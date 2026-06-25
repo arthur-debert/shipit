@@ -32,5 +32,7 @@ def pr() -> None:
 from . import status  # noqa: E402  (WS04)
 
 pr.add_command(status.cmd)
-# WS05 will add: from . import review ; pr.add_command(review.cmd)
+from . import review  # noqa: E402  (WS05)
+
+pr.add_command(review.cmd)
 # WS06 will add: from . import next_action, ready ; pr.add_command(next_action.cmd, ready.cmd)
