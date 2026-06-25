@@ -270,13 +270,13 @@ class _LocalReviewAdapter(ReviewerAdapter):
     is SYNCHRONOUS (it runs the review + posts it now); there is no
     `review_requested` edge to place or withdraw, so `cancel` is a no-op.
 
-    In shipit the local-agent review *execution* engine is OUT OF SCOPE for the
-    PRF01 epic (it is deferred to its own step), so this adapter's `request`
-    GUARDS that path: requesting a local-agent review raises a clean
-    `ghapi.GhError` instead of trying (and failing) to import the absent review
-    engine. The DETECTION path is fully intact — `detect` reads an existing
-    local-agent review exactly as in release; only the run-and-post act is
-    guarded.
+    In shipit the local-agent review *execution* engine lives in
+    `shipit.review` (PRF01-WS07): this adapter's `request` LAZILY imports
+    `shipit.review.service` and runs the agent over the PR diff + posts the
+    verdict as the agent's bot, synchronously. The import is lazy so the
+    optional `review` extra (pyjwt) is only pulled in when a local review is
+    actually requested. The DETECTION path is fully intact — `detect` reads an
+    existing local-agent review exactly as in release.
 
     Detection is the shared rerun-aware base `detect`: review-once (default)
     counts a non-DISMISSED review by `matches` on any head as done; rerun=True
@@ -308,27 +308,52 @@ class _LocalReviewAdapter(ReviewerAdapter):
         return low.endswith("[bot]") and self.bot_slug_fragment in low
 
     def request(self, pr: int) -> bool:
-        """GUARD: local-agent review execution is deferred — fail loud, not import.
+        """Run the local agent over the PR diff and POST the verdict as the bot.
 
-        In release this generates the review locally and POSTs it via that
-        project's `review` service (run-and-post, as_app=True). shipit does NOT
-        yet carry that review-execution engine (it is OUT OF
-        SCOPE for the PRF01 epic — see the class docstring), so requesting a
-        local-agent review here raises `ghapi.GhError` — the one error type the
-        `pr review request` CLI catches and renders as a clean message + exit 1 —
-        rather than crashing with an `ImportError` from the absent `review`
-        package. The DETECTION path (reading an existing local-agent review) is
-        unaffected; only this execution path is guarded.
+        This is SYNCHRONOUS run-and-post (PRF01-WS07): there is no
+        `review_requested` edge to place. `shipit.review.service` is imported
+        LAZILY here, so the optional `review` extra (pyjwt) is only pulled in
+        when a local review is actually requested — the detection path and every
+        non-local reviewer stay free of that dependency. The agent's per-reviewer
+        `model` / `instructions` (the `[reviewers]` options) are read from
+        `.shipit.toml` and threaded into the run.
 
-        When the deferred local-agent step lands, this guard is replaced by the
-        lazy import + run-and-post (with the failure-mode normalization to
-        `ghapi.GhError`) that release uses.
+        Any failure — a missing backend CLI, a parse failure, a Doppler/JWT auth
+        failure, a `gh` post failure — is normalized to `ghapi.GhError`, the one
+        error type the `pr review request` CLI renders as a clean message + exit
+        1, so a local review never crashes with a raw traceback. Returns True on
+        a successful post (the review is already posted; a local reviewer is
+        never edge-verified).
         """
-        raise ghapi.GhError(
-            f"{self.name}-local: local-agent review execution is not yet "
-            "available in shipit (deferred to a later step) — request a "
-            "GitHub-App reviewer (e.g. copilot) instead"
-        )
+        # Lazy: keep the optional `review`/pyjwt import off the detection path
+        # and out of every non-local reviewer. `review` never imports `prstate`,
+        # so this one-way edge has no cycle.
+        from . import reviewers_config
+
+        try:
+            from ..review import service
+        except ImportError as exc:  # pragma: no cover - only when the extra is absent
+            raise ghapi.GhError(
+                f"{self.name}-local review needs the optional `review` extra "
+                f"(pyjwt): install shipit with `pip install 'shipit[review]'`. ({exc})"
+            ) from exc
+
+        options = reviewers_config.reviewer_run_options(self.name)
+        run_kwargs: dict[str, object] = {"as_app": True}
+        if "model" in options:
+            run_kwargs["model"] = options["model"]
+        if "instructions" in options:
+            run_kwargs["instructions_path"] = options["instructions"]
+
+        try:
+            service.run_and_post(self.name, pr, **run_kwargs)
+        except ghapi.GhError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - normalize every failure mode uniformly
+            raise ghapi.GhError(
+                f"{self.name}-local review failed on #{pr}: {exc}"
+            ) from exc
+        return True
 
     def cancel(self, pr: int) -> bool:
         """No-op: a posted review can't be withdrawn.

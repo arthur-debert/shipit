@@ -23,3 +23,16 @@
 # GH_TOKEN skips the re-set rather than aborting gh-setup; when present it rotates
 # the value. More entries land as shipit's release workflows arrive (Steps 4–6).
 RELEASE_TOKEN = { env = "GH_TOKEN", optional = true }
+
+# Local-agent review App credentials (PRF01-WS07). The codex/agy review backends
+# post AS their GitHub App (`adr-codex-review[bot]` / `adr-agy-review[bot]`); the
+# App private key (PEM) + app id are provisioned into Doppler `github/prd` under
+# these keys. Mapping them here makes `gh-setup` push them as repo Actions secrets
+# so a CI-side review has the same credentials the LOCAL path sources directly
+# from Doppler via `secretsrc` — CI parity, single source of truth. (The repo's
+# OWN PRs are NOT gated on a local reviewer: codex-local is requested manually via
+# `--reviewer codex-local`, never added to the [reviewers] required set here.)
+CODEX_REVIEW_APP_PRIVATE_KEY = { doppler = "CODEX_REVIEW_APP_PRIVATE_KEY" }
+CODEX_REVIEW_APP_ID          = { doppler = "CODEX_REVIEW_APP_ID" }
+AGY_REVIEW_APP_PRIVATE_KEY   = { doppler = "AGY_REVIEW_APP_PRIVATE_KEY" }
+AGY_REVIEW_APP_ID            = { doppler = "AGY_REVIEW_APP_ID" }

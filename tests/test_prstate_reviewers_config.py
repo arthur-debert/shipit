@@ -242,3 +242,30 @@ def test_load_override_searches_up_to_the_repo_root(tmp_path, monkeypatch):
     nested.mkdir(parents=True)
     monkeypatch.chdir(nested)
     assert reviewers_config.load_override() == {"codex": True}
+
+
+def test_reviewer_run_options_reads_model_and_instructions(tmp_path):
+    # The local-review RUN path (PRF01-WS07) reads `model` / `instructions` for a
+    # reviewer WITHOUT it needing to be in the required set (force scope).
+    (tmp_path / ".shipit.toml").write_text(
+        "[reviewers]\n"
+        "copilot = {}\n"
+        'codex = { model = "flash", instructions = "docs/rev.md" }\n'
+    )
+    opts = reviewers_config.reviewer_run_options("codex", str(tmp_path))
+    assert opts == {"model": "flash", "instructions": "docs/rev.md"}
+
+
+def test_reviewer_run_options_absent_reviewer_is_empty(tmp_path):
+    (tmp_path / ".shipit.toml").write_text("[reviewers]\ncopilot = {}\n")
+    assert reviewers_config.reviewer_run_options("codex", str(tmp_path)) == {}
+
+
+def test_reviewer_run_options_no_config_is_empty(tmp_path):
+    assert reviewers_config.reviewer_run_options("codex", str(tmp_path)) == {}
+
+
+def test_reviewer_run_options_list_shorthand_is_empty(tmp_path):
+    # List shorthand carries no per-reviewer options.
+    (tmp_path / ".shipit.toml").write_text('reviewers = ["copilot", "codex"]\n')
+    assert reviewers_config.reviewer_run_options("codex", str(tmp_path)) == {}

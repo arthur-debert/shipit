@@ -288,6 +288,48 @@ def load_override(root: str | None = None) -> dict[str, bool] | None:
     return parsed or None
 
 
+def reviewer_run_options(name: str, root: str | None = None) -> dict[str, str]:
+    """The per-reviewer `model` / `instructions` for `name` from `.shipit.toml`.
+
+    Consumed by the local-agent review RUN path (PRF01-WS07): a reviewer's
+    `[reviewers]` entry MAY carry `model` (the backend model alias) and
+    `instructions` (a path to a custom review-instructions file). Returns a dict
+    with only the keys that are set (e.g. `{"model": "flash"}`); an absent
+    config, an absent reviewer entry, or the list-shorthand form → `{}` (the run
+    path then uses its own defaults).
+
+    Reading `model`/`instructions` is NOT gating: a reviewer requested manually
+    via `--reviewer codex-local` (force scope) reads its options here WITHOUT
+    being in the required set — so a consumer can tune a local reviewer's model
+    without making it a required gate (see the PRD's reviewer-policy note).
+    """
+    config = _find_config(root)
+    if config is None:
+        return {}
+    try:
+        with config.open("rb") as fh:
+            cfg = tomllib.load(fh)
+    except tomllib.TOMLDecodeError as exc:
+        raise RequiredReviewersConfigError(f"malformed {config}: {exc}") from None
+    value = cfg.get(OVERRIDE_KEY)
+    if not isinstance(value, dict):
+        # List shorthand (or absent) carries no per-reviewer options.
+        return {}
+    canonical = _canonical_name(name)
+    out: dict[str, str] = {}
+    for key, opts in value.items():
+        if _canonical_name(key) != canonical or not isinstance(opts, dict):
+            continue
+        for field in _RESERVED_OPTIONS:
+            if field in opts:
+                if not isinstance(opts[field], str):
+                    raise RequiredReviewersConfigError(
+                        f"{OVERRIDE_FILE} `{OVERRIDE_KEY}.{key}.{field}` must be a string"
+                    )
+                out[field] = opts[field]
+    return out
+
+
 def required_reviewers(names: tuple[str, ...]) -> list[ReviewerAdapter]:
     """Map required names → their registry adapters, preserving config order.
 
