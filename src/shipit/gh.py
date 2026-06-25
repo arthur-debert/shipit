@@ -15,7 +15,9 @@ class GhError(RuntimeError):
     """A ``gh`` / ``git`` invocation failed (non-zero exit)."""
 
 
-def _run(args: list[str], *, input_text: str | None = None) -> str:
+def _run(
+    args: list[str], *, input_text: str | None = None, cwd: str | None = None
+) -> str:
     """Run a command, returning stdout. Raise :class:`GhError` on failure."""
     try:
         proc = subprocess.run(
@@ -24,6 +26,7 @@ def _run(args: list[str], *, input_text: str | None = None) -> str:
             capture_output=True,
             text=True,
             check=False,
+            cwd=cwd,
         )
     except FileNotFoundError as exc:
         raise GhError(f"{args[0]!r} not found on PATH") from exc
@@ -162,3 +165,105 @@ def secret_list(repo: str) -> list[str]:
         ["gh", "secret", "list", "--repo", repo, "--json", "name", "-q", ".[].name"]
     )
     return [line for line in out.splitlines() if line.strip()]
+
+
+# --------------------------------------------------------------------------
+# git + PR — the boundary ``install`` needs (pull, never push)
+# --------------------------------------------------------------------------
+
+
+def _git(args: list[str], *, cwd: str) -> str:
+    """``git -C <cwd> <args>`` via :func:`_run`."""
+    return _run(["git", "-C", cwd, *args])
+
+
+def git_current_branch(*, cwd: str) -> str | None:
+    """The current branch name, or ``None`` on a detached/unborn HEAD."""
+    try:
+        name = _git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=cwd).strip()
+    except GhError:
+        return None
+    return None if (not name or name == "HEAD") else name
+
+
+def git_switch_create(branch: str, *, cwd: str) -> None:
+    """Create-or-reset ``branch`` from the current HEAD and switch to it.
+
+    ``-C`` (force) so a re-run that reuses the install branch name starts clean
+    rather than failing on an existing branch.
+    """
+    _git(["switch", "-C", branch], cwd=cwd)
+
+
+def git_add(paths: list[str], *, cwd: str) -> None:
+    """``git add -f -- <paths>`` — stage ONLY these pathspecs, never ``-A``.
+
+    ``-f`` because the managed paths are shipit-owned and must be tracked even if
+    a consumer ``.gitignore`` happens to cover one (plain ``git add`` errors on an
+    ignored path).
+    """
+    if not paths:
+        return
+    _git(["add", "-f", "--", *paths], cwd=cwd)
+
+
+def git_commit(message: str, paths: list[str], *, cwd: str) -> None:
+    """``git commit -m <message> -- <paths>`` — commit only the given pathspecs."""
+    _git(["commit", "-m", message, "--", *paths], cwd=cwd)
+
+
+def git_push(
+    branch: str, *, cwd: str, remote: str = "origin", force: bool = False
+) -> None:
+    """``git push <remote> <branch>``.
+
+    ``force`` plain-force-pushes the shipit-owned install branch, which install
+    regenerates from HEAD every run — so re-running with a prior install PR still
+    open updates that PR rather than failing non-fast-forward. (Plain ``--force``,
+    not ``--force-with-lease``: a freshly recreated branch has no remote-tracking
+    ref to lease against, and the branch is shipit-exclusive, so there is nothing
+    to protect.) The break-glass push to a real branch (main) never forces.
+    """
+    args = ["push"]
+    if force:
+        args.append("--force")
+    args += [remote, branch]
+    _git(args, cwd=cwd)
+
+
+def pr_url_for_head(branch: str, *, cwd: str | None = None) -> str | None:
+    """The URL of the open PR whose head is ``branch``, or ``None``."""
+    out = _run(
+        ["gh", "pr", "list", "--head", branch, "--state", "open",
+         "--json", "url", "-q", ".[0].url"],
+        cwd=cwd,
+    )
+    return out.strip() or None
+
+
+def pr_create(
+    *,
+    repo: str | None = None,
+    base: str | None = None,
+    head: str | None = None,
+    title: str,
+    body: str,
+    draft: bool = True,
+    cwd: str | None = None,
+) -> str:
+    """``gh pr create`` (draft by default); returns the new PR's URL.
+
+    The body is passed on stdin (``--body-file -``) so a long, multi-line PR body
+    never hits an argv limit.
+    """
+    args = ["gh", "pr", "create"]
+    if repo is not None:
+        args += ["--repo", repo]
+    if base is not None:
+        args += ["--base", base]
+    if head is not None:
+        args += ["--head", head]
+    if draft:
+        args.append("--draft")
+    args += ["--title", title, "--body-file", "-"]
+    return _run(args, input_text=body, cwd=cwd).strip()

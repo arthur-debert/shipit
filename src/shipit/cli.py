@@ -13,7 +13,7 @@ import sys
 import click
 
 from . import __version__
-from .verbs import gh_setup
+from .verbs import gh_setup, install
 
 
 @click.group(
@@ -66,6 +66,27 @@ def gh_setup_cmd(
         dry_run=dry_run,
         prompt=lambda name: click.prompt(f"secret {name}", hide_input=True),
     )
+    raise SystemExit(rc)
+
+
+@root.command(name="install")
+@click.argument("path", required=False)
+@click.option(
+    "--push",
+    is_flag=True,
+    help="Break-glass: commit and push straight to the branch (admin), no PR.",
+)
+@click.option(
+    "--dry-run", is_flag=True, help="Print the reconciliation plan; touch nothing."
+)
+def install_cmd(path: str | None, push: bool, dry_run: bool) -> None:
+    """Vendor + reconcile shipit's managed set into the consumer at PATH.
+
+    PATH defaults to the current directory. By default install opens a DRAFT PR
+    with the changes (pull, never push); a consumer-edited unit is surfaced in
+    the PR rather than clobbered. Re-running with no changes is a clean no-op.
+    """
+    rc = install.run(path, dry_run=dry_run, push=push)
     raise SystemExit(rc)
 
 
