@@ -86,8 +86,16 @@ class Unit:
 
 
 def _data_bytes(*parts: str) -> bytes:
-    """Read a ``shipit.data`` file via the resources Traversable API."""
-    return resources.files("shipit.data").joinpath(*parts).read_bytes()
+    """Read a ``shipit.data`` file via the resources Traversable API.
+
+    joinpath is chained one segment at a time: on Python 3.11 a namespace
+    package's ``MultiplexedPath.joinpath`` takes a SINGLE child (multi-arg only
+    arrived in 3.12), so ``joinpath("bootstrap", "shipit")`` would TypeError.
+    """
+    node = resources.files("shipit.data")
+    for part in parts:
+        node = node.joinpath(part)
+    return node.read_bytes()
 
 
 def _skills_root():
