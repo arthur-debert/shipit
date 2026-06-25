@@ -79,4 +79,4 @@ The agent stops at that flip — it does NOT merge. Opening as a draft and flipp
 
 ##   See Also
 
-\- \[./docs/dev/architecture.lex\] — the load-bearing design decisions and   their rationale (pixi as substrate, the slow/fast split, the   pixi-task / workflow-YAML boundary, the .shipit.toml config). - \[./docs/dev/workflows.lex\] — the composable CI design (the decomposed   build → package → sign → release pipeline and its invariants). - \[./docs/dev/ROADMAP.lex\] — the incremental, verifying build sequence   (Spike 0 through cutover). - \[./AGENTS.lex\] — the dev-cycle and PR-review policy agents follow.
+\- \[./docs/dev/architecture.lex\] — the load-bearing design decisions and   their rationale (pixi as substrate, the slow/fast split, the   pixi-task / workflow-YAML boundary, the .shipit.toml config). - \[./docs/dev/workflows.lex\] — the composable CI design (the decomposed   build → package → sign → release pipeline and its invariants). - \[./docs/prd/FUTURE\_WORK.md\] — the high-level map of shipped + planned   work (the retired roadmap's successor). - \[./AGENTS.lex\] — the dev-cycle and PR-review policy agents follow.

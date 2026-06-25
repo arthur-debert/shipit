@@ -4,7 +4,7 @@ shipit reuses release-core's proven code (the `gh` boundary, the verbs, and —
 in Step 4 / epic PRF01 — the whole `prstate` PR-state engine) by **copying the
 source into shipit's own slim package and re-skinning its entry points**, never
 by depending on the published release-core wheel. The global no-backwards-compat
-/ clean-fork principle wins over the wheel dependency the ROADMAP's "`pixi add`
+/ clean-fork principle wins over the wheel dependency an earlier roadmap draft's "`pixi add`
 the existing package" wording superficially implies: shipit is the *slimmed,
 renamed successor* to that engine, not a consumer of it, and the slow/fast split
 (architecture.lex §2) ships the PR-loop code through the `shipit` package itself.
