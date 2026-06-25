@@ -215,27 +215,37 @@ def test_gh_failure_in_skip_read_propagates():
 # --- the local-agent guard via the CLI verb -----------------------------------
 
 
-def test_local_agent_request_surfaces_clean_guard(monkeypatch, capsys):
-    """Requesting a local-agent reviewer surfaces the foundation's guard as a
-    clean GhError -> stderr + non-zero exit, never a crash."""
+def test_local_agent_request_runs_and_posts(monkeypatch, capsys):
+    """PRF01-WS07: requesting a local-agent reviewer runs the service + posts as
+    the bot (force scope) — the verb reports `posted` and exits 0. The service
+    boundary is faked so no LLM/network runs."""
+    from shipit.review import service
+
     monkeypatch.setattr(review_verb, "resolve_pr", lambda pr: 7)
+    posted: list = []
+    monkeypatch.setattr(
+        service,
+        "run_and_post",
+        lambda agent, pr, **kw: posted.append((agent, pr)) or {},
+    )
     rc = review_verb.run(7, reviewer="codex")
-    assert rc != 0
-    err = capsys.readouterr().err
-    assert "not yet available" in err
-    assert "codex" in err
+    assert rc == 0
+    assert posted == [("codex", 7)]
+    assert "posted review: codex on #7" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("name", ["codex-local", "agy-local"])
-def test_local_agent_spec_alias_surfaces_guard(monkeypatch, capsys, name):
+def test_local_agent_spec_alias_runs_and_posts(monkeypatch, capsys, name):
     """The PRD/glossary spell these `codex-local`/`agy-local`; the `-local` alias
-    resolves the base adapter so the guard surfaces, not an unknown-name error."""
+    resolves the base adapter so the local review runs, not an unknown-name error."""
+    from shipit.review import service
+
     monkeypatch.setattr(review_verb, "resolve_pr", lambda pr: 7)
+    monkeypatch.setattr(service, "run_and_post", lambda agent, pr, **kw: {})
     rc = review_verb.run(7, reviewer=name)
-    assert rc != 0
-    err = capsys.readouterr().err
-    assert "not yet available" in err
-    assert "unknown reviewer" not in err
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "posted review:" in out
 
 
 def test_local_alias_does_not_match_app_reviewer(capsys):

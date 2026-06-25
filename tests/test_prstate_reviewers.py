@@ -456,20 +456,76 @@ def test_dismissed_codex_review_does_not_count_done():
     assert CODEX.detect(ctx) == ReviewLifecycle.NOT_REQUESTED
 
 
-def test_local_request_is_guarded_with_a_clean_gherror():
-    # PRF01 scope boundary: the local-agent review EXECUTION engine is deferred,
-    # so requesting a codex/agy review must raise the engine's GhError with a
-    # clear "not yet available" message — NEVER an ImportError from the absent
-    # `review` package. This replaces release's run-and-post execution tests
-    # (those exercise the deferred engine). The DETECTION tests above stay.
-    from shipit.prstate import ghapi
+def test_local_request_runs_and_posts_via_service(monkeypatch, tmp_path):
+    # PRF01-WS07: the guard is gone — requesting a codex/agy review LAZILY calls
+    # `shipit.review.service.run_and_post` (run the agent over the diff + post as
+    # the bot) and returns True (the review is posted; a local reviewer is never
+    # edge-verified). The service boundary is faked here — no LLM, no network.
+    from shipit.review import service
 
-    for adapter in (CODEX, AGY):
-        with pytest.raises(ghapi.GhError, match="not yet") as excinfo:
-            adapter.request(7)
-        assert "local-agent review execution" in str(excinfo.value)
-        # A clean engine error, not an ImportError leaking the missing module.
-        assert not isinstance(excinfo.value, ImportError)
+    calls: list[tuple] = []
+
+    def fake_run_and_post(agent, pr, **kwargs):
+        calls.append((agent, pr, kwargs))
+        return {"review": {}, "post": {}, "ctx_repo": None, "pr": pr}
+
+    monkeypatch.setattr(service, "run_and_post", fake_run_and_post)
+    # No `.shipit.toml` in tmp cwd → no per-reviewer model/instructions options.
+    monkeypatch.chdir(tmp_path)
+
+    assert CODEX.request(7) is True
+    assert AGY.request(9) is True
+    assert calls[0][0] == "codex" and calls[0][1] == 7
+    assert calls[0][2]["as_app"] is True
+    assert calls[1][0] == "agy" and calls[1][1] == 9
+
+
+def test_local_request_threads_model_and_instructions_from_config(
+    monkeypatch, tmp_path
+):
+    # The per-reviewer `model` / `instructions` from `[reviewers]` are read and
+    # threaded into the run (force scope: codex need not be a required gate).
+    from shipit.review import service
+
+    (tmp_path / ".shipit.toml").write_text(
+        "[reviewers]\n"
+        "copilot = {}\n"
+        'codex = { model = "flash", instructions = "docs/rev.md" }\n',
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    captured: dict = {}
+
+    def fake_run_and_post(agent, pr, **kwargs):
+        captured.update(kwargs)
+        return {}
+
+    monkeypatch.setattr(service, "run_and_post", fake_run_and_post)
+    assert CODEX.request(3) is True
+    assert captured["model"] == "flash"
+    # The instructions path is anchored to the config dir (absolute).
+    assert captured["instructions_path"] == str(tmp_path / "docs" / "rev.md")
+
+
+def test_local_request_normalizes_failure_to_gherror(monkeypatch, tmp_path):
+    # Any backend/auth/post failure is normalized to a clean GhError (the one
+    # error type the CLI renders + exit 1) — never a raw traceback.
+    from shipit.prstate import ghapi
+    from shipit.review import service
+
+    def boom(agent, pr, **kwargs):
+        raise RuntimeError("backend CLI exploded")
+
+    monkeypatch.setattr(service, "run_and_post", boom)
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(ghapi.GhError, match="codex-local review failed") as excinfo:
+        CODEX.request(7)
+    # The original failure was WRAPPED (normalized), not re-raised: the chained
+    # cause is the underlying RuntimeError, so no raw traceback escapes.
+    assert isinstance(excinfo.value.__cause__, RuntimeError)
+    assert "backend CLI exploded" in str(excinfo.value.__cause__)
 
 
 def test_local_cancel_is_a_noop():
