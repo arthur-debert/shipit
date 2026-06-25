@@ -140,10 +140,16 @@ def push_secrets(
     *,
     dry_run: bool,
     prompt=None,
-) -> tuple[int, int]:
-    """Pass (c). Resolve and push each secret; returns (set, skipped) counts."""
+) -> tuple[int, int, int]:
+    """Pass (c). Resolve and push each secret; returns (set, skipped, failed).
+
+    A required source that can't be resolved is reported and counted as failed
+    — it does NOT abort the pass, so one bad secret never strands the others (or
+    crashes gh-setup after the ruleset/labels already applied).
+    """
     set_count = 0
     skipped = 0
+    failed = 0
     for source in sources:
         # Dry-run must have no side effects — do NOT resolve (which would hit
         # doppler or prompt); just report the intended source.
@@ -151,7 +157,12 @@ def push_secrets(
             print(f"  [dry] secret {source.name} (from {source.kind})")
             set_count += 1
             continue
-        value = secretsrc.resolve(source, prompt=prompt)
+        try:
+            value = secretsrc.resolve(source, prompt=prompt)
+        except secretsrc.SecretSourceError as exc:
+            print(f"  FAIL {source.name}: {exc}")
+            failed += 1
+            continue
         if value is None:
             print(f"  skip {source.name} (optional source absent)")
             skipped += 1
@@ -159,7 +170,7 @@ def push_secrets(
         gh.secret_set(source.name, value, repo=repo)
         print(f"  secret {source.name}")
         set_count += 1
-    return set_count, skipped
+    return set_count, skipped, failed
 
 
 # --------------------------------------------------------------------------
@@ -220,11 +231,12 @@ def run(
     except config.ConfigError as exc:
         print(f"  no secrets applied: {exc}")
         sources = []
+    failed = 0
     if sources:
-        set_count, skipped = push_secrets(
+        set_count, skipped, failed = push_secrets(
             target, sources, dry_run=dry_run, prompt=prompt
         )
-        print(f"  {set_count} secret(s) set, {skipped} skipped")
+        print(f"  {set_count} secret(s) set, {skipped} skipped, {failed} failed")
 
     print("done.")
-    return 0
+    return 1 if failed else 0

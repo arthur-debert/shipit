@@ -141,10 +141,19 @@ def test_push_secrets_sets_and_skips_optional(fake_gh, monkeypatch):
         SecretSource("A", "env", "VAR_A", False),  # present → set
         SecretSource("B", "env", "VAR_B", True),  # optional, missing → skip
     ]
-    set_count, skipped = gh_setup.push_secrets("o/r", sources, dry_run=False)
+    set_count, skipped, failed = gh_setup.push_secrets("o/r", sources, dry_run=False)
     assert set_count == 1
     assert skipped == 1
+    assert failed == 0
     assert fake_gh.secrets == {"A": "secret-a"}
+
+
+def test_push_secrets_required_failure_does_not_crash(fake_gh, monkeypatch):
+    monkeypatch.delenv("VAR_MISSING", raising=False)
+    sources = [SecretSource("X", "env", "VAR_MISSING", False)]  # required, absent
+    set_count, skipped, failed = gh_setup.push_secrets("o/r", sources, dry_run=False)
+    assert (set_count, skipped, failed) == (0, 0, 1)
+    assert fake_gh.secrets == {}  # nothing pushed, no exception escaped
 
 
 def test_run_dry_run_end_to_end(monkeypatch, capsys):
