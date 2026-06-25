@@ -202,7 +202,7 @@ def evaluate(
         status.state = TaskState.ADDRESSING
         status.next_action = (
             f"triage {open_threads} open thread(s): read them with "
-            "`shipit pr review`, then fix-or-reply + resolve each"
+            "`gh pr view --comments`, then fix-or-reply + resolve each"
         )
         return status
 

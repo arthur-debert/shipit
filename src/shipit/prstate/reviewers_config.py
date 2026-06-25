@@ -311,10 +311,16 @@ def reviewer_run_options(name: str, root: str | None = None) -> dict[str, str]:
     except tomllib.TOMLDecodeError as exc:
         raise RequiredReviewersConfigError(f"malformed {config}: {exc}") from None
     value = cfg.get(OVERRIDE_KEY)
-    if not isinstance(value, dict):
-        # A non-table `reviewers` value (or absent) carries no per-reviewer
-        # options. The gating path rejects it loud; this read just no-ops.
+    if value is None:
+        # No `[reviewers]` table: no per-reviewer options to read.
         return {}
+    if not isinstance(value, dict):
+        # TABLE-ONLY, enforced here too: a present-but-non-table `reviewers`
+        # value (e.g. a list/array) is an invalid config and must fail loud on
+        # EVERY read path, not just the gating one — otherwise a forced local
+        # review (`--reviewer codex-local`) would silently read past the same
+        # invalid config that `load_override` rejects.
+        _parse_override_value(value)
     canonical = _canonical_name(name)
     out: dict[str, str] = {}
     for key, opts in value.items():

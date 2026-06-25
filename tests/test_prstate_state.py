@@ -255,9 +255,11 @@ def test_addressing_reports_open_thread_count(context):
 
 def test_addressing_names_the_thread_reading_tool(context):
     # Discoverability (#564): the agent must learn HOW to read the threads from
-    # the next action itself, not fall back to raw `gh api`.
+    # the next action itself, not fall back to raw `gh api`. It points at a
+    # command that actually displays threads (`gh pr view --comments`); shipit
+    # has no thread-listing verb (`shipit pr review` is request-only).
     status = evaluate(context("copilot_changes_requested"))
-    assert "shipit pr review" in status.next_action
+    assert "gh pr view --comments" in status.next_action
     assert "resolve" in status.next_action
 
 

@@ -277,8 +277,11 @@ def test_reviewer_run_options_no_config_is_empty(tmp_path):
     assert reviewers_config.reviewer_run_options("codex", str(tmp_path)) == {}
 
 
-def test_reviewer_run_options_non_table_value_is_empty(tmp_path):
-    # A non-table `reviewers` value carries no per-reviewer options. The gating
-    # path rejects it loud; the run-options read is non-gating and just no-ops.
+def test_reviewer_run_options_rejects_non_table_value_loud(tmp_path):
+    # TABLE-ONLY is enforced on EVERY read path: a present-but-non-table
+    # `reviewers` value (a list/array) fails loud here too, so a forced local
+    # review (`--reviewer codex-local`) can't slip past the same invalid config
+    # `load_override` rejects.
     (tmp_path / ".shipit.toml").write_text('reviewers = ["copilot", "codex"]\n')
-    assert reviewers_config.reviewer_run_options("codex", str(tmp_path)) == {}
+    with pytest.raises(RequiredReviewersConfigError, match="TABLE"):
+        reviewers_config.reviewer_run_options("codex", str(tmp_path))
