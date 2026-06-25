@@ -25,8 +25,10 @@ options:
   * `model` / `instructions` — parsed + validated now but RESERVED for the
     deferred local-agent review step; they do not affect this epic's behaviour.
 
-A LIST shorthand (`reviewers = ["copilot", "codex"]`) is also accepted, meaning
-all those required with rerun=False.
+The `[reviewers]` value is TABLE-ONLY: a list/array form (`reviewers =
+["copilot", "codex"]`) is REJECTED loud, not silently accepted. The required
+set + per-reviewer options must be expressed as the table so every gate carries
+its options in one place.
 
 NEW POLICY: re-run-on-push is per-reviewer and defaults OFF for EVERYONE. All
 reviewers are token-billed now (and local agents cost a real model run each
@@ -140,10 +142,10 @@ def _validate(names: tuple[str, ...]) -> None:
 def _parse_override_value(value: object) -> dict[str, bool]:
     """Parse the raw `reviewers` value into a name -> rerun map.
 
-    Accepts two shapes:
-      * a MAP  `{copilot = {rerun = false}, codex = {rerun = true}}` — keys are
-        the required reviewers, each value an options inline-table.
-      * a LIST `["copilot", "codex"]` — ergonomic shorthand: all required, rerun=False.
+    TABLE-ONLY: the value MUST be a MAP `{copilot = {rerun = false}, codex =
+    {rerun = true}}` — keys are the required reviewers, each value an options
+    inline-table. A list/array form (or any other non-table) fails LOUD; the
+    list shorthand a ported release behavior once accepted is gone.
 
     Wrong-typed values / unknown options fail LOUD. Reviewer-name keys are
     normalized to their canonical adapter name (lowercase) so the resulting map
@@ -151,36 +153,28 @@ def _parse_override_value(value: object) -> dict[str, bool]:
     .name, ...)`); a `Copilot` key therefore APPLIES its rerun flag instead of
     silently degrading to review-once (release#852). Two differently-cased keys
     that canonicalize to the same adapter (`Copilot` + `copilot`) collide → a
-    loud duplicate error, the same as a repeated list entry."""
-    if isinstance(value, list):
-        if not all(isinstance(x, str) for x in value):
+    loud duplicate error."""
+    if not isinstance(value, dict):
+        raise RequiredReviewersConfigError(
+            f"{OVERRIDE_FILE} `{OVERRIDE_KEY}` must be a TABLE of reviewer -> "
+            "{{rerun = bool}} (e.g. `[reviewers]` with `copilot = {{rerun = false}}`); "
+            "a list/array form is not accepted"
+        )
+
+    out: dict[str, bool] = {}
+    for name, opts in value.items():
+        if not isinstance(name, str):
             raise RequiredReviewersConfigError(
-                f"{OVERRIDE_FILE} `{OVERRIDE_KEY}` list shorthand must be a list of reviewer names"
+                f"{OVERRIDE_FILE} `{OVERRIDE_KEY}` keys must be reviewer names"
             )
-        canon = [_canonical_name(name) for name in value]
-        _reject_duplicate_names(canon)
-        return {name: False for name in canon}
-
-    if isinstance(value, dict):
-        out: dict[str, bool] = {}
-        for name, opts in value.items():
-            if not isinstance(name, str):
-                raise RequiredReviewersConfigError(
-                    f"{OVERRIDE_FILE} `{OVERRIDE_KEY}` keys must be reviewer names"
-                )
-            key = _canonical_name(name)
-            # The duplicate guard catches differently-cased keys that collide to
-            # one adapter (e.g. `Copilot` + `copilot`); here we fail on first
-            # overwrite so the per-reviewer options are never silently clobbered.
-            if key in out:
-                _reject_duplicate_names([*out, key])
-            out[key] = _parse_options(name, opts)
-        return out
-
-    raise RequiredReviewersConfigError(
-        f"{OVERRIDE_FILE} `{OVERRIDE_KEY}` must be a map of reviewer -> "
-        "{{rerun = bool}} (or a list of reviewer names for rerun=false)"
-    )
+        key = _canonical_name(name)
+        # The duplicate guard catches differently-cased keys that collide to
+        # one adapter (e.g. `Copilot` + `copilot`); here we fail on first
+        # overwrite so the per-reviewer options are never silently clobbered.
+        if key in out:
+            _reject_duplicate_names([*out, key])
+        out[key] = _parse_options(name, opts)
+    return out
 
 
 def _canonical_name(name: str) -> str:
@@ -199,11 +193,10 @@ def _canonical_name(name: str) -> str:
 def _reject_duplicate_names(names: list[str]) -> None:
     """Fail LOUD on any reviewer name that appears more than once (post-canon).
 
-    Both config shapes run this on canonicalized names: the list shorthand can
-    repeat a name outright (`["copilot", "copilot"]`), and the map can collide
-    two differently-cased keys onto one adapter (`Copilot` + `copilot`). TOML's
-    own duplicate-key rejection only covers byte-identical map keys, so the
-    collision case slips past it — this is the one check that catches both."""
+    Run on canonicalized table keys: the map can collide two differently-cased
+    keys onto one adapter (`Copilot` + `copilot`). TOML's own duplicate-key
+    rejection only covers byte-identical map keys, so the collision case slips
+    past it — this is the check that catches it."""
     duplicates = sorted({n for n in names if names.count(n) > 1})
     if duplicates:
         raise RequiredReviewersConfigError(
@@ -295,8 +288,8 @@ def reviewer_run_options(name: str, root: str | None = None) -> dict[str, str]:
     `[reviewers]` entry MAY carry `model` (the backend model alias) and
     `instructions` (a path to a custom review-instructions file). Returns a dict
     with only the keys that are set (e.g. `{"model": "flash"}`); an absent
-    config, an absent reviewer entry, or the list-shorthand form → `{}` (the run
-    path then uses its own defaults).
+    config, an absent reviewer entry, or a non-table `reviewers` value → `{}`
+    (the run path then uses its own defaults).
 
     A relative `instructions` path is resolved against the directory CONTAINING
     `.shipit.toml` (and `~` is expanded), not the caller's cwd: the config is
@@ -319,7 +312,8 @@ def reviewer_run_options(name: str, root: str | None = None) -> dict[str, str]:
         raise RequiredReviewersConfigError(f"malformed {config}: {exc}") from None
     value = cfg.get(OVERRIDE_KEY)
     if not isinstance(value, dict):
-        # List shorthand (or absent) carries no per-reviewer options.
+        # A non-table `reviewers` value (or absent) carries no per-reviewer
+        # options. The gating path rejects it loud; this read just no-ops.
         return {}
     canonical = _canonical_name(name)
     out: dict[str, str] = {}

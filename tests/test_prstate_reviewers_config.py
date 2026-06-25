@@ -1,9 +1,10 @@
 """The required-reviewer SET + per-reviewer rerun policy is config, not code.
 
 Proves the `[reviewers]` config is data-driven: a shipped default
-({copilot: rerun=False} — review-once), a per-repo `.shipit.toml` override (map
-or list shorthand), per-reviewer `rerun` flags, the reserved `model`/
-`instructions` fields, and unknown / non-requestable names failing LOUD. The
+({copilot: rerun=False} — review-once), a per-repo `.shipit.toml` override
+(a TABLE only — the list/array form is rejected loud), per-reviewer `rerun`
+flags, the reserved `model`/`instructions` fields, and unknown /
+non-requestable names failing LOUD. The
 engine-side proof (a DIFFERENT set drives a DIFFERENT verdict) lives in
 test_prstate_state.py::test_required_set_is_data_driven_*.
 
@@ -83,25 +84,15 @@ def test_reserved_field_must_be_a_string():
         reviewers_config._parse_override_value({"codex": {"instructions": True}})
 
 
-# --- list shorthand ---------------------------------------------------------
+# --- table-only: the list/array form is rejected loud ----------------------
 
 
-def test_list_shorthand_means_all_required_rerun_false():
-    parsed = reviewers_config._parse_override_value(["copilot", "codex", "agy"])
-    assert parsed == {"copilot": False, "codex": False, "agy": False}
-    assert resolve_required_names(parsed) == ("copilot", "codex", "agy")
-
-
-def test_list_shorthand_rejects_non_string_entries():
-    with pytest.raises(RequiredReviewersConfigError, match="list shorthand"):
-        reviewers_config._parse_override_value(["copilot", 3])
-
-
-def test_list_shorthand_rejects_duplicates():
-    # A repeated reviewer in the list shorthand is always a typo, not two gates —
-    # it must fail loud, not silently dedup (release#852).
-    with pytest.raises(RequiredReviewersConfigError, match="duplicate"):
-        reviewers_config._parse_override_value(["copilot", "copilot"])
+def test_list_array_form_is_rejected_loud():
+    # The `[reviewers]` config is TABLE-ONLY. A list/array form
+    # (`reviewers = ["copilot", "codex"]`) — a ported release shorthand — must
+    # fail loud, not be silently accepted (spec #11 / PRD reviewer-policy).
+    with pytest.raises(RequiredReviewersConfigError, match="TABLE"):
+        reviewers_config._parse_override_value(["copilot", "codex", "agy"])
 
 
 # --- reviewer-name key normalization (release#852) --------------------------
@@ -117,11 +108,6 @@ def test_map_keys_are_canonicalized_to_adapter_names():
     assert parsed == {"copilot": True}
     assert resolve_required_names(parsed) == ("copilot",)
     assert reviewer_rerun(parsed)["copilot"] is True
-
-
-def test_list_shorthand_keys_are_canonicalized():
-    parsed = reviewers_config._parse_override_value(["Copilot", "CodeRabbit"])
-    assert parsed == {"copilot": False, "coderabbit": False}
 
 
 def test_map_keys_colliding_after_canonicalization_fail_loud():
@@ -165,7 +151,7 @@ def test_non_bool_rerun_fails_loud():
 
 
 def test_wrong_typed_reviewers_value_fails_loud():
-    with pytest.raises(RequiredReviewersConfigError, match="must be a map"):
+    with pytest.raises(RequiredReviewersConfigError, match="must be a TABLE"):
         reviewers_config._parse_override_value("copilot")
 
 
@@ -206,12 +192,12 @@ def test_load_override_reads_the_map(tmp_path):
     assert reviewers_config.load_override(str(tmp_path)) == {"coderabbit": True}
 
 
-def test_load_override_reads_the_list_shorthand(tmp_path):
+def test_load_override_rejects_the_list_array_form_loud(tmp_path):
+    # TABLE-ONLY: a `reviewers = [...]` array in `.shipit.toml` is rejected loud
+    # by the loader, not silently accepted (spec #11 / PRD reviewer-policy).
     (tmp_path / ".shipit.toml").write_text('reviewers = ["copilot", "codex"]\n')
-    assert reviewers_config.load_override(str(tmp_path)) == {
-        "copilot": False,
-        "codex": False,
-    }
+    with pytest.raises(RequiredReviewersConfigError, match="TABLE"):
+        reviewers_config.load_override(str(tmp_path))
 
 
 def test_load_override_reads_reserved_fields(tmp_path):
@@ -230,7 +216,7 @@ def test_load_override_reads_reserved_fields(tmp_path):
 
 def test_load_override_rejects_a_wrong_typed_value(tmp_path):
     (tmp_path / ".shipit.toml").write_text('reviewers = "copilot"\n')
-    with pytest.raises(RequiredReviewersConfigError, match="must be a map"):
+    with pytest.raises(RequiredReviewersConfigError, match="must be a TABLE"):
         reviewers_config.load_override(str(tmp_path))
 
 
@@ -291,7 +277,8 @@ def test_reviewer_run_options_no_config_is_empty(tmp_path):
     assert reviewers_config.reviewer_run_options("codex", str(tmp_path)) == {}
 
 
-def test_reviewer_run_options_list_shorthand_is_empty(tmp_path):
-    # List shorthand carries no per-reviewer options.
+def test_reviewer_run_options_non_table_value_is_empty(tmp_path):
+    # A non-table `reviewers` value carries no per-reviewer options. The gating
+    # path rejects it loud; the run-options read is non-gating and just no-ops.
     (tmp_path / ".shipit.toml").write_text('reviewers = ["copilot", "codex"]\n')
     assert reviewers_config.reviewer_run_options("codex", str(tmp_path)) == {}

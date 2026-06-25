@@ -164,7 +164,7 @@ def test_unstable_with_green_rollup_is_ready(context):
     )
     status = evaluate(ctx)
     assert status.state is TaskState.READY
-    assert "release-core pr ready" in status.next_action  # draft fixture → flip
+    assert "shipit pr ready" in status.next_action  # draft fixture → flip
     assert "UNSTABLE" in status.next_action  # explains why it's not a flat CLEAN
 
 
@@ -234,7 +234,7 @@ def test_unstable_non_draft_says_done_not_flip(context):
     ctx.is_draft = False
     status = evaluate(ctx)
     assert status.state is TaskState.READY
-    assert "release-core pr ready" not in status.next_action
+    assert "shipit pr ready" not in status.next_action
     assert "done" in status.next_action and "merge" in status.next_action
 
 
@@ -257,7 +257,7 @@ def test_addressing_names_the_thread_reading_tool(context):
     # Discoverability (#564): the agent must learn HOW to read the threads from
     # the next action itself, not fall back to raw `gh api`.
     status = evaluate(context("copilot_changes_requested"))
-    assert "release-core pr review show" in status.next_action
+    assert "shipit pr review" in status.next_action
     assert "resolve" in status.next_action
 
 
@@ -267,7 +267,7 @@ def test_addressing_names_the_thread_reading_tool(context):
 def test_ready_draft_says_flip(context):
     status = evaluate(context("ready_checks_green"))  # isDraft: true
     assert status.state is TaskState.READY
-    assert "release-core pr ready" in status.next_action
+    assert "shipit pr ready" in status.next_action
 
 
 def test_ready_non_draft_says_done_not_flip(context):
@@ -277,7 +277,7 @@ def test_ready_non_draft_says_done_not_flip(context):
     ctx.is_draft = False
     status = evaluate(ctx)
     assert status.state is TaskState.READY
-    assert "release-core pr ready" not in status.next_action
+    assert "shipit pr ready" not in status.next_action
     assert "done" in status.next_action
     assert "merge" in status.next_action
 
