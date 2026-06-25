@@ -4,6 +4,12 @@
 
 How agents plan, structure, and ship work. Two tracks: a lightweight one for bug fixes and small issues, and a full design process for new features and larger projects.
 
+## The PR lifecycle (both tracks):
+
+Every change ships as a PR the agent drives. Open it as a DRAFT — a draft is WIP the agent owns. Shepherd the whole loop while it stays draft: request and address reviews (see Addressing Code Reviews), get CI green, and make it mergeable. Flipping draft → ready is the ONE signal that means "done iterating — a human can validate and merge", so it happens only when all three hold: reviews addressed, CI green, mergeable.
+
+Stop at that flip; do NOT merge. Opening as a draft and flipping it to ready is the agent's job; the human does the final read and merge unless they ask otherwise. A human request for changes flips the PR back to draft; the loop repeats and re-flips to ready when green.
+
 ## 1. Addressing Code Reviews
 
 ### 1.1. Addressing a Review Round

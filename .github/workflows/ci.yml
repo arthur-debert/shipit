@@ -1,0 +1,30 @@
+name: CI
+
+# shipit's own gate — dogfooding the check from the first commit
+# (lessons-learned.lex §1d). For now a self-contained Python job: install the
+# package and run the test suite. It migrates to `setup-pixi` + `pixi run ci`
+# once the pixi tasks land (ROADMAP Steps 3/5/6); the required-check contract
+# (`check`) stays stable across that move.
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e . pytest
+      - name: Test
+        run: python -m pytest -q
