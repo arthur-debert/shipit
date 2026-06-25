@@ -1,5 +1,5 @@
 ---
-name: adebert-to-issues
+name: shipit-to-issues
 description: Break a plan, spec, or PRD into independently-grabbable Work Streams on the project issue tracker using tracer-bullet vertical slices. Use when user wants to convert a plan into issues/work streams, create implementation tickets, or break down work.
 metadata:
     forked-from: https://github.com/mattpocock/skills (skills/engineering/to-issues)
@@ -14,7 +14,7 @@ The issue tracker and triage label vocabulary should have been provided to you â
 
 ### 1. Gather context
 
-Work from whatever is already in the conversation context. If the user passes an issue reference (issue number, URL, or path) as an argument, fetch it from the issue tracker and read its full body and comments. The parent is normally the **epic issue** produced by `/adebert-to-prd`, which links to the authoritative PRD in `docs/prd/`.
+Work from whatever is already in the conversation context. If the user passes an issue reference (issue number, URL, or path) as an argument, fetch it from the issue tracker and read its full body and comments. The parent is normally the **epic issue** produced by `/shipit-to-prd`, which links to the authoritative PRD in `docs/prd/`.
 
 ### 2. Explore the codebase (optional)
 

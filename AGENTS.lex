@@ -43,8 +43,8 @@ How agents plan, structure, and ship work. Two tracks: a lightweight one for bug
 
         2.2.2. Planning
 
-            - `/adebert-to-prd` produces the PRD as a file under `docs/prd/` and opens an epic tracker issue pointing to it. The user reviews the PRD.
-            - `/adebert-to-issues` turns the PRD into Work Streams (WS): each WS is a vertical slice, published as a sub-issue of the epic, with blocked-by dependencies.
+            - `/shipit-to-prd` produces the PRD as a file under `docs/prd/` and opens an epic tracker issue pointing to it. The user reviews the PRD.
+            - `/shipit-to-issues` turns the PRD into Work Streams (WS): each WS is a vertical slice, published as a sub-issue of the epic, with blocked-by dependencies.
             - The parallelizability and dependency map is recorded on the epic issue — execution detail belongs there, not in the PRD.
 
         2.2.3. Execution

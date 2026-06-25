@@ -1,5 +1,5 @@
 ---
-name: adebert-to-prd
+name: shipit-to-prd
 description: Turn the current conversation context into a PRD, write it to docs/prd/, and open an epic tracker issue that points to it. Use when user wants to create a PRD from the current context.
 metadata:
     forked-from: https://github.com/mattpocock/skills (skills/engineering/to-prd)

@@ -1,0 +1,17 @@
+["bug"]
+description="Denotes issue is a bug, implying this corrects current behaviour."
+
+["feature"]
+description="Feature releated, that is adds new behaviour or capability"
+
+["ready-for-agent"]
+description="Ready is ready to pick up"
+
+["small"]
+description="This is a small and focused task, particularly suited for testing agents behaviour or new code base commers"
+
+["needs-decision"]
+description="Needs a maintainer decision before can be ready to execute"
+
+["duplicate-of"]
+descriptions="This is a duplicate of "
