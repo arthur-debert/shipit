@@ -195,16 +195,23 @@ codex-local = { rerun = false, model = "pro", instructions = "docs/review.md" }
   read. The process-lifetime config cache release needed (to avoid a `yq` subprocess per
   poll) is **dropped** — it does not apply to an in-process TOML read.
 
-### Scope boundary — local-agent execution deferred
+### Scope boundary — local-agent execution (WS07, in scope)
 
 - The full reviewer-adapter registry is copied (copilot, coderabbit, gemini, codex-local,
   agy-local), so the engine **detects** an existing local-agent review and resolves every
-  name. Copilot — an **app reviewer** — is the working required reviewer; requesting it is a
-  single `gh` reviewer-edit call in the engine boundary.
-- *Running* a local-agent review (the release-core `review/` engine: backends, prompt,
-  GitHub-App auth) is **out of scope** and deferred to its own step. The local adapter's
-  request path lazy-imports that engine; this epic **guards** that import so requesting a
-  `codex-local`/`agy-local` review fails with a clean engine error, not an `ImportError`.
+  name. Copilot — an **app reviewer** — needs only a single `gh` reviewer-edit.
+- **Running** a local-agent review (the release-core `review/` engine: backends, prompt,
+  GitHub-App auth) is **in scope** as **WS07** (the original deferral is reversed — every
+  adapter is PRF01 work, and the epic dogfoods the local reviewers on its own PRs). The
+  earlier WS01 lazy-import **guard** is replaced by the real ported `review/` subpackage;
+  `_LocalReviewAdapter.request()` runs the agent over the diff and posts as the bot.
+- The bot **identity** is sourced from Doppler via shipit's **existing** `secretsrc` /
+  `[secrets]` infra — `CODEX_REVIEW_APP_PRIVATE_KEY` / `CODEX_REVIEW_APP_ID` (and `AGY_…`)
+  in `github/prd` — and signed in-memory by PyJWT, so the key never lands on disk (the
+  decided divergence from release's loose-`.pem`-on-disk model). The `adr-codex-review` /
+  `adr-agy-review` Apps are already minted and installed on `arthur-debert`; their PEMs were
+  migrated off `~/.config` into Doppler as PRF01 **pre-work** (done). The reserved
+  `[reviewers]` `model` / `instructions` fields are **consumed** here.
 
 ## Testing Decisions
 
@@ -244,11 +251,11 @@ is "port what still earns its keep," not "port everything."
 
 ## Out of Scope
 
-- **Running** local-agent reviews (`codex-local` / `agy-local`): the `review/` execution
-  engine, its backends, prompt building, and GitHub-App auth — a separate later step.
-- **GitHub App activation**: registering the bot App, sourcing its private key from Doppler
-  (the decided divergence from release's loose-`.pem` model), installing the App, and
-  provisioning the `codex`/`agy` CLIs.
+- **Minting NEW review Apps**: running the manifest mint/install flow to register a
+  brand-new bot App or install it on a new owner. The `adr-codex-review` / `adr-agy-review`
+  Apps already exist and are installed on `arthur-debert`; WS07 *uses* them (auth + post),
+  it does not re-mint. Provisioning the `codex` / `agy` CLIs is likewise assumed (they are
+  on the dev/agent PATH), not automated here.
 - A looping/blocking `pr wait` (only the single-shot `pr next` is in scope).
 - The `pr resolve-thread` / `pr review reply` push-back surface beyond what `pr status` /
   `pr next` need to *report* (threads are surfaced, not auto-resolved).
