@@ -123,8 +123,8 @@ Scope
       pixi-task / workflow-YAML boundary, the .shipit.toml config).
     - [./docs/dev/workflows.lex] — the composable CI design (the decomposed
       build → package → sign → release pipeline and its invariants).
-    - [./docs/dev/ROADMAP.lex] — the incremental, verifying build sequence
-      (Spike 0 through cutover).
+    - [./docs/prd/FUTURE_WORK.md] — the high-level map of shipped + planned
+      work (the retired roadmap's successor).
     - [./AGENTS.lex] — the dev-cycle and PR-review policy agents follow.
 
 

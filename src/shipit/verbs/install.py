@@ -4,7 +4,7 @@
 skills, the AGENTS.md block, the bootstrap launcher) into a consumer repo,
 recording a per-unit pristine ``sha256`` in ``.shipit.toml``. On re-install it
 hash-compares each unit against its stored pristine and opens a DRAFT PR with the
-changes — never an admin push (docs/dev/architecture.lex §2, ROADMAP.lex §2).
+changes — never an admin push (docs/dev/architecture.lex §2, docs/prd/install-reconciliation.md).
 
 Reconciliation is a HASH COMPARE, not a subsystem. Per unit there are four
 outcomes and no more — the moment it grows features it has become the drift
@@ -46,7 +46,7 @@ AGENTS_KEY = "AGENTS.md#shipit-block"
 BLOCK_OPEN = "<!-- Managed by shipit; do not edit. Regenerate via shipit install. -->"
 BLOCK_CLOSE = "<!-- End shipit-managed block. -->"
 
-# The gate units Step 2 deferred to Step 3 (ROADMAP.lex §3). The consumer gets
+# The gate units Step 2 deferred to Step 3 (docs/prd/lint-gate.md). The consumer gets
 # the thin lefthook caller (whole file) and a `lint = "shipit lint"` task BLOCK
 # in its own pixi.toml — NEVER a linter-dependency block: the linters ride in as
 # shipit-the-package's own deps, so the consumer's manifest carries only the
@@ -177,7 +177,7 @@ def load_units() -> list[Unit]:
         )
     )
 
-    # The gate units (ROADMAP.lex §3): the thin lefthook caller and the
+    # The gate units (docs/prd/lint-gate.md): the thin lefthook caller and the
     # `lint = "shipit lint"` task block in the consumer's pixi.toml.
     units.append(
         Unit(

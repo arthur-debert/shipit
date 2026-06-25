@@ -3,7 +3,7 @@ shipit Architecture
 This document records the load-bearing design decisions and, for each, the
 reasoning that makes it load-bearing. It describes the FINAL STATE shipit aims
 to be — not any migration step. The incremental path to get there lives in
-[./ROADMAP.lex].
+[../prd/FUTURE_WORK.md].
 
 The short version: pixi is the substrate; what shipit manages is split by how
 fast it changes; producing logic is pixi tasks and routing logic is thin YAML;
