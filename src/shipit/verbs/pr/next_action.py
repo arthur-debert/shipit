@@ -13,12 +13,11 @@ injects. Only two acts mutate the PR — the REVIEWS_PENDING request and the REA
 flip — and the flip goes through the SAME guarded re-check (`ready.guarded_flip`)
 that `pr ready` uses, so `pr next` can never flip a not-actually-ready PR.
 
-Reconcile seam (WS05): the request act needs the canonical reviewer-request
-helper `verbs/pr/_request.py::request_reviewers(...)` (attach-verify), which WS05
-owns and is NOT on this branch yet. It is routed through ONE spot —
-:meth:`_NextActs.request_review` — with a MINIMAL request-via-adapter + basic
-attach check standing in for it, marked `# reconcile:` so the coordinator swaps
-it to WS05's helper in a single edit at integration.
+The request act delegates to the canonical reviewer-request helper
+`verbs/pr/_request.py::request_reviewers(...)` (WS05) — the ONE attach-verified
+request path `pr review request` also uses. `pr next` owns only the
+reviewer-SELECTION (excluding reviewers already mid-review on the head); the
+request placement + #614 attach-verify is the shared helper's job.
 """
 
 from __future__ import annotations
@@ -28,11 +27,12 @@ import sys
 import click
 
 from ...prstate import ghapi
-from ...prstate.fetch import attach_state, gather
+from ...prstate.fetch import gather
 from ...prstate.reviewers import required_reviewers
 from ...prstate.state import TaskStatus, evaluate, no_pr
 from . import ready as ready_verb
 from . import status as status_verb
+from ._request import request_reviewers
 from ._resolve import resolve_pr
 from .dispatch import dispatch
 
@@ -57,57 +57,47 @@ class _NextActs:
     def request_review(self, status: TaskStatus) -> str:
         """Request/re-request the pending required reviewers on the head.
 
-        # reconcile: replace this whole body with a single call to WS05's
-        # canonical helper — `from .review import request_reviewers` (the
-        # `verbs/pr/_request.py::request_reviewers(pr)` attach-verify path) — once
-        # WS05 merges. It is isolated to THIS method so the swap is one edit; the
-        # dispatcher and the rest of `pr next` are unaffected.
+        Two concerns, deliberately split:
 
-        Minimal stand-in until then: request each pending required reviewer via
-        its adapter (the engine boundary's `gh pr edit --add-reviewer`), then do a
-        BASIC attach check (re-read the pending requests once and confirm the
-        requestable reviewers show up). This is deliberately NOT the full #614
-        attach-verify poll — that is WS05's job; this only un-parks the common
-        case and fails loud on an outright request error.
+          * SELECTION (here): which reviewers to act on. A reviewer already
+            REQUESTED / IN_PROGRESS on the head is mid-review — re-poking it would
+            spam the reviewer and contradict the engine's "wait (already
+            requested…)" advice — so it is EXCLUDED. DONE reviewers are excluded
+            too. What remains is NOT_REQUESTED / stale-after-push — exactly the
+            reviewers the engine's request/RE-REQUEST clauses name. (The
+            dispatcher only routes a MIXED state to this act; the all-waiting case
+            it already reports.)
+          * EXECUTION (delegated): the actual request + #614 attach-verify is
+            WS05's canonical `_request.request_reviewers` — the ONE request path
+            `pr review request` also uses. We pass `force=True` because we have
+            ALREADY filtered to the reviewers that need acting on; the helper then
+            places each request and polls until its `review_requested` edge is
+            verified (or reports it dropped). A silently-dropped edge is a hard
+            failure: surface it as a `GhError` so the verb renders a clean stderr
+            + non-zero exit, exactly like `pr review request`.
         """
-        required = required_reviewers()
-        # Which required reviewers actually need (re-)requesting. `status.reviewers`
-        # maps name -> lifecycle value. A reviewer already REQUESTED / IN_PROGRESS
-        # on the head is mid-review — re-poking it would spam the reviewer and
-        # contradict the engine's "wait (already requested…)" advice — so it is
-        # SKIPPED here (the dispatcher only routes a MIXED state to this act;
-        # the all-waiting case it already reports). DONE reviewers are skipped
-        # too. What remains is NOT_REQUESTED / stale-after-push — the ones the
-        # engine's request/RE-REQUEST clauses name — which is exactly the set to
-        # request. (`adapter.request` is the same call for request and re-request.)
         skip = {"done_clean", "done_comments", "requested", "in_progress"}
-        pending = [r for r in required if status.reviewers.get(r.name) not in skip]
-        requested: list[str] = []
-        for adapter in pending:
-            # adapter.request returns True when a real request edge was placed;
-            # False for a no-mechanism backend (best-effort). A local-agent
-            # adapter raises GhError here (execution deferred) — let it propagate
-            # to the verb's clean error path.
-            if adapter.request(self._pr):
-                requested.append(adapter.name)
-        if not requested:
-            return f"no requestable reviewer to (re-)request — {status.next_action}"
-        # Basic attach check: re-read the pending requests once and confirm the
-        # reviewers we just requested actually attached. A silent drop is reported
-        # (not a hard failure here — WS05's helper owns the polling retry).
-        attached_logins, _reviews = attach_state(self._pr)
-        low = [login.lower() for login in attached_logins]
-        missing = [
-            name
-            for name in requested
-            if not any(_adapter_for(name, required).matches(login) for login in low)
+        selected = [
+            r for r in required_reviewers() if status.reviewers.get(r.name) not in skip
         ]
-        line = f"requested review(s): {', '.join(requested)}"
-        if missing:
-            line += (
-                f" — WARNING: not yet attached: {', '.join(missing)} (re-run to retry)"
+        if not selected:
+            return f"no requestable reviewer to (re-)request — {status.next_action}"
+        # force=True: selection is done above, so the helper requests exactly
+        # these and attach-verifies each remote edge. GhError (e.g. a deferred
+        # local-agent reviewer, or a gh failure) propagates to the verb.
+        result = request_reviewers(self._pr, selected, force=True)
+        if not result.ok:
+            # A remote request edge was silently dropped (#614) — fail loud rather
+            # than park the PR invisibly at reviews-pending.
+            raise ghapi.GhError(
+                "review request dropped by GitHub (no review_requested edge "
+                f"attached): {', '.join(result.dropped)} — re-run `pr next`"
             )
-        return line
+        acted = result.verified + result.posted
+        if not acted:
+            # Only no-op (auto-triggering) backends were selected — nothing placed.
+            return f"no requestable reviewer to (re-)request — {status.next_action}"
+        return f"requested review(s): {', '.join(acted)}"
 
     def flip_ready(self, status: TaskStatus) -> str:
         # The single hand-off. Go through the SHARED guarded re-check so a status
@@ -115,13 +105,6 @@ class _NextActs:
         # re-evaluates live and raises NotReady if it is no longer READY.
         flipped = ready_verb.guarded_flip(self._pr)
         return f"flipped draft→ready — {flipped.next_action}"
-
-
-def _adapter_for(name: str, required):
-    for r in required:
-        if r.name == name:
-            return r
-    raise KeyError(name)  # pragma: no cover — name came from `required`
 
 
 @click.command(name="next")

@@ -52,8 +52,9 @@ class Acts(Protocol):
         """Request / re-request the pending required reviewers on the head.
 
         The act for REVIEWS_PENDING when a reviewer still needs requesting. The
-        boundary owns the request + attach check (see the WS05 reconcile seam in
-        :mod:`.next_action`). Returns the line describing who was requested.
+        boundary owns the request placement + attach-verify (it delegates to the
+        shared `_request.request_reviewers` helper). Returns the line describing
+        who was requested.
         """
         ...
 

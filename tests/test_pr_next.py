@@ -128,20 +128,27 @@ def test_next_ready_refusal_is_nonzero(patched_next, monkeypatch, capsys):
     assert "refusing to flip" in capsys.readouterr().err
 
 
+class FakeAdapter:
+    def __init__(self, name):
+        self.name = name
+
+    def matches(self, login):
+        return self.name in login.lower()
+
+
+def _fake_request_result(names):
+    """A RequestResult whose `verified` are the given names — `ok` is True."""
+    from shipit.verbs.pr._request import RequestResult, ReviewerOutcome
+
+    return RequestResult(outcomes=[ReviewerOutcome(n, "verified") for n in names])
+
+
 def test_next_request_act_requests_reviewer(patched_next, monkeypatch, capsys):
     """REVIEWS_PENDING with a reviewer to request fires the request act, which
-    routes through the adapter + a basic attach check (both stubbed)."""
-
-    class FakeAdapter:
-        name = "copilot"
-
-        def request(self, pr):
-            return True
-
-        def matches(self, login):
-            return "copilot" in login
-
-    monkeypatch.setattr(next_verb, "required_reviewers", lambda: [FakeAdapter()])
+    delegates execution to WS05's `request_reviewers` (attach-verify)."""
+    monkeypatch.setattr(
+        next_verb, "required_reviewers", lambda: [FakeAdapter("copilot")]
+    )
     monkeypatch.setattr(
         next_verb,
         "evaluate",
@@ -152,34 +159,33 @@ def test_next_request_act_requests_reviewer(patched_next, monkeypatch, capsys):
             reviewers={"copilot": "not_requested"},
         ),
     )
-    monkeypatch.setattr(next_verb, "attach_state", lambda pr: (["Copilot"], []))
+    seen = {}
+
+    def fake_request(pr, adapters, *, force):
+        seen["pr"] = pr
+        seen["names"] = [a.name for a in adapters]
+        seen["force"] = force
+        return _fake_request_result([a.name for a in adapters])
+
+    monkeypatch.setattr(next_verb, "request_reviewers", fake_request)
     rc = cli.main(["pr", "next"])
     assert rc == 0
     assert "requested review(s): copilot" in capsys.readouterr().out
+    assert seen == {"pr": 42, "names": ["copilot"], "force": True}
 
 
 def test_next_request_act_skips_already_requested_reviewer(
     patched_next, monkeypatch, capsys
 ):
     """A MIXED REVIEWS_PENDING (one not_requested, one already requested) must
-    request ONLY the not_requested reviewer — never re-poke a reviewer already
-    mid-review (Copilot review on PR #19)."""
-
-    class FakeAdapter:
-        def __init__(self, name):
-            self.name = name
-            self.requested_for = None
-
-        def request(self, pr):
-            self.requested_for = pr
-            return True
-
-        def matches(self, login):
-            return self.name in login.lower()
-
-    fresh = FakeAdapter("copilot")  # not_requested → should be requested
-    busy = FakeAdapter("coderabbit")  # requested → should be SKIPPED
-    monkeypatch.setattr(next_verb, "required_reviewers", lambda: [fresh, busy])
+    SELECT only the not_requested reviewer for the request helper — never re-poke
+    a reviewer already mid-review (Copilot review on PR #19). The selection is
+    what `request_reviewers` receives; execution is delegated to that helper."""
+    monkeypatch.setattr(
+        next_verb,
+        "required_reviewers",
+        lambda: [FakeAdapter("copilot"), FakeAdapter("coderabbit")],
+    )
     monkeypatch.setattr(
         next_verb,
         "evaluate",
@@ -194,11 +200,48 @@ def test_next_request_act_skips_already_requested_reviewer(
             reviewers={"copilot": "not_requested", "coderabbit": "requested"},
         ),
     )
-    monkeypatch.setattr(next_verb, "attach_state", lambda pr: (["Copilot"], []))
+    selected = {}
+
+    def fake_request(pr, adapters, *, force):
+        selected["names"] = [a.name for a in adapters]
+        return _fake_request_result([a.name for a in adapters])
+
+    monkeypatch.setattr(next_verb, "request_reviewers", fake_request)
     rc = cli.main(["pr", "next"])
     assert rc == 0
     out = capsys.readouterr().out
     assert "requested review(s): copilot" in out
+    # Selection excluded the mid-review reviewer — only copilot reached the helper.
+    assert selected["names"] == ["copilot"]
     assert "coderabbit" not in out.split("action:")[1].split("\n")[0]
-    assert fresh.requested_for == 42  # the fresh one was requested
-    assert busy.requested_for is None  # the busy one was NOT re-poked
+
+
+def test_next_request_act_dropped_edge_is_error(patched_next, monkeypatch, capsys):
+    """A silently-dropped request edge (#614) → non-zero exit, named in stderr."""
+    monkeypatch.setattr(
+        next_verb, "required_reviewers", lambda: [FakeAdapter("copilot")]
+    )
+    monkeypatch.setattr(
+        next_verb,
+        "evaluate",
+        lambda ctx, required: TaskStatus(
+            state=TaskState.REVIEWS_PENDING,
+            next_action="waiting on required review(s): copilot — request for the current head: copilot",
+            pr=ctx,
+            reviewers={"copilot": "not_requested"},
+        ),
+    )
+    from shipit.verbs.pr._request import RequestResult, ReviewerOutcome
+
+    monkeypatch.setattr(
+        next_verb,
+        "request_reviewers",
+        lambda pr, adapters, *, force: RequestResult(
+            outcomes=[ReviewerOutcome("copilot", "dropped")]
+        ),
+    )
+    rc = cli.main(["pr", "next"])
+    assert rc != 0
+    err = capsys.readouterr().err
+    assert "dropped" in err
+    assert "copilot" in err
