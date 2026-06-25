@@ -26,9 +26,12 @@ reviewer does not hold the PR in REVIEWS_PENDING. The *skip-after-timeout*
 decision is the polling caller's, not the snapshot's — the snapshot is
 stateless and has no clock.
 
-Review rounds repeat until done: a review counts only against the current
-head, so any push stales the prior review and the snapshot advises RE-REQUEST
-(the engine is the arbiter — no minor-round exception, #565).
+Review rounds repeat until done, gated by the per-reviewer rerun policy: for a
+rerun=True (head-strict) reviewer a review counts only against the current head,
+so any push stales the prior review and the snapshot advises RE-REQUEST; for a
+rerun=False reviewer (review-once — the DEFAULT for everyone) a review on ANY
+head still counts as done and a push never re-stales it. Either way the engine
+is the arbiter — no minor-round exception, #565.
 
 The stopping rule (breakers.py) caps that repetition: address every comment
 each round EXCEPT stop when 6 rounds have happened, or when the latest round is
@@ -137,8 +140,8 @@ def evaluate(
     never block. A test passes a DIFFERENT set to prove the engine is
     data-driven, not hard-coded to any reviewer. The `None` default is a
     convenience for REPL/ad-hoc callers ONLY — it resolves the config-default
-    set (`reviewers.required_reviewers()`, which reads `.release-sync.yaml`),
-    the one impurity, which is why the CLI never relies on it.
+    set (`reviewers.required_reviewers()`, which reads the `[reviewers]` table
+    from `.shipit.toml`), the one impurity, which is why the CLI never relies on it.
 
     The stopping rule (breakers.py) decides when the review loop has run its
     course: 6 rounds reached, or the latest round is all nitpicks. When it fires

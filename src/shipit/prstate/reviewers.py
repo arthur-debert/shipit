@@ -155,7 +155,7 @@ class CodeRabbitAdapter(ReviewerAdapter):
     """CodeRabbit is a requestable GitHub App that posts a discrete review on the
     PR head SHA — structurally the same model as Copilot. It is being PILOTED on
     the phos-org repos (the only place the App is installed); a pilot repo opts
-    in via the `reviewers:` map in its `.release-sync.yaml`. It is NOT in the
+    in via the `[reviewers]` table in its `.shipit.toml`. It is NOT in the
     default required set: on a repo without the App, the request edge silently
     drops (#613-style) and a required gate would park every PR at
     REVIEWS_PENDING. Whether it gates is a config decision, not an adapter
