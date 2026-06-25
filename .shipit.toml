@@ -18,5 +18,8 @@
 [secrets]
 # RELEASE_TOKEN backs the Copilot-review caller (and, later, cross-repo release
 # pushes). Sourced from the local gh CLI token env var, which carries repo +
-# workflow scope. More entries land as shipit's release workflows arrive (Steps 4–6).
-RELEASE_TOKEN = { env = "GH_TOKEN" }
+# workflow scope. Optional: GH_TOKEN is not always exported (gh often keeps the
+# token in the keychain), and the repo secret is already set — so an absent
+# GH_TOKEN skips the re-set rather than aborting gh-setup; when present it rotates
+# the value. More entries land as shipit's release workflows arrive (Steps 4–6).
+RELEASE_TOKEN = { env = "GH_TOKEN", optional = true }
