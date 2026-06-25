@@ -1,0 +1,1 @@
+lexd convert AGENTS.lex --to markdown > AGENTES.md
