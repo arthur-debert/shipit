@@ -274,26 +274,41 @@ def _write_unit(root: Path, unit: Unit) -> None:
 # --------------------------------------------------------------------------
 
 
-def _override_diff(root: Path, decision: Decision) -> str:
-    """A short unified diff of shipit's intended content vs the consumer's edit."""
-    unit = decision.unit
+def _consumer_snapshot(root: Path, unit: Unit) -> str:
+    """The consumer's current text for a unit — captured BEFORE any overwrite."""
     if unit.kind == "block":
-        consumer_text = (_consumer_inner(root, unit) or "") + "\n"
-        desired_text = unit.desired_inner() + "\n"
-    else:
-        consumer_text = (root / unit.dest).read_text(encoding="utf-8", errors="replace")
-        desired_text = unit.content.decode("utf-8", errors="replace")
+        inner = _consumer_inner(root, unit)
+        return "" if inner is None else inner + "\n"
+    dest = root / unit.dest
+    return dest.read_text(encoding="utf-8", errors="replace") if dest.is_file() else ""
+
+
+def _desired_text(unit: Unit) -> str:
+    return unit.desired_inner() + "\n" if unit.kind == "block" else unit.content.decode(
+        "utf-8", errors="replace"
+    )
+
+
+def _override_diff(unit: Unit, consumer_text: str) -> str:
+    """A unified diff of the consumer's edit vs shipit's intended content."""
     diff = difflib.unified_diff(
         consumer_text.splitlines(keepends=True),
-        desired_text.splitlines(keepends=True),
+        _desired_text(unit).splitlines(keepends=True),
         fromfile=f"{unit.dest} (consumer)",
         tofile=f"{unit.dest} (shipit)",
     )
     return "".join(diff)
 
 
-def _pr_body(root: Path, decisions: list[Decision]) -> str:
-    """The PR body: what was added/updated, and every override surfaced with its diff."""
+def _pr_body(
+    decisions: list[Decision], override_before: dict[str, str]
+) -> str:
+    """The PR body: what was added/updated, and every override surfaced with its diff.
+
+    ``override_before`` holds each overridden unit's consumer content captured
+    BEFORE the branch write, so the diff shows the real divergence (not an empty
+    diff against the content shipit just wrote over it).
+    """
     adds = [d for d in decisions if d.action == ADD]
     updates = [d for d in decisions if d.action == UPDATE]
     overrides = [d for d in decisions if d.action == OVERRIDE]
@@ -320,7 +335,7 @@ def _pr_body(root: Path, decisions: list[Decision]) -> str:
             lines.append(f"<details><summary><code>{d.unit.dest}</code></summary>")
             lines.append("")
             lines.append("```diff")
-            lines.append(_override_diff(root, d).rstrip("\n"))
+            lines.append(_override_diff(d.unit, override_before.get(d.unit.key, "")).rstrip("\n"))
             lines.append("```")
             lines.append("</details>")
             lines.append("")
@@ -377,6 +392,12 @@ def run(path: str | None, *, dry_run: bool = False, push: bool = False) -> int:
         print(f"  ({len(writes)} to write, {len(overrides)} override(s)) — dry-run, nothing written")
         return 0
 
+    # Snapshot each override's consumer content BEFORE writing, so the PR diff
+    # shows the real divergence rather than an empty diff against what we wrote.
+    override_before = {
+        d.unit.key: _consumer_snapshot(root, d.unit) for d in overrides
+    }
+
     # Apply the writes, then record the advanced pristine map. Every unit the
     # branch now carries shipit's content for is pinned to its desired hash.
     for d in writes:
@@ -407,11 +428,18 @@ def run(path: str | None, *, dry_run: bool = False, push: bool = False) -> int:
     gh.git_switch_create(INSTALL_BRANCH, cwd=cwd)
     gh.git_add(changed_paths, cwd=cwd)
     gh.git_commit(COMMIT_MESSAGE, changed_paths, cwd=cwd)
-    gh.git_push(INSTALL_BRANCH, cwd=cwd)
+    # The install branch is regenerated from HEAD each run; force so a re-run with
+    # an open install PR updates it rather than failing non-fast-forward.
+    gh.git_push(INSTALL_BRANCH, cwd=cwd, force=True)
+    existing = gh.pr_url_for_head(INSTALL_BRANCH, cwd=cwd)
+    if existing:
+        # The force-push already refreshed the open PR's diff.
+        print(f"  updated draft PR: {existing}")
+        return 0
     url = gh.pr_create(
         head=INSTALL_BRANCH,
         title="shipit: install/update the managed set",
-        body=_pr_body(root, decisions),
+        body=_pr_body(decisions, override_before),
         draft=True,
         cwd=cwd,
     )

@@ -75,11 +75,14 @@ class _GhRecorder:
     def git_commit(self, message, paths, *, cwd):
         self.calls.append(("commit", message))
 
-    def git_push(self, branch, *, cwd, remote="origin"):
+    def git_push(self, branch, *, cwd, remote="origin", force=False):
         self.calls.append(("push", branch))
 
     def git_current_branch(self, *, cwd):
         return "main"
+
+    def pr_url_for_head(self, branch, *, cwd=None):
+        return None  # no existing PR by default
 
     def pr_create(self, *, head, title, body, draft, cwd, **kw):
         self.calls.append(("pr_create", draft))
@@ -99,6 +102,7 @@ def rec(monkeypatch):
         "git_commit",
         "git_push",
         "git_current_branch",
+        "pr_url_for_head",
         "pr_create",
     ):
         monkeypatch.setattr(gh, name, getattr(r, name))
@@ -164,6 +168,23 @@ def test_consumer_edit_surfaces_as_override(tmp_path, rec):
     assert ("pr_create", True) in rec.calls
     assert "### Overrides" in rec.pr_body
     assert "skills/shipt-to-prd/SKILL.md" in rec.pr_body
+    # The diff is captured BEFORE the overwrite, so it shows the consumer's edit
+    # (a non-empty diff), not an empty diff against what shipit just wrote.
+    assert "CONSUMER EDIT" in rec.pr_body
+    assert "```diff" in rec.pr_body
+
+
+def test_open_install_pr_is_updated_not_recreated(tmp_path, rec, monkeypatch):
+    # An install PR already exists for the branch (a prior unmerged install).
+    monkeypatch.setattr(
+        gh, "pr_url_for_head", lambda branch, cwd=None: "https://x/pull/7"
+    )
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    rc = install.run(str(tmp_path))
+    assert rc == 0
+    # The branch was force-pushed, but no second PR was created.
+    assert "push" in rec.names()
+    assert "pr_create" not in rec.names()
 
 
 def test_push_flag_pushes_to_branch_without_pr(tmp_path, rec):

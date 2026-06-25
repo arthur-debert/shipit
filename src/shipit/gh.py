@@ -212,9 +212,33 @@ def git_commit(message: str, paths: list[str], *, cwd: str) -> None:
     _git(["commit", "-m", message, "--", *paths], cwd=cwd)
 
 
-def git_push(branch: str, *, cwd: str, remote: str = "origin") -> None:
-    """``git push <remote> <branch>`` — a plain push (never ``--force``)."""
-    _git(["push", remote, branch], cwd=cwd)
+def git_push(
+    branch: str, *, cwd: str, remote: str = "origin", force: bool = False
+) -> None:
+    """``git push <remote> <branch>``.
+
+    ``force`` plain-force-pushes the shipit-owned install branch, which install
+    regenerates from HEAD every run — so re-running with a prior install PR still
+    open updates that PR rather than failing non-fast-forward. (Plain ``--force``,
+    not ``--force-with-lease``: a freshly recreated branch has no remote-tracking
+    ref to lease against, and the branch is shipit-exclusive, so there is nothing
+    to protect.) The break-glass push to a real branch (main) never forces.
+    """
+    args = ["push"]
+    if force:
+        args.append("--force")
+    args += [remote, branch]
+    _git(args, cwd=cwd)
+
+
+def pr_url_for_head(branch: str, *, cwd: str | None = None) -> str | None:
+    """The URL of the open PR whose head is ``branch``, or ``None``."""
+    out = _run(
+        ["gh", "pr", "list", "--head", branch, "--state", "open",
+         "--json", "url", "-q", ".[0].url"],
+        cwd=cwd,
+    )
+    return out.strip() or None
 
 
 def pr_create(
