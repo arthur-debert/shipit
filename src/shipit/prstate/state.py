@@ -202,7 +202,7 @@ def evaluate(
         status.state = TaskState.ADDRESSING
         status.next_action = (
             f"triage {open_threads} open thread(s): read them with "
-            "`release-core pr review show`, then fix-or-reply + resolve each"
+            "`gh pr view --comments`, then fix-or-reply + resolve each"
         )
         return status
 
@@ -296,7 +296,7 @@ def evaluate(
             status.next_action = (
                 "reviewed + threads resolved + CI green; merge state UNSTABLE only "
                 "from a non-required check re-running on ready_for_review (the rollup "
-                "is green) — run `release-core pr ready` to flip draft->ready and page "
+                "is green) — run `shipit pr ready` to flip draft->ready and page "
                 "the human"
             )
         else:
@@ -315,7 +315,7 @@ def evaluate(
         if ctx.is_draft:
             status.next_action = (
                 "reviewed + threads resolved + CI green + CLEAN merge state — run "
-                "`release-core pr ready` to flip draft->ready and page the human"
+                "`shipit pr ready` to flip draft->ready and page the human"
             )
         else:
             status.next_action = (
