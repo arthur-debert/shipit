@@ -428,14 +428,101 @@ done until its verification passes.
     (the lefthook caller + task lines + feature deps added to install's managed
     set) is verified when Step 2's install carries them into a test consumer.
 
-4. Step 4 — PR flow
+4. Step 4 (epic PRF01) — PR flow
 
-    `pixi add` the existing PR-state-machine package and expose thin `shipit pr
-    status` / `shipit pr next` subcommands over it. Do NOT rewrite the state
-    machine — re-skin its entry points only.
+    Bring the PR-state engine — release-core's crown jewel — into shipit and
+    expose thin `shipit pr status` / `shipit pr next` subcommands over it.
 
-    Verified by: pr status / pr next drive a real PR through the review -> ready
-    lifecycle on a test repo.
+    COPY, do not depend ([../adr/0001-reuse-release-core-by-copy.md]):
+
+        The engine is COPIED verbatim into `src/shipit/prstate/`, NOT pulled in
+        as the release-core wheel. This ROADMAP once read "`pixi add` the existing
+        package"; that wording is corrected — shipit is the slimmed, renamed
+        SUCCESSOR to the engine ([./architecture.lex] §4), and the PR-loop code
+        ships through the `shipit` package itself (the slow/fast split, §2), so
+        no release-core dependency ever enters shipit's graph. "Do NOT rewrite the
+        state machine — re-skin its entry points only" is taken literally:
+        `prstate/` moves across near-byte-for-byte, INCLUDING its own stdlib-only
+        `ghapi` boundary. shipit keeps two gh boundaries by design —
+        `src/shipit/gh.py` (verb-layer: gh-setup / install) and
+        `src/shipit/prstate/ghapi.py` (the engine's PR-introspection boundary);
+        the small `rest()` overlap is intentional duplication, the price of not
+        rewriting the engine's I/O.
+
+    Scope — the engine + adapters now; the local-review EXECUTION later:
+
+        PRF01 ships the `prstate` engine (status, next-action, ready-flip) AND the
+        full reviewer-adapter registry — copilot, coderabbit, gemini, and the
+        `codex-local` / `agy-local` LOCAL adapters — copied verbatim (WS01). With
+        the registry present the engine DETECTS a codex/agy review that already
+        exists and knows every reviewer name; Copilot, an APP reviewer, is the
+        working required reviewer (requesting it is one `gh pr edit --add-reviewer`
+        inside `ghapi`).
+
+        What PRF01 DEFERS is only the local-review EXECUTION path: a local
+        adapter's `request()` RUNS the agent over the diff and POSTS the result as
+        a bot identity, which lives in release-core's `review/` subpackage
+        (backends, prompt, GitHub-App auth). The boundary makes this defer cheap,
+        not lossy: `_LocalReviewAdapter.request()` LAZY-imports `review/` only when
+        a local review is actually requested (`review` never imports `prstate` — a
+        cycle-free one-way edge), and `review/` is stdlib-only but for ONE lazy,
+        OPTIONAL `pyjwt[crypto]` import used solely to sign the App JWT. So
+        carrying or omitting `review/` changes shipit's hard-dependency footprint
+        by NOTHING (it stays click-only); the engine's stdlib-only guarantee holds
+        either way.
+
+        The reason to defer is therefore NOT code size or dependency cost — the
+        code is already written — but that the execution path has its own
+        ACTIVATION story with no verification in PRF01: registering each agent's
+        GitHub App (the manifest/register flow — "App minting": the bot identity
+        that posts as `adr-codex-review[bot]`), SOURCING its private key from
+        Doppler via shipit's existing `[secrets]` infrastructure (a deliberate
+        divergence from release's loose-`.pem`-on-disk model — PyJWT signs from an
+        in-memory PEM string, so the key never lands on disk), installing the App
+        on the target repos, and provisioning the codex/agy CLIs. Landing ~2000 lines that PRF01's Copilot-only verification
+        never exercises is exactly the untested-surface drift the small-package
+        discipline exists to avoid ([./lessons-learned.lex] §1d). So the
+        local-review engine is its OWN thin follow-on step (epic code
+        human-assigned) — thin BECAUSE the code is written — verified by: a local
+        codex review runs over a test PR and posts as the bot. The `model` /
+        `instructions` reviewer config (below) is PARSED by PRF01 but consumed
+        there.
+
+    Reviewer policy moves to .shipit.toml:
+
+        release resolves the required-reviewer SET + per-reviewer `rerun` flags
+        from `.release-sync.yaml`'s `reviewers:` key. shipit has no such file; the
+        policy moves to a `[reviewers]` table in `.shipit.toml` (the policy home,
+        [./architecture.lex] §6 — alongside `[secrets]`). The default is unchanged:
+        Copilot required, review-once (`rerun = false`). The resolver
+        (`reviewers_config`) keeps its pure `resolve_reviewers(override)` seam;
+        only its thin YAML loader is swapped for a `.shipit.toml` reader. This is
+        the one module RETOOLED rather than copied verbatim.
+
+    `pr status` and `pr next`:
+
+        - `shipit pr status` is the read path: gather a snapshot, `evaluate()` it,
+          print the lifecycle state + single next action (JSON or text). A re-skin
+          of release's `pr status` (`prstate.cli.task_status`).
+        - `shipit pr next` is new: run the ONE next action the engine advises —
+          request / re-request a review, or flip draft->ready when READY — then
+          report the action taken + resulting status (README §2.2's
+          "pr-next-action"). It is the single-shot form of release's looping `pr
+          wait`; the guarded flip reuses release's `pr ready`.
+
+    Decomposed into parallel work streams:
+
+        PRF01 is not one PR. It splits into vertical slices that parallelize: the
+        pure engine copy, the snapshot boundary, the reviewer-policy retool, and
+        the two CLI capability slices (read path / act path). The work-stream set
+        and its dependency map live on the PRF01 epic issue ([./AGENTS.lex] §2.2.3
+        — execution detail belongs on the epic, not here).
+
+    Verified by: `shipit pr status` and `shipit pr next` drive a real PR through
+    the review -> ready lifecycle on a test repo with Copilot as the required
+    reviewer — status reports each lifecycle state correctly, and `pr next`
+    requests the review, then (once reviewed + CI green + CLEAN) flips
+    draft->ready and stops.
 
 5. Step 5 — pixi test / build / run + changelog / release
 
