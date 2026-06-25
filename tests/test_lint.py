@@ -66,10 +66,11 @@ def test_tool_argv_check_and_fix_selection():
     ruff_check = lint.PYTHON.tools[0]
     assert ruff_check.argv(fix=False) == ("check",)
     assert ruff_check.argv(fix=True) == ("check", "--fix")
-    # lexd has no fix form -> skipped in fix mode.
+    # lexd has no fix form -> falls back to its check form in fix mode (never
+    # skipped: --fix still checks everything).
     lexd = lint.LEX.tools[0]
     assert lexd.argv(fix=False) == ("check",)
-    assert lexd.argv(fix=True) is None
+    assert lexd.argv(fix=True) == ("check",)
 
 
 def test_every_lang_has_at_least_one_tool():
@@ -147,7 +148,7 @@ def test_missing_tool_propagates_to_a_failed_gate(tmp_path, capsys):
     assert "LINT: FAILED" in capsys.readouterr().out
 
 
-def test_fix_mode_uses_fix_argv_and_skips_unfixable(tmp_path, capsys):
+def test_fix_mode_fixes_what_it_can_and_still_checks_the_rest(tmp_path, capsys):
     rec = _Recorder()
     rc = lint.run(
         str(tmp_path),
@@ -159,8 +160,9 @@ def test_fix_mode_uses_fix_argv_and_skips_unfixable(tmp_path, capsys):
     # ruff runs its fix forms.
     assert ("ruff", ("check", "--fix", "a.py")) in rec.calls
     assert ("ruff", ("format", "a.py")) in rec.calls
-    # lexd has no fixer -> never invoked in fix mode.
-    assert not any(binary == "lexd" for binary, _ in rec.calls)
+    # lexd has no fixer -> it still runs its CHECK form (the gate never skips a
+    # leg in fix mode, so --fix can't pass while lex is broken).
+    assert ("lexd", ("check", "d.lex")) in rec.calls
 
 
 def test_shell_routed_by_shebang_runs_shellcheck(tmp_path, capsys):

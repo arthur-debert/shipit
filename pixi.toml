@@ -43,6 +43,9 @@ yamllint = "1.38.*"
 prettier = "3.8.*"
 markdownlint-cli = "0.49.*"
 lefthook = "2.1.*"
+# curl provisions the pinned lexd (scripts/provision-lexd.sh); pinning it here
+# keeps the gate from depending on a host-provided curl ("identical everywhere").
+curl = "*"
 
 [feature.lint.tasks]
 # lexd is not on conda-forge; fetch the pinned prebuilt before every gate run

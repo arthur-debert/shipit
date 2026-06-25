@@ -11,7 +11,7 @@
 set -euo pipefail
 
 if command -v shipit >/dev/null 2>&1; then
-	exec shipit "$@"
+    exec shipit "$@"
 fi
 
 echo "shipit: the shipit CLI is not on PATH." >&2

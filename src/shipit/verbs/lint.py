@@ -49,18 +49,21 @@ class Tool:
     """One linter invocation: the binary plus its check args (files appended).
 
     ``fix`` is the formatter form applied under ``--fix``; ``None`` means the
-    tool has no safe in-place fix, so it is skipped in fix mode but still runs
-    as a check.
+    tool has no safe in-place fix, so in fix mode it falls back to its check
+    form. The gate NEVER skips a tool — ``shipit lint --fix`` formats what it can
+    AND still checks everything, so it can never pass while a non-fixable leg
+    (shellcheck, yamllint, lexd) is failing.
     """
 
     binary: str
     check: tuple[str, ...]
     fix: tuple[str, ...] | None = None
 
-    def argv(self, *, fix: bool) -> tuple[str, ...] | None:
-        """The argv prefix for this run, or ``None`` to skip (fix mode, no fixer)."""
-        if fix:
-            return self.fix  # may be None -> skip
+    def argv(self, *, fix: bool) -> tuple[str, ...]:
+        """The argv prefix for this run: the fix form in fix mode if the tool has
+        one, else the check form (never ``None`` — the gate never skips)."""
+        if fix and self.fix is not None:
+            return self.fix
         return self.check
 
 
@@ -276,9 +279,9 @@ def run(
     for lang, paths in routed:
         for tool in lang.tools:
             prefix = tool.argv(fix=fix)
-            if prefix is None:
-                continue  # fix mode, tool has no in-place fixer — skip
-            label = f"{tool.binary} {' '.join(tool.check)}".strip()
+            # Label from the actual argv that ran, so fix mode never claims it
+            # ran the check form when it ran the fix form.
+            label = f"{tool.binary} {' '.join(prefix)}".strip()
             rc, out = run_tool(tool.binary, [*prefix, *paths], root)
             runs.append(ToolRun(lang.name, tool.binary, label, rc, out))
             mark = "ok  " if rc == 0 else "FAIL"

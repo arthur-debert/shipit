@@ -22,6 +22,22 @@ PIN="0.18.4"
 TAG="v${PIN}"
 REPO="lex-fmt/lex"
 
+# Expected SHA-256 of each release tarball — see sha_for() below. The lex-fmt/lex
+# release ships no checksums file, so these are pinned here (trust-on-first-use):
+# they detect a tampered or silently re-cut release before the binary is
+# installed into the gate env. Re-pin when bumping PIN (download + sha256 them).
+sha_for() {
+    case "$1" in
+        x86_64-unknown-linux-gnu)
+            echo "ac7706d9d841e9d90ca8ccef86cb3ad476da033084a00cc7bde3a46663f8c78f"
+            ;;
+        aarch64-unknown-linux-gnu)
+            echo "93d7a540e98e74a583c38479f2803c23d04821e11ca40d56317cef6e73c9b6b6"
+            ;;
+        *) echo "" ;;
+    esac
+}
+
 prefix="${CONDA_PREFIX:?provision-lexd: must run inside a pixi/conda env}"
 dest="${prefix}/bin/lexd"
 
@@ -77,6 +93,25 @@ trap 'rm -rf "$tmp"' EXIT
 
 echo "provision-lexd: fetching lexd ${PIN} (${triple})"
 curl -fsSL "$url" -o "${tmp}/lexd.tar.gz"
+
+# Verify the tarball against the pinned SHA-256 before extracting/installing.
+expected="$(sha_for "$triple")"
+if [ -z "$expected" ]; then
+    echo "provision-lexd: no pinned SHA-256 for ${triple} — refusing to install" >&2
+    exit 1
+fi
+if command -v sha256sum >/dev/null 2>&1; then
+    actual="$(sha256sum "${tmp}/lexd.tar.gz" | awk '{print $1}')"
+else
+    actual="$(shasum -a 256 "${tmp}/lexd.tar.gz" | awk '{print $1}')"
+fi
+if [ "$actual" != "$expected" ]; then
+    echo "provision-lexd: SHA-256 mismatch for lexd ${PIN} (${triple})" >&2
+    echo "  expected ${expected}" >&2
+    echo "  actual   ${actual}" >&2
+    exit 1
+fi
+
 tar -xzf "${tmp}/lexd.tar.gz" -C "$tmp"
 
 # The tarball is `lexd-<triple>/lexd`; find it rather than assume the prefix.
