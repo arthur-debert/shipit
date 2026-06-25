@@ -398,50 +398,55 @@ def run(path: str | None, *, dry_run: bool = False, push: bool = False) -> int:
         d.unit.key: _consumer_snapshot(root, d.unit) for d in overrides
     }
 
-    # Apply the writes, then record the advanced pristine map. Every unit the
-    # branch now carries shipit's content for is pinned to its desired hash.
+    # Apply the writes, then record the advanced pristine map. Build [managed]
+    # from the CURRENT decisions only — so a unit retired in a later shipit
+    # version drops out of the manifest rather than lingering as a stale key.
     for d in writes:
         _write_unit(root, d.unit)
-    new_managed = dict(pristine)
-    for d in decisions:
-        new_managed[d.unit.key] = d.desired_hash
+    new_managed = {d.unit.key: d.desired_hash for d in decisions}
     config.write_manifest(cfg_path, version=_shipit_version(), managed=new_managed)
 
     changed_paths = sorted({d.unit.dest for d in writes} | {config.CONFIG_NAME})
     cwd = str(root)
 
-    if push:
-        # Break-glass: commit on the current branch and push straight to it
-        # (relies on the repo's admin bypass). Reserved for bootstrapping a repo
-        # that cannot yet run the PR loop.
-        branch = gh.git_current_branch(cwd=cwd)
-        if branch is None:
-            print("install: --push needs a checked-out branch", file=sys.stderr)
-            return 1
+    try:
+        if push:
+            # Break-glass: commit on the current branch and push straight to it
+            # (relies on the repo's admin bypass). Reserved for bootstrapping a
+            # repo that cannot yet run the PR loop.
+            branch = gh.git_current_branch(cwd=cwd)
+            if branch is None:
+                print("install: --push needs a checked-out branch", file=sys.stderr)
+                return 1
+            gh.git_add(changed_paths, cwd=cwd)
+            gh.git_commit(COMMIT_MESSAGE, changed_paths, cwd=cwd)
+            gh.git_push(branch, cwd=cwd)
+            print(f"  pushed to {branch} (break-glass --push)")
+            return 0
+
+        # Default: stage onto an install branch, push it, open a DRAFT PR.
+        gh.git_switch_create(INSTALL_BRANCH, cwd=cwd)
         gh.git_add(changed_paths, cwd=cwd)
         gh.git_commit(COMMIT_MESSAGE, changed_paths, cwd=cwd)
-        gh.git_push(branch, cwd=cwd)
-        print(f"  pushed to {branch} (break-glass --push)")
+        # The install branch is regenerated from HEAD each run; force so a re-run
+        # with an open install PR updates it rather than failing non-fast-forward.
+        gh.git_push(INSTALL_BRANCH, cwd=cwd, force=True)
+        existing = gh.pr_url_for_head(INSTALL_BRANCH, cwd=cwd)
+        if existing:
+            # The force-push already refreshed the open PR's diff.
+            print(f"  updated draft PR: {existing}")
+            return 0
+        url = gh.pr_create(
+            head=INSTALL_BRANCH,
+            title="shipit: install/update the managed set",
+            body=_pr_body(decisions, override_before),
+            draft=True,
+            cwd=cwd,
+        )
+        print(f"  opened draft PR: {url}")
         return 0
-
-    # Default: stage onto an install branch, push it, open a DRAFT PR.
-    gh.git_switch_create(INSTALL_BRANCH, cwd=cwd)
-    gh.git_add(changed_paths, cwd=cwd)
-    gh.git_commit(COMMIT_MESSAGE, changed_paths, cwd=cwd)
-    # The install branch is regenerated from HEAD each run; force so a re-run with
-    # an open install PR updates it rather than failing non-fast-forward.
-    gh.git_push(INSTALL_BRANCH, cwd=cwd, force=True)
-    existing = gh.pr_url_for_head(INSTALL_BRANCH, cwd=cwd)
-    if existing:
-        # The force-push already refreshed the open PR's diff.
-        print(f"  updated draft PR: {existing}")
-        return 0
-    url = gh.pr_create(
-        head=INSTALL_BRANCH,
-        title="shipit: install/update the managed set",
-        body=_pr_body(decisions, override_before),
-        draft=True,
-        cwd=cwd,
-    )
-    print(f"  opened draft PR: {url}")
-    return 0
+    except gh.GhError as exc:
+        # Match gh_setup: a boundary failure (no remote, auth, not a repo) is a
+        # clean CLI error + non-zero exit, not a raw traceback.
+        print(f"install: git/gh step failed: {exc}", file=sys.stderr)
+        return 1

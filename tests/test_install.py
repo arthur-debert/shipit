@@ -193,3 +193,28 @@ def test_push_flag_pushes_to_branch_without_pr(tmp_path, rec):
     assert rc == 0
     assert ("push", "main") in rec.calls
     assert "pr_create" not in rec.names()
+
+
+def test_stale_manifest_keys_are_dropped(tmp_path, rec):
+    # A prior manifest claims a unit shipit no longer manages.
+    config.write_manifest(
+        tmp_path / ".shipit.toml",
+        version="old",
+        managed={"skills/retired/SKILL.md": "sha256:dead", "bin/shipit": "sha256:old"},
+    )
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    install.run(str(tmp_path))
+    managed = config.load_managed(config.load(tmp_path / ".shipit.toml"))
+    # The retired key is gone; the manifest reflects only the current set.
+    assert "skills/retired/SKILL.md" not in managed
+    assert set(managed) == {u.key for u in install.load_units()}
+
+
+def test_gh_failure_is_a_clean_nonzero_exit(tmp_path, monkeypatch, rec):
+    def boom(*a, **k):
+        raise gh.GhError("no remote configured")
+
+    monkeypatch.setattr(gh, "git_switch_create", boom)
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    rc = install.run(str(tmp_path))
+    assert rc == 1  # clean exit, not a raised traceback
