@@ -6,7 +6,7 @@
 > Decisions: `docs/adr/0001-reuse-release-core-by-copy.md` (copy-not-depend) ·
 > `architecture.lex §6` (the `.shipit.toml` secret map).
 
-## Original design (ROADMAP §1, reproduced)
+## Original design (reproduced)
 
 The `shipit gh-setup <repo>` subcommand makes a GitHub repo conform to the
 portfolio standard in three idempotent passes — branch ruleset, issue labels,

@@ -276,7 +276,7 @@ current truth.
         between minors and whose rust/tauri toolchain story is unproven for this
         stack. This is the right trade, but it is not free — Spike 0 is the
         load-bearing test of the whole premise, which is why it gates everything
-        in [../prd/workflows-cutover.md].
+        in [../prd/FUTURE_WORK.md].
 
     Step 6 is the danger zone:
 

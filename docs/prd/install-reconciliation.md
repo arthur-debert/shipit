@@ -6,7 +6,7 @@
 > Decisions: `docs/adr/0003-install-reconciliation-pull-not-push.md` (open a PR,
 > never admin-push) · `architecture.lex §2` (the slow/fast split).
 
-## Original design (ROADMAP §2, reproduced)
+## Original design (reproduced)
 
 The `shipit install <path>` subcommand: vendor the small slow set into a consumer
 repo, recording per-unit pristine hashes in `.shipit.toml`. On re-install,

@@ -8,7 +8,7 @@
 > binary, not templated tasks), `architecture.lex §7` (the gate: one definition,
 > hard).
 
-## Original design (ROADMAP §3, reproduced)
+## Original design (reproduced)
 
 The standardized multi-language gate: a `[feature.lint]` pixi environment that
 provisions the linters, a `shipit lint` subcommand that runs them over the tree,

@@ -1,5 +1,5 @@
 # shipit's own pixi workspace — Step 3 lands shipit's first pixi integration
-# (ROADMAP.lex §3). The substrate proven in Spike 0 stops being a spike here and
+# (docs/prd/lint-gate.md). The substrate proven in Spike 0 stops being a spike here and
 # becomes a real dependency of shipit's own repo: the gate is dogfooded on shipit
 # from this step forward.
 #

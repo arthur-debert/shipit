@@ -1,4 +1,4 @@
-"""lint — the standardized multi-language gate (ROADMAP.lex §3).
+"""lint — the standardized multi-language gate (docs/prd/lint-gate.md).
 
 shipit INVERTS release's lefthook-as-orchestrator model. Because pixi has no
 cross-manifest task inheritance (architecture.lex §5), the per-language
