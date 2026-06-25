@@ -26,17 +26,10 @@ hierarchical click tree (`cli_entry.py`), a verb-per-module convention
 `cli/_helpers.py:wrap_verb`), and a single GitHub boundary in `gh.py` (`rest()`,
 `secret_set()`, `secret_list()`, `repo_view()`).
 
-### Decision to confirm with the maintainer first (the one real fork)
+### Decisions
 
-How shipit reuses release-core — DEPEND on the published release-core package and
-re-skin its entry points, or COPY the handful of needed pieces (`gh.py` plus the
-two verbs named below) into a fresh slim shipit package. `architecture.lex §4`
-("KEEP that state machine; do not rewrite it, only re-skin its entry points")
-leans toward reuse; the global no-adapters / no-backwards-compat principle leans
-toward a clean copy. This sets the package's shape, so settle it before writing
-code.
-
-> Resolved: COPY, not depend — captured in `docs/adr/0001-reuse-release-core-by-copy.md`.
+How shipit reuses release-core (DEPEND vs COPY) was resolved as **COPY, not
+depend** — see `docs/adr/0001-reuse-release-core-by-copy.md`.
 
 ### The three passes
 

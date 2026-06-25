@@ -105,20 +105,21 @@ to main, reserved for bootstrapping a repo that cannot yet run the PR loop (the
 README). Support `--dry-run` (print the plan, touch nothing), as Step 1's verbs
 do.
 
-### Open questions to settle with the maintainer BEFORE coding
+## Decisions
 
-One short fork each, as Step 1's COPY-vs-DEPEND was:
+The questions this PRD originally left open are now resolved and captured in
+`docs/adr/0003-install-reconciliation-pull-not-push.md`:
 
-- "bootstrap" is undefined: what file/mechanism makes `shipit` available in a
-  consumer (a pixi dependency line? a bin launcher?)? It is listed in the slow set
-  but has no source yet, and is likely entangled with the pixi integration
-  deferred to Steps 5–6. Confirm whether Step 2 manages it or defers it.
-- the block marker exactly: confirm the marker text, and that block-hashing (not
-  whole-file) is the AGENTS.md model.
-- self-install: shipit's own repo IS the source of skills + AGENTS, so decide
-  whether `shipit install .` on shipit is a supported identity no-op or simply out
-  of scope (test against a real consumer repo — the `arthur-debert/release-canary-*`
-  repos are the standing throwaways).
+- **bootstrap** = the `bin/shipit` minimal launcher, managed as a whole-file unit;
+  the pinned-version pixi auto-provision is deferred to Step 5.
+- **block marker + block-hashing** — `<!-- Managed by shipit; do not edit. … -->`
+  / `<!-- End shipit-managed block. -->`, hashing the block inner content only.
+
+One question is NOT settled by the code and is left for the maintainer:
+
+- **self-install** (`shipit install .` on shipit) — there is no special-casing in
+  the verb and shipit's own `.shipit.toml` carries no `[managed]` table, so it was
+  never dogfooded as an identity no-op nor explicitly ruled out of scope.
 
 ### Verified by
 

@@ -20,6 +20,38 @@ binary with the identical config — "both agree" because there is one transcrip
 rules, not two. Full rationale is in `docs/dev/architecture.lex §5` (why a binary, not
 templated tasks) and `§7` (the gate: one definition, hard).
 
+## Resolved details (carried from docs/prd/lint-gate.md)
+
+- **Provisioning / the conda-forge gap.** prettier and markdownlint-cli ARE on
+  conda-forge, so the anticipated npm path is unnecessary — every linter is a
+  pinned conda-forge dep in `[feature.lint.dependencies]` (`pixi.toml`: ruff,
+  shellcheck, go-shfmt, yamllint, prettier 3.8.\*, markdownlint-cli 0.49.\*,
+  lefthook). The one exception is **lexd** (not on conda-forge), fetched at a pin
+  by `tools/provision-lexd.sh` (v0.18.4 from the `lex-fmt/lex` GitHub release,
+  with checksum pinning); the `lint`/`fmt` tasks `depends-on = ["provision-lexd"]`
+  so CI and the hook provision it identically.
+- **Check vs fix.** The gate is CHECK-ONLY by default (release's scar: a
+  formatter under `--all-files` silently rewrites untouched files). `--fix` is the
+  opt-in formatter pass, exposed as `pixi run fmt`; only tools with a safe
+  in-place fix participate, the rest still run as checks
+  (`src/shipit/verbs/lint.py:14-19`, `Tool.fix`, `pixi.toml` `fmt` task).
+- **Whole-tree, NOT staged-only.** Staged-only was deliberately NOT implemented.
+  Both the pre-commit and pre-push hooks call `pixi run lint`, which lints the
+  whole tracked tree via `git ls-files` (`lefthook.yml` and
+  `src/shipit/data/lefthook.yml`; `lint.py:210-211`). Rationale (stated inline in
+  `lefthook.yml`): a green hook then never lies about an unstaged edit. This is a
+  conscious simplification of release's `stage_fixed` staged-only dance, not a gap.
+- **Path → toolchain map is built-in by extension.** Routing is the hardcoded
+  `LANGS` registry (`lint.py:120`, `lang_for` at `:132`); extensionless scripts
+  route by shebang. The optional `[lint]` `.shipit.toml` override was NOT
+  implemented — routing is fully zero-config.
+- **Consumer pixi.toml integration is a managed BLOCK.** install splices a
+  marker-delimited block (TOML-comment markers `PIXI_OPEN`/`PIXI_CLOSE`, anchored
+  under `[tasks]`) carrying only the stable `lint = "shipit lint"` line — never a
+  linter-dependency block, since the linters ride in as the shipit package's own
+  deps (`install.py:56-63`, `:190-200`; `src/shipit/data/pixi-tasks-block.toml`).
+  Block-hashed and reconciled by the install algorithm (ADR-0003).
+
 ## Consequences
 
 - lefthook and `pixi.toml` stay dumb thin callers; neither carries per-language logic, so

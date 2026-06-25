@@ -138,29 +138,23 @@ the python/lex/shell/yaml/json/markdown legs are dogfooded for real; the
 compiled-language legs are first exercised against a real consumer when install
 carries the gate outward, and fully at Step 6's reference cut.
 
-### Open questions to settle with the maintainer BEFORE coding
+## Decisions
 
-One short fork each, as Steps 1–2 had:
+The questions this PRD originally left open are now resolved and captured in
+`docs/adr/0004-lint-gate-orchestration-in-binary.md`:
 
-- lexd and the conda-forge gap: how the three non-conda linters (lexd, prettier,
-  markdownlint-cli) are provisioned in `[feature.lint]` — cargo/npm install at a
-  pin, conda-native substitutes, or vendored binaries. lex is shipit-native and
-  load-bearing for its own docs, so lexd cannot simply be dropped.
-- check vs fix: the README scope names "Linting and Formatting" (so formatting is
-  in scope, not just checking). Decide whether the gate is check-only
-  (`shipit lint`, with formatting offered separately as `shipit fmt` or a `--fix`
-  mode) or one verb with a fix mode. Heed release's scar: `prettier --write` under
-  `--all-files` silently rewrites untouched files, so the GATE stays check-only and
-  any auto-fix is opt-in.
-- whole-tree vs staged: `shipit lint` defaults to the whole tree (what CI runs);
-  confirm the pre-commit hook lints staged files only (re-staging any fixes,
-  release's `stage_fixed`) while CI lints all — "both agree" means same tool +
-  config + rules, not an identical fileset.
-- path → toolchain map ownership: `architecture.lex §6` puts "the path → toolchain
-  map" in `.shipit.toml`. Decide whether routing is built-in-by-extension with an
-  optional `[lint]` override, or fully config-driven. Keep the default zero-config.
-- consumer pixi.toml integration: the managed-block-vs-other-mechanism question
-  above — settle alongside Step 2's reconciliation.
+- **lexd + the conda-forge gap** — prettier and markdownlint-cli are conda-forge
+  deps (no npm path needed); lexd is fetched at a pin by `tools/provision-lexd.sh`,
+  which the `lint`/`fmt` tasks depend on.
+- **check vs fix** — check-only by default; `--fix` (= `pixi run fmt`) is the
+  opt-in formatter pass.
+- **whole-tree vs staged** — staged-only was deliberately NOT implemented; both
+  hooks call `pixi run lint`, which lints the whole tracked tree via
+  `git ls-files` (a conscious simplification, not a gap).
+- **path → toolchain map** — built-in by extension (the `LANGS` registry); the
+  optional `[lint]` override was not implemented, so routing is fully zero-config.
+- **consumer pixi.toml integration** — a marker-delimited managed BLOCK carrying
+  only the `lint = "shipit lint"` task line (no linter-dependency block).
 
 ### Verified by
 

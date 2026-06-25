@@ -24,6 +24,24 @@ push-versus-pull and why the drift engine is the anti-goal — lives in
 `docs/dev/architecture.lex §2` and `docs/dev/lessons-learned.lex §4`; it is not duplicated
 here.
 
+## Resolved details (carried from docs/prd/install-reconciliation.md)
+
+- **The bootstrap is `bin/shipit`** — a minimal launcher managed as a whole-file
+  unit (`src/shipit/verbs/install.py:171-178`; content at
+  `src/shipit/data/bootstrap/shipit`). It makes the `shipit` CLI reachable from a
+  stable in-repo path and execs a `shipit` already on PATH. The pinned-version
+  auto-provision (a pixi dependency on the shipit package at `.shipit.toml`'s
+  `[shipit].version`) is deferred to the pixi integration (Step 5); the launcher
+  fails loudly with exit 127 until then.
+- **AGENTS.md block markers + block-hashing.** The managed region is fenced by
+  `BLOCK_OPEN`/`BLOCK_CLOSE` (`install.py:46-47`:
+  `<!-- Managed by shipit; do not edit. Regenerate via shipit install. -->` …
+  `<!-- End shipit-managed block. -->`). shipit hashes the BLOCK INNER content,
+  not the whole file — the consumer owns the rest (`desired_hash` /
+  `consumer_hash`, `install.py:103-107`, `:331-339`).
+- **Self-install** has no special-casing in the code — see the UNRESOLVED note in
+  the PRD handoff; left out of this ADR deliberately.
+
 ## Consequences
 
 - Every install lands as a reviewable PR, so the consumer's branch protection and human
