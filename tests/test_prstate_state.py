@@ -117,7 +117,9 @@ def test_behind_base_takes_precedence_over_pending_ci(context):
     import dataclasses
 
     pending = [{"__typename": "CheckRun", "status": "IN_PROGRESS", "conclusion": None}]
-    ctx = dataclasses.replace(context("ready_checks_green"), merge_state="BEHIND", checks=pending)
+    ctx = dataclasses.replace(
+        context("ready_checks_green"), merge_state="BEHIND", checks=pending
+    )
     status = evaluate(ctx)
     assert status.state is TaskState.BLOCKED
     assert "behind" in status.next_action
@@ -157,7 +159,9 @@ def test_unstable_with_green_rollup_is_ready(context):
             "conclusion": "SKIPPED",
         },
     ]
-    ctx = dataclasses.replace(context("ready_checks_green"), merge_state="UNSTABLE", checks=rollup)
+    ctx = dataclasses.replace(
+        context("ready_checks_green"), merge_state="UNSTABLE", checks=rollup
+    )
     status = evaluate(ctx)
     assert status.state is TaskState.READY
     assert "release-core pr ready" in status.next_action  # draft fixture → flip
@@ -178,7 +182,9 @@ def test_unstable_with_a_genuinely_failing_check_is_still_blocked(context):
             "conclusion": "FAILURE",
         },
     ]
-    ctx = dataclasses.replace(context("ready_checks_green"), merge_state="UNSTABLE", checks=rollup)
+    ctx = dataclasses.replace(
+        context("ready_checks_green"), merge_state="UNSTABLE", checks=rollup
+    )
     status = evaluate(ctx)
     assert status.state is TaskState.BLOCKED
     assert "failing" in status.next_action
@@ -190,7 +196,9 @@ def test_unstable_with_no_rollup_is_not_promoted(context):
     # READY — only an EXPLICITLY GREEN rollup tolerates UNSTABLE.
     import dataclasses
 
-    ctx = dataclasses.replace(context("ready_checks_green"), merge_state="UNSTABLE", checks=[])
+    ctx = dataclasses.replace(
+        context("ready_checks_green"), merge_state="UNSTABLE", checks=[]
+    )
     status = evaluate(ctx)
     assert status.state is not TaskState.READY
 
@@ -203,9 +211,16 @@ def test_unstable_with_a_re_running_check_is_validating(context):
 
     rollup = [
         {"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "SUCCESS"},
-        {"name": "e2e-gpu", "__typename": "CheckRun", "status": "IN_PROGRESS", "conclusion": None},
+        {
+            "name": "e2e-gpu",
+            "__typename": "CheckRun",
+            "status": "IN_PROGRESS",
+            "conclusion": None,
+        },
     ]
-    ctx = dataclasses.replace(context("ready_checks_green"), merge_state="UNSTABLE", checks=rollup)
+    ctx = dataclasses.replace(
+        context("ready_checks_green"), merge_state="UNSTABLE", checks=rollup
+    )
     status = evaluate(ctx)
     assert status.state is TaskState.VALIDATING
 
@@ -365,14 +380,18 @@ def _ctx_with_reviews(*authors_on_head: str) -> PullContext:
         is_draft=True,
         mergeable="MERGEABLE",
         merge_state="CLEAN",
-        reviews=[Review(i, a, "APPROVED", "h", "") for i, a in enumerate(authors_on_head, 1)],
+        reviews=[
+            Review(i, a, "APPROVED", "h", "") for i, a in enumerate(authors_on_head, 1)
+        ],
         checks=_green_checks(),
     )
 
 
 def test_both_required_reviewers_reviewed_reaches_ready():
     # Copilot AND CodeRabbit both reviewed the current head → READY.
-    status = evaluate(_ctx_with_reviews("Copilot", "coderabbitai[bot]"), required=_both_required())
+    status = evaluate(
+        _ctx_with_reviews("Copilot", "coderabbitai[bot]"), required=_both_required()
+    )
     assert status.state is TaskState.READY
     assert status.reviewers["copilot"].startswith("done")
     assert status.reviewers["coderabbit"].startswith("done")
@@ -385,7 +404,9 @@ def test_missing_coderabbit_review_is_not_ready_and_names_it_outstanding():
     status = evaluate(_ctx_with_reviews("Copilot"), required=_both_required())
     assert status.state is TaskState.REVIEWS_PENDING
     assert "coderabbit" in status.next_action
-    assert "copilot" not in status.next_action.split("—")[1]  # copilot is done, not pending
+    assert (
+        "copilot" not in status.next_action.split("—")[1]
+    )  # copilot is done, not pending
 
 
 def test_missing_copilot_review_is_not_ready_and_names_it_outstanding():
@@ -423,7 +444,9 @@ def test_required_set_is_data_driven_three_reviewers():
 
         def detect(self, ctx) -> ReviewLifecycle:
             on_head = any(self.matches(r.author) for r in ctx.reviews_on_head())
-            return ReviewLifecycle.DONE_CLEAN if on_head else ReviewLifecycle.NOT_REQUESTED
+            return (
+                ReviewLifecycle.DONE_CLEAN if on_head else ReviewLifecycle.NOT_REQUESTED
+            )
 
     three = [by_name("copilot"), by_name("coderabbit"), _Falcon()]
     status = evaluate(_ctx_with_reviews("Copilot", "coderabbitai[bot]"), required=three)

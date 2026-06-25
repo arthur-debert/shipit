@@ -63,7 +63,9 @@ query($owner: String!, $name: String!, $pr: Int!, $cursor: String) {
 """
 
 
-def _threads_and_review_requests(owner: str, name: str, pr: int) -> tuple[list[dict], list[dict]]:
+def _threads_and_review_requests(
+    owner: str, name: str, pr: int
+) -> tuple[list[dict], list[dict]]:
     """Every review-thread node for the PR plus its pending review requests.
 
     Threads follow the cursor to the end: without pagination a PR with >100
@@ -75,7 +77,9 @@ def _threads_and_review_requests(owner: str, name: str, pr: int) -> tuple[list[d
     requests: list[dict] = []
     cursor: str | None = None
     while True:
-        data = ghapi.graphql(_THREADS_QUERY, owner=owner, name=name, pr=pr, cursor=cursor)
+        data = ghapi.graphql(
+            _THREADS_QUERY, owner=owner, name=name, pr=pr, cursor=cursor
+        )
         pull = data["repository"]["pullRequest"]
         if cursor is None:
             requests = [
@@ -314,10 +318,15 @@ def _thread(node: dict) -> Thread:
         )
         for c in node["comments"]["nodes"]
     )
-    return Thread(thread_id=node["id"], is_resolved=node["isResolved"], comments=comments)
+    return Thread(
+        thread_id=node["id"], is_resolved=node["isResolved"], comments=comments
+    )
 
 
 def _requested_logins(review_requests: list[dict]) -> list[str]:
     # User/Bot requests carry `login`; team requests carry `name`/`slug`.
-    out = [(rr.get("login") or rr.get("name") or rr.get("slug") or "") for rr in review_requests]
+    out = [
+        (rr.get("login") or rr.get("name") or rr.get("slug") or "")
+        for rr in review_requests
+    ]
     return [x for x in out if x]

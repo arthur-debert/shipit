@@ -69,10 +69,14 @@ class ReviewerAdapter:
         counts as done. Adapters differ only by `matches` / `has_requested_edge`
         / `requestable`, NOT by this detection algorithm (Gemini, which signals
         weakly and is not requestable, is the one exception and overrides this)."""
-        candidates = ctx.reviews_on_head() if self._rerun(ctx) else ctx.reviews_any_head()
+        candidates = (
+            ctx.reviews_on_head() if self._rerun(ctx) else ctx.reviews_any_head()
+        )
         if any(self.matches(r.author) and r.state != "DISMISSED" for r in candidates):
             return self._done_state(ctx)
-        if self.has_requested_edge and any(self.matches(login) for login in ctx.requested_logins):
+        if self.has_requested_edge and any(
+            self.matches(login) for login in ctx.requested_logins
+        ):
             return ReviewLifecycle.REQUESTED
         return ReviewLifecycle.NOT_REQUESTED
 
@@ -238,7 +242,10 @@ class GeminiAdapter(ReviewerAdapter):
         # A DISMISSED review is retracted, so it doesn't count as done.
         if any(self.matches(r.author) and r.state != "DISMISSED" for r in ctx.reviews):
             return self._done_state(ctx)
-        if any(self.matches((c.get("user") or {}).get("login", "")) for c in ctx.issue_comments):
+        if any(
+            self.matches((c.get("user") or {}).get("login", ""))
+            for c in ctx.issue_comments
+        ):
             return ReviewLifecycle.DONE_COMMENTS
         if self._is_looking(ctx):
             return ReviewLifecycle.IN_PROGRESS
@@ -246,7 +253,8 @@ class GeminiAdapter(ReviewerAdapter):
 
     def _is_looking(self, ctx: PullContext) -> bool:
         return any(
-            r.get("content") == "eyes" and self.matches((r.get("user") or {}).get("login", ""))
+            r.get("content") == "eyes"
+            and self.matches((r.get("user") or {}).get("login", ""))
             for r in ctx.reactions
         )
 

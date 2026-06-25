@@ -22,13 +22,17 @@ from shipit.prstate.state import TaskState, evaluate
 
 
 def review(rid: int, sha: str, author: str = "Copilot") -> Review:
-    return Review(review_id=rid, author=author, state="COMMENTED", commit_id=sha, body="")
+    return Review(
+        review_id=rid, author=author, state="COMMENTED", commit_id=sha, body=""
+    )
 
 
 _FID = count(9000)  # unique comment/thread ids for synthetic findings
 
 
-def finding(rid: int, path: str, line: int, body: str = "substantive bug here") -> Thread:
+def finding(
+    rid: int, path: str, line: int, body: str = "substantive bug here"
+) -> Thread:
     """A review thread holding one finding submitted with review `rid`.
 
     Resolved on purpose: a resolved finding was still a finding of that round,
@@ -67,7 +71,9 @@ def ctx(
 
 
 def open_copilot_thread(path="a.py", line=1, body="substantive open issue"):
-    comment = ReviewComment(comment_id=1, path=path, line=line, body=body, author="Copilot")
+    comment = ReviewComment(
+        comment_id=1, path=path, line=line, body=body, author="Copilot"
+    )
     return Thread(thread_id="PRT_1", is_resolved=False, comments=(comment,))
 
 
@@ -124,7 +130,10 @@ def test_a_round_unions_both_reviewers_findings_on_the_same_head():
     # UNION of their thread comments. The dual set is the opt-in (phos pilot)
     # config, not the default, so pass it explicitly.
     both = [by_name("copilot"), by_name("coderabbit")]
-    reviews = [review(1, "h1", author="Copilot"), review(2, "h1", author="coderabbitai[bot]")]
+    reviews = [
+        review(1, "h1", author="Copilot"),
+        review(2, "h1", author="coderabbitai[bot]"),
+    ]
     findings = [finding(1, "a.py", 1, "fix A"), finding(2, "b.py", 2, "fix B")]
     rounds = build_rounds(ctx(reviews, findings=findings), required=both)
     assert len(rounds) == 1
@@ -285,7 +294,10 @@ def test_all_nitpick_with_open_threads_routes_to_ready():
     # Latest round is all nitpicks + an open nitpick thread, CI green + CLEAN ->
     # READY, recording the all-nitpick stop.
     reviews = [review(1, "c1"), review(2, "c2")]
-    findings = [finding(1, "a.py", 1, "real bug"), finding(2, "b.py", 2, "nit: wording")]
+    findings = [
+        finding(1, "a.py", 1, "real bug"),
+        finding(2, "b.py", 2, "nit: wording"),
+    ]
     rollup = [{"status": "COMPLETED", "conclusion": "SUCCESS"}]
     c = ctx(
         reviews,
@@ -304,7 +316,13 @@ def test_stop_does_not_override_a_real_ci_failure():
     reviews = [review(i, f"c{i}") for i in range(1, 7)]
     findings = [finding(i, f"f{i}.py", i) for i in range(1, 7)]
     rollup = [{"status": "COMPLETED", "conclusion": "FAILURE"}]
-    c = ctx(reviews, findings=findings, threads=[open_copilot_thread()], head="c6", checks=rollup)
+    c = ctx(
+        reviews,
+        findings=findings,
+        threads=[open_copilot_thread()],
+        head="c6",
+        checks=rollup,
+    )
     status = evaluate(c, required=_COPILOT_ONLY)
     assert status.state is TaskState.BLOCKED
     assert "CI" in status.next_action

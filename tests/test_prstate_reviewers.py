@@ -77,7 +77,10 @@ def test_stale_copilot_review_counts_as_done_when_review_once(context):
     # DEFAULT policy is review-once (rerun=False): a review against an earlier
     # commit still counts as done — the reviewer won't be asked to look again.
     ctx = context("copilot_stale_review")
-    assert COPILOT.detect(ctx) in (ReviewLifecycle.DONE_CLEAN, ReviewLifecycle.DONE_COMMENTS)
+    assert COPILOT.detect(ctx) in (
+        ReviewLifecycle.DONE_CLEAN,
+        ReviewLifecycle.DONE_COMMENTS,
+    )
 
 
 def test_stale_copilot_review_does_not_count_as_done_when_rerun(context):
@@ -115,7 +118,10 @@ def test_copilot_review_on_earlier_head_counts_done_review_once():
         reviews=[Review(1, "Copilot", "COMMENTED", "old", "")],
         requested_logins=["Copilot"],
     )
-    assert COPILOT.detect(ctx) in (ReviewLifecycle.DONE_CLEAN, ReviewLifecycle.DONE_COMMENTS)
+    assert COPILOT.detect(ctx) in (
+        ReviewLifecycle.DONE_CLEAN,
+        ReviewLifecycle.DONE_COMMENTS,
+    )
 
 
 def test_copilot_review_on_earlier_head_does_NOT_count_done_when_rerun():
@@ -138,7 +144,9 @@ def test_copilot_never_reviewed_is_requested_or_not_requested():
     # independent of the rerun flag.
     from shipit.prstate.model import PullContext
 
-    requested = PullContext(number=1, head_sha="h", is_draft=True, requested_logins=["Copilot"])
+    requested = PullContext(
+        number=1, head_sha="h", is_draft=True, requested_logins=["Copilot"]
+    )
     assert COPILOT.detect(requested) == ReviewLifecycle.REQUESTED
     bare = PullContext(number=1, head_sha="h", is_draft=True)
     assert COPILOT.detect(bare) == ReviewLifecycle.NOT_REQUESTED
@@ -187,7 +195,9 @@ def test_by_name_resolves_registry_adapters():
 
     assert by_name("copilot") is not None and by_name("copilot").name == "copilot"
     assert by_name("GEMINI") is not None and by_name("GEMINI").name == "gemini"
-    assert by_name("coderabbit") is not None and by_name("coderabbit").name == "coderabbit"
+    assert (
+        by_name("coderabbit") is not None and by_name("coderabbit").name == "coderabbit"
+    )
     assert by_name("codex") is not None and by_name("codex").name == "codex"
     assert by_name("agy") is not None and by_name("agy").name == "agy"
     assert by_name("nosuchbot") is None
@@ -284,7 +294,10 @@ def test_coderabbit_review_once_by_default_counts_earlier_head():
         reviews=[Review(1, "coderabbitai[bot]", "COMMENTED", "old", "")],
         requested_logins=["coderabbitai[bot]"],
     )
-    assert CODERABBIT.detect(ctx) in (ReviewLifecycle.DONE_CLEAN, ReviewLifecycle.DONE_COMMENTS)
+    assert CODERABBIT.detect(ctx) in (
+        ReviewLifecycle.DONE_CLEAN,
+        ReviewLifecycle.DONE_COMMENTS,
+    )
 
 
 def test_coderabbit_is_head_strict_when_rerun():
@@ -409,7 +422,10 @@ def test_codex_detect_stale_review_counts_done_review_once():
         is_draft=True,
         reviews=[Review(1, "adr-codex-review[bot]", "COMMENTED", "old", "")],
     )
-    assert CODEX.detect(ctx) in (ReviewLifecycle.DONE_CLEAN, ReviewLifecycle.DONE_COMMENTS)
+    assert CODEX.detect(ctx) in (
+        ReviewLifecycle.DONE_CLEAN,
+        ReviewLifecycle.DONE_COMMENTS,
+    )
 
 
 def test_codex_detect_stale_review_is_not_done_when_rerun():

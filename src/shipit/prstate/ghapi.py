@@ -29,7 +29,9 @@ def _gh(args: list[str], *, input_text: str | None = None) -> str:
         check=False,
     )
     if proc.returncode != 0:
-        raise GhError(f"gh {' '.join(args)} failed ({proc.returncode}): {proc.stderr.strip()}")
+        raise GhError(
+            f"gh {' '.join(args)} failed ({proc.returncode}): {proc.stderr.strip()}"
+        )
     return proc.stdout
 
 

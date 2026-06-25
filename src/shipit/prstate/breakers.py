@@ -125,7 +125,9 @@ def build_rounds(
         review_ids_by_head.setdefault(review.commit_id, []).append(review.review_id)
 
     rounds: list[Round] = []
-    for index, (commit_id, review_ids) in enumerate(review_ids_by_head.items(), start=1):
+    for index, (commit_id, review_ids) in enumerate(
+        review_ids_by_head.items(), start=1
+    ):
         id_set = set(review_ids)
         bodies = tuple(c.body for c in thread_comments if c.review_id in id_set)
         rounds.append(Round(index, commit_id, bodies))

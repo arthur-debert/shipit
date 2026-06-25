@@ -19,7 +19,9 @@ from shipit.prstate.model import ReviewLifecycle
 from shipit.prstate.reviewers import CopilotAdapter
 
 
-def _graphql_page(review_requests: list[dict], threads: list[dict] | None = None) -> dict:
+def _graphql_page(
+    review_requests: list[dict], threads: list[dict] | None = None
+) -> dict:
     return {
         "repository": {
             "pullRequest": {
@@ -88,7 +90,9 @@ def test_no_pending_requests_reads_not_requested(monkeypatch):
 # --- the light skip-decision fetch (release#852) ----------------------------
 
 
-def _reviews_page(review_requests: list[dict], reviews: list[dict], head: str = "abc1234") -> dict:
+def _reviews_page(
+    review_requests: list[dict], reviews: list[dict], head: str = "abc1234"
+) -> dict:
     return {
         "repository": {
             "pullRequest": {
@@ -109,10 +113,14 @@ def test_gather_reviews_fetches_only_the_skip_decision_inputs(monkeypatch):
     monkeypatch.setattr(
         fetch.ghapi,
         "rest",
-        lambda *a, **k: pytest.fail("gather_reviews must not hit the REST pagination paths"),
+        lambda *a, **k: pytest.fail(
+            "gather_reviews must not hit the REST pagination paths"
+        ),
     )
     monkeypatch.setattr(
-        fetch, "_threads_and_review_requests", lambda *a, **k: pytest.fail("no threads walk")
+        fetch,
+        "_threads_and_review_requests",
+        lambda *a, **k: pytest.fail("no threads walk"),
     )
     monkeypatch.setattr(
         fetch.ghapi,
@@ -152,7 +160,9 @@ def test_gather_reviews_threads_the_rerun_policy(monkeypatch):
     from shipit.prstate import reviewers, reviewers_config
 
     reviewers._reset_required_cache()
-    monkeypatch.setattr(reviewers_config, "load_override", lambda root=None: {"copilot": True})
+    monkeypatch.setattr(
+        reviewers_config, "load_override", lambda root=None: {"copilot": True}
+    )
     monkeypatch.setattr(
         fetch.ghapi,
         "graphql",

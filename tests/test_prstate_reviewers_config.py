@@ -218,8 +218,8 @@ def test_load_override_reads_reserved_fields(tmp_path):
     # The full inline-table shape from the PRD example parses; only rerun is
     # consumed (model/instructions are reserved but validated).
     (tmp_path / ".shipit.toml").write_text(
-        '[reviewers]\n'
-        'copilot = { rerun = false }\n'
+        "[reviewers]\n"
+        "copilot = { rerun = false }\n"
         'codex = { rerun = false, model = "pro", instructions = "docs/review.md" }\n'
     )
     assert reviewers_config.load_override(str(tmp_path)) == {

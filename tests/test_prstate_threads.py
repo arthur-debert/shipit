@@ -34,7 +34,14 @@ def test_snapshot_surfaces_all_inline_comments(context):
     # The REST-missed regression: every known inline comment is in the
     # snapshot, regardless of author or thread resolution state.
     ctx = context("multi_bot_threads")
-    assert sorted(c.comment_id for c in all_comments(ctx)) == [101, 102, 103, 104, 105, 106]
+    assert sorted(c.comment_id for c in all_comments(ctx)) == [
+        101,
+        102,
+        103,
+        104,
+        105,
+        106,
+    ]
 
 
 def test_copilot_login_variants_both_match(context):

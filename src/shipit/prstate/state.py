@@ -49,9 +49,22 @@ from .reviewers import REGISTRY, ReviewerAdapter, required_reviewers
 _DONE = {ReviewLifecycle.DONE_CLEAN, ReviewLifecycle.DONE_COMMENTS}
 
 # CheckRun conclusions / StatusContext states that count as failures.
-_FAIL_CONCLUSIONS = {"FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE"}
+_FAIL_CONCLUSIONS = {
+    "FAILURE",
+    "TIMED_OUT",
+    "CANCELLED",
+    "ACTION_REQUIRED",
+    "STARTUP_FAILURE",
+}
 _FAIL_STATES = {"FAILURE", "ERROR"}
-_PENDING_STATUSES = {"QUEUED", "IN_PROGRESS", "PENDING", "WAITING", "REQUESTED", "EXPECTED"}
+_PENDING_STATUSES = {
+    "QUEUED",
+    "IN_PROGRESS",
+    "PENDING",
+    "WAITING",
+    "REQUESTED",
+    "EXPECTED",
+}
 
 
 class TaskState(StrEnum):
@@ -237,14 +250,14 @@ def evaluate(
     # agent updates and re-evaluates — not a human handoff.
     if ctx.merge_state == "BEHIND":
         status.state = TaskState.BLOCKED
-        status.next_action = (
-            "branch is behind its base — update it (merge/rebase the base) before this can be Ready"
-        )
+        status.next_action = "branch is behind its base — update it (merge/rebase the base) before this can be Ready"
         return status
 
     if checks == ChecksState.FAILING:
         status.state = TaskState.BLOCKED
-        status.next_action = "CI check(s) failing — fix and push before this can be Ready"
+        status.next_action = (
+            "CI check(s) failing — fix and push before this can be Ready"
+        )
         return status
 
     if checks == ChecksState.PENDING:
@@ -311,7 +324,9 @@ def evaluate(
     # Merge state not yet computed (UNKNOWN / null) — GitHub is working; re-poll.
     if ctx.merge_state in (None, "UNKNOWN"):
         status.state = TaskState.REVIEWED
-        status.next_action = "reviews done; mergeability not yet determined — re-check shortly"
+        status.next_action = (
+            "reviews done; mergeability not yet determined — re-check shortly"
+        )
         return status
 
     # Computed, but a non-CLEAN merge state (BLOCKED / HAS_HOOKS — UNSTABLE was
@@ -365,10 +380,14 @@ def _reviews_pending_action(
             f"{', '.join(rerequest_names)}"
         )
     if waiting_names:
-        clauses.append(f"wait (already requested on the current head): {', '.join(waiting_names)}")
+        clauses.append(
+            f"wait (already requested on the current head): {', '.join(waiting_names)}"
+        )
 
     all_names = [a.name for a in pending]
-    return f"waiting on required review(s): {', '.join(all_names)} — " + "; ".join(clauses)
+    return f"waiting on required review(s): {', '.join(all_names)} — " + "; ".join(
+        clauses
+    )
 
 
 def _has_stale_review(ctx: PullContext, adapter: ReviewerAdapter) -> bool:
@@ -385,7 +404,9 @@ def _has_stale_review(ctx: PullContext, adapter: ReviewerAdapter) -> bool:
     if not adapter._rerun(ctx):
         return False
     return any(
-        adapter.matches(r.author) and r.state != "DISMISSED" and r.commit_id != ctx.head_sha
+        adapter.matches(r.author)
+        and r.state != "DISMISSED"
+        and r.commit_id != ctx.head_sha
         for r in ctx.reviews
     )
 
