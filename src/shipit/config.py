@@ -19,11 +19,15 @@ source:
 
 from __future__ import annotations
 
+import hashlib
+import re
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
 CONFIG_NAME = ".shipit.toml"
+
+_BARE_KEY = re.compile(r"[A-Za-z0-9_-]+")
 
 
 class ConfigError(RuntimeError):
@@ -86,3 +90,81 @@ def load(path: str | Path) -> dict:
             return tomllib.load(fh)
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"malformed {p}: {exc}") from None
+
+
+# --------------------------------------------------------------------------
+# The [shipit] / [managed] manifest — written by ``shipit install``
+# --------------------------------------------------------------------------
+#
+# ``[shipit].version`` pins the shipit commit that last wrote the managed set;
+# ``[managed]`` is the per-unit pristine-hash map the next re-install compares
+# against (docs/dev/architecture.lex §6, ROADMAP.lex §2). tomllib is read-only,
+# so the writer below hand-serializes these two flat string tables and splices
+# them into an existing file, leaving any ``[secrets]`` (and anything else the
+# consumer owns) textually untouched.
+
+
+def content_hash(data: bytes) -> str:
+    """The ``sha256:<hex>`` pristine hash of a managed unit's content."""
+    return "sha256:" + hashlib.sha256(data).hexdigest()
+
+
+def load_managed(cfg: dict) -> dict[str, str]:
+    """The ``[managed]`` pristine map (path → ``sha256:...``); ``{}`` when absent."""
+    managed = cfg.get("managed", {})
+    if not isinstance(managed, dict):
+        raise ConfigError("[managed] must be a table")
+    return {str(k): str(v) for k, v in managed.items()}
+
+
+def shipit_version(cfg: dict) -> str | None:
+    """The ``[shipit].version`` pin, or ``None`` when absent."""
+    section = cfg.get("shipit", {})
+    if not isinstance(section, dict):
+        raise ConfigError("[shipit] must be a table")
+    value = section.get("version")
+    return str(value) if value is not None else None
+
+
+def _toml_key(key: str) -> str:
+    """A TOML key, bare when it can be and quoted (paths, ``#``) otherwise."""
+    if _BARE_KEY.fullmatch(key):
+        return key
+    return '"' + key.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _strip_tables(text: str, tables: set[str]) -> str:
+    """Drop the given top-level tables (header + body) from TOML ``text``."""
+    out: list[str] = []
+    skipping = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            name = stripped.strip("[]").strip()
+            skipping = name in tables
+            if skipping:
+                continue
+        if skipping:
+            continue
+        out.append(line)
+    return "\n".join(out).strip()
+
+
+def dump_manifest(version: str, managed: dict[str, str]) -> str:
+    """Serialize the ``[shipit]`` and ``[managed]`` tables to TOML text."""
+    lines = ["[shipit]", f'version = "{version}"', "", "[managed]"]
+    for key, value in managed.items():
+        lines.append(f'{_toml_key(key)} = "{value}"')
+    return "\n".join(lines) + "\n"
+
+
+def write_manifest(
+    path: str | Path, *, version: str, managed: dict[str, str]
+) -> None:
+    """Write the ``[shipit]``/``[managed]`` tables, preserving the rest of the file."""
+    p = Path(path)
+    existing = p.read_text(encoding="utf-8") if p.is_file() else ""
+    kept = _strip_tables(existing, {"shipit", "managed"})
+    block = dump_manifest(version, managed)
+    text = f"{kept}\n\n{block}" if kept else block
+    p.write_text(text, encoding="utf-8")
