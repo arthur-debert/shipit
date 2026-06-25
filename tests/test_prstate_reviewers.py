@@ -504,7 +504,8 @@ def test_local_request_threads_model_and_instructions_from_config(
     monkeypatch.setattr(service, "run_and_post", fake_run_and_post)
     assert CODEX.request(3) is True
     assert captured["model"] == "flash"
-    assert captured["instructions_path"] == "docs/rev.md"
+    # The instructions path is anchored to the config dir (absolute).
+    assert captured["instructions_path"] == str(tmp_path / "docs" / "rev.md")
 
 
 def test_local_request_normalizes_failure_to_gherror(monkeypatch, tmp_path):
@@ -521,9 +522,10 @@ def test_local_request_normalizes_failure_to_gherror(monkeypatch, tmp_path):
 
     with pytest.raises(ghapi.GhError, match="codex-local review failed") as excinfo:
         CODEX.request(7)
-    assert not isinstance(excinfo.value, RuntimeError) or isinstance(
-        excinfo.value, ghapi.GhError
-    )
+    # The original failure was WRAPPED (normalized), not re-raised: the chained
+    # cause is the underlying RuntimeError, so no raw traceback escapes.
+    assert isinstance(excinfo.value.__cause__, RuntimeError)
+    assert "backend CLI exploded" in str(excinfo.value.__cause__)
 
 
 def test_local_cancel_is_a_noop():

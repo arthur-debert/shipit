@@ -253,7 +253,33 @@ def test_reviewer_run_options_reads_model_and_instructions(tmp_path):
         'codex = { model = "flash", instructions = "docs/rev.md" }\n'
     )
     opts = reviewers_config.reviewer_run_options("codex", str(tmp_path))
-    assert opts == {"model": "flash", "instructions": "docs/rev.md"}
+    # A relative `instructions` path is anchored to the config's directory (so it
+    # opens regardless of cwd), and the path is returned absolute.
+    assert opts["model"] == "flash"
+    assert opts["instructions"] == str(tmp_path / "docs" / "rev.md")
+
+
+def test_reviewer_run_options_instructions_anchored_to_config_dir_not_cwd(
+    tmp_path, monkeypatch
+):
+    # `.shipit.toml` is found by walking UP from cwd; a relative `instructions`
+    # path must resolve against the config's dir, not a nested cwd.
+    (tmp_path / ".shipit.toml").write_text(
+        '[reviewers]\ncodex = { instructions = "docs/rev.md" }\n'
+    )
+    nested = tmp_path / "src" / "deep"
+    nested.mkdir(parents=True)
+    monkeypatch.chdir(nested)
+    opts = reviewers_config.reviewer_run_options("codex")
+    assert opts["instructions"] == str(tmp_path / "docs" / "rev.md")
+
+
+def test_reviewer_run_options_absolute_instructions_kept(tmp_path):
+    (tmp_path / ".shipit.toml").write_text(
+        '[reviewers]\ncodex = { instructions = "/abs/rev.md" }\n'
+    )
+    opts = reviewers_config.reviewer_run_options("codex", str(tmp_path))
+    assert opts["instructions"] == "/abs/rev.md"
 
 
 def test_reviewer_run_options_absent_reviewer_is_empty(tmp_path):

@@ -298,6 +298,12 @@ def reviewer_run_options(name: str, root: str | None = None) -> dict[str, str]:
     config, an absent reviewer entry, or the list-shorthand form → `{}` (the run
     path then uses its own defaults).
 
+    A relative `instructions` path is resolved against the directory CONTAINING
+    `.shipit.toml` (and `~` is expanded), not the caller's cwd: the config is
+    discovered by walking UP from cwd, so a caller in a nested subdir would
+    otherwise resolve a repo-relative `instructions` path against the wrong
+    directory and fail to open it. The returned path is absolute.
+
     Reading `model`/`instructions` is NOT gating: a reviewer requested manually
     via `--reviewer codex-local` (force scope) reads its options here WITHOUT
     being in the required set — so a consumer can tune a local reviewer's model
@@ -327,6 +333,13 @@ def reviewer_run_options(name: str, root: str | None = None) -> dict[str, str]:
                         f"{OVERRIDE_FILE} `{OVERRIDE_KEY}.{key}.{field}` must be a string"
                     )
                 out[field] = opts[field]
+    if "instructions" in out:
+        # Anchor a relative instructions path to the config's own directory (and
+        # expand ~), so it opens regardless of the caller's cwd.
+        expanded = Path(out["instructions"]).expanduser()
+        if not expanded.is_absolute():
+            expanded = config.parent / expanded
+        out["instructions"] = str(expanded)
     return out
 
 

@@ -55,6 +55,24 @@ def _is_git_checkout(workdir: str) -> bool:
     return result.returncode == 0 and result.stdout.strip() == "true"
 
 
+def _git_toplevel(workdir: str) -> str | None:
+    """The git working-tree root for ``workdir``, or ``None`` when not a checkout.
+
+    The backend reads files with ``cwd=ctx.workdir`` and the review prompt names
+    paths relative to the REPO ROOT, so running from a nested subdir would leave
+    repo-relative paths unopenable. Normalizing ``workdir`` to the toplevel makes
+    the agent's cwd the repo root regardless of where the command was invoked.
+    """
+    result = proc.run(
+        ["git", "-C", workdir, "rev-parse", "--show-toplevel"],
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    top = result.stdout.strip()
+    return top or None
+
+
 def _git(
     workdir: str, args: list[str], *, check: bool = True
 ) -> subprocess.CompletedProcess[str]:
@@ -117,12 +135,17 @@ def resolve_pr(
     PR can't be resolved, or the head commit can't be fetched into ``workdir``.
     """
     workdir = workdir or os.getcwd()
-    if not _is_git_checkout(workdir):
+    toplevel = _git_toplevel(workdir)
+    if toplevel is None:
         raise ReviewError(
             f"{workdir!r} is not a git checkout — `shipit pr review` resolves a "
             f"PR by diffing inside a clone of the repository. cd into the repo (or "
             f"pass a checkout) and re-run."
         )
+    # Normalize to the repo root: the backend runs with cwd=workdir and the
+    # review prompt names repo-root-relative paths, so a nested-subdir cwd would
+    # leave those paths unopenable for the agent.
+    workdir = toplevel
 
     # Normalize any explicit repo slug to its canonical owner/name. An aliased
     # slug (e.g. a transferred/renamed repo) 307-redirects on GET but NOT on
