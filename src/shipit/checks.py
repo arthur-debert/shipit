@@ -32,6 +32,27 @@ from . import gh
 
 _NON_GATE_WORKFLOWS = ("copilot-review.yml", "copilot-review.yaml")
 
+
+class _WorkflowLoader(yaml.SafeLoader):
+    """A YAML loader that does NOT treat ``on``/``off``/``yes``/``no`` as bools.
+
+    GitHub workflows key their triggers under ``on:``. PyYAML follows YAML 1.1,
+    where ``on`` is the boolean ``True`` — so a naive parse turns the ``on:`` key
+    into ``True`` and every workflow looks trigger-less. This loader strips the
+    YAML-1.1 bool resolver and re-adds a YAML-1.2 one (``true``/``false`` only),
+    so ``on`` stays the string key it is in the file (the same result ``yq``
+    gives, which is what release-core relied on).
+    """
+
+
+_WorkflowLoader.yaml_implicit_resolvers = {
+    ch: [(tag, rx) for tag, rx in resolvers if tag != "tag:yaml.org,2002:bool"]
+    for ch, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
+}
+_BOOL_1_2 = re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$")
+for _ch in "tTfF":
+    _WorkflowLoader.add_implicit_resolver("tag:yaml.org,2002:bool", _BOOL_1_2, _ch)
+
 # Cross-repo reusable reference: owner/repo/.github/workflows/x.yml@ref
 _USES_RE = re.compile(
     r"^(?P<owner>[^/]+)/(?P<repo>[^/]+)/(?P<path>[^@]+\.ya?ml)@(?P<ref>.+)$"
@@ -132,12 +153,12 @@ def _called_job_included(job: object, with_values: dict) -> bool:
 
 
 def _load_yaml_text(text: str) -> object:
-    return yaml.safe_load(text)
+    return yaml.load(text, Loader=_WorkflowLoader)
 
 
 def _load_yaml_file(path: str) -> object:
     with open(path, encoding="utf-8") as fh:
-        return yaml.safe_load(fh)
+        return yaml.load(fh, Loader=_WorkflowLoader)
 
 
 def _fetch_called_workflow(uses: str, toplevel: str | None) -> object:

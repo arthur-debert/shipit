@@ -59,6 +59,27 @@ def test_called_job_included_resolves_inputs_if():
     assert checks._called_job_included({}, {})
 
 
+def test_on_key_is_not_parsed_as_bool():
+    # The YAML 1.1 gotcha: `on:` must stay the string key, not become True.
+    doc = checks._load_yaml_text(
+        "on:\n  push:\n    branches: ['**']\n  pull_request:\n"
+        "jobs:\n  ci:\n    name: CI\n"
+    )
+    assert "on" in doc
+    assert True not in doc
+    assert checks.is_pr_workflow(doc)
+    assert not checks.pr_trigger_is_path_filtered(doc)
+
+
+def test_loader_keeps_true_false_as_bool():
+    doc = checks._load_yaml_text("a: true\nb: false\nc: on\nd: yes\n")
+    assert doc["a"] is True
+    assert doc["b"] is False
+    # on/off/yes/no stay strings (only true/false are bools).
+    assert doc["c"] == "on"
+    assert doc["d"] == "yes"
+
+
 def test_job_contexts_plain_job():
     assert checks._job_contexts("build", {"name": "Build"}, toplevel=None, cache={}) == [
         "Build"
