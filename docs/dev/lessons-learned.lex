@@ -241,7 +241,7 @@ current truth.
 
         tauri wants frontendDist co-located at compile time, so the frontend
         builds inside each platform leg; the expensive part (the WASM bundle) is
-        cached per-OS. "Build the frontend once and share it" is an optimization
+        cached per-OS. "Build the frontend once and share it" is an optimisation
         tauri resists, and the payoff is small because the cheap part is the JS,
         not the WASM that is already deduped.
 
