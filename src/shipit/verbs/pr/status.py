@@ -10,11 +10,12 @@ The read path is a thin shell over the engine: resolve the PR ->
 config-resolved required reviewer set) -> render. All the lifecycle logic lives
 in the engine; this verb only resolves, renders, and maps errors to exit codes.
 
-``no_pr`` is a NORMAL state (exit 0), not an error — so the PR resolution here is
-deliberately lenient: a `gh`/auth failure while *looking up the current branch's
-PR* reads as "no PR for this branch" rather than crashing a status line. A
-`gh`/auth failure during the actual ``gather`` (we have a PR number but can't
-read it) is a real error: clean stderr message + non-zero exit.
+``no_pr`` is a NORMAL state (exit 0): the shared resolver returns ``None`` when
+the branch genuinely has no PR, which renders as ``no_pr``. A real `gh`/auth
+failure — at resolution OR at ``gather`` — is NOT collapsed into ``no_pr``; the
+PRD requires it to surface as a clean stderr message + non-zero exit so
+automation can detect it. The resolver keeps the two cases distinct, so this
+verb maps ``None`` -> ``no_pr`` and ``GhError`` -> fatal without guessing.
 """
 
 from __future__ import annotations
@@ -50,36 +51,24 @@ def cmd(pr: int | None, as_json: bool) -> None:
 def run(pr: int | None = None, *, as_json: bool = False) -> int:
     """Resolve -> gather -> evaluate -> render. Returns an int exit code.
 
-    Returns 0 on a printed status (including ``no_pr``), non-zero on a gh/auth
-    failure while reading a known PR.
+    Returns 0 on a printed status (including ``no_pr``); non-zero on a real
+    gh/auth failure, whether resolving the branch's PR or reading a known one.
     """
-    resolved = _resolve_lenient(pr)
-    if resolved is None:
-        _emit(no_pr(), as_json=as_json)
-        return 0
     try:
+        resolved = resolve_pr(pr)
+        if resolved is None:
+            _emit(no_pr(), as_json=as_json)
+            return 0
         ctx = gather(resolved)
     except ghapi.GhError as exc:
+        # A genuine gh/auth failure (NOT "no PR for branch" — the resolver
+        # returns None for that). The PRD requires this to be visible: clean
+        # stderr + non-zero exit, never a silent no_pr.
         print(f"error: {exc}", file=sys.stderr)
         return 1
     status = evaluate(ctx, required=required_reviewers())
     _emit(status, as_json=as_json)
     return 0
-
-
-def _resolve_lenient(pr: int | None) -> int | None:
-    """Resolve the PR for a read-only status line, treating any gh failure during
-    the current-branch lookup as "no PR".
-
-    ``pr status`` must not error out of a status line just because the branch has
-    no PR (``gh pr view`` exits non-zero then) or gh is momentarily unhappy —
-    ``no_pr`` is the answer. An EXPLICIT pr number is returned as-is (no lookup,
-    so nothing to swallow); the lenient catch only covers the branch resolution.
-    """
-    try:
-        return resolve_pr(pr)
-    except ghapi.GhError:
-        return None
 
 
 def _emit(status: TaskStatus, *, as_json: bool = False) -> None:

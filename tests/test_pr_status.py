@@ -126,13 +126,52 @@ def test_gh_failure_on_known_pr_exits_nonzero(monkeypatch, capsys):
     assert "gh exploded" in capsys.readouterr().err
 
 
-def test_gh_failure_during_branch_resolution_reads_as_no_pr(monkeypatch, capsys):
-    """A gh failure resolving the CURRENT BRANCH's PR is lenient -> no_pr, exit 0."""
+def test_gh_failure_during_resolution_is_fatal(monkeypatch, capsys):
+    """A REAL gh/auth failure resolving the branch's PR is fatal — NOT a silent
+    no_pr. The resolver returns None for the genuine "no PR for branch" case, so a
+    GhError reaching the verb is always a real failure (PRD: stderr + non-zero)."""
 
     def boom(pr):
-        raise ghapi.GhError("no pr for branch")
+        raise ghapi.GhError("gh auth exploded")
 
     monkeypatch.setattr(status_verb, "resolve_pr", boom)
     rc = cli.main(["pr", "status"])
-    assert rc == 0
-    assert "no_pr" in capsys.readouterr().out
+    assert rc != 0
+    assert "gh auth exploded" in capsys.readouterr().err
+
+
+# --- the shared resolver: no-PR vs real failure discrimination ----------------
+
+from shipit.verbs.pr._resolve import resolve_pr  # noqa: E402
+
+
+def test_resolver_explicit_pr_passthrough():
+    assert resolve_pr(7) == 7
+
+
+def test_resolver_no_pr_marker_maps_to_none(monkeypatch):
+    """gh's "no pull requests found for branch" exit is a normal no-PR state -> None."""
+
+    def fake_gh(args, **kw):
+        raise ghapi.GhError(
+            'gh pr view failed (1): no pull requests found for branch "x"'
+        )
+
+    monkeypatch.setattr(ghapi, "_gh", fake_gh)
+    assert resolve_pr(None) is None
+
+
+def test_resolver_real_gh_error_propagates(monkeypatch):
+    """Any other gh failure stays a GhError — never collapsed into None."""
+
+    def fake_gh(args, **kw):
+        raise ghapi.GhError("gh pr view failed (1): could not authenticate")
+
+    monkeypatch.setattr(ghapi, "_gh", fake_gh)
+    with pytest.raises(ghapi.GhError):
+        resolve_pr(None)
+
+
+def test_resolver_parses_number(monkeypatch):
+    monkeypatch.setattr(ghapi, "_gh", lambda args, **kw: '{"number": 99}')
+    assert resolve_pr(None) == 99
