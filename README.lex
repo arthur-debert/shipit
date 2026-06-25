@@ -5,42 +5,56 @@ of personal projects (arthur-debert, lex-fmt and phos-editor on gh)
 
 Scope
 
+    1. Provisioning: 
+      1.1 Ensure that os level dependencies are installed in a pinned version.
     1. Development Workflow: 
         1.1 The how to full for development workflow.
-        1.1 The skills for development ()
-the `SKILL.md` convention).
+        1.1 The skills for development (shipt-to-PRD, shipit-to-issues, shipt-grill-with-docs)
+      2.  Standarized Linting and Formatting via LeftHook
+        2.1 Multi language / file types supported (rust, python, shell, markdown, yaml, json, go, lex)
+      3. Github Repo Setup: 
+        3.1. Ensure used issues labels are available
+        3.2 Ensures a standarized ruleset for branches 
+        3.3. Ensures repo secrets are available (fetched from local doppler config)
+      4. Tooling: 
+        4.1 Leverages pixi to offer pixi build, lint, test, and run commands for all supported languages.
+      5. PR and Code Reviews
+        A significant part of the value is the connection between skills, tooling, and review helpers that take the guesswork out of agents on how to handle it. 
 
-Each skill folder lives under `skills/` and is self-contained. Names carry an
-`shipit-` prefix so they never clash with the upstream third-party skills they
-were forked from.
+  How It  Works
 
-## Skills
+    1. Install : $ pixi install shipit <path> --push
 
-| Skill | Forked from | What changed |
-|-------|-------------|--------------|
-| `shipit-to-PRD` | [mattpocock/skills](https://github.com/mattpocock/skills) `to-PRD` | PRD is written as a file in `docs/PRD/` (single source of truth); the epic tracker issue links to it instead of embedding the body. |
-| `shipit-to-issues` | [mattpocock/skills](https://github.com/mattpocock/skills) `to-issues` | Vertical slices are framed as **Work Streams**; dropped the max-thinness bias (each WS = thinnest *coherent, reviewable* PR) and the HILT/AFC tagging (all AFC); kept the blocked-by dependency graph; WS may overlap files. |
+      1.0 Provisions the project
+      1.1. Runs the script that setup gh repo.
+      1.2 Copy the skills. 
+      1.3. Copy the left hook config 
+      1.4. Stores a .shipit.toml file with the commit hash of the shipit repo that installed it.
+      1.5 Sets up git commit hooks to run left hook on pre-commit and pre-push.
+      1.6 Adds to AGENTS.md a section on how the development workflow works (AGENTS.lex ) and a short pixi command reference for shipit commands.
 
-## Install
+      This is the same command for fresh installs and updates. 
+      
+      For updates: shipt will compare the files to be repalced in the consumer repo with the same file shipit had at the last time shipit ran on that consumer repo. If there are changes in the consumer repo, shipit will prompt the user to either overwrite or skip the file.
 
-These are just folders — point your agent's skills directory at them.
+    That is, install is incremental and mostly safe (if doppler secrets change between applies the new one will be set, which is most likely the desired behavior). 
 
-**Symlink an individual skill** into a project (or your user-level skills dir):
+    If push is set it will push to the repo's main bypassing PR workflow via ADMIN . 
 
-```sh
-Ln -s ~/h/shipit-skills/skills/shipit-to-PRD    <repo>/.claude/skills/shipit-to-PRD
-Ln -s ~/h/shipit-skills/skills/shipit-to-issues <repo>/.claude/skills/shipit-to-issues
-```
+  2. PR Reviews
 
-(For other agents, symlink/copy into whatever directory that agent scans for
-`SKILL.md` folders.)
+    2.1 pixil shipit-request-review <pr_number> <reviewer>....
 
-## Notes
+      2.1.1 This pixi extension will look into the projects .shipit.toml file to read which reviewers are used in the project , for now we have copilot, agy-local, and codex-local. 
+      2.1.2 If no reviewers are specified, it will use the default reviewers in the .shipit.toml file.
 
-- These skills reference `/grill-with-docs` (upstream, unchanged) and
-  `/setup-matt-pocock-skills` (issue-tracker + label vocabulary). Install those
-  separately if your flow uses them.
-- The surrounding workflow (epic branches, the coordinating-agent execution
-  model, branch/issue naming, the bug track, review-round breaking) lives in the
-  user's global instructions, not in these skills — these only correct the two
-  points where the upstream skills contradicted that workflow.
+    2.2. pixi shipit-pr-status
+
+      Returns a json summary of the PR status according to our developement workflow: with fields for reviews_complete (each can be complete ,  pending, addressing needed or not needed), ci cheks (status and if failed, which ones), mergeable. 
+
+      2.2 pixi shipit-pr-next-action
+
+      A state machine that encodes the rules for the workflow development and runs the next action (request or re requrest reviews, check for ready status, if can be ready, flips the PR from draft to ready, etc).  Returns a useful json summary of the action taken and current status. Implemented on top of shipit-pr-status and shipit-request-review.
+
+
+
