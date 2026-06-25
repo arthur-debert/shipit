@@ -298,3 +298,70 @@ current truth.
       to just two primitives — run-a-task-in-a-project and checkout-a-worktree.
       The elaborate fleet orchestration was complexity the portfolio's size does
       not justify.
+
+8. Spike 0 outcome — pixi DOES run the rust + tauri toolchain (verified 2026-06-25)
+
+    The premise question from [./ROADMAP.lex] §0 is answered yes: pixi-provisioned
+    native deps built a real tauri bundle with the correct main binary on BOTH
+    macos-latest and ubuntu-latest. Done on a throwaway phos-editor/app branch
+    (spike/pixi-tauri), since torn down — phos main untouched. The foundational
+    risk in [#6] ("pixi is a new foundational dependency risk") is retired for the
+    rust + tauri stack; the floor holds.
+
+    What provisioned cleanly from conda-forge:
+
+        - Modern webkit is `webkit2gtk4.1` (2.48.5), linux-64 ONLY (macOS links
+          the system WebKit.framework). This was the single biggest threat to the
+          pixi premise — it is real, current, and present. It needs
+          `[system-requirements] libc = glibc 2.34` or the linux-64 solve fails.
+        - The forced mold/lld linkers from the committed .cargo/config.toml are
+          ordinary conda packages — the Nix worst-case from [#2] is a non-issue on
+          pixi's FHS prefix, exactly as predicted.
+        - rust from conda (NO rustup) plus the wasm32 target as the conda package
+          `rust-std-wasm32-unknown-unknown` (version-locked to `rust`).
+
+    Two real provisioning gaps the spike hit and fixed — carry these into the
+    shipit install / CI design, they do not solve themselves:
+
+        wasm-bindgen is NOT on conda-forge:
+
+            conda-forge ships no `wasm-bindgen-cli` package, and `wasm-pack --mode
+            no-install` only appeared to work locally because a prior run had
+            cached wasm-bindgen — a clean runner has nothing to find and fails
+            ("Not able to find or install a local wasm-bindgen"). The fix that
+            holds: `cargo install wasm-bindgen-cli` at the EXACT version pinned in
+            the consumer's Cargo.lock, built with the conda cargo (no rustup
+            anywhere). shipit must provision wasm-bindgen this way for every
+            wasm-building consumer; pixi/conda does not give it for free.
+
+        conda-forge's libNAME / NAME split breaks pkg-config closures:
+
+            webkit2gtk-4.1's pkg-config closure failed because conda-forge splits
+            some libraries into a `libNAME` runtime package (pulled in
+            transitively by gtk/glib) and a `NAME` package that carries the `.pc`.
+            Only the runtime halves arrived, so `pkg-config --exists
+            webkit2gtk-4.1` died on `gio-2.0 -> zlib`, then `fontconfig -> expat`.
+            Fix: add `zlib` and `expat` to the linux deps explicitly. Expect a
+            short tail of these for any native-GUI consumer.
+
+    Smaller facts worth keeping:
+
+        - pixi `[activation.env]` OVERRIDES a shell/CI-exported variable. So a
+          per-environment value (the spike's PHOS_CORE_PATH, pointing at the
+          consumer's native-dep source) must NOT live there — default it in a
+          script and let CI export the real path, or CI cannot redirect it.
+        - setup-pixi was NOT blocked by the phos-editor org Actions policy (the
+          worry flagged in [./ROADMAP.lex] §0 did not bite this time). RELEASE_TOKEN
+          cloned the private phos-core at its pinned tag, serving BOTH the native
+          git-dep patch and the from-source wasm build from one clone.
+        - The producing-logic-runs-in-local-Docker property ([./architecture.lex] §3)
+          paid off immediately: reproducing the linux-64 env in a `--platform
+          linux/amd64` container gave ~2-minute pkg-config probe loops instead of
+          ~25-minute CI round-trips while diagnosing the webkit closure.
+
+    The native build must use the consumer's native-dep source AT THE PINNED
+    version. The spike first failed compiling against a local phos-core dev
+    checkout 6 commits past the tag (an enum variant had drifted); building
+    against the exact pinned tag — what CI clones — compiled clean. shipit's
+    install / CI must pin the native-dep source as firmly as it pins everything
+    else.
