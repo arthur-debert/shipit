@@ -40,7 +40,7 @@ from .. import gh
 # These are release-core toolset.py's battle-tested command lines (NOT its
 # lefthook orchestration, toolset provisioning, or verdict parsing — the three
 # things the pixi + binary model replaces). Version pinning lives in pixi.toml /
-# pixi.lock (the linters) and scripts/provision-lexd.sh (lexd); the registry
+# pixi.lock (the linters) and tools/provision-lexd.sh (lexd); the registry
 # only encodes WHICH tool runs and HOW it is invoked.
 
 
