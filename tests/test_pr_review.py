@@ -66,7 +66,6 @@ def _boundary(
     *,
     requested_logins: list[str] | None = None,
     reviews: list[tuple[int, str]] | None = None,
-    gather_lifecycles: dict | None = None,
 ) -> _Boundary:
     """A faked boundary: `attach_state` returns the given pending logins + review
     tail; `gather_reviews` returns a sentinel ctx (adapters' fake `detect` ignores
@@ -225,6 +224,26 @@ def test_local_agent_request_surfaces_clean_guard(monkeypatch, capsys):
     err = capsys.readouterr().err
     assert "not yet available" in err
     assert "codex" in err
+
+
+@pytest.mark.parametrize("name", ["codex-local", "agy-local"])
+def test_local_agent_spec_alias_surfaces_guard(monkeypatch, capsys, name):
+    """The PRD/glossary spell these `codex-local`/`agy-local`; the `-local` alias
+    resolves the base adapter so the guard surfaces, not an unknown-name error."""
+    monkeypatch.setattr(review_verb, "resolve_pr", lambda pr: 7)
+    rc = review_verb.run(7, reviewer=name)
+    assert rc != 0
+    err = capsys.readouterr().err
+    assert "not yet available" in err
+    assert "unknown reviewer" not in err
+
+
+def test_local_alias_does_not_match_app_reviewer(capsys):
+    """`-local` aliases only the local-agent family — `copilot-local` is unknown
+    (an app reviewer has a requested edge and is not a local backend)."""
+    rc = review_verb.run(7, reviewer="copilot-local")
+    assert rc != 0
+    assert "unknown reviewer" in capsys.readouterr().err
 
 
 # --- CLI verb wiring + behavior ----------------------------------------------

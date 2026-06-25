@@ -105,15 +105,37 @@ def _select(reviewer: str | None) -> list[ReviewerAdapter] | None:
 
     Returns None (a usage failure) when ``--reviewer`` names an unknown reviewer,
     after printing the known names — a typo never silently drops a request.
+
+    The local-agent reviewers are spelled ``codex-local`` / ``agy-local`` in the
+    PRD/glossary (and in the foundation guard's own message), but their adapter
+    registry names are the bare ``codex`` / ``agy``. So a ``-local`` suffix is
+    accepted as an alias for the base adapter: ``--reviewer codex-local`` resolves
+    the ``codex`` adapter and therefore surfaces the local-agent guard, rather than
+    being rejected as an unknown name.
     """
     if reviewer is None:
         return required_reviewers()
-    adapter = by_name(reviewer)
+    adapter = by_name(reviewer) or _resolve_local_alias(reviewer)
     if adapter is None:
         known = ", ".join(r.name for r in REGISTRY)
         print(f"error: unknown reviewer {reviewer!r} (known: {known})", file=sys.stderr)
         return None
     return [adapter]
+
+
+def _resolve_local_alias(reviewer: str) -> ReviewerAdapter | None:
+    """Resolve a ``<name>-local`` spec name to its base adapter, else None.
+
+    Only a local-agent adapter (one with no requested edge) is reachable this
+    way, so ``copilot-local`` does not alias to ``copilot``: the suffix names the
+    local-agent reviewer family specifically.
+    """
+    if not reviewer.endswith("-local"):
+        return None
+    base = by_name(reviewer[: -len("-local")])
+    if base is not None and not base.has_requested_edge:
+        return base
+    return None
 
 
 def _emit(pr: int, result: RequestResult) -> None:
