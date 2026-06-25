@@ -1,0 +1,11 @@
+# markdownlint config for the markdown leg of `shipit lint` (auto-discovered).
+# Two rules are relaxed for shipit's actual markdown genre; everything else stays
+# at markdownlint's defaults so real structural issues still fail the gate.
+#   - MD013 (line-length): shipit's markdown is prose / managed-block content
+#     where hard wrapping is churn, not signal.
+#   - MD041 (first-line-h1): shipit ships fragment markdown (the AGENTS.md
+#     managed block in src/shipit/data/agents-block.md is a `##` section, not a
+#     document), so "first line must be an h1" does not apply.
+default: true
+MD013: false
+MD041: false

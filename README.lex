@@ -66,6 +66,25 @@ Scope
     Doppler-sourced secrets are re-applied on every install (a changed
     secret is set to its new value, which is the desired behavior).
 
+    Lint — the standardized gate:
+
+        `shipit lint` runs one multi-language gate (python, shell, yaml,
+        json, markdown and lex today; rust, go and more as consumers bring
+        them) over the tracked tree. The SAME invocation runs in CI and in
+        the lefthook pre-commit / pre-push hooks — one binary, one config,
+        so they cannot drift into two definitions. It is a hard gate: a
+        missing tool fails the run, it never skips. `shipit lint --fix` is
+        the opt-in formatter pass; the bare gate never mutates files.
+
+        The orchestration lives in the binary, not in lefthook or a
+        templated pixi task: pixi has no cross-manifest task inheritance,
+        so lefthook and pixi stay thin callers (`pixi run lint`) while the
+        per-language discovery and routing live in `shipit lint`. The
+        linters themselves ride in as shipit's own pinned dependencies, so
+        a consumer's pixi.toml carries only the stable `lint = "shipit
+        lint"` task line, never a drifting list of tool pins. See
+        [./docs/dev/architecture.lex] §5 and §7.
+
   2. PR Reviews
 
     Draft → shepherd → ready, then stop:

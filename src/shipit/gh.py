@@ -128,9 +128,7 @@ def default_branch(repo: str) -> str:
 # --------------------------------------------------------------------------
 
 
-def label_create(
-    repo: str, name: str, *, description: str, color: str
-) -> None:
+def label_create(repo: str, name: str, *, description: str, color: str) -> None:
     """Create-or-update a label (``gh label create --force`` is idempotent)."""
     _run(
         [
@@ -186,6 +184,16 @@ def git_current_branch(*, cwd: str) -> str | None:
     return None if (not name or name == "HEAD") else name
 
 
+def git_ls_files(*, cwd: str) -> list[str]:
+    """Tracked files (``git ls-files``), repo-root-relative, in git's order.
+
+    Tracked-only is deliberate: it keeps generated/ignored paths out of the lint
+    scope without an exclude list (ROADMAP.lex §3 — "whole tree via git ls-files").
+    """
+    out = _git(["ls-files"], cwd=cwd)
+    return [line for line in out.splitlines() if line.strip()]
+
+
 def git_switch_create(branch: str, *, cwd: str) -> None:
     """Create-or-reset ``branch`` from the current HEAD and switch to it.
 
@@ -234,8 +242,19 @@ def git_push(
 def pr_url_for_head(branch: str, *, cwd: str | None = None) -> str | None:
     """The URL of the open PR whose head is ``branch``, or ``None``."""
     out = _run(
-        ["gh", "pr", "list", "--head", branch, "--state", "open",
-         "--json", "url", "-q", ".[0].url"],
+        [
+            "gh",
+            "pr",
+            "list",
+            "--head",
+            branch,
+            "--state",
+            "open",
+            "--json",
+            "url",
+            "-q",
+            ".[0].url",
+        ],
         cwd=cwd,
     )
     return out.strip() or None

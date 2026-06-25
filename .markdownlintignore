@@ -1,0 +1,12 @@
+# Markdown the gate deliberately does not lint with prose rules:
+#
+#   - AGENTS.md, README.md — GENERATED from the .lex source (which `lexd check`
+#     gates). These .md are the projection (bash tools/lex-convert-doc.sh) and
+#     carry a "do not hand edit" preamble, so linting them is the generator's job.
+#   - skills/ — agent-skill content, not prose. The files carry load-bearing
+#     inline HTML tags (<what-to-do>, <prd-template>, …), language-less fences,
+#     and fragment structure by design; markdownlint's prose rules miscategorize
+#     them. They are vendored as a managed set, linted at their own source.
+AGENTS.md
+README.md
+skills/

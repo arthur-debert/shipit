@@ -158,9 +158,7 @@ def dump_manifest(version: str, managed: dict[str, str]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def write_manifest(
-    path: str | Path, *, version: str, managed: dict[str, str]
-) -> None:
+def write_manifest(path: str | Path, *, version: str, managed: dict[str, str]) -> None:
     """Write the ``[shipit]``/``[managed]`` tables, preserving the rest of the file."""
     p = Path(path)
     existing = p.read_text(encoding="utf-8") if p.is_file() else ""

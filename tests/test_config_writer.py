@@ -33,7 +33,7 @@ def test_write_manifest_fresh_file_roundtrips(tmp_path):
 def test_write_manifest_preserves_existing_secrets(tmp_path):
     p = tmp_path / ".shipit.toml"
     p.write_text(
-        '[secrets]\n'
+        "[secrets]\n"
         'CARGO_REGISTRY_TOKEN = { doppler = "CRATES_IO_KEY" }\n'
         'GH_PAT = { env = "SHIPIT_GH_PAT" }\n'
     )

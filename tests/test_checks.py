@@ -81,9 +81,9 @@ def test_loader_keeps_true_false_as_bool():
 
 
 def test_job_contexts_plain_job():
-    assert checks._job_contexts("build", {"name": "Build"}, toplevel=None, cache={}) == [
-        "Build"
-    ]
+    assert checks._job_contexts(
+        "build", {"name": "Build"}, toplevel=None, cache={}
+    ) == ["Build"]
 
 
 def test_job_contexts_reusable_nesting_and_gating():

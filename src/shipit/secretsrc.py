@@ -40,9 +40,7 @@ def doppler_get(key: str) -> str:
     except FileNotFoundError as exc:
         raise SecretSourceError("doppler not found on PATH") from exc
     if proc.returncode != 0:
-        raise SecretSourceError(
-            f"doppler get {key} failed: {proc.stderr.strip()}"
-        )
+        raise SecretSourceError(f"doppler get {key} failed: {proc.stderr.strip()}")
     return proc.stdout.rstrip("\n")
 
 

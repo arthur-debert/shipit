@@ -18,6 +18,20 @@ def test_gh_setup_help(capsys):
     assert "--dry-run" in out
 
 
+def test_help_lists_lint(capsys):
+    rc = cli.main(["--help"])
+    assert rc == 0
+    assert "lint" in capsys.readouterr().out
+
+
+def test_lint_help(capsys):
+    rc = cli.main(["lint", "--help"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "--fix" in out
+    assert "gate" in out.lower()
+
+
 def test_version():
     rc = cli.main(["--version"])
     assert rc == 0

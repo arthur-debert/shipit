@@ -52,14 +52,15 @@ def test_build_payload_injects_checks_only():
         {"context": "wire / check"},
     ]
     # The template is not mutated (deepcopy).
-    src_rule = next(
-        r for r in tmpl["rules"] if r["type"] == "required_status_checks"
-    )
+    src_rule = next(r for r in tmpl["rules"] if r["type"] == "required_status_checks")
     assert src_rule["parameters"]["required_status_checks"] == []
 
 
 def test_existing_ruleset_id():
-    rulesets = [{"name": "other", "id": 1}, {"name": "main-branch-protection", "id": 42}]
+    rulesets = [
+        {"name": "other", "id": 1},
+        {"name": "main-branch-protection", "id": 42},
+    ]
     assert gh_setup.existing_ruleset_id(rulesets, "main-branch-protection") == 42
     assert gh_setup.existing_ruleset_id(rulesets, "absent") is None
     assert gh_setup.existing_ruleset_id(None, "x") is None
@@ -166,9 +167,7 @@ def test_run_dry_run_end_to_end(monkeypatch, capsys):
     monkeypatch.setattr(gh_setup.gh, "default_branch", lambda repo: "main")
     monkeypatch.setattr(gh_setup.checks_mod, "discover", lambda *a, **k: ["c / check"])
 
-    rc = gh_setup.run(
-        None, config_path=None, checks_override=None, dry_run=True
-    )
+    rc = gh_setup.run(None, config_path=None, checks_override=None, dry_run=True)
     assert rc == 0
     out = capsys.readouterr().out
     assert "gh-setup: o/r (dry-run)" in out
