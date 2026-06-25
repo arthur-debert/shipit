@@ -145,7 +145,7 @@ def _parse_override_value(value: object) -> dict[str, bool]:
     TABLE-ONLY: the value MUST be a MAP `{copilot = {rerun = false}, codex =
     {rerun = true}}` — keys are the required reviewers, each value an options
     inline-table. A list/array form (or any other non-table) fails LOUD; the
-    list shorthand a ported release behavior once accepted is gone.
+    list shorthand (a ported release behavior once accepted) is gone.
 
     Wrong-typed values / unknown options fail LOUD. Reviewer-name keys are
     normalized to their canonical adapter name (lowercase) so the resulting map
