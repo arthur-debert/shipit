@@ -156,3 +156,49 @@ def test_next_request_act_requests_reviewer(patched_next, monkeypatch, capsys):
     rc = cli.main(["pr", "next"])
     assert rc == 0
     assert "requested review(s): copilot" in capsys.readouterr().out
+
+
+def test_next_request_act_skips_already_requested_reviewer(
+    patched_next, monkeypatch, capsys
+):
+    """A MIXED REVIEWS_PENDING (one not_requested, one already requested) must
+    request ONLY the not_requested reviewer — never re-poke a reviewer already
+    mid-review (Copilot review on PR #19)."""
+
+    class FakeAdapter:
+        def __init__(self, name):
+            self.name = name
+            self.requested_for = None
+
+        def request(self, pr):
+            self.requested_for = pr
+            return True
+
+        def matches(self, login):
+            return self.name in login.lower()
+
+    fresh = FakeAdapter("copilot")  # not_requested → should be requested
+    busy = FakeAdapter("coderabbit")  # requested → should be SKIPPED
+    monkeypatch.setattr(next_verb, "required_reviewers", lambda: [fresh, busy])
+    monkeypatch.setattr(
+        next_verb,
+        "evaluate",
+        lambda ctx, required: TaskStatus(
+            state=TaskState.REVIEWS_PENDING,
+            next_action=(
+                "waiting on required review(s): copilot, coderabbit — "
+                "request for the current head: copilot; "
+                "wait (already requested on the current head): coderabbit"
+            ),
+            pr=ctx,
+            reviewers={"copilot": "not_requested", "coderabbit": "requested"},
+        ),
+    )
+    monkeypatch.setattr(next_verb, "attach_state", lambda pr: (["Copilot"], []))
+    rc = cli.main(["pr", "next"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "requested review(s): copilot" in out
+    assert "coderabbit" not in out.split("action:")[1].split("\n")[0]
+    assert fresh.requested_for == 42  # the fresh one was requested
+    assert busy.requested_for is None  # the busy one was NOT re-poked

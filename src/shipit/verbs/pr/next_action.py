@@ -71,11 +71,17 @@ class _NextActs:
         case and fails loud on an outright request error.
         """
         required = required_reviewers()
-        # Which required reviewers are not yet done — the engine left them pending,
-        # so they are exactly the ones to (re-)request. `status.reviewers` maps
-        # name -> lifecycle value; a non-DONE lifecycle means still outstanding.
-        done = {"done_clean", "done_comments"}
-        pending = [r for r in required if status.reviewers.get(r.name) not in done]
+        # Which required reviewers actually need (re-)requesting. `status.reviewers`
+        # maps name -> lifecycle value. A reviewer already REQUESTED / IN_PROGRESS
+        # on the head is mid-review — re-poking it would spam the reviewer and
+        # contradict the engine's "wait (already requested…)" advice — so it is
+        # SKIPPED here (the dispatcher only routes a MIXED state to this act;
+        # the all-waiting case it already reports). DONE reviewers are skipped
+        # too. What remains is NOT_REQUESTED / stale-after-push — the ones the
+        # engine's request/RE-REQUEST clauses name — which is exactly the set to
+        # request. (`adapter.request` is the same call for request and re-request.)
+        skip = {"done_clean", "done_comments", "requested", "in_progress"}
+        pending = [r for r in required if status.reviewers.get(r.name) not in skip]
         requested: list[str] = []
         for adapter in pending:
             # adapter.request returns True when a real request edge was placed;
