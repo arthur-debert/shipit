@@ -312,8 +312,9 @@ done until its verification passes.
         boundary so it is unit-testable, the same split checks.py uses against
         its gh calls. The verb:
 
-        - DISCOVERS files (whole tree via `git ls-files`, honoring ignores) and
-          ROUTES each to a toolchain by extension and — for extensionless
+        - DISCOVERS files (whole tree via `git ls-files` — tracked files only,
+          which keeps generated and ignored paths out of scope) and ROUTES each
+          to a toolchain by extension and — for extensionless
           scripts — shebang (release routes shell this way; mirror it).
         - RUNS each language's tool(s), aggregates the results, and emits one
           verdict. It is a HARD gate ([./architecture.lex] §7): a missing tool
@@ -401,7 +402,8 @@ done until its verification passes.
           cargo/npm install at a pin, conda-native substitutes, or vendored
           binaries. lex is shipit-native and load-bearing for its own docs, so
           lexd cannot simply be dropped.
-        - check vs fix: README §2 says "Linting AND Formatting". Decide whether
+        - check vs fix: the README scope names "Linting and Formatting" (so
+          formatting is in scope, not just checking). Decide whether
           the gate is check-only (`shipit lint`, with formatting offered
           separately as `shipit fmt` or a `--fix` mode) or one verb with a fix
           mode. Heed release's scar: `prettier --write` under --all-files
