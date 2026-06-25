@@ -131,7 +131,7 @@ done until its verification passes.
 2. Step 2 — install + reconciliation
 
     The `shipit install <path>` subcommand: vendor the small slow set into a
-    consumer repo, recording per-file pristine hashes in .shipit.toml. On
+    consumer repo, recording per-unit pristine hashes in .shipit.toml. On
     re-install, hash-compare each managed unit against its stored pristine; open
     a PR with the changes (never admin-push), surfacing any consumer-edited unit
     as an override in the PR.
@@ -175,7 +175,9 @@ done until its verification passes.
         lefthook caller, the skills, the AGENTS.md block" — but stage it to what
         exists now:
 
-        - skills/ — whole files (the shipt-* skills already in this repo). They
+        - skills/ — whole files (the skills already in this repo: shipt-to-prd,
+          shipt-to-issues, shipt-grill-with-docs, lex-primer — confirm the exact
+          managed subset when defining the set). They
           must be bundled as PACKAGE DATA so the pip-installed `shipit` can vendor
           them — the same importlib.resources mechanism Step 1 used for
           `data/issue-labels.toml`. They are NOT packaged yet; add them.
@@ -227,9 +229,9 @@ done until its verification passes.
         install stages onto a branch (e.g. `shipit/install`), commits the managed
         changes, pushes the branch, and opens a DRAFT PR for a human to merge —
         the same draft -> shepherd -> ready lifecycle shipit itself follows
-        ([./AGENTS.lex]). It NEVER admin-pushes to main. The `--push` flag is the
+        (AGENTS.lex). It NEVER admin-pushes to main. The `--push` flag is the
         sole break-glass: a straight push to main, reserved for bootstrapping a
-        repo that cannot yet run the PR loop ([../../README.lex]). Support
+        repo that cannot yet run the PR loop (the README). Support
         `--dry-run` (print the plan, touch nothing), as Step 1's verbs do.
 
     Open questions to settle with the maintainer BEFORE coding (one short fork
