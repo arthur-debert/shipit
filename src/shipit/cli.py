@@ -14,6 +14,7 @@ import click
 
 from . import __version__
 from .verbs import gh_setup, install, lint
+from .verbs.pr import pr as pr_group
 
 
 @click.group(
@@ -106,6 +107,12 @@ def lint_cmd(path: str | None, fix: bool) -> None:
     """
     rc = lint.run(path, fix=fix)
     raise SystemExit(rc)
+
+
+# The nested `pr` group (PR flow) is a click.Group assembled in its own package
+# (verbs/pr/), so its verbs register there rather than as inline commands here;
+# attach the whole group to the root.
+root.add_command(pr_group)
 
 
 def main(argv: list[str] | None = None) -> int:
