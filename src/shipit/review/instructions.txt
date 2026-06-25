@@ -1,0 +1,66 @@
+How To Execute the Code Review
+
+Your code review will match an implementation - actual code - to a proposal, task
+description, or user issue / scenario or a feature spec, that is the description of
+what we are trying to accomplish and why.
+
+    Under that light, you want to ensure, for the codebase:
+
+    - Correctness: the code's behaviour matches the intent and need under various
+      invariants and edge cases. Even if locally some behavior seems correct, do
+      validate that up the chain it is still the correct behavior from the higher
+      level perspective, ultimately, the user's.
+    - Completeness: does the implementation handle all the requested functionality,
+      including things like error handling, and the user experience?
+    - Code Quality: we look for the right abstractions and design contexts, api
+      ergonomics, appropriate data types (performance, match the code base's when
+      possible), single responsibility, structurally consistent, follows naming and
+      layout / package conventions.
+    - Robustness: does the code foresee invariants and edge cases, properly handling
+      them (be it with descriptive errors or self correcting when possible, logging)
+
+    Likewise the test quality:
+    - Breadth: coverage, lines / branches exercised.
+    - Depth: invariants, edge-cases, error testing. If useful for this perspective,
+      proptest or other dynamic testing methods that exercise invariants beyond a
+      handful of inputs.
+    - Granularity: testing many inputs is slow to run and write, and you want to keep
+      these deeper tests as close to the function as possible, that is we want deep
+      granular tests at the function level. We can later write more high level tests
+      on higher functions, trusting that the inner ones are well tested, and having
+      these test essentially ensure the right calls / params are made and the result
+      is constructed / handled correctly. Getting the level wrong invariably means an
+      under tested, yet slow to run codebase as the abstraction level is wrong.
+    - Leverages Test Harness / Infrastructure: many tests take considerable setup,
+      from files on disk to repopulated data structures. Having tests ad hoc
+      duplicate this logic not only makes tests more expensive and harder to write,
+      but often harbors small bugs and discrepancies from real world usage. Not only
+      that, when internals / data structures change, each test must be updated, that
+      is, this makes very brittle tests. We want to have a shared pool of well crafted
+      setups and their teardowns that free test authors from the secondary work and
+      allow fixes / updates to be handled in fewer places.
+    - Likewise for higher level assertions (like from a user or feature perspective)
+      we want to ensure a library of custom assertions, flexible enough to lend itself
+      when asserting multiple conditions, but that centralizes / encapsulates the
+      implementation details, making tests faster and easier to write and maintain.
+      (of course there is value in very low level tests, but those don't need much
+      logic to verify)
+
+How to Measure
+
+    The mental model is to consider could this be considered a world class
+    implementation. Adjust for the context (i.e. five nines availability on a hyper
+    scaler for kernel code is different than a personal / small scale project), where
+    performance and security, reliability are disproportionately larger, but still
+    upholding the quality, design, clarity (and non-punitive performance).
+
+    Take note of the issues that do not match such a world class implementation, and
+    then, after your initial high-level assessment on the axis above, list the issues,
+    by highest to lowest priority. For each, include a brief but clear description of
+    where and what the issue is about, and the correct way to address it as a
+    suggestion. Output a ranked list of findings, ordered highest to lowest priority.
+
+    Base your review solely on the provided diff and on reading the changed files.
+    Do NOT run build, test, or shell commands, and do NOT start background tasks —
+    this is a one-shot review, not an agentic session. Respond with ONLY the
+    requested JSON and nothing else.
