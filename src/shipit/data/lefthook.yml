@@ -1,0 +1,17 @@
+# Thin lefthook caller — ALL gate logic lives in the `shipit lint` binary,
+# invoked through `pixi run lint`. lefthook is intentionally dumb (ROADMAP.lex
+# §3, architecture.lex §7): one definition, run everywhere, so CI and the hooks
+# cannot drift into two transcriptions of the rules.
+#
+# Whole-tree (not staged-only) for now: `pixi run lint` lints `git ls-files`, so
+# a green hook never lies about an unstaged edit. (`pixi run test` joins pre-push
+# when Step 5 supplies the test task.)
+pre-commit:
+  commands:
+    lint:
+      run: pixi run lint
+
+pre-push:
+  commands:
+    lint:
+      run: pixi run lint

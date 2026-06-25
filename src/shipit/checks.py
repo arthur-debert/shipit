@@ -310,9 +310,7 @@ def checks_from_workflows(toplevel: str, paths: list[str]) -> list[str]:
         if not isinstance(doc, dict) or not isinstance(doc.get("jobs"), dict):
             continue
         for job_id, job in doc["jobs"].items():
-            found.update(
-                _job_contexts(job_id, job, toplevel=toplevel, cache=cache)
-            )
+            found.update(_job_contexts(job_id, job, toplevel=toplevel, cache=cache))
     return sorted(found)
 
 

@@ -21,7 +21,7 @@ while [[ $# -gt 0 ]]; do
             no_preamble=true
             shift
             ;;
-        -h|--help)
+        -h | --help)
             usage
             exit 0
             ;;

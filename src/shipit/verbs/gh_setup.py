@@ -105,8 +105,10 @@ def apply_ruleset(repo: str, checks: list[str], *, dry_run: bool) -> str:
         rulesets = None
     existing = existing_ruleset_id(rulesets, RULESET_NAME)
 
-    print(f"  ruleset: {RULESET_NAME} "
-          f"(existing id: {existing if existing is not None else 'none'})")
+    print(
+        f"  ruleset: {RULESET_NAME} "
+        f"(existing id: {existing if existing is not None else 'none'})"
+    )
     print(f"  checks:  {', '.join(checks) if checks else '(none)'}")
     if dry_run:
         print("  --- payload (dry-run, not sent) ---")
@@ -196,7 +198,9 @@ def run(
             current = None
     target = repo or current
     if not target:
-        print("gh-setup: no repo given and not inside a GitHub checkout", file=sys.stderr)
+        print(
+            "gh-setup: no repo given and not inside a GitHub checkout", file=sys.stderr
+        )
         return 1
     print(f"gh-setup: {target}{' (dry-run)' if dry_run else ''}")
 

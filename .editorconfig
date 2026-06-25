@@ -1,0 +1,19 @@
+# Indentation shfmt honors for the shell leg of `shipit lint` (it reads
+# .editorconfig when no explicit -i/-ci flags are passed). 4-space, indented
+# case bodies — the house style of shipit's own scripts. The glob covers both
+# *.sh and the extensionless bootstrap (src/shipit/data/bootstrap/shipit), which
+# shfmt would otherwise format with its tab default, leaving the installed
+# launcher inconsistent with the rest of the tree.
+root = true
+
+[*.sh]
+indent_style = space
+indent_size = 4
+switch_case_indent = true
+binary_next_line = true
+
+[**/bootstrap/shipit]
+indent_style = space
+indent_size = 4
+switch_case_indent = true
+binary_next_line = true

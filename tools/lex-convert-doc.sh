@@ -26,7 +26,7 @@ while [[ $# -gt 0 ]]; do
             no_preamble=true
             shift
             ;;
-        -h|--help)
+        -h | --help)
             usage
             exit 0
             ;;
@@ -69,7 +69,7 @@ dest="${src%.lex}.md"
 tmp="$(mktemp)"
 trap 'rm -f "$tmp"' EXIT
 
-if ! lexd "$src" --to markdown > "$tmp"; then
+if ! lexd "$src" --to markdown >"$tmp"; then
     echo "Error: lexd conversion failed for: $src" >&2
     exit 1
 fi
@@ -77,7 +77,10 @@ fi
 if [[ "$no_preamble" == true ]]; then
     cp "$tmp" "$dest"
 else
-    { printf '%s\n\n' "$PREAMBLE"; cat "$tmp"; } > "$dest"
+    {
+        printf '%s\n\n' "$PREAMBLE"
+        cat "$tmp"
+    } >"$dest"
 fi
 
 echo "Converted: $src -> $dest"

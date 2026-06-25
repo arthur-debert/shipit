@@ -13,15 +13,30 @@ from shipit.verbs import install
 
 def test_decide_covers_four_cases():
     # absent -> ADD
-    assert install.decide(consumer_hash=None, pristine_hash=None, desired_hash="d") == install.ADD
+    assert (
+        install.decide(consumer_hash=None, pristine_hash=None, desired_hash="d")
+        == install.ADD
+    )
     # already current -> NOOP
-    assert install.decide(consumer_hash="d", pristine_hash="p", desired_hash="d") == install.NOOP
+    assert (
+        install.decide(consumer_hash="d", pristine_hash="p", desired_hash="d")
+        == install.NOOP
+    )
     # untouched since last install -> UPDATE
-    assert install.decide(consumer_hash="p", pristine_hash="p", desired_hash="d") == install.UPDATE
+    assert (
+        install.decide(consumer_hash="p", pristine_hash="p", desired_hash="d")
+        == install.UPDATE
+    )
     # consumer-edited -> OVERRIDE
-    assert install.decide(consumer_hash="x", pristine_hash="p", desired_hash="d") == install.OVERRIDE
+    assert (
+        install.decide(consumer_hash="x", pristine_hash="p", desired_hash="d")
+        == install.OVERRIDE
+    )
     # present but never installed by shipit (no pristine) and divergent -> OVERRIDE
-    assert install.decide(consumer_hash="x", pristine_hash=None, desired_hash="d") == install.OVERRIDE
+    assert (
+        install.decide(consumer_hash="x", pristine_hash=None, desired_hash="d")
+        == install.OVERRIDE
+    )
 
 
 def test_block_extract_and_splice_roundtrip():
@@ -40,6 +55,79 @@ def test_block_extract_and_splice_roundtrip():
 
 def test_extract_block_absent_is_none():
     assert install.extract_block("no markers here") is None
+
+
+# --------------------------------------------------------------------------
+# The gate units (Step 3) — lefthook caller + pixi [tasks] block
+# --------------------------------------------------------------------------
+
+
+def test_load_units_includes_lefthook_and_pixi_task_block():
+    units = {u.key: u for u in install.load_units()}
+    assert install.LEFTHOOK_FILE in units
+    assert units[install.LEFTHOOK_FILE].kind == "file"
+
+    pixi = units[install.PIXI_KEY]
+    assert pixi.kind == "block"
+    assert pixi.dest == "pixi.toml"
+    assert pixi.anchor == "[tasks]"
+    # The managed pixi block is the thin task line ONLY — never a linter-dep
+    # block (deps ride in as shipit's own package deps, architecture.lex §5).
+    assert pixi.desired_inner() == 'lint = "shipit lint"'
+
+
+def test_pixi_block_inserts_under_existing_tasks_table():
+    consumer = '[project]\nname = "acme"\n\n[tasks]\ntest = "pytest"\n'
+    out = install.splice_block(
+        consumer,
+        'lint = "shipit lint"',
+        install.PIXI_OPEN,
+        install.PIXI_CLOSE,
+        anchor="[tasks]",
+    )
+    # The managed line lands inside [tasks], not after some later table.
+    tasks_idx = out.index("[tasks]")
+    project_after = out.find("[project]", tasks_idx)
+    lint_idx = out.index('lint = "shipit lint"')
+    assert tasks_idx < lint_idx
+    assert project_after == -1  # no table opens between [tasks] and the line
+    assert 'test = "pytest"' in out
+    # Round-trips through extract with the pixi markers.
+    assert (
+        install.extract_block(out, install.PIXI_OPEN, install.PIXI_CLOSE)
+        == 'lint = "shipit lint"'
+    )
+
+
+def test_pixi_block_creates_tasks_table_when_absent():
+    consumer = '[project]\nname = "acme"\n'
+    out = install.splice_block(
+        consumer,
+        'lint = "shipit lint"',
+        install.PIXI_OPEN,
+        install.PIXI_CLOSE,
+        anchor="[tasks]",
+    )
+    assert "[tasks]" in out
+    # The block follows the freshly-added header.
+    assert out.index("[tasks]") < out.index('lint = "shipit lint"')
+
+
+def test_pixi_block_reinstall_replaces_in_place():
+    consumer = '[tasks]\ntest = "pytest"\n'
+    once = install.splice_block(
+        consumer,
+        'lint = "shipit lint"',
+        install.PIXI_OPEN,
+        install.PIXI_CLOSE,
+        "[tasks]",
+    )
+    twice = install.splice_block(
+        once, 'lint = "shipit lint"', install.PIXI_OPEN, install.PIXI_CLOSE, "[tasks]"
+    )
+    # Idempotent: exactly one managed block after a second install.
+    assert twice.count(install.PIXI_OPEN) == 1
+    assert twice == once
 
 
 def test_load_units_has_skills_agents_and_bootstrap():

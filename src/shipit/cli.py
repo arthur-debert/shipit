@@ -13,7 +13,7 @@ import sys
 import click
 
 from . import __version__
-from .verbs import gh_setup, install
+from .verbs import gh_setup, install, lint
 
 
 @click.group(
@@ -87,6 +87,24 @@ def install_cmd(path: str | None, push: bool, dry_run: bool) -> None:
     the PR rather than clobbered. Re-running with no changes is a clean no-op.
     """
     rc = install.run(path, dry_run=dry_run, push=push)
+    raise SystemExit(rc)
+
+
+@root.command(name="lint")
+@click.argument("path", required=False)
+@click.option(
+    "--fix",
+    is_flag=True,
+    help="Apply formatters in place (opt-in). Default is a check-only hard gate.",
+)
+def lint_cmd(path: str | None, fix: bool) -> None:
+    """Run the standardized multi-language gate over the tree at PATH.
+
+    PATH defaults to the current directory. The same invocation CI and the
+    pre-commit hook run — one binary, one config. A missing tool fails the gate
+    (it never skips); a clean tree exits 0, any failure exits 1.
+    """
+    rc = lint.run(path, fix=fix)
     raise SystemExit(rc)
 
 

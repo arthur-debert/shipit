@@ -46,6 +46,22 @@ AGENTS_KEY = "AGENTS.md#shipit-block"
 BLOCK_OPEN = "<!-- Managed by shipit; do not edit. Regenerate via shipit install. -->"
 BLOCK_CLOSE = "<!-- End shipit-managed block. -->"
 
+# The gate units Step 2 deferred to Step 3 (ROADMAP.lex §3). The consumer gets
+# the thin lefthook caller (whole file) and a `lint = "shipit lint"` task BLOCK
+# in its own pixi.toml — NEVER a linter-dependency block: the linters ride in as
+# shipit-the-package's own deps, so the consumer's manifest carries only the
+# stable task line (architecture.lex §5). The pixi block uses TOML-comment
+# markers (HTML comments are invalid TOML) and anchors under `[tasks]` so the
+# managed key lands in the right table on a first install.
+LEFTHOOK_FILE = "lefthook.yml"
+PIXI_FILE = "pixi.toml"
+PIXI_KEY = "pixi.toml#shipit-tasks"
+PIXI_OPEN = (
+    "# >>> shipit-managed tasks (do not edit; regenerate via `shipit install`) >>>"
+)
+PIXI_CLOSE = "# <<< shipit-managed tasks <<<"
+PIXI_ANCHOR = "[tasks]"
+
 INSTALL_BRANCH = "shipit/install"
 COMMIT_MESSAGE = "chore(shipit): install/update the managed set"
 
@@ -73,6 +89,12 @@ class Unit:
     kind: str  # "file" | "block"
     content: bytes
     executable: bool = False
+    # Block units only: the delimiters that fence shipit's region in a
+    # consumer-owned file, and (for a TOML table) the header the block anchors
+    # under on a first insert. Default to the AGENTS.md HTML-comment markers.
+    open_marker: str = BLOCK_OPEN
+    close_marker: str = BLOCK_CLOSE
+    anchor: str | None = None
 
     def desired_inner(self) -> str:
         """A block unit's canonical inner text (newline-trimmed)."""
@@ -154,6 +176,28 @@ def load_units() -> list[Unit]:
             executable=True,
         )
     )
+
+    # The gate units (ROADMAP.lex §3): the thin lefthook caller and the
+    # `lint = "shipit lint"` task block in the consumer's pixi.toml.
+    units.append(
+        Unit(
+            key=LEFTHOOK_FILE,
+            dest=LEFTHOOK_FILE,
+            kind="file",
+            content=_data_bytes("lefthook.yml"),
+        )
+    )
+    units.append(
+        Unit(
+            key=PIXI_KEY,
+            dest=PIXI_FILE,
+            kind="block",
+            content=_data_bytes("pixi-tasks-block.toml"),
+            open_marker=PIXI_OPEN,
+            close_marker=PIXI_CLOSE,
+            anchor=PIXI_ANCHOR,
+        )
+    )
     return units
 
 
@@ -162,28 +206,57 @@ def load_units() -> list[Unit]:
 # --------------------------------------------------------------------------
 
 
-def extract_block(text: str) -> str | None:
-    """The inner text of the shipit-managed block, or ``None`` when absent."""
-    i = text.find(BLOCK_OPEN)
+def extract_block(
+    text: str, open_marker: str = BLOCK_OPEN, close_marker: str = BLOCK_CLOSE
+) -> str | None:
+    """The inner text of the marker-delimited block, or ``None`` when absent."""
+    i = text.find(open_marker)
     if i == -1:
         return None
-    j = text.find(BLOCK_CLOSE, i)
+    j = text.find(close_marker, i)
     if j == -1:
         return None
-    return text[i + len(BLOCK_OPEN) : j].strip("\n")
+    return text[i + len(open_marker) : j].strip("\n")
 
 
-def splice_block(text: str, inner: str) -> str:
-    """Insert or replace the managed block in ``text``, owning only the block."""
-    block = f"{BLOCK_OPEN}\n{inner}\n{BLOCK_CLOSE}"
-    i = text.find(BLOCK_OPEN)
+def splice_block(
+    text: str,
+    inner: str,
+    open_marker: str = BLOCK_OPEN,
+    close_marker: str = BLOCK_CLOSE,
+    anchor: str | None = None,
+) -> str:
+    """Insert or replace the managed block in ``text``, owning only the block.
+
+    When the markers are already present the block is replaced in place. On a
+    first insert with an ``anchor`` (a TOML table header), the block is placed
+    immediately after that header — creating the header at EOF if absent — so the
+    managed keys land inside the right table. Without an anchor it appends at EOF
+    (the AGENTS.md case).
+    """
+    block = f"{open_marker}\n{inner}\n{close_marker}"
+    i = text.find(open_marker)
     if i != -1:
-        j = text.find(BLOCK_CLOSE, i)
+        j = text.find(close_marker, i)
         if j != -1:
-            return text[:i] + block + text[j + len(BLOCK_CLOSE) :]
+            return text[:i] + block + text[j + len(close_marker) :]
+    if anchor is not None:
+        return _insert_under_anchor(text, anchor, block)
     if text and not text.endswith("\n"):
         text += "\n"
     return f"{text}\n{block}\n" if text else f"{block}\n"
+
+
+def _insert_under_anchor(text: str, anchor: str, block: str) -> str:
+    """Place ``block`` right after the ``anchor`` line, adding the anchor if absent."""
+    lines = text.splitlines()
+    for idx, line in enumerate(lines):
+        if line.strip() == anchor:
+            spliced = lines[: idx + 1] + block.splitlines() + lines[idx + 1 :]
+            return "\n".join(spliced) + "\n"
+    base = text.rstrip("\n")
+    sep = "\n\n" if base else ""
+    return f"{base}{sep}{anchor}\n{block}\n"
 
 
 # --------------------------------------------------------------------------
@@ -250,7 +323,9 @@ def _consumer_inner(root: Path, unit: Unit) -> str | None:
     dest = root / unit.dest
     if not dest.is_file():
         return None
-    return extract_block(dest.read_text(encoding="utf-8"))
+    return extract_block(
+        dest.read_text(encoding="utf-8"), unit.open_marker, unit.close_marker
+    )
 
 
 def consumer_hash(root: Path, unit: Unit) -> str | None:
@@ -270,7 +345,16 @@ def _write_unit(root: Path, unit: Unit) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     if unit.kind == "block":
         existing = dest.read_text(encoding="utf-8") if dest.is_file() else ""
-        dest.write_text(splice_block(existing, unit.desired_inner()), encoding="utf-8")
+        dest.write_text(
+            splice_block(
+                existing,
+                unit.desired_inner(),
+                unit.open_marker,
+                unit.close_marker,
+                unit.anchor,
+            ),
+            encoding="utf-8",
+        )
         return
     dest.write_bytes(unit.content)
     if unit.executable:
@@ -292,8 +376,10 @@ def _consumer_snapshot(root: Path, unit: Unit) -> str:
 
 
 def _desired_text(unit: Unit) -> str:
-    return unit.desired_inner() + "\n" if unit.kind == "block" else unit.content.decode(
-        "utf-8", errors="replace"
+    return (
+        unit.desired_inner() + "\n"
+        if unit.kind == "block"
+        else unit.content.decode("utf-8", errors="replace")
     )
 
 
@@ -308,9 +394,7 @@ def _override_diff(unit: Unit, consumer_text: str) -> str:
     return "".join(diff)
 
 
-def _pr_body(
-    decisions: list[Decision], override_before: dict[str, str]
-) -> str:
+def _pr_body(decisions: list[Decision], override_before: dict[str, str]) -> str:
     """The PR body: what was added/updated, and every override surfaced with its diff.
 
     ``override_before`` holds each overridden unit's consumer content captured
@@ -343,7 +427,9 @@ def _pr_body(
             lines.append(f"<details><summary><code>{d.unit.dest}</code></summary>")
             lines.append("")
             lines.append("```diff")
-            lines.append(_override_diff(d.unit, override_before.get(d.unit.key, "")).rstrip("\n"))
+            lines.append(
+                _override_diff(d.unit, override_before.get(d.unit.key, "")).rstrip("\n")
+            )
             lines.append("```")
             lines.append("</details>")
             lines.append("")
@@ -397,14 +483,14 @@ def run(path: str | None, *, dry_run: bool = False, push: bool = False) -> int:
 
     if dry_run:
         # Dry-run must have NO side effects: no writes, no git, no PR.
-        print(f"  ({len(writes)} to write, {len(overrides)} override(s)) — dry-run, nothing written")
+        print(
+            f"  ({len(writes)} to write, {len(overrides)} override(s)) — dry-run, nothing written"
+        )
         return 0
 
     # Snapshot each override's consumer content BEFORE writing, so the PR diff
     # shows the real divergence rather than an empty diff against what we wrote.
-    override_before = {
-        d.unit.key: _consumer_snapshot(root, d.unit) for d in overrides
-    }
+    override_before = {d.unit.key: _consumer_snapshot(root, d.unit) for d in overrides}
 
     # Apply the writes, then record the advanced pristine map. Build [managed]
     # from the CURRENT decisions only — so a unit retired in a later shipit
