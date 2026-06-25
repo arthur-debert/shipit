@@ -1,0 +1,22 @@
+# shipit policy config. Owns POLICY (secrets, reviewers, the path→toolchain map,
+# pristine hashes); pixi.toml owns PROVISIONING. They describe different layers,
+# so there is no split-brain. See docs/dev/architecture.lex §6.
+
+# [secrets] — the single source of truth for repo Actions secrets. Each table key
+# is the GitHub secret NAME; the value names exactly one source:
+#
+#   NAME = { doppler = "KEY" }      # doppler secrets get KEY --plain --project github --config prd
+#   NAME = { env = "VAR" }          # value of $VAR in the environment
+#   NAME = { prompt = true }        # ask interactively
+#
+# Add `optional = true` to any entry whose absence should be a skip, not an error:
+#
+#   NAME = { doppler = "KEY", optional = true }
+#
+# `shipit gh-setup` resolves each and pushes it; a changed secret is re-set to its
+# new value. The same table feeds the cross-org workflow caller's `secrets:` block.
+[secrets]
+# shipit's own repo carries no required secrets yet; the cross-repo release token
+# is optional so a self-run without doppler access skips it cleanly rather than
+# failing. Real entries land as shipit's release/PR workflows arrive (Steps 4–6).
+RELEASE_TOKEN = { doppler = "RELEASE_TOKEN", optional = true }

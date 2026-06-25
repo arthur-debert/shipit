@@ -1,0 +1,28 @@
+# The portfolio-standard issue label set. `shipit gh-setup` ensures each of
+# these exists on the target repo (created-or-updated idempotently). Each table
+# key is the label name; `description` and `color` (6-hex, no leading #) are the
+# label's GitHub attributes.
+
+["bug"]
+description = "Denotes issue is a bug, implying this corrects current behaviour."
+color = "d73a4a"
+
+["feature"]
+description = "Feature related: adds new behaviour or capability."
+color = "a2eeef"
+
+["ready-for-agent"]
+description = "Ready to pick up."
+color = "0e8a16"
+
+["small"]
+description = "A small, focused task — suited for testing agent behaviour or onboarding new code-base comers."
+color = "c2e0c6"
+
+["needs-decision"]
+description = "Needs a maintainer decision before it can be ready to execute."
+color = "fbca04"
+
+["duplicate-of"]
+description = "This is a duplicate of another issue."
+color = "cfd3d7"

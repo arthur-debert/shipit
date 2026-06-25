@@ -1,0 +1,230 @@
+"""gh-setup — make a GitHub repo conform to the portfolio standard.
+
+Three idempotent passes (install AND update share this command):
+
+  a. ruleset — apply the standard main-branch-protection ruleset, requiring the
+     TARGET repo's own checks (auto-discovered, never phos's captured set).
+  b. labels  — ensure the standard label set exists (create-or-update).
+  c. secrets — resolve each ``[secrets]`` entry from .shipit.toml and push it.
+
+Re-running is a clean no-op: the ruleset is PUT in place when it already exists,
+labels are ``--force`` upserts, and a changed secret is re-set to its new value.
+"""
+
+from __future__ import annotations
+
+import copy
+import json
+import sys
+import tomllib
+from dataclasses import dataclass
+from importlib import resources
+from pathlib import Path
+
+from .. import checks as checks_mod
+from .. import config, gh, secretsrc
+
+RULESET_NAME = "main-branch-protection"
+
+
+@dataclass(frozen=True)
+class Label:
+    name: str
+    description: str
+    color: str
+
+
+# --------------------------------------------------------------------------
+# Packaged data
+# --------------------------------------------------------------------------
+
+
+def load_template() -> dict:
+    """The cleaned ruleset template (no per-repo id/source; empty checks)."""
+    text = (resources.files("shipit.data") / "main-branch-protection.json").read_text(
+        encoding="utf-8"
+    )
+    return json.loads(text)
+
+
+def load_labels() -> list[Label]:
+    """The standard label set, in declaration order."""
+    text = (resources.files("shipit.data") / "issue-labels.toml").read_text(
+        encoding="utf-8"
+    )
+    data = tomllib.loads(text)
+    labels: list[Label] = []
+    for name, attrs in data.items():
+        if not isinstance(attrs, dict):
+            continue
+        labels.append(
+            Label(
+                name=name,
+                description=str(attrs.get("description", "")),
+                color=str(attrs.get("color", "")),
+            )
+        )
+    return labels
+
+
+# --------------------------------------------------------------------------
+# Pure ruleset payload logic
+# --------------------------------------------------------------------------
+
+
+def build_payload(template: dict, checks: list[str]) -> dict:
+    """Inject ``checks`` into the template's ``required_status_checks`` rule."""
+    body = copy.deepcopy(template)
+    contexts = checks_mod.checks_json(checks)
+    for rule in body.get("rules", []):
+        if isinstance(rule, dict) and rule.get("type") == "required_status_checks":
+            rule.setdefault("parameters", {})["required_status_checks"] = contexts
+    return body
+
+
+def existing_ruleset_id(rulesets: object, name: str) -> int | None:
+    """The id of the first ruleset named ``name``, or ``None``."""
+    for rs in rulesets or []:
+        if isinstance(rs, dict) and rs.get("name") == name:
+            return rs.get("id")
+    return None
+
+
+# --------------------------------------------------------------------------
+# Passes
+# --------------------------------------------------------------------------
+
+
+def apply_ruleset(repo: str, checks: list[str], *, dry_run: bool) -> str:
+    """Pass (a). Returns the action taken: ``created`` / ``updated`` / ``dry-run``."""
+    template = load_template()
+    body = build_payload(template, checks)
+    try:
+        rulesets = gh.rest(f"repos/{repo}/rulesets")
+    except gh.GhError:
+        rulesets = None
+    existing = existing_ruleset_id(rulesets, RULESET_NAME)
+
+    print(f"  ruleset: {RULESET_NAME} "
+          f"(existing id: {existing if existing is not None else 'none'})")
+    print(f"  checks:  {', '.join(checks) if checks else '(none)'}")
+    if dry_run:
+        print("  --- payload (dry-run, not sent) ---")
+        print(json.dumps(body, indent=2))
+        return "dry-run"
+    if existing is not None:
+        gh.rest(f"repos/{repo}/rulesets/{existing}", method="PUT", body=body)
+        print("  ruleset updated")
+        return "updated"
+    gh.rest(f"repos/{repo}/rulesets", method="POST", body=body)
+    print("  ruleset created")
+    return "created"
+
+
+def ensure_labels(repo: str, labels: list[Label], *, dry_run: bool) -> int:
+    """Pass (b). Create-or-update each label; returns the count processed."""
+    for label in labels:
+        if dry_run:
+            print(f"  [dry] label {label.name}")
+            continue
+        gh.label_create(
+            repo, label.name, description=label.description, color=label.color
+        )
+        print(f"  label {label.name}")
+    return len(labels)
+
+
+def push_secrets(
+    repo: str,
+    sources: list[config.SecretSource],
+    *,
+    dry_run: bool,
+    prompt=None,
+) -> tuple[int, int]:
+    """Pass (c). Resolve and push each secret; returns (set, skipped) counts."""
+    set_count = 0
+    skipped = 0
+    for source in sources:
+        # Dry-run must have no side effects — do NOT resolve (which would hit
+        # doppler or prompt); just report the intended source.
+        if dry_run:
+            print(f"  [dry] secret {source.name} (from {source.kind})")
+            set_count += 1
+            continue
+        value = secretsrc.resolve(source, prompt=prompt)
+        if value is None:
+            print(f"  skip {source.name} (optional source absent)")
+            skipped += 1
+            continue
+        gh.secret_set(source.name, value, repo=repo)
+        print(f"  secret {source.name}")
+        set_count += 1
+    return set_count, skipped
+
+
+# --------------------------------------------------------------------------
+# Orchestrator
+# --------------------------------------------------------------------------
+
+
+def run(
+    repo: str | None,
+    *,
+    config_path: str | None,
+    checks_override: list[str] | None,
+    dry_run: bool,
+    prompt=None,
+) -> int:
+    """Drive the three passes against ``repo`` (current checkout when omitted)."""
+    toplevel = gh.repo_root()
+    current = None
+    if toplevel:
+        try:
+            current = gh.current_repo()
+        except gh.GhError:
+            current = None
+    target = repo or current
+    if not target:
+        print("gh-setup: no repo given and not inside a GitHub checkout", file=sys.stderr)
+        return 1
+    print(f"gh-setup: {target}{' (dry-run)' if dry_run else ''}")
+
+    # (a) ruleset
+    print("ruleset:")
+    if checks_override is not None:
+        checks = [c for c in checks_override if c]
+    else:
+        default_branch = gh.default_branch(target)
+        # Auto-discovery reads the target's own workflow files, so it needs the
+        # target's local checkout. For a different remote target, pass --checks.
+        local = toplevel if (toplevel and target == current) else None
+        checks = checks_mod.discover(target, default_branch, toplevel=local)
+    if not checks:
+        print(
+            "  warning: no required checks discovered — applying ruleset with an "
+            "empty required-checks set. Pass --checks a,b to set them explicitly.",
+            file=sys.stderr,
+        )
+    apply_ruleset(target, checks, dry_run=dry_run)
+
+    # (b) labels
+    print("labels:")
+    ensure_labels(target, load_labels(), dry_run=dry_run)
+
+    # (c) secrets
+    print("secrets:")
+    cfg_path = config_path or str(Path(toplevel or ".") / config.CONFIG_NAME)
+    try:
+        cfg = config.load(cfg_path)
+        sources = config.load_secrets(cfg)
+    except config.ConfigError as exc:
+        print(f"  no secrets applied: {exc}")
+        sources = []
+    if sources:
+        set_count, skipped = push_secrets(
+            target, sources, dry_run=dry_run, prompt=prompt
+        )
+        print(f"  {set_count} secret(s) set, {skipped} skipped")
+
+    print("done.")
+    return 0

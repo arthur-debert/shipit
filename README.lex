@@ -68,6 +68,22 @@ Scope
 
   2. PR Reviews
 
+    Draft → shepherd → ready, then stop:
+
+        Every change ships as a PR the agent drives. Open it as a DRAFT,
+        then shepherd the whole loop while it stays draft — request and
+        address reviews, get CI green, make it mergeable. Flipping
+        draft → ready is the ONE signal that means "done iterating; a
+        human can validate and merge", so it happens only when all three
+        hold: reviews addressed, CI green, mergeable.
+
+        The agent stops at that flip — it does NOT merge. Opening as a
+        draft and flipping it to ready is the agent's job; the human does
+        the final read and merge unless they say otherwise. A human
+        request for changes sends the PR back to draft and the loop
+        repeats. The per-reviewer re-review and review-break rules are in
+        [./AGENTS.lex].
+
     2.1 pixil shipit-request-review <pr_number> <reviewer>....
 
       2.1.1 This pixi extension will look into the projects .shipit.toml file to read which reviewers are used in the project , for now we have copilot, agy-local, and codex-local. 

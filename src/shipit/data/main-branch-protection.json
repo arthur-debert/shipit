@@ -1,9 +1,6 @@
 {
-  "id": 16096943,
   "name": "main-branch-protection",
   "target": "branch",
-  "source_type": "Repository",
-  "source": "phos-editor/app",
   "enforcement": "active",
   "conditions": {
     "ref_name": {
@@ -35,14 +32,7 @@
       "parameters": {
         "strict_required_status_checks_policy": false,
         "do_not_enforce_on_create": false,
-        "required_status_checks": [
-          {
-            "context": "app-ui-unit-test / check"
-          },
-          {
-            "context": "tauri-wire-contract-test / check"
-          }
-        ]
+        "required_status_checks": []
       }
     },
     {
