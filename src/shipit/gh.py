@@ -19,15 +19,16 @@ def _token_env(token: str | None) -> dict[str, str] | None:
     """The env override that makes ``gh`` authenticate as ``token``.
 
     ``None`` leaves the user's normal ``gh`` auth in place. Otherwise sets
-    ``GH_TOKEN=<token>`` and CLEARS ``GITHUB_TOKEN`` (whose precedence vs
-    ``GH_TOKEN`` is gh-version dependent) so the call authenticates as EXACTLY
-    the token we pass — the seam for posting a review AS a GitHub App
-    installation. An installation token (``ghs_…``) is a normal bearer token to
-    ``gh``.
+    ``GH_TOKEN=<token>``; :func:`_run` also *removes* any ``GITHUB_TOKEN`` from
+    the child env (rather than blanking it — an empty-but-set var still reads as
+    "set" to many tools, and its precedence vs ``GH_TOKEN`` is gh-version
+    dependent) so the call authenticates as EXACTLY the token we pass — the seam
+    for posting a review AS a GitHub App installation. An installation token
+    (``ghs_…``) is a normal bearer token to ``gh``.
     """
     if token is None:
         return None
-    return {"GH_TOKEN": token, "GITHUB_TOKEN": ""}
+    return {"GH_TOKEN": token}
 
 
 def _run(
@@ -47,7 +48,9 @@ def _run(
     if token is not None:
         import os
 
-        env = {**os.environ, **_token_env(token)}
+        # Drop GITHUB_TOKEN entirely (not blank it) so only GH_TOKEN remains.
+        env = {k: v for k, v in os.environ.items() if k != "GITHUB_TOKEN"}
+        env.update(_token_env(token))
     try:
         proc = subprocess.run(
             args,

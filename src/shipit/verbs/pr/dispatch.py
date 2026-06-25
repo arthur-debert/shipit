@@ -114,9 +114,11 @@ def _only_waiting(status: TaskStatus) -> bool:
     engine's own words — rather than re-inspecting reviewer lifecycles here, so
     the dispatcher stays a thin routing decision over the engine's output.
     """
-    action = status.next_action
+    # Case-insensitive: the next-action text is human-facing prose, so match its
+    # request/re-request verbs regardless of the engine's casing.
+    action = status.next_action.lower()
     return (
         "wait (already requested" in action
         and "request for the current head:" not in action
-        and "RE-REQUEST for the current head" not in action
+        and "re-request for the current head" not in action
     )

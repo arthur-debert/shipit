@@ -47,14 +47,6 @@ class PRContext:
     workdir: str = "."
 
 
-def _is_git_checkout(workdir: str) -> bool:
-    result = proc.run(
-        ["git", "-C", workdir, "rev-parse", "--is-inside-work-tree"],
-        check=False,
-    )
-    return result.returncode == 0 and result.stdout.strip() == "true"
-
-
 def _git_toplevel(workdir: str) -> str | None:
     """The git working-tree root for ``workdir``, or ``None`` when not a checkout.
 
