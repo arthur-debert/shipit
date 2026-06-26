@@ -228,7 +228,8 @@ def _parse_options(name: str, opts: object) -> bool:
         raise RequiredReviewersConfigError(
             f"{OVERRIDE_FILE} `{OVERRIDE_KEY}.{name}` has unknown option(s) "
             f"{unknown} — supported options are {sorted(_KNOWN_OPTIONS)} "
-            "(`rerun` is consumed now; `model`/`instructions` are reserved)"
+            "(`rerun` gates re-review; `model`/`instructions`/`timeout` are read "
+            "by the local-agent run path)"
         )
     for field in _RESERVED_OPTIONS:
         if field in opts and not isinstance(opts[field], str):

@@ -64,7 +64,7 @@ def test_resolve_pr_normalizes_workdir_to_toplevel(monkeypatch):
 
         class R:
             returncode = 0
-            stdout = "the diff\n"
+            stdout = "mergebasesha\n" if args[:1] == ["merge-base"] else "the diff\n"
 
         return R()
 
@@ -72,12 +72,50 @@ def test_resolve_pr_normalizes_workdir_to_toplevel(monkeypatch):
 
     ctx = diff.resolve_pr(5, workdir="/repo/root/src/deep")
     assert ctx.workdir == "/repo/root"
-    # The diff is computed against the authoritative base sha (baseRefOid), not a
-    # local `origin/<base>` ref.
+    # The PRContext base is the authoritative base sha (baseRefOid), not a local
+    # `origin/<base>` ref.
     assert ctx.base_sha == "basesha"
-    assert seen_diff_specs == ["basesha...headsha", "basesha...headsha"]
+    # The diff endpoint is the MERGE BASE of the authoritative base + head (the PR
+    # branch point) — GitHub's three-dot diff — computed explicitly, not the raw
+    # base tip.
+    assert seen_diff_specs == ["mergebasesha...headsha", "mergebasesha...headsha"]
     # Every git invocation ran against the toplevel, not the nested subdir.
     assert set(seen_workdirs) == {"/repo/root"}
+
+
+def test_resolve_pr_no_common_ancestor_fails_loud(monkeypatch):
+    """When the authoritative base and head share no merge base, resolve_pr fails
+    loud rather than degrading to a base-tip diff."""
+    monkeypatch.setattr(diff, "_git_toplevel", lambda wd: "/repo/root")
+    monkeypatch.setattr(
+        diff.gh,
+        "pr_view",
+        lambda *a, **k: (
+            '{"number": 5, "headRefName": "feat", "headRefOid": "headsha", '
+            '"baseRefName": "main", "baseRefOid": "basesha"}'
+        ),
+    )
+    monkeypatch.setattr(diff, "_sha_present", lambda wd, sha: True)
+
+    diff_attempted = False
+
+    def fake_git(workdir, args, *, check=True):
+        nonlocal diff_attempted
+        if args[:1] == ["diff"]:
+            diff_attempted = True
+
+        class R:
+            # merge-base finds no common ancestor (rc=1, empty stdout).
+            returncode = 1 if args[:1] == ["merge-base"] else 0
+            stdout = ""
+
+        return R()
+
+    monkeypatch.setattr(diff, "_git", fake_git)
+
+    with pytest.raises(diff.ReviewError, match="no common ancestor"):
+        diff.resolve_pr(5, workdir="/repo/root")
+    assert diff_attempted is False
 
 
 def test_resolve_pr_missing_base_oid_fails_loud(monkeypatch):

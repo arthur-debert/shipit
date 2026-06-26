@@ -128,12 +128,14 @@ def resolve_pr(
 
     Resolves BOTH endpoints authoritatively from ``gh pr view`` — the head from
     ``headRefOid`` and the base from ``baseRefOid`` — then fetches each as a known
-    commit object (never a branch switch) and computes the three-dot diff
-    ``base_sha...head_sha``. Both SHAs are HARD preconditions: a base or head that
-    can't be made present fails loud rather than silently degrading to a local
-    ref or the base tip (the review must never run against a stale/wrong base).
-    Raises :class:`ReviewError` if ``workdir`` is not a git checkout, the PR can't
-    be resolved, or either commit can't be fetched into ``workdir``.
+    commit object (never a branch switch) and diffs from their MERGE BASE (the PR
+    branch point) to the head: GitHub's three-dot "Files changed" diff, computed
+    from an authoritative base rather than a possibly-stale local ``origin/<base>``.
+    Both SHAs are HARD preconditions: a base or head that can't be made present
+    fails loud rather than silently degrading to a local ref or the base tip (the
+    review must never run against a stale/wrong base). Raises :class:`ReviewError`
+    if ``workdir`` is not a git checkout, the PR can't be resolved, either commit
+    can't be fetched, or the two share no common ancestor.
     """
     workdir = workdir or os.getcwd()
     toplevel = _git_toplevel(workdir)
@@ -228,14 +230,30 @@ def resolve_pr(
             f"reviewing against a stale or wrong base."
         )
 
+    # The diff endpoint is the MERGE BASE of the authoritative base + head — the
+    # point at which the PR branch diverged from its base — so the review sees
+    # exactly the PR's own commits (GitHub's "Files changed" three-dot diff), never
+    # commits that merely landed on the base after the branch point. We compute
+    # merge-base explicitly (rather than relying on git's `A...B` shorthand) so the
+    # endpoint is unambiguous, and FAIL LOUD if there is no common ancestor instead
+    # of silently degrading to the base tip.
+    merge_base = _git(workdir, ["merge-base", base_sha, head_point], check=False)
+    if merge_base.returncode != 0 or not merge_base.stdout.strip():
+        raise ReviewError(
+            f"PR #{pr} base {base_sha} and head {head_point} have no common "
+            f"ancestor — cannot compute a meaningful review diff. The PR base/head "
+            f"may be unrelated histories; resolve the base and re-run."
+        )
+    base_point = merge_base.stdout.strip()
+
     try:
-        diff = _git(workdir, ["diff", f"{base_sha}...{head_point}"]).stdout
+        diff = _git(workdir, ["diff", f"{base_point}...{head_point}"]).stdout
         names = _git(
-            workdir, ["diff", "--name-only", f"{base_sha}...{head_point}"]
+            workdir, ["diff", "--name-only", f"{base_point}...{head_point}"]
         ).stdout
     except proc.ProcError as exc:
         raise ReviewError(
-            f"failed to compute diff for PR #{pr} ({base_sha}...{head_point}): {exc}"
+            f"failed to compute diff for PR #{pr} ({base_point}...{head_point}): {exc}"
         ) from exc
     changed_files = [line for line in names.splitlines() if line.strip()]
 
