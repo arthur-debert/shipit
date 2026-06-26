@@ -1,10 +1,10 @@
-"""Unit tests for the durable file sink + logging config (OBS01-WS01).
+"""Behavioural tests for shipit's logging configuration (OBS01).
 
-Asserts external behavior in line with shipit's conventions: the resolved sink
-path, the rotation bound, the file handler's verbose level, and that the
-dependency / single-source-of-truth constraints hold. The platformdirs base and
-the ``(owner, repo)`` namespace are injected so nothing ever writes to a real
-``$HOME``.
+Asserts external behaviour in line with shipit's conventions — what reaches
+stderr / stdout / the step-summary file, the resolved file-sink path, the
+rotation bound, the handler levels, and the dependency / single-source-of-truth
+constraints. The platformdirs base and the ``(owner, repo)`` namespace are
+injected so nothing ever writes to a real ``$HOME``.
 """
 
 from __future__ import annotations
@@ -15,31 +15,151 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 import pytest
-
-from shipit import logsetup
+from shipit import cli, logsetup
 
 
 @pytest.fixture(autouse=True)
 def _reset_package_logger():
-    """Detach any handlers around each test so the process-lifetime ``shipit``
-    logger never leaks state (configure_logging mutates a module-global logger)."""
+    """Fully reset the process-lifetime ``shipit`` logger around each test, so a
+    configured logger from one test never leaks its sinks/level into the next."""
     logger = logging.getLogger(logsetup.LOGGER_NAME)
     saved = list(logger.handlers)
     saved_level, saved_prop = logger.level, logger.propagate
-    logger.handlers.clear()
+    for handler in saved:
+        logger.removeHandler(handler)
     try:
         yield
     finally:
-        for handler in logger.handlers:
+        for handler in list(logger.handlers):
             handler.close()
-        logger.handlers[:] = saved
+            logger.removeHandler(handler)
+        for handler in saved:
+            logger.addHandler(handler)
         logger.setLevel(saved_level)
         logger.propagate = saved_prop
 
 
-# --------------------------------------------------------------------------
-# Path resolution — per-repo namespace under the injected platformdirs base
-# --------------------------------------------------------------------------
+def _emit(level: int, message: str) -> None:
+    logging.getLogger(logsetup.LOGGER_NAME).log(level, message)
+
+
+# ==========================================================================
+# Console sink — quiet by default, raised by -v
+# ==========================================================================
+
+
+def test_console_quiet_by_default_drops_below_warning(capfd):
+    # No CI env and no file params, so only the console sink is attached.
+    logsetup.configure_logging(verbose=False, env={})
+    _emit(logging.INFO, "info-detail")
+    _emit(logging.DEBUG, "debug-detail")
+    _emit(logging.WARNING, "warn-surfaced")
+    err = capfd.readouterr().err
+    assert "info-detail" not in err
+    assert "debug-detail" not in err
+    assert "warn-surfaced" in err
+
+
+def test_default_cli_invocation_emits_nothing_below_warning(capfd):
+    # A normal command run must not change the user-facing surface: nothing
+    # below WARNING reaches the console. Routed through a real subcommand so the
+    # root group callback (which calls configure_logging) actually fires — a
+    # bare top-level --help is eager and short-circuits before the callback.
+    rc = cli.main(["lint", "--help"])
+    assert rc == 0
+    _emit(logging.INFO, "info-after-cli")
+    err = capfd.readouterr().err
+    assert "info-after-cli" not in err
+
+
+def test_verbose_raises_console_level(capfd):
+    logsetup.configure_logging(verbose=True, env={})
+    _emit(logging.INFO, "info-detail")
+    _emit(logging.DEBUG, "debug-detail")
+    err = capfd.readouterr().err
+    assert "info-detail" in err
+    assert "debug-detail" in err
+
+
+def test_cli_verbose_flag_raises_console_level(capfd):
+    # Drive it through the real CLI flag, not just configure_logging directly.
+    # `-v` is a root-group option, so it precedes the subcommand; the subcommand
+    # is present so the group callback fires before lint's own --help exits.
+    cli.main(["-v", "lint", "--help"])
+    _emit(logging.INFO, "info-via-flag")
+    err = capfd.readouterr().err
+    assert "info-via-flag" in err
+
+
+# ==========================================================================
+# CI sink — stdout job log + optional step summary
+# ==========================================================================
+
+
+def test_ci_detected_logs_go_to_stdout(capfd):
+    logsetup.configure_logging(verbose=False, env={"CI": "true"})
+    _emit(logging.INFO, "ci-record")
+    captured = capfd.readouterr()
+    assert "ci-record" in captured.out
+    # The CI record lands on stdout, not on the quiet stderr console.
+    assert "ci-record" not in captured.err
+
+
+def test_ci_stdout_captures_debug(capfd):
+    # In CI the job log is the durable run record, so DEBUG must land there.
+    logsetup.configure_logging(verbose=False, env={"CI": "true"})
+    _emit(logging.DEBUG, "ci-debug-record")
+    out = capfd.readouterr().out
+    assert "ci-debug-record" in out
+
+
+def test_github_step_summary_is_appended(tmp_path):
+    summary = tmp_path / "step_summary.md"
+    summary.write_text("pre-existing\n")
+    logsetup.configure_logging(
+        verbose=False,
+        env={"GITHUB_ACTIONS": "true", "GITHUB_STEP_SUMMARY": str(summary)},
+    )
+    _emit(logging.INFO, "summary-line")
+    contents = summary.read_text()
+    # Appended, not truncated.
+    assert "pre-existing" in contents
+    assert "summary-line" in contents
+
+
+def test_unopenable_step_summary_does_not_crash(capfd, tmp_path):
+    # An unwritable $GITHUB_STEP_SUMMARY (here: a path under a non-existent dir)
+    # must not fail the command; the stdout CI sink still works.
+    bad_path = tmp_path / "missing-dir" / "summary.md"
+    logsetup.configure_logging(
+        verbose=False,
+        env={"GITHUB_ACTIONS": "true", "GITHUB_STEP_SUMMARY": str(bad_path)},
+    )
+    _emit(logging.INFO, "still-running")
+    assert "still-running" in capfd.readouterr().out
+    assert not bad_path.exists()
+
+
+def test_no_ci_means_no_stdout_handler(capfd):
+    logsetup.configure_logging(verbose=False, env={})
+    _emit(logging.INFO, "info-detail")
+    _emit(logging.WARNING, "warn-detail")
+    out = capfd.readouterr().out
+    assert "info-detail" not in out
+    assert "warn-detail" not in out
+
+
+def test_is_ci_injectable_and_ignores_falsey_values():
+    assert logsetup.is_ci({"CI": "true"}) is True
+    assert logsetup.is_ci({"GITHUB_ACTIONS": "true"}) is True
+    assert logsetup.is_ci({"CI": "false"}) is False
+    assert logsetup.is_ci({"CI": ""}) is False
+    assert logsetup.is_ci({}) is False
+
+
+# ==========================================================================
+# File sink — path resolution (per-repo under the injected platformdirs base)
+# ==========================================================================
 
 
 def test_resolve_log_dir_is_per_repo_under_base(tmp_path):
@@ -62,9 +182,9 @@ def test_resolve_log_dir_uses_platformdirs_when_base_omitted(monkeypatch, tmp_pa
     assert path == tmp_path / "platform-base" / "acme" / "widgets"
 
 
-# --------------------------------------------------------------------------
-# The file handler — rotating, bounded, verbose
-# --------------------------------------------------------------------------
+# ==========================================================================
+# File sink — the handler is rotating, bounded, verbose
+# ==========================================================================
 
 
 def test_file_handler_is_rotating_with_5mb_x_3_bound(tmp_path):
@@ -126,9 +246,9 @@ def test_file_handler_rolls_over_rather_than_growing_unbounded(tmp_path, monkeyp
         )
 
 
-# --------------------------------------------------------------------------
-# configure_logging — wiring + idempotence + boundary injection
-# --------------------------------------------------------------------------
+# ==========================================================================
+# configure_logging — file-sink wiring + idempotence + boundary injection
+# ==========================================================================
 
 
 def test_configure_logging_attaches_one_file_handler(tmp_path):
@@ -173,9 +293,67 @@ def test_configure_logging_rejects_non_slug_from_gh(tmp_path, monkeypatch):
         logsetup.configure_logging(base_dir=tmp_path)
 
 
-# --------------------------------------------------------------------------
+def test_no_file_params_means_no_file_handler():
+    # The surface-only call style (console/CI, used by WS02 tests and the CLI when
+    # outside a repo): with neither owner_repo nor base_dir, no file sink and no
+    # gh boundary call.
+    logsetup.configure_logging(verbose=False, env={})
+    logger = logging.getLogger(logsetup.LOGGER_NAME)
+    assert not any(isinstance(h, RotatingFileHandler) for h in logger.handlers)
+
+
+def test_resolve_current_owner_repo_is_best_effort(monkeypatch):
+    monkeypatch.setattr(
+        logsetup.gh,
+        "current_repo",
+        lambda: (_ for _ in ()).throw(logsetup.gh.GhError("no repo")),
+    )
+    assert logsetup.resolve_current_owner_repo() is None
+
+
+def test_all_three_sinks_attach_together(capfd, tmp_path):
+    # The merged shape: console + CI + file all on the logger at once.
+    logsetup.configure_logging(
+        verbose=False, env={"CI": "true"}, owner_repo=("o", "r"), base_dir=tmp_path
+    )
+    logger = logging.getLogger(logsetup.LOGGER_NAME)
+    names = {h.name for h in logger.handlers}
+    assert "shipit-console" in names
+    assert "shipit-ci-stdout" in names
+    assert "shipit-file" in names
+
+
+def test_repeated_configure_does_not_stack_handlers(tmp_path):
+    logsetup.configure_logging(
+        verbose=False, env={"CI": "true"}, owner_repo=("o", "r"), base_dir=tmp_path
+    )
+    logger = logging.getLogger(logsetup.LOGGER_NAME)
+    first = len([h for h in logger.handlers if (h.name or "").startswith("shipit-")])
+    logsetup.configure_logging(
+        verbose=False, env={"CI": "true"}, owner_repo=("o", "r"), base_dir=tmp_path
+    )
+    second = len([h for h in logger.handlers if (h.name or "").startswith("shipit-")])
+    assert first == second
+
+
+def test_console_level_independent_of_file_handler(capfd, tmp_path):
+    # File sink at DEBUG must not change what the quiet console surfaces.
+    logsetup.configure_logging(
+        verbose=False, env={}, owner_repo=("o", "r"), base_dir=tmp_path
+    )
+    _emit(logging.INFO, "info-detail")
+    # Console (stderr) stays quiet...
+    assert "info-detail" not in capfd.readouterr().err
+    # ...while the file sink (DEBUG) captured it.
+    log_file = tmp_path / "o" / "r" / "shipit.log"
+    for h in logging.getLogger(logsetup.LOGGER_NAME).handlers:
+        h.flush()
+    assert "info-detail" in log_file.read_text()
+
+
+# ==========================================================================
 # Dependency + single-source-of-truth constraints
-# --------------------------------------------------------------------------
+# ==========================================================================
 
 
 def test_platformdirs_declared_as_dependency():

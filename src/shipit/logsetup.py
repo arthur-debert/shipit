@@ -2,23 +2,38 @@
 
 Named ``logsetup`` (NOT ``logging``) so it never shadows the stdlib module. It
 configures the package logger ``logging.getLogger("shipit")`` and attaches the
-sinks shipit logs through.
+sinks shipit logs through. Each sink lives in its own builder so the wiring in
+:func:`configure_logging` is a simple, additive union.
 
-This work stream (OBS01-WS01) wires the durable, per-repo, rotating **file**
-sink — the diagnosis record (PRD ``docs/prd/obs01-logging.md`` §Solution). The
-console / CI handlers are a sibling work stream (WS02); each sink lives in its
-own builder function so a sibling stream merges in by adding one call inside
-:func:`configure_logging`.
+Three sinks, chosen for where shipit runs (PRD ``docs/prd/obs01-logging.md``):
 
-Path resolution is :func:`platformdirs.user_log_dir` — the single source of
-truth (no platform ``if`` branches, no bespoke override env var). The base and
-the ``(owner, repo)`` namespace are injectable so tests cross the boundary
-without writing to a real ``$HOME``.
+- **Console** — quiet by default (WARNING+ to stderr), so the user-facing surface
+  is unchanged in spirit from today. ``-v/--verbose`` raises it to DEBUG so an
+  interactive debugging session can watch detail live.
+- **CI** — when a CI environment is detected, a stdout handler so the run's record
+  lands in the job log (DEBUG-level, the durable artifact CI keeps); and, when
+  ``$GITHUB_STEP_SUMMARY`` is present, a best-effort handler that appends records
+  to that file.
+- **File** — the durable, per-repo, rotating diagnosis record. Path resolution is
+  :func:`platformdirs.user_log_dir` — the single source of truth (no platform
+  ``if`` branches, no bespoke override env var) — namespaced ``<base>/<owner>/<repo>/``
+  and bounded by a :class:`~logging.handlers.RotatingFileHandler`. The base and
+  the ``(owner, repo)`` namespace are injectable so tests cross the boundary
+  without writing to a real ``$HOME``.
+
+The three level controls are independent: the file sink is always verbose
+(DEBUG); the console is quiet unless ``-v``; the CI stdout sink is verbose. Every
+handler this module attaches carries a ``shipit-`` name prefix so a repeated
+:func:`configure_logging` call replaces exactly its own handlers and never
+double-attaches, while leaving any foreign handler alone.
 """
 
 from __future__ import annotations
 
 import logging
+import os
+import sys
+from collections.abc import Mapping
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -30,6 +45,15 @@ from . import gh
 #: of a child name propagates here).
 LOGGER_NAME = "shipit"
 
+# Every handler this module attaches carries a name with this prefix, so we can
+# recognise — and replace — exactly our own handlers on a repeated call without
+# disturbing anything a host application may have attached to the logger.
+_HANDLER_PREFIX = "shipit-"
+
+#: CI-detection env vars, in no particular order. ``GITHUB_ACTIONS`` is the
+#: GitHub-specific signal; ``CI`` is the de-facto cross-provider convention.
+_CI_ENV_VARS = ("GITHUB_ACTIONS", "CI")
+
 #: The basename of the active log file inside the per-repo directory.
 LOG_FILENAME = "shipit.log"
 
@@ -39,12 +63,80 @@ LOG_FILENAME = "shipit.log"
 MAX_BYTES = 5 * 1024 * 1024
 BACKUP_COUNT = 3
 
-#: Stable handler name so a repeated :func:`configure_logging` never
-#: double-attaches the file sink.
-_FILE_HANDLER_NAME = "shipit-file"
+#: Stable handler name for the file sink. Shares the ``shipit-`` prefix so the
+#: idempotency sweep covers it too.
+_FILE_HANDLER_NAME = _HANDLER_PREFIX + "file"
 
-#: The verbose record format — timestamp, level, logger, message.
+#: The verbose file record format — timestamp, level, logger, message.
 _FILE_FORMAT = "%(asctime)s %(levelname)-7s %(name)s %(message)s"
+
+#: The plain record format shared by the console / CI surface sinks.
+_SURFACE_FORMAT = "%(levelname)s %(name)s: %(message)s"
+
+
+def _surface_formatter() -> logging.Formatter:
+    """The plain record format shared by the console / CI surface sinks."""
+    return logging.Formatter(_SURFACE_FORMAT)
+
+
+# --------------------------------------------------------------------------
+# Surface sinks — console + CI
+# --------------------------------------------------------------------------
+
+
+def is_ci(env: Mapping[str, str] | None = None) -> bool:
+    """Return whether we appear to be running inside a CI environment.
+
+    ``env`` is injectable so tests never depend on the real process environment;
+    it defaults to ``os.environ``. A CI is detected when any known signal var is
+    set to a non-empty, non-``false`` value (GitHub sets ``CI=true``).
+    """
+    env = os.environ if env is None else env
+    for var in _CI_ENV_VARS:
+        value = env.get(var)
+        if value and value.strip().lower() not in ("", "0", "false"):
+            return True
+    return False
+
+
+def build_console_handler(verbose: bool = False) -> logging.Handler:
+    """Build the quiet-by-default console handler (stderr).
+
+    WARNING and above by default — so normal output looks like it does today —
+    raised to DEBUG when ``verbose`` is set.
+    """
+    handler = logging.StreamHandler(stream=sys.stderr)
+    handler.setLevel(logging.DEBUG if verbose else logging.WARNING)
+    handler.setFormatter(_surface_formatter())
+    handler.set_name(_HANDLER_PREFIX + "console")
+    return handler
+
+
+def build_ci_stdout_handler() -> logging.Handler:
+    """Build the CI stdout handler so the run's record lands in the job log.
+
+    Captures DEBUG and up: in CI the job log *is* the durable run record (per the
+    PRD), so it carries the full verbose detail, not just INFO+.
+    """
+    handler = logging.StreamHandler(stream=sys.stdout)
+    handler.setLevel(logging.DEBUG)
+    handler.setFormatter(_surface_formatter())
+    handler.set_name(_HANDLER_PREFIX + "ci-stdout")
+    return handler
+
+
+def build_step_summary_handler(path: str) -> logging.Handler:
+    """Build a handler that appends records to ``$GITHUB_STEP_SUMMARY``."""
+    handler = logging.FileHandler(path, mode="a", encoding="utf-8")
+    handler.setLevel(logging.INFO)
+    handler.setFormatter(_surface_formatter())
+    handler.set_name(_HANDLER_PREFIX + "ci-summary")
+    return handler
+
+
+# --------------------------------------------------------------------------
+# File sink — the durable, per-repo, rotating diagnosis record
+# --------------------------------------------------------------------------
 
 
 def resolve_log_dir(
@@ -93,8 +185,8 @@ def build_file_handler(
 
     A :class:`~logging.handlers.RotatingFileHandler` bounded at :data:`MAX_BYTES`
     × :data:`BACKUP_COUNT` so it rolls over rather than growing without limit. It
-    emits at ``DEBUG`` (the verbose record), independent of any console level a
-    sibling work stream sets. The per-repo directory is created on demand.
+    emits at ``DEBUG`` (the verbose record), independent of the console level. The
+    per-repo directory is created on demand.
     """
     log_dir = resolve_log_dir(owner_repo, base_dir=base_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -108,39 +200,6 @@ def build_file_handler(
     handler.setLevel(logging.DEBUG)
     handler.setFormatter(logging.Formatter(_FILE_FORMAT))
     return handler
-
-
-def configure_logging(
-    verbose: bool = False,
-    *,
-    owner_repo: tuple[str, str] | None = None,
-    base_dir: str | Path | None = None,
-) -> None:
-    """Configure the ``shipit`` package logger and attach the file sink.
-
-    Sets the package logger to ``DEBUG`` so the verbose file record is captured
-    regardless of the (quieter) console level a sibling work stream applies, and
-    is idempotent: repeated calls never double-attach the file handler (guarded
-    by handler name). ``propagate`` is turned off so shipit's records do not
-    also bubble to a host app's root logger.
-
-    ``owner_repo`` / ``base_dir`` are injectable boundaries for tests; in normal
-    use ``owner_repo`` is resolved from the current checkout via :mod:`shipit.gh`
-    and ``base_dir`` from ``platformdirs``.
-
-    WS02 merge seam: the console / CI handlers attach here too. Add their builder
-    calls alongside the file handler below; ``verbose`` is the thread for the
-    console-level control (this stream keeps it in the signature but the file
-    sink is verbose unconditionally).
-    """
-    logger = logging.getLogger(LOGGER_NAME)
-    logger.setLevel(logging.DEBUG)
-    logger.propagate = False
-
-    if not _has_handler(logger, _FILE_HANDLER_NAME):
-        if owner_repo is None:
-            owner_repo = _current_owner_repo()
-        logger.addHandler(build_file_handler(owner_repo, base_dir=base_dir))
 
 
 def _current_owner_repo() -> tuple[str, str]:
@@ -159,6 +218,97 @@ def _current_owner_repo() -> tuple[str, str]:
     return owner, repo
 
 
-def _has_handler(logger: logging.Logger, name: str) -> bool:
-    """Whether ``logger`` already carries a handler named ``name``."""
-    return any(getattr(handler, "name", None) == name for handler in logger.handlers)
+def resolve_current_owner_repo() -> tuple[str, str] | None:
+    """Best-effort ``(owner, repo)`` for the current checkout, or ``None``.
+
+    For the CLI entrypoint, where a logging-setup failure must never crash the
+    command: if the repo can't be determined (not a checkout, ``gh`` unavailable,
+    a malformed slug), return ``None`` so the caller simply runs without the file
+    sink rather than aborting.
+    """
+    try:
+        return _current_owner_repo()
+    except (gh.GhError, ValueError):
+        return None
+
+
+# --------------------------------------------------------------------------
+# Wiring
+# --------------------------------------------------------------------------
+
+
+def _clear_own_handlers(logger: logging.Logger) -> None:
+    """Detach (and close) only the handlers this module previously attached.
+
+    Keyed on the ``shipit-`` name prefix (which covers console, CI, and file
+    handlers) so a repeated :func:`configure_logging` call never stacks duplicate
+    handlers, while leaving foreign handlers alone.
+    """
+    for handler in list(logger.handlers):
+        if (handler.name or "").startswith(_HANDLER_PREFIX):
+            logger.removeHandler(handler)
+            handler.close()
+
+
+def configure_logging(
+    verbose: bool = False,
+    env: Mapping[str, str] | None = None,
+    *,
+    owner_repo: tuple[str, str] | None = None,
+    base_dir: str | Path | None = None,
+) -> None:
+    """Configure the ``shipit`` package logger and attach its sinks.
+
+    The package logger is set to ``DEBUG`` (it passes everything through; each
+    handler's own level decides what that surface shows) and is detached from the
+    root logger so records do not double-emit. Safe to call repeatedly: only this
+    module's own (``shipit-``prefixed) handlers are replaced, so successive calls
+    re-apply levels without stacking duplicates.
+
+    Sinks:
+
+    - **Console** — always attached; quiet (WARNING+) unless ``verbose``.
+    - **CI** — attached only when :func:`is_ci` (``env`` is injectable, defaulting
+      to ``os.environ``): a stdout handler, plus a best-effort
+      ``$GITHUB_STEP_SUMMARY`` appender.
+    - **File** — attached when a target repo is known, i.e. when ``owner_repo`` or
+      ``base_dir`` is provided. ``owner_repo`` / ``base_dir`` are injectable
+      boundaries for tests; with ``base_dir`` given but ``owner_repo`` omitted, the
+      repo is resolved (strictly) via :mod:`shipit.gh`. The CLI entrypoint resolves
+      ``owner_repo`` best-effort (:func:`resolve_current_owner_repo`) and passes it,
+      so a normal run gets the file sink and a non-repo run simply skips it.
+    """
+    env = os.environ if env is None else env
+
+    logger = logging.getLogger(LOGGER_NAME)
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+
+    _clear_own_handlers(logger)
+
+    # Console sink — always on, quiet by default.
+    logger.addHandler(build_console_handler(verbose=verbose))
+
+    # CI sinks — only when we detect a CI environment.
+    if is_ci(env):
+        logger.addHandler(build_ci_stdout_handler())
+        summary_path = env.get("GITHUB_STEP_SUMMARY")
+        if summary_path:
+            # The step-summary sink is best-effort: if the path can't be opened
+            # (missing dir, permissions, …) we keep the stdout CI sink and carry
+            # on rather than fail the command — a logging glitch never gates.
+            try:
+                logger.addHandler(build_step_summary_handler(summary_path))
+            except OSError:
+                logger.debug(
+                    "could not open GITHUB_STEP_SUMMARY at %s; "
+                    "skipping step-summary sink",
+                    summary_path,
+                )
+
+    # File sink — the durable per-repo record, attached when a target repo is
+    # known (a param was injected, or the CLI resolved and passed one).
+    if owner_repo is not None or base_dir is not None:
+        if owner_repo is None:
+            owner_repo = _current_owner_repo()
+        logger.addHandler(build_file_handler(owner_repo, base_dir=base_dir))
