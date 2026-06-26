@@ -6,8 +6,8 @@ reviewer's App via the installation-token boundary. These tests assert the
 breadcrumb shipit WRITES with the App-token boundary (`ghauth.installation_token`)
 and the `gh` check-run POST seam FAKED — never live GitHub.
 
-The terminal `transition` (success / failure / timed_out) is WS02, not asserted
-here.
+OBS02-WS02 adds the terminal `transition` (a single PATCH closing the SAME run to
+its mapped conclusion + output + completed_at); its tests follow the create tests.
 """
 
 from __future__ import annotations
@@ -149,3 +149,118 @@ def test_create_propagates_auth_failure(monkeypatch):
     monkeypatch.setattr(checkrun.ghauth, "installation_token", boom)
     with pytest.raises(checkrun.ghauth.ReviewAuthError):
         checkrun.create("codex", "owner/repo", "deadbeef")
+
+
+# --------------------------------------------------------------------------
+# transition — OBS02-WS02 terminal conclusion
+# --------------------------------------------------------------------------
+
+
+def test_transition_patches_run_to_terminal_conclusion(monkeypatch):
+    """The terminal transition PATCHes the SAME run id (no second create) to
+    completed + the mapped conclusion, with an output message and an honest
+    tz-aware `completed_at` timestamp."""
+    _fake_token(monkeypatch, {})
+    seen: dict = {}
+
+    def fake_rest(path, *, method=None, body=None, token=None):
+        seen["path"] = path
+        seen["method"] = method
+        seen["body"] = body
+        return {}
+
+    monkeypatch.setattr(checkrun.gh, "rest", fake_rest)
+
+    checkrun.transition(
+        "codex",
+        "owner/repo",
+        4242,
+        conclusion="success",
+        title="Local review posted",
+        summary="done",
+    )
+
+    assert seen["path"] == "/repos/owner/repo/check-runs/4242"
+    assert seen["method"] == "PATCH"
+    body = seen["body"]
+    assert body["status"] == "completed"
+    assert body["conclusion"] == "success"
+    assert body["output"] == {"title": "Local review posted", "summary": "done"}
+    # `completed_at` mirrors `started_at`: an honest, parseable, tz-aware UTC "now".
+    completed = _dt.datetime.fromisoformat(body["completed_at"])
+    assert completed.tzinfo is not None
+
+
+def test_transition_authored_via_installation_token(monkeypatch):
+    """The transition is authored AS the reviewer's App — it mints the per-agent
+    installation token and injects it on the PATCH, never the user's `gh` login."""
+    auth: dict = {}
+    _fake_token(monkeypatch, auth, value="ghs_appInstallToken")
+    seen: dict = {}
+
+    def fake_rest(path, *, method=None, body=None, token=None):
+        seen["token"] = token
+        return {}
+
+    monkeypatch.setattr(checkrun.gh, "rest", fake_rest)
+
+    checkrun.transition(
+        "agy", "owner/repo", 7, conclusion="failure", title="t", summary="s"
+    )
+
+    assert auth == {"agent": "agy", "repo": "owner/repo"}
+    assert seen["token"] == "ghs_appInstallToken"
+
+
+def test_transition_run_is_non_required(monkeypatch):
+    """The transition rides the same non-required check-runs surface — never the
+    branch-protection endpoint, never a `required` marker — so the run stays
+    visible-but-non-blocking through its terminal state too."""
+    _fake_token(monkeypatch, {})
+    seen: dict = {}
+
+    def fake_rest(path, *, method=None, body=None, token=None):
+        seen["path"] = path
+        seen["body"] = body
+        return {}
+
+    monkeypatch.setattr(checkrun.gh, "rest", fake_rest)
+
+    checkrun.transition(
+        "codex", "owner/repo", 9, conclusion="timed_out", title="t", summary="s"
+    )
+
+    assert "protection" not in seen["path"]
+    assert "required" not in seen["body"]
+
+
+def test_transition_never_logs_the_token(monkeypatch, caplog):
+    """A record produced over the secret-bearing transition path must NOT contain
+    the installation-token value — mirror `create`/`post.py` discipline."""
+    secret = "ghs_transitionInstallToken1234567890"
+    _fake_token(monkeypatch, {}, value=secret)
+    monkeypatch.setattr(
+        checkrun.gh, "rest", lambda path, *, method=None, body=None, token=None: {}
+    )
+    with caplog.at_level(logging.DEBUG, logger="shipit.review"):
+        checkrun.transition(
+            "codex", "owner/repo", 3, conclusion="success", title="t", summary="s"
+        )
+    full = "\n".join(r.getMessage() for r in caplog.records)
+    assert secret not in full
+
+
+def test_transition_propagates_failure(monkeypatch):
+    """`transition` is honest like `create` — it RAISES on a mint/PATCH failure
+    (e.g. the 403 before the `checks:write` re-grant). The best-effort swallowing
+    lives in `run_and_post`, not here."""
+    _fake_token(monkeypatch, {})
+
+    def boom(path, *, method=None, body=None, token=None):
+        raise checkrun.gh.GhError("403 Resource not accessible")
+
+    monkeypatch.setattr(checkrun.gh, "rest", boom)
+    with pytest.raises(checkrun.gh.GhError):
+        checkrun.transition(
+            "codex", "owner/repo", 1, conclusion="success", title="t", summary="s"
+        )
