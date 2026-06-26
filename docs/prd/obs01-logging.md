@@ -41,9 +41,12 @@ for where shipit runs.
   (DEBUG/INFO) — it is the record you go back to. The **CLI stays quiet** by default:
   WARNING and above to stderr, so the user-facing surface is unchanged in spirit. A
   `-v/--verbose` flag raises the console level for an interactive debugging session.
-- **A CI sink.** When running in CI, log to stdout (and optionally append a summary to
+- **A CI sink.** When running in CI, log to **stderr** (and optionally append a summary to
   `$GITHUB_STEP_SUMMARY`) so the run's record lands in the job log, where it is the
-  durable artifact CI already keeps.
+  durable artifact CI already keeps. It is stderr, not stdout, deliberately: GitHub
+  Actions captures both streams into the job log, so the record lands there either way —
+  and keeping it off stdout leaves stdout reserved for a command's own output (notably
+  `--json`), which a log record on stdout would interleave with and corrupt.
 - **Add `platformdirs` as a shipit dependency.**
 
 ### Why it is safe on the fast path
@@ -85,7 +88,7 @@ build. (See architecture.lex §2 for the full statement; it is not duplicated he
 - **Bounding is `RotatingFileHandler`** at ≈5 MB per file × 3 backups. The numbers are a
   starting point, not a config surface in this epic.
 - **Two independent level controls**: file handler at DEBUG/INFO (the record); console
-  handler at WARNING by default, raised by `-v/--verbose`. The CI sink is a stdout handler
+  handler at WARNING by default, raised by `-v/--verbose`. The CI sink is a stderr handler
   installed when a CI environment is detected.
 - **`print()` → `logging` adoption is scoped to the key boundaries**, not a blanket
   sweep: the `gh` boundary (every call and its outcome), `prstate` (the lifecycle/next-
@@ -106,7 +109,7 @@ issue per `AGENTS.lex`, not here):
 - **WS — file sink + config.** The `platformdirs`-resolved, per-repo, rotating file
   handler and the logging configuration that wires it up; add the `platformdirs` dependency.
 - **WS — CI / console sinks + `-v`.** The quiet-by-default stderr console handler, the
-  `-v/--verbose` level control, and the CI stdout (+ optional `$GITHUB_STEP_SUMMARY`) sink.
+  `-v/--verbose` level control, and the CI stderr (+ optional `$GITHUB_STEP_SUMMARY`) sink.
 - **WS — call-site adoption.** Convert `print()` to `logging` at the `gh`, `prstate`, and
   `review` boundaries, preserving user-facing output and keeping secrets out of records.
 

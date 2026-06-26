@@ -8,7 +8,36 @@ descendant of release-core's ``gh.py`` — only the surface ``gh-setup`` needs.
 from __future__ import annotations
 
 import json
+import logging
+import re
 import subprocess
+
+#: The boundary's logger — a child of the package ``shipit`` logger, so it
+#: inherits the sinks :func:`shipit.logsetup.configure_logging` attaches. Every
+#: ``gh`` / ``git`` call and its outcome is recorded here at DEBUG (the verbose
+#: file/CI record), so the console surface (WARNING+) stays unchanged.
+logger = logging.getLogger("shipit.gh")
+
+#: Token shapes GitHub mints (PAT / OAuth / user / installation / refresh, plus
+#: the fine-grained ``github_pat_`` prefix). Used to MASK any token-shaped
+#: argument before a call's argv is logged — so a secret accidentally placed in
+#: argv never reaches a sink. Tokens normally travel in the env (never argv);
+#: this is the load-bearing no-secrets guard, applied belt-and-suspenders.
+_TOKEN_RE = re.compile(r"gh[posru]_[A-Za-z0-9]+|github_pat_[A-Za-z0-9_]+")
+
+#: The placeholder a masked secret is replaced with in a log record.
+_REDACTED = "***"
+
+
+def _argv_for_log(args: list[str]) -> str:
+    """A single redacted command string for a log record.
+
+    Only the argv is ever logged — never the child env, the ``token``, or any
+    stdin body (``input_text``): those are the secret-bearing channels and are
+    deliberately kept out of every record. Any token-shaped argument is masked
+    too, as defence in depth.
+    """
+    return _TOKEN_RE.sub(_REDACTED, " ".join(args))
 
 
 class GhError(RuntimeError):
@@ -51,6 +80,13 @@ def _run(
         # Drop GITHUB_TOKEN entirely (not blank it) so only GH_TOKEN remains.
         env = {k: v for k, v in os.environ.items() if k != "GITHUB_TOKEN"}
         env.update(_token_env(token))
+    cmd = _argv_for_log(args)
+    # Record the call before it runs: the redacted argv, the cwd, and the auth
+    # mode (a bare boolean — NEVER the token value). The token / env / stdin body
+    # are the secret-bearing channels and are intentionally absent from the log.
+    logger.debug(
+        "run %s (cwd=%s, auth=%s)", cmd, cwd or ".", "token" if token else "default"
+    )
     try:
         proc = subprocess.run(
             args,
@@ -62,11 +98,17 @@ def _run(
             env=env,
         )
     except FileNotFoundError as exc:
+        logger.debug("run %s -> %r not found on PATH", cmd, args[0])
         raise GhError(f"{args[0]!r} not found on PATH") from exc
     if proc.returncode != 0:
-        raise GhError(
-            f"{' '.join(args)} exited {proc.returncode}: {proc.stderr.strip()}"
-        )
+        # Redact the argv AND the stderr in BOTH the log record and the raised
+        # error: GhError messages are surfaced and re-logged by callers (e.g.
+        # review.post logs the exc), so a token echoed in argv/stderr must never
+        # ride the exception text to a sink either.
+        stderr = _TOKEN_RE.sub(_REDACTED, proc.stderr.strip())
+        logger.debug("run %s -> exit %s: %s", cmd, proc.returncode, stderr)
+        raise GhError(f"{cmd} exited {proc.returncode}: {stderr}")
+    logger.debug("run %s -> ok (%d bytes stdout)", cmd, len(proc.stdout))
     return proc.stdout
 
 

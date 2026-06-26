@@ -18,12 +18,20 @@ Two functions, layered:
 
 from __future__ import annotations
 
+import logging
+
 from . import post
 from .backends import get_backend
 from .diff import resolve_pr
 from .instructions import load_instructions
 from .prompt import build_prompt
 from .schema import REVIEW_SCHEMA
+
+#: The review path's logger — a child of the package ``shipit`` logger. A local
+#: review run (start, the backend/agent invoked, and the outcome) is recorded
+#: here at DEBUG/INFO so an async, detached run (OBS03) leaves a durable record.
+#: The review text and the diff are deliberately summarised, not dumped.
+logger = logging.getLogger("shipit.review")
 
 
 def generate_review(
@@ -43,11 +51,28 @@ def generate_review(
     described in-prose only for ``agy``, which has no native schema enforcement),
     and runs the backend in ``ctx.workdir``.
     """
+    logger.info(
+        "review run: agent=%s model=%s starting (backend resolve)", agent, model
+    )
     backend = get_backend(agent, model=model)
     backend.preflight()
     instructions = load_instructions(instructions_path)
     prompt = build_prompt(instructions, ctx.diff, schema_inline=(agent == "agy"))
-    return backend.run(prompt, REVIEW_SCHEMA, cwd=ctx.workdir)
+    logger.debug(
+        "review run: agent=%s invoking backend over diff (%d bytes) in %s",
+        agent,
+        len(ctx.diff or ""),
+        ctx.workdir,
+    )
+    review = backend.run(prompt, REVIEW_SCHEMA, cwd=ctx.workdir)
+    summary = (review.get("summary") or {}) if isinstance(review, dict) else {}
+    logger.info(
+        "review run: agent=%s complete -> status=%s, %d comment(s)",
+        agent,
+        summary.get("status"),
+        len((review.get("comments") or []) if isinstance(review, dict) else []),
+    )
+    return review
 
 
 def run_and_post(
@@ -73,6 +98,14 @@ def run_and_post(
     summary status drive APPROVE/REQUEST_CHANGES/COMMENT (the bot is a distinct
     identity, so a self-review 422 does not apply).
     """
+    logger.info(
+        "run_and_post: agent=%s pr=#%s repo=%s as_app=%s dry_run=%s",
+        agent,
+        pr,
+        repo,
+        as_app,
+        dry_run,
+    )
     ctx = resolve_pr(pr, repo=repo)
     review = generate_review(
         agent, ctx, instructions_path=instructions_path, model=model
@@ -85,4 +118,5 @@ def run_and_post(
         dry_run=dry_run,
         as_app=as_app,
     )
+    logger.info("run_and_post: agent=%s pr=#%s done", agent, pr)
     return {"review": review, "post": result, "ctx_repo": ctx.repo, "pr": pr}

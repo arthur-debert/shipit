@@ -8,11 +8,14 @@ version = "0.0.1"
 description = "Portfolio standardization tooling — provisioning, gh-setup, lint, PR flow, release — on pixi."
 requires-python = ">=3.11"
 # Runtime deps are pure-python wheel pulls (no native build step):
-#   click  — the CLI framework backing the `shipit <command>` tree.
-#   PyYAML — parse a target repo's workflow files for required-check discovery.
+#   click        — the CLI framework backing the `shipit <command>` tree.
+#   PyYAML       — parse a target repo's workflow files for required-check discovery.
+#   platformdirs — resolve the per-platform log directory (OBS01 logging); the
+#                  single source of truth for the log path (no platform branches).
 dependencies = [
     "click>=8,<9",
     "PyYAML>=6",
+    "platformdirs>=4",
 ]
 
 [project.optional-dependencies]

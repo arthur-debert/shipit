@@ -28,10 +28,16 @@ Two GitHub constraints shape the mapping:
 from __future__ import annotations
 
 import json
+import logging
 
 from .. import gh
 from . import ghauth
 from .diff import PRContext
+
+#: The review-post logger — a child of the package ``shipit`` logger. The post
+#: (target, identity, outcome) is recorded at DEBUG/INFO; the minted installation
+#: token is NEVER passed to a record — only the boolean ``as_app`` fact is.
+logger = logging.getLogger("shipit.review")
 
 # Map the review summary.status enum → GitHub review `event`.
 _STATUS_TO_EVENT = {
@@ -236,6 +242,13 @@ def post_review(
     payload = build_review_payload(review, ctx, agent_name=agent_name, event=event)
 
     if dry_run:
+        logger.info(
+            "post_review: dry-run for %s#%s (event=%s, as_app=%s) — not posting",
+            ctx.repo,
+            ctx.number,
+            payload.get("event"),
+            as_app,
+        )
         print(json.dumps(payload, indent=2))
         if as_app:
             print(f"(dry-run: would post as adr-{agent_name}-review[bot])")
@@ -245,6 +258,12 @@ def post_review(
 
     token: str | None = None
     if as_app:
+        # Mint a 1-hour installation token to author the review AS the bot. The
+        # token value never reaches a log record — only the fact that we are
+        # authenticating as the app is recorded.
+        logger.debug(
+            "post_review: authenticating as the %r GitHub App for %s", agent_name, repo
+        )
         try:
             token = ghauth.installation_token(agent_name, repo)
         except ghauth.ReviewAuthError as exc:
@@ -254,10 +273,19 @@ def post_review(
             ) from exc
 
     path = f"/repos/{repo}/pulls/{ctx.number}/reviews"
+    logger.info(
+        "post_review: posting review to %s#%s (event=%s, as_app=%s)",
+        repo,
+        ctx.number,
+        payload.get("event"),
+        as_app,
+    )
     try:
         response = gh.rest(path, method="POST", body=payload, token=token)
     except gh.GhError as exc:
+        logger.debug("post_review: post to %s#%s failed: %s", repo, ctx.number, exc)
         raise RuntimeError(
             f"Failed to post review to {repo}#{ctx.number}: {exc}"
         ) from exc
+    logger.info("post_review: posted review to %s#%s", repo, ctx.number)
     return response if isinstance(response, dict) else {"response": response}

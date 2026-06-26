@@ -27,3 +27,6 @@ __pycache__/
 
 # Local padz note store (out of source control)
 .padz/
+
+# Agent worktrees (isolation: worktree) — never tracked
+.claude/worktrees/
