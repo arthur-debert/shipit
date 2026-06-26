@@ -160,6 +160,22 @@ def resolve_log_dir(
     return base / owner / repo
 
 
+def log_file_path(
+    owner_repo: tuple[str, str],
+    *,
+    base_dir: str | Path | None = None,
+) -> Path:
+    """The absolute path to the active log FILE: ``<base>/<owner>/<repo>/shipit.log``.
+
+    The single source of truth for the concrete log file — the directory from
+    :func:`resolve_log_dir` joined with :data:`LOG_FILENAME` (the basename the
+    :class:`~logging.handlers.RotatingFileHandler` writes). Readers (``shipit
+    logs``) consume THIS rather than recomputing the platformdirs path, so the
+    reader can never disagree with the writer about where the log lives.
+    """
+    return resolve_log_dir(owner_repo, base_dir=base_dir) / LOG_FILENAME
+
+
 def build_file_handler(
     owner_repo: tuple[str, str],
     *,

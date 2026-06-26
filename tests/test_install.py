@@ -71,9 +71,9 @@ def test_load_units_includes_lefthook_and_pixi_task_block():
     assert pixi.kind == "block"
     assert pixi.dest == "pixi.toml"
     assert pixi.anchor == "[tasks]"
-    # The managed pixi block is the thin task line ONLY — never a linter-dep
+    # The managed pixi block is the thin task lines ONLY — never a linter-dep
     # block (deps ride in as shipit's own package deps, architecture.lex §5).
-    assert pixi.desired_inner() == 'lint = "shipit lint"'
+    assert pixi.desired_inner() == 'lint = "shipit lint"\nlogs = "shipit logs"'
 
 
 def test_pixi_block_inserts_under_existing_tasks_table():

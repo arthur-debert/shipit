@@ -14,7 +14,7 @@ import click
 
 from . import __version__
 from .logsetup import configure_logging, resolve_current_owner_repo
-from .verbs import gh_setup, install, lint
+from .verbs import gh_setup, install, lint, logs
 from .verbs.pr import pr as pr_group
 
 
@@ -120,6 +120,43 @@ def lint_cmd(path: str | None, fix: bool) -> None:
     (it never skips); a clean tree exits 0, any failure exits 1.
     """
     rc = lint.run(path, fix=fix)
+    raise SystemExit(rc)
+
+
+@root.command(name="logs")
+@click.argument("repo", required=False)
+@click.option(
+    "--path",
+    "path_only",
+    is_flag=True,
+    help='Print the absolute log file path and exit (for `cat "$(shipit logs --path)"`).',
+)
+@click.option(
+    "-f",
+    "--follow",
+    is_flag=True,
+    help="Stream appended log lines live (tail -f); ends on Ctrl-C.",
+)
+@click.option(
+    "-n",
+    "--lines",
+    "lines",
+    type=int,
+    default=logs.DEFAULT_TAIL,
+    show_default=True,
+    help="Trailing lines to print in the default (no-flag) view.",
+)
+def logs_cmd(repo: str | None, path_only: bool, follow: bool, lines: int) -> None:
+    """Locate and read shipit's durable per-repo log.
+
+    REPO is owner/name; omitted, it defaults to the current checkout's repo. The
+    path is resolved by the file sink (logsetup), the single source of truth — no
+    recomputed platform location. --path prints just that absolute path so an
+    agent can `cat`/`grep` it. -f/--follow streams new lines; with no flag it
+    prints the path plus the last N lines. A log not written yet is reported, not
+    crashed.
+    """
+    rc = logs.run(repo, path_only=path_only, follow=follow, tail=lines)
     raise SystemExit(rc)
 
 
