@@ -24,15 +24,25 @@ requested," and the PR parks silently with no signal to a human or to an agent
 The local-review **funnel** — requested → in-flight → posted (success) /
 failed / empty / timed-out — rides on **GitHub Check Runs authored by the
 reviewer's App**. On kickoff shipit creates a check run (`status=in_progress`,
-`started_at=now`); on completion it transitions the run to `completed/success`
-(alongside the posted structured review) or `completed/failure` / `timed_out`
-with an `output` message. The check run is the **native, timestamped stand-in for
-the `review_requested` edge GitHub denies these bots**.
+`started_at=now`); on completion it transitions the run to a terminal conclusion,
+mapping the funnel outcome:
+
+- **posted** (a structured review landed, *including* a clean zero-findings
+  review) → `completed/success`;
+- **failed** (the agent errored / crashed) → `completed/failure`;
+- **empty** (the agent returned nothing parseable — the known agy mode) →
+  `completed/failure` with an `output` reason of `empty` (treated as **degraded**,
+  not success — it is a non-delivery, distinct from a clean zero-findings review);
+- **timed-out** (exceeded the wait window) → `completed/timed_out`.
+
+(`completed/neutral` is an acceptable implementer alternative for *empty*; the
+load-bearing point is it is **not** `success`.) The check run is the **native,
+timestamped stand-in for the `review_requested` edge GitHub denies these bots**.
 
 App reviewers (Copilot) keep using their native `review_requested` edge + review
 object; the engine normalizes native-edge and check-run inputs into **one funnel
-view** — "isomorphic" at the engine's level, not on the wire (per
-[ADR follow-on / OBS04]). The funnel check run is **non-required**: a failed local
+view** — "isomorphic" at the engine's level, not on the wire (the normalization +
+gate live in OBS04 / ADR-0006). The funnel check run is **non-required**: a failed local
 review is *visible but non-blocking*, because the Ready gate is "every required
 reviewer's outcome is **recorded** + threads resolved," not "every review
 **succeeded**."

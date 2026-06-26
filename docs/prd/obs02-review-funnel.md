@@ -37,10 +37,13 @@ Check Run authored by the reviewer's own App**.
   `status=in_progress` and `started_at=now`, authored by the reviewer's App
   (`adr-codex-review[bot]` / `adr-agy-review[bot]`). This is the *requested /
   in-flight* breadcrumb that previously did not exist.
-- **On completion**, shipit transitions that same run to `completed/success`
-  (alongside the structured review the reviewer already posts) or to
-  `completed/failure` / `timed_out`, carrying an `output` message describing the
-  terminal state (failed / empty / timed-out).
+- **On completion**, shipit transitions that same run to its terminal conclusion:
+  `completed/success` (alongside the structured review the reviewer posts —
+  *including* a clean zero-findings review), `completed/failure` for a **failed**
+  run (agent errored) or an **empty** one (no parseable review — the agy mode —
+  treated as degraded, NOT success), or `completed/timed_out` — each carrying an
+  `output` message. (`completed/neutral` is an acceptable alternative for *empty*;
+  the load-bearing point is it is not `success`.)
 - The funnel check run is **non-required**: it is *visible but never blocks*. A
   failed local review must be *seen*, not *gate* — the Ready pillar is "every
   required reviewer **settled** (outcome recorded) + threads resolved", not "every
@@ -114,11 +117,11 @@ re-authorizes.
 - **Funnel stages → check-run state** (the mapping ADR-0005 fixes):
 
   ```text
-  requested / in-flight → status=in_progress, started_at=now
-  posted (success)      → completed / success      (+ the structured review POST)
-  failed                → completed / failure       + output message
-  empty                 → completed / success|neutral + output "no findings"
-  timed-out             → completed / timed_out      + output message
+  requested / in-flight                        → status=in_progress, started_at=now
+  posted (success, incl. clean zero-findings)  → completed / success   (+ the structured review POST)
+  failed (agent errored)                       → completed / failure    + output message
+  empty (no parseable review — agy mode)       → completed / failure    + output "empty" (degraded, NOT success)
+  timed-out                                    → completed / timed_out  + output message
   ```
 
 - The run is **non-required** — visible on the PR but never a required check, so it
@@ -146,8 +149,9 @@ issue, not here. The shape:
   with `started_at=now`, authored via the App installation token, at local-review
   kickoff.
 - **WS — terminal transition.** Transition the run to `success` (with the existing
-  review POST) / `failure` / `empty` / `timed_out`, with an `output` message and
-  `completed_at`, on completion or failure.
+  review POST, incl. a clean zero-findings review) / `failure` (a failed *or* empty
+  run) / `timed_out`, with an `output` message and `completed_at`, on completion or
+  failure.
 - **WS — `checks:write` provisioning + verification harness.** Document the scope
   add + owner re-consent (folded into INS01 / #26) and a verification harness that
   exercises the full lifecycle on a canary PR. **Depends on the re-grant** for its
