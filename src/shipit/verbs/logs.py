@@ -50,16 +50,25 @@ def _owner_repo(slug: str) -> tuple[str, str]:
     return owner, repo
 
 
+def _last_n(lines: list[str], n: int) -> list[str]:
+    """The last ``n`` of ``lines``: all when ``n < 0``, none when ``n == 0``,
+    else the final ``n``.
+
+    The explicit ``n == 0`` arm guards the ``lines[-0:]`` trap (``-0 == 0``, so a
+    naive slice would return EVERY line for ``-n 0`` instead of none).
+    """
+    if n < 0:
+        return lines
+    return lines[-n:] if n > 0 else []
+
+
 def _tail_lines(path: Path, n: int) -> list[str]:
     """The last ``n`` lines of ``path`` (newlines stripped).
 
     The file is bounded (``RotatingFileHandler`` caps it at ~5 MB), so reading it
-    whole is cheap and keeps this simple — no seek-from-end arithmetic. ``n < 0``
-    means "all lines".
+    whole is cheap and keeps this simple — no seek-from-end arithmetic.
     """
-    text = path.read_text(encoding="utf-8", errors="replace")
-    lines = text.splitlines()
-    return lines if n < 0 else lines[-n:]
+    return _last_n(path.read_text(encoding="utf-8", errors="replace").splitlines(), n)
 
 
 def _follow(path: Path, *, tail: int, sleep: Callable[[float], None]) -> int:
@@ -70,8 +79,7 @@ def _follow(path: Path, *, tail: int, sleep: Callable[[float], None]) -> int:
     """
     print(str(path))
     with path.open("r", encoding="utf-8", errors="replace") as fh:
-        existing = fh.read().splitlines()
-        for line in existing if tail < 0 else existing[-tail:]:
+        for line in _last_n(fh.read().splitlines(), tail):
             print(line)
         # fh is now positioned at EOF; subsequent appends are picked up by readline.
         try:

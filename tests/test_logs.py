@@ -74,6 +74,18 @@ def test_default_prints_path_then_last_n_lines(tmp_path, capsys):
     assert out[1:] == ["line7", "line8", "line9"]
 
 
+def test_tail_zero_prints_path_only_not_whole_file(tmp_path, capsys):
+    # Regression: `lines[-0:]` is the whole file — `-n 0` must print NO log lines.
+    log = tmp_path / "o" / "r" / "shipit.log"
+    log.parent.mkdir(parents=True)
+    log.write_text("a\nb\nc\n")
+
+    rc = logs.run("o/r", tail=0, base_dir=tmp_path, current_repo=lambda: "x/y")
+    assert rc == 0
+    out = capsys.readouterr().out.splitlines()
+    assert out == [str(log)]
+
+
 # --------------------------------------------------------------------------
 # -f/--follow — stream appended lines live
 # --------------------------------------------------------------------------
