@@ -10,8 +10,9 @@ Three sinks, chosen for where shipit runs (PRD ``docs/prd/obs01-logging.md``):
 - **Console** — quiet by default (WARNING+ to stderr), so the user-facing surface
   is unchanged in spirit from today. ``-v/--verbose`` raises it to DEBUG so an
   interactive debugging session can watch detail live.
-- **CI** — when a CI environment is detected, a stdout handler so the run's record
-  lands in the job log (DEBUG-level, the durable artifact CI keeps); and, when
+- **CI** — when a CI environment is detected, a stderr handler so the run's record
+  lands in the job log (DEBUG-level, the durable artifact CI keeps) while leaving
+  stdout reserved for command / ``--json`` output; and, when
   ``$GITHUB_STEP_SUMMARY`` is present, a best-effort handler that appends records
   to that file.
 - **File** — the durable, per-repo, rotating diagnosis record. Path resolution is
@@ -22,7 +23,7 @@ Three sinks, chosen for where shipit runs (PRD ``docs/prd/obs01-logging.md``):
   without writing to a real ``$HOME``.
 
 The three level controls are independent: the file sink is always verbose
-(DEBUG); the console is quiet unless ``-v``; the CI stdout sink is verbose. Every
+(DEBUG); the console is quiet unless ``-v``; the CI sink is verbose. Every
 handler this module attaches carries a ``shipit-`` name prefix so a repeated
 :func:`configure_logging` call replaces exactly its own handlers and never
 double-attaches, while leaving any foreign handler alone.
@@ -112,16 +113,21 @@ def build_console_handler(verbose: bool = False) -> logging.Handler:
     return handler
 
 
-def build_ci_stdout_handler() -> logging.Handler:
-    """Build the CI stdout handler so the run's record lands in the job log.
+def build_ci_handler() -> logging.Handler:
+    """Build the CI handler so the run's record lands in the job log.
+
+    Streams to **stderr**, not stdout: GitHub Actions captures both streams into
+    the job log, so the run's record lands there either way — and routing to
+    stderr keeps stdout reserved for command / ``--json`` output, which a record
+    on stdout would interleave with and corrupt.
 
     Captures DEBUG and up: in CI the job log *is* the durable run record (per the
     PRD), so it carries the full verbose detail, not just INFO+.
     """
-    handler = logging.StreamHandler(stream=sys.stdout)
+    handler = logging.StreamHandler(stream=sys.stderr)
     handler.setLevel(logging.DEBUG)
     handler.setFormatter(_surface_formatter())
-    handler.set_name(_HANDLER_PREFIX + "ci-stdout")
+    handler.set_name(_HANDLER_PREFIX + "ci")
     return handler
 
 
@@ -269,8 +275,8 @@ def configure_logging(
 
     - **Console** — always attached; quiet (WARNING+) unless ``verbose``.
     - **CI** — attached only when :func:`is_ci` (``env`` is injectable, defaulting
-      to ``os.environ``): a stdout handler, plus a best-effort
-      ``$GITHUB_STEP_SUMMARY`` appender.
+      to ``os.environ``): a stderr handler (stdout stays clean for ``--json``
+      output), plus a best-effort ``$GITHUB_STEP_SUMMARY`` appender.
     - **File** — attached when a target repo is known, i.e. when ``owner_repo`` or
       ``base_dir`` is provided. ``owner_repo`` / ``base_dir`` are injectable
       boundaries for tests; with ``base_dir`` given but ``owner_repo`` omitted, the
@@ -291,11 +297,11 @@ def configure_logging(
 
     # CI sinks — only when we detect a CI environment.
     if is_ci(env):
-        logger.addHandler(build_ci_stdout_handler())
+        logger.addHandler(build_ci_handler())
         summary_path = env.get("GITHUB_STEP_SUMMARY")
         if summary_path:
             # The step-summary sink is best-effort: if the path can't be opened
-            # (missing dir, permissions, …) we keep the stdout CI sink and carry
+            # (missing dir, permissions, …) we keep the CI sink and carry
             # on rather than fail the command — a logging glitch never gates.
             try:
                 logger.addHandler(build_step_summary_handler(summary_path))

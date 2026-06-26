@@ -92,25 +92,27 @@ def test_cli_verbose_flag_raises_console_level(capfd):
 
 
 # ==========================================================================
-# CI sink — stdout job log + optional step summary
+# CI sink — stderr job log + optional step summary
 # ==========================================================================
 
 
-def test_ci_detected_logs_go_to_stdout(capfd):
+def test_ci_detected_logs_go_to_stderr(capfd):
     logsetup.configure_logging(verbose=False, env={"CI": "true"})
     _emit(logging.INFO, "ci-record")
     captured = capfd.readouterr()
-    assert "ci-record" in captured.out
-    # The CI record lands on stdout, not on the quiet stderr console.
-    assert "ci-record" not in captured.err
+    # The CI record lands on stderr (still captured in the Actions job log),
+    # leaving stdout clean for command / --json output it must not corrupt.
+    assert "ci-record" in captured.err
+    assert "ci-record" not in captured.out
 
 
-def test_ci_stdout_captures_debug(capfd):
+def test_ci_captures_debug(capfd):
     # In CI the job log is the durable run record, so DEBUG must land there.
     logsetup.configure_logging(verbose=False, env={"CI": "true"})
     _emit(logging.DEBUG, "ci-debug-record")
-    out = capfd.readouterr().out
-    assert "ci-debug-record" in out
+    captured = capfd.readouterr()
+    assert "ci-debug-record" in captured.err
+    assert "ci-debug-record" not in captured.out
 
 
 def test_github_step_summary_is_appended(tmp_path):
@@ -129,24 +131,28 @@ def test_github_step_summary_is_appended(tmp_path):
 
 def test_unopenable_step_summary_does_not_crash(capfd, tmp_path):
     # An unwritable $GITHUB_STEP_SUMMARY (here: a path under a non-existent dir)
-    # must not fail the command; the stdout CI sink still works.
+    # must not fail the command; the CI sink still works.
     bad_path = tmp_path / "missing-dir" / "summary.md"
     logsetup.configure_logging(
         verbose=False,
         env={"GITHUB_ACTIONS": "true", "GITHUB_STEP_SUMMARY": str(bad_path)},
     )
     _emit(logging.INFO, "still-running")
-    assert "still-running" in capfd.readouterr().out
+    assert "still-running" in capfd.readouterr().err
     assert not bad_path.exists()
 
 
-def test_no_ci_means_no_stdout_handler(capfd):
+def test_no_ci_means_no_ci_handler(capfd):
     logsetup.configure_logging(verbose=False, env={})
     _emit(logging.INFO, "info-detail")
     _emit(logging.WARNING, "warn-detail")
-    out = capfd.readouterr().out
-    assert "info-detail" not in out
-    assert "warn-detail" not in out
+    captured = capfd.readouterr()
+    # No CI sink: INFO is dropped everywhere; only the quiet console (WARNING+
+    # on stderr) speaks, and stdout stays empty.
+    assert "info-detail" not in captured.err
+    assert "info-detail" not in captured.out
+    assert "warn-detail" in captured.err
+    assert "warn-detail" not in captured.out
 
 
 def test_is_ci_injectable_and_ignores_falsey_values():
@@ -319,7 +325,7 @@ def test_all_three_sinks_attach_together(capfd, tmp_path):
     logger = logging.getLogger(logsetup.LOGGER_NAME)
     names = {h.name for h in logger.handlers}
     assert "shipit-console" in names
-    assert "shipit-ci-stdout" in names
+    assert "shipit-ci" in names
     assert "shipit-file" in names
 
 
