@@ -30,7 +30,9 @@ filesystem + gh boundary so it is unit-testable, the same split checks.py uses.
 from __future__ import annotations
 
 import difflib
+import subprocess
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
@@ -54,6 +56,15 @@ BLOCK_CLOSE = "<!-- End shipit-managed block. -->"
 # markers (HTML comments are invalid TOML) and anchors under `[tasks]` so the
 # managed key lands in the right table on a first install.
 LEFTHOOK_FILE = "lefthook.yml"
+# Activating the gate is one bounded `lefthook install`, which writes the
+# `.git/hooks/{pre-commit,pre-push}` shims that fire `pixi run lint`. This is
+# EXACTLY what the `install-hooks` pixi task wraps (`lefthook install`) — one
+# definition — so the consumer install and shipit-self's bootstrap activate the
+# gate through the same invocation rather than a re-implemented hook writer.
+# lefthook install is idempotent and rewrites only its own managed region of a
+# hook file, so a re-install is a no-op and pre-existing unrelated hooks survive.
+LEFTHOOK_BINARY = "lefthook"
+HOOK_ACTIVATE_ARGV = ["install"]
 PIXI_FILE = "pixi.toml"
 PIXI_KEY = "pixi.toml#shipit-tasks"
 PIXI_OPEN = (
@@ -305,6 +316,19 @@ def plan(
     return decisions
 
 
+def activates_hooks(decisions: list[Decision]) -> bool:
+    """Whether this install should activate the git hooks.
+
+    The pure half of the decision: ``True`` whenever ``lefthook.yml`` is part of
+    the reconciled set, i.e. the gate config is (now) in place — so its hooks
+    belong live. The actual ``lefthook install`` is the bounded side effect
+    :func:`_activate_hooks` performs; the plan only records that it WILL happen.
+    Because activation is idempotent, we run it on every install that manages the
+    caller, not only on the first ADD.
+    """
+    return any(d.unit.key == LEFTHOOK_FILE for d in decisions)
+
+
 # --------------------------------------------------------------------------
 # Consumer-state I/O
 # --------------------------------------------------------------------------
@@ -351,6 +375,32 @@ def _write_unit(root: Path, unit: Unit) -> None:
     dest.write_bytes(unit.content)
     if unit.executable:
         dest.chmod(0o755)
+
+
+def _activate_hooks(root: Path) -> tuple[int, str]:
+    """Run ``lefthook install`` in ``root`` — the bounded side effect that turns
+    the ``lefthook.yml`` config into live ``.git/hooks``. Returns
+    ``(exit code, combined output)``.
+
+    This is the same invocation the ``install-hooks`` pixi task wraps, so the
+    gate has one activation definition. A missing ``lefthook`` binary is reported
+    (``127``) rather than crashing: unlike the lint gate this is opportunistic
+    setup, so install warns and still finishes its PR rather than hard-failing.
+    """
+    try:
+        proc = subprocess.run(
+            [LEFTHOOK_BINARY, *HOOK_ACTIVATE_ARGV],
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        return 127, (
+            f"{LEFTHOOK_BINARY}: not found on PATH — provision the pixi env, then "
+            f"`pixi run install-hooks` to activate the gate"
+        )
+    return proc.returncode, proc.stdout + proc.stderr
 
 
 # --------------------------------------------------------------------------
@@ -425,6 +475,14 @@ def _pr_body(decisions: list[Decision], override_before: dict[str, str]) -> str:
             lines.append("```")
             lines.append("</details>")
             lines.append("")
+    if activates_hooks(decisions):
+        lines.append("### Gate activated")
+        lines.append(
+            "Ran `lefthook install`, so `.git/hooks/{pre-commit,pre-push}` now fire "
+            "`pixi run lint` — the gate is **live**, not just configured. Activation "
+            "is idempotent and leaves pre-existing unrelated hooks intact."
+        )
+        lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -442,8 +500,20 @@ def _shipit_version() -> str:
 # --------------------------------------------------------------------------
 
 
-def run(path: str | None, *, dry_run: bool = False, push: bool = False) -> int:
-    """Install/reconcile the managed set into the consumer at ``path``."""
+def run(
+    path: str | None,
+    *,
+    dry_run: bool = False,
+    push: bool = False,
+    activate_hooks: Callable[[Path], tuple[int, str]] | None = None,
+) -> int:
+    """Install/reconcile the managed set into the consumer at ``path``.
+
+    ``activate_hooks`` injects the lefthook boundary so tests exercise the
+    activation contract without mutating a real ``.git/hooks`` (mirrors how
+    :func:`shipit.verbs.lint.run` injects ``run_tool``).
+    """
+    activate = activate_hooks or _activate_hooks
     root = Path(path or ".").resolve()
     if not root.is_dir():
         print(f"install: {root} is not a directory", file=sys.stderr)
@@ -491,6 +561,19 @@ def run(path: str | None, *, dry_run: bool = False, push: bool = False) -> int:
         _write_unit(root, d.unit)
     new_managed = {d.unit.key: d.desired_hash for d in decisions}
     config.write_manifest(cfg_path, version=_shipit_version(), managed=new_managed)
+
+    # Turn the gate on: with lefthook.yml on disk, activate the local hooks so
+    # `pixi run lint` fires at commit time — the gate ships LIVE, not dormant.
+    # Opportunistic, so a missing lefthook warns rather than aborting the PR.
+    if activates_hooks(decisions):
+        rc_hooks, out_hooks = activate(root)
+        if rc_hooks == 0:
+            print("  activated git hooks (lefthook install) — the gate is live")
+        else:
+            print(
+                f"install: could not activate git hooks: {out_hooks.strip()}",
+                file=sys.stderr,
+            )
 
     changed_paths = sorted({d.unit.dest for d in writes} | {config.CONFIG_NAME})
     cwd = str(root)

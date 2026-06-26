@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "pixi run -e lint install-hooks"
+          }
+        ]
+      }
+    ]
+  }
+}

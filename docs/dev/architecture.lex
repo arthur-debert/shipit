@@ -194,3 +194,13 @@ the durable code is one slim versioned package; and configuration is explicit.
     source of truth" never becomes a second, divergent definition of the
     checks. The lint/fmt rules are fully standardized (rust, python, shell,
     markdown, yaml, json, go, lex); only `test` is consumer-owned.
+
+    Writing `lefthook.yml` is not enough — a config without `lefthook install`
+    is a dormant gate (empty `.git/hooks`, commits sail past lint). So
+    activation is part of setup, never a remembered manual step: `shipit
+    install` runs `lefthook install` after laying down the caller (the consumer
+    leg), and shipit-self activates via the committed SessionStart hook in
+    `.claude/settings.json` (`pixi run -e lint install-hooks`), so a fresh clone
+    is gated on first agent session. Both routes are the one `lefthook install`
+    the `install-hooks` pixi task wraps; activation is idempotent and never
+    clobbers a pre-existing unrelated hook.
