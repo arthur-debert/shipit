@@ -13,7 +13,7 @@ import sys
 import click
 
 from . import __version__
-from .logsetup import configure_logging
+from .logsetup import configure_logging, resolve_current_owner_repo
 from .verbs import gh_setup, install, lint
 from .verbs.pr import pr as pr_group
 
@@ -36,10 +36,12 @@ from .verbs.pr import pr as pr_group
 def root(verbose: bool) -> None:
     """Root group; subcommands are attached below.
 
-    Configures logging before any subcommand runs, so every verb is covered by
-    the surface sinks (quiet stderr console by default; ``-v`` raises it).
+    Configures logging before any subcommand runs, so every verb is covered:
+    the quiet stderr console (raised by ``-v``), the CI sinks when in CI, and the
+    durable per-repo file sink. The repo is resolved best-effort, so a run outside
+    a checkout just skips the file sink rather than failing.
     """
-    configure_logging(verbose=verbose)
+    configure_logging(verbose=verbose, owner_repo=resolve_current_owner_repo())
 
 
 @root.command(name="gh-setup")
