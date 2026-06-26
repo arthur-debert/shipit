@@ -13,6 +13,7 @@ import sys
 import click
 
 from . import __version__
+from .logsetup import configure_logging
 from .verbs import gh_setup, install, lint
 from .verbs.pr import pr as pr_group
 
@@ -26,8 +27,19 @@ from .verbs.pr import pr as pr_group
     context_settings={"help_option_names": ["-h", "--help"]},
 )
 @click.version_option(version=__version__, prog_name="shipit")
-def root() -> None:
-    """Root group; subcommands are attached below."""
+@click.option(
+    "-v",
+    "--verbose",
+    is_flag=True,
+    help="Raise the console log level so INFO/DEBUG detail appears.",
+)
+def root(verbose: bool) -> None:
+    """Root group; subcommands are attached below.
+
+    Configures logging before any subcommand runs, so every verb is covered by
+    the surface sinks (quiet stderr console by default; ``-v`` raises it).
+    """
+    configure_logging(verbose=verbose)
 
 
 @root.command(name="gh-setup")
