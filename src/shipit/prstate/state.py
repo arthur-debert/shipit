@@ -124,13 +124,16 @@ class TaskStatus:
 
 
 def no_pr() -> TaskStatus:
-    """No PR exists for the branch — the entry state."""
-    status = TaskStatus(
+    """No PR exists for the branch — the entry state.
+
+    A pre-engine shortcut the verbs take when there is no PR to evaluate, so it
+    does NOT log a decision: the state machine's resolution point (and its
+    decision record) is :func:`evaluate`.
+    """
+    return TaskStatus(
         state=TaskState.NO_PR,
         next_action="no PR for this branch — create a draft PR to start the review loop",
     )
-    logger.debug("decision: no PR for branch -> %s", status.state.value)
-    return status
 
 
 def evaluate(

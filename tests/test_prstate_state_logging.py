@@ -24,10 +24,14 @@ def test_evaluate_logs_the_decision(context, caplog):
     assert status.next_action in text
 
 
-def test_no_pr_logs_the_decision(caplog):
+def test_no_pr_does_not_log_a_decision(caplog):
+    """`no_pr` is a pre-engine shortcut, not a state-machine resolution: it emits
+    no decision record. (This also keeps a no-PR `pr status --json` run clean of
+    log lines on the CI stdout sink, where command output and logs share stdout.)"""
     with caplog.at_level(logging.DEBUG, logger="shipit.prstate"):
-        no_pr()
-    assert any("no PR for branch" in r.getMessage() for r in caplog.records)
+        status = no_pr()
+    assert status.state.value == "no_pr"
+    assert not [r for r in caplog.records if "decision" in r.getMessage()]
 
 
 def test_evaluate_return_value_is_unchanged_by_logging(context):
