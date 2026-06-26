@@ -39,6 +39,20 @@ def _reset_package_logger():
         logger.propagate = saved_prop
 
 
+@pytest.fixture(autouse=True)
+def _no_ambient_ci(monkeypatch):
+    """Strip the runner's own CI signals so a unit test exercises the genuine
+    default path, never inheriting the environment shipit happens to run under.
+
+    The CLI-driven tests call ``configure_logging`` with the real ``os.environ``
+    (the CLI passes no ``env=``); under GitHub Actions the ambient ``CI`` /
+    ``GITHUB_ACTIONS`` would otherwise attach the CI sink and change what reaches
+    the console. Tests that want the CI path inject ``env=`` explicitly, so this
+    leaves them untouched."""
+    for var in logsetup._CI_ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
+
+
 def _emit(level: int, message: str) -> None:
     logging.getLogger(logsetup.LOGGER_NAME).log(level, message)
 
