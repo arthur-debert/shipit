@@ -23,6 +23,7 @@ import logging
 from .. import gh
 from . import checkrun, post
 from .backends import get_backend
+from .backends.base import _TIMEOUT_MARKER, BackendError
 from .diff import resolve_pr
 from .instructions import load_instructions
 from .prompt import build_prompt
@@ -108,29 +109,84 @@ def run_and_post(
         dry_run,
     )
     ctx = resolve_pr(pr, repo=repo)
-    _open_funnel_breadcrumb(agent, ctx)
-    review = generate_review(
-        agent, ctx, instructions_path=instructions_path, model=model
-    )
-    result = post.post_review(
-        review,
-        ctx,
-        agent_name=agent,
-        event=event,
-        dry_run=dry_run,
-        as_app=as_app,
-    )
+    run_id, run_repo = _open_funnel_breadcrumb(agent, ctx)
+    try:
+        review = generate_review(
+            agent, ctx, instructions_path=instructions_path, model=model
+        )
+        result = post.post_review(
+            review,
+            ctx,
+            agent_name=agent,
+            event=event,
+            dry_run=dry_run,
+            as_app=as_app,
+        )
+    except BackendError as exc:
+        # A backend that ran but produced no usable review: the agy timeout marker
+        # in its output means it TIMED OUT (-> timed_out); any other unparseable /
+        # empty output is the degraded "empty" non-delivery (-> failure, NOT
+        # success — distinct from a clean zero-findings review which posts).
+        outcome = "timed_out" if _TIMEOUT_MARKER in str(exc).lower() else "empty"
+        _close_funnel_breadcrumb(
+            agent, run_repo, run_id, outcome=outcome, detail=str(exc)
+        )
+        # Record the breadcrumb, then RE-RAISE so the caller still sees the real
+        # review failure (the adapter normalizes it to GhError).
+        raise
+    except Exception as exc:  # noqa: BLE001 - any other failure is a degraded run
+        # The agent errored (missing CLI, crash) or the review POST failed.
+        _close_funnel_breadcrumb(
+            agent, run_repo, run_id, outcome="failed", detail=str(exc)
+        )
+        raise
+    # Success — incl. a clean zero-findings review: the review POST above already
+    # fired unchanged; now close the funnel run to completed/success.
+    _close_funnel_breadcrumb(agent, run_repo, run_id, outcome="success")
     logger.info("run_and_post: agent=%s pr=#%s done", agent, pr)
     return {"review": review, "post": result, "ctx_repo": ctx.repo, "pr": pr}
 
 
-def _open_funnel_breadcrumb(agent, ctx) -> None:
+#: Funnel outcome → (check-run ``conclusion``, output ``title``, output
+#: ``summary``). The mapping ADR-0005 fixes: a posted review (incl. a clean
+#: zero-findings one) is ``success``; a failed run is ``failure``; an EMPTY run
+#: (no parseable review — the agy mode) is ``failure`` with an explicit "empty"
+#: reason — a non-delivery, deliberately NOT ``success`` (``neutral`` would be an
+#: accepted alternative); a timeout is ``timed_out``.
+_FUNNEL_TERMINAL: dict[str, tuple[str, str, str]] = {
+    "success": (
+        "success",
+        "Local review posted",
+        "The local review completed and posted its verdict to the PR.",
+    ),
+    "failed": (
+        "failure",
+        "Local review failed",
+        "The local review backend errored before a verdict could be posted.",
+    ),
+    "empty": (
+        "failure",
+        "Local review empty",
+        "The local review returned nothing parseable (empty) — a degraded "
+        "non-delivery, NOT a clean zero-findings review.",
+    ),
+    "timed_out": (
+        "timed_out",
+        "Local review timed out",
+        "The local review backend timed out before returning a complete review.",
+    ),
+}
+
+
+def _open_funnel_breadcrumb(agent, ctx) -> tuple[int | None, str | None]:
     """Open the kickoff funnel check run for this review — BEST-EFFORT.
 
     Opens the ``in_progress`` ``review: <agent>-local`` check run
     (:func:`shipit.review.checkrun.create`) so the same flow that kicks the
     review off leaves the *requested / in-flight* breadcrumb that GitHub denies
-    these App bots a native edge for.
+    these App bots a native edge for. Returns ``(run_id, repo)`` for the terminal
+    :func:`_close_funnel_breadcrumb` to transition the SAME run — both ``None`` on
+    any failure, so the close is a clean skip (nothing was created).
 
     **A breadcrumb failure must NEVER fail the review.** Per the OBS02
     prerequisite, until the App's ``checks:write`` re-grant propagates everywhere
@@ -151,6 +207,7 @@ def _open_funnel_breadcrumb(agent, ctx) -> None:
             repo,
             run_id,
         )
+        return run_id, repo
     except Exception as exc:  # noqa: BLE001 - the breadcrumb is best-effort, never fatal
         # Record the failure fact (never the token) and proceed — the review post
         # is unaffected by a missing/denied check-runs scope.
@@ -158,5 +215,54 @@ def _open_funnel_breadcrumb(agent, ctx) -> None:
             "run_and_post: funnel check run create failed for %s-local "
             "(continuing to post the review): %s",
             agent,
+            exc,
+        )
+        return None, None
+
+
+def _close_funnel_breadcrumb(
+    agent, repo, run_id, *, outcome: str, detail: str | None = None
+) -> None:
+    """Transition the funnel run to its terminal ``outcome`` — BEST-EFFORT.
+
+    Maps ``outcome`` (``success`` / ``failed`` / ``empty`` / ``timed_out``) through
+    :data:`_FUNNEL_TERMINAL` to the check-run ``conclusion`` + ``output`` message
+    and PATCHes the SAME run :func:`_open_funnel_breadcrumb` opened
+    (:func:`shipit.review.checkrun.transition`).
+
+    Two best-effort guards, so the breadcrumb NEVER crashes the flow or masks the
+    review's real outcome:
+
+      * if ``create`` returned no run id (``run_id is None`` — e.g. a ``403``
+        before the ``checks:write`` re-grant left no run), there is nothing to
+        transition, so SKIP cleanly; and
+      * a PATCH/mint failure is caught, logged through the OBS01 sink (the failure
+        FACT only — the installation token never reaches a record), and swallowed.
+
+    On the success path the review has already posted; on a failure path the caller
+    re-raises the real review error AFTER this records the terminal breadcrumb.
+    """
+    if run_id is None or repo is None:
+        return
+    conclusion, title, base_summary = _FUNNEL_TERMINAL[outcome]
+    summary = f"{base_summary}\n\n{detail}" if detail else base_summary
+    try:
+        checkrun.transition(
+            agent, repo, run_id, conclusion=conclusion, title=title, summary=summary
+        )
+        logger.info(
+            "run_and_post: closed funnel check run for %s-local on %s "
+            "(run id=%s) -> completed/%s",
+            agent,
+            repo,
+            run_id,
+            conclusion,
+        )
+    except Exception as exc:  # noqa: BLE001 - best-effort; never masks the review outcome
+        logger.warning(
+            "run_and_post: funnel check run transition failed for %s-local "
+            "(run id=%s); the review outcome is unaffected: %s",
+            agent,
+            run_id,
             exc,
         )

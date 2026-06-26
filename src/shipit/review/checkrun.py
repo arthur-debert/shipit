@@ -6,10 +6,12 @@ in-flight* signal on the PR until it actually posts. This module supplies the
 missing breadcrumb: a **GitHub Check Run authored by the reviewer's own App**,
 the native, timestamped stand-in for that edge.
 
-OBS02-WS01 is the **kickoff create** only — :func:`create` opens the run
-``status=in_progress`` with ``started_at=now``. The terminal transition (the run
-moving to ``success`` / ``failure`` / ``timed_out`` at completion) is WS02 and
-lands as a sibling function here, sharing this module's App-token boundary.
+:func:`create` (OBS02-WS01) opens the run ``status=in_progress`` with
+``started_at=now``; :func:`transition` (OBS02-WS02) closes that SAME run to its
+terminal ``conclusion`` (``success`` / ``failure`` / ``timed_out`` / ``neutral``)
+at completion. The two share this module's App-token boundary — one create, one
+PATCH to the run create returned — so the breadcrumb carries one run through its
+whole life and shipit never opens a second run.
 
 The auth is the same installation-token path :mod:`shipit.review.post` already
 uses to post AS the bot (Doppler-sourced PEM → in-memory RS256 JWT → installation
@@ -81,3 +83,61 @@ def create(agent: str, repo: str, head_sha: str) -> int | None:
     run_id = response.get("id") if isinstance(response, dict) else None
     logger.info("checkrun.create: opened %r on %s (run id=%s)", name, repo, run_id)
     return int(run_id) if run_id is not None else None
+
+
+def transition(
+    agent: str,
+    repo: str,
+    run_id: int,
+    *,
+    conclusion: str,
+    title: str,
+    summary: str,
+) -> None:
+    """Close the funnel check run ``run_id`` to its terminal ``conclusion``.
+
+    PATCHes ``/repos/{repo}/check-runs/{run_id}`` — the SAME run :func:`create`
+    opened, never a second run — with ``status=completed``, the mapped
+    ``conclusion`` (``success`` for a posted review incl. a clean zero-findings
+    one, ``failure`` for a failed *or* empty run, ``timed_out`` for a timeout;
+    ``neutral`` is an accepted alternative for empty), an ``output`` (``title`` +
+    ``summary``) message, and a tz-aware ``completed_at=now`` (the load-bearing
+    timestamp OBS04 ages against, the mirror of ``create``'s ``started_at``).
+
+    Authored via the agent's App installation token, so GitHub keeps attributing
+    the run to ``adr-<agent>-review[bot]``; the token is threaded onto the ``gh``
+    boundary but NEVER reaches a log record, mirroring :func:`create`.
+
+    Honest by design like :func:`create`: any mint/PATCH failure PROPAGATES. The
+    best-effort swallowing — and the "no run id ⇒ nothing to transition" skip when
+    ``create`` opened no run (e.g. a ``403`` before the ``checks:write`` re-grant)
+    — live in :func:`shipit.review.service.run_and_post`, so a breadcrumb failure
+    never crashes the review and never masks its real outcome.
+    """
+    name = f"review: {reviewer_name(agent)}"
+    token = ghauth.installation_token(agent, repo)
+    body = {
+        "status": "completed",
+        "conclusion": conclusion,
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+        "output": {"title": title, "summary": summary},
+    }
+    logger.debug(
+        "checkrun.transition: closing %r on %s (run id=%s) -> completed/%s "
+        "(as the %r app)",
+        name,
+        repo,
+        run_id,
+        conclusion,
+        agent,
+    )
+    gh.rest(
+        f"/repos/{repo}/check-runs/{run_id}", method="PATCH", body=body, token=token
+    )
+    logger.info(
+        "checkrun.transition: closed %r on %s (run id=%s) -> completed/%s",
+        name,
+        repo,
+        run_id,
+        conclusion,
+    )
