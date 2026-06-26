@@ -56,5 +56,18 @@ fmt = { cmd = "shipit lint --fix", depends-on = ["provision-lexd"] }
 # One command from a fresh clone to a working gate (the `--install-hook` equiv).
 install-hooks = "lefthook install"
 
+# OBS02-WS03: the LIVE-GitHub review-funnel verification harness. It is OPT-IN —
+# never part of `test` / CI (it needs Doppler App creds + a canary PR) — so it
+# lives in its own env that pulls the `review` extra (PyJWT, to sign the App JWT)
+# and refuses to run without an explicit --repo/--pr. See
+# docs/dev/review-app-provisioning.md ("Step 3 — verify").
+[feature.verify.pypi-dependencies]
+shipit = { path = ".", editable = true, extras = ["review"] }
+
+[feature.verify.tasks]
+# Run e.g.: pixi run -e verify verify-funnel --repo arthur-debert/shipit-canary --pr <N>
+verify-funnel = "python -m shipit.review.funnel_verify"
+
 [environments]
 lint = ["lint"]
+verify = ["verify"]

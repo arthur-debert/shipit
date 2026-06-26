@@ -69,11 +69,35 @@ Confirm by minting a token and creating a check run on a throwaway commit:
 - the create-installation-token response's `permissions` now includes `checks: write`;
 - `POST /repos/<owner>/<repo>/check-runs` returns **201** (not 403).
 
-(shipit's own check-run create path will exercise this once OBS02 lands; until then the
-one-line probe in OBS02-WS03 is the check.)
+OBS02-WS03 ships this as a runnable harness — `shipit.review.funnel_verify` — that drives
+the **full** funnel lifecycle (kickoff create → terminal transition) on a canary PR and
+asserts all of the above on the same run. It is **opt-in** (it hits live GitHub + needs
+the Doppler App creds + a canary PR), so it is **never** part of `pixi run test` / CI; run
+it explicitly against a throwaway canary PR:
+
+```bash
+pixi run -e verify verify-funnel --repo arthur-debert/shipit-canary --pr <N> --agent codex
+# or: SHIPIT_FUNNEL_CANARY_{REPO,PR}=… python -m shipit.review.funnel_verify
+```
+
+It exits `0` on a full PASS, `1` on any failed check. Verified live for the
+`arthur-debert` owner on `shipit-canary` — **PASS** for both `codex` and `agy` (token
+carries `checks: write`; create returns 201 `in_progress`+`started_at`; the same run
+transitions to `completed`/`success` with `output`+`completed_at`).
 
 ## Adding a new consumer later
 
-Same two steps for the new owner: the App permission is already `checks: write` (Step 1
-is done once globally), so only **Step 2** — approve the new owner's installation — is
-needed when onboarding a consumer per #26.
+**The App-level `checks: write` grant does NOT propagate on its own.** Step 1 is global
+(done once per App) and is already done — but a token minted for a **new** consumer (a
+new install / a new owner) keeps the **old** scopes until *that installation* is
+re-consented. So onboarding a new consumer for the OBS02 funnel still requires the
+one-time, per-install **Step 2 accept** by that owner; without it, the consumer's minted
+token lacks `checks` and its funnel check-run create returns **403** — the local review
+still *posts* (that path is unaffected), but the `review: <reviewer>` funnel breadcrumb
+never appears.
+
+Concretely, for a new owner: Step 1 is already satisfied (the App permission is
+`checks: write` globally), so **only Step 2** — approve the new owner's installation — is
+needed when onboarding a consumer per #26. Re-run the Step 3 harness against that
+consumer's repo to confirm the token now carries `checks: write` and the create returns
+201.
