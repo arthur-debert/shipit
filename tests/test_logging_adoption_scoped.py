@@ -32,7 +32,11 @@ def test_out_of_scope_cli_verbs_were_not_swept():
     from shipit.verbs import gh_setup, install, lint
 
     for mod in (gh_setup, install, lint):
-        assert not hasattr(mod, "logger"), f"{mod.__name__} unexpectedly gained a logger"
+        assert not hasattr(mod, "logger"), (
+            f"{mod.__name__} unexpectedly gained a logger"
+        )
         src = inspect.getsource(mod)
-        assert "print(" in src, f"{mod.__name__} should still use print() for CLI output"
+        assert "print(" in src, (
+            f"{mod.__name__} should still use print() for CLI output"
+        )
         assert "import logging" not in src, f"{mod.__name__} should not import logging"

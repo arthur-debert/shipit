@@ -65,9 +65,7 @@ def test_post_as_app_never_logs_the_token(monkeypatch, caplog):
     """A record produced over the secret-bearing (installation-token) review path
     must NOT contain the token value."""
     secret = "ghs_reviewInstallToken0987654321"
-    monkeypatch.setattr(
-        post.ghauth, "installation_token", lambda agent, repo: secret
-    )
+    monkeypatch.setattr(post.ghauth, "installation_token", lambda agent, repo: secret)
     captured = {}
 
     def _fake_rest(path, *, method, body, token):
