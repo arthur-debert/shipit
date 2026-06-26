@@ -71,9 +71,13 @@ def build_console_handler(verbose: bool = False) -> logging.Handler:
 
 
 def build_ci_stdout_handler() -> logging.Handler:
-    """Build the CI stdout handler so the run's record lands in the job log."""
+    """Build the CI stdout handler so the run's record lands in the job log.
+
+    Captures DEBUG and up: in CI the job log *is* the durable run record (per the
+    PRD), so it carries the full verbose detail, not just INFO+.
+    """
     handler = logging.StreamHandler(stream=sys.stdout)
-    handler.setLevel(logging.INFO)
+    handler.setLevel(logging.DEBUG)
     handler.setFormatter(_formatter())
     handler.set_name(_HANDLER_PREFIX + "ci-stdout")
     return handler
@@ -134,4 +138,14 @@ def configure_logging(
         logger.addHandler(build_ci_stdout_handler())
         summary_path = env.get("GITHUB_STEP_SUMMARY")
         if summary_path:
-            logger.addHandler(build_step_summary_handler(summary_path))
+            # The step-summary sink is best-effort: if the path can't be opened
+            # (missing dir, permissions, …) we keep the stdout CI sink and carry
+            # on rather than fail the command — a logging glitch never gates.
+            try:
+                logger.addHandler(build_step_summary_handler(summary_path))
+            except OSError:
+                logger.debug(
+                    "could not open GITHUB_STEP_SUMMARY at %s; "
+                    "skipping step-summary sink",
+                    summary_path,
+                )

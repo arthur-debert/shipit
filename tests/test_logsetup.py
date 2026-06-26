@@ -87,6 +87,14 @@ def test_ci_detected_logs_go_to_stdout(capfd):
     assert "ci-record" not in captured.err
 
 
+def test_ci_stdout_captures_debug(capfd):
+    # In CI the job log is the durable run record, so DEBUG must land there.
+    logsetup.configure_logging(verbose=False, env={"CI": "true"})
+    _emit(logging.DEBUG, "ci-debug-record")
+    out = capfd.readouterr().out
+    assert "ci-debug-record" in out
+
+
 def test_github_step_summary_is_appended(tmp_path):
     summary = tmp_path / "step_summary.md"
     summary.write_text("pre-existing\n")
@@ -99,6 +107,19 @@ def test_github_step_summary_is_appended(tmp_path):
     # Appended, not truncated.
     assert "pre-existing" in contents
     assert "summary-line" in contents
+
+
+def test_unopenable_step_summary_does_not_crash(capfd, tmp_path):
+    # An unwritable $GITHUB_STEP_SUMMARY (here: a path under a non-existent dir)
+    # must not fail the command; the stdout CI sink still works.
+    bad_path = tmp_path / "missing-dir" / "summary.md"
+    logsetup.configure_logging(
+        verbose=False,
+        env={"GITHUB_ACTIONS": "true", "GITHUB_STEP_SUMMARY": str(bad_path)},
+    )
+    _emit(logging.INFO, "still-running")
+    assert "still-running" in capfd.readouterr().out
+    assert not bad_path.exists()
 
 
 def test_no_ci_means_no_stdout_handler(capfd):
