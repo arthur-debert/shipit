@@ -1,10 +1,10 @@
 ---
-name: shipit-to-prd
+name: shipt-to-prd
 description: Turn the current conversation context into a PRD, write it to docs/prd/, and open an epic tracker issue that points to it. Use when user wants to create a PRD from the current context.
 metadata:
     forked-from: https://github.com/mattpocock/skills (skills/engineering/to-prd)
 ---
-This skill takes the current conversation context and codebase understanding and produces a PRD. Do NOT interview the user — just synthesize what you already know. (The interview happens earlier, in `/grill-with-docs`.)
+This skill takes the current conversation context and codebase understanding and produces a PRD. Do NOT interview the user — just synthesize what you already know. (The interview happens earlier, in `/shipt-grill-with-docs`.)
 
 The issue tracker and triage label vocabulary should have been provided to you — run `/setup-matt-pocock-skills` if not.
 
