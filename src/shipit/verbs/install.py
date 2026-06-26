@@ -323,8 +323,10 @@ def activates_hooks(decisions: list[Decision]) -> bool:
     the reconciled set, i.e. the gate config is (now) in place — so its hooks
     belong live. The actual ``lefthook install`` is the bounded side effect
     :func:`_activate_hooks` performs; the plan only records that it WILL happen.
-    Because activation is idempotent, we run it on every install that manages the
-    caller, not only on the first ADD.
+    Because activation is idempotent, we run it on every WRITING install that
+    manages the caller (ADD or UPDATE), not only the first ADD. A pure no-op
+    re-run returns early in :func:`run` before activation, so it never re-touches
+    already-current hooks.
     """
     return any(d.unit.key == LEFTHOOK_FILE for d in decisions)
 
@@ -383,9 +385,10 @@ def _activate_hooks(root: Path) -> tuple[int, str]:
     ``(exit code, combined output)``.
 
     This is the same invocation the ``install-hooks`` pixi task wraps, so the
-    gate has one activation definition. A missing ``lefthook`` binary is reported
-    (``127``) rather than crashing: unlike the lint gate this is opportunistic
-    setup, so install warns and still finishes its PR rather than hard-failing.
+    gate has one activation definition. A spawn failure — ``lefthook`` missing
+    from PATH or not executable — is reported (``127``) rather than crashing:
+    unlike the lint gate this is opportunistic setup, so install warns and still
+    finishes its PR rather than hard-failing.
     """
     try:
         proc = subprocess.run(
@@ -395,12 +398,18 @@ def _activate_hooks(root: Path) -> tuple[int, str]:
             text=True,
             check=False,
         )
-    except FileNotFoundError:
+    except OSError as exc:
+        # Covers a missing binary (FileNotFoundError) and a present-but-not-
+        # executable one (PermissionError) — both OSError. `lefthook install`
+        # is the canonical activation in BOTH repos (a consumer's pixi.toml has
+        # no install-hooks task), so that is the recovery we point at.
         return 127, (
-            f"{LEFTHOOK_BINARY}: not found on PATH — provision the pixi env, then "
-            f"`pixi run install-hooks` to activate the gate"
+            f"{LEFTHOOK_BINARY}: could not run ({exc}) — ensure lefthook is "
+            f"installed and on PATH, then `lefthook install` to activate the gate"
         )
-    return proc.returncode, proc.stdout + proc.stderr
+    # Join with a newline so a stdout without a trailing newline does not run
+    # straight into stderr (e.g. `donefatal: ...`) in the warning we print.
+    return proc.returncode, "\n".join(s for s in (proc.stdout, proc.stderr) if s)
 
 
 # --------------------------------------------------------------------------
@@ -436,12 +445,22 @@ def _override_diff(unit: Unit, consumer_text: str) -> str:
     return "".join(diff)
 
 
-def _pr_body(decisions: list[Decision], override_before: dict[str, str]) -> str:
+def _pr_body(
+    decisions: list[Decision],
+    override_before: dict[str, str],
+    hooks_activated: bool | None,
+) -> str:
     """The PR body: what was added/updated, and every override surfaced with its diff.
 
     ``override_before`` holds each overridden unit's consumer content captured
     BEFORE the branch write, so the diff shows the real divergence (not an empty
     diff against the content shipit just wrote over it).
+
+    ``hooks_activated`` carries the real activation outcome so the body never
+    claims a success that did not happen: ``None`` when the set has no gate to
+    activate, ``True`` when ``lefthook install`` succeeded where install ran,
+    ``False`` when it was skipped/failed (binary missing) and a merger must
+    activate the gate themselves.
     """
     adds = [d for d in decisions if d.action == ADD]
     updates = [d for d in decisions if d.action == UPDATE]
@@ -475,12 +494,23 @@ def _pr_body(decisions: list[Decision], override_before: dict[str, str]) -> str:
             lines.append("```")
             lines.append("</details>")
             lines.append("")
-    if activates_hooks(decisions):
-        lines.append("### Gate activated")
+    if hooks_activated is True:
+        lines.append("### Gate activated locally")
         lines.append(
-            "Ran `lefthook install`, so `.git/hooks/{pre-commit,pre-push}` now fire "
-            "`pixi run lint` — the gate is **live**, not just configured. Activation "
-            "is idempotent and leaves pre-existing unrelated hooks intact."
+            "`lefthook install` ran where this install was invoked, so its "
+            "`.git/hooks/{pre-commit,pre-push}` fire `pixi run lint` there now. "
+            "Reviewers/mergers: run `lefthook install` on your own checkout "
+            "(shipit-self: `pixi run -e lint install-hooks`) to make the gate live "
+            "for you too. Activation is idempotent and leaves unrelated hooks intact."
+        )
+        lines.append("")
+    elif hooks_activated is False:
+        lines.append("### Gate configured — local activation skipped")
+        lines.append(
+            "`lefthook.yml` is in this PR, but `lefthook install` did not run here "
+            "(lefthook missing or it errored). After merging, run `lefthook install` "
+            "(shipit-self: `pixi run -e lint install-hooks`) to activate the gate. "
+            "The config is correct; only local activation was deferred."
         )
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
@@ -565,9 +595,11 @@ def run(
     # Turn the gate on: with lefthook.yml on disk, activate the local hooks so
     # `pixi run lint` fires at commit time — the gate ships LIVE, not dormant.
     # Opportunistic, so a missing lefthook warns rather than aborting the PR.
+    hooks_activated: bool | None = None
     if activates_hooks(decisions):
         rc_hooks, out_hooks = activate(root)
-        if rc_hooks == 0:
+        hooks_activated = rc_hooks == 0
+        if hooks_activated:
             print("  activated git hooks (lefthook install) — the gate is live")
         else:
             print(
@@ -608,7 +640,7 @@ def run(
         url = gh.pr_create(
             head=INSTALL_BRANCH,
             title="shipit: install/update the managed set",
-            body=_pr_body(decisions, override_before),
+            body=_pr_body(decisions, override_before, hooks_activated),
             draft=True,
             cwd=cwd,
         )

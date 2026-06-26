@@ -381,6 +381,11 @@ def test_install_warns_but_succeeds_when_lefthook_missing(tmp_path, monkeypatch,
     rc = install.run(str(tmp_path))
     assert rc == 0
     assert ("pr_create", True) in rec.calls
+    # The PR body must NOT claim the gate went live on this failure path; it
+    # records that local activation was deferred so a merger knows to act.
+    assert "### Gate activated locally" not in rec.pr_body
+    assert "local activation skipped" in rec.pr_body
+    assert "lefthook install" in rec.pr_body
 
 
 def test_activate_hooks_boundary_runs_lefthook_install(tmp_path, monkeypatch):
@@ -413,4 +418,17 @@ def test_activate_hooks_boundary_reports_missing_binary(tmp_path, monkeypatch):
     monkeypatch.setattr(install.subprocess, "run", boom)
     rc, out = install._activate_hooks(tmp_path)
     assert rc == 127
-    assert "not found on PATH" in out
+    # Points at the canonical recovery, which works in a consumer repo too.
+    assert "lefthook install" in out
+
+
+def test_activate_hooks_boundary_reports_unexecutable_binary(tmp_path, monkeypatch):
+    # A present-but-not-executable lefthook raises PermissionError (an OSError);
+    # install must warn, not crash, exactly as for a missing binary.
+    def boom(*a, **k):
+        raise PermissionError("Permission denied")
+
+    monkeypatch.setattr(install.subprocess, "run", boom)
+    rc, out = install._activate_hooks(tmp_path)
+    assert rc == 127
+    assert "lefthook install" in out
