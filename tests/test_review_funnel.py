@@ -317,3 +317,22 @@ def test_breadcrumb_failure_never_leaks_token(monkeypatch, _stub_pipeline, caplo
     full = "\n".join(r.getMessage() for r in caplog.records)
     assert secret not in full
     assert _stub_pipeline["called"] is True
+
+
+def test_unknown_outcome_falls_back_to_failed_without_crashing(monkeypatch, caplog):
+    """Defensive (Copilot #66): `_close_funnel_breadcrumb` must not KeyError on an
+    unexpected/typo outcome — that would escape this best-effort path and mask the
+    review's real result. An unknown outcome maps to the `failed` conclusion and is
+    logged, never raised."""
+    calls = _fake_checkrun_boundary(monkeypatch)
+
+    with caplog.at_level(logging.WARNING, logger="shipit.review"):
+        service._close_funnel_breadcrumb(
+            "codex", "owner/repo", 555, outcome="bogus-outcome"
+        )
+
+    patches = [c for c in calls if c["method"] == "PATCH"]
+    assert len(patches) == 1
+    assert patches[0]["body"]["conclusion"] == "failure"  # the `failed` mapping
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "unknown funnel outcome" in text.lower()

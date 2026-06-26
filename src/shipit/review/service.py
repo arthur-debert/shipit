@@ -244,7 +244,20 @@ def _close_funnel_breadcrumb(
     """
     if run_id is None or repo is None:
         return
-    conclusion, title, base_summary = _FUNNEL_TERMINAL[outcome]
+    # Defensive: an unexpected/typo outcome must not KeyError out of this
+    # best-effort path and mask the review's real result — fall back to the
+    # `failed` mapping (a degraded breadcrumb beats a crash) and log the fact.
+    terminal = _FUNNEL_TERMINAL.get(outcome)
+    if terminal is None:
+        logger.warning(
+            "run_and_post: unknown funnel outcome %r for %s-local (run id=%s); "
+            "recording it as 'failed'",
+            outcome,
+            agent,
+            run_id,
+        )
+        terminal = _FUNNEL_TERMINAL["failed"]
+    conclusion, title, base_summary = terminal
     summary = f"{base_summary}\n\n{detail}" if detail else base_summary
     try:
         checkrun.transition(
