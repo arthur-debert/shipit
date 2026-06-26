@@ -75,7 +75,23 @@ def _merge_paginated(out: str) -> list:
 
 
 def graphql(query: str, **variables: object) -> dict:
-    """Run a GraphQL query/mutation; return the `data` object, raising on errors."""
+    """Run one of the ENGINE's own GraphQL queries/mutations; return `data`.
+
+    PURPOSE-BUILT for the engine's cursor/pagination + review-thread queries —
+    NOT a general-purpose GraphQL boundary. Two deliberate behaviours make it
+    correct for every call the engine makes but surprising to a general caller:
+
+      * a variable whose value is ``None`` is OMITTED entirely (not sent as
+        null) — so a first-page ``after: $cursor`` defaults to GraphQL null;
+        you cannot pass an *explicit* null through this helper; and
+      * a str value is forced as a string via ``-f`` (only int/bool type-infer
+        via ``-F``) — required for ``ID!`` variables, which must not be coerced
+        to a number.
+
+    A future caller needing explicit-null variables, or float/enum/list
+    variables, must not reach for this — build that call against ``gh api
+    graphql`` directly. Raises :class:`GhError` if the response carries errors.
+    """
     args = ["api", "graphql", "-f", f"query={query}"]
     for key, value in variables.items():
         # Omit None entirely: an unprovided nullable GraphQL variable defaults

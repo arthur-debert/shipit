@@ -91,7 +91,7 @@ def test_generate_review_logs_start_and_outcome(monkeypatch, caplog):
         def run(self, prompt, schema, *, cwd):
             return _REVIEW
 
-    monkeypatch.setattr(service, "get_backend", lambda agent, model: _FakeBackend())
+    monkeypatch.setattr(service, "get_backend", lambda agent, **kwargs: _FakeBackend())
     ctx = SimpleNamespace(diff=_DIFF, workdir="/tmp/wd")
     with caplog.at_level(logging.DEBUG, logger="shipit.review"):
         service.generate_review("codex", ctx)

@@ -64,11 +64,13 @@ DEFAULT_REVIEWERS: dict[str, bool] = {"copilot": False}
 OVERRIDE_FILE = ".shipit.toml"
 OVERRIDE_KEY = "reviewers"
 
-# The per-reviewer options that are accepted. `rerun` is consumed now; `model`
-# and `instructions` are parsed + validated but RESERVED for the deferred
-# local-agent review step (an option not listed here fails loud).
+# The per-reviewer options that are accepted. `rerun` gates re-review; `model`,
+# `instructions`, and `timeout` are consumed by the local-agent review RUN path
+# (read via `reviewer_run_options`). `model`/`instructions` are free-form strings;
+# `timeout` is a duration validated + normalized here. An option not listed here
+# fails loud.
 _RESERVED_OPTIONS = ("model", "instructions")
-_KNOWN_OPTIONS = ("rerun", *_RESERVED_OPTIONS)
+_KNOWN_OPTIONS = ("rerun", "timeout", *_RESERVED_OPTIONS)
 
 
 class RequiredReviewersConfigError(RuntimeError):
@@ -228,18 +230,59 @@ def _parse_options(name: str, opts: object) -> bool:
             f"{unknown} — supported options are {sorted(_KNOWN_OPTIONS)} "
             "(`rerun` is consumed now; `model`/`instructions` are reserved)"
         )
-    # Reserved fields are parsed + validated now but not consumed in this epic.
     for field in _RESERVED_OPTIONS:
         if field in opts and not isinstance(opts[field], str):
             raise RequiredReviewersConfigError(
                 f"{OVERRIDE_FILE} `{OVERRIDE_KEY}.{name}.{field}` must be a string"
             )
+    # `timeout` is validated here too (loud on bad input) so a malformed duration
+    # is caught at config-parse time, not only on the run path.
+    if "timeout" in opts:
+        _normalize_timeout(name, opts["timeout"])
     rerun = opts.get("rerun", False)
     if not isinstance(rerun, bool):
         raise RequiredReviewersConfigError(
             f"{OVERRIDE_FILE} `{OVERRIDE_KEY}.{name}.rerun` must be a boolean"
         )
     return rerun
+
+
+def _normalize_timeout(name: str, value: object) -> str:
+    """Validate a per-reviewer `timeout` and normalize it to a duration string.
+
+    Accepts a positive integer (seconds) or a string of digits optionally suffixed
+    with `s` (e.g. `600` or `600s`); returns the canonical `<N>s` form the backend
+    passes straight to the agent CLI. A bool, a non-positive value, or any other
+    shape fails LOUD — a bad timeout is a config error, never a silent default.
+    `bool` is an `int` subclass, so it is rejected explicitly (a `timeout = true`
+    is never "1 second")."""
+    if isinstance(value, bool):
+        raise RequiredReviewersConfigError(
+            f"{OVERRIDE_FILE} `{OVERRIDE_KEY}.{name}.timeout` must be a duration "
+            f"like `600s` or a positive integer of seconds, not a boolean"
+        )
+    if isinstance(value, int):
+        seconds = value
+    elif isinstance(value, str):
+        text = value.strip()
+        core = text[:-1] if text.endswith("s") else text
+        if not core.isdigit():
+            raise RequiredReviewersConfigError(
+                f"{OVERRIDE_FILE} `{OVERRIDE_KEY}.{name}.timeout` must be a duration "
+                f"like `600s` or a positive integer of seconds, got {value!r}"
+            )
+        seconds = int(core)
+    else:
+        raise RequiredReviewersConfigError(
+            f"{OVERRIDE_FILE} `{OVERRIDE_KEY}.{name}.timeout` must be a duration "
+            f"like `600s` or a positive integer of seconds, got {value!r}"
+        )
+    if seconds <= 0:
+        raise RequiredReviewersConfigError(
+            f"{OVERRIDE_FILE} `{OVERRIDE_KEY}.{name}.timeout` must be positive, "
+            f"got {value!r}"
+        )
+    return f"{seconds}s"
 
 
 def _find_config(start: str | None = None) -> Path | None:
@@ -282,14 +325,15 @@ def load_override(root: str | None = None) -> dict[str, bool] | None:
 
 
 def reviewer_run_options(name: str, root: str | None = None) -> dict[str, str]:
-    """The per-reviewer `model` / `instructions` for `name` from `.shipit.toml`.
+    """The per-reviewer `model` / `instructions` / `timeout` for `name`.
 
     Consumed by the local-agent review RUN path (PRF01-WS07): a reviewer's
-    `[reviewers]` entry MAY carry `model` (the backend model alias) and
-    `instructions` (a path to a custom review-instructions file). Returns a dict
-    with only the keys that are set (e.g. `{"model": "flash"}`); an absent
-    config, an absent reviewer entry, or a non-table `reviewers` value → `{}`
-    (the run path then uses its own defaults).
+    `[reviewers]` entry MAY carry `model` (the backend model alias),
+    `instructions` (a path to a custom review-instructions file), and `timeout`
+    (the agent's per-run timeout, normalized to a `<N>s` duration string).
+    Returns a dict with only the keys that are set (e.g. `{"model": "flash"}`);
+    an absent config, an absent reviewer entry, or a non-table `reviewers` value
+    → `{}` (the run path then uses its own defaults).
 
     A relative `instructions` path is resolved against the directory CONTAINING
     `.shipit.toml` (and `~` is expanded), not the caller's cwd: the config is
@@ -333,6 +377,8 @@ def reviewer_run_options(name: str, root: str | None = None) -> dict[str, str]:
                         f"{OVERRIDE_FILE} `{OVERRIDE_KEY}.{key}.{field}` must be a string"
                     )
                 out[field] = opts[field]
+        if "timeout" in opts:
+            out["timeout"] = _normalize_timeout(key, opts["timeout"])
     if "instructions" in out:
         # Anchor a relative instructions path to the config's own directory (and
         # expand ~), so it opens regardless of the caller's cwd.

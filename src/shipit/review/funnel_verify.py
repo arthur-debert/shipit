@@ -25,7 +25,7 @@ boundary, and asserts every breadcrumb fact:
 **Siting — why this is NOT in the test gate.** It hits live GitHub, needs Doppler
 App creds, and needs a canary PR, so it must never run inside ``pixi run test`` / CI
 (which have none of those and would fail). So it is a standalone ``python -m``
-entrypoint (``pixi run -e verify verify-funnel``), it REFUSES to run without an
+entrypoint (``pixi run -e review verify-funnel``), it REFUSES to run without an
 explicit ``--repo`` + ``--pr`` (or the ``SHIPIT_FUNNEL_CANARY_REPO`` /
 ``SHIPIT_FUNNEL_CANARY_PR`` env), and pytest never collects it (it lives in
 ``src/``, not ``tests/``). Its assertion/wiring logic is regression-covered in the
@@ -34,7 +34,7 @@ with the same boundary FAKED — so the harness itself can't silently rot.
 
 Run it (for the ``arthur-debert`` owner, whose re-grant is live)::
 
-    pixi run -e verify verify-funnel --repo arthur-debert/shipit-canary --pr <N>
+    pixi run -e review verify-funnel --repo arthur-debert/shipit-canary --pr <N>
     # or:
     SHIPIT_FUNNEL_CANARY_REPO=arthur-debert/shipit-canary \
     SHIPIT_FUNNEL_CANARY_PR=<N> python -m shipit.review.funnel_verify
