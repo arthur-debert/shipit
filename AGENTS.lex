@@ -24,9 +24,9 @@ The dev cycle is ALWAYS delegated:
     - a FRESH SHEPHERD subagent handles each review-addressing round — one per
       round, briefed cold.
 
-    The canonical statement of this cycle lives in `release/docs/dev-cycle.lex`;
-    this document adapts it to shipit's `shipit pr` engine. On any drift, the
-    canonical doc wins.
+    The canonical statement of this cycle lives in the `arthur-debert/release`
+    repo (`docs/dev-cycle.lex`); this document adapts it to shipit's `shipit pr`
+    engine. On any drift, the canonical doc wins.
 
 The PR lifecycle (draft -> ready -> stop):
 
@@ -174,7 +174,7 @@ The PR lifecycle (draft -> ready -> stop):
 
         - 6 rounds have happened (there is no 7th round), or
         - the current round is all nitpicks — nothing that changes
-          correctness, behaviour, or security.
+          correctness, behavior, or security.
 
         *Nitpick* — a comment about documentation wording, naming, or style
         with no correctness, behavioral, or security impact. Anything touching
@@ -202,8 +202,8 @@ The PR lifecycle (draft -> ready -> stop):
 
     Before execution, a new feature is planned through shipit's design skills:
     `/shipt-grill-with-docs` lands the CONTEXT.md / ADR changes,
-    `/shipit-to-prd` writes the PRD under `docs/prd/` and opens the epic
-    tracker issue, and `/shipit-to-issues` turns the PRD into Work Streams
+    `/shipt-to-prd` writes the PRD under `docs/prd/` and opens the epic
+    tracker issue, and `/shipt-to-issues` turns the PRD into Work Streams
     (each a vertical slice, a sub-issue of the epic, with blocked-by
     dependencies).
 
