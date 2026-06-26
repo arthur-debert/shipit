@@ -1,14 +1,14 @@
-# Review-App provisioning — `checks:write` for the local-review funnel
+# Review-App provisioning — `checks: write` for the local-review funnel
 
 The local-review **funnel** (OBS02, [ADR-0005](../adr/0005-local-review-funnel-via-check-runs.md))
 rides on GitHub **check runs authored by the review App**: shipit creates a
-`review: <reviewer>` check run (`in_progress` → `success`/`failure`/`timed_out`) so a
+`review: <reviewer>` check run (`status: in_progress` → `status: completed` with `conclusion: success`/`failure`/`timed_out`) so a
 requested / in-flight / failed local review is visible on the PR. Creating a check run
 needs the App's installation token to carry **`checks: write`**.
 
 The review Apps were minted with only `contents:read`, `metadata:read`,
 `pull_requests:write` — **no `checks` permission** — so a check-run create returns
-`403 Resource not accessible by integration` today. Granting `checks:write` is a
+`403 Resource not accessible by integration` today. Granting `checks: write` is a
 **one-time, owner-only GitHub UI action** (there is no API to change an App's
 permission set or to re-consent an installation), and it must be done **per App** and
 re-consented **per installation (owner)**. This is the provisioning step the
@@ -74,6 +74,6 @@ one-line probe in OBS02-WS03 is the check.)
 
 ## Adding a new consumer later
 
-Same two steps for the new owner: the App permission is already `checks:write` (Step 1
+Same two steps for the new owner: the App permission is already `checks: write` (Step 1
 is done once globally), so only **Step 2** — approve the new owner's installation — is
 needed when onboarding a consumer per #26.
