@@ -1,1 +1,2 @@
 lint = "shipit lint"
+logs = "shipit logs"
