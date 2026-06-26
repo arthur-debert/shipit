@@ -128,8 +128,18 @@ def configure_logging(
 
 
 def _current_owner_repo() -> tuple[str, str]:
-    """``(owner, repo)`` for the current checkout, via the :mod:`shipit.gh` boundary."""
-    owner, _, repo = gh.current_repo().partition("/")
+    """``(owner, repo)`` for the current checkout, via the :mod:`shipit.gh` boundary.
+
+    The boundary returns ``owner/name`` (``gh repo view --json nameWithOwner``).
+    A value that is not a two-part slug is a real failure — fail loud rather than
+    silently writing to an empty/incorrect log directory.
+    """
+    slug = gh.current_repo()
+    owner, sep, repo = slug.partition("/")
+    if not sep or not owner or not repo:
+        raise ValueError(
+            f"expected an 'owner/repo' slug from gh.current_repo(), got {slug!r}"
+        )
     return owner, repo
 
 

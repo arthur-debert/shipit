@@ -116,8 +116,14 @@ def test_file_handler_rolls_over_rather_than_growing_unbounded(tmp_path, monkeyp
     assert (log_dir / "shipit.log") in backups
     assert any(p.name != "shipit.log" for p in backups), "never rolled over"
     assert len(backups) <= logsetup.BACKUP_COUNT + 1
+    # RotatingFileHandler rolls BEFORE a write that would cross maxBytes, so a
+    # file can carry the one final record past the cap. Tie the bound to
+    # MAX_BYTES (not a bare number) plus one record's worth of slack.
+    one_record_slack = 256
     for path in backups:
-        assert path.stat().st_size <= 4096, f"{path} grew past the bound"
+        assert path.stat().st_size <= logsetup.MAX_BYTES + one_record_slack, (
+            f"{path} grew past the bound"
+        )
 
 
 # --------------------------------------------------------------------------
@@ -157,6 +163,14 @@ def test_configure_logging_resolves_owner_repo_via_gh_boundary(tmp_path, monkeyp
         )
     finally:
         handler.close()
+
+
+def test_configure_logging_rejects_non_slug_from_gh(tmp_path, monkeypatch):
+    # A boundary value that is not an 'owner/repo' slug must fail loud rather than
+    # silently target an empty/incorrect log directory.
+    monkeypatch.setattr(logsetup.gh, "current_repo", lambda: "not-a-slug")
+    with pytest.raises(ValueError, match="owner/repo"):
+        logsetup.configure_logging(base_dir=tmp_path)
 
 
 # --------------------------------------------------------------------------
