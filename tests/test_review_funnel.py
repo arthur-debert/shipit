@@ -96,7 +96,9 @@ def test_kickoff_opens_funnel_run_then_posts(monkeypatch, _stub_pipeline):
     assert result["post"] == {"id": 99}
 
 
-def test_breadcrumb_failure_does_not_fail_the_review(monkeypatch, _stub_pipeline, caplog):
+def test_breadcrumb_failure_does_not_fail_the_review(
+    monkeypatch, _stub_pipeline, caplog
+):
     """When the check-run create raises (simulated 403 before the `checks:write`
     re-grant), `run_and_post` STILL posts the review and returns its normal
     result — the failure is swallowed and logged, never propagated."""

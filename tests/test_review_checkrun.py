@@ -70,8 +70,9 @@ def test_create_names_run_per_reviewer(monkeypatch):
     monkeypatch.setattr(
         checkrun.gh,
         "rest",
-        lambda path, *, method=None, body=None, token=None: seen.update(body=body)
-        or {"id": 1},
+        lambda path, *, method=None, body=None, token=None: (
+            seen.update(body=body) or {"id": 1}
+        ),
     )
     checkrun.create("agy", "owner/repo", "cafef00d")
     assert seen["body"]["name"] == "review: agy-local"
