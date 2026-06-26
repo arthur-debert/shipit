@@ -153,6 +153,12 @@ class _GhRecorder:
     def __init__(self):
         self.calls = []
         self.pr_body = None
+        self.hook_activations = []
+
+    def activate_hooks(self, root):
+        # Stand in for `lefthook install`: record the call, mutate nothing.
+        self.hook_activations.append(root)
+        return (0, "")
 
     def git_switch_create(self, branch, *, cwd):
         self.calls.append(("switch", branch))
@@ -195,6 +201,10 @@ def rec(monkeypatch):
     ):
         monkeypatch.setattr(gh, name, getattr(r, name))
     monkeypatch.setattr(install, "_shipit_version", lambda: "testhash")
+    # Inject the lefthook boundary so no test spawns a real `lefthook install`
+    # (mirrors how lint tests inject run_tool). Real activation is covered
+    # directly against subprocess in test_activate_hooks_* below.
+    monkeypatch.setattr(install, "_activate_hooks", r.activate_hooks)
     return r
 
 
@@ -306,3 +316,119 @@ def test_gh_failure_is_a_clean_nonzero_exit(tmp_path, monkeypatch, rec):
     (tmp_path / "AGENTS.md").write_text("# Acme\n")
     rc = install.run(str(tmp_path))
     assert rc == 1  # clean exit, not a raised traceback
+
+
+# --------------------------------------------------------------------------
+# Gate activation — the lefthook.yml caller is turned LIVE, not just written
+# --------------------------------------------------------------------------
+
+
+def test_activates_hooks_is_true_iff_lefthook_is_managed():
+    units = install.load_units()
+    decisions = install.plan(units, {}, {})
+    assert install.activates_hooks(decisions) is True
+
+    # A set with no lefthook unit does not activate.
+    others = [d for d in decisions if d.unit.key != install.LEFTHOOK_FILE]
+    assert install.activates_hooks(others) is False
+
+
+def test_fresh_install_activates_the_gate_hooks(tmp_path, rec):
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    rc = install.run(str(tmp_path))
+    assert rc == 0
+    # The lefthook boundary was invoked exactly once, on the consumer root.
+    assert len(rec.hook_activations) == 1
+    assert rec.hook_activations[0] == tmp_path.resolve()
+    # The PR body announces the gate is live.
+    assert "### Gate activated" in rec.pr_body
+    assert "lefthook install" in rec.pr_body
+
+
+def test_break_glass_push_also_activates_hooks(tmp_path, rec):
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    rc = install.run(str(tmp_path), push=True)
+    assert rc == 0
+    assert len(rec.hook_activations) == 1
+
+
+def test_dry_run_does_not_activate_hooks(tmp_path, rec):
+    rc = install.run(str(tmp_path), dry_run=True)
+    assert rc == 0
+    assert rec.hook_activations == []  # no side effect on dry-run
+
+
+def test_reinstall_with_writes_reactivates_idempotently(tmp_path, rec):
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    install.run(str(tmp_path))
+    assert len(rec.hook_activations) == 1
+    # A consumer edit forces a writing re-install; activation re-runs (safe
+    # because `lefthook install` is idempotent — we never hand-roll a hook).
+    (tmp_path / "lefthook.yml").write_text("CONSUMER EDIT\n")
+    rec.calls.clear()
+    install.run(str(tmp_path))
+    assert len(rec.hook_activations) == 2
+
+
+def test_install_warns_but_succeeds_when_lefthook_missing(tmp_path, monkeypatch, rec):
+    # The boundary reports a missing binary (127); install must still finish its
+    # PR rather than aborting — activation is opportunistic, not a hard gate.
+    rec.hook_activations.clear()
+    monkeypatch.setattr(
+        install, "_activate_hooks", lambda root: (127, "lefthook: not found on PATH")
+    )
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    rc = install.run(str(tmp_path))
+    assert rc == 0
+    assert ("pr_create", True) in rec.calls
+    # The PR body must NOT claim the gate went live on this failure path; it
+    # records that local activation was deferred so a merger knows to act.
+    assert "### Gate activated locally" not in rec.pr_body
+    assert "local activation skipped" in rec.pr_body
+    assert "lefthook install" in rec.pr_body
+
+
+def test_activate_hooks_boundary_runs_lefthook_install(tmp_path, monkeypatch):
+    # The real boundary shells out to `lefthook install` (the install-hooks task
+    # invocation), in the consumer root — never a re-implemented hook writer.
+    captured = {}
+
+    class _Proc:
+        returncode = 0
+        stdout = "sync hooks: ✔️ pre-commit, ✔️ pre-push\n"
+        stderr = ""
+
+    def fake_run(argv, **kw):
+        captured["argv"] = argv
+        captured["cwd"] = kw.get("cwd")
+        return _Proc()
+
+    monkeypatch.setattr(install.subprocess, "run", fake_run)
+    rc, out = install._activate_hooks(tmp_path)
+    assert rc == 0
+    assert captured["argv"] == ["lefthook", "install"]
+    assert captured["cwd"] == str(tmp_path)
+    assert "pre-commit" in out
+
+
+def test_activate_hooks_boundary_reports_missing_binary(tmp_path, monkeypatch):
+    def boom(*a, **k):
+        raise FileNotFoundError("lefthook")
+
+    monkeypatch.setattr(install.subprocess, "run", boom)
+    rc, out = install._activate_hooks(tmp_path)
+    assert rc == 127
+    # Points at the canonical recovery, which works in a consumer repo too.
+    assert "lefthook install" in out
+
+
+def test_activate_hooks_boundary_reports_unexecutable_binary(tmp_path, monkeypatch):
+    # A present-but-not-executable lefthook raises PermissionError (an OSError);
+    # install must warn, not crash, exactly as for a missing binary.
+    def boom(*a, **k):
+        raise PermissionError("Permission denied")
+
+    monkeypatch.setattr(install.subprocess, "run", boom)
+    rc, out = install._activate_hooks(tmp_path)
+    assert rc == 127
+    assert "lefthook install" in out
