@@ -20,7 +20,8 @@ from __future__ import annotations
 
 import logging
 
-from . import post
+from .. import gh
+from . import checkrun, post
 from .backends import get_backend
 from .diff import resolve_pr
 from .instructions import load_instructions
@@ -107,6 +108,7 @@ def run_and_post(
         dry_run,
     )
     ctx = resolve_pr(pr, repo=repo)
+    _open_funnel_breadcrumb(agent, ctx)
     review = generate_review(
         agent, ctx, instructions_path=instructions_path, model=model
     )
@@ -120,3 +122,41 @@ def run_and_post(
     )
     logger.info("run_and_post: agent=%s pr=#%s done", agent, pr)
     return {"review": review, "post": result, "ctx_repo": ctx.repo, "pr": pr}
+
+
+def _open_funnel_breadcrumb(agent, ctx) -> None:
+    """Open the kickoff funnel check run for this review — BEST-EFFORT.
+
+    Opens the ``in_progress`` ``review: <agent>-local`` check run
+    (:func:`shipit.review.checkrun.create`) so the same flow that kicks the
+    review off leaves the *requested / in-flight* breadcrumb that GitHub denies
+    these App bots a native edge for.
+
+    **A breadcrumb failure must NEVER fail the review.** Per the OBS02
+    prerequisite, until the App's ``checks:write`` re-grant propagates everywhere
+    a create can ``403``; the local review must still post regardless. So every
+    failure here is caught, logged through the OBS01 sink (the failure FACT only —
+    the installation token never reaches a record, mirroring ``post.py``), and
+    swallowed, leaving ``generate_review`` / ``post_review`` unaffected.
+
+    The repo slug is ``ctx.repo`` when set, else inferred from the checkout
+    (``gh.current_repo()``) — the same source ``post.post_review`` resolves to.
+    """
+    try:
+        repo = ctx.repo or gh.current_repo()
+        run_id = checkrun.create(agent, repo, ctx.head_sha)
+        logger.info(
+            "run_and_post: opened funnel check run for %s-local on %s (run id=%s)",
+            agent,
+            repo,
+            run_id,
+        )
+    except Exception as exc:  # noqa: BLE001 - the breadcrumb is best-effort, never fatal
+        # Record the failure fact (never the token) and proceed — the review post
+        # is unaffected by a missing/denied check-runs scope.
+        logger.warning(
+            "run_and_post: funnel check run create failed for %s-local "
+            "(continuing to post the review): %s",
+            agent,
+            exc,
+        )
