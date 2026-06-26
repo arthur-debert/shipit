@@ -147,8 +147,10 @@ to a thin caller of `arthur-debert/shipit@vN`, upgraded by bumping one version.
   non-required nuance beyond the lane flag — WF03.
 - Changelog/release/sign/distribution — WF04/WF05.
 - The cross-repo cascade — WF06.
-- supage's Cloud-Run **deploy** (not a **Release**); its CLI artifact is in scope
-  under the normal model, its server deploy stays bespoke in-repo.
+- The `supage` repo's server **deploy** (its Go services shipped to Google Cloud
+  Run) — a *deploy*, not a **Release**, so it falls outside the artifact→endpoint
+  model. Its `supage` CLI artifact is in scope under the normal model; the Cloud Run
+  deploy stays bespoke in-repo.
 
 ## Further Notes
 
