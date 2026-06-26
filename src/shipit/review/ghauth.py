@@ -224,13 +224,17 @@ def installation_id(agent: str, repo: str, *, jwt: str | None = None) -> int:
     return int(resp["id"])
 
 
-def installation_token(agent: str, repo: str) -> str:
-    """Mint a 1-hour installation access token for ``agent`` on ``repo``.
+def installation_auth(agent: str, repo: str) -> dict:
+    """Mint a 1-hour installation token for ``agent`` on ``repo`` — full response.
 
-    Orchestrates the three hops: JWT → installation id → ``POST
-    /app/installations/{id}/access_tokens`` → the ``ghs_…`` token. Nothing is
-    cached to disk; the token is returned for the caller to inject as
-    ``gh.rest(..., token=...)``. Raises :class:`ReviewAuthError` on any failure.
+    The same three hops as :func:`installation_token` (JWT → installation id →
+    ``POST /app/installations/{id}/access_tokens``), but returns the WHOLE
+    access-tokens response rather than just the token string. The load-bearing
+    extra field is ``permissions`` — the scope map GitHub actually granted this
+    token (e.g. ``{"checks": "write", "pull_requests": "write", …}``), which the
+    OBS02 funnel verification harness asserts carries ``checks: write`` (the
+    re-grant landed) before it drives a check-run create. Nothing is cached to
+    disk. Raises :class:`ReviewAuthError` on any failure.
     """
     jwt_token = make_app_jwt(agent)
     inst_id = installation_id(agent, repo, jwt=jwt_token)
@@ -240,4 +244,16 @@ def installation_token(agent: str, repo: str) -> str:
             f"Minting an installation token for {agent!r} on {repo} returned no "
             f"'token': {resp!r}"
         )
-    return str(resp["token"])
+    return resp
+
+
+def installation_token(agent: str, repo: str) -> str:
+    """Mint a 1-hour installation access token for ``agent`` on ``repo``.
+
+    Orchestrates the three hops: JWT → installation id → ``POST
+    /app/installations/{id}/access_tokens`` → the ``ghs_…`` token (the ``token``
+    field of :func:`installation_auth`'s response). Nothing is cached to disk; the
+    token is returned for the caller to inject as ``gh.rest(..., token=...)``.
+    Raises :class:`ReviewAuthError` on any failure.
+    """
+    return str(installation_auth(agent, repo)["token"])

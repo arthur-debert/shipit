@@ -162,6 +162,39 @@ def test_installation_token_runs_the_three_hops(monkeypatch, doppler_stub):
     assert posts == ["/app/installations/42/access_tokens"]
 
 
+def test_installation_auth_returns_token_and_granted_permissions(
+    monkeypatch, doppler_stub
+):
+    """`installation_auth` returns the WHOLE access-tokens response — crucially the
+    `permissions` scope map the OBS02 funnel verify harness reads `checks: write`
+    from — while `installation_token` delegates to it for just the token string."""
+    _stub_jwt(monkeypatch)
+    monkeypatch.setattr(ghauth, "_api_get", lambda path, token: {"id": 42})
+    monkeypatch.setattr(
+        ghauth,
+        "_api_post",
+        lambda path, token: {
+            "token": "ghs_installation_tok",
+            "permissions": {"checks": "write", "pull_requests": "write"},
+        },
+    )
+
+    auth = ghauth.installation_auth("codex", "owner/repo")
+    assert auth["token"] == "ghs_installation_tok"
+    assert auth["permissions"]["checks"] == "write"
+    # The string-only helper rides the same mint.
+    assert ghauth.installation_token("codex", "owner/repo") == "ghs_installation_tok"
+
+
+def test_installation_auth_raises_when_no_token(monkeypatch, doppler_stub):
+    """A response without a `token` is a clean ReviewAuthError, not a silent {}."""
+    _stub_jwt(monkeypatch)
+    monkeypatch.setattr(ghauth, "_api_get", lambda path, token: {"id": 42})
+    monkeypatch.setattr(ghauth, "_api_post", lambda path, token: {"permissions": {}})
+    with pytest.raises(ghauth.ReviewAuthError, match="no\n? *'token'|no 'token'"):
+        ghauth.installation_auth("codex", "owner/repo")
+
+
 def test_installation_id_404_is_actionable(monkeypatch, doppler_stub):
     _stub_jwt(monkeypatch)
 
