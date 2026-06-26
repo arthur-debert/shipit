@@ -96,12 +96,14 @@ Scope
         human can validate and merge", so it happens only when all three
         hold: reviews addressed, CI green, mergeable.
 
-        The agent stops at that flip — it does NOT merge. Opening as a
-        draft and flipping it to ready is the agent's job; the human does
-        the final read and merge unless they say otherwise. A human
-        request for changes sends the PR back to draft and the loop
-        repeats. The per-reviewer re-review and review-break rules are in
-        [./AGENTS.lex].
+        The agent stops at that flip — it does NOT merge. But the FLOOR is
+        the agent's own: committing, pushing, and opening the draft PR need
+        no go-ahead — "stop at the ready flip" never means "wait to be
+        asked to commit" or leave finished work uncommitted. The CEILING —
+        the ONE human-gated step — is the merge: the human does the final
+        read and merge unless they say otherwise. A human request for
+        changes sends the PR back to draft and the loop repeats. The
+        per-reviewer re-review and review-break rules are in [./AGENTS.lex].
 
     2.1 pixil shipit-request-review <pr_number> <reviewer>....
 
