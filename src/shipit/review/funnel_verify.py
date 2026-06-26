@@ -100,17 +100,29 @@ def verify(agent: str, repo: str, pr: int, *, conclusion: str = "success") -> Re
     run id, ``completed`` status, the conclusion, an ``output`` message, and a
     ``completed_at``).
 
-    Returns a :class:`Report`; it never raises for an *assertion* failure (those
-    become failed checks) — only an unexpected boundary error short-circuits with
-    the failure recorded. Stops early (returning the partial report) when a step's
-    failure makes the rest meaningless (no token scope read, no head sha, no run).
+    Returns a :class:`Report`; it NEVER raises — every failure, an *assertion*
+    miss OR a boundary error (``ReviewAuthError`` minting the App token,
+    ``GhError`` on a REST call), becomes a recorded failed check so the harness
+    always prints a PASS/FAIL report and exits 0/1. It stops early (returning the
+    partial report) when a step's failure makes the rest meaningless (no token, no
+    head sha, no created run).
     """
     report = Report()
 
     # 1. Token scope — the create-installation-token response carries the scopes
     #    GitHub actually granted this token. This is the direct read of "the
-    #    checks:write re-grant + per-install consent landed for this owner".
-    auth = ghauth.installation_auth(agent, repo)
+    #    checks:write re-grant + per-install consent landed for this owner". A mint
+    #    failure (missing PyJWT, app not installed, API error) is recorded, not
+    #    raised, so the harness still reports — there is nothing further to drive.
+    try:
+        auth = ghauth.installation_auth(agent, repo)
+    except ghauth.ReviewAuthError as exc:
+        report.record(
+            "installation token granted checks: write",
+            False,
+            f"could not mint the installation token: {exc}",
+        )
+        return report
     perms = auth.get("permissions", {}) if isinstance(auth, dict) else {}
     report.record(
         "installation token granted checks: write",
@@ -118,8 +130,14 @@ def verify(agent: str, repo: str, pr: int, *, conclusion: str = "success") -> Re
         f"permissions.checks={perms.get('checks')!r}",
     )
 
-    # The canary PR's head sha — the commit the funnel run attaches to.
-    head_sha = _pr_head_sha(repo, pr)
+    # The canary PR's head sha — the commit the funnel run attaches to. A `gh`
+    # failure (repo/PR not accessible, auth) is recorded as the failed head-sha
+    # check, not raised.
+    try:
+        head_sha = _pr_head_sha(repo, pr)
+    except gh.GhError as exc:
+        report.record("resolved canary PR head sha", False, f"{repo}#{pr}: {exc}")
+        return report
     if not report.record(
         "resolved canary PR head sha",
         bool(head_sha),
@@ -130,11 +148,12 @@ def verify(agent: str, repo: str, pr: int, *, conclusion: str = "success") -> Re
 
     # 2. Kickoff create — drive WS01's real code. A returned run id means
     #    POST .../check-runs was a 201; a missing checks:write scope would 403,
-    #    which `gh` surfaces as a GhError — caught here and recorded as the failed
-    #    "201, not 403" check rather than crashing the harness.
+    #    which `gh` surfaces as a GhError (and a token mint can ReviewAuthError) —
+    #    both caught here and recorded as the failed "201, not 403" check rather
+    #    than crashing the harness.
     try:
         run_id = checkrun.create(agent, repo, head_sha)
-    except gh.GhError as exc:
+    except (gh.GhError, ghauth.ReviewAuthError) as exc:
         report.record(
             "POST /repos/<repo>/check-runs returned 201 (not 403)",
             False,
@@ -150,7 +169,7 @@ def verify(agent: str, repo: str, pr: int, *, conclusion: str = "success") -> Re
         return report
     assert run_id is not None  # guarded by the record above
 
-    created = _get_run(repo, run_id)
+    created = _read_run(report, repo, run_id, "kickoff")
     report.record(
         "kickoff run is in_progress",
         _field(created, "status") == "in_progress",
@@ -162,16 +181,26 @@ def verify(agent: str, repo: str, pr: int, *, conclusion: str = "success") -> Re
         f"started_at={_field(created, 'started_at')!r}",
     )
 
-    # 3. Terminal transition — drive WS02's real code on the SAME run id.
+    # 3. Terminal transition — drive WS02's real code on the SAME run id. A
+    #    transition (or read-back) boundary error is recorded, not raised, so the
+    #    harness still prints a structured FAIL report.
     title = f"OBS02 funnel verify ({agent}-local)"
     summary = (
         "Lifecycle verification harness drove this run to its terminal "
         f"conclusion ({conclusion})."
     )
-    checkrun.transition(
-        agent, repo, run_id, conclusion=conclusion, title=title, summary=summary
-    )
-    closed = _get_run(repo, run_id)
+    try:
+        checkrun.transition(
+            agent, repo, run_id, conclusion=conclusion, title=title, summary=summary
+        )
+    except (gh.GhError, ghauth.ReviewAuthError) as exc:
+        report.record(
+            f"run conclusion is {conclusion}",
+            False,
+            f"terminal transition failed: {exc}",
+        )
+        return report
+    closed = _read_run(report, repo, run_id, "terminal")
     report.record(
         "terminal transition hit the SAME run (no second run)",
         _field(closed, "id") == run_id,
@@ -208,6 +237,17 @@ def _pr_head_sha(repo: str, pr: int) -> str | None:
     obj = gh.rest(f"/repos/{repo}/pulls/{pr}")
     head = obj.get("head") if isinstance(obj, dict) else None
     return head.get("sha") if isinstance(head, dict) else None
+
+
+def _read_run(report: Report, repo: str, run_id: int, phase: str) -> object:
+    """Read back run ``run_id``, recording a failed check (and returning ``{}``)
+    on a `gh` boundary error so the downstream field assertions degrade to clean
+    FAILs instead of crashing the harness."""
+    try:
+        return _get_run(repo, run_id)
+    except gh.GhError as exc:
+        report.record(f"read back the {phase} run", False, f"read failed: {exc}")
+        return {}
 
 
 def _get_run(repo: str, run_id: int) -> object:

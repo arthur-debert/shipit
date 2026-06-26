@@ -185,6 +185,79 @@ def test_verify_records_403_on_create_and_stops(monkeypatch):
     assert not [c for c in fake.calls if c["method"] == "PATCH"]
 
 
+def test_verify_records_auth_failure_without_raising(monkeypatch):
+    """A `ReviewAuthError` minting the App token is recorded as the failed scope
+    check, not raised — the harness still returns a report (its 0/1 contract)."""
+    fake = _FakeGitHub()
+    monkeypatch.setattr(funnel_verify.gh, "rest", fake.rest)
+
+    def boom(agent, repo):
+        raise funnel_verify.ghauth.ReviewAuthError("app not installed")
+
+    monkeypatch.setattr(funnel_verify.ghauth, "installation_auth", boom)
+
+    report = funnel_verify.verify("codex", "owner/repo", 7)
+
+    assert report.passed is False
+    scope = next(c for c in report.checks if "checks: write" in c.name)
+    assert scope.passed is False
+    assert "could not mint" in scope.detail
+    # Stopped before touching the check-run surface.
+    assert not fake.calls
+
+
+def test_verify_records_head_sha_gh_error_without_raising(monkeypatch):
+    """A `GhError` resolving the PR head sha is recorded, not raised."""
+    monkeypatch.setattr(
+        funnel_verify.ghauth,
+        "installation_auth",
+        lambda agent, repo: {"token": "ghs_tok", "permissions": {"checks": "write"}},
+    )
+
+    def rest(path, *, method=None, body=None, paginate=False, token=None):
+        from shipit import gh
+
+        raise gh.GhError("PR not accessible")
+
+    monkeypatch.setattr(funnel_verify.gh, "rest", rest)
+
+    report = funnel_verify.verify("codex", "owner/repo", 7)
+
+    assert report.passed is False
+    head = next(c for c in report.checks if "head sha" in c.name)
+    assert head.passed is False
+
+
+def test_verify_records_transition_failure_without_raising(monkeypatch):
+    """A `GhError` on the terminal PATCH is recorded as a failed conclusion check,
+    not raised — the harness still prints a structured FAIL."""
+    fake = _FakeGitHub()
+
+    def rest(path, *, method=None, body=None, paginate=False, token=None):
+        from shipit import gh
+
+        if method == "PATCH":
+            raise gh.GhError("PATCH 403")
+        return fake.rest(path, method=method, body=body, token=token)
+
+    monkeypatch.setattr(funnel_verify.gh, "rest", rest)
+    monkeypatch.setattr(
+        funnel_verify.ghauth,
+        "installation_auth",
+        lambda agent, repo: {"token": "ghs_tok", "permissions": {"checks": "write"}},
+    )
+    monkeypatch.setattr(
+        funnel_verify.ghauth, "installation_token", lambda agent, repo: "ghs_tok"
+    )
+
+    report = funnel_verify.verify("codex", "owner/repo", 7)
+
+    assert report.passed is False
+    concl = next(c for c in report.checks if "conclusion is success" in c.name)
+    assert concl.passed is False
+    assert "transition failed" in concl.detail
+
+
 def test_verify_fails_when_pr_head_cannot_be_resolved(monkeypatch):
     """No resolvable head sha (bad PR) fails fast with the head-sha check and no
     check-run is created."""
