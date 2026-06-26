@@ -1,0 +1,66 @@
+# Local-review funnel via App-authored check runs
+
+shipit's local reviewers (`codex-local`, `agy-local`) post **structured reviews**
+AS their GitHub Apps (`adr-codex-review[bot]` / `adr-agy-review[bot]`), through the
+official Reviews API — byte-for-byte the same shape Copilot produces. But GitHub
+gives those App identities **no native pre-post signal**: a custom App bot cannot
+be assigned as a requested reviewer. Verified empirically (on a throwaway canary
+PR):
+
+- GraphQL `requestReviews(userIds:[…])` rejects Bot nodes (there is no `botIds`
+  input) — `NOT_FOUND` on the bot's `BOT_…` id;
+- `gh pr edit --add-reviewer adr-codex-review` — the login does not resolve;
+- REST `POST …/requested_reviewers` — HTTP 200 but a **silent no-op**
+  (`reviewRequests` stays empty);
+- `suggestedActors(CAN_BE_ASSIGNED)` does not list them at all.
+
+So until a local review *posts*, there is no record it was ever requested — a
+failed, empty, or timed-out local review is indistinguishable from "never
+requested," and the PR parks silently with no signal to a human or to an agent
+(the failure mode the whole observability spine exists to kill).
+
+## Decision
+
+The local-review **funnel** — requested → in-flight → posted (success) /
+failed / empty / timed-out — rides on **GitHub Check Runs authored by the
+reviewer's App**. On kickoff shipit creates a check run (`status=in_progress`,
+`started_at=now`); on completion it transitions the run to `completed/success`
+(alongside the posted structured review) or `completed/failure` / `timed_out`
+with an `output` message. The check run is the **native, timestamped stand-in for
+the `review_requested` edge GitHub denies these bots**.
+
+App reviewers (Copilot) keep using their native `review_requested` edge + review
+object; the engine normalizes native-edge and check-run inputs into **one funnel
+view** — "isomorphic" at the engine's level, not on the wire (per
+[ADR follow-on / OBS04]). The funnel check run is **non-required**: a failed local
+review is *visible but non-blocking*, because the Ready gate is "every required
+reviewer's outcome is **recorded** + threads resolved," not "every review
+**succeeded**."
+
+### Alternatives rejected
+
+- **Native reviewer-API request for the bots** — the obvious path; empirically
+  forbidden for App identities (above). Dead end, not a choice.
+- **Bot marker comments** — an App-authored issue comment per stage. Works *today*
+  with the App's existing `pull_requests:write`, but it is comment-noise on the PR
+  and needs bespoke parsing; check runs are a native primitive the engine already
+  consumes and carry first-class state + timestamps.
+
+## Consequences
+
+- The engine reads **check runs** (already in its snapshot) + **review objects**;
+  no custom comment parsing is introduced.
+- The check run's `started_at` gives OBS04's **wait window** a timestamp to age
+  against, so the engine stays **stateless** (it takes "now" as input; it keeps no
+  clock of its own).
+- **Prerequisite / rollout step:** the review Apps need **`checks:write`**, which
+  they currently lack — the granted set is only `contents:read`, `metadata:read`,
+  `pull_requests:write` (verified on the codex App; a check-run create returns
+  `403 Resource not accessible by integration`). Adding a permission scope requires
+  the **install owner to re-consent**, so "add `checks:write` + re-authorize the
+  install" is a manual owner action per App/owner, folded into the local-reviewer
+  rollout (INS01 / issue #26). It cannot be automated by shipit (same class as the
+  App install itself).
+- Until the re-grant lands, a local review still **posts its review** (that path is
+  unaffected); only the pre-post funnel visibility is absent, so OBS02–04 are
+  gated on the re-grant for end-to-end verification.
