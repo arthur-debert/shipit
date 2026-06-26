@@ -42,12 +42,20 @@ PR is not otherwise ready, the real reason (failing CI / conflict) blocks it.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from enum import StrEnum
 
 from .breakers import evaluate_breakers
 from .model import PullContext, ReviewLifecycle
 from .reviewers import REGISTRY, ReviewerAdapter, required_reviewers
+
+#: The lifecycle engine's logger — a child of the package ``shipit`` logger, so
+#: it inherits the configured sinks. The resolved next-action decision (what
+#: ``pr next`` / ``pr status`` will report) is recorded here at DEBUG, so the
+#: state machine's reasoning is reconstructable after the fact without changing
+#: any user-facing output.
+logger = logging.getLogger("shipit.prstate")
 
 _DONE = {ReviewLifecycle.DONE_CLEAN, ReviewLifecycle.DONE_COMMENTS}
 
@@ -116,7 +124,12 @@ class TaskStatus:
 
 
 def no_pr() -> TaskStatus:
-    """No PR exists for the branch — the entry state."""
+    """No PR exists for the branch — the entry state.
+
+    A pre-engine shortcut the verbs take when there is no PR to evaluate, so it
+    does NOT log a decision: the state machine's resolution point (and its
+    decision record) is :func:`evaluate`.
+    """
     return TaskStatus(
         state=TaskState.NO_PR,
         next_action="no PR for this branch — create a draft PR to start the review loop",
@@ -124,6 +137,35 @@ def no_pr() -> TaskStatus:
 
 
 def evaluate(
+    ctx: PullContext,
+    registry: list[ReviewerAdapter] | None = None,
+    required: list[ReviewerAdapter] | None = None,
+) -> TaskStatus:
+    """Compute the PR's lifecycle state from a snapshot, recording the decision.
+
+    A thin observable wrapper over :func:`_evaluate` (the pure engine): it logs
+    the resolved lifecycle state + next action at DEBUG so a ``pr next`` /
+    ``pr status`` decision is reconstructable after the run, then returns the
+    snapshot unchanged. The engine itself stays pure — the log is the only
+    side effect, and it never touches user-facing output.
+    """
+    status = _evaluate(ctx, registry, required)
+    logger.debug(
+        "decision pr#%s: state=%s checks=%s mergeable=%s open_threads=%s "
+        "cycles=%s breaker=%s -> next_action=%r",
+        status.pr,
+        status.state.value,
+        status.checks.value,
+        status.mergeable,
+        status.open_threads,
+        status.cycles,
+        status.breaker,
+        status.next_action,
+    )
+    return status
+
+
+def _evaluate(
     ctx: PullContext,
     registry: list[ReviewerAdapter] | None = None,
     required: list[ReviewerAdapter] | None = None,
