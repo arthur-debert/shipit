@@ -84,7 +84,8 @@ def test_token_shaped_argv_is_redacted(monkeypatch, caplog):
 
 def test_stderr_token_is_redacted_on_failure(monkeypatch, caplog):
     """A token echoed back in stderr (e.g. a gh error quoting the URL) is masked
-    in the failure record."""
+    in the failure record AND in the raised exception text — GhError messages are
+    re-logged by callers, so the token must not ride the exception to a sink."""
     leaked = "ghs_stderrLeak1234567890abcd"
     monkeypatch.setattr(
         gh.subprocess,
@@ -92,7 +93,22 @@ def test_stderr_token_is_redacted_on_failure(monkeypatch, caplog):
         lambda *a, **k: _fake_proc(returncode=1, stderr=f"bad token {leaked}"),
     )
     with caplog.at_level(logging.DEBUG, logger="shipit.gh"):
-        with pytest.raises(gh.GhError):
+        with pytest.raises(gh.GhError) as excinfo:
             gh._run(["gh", "api", "/x"])
     full = "\n".join(r.getMessage() for r in caplog.records)
     assert leaked not in full
+    # The exception message is a sink too: it must be redacted.
+    assert leaked not in str(excinfo.value)
+
+
+def test_token_in_argv_is_redacted_in_gherror_message(monkeypatch):
+    """A token-shaped argv argument must not survive in the raised GhError text,
+    which callers (e.g. review.post) re-log."""
+    leaked = "ghp_argvErrLeak1234567890abcDE"
+    monkeypatch.setattr(
+        gh.subprocess, "run", lambda *a, **k: _fake_proc(returncode=2, stderr="nope")
+    )
+    with pytest.raises(gh.GhError) as excinfo:
+        gh._run(["gh", "api", "-f", f"token={leaked}"])
+    assert leaked not in str(excinfo.value)
+    assert gh._REDACTED in str(excinfo.value)

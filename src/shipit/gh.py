@@ -101,15 +101,13 @@ def _run(
         logger.debug("run %s -> %r not found on PATH", cmd, args[0])
         raise GhError(f"{args[0]!r} not found on PATH") from exc
     if proc.returncode != 0:
-        logger.debug(
-            "run %s -> exit %s: %s",
-            cmd,
-            proc.returncode,
-            _TOKEN_RE.sub(_REDACTED, proc.stderr.strip()),
-        )
-        raise GhError(
-            f"{' '.join(args)} exited {proc.returncode}: {proc.stderr.strip()}"
-        )
+        # Redact the argv AND the stderr in BOTH the log record and the raised
+        # error: GhError messages are surfaced and re-logged by callers (e.g.
+        # review.post logs the exc), so a token echoed in argv/stderr must never
+        # ride the exception text to a sink either.
+        stderr = _TOKEN_RE.sub(_REDACTED, proc.stderr.strip())
+        logger.debug("run %s -> exit %s: %s", cmd, proc.returncode, stderr)
+        raise GhError(f"{cmd} exited {proc.returncode}: {stderr}")
     logger.debug("run %s -> ok (%d bytes stdout)", cmd, len(proc.stdout))
     return proc.stdout
 
