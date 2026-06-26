@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from shipit import cli
+from shipit import cli, gh
 from shipit.verbs import logs
 
 
@@ -124,6 +124,39 @@ def test_follow_streams_appended_lines(tmp_path, capsys):
     assert "old1" not in out
 
 
+def test_follow_reopens_after_rotation(tmp_path, capsys):
+    # The writer is a RotatingFileHandler: the active shipit.log can be rolled
+    # over mid-follow. A follow that holds one handle would then track the stale
+    # renamed file and go silent — so it must reopen when the file shrinks.
+    log = tmp_path / "o" / "r" / "shipit.log"
+    log.parent.mkdir(parents=True)
+    log.write_text("before-rotation\n")
+
+    steps = [
+        # Simulate the rollover: replace shipit.log with a fresh, SMALLER file.
+        lambda: log.write_text("after\n"),
+    ]
+
+    def fake_sleep(_interval: float) -> None:
+        if steps:
+            steps.pop(0)()
+        else:
+            raise KeyboardInterrupt
+
+    rc = logs.run(
+        "o/r",
+        follow=True,
+        tail=0,
+        base_dir=tmp_path,
+        current_repo=lambda: "o/r",
+        sleep=fake_sleep,
+    )
+    assert rc == 0
+    # The line written into the post-rotation file streamed through, proving the
+    # follow loop reopened rather than clinging to the original handle.
+    assert "after" in capsys.readouterr().out
+
+
 # --------------------------------------------------------------------------
 # Missing file + bad slug — graceful, never a traceback
 # --------------------------------------------------------------------------
@@ -141,6 +174,19 @@ def test_bad_repo_slug_is_usage_error(tmp_path, capsys):
     rc = logs.run("not-a-slug", path_only=True, base_dir=tmp_path)
     assert rc == 2
     assert "owner/repo" in capsys.readouterr().err
+
+
+def test_gh_error_resolving_repo_is_graceful(tmp_path, capsys):
+    # No explicit repo and the cwd resolution shells out to gh and fails (not a
+    # checkout / gh missing). That must be a clean usage error, never a traceback.
+    def boom() -> str:
+        raise gh.GhError("not a git repository")
+
+    rc = logs.run(base_dir=tmp_path, current_repo=boom)
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "could not determine the current repo" in err
+    assert "owner/repo" in err
 
 
 # --------------------------------------------------------------------------

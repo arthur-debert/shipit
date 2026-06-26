@@ -78,19 +78,34 @@ def _follow(path: Path, *, tail: int, sleep: Callable[[float], None]) -> int:
     and stop it deterministically.
     """
     print(str(path))
-    with path.open("r", encoding="utf-8", errors="replace") as fh:
+    fh = path.open("r", encoding="utf-8", errors="replace")
+    try:
         for line in _last_n(fh.read().splitlines(), tail):
             print(line)
         # fh is now positioned at EOF; subsequent appends are picked up by readline.
-        try:
-            while True:
-                line = fh.readline()
-                if line:
-                    print(line.rstrip("\n"))
-                    continue
-                sleep(_FOLLOW_INTERVAL)
-        except KeyboardInterrupt:
-            return 0
+        while True:
+            line = fh.readline()
+            if line:
+                print(line.rstrip("\n"))
+                continue
+            # No new data. The writer is a RotatingFileHandler, so the active
+            # shipit.log can be rolled over mid-follow — at which point our open
+            # handle points at the stale renamed file and would go silent. Detect
+            # it: when the on-disk file is now SHORTER than our read position, it
+            # was rotated/truncated, so reopen and follow the fresh file.
+            try:
+                rotated = path.stat().st_size < fh.tell()
+            except OSError:
+                rotated = False  # mid-rotation flicker; retry on the next tick
+            if rotated:
+                fh.close()
+                fh = path.open("r", encoding="utf-8", errors="replace")
+                continue
+            sleep(_FOLLOW_INTERVAL)
+    except KeyboardInterrupt:
+        return 0
+    finally:
+        fh.close()
 
 
 def run(
@@ -118,6 +133,15 @@ def run(
     try:
         slug = repo if repo is not None else current_repo()
         owner_repo = _owner_repo(slug)
+    except gh.GhError as exc:
+        # Resolving the cwd repo shelled out and failed — not a checkout, or gh
+        # is unavailable. Keep the verb's promise of a clean message, no traceback.
+        print(
+            "logs: could not determine the current repo (not a git checkout, or "
+            f"gh unavailable); pass an explicit owner/repo. ({exc})",
+            file=sys.stderr,
+        )
+        return _EXIT_BAD_REPO
     except ValueError as exc:
         print(f"logs: {exc}", file=sys.stderr)
         return _EXIT_BAD_REPO
