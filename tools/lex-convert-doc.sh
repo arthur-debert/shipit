@@ -65,9 +65,12 @@ fi
 
 dest="${src%.lex}.md"
 
-# Convert first to a temp file so a failure never clobbers an existing .md.
+# Assemble in temp files so a failure never clobbers an existing .md.
+#   tmp  — raw lexd output
+#   out  — preamble (optional) + body, the final document before formatting
 tmp="$(mktemp)"
-trap 'rm -f "$tmp"' EXIT
+out="$(mktemp)"
+trap 'rm -f "$tmp" "$out"' EXIT
 
 if ! lexd "$src" --to markdown >"$tmp"; then
     echo "Error: lexd conversion failed for: $src" >&2
@@ -75,12 +78,33 @@ if ! lexd "$src" --to markdown >"$tmp"; then
 fi
 
 if [[ "$no_preamble" == true ]]; then
-    cp "$tmp" "$dest"
+    cp "$tmp" "$out"
 else
     {
         printf '%s\n\n' "$PREAMBLE"
         cat "$tmp"
-    } >"$dest"
+    } >"$out"
 fi
+
+# Format the result with the repo's pinned prettier so trivial formatting
+# (trailing whitespace, stray internal spacing) can never fail the gate, and so
+# a freshly generated mirror is byte-stable (idempotent). The temp has no .md
+# extension, so the markdown parser is named explicitly. prettier is in the
+# `lint` pixi env; if it is absent (a bare developer shell), degrade gracefully:
+# warn and emit the unformatted document rather than fail the conversion.
+if command -v prettier >/dev/null 2>&1; then
+    fmt="$(mktemp)"
+    if prettier --parser markdown "$out" >"$fmt" 2>/dev/null; then
+        mv "$fmt" "$out"
+    else
+        rm -f "$fmt"
+        echo "Error: prettier formatting failed for: $src" >&2
+        exit 1
+    fi
+else
+    echo "Warning: prettier not on PATH; emitting unformatted markdown for $src" >&2
+fi
+
+mv "$out" "$dest"
 
 echo "Converted: $src -> $dest"

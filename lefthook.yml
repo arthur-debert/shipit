@@ -6,9 +6,32 @@
 # Whole-tree (not staged-only) for now: `pixi run lint` lints `git ls-files`, so
 # a green hook never lies about an unstaged edit. (`pixi run test` joins pre-push
 # when Step 5 supplies the test task.)
+# `piped: true` runs the commands in priority order and stops on the first
+# failure, so the mirror regen (priority 1) always lands BEFORE the lint check
+# (priority 2) reads the tree.
 pre-commit:
+  piped: true
   commands:
+    # Auto-regenerate every committed .lex→.md mirror whose .lex is staged, then
+    # stage the regenerated .md into THIS commit — so a .lex edit and its .md
+    # projection ship together and the mirrors can never silently drift. Only
+    # mirrors that already exist are regenerated (source-only .lex stay un-mirrored).
+    # Runs through `pixi run -e lint` so lexd + the pinned prettier are on PATH.
+    lex-mirror:
+      priority: 1
+      glob: "*.lex"
+      run: |
+        pixi run -e lint bash -c '
+          for f in {staged_files}; do
+            md="${f%.lex}.md"
+            if [ -f "$md" ]; then
+              bash tools/lex-convert-doc.sh "$f"
+              git add "$md"
+            fi
+          done
+        '
     lint:
+      priority: 2
       run: pixi run lint
 
 pre-push:
