@@ -2,8 +2,9 @@
 
 shipit standardizes work across a personal portfolio of repos: provisioning,
 the dev workflow + skills, a multi-language lint gate, GitHub repo setup, pixi
-tooling, and the PR-review state machine. This glossary fixes the language of
-that domain — especially the PR-flow vocabulary inherited from release-core.
+tooling, the PR-review state machine, and the build/release workflows. This
+glossary fixes the language of that domain — especially the PR-flow vocabulary
+inherited from release-core and the build/release vocabulary.
 
 ## Language
 
@@ -103,3 +104,101 @@ never "gating".
 **Next action**:
 The single instruction the **PR state engine** emits for a PR's current state
 (request a review, address threads, wait for CI, flip to Ready, …).
+
+### Build & release
+
+**Toolchain**:
+The build/test/provisioning ecosystem of one path in a repo — rust, npm, mkdocs,
+go, wasm, … The axis shipit dispatches on: a closed registry like the lint
+**Lang** set (adding one is adding an entry; nothing downstream changes).
+*Avoid*: "Kind", "stack", "project type" as a *code switch*. "A tauri Kind" is
+fine as informal shorthand for a recognizable composition, never a dispatch label.
+
+**Path→toolchain map**:
+The `.shipit.toml` declaration mapping each build-bearing path to its
+**toolchain**. A repo *is* the set of these entries; shipit composes
+provisioning / build / test / lint by walking the map. One repo routinely carries
+several (a Tauri app = a rust path + an npm path + maybe an mkdocs path).
+
+**Artifact**:
+A produced, content-addressed, distributable unit. Produced by one or more
+**toolchain** build targets plus an optional **bundle** step — many-to-many with
+the map: one toolchain can yield several artifacts (a rust workspace → a CLI, an
+LSP binary, a wasm package, library crates), and several toolchains can yield one
+(rust binary + npm frontend → a Tauri app). A **distribution endpoint** attaches
+to an artifact. *Avoid*: "build output" — an artifact is the named, addressable
+thing, not raw output.
+
+**Bundle**:
+The optional composition step that combines toolchain outputs into one
+**artifact** (`tauri bundle`, `electron-builder`). *Avoid*: "package" as the
+*producing verb* — "package" is the pipeline stage that runs the bundle
+(workflows.lex), not the producing task.
+
+**Distribution endpoint**:
+A place an **artifact** is published — crates.io, npm, brew, VS Marketplace,
+Open VSX, Zed registry, nvim registries, GH release, App Store, … One artifact may
+target several (a VS Code extension → Marketplace *and* Open VSX). *Avoid*:
+"channel" (overloaded — conda / release channels).
+
+**Endpoint adapter**:
+The only place that knows one **distribution endpoint**'s mechanics (how to
+publish to it). Adding an endpoint is adding an adapter to the registry; nothing
+downstream changes. Mirrors **Reviewer adapter**.
+
+**Content-key**:
+The identity of an **artifact** for build-once reuse — a hash of the inputs that
+*determine* it: toolchain identity, lockfiles, the artifact's declared input-glob
+contents, build profile, and any bundle inputs. A hit on the content-key reuses a
+prior build across workflows *and* across git revisions. An artifact that declares
+no inputs falls back to the whole-tree commit SHA (always rebuild), so
+under-declaration costs a rebuild, never a stale ship. *Avoid*: "cache key" — the
+content-key is the artifact's identity, not merely a cache bucket.
+
+**Lane**:
+A declared CI test unit — `{ name, consumes an artifact, run = a pixi task,
+required, local, trigger (pr / push / nightly / dispatch), runner, scope }`. The
+generic CI workflow fans the lanes into jobs; each resolves-or-builds its
+**artifact** by **content-key**, runs its harness, and posts results. The
+**required** lanes feed the CI-green **Ready** pillar; the non-required ones
+surface as signals (like **degraded**) but never **hold**. *Avoid*: "suite", "job"
+— a lane may map to a GitHub check, but the lane is the *declaration*.
+
+**Gate**:
+The **lanes** that are both **required** and **local** — `lint` + `test` are the
+two always-required, always-local lanes. Pre-commit / lefthook run the gate; CI
+runs *all* lanes (gate ⊆ lanes), including non-local / non-required ones (GPU,
+nightly native-e2e) that can never form the gate. A missing required-local check
+hard-fails — one definition, invoked everywhere (architecture.lex §7). Distinct
+from **Holds / Settled**: the gate is a pass/fail check, not a readiness pillar.
+
+**Scope** (thin / full):
+A **lane**'s breadth for a given run, decided by a path-diff: *thin* runs the
+minimal set for a PR touching unrelated paths; *full* runs everything (always on
+nightly / dispatch / non-PR events). Keeps expensive lanes cheap on unrelated PRs
+without dropping coverage on the changes that matter.
+
+**Release**:
+A repo-level versioned event that publishes the repo's declared **artifact** set to
+their **distribution endpoints**. `shipit changelog` coalesces unreleased fragments
+→ bump + tag → for each artifact: resolve-or-build by **content-key**, **bundle**,
+sign, publish; the coalesced notes feed both the tag annotation and the GH release.
+The build/sign half is an all-or-nothing barrier (publish nothing if any artifact
+fails); the publish half is ordered + idempotent-resumable, because external
+endpoints cannot be rolled back. *Avoid*: "deploy" — client artifacts are released,
+not deployed.
+
+**Cascade**:
+The cross-repo release backbone. When a repo releases it fires a uniform
+`upstream-released` signal; the **cascade-handler** opens a version-bump PR on each
+declared downstream (decision in CI, tag-authoritative). Examples: phos-core →
+phos-app, simple-gal → simple-gal-ui, lex/lexd → {vscode, nvim, zed, lexed}.
+*Avoid*: "trigger chain", "webhook chain".
+
+**Dependency mode** (source-pinned / artifact-pinned):
+How a downstream consumes an upstream it depends on, declared per upstream edge.
+*Source-pinned* — pins the upstream by ref/version and rebuilds from source (a bump
+busts the **content-key** → rebuild; e.g. phos-app builds wasm from phos-core's
+pinned tag). *Artifact-pinned* — fetches the upstream's released **artifact** by
+version and does not rebuild it (cross-repo build-once reuse, the "intermediate
+artifact" across repo lines; e.g. lexed fetches the lexd-lsp binary).
