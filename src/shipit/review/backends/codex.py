@@ -34,8 +34,13 @@ class CodexBackend(Backend):
     name = "codex"
     binary = "codex"
 
-    def __init__(self, model: str = "pro") -> None:
+    def __init__(self, model: str = "pro", timeout: str = "600s") -> None:
         self.model = resolve_model(model)
+        # `timeout` is accepted for interface parity with the shared run path
+        # (`get_backend(..., timeout=…)`), but `codex exec` has no per-run timeout
+        # flag, so it is not applied here. The knob is meaningful for `agy`, whose
+        # `--print` mode can time out on a large diff.
+        self.timeout = timeout
 
     def _argv(self, schema_path: str) -> list[str]:
         return [

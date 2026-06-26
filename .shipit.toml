@@ -29,10 +29,21 @@ RELEASE_TOKEN = { env = "GH_TOKEN", optional = true }
 # App private key (PEM) + app id are provisioned into Doppler `github/prd` under
 # these keys. Mapping them here makes `gh-setup` push them as repo Actions secrets
 # so a CI-side review has the same credentials the LOCAL path sources directly
-# from Doppler via `secretsrc` — CI parity, single source of truth. (The repo's
-# OWN PRs are NOT gated on a local reviewer: codex-local is requested manually via
-# `--reviewer codex-local`, never added to the [reviewers] required set here.)
+# from Doppler via `secretsrc` — CI parity, single source of truth. shipit gates
+# its OWN PRs on these local reviewers: `codex` and `agy` are in the [reviewers]
+# required set below, so every shipit PR is reviewed by both (alongside Copilot).
 CODEX_REVIEW_APP_PRIVATE_KEY = { doppler = "CODEX_REVIEW_APP_PRIVATE_KEY" }
 CODEX_REVIEW_APP_ID          = { doppler = "CODEX_REVIEW_APP_ID" }
 AGY_REVIEW_APP_PRIVATE_KEY   = { doppler = "AGY_REVIEW_APP_PRIVATE_KEY" }
 AGY_REVIEW_APP_ID            = { doppler = "AGY_REVIEW_APP_ID" }
+
+# [reviewers] — the required-reviewer SET for THIS repo's PRs (overrides the
+# shipped Copilot-only default; see src/shipit/prstate/reviewers_config.py). The
+# map KEYS are the required reviewers — all must be DONE to flip Ready. shipit
+# dogfoods its own local-review backends: `codex` and `agy` post as their App
+# bots and gate Ready alongside Copilot. Review-once (rerun defaults OFF): a
+# token-billed local agent re-runs only on explicit opt-in, never per push.
+[reviewers]
+copilot = {}
+codex = {}
+agy = {}

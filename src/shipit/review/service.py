@@ -42,6 +42,7 @@ def generate_review(
     *,
     instructions_path: str | None = None,
     model: str = "pro",
+    timeout: str = "600s",
 ) -> dict:
     """Run ``agent`` over ``ctx``'s diff and return the parsed review dict.
 
@@ -52,11 +53,18 @@ def generate_review(
     is given), builds the shared prompt over ``ctx.diff`` (with the schema
     described in-prose only for ``agy``, which has no native schema enforcement),
     and runs the backend in ``ctx.workdir``.
+
+    ``timeout`` is the per-run agent timeout (a ``<N>s`` duration string,
+    defaulting to ``600s``); it is threaded to the backend, where ``agy`` applies
+    it as ``--print-timeout`` (``codex`` accepts it for interface parity).
     """
     logger.info(
-        "review run: agent=%s model=%s starting (backend resolve)", agent, model
+        "review run: agent=%s model=%s timeout=%s starting (backend resolve)",
+        agent,
+        model,
+        timeout,
     )
-    backend = get_backend(agent, model=model)
+    backend = get_backend(agent, model=model, timeout=timeout)
     backend.preflight()
     instructions = load_instructions(instructions_path)
     prompt = build_prompt(instructions, ctx.diff, schema_inline=(agent == "agy"))
@@ -83,6 +91,7 @@ def run_and_post(
     *,
     repo: str | None = None,
     model: str = "pro",
+    timeout: str = "600s",
     instructions_path: str | None = None,
     event: str | None = None,
     as_app: bool = True,
@@ -112,7 +121,11 @@ def run_and_post(
     run_id, run_repo = _open_funnel_breadcrumb(agent, ctx)
     try:
         review = generate_review(
-            agent, ctx, instructions_path=instructions_path, model=model
+            agent,
+            ctx,
+            instructions_path=instructions_path,
+            model=model,
+            timeout=timeout,
         )
         result = post.post_review(
             review,

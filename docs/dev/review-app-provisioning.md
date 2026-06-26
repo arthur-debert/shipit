@@ -76,7 +76,7 @@ the Doppler App creds + a canary PR), so it is **never** part of `pixi run test`
 it explicitly against a throwaway canary PR:
 
 ```bash
-pixi run -e verify verify-funnel --repo arthur-debert/shipit-canary --pr <N> --agent codex
+pixi run -e review verify-funnel --repo arthur-debert/shipit-canary --pr <N> --agent codex
 # or: SHIPIT_FUNNEL_CANARY_{REPO,PR}=… python -m shipit.review.funnel_verify
 ```
 

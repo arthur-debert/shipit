@@ -49,19 +49,22 @@ def test_resolve_pr_normalizes_workdir_to_toplevel(monkeypatch):
         "pr_view",
         lambda *a, **k: (
             '{"number": 5, "headRefName": "feat", '
-            '"headRefOid": "headsha", "baseRefName": "main"}'
+            '"headRefOid": "headsha", "baseRefName": "main", "baseRefOid": "basesha"}'
         ),
     )
     monkeypatch.setattr(diff, "_sha_present", lambda wd, sha: True)
 
     seen_workdirs: list[str] = []
+    seen_diff_specs: list[str] = []
 
     def fake_git(workdir, args, *, check=True):
         seen_workdirs.append(workdir)
+        if args[:1] == ["diff"]:
+            seen_diff_specs.append(args[-1])
 
         class R:
             returncode = 0
-            stdout = "basesha\n" if args[:1] == ["merge-base"] else "the diff\n"
+            stdout = "mergebasesha\n" if args[:1] == ["merge-base"] else "the diff\n"
 
         return R()
 
@@ -69,8 +72,106 @@ def test_resolve_pr_normalizes_workdir_to_toplevel(monkeypatch):
 
     ctx = diff.resolve_pr(5, workdir="/repo/root/src/deep")
     assert ctx.workdir == "/repo/root"
+    # The PRContext base is the authoritative base sha (baseRefOid), not a local
+    # `origin/<base>` ref.
+    assert ctx.base_sha == "basesha"
+    # The diff endpoint is the MERGE BASE of the authoritative base + head (the PR
+    # branch point) — GitHub's three-dot diff — computed explicitly, not the raw
+    # base tip.
+    assert seen_diff_specs == ["mergebasesha...headsha", "mergebasesha...headsha"]
     # Every git invocation ran against the toplevel, not the nested subdir.
     assert set(seen_workdirs) == {"/repo/root"}
+
+
+def test_resolve_pr_no_common_ancestor_fails_loud(monkeypatch):
+    """When the authoritative base and head share no merge base, resolve_pr fails
+    loud rather than degrading to a base-tip diff."""
+    monkeypatch.setattr(diff, "_git_toplevel", lambda wd: "/repo/root")
+    monkeypatch.setattr(
+        diff.gh,
+        "pr_view",
+        lambda *a, **k: (
+            '{"number": 5, "headRefName": "feat", "headRefOid": "headsha", '
+            '"baseRefName": "main", "baseRefOid": "basesha"}'
+        ),
+    )
+    monkeypatch.setattr(diff, "_sha_present", lambda wd, sha: True)
+
+    diff_attempted = False
+
+    def fake_git(workdir, args, *, check=True):
+        nonlocal diff_attempted
+        if args[:1] == ["diff"]:
+            diff_attempted = True
+
+        class R:
+            # merge-base finds no common ancestor (rc=1, empty stdout).
+            returncode = 1 if args[:1] == ["merge-base"] else 0
+            stdout = ""
+
+        return R()
+
+    monkeypatch.setattr(diff, "_git", fake_git)
+
+    with pytest.raises(diff.ReviewError, match="no common ancestor"):
+        diff.resolve_pr(5, workdir="/repo/root")
+    assert diff_attempted is False
+
+
+def test_resolve_pr_missing_base_oid_fails_loud(monkeypatch):
+    """A `gh pr view` with no baseRefOid fails loud — the resolver never guesses
+    a base, so the review can't run against a wrong one."""
+    monkeypatch.setattr(diff, "_git_toplevel", lambda wd: "/repo/root")
+    monkeypatch.setattr(
+        diff.gh,
+        "pr_view",
+        lambda *a, **k: (
+            '{"number": 5, "headRefName": "feat", '
+            '"headRefOid": "headsha", "baseRefName": "main"}'
+        ),
+    )
+    monkeypatch.setattr(diff, "_sha_present", lambda wd, sha: True)
+    monkeypatch.setattr(diff, "_git", lambda *a, **k: None)
+    with pytest.raises(diff.ReviewError, match="no base sha"):
+        diff.resolve_pr(5, workdir="/repo/root")
+
+
+def test_resolve_pr_stale_base_fetch_fails_loud(monkeypatch):
+    """When the base sha (baseRefOid) can't be made present — a stale/missing
+    `origin/<base>` and an unfetchable sha — resolve_pr fails loud instead of
+    silently degrading to a local ref or the base tip (no wrong-base diff)."""
+    monkeypatch.setattr(diff, "_git_toplevel", lambda wd: "/repo/root")
+    monkeypatch.setattr(
+        diff.gh,
+        "pr_view",
+        lambda *a, **k: (
+            '{"number": 5, "headRefName": "feat", "headRefOid": "headsha", '
+            '"baseRefName": "main", "baseRefOid": "basesha"}'
+        ),
+    )
+    # The head is present; the base sha never becomes present (every fetch is a
+    # no-op — the classic stale/missing `origin/main`).
+    monkeypatch.setattr(diff, "_sha_present", lambda wd, sha: sha == "headsha")
+
+    diff_attempted = False
+
+    def fake_git(workdir, args, *, check=True):
+        nonlocal diff_attempted
+        if args[:1] == ["diff"]:
+            diff_attempted = True
+
+        class R:
+            returncode = 0
+            stdout = ""
+
+        return R()
+
+    monkeypatch.setattr(diff, "_git", fake_git)
+
+    with pytest.raises(diff.ReviewError, match="base basesha"):
+        diff.resolve_pr(5, workdir="/repo/root")
+    # It failed BEFORE computing any diff — never produced a wrong-base diff.
+    assert diff_attempted is False
 
 
 def test_resolve_pr_rejects_non_checkout(monkeypatch):

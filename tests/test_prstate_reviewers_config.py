@@ -15,6 +15,8 @@ Ported from release-core: the pure-seam tests are unchanged (re-pointed to
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from shipit.prstate import reviewers_config
 from shipit.prstate.reviewers_config import (
@@ -24,6 +26,23 @@ from shipit.prstate.reviewers_config import (
     resolve_reviewers,
     reviewer_rerun,
 )
+
+
+def test_shipit_own_repo_gates_on_copilot_codex_agy():
+    # Task A / FLU01: shipit DOGFOODS its local reviewers — its own
+    # `.shipit.toml` `[reviewers]` table gates Ready on copilot + codex + agy
+    # (reversing the earlier "own PRs not gated on a local reviewer" choice).
+    # Reading the real repo config directly (not the cache) keeps this assertion
+    # honest about the shipped policy.
+    repo_root = Path(__file__).resolve().parent.parent
+    override = reviewers_config.load_override(str(repo_root))
+    assert override is not None
+    assert set(override) == {"copilot", "codex", "agy"}
+    assert reviewers_config.resolve_required_names(override) == (
+        "copilot",
+        "codex",
+        "agy",
+    )
 
 
 def test_default_is_copilot_only_review_once():
@@ -275,6 +294,39 @@ def test_reviewer_run_options_absent_reviewer_is_empty(tmp_path):
 
 def test_reviewer_run_options_no_config_is_empty(tmp_path):
     assert reviewers_config.reviewer_run_options("codex", str(tmp_path)) == {}
+
+
+def test_reviewer_run_options_reads_and_normalizes_timeout(tmp_path):
+    # `timeout` is consumed by the run path: a duration string or bare seconds is
+    # normalized to the canonical `<N>s` form the backend passes to the agent CLI.
+    (tmp_path / ".shipit.toml").write_text(
+        '[reviewers]\nagy = { timeout = "900s" }\ncodex = { timeout = 1200 }\n'
+    )
+    assert reviewers_config.reviewer_run_options("agy", str(tmp_path)) == {
+        "timeout": "900s"
+    }
+    assert reviewers_config.reviewer_run_options("codex", str(tmp_path)) == {
+        "timeout": "1200s"
+    }
+
+
+def test_reviewer_run_options_omits_timeout_when_unset(tmp_path):
+    # An unset timeout is simply absent (the run path then defaults to 600s).
+    (tmp_path / ".shipit.toml").write_text('[reviewers]\nagy = { model = "pro" }\n')
+    assert reviewers_config.reviewer_run_options("agy", str(tmp_path)) == {
+        "model": "pro"
+    }
+
+
+def test_timeout_validated_loud_on_bad_input():
+    # A non-duration string, a non-positive value, and a boolean all fail loud at
+    # parse time — a bad timeout is a config error, never a silent default.
+    with pytest.raises(RequiredReviewersConfigError, match="timeout"):
+        reviewers_config._parse_override_value({"agy": {"timeout": "soon"}})
+    with pytest.raises(RequiredReviewersConfigError, match="positive"):
+        reviewers_config._parse_override_value({"agy": {"timeout": 0}})
+    with pytest.raises(RequiredReviewersConfigError, match="timeout"):
+        reviewers_config._parse_override_value({"agy": {"timeout": True}})
 
 
 def test_reviewer_run_options_rejects_non_table_value_loud(tmp_path):

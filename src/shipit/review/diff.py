@@ -91,7 +91,13 @@ def _pr_meta(pr: int, repo: str | None) -> dict:
         raw = gh.pr_view(
             str(pr),
             repo=repo,
-            json_fields=["number", "headRefName", "headRefOid", "baseRefName"],
+            json_fields=[
+                "number",
+                "headRefName",
+                "headRefOid",
+                "baseRefName",
+                "baseRefOid",
+            ],
         )
     except gh.GhError as exc:
         raise ReviewError(
@@ -120,11 +126,16 @@ def resolve_pr(
     * ``workdir`` is the checkout the agent reads files from; defaults to the
       current directory (the consumer reviewing their own PR).
 
-    Fetches (never switches branches) the base ref and, if absent, the PR head
-    (``headRefOid`` — the ONLY head-point; never FETCH_HEAD/HEAD), then computes
-    ``base_sha = merge-base(origin/<base_ref>, <head_sha>)`` and the three-dot
-    diff. Raises :class:`ReviewError` if ``workdir`` is not a git checkout, the
-    PR can't be resolved, or the head commit can't be fetched into ``workdir``.
+    Resolves BOTH endpoints authoritatively from ``gh pr view`` — the head from
+    ``headRefOid`` and the base from ``baseRefOid`` — then fetches each as a known
+    commit object (never a branch switch) and diffs from their MERGE BASE (the PR
+    branch point) to the head: GitHub's three-dot "Files changed" diff, computed
+    from an authoritative base rather than a possibly-stale local ``origin/<base>``.
+    Both SHAs are HARD preconditions: a base or head that can't be made present
+    fails loud rather than silently degrading to a local ref or the base tip (the
+    review must never run against a stale/wrong base). Raises :class:`ReviewError`
+    if ``workdir`` is not a git checkout, the PR can't be resolved, either commit
+    can't be fetched, or the two share no common ancestor.
     """
     workdir = workdir or os.getcwd()
     toplevel = _git_toplevel(workdir)
@@ -156,11 +167,9 @@ def resolve_pr(
 
     meta = _pr_meta(pr, repo)
     base_ref = meta.get("baseRefName") or "main"
+    base_sha = meta.get("baseRefOid") or ""
     head_sha = meta.get("headRefOid") or ""
     head_ref = meta.get("headRefName") or ""
-
-    # Make the base available (fetch only — never checkout-switch).
-    _git(workdir, ["fetch", "--quiet", "origin", base_ref], check=False)
 
     # The head endpoint of the diff is ALWAYS the resolved head sha
     # (``headRefOid`` from ``gh pr view``). We never fall back to FETCH_HEAD or
@@ -170,6 +179,17 @@ def resolve_pr(
         raise ReviewError(
             f"PR #{pr} returned no head sha (headRefOid) from `gh pr view` — "
             f"cannot resolve the PR head to review."
+        )
+
+    # The base endpoint is resolved the SAME authoritative way as the head:
+    # ``baseRefOid`` from `gh pr view` is a known commit object, so the review
+    # diffs against the PR's REAL base — never against whatever a local
+    # `origin/<base>` happens to point at (which may be stale or missing). A
+    # missing baseRefOid fails loud rather than degrading to a guessed base.
+    if not base_sha:
+        raise ReviewError(
+            f"PR #{pr} returned no base sha (baseRefOid) from `gh pr view` — "
+            f"cannot resolve the PR base to review against."
         )
 
     # Make the head commit object available locally (fetch only — never a
@@ -192,26 +212,48 @@ def resolve_pr(
 
     head_point = head_sha
 
-    base_point = f"origin/{base_ref}"
-    if not _sha_present(workdir, base_point):
-        base_point = base_ref  # fall back to a local ref of the same name
+    # Make the base commit object available the SAME way — fetch the base branch
+    # (its tip is baseRefOid), then the sha directly — and FAIL LOUD if it still
+    # isn't present. No silent degrade to a local `origin/<base>` ref or to the
+    # base tip: an unfetchable base SHA stops the review rather than diffing
+    # against the wrong base.
+    if not _sha_present(workdir, base_sha):
+        _git(workdir, ["fetch", "--quiet", "origin", base_ref], check=False)
+        if not _sha_present(workdir, base_sha):
+            _git(workdir, ["fetch", "--quiet", "origin", base_sha], check=False)
 
-    merge_base = _git(workdir, ["merge-base", base_point, head_point], check=False)
-    if merge_base.returncode == 0 and merge_base.stdout.strip():
-        base_sha = merge_base.stdout.strip()
-    else:
-        # No common ancestor reachable (e.g. base not fetched) — diff against the
-        # base tip directly so we still produce a usable review.
-        base_sha = base_point
+    if not _sha_present(workdir, base_sha):
+        raise ReviewError(
+            f"Can't resolve PR #{pr} base {base_sha} (baseRefOid) — the commit "
+            f"isn't available after fetching the base branch '{base_ref}' and the "
+            f"sha directly. Fetch it into this checkout and re-run rather than "
+            f"reviewing against a stale or wrong base."
+        )
+
+    # The diff endpoint is the MERGE BASE of the authoritative base + head — the
+    # point at which the PR branch diverged from its base — so the review sees
+    # exactly the PR's own commits (GitHub's "Files changed" three-dot diff), never
+    # commits that merely landed on the base after the branch point. We compute
+    # merge-base explicitly (rather than relying on git's `A...B` shorthand) so the
+    # endpoint is unambiguous, and FAIL LOUD if there is no common ancestor instead
+    # of silently degrading to the base tip.
+    merge_base = _git(workdir, ["merge-base", base_sha, head_point], check=False)
+    if merge_base.returncode != 0 or not merge_base.stdout.strip():
+        raise ReviewError(
+            f"PR #{pr} base {base_sha} and head {head_point} have no common "
+            f"ancestor — cannot compute a meaningful review diff. The PR base/head "
+            f"may be unrelated histories; resolve the base and re-run."
+        )
+    base_point = merge_base.stdout.strip()
 
     try:
-        diff = _git(workdir, ["diff", f"{base_sha}...{head_point}"]).stdout
+        diff = _git(workdir, ["diff", f"{base_point}...{head_point}"]).stdout
         names = _git(
-            workdir, ["diff", "--name-only", f"{base_sha}...{head_point}"]
+            workdir, ["diff", "--name-only", f"{base_point}...{head_point}"]
         ).stdout
     except proc.ProcError as exc:
         raise ReviewError(
-            f"failed to compute diff for PR #{pr} ({base_sha}...{head_point}): {exc}"
+            f"failed to compute diff for PR #{pr} ({base_point}...{head_point}): {exc}"
         ) from exc
     changed_files = [line for line in names.splitlines() if line.strip()]
 

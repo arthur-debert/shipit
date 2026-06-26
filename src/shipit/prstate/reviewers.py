@@ -315,8 +315,8 @@ class _LocalReviewAdapter(ReviewerAdapter):
         LAZILY here, so the optional `review` extra (pyjwt) is only pulled in
         when a local review is actually requested — the detection path and every
         non-local reviewer stay free of that dependency. The agent's per-reviewer
-        `model` / `instructions` (the `[reviewers]` options) are read from
-        `.shipit.toml` and threaded into the run.
+        `model` / `instructions` / `timeout` (the `[reviewers]` options) are read
+        from `.shipit.toml` and threaded into the run.
 
         Any failure — a missing backend CLI, a parse failure, a Doppler/JWT auth
         failure, a `gh` post failure — is normalized to `ghapi.GhError`, the one
@@ -344,6 +344,8 @@ class _LocalReviewAdapter(ReviewerAdapter):
             run_kwargs["model"] = options["model"]
         if "instructions" in options:
             run_kwargs["instructions_path"] = options["instructions"]
+        if "timeout" in options:
+            run_kwargs["timeout"] = options["timeout"]
 
         try:
             service.run_and_post(self.name, pr, **run_kwargs)

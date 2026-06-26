@@ -47,17 +47,20 @@ class AgyBackend(Backend):
     name = "agy"
     binary = "agy"
 
-    def __init__(self, model: str = "pro") -> None:
+    def __init__(self, model: str = "pro", timeout: str = "600s") -> None:
         self.model = resolve_model(model)
+        # agy's `--print` timeout defaults to 5m; a large review can exceed that
+        # and return a TRUNCATED JSON + "timed out waiting for response" (the live
+        # agy failure). The default here (600s = 10m) gives big diffs headroom; a
+        # consumer with consistently large diffs raises it via the per-reviewer
+        # `timeout` option in `.shipit.toml` (normalized to a `<N>s` string).
+        self.timeout = timeout
 
     def _argv(self, prompt_path: str) -> list[str]:
         return [
             "agy",
             f"--model={self.model}",
-            # agy's `--print` timeout defaults to 5m; a large review can exceed
-            # that and return a TRUNCATED JSON + "timed out waiting for response"
-            # (the live agy failure). Give it 10m of headroom so big diffs finish.
-            "--print-timeout=600s",
+            f"--print-timeout={self.timeout}",
             "--print",
             _print_instruction(prompt_path),
         ]
