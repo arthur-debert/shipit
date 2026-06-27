@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
+from urllib.parse import quote
 
 from .. import gh
 from . import ghauth
@@ -36,6 +37,15 @@ from . import ghauth
 #: The funnel writes through the shared review logger (OBS01 sink). The minted
 #: installation token is NEVER passed to a record — only the run's identity facts.
 logger = logging.getLogger("shipit.review")
+
+#: ``completed`` is the SOLE terminal check-run status: a run is finished exactly
+#: when GitHub closes it to ``status=completed`` (the only state that carries a
+#: non-null ``conclusion``). Every other status the Checks API can surface —
+#: ``queued`` / ``in_progress`` / ``waiting`` / ``requested`` / ``pending`` — means
+#: the run is still IN FLIGHT. The idempotency read (:func:`find_nonterminal`)
+#: defines non-terminal as ``status != "completed"`` so a re-request reconciles
+#: against ANY unfinished run, not just the two states we happen to open with.
+_TERMINAL_STATUS = "completed"
 
 
 def reviewer_name(agent: str) -> str:
@@ -141,3 +151,51 @@ def transition(
         run_id,
         conclusion,
     )
+
+
+def find_nonterminal(agent: str, repo: str, head_sha: str) -> int | None:
+    """Return the id of an IN-FLIGHT funnel run for ``agent`` on ``repo``@``head_sha``.
+
+    The idempotency read (OBS03-WS03): because the check run IS the store, a
+    re-request must reconcile against a funnel run that is still in flight rather
+    than open a second one that double-posts. This GETs the check runs named
+    ``review: <reviewer>`` on the head commit (filtered server-side by
+    ``check_name``) and returns the id of the FIRST whose ``status`` is non-terminal
+    (anything but ``completed`` — ``queued`` / ``in_progress`` / ``waiting`` /
+    ``requested`` / ``pending``); ``None`` when none is in flight (all ``completed``
+    or absent), so the caller proceeds to open + spawn a fresh run.
+
+    Authored over the SAME App installation-token boundary as :func:`create` /
+    :func:`transition` (so the run is read AS the reviewer's App, the identity that
+    authored it). Honest by design like its siblings: any mint/GET failure
+    PROPAGATES — the best-effort swallowing that keeps a reconcile-read failure from
+    failing the request lives in :func:`shipit.review.service.start_detached_review`.
+    """
+    name = f"review: {reviewer_name(agent)}"
+    token = ghauth.installation_token(agent, repo)
+    # The `check_name` value carries a space + colon — url-encode it so the query
+    # string is well formed (`gh api` passes the path through verbatim).
+    path = f"/repos/{repo}/commits/{head_sha}/check-runs?check_name={quote(name)}"
+    logger.debug(
+        "checkrun.find_nonterminal: reading %r on %s @ %s (as the %r app)",
+        name,
+        repo,
+        head_sha,
+        agent,
+    )
+    response = gh.rest(path, token=token)
+    runs = response.get("check_runs") if isinstance(response, dict) else None
+    for run in runs or []:
+        if isinstance(run, dict) and run.get("status") != _TERMINAL_STATUS:
+            run_id = run.get("id")
+            if run_id is not None:
+                logger.info(
+                    "checkrun.find_nonterminal: %r on %s has an in-flight run "
+                    "(id=%s, status=%s)",
+                    name,
+                    repo,
+                    run_id,
+                    run.get("status"),
+                )
+                return int(run_id)
+    return None

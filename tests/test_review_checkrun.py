@@ -264,3 +264,119 @@ def test_transition_propagates_failure(monkeypatch):
         checkrun.transition(
             "codex", "owner/repo", 1, conclusion="success", title="t", summary="s"
         )
+
+
+# --------------------------------------------------------------------------
+# find_nonterminal — OBS03-WS03 idempotency read
+# --------------------------------------------------------------------------
+
+
+def test_find_nonterminal_returns_id_for_in_progress_run(monkeypatch):
+    """The reconcile read GETs the check runs on the head commit and returns the id
+    of an IN-FLIGHT (`in_progress`) funnel run — the run a re-request reconciles
+    against instead of opening a duplicate."""
+    _fake_token(monkeypatch, {})
+    seen: dict = {}
+
+    def fake_rest(path, *, method=None, body=None, token=None):
+        seen["path"] = path
+        seen["method"] = method
+        return {
+            "total_count": 1,
+            "check_runs": [{"id": 4242, "status": "in_progress", "conclusion": None}],
+        }
+
+    monkeypatch.setattr(checkrun.gh, "rest", fake_rest)
+
+    run_id = checkrun.find_nonterminal("codex", "owner/repo", "deadbeef")
+
+    assert run_id == 4242
+    # A read (GET) of the head commit's check runs, filtered by the reviewer name.
+    assert seen["method"] in (None, "GET")
+    assert "/repos/owner/repo/commits/deadbeef/check-runs" in seen["path"]
+    assert "check_name" in seen["path"]
+
+
+@pytest.mark.parametrize("status", ["waiting", "requested", "pending", "queued"])
+def test_find_nonterminal_returns_id_for_other_unfinished_statuses(monkeypatch, status):
+    """`completed` is the SOLE terminal status — every other status the Checks API
+    can surface (`waiting` / `requested` / `pending` / `queued`) is still IN FLIGHT.
+    A run in any of them must reconcile as in-flight so reconcile catches it instead
+    of opening + spawning a DUPLICATE review."""
+    _fake_token(monkeypatch, {})
+    monkeypatch.setattr(
+        checkrun.gh,
+        "rest",
+        lambda path, *, method=None, body=None, token=None: {
+            "total_count": 1,
+            "check_runs": [{"id": 4242, "status": status, "conclusion": None}],
+        },
+    )
+    assert checkrun.find_nonterminal("codex", "owner/repo", "deadbeef") == 4242
+
+
+def test_find_nonterminal_returns_none_for_terminal_run(monkeypatch):
+    """A run that has already CLOSED (status=completed) is terminal, not in flight —
+    `find_nonterminal` returns None so the caller opens a fresh run."""
+    _fake_token(monkeypatch, {})
+    monkeypatch.setattr(
+        checkrun.gh,
+        "rest",
+        lambda path, *, method=None, body=None, token=None: {
+            "total_count": 1,
+            "check_runs": [{"id": 1, "status": "completed", "conclusion": "success"}],
+        },
+    )
+    assert checkrun.find_nonterminal("codex", "owner/repo", "deadbeef") is None
+
+
+def test_find_nonterminal_returns_none_when_absent(monkeypatch):
+    """No funnel run on the head commit → None (nothing to reconcile against)."""
+    _fake_token(monkeypatch, {})
+    monkeypatch.setattr(
+        checkrun.gh,
+        "rest",
+        lambda path, *, method=None, body=None, token=None: {
+            "total_count": 0,
+            "check_runs": [],
+        },
+    )
+    assert checkrun.find_nonterminal("codex", "owner/repo", "deadbeef") is None
+
+
+def test_find_nonterminal_authored_via_installation_token(monkeypatch):
+    """The reconcile read is authored AS the reviewer's App — it mints the per-agent
+    installation token and threads it on the GET, mirroring create/transition."""
+    auth: dict = {}
+    _fake_token(monkeypatch, auth, value="ghs_appInstallToken")
+    seen: dict = {}
+
+    def fake_rest(path, *, method=None, body=None, token=None):
+        seen["token"] = token
+        return {"check_runs": []}
+
+    monkeypatch.setattr(checkrun.gh, "rest", fake_rest)
+
+    checkrun.find_nonterminal("codex", "owner/repo", "deadbeef")
+
+    assert auth == {"agent": "codex", "repo": "owner/repo"}
+    assert seen["token"] == "ghs_appInstallToken"
+
+
+def test_find_nonterminal_filters_by_reviewer_name(monkeypatch):
+    """The query filters server-side by the per-reviewer run name (`<agent>-local`),
+    url-encoded so the space + colon make a well-formed query string."""
+    from urllib.parse import quote
+
+    _fake_token(monkeypatch, {})
+    seen: dict = {}
+
+    def fake_rest(path, *, method=None, body=None, token=None):
+        seen["path"] = path
+        return {"check_runs": []}
+
+    monkeypatch.setattr(checkrun.gh, "rest", fake_rest)
+
+    checkrun.find_nonterminal("agy", "owner/repo", "cafef00d")
+
+    assert quote("review: agy-local") in seen["path"]
