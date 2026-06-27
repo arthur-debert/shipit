@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import subprocess
 import sys
 from collections.abc import Callable, Sequence
@@ -172,13 +173,32 @@ def _generate_post_and_close(
 _SALVAGE_MAX = 60000
 
 
+def _safe_fence(content: str) -> str:
+    """A backtick fence guaranteed to CONTAIN ``content`` — never closed early by it.
+
+    CommonMark ends a fenced code block only on a line whose backtick run is at least
+    as long as the opening run, so a fence of ``max_backtick_run + 1`` backticks
+    (floor 3, the CommonMark minimum) cannot be closed by anything inside ``content``.
+    Untrusted agent output routinely carries ```` ``` ```` fences (the very ```json
+    blocks ``extract_json`` tolerates); a FIXED ``` fence would close early, breaking
+    the rendering AND — worse — letting the remaining raw render as LIVE GitHub
+    markdown (stray headings / mentions / links / checkboxes — an injection surface).
+    A delimiter longer than any run in the content fixes both at once: fenced content
+    is literal, so nothing inside it can fire.
+    """
+    longest_run = max((len(m) for m in re.findall(r"`+", content)), default=0)
+    return "`" * max(3, longest_run + 1)
+
+
 def _salvage_body(agent: str, raw: str) -> tuple[str, bool]:
     """Build the salvage comment body from the agent's raw output — (body, truncated).
 
     A clear marker that the STRUCTURED parse failed (so a reader never mistakes the
-    raw dump for a normal review), then the raw text in a fenced block. Truncated to
-    :data:`_SALVAGE_MAX` with an explicit note when the output is huge, so the post
-    never trips GitHub's comment-size limit.
+    raw dump for a normal review), then the raw text in a fenced block. The fence is
+    sized by :func:`_safe_fence` to be longer than any backtick run in the raw, so the
+    untrusted output is fully CONTAINED — it can't close the fence early and leak as
+    live markdown. Truncated to :data:`_SALVAGE_MAX` with an explicit note when the
+    output is huge, so the post never trips GitHub's comment-size limit.
     """
     marker = (
         f"⚠️ {agent}'s structured review could not be parsed "
@@ -187,7 +207,8 @@ def _salvage_body(agent: str, raw: str) -> tuple[str, bool]:
     truncated = len(raw) > _SALVAGE_MAX
     shown = raw[:_SALVAGE_MAX]
     note = "\n\n_(raw response truncated)_" if truncated else ""
-    return f"{marker}\n\n```\n{shown}\n```{note}", truncated
+    fence = _safe_fence(shown)
+    return f"{marker}\n\n{fence}\n{shown}\n{fence}{note}", truncated
 
 
 def _maybe_post_salvage(

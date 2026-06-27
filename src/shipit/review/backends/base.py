@@ -83,15 +83,24 @@ def parse_review_output(stdout: str, *, backend_name: str = "the agent") -> dict
     try:
         review = extract_json(stdout)
     except ValueError as exc:
-        # Parse FAILED. Log the FULL raw output (#75) at WARNING — the durable
-        # 'why' a truncation/invalid-JSON failure needs, in the file sink ONLY (the
-        # check-run summary + PR surface keep the snippet below). Logged once here,
-        # not also at DEBUG, so the same raw never lands twice.
+        snippet = (
+            f"{raw[:_SNIPPET]} … {raw[-_SNIPPET:]}" if len(raw) > 2 * _SNIPPET else raw
+        )
+        # Parse FAILED (#75). The user-facing surfaces (console handler WARNING+, the
+        # CI handler) get only the short SNIPPET — the full raw must not dump to a
+        # terminal / CI job log. The FULL raw — the durable 'why' a truncation/invalid
+        # -JSON failure needs — goes to DEBUG only, which the always-DEBUG OBS01 file
+        # sink still captures. So: snippet on every surface, full raw in the file sink.
         logger.warning(
             "review parse failed for %s — agent returned UNPARSEABLE output "
-            "(%d chars); full raw stdout follows:\n%s",
+            "(%d chars); snippet: %s",
             backend_name,
             len(raw),
+            snippet,
+        )
+        logger.debug(
+            "review parse failed for %s — full raw stdout follows:\n%s",
+            backend_name,
             raw,
         )
         if _TIMEOUT_MARKER in raw.lower():
@@ -104,9 +113,6 @@ def parse_review_output(stdout: str, *, backend_name: str = "the agent") -> dict
                 "the agent returned no parseable JSON (it may have timed out or "
                 "been truncated) — try a faster model or a smaller diff"
             )
-        snippet = (
-            f"{raw[:_SNIPPET]} … {raw[-_SNIPPET:]}" if len(raw) > 2 * _SNIPPET else raw
-        )
         # Attach the full raw so the service can SALVAGE it (#76); the message keeps
         # only the snippet (the PR-surface / terminal budget).
         raise BackendError(f"{hint}\nraw output: {snippet}", raw=raw) from exc

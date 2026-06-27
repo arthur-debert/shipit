@@ -499,6 +499,38 @@ def test_run_detached_funnel_summary_carries_snippet_not_full_raw(
     assert full_raw not in summary  # ...but never the full raw
 
 
+def test_salvage_body_contains_raw_holding_backtick_fences():
+    """#76 fence safety: raw that itself contains ``` (and a longer ```` run) must be
+    fully CONTAINED by the salvage fence — a fixed ``` fence would close early and let
+    the untrusted remainder render as live GitHub markdown (an injection surface). The
+    body fences with a delimiter LONGER than the longest backtick run in the raw, so
+    nothing inside can break out."""
+    import re
+
+    raw = (
+        "Here is my review.\n"
+        "```json\n"
+        '{"summary": {"status": "COMMENT"}}\n'
+        "```\n"
+        "and a longer run: ````\nstill inside the fence\n````\n"
+        "## not a real heading  @nobody  [x](http://evil)  - [ ] not a checkbox"
+    )
+    body, truncated = service._salvage_body("agy", raw)
+
+    assert truncated is False
+    assert raw in body  # the whole raw appears verbatim, fully contained
+
+    # The opening fence is the FIRST backtick-only line (it precedes the raw content);
+    # it must be longer than the longest backtick run inside raw (4 -> >= 5).
+    fence = next(ln for ln in body.splitlines() if ln and set(ln) == {"`"})
+    longest_inner = max((len(m) for m in re.findall(r"`+", raw)), default=0)
+    assert len(fence) >= 3
+    assert len(fence) > longest_inner  # cannot be closed early by any run in raw
+    # The exact opening delimiter appears EXACTLY twice (open + close) — the raw's own
+    # shorter runs never match it, so the fence can't be broken out of.
+    assert body.count(fence) == 2
+
+
 def test_run_detached_salvage_post_failure_does_not_mask_outcome(
     monkeypatch, _stub_pipeline
 ):

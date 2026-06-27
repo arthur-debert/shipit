@@ -83,22 +83,33 @@ def test_post_as_app_never_logs_the_token(monkeypatch, caplog):
     assert "posting review to owner/repo#5" in full
 
 
-def test_parse_failure_logs_full_raw_not_just_snippet(caplog):
+def test_parse_failure_full_raw_at_debug_snippet_at_warning(caplog):
     """#75: when an agent's output can't be parsed, the FULL raw stdout reaches the
-    `shipit.review` logger (the durable file-sink 'why'), while the `BackendError`
-    message — the PR-surface / terminal budget — keeps ONLY the head/tail snippet."""
+    logger ONLY at DEBUG (the always-DEBUG OBS01 file sink) — the user-facing WARNING
+    surface (console / CI handler) carries ONLY the head/tail snippet, never the full
+    raw. The `BackendError` message — the PR-surface / terminal budget — likewise keeps
+    only the snippet."""
     import pytest
 
     from shipit.review.backends import base
 
-    # > 2*_SNIPPET so the message would snippet it; unparseable so it raises.
+    # > 2*_SNIPPET so the message would snippet it; unparseable so it raises. The
+    # MIDDLE marker lives only in the full raw — never in the head/tail snippet.
     raw = "A" * 500 + "MIDDLE-ONLY-IN-FULL-RAW" + "B" * 500
-    with caplog.at_level(logging.WARNING, logger="shipit.review"):
+    with caplog.at_level(logging.DEBUG, logger="shipit.review"):
         with pytest.raises(base.BackendError) as excinfo:
             base.parse_review_output(raw, backend_name="agy")
 
-    logged = "\n".join(r.getMessage() for r in caplog.records)
-    assert raw in logged  # the FULL raw reached the logger / file sink
+    # The WARNING surface (console WARNING+, CI logs) carries only the snippet.
+    warnings = "\n".join(
+        r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING
+    )
+    assert "MIDDLE-ONLY-IN-FULL-RAW" not in warnings  # full raw never on the surface
+    # The FULL raw reaches the logger only at DEBUG — captured by the durable file sink.
+    debug = "\n".join(
+        r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG
+    )
+    assert raw in debug
     # The error message (-> check-run summary / PR surface) keeps only the snippet.
     assert "MIDDLE-ONLY-IN-FULL-RAW" not in str(excinfo.value)
     # ...and the full raw is attached to the error so the service can salvage it (#76).
