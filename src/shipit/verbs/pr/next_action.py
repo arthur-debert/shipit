@@ -16,8 +16,11 @@ that `pr ready` uses, so `pr next` can never flip a not-actually-ready PR.
 The request act delegates to the canonical reviewer-request helper
 `verbs/pr/_request.py::request_reviewers(...)` (WS05) — the ONE attach-verified
 request path `pr review request` also uses. `pr next` owns only the
-reviewer-SELECTION (excluding reviewers already mid-review on the head); the
-request placement + #614 attach-verify is the shared helper's job.
+reviewer-SELECTION, which it reads from the engine's structured
+`TaskStatus.to_request` (the required reviewers needing a (re-)request now) rather
+than re-deriving from the lifecycle map — so an in-flight local-agent reviewer is
+never re-poked mid-review; the request placement + #614 attach-verify is the
+shared helper's job.
 """
 
 from __future__ import annotations
@@ -59,14 +62,19 @@ class _NextActs:
 
         Two concerns, deliberately split:
 
-          * SELECTION (here): which reviewers to act on. A reviewer already
-            REQUESTED / IN_PROGRESS on the head is mid-review — re-poking it would
-            spam the reviewer and contradict the engine's "wait (already
-            requested…)" advice — so it is EXCLUDED. DONE reviewers are excluded
-            too. What remains is NOT_REQUESTED / stale-after-push — exactly the
-            reviewers the engine's request/RE-REQUEST clauses name. (The
-            dispatcher only routes a MIXED state to this act; the all-waiting case
-            it already reports.)
+          * SELECTION (here): which reviewers to act on. This CONSUMES the engine's
+            structured `status.to_request` — the required reviewers whose funnel
+            state says they need a (re-)request NOW (NEVER_REQUESTED, or a prior
+            review staled by a push) — and maps those names back to their adapters.
+            It no longer re-derives the set from the lifecycle `status.reviewers`
+            map: that map cannot tell a genuinely-IN_FLIGHT local-agent reviewer
+            (its `review: <agent>-local` check run still running) apart from a
+            never-requested one — both read lifecycle `not_requested`, because a
+            local agent has no native `review_requested` edge — so re-deriving here
+            would re-poke a reviewer mid-review. The engine already settled the
+            funnel/window state and the required-vs-best-effort split into
+            `to_request`, so the act reads THAT (the act-side completion of WS04's
+            structured-state routing; the dispatcher routes on the same field).
           * EXECUTION (delegated): the actual request + #614 attach-verify is
             WS05's canonical `_request.request_reviewers` — the ONE request path
             `pr review request` also uses. We pass `force=True` because we have
@@ -76,10 +84,8 @@ class _NextActs:
             failure: surface it as a `GhError` so the verb renders a clean stderr
             + non-zero exit, exactly like `pr review request`.
         """
-        skip = {"done_clean", "done_comments", "requested", "in_progress"}
-        selected = [
-            r for r in required_reviewers() if status.reviewers.get(r.name) not in skip
-        ]
+        by_name = {r.name: r for r in required_reviewers()}
+        selected = [by_name[name] for name in status.to_request if name in by_name]
         if not selected:
             return f"no requestable reviewer to (re-)request — {status.next_action}"
         # force=True: selection is done above, so the helper requests exactly
