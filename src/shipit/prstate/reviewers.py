@@ -10,8 +10,24 @@ shifts.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from . import ghapi
 from .model import PullContext, ReviewFunnelCheck, ReviewLifecycle, Thread
+
+
+def _funnel_recency_key(check: ReviewFunnelCheck) -> datetime:
+    """Recency signal for picking the live run among same-name funnel checks.
+
+    `statusCheckRollup` ordering is not a documented recency contract, so we sort
+    on the run's own `started_at` (ISO-8601, tz-aware; the App stamps it at kickoff
+    and it never moves) rather than trusting the rollup's list order. A breadcrumb
+    that somehow arrives without a `started_at` sorts earliest so a timestamped run
+    always wins over it.
+    """
+    if not check.started_at:
+        return datetime.min.replace(tzinfo=timezone.utc)
+    return datetime.fromisoformat(check.started_at)
 
 
 class ReviewerAdapter:
@@ -404,14 +420,20 @@ class _LocalReviewAdapter(ReviewerAdapter):
 
         Matches the `review: <agent>-local` check run by its funnel reviewer name.
         If several runs carry the name (a re-request that opened a second run, or
-        a stale earlier-head run), the LAST is returned — the rollup lists the
-        head commit's runs and the most recent is the live one. `None` when no
-        funnel run is present (the breadcrumb absent: never run, or the App still
-        lacks `checks:write` before the ADR-0005 re-grant — read as degraded
-        downstream, never as a block)."""
+        a stale earlier-head run), the one with the latest `started_at` is the live
+        one — we select on that timestamp rather than rollup list order, which is
+        not a documented recency contract (see `_funnel_recency_key`); rollup
+        position only breaks an exact-timestamp tie. `None` when no funnel run is
+        present (the breadcrumb absent: never run, or the App still lacks
+        `checks:write` before the ADR-0005 re-grant — read as degraded downstream,
+        never as a block)."""
         target = self.funnel_reviewer_name()
         matches = [c for c in ctx.review_funnel if c.reviewer == target]
-        return matches[-1] if matches else None
+        if not matches:
+            return None
+        return max(
+            enumerate(matches), key=lambda ic: (_funnel_recency_key(ic[1]), ic[0])
+        )[1]
 
 
 class CodexAdapter(_LocalReviewAdapter):

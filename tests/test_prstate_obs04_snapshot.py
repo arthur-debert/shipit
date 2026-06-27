@@ -120,6 +120,33 @@ def test_app_adapter_has_no_funnel_run(context):
     assert by_name("copilot").funnel_check(ctx) is None
 
 
+def test_funnel_check_selects_latest_started_not_list_order(context):
+    """Among same-name runs, the latest `started_at` wins — NOT rollup list order.
+
+    `statusCheckRollup` order is not a recency contract, so a second (newer) run
+    arriving BEFORE the stale one in the list must still be picked. Here the live
+    in-progress run is listed first and the stale failure last; the live one wins."""
+    ctx = context("local_funnel_failed_ci_green")
+    ctx.review_funnel = [
+        ReviewFunnelCheck(
+            reviewer="codex-local",
+            status="IN_PROGRESS",
+            conclusion=None,
+            started_at="2026-01-01T00:20:00Z",  # newer, but listed FIRST
+        ),
+        ReviewFunnelCheck(
+            reviewer="codex-local",
+            status="COMPLETED",
+            conclusion="FAILURE",
+            started_at="2026-01-01T00:00:00Z",  # stale, but listed LAST
+        ),
+    ]
+    picked = by_name("codex").funnel_check(ctx)
+    assert picked is not None
+    assert picked.status == "IN_PROGRESS"
+    assert picked.started_at == "2026-01-01T00:20:00Z"
+
+
 # --- TaskStatus carries the structured per-reviewer funnel data ------------
 
 
