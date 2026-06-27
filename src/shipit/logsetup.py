@@ -238,6 +238,40 @@ def resolve_current_owner_repo() -> tuple[str, str] | None:
         return None
 
 
+def configure_logging_for_slug(
+    slug: str,
+    *,
+    verbose: bool = False,
+    base_dir: str | Path | None = None,
+) -> bool:
+    """Wire the per-repo file sink from a KNOWN ``owner/repo`` slug — best-effort.
+
+    The detached review child (OBS03) knows its repo DETERMINISTICALLY from its
+    ``--repo`` argument, so — unlike the CLI bootstrap, which resolves the repo
+    best-effort off cwd (:func:`resolve_current_owner_repo`, a ``gh`` call that can
+    degrade in a terminal-less child) — it can attach the file sink with certainty.
+    The child passes that slug here so the detached run's diagnostics can reach
+    ``<logdir>/<owner>/<repo>/shipit.log``, independent of cwd resolution — this is
+    what attempts to make good on OBS03 story 5 (a crashed detached run should leave
+    a durable "why", not just a terminal check run). Best-effort, not a hard
+    guarantee: see the return contract below.
+
+    Returns whether the file sink was attached. Best-effort: a malformed slug or a
+    logging-setup failure is swallowed (returns ``False``) — a logging glitch must
+    NEVER crash the review (mirrors :func:`resolve_current_owner_repo`'s posture).
+    ``base_dir`` is the platformdirs base, injected by tests so the child's records
+    are asserted without writing to a real ``$HOME``.
+    """
+    try:
+        owner, sep, repo = slug.partition("/")
+        if not sep or not owner or not repo:
+            return False
+        configure_logging(verbose=verbose, owner_repo=(owner, repo), base_dir=base_dir)
+        return True
+    except Exception:  # noqa: BLE001 - logging setup must never crash the review
+        return False
+
+
 # --------------------------------------------------------------------------
 # Wiring
 # --------------------------------------------------------------------------

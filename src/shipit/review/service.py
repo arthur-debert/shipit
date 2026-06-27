@@ -296,11 +296,16 @@ def run_detached_review(
     SAME ``run_id`` to its terminal state. The parent creates, the child closes:
     exactly ONE check run, never two.
 
-    The child's diagnostics land in the OBS01 file sink because the CLI bootstrap
-    (the ``shipit`` root group callback) configures logging before this runs — a
-    detached process with no terminal still leaves a durable record. ``run_id`` is
-    ``None`` only when the parent's best-effort create failed; the review still
-    posts and the terminal close cleanly skips.
+    The child's diagnostics land in the OBS01 file sink: the child entrypoint
+    (``shipit pr review _run``) attempts to wire the per-repo file sink
+    DETERMINISTICALLY from its ``--repo`` argument before calling this (best-effort —
+    a malformed slug or logging-setup failure is swallowed), so a detached process
+    with no terminal normally leaves a durable record (OBS03 story 5) — independent
+    of the bootstrap's best-effort cwd resolution. Each step here is recorded (resolve,
+    generate, post, terminal transition) so a reader of the sink can reconstruct
+    what the run did and why it ended where it did. ``run_id`` is ``None`` only when
+    the parent's best-effort create failed; the review still posts and the terminal
+    close cleanly skips.
     """
     logger.info(
         "run_detached_review: agent=%s pr=#%s repo=%s run_id=%s — child start",
@@ -310,6 +315,17 @@ def run_detached_review(
         run_id,
     )
     ctx = resolve_pr(pr, repo=repo)
+    # The heavy resolve (fetch + merge-base + diff) the request path deliberately
+    # skipped is now done — record its shape (NOT the diff text) so the detached
+    # run's file-sink record shows what was reviewed.
+    logger.info(
+        "run_detached_review: agent=%s pr=#%s resolved — %d changed file(s), "
+        "%d chars diff; generating + posting",
+        agent,
+        pr,
+        len(ctx.changed_files or []),
+        len(ctx.diff or ""),
+    )
     result = _generate_post_and_close(
         agent,
         ctx,
