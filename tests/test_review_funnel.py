@@ -671,6 +671,184 @@ def test_configure_logging_for_slug_is_best_effort_on_bad_slug(tmp_path):
     assert logsetup.configure_logging_for_slug("not-a-slug", base_dir=tmp_path) is False
 
 
+# --- OBS03-WS03: child self-resolution of the resolve region --------------------
+# The ONE remaining observable `in_progress` gap: `resolve_pr` runs OUTSIDE
+# `_generate_post_and_close`'s own terminal-close region, so a resolve failure would
+# kill the child before any close and leave the parent-opened run stuck
+# `in_progress` forever. WS03 wraps PRECISELY that region — and nothing more, so a
+# correct timeout/empty close is never overwritten with `failed`.
+
+
+def test_run_detached_resolve_failure_closes_run_failed_and_reraises(monkeypatch):
+    """A `resolve_pr` failure (fetch / auth / network) closes the handed `run_id` to
+    `failed` EXACTLY ONCE on the SAME run and RE-RAISES — no dangling `in_progress`,
+    no create."""
+    calls = _fake_checkrun_boundary(monkeypatch)
+
+    def boom_resolve(pr, repo=None):
+        raise service.gh.GhError("could not fetch PR diff for #5")
+
+    monkeypatch.setattr(service, "resolve_pr", boom_resolve)
+
+    with pytest.raises(service.gh.GhError, match="could not fetch PR diff"):
+        service.run_detached_review("codex", 5, repo="owner/repo", run_id=555)
+
+    assert not [c for c in calls if c["method"] == "POST"]  # child never creates
+    patches = [c for c in calls if c["method"] == "PATCH"]
+    assert len(patches) == 1  # closed exactly once
+    assert patches[0]["path"] == "/repos/owner/repo/check-runs/555"  # the SAME run
+    assert patches[0]["body"]["status"] == "completed"
+    assert patches[0]["body"]["conclusion"] == "failure"
+
+
+def test_run_detached_resolve_failure_with_no_run_id_just_reraises(monkeypatch):
+    """When the parent opened no run (`run_id is None`) and resolve THEN fails, there
+    is nothing to close — the child re-raises without a terminal PATCH (which would
+    otherwise crash on `run_id is None`)."""
+    calls = _fake_checkrun_boundary(monkeypatch)
+
+    def boom_resolve(pr, repo=None):
+        raise service.gh.GhError("could not fetch PR diff")
+
+    monkeypatch.setattr(service, "resolve_pr", boom_resolve)
+
+    with pytest.raises(service.gh.GhError):
+        service.run_detached_review("codex", 5, repo="owner/repo", run_id=None)
+
+    assert not [c for c in calls if c["method"] == "PATCH"]
+
+
+def test_run_detached_resolve_guard_does_not_overwrite_timeout_close(
+    monkeypatch, _stub_pipeline
+):
+    """The guard's scope is PRECISELY the resolve region: it must NOT wrap
+    `_generate_post_and_close`, which already closes with the CORRECT conclusion.
+    With resolve SUCCEEDING, a timeout still closes `timed_out` (NOT overwritten to
+    `failed`), exactly once."""
+    from shipit.review.backends.base import _TIMEOUT_MARKER
+
+    calls = _fake_checkrun_boundary(monkeypatch)
+
+    def _timed(agent, ctx, **kw):
+        raise BackendError(
+            "codex timed out before returning a complete review\n"
+            f"raw output: …{_TIMEOUT_MARKER}"
+        )
+
+    monkeypatch.setattr(service, "generate_review", _timed)
+
+    with pytest.raises(BackendError):
+        service.run_detached_review("codex", 5, repo="owner/repo", run_id=555)
+
+    patches = [c for c in calls if c["method"] == "PATCH"]
+    assert len(patches) == 1  # closed exactly once...
+    assert patches[0]["body"]["conclusion"] == "timed_out"  # ...with its OWN conclusion
+
+
+def test_run_detached_resolve_guard_does_not_overwrite_empty_close(
+    monkeypatch, _stub_pipeline
+):
+    """Same no-overwrite guarantee for the EMPTY path: with resolve SUCCEEDING, an
+    empty review closes `failure` with the `empty` reason — NOT overwritten to a
+    bare `failed` — exactly once."""
+    calls = _fake_checkrun_boundary(monkeypatch)
+
+    def _empty(agent, ctx, **kw):
+        raise BackendError("no parseable JSON\nraw output: <not json>")
+
+    monkeypatch.setattr(service, "generate_review", _empty)
+
+    with pytest.raises(BackendError):
+        service.run_detached_review("codex", 5, repo="owner/repo", run_id=555)
+
+    patches = [c for c in calls if c["method"] == "PATCH"]
+    assert len(patches) == 1
+    assert patches[0]["body"]["conclusion"] in {"failure", "neutral"}
+    output = patches[0]["body"]["output"]
+    assert "empty" in (output["title"] + output["summary"]).lower()
+
+
+# --- OBS03-WS03: idempotent reconcile against an in-flight run -------------------
+# A re-request whose funnel run is already non-terminal for the CURRENT head must
+# reconcile (report in-flight) — NOT open a second breadcrumb + spawn a second child
+# that double-posts. Read-then-decide in the PARENT, against the check run only (no
+# local/daemon state). The find boundary is injected so "already in-flight" is
+# simulated without the network.
+
+
+def test_start_detached_reconciles_against_existing_inflight_run(monkeypatch):
+    """When the find boundary reports an existing in-flight run, the re-request
+    RECONCILES: it returns in-flight WITHOUT opening a breadcrumb (no POST) or
+    spawning a child — so no second review is ever posted."""
+    calls = _fake_checkrun_boundary(monkeypatch)
+    monkeypatch.setattr(
+        service, "_resolve_target", lambda pr: ("owner/repo", "deadbeef")
+    )
+
+    spawned: list = []
+    rc = service.start_detached_review(
+        "codex",
+        5,
+        spawn=lambda argv: spawned.append(list(argv)),
+        find=lambda agent, repo, head_sha: 999,
+    )
+
+    assert rc is True  # reported in-flight
+    assert spawned == []  # no duplicate child spawned
+    # No breadcrumb create and no terminal PATCH — reconciled against run 999.
+    assert not [c for c in calls if c["method"] in {"POST", "PATCH"}]
+
+
+def test_start_detached_no_inflight_run_creates_and_spawns(monkeypatch):
+    """The reconcile is a NO-OP when nothing is in flight: the find boundary returns
+    None, so the normal path runs — one `in_progress` create and one detached
+    child."""
+    calls = _fake_checkrun_boundary(monkeypatch)
+    monkeypatch.setattr(
+        service, "_resolve_target", lambda pr: ("owner/repo", "deadbeef")
+    )
+
+    spawned: list = []
+    rc = service.start_detached_review(
+        "codex",
+        5,
+        spawn=lambda argv: spawned.append(list(argv)),
+        find=lambda agent, repo, head_sha: None,
+    )
+
+    assert rc is True
+    assert len(spawned) == 1  # the normal detached child
+    posts = [c for c in calls if c["method"] == "POST"]
+    assert len(posts) == 1  # the in_progress create still happened
+    assert posts[0]["body"]["status"] == "in_progress"
+
+
+def test_start_detached_reconcile_lookup_failure_proceeds_to_spawn(monkeypatch, caplog):
+    """The reconcile read is BEST-EFFORT: if the in-flight lookup raises (e.g. a 403
+    before the `checks` re-grant), the request must NOT fail — it logs the fact and
+    proceeds to open + spawn a fresh run (at worst a duplicate, never a blocked
+    request)."""
+    calls = _fake_checkrun_boundary(monkeypatch)
+    monkeypatch.setattr(
+        service, "_resolve_target", lambda pr: ("owner/repo", "deadbeef")
+    )
+
+    def boom_find(agent, repo, head_sha):
+        raise service.gh.GhError("403 Resource not accessible by integration")
+
+    spawned: list = []
+    with caplog.at_level(logging.WARNING, logger="shipit.review"):
+        rc = service.start_detached_review(
+            "codex", 5, spawn=lambda argv: spawned.append(list(argv)), find=boom_find
+        )
+
+    assert rc is True
+    assert len(spawned) == 1  # proceeded to spawn a fresh run
+    assert [c for c in calls if c["method"] == "POST"]  # ...and opened a fresh run
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "reconcile" in text.lower()
+
+
 def test_unknown_outcome_falls_back_to_failed_without_crashing(monkeypatch, caplog):
     """Defensive (Copilot #66): `_close_funnel_breadcrumb` must not KeyError on an
     unexpected/typo outcome — that would escape this best-effort path and mask the

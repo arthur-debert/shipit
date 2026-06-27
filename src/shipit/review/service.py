@@ -221,27 +221,49 @@ def start_detached_review(
     instructions_path: str | None = None,
     as_app: bool = True,
     spawn: Callable[[Sequence[str]], None] | None = None,
+    find: Callable[[str, str, str], int | None] | None = None,
 ) -> bool:
     """Open the in_progress funnel run, DETACH the review, return in-flight (OBS03).
 
     The PARENT half of the async inversion: it does ONLY the cheap, synchronous
-    work — resolve ``(repo, head_sha)`` via the lightweight ``gh pr view`` and open
-    the OBS02 ``in_progress`` breadcrumb (best-effort) — then spawns a DETACHED
-    child (``shipit pr review _run``) that runs the model, posts the review, and
-    closes the SAME ``run_id`` to its terminal state. It returns ``True``
-    (in-flight) WITHOUT blocking on the model run; the outcome is read LATER from
-    the PR (the funnel check run + the posted review), never from this return.
+    work — resolve ``(repo, head_sha)`` via the lightweight ``gh pr view``,
+    RECONCILE against any in-flight run, and open the OBS02 ``in_progress``
+    breadcrumb (best-effort) — then spawns a DETACHED child (``shipit pr review
+    _run``) that runs the model, posts the review, and closes the SAME ``run_id`` to
+    its terminal state. It returns ``True`` (in-flight) WITHOUT blocking on the model
+    run; the outcome is read LATER from the PR (the funnel check run + the posted
+    review), never from this return.
+
+    **Idempotent reconcile (OBS03-WS03, issue #41):** because the check run IS the
+    store, a re-request for a reviewer whose funnel run is already non-terminal on
+    THIS head must NOT open a second breadcrumb + spawn a second child that
+    double-posts. So BEFORE creating + spawning, this reads whether such a run exists
+    (:func:`shipit.review.checkrun.find_nonterminal`) and, if so, reconciles —
+    reports in-flight and returns ``True`` without creating or spawning. No local /
+    daemon state: the check run is the only source of truth (ADR-0005 / #41).
 
     The breadcrumb create is BEST-EFFORT — a 403 before the ``checks:write``
     re-grant (or any failure) must not fail the request, so the child still runs
     with ``run_id=None`` (no in_progress marker, but the review still posts).
     ``spawn`` is the injected detach boundary (default: a new-session, no-daemon
-    :func:`_spawn_detached`) so a test asserts the child argv WITHOUT forking.
+    :func:`_spawn_detached`) and ``find`` the injected reconcile-lookup boundary
+    (default: :func:`shipit.review.checkrun.find_nonterminal`) — mirrored injectable
+    seams so a test asserts reconcile + detach WITHOUT the network or a fork.
     """
     logger.info(
         "start_detached_review: agent=%s pr=#%s — resolving + detaching", agent, pr
     )
     repo, head_sha = _resolve_target(pr)
+    existing = _reconcile_inflight(agent, repo, head_sha, find)
+    if existing is not None:
+        logger.info(
+            "start_detached_review: agent=%s pr=#%s reconciled against existing "
+            "in-flight run (id=%s) — not opening or spawning a duplicate",
+            agent,
+            pr,
+            existing,
+        )
+        return True
     run_id = _open_breadcrumb(agent, repo, head_sha)
     argv = _child_argv(
         agent,
@@ -306,6 +328,21 @@ def run_detached_review(
     what the run did and why it ended where it did. ``run_id`` is ``None`` only when
     the parent's best-effort create failed; the review still posts and the terminal
     close cleanly skips.
+
+    Self-resolution covers EVERY observable outcome (OBS03-WS03, issue #41): the
+    heavy :func:`resolve_pr` is wrapped so a fetch/auth/network failure closes the
+    parent-opened ``run_id`` to ``failed`` instead of dying before
+    :func:`_generate_post_and_close` and leaving the run stuck ``in_progress``
+    forever; everything past resolve is closed by :func:`_generate_post_and_close`
+    with its OWN conclusion (success / empty→failure / backend-error→failure / agy
+    timeout-marker→timed_out). The guard's scope is PRECISELY the resolve region that
+    helper does not cover — it deliberately does NOT wrap the helper, so a correct
+    ``timed_out`` / ``empty`` close is never overwritten with ``failed``. A
+    CATASTROPHIC child-startup death (a crash in click parsing / import, OOM, a
+    reboot — before/outside these guards) is the *vanished-process* case: it leaves
+    the run ``in_progress`` with its ``started_at``, resolved by OBS04's wait window
+    ageing that timestamp. WS03 does NOT implement that window — it only relies on it
+    as the backstop (PRD "Failure & Timeout").
     """
     logger.info(
         "run_detached_review: agent=%s pr=#%s repo=%s run_id=%s — child start",
@@ -314,18 +351,39 @@ def run_detached_review(
         repo,
         run_id,
     )
-    ctx = resolve_pr(pr, repo=repo)
-    # The heavy resolve (fetch + merge-base + diff) the request path deliberately
-    # skipped is now done — record its shape (NOT the diff text) so the detached
-    # run's file-sink record shows what was reviewed.
-    logger.info(
-        "run_detached_review: agent=%s pr=#%s resolved — %d changed file(s), "
-        "%d chars diff; generating + posting",
-        agent,
-        pr,
-        len(ctx.changed_files or []),
-        len(ctx.diff or ""),
-    )
+    try:
+        ctx = resolve_pr(pr, repo=repo)
+        # The heavy resolve (fetch + merge-base + diff) the request path deliberately
+        # skipped is now done — record its shape (NOT the diff text) so the detached
+        # run's file-sink record shows what was reviewed.
+        logger.info(
+            "run_detached_review: agent=%s pr=#%s resolved — %d changed file(s), "
+            "%d chars diff; generating + posting",
+            agent,
+            pr,
+            len(ctx.changed_files or []),
+            len(ctx.diff or ""),
+        )
+    except Exception as exc:  # noqa: BLE001 - any resolve failure must still resolve the run
+        # The resolve region is OUTSIDE `_generate_post_and_close`'s own
+        # terminal-close region, so a failure here would otherwise kill the child
+        # before any close — leaving the parent-opened run stuck `in_progress`.
+        # Close it `failed` (only when the parent actually opened a run) and RE-RAISE
+        # so the failure is still surfaced. This is the ONLY close on the resolve
+        # path; the helper below owns every post-resolve outcome's close.
+        if run_id is not None:
+            _close_funnel_breadcrumb(
+                agent, repo, run_id, outcome="failed", detail=str(exc)
+            )
+        logger.warning(
+            "run_detached_review: agent=%s pr=#%s resolve failed — closed run %s "
+            "as failed: %s",
+            agent,
+            pr,
+            run_id,
+            exc,
+        )
+        raise
     result = _generate_post_and_close(
         agent,
         ctx,
@@ -492,6 +550,40 @@ def _open_funnel_breadcrumb(agent, ctx) -> tuple[int | None, str | None]:
         return None, None
     run_id = _open_breadcrumb(agent, repo, ctx.head_sha)
     return (run_id, repo) if run_id is not None else (None, None)
+
+
+def _reconcile_inflight(
+    agent: str,
+    repo: str,
+    head_sha: str,
+    find: Callable[[str, str, str], int | None] | None,
+) -> int | None:
+    """Look up an in-flight funnel run to RECONCILE against — BEST-EFFORT (OBS03-WS03).
+
+    The idempotency read: the check run IS the store, so a re-request for a reviewer
+    whose funnel run is still non-terminal on THIS head must reconcile against it
+    (report in-flight) instead of opening a second breadcrumb + spawning a second
+    child that double-posts. Returns the existing run id when one is in flight, else
+    ``None`` (the caller proceeds to open + spawn a fresh run).
+
+    Best-effort like :func:`_open_breadcrumb`: the lookup rides the SAME App-token
+    boundary, which can ``403`` before the ``checks`` re-grant propagates. A read
+    failure must not fail the request, so it is logged (the failure FACT only — the
+    installation token never reaches a record) and treated as "no in-flight run" — at
+    worst a duplicate run, never a blocked request. ``find`` is injected so a test
+    simulates "already in-flight" without the network.
+    """
+    try:
+        return (find or checkrun.find_nonterminal)(agent, repo, head_sha)
+    except Exception as exc:  # noqa: BLE001 - the reconcile read is best-effort
+        logger.warning(
+            "start_detached_review: in-flight reconcile lookup failed for %s-local "
+            "on %s (proceeding to open a fresh run): %s",
+            agent,
+            repo,
+            exc,
+        )
+        return None
 
 
 def _open_breadcrumb(agent: str, repo: str, head_sha: str) -> int | None:
