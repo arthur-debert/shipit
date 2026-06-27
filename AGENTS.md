@@ -10,11 +10,10 @@ The agent the human addresses is a COORDINATING agent: it never implements. Rega
 
 The cycle is SPLIT across roles so no one context carries all of it:
 
-\- an IMPLEMENTER subagent implements (and writes/updates tests), runs the gate green, and opens a DRAFT PR — then STOPS AT PR-OPEN; it never sees a review round;
-
+- an IMPLEMENTER subagent implements (and writes/updates tests), runs the
+  gate green, and opens a DRAFT PR — then STOPS AT PR-OPEN; it never sees a review round;
 - the COORDINATOR owns every wait and the flip;
 - a FRESH SHEPHERD subagent handles each review-addressing round — one per
-
   round, briefed cold.
 
 The canonical statement of this cycle lives in the `arthur-debert/release` repo (`docs/dev-cycle.lex`); this document adapts it to shipit's `shipit pr` engine. On any drift, the canonical doc wins.
@@ -27,7 +26,10 @@ Stop at that flip; do NOT merge. The HUMAN does the final read and merge — mer
 
 FLOOR and CEILING — what needs no go-ahead, and the one thing that does:
 
-\- FLOOR: committing, pushing, and opening the draft PR are the agent's OWN job and need no human go-ahead. "Stop at the ready flip" NEVER means "wait to be asked to commit" or "leave finished work uncommitted" — finished work is committed, pushed, and opened as a draft PR without asking. - CEILING: the ONLY human-gated step is the merge. The agent drives everything up to and including the ready flip on its own authority, then stops.
+- FLOOR: committing, pushing, and opening the draft PR are the agent's OWN
+  job and need no human go-ahead. "Stop at the ready flip" NEVER means "wait to be asked to commit" or "leave finished work uncommitted" — finished work is committed, pushed, and opened as a draft PR without asking.
+- CEILING: the ONLY human-gated step is the merge. The agent drives
+  everything up to and including the ready flip on its own authority, then stops.
 
 ## 1. The single-task cycle (one PR)
 
@@ -37,7 +39,12 @@ The unit of work, applied identically whether the task ships as one PR to `main`
 
 The coordinator aligns on what is to be done before any code is touched — and before delegating.
 
-\- Task description: a GitHub issue, a handoff artifact, or an interactive maintainer message. A maintainer-directed quick fix does NOT require filing a GitHub issue first — a direct maintainer instruction is its own authorization; ship the fix PR. This overrides the default of filing one issue per change for that case. - Contextualization: read the description and the related code / resources. - Clarifications: if information is missing or a real decision point exists, surface it to the maintainer — and where possible propose a preferred option rather than only asking.
+- Task description: a GitHub issue, a handoff artifact, or an
+  interactive maintainer message. A maintainer-directed quick fix does NOT require filing a GitHub issue first — a direct maintainer instruction is its own authorization; ship the fix PR. This overrides the default of filing one issue per change for that case.
+- Contextualization: read the description and the related code /
+  resources.
+- Clarifications: if information is missing or a real decision point
+  exists, surface it to the maintainer — and where possible propose a preferred option rather than only asking.
 
 The coordinator does the reading/research needed to brief the work, then delegates the implementation. It does not implement.
 
@@ -55,13 +62,25 @@ For bugs, write the test that captures the bug — and thus fails — first, the
 
 The cycle is SPLIT across roles so no one context carries all of it. An implementer that also shepherds its own review rounds drags the full implementation context — exploration, dead ends, test output — through every round, and a long context is also a worse judge of review comments, defending remembered choices instead of reading the diff on its merits. So:
 
-\- The IMPLEMENTER subagent STOPS AT PR-OPEN. It opens the PR as a DRAFT (linking the issue if relevant: `for #<id>` / `closes #<id>`) with a `## Context` handoff note in the PR body — why this approach, what is out of scope, what NOT to "fix" — written for a stranger, because a stranger is exactly who addresses the review rounds. Then it reports back and terminates. It never sees a review round. - The COORDINATOR owns every wait and the flip. shipit's PR engine is STATELESS — "now" is an input, there is no looping wait command (shipit deliberately has no `pr wait`; see the **Wait window** entry in CONTEXT.md [and](./docs/adr/0006-readiness-with-degraded-reviewers.md)). So the coordinator does NOT block on an engine wait: it drives the PR with `shipit pr next` / `shipit pr status`, manages the waiting cadence itself, and flips with `shipit pr ready` once the engine reports READY. The guard refuses the flip early, so it can't fire prematurely. That hands the PR to a human; don't auto-merge. - A FRESH SHEPHERD subagent handles each ADDRESSING round. When \`shipit pr status\` reports addressing is needed, the coordinator spawns a shepherd whose brief is just the PR number and the Context note. It triages the open threads (fix or reply with rationale, resolving as it goes), pushes all commits for the round at once, re-requests review (`shipit pr review request`), hands back to the coordinator, and terminates. One fresh shepherd per round — each starts cold on the diff as it exists.
+- The IMPLEMENTER subagent STOPS AT PR-OPEN. It opens the PR as a DRAFT
+  (linking the issue if relevant: `for #<id>` / `closes #<id>`) with a `## Context` handoff note in the PR body — why this approach, what is out of scope, what NOT to "fix" — written for a stranger, because a stranger is exactly who addresses the review rounds. Then it reports back and terminates. It never sees a review round.
+- The COORDINATOR owns every wait and the flip. shipit's PR engine is
+  STATELESS — "now" is an input, there is no looping wait command (shipit deliberately has no `pr wait`; see the **Wait window** entry in CONTEXT.md [and](./docs/adr/0006-readiness-with-degraded-reviewers.md)). So the coordinator does NOT block on an engine wait: it drives the PR with `shipit pr next` / `shipit pr status`, manages the waiting cadence itself, and flips with `shipit pr ready` once the engine reports READY. The guard refuses the flip early, so it can't fire prematurely. That hands the PR to a human; don't auto-merge.
+- A FRESH SHEPHERD subagent handles each ADDRESSING round. When \`shipit
+  pr status\` reports addressing is needed, the coordinator spawns a shepherd whose brief is just the PR number and the Context note. It triages the open threads (fix or reply with rationale, resolving as it goes), pushes all commits for the round at once, re-requests review (`shipit pr review request`), hands back to the coordinator, and terminates. One fresh shepherd per round — each starts cold on the diff as it exists.
 
 #### On addressing a round (the shepherd's discipline):
 
 The local agent has more context than the reviewing agent, so it has the final word.
 
-\- The local agent decides whether a PR comment is valid. Valid comments are addressed in a commit; otherwise it pushes back with a rationale. - Each PR review comment is answered either with the commit that addresses it or a rationale for the pushback. - All PR review comments are marked resolved — including deferred nitpicks — so review status stays readable. - Push all commits for a round at once, so reviewers configured to re-run do so only once.
+- The local agent decides whether a PR comment is valid. Valid
+  comments are addressed in a commit; otherwise it pushes back with a rationale.
+- Each PR review comment is answered either with the commit that
+  addresses it or a rationale for the pushback.
+- All PR review comments are marked resolved — including deferred
+  nitpicks — so review status stays readable.
+- Push all commits for a round at once, so reviewers configured to
+  re-run do so only once.
 
 ### 1.4. User validation
 
@@ -77,7 +96,6 @@ Each round, address every review comment, EXCEPT stop when EITHER:
 
 - 6 rounds have happened (there is no 7th round), or
 - the current round is all nitpicks — nothing that changes
-
   correctness, behavior, or security.
 
 **Nitpick** — a comment about documentation wording, naming, or style with no correctness, behavioral, or security impact. Anything touching behavior, correctness, or security is not a nitpick and keeps the round open.
@@ -130,7 +148,14 @@ Codes are assigned by the human — repo codes once per project (usually already
 
 Used in plain language: issue and PR titles, commit logs, cross-references. Form: `REPO-EPIC-WSnn[-FXnn]` — e.g. `APP-GPU02-WS03-FX02`.
 
-\- Epic: a registered THEME (3 uppercase letters) + NN — e.g. `GPU02` (there was a GPU01). A roadmap stage, if any, is metadata in the epic body, not the code. - Repo: 3 uppercase letters — `APP` (phos-app), `COR` (phos-core). Only for multi-repo projects. - Workstream: `WSnn`, scoped per (epic, repo) — both repos may have a WS01 in the same epic. - Fix round: `FXnn`, scoped per PR, review-phase only (squashed away on merge) — the Nth review-response round.
+- Epic: a registered THEME (3 uppercase letters) + NN — e.g. `GPU02`
+  (there was a GPU01). A roadmap stage, if any, is metadata in the epic body, not the code.
+- Repo: 3 uppercase letters — `APP` (phos-app), `COR` (phos-core). Only
+  for multi-repo projects.
+- Workstream: `WSnn`, scoped per (epic, repo) — both repos may have a
+  WS01 in the same epic.
+- Fix round: `FXnn`, scoped per PR, review-phase only (squashed away on
+  merge) — the Nth review-response round.
 
 ### 3.2. Titles
 
