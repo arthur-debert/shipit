@@ -14,7 +14,7 @@ import click
 
 from . import __version__
 from .logsetup import configure_logging, resolve_current_owner_repo
-from .verbs import gh_setup, install, lint, logs
+from .verbs import gh_setup, install, lint, logs, verify_apps
 from .verbs.pr import pr as pr_group
 
 
@@ -81,6 +81,32 @@ def gh_setup_cmd(
         dry_run=dry_run,
         prompt=lambda name: click.prompt(f"secret {name}", hide_input=True),
     )
+    raise SystemExit(rc)
+
+
+@root.command(name="verify-apps")
+@click.argument("repo", required=False)
+@click.option(
+    "--agent",
+    "agents",
+    multiple=True,
+    type=click.Choice(verify_apps.known_agents()),
+    help=(
+        "Local-agent reviewer App to verify (repeatable). "
+        "Default: every known App reviewer."
+    ),
+)
+def verify_apps_cmd(repo: str | None, agents: tuple[str, ...]) -> None:
+    """Verify each local-agent reviewer App is LIVE on REPO (installed + checks:write).
+
+    REPO is owner/name; omitted, it defaults to the current checkout's repo. For
+    each App (adr-codex-review / adr-agy-review) this mints the App installation
+    token and checks the granted permissions carry `checks: write` — a cheap read,
+    not a check-run create. Prints a pass-or-instruct line per App and exits 0 only
+    when ALL are live, 1 otherwise, so a rollout can gate on it mechanically. It
+    only VERIFIES; the one-time install/consent is per docs/dev/review-app-provisioning.md.
+    """
+    rc = verify_apps.run(repo, agents=list(agents) or None)
     raise SystemExit(rc)
 
 
