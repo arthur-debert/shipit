@@ -68,6 +68,52 @@ def request_cmd(pr: int | None, reviewer: str | None) -> None:
     raise SystemExit(run(pr, reviewer=reviewer))
 
 
+@cmd.command(name="_run", hidden=True)
+@click.option("--agent", "agent", required=True)
+@click.option("--pr", "pr", required=True, type=int)
+@click.option("--repo", "repo", required=True)
+@click.option("--run-id", "run_id", default=None, type=int)
+@click.option("--model", "model", default="pro")
+@click.option("--timeout", "timeout", default="600s")
+@click.option("--instructions", "instructions", default=None)
+@click.option("--as-app/--no-as-app", "as_app", default=True)
+def run_internal_cmd(
+    agent: str,
+    pr: int,
+    repo: str,
+    run_id: int | None,
+    model: str,
+    timeout: str,
+    instructions: str | None,
+    as_app: bool,
+) -> None:
+    """INTERNAL — the detached local-review child entrypoint (hidden, not a verb).
+
+    Spawned by `_LocalReviewAdapter.request()` as a new-session subinvocation
+    (`python -m shipit pr review _run …`); it carries everything it needs as
+    arguments and shares NO state with the parent. It runs the agent over the PR
+    diff, posts the review as the bot, and closes the SAME funnel `run_id` the
+    parent opened — so there is exactly ONE check run. Hidden so it never shows in
+    `--help`: humans use `pr review request`, which detaches this.
+
+    Logging (the OBS01 file sink the detached run's diagnostics land in) is already
+    configured by the `shipit` root group callback that runs before this command,
+    so a terminal-less child still leaves a durable record.
+    """
+    from ...review import service
+
+    service.run_detached_review(
+        agent,
+        pr,
+        repo=repo,
+        run_id=run_id,
+        model=model,
+        timeout=timeout,
+        instructions_path=instructions,
+        as_app=as_app,
+    )
+
+
 def run(pr: int | None = None, *, reviewer: str | None = None) -> int:
     """Resolve -> select scope -> request + verify -> render. Returns an exit code.
 
@@ -144,13 +190,16 @@ def _emit(pr: int, result: RequestResult) -> None:
         print(f"{name}: already reviewed #{pr} (review-once) — skip")
     for name in result.no_op:
         print(f"{name}: auto-triggers, no request mechanism — no-op")
-    for name in result.posted:
-        print(f"posted review: {name} on #{pr}")
+    for name in result.in_flight:
+        print(
+            f"review in flight: {name} on #{pr} (detached — poll the PR for the "
+            "outcome)"
+        )
     for name in result.verified:
         print(f"verified: {name} request attached on #{pr}")
     # A bare run that skipped every reviewer placed nothing — say so explicitly
     # rather than exit silently.
-    acted = result.no_op + result.posted + result.verified + result.dropped
+    acted = result.no_op + result.in_flight + result.verified + result.dropped
     if result.skipped and not acted:
         print(f"all required reviewers already reviewed #{pr} — nothing to request")
     for name in result.dropped:

@@ -24,10 +24,11 @@ The split that makes #614 correct (carried over verbatim from release):
     fast bot can consume the request before the poll sees the edge). A baseline
     of the newest review ids is taken BEFORE placing so a review that lands
     between placement and the poll still reads as fresh.
-  * LOCAL reviewers (`has_requested_edge == False` — codex, agy) run + POST a
-    review synchronously inside `request()`; a True return means the review is
-    already posted (a failure raises). There is no edge to poll, so they are
-    NEVER edge-verified and NEVER reported dropped.
+  * LOCAL reviewers (`has_requested_edge == False` — codex, agy) DETACH an async
+    review inside `request()` (OBS03); a True return means the review is now
+    IN-FLIGHT — a detached child is running it and the funnel check run is the
+    result store (a failure in the synchronous detach raises). There is no edge to
+    poll, so they are NEVER edge-verified and NEVER reported dropped.
   * No-mechanism backends (`request()` returns False — auto-triggering Gemini)
     are a recorded no-op and never verified.
 
@@ -62,9 +63,10 @@ class ReviewerOutcome:
     """What happened for one reviewer in a `request_reviewers` run."""
 
     name: str
-    # One of: "verified" (remote edge attached), "posted" (local review posted),
-    # "no_op" (no request mechanism), "skipped" (already done, bare run),
-    # "dropped" (remote edge never attached — a hard failure).
+    # One of: "verified" (remote edge attached), "in_flight" (local review
+    # detached, running async), "no_op" (no request mechanism), "skipped"
+    # (already done, bare run), "dropped" (remote edge never attached — a hard
+    # failure).
     status: str
 
 
@@ -96,8 +98,8 @@ class RequestResult:
         return self._by_status("verified")
 
     @property
-    def posted(self) -> list[str]:
-        return self._by_status("posted")
+    def in_flight(self) -> list[str]:
+        return self._by_status("in_flight")
 
     @property
     def no_op(self) -> list[str]:
@@ -139,8 +141,8 @@ def request_reviewers(
 
     Remote reviewers (real `review_requested` edge) are edge-verified by polling
     `boundary.attach_state`; a dropped attach lands as a `"dropped"` outcome and
-    flips `result.ok` False. Local reviewers post synchronously (recorded
-    `"posted"`); no-mechanism backends record `"no_op"`. Neither is verified.
+    flips `result.ok` False. Local reviewers DETACH an async review (recorded
+    `"in_flight"`); no-mechanism backends record `"no_op"`. Neither is verified.
 
     Raises `ghapi.GhError` straight through when a `gh` call fails (the skip read,
     a `request()` placement, or the attach poll) — the caller renders it as a
@@ -171,9 +173,9 @@ def request_reviewers(
             if adapter.has_requested_edge:
                 remote_placed.append(adapter)
             else:
-                # Local reviewer: the review was POSTED synchronously inside
-                # request(); no edge to poll.
-                result.outcomes.append(ReviewerOutcome(adapter.name, "posted"))
+                # Local reviewer: request() detached an async review (OBS03) — it
+                # is now in-flight; there is no edge to poll.
+                result.outcomes.append(ReviewerOutcome(adapter.name, "in_flight"))
         else:
             # No request mechanism (auto-triggering backend) — a no-op.
             result.outcomes.append(ReviewerOutcome(adapter.name, "no_op"))

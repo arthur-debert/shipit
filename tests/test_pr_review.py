@@ -171,8 +171,8 @@ def test_force_requests_already_done_reviewer():
     assert result.verified == ["copilot"]
 
 
-def test_local_reviewer_posted_not_edge_verified():
-    """A local reviewer (no edge) that returns True is `posted`, never polled."""
+def test_local_reviewer_in_flight_not_edge_verified():
+    """A local reviewer (no edge) that returns True is `in_flight`, never polled."""
     local = _FakeAdapter("codex", has_edge=False, request_returns=True)
     # attach_state would raise if the poll ran — proving locals skip verification.
 
@@ -184,7 +184,7 @@ def test_local_reviewer_posted_not_edge_verified():
     )
     result = request_reviewers(7, [local], force=True, boundary=boundary)
     assert result.ok
-    assert result.posted == ["codex"]
+    assert result.in_flight == ["codex"]
     assert result.verified == []
 
 
@@ -215,37 +215,38 @@ def test_gh_failure_in_skip_read_propagates():
 # --- the local-agent guard via the CLI verb -----------------------------------
 
 
-def test_local_agent_request_runs_and_posts(monkeypatch, capsys):
-    """PRF01-WS07: requesting a local-agent reviewer runs the service + posts as
-    the bot (force scope) — the verb reports `posted` and exits 0. The service
-    boundary is faked so no LLM/network runs."""
+def test_local_agent_request_detaches_in_flight(monkeypatch, capsys):
+    """OBS03: requesting a local-agent reviewer DETACHES the review (force scope) —
+    the verb reports it in-flight and exits 0, without blocking on a model run. The
+    service detach boundary is faked so nothing forks."""
     from shipit.review import service
 
     monkeypatch.setattr(review_verb, "resolve_pr", lambda pr: 7)
-    posted: list = []
+    detached: list = []
     monkeypatch.setattr(
         service,
-        "run_and_post",
-        lambda agent, pr, **kw: posted.append((agent, pr)) or {},
+        "start_detached_review",
+        lambda agent, pr, **kw: detached.append((agent, pr)) or True,
     )
     rc = review_verb.run(7, reviewer="codex")
     assert rc == 0
-    assert posted == [("codex", 7)]
-    assert "posted review: codex on #7" in capsys.readouterr().out
+    assert detached == [("codex", 7)]
+    assert "review in flight: codex on #7" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("name", ["codex-local", "agy-local"])
-def test_local_agent_spec_alias_runs_and_posts(monkeypatch, capsys, name):
+def test_local_agent_spec_alias_detaches(monkeypatch, capsys, name):
     """The PRD/glossary spell these `codex-local`/`agy-local`; the `-local` alias
-    resolves the base adapter so the local review runs, not an unknown-name error."""
+    resolves the base adapter so the local review detaches, not an unknown-name
+    error."""
     from shipit.review import service
 
     monkeypatch.setattr(review_verb, "resolve_pr", lambda pr: 7)
-    monkeypatch.setattr(service, "run_and_post", lambda agent, pr, **kw: {})
+    monkeypatch.setattr(service, "start_detached_review", lambda agent, pr, **kw: True)
     rc = review_verb.run(7, reviewer=name)
     assert rc == 0
     out = capsys.readouterr().out
-    assert "posted review:" in out
+    assert "review in flight:" in out
 
 
 def test_local_alias_does_not_match_app_reviewer(capsys):
@@ -340,3 +341,47 @@ def test_pr_review_request_help(capsys):
     assert rc == 0
     out = capsys.readouterr().out
     assert "--reviewer" in out
+
+
+def test_pr_review_run_is_hidden(capsys):
+    """The detached child entry `_run` is internal — it never shows in `--help`."""
+    rc = cli.main(["pr", "review", "--help"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "request" in out
+    assert "_run" not in out
+
+
+def test_pr_review_run_invokes_detached_child(monkeypatch):
+    """OBS03: the hidden `_run` command is the detached child entry — it parses its
+    args and drives `service.run_detached_review` with the parent's `run_id`."""
+    from shipit.review import service
+
+    captured: dict = {}
+
+    def fake_child(agent, pr, **kw):
+        captured.update({"agent": agent, "pr": pr, **kw})
+        return {}
+
+    monkeypatch.setattr(service, "run_detached_review", fake_child)
+    rc = cli.main(
+        [
+            "pr",
+            "review",
+            "_run",
+            "--agent",
+            "codex",
+            "--pr",
+            "5",
+            "--repo",
+            "owner/repo",
+            "--run-id",
+            "555",
+        ]
+    )
+    assert rc == 0
+    assert captured["agent"] == "codex"
+    assert captured["pr"] == 5
+    assert captured["repo"] == "owner/repo"
+    assert captured["run_id"] == 555
+    assert captured["as_app"] is True
