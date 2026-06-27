@@ -81,6 +81,8 @@ def _stub_pipeline(monkeypatch):
     def fake_post_review(review, ctx, *, agent_name, event, dry_run, as_app):
         posted["called"] = True
         posted["agent"] = agent_name
+        posted["review"] = review
+        posted["event"] = event
         return {"id": 99}
 
     monkeypatch.setattr(service.post, "post_review", fake_post_review)
@@ -384,6 +386,142 @@ def test_run_detached_timeout_marker_transitions_to_timed_out(
     patch = next(c for c in calls if c["method"] == "PATCH")
     assert patch["path"] == "/repos/owner/repo/check-runs/555"
     assert patch["body"]["conclusion"] == "timed_out"
+
+
+# --- #76: salvage content-but-unparseable output as a top-level comment ------
+# A local agent (agy) routinely returns review PROSE but truncated/invalid JSON on a
+# large diff -> `BackendError`. Rather than drop it, the content is posted as a single
+# top-level COMMENT (salvage) — but the funnel outcome STAYS the degraded `empty`
+# (failure): the salvage is additive and never flips the run to success.
+
+
+def test_run_detached_salvages_unparseable_content_as_comment(
+    monkeypatch, _stub_pipeline
+):
+    """Content-but-unparseable JSON (a `BackendError` carrying `raw`) posts the raw
+    text as a single top-level COMMENT, AND the funnel still records the degraded
+    `empty`/failure — salvage is additive, never a flip to success."""
+    calls = _fake_checkrun_boundary(monkeypatch)
+    raw = 'Here is my detailed review prose...\n{"summary": {truncated'
+    err = BackendError("no parseable JSON\nraw output: <snip>", raw=raw)
+
+    def _unparseable(agent, ctx, **kw):
+        raise err
+
+    monkeypatch.setattr(service, "generate_review", _unparseable)
+
+    with pytest.raises(BackendError):
+        service.run_detached_review("agy", 5, repo="owner/repo", run_id=555)
+
+    # (a) the salvage comment was posted as a COMMENT carrying the raw + a marker.
+    assert _stub_pipeline["called"] is True
+    assert _stub_pipeline["event"] == "COMMENT"
+    body = _stub_pipeline["review"]["summary"]["overall_feedback"]
+    assert raw in body
+    assert "could not be parsed" in body
+    assert not _stub_pipeline["review"]["comments"]  # a single top-level comment
+    # (b) the funnel STILL records the degraded `empty`/failure (NOT success).
+    patch = next(c for c in calls if c["method"] == "PATCH")
+    assert patch["body"]["conclusion"] in {"failure", "neutral"}
+    output = patch["body"]["output"]
+    assert "empty" in (output["title"] + output["summary"]).lower()
+
+
+def test_run_detached_empty_stdout_does_not_salvage(monkeypatch, _stub_pipeline):
+    """A genuinely EMPTY stdout (no content on `raw`) posts NO salvage comment — the
+    degraded `empty` close is unchanged from before #76."""
+    calls = _fake_checkrun_boundary(monkeypatch)
+    err = BackendError("no parseable JSON\nraw output:", raw="")  # nothing to salvage
+
+    def _empty(agent, ctx, **kw):
+        raise err
+
+    monkeypatch.setattr(service, "generate_review", _empty)
+
+    with pytest.raises(BackendError):
+        service.run_detached_review("agy", 5, repo="owner/repo", run_id=555)
+
+    assert _stub_pipeline.get("called") is not True  # no salvage post
+    patch = next(c for c in calls if c["method"] == "PATCH")
+    assert patch["body"]["conclusion"] in {"failure", "neutral"}
+
+
+def test_run_detached_salvages_timeout_content_but_stays_timed_out(
+    monkeypatch, _stub_pipeline
+):
+    """A TIMED-OUT agy run still emits truncated content before its marker — that is
+    salvaged too, but the funnel outcome stays `timed_out` (honest), not flipped."""
+    from shipit.review.backends.base import _TIMEOUT_MARKER
+
+    calls = _fake_checkrun_boundary(monkeypatch)
+    raw = f'{{"summary": {{"status": "COMMENT"... {_TIMEOUT_MARKER}'
+    err = BackendError(
+        f"agy timed out before returning a complete review\nraw output: …{raw}",
+        raw=raw,
+    )
+
+    def _timed(agent, ctx, **kw):
+        raise err
+
+    monkeypatch.setattr(service, "generate_review", _timed)
+
+    with pytest.raises(BackendError):
+        service.run_detached_review("agy", 5, repo="owner/repo", run_id=555)
+
+    assert _stub_pipeline["called"] is True  # content salvaged
+    patch = next(c for c in calls if c["method"] == "PATCH")
+    assert patch["body"]["conclusion"] == "timed_out"  # ...but outcome stays honest
+
+
+def test_run_detached_funnel_summary_carries_snippet_not_full_raw(
+    monkeypatch, _stub_pipeline
+):
+    """#75: the funnel check-run summary (a PR surface) carries only the snippet
+    from the `BackendError` message — never the full raw, which belongs in the file
+    sink. The full raw is salvaged to a comment + logged, but not dumped here."""
+    calls = _fake_checkrun_boundary(monkeypatch)
+    full_raw = "SECRET-FULL-RAW-" + "Z" * 5000
+    err = BackendError(
+        "the agent returned no parseable JSON\nraw output: SNIPPET-ONLY", raw=full_raw
+    )
+
+    def _unparseable(agent, ctx, **kw):
+        raise err
+
+    monkeypatch.setattr(service, "generate_review", _unparseable)
+
+    with pytest.raises(BackendError):
+        service.run_detached_review("agy", 5, repo="owner/repo", run_id=555)
+
+    patch = next(c for c in calls if c["method"] == "PATCH")
+    summary = patch["body"]["output"]["summary"]
+    assert "SNIPPET-ONLY" in summary  # the snippet from the message is carried
+    assert full_raw not in summary  # ...but never the full raw
+
+
+def test_run_detached_salvage_post_failure_does_not_mask_outcome(
+    monkeypatch, _stub_pipeline
+):
+    """The salvage post is BEST-EFFORT: if posting the salvage comment fails, the
+    funnel still records the degraded `empty` and the original `BackendError` still
+    propagates (the salvage never masks the real outcome)."""
+    calls = _fake_checkrun_boundary(monkeypatch)
+    err = BackendError("no parseable JSON\nraw output: <snip>", raw="some prose")
+
+    def _unparseable(agent, ctx, **kw):
+        raise err
+
+    def boom_post(*a, **k):
+        raise RuntimeError("salvage post 403")
+
+    monkeypatch.setattr(service, "generate_review", _unparseable)
+    monkeypatch.setattr(service.post, "post_review", boom_post)
+
+    with pytest.raises(BackendError):  # original error still propagates
+        service.run_detached_review("agy", 5, repo="owner/repo", run_id=555)
+
+    patch = next(c for c in calls if c["method"] == "PATCH")
+    assert patch["body"]["conclusion"] in {"failure", "neutral"}  # degraded recorded
 
 
 # --- OBS03-WS02: the terminal close stays BEST-EFFORT at the child boundary ---

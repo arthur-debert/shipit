@@ -36,6 +36,21 @@ JSON Schema:
   ]
 }"""
 
+# Appended ONLY for backends without native schema enforcement (agy): an emphatic
+# restatement that the ENTIRE response must be one complete, valid JSON object and
+# nothing else. agy has no `--output-schema`, so on a large diff it tends to emit
+# prose, markdown fences, or JSON truncated mid-object (the live #76 failure); this
+# reduces — does not eliminate — that. codex enforces the shape out of band and so
+# never sees this block.
+_JSON_VALIDITY_INSTRUCTION = """\
+CRITICAL OUTPUT REQUIREMENT: Your ENTIRE response must be a single, complete, \
+valid JSON object matching the schema above — and NOTHING else. Do not write any \
+prose, explanation, or markdown code fences (no ```) before, after, or around the \
+JSON. Do not stop early or truncate: every brace and bracket must be closed so the \
+output is syntactically valid JSON that a strict parser accepts on the first try. \
+If you have many findings, keep each comment concise rather than emitting an \
+incomplete object."""
+
 
 def build_prompt(instructions: str, diff: str, *, schema_inline: bool) -> str:
     """Compose the shared review prompt from ``instructions`` and a unified ``diff``.
@@ -70,6 +85,6 @@ Here is the unified diff to review:
 {diff}"""
 
     if schema_inline:
-        body = f"{body}\n\n{_SCHEMA_PROSE}"
+        body = f"{body}\n\n{_SCHEMA_PROSE}\n\n{_JSON_VALIDITY_INSTRUCTION}"
 
     return body

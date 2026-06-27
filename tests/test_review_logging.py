@@ -83,6 +83,42 @@ def test_post_as_app_never_logs_the_token(monkeypatch, caplog):
     assert "posting review to owner/repo#5" in full
 
 
+def test_parse_failure_logs_full_raw_not_just_snippet(caplog):
+    """#75: when an agent's output can't be parsed, the FULL raw stdout reaches the
+    `shipit.review` logger (the durable file-sink 'why'), while the `BackendError`
+    message — the PR-surface / terminal budget — keeps ONLY the head/tail snippet."""
+    import pytest
+
+    from shipit.review.backends import base
+
+    # > 2*_SNIPPET so the message would snippet it; unparseable so it raises.
+    raw = "A" * 500 + "MIDDLE-ONLY-IN-FULL-RAW" + "B" * 500
+    with caplog.at_level(logging.WARNING, logger="shipit.review"):
+        with pytest.raises(base.BackendError) as excinfo:
+            base.parse_review_output(raw, backend_name="agy")
+
+    logged = "\n".join(r.getMessage() for r in caplog.records)
+    assert raw in logged  # the FULL raw reached the logger / file sink
+    # The error message (-> check-run summary / PR surface) keeps only the snippet.
+    assert "MIDDLE-ONLY-IN-FULL-RAW" not in str(excinfo.value)
+    # ...and the full raw is attached to the error so the service can salvage it (#76).
+    assert excinfo.value.raw == raw
+
+
+def test_parse_success_logs_full_raw_at_debug(caplog):
+    """#75: a SUCCESSFUL parse still logs the full raw at DEBUG — the always-on audit
+    trail of what the agent actually emitted, durable in the file sink."""
+    from shipit.review.backends import base
+
+    raw = '{"summary": {"status": "COMMENT", "overall_feedback": "ok"}, "comments": []}'
+    with caplog.at_level(logging.DEBUG, logger="shipit.review"):
+        review = base.parse_review_output(raw, backend_name="agy")
+
+    assert review["summary"]["status"] == "COMMENT"
+    logged = "\n".join(r.getMessage() for r in caplog.records)
+    assert raw in logged
+
+
 def test_generate_review_logs_start_and_outcome(monkeypatch, caplog):
     class _FakeBackend:
         def preflight(self):
