@@ -82,8 +82,8 @@ def test_reviews_pending_only_waiting_reports():
     acts = RecordingActs()
     status = _status(
         TaskState.REVIEWS_PENDING,
-        "waiting on required review(s): copilot — wait (already requested on the "
-        "current head): copilot",
+        "waiting on required review(s): copilot — wait (already requested / in "
+        "flight on the current head): copilot",
     )
     dispatch(status, acts)
     assert acts.called == "report"

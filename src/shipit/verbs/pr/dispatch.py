@@ -107,7 +107,7 @@ def _only_waiting(status: TaskStatus) -> bool:
 
     The engine's `_reviews_pending_action` builds the next-action from up to
     three clauses — "request for the current head: …", "RE-REQUEST … : …", and
-    "wait (already requested on the current head): …". When the only clause is
+    "wait (already requested / in flight on the current head): …". When the only clause is
     the wait one, there is no reviewer to (re-)request and `pr next` reports
     waiting instead of poking a reviewer that is already mid-review. Keyed off
     the presence of the request/re-request verbs in the next-action text — the

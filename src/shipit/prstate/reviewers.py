@@ -13,7 +13,61 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from . import ghapi
-from .model import PullContext, ReviewFunnelCheck, ReviewLifecycle, Thread
+from .model import (
+    FunnelState,
+    PullContext,
+    ReviewFunnelCheck,
+    ReviewLifecycle,
+    Thread,
+)
+
+# How a reviewer's native `ReviewLifecycle` (the App-reviewer signal) folds into
+# the normalized `FunnelState` (ADR-0006). This is the App/native side of the
+# funnel: it has no check-run breadcrumb, so its whole funnel view comes from the
+# lifecycle. A local-agent reviewer overrides `funnel_state` to read its breadcrumb
+# instead (a posted review still short-circuits to POSTED there). `IN_PROGRESS`
+# only arises for the best-effort Gemini adapter (an "eyes" reaction); it maps to
+# IN_FLIGHT for uniformity, though Gemini is never a required/gating reviewer.
+_LIFECYCLE_TO_FUNNEL: dict[ReviewLifecycle, FunnelState] = {
+    ReviewLifecycle.DONE_CLEAN: FunnelState.POSTED,
+    ReviewLifecycle.DONE_COMMENTS: FunnelState.POSTED,
+    ReviewLifecycle.IN_PROGRESS: FunnelState.IN_FLIGHT,
+    ReviewLifecycle.REQUESTED: FunnelState.REQUESTED,
+    ReviewLifecycle.NOT_REQUESTED: FunnelState.NEVER_REQUESTED,
+}
+
+
+def _funnel_state_from_check(check: ReviewFunnelCheck) -> FunnelState:
+    """Normalize a local reviewer's OBS02/ADR-0005 check-run breadcrumb to a
+    `FunnelState` — the conclusion mapping ADR-0005 fixes.
+
+    A run that has not COMPLETED is still IN_FLIGHT (`status` is
+    ``in_progress`` / ``queued`` / ``waiting`` / ...). A completed run maps by
+    ``conclusion``:
+
+      * ``SUCCESS`` → POSTED (a review landed, incl. a clean zero-findings one);
+      * ``TIMED_OUT`` → TIMED_OUT (the producer recorded a timeout);
+      * ``NEUTRAL`` → EMPTY (the producer's *empty* non-delivery — nothing
+        parseable; ADR-0005's accepted ``neutral`` mapping, which lets THIS gate
+        tell empty apart from a hard failure WITHOUT the snapshot carrying the
+        check-run ``output`` text — see `shipit.review.service._FUNNEL_TERMINAL`);
+      * anything else terminal (``FAILURE`` / ``CANCELLED`` / ``STARTUP_FAILURE``
+        / ``ACTION_REQUIRED`` / ...) → FAILED.
+
+    EMPTY / FAILED / TIMED_OUT are all *settled + degraded* at the gate; they
+    differ only in the human-facing "why". WS03 adds the second path to TIMED_OUT:
+    an IN_FLIGHT run whose `started_at` has aged past the wait window.
+    """
+    if (check.status or "").upper() != "COMPLETED":
+        return FunnelState.IN_FLIGHT
+    conclusion = (check.conclusion or "").upper()
+    if conclusion == "SUCCESS":
+        return FunnelState.POSTED
+    if conclusion == "TIMED_OUT":
+        return FunnelState.TIMED_OUT
+    if conclusion == "NEUTRAL":
+        return FunnelState.EMPTY
+    return FunnelState.FAILED
 
 
 def _funnel_recency_key(check: ReviewFunnelCheck) -> datetime:
@@ -121,6 +175,28 @@ class ReviewerAdapter:
         request mechanism to withdraw from (no-op backends).
         """
         raise NotImplementedError
+
+    @property
+    def display_name(self) -> str:
+        """The name to SHOW a human for this reviewer (defaults to the registry
+        name). The local-agent adapters override it to their ``<agent>-local``
+        funnel name, so a degraded annotation reads ``codex-local failed`` (the
+        name the check run is published under), not the bare ``codex``."""
+        return self.name
+
+    def funnel_state(self, ctx: PullContext, lifecycle: ReviewLifecycle) -> FunnelState:
+        """This reviewer's normalized OBS04 funnel state (ADR-0006).
+
+        The App/native side: an App reviewer (Copilot / CodeRabbit / Gemini) has no
+        check-run breadcrumb, so its funnel view folds straight from the native
+        `ReviewLifecycle` the engine already computed (passed in so `detect` is not
+        re-run). The LOCAL-agent adapters override this to read their breadcrumb.
+
+        Kept behind the adapter interface so the engine normalizes EVERY reviewer
+        the same way — `status.reviewer_funnel[name].state` — without ever branching
+        on a reviewer's name.
+        """
+        return _LIFECYCLE_TO_FUNNEL[lifecycle]
 
     def funnel_check(self, ctx: PullContext) -> ReviewFunnelCheck | None:
         """This reviewer's OBS02/ADR-0005 funnel check-run breadcrumb, if any.
@@ -414,6 +490,49 @@ class _LocalReviewAdapter(ReviewerAdapter):
         of `shipit.review.checkrun.reviewer_name`, kept here so prstate reads the
         funnel without importing the optional `review` extra."""
         return f"{self.name}-local"
+
+    @property
+    def display_name(self) -> str:
+        # A local reviewer is shown under the name its check run is published as
+        # (`codex-local`), so a degraded annotation matches the PR's funnel run.
+        return self.funnel_reviewer_name()
+
+    def funnel_state(self, ctx: PullContext, lifecycle: ReviewLifecycle) -> FunnelState:
+        """A local-agent reviewer's funnel state, read from its breadcrumb (ADR-0006).
+
+        Two sources fold here, in priority order:
+
+          1. A POSTED review wins outright. If `detect` already found a counting
+             review by this bot (`lifecycle` is DONE), the review LANDED → POSTED,
+             regardless of the breadcrumb. This is the load-bearing
+             **provisioning-as-flake** path (ADR-0005/0006): a consumer whose review
+             App still lacks ``checks:write`` opens NO check run, but the review
+             *still posts* — so it reads POSTED → settled, never blocked. The salvage
+             COMMENT (#76) posts a real review too, so a content-but-unparseable run
+             also lands here as POSTED, not degraded.
+
+          2. Otherwise the check-run breadcrumb decides
+             (`_funnel_state_from_check`): in-flight / failed / empty / timed-out.
+
+        The genuinely-no-outcome case — NO breadcrumb AND no posted review — is, in
+        a pure snapshot, INDISTINGUISHABLE from never-requested (provisioning
+        failure leaves no artifact at all; ADR-0005 rejected comment markers, so
+        there is nothing else to read). It maps to NEVER_REQUESTED, which HOLDS at
+        reviews-pending with an actionable *request* next-step — NEVER a BLOCKED
+        terminal state. So "not provisioned" still never *blocks* the PR (ADR-0006's
+        load-bearing guarantee): the realistic unprovisioned run settles via path 1,
+        and the pathological double-failure (no breadcrumb AND no posted review)
+        holds-with-an-action rather than parking silently. Marking an ABSENT signal
+        as degraded would instead silently skip a reviewer that simply has not run
+        yet (breaking the start-the-loop story), so the engine does not — the
+        not-required-until-provisioned rollout gate (INS01) owns that residual.
+        """
+        if lifecycle in (ReviewLifecycle.DONE_CLEAN, ReviewLifecycle.DONE_COMMENTS):
+            return FunnelState.POSTED
+        check = self.funnel_check(ctx)
+        if check is None:
+            return FunnelState.NEVER_REQUESTED
+        return _funnel_state_from_check(check)
 
     def funnel_check(self, ctx: PullContext) -> ReviewFunnelCheck | None:
         """This local reviewer's funnel breadcrumb off `ctx.review_funnel`.
