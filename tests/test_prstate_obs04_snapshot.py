@@ -20,7 +20,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from conftest import DEFAULT_NOW, load_context
-from shipit.prstate.model import ReviewFunnelCheck
+from shipit.prstate.model import FunnelState, ReviewFunnelCheck
 from shipit.prstate.reviewers import by_name
 from shipit.prstate.state import ChecksState, ReviewLifecycle, evaluate
 
@@ -50,17 +50,22 @@ def test_fixed_now_plus_recorded_snapshot_is_deterministic(context):
     assert first == second
 
 
-def test_now_does_not_leak_into_the_decision(context):
-    """Two DIFFERENT injected "now"s carry through but (in WS01, "now" is not yet
-    consumed) leave the engine's verdict identical — proving "now" is an input the
-    engine carries, not something it branches on yet (WS03 will age the window)."""
-    early = load_context("local_funnel_failed_ci_green", now=DEFAULT_NOW)
-    late = load_context(
-        "local_funnel_failed_ci_green",
-        now=datetime(2030, 1, 1, tzinfo=timezone.utc),
+def test_now_ages_an_inflight_reviewer_past_its_window(context):
+    """WS03 consumes the injected "now": the SAME recorded snapshot reads an
+    in-flight reviewer IN_FLIGHT at a "now" within its wait window and TIMED_OUT at
+    one well past it — with no wall clock. The fixture's agy-local run is IN_PROGRESS
+    (started 00:25); at the fixture's own now (00:30, +5m) it holds, and at a now
+    decades later it has aged out. This is the whole point of the injected clock:
+    the window is a pure function of "now" and the run's `started_at`."""
+    within = evaluate(context("local_funnel_failed_ci_green"))  # now 00:30, +5m
+    past = evaluate(
+        load_context(
+            "local_funnel_failed_ci_green",
+            now=datetime(2030, 1, 1, tzinfo=timezone.utc),
+        )
     )
-    assert early.now != late.now
-    assert evaluate(early).to_dict() == evaluate(late).to_dict()
+    assert within.reviewer_funnel["agy"].state is FunnelState.IN_FLIGHT
+    assert past.reviewer_funnel["agy"].state is FunnelState.TIMED_OUT
 
 
 # --- funnel breadcrumbs are split out of the CI rollup ---------------------

@@ -66,11 +66,15 @@ def _ctx(funnel=None, codex_review=False, head="beef03"):
 
 
 def _codex_funnel(status, conclusion):
+    # started_at is 5m before the base fixture's now (00:30) — comfortably WITHIN
+    # the 20m default wait window, so an IN_PROGRESS breadcrumb HOLDS here (this
+    # suite owns the within-window verdict); WS03's own suite owns aging an
+    # in-flight run PAST the window into TIMED_OUT.
     return ReviewFunnelCheck(
         reviewer="codex-local",
         status=status,
         conclusion=conclusion,
-        started_at="2026-01-01T00:00:00Z",
+        started_at="2026-01-01T00:25:00Z",
     )
 
 
@@ -80,7 +84,8 @@ def _codex_funnel(status, conclusion):
 _MATRIX = [
     # never-requested: no breadcrumb, no review → holds, not degraded.
     ("never_requested", None, False, FunnelState.NEVER_REQUESTED, True, False),
-    # in-flight: an in_progress breadcrumb → holds (WS03 ages it past the window).
+    # in-flight WITHIN the window: an in_progress breadcrumb 5m old → holds. (WS03's
+    # own suite covers an in-flight run aged PAST the window → timed-out.)
     (
         "in_flight",
         ("IN_PROGRESS", None),
