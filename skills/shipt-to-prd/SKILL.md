@@ -1,6 +1,6 @@
 ---
 name: shipt-to-prd
-description: Turn the current conversation context into a PRD, write it to docs/prd/, and open an epic tracker issue that points to it. Use when user wants to create a PRD from the current context.
+description: Turn the current conversation context into a PRD — the authoritative feature spec — and write it to docs/prd/. Use when user wants to create a PRD from the current context.
 metadata:
     forked-from: https://github.com/mattpocock/skills (skills/engineering/to-prd)
 ---
@@ -18,11 +18,11 @@ A deep module (as opposed to a shallow module) is one which encapsulates a lot o
 
 Check with the user that these modules match their expectations. Check with the user which modules they want tests written for.
 
-3. Write the PRD using the template below. **The authoritative PRD is a file**, not an issue body:
+3. Write the PRD using the template below. **The PRD is the authoritative feature definition / spec** — the *what & why*. It is a file, not an issue body:
 
-   - Write it to `docs/prd/<epic-slug>.md`. This file is the single source of truth for the spec.
-   - Then open the **epic tracker issue**. The issue does NOT embed the full PRD — it links to the `docs/prd/` file and carries a short summary plus the execution topology (which Work Streams are parallelizable / their dependencies — this is execution detail that belongs in the issue, not the spec). Apply the `ready-for-agent` triage label — no need for additional triage.
-   - The epic code (`THEME+NN`, e.g. `GPU02`) is assigned by the human at epic creation. Use it in the issue title: `<REPO>-<EPIC>: Epic: <Epic Name>`.
+   - Write it to `docs/prd/<slug>.md`. This file is the single source of truth for the spec.
+   - That is the whole output of this skill. Do NOT open an epic tracker issue here. The **epic GitHub issue is an execution tracker** — it summarizes the PRD and points to it plus the relevant ADRs — and it is created later, in `/shipt-to-issues` (the issue-planning leg), not by this skill.
+   - The epic code (`THEME+NN`, e.g. `GPU02`) is assigned by the human, but it is used later in `/shipt-to-issues` when the epic issue is minted — not here.
 
 <prd-template>
 
