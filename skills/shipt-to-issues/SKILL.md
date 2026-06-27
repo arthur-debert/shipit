@@ -1,6 +1,6 @@
 ---
 name: shipt-to-issues
-description: Break a plan, spec, or PRD into independently-grabbable Work Streams on the project issue tracker using tracer-bullet vertical slices. Use when user wants to convert a plan into issues/work streams, create implementation tickets, or break down work.
+description: Break a PRD into one or more epic tracker issues plus independently-grabbable Work Stream sub-issues on the project issue tracker, using tracer-bullet vertical slices. Use when user wants to convert a plan/PRD into epics and work streams, create implementation tickets, or break down work.
 metadata:
     forked-from: https://github.com/mattpocock/skills (skills/engineering/to-issues)
 ---
@@ -14,15 +14,19 @@ The issue tracker and triage label vocabulary should have been provided to you �
 
 ### 1. Gather context
 
-Work from whatever is already in the conversation context. If the user passes an issue reference (issue number, URL, or path) as an argument, fetch it from the issue tracker and read its full body and comments. The parent is normally the **epic issue** produced by `/shipt-to-prd`, which links to the authoritative PRD in `docs/prd/`.
+Work from whatever is already in the conversation context. The authoritative source is the **PRD file in `docs/prd/`** (the feature spec — the *what & why*), produced by `/shipt-to-prd`. Read it in full, along with the ADRs it references. If the user passes a reference (PRD path, issue number, or URL) as an argument, fetch it and read it fully.
+
+This skill **creates the epic umbrella issue(s)** — do not assume one already exists. The epic issue is an **execution tracker** (PRD summary + pointers to the PRD/ADRs + the WS topology), not the spec; the PRD file stays authoritative. (`/shipt-to-prd` writes the PRD only; epic-issue creation lives here.)
 
 ### 2. Explore the codebase (optional)
 
 If you have not already explored the codebase, do so to understand the current state of the code. Issue titles and descriptions should use the project's domain glossary vocabulary (`CONTEXT.md`), and respect ADRs in the area you're touching.
 
-### 3. Draft the Work Streams (vertical slices)
+### 3. Draft the epic(s) and their Work Streams (vertical slices)
 
-Break the plan into **tracer bullet** Work Streams. Each WS is a thin vertical slice that cuts through ALL integration layers end-to-end, NOT a horizontal slice of one layer.
+First, settle the **epic decomposition**. One feature usually maps to a single epic, but it may split into a **list of epics** when a single mega-epic would be too large or slow to merge (e.g. `OBS01`→`OBS04`: one feature, several epics shipped in sequence). Default to one epic; propose more only when the size/merge argument is real. Each epic name (`THEME+NN`, e.g. `OBS04`) is assigned by the human; the WS codes under it are assigned here.
+
+Then, for each epic, break its slice of the plan into **tracer bullet** Work Streams. Each WS is a thin vertical slice that cuts through ALL integration layers end-to-end, NOT a horizontal slice of one layer.
 
 <work-stream-rules>
 - Each WS delivers a narrow but COMPLETE path through every layer (schema, API, UI, tests)
@@ -36,7 +40,7 @@ All Work Streams are AFK (implemented and merged by agents without mid-stream hu
 
 ### 4. Quiz the user
 
-Present the proposed breakdown as a numbered list. For each WS, show:
+Present the proposed breakdown as a numbered list, grouped under each epic. For each WS, show:
 
 - **Title**: short descriptive name
 - **Blocked by**: which other WS (if any) must complete first
@@ -44,24 +48,45 @@ Present the proposed breakdown as a numbered list. For each WS, show:
 
 Ask the user:
 
-- Does the granularity feel right? (too coarse / too fine)
+- Is the epic split right? (one epic vs. several — too coarse / too fine)
+- Does the WS granularity feel right? (too coarse / too fine)
 - Are the dependency relationships correct?
 - Should any WS be merged or split further?
 
-Iterate until the user approves the breakdown.
+Iterate until the user approves the breakdown. Before publishing, confirm the human-assigned epic code(s) (`THEME+NN`, e.g. `OBS04`) for every epic — do not invent one. Without a confirmed code there is no valid `<EPIC>` for the epic and WS titles.
 
-### 5. Publish the Work Streams to the issue tracker
+### 5. Publish the epic(s) and Work Streams to the issue tracker
 
-For each approved WS, publish a new issue to the issue tracker. Use the issue body template below. These are considered ready for AFK agents, so publish them with the correct triage label unless instructed otherwise.
+Work one epic at a time. For each approved epic:
 
-Make each WS issue a **sub-issue of the epic issue** (improves progress tracking in the GitHub UI). Publish in dependency order (blockers first) so you can reference real issue identifiers in the "Blocked by" field.
+**a. Create the epic umbrella issue first.** This is the **execution tracker**, not the spec — use the epic template below. Title: `<REPO>-<EPIC>: Epic: <Epic Name>`. It carries a summary of the PRD, pointers to the authoritative PRD (`docs/prd/…`) and the relevant ADRs, and the WS list/topology. Apply the correct triage label unless instructed otherwise.
 
-The WS code (`WSnn`, scoped per epic+repo) is assigned here; the epic code comes from the human. Use the identifier in the title: `<REPO>-<EPIC>-<WSnn>: Epic: <Epic Name> - Workstream: <WS Name>`.
+**b. Then publish its Work Streams** as sub-issues of that epic umbrella (formal sub-issue links improve progress tracking in the GitHub UI). Use the `<ws-template>` below. These are considered ready for AFK agents, so publish them with the correct triage label unless instructed otherwise. Publish in dependency order (blockers first) so you can reference real issue identifiers in the "Blocked by" field.
 
-<issue-template>
+The WS code (`WSnn`, scoped per epic+repo) is assigned here; the epic code comes from the human. Use the identifier in the WS title: `<REPO>-<EPIC>-<WSnn>: Epic: <Epic Name> - Workstream: <WS Name>`.
+
+If the decomposition produced **multiple epics**, repeat (a)+(b) for each — one umbrella per epic, with its own WS sub-issue tree.
+
+<epic-template>
+## Summary
+
+A short summary of the PRD — the *what & why*, enough to orient without opening the spec. This issue is an execution tracker, NOT the authoritative spec.
+
+## Spec
+
+- **PRD**: a reference to the authoritative feature PRD file read in step 1 (`docs/prd/<feature-slug>.md`). When one feature splits into several epics, every epic points at the same feature PRD.
+- **ADRs**: references to the relevant ADRs.
+
+## Work Streams
+
+The WS list and topology for this epic — each WS, and which WS it is blocked by (parallelizable vs. sequential). Sub-issues are linked below for progress tracking.
+
+</epic-template>
+
+<ws-template>
 ## Parent
 
-A reference to the epic issue on the issue tracker.
+A reference to the epic umbrella issue created in step 5a.
 
 ## What to build
 
@@ -81,6 +106,6 @@ Avoid specific file paths or code snippets — they go stale fast. Exception: if
 
 Or "None - can start immediately" if no blockers.
 
-</issue-template>
+</ws-template>
 
-Do NOT close or modify the parent epic issue.
+Do NOT close any epic umbrella issue you create — it stays open as the live execution tracker until its WS sub-issues all land.
