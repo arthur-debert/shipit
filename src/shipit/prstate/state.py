@@ -10,8 +10,11 @@ Two definitions anchor it (ADR-0006 redefines the first):
              posted / empty / failed / timed-out, NOT only "succeeded") + every
              thread from a POSTED review resolved. A reviewer that failed / came
              back empty / timed out settles NON-blocking and is surfaced as
-             *degraded* ("Ready (degraded: codex-local failed)"); only a
-             never-requested or in-flight reviewer still HOLDS the PR.
+             *degraded* ("Ready (degraded: codex-local failed)"); a reviewer
+             still HOLDS the PR only while never-requested or still pending —
+             requested or in-flight within its wait window (NEVER_REQUESTED,
+             REQUESTED, IN_FLIGHT); a past-window in-flight reviewer has already
+             aged to settled TIMED_OUT (WS03), so it no longer holds.
   Ready    = Reviewed + CI green + a merge state of CLEAN, or UNSTABLE while the
              CI rollup is already green (a transient ready_for_review re-queue
              lag; release#715). "Mergeable" here keys off `mergeStateStatus` — the
@@ -77,8 +80,10 @@ logger = logging.getLogger("shipit.prstate")
 
 # The funnel-state gate verdicts (ADR-0006). A required reviewer is SETTLED at any
 # recorded terminal outcome (POSTED *or* a degraded one), and HOLDS the PR only
-# while never-requested or in-flight. DEGRADED is the non-blocking subset of
-# settled — a recorded non-delivery that is surfaced loud but does not gate Ready.
+# while never-requested or still pending — requested or in-flight within its wait
+# window (a past-window in-flight reviewer has aged to settled TIMED_OUT, WS03).
+# DEGRADED is the non-blocking subset of settled — a recorded non-delivery that is
+# surfaced loud but does not gate Ready.
 _HOLDS = {
     FunnelState.NEVER_REQUESTED,
     FunnelState.REQUESTED,
