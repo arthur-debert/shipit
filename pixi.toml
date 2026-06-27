@@ -71,6 +71,13 @@ shipit = { path = ".", editable = true, extras = ["review"] }
 # creds + a canary PR), refuses to run without an explicit --repo/--pr. Run e.g.:
 #   pixi run -e review verify-funnel --repo arthur-debert/shipit-canary --pr <N>
 verify-funnel = "python -m shipit.review.funnel_verify"
+# Per-consumer App-liveness verification (INS01): is each local-agent reviewer App
+# installed on the target repo's owner with `checks: write`? A cheap read (mints the
+# App token + inspects granted permissions — NO check-run create). Needs Doppler App
+# creds + PyJWT (the `review` extra), so it lives here, off CI. Exits 0 (all live) / 1
+# (instruct), so a rollout can gate on it mechanically. Run e.g.:
+#   pixi run -e review verify-apps arthur-debert/shipit-canary
+verify-apps = "shipit verify-apps"
 
 [environments]
 lint = ["lint"]
