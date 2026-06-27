@@ -449,6 +449,7 @@ def _pr_body(
     decisions: list[Decision],
     override_before: dict[str, str],
     hooks_activated: bool | None,
+    seeded: list[str] | None = None,
 ) -> str:
     """The PR body: what was added/updated, and every override surfaced with its diff.
 
@@ -494,6 +495,14 @@ def _pr_body(
             lines.append("```")
             lines.append("</details>")
             lines.append("")
+    if seeded:
+        lines.append("### Policy seeded")
+        lines.append(
+            "Consumer-owned pr-flow policy in `.shipit.toml` (seed-if-absent — "
+            "existing entries are never clobbered, only absent ones are added):"
+        )
+        lines += [f"- `{s}`" for s in seeded]
+        lines.append("")
     if hooks_activated is True:
         lines.append("### Gate activated locally")
         lines.append(
@@ -554,11 +563,17 @@ def run(
 
     cfg_path = root / config.CONFIG_NAME
     pristine: dict[str, str] = {}
-    if cfg_path.is_file():
-        try:
+    # Seed-if-absent consumer policy (the App `[secrets]` mappings + the
+    # `[reviewers]` set) is CONSUMER-OWNED, not the hash-managed slow set: it is
+    # planned/applied alongside the manifest but never under the pristine-hash
+    # reconciliation (architecture.lex §6, issue #25).
+    seed_plan: list[str] = []
+    try:
+        if cfg_path.is_file():
             pristine = config.load_managed(config.load(cfg_path))
-        except config.ConfigError as exc:
-            print(f"install: ignoring unreadable manifest: {exc}", file=sys.stderr)
+        seed_plan = config.plan_policy_seed(cfg_path)
+    except config.ConfigError as exc:
+        print(f"install: ignoring unreadable manifest: {exc}", file=sys.stderr)
 
     decisions = plan(units, consumer_hashes, pristine)
     # ADD/UPDATE/OVERRIDE all write onto the branch; only NOOP writes nothing.
@@ -569,14 +584,20 @@ def run(
     for d in decisions:
         if d.action != NOOP:
             print(f"  {d.action:8} {d.unit.dest}")
-    if not writes:
+    for item in seed_plan:
+        print(f"  {'seed':8} {item}")
+    # A seed-only change (managed set current, policy missing) still warrants a PR,
+    # so a re-install picks up policy a consumer never had — but stays a no-op once
+    # the policy is in place.
+    if not writes and not seed_plan:
         print("  nothing to do — managed set is current.")
         return 0
 
     if dry_run:
         # Dry-run must have NO side effects: no writes, no git, no PR.
         print(
-            f"  ({len(writes)} to write, {len(overrides)} override(s)) — dry-run, nothing written"
+            f"  ({len(writes)} to write, {len(overrides)} override(s), "
+            f"{len(seed_plan)} policy seed(s)) — dry-run, nothing written"
         )
         return 0
 
@@ -589,6 +610,10 @@ def run(
     # version drops out of the manifest rather than lingering as a stale key.
     for d in writes:
         _write_unit(root, d.unit)
+    # Seed the consumer-owned policy BEFORE the manifest write, which preserves
+    # `[secrets]`/`[reviewers]` textually while it re-stamps `[shipit]`/`[managed]`.
+    if seed_plan:
+        config.apply_policy_seed(cfg_path)
     new_managed = {d.unit.key: d.desired_hash for d in decisions}
     config.write_manifest(cfg_path, version=_shipit_version(), managed=new_managed)
 
@@ -596,7 +621,9 @@ def run(
     # `pixi run lint` fires at commit time — the gate ships LIVE, not dormant.
     # Opportunistic, so a missing lefthook warns rather than aborting the PR.
     hooks_activated: bool | None = None
-    if activates_hooks(decisions):
+    # Only (re)activate when this install actually writes a managed unit; a
+    # seed-only change touches just `.shipit.toml` and leaves the live hooks alone.
+    if writes and activates_hooks(decisions):
         rc_hooks, out_hooks = activate(root)
         hooks_activated = rc_hooks == 0
         if hooks_activated:
@@ -640,7 +667,7 @@ def run(
         url = gh.pr_create(
             head=INSTALL_BRANCH,
             title="shipit: install/update the managed set",
-            body=_pr_body(decisions, override_before, hooks_activated),
+            body=_pr_body(decisions, override_before, hooks_activated, seed_plan),
             draft=True,
             cwd=cwd,
         )

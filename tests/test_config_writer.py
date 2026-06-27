@@ -2,6 +2,8 @@
 
 import tomllib
 
+import pytest
+
 from shipit import config
 
 
@@ -59,3 +61,77 @@ def test_write_manifest_replaces_prior_shipit_tables(tmp_path):
     assert config.load_managed(cfg) == {"a": "sha256:9"}
     # And only one [shipit] table exists.
     assert p.read_text().count("[shipit]") == 1
+
+
+# --------------------------------------------------------------------------
+# Seed-if-absent consumer policy ([secrets] App mappings + [reviewers] set)
+# --------------------------------------------------------------------------
+
+
+def test_plan_policy_seed_fresh_lists_secrets_and_reviewers(tmp_path):
+    p = tmp_path / ".shipit.toml"  # absent
+    seeded = config.plan_policy_seed(p)
+    assert "[reviewers]" in seeded
+    for name in config.SEEDED_APP_SECRETS:
+        assert f"[secrets].{name}" in seeded
+    # Pure: planning twice gives the same answer and writes nothing.
+    assert config.plan_policy_seed(p) == seeded
+    assert not p.exists()
+
+
+def test_apply_policy_seed_is_idempotent(tmp_path):
+    p = tmp_path / ".shipit.toml"
+    first = config.apply_policy_seed(p)
+    assert first  # something was seeded
+    # The seeded file is valid and carries both tables.
+    cfg = config.load(p)
+    assert {s.name for s in config.load_secrets(cfg)} == set(config.SEEDED_APP_SECRETS)
+    assert "reviewers" in cfg
+
+    again = config.apply_policy_seed(p)
+    assert again == []  # nothing left to seed
+    assert config.plan_policy_seed(p) == []
+
+
+def test_apply_policy_seed_merges_into_existing_secrets(tmp_path):
+    p = tmp_path / ".shipit.toml"
+    p.write_text(
+        '[secrets]\nMY = { env = "MY" }\nCODEX_REVIEW_APP_ID = { doppler = "CUSTOM" }\n'
+    )
+    seeded = config.apply_policy_seed(p)
+    # The already-present App secret is NOT re-seeded; the rest are.
+    assert "[secrets].CODEX_REVIEW_APP_ID" not in seeded
+
+    secrets = {s.name: s for s in config.load_secrets(config.load(p))}
+    assert secrets["MY"].kind == "env"  # consumer entry preserved
+    assert secrets["CODEX_REVIEW_APP_ID"].key == "CUSTOM"  # not clobbered
+    assert {
+        "CODEX_REVIEW_APP_PRIVATE_KEY",
+        "AGY_REVIEW_APP_PRIVATE_KEY",
+        "AGY_REVIEW_APP_ID",
+    } <= set(secrets)
+
+
+def test_apply_policy_seed_preserves_existing_reviewers(tmp_path):
+    p = tmp_path / ".shipit.toml"
+    p.write_text("[reviewers]\ncodex = {}\n")
+    seeded = config.apply_policy_seed(p)
+    # [reviewers] present → not reseeded; only the missing secrets are added.
+    assert "[reviewers]" not in seeded
+    assert config.load(p)["reviewers"] == {"codex": {}}
+
+
+def test_seeded_reviewers_resolve_to_required_set(tmp_path):
+    from shipit.prstate import reviewers_config as rcfg
+
+    p = tmp_path / ".shipit.toml"
+    config.apply_policy_seed(p)
+    override = rcfg.load_override(str(tmp_path))
+    assert rcfg.resolve_required_names(override) == ("copilot", "codex", "agy")
+
+
+def test_plan_policy_seed_raises_on_malformed(tmp_path):
+    p = tmp_path / ".shipit.toml"
+    p.write_text("this is = not valid = toml\n")
+    with pytest.raises(config.ConfigError):
+        config.plan_policy_seed(p)

@@ -319,6 +319,120 @@ def test_gh_failure_is_a_clean_nonzero_exit(tmp_path, monkeypatch, rec):
 
 
 # --------------------------------------------------------------------------
+# Seed-if-absent consumer policy — App [secrets] mappings + [reviewers] set
+# --------------------------------------------------------------------------
+
+
+def _secrets_by_name(root):
+    cfg = config.load(root / ".shipit.toml")
+    return {s.name: s for s in config.load_secrets(cfg)}
+
+
+def test_fresh_install_seeds_app_secret_mappings(tmp_path, rec):
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    rc = install.run(str(tmp_path))
+    assert rc == 0
+
+    secrets = _secrets_by_name(tmp_path)
+    for name in (
+        "CODEX_REVIEW_APP_PRIVATE_KEY",
+        "CODEX_REVIEW_APP_ID",
+        "AGY_REVIEW_APP_PRIVATE_KEY",
+        "AGY_REVIEW_APP_ID",
+    ):
+        assert name in secrets
+        # Each maps to its like-named Doppler key (matches shipit's own .shipit.toml).
+        assert secrets[name].kind == "doppler"
+        assert secrets[name].key == name
+    # The PR body announces the seed under its own section.
+    assert "### Policy seeded" in rec.pr_body
+    assert "[secrets].CODEX_REVIEW_APP_PRIVATE_KEY" in rec.pr_body
+
+
+def test_fresh_install_seeds_required_reviewer_set(tmp_path, rec):
+    from shipit.prstate import reviewers_config as rcfg
+
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    install.run(str(tmp_path))
+
+    # The seeded [reviewers] table requires all three — copilot + the codex/agy
+    # local-agent backends — matching shipit's own .shipit.toml.
+    override = rcfg.load_override(str(tmp_path))
+    assert rcfg.resolve_required_names(override) == ("copilot", "codex", "agy")
+
+
+def test_install_preserves_existing_secrets_and_reviewers(tmp_path, rec):
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    (tmp_path / ".shipit.toml").write_text(
+        "[secrets]\n"
+        'MY_TOKEN = { env = "MY_TOKEN" }\n'
+        # A consumer who deliberately points one App secret at a custom key must
+        # NOT be clobbered by the seed.
+        'CODEX_REVIEW_APP_ID = { doppler = "CUSTOM_KEY" }\n'
+        "\n[reviewers]\n"
+        "copilot = { rerun = true }\n"
+    )
+    rc = install.run(str(tmp_path))
+    assert rc == 0
+
+    secrets = _secrets_by_name(tmp_path)
+    # Consumer entries are left exactly as written.
+    assert secrets["MY_TOKEN"].kind == "env"
+    assert secrets["CODEX_REVIEW_APP_ID"].key == "CUSTOM_KEY"
+    # The absent App mappings are merged in alongside them.
+    assert "CODEX_REVIEW_APP_PRIVATE_KEY" in secrets
+    assert "AGY_REVIEW_APP_PRIVATE_KEY" in secrets
+    assert "AGY_REVIEW_APP_ID" in secrets
+    # The pre-existing [reviewers] table is untouched — not overwritten by the scaffold.
+    cfg = config.load(tmp_path / ".shipit.toml")
+    assert cfg["reviewers"] == {"copilot": {"rerun": True}}
+
+
+def test_reinstall_does_not_reseed_policy(tmp_path, rec):
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    install.run(str(tmp_path))
+    before = (tmp_path / ".shipit.toml").read_text()
+
+    rec.calls.clear()
+    rc = install.run(str(tmp_path))
+    assert rc == 0
+    # Clean no-op: no PR, and the policy text is byte-identical (not re-appended).
+    assert rec.calls == []
+    assert (tmp_path / ".shipit.toml").read_text() == before
+
+
+def test_install_reseeds_policy_when_missing_even_if_managed_current(tmp_path, rec):
+    # Simulate an older install (or a consumer who dropped the policy tables): the
+    # managed set is fully current but `[secrets]`/`[reviewers]` are absent.
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    install.run(str(tmp_path))
+    cfg_path = tmp_path / ".shipit.toml"
+    managed = config.load_managed(config.load(cfg_path))
+    cfg_path.write_text(config.dump_manifest("testhash", managed))  # policy stripped
+
+    rec.calls.clear()
+    rc = install.run(str(tmp_path))
+    assert rc == 0
+    # A seed-only change still opens a DRAFT PR (managed set NOOP, policy seeded)...
+    assert ("pr_create", True) in rec.calls
+    assert "### Policy seeded" in rec.pr_body
+    # ...but it does NOT claim to (re)activate the gate — no managed unit was written.
+    assert "### Gate activated locally" not in rec.pr_body
+    # ...and the policy is back in place.
+    secrets = _secrets_by_name(tmp_path)
+    assert "CODEX_REVIEW_APP_PRIVATE_KEY" in secrets
+    assert "reviewers" in config.load(cfg_path)
+
+
+def test_dry_run_does_not_seed_policy(tmp_path, rec):
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    rc = install.run(str(tmp_path), dry_run=True)
+    assert rc == 0
+    # No file written on a dry-run, so nothing is seeded.
+    assert not (tmp_path / ".shipit.toml").exists()
+
+
+# --------------------------------------------------------------------------
 # Gate activation — the lefthook.yml caller is turned LIVE, not just written
 # --------------------------------------------------------------------------
 
