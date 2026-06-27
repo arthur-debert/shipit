@@ -28,6 +28,7 @@ EXPECTED_JSON_FIELDS = {
     "mergeable",
     "cycles",
     "breaker",
+    "reviewer_funnel",  # OBS04-WS01: structured per-reviewer funnel data
 }
 
 

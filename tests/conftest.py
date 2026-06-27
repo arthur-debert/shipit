@@ -9,6 +9,7 @@ re-pointed to `shipit.prstate.*`.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -17,15 +18,26 @@ from shipit.prstate.model import PullContext
 
 FIXTURES = Path(__file__).parent / "prstate_fixtures"
 
+#: A FIXED injected "now" for the recorded-snapshot tests. The engine never calls
+#: a clock — it reads "now" off the snapshot (OBS04-WS01) — so a fixed value here
+#: makes every fixture deterministic. A fixture can override it with a top-level
+#: `now` (ISO-8601) field, and a test can pass `load_context(name, now=...)` to
+#: pin a wait-window relative to the funnel breadcrumb's `started_at`.
+DEFAULT_NOW = datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
 
-def load_context(name: str) -> PullContext:
+
+def load_context(name: str, now: datetime | None = None) -> PullContext:
     data = json.loads((FIXTURES / f"{name}.json").read_text())
+    if now is None:
+        raw_now = data.get("now")
+        now = datetime.fromisoformat(raw_now) if raw_now else DEFAULT_NOW
     return context_from_raw(
         meta=data["meta"],
         reviews_json=data.get("reviews", []),
         thread_nodes=data.get("threads", []),
         reactions=data.get("reactions", []),
         issue_comments=data.get("issue_comments", []),
+        now=now,
     )
 
 

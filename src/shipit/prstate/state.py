@@ -50,6 +50,17 @@ from .breakers import evaluate_breakers
 from .model import PullContext, ReviewLifecycle
 from .reviewers import REGISTRY, ReviewerAdapter, required_reviewers
 
+# --- ADR-0001 divergence (OBS04) -------------------------------------------
+# `prstate` is a VERBATIM copy of release-core's engine (ADR-0001: reuse by copy,
+# not dependency). The `TaskStatus` contract below is DELIBERATELY extended in
+# shipit — `reviewer_funnel` (structured per-reviewer funnel data) — beyond the
+# upstream shape. This is a recorded divergence, made so the OBS04 readiness
+# engine's downstream workstreams (WS02 gate, WS04 dispatcher) read STRUCTURE off
+# `TaskStatus` instead of substring-matching `next_action` prose. The divergence
+# is also recorded in `docs/adr/0001-reuse-release-core-by-copy.md`. WS01 only
+# CARRIES the data; the gate redefinition and the dispatcher rewrite are WS02/WS04.
+# ---------------------------------------------------------------------------
+
 #: The lifecycle engine's logger — a child of the package ``shipit`` logger, so
 #: it inherits the configured sinks. The resolved next-action decision (what
 #: ``pr next`` / ``pr status`` will report) is recorded here at DEBUG, so the
@@ -95,6 +106,27 @@ class ChecksState(StrEnum):
     FAILING = "failing"
 
 
+@dataclass(frozen=True)
+class ReviewerFunnel:
+    """Structured per-reviewer funnel signal carried on `TaskStatus`.
+
+    The OBS04 divergence's payload: it pairs the native `ReviewLifecycle` (what
+    `reviewers.py` `detect` resolves) with the OBS02/ADR-0005 funnel check-run
+    breadcrumb (`status` / `conclusion` / `started_at`), if the reviewer has one.
+    A local-agent reviewer carries both; an App/native reviewer carries only the
+    lifecycle (its check fields stay `None` — it sources the funnel from native
+    signals). WS02's gate and WS04's dispatcher read THIS instead of parsing
+    `next_action` text. WS01 carries the raw signal; the funnel-STATE
+    normalization (requested / in-flight / posted / failed / empty / timed-out)
+    and the wait-window ageing of `started_at` are WS02 / WS03.
+    """
+
+    lifecycle: ReviewLifecycle
+    check_status: str | None = None
+    check_conclusion: str | None = None
+    check_started_at: str | None = None
+
+
 @dataclass
 class TaskStatus:
     """The snapshot result: lifecycle position + the one next action."""
@@ -108,6 +140,12 @@ class TaskStatus:
     mergeable: str | None = None
     cycles: int = 0  # completed required-reviewer review rounds (raw count)
     breaker: str | None = None  # which stopping condition fired, if any
+    # ADR-0001 divergence (OBS04): structured per-reviewer funnel data so WS02's
+    # gate and WS04's dispatcher read structure, not `next_action` prose. Keyed by
+    # adapter name, same keys as `reviewers`. The `reviewers` map (name ->
+    # lifecycle string) is UNCHANGED for back-compat with current consumers; this
+    # is purely additive.
+    reviewer_funnel: dict[str, ReviewerFunnel] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -120,6 +158,15 @@ class TaskStatus:
             "mergeable": self.mergeable,
             "cycles": self.cycles,
             "breaker": self.breaker,
+            "reviewer_funnel": {
+                name: {
+                    "lifecycle": rf.lifecycle.value,
+                    "check_status": rf.check_status,
+                    "check_conclusion": rf.check_conclusion,
+                    "check_started_at": rf.check_started_at,
+                }
+                for name, rf in self.reviewer_funnel.items()
+            },
         }
 
 
@@ -200,6 +247,20 @@ def _evaluate(
     to_detect = {r.name: r for r in (*registry, *required)}.values()
     lifecycles = {r.name: r.detect(ctx) for r in to_detect}
     reviewers = {name: lc.value for name, lc in lifecycles.items()}
+    # Pair each reviewer's lifecycle with its OBS02 funnel breadcrumb (ADR-0005),
+    # asking the ADAPTER for the breadcrumb so the engine never branches on a
+    # reviewer's name. Local reviewers return their `review: <agent>-local` check
+    # run; App/native reviewers return None (lifecycle-only). This is the
+    # structured data WS02/WS04 consume in place of `next_action` prose.
+    reviewer_funnel = {}
+    for r in to_detect:
+        fc = r.funnel_check(ctx)
+        reviewer_funnel[r.name] = ReviewerFunnel(
+            lifecycle=lifecycles[r.name],
+            check_status=fc.status if fc else None,
+            check_conclusion=fc.conclusion if fc else None,
+            check_started_at=fc.started_at if fc else None,
+        )
     open_threads = len(ctx.open_threads())
     checks = classify_checks(ctx.checks)
     # The stopping rule counts rounds against the SAME required set the engine
@@ -219,6 +280,7 @@ def _evaluate(
         checks=checks,
         mergeable=ctx.mergeable,
         cycles=breaker.cycles,
+        reviewer_funnel=reviewer_funnel,
     )
 
     # 1. Required reviewers must all be done. Best-effort ones never gate. The
