@@ -337,3 +337,59 @@ def test_reviewer_run_options_rejects_non_table_value_loud(tmp_path):
     (tmp_path / ".shipit.toml").write_text('reviewers = ["copilot", "codex"]\n')
     with pytest.raises(RequiredReviewersConfigError, match="TABLE"):
         reviewers_config.reviewer_run_options("codex", str(tmp_path))
+
+
+# --- OBS04-WS03: the per-reviewer wait `window` override -------------------
+
+
+def test_reviewer_window_reads_and_normalizes_to_seconds(tmp_path):
+    # `window` is the OBS04-WS03 wait window: a duration string or bare seconds,
+    # resolved to whole SECONDS and threaded onto the snapshot. Only reviewers that
+    # set a window appear; the rest use the engine's 20m default.
+    (tmp_path / ".shipit.toml").write_text(
+        '[reviewers]\ncopilot = { window = "1800s" }\ncodex = { window = 600 }\n'
+    )
+    assert reviewers_config.reviewer_window(str(tmp_path)) == {
+        "copilot": 1800,
+        "codex": 600,
+    }
+
+
+def test_reviewer_window_omits_reviewers_without_one(tmp_path):
+    # A reviewer with no `window` is absent (the adapter applies the 20m default).
+    (tmp_path / ".shipit.toml").write_text(
+        '[reviewers]\ncopilot = { rerun = false }\ncodex = { window = "300s" }\n'
+    )
+    assert reviewers_config.reviewer_window(str(tmp_path)) == {"codex": 300}
+
+
+def test_reviewer_window_absent_config_is_empty(tmp_path):
+    # No `.shipit.toml` up the tree → {} (every reviewer uses the 20m default).
+    assert reviewers_config.reviewer_window(str(tmp_path)) == {}
+
+
+def test_reviewer_window_canonicalizes_the_key(tmp_path):
+    # A differently-cased reviewer key resolves to its canonical adapter name, so
+    # the map keys the SAME way the adapter reads it off the context.
+    (tmp_path / ".shipit.toml").write_text(
+        '[reviewers]\nCopilot = { window = "120s" }\n'
+    )
+    assert reviewers_config.reviewer_window(str(tmp_path)) == {"copilot": 120}
+
+
+def test_window_validated_loud_on_bad_input():
+    # A non-duration string, a non-positive value, and a boolean all fail loud at
+    # parse time — a bad window is a config error, never a silent default.
+    with pytest.raises(RequiredReviewersConfigError, match="window"):
+        reviewers_config._parse_override_value({"copilot": {"window": "soon"}})
+    with pytest.raises(RequiredReviewersConfigError, match="positive"):
+        reviewers_config._parse_override_value({"copilot": {"window": 0}})
+    with pytest.raises(RequiredReviewersConfigError, match="window"):
+        reviewers_config._parse_override_value({"copilot": {"window": True}})
+
+
+def test_reviewer_window_rejects_non_table_value_loud(tmp_path):
+    # TABLE-ONLY on every read path, the window resolver included.
+    (tmp_path / ".shipit.toml").write_text('reviewers = ["copilot"]\n')
+    with pytest.raises(RequiredReviewersConfigError, match="TABLE"):
+        reviewers_config.reviewer_window(str(tmp_path))

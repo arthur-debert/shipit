@@ -9,6 +9,7 @@ without touching the network.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import StrEnum
 
 
@@ -20,6 +21,44 @@ class ReviewLifecycle(StrEnum):
     IN_PROGRESS = "in_progress"
     DONE_CLEAN = "done_clean"  # finished, left no comments
     DONE_COMMENTS = "done_comments"  # finished, left comments
+
+
+class FunnelState(StrEnum):
+    """The ONE normalized funnel view per reviewer the OBS04 gate reads (ADR-0006).
+
+    The engine folds BOTH native reviewer signals (an App reviewer's
+    ``review_requested`` edge + its review object, via ``ReviewLifecycle``) AND the
+    OBS02/ADR-0005 check-run breadcrumb (a local-agent reviewer's
+    ``review: <agent>-local`` run) into this single per-reviewer state, read
+    uniformly across reviewer kinds. The mapping lives behind the adapter interface
+    (`ReviewerAdapter.funnel_state`), so the engine never branches on a reviewer's
+    name — it just asks each adapter for its funnel state and gates on the result.
+
+    The states split into three gate verdicts (OBS04-WS02):
+
+      * **holds** the PR at reviews-pending — ``NEVER_REQUESTED`` (start the loop)
+        and ``IN_FLIGHT`` (a review is legitimately coming; WS03 splits this into
+        within-window=holds vs past-window→``TIMED_OUT``). ``REQUESTED`` is the App
+        reviewer's pre-review hold (the request edge placed, no review yet).
+      * **settled, blocking-on-threads** — ``POSTED``: a review actually landed
+        (incl. a clean zero-findings review *and* a salvaged COMMENT); its threads
+        gate until resolved.
+      * **settled, NON-blocking + degraded** — ``FAILED`` / ``EMPTY`` /
+        ``TIMED_OUT``: a recorded terminal outcome that is NOT a delivered review.
+        It settles (does not hold Ready) but is surfaced loud as *degraded* so the
+        state is never silently "fine."
+
+    "Settled" is therefore *outcome-recorded*, not *review-succeeded*: every state
+    except the three holds is a recorded terminal outcome.
+    """
+
+    NEVER_REQUESTED = "never_requested"  # no signal at all → holds (start the loop)
+    REQUESTED = "requested"  # App request edge placed, no review yet → holds
+    IN_FLIGHT = "in_flight"  # a review is running → holds (WS03 ages the window)
+    POSTED = "posted"  # a review landed → settled, threads gate
+    FAILED = "failed"  # the run errored → settled, degraded (non-blocking)
+    EMPTY = "empty"  # nothing parseable returned → settled, degraded
+    TIMED_OUT = "timed_out"  # exceeded the wait window → settled, degraded
 
 
 @dataclass(frozen=True)
@@ -84,6 +123,32 @@ class Review:
     body: str
 
 
+@dataclass(frozen=True)
+class ReviewFunnelCheck:
+    """One OBS02/ADR-0005 funnel breadcrumb: the App-authored ``review: <reviewer>``
+    check run that stands in for the ``review_requested`` edge GitHub denies a
+    local-agent bot.
+
+    A local reviewer (``codex-local`` / ``agy-local``) has no native pre-post
+    signal, so shipit opens a check run named ``review: <reviewer>`` at kickoff
+    (``status=in_progress``, ``started_at=now``) and closes it to a terminal
+    ``conclusion`` at completion. This dataclass carries that run's RAW state off
+    the head commit's status rollup. The funnel-STATE normalization
+    (requested / in-flight / posted / failed / empty / timed-out) and the
+    wait-window ageing of ``started_at`` are OBS04-WS02 / WS03 — WS01 only carries
+    the breadcrumb so those workstreams read structure, not prose.
+
+    Field names/casing mirror the gh ``statusCheckRollup`` CheckRun node the run
+    arrives on: ``status`` (e.g. ``IN_PROGRESS`` / ``COMPLETED``), ``conclusion``
+    (``SUCCESS`` / ``FAILURE`` / ``TIMED_OUT`` / ``NEUTRAL`` / ...), ``startedAt``.
+    """
+
+    reviewer: str  # the funnel reviewer name, e.g. "codex-local"
+    status: str | None  # gh CheckRun status (COMPLETED ⇒ terminal; else in flight)
+    conclusion: str | None  # terminal conclusion, or None while in flight
+    started_at: str | None  # ISO-8601 tz-aware; WS03 ages the wait window against it
+
+
 @dataclass
 class PullContext:
     """Snapshot of all raw GitHub state the engine reads for one PR.
@@ -104,6 +169,19 @@ class PullContext:
     issue_comments: list[dict] = field(default_factory=list)  # Gemini bot comments
     requested_logins: list[str] = field(default_factory=list)
     checks: list[dict] = field(default_factory=list)  # gh statusCheckRollup entries
+    # The OBS02/ADR-0005 local-review funnel breadcrumbs: the App-authored
+    # `review: <reviewer>` check runs, lifted OUT of the CI `checks` rollup above
+    # at the build site so a failed `review: codex-local` run can never make the
+    # CI-checks gate (`classify_checks`) read FAILING — the two concerns ride the
+    # SAME `statusCheckRollup` on the wire but must not cross (see `fetch`). WS01
+    # carries the raw breadcrumbs; OBS04-WS02/WS03 normalize + age them.
+    review_funnel: list[ReviewFunnelCheck] = field(default_factory=list)
+    # Injected wall-clock "now" (tz-aware UTC). The engine is a pure, stateless
+    # function snapshot -> state and NEVER calls a clock itself; `gather()` stamps
+    # this at fetch time and a test/fixture supplies a FIXED value, so a recorded
+    # snapshot + a fixed "now" yields a deterministic state. WS01 only carries it;
+    # OBS04-WS03 reads it to age the per-reviewer wait window.
+    now: datetime | None = None
     # Per-reviewer rerun policy (name -> rerun flag), resolved from config at the
     # build site (`fetch`/the CLI). rerun=True means head-strict (re-review every
     # push); rerun=False (the DEFAULT for any reviewer absent here) means
@@ -111,6 +189,21 @@ class PullContext:
     # stale-after-push. The adapters read this to pick head-strict vs any-head
     # detection — keeping the policy data here, not a code branch per reviewer.
     reviewer_rerun: dict[str, bool] = field(default_factory=dict)
+    # Per-reviewer wait-window override in SECONDS (name -> seconds), resolved from
+    # the `[reviewers]` `window` option at the build site and threaded on here
+    # EXACTLY like `reviewer_rerun` — so the engine reads the window off the
+    # snapshot, never the filesystem. A reviewer ABSENT here uses the shipped 20m
+    # default (`reviewers.DEFAULT_WAIT_WINDOW`, applied by the adapter). OBS04-WS03
+    # ages an in-flight / requested-but-silent reviewer past this window into
+    # TIMED_OUT (settled + degraded). Empty in a light/skip context that never gates.
+    reviewer_window: dict[str, int] = field(default_factory=dict)
+    # The `review_requested` edge time per requested login (login -> ISO-8601
+    # tz-aware), sourced from the PR timeline's ReviewRequestedEvent at the build
+    # site. GraphQL `reviewRequests` carries NO timestamp, so this is where an App
+    # reviewer's request time — what WS03 ages its wait window against — lives. A
+    # LOCAL reviewer has no requested edge (it ages its check run's `started_at`
+    # instead) and so never appears here. Empty in a light/skip context.
+    requested_at: dict[str, str] = field(default_factory=dict)
 
     def reviews_on_head(self) -> list[Review]:
         """Reviews made against the current head — stale reviews don't count."""

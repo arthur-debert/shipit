@@ -1,0 +1,50 @@
+{
+  "now": "2026-01-01T00:30:00+00:00",
+  "meta": {
+    "number": 470,
+    "headRefOid": "beef02",
+    "isDraft": true,
+    "mergeable": "MERGEABLE",
+    "mergeStateStatus": "CLEAN",
+    "reviewRequests": [],
+    "statusCheckRollup": [
+      {
+        "__typename": "CheckRun",
+        "name": "ci / check",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      },
+      {
+        "__typename": "StatusContext",
+        "context": "license/cla",
+        "state": "SUCCESS"
+      },
+      {
+        "__typename": "CheckRun",
+        "name": "review: codex-local",
+        "status": "COMPLETED",
+        "conclusion": "FAILURE",
+        "startedAt": "2026-01-01T00:00:00Z"
+      },
+      {
+        "__typename": "CheckRun",
+        "name": "review: agy-local",
+        "status": "IN_PROGRESS",
+        "conclusion": null,
+        "startedAt": "2026-01-01T00:25:00Z"
+      }
+    ]
+  },
+  "reviews": [
+    {
+      "id": 9001,
+      "user": { "login": "Copilot" },
+      "state": "APPROVED",
+      "commit_id": "beef02",
+      "body": ""
+    }
+  ],
+  "threads": [],
+  "reactions": [],
+  "issue_comments": []
+}

@@ -28,6 +28,9 @@ EXPECTED_JSON_FIELDS = {
     "mergeable",
     "cycles",
     "breaker",
+    "reviewer_funnel",  # OBS04-WS01: structured per-reviewer funnel data
+    "degraded",  # OBS04-WS02: required reviewers settled non-success
+    "to_request",  # OBS04-WS04: structured REVIEWS_PENDING routing signal
 }
 
 
@@ -94,6 +97,38 @@ def test_status_text_renders_state_and_next_action(patched, capsys):
     out = capsys.readouterr().out
     assert "ready" in out
     assert "run `pr ready`" in out
+
+
+def test_status_text_annotates_degraded_on_the_state_line(capsys):
+    """A clean-but-degraded PR reports "ready (degraded: codex-local failed)" inline
+    on the state line AND on a dedicated degraded line (OBS04-WS02 / ADR-0006)."""
+    status = TaskStatus(
+        state=TaskState.READY,
+        next_action="run `pr ready`",
+        pr=42,
+        reviewers={"copilot": "done_clean", "codex": "not_requested"},
+        checks=ChecksState.GREEN,
+        mergeable="MERGEABLE",
+        degraded={"codex-local": "failed"},
+    )
+    status_verb._emit(status, as_json=False)
+    out = capsys.readouterr().out
+    assert "ready (degraded: codex-local failed)" in out
+    assert "degraded:   codex-local failed" in out
+
+
+def test_status_json_carries_the_structured_degraded_set(capsys):
+    """The degraded set rides the JSON surface as a structured map (name → why)."""
+    status = TaskStatus(
+        state=TaskState.READY,
+        next_action="run `pr ready`",
+        pr=42,
+        degraded={"codex-local": "timed_out"},
+    )
+    status_verb._emit(status, as_json=True)
+    assert json.loads(capsys.readouterr().out)["degraded"] == {
+        "codex-local": "timed_out"
+    }
 
 
 def test_status_explicit_pr_argument(patched, capsys):

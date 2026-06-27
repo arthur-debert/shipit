@@ -157,6 +157,7 @@ def test_next_request_act_requests_reviewer(patched_next, monkeypatch, capsys):
             next_action="waiting on required review(s): copilot — request for the current head: copilot",
             pr=ctx,
             reviewers={"copilot": "not_requested"},
+            to_request=["copilot"],
         ),
     )
     seen = {}
@@ -194,10 +195,11 @@ def test_next_request_act_skips_already_requested_reviewer(
             next_action=(
                 "waiting on required review(s): copilot, coderabbit — "
                 "request for the current head: copilot; "
-                "wait (already requested on the current head): coderabbit"
+                "wait (already requested / in flight on the current head): coderabbit"
             ),
             pr=ctx,
             reviewers={"copilot": "not_requested", "coderabbit": "requested"},
+            to_request=["copilot"],
         ),
     )
     selected = {}
@@ -216,6 +218,96 @@ def test_next_request_act_skips_already_requested_reviewer(
     assert "coderabbit" not in out.split("action:")[1].split("\n")[0]
 
 
+def test_next_request_act_excludes_in_flight_local_agent(
+    patched_next, monkeypatch, capsys
+):
+    """OBS04 convergence regression: a required LOCAL-agent reviewer genuinely
+    IN_FLIGHT (its `review: codex-local` check run still running) reads lifecycle
+    `not_requested` — a local agent has no native `review_requested` edge — so the
+    OLD lifecycle-based selection (`not_requested` ∉ skip) would re-poke it
+    mid-review. The act now consumes the engine's `to_request`, which EXCLUDES the
+    in-flight reviewer; only the genuinely never-requested copilot is selected and
+    reaches the helper."""
+    monkeypatch.setattr(
+        next_verb,
+        "required_reviewers",
+        lambda: [FakeAdapter("copilot"), FakeAdapter("codex")],
+    )
+    monkeypatch.setattr(
+        next_verb,
+        "evaluate",
+        lambda ctx, required: TaskStatus(
+            state=TaskState.REVIEWS_PENDING,
+            next_action=(
+                "waiting on required review(s): copilot, codex — "
+                "request for the current head: copilot; "
+                "wait (already requested / in flight on the current head): codex"
+            ),
+            pr=ctx,
+            # codex's detached run is in-flight, but its lifecycle reads
+            # not_requested (no requested edge) — the OLD selection would pick it.
+            reviewers={"copilot": "not_requested", "codex": "not_requested"},
+            # the engine already excluded the in-flight codex; only copilot needs it.
+            to_request=["copilot"],
+        ),
+    )
+    selected = {}
+
+    def fake_request(pr, adapters, *, force):
+        selected["names"] = [a.name for a in adapters]
+        return _fake_request_result([a.name for a in adapters])
+
+    monkeypatch.setattr(next_verb, "request_reviewers", fake_request)
+    rc = cli.main(["pr", "next"])
+    assert rc == 0
+    # Only the never-requested reviewer reached the helper — codex was NOT re-poked.
+    assert selected["names"] == ["copilot"]
+    out = capsys.readouterr().out
+    assert "requested review(s): copilot" in out
+    assert "codex" not in out.split("action:")[1].split("\n")[0]
+
+
+def test_next_request_act_selects_never_requested_and_stale(
+    patched_next, monkeypatch, capsys
+):
+    """The act selects EVERY name the engine placed in `to_request` — both a
+    never-requested reviewer and a stale-after-push (RE-REQUEST) one. At the act
+    seam both read lifecycle `not_requested`; the engine's `to_request` is the
+    authority, so both reach the helper."""
+    monkeypatch.setattr(
+        next_verb,
+        "required_reviewers",
+        lambda: [FakeAdapter("copilot"), FakeAdapter("coderabbit")],
+    )
+    monkeypatch.setattr(
+        next_verb,
+        "evaluate",
+        lambda ctx, required: TaskStatus(
+            state=TaskState.REVIEWS_PENDING,
+            next_action=(
+                "waiting on required review(s): copilot, coderabbit — "
+                "request for the current head: copilot; "
+                "RE-REQUEST for the current head (a prior review is stale after a "
+                "push): coderabbit"
+            ),
+            pr=ctx,
+            reviewers={"copilot": "not_requested", "coderabbit": "not_requested"},
+            to_request=["copilot", "coderabbit"],
+        ),
+    )
+    selected = {}
+
+    def fake_request(pr, adapters, *, force):
+        selected["names"] = [a.name for a in adapters]
+        return _fake_request_result([a.name for a in adapters])
+
+    monkeypatch.setattr(next_verb, "request_reviewers", fake_request)
+    rc = cli.main(["pr", "next"])
+    assert rc == 0
+    assert selected["names"] == ["copilot", "coderabbit"]
+    assert "requested review(s): copilot, coderabbit" in capsys.readouterr().out
+
+
 def test_next_request_act_dropped_edge_is_error(patched_next, monkeypatch, capsys):
     """A silently-dropped request edge (#614) → non-zero exit, named in stderr."""
     monkeypatch.setattr(
@@ -229,6 +321,7 @@ def test_next_request_act_dropped_edge_is_error(patched_next, monkeypatch, capsy
             next_action="waiting on required review(s): copilot — request for the current head: copilot",
             pr=ctx,
             reviewers={"copilot": "not_requested"},
+            to_request=["copilot"],
         ),
     )
     from shipit.verbs.pr._request import RequestResult, ReviewerOutcome

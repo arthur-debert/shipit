@@ -20,12 +20,17 @@ from shipit.prstate.reviewers import CopilotAdapter
 
 
 def _graphql_page(
-    review_requests: list[dict], threads: list[dict] | None = None
+    review_requests: list[dict],
+    threads: list[dict] | None = None,
+    timeline: list[dict] | None = None,
 ) -> dict:
     return {
         "repository": {
             "pullRequest": {
                 "reviewRequests": {"nodes": review_requests},
+                # The ReviewRequestedEvent timeline (WS03): the request-edge times
+                # the App reviewer's wait window ages against.
+                "timelineItems": {"nodes": timeline or []},
                 "reviewThreads": {
                     "pageInfo": {"hasNextPage": False, "endCursor": None},
                     "nodes": threads or [],
@@ -35,7 +40,7 @@ def _graphql_page(
     }
 
 
-def _wire(monkeypatch, review_requests: list[dict]):
+def _wire(monkeypatch, review_requests: list[dict], timeline: list[dict] | None = None):
     monkeypatch.setattr(fetch.ghapi, "repo_slug", lambda: ("owner", "repo"))
     monkeypatch.setattr(
         fetch.ghapi,
@@ -52,7 +57,9 @@ def _wire(monkeypatch, review_requests: list[dict]):
         },
     )
     monkeypatch.setattr(
-        fetch.ghapi, "graphql", lambda query, **vars: _graphql_page(review_requests)
+        fetch.ghapi,
+        "graphql",
+        lambda query, **vars: _graphql_page(review_requests, timeline=timeline),
     )
     monkeypatch.setattr(fetch.ghapi, "rest", lambda *args, **kwargs: [])
 
@@ -85,6 +92,29 @@ def test_no_pending_requests_reads_not_requested(monkeypatch):
     ctx = fetch.gather(558)
     assert ctx.requested_logins == []
     assert CopilotAdapter().detect(ctx) is ReviewLifecycle.NOT_REQUESTED
+
+
+def test_review_requested_edge_time_carried_for_the_app_wait_window(monkeypatch):
+    # WS03: the App reviewer's `review_requested` edge time comes from the timeline
+    # (GraphQL `reviewRequests` has none), keyed by login. The LATEST event per login
+    # wins — a re-request supersedes an earlier one — so the current edge's age is
+    # what the wait window measures.
+    _wire(
+        monkeypatch,
+        [{"requestedReviewer": {"login": "Copilot"}}],
+        timeline=[
+            {
+                "createdAt": "2026-01-01T00:00:00Z",
+                "requestedReviewer": {"login": "Copilot"},
+            },
+            {
+                "createdAt": "2026-01-01T00:10:00Z",
+                "requestedReviewer": {"login": "Copilot"},
+            },
+        ],
+    )
+    ctx = fetch.gather(558)
+    assert ctx.requested_at == {"Copilot": "2026-01-01T00:10:00Z"}
 
 
 # --- the light skip-decision fetch (release#852) ----------------------------

@@ -1,0 +1,31 @@
+{
+  "now": "2026-01-01T00:30:00+00:00",
+  "meta": {
+    "number": 480,
+    "headRefOid": "beef03",
+    "isDraft": true,
+    "mergeable": "MERGEABLE",
+    "mergeStateStatus": "CLEAN",
+    "reviewRequests": [],
+    "statusCheckRollup": [
+      {
+        "__typename": "CheckRun",
+        "name": "ci / check",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      }
+    ]
+  },
+  "reviews": [
+    {
+      "id": 9101,
+      "user": { "login": "Copilot" },
+      "state": "APPROVED",
+      "commit_id": "beef03",
+      "body": ""
+    }
+  ],
+  "threads": [],
+  "reactions": [],
+  "issue_comments": []
+}

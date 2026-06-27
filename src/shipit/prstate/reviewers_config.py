@@ -21,9 +21,16 @@ the map KEYS are the required reviewers (all must be DONE to flip Ready). The
 options:
 
   * `rerun` (bool, default **False**) — whether the reviewer re-reviews every
-    new head (consumed now by the engine).
-  * `model` / `instructions` — parsed + validated now but RESERVED for the
-    deferred local-agent review step; they do not affect this epic's behaviour.
+    new head (consumed by the engine).
+  * `window` (duration, default **20m**) — the per-reviewer readiness wait
+    window (OBS04-WS03): how long the engine waits for an in-flight review to
+    ARRIVE before ageing it to *timed-out* → settled. Threaded onto the snapshot
+    via `reviewer_window`.
+  * `timeout` (duration) — the agent-execution cap on a local review's model
+    RUN; distinct from `window` (arrival deadline vs run cap). Consumed by the
+    local-agent review path, not the engine.
+  * `model` / `instructions` — free-form strings consumed by the local-agent
+    review RUN path (`reviewer_run_options`); they do not affect the engine gate.
 
 The `[reviewers]` value is TABLE-ONLY: a list/array form (`reviewers =
 ["copilot", "codex"]`) is REJECTED loud, not silently accepted. The required
@@ -64,13 +71,17 @@ DEFAULT_REVIEWERS: dict[str, bool] = {"copilot": False}
 OVERRIDE_FILE = ".shipit.toml"
 OVERRIDE_KEY = "reviewers"
 
-# The per-reviewer options that are accepted. `rerun` gates re-review; `model`,
-# `instructions`, and `timeout` are consumed by the local-agent review RUN path
-# (read via `reviewer_run_options`). `model`/`instructions` are free-form strings;
-# `timeout` is a duration validated + normalized here. An option not listed here
-# fails loud.
+# The per-reviewer options that are accepted. `rerun` gates re-review; `window` is
+# the OBS04-WS03 wait window (the uniform readiness deadline the engine ages an
+# in-flight reviewer against); `model`, `instructions`, and `timeout` are consumed
+# by the local-agent review RUN path (read via `reviewer_run_options`).
+# `model`/`instructions` are free-form strings; `timeout` and `window` are durations
+# validated + normalized here. `window` and `timeout` are DISTINCT concepts: `window`
+# is how long the engine waits for a review to ARRIVE before timing it out, `timeout`
+# is the agent-execution cap on a local review's model RUN. An option not listed
+# here fails loud.
 _RESERVED_OPTIONS = ("model", "instructions")
-_KNOWN_OPTIONS = ("rerun", "timeout", *_RESERVED_OPTIONS)
+_KNOWN_OPTIONS = ("rerun", "timeout", "window", *_RESERVED_OPTIONS)
 
 
 class RequiredReviewersConfigError(RuntimeError):
@@ -228,18 +239,20 @@ def _parse_options(name: str, opts: object) -> bool:
         raise RequiredReviewersConfigError(
             f"{OVERRIDE_FILE} `{OVERRIDE_KEY}.{name}` has unknown option(s) "
             f"{unknown} — supported options are {sorted(_KNOWN_OPTIONS)} "
-            "(`rerun` gates re-review; `model`/`instructions`/`timeout` are read "
-            "by the local-agent run path)"
+            "(`rerun` gates re-review; `window` is the readiness wait window; "
+            "`model`/`instructions`/`timeout` are read by the local-agent run path)"
         )
     for field in _RESERVED_OPTIONS:
         if field in opts and not isinstance(opts[field], str):
             raise RequiredReviewersConfigError(
                 f"{OVERRIDE_FILE} `{OVERRIDE_KEY}.{name}.{field}` must be a string"
             )
-    # `timeout` is validated here too (loud on bad input) so a malformed duration
-    # is caught at config-parse time, not only on the run path.
+    # `timeout` / `window` are validated here too (loud on bad input) so a malformed
+    # duration is caught at config-parse time, not only on the run/gate path.
     if "timeout" in opts:
-        _normalize_timeout(name, opts["timeout"])
+        _duration_seconds(name, "timeout", opts["timeout"])
+    if "window" in opts:
+        _duration_seconds(name, "window", opts["window"])
     rerun = opts.get("rerun", False)
     if not isinstance(rerun, bool):
         raise RequiredReviewersConfigError(
@@ -248,18 +261,18 @@ def _parse_options(name: str, opts: object) -> bool:
     return rerun
 
 
-def _normalize_timeout(name: str, value: object) -> str:
-    """Validate a per-reviewer `timeout` and normalize it to a duration string.
+def _duration_seconds(name: str, field: str, value: object) -> int:
+    """Validate a per-reviewer duration option (`timeout` / `window`) → whole seconds.
 
     Accepts a positive integer (seconds) or a string of digits optionally suffixed
-    with `s` (e.g. `600` or `600s`); returns the canonical `<N>s` form the backend
-    passes straight to the agent CLI. A bool, a non-positive value, or any other
-    shape fails LOUD — a bad timeout is a config error, never a silent default.
-    `bool` is an `int` subclass, so it is rejected explicitly (a `timeout = true`
-    is never "1 second")."""
+    with `s` (e.g. `600` or `600s`). A bool, a non-positive value, or any other
+    shape fails LOUD — a bad duration is a config error, never a silent default.
+    `bool` is an `int` subclass, so it is rejected explicitly (a `window = true` is
+    never "1 second"). `field` names the offending option in the error so the same
+    core serves both `timeout` and `window`."""
     if isinstance(value, bool):
         raise RequiredReviewersConfigError(
-            f"{OVERRIDE_FILE} `{OVERRIDE_KEY}.{name}.timeout` must be a duration "
+            f"{OVERRIDE_FILE} `{OVERRIDE_KEY}.{name}.{field}` must be a duration "
             f"like `600s` or a positive integer of seconds, not a boolean"
         )
     if isinstance(value, int):
@@ -269,21 +282,27 @@ def _normalize_timeout(name: str, value: object) -> str:
         core = text[:-1] if text.endswith("s") else text
         if not core.isdigit():
             raise RequiredReviewersConfigError(
-                f"{OVERRIDE_FILE} `{OVERRIDE_KEY}.{name}.timeout` must be a duration "
+                f"{OVERRIDE_FILE} `{OVERRIDE_KEY}.{name}.{field}` must be a duration "
                 f"like `600s` or a positive integer of seconds, got {value!r}"
             )
         seconds = int(core)
     else:
         raise RequiredReviewersConfigError(
-            f"{OVERRIDE_FILE} `{OVERRIDE_KEY}.{name}.timeout` must be a duration "
+            f"{OVERRIDE_FILE} `{OVERRIDE_KEY}.{name}.{field}` must be a duration "
             f"like `600s` or a positive integer of seconds, got {value!r}"
         )
     if seconds <= 0:
         raise RequiredReviewersConfigError(
-            f"{OVERRIDE_FILE} `{OVERRIDE_KEY}.{name}.timeout` must be positive, "
+            f"{OVERRIDE_FILE} `{OVERRIDE_KEY}.{name}.{field}` must be positive, "
             f"got {value!r}"
         )
-    return f"{seconds}s"
+    return seconds
+
+
+def _normalize_timeout(name: str, value: object) -> str:
+    """Validate a per-reviewer `timeout` and normalize it to the canonical `<N>s`
+    duration string the backend passes straight to the agent CLI."""
+    return f"{_duration_seconds(name, 'timeout', value)}s"
 
 
 def _find_config(start: str | None = None) -> Path | None:
@@ -387,6 +406,47 @@ def reviewer_run_options(name: str, root: str | None = None) -> dict[str, str]:
         if not expanded.is_absolute():
             expanded = config.parent / expanded
         out["instructions"] = str(expanded)
+    return out
+
+
+def reviewer_window(root: str | None = None) -> dict[str, int]:
+    """Per-reviewer wait-window override in SECONDS (name -> seconds), read from the
+    `[reviewers]` table's `window` option.
+
+    The OBS04-WS03 uniform wait window: the readiness deadline the engine ages an
+    in-flight / requested-but-silent reviewer against (ADR-0006). This returns ONLY
+    reviewers that set a `window`; a reviewer absent here uses the engine's shipped
+    20m default (`reviewers.DEFAULT_WAIT_WINDOW`), applied by the adapter — so a slow
+    backend gets more room without loosening it for everyone. `window` is DISTINCT
+    from the per-run `timeout` (the agent-execution cap on a local review's model
+    run); a reviewer may set either, both, or neither.
+
+    Threaded onto `PullContext.reviewer_window` at the build site (`fetch.gather`),
+    exactly like `reviewer_rerun`, so the engine reads the window off the snapshot
+    and never the filesystem. Mirrors `reviewer_run_options`' read shape — the one
+    in-process `tomllib` seam, re-read at the build site (no separate cache: `gather`
+    reads it once per command, unlike the `evaluate`-path rerun cache). An absent
+    config or `[reviewers]` table → `{}`. A present-but-non-table `reviewers` value
+    fails loud here too, on every read path (not only the gating one)."""
+    config = _find_config(root)
+    if config is None:
+        return {}
+    try:
+        with config.open("rb") as fh:
+            cfg = tomllib.load(fh)
+    except tomllib.TOMLDecodeError as exc:
+        raise RequiredReviewersConfigError(f"malformed {config}: {exc}") from None
+    value = cfg.get(OVERRIDE_KEY)
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        # TABLE-ONLY, enforced on every read path (cf. `reviewer_run_options`).
+        _parse_override_value(value)
+    out: dict[str, int] = {}
+    for key, opts in value.items():
+        if not isinstance(opts, dict) or "window" not in opts:
+            continue
+        out[_canonical_name(key)] = _duration_seconds(key, "window", opts["window"])
     return out
 
 

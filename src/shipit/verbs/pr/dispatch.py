@@ -21,9 +21,12 @@ The mapping is the PRD's "`pr next` behavior" table (prf01-pr-flow.md):
 The split that keeps this a deep module: :func:`dispatch` decides WHICH act and
 with WHAT message from the (already-computed) `TaskStatus`; the `Acts` boundary
 decides HOW to carry it out (talk to `gh`). The decision never branches on a
-reviewer's name and never touches the network — it reads the state the engine
-already settled and routes to one act. Swapping a real `Acts` for a fake is the
-whole test seam.
+reviewer's name and never touches the network — it reads the STRUCTURED state the
+engine already settled (the lifecycle `TaskState`, and for REVIEWS_PENDING the
+`to_request` set of required reviewers needing a (re-)request) and routes to one
+act. It does NOT parse the human-facing `next_action` prose: a wording change to
+that text cannot re-route the dispatcher (OBS04-WS04, absorbing #24.1). Swapping a
+real `Acts` for a fake is the whole test seam.
 """
 
 from __future__ import annotations
@@ -81,44 +84,27 @@ def dispatch(status: TaskStatus, acts: Acts) -> str:
     state = status.state
 
     if state is TaskState.REVIEWS_PENDING:
-        # request/re-request the pending reviewers, UNLESS they are already
-        # requested / in-progress on the head (then there is nothing to do but
-        # wait). The engine already encoded that distinction in next_action: a
-        # "wait (already requested ...)" with no request/re-request clause means
-        # every pending reviewer is mid-flight. Routing on that keeps the
-        # dispatcher reading the engine's decision rather than re-deriving it.
-        if _only_waiting(status):
-            return acts.report(status)
-        return acts.request_review(status)
+        # Route on the engine's STRUCTURED decision, not next_action prose (#24.1):
+        # `status.to_request` lists the required reviewers whose funnel state says
+        # they need a (re-)request now (NEVER_REQUESTED — never asked, or a prior
+        # review staled by a push). When it is non-empty there is a reviewer to
+        # (re-)request; when it is empty every holding reviewer is in-flight within
+        # its window (REQUESTED / IN_FLIGHT — WS03 already aged any past-window one
+        # into a settled TIMED_OUT, which would not hold here at all), so the only
+        # act is to wait. A wording change to next_action cannot re-route this.
+        if status.to_request:
+            return acts.request_review(status)
+        return acts.report(status)
 
     if state is TaskState.READY:
+        # Flip draft→ready. A degraded set (required reviewers settled non-success)
+        # does NOT block the flip — the engine already let a degraded-but-otherwise
+        # -ready PR reach READY (ADR-0006); the dispatcher just hands it off.
         return acts.flip_ready(status)
 
     # no_pr, addressing, reviewed, validating, blocked — all report-only. The
     # engine's next_action already carries the right human-language instruction
     # (create a draft PR / triage open threads / re-check mergeability / wait for
-    # CI / the real blocker), so the report act just surfaces it.
+    # CI / the real blocker), so the report act just surfaces it. The STATE drives
+    # this routing; the prose is only what `report` echoes, never a routing key.
     return acts.report(status)
-
-
-def _only_waiting(status: TaskStatus) -> bool:
-    """True when every pending required reviewer is already requested/in-progress
-    on the head — i.e. the act is to WAIT, not to (re-)request.
-
-    The engine's `_reviews_pending_action` builds the next-action from up to
-    three clauses — "request for the current head: …", "RE-REQUEST … : …", and
-    "wait (already requested on the current head): …". When the only clause is
-    the wait one, there is no reviewer to (re-)request and `pr next` reports
-    waiting instead of poking a reviewer that is already mid-review. Keyed off
-    the presence of the request/re-request verbs in the next-action text — the
-    engine's own words — rather than re-inspecting reviewer lifecycles here, so
-    the dispatcher stays a thin routing decision over the engine's output.
-    """
-    # Case-insensitive: the next-action text is human-facing prose, so match its
-    # request/re-request verbs regardless of the engine's casing.
-    action = status.next_action.lower()
-    return (
-        "wait (already requested" in action
-        and "request for the current head:" not in action
-        and "re-request for the current head" not in action
-    )

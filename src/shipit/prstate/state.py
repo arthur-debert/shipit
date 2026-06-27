@@ -5,8 +5,16 @@
 (it *reports* READY; the caller does the draft->ready flip) and never branches
 on a reviewer's name — it consumes the adapter interface only.
 
-Two definitions anchor it:
-  Reviewed = every required reviewer done + every thread resolved.
+Two definitions anchor it (ADR-0006 redefines the first):
+  Reviewed = every required reviewer SETTLED (a recorded terminal funnel outcome —
+             posted / empty / failed / timed-out, NOT only "succeeded") + every
+             thread from a POSTED review resolved. A reviewer that failed / came
+             back empty / timed out settles NON-blocking and is surfaced as
+             *degraded* ("Ready (degraded: codex-local failed)"); a reviewer
+             still HOLDS the PR only while never-requested or still pending —
+             requested or in-flight within its wait window (NEVER_REQUESTED,
+             REQUESTED, IN_FLIGHT); a past-window in-flight reviewer has already
+             aged to settled TIMED_OUT (WS03), so it no longer holds.
   Ready    = Reviewed + CI green + a merge state of CLEAN, or UNSTABLE while the
              CI rollup is already green (a transient ready_for_review re-queue
              lag; release#715). "Mergeable" here keys off `mergeStateStatus` — the
@@ -47,8 +55,21 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 
 from .breakers import evaluate_breakers
-from .model import PullContext, ReviewLifecycle
+from .model import FunnelState, PullContext, ReviewLifecycle
 from .reviewers import REGISTRY, ReviewerAdapter, required_reviewers
+
+# --- ADR-0001 divergence (OBS04) -------------------------------------------
+# `prstate` is a VERBATIM copy of release-core's engine (ADR-0001: reuse by copy,
+# not dependency). The `TaskStatus` contract below is DELIBERATELY extended in
+# shipit — `reviewer_funnel` (structured per-reviewer funnel data, incl. the WS02
+# normalized `FunnelState`) and `degraded` (required reviewers settled non-success)
+# — beyond the upstream shape. This is a recorded divergence, made so the OBS04
+# readiness engine's downstream workstreams (WS02 gate, WS04 dispatcher) read
+# STRUCTURE off `TaskStatus` instead of substring-matching `next_action` prose. The
+# divergence is also recorded in `docs/adr/0001-reuse-release-core-by-copy.md`. WS01
+# CARRIED the data; WS02 redefines the gate over it (settled + degraded); the
+# dispatcher rewrite is WS04.
+# ---------------------------------------------------------------------------
 
 #: The lifecycle engine's logger — a child of the package ``shipit`` logger, so
 #: it inherits the configured sinks. The resolved next-action decision (what
@@ -57,7 +78,18 @@ from .reviewers import REGISTRY, ReviewerAdapter, required_reviewers
 #: any user-facing output.
 logger = logging.getLogger("shipit.prstate")
 
-_DONE = {ReviewLifecycle.DONE_CLEAN, ReviewLifecycle.DONE_COMMENTS}
+# The funnel-state gate verdicts (ADR-0006). A required reviewer is SETTLED at any
+# recorded terminal outcome (POSTED *or* a degraded one), and HOLDS the PR only
+# while never-requested or still pending — requested or in-flight within its wait
+# window (a past-window in-flight reviewer has aged to settled TIMED_OUT, WS03).
+# DEGRADED is the non-blocking subset of settled — a recorded non-delivery that is
+# surfaced loud but does not gate Ready.
+_HOLDS = {
+    FunnelState.NEVER_REQUESTED,
+    FunnelState.REQUESTED,
+    FunnelState.IN_FLIGHT,
+}
+_DEGRADED = {FunnelState.FAILED, FunnelState.EMPTY, FunnelState.TIMED_OUT}
 
 # CheckRun conclusions / StatusContext states that count as failures.
 _FAIL_CONCLUSIONS = {
@@ -95,6 +127,32 @@ class ChecksState(StrEnum):
     FAILING = "failing"
 
 
+@dataclass(frozen=True)
+class ReviewerFunnel:
+    """Structured per-reviewer funnel signal carried on `TaskStatus`.
+
+    The OBS04 divergence's payload: it pairs the native `ReviewLifecycle` (what
+    `reviewers.py` `detect` resolves) with the OBS02/ADR-0005 funnel check-run
+    breadcrumb (`status` / `conclusion` / `started_at`), if the reviewer has one.
+    A local-agent reviewer carries both; an App/native reviewer carries only the
+    lifecycle (its check fields stay `None` — it sources the funnel from native
+    signals). WS02's gate and WS04's dispatcher read THIS instead of parsing
+    `next_action` text. WS01 carries the raw signal; the funnel-STATE
+    normalization (requested / in-flight / posted / failed / empty / timed-out)
+    and the wait-window ageing of `started_at` are WS02 / WS03.
+    """
+
+    lifecycle: ReviewLifecycle
+    # The normalized OBS04 funnel state (ADR-0006): the ONE per-reviewer view the
+    # WS02 gate verdicts on and WS04's dispatcher routes on. Folded from the
+    # lifecycle (App reviewers) or the breadcrumb (local reviewers) by the adapter,
+    # so neither downstream reader branches on a reviewer's name.
+    state: FunnelState = FunnelState.NEVER_REQUESTED
+    check_status: str | None = None
+    check_conclusion: str | None = None
+    check_started_at: str | None = None
+
+
 @dataclass
 class TaskStatus:
     """The snapshot result: lifecycle position + the one next action."""
@@ -108,6 +166,31 @@ class TaskStatus:
     mergeable: str | None = None
     cycles: int = 0  # completed required-reviewer review rounds (raw count)
     breaker: str | None = None  # which stopping condition fired, if any
+    # ADR-0001 divergence (OBS04): structured per-reviewer funnel data so WS02's
+    # gate and WS04's dispatcher read structure, not `next_action` prose. Keyed by
+    # adapter name, same keys as `reviewers`. The `reviewers` map (name ->
+    # lifecycle string) is UNCHANGED for back-compat with current consumers; this
+    # is purely additive.
+    reviewer_funnel: dict[str, ReviewerFunnel] = field(default_factory=dict)
+    # ADR-0006 (OBS04-WS02): required reviewers that SETTLED at a non-success
+    # terminal outcome (failed / empty / timed-out). They do NOT hold Ready, but
+    # they are surfaced LOUD so a degraded PR is never silently "fine". Keyed by the
+    # reviewer's DISPLAY name (a local reviewer's `<agent>-local`, so the annotation
+    # reads "codex-local failed") → the `FunnelState` reason value. Empty when the
+    # PR is cleanly settled. WS04's dispatcher still proceeds (a degraded-but-ready
+    # PR flips); this set only makes the degradation visible.
+    degraded: dict[str, str] = field(default_factory=dict)
+    # OBS04-WS04: the structured REVIEWS_PENDING routing signal — the required
+    # reviewers still HOLDING the PR whose funnel state says they need a
+    # (re-)request NOW: funnel NEVER_REQUESTED, i.e. never asked, or a prior review
+    # staled by a push (re-request). The dispatcher routes REVIEWS_PENDING to
+    # `request_review` iff this is non-empty, else to WAIT — reading this structure
+    # instead of substring-matching `next_action` prose (it absorbs #24.1). A
+    # holding reviewer that is REQUESTED / IN_FLIGHT (in-flight within window — WS03
+    # already aged any past-window one into a settled TIMED_OUT) is NOT here: it is
+    # the wait case. Empty outside REVIEWS_PENDING and whenever every holding
+    # reviewer is merely awaited.
+    to_request: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -120,6 +203,18 @@ class TaskStatus:
             "mergeable": self.mergeable,
             "cycles": self.cycles,
             "breaker": self.breaker,
+            "to_request": self.to_request,
+            "reviewer_funnel": {
+                name: {
+                    "lifecycle": rf.lifecycle.value,
+                    "state": rf.state.value,
+                    "check_status": rf.check_status,
+                    "check_conclusion": rf.check_conclusion,
+                    "check_started_at": rf.check_started_at,
+                }
+                for name, rf in self.reviewer_funnel.items()
+            },
+            "degraded": self.degraded,
         }
 
 
@@ -200,6 +295,23 @@ def _evaluate(
     to_detect = {r.name: r for r in (*registry, *required)}.values()
     lifecycles = {r.name: r.detect(ctx) for r in to_detect}
     reviewers = {name: lc.value for name, lc in lifecycles.items()}
+    # Normalize each reviewer's signals to its ONE funnel state (ADR-0006), asking
+    # the ADAPTER so the engine never name-branches: an App reviewer folds from its
+    # lifecycle, a local reviewer from its `review: <agent>-local` breadcrumb (or a
+    # posted review). This is the structured state WS02 gates on and WS04 routes on,
+    # in place of `next_action` prose. The raw breadcrumb (status / conclusion /
+    # started_at) rides alongside it on `ReviewerFunnel` (WS03 ages started_at).
+    funnel_states = {r.name: r.funnel_state(ctx, lifecycles[r.name]) for r in to_detect}
+    reviewer_funnel = {}
+    for r in to_detect:
+        fc = r.funnel_check(ctx)
+        reviewer_funnel[r.name] = ReviewerFunnel(
+            lifecycle=lifecycles[r.name],
+            state=funnel_states[r.name],
+            check_status=fc.status if fc else None,
+            check_conclusion=fc.conclusion if fc else None,
+            check_started_at=fc.started_at if fc else None,
+        )
     open_threads = len(ctx.open_threads())
     checks = classify_checks(ctx.checks)
     # The stopping rule counts rounds against the SAME required set the engine
@@ -210,6 +322,17 @@ def _evaluate(
     breaker = evaluate_breakers(ctx, required=required)
     breaker_stops = breaker.stop
 
+    # The degraded set (ADR-0006): required reviewers SETTLED at a non-success
+    # terminal outcome (failed / empty / timed-out). They settle non-blocking, so
+    # they never appear in `holding` below — but they are surfaced LOUD on every
+    # status (even while another reviewer still holds) so the state is never
+    # silently "fine". Keyed by display name (`codex-local`) → the reason value.
+    degraded = {
+        r.display_name: funnel_states[r.name].value
+        for r in required
+        if funnel_states[r.name] in _DEGRADED
+    }
+
     status = TaskStatus(
         state=TaskState.REVIEWS_PENDING,  # provisional; set below
         next_action="",
@@ -219,16 +342,35 @@ def _evaluate(
         checks=checks,
         mergeable=ctx.mergeable,
         cycles=breaker.cycles,
+        reviewer_funnel=reviewer_funnel,
+        degraded=degraded,
     )
 
-    # 1. Required reviewers must all be done. Best-effort ones never gate. The
-    #    required SET is config-driven (release#622): every reviewer in it gates,
-    #    so a missing review by ANY required reviewer holds the PR in
-    #    REVIEWS_PENDING and names that reviewer as outstanding.
-    pending_required = [r for r in required if lifecycles[r.name] not in _DONE]
-    if pending_required:
+    # 1. Required reviewers must all be SETTLED (ADR-0006): a recorded terminal
+    #    funnel outcome, NOT only a posted review. A reviewer HOLDS the PR only
+    #    while never-requested or in-flight (within window — WS03 ages in-flight
+    #    past its window into timed-out, which settles). failed / empty / timed-out
+    #    settle non-blocking (already collected into `degraded` above), so they do
+    #    NOT appear here — one broken reviewer never parks the PR. Best-effort
+    #    reviewers (outside `required`) never gate.
+    holding = [r for r in required if funnel_states[r.name] in _HOLDS]
+    if holding:
+        # Split the holding reviewers into the act each one's funnel state dictates
+        # ONCE: those needing a (re-)request now vs those merely awaited. Both the
+        # human-facing prose (`_reviews_pending_action`) and the WS04 dispatcher's
+        # routing read this same structured split — the dispatcher off
+        # `status.to_request`, never the prose (it absorbs #24.1).
+        request_names, rerequest_names, waiting_names = _classify_pending(
+            ctx, holding, funnel_states
+        )
         status.state = TaskState.REVIEWS_PENDING
-        status.next_action = _reviews_pending_action(ctx, pending_required, lifecycles)
+        # request ∪ re-request both route to the single `request_review` act; only
+        # the wait set (`waiting_names`) leaves `to_request` empty → the dispatcher
+        # reports/waits.
+        status.to_request = request_names + rerequest_names
+        status.next_action = _reviews_pending_action(
+            holding, request_names, rerequest_names, waiting_names
+        )
         return status
 
     # 2. Required reviews in; any open thread (from any reviewer) must be
@@ -386,36 +528,57 @@ def _evaluate(
     return status
 
 
-def _reviews_pending_action(
+def _classify_pending(
     ctx: PullContext,
     pending: list[ReviewerAdapter],
-    lifecycles: dict[str, ReviewLifecycle],
-) -> str:
-    """Build the REVIEWS_PENDING next-action, distinguishing the two cases a
-    bare "request if not yet requested, else wait" conflates:
+    funnel_states: dict[str, FunnelState],
+) -> tuple[list[str], list[str], list[str]]:
+    """Split the holding required reviewers into `(request, rerequest, wait)` by
+    funnel state — the ONE structured decision both the next-action prose and the
+    WS04 dispatcher's routing read from (no prose round-trip). The cases a bare
+    "request if not yet requested, else wait" conflates:
 
-      • never-requested — no review by this reviewer has ever landed → request.
+      • never-requested — no signal at all from this reviewer → request.
       • stale-after-push — a review landed on an EARLIER commit but the current
         head is `not_requested` (a fixup push resets Copilot's request) → the
         action is to *re-request* the reviewer for the new head, not to wait.
+      • in-flight / requested — a review is already coming on the head → wait.
 
-    The distinction is cheap: a review on a non-head commit means a prior cycle
-    existed. A reviewer already REQUESTED / IN_PROGRESS on the head is simply
-    pending — wait.
+    Routed on the normalized FUNNEL state, not the raw lifecycle: a local-agent
+    reviewer whose detached run is IN_FLIGHT has lifecycle NOT_REQUESTED (it has no
+    requested edge — the in-flight signal lives in its breadcrumb), so keying off
+    the lifecycle alone would wrongly advise "request" and risk a duplicate run.
+    The funnel state folds the breadcrumb in, so IN_FLIGHT correctly reads as wait.
+    The stale-after-push re-request stays a lifecycle/commit concern
+    (`_has_stale_review`), only reachable for a never-requested funnel state.
     """
-    request_names: list[str] = []  # never reviewed → request
+    request_names: list[str] = []  # no signal → request
     rerequest_names: list[str] = []  # reviewed an earlier head → re-request
-    waiting_names: list[str] = []  # already requested/in-progress on head → wait
+    waiting_names: list[str] = []  # already requested/in-flight on head → wait
 
     for adapter in pending:
-        lc = lifecycles[adapter.name]
-        if lc in (ReviewLifecycle.REQUESTED, ReviewLifecycle.IN_PROGRESS):
+        fs = funnel_states[adapter.name]
+        if fs in (FunnelState.REQUESTED, FunnelState.IN_FLIGHT):
             waiting_names.append(adapter.name)
         elif _has_stale_review(ctx, adapter):
             rerequest_names.append(adapter.name)
         else:
             request_names.append(adapter.name)
+    return request_names, rerequest_names, waiting_names
 
+
+def _reviews_pending_action(
+    pending: list[ReviewerAdapter],
+    request_names: list[str],
+    rerequest_names: list[str],
+    waiting_names: list[str],
+) -> str:
+    """Render the REVIEWS_PENDING next-action from the precomputed
+    `_classify_pending` split. PURE human-facing prose for the status/`pr next`
+    output — it no longer DRIVES routing (the dispatcher routes on
+    `TaskStatus.to_request`, WS04), so a wording change here cannot re-route
+    `pr next` (the #24.1 fix).
+    """
     clauses: list[str] = []
     if request_names:
         clauses.append(f"request for the current head: {', '.join(request_names)}")
@@ -426,7 +589,8 @@ def _reviews_pending_action(
         )
     if waiting_names:
         clauses.append(
-            f"wait (already requested on the current head): {', '.join(waiting_names)}"
+            "wait (already requested / in flight on the current head): "
+            f"{', '.join(waiting_names)}"
         )
 
     all_names = [a.name for a in pending]

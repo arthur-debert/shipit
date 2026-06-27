@@ -10,8 +10,125 @@ shifts.
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 from . import ghapi
-from .model import PullContext, ReviewLifecycle, Thread
+from .model import (
+    FunnelState,
+    PullContext,
+    ReviewFunnelCheck,
+    ReviewLifecycle,
+    Thread,
+)
+
+# The shipped uniform wait window (ADR-0006): a required reviewer still in flight /
+# requested-but-silent that ages PAST this window settles as TIMED_OUT. 20m
+# default, overridable per-reviewer via the `[reviewers]` `window` option (threaded
+# onto `ctx.reviewer_window`). Uniform across reviewer kinds — a local reviewer
+# ages against its check run's `started_at`, an App reviewer against its
+# `review_requested` edge time — so a slow backend gets a longer window without
+# loosening it for everyone.
+DEFAULT_WAIT_WINDOW = timedelta(minutes=20)
+
+# The ONLY funnel states the wait window ages: a reviewer still legitimately
+# working. IN_FLIGHT (a review is running) and REQUESTED (an App request edge
+# placed, no review yet) are the holds the window can convert to TIMED_OUT; every
+# other state is already terminal (POSTED / FAILED / EMPTY / TIMED_OUT) or a
+# never-started hold (NEVER_REQUESTED, which has no request timestamp to age) and
+# is never re-aged.
+_AGEABLE = (FunnelState.IN_FLIGHT, FunnelState.REQUESTED)
+
+
+def _age_to_timeout(
+    state: FunnelState,
+    request_at: str | None,
+    window: timedelta,
+    now: datetime | None,
+) -> FunnelState:
+    """Age an in-flight / requested reviewer past its wait window into TIMED_OUT.
+
+    The pure timeout function (ADR-0006/WS03): a function of (now, request
+    timestamp, window) and nothing else — the engine calls no clock; "now" is the
+    injected `ctx.now`. Only an `_AGEABLE` state (IN_FLIGHT / REQUESTED — a reviewer
+    still legitimately working) can age; every other state is already settled and
+    returned unchanged. With both timestamps present, a reviewer whose age
+    (`now - request_at`) EXCEEDS its window has gone silent past the deadline →
+    TIMED_OUT (the gate then settles it non-blocking + degraded); within the window
+    it HOLDS (returned unchanged). Missing either timestamp — no injected `now`, or
+    a reviewer with no recorded request time (best-effort Gemini has no requested
+    edge) — cannot be aged and so holds: the window never invents a timeout from
+    absent data.
+    """
+    if state not in _AGEABLE:
+        return state
+    if not request_at or now is None:
+        return state
+    if now - datetime.fromisoformat(request_at) > window:
+        return FunnelState.TIMED_OUT
+    return state
+
+
+# How a reviewer's native `ReviewLifecycle` (the App-reviewer signal) folds into
+# the normalized `FunnelState` (ADR-0006). This is the App/native side of the
+# funnel: it has no check-run breadcrumb, so its whole funnel view comes from the
+# lifecycle. A local-agent reviewer overrides `funnel_state` to read its breadcrumb
+# instead (a posted review still short-circuits to POSTED there). `IN_PROGRESS`
+# only arises for the best-effort Gemini adapter (an "eyes" reaction); it maps to
+# IN_FLIGHT for uniformity, though Gemini is never a required/gating reviewer.
+_LIFECYCLE_TO_FUNNEL: dict[ReviewLifecycle, FunnelState] = {
+    ReviewLifecycle.DONE_CLEAN: FunnelState.POSTED,
+    ReviewLifecycle.DONE_COMMENTS: FunnelState.POSTED,
+    ReviewLifecycle.IN_PROGRESS: FunnelState.IN_FLIGHT,
+    ReviewLifecycle.REQUESTED: FunnelState.REQUESTED,
+    ReviewLifecycle.NOT_REQUESTED: FunnelState.NEVER_REQUESTED,
+}
+
+
+def _funnel_state_from_check(check: ReviewFunnelCheck) -> FunnelState:
+    """Normalize a local reviewer's OBS02/ADR-0005 check-run breadcrumb to a
+    `FunnelState` — the conclusion mapping ADR-0005 fixes.
+
+    A run that has not COMPLETED is still IN_FLIGHT (`status` is
+    ``in_progress`` / ``queued`` / ``waiting`` / ...). A completed run maps by
+    ``conclusion``:
+
+      * ``SUCCESS`` → POSTED (a review landed, incl. a clean zero-findings one);
+      * ``TIMED_OUT`` → TIMED_OUT (the producer recorded a timeout);
+      * ``NEUTRAL`` → EMPTY (the producer's *empty* non-delivery — nothing
+        parseable; ADR-0005's accepted ``neutral`` mapping, which lets THIS gate
+        tell empty apart from a hard failure WITHOUT the snapshot carrying the
+        check-run ``output`` text — see `shipit.review.service._FUNNEL_TERMINAL`);
+      * anything else terminal (``FAILURE`` / ``CANCELLED`` / ``STARTUP_FAILURE``
+        / ``ACTION_REQUIRED`` / ...) → FAILED.
+
+    EMPTY / FAILED / TIMED_OUT are all *settled + degraded* at the gate; they
+    differ only in the human-facing "why". WS03 adds the second path to TIMED_OUT:
+    an IN_FLIGHT run whose `started_at` has aged past the wait window.
+    """
+    if (check.status or "").upper() != "COMPLETED":
+        return FunnelState.IN_FLIGHT
+    conclusion = (check.conclusion or "").upper()
+    if conclusion == "SUCCESS":
+        return FunnelState.POSTED
+    if conclusion == "TIMED_OUT":
+        return FunnelState.TIMED_OUT
+    if conclusion == "NEUTRAL":
+        return FunnelState.EMPTY
+    return FunnelState.FAILED
+
+
+def _funnel_recency_key(check: ReviewFunnelCheck) -> datetime:
+    """Recency signal for picking the live run among same-name funnel checks.
+
+    `statusCheckRollup` ordering is not a documented recency contract, so we sort
+    on the run's own `started_at` (ISO-8601, tz-aware; the App stamps it at kickoff
+    and it never moves) rather than trusting the rollup's list order. A breadcrumb
+    that somehow arrives without a `started_at` sorts earliest so a timestamped run
+    always wins over it.
+    """
+    if not check.started_at:
+        return datetime.min.replace(tzinfo=timezone.utc)
+    return datetime.fromisoformat(check.started_at)
 
 
 class ReviewerAdapter:
@@ -49,6 +166,26 @@ class ReviewerAdapter:
         EVERY reviewer (all reviewers are token-billed / cost a model run, so
         re-reviewing each push is explicit opt-in)."""
         return ctx.reviewer_rerun.get(self.name, False)
+
+    def _window(self, ctx: PullContext) -> timedelta:
+        """This reviewer's wait window — the per-reviewer `[reviewers]` `window`
+        override (seconds, threaded onto `ctx.reviewer_window`) or the shipped 20m
+        default. Read off the context like `_rerun`, so the engine never touches
+        config; a 0/absent override falls back to `DEFAULT_WAIT_WINDOW`."""
+        seconds = ctx.reviewer_window.get(self.name)
+        return timedelta(seconds=seconds) if seconds else DEFAULT_WAIT_WINDOW
+
+    def _requested_at(self, ctx: PullContext) -> str | None:
+        """This reviewer's `review_requested` edge time (App side), matched off
+        `ctx.requested_at` by login — the timestamp WS03 ages an App reviewer's
+        wait window against. None when this reviewer has no recorded request edge:
+        a LOCAL reviewer ages its check-run `started_at` instead (and overrides
+        `funnel_state` to do so), and best-effort Gemini has no requested edge at
+        all — neither appears in `requested_at`, so neither ages here."""
+        for login, ts in ctx.requested_at.items():
+            if self.matches(login):
+                return ts
+        return None
 
     def detect(self, ctx: PullContext) -> ReviewLifecycle:
         """Where this reviewer stands — rerun-aware, shared across adapters.
@@ -105,6 +242,52 @@ class ReviewerAdapter:
         request mechanism to withdraw from (no-op backends).
         """
         raise NotImplementedError
+
+    @property
+    def display_name(self) -> str:
+        """The name to SHOW a human for this reviewer (defaults to the registry
+        name). The local-agent adapters override it to their ``<agent>-local``
+        funnel name, so a degraded annotation reads ``codex-local failed`` (the
+        name the check run is published under), not the bare ``codex``."""
+        return self.name
+
+    def funnel_state(self, ctx: PullContext, lifecycle: ReviewLifecycle) -> FunnelState:
+        """This reviewer's normalized OBS04 funnel state (ADR-0006).
+
+        The App/native side: an App reviewer (Copilot / CodeRabbit / Gemini) has no
+        check-run breadcrumb, so its funnel view folds straight from the native
+        `ReviewLifecycle` the engine already computed (passed in so `detect` is not
+        re-run). The LOCAL-agent adapters override this to read their breadcrumb.
+
+        Kept behind the adapter interface so the engine normalizes EVERY reviewer
+        the same way — `status.reviewer_funnel[name].state` — without ever branching
+        on a reviewer's name.
+
+        WS03 ages the App side here: a REQUESTED reviewer (request edge placed, no
+        review yet) silent past its wait window settles as TIMED_OUT, aged from its
+        `review_requested` edge time (`ctx.requested_at`). Within the window it
+        still holds; a reviewer with no recorded edge time (Gemini) never ages.
+        """
+        state = _LIFECYCLE_TO_FUNNEL[lifecycle]
+        return _age_to_timeout(
+            state, self._requested_at(ctx), self._window(ctx), ctx.now
+        )
+
+    def funnel_check(self, ctx: PullContext) -> ReviewFunnelCheck | None:
+        """This reviewer's OBS02/ADR-0005 funnel check-run breadcrumb, if any.
+
+        Base: ``None``. App/native reviewers (Copilot, CodeRabbit, Gemini) source
+        their funnel from native GitHub signals — the ``review_requested`` edge +
+        the review object — not from a shipit-authored check run, so they have no
+        breadcrumb here. Only the LOCAL-agent adapters (codex / agy), which GitHub
+        denies a native requested edge, override this to claim their
+        ``review: <agent>-local`` run off ``ctx.review_funnel``.
+
+        Keeping the reviewer→breadcrumb mapping behind the adapter interface is
+        what lets the engine attach per-reviewer funnel state without ever
+        branching on a reviewer's name — it just asks each adapter.
+        """
+        return None
 
     def authored_threads(self, ctx: PullContext) -> list[Thread]:
         """All threads (resolved or not) rooted in a comment by this reviewer."""
@@ -375,6 +558,86 @@ class _LocalReviewAdapter(ReviewerAdapter):
         same shape a no-mechanism backend uses.
         """
         return False
+
+    def funnel_reviewer_name(self) -> str:
+        """The funnel reviewer name (`codex` → `codex-local`) — the suffix the
+        OBS02 check run is named after (`review: <agent>-local`, ADR-0005). Mirror
+        of `shipit.review.checkrun.reviewer_name`, kept here so prstate reads the
+        funnel without importing the optional `review` extra."""
+        return f"{self.name}-local"
+
+    @property
+    def display_name(self) -> str:
+        # A local reviewer is shown under the name its check run is published as
+        # (`codex-local`), so a degraded annotation matches the PR's funnel run.
+        return self.funnel_reviewer_name()
+
+    def funnel_state(self, ctx: PullContext, lifecycle: ReviewLifecycle) -> FunnelState:
+        """A local-agent reviewer's funnel state, read from its breadcrumb (ADR-0006).
+
+        Two sources fold here, in priority order:
+
+          1. A POSTED review wins outright. If `detect` already found a counting
+             review by this bot (`lifecycle` is DONE), the review LANDED → POSTED,
+             regardless of the breadcrumb. This is the load-bearing
+             **provisioning-as-flake** path (ADR-0005/0006): a consumer whose review
+             App still lacks ``checks:write`` opens NO check run, but the review
+             *still posts* — so it reads POSTED → settled, never blocked. The salvage
+             COMMENT (#76) posts a real review too, so a content-but-unparseable run
+             also lands here as POSTED, not degraded.
+
+          2. Otherwise the check-run breadcrumb decides
+             (`_funnel_state_from_check`): in-flight / failed / empty / timed-out.
+
+        The genuinely-no-outcome case — NO breadcrumb AND no posted review — is, in
+        a pure snapshot, INDISTINGUISHABLE from never-requested (provisioning
+        failure leaves no artifact at all; ADR-0005 rejected comment markers, so
+        there is nothing else to read). It maps to NEVER_REQUESTED, which HOLDS at
+        reviews-pending with an actionable *request* next-step — NEVER a BLOCKED
+        terminal state. So "not provisioned" still never *blocks* the PR (ADR-0006's
+        load-bearing guarantee): the realistic unprovisioned run settles via path 1,
+        and the pathological double-failure (no breadcrumb AND no posted review)
+        holds-with-an-action rather than parking silently. Marking an ABSENT signal
+        as degraded would instead silently skip a reviewer that simply has not run
+        yet (breaking the start-the-loop story), so the engine does not — the
+        not-required-until-provisioned rollout gate (INS01) owns that residual.
+        """
+        if lifecycle in (ReviewLifecycle.DONE_CLEAN, ReviewLifecycle.DONE_COMMENTS):
+            return FunnelState.POSTED
+        check = self.funnel_check(ctx)
+        if check is None:
+            return FunnelState.NEVER_REQUESTED
+        # WS03 ages the LOCAL side here: an IN_FLIGHT run (status not yet COMPLETED)
+        # silent past its wait window settles as TIMED_OUT, aged from the run's OWN
+        # `started_at` (ADR-0005's load-bearing timestamp). A terminal breadcrumb
+        # (posted / failed / empty / producer-recorded timeout) is already settled
+        # and `_age_to_timeout` returns it unchanged; within the window the run holds.
+        return _age_to_timeout(
+            _funnel_state_from_check(check),
+            check.started_at,
+            self._window(ctx),
+            ctx.now,
+        )
+
+    def funnel_check(self, ctx: PullContext) -> ReviewFunnelCheck | None:
+        """This local reviewer's funnel breadcrumb off `ctx.review_funnel`.
+
+        Matches the `review: <agent>-local` check run by its funnel reviewer name.
+        If several runs carry the name (a re-request that opened a second run, or
+        a stale earlier-head run), the one with the latest `started_at` is the live
+        one — we select on that timestamp rather than rollup list order, which is
+        not a documented recency contract (see `_funnel_recency_key`); rollup
+        position only breaks an exact-timestamp tie. `None` when no funnel run is
+        present (the breadcrumb absent: never run, or the App still lacks
+        `checks:write` before the ADR-0005 re-grant — read as degraded downstream,
+        never as a block)."""
+        target = self.funnel_reviewer_name()
+        matches = [c for c in ctx.review_funnel if c.reviewer == target]
+        if not matches:
+            return None
+        return max(
+            enumerate(matches), key=lambda ic: (_funnel_recency_key(ic[1]), ic[0])
+        )[1]
 
 
 class CodexAdapter(_LocalReviewAdapter):

@@ -7,8 +7,25 @@ fixtures without the network, exercising the exact code `gather()` runs live.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from . import ghapi
-from .model import PullContext, Review, ReviewComment, Thread
+from .model import (
+    PullContext,
+    Review,
+    ReviewComment,
+    ReviewFunnelCheck,
+    Thread,
+)
+
+# The OBS02/ADR-0005 funnel check runs are named `review: <reviewer>` (see
+# `shipit.review.checkrun`). They arrive on the head commit's `statusCheckRollup`
+# alongside the real CI checks, so the build site recognizes this RESERVED name
+# prefix to split them OUT of the CI rollup — keeping the funnel breadcrumbs and
+# the CI-checks gate (`classify_checks`) from crossing. Matching a naming
+# convention is NOT branching on a reviewer's name: every funnel run, for any
+# reviewer, shares this one prefix.
+_FUNNEL_CHECK_PREFIX = "review: "
 
 # `comments(first: 100)` is deliberately un-paginated: the engine gates on a
 # thread's existence + `isResolved` + its root author, all of which live in the
@@ -26,6 +43,15 @@ from .model import PullContext, Review, ReviewComment, Thread
 # `{login: "Copilot", type: "Bot"}`; gh returns `[]`), so a requested Copilot
 # could never read as REQUESTED through the adapter. The GraphQL union includes
 # Bots. Un-paginated (first: 100): no PR has 100 pending reviewer requests.
+#
+# `timelineItems(REVIEW_REQUESTED_EVENT)` carries what `reviewRequests` does NOT:
+# the TIME each reviewer was requested (`createdAt`). The pending-request union
+# above has no timestamp, so the App reviewer's request time — which OBS04-WS03
+# ages its wait window against — is sourced from the timeline here. `last: 100` is
+# the recent tail in ascending chronological order, so the LATEST event per login
+# (a re-request after a push supersedes an earlier one) is the current edge; rides
+# the first page only (read when the cursor is None). A LOCAL reviewer has no
+# requested edge and ages its check run's `started_at` instead, so it never appears.
 _THREADS_QUERY = """
 query($owner: String!, $name: String!, $pr: Int!, $cursor: String) {
   repository(owner: $owner, name: $name) {
@@ -36,6 +62,18 @@ query($owner: String!, $name: String!, $pr: Int!, $cursor: String) {
             ... on User { login }
             ... on Bot { login }
             ... on Team { slug }
+          }
+        }
+      }
+      timelineItems(itemTypes: [REVIEW_REQUESTED_EVENT], last: 100) {
+        nodes {
+          ... on ReviewRequestedEvent {
+            createdAt
+            requestedReviewer {
+              ... on User { login }
+              ... on Bot { login }
+              ... on Team { slug }
+            }
           }
         }
       }
@@ -65,16 +103,18 @@ query($owner: String!, $name: String!, $pr: Int!, $cursor: String) {
 
 def _threads_and_review_requests(
     owner: str, name: str, pr: int
-) -> tuple[list[dict], list[dict]]:
-    """Every review-thread node for the PR plus its pending review requests.
+) -> tuple[list[dict], list[dict], dict[str, str]]:
+    """Every review-thread node for the PR, its pending review requests, and the
+    per-login `review_requested` edge time.
 
     Threads follow the cursor to the end: without pagination a PR with >100
     threads would silently truncate, and a dropped unresolved thread reads as
-    READY when it isn't. Review requests ride along on the first page only
-    (the connection is identical on every page).
+    READY when it isn't. Review requests and the timeline request-times ride along
+    on the first page only (those connections are identical on every page).
     """
     nodes: list[dict] = []
     requests: list[dict] = []
+    requested_at: dict[str, str] = {}
     cursor: str | None = None
     while True:
         data = ghapi.graphql(
@@ -87,12 +127,33 @@ def _threads_and_review_requests(
                 for rr in pull["reviewRequests"]["nodes"]
                 if rr.get("requestedReviewer")
             ]
+            requested_at = _requested_at_times(pull["timelineItems"]["nodes"])
         conn = pull["reviewThreads"]
         nodes.extend(conn["nodes"])
         page = conn["pageInfo"]
         if not page["hasNextPage"]:
-            return nodes, requests
+            return nodes, requests, requested_at
         cursor = page["endCursor"]
+
+
+def _requested_at_times(events: list[dict]) -> dict[str, str]:
+    """Map each requested reviewer login -> the time of its LATEST
+    ReviewRequestedEvent (ISO-8601 tz-aware `createdAt`).
+
+    `timelineItems(last: 100)` returns events oldest-first, so iterating in order
+    and overwriting keeps the MOST RECENT request per login — the current pending
+    edge, whose age WS03 measures (a re-request after a push supersedes the earlier
+    one). A non-reviewer timeline node (the union member that isn't a
+    ReviewRequestedEvent) has no `requestedReviewer` and is skipped; team requests
+    (a `slug`, no `login`) are skipped too — only User/Bot reviewers age."""
+    out: dict[str, str] = {}
+    for ev in events:
+        reviewer = ev.get("requestedReviewer") or {}
+        login = reviewer.get("login")
+        created = ev.get("createdAt")
+        if login and created:
+            out[login] = created
+    return out
 
 
 # The attach-verification read (release#614). One light GraphQL call: the
@@ -246,11 +307,14 @@ def gather(pr: int) -> PullContext:
     # keep the import edge one-way (reviewers -> fetch is not a cycle, but the
     # config read is genuinely a build-site concern).
     from .reviewers import reviewer_rerun
+    from .reviewers_config import reviewer_window
 
     owner, name = ghapi.repo_slug()
     base = f"repos/{owner}/{name}"
     meta = ghapi.pr_meta(pr)
-    thread_nodes, review_requests = _threads_and_review_requests(owner, name, pr)
+    thread_nodes, review_requests, requested_at = _threads_and_review_requests(
+        owner, name, pr
+    )
     # Bot-typed requests only surface through GraphQL (see _THREADS_QUERY);
     # the node shape ({login} / {slug}) is what _requested_logins consumes.
     meta["reviewRequests"] = review_requests
@@ -261,6 +325,15 @@ def gather(pr: int) -> PullContext:
         reactions=ghapi.rest(f"{base}/issues/{pr}/reactions", paginate=True) or [],
         issue_comments=ghapi.rest(f"{base}/issues/{pr}/comments", paginate=True) or [],
         reviewer_rerun=reviewer_rerun(),
+        # The per-reviewer wait-window override + the App `review_requested` edge
+        # times — both resolved at the build edge and threaded on so the engine
+        # ages the window off the snapshot, never the config/clock (OBS04-WS03).
+        reviewer_window=reviewer_window(),
+        requested_at=requested_at,
+        # Stamp "now" once, at fetch time. The engine NEVER calls a clock — it
+        # reads this off the snapshot — so the wall-clock read lives here, at the
+        # build edge, the same place every other impurity (config, network) does.
+        now=datetime.now(timezone.utc),
     )
 
 
@@ -272,13 +345,29 @@ def context_from_raw(
     reactions: list[dict],
     issue_comments: list[dict],
     reviewer_rerun: dict[str, bool] | None = None,
+    reviewer_window: dict[str, int] | None = None,
+    requested_at: dict[str, str] | None = None,
+    now: datetime | None = None,
 ) -> PullContext:
     """Pure: assemble a `PullContext` from raw gh payloads. No network.
 
     `reviewer_rerun` is the per-reviewer rerun policy (name -> bool) resolved
     from config at the build site; it defaults to empty (every reviewer
     review-once) so a test/fixture context that omits it gets the shipped
-    default behaviour."""
+    default behaviour.
+
+    `reviewer_window` is the per-reviewer wait-window override (name -> seconds),
+    and `requested_at` the App `review_requested` edge times (login -> ISO-8601);
+    both default to empty so a fixture that omits them gets the shipped 20m window
+    and no App-side ageing (a local reviewer ages its own check-run `started_at`).
+
+    `now` is the injected wall-clock the snapshot carries (a tz-aware UTC
+    datetime); `gather()` stamps it at fetch time and a test/fixture passes a
+    FIXED value so a recorded snapshot is deterministic. It is a parameter — not
+    a default `datetime.now()` — precisely so the engine stays clock-free: the
+    only "now" the engine ever sees is the one handed in here.
+    """
+    ci_checks, review_funnel = _partition_checks(meta.get("statusCheckRollup") or [])
     return PullContext(
         number=meta["number"],
         head_sha=meta["headRefOid"],
@@ -291,9 +380,45 @@ def context_from_raw(
         reactions=reactions,
         issue_comments=issue_comments,
         requested_logins=_requested_logins(meta.get("reviewRequests") or []),
-        checks=meta.get("statusCheckRollup") or [],
+        checks=ci_checks,
+        review_funnel=review_funnel,
+        now=now,
         reviewer_rerun=reviewer_rerun or {},
+        reviewer_window=reviewer_window or {},
+        requested_at=requested_at or {},
     )
+
+
+def _partition_checks(
+    rollup: list[dict],
+) -> tuple[list[dict], list[ReviewFunnelCheck]]:
+    """Split a head-commit status rollup into (CI checks, funnel breadcrumbs).
+
+    The OBS02/ADR-0005 funnel check runs (`review: <reviewer>`) ride the SAME
+    `statusCheckRollup` as the real CI checks. Left in `checks`, a failed
+    `review: codex-local` run (conclusion FAILURE) would make `classify_checks`
+    read the whole CI gate as FAILING — a degraded local review must never block
+    CI. So the funnel runs are lifted out HERE, at the build site: anything whose
+    `name` starts with the reserved `review: ` prefix becomes a
+    `ReviewFunnelCheck`; everything else stays a CI check. Entries without a
+    `name` (legacy StatusContext, keyed by `context`) are CI checks by definition.
+    """
+    ci_checks: list[dict] = []
+    funnel: list[ReviewFunnelCheck] = []
+    for entry in rollup:
+        name = entry.get("name") or ""
+        if name.startswith(_FUNNEL_CHECK_PREFIX):
+            funnel.append(
+                ReviewFunnelCheck(
+                    reviewer=name[len(_FUNNEL_CHECK_PREFIX) :],
+                    status=entry.get("status"),
+                    conclusion=entry.get("conclusion"),
+                    started_at=entry.get("startedAt"),
+                )
+            )
+        else:
+            ci_checks.append(entry)
+    return ci_checks, funnel
 
 
 def _review(raw: dict) -> Review:

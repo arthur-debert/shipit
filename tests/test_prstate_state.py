@@ -304,6 +304,9 @@ def test_status_to_dict_round_trips(context):
         "mergeable",
         "cycles",
         "breaker",
+        "reviewer_funnel",
+        "degraded",
+        "to_request",
     }
 
 
@@ -352,7 +355,9 @@ def test_reviews_pending_already_requested_says_wait(context):
     # action must not tell the caller to (re-)request what is already pending.
     status = evaluate(context("gemini_eyes_copilot_requested"))
     assert status.state is TaskState.REVIEWS_PENDING
-    assert "wait (already requested on the current head)" in status.next_action
+    assert (
+        "wait (already requested / in flight on the current head)" in status.next_action
+    )
     assert "RE-REQUEST" not in status.next_action
 
 
