@@ -157,6 +157,7 @@ def test_next_request_act_requests_reviewer(patched_next, monkeypatch, capsys):
             next_action="waiting on required review(s): copilot — request for the current head: copilot",
             pr=ctx,
             reviewers={"copilot": "not_requested"},
+            to_request=["copilot"],
         ),
     )
     seen = {}
@@ -198,6 +199,7 @@ def test_next_request_act_skips_already_requested_reviewer(
             ),
             pr=ctx,
             reviewers={"copilot": "not_requested", "coderabbit": "requested"},
+            to_request=["copilot"],
         ),
     )
     selected = {}
@@ -229,6 +231,7 @@ def test_next_request_act_dropped_edge_is_error(patched_next, monkeypatch, capsy
             next_action="waiting on required review(s): copilot — request for the current head: copilot",
             pr=ctx,
             reviewers={"copilot": "not_requested"},
+            to_request=["copilot"],
         ),
     )
     from shipit.verbs.pr._request import RequestResult, ReviewerOutcome

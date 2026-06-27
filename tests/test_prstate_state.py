@@ -306,6 +306,7 @@ def test_status_to_dict_round_trips(context):
         "breaker",
         "reviewer_funnel",
         "degraded",
+        "to_request",
     }
 
 
