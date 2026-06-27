@@ -96,11 +96,18 @@ def run_internal_cmd(
     parent opened — so there is exactly ONE check run. Hidden so it never shows in
     `--help`: humans use `pr review request`, which detaches this.
 
-    Logging (the OBS01 file sink the detached run's diagnostics land in) is already
-    configured by the `shipit` root group callback that runs before this command,
-    so a terminal-less child still leaves a durable record.
+    Logging: the root group callback already configured logging, but it resolves
+    the repo best-effort off cwd (`resolve_current_owner_repo`) — which can degrade
+    in a terminal-less child and leave the run with NO file sink. This child KNOWS
+    its repo deterministically (the `--repo` arg), so it re-wires the OBS01 file
+    sink from that slug, guaranteeing the detached run's diagnostics ALWAYS reach
+    `<logdir>/<owner>/<repo>/shipit.log` (OBS03 story 5). Best-effort: a
+    logging-setup failure never crashes the review.
     """
+    from ...logsetup import configure_logging_for_slug
     from ...review import service
+
+    configure_logging_for_slug(repo)
 
     service.run_detached_review(
         agent,

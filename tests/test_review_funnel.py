@@ -522,6 +522,155 @@ def test_split_parent_creates_child_closes_one_run(monkeypatch, _stub_pipeline):
     assert patches[0]["path"] == f"/repos/owner/repo/check-runs/{run_id}"
 
 
+# --- OBS03-WS02: terminal-transition contract at the CHILD boundary ----------
+# The mapping itself is reused from `_generate_post_and_close` (locked by the
+# `run_and_post` tests above); these pin it at the `run_detached_review` boundary
+# the detached child actually runs through — posted -> success (above), empty ->
+# failure(empty), backend/post error -> failure, timeout marker -> timed_out — and
+# assert the child NEVER creates a run (the parent already did).
+
+
+def test_run_detached_empty_transitions_to_failure_with_empty_reason(
+    monkeypatch, _stub_pipeline
+):
+    """The CHILD boundary: an EMPTY review (a `BackendError` without the timeout
+    marker) closes the handed `run_id` to failure with an `empty` reason and
+    re-raises — no create, exactly one terminal PATCH on the same run."""
+    calls = _fake_checkrun_boundary(monkeypatch)
+
+    def _empty(agent, ctx, **kw):
+        raise BackendError("no parseable JSON\nraw output: <not json>")
+
+    monkeypatch.setattr(service, "generate_review", _empty)
+
+    with pytest.raises(BackendError):
+        service.run_detached_review("codex", 5, repo="owner/repo", run_id=555)
+
+    assert not [c for c in calls if c["method"] == "POST"]  # child never creates
+    patch = next(c for c in calls if c["method"] == "PATCH")
+    assert patch["path"] == "/repos/owner/repo/check-runs/555"
+    assert patch["body"]["conclusion"] in {"failure", "neutral"}
+    output = patch["body"]["output"]
+    assert "empty" in (output["title"] + output["summary"]).lower()
+
+
+def test_run_detached_backend_error_transitions_to_failure(monkeypatch, _stub_pipeline):
+    """The CHILD boundary: an agent error (missing CLI / crash) closes the handed
+    `run_id` to failure and the original error still propagates."""
+    from shipit.review.backends.base import BackendUnavailable
+
+    calls = _fake_checkrun_boundary(monkeypatch)
+
+    def _boom(agent, ctx, **kw):
+        raise BackendUnavailable("the 'codex' CLI was not found")
+
+    monkeypatch.setattr(service, "generate_review", _boom)
+
+    with pytest.raises(BackendUnavailable):
+        service.run_detached_review("codex", 5, repo="owner/repo", run_id=555)
+
+    assert not [c for c in calls if c["method"] == "POST"]  # child never creates
+    patches = [c for c in calls if c["method"] == "PATCH"]
+    assert len(patches) == 1
+    assert patches[0]["path"] == "/repos/owner/repo/check-runs/555"
+    assert patches[0]["body"]["conclusion"] == "failure"
+    # Generation failed first, so the review POST never ran.
+    assert _stub_pipeline.get("called") is not True
+
+
+def test_run_detached_timeout_marker_transitions_to_timed_out(
+    monkeypatch, _stub_pipeline
+):
+    """The CHILD boundary: a `BackendError` carrying the `_TIMEOUT_MARKER` closes
+    the handed `run_id` to timed_out and re-raises."""
+    from shipit.review.backends.base import _TIMEOUT_MARKER
+
+    calls = _fake_checkrun_boundary(monkeypatch)
+
+    def _timed(agent, ctx, **kw):
+        raise BackendError(
+            "codex timed out before returning a complete review\n"
+            f"raw output: …{_TIMEOUT_MARKER}"
+        )
+
+    monkeypatch.setattr(service, "generate_review", _timed)
+
+    with pytest.raises(BackendError):
+        service.run_detached_review("codex", 5, repo="owner/repo", run_id=555)
+
+    assert not [c for c in calls if c["method"] == "POST"]  # child never creates
+    patch = next(c for c in calls if c["method"] == "PATCH")
+    assert patch["path"] == "/repos/owner/repo/check-runs/555"
+    assert patch["body"]["conclusion"] == "timed_out"
+
+
+# --- OBS03-WS02: the detached child's records reach the OBS01 file sink -------
+# Story 5: a crashed/finished detached run leaves a durable "why" in the per-repo
+# file sink. The child entrypoint wires that sink deterministically from its
+# `--repo` arg (`configure_logging_for_slug`); here we drive that wiring with an
+# injected `base_dir` (the logsetup test seam), run the child body, and assert its
+# run records landed in `<base>/<owner>/<repo>/shipit.log`.
+
+
+@pytest.fixture
+def _restore_shipit_logger():
+    """Snapshot + restore the process-lifetime `shipit` logger so a file sink this
+    test attaches (to a tmp dir) never leaks into another test."""
+    logger = logging.getLogger("shipit")
+    saved = list(logger.handlers)
+    saved_level, saved_prop = logger.level, logger.propagate
+    for handler in saved:
+        logger.removeHandler(handler)
+    try:
+        yield
+    finally:
+        for handler in list(logger.handlers):
+            handler.close()
+            logger.removeHandler(handler)
+        for handler in saved:
+            logger.addHandler(handler)
+        logger.setLevel(saved_level)
+        logger.propagate = saved_prop
+
+
+def test_detached_child_records_reach_the_file_sink(
+    monkeypatch, _stub_pipeline, _restore_shipit_logger, tmp_path
+):
+    """The story-5 regression: with the file sink wired from the child's known
+    `owner/repo` slug, the detached run's records (start, resolve, terminal close)
+    land in the per-repo log file — so a finished/crashed detached run leaves a
+    durable, readable trail even with no terminal attached."""
+    from shipit import logsetup
+
+    _fake_checkrun_boundary(monkeypatch)
+    # Wire the file sink the way the `_run` child does — deterministically from the
+    # repo slug — but into an injected base_dir so nothing touches a real $HOME.
+    attached = logsetup.configure_logging_for_slug("owner/repo", base_dir=tmp_path)
+    assert attached is True
+
+    service.run_detached_review("codex", 5, repo="owner/repo", run_id=555)
+
+    for handler in logging.getLogger("shipit").handlers:
+        handler.flush()
+    log_file = tmp_path / "owner" / "repo" / "shipit.log"
+    assert log_file.exists()
+    contents = log_file.read_text()
+    # The child's own framing records reconstruct the run...
+    assert "child start" in contents
+    assert "child done" in contents
+    # ...including the heavy-resolve shape and the terminal transition.
+    assert "resolved" in contents
+    assert "completed/success" in contents
+
+
+def test_configure_logging_for_slug_is_best_effort_on_bad_slug(tmp_path):
+    """A malformed slug attaches no file sink and never raises — a logging glitch
+    must not crash the detached review."""
+    from shipit import logsetup
+
+    assert logsetup.configure_logging_for_slug("not-a-slug", base_dir=tmp_path) is False
+
+
 def test_unknown_outcome_falls_back_to_failed_without_crashing(monkeypatch, caplog):
     """Defensive (Copilot #66): `_close_funnel_breadcrumb` must not KeyError on an
     unexpected/typo outcome — that would escape this best-effort path and mask the
