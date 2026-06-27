@@ -246,15 +246,50 @@ def _parse_text(text: str, path: str | Path) -> dict:
         raise ConfigError(f"malformed {path}: {exc}") from None
 
 
-def _seed_descriptions(cfg: dict) -> list[str]:
-    """The seed-if-absent items missing from an already-parsed config, in order:
-    each absent App-secret mapping, then ``[reviewers]`` when its table is absent."""
-    secrets = cfg.get("secrets")
-    present = set(secrets) if isinstance(secrets, dict) else set()
-    out = [f"[secrets].{n}" for n in SEEDED_APP_SECRETS if n not in present]
+def _require_table(cfg: dict, name: str, path: str | Path) -> dict | None:
+    """``cfg[name]`` when it is a table (absent → ``None``); raise
+    :class:`ConfigError` when it is present but NOT a table.
+
+    Seeding either merges into a table or writes a fresh ``[name]`` one — a scalar
+    (``secrets = "off"``) can be neither: re-heading it would redefine the key and
+    produce TOML that no longer parses. We refuse to touch such a file rather than
+    corrupt it (install catches the :class:`ConfigError` and skips seeding)."""
+    val = cfg.get(name)
+    if val is None or isinstance(val, dict):
+        return val
+    raise ConfigError(
+        f"malformed {path}: `{name}` must be a table, not {type(val).__name__}"
+    )
+
+
+def _plan_seed(text: str, path: str | Path) -> tuple[list[str], str]:
+    """The seed-if-absent items missing from ``text`` and the resulting file text.
+
+    Pure: parses and computes, never writes. Raises :class:`ConfigError` for any
+    shape install cannot seed safely — malformed TOML, a scalar ``secrets``/
+    ``reviewers``, or an existing ``[secrets]`` table that has no literal header to
+    merge under (an inline table or dotted keys) — so the caller skips seeding
+    rather than write a broken config.
+    """
+    cfg = _parse_text(text, path)
+    secrets = _require_table(cfg, "secrets", path)
+    _require_table(cfg, "reviewers", path)  # validate shape; preserved if present
+
+    missing = [n for n in SEEDED_APP_SECRETS if n not in (secrets or {})]
+    seeded: list[str] = []
+    if missing:
+        if secrets is None:
+            text = _append_lines(text, SECRETS_SCAFFOLD.splitlines())
+        else:
+            text = _insert_after_header(
+                text, "secrets", [_seeded_secret_line(n) for n in missing], path
+            )
+        seeded += [f"[secrets].{n}" for n in missing]
+
     if "reviewers" not in cfg:
-        out.append("[reviewers]")
-    return out
+        text = _append_lines(text, REVIEWERS_SCAFFOLD.splitlines())
+        seeded.append("[reviewers]")
+    return seeded, text
 
 
 def plan_policy_seed(path: str | Path) -> list[str]:
@@ -262,11 +297,11 @@ def plan_policy_seed(path: str | Path) -> list[str]:
     missing App-secret mappings and, when its table is absent, ``[reviewers]``.
 
     Pure: reads, never writes. An empty list means the policy is already in place,
-    so a re-install stays a no-op. Raises :class:`ConfigError` on a malformed file
-    (the same failure :func:`load` raises), letting the caller skip seeding rather
-    than corrupt an unreadable manifest.
+    so a re-install stays a no-op. Raises :class:`ConfigError` on any shape we
+    cannot seed safely (see :func:`_plan_seed`), letting the caller skip seeding
+    rather than corrupt the file.
     """
-    return _seed_descriptions(_parse_text(_config_text(path), path))
+    return _plan_seed(_config_text(path), path)[0]
 
 
 def apply_policy_seed(path: str | Path) -> list[str]:
@@ -278,33 +313,11 @@ def apply_policy_seed(path: str | Path) -> list[str]:
     the full :data:`SECRETS_SCAFFOLD`. ``[reviewers]`` is written only when its
     table is entirely absent — a consumer's own ``[reviewers]`` is never touched.
     Writes the file only when something is seeded, so an already-seeded config is
-    left byte-identical (a clean no-op).
+    left byte-identical (a clean no-op). Raises identically to
+    :func:`plan_policy_seed`, so an install that planned a seed never reaches an
+    unsafe apply.
     """
-    text = _config_text(path)
-    cfg = _parse_text(text, path)
-
-    secrets = cfg.get("secrets")
-    secrets_table = isinstance(secrets, dict)
-    missing = [
-        n
-        for n in SEEDED_APP_SECRETS
-        if n not in (set(secrets) if secrets_table else set())
-    ]
-
-    seeded: list[str] = []
-    if missing:
-        if secrets_table:
-            text = _insert_after_header(
-                text, "[secrets]", [_seeded_secret_line(n) for n in missing]
-            )
-        else:
-            text = _append_lines(text, SECRETS_SCAFFOLD.splitlines())
-        seeded += [f"[secrets].{n}" for n in missing]
-
-    if "reviewers" not in cfg:
-        text = _append_lines(text, REVIEWERS_SCAFFOLD.splitlines())
-        seeded.append("[reviewers]")
-
+    seeded, text = _plan_seed(_config_text(path), path)
     if seeded:
         Path(path).write_text(text, encoding="utf-8")
     return seeded
@@ -317,11 +330,22 @@ def _append_lines(text: str, lines: list[str]) -> str:
     return f"{base}{sep}" + "\n".join(lines) + "\n"
 
 
-def _insert_after_header(text: str, header: str, lines: list[str]) -> str:
-    """Insert ``lines`` immediately after the ``header`` line (e.g. ``[secrets]``),
-    appending a fresh block if the header is absent."""
+def _insert_after_header(
+    text: str, table: str, lines: list[str], path: str | Path
+) -> str:
+    """Insert ``lines`` immediately after the ``[table]`` header, tolerating
+    surrounding whitespace and a trailing comment (``[ secrets ]  # note``).
+
+    Raises :class:`ConfigError` when the table is defined without a literal header
+    — an inline table (``secrets = { … }``) or dotted keys (``secrets.X = …``) —
+    since there is no header to merge under and a fresh ``[table]`` block would
+    redefine the key into invalid TOML."""
+    header = re.compile(rf"^\s*\[\s*{re.escape(table)}\s*\]\s*(#.*)?$")
     rows = text.splitlines()
     for idx, row in enumerate(rows):
-        if row.strip() == header:
+        if header.match(row):
             return "\n".join(rows[: idx + 1] + lines + rows[idx + 1 :]) + "\n"
-    return _append_lines(text, lines)
+    raise ConfigError(
+        f"malformed {path}: cannot seed [{table}] — no `[{table}]` header to merge "
+        f"under (inline table or dotted keys?)"
+    )

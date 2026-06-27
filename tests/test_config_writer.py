@@ -135,3 +135,50 @@ def test_plan_policy_seed_raises_on_malformed(tmp_path):
     p.write_text("this is = not valid = toml\n")
     with pytest.raises(config.ConfigError):
         config.plan_policy_seed(p)
+
+
+def test_apply_policy_seed_merges_under_header_with_comment(tmp_path):
+    # A normally-formatted header that carries a trailing comment (and a spaced
+    # variant) must still be found and merged under — not appended at the root.
+    p = tmp_path / ".shipit.toml"
+    p.write_text('[ secrets ]  # my repo secrets\nMY = { env = "MY" }\n')
+    config.apply_policy_seed(p)
+    secrets = {s.name: s for s in config.load_secrets(config.load(p))}
+    assert secrets["MY"].kind == "env"  # preserved
+    assert set(config.SEEDED_APP_SECRETS) <= set(secrets)  # merged in, parses
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        'secrets = "disabled"\n',  # scalar where a table is expected
+        "reviewers = 42\n",  # scalar reviewers
+    ],
+)
+def test_seed_refuses_scalar_policy_value(tmp_path, body):
+    # A scalar `secrets`/`reviewers` can't be merged or re-headed without
+    # redefining the key into invalid TOML — refuse, don't corrupt.
+    p = tmp_path / ".shipit.toml"
+    p.write_text(body)
+    with pytest.raises(config.ConfigError):
+        config.plan_policy_seed(p)
+    with pytest.raises(config.ConfigError):
+        config.apply_policy_seed(p)
+    assert p.read_text() == body  # untouched
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        'secrets = { CODEX_REVIEW_APP_ID = { doppler = "X" } }\n',  # inline table
+        'secrets.CODEX_REVIEW_APP_ID = { doppler = "X" }\n',  # dotted keys
+    ],
+)
+def test_seed_refuses_secrets_without_literal_header(tmp_path, body):
+    # `secrets` IS a table here, but there is no `[secrets]` header to merge the
+    # missing App mappings under — refuse rather than append them at the root.
+    p = tmp_path / ".shipit.toml"
+    p.write_text(body)
+    with pytest.raises(config.ConfigError):
+        config.plan_policy_seed(p)
+    assert p.read_text() == body  # untouched
