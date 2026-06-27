@@ -456,20 +456,20 @@ def test_dismissed_codex_review_does_not_count_done():
     assert CODEX.detect(ctx) == ReviewLifecycle.NOT_REQUESTED
 
 
-def test_local_request_runs_and_posts_via_service(monkeypatch, tmp_path):
-    # PRF01-WS07: the guard is gone — requesting a codex/agy review LAZILY calls
-    # `shipit.review.service.run_and_post` (run the agent over the diff + post as
-    # the bot) and returns True (the review is posted; a local reviewer is never
-    # edge-verified). The service boundary is faked here — no LLM, no network.
+def test_local_request_detaches_via_service(monkeypatch, tmp_path):
+    # OBS03: requesting a codex/agy review LAZILY calls
+    # `shipit.review.service.start_detached_review` (open the in_progress funnel run
+    # + spawn the detached child) and returns True (in-flight; a local reviewer is
+    # never edge-verified). The detach boundary is faked here — no fork, no network.
     from shipit.review import service
 
     calls: list[tuple] = []
 
-    def fake_run_and_post(agent, pr, **kwargs):
+    def fake_start_detached(agent, pr, **kwargs):
         calls.append((agent, pr, kwargs))
-        return {"review": {}, "post": {}, "ctx_repo": None, "pr": pr}
+        return True
 
-    monkeypatch.setattr(service, "run_and_post", fake_run_and_post)
+    monkeypatch.setattr(service, "start_detached_review", fake_start_detached)
     # No `.shipit.toml` in tmp cwd → no per-reviewer model/instructions options.
     monkeypatch.chdir(tmp_path)
 
@@ -484,7 +484,8 @@ def test_local_request_threads_model_and_instructions_from_config(
     monkeypatch, tmp_path
 ):
     # The per-reviewer `model` / `instructions` from `[reviewers]` are read and
-    # threaded into the run (force scope: codex need not be a required gate).
+    # threaded to the detached child (force scope: codex need not be a required
+    # gate).
     from shipit.review import service
 
     (tmp_path / ".shipit.toml").write_text(
@@ -497,11 +498,11 @@ def test_local_request_threads_model_and_instructions_from_config(
 
     captured: dict = {}
 
-    def fake_run_and_post(agent, pr, **kwargs):
+    def fake_start_detached(agent, pr, **kwargs):
         captured.update(kwargs)
-        return {}
+        return True
 
-    monkeypatch.setattr(service, "run_and_post", fake_run_and_post)
+    monkeypatch.setattr(service, "start_detached_review", fake_start_detached)
     assert CODEX.request(3) is True
     assert captured["model"] == "flash"
     # The instructions path is anchored to the config dir (absolute).
@@ -509,15 +510,16 @@ def test_local_request_threads_model_and_instructions_from_config(
 
 
 def test_local_request_normalizes_failure_to_gherror(monkeypatch, tmp_path):
-    # Any backend/auth/post failure is normalized to a clean GhError (the one
-    # error type the CLI renders + exit 1) — never a raw traceback.
+    # Any failure in the synchronous detach (a `gh`/auth failure, a spawn failure)
+    # is normalized to a clean GhError (the one error type the CLI renders + exit
+    # 1) — never a raw traceback.
     from shipit.prstate import ghapi
     from shipit.review import service
 
     def boom(agent, pr, **kwargs):
         raise RuntimeError("backend CLI exploded")
 
-    monkeypatch.setattr(service, "run_and_post", boom)
+    monkeypatch.setattr(service, "start_detached_review", boom)
     monkeypatch.chdir(tmp_path)
 
     with pytest.raises(ghapi.GhError, match="codex-local review failed") as excinfo:
