@@ -253,7 +253,19 @@ def start_detached_review(
         instructions_path=instructions_path,
         as_app=as_app,
     )
-    (spawn or _spawn_detached)(argv)
+    try:
+        (spawn or _spawn_detached)(argv)
+    except Exception:
+        # The spawn is what the child relies on to reach its terminal close. If it
+        # fails AFTER the parent opened the in_progress run, no child will ever
+        # close that run — it would hang `in_progress` forever. Close it as failed
+        # here (only when a run was actually opened), then re-raise so the reviewer
+        # adapter still normalizes the request failure to `GhError`. (This is only
+        # the PARENT-observed spawn failure; the child's own self-resolution
+        # catch-all is OBS03-WS03's deliverable, issue #41.)
+        if run_id is not None:
+            _close_funnel_breadcrumb(agent, repo, run_id, outcome="failed")
+        raise
     logger.info(
         "start_detached_review: agent=%s pr=#%s detached (run id=%s) — in-flight",
         agent,
@@ -324,9 +336,17 @@ def _resolve_target(pr: int) -> tuple[str, str]:
     repo = gh.current_repo()
     raw = gh.pr_view(str(pr), json_fields=["headRefOid"])
     try:
-        head_sha = (json.loads(raw) or {}).get("headRefOid") or ""
+        data = json.loads(raw)
     except json.JSONDecodeError as exc:
         raise gh.GhError(f"unparseable `gh pr view` output for #{pr}: {exc}") from exc
+    # A truthy non-dict (e.g. a JSON list) would AttributeError on `.get`; and a
+    # missing/empty `headRefOid` would silently degrade the breadcrumb create to an
+    # in-flight reply with no target commit. This is the synchronous validation
+    # path, so both are real failures — raise `GhError` (like the unparseable case
+    # above) so the request fails loud instead of degrading.
+    head_sha = data.get("headRefOid") if isinstance(data, dict) else None
+    if not head_sha:
+        raise gh.GhError(f"`gh pr view` output for #{pr} has no headRefOid: {raw!r}")
     return repo, head_sha
 
 
@@ -448,7 +468,7 @@ def _open_funnel_breadcrumb(agent, ctx) -> tuple[int | None, str | None]:
         repo = ctx.repo or gh.current_repo()
     except Exception as exc:  # noqa: BLE001 - the breadcrumb is best-effort, never fatal
         logger.warning(
-            "run_and_post: funnel check run create failed for %s-local "
+            "run_and_post: funnel check run repo resolution failed for %s-local "
             "(continuing to post the review): %s",
             agent,
             exc,
