@@ -7,8 +7,25 @@ fixtures without the network, exercising the exact code `gather()` runs live.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from . import ghapi
-from .model import PullContext, Review, ReviewComment, Thread
+from .model import (
+    PullContext,
+    Review,
+    ReviewComment,
+    ReviewFunnelCheck,
+    Thread,
+)
+
+# The OBS02/ADR-0005 funnel check runs are named `review: <reviewer>` (see
+# `shipit.review.checkrun`). They arrive on the head commit's `statusCheckRollup`
+# alongside the real CI checks, so the build site recognizes this RESERVED name
+# prefix to split them OUT of the CI rollup — keeping the funnel breadcrumbs and
+# the CI-checks gate (`classify_checks`) from crossing. Matching a naming
+# convention is NOT branching on a reviewer's name: every funnel run, for any
+# reviewer, shares this one prefix.
+_FUNNEL_CHECK_PREFIX = "review: "
 
 # `comments(first: 100)` is deliberately un-paginated: the engine gates on a
 # thread's existence + `isResolved` + its root author, all of which live in the
@@ -261,6 +278,10 @@ def gather(pr: int) -> PullContext:
         reactions=ghapi.rest(f"{base}/issues/{pr}/reactions", paginate=True) or [],
         issue_comments=ghapi.rest(f"{base}/issues/{pr}/comments", paginate=True) or [],
         reviewer_rerun=reviewer_rerun(),
+        # Stamp "now" once, at fetch time. The engine NEVER calls a clock — it
+        # reads this off the snapshot — so the wall-clock read lives here, at the
+        # build edge, the same place every other impurity (config, network) does.
+        now=datetime.now(timezone.utc),
     )
 
 
@@ -272,13 +293,22 @@ def context_from_raw(
     reactions: list[dict],
     issue_comments: list[dict],
     reviewer_rerun: dict[str, bool] | None = None,
+    now: datetime | None = None,
 ) -> PullContext:
     """Pure: assemble a `PullContext` from raw gh payloads. No network.
 
     `reviewer_rerun` is the per-reviewer rerun policy (name -> bool) resolved
     from config at the build site; it defaults to empty (every reviewer
     review-once) so a test/fixture context that omits it gets the shipped
-    default behaviour."""
+    default behaviour.
+
+    `now` is the injected wall-clock the snapshot carries (a tz-aware UTC
+    datetime); `gather()` stamps it at fetch time and a test/fixture passes a
+    FIXED value so a recorded snapshot is deterministic. It is a parameter — not
+    a default `datetime.now()` — precisely so the engine stays clock-free: the
+    only "now" the engine ever sees is the one handed in here.
+    """
+    ci_checks, review_funnel = _partition_checks(meta.get("statusCheckRollup") or [])
     return PullContext(
         number=meta["number"],
         head_sha=meta["headRefOid"],
@@ -291,9 +321,43 @@ def context_from_raw(
         reactions=reactions,
         issue_comments=issue_comments,
         requested_logins=_requested_logins(meta.get("reviewRequests") or []),
-        checks=meta.get("statusCheckRollup") or [],
+        checks=ci_checks,
+        review_funnel=review_funnel,
+        now=now,
         reviewer_rerun=reviewer_rerun or {},
     )
+
+
+def _partition_checks(
+    rollup: list[dict],
+) -> tuple[list[dict], list[ReviewFunnelCheck]]:
+    """Split a head-commit status rollup into (CI checks, funnel breadcrumbs).
+
+    The OBS02/ADR-0005 funnel check runs (`review: <reviewer>`) ride the SAME
+    `statusCheckRollup` as the real CI checks. Left in `checks`, a failed
+    `review: codex-local` run (conclusion FAILURE) would make `classify_checks`
+    read the whole CI gate as FAILING — a degraded local review must never block
+    CI. So the funnel runs are lifted out HERE, at the build site: anything whose
+    `name` starts with the reserved `review: ` prefix becomes a
+    `ReviewFunnelCheck`; everything else stays a CI check. Entries without a
+    `name` (legacy StatusContext, keyed by `context`) are CI checks by definition.
+    """
+    ci_checks: list[dict] = []
+    funnel: list[ReviewFunnelCheck] = []
+    for entry in rollup:
+        name = entry.get("name") or ""
+        if name.startswith(_FUNNEL_CHECK_PREFIX):
+            funnel.append(
+                ReviewFunnelCheck(
+                    reviewer=name[len(_FUNNEL_CHECK_PREFIX) :],
+                    status=entry.get("status"),
+                    conclusion=entry.get("conclusion"),
+                    started_at=entry.get("startedAt"),
+                )
+            )
+        else:
+            ci_checks.append(entry)
+    return ci_checks, funnel
 
 
 def _review(raw: dict) -> Review:

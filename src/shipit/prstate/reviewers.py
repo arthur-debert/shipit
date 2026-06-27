@@ -11,7 +11,7 @@ shifts.
 from __future__ import annotations
 
 from . import ghapi
-from .model import PullContext, ReviewLifecycle, Thread
+from .model import PullContext, ReviewFunnelCheck, ReviewLifecycle, Thread
 
 
 class ReviewerAdapter:
@@ -105,6 +105,22 @@ class ReviewerAdapter:
         request mechanism to withdraw from (no-op backends).
         """
         raise NotImplementedError
+
+    def funnel_check(self, ctx: PullContext) -> ReviewFunnelCheck | None:
+        """This reviewer's OBS02/ADR-0005 funnel check-run breadcrumb, if any.
+
+        Base: ``None``. App/native reviewers (Copilot, CodeRabbit, Gemini) source
+        their funnel from native GitHub signals — the ``review_requested`` edge +
+        the review object — not from a shipit-authored check run, so they have no
+        breadcrumb here. Only the LOCAL-agent adapters (codex / agy), which GitHub
+        denies a native requested edge, override this to claim their
+        ``review: <agent>-local`` run off ``ctx.review_funnel``.
+
+        Keeping the reviewer→breadcrumb mapping behind the adapter interface is
+        what lets the engine attach per-reviewer funnel state without ever
+        branching on a reviewer's name — it just asks each adapter.
+        """
+        return None
 
     def authored_threads(self, ctx: PullContext) -> list[Thread]:
         """All threads (resolved or not) rooted in a comment by this reviewer."""
@@ -375,6 +391,27 @@ class _LocalReviewAdapter(ReviewerAdapter):
         same shape a no-mechanism backend uses.
         """
         return False
+
+    def funnel_reviewer_name(self) -> str:
+        """The funnel reviewer name (`codex` → `codex-local`) — the suffix the
+        OBS02 check run is named after (`review: <agent>-local`, ADR-0005). Mirror
+        of `shipit.review.checkrun.reviewer_name`, kept here so prstate reads the
+        funnel without importing the optional `review` extra."""
+        return f"{self.name}-local"
+
+    def funnel_check(self, ctx: PullContext) -> ReviewFunnelCheck | None:
+        """This local reviewer's funnel breadcrumb off `ctx.review_funnel`.
+
+        Matches the `review: <agent>-local` check run by its funnel reviewer name.
+        If several runs carry the name (a re-request that opened a second run, or
+        a stale earlier-head run), the LAST is returned — the rollup lists the
+        head commit's runs and the most recent is the live one. `None` when no
+        funnel run is present (the breadcrumb absent: never run, or the App still
+        lacks `checks:write` before the ADR-0005 re-grant — read as degraded
+        downstream, never as a block)."""
+        target = self.funnel_reviewer_name()
+        matches = [c for c in ctx.review_funnel if c.reviewer == target]
+        return matches[-1] if matches else None
 
 
 class CodexAdapter(_LocalReviewAdapter):

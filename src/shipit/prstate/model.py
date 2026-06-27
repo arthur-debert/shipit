@@ -9,6 +9,7 @@ without touching the network.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import StrEnum
 
 
@@ -84,6 +85,32 @@ class Review:
     body: str
 
 
+@dataclass(frozen=True)
+class ReviewFunnelCheck:
+    """One OBS02/ADR-0005 funnel breadcrumb: the App-authored ``review: <reviewer>``
+    check run that stands in for the ``review_requested`` edge GitHub denies a
+    local-agent bot.
+
+    A local reviewer (``codex-local`` / ``agy-local``) has no native pre-post
+    signal, so shipit opens a check run named ``review: <reviewer>`` at kickoff
+    (``status=in_progress``, ``started_at=now``) and closes it to a terminal
+    ``conclusion`` at completion. This dataclass carries that run's RAW state off
+    the head commit's status rollup. The funnel-STATE normalization
+    (requested / in-flight / posted / failed / empty / timed-out) and the
+    wait-window ageing of ``started_at`` are OBS04-WS02 / WS03 — WS01 only carries
+    the breadcrumb so those workstreams read structure, not prose.
+
+    Field names/casing mirror the gh ``statusCheckRollup`` CheckRun node the run
+    arrives on: ``status`` (e.g. ``IN_PROGRESS`` / ``COMPLETED``), ``conclusion``
+    (``SUCCESS`` / ``FAILURE`` / ``TIMED_OUT`` / ``NEUTRAL`` / ...), ``startedAt``.
+    """
+
+    reviewer: str  # the funnel reviewer name, e.g. "codex-local"
+    status: str | None  # gh CheckRun status (COMPLETED ⇒ terminal; else in flight)
+    conclusion: str | None  # terminal conclusion, or None while in flight
+    started_at: str | None  # ISO-8601 tz-aware; WS03 ages the wait window against it
+
+
 @dataclass
 class PullContext:
     """Snapshot of all raw GitHub state the engine reads for one PR.
@@ -104,6 +131,19 @@ class PullContext:
     issue_comments: list[dict] = field(default_factory=list)  # Gemini bot comments
     requested_logins: list[str] = field(default_factory=list)
     checks: list[dict] = field(default_factory=list)  # gh statusCheckRollup entries
+    # The OBS02/ADR-0005 local-review funnel breadcrumbs: the App-authored
+    # `review: <reviewer>` check runs, lifted OUT of the CI `checks` rollup above
+    # at the build site so a failed `review: codex-local` run can never make the
+    # CI-checks gate (`classify_checks`) read FAILING — the two concerns ride the
+    # SAME `statusCheckRollup` on the wire but must not cross (see `fetch`). WS01
+    # carries the raw breadcrumbs; OBS04-WS02/WS03 normalize + age them.
+    review_funnel: list[ReviewFunnelCheck] = field(default_factory=list)
+    # Injected wall-clock "now" (tz-aware UTC). The engine is a pure, stateless
+    # function snapshot -> state and NEVER calls a clock itself; `gather()` stamps
+    # this at fetch time and a test/fixture supplies a FIXED value, so a recorded
+    # snapshot + a fixed "now" yields a deterministic state. WS01 only carries it;
+    # OBS04-WS03 reads it to age the per-reviewer wait window.
+    now: datetime | None = None
     # Per-reviewer rerun policy (name -> rerun flag), resolved from config at the
     # build site (`fetch`/the CLI). rerun=True means head-strict (re-review every
     # push); rerun=False (the DEFAULT for any reviewer absent here) means

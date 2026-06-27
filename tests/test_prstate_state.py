@@ -304,6 +304,7 @@ def test_status_to_dict_round_trips(context):
         "mergeable",
         "cycles",
         "breaker",
+        "reviewer_funnel",
     }
 
 
