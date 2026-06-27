@@ -38,10 +38,14 @@ from . import ghauth
 #: installation token is NEVER passed to a record — only the run's identity facts.
 logger = logging.getLogger("shipit.review")
 
-#: The check-run ``status`` values that mean a run is still IN FLIGHT (not yet
-#: closed to a terminal ``conclusion``). The idempotency read (:func:`find_nonterminal`)
-#: reconciles a re-request against a run in one of these states.
-_NONTERMINAL_STATUSES = frozenset({"queued", "in_progress"})
+#: ``completed`` is the SOLE terminal check-run status: a run is finished exactly
+#: when GitHub closes it to ``status=completed`` (the only state that carries a
+#: non-null ``conclusion``). Every other status the Checks API can surface —
+#: ``queued`` / ``in_progress`` / ``waiting`` / ``requested`` / ``pending`` — means
+#: the run is still IN FLIGHT. The idempotency read (:func:`find_nonterminal`)
+#: defines non-terminal as ``status != "completed"`` so a re-request reconciles
+#: against ANY unfinished run, not just the two states we happen to open with.
+_TERMINAL_STATUS = "completed"
 
 
 def reviewer_name(agent: str) -> str:
@@ -157,8 +161,9 @@ def find_nonterminal(agent: str, repo: str, head_sha: str) -> int | None:
     than open a second one that double-posts. This GETs the check runs named
     ``review: <reviewer>`` on the head commit (filtered server-side by
     ``check_name``) and returns the id of the FIRST whose ``status`` is non-terminal
-    (``queued`` / ``in_progress``); ``None`` when none is in flight (all terminal or
-    absent), so the caller proceeds to open + spawn a fresh run.
+    (anything but ``completed`` — ``queued`` / ``in_progress`` / ``waiting`` /
+    ``requested`` / ``pending``); ``None`` when none is in flight (all ``completed``
+    or absent), so the caller proceeds to open + spawn a fresh run.
 
     Authored over the SAME App installation-token boundary as :func:`create` /
     :func:`transition` (so the run is read AS the reviewer's App, the identity that
@@ -181,7 +186,7 @@ def find_nonterminal(agent: str, repo: str, head_sha: str) -> int | None:
     response = gh.rest(path, token=token)
     runs = response.get("check_runs") if isinstance(response, dict) else None
     for run in runs or []:
-        if isinstance(run, dict) and run.get("status") in _NONTERMINAL_STATUSES:
+        if isinstance(run, dict) and run.get("status") != _TERMINAL_STATUS:
             run_id = run.get("id")
             if run_id is not None:
                 logger.info(

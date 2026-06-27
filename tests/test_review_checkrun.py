@@ -297,6 +297,24 @@ def test_find_nonterminal_returns_id_for_in_progress_run(monkeypatch):
     assert "check_name" in seen["path"]
 
 
+@pytest.mark.parametrize("status", ["waiting", "requested", "pending", "queued"])
+def test_find_nonterminal_returns_id_for_other_unfinished_statuses(monkeypatch, status):
+    """`completed` is the SOLE terminal status — every other status the Checks API
+    can surface (`waiting` / `requested` / `pending` / `queued`) is still IN FLIGHT.
+    A run in any of them must reconcile as in-flight so reconcile catches it instead
+    of opening + spawning a DUPLICATE review."""
+    _fake_token(monkeypatch, {})
+    monkeypatch.setattr(
+        checkrun.gh,
+        "rest",
+        lambda path, *, method=None, body=None, token=None: {
+            "total_count": 1,
+            "check_runs": [{"id": 4242, "status": status, "conclusion": None}],
+        },
+    )
+    assert checkrun.find_nonterminal("codex", "owner/repo", "deadbeef") == 4242
+
+
 def test_find_nonterminal_returns_none_for_terminal_run(monkeypatch):
     """A run that has already CLOSED (status=completed) is terminal, not in flight —
     `find_nonterminal` returns None so the caller opens a fresh run."""

@@ -375,14 +375,22 @@ def run_detached_review(
             _close_funnel_breadcrumb(
                 agent, repo, run_id, outcome="failed", detail=str(exc)
             )
-        logger.warning(
-            "run_detached_review: agent=%s pr=#%s resolve failed — closed run %s "
-            "as failed: %s",
-            agent,
-            pr,
-            run_id,
-            exc,
-        )
+            logger.warning(
+                "run_detached_review: agent=%s pr=#%s resolve failed — closed run "
+                "%s as failed: %s",
+                agent,
+                pr,
+                run_id,
+                exc,
+            )
+        else:
+            logger.warning(
+                "run_detached_review: agent=%s pr=#%s resolve failed — no run to "
+                "close (parent opened none): %s",
+                agent,
+                pr,
+                exc,
+            )
         raise
     result = _generate_post_and_close(
         agent,
