@@ -224,6 +224,9 @@ def test_start_detached_closes_run_when_spawn_fails(monkeypatch):
     assert patches[0]["path"] == "/repos/owner/repo/check-runs/555"
     assert patches[0]["body"]["status"] == "completed"
     assert patches[0]["body"]["conclusion"] == "failure"
+    # The spawn failure's reason is recorded in the close (detail=str(exc)), so the
+    # check-run output carries WHY it failed — consistent with the resolve path.
+    assert "cannot fork" in patches[0]["body"]["output"]["summary"]
 
 
 def test_start_detached_spawn_failure_with_no_run_just_reraises(monkeypatch):

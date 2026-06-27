@@ -225,7 +225,7 @@ def start_detached_review(
     )
     try:
         (spawn or _spawn_detached)(argv)
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 - any spawn failure must still close the run
         # The spawn is what the child relies on to reach its terminal close. If it
         # fails AFTER the parent opened the in_progress run, no child will ever
         # close that run — it would hang `in_progress` forever. Close it as failed
@@ -234,7 +234,9 @@ def start_detached_review(
         # the PARENT-observed spawn failure; the child's own self-resolution
         # catch-all is OBS03-WS03's deliverable, issue #41.)
         if run_id is not None:
-            _close_funnel_breadcrumb(agent, repo, run_id, outcome="failed")
+            _close_funnel_breadcrumb(
+                agent, repo, run_id, outcome="failed", detail=str(exc)
+            )
         raise
     logger.info(
         "start_detached_review: agent=%s pr=#%s detached (run id=%s) — in-flight",
