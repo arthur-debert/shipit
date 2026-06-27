@@ -69,7 +69,12 @@ The shipit-authored signal that stands in for the `review_requested` edge GitHub
 denies a **local-agent reviewer** — a GitHub Check Run authored by the reviewer's
 own App. Opened `in_progress` (with an honest `started_at`) when the review is
 requested, transitioned to a terminal conclusion (success / failure / timed_out)
-when it settles. The PR + this check run are the WHOLE store — no daemon, no local
+when it settles. The funnel's *empty* outcome — a degraded non-delivery, NOT a
+clean zero-findings review (which posts as success) — is carried as conclusion
+`failure` with an explicit `empty` reason in the run's output, so the distinct
+terminal outcome the **Review funnel** lists survives the narrower check-run
+conclusion vocabulary (see `_FUNNEL_TERMINAL` in `review/service.py`). The PR +
+this check run are the WHOLE store — no daemon, no local
 job state — so the engine stays stateless and any reader recovers the funnel
 straight from the PR. (ADR-0005.)
 
