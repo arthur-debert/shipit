@@ -85,13 +85,10 @@ def _emit(status: TaskStatus, *, as_json: bool = False) -> None:
     # codex-local failed)" — so the one line a reader scans already carries the
     # warning (ADR-0006: a degraded PR is never silently "fine"). The full set is
     # also listed on its own line for legibility when several reviewers degraded.
-    degraded_note = ""
-    if status.degraded:
-        degraded_note = (
-            " (degraded: "
-            + ", ".join(f"{name} {reason}" for name, reason in status.degraded.items())
-            + ")"
-        )
+    degraded_list = ", ".join(
+        f"{name} {reason}" for name, reason in status.degraded.items()
+    )
+    degraded_note = f" (degraded: {degraded_list})" if status.degraded else ""
     print(f"PR #{status.pr}")
     print(f"state:      {status.state.value}{degraded_note}")
     print(f"next:       {status.next_action}")
@@ -101,9 +98,6 @@ def _emit(status: TaskStatus, *, as_json: bool = False) -> None:
     print(f"mergeable:  {status.mergeable}")
     print(f"cycles:     {status.cycles}")
     if status.degraded:
-        degraded_list = ", ".join(
-            f"{name} {reason}" for name, reason in status.degraded.items()
-        )
         print(f"degraded:   {degraded_list}")
     if status.breaker:
         print(f"breaker:    {status.breaker}")

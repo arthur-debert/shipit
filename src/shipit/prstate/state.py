@@ -542,7 +542,8 @@ def _reviews_pending_action(
         )
     if waiting_names:
         clauses.append(
-            f"wait (already requested on the current head): {', '.join(waiting_names)}"
+            "wait (already requested / in flight on the current head): "
+            f"{', '.join(waiting_names)}"
         )
 
     all_names = [a.name for a in pending]

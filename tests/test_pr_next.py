@@ -194,7 +194,7 @@ def test_next_request_act_skips_already_requested_reviewer(
             next_action=(
                 "waiting on required review(s): copilot, coderabbit — "
                 "request for the current head: copilot; "
-                "wait (already requested on the current head): coderabbit"
+                "wait (already requested / in flight on the current head): coderabbit"
             ),
             pr=ctx,
             reviewers={"copilot": "not_requested", "coderabbit": "requested"},
