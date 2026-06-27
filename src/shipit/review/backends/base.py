@@ -16,8 +16,16 @@ concerns so `--dry-run` is honest:
 
 from __future__ import annotations
 
+import logging
 import shutil
 from abc import ABC, abstractmethod
+
+#: The review path's logger — a child of the package ``shipit`` logger, so a record
+#: here reaches the OBS01 per-repo file sink (DEBUG-verbose). This is the ONE site
+#: that sees the agent's full raw stdout on EVERY local-agent run (every backend's
+#: ``run`` parses through :func:`parse_review_output`), so the durable raw-output
+#: audit trail (#75) is logged here rather than at the per-backend call sites.
+logger = logging.getLogger("shipit.review")
 
 #: How much of the raw agent output to echo back in a parse-failure message —
 #: enough to see the head and tail (where a truncation marker lives) without
@@ -40,7 +48,17 @@ class BackendError(RuntimeError):
     Raised when ``extract_json`` can't parse the agent's stdout (truncated /
     non-JSON output — commonly an agent timeout). Subclasses ``RuntimeError``
     so ``_LocalReviewAdapter.request`` already normalizes it to ``GhError``
-    (clean error + exit 1, never a raw traceback)."""
+    (clean error + exit 1, never a raw traceback).
+
+    Carries the FULL raw agent stdout on ``raw`` (the message itself keeps only a
+    head/tail snippet, the PR-surface budget). The service layer reads ``raw`` to
+    SALVAGE content-but-unparseable output as a top-level review comment (#76) —
+    so the agent's prose isn't dropped just because its JSON was truncated."""
+
+    def __init__(self, *args: object, raw: str = "") -> None:
+        super().__init__(*args)
+        #: The full raw agent stdout (empty when there was nothing to salvage).
+        self.raw = raw
 
 
 def parse_review_output(stdout: str, *, backend_name: str = "the agent") -> dict:
@@ -61,10 +79,30 @@ def parse_review_output(stdout: str, *, backend_name: str = "the agent") -> dict
     # of an import-order issue and matches the lazy style used elsewhere.
     from ..schema import extract_json
 
+    raw = stdout or ""
     try:
-        return extract_json(stdout)
+        review = extract_json(stdout)
     except ValueError as exc:
-        raw = stdout or ""
+        snippet = (
+            f"{raw[:_SNIPPET]} … {raw[-_SNIPPET:]}" if len(raw) > 2 * _SNIPPET else raw
+        )
+        # Parse FAILED (#75). The user-facing surfaces (console handler WARNING+, the
+        # CI handler) get only the short SNIPPET — the full raw must not dump to a
+        # terminal / CI job log. The FULL raw — the durable 'why' a truncation/invalid
+        # -JSON failure needs — goes to DEBUG only, which the always-DEBUG OBS01 file
+        # sink still captures. So: snippet on every surface, full raw in the file sink.
+        logger.warning(
+            "review parse failed for %s — agent returned UNPARSEABLE output "
+            "(%d chars); snippet: %s",
+            backend_name,
+            len(raw),
+            snippet,
+        )
+        logger.debug(
+            "review parse failed for %s — full raw stdout follows:\n%s",
+            backend_name,
+            raw,
+        )
         if _TIMEOUT_MARKER in raw.lower():
             hint = (
                 f"{backend_name} timed out before returning a complete review — "
@@ -75,10 +113,18 @@ def parse_review_output(stdout: str, *, backend_name: str = "the agent") -> dict
                 "the agent returned no parseable JSON (it may have timed out or "
                 "been truncated) — try a faster model or a smaller diff"
             )
-        snippet = (
-            f"{raw[:_SNIPPET]} … {raw[-_SNIPPET:]}" if len(raw) > 2 * _SNIPPET else raw
-        )
-        raise BackendError(f"{hint}\nraw output: {snippet}") from exc
+        # Attach the full raw so the service can SALVAGE it (#76); the message keeps
+        # only the snippet (the PR-surface / terminal budget).
+        raise BackendError(f"{hint}\nraw output: {snippet}", raw=raw) from exc
+    # Parse OK. Log the full raw at DEBUG — the always-on audit trail (#75) of what
+    # the agent actually emitted, durable in the file sink for every run.
+    logger.debug(
+        "review parsed for %s — agent returned %d chars; full raw stdout follows:\n%s",
+        backend_name,
+        len(raw),
+        raw,
+    )
+    return review
 
 
 class Backend(ABC):

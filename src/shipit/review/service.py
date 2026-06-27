@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import subprocess
 import sys
 from collections.abc import Callable, Sequence
@@ -142,6 +143,13 @@ def _generate_post_and_close(
         # empty output is the degraded "empty" non-delivery (-> failure, NOT
         # success — distinct from a clean zero-findings review which posts).
         outcome = "timed_out" if _TIMEOUT_MARKER in str(exc).lower() else "empty"
+        # SALVAGE (#76): the agent produced CONTENT but unparseable JSON — don't
+        # drop it. Post the raw text as a single top-level comment so the human
+        # still gets the feedback and the failure is debuggable from the PR. This is
+        # ADDITIVE and best-effort: the funnel still records the degraded `outcome`
+        # below (the salvage NEVER flips the run to success), and a degraded local
+        # review stays non-blocking (ADR-0006).
+        _maybe_post_salvage(agent, ctx, exc, as_app=as_app, dry_run=dry_run)
         _close_funnel_breadcrumb(
             agent, run_repo, run_id, outcome=outcome, detail=str(exc)
         )
@@ -158,6 +166,103 @@ def _generate_post_and_close(
     # fired unchanged; now close the funnel run to completed/success.
     _close_funnel_breadcrumb(agent, run_repo, run_id, outcome="success")
     return {"review": review, "post": result, "ctx_repo": ctx.repo, "pr": ctx.number}
+
+
+#: Cap on the salvaged raw text posted to a PR comment. GitHub's review-body limit
+#: is 65536 chars; stay well under it to leave room for the marker + code fences.
+_SALVAGE_MAX = 60000
+
+
+def _safe_fence(content: str) -> str:
+    """A backtick fence guaranteed to CONTAIN ``content`` — never closed early by it.
+
+    CommonMark ends a fenced code block only on a line whose backtick run is at least
+    as long as the opening run, so a fence of ``max_backtick_run + 1`` backticks
+    (floor 3, the CommonMark minimum) cannot be closed by anything inside ``content``.
+    Untrusted agent output routinely carries ```` ``` ```` fences (the very ```json
+    blocks ``extract_json`` tolerates); a FIXED ``` fence would close early, breaking
+    the rendering AND — worse — letting the remaining raw render as LIVE GitHub
+    markdown (stray headings / mentions / links / checkboxes — an injection surface).
+    A delimiter longer than any run in the content fixes both at once: fenced content
+    is literal, so nothing inside it can fire.
+    """
+    longest_run = max((len(m) for m in re.findall(r"`+", content)), default=0)
+    return "`" * max(3, longest_run + 1)
+
+
+def _salvage_body(agent: str, raw: str) -> tuple[str, bool]:
+    """Build the salvage comment body from the agent's raw output — (body, truncated).
+
+    A clear marker that the STRUCTURED parse failed (so a reader never mistakes the
+    raw dump for a normal review), then the raw text in a fenced block. The fence is
+    sized by :func:`_safe_fence` to be longer than any backtick run in the raw, so the
+    untrusted output is fully CONTAINED — it can't close the fence early and leak as
+    live markdown. Truncated to :data:`_SALVAGE_MAX` with an explicit note when the
+    output is huge, so the post never trips GitHub's comment-size limit.
+    """
+    marker = (
+        f"⚠️ {agent}'s structured review could not be parsed "
+        "(truncated/invalid JSON); raw response below:"
+    )
+    truncated = len(raw) > _SALVAGE_MAX
+    shown = raw[:_SALVAGE_MAX]
+    note = "\n\n_(raw response truncated)_" if truncated else ""
+    fence = _safe_fence(shown)
+    return f"{marker}\n\n{fence}\n{shown}\n{fence}{note}", truncated
+
+
+def _maybe_post_salvage(
+    agent: str, ctx, exc: BackendError, *, as_app: bool, dry_run: bool
+) -> None:
+    """Post unparseable-but-non-empty agent output as a top-level review COMMENT (#76).
+
+    When a local agent returns CONTENT but JSON we couldn't parse, the structured
+    review is lost — but the prose is still valuable. Rather than drop it, post it as
+    ONE top-level comment (a synthetic ``COMMENT`` review: no inline comments, the
+    raw text in the body) prefixed with a marker that the structured parse failed.
+
+    The funnel outcome is recorded SEPARATELY by the caller and stays degraded — this
+    only preserves the content; it never flips the run to success. Best-effort, like
+    the funnel breadcrumb: a genuinely EMPTY stdout (nothing on ``exc.raw``) posts
+    nothing, and a post failure here is logged and swallowed so it never masks the
+    real ``BackendError`` the caller re-raises. The event is forced to ``COMMENT``
+    (there is no parsed status, so this must never APPROVE / REQUEST_CHANGES).
+    """
+    raw = (getattr(exc, "raw", "") or "").strip()
+    if not raw:
+        # Genuinely empty — there is nothing to salvage; behave exactly as before.
+        return
+    body, truncated = _salvage_body(agent, raw)
+    review = {
+        "summary": {"status": "COMMENT", "overall_feedback": body},
+        "comments": [],
+    }
+    try:
+        post.post_review(
+            review,
+            ctx,
+            agent_name=agent,
+            event="COMMENT",
+            dry_run=dry_run,
+            as_app=as_app,
+        )
+        logger.info(
+            "salvaged unparseable %s review for %s#%s as a top-level comment "
+            "(%d raw chars%s) — funnel still records the degraded outcome",
+            agent,
+            ctx.repo,
+            ctx.number,
+            len(raw),
+            ", truncated" if truncated else "",
+        )
+    except Exception as post_exc:  # noqa: BLE001 - salvage is best-effort, never fatal
+        logger.warning(
+            "could not post salvage comment for %s#%s (the degraded outcome is "
+            "still recorded; the original review error still propagates): %s",
+            ctx.repo,
+            ctx.number,
+            post_exc,
+        )
 
 
 def start_detached_review(
