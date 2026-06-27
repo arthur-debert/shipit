@@ -172,6 +172,7 @@ def test_reviewer_funnel_serializes_to_dict(context):
     funnel = d["reviewer_funnel"]
     assert funnel["codex"] == {
         "lifecycle": "not_requested",
+        "state": "failed",
         "check_status": "COMPLETED",
         "check_conclusion": "FAILURE",
         "check_started_at": "2026-01-01T00:00:00Z",

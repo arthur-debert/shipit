@@ -305,6 +305,7 @@ def test_status_to_dict_round_trips(context):
         "cycles",
         "breaker",
         "reviewer_funnel",
+        "degraded",
     }
 
 

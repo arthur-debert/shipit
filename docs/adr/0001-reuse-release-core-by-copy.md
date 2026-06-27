@@ -29,9 +29,12 @@ here, so a future re-copy knows what NOT to clobber:
 
 - **OBS04 (`prstate/state.py` `TaskStatus`)** — `TaskStatus` is extended with
   `reviewer_funnel`: structured per-reviewer funnel data (the native
-  `ReviewLifecycle` paired with the OBS02/ADR-0005 funnel check-run breadcrumb).
-  The snapshot (`PullContext`) likewise gains `review_funnel` + an injected `now`.
-  This lets the OBS04 readiness engine consume the funnel and lets `pr next` route
-  on structured state rather than `next_action` prose (issue #24.1). Upstream
-  release-core has none of these fields. See ADR-0006 and the module note in
-  `prstate/state.py`.
+  `ReviewLifecycle` paired with the OBS02/ADR-0005 funnel check-run breadcrumb,
+  plus the WS02 normalized `FunnelState`), and with `degraded`: the set of required
+  reviewers settled at a non-success terminal outcome (failed / empty / timed-out),
+  surfaced loud but non-blocking. The snapshot (`PullContext`) likewise gains
+  `review_funnel` + an injected `now`. This lets the OBS04 readiness engine redefine
+  the gate over *settled* (outcome-recorded, not review-succeeded) and lets
+  `pr next` route on structured state rather than `next_action` prose (issue #24.1).
+  Upstream release-core has none of these fields. See ADR-0006 and the module note
+  in `prstate/state.py`.

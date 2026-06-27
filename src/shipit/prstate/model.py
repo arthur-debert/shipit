@@ -23,6 +23,44 @@ class ReviewLifecycle(StrEnum):
     DONE_COMMENTS = "done_comments"  # finished, left comments
 
 
+class FunnelState(StrEnum):
+    """The ONE normalized funnel view per reviewer the OBS04 gate reads (ADR-0006).
+
+    The engine folds BOTH native reviewer signals (an App reviewer's
+    ``review_requested`` edge + its review object, via ``ReviewLifecycle``) AND the
+    OBS02/ADR-0005 check-run breadcrumb (a local-agent reviewer's
+    ``review: <agent>-local`` run) into this single per-reviewer state, read
+    uniformly across reviewer kinds. The mapping lives behind the adapter interface
+    (`ReviewerAdapter.funnel_state`), so the engine never branches on a reviewer's
+    name — it just asks each adapter for its funnel state and gates on the result.
+
+    The states split into three gate verdicts (OBS04-WS02):
+
+      * **holds** the PR at reviews-pending — ``NEVER_REQUESTED`` (start the loop)
+        and ``IN_FLIGHT`` (a review is legitimately coming; WS03 splits this into
+        within-window=holds vs past-window→``TIMED_OUT``). ``REQUESTED`` is the App
+        reviewer's pre-review hold (the request edge placed, no review yet).
+      * **settled, blocking-on-threads** — ``POSTED``: a review actually landed
+        (incl. a clean zero-findings review *and* a salvaged COMMENT); its threads
+        gate until resolved.
+      * **settled, NON-blocking + degraded** — ``FAILED`` / ``EMPTY`` /
+        ``TIMED_OUT``: a recorded terminal outcome that is NOT a delivered review.
+        It settles (does not hold Ready) but is surfaced loud as *degraded* so the
+        state is never silently "fine."
+
+    "Settled" is therefore *outcome-recorded*, not *review-succeeded*: every state
+    except the three holds is a recorded terminal outcome.
+    """
+
+    NEVER_REQUESTED = "never_requested"  # no signal at all → holds (start the loop)
+    REQUESTED = "requested"  # App request edge placed, no review yet → holds
+    IN_FLIGHT = "in_flight"  # a review is running → holds (WS03 ages the window)
+    POSTED = "posted"  # a review landed → settled, threads gate
+    FAILED = "failed"  # the run errored → settled, degraded (non-blocking)
+    EMPTY = "empty"  # nothing parseable returned → settled, degraded
+    TIMED_OUT = "timed_out"  # exceeded the wait window → settled, degraded
+
+
 @dataclass(frozen=True)
 class ReviewComment:
     """One inline review comment (REST `databaseId` is the stable handle).
