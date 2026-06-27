@@ -200,12 +200,15 @@ The PR lifecycle (draft -> ready -> stop):
     fresh-shepherd-per-round are NOT epic-specific — they are [#1.3], applied
     here per workstream.
 
-    Before execution, a new feature is planned through shipit's design skills:
-    `/shipt-grill-with-docs` lands the CONTEXT.md / ADR changes,
-    `/shipt-to-prd` writes the PRD under `docs/prd/` and opens the epic
-    tracker issue, and `/shipt-to-issues` turns the PRD into Work Streams
-    (each a vertical slice, a sub-issue of the epic, with blocked-by
-    dependencies).
+    Before execution, a new feature is planned through shipit's `/shipt-planning`
+    skill, which conducts the design skills in two legs. Feature planning:
+    `/shipt-grill-with-docs` lands the CONTEXT.md / ADR changes, then
+    `/shipt-to-prd` writes the PRD — the authoritative feature spec — under
+    `docs/prd/`; the ADRs + PRD are locked by a reviewed docs PR. Issue planning
+    (often a later session): `/shipt-to-issues` turns the PRD into the epic
+    tracker issue(s) and their Work Stream sub-issues (each a vertical slice,
+    with blocked-by dependencies). The PRD is the spec; the epic issue is an
+    execution tracker that summarizes it and points to the PRD + ADRs.
 
     2.1. Information gathering
 
