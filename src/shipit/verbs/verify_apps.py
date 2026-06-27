@@ -163,4 +163,7 @@ def run(repo: str | None, *, agents: list[str] | None = None, mint=None) -> int:
     selected = agents or known_agents()
     results = [verify_app(agent, target, mint=mint) for agent in selected]
     print(format_report(target, results))
-    return 0 if all(r.live for r in results) else 1
+    # An empty probe set is NOT a pass: `all([])` is True, but a gate with nothing
+    # verified must fail (and `format_report` already renders empty as NOT LIVE).
+    # Mirror that verdict so the exit code and the printed report never disagree.
+    return 0 if (bool(results) and all(r.live for r in results)) else 1

@@ -106,6 +106,18 @@ def test_run_exits_nonzero_when_any_app_not_live(capsys):
     assert verify_apps.PROVISIONING_DOC in out
 
 
+def test_run_exits_nonzero_when_probe_set_is_empty(capsys, monkeypatch):
+    """An empty probe set must FAIL the gate, not pass via `all([])` being True.
+
+    The exit code and the printed verdict must agree: with nothing verified,
+    `format_report` renders NOT LIVE, so `run` must also return non-zero.
+    """
+    monkeypatch.setattr(verify_apps, "known_agents", list)
+    rc = verify_apps.run("owner/repo", mint=_mint_live)
+    assert rc == 1
+    assert "NOT LIVE" in capsys.readouterr().out
+
+
 def test_run_can_narrow_to_one_agent(capsys):
     """`agents=[...]` probes only the named App(s)."""
     rc = verify_apps.run("owner/repo", agents=["codex"], mint=_mint_live)
