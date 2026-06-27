@@ -21,9 +21,16 @@ the map KEYS are the required reviewers (all must be DONE to flip Ready). The
 options:
 
   * `rerun` (bool, default **False**) — whether the reviewer re-reviews every
-    new head (consumed now by the engine).
-  * `model` / `instructions` — parsed + validated now but RESERVED for the
-    deferred local-agent review step; they do not affect this epic's behaviour.
+    new head (consumed by the engine).
+  * `window` (duration, default **20m**) — the per-reviewer readiness wait
+    window (OBS04-WS03): how long the engine waits for an in-flight review to
+    ARRIVE before ageing it to *timed-out* → settled. Threaded onto the snapshot
+    via `reviewer_window`.
+  * `timeout` (duration) — the agent-execution cap on a local review's model
+    RUN; distinct from `window` (arrival deadline vs run cap). Consumed by the
+    local-agent review path, not the engine.
+  * `model` / `instructions` — free-form strings consumed by the local-agent
+    review RUN path (`reviewer_run_options`); they do not affect the engine gate.
 
 The `[reviewers]` value is TABLE-ONLY: a list/array form (`reviewers =
 ["copilot", "codex"]`) is REJECTED loud, not silently accepted. The required

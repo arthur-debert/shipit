@@ -15,28 +15,27 @@ the roadmap:
 - Step 2 — install + reconciliation → `docs/prd/install-reconciliation.md`
 - Step 3 — lint / fmt gate → `docs/prd/lint-gate.md`
 - Step 4 — PR flow (PRF01) → `docs/prd/prf01-pr-flow.md`
+- OBS01 — logging foundation → `docs/prd/obs01-logging.md`
+- OBS02 — review funnel → `docs/prd/obs02-review-funnel.md`
+- OBS03 — async local-review execution → `docs/prd/obs03-async-review.md`
+- OBS04 — readiness engine consumes the funnel → `docs/prd/obs04-readiness-engine.md`
+- FLU01 — PRF01 review follow-ups → `docs/prd/flu01-prf01-followups.md`
 
-## Active plan — observability first, then rollout
+## Active plan — rollout
 
-The PR-review path today is synchronous and blocking, with zero logging and no durable
-record of the review funnel on the PR itself. When a review is broken, absent, empty, or
-times out, none of those outcomes is distinguishable from "never requested" — so a PR can
-silently park with no signal to anyone about why. The fix is an observability spine that
-makes the PR itself the source of truth: piggyback GitHub as the state store (bot comments +
-timestamps), with no daemon and no local state to keep in sync. Only once the funnel is
-observable does gating-by-default become safe to turn on, which is why rollout (INS01)
-sits at the end of the spine rather than the front.
+The observability spine (OBS01 → OBS04) is shipped: logging, uniform funnel breadcrumbs,
+async local execution, and a readiness engine that reads the breadcrumbs + timestamps and
+gates on "requested + outcome-recorded + threads-resolved", NOT "the review succeeded"
+(degraded reviewers are visible-but-non-blocking; the dispatcher routes on structured
+`TaskStatus` data, not `next_action` prose). With the funnel observable, gating-by-default
+is now safe to roll out — which is why rollout (INS01) sits at the end of the spine rather
+than the front.
 
 | Epic | Delivers | Depends on |
 | --- | --- | --- |
-| OBS01 | Logging foundation — real `logging`, a predictable bounded file sink + level control + quiet CLI default + a CI sink. | — |
-| OBS02 | Uniform funnel breadcrumbs on the PR — bot comments for requested / arrived / failed / empty, timestamped, isomorphic across app and local reviewers. | OBS01 |
-| OBS03 | Async local execution — fire-and-forget detached run that posts result/failure back to the PR; the request returns immediately. No daemon, no local state. | OBS02 |
-| OBS04 | State machine consumes the new info — reads breadcrumbs + timestamps, applies a wait window (per-backend, 20m global fallback); the Ready gate is "requested + outcome-recorded + threads-resolved", NOT "the review succeeded". Degraded reviewers are visible-but-non-blocking. Absorbs the deferred dispatcher finding (route on structured `TaskStatus` data, not on `next_action` prose). | OBS02, OBS03 |
-| FLU01 | Small follow-ups from the PRF01 review (issue #24): graphql() doc-scope note; review diff stale-base hardening; pixi `review` extra (pyjwt) materialized in the env; configurable per-backend review timeout. | — (free-floating) |
 | INS01 | Install integration (#25): carry the `[reviewers]` policy + codex/agy App `[secrets]` mappings + pr-loop AGENTS/skills into consumers via the managed set. Plus local-reviewer rollout (#26): per-consumer App-liveness verification + gating. Safe only after OBS04. | OBS04 |
 
-Dependency spine: OBS01 → OBS02 → OBS03 → OBS04 → INS01; FLU01 is independent.
+Dependency spine: OBS01 → OBS02 → OBS03 → OBS04 → INS01 (OBS01–OBS04 shipped); FLU01 (shipped) was independent.
 
 ## Postponed
 
