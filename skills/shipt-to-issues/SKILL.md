@@ -53,7 +53,7 @@ Ask the user:
 - Are the dependency relationships correct?
 - Should any WS be merged or split further?
 
-Iterate until the user approves the breakdown.
+Iterate until the user approves the breakdown. Before publishing, confirm the human-assigned epic code(s) (`THEME+NN`, e.g. `OBS04`) for every epic — do not invent one. Without a confirmed code there is no valid `<EPIC>` for the epic and WS titles.
 
 ### 5. Publish the epic(s) and Work Streams to the issue tracker
 
@@ -61,7 +61,7 @@ Work one epic at a time. For each approved epic:
 
 **a. Create the epic umbrella issue first.** This is the **execution tracker**, not the spec — use the epic template below. Title: `<REPO>-<EPIC>: Epic: <Epic Name>`. It carries a summary of the PRD, pointers to the authoritative PRD (`docs/prd/…`) and the relevant ADRs, and the WS list/topology. Apply the correct triage label unless instructed otherwise.
 
-**b. Then publish its Work Streams** as sub-issues of that epic umbrella (formal sub-issue links improve progress tracking in the GitHub UI). Use the WS body template below. These are considered ready for AFK agents, so publish them with the correct triage label unless instructed otherwise. Publish in dependency order (blockers first) so you can reference real issue identifiers in the "Blocked by" field.
+**b. Then publish its Work Streams** as sub-issues of that epic umbrella (formal sub-issue links improve progress tracking in the GitHub UI). Use the `<ws-template>` below. These are considered ready for AFK agents, so publish them with the correct triage label unless instructed otherwise. Publish in dependency order (blockers first) so you can reference real issue identifiers in the "Blocked by" field.
 
 The WS code (`WSnn`, scoped per epic+repo) is assigned here; the epic code comes from the human. Use the identifier in the WS title: `<REPO>-<EPIC>-<WSnn>: Epic: <Epic Name> - Workstream: <WS Name>`.
 
@@ -74,7 +74,7 @@ A short summary of the PRD — the *what & why*, enough to orient without openin
 
 ## Spec
 
-- **PRD**: a reference to the authoritative `docs/prd/<epic-slug>.md` file.
+- **PRD**: a reference to the authoritative feature PRD file read in step 1 (`docs/prd/<feature-slug>.md`). When one feature splits into several epics, every epic points at the same feature PRD.
 - **ADRs**: references to the relevant ADRs.
 
 ## Work Streams
@@ -83,7 +83,7 @@ The WS list and topology for this epic — each WS, and which WS it is blocked b
 
 </epic-template>
 
-<issue-template>
+<ws-template>
 ## Parent
 
 A reference to the epic umbrella issue created in step 5a.
@@ -106,6 +106,6 @@ Avoid specific file paths or code snippets — they go stale fast. Exception: if
 
 Or "None - can start immediately" if no blockers.
 
-</issue-template>
+</ws-template>
 
 Do NOT close any epic umbrella issue you create — it stays open as the live execution tracker until its WS sub-issues all land.
