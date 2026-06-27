@@ -40,7 +40,11 @@ A reviewer whose review is generated locally (`agy-local`, `codex-local`) — an
 agent reviews the diff — and posted as a GitHub-App bot identity. GitHub gives it
 no native `review_requested` edge (a custom App bot cannot be assigned as a
 requested reviewer), so its **review funnel** is tracked by a shipit-authored
-signal rather than read from a native reviewer edge. Contrast **App reviewer**.
+signal — the **funnel check run** — rather than read from a native reviewer edge.
+Requesting one runs **async**: the request opens that in-flight signal and
+detaches the agent run (see **Detached review**), returning immediately — the
+outcome is read LATER from the PR, never from the request. Contrast **App
+reviewer**.
 
 **rerun**:
 A per-reviewer policy flag. `rerun=false` (the default for everyone:
@@ -57,7 +61,41 @@ The stages a single reviewer's review passes through on a PR — *requested* →
 *in-flight* → *posted*, or a terminal *failed* / *empty* / *timed-out*. The engine
 reads the funnel uniformly across reviewer kinds: from native GitHub signals for an
 **App reviewer** (its `review_requested` edge, then its review object) and from a
-shipit-authored signal for a **local-agent reviewer** (which has no native edge).
+shipit-authored signal — the **funnel check run** — for a **local-agent reviewer**
+(which has no native edge).
+
+**Funnel check run**:
+The shipit-authored signal that stands in for the `review_requested` edge GitHub
+denies a **local-agent reviewer** — a GitHub Check Run authored by the reviewer's
+own App. Opened `in_progress` (with an honest `started_at`) when the review is
+requested, transitioned to a terminal conclusion (success / failure / timed_out)
+when it settles. The funnel's *empty* outcome — a degraded non-delivery, NOT a
+clean zero-findings review (which posts as success) — is carried as conclusion
+`failure` with an explicit `empty` reason in the run's output, so the distinct
+terminal outcome the **Review funnel** lists survives the narrower check-run
+conclusion vocabulary (see `_FUNNEL_TERMINAL` in `review/service.py`). The PR +
+this check run are the WHOLE store — no daemon, no local
+job state — so the engine stays stateless and any reader recovers the funnel
+straight from the PR. (ADR-0005.)
+
+**Detached review**:
+How a **local-agent reviewer**'s request executes. The request does only the cheap
+synchronous work — resolve `(repo, head_sha)`, **reconcile** against any in-flight
+run, open the **funnel check run** `in_progress` — then spawns a DETACHED child
+process that runs the agent, posts the verdict as the bot, and closes the SAME
+check run to its terminal state. The request returns in-flight WITHOUT blocking on
+the model run: the parent opens, the child closes, exactly ONE check run. The gap
+between the open and the child's close is the *in-flight* window the **wait window**
+ages a `started_at` against (a child that vanishes before closing is reaped there).
+*Avoid*: "background job", "queue" — there is no daemon or job store, only the
+detached process + the check run.
+
+**Reconcile** (idempotent re-request):
+Because the **funnel check run** IS the store, a re-request for a **local-agent
+reviewer** whose run is still in-flight on the current head reconciles against that
+run — reports in-flight, opens no second check run, spawns no second child — rather
+than double-posting. Read-then-decide against the check run only; no local/daemon
+state to consult.
 
 **Breaker** (stopping rule):
 The rule that ends the review loop instead of iterating forever: stop when 6
