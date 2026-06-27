@@ -15,6 +15,15 @@ PATCH failure / a `run_id is None` (create never opened a run) never crashes the
 flow nor masks the review's real outcome (the original error still propagates on
 the failure paths).
 
+OBS03-WS01: the async inversion SPLITS that single flow across a process
+boundary. `start_detached_review` (the PARENT) does the cheap synchronous work —
+resolve `(repo, head_sha)`, open the `in_progress` run — then spawns a DETACHED
+child and returns in-flight WITHOUT running the agent. `run_detached_review` (the
+CHILD body) does the heavy resolve + generate + post and CLOSES the SAME `run_id`
+the parent handed it. The invariant: exactly ONE check run — the parent creates,
+the child closes — never two. The spawn boundary is injected so the parent's
+detach is asserted WITHOUT forking.
+
 The App-token boundary (`ghauth`) and the `gh` check-run POST/PATCH are FAKED —
 never live GitHub.
 """
@@ -317,6 +326,200 @@ def test_breadcrumb_failure_never_leaks_token(monkeypatch, _stub_pipeline, caplo
     full = "\n".join(r.getMessage() for r in caplog.records)
     assert secret not in full
     assert _stub_pipeline["called"] is True
+
+
+# --- OBS03-WS01: the detach split (parent creates, child closes) -------------
+
+
+def test_start_detached_opens_inprogress_then_spawns(monkeypatch):
+    """The PARENT: (a) opens the `in_progress` funnel run with a `started_at`,
+    (b) spawns the detached child carrying repo + pr + the created run id, and
+    (c) returns in-flight WITHOUT running the agent — no model run on the request
+    path. The spawn boundary is injected so nothing forks."""
+    calls = _fake_checkrun_boundary(monkeypatch)  # create POST -> run id 555
+    monkeypatch.setattr(
+        service, "_resolve_target", lambda pr: ("owner/repo", "deadbeef")
+    )
+    # If the agent ran in the parent, this records it — it must NOT.
+    ran: list = []
+    monkeypatch.setattr(service, "generate_review", lambda *a, **k: ran.append(1))
+
+    spawned: list = []
+    rc = service.start_detached_review(
+        "codex", 5, spawn=lambda argv: spawned.append(list(argv))
+    )
+
+    assert rc is True  # in-flight
+    # (a) the in_progress funnel run was opened with an honest started_at.
+    posts = [c for c in calls if c["method"] == "POST"]
+    assert len(posts) == 1
+    assert posts[0]["path"] == "/repos/owner/repo/check-runs"
+    assert posts[0]["body"]["status"] == "in_progress"
+    assert posts[0]["body"]["started_at"]
+    # The parent does NOT close the run — the child does (no terminal PATCH here).
+    assert not [c for c in calls if c["method"] == "PATCH"]
+    # (b) the detached child was spawned with the args it reconstructs from.
+    assert len(spawned) == 1
+    argv = spawned[0]
+    assert "_run" in argv
+    assert argv[argv.index("--agent") + 1] == "codex"
+    assert argv[argv.index("--pr") + 1] == "5"
+    assert argv[argv.index("--repo") + 1] == "owner/repo"
+    assert argv[argv.index("--run-id") + 1] == "555"
+    # (c) the agent never ran on the request path.
+    assert ran == []
+
+
+def test_start_detached_still_spawns_when_breadcrumb_create_fails(monkeypatch):
+    """The breadcrumb create is BEST-EFFORT: a 403 before the `checks:write`
+    re-grant must not fail the request — the child is still spawned (with no
+    `--run-id`, so it runs without an in_progress marker) and the request returns
+    in-flight."""
+    monkeypatch.setattr(
+        service.checkrun.ghauth, "installation_token", lambda agent, repo: "ghs_tok"
+    )
+
+    def boom_rest(path, *, method=None, body=None, token=None):
+        raise service.gh.GhError("403 Resource not accessible by integration")
+
+    monkeypatch.setattr(service.checkrun.gh, "rest", boom_rest)
+    monkeypatch.setattr(
+        service, "_resolve_target", lambda pr: ("owner/repo", "deadbeef")
+    )
+
+    spawned: list = []
+    rc = service.start_detached_review(
+        "codex", 5, spawn=lambda argv: spawned.append(list(argv))
+    )
+
+    assert rc is True
+    assert len(spawned) == 1
+    assert "--run-id" not in spawned[0]  # no run was opened, so none is threaded
+
+
+def test_resolve_target_raises_on_missing_headrefoid(monkeypatch):
+    """The synchronous validation path: a `gh pr view` response without
+    `headRefOid` (schema change / unexpected output) must raise `GhError`, NOT
+    silently return an empty SHA — otherwise the request reports in-flight with no
+    target commit for the funnel check."""
+    monkeypatch.setattr(service.gh, "current_repo", lambda: "owner/repo")
+    monkeypatch.setattr(service.gh, "pr_view", lambda pr, json_fields=None: "{}")
+
+    with pytest.raises(service.gh.GhError, match="no headRefOid"):
+        service._resolve_target(5)
+
+
+def test_resolve_target_raises_on_non_dict_json(monkeypatch):
+    """A truthy non-dict (e.g. a JSON list) must not `AttributeError` out of
+    `_resolve_target` — it is parseable but malformed, so it raises `GhError` like
+    the other malformed-output cases."""
+    monkeypatch.setattr(service.gh, "current_repo", lambda: "owner/repo")
+    monkeypatch.setattr(service.gh, "pr_view", lambda pr, json_fields=None: "[1]")
+
+    with pytest.raises(service.gh.GhError, match="no headRefOid"):
+        service._resolve_target(5)
+
+
+def test_start_detached_closes_run_when_spawn_fails(monkeypatch):
+    """If the detached spawn fails AFTER the parent opened the `in_progress` run,
+    that run would hang forever with no child to close it. The parent closes it as
+    failed (terminal PATCH on the SAME run) and re-raises so the adapter still
+    normalizes the failure to `GhError`."""
+    calls = _fake_checkrun_boundary(monkeypatch)  # create POST -> run id 555
+    monkeypatch.setattr(
+        service, "_resolve_target", lambda pr: ("owner/repo", "deadbeef")
+    )
+
+    def boom_spawn(argv):
+        raise OSError("cannot fork")
+
+    with pytest.raises(OSError, match="cannot fork"):
+        service.start_detached_review("codex", 5, spawn=boom_spawn)
+
+    # The parent opened the run (POST) and then closed it as failed (terminal
+    # PATCH on the SAME run) — no dangling in_progress.
+    posts = [c for c in calls if c["method"] == "POST"]
+    assert len(posts) == 1
+    patches = [c for c in calls if c["method"] == "PATCH"]
+    assert len(patches) == 1
+    assert patches[0]["path"] == "/repos/owner/repo/check-runs/555"
+    assert patches[0]["body"]["status"] == "completed"
+    assert patches[0]["body"]["conclusion"] == "failure"
+
+
+def test_start_detached_spawn_failure_with_no_run_just_reraises(monkeypatch):
+    """When the best-effort breadcrumb create returned no run (`run_id is None`) and
+    the spawn THEN fails, there is nothing to close — the parent must re-raise
+    without attempting a terminal PATCH (which would crash on `run_id is None`)."""
+    monkeypatch.setattr(
+        service.checkrun.ghauth, "installation_token", lambda agent, repo: "ghs_tok"
+    )
+    calls: list[dict] = []
+
+    def fake_rest(path, *, method=None, body=None, token=None):
+        calls.append({"method": method, "path": path, "body": body})
+        if method == "POST":
+            raise service.gh.GhError("403 Resource not accessible by integration")
+        return {}
+
+    monkeypatch.setattr(service.checkrun.gh, "rest", fake_rest)
+    monkeypatch.setattr(
+        service, "_resolve_target", lambda pr: ("owner/repo", "deadbeef")
+    )
+
+    def boom_spawn(argv):
+        raise OSError("cannot fork")
+
+    with pytest.raises(OSError, match="cannot fork"):
+        service.start_detached_review("codex", 5, spawn=boom_spawn)
+
+    # No run was opened, so no terminal PATCH was attempted.
+    assert not [c for c in calls if c["method"] == "PATCH"]
+
+
+def test_run_detached_closes_passed_run_without_creating(monkeypatch, _stub_pipeline):
+    """The CHILD: it NEVER creates a run (the parent already did) — it CLOSES the
+    SAME `run_id` it was handed to completed/success, and the review still
+    generates + posts."""
+    calls = _fake_checkrun_boundary(monkeypatch)
+
+    result = service.run_detached_review("codex", 5, repo="owner/repo", run_id=555)
+
+    assert not [c for c in calls if c["method"] == "POST"]  # child never creates
+    patches = [c for c in calls if c["method"] == "PATCH"]
+    assert len(patches) == 1
+    assert patches[0]["path"] == "/repos/owner/repo/check-runs/555"  # the SAME run
+    assert patches[0]["body"]["status"] == "completed"
+    assert patches[0]["body"]["conclusion"] == "success"
+    assert _stub_pipeline["called"] is True
+    assert result["post"] == {"id": 99}
+
+
+def test_split_parent_creates_child_closes_one_run(monkeypatch, _stub_pipeline):
+    """The OBS03 invariant end to end: the run id the PARENT creates is the run id
+    the CHILD closes — exactly ONE check run, never two."""
+    monkeypatch.setattr(
+        service, "_resolve_target", lambda pr: ("owner/repo", "deadbeef")
+    )
+
+    # Parent: create -> 555; capture the child argv instead of forking.
+    parent_calls = _fake_checkrun_boundary(monkeypatch)
+    spawned: list = []
+    service.start_detached_review(
+        "codex", 5, spawn=lambda argv: spawned.append(list(argv))
+    )
+    argv = spawned[0]
+    run_id = int(argv[argv.index("--run-id") + 1])
+    assert run_id == 555
+    assert len([c for c in parent_calls if c["method"] == "POST"]) == 1
+
+    # Child: hand it that run id; it closes the SAME run and creates none.
+    child_calls = _fake_checkrun_boundary(monkeypatch)
+    service.run_detached_review("codex", 5, repo="owner/repo", run_id=run_id)
+    assert not [c for c in child_calls if c["method"] == "POST"]
+    patches = [c for c in child_calls if c["method"] == "PATCH"]
+    assert len(patches) == 1
+    assert patches[0]["path"] == f"/repos/owner/repo/check-runs/{run_id}"
 
 
 def test_unknown_outcome_falls_back_to_failed_without_crashing(monkeypatch, caplog):

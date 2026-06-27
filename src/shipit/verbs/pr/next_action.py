@@ -93,7 +93,7 @@ class _NextActs:
                 "review request dropped by GitHub (no review_requested edge "
                 f"attached): {', '.join(result.dropped)} — re-run `pr next`"
             )
-        acted = result.verified + result.posted
+        acted = result.verified + result.in_flight
         if not acted:
             # Only no-op (auto-triggering) backends were selected — nothing placed.
             return f"no requestable reviewer to (re-)request — {status.next_action}"

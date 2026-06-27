@@ -272,8 +272,9 @@ class _LocalReviewAdapter(ReviewerAdapter):
 
     In shipit the local-agent review *execution* engine lives in
     `shipit.review` (PRF01-WS07): this adapter's `request` LAZILY imports
-    `shipit.review.service` and runs the agent over the PR diff + posts the
-    verdict as the agent's bot, synchronously. The import is lazy so the
+    `shipit.review.service`. Since OBS03 the run is ASYNC — `request` detaches the
+    agent run and returns IN-FLIGHT rather than blocking for the length of a model
+    run (see `request` for the inverted contract). The import is lazy so the
     optional `review` extra (pyjwt) is only pulled in when a local review is
     actually requested. The DETECTION path is fully intact — `detect` reads an
     existing local-agent review exactly as in release.
@@ -308,22 +309,31 @@ class _LocalReviewAdapter(ReviewerAdapter):
         return low.endswith("[bot]") and self.bot_slug_fragment in low
 
     def request(self, pr: int) -> bool:
-        """Run the local agent over the PR diff and POST the verdict as the bot.
+        """DETACH a local-agent review and return IN-FLIGHT (OBS03).
 
-        This is SYNCHRONOUS run-and-post (PRF01-WS07): there is no
-        `review_requested` edge to place. `shipit.review.service` is imported
-        LAZILY here, so the optional `review` extra (pyjwt) is only pulled in
-        when a local review is actually requested — the detection path and every
-        non-local reviewer stay free of that dependency. The agent's per-reviewer
-        `model` / `instructions` / `timeout` (the `[reviewers]` options) are read
-        from `.shipit.toml` and threaded into the run.
+        Fire-and-forget: this does the cheap, synchronous work — resolve the PR's
+        ``(repo, head_sha)``, open the OBS02 ``in_progress`` funnel check run — then
+        spawns a DETACHED child process that runs the agent over the PR diff, posts
+        the verdict as the bot, and closes that SAME check run to its terminal
+        state. It returns immediately (``True`` = in-flight); the OUTCOME is read
+        LATER from the PR (the funnel check run + the posted review), never from
+        this return. This inverts the pre-OBS03 contract — there is no longer a
+        blocking model run inside `request`. There is still no `review_requested`
+        edge, so a local reviewer is never edge-verified.
 
-        Any failure — a missing backend CLI, a parse failure, a Doppler/JWT auth
-        failure, a `gh` post failure — is normalized to `ghapi.GhError`, the one
-        error type the `pr review request` CLI renders as a clean message + exit
-        1, so a local review never crashes with a raw traceback. Returns True on
-        a successful post (the review is already posted; a local reviewer is
-        never edge-verified).
+        `shipit.review.service` is imported LAZILY here, so the optional `review`
+        extra (pyjwt) is only pulled in when a local review is actually requested —
+        the detection path and every non-local reviewer stay free of that
+        dependency. The agent's per-reviewer `model` / `instructions` / `timeout`
+        (the `[reviewers]` options) are read from `.shipit.toml` and threaded to
+        the detached child.
+
+        Any failure in the SYNCHRONOUS part — a `gh`/auth failure resolving the PR,
+        a spawn failure — is normalized to `ghapi.GhError`, the one error type the
+        `pr review request` CLI renders as a clean message + exit 1, so a request
+        never crashes with a raw traceback. (A failure INSIDE the detached child
+        resolves to a visible failed/timed-out check run on the PR, not to this
+        return — that is the whole point of detaching.)
         """
         # Lazy: keep the optional `review`/pyjwt import off the detection path
         # and out of every non-local reviewer. `review` never imports `prstate`,
@@ -348,7 +358,7 @@ class _LocalReviewAdapter(ReviewerAdapter):
             run_kwargs["timeout"] = options["timeout"]
 
         try:
-            service.run_and_post(self.name, pr, **run_kwargs)
+            service.start_detached_review(self.name, pr, **run_kwargs)
         except ghapi.GhError:
             raise
         except Exception as exc:  # noqa: BLE001 - normalize every failure mode uniformly
