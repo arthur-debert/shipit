@@ -100,9 +100,9 @@ def run_internal_cmd(
     the repo best-effort off cwd (`resolve_current_owner_repo`) — which can degrade
     in a terminal-less child and leave the run with NO file sink. This child KNOWS
     its repo deterministically (the `--repo` arg), so it re-wires the OBS01 file
-    sink from that slug, guaranteeing the detached run's diagnostics ALWAYS reach
-    `<logdir>/<owner>/<repo>/shipit.log` (OBS03 story 5). Best-effort: a
-    logging-setup failure never crashes the review.
+    sink from that slug — best-effort — so the detached run's diagnostics normally
+    reach `<logdir>/<owner>/<repo>/shipit.log` (OBS03 story 5). A malformed slug or
+    logging-setup failure is swallowed (returns False) and never crashes the review.
     """
     from ...logsetup import configure_logging_for_slug
     from ...review import service

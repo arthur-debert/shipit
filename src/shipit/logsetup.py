@@ -250,10 +250,11 @@ def configure_logging_for_slug(
     ``--repo`` argument, so — unlike the CLI bootstrap, which resolves the repo
     best-effort off cwd (:func:`resolve_current_owner_repo`, a ``gh`` call that can
     degrade in a terminal-less child) — it can attach the file sink with certainty.
-    The child passes that slug here so the detached run's diagnostics ALWAYS reach
-    ``<logdir>/<owner>/<repo>/shipit.log``, independent of cwd resolution — the
-    load-bearing guarantee behind OBS03 story 5 (a crashed detached run must leave
-    a durable "why", not just a terminal check run).
+    The child passes that slug here so the detached run's diagnostics can reach
+    ``<logdir>/<owner>/<repo>/shipit.log``, independent of cwd resolution — this is
+    what attempts to make good on OBS03 story 5 (a crashed detached run should leave
+    a durable "why", not just a terminal check run). Best-effort, not a hard
+    guarantee: see the return contract below.
 
     Returns whether the file sink was attached. Best-effort: a malformed slug or a
     logging-setup failure is swallowed (returns ``False``) — a logging glitch must

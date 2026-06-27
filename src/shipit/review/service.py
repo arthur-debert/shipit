@@ -297,10 +297,11 @@ def run_detached_review(
     exactly ONE check run, never two.
 
     The child's diagnostics land in the OBS01 file sink: the child entrypoint
-    (``shipit pr review _run``) wires the per-repo file sink DETERMINISTICALLY from
-    its ``--repo`` argument before calling this, so a detached process with no
-    terminal always leaves a durable record (OBS03 story 5) — independent of the
-    bootstrap's best-effort cwd resolution. Each step here is recorded (resolve,
+    (``shipit pr review _run``) attempts to wire the per-repo file sink
+    DETERMINISTICALLY from its ``--repo`` argument before calling this (best-effort —
+    a malformed slug or logging-setup failure is swallowed), so a detached process
+    with no terminal normally leaves a durable record (OBS03 story 5) — independent
+    of the bootstrap's best-effort cwd resolution. Each step here is recorded (resolve,
     generate, post, terminal transition) so a reader of the sink can reconstruct
     what the run did and why it ended where it did. ``run_id`` is ``None`` only when
     the parent's best-effort create failed; the review still posts and the terminal
@@ -319,7 +320,7 @@ def run_detached_review(
     # run's file-sink record shows what was reviewed.
     logger.info(
         "run_detached_review: agent=%s pr=#%s resolved — %d changed file(s), "
-        "%d bytes diff; generating + posting",
+        "%d chars diff; generating + posting",
         agent,
         pr,
         len(ctx.changed_files or []),
