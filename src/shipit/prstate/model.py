@@ -189,6 +189,21 @@ class PullContext:
     # stale-after-push. The adapters read this to pick head-strict vs any-head
     # detection — keeping the policy data here, not a code branch per reviewer.
     reviewer_rerun: dict[str, bool] = field(default_factory=dict)
+    # Per-reviewer wait-window override in SECONDS (name -> seconds), resolved from
+    # the `[reviewers]` `window` option at the build site and threaded on here
+    # EXACTLY like `reviewer_rerun` — so the engine reads the window off the
+    # snapshot, never the filesystem. A reviewer ABSENT here uses the shipped 20m
+    # default (`reviewers.DEFAULT_WAIT_WINDOW`, applied by the adapter). OBS04-WS03
+    # ages an in-flight / requested-but-silent reviewer past this window into
+    # TIMED_OUT (settled + degraded). Empty in a light/skip context that never gates.
+    reviewer_window: dict[str, int] = field(default_factory=dict)
+    # The `review_requested` edge time per requested login (login -> ISO-8601
+    # tz-aware), sourced from the PR timeline's ReviewRequestedEvent at the build
+    # site. GraphQL `reviewRequests` carries NO timestamp, so this is where an App
+    # reviewer's request time — what WS03 ages its wait window against — lives. A
+    # LOCAL reviewer has no requested edge (it ages its check run's `started_at`
+    # instead) and so never appears here. Empty in a light/skip context.
+    requested_at: dict[str, str] = field(default_factory=dict)
 
     def reviews_on_head(self) -> list[Review]:
         """Reviews made against the current head — stale reviews don't count."""

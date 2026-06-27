@@ -10,7 +10,7 @@ shifts.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from . import ghapi
 from .model import (
@@ -20,6 +20,53 @@ from .model import (
     ReviewLifecycle,
     Thread,
 )
+
+# The shipped uniform wait window (ADR-0006): a required reviewer still in flight /
+# requested-but-silent that ages PAST this window settles as TIMED_OUT. 20m
+# default, overridable per-reviewer via the `[reviewers]` `window` option (threaded
+# onto `ctx.reviewer_window`). Uniform across reviewer kinds — a local reviewer
+# ages against its check run's `started_at`, an App reviewer against its
+# `review_requested` edge time — so a slow backend gets a longer window without
+# loosening it for everyone.
+DEFAULT_WAIT_WINDOW = timedelta(minutes=20)
+
+# The ONLY funnel states the wait window ages: a reviewer still legitimately
+# working. IN_FLIGHT (a review is running) and REQUESTED (an App request edge
+# placed, no review yet) are the holds the window can convert to TIMED_OUT; every
+# other state is already terminal (POSTED / FAILED / EMPTY / TIMED_OUT) or a
+# never-started hold (NEVER_REQUESTED, which has no request timestamp to age) and
+# is never re-aged.
+_AGEABLE = (FunnelState.IN_FLIGHT, FunnelState.REQUESTED)
+
+
+def _age_to_timeout(
+    state: FunnelState,
+    request_at: str | None,
+    window: timedelta,
+    now: datetime | None,
+) -> FunnelState:
+    """Age an in-flight / requested reviewer past its wait window into TIMED_OUT.
+
+    The pure timeout function (ADR-0006/WS03): a function of (now, request
+    timestamp, window) and nothing else — the engine calls no clock; "now" is the
+    injected `ctx.now`. Only an `_AGEABLE` state (IN_FLIGHT / REQUESTED — a reviewer
+    still legitimately working) can age; every other state is already settled and
+    returned unchanged. With both timestamps present, a reviewer whose age
+    (`now - request_at`) EXCEEDS its window has gone silent past the deadline →
+    TIMED_OUT (the gate then settles it non-blocking + degraded); within the window
+    it HOLDS (returned unchanged). Missing either timestamp — no injected `now`, or
+    a reviewer with no recorded request time (best-effort Gemini has no requested
+    edge) — cannot be aged and so holds: the window never invents a timeout from
+    absent data.
+    """
+    if state not in _AGEABLE:
+        return state
+    if not request_at or now is None:
+        return state
+    if now - datetime.fromisoformat(request_at) > window:
+        return FunnelState.TIMED_OUT
+    return state
+
 
 # How a reviewer's native `ReviewLifecycle` (the App-reviewer signal) folds into
 # the normalized `FunnelState` (ADR-0006). This is the App/native side of the
@@ -120,6 +167,26 @@ class ReviewerAdapter:
         re-reviewing each push is explicit opt-in)."""
         return ctx.reviewer_rerun.get(self.name, False)
 
+    def _window(self, ctx: PullContext) -> timedelta:
+        """This reviewer's wait window — the per-reviewer `[reviewers]` `window`
+        override (seconds, threaded onto `ctx.reviewer_window`) or the shipped 20m
+        default. Read off the context like `_rerun`, so the engine never touches
+        config; a 0/absent override falls back to `DEFAULT_WAIT_WINDOW`."""
+        seconds = ctx.reviewer_window.get(self.name)
+        return timedelta(seconds=seconds) if seconds else DEFAULT_WAIT_WINDOW
+
+    def _requested_at(self, ctx: PullContext) -> str | None:
+        """This reviewer's `review_requested` edge time (App side), matched off
+        `ctx.requested_at` by login — the timestamp WS03 ages an App reviewer's
+        wait window against. None when this reviewer has no recorded request edge:
+        a LOCAL reviewer ages its check-run `started_at` instead (and overrides
+        `funnel_state` to do so), and best-effort Gemini has no requested edge at
+        all — neither appears in `requested_at`, so neither ages here."""
+        for login, ts in ctx.requested_at.items():
+            if self.matches(login):
+                return ts
+        return None
+
     def detect(self, ctx: PullContext) -> ReviewLifecycle:
         """Where this reviewer stands — rerun-aware, shared across adapters.
 
@@ -195,8 +262,16 @@ class ReviewerAdapter:
         Kept behind the adapter interface so the engine normalizes EVERY reviewer
         the same way — `status.reviewer_funnel[name].state` — without ever branching
         on a reviewer's name.
+
+        WS03 ages the App side here: a REQUESTED reviewer (request edge placed, no
+        review yet) silent past its wait window settles as TIMED_OUT, aged from its
+        `review_requested` edge time (`ctx.requested_at`). Within the window it
+        still holds; a reviewer with no recorded edge time (Gemini) never ages.
         """
-        return _LIFECYCLE_TO_FUNNEL[lifecycle]
+        state = _LIFECYCLE_TO_FUNNEL[lifecycle]
+        return _age_to_timeout(
+            state, self._requested_at(ctx), self._window(ctx), ctx.now
+        )
 
     def funnel_check(self, ctx: PullContext) -> ReviewFunnelCheck | None:
         """This reviewer's OBS02/ADR-0005 funnel check-run breadcrumb, if any.
@@ -532,7 +607,17 @@ class _LocalReviewAdapter(ReviewerAdapter):
         check = self.funnel_check(ctx)
         if check is None:
             return FunnelState.NEVER_REQUESTED
-        return _funnel_state_from_check(check)
+        # WS03 ages the LOCAL side here: an IN_FLIGHT run (status not yet COMPLETED)
+        # silent past its wait window settles as TIMED_OUT, aged from the run's OWN
+        # `started_at` (ADR-0005's load-bearing timestamp). A terminal breadcrumb
+        # (posted / failed / empty / producer-recorded timeout) is already settled
+        # and `_age_to_timeout` returns it unchanged; within the window the run holds.
+        return _age_to_timeout(
+            _funnel_state_from_check(check),
+            check.started_at,
+            self._window(ctx),
+            ctx.now,
+        )
 
     def funnel_check(self, ctx: PullContext) -> ReviewFunnelCheck | None:
         """This local reviewer's funnel breadcrumb off `ctx.review_funnel`.
