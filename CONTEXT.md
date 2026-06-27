@@ -143,6 +143,21 @@ never "gating".
 The single instruction the **PR state engine** emits for a PR's current state
 (request a review, address threads, wait for CI, flip to Ready, …).
 
+### Planning
+
+**PRD**:
+The **feature definition** — the authoritative spec, a file in `docs/prd/`. The
+*what & why* of a feature, written from the user's perspective (problem, solution,
+user stories, decisions). Locked by a merged docs PR; produced by `/shipt-to-prd`.
+*Avoid*: treating the **epic issue** as the spec — the PRD is the source of truth.
+
+**Epic issue**:
+An **execution tracker** — a GitHub umbrella issue that points to the **PRD** and
+the relevant ADRs and carries a PRD summary plus the **Work Stream** topology and
+progress (sub-issues). It tracks *how the work lands*, not *what to build*. One
+feature may have several epic issues; produced by `/shipt-to-issues`.
+*Avoid*: embedding the full PRD in the issue — it links to the PRD, never replaces it.
+
 ### Build & release
 
 **Toolchain**:
