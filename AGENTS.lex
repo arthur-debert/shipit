@@ -5,9 +5,9 @@ draft-first, state-machine-driven, and ALWAYS delegated — the same flow whethe
 change ships as one PR to `main` or as an epic of many PRs, which differ ONLY in
 branch/merge topology, never in whether delegation happens.
 
-This file is the always-on core. The full epic topology lives in
-[./docs/dev/epics.lex] and the naming grammar in [./docs/dev/naming.lex] — read
-those when the task calls for them.
+This file is the always-on core. For the full epic topology see [./docs/dev/epics.lex];
+for the naming grammar see [./docs/dev/naming.lex]. Pull them in when the task
+calls for them.
 
 The dev cycle is ALWAYS delegated:
 
@@ -135,8 +135,8 @@ The PR lifecycle (draft -> ready -> stop):
     -> PRD -> docs PR, then epic/WS decomposition -> issues).
 
     Full topology — per-workstream delegation, integration ordering, convergence,
-    the docs pass, the umbrella, changelog/release status — is in
-    [./docs/dev/epics.lex]. Read it before running an epic.
+    the docs pass, the umbrella, changelog/release status. See [./docs/dev/epics.lex]
+    before running an epic.
 
 3. Naming
 
@@ -153,5 +153,5 @@ The PR lifecycle (draft -> ready -> stop):
     - Branch: `EPIC-WSnn` (hyphen, not slash); the epic branch is the bare epic
         code.
 
-    Full grammar + rationale (the THEME registry, multi-repo prefixes, FX rounds,
-    the slash-collision reason) is in [./docs/dev/naming.lex].
+    Full grammar + rationale — the THEME registry, multi-repo prefixes, FX rounds,
+    the slash-collision reason. See [./docs/dev/naming.lex].
