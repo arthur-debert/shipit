@@ -30,6 +30,7 @@ EXPECTED_JSON_FIELDS = {
     "breaker",
     "reviewer_funnel",  # OBS04-WS01: structured per-reviewer funnel data
     "degraded",  # OBS04-WS02: required reviewers settled non-success
+    "to_request",  # OBS04-WS04: structured REVIEWS_PENDING routing signal
 }
 
 

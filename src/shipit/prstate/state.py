@@ -175,6 +175,17 @@ class TaskStatus:
     # PR is cleanly settled. WS04's dispatcher still proceeds (a degraded-but-ready
     # PR flips); this set only makes the degradation visible.
     degraded: dict[str, str] = field(default_factory=dict)
+    # OBS04-WS04: the structured REVIEWS_PENDING routing signal — the required
+    # reviewers still HOLDING the PR whose funnel state says they need a
+    # (re-)request NOW: funnel NEVER_REQUESTED, i.e. never asked, or a prior review
+    # staled by a push (re-request). The dispatcher routes REVIEWS_PENDING to
+    # `request_review` iff this is non-empty, else to WAIT — reading this structure
+    # instead of substring-matching `next_action` prose (it absorbs #24.1). A
+    # holding reviewer that is REQUESTED / IN_FLIGHT (in-flight within window — WS03
+    # already aged any past-window one into a settled TIMED_OUT) is NOT here: it is
+    # the wait case. Empty outside REVIEWS_PENDING and whenever every holding
+    # reviewer is merely awaited.
+    to_request: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -187,6 +198,7 @@ class TaskStatus:
             "mergeable": self.mergeable,
             "cycles": self.cycles,
             "breaker": self.breaker,
+            "to_request": self.to_request,
             "reviewer_funnel": {
                 name: {
                     "lifecycle": rf.lifecycle.value,
@@ -338,8 +350,22 @@ def _evaluate(
     #    reviewers (outside `required`) never gate.
     holding = [r for r in required if funnel_states[r.name] in _HOLDS]
     if holding:
+        # Split the holding reviewers into the act each one's funnel state dictates
+        # ONCE: those needing a (re-)request now vs those merely awaited. Both the
+        # human-facing prose (`_reviews_pending_action`) and the WS04 dispatcher's
+        # routing read this same structured split — the dispatcher off
+        # `status.to_request`, never the prose (it absorbs #24.1).
+        request_names, rerequest_names, waiting_names = _classify_pending(
+            ctx, holding, funnel_states
+        )
         status.state = TaskState.REVIEWS_PENDING
-        status.next_action = _reviews_pending_action(ctx, holding, funnel_states)
+        # request ∪ re-request both route to the single `request_review` act; only
+        # the wait set (`waiting_names`) leaves `to_request` empty → the dispatcher
+        # reports/waits.
+        status.to_request = request_names + rerequest_names
+        status.next_action = _reviews_pending_action(
+            holding, request_names, rerequest_names, waiting_names
+        )
         return status
 
     # 2. Required reviews in; any open thread (from any reviewer) must be
@@ -497,12 +523,14 @@ def _evaluate(
     return status
 
 
-def _reviews_pending_action(
+def _classify_pending(
     ctx: PullContext,
     pending: list[ReviewerAdapter],
     funnel_states: dict[str, FunnelState],
-) -> str:
-    """Build the REVIEWS_PENDING next-action, distinguishing the cases a bare
+) -> tuple[list[str], list[str], list[str]]:
+    """Split the holding required reviewers into `(request, rerequest, wait)` by
+    funnel state — the ONE structured decision both the next-action prose and the
+    WS04 dispatcher's routing read from (no prose round-trip). The cases a bare
     "request if not yet requested, else wait" conflates:
 
       • never-requested — no signal at all from this reviewer → request.
@@ -531,7 +559,21 @@ def _reviews_pending_action(
             rerequest_names.append(adapter.name)
         else:
             request_names.append(adapter.name)
+    return request_names, rerequest_names, waiting_names
 
+
+def _reviews_pending_action(
+    pending: list[ReviewerAdapter],
+    request_names: list[str],
+    rerequest_names: list[str],
+    waiting_names: list[str],
+) -> str:
+    """Render the REVIEWS_PENDING next-action from the precomputed
+    `_classify_pending` split. PURE human-facing prose for the status/`pr next`
+    output — it no longer DRIVES routing (the dispatcher routes on
+    `TaskStatus.to_request`, WS04), so a wording change here cannot re-route
+    `pr next` (the #24.1 fix).
+    """
     clauses: list[str] = []
     if request_names:
         clauses.append(f"request for the current head: {', '.join(request_names)}")
