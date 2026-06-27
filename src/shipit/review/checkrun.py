@@ -69,8 +69,8 @@ def create(agent: str, repo: str, head_sha: str) -> int | None:
     Honest by design: any failure (a missing scope 403 before the ``checks:write``
     re-grant, an auth failure, a ``gh`` failure) PROPAGATES. The best-effort
     swallowing that keeps a breadcrumb failure from failing the review lives in
-    :func:`shipit.review.service.run_and_post`, so this function stays a thin,
-    reusable base for WS02's terminal transition.
+    :func:`shipit.review.service._open_breadcrumb` (the async parent's create), so
+    this function stays a thin, reusable base for WS02's terminal transition.
     """
     name = f"review: {reviewer_name(agent)}"
     token = ghauth.installation_token(agent, repo)
@@ -121,8 +121,9 @@ def transition(
     Honest by design like :func:`create`: any mint/PATCH failure PROPAGATES. The
     best-effort swallowing — and the "no run id ⇒ nothing to transition" skip when
     ``create`` opened no run (e.g. a ``403`` before the ``checks:write`` re-grant)
-    — live in :func:`shipit.review.service.run_and_post`, so a breadcrumb failure
-    never crashes the review and never masks its real outcome.
+    — live in :func:`shipit.review.service._close_funnel_breadcrumb` (the terminal
+    close the async path runs through), so a breadcrumb failure never crashes the
+    review and never masks its real outcome.
     """
     name = f"review: {reviewer_name(agent)}"
     token = ghauth.installation_token(agent, repo)

@@ -141,7 +141,8 @@ def test_create_never_logs_the_token(monkeypatch, caplog):
 def test_create_propagates_auth_failure(monkeypatch):
     """`create` itself is honest — it RAISES on a mint/POST failure (e.g. the
     403 before the `checks:write` re-grant). The best-effort swallowing lives in
-    `run_and_post`, not here (so WS02's `transition` shares the same honest base)."""
+    `service._open_breadcrumb`, not here (so WS02's `transition` shares the same
+    honest base)."""
 
     def boom(agent, repo):
         raise checkrun.ghauth.ReviewAuthError("403 Resource not accessible")
@@ -253,7 +254,7 @@ def test_transition_never_logs_the_token(monkeypatch, caplog):
 def test_transition_propagates_failure(monkeypatch):
     """`transition` is honest like `create` — it RAISES on a mint/PATCH failure
     (e.g. the 403 before the `checks:write` re-grant). The best-effort swallowing
-    lives in `run_and_post`, not here."""
+    lives in `service._close_funnel_breadcrumb`, not here."""
     _fake_token(monkeypatch, {})
 
     def boom(path, *, method=None, body=None, token=None):

@@ -74,3 +74,24 @@ reviewer's outcome is **recorded** + threads resolved," not "every review
 - Until the re-grant lands, a local review still **posts its review** (that path is
   unaffected); only the pre-post funnel visibility is absent, so OBS02–04 are
   gated on the re-grant for end-to-end verification.
+
+## OBS03: the in-flight marker made real
+
+OBS02 wrote the breadcrumb's two endpoints (create `in_progress`, transition to a
+terminal conclusion) inside one synchronous flow. OBS03 makes the *in-flight*
+marker an **honest** state by **detaching execution**: the request opens the check
+run `in_progress` synchronously in the parent and returns immediately, and a
+DETACHED child process runs the agent, posts the review, and closes the SAME run to
+its terminal conclusion. So the open and the close straddle a real process boundary
+— the run genuinely *is* in flight for the duration of the model run, not for the
+blink of a synchronous call. The PR + check run remain the only store (no daemon,
+no local job state), and a re-request reconciles against an already-in-flight run
+rather than opening a second one.
+
+This sharpens the load-bearing role of `started_at`: the one outcome OBS03 does
+**not** itself close is a child that *vanishes* before reaching a terminal PATCH (a
+crash in startup, OOM, a reboot — outside the child's own self-resolution guards),
+which leaves the run stuck `in_progress`. That is the **vanished-process** case, and
+the backstop is **OBS04's wait window** ageing `started_at` — exactly the timestamp
+this ADR makes load-bearing. OBS03 relies on that window as the backstop; it does
+not implement it.

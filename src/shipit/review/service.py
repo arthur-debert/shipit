@@ -10,16 +10,14 @@ Layered functions:
   * :func:`generate_review` — resolve the backend, preflight it, build the shared
     prompt over a resolved PR's diff, and run the backend → the parsed review
     dict. No GitHub posting.
-  * :func:`run_and_post` — resolve the PR, open the funnel breadcrumb, generate
-    the review, and post it via :func:`shipit.review.post.post_review` (the
-    SYNCHRONOUS composition; the funnel suite exercises the create+close pairing
-    through it).
   * :func:`start_detached_review` — the OBS03 PARENT entry the reviewer adapter
-    calls: do the cheap synchronous work (resolve ``(repo, head_sha)``, open the
-    ``in_progress`` breadcrumb), spawn a DETACHED child, and return immediately.
+    calls: do the cheap synchronous work (resolve ``(repo, head_sha)``, reconcile
+    against any in-flight run, open the ``in_progress`` breadcrumb), spawn a
+    DETACHED child, and return immediately (in-flight).
   * :func:`run_detached_review` — the OBS03 CHILD body (run by the hidden
     ``shipit pr review _run`` command in the detached process): resolve fully,
-    generate, post, and close the SAME ``run_id`` the parent opened — so there is
+    then generate, post, and close the SAME ``run_id`` the parent opened (the
+    shared terminal body is :func:`_generate_post_and_close`) — so there is
     exactly ONE check run.
 
 ``prstate`` may import this module (``prstate → review`` is a ONE-WAY edge —
@@ -100,56 +98,6 @@ def generate_review(
     return review
 
 
-def run_and_post(
-    agent: str,
-    pr: int,
-    *,
-    repo: str | None = None,
-    model: str = "pro",
-    timeout: str = "600s",
-    instructions_path: str | None = None,
-    event: str | None = None,
-    as_app: bool = True,
-    dry_run: bool = False,
-) -> dict:
-    """Resolve ``pr``, generate a review with ``agent``, and post it.
-
-    Returns ``{"review": <dict>, "post": <dict>, "ctx_repo": <str|None>,
-    "pr": <int>}``.
-
-    With ``as_app=True`` (the default), the review is posted AS the agent's
-    GitHub App (``adr-<agent>-review[bot]``) — the App credentials are sourced
-    from Doppler at post time (:mod:`shipit.review.ghauth`); there is no local
-    app-registration step to precheck. ``event=None`` lets the review's own
-    summary status drive APPROVE/REQUEST_CHANGES/COMMENT (the bot is a distinct
-    identity, so a self-review 422 does not apply).
-    """
-    logger.info(
-        "run_and_post: agent=%s pr=#%s repo=%s as_app=%s dry_run=%s",
-        agent,
-        pr,
-        repo,
-        as_app,
-        dry_run,
-    )
-    ctx = resolve_pr(pr, repo=repo)
-    run_id, run_repo = _open_funnel_breadcrumb(agent, ctx)
-    result = _generate_post_and_close(
-        agent,
-        ctx,
-        run_id,
-        run_repo,
-        model=model,
-        timeout=timeout,
-        instructions_path=instructions_path,
-        event=event,
-        as_app=as_app,
-        dry_run=dry_run,
-    )
-    logger.info("run_and_post: agent=%s pr=#%s done", agent, pr)
-    return result
-
-
 def _generate_post_and_close(
     agent: str,
     ctx,
@@ -165,12 +113,12 @@ def _generate_post_and_close(
 ) -> dict:
     """Generate the review for ``ctx``, post it, and CLOSE ``run_id`` to terminal.
 
-    The shared body of both the synchronous :func:`run_and_post` and the detached
-    :func:`run_detached_review`: it does NOT open a breadcrumb (its caller already
-    did — the synchronous path here, the async PARENT for the child) — it only
-    closes the run it is handed. Every outcome (success / empty / failed /
-    timed_out) flips the run through :func:`_close_funnel_breadcrumb` before
-    returning or re-raising, so the terminal-mapping logic lives in ONE place.
+    The shared terminal body of the detached :func:`run_detached_review`: it does
+    NOT open a breadcrumb (the async PARENT, :func:`start_detached_review`, already
+    did) — it only closes the run it is handed. Every outcome (success / empty /
+    failed / timed_out) flips the run through :func:`_close_funnel_breadcrumb`
+    before returning or re-raising, so the terminal-mapping logic lives in ONE
+    place.
     """
     try:
         review = generate_review(
@@ -526,40 +474,6 @@ _FUNNEL_TERMINAL: dict[str, tuple[str, str, str]] = {
 }
 
 
-def _open_funnel_breadcrumb(agent, ctx) -> tuple[int | None, str | None]:
-    """Open the kickoff funnel check run for this review — BEST-EFFORT.
-
-    Opens the ``in_progress`` ``review: <agent>-local`` check run
-    (:func:`shipit.review.checkrun.create`) so the same flow that kicks the
-    review off leaves the *requested / in-flight* breadcrumb that GitHub denies
-    these App bots a native edge for. Returns ``(run_id, repo)`` for the terminal
-    :func:`_close_funnel_breadcrumb` to transition the SAME run — both ``None`` on
-    any failure, so the close is a clean skip (nothing was created).
-
-    **A breadcrumb failure must NEVER fail the review.** Per the OBS02
-    prerequisite, until the App's ``checks:write`` re-grant propagates everywhere
-    a create can ``403``; the local review must still post regardless. So every
-    failure here is caught, logged through the OBS01 sink (the failure FACT only —
-    the installation token never reaches a record, mirroring ``post.py``), and
-    swallowed, leaving ``generate_review`` / ``post_review`` unaffected.
-
-    The repo slug is ``ctx.repo`` when set, else inferred from the checkout
-    (``gh.current_repo()``) — the same source ``post.post_review`` resolves to.
-    """
-    try:
-        repo = ctx.repo or gh.current_repo()
-    except Exception as exc:  # noqa: BLE001 - the breadcrumb is best-effort, never fatal
-        logger.warning(
-            "run_and_post: funnel check run repo resolution failed for %s-local "
-            "(continuing to post the review): %s",
-            agent,
-            exc,
-        )
-        return None, None
-    run_id = _open_breadcrumb(agent, repo, ctx.head_sha)
-    return (run_id, repo) if run_id is not None else (None, None)
-
-
 def _reconcile_inflight(
     agent: str,
     repo: str,
@@ -597,9 +511,9 @@ def _reconcile_inflight(
 def _open_breadcrumb(agent: str, repo: str, head_sha: str) -> int | None:
     """Open the ``in_progress`` funnel check run on ``repo@head_sha`` — BEST-EFFORT.
 
-    The shared create both the synchronous :func:`_open_funnel_breadcrumb` and the
-    async parent (:func:`start_detached_review`) use, so the "a breadcrumb failure
-    must NEVER fail the review" rule lives in ONE place. Any failure (a 403 before
+    The create the async parent (:func:`start_detached_review`) opens its
+    ``in_progress`` run through, so the "a breadcrumb failure must NEVER fail the
+    review" rule lives in ONE place. Any failure (a 403 before
     the ``checks:write`` re-grant, an auth/``gh`` failure) is logged through the
     OBS01 sink (the failure FACT only — the installation token never reaches a
     record) and swallowed, returning ``None`` so the flow proceeds with no
@@ -633,7 +547,7 @@ def _close_funnel_breadcrumb(
 
     Maps ``outcome`` (``success`` / ``failed`` / ``empty`` / ``timed_out``) through
     :data:`_FUNNEL_TERMINAL` to the check-run ``conclusion`` + ``output`` message
-    and PATCHes the SAME run :func:`_open_funnel_breadcrumb` opened
+    and PATCHes the SAME run :func:`_open_breadcrumb` opened
     (:func:`shipit.review.checkrun.transition`).
 
     Two best-effort guards, so the breadcrumb NEVER crashes the flow or masks the
@@ -656,8 +570,8 @@ def _close_funnel_breadcrumb(
     terminal = _FUNNEL_TERMINAL.get(outcome)
     if terminal is None:
         logger.warning(
-            "run_and_post: unknown funnel outcome %r for %s-local (run id=%s); "
-            "recording it as 'failed'",
+            "_close_funnel_breadcrumb: unknown funnel outcome %r for %s-local "
+            "(run id=%s); recording it as 'failed'",
             outcome,
             agent,
             run_id,
@@ -670,7 +584,7 @@ def _close_funnel_breadcrumb(
             agent, repo, run_id, conclusion=conclusion, title=title, summary=summary
         )
         logger.info(
-            "run_and_post: closed funnel check run for %s-local on %s "
+            "_close_funnel_breadcrumb: closed funnel check run for %s-local on %s "
             "(run id=%s) -> completed/%s",
             agent,
             repo,
@@ -679,8 +593,8 @@ def _close_funnel_breadcrumb(
         )
     except Exception as exc:  # noqa: BLE001 - best-effort; never masks the review outcome
         logger.warning(
-            "run_and_post: funnel check run transition failed for %s-local "
-            "(run id=%s); the review outcome is unaffected: %s",
+            "_close_funnel_breadcrumb: funnel check run transition failed for "
+            "%s-local (run id=%s); the review outcome is unaffected: %s",
             agent,
             run_id,
             exc,
