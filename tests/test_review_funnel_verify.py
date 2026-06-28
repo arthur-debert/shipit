@@ -1,7 +1,7 @@
 """Tests for `shipit.review.funnel_verify` — the OBS02 funnel verification harness.
 
 The harness itself drives LIVE GitHub (kickoff create -> terminal transition on a
-canary PR) and is never run by this gate. These tests cover its *wiring and
+canary PR) and is never run by these checks. These tests cover its *wiring and
 assertion logic* with the App-token boundary (`ghauth`) and the `gh` check-run
 REST seam FAKED — exactly as `test_review_checkrun.py` / `test_review_funnel.py`
 fake them — so the harness can't silently rot even though its live mode is opt-in.
@@ -295,7 +295,7 @@ def test_format_report_shows_verdict_and_each_check(healthy):
 
 
 def test_main_requires_an_explicit_canary_target(monkeypatch):
-    """`main` REFUSES to run with no --repo/--pr (and no env) — the gate against an
+    """`main` REFUSES to run with no --repo/--pr (and no env) — the check against an
     accidental live fire. argparse errors out with a nonzero SystemExit."""
     monkeypatch.delenv("SHIPIT_FUNNEL_CANARY_REPO", raising=False)
     monkeypatch.delenv("SHIPIT_FUNNEL_CANARY_PR", raising=False)

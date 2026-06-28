@@ -1,4 +1,4 @@
-"""lint — the standardized multi-language gate (docs/prd/lint-gate.md).
+"""lint — the standardized multi-language checks (docs/prd/lint-checks.md).
 
 shipit INVERTS release's lefthook-as-orchestrator model. Because pixi has no
 cross-manifest task inheritance (architecture.lex §5), the per-language
@@ -6,14 +6,14 @@ discovery, routing and aggregation cannot live in a pixi task templated into
 each consumer — that is drift on pixi.toml. So it lives HERE, in the binary:
 lefthook is thin (it calls ``pixi run lint``), pixi is thin (it runs
 ``shipit lint``), and this verb does the real work. CI and the pre-commit hook
-run the IDENTICAL gate because it is ONE binary with ONE config — "both agree"
+run the IDENTICAL checks because it is ONE binary with ONE config — "both agree"
 is structural, not two transcriptions of the rules drifting apart.
 
-It is a HARD gate (architecture.lex §7): a missing tool exits non-zero, it never
-skips. A clean run is ``0``; any failure is ``1``.
+The lint checks are HARD-FAIL (architecture.lex §7): a missing tool exits
+non-zero, it never skips. A clean run is ``0``; any failure is ``1``.
 
-The gate is CHECK-ONLY by default (release's scar: ``prettier --write`` under
---all-files silently rewrites untouched files, so the gate must never mutate).
+The checks are CHECK-ONLY by default (release's scar: ``prettier --write`` under
+--all-files silently rewrites untouched files, so they must never mutate).
 ``--fix`` is the opt-in formatter pass — and only tools with a safe in-place fix
 participate; the rest still run as checks.
 
@@ -34,7 +34,7 @@ from typing import Callable
 from .. import gh
 
 # --------------------------------------------------------------------------
-# The toolchain registry — the slim, valuable part of release-core's gate
+# The toolchain registry — the slim, valuable part of release-core's checks
 # --------------------------------------------------------------------------
 #
 # These are release-core toolset.py's battle-tested command lines (NOT its
@@ -50,7 +50,7 @@ class Tool:
 
     ``fix`` is the formatter form applied under ``--fix``; ``None`` means the
     tool has no safe in-place fix, so in fix mode it falls back to its check
-    form. The gate NEVER skips a tool — ``shipit lint --fix`` formats what it can
+    form. The checks NEVER skip a tool — ``shipit lint --fix`` formats what it can
     AND still checks everything, so it can never pass while a non-fixable leg
     (shellcheck, yamllint, lexd) is failing.
     """
@@ -61,7 +61,7 @@ class Tool:
 
     def argv(self, *, fix: bool) -> tuple[str, ...]:
         """The argv prefix for this run: the fix form in fix mode if the tool has
-        one, else the check form (never ``None`` — the gate never skips)."""
+        one, else the check form (never ``None`` — the checks never skip)."""
         if fix and self.fix is not None:
             return self.fix
         return self.check
@@ -69,7 +69,7 @@ class Tool:
 
 @dataclass(frozen=True)
 class Lang:
-    """A language leg: how files map to it, and the tools that gate it."""
+    """A language leg: how files map to it, and the tools that check it."""
 
     name: str
     extensions: tuple[str, ...]
@@ -113,7 +113,7 @@ LEX = Lang(
     name="lex",
     extensions=(".lex",),
     # `lexd format` writes to stdout only (no in-place form), so lex has no safe
-    # --fix; it gates as check-only via `lexd check` (CI-friendly exit codes).
+    # --fix; it runs as check-only via `lexd check` (CI-friendly exit codes).
     tools=(Tool("lexd", ("check",)),),
 )
 
@@ -198,7 +198,7 @@ class ToolRun:
 
 
 def verdict(runs: list[ToolRun]) -> int:
-    """``0`` when every run passed, ``1`` otherwise — the whole gate contract."""
+    """``0`` when every run passed, ``1`` otherwise — the whole check contract."""
     return 0 if all(run.ok for run in runs) else 1
 
 
@@ -224,7 +224,7 @@ def _shebang(path: Path) -> str | None:
 def _run_tool(binary: str, args: list[str], cwd: Path) -> tuple[int, str]:
     """Run ``binary args`` in ``cwd``; return (exit code, combined output).
 
-    A binary missing from PATH is the HARD-gate signal: ``127`` + a clear note,
+    A binary missing from PATH is the HARD-fail signal: ``127`` + a clear note,
     never a silent skip.
     """
     try:
@@ -236,7 +236,7 @@ def _run_tool(binary: str, args: list[str], cwd: Path) -> tuple[int, str]:
             check=False,
         )
     except FileNotFoundError:
-        return 127, f"{binary}: not found on PATH (the gate is hard — provision it)"
+        return 127, f"{binary}: not found on PATH (the check is hard — provision it)"
     return proc.returncode, proc.stdout + proc.stderr
 
 
@@ -256,7 +256,7 @@ def run(
     discover: Callable[[Path], list[str]] | None = None,
     run_tool: Callable[[str, list[str], Path], tuple[int, str]] | None = None,
 ) -> int:
-    """Run the gate over the tree at ``path`` (default ``.``). Returns 0/1."""
+    """Run the checks over the tree at ``path`` (default ``.``). Returns 0/1."""
     root = Path(path or ".").resolve()
     if not root.is_dir():
         print(f"lint: {root} is not a directory", file=sys.stderr)

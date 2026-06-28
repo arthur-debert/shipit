@@ -163,9 +163,9 @@ not here. As a sketch:
 
 ## Out of Scope
 
-- **The engine reading the funnel / the wait window / the Ready gate** — consuming
+- **The engine reading the funnel / the wait window / the Ready pillars** — consuming
   the breadcrumbs + timestamps, applying the per-backend wait window, and the
-  "requested + outcome-recorded + threads-resolved" gate are **OBS04**. OBS03 only
+  "requested + outcome-recorded + threads-resolved" readiness pillar are **OBS04**. OBS03 only
   *produces* the async outcome; it relies on OBS04's window solely as the
   vanished-process backstop.
 - **The check-run primitive itself** — creating the funnel check run, its
@@ -173,7 +173,7 @@ not here. As a sketch:
   (and ADR-0005). OBS03 *uses* the primitive; it does not define it.
 - **The App-reviewer (Copilot) path** — Copilot has a native `review_requested`
   edge and posts on its own; nothing about its flow becomes async here.
-- **Install rollout / gating-by-default** — INS01.
+- **Install rollout / readiness holds on by default** — INS01.
 
 ## Depends on
 

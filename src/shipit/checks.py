@@ -4,18 +4,19 @@ Ported from release-core's ``verbs/apply_ruleset.py``: the ruleset must require
 the TARGET repo's own checks, never a captured set from another repo. Two modes,
 tried in order:
 
-1. From runs — the job names of the latest default-branch run of each PR-gate
-   workflow (purely the GitHub API; catches matrix expansion and ``name:``
-   overrides that static parsing can't see).
+1. From runs — the job names of the latest default-branch run of each
+   required-PR-check workflow (purely the GitHub API; catches matrix expansion
+   and ``name:`` overrides that static parsing can't see).
 2. Static — when no runs exist yet (the onboarding case), the contexts the
    workflow files themselves declare, resolving reusable-workflow calls to their
    nested ``<caller> / <called>`` contexts.
 
-A workflow is a gate only when it triggers on ``pull_request`` WITHOUT a
-``paths:`` / ``paths-ignore:`` filter (a path-filtered job is conditional and
-would deadlock unrelated PRs — release#416) and is not ``copilot-review`` (not a
-gate). The bare caller-job name of a reusable call is never a reported context
-and would deadlock every PR — release#602.
+A workflow contributes a required check only when it triggers on ``pull_request``
+WITHOUT a ``paths:`` / ``paths-ignore:`` filter (a path-filtered job is
+conditional and would deadlock unrelated PRs — release#416) and is not
+``copilot-review`` (which only requests a review, not a check). The bare
+caller-job name of a reusable call is never a reported context and would deadlock
+every PR — release#602.
 """
 
 from __future__ import annotations
@@ -30,7 +31,7 @@ import yaml
 
 from . import gh
 
-_NON_GATE_WORKFLOWS = ("copilot-review.yml", "copilot-review.yaml")
+_NON_CHECK_WORKFLOWS = ("copilot-review.yml", "copilot-review.yaml")
 
 
 class _WorkflowLoader(yaml.SafeLoader):
@@ -90,7 +91,7 @@ def pr_trigger_is_path_filtered(workflow: object) -> bool:
 
     Path-filtered jobs are conditional, so requiring them deadlocks any PR that
     doesn't touch the matching files (release#416). Only unfiltered
-    ``pull_request`` workflows are always-run gates and safe to require.
+    ``pull_request`` workflows are always-run checks and safe to require.
     """
     if not isinstance(workflow, dict):
         return False
@@ -125,7 +126,7 @@ def _called_job_included(job: object, with_values: dict) -> bool:
     """Whether a called workflow's job contributes a required context.
 
     A job-level ``if: inputs.<key>`` (optionally ``${{ … }}``-wrapped) is
-    resolved against the caller's ``with:`` — reusable CI gates its optional
+    resolved against the caller's ``with:`` — reusable CI conditions its optional
     jobs exactly this way, so a consumer that doesn't enable the feature must
     not have the context required. Any other ``if:`` is included: a skipped job
     still reports a (``skipped``) check run, which satisfies the ruleset.
@@ -239,14 +240,14 @@ def _job_contexts(
 
 
 def pr_workflow_paths(workflows_dir: str) -> list[str]:
-    """``.github/workflows/<name>`` of the local always-run PR-gate workflows."""
+    """``.github/workflows/<name>`` of the local always-run PR-check workflows."""
     names: list[str] = []
     for ext in ("*.yml", "*.yaml"):
         names.extend(sorted(glob.glob(os.path.join(workflows_dir, ext))))
     paths: list[str] = []
     for path in names:
         base = os.path.basename(path)
-        if base in _NON_GATE_WORKFLOWS:
+        if base in _NON_CHECK_WORKFLOWS:
             continue
         try:
             doc = _load_yaml_file(path)

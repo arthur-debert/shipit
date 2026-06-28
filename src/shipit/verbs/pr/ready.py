@@ -5,10 +5,10 @@ merge", so it is GUARDED: it refuses unless the engine says the PR is READY (all
 three Ready pillars — Reviewed + CI green + authoritative-mergeable). The refusal
 is a clean message + non-zero exit, never a silent no-op. `--undo` reverts
 ready→draft and is ALWAYS allowed — sending a PR back to draft when a human asks
-for changes is never gated.
+for changes is never held.
 
 The guarded re-check lives in :func:`guarded_flip` so both this verb and
-`pr next`'s ready act flip through the SAME gate: re-evaluate the live snapshot,
+`pr next`'s ready act flip through the SAME guard: re-evaluate the live snapshot,
 flip only on READY. Re-checking at flip time (not trusting a status computed
 moments earlier) is what makes the flip safe against a state that moved.
 """
@@ -67,7 +67,7 @@ def guarded_flip(pr: int, *, flip=ghapi.pr_ready, evaluate_status=None) -> TaskS
 @click.option(
     "--undo",
     is_flag=True,
-    help="Revert ready→draft (always allowed; not gated on Ready).",
+    help="Revert ready→draft (always allowed; not held by Ready).",
 )
 def cmd(pr: int | None, undo: bool) -> None:
     """Flip a PR draft→ready — guarded: refuses unless the engine says Ready.
@@ -93,7 +93,7 @@ def run(pr: int | None = None, *, undo: bool = False) -> int:
             print("error: no PR for this branch — nothing to flip", file=sys.stderr)
             return 1
         if undo:
-            # Always allowed: revert ready→draft. No readiness gate.
+            # Always allowed: revert ready→draft. No readiness hold.
             ghapi.pr_ready(resolved, undo=True)
             print(f"PR #{resolved}: reverted ready→draft")
             return 0

@@ -25,7 +25,7 @@ check-run create) and asserts the token GitHub actually granted carries
 It only VERIFIES and INSTRUCTS. The actual per-repo App install/consent EXECUTION
 is the ROL01 rollout's job (one sub-issue per repo) — out of scope here — and the
 install-seeds-secrets change is issue #25. ``run`` exits non-zero when any App is
-not live, so a rollout can gate on it: ``shipit verify-apps owner/repo; echo $?``.
+not live, so a rollout can branch on it: ``shipit verify-apps owner/repo; echo $?``.
 
 The probe is the SAME in-memory App-auth path the funnel itself uses
 (:mod:`shipit.review.ghauth`: Doppler-sourced PEM → in-memory RS256 JWT →
@@ -145,7 +145,7 @@ def run(repo: str | None, *, agents: list[str] | None = None, mint=None) -> int:
     ``gh-setup`` / ``logs``. ``agents`` selects which App reviewers to probe;
     omitted, it probes every known local-agent App (:func:`known_agents`). Prints
     a pass-or-instruct line per App and returns ``0`` only when ALL are live, ``1``
-    otherwise — the mechanical gate a rollout reads.
+    otherwise — the mechanical verdict a rollout reads.
     """
     target = repo
     if not target:
@@ -163,7 +163,7 @@ def run(repo: str | None, *, agents: list[str] | None = None, mint=None) -> int:
     selected = agents or known_agents()
     results = [verify_app(agent, target, mint=mint) for agent in selected]
     print(format_report(target, results))
-    # An empty probe set is NOT a pass: `all([])` is True, but a gate with nothing
+    # An empty probe set is NOT a pass: `all([])` is True, but a check with nothing
     # verified must fail (and `format_report` already renders empty as NOT LIVE).
     # Mirror that verdict so the exit code and the printed report never disagree.
     return 0 if (bool(results) and all(r.live for r in results)) else 1

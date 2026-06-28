@@ -29,9 +29,10 @@ RELEASE_TOKEN = { env = "GH_TOKEN", optional = true }
 # App private key (PEM) + app id are provisioned into Doppler `github/prd` under
 # these keys. Mapping them here makes `gh-setup` push them as repo Actions secrets
 # so a CI-side review has the same credentials the LOCAL path sources directly
-# from Doppler via `secretsrc` — CI parity, single source of truth. shipit gates
-# its OWN PRs on these local reviewers: `codex` and `agy` are in the [reviewers]
-# required set below, so every shipit PR is reviewed by both (alongside Copilot).
+# from Doppler via `secretsrc` — CI parity, single source of truth. shipit requires
+# these local reviewers on its OWN PRs: `codex` and `agy` are in the [reviewers]
+# required set below — blocking the flip-to-Ready — so every shipit PR is reviewed
+# by both (alongside Copilot).
 CODEX_REVIEW_APP_PRIVATE_KEY = { doppler = "CODEX_REVIEW_APP_PRIVATE_KEY" }
 CODEX_REVIEW_APP_ID          = { doppler = "CODEX_REVIEW_APP_ID" }
 AGY_REVIEW_APP_PRIVATE_KEY   = { doppler = "AGY_REVIEW_APP_PRIVATE_KEY" }
@@ -41,9 +42,52 @@ AGY_REVIEW_APP_ID            = { doppler = "AGY_REVIEW_APP_ID" }
 # shipped Copilot-only default; see src/shipit/prstate/reviewers_config.py). The
 # map KEYS are the required reviewers — all must be DONE to flip Ready. shipit
 # dogfoods its own local-review backends: `codex` and `agy` post as their App
-# bots and gate Ready alongside Copilot. Review-once (rerun defaults OFF): a
-# token-billed local agent re-runs only on explicit opt-in, never per push.
+# bots and block the flip-to-Ready alongside Copilot. Review-once (rerun defaults
+# OFF): a token-billed local agent re-runs only on explicit opt-in, never per push.
 [reviewers]
 copilot = {}
 codex = {}
 agy = {}
+
+# [project] — the CONSUMER-OWNED, un-validated namespace. shipit validates that
+# top-level tables are KNOWN (so a typo dies fast), but `[project]` (alias:
+# `[custom]`) is the well-known escape hatch whose SUBTREE shipit reads but does NOT
+# police the shape of — consumers put their own free-form policy here.
+#
+# [project.portfolio] — the AUTHORITATIVE, version-controlled list of repos shipit is
+# being rolled out across, grouped by STACK (workstream). It lives HERE, in git — never
+# in agent memory: a session reads this table instead of reconstructing a list from
+# `~/h` sibling dirs (the source of the recurring wrong list). Each entry carries the
+# `repo` (owner/name) and its `path` (hermetic-clone checkout layout). Transcribed from
+# the now-stale release/managed-repos.yaml; THIS is the source of truth. A future
+# `shipit portfolio` verb can consume it.
+#
+# Secondary stacks are deferred (out of scope for now): the brew-tap stack
+# (arthur-debert/homebrew-tools — formulas land via release-workflow pushes, not the PR
+# loop), the gh-action stack (arthur-debert/simple-gal-action, #108), and release/
+# itself (the source-of-truth repo, which needs its own check set). Add them when those
+# workstreams pick up.
+[project.portfolio]
+phos = [
+  { repo = "phos-editor/app", path = "phos/phos-app", expect_verify_fail = "the parity verify needs the phos sibling checkouts, absent in the hermetic clone" },
+  { repo = "phos-editor/core", path = "phos/phos-core" },
+]
+burgertocow = [{ repo = "arthur-debert/burgertocow", path = "burgertocow" }]
+clapfig = [{ repo = "arthur-debert/clapfig", path = "clapfig" }]
+dodot = [{ repo = "arthur-debert/dodot", path = "dodot" }]
+lex = [
+  { repo = "lex-fmt/comms", path = "lex-fmt/comms" },
+  { repo = "lex-fmt/lex", path = "lex-fmt/lex" },
+  { repo = "lex-fmt/lexed", path = "lex-fmt/lexed" },
+  { repo = "lex-fmt/nvim", path = "lex-fmt/nvim" },
+  { repo = "lex-fmt/tree-sitter-lex", path = "lex-fmt/tree-sitter-lex" },
+  { repo = "lex-fmt/vscode", path = "lex-fmt/vscode" },
+  { repo = "lex-fmt/zed-lex", path = "lex-fmt/zed-lex" },
+]
+padz = [{ repo = "arthur-debert/padz", path = "padz" }]
+rustloc = [{ repo = "arthur-debert/rustloc", path = "rustloc" }]
+simple-gal = [
+  { repo = "arthur-debert/simple-gal", path = "simple-gal/simple-gal" },
+  { repo = "arthur-debert/simple-gal-ui", path = "simple-gal/simple-gal-ui" },
+]
+standout = [{ repo = "arthur-debert/standout", path = "standout" }]

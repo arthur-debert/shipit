@@ -66,15 +66,15 @@ Scope
     Doppler-sourced secrets are re-applied on every install (a changed
     secret is set to its new value, which is the desired behavior).
 
-    Lint — the standardized gate:
+    Lint — the standardized checks:
 
-        `shipit lint` runs one multi-language gate (python, shell, yaml,
+        `shipit lint` runs one multi-language checkset (python, shell, yaml,
         json, markdown and lex today; rust, go and more as consumers bring
         them) over the tracked tree. The SAME invocation runs in CI and in
         the lefthook pre-commit / pre-push hooks — one binary, one config,
-        so they cannot drift into two definitions. It is a hard gate: a
+        so they cannot drift into two definitions. It is a hard-fail check: a
         missing tool fails the run, it never skips. `shipit lint --fix` is
-        the opt-in formatter pass; the bare gate never mutates files.
+        the opt-in formatter pass; the bare check never mutates files.
 
         The orchestration lives in the binary, not in lefthook or a
         templated pixi task: pixi has no cross-manifest task inheritance,
@@ -100,7 +100,7 @@ Scope
         the agent's own: committing, pushing, and opening the draft PR need
         no go-ahead — "stop at the ready flip" never means "wait to be
         asked to commit" or leave finished work uncommitted. The CEILING —
-        the ONE human-gated step — is the merge: the human does the final
+        the ONE step needing a human — is the merge: the human does the final
         read and merge unless they say otherwise. A human request for
         changes sends the PR back to draft and the loop repeats. The
         per-reviewer re-review and review-break rules are in [./AGENTS.lex].

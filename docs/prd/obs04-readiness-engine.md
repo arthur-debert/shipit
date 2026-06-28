@@ -80,7 +80,7 @@ PR flips).
    want it to hold the PR, so that I wait for a review that is still legitimately
    coming.
 3. As an agent, when a required reviewer **posted** its review, I want it counted
-   as settled (and its threads gating until resolved), so that Reviewed means the
+   as settled (and its threads holding until resolved), so that Reviewed means the
    review actually arrived and was addressed.
 4. As an agent, when a required reviewer **failed / came back empty / timed out**,
    I want it **settled and non-blocking**, so that one broken reviewer never parks
@@ -127,7 +127,7 @@ PR flips).
   The mapping lives behind the adapter interface so the engine never branches on a
   reviewer's name.
 
-### Gate / Reviewed redefinition + degraded
+### Readiness / Reviewed redefinition + degraded
 
 - A required reviewer is **settled** at any recorded terminal funnel outcome
   (not only *posted*). **Reviewed** = all required reviewers settled + every

@@ -22,15 +22,15 @@ from .model import (
 # `shipit.review.checkrun`). They arrive on the head commit's `statusCheckRollup`
 # alongside the real CI checks, so the build site recognizes this RESERVED name
 # prefix to split them OUT of the CI rollup — keeping the funnel breadcrumbs and
-# the CI-checks gate (`classify_checks`) from crossing. Matching a naming
+# the CI-checks verdict (`classify_checks`) from crossing. Matching a naming
 # convention is NOT branching on a reviewer's name: every funnel run, for any
 # reviewer, shares this one prefix.
 _FUNNEL_CHECK_PREFIX = "review: "
 
-# `comments(first: 100)` is deliberately un-paginated: the engine gates on a
+# `comments(first: 100)` is deliberately un-paginated: the engine blocks on a
 # thread's existence + `isResolved` + its root author, all of which live in the
 # thread node and its first comment, so truncating a >100-comment thread's tail
-# can't flip a gating decision. Thread COUNT is the real risk (a missed thread
+# can't flip a blocking decision. Thread COUNT is the real risk (a missed thread
 # is a missed unresolved blocker), so reviewThreads IS paginated via the cursor.
 #
 # `pullRequestReview { databaseId }` ties each comment back to the review that
@@ -397,7 +397,7 @@ def _partition_checks(
     The OBS02/ADR-0005 funnel check runs (`review: <reviewer>`) ride the SAME
     `statusCheckRollup` as the real CI checks. Left in `checks`, a failed
     `review: codex-local` run (conclusion FAILURE) would make `classify_checks`
-    read the whole CI gate as FAILING — a degraded local review must never block
+    read the whole CI verdict as FAILING — a degraded local review must never block
     CI. So the funnel runs are lifted out HERE, at the build site: anything whose
     `name` starts with the reserved `review: ` prefix becomes a
     `ReviewFunnelCheck`; everything else stays a CI check. Entries without a

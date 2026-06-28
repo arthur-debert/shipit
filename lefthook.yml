@@ -1,6 +1,6 @@
-# Thin lefthook caller — ALL gate logic lives in the `shipit lint` binary,
+# Thin lefthook caller — ALL lint-check logic lives in the `shipit lint` binary,
 # invoked through `pixi run lint`. lefthook is intentionally dumb
-# (docs/prd/lint-gate.md, architecture.lex §7): one definition, run everywhere, so CI and the hooks
+# (docs/prd/lint-checks.md, architecture.lex §7): one definition, run everywhere, so CI and the hooks
 # cannot drift into two transcriptions of the rules.
 #
 # Whole-tree (not staged-only) for now: `pixi run lint` lints `git ls-files`, so

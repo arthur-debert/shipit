@@ -28,10 +28,10 @@ from shipit.prstate.reviewers_config import (
 )
 
 
-def test_shipit_own_repo_gates_on_copilot_codex_agy():
+def test_shipit_own_repo_requires_copilot_codex_agy():
     # Task A / FLU01: shipit DOGFOODS its local reviewers — its own
-    # `.shipit.toml` `[reviewers]` table gates Ready on copilot + codex + agy
-    # (reversing the earlier "own PRs not gated on a local reviewer" choice).
+    # `.shipit.toml` `[reviewers]` table holds Ready on copilot + codex + agy
+    # (reversing the earlier "own PRs not held by a local reviewer" choice).
     # Reading the real repo config directly (not the cache) keeps this assertion
     # honest about the shipped policy.
     repo_root = Path(__file__).resolve().parent.parent
@@ -56,7 +56,7 @@ def test_default_is_copilot_only_review_once():
 
 
 def test_empty_override_falls_back_to_default():
-    # `reviewers = {}` is "unset", never "disable all review gating".
+    # `reviewers = {}` is "unset", never "disable all review holds".
     assert resolve_reviewers({}) == {"copilot": False}
 
 
@@ -132,7 +132,7 @@ def test_map_keys_are_canonicalized_to_adapter_names():
 def test_map_keys_colliding_after_canonicalization_fail_loud():
     # `Copilot` + `copilot` are byte-distinct keys (so a parser's own
     # duplicate-key rejection misses them) but canonicalize to one adapter — a
-    # typo, never two gates. It must fail loud, not silently clobber.
+    # typo, never two reviewers. It must fail loud, not silently clobber.
     with pytest.raises(RequiredReviewersConfigError, match="duplicate"):
         reviewers_config._parse_override_value({"Copilot": {}, "copilot": {}})
 
@@ -142,7 +142,7 @@ def test_map_keys_colliding_after_canonicalization_fail_loud():
 
 def test_local_backends_are_requestable_and_can_be_required():
     # codex / agy are requestable local backends, so they are valid in the
-    # required set (they post a real review the gate can read as done).
+    # required set (they post a real review the engine can read as done).
     assert resolve_required_names({"codex": False}) == ("codex",)
     assert resolve_required_names({"copilot": False, "agy": True}) == ("copilot", "agy")
 
@@ -154,7 +154,7 @@ def test_unknown_reviewer_name_fails_loud():
 
 def test_non_requestable_reviewer_cannot_be_required():
     # Gemini auto-triggers and has no request mechanism, so it can never satisfy
-    # a required gate — configuring it required fails loud at parse time.
+    # a required (holding) reviewer — configuring it required fails loud at parse time.
     with pytest.raises(RequiredReviewersConfigError, match="non-requestable"):
         resolve_reviewers({"copilot": False, "gemini": False})
 
@@ -199,7 +199,7 @@ def test_load_override_missing_table_is_none(tmp_path):
 
 def test_load_override_empty_table_is_none(tmp_path):
     # An empty `[reviewers]` table is "unset" → None (default applies), never
-    # "disable all gating".
+    # "disable all holds".
     (tmp_path / ".shipit.toml").write_text("[reviewers]\n")
     assert reviewers_config.load_override(str(tmp_path)) is None
 

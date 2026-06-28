@@ -107,9 +107,9 @@ def build_rounds(
     job — never re-roll an author filter here (a reviewer's review login and
     comment author can render differently; release#455).
 
-    `required` is the gating set; defaults to the config-resolved one but the
+    `required` is the blocking set; defaults to the config-resolved one but the
     engine threads its own set in so the stopping rule counts against the SAME
-    reviewers everything else gates on.
+    reviewers everything else blocks on.
     """
     required = required if required is not None else required_reviewers()
     reviews = sorted(
@@ -147,7 +147,7 @@ def is_all_nitpick_round(rnd: Round) -> bool:
     """True iff the round has findings and EVERY finding is a nitpick.
 
     An empty round (a clean/approving pass, no findings) is not "all nitpicks" —
-    there is nothing to address, so the normal readiness gates handle it.
+    there is nothing to address, so the normal readiness checks handle it.
     """
     return bool(rnd.bodies) and all(_is_nitpick(b) for b in rnd.bodies)
 
@@ -159,7 +159,7 @@ def evaluate_breakers(
     """Apply the stopping rule. First condition to hit wins.
 
     `required` is threaded through to `build_rounds` so round counting uses the
-    SAME required set the engine gates on (release#622).
+    SAME required set the engine evaluates (release#622).
 
     Stop when 6 rounds have happened, or when the latest round is all nitpicks.
     Either way the reported `cycles` is the raw round count (what the human

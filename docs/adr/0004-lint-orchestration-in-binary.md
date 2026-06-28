@@ -1,6 +1,6 @@
-# Lint-gate orchestration lives in the binary
+# Lint orchestration lives in the binary
 
-The lint gate's per-language discovery, routing, and aggregation live in the
+The lint command's per-language discovery, routing, and aggregation live in the
 `shipit lint` **binary** — not in lefthook, and not templated into the consumer's
 `pixi.toml`. This inverts release-core's shape, where lefthook is the orchestrator
 carrying the per-language glob map. In shipit, lefthook and pixi stay thin one-line
@@ -14,13 +14,13 @@ the manifest a managed-but-edited file, i.e. drift on the most important config 
 the logic in a binary instead and the consumer's `pixi.toml` carries only a stable,
 never-drifting one-line task.
 
-It is a **hard gate**: a missing tool fails non-zero, never skips. There is exactly one
-gate definition, so CI's `pixi run lint` and the local pre-commit hook run the identical
+It is a **hard-fail check**: a missing tool fails non-zero, never skips. There is exactly one
+lint definition, so CI's `pixi run lint` and the local pre-commit hook run the identical
 binary with the identical config — "both agree" because there is one transcription of the
 rules, not two. Full rationale is in `docs/dev/architecture.lex §5` (why a binary, not
-templated tasks) and `§7` (the gate: one definition, hard).
+templated tasks) and `§7` (lint checks: one definition, hard).
 
-## Resolved details (carried from docs/prd/lint-gate.md)
+## Resolved details (carried from docs/prd/lint-checks.md)
 
 - **Provisioning / the conda-forge gap.** prettier and markdownlint-cli ARE on
   conda-forge, so the anticipated npm path is unnecessary — every linter is a
@@ -30,7 +30,7 @@ templated tasks) and `§7` (the gate: one definition, hard).
   by `tools/provision-lexd.sh` (v0.18.4 from the `lex-fmt/lex` GitHub release,
   with checksum pinning); the `lint`/`fmt` tasks `depends-on = ["provision-lexd"]`
   so CI and the hook provision it identically.
-- **Check vs fix.** The gate is CHECK-ONLY by default (release's scar: a
+- **Check vs fix.** Lint is CHECK-ONLY by default (release's scar: a
   formatter under `--all-files` silently rewrites untouched files). `--fix` is the
   opt-in formatter pass, exposed as `pixi run fmt`; only tools with a safe
   in-place fix participate, the rest still run as checks
@@ -58,6 +58,6 @@ templated tasks) and `§7` (the gate: one definition, hard).
   neither drifts.
 - The orchestration is plain testable code in the package, kept out of the subprocess
   boundary so it is unit-testable (shipit's pure/boundary split).
-- An unprovisioned linter fails the gate loudly rather than quietly skipping, so the gate
-  cannot silently weaken.
-- The gate definition cannot fork between local and CI: there is one binary, one config.
+- An unprovisioned linter fails the lint checks loudly rather than quietly skipping, so the
+  checks cannot silently weaken.
+- The lint-check definition cannot fork between local and CI: there is one binary, one config.

@@ -12,7 +12,7 @@ The agent the human addresses is a COORDINATING agent: it never implements. Rega
 
 Three roles, so no one context carries all of it:
 
-- an IMPLEMENTER subagent implements (+ tests), runs the gate green, opens a
+- an IMPLEMENTER subagent implements (+ tests), runs the checks green, opens a
   DRAFT PR, then STOPS AT PR-OPEN — it never sees a review round;
 - the COORDINATOR owns every wait and the flip;
 - a FRESH SHEPHERD handles each review-addressing round, one per round,
@@ -30,8 +30,8 @@ FLOOR / CEILING:
 
 - FLOOR: committing, pushing, opening the draft PR are the agent's OWN job,
   no go-ahead needed. "Stop at the ready flip" NEVER means "wait to be asked to commit" or "leave finished work uncommitted".
-- CEILING: the ONLY human-gated step is the merge. Drive everything up to and
-  including the ready flip on your own authority, then stop.
+- CEILING: the ONLY step needing a human is the merge. Drive everything up to
+  and including the ready flip on your own authority, then stop.
 
 ## 1. The single-task cycle (one PR)
 
@@ -51,9 +51,9 @@ The coordinator reads/researches to brief the work, then delegates. It does not 
 
 ### 1.2. Implementation (the implementer subagent)
 
-The coordinator CREATES the branch off `main` (`fix/<issue>`) and spawns an IMPLEMENTER to do the task + tests. The implementer runs the commit/push gate — BOTH `pixi run lint` and `pixi run test`, the two blocking checks — green BEFORE opening the PR; CI runs the same as required checks, so local green is necessary for CI green.
+The coordinator CREATES the branch off `main` (`fix/<issue>`) and spawns an IMPLEMENTER to do the task + tests. The implementer runs BOTH `pixi run lint` and `pixi run test` — the two blocking commit/push checks — green BEFORE opening the PR; CI runs the same as required checks, so local green is necessary for CI green.
 
-Gate fidelity: a check that reads ambient local state (a sibling checkout, a machine-only tool, an env var CI lacks) passes locally and lies about CI. If a check needs something, make CI provide it.
+Check fidelity: a check that reads ambient local state (a sibling checkout, a machine-only tool, an env var CI lacks) passes locally and lies about CI. If a check needs something, make CI provide it.
 
 Verb passthrough: the standardized tasks are verbs — `pixi run <verb>` (`lint`, `test`, `build`, `docs-build`, `release`, `fmt`, `run`/`serve`, `docs-serve`, `clean`). Reach the underlying tool (pytest, cargo, tauri) by appending its args after `--`: `pixi run test -- -k test_foo`, \`pixi run build -- --release\`. shipit does not model the per-stack arg surface — the consumer's task and the tool own it. Full vocabulary + rationale: \[./docs/dev/verbs-tasks.lex\].
 
@@ -80,7 +80,7 @@ The single PR targets `main`; the coordinator drives it to READY and stops — t
 
 ## 2. Epics (multiple PRs)
 
-An epic — a feature of multiple PRs — is the SAME coordinator + role-split model [as](#1), differing ONLY in branch/merge topology: one **epic branch** + one umbrella PR; each workstream is a single-task cycle (\[\#1\]) whose PR targets the epic branch (not `main`). The coordinator merges each READY workstream PR INTO the epic branch on its own authority (parallel implement, serial integrate); the HUMAN's one gate is the umbrella PR (epic branch -\> `main`). Convergence (clear epic-owned fallouts) and a docs pass precede the umbrella.
+An epic — a feature of multiple PRs — is the SAME coordinator + role-split model [as](#1), differing ONLY in branch/merge topology: one **epic branch** + one umbrella PR; each workstream is a single-task cycle (\[\#1\]) whose PR targets the epic branch (not `main`). The coordinator merges each READY workstream PR INTO the epic branch on its own authority (parallel implement, serial integrate); the HUMAN's one checkpoint is the umbrella PR (epic branch -\> `main`). Convergence (clear epic-owned fallouts) and a docs pass precede the umbrella.
 
 A feature is planned before execution via `/shipt-planning` (ideation -\> ADRs -\> PRD -\> docs PR, then epic/WS decomposition -\> issues).
 

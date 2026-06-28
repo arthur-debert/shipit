@@ -13,7 +13,7 @@ the roadmap:
 - Spike 0 — pixi runs the rust+tauri toolchain. Verified 2026-06-25 (macOS+Linux CI). No PRD (a spike); rationale in `docs/dev/lessons-learned.lex §8`.
 - Step 1 — gh-setup → `docs/prd/gh-setup.md`
 - Step 2 — install + reconciliation → `docs/prd/install-reconciliation.md`
-- Step 3 — lint / fmt gate → `docs/prd/lint-gate.md`
+- Step 3 — lint / fmt checks → `docs/prd/lint-checks.md`
 - Step 4 — PR flow (PRF01) → `docs/prd/prf01-pr-flow.md`
 - OBS01 — logging foundation → `docs/prd/obs01-logging.md`
 - OBS02 — review funnel → `docs/prd/obs02-review-funnel.md`
@@ -25,15 +25,15 @@ the roadmap:
 
 The observability spine (OBS01 → OBS04) is shipped: logging, uniform funnel breadcrumbs,
 async local execution, and a readiness engine that reads the breadcrumbs + timestamps and
-gates on "requested + outcome-recorded + threads-resolved", NOT "the review succeeded"
+holds Ready until "requested + outcome-recorded + threads-resolved", NOT until "the review succeeded"
 (degraded reviewers are visible-but-non-blocking; the dispatcher routes on structured
-`TaskStatus` data, not `next_action` prose). With the funnel observable, gating-by-default
+`TaskStatus` data, not `next_action` prose). With the funnel observable, enabling the review holds by default
 is now safe to roll out — which is why rollout (INS01) sits at the end of the spine rather
 than the front.
 
 | Epic | Delivers | Depends on |
 | --- | --- | --- |
-| INS01 | Install integration (#25): carry the `[reviewers]` policy + codex/agy App `[secrets]` mappings + pr-loop AGENTS/skills into consumers via the managed set. Plus local-reviewer rollout (#26): per-consumer App-liveness verification + gating. Safe only after OBS04. | OBS04 |
+| INS01 | Install integration (#25): carry the `[reviewers]` policy + codex/agy App `[secrets]` mappings + pr-loop AGENTS/skills into consumers via the managed set. Plus local-reviewer rollout (#26): per-consumer App-liveness verification + enabling readiness holds. Safe only after OBS04. | OBS04 |
 
 Dependency spine: OBS01 → OBS02 → OBS03 → OBS04 → INS01 (OBS01–OBS04 shipped); FLU01 (shipped) was independent.
 

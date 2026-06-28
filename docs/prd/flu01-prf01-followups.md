@@ -13,7 +13,7 @@ it depends on nothing and nothing depends on it.
 
 The PRF01 review surfaced four small, independent rough edges in the shipped PR-flow
 code. Each is a localized hardening or ergonomics fix in already-working code — they
-were deferred because none gates PRF01's correctness on its happy path, and batching
+were deferred because none blocks PRF01's correctness on its happy path, and batching
 them out of the epic kept that PR landable. They remain worth doing:
 
 1. **`graphql()` reads as a general boundary but isn't one.** `src/shipit/prstate/ghapi.py:77`
@@ -89,7 +89,7 @@ Add a dedicated **non-default** `[feature.review]` feature to `pixi.toml` that i
 the `review` extra (`pyjwt[crypto]`), and a matching entry in `[environments]` (e.g.
 `review = ["review"]`), following the existing `lint` feature/env shape
 (`pixi.toml:35-60`). It must stay **off the required-check path** — not folded into the
-default env or the `lint`/`check` surface — so the locked CI gate is unchanged
+default env or the `lint`/`check` surface — so the locked CI checks are unchanged
 (architecture.lex §2); it exists so an agent env that needs to post local reviews can
 provision the extra via pixi instead of a manual `pip install`. (The extra itself is
 already declared in `pyproject.toml:23`; this only makes it reachable through a pixi
@@ -121,7 +121,7 @@ already exists:
    verified by a test exercising the stale/missing-base case.
 3. A pixi env materializes `pyjwt[crypto]`: a `review`-feature env can import the lazy
    `review` path without the clean-install hint firing, and the required-check (`lint`)
-   surface and `pixi.lock` gate are unchanged.
+   surface and the `pixi.lock` check are unchanged.
 4. A `[reviewers]` entry can set `timeout`; it is parsed/validated (loud on bad input),
    threads through to the backend, and an unset value defaults to 600s.
 

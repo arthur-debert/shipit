@@ -34,6 +34,33 @@ class ConfigError(RuntimeError):
     """``.shipit.toml`` is missing or malformed."""
 
 
+# A CLOSED registry of the top-level tables shipit knows. Adding a table = adding
+# an entry HERE (mirror of the review-backend ``_REGISTRY``). Validation rejects any
+# top-level table NOT in this set so a typo (``[secretz]``) dies fast instead of
+# being silently ignored. ``project`` (alias: ``custom``) is the consumer-owned
+# escape hatch — known so validation accepts it, but its SUBTREE is never descended or
+# policed.
+_KNOWN_TABLES = {"secrets", "reviewers", "managed", "shipit", "project"}
+_ESCAPE_HATCH_TABLES = {"project", "custom"}
+
+
+def _validate_known_tables(cfg: dict) -> None:
+    """Reject any top-level table not in the closed :data:`_KNOWN_TABLES` registry.
+
+    The ``project`` / ``custom`` escape-hatch tables are allowed and their subtree
+    is NOT descended or validated — consumers own that namespace. Raises
+    :class:`ConfigError` naming the offending key and listing the known set.
+    """
+    allowed = _KNOWN_TABLES | _ESCAPE_HATCH_TABLES
+    for key in cfg:
+        if key not in allowed:
+            known = ", ".join(sorted(allowed))
+            raise ConfigError(
+                f"unknown top-level table `{key}` in {CONFIG_NAME}; "
+                f"known tables: {known}"
+            )
+
+
 @dataclass(frozen=True)
 class SecretSource:
     """One ``[secrets]`` entry: the GitHub secret ``name`` and where it comes from.
@@ -87,9 +114,11 @@ def load(path: str | Path) -> dict:
         raise ConfigError(f"no {CONFIG_NAME} at {p}")
     try:
         with p.open("rb") as fh:
-            return tomllib.load(fh)
+            cfg = tomllib.load(fh)
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"malformed {p}: {exc}") from None
+    _validate_known_tables(cfg)
+    return cfg
 
 
 # --------------------------------------------------------------------------

@@ -23,7 +23,7 @@ workflows* publish from.
   20%) and upgrade by bumping one version — no thick vendored workflow copies to
   drift.
 - **Routing stays thin YAML:** the lane/platform matrix, cross-job artifact
-  upload/download, secret gating, the macOS keychain import. None of it is
+  upload/download, secret injection, the macOS keychain import. None of it is
   pixi-shaped.
 
 ### Alternatives rejected

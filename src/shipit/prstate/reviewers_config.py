@@ -1,6 +1,6 @@
 """The required-reviewer SET + per-reviewer rerun policy — config, not code.
 
-Which reviewers GATE Ready, and whether each re-reviews every push, is policy
+Which reviewers BLOCK Ready, and whether each re-reviews every push, is policy
 that changes with reviewer pricing and availability, so it must be a one-line
 config edit with no code change (release#622). This module is the single place
 that resolves that config:
@@ -9,7 +9,7 @@ that resolves that config:
     Copilot only, review-once (rerun=False). CodeRabbit is a registered,
     requestable adapter being PILOTED on the phos-org repos (where the GitHub
     App is installed) — a pilot repo opts in via the override below; requiring
-    it by default would gate every other repo on an app that is not installed
+    it by default would block every other repo on an app that is not installed
     there (the request edge silently drops, #613-style, and the PR parks at
     REVIEWS_PENDING forever).
   * a per-repo OVERRIDE — the optional `[reviewers]` table in the consumer's
@@ -30,11 +30,11 @@ options:
     RUN; distinct from `window` (arrival deadline vs run cap). Consumed by the
     local-agent review path, not the engine.
   * `model` / `instructions` — free-form strings consumed by the local-agent
-    review RUN path (`reviewer_run_options`); they do not affect the engine gate.
+    review RUN path (`reviewer_run_options`); they do not affect the engine verdict.
 
 The `[reviewers]` value is TABLE-ONLY: a list/array form (`reviewers =
 ["copilot", "codex"]`) is REJECTED loud, not silently accepted. The required
-set + per-reviewer options must be expressed as the table so every gate carries
+set + per-reviewer options must be expressed as the table so every required reviewer carries
 its options in one place.
 
 NEW POLICY: re-run-on-push is per-reviewer and defaults OFF for EVERYONE. All
@@ -43,7 +43,7 @@ time), so re-reviewing each push is explicit opt-in, not the default.
 
 Names map to adapters in the registry (#558); an unknown / non-requestable name
 fails LOUD (`RequiredReviewersConfigError`) rather than silently dropping a
-required gate.
+required reviewer.
 
 `resolve_reviewers` takes the override as data (already parsed), keeping THIS
 module pure and unit-testable; the thin `load_override` seam is the only thing
@@ -71,7 +71,7 @@ DEFAULT_REVIEWERS: dict[str, bool] = {"copilot": False}
 OVERRIDE_FILE = ".shipit.toml"
 OVERRIDE_KEY = "reviewers"
 
-# The per-reviewer options that are accepted. `rerun` gates re-review; `window` is
+# The per-reviewer options that are accepted. `rerun` controls re-review; `window` is
 # the OBS04-WS03 wait window (the uniform readiness deadline the engine ages an
 # in-flight reviewer against); `model`, `instructions`, and `timeout` are consumed
 # by the local-agent review RUN path (read via `reviewer_run_options`).
@@ -97,8 +97,8 @@ def resolve_reviewers(override: dict[str, bool] | None = None) -> dict[str, bool
 
     Pure: the caller passes the already-parsed override map (or None). An empty
     map is treated as "unset" — a consumer cannot accidentally disable ALL
-    review gating by writing `reviewers = {}`; that falls back to the default.
-    (Removing review gating entirely is not a config the loop offers.)
+    review enforcement by writing `reviewers = {}`; that falls back to the default.
+    (Removing review enforcement entirely is not a config the loop offers.)
     """
     resolved = dict(override) if override else dict(DEFAULT_REVIEWERS)
     _validate(tuple(resolved))
@@ -121,10 +121,10 @@ def _validate(names: tuple[str, ...]) -> None:
     no name repeats.
 
     Requestable is load-bearing: a reviewer with no request mechanism (Gemini)
-    can never satisfy a required gate — the engine would forever advise
+    can never satisfy a required reviewer — the engine would forever advise
     "request gemini" while `pr review request` only no-ops. Rejecting it here,
     at parse time, turns that silent dead-end into a loud config error. A
-    duplicate name is also rejected — a repeated gate is always a typo, never
+    duplicate name is also rejected — a repeated requirement is always a typo, never
     intent."""
     requestable = {r.name for r in REGISTRY if r.requestable}
     known = {r.name for r in REGISTRY}
@@ -141,7 +141,7 @@ def _validate(names: tuple[str, ...]) -> None:
         raise RequiredReviewersConfigError(
             f"non-requestable reviewer(s) {not_requestable} cannot be required "
             f"in {OVERRIDE_FILE} `{OVERRIDE_KEY}`: a reviewer with no request "
-            f"mechanism can never satisfy the gate — requestable adapters: "
+            f"mechanism can never satisfy the requirement — requestable adapters: "
             f"{sorted(requestable)}"
         )
     duplicates = sorted({n for n in lowered if lowered.count(n) > 1})
@@ -239,7 +239,7 @@ def _parse_options(name: str, opts: object) -> bool:
         raise RequiredReviewersConfigError(
             f"{OVERRIDE_FILE} `{OVERRIDE_KEY}.{name}` has unknown option(s) "
             f"{unknown} — supported options are {sorted(_KNOWN_OPTIONS)} "
-            "(`rerun` gates re-review; `window` is the readiness wait window; "
+            "(`rerun` controls re-review; `window` is the readiness wait window; "
             "`model`/`instructions`/`timeout` are read by the local-agent run path)"
         )
     for field in _RESERVED_OPTIONS:
@@ -248,7 +248,7 @@ def _parse_options(name: str, opts: object) -> bool:
                 f"{OVERRIDE_FILE} `{OVERRIDE_KEY}.{name}.{field}` must be a string"
             )
     # `timeout` / `window` are validated here too (loud on bad input) so a malformed
-    # duration is caught at config-parse time, not only on the run/gate path.
+    # duration is caught at config-parse time, not only on the run/readiness path.
     if "timeout" in opts:
         _duration_seconds(name, "timeout", opts["timeout"])
     if "window" in opts:
@@ -361,10 +361,10 @@ def reviewer_run_options(name: str, root: str | None = None) -> dict[str, str]:
     otherwise resolve a repo-relative `instructions` path against the wrong
     directory and fail to open it. The returned path is absolute.
 
-    Reading `model`/`instructions` is NOT gating: a reviewer requested manually
+    Reading `model`/`instructions` is NOT blocking: a reviewer requested manually
     via `--reviewer codex-local` (force scope) reads its options here WITHOUT
     being in the required set — so a consumer can tune a local reviewer's model
-    without making it a required gate (see the PRD's reviewer-policy note).
+    without making it a required reviewer (see the PRD's reviewer-policy note).
     """
     config = _find_config(root)
     if config is None:
@@ -381,7 +381,7 @@ def reviewer_run_options(name: str, root: str | None = None) -> dict[str, str]:
     if not isinstance(value, dict):
         # TABLE-ONLY, enforced here too: a present-but-non-table `reviewers`
         # value (e.g. a list/array) is an invalid config and must fail loud on
-        # EVERY read path, not just the gating one — otherwise a forced local
+        # EVERY read path, not just the blocking one — otherwise a forced local
         # review (`--reviewer codex-local`) would silently read past the same
         # invalid config that `load_override` rejects.
         _parse_override_value(value)
@@ -427,7 +427,7 @@ def reviewer_window(root: str | None = None) -> dict[str, int]:
     in-process `tomllib` seam, re-read at the build site (no separate cache: `gather`
     reads it once per command, unlike the `evaluate`-path rerun cache). An absent
     config or `[reviewers]` table → `{}`. A present-but-non-table `reviewers` value
-    fails loud here too, on every read path (not only the gating one)."""
+    fails loud here too, on every read path (not only the blocking one)."""
     config = _find_config(root)
     if config is None:
         return {}

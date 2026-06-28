@@ -56,7 +56,7 @@ Logging is agent / PR-loop tooling, not artifact-producing or required-check log
 installed outside the locked env — so it auto-updates fleet-wide with zero per-consumer
 lockfile churn. The accepted cost of that path (no per-consumer pin) is acceptable here
 for the same reason it is for the PR state machine: logging is off the required-check
-surface; a logging glitch is visible and retryable, it never fails a gate or corrupts a
+surface; a logging glitch is visible and retryable, it never fails a check or corrupts a
 build. (See architecture.lex §2 for the full statement; it is not duplicated here.)
 
 ## User Stories
