@@ -49,8 +49,8 @@ Each managed unit is either a WHOLE FILE or a marker-delimited BLOCK in a
 consumer-owned file. The architecture's slow set is "the bootstrap, the lefthook
 caller, the skills, the AGENTS.md block" — but stage it to what exists now:
 
-- `skills/` — whole files (the skills already in this repo: shipt-to-prd,
-  shipt-to-issues, shipt-grill-with-docs, lex-primer — confirm the exact managed
+- `skills/` — whole files (the skills already in this repo: shipit-to-prd,
+  shipit-to-issues, shipit-grill-with-docs, lex-primer — confirm the exact managed
   subset when defining the set). They must be bundled as PACKAGE DATA so the
   pip-installed `shipit` can vendor them — the same `importlib.resources`
   mechanism Step 1 used for `data/issue-labels.toml`. They are NOT packaged yet;
@@ -72,7 +72,7 @@ Step 1 defined `[secrets]`. Step 2 adds two tables:
 version = "<shipit commit hash that last wrote the set>"
 
 [managed]
-"skills/shipt-to-prd/SKILL.md" = "sha256:..."
+"skills/shipit-to-prd/SKILL.md" = "sha256:..."
 "AGENTS.md#shipit-block"       = "sha256:..."   # block, not whole file
 ```
 

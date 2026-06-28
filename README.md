@@ -10,7 +10,7 @@ A small set of utilities and agent harnesses to standardize work across my portf
 2.  Ensure that os level dependencies are installed in a pinned version.
 3.  Development Workflow:
     1.  The how to full for development workflow.
-    2.  The skills for development (shipt-planning, shipt-grill-with-docs, shipt-to-prd, shipt-to-issues)
+    2.  The skills for development (shipit-planning, shipit-grill-with-docs, shipit-to-prd, shipit-to-issues)
 4.  Standarized Linting and Formatting via LeftHook
     2.1 Multi language / file types supported (rust, python, shell, markdown, yaml, json, go, lex)
 5.  Github Repo Setup:

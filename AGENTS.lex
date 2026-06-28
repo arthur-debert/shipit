@@ -131,7 +131,7 @@ The PR lifecycle (draft -> ready -> stop):
     integrate); the HUMAN's one checkpoint is the umbrella PR (epic branch -> `main`).
     Convergence (clear epic-owned fallouts) and a docs pass precede the umbrella.
 
-    A feature is planned before execution via `/shipt-planning` (ideation -> ADRs
+    A feature is planned before execution via `/shipit-planning` (ideation -> ADRs
     -> PRD -> docs PR, then epic/WS decomposition -> issues).
 
     Full topology — per-workstream delegation, integration ordering, convergence,
