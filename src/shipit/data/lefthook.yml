@@ -4,14 +4,17 @@
 # cannot drift into two transcriptions of the rules.
 #
 # Whole-tree (not staged-only) for now: `pixi run lint` lints `git ls-files`, so
-# a green hook never lies about an unstaged edit. `pixi run test` runs in
-# pre-commit too, so a commit blocks on BOTH lint and test (the commit/push gate).
+# a green hook never lies about an unstaged edit. `pixi run test` is a commit/push
+# check in the final-state verb model (docs/dev/verbs-tasks.lex §2.1), but it is
+# wired into this seeded hook only once the consumer-provisioning rollout seeds a
+# `test` task: the seeded pixi tasks block (pixi-tasks-block.toml) ships `lint`
+# alone today, so calling `pixi run test` here now would hard-fail every commit
+# with task-not-found. When `test` is provisioned, add it back under `piped: true`
+# with priorities (lint before test) to fail fast.
 pre-commit:
   commands:
     lint:
       run: pixi run lint
-    test:
-      run: pixi run test
 
 pre-push:
   commands:

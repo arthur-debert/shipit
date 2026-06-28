@@ -84,8 +84,8 @@ The PR lifecycle (draft -> ready -> stop):
         Verb passthrough: the standardized tasks are verbs — `pixi run <verb>`
         (`lint`, `test`, `build`, `docs-build`, `release`, `fmt`, `run`/`serve`,
         `docs-serve`, `clean`). Reach the underlying tool (pytest, cargo, tauri) by
-        appending its args after `--`: `pixi run test -- -k test_foo`, `pixi run
-        build -- --release`. shipit does not model the per-stack arg surface — the
+        appending its args after `--`: `pixi run test -- -k test_foo`,
+        `pixi run build -- --release`. shipit does not model the per-stack arg surface — the
         consumer's task and the tool own it. Full vocabulary + rationale:
         [./docs/dev/verbs-tasks.lex].
 
