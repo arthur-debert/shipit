@@ -1,0 +1,9 @@
+{
+  "hooks": [
+    {
+      "command": "pixi run shipit hook pretooluse",
+      "type": "command"
+    }
+  ],
+  "matcher": "Edit|Write|MultiEdit|NotebookEdit"
+}

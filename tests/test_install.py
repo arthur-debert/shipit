@@ -1,5 +1,7 @@
 """Unit tests for install — reconciliation decisions, block splicing, and the verb."""
 
+import json
+
 import pytest
 
 from shipit import config, gh
@@ -143,6 +145,120 @@ def test_load_units_has_skills_agents_and_bootstrap():
 
 
 # --------------------------------------------------------------------------
+# The HAR01 harness units — generated agent-defs + the settings.json hook line
+# (docs/prd/har01-coordinator-guard-and-role-prompts.md, user stories 17 & 21)
+# --------------------------------------------------------------------------
+
+
+def test_load_units_includes_the_three_agent_defs():
+    units = {u.key: u for u in install.load_units()}
+    for role in ("implementer", "shepherd", "explorer"):
+        key = f"{install.AGENTS_DEF_DIR}/{role}.md"
+        assert key in units, f"{key} not registered"
+        unit = units[key]
+        assert unit.kind == "file"
+        assert unit.dest == key
+        # The bundled content is the generated agent-def (frontmatter names the role).
+        assert f"name: {role}".encode() in unit.content
+
+
+def test_load_units_includes_the_settings_hook_block():
+    units = {u.key: u for u in install.load_units()}
+    assert install.SETTINGS_KEY in units
+    unit = units[install.SETTINGS_KEY]
+    assert unit.kind == "block"
+    assert unit.fmt == install.FMT_JSON_HOOK
+    assert unit.dest == install.SETTINGS_FILE
+    # The managed region is shipit's PreToolUse entry (canonical JSON), nothing else.
+    entry = json.loads(unit.desired_inner())
+    assert entry["matcher"] == "Edit|Write|MultiEdit|NotebookEdit"
+    assert install.SETTINGS_HOOK_MARKER in entry["hooks"][0]["command"]
+
+
+def test_settings_hook_splice_preserves_other_settings():
+    consumer = json.dumps(
+        {
+            "permissions": {"allow": ["Bash(ls:*)"]},
+            "hooks": {
+                "SessionStart": [{"hooks": [{"type": "command", "command": "echo hi"}]}]
+            },
+        }
+    )
+    inner = json.dumps(
+        {
+            "matcher": "Edit|Write",
+            "hooks": [
+                {"type": "command", "command": "pixi run shipit hook pretooluse"}
+            ],
+        }
+    )
+    out = install.splice_settings_hook(consumer, inner)
+    data = json.loads(out)
+    # The consumer's unrelated settings survive untouched.
+    assert data["permissions"] == {"allow": ["Bash(ls:*)"]}
+    assert data["hooks"]["SessionStart"][0]["hooks"][0]["command"] == "echo hi"
+    # shipit's entry is now present in PreToolUse.
+    assert install.extract_settings_hook(out) == install._canonical_hook_entry(
+        json.loads(inner)
+    )
+
+
+def _unit(key):
+    return next(u for u in install.load_units() if u.key == key)
+
+
+def test_settings_hook_splice_is_idempotent_and_replaces_in_place():
+    inner = _unit(install.SETTINGS_KEY).desired_inner()
+    once = install.splice_settings_hook("", inner)
+    twice = install.splice_settings_hook(once, inner)
+    assert twice == once
+    # Exactly one shipit PreToolUse entry, even after a second splice.
+    pre = json.loads(twice)["hooks"]["PreToolUse"]
+    assert sum(install._is_shipit_hook(e) for e in pre) == 1
+
+
+def test_settings_hook_extract_is_none_when_absent_or_unparseable():
+    assert install.extract_settings_hook("") is None
+    assert install.extract_settings_hook("{}") is None
+    assert install.extract_settings_hook("not json") is None
+    # A settings.json with only the consumer's own hooks → no shipit entry.
+    other = json.dumps(
+        {"hooks": {"PreToolUse": [{"hooks": [{"command": "echo other"}]}]}}
+    )
+    assert install.extract_settings_hook(other) is None
+
+
+def test_settings_hook_reconciles_through_the_four_cases():
+    """The settings hook unit gives the standard ADD/NOOP/UPDATE/OVERRIDE decisions."""
+    unit = _unit(install.SETTINGS_KEY)
+    desired = unit.desired_hash()
+    extract = install.extract_settings_hook
+    h = lambda inner: config.content_hash(inner.encode("utf-8"))  # noqa: E731
+
+    # absent → ADD
+    assert (
+        install.decide(consumer_hash=None, pristine_hash=None, desired_hash=desired)
+        == install.ADD
+    )
+    # unchanged (consumer carries shipit's exact entry) → NOOP
+    on_disk = install.splice_settings_hook("", unit.desired_inner())
+    cur = h(extract(on_disk))
+    assert cur == desired
+    assert (
+        install.decide(consumer_hash=cur, pristine_hash=desired, desired_hash=desired)
+        == install.NOOP
+    )
+    # consumer edited shipit's own entry → OVERRIDE (not clobbered, surfaced in PR)
+    edited = on_disk.replace("Edit|Write|MultiEdit|NotebookEdit", "Edit")
+    cedit = h(extract(edited))
+    assert cedit != desired
+    assert (
+        install.decide(consumer_hash=cedit, pristine_hash=desired, desired_hash=desired)
+        == install.OVERRIDE
+    )
+
+
+# --------------------------------------------------------------------------
 # The verb — gh boundary patched
 # --------------------------------------------------------------------------
 
@@ -240,6 +356,93 @@ def test_fresh_install_writes_set_and_opens_draft_pr(tmp_path, rec):
     assert "### Added" in rec.pr_body
     # Order: branch -> add -> commit -> push -> pr.
     assert rec.names() == ["switch", "add", "commit", "push", "pr_create"]
+
+
+def test_fresh_install_provisions_agent_defs_and_settings_hook(tmp_path, rec):
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    rc = install.run(str(tmp_path))
+    assert rc == 0
+
+    # The three generated agent-defs land under .claude/agents/.
+    for role in ("implementer", "shepherd", "explorer"):
+        dest = tmp_path / ".claude" / "agents" / f"{role}.md"
+        assert dest.is_file()
+        assert f"name: {role}" in dest.read_text()
+
+    # The PreToolUse hook line lands in .claude/settings.json.
+    settings = json.loads((tmp_path / ".claude" / "settings.json").read_text())
+    pre = settings["hooks"]["PreToolUse"]
+    assert any(install._is_shipit_hook(e) for e in pre)
+
+    # Both kinds recorded a pristine hash in the manifest.
+    managed = config.load_managed(config.load(tmp_path / ".shipit.toml"))
+    assert ".claude/agents/implementer.md" in managed
+    assert install.SETTINGS_KEY in managed
+
+
+def test_install_merges_settings_hook_without_clobbering_consumer_settings(
+    tmp_path, rec
+):
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    settings_path = tmp_path / ".claude" / "settings.json"
+    settings_path.parent.mkdir(parents=True)
+    # A consumer who already has settings.json with their own permissions + hook.
+    settings_path.write_text(
+        json.dumps(
+            {
+                "permissions": {"allow": ["Bash(ls:*)"]},
+                "hooks": {
+                    "SessionStart": [
+                        {"hooks": [{"type": "command", "command": "echo hi"}]}
+                    ]
+                },
+            },
+            indent=2,
+        )
+    )
+    rc = install.run(str(tmp_path))
+    assert rc == 0
+
+    merged = json.loads(settings_path.read_text())
+    # The consumer's settings are intact, and shipit's hook was merged alongside.
+    assert merged["permissions"] == {"allow": ["Bash(ls:*)"]}
+    assert merged["hooks"]["SessionStart"][0]["hooks"][0]["command"] == "echo hi"
+    assert any(install._is_shipit_hook(e) for e in merged["hooks"]["PreToolUse"])
+
+
+def test_consumer_edit_to_settings_hook_surfaces_as_override(tmp_path, rec):
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    install.run(str(tmp_path))
+    rec.calls.clear()
+
+    # The consumer narrows shipit's managed PreToolUse matcher.
+    settings_path = tmp_path / ".claude" / "settings.json"
+    data = json.loads(settings_path.read_text())
+    for entry in data["hooks"]["PreToolUse"]:
+        if install._is_shipit_hook(entry):
+            entry["matcher"] = "Edit"
+    settings_path.write_text(json.dumps(data, indent=2))
+
+    rc = install.run(str(tmp_path))
+    assert rc == 0
+    assert ("pr_create", True) in rec.calls
+    # The edited unit is surfaced as an override with its diff, never clobbered blind.
+    assert "### Overrides" in rec.pr_body
+    assert install.SETTINGS_FILE in rec.pr_body
+
+
+def test_consumer_edit_to_agent_def_surfaces_as_override(tmp_path, rec):
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    install.run(str(tmp_path))
+    rec.calls.clear()
+
+    (tmp_path / ".claude" / "agents" / "implementer.md").write_text("HAND EDIT\n")
+    rc = install.run(str(tmp_path))
+    assert rc == 0
+    assert ("pr_create", True) in rec.calls
+    assert "### Overrides" in rec.pr_body
+    assert ".claude/agents/implementer.md" in rec.pr_body
+    assert "HAND EDIT" in rec.pr_body
 
 
 def test_reinstall_with_no_changes_is_a_clean_noop(tmp_path, rec):
