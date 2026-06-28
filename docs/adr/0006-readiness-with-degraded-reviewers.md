@@ -43,7 +43,7 @@ clock in the system to lean on.
 
 ### Alternatives rejected
 
-- **Block on any non-succeeded required reviewer** — the intuitive gate; recreates
+- **Block on any non-succeeded required reviewer** — the intuitive rule; recreates
   both the silent-park and the one-broken-reviewer-blocks-everything failures.
 - **Silently skip failed reviewers** — invites the erosion above; the failure
   becomes an invisible flake.

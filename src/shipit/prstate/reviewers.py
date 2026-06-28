@@ -53,7 +53,7 @@ def _age_to_timeout(
     still legitimately working) can age; every other state is already settled and
     returned unchanged. With both timestamps present, a reviewer whose age
     (`now - request_at`) EXCEEDS its window has gone silent past the deadline →
-    TIMED_OUT (the gate then settles it non-blocking + degraded); within the window
+    TIMED_OUT (the engine then settles it non-blocking + degraded); within the window
     it HOLDS (returned unchanged). Missing either timestamp — no injected `now`, or
     a reviewer with no recorded request time (best-effort Gemini has no requested
     edge) — cannot be aged and so holds: the window never invents a timeout from
@@ -74,7 +74,7 @@ def _age_to_timeout(
 # lifecycle. A local-agent reviewer overrides `funnel_state` to read its breadcrumb
 # instead (a posted review still short-circuits to POSTED there). `IN_PROGRESS`
 # only arises for the best-effort Gemini adapter (an "eyes" reaction); it maps to
-# IN_FLIGHT for uniformity, though Gemini is never a required/gating reviewer.
+# IN_FLIGHT for uniformity, though Gemini is never a required/blocking reviewer.
 _LIFECYCLE_TO_FUNNEL: dict[ReviewLifecycle, FunnelState] = {
     ReviewLifecycle.DONE_CLEAN: FunnelState.POSTED,
     ReviewLifecycle.DONE_COMMENTS: FunnelState.POSTED,
@@ -95,13 +95,13 @@ def _funnel_state_from_check(check: ReviewFunnelCheck) -> FunnelState:
       * ``SUCCESS`` → POSTED (a review landed, incl. a clean zero-findings one);
       * ``TIMED_OUT`` → TIMED_OUT (the producer recorded a timeout);
       * ``NEUTRAL`` → EMPTY (the producer's *empty* non-delivery — nothing
-        parseable; ADR-0005's accepted ``neutral`` mapping, which lets THIS gate
+        parseable; ADR-0005's accepted ``neutral`` mapping, which lets THIS engine
         tell empty apart from a hard failure WITHOUT the snapshot carrying the
         check-run ``output`` text — see `shipit.review.service._FUNNEL_TERMINAL`);
       * anything else terminal (``FAILURE`` / ``CANCELLED`` / ``STARTUP_FAILURE``
         / ``ACTION_REQUIRED`` / ...) → FAILED.
 
-    EMPTY / FAILED / TIMED_OUT are all *settled + degraded* at the gate; they
+    EMPTY / FAILED / TIMED_OUT are all *settled + degraded* in the engine; they
     differ only in the human-facing "why". WS03 adds the second path to TIMED_OUT:
     an IN_FLIGHT run whose `started_at` has aged past the wait window.
     """
@@ -140,7 +140,7 @@ class ReviewerAdapter:
     # Whether this adapter HAS a request mechanism (a real `review_requested`
     # edge it can place + the #614 attach-verification). Best-effort
     # auto-triggering backends (Gemini) set this False and can never be a
-    # required, gating reviewer. WHICH requestable adapters are *currently*
+    # required, blocking reviewer. WHICH requestable adapters are *currently*
     # required is NOT decided here — it is the config knob in
     # `reviewers_config` (release#622); this flag only marks eligibility.
     requestable: bool = False
@@ -195,7 +195,7 @@ class ReviewerAdapter:
           * rerun=False (default, review-once): a non-DISMISSED review by this
             reviewer on ANY commit of the PR reads DONE — it is NEVER stale
             after a push. The reviewer won't be asked to look again, so an
-            earlier-head review still satisfies the gate.
+            earlier-head review still satisfies the requirement.
           * rerun=True (opt-in, head-strict): the review must be on the CURRENT
             head to count DONE; a review only on an older head is stale and the
             reviewer reads back as REQUESTED (needs re-request for the new head).
@@ -340,14 +340,14 @@ class CodeRabbitAdapter(ReviewerAdapter):
     the phos-org repos (the only place the App is installed); a pilot repo opts
     in via the `[reviewers]` table in its `.shipit.toml`. It is NOT in the
     default required set: on a repo without the App, the request edge silently
-    drops (#613-style) and a required gate would park every PR at
-    REVIEWS_PENDING. Whether it gates is a config decision, not an adapter
+    drops (#613-style) and a required reviewer would park every PR at
+    REVIEWS_PENDING. Whether it blocks is a config decision, not an adapter
     property — this adapter only declares CodeRabbit *requestable* (it has a
     real request edge + the #614 attach-verification, so it is ELIGIBLE to be
     required wherever the App is installed).
 
     When a repo requires both Copilot and CodeRabbit, the policy is
-    parallel-required, not fallback: each gates Ready, so a PR is reviewed only
+    parallel-required, not fallback: each holds Ready, so a PR is reviewed only
     when BOTH have a fresh review on the current head. The accepted trade-off is
     availability — one required reviewer's outage holds Ready until it recovers —
     in exchange for always-on dual coverage and no single point of failure on
@@ -403,7 +403,7 @@ class GeminiAdapter(ReviewerAdapter):
     """
 
     name = "gemini"
-    requestable = False  # auto-triggers; no request edge, so never a required gate
+    requestable = False  # auto-triggers; no request edge, so never a required blocker
     has_requested_edge = False  # no requested edge; overrides detect entirely anyway
     # Declared location only — no content shipped until Gemini is onboarded
     # as a required reviewer.
@@ -600,7 +600,7 @@ class _LocalReviewAdapter(ReviewerAdapter):
         holds-with-an-action rather than parking silently. Marking an ABSENT signal
         as degraded would instead silently skip a reviewer that simply has not run
         yet (breaking the start-the-loop story), so the engine does not — the
-        not-required-until-provisioned rollout gate (INS01) owns that residual.
+        not-required-until-provisioned rollout policy (INS01) owns that residual.
         """
         if lifecycle in (ReviewLifecycle.DONE_CLEAN, ReviewLifecycle.DONE_COMMENTS):
             return FunnelState.POSTED
@@ -665,7 +665,7 @@ class AgyAdapter(_LocalReviewAdapter):
 
 # The adapter CATALOG: every reviewer the engine knows how to read/request. This
 # is the registry (#558) — adding a backend is adding an adapter here. WHICH of
-# these gate Ready is NOT decided here: that is the config knob in
+# these hold Ready is NOT decided here: that is the config knob in
 # `reviewers_config` (release#622), default [copilot] (coderabbit is a
 # phos-org pilot, opted in per-repo). codex / agy are LOCAL review backends
 # (generated + posted locally), unified under the same adapter interface.

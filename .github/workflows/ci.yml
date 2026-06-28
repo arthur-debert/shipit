@@ -1,6 +1,6 @@
 name: CI
 
-# shipit's own gate — now dogfooding `pixi run lint` (docs/prd/lint-gate.md). This is
+# shipit's own commit/push checks — now dogfooding `pixi run lint` (docs/prd/lint-checks.md). This is
 # the migration the prior self-contained python job anticipated: CI flips to
 # setup-pixi + pixi tasks, and the linters run --locked against pixi.lock so a
 # bump arrives as an auto-PR, never silently (architecture.lex §2). The required

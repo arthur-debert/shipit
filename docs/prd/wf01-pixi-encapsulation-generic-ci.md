@@ -14,7 +14,7 @@ workflows in `arthur-debert/release` (`rust-ci`, `tauri-ci`, `electron-ci`,
 → post` skeleton in a slightly different flavor, and the provisioning lives in
 `apt-get` / `setup-node` / `dtolnay` — so the only way to find out whether a CI
 change works is to push and watch a runner (the "monte carlo" loop, ~20 min per
-iteration). A maintainer cannot run the gate the way CI runs it, cannot test a
+iteration). A maintainer cannot run the commit/push checks the way CI runs them, cannot test a
 workflow edit locally, and cannot add a new project shape without touching the
 central repo.
 
@@ -26,7 +26,7 @@ through a single generic reusable workflow that is essentially `setup-pixi` +
 environments; build/test/lint become uniform-named pixi tasks the consumer supplies
 behind a stable interface; per-**toolchain** difference hides behind those names so
 the workflow stays generic. The same `pixi run` invocations run on a laptop, in
-local Docker, and in CI — and an `actionlint` gate plus an `act` harness let a
+local Docker, and in CI — and an `actionlint` check plus an `act` harness let a
 maintainer validate workflow edits locally before pushing. A consumer's CI shrinks
 to a thin caller of `arthur-debert/shipit@vN`, upgraded by bumping one version.
 
@@ -52,10 +52,10 @@ to a thin caller of `arthur-debert/shipit@vN`, upgraded by bumping one version.
 7. As a maintainer, I want to declare CI lanes (`{ run, required, local, trigger,
    runner, scope }`), so that the generic workflow fans them into jobs without me
    writing YAML per lane.
-8. As a maintainer, I want the **gate** (required∩local lanes — `lint` + `test`) to
-   run in pre-commit and CI identically, so that a missing tool hard-fails the same
-   way everywhere.
-9. As a maintainer, I want `actionlint` in the lint gate, so that a bad expression,
+8. As a maintainer, I want the **commit/push checks** (required∩local lanes —
+   `lint` + `test`) to run in pre-commit and CI identically, so that a missing tool
+   hard-fails the same way everywhere.
+9. As a maintainer, I want `actionlint` in the lint check, so that a bad expression,
    broken `needs:`, or malformed matrix is caught in milliseconds locally, not after
    a 20-minute push.
 10. As a maintainer, I want an `act`-based local runner for a single workflow/job
@@ -99,16 +99,17 @@ to a thin caller of `arthur-debert/shipit@vN`, upgraded by bumping one version.
   (thin/full), runner, and required/local flags. Mirrors `prstate/state.py`
   `evaluate()`: snapshot in, plan out, no network. The generic workflow consumes the
   emitted matrix.
-- **gate = required∩local lanes.** `shipit lint` and the consumer-supplied `test`
-  task are the two canonical gate lanes. Lefthook calls the gate; CI runs all lanes.
-  Refines, does not redefine, the existing **gate** (architecture.lex §7).
+- **commit/push checks = required∩local lanes.** `shipit lint` and the
+  consumer-supplied `test` task are the two canonical check lanes. Lefthook calls the
+  commit/push checks; CI runs all lanes. Refines, does not redefine, the existing
+  **commit/push checks** (architecture.lex §7).
 - **Generic reusable workflow (thin routing).** Published from
   `arthur-debert/shipit@vN` (ADR-0010): `setup-pixi` + emit the lane matrix +
   `pixi run <lane task>` per job + collect/post. Routing only — matrix, artifact
-  up/download stubs, secret gating. No shell logic in YAML.
-- **actionlint into the lint gate.** Add a workflow/actionlint **Lang** to
+  up/download stubs, secret injection. No shell logic in YAML.
+- **actionlint into the lint check.** Add a workflow/actionlint **Lang** to
   `verbs/lint.py`'s registry so `shipit lint` (hence pre-commit and CI) lints
-  workflow YAML. Hard gate: missing `actionlint` exits non-zero (architecture.lex §7).
+  workflow YAML. Hard-fail check: missing `actionlint` exits non-zero (architecture.lex §7).
 - **act harness (`shipit wf test` / a pixi task).** A wrapper that runs one
   workflow/job under `act` in catthehacker containers with an input-file and crafted
   event payload, and prints act's known-unsupported surface so a local pass is
@@ -135,9 +136,9 @@ to a thin caller of `arthur-debert/shipit@vN`, upgraded by bumping one version.
   single-toolchain rust-cli and a multi-toolchain tauri repo, each with an event +
   diff, asserting the planned matrix.
 - **Not unit-tested (validated by actionlint + act):** the generated reusable
-  workflow YAML itself; covered by the actionlint gate and a smoke `act` run in CI.
+  workflow YAML itself; covered by the actionlint check and a smoke `act` run in CI.
 - The `act` invocation, `setup-pixi`, and real provisioning are integration concerns,
-  exercised by running the gate on ≥2 real toolchains, not mocked in unit tests.
+  exercised by running the checks on ≥2 real toolchains, not mocked in unit tests.
 
 ## Out of Scope
 

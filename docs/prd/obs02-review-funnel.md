@@ -45,7 +45,7 @@ Check Run authored by the reviewer's own App**.
   `output` message. (`completed/neutral` is an acceptable alternative for *empty*;
   the load-bearing point is it is not `success`.)
 - The funnel check run is **non-required**: it is *visible but never blocks*. A
-  failed local review must be *seen*, not *gate* — the Ready pillar is "every
+  failed local review must be *seen*, not *hold* — the Ready pillar is "every
   required reviewer **settled** (outcome recorded) + threads resolved", not "every
   review **succeeded**".
 
@@ -54,9 +54,9 @@ native `review_requested` edge and its review object. OBS02 only supplies the
 missing native breadcrumb for the bots that lack one. The engine then sees one
 **review funnel** across both reviewer kinds — native-edge inputs for app
 reviewers, check-run inputs for local-agent reviewers. **That normalization into a
-single funnel view, and the gate change that consumes it, is OBS04's job** — OBS02
+single funnel view, and the readiness change that consumes it, is OBS04's job** — OBS02
 only *produces* the check-run breadcrumb; it does not change how the engine reads
-or gates.
+or holds Ready.
 
 **The structured-review POST already exists and stays unchanged.**
 `src/shipit/review/post.py` (`build_review_payload` / `post_review`) already posts
@@ -79,7 +79,7 @@ shipit cannot automate it (same class as the App install itself), and it is
 
 Consequence for this epic: until the re-grant lands, the local review **still
 posts** (that path is unaffected by the missing scope) — only the funnel check run
-cannot be created. So **OBS02's end-to-end verification is gated on the
+cannot be created. So **OBS02's end-to-end verification is blocked by the
 re-grant**; the code lands first, the live funnel turns on once the owner
 re-authorizes.
 
@@ -138,7 +138,7 @@ re-authorizes.
   the `in_progress` run and the completion that posts the review + closes the run
   are the same flow.
 - OBS02 changes **only** the *write* side (producing the breadcrumb). It does **not**
-  change `prstate` reading, normalization, or the Ready gate — those are OBS04.
+  change `prstate` reading, normalization, or the Ready pillars — those are OBS04.
 
 ## Work Streams (hint)
 
@@ -171,14 +171,14 @@ faked — never live GitHub.
   not block merge).
 - The existing structured-review POST (`post.py`) still fires unchanged on the
   success path — OBS02 wraps it, it does not replace it.
-- No test re-asserts engine reading / normalization / gating (that is OBS04).
+- No test re-asserts engine reading / normalization / readiness holds (that is OBS04).
 
 ## Out of Scope
 
-- **Reading / normalizing the funnel and the Ready-gate change — OBS04.** OBS02
+- **Reading / normalizing the funnel and the Ready-pillar change — OBS04.** OBS02
   only *produces* the check-run breadcrumb; the engine consuming both native-edge
   and check-run inputs into one funnel view, the wait window, and the
-  "requested + outcome-recorded + threads-resolved" gate are OBS04.
+  "requested + outcome-recorded + threads-resolved" readiness pillar are OBS04.
 - **Async local execution — OBS03.** OBS02 wraps whatever execution model is in
   place; the fire-and-forget detached run is OBS03.
 - **The actual App permission re-grant — INS01 / #26.** Adding `checks:write` and

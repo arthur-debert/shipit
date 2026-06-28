@@ -52,7 +52,7 @@ is a pixi task; routing logic is thin YAML) is stated in [./architecture.lex#3].
     Routing (thin workflow YAML):
         - the per-OS matrix
         - cross-job artifact upload / download
-        - secret gating and presence checks
+        - secret injection and presence checks
         - the macOS keychain import for signing
 
     These building blocks already exist in arthur-debert/release as
@@ -103,7 +103,7 @@ is a pixi task; routing logic is thin YAML) is stated in [./architecture.lex#3].
 
         The release job publishes ONLY when build and package succeeded and
         sign either succeeded (signed path) or was skipped (unsigned path). A
-        FAILED sign or package blocks the release. The gate cannot be a plain
+        FAILED sign or package blocks the release. This block cannot be a plain
         dependency — the default "a skipped dependency skips the dependent"
         would wrongly skip release on the unsigned path — so it is an explicit
         result check that accepts skipped-or-success for sign while still

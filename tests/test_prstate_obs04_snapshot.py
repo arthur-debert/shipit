@@ -9,9 +9,9 @@ These tests pin the data-carrying foundation the later OBS04 workstreams read:
       parsing `next_action` prose;
   (c) the `review: <agent>-local` funnel check runs do NOT corrupt the CI
       `classify_checks` verdict — a failed local review must never read the CI
-      gate as FAILING.
+      checks as FAILING.
 
-WS01 only CARRIES the data; the gate redefinition (WS02), the wait-window
+WS01 only CARRIES the data; the readiness pillars redefinition (WS02), the wait-window
 timeout (WS03), and the dispatcher rewrite (WS04) are out of scope here.
 """
 
@@ -81,7 +81,7 @@ def test_funnel_runs_lifted_out_of_ci_checks(context):
     assert reviewers == {"codex-local", "agy-local"}
 
 
-def test_failed_funnel_run_does_not_fail_the_ci_gate(context):
+def test_failed_funnel_run_does_not_fail_the_ci_checks(context):
     """The codex-local funnel run failed, yet CI reads GREEN — the two never cross.
 
     This is the load-bearing subtlety: left in the rollup, the funnel FAILURE

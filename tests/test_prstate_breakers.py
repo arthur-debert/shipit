@@ -2,7 +2,7 @@
 
 The rule: address every comment each round EXCEPT stop when 6 rounds have
 happened, or when the latest round is all nitpicks. A stop on an otherwise-ready
-PR routes to READY (the leftover threads no longer gate); a real CI/merge
+PR routes to READY (the leftover threads no longer hold Ready); a real CI/merge
 problem still blocks on its own terms.
 """
 
@@ -36,7 +36,7 @@ def finding(
     """A review thread holding one finding submitted with review `rid`.
 
     Resolved on purpose: a resolved finding was still a finding of that round,
-    so the round builder must count it (resolution clears the *open*-thread gate,
+    so the round builder must count it (resolution clears the *open*-thread hold,
     not the round history). `body` defaults to a substantive comment; pass a
     nitpick-marked body to model a cosmetic finding.
     """

@@ -20,21 +20,21 @@ Two definitions anchor it (ADR-0006 redefines the first):
              lag; release#715). "Mergeable" here keys off `mergeStateStatus` — the
              authoritative, merge-obeyed signal — NOT GitHub's async-stale
              `mergeable` verdict (it reads MERGEABLE optimistically before a
-             recompute lands). Gate order once
+             recompute lands). Check order once
              Reviewed: a conflict (DIRTY) or a BEHIND base surfaces first (a
              moved base re-stales CI); then failing/pending CI (BLOCKED /
              VALIDATING); then CLEAN -> READY; an UNSTABLE that survives the CI
-             gates is a transient ready_for_review re-queue lag (the rollup is
+             checks is a transient ready_for_review re-queue lag (the rollup is
              green) and also goes READY (release#715); an uncomputed (UNKNOWN)
              merge state re-polls; any remaining computed non-CLEAN state
              (BLOCKED/HAS_HOOKS) is BLOCKED (release#675).
 
-Best-effort reviewers (Gemini) never gate: an absent or in-progress best-effort
+Best-effort reviewers (Gemini) never hold: an absent or in-progress best-effort
 reviewer does not hold the PR in REVIEWS_PENDING. The *skip-after-timeout*
 decision is the polling caller's, not the snapshot's — the snapshot is
 stateless and has no clock.
 
-Review rounds repeat until done, gated by the per-reviewer rerun policy: for a
+Review rounds repeat until done, governed by the per-reviewer rerun policy: for a
 rerun=True (head-strict) reviewer a review counts only against the current head,
 so any push stales the prior review and the snapshot advises RE-REQUEST; for a
 rerun=False reviewer (review-once — the DEFAULT for everyone) a review on ANY
@@ -64,10 +64,10 @@ from .reviewers import REGISTRY, ReviewerAdapter, required_reviewers
 # shipit — `reviewer_funnel` (structured per-reviewer funnel data, incl. the WS02
 # normalized `FunnelState`) and `degraded` (required reviewers settled non-success)
 # — beyond the upstream shape. This is a recorded divergence, made so the OBS04
-# readiness engine's downstream workstreams (WS02 gate, WS04 dispatcher) read
+# readiness engine's downstream workstreams (WS02 readiness verdict, WS04 dispatcher) read
 # STRUCTURE off `TaskStatus` instead of substring-matching `next_action` prose. The
 # divergence is also recorded in `docs/adr/0001-reuse-release-core-by-copy.md`. WS01
-# CARRIED the data; WS02 redefines the gate over it (settled + degraded); the
+# CARRIED the data; WS02 redefines the readiness verdict over it (settled + degraded); the
 # dispatcher rewrite is WS04.
 # ---------------------------------------------------------------------------
 
@@ -78,12 +78,12 @@ from .reviewers import REGISTRY, ReviewerAdapter, required_reviewers
 #: any user-facing output.
 logger = logging.getLogger("shipit.prstate")
 
-# The funnel-state gate verdicts (ADR-0006). A required reviewer is SETTLED at any
+# The funnel-state readiness verdicts (ADR-0006). A required reviewer is SETTLED at any
 # recorded terminal outcome (POSTED *or* a degraded one), and HOLDS the PR only
 # while never-requested or still pending — requested or in-flight within its wait
 # window (a past-window in-flight reviewer has aged to settled TIMED_OUT, WS03).
 # DEGRADED is the non-blocking subset of settled — a recorded non-delivery that is
-# surfaced loud but does not gate Ready.
+# surfaced loud but does not hold Ready.
 _HOLDS = {
     FunnelState.NEVER_REQUESTED,
     FunnelState.REQUESTED,
@@ -136,7 +136,7 @@ class ReviewerFunnel:
     breadcrumb (`status` / `conclusion` / `started_at`), if the reviewer has one.
     A local-agent reviewer carries both; an App/native reviewer carries only the
     lifecycle (its check fields stay `None` — it sources the funnel from native
-    signals). WS02's gate and WS04's dispatcher read THIS instead of parsing
+    signals). WS02's readiness verdict and WS04's dispatcher read THIS instead of parsing
     `next_action` text. WS01 carries the raw signal; the funnel-STATE
     normalization (requested / in-flight / posted / failed / empty / timed-out)
     and the wait-window ageing of `started_at` are WS02 / WS03.
@@ -144,7 +144,7 @@ class ReviewerFunnel:
 
     lifecycle: ReviewLifecycle
     # The normalized OBS04 funnel state (ADR-0006): the ONE per-reviewer view the
-    # WS02 gate verdicts on and WS04's dispatcher routes on. Folded from the
+    # WS02 readiness verdict turns on and WS04's dispatcher routes on. Folded from the
     # lifecycle (App reviewers) or the breadcrumb (local reviewers) by the adapter,
     # so neither downstream reader branches on a reviewer's name.
     state: FunnelState = FunnelState.NEVER_REQUESTED
@@ -167,7 +167,7 @@ class TaskStatus:
     cycles: int = 0  # completed required-reviewer review rounds (raw count)
     breaker: str | None = None  # which stopping condition fired, if any
     # ADR-0001 divergence (OBS04): structured per-reviewer funnel data so WS02's
-    # gate and WS04's dispatcher read structure, not `next_action` prose. Keyed by
+    # readiness verdict and WS04's dispatcher read structure, not `next_action` prose. Keyed by
     # adapter name, same keys as `reviewers`. The `reviewers` map (name ->
     # lifecycle string) is UNCHANGED for back-compat with current consumers; this
     # is purely additive.
@@ -272,7 +272,7 @@ def _evaluate(
     the production paths stay pure — config resolution lives at the edge, not in
     the engine.
 
-    `required` is the gating reviewer SET; every reviewer in it gates Ready
+    `required` is the blocking reviewer SET; every reviewer in it holds Ready
     (parallel-required, release#622), reviewers outside it are best-effort and
     never block. A test passes a DIFFERENT set to prove the engine is
     data-driven, not hard-coded to any reviewer. The `None` default is a
@@ -298,7 +298,7 @@ def _evaluate(
     # Normalize each reviewer's signals to its ONE funnel state (ADR-0006), asking
     # the ADAPTER so the engine never name-branches: an App reviewer folds from its
     # lifecycle, a local reviewer from its `review: <agent>-local` breadcrumb (or a
-    # posted review). This is the structured state WS02 gates on and WS04 routes on,
+    # posted review). This is the structured state WS02's verdict turns on and WS04 routes on,
     # in place of `next_action` prose. The raw breadcrumb (status / conclusion /
     # started_at) rides alongside it on `ReviewerFunnel` (WS03 ages started_at).
     funnel_states = {r.name: r.funnel_state(ctx, lifecycles[r.name]) for r in to_detect}
@@ -315,7 +315,7 @@ def _evaluate(
     open_threads = len(ctx.open_threads())
     checks = classify_checks(ctx.checks)
     # The stopping rule counts rounds against the SAME required set the engine
-    # gates on — passed through so an override repo's round math matches its
+    # evaluates — passed through so an override repo's round math matches its
     # reviewers. When it has fired, the loop must NOT open another round: an
     # otherwise-ready PR flips to READY (the leftover threads are stale or
     # nitpicks), not back to ADDRESSING.
@@ -352,7 +352,7 @@ def _evaluate(
     #    past its window into timed-out, which settles). failed / empty / timed-out
     #    settle non-blocking (already collected into `degraded` above), so they do
     #    NOT appear here — one broken reviewer never parks the PR. Best-effort
-    #    reviewers (outside `required`) never gate.
+    #    reviewers (outside `required`) never hold.
     holding = [r for r in required if funnel_states[r.name] in _HOLDS]
     if holding:
         # Split the holding reviewers into the act each one's funnel state dictates
@@ -376,7 +376,7 @@ def _evaluate(
     # 2. Required reviews in; any open thread (from any reviewer) must be
     #    addressed — UNLESS the stopping rule has fired (6 rounds, or the latest
     #    round is all nitpicks): then do NOT open another round. The leftover
-    #    threads no longer gate, so fall through to the readiness gates below —
+    #    threads no longer hold, so fall through to the readiness checks below —
     #    an otherwise-ready PR flips to READY (it records the breaker name so the
     #    stop is visible), and a real CI/merge problem still blocks it on its own
     #    terms. Record the breaker either way.
@@ -390,7 +390,7 @@ def _evaluate(
         )
         return status
 
-    # 3. Reviewed. Now gate on mergeability + CI.
+    # 3. Reviewed. Now evaluate mergeability + CI.
     #
     # GitHub exposes mergeability through TWO fields, and they disagree often
     # enough to matter (release#675):
@@ -407,7 +407,7 @@ def _evaluate(
     #   DIRTY    → conflict          BEHIND → base moved, head out of date
     #   BLOCKED  → branch protection / a required status not satisfied
     #   UNSTABLE → a (non-required) check is failing/pending — EXCEPT when the
-    #              rollup is already green (the FAILING/PENDING gates passed): then
+    #              rollup is already green (the FAILING/PENDING checks passed): then
     #              UNSTABLE is a transient ready_for_review re-queue lag and goes
     #              READY, deferring to the authoritative rollup (release#715).
     # An UNKNOWN / null merge state means GitHub is still computing — re-poll
@@ -421,7 +421,7 @@ def _evaluate(
     # the async-stale `mergeable == CONFLICTING` is only a FALLBACK for when the
     # merge state is still uncomputed (None/UNKNOWN). Trusting CONFLICTING
     # unconditionally would false-BLOCK a PR that DIRTY/CLEAN already disproves —
-    # the mirror image of the stale-MERGEABLE bug this gate exists to fix.
+    # the mirror image of the stale-MERGEABLE bug this check exists to fix.
     # Checked first: a conflict must be resolved regardless of CI.
     if ctx.merge_state == "DIRTY" or (
         ctx.merge_state in (None, "UNKNOWN") and ctx.mergeable == "CONFLICTING"
@@ -462,7 +462,7 @@ def _evaluate(
 
     # UNSTABLE is GitHub's "a non-required check is failing/pending" state — but
     # the engine ALREADY inspects every check via the rollup (the FAILING/PENDING
-    # gates above). A surviving UNSTABLE with an EXPLICITLY GREEN rollup is a
+    # checks above). A surviving UNSTABLE with an EXPLICITLY GREEN rollup is a
     # transient lag, not a real block: GitHub re-runs a SKIPPED/NEUTRAL check on
     # the `ready_for_review` event (e.g. phos's `e2e-gpu`, conclusion=skipped),
     # flipping mergeStateStatus to UNSTABLE for a beat while the rollup still reads

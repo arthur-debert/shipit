@@ -50,9 +50,9 @@ The `--push` flag is a break-glass escape hatch: it pushes straight to the repo'
 
 Doppler-sourced secrets are re-applied on every install (a changed secret is set to its new value, which is the desired behavior).
 
-### Lint — the standardized gate:
+### Lint — the standardized checks:
 
-`shipit lint` runs one multi-language gate (python, shell, yaml, json, markdown and lex today; rust, go and more as consumers bring them) over the tracked tree. The SAME invocation runs in CI and in the lefthook pre-commit / pre-push hooks — one binary, one config, so they cannot drift into two definitions. It is a hard gate: a missing tool fails the run, it never skips. `shipit lint --fix` is the opt-in formatter pass; the bare gate never mutates files.
+`shipit lint` runs one multi-language checkset (python, shell, yaml, json, markdown and lex today; rust, go and more as consumers bring them) over the tracked tree. The SAME invocation runs in CI and in the lefthook pre-commit / pre-push hooks — one binary, one config, so they cannot drift into two definitions. It is a hard-fail check: a missing tool fails the run, it never skips. `shipit lint --fix` is the opt-in formatter pass; the bare check never mutates files.
 
 The orchestration lives in the binary, not in lefthook or a templated pixi task: pixi has no cross-manifest task inheritance, so lefthook and pixi stay thin callers (`pixi run lint`) while the per-language discovery and routing live in `shipit lint`. The linters themselves ride in as shipit's own pinned dependencies, so a consumer's pixi.toml carries only the stable \`lint = "shipit lint"\` task line, never a drifting list of tool pins. See [5](./docs/dev/architecture.lex) and §7.
 
@@ -62,7 +62,7 @@ The orchestration lives in the binary, not in lefthook or a templated pixi task:
 
 Every change ships as a PR the agent drives. Open it as a DRAFT, then shepherd the whole loop while it stays draft — request and address reviews, get CI green, make it mergeable. Flipping draft → ready is the ONE signal that means "done iterating; a human can validate and merge", so it happens only when all three hold: reviews addressed, CI green, mergeable.
 
-The agent stops at that flip — it does NOT merge. But the FLOOR is the agent's own: committing, pushing, and opening the draft PR need no go-ahead — "stop at the ready flip" never means "wait to be asked to commit" or leave finished work uncommitted. The CEILING — the ONE human-gated step — is the merge: the human does the final read and merge unless they say otherwise. A human request for changes sends the PR back to draft and the loop repeats. The per-reviewer re-review and review-break rules are [in](./AGENTS.lex).
+The agent stops at that flip — it does NOT merge. But the FLOOR is the agent's own: committing, pushing, and opening the draft PR need no go-ahead — "stop at the ready flip" never means "wait to be asked to commit" or leave finished work uncommitted. The CEILING — the ONE step needing a human — is the merge: the human does the final read and merge unless they say otherwise. A human request for changes sends the PR back to draft and the loop repeats. The per-reviewer re-review and review-break rules are [in](./AGENTS.lex).
 
 2.1 pixil shipit-request-review \<pr_number\> \<reviewer\>....
 

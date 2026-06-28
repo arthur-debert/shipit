@@ -34,12 +34,12 @@ generic, obvious work is done: (1) the code is correct — **Reviewed**: written
 and every thread addressed; (2) the checks pass — CI green; (3) the PR is **Mergeable** —
 no conflict, not behind its base, no unsatisfied branch-protection rule, keyed off the
 authoritative merge-state signal (not GitHub's async-stale `mergeable` boolean). These
-three are exactly the engine's gate order, and `pr next` flips draft→ready only when all
+three are exactly the engine's pillar order, and `pr next` flips draft→ready only when all
 three hold.
 
 The engine is unchanged (the crown jewel is copied, not rewritten); the surface a user
 touches is redesigned for consistency with the rest of shipit. Reviewer policy — which
-reviewers gate **Ready** and whether each re-reviews every push — moves to a `[reviewers]`
+reviewers hold **Ready** and whether each re-reviews every push — moves to a `[reviewers]`
 table in `.shipit.toml`, alongside `[secrets]`. The default is **Copilot only,
 review-once**, and Copilot works end-to-end in this epic. The **local-agent reviewers**
 (`codex-local`, `agy-local`) are known to the engine (their reviews are detected, their
@@ -79,7 +79,7 @@ names resolve) but actually *running* a local review is deferred to a later step
     cannot flip a PR that isn't actually done.
 14. As an agent, I want `pr ready --undo`, so that I can send a PR back to draft when a
     human asks for changes.
-15. As a maintainer, I want to declare which reviewers gate **Ready** in `.shipit.toml`, so
+15. As a maintainer, I want to declare which reviewers hold **Ready** in `.shipit.toml`, so
     that changing the required set is a one-line config edit, not a code change.
 16. As a maintainer, I want a per-reviewer `rerun` flag (default false = review-once), so
     that re-reviewing every push is an explicit, cost-aware opt-in.
@@ -89,7 +89,7 @@ names resolve) but actually *running* a local review is deferred to a later step
     default (Copilot, review-once), so that a repo works with zero reviewer config.
 19. As a maintainer, I want an unknown reviewer name, a non-requestable reviewer in the
     required set, or a malformed entry to fail loud with a clear message, so that a typo
-    never silently drops a gate.
+    never silently drops a required reviewer.
 20. As a maintainer, I want to pre-declare `model` / `instructions` for a local-agent
     reviewer in `.shipit.toml`, so that the config is complete now even though it is
     consumed by the later local-agent step.
@@ -106,7 +106,7 @@ names resolve) but actually *running* a local review is deferred to a later step
 25. As an agent, I want `pr status`/`pr next` to read the **authoritative** merge state
     (not GitHub's async-stale `mergeable`), so that I don't flip on a stale optimistic
     verdict.
-26. As an agent, I want best-effort reviewers (e.g. Gemini) to never gate **Ready**, so
+26. As an agent, I want best-effort reviewers (e.g. Gemini) to never hold **Ready**, so
     that an absent best-effort reviewer doesn't hold the PR.
 27. As an agent, I want every `shipit pr` command to share the same option idiom (optional
     PR argument, `--json`, `--reviewer`), so that the group feels like one tool.
@@ -182,7 +182,7 @@ copilot     = { rerun = false }                         # default if table absen
 codex-local = { rerun = false, model = "pro", instructions = "docs/review.md" }
 ```
 
-- The **required reviewer** set is the table's keys; every key gates **Ready**. Per-reviewer
+- The **required reviewer** set is the table's keys; every key holds **Ready**. Per-reviewer
   options: `rerun` (bool, default false = review-once) consumed now by the engine; `model`
   and `instructions` parsed and validated now but **reserved** for the deferred local-agent
   step. Unknown options, unknown/non-requestable reviewer names, and duplicates fail loud.
@@ -266,7 +266,7 @@ is "port what still earns its keep," not "port everything."
 
 - CodeRabbit and Gemini adapters come along in the registry but are not in the default
   required set; CodeRabbit remains an opt-in (its App is only installed on some repos) and
-  Gemini is best-effort (never gates). This epic does not onboard either.
+  Gemini is best-effort (never holds Ready). This epic does not onboard either.
 - The verification target is a real PR on a throwaway test repo with Copilot as the required
   reviewer: `pr status` reports each lifecycle state correctly, and `pr next` requests the
   review, then — once reviewed, CI green, merge state clean — flips draft→ready and stops.

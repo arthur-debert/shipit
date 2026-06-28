@@ -1,7 +1,7 @@
 # shipit
 
 shipit standardizes work across a personal portfolio of repos: provisioning,
-the dev workflow + skills, a multi-language lint gate, GitHub repo setup, pixi
+the dev workflow + skills, a multi-language lint check, GitHub repo setup, pixi
 tooling, the PR-review state machine, and the build/release workflows. This
 glossary fixes the language of that domain — especially the PR-flow vocabulary
 inherited from release-core and the build/release vocabulary.
@@ -135,9 +135,10 @@ keeps.
 **Holds / Settled**:
 A reviewer or pillar **holds** a PR when its condition keeps the PR from Ready; it
 is **settled** once that condition is met. The PR is **Ready** when nothing holds
-it. Deliberately distinct from the **gate** — the lint/test hard check, a separate
-pass/fail concept — so readiness is spoken of as *holds / settled / pillars*,
-never "gating".
+it. Deliberately distinct from a **check**'s **blocking / advisory** role — readiness
+(holds / settled / pillars) is about reviewers and merge-state, a separate layer
+from whether a check blocks an operation; speak of it as *holds / settled /
+pillars*, never "gating".
 
 **Next action**:
 The single instruction the **PR state engine** emits for a PR's current state
@@ -157,6 +158,43 @@ the relevant ADRs and carries a PRD summary plus the **Work Stream** topology an
 progress (sub-issues). It tracks *how the work lands*, not *what to build*. One
 feature may have several epic issues; produced by `/shipt-to-issues`.
 *Avoid*: embedding the full PRD in the issue — it links to the PRD, never replaces it.
+
+### Checks & enforcement
+
+There is no "gate". A **check** has no inherent power to stop anything; *blocking* is a
+relation between an **operation**, the context it runs in, and a check — decided by a
+**policy**, never a property of the check itself. The recurring confusion ("what does a
+test *gate*?") dissolves once these three are kept separate: a test is a check; what it
+blocks, if anything, depends on which operation is asking and under what policy.
+
+**Check**:
+A verifiable yes/no verdict over the tree — `lint`, each `test` variant, `build`-succeeds,
+`actionlint`, a **lane**'s result. Intrinsically just a question; on its own it stops
+nothing. The very same check can be decisive in one place and informational in another.
+*Avoid*: "gate", "gating" — a check carries no blocking power to name.
+
+**Operation**:
+An attempted transition someone (human or agent) wants to make — *commit*, *push*,
+*open-PR*, *flip-to-Ready*, *merge*, *release*. The unit that can be *blocked*. Each
+operation runs the checks its **policy** binds, evaluated in that operation's context.
+
+**Policy** (per operation):
+The binding that says, for one **operation** in a given context, whether each relevant
+**check** is **blocking** (its failure stops the operation) or **advisory** (its failure
+is recorded and surfaced — cf. **degraded** — but the operation proceeds). Enforcement is
+contextual, not global: `lint` + the fast `test` set block at *commit/push*; an expensive
+`test-e2e` / GPU lane is advisory there and blocking only at *open-PR* / *merge*. A
+**lane**'s `required` / `local` / `trigger` fields ARE its policy across operations —
+`required` = blocking at *merge*, `local` = also enforced at *commit/push*, `trigger` =
+which operations run it at all.
+*Avoid*: one global "the gate" — there are as many enforcement sets as there are operations.
+
+**Blocking / Advisory**:
+The two roles a **check** can play under a **policy** for a given **operation**. *Blocking*:
+its failure stops the operation. *Advisory*: its failure is surfaced but does not stop it. A
+check is never blocking or advisory in the abstract — only for a named operation in a named
+context. (So "pre-commit runs `lint` + `test`" means: the *commit* operation's policy marks
+those two checks blocking — not that they are gates.)
 
 ### Build & release
 
@@ -217,13 +255,14 @@ generic CI workflow fans the lanes into jobs; each resolves-or-builds its
 surface as signals (like **degraded**) but never **hold**. *Avoid*: "suite", "job"
 — a lane may map to a GitHub check, but the lane is the *declaration*.
 
-**Gate**:
-The **lanes** that are both **required** and **local** — `lint` + `test` are the
-two always-required, always-local lanes. Pre-commit / lefthook run the gate; CI
-runs *all* lanes (gate ⊆ lanes), including non-local / non-required ones (GPU,
-nightly native-e2e) that can never form the gate. A missing required-local check
-hard-fails — one definition, invoked everywhere (architecture.lex §7). Distinct
-from **Holds / Settled**: the gate is a pass/fail check, not a readiness pillar.
+**Commit/push checks** (the set formerly called "the gate"):
+The **checks** a **policy** marks **blocking** at the *commit* and *push* operations —
+`lint` + the fast `test` set, the **lanes** that are both **required** and **local**.
+Pre-commit / lefthook enforce exactly these; CI enforces a broader policy over *all*
+lanes (commit/push checks ⊆ lanes), including non-local / non-required ones (GPU,
+nightly native-e2e) that are advisory at commit but blocking later. A missing blocking
+check hard-fails — one definition of each check, invoked everywhere (architecture.lex
+§7). There is no standalone "gate" noun: this is just one **operation**'s blocking set.
 
 **Scope** (thin / full):
 A **lane**'s breadth for a given run, decided by a path-diff: *thin* runs the

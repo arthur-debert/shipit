@@ -24,7 +24,7 @@ class ReviewLifecycle(StrEnum):
 
 
 class FunnelState(StrEnum):
-    """The ONE normalized funnel view per reviewer the OBS04 gate reads (ADR-0006).
+    """The ONE normalized funnel view per reviewer the OBS04 readiness engine reads (ADR-0006).
 
     The engine folds BOTH native reviewer signals (an App reviewer's
     ``review_requested`` edge + its review object, via ``ReviewLifecycle``) AND the
@@ -32,9 +32,10 @@ class FunnelState(StrEnum):
     ``review: <agent>-local`` run) into this single per-reviewer state, read
     uniformly across reviewer kinds. The mapping lives behind the adapter interface
     (`ReviewerAdapter.funnel_state`), so the engine never branches on a reviewer's
-    name — it just asks each adapter for its funnel state and gates on the result.
+    name — it just asks each adapter for its funnel state and decides holds/settled
+    on the result.
 
-    The states split into three gate verdicts (OBS04-WS02):
+    The states split into three readiness verdicts (OBS04-WS02):
 
       * **holds** the PR at reviews-pending — ``NEVER_REQUESTED`` (start the loop)
         and ``IN_FLIGHT`` (a review is legitimately coming; WS03 splits this into
@@ -42,7 +43,7 @@ class FunnelState(StrEnum):
         reviewer's pre-review hold (the request edge placed, no review yet).
       * **settled, blocking-on-threads** — ``POSTED``: a review actually landed
         (incl. a clean zero-findings review *and* a salvaged COMMENT); its threads
-        gate until resolved.
+        hold until resolved.
       * **settled, NON-blocking + degraded** — ``FAILED`` / ``EMPTY`` /
         ``TIMED_OUT``: a recorded terminal outcome that is NOT a delivered review.
         It settles (does not hold Ready) but is surfaced loud as *degraded* so the
@@ -55,7 +56,7 @@ class FunnelState(StrEnum):
     NEVER_REQUESTED = "never_requested"  # no signal at all → holds (start the loop)
     REQUESTED = "requested"  # App request edge placed, no review yet → holds
     IN_FLIGHT = "in_flight"  # a review is running → holds (WS03 ages the window)
-    POSTED = "posted"  # a review landed → settled, threads gate
+    POSTED = "posted"  # a review landed → settled, threads hold
     FAILED = "failed"  # the run errored → settled, degraded (non-blocking)
     EMPTY = "empty"  # nothing parseable returned → settled, degraded
     TIMED_OUT = "timed_out"  # exceeded the wait window → settled, degraded
@@ -172,7 +173,7 @@ class PullContext:
     # The OBS02/ADR-0005 local-review funnel breadcrumbs: the App-authored
     # `review: <reviewer>` check runs, lifted OUT of the CI `checks` rollup above
     # at the build site so a failed `review: codex-local` run can never make the
-    # CI-checks gate (`classify_checks`) read FAILING — the two concerns ride the
+    # CI-checks verdict (`classify_checks`) read FAILING — the two concerns ride the
     # SAME `statusCheckRollup` on the wire but must not cross (see `fetch`). WS01
     # carries the raw breadcrumbs; OBS04-WS02/WS03 normalize + age them.
     review_funnel: list[ReviewFunnelCheck] = field(default_factory=list)
@@ -195,7 +196,7 @@ class PullContext:
     # snapshot, never the filesystem. A reviewer ABSENT here uses the shipped 20m
     # default (`reviewers.DEFAULT_WAIT_WINDOW`, applied by the adapter). OBS04-WS03
     # ages an in-flight / requested-but-silent reviewer past this window into
-    # TIMED_OUT (settled + degraded). Empty in a light/skip context that never gates.
+    # TIMED_OUT (settled + degraded). Empty in a light/skip context that never holds.
     reviewer_window: dict[str, int] = field(default_factory=dict)
     # The `review_requested` edge time per requested login (login -> ISO-8601
     # tz-aware), sourced from the PR timeline's ReviewRequestedEvent at the build

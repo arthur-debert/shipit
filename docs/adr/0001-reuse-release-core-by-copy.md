@@ -34,7 +34,7 @@ here, so a future re-copy knows what NOT to clobber:
   reviewers settled at a non-success terminal outcome (failed / empty / timed-out),
   surfaced loud but non-blocking. The snapshot (`PullContext`) likewise gains
   `review_funnel` + an injected `now`. This lets the OBS04 readiness engine redefine
-  the gate over *settled* (outcome-recorded, not review-succeeded) and lets
+  readiness over *settled* (outcome-recorded, not review-succeeded) and lets
   `pr next` route on structured state rather than `next_action` prose (issue #24.1).
   Upstream release-core has none of these fields. See ADR-0006 and the module note
   in `prstate/state.py`.

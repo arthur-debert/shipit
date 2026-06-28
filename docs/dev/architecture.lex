@@ -79,7 +79,7 @@ the durable code is one slim versioned package; and configuration is explicit.
         The auto-updating surface has no per-consumer pin to roll back to, so a
         bad release breaks that surface everywhere at once. This is acceptable
         ONLY because it is kept off the required-check path: a PR-loop tool
-        failing is visible and retryable; it does not fail a gate or corrupt a
+        failing is visible and retryable; it does not fail a check or corrupt a
         build. The moment something on that surface becomes a required check,
         it must move into the lock.
 
@@ -93,7 +93,7 @@ the durable code is one slim versioned package; and configuration is explicit.
       kills the "push an RC to find out if it works" loop: the same task runs
       on a laptop (or in local Docker) before anything reaches CI.
     - Artifact-ROUTING logic stays thin workflow YAML: the build matrix,
-      cross-job artifact upload/download, secret gating, the macOS keychain
+      cross-job artifact upload/download, secret injection, the macOS keychain
       import. None of this is pixi-shaped; it is GitHub Actions orchestration.
 
     Consequently the reusable workflow is essentially `setup-pixi` + `pixi run
@@ -109,7 +109,7 @@ the durable code is one slim versioned package; and configuration is explicit.
 
     - install — provision + reconcile the managed files (open a PR).
     - gh-setup — labels, ruleset, secrets.
-    - lint — run the standardized gate.
+    - lint — run the standardized checks.
     - pr status / pr next — the PR-lifecycle state machine.
     - changelog — coalesce unreleased fragments into a version.
     - release — drive the cut.
@@ -181,26 +181,26 @@ the durable code is one slim versioned package; and configuration is explicit.
         secret explicitly with the mapped name. gh-setup pushes the secrets and
         the workflow caller reads the same map — they cannot diverge.
 
-7. The gate: one definition
+7. The commit/push checks: one definition
 
-    There is exactly one gate definition, invoked everywhere. lefthook is thin:
+    There is exactly one definition of these checks, invoked everywhere. lefthook is thin:
     it calls `pixi run lint` and `pixi run test`. shipit ships the lint tasks
     and the linter dependencies; the consumer supplies `test` (the pixi-test
     encapsulation — per-project test differences hide behind one task name, so
     lefthook stays dumb).
 
-    It is a hard gate: a missing tool exits non-zero, never skips. CI runs the
+    They are hard-fail checks: a missing tool exits non-zero, never skips. CI runs the
     SAME `pixi run` invocations as the local pre-commit hook, so "CI is the
     source of truth" never becomes a second, divergent definition of the
     checks. The lint/fmt rules are fully standardized (rust, python, shell,
     markdown, yaml, json, go, lex); only `test` is consumer-owned.
 
     Writing `lefthook.yml` is not enough — a config without `lefthook install`
-    is a dormant gate (empty `.git/hooks`, commits sail past lint). So
+    leaves the checks dormant (empty `.git/hooks`, commits sail past lint). So
     activation is part of setup, never a remembered manual step: `shipit
     install` runs `lefthook install` after laying down the caller (the consumer
     leg), and shipit-self activates via the committed SessionStart hook in
     `.claude/settings.json` (`pixi run -e lint install-hooks`), so a fresh clone
-    is gated on first agent session. Both routes are the one `lefthook install`
+    activates the checks on first agent session. Both routes are the one `lefthook install`
     the `install-hooks` pixi task wraps; activation is idempotent and never
     clobbers a pre-existing unrelated hook.

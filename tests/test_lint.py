@@ -1,4 +1,4 @@
-"""Unit tests for lint — routing, the registry, and the hard-gate verb.
+"""Unit tests for lint — routing, the registry, and the hard-fail check verb.
 
 The subprocess + git boundary is injected (``run`` takes ``discover`` /
 ``run_tool``), so the orchestration is exercised with no real linters present.
@@ -123,7 +123,7 @@ def test_no_recognized_files_is_clean(tmp_path, capsys):
     assert "nothing to check" in capsys.readouterr().out
 
 
-def test_a_failing_tool_fails_the_gate(tmp_path, capsys):
+def test_a_failing_tool_fails_the_checks(tmp_path, capsys):
     rec = _Recorder(codes={"ruff": 1})
     rc = lint.run(str(tmp_path), discover=_fake_discover(["a.py"]), run_tool=rec)
     assert rc == 1
@@ -134,14 +134,14 @@ def test_a_failing_tool_fails_the_gate(tmp_path, capsys):
 
 def test_run_tool_missing_binary_is_hard_127(tmp_path):
     # The real boundary, deterministic: a binary absent from PATH is 127 + a
-    # clear note, never a silent skip (the hard-gate contract).
+    # clear note, never a silent skip (the hard-fail-check contract).
     rc, out = lint._run_tool("shipit-no-such-linter-xyz", ["a.py"], tmp_path)
     assert rc == 127
     assert "not found on PATH" in out
 
 
-def test_missing_tool_propagates_to_a_failed_gate(tmp_path, capsys):
-    # A 127 from any leg fails the whole gate (hard, never skips).
+def test_missing_tool_propagates_to_failed_checks(tmp_path, capsys):
+    # A 127 from any leg fails the whole check run (hard, never skips).
     rec = _Recorder(codes={"markdownlint": 127})
     rc = lint.run(str(tmp_path), discover=_fake_discover(["b.md"]), run_tool=rec)
     assert rc == 1
@@ -160,7 +160,7 @@ def test_fix_mode_fixes_what_it_can_and_still_checks_the_rest(tmp_path, capsys):
     # ruff runs its fix forms.
     assert ("ruff", ("check", "--fix", "a.py")) in rec.calls
     assert ("ruff", ("format", "a.py")) in rec.calls
-    # lexd has no fixer -> it still runs its CHECK form (the gate never skips a
+    # lexd has no fixer -> it still runs its CHECK form (the checks never skip a
     # leg in fix mode, so --fix can't pass while lex is broken).
     assert ("lexd", ("check", "d.lex")) in rec.calls
 

@@ -51,7 +51,7 @@ current truth.
         discipline, not an architecture: the design can only *help* — a smaller
         surface and visibly-tracked drift give review less to miss — it cannot
         guarantee. The real defense against (d) is keeping the package small and
-        dogfooding the gate on shipit itself from the first commit.
+        dogfooding the lint checks on shipit itself from the first commit.
 
 2. The foundation decision: pixi, and why not Devbox/Nix
 
@@ -275,7 +275,7 @@ current truth.
         bets the floor on a pre-1.0, conda-first tool whose action API can break
         between minors and whose rust/tauri toolchain story is unproven for this
         stack. This is the right trade, but it is not free — Spike 0 is the
-        load-bearing test of the whole premise, which is why it gates everything
+        load-bearing test of the whole premise, which is why it blocks everything
         in [../prd/FUTURE_WORK.md].
 
     Step 6 is the danger zone:

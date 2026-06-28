@@ -1,6 +1,6 @@
 """OBS04-WS03 — the uniform wait window ages an in-flight reviewer to *timed-out*.
 
-WS02 made the gate treat a `TIMED_OUT` funnel state as settled + degraded; this
+WS02 made the engine treat a `TIMED_OUT` funnel state as settled + degraded; this
 suite owns PRODUCING that state from the injected "now". The window is a pure
 function of (now, the reviewer's OWN request timestamp, its window) — the engine
 calls no clock — so every case is deterministic with a FIXED injected "now":
@@ -15,7 +15,7 @@ calls no clock — so every case is deterministic with a FIXED injected "now":
   * **No timestamp → never ages.** A reviewer with no recorded request time can't
     be aged — the window never invents a timeout from absent data.
 
-Everything asserts EXTERNAL engine behaviour (the funnel state, the gate verdict,
+Everything asserts EXTERNAL engine behaviour (the funnel state, the readiness verdict,
 the degraded set) from a recorded snapshot + an injected "now" — never a clock.
 """
 

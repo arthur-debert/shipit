@@ -60,7 +60,7 @@ caller, the skills, the AGENTS.md block" — but stage it to what exists now:
   opening `<!-- Managed by shipit; do not edit. Regenerate via shipit install. -->`
   and a closing marker. Hash the BLOCK content, not the whole file, since the
   consumer owns the rest.
-- the lefthook caller — DEFER to Step 3, where the lint gate it calls exists. Add
+- the lefthook caller — DEFER to Step 3, where the lint check it calls exists. Add
   it to the managed set then.
 
 ### The .shipit.toml manifest

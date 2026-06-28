@@ -27,7 +27,7 @@ AGY = AgyAdapter()
 
 
 def test_registry_catalogs_all_adapters():
-    # The registry is the CATALOG; which entries gate is the config knob. The
+    # The registry is the CATALOG; which entries hold Ready is the config knob. The
     # local backends (codex / agy) join the GitHub-App reviewers under one
     # interface.
     assert [r.name for r in REGISTRY] == [
@@ -37,7 +37,7 @@ def test_registry_catalogs_all_adapters():
         "codex",
         "agy",
     ]
-    # `requestable` marks eligibility to be a required gate (a real request
+    # `requestable` marks eligibility to be a required (holding) reviewer (a real request
     # edge + the #614 attach-verification, or — for the local backends — a
     # synchronous run-and-post), NOT the current required set.
     assert COPILOT.requestable is True
@@ -48,7 +48,7 @@ def test_registry_catalogs_all_adapters():
 
 
 def test_default_required_set_is_copilot_only():
-    # The shipped default config: Copilot gates Ready. CodeRabbit is a phos-org
+    # The shipped default config: Copilot holds Ready. CodeRabbit is a phos-org
     # pilot — requestable (eligible), but required only where a repo opts in.
     assert [r.name for r in required_reviewers()] == ["copilot"]
 
@@ -485,7 +485,7 @@ def test_local_request_threads_model_and_instructions_from_config(
 ):
     # The per-reviewer `model` / `instructions` from `[reviewers]` are read and
     # threaded to the detached child (force scope: codex need not be a required
-    # gate).
+    # (holding) reviewer).
     from shipit.review import service
 
     (tmp_path / ".shipit.toml").write_text(

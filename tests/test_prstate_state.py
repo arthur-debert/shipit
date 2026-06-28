@@ -43,10 +43,10 @@ def test_evaluate_states(context, fixture, expected):
     assert evaluate(context(fixture)).state is expected
 
 
-# --- mergeStateStatus gating (release#675) ----------------------------------
+# --- mergeStateStatus blocking (release#675) ----------------------------------
 # `mergeable` is computed async and stale on first read (optimistic MERGEABLE);
 # READY requires the authoritative `mergeStateStatus == CLEAN`. We vary only the
-# merge fields on the otherwise-READY fixture to isolate the gate. CLEAN is the
+# merge fields on the otherwise-READY fixture to isolate the merge-state check. CLEAN is the
 # ONLY ready state — every other COMPUTED state is a real block (this fleet
 # requires 0 approving reviews, so a reviewed+green PR reaches CLEAN without a
 # human; a non-CLEAN computed state is never a waiting-on-approval handoff).
@@ -113,7 +113,7 @@ def test_behind_base_says_update_the_branch(context):
 def test_behind_base_takes_precedence_over_pending_ci(context):
     # A moved base re-stales CI, so a behind PR with pending checks must give the
     # actionable "update the branch" next action, not "wait for checks" — BEHIND
-    # is gated before CI state (release#675).
+    # is evaluated before CI state (release#675).
     import dataclasses
 
     pending = [{"__typename": "CheckRun", "status": "IN_PROGRESS", "conclusion": None}]
@@ -170,7 +170,7 @@ def test_unstable_with_green_rollup_is_ready(context):
 
 def test_unstable_with_a_genuinely_failing_check_is_still_blocked(context):
     # UNSTABLE must NOT mask a real failure: a FAILING rollup is caught by the CI
-    # gate BEFORE the merge-state branch, so it stays BLOCKED with the CI message.
+    # checks BEFORE the merge-state branch, so it stays BLOCKED with the CI message.
     import dataclasses
 
     rollup = [
@@ -205,7 +205,7 @@ def test_unstable_with_no_rollup_is_not_promoted(context):
 
 def test_unstable_with_a_re_running_check_is_validating(context):
     # The check is genuinely mid-re-run (IN_PROGRESS) → the rollup is PENDING, so
-    # the CI gate reports VALIDATING (wait for checks), never a flip. Only an
+    # the CI checks report VALIDATING (wait for checks), never a flip. Only an
     # already-green rollup reaches READY.
     import dataclasses
 
@@ -238,7 +238,7 @@ def test_unstable_non_draft_says_done_not_flip(context):
     assert "done" in status.next_action and "merge" in status.next_action
 
 
-def test_best_effort_gemini_does_not_gate_ready(context):
+def test_best_effort_gemini_does_not_hold_ready(context):
     # Gemini is NOT_REQUESTED here, yet Copilot (required) is done clean with
     # green checks -> READY. A best-effort reviewer must not hold it back.
     status = evaluate(context("ready_checks_green"))
@@ -343,7 +343,7 @@ def test_review_once_earlier_head_is_done_never_rerequested(context):
     # The DEFAULT (review-once): the SAME stale fixture, with no rerun opt-in, is
     # NOT pending — the earlier-head review counts as done, so the reviewer never
     # appears in RE-REQUEST advice. (mergeStateStatus=BLOCKED in the fixture is
-    # then the only thing holding it, proving review gating cleared.)
+    # then the only thing holding it, proving review holds cleared.)
     status = evaluate(context("copilot_stale_needs_rerequest"))
     assert status.state is not TaskState.REVIEWS_PENDING
     assert "RE-REQUEST" not in status.next_action
@@ -361,11 +361,11 @@ def test_reviews_pending_already_requested_says_wait(context):
     assert "RE-REQUEST" not in status.next_action
 
 
-# --- parallel-required: BOTH reviewers gate (release#622) -------------------
+# --- parallel-required: BOTH reviewers hold (release#622) -------------------
 #
 # The dual set is no longer the shipped default (coderabbit is a phos-org
 # pilot, opted in per-repo), so these tests pass the pair explicitly — the
-# both-gate BEHAVIOR they prove is unchanged for any repo that requires both.
+# both-hold BEHAVIOR they prove is unchanged for any repo that requires both.
 
 
 def _both_required():
@@ -379,7 +379,7 @@ def _green_checks() -> list[dict]:
 def _ctx_with_reviews(*authors_on_head: str) -> PullContext:
     """A draft PR, green + mergeable, with an APPROVED review on the head per
     named author — everything but the review set held constant. `merge_state`
-    is CLEAN so the merge-state gate (release#675) doesn't hold back a context
+    is CLEAN so the merge-state check (release#675) doesn't hold back a context
     built to isolate REVIEWER logic."""
     return PullContext(
         number=1,
@@ -428,7 +428,7 @@ def test_missing_copilot_review_is_not_ready_and_names_it_outstanding():
 def test_required_set_is_data_driven_single_reviewer():
     # Drive the engine with a DIFFERENT required set — just CodeRabbit. With
     # only CodeRabbit's review present (no Copilot), it now reaches READY: the
-    # gate follows the config, not a hard-coded pair.
+    # required set follows the config, not a hard-coded pair.
     only_coderabbit = [by_name("coderabbit")]
     status = evaluate(_ctx_with_reviews("coderabbitai[bot]"), required=only_coderabbit)
     assert status.state is TaskState.READY
@@ -488,7 +488,7 @@ def test_a_push_re_stales_both_required_reviewers_when_rerun():
 def test_review_once_both_earlier_head_reaches_ready():
     # The DEFAULT (review-once): the SAME both-reviewed-an-earlier-head context,
     # with no rerun opt-in, reaches READY — neither earlier-head review is stale,
-    # so a push does NOT re-open the review gate (the whole point of the policy).
+    # so a push does NOT re-open the review holds (the whole point of the policy).
     ctx = PullContext(
         number=1,
         head_sha="new",

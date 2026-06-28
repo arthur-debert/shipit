@@ -103,7 +103,7 @@ def verify_apps_cmd(repo: str | None, agents: tuple[str, ...]) -> None:
     each App (adr-codex-review / adr-agy-review) this mints the App installation
     token and checks the granted permissions carry `checks: write` — a cheap read,
     not a check-run create. Prints a pass-or-instruct line per App and exits 0 only
-    when ALL are live, 1 otherwise, so a rollout can gate on it mechanically. It
+    when ALL are live, 1 otherwise, so a rollout can branch on it mechanically. It
     only VERIFIES; the one-time install/consent is per docs/dev/review-app-provisioning.md.
     """
     rc = verify_apps.run(repo, agents=list(agents) or None)
@@ -136,14 +136,14 @@ def install_cmd(path: str | None, push: bool, dry_run: bool) -> None:
 @click.option(
     "--fix",
     is_flag=True,
-    help="Apply formatters in place (opt-in). Default is a check-only hard gate.",
+    help="Apply formatters in place (opt-in). Default is a check-only hard-fail check.",
 )
 def lint_cmd(path: str | None, fix: bool) -> None:
-    """Run the standardized multi-language gate over the tree at PATH.
+    """Run the standardized multi-language checks over the tree at PATH.
 
     PATH defaults to the current directory. The same invocation CI and the
-    pre-commit hook run — one binary, one config. A missing tool fails the gate
-    (it never skips); a clean tree exits 0, any failure exits 1.
+    pre-commit hook run — one binary, one config. A missing tool fails the checks
+    (they never skip); a clean tree exits 0, any failure exits 1.
     """
     rc = lint.run(path, fix=fix)
     raise SystemExit(rc)

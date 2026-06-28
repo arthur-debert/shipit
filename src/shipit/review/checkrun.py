@@ -19,7 +19,7 @@ token, via :mod:`shipit.review.ghauth`): the PEM never lands on disk, and the
 minted token is threaded onto the ``gh`` boundary but NEVER reaches a log record.
 
 The run is **non-required** — a check run only blocks merge if branch protection
-names it, and shipit never registers it there, so it is *visible but never gates*
+names it, and shipit never registers it there, so it is *visible but never blocks*
 (the Ready pillar is *settled*, not *succeeded*). And ``started_at`` is the
 load-bearing output: OBS02 only WRITES an honest timestamp; reading/aging it
 against a wait window is OBS04.
