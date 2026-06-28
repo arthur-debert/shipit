@@ -9,8 +9,8 @@ name: Copilot Review
 #   - Fork PRs are skipped (security: don't pass RELEASE_TOKEN to untrusted
 #     source).
 #
-# Not a required check — this requests a review, it is not a required check, so
-# `shipit gh-setup` excludes it from the branch ruleset's required checks.
+# Not a required check — this requests a review, so `shipit gh-setup` excludes
+# it from the branch ruleset's required checks.
 
 on:
   pull_request:
