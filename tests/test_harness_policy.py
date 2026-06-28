@@ -1,8 +1,9 @@
-"""Edit-enforcement decision: role x tool x path -> allow/deny verdict.
+"""Edit-enforcement decision: the role x is_code x break_glass security matrix.
 
-The security-critical matrix (ADR-0012): a coordinator `edit` on a code path is
-denied; everything else allowed. Asserts external behavior (the verdict + that a
-deny carries a reason), never internal call shapes.
+The security-critical core (ADR-0012): a coordinator edit on a code path is
+denied UNLESS break-glass is set; every other combination is allowed. Asserts
+external behavior (the verdict + that a deny carries the redirect reason), never
+internal call shapes.
 """
 
 from __future__ import annotations
@@ -13,58 +14,62 @@ from shipit.harness.policy import (
     Decision,
     Permission,
     decide,
-    is_code_path,
+    is_edit_tool,
 )
 from shipit.harness.role import Role
 
 
 @pytest.mark.parametrize(
-    ("path", "expected"),
+    ("role", "is_code", "break_glass", "expected"),
     [
-        ("src/shipit/cli.py", True),
-        ("/Users/x/h/shipit/src/shipit/harness/policy.py", True),
-        ("tests/test_harness_policy.py", False),
-        ("docs/prd/har01.md", False),
-        ("docs/adr/0012-enforcement.lex", False),
-        (".shipit.toml", False),
-        ("README.md", False),
-        ("", False),
+        # The ONE intended deny: coordinator, code path, no break-glass.
+        (Role.COORDINATOR, True, False, Permission.DENY),
+        # Break-glass lets the coordinator through on a code path.
+        (Role.COORDINATOR, True, True, Permission.ALLOW),
+        # Coordinator on a non-code path (docs/config) is allowed.
+        (Role.COORDINATOR, False, False, Permission.ALLOW),
+        (Role.COORDINATOR, False, True, Permission.ALLOW),
+        # Every non-coordinator role is allowed everywhere — code or not,
+        # break-glass or not. The guard turns on the coordinator role alone.
+        (Role.IMPLEMENTER, True, False, Permission.ALLOW),
+        (Role.IMPLEMENTER, True, True, Permission.ALLOW),
+        (Role.IMPLEMENTER, False, False, Permission.ALLOW),
+        (Role.SHEPHERD, True, False, Permission.ALLOW),
+        (Role.SHEPHERD, False, False, Permission.ALLOW),
+        (Role.EXPLORER, True, False, Permission.ALLOW),
+        (Role.EXPLORER, False, False, Permission.ALLOW),
     ],
 )
-def test_is_code_path(path, expected):
-    assert is_code_path(path) is expected
-
-
-@pytest.mark.parametrize(
-    ("role", "tool", "path", "expected"),
-    [
-        # The one intended deny: coordinator edits code.
-        (Role.COORDINATOR, "Edit", "src/shipit/cli.py", Permission.DENY),
-        (Role.COORDINATOR, "Write", "src/shipit/cli.py", Permission.DENY),
-        (Role.COORDINATOR, "MultiEdit", "src/shipit/cli.py", Permission.DENY),
-        (Role.COORDINATOR, "edit", "src/shipit/cli.py", Permission.DENY),
-        # A subagent editing the same code path is allowed.
-        (Role.IMPLEMENTER, "Edit", "src/shipit/cli.py", Permission.ALLOW),
-        (Role.SHEPHERD, "Edit", "src/shipit/cli.py", Permission.ALLOW),
-        (Role.EXPLORER, "Edit", "src/shipit/cli.py", Permission.ALLOW),
-        # A coordinator editing a non-code path is allowed (planning/authoring).
-        (Role.COORDINATOR, "Edit", "docs/prd/har01.md", Permission.ALLOW),
-        (Role.COORDINATOR, "Write", ".shipit.toml", Permission.ALLOW),
-        # A coordinator using a non-edit tool is allowed.
-        (Role.COORDINATOR, "Read", "src/shipit/cli.py", Permission.ALLOW),
-        (Role.COORDINATOR, "Bash", "src/shipit/cli.py", Permission.ALLOW),
-    ],
-)
-def test_decide(role, tool, path, expected):
-    assert decide(role, tool, path).permission is expected
+def test_decide_matrix(role, is_code, break_glass, expected):
+    assert decide(role, "any/path", is_code, break_glass).permission is expected
 
 
 def test_coordinator_deny_carries_the_redirect_reason():
-    decision = decide(Role.COORDINATOR, "Edit", "src/shipit/cli.py")
+    decision = decide(Role.COORDINATOR, "src/shipit/cli.py", True, False)
     assert decision == Decision(Permission.DENY, COORDINATOR_DENY_REASON)
     assert "delegate" in decision.reason
     assert "origin/main" in decision.reason
 
 
 def test_allow_carries_no_reason():
-    assert decide(Role.IMPLEMENTER, "Edit", "src/shipit/cli.py").reason == ""
+    assert decide(Role.IMPLEMENTER, "src/shipit/cli.py", True, False).reason == ""
+    assert decide(Role.COORDINATOR, "src/shipit/cli.py", True, True).reason == ""
+
+
+@pytest.mark.parametrize(
+    ("tool", "expected"),
+    [
+        ("Edit", True),
+        ("Write", True),
+        ("MultiEdit", True),
+        ("NotebookEdit", True),
+        ("edit", True),  # case-insensitive — a casing drift can't disarm the guard.
+        ("  Write  ", True),  # surrounding whitespace tolerated.
+        ("Read", False),
+        ("Bash", False),
+        ("Grep", False),
+        ("", False),
+    ],
+)
+def test_is_edit_tool(tool, expected):
+    assert is_edit_tool(tool) is expected
