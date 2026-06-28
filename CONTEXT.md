@@ -217,6 +217,22 @@ generic CI workflow fans the lanes into jobs; each resolves-or-builds its
 surface as signals (like **degraded**) but never **hold**. *Avoid*: "suite", "job"
 — a lane may map to a GitHub check, but the lane is the *declaration*.
 
+**Verb / task**:
+A uniform-named pixi task — shipit's stable per-repo interface. `pixi run <verb>` means
+the same thing in every repo → a consumer-supplied task; the per-**toolchain** mechanics
+hide behind the name, so callers (lefthook, CI, agents) never branch on the stack. The
+verb set: `lint`, `test` (+ **test variants**), `build`, `docs-build`, `release`, `fmt`,
+`run`/`serve`, `docs-serve`, `clean`. Extra args reach the underlying tool via `pixi run
+<verb> -- <native args>` (pixi appends them verbatim; shipit does not model the arg
+surface). Full rationale: `docs/dev/verbs-tasks.lex`. *Avoid*: "script", "command" as the
+dispatch unit — the verb is the stable name; the task body varies per repo.
+
+**Test variant**:
+A named `test-*` task (`test-e2e`, `test-wasm`, `test-tauri`) beside the fast `test`. WHICH
+one runs WHEN is the **Lane** / **Scope** decision — the blocking commit/push set is the
+fast `test` plus `lint`; variants are advisory at commit, blocking later in CI. *Avoid*: treating
+a variant as its own gate — it is a lane, scheduled by trigger.
+
 **Gate**:
 The **lanes** that are both **required** and **local** — `lint` + `test` are the
 two always-required, always-local lanes. Pre-commit / lefthook run the gate; CI

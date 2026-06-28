@@ -21,6 +21,13 @@ shipit pr ready   # guarded flip draft→ready (refuses early); --undo reverts
 PR number is optional (resolves the current branch's PR). Also: `shipit pr review
 request`; setup/ops `shipit gh-setup` / `verify-apps` / `install` / `lint` / `logs`.
 
+**Verb passthrough:** the standardized tasks are verbs — `pixi run <verb>` (`lint`, `test`,
+`build`, `docs-build`, `release`, `fmt`, `run`/`serve`, `docs-serve`, `clean`). Reach the
+underlying tool (pytest, cargo, tauri) by appending its args after `--`: `pixi run test --
+-k test_foo`, `pixi run build -- --release`. The consumer's task and the tool own the arg
+surface — shipit does not model it. Rationale + full vocabulary: shipit's
+`docs/dev/verbs-tasks.lex`.
+
 ### The cycle: draft → address reviews → checks passing + mergeable → flip to ready
 
 Open every change as a **DRAFT** PR. Loop `shipit pr next` — do the one thing it returns

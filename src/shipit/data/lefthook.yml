@@ -4,12 +4,14 @@
 # cannot drift into two transcriptions of the rules.
 #
 # Whole-tree (not staged-only) for now: `pixi run lint` lints `git ls-files`, so
-# a green hook never lies about an unstaged edit. (`pixi run test` joins pre-push
-# when Step 5 supplies the test task.)
+# a green hook never lies about an unstaged edit. `pixi run test` runs in
+# pre-commit too, so a commit blocks on BOTH lint and test (the commit/push gate).
 pre-commit:
   commands:
     lint:
       run: pixi run lint
+    test:
+      run: pixi run test
 
 pre-push:
   commands:

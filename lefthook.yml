@@ -4,11 +4,11 @@
 # cannot drift into two transcriptions of the rules.
 #
 # Whole-tree (not staged-only) for now: `pixi run lint` lints `git ls-files`, so
-# a green hook never lies about an unstaged edit. (`pixi run test` joins pre-push
-# when Step 5 supplies the test task.)
+# a green hook never lies about an unstaged edit. `pixi run test` now runs in
+# pre-commit too, so a commit blocks on BOTH lint and test (the commit/push gate).
 # `piped: true` runs the commands in priority order and stops on the first
 # failure, so the mirror regen (priority 1) always lands BEFORE the lint check
-# (priority 2) reads the tree.
+# (priority 2) reads the tree, and the test run (priority 3) runs last.
 pre-commit:
   piped: true
   commands:
@@ -44,6 +44,9 @@ pre-commit:
     lint:
       priority: 2
       run: pixi run lint
+    test:
+      priority: 3
+      run: pixi run test
 
 pre-push:
   commands:

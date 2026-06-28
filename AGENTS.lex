@@ -72,14 +72,22 @@ The PR lifecycle (draft -> ready -> stop):
     1.2. Implementation (the implementer subagent)
 
         The coordinator CREATES the branch off `main` (`fix/<issue>`) and spawns
-        an IMPLEMENTER to do the task + tests. The implementer runs the gate
-        (`shipit lint`) and tests (`pixi run test`) green BEFORE opening the PR —
-        CI runs the same as required checks, so local green is necessary for CI
-        green.
+        an IMPLEMENTER to do the task + tests. The implementer runs the commit/push
+        gate — BOTH `pixi run lint` and `pixi run test`, the two blocking checks —
+        green BEFORE opening the PR; CI runs the same as required checks, so local
+        green is necessary for CI green.
 
         Gate fidelity: a check that reads ambient local state (a sibling
         checkout, a machine-only tool, an env var CI lacks) passes locally and
         lies about CI. If a check needs something, make CI provide it.
+
+        Verb passthrough: the standardized tasks are verbs — `pixi run <verb>`
+        (`lint`, `test`, `build`, `docs-build`, `release`, `fmt`, `run`/`serve`,
+        `docs-serve`, `clean`). Reach the underlying tool (pytest, cargo, tauri) by
+        appending its args after `--`: `pixi run test -- -k test_foo`, `pixi run
+        build -- --release`. shipit does not model the per-stack arg surface — the
+        consumer's task and the tool own it. Full vocabulary + rationale:
+        [./docs/dev/verbs-tasks.lex].
 
         For bugs: write the failing test first, then the fix, then watch it pass.
         Fix the abstract root cause, not just the instance.
