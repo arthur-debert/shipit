@@ -174,20 +174,33 @@ nothing. The very same check can be decisive in one place and informational in a
 *Avoid*: "gate", "gating" — a check carries no blocking power to name.
 
 **Operation**:
-An attempted transition someone (human or agent) wants to make — *commit*, *push*,
-*open-PR*, *flip-to-Ready*, *merge*, *release*. The unit that can be *blocked*. Each
-operation runs the checks its **policy** binds, evaluated in that operation's context.
+An attempted transition someone (human or agent) wants to make. The unit that can
+be *blocked*. Two families: **VCS operations** — *commit*, *push*, *open-PR*,
+*flip-to-Ready*, *merge*, *release* — and **agent-action operations**, the
+agent-harness extension — *edit* (a file write), *run* (a shell command), *spawn*
+(a subagent), … Each operation runs the **checks** and **context predicates** its
+**policy** binds, evaluated in that operation's context. The model is one and the
+same across both families; the agent harness does not fork it.
 
 **Policy** (per operation):
 The binding that says, for one **operation** in a given context, whether each relevant
-**check** is **blocking** (its failure stops the operation) or **advisory** (its failure
-is recorded and surfaced — cf. **degraded** — but the operation proceeds). Enforcement is
+input is **blocking** (its failure stops the operation) or **advisory** (its failure
+is recorded and surfaced — cf. **degraded** — but the operation proceeds). The input is
+either a **check** (a yes/no verdict over the tree) or a **context predicate** (a fact
+about the actor or context the operation runs in — e.g. the acting **role**). Enforcement is
 contextual, not global: `lint` + the fast `test` set block at *commit/push*; an expensive
-`test-e2e` / GPU lane is advisory there and blocking only at *open-PR* / *merge*. A
+`test-e2e` / GPU lane is advisory there and blocking only at *open-PR* / *merge*; the
+*edit* operation is blocking when the actor's **role** is the coordinator. A
 **lane**'s `required` / `local` / `trigger` fields ARE its policy across operations —
 `required` = blocking at *merge*, `local` = also enforced at *commit/push*, `trigger` =
 which operations run it at all.
 *Avoid*: one global "the gate" — there are as many enforcement sets as there are operations.
+
+**Context predicate**:
+A **policy** input that is a fact about the *actor or context* of an **operation** rather
+than a verdict over the tree — the acting **role**, the **session** kind, an env marker.
+The agent harness keys its enforcement on these (the coordinator cannot *edit*), reusing
+the same blocking/advisory machinery as a **check**. Contrast **check** (tree-verdict).
 
 **Blocking / Advisory**:
 The two roles a **check** can play under a **policy** for a given **operation**. *Blocking*:
@@ -195,6 +208,82 @@ its failure stops the operation. *Advisory*: its failure is surfaced but does no
 check is never blocking or advisory in the abstract — only for a named operation in a named
 context. (So "pre-commit runs `lint` + `test`" means: the *commit* operation's policy marks
 those two checks blocking — not that they are gates.)
+
+### Agent harness
+
+**Role**:
+The function an acting agent plays in the dev cycle — and the **context predicate**
+the agent harness keys enforcement on. A **closed registry** (mirrors **Toolchain** /
+**Reviewer adapter**: adding one is an entry, nothing downstream changes):
+`coordinator`, `implementer`, `shepherd`, `explorer`. Read from the acting session's
+agent identity — *empty ⇒ `coordinator`* (the top-level, human-facing session), a
+named subagent ⇒ that role. Two realizations of the same concept: the **coordinator**
+is a *session-role* (the top-level session; it has no agent-def file — its prompt
+arrives as injected context plus the enforcement **deny** reason), while
+`implementer` / `shepherd` / `explorer` are *agent-def roles* (each a generated
+prompt file whose body is that role's system prompt). The **policy** reads `role`
+uniformly across both.
+*Avoid*: "agent type" as the domain noun (that's the raw signal under the term);
+"guard" (enforcement is a **policy**, not a thing with inherent power).
+
+**Role definition**:
+The single source of a **role**'s behavior — focused **lex** fragments (a shared
+dev-cycle *base* plus one *overlay* per role) composed via lex includes. The source
+of truth that feeds every other surface (the **role prompts**, the AGENTS.md
+reference, the **deny** text); never handed to an agent verbatim. One edit re-flows
+all derived surfaces, so the dev cycle is stated once.
+*Avoid*: "charter" (dissolved — it was just the coordinator's role prompt).
+
+**Role prompt**:
+The generated, **role-scoped reduction** handed to exactly one **role** — `base +
+that role's overlay only`, so an agent sees only what applies to it (seeing every
+role invites mid-session role-drift). The `coordinator`'s is the broad slice (it must
+know the cycle and the roles it delegates to); the others are narrow. Delivered on the
+surface that *binds*: a subagent's system prompt (its agent-def body), or — for the
+`coordinator` — injected context plus the enforcement **deny** reason. Contrast the
+*ambient reference* (AGENTS.md): generated from the same **role definition**, but
+read-then-lost, so it is never the surface behavior is relied on to arrive through.
+
+**Run**:
+The unit the agent harness **evaluates** — one **role**'s bounded execution together
+with its transcript (and `.meta.json`). **Not task-bound**: one piece of work spans
+several runs — the `implementer` run that writes the code and each `shepherd` run that
+addresses a review round are *distinct* runs, each its own **eval record**. The
+`coordinator` run is the top-level session transcript; each subagent run is a separate
+`agent-<id>` transcript. Eval fires at a run's *terminal* lifecycle hook (a subagent run
+at SubagentStop, the coordinator run at Stop/SessionEnd) and emits one record, tagged by
+`role` (from `meta.agentType`). Runs aggregate up by role, by task, and over time.
+*Avoid*: "session" as the eval unit — Claude Code shares one `session_id` across an agent
+and its subagents, so the per-agent unit is the *run*, not the session.
+
+**Eval record**:
+The structured result of evaluating one **Run** — JSONL, one object per run, named with
+OpenTelemetry `gen_ai.*` field vocabulary (a *naming* standard borrowed, never a running
+collector). **Objective-first**: its fields are extracted *deterministically by code* from
+the on-disk transcript + `.meta.json` — tool-call counts, step count, stuck-loop
+fingerprints, `--no-verify` / workaround greps, **break-glass** uses, `model`,
+`permissionMode`. A subjective agent-as-judge verdict is **deferred to HAR04** (a same-model
+self-judge is non-independent — upward-biased — so it is layered on later, de-biased, never
+the primary signal). Written to a **harness-owned local store, never committed** to the
+product repo, each record `git.commit`-stamped so it correlates to repo state without
+entering the tree. It also carries a **variant** attribution so results separate by which
+version of each harness input produced them: a *derived content-hash* of the generated
+**role prompt** (and policy) that ran — the **content-key** / pristine-hash idea applied to
+prompts, so runs pool across commits when the input is unchanged and separate within one
+commit when it differs — plus an optional explicit variant label for deliberate A/B runs. If shared/structured trend is ever needed the substrate is GitHub-native
+(an epic issue's run comments, or Pages) — never self-hosted infra. Aggregated with DuckDB.
+*Avoid*: a tracing/observability platform (LangSmith et al.) — wrong *kind* (live tracing,
+not transcript rubric/metric extraction) and wrong deployment for a no-infra dev harness.
+
+**Break-glass**:
+A visible, logged escape hatch that lets an actor perform an **operation** its
+**policy** would otherwise **block** — the deliberate exception, never the default.
+Instances: `install --push` (bypass the PR loop straight to main); the
+**coordinator** editing a code path (the `edit` operation is blocked for the
+coordinator on **path→toolchain map** paths — implementation it should delegate —
+unless a break-glass marker is present). Each use is recorded, so its frequency is a
+signal the harness can measure (an HAR02 metric) and tighten on, rather than a silent
+bypass. *Avoid*: "override", "force" as the noun — break-glass is logged and rare.
 
 ### Build & release
 
