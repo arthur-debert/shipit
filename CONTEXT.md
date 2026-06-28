@@ -203,11 +203,12 @@ The agent harness keys its enforcement on these (the coordinator cannot *edit*),
 the same blocking/advisory machinery as a **check**. Contrast **check** (tree-verdict).
 
 **Blocking / Advisory**:
-The two roles a **check** can play under a **policy** for a given **operation**. *Blocking*:
-its failure stops the operation. *Advisory*: its failure is surfaced but does not stop it. A
-check is never blocking or advisory in the abstract — only for a named operation in a named
-context. (So "pre-commit runs `lint` + `test`" means: the *commit* operation's policy marks
-those two checks blocking — not that they are gates.)
+The two roles a **policy input** — a **check** or a **context predicate** — can play under a
+**policy** for a given **operation**. *Blocking*: its failure (or, for a predicate, its
+unmet condition) stops the operation. *Advisory*: its failure is surfaced but does not stop
+it. A policy input is never blocking or advisory in the abstract — only for a named operation
+in a named context. (So "pre-commit runs `lint` + `test`" means: the *commit* operation's
+policy marks those two checks blocking — not that they are gates.)
 
 ### Agent harness
 
