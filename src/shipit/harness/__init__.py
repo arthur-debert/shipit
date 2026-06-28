@@ -13,6 +13,12 @@ empty-`agent_type`⇒`coordinator` rule), `policy.decide(role, path, is_code,
 break_glass)` (the security matrix, break-glass an input), and
 `codepath.is_code_path` (the HAR01 default classifier, converging on the
 ADR-0007 toolchain map later). The boundary (verbs/hook/) reads the break-glass
-env marker and logs each use. WS03 swaps `COORDINATOR_DENY_REASON` for the
-generated coordinator role-prompt slice.
+env marker and logs each use.
+
+WS03 adds the role-prompt generator (`prompts.render`): it composes the lex
+fragments (a shared base + one overlay per role, under `shipit.data.roles`) into
+the reduced per-role prompts + the `AGENTS.md` union, and `policy`'s
+`COORDINATOR_DENY_REASON` is now the GENERATED coordinator slice (loaded from the
+bundled `roles/generated/coordinator-prompt.md`), so the deny wall and the
+injected coordinator prompt are the same text.
 """

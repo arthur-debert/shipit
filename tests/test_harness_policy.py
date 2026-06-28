@@ -51,6 +51,18 @@ def test_coordinator_deny_carries_the_redirect_reason():
     assert "origin/main" in decision.reason
 
 
+def test_coordinator_deny_reason_is_the_generated_role_slice():
+    """WS03: the deny reason is no longer a placeholder string — it carries the
+    GENERATED coordinator role-prompt slice (base + coordinator overlay + the role
+    map), so the deny wall and the injected coordinator prompt are the same text.
+    Assert the overlay's marching orders AND the role-map marker are present."""
+    reason = decide(Role.COORDINATOR, "src/shipit/cli.py", True, False).reason
+    assert "You are the COORDINATOR" in reason  # the overlay scopes the role
+    assert "never implement" in reason  # the coordinator's core rule
+    assert "The roles you delegate to" in reason  # the role-map marker
+    assert "implementer" in reason and "shepherd" in reason  # the map's contents
+
+
 def test_allow_carries_no_reason():
     assert decide(Role.IMPLEMENTER, "src/shipit/cli.py", True, False).reason == ""
     assert decide(Role.COORDINATOR, "src/shipit/cli.py", True, True).reason == ""

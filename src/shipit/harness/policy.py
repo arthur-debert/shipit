@@ -30,17 +30,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 
+from .prompts import load_coordinator_slice
 from .role import Role
 
 #: The coordinator deny reason — the role-prompt slice that teaches the next
-#: action. This is still the WS01/WS02 PLACEHOLDER redirect string; WS03 swaps it
-#: for the generated coordinator role-prompt slice (the same text injected as
-#: context), so the deny wall and the prompt never disagree. Keep this constant
-#: as the single seam: WS03 changes only what it points at.
-COORDINATOR_DENY_REASON = (
-    "You are the coordinator — delegate this edit to an implementer; "
-    "branch off origin/main."
-)
+#: action. WS03 repoints this seam at the GENERATED coordinator role-prompt slice
+#: (base + coordinator overlay + role map — the exact text injected as the
+#: coordinator's context), loaded ONCE from the committed bundled file at import,
+#: so the deny wall and the injected prompt are byte-identical and can never
+#: disagree. Loaded at import (not inside `decide()`) so the verdict stays pure —
+#: `decide()` only references this constant. The slice is regenerated from the
+#: lex fragments by `pixi run regen-roles` (shipit.harness.prompts).
+COORDINATOR_DENY_REASON = load_coordinator_slice()
 
 #: Tool names that count as a file-mutating `edit` **operation**. Claude Code
 #: spells the write tools `Edit` / `Write` / `MultiEdit` / `NotebookEdit`;
