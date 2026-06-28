@@ -150,7 +150,7 @@ the binding behavior no longer depends on anyone reading `AGENTS.md`.
 - **Verified mechanics** (Claude Code 2.1.195, recorded so they aren't re-derived): hooks
   fire for the coordinator's own calls and recursively in subagents; `agent_type` present iff
   subagent (empty ⇒ coordinator); `permissionDecision:"deny"` blocks even under
-  `bypassPermissions`; per-run `meta.json` carries `agentType` / `model` / `permissionMode`.
+  `bypassPermissions`; per-run `.meta.json` carries `agentType` / `model` / `permissionMode`.
   The hook contract is pinned to this version.
 
 ## Testing Decisions

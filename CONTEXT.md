@@ -252,7 +252,7 @@ several runs — the `implementer` run that writes the code and each `shepherd` 
 addresses a review round are *distinct* runs, each its own **eval record**. The
 `coordinator` run is the top-level session transcript; each subagent run is a separate
 `agent-<id>` transcript. Eval fires at a run's *terminal* lifecycle hook (a subagent run
-at SubagentStop, the coordinator run at Stop/SessionEnd) and emits one record, tagged by
+at `SubagentStop`, the coordinator run at `Stop`/`SessionEnd`) and emits one record, tagged by
 `role` (from `meta.agentType`). Runs aggregate up by role, by task, and over time.
 *Avoid*: "session" as the eval unit — Claude Code shares one `session_id` across an agent
 and its subagents, so the per-agent unit is the *run*, not the session.
@@ -271,8 +271,9 @@ entering the tree. It also carries a **variant** attribution so results separate
 version of each harness input produced them: a *derived content-hash* of the generated
 **role prompt** (and policy) that ran — the **content-key** / pristine-hash idea applied to
 prompts, so runs pool across commits when the input is unchanged and separate within one
-commit when it differs — plus an optional explicit variant label for deliberate A/B runs. If shared/structured trend is ever needed the substrate is GitHub-native
-(an epic issue's run comments, or Pages) — never self-hosted infra. Aggregated with DuckDB.
+commit when it differs — plus an optional explicit variant label for deliberate A/B runs. If
+shared/structured trend is ever needed the substrate is GitHub-native (an epic issue's run
+comments, or Pages) — never self-hosted infra. Aggregated with DuckDB.
 *Avoid*: a tracing/observability platform (LangSmith et al.) — wrong *kind* (live tracing,
 not transcript rubric/metric extraction) and wrong deployment for a no-infra dev harness.
 

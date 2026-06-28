@@ -11,7 +11,8 @@ every run's transcript + `.meta.json` is **already on disk**.
 **Decision.**
 
 - **Objective-first.** An **Eval record**'s fields are extracted *deterministically by code*
-  from the on-disk transcript + meta (tool-call vector, step count, stuck-loop fingerprints,
+  from the on-disk transcript + `.meta.json` (tool-call vector, step count, stuck-loop
+  fingerprints,
   `--no-verify` / workaround greps, **break-glass** uses, `model`, `permissionMode`). A
   subjective **agent-as-judge** verdict is **deferred to HAR04** and layered on top
   (different model family, evidence-required, anchored-binary), never the primary signal.

@@ -5,7 +5,8 @@ The agent harness must enforce role behavior at the moment of action — first a
 *frameworks* (LangChain `AgentMiddleware`, OpenAI Agents SDK guardrails) — imperative code
 libraries you wire into an agent runtime. But Claude Code uniquely exposes the *same*
 interception **declaratively**: `PreToolUse` / `PostToolUse` hooks configured in
-`settings.json`, fed JSON on stdin, returning a JSON decision — and a hook can `deny` (block),
+`.claude/settings.json`, fed JSON on stdin, returning a JSON decision — and a hook can `deny`
+(block),
 return `updatedInput` (mutate), or `additionalContext` (inform). We verified on Claude Code
 2.1.195 that these hooks fire recursively in subagents, that `agent_type` is present iff the
 caller is a subagent (empty ⇒ coordinator — the **role** signal), and that `deny` overrides
