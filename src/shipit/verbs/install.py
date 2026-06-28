@@ -351,22 +351,48 @@ def _insert_under_anchor(text: str, anchor: str, block: str) -> str:
 # --------------------------------------------------------------------------
 
 
-def _is_shipit_hook(entry: dict) -> bool:
-    """Whether a PreToolUse array entry is shipit's managed one (by command marker)."""
+def _is_shipit_hook(entry: object) -> bool:
+    """Whether a PreToolUse array entry is shipit's managed one (by command marker).
+
+    Defensive against a malformed consumer file: a non-dict entry, a ``hooks`` that
+    is ``null`` or any non-list, or a non-dict hook all answer ``False`` ("not a
+    shipit hook") rather than raising — the structure walk never trips on garbage.
+    """
     if not isinstance(entry, dict):
         return False
+    hooks = entry.get("hooks")
+    if not isinstance(hooks, list):
+        return False
     return any(
-        SETTINGS_HOOK_MARKER in (h.get("command", "") if isinstance(h, dict) else "")
-        for h in entry.get("hooks", [])
+        isinstance(h, dict) and SETTINGS_HOOK_MARKER in h.get("command", "")
+        for h in hooks
     )
+
+
+# Sentinel inner value for a settings.json that exists but is malformed/unparseable
+# or is not a JSON object. It is NOT a real hook entry — the read path returns it so
+# the unit hashes to something present-but-non-matching (→ OVERRIDE, surfaced for a
+# human), and the write path recognizes it to preserve the original byte-for-byte.
+_SETTINGS_MALFORMED = "\x00shipit-settings-malformed\x00"
 
 
 def extract_settings_hook(text: str) -> str | None:
     """shipit's current PreToolUse entry in a settings.json text, canonical, or ``None``.
 
-    Returns ``None`` when the file is empty, unparseable, or carries no shipit entry —
-    all of which the reconciler reads as "absent" (ADD). A consumer's other settings
-    are never inspected; only shipit's own entry is the managed region.
+    Three outcomes, kept in lockstep with :func:`splice_settings_hook` so a read that
+    classifies the file is honored by the write that follows:
+
+      - empty file, or a JSON object with no shipit entry -> ``None`` ("absent" -> ADD;
+        the write splices shipit's entry into the consumer's object, untouched).
+      - a JSON object carrying shipit's entry -> the canonical entry (NOOP/UPDATE/
+        OVERRIDE by hash, exactly as before).
+      - **unparseable, or valid JSON that is not an object** -> a non-``None`` sentinel
+        so the reconciler reads it as present-but-divergent (OVERRIDE): a malformed
+        ``.claude/settings.json`` is a CONFLICT to surface for a human, never an
+        absent file we ADD onto and never a crash. The matching write preserves it.
+
+    A consumer's other settings are never inspected; only shipit's own entry is the
+    managed region.
     """
     text = text.strip()
     if not text:
@@ -374,11 +400,13 @@ def extract_settings_hook(text: str) -> str | None:
     try:
         data = json.loads(text)
     except json.JSONDecodeError:
-        return None
+        return _SETTINGS_MALFORMED
     if not isinstance(data, dict):
-        return None
+        return _SETTINGS_MALFORMED
     hooks = data.get("hooks")
     entries = hooks.get("PreToolUse", []) if isinstance(hooks, dict) else []
+    if not isinstance(entries, list):
+        entries = []
     for entry in entries:
         if _is_shipit_hook(entry):
             return _canonical_hook_entry(entry)
@@ -391,10 +419,21 @@ def splice_settings_hook(text: str, inner: str) -> str:
     Owns ONLY shipit's entry: any prior shipit entry is replaced, every other key and
     hook the consumer set is preserved, and the file is returned as pretty-printed
     JSON. An empty/whitespace input starts from ``{}`` (a fresh settings.json).
+
+    Fail-safe, matching :func:`extract_settings_hook`: a consumer file that is
+    unparseable or is not a JSON object is NEVER clobbered — the original ``text`` is
+    returned verbatim (the read path already classified it as an OVERRIDE conflict, so
+    the install surfaces it for a human instead of overwriting or crashing).
     """
-    text = text.strip()
-    data = json.loads(text) if text else {}
-    if not isinstance(data, dict):
+    stripped = text.strip()
+    if stripped:
+        try:
+            data = json.loads(stripped)
+        except json.JSONDecodeError:
+            return text  # malformed → preserve, never clobber (conflict surfaced)
+        if not isinstance(data, dict):
+            return text  # not a JSON object → preserve, never clobber
+    else:
         data = {}
     entry = json.loads(inner)
     hooks = data.setdefault("hooks", {})
@@ -568,6 +607,15 @@ def _consumer_snapshot(root: Path, unit: Unit) -> str:
     """The consumer's current text for a unit — captured BEFORE any overwrite."""
     if unit.kind == "block":
         inner = _consumer_inner(root, unit)
+        if inner == _SETTINGS_MALFORMED:
+            # A malformed settings.json has no clean managed region; surface the
+            # whole file so the OVERRIDE diff shows the human the real content.
+            dest = root / unit.dest
+            return (
+                dest.read_text(encoding="utf-8", errors="replace")
+                if dest.is_file()
+                else ""
+            )
         return "" if inner is None else inner + "\n"
     dest = root / unit.dest
     return dest.read_text(encoding="utf-8", errors="replace") if dest.is_file() else ""

@@ -217,15 +217,47 @@ def test_settings_hook_splice_is_idempotent_and_replaces_in_place():
     assert sum(install._is_shipit_hook(e) for e in pre) == 1
 
 
-def test_settings_hook_extract_is_none_when_absent_or_unparseable():
+def test_settings_hook_extract_is_none_when_absent():
+    # Genuinely "absent" (→ ADD): empty file, an empty object, or an object that
+    # carries only the consumer's own hooks (no shipit entry).
     assert install.extract_settings_hook("") is None
     assert install.extract_settings_hook("{}") is None
-    assert install.extract_settings_hook("not json") is None
-    # A settings.json with only the consumer's own hooks → no shipit entry.
     other = json.dumps(
         {"hooks": {"PreToolUse": [{"hooks": [{"command": "echo other"}]}]}}
     )
     assert install.extract_settings_hook(other) is None
+
+
+def test_settings_hook_extract_flags_malformed_as_non_none():
+    # A present-but-malformed file is NOT "absent": extract returns a non-None
+    # sentinel so the reconciler reads it as present-but-divergent (→ OVERRIDE),
+    # never an ADD onto a file it cannot parse.
+    assert install.extract_settings_hook("not json") is not None
+    assert install.extract_settings_hook("{bad json,,}") is not None
+    # Valid JSON that is not an object is also a conflict, not an absent file.
+    assert install.extract_settings_hook("[1, 2, 3]") is not None
+    assert install.extract_settings_hook('"a string"') is not None
+
+
+def test_is_shipit_hook_is_defensive_against_malformed_entries():
+    # Malformed PreToolUse entries must answer "not a shipit hook", never raise.
+    assert install._is_shipit_hook({"hooks": None}) is False  # noqa: E711
+    assert install._is_shipit_hook({"hooks": "not-a-list"}) is False
+    assert install._is_shipit_hook({"hooks": [None, "x", 7]}) is False
+    assert install._is_shipit_hook({}) is False
+    assert install._is_shipit_hook("not-a-dict") is False
+    assert install._is_shipit_hook(None) is False
+
+
+def test_settings_hook_splice_preserves_a_malformed_file_verbatim():
+    # The write path agrees with the read path: an unparseable consumer file (or
+    # one that is not a JSON object) is preserved byte-for-byte, never clobbered
+    # and never a JSONDecodeError crash.
+    inner = _unit(install.SETTINGS_KEY).desired_inner()
+    malformed = '{ "permissions": [ this is not json ]\n'
+    assert install.splice_settings_hook(malformed, inner) == malformed
+    not_an_object = "[1, 2, 3]\n"
+    assert install.splice_settings_hook(not_an_object, inner) == not_an_object
 
 
 def test_settings_hook_reconciles_through_the_four_cases():
@@ -443,6 +475,27 @@ def test_consumer_edit_to_agent_def_surfaces_as_override(tmp_path, rec):
     assert "### Overrides" in rec.pr_body
     assert ".claude/agents/implementer.md" in rec.pr_body
     assert "HAND EDIT" in rec.pr_body
+
+
+def test_install_against_malformed_settings_json_does_not_crash(tmp_path, rec):
+    # A consumer whose .claude/settings.json is unparseable must NOT crash install
+    # and must NOT be clobbered: the file is left byte-for-byte untouched and the
+    # conflict is surfaced as an OVERRIDE for a human (WS04: reconcile, never clobber).
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    settings_path = tmp_path / ".claude" / "settings.json"
+    settings_path.parent.mkdir(parents=True)
+    garbage = '{ "permissions": [ this is not valid json,,, ]\n'
+    settings_path.write_text(garbage)
+
+    rc = install.run(str(tmp_path))
+
+    assert rc == 0  # completed without raising
+    # The malformed file was left exactly as it was — never overwritten.
+    assert settings_path.read_text() == garbage
+    # The conflict is surfaced for the human, not silently swallowed.
+    assert ("pr_create", True) in rec.calls
+    assert "### Overrides" in rec.pr_body
+    assert install.SETTINGS_FILE in rec.pr_body
 
 
 def test_reinstall_with_no_changes_is_a_clean_noop(tmp_path, rec):

@@ -20,6 +20,24 @@ from shipit.harness.codepath import is_code_path
         ("tests/test_harness_policy.py", True),
         ("tools/release.sh", True),  # shell script
         ("scripts/foo.py", True),  # a .py anywhere is code
+        # Executables + build files are code (fail-open default was too narrow).
+        ("bin/shipit", True),  # bin/ executable, no extension
+        ("bin/deploy", True),
+        ("Makefile", True),  # known code filename
+        ("Dockerfile", True),
+        ("subdir/Makefile", True),
+        # Mainstream language extensions are code wherever they live.
+        ("app.ts", True),
+        ("components/Button.tsx", True),
+        ("server.js", True),
+        ("index.mjs", True),
+        ("lib.rs", True),
+        ("main.go", True),
+        ("widget.rb", True),
+        ("App.java", True),
+        ("vec.cpp", True),
+        ("vec.h", True),
+        ("parser.c", True),
         # --- NON-CODE (allowed) -----------------------------------------------
         ("docs/prd/har01.md", False),
         ("docs/adr/0012-enforcement.lex", False),
@@ -36,6 +54,9 @@ from shipit.harness.codepath import is_code_path
         # is still non-code (fail-open bias).
         ("docs/examples/snippet.py", False),
         (".claude/hooks/helper.py", False),
+        # Markup/styling stays NON-code (config/docs surface, not guarded code).
+        ("styles/site.css", False),
+        ("index.html", False),
         # Unknown extension, no code dir -> non-code (conservative).
         ("notes.txt", False),
         ("", False),
