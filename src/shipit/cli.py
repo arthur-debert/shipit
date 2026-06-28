@@ -15,6 +15,7 @@ import click
 from . import __version__
 from .logsetup import configure_logging, resolve_current_owner_repo
 from .verbs import gh_setup, install, lint, logs, verify_apps
+from .verbs.hook import hook as hook_group
 from .verbs.pr import pr as pr_group
 
 
@@ -190,6 +191,10 @@ def logs_cmd(repo: str | None, path_only: bool, follow: bool, lines: int) -> Non
 # (verbs/pr/), so its verbs register there rather than as inline commands here;
 # attach the whole group to the root.
 root.add_command(pr_group)
+
+# The nested `hook` group (Claude Code lifecycle-hook entrypoints) — the binary
+# side of the agent harness (ADR-0012); attached the same way as `pr`.
+root.add_command(hook_group)
 
 
 def main(argv: list[str] | None = None) -> int:
