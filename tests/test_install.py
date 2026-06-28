@@ -58,7 +58,7 @@ def test_extract_block_absent_is_none():
 
 
 # --------------------------------------------------------------------------
-# The gate units (Step 3) — lefthook caller + pixi [tasks] block
+# The lint-check units (Step 3) — lefthook caller + pixi [tasks] block
 # --------------------------------------------------------------------------
 
 
@@ -416,8 +416,8 @@ def test_install_reseeds_policy_when_missing_even_if_managed_current(tmp_path, r
     # A seed-only change still opens a DRAFT PR (managed set NOOP, policy seeded)...
     assert ("pr_create", True) in rec.calls
     assert "### Policy seeded" in rec.pr_body
-    # ...but it does NOT claim to (re)activate the gate — no managed unit was written.
-    assert "### Gate activated locally" not in rec.pr_body
+    # ...but it does NOT claim to (re)activate the checks — no managed unit was written.
+    assert "### Checks activated locally" not in rec.pr_body
     # ...and the policy is back in place.
     secrets = _secrets_by_name(tmp_path)
     assert "CODEX_REVIEW_APP_PRIVATE_KEY" in secrets
@@ -433,7 +433,7 @@ def test_dry_run_does_not_seed_policy(tmp_path, rec):
 
 
 # --------------------------------------------------------------------------
-# Gate activation — the lefthook.yml caller is turned LIVE, not just written
+# Checks activation — the lefthook.yml caller is turned LIVE, not just written
 # --------------------------------------------------------------------------
 
 
@@ -447,15 +447,15 @@ def test_activates_hooks_is_true_iff_lefthook_is_managed():
     assert install.activates_hooks(others) is False
 
 
-def test_fresh_install_activates_the_gate_hooks(tmp_path, rec):
+def test_fresh_install_activates_the_check_hooks(tmp_path, rec):
     (tmp_path / "AGENTS.md").write_text("# Acme\n")
     rc = install.run(str(tmp_path))
     assert rc == 0
     # The lefthook boundary was invoked exactly once, on the consumer root.
     assert len(rec.hook_activations) == 1
     assert rec.hook_activations[0] == tmp_path.resolve()
-    # The PR body announces the gate is live.
-    assert "### Gate activated" in rec.pr_body
+    # The PR body announces the checks are live.
+    assert "### Checks activated" in rec.pr_body
     assert "lefthook install" in rec.pr_body
 
 
@@ -486,7 +486,7 @@ def test_reinstall_with_writes_reactivates_idempotently(tmp_path, rec):
 
 def test_install_warns_but_succeeds_when_lefthook_missing(tmp_path, monkeypatch, rec):
     # The boundary reports a missing binary (127); install must still finish its
-    # PR rather than aborting — activation is opportunistic, not a hard gate.
+    # PR rather than aborting — activation is opportunistic, not a hard-fail check.
     rec.hook_activations.clear()
     monkeypatch.setattr(
         install, "_activate_hooks", lambda root: (127, "lefthook: not found on PATH")
@@ -495,9 +495,9 @@ def test_install_warns_but_succeeds_when_lefthook_missing(tmp_path, monkeypatch,
     rc = install.run(str(tmp_path))
     assert rc == 0
     assert ("pr_create", True) in rec.calls
-    # The PR body must NOT claim the gate went live on this failure path; it
+    # The PR body must NOT claim the checks went live on this failure path; it
     # records that local activation was deferred so a merger knows to act.
-    assert "### Gate activated locally" not in rec.pr_body
+    assert "### Checks activated locally" not in rec.pr_body
     assert "local activation skipped" in rec.pr_body
     assert "lefthook install" in rec.pr_body
 

@@ -29,7 +29,7 @@ def test_lint_help(capsys):
     assert rc == 0
     out = capsys.readouterr().out
     assert "--fix" in out
-    assert "gate" in out.lower()
+    assert "checks" in out.lower()
 
 
 def test_version():

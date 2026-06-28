@@ -99,7 +99,7 @@ def test_run_refuses_when_not_ready(monkeypatch, capsys):
 
 
 def test_run_undo_always_allowed(monkeypatch, capsys):
-    """--undo reverts ready→draft without any readiness gate."""
+    """--undo reverts ready→draft without any readiness check."""
     monkeypatch.setattr(ready_verb, "resolve_pr", lambda pr: 42)
     undos: list[tuple[int, bool]] = []
     monkeypatch.setattr(
@@ -111,7 +111,7 @@ def test_run_undo_always_allowed(monkeypatch, capsys):
     monkeypatch.setattr(
         ready_verb,
         "guarded_flip",
-        lambda pr: (_ for _ in ()).throw(AssertionError("undo must not gate")),
+        lambda pr: (_ for _ in ()).throw(AssertionError("undo must not be held")),
     )
     rc = ready_verb.run(undo=True)
     assert rc == 0

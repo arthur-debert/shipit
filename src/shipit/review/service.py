@@ -558,11 +558,11 @@ def _spawn_detached(argv: Sequence[str]) -> None:
 #: EMPTY takes ADR-0005's blessed ``neutral`` alternative (over ``failure`` + an
 #: "empty" output reason) DELIBERATELY: the OBS04 readiness snapshot carries only
 #: the check run's ``status`` / ``conclusion`` / ``startedAt`` (not its ``output``
-#: text), so a distinct ``conclusion`` is the ONLY way the gate can tell an *empty*
+#: text), so a distinct ``conclusion`` is the ONLY way the readiness layer can tell an *empty*
 #: non-delivery (degraded, but distinct from a hard ``failure``) apart from a
 #: backend ``failure`` WITHOUT the snapshot fetching check-run output. The load-
 #: bearing point ADR-0005 makes is unchanged — empty is NOT ``success`` — and both
-#: ``neutral`` and ``failure`` settle as degraded + non-blocking at the gate
+#: ``neutral`` and ``failure`` settle as degraded + non-blocking at the readiness layer
 #: (`shipit.prstate.reviewers._funnel_state_from_check`); the conclusion split only
 #: sharpens the human-facing "why" (empty vs failed). The "empty" word stays in the
 #: output title/summary for a human reading the run directly.

@@ -48,7 +48,7 @@ def test_job_display_name_prefers_static_name():
 
 
 def test_called_job_included_resolves_inputs_if():
-    # `if: inputs.bats` gated job is included only when the caller passes bats=true.
+    # `if: inputs.bats` conditional job is included only when the caller passes bats=true.
     bats_job = {"if": "inputs.bats"}
     assert checks._called_job_included(bats_job, {"bats": True})
     assert checks._called_job_included(bats_job, {"bats": "true"})
@@ -86,7 +86,7 @@ def test_job_contexts_plain_job():
     ) == ["Build"]
 
 
-def test_job_contexts_reusable_nesting_and_gating():
+def test_job_contexts_reusable_nesting_and_conditions():
     uses = "owner/repo/.github/workflows/ci.yml@v1"
     job = {"uses": uses, "with": {"bats": True}}
     # Pre-seed the cache so no boundary call happens.

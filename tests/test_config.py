@@ -69,3 +69,44 @@ def test_load_roundtrip(tmp_path):
     p.write_text('[secrets]\nA = { env = "X" }\n')
     cfg = config.load(p)
     assert config.load_secrets(cfg)[0].name == "A"
+
+
+def test_unknown_top_level_table_rejected(tmp_path):
+    p = tmp_path / ".shipit.toml"
+    p.write_text('[secretz]\nA = { env = "X" }\n')
+    with pytest.raises(config.ConfigError, match="unknown top-level table `secretz`"):
+        config.load(p)
+
+
+def test_known_tables_load(tmp_path):
+    p = tmp_path / ".shipit.toml"
+    p.write_text(
+        '[secrets]\nA = { env = "X" }\n'
+        "[reviewers]\ncopilot = {}\n"
+        '[shipit]\nversion = "abc"\n'
+        '[managed]\n"path" = "sha256:deadbeef"\n'
+    )
+    cfg = config.load(p)
+    assert config.load_secrets(cfg)[0].name == "A"
+
+
+def test_project_freeform_subtree_not_validated(tmp_path):
+    p = tmp_path / ".shipit.toml"
+    p.write_text(
+        "[project.portfolio]\n"
+        'exclude = ["a/b"]\n'
+        "[[project.portfolio.repo]]\n"
+        'name = "x/y"\n'
+        'kind = "anything"\n'
+        "[project.whatever.deeply.nested]\n"
+        'made_up_key = "fine"\n'
+    )
+    cfg = config.load(p)
+    assert cfg["project"]["portfolio"]["repo"][0]["name"] == "x/y"
+
+
+def test_custom_escape_hatch_alias_allowed(tmp_path):
+    p = tmp_path / ".shipit.toml"
+    p.write_text('[custom.anything]\nmade_up = "fine"\n')
+    cfg = config.load(p)
+    assert cfg["custom"]["anything"]["made_up"] == "fine"

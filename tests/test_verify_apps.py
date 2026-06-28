@@ -3,7 +3,7 @@
 The verify logic mints the reviewer App's installation token (the App-auth path,
 `ghauth.installation_auth`) and asserts the granted `permissions` carry
 `checks: write`. These tests fake that mint seam (no Doppler, no network, no PyJWT)
-to cover the three liveness shapes the rollout gates on:
+to cover the three liveness shapes the rollout blocks on:
 
   * App installed + `checks: write` present              -> LIVE (pass);
   * App not installed (the mint `ReviewAuthError`)        -> NOT LIVE (instruct);
@@ -82,7 +82,7 @@ def test_app_not_live_when_checks_permission_absent():
 
 
 # --------------------------------------------------------------------------
-# run — the multi-App gate + exit code
+# run — the multi-App check + exit code
 # --------------------------------------------------------------------------
 
 
@@ -98,7 +98,7 @@ def test_run_exits_zero_when_all_apps_live(capsys):
 
 
 def test_run_exits_nonzero_when_any_app_not_live(capsys):
-    """One not-live App fails the whole gate -> exit 1 with an instruct line."""
+    """One not-live App fails the whole check -> exit 1 with an instruct line."""
     rc = verify_apps.run("owner/repo", mint=_mint_not_installed)
     assert rc == 1
     out = capsys.readouterr().out
@@ -107,7 +107,7 @@ def test_run_exits_nonzero_when_any_app_not_live(capsys):
 
 
 def test_run_exits_nonzero_when_probe_set_is_empty(capsys, monkeypatch):
-    """An empty probe set must FAIL the gate, not pass via `all([])` being True.
+    """An empty probe set must FAIL the check, not pass via `all([])` being True.
 
     The exit code and the printed verdict must agree: with nothing verified,
     `format_report` renders NOT LIVE, so `run` must also return non-zero.

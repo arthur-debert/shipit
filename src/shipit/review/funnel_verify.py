@@ -22,14 +22,14 @@ boundary, and asserts every breadcrumb fact:
   3. :func:`shipit.review.checkrun.transition` closes that SAME run id (no second
      run) to its terminal ``conclusion`` + ``output`` + ``completed_at``.
 
-**Siting — why this is NOT in the test gate.** It hits live GitHub, needs Doppler
+**Siting — why this is NOT in the test checks.** It hits live GitHub, needs Doppler
 App creds, and needs a canary PR, so it must never run inside ``pixi run test`` / CI
 (which have none of those and would fail). So it is a standalone ``python -m``
 entrypoint (``pixi run -e review verify-funnel``), it REFUSES to run without an
 explicit ``--repo`` + ``--pr`` (or the ``SHIPIT_FUNNEL_CANARY_REPO`` /
 ``SHIPIT_FUNNEL_CANARY_PR`` env), and pytest never collects it (it lives in
 ``src/``, not ``tests/``). Its assertion/wiring logic is regression-covered in the
-normal gate by ``tests/test_review_funnel_verify.py``, which drives :func:`verify`
+normal test checks by ``tests/test_review_funnel_verify.py``, which drives :func:`verify`
 with the same boundary FAKED — so the harness itself can't silently rot.
 
 Run it (for the ``arthur-debert`` owner, whose re-grant is live)::
@@ -284,7 +284,7 @@ def main(argv: list[str] | None = None) -> int:
     """Console entrypoint: parse the canary target, run :func:`verify`, print the
     PASS/FAIL report, and exit ``0``/``1``. Refuses to run without an explicit
     ``--repo`` + ``--pr`` (or the env equivalents), so it can never fire by
-    accident inside the test gate."""
+    accident inside the test checks."""
     parser = argparse.ArgumentParser(
         prog="shipit-funnel-verify",
         description=(
@@ -321,7 +321,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(
             "a canary --repo and --pr are required (or set "
             "SHIPIT_FUNNEL_CANARY_REPO / SHIPIT_FUNNEL_CANARY_PR). This harness "
-            "hits LIVE GitHub and is never run by the test gate."
+            "hits LIVE GitHub and is never run by the test checks."
         )
 
     report = verify(args.agent, args.repo, args.pr, conclusion=args.conclusion)

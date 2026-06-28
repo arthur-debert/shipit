@@ -1,21 +1,21 @@
-# lint gate — one definition, orchestrated in the binary
+# lint checks — one definition, orchestrated in the binary
 
 > Status: **implemented** (shipped before the per-feature PRD convention)
 > Origin: this capability was built from the retired roadmap §3, reproduced below so the
 > design + verification rationale survives the roadmap's retirement.
-> Decisions: `docs/adr/0004-lint-gate-orchestration-in-binary.md` (orchestration
+> Decisions: `docs/adr/0004-lint-orchestration-in-binary.md` (orchestration
 > moves out of lefthook and into `shipit lint`) · `architecture.lex §5` (why a
-> binary, not templated tasks), `architecture.lex §7` (the gate: one definition,
-> hard).
+> binary, not templated tasks), `architecture.lex §7` (the lint check: one
+> definition, hard).
 
 ## Original design (reproduced)
 
-The standardized multi-language gate: a `[feature.lint]` pixi environment that
+The standardized multi-language lint check: a `[feature.lint]` pixi environment that
 provisions the linters, a `shipit lint` subcommand that runs them over the tree,
 exposed as `pixi run lint`, and a thin lefthook caller that fires it on
 pre-commit and pre-push. This is shipit's FIRST pixi integration — the point
 where the substrate proven in Spike 0 stops being a spike and becomes a real
-dependency of shipit's own repo. The gate is dogfooded on shipit from this step
+dependency of shipit's own repo. The lint check is dogfooded on shipit from this step
 forward (`lessons-learned.lex §1d`).
 
 ### The one inversion to internalize BEFORE reading release-core's gate
@@ -67,7 +67,7 @@ verb:
   extension and — for extensionless scripts — shebang (release routes shell this
   way; mirror it).
 - RUNS each language's tool(s), aggregates the results, and emits one verdict. It
-  is a HARD gate (`architecture.lex §7`): a missing tool exits non-zero, never
+  is a HARD-fail check (`architecture.lex §7`): a missing tool exits non-zero, never
   skips. A clean run is `0`; any failure is `1`.
 - is the SAME definition everywhere. CI runs `pixi run lint` (= this verb) and the
   lefthook pre-commit hook runs `pixi run lint`; "both agree" because it is ONE
@@ -97,7 +97,7 @@ THREE are not — the same gap class Spike 0 hit with wasm-bindgen
   `rust` package carries them or add the rustup components.
 
 Resolving these is the central provisioning fork (below), not a detail: the
-hard-gate rule means an unprovisioned linter FAILS the gate, it does not quietly
+hard-fail rule means an unprovisioned linter FAILS the check, it does not quietly
 skip.
 
 ### The lefthook caller (the unit Step 2 deferred)
@@ -108,15 +108,15 @@ supplies test). lefthook itself comes from conda-forge pinned in `pixi.lock`, so
 release's "one runner on PATH" dance (`toolset.py` resolving the right lefthook
 past `node_modules` copies) dissolves — pixi provides exactly the pinned binary.
 `shipit lint` installs the git hooks (the release `--install-hook` equivalent) so
-a fresh clone is one command from a working gate.
+a fresh clone is one command from a working lint check.
 
 This lefthook caller is the managed unit Step 2 explicitly DEFERRED to Step 3
 (install §2, "the lefthook caller — DEFER to Step 3"). Step 3 adds it — plus the
 `lint`/`test` task lines and the `[feature.lint]` deps — to install's managed set,
-so a `shipit install` provisions a consumer's gate the same way it provisions the
+so a `shipit install` provisions a consumer's lint check the same way it provisions the
 skills and the AGENTS.md block.
 
-### The consumer-side question — how the gate lands in a consumer's pixi.toml
+### The consumer-side question — how the lint check lands in a consumer's pixi.toml
 
 install must get the `[feature.lint]` deps and the thin task lines into the
 CONSUMER's `pixi.toml` without making `pixi.toml` a managed-but-edited drift
@@ -128,20 +128,20 @@ marker-delimited shipit BLOCK in `pixi.toml` (block-hashed like the AGENTS.md
 block and reconciled by Step 2's algorithm) or another mechanism. This couples
 Step 3 to Step 2's reconciliation and should be settled with it.
 
-### Dogfood scope — what shipit's own gate actually exercises
+### Dogfood scope — what shipit's own lint check actually exercises
 
 shipit's repo is python + lex + yaml + json + shell + markdown, so its own
 `pixi run lint` exercises only those legs; the rust, go and tauri toolchains it
 standardizes are NOT present here (the dogfood blind spot,
-`lessons-learned.lex §6`). That is acceptable for Step 3 — the gate's SHAPE and
+`lessons-learned.lex §6`). That is acceptable for Step 3 — the lint check's SHAPE and
 the python/lex/shell/yaml/json/markdown legs are dogfooded for real; the
 compiled-language legs are first exercised against a real consumer when install
-carries the gate outward, and fully at Step 6's reference cut.
+carries the lint check outward, and fully at Step 6's reference cut.
 
 ## Decisions
 
 The questions this PRD originally left open are now resolved and captured in
-`docs/adr/0004-lint-gate-orchestration-in-binary.md`:
+`docs/adr/0004-lint-orchestration-in-binary.md`:
 
 - **lexd + the conda-forge gap** — prettier and markdownlint-cli are conda-forge
   deps (no npm path needed); lexd is fetched at a pin by `tools/provision-lexd.sh`,
@@ -159,8 +159,8 @@ The questions this PRD originally left open are now resolved and captured in
 ### Verified by
 
 On shipit itself, `pixi run lint` and the lefthook pre-commit hook run the
-IDENTICAL gate and agree; CI runs the same `pixi run lint` under `--locked`; a
-file with a deliberate lint error fails the gate non-zero (proving the gate is
+IDENTICAL lint check and agree; CI runs the same `pixi run lint` under `--locked`; a
+file with a deliberate lint error fails the check non-zero (proving the check is
 hard, not advisory) and a clean tree passes; and a missing linter fails loudly
 rather than skipping. The consumer-install leg (the lefthook caller + task lines +
 feature deps added to install's managed set) is verified when Step 2's install

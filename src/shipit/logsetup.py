@@ -336,7 +336,7 @@ def configure_logging(
         if summary_path:
             # The step-summary sink is best-effort: if the path can't be opened
             # (missing dir, permissions, …) we keep the CI sink and carry
-            # on rather than fail the command — a logging glitch never gates.
+            # on rather than fail the command — a logging glitch never blocks.
             try:
                 logger.addHandler(build_step_summary_handler(summary_path))
             except OSError:

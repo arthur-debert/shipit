@@ -11,7 +11,7 @@ The agent the human addresses is a COORDINATING agent: it never implements. Rega
 The cycle is SPLIT across roles so no one context carries all of it:
 
 - an IMPLEMENTER subagent implements (and writes/updates tests), runs the
-  gate green, and opens a DRAFT PR — then STOPS AT PR-OPEN; it never sees a review round;
+  checks green, and opens a DRAFT PR — then STOPS AT PR-OPEN; it never sees a review round;
 - the COORDINATOR owns every wait and the flip;
 - a FRESH SHEPHERD subagent handles each review-addressing round — one per
   round, briefed cold.
@@ -28,7 +28,7 @@ FLOOR and CEILING — what needs no go-ahead, and the one thing that does:
 
 - FLOOR: committing, pushing, and opening the draft PR are the agent's OWN
   job and need no human go-ahead. "Stop at the ready flip" NEVER means "wait to be asked to commit" or "leave finished work uncommitted" — finished work is committed, pushed, and opened as a draft PR without asking.
-- CEILING: the ONLY human-gated step is the merge. The agent drives
+- CEILING: the ONLY step needing a human is the merge. The agent drives
   everything up to and including the ready flip on its own authority, then stops.
 
 ## 1. The single-task cycle (one PR)
@@ -52,9 +52,9 @@ The coordinator does the reading/research needed to brief the work, then delegat
 
 The coordinator CREATES the fix branch off `main` (`fix/<issue>` for an issue-scoped task) and spawns an IMPLEMENTER subagent to do the task, writing or improving tests where needed.
 
-The implementer runs the gate — `shipit lint` — and the tests — \`pixi run test\` — until both are green before opening the PR. CI runs the same gate plus the tests as required checks, so local green is necessary for CI green.
+The implementer runs the commit/push checks — `shipit lint` — and the tests — \`pixi run test\` — until both are green before opening the PR. CI runs the same checks plus the tests as required checks, so local green is necessary for CI green.
 
-Gate fidelity: a local check that reads ambient local state — a sibling checkout, a tool only your machine has, an env var CI doesn't set — passes locally and lies about CI. If a check needs something, make CI provide it rather than trusting that local green implies CI green.
+Check fidelity: a local check that reads ambient local state — a sibling checkout, a tool only your machine has, an env var CI doesn't set — passes locally and lies about CI. If a check needs something, make CI provide it rather than trusting that local green implies CI green.
 
 For bugs, write the test that captures the bug — and thus fails — first, then the fix, then watch it pass. Reflect on the abstract root cause, not just the one instance: if there is an opportunity to fix the broader root cause or improve testing, do it.
 
@@ -120,7 +120,7 @@ Parallel implementation, serialized integration. Subagents implement eligible wo
 
 ### 2.3. Integration
 
-The COORDINATOR merges each workstream PR into the epic branch once that PR is READY (CI green + reviewed + mergeable) — its own go/no-go, no user approval needed for these intra-epic merges. This is the one place the coordinator merges: workstreams INTO the epic branch, never the epic branch into `main`. The user's approval gate is the umbrella PR (\[\#2.6\]), not the individual workstreams.
+The COORDINATOR merges each workstream PR into the epic branch once that PR is READY (CI green + reviewed + mergeable) — its own go/no-go, no user approval needed for these intra-epic merges. This is the one place the coordinator merges: workstreams INTO the epic branch, never the epic branch into `main`. The user's approval checkpoint is the umbrella PR (\[\#2.6\]), not the individual workstreams.
 
 ### 2.4. Convergence — clearing the fallouts
 

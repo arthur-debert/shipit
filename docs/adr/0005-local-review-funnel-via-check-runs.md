@@ -42,8 +42,8 @@ timestamped stand-in for the `review_requested` edge GitHub denies these bots**.
 App reviewers (Copilot) keep using their native `review_requested` edge + review
 object; the engine normalizes native-edge and check-run inputs into **one funnel
 view** — "isomorphic" at the engine's level, not on the wire (the normalization +
-gate live in OBS04 / ADR-0006). The funnel check run is **non-required**: a failed local
-review is *visible but non-blocking*, because the Ready gate is "every required
+readiness pillar live in OBS04 / ADR-0006). The funnel check run is **non-required**: a failed local
+review is *visible but non-blocking*, because the Ready pillar is "every required
 reviewer's outcome is **recorded** + threads resolved," not "every review
 **succeeded**."
 
@@ -73,7 +73,7 @@ reviewer's outcome is **recorded** + threads resolved," not "every review
   App install itself).
 - Until the re-grant lands, a local review still **posts its review** (that path is
   unaffected); only the pre-post funnel visibility is absent, so OBS02–04 are
-  gated on the re-grant for end-to-end verification.
+  blocked by the re-grant for end-to-end verification.
 
 ## OBS03: the in-flight marker made real
 

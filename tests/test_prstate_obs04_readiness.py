@@ -1,4 +1,4 @@
-"""OBS04-WS02 — the readiness gate redefined over the funnel (ADR-0006).
+"""OBS04-WS02 — the readiness pillars redefined over the funnel (ADR-0006).
 
 WS01 made the snapshot CARRY the funnel breadcrumb; this suite pins what WS02
 DECIDES from it:
@@ -18,7 +18,7 @@ DECIDES from it:
 
 Tests assert EXTERNAL behaviour from a recorded snapshot + a fixed "now": the
 engine's state / degraded set, never an implementation detail. The wait-window
-ageing of in-flight→timed-out is WS03; here the gate already treats a recorded
+ageing of in-flight→timed-out is WS03; here the engine already treats a recorded
 `timed-out` funnel state as settled+degraded, which is all WS02 owns.
 """
 
@@ -31,7 +31,7 @@ from shipit.prstate.model import FunnelState, Review, ReviewFunnelCheck
 from shipit.prstate.reviewers import by_name
 from shipit.prstate.state import TaskState, evaluate
 
-# The required set every gate test below uses: an App reviewer (copilot, always
+# The required set every readiness test below uses: an App reviewer (copilot, always
 # posted in the base fixture) PLUS a local-agent reviewer (codex) whose funnel
 # signal each test varies. Passing it explicitly proves the engine is data-driven,
 # not coupled to this repo's deployed `[reviewers]` policy.
@@ -240,7 +240,7 @@ def test_app_reviewer_folds_from_lifecycle_not_a_breadcrumb():
 
 def test_empty_distinguished_from_failed_by_conclusion():
     """The neutral→empty / failure→failed split (the producer's ADR-0005 mapping)
-    is what lets the gate name the right "why" without the snapshot carrying the
+    is what lets the engine name the right "why" without the snapshot carrying the
     check-run output text."""
     empty = evaluate(
         _ctx(funnel=_codex_funnel("COMPLETED", "NEUTRAL")), required=_REQUIRED

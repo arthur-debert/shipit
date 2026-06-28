@@ -1,10 +1,10 @@
 ---
 name: shipt-planning
-description: Plan a new feature or epic from loose ideas through to issues. Drives ideation → overview gate → ADRs → PRD → docs PR (Leg A), then epic decomposition → issues (Leg B). Use at the START of a feature/epic, before any code. NOT for single fixes — the simpler-issue path skips planning.
+description: Plan a new feature or epic from loose ideas through to issues. Drives ideation → overview checkpoint → ADRs → PRD → docs PR (Leg A), then epic decomposition → issues (Leg B). Use at the START of a feature/epic, before any code. NOT for single fixes — the simpler-issue path skips planning.
 ---
 # Planning
 
-Conduct a planning session for a **new feature or epic**. This is the orchestrator: it drives the other planning skills in order and keeps the human in the loop at the two gates that matter.
+Conduct a planning session for a **new feature or epic**. This is the orchestrator: it drives the other planning skills in order and keeps the human in the loop at the two checkpoints that matter.
 
 **Two legs, often two sessions.** Leg A turns loose ideas into the **spec** (ADRs + a PRD), locked by a merged docs PR. Leg B turns that spec into **execution tracking** (epic issue(s) + Work Stream sub-issues). Leg B is independently invocable — it is frequently a separate, later session run directly once the PRD is merged. Run Leg A end-to-end first; only continue into Leg B when asked, or note it as the next session.
 
@@ -30,7 +30,7 @@ Open discussion. Move from loose ideas to a structured, shared understanding of 
 
 **Name the feature here** — agree a short, memorable name; everything downstream (PRD slug, ADRs, later the epic) hangs off it.
 
-### 2. Overview gate (user gate)
+### 2. Overview checkpoint (user checkpoint)
 
 Present a **high-level overview** of the feature — the shape of it, the major pieces, the approach. The user **oks it or requests changes**. Loop until they ok. Do not proceed to grilling until the overview is blessed.
 
@@ -42,7 +42,7 @@ Run `/shipt-grill-with-docs`: relentless one-question-at-a-time Q&A on the impor
 
 Run `/shipt-to-prd`. It synthesizes the conversation into the **PRD file only** — `docs/prd/<slug>.md`, the authoritative feature spec. No interview (that already happened in the grill); no epic issue (that's Leg B).
 
-### 5. Docs PR (user gate at merge)
+### 5. Docs PR (user checkpoint at merge)
 
 Push the ADR + PRD changes as a DRAFT PR and run it through the **full required-reviewer cycle, exactly like code** — architectural oversights surface in review. The agent addresses review threads itself, **surfacing to the user only when a real call is needed**, flips the PR to **READY** when reviews are settled and CI is green, then stops. **The user merges.** The merged PR is what locks the spec.
 
@@ -52,7 +52,7 @@ Push the ADR + PRD changes as a DRAFT PR and run it through the **full required-
 
 Run this once the PRD is merged — usually a fresh session. If invoked directly, read the merged PRD in `docs/prd/` first for context.
 
-### 6. Epic naming + decomposition (user gate)
+### 6. Epic naming + decomposition (user checkpoint)
 
 The user proposes the **epic name(s)**. Work with them on a **terse, nested epic / WS list** — back-and-forth until they ok the decomposition.
 
@@ -67,9 +67,9 @@ Run `/shipt-to-issues`, **per epic**. It creates:
 
 ---
 
-## The gates, in one place
+## The checkpoints, in one place
 
-Everything between the gates the agent drives on its own authority. The human is on the hook at exactly three points:
+Everything between the checkpoints the agent drives on its own authority. The human is on the hook at exactly three points:
 
 1. **Overview ok** (step 2) — before any grilling.
 2. **Docs PR merge** (step 5) — the spec is locked only by a human merge.
