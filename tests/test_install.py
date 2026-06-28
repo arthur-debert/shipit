@@ -222,7 +222,7 @@ def test_fresh_install_writes_set_and_opens_draft_pr(tmp_path, rec):
     assert rc == 0
 
     # Managed files landed.
-    assert (tmp_path / "skills" / "shipt-to-prd" / "SKILL.md").is_file()
+    assert (tmp_path / "skills" / "shipit-to-prd" / "SKILL.md").is_file()
     assert (tmp_path / "bin" / "shipit").is_file()
     # The AGENTS block was spliced in without losing the consumer's text.
     agents = (tmp_path / "AGENTS.md").read_text()
@@ -258,14 +258,14 @@ def test_consumer_edit_surfaces_as_override(tmp_path, rec):
     rec.calls.clear()
 
     # The consumer edits a managed skill file.
-    skill = tmp_path / "skills" / "shipt-to-prd" / "SKILL.md"
+    skill = tmp_path / "skills" / "shipit-to-prd" / "SKILL.md"
     skill.write_text("CONSUMER EDIT\n")
 
     rc = install.run(str(tmp_path))
     assert rc == 0
     assert ("pr_create", True) in rec.calls
     assert "### Overrides" in rec.pr_body
-    assert "skills/shipt-to-prd/SKILL.md" in rec.pr_body
+    assert "skills/shipit-to-prd/SKILL.md" in rec.pr_body
     # The diff is captured BEFORE the overwrite, so it shows the consumer's edit
     # (a non-empty diff), not an empty diff against what shipit just wrote.
     assert "CONSUMER EDIT" in rec.pr_body

@@ -80,7 +80,7 @@ The single PR targets `main`; the coordinator drives it to READY and stops — t
 
 An epic — a feature of multiple PRs — is the SAME coordinator + role-split model [as](#1), differing ONLY in branch/merge topology: one **epic branch** + one umbrella PR; each workstream is a single-task cycle (\[\#1\]) whose PR targets the epic branch (not `main`). The coordinator merges each READY workstream PR INTO the epic branch on its own authority (parallel implement, serial integrate); the HUMAN's one checkpoint is the umbrella PR (epic branch -\> `main`). Convergence (clear epic-owned fallouts) and a docs pass precede the umbrella.
 
-A feature is planned before execution via `/shipt-planning` (ideation -\> ADRs -\> PRD -\> docs PR, then epic/WS decomposition -\> issues).
+A feature is planned before execution via `/shipit-planning` (ideation -\> ADRs -\> PRD -\> docs PR, then epic/WS decomposition -\> issues).
 
 Full topology — per-workstream delegation, integration ordering, convergence, the docs pass, the umbrella, changelog/release status. [See](./docs/dev/epics.lex) before running an epic.
 

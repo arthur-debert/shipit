@@ -1,5 +1,5 @@
 ---
-name: shipt-planning
+name: shipit-planning
 description: Plan a new feature or epic from loose ideas through to issues. Drives ideation → overview checkpoint → ADRs → PRD → docs PR (Leg A), then epic decomposition → issues (Leg B). Use at the START of a feature/epic, before any code. NOT for single fixes — the simpler-issue path skips planning.
 ---
 # Planning
@@ -15,7 +15,7 @@ Conduct a planning session for a **new feature or epic**. This is the orchestrat
 
 **Bail early on small work.** Planning is for features and epics. If this is a single fix or a small change, stop and say so — skip straight to implementation. Don't manufacture an epic for a one-PR change.
 
-**Interview style.** For every interactive step (ideation, overview, decomposition), ask **one question at a time**, wait for the answer, and **recommend an answer** with each question — same cadence as `/shipt-grill-with-docs`.
+**Interview style.** For every interactive step (ideation, overview, decomposition), ask **one question at a time**, wait for the answer, and **recommend an answer** with each question — same cadence as `/shipit-grill-with-docs`.
 
 ---
 
@@ -34,13 +34,13 @@ Open discussion. Move from loose ideas to a structured, shared understanding of 
 
 Present a **high-level overview** of the feature — the shape of it, the major pieces, the approach. The user **oks it or requests changes**. Loop until they ok. Do not proceed to grilling until the overview is blessed.
 
-### 3. Grill — `/shipt-grill-with-docs`
+### 3. Grill — `/shipit-grill-with-docs`
 
-Run `/shipt-grill-with-docs`: relentless one-question-at-a-time Q&A on the important decisions, challenged against `CONTEXT.md` and the existing domain model. It sharpens terminology and writes **ADRs** for the decisions that warrant them.
+Run `/shipit-grill-with-docs`: relentless one-question-at-a-time Q&A on the important decisions, challenged against `CONTEXT.md` and the existing domain model. It sharpens terminology and writes **ADRs** for the decisions that warrant them.
 
-### 4. PRD — `/shipt-to-prd`
+### 4. PRD — `/shipit-to-prd`
 
-Run `/shipt-to-prd`. It synthesizes the conversation into the **PRD file only** — `docs/prd/<slug>.md`, the authoritative feature spec. No interview (that already happened in the grill); no epic issue (that's Leg B).
+Run `/shipit-to-prd`. It synthesizes the conversation into the **PRD file only** — `docs/prd/<slug>.md`, the authoritative feature spec. No interview (that already happened in the grill); no epic issue (that's Leg B).
 
 ### 5. Docs PR (user checkpoint at merge)
 
@@ -58,9 +58,9 @@ The user proposes the **epic name(s)**. Work with them on a **terse, nested epic
 
 One feature **may span several epics** (e.g. `OBS01`→`OBS04`: one feature, several epics, because a single mega-epic would be too large/slow to merge). **Default to one epic**; only split when the work is genuinely too big to land as one umbrella.
 
-### 7. Issues — `/shipt-to-issues`
+### 7. Issues — `/shipit-to-issues`
 
-Run `/shipt-to-issues`, **per epic**. It creates:
+Run `/shipit-to-issues`, **per epic**. It creates:
 
 - the **epic umbrella issue** — the execution tracker: PRD summary, pointers to the PRD + relevant ADRs, the WS list/topology, progress;
 - the **WS sub-issues** — high detail (risks, where/how in the code, testing, links to the PRD/ADRs), formally linked as sub-issues for GitHub progress tracking.
