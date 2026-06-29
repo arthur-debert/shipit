@@ -107,7 +107,7 @@ def _read_record(path: Path) -> TreeRecord:
     )
 
 
-def _pr_label(pr: dict | None | gh._UnknownPr) -> str | None:
+def _pr_label(pr: dict | None | gh.UnknownPr) -> str | None:
     """A short ``"#<n> <STATE>"`` label for a PR snapshot, or ``None`` when there is none.
 
     A draft open PR reads as ``DRAFT`` (the turn-signal the dev cycle hinges on);

@@ -44,7 +44,7 @@ class GhError(RuntimeError):
     """A ``gh`` / ``git`` invocation failed (non-zero exit)."""
 
 
-class _UnknownPr:
+class UnknownPr:
     """Sentinel: a head's PR state could NOT be read — distinct from ``None`` (no PR).
 
     :func:`pr_for_head` returns this singleton when ``gh`` failed for a reason OTHER
@@ -62,8 +62,8 @@ class _UnknownPr:
         return "UNKNOWN"
 
 
-#: The singleton unreadable-PR-state sentinel (see :class:`_UnknownPr`).
-UNKNOWN = _UnknownPr()
+#: The singleton unreadable-PR-state sentinel (see :class:`UnknownPr`).
+UNKNOWN = UnknownPr()
 
 
 def _token_env(token: str | None) -> dict[str, str] | None:
@@ -456,7 +456,7 @@ def git_ahead_behind(*, cwd: str) -> tuple[int, int]:
     return (ahead, behind)
 
 
-def pr_for_head(branch: str, *, cwd: str | None = None) -> dict | None | _UnknownPr:
+def pr_for_head(branch: str, *, cwd: str | None = None) -> dict | None | UnknownPr:
     """The PR whose head is ``branch`` as ``{number, state, isDraft}`` — or ``None`` /
     :data:`UNKNOWN`.
 
