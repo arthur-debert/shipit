@@ -51,7 +51,7 @@ The coordinator reads/researches to brief the work, then delegates. It does not 
 
 ### 1.2. Implementation (the implementer subagent)
 
-The coordinator CREATES the branch off the integration base — `origin/main` (`fix/<issue>`) for standalone work, the epic branch for a workstream — and spawns an IMPLEMENTER to do the task + tests. The implementer runs the checks (`shipit lint`) and tests (`pixi run test`) green BEFORE opening the PR — CI runs the same as required checks, so local green is necessary for CI green.
+The coordinator CREATES the branch off the integration base — `origin/main` (`fix/<issue>-<slug>`) for standalone work, the epic branch for a workstream — and spawns an IMPLEMENTER to do the task + tests. The implementer runs the checks (`shipit lint`) and tests (`pixi run test`) green BEFORE opening the PR — CI runs the same as required checks, so local green is necessary for CI green.
 
 Check fidelity: a check that reads ambient local state (a sibling checkout, a machine-only tool, an env var CI lacks) passes locally and lies about CI. If a check needs something, make CI provide it.
 
@@ -97,8 +97,8 @@ Per-PR essentials:
   Name\>\`; a standalone PR uses a plain summary.
 - PR body: `closes #<id>` (auto-closes on merge to `main`) or `for #<id>`
   when it must not (e.g. a WS PR onto an epic branch).
-- Branch: `EPIC-WSnn` (hyphen, not slash); the epic branch is the bare epic
-  code.
+- Branch: `EPIC/WSnn` (slash-namespaced); the epic (umbrella) branch is
+  `EPIC/umbrella`, not bare `EPIC` (which would collide with the `EPIC/WSnn` refs). The plain-language identifier stays hyphenated (`EPIC-WSnn`).
 
 Full grammar + rationale — the THEME registry, multi-repo prefixes, FX rounds, the slash-collision reason. [See](./docs/dev/naming.lex).
 

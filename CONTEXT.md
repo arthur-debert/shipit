@@ -299,6 +299,19 @@ unless a break-glass marker is present). Each use is recorded, so its frequency 
 signal the harness can measure (an HAR02 metric) and tighten on, rather than a silent
 bypass. *Avoid*: "override", "force" as the noun — break-glass is logged and rare.
 
+### Trees (where work happens)
+
+**Tree**:
+An isolated, fully-independent **clone** of one repo where exactly one write-session
+works, living under a central root outside any repo
+(`~/workspace/trees/<org>/<repo>/…`). One **Run** executes in one Tree; concurrent
+agents (and the human) each get their own, so they never collide on files. A Tree is
+a real clone — its own `.git`, able to sit on `main` — NOT a git worktree (which
+shares one object store and forbids the same branch in two places). The unit the
+**coordinator** provisions and assigns.
+*Avoid*: "worktree" for this unit (that names the git feature we deliberately reject —
+see ADR-0014); "workspace" (collides with Cargo/pixi/editor "workspace").
+
 ### Build & release
 
 **Toolchain**:
