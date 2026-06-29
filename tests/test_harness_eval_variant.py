@@ -56,12 +56,21 @@ def test_role_of_meta_maps_agent_type_to_role():
     assert role_of_meta({"agentType": "shepherd"}) is Role.SHEPHERD
 
 
-def test_role_of_meta_defaults_to_coordinator_for_absent_or_unknown():
-    # Absent meta (coordinator run) and an unrecognized agentType both resolve to
-    # the coordinator — the same default the record builder stamps.
+def test_role_of_meta_defaults_to_coordinator_only_for_absent_or_blank():
+    # Only an absent/blank agentType is the coordinator (no meta, no agent-def
+    # prompt of its own) — the same default the record builder stamps.
     assert role_of_meta(None) is Role.COORDINATOR
     assert role_of_meta({}) is Role.COORDINATOR
-    assert role_of_meta({"agentType": "nonesuch"}) is Role.COORDINATOR
+    assert role_of_meta({"agentType": ""}) is Role.COORDINATOR
+    assert role_of_meta({"agentType": "   "}) is Role.COORDINATOR
+
+
+def test_role_of_meta_attributes_drifted_agent_type_to_a_worker_not_coordinator():
+    # A present-but-unrecognized agentType is still a subagent: it must NOT pool
+    # under the coordinator prompt hash. Mirrors role.resolve_role's worker
+    # fallback so the two resolvers agree.
+    assert role_of_meta({"agentType": "nonesuch"}) is Role.IMPLEMENTER
+    assert role_of_meta({"agentType": "Implementer"}) is Role.IMPLEMENTER
 
 
 def test_resolve_variant_hashes_the_real_role_prompt_and_is_stable():
@@ -78,3 +87,21 @@ def test_resolve_variant_hashes_the_real_role_prompt_and_is_stable():
 def test_resolve_variant_carries_the_env_label():
     v = resolve_variant({"agentType": "implementer"}, env={VARIANT_LABEL_ENV: "arm-2"})
     assert v.label == "arm-2"
+
+
+def test_resolve_variant_normalizes_the_env_label():
+    # Accidental whitespace from shell quoting / CI templating must not split an
+    # arm from itself, and an all-whitespace/empty label is no label at all.
+    padded = resolve_variant(
+        {"agentType": "implementer"}, env={VARIANT_LABEL_ENV: "  arm-2  "}
+    )
+    clean = resolve_variant(
+        {"agentType": "implementer"}, env={VARIANT_LABEL_ENV: "arm-2"}
+    )
+    assert padded.label == "arm-2"
+    assert padded == clean
+    for blank in ("", "   "):
+        v = resolve_variant(
+            {"agentType": "implementer"}, env={VARIANT_LABEL_ENV: blank}
+        )
+        assert v.label is None

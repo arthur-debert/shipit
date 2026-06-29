@@ -25,6 +25,7 @@ Pure core / thin boundary (the eval-wire shape):
 
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -33,6 +34,8 @@ from typing import Any
 from ... import config
 from ..prompts import load_role_defs, render
 from ..role import Role
+
+logger = logging.getLogger("shipit.hook")
 
 #: Optional explicit A/B label for the running variant, read at the hook boundary.
 #: Set it to separate two runs of the SAME prompt into distinct experiment arms.
@@ -72,16 +75,26 @@ def variant_of(prompt_text: str, *, label: str | None = None) -> Variant:
 def role_of_meta(meta: Mapping[str, Any] | None) -> Role:
     """The **role** whose prompt ran, from a run's ``.meta.json``. PURE.
 
-    A subagent run's meta carries ``agentType``; the coordinator run has no meta
-    (and no agent-def prompt of its own kind), so an absent or unrecognized
-    ``agentType`` resolves to the ``coordinator`` — the same default
-    :mod:`shipit.harness.eval.record` stamps for an absent meta.
+    Mirrors the hook-role resolver (:func:`shipit.harness.role.resolve_role`) so
+    the two agree: only an **absent/blank** ``agentType`` is the ``coordinator``
+    (the coordinator run has no meta and no agent-def prompt of its own kind — the
+    same default :mod:`shipit.harness.eval.record` stamps for an absent meta). A
+    subagent meta whose ``agentType`` *drifted* (a new/renamed role, corruption,
+    casing) is still a worker, NOT the coordinator, so it resolves to the generic
+    worker role (``implementer``) rather than pooling under the coordinator's
+    prompt hash; the mismatch is logged.
     """
     agent_type = str((meta or {}).get("agentType") or "").strip().lower()
+    if not agent_type:
+        return Role.COORDINATOR
     for role in Role:
         if role.value == agent_type:
             return role
-    return Role.COORDINATOR
+    logger.debug(
+        "unrecognized agentType %r — attributing to a non-coordinator worker",
+        agent_type,
+    )
+    return Role.IMPLEMENTER
 
 
 def role_prompt_text(role: Role) -> str:
@@ -101,10 +114,14 @@ def resolve_variant(
     """Resolve a run's variant from its meta + the environment. BOUNDARY.
 
     Maps the meta to its role, reads that role's generated prompt, and content-
-    hashes it, carrying any :data:`VARIANT_LABEL_ENV` A/B label. ``env`` is
-    injectable for tests (defaults to ``os.environ``).
+    hashes it, carrying any :data:`VARIANT_LABEL_ENV` A/B label. The label is
+    normalized like the other hook-boundary env reads (e.g.
+    :func:`shipit.verbs.hook.pretooluse._break_glass_armed`): surrounding
+    whitespace is stripped and an empty string is treated as ``None``, so a label
+    accidentally padded by shell quoting or CI templating does not split an arm
+    from itself. ``env`` is injectable for tests (defaults to ``os.environ``).
     """
     environ = os.environ if env is None else env
-    label = environ.get(VARIANT_LABEL_ENV) or None
+    label = (environ.get(VARIANT_LABEL_ENV) or "").strip() or None
     prompt = role_prompt_text(role_of_meta(meta))
     return variant_of(prompt, label=label)
