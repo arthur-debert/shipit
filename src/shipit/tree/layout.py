@@ -263,7 +263,20 @@ def _plan_issue(spec: TreeSpec) -> TreePlan:
       the dir leaf, keyed by issue, so duplicate Trees never collide on disk.
     - **base**: ``origin/main`` (a standalone issue is cut from the default branch;
       a work stream's epic-branch base is WS02's concern).
+
+    ``issue`` is validated as a positive integer at this invariant boundary, the
+    same way ``ws`` is in :func:`_plan_epic_ws`: ``click`` accepts ``0`` and
+    negatives, but they yield out-of-grammar branches like ``fix/0`` / ``fix/-1``,
+    so they raise :class:`ValueError`.
     """
+    assert spec.issue is not None  # guaranteed by plan()
+    if spec.issue < 1:
+        raise ValueError(
+            "tree.layout.plan: issue number must be a positive integer "
+            f"(the fix/<issue> grammar, naming.lex §3); got issue={spec.issue!r}. "
+            "Zero or negative values produce out-of-grammar branches like "
+            "'fix/0'/'fix/-1'."
+        )
     slug = sanitize_slug(spec.slug)
     branch = f"fix/{spec.issue}-{slug}" if slug else f"fix/{spec.issue}"
     root = spec.root if spec.root is not None else central_root()

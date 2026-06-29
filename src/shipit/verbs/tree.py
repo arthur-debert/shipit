@@ -23,7 +23,7 @@ from pathlib import Path
 
 import click
 
-from .. import gh
+from .. import gh, proc
 from ..tree import cleanup, layout, registry
 from ..tree.cleanup import Cleanup
 from ..tree.create import Tree, create, new_agent_hash
@@ -147,7 +147,11 @@ def run_create(
     )
     try:
         result = create(spec, source_repo=root, github_url=url)
-    except (gh.GhError, ValueError) as exc:
+    except (gh.GhError, ValueError, proc.ProcError, OSError) as exc:
+        # The whole create pipeline collapses to a clean exit-1 here: the planner
+        # rejects a spec (ValueError), a git/gh call fails (GhError), provisioning
+        # exits nonzero (ProcError), or a filesystem step — mkdir/copy/an existing
+        # dest — fails (OSError). None of these should surface as a traceback.
         print(f"tree create: {exc}", file=sys.stderr)
         return 1
     _emit_ready(result)
@@ -218,11 +222,18 @@ def list_cmd() -> None:
 def run_list() -> int:
     """Scan the central root and render the Tree fleet. Returns an exit code.
 
-    Always returns 0: an empty or missing root is a valid "no Trees yet" state, not
-    an error. Repo identity is irrelevant here — the central root spans every repo,
-    so ``list`` shows the whole fleet (PRD user story 14/22).
+    Returns 0 in the normal case — an empty or missing root is a valid "no Trees
+    yet" state, not an error; returns 1 with a clean stderr message when the central
+    root is MISCONFIGURED (a relative ``SHIPIT_TREES_ROOT`` → ``ValueError``), so a
+    config error reads as a message, never a traceback. Repo identity is irrelevant
+    here — the central root spans every repo, so ``list`` shows the whole fleet (PRD
+    user story 14/22).
     """
-    root = layout.central_root()
+    try:
+        root = layout.central_root()
+    except ValueError as exc:
+        print(f"tree list: {exc}", file=sys.stderr)
+        return 1
     records = registry.scan(root)
     _render_list(records, now=time.time())
     return 0
@@ -311,10 +322,16 @@ def remove_cmd(target: str) -> None:
 def run_remove(target: str) -> int:
     """Resolve TARGET to one Tree and delete its clone dir. Returns an exit code.
 
-    Returns 0 after removing the one matching Tree; 1 with a stderr message when no
-    Tree matches or more than one does (never guess which to delete).
+    Returns 0 after removing the one matching Tree; 1 with a stderr message when the
+    central root is misconfigured (a relative ``SHIPIT_TREES_ROOT`` → ``ValueError``,
+    surfaced as a message not a traceback), no Tree matches, or more than one does
+    (never guess which to delete).
     """
-    root = layout.central_root()
+    try:
+        root = layout.central_root()
+    except ValueError as exc:
+        print(f"tree remove: {exc}", file=sys.stderr)
+        return 1
     records = registry.scan(root)
     matches = _match_trees(records, target)
     if not matches:
@@ -364,11 +381,17 @@ def gc_cmd() -> None:
 def run_gc() -> int:
     """Scan, classify, then remove only the removable set and list the stale set.
 
-    Returns 0 always: an empty root or a fleet with nothing to reclaim is a valid
-    outcome, not an error. Repo identity is irrelevant — ``gc`` spans the whole
-    central root, like ``list``.
+    Returns 0 in the normal case — an empty root or a fleet with nothing to reclaim
+    is a valid outcome, not an error; returns 1 with a clean stderr message when the
+    central root is misconfigured (a relative ``SHIPIT_TREES_ROOT`` → ``ValueError``)
+    so the gc contract stays "no tracebacks, just messages + counts". Repo identity
+    is irrelevant — ``gc`` spans the whole central root, like ``list``.
     """
-    root = layout.central_root()
+    try:
+        root = layout.central_root()
+    except ValueError as exc:
+        print(f"tree gc: {exc}", file=sys.stderr)
+        return 1
     records = registry.scan(root)
     pr_states = {record.path: _pr_state(record) for record in records}
     decision = cleanup.classify(records, now=time.time(), pr_states=pr_states)

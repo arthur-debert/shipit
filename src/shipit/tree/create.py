@@ -80,10 +80,20 @@ def create(spec: TreeSpec, *, source_repo: str, github_url: str) -> Tree:
     Materialization is atomic from the caller's view: if any step after the clone
     fails, the half-built leaf is removed before the error propagates, so a failed
     ``create`` never leaves a partial Tree on disk for the next run to trip over.
+
+    The rollback ``rmtree`` only ever removes a directory THIS call created: a
+    pre-existing ``dest`` (a deterministic/colliding agent hash, or a rerun for the
+    same issue) is refused up front with :class:`FileExistsError`, so a failed clone
+    can never clobber a Tree — or any other directory — that was already on disk.
     """
     tree_plan = plan(spec)
     dest = tree_plan.dir
     trees_root = spec.root if spec.root is not None else central_root()
+    if dest.exists():
+        raise FileExistsError(
+            f"tree dir already exists: {dest}; refusing to clone so a failed "
+            "create never deletes a pre-existing checkout (rerun, or hash collision)."
+        )
     dest.parent.mkdir(parents=True, exist_ok=True)
 
     try:

@@ -131,6 +131,29 @@ def test_create_rolls_back_partial_tree_on_failure(
     assert not dest.exists()
 
 
+def test_create_refuses_a_preexisting_dest_without_clobbering_it(
+    tmp_path: Path, remote: Path, reference: Path, monkeypatch
+):
+    # A pre-existing dest (deterministic/colliding hash, or a rerun) must be refused
+    # BEFORE any clone, and the rollback must NEVER delete that prior directory.
+    spec = _spec(tmp_path)
+    dest = tmp_path / "trees" / "acme" / "widget" / "issues" / "123-abcd1234"
+    dest.mkdir(parents=True)
+    (dest / "precious.txt").write_text("do not delete")
+
+    # Clone would explode if reached; the guard must fire first.
+    def boom(*args, **kwargs):
+        raise AssertionError("clone must not run when dest already exists")
+
+    monkeypatch.setattr(gh, "git_clone_dissociated", boom)
+
+    with pytest.raises(FileExistsError, match="already exists"):
+        create(spec, source_repo=str(reference), github_url=str(remote))
+
+    # The pre-existing checkout is untouched — rollback only removes what THIS run made.
+    assert (dest / "precious.txt").read_text() == "do not delete"
+
+
 # --------------------------------------------------------------------------
 # Provisioning — .treeinclude copy + shipit/pixi/npm + ADR-0015 build env.
 # These mock the git boundary so they exercise steps 3–4 without a real clone.

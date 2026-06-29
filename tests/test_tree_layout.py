@@ -42,6 +42,14 @@ def test_branch_never_carries_the_agent_hash():
     assert "cafe1234" not in p.branch
 
 
+@pytest.mark.parametrize("bad_issue", [0, -1, -42])
+def test_issue_rejects_non_positive_number(bad_issue):
+    # click accepts 0 and negatives; they format as out-of-grammar branches like
+    # 'fix/0'/'fix/-1', so the planner rejects them at this invariant boundary.
+    with pytest.raises(ValueError, match="positive integer"):
+        plan(_issue_spec(issue=bad_issue))
+
+
 # --------------------------------------------------------------------------
 # dir — hash lands HERE, keyed by issue, under the central root
 # --------------------------------------------------------------------------

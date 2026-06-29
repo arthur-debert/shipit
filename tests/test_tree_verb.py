@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import json
 
-from shipit import gh
+import pytest
+
+from shipit import gh, proc
 from shipit.tree.create import Tree
 from shipit.tree.registry import TreeRecord
 from shipit.verbs import tree as tree_verb
@@ -310,6 +312,68 @@ def test_run_create_maps_create_failure_to_exit_1(monkeypatch, capsys):
 
     assert rc == 1
     assert "tree create:" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        proc.ProcError(["pixi", "install"], 1, "boom"),  # provisioning failed
+        OSError("disk full"),  # a filesystem step failed
+        FileExistsError("tree dir already exists: /trees/...; refusing to clone"),
+    ],
+)
+def test_run_create_maps_provisioning_and_fs_failures_to_clean_exit_1(
+    monkeypatch, capsys, exc
+):
+    # The create contract: git/gh/provisioning/filesystem failures are a clean
+    # exit-1 message, never a traceback. ProcError (provisioning), OSError (mkdir/
+    # copy/stat), and the pre-existing-dest FileExistsError all funnel through here.
+    monkeypatch.setattr(gh, "repo_root", lambda: "/repo")
+    monkeypatch.setattr(gh, "current_repo", lambda: "acme/widget")
+    monkeypatch.setattr(gh, "git_remote_url", lambda *, cwd: "git@example:acme/widget")
+
+    def boom(spec, *, source_repo, github_url):
+        raise exc
+
+    monkeypatch.setattr(tree_verb, "create", boom)
+
+    rc = tree_verb.run_create(issue=7)
+
+    assert rc == 1
+    assert "tree create:" in capsys.readouterr().err
+
+
+def _raise_relative_root() -> None:
+    raise ValueError("SHIPIT_TREES_ROOT must be an absolute path")
+
+
+def test_run_list_reports_misconfigured_root_cleanly(monkeypatch, capsys):
+    # A relative SHIPIT_TREES_ROOT makes central_root() raise; list must surface it
+    # as a clean exit-1 message, not a traceback.
+    monkeypatch.setattr(tree_verb.layout, "central_root", _raise_relative_root)
+
+    rc = tree_verb.run_list()
+
+    assert rc == 1
+    assert "tree list:" in capsys.readouterr().err
+
+
+def test_run_remove_reports_misconfigured_root_cleanly(monkeypatch, capsys):
+    monkeypatch.setattr(tree_verb.layout, "central_root", _raise_relative_root)
+
+    rc = tree_verb.run_remove("7-aaaa")
+
+    assert rc == 1
+    assert "tree remove:" in capsys.readouterr().err
+
+
+def test_run_gc_reports_misconfigured_root_cleanly(monkeypatch, capsys):
+    monkeypatch.setattr(tree_verb.layout, "central_root", _raise_relative_root)
+
+    rc = tree_verb.run_gc()
+
+    assert rc == 1
+    assert "tree gc:" in capsys.readouterr().err
 
 
 # --- tree remove ---------------------------------------------------------------
