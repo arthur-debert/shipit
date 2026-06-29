@@ -302,26 +302,56 @@ bypass. *Avoid*: "override", "force" as the noun — break-glass is logged and r
 ### Trees (where work happens)
 
 **Tree**:
-An isolated, fully-independent **clone** of one repo where exactly one write-session
-works, living under a central root outside any repo
-(`~/workspace/trees/<org>/<repo>/…`). One **Run** executes in one Tree; concurrent
-agents (and the human) each get their own, so they never collide on files. A Tree is
+An isolated, fully-independent **clone** of one repo where one **Run** works, living
+under a central root outside any repo (`~/workspace/trees/<org>/<repo>/…`). A Tree is
 a real clone — its own `.git`, able to sit on `main` — NOT a git worktree (which
-shares one object store and forbids the same branch in two places). The unit the
-**coordinator** provisions and assigns.
+shares one object store and forbids the same branch in two places). Two modes (ADR-0018):
+a **write Tree** (one per write-Run; `.treeinclude` + pixi + sccache; read-write) and a
+**read-only Tree** (clone + checkout only, files read-only, shared per `(repo, branch)`).
+The unit `shipit spawn subagent` provisions for a Run (ADR-0017).
 *Avoid*: "worktree" for this unit (that names the git feature we deliberately reject —
-see ADR-0014); "workspace" (collides with Cargo/pixi/editor "workspace").
+see ADR-0014); note Claude Code's `WorktreeCreate` hook is the *harness event we adapt*
+for throwaway in-CC helpers, NOT our Tree unit; "workspace" (collides with
+Cargo/pixi/editor "workspace").
+
+**Read-only Tree**:
+A **Tree** mode for a **Reviewer** — clone + `git checkout` only (no `.treeinclude`, no
+pixi provisioning), with working files `chmod`'d read-only. **Shared per `(repo, branch)`**:
+N reviewers on one PR head share a single cheap clone, safe because none mutate it. The cut
+is **branch-pinned-vs-ambient**, not read-vs-write — an ambient explorer still gets no Tree;
+a branch-pinned reviewer gets this one (ADR-0018).
+*Avoid*: "explorer Tree" (an explorer has no Tree at all); conflating it with a **write Tree**.
+
+**Reviewer Run** (a kind of **Run**):
+A branch-pinned, **read-only** Run — a PR reviewer (claude / codex / antigravity) that reads
+the diff and code and **posts a review**, never executing or mutating. Spawned like any Run
+via `shipit spawn subagent --role reviewer`, it gets a shared **Read-only Tree** and reports
+back through the PR (a posted review). Contrast the **implementer** / **shepherd** write-Runs
+(write Tree, report via a draft PR) and the **explorer** (ambient, no Tree).
+
+**shipit-owned spawning**:
+The model (ADR-0017) where the **coordinator** launches every real **Run** through a CLI —
+`shipit spawn subagent --repo R --epic E --ws N --role ROLE [--backend claude|codex|antigravity]`
+— passing intent as **arguments**, so shipit never infers it. The verb creates the **Tree**,
+launches the backend agent as a **child process rooted in it** (cwd = the Tree → no bash-cwd
+footgun), and the Run reports back **through the PR**. **Fail-closed**: a Tree-creation error
+fails the spawn loud, never a silent fallback to a native worktree.
+*Avoid*: "the worktree hook" as the spawn mechanism — the `WorktreeCreate` hook is only a
+demoted convenience adapter for throwaway in-CC Claude helpers (epic-marker → `<epic>/agent-<id>`,
+Claude-only); real Runs go through `shipit spawn subagent`.
 
 **Tree ownership** (extends the **Role** registry):
 Who provisions a **Tree** and who merely works in one — the role-keyed half of the
-Tree primitive. The **coordinator** provisions and assigns: its own epic Tree at
-session start, then a ready Tree handed to each **implementer** / **shepherd**
-**Run**. Those Runs START inside the Tree they were handed and **never
-self-provision** — discovering where to work is the coordinator's job, not theirs.
-**Explorers** are exempt: read-only investigation needs no file isolation, so it
-runs in the main checkout without a Tree. Enforcement is the flip side of the same
-rule — the native `git worktree` path is **denied** (PreToolUse, ADR-0014) with a
-message pointing at `shipit tree create`, so no role can drift back to the old
+Tree primitive. The **coordinator** provisions and assigns by **spawning** (via
+`shipit spawn subagent`, ADR-0017): its own epic Tree at session start, then a ready Tree
+minted for each Run it launches — a **write Tree** for an **implementer** / **shepherd**, a
+shared **Read-only Tree** for a **Reviewer**. Those Runs START inside the Tree they were
+handed and **never self-provision**. Only an **ambient** explorer survives the exemption:
+open-ended (no branch) read-only investigation runs in the **main checkout with no Tree**
+(the cut is branch-pinned-vs-ambient, not read-vs-write — a reviewer is read-only yet
+branch-pinned, so it *does* get a Tree). Enforcement is the flip side — the native
+`git worktree` / `EnterWorktree` path is **denied** (PreToolUse, ADR-0014) with a message
+pointing at the shipit-owned spawn path, so no role can drift back to the old
 shared-worktree mess.
 
 ### Build & release
