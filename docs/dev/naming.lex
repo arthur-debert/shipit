@@ -47,7 +47,7 @@ mid-stream. Agents derive WS codes and all names from them.
     plain-language identifier (§1) stays hyphenated — `GPU02-WS03` in titles,
     logs, cross-refs — only the git branch form is slashed.
 
-    Grandfathered: epics already in flight when this slash scheme landed keep
+    Grandfathered: epics already in-flight when this slash scheme landed keep
     their original hyphen form (bare `EPIC` epic branch, `EPIC-WSnn` workstreams)
     — e.g. `HAR02` / `HAR02-WS03`. The slash/umbrella form applies to epics
     created after; in-flight epics are NOT retroactively renamed (see ADR-0016).
