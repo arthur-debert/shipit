@@ -62,6 +62,9 @@ TABLE = [
     ("recent (merged but young) is kept", {"mtime": RECENT_MTIME}, "MERGED", "keep"),
     ("aged + clean + no PR is stale", {}, None, "stale"),
     ("aged + clean + closed-unmerged PR is stale", {}, "CLOSED", "stale"),
+    # UNKNOWN (unreadable PR state) is conservatively stale — NEVER removable — even
+    # when the Tree is otherwise a removable shape (aged + clean + no unpushed).
+    ("aged + clean + UNKNOWN PR is stale (never removable)", {}, "UNKNOWN", "stale"),
 ]
 
 
@@ -73,8 +76,9 @@ def test_classify_truth_table(desc, over, state, expected):
 
 
 def test_stale_is_never_removable():
-    # The ambiguous-but-abandoned cases (no PR / closed) must never be auto-removed.
-    for state in (None, "CLOSED"):
+    # The ambiguous-but-abandoned cases (no PR / closed) and the unreadable case
+    # (UNKNOWN) must never be auto-removed.
+    for state in (None, "CLOSED", "UNKNOWN"):
         decision = classify(
             [_record()],
             now=NOW,
