@@ -34,9 +34,14 @@ mid-stream. Agents derive WS codes and all names from them.
 
 3. Branches
 
-    Inside one repo, so no repo prefix; hyphen-separated; no fix round. Form:
-    `EPIC-WSnn` — e.g. `GPU02-WS03`. The epic branch itself is the bare epic code
-    — e.g. `GPU02`. Hyphen, not slash: a slash form (`GPU02/WS03`) collides with
-    the bare epic branch in git — a ref cannot be both a file
-    (`refs/heads/GPU02`) and a directory (`refs/heads/GPU02/WS03`), so the two
-    branches cannot coexist.
+    Inside one repo, so no repo prefix; slash-namespaced; no fix round. Form:
+    `EPIC/WSnn` — e.g. `GPU02/WS03`. The epic (umbrella) branch is
+    `EPIC/umbrella` — e.g. `GPU02/umbrella` — NOT the bare epic code. Slashes
+    group every branch of one epic under a single `EPIC/` ref directory, which
+    sorts and greps cleanly. The epic branch is `EPIC/umbrella` rather than bare
+    `EPIC` precisely to dodge the git ref collision: a bare `refs/heads/GPU02`
+    file cannot coexist with the `refs/heads/GPU02/WS03` directory, so the
+    umbrella name keeps the epic branch a sibling of its workstreams under
+    `refs/heads/GPU02/`. Standalone (non-epic) work uses `fix/<issue>`. The
+    plain-language identifier (§1) stays hyphenated — `GPU02-WS03` in titles,
+    logs, cross-refs — only the git branch form is slashed.

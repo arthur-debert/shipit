@@ -79,11 +79,11 @@ that's an accepted, mild cost (and a useful record of provenance).
 12. As a **coordinator**, I want each Tree's directory name to carry a unique agent hash
     while the branch name stays stable, so that duplicate Trees never collide on disk and
     the branch still reads as a meaningful namespace.
-13. As any agent, I want each Tree's *directory path* to read as a namespace
-    (`…/epics/HAR02/WS02-<hash>`, `…/issues/433-<hash>`) while the **branch** follows the
-    existing hyphen grammar (`HAR02-WS02`, `fix/433-…`, per `naming.lex §3`), so that
-    Trees sort and group cleanly on disk without the branch colliding with the bare epic
-    branch.
+13. As any agent, I want a Tree's *directory path* and its **branch** to share one slash
+    namespace (`…/epics/HAR02/WS02-<hash>` on disk, branch `HAR02/WS02`; the epic branch is
+    `HAR02/umbrella`, standalone work is `fix/433-…`, per `naming.lex §3`), so that an
+    epic's Trees and branches group cleanly under `HAR02/` without the epic branch
+    colliding with its work-stream refs.
 14. As a **coordinator**, I want `shipit tree list` to show every Tree with its branch,
     base, age, dirty state, and PR status, so that I can see the whole fleet at a glance.
 15. As a **coordinator**, I want `shipit tree remove <id>` to safely delete one Tree, so
@@ -121,15 +121,16 @@ built from small testable pieces in the `prstate` "snapshot → decision" idiom:
 - **`tree/layout.py` (deep, pure, rarely changes).** `plan(spec) -> TreePlan{dir, branch,
   base}`. Resolves the three spec shapes — `--epic E --ws N [--slug S]`, `--issue N`,
   `--branch <freeform>` — into:
-  - **branch** (stable, no hash): `EPIC-WSnn` (e.g. `HAR02-WS02`), `fix/<issue>-<slug>`,
-    or the freeform name — the existing hyphen grammar (`naming.lex §3`). The slash form
-    (`HAR02/ws02-…`) is **rejected**: a WS branch `refs/heads/HAR02/ws02` cannot coexist
-    with the bare epic branch `refs/heads/HAR02` (a ref can't be both file and directory),
-    and the coordinator sits on the bare epic branch with WS branches off it.
+  - **branch** (stable, no hash): `EPIC/WSnn` (e.g. `HAR02/WS02`), `fix/<issue>-<slug>`,
+    or the freeform name — the slash-namespaced grammar (`naming.lex §3`). The epic
+    (umbrella) branch is `EPIC/umbrella`, never bare `EPIC`: that keeps the epic branch a
+    sibling of its work streams under `refs/heads/HAR02/` instead of colliding with them
+    (a ref can't be both a file and a directory), so the coordinator's epic branch and the
+    WS branches off it coexist.
   - **dir**: the branch path plus a trailing `-<agent-hash>`, under
     `~/workspace/trees/<org>/<repo>/<kind>/…`. The dir carries the hash; the branch never
     does. (Rationale: two sessions on one branch is fine; two Trees in one dir is not.)
-  - **base ref**: `origin/<EPIC>` for a work stream, else `origin/main`.
+  - **base ref**: `origin/<EPIC>/umbrella` for a work stream, else `origin/main`.
   - Slug sanitization (lowercase, `/`,`.`,`:`,space → `-`) lives here.
 - **`tree/create.py` (deep orchestrator).** `create(spec) -> Tree`. Pipeline:
   (1) source = `git clone --reference <local> --dissociate <github-url>` (ADR-0014); the

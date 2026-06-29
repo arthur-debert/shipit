@@ -26,7 +26,7 @@ dependencies.
     The coordinator is briefed as in the single-task cycle's information-gathering
     step in [../../AGENTS.lex] — via the epic tracker issue, the PRD, or a chat
     with the maintainer. It does the general reading/research, CREATES the epic
-    branch (the bare epic code — see [./naming.lex]), and asks the maintainer for
+    branch (`EPIC/umbrella` — see [./naming.lex]), and asks the maintainer for
     decisions/clarifications as needed.
 
 2. Delegation per workstream
@@ -34,7 +34,7 @@ dependencies.
     The coordinator does NOT implement. It spins one IMPLEMENTER subagent per
     workstream — each scoped by its own Work Stream issue — and runs the
     [../../AGENTS.lex] role split for each: the coordinator CREATES the WS branch
-    off the epic branch (`EPIC-WSnn` — see [./naming.lex]); the implementer stops
+    off the epic branch (`EPIC/WSnn` — see [./naming.lex]); the implementer stops
     at PR-open, the only topology change being that its draft PR targets the EPIC
     branch (not `main`); the coordinator owns the wait and the flip; a fresh
     shepherd handles each addressing round. The 6 / nitpick breaker applies to
