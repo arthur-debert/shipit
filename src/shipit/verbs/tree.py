@@ -333,6 +333,25 @@ def remove_cmd(target: str, yes: bool) -> None:
     raise SystemExit(run_remove(target, assume_yes=yes))
 
 
+def _stdin_is_tty() -> bool:
+    """Whether stdin is an interactive terminal, robust to a missing/closed stream.
+
+    The default ``is_tty`` for removal gating. Reaching for ``sys.stdin.isatty``
+    directly is unsafe outside a normal terminal: ``sys.stdin`` can be ``None`` (a
+    detached/background process → ``AttributeError``) or a closed stream
+    (``isatty()`` → ``ValueError``). Either way the answer we want is "not a TTY",
+    so a risky remove is refused rather than crashing — the safe non-interactive
+    default.
+    """
+    stream = sys.stdin
+    if stream is None or getattr(stream, "closed", False):
+        return False
+    try:
+        return stream.isatty()
+    except (ValueError, OSError):
+        return False
+
+
 def run_remove(
     target: str,
     *,
@@ -357,12 +376,13 @@ def run_remove(
     guess which to delete), the user declines, or a risky remove can't be confirmed
     non-interactively. ``confirm``/``is_tty`` are injectable so the gating is unit-
     testable without a real terminal; they default to ``click.confirm`` and
-    ``sys.stdin.isatty``.
+    :func:`_stdin_is_tty` (a guard around ``sys.stdin.isatty`` that reads as
+    not-a-TTY when stdin is missing or closed rather than crashing).
     """
     if confirm is None:
         confirm = click.confirm
     if is_tty is None:
-        is_tty = sys.stdin.isatty
+        is_tty = _stdin_is_tty
     try:
         root = layout.central_root()
     except ValueError as exc:

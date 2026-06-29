@@ -488,9 +488,17 @@ def pr_for_head(branch: str, *, cwd: str | None = None) -> dict | None | Unknown
         return UNKNOWN
     if not isinstance(data, dict):
         return UNKNOWN
+    number = data.get("number")
+    state = data.get("state")
+    # A dict that decoded cleanly but is missing/mistyped its load-bearing fields
+    # (e.g. ``{}`` or ``{"number": null, "state": null}``) is NOT a usable PR
+    # snapshot — returning it would render as ``#None None`` in ``tree list``. Treat
+    # it as an undetermined state, the same as malformed/non-JSON output above.
+    if not isinstance(number, int) or not isinstance(state, str):
+        return UNKNOWN
     return {
-        "number": data.get("number"),
-        "state": data.get("state"),
+        "number": number,
+        "state": state,
         "isDraft": data.get("isDraft"),
     }
 

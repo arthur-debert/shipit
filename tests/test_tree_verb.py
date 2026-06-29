@@ -696,6 +696,41 @@ def test_run_remove_clean_tree_non_interactive_deletes(tmp_path, monkeypatch, ca
     assert not target.exists()
 
 
+def test_stdin_is_tty_false_when_stdin_none(monkeypatch):
+    # The default is_tty must survive a detached process where sys.stdin is None
+    # (would AttributeError on sys.stdin.isatty) — reading as not-a-TTY, not crashing.
+    monkeypatch.setattr(tree_verb.sys, "stdin", None)
+    assert tree_verb._stdin_is_tty() is False
+
+
+def test_stdin_is_tty_false_when_stdin_closed(monkeypatch):
+    # A closed stream raises ValueError from isatty(); the guard returns not-a-TTY.
+    class _Closed:
+        closed = True
+
+        def isatty(self):  # pragma: no cover - guard short-circuits on `closed`
+            raise ValueError("I/O operation on closed file")
+
+    monkeypatch.setattr(tree_verb.sys, "stdin", _Closed())
+    assert tree_verb._stdin_is_tty() is False
+
+
+def test_stdin_is_tty_reflects_real_stream(monkeypatch):
+    class _Stream:
+        closed = False
+
+        def __init__(self, tty):
+            self._tty = tty
+
+        def isatty(self):
+            return self._tty
+
+    monkeypatch.setattr(tree_verb.sys, "stdin", _Stream(True))
+    assert tree_verb._stdin_is_tty() is True
+    monkeypatch.setattr(tree_verb.sys, "stdin", _Stream(False))
+    assert tree_verb._stdin_is_tty() is False
+
+
 # --- tree gc -------------------------------------------------------------------
 
 

@@ -100,3 +100,20 @@ def test_pr_for_head_unknown_when_not_a_dict(monkeypatch):
     # Valid JSON but not an object (a list / scalar) is malformed for this read.
     monkeypatch.setattr(gh, "_run", lambda args, *, cwd=None: "[1, 2, 3]")
     assert gh.pr_for_head("fix/12", cwd="/x") is gh.UNKNOWN
+
+
+def test_pr_for_head_unknown_when_dict_missing_fields(monkeypatch):
+    # A JSON object that decoded cleanly but lacks the load-bearing fields (an empty
+    # object) is NOT a usable snapshot: returning it would render as `#None None` in
+    # `tree list`. Treat it as an unreadable state -> UNKNOWN.
+    monkeypatch.setattr(gh, "_run", lambda args, *, cwd=None: "{}")
+    assert gh.pr_for_head("fix/12", cwd="/x") is gh.UNKNOWN
+
+
+def test_pr_for_head_unknown_when_fields_wrong_type(monkeypatch):
+    # number/state present but null (or otherwise mistyped) is the same malformed
+    # case the `#None None` bug came from: number must be an int and state a str,
+    # else the snapshot is undetermined -> UNKNOWN.
+    payload = json.dumps({"number": None, "state": None, "isDraft": False})
+    monkeypatch.setattr(gh, "_run", lambda args, *, cwd=None: payload)
+    assert gh.pr_for_head("fix/12", cwd="/x") is gh.UNKNOWN
