@@ -165,6 +165,35 @@ def test_epic_requires_both_epic_and_ws():
         plan(TreeSpec(org="o", repo="r", agent_hash="h", ws=3, root=ROOT))
 
 
+# The epic code is used verbatim as BOTH a branch ref component and a path
+# segment, so the planner validates it at this invariant boundary.
+
+
+@pytest.mark.parametrize(
+    "bad_epic",
+    [
+        "",  # empty → '/WS02' and 'origin//umbrella', dir segment collapses
+        "   ",  # whitespace-only
+        "HAR 02",  # embedded space
+        "HAR/02",  # path/ref separator
+        "HAR.02",  # dot
+        "..",  # path traversal
+        "../evil",  # path traversal escaping the central root
+    ],
+)
+def test_epic_rejects_unsafe_epic_code(bad_epic):
+    with pytest.raises(ValueError, match="epic code"):
+        plan(_epic_spec(epic=bad_epic))
+
+
+@pytest.mark.parametrize("bad_ws", [0, -1, -12])
+def test_epic_rejects_non_positive_ws(bad_ws):
+    # Zero/negative work-stream numbers format as 'WS00'/'WS-1', outside the WSnn
+    # grammar — reject before they become an unusable branch.
+    with pytest.raises(ValueError, match="positive integer"):
+        plan(_epic_spec(ws=bad_ws))
+
+
 # --------------------------------------------------------------------------
 # freeform shape — branch verbatim, base origin/main, sanitized dir leaf
 # --------------------------------------------------------------------------
@@ -200,6 +229,20 @@ def test_freeform_dir_sanitizes_separators_and_casing():
 def test_freeform_branch_never_carries_the_agent_hash():
     p = plan(_freeform_spec(agent_hash="cafe1234", branch="wip"))
     assert "cafe1234" not in p.branch
+
+
+@pytest.mark.parametrize(
+    "bad_branch",
+    [
+        "",  # empty → unusable branch and a bare '-<hash>' leaf
+        "   ",  # whitespace-only
+        "///",  # all separators → sanitizes to ''
+        " . / : ",  # only separator characters
+    ],
+)
+def test_freeform_rejects_branch_that_sanitizes_to_empty(bad_branch):
+    with pytest.raises(ValueError, match="freeform --branch"):
+        plan(_freeform_spec(branch=bad_branch))
 
 
 # --------------------------------------------------------------------------

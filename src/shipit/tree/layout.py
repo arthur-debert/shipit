@@ -46,6 +46,17 @@ DEFAULT_CENTRAL_ROOT = "~/workspace/trees"
 #: directory name.
 _SLUG_SEP = re.compile(r"[\s/.:]+")
 
+#: An epic code is a human-assigned identifier (naming.lex §3: uppercase
+#: ``THEME+NN``, e.g. ``HAR02``). Unlike a slug it is kept VERBATIM and becomes
+#: BOTH a branch ref component (``E/WSnn``, base ``origin/E/umbrella``) and a path
+#: segment (``epics/E/...``) — so it must be a single safe alphanumeric token.
+#: Requiring a full alphanumeric match rejects the degenerate inputs reviewers
+#: flagged at this invariant boundary: empty/whitespace codes (which would yield
+#: refs like ``/WS02`` and ``origin//umbrella`` and a collapsed dir segment) and
+#: path-unsafe values — separators or ``..`` — that could escape the central root
+#: once the orchestrator runs ``dest.parent.mkdir(...)``.
+_EPIC_CODE = re.compile(r"[A-Za-z0-9]+")
+
 
 def central_root() -> Path:
     """The central root every Tree lives under (env override, else the default).
@@ -168,15 +179,35 @@ def _plan_epic_ws(spec: TreeSpec) -> TreePlan:
     - **branch**: ``E/WSnn`` — the slash-namespaced work-stream form (naming.lex
       §3), ``ws`` zero-padded to two digits (``--ws 2`` → ``WS02``). The branch
       carries neither slug nor hash; ``E`` is the human-assigned epic code, kept
-      verbatim (uppercase ``THEME+NN``).
+      verbatim (uppercase ``THEME+NN``) but validated as a single alphanumeric
+      token (:data:`_EPIC_CODE`).
     - **base**: ``origin/E/umbrella`` — a work stream is cut from its epic's
       umbrella branch, the sibling of every ``E/WSnn`` under ``refs/heads/E/``.
     - **dir**: ``<root>/<org>/<repo>/epics/<E>/WSnn[-<slug>]-<agent-hash>`` — the
       branch path under the ``epics`` kind, with the hash on the leaf. An optional
       sanitized slug rides on the DIR only (never the canonical branch), so a Tree
       reads as ``WS02-tiling-deadbeef`` on disk while the branch stays ``E/WS02``.
+
+    Both user-controlled inputs are validated at this invariant boundary so a
+    malformed ref or a path-traversing segment never reaches git or the filesystem:
+    the epic code must be a single alphanumeric token (rejecting empty/whitespace
+    codes and separators / ``..``), and ``ws`` must be a positive integer
+    (rejecting ``WS00`` / ``WS-1``). Both raise :class:`ValueError`.
     """
     assert spec.epic is not None and spec.ws is not None  # guaranteed by plan()
+    if not _EPIC_CODE.fullmatch(spec.epic):
+        raise ValueError(
+            "tree.layout.plan: epic code must be a single alphanumeric token "
+            f"(naming.lex §3 THEME+NN, e.g. 'HAR02'); got {spec.epic!r}. The code "
+            "becomes both a branch ref and a path segment, so empty/whitespace "
+            "values and separators or '..' (a path-traversal risk) are rejected."
+        )
+    if spec.ws < 1:
+        raise ValueError(
+            "tree.layout.plan: work stream number must be a positive integer "
+            f"(the WSnn grammar, naming.lex §3); got ws={spec.ws!r}. Zero or "
+            "negative values produce out-of-grammar branches like 'WS00'/'WS-1'."
+        )
     ws_code = f"WS{spec.ws:02d}"
     branch = f"{spec.epic}/{ws_code}"
     base = f"origin/{spec.epic}/umbrella"
@@ -203,11 +234,23 @@ def _plan_freeform(spec: TreeSpec) -> TreePlan:
       the freeform name is sanitized into one safe leaf (slashes and other
       separators collapse to ``-``) so an arbitrary branch like ``spike/foo`` maps
       to a flat, predictable dir; the hash keeps duplicate Trees apart.
+
+    A branch that sanitizes to nothing (empty, whitespace-only, or all separators
+    like ``///``) is rejected with :class:`ValueError`: it would yield an unusable
+    empty git branch and a bare ``-<hash>`` dir leaf.
     """
     branch = spec.branch
     assert branch is not None  # guarded by plan(); narrows the type for callers
+    sanitized = sanitize_slug(branch)
+    if not sanitized:
+        raise ValueError(
+            "tree.layout.plan: freeform --branch must contain at least one "
+            "alphanumeric character (it becomes both the branch ref and the dir "
+            f"leaf); got {branch!r}, which sanitizes to an empty name — a leaf of "
+            "just '-<hash>' and an unusable empty branch."
+        )
     root = spec.root if spec.root is not None else central_root()
-    leaf = f"{sanitize_slug(branch)}-{spec.agent_hash}"
+    leaf = f"{sanitized}-{spec.agent_hash}"
     directory = Path(root) / spec.org / spec.repo / "branches" / leaf
     return TreePlan(dir=directory, branch=branch, base="origin/main")
 
