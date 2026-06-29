@@ -95,7 +95,200 @@ def test_plan_applies_slug_sanitization_to_the_branch():
 
 
 # --------------------------------------------------------------------------
-# central root override + WS01 scope guard
+# epic / work-stream shape — branch E/WSnn, base origin/E/umbrella, hash on dir
+# --------------------------------------------------------------------------
+
+
+def _epic_spec(**over) -> TreeSpec:
+    base = dict(
+        org="acme",
+        repo="widget",
+        agent_hash="deadbeef",
+        epic="HAR02",
+        ws=2,
+        root=ROOT,
+    )
+    base.update(over)
+    return TreeSpec(**base)
+
+
+@pytest.mark.parametrize(
+    "ws, expected_branch",
+    [
+        (1, "HAR02/WS01"),
+        (2, "HAR02/WS02"),
+        (12, "HAR02/WS12"),
+        (100, "HAR02/WS100"),
+    ],
+)
+def test_epic_branch_is_slash_namespaced_zero_padded(ws, expected_branch):
+    assert plan(_epic_spec(ws=ws)).branch == expected_branch
+
+
+def test_epic_branch_keeps_epic_code_verbatim():
+    # The epic code is human-assigned (uppercase THEME+NN) and is NOT sanitized.
+    assert plan(_epic_spec(epic="GPU02")).branch == "GPU02/WS02"
+
+
+def test_epic_base_is_origin_epic_umbrella():
+    assert plan(_epic_spec()).base == "origin/HAR02/umbrella"
+
+
+def test_epic_dir_is_epics_kind_with_hash_on_leaf():
+    p = plan(_epic_spec())
+    assert p.dir == ROOT / "acme" / "widget" / "epics" / "HAR02" / "WS02-deadbeef"
+
+
+def test_epic_dir_carries_slug_when_given_branch_does_not():
+    p = plan(_epic_spec(slug="Tiling Pass"))
+    assert (
+        p.dir
+        == ROOT / "acme" / "widget" / "epics" / "HAR02" / "WS02-tiling-pass-deadbeef"
+    )
+    # The slug rides the dir only; the canonical branch stays E/WSnn.
+    assert p.branch == "HAR02/WS02"
+
+
+def test_epic_branch_never_carries_the_agent_hash():
+    p = plan(_epic_spec(agent_hash="cafe1234", slug="anything"))
+    assert "cafe1234" not in p.branch
+
+
+def test_epic_dir_leaf_carries_the_agent_hash():
+    assert plan(_epic_spec(agent_hash="abc99999")).dir.name == "WS02-abc99999"
+
+
+def test_epic_requires_both_epic_and_ws():
+    with pytest.raises(ValueError, match="both --epic and --ws"):
+        plan(_epic_spec(ws=None))
+    with pytest.raises(ValueError, match="both --epic and --ws"):
+        plan(TreeSpec(org="o", repo="r", agent_hash="h", ws=3, root=ROOT))
+
+
+# The epic code is used verbatim as BOTH a branch ref component and a path
+# segment, so the planner validates it at this invariant boundary.
+
+
+@pytest.mark.parametrize(
+    "bad_epic",
+    [
+        "",  # empty → '/WS02' and 'origin//umbrella', dir segment collapses
+        "   ",  # whitespace-only
+        "HAR 02",  # embedded space
+        "HAR/02",  # path/ref separator
+        "HAR.02",  # dot
+        "..",  # path traversal
+        "../evil",  # path traversal escaping the central root
+    ],
+)
+def test_epic_rejects_unsafe_epic_code(bad_epic):
+    with pytest.raises(ValueError, match="epic code"):
+        plan(_epic_spec(epic=bad_epic))
+
+
+@pytest.mark.parametrize("bad_ws", [0, -1, -12])
+def test_epic_rejects_non_positive_ws(bad_ws):
+    # Zero/negative work-stream numbers format as 'WS00'/'WS-1', outside the WSnn
+    # grammar — reject before they become an unusable branch.
+    with pytest.raises(ValueError, match="positive integer"):
+        plan(_epic_spec(ws=bad_ws))
+
+
+# --------------------------------------------------------------------------
+# freeform shape — branch verbatim, base origin/main, sanitized dir leaf
+# --------------------------------------------------------------------------
+
+
+def _freeform_spec(**over) -> TreeSpec:
+    base = dict(
+        org="acme", repo="widget", agent_hash="deadbeef", branch="spike/foo", root=ROOT
+    )
+    base.update(over)
+    return TreeSpec(**base)
+
+
+def test_freeform_branch_is_verbatim():
+    # The caller owns the freeform name; the planner reflects it unchanged.
+    assert plan(_freeform_spec(branch="my/wild-Branch")).branch == "my/wild-Branch"
+
+
+def test_freeform_base_is_origin_main():
+    assert plan(_freeform_spec()).base == "origin/main"
+
+
+def test_freeform_dir_is_branches_kind_with_sanitized_leaf():
+    p = plan(_freeform_spec(branch="spike/foo"))
+    assert p.dir == ROOT / "acme" / "widget" / "branches" / "spike-foo-deadbeef"
+
+
+def test_freeform_dir_sanitizes_separators_and_casing():
+    p = plan(_freeform_spec(branch="Spike/Foo.Bar Baz"))
+    assert p.dir.name == "spike-foo-bar-baz-deadbeef"
+
+
+def test_freeform_branch_never_carries_the_agent_hash():
+    p = plan(_freeform_spec(agent_hash="cafe1234", branch="wip"))
+    assert "cafe1234" not in p.branch
+
+
+@pytest.mark.parametrize(
+    "bad_branch",
+    [
+        "",  # empty → unusable branch and a bare '-<hash>' leaf
+        "   ",  # whitespace-only
+        "///",  # all separators → sanitizes to ''
+        " . / : ",  # only separator characters
+    ],
+)
+def test_freeform_rejects_branch_that_sanitizes_to_empty(bad_branch):
+    with pytest.raises(ValueError, match="freeform --branch"):
+        plan(_freeform_spec(branch=bad_branch))
+
+
+# --------------------------------------------------------------------------
+# the hash NEVER lands on the branch, for ANY shape
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        _issue_spec(agent_hash="cafef00d", slug="x"),
+        _epic_spec(agent_hash="cafef00d", slug="x"),
+        _freeform_spec(agent_hash="cafef00d", branch="spike/foo"),
+    ],
+)
+def test_hash_never_appears_in_any_branch(spec):
+    assert spec.agent_hash not in plan(spec).branch
+
+
+# --------------------------------------------------------------------------
+# shape exclusivity — exactly one shape, else ValueError
+# --------------------------------------------------------------------------
+
+
+def test_plan_rejects_no_shape():
+    spec = TreeSpec(org="o", repo="r", agent_hash="h", root=ROOT)
+    with pytest.raises(ValueError, match="exactly one shape"):
+        plan(spec)
+
+
+@pytest.mark.parametrize(
+    "over",
+    [
+        dict(issue=1, branch="x"),
+        dict(issue=1, epic="HAR02", ws=2),
+        dict(branch="x", epic="HAR02", ws=2),
+    ],
+)
+def test_plan_rejects_more_than_one_shape(over):
+    spec = TreeSpec(org="o", repo="r", agent_hash="h", root=ROOT, **over)
+    with pytest.raises(ValueError, match="exactly one shape"):
+        plan(spec)
+
+
+# --------------------------------------------------------------------------
+# central root override
 # --------------------------------------------------------------------------
 
 
@@ -121,9 +314,3 @@ def test_plan_uses_central_root_when_spec_root_is_none(monkeypatch):
     monkeypatch.setenv(layout.CENTRAL_ROOT_ENV, "/env/trees")
     p = plan(_issue_spec(root=None))
     assert p.dir == Path("/env/trees") / "acme" / "widget" / "issues" / "123-deadbeef"
-
-
-def test_plan_rejects_non_issue_shape_in_ws01():
-    spec = TreeSpec(org="o", repo="r", agent_hash="h", issue=None, root=ROOT)
-    with pytest.raises(NotImplementedError):
-        plan(spec)
