@@ -150,10 +150,11 @@ def _render_list(records: list[TreeRecord], *, now: float) -> None:
         return
     headers = [header for header, _ in _LIST_COLUMNS]
     rows = [_row_cells(record, now=now) for record in records]
-    widths = [
-        max(len(headers[col]), *(len(row[col]) for row in rows))
-        for col in range(len(headers))
-    ]
+    # Width each column to its widest cell, header included. Pass a single generator
+    # to max() (header counts as just another row) rather than star-unpacking one
+    # positional arg per row — that materializes an arg list and can hit arg limits.
+    all_rows = [headers, *rows]
+    widths = [max(len(row[col]) for row in all_rows) for col in range(len(headers))]
     print(_format_row(headers, widths))
     for row in rows:
         print(_format_row(row, widths))

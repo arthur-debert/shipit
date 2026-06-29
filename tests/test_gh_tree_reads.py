@@ -55,3 +55,11 @@ def test_pr_for_head_none_when_no_pr(monkeypatch):
 
     monkeypatch.setattr(gh, "_run", boom)
     assert gh.pr_for_head("fix/12", cwd="/x") is None
+
+
+def test_pr_for_head_none_when_output_not_json(monkeypatch):
+    # A scan/read boundary over the whole fleet: malformed/non-JSON gh output
+    # (warnings, prompts, garbage on stdout) must collapse to None, not crash
+    # `tree list` for every Tree with a JSONDecodeError.
+    monkeypatch.setattr(gh, "_run", lambda args, *, cwd=None: "not json at all")
+    assert gh.pr_for_head("fix/12", cwd="/x") is None

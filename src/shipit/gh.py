@@ -439,7 +439,9 @@ def pr_for_head(branch: str, *, cwd: str | None = None) -> dict | None:
 
     Reads ``gh pr view <branch> --json number,state,isDraft`` from inside the Tree
     (``cwd``). ``None`` when no PR is associated with the branch (``gh`` exits non-zero)
-    so ``scan`` can render "no PR" without distinguishing that from an error.
+    so ``scan`` can render "no PR" without distinguishing that from an error. Malformed
+    or non-JSON ``gh`` output is collapsed to ``None`` too: this is a scan/read boundary
+    over the whole fleet, so one bad response must not crash ``tree list`` for every Tree.
     """
     try:
         out = _run(
@@ -449,7 +451,10 @@ def pr_for_head(branch: str, *, cwd: str | None = None) -> dict | None:
         return None
     if not out:
         return None
-    data = json.loads(out)
+    try:
+        data = json.loads(out)
+    except json.JSONDecodeError:
+        return None
     if not isinstance(data, dict):
         return None
     return {
