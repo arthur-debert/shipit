@@ -15,6 +15,7 @@ import click
 from . import __version__
 from .logsetup import configure_logging, resolve_current_owner_repo
 from .verbs import gh_setup, install, lint, logs, verify_apps
+from .verbs.eval import eval_group
 from .verbs.hook import hook as hook_group
 from .verbs.pr import pr as pr_group
 
@@ -195,6 +196,10 @@ root.add_command(pr_group)
 # The nested `hook` group (Claude Code lifecycle-hook entrypoints) — the binary
 # side of the agent harness (ADR-0012); attached the same way as `pr`.
 root.add_command(hook_group)
+
+# The nested `eval` group (HAR02) — the READER side of the harness eval store the
+# `hook` events write; `shipit eval report` aggregates it. Attached like `pr`.
+root.add_command(eval_group)
 
 
 def main(argv: list[str] | None = None) -> int:

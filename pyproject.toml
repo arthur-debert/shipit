@@ -12,10 +12,14 @@ requires-python = ">=3.13"
 #   PyYAML       — parse a target repo's workflow files for required-check discovery.
 #   platformdirs — resolve the per-platform log directory (OBS01 logging); the
 #                  single source of truth for the log path (no platform branches).
+#   duckdb       — the SQL query engine behind `shipit eval report` (HAR02-WS04):
+#                  it reads the local JSONL eval store directly (read_json_auto) so
+#                  aggregation is plain SQL with no platform/infra (ADR-0013).
 dependencies = [
     "click>=8,<9",
     "PyYAML>=6",
     "platformdirs>=4",
+    "duckdb>=1",
 ]
 
 [project.optional-dependencies]
