@@ -111,8 +111,10 @@ Scope
           name. A clean, fully-pushed Tree is a disposable clone, so it is
           removed without a prompt; but when the delete would discard work
           living ONLY in that clone — uncommitted changes or unpushed commits —
-          it is gated behind a confirmation. `--yes`/`-y` skips that prompt and
-          is the non-interactive default.
+          it is gated behind a confirmation. `--yes`/`-y` skips that prompt;
+          without a TTY and without `--yes` a risky remove is refused rather
+          than silently destroying work — so a non-interactive caller must
+          pass `--yes` explicitly to remove such a Tree.
         - `shipit tree gc` sweeps the fleet conservatively — it removes only
           Trees whose PR is merged, working tree clean, nothing unpushed, and
           aged past a threshold; ambiguous ones are listed as stale, never
