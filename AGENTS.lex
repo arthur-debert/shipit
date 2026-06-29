@@ -73,8 +73,9 @@ The PR lifecycle (draft -> ready -> stop):
 
     1.2. Implementation (the implementer subagent)
 
-        The coordinator CREATES the branch off `main` (`fix/<issue>`) and spawns
-        an IMPLEMENTER to do the task + tests. The implementer runs the checks
+        The coordinator CREATES the branch off the integration base — `origin/main`
+        (`fix/<issue>`) for standalone work, the epic branch for a workstream — and
+        spawns an IMPLEMENTER to do the task + tests. The implementer runs the checks
         (`shipit lint`) and tests (`pixi run test`) green BEFORE opening the PR —
         CI runs the same as required checks, so local green is necessary for CI
         green.
@@ -109,9 +110,10 @@ The PR lifecycle (draft -> ready -> stop):
 
     1.4. Validation
 
-        The single PR targets `main`; the coordinator drives it to READY and
-        stops — the HUMAN merges. More work needed -> back to draft (`shipit pr
-        ready --undo`), re-green, re-flip.
+        The single PR targets its base (`main`, or the epic branch for a
+        workstream); the coordinator drives it to READY and stops — the HUMAN
+        merges. More work needed -> back to draft (`shipit pr ready --undo`),
+        re-green, re-flip.
 
     Engine-owned policy — trust the tool, don't carry it in your head:
 
