@@ -1,0 +1,8 @@
+{
+  "hooks": [
+    {
+      "command": "pixi run shipit hook stop",
+      "type": "command"
+    }
+  ]
+}

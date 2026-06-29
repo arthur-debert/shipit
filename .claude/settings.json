@@ -20,6 +20,26 @@
           }
         ]
       }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "pixi run shipit hook stop"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "pixi run shipit hook subagent-stop"
+          }
+        ]
+      }
     ]
   }
 }

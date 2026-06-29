@@ -1,0 +1,62 @@
+"""Local eval store — append eval records to a harness-owned, never-committed file.
+
+The store is JSONL, append-only, **keyed by repo**, and lives OUTSIDE every repo
+working tree: under platformdirs' user *state* dir (`~/Library/Application
+Support/shipit/eval` on macOS, `~/.local/state/shipit/eval` on Linux), the same
+`platformdirs`-rooted convention `logsetup` uses. So process telemetry never
+dirties product history — a written record can never show up as a repo change
+(docs/prd/har02-run-eval.md, ADR-0013: "local, never committed").
+
+``base_dir`` is injected by tests (mirroring :mod:`shipit.logsetup`) so they write
+to a tmp path; in real use it is the platformdirs state dir.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+from typing import Any
+
+import platformdirs
+
+
+def store_dir(base_dir: Path | None = None) -> Path:
+    """The eval store's root directory (outside any repo tree).
+
+    ``base_dir`` overrides the default for tests; otherwise it is
+    ``platformdirs.user_state_dir("shipit")/eval``.
+    """
+    if base_dir is not None:
+        return Path(base_dir)
+    return Path(platformdirs.user_state_dir("shipit")) / "eval"
+
+
+def repo_key(repo_root: str | Path) -> str:
+    """A filesystem-safe key for a repo — its absolute path slugified.
+
+    Mirrors Claude Code's own project-dir convention (path separators → ``-``) so
+    one repo's runs pool into one store file and distinct repos never collide.
+    """
+    slug = str(Path(repo_root).resolve()).replace(os.sep, "-").strip("-")
+    return slug or "_"
+
+
+def store_path(repo_root: str | Path, base_dir: Path | None = None) -> Path:
+    """The JSONL store file for ``repo_root``."""
+    return store_dir(base_dir) / f"{repo_key(repo_root)}.jsonl"
+
+
+def append_record(
+    record: dict[str, Any], repo_root: str | Path, base_dir: Path | None = None
+) -> Path:
+    """Append one eval record as a JSONL line to the repo's store; return its path.
+
+    Creates the store directory on first write. Returns the path so the caller (and
+    tests) can assert where the record landed.
+    """
+    path = store_path(repo_root, base_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(record) + "\n")
+    return path

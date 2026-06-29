@@ -175,6 +175,59 @@ def test_load_units_includes_the_settings_hook_block():
     assert install.SETTINGS_HOOK_MARKER in entry["hooks"][0]["command"]
 
 
+def test_load_units_includes_the_eval_terminal_hooks():
+    # HAR02 adds the Stop (coordinator) + SubagentStop (subagent) eval hook lines as
+    # two more JSON-hook units over the same settings.json, each owning its event.
+    units = {u.key: u for u in install.load_units()}
+    for key, event, marker in (
+        (install.SETTINGS_STOP_KEY, install.EVENT_STOP, install.SETTINGS_STOP_MARKER),
+        (
+            install.SETTINGS_SUBAGENTSTOP_KEY,
+            install.EVENT_SUBAGENTSTOP,
+            install.SETTINGS_SUBAGENTSTOP_MARKER,
+        ),
+    ):
+        unit = units[key]
+        assert unit.fmt == install.FMT_JSON_HOOK
+        assert unit.dest == install.SETTINGS_FILE
+        assert unit.event == event
+        assert unit.marker == marker
+        entry = json.loads(unit.desired_inner())
+        # Terminal-hook entries bind to no tool, so they carry no matcher.
+        assert "matcher" not in entry
+        assert marker in entry["hooks"][0]["command"]
+
+
+def test_three_hook_units_coexist_on_one_settings_file():
+    # Splicing all three event entries into one file leaves each in its own event
+    # array, none clobbering another — the consumer keeps a single valid settings.json.
+    units = {u.key: u for u in install.load_units()}
+    text = ""
+    for key in (
+        install.SETTINGS_KEY,
+        install.SETTINGS_STOP_KEY,
+        install.SETTINGS_SUBAGENTSTOP_KEY,
+    ):
+        u = units[key]
+        text = install.splice_settings_hook(text, u.desired_inner(), u.event, u.marker)
+    hooks = json.loads(text)["hooks"]
+    assert install.SETTINGS_HOOK_MARKER in hooks["PreToolUse"][0]["hooks"][0]["command"]
+    assert install.SETTINGS_STOP_MARKER in hooks["Stop"][0]["hooks"][0]["command"]
+    assert (
+        install.SETTINGS_SUBAGENTSTOP_MARKER
+        in hooks["SubagentStop"][0]["hooks"][0]["command"]
+    )
+    # And each event unit reconciles to NOOP against the file carrying all three.
+    for key in (
+        install.SETTINGS_KEY,
+        install.SETTINGS_STOP_KEY,
+        install.SETTINGS_SUBAGENTSTOP_KEY,
+    ):
+        u = units[key]
+        got = install.extract_settings_hook(text, u.event, u.marker)
+        assert got == install._canonical_hook_entry(json.loads(u.desired_inner()))
+
+
 def test_settings_hook_splice_preserves_other_settings():
     consumer = json.dumps(
         {

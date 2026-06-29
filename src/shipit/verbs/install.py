@@ -98,8 +98,23 @@ SETTINGS_KEY = ".claude/settings.json#shipit-pretooluse-hook"
 # settings.json, independent of the runner prefix (`pixi run`, a bare path, etc.).
 SETTINGS_HOOK_MARKER = "shipit hook pretooluse"
 
+# The HAR02 eval wire (docs/prd/har02-run-eval.md) adds two more committed
+# settings.json hook lines — the terminal-hook eval boundary — each its own
+# event array + command marker, reconciled by the SAME event-keyed JSON-hook
+# splice as PreToolUse. Stop/SubagentStop entries carry no `matcher` (they bind
+# to no tool), so the entry shape is just `{"hooks": [...]}`.
+SETTINGS_STOP_KEY = ".claude/settings.json#shipit-stop-hook"
+SETTINGS_STOP_MARKER = "shipit hook stop"
+SETTINGS_SUBAGENTSTOP_KEY = ".claude/settings.json#shipit-subagentstop-hook"
+SETTINGS_SUBAGENTSTOP_MARKER = "shipit hook subagent-stop"
+
+# The settings.json hooks-event arrays each JSON-hook unit owns one entry of.
+EVENT_PRETOOLUSE = "PreToolUse"
+EVENT_STOP = "Stop"
+EVENT_SUBAGENTSTOP = "SubagentStop"
+
 FMT_MARKERS = "markers"  # block splice via open/close comment markers (default)
-FMT_JSON_HOOK = "json-hook"  # block splice into settings.json's PreToolUse array
+FMT_JSON_HOOK = "json-hook"  # block splice into a settings.json hooks-event array
 
 INSTALL_BRANCH = "shipit/install"
 COMMIT_MESSAGE = "chore(shipit): install/update the managed set"
@@ -136,9 +151,12 @@ class Unit:
     anchor: str | None = None
     # Block units only: how the managed region is extracted from / spliced into the
     # consumer file. ``FMT_MARKERS`` (default) uses the comment-marker pair above;
-    # ``FMT_JSON_HOOK`` parses ``settings.json`` and owns just shipit's PreToolUse
-    # entry, so the consumer's other settings merge through untouched.
+    # ``FMT_JSON_HOOK`` parses ``settings.json`` and owns just shipit's one entry in
+    # the ``event`` hooks-array (identified by ``marker``), so the consumer's other
+    # settings — and shipit's other hook entries — merge through untouched.
     fmt: str = FMT_MARKERS
+    event: str = EVENT_PRETOOLUSE
+    marker: str = SETTINGS_HOOK_MARKER
 
     def desired_inner(self) -> str:
         """A block unit's canonical inner text (newline-trimmed)."""
@@ -273,18 +291,43 @@ def load_units() -> list[Unit]:
             )
         )
 
-    # Store the desired entry already canonicalized, so its hash matches a consumer
+    # Store each desired entry already canonicalized, so its hash matches a consumer
     # entry extracted + canonicalized through the same function (formatting-immune).
-    hook_entry = json.loads(_data_bytes("claude-settings-pretooluse.json"))
-    units.append(
-        Unit(
-            key=SETTINGS_KEY,
-            dest=SETTINGS_FILE,
-            kind="block",
-            content=_canonical_hook_entry(hook_entry).encode("utf-8"),
-            fmt=FMT_JSON_HOOK,
+    # The PreToolUse coordinator-guard (HAR01) plus the HAR02 eval terminal hooks
+    # (Stop = the coordinator run, SubagentStop = each subagent run) are three
+    # JSON-hook units over the SAME settings.json, each owning one event array.
+    for key, marker, event, data_file in (
+        (
+            SETTINGS_KEY,
+            SETTINGS_HOOK_MARKER,
+            EVENT_PRETOOLUSE,
+            "claude-settings-pretooluse.json",
+        ),
+        (
+            SETTINGS_STOP_KEY,
+            SETTINGS_STOP_MARKER,
+            EVENT_STOP,
+            "claude-settings-stop.json",
+        ),
+        (
+            SETTINGS_SUBAGENTSTOP_KEY,
+            SETTINGS_SUBAGENTSTOP_MARKER,
+            EVENT_SUBAGENTSTOP,
+            "claude-settings-subagentstop.json",
+        ),
+    ):
+        hook_entry = json.loads(_data_bytes(data_file))
+        units.append(
+            Unit(
+                key=key,
+                dest=SETTINGS_FILE,
+                kind="block",
+                content=_canonical_hook_entry(hook_entry).encode("utf-8"),
+                fmt=FMT_JSON_HOOK,
+                event=event,
+                marker=marker,
+            )
         )
-    )
     return units
 
 
@@ -351,8 +394,8 @@ def _insert_under_anchor(text: str, anchor: str, block: str) -> str:
 # --------------------------------------------------------------------------
 
 
-def _is_shipit_hook(entry: object) -> bool:
-    """Whether a PreToolUse array entry is shipit's managed one (by command marker).
+def _is_shipit_hook(entry: object, marker: str = SETTINGS_HOOK_MARKER) -> bool:
+    """Whether a hooks-array entry is shipit's managed one (by command ``marker``).
 
     Defensive against a malformed consumer file: a non-dict entry, a ``hooks`` that
     is ``null`` or any non-list, or a non-dict hook all answer ``False`` ("not a
@@ -363,10 +406,7 @@ def _is_shipit_hook(entry: object) -> bool:
     hooks = entry.get("hooks")
     if not isinstance(hooks, list):
         return False
-    return any(
-        isinstance(h, dict) and SETTINGS_HOOK_MARKER in h.get("command", "")
-        for h in hooks
-    )
+    return any(isinstance(h, dict) and marker in h.get("command", "") for h in hooks)
 
 
 # Sentinel inner value for a settings.json that exists but is malformed/unparseable
@@ -376,8 +416,12 @@ def _is_shipit_hook(entry: object) -> bool:
 _SETTINGS_MALFORMED = "\x00shipit-settings-malformed\x00"
 
 
-def extract_settings_hook(text: str) -> str | None:
-    """shipit's current PreToolUse entry in a settings.json text, canonical, or ``None``.
+def extract_settings_hook(
+    text: str,
+    event: str = EVENT_PRETOOLUSE,
+    marker: str = SETTINGS_HOOK_MARKER,
+) -> str | None:
+    """shipit's current ``event`` entry in a settings.json text, canonical, or ``None``.
 
     Three outcomes, kept in lockstep with :func:`splice_settings_hook` so a read that
     classifies the file is honored by the write that follows:
@@ -391,8 +435,9 @@ def extract_settings_hook(text: str) -> str | None:
         ``.claude/settings.json`` is a CONFLICT to surface for a human, never an
         absent file we ADD onto and never a crash. The matching write preserves it.
 
-    A consumer's other settings are never inspected; only shipit's own entry is the
-    managed region.
+    Only shipit's own ``event`` entry (matched by ``marker``) is the managed region;
+    the consumer's other settings — and shipit's entries in OTHER event arrays — are
+    never inspected.
     """
     text = text.strip()
     if not text:
@@ -404,21 +449,27 @@ def extract_settings_hook(text: str) -> str | None:
     if not isinstance(data, dict):
         return _SETTINGS_MALFORMED
     hooks = data.get("hooks")
-    entries = hooks.get("PreToolUse", []) if isinstance(hooks, dict) else []
+    entries = hooks.get(event, []) if isinstance(hooks, dict) else []
     if not isinstance(entries, list):
         entries = []
     for entry in entries:
-        if _is_shipit_hook(entry):
+        if _is_shipit_hook(entry, marker):
             return _canonical_hook_entry(entry)
     return None
 
 
-def splice_settings_hook(text: str, inner: str) -> str:
-    """Merge shipit's PreToolUse entry (``inner``, canonical JSON) into a settings.json.
+def splice_settings_hook(
+    text: str,
+    inner: str,
+    event: str = EVENT_PRETOOLUSE,
+    marker: str = SETTINGS_HOOK_MARKER,
+) -> str:
+    """Merge shipit's ``event`` entry (``inner``, canonical JSON) into a settings.json.
 
-    Owns ONLY shipit's entry: any prior shipit entry is replaced, every other key and
-    hook the consumer set is preserved, and the file is returned as pretty-printed
-    JSON. An empty/whitespace input starts from ``{}`` (a fresh settings.json).
+    Owns ONLY shipit's entry in the ``event`` array: any prior shipit entry there
+    (matched by ``marker``) is replaced, every other key and hook the consumer set —
+    including shipit's entries in other event arrays — is preserved, and the file is
+    returned as pretty-printed JSON. An empty/whitespace input starts from ``{}``.
 
     Fail-safe, matching :func:`extract_settings_hook`: a consumer file that is
     unparseable or is not a JSON object is NEVER clobbered — the original ``text`` is
@@ -439,10 +490,10 @@ def splice_settings_hook(text: str, inner: str) -> str:
     hooks = data.setdefault("hooks", {})
     if not isinstance(hooks, dict):
         hooks = data["hooks"] = {}
-    pre = hooks.get("PreToolUse", [])
-    if not isinstance(pre, list):
-        pre = []
-    hooks["PreToolUse"] = [e for e in pre if not _is_shipit_hook(e)] + [entry]
+    current = hooks.get(event, [])
+    if not isinstance(current, list):
+        current = []
+    hooks[event] = [e for e in current if not _is_shipit_hook(e, marker)] + [entry]
     return json.dumps(data, indent=2) + "\n"
 
 
@@ -527,7 +578,7 @@ def _consumer_inner(root: Path, unit: Unit) -> str | None:
         return None
     text = dest.read_text(encoding="utf-8")
     if unit.fmt == FMT_JSON_HOOK:
-        return extract_settings_hook(text)
+        return extract_settings_hook(text, unit.event, unit.marker)
     return extract_block(text, unit.open_marker, unit.close_marker)
 
 
@@ -549,7 +600,9 @@ def _write_unit(root: Path, unit: Unit) -> None:
     if unit.kind == "block":
         existing = dest.read_text(encoding="utf-8") if dest.is_file() else ""
         if unit.fmt == FMT_JSON_HOOK:
-            spliced = splice_settings_hook(existing, unit.desired_inner())
+            spliced = splice_settings_hook(
+                existing, unit.desired_inner(), unit.event, unit.marker
+            )
         else:
             spliced = splice_block(
                 existing,
