@@ -791,6 +791,147 @@ def test_run_gc_continues_past_a_failed_delete(tmp_path, monkeypatch, capsys):
     assert "removed 1, stale 0, kept 0" in captured.out  # count reflects disk reality
 
 
+def _gc_fleet(root, monkeypatch):
+    """A four-Tree fixture for gc: one removable, one stale, one dirty-keep, one open-keep.
+
+    Returns ``(removable, stale, keep_dirty, keep_open)`` paths after wiring
+    ``central_root``/``scan``/``pr_for_head`` so both ``run_gc()`` and its dry-run share
+    one fleet. The removable Tree (merged + clean + aged) is the only delete candidate.
+    """
+    removable = _make_tree_dir(root, "acme/widget/issues/1-merged")
+    stale = _make_tree_dir(root, "acme/widget/issues/2-orphan")
+    keep_dirty = _make_tree_dir(root, "acme/widget/issues/3-dirty")
+    keep_open = _make_tree_dir(root, "acme/widget/issues/4-open")
+    aged = 0.0  # mtime far in the past -> always aged vs time.time()
+    records = [
+        _record(path=str(removable), branch="b1", dirty=False, ahead=0, mtime=aged),
+        _record(path=str(stale), branch="b2", dirty=False, ahead=0, mtime=aged),
+        _record(path=str(keep_dirty), branch="b3", dirty=True, ahead=0, mtime=aged),
+        _record(path=str(keep_open), branch="b4", dirty=False, ahead=0, mtime=aged),
+    ]
+    pr_by_branch = {
+        "b1": {"number": 1, "state": "MERGED", "isDraft": False},
+        "b2": None,
+        "b3": {"number": 3, "state": "MERGED", "isDraft": False},
+        "b4": {"number": 4, "state": "OPEN", "isDraft": False},
+    }
+    monkeypatch.setattr(tree_verb.layout, "central_root", lambda: str(root))
+    monkeypatch.setattr(tree_verb.registry, "scan", lambda r: records)
+    monkeypatch.setattr(
+        gh, "pr_for_head", lambda branch, *, cwd=None: pr_by_branch.get(branch)
+    )
+    return removable, stale, keep_dirty, keep_open
+
+
+def _paths_after(out: str, marker: str) -> set[str]:
+    """The set of paths on lines whose first whitespace-delimited token is ``marker``."""
+    paths = set()
+    for line in out.splitlines():
+        parts = line.split()
+        if parts and parts[0] == marker:
+            paths.add(parts[1])
+    return paths
+
+
+def test_run_gc_dry_run_lists_classifications_and_deletes_nothing(
+    tmp_path, monkeypatch, capsys
+):
+    # --dry-run prints every Tree's bucket and must not touch disk: rmtree is fatal here.
+    root = tmp_path / "trees"
+    removable, stale, keep_dirty, keep_open = _gc_fleet(root, monkeypatch)
+
+    def boom(*args, **kwargs):
+        raise AssertionError("dry-run must not delete anything")
+
+    monkeypatch.setattr(tree_verb.shutil, "rmtree", boom)
+
+    rc = tree_verb.run_gc(dry_run=True)
+
+    assert rc == 0
+    # Nothing was deleted.
+    assert removable.exists() and stale.exists()
+    assert keep_dirty.exists() and keep_open.exists()
+    out = capsys.readouterr().out
+    # Each Tree is listed under its classification, and the summary says zero deleted.
+    assert f"REMOVABLE {removable}" in out
+    assert f"STALE     {stale}" in out
+    assert f"KEEP      {keep_dirty}" in out
+    assert f"KEEP      {keep_open}" in out
+    assert "no Trees deleted" in out
+    assert "removable 1, stale 1, keep 2" in out
+
+
+def test_run_gc_dry_run_decisions_match_the_real_sweep(tmp_path, monkeypatch, capsys):
+    # Parity: the paths --dry-run labels REMOVABLE are exactly the ones the real sweep
+    # REMOVEs. Both modes share _scan_and_classify, so the preview can never drift.
+    root = tmp_path / "trees"
+    _gc_fleet(root, monkeypatch)
+
+    assert tree_verb.run_gc(dry_run=True) == 0
+    dry_out = capsys.readouterr().out
+
+    assert tree_verb.run_gc() == 0  # real sweep over the same fleet (dry-run deleted 0)
+    real_out = capsys.readouterr().out
+
+    assert _paths_after(dry_out, "REMOVABLE") == _paths_after(real_out, "REMOVED")
+    assert _paths_after(
+        dry_out, "REMOVABLE"
+    )  # and it is non-empty (proves real parity)
+
+
+def _capture_classify_kwargs(monkeypatch) -> dict:
+    """Spy on cleanup.classify: record its kwargs, return an empty partition."""
+    seen: dict = {}
+
+    def fake_classify(records, *, now, pr_states, **kwargs):
+        seen["max_age_seconds"] = kwargs.get("max_age_seconds")
+        return tree_verb.Cleanup(removable=[], stale=[], keep=[])
+
+    monkeypatch.setattr(tree_verb.cleanup, "classify", fake_classify)
+    return seen
+
+
+def test_run_gc_threshold_overrides_the_age_boundary(tmp_path, monkeypatch, capsys):
+    root = tmp_path / "trees"
+    monkeypatch.setattr(tree_verb.layout, "central_root", lambda: str(root))
+    monkeypatch.setattr(tree_verb.registry, "scan", lambda r: [])
+    seen = _capture_classify_kwargs(monkeypatch)
+
+    rc = tree_verb.run_gc(threshold="36h")
+
+    assert rc == 0
+    assert seen["max_age_seconds"] == 36 * 3600
+
+
+def test_run_gc_default_threshold_is_two_weeks(tmp_path, monkeypatch, capsys):
+    # Omitting --threshold passes the 14-day default through to classify unchanged.
+    root = tmp_path / "trees"
+    monkeypatch.setattr(tree_verb.layout, "central_root", lambda: str(root))
+    monkeypatch.setattr(tree_verb.registry, "scan", lambda r: [])
+    seen = _capture_classify_kwargs(monkeypatch)
+
+    rc = tree_verb.run_gc()
+
+    assert rc == 0
+    assert seen["max_age_seconds"] == tree_verb.cleanup.DEFAULT_MAX_AGE_SECONDS
+
+
+def test_run_gc_bad_threshold_is_clean_exit_1(tmp_path, monkeypatch, capsys):
+    # A malformed --threshold is a clean message, never a traceback — and never a sweep.
+    root = tmp_path / "trees"
+    monkeypatch.setattr(tree_verb.layout, "central_root", lambda: str(root))
+
+    def boom(_r):
+        raise AssertionError("must not scan when the threshold is invalid")
+
+    monkeypatch.setattr(tree_verb.registry, "scan", boom)
+
+    rc = tree_verb.run_gc(threshold="nope")
+
+    assert rc == 1
+    assert "tree gc:" in capsys.readouterr().err
+
+
 def test_pr_state_normalizes_draft(monkeypatch):
     # A draft open PR reads as "DRAFT" (one fleet-wide vocabulary, mirroring the
     # registry label), not the raw "OPEN" GitHub state.
@@ -852,6 +993,48 @@ def test_run_gc_warns_on_incomplete_sweep(tmp_path, monkeypatch, capsys):
     assert "swept 1 of 2; 1 skipped (state unknown)" in captured.err
     # The summary still counts it as stale, not removed.
     assert "removed 1, stale 1, kept 0" in captured.out
+
+
+def test_run_gc_dry_run_warns_on_unknown_and_deletes_nothing(
+    tmp_path, monkeypatch, capsys
+):
+    # The merged interaction (WS01 dry-run + WS03 UNKNOWN): a --dry-run preview over a
+    # fleet that contains an unreadable-state Tree must still surface the incomplete-view
+    # warning, yet touch nothing on disk. The UNKNOWN Tree lands in STALE (conservative).
+    root = tmp_path / "trees"
+    merged = _make_tree_dir(root, "acme/widget/issues/1-merged")
+    unknown = _make_tree_dir(root, "acme/widget/issues/2-unknown")
+    aged = 0.0
+    records = [
+        _record(path=str(merged), branch="b1", dirty=False, ahead=0, mtime=aged),
+        _record(path=str(unknown), branch="b2", dirty=False, ahead=0, mtime=aged),
+    ]
+    pr_by_branch = {
+        "b1": {"number": 1, "state": "MERGED", "isDraft": False},
+        "b2": gh.UNKNOWN,
+    }
+    monkeypatch.setattr(tree_verb.layout, "central_root", lambda: str(root))
+    monkeypatch.setattr(tree_verb.registry, "scan", lambda r: records)
+    monkeypatch.setattr(
+        gh, "pr_for_head", lambda branch, *, cwd=None: pr_by_branch.get(branch)
+    )
+
+    def boom(*args, **kwargs):
+        raise AssertionError("dry-run must not delete anything")
+
+    monkeypatch.setattr(tree_verb.shutil, "rmtree", boom)
+
+    rc = tree_verb.run_gc(dry_run=True)
+
+    assert rc == 0
+    assert merged.exists() and unknown.exists()  # nothing deleted in dry-run
+    captured = capsys.readouterr()
+    # Preview lists the partition (the UNKNOWN Tree is conservatively STALE) ...
+    assert f"REMOVABLE {merged}" in captured.out
+    assert f"STALE     {unknown}" in captured.out
+    assert "no Trees deleted" in captured.out
+    # ... and still warns that the fleet was only partially seen, phrased for a preview.
+    assert "would sweep 1 of 2; 1 skipped (state unknown)" in captured.err
 
 
 def test_run_gc_no_warning_when_no_unknown(tmp_path, monkeypatch, capsys):

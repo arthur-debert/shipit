@@ -20,6 +20,7 @@ import shutil
 import sys
 import time
 from collections.abc import Callable
+from dataclasses import fields
 from pathlib import Path
 
 import click
@@ -456,37 +457,98 @@ def _match_trees(records: list[TreeRecord], target: str) -> list[TreeRecord]:
 
 
 @tree.command(name="gc")
-def gc_cmd() -> None:
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help=(
+        "Preview only: print the removable/stale/keep partition for the whole fleet "
+        "and delete NOTHING. The preview is the exact decision the real sweep acts on."
+    ),
+)
+@click.option(
+    "--threshold",
+    default=None,
+    metavar="DURATION",
+    help=(
+        "Age boundary a Tree must exceed to be reclaimable, as a human duration "
+        "(e.g. 14d, 36h, 90m). Defaults to 14d when omitted."
+    ),
+)
+def gc_cmd(dry_run: bool, threshold: str | None) -> None:
     """Sweep the central root: remove only provably-safe Trees, list ambiguous ones.
 
     Scans every Tree, classifies the fleet, then deletes ONLY the Trees whose PR is
     merged, working tree clean, nothing unpushed, and which are aged past the
     threshold. Trees that merely look abandoned are LISTED as stale (never deleted),
     and anything with live or local work is left untouched. Conservative by default.
+
+    ``--dry-run`` prints the same partition the real sweep would act on and deletes
+    nothing; ``--threshold DURATION`` (e.g. ``36h``) overrides the 14-day age boundary
+    for this run.
     """
-    raise SystemExit(run_gc())
+    raise SystemExit(run_gc(dry_run=dry_run, threshold=threshold))
 
 
-def run_gc() -> int:
-    """Scan, classify, then remove only the removable set and list the stale set.
+def run_gc(*, dry_run: bool = False, threshold: str | None = None) -> int:
+    """Scan, classify, then either preview the partition or sweep the removable set.
+
+    The scan→classify step is shared by both modes (:func:`_scan_and_classify`), so a
+    ``--dry-run`` preview can NEVER drift from the action: it renders the very
+    :class:`Cleanup` the real sweep would consume; only the "print vs delete" tail
+    differs. ``threshold`` (a human duration like ``36h``) overrides the default age
+    boundary for this run; ``None`` keeps the 14-day default.
 
     Returns 0 in the normal case — an empty root or a fleet with nothing to reclaim
     is a valid outcome, not an error; returns 1 with a clean stderr message when the
     central root is misconfigured (a relative ``SHIPIT_TREES_ROOT`` → ``ValueError``)
-    so the gc contract stays "no tracebacks, just messages + counts". Repo identity
-    is irrelevant — ``gc`` spans the whole central root, like ``list``.
+    or ``threshold`` is not a valid duration, so the gc contract stays "no tracebacks,
+    just messages + counts". Repo identity is irrelevant — ``gc`` spans the whole
+    central root, like ``list``.
     """
     try:
         root = layout.central_root()
+        max_age_seconds = (
+            cleanup.DEFAULT_MAX_AGE_SECONDS
+            if threshold is None
+            else cleanup.parse_duration(threshold)
+        )
     except ValueError as exc:
         print(f"tree gc: {exc}", file=sys.stderr)
         return 1
+    decision, total, unknown = _scan_and_classify(root, max_age_seconds=max_age_seconds)
+    if dry_run:
+        _emit_gc_preview(decision, total=total, unknown=unknown)
+    else:
+        _emit_gc(decision, total=total, unknown=unknown)
+    return 0
+
+
+def _scan_and_classify(
+    root: str, *, max_age_seconds: float
+) -> tuple[Cleanup, int, int]:
+    """Scan the central root and classify the fleet — the step shared by both gc modes.
+
+    Factoring scan→PR-state→``classify`` here is what guarantees dry-run/real-sweep
+    parity: both the preview and the sweep call this one path, so the partition they
+    render and act on is the identical :class:`Cleanup`. Pure ``classify`` does the
+    deciding; this wrapper only supplies the effectful inputs (disk scan, ``now``, PR
+    states) it needs.
+
+    Returns the :class:`Cleanup` partition alongside ``total`` (Trees scanned) and
+    ``unknown`` (how many had an unreadable PR state). Both gc tails — the real sweep
+    and the ``--dry-run`` preview — need those counts to warn about an INCOMPLETE
+    view of the fleet, so they travel with the partition rather than being recomputed.
+    """
     records = registry.scan(root)
     pr_states = {record.path: _pr_state(record) for record in records}
-    decision = cleanup.classify(records, now=time.time(), pr_states=pr_states)
+    decision = cleanup.classify(
+        records,
+        now=time.time(),
+        pr_states=pr_states,
+        max_age_seconds=max_age_seconds,
+    )
     unknown = sum(1 for state in pr_states.values() if state == "UNKNOWN")
-    _emit_gc(decision, total=len(records), unknown=unknown)
-    return 0
+    return decision, len(records), unknown
 
 
 def _pr_state(record: TreeRecord) -> str | None:
@@ -549,5 +611,35 @@ def _emit_gc(decision: Cleanup, *, total: int, unknown: int) -> None:
         swept = total - unknown
         print(
             f"swept {swept} of {total}; {unknown} skipped (state unknown)",
+            file=sys.stderr,
+        )
+
+
+def _emit_gc_preview(decision: Cleanup, *, total: int, unknown: int) -> None:
+    """Print the removable/stale/keep partition WITHOUT touching disk (``--dry-run``).
+
+    Renders the exact :class:`Cleanup` the real sweep would act on, so a preview can
+    never disagree with the sweep that follows it. The buckets are walked GENERICALLY
+    (``dataclasses.fields``) and each is printed by its own field name — so if an
+    upstream change adds a bucket, it surfaces here with no edit and no hard-coded
+    state vocabulary to fall out of date. Deletes nothing: there is no ``rmtree`` on
+    this path at all.
+
+    The same INCOMPLETE-view warning the real sweep emits is surfaced here too: when
+    any Tree had an unreadable PR state, a ``would sweep N of M; K skipped (state
+    unknown)`` line goes to stderr, so a dry-run preview tells the operator the fleet
+    was only partially seen — exactly as the real sweep would, never silently.
+    """
+    counts: list[str] = []
+    for field in fields(decision):
+        bucket: list[TreeRecord] = getattr(decision, field.name)
+        for record in bucket:
+            print(f"{field.name.upper():<9} {record.path}")
+        counts.append(f"{field.name} {len(bucket)}")
+    print(f"gc --dry-run (no Trees deleted): {', '.join(counts)}")
+    if unknown:
+        swept = total - unknown
+        print(
+            f"would sweep {swept} of {total}; {unknown} skipped (state unknown)",
             file=sys.stderr,
         )

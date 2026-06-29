@@ -10,7 +10,11 @@ from __future__ import annotations
 
 import pytest
 
-from shipit.tree.cleanup import DEFAULT_MAX_AGE_SECONDS, classify
+from shipit.tree.cleanup import (
+    DEFAULT_MAX_AGE_SECONDS,
+    classify,
+    parse_duration,
+)
 from shipit.tree.registry import TreeRecord
 
 NOW = 1_000_000.0
@@ -142,3 +146,53 @@ def test_default_threshold_is_two_weeks():
     assert (
         len(classify([old], now=NOW, pr_states={"/trees/t": "MERGED"}).removable) == 1
     )
+
+
+# --- parse_duration: the pure --threshold helper -------------------------------
+
+# (input, expected seconds) — one row per accepted shape. Each unit and a couple of
+# magnitudes, plus surrounding whitespace and a mixed-case suffix, must all parse.
+_DURATION_OK = [
+    ("14d", 14 * 86_400),
+    ("36h", 36 * 3_600),
+    ("90m", 90 * 60),
+    ("45s", 45),
+    ("1d", 86_400),
+    ("  7d  ", 7 * 86_400),  # surrounding whitespace is stripped
+    ("12H", 12 * 3_600),  # the unit is case-insensitive
+]
+
+
+@pytest.mark.parametrize(
+    "text, seconds", _DURATION_OK, ids=[row[0].strip() for row in _DURATION_OK]
+)
+def test_parse_duration_accepts_human_durations(text, seconds):
+    result = parse_duration(text)
+    assert result == float(seconds)
+    assert isinstance(result, float)  # the type classify's max_age_seconds expects
+
+
+# Each rejected shape is a clean ValueError, never a silent default.
+_DURATION_BAD = [
+    "",  # empty
+    "   ",  # blank
+    "14",  # no unit
+    "14w",  # unknown unit
+    "d",  # no magnitude
+    "1.5d",  # non-integer magnitude
+    "-5d",  # negative
+    "0d",  # non-positive
+    "abc",  # not a duration at all
+]
+
+
+@pytest.mark.parametrize("text", _DURATION_BAD)
+def test_parse_duration_rejects_bad_input(text):
+    with pytest.raises(ValueError):
+        parse_duration(text)
+
+
+def test_parse_duration_round_trips_with_default_threshold():
+    # The CLI default (14d) must parse back to exactly DEFAULT_MAX_AGE_SECONDS, so the
+    # documented default and the keyword default can never silently diverge.
+    assert parse_duration("14d") == float(DEFAULT_MAX_AGE_SECONDS)
