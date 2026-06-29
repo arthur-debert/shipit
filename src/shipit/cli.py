@@ -18,6 +18,7 @@ from .verbs import gh_setup, install, lint, logs, verify_apps
 from .verbs.eval import eval_group
 from .verbs.hook import hook as hook_group
 from .verbs.pr import pr as pr_group
+from .verbs.tree import tree as tree_group
 
 
 @click.group(
@@ -200,6 +201,10 @@ root.add_command(hook_group)
 # The nested `eval` group (HAR02) — the READER side of the harness eval store the
 # `hook` events write; `shipit eval report` aggregates it. Attached like `pr`.
 root.add_command(eval_group)
+
+# The nested `tree` group (TRE01) — isolated Trees: independent dissociated
+# clones a write-session works in (ADR-0014). Attached like `pr`.
+root.add_command(tree_group)
 
 
 def main(argv: list[str] | None = None) -> int:

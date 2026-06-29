@@ -355,6 +355,39 @@ def git_push(
     _git(args, cwd=cwd)
 
 
+# --------------------------------------------------------------------------
+# git — the Tree-creation boundary (clone / fetch / checkout)
+# --------------------------------------------------------------------------
+
+
+def git_clone_dissociated(url: str, dest: str, *, reference: str) -> None:
+    """Clone ``url`` into ``dest`` as an INDEPENDENT, dissociated checkout.
+
+    ``--reference <reference>`` borrows the local checkout's object store so the
+    clone is near-instant and tiny over the wire; ``--dissociate`` then copies
+    every borrowed object into the new clone and drops the alternates link, so the
+    result shares NOTHING with the reference (no ``.git/objects/info/alternates``)
+    and is safe to ``rm -rf`` (ADR-0014). ``origin`` is set to ``url`` — the GitHub
+    URL — so ``gh``/``git`` work inside the Tree unchanged.
+    """
+    _run(["git", "clone", "--reference", reference, "--dissociate", url, dest])
+
+
+def git_fetch(*, cwd: str, remote: str = "origin") -> None:
+    """``git fetch <remote>`` inside the Tree, so its base ref is up to date."""
+    _git(["fetch", remote], cwd=cwd)
+
+
+def git_checkout_new_branch(branch: str, base: str, *, cwd: str) -> None:
+    """``git checkout -b <branch> <base>`` — cut ``branch`` from ``base`` and switch."""
+    _git(["checkout", "-b", branch, base], cwd=cwd)
+
+
+def git_remote_url(*, cwd: str, remote: str = "origin") -> str:
+    """The configured URL of ``remote`` for the checkout at ``cwd``."""
+    return _git(["remote", "get-url", remote], cwd=cwd).strip()
+
+
 def pr_url_for_head(branch: str, *, cwd: str | None = None) -> str | None:
     """The URL of the open PR whose head is ``branch``, or ``None``."""
     out = _run(

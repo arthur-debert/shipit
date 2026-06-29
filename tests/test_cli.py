@@ -35,3 +35,22 @@ def test_lint_help(capsys):
 def test_version():
     rc = cli.main(["--version"])
     assert rc == 0
+
+
+def test_help_lists_tree(capsys):
+    rc = cli.main(["--help"])
+    assert rc == 0
+    assert "tree" in capsys.readouterr().out
+
+
+def test_tree_help_lists_create(capsys):
+    rc = cli.main(["tree", "--help"])
+    assert rc == 0
+    assert "create" in capsys.readouterr().out
+
+
+def test_tree_create_help(capsys):
+    rc = cli.main(["tree", "create", "--help"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "--issue" in out
