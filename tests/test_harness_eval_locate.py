@@ -47,3 +47,10 @@ def test_missing_transcript_path_returns_none():
     # No transcript named → nothing to evaluate; the boundary fails open on None.
     assert locate_run({}) is None
     assert locate_run({"transcript_path": ""}) is None
+
+
+def test_named_but_nonexistent_transcript_returns_none(tmp_path):
+    # A transcript_path that does not exist on disk is "nothing to evaluate" — the
+    # boundary fails open (None) rather than yielding a hollow count-0 record.
+    ghost = tmp_path / "session" / "gone.jsonl"
+    assert locate_run({"transcript_path": str(ghost)}) is None

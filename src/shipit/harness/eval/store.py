@@ -7,8 +7,11 @@ Support/shipit/eval` on macOS, `~/.local/state/shipit/eval` on Linux), the same
 dirties product history — a written record can never show up as a repo change
 (docs/prd/har02-run-eval.md, ADR-0013: "local, never committed").
 
-``base_dir`` is injected by tests (mirroring :mod:`shipit.logsetup`) so they write
-to a tmp path; in real use it is the platformdirs state dir.
+``base_dir`` is the eval-store root itself, injected by tests (mirroring
+:mod:`shipit.logsetup`, whose ``resolve_log_dir`` returns an injected ``base_dir``
+verbatim) so they write to a tmp path. It is returned as-is — the ``eval``
+suffix is appended only when computing the *default* root from platformdirs, so
+an injected ``base_dir`` is already the leaf the store writes under.
 """
 
 from __future__ import annotations
@@ -24,8 +27,9 @@ import platformdirs
 def store_dir(base_dir: Path | None = None) -> Path:
     """The eval store's root directory (outside any repo tree).
 
-    ``base_dir`` overrides the default for tests; otherwise it is
-    ``platformdirs.user_state_dir("shipit")/eval``.
+    ``base_dir`` IS that root when given (returned verbatim, for tests); otherwise
+    the root is ``platformdirs.user_state_dir("shipit")/eval``. The ``eval`` suffix
+    belongs to the platformdirs default only — an injected ``base_dir`` is the leaf.
     """
     if base_dir is not None:
         return Path(base_dir)

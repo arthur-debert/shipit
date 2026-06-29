@@ -48,7 +48,7 @@ def build(
         "gen_ai.agent.name": meta.get("agentType") or _COORDINATOR_ROLE,
         "gen_ai.request.model": meta.get("model"),
         "eval.permission_mode": meta.get("spawnMode"),
-        "eval.tool_call_count": metrics.get("tool_call_count"),
+        "eval.tool_call_count": metrics.get("tool_call_count") or 0,
         "eval.variant": variant,
         "git.commit": commit,
     }

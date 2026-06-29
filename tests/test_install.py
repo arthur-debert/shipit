@@ -300,6 +300,10 @@ def test_is_shipit_hook_is_defensive_against_malformed_entries():
     assert install._is_shipit_hook({}) is False
     assert install._is_shipit_hook("not-a-dict") is False
     assert install._is_shipit_hook(None) is False
+    # A hook whose `command` is null/non-string must not crash on `marker in None`.
+    assert install._is_shipit_hook({"hooks": [{"command": None}]}) is False
+    assert install._is_shipit_hook({"hooks": [{"command": 7}]}) is False
+    assert install._is_shipit_hook({"hooks": [{}]}) is False
 
 
 def test_settings_hook_splice_preserves_a_malformed_file_verbatim():

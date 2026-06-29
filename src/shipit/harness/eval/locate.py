@@ -11,8 +11,9 @@ into the run's transcript plus its `.meta.json` sidecar — handling BOTH run ki
     `agent-<id>.meta.json` carrying `agentType` / `spawnMode`.
 
 The split is read off the transcript filename (`agent-` prefix ⇒ subagent), so the
-locator is a pure function of the payload + a single existence probe. `None` means
-the payload named no transcript — the caller fails open (no record, no crash).
+locator is a pure function of the payload + existence probes. `None` means the
+payload named no transcript, or named one that does not exist — the caller fails
+open (no record, no crash).
 """
 
 from __future__ import annotations
@@ -43,13 +44,17 @@ class RunFiles:
 def locate_run(hook_input: Mapping[str, Any]) -> RunFiles | None:
     """Resolve the run's transcript + meta from a `Stop` / `SubagentStop` payload.
 
-    Returns ``None`` when the payload names no ``transcript_path`` — the boundary
-    treats that as "nothing to evaluate" and falls through to a no-op.
+    Returns ``None`` when the payload names no ``transcript_path`` OR names one
+    that does not exist on disk — the boundary treats either as "nothing to
+    evaluate" and falls through to a no-op, honouring the fail-open contract that
+    a missing transcript writes nothing (rather than a hollow count-0 record).
     """
     raw = hook_input.get("transcript_path")
     if not raw:
         return None
     transcript = Path(str(raw))
+    if not transcript.exists():
+        return None
     return RunFiles(transcript=transcript, meta=_sibling_meta(transcript))
 
 

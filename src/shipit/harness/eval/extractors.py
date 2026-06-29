@@ -35,24 +35,27 @@ def extract(transcript: Path) -> dict[str, Any]:
 def iter_events(transcript: Path) -> Iterator[dict]:
     """Yield each transcript event (one parsed JSON object per line).
 
-    Tolerant by design — blank lines and any line that is not a JSON object are
-    skipped rather than raising, so a partially-written or truncated transcript
-    still yields the events it can. A missing file yields nothing.
+    Streamed line-by-line (never the whole file into memory) so a long session's
+    transcript costs O(line) rather than O(file_size) — the hook stays in its
+    "few ms" budget. Tolerant by design — blank lines and any line that is not a
+    JSON object are skipped rather than raising, so a partially-written or
+    truncated transcript still yields the events it can. A missing file yields
+    nothing.
     """
     try:
-        text = transcript.read_text(encoding="utf-8")
+        with transcript.open(encoding="utf-8") as fh:
+            for raw_line in fh:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(event, dict):
+                    yield event
     except OSError:
         return
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(event, dict):
-            yield event
 
 
 def tool_call_count(events: Iterable[Mapping[str, Any]]) -> int:

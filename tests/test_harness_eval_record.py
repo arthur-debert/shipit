@@ -56,6 +56,14 @@ def test_variant_is_stamped_verbatim():
     assert filled["eval.variant"] == {"content_hash": "sha256:deadbeef", "label": "A"}
 
 
+def test_tool_call_count_defaults_to_zero_int_for_partial_metrics():
+    # A partial/empty metrics mapping must still yield an int (0), not None, so the
+    # store stays single-typed for downstream aggregators.
+    record = build(metrics={}, meta=None, variant=None, commit="c", timestamp="t")
+    assert record["eval.tool_call_count"] == 0
+    assert isinstance(record["eval.tool_call_count"], int)
+
+
 def test_record_round_trips_through_json():
     record = build(
         metrics={"tool_call_count": 3},

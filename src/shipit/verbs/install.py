@@ -398,15 +398,18 @@ def _is_shipit_hook(entry: object, marker: str = SETTINGS_HOOK_MARKER) -> bool:
     """Whether a hooks-array entry is shipit's managed one (by command ``marker``).
 
     Defensive against a malformed consumer file: a non-dict entry, a ``hooks`` that
-    is ``null`` or any non-list, or a non-dict hook all answer ``False`` ("not a
-    shipit hook") rather than raising — the structure walk never trips on garbage.
+    is ``null`` or any non-list, a non-dict hook, or a hook whose ``command`` is
+    ``null``/non-string all answer ``False`` ("not a shipit hook") rather than
+    raising — the structure walk never trips on garbage.
     """
     if not isinstance(entry, dict):
         return False
     hooks = entry.get("hooks")
     if not isinstance(hooks, list):
         return False
-    return any(isinstance(h, dict) and marker in h.get("command", "") for h in hooks)
+    return any(
+        isinstance(h, dict) and marker in str(h.get("command") or "") for h in hooks
+    )
 
 
 # Sentinel inner value for a settings.json that exists but is malformed/unparseable
