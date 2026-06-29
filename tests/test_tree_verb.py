@@ -255,6 +255,26 @@ def test_run_remove_ambiguous_match_refuses(tmp_path, monkeypatch, capsys):
     assert a.exists() and b.exists()  # nothing deleted on an ambiguous match
 
 
+def test_run_remove_reports_rmtree_failure_cleanly(tmp_path, monkeypatch, capsys):
+    # A failed delete (read-only file, lock, vanished dir) must surface as a clean
+    # exit-1 + stderr message, never an unhandled traceback that breaks the contract.
+    target = _make_tree_dir(tmp_path / "trees", "acme/widget/issues/7-aaaa")
+    monkeypatch.setattr(tree_verb.layout, "central_root", lambda: str(tmp_path))
+    monkeypatch.setattr(
+        tree_verb.registry, "scan", lambda r: [_record(path=str(target))]
+    )
+
+    def boom(_path):
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(tree_verb.shutil, "rmtree", boom)
+
+    rc = tree_verb.run_remove(str(target))
+
+    assert rc == 1
+    assert "could not remove" in capsys.readouterr().err
+
+
 # --- tree gc -------------------------------------------------------------------
 
 
@@ -310,3 +330,54 @@ def test_run_gc_empty_root_is_not_an_error(tmp_path, monkeypatch, capsys):
 
     assert rc == 0
     assert "removed 0, stale 0, kept 0" in capsys.readouterr().out
+
+
+def test_run_gc_continues_past_a_failed_delete(tmp_path, monkeypatch, capsys):
+    # Two removable Trees; the first delete fails. The sweep must continue to the
+    # second, report the failure on stderr, and count only the delete that landed.
+    root = tmp_path / "trees"
+    bad = _make_tree_dir(root, "acme/widget/issues/1-bad")
+    good = _make_tree_dir(root, "acme/widget/issues/2-good")
+    aged = 0.0
+    records = [
+        _record(path=str(bad), branch="b1", dirty=False, ahead=0, mtime=aged),
+        _record(path=str(good), branch="b2", dirty=False, ahead=0, mtime=aged),
+    ]
+    monkeypatch.setattr(tree_verb.layout, "central_root", lambda: str(root))
+    monkeypatch.setattr(tree_verb.registry, "scan", lambda r: records)
+    monkeypatch.setattr(
+        gh,
+        "pr_for_head",
+        lambda branch, *, cwd=None: {"number": 1, "state": "MERGED", "isDraft": False},
+    )
+
+    real_rmtree = tree_verb.shutil.rmtree
+
+    def flaky(path, *args, **kwargs):
+        if path == str(bad):
+            raise OSError("read-only file")
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(tree_verb.shutil, "rmtree", flaky)
+
+    rc = tree_verb.run_gc()
+
+    assert rc == 0
+    assert bad.exists()  # the failed delete left it on disk
+    assert not good.exists()  # the sweep continued and reclaimed the next one
+    captured = capsys.readouterr()
+    assert f"FAILED  {bad}" in captured.err
+    assert "removed 1, stale 0, kept 0" in captured.out  # count reflects disk reality
+
+
+def test_pr_state_normalizes_draft(monkeypatch):
+    # A draft open PR reads as "DRAFT" (one fleet-wide vocabulary, mirroring the
+    # registry label), not the raw "OPEN" GitHub state.
+    monkeypatch.setattr(
+        gh,
+        "pr_for_head",
+        lambda branch, *, cwd=None: {"number": 7, "state": "OPEN", "isDraft": True},
+    )
+    record = _record(path="/trees/x", branch="b1")
+
+    assert tree_verb._pr_state(record) == "DRAFT"

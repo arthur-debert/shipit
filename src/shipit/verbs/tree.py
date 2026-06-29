@@ -233,7 +233,11 @@ def run_remove(target: str) -> int:
         )
         return 1
     record = matches[0]
-    shutil.rmtree(record.path)
+    try:
+        shutil.rmtree(record.path)
+    except OSError as exc:
+        print(f"tree remove: could not remove {record.path}: {exc}", file=sys.stderr)
+        return 1
     print(f"REMOVED {record.path}")
     return 0
 
@@ -283,6 +287,8 @@ def _pr_state(record: TreeRecord) -> str | None:
 
     Reads through the same ``gh`` boundary the registry uses, from inside the clone, so
     ``gc`` sees the authoritative merge state rather than re-parsing the rendered label.
+    A draft open PR is normalized to ``"DRAFT"`` (mirroring ``registry._pr_label``) so the
+    fleet has ONE state vocabulary and ``cleanup.classify``'s draft branch is reachable.
     ``None`` when the Tree has no branch or no PR.
     """
     if not record.branch:
@@ -291,17 +297,33 @@ def _pr_state(record: TreeRecord) -> str | None:
     if not pr:
         return None
     state = pr.get("state")
-    return state.upper() if isinstance(state, str) else None
+    if not isinstance(state, str):
+        return None
+    state = state.upper()
+    if state == "OPEN" and pr.get("isDraft"):
+        return "DRAFT"
+    return state
 
 
 def _emit_gc(decision: Cleanup) -> None:
-    """Delete the removable Trees, then report what was removed, kept stale, or kept."""
+    """Delete the removable Trees, then report what was removed, kept stale, or kept.
+
+    Deletion is best-effort per Tree: if one ``rmtree`` fails (a read-only file, a lock,
+    a vanished dir), the failure goes to stderr and the sweep CONTINUES to the next Tree
+    rather than aborting mid-fleet. The summary's ``removed`` count reflects what actually
+    came off disk, not what was merely planned.
+    """
+    removed = 0
     for record in decision.removable:
-        shutil.rmtree(record.path)
+        try:
+            shutil.rmtree(record.path)
+        except OSError as exc:
+            print(f"FAILED  {record.path}: {exc}", file=sys.stderr)
+            continue
+        removed += 1
         print(f"REMOVED {record.path}")
     for record in decision.stale:
         print(f"STALE   {record.path} (ambiguous — left for review, not removed)")
-    removed = len(decision.removable)
     stale = len(decision.stale)
     kept = len(decision.keep)
     print(f"gc: removed {removed}, stale {stale}, kept {kept}")
