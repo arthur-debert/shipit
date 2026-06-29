@@ -255,3 +255,16 @@ def test_scan_workers_is_bounded_and_at_least_one(monkeypatch):
     # Never exceeds the number of clones, and never drops below one.
     assert registry._scan_workers(3) == 3
     assert registry._scan_workers(0) == 1
+
+
+def test_scan_workers_keeps_floor_on_low_core_box(monkeypatch):
+    """The fan-out does NOT collapse to the core count: the reads are I/O-bound, so a
+    1-core box must still overlap several subprocesses (up to the clone count)."""
+    monkeypatch.setattr(registry.os, "cpu_count", lambda: 1)
+    # Many clones on a 1-core box still get the I/O floor, not a single serial worker.
+    assert registry._scan_workers(100) == registry._MIN_SCAN_WORKERS
+    # Still bounded by the clone count below the floor.
+    assert registry._scan_workers(2) == 2
+    # An unknown core count behaves like the floor, not like a single worker.
+    monkeypatch.setattr(registry.os, "cpu_count", lambda: None)
+    assert registry._scan_workers(100) == registry._MIN_SCAN_WORKERS

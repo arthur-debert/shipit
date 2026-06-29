@@ -26,15 +26,28 @@ from .. import gh
 #: Upper bound on the per-clone read fan-out. Each task is I/O-bound — it blocks on
 #: ``git``/``gh`` subprocesses through the :mod:`shipit.gh` boundary, not on the GIL —
 #: so threads (not processes) are the right tool and a small cap keeps a large fleet
-#: from spawning hundreds of concurrent subprocesses (fd/process pressure). We cap at
-#: the CPU count but never below a useful floor so even a 1-2 core box still overlaps
-#: subprocess latency.
+#: from spawning hundreds of concurrent subprocesses (fd/process pressure). Because the
+#: tasks block on subprocesses rather than burn CPU, we do NOT scale the pool down to the
+#: core count: we keep a floor (:data:`_MIN_SCAN_WORKERS`) so even a 1-2 core box overlaps
+#: subprocess latency, then bound that by this max and the clone count.
 _MAX_SCAN_WORKERS = 8
+
+#: Lower bound on the fan-out (subject to the clone count). The reads are I/O-bound, so a
+#: 1-2 core box should still overlap several subprocesses at once — sizing the pool by
+#: ``os.cpu_count()`` would needlessly serialize the scan on low-core machines.
+_MIN_SCAN_WORKERS = 4
 
 
 def _scan_workers(clone_count: int) -> int:
-    """Pick a bounded worker count for ``clone_count`` clones (always ``>= 1``)."""
-    cap = min(_MAX_SCAN_WORKERS, os.cpu_count() or 4)
+    """Pick a bounded worker count for ``clone_count`` clones (always ``>= 1``).
+
+    The reads are I/O-bound, so the pool is sized within a fixed ``[_MIN, _MAX]`` band
+    rather than by the core count (a 1-core box still overlaps subprocess latency), then
+    capped at the number of clones so we never spawn idle workers.
+    """
+    cap = min(
+        _MAX_SCAN_WORKERS, max(_MIN_SCAN_WORKERS, os.cpu_count() or _MIN_SCAN_WORKERS)
+    )
     return max(1, min(cap, clone_count))
 
 
