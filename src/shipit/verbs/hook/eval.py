@@ -30,6 +30,7 @@ from ...harness.eval.extractors import extract
 from ...harness.eval.locate import locate_run
 from ...harness.eval.record import build
 from ...harness.eval.store import append_record
+from ...harness.eval.variant import resolve_variant
 
 logger = logging.getLogger("shipit.hook")
 
@@ -64,7 +65,7 @@ def run(stdin: TextIO | None = None) -> int:
         record = build(
             metrics=metrics,
             meta=meta,
-            variant=None,  # WS01 placeholder — WS03's variant resolver fills this.
+            variant=_variant(meta),
             commit=_git_commit(repo_root),
             timestamp=_now_iso(),
         )
@@ -72,6 +73,21 @@ def run(stdin: TextIO | None = None) -> int:
     except Exception:  # noqa: BLE001 — fail-open is the whole point.
         logger.debug("eval hook failed open (no record written)", exc_info=True)
     return 0
+
+
+def _variant(meta: dict | None) -> dict | None:
+    """The run's variant record (role-prompt hash + label), or ``None`` fail-open.
+
+    The variant is best-effort attribution: if the role prompt cannot be read or
+    hashed, the record is still written (with a null variant) rather than dropped —
+    a tighter fail-open than the whole-pipeline guard so an attribution miss never
+    costs a metric record.
+    """
+    try:
+        return resolve_variant(meta).as_record()
+    except Exception:  # noqa: BLE001 — variant is best-effort; never drop the record.
+        logger.debug("variant resolution failed; stamping null", exc_info=True)
+        return None
 
 
 def _read_meta(meta_path: object) -> dict | None:

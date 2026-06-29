@@ -59,7 +59,9 @@ def test_subagent_stop_writes_a_record_with_role_and_metric(state_dir, tmp_path)
     rec = records[0]
     assert rec["gen_ai.agent.name"] == "implementer"
     assert rec["eval.tool_call_count"] == 3
-    assert rec["eval.variant"] is None  # WS01 placeholder
+    # WS03: the record now carries the implementer role-prompt content-hash.
+    assert rec["eval.variant"]["content_hash"].startswith("sha256:")
+    assert rec["eval.variant"]["label"] is None
     assert "git.commit" in rec
 
 
@@ -74,6 +76,8 @@ def test_stop_writes_a_coordinator_record(state_dir, tmp_path):
     assert len(records) == 1
     assert records[0]["gen_ai.agent.name"] == "coordinator"
     assert records[0]["eval.tool_call_count"] == 1
+    # The coordinator run is stamped with the coordinator role-prompt hash.
+    assert records[0]["eval.variant"]["content_hash"].startswith("sha256:")
 
 
 @pytest.mark.parametrize(
