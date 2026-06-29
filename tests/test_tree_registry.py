@@ -124,6 +124,22 @@ def test_scan_branch_without_pr_has_none(tmp_path: Path, monkeypatch):
     assert (record.ahead, record.behind) == (0, 0)
 
 
+def test_scan_unreadable_pr_renders_unknown_label(tmp_path: Path, monkeypatch):
+    # An unreadable PR state (gh.pr_for_head -> UNKNOWN) renders as a bare "UNKNOWN"
+    # label, distinct from the None a genuinely-PR-less Tree shows.
+    root = tmp_path / "trees"
+    clone = _make_clone(root, "acme/widget/issues/1-zzzz")
+    monkeypatch.setattr(gh, "git_current_branch", lambda *, cwd: "fix/1")
+    monkeypatch.setattr(gh, "git_upstream_ref", lambda *, cwd: "origin/main")
+    monkeypatch.setattr(gh, "git_status_porcelain", lambda *, cwd: "")
+    monkeypatch.setattr(gh, "git_ahead_behind", lambda *, cwd: (0, 0))
+    monkeypatch.setattr(gh, "pr_for_head", lambda branch, *, cwd=None: gh.UNKNOWN)
+
+    (record,) = registry.scan(root)
+    assert record.path == str(clone)
+    assert record.pr == "UNKNOWN"
+
+
 def test_scan_missing_root_yields_empty(tmp_path: Path):
     assert registry.scan(tmp_path / "does-not-exist") == []
 
