@@ -103,7 +103,15 @@ def test_is_edit_tool(tool, expected):
         ("Bash", "git worktree add ../tree-x my-branch", Permission.DENY),
         ("Bash", "git   worktree   add ../t b", Permission.DENY),  # extra whitespace
         ("Bash", "cd /repo && git worktree add ../t b", Permission.DENY),  # compound
+        ("Bash", "git worktree add ../t b; ls", Permission.DENY),  # `;`-separated
         ("bash", "git worktree add ../t b", Permission.DENY),  # tool name case
+        # Global git options between `git` and `worktree add` must NOT bypass the
+        # wall — the structural matcher skips leading global options (incl. ones
+        # that take a separate argument like `-C <path>` / `-c <name=value>`).
+        ("Bash", "git -C /repo worktree add ../t b", Permission.DENY),
+        ("Bash", "git --no-pager worktree add ../t b", Permission.DENY),
+        ("Bash", "git -c core.hooksPath= worktree add ../t b", Permission.DENY),
+        ("Bash", "FOO=bar git worktree add ../t b", Permission.DENY),  # env prefix
         # Ordinary git is unaffected — including the sibling worktree subcommands.
         ("Bash", "git status", Permission.ALLOW),
         ("Bash", "git checkout -b feature/x", Permission.ALLOW),
@@ -115,6 +123,13 @@ def test_is_edit_tool(tool, expected):
         # gh commands are unaffected.
         ("Bash", "gh pr create --draft", Permission.ALLOW),
         ("Bash", "gh pr ready 123", Permission.ALLOW),
+        # The policy blocks CREATION, not every mention of the text: a command
+        # that merely quotes / searches / prints the phrase is allowed, because
+        # tokenizing makes the quoted phrase a single token, not the `git`
+        # executable running the `worktree add` subcommand.
+        ("Bash", 'rg "git worktree add"', Permission.ALLOW),
+        ("Bash", "printf 'git worktree add'", Permission.ALLOW),
+        ("Bash", "echo git worktree add", Permission.ALLOW),  # echo, not git
         # `worktree add` is only a deny under Bash — not on some other tool, and
         # not as a bare substring without the `git` verb.
         ("Read", "git worktree add ../t b", Permission.ALLOW),

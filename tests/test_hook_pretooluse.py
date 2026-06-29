@@ -79,12 +79,21 @@ def test_enter_worktree_is_denied():
     assert decision["permissionDecisionReason"] == WORKTREE_DENY_REASON
 
 
-def test_bash_git_worktree_add_is_denied():
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git worktree add ../tree-x my-branch",
+        # A leading global option must NOT smuggle `worktree add` past the wall.
+        "git -C /repo worktree add ../t b",
+        "git --no-pager worktree add ../t b",
+    ],
+)
+def test_bash_git_worktree_add_is_denied(command):
     payload = json.dumps(
         {
             "agent_type": "implementer",  # role-independent: a subagent is blocked too
             "tool_name": "Bash",
-            "tool_input": {"command": "git worktree add ../tree-x my-branch"},
+            "tool_input": {"command": command},
         }
     )
     code, out = _run(payload)
