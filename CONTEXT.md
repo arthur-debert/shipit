@@ -253,7 +253,8 @@ addresses a review round are *distinct* runs, each its own **eval record**. The
 `coordinator` run is the top-level session transcript; each subagent run is a separate
 `agent-<id>` transcript. Eval fires at a run's *terminal* lifecycle hook (a subagent run
 at `SubagentStop`, the coordinator run at `Stop`/`SessionEnd`) and emits one record, tagged by
-`role` (from `meta.agentType`). Runs aggregate up by role, by task, and over time.
+`role` (from `meta.agentType`). Runs aggregate up by role, by **variant**, and over time
+(`shipit eval report`).
 *Avoid*: "session" as the eval unit — Claude Code shares one `session_id` across an agent
 and its subagents, so the per-agent unit is the *run*, not the session.
 
@@ -276,6 +277,17 @@ shared/structured trend is ever needed the substrate is GitHub-native (an epic i
 comments, or Pages) — never self-hosted infra. Aggregated with DuckDB.
 *Avoid*: a tracing/observability platform (LangSmith et al.) — wrong *kind* (live tracing,
 not transcript rubric/metric extraction) and wrong deployment for a no-infra dev harness.
+
+**Variant**:
+The attribution stamped on every **eval record** answering *which version of the harness
+produced this run* — a *derived content-hash* of the generated **role prompt** that drove the
+run (the **content-key** / pristine-hash idea applied to prompts, via the same
+`shipit.config.content_hash` scheme `install` uses), plus an OPTIONAL explicit A/B **label**
+(`SHIPIT_EVAL_VARIANT_LABEL`). Identical prompts hash identically, so runs *pool* across
+commits when the input is unchanged; a changed prompt hashes differently, so runs *separate*
+within one commit. `shipit eval report` groups by variant, which is what makes a prompt A/B
+separable by data rather than intuition. *Avoid*: conflating it with a `test` **variant**
+(`lint`/`test`/`build` axis) — same word, unrelated axis.
 
 **Break-glass**:
 A visible, logged escape hatch that lets an actor perform an **operation** its
