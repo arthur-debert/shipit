@@ -36,8 +36,8 @@ dependencies.
     The coordinator does NOT implement. It spins one IMPLEMENTER subagent per
     workstream — each scoped by its own Work Stream issue — and runs the
     [../../AGENTS.lex] role split for each: the coordinator CREATES the WS branch
-    off the epic branch by provisioning the implementer with a ready *Tree* (`shipit tree
-    create --epic E --ws N` → branch `EPIC/WSnn` — see [./naming.lex]); the implementer stops
+    off the epic branch by provisioning the implementer with a ready *Tree*
+    (`shipit tree create --epic E --ws N` → branch `EPIC/WSnn` — see [./naming.lex]); the implementer stops
     at PR-open, the only topology change being that its draft PR targets the EPIC
     branch (not `main`); the coordinator owns the wait and the flip; a fresh
     shepherd handles each addressing round. The 6 / nitpick breaker applies to
