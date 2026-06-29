@@ -99,3 +99,14 @@ Per-PR essentials:
   code.
 
 Full grammar + rationale — the THEME registry, multi-repo prefixes, FX rounds, the slash-collision reason. [See](./docs/dev/naming.lex).
+
+## 4. Role prompts (generated, role-scoped)
+
+Each role's binding prompt is GENERATED from focused lex fragments under \[./src/shipit/data/roles\] — a shared dev-cycle base plus one overlay per role — so the cycle is stated once and re-flows on a single edit (\`pixi run regen-roles\`). Each agent receives ONLY its own role's slice, never the others', which is what stops mid-session role drift (ADR-0011).
+
+The roles (one line each; non-binding map — the binding surfaces are the agent-defs and the coordinator deny reason):
+
+- coordinator — the agent the human addresses; orchestrates and delegates, never implements. Its slice rides the PreToolUse deny reason plus injected context (it has no agent-def).
+- implementer — builds the change with tests and opens the draft PR, then stops; [agent-def](./.claude/agents/implementer.md).
+- shepherd — addresses one review round on an open PR, then hands back; [agent-def](./.claude/agents/shepherd.md).
+- explorer — read-only investigator: searches and reports, changes nothing; [agent-def](./.claude/agents/explorer.md).

@@ -30,6 +30,7 @@ filesystem + gh boundary so it is unit-testable, the same split checks.py uses.
 from __future__ import annotations
 
 import difflib
+import json
 import subprocess
 import sys
 from collections.abc import Callable
@@ -73,6 +74,33 @@ PIXI_OPEN = (
 PIXI_CLOSE = "# <<< shipit-managed tasks <<<"
 PIXI_ANCHOR = "[tasks]"
 
+# The HAR01 agent harness (docs/prd/har01-coordinator-guard-and-role-prompts.md):
+# the three GENERATED subagent agent-defs and the committed `PreToolUse` hook line
+# join the managed set so a consumer's agents follow the same dev cycle + guard.
+#
+# Agent-defs: whole-file units, sourced from `.claude/agents/<role>.md` — the same
+# repo-root-in-dev / wheel-package-data split skills use (force-included via
+# pyproject). They are generated (`pixi run regen-roles`); install only vendors the
+# committed output, it never regenerates.
+#
+# settings hook: NOT a whole-file unit. `.claude/settings.json` is Claude-Code-owned
+# structured JSON a consumer fills with their own permissions/env/hooks; shipit owns
+# ONLY its one `PreToolUse` entry. So it is a `kind="block"` unit with a JSON splice
+# (`fmt=FMT_JSON_HOOK`) instead of comment-marker text splice: the managed "inner" is
+# shipit's canonical PreToolUse entry, identified in the consumer file by its command
+# marker. Reconciliation is the standard four-case `decide()` on that entry's hash —
+# the consumer's other settings are merged through untouched, never clobbered, and a
+# consumer edit to shipit's own entry surfaces as an OVERRIDE like any other unit.
+AGENTS_DEF_DIR = ".claude/agents"
+SETTINGS_FILE = ".claude/settings.json"
+SETTINGS_KEY = ".claude/settings.json#shipit-pretooluse-hook"
+# The substring that identifies shipit's managed PreToolUse entry in a consumer's
+# settings.json, independent of the runner prefix (`pixi run`, a bare path, etc.).
+SETTINGS_HOOK_MARKER = "shipit hook pretooluse"
+
+FMT_MARKERS = "markers"  # block splice via open/close comment markers (default)
+FMT_JSON_HOOK = "json-hook"  # block splice into settings.json's PreToolUse array
+
 INSTALL_BRANCH = "shipit/install"
 COMMIT_MESSAGE = "chore(shipit): install/update the managed set"
 
@@ -106,6 +134,11 @@ class Unit:
     open_marker: str = BLOCK_OPEN
     close_marker: str = BLOCK_CLOSE
     anchor: str | None = None
+    # Block units only: how the managed region is extracted from / spliced into the
+    # consumer file. ``FMT_MARKERS`` (default) uses the comment-marker pair above;
+    # ``FMT_JSON_HOOK`` parses ``settings.json`` and owns just shipit's PreToolUse
+    # entry, so the consumer's other settings merge through untouched.
+    fmt: str = FMT_MARKERS
 
     def desired_inner(self) -> str:
         """A block unit's canonical inner text (newline-trimmed)."""
@@ -135,6 +168,31 @@ def _skills_root():
     if bundled.is_dir():
         return bundled
     return Path(__file__).resolve().parents[3] / "skills"
+
+
+def _agents_root():
+    """The bundled subagent agent-defs — wheel package data, or the repo root in dev.
+
+    Mirrors :func:`_skills_root`: the generated ``.claude/agents/<role>.md`` files
+    live at the repo root (where Claude Code reads them for shipit-self) and are
+    force-included into the wheel at ``shipit/data/agents`` (pyproject). Returns a
+    Traversable (installed wheel) or a :class:`Path` (editable checkout).
+    """
+    bundled = resources.files("shipit.data").joinpath("agents")
+    if bundled.is_dir():
+        return bundled
+    return Path(__file__).resolve().parents[3] / ".claude" / "agents"
+
+
+def _canonical_hook_entry(entry: dict) -> str:
+    """The stable serialization of a settings.json PreToolUse entry.
+
+    Both the desired (bundled) entry and the consumer's extracted entry pass through
+    this one function, so the unit's hash compares STRUCTURE, not byte-formatting —
+    a consumer who reformats settings.json (whitespace, key order) still reconciles
+    to NOOP as long as shipit's entry is semantically unchanged.
+    """
+    return json.dumps(entry, indent=2, sort_keys=True)
 
 
 def _walk_files(node, prefix: str = ""):
@@ -201,6 +259,32 @@ def load_units() -> list[Unit]:
             anchor=PIXI_ANCHOR,
         )
     )
+
+    # The HAR01 harness (docs/prd/har01-coordinator-guard-and-role-prompts.md): the
+    # generated subagent agent-defs (whole files) and the committed PreToolUse hook
+    # line (a JSON splice into the consumer's settings.json).
+    for rel, content in _walk_files(_agents_root()):
+        units.append(
+            Unit(
+                key=f"{AGENTS_DEF_DIR}/{rel}",
+                dest=f"{AGENTS_DEF_DIR}/{rel}",
+                kind="file",
+                content=content,
+            )
+        )
+
+    # Store the desired entry already canonicalized, so its hash matches a consumer
+    # entry extracted + canonicalized through the same function (formatting-immune).
+    hook_entry = json.loads(_data_bytes("claude-settings-pretooluse.json"))
+    units.append(
+        Unit(
+            key=SETTINGS_KEY,
+            dest=SETTINGS_FILE,
+            kind="block",
+            content=_canonical_hook_entry(hook_entry).encode("utf-8"),
+            fmt=FMT_JSON_HOOK,
+        )
+    )
     return units
 
 
@@ -260,6 +344,106 @@ def _insert_under_anchor(text: str, anchor: str, block: str) -> str:
     base = text.rstrip("\n")
     sep = "\n\n" if base else ""
     return f"{base}{sep}{anchor}\n{block}\n"
+
+
+# --------------------------------------------------------------------------
+# JSON-hook splicing — settings.json PreToolUse entry (the FMT_JSON_HOOK variant)
+# --------------------------------------------------------------------------
+
+
+def _is_shipit_hook(entry: object) -> bool:
+    """Whether a PreToolUse array entry is shipit's managed one (by command marker).
+
+    Defensive against a malformed consumer file: a non-dict entry, a ``hooks`` that
+    is ``null`` or any non-list, or a non-dict hook all answer ``False`` ("not a
+    shipit hook") rather than raising — the structure walk never trips on garbage.
+    """
+    if not isinstance(entry, dict):
+        return False
+    hooks = entry.get("hooks")
+    if not isinstance(hooks, list):
+        return False
+    return any(
+        isinstance(h, dict) and SETTINGS_HOOK_MARKER in h.get("command", "")
+        for h in hooks
+    )
+
+
+# Sentinel inner value for a settings.json that exists but is malformed/unparseable
+# or is not a JSON object. It is NOT a real hook entry — the read path returns it so
+# the unit hashes to something present-but-non-matching (→ OVERRIDE, surfaced for a
+# human), and the write path recognizes it to preserve the original byte-for-byte.
+_SETTINGS_MALFORMED = "\x00shipit-settings-malformed\x00"
+
+
+def extract_settings_hook(text: str) -> str | None:
+    """shipit's current PreToolUse entry in a settings.json text, canonical, or ``None``.
+
+    Three outcomes, kept in lockstep with :func:`splice_settings_hook` so a read that
+    classifies the file is honored by the write that follows:
+
+      - empty file, or a JSON object with no shipit entry -> ``None`` ("absent" -> ADD;
+        the write splices shipit's entry into the consumer's object, untouched).
+      - a JSON object carrying shipit's entry -> the canonical entry (NOOP/UPDATE/
+        OVERRIDE by hash, exactly as before).
+      - **unparseable, or valid JSON that is not an object** -> a non-``None`` sentinel
+        so the reconciler reads it as present-but-divergent (OVERRIDE): a malformed
+        ``.claude/settings.json`` is a CONFLICT to surface for a human, never an
+        absent file we ADD onto and never a crash. The matching write preserves it.
+
+    A consumer's other settings are never inspected; only shipit's own entry is the
+    managed region.
+    """
+    text = text.strip()
+    if not text:
+        return None
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return _SETTINGS_MALFORMED
+    if not isinstance(data, dict):
+        return _SETTINGS_MALFORMED
+    hooks = data.get("hooks")
+    entries = hooks.get("PreToolUse", []) if isinstance(hooks, dict) else []
+    if not isinstance(entries, list):
+        entries = []
+    for entry in entries:
+        if _is_shipit_hook(entry):
+            return _canonical_hook_entry(entry)
+    return None
+
+
+def splice_settings_hook(text: str, inner: str) -> str:
+    """Merge shipit's PreToolUse entry (``inner``, canonical JSON) into a settings.json.
+
+    Owns ONLY shipit's entry: any prior shipit entry is replaced, every other key and
+    hook the consumer set is preserved, and the file is returned as pretty-printed
+    JSON. An empty/whitespace input starts from ``{}`` (a fresh settings.json).
+
+    Fail-safe, matching :func:`extract_settings_hook`: a consumer file that is
+    unparseable or is not a JSON object is NEVER clobbered — the original ``text`` is
+    returned verbatim (the read path already classified it as an OVERRIDE conflict, so
+    the install surfaces it for a human instead of overwriting or crashing).
+    """
+    stripped = text.strip()
+    if stripped:
+        try:
+            data = json.loads(stripped)
+        except json.JSONDecodeError:
+            return text  # malformed → preserve, never clobber (conflict surfaced)
+        if not isinstance(data, dict):
+            return text  # not a JSON object → preserve, never clobber
+    else:
+        data = {}
+    entry = json.loads(inner)
+    hooks = data.setdefault("hooks", {})
+    if not isinstance(hooks, dict):
+        hooks = data["hooks"] = {}
+    pre = hooks.get("PreToolUse", [])
+    if not isinstance(pre, list):
+        pre = []
+    hooks["PreToolUse"] = [e for e in pre if not _is_shipit_hook(e)] + [entry]
+    return json.dumps(data, indent=2) + "\n"
 
 
 # --------------------------------------------------------------------------
@@ -341,9 +525,10 @@ def _consumer_inner(root: Path, unit: Unit) -> str | None:
     dest = root / unit.dest
     if not dest.is_file():
         return None
-    return extract_block(
-        dest.read_text(encoding="utf-8"), unit.open_marker, unit.close_marker
-    )
+    text = dest.read_text(encoding="utf-8")
+    if unit.fmt == FMT_JSON_HOOK:
+        return extract_settings_hook(text)
+    return extract_block(text, unit.open_marker, unit.close_marker)
 
 
 def consumer_hash(root: Path, unit: Unit) -> str | None:
@@ -363,16 +548,17 @@ def _write_unit(root: Path, unit: Unit) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     if unit.kind == "block":
         existing = dest.read_text(encoding="utf-8") if dest.is_file() else ""
-        dest.write_text(
-            splice_block(
+        if unit.fmt == FMT_JSON_HOOK:
+            spliced = splice_settings_hook(existing, unit.desired_inner())
+        else:
+            spliced = splice_block(
                 existing,
                 unit.desired_inner(),
                 unit.open_marker,
                 unit.close_marker,
                 unit.anchor,
-            ),
-            encoding="utf-8",
-        )
+            )
+        dest.write_text(spliced, encoding="utf-8")
         return
     dest.write_bytes(unit.content)
     if unit.executable:
@@ -421,6 +607,15 @@ def _consumer_snapshot(root: Path, unit: Unit) -> str:
     """The consumer's current text for a unit — captured BEFORE any overwrite."""
     if unit.kind == "block":
         inner = _consumer_inner(root, unit)
+        if inner == _SETTINGS_MALFORMED:
+            # A malformed settings.json has no clean managed region; surface the
+            # whole file so the OVERRIDE diff shows the human the real content.
+            dest = root / unit.dest
+            return (
+                dest.read_text(encoding="utf-8", errors="replace")
+                if dest.is_file()
+                else ""
+            )
         return "" if inner is None else inner + "\n"
     dest = root / unit.dest
     return dest.read_text(encoding="utf-8", errors="replace") if dest.is_file() else ""

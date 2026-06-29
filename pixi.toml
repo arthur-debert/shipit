@@ -55,6 +55,11 @@ lint = { cmd = "shipit lint", depends-on = ["provision-lexd"] }
 fmt = { cmd = "shipit lint --fix", depends-on = ["provision-lexd"] }
 # One command from a fresh clone to working lint checks (the `--install-hook` equiv).
 install-hooks = "lefthook install"
+# Re-flow every role-prompt surface from the lex fragments (HAR01-WS03, ADR-0011):
+# mirror src/shipit/data/roles/*.lex -> .md, then compose the agent-defs, the
+# bundled coordinator deny slice, and the AGENTS.md union. Needs lexd + prettier
+# (mirroring) and shipit (the generator), all on PATH in the lint env.
+regen-roles = { cmd = "bash tools/regen-roles.sh", depends-on = ["provision-lexd"] }
 
 # The `review` env carries the `review` extra (PyJWT, to sign the App JWT) so the
 # normal `shipit pr review` path AND the opt-in funnel-verification harness can

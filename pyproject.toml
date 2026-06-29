@@ -38,8 +38,15 @@ packages = ["src/shipit"]
 # repo root (it is also shipit's own Claude skill set), so it is force-included
 # rather than re-homed under src/. It is OUTSIDE src/shipit, so this does not
 # collide with the packages= bundling above (no double-add).
+#
+# The generated subagent agent-defs are force-included the same way: they live at
+# `.claude/agents/` (where Claude Code reads them for shipit-self) and are vendored
+# into the wheel so `shipit install` can lay them into a consumer's `.claude/agents/`.
+# One source (the regen-roles generator), two readers (shipit-self at the repo
+# root, the wheel for install) — never committed twice.
 [tool.hatch.build.targets.wheel.force-include]
 "skills" = "shipit/data/skills"
+".claude/agents" = "shipit/data/agents"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
