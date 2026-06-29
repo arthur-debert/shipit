@@ -190,8 +190,8 @@ decisions), `config.py` (parse/validate), all table-driven.
 Tested modules:
 
 - **`layout.plan`** — every spec shape (epic+ws, issue, freeform); hash lands on the dir and
-  never on the branch; base ref resolution (`origin/<EPIC>` vs `origin/main`); slug
-  sanitization edge cases.
+  never on the branch; base ref resolution (`origin/<EPIC>/umbrella` for a work stream vs
+  `origin/main`); slug sanitization edge cases.
 - **`cleanup.classify`** — the partition truth table: merged+clean+no-unpushed+aged →
   removable; dirty → keep; unpushed → keep; unmerged PR → keep; abandoned-but-ambiguous →
   stale (never removable).
