@@ -17,10 +17,26 @@ renders. ``scan`` does NOT mutate anything — it is a pure read of the fleet.
 from __future__ import annotations
 
 import os
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
 from .. import gh
+
+#: Upper bound on the per-clone read fan-out. Each task is I/O-bound — it blocks on
+#: ``git``/``gh`` subprocesses through the :mod:`shipit.gh` boundary, not on the GIL —
+#: so threads (not processes) are the right tool and a small cap keeps a large fleet
+#: from spawning hundreds of concurrent subprocesses (fd/process pressure). We cap at
+#: the CPU count but never below a useful floor so even a 1-2 core box still overlaps
+#: subprocess latency.
+_MAX_SCAN_WORKERS = 8
+
+
+def _scan_workers(clone_count: int) -> int:
+    """Pick a bounded worker count for ``clone_count`` clones (always ``>= 1``)."""
+    cap = min(_MAX_SCAN_WORKERS, os.cpu_count() or 4)
+    return max(1, min(cap, clone_count))
+
 
 #: The marker that makes a directory a Tree: an independent clone has a ``.git``
 #: (a dir in a normal clone). A directory under the central root WITHOUT one is not
@@ -64,20 +80,38 @@ def scan(root: str | Path) -> list[TreeRecord]:
     walk does NOT descend into a clone once found (a clone's own ``.git`` and nested
     paths are not separate Trees). Directories that are not clones — namespace dirs
     and stray non-Tree dirs alike — are simply skipped, so the fleet view reflects
-    only real Trees. A missing or empty root yields ``[]``. Records are returned
-    sorted by path for a stable, deterministic listing.
+    only real Trees. A missing or empty root yields ``[]``.
+
+    The cheap walk (just locating ``.git`` markers) runs sequentially; the EXPENSIVE
+    per-clone reads — branch/base/dirty/ahead-behind/PR, each a ``git``/``gh``
+    subprocess through the :mod:`shipit.gh` boundary — are fanned out across a bounded
+    :class:`~concurrent.futures.ThreadPoolExecutor` so ``list``/``gc`` over a large
+    fleet overlap that subprocess latency instead of paying for it serially. Each task
+    builds and RETURNS its own :class:`TreeRecord` (no shared mutable accumulator
+    written from threads), and the results are SORTED by path afterward, so ``scan``'s
+    output is identical regardless of task completion order — a stable, deterministic
+    listing.
     """
     base = Path(root)
-    records: list[TreeRecord] = []
     if not base.is_dir():
-        return records
+        return []
+
+    clone_dirs: list[Path] = []
     for dirpath, dirnames, _filenames in os.walk(base):
         here = Path(dirpath)
         if (here / _GIT_MARKER).exists():
-            records.append(_read_record(here))
+            clone_dirs.append(here)
             # A clone is a leaf for scanning purposes — never descend into it.
             dirnames[:] = []
             continue
+
+    if not clone_dirs:
+        return []
+
+    # Fan the per-clone reads out; each task returns its own record (race-free), then
+    # we sort for a deterministic order independent of completion order.
+    with ThreadPoolExecutor(max_workers=_scan_workers(len(clone_dirs))) as pool:
+        records = list(pool.map(_read_record, clone_dirs))
     records.sort(key=lambda record: record.path)
     return records
 
