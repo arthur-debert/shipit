@@ -468,6 +468,234 @@ def test_run_remove_reports_rmtree_failure_cleanly(tmp_path, monkeypatch, capsys
     assert "could not remove" in capsys.readouterr().err
 
 
+# --- tree remove: risk-detection + confirmation gate ---------------------------
+
+
+def test_removal_risk_clean_pushed_tree_is_safe():
+    # A clean, fully-pushed Tree holds no work that the delete would lose -> no gate.
+    assert tree_verb._removal_risk(_record(dirty=False, ahead=0)) is None
+
+
+def test_removal_risk_flags_dirty():
+    risk = tree_verb._removal_risk(_record(dirty=True, ahead=0))
+    assert risk is not None and "uncommitted" in risk
+
+
+def test_removal_risk_flags_unpushed_commits():
+    risk = tree_verb._removal_risk(_record(dirty=False, ahead=3))
+    assert risk is not None and "3 unpushed commit" in risk
+
+
+def test_removal_risk_combines_dirty_and_unpushed():
+    risk = tree_verb._removal_risk(_record(dirty=True, ahead=1))
+    assert risk is not None
+    assert "uncommitted" in risk and "1 unpushed commit" in risk
+
+
+def _confirm_spy(answer: bool):
+    """A confirm callback that records the prompt it was asked and returns ``answer``."""
+    calls: list[str] = []
+
+    def confirm(message: str) -> bool:
+        calls.append(message)
+        return answer
+
+    return confirm, calls
+
+
+def test_gate_removal_clean_proceeds_without_prompting():
+    confirm, calls = _confirm_spy(False)
+    block = tree_verb._gate_removal(
+        _record(dirty=False, ahead=0),
+        assume_yes=False,
+        is_tty=lambda: True,
+        confirm=confirm,
+    )
+    assert block is None  # safe -> proceed
+    assert calls == []  # never prompted
+
+
+def test_gate_removal_assume_yes_skips_prompt_even_when_risky():
+    confirm, calls = _confirm_spy(False)
+    block = tree_verb._gate_removal(
+        _record(dirty=True, ahead=2),
+        assume_yes=True,
+        is_tty=lambda: True,
+        confirm=confirm,
+    )
+    assert block is None  # --yes proceeds unconditionally
+    assert calls == []  # bypassed the prompt entirely
+
+
+def test_gate_removal_risky_tty_confirm_proceeds():
+    confirm, calls = _confirm_spy(True)
+    block = tree_verb._gate_removal(
+        _record(dirty=True, ahead=0),
+        assume_yes=False,
+        is_tty=lambda: True,
+        confirm=confirm,
+    )
+    assert block is None  # confirmed -> proceed
+    assert len(calls) == 1  # the user was asked
+
+
+def test_gate_removal_risky_tty_decline_blocks():
+    confirm, _calls = _confirm_spy(False)
+    block = tree_verb._gate_removal(
+        _record(dirty=True, ahead=0),
+        assume_yes=False,
+        is_tty=lambda: True,
+        confirm=confirm,
+    )
+    assert block is not None and "aborted" in block
+
+
+def test_gate_removal_risky_non_interactive_refuses_without_yes():
+    confirm, calls = _confirm_spy(True)
+    block = tree_verb._gate_removal(
+        _record(dirty=False, ahead=1),
+        assume_yes=False,
+        is_tty=lambda: False,
+        confirm=confirm,
+    )
+    assert block is not None and "non-interactively" in block
+    assert calls == []  # never blocks on a prompt when there is no TTY
+
+
+def test_run_remove_dirty_tree_prompts_and_decline_keeps_it(
+    tmp_path, monkeypatch, capsys
+):
+    root = tmp_path / "trees"
+    target = _make_tree_dir(root, "acme/widget/issues/7-aaaa")
+    monkeypatch.setattr(tree_verb.layout, "central_root", lambda: str(root))
+    monkeypatch.setattr(
+        tree_verb.registry,
+        "scan",
+        lambda r: [_record(path=str(target), dirty=True)],
+    )
+    confirm, calls = _confirm_spy(False)
+
+    rc = tree_verb.run_remove(str(target), confirm=confirm, is_tty=lambda: True)
+
+    assert rc == 1
+    assert target.exists()  # declined -> Tree survives
+    assert len(calls) == 1  # prompted before deleting
+    assert "aborted" in capsys.readouterr().err
+
+
+def test_run_remove_dirty_tree_confirm_deletes(tmp_path, monkeypatch, capsys):
+    root = tmp_path / "trees"
+    target = _make_tree_dir(root, "acme/widget/issues/7-aaaa")
+    monkeypatch.setattr(tree_verb.layout, "central_root", lambda: str(root))
+    monkeypatch.setattr(
+        tree_verb.registry,
+        "scan",
+        lambda r: [_record(path=str(target), dirty=True)],
+    )
+    confirm, calls = _confirm_spy(True)
+
+    rc = tree_verb.run_remove(str(target), confirm=confirm, is_tty=lambda: True)
+
+    assert rc == 0
+    assert not target.exists()  # confirmed -> removed
+    assert len(calls) == 1
+    assert "REMOVED" in capsys.readouterr().out
+
+
+def test_run_remove_unpushed_tree_prompts(tmp_path, monkeypatch, capsys):
+    # Unpushed commits (ahead > 0) are risky even with a clean working tree.
+    root = tmp_path / "trees"
+    target = _make_tree_dir(root, "acme/widget/issues/7-aaaa")
+    monkeypatch.setattr(tree_verb.layout, "central_root", lambda: str(root))
+    monkeypatch.setattr(
+        tree_verb.registry,
+        "scan",
+        lambda r: [_record(path=str(target), dirty=False, ahead=2)],
+    )
+    confirm, calls = _confirm_spy(False)
+
+    rc = tree_verb.run_remove(str(target), confirm=confirm, is_tty=lambda: True)
+
+    assert rc == 1
+    assert target.exists()
+    assert len(calls) == 1  # the unpushed work triggered the prompt
+
+
+def test_run_remove_clean_tree_deletes_without_prompt(tmp_path, monkeypatch, capsys):
+    root = tmp_path / "trees"
+    target = _make_tree_dir(root, "acme/widget/issues/7-aaaa")
+    monkeypatch.setattr(tree_verb.layout, "central_root", lambda: str(root))
+    monkeypatch.setattr(
+        tree_verb.registry,
+        "scan",
+        lambda r: [_record(path=str(target), dirty=False, ahead=0)],
+    )
+    confirm, calls = _confirm_spy(True)
+
+    rc = tree_verb.run_remove(str(target), confirm=confirm, is_tty=lambda: True)
+
+    assert rc == 0
+    assert not target.exists()
+    assert calls == []  # clean+pushed -> removed silently, no prompt
+
+
+def test_run_remove_yes_flag_skips_prompt(tmp_path, monkeypatch, capsys):
+    root = tmp_path / "trees"
+    target = _make_tree_dir(root, "acme/widget/issues/7-aaaa")
+    monkeypatch.setattr(tree_verb.layout, "central_root", lambda: str(root))
+    monkeypatch.setattr(
+        tree_verb.registry,
+        "scan",
+        lambda r: [_record(path=str(target), dirty=True, ahead=4)],
+    )
+    confirm, calls = _confirm_spy(False)
+
+    rc = tree_verb.run_remove(
+        str(target), assume_yes=True, confirm=confirm, is_tty=lambda: True
+    )
+
+    assert rc == 0
+    assert not target.exists()  # --yes removed it despite the risk
+    assert calls == []  # prompt skipped unconditionally
+
+
+def test_run_remove_risky_non_interactive_refuses_and_does_not_hang(
+    tmp_path, monkeypatch, capsys
+):
+    # No TTY and no --yes: a risky remove is refused, never blocking on a prompt.
+    root = tmp_path / "trees"
+    target = _make_tree_dir(root, "acme/widget/issues/7-aaaa")
+    monkeypatch.setattr(tree_verb.layout, "central_root", lambda: str(root))
+    monkeypatch.setattr(
+        tree_verb.registry,
+        "scan",
+        lambda r: [_record(path=str(target), dirty=True)],
+    )
+    confirm, calls = _confirm_spy(True)
+
+    rc = tree_verb.run_remove(str(target), confirm=confirm, is_tty=lambda: False)
+
+    assert rc == 1
+    assert target.exists()  # not destroyed
+    assert calls == []  # never prompted -> cannot hang
+    assert "--yes" in capsys.readouterr().err
+
+
+def test_run_remove_clean_tree_non_interactive_deletes(tmp_path, monkeypatch, capsys):
+    # The safe non-interactive path: a clean+pushed Tree is removed without --yes.
+    root = tmp_path / "trees"
+    target = _make_tree_dir(root, "acme/widget/issues/7-aaaa")
+    monkeypatch.setattr(tree_verb.layout, "central_root", lambda: str(root))
+    monkeypatch.setattr(
+        tree_verb.registry, "scan", lambda r: [_record(path=str(target))]
+    )
+
+    rc = tree_verb.run_remove(str(target), is_tty=lambda: False)
+
+    assert rc == 0
+    assert not target.exists()
+
+
 # --- tree gc -------------------------------------------------------------------
 
 
