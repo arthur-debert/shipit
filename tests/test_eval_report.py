@@ -89,6 +89,47 @@ def test_aggregate_trends_by_day(tmp_path):
     ]
 
 
+def test_aggregate_trends_by_day_is_chronological_not_by_run_count(tmp_path):
+    """The day trend must read oldest→newest even when an earlier day has FEWER
+    runs than a later one — i.e. run-count ordering would reverse them.
+
+    Seeds an older day (06-01, 1 run) and a busier newer day (06-02, 2 runs): a
+    ``runs DESC`` ordering would surface 06-02 first, so asserting 06-01 first
+    proves the day roll-up orders by the date key, not by run count.
+    """
+    base = tmp_path / "state"
+    repo = tmp_path / "repo"
+    _write(
+        base,
+        repo,
+        role="implementer",
+        tool_calls=5,
+        variant="v1",
+        timestamp="2026-06-01T08:00:00+00:00",
+    )
+    _write(
+        base,
+        repo,
+        role="implementer",
+        tool_calls=10,
+        variant="v1",
+        timestamp="2026-06-02T08:00:00+00:00",
+    )
+    _write(
+        base,
+        repo,
+        role="implementer",
+        tool_calls=20,
+        variant="v1",
+        timestamp="2026-06-02T09:00:00+00:00",
+    )
+    result = report.aggregate(store.store_path(repo, base_dir=base))
+    assert result.by_day == [
+        report.GroupRow(key="2026-06-01", runs=1, avg_tool_calls=5.0),
+        report.GroupRow(key="2026-06-02", runs=2, avg_tool_calls=15.0),
+    ]
+
+
 def test_null_variant_buckets_as_none(tmp_path):
     base = tmp_path / "state"
     repo = tmp_path / "repo"

@@ -67,12 +67,21 @@ class EvalReport:
     by_day: list[GroupRow]
 
 
-def _group_query(key_expr: str) -> str:
-    """A GROUP-BY query rolling the store up by ``key_expr``.
+#: Default roll-up ordering: most runs first, then key — a "top buckets" view for
+#: the role/variant groupings. The day trend overrides this (see ``_ORDER_BY_KEY``)
+#: because a time series must read chronologically, not by run-count.
+_ORDER_BY_RUNS = "runs DESC, key"
+#: Chronological ordering for the day roll-up: the key is the ISO date prefix, so
+#: ordering by key alone reads oldest→newest regardless of each day's run count.
+_ORDER_BY_KEY = "key"
+
+
+def _group_query(key_expr: str, order_by: str) -> str:
+    """A GROUP-BY query rolling the store up by ``key_expr``, ordered by ``order_by``.
 
     The single ``?`` parameter is the store path; the FROM clause reads the JSONL
-    directly. Ordering is deterministic (most runs first, then key) so the rendered
-    table — and the tests — are stable.
+    directly. ``order_by`` is a fixed SQL fragment (one of the module ``_ORDER_BY_*``
+    constants, never user input) so the rendered table — and the tests — are stable.
     """
     return f"""
         SELECT
@@ -81,7 +90,7 @@ def _group_query(key_expr: str) -> str:
             AVG(CAST({_TOOL_CALLS_FIELD} AS DOUBLE)) AS avg_tool_calls
         FROM read_json_auto(?, format='newline_delimited')
         GROUP BY 1
-        ORDER BY runs DESC, key
+        ORDER BY {order_by}
     """
 
 
@@ -107,9 +116,11 @@ def aggregate(store_path: str | Path) -> EvalReport:
         # 10 chars so it never depends on DuckDB parsing the timezone offset.
         day_key = f"SUBSTR(CAST({_TIMESTAMP_FIELD} AS VARCHAR), 1, 10)"
 
-        by_role = _run_group(con, role_key, str(path))
-        by_variant = _run_group(con, variant_key, str(path))
-        by_day = _run_group(con, day_key, str(path))
+        by_role = _run_group(con, role_key, str(path), _ORDER_BY_RUNS)
+        by_variant = _run_group(con, variant_key, str(path), _ORDER_BY_RUNS)
+        # The day trend orders chronologically by the date key, not by run count,
+        # so a busy older day cannot jump ahead of a quieter newer one.
+        by_day = _run_group(con, day_key, str(path), _ORDER_BY_KEY)
         total = sum(row.runs for row in by_role)
         return EvalReport(
             total_runs=total,
@@ -121,9 +132,9 @@ def aggregate(store_path: str | Path) -> EvalReport:
         con.close()
 
 
-def _run_group(con: object, key_expr: str, path: str) -> list[GroupRow]:
+def _run_group(con: object, key_expr: str, path: str, order_by: str) -> list[GroupRow]:
     """Execute the group query for ``key_expr`` and map its rows to ``GroupRow``."""
-    rows = con.execute(_group_query(key_expr), [path]).fetchall()  # type: ignore[attr-defined]
+    rows = con.execute(_group_query(key_expr, order_by), [path]).fetchall()  # type: ignore[attr-defined]
     return [
         GroupRow(key=str(key), runs=int(runs), avg_tool_calls=float(avg or 0.0))
         for key, runs, avg in rows
@@ -168,9 +179,17 @@ def _repo_root(start: str) -> str:
 
     Mirrors the hook's resolution so the verb reads exactly the store the hook
     wrote: keyed by the repo's filesystem root, not its ``owner/repo`` slug.
+
+    ``start`` may name a *file* inside the repo, but ``git -C`` needs a directory,
+    so a file path is normalized to its parent before the ``rev-parse`` — otherwise
+    git errors and we'd fall back to the file path as the store key, missing the
+    repo's actual store.
     """
+    cwd = Path(start)
+    if cwd.is_file():
+        cwd = cwd.parent
     try:
-        root = gh._git(["rev-parse", "--show-toplevel"], cwd=start).strip()
+        root = gh._git(["rev-parse", "--show-toplevel"], cwd=str(cwd)).strip()
     except gh.GhError:
         return start
     return root or start
