@@ -44,6 +44,28 @@ class GhError(RuntimeError):
     """A ``gh`` / ``git`` invocation failed (non-zero exit)."""
 
 
+class UnknownPr:
+    """Sentinel: a head's PR state could NOT be read — distinct from ``None`` (no PR).
+
+    :func:`pr_for_head` returns this singleton when ``gh`` failed for a reason OTHER
+    than "the branch has no PR" (auth/network/rate-limit), or returned empty/malformed
+    output — i.e. whenever the PR state is genuinely *undetermined*, as opposed to
+    provably absent (``None``). Keeping the two apart is the whole point of TRE02-WS03:
+    a Tree whose PR state is UNKNOWN must never be reclaimed by ``gc`` AND its presence
+    must be surfaced (the incomplete-sweep warning) rather than silently collapsed to
+    "no PR". A singleton so callers test it with ``pr is gh.UNKNOWN``.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid only
+        return "UNKNOWN"
+
+
+#: The singleton unreadable-PR-state sentinel (see :class:`UnknownPr`).
+UNKNOWN = UnknownPr()
+
+
 def _token_env(token: str | None) -> dict[str, str] | None:
     """The env override that makes ``gh`` authenticate as ``token``.
 
@@ -434,34 +456,71 @@ def git_ahead_behind(*, cwd: str) -> tuple[int, int]:
     return (ahead, behind)
 
 
-def pr_for_head(branch: str, *, cwd: str | None = None) -> dict | None:
-    """The PR whose head is ``branch`` as ``{number, state, isDraft}``, or ``None``.
+def pr_for_head(branch: str, *, cwd: str | None = None) -> dict | None | UnknownPr:
+    """The PR whose head is ``branch`` as ``{number, state, isDraft}`` — or ``None`` /
+    :data:`UNKNOWN`.
 
     Reads ``gh pr view <branch> --json number,state,isDraft`` from inside the Tree
-    (``cwd``). ``None`` when no PR is associated with the branch (``gh`` exits non-zero)
-    so ``scan`` can render "no PR" without distinguishing that from an error. Malformed
-    or non-JSON ``gh`` output is collapsed to ``None`` too: this is a scan/read boundary
-    over the whole fleet, so one bad response must not crash ``tree list`` for every Tree.
+    (``cwd``) and returns a THREE-way result, never crashing the fleet scan:
+
+    - the PR snapshot ``dict`` when a PR is read cleanly;
+    - ``None`` when the branch *provably* has no PR — ``gh`` exits non-zero with its
+      documented "no pull requests found" message;
+    - :data:`UNKNOWN` when the state is *undetermined* — any OTHER ``gh`` failure
+      (auth/network/rate-limit) or empty/malformed/non-JSON output.
+
+    The ``None`` vs :data:`UNKNOWN` split is load-bearing: an unreadable state must
+    NOT masquerade as "no PR" (which would let a conservative caller treat it like an
+    abandoned Tree). Callers surface UNKNOWN (``gc``'s incomplete-sweep warning) and
+    keep treating it conservatively, but they can now tell the two apart.
     """
     try:
         out = _run(
             ["gh", "pr", "view", branch, "--json", "number,state,isDraft"], cwd=cwd
         ).strip()
-    except GhError:
-        return None
+    except GhError as exc:
+        return None if _is_no_pr_error(exc) else UNKNOWN
     if not out:
-        return None
+        return UNKNOWN
     try:
         data = json.loads(out)
     except json.JSONDecodeError:
-        return None
+        return UNKNOWN
     if not isinstance(data, dict):
-        return None
+        return UNKNOWN
+    number = data.get("number")
+    state = data.get("state")
+    # A dict that decoded cleanly but is missing/mistyped its load-bearing fields
+    # (e.g. ``{}`` or ``{"number": null, "state": null}``) is NOT a usable PR
+    # snapshot — returning it would render as ``#None None`` in ``tree list``. Treat
+    # it as an undetermined state, the same as malformed/non-JSON output above.
+    if not isinstance(number, int) or not isinstance(state, str):
+        return UNKNOWN
     return {
-        "number": data.get("number"),
-        "state": data.get("state"),
+        "number": number,
+        "state": state,
         "isDraft": data.get("isDraft"),
     }
+
+
+# gh's exact wording when a head has no associated PR — the SAME marker
+# verbs/pr/_resolve.py keys on (_NO_PR_MARKER). Kept narrow on purpose: a
+# broader substring risks classifying an unrelated gh failure as a provable
+# no-PR and collapsing it to None instead of UNKNOWN.
+_NO_PR_MARKER = "no pull requests found for branch"
+
+
+def _is_no_pr_error(exc: GhError) -> bool:
+    """``True`` when a ``gh pr view`` failure means "this branch has no PR".
+
+    ``gh`` exits non-zero with a "no pull requests found for branch ..." message when
+    a head simply has no associated PR — the one failure that is a provable *absence*,
+    not an undetermined state. Every other ``GhError`` (auth, network, rate-limit) is
+    left as :data:`UNKNOWN`. Matched on ``gh``'s precise no-PR marker (the exit code is
+    a bare ``1`` for both cases, so the message is the only signal) — narrow on
+    purpose so an unrelated failure is never mistaken for a provable absence.
+    """
+    return _NO_PR_MARKER in str(exc).lower()
 
 
 def pr_url_for_head(branch: str, *, cwd: str | None = None) -> str | None:

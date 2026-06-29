@@ -39,6 +39,42 @@ from .registry import TreeRecord
 #: Tree never ages. Overridable per call so the boundary is exhaustively table-tested.
 DEFAULT_MAX_AGE_SECONDS = 14 * 86_400
 
+#: The duration suffixes ``parse_duration`` accepts → their length in seconds. Mirrors
+#: (and inverts) the units ``shipit.verbs.tree._format_age`` renders, so a Tree's printed
+#: age (``3d``) round-trips back through ``--threshold 3d`` to the same boundary.
+_DURATION_UNITS = {"d": 86_400, "h": 3_600, "m": 60, "s": 1}
+
+
+def parse_duration(text: str) -> float:
+    """Parse a human duration like ``14d`` / ``36h`` / ``90m`` / ``45s`` into seconds.
+
+    A small pure helper backing ``tree gc --threshold``: the inverse of
+    :func:`shipit.verbs.tree._format_age`. Accepts a positive whole number suffixed
+    with a single unit — ``d`` days, ``h`` hours, ``m`` minutes, ``s`` seconds — and
+    returns the equivalent seconds as a float (the type ``classify``'s
+    ``max_age_seconds`` expects). A missing/unknown unit, a non-positive or
+    non-integer magnitude, or empty input raises :class:`ValueError`, so a malformed
+    ``--threshold`` becomes a clean exit-1 message rather than a silent default.
+    """
+    raw = text.strip().lower()
+    if not raw:
+        raise ValueError("duration must not be empty (e.g. 14d, 36h, 90m)")
+    unit = raw[-1]
+    if unit not in _DURATION_UNITS:
+        raise ValueError(
+            f"duration {text!r} must end in one of d/h/m/s (e.g. 14d, 36h, 90m)"
+        )
+    magnitude = raw[:-1]
+    if not magnitude.isdigit():
+        raise ValueError(
+            f"duration {text!r} needs a positive whole number before its "
+            "d/h/m/s suffix (e.g. 14d, 36h, 90m)"
+        )
+    value = int(magnitude)
+    if value <= 0:
+        raise ValueError(f"duration {text!r} must be positive")
+    return float(value * _DURATION_UNITS[unit])
+
 
 @dataclass(frozen=True)
 class Cleanup:
@@ -64,6 +100,18 @@ def _is_in_flight(state: str | None) -> bool:
     return (state or "").upper() in {"OPEN", "DRAFT"}
 
 
+def _is_unknown(state: str | None) -> bool:
+    """``True`` when the PR state could not be read (``"UNKNOWN"`` in the vocabulary).
+
+    The verb layer maps an unreadable :data:`~shipit.gh.UNKNOWN` snapshot to the state
+    string ``"UNKNOWN"``. It is neither merged nor in flight, so it falls to **stale**
+    like the other ambiguous cases — never ``removable``. Recognising it explicitly
+    keeps that safety legible (and the truth table honest) rather than relying on the
+    catch-all; ``gc`` separately *warns* whenever any UNKNOWN was seen.
+    """
+    return (state or "").upper() == "UNKNOWN"
+
+
 def classify(
     records: list[TreeRecord],
     now: float,
@@ -74,8 +122,9 @@ def classify(
     """Partition ``records`` into removable / stale / keep — a pure, total decision.
 
     ``now`` is the current epoch time and ``pr_states`` maps a Tree's ``path`` to its
-    PR state on the remote (``"MERGED"`` / ``"OPEN"`` / ``"CLOSED"`` / ``"DRAFT"``, or
-    ``None`` for no PR). Keying by ``path`` — not branch — is deliberate: two Trees can
+    PR state on the remote (``"MERGED"`` / ``"OPEN"`` / ``"CLOSED"`` / ``"DRAFT"``,
+    ``"UNKNOWN"`` when the state could not be read, or ``None`` for no PR). Keying by
+    ``path`` — not branch — is deliberate: two Trees can
     share one branch (PRD), so the path is the only unique handle. Both are INPUTS, so
     this function holds no clock and does no I/O.
 
@@ -88,8 +137,10 @@ def classify(
     3. aged, clean, nothing unpushed — decide on the PR:
        - **merged** → **removable** (the one safe-to-delete case);
        - **in flight** (open/draft) → **keep** (protect active review);
-       - otherwise (no PR, or closed-without-merge) → **stale** (abandoned-but-ambiguous,
-         listed for a human, NEVER auto-removed).
+       - otherwise (no PR, closed-without-merge, or **UNKNOWN**) → **stale**
+         (abandoned-but-ambiguous, listed for a human, NEVER auto-removed). An UNKNOWN
+         state is unreadable, not provably abandoned, so it is conservatively stale and
+         ``gc`` raises an incomplete-sweep warning for it.
     """
     buckets: dict[str, list[TreeRecord]] = {"removable": [], "stale": [], "keep": []}
     for record in records:
@@ -128,4 +179,10 @@ def _bucket_for(
         return "removable"
     if _is_in_flight(state):
         return "keep"
+    # UNKNOWN (state unreadable) lands here alongside no-PR / closed-without-merge:
+    # all ambiguous, all conservatively STALE (listed, never auto-removed). UNKNOWN is
+    # called out explicitly so "never removable when we couldn't even read the PR" is a
+    # documented invariant, not an accident of the catch-all.
+    if _is_unknown(state):
+        return "stale"
     return "stale"
