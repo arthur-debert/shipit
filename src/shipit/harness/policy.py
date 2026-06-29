@@ -27,6 +27,8 @@ arguments and is fully unit-testable on its own. The boundary
 
 from __future__ import annotations
 
+import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -85,4 +87,81 @@ def decide(role: Role, path: str, is_code: bool, break_glass: bool) -> Decision:
     """
     if role is Role.COORDINATOR and is_code and not break_glass:
         return Decision(permission=Permission.DENY, reason=COORDINATOR_DENY_REASON)
+    return Decision(permission=Permission.ALLOW)
+
+
+# --- native-worktree deny guard (TRE01 / ADR-0014) -------------------------
+#
+# A second, role-independent deny surface on the SAME stable PreToolUse channel:
+# block the two ways an agent creates a NATIVE git worktree, because a Tree (the
+# isolated checkout where a write-session works) is a *dissociated clone*, not a
+# `git worktree` (ADR-0014). The deny reason redirects to `shipit tree create`.
+#
+# This is **deny, not redirect**: it does NOT couple to Claude Code's
+# `WorktreeCreate`/undocumented hook — it rides the PreToolUse `deny` surface the
+# policy module already owns. The verdict is a pure function of the tool name +
+# (for Bash) the command string; the boundary reads those off the payload.
+
+#: The native-worktree deny reason — redirects to `shipit tree create` and cites
+#: ADR-0014 so the wall teaches WHY worktrees are refused, not just THAT they are.
+WORKTREE_DENY_REASON = (
+    "Trees are dissociated clones, not git worktrees (ADR-0014). Do not create a "
+    "native git worktree — run `shipit tree create` to get an isolated checkout. "
+    "(A Tree is a full `git clone --reference --dissociate` in the central Trees "
+    "root, so it can sit on any branch — including a branch another Tree holds — "
+    "and `rm -rf` is a safe delete; a worktree can do neither.)"
+)
+
+#: Match `git worktree add` ANYWHERE in a command string (so it still fires inside
+#: a compound like `cd x && git worktree add …`), tolerating arbitrary internal
+#: whitespace. The trailing `\b` keeps it from over-matching `…addcondition`; the
+#: `add` subcommand boundary means sibling subcommands — `git worktree list`,
+#: `git worktree prune`, plain `git status` — are deliberately NOT matched.
+_GIT_WORKTREE_ADD = re.compile(r"\bgit\s+worktree\s+add\b")
+
+
+def _matches_enter_worktree(tool_name: str, command: str) -> bool:
+    """True iff the call is the `EnterWorktree` tool (case/whitespace tolerant)."""
+    return tool_name.strip().lower() == "enterworktree"
+
+
+def _matches_git_worktree_add(tool_name: str, command: str) -> bool:
+    """True iff this is a Bash call whose command runs `git worktree add`."""
+    if tool_name.strip().lower() != "bash":
+        return False
+    return _GIT_WORKTREE_ADD.search(command) is not None
+
+
+@dataclass(frozen=True)
+class WorktreeDenyRule:
+    """One native-worktree deny rule: a name + a predicate over the call.
+
+    The predicate takes `(tool_name, command)` — `command` is the Bash command
+    string (`""` for non-Bash tools) — and returns True when the call is a native
+    worktree creation that must be denied.
+    """
+
+    name: str
+    matches: Callable[[str, str], bool]
+
+
+#: The deny table — checked in order; the first match wins. Both rules carry the
+#: same redirect reason. Append a rule here to cover a new worktree-creating path.
+WORKTREE_DENY_RULES: tuple[WorktreeDenyRule, ...] = (
+    WorktreeDenyRule("EnterWorktree", _matches_enter_worktree),
+    WorktreeDenyRule("git worktree add", _matches_git_worktree_add),
+)
+
+
+def decide_worktree(tool_name: str, command: str = "") -> Decision:
+    """Decide a PreToolUse call against the native-worktree deny table. Pure.
+
+    DENY (with the `shipit tree create` redirect) iff `(tool_name, command)`
+    matches a rule in :data:`WORKTREE_DENY_RULES`; every other call — ordinary git
+    (`status`, `checkout`, `fetch`, `pull`, `push`), `git worktree list/prune`, and
+    all `gh` commands — ALLOWs. Independent of role and break-glass.
+    """
+    for rule in WORKTREE_DENY_RULES:
+        if rule.matches(tool_name, command):
+            return Decision(permission=Permission.DENY, reason=WORKTREE_DENY_REASON)
     return Decision(permission=Permission.ALLOW)

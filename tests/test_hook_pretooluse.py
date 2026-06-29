@@ -13,7 +13,7 @@ import logging
 
 import pytest
 from shipit.harness import breakglass
-from shipit.harness.policy import COORDINATOR_DENY_REASON
+from shipit.harness.policy import COORDINATOR_DENY_REASON, WORKTREE_DENY_REASON
 from shipit.verbs.hook.pretooluse import run
 
 
@@ -63,6 +63,43 @@ def test_non_edit_tool_is_allowed_silently():
     payload = json.dumps(
         {"tool_name": "Read", "tool_input": {"file_path": "src/shipit/cli.py"}}
     )
+    code, out = _run(payload)
+    assert code == 0
+    assert out == ""
+
+
+def test_enter_worktree_is_denied():
+    # The native-worktree guard fires even though EnterWorktree is not an edit
+    # tool, and regardless of role (no agent_type ⇒ coordinator).
+    payload = json.dumps({"tool_name": "EnterWorktree", "tool_input": {}})
+    code, out = _run(payload)
+    assert code == 0
+    decision = json.loads(out)["hookSpecificOutput"]
+    assert decision["permissionDecision"] == "deny"
+    assert decision["permissionDecisionReason"] == WORKTREE_DENY_REASON
+
+
+def test_bash_git_worktree_add_is_denied():
+    payload = json.dumps(
+        {
+            "agent_type": "implementer",  # role-independent: a subagent is blocked too
+            "tool_name": "Bash",
+            "tool_input": {"command": "git worktree add ../tree-x my-branch"},
+        }
+    )
+    code, out = _run(payload)
+    assert code == 0
+    decision = json.loads(out)["hookSpecificOutput"]
+    assert decision["permissionDecision"] == "deny"
+    assert decision["permissionDecisionReason"] == WORKTREE_DENY_REASON
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["git status", "git checkout -b x", "git fetch origin", "git worktree list"],
+)
+def test_ordinary_git_bash_is_allowed_silently(command):
+    payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
     code, out = _run(payload)
     assert code == 0
     assert out == ""
