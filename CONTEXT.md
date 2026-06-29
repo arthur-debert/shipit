@@ -312,6 +312,18 @@ shares one object store and forbids the same branch in two places). The unit the
 *Avoid*: "worktree" for this unit (that names the git feature we deliberately reject —
 see ADR-0014); "workspace" (collides with Cargo/pixi/editor "workspace").
 
+**Tree ownership** (extends the **Role** registry):
+Who provisions a **Tree** and who merely works in one — the role-keyed half of the
+Tree primitive. The **coordinator** provisions and assigns: its own epic Tree at
+session start, then a ready Tree handed to each **implementer** / **shepherd**
+**Run**. Those Runs START inside the Tree they were handed and **never
+self-provision** — discovering where to work is the coordinator's job, not theirs.
+**Explorers** are exempt: read-only investigation needs no file isolation, so it
+runs in the main checkout without a Tree. Enforcement is the flip side of the same
+rule — the native `git worktree` path is **denied** (PreToolUse, ADR-0014) with a
+message pointing at `shipit tree create`, so no role can drift back to the old
+shared-worktree mess.
+
 ### Build & release
 
 **Toolchain**:
