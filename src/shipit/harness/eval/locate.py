@@ -40,6 +40,17 @@ class RunFiles:
     transcript: Path
     meta: Path | None
 
+    @property
+    def is_coordinator(self) -> bool:
+        """True for the coordinator run (the session transcript, no `agent-` prefix).
+
+        Run KIND is read off the transcript filename — the SAME signal the locator
+        uses to decide whether a meta sidecar exists — NOT off whether a meta dict
+        parsed. A subagent run with a missing/unreadable sidecar is still a subagent,
+        so the coordinator-only checks (exit-hygiene) must not run for it.
+        """
+        return not self.transcript.name.startswith(_SUBAGENT_PREFIX)
+
 
 def locate_run(hook_input: Mapping[str, Any]) -> RunFiles | None:
     """Resolve the run's transcript + meta from a `Stop` / `SubagentStop` payload.
