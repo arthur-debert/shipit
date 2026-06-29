@@ -355,6 +355,115 @@ def git_push(
     _git(args, cwd=cwd)
 
 
+# --------------------------------------------------------------------------
+# git — the Tree-creation boundary (clone / fetch / checkout)
+# --------------------------------------------------------------------------
+
+
+def git_clone_dissociated(url: str, dest: str, *, reference: str) -> None:
+    """Clone ``url`` into ``dest`` as an INDEPENDENT, dissociated checkout.
+
+    ``--reference <reference>`` borrows the local checkout's object store so the
+    clone is near-instant and tiny over the wire; ``--dissociate`` then copies
+    every borrowed object into the new clone and drops the alternates link, so the
+    result shares NOTHING with the reference (no ``.git/objects/info/alternates``)
+    and is safe to ``rm -rf`` (ADR-0014). ``origin`` is set to ``url`` — the GitHub
+    URL — so ``gh``/``git`` work inside the Tree unchanged.
+    """
+    _run(["git", "clone", "--reference", reference, "--dissociate", url, dest])
+
+
+def git_fetch(*, cwd: str, remote: str = "origin") -> None:
+    """``git fetch <remote>`` inside the Tree, so its base ref is up to date."""
+    _git(["fetch", remote], cwd=cwd)
+
+
+def git_checkout_new_branch(branch: str, base: str, *, cwd: str) -> None:
+    """``git checkout -b <branch> <base>`` — cut ``branch`` from ``base`` and switch."""
+    _git(["checkout", "-b", branch, base], cwd=cwd)
+
+
+def git_remote_url(*, cwd: str, remote: str = "origin") -> str:
+    """The configured URL of ``remote`` for the checkout at ``cwd``."""
+    return _git(["remote", "get-url", remote], cwd=cwd).strip()
+
+
+# --------------------------------------------------------------------------
+# git + gh — the Tree-registry boundary (scan reads; never mutates)
+# --------------------------------------------------------------------------
+
+
+def git_upstream_ref(*, cwd: str) -> str | None:
+    """The branch's configured upstream tracking ref (e.g. ``origin/main``), or ``None``.
+
+    This is the only durable, on-disk record of what a Tree's branch is measured
+    against — there is NO manifest (PRD: the clones on disk are the whole store), so
+    ``scan`` reports the upstream git itself tracks as the Tree's *base*. ``None`` when
+    the branch has no upstream (never pushed / set), which ``scan`` surfaces as such.
+    """
+    try:
+        out = _git(
+            ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
+            cwd=cwd,
+        ).strip()
+    except GhError:
+        return None
+    return out or None
+
+
+def git_ahead_behind(*, cwd: str) -> tuple[int, int]:
+    """``(ahead, behind)`` commit counts of ``HEAD`` vs its upstream.
+
+    ``ahead`` is commits on ``HEAD`` not yet on the upstream (unpushed); ``behind`` is
+    commits on the upstream not yet on ``HEAD``. ``(0, 0)`` when there is no upstream
+    (or the rev-list fails), so a freshly-cut Tree reads as level rather than erroring.
+    """
+    try:
+        out = _git(
+            ["rev-list", "--left-right", "--count", "@{upstream}...HEAD"], cwd=cwd
+        ).strip()
+    except GhError:
+        return (0, 0)
+    parts = out.split()
+    if len(parts) != 2:
+        return (0, 0)
+    try:
+        behind, ahead = int(parts[0]), int(parts[1])
+    except ValueError:
+        return (0, 0)
+    return (ahead, behind)
+
+
+def pr_for_head(branch: str, *, cwd: str | None = None) -> dict | None:
+    """The PR whose head is ``branch`` as ``{number, state, isDraft}``, or ``None``.
+
+    Reads ``gh pr view <branch> --json number,state,isDraft`` from inside the Tree
+    (``cwd``). ``None`` when no PR is associated with the branch (``gh`` exits non-zero)
+    so ``scan`` can render "no PR" without distinguishing that from an error. Malformed
+    or non-JSON ``gh`` output is collapsed to ``None`` too: this is a scan/read boundary
+    over the whole fleet, so one bad response must not crash ``tree list`` for every Tree.
+    """
+    try:
+        out = _run(
+            ["gh", "pr", "view", branch, "--json", "number,state,isDraft"], cwd=cwd
+        ).strip()
+    except GhError:
+        return None
+    if not out:
+        return None
+    try:
+        data = json.loads(out)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    return {
+        "number": data.get("number"),
+        "state": data.get("state"),
+        "isDraft": data.get("isDraft"),
+    }
+
+
 def pr_url_for_head(branch: str, *, cwd: str | None = None) -> str | None:
     """The URL of the open PR whose head is ``branch``, or ``None``."""
     out = _run(

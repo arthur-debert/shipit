@@ -30,7 +30,13 @@ import click
 
 from ...harness import breakglass
 from ...harness.codepath import is_code_path
-from ...harness.policy import Decision, Permission, decide, is_edit_tool
+from ...harness.policy import (
+    Decision,
+    Permission,
+    decide,
+    decide_worktree,
+    is_edit_tool,
+)
 from ...harness.role import resolve_role
 
 logger = logging.getLogger("shipit.hook")
@@ -57,6 +63,17 @@ def run(stdin: TextIO | None = None, stdout: TextIO | None = None) -> int:
         raw = (stdin if stdin is not None else sys.stdin).read()
         payload = json.loads(raw)
         tool_name = str(payload.get("tool_name", ""))
+        # First gate: the native-worktree deny (TRE01 / ADR-0014). Independent of
+        # role and break-glass, and checked BEFORE the edit-tool gate because the
+        # worktree-creating calls (EnterWorktree / Bash) are not edit tools and
+        # would otherwise be allowed straight through.
+        worktree = decide_worktree(
+            tool_name, _extract_command(payload.get("tool_input"))
+        )
+        if worktree.permission is Permission.DENY:
+            logger.debug("pretooluse DENY: native worktree blocked tool=%s", tool_name)
+            _emit_deny(worktree.reason, out)
+            return 0
         if not is_edit_tool(tool_name):
             return 0  # not an edit operation — allow silently, never block.
         role = resolve_role(payload)
@@ -100,6 +117,17 @@ def _extract_path(tool_input: object) -> str:
     if not isinstance(tool_input, dict):
         return ""
     return str(tool_input.get("file_path") or tool_input.get("notebook_path") or "")
+
+
+def _extract_command(tool_input: object) -> str:
+    """Pull the shell command off a Bash `tool_input` payload, or `""` if absent.
+
+    The native-worktree guard inspects this for `git worktree add`. A non-dict
+    input (a non-Bash tool, or malformed) yields `""`, which matches no rule.
+    """
+    if not isinstance(tool_input, dict):
+        return ""
+    return str(tool_input.get("command") or "")
 
 
 def _break_glass_armed() -> bool:

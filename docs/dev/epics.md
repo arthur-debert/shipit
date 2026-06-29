@@ -10,11 +10,11 @@ Before execution, a new feature is planned via `/shipit-planning` — the orches
 
 ## 1. Information gathering
 
-The coordinator is briefed as in the single-task cycle's information-gathering step [in](../../AGENTS.lex) — via the epic tracker issue, the PRD, or a chat with the maintainer. It does the general reading/research, CREATES the epic branch (`EPIC/umbrella` — [see](./naming.lex)), and asks the maintainer for decisions/clarifications as needed.
+The coordinator is briefed as in the single-task cycle's information-gathering step [in](../../AGENTS.lex) — via the epic tracker issue, the PRD, or a chat with the maintainer. It does the general reading/research, CREATES the epic branch (`EPIC/umbrella` — [see](./naming.lex)) by provisioning its own isolated **Tree** to manage that branch (`shipit tree create`; a dissociated clone, never a native `git worktree` — ADR-0014 / \[../prd/where-to-do-work.md\]), and asks the maintainer for decisions/clarifications as needed.
 
 ## 2. Delegation per workstream
 
-The coordinator does NOT implement. It spins one IMPLEMENTER subagent per workstream — each scoped by its own Work Stream issue — and runs the [role](../../AGENTS.lex) split for each: the coordinator CREATES the WS branch off the epic branch (`EPIC/WSnn` — [see](./naming.lex)); the implementer stops at PR-open, the only topology change being that its draft PR targets the EPIC branch (not `main`); the coordinator owns the wait and the flip; a fresh shepherd handles each addressing round. The 6 / nitpick breaker applies to every workstream PR.
+The coordinator does NOT implement. It spins one IMPLEMENTER subagent per workstream — each scoped by its own Work Stream issue — and runs the [role](../../AGENTS.lex) split for each: the coordinator CREATES the WS branch off the epic branch by provisioning the implementer with a ready **Tree** (`shipit tree create --epic E --ws N` → branch `EPIC/WSnn` — [see](./naming.lex)); the implementer stops at PR-open, the only topology change being that its draft PR targets the EPIC branch (not `main`); the coordinator owns the wait and the flip; a fresh shepherd handles each addressing round. The 6 / nitpick breaker applies to every workstream PR.
 
 Parallel implementation, serialized integration. Subagents implement eligible workstreams concurrently per the dependency graph, but the coordinator merges into the epic branch one at a time. After each merge, in-flight WS branches pull the new epic head and re-green before their own PR flips READY. Workstreams may overlap files; contention is resolved at merge time, never by pre-partitioning.
 
