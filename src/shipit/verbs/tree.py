@@ -15,13 +15,16 @@ lives in :mod:`shipit.tree`.
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 import time
+from pathlib import Path
 
 import click
 
 from .. import gh
-from ..tree import layout, registry
+from ..tree import cleanup, layout, registry
+from ..tree.cleanup import Cleanup
 from ..tree.create import Tree, create, new_agent_hash
 from ..tree.layout import TreeSpec
 from ..tree.registry import TreeRecord
@@ -196,3 +199,131 @@ def _format_age(seconds: float) -> str:
         if secs >= unit_seconds:
             return f"{secs // unit_seconds}{suffix}"
     return f"{secs}s"
+
+
+@tree.command(name="remove")
+@click.argument("target")
+def remove_cmd(target: str) -> None:
+    """Delete a single Tree identified by TARGET (its path or its directory name).
+
+    A Tree is a disposable, fully-independent clone, so removing it is just deleting
+    its directory — no worktree to prune, no shared state to corrupt. TARGET must
+    resolve to exactly one Tree under the central root; an unknown or ambiguous TARGET
+    is a clean error (the Tree is left untouched).
+    """
+    raise SystemExit(run_remove(target))
+
+
+def run_remove(target: str) -> int:
+    """Resolve TARGET to one Tree and delete its clone dir. Returns an exit code.
+
+    Returns 0 after removing the one matching Tree; 1 with a stderr message when no
+    Tree matches or more than one does (never guess which to delete).
+    """
+    root = layout.central_root()
+    records = registry.scan(root)
+    matches = _match_trees(records, target)
+    if not matches:
+        print(f"tree remove: no Tree matching {target!r}", file=sys.stderr)
+        return 1
+    if len(matches) > 1:
+        paths = ", ".join(record.path for record in matches)
+        print(
+            f"tree remove: {target!r} is ambiguous — matches {paths}", file=sys.stderr
+        )
+        return 1
+    record = matches[0]
+    try:
+        shutil.rmtree(record.path)
+    except OSError as exc:
+        print(f"tree remove: could not remove {record.path}: {exc}", file=sys.stderr)
+        return 1
+    print(f"REMOVED {record.path}")
+    return 0
+
+
+def _match_trees(records: list[TreeRecord], target: str) -> list[TreeRecord]:
+    """Trees whose absolute path equals TARGET or whose dir name equals TARGET.
+
+    Matching on the basename lets a coordinator name a Tree by its short id
+    (``7-aaaa``) without typing the whole central-root path; matching the full path
+    stays exact. The path form takes precedence — an exact path match is unambiguous.
+    """
+    by_path = [record for record in records if record.path == target]
+    if by_path:
+        return by_path
+    return [record for record in records if Path(record.path).name == target]
+
+
+@tree.command(name="gc")
+def gc_cmd() -> None:
+    """Sweep the central root: remove only provably-safe Trees, list ambiguous ones.
+
+    Scans every Tree, classifies the fleet, then deletes ONLY the Trees whose PR is
+    merged, working tree clean, nothing unpushed, and which are aged past the
+    threshold. Trees that merely look abandoned are LISTED as stale (never deleted),
+    and anything with live or local work is left untouched. Conservative by default.
+    """
+    raise SystemExit(run_gc())
+
+
+def run_gc() -> int:
+    """Scan, classify, then remove only the removable set and list the stale set.
+
+    Returns 0 always: an empty root or a fleet with nothing to reclaim is a valid
+    outcome, not an error. Repo identity is irrelevant — ``gc`` spans the whole
+    central root, like ``list``.
+    """
+    root = layout.central_root()
+    records = registry.scan(root)
+    pr_states = {record.path: _pr_state(record) for record in records}
+    decision = cleanup.classify(records, now=time.time(), pr_states=pr_states)
+    _emit_gc(decision)
+    return 0
+
+
+def _pr_state(record: TreeRecord) -> str | None:
+    """The PR's remote state (``"MERGED"`` / ``"OPEN"`` / ``"CLOSED"`` …) for one Tree.
+
+    Reads through the same ``gh`` boundary the registry uses, from inside the clone, so
+    ``gc`` sees the authoritative merge state rather than re-parsing the rendered label.
+    A draft open PR is normalized to ``"DRAFT"`` (mirroring ``registry._pr_label``) so the
+    fleet has ONE state vocabulary and ``cleanup.classify``'s draft branch is reachable.
+    ``None`` when the Tree has no branch or no PR.
+    """
+    if not record.branch:
+        return None
+    pr = gh.pr_for_head(record.branch, cwd=record.path)
+    if not pr:
+        return None
+    state = pr.get("state")
+    if not isinstance(state, str):
+        return None
+    state = state.upper()
+    if state == "OPEN" and pr.get("isDraft"):
+        return "DRAFT"
+    return state
+
+
+def _emit_gc(decision: Cleanup) -> None:
+    """Delete the removable Trees, then report what was removed, kept stale, or kept.
+
+    Deletion is best-effort per Tree: if one ``rmtree`` fails (a read-only file, a lock,
+    a vanished dir), the failure goes to stderr and the sweep CONTINUES to the next Tree
+    rather than aborting mid-fleet. The summary's ``removed`` count reflects what actually
+    came off disk, not what was merely planned.
+    """
+    removed = 0
+    for record in decision.removable:
+        try:
+            shutil.rmtree(record.path)
+        except OSError as exc:
+            print(f"FAILED  {record.path}: {exc}", file=sys.stderr)
+            continue
+        removed += 1
+        print(f"REMOVED {record.path}")
+    for record in decision.stale:
+        print(f"STALE   {record.path} (ambiguous — left for review, not removed)")
+    stale = len(decision.stale)
+    kept = len(decision.keep)
+    print(f"gc: removed {removed}, stale {stale}, kept {kept}")
