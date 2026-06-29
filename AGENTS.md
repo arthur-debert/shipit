@@ -51,7 +51,7 @@ The coordinator reads/researches to brief the work, then delegates. It does not 
 
 ### 1.2. Implementation (the implementer subagent)
 
-The coordinator CREATES the branch off the integration base — `origin/main` (`fix/<issue>-<slug>`) for standalone work, the epic branch for a workstream — by provisioning the implementer an isolated **Tree** to work in (`shipit tree create`), and spawns an IMPLEMENTER to do the task + tests. A Tree is a dissociated clone, NOT a native `git worktree` — that path is denied (ADR-0014) — so concurrent agents never collide on one checkout; [see](./docs/prd/where-to-do-work.md). The implementer runs the checks (`shipit lint`) and tests (`pixi run test`) green BEFORE opening the PR — CI runs the same as required checks, so local green is necessary for CI green.
+The coordinator CREATES the branch off the integration base — `origin/main` (`fix/<issue>-<slug>`) for standalone work, the epic branch for a workstream — by provisioning the implementer with an isolated **Tree** to work in (`shipit tree create`), and spawns an IMPLEMENTER to do the task + tests. A Tree is a dissociated clone, NOT a native `git worktree` — that path is denied (ADR-0014) — so concurrent agents never collide on one checkout; [see](./docs/prd/where-to-do-work.md). The implementer runs the checks (`shipit lint`) and tests (`pixi run test`) green BEFORE opening the PR — CI runs the same as required checks, so local green is necessary for CI green.
 
 Check fidelity: a check that reads ambient local state (a sibling checkout, a machine-only tool, an env var CI lacks) passes locally and lies about CI. If a check needs something, make CI provide it.
 

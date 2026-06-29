@@ -91,15 +91,15 @@ Scope
         work in. A Tree is a fully-independent clone of the repo under a central
         root outside any checkout (`~/workspace/trees/<org>/<repo>/…`), so
         concurrent agents (and the human) never collide on one shared working
-        tree. It is a real clone, NOT a `git worktree` — the native `git
-        worktree` path is denied so agents cannot drift back to the old
-        `.claude/worktrees` mess (ADR-0014).
+        tree. It is a real clone, NOT a `git worktree` — the native
+        `git worktree` path is denied so agents cannot drift back to the
+        old `.claude/worktrees` mess (ADR-0014).
 
         The surface is four verbs:
 
         - `shipit tree create` provisions a ready Tree — its own clone, on a
           fresh branch, deps installed, gitignored-but-needed files copied in —
-          then prints a READY summary. It takes exactly one shape: `--issue N`
+          then prints a READY summary. It takes exactly one of three shapes: `--issue N`
           (branch `fix/<n>-<slug>`), `--epic E --ws N` (branch `E/WSnn`, cut from
           `origin/E/umbrella`), or `--branch NAME` (verbatim, cut from
           `origin/main`).

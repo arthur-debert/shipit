@@ -6,7 +6,7 @@ on disk, the **branch** to check out, and the **base** ref to cut it from — wi
 no I/O, so the truth table is unit-tested directly (Testing Decisions in the PRD).
 
 :func:`plan` resolves EVERY spec shape — ``--issue N [--slug S]``,
-``--epic E --ws N [--slug S]``, and freeform ``--branch <name>`` (naming.lex §3).
+``--epic E --ws N [--slug S]``, and freeform ``--branch NAME`` (naming.lex §3).
 :class:`TreeSpec` stays a single typed entry point: adding a shape is adding a field
 plus a branch in :func:`plan`, not reshaping callers.
 

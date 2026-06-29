@@ -75,7 +75,7 @@ The PR lifecycle (draft -> ready -> stop):
 
         The coordinator CREATES the branch off the integration base — `origin/main`
         (`fix/<issue>-<slug>`) for standalone work, the epic branch for a workstream — by
-        provisioning the implementer an isolated *Tree* to work in (`shipit tree create`),
+        provisioning the implementer with an isolated *Tree* to work in (`shipit tree create`),
         and spawns an IMPLEMENTER to do the task + tests. A Tree is a dissociated clone,
         NOT a native `git worktree` — that path is denied (ADR-0014) — so concurrent
         agents never collide on one checkout; see [./docs/prd/where-to-do-work.md]. The
