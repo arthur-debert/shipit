@@ -22,6 +22,7 @@ def test_coordinator_run_resolves_session_transcript_with_no_meta(tmp_path):
     transcript = _write(tmp_path / "57d92339-f3c3-45e8.jsonl")
     run = locate_run({"transcript_path": str(transcript)})
     assert run == RunFiles(transcript=transcript, meta=None)
+    assert run.is_coordinator is True
 
 
 def test_subagent_run_resolves_agent_transcript_and_its_meta(tmp_path):
@@ -41,6 +42,9 @@ def test_subagent_without_meta_sidecar_degrades_to_no_meta(tmp_path):
     assert run is not None
     assert run.transcript == transcript
     assert run.meta is None
+    # Run KIND comes off the filename, NOT off meta: a sidecar-less subagent is still
+    # a subagent, so the coordinator-only exit-hygiene check stays off for it.
+    assert run.is_coordinator is False
 
 
 def test_missing_transcript_path_returns_none():

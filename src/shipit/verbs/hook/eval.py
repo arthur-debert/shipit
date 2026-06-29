@@ -62,9 +62,11 @@ def run(stdin: TextIO | None = None) -> int:
         meta = _read_meta(run_files.meta)
         repo_root = _repo_root(str(payload.get("cwd") or os.getcwd()))
         metrics = extract(run_files.transcript)
-        if meta is None:
-            # The coordinator run (no meta sidecar) gets the one live check —
-            # exit-hygiene (clean worktree + no stray PIDs) at its terminal hook.
+        if run_files.is_coordinator:
+            # The coordinator run gets the one live check — exit-hygiene (clean
+            # worktree + no stray PIDs) at its terminal hook. Gated on run KIND, not
+            # on `meta is None`: a subagent with an unreadable/missing meta sidecar
+            # also parses to None but must NOT run this coordinator-only check.
             metrics["exit_hygiene"] = exit_hygiene(repo_root)
         record = build(
             metrics=metrics,

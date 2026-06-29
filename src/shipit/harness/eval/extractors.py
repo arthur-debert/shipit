@@ -39,9 +39,10 @@ from pathlib import Path
 from typing import Any
 
 from ... import gh
+from .. import breakglass
 
-#: A single (tool, args) fingerprint occurring MORE than this many times in a run
-#: is the repeated-call stuck-loop signal (PRD: "same tool+args hash >2× in a turn").
+#: A single (tool, args) fingerprint occurring MORE than this many times WITHIN ONE
+#: TURN is the repeated-call stuck-loop signal (PRD: "same tool+args hash >2× in a turn").
 _REPEAT_THRESHOLD = 2
 
 #: A single model turn running MORE than this many internal agentic iterations
@@ -52,11 +53,13 @@ _ITERATION_THRESHOLD = 8
 #: skips git's pre-commit/pre-push hooks; ``--no-hooks`` is the lefthook/husky form.
 _BYPASS_MARKERS = ("--no-verify", "--no-hooks")
 
-#: HAR01's break-glass escape (`SHIPIT_BREAK_GLASS=<truthy>` in a command). A
-#: matching assignment whose value is NOT one of the falsey spellings the
-#: pretooluse hook disarms on is a counted use; ``=0`` / ``=false`` etc. disarm it.
-_BREAK_GLASS_RE = re.compile(r"SHIPIT_BREAK_GLASS\s*=\s*(\S+)")
-_FALSEY = frozenset({"0", "false", "no", "off", '""', "''"})
+#: HAR01's break-glass escape (`SHIPIT_BREAK_GLASS=<truthy>` in a command). The
+#: value capture is a single shell token that STOPS at whitespace, quotes, braces,
+#: and backslashes — so a grep over the JSON-serialized tool input does not swallow
+#: the surrounding JSON syntax (e.g. `{"command": "SHIPIT_BREAK_GLASS=0"}` captures
+#: ``0``, not ``0"}``). Whether a captured value arms or disarms the escape is
+#: decided by :mod:`shipit.harness.breakglass`, shared with the pretooluse hook.
+_BREAK_GLASS_RE = re.compile(rf"{re.escape(breakglass.ENV)}\s*=\s*([^\s\"'\\{{}}]+)")
 
 
 def extract(transcript: Path) -> dict[str, Any]:
@@ -164,8 +167,11 @@ def stuck_loop(events: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
     Two independent signals, OR'd into ``detected``:
 
       - **repeated identical calls** — the max number of times any single
-        ``(tool, args-hash)`` fingerprint occurs in the run; ``> 2`` is the
-        "same tool+args hash >2×" signal (an agent re-issuing the exact same call).
+        ``(tool, args-hash)`` fingerprint occurs WITHIN ONE TURN; ``> 2`` is the
+        "same tool+args hash >2× in a turn" signal (an agent re-issuing the exact
+        same call inside a single step). Counting per-turn (not across the whole
+        run) is deliberate: a call legitimately repeated once per turn — e.g.
+        ``Bash pytest`` every turn — is NORMAL and must not flag.
       - **runaway iterations** — the max ``message.usage.iterations`` length across
         the run's turns; ``> 8`` is a single model turn that spun internally.
 
@@ -173,11 +179,13 @@ def stuck_loop(events: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
     so the record carries *why* a run was flagged, not just that it was.
     """
     events = list(events)
-    counts: dict[tuple[str, str], int] = {}
-    for block in _tool_use_blocks(events):
-        fp = _fingerprint(block)
-        counts[fp] = counts.get(fp, 0) + 1
-    max_repeated = max(counts.values(), default=0)
+    max_repeated = 0
+    for blocks in _turn_tool_use_blocks(events):
+        counts: dict[tuple[str, str], int] = {}
+        for block in blocks:
+            fp = _fingerprint(block)
+            counts[fp] = counts.get(fp, 0) + 1
+        max_repeated = max(max_repeated, max(counts.values(), default=0))
     max_iterations = max(_turn_iteration_counts(events), default=0)
     return {
         "detected": max_repeated > _REPEAT_THRESHOLD
@@ -237,7 +245,10 @@ def break_glass_count(events: Iterable[Mapping[str, Any]]) -> int:
     count = 0
     for block in _tool_use_blocks(events):
         for value in _BREAK_GLASS_RE.findall(_input_text(block)):
-            if value.strip().lower() not in _FALSEY:
+            # Strip any stray surrounding quotes, then defer the armed/disarmed
+            # decision to the shared break-glass semantics (same falsey set as the
+            # pretooluse hook, including the empty string).
+            if breakglass.is_armed(value.strip("\"'")):
                 count += 1
                 break  # one armed use per call, not per assignment occurrence.
     return count
@@ -275,6 +286,11 @@ def token_usage(events: Iterable[Mapping[str, Any]]) -> dict[str, int] | None:
     input variants); ``total_tokens`` is input+output. Returns ``None`` when NO
     turn logged usage, so an absent metric reads as absent rather than a hollow
     all-zero block (PRD: "token totals if logged … else omit/None").
+
+    Streamed parts of one response share a ``message.id`` and may each carry the
+    same usage block, so usage is consumed ONCE per id (mirroring :func:`turn_count`)
+    rather than summed per event — otherwise a single turn's tokens double-count.
+    Only assistant messages are summed, matching the documented scope.
     """
     fields = {
         "input_tokens": 0,
@@ -283,13 +299,19 @@ def token_usage(events: Iterable[Mapping[str, Any]]) -> dict[str, int] | None:
         "cache_creation_tokens": 0,
     }
     seen = False
+    seen_ids: set[str] = set()
     for event in events:
         message = event.get("message")
-        if not isinstance(message, Mapping):
+        if not isinstance(message, Mapping) or message.get("role") != "assistant":
             continue
         usage = message.get("usage")
         if not isinstance(usage, Mapping):
             continue
+        msg_id = message.get("id")
+        if isinstance(msg_id, str):
+            if msg_id in seen_ids:
+                continue
+            seen_ids.add(msg_id)
         seen = True
         fields["input_tokens"] += _int(usage.get("input_tokens"))
         fields["output_tokens"] += _int(usage.get("output_tokens"))
@@ -384,6 +406,38 @@ def _tool_use_blocks(
             yield block
 
 
+def _turn_tool_use_blocks(
+    events: Iterable[Mapping[str, Any]],
+) -> Iterator[list[Mapping[str, Any]]]:
+    """Yield, per assistant TURN, the list of that turn's ``tool_use`` blocks.
+
+    A turn is one assistant message. Streamed parts that share a ``message.id`` are
+    the SAME turn and contribute once — taken from the first event bearing that id,
+    mirroring :func:`turn_count`'s dedup so the per-turn stuck-loop count agrees with
+    the turn count on what a "turn" is. An assistant event with no id is its own
+    turn; non-assistant events contribute nothing.
+    """
+    seen_ids: set[str] = set()
+    for event in events:
+        message = event.get("message")
+        if not isinstance(message, Mapping) or message.get("role") != "assistant":
+            continue
+        msg_id = message.get("id")
+        if isinstance(msg_id, str):
+            if msg_id in seen_ids:
+                continue
+            seen_ids.add(msg_id)
+        content = message.get("content")
+        if not isinstance(content, list):
+            yield []
+            continue
+        yield [
+            block
+            for block in content
+            if isinstance(block, Mapping) and block.get("type") == "tool_use"
+        ]
+
+
 def _fingerprint(block: Mapping[str, Any]) -> tuple[str, str]:
     """A ``(tool-name, canonical-args)`` fingerprint for one tool_use block.
 
@@ -408,16 +462,18 @@ def _input_text(block: Mapping[str, Any]) -> str:
     if isinstance(inp, str):
         return inp
     try:
-        return json.dumps(inp, default=str)
+        # sort_keys mirrors _fingerprint's canonicalization, so grep/text metrics
+        # are deterministic regardless of input key order.
+        return json.dumps(inp, sort_keys=True, default=str)
     except (TypeError, ValueError):
         return repr(inp)
 
 
 def _turn_iteration_counts(events: Iterable[Mapping[str, Any]]) -> Iterator[int]:
-    """Yield the ``message.usage.iterations`` length for each turn that logs it."""
+    """Yield the ``message.usage.iterations`` length for each assistant turn that logs it."""
     for event in events:
         message = event.get("message")
-        if not isinstance(message, Mapping):
+        if not isinstance(message, Mapping) or message.get("role") != "assistant":
             continue
         usage = message.get("usage")
         if not isinstance(usage, Mapping):

@@ -126,20 +126,27 @@ def test_stuck_loop_clean_run_is_not_flagged():
 
 
 def test_stuck_loop_flags_same_tool_args_repeated_more_than_twice():
-    # The exact same call three times (>2) trips the repeated-call fingerprint.
-    events = [_assistant(_bash("pytest -q")) for _ in range(3)]
+    # The exact same call three times WITHIN ONE TURN (>2) trips the repeated-call
+    # fingerprint — the signal is per-turn (one assistant message's content list).
+    events = [_assistant(_bash("pytest -q"), _bash("pytest -q"), _bash("pytest -q"))]
     result = stuck_loop(events)
     assert result["max_repeated_calls"] == 3
     assert result["detected"] is True
 
 
+def test_stuck_loop_is_per_turn_not_across_the_run():
+    # The same call once per turn across many turns is NORMAL (e.g. `Bash pytest`
+    # every turn). The repeated-call signal resets per turn, so this is not stuck.
+    events = [_assistant(_bash("pytest -q")) for _ in range(5)]
+    result = stuck_loop(events)
+    assert result["max_repeated_calls"] == 1
+    assert result["detected"] is False
+
+
 def test_stuck_loop_does_not_flag_same_tool_with_different_args():
-    # Same tool, different args twice each → max repeat 2, not stuck.
-    events = [
-        _assistant(_bash("ls")),
-        _assistant(_bash("ls")),
-        _assistant(_bash("pwd")),
-    ]
+    # One turn with the same call twice + a third different call → max repeat 2,
+    # at the >2 threshold but not over it, so not stuck.
+    events = [_assistant(_bash("ls"), _bash("ls"), _bash("pwd"))]
     result = stuck_loop(events)
     assert result["max_repeated_calls"] == 2
     assert result["detected"] is False
@@ -213,7 +220,13 @@ def test_no_verify_count_one_per_call_even_with_multiple_markers():
         ("SHIPIT_BREAK_GLASS=true git commit", 1),
         ("SHIPIT_BREAK_GLASS=0 git commit", 0),  # disarmed
         ("SHIPIT_BREAK_GLASS=false git commit", 0),
+        ("SHIPIT_BREAK_GLASS=FALSE git commit", 0),  # case-insensitive falsey
         ("git commit -m normal", 0),
+        # Value at the END of the command: the input serializes to
+        # `{"command": "SHIPIT_BREAK_GLASS=0"}`, so the capture must STOP at the
+        # closing quote/brace (`0`, not `0"}`) — else a disarmed use miscounts as armed.
+        ("SHIPIT_BREAK_GLASS=0", 0),
+        ("SHIPIT_BREAK_GLASS=1", 1),
     ],
 )
 def test_break_glass_count_counts_armed_uses_only(command, expected):
@@ -274,6 +287,33 @@ def test_token_usage_is_none_when_nothing_logged():
     assert token_usage([_assistant(_bash("x"))]) is None
 
 
+def test_token_usage_dedupes_streamed_parts_sharing_a_message_id():
+    # Two streamed parts of ONE response share a message id and each carry the same
+    # usage block; usage is consumed once per id (not summed per event), mirroring
+    # turn_count — otherwise a single turn's tokens would double-count.
+    usage = {"input_tokens": 100, "output_tokens": 20}
+    events = [
+        _assistant({"type": "text", "text": "a"}, usage=usage, msg_id="m1"),
+        _assistant(_bash("x"), usage=usage, msg_id="m1"),
+    ]
+    assert token_usage(events) == {
+        "input_tokens": 100,
+        "output_tokens": 20,
+        "cache_read_tokens": 0,
+        "cache_creation_tokens": 0,
+        "total_tokens": 120,
+    }
+
+
+def test_token_usage_ignores_non_assistant_usage():
+    # A usage block on a non-assistant message is not summed (role-guarded), so a
+    # transcript carrying only that logs no usage at all.
+    events = [
+        {"type": "user", "message": {"role": "user", "usage": {"input_tokens": 99}}}
+    ]
+    assert token_usage(events) is None
+
+
 # --------------------------------------------------------------------------- #
 # extract() over a real JSONL transcript file (the four PRD fixtures)
 # --------------------------------------------------------------------------- #
@@ -302,7 +342,9 @@ def test_extract_clean_run(tmp_path):
 
 
 def test_extract_stuck_run(tmp_path):
-    events = [_assistant(_bash("pytest -q")) for _ in range(4)]
+    # Four identical calls WITHIN ONE TURN — the per-turn repeated-call signal —
+    # which also reads as three back-to-back retries in the flat call sequence.
+    events = [_assistant(*[_bash("pytest -q") for _ in range(4)])]
     metrics = extract(_write_transcript(tmp_path, events))
     assert metrics["stuck_loop"]["detected"] is True
     assert metrics["stuck_loop"]["max_repeated_calls"] == 4

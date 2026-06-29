@@ -69,6 +69,28 @@ def test_subagent_stop_writes_a_record_with_role_and_metric(state_dir, tmp_path)
     assert rec["eval.exit_hygiene.worktree_clean"] is None
 
 
+def test_subagent_with_missing_meta_gets_no_exit_hygiene(
+    state_dir, tmp_path, monkeypatch
+):
+    # A subagent run whose meta sidecar is missing parses to meta=None just like the
+    # coordinator — but it is STILL a subagent (agent-* transcript), so the
+    # coordinator-only exit-hygiene check must NOT run. The git read is patched to a
+    # clean tree so, were the check wrongly run, worktree_clean would be True; the
+    # None assertion proves the gate is on run KIND, not on `meta is None`.
+    monkeypatch.setattr(gh, "git_status_porcelain", lambda *, cwd: "")
+    sub = tmp_path / "session" / "subagents"
+    transcript = sub / "agent-nometa.jsonl"
+    _write_transcript(transcript, "Read")  # deliberately no agent-nometa.meta.json
+    payload = {"transcript_path": str(transcript), "cwd": str(tmp_path)}
+
+    assert run(stdin=io.StringIO(json.dumps(payload))) == 0
+
+    rec = _records(state_dir)[0]
+    # Subagent role falls back to coordinator when meta is absent (pre-existing), but
+    # the exit-hygiene block must stay unstamped.
+    assert rec["eval.exit_hygiene.worktree_clean"] is None
+
+
 def test_stop_writes_a_coordinator_record(state_dir, tmp_path):
     transcript = tmp_path / "57d92339.jsonl"
     _write_transcript(transcript, "Read")
