@@ -44,14 +44,14 @@ Align on what's to be done before any code is touched — and before delegating.
 - Task: a GitHub issue, a handoff artifact, or a maintainer message. A
   maintainer-directed quick fix needs NO issue first — a direct instruction is its own authorization; ship the fix PR.
 - Contextualize: read the description + related code/resources.
-- Clarify: if information is missing or a real decision exists, surface it
-  — propose a preferred option, don't only ask.
+- Clarify: if information is missing or a real PRODUCT/SCOPE decision
+  exists, surface it — propose a preferred option, don't only ask. The dev cycle and the epic branch/merge topology (\[\#2\]) are FIXED policy, never a choice to put to the human — never offer a PR-strategy menu.
 
 The coordinator reads/researches to brief the work, then delegates. It does not implement.
 
 ### 1.2. Implementation (the implementer subagent)
 
-The coordinator CREATES the branch off `main` (`fix/<issue>`) and spawns an IMPLEMENTER to do the task + tests. The implementer runs the checks (`shipit lint`) and tests (`pixi run test`) green BEFORE opening the PR — CI runs the same as required checks, so local green is necessary for CI green.
+The coordinator CREATES the branch off the integration base — `origin/main` (`fix/<issue>`) for standalone work, the epic branch for a workstream — and spawns an IMPLEMENTER to do the task + tests. The implementer runs the checks (`shipit lint`) and tests (`pixi run test`) green BEFORE opening the PR — CI runs the same as required checks, so local green is necessary for CI green.
 
 Check fidelity: a check that reads ambient local state (a sibling checkout, a machine-only tool, an env var CI lacks) passes locally and lies about CI. If a check needs something, make CI provide it.
 
@@ -70,7 +70,7 @@ Why split: an implementer that also shepherds drags its full implementation cont
 
 ### 1.4. Validation
 
-The single PR targets `main`; the coordinator drives it to READY and stops — the HUMAN merges. More work needed -\> back to draft (\`shipit pr ready --undo\`), re-green, re-flip.
+The single PR targets its base (`main`, or the epic branch for a workstream); the coordinator drives it to READY and stops — the HUMAN merges. More work needed -\> back to draft (`shipit pr ready --undo`), re-green, re-flip.
 
 ### Engine-owned policy — trust the tool, don't carry it in your head:
 
@@ -79,6 +79,8 @@ The single PR targets `main`; the coordinator drives it to READY and stops — t
 ## 2. Epics (multiple PRs)
 
 An epic — a feature of multiple PRs — is the SAME coordinator + role-split model [as](#1), differing ONLY in branch/merge topology: one **epic branch** + one umbrella PR; each workstream is a single-task cycle (\[\#1\]) whose PR targets the epic branch (not `main`). The coordinator merges each READY workstream PR INTO the epic branch on its own authority (parallel implement, serial integrate); the HUMAN's one checkpoint is the umbrella PR (epic branch -\> `main`). Convergence (clear epic-owned fallouts) and a docs pass precede the umbrella.
+
+This topology is FIXED policy, not a choice: the coordinator does NOT ask the human to pick a PR strategy (one big PR, one PR per workstream to `main`, an epic branch) — a multi-PR feature runs on the epic branch, full stop.
 
 A feature is planned before execution via `/shipit-planning` (ideation -\> ADRs -\> PRD -\> docs PR, then epic/WS decomposition -\> issues).
 
