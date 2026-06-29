@@ -802,3 +802,76 @@ def test_pr_state_normalizes_draft(monkeypatch):
     record = _record(path="/trees/x", branch="b1")
 
     assert tree_verb._pr_state(record) == "DRAFT"
+
+
+def test_pr_state_unknown_when_gh_state_unreadable(monkeypatch):
+    # An unreadable PR state (gh.pr_for_head -> UNKNOWN) surfaces as the "UNKNOWN"
+    # string, distinct from None (no branch / no PR), so gc can both treat it
+    # conservatively and warn.
+    monkeypatch.setattr(gh, "pr_for_head", lambda branch, *, cwd=None: gh.UNKNOWN)
+    record = _record(path="/trees/x", branch="b1")
+
+    assert tree_verb._pr_state(record) == "UNKNOWN"
+
+
+def test_pr_state_none_when_no_branch_or_no_pr(monkeypatch):
+    # No branch -> None without even hitting gh; a branch with no PR -> None too.
+    assert tree_verb._pr_state(_record(path="/trees/x", branch=None)) is None
+    monkeypatch.setattr(gh, "pr_for_head", lambda branch, *, cwd=None: None)
+    assert tree_verb._pr_state(_record(path="/trees/y", branch="b1")) is None
+
+
+def test_run_gc_warns_on_incomplete_sweep(tmp_path, monkeypatch, capsys):
+    # When any Tree's PR state is UNKNOWN, gc prints the incomplete-sweep warning so
+    # the operator knows the sweep did not see the whole fleet. The UNKNOWN Tree is
+    # classified conservatively (stale -> never removed).
+    root = tmp_path / "trees"
+    merged = _make_tree_dir(root, "acme/widget/issues/1-merged")
+    unknown = _make_tree_dir(root, "acme/widget/issues/2-unknown")
+    aged = 0.0
+    records = [
+        _record(path=str(merged), branch="b1", dirty=False, ahead=0, mtime=aged),
+        _record(path=str(unknown), branch="b2", dirty=False, ahead=0, mtime=aged),
+    ]
+    pr_by_branch = {
+        "b1": {"number": 1, "state": "MERGED", "isDraft": False},
+        "b2": gh.UNKNOWN,
+    }
+    monkeypatch.setattr(tree_verb.layout, "central_root", lambda: str(root))
+    monkeypatch.setattr(tree_verb.registry, "scan", lambda r: records)
+    monkeypatch.setattr(
+        gh, "pr_for_head", lambda branch, *, cwd=None: pr_by_branch.get(branch)
+    )
+
+    rc = tree_verb.run_gc()
+
+    assert rc == 0
+    assert not merged.exists()  # the readable, merged Tree is reclaimed
+    assert unknown.exists()  # the unreadable Tree is left untouched (conservative)
+    captured = capsys.readouterr()
+    assert "swept 1 of 2; 1 skipped (state unknown)" in captured.err
+    # The summary still counts it as stale, not removed.
+    assert "removed 1, stale 1, kept 0" in captured.out
+
+
+def test_run_gc_no_warning_when_no_unknown(tmp_path, monkeypatch, capsys):
+    # A sweep where every PR state is readable prints NO incomplete-sweep warning.
+    root = tmp_path / "trees"
+    merged = _make_tree_dir(root, "acme/widget/issues/1-merged")
+    records = [
+        _record(path=str(merged), branch="b1", dirty=False, ahead=0, mtime=0.0),
+    ]
+    monkeypatch.setattr(tree_verb.layout, "central_root", lambda: str(root))
+    monkeypatch.setattr(tree_verb.registry, "scan", lambda r: records)
+    monkeypatch.setattr(
+        gh,
+        "pr_for_head",
+        lambda branch, *, cwd=None: {"number": 1, "state": "MERGED", "isDraft": False},
+    )
+
+    rc = tree_verb.run_gc()
+
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "skipped (state unknown)" not in captured.err
+    assert "skipped (state unknown)" not in captured.out

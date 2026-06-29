@@ -484,40 +484,52 @@ def run_gc() -> int:
     records = registry.scan(root)
     pr_states = {record.path: _pr_state(record) for record in records}
     decision = cleanup.classify(records, now=time.time(), pr_states=pr_states)
-    _emit_gc(decision)
+    unknown = sum(1 for state in pr_states.values() if state == "UNKNOWN")
+    _emit_gc(decision, total=len(records), unknown=unknown)
     return 0
 
 
 def _pr_state(record: TreeRecord) -> str | None:
-    """The PR's remote state (``"MERGED"`` / ``"OPEN"`` / ``"CLOSED"`` …) for one Tree.
+    """The PR's remote state (``"MERGED"`` / ``"OPEN"`` / ``"CLOSED"`` / ``"UNKNOWN"`` …)
+    for one Tree.
 
     Reads through the same ``gh`` boundary the registry uses, from inside the clone, so
     ``gc`` sees the authoritative merge state rather than re-parsing the rendered label.
     A draft open PR is normalized to ``"DRAFT"`` (mirroring ``registry._pr_label``) so the
     fleet has ONE state vocabulary and ``cleanup.classify``'s draft branch is reachable.
-    ``None`` when the Tree has no branch or no PR.
+    An unreadable state (``gh.pr_for_head`` returns :data:`~shipit.gh.UNKNOWN`, or a PR
+    with a malformed state field) maps to ``"UNKNOWN"`` — distinct from ``None`` (no
+    branch / no PR) — so ``gc`` can both treat it conservatively and warn about it.
     """
     if not record.branch:
         return None
     pr = gh.pr_for_head(record.branch, cwd=record.path)
+    if pr is gh.UNKNOWN:
+        return "UNKNOWN"
     if not pr:
         return None
     state = pr.get("state")
     if not isinstance(state, str):
-        return None
+        return "UNKNOWN"
     state = state.upper()
     if state == "OPEN" and pr.get("isDraft"):
         return "DRAFT"
     return state
 
 
-def _emit_gc(decision: Cleanup) -> None:
+def _emit_gc(decision: Cleanup, *, total: int, unknown: int) -> None:
     """Delete the removable Trees, then report what was removed, kept stale, or kept.
 
     Deletion is best-effort per Tree: if one ``rmtree`` fails (a read-only file, a lock,
     a vanished dir), the failure goes to stderr and the sweep CONTINUES to the next Tree
     rather than aborting mid-fleet. The summary's ``removed`` count reflects what actually
     came off disk, not what was merely planned.
+
+    ``total`` is the number of Trees swept and ``unknown`` how many had an unreadable PR
+    state. When any were unknown, a ``swept N of M; K skipped (state unknown)`` warning is
+    emitted to stderr so an INCOMPLETE sweep is visible — those Trees were classified
+    conservatively (never removed), but a transient ``gh`` failure could be hiding a
+    reclaimable Tree, and the operator should know the sweep did not see the whole fleet.
     """
     removed = 0
     for record in decision.removable:
@@ -533,3 +545,9 @@ def _emit_gc(decision: Cleanup) -> None:
     stale = len(decision.stale)
     kept = len(decision.keep)
     print(f"gc: removed {removed}, stale {stale}, kept {kept}")
+    if unknown:
+        swept = total - unknown
+        print(
+            f"swept {swept} of {total}; {unknown} skipped (state unknown)",
+            file=sys.stderr,
+        )
