@@ -105,14 +105,23 @@ Scope
           `origin/main`).
         - `shipit tree list` renders the whole fleet — path, branch, base, age,
           dirty?, PR state — derived purely by scanning the central root (no
-          manifest).
+          manifest). A Tree whose PR state cannot be read shows `UNKNOWN`,
+          distinct from a Tree with no PR.
         - `shipit tree remove <target>` deletes one Tree by path or directory
-          name; a Tree is a disposable clone, so removal is just a directory
-          delete.
+          name. A clean, fully-pushed Tree is a disposable clone, so it is
+          removed without a prompt; but when the delete would discard work
+          living ONLY in that clone — uncommitted changes or unpushed commits —
+          it is gated behind a confirmation. `--yes`/`-y` skips that prompt and
+          is the non-interactive default.
         - `shipit tree gc` sweeps the fleet conservatively — it removes only
           Trees whose PR is merged, working tree clean, nothing unpushed, and
           aged past a threshold; ambiguous ones are listed as stale, never
-          auto-removed.
+          auto-removed. `--dry-run` previews the exact removable/stale/keep
+          partition the real sweep would act on and deletes nothing;
+          `--threshold <duration>` (e.g. `14d`, `36h`) overrides the default
+          14-day age boundary. A Tree whose PR state is `UNKNOWN` is treated as
+          stale (never auto-removed), and the sweep reports
+          `swept N of M; K skipped (state unknown)` whenever any was seen.
 
         See [./docs/prd/where-to-do-work.md] for the full design, and
         [./docs/adr/0014-trees-dissociated-clones-central-root.md] +
