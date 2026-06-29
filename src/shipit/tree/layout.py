@@ -45,11 +45,25 @@ _SLUG_SEP = re.compile(r"[\s/.:]+")
 def central_root() -> Path:
     """The central root every Tree lives under (env override, else the default).
 
-    Expanded (``~`` and any ``$VARS``) and returned absolute. Pure read of the
+    Expanded (``~`` and any ``$VARS``) and guaranteed absolute. Pure read of the
     environment — no directory is created here; the orchestrator makes the leaf.
+
+    A non-absolute ``SHIPIT_TREES_ROOT`` is rejected with :class:`ValueError`
+    rather than resolved against the cwd: a relative root would place Trees under
+    wherever ``shipit`` happens to be invoked from — potentially inside the source
+    checkout — which breaks the central-root/isolation invariant this whole
+    feature rests on (PRD Solution; ADR-0014). The default already expands to an
+    absolute path.
     """
     raw = os.environ.get(CENTRAL_ROOT_ENV) or DEFAULT_CENTRAL_ROOT
-    return Path(os.path.expandvars(raw)).expanduser()
+    root = Path(os.path.expandvars(raw)).expanduser()
+    if not root.is_absolute():
+        raise ValueError(
+            f"{CENTRAL_ROOT_ENV} must be an absolute path so Trees live OUTSIDE "
+            f"every repo (got {raw!r}); a relative root would place Trees under the "
+            "current working directory and make cleanup cwd-dependent."
+        )
+    return root
 
 
 def sanitize_slug(slug: str) -> str:

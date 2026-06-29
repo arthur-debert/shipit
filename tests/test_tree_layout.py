@@ -109,6 +109,14 @@ def test_central_root_default_when_unset(monkeypatch):
     assert layout.central_root() == Path("~/workspace/trees").expanduser()
 
 
+def test_central_root_rejects_relative_override(monkeypatch):
+    # A relative override would place Trees under the cwd (possibly inside the
+    # source checkout), breaking the isolation invariant — reject it loudly.
+    monkeypatch.setenv(layout.CENTRAL_ROOT_ENV, "relative/trees")
+    with pytest.raises(ValueError, match="absolute"):
+        layout.central_root()
+
+
 def test_plan_uses_central_root_when_spec_root_is_none(monkeypatch):
     monkeypatch.setenv(layout.CENTRAL_ROOT_ENV, "/env/trees")
     p = plan(_issue_spec(root=None))

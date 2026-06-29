@@ -22,6 +22,7 @@ path end to end, while the planning truth table is unit-tested in ``layout``.
 from __future__ import annotations
 
 import secrets
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -56,14 +57,22 @@ def create(spec: TreeSpec, *, source_repo: str, github_url: str) -> Tree:
     at. The leaf directory's parents are created first (``git clone`` makes only
     the leaf), then the clone is dissociated, fetched, and put on the planned
     branch cut from the planned base.
+
+    Materialization is atomic from the caller's view: if any step after the clone
+    fails, the half-built leaf is removed before the error propagates, so a failed
+    ``create`` never leaves a partial Tree on disk for the next run to trip over.
     """
     tree_plan = plan(spec)
     dest = tree_plan.dir
     dest.parent.mkdir(parents=True, exist_ok=True)
 
-    gh.git_clone_dissociated(github_url, str(dest), reference=source_repo)
-    gh.git_fetch(cwd=str(dest))
-    gh.git_checkout_new_branch(tree_plan.branch, tree_plan.base, cwd=str(dest))
+    try:
+        gh.git_clone_dissociated(github_url, str(dest), reference=source_repo)
+        gh.git_fetch(cwd=str(dest))
+        gh.git_checkout_new_branch(tree_plan.branch, tree_plan.base, cwd=str(dest))
+    except BaseException:
+        shutil.rmtree(dest, ignore_errors=True)
+        raise
 
     return Tree(path=str(dest), branch=tree_plan.branch, base=tree_plan.base)
 

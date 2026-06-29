@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from shipit import gh
 from shipit.tree.create import create, create_from_source
 from shipit.tree.layout import TreeSpec
 
@@ -108,3 +109,22 @@ def test_create_from_source_resolves_origin_url(
     dest = Path(tree.path)
     assert _git(["remote", "get-url", "origin"], cwd=dest) == str(remote)
     assert not (dest / ".git" / "objects" / "info" / "alternates").exists()
+
+
+def test_create_rolls_back_partial_tree_on_failure(
+    tmp_path: Path, remote: Path, reference: Path, monkeypatch
+):
+    # If a post-clone step fails, the half-built leaf must not survive — otherwise
+    # the next run trips over a partial directory.
+    spec = _spec(tmp_path)
+
+    def boom(*args, **kwargs):
+        raise gh.GhError("checkout blew up")
+
+    monkeypatch.setattr(gh, "git_checkout_new_branch", boom)
+
+    with pytest.raises(gh.GhError):
+        create(spec, source_repo=str(reference), github_url=str(remote))
+
+    dest = tmp_path / "trees" / "acme" / "widget" / "issues" / "123-abcd1234"
+    assert not dest.exists()
