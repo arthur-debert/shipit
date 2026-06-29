@@ -3,9 +3,9 @@
 A NESTED click group: ``shipit tree <verb>`` is the surface for isolated Trees.
 ``create`` exposes the full spec grammar (naming.lex §3) — the ``--issue N``,
 ``--epic E --ws N``, and freeform ``--branch NAME`` shapes — each resolved by the
-pure planner; ``list`` / ``remove`` / ``gc`` are sibling verbs, each added as one
-``from .`` import + one ``@tree.command`` block, so concurrent work streams touch
-disjoint lines.
+pure planner; ``list`` / ``remove`` / ``gc`` are sibling verbs, each its own
+``@tree.command`` block in this module, so concurrent work streams touch disjoint
+lines.
 
 The verb is thin: resolve the ambient repo identity (org/repo, local checkout,
 origin URL) at the gh/git boundary, hand a typed :class:`TreeSpec` to the pure
@@ -69,7 +69,11 @@ def tree() -> None:
 @click.option(
     "--slug",
     default="",
-    help="Optional short slug for the branch/dir name; sanitized to lowercase-dashed.",
+    help=(
+        "Optional short label, sanitized to lowercase-dashed. Per shape: --issue "
+        "puts it in the branch (fix/<n>-<slug>); --epic rides the Tree dir only "
+        "(branch stays E/WSnn); ignored for --branch."
+    ),
 )
 def create_cmd(
     issue: int | None,
