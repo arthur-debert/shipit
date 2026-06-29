@@ -52,6 +52,135 @@ def test_run_create_happy_path(monkeypatch, capsys):
     }
 
 
+def _patch_identity(monkeypatch):
+    """Mock the gh boundary so run_create resolves a fixed repo identity (acme/widget)."""
+    monkeypatch.setattr(gh, "repo_root", lambda: "/repo")
+    monkeypatch.setattr(gh, "current_repo", lambda: "acme/widget")
+    monkeypatch.setattr(gh, "git_remote_url", lambda *, cwd: "git@example:acme/widget")
+
+
+def _capture_create(monkeypatch, tree: Tree | None = None) -> dict:
+    """Replace the orchestrator with a spy; return the dict it records the spec into."""
+    captured: dict = {}
+    result = tree or Tree(path="/repo/trees/x", branch="b", base="origin/main")
+
+    def fake_create(spec, *, source_repo, github_url):
+        captured["spec"] = spec
+        captured["source_repo"] = source_repo
+        captured["github_url"] = github_url
+        return result
+
+    monkeypatch.setattr(tree_verb, "create", fake_create)
+    return captured
+
+
+def test_run_create_epic_ws_shape_builds_spec(monkeypatch, capsys):
+    _patch_identity(monkeypatch)
+    captured = _capture_create(
+        monkeypatch,
+        Tree(path="/repo/trees/ws", branch="HAR02/WS02", base="origin/HAR02/umbrella"),
+    )
+
+    rc = tree_verb.run_create(epic="HAR02", ws=2, slug="Tiling")
+
+    assert rc == 0
+    spec = captured["spec"]
+    # The epic shape rides through as the typed fields the planner dispatches on.
+    assert spec.epic == "HAR02"
+    assert spec.ws == 2
+    assert spec.slug == "Tiling"
+    assert spec.issue is None and spec.branch is None
+    out = capsys.readouterr().out
+    assert out.splitlines()[0] == "READY"
+    payload = json.loads("\n".join(out.splitlines()[1:]))
+    assert payload == {
+        "path": "/repo/trees/ws",
+        "branch": "HAR02/WS02",
+        "base": "origin/HAR02/umbrella",
+    }
+
+
+def test_run_create_branch_shape_builds_spec(monkeypatch, capsys):
+    _patch_identity(monkeypatch)
+    captured = _capture_create(
+        monkeypatch,
+        Tree(path="/repo/trees/spike", branch="spike/foo", base="origin/main"),
+    )
+
+    rc = tree_verb.run_create(branch="spike/foo")
+
+    assert rc == 0
+    spec = captured["spec"]
+    assert spec.branch == "spike/foo"
+    assert spec.issue is None and spec.epic is None and spec.ws is None
+    out = capsys.readouterr().out
+    assert out.splitlines()[0] == "READY"
+    payload = json.loads("\n".join(out.splitlines()[1:]))
+    assert payload["branch"] == "spike/foo"
+
+
+def test_run_create_issue_shape_unchanged(monkeypatch, capsys):
+    # The --issue path keeps its exact behavior now that it shares the verb with the
+    # other two shapes: same spec fields, same READY summary.
+    _patch_identity(monkeypatch)
+    captured = _capture_create(
+        monkeypatch,
+        Tree(path="/repo/trees/i", branch="fix/7-thing", base="origin/main"),
+    )
+
+    rc = tree_verb.run_create(issue=7, slug="Thing")
+
+    assert rc == 0
+    spec = captured["spec"]
+    assert spec.issue == 7
+    assert spec.slug == "Thing"
+    assert spec.epic is None and spec.ws is None and spec.branch is None
+
+
+def test_run_create_zero_shapes_is_exit_1(monkeypatch, capsys):
+    # No gh mocks needed: the flag-grammar gate fires before any repo resolution.
+    rc = tree_verb.run_create()
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "exactly one shape" in err
+    assert "got none" in err
+
+
+def test_run_create_multiple_shapes_is_exit_1(monkeypatch, capsys):
+    rc = tree_verb.run_create(issue=7, branch="spike/foo")
+
+    assert rc == 1
+    assert "exactly one shape" in capsys.readouterr().err
+
+
+def test_run_create_partial_epic_missing_ws_is_exit_1(monkeypatch, capsys):
+    rc = tree_verb.run_create(epic="HAR02")
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "needs both --epic and --ws" in err
+
+
+def test_run_create_partial_epic_missing_epic_is_exit_1(monkeypatch, capsys):
+    rc = tree_verb.run_create(ws=2)
+
+    assert rc == 1
+    assert "needs both --epic and --ws" in capsys.readouterr().err
+
+
+def test_run_create_bad_epic_code_surfaces_planner_error(monkeypatch, capsys):
+    # A well-formed flag grammar but a domain-invalid epic code: the gate passes,
+    # then the planner's ValueError (raised by plan() before any clone side effect)
+    # surfaces as a clean exit-1, not a traceback.
+    _patch_identity(monkeypatch)
+
+    rc = tree_verb.run_create(epic="bad/code", ws=2)
+
+    assert rc == 1
+    assert "tree create:" in capsys.readouterr().err
+
+
 def test_run_create_not_inside_checkout(monkeypatch, capsys):
     monkeypatch.setattr(gh, "repo_root", lambda: None)
 
