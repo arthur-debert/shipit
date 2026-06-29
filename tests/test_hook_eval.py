@@ -11,6 +11,7 @@ import io
 import json
 
 import pytest
+from shipit import gh
 from shipit.harness.eval import store
 from shipit.verbs.hook.eval import run
 
@@ -59,8 +60,11 @@ def test_subagent_stop_writes_a_record_with_role_and_metric(state_dir, tmp_path)
     rec = records[0]
     assert rec["gen_ai.agent.name"] == "implementer"
     assert rec["eval.tool_call_count"] == 3
+    assert rec["eval.tool_call_vector"] == {"Read": 1, "Bash": 1, "Edit": 1}
     assert rec["eval.variant"] is None  # WS01 placeholder
     assert "git.commit" in rec
+    # A subagent run carries no exit-hygiene block (that check is coordinator-only).
+    assert rec["eval.exit_hygiene.worktree_clean"] is None
 
 
 def test_stop_writes_a_coordinator_record(state_dir, tmp_path):
@@ -74,6 +78,21 @@ def test_stop_writes_a_coordinator_record(state_dir, tmp_path):
     assert len(records) == 1
     assert records[0]["gen_ai.agent.name"] == "coordinator"
     assert records[0]["eval.tool_call_count"] == 1
+
+
+def test_stop_record_carries_coordinator_exit_hygiene(state_dir, tmp_path, monkeypatch):
+    # The coordinator run runs the one live check; a clean porcelain → worktree_clean.
+    monkeypatch.setattr(gh, "git_status_porcelain", lambda *, cwd: "")
+    transcript = tmp_path / "57d92339.jsonl"
+    _write_transcript(transcript, "Read")
+    payload = {"transcript_path": str(transcript), "cwd": str(tmp_path)}
+
+    assert run(stdin=io.StringIO(json.dumps(payload))) == 0
+
+    rec = _records(state_dir)[0]
+    assert rec["eval.exit_hygiene.worktree_clean"] is True
+    assert rec["eval.exit_hygiene.dirty_file_count"] == 0
+    assert rec["eval.exit_hygiene.stray_pid_count"] == 0
 
 
 @pytest.mark.parametrize(

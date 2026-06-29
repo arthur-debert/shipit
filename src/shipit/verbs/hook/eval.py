@@ -26,7 +26,7 @@ from typing import TextIO
 import click
 
 from ... import gh
-from ...harness.eval.extractors import extract
+from ...harness.eval.extractors import exit_hygiene, extract
 from ...harness.eval.locate import locate_run
 from ...harness.eval.record import build
 from ...harness.eval.store import append_record
@@ -59,8 +59,12 @@ def run(stdin: TextIO | None = None) -> int:
         if run_files is None:
             return 0  # nothing named to evaluate — no-op.
         meta = _read_meta(run_files.meta)
-        metrics = extract(run_files.transcript)
         repo_root = _repo_root(str(payload.get("cwd") or os.getcwd()))
+        metrics = extract(run_files.transcript)
+        if meta is None:
+            # The coordinator run (no meta sidecar) gets the one live check —
+            # exit-hygiene (clean worktree + no stray PIDs) at its terminal hook.
+            metrics["exit_hygiene"] = exit_hygiene(repo_root)
         record = build(
             metrics=metrics,
             meta=meta,

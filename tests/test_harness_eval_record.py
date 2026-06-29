@@ -73,3 +73,64 @@ def test_record_round_trips_through_json():
         timestamp="2026-06-29T00:00:00+00:00",
     )
     assert json.loads(json.dumps(record)) == record
+
+
+def test_record_folds_in_full_ws02_metric_set():
+    # The WS02 metrics fold into stable OTel `gen_ai.usage.*` + harness `eval.*` names.
+    record = build(
+        metrics={
+            "tool_call_count": 9,
+            "tool_call_vector": {"Bash": 5, "Read": 4},
+            "turn_count": 6,
+            "stuck_loop": {
+                "detected": True,
+                "max_repeated_calls": 4,
+                "max_turn_iterations": 9,
+            },
+            "no_verify_count": 1,
+            "break_glass_count": 2,
+            "error_count": 3,
+            "retry_count": 1,
+            "token_usage": {
+                "input_tokens": 100,
+                "output_tokens": 20,
+                "cache_read_tokens": 5,
+                "cache_creation_tokens": 7,
+                "total_tokens": 120,
+            },
+            "exit_hygiene": {
+                "worktree_clean": False,
+                "dirty_file_count": 2,
+                "stray_pid_count": 1,
+            },
+        },
+        meta=None,
+        variant=None,
+        commit="c",
+        timestamp="t",
+    )
+    assert record["eval.tool_call_vector"] == {"Bash": 5, "Read": 4}
+    assert record["eval.turn_count"] == 6
+    assert record["eval.stuck_loop"] is True
+    assert record["eval.max_repeated_calls"] == 4
+    assert record["eval.max_turn_iterations"] == 9
+    assert record["eval.no_verify_count"] == 1
+    assert record["eval.break_glass_count"] == 2
+    assert record["eval.error_count"] == 3
+    assert record["eval.retry_count"] == 1
+    assert record["gen_ai.usage.input_tokens"] == 100
+    assert record["gen_ai.usage.output_tokens"] == 20
+    assert record["eval.usage.total_tokens"] == 120
+    assert record["eval.exit_hygiene.worktree_clean"] is False
+    assert record["eval.exit_hygiene.dirty_file_count"] == 2
+    assert record["eval.exit_hygiene.stray_pid_count"] == 1
+
+
+def test_record_token_and_hygiene_fields_are_none_when_absent():
+    # No tokens logged and no exit-hygiene block (subagent) → None, not hollow zeros.
+    record = build(metrics={}, meta=None, variant=None, commit="c", timestamp="t")
+    assert record["gen_ai.usage.input_tokens"] is None
+    assert record["eval.usage.total_tokens"] is None
+    assert record["eval.exit_hygiene.worktree_clean"] is None
+    assert record["eval.stuck_loop"] is False
+    assert record["eval.turn_count"] == 0
