@@ -16,12 +16,15 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 
 import click
 
 from .. import gh
+from ..tree import layout, registry
 from ..tree.create import Tree, create, new_agent_hash
 from ..tree.layout import TreeSpec
+from ..tree.registry import TreeRecord
 
 
 @click.group(
@@ -102,3 +105,93 @@ def _emit_ready(result: Tree) -> None:
             indent=2,
         )
     )
+
+
+@tree.command(name="list")
+def list_cmd() -> None:
+    """List every Tree under the central root with its at-a-glance state.
+
+    Renders the whole fleet — path, branch, base, age, dirty?, PR state — derived
+    purely by SCANNING the central root (no manifest); the state is whatever the
+    clones on disk say right now.
+    """
+    raise SystemExit(run_list())
+
+
+def run_list() -> int:
+    """Scan the central root and render the Tree fleet. Returns an exit code.
+
+    Always returns 0: an empty or missing root is a valid "no Trees yet" state, not
+    an error. Repo identity is irrelevant here — the central root spans every repo,
+    so ``list`` shows the whole fleet (PRD user story 14/22).
+    """
+    root = layout.central_root()
+    records = registry.scan(root)
+    _render_list(records, now=time.time())
+    return 0
+
+
+#: The fleet table's columns, in render order: each is ``(header, field-extractor)``.
+#: A new column is one tuple here — the renderer widths every column to its content.
+_LIST_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("PATH", "path"),
+    ("BRANCH", "branch"),
+    ("BASE", "base"),
+    ("AGE", "age"),
+    ("DIRTY", "dirty"),
+    ("PR", "pr"),
+)
+
+
+def _render_list(records: list[TreeRecord], *, now: float) -> None:
+    """Print the fleet as a fixed-width table (one Tree per row), or a hint when empty."""
+    if not records:
+        print("No Trees under the central root.")
+        return
+    headers = [header for header, _ in _LIST_COLUMNS]
+    rows = [_row_cells(record, now=now) for record in records]
+    widths = [
+        max(len(headers[col]), *(len(row[col]) for row in rows))
+        for col in range(len(headers))
+    ]
+    print(_format_row(headers, widths))
+    for row in rows:
+        print(_format_row(row, widths))
+
+
+def _row_cells(record: TreeRecord, *, now: float) -> list[str]:
+    """The rendered string cells for one Tree row, in :data:`_LIST_COLUMNS` order."""
+    values = {
+        "path": record.path,
+        "branch": record.branch or "(detached)",
+        "base": _base_cell(record),
+        "age": _format_age(now - record.mtime),
+        "dirty": "dirty" if record.dirty else "clean",
+        "pr": record.pr or "-",
+    }
+    return [values[field] for _, field in _LIST_COLUMNS]
+
+
+def _base_cell(record: TreeRecord) -> str:
+    """The BASE cell: the upstream ref, annotated with ahead/behind when diverged."""
+    base = record.base or "-"
+    marks = []
+    if record.ahead:
+        marks.append(f"+{record.ahead}")
+    if record.behind:
+        marks.append(f"-{record.behind}")
+    return f"{base} ({'/'.join(marks)})" if marks else base
+
+
+def _format_row(cells: list[str], widths: list[int]) -> str:
+    """Left-justify each cell to its column width and join with two spaces."""
+    return "  ".join(cell.ljust(widths[col]) for col, cell in enumerate(cells)).rstrip()
+
+
+def _format_age(seconds: float) -> str:
+    """A compact human age (``"3d"``, ``"4h"``, ``"5m"``, ``"12s"``) for a Tree's mtime."""
+    secs = int(max(seconds, 0))
+    for unit_seconds, suffix in ((86400, "d"), (3600, "h"), (60, "m")):
+        if secs >= unit_seconds:
+            return f"{secs // unit_seconds}{suffix}"
+    return f"{secs}s"
