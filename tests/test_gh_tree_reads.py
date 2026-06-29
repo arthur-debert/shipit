@@ -59,6 +59,18 @@ def test_pr_for_head_none_when_no_pr(monkeypatch):
     assert gh.pr_for_head("fix/12", cwd="/x") is None
 
 
+def test_pr_for_head_unknown_on_loose_no_pr_phrasing(monkeypatch):
+    # The no-PR check keys on gh's PRECISE marker ("no pull requests found for
+    # branch"), not the loose substring "no pull request": an unrelated failure
+    # that merely mentions a pull request must stay UNDETERMINED (UNKNOWN), never
+    # collapse to a provable absence (None) that would suppress the gc warning.
+    def boom(args, *, cwd=None):
+        raise gh.GhError("gh pr view exited 1: could not resolve no pull request here")
+
+    monkeypatch.setattr(gh, "_run", boom)
+    assert gh.pr_for_head("fix/12", cwd="/x") is gh.UNKNOWN
+
+
 def test_pr_for_head_unknown_on_non_no_pr_error(monkeypatch):
     # Any OTHER gh failure (auth/network/rate-limit) leaves the state UNDETERMINED:
     # it returns the first-class UNKNOWN sentinel, NOT None ("no PR").

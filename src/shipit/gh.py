@@ -495,16 +495,24 @@ def pr_for_head(branch: str, *, cwd: str | None = None) -> dict | None | Unknown
     }
 
 
+# gh's exact wording when a head has no associated PR — the SAME marker
+# verbs/pr/_resolve.py keys on (_NO_PR_MARKER). Kept narrow on purpose: a
+# broader substring risks classifying an unrelated gh failure as a provable
+# no-PR and collapsing it to None instead of UNKNOWN.
+_NO_PR_MARKER = "no pull requests found for branch"
+
+
 def _is_no_pr_error(exc: GhError) -> bool:
     """``True`` when a ``gh pr view`` failure means "this branch has no PR".
 
     ``gh`` exits non-zero with a "no pull requests found for branch ..." message when
     a head simply has no associated PR — the one failure that is a provable *absence*,
     not an undetermined state. Every other ``GhError`` (auth, network, rate-limit) is
-    left as :data:`UNKNOWN`. Matched on the message substring because that is the only
-    signal ``gh`` gives (the exit code is a bare ``1`` for both cases).
+    left as :data:`UNKNOWN`. Matched on ``gh``'s precise no-PR marker (the exit code is
+    a bare ``1`` for both cases, so the message is the only signal) — narrow on
+    purpose so an unrelated failure is never mistaken for a provable absence.
     """
-    return "no pull request" in str(exc).lower()
+    return _NO_PR_MARKER in str(exc).lower()
 
 
 def pr_url_for_head(branch: str, *, cwd: str | None = None) -> str | None:
