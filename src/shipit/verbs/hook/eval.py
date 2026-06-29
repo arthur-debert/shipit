@@ -74,6 +74,7 @@ def run(stdin: TextIO | None = None) -> int:
             variant=_variant(meta),
             commit=_git_commit(repo_root),
             timestamp=_now_iso(),
+            is_coordinator=run_files.is_coordinator,
         )
         append_record(record, repo_root)
     except Exception:  # noqa: BLE001 — fail-open is the whole point.

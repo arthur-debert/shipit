@@ -12,7 +12,14 @@ import io
 
 from shipit.harness.eval import store
 from shipit.harness.eval.record import build
+from shipit.harness.eval.variant import Variant
 from shipit.verbs.eval import report
+
+
+def _variant(content_hash, label=None):
+    """The real persisted variant shape — what ``Variant.as_record()`` produces and
+    the hook writes (a nested object, NOT a plain string)."""
+    return Variant(content_hash=content_hash, label=label).as_record()
 
 
 def _write(base, repo, *, role, tool_calls, variant, timestamp):
@@ -24,13 +31,21 @@ def _write(base, repo, *, role, tool_calls, variant, timestamp):
         variant=variant,
         commit="abc123",
         timestamp=timestamp,
+        is_coordinator=role == "coordinator",
     )
     store.append_record(record, repo, base_dir=base)
 
 
+#: The variant content-hashes the seeded runs carry — the real ``sha256:`` key shape.
+_V1 = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+_V2 = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+
+
 def _seed(tmp_path):
-    """Three records: two implementer runs (variant v1, day 06-01), one
-    coordinator run (variant v2, day 06-02)."""
+    """Three records: two implementer runs (variant V1, day 06-01), one
+    coordinator run (variant V2, day 06-02). Variants are the real nested-object
+    shape the hook persists, so the by-variant grouping is exercised against the
+    actual stored type, not a plain-string stand-in."""
     base = tmp_path / "state"
     repo = tmp_path / "repo"
     _write(
@@ -38,7 +53,7 @@ def _seed(tmp_path):
         repo,
         role="implementer",
         tool_calls=10,
-        variant="v1",
+        variant=_variant(_V1),
         timestamp="2026-06-01T08:00:00+00:00",
     )
     _write(
@@ -46,7 +61,7 @@ def _seed(tmp_path):
         repo,
         role="implementer",
         tool_calls=20,
-        variant="v1",
+        variant=_variant(_V1),
         timestamp="2026-06-01T09:00:00+00:00",
     )
     _write(
@@ -54,7 +69,7 @@ def _seed(tmp_path):
         repo,
         role="coordinator",
         tool_calls=6,
-        variant="v2",
+        variant=_variant(_V2),
         timestamp="2026-06-02T10:00:00+00:00",
     )
     return base, repo, store.store_path(repo, base_dir=base)
@@ -72,11 +87,43 @@ def test_aggregate_groups_by_role(tmp_path):
 
 
 def test_aggregate_groups_by_variant(tmp_path):
+    # The real persisted variant is a nested object; grouping must key on its
+    # content-hash (a null label collapses to the bare hash), NOT the struct's
+    # text repr. So the V1 runs pool under the V1 content-hash, etc.
     _, _, path = _seed(tmp_path)
     result = report.aggregate(path)
     assert result.by_variant == [
-        report.GroupRow(key="v1", runs=2, avg_tool_calls=15.0),
-        report.GroupRow(key="v2", runs=1, avg_tool_calls=6.0),
+        report.GroupRow(key=_V1, runs=2, avg_tool_calls=15.0),
+        report.GroupRow(key=_V2, runs=1, avg_tool_calls=6.0),
+    ]
+
+
+def test_aggregate_separates_ab_label_arms_of_the_same_prompt(tmp_path):
+    """Two runs of the SAME prompt (same content-hash) tagged with different A/B
+    labels must separate into distinct variant buckets — that is what makes a
+    same-prompt A/B separable by data (CONTEXT.md "variant")."""
+    base = tmp_path / "state"
+    repo = tmp_path / "repo"
+    _write(
+        base,
+        repo,
+        role="implementer",
+        tool_calls=10,
+        variant=_variant(_V1, label="arm-a"),
+        timestamp="2026-06-01T08:00:00+00:00",
+    )
+    _write(
+        base,
+        repo,
+        role="implementer",
+        tool_calls=20,
+        variant=_variant(_V1, label="arm-b"),
+        timestamp="2026-06-01T09:00:00+00:00",
+    )
+    result = report.aggregate(store.store_path(repo, base_dir=base))
+    assert result.by_variant == [
+        report.GroupRow(key=f"{_V1} [arm-a]", runs=1, avg_tool_calls=10.0),
+        report.GroupRow(key=f"{_V1} [arm-b]", runs=1, avg_tool_calls=20.0),
     ]
 
 
@@ -104,7 +151,7 @@ def test_aggregate_trends_by_day_is_chronological_not_by_run_count(tmp_path):
         repo,
         role="implementer",
         tool_calls=5,
-        variant="v1",
+        variant=_variant(_V1),
         timestamp="2026-06-01T08:00:00+00:00",
     )
     _write(
@@ -112,7 +159,7 @@ def test_aggregate_trends_by_day_is_chronological_not_by_run_count(tmp_path):
         repo,
         role="implementer",
         tool_calls=10,
-        variant="v1",
+        variant=_variant(_V1),
         timestamp="2026-06-02T08:00:00+00:00",
     )
     _write(
@@ -120,7 +167,7 @@ def test_aggregate_trends_by_day_is_chronological_not_by_run_count(tmp_path):
         repo,
         role="implementer",
         tool_calls=20,
-        variant="v1",
+        variant=_variant(_V1),
         timestamp="2026-06-02T09:00:00+00:00",
     )
     result = report.aggregate(store.store_path(repo, base_dir=base))

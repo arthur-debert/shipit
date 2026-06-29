@@ -18,14 +18,20 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from ..role import Role
+from .variant import role_of_meta
+
 #: Bump when the record's field set changes, so an aggregator can read mixed stores.
 #: v2 adds the full WS02 objective metric set (tool-call vector, turn count,
 #: stuck-loop, check-bypass / break-glass, error / retry, tokens, exit-hygiene).
 SCHEMA_VERSION = 2
 
-#: The role recorded for a run whose meta is absent — the coordinator's session
-#: transcript has no `.meta.json`, so an absent meta *is* the coordinator signal.
-_COORDINATOR_ROLE = "coordinator"
+#: The role recorded for a SUBAGENT run whose meta is absent/unreadable. The locator
+#: still classifies it as a subagent (off the transcript filename), but with no
+#: `.meta.json` we cannot name *which* worker role ran — so it stamps this distinct
+#: sentinel rather than defaulting to ``coordinator`` (which would pollute the
+#: coordinator aggregate and contradict the locator's own ``is_coordinator``).
+_UNKNOWN_SUBAGENT_ROLE = "unknown-subagent"
 
 
 def build(
@@ -35,13 +41,18 @@ def build(
     variant: Any,
     commit: str | None,
     timestamp: str,
+    is_coordinator: bool,
 ) -> dict[str, Any]:
     """Assemble the eval record for one run.
 
     ``meta`` is the parsed `agent-<id>.meta.json` for a subagent run, or ``None``
-    for the coordinator (whose role is implied). ``variant`` is stamped verbatim
-    (WS01 passes ``None``; WS03 fills it). ``commit`` is the stamping `git.commit`
-    (``None`` when it could not be resolved — the record is still valid).
+    for the coordinator (whose role is implied) — and also for a subagent whose meta
+    sidecar was missing/unreadable. ``is_coordinator`` is the locator's run-kind
+    classification (off the transcript filename, NOT off whether ``meta`` parsed), so
+    a subagent with an unreadable meta is never mistaken for the coordinator.
+    ``variant`` is stamped verbatim (WS01 passes ``None``; WS03 fills it). ``commit``
+    is the stamping `git.commit` (``None`` when it could not be resolved — the record
+    is still valid).
 
     The objective metrics fold in from :func:`shipit.harness.eval.extractors.extract`
     under stable OTel ``gen_ai.usage.*`` names for the standard token fields and
@@ -56,7 +67,7 @@ def build(
     return {
         "eval.schema_version": SCHEMA_VERSION,
         "eval.timestamp": timestamp,
-        "gen_ai.agent.name": meta.get("agentType") or _COORDINATOR_ROLE,
+        "gen_ai.agent.name": _role_name(meta, is_coordinator),
         "gen_ai.request.model": meta.get("model"),
         "eval.permission_mode": meta.get("spawnMode"),
         # Tool usage.
@@ -85,6 +96,28 @@ def build(
         "eval.variant": variant,
         "git.commit": commit,
     }
+
+
+def _role_name(meta: Mapping[str, Any], is_coordinator: bool) -> str:
+    """The ``gen_ai.agent.name`` stamped for a run — the SAME role resolution the
+    variant uses, plus the run-kind distinction the locator already drew.
+
+    - The coordinator run (``is_coordinator``) is the ``coordinator``.
+    - A subagent with a readable ``agentType`` resolves through
+      :func:`shipit.harness.eval.variant.role_of_meta` — the SAME resolver the
+      variant attribution uses — so the record's role field and the variant's
+      prompt selection agree, casing/whitespace are normalized, and an unknown
+      non-empty role attributes to a generic worker (``implementer``) rather than
+      pooling under the coordinator.
+    - A subagent whose meta is missing/unreadable (no ``agentType``) is a known
+      subagent of an UNKNOWN role, so it stamps :data:`_UNKNOWN_SUBAGENT_ROLE` —
+      neither the coordinator nor a guessed worker.
+    """
+    if is_coordinator:
+        return Role.COORDINATOR.value
+    if not str(meta.get("agentType") or "").strip():
+        return _UNKNOWN_SUBAGENT_ROLE
+    return role_of_meta(meta).value
 
 
 def _mapping(value: Any) -> Mapping[str, Any]:

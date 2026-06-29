@@ -41,10 +41,27 @@ _VARIANT_FIELD = '"eval.variant"'
 _TIMESTAMP_FIELD = '"eval.timestamp"'
 _TOOL_CALLS_FIELD = '"eval.tool_call_count"'
 
-#: Substituted for a NULL group key so a row with no variant (WS01 writes ``None``)
-#: still aggregates under a stable, printable bucket instead of vanishing.
+#: Substituted for a NULL group key so a row with no variant (a fail-open run writes
+#: ``None``) still aggregates under a stable, printable bucket instead of vanishing.
 _NO_VARIANT = "(none)"
 _UNKNOWN_ROLE = "(unknown)"
+
+#: The variant is persisted as a nested object — ``{"content_hash": …, "label": …}``
+#: (:meth:`shipit.harness.eval.variant.Variant.as_record`), which ``read_json_auto``
+#: reads as a STRUCT (or, when every row's variant is null, a plain JSON column).
+#: Grouping must key on the variant's IDENTITY, not the struct's text repr: the
+#: content-hash, refined by the optional A/B label so two arms of the same prompt
+#: separate (CONTEXT.md "variant"; PRD user stories 7-8). A null variant — or a
+#: null content-hash — buckets under :data:`_NO_VARIANT`; a null label collapses to
+#: the bare content-hash. Struct-field access is null-safe across both inferred
+#: column types, so a store of only-null variants does not error.
+_VARIANT_HASH = f"{_VARIANT_FIELD}.content_hash"
+_VARIANT_LABEL = f"{_VARIANT_FIELD}.label"
+_VARIANT_KEY = f"""CASE
+        WHEN {_VARIANT_FIELD} IS NULL OR {_VARIANT_HASH} IS NULL THEN '{_NO_VARIANT}'
+        WHEN {_VARIANT_LABEL} IS NULL THEN CAST({_VARIANT_HASH} AS VARCHAR)
+        ELSE CAST({_VARIANT_HASH} AS VARCHAR) || ' [' || CAST({_VARIANT_LABEL} AS VARCHAR) || ']'
+    END"""
 
 
 @dataclass(frozen=True)
@@ -111,7 +128,7 @@ def aggregate(store_path: str | Path) -> EvalReport:
     con = duckdb.connect(":memory:")
     try:
         role_key = f"COALESCE(CAST({_ROLE_FIELD} AS VARCHAR), '{_UNKNOWN_ROLE}')"
-        variant_key = f"COALESCE(CAST({_VARIANT_FIELD} AS VARCHAR), '{_NO_VARIANT}')"
+        variant_key = _VARIANT_KEY
         # The day bucket is the ISO timestamp's date prefix — taken as the leading
         # 10 chars so it never depends on DuckDB parsing the timezone offset.
         day_key = f"SUBSTR(CAST({_TIMESTAMP_FIELD} AS VARCHAR), 1, 10)"

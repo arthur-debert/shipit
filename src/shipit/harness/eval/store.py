@@ -40,9 +40,17 @@ def repo_key(repo_root: str | Path) -> str:
     """A filesystem-safe key for a repo — its absolute path slugified.
 
     Mirrors Claude Code's own project-dir convention (path separators → ``-``) so
-    one repo's runs pool into one store file and distinct repos never collide.
+    one repo's runs pool into one store file and distinct repos never collide. As
+    well as the platform path separator(s) — ``os.sep`` and, where the platform has
+    one, ``os.altsep`` — the drive-letter colon is slugified too: a Windows absolute
+    path like ``C:\\repo`` carries a ``:``, which is not a legal filename character,
+    so leaving it would break the store write.
     """
-    slug = str(Path(repo_root).resolve()).replace(os.sep, "-").strip("-")
+    seps = {os.sep, os.altsep, ":"} - {None}
+    slug = str(Path(repo_root).resolve())
+    for sep in seps:
+        slug = slug.replace(sep, "-")
+    slug = slug.strip("-")
     return slug or "_"
 
 

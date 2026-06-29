@@ -49,3 +49,12 @@ def test_repo_key_is_a_path_slug():
     key = store.repo_key("/Users/x/h/shipit")
     assert "/" not in key
     assert key.endswith("shipit")
+
+
+def test_repo_key_sanitizes_drive_colon():
+    # A Windows-style drive colon is not a legal filename character, so the slug must
+    # not carry one (nor a path separator) — otherwise the per-repo store write fails.
+    key = store.repo_key("C:/Users/x/shipit")
+    assert ":" not in key
+    assert "/" not in key
+    assert key.endswith("shipit")
