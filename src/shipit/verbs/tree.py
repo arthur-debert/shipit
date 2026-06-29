@@ -1,10 +1,11 @@
 """``shipit tree`` — the Tree command group (PRD docs/prd/where-to-do-work.md).
 
 A NESTED click group: ``shipit tree <verb>`` is the surface for isolated Trees.
-WS01 wires only ``create`` (the thinnest end-to-end thread); ``list`` / ``remove``
-/ ``gc`` are added by later workstreams as one ``from .`` import + one
-``tree.add_command(...)`` line each, mirroring how the ``pr`` group grows, so
-concurrent work streams touch disjoint lines.
+``create`` exposes the full spec grammar (naming.lex §3) — the ``--issue N``,
+``--epic E --ws N``, and freeform ``--branch NAME`` shapes — each resolved by the
+pure planner; ``list`` / ``remove`` / ``gc`` are sibling verbs, each added as one
+``from .`` import + one ``@tree.command`` block, so concurrent work streams touch
+disjoint lines.
 
 The verb is thin: resolve the ambient repo identity (org/repo, local checkout,
 origin URL) at the gh/git boundary, hand a typed :class:`TreeSpec` to the pure
@@ -46,31 +47,78 @@ def tree() -> None:
 @click.option(
     "--issue",
     type=int,
-    required=True,
-    help="Issue number to provision a Tree for (branch fix/<n>-<slug>).",
+    default=None,
+    help="Issue shape: provision a Tree for issue N (branch fix/<n>-<slug>).",
+)
+@click.option(
+    "--epic",
+    default=None,
+    help="Epic shape (with --ws): epic code E, e.g. HAR02 (branch E/WSnn).",
+)
+@click.option(
+    "--ws",
+    type=int,
+    default=None,
+    help="Epic shape (with --epic): work stream number N (branch E/WSnn).",
+)
+@click.option(
+    "--branch",
+    default=None,
+    help="Freeform shape: provision a Tree on branch NAME, cut from origin/main.",
 )
 @click.option(
     "--slug",
     default="",
-    help="Optional short slug for the branch name; sanitized to lowercase-dashed.",
+    help="Optional short slug for the branch/dir name; sanitized to lowercase-dashed.",
 )
-def create_cmd(issue: int, slug: str) -> None:
-    """Provision an isolated Tree for issue --issue and print its READY summary.
+def create_cmd(
+    issue: int | None,
+    epic: str | None,
+    ws: int | None,
+    branch: str | None,
+    slug: str,
+) -> None:
+    """Provision an isolated Tree and print its READY summary.
 
-    Creates a fully-independent clone under the central root on a new
-    ``fix/<n>-<slug>`` branch cut from ``origin/main``, then prints
-    ``READY {path, branch, base}``. The clone's ``origin`` is the repo's GitHub
-    URL, so ``git``/``gh`` work inside it unchanged.
+    Accepts exactly ONE of three shapes (naming.lex §3); the planner resolves each
+    to a concrete dir/branch/base:
+
+    \b
+    - ``--issue N [--slug S]``       → branch ``fix/<n>-<slug>``, base ``origin/main``
+    - ``--epic E --ws N [--slug S]`` → branch ``E/WSnn``, base ``origin/E/umbrella``
+    - ``--branch NAME``              → branch ``NAME`` verbatim, base ``origin/main``
+
+    Creates a fully-independent clone under the central root on the resolved branch,
+    then prints ``READY {path, branch, base}``. The clone's ``origin`` is the repo's
+    GitHub URL, so ``git``/``gh`` work inside it unchanged. Giving zero shapes, more
+    than one, or a partial epic (only one of ``--epic``/``--ws``) is a clean exit-1
+    error.
     """
-    raise SystemExit(run_create(issue=issue, slug=slug))
+    raise SystemExit(
+        run_create(issue=issue, epic=epic, ws=ws, branch=branch, slug=slug)
+    )
 
 
-def run_create(*, issue: int, slug: str = "") -> int:
-    """Resolve repo identity -> plan -> clone -> print READY. Returns an exit code.
+def run_create(
+    *,
+    issue: int | None = None,
+    epic: str | None = None,
+    ws: int | None = None,
+    branch: str | None = None,
+    slug: str = "",
+) -> int:
+    """Select a shape -> resolve repo identity -> plan -> clone -> print READY.
 
-    Returns 0 on success; 1 with a clean stderr message when the command is not
-    run inside a GitHub checkout or a git/gh call fails.
+    Returns 0 on success; 1 with a clean stderr message when the flag grammar is
+    wrong (zero/multiple/partial shapes), the command is not run inside a GitHub
+    checkout, the planner rejects the spec, or a git/gh call fails.
     """
+    try:
+        _select_shape(issue=issue, epic=epic, ws=ws, branch=branch)
+    except ValueError as exc:
+        print(f"tree create: {exc}", file=sys.stderr)
+        return 1
+
     root = gh.repo_root()
     if not root:
         print("tree create: not inside a git checkout", file=sys.stderr)
@@ -88,15 +136,57 @@ def run_create(*, issue: int, slug: str = "") -> int:
         repo=repo,
         agent_hash=new_agent_hash(),
         issue=issue,
+        epic=epic,
+        ws=ws,
+        branch=branch,
         slug=slug,
     )
     try:
         result = create(spec, source_repo=root, github_url=url)
-    except gh.GhError as exc:
+    except (gh.GhError, ValueError) as exc:
         print(f"tree create: {exc}", file=sys.stderr)
         return 1
     _emit_ready(result)
     return 0
+
+
+def _select_shape(
+    *,
+    issue: int | None,
+    epic: str | None,
+    ws: int | None,
+    branch: str | None,
+) -> str:
+    """Validate that exactly one of the three shapes is requested; return its name.
+
+    The flag-grammar gate (a CLI concern): exactly one of {``--issue``,
+    ``--epic`` + ``--ws``, ``--branch``} must be given, and the epic shape needs BOTH
+    halves. Any violation raises a clean :class:`ValueError` (no planner-module
+    prefix), surfaced as an exit-1 stderr message by :func:`run_create`. The per-shape
+    DOMAIN invariants — epic-code format, positive work-stream number, non-empty
+    freeform name — stay the planner's job; it re-validates the built spec and its
+    ``ValueError`` is caught the same way.
+    """
+    has_epic = epic is not None or ws is not None
+    shapes = [
+        name
+        for name, present in (
+            ("epic", has_epic),
+            ("issue", issue is not None),
+            ("branch", branch is not None),
+        )
+        if present
+    ]
+    if len(shapes) != 1:
+        raise ValueError(
+            "exactly one shape must be given — --issue N, --epic E --ws N, "
+            f"or --branch NAME (got {', '.join(shapes) or 'none'})"
+        )
+    if has_epic and (epic is None or ws is None):
+        raise ValueError(
+            f"the epic shape needs both --epic and --ws (got epic={epic!r}, ws={ws!r})"
+        )
+    return shapes[0]
 
 
 def _emit_ready(result: Tree) -> None:
