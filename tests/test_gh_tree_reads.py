@@ -50,16 +50,41 @@ def test_pr_for_head_parses_snapshot(monkeypatch):
 
 
 def test_pr_for_head_none_when_no_pr(monkeypatch):
+    # gh's documented "no pull requests found" exit is a PROVABLE absence -> None,
+    # distinct from UNKNOWN (an undetermined state).
     def boom(args, *, cwd=None):
-        raise gh.GhError("no pull requests found")
+        raise gh.GhError('gh pr view exited 1: no pull requests found for branch "x"')
 
     monkeypatch.setattr(gh, "_run", boom)
     assert gh.pr_for_head("fix/12", cwd="/x") is None
 
 
-def test_pr_for_head_none_when_output_not_json(monkeypatch):
+def test_pr_for_head_unknown_on_non_no_pr_error(monkeypatch):
+    # Any OTHER gh failure (auth/network/rate-limit) leaves the state UNDETERMINED:
+    # it returns the first-class UNKNOWN sentinel, NOT None ("no PR").
+    def boom(args, *, cwd=None):
+        raise gh.GhError("gh pr view exited 1: HTTP 401: Bad credentials")
+
+    monkeypatch.setattr(gh, "_run", boom)
+    assert gh.pr_for_head("fix/12", cwd="/x") is gh.UNKNOWN
+
+
+def test_pr_for_head_unknown_when_output_not_json(monkeypatch):
     # A scan/read boundary over the whole fleet: malformed/non-JSON gh output
-    # (warnings, prompts, garbage on stdout) must collapse to None, not crash
-    # `tree list` for every Tree with a JSONDecodeError.
+    # (warnings, prompts, garbage on stdout) must NOT crash `tree list`, but it is an
+    # unreadable state -> UNKNOWN (distinct from None / "no PR"), not silently collapsed.
     monkeypatch.setattr(gh, "_run", lambda args, *, cwd=None: "not json at all")
-    assert gh.pr_for_head("fix/12", cwd="/x") is None
+    assert gh.pr_for_head("fix/12", cwd="/x") is gh.UNKNOWN
+
+
+def test_pr_for_head_unknown_when_output_empty(monkeypatch):
+    # A clean run that yields no stdout is anomalous (a real PR always prints JSON):
+    # treat it as an unreadable state, not "no PR".
+    monkeypatch.setattr(gh, "_run", lambda args, *, cwd=None: "   ")
+    assert gh.pr_for_head("fix/12", cwd="/x") is gh.UNKNOWN
+
+
+def test_pr_for_head_unknown_when_not_a_dict(monkeypatch):
+    # Valid JSON but not an object (a list / scalar) is malformed for this read.
+    monkeypatch.setattr(gh, "_run", lambda args, *, cwd=None: "[1, 2, 3]")
+    assert gh.pr_for_head("fix/12", cwd="/x") is gh.UNKNOWN
