@@ -63,8 +63,10 @@ The PR lifecycle (draft -> ready -> stop):
             maintainer-directed quick fix needs NO issue first — a direct
             instruction is its own authorization; ship the fix PR.
         - Contextualize: read the description + related code/resources.
-        - Clarify: if information is missing or a real decision exists, surface it
-            — propose a preferred option, don't only ask.
+        - Clarify: if information is missing or a real PRODUCT/SCOPE decision
+            exists, surface it — propose a preferred option, don't only ask. The
+            dev cycle and the epic branch/merge topology ([#2]) are FIXED policy,
+            never a choice to put to the human — never offer a PR-strategy menu.
 
         The coordinator reads/researches to brief the work, then delegates. It
         does not implement.
@@ -130,6 +132,10 @@ The PR lifecycle (draft -> ready -> stop):
     INTO the epic branch on its own authority (parallel implement, serial
     integrate); the HUMAN's one checkpoint is the umbrella PR (epic branch -> `main`).
     Convergence (clear epic-owned fallouts) and a docs pass precede the umbrella.
+
+    This topology is FIXED policy, not a choice: the coordinator does NOT ask the
+    human to pick a PR strategy (one big PR, one PR per workstream to `main`, an
+    epic branch) — a multi-PR feature runs on the epic branch, full stop.
 
     A feature is planned before execution via `/shipit-planning` (ideation -> ADRs
     -> PRD -> docs PR, then epic/WS decomposition -> issues).

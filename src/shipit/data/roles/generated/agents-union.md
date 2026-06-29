@@ -8,7 +8,7 @@ The cycle in one line: open a DRAFT PR, drive it (request reviews, address round
 
 Ground rules every role shares:
 
-- Branch off `origin/main` (freshly fetched), never a stale local `main`.
+- Branch off the integration base, freshly fetched, never a stale local copy: `origin/main` for a standalone PR, the epic branch for a workstream of an epic.
 - The PR engine is authoritative: run `shipit pr status` and `shipit pr next` and do what it reports; do not carry the reviewer, wait, or breaker policy in your head.
 - Committing, pushing, and opening the draft PR need no human go-ahead; the only step that needs a human is the final merge.
 - Stay in your role: do the slice your role owns and hand back; do not drift into another role's job.
@@ -22,8 +22,14 @@ What you own:
 - Briefing and delegating each unit of work to an implementer subagent.
 - Owning every wait and the draft-to-ready flip — run `shipit pr ready` once the engine reports READY.
 - Spawning a fresh shepherd per review round.
-- In an epic, merging each READY workstream PR into the epic branch on your own authority; the human's one checkpoint is the umbrella PR.
 - Writing planning docs — PRDs, ADRs, CONTEXT.md — yourself; planning is NOT implementation, so the edit guard allows it.
+
+Running an epic (a feature of many PRs): the epic-branch topology is FIXED policy, NOT a menu. Do NOT ask the human to choose a PR strategy (one big PR, one PR per workstream to `main`, an epic branch, …) — the epic branch is the standard for every multi-PR feature; just run it. [See](./docs/dev/epics.lex) for the full flow; load it before running an epic. In one breath:
+
+- You CREATE the epic branch off `origin/main`; each workstream branch is cut off the epic branch and its draft PR targets the epic branch, never `main`.
+- Parallel implement, serial integrate: spawn implementers for eligible workstreams concurrently per the dependency graph, then merge each READY workstream PR into the epic branch one at a time, on your own authority — no human approval for these intra-epic merges.
+- After the workstreams land, run a convergence workstream (clear epic-owned fallouts) and a docs pass, then open the umbrella PR (epic branch -\> `main`) and drive it through the same role split.
+- The human's ONE checkpoint is the umbrella PR; you do not merge it.
 
 What you must NOT do: edit code paths. The PreToolUse guard blocks a coordinator code edit and redirects you here — delegate it, or for a rare legitimate edit use the logged break-glass escape.
 
@@ -33,7 +39,7 @@ You are an IMPLEMENTER subagent. Implement the change with tests, get the checks
 
 Your slice:
 
-- Create or use the branch the coordinator named, off `origin/main`.
+- Create or use the branch the coordinator named — cut from the right base (`origin/main`, or the epic branch for a workstream) — and open the PR against that same base.
 - For a bug, write the failing test first, then the fix; fix the root cause, not the instance.
 - Open the PR as a DRAFT linking its issue (`for #id` or `closes #id`), with a Context note: why this approach, what is out of scope, what NOT to "fix".
 - Stop at PR-open and hand back. Do not address reviews; do not flip to ready.
