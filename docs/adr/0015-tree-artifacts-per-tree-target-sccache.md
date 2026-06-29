@@ -1,5 +1,10 @@
 # Tree build artifacts: per-Tree `target/`, sccache as the cross-Tree cache
 
+> **See ADR-0017** (Trees v2): with Trees provisioned per spawn, **sccache is now
+> load-bearing** — it is what keeps a per-spawn cold Tree's first build cheap — rather
+> than the nicety this ADR framed it as. The deferred warm-template below stays deferred
+> for the same reason (provisioning is already cheap enough).
+
 Each **Tree** owns its build artifacts (`target/`, `node_modules/`); we do **not**
 share a `CARGO_TARGET_DIR` across Trees. Cross-Tree reuse happens one layer down,
 through **sccache** (content-addressed compiler output, already running portfolio-wide),

@@ -1,5 +1,11 @@
 # Trees are independent dissociated clones in a central root, not git worktrees
 
+> **Amended by ADR-0017** (Trees v2): enforcement is no longer deny-only — the native
+> worktree path stays denied **and** shipit now provides the positive spawn path
+> (`shipit spawn subagent`), which is what mints the Tree. ADR-0018 also splits the Tree
+> unit into a write Tree and a shared read-only Tree. This ADR's clone strategy and
+> central-root layout are unchanged.
+
 A **Tree** — the isolated checkout where one write-session works — is created as a
 full, independent clone in a central out-of-repo root
 (`~/workspace/trees/<org>/<repo>/…`), **not** as a `git worktree` inside the repo.

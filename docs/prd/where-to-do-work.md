@@ -171,6 +171,15 @@ launch flag, so the native path is simply never invoked. Redirecting via the
 `WorktreeCreate` hook was rejected — it would couple shipit to an undocumented Claude Code
 hook contract; denial uses only the stable PreToolUse surface shipit already owns.
 
+> **Corrected by Trees v2 / shipit-owned subagent spawning (ADR-0017).** The "undocumented
+> `WorktreeCreate` hook contract" premise above is **wrong** — a feasibility spike on #139
+> confirmed the hook is documented and stable. More importantly the enforcement story moved
+> on: this deny-only stance is now paired with a **positive** path — the coordinator
+> provisions and launches every Run through `shipit spawn subagent`, which mints the Tree
+> and roots the child agent in it (the native worktree path stays denied). The full
+> successor PRD comes later via `/shipit-to-prd`; see ADR-0017 (spawning) and ADR-0018
+> (write vs read-only Trees).
+
 **Config.** The central root defaults to `~/workspace/trees` and is overridable. `.treeinclude`
 is a repo-root file in gitignore syntax (a separate file, not a `.shipit.toml` table, so it
 stays close to `.gitignore`). The sccache settings (`SCCACHE_BASEDIRS`, `CARGO_INCREMENTAL=0`,
