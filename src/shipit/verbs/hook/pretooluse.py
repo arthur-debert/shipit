@@ -28,19 +28,12 @@ from typing import TextIO
 
 import click
 
+from ...harness import breakglass
 from ...harness.codepath import is_code_path
 from ...harness.policy import Decision, Permission, decide, is_edit_tool
 from ...harness.role import resolve_role
 
 logger = logging.getLogger("shipit.hook")
-
-#: Environment variable that arms the **break-glass** escape: when truthy, the
-#: coordinator's otherwise-blocked code edit is permitted (and LOGGED). A runtime
-#: escape hatch, NOT consumer config — there is deliberately nothing in
-#: `.shipit.toml` for it. Treated as off for the empty string and the usual
-#: false-y spellings so `SHIPIT_BREAK_GLASS=0` disarms it.
-_BREAK_GLASS_ENV = "SHIPIT_BREAK_GLASS"
-_FALSEY = frozenset({"", "0", "false", "no", "off"})
 
 
 @click.command(name="pretooluse")
@@ -113,8 +106,10 @@ def _break_glass_armed() -> bool:
     """Read the break-glass env marker — a BOUNDARY (impure) concern.
 
     Kept out of `decide()` so the verdict stays pure: the boolean is passed in.
+    The env name + falsey spellings live in :mod:`shipit.harness.breakglass`, shared
+    with the eval break-glass grep so the two cannot drift.
     """
-    return os.environ.get(_BREAK_GLASS_ENV, "").strip().lower() not in _FALSEY
+    return breakglass.is_armed(os.environ.get(breakglass.ENV, ""))
 
 
 def _emit_deny(reason: str, out: TextIO) -> None:

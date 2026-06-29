@@ -281,6 +281,16 @@ def _git(args: list[str], *, cwd: str) -> str:
     return _run(["git", "-C", cwd, *args])
 
 
+def git_status_porcelain(*, cwd: str) -> str:
+    """Machine-readable working-tree status (``git status --porcelain``).
+
+    Empty output means a clean tree; each non-empty line is one changed/untracked
+    path. The eval exit-hygiene check reads this to flag a coordinator run that
+    left a dirty worktree (uncommitted edits, conflict markers, stray files).
+    """
+    return _git(["status", "--porcelain"], cwd=cwd)
+
+
 def git_current_branch(*, cwd: str) -> str | None:
     """The current branch name, or ``None`` on a detached/unborn HEAD."""
     try:

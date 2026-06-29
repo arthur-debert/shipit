@@ -12,8 +12,9 @@ import json
 import logging
 
 import pytest
+from shipit.harness import breakglass
 from shipit.harness.policy import COORDINATOR_DENY_REASON
-from shipit.verbs.hook.pretooluse import _BREAK_GLASS_ENV, run
+from shipit.verbs.hook.pretooluse import run
 
 
 def _run(payload_text: str) -> tuple[int, str]:
@@ -68,7 +69,7 @@ def test_non_edit_tool_is_allowed_silently():
 
 
 def test_break_glass_permits_the_edit_and_logs_it(monkeypatch, caplog):
-    monkeypatch.setenv(_BREAK_GLASS_ENV, "1")
+    monkeypatch.setenv(breakglass.ENV, "1")
     payload = json.dumps(
         {"tool_name": "Edit", "tool_input": {"file_path": "src/shipit/cli.py"}}
     )
@@ -88,7 +89,7 @@ def test_break_glass_permits_the_edit_and_logs_it(monkeypatch, caplog):
 def test_break_glass_does_not_log_when_no_edit_would_be_blocked(monkeypatch, caplog):
     # Break-glass armed, but a subagent edit was never going to be denied — so
     # there is nothing to break through and nothing to log.
-    monkeypatch.setenv(_BREAK_GLASS_ENV, "1")
+    monkeypatch.setenv(breakglass.ENV, "1")
     payload = json.dumps(
         {
             "agent_type": "implementer",
@@ -105,7 +106,7 @@ def test_break_glass_does_not_log_when_no_edit_would_be_blocked(monkeypatch, cap
 
 @pytest.mark.parametrize("falsey", ["", "0", "false", "no", "off"])
 def test_falsey_break_glass_still_denies(monkeypatch, falsey):
-    monkeypatch.setenv(_BREAK_GLASS_ENV, falsey)
+    monkeypatch.setenv(breakglass.ENV, falsey)
     payload = json.dumps(
         {"tool_name": "Edit", "tool_input": {"file_path": "src/shipit/cli.py"}}
     )
