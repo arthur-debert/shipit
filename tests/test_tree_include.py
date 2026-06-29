@@ -8,6 +8,7 @@ the resolved list IS the contract.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from shipit.tree import include
@@ -169,14 +170,16 @@ def test_resolve_prunes_git_and_unmatched_directories(tmp_path: Path, monkeypatc
     _write(tmp_path, ".git/objects/pack/whatever")
     _write(tmp_path, "node_modules/pkg/secret.key")  # NOT under config/
 
-    # Trip a failure if the walk ever steps into node_modules.
-    real_listdir = __import__("os").listdir
+    # Trip a failure if the walk ever steps into node_modules. ``os.walk`` lists
+    # each directory via ``os.scandir`` (NOT ``os.listdir``), so the guard has to
+    # wrap ``scandir`` to actually observe a descent into a pruned directory.
+    real_scandir = os.scandir
 
-    def guarded_listdir(path):
+    def guarded_scandir(path):
         assert "node_modules" not in str(path), "walked a pruned directory"
-        return real_listdir(path)
+        return real_scandir(path)
 
-    monkeypatch.setattr("os.listdir", guarded_listdir)
+    monkeypatch.setattr("os.scandir", guarded_scandir)
 
     assert include.resolve(tmp_path) == ["config/a/secret.key"]
 
@@ -198,3 +201,21 @@ def test_apply_copies_selected_files_into_dest(tmp_path: Path):
         ".env",
         "models/saml.bin",
     }
+
+
+def test_apply_never_clobbers_an_existing_dest_file(tmp_path: Path):
+    # A selected path that already exists at dest came from the fresh checkout of
+    # the base (a tracked file): that version is authoritative and must NOT be
+    # overwritten by a stale/dirty copy from the source checkout.
+    src = tmp_path / "src"
+    dest = tmp_path / "dest"
+    _write(src, ".treeinclude", ".env\nmodels/saml.bin\n")
+    _write(src, ".env", "STALE")
+    _write(src, "models/saml.bin", "FRESH-FROM-SRC")
+    _write(dest, "models/saml.bin", "CHECKED-OUT")  # already present at dest
+
+    written = include.apply(src, dest)
+
+    assert (dest / "models" / "saml.bin").read_text() == "CHECKED-OUT"
+    assert (dest / ".env").read_text() == "STALE"  # genuinely missing file is filled
+    assert {p.relative_to(dest).as_posix() for p in written} == {".env"}

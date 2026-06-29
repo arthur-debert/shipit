@@ -244,6 +244,30 @@ def test_check_same_filesystem_never_fails_on_missing_path(tmp_path: Path, monke
     )
 
 
+def test_check_same_filesystem_probes_nearest_existing_parent(
+    tmp_path: Path, monkeypatch
+):
+    # First run (#119): the pixi cache dir does not exist yet, but its existing
+    # parent is on a different filesystem than the Trees root. The warning must
+    # still fire — probing up to the nearest existing ancestor — not be suppressed
+    # just because the leaf cache dir has not been created.
+    trees_root = tmp_path / "trees"
+    trees_root.mkdir()
+    cache_parent = tmp_path / "ext"
+    cache_parent.mkdir()
+    cache = cache_parent / "rattler" / "cache"  # does NOT exist yet
+
+    def fake_st_dev(p):
+        p = Path(p)
+        if not p.exists():
+            raise OSError("missing")
+        return 2 if (p == cache_parent or cache_parent in p.parents) else 1
+
+    monkeypatch.setattr(create_mod, "_st_dev", fake_st_dev)
+    msg = create_mod.check_same_filesystem(trees_root, cache)
+    assert msg is not None and "#119" in msg
+
+
 def test_create_warns_when_pixi_cache_on_other_filesystem(
     tmp_path: Path, monkeypatch, caplog
 ):

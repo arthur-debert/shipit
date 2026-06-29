@@ -165,8 +165,29 @@ def pixi_cache_dir() -> Path:
 
 
 def _st_dev(path: Path) -> int:
-    """The filesystem device id backing ``path`` (a patchable seam for the FS check)."""
+    """The filesystem device id backing ``path`` (a patchable seam for the FS check).
+
+    Raises ``OSError`` when ``path`` does not exist; callers that must tolerate an
+    absent leaf go through :func:`_nearest_dev`.
+    """
     return os.stat(path).st_dev
+
+
+def _nearest_dev(path: Path) -> int | None:
+    """Device id of ``path``, or of its nearest existing ancestor when it is absent.
+
+    A device id is a property of the *filesystem*, so the closest existing ancestor
+    of a not-yet-created path sits on the same filesystem that path will be created
+    on. Probing upward is what lets the #119 check work on a **first** run — exactly
+    when it matters — before the Trees root or the pixi cache directory exists.
+    Returns ``None`` only when nothing up the chain can be stat'd.
+    """
+    for candidate in (path, *path.parents):
+        try:
+            return _st_dev(candidate)
+        except OSError:
+            continue
+    return None
 
 
 def check_same_filesystem(trees_root: Path, cache_dir: Path) -> str | None:
@@ -175,18 +196,22 @@ def check_same_filesystem(trees_root: Path, cache_dir: Path) -> str | None:
     pixi links packages out of its cache into each Tree's environment; when the
     cache and the Trees root share a filesystem that linking is near-free, but
     across filesystems it silently falls back to **full copies** (#119). Returns the
-    warning string in that case, else ``None``. A path that does not exist yet (so
-    its device can't be read) is treated as "can't tell" → ``None`` (never fail).
+    warning string in that case, else ``None``. Either path may not exist yet (the
+    cache dir is created by the first ``pixi install``); we compare the device of
+    the nearest existing ancestor, so the warning still fires on a first run. Only
+    when neither path nor any ancestor can be stat'd do we give up → ``None`` (the
+    check warns, never fails).
     """
-    try:
-        if _st_dev(trees_root) != _st_dev(cache_dir):
-            return (
-                f"pixi cache ({cache_dir}) and Trees root ({trees_root}) are on "
-                "different filesystems; package linking falls back to full copies, "
-                "so Tree provisioning will be slower and use more disk (#119)."
-            )
-    except OSError:
+    trees_dev = _nearest_dev(trees_root)
+    cache_dev = _nearest_dev(cache_dir)
+    if trees_dev is None or cache_dev is None:
         return None
+    if trees_dev != cache_dev:
+        return (
+            f"pixi cache ({cache_dir}) and Trees root ({trees_root}) are on "
+            "different filesystems; package linking falls back to full copies, "
+            "so Tree provisioning will be slower and use more disk (#119)."
+        )
     return None
 
 

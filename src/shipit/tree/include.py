@@ -174,6 +174,13 @@ def apply(
     Files are COPIED (parents created as needed), never symlinked, so the Tree is
     self-contained and a plain ``rm -rf`` is a safe delete. Returns the destination
     paths written, in resolution order.
+
+    ``.treeinclude`` exists to fill in the gitignored-but-needed files the fresh
+    checkout *lacks* (``.env``, Doppler config, models). A selected path that
+    already exists at ``dest`` therefore came from the checkout of
+    ``tree_plan.base`` — that version is authoritative and is left untouched, so a
+    stale/dirty copy under ``src_root`` can never clobber a freshly-checked-out
+    tracked file (the path is skipped, not in the returned list).
     """
     src = Path(src_root)
     dest = Path(dest_root)
@@ -183,6 +190,8 @@ def apply(
         if not source.is_file():
             continue
         target = dest / rel
+        if target.exists():
+            continue
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, target)
         written.append(target)
