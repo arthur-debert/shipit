@@ -39,6 +39,42 @@ from .registry import TreeRecord
 #: Tree never ages. Overridable per call so the boundary is exhaustively table-tested.
 DEFAULT_MAX_AGE_SECONDS = 14 * 86_400
 
+#: The duration suffixes ``parse_duration`` accepts → their length in seconds. Mirrors
+#: (and inverts) the units ``shipit.verbs.tree._format_age`` renders, so a Tree's printed
+#: age (``3d``) round-trips back through ``--threshold 3d`` to the same boundary.
+_DURATION_UNITS = {"d": 86_400, "h": 3_600, "m": 60, "s": 1}
+
+
+def parse_duration(text: str) -> float:
+    """Parse a human duration like ``14d`` / ``36h`` / ``90m`` / ``45s`` into seconds.
+
+    A small pure helper backing ``tree gc --threshold``: the inverse of
+    :func:`shipit.verbs.tree._format_age`. Accepts a positive whole number suffixed
+    with a single unit — ``d`` days, ``h`` hours, ``m`` minutes, ``s`` seconds — and
+    returns the equivalent seconds as a float (the type ``classify``'s
+    ``max_age_seconds`` expects). A missing/unknown unit, a non-positive or
+    non-integer magnitude, or empty input raises :class:`ValueError`, so a malformed
+    ``--threshold`` becomes a clean exit-1 message rather than a silent default.
+    """
+    raw = text.strip().lower()
+    if not raw:
+        raise ValueError("duration must not be empty (e.g. 14d, 36h, 90m)")
+    unit = raw[-1]
+    if unit not in _DURATION_UNITS:
+        raise ValueError(
+            f"duration {text!r} must end in one of d/h/m/s (e.g. 14d, 36h, 90m)"
+        )
+    magnitude = raw[:-1]
+    if not magnitude.isdigit():
+        raise ValueError(
+            f"duration {text!r} needs a positive whole number before its "
+            "d/h/m/s suffix (e.g. 14d, 36h, 90m)"
+        )
+    value = int(magnitude)
+    if value <= 0:
+        raise ValueError(f"duration {text!r} must be positive")
+    return float(value * _DURATION_UNITS[unit])
+
 
 @dataclass(frozen=True)
 class Cleanup:
