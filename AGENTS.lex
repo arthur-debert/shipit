@@ -74,8 +74,12 @@ The PR lifecycle (draft -> ready -> stop):
     1.2. Implementation (the implementer subagent)
 
         The coordinator CREATES the branch off the integration base — `origin/main`
-        (`fix/<issue>-<slug>`) for standalone work, the epic branch for a workstream — and
-        spawns an IMPLEMENTER to do the task + tests. The implementer runs the checks
+        (`fix/<issue>-<slug>`) for standalone work, the epic branch for a workstream — by
+        provisioning the implementer an isolated *Tree* to work in (`shipit tree create`),
+        and spawns an IMPLEMENTER to do the task + tests. A Tree is a dissociated clone,
+        NOT a native `git worktree` — that path is denied (ADR-0014) — so concurrent
+        agents never collide on one checkout; see [./docs/prd/where-to-do-work.md]. The
+        implementer runs the checks
         (`shipit lint`) and tests (`pixi run test`) green BEFORE opening the PR —
         CI runs the same as required checks, so local green is necessary for CI
         green.

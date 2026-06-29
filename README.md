@@ -56,6 +56,16 @@ Doppler-sourced secrets are re-applied on every install (a changed secret is set
 
 The orchestration lives in the binary, not in lefthook or a templated pixi task: pixi has no cross-manifest task inheritance, so lefthook and pixi stay thin callers (`pixi run lint`) while the per-language discovery and routing live in `shipit lint`. The linters themselves ride in as shipit's own pinned dependencies, so a consumer's pixi.toml carries only the stable \`lint = "shipit lint"\` task line, never a drifting list of tool pins. See [5](./docs/dev/architecture.lex) and §7.
 
+### Trees — isolated per-agent checkouts:
+
+`shipit tree` provisions and manages the isolated working trees agents work in. A Tree is a fully-independent clone of the repo under a central root outside any checkout (`~/workspace/trees/<org>/<repo>/…`), so concurrent agents (and the human) never collide on one shared working tree. It is a real clone, NOT a `git worktree` — the native \`git worktree\` path is denied so agents cannot drift back to the old `.claude/worktrees` mess (ADR-0014).
+
+The surface is four verbs:
+
+\- `shipit tree create` provisions a ready Tree — its own clone, on a fresh branch, deps installed, gitignored-but-needed files copied in — then prints a READY summary. It takes exactly one shape: `--issue N` (branch `fix/<n>-<slug>`), `--epic E --ws N` (branch `E/WSnn`, cut from `origin/E/umbrella`), or `--branch NAME` (verbatim, cut from `origin/main`). - `shipit tree list` renders the whole fleet — path, branch, base, age, dirty?, PR state — derived purely by scanning the central root (no manifest). - `shipit tree remove <target>` deletes one Tree by path or directory name; a Tree is a disposable clone, so removal is just a directory delete. - `shipit tree gc` sweeps the fleet conservatively — it removes only Trees whose PR is merged, working tree clean, nothing unpushed, and aged past a threshold; ambiguous ones are listed as stale, never auto-removed.
+
+[See](./docs/prd/where-to-do-work.md) for the full design, and \[./docs/adr/0014-trees-dissociated-clones-central-root.md\] + [for](./docs/adr/0015-tree-artifacts-per-tree-target-sccache.md) the clone-over-worktree and per-Tree-cache rationale.
+
 ## 2. PR Reviews
 
 ### Draft → shepherd → ready, then stop:
