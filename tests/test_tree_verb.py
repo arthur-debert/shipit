@@ -181,3 +181,132 @@ def test_run_create_maps_create_failure_to_exit_1(monkeypatch, capsys):
 
     assert rc == 1
     assert "tree create:" in capsys.readouterr().err
+
+
+# --- tree remove ---------------------------------------------------------------
+
+
+def _make_tree_dir(root, rel: str):
+    """Create ``root/<rel>`` as a fake Tree clone (a dir carrying a ``.git`` marker)."""
+    path = root / rel
+    (path / ".git").mkdir(parents=True)
+    return path
+
+
+def test_run_remove_deletes_exactly_one_tree(tmp_path, monkeypatch, capsys):
+    root = tmp_path / "trees"
+    target = _make_tree_dir(root, "acme/widget/issues/7-aaaa")
+    other = _make_tree_dir(root, "acme/widget/issues/9-bbbb")
+    monkeypatch.setattr(tree_verb.layout, "central_root", lambda: str(root))
+    monkeypatch.setattr(
+        tree_verb.registry,
+        "scan",
+        lambda r: [_record(path=str(target)), _record(path=str(other))],
+    )
+
+    rc = tree_verb.run_remove(str(target))
+
+    assert rc == 0
+    assert not target.exists()  # the matched Tree is gone
+    assert other.exists()  # the sibling is untouched
+    assert "REMOVED" in capsys.readouterr().out
+
+
+def test_run_remove_matches_by_dir_name(tmp_path, monkeypatch, capsys):
+    root = tmp_path / "trees"
+    target = _make_tree_dir(root, "acme/widget/issues/7-aaaa")
+    monkeypatch.setattr(tree_verb.layout, "central_root", lambda: str(root))
+    monkeypatch.setattr(
+        tree_verb.registry, "scan", lambda r: [_record(path=str(target))]
+    )
+
+    rc = tree_verb.run_remove("7-aaaa")  # short id, not the full path
+
+    assert rc == 0
+    assert not target.exists()
+
+
+def test_run_remove_no_match_is_an_error(tmp_path, monkeypatch, capsys):
+    root = tmp_path / "trees"
+    monkeypatch.setattr(tree_verb.layout, "central_root", lambda: str(root))
+    monkeypatch.setattr(tree_verb.registry, "scan", lambda r: [])
+
+    rc = tree_verb.run_remove("does-not-exist")
+
+    assert rc == 1
+    assert "no Tree matching" in capsys.readouterr().err
+
+
+def test_run_remove_ambiguous_match_refuses(tmp_path, monkeypatch, capsys):
+    root = tmp_path / "trees"
+    a = _make_tree_dir(root, "acme/widget/issues/7-aaaa")
+    b = _make_tree_dir(root, "acme/gadget/issues/7-aaaa")  # same dir name, two repos
+    monkeypatch.setattr(tree_verb.layout, "central_root", lambda: str(root))
+    monkeypatch.setattr(
+        tree_verb.registry,
+        "scan",
+        lambda r: [_record(path=str(a)), _record(path=str(b))],
+    )
+
+    rc = tree_verb.run_remove("7-aaaa")
+
+    assert rc == 1
+    assert "ambiguous" in capsys.readouterr().err
+    assert a.exists() and b.exists()  # nothing deleted on an ambiguous match
+
+
+# --- tree gc -------------------------------------------------------------------
+
+
+def test_run_gc_removes_only_removable_lists_stale_keeps_rest(
+    tmp_path, monkeypatch, capsys
+):
+    root = tmp_path / "trees"
+    # Four Trees: one removable (merged+aged), one stale (no PR+aged), one kept dirty,
+    # one kept in-flight (open PR). gc must delete ONLY the removable one.
+    removable = _make_tree_dir(root, "acme/widget/issues/1-merged")
+    stale = _make_tree_dir(root, "acme/widget/issues/2-orphan")
+    keep_dirty = _make_tree_dir(root, "acme/widget/issues/3-dirty")
+    keep_open = _make_tree_dir(root, "acme/widget/issues/4-open")
+
+    aged = 0.0  # mtime far in the past -> always aged vs time.time()
+    records = [
+        _record(path=str(removable), branch="b1", dirty=False, ahead=0, mtime=aged),
+        _record(path=str(stale), branch="b2", dirty=False, ahead=0, mtime=aged),
+        _record(path=str(keep_dirty), branch="b3", dirty=True, ahead=0, mtime=aged),
+        _record(path=str(keep_open), branch="b4", dirty=False, ahead=0, mtime=aged),
+    ]
+    pr_by_branch = {
+        "b1": {"number": 1, "state": "MERGED", "isDraft": False},
+        "b2": None,
+        "b3": {"number": 3, "state": "MERGED", "isDraft": False},
+        "b4": {"number": 4, "state": "OPEN", "isDraft": False},
+    }
+    monkeypatch.setattr(tree_verb.layout, "central_root", lambda: str(root))
+    monkeypatch.setattr(tree_verb.registry, "scan", lambda r: records)
+    monkeypatch.setattr(
+        gh, "pr_for_head", lambda branch, *, cwd=None: pr_by_branch.get(branch)
+    )
+
+    rc = tree_verb.run_gc()
+
+    assert rc == 0
+    assert not removable.exists()  # only the removable Tree is deleted
+    assert stale.exists()  # ambiguous -> listed, never removed
+    assert keep_dirty.exists()  # local work protected
+    assert keep_open.exists()  # in-flight PR protected
+    out = capsys.readouterr().out
+    assert f"REMOVED {removable}" in out
+    assert f"STALE   {stale}" in out
+    assert "removed 1, stale 1, kept 2" in out
+
+
+def test_run_gc_empty_root_is_not_an_error(tmp_path, monkeypatch, capsys):
+    root = tmp_path / "trees"
+    monkeypatch.setattr(tree_verb.layout, "central_root", lambda: str(root))
+    monkeypatch.setattr(tree_verb.registry, "scan", lambda r: [])
+
+    rc = tree_verb.run_gc()
+
+    assert rc == 0
+    assert "removed 0, stale 0, kept 0" in capsys.readouterr().out
