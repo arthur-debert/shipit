@@ -298,7 +298,7 @@ a real clone — its own `.git`, able to sit on `main` — NOT a git worktree (w
 shares one object store and forbids the same branch in two places). The unit the
 **coordinator** provisions and assigns.
 *Avoid*: "worktree" for this unit (that names the git feature we deliberately reject —
-see ADR); "workspace" (collides with Cargo/pixi/editor "workspace").
+see ADR-0014); "workspace" (collides with Cargo/pixi/editor "workspace").
 
 ### Build & release
 

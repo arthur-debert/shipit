@@ -2,7 +2,7 @@
 
 Each **Tree** owns its build artifacts (`target/`, `node_modules/`); we do **not**
 share a `CARGO_TARGET_DIR` across Trees. Cross-Tree reuse happens one layer down,
-through **sccache** (content-addressed compiler output, already run portfolio-wide),
+through **sccache** (content-addressed compiler output, already running portfolio-wide),
 configured with two non-obvious settings so it actually pays off across Trees:
 `SCCACHE_BASEDIRS` (sccache's cache key includes the absolute CWD, so without it every
 distinct Tree path misses) and `CARGO_INCREMENTAL=0` (sccache disables incremental

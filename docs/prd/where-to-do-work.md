@@ -59,7 +59,7 @@ that's an accepted, mild cost (and a useful record of provenance).
    (`shipit tree create --issue 433`), so that one-off fixes get the same isolation as
    epic work.
 4. As a **coordinator**, I want my own epic Tree at session start, so that I manage my
-   own branch in isolation while delegating work-stream Trees to subagents.
+   own branch in isolation while delegating work stream Trees to subagents.
 5. As an **implementer**, I want to start already inside a provisioned Tree on my branch,
    so that I spend zero tokens discovering where to work and start coding immediately.
 6. As an **implementer**, I want the Tree's dependencies already installed
@@ -79,8 +79,11 @@ that's an accepted, mild cost (and a useful record of provenance).
 12. As a **coordinator**, I want each Tree's directory name to carry a unique agent hash
     while the branch name stays stable, so that duplicate Trees never collide on disk and
     the branch still reads as a meaningful namespace.
-13. As any agent, I want branch names that read as git namespaces (`HAR02/ws02-…`,
-    `issue/433-…`), so that branches sort, group, and grep cleanly.
+13. As any agent, I want each Tree's *directory path* to read as a namespace
+    (`…/epics/HAR02/WS02-<hash>`, `…/issues/433-<hash>`) while the **branch** follows the
+    existing hyphen grammar (`HAR02-WS02`, `fix/433-…`, per `naming.lex §3`), so that
+    Trees sort and group cleanly on disk without the branch colliding with the bare epic
+    branch.
 14. As a **coordinator**, I want `shipit tree list` to show every Tree with its branch,
     base, age, dirty state, and PR status, so that I can see the whole fleet at a glance.
 15. As a **coordinator**, I want `shipit tree remove <id>` to safely delete one Tree, so
@@ -95,7 +98,7 @@ that's an accepted, mild cost (and a useful record of provenance).
 19. As any agent, I want `git fetch/pull/push` and all `gh` commands to work normally in a
     Tree, so that the PR flow is identical to a normal clone.
 20. As a **coordinator**, I want the cost of a new Tree to be ~22 MB and a few seconds, so
-    that spinning up isolation per work-stream is never a reason to skip it.
+    that spinning up isolation per work stream is never a reason to skip it.
 21. As any agent, I want an attempt to call `EnterWorktree` or run `git worktree add` to be
     **denied with a message pointing me to `shipit tree create`**, so that I can't
     accidentally recreate the `.claude/worktrees` mess.
@@ -118,8 +121,11 @@ built from small testable pieces in the `prstate` "snapshot → decision" idiom:
 - **`tree/layout.py` (deep, pure, rarely changes).** `plan(spec) -> TreePlan{dir, branch,
   base}`. Resolves the three spec shapes — `--epic E --ws N [--slug S]`, `--issue N`,
   `--branch <freeform>` — into:
-  - **branch** (stable, no hash): `<EPIC>/ws<NN>-<slug>`, `issue/<num>-<slug>`, or the
-    freeform name. Git-namespace-as-path.
+  - **branch** (stable, no hash): `EPIC-WSnn` (e.g. `HAR02-WS02`), `fix/<issue>-<slug>`,
+    or the freeform name — the existing hyphen grammar (`naming.lex §3`). The slash form
+    (`HAR02/ws02-…`) is **rejected**: a WS branch `refs/heads/HAR02/ws02` cannot coexist
+    with the bare epic branch `refs/heads/HAR02` (a ref can't be both file and directory),
+    and the coordinator sits on the bare epic branch with WS branches off it.
   - **dir**: the branch path plus a trailing `-<agent-hash>`, under
     `~/workspace/trees/<org>/<repo>/<kind>/…`. The dir carries the hash; the branch never
     does. (Rationale: two sessions on one branch is fine; two Trees in one dir is not.)
@@ -144,7 +150,9 @@ built from small testable pieces in the `prstate` "snapshot → decision" idiom:
   auto-removed). Everything else is **keep**. The effectful removal (`tree/registry` or the
   verb) consumes this decision; the decision itself is pure and table-tested.
 - **`tree/include.py` (shallow).** `parse(.treeinclude) -> [path]` (gitignore syntax,
-  repo-root file) then copy/reflink exactly those gitignored-but-needed files
+  repo-root file; patterns are evaluated **relative to the repo root**, like `.gitignore`,
+  so a leading-`/` anchors to the repo root) then copy/reflink exactly those
+  gitignored-but-needed files
   (`.env`, Doppler config, models) from the source checkout into the new Tree. A Tree is
   self-contained and disposable — secrets are **copied, not symlinked**.
 - **`verbs/tree.py` (thin).** click wiring over the above, registered in `cli.py` beside
