@@ -50,7 +50,6 @@ class ClaudeAdapter(BackendAdapter):
         task: str,
         role: str,
         *,
-        output_format: str = "json",
         tools: tuple[str, ...] | list[str] | None = None,
     ) -> list[str]:
         """The exact ``claude`` print-mode argv ADR-0019 §1 specifies.
@@ -80,7 +79,7 @@ class ClaudeAdapter(BackendAdapter):
         ]
         if tools:
             cmd += ["--tools", ",".join(tools)]
-        cmd += ["--output-format", output_format]
+        cmd += ["--output-format", "json"]
         return cmd
 
     def child_env(self, parent_env: Mapping[str, str] | None = None) -> dict[str, str]:
