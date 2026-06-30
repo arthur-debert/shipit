@@ -173,12 +173,17 @@ hook contract; denial uses only the stable PreToolUse surface shipit already own
 
 > **Corrected by Trees v2 / shipit-owned subagent spawning (ADR-0017).** The "undocumented
 > `WorktreeCreate` hook contract" premise above is **wrong** — a feasibility spike on #139
-> confirmed the hook is documented and stable. More importantly the enforcement story moved
-> on: this deny-only stance is now paired with a **positive** path — the coordinator
-> provisions and launches every Run through `shipit spawn subagent`, which mints the Tree
-> and roots the child agent in it (the native worktree path stays denied). The full
-> successor PRD comes later via `/shipit-to-prd`; see ADR-0017 (spawning) and ADR-0018
-> (write vs read-only Trees).
+> confirmed the hook **is documented and stable**, and a later live probe (Claude Code
+> 2.1.196, pinned in `verbs/hook/worktreecreate.py`) verified its exact payload: CC fires
+> the hook with the spawn id in the **`name`** field and then adopts the bare path the hook
+> prints to stdout as the subagent cwd **without validating it** — which is precisely what
+> lets the demoted hook relocate an in-CC spawn into a dissociated-clone Tree. More
+> importantly the enforcement story moved on: this deny-only stance is now paired with a
+> **positive** path — the coordinator provisions and launches every Run through
+> `shipit spawn subagent`, which mints the Tree and roots the child agent in it (the native
+> worktree path stays denied). The full successor PRD comes later via `/shipit-to-prd`; see
+> ADR-0017 (spawning), ADR-0018 (write vs read-only Trees), and ADR-0019 (the
+> headless-`claude` launch contract that settles the launch mechanism ADR-0017 left open).
 
 **Config.** The central root defaults to `~/workspace/trees` and is overridable. `.treeinclude`
 is a repo-root file in gitignore syntax (a separate file, not a `.shipit.toml` table, so it
