@@ -79,9 +79,12 @@ def epic_umbrella_base(epic: str) -> str:
     bare-``E`` ref/dir collision. ``epic`` is validated as a single alphanumeric
     token (:data:`_EPIC_CODE`) — the same invariant :func:`_plan_epic_ws` pins — so
     an empty/whitespace or separator/``..`` code can never build a malformed
-    ``origin//umbrella`` ref or a path-traversing one. Raises :class:`ValueError`.
+    ``origin//umbrella`` ref or a path-traversing one. The type is checked before
+    the regex so a non-``str`` (e.g. ``None``) raises the documented
+    :class:`ValueError` rather than an escaping ``TypeError`` — the fail-closed
+    contract holds for ANY caller. Raises :class:`ValueError`.
     """
-    if not _EPIC_CODE.fullmatch(epic):
+    if not isinstance(epic, str) or not _EPIC_CODE.fullmatch(epic):
         raise ValueError(
             "tree.layout.epic_umbrella_base: epic code must be a single alphanumeric "
             f"token (naming.lex §3 THEME+NN, e.g. 'HAR02'); got {epic!r}."

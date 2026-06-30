@@ -160,6 +160,16 @@ def test_epic_umbrella_base_rejects_unsafe_epic_code(bad_epic):
         layout.epic_umbrella_base(bad_epic)
 
 
+def test_epic_umbrella_base_none_raises_valueerror_not_typeerror():
+    # The type is guarded BEFORE the regex, so a non-str (e.g. None) honors the
+    # documented ValueError contract rather than leaking a TypeError from
+    # _EPIC_CODE.fullmatch(None) — the fail-closed "never a traceback" promise of
+    # #176 holds even if a future caller passes a non-str. (A bare `except
+    # ValueError` in the spawn verb would NOT catch a TypeError.)
+    with pytest.raises(ValueError, match="epic code"):
+        layout.epic_umbrella_base(None)
+
+
 def test_non_epic_shapes_keep_origin_main_base():
     # The #176 change is scoped to the EPIC shape: the issue and freeform shapes (a
     # standalone, no-epic Tree) still cut from origin/main — never the umbrella base.
