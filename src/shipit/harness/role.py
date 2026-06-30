@@ -7,9 +7,9 @@ top-level human-facing session — the `coordinator`, the role the guard governs
 A named subagent resolves to its own role.
 
 `Role` is a CLOSED registry (mirrors `prstate`'s reviewer/toolchain registries):
-`coordinator`, `implementer`, `shepherd`, `explorer`. Per-consumer custom roles
-are out of scope (the registry ships fixed). Pure: a function of the payload
-only, no I/O.
+`coordinator`, `implementer`, `shepherd`, `explorer`, `reviewer`. Per-consumer
+custom roles are out of scope (the registry ships fixed). Pure: a function of the
+payload only, no I/O.
 """
 
 from __future__ import annotations
@@ -29,6 +29,7 @@ class Role(StrEnum):
     IMPLEMENTER = "implementer"
     SHEPHERD = "shepherd"
     EXPLORER = "explorer"
+    REVIEWER = "reviewer"
 
 
 def resolve_role(hook_input: Mapping[str, Any]) -> Role:

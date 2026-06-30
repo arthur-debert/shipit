@@ -7,3 +7,4 @@ The roles a coordinator delegates to — one line each. The binding prompt for e
 - implementer — builds the change with tests and opens the draft PR, then stops.
 - shepherd — addresses one review round on an open PR, then hands back.
 - explorer — read-only investigator: searches and reports, changes nothing.
+- reviewer — read-only, branch-pinned: reads a PR head and posts one review, changes nothing.

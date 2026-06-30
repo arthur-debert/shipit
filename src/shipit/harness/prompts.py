@@ -40,7 +40,12 @@ from .role import Role
 #: session and has no agent-def (ADR-0011). These are the roles that get a
 #: ``.claude/agents/<role>.md`` body; the coordinator's prompt rides the injected
 #: context + the PreToolUse deny reason instead.
-SUBAGENT_ROLES: tuple[Role, ...] = (Role.IMPLEMENTER, Role.SHEPHERD, Role.EXPLORER)
+SUBAGENT_ROLES: tuple[Role, ...] = (
+    Role.IMPLEMENTER,
+    Role.SHEPHERD,
+    Role.EXPLORER,
+    Role.REVIEWER,
+)
 
 #: Section headings the generator injects so the composed markdown is well-formed
 #: regardless of the fragments (the fragments themselves are heading-free prose +
@@ -67,10 +72,11 @@ _COORDINATOR_SLICE_NAME = "coordinator-prompt.md"
 _UNION_NAME = "agents-union.md"
 
 #: Per-subagent-role agent-def frontmatter. `description` is the "when to use"
-#: line Claude Code shows in the agent picker; `tools` is set ONLY for the
-#: explorer (read-only, so it is denied the mutating tools) — the others inherit
-#: the full toolset and are governed by their prompt + (for any code edit) the
-#: PreToolUse guard, not a tool allow-list.
+#: line Claude Code shows in the agent picker; `tools` is set for the read-only
+#: roles — the explorer and the reviewer are denied the mutating tools (no
+#: `Write`/`Edit`), so their read-only posture rides the tool allow-list, not just
+#: the prompt. The write roles inherit the full toolset and are governed by their
+#: prompt + (for any code edit) the PreToolUse guard.
 _AGENT_FRONTMATTER: dict[Role, dict[str, str]] = {
     Role.IMPLEMENTER: {
         "description": (
@@ -88,6 +94,14 @@ _AGENT_FRONTMATTER: dict[Role, dict[str, str]] = {
         "description": (
             "Read-only, search-scoped investigator: searches and reports "
             "findings, mutates nothing. Use to answer a question about the code."
+        ),
+        "tools": "Read, Grep, Glob, Bash",
+    },
+    Role.REVIEWER: {
+        "description": (
+            "Read-only, branch-pinned reviewer: reads a PR head in a shared "
+            "read-only Tree and posts one review, mutates nothing. Use to review "
+            "a PR."
         ),
         "tools": "Read, Grep, Glob, Bash",
     },

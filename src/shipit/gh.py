@@ -405,6 +405,29 @@ def git_checkout_new_branch(branch: str, base: str, *, cwd: str) -> None:
     _git(["checkout", "-b", branch, base], cwd=cwd)
 
 
+def git_checkout(branch: str, *, cwd: str) -> None:
+    """``git checkout <branch>`` — switch to an EXISTING branch (no ``-b``).
+
+    The read-only-Tree counterpart of :func:`git_checkout_new_branch`: a reviewer
+    Tree checks out a branch that already exists on ``origin`` (the PR head) rather
+    than cutting a new one. After a ``git fetch`` the plain checkout DWIMs a local
+    tracking branch from ``origin/<branch>``, so the read-only clone lands on the
+    exact head under review.
+    """
+    _git(["checkout", branch], cwd=cwd)
+
+
+def git_reset_hard(ref: str, *, cwd: str) -> None:
+    """``git reset --hard <ref>`` — force HEAD, index, and working tree to ``ref``.
+
+    The read-only-Tree reuse counterpart of :func:`git_checkout`: when a shared review
+    clone is reused after the PR head advanced, a ``git fetch`` followed by a hard reset
+    to ``origin/<branch>`` re-pins the working tree to the CURRENT head, so a second
+    reviewer never reads the stale commit the first clone happened to land on.
+    """
+    _git(["reset", "--hard", ref], cwd=cwd)
+
+
 def git_remote_url(*, cwd: str, remote: str = "origin") -> str:
     """The configured URL of ``remote`` for the checkout at ``cwd``."""
     return _git(["remote", "get-url", remote], cwd=cwd).strip()

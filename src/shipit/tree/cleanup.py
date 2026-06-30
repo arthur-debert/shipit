@@ -24,13 +24,23 @@ local work is *kept*.
   auto-removed**; a human decides.
 - **keep** — everything else: a dirty tree, unpushed commits, an in-flight (open/draft)
   PR, or a Tree too recent to be aged. Live or local work is always protected.
+
+A **shared read-only (reviewer) Tree** (ADR-0018; ``…/review/<branch>``) is a
+distinct reclaim case the precedence ladder handles FIRST. It carries no local work
+(read-only, ``chmod``'d) and is shared across reviewers, so age / dirty / unpushed do
+not apply; instead it is **removable when its PR is merged or closed AND no reviewer
+is still live against it** (the ``live_reviews`` input), and **kept** otherwise (an
+in-flight PR, an unreadable state, or a live reviewer). It never lands in *stale*:
+a cheap shared clone is either provably reclaimable or kept.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 
+from .layout import REVIEW_KIND
 from .registry import TreeRecord
 
 #: Default age threshold (seconds): a Tree must be untouched for longer than this
@@ -100,6 +110,33 @@ def _is_in_flight(state: str | None) -> bool:
     return (state or "").upper() in {"OPEN", "DRAFT"}
 
 
+def _is_closed(state: str | None) -> bool:
+    """``True`` when the PR was **closed without merging** (a terminal, non-merge state).
+
+    Together with :func:`_is_merged` this is the ``merged/closed`` terminal condition
+    a shared review Tree's reclaim turns on (ADR-0018): once the PR is done — merged or
+    abandoned — the read-only clone has nothing left to serve.
+    """
+    return (state or "").upper() == "CLOSED"
+
+
+def _is_review_tree(path: str) -> bool:
+    """``True`` when ``path`` is a shared read-only (reviewer) Tree.
+
+    Keyed off the :data:`~shipit.tree.layout.REVIEW_KIND` dir segment the read-only
+    planner stamps (``…/<org>/<repo>/review/<leaf>``), which ADR-0018 makes the naming
+    source of truth for the mode — there is no manifest, so the path IS the signal,
+    exactly as the rest of the registry reads state off disk.
+
+    The kind is matched as the leaf's PARENT segment specifically, not "anywhere in the
+    path" — a substring/``in parts`` test would misclassify a write Tree whose org, repo,
+    or central-root happens to contain a ``review`` segment, bypassing the dirty/ahead/age
+    safety ladder. The layout pins the kind to exactly ``<leaf>``'s parent, so that is
+    the only segment checked.
+    """
+    return Path(path).parent.name == REVIEW_KIND
+
+
 def _is_unknown(state: str | None) -> bool:
     """``True`` when the PR state could not be read (``"UNKNOWN"`` in the vocabulary).
 
@@ -118,6 +155,7 @@ def classify(
     pr_states: Mapping[str, str | None],
     *,
     max_age_seconds: float = DEFAULT_MAX_AGE_SECONDS,
+    live_reviews: Mapping[str, bool] | None = None,
 ) -> Cleanup:
     """Partition ``records`` into removable / stale / keep — a pure, total decision.
 
@@ -125,11 +163,19 @@ def classify(
     PR state on the remote (``"MERGED"`` / ``"OPEN"`` / ``"CLOSED"`` / ``"DRAFT"``,
     ``"UNKNOWN"`` when the state could not be read, or ``None`` for no PR). Keying by
     ``path`` — not branch — is deliberate: two Trees can
-    share one branch (PRD), so the path is the only unique handle. Both are INPUTS, so
-    this function holds no clock and does no I/O.
+    share one branch (PRD), so the path is the only unique handle. ``live_reviews``
+    maps a *review* Tree's ``path`` to whether a reviewer Run is still live against it
+    (default: none live). All are INPUTS, so this function holds no clock and does no
+    I/O.
 
     The rules, in precedence order (the first that matches wins):
 
+    0. **shared read-only (reviewer) Tree** (``…/review/<branch>``) — a DISTINCT
+       reclaim case decided before the write-Tree ladder (ADR-0018). It holds no local
+       work, so age / dirty / unpushed do not apply: it is **removable** when its PR is
+       **merged or closed** ∧ **no reviewer is live** against it, and **keep**
+       otherwise (in-flight PR, unreadable state, or a live reviewer). It is never
+       *stale*.
     1. **dirty or unpushed** (``ahead > 0``) → **keep** — local work is never at risk
        from ``gc``, regardless of age or PR state.
     2. **not aged** (``now - mtime <= max_age_seconds``) → **keep** — too recent to
@@ -142,6 +188,7 @@ def classify(
          state is unreadable, not provably abandoned, so it is conservatively stale and
          ``gc`` raises an incomplete-sweep warning for it.
     """
+    live = live_reviews or {}
     buckets: dict[str, list[TreeRecord]] = {"removable": [], "stale": [], "keep": []}
     for record in records:
         label = _bucket_for(
@@ -149,6 +196,7 @@ def classify(
             now=now,
             state=pr_states.get(record.path),
             max_age_seconds=max_age_seconds,
+            reviewer_live=live.get(record.path, False),
         )
         buckets[label].append(record)
     return Cleanup(
@@ -164,12 +212,15 @@ def _bucket_for(
     now: float,
     state: str | None,
     max_age_seconds: float,
+    reviewer_live: bool,
 ) -> str:
     """The bucket name (``"removable"`` / ``"stale"`` / ``"keep"``) for one Tree.
 
     Encodes the precedence ladder documented on :func:`classify`. Pure: it reads only
     its arguments.
     """
+    if _is_review_tree(record.path):
+        return _review_bucket(state, reviewer_live=reviewer_live)
     if record.dirty or record.ahead > 0:
         return "keep"
     aged = (now - record.mtime) > max_age_seconds
@@ -186,3 +237,21 @@ def _bucket_for(
     if _is_unknown(state):
         return "stale"
     return "stale"
+
+
+def _review_bucket(state: str | None, *, reviewer_live: bool) -> str:
+    """The bucket for a shared read-only (reviewer) Tree (ADR-0018). Pure.
+
+    Reclaim is binary — ``removable`` or ``keep``, never ``stale``: a review Tree is a
+    cheap shared clone carrying no local work, so it is either provably done with or
+    kept. It is **removable** only when its PR has reached a terminal state (merged or
+    closed) AND no reviewer Run is still live against it; a live reviewer, an in-flight
+    PR (open/draft), an unreadable (UNKNOWN) state, or no PR at all all → **keep**
+    (never reclaim a clone a reviewer might still be reading, and never guess from an
+    unreadable PR).
+    """
+    if reviewer_live:
+        return "keep"
+    if _is_merged(state) or _is_closed(state):
+        return "removable"
+    return "keep"

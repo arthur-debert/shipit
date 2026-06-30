@@ -40,6 +40,15 @@ CENTRAL_ROOT_ENV = "SHIPIT_TREES_ROOT"
 #: (PRD Solution; ADR-0014).
 DEFAULT_CENTRAL_ROOT = "~/workspace/trees"
 
+#: The dir-namespace segment that marks a **shared read-only (reviewer) Tree**
+#: (ADR-0018): ``<root>/<org>/<repo>/review/<branch>``. Unlike the per-Run write
+#: kinds (``epics`` / ``issues`` / ``branches``), a ``review`` Tree's leaf carries
+#: NO agent hash — it is shared per ``(repo, branch)`` (git's branch is its source
+#: of truth) — and the segment is the marker :func:`shipit.tree.cleanup.classify`
+#: keys its reclaim rule off. Defined here so the read-only planner
+#: (:mod:`shipit.tree.readonly`) and ``cleanup`` name it from one place.
+REVIEW_KIND = "review"
+
 #: Characters a slug is normalized on: path/ref separators, dots, colons, and
 #: whitespace all collapse to ``-`` so a slug is safe in both a branch ref and a
 #: directory name.

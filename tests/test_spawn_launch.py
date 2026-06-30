@@ -37,6 +37,41 @@ def test_build_command_carries_the_role_verbatim():
     assert cmd[cmd.index("--agent") + 1] == "shepherd"
 
 
+def test_build_command_omits_tools_when_none():
+    # A write Run passes no allow-list: the --tools flag must be absent so the role
+    # inherits its full toolset.
+    cmd = launch.build_command("t", "implementer")
+    assert "--tools" not in cmd
+
+
+def test_build_command_adds_readonly_tools_for_a_reviewer():
+    # A reviewer narrows tool access (ADR-0019 §4): --tools carries the read-only
+    # allow-list as a comma-joined string, and crucially excludes Write/Edit.
+    cmd = launch.build_command("t", "reviewer", tools=launch.REVIEWER_TOOLS)
+    allowlist = cmd[cmd.index("--tools") + 1]
+    assert allowlist == "Read,Grep,Glob,Bash"
+    assert "Write" not in allowlist and "Edit" not in allowlist
+    # The flag sits before --output-format, preserving the envelope arg at the tail.
+    assert cmd.index("--tools") < cmd.index("--output-format")
+
+
+def test_reviewer_task_names_the_branch_and_posts_a_review():
+    task = launch.reviewer_task("TRE03/WS03")
+    assert "TRE03/WS03" in task
+    assert "gh pr review" in task
+    # The read-only posture is stated: no edits/build/push/merge.
+    assert "READ-ONLY" in task
+
+
+def test_reviewer_task_reads_the_diff_with_gh_pr_diff_not_a_hardcoded_base():
+    # The diff instruction must use `gh pr diff` (the PR's actual base/head), NOT a baked
+    # `git diff origin/main...HEAD` — an epic/umbrella PR has a non-main base, so a
+    # hardcoded base would compute the wrong range.
+    task = launch.reviewer_task("TRE03/WS03")
+    assert "gh pr diff" in task
+    assert "origin/main" not in task
+
+
 def test_child_env_scrubs_anthropic_api_key():
     parent = {"PATH": "/bin", "ANTHROPIC_API_KEY": "stale-key", "HOME": "/home/a"}
 

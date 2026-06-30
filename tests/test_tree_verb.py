@@ -460,7 +460,7 @@ def test_run_remove_reports_rmtree_failure_cleanly(tmp_path, monkeypatch, capsys
     def boom(_path):
         raise OSError("permission denied")
 
-    monkeypatch.setattr(tree_verb.shutil, "rmtree", boom)
+    monkeypatch.setattr(tree_verb, "remove_tree", boom)
 
     rc = tree_verb.run_remove(str(target))
 
@@ -807,14 +807,14 @@ def test_run_gc_continues_past_a_failed_delete(tmp_path, monkeypatch, capsys):
         lambda branch, *, cwd=None: {"number": 1, "state": "MERGED", "isDraft": False},
     )
 
-    real_rmtree = tree_verb.shutil.rmtree
+    real_remove_tree = tree_verb.remove_tree
 
     def flaky(path, *args, **kwargs):
         if path == str(bad):
             raise OSError("read-only file")
-        return real_rmtree(path, *args, **kwargs)
+        return real_remove_tree(path, *args, **kwargs)
 
-    monkeypatch.setattr(tree_verb.shutil, "rmtree", flaky)
+    monkeypatch.setattr(tree_verb, "remove_tree", flaky)
 
     rc = tree_verb.run_gc()
 
@@ -878,7 +878,7 @@ def test_run_gc_dry_run_lists_classifications_and_deletes_nothing(
     def boom(*args, **kwargs):
         raise AssertionError("dry-run must not delete anything")
 
-    monkeypatch.setattr(tree_verb.shutil, "rmtree", boom)
+    monkeypatch.setattr(tree_verb, "remove_tree", boom)
 
     rc = tree_verb.run_gc(dry_run=True)
 
@@ -1057,7 +1057,7 @@ def test_run_gc_dry_run_warns_on_unknown_and_deletes_nothing(
     def boom(*args, **kwargs):
         raise AssertionError("dry-run must not delete anything")
 
-    monkeypatch.setattr(tree_verb.shutil, "rmtree", boom)
+    monkeypatch.setattr(tree_verb, "remove_tree", boom)
 
     rc = tree_verb.run_gc(dry_run=True)
 

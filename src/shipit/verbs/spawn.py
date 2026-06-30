@@ -34,12 +34,18 @@ from .. import gh, proc
 from ..spawn import launch
 from ..tree.create import Tree, create, new_agent_hash
 from ..tree.layout import TreeSpec
+from ..tree.readonly import create_readonly, readonly_plan
 
 #: The backends ``spawn subagent`` can launch today. Only ``claude`` is wired
 #: (ADR-0019 is the claude-backend contract); codex / antigravity are a future WS
 #: (#153). A ``click.Choice`` over this gates the CLI, and :func:`run_subagent`
 #: re-checks it so the programmatic entry point is guarded too.
 SUPPORTED_BACKENDS = ("claude",)
+
+#: The role that gets a shared **read-only Tree** + a **Reviewer Run** (ADR-0018)
+#: instead of the per-Run write Tree every other role gets: a reviewer is read-only
+#: and branch-pinned, so :func:`run_subagent` dispatches on this exact value.
+REVIEWER_ROLE = "reviewer"
 
 
 @click.group(
@@ -92,7 +98,9 @@ def spawn() -> None:
     help=(
         "The Run's role, passed verbatim to `claude --agent <role>` (ADR-0019 §2) — "
         "load-bearing: it populates the hook payload so the guard allows the Run's "
-        "own edits. Needs a committed .claude/agents/<role>.md def in the Tree."
+        "own edits. Needs a committed .claude/agents/<role>.md def in the Tree. "
+        "`reviewer` is special: it gets a shared READ-ONLY Tree and posts a review "
+        "through the PR (ADR-0018), not a write Tree."
     ),
 )
 @click.option(
@@ -131,23 +139,31 @@ def run_subagent(
     repo: str,
     epic: str,
     ws: int,
-    issue: int,
     role: str,
+    issue: int | None = None,
     backend: str = "claude",
     launcher: launch.Runner | None = None,
 ) -> int:
     """Resolve identity → create the Tree → launch the Run → link its PR. Returns a code.
 
-    Returns 0 once a headless ``claude`` child has run rooted in a freshly-created
-    write Tree and opened a PR on that Tree's branch — the Run↔PR linkage the
-    SPAWNED summary reports for ``shipit pr status``. Returns 1 with a clean stderr
-    message (never a traceback) when the backend is unsupported, ``--ws`` or
-    ``--issue`` is not positive, ``--repo`` disagrees with the ambient checkout, the
-    command is not run inside a GitHub checkout, a git/gh call fails, **Tree creation
-    fails** (fail-closed — no native-worktree fallback), the child exits nonzero, the
-    child exits 0 without opening a PR on the branch, that PR's state cannot be read,
-    or the PR is not an OPEN, DRAFT PR targeting the Tree's intended base (an invalid
-    lifecycle state the coordinator must not be handed).
+    Tree. There are two modes, dispatched on ``role``:
+
+    - every role but ``reviewer`` gets a per-Run **write** Tree (WS02): the child
+      implements ``--issue`` and opens a draft PR on the Tree's branch, and the proof
+      is that Run↔PR linkage — the SPAWNED summary reports it for ``shipit pr status``;
+    - ``reviewer`` (ADR-0018) gets a shared **read-only** Tree on the existing PR head
+      and posts its review THROUGH that PR, so it needs no ``--issue`` and leaves no
+      Run↔PR linkage to resolve — its proof is the child's clean exit (the review is
+      out-of-band, in the PR).
+
+    Returns 1 with a clean stderr message (never a traceback) when the backend is
+    unsupported, ``--ws`` is not positive, ``--issue`` is missing/not positive for a
+    WRITE Run, ``--repo`` disagrees with the ambient checkout, the command is not run
+    inside a GitHub checkout, a git/gh call fails, **Tree creation fails** (fail-closed
+    — no native-worktree fallback), or the child exits nonzero. For a write Run it also
+    fails when the child exits 0 without opening a PR on the branch, that PR's state
+    cannot be read, or the PR is not an OPEN, DRAFT PR targeting the Tree's intended
+    base (an invalid lifecycle state the coordinator must not be handed).
 
     ``launcher`` injects the subprocess seam so the launch contract is unit-tested
     without spawning a real ``claude``; ``None`` uses the real
@@ -167,11 +183,12 @@ def run_subagent(
             file=sys.stderr,
         )
         return 1
-    if issue < 1:
+    if role != REVIEWER_ROLE and (issue is None or issue < 1):
         # ``--issue`` rides the task prompt and the draft PR's ``for #<issue>`` link;
-        # a zero/negative value (which click's int type still accepts) would forge a
-        # nonsensical issue reference. Refuse it before any Tree/child work, mirroring
-        # the ``--ws`` guard above.
+        # a missing or zero/negative value (which click's int type still accepts) would
+        # forge a nonsensical issue reference. Refuse it before any Tree/child work,
+        # mirroring the ``--ws`` guard above. A reviewer Run implements no issue (it
+        # reviews an existing PR head), so the requirement does not apply to it.
         print(
             f"spawn subagent: --issue must be a positive integer (got {issue})",
             file=sys.stderr,
@@ -215,10 +232,27 @@ def run_subagent(
         )
         return 1
 
+    # The slash-namespaced E/WSnn branch — the WS PR head. A reviewer reviews THIS
+    # head; a write Run cuts a fresh branch of this name via the FREEFORM shape.
+    branch = f"{epic}/WS{ws:02d}"
+
+    # Reviewer Run (ADR-0018): a shared READ-ONLY Tree on the existing PR head, not a
+    # per-Run write Tree. Dispatched before building the write TreeSpec so the two
+    # modes never share provisioning.
+    if role == REVIEWER_ROLE:
+        return _launch_reviewer(
+            org=org,
+            repo_name=repo_name,
+            branch=branch,
+            source_repo=root,
+            github_url=url,
+            backend=backend,
+            launcher=launcher,
+        )
+
     # Skeleton Tree: the slash-namespaced E/WSnn branch via the FREEFORM shape, so
     # the base stays the dumb origin/main; the epic-grouped umbrella base
     # (origin/E/umbrella) is the semantic path a later WS swaps in.
-    branch = f"{epic}/WS{ws:02d}"
     spec = TreeSpec(
         org=org,
         repo=repo_name,
@@ -320,27 +354,81 @@ def run_subagent(
     return 0
 
 
-def _emit_spawned(tree: Tree, *, role: str, backend: str, pr: dict) -> None:
+def _launch_reviewer(
+    *,
+    org: str,
+    repo_name: str,
+    branch: str,
+    source_repo: str,
+    github_url: str,
+    backend: str,
+    launcher: launch.Runner | None,
+) -> int:
+    """Provision the shared read-only Tree, launch the Reviewer Run, observe. Returns a code.
+
+    The ADR-0018 reviewer path: resolve the shared per-``(repo, branch)`` read-only
+    Tree (a second reviewer on the same head REUSES the clone), then launch a headless
+    ``claude`` child rooted in it with the read-only ``--tools`` allow-list
+    (:data:`~shipit.spawn.launch.REVIEWER_TOOLS`) and the reviewer task — which reads
+    the diff and posts a review THROUGH the PR. Unlike the write path there is no
+    Run↔PR linkage to resolve: the Run reports out-of-band (the review lands in the
+    existing PR), so success is the child's clean exit. Fail-closed mirrors the write
+    path — a read-only-Tree error exits 1 loud, never a fallback.
+    """
+    plan = readonly_plan(org=org, repo=repo_name, branch=branch)
+    try:
+        tree = create_readonly(plan, source_repo=source_repo, github_url=github_url)
+    except (gh.GhError, ValueError, proc.ProcError, OSError) as exc:
+        # Fail-closed (ADR-0017/0018): a read-only-Tree error fails the spawn LOUD;
+        # the launcher below is unreachable unless a real Tree exists.
+        print(f"spawn subagent: read-only tree creation failed: {exc}", file=sys.stderr)
+        return 1
+
+    cmd = launch.build_command(
+        launch.reviewer_task(branch), REVIEWER_ROLE, tools=launch.REVIEWER_TOOLS
+    )
+    try:
+        result = launch.launch(
+            cmd, cwd=tree.path, env=launch.child_env(), runner=launcher
+        )
+    except OSError as exc:
+        print(f"spawn subagent: {exc}", file=sys.stderr)
+        return 1
+    if result.returncode != 0:
+        detail = result.stderr.strip()
+        print(
+            f"spawn subagent: claude child exited {result.returncode}"
+            + (f"\n{detail}" if detail else ""),
+            file=sys.stderr,
+        )
+        return 1
+
+    _emit_spawned(tree, role=REVIEWER_ROLE, backend=backend)
+    return 0
+
+
+def _emit_spawned(
+    tree: Tree, *, role: str, backend: str, pr: dict | None = None
+) -> None:
     """Print the SPAWNED summary: a ``SPAWNED`` line plus the Run's coordinates as JSON.
 
-    The ``pr`` block is the Run↔PR linkage the coordinator acts on: ``number`` is what
+    A WRITE Run passes ``pr``, the Run↔PR linkage the coordinator acts on: ``number``
     feeds ``shipit pr status <N>`` to drive the spawned-Run PR through the normal engine
     (reviews, ready, merge) exactly like a hand-spawned implementer's; ``state`` /
-    ``is_draft`` echo how the Run left it (a draft, per the role's PR protocol).
+    ``is_draft`` echo how the Run left it (a draft, per the role's PR protocol). A
+    reviewer Run reports through the existing PR and opens none, so it passes no ``pr``
+    and the block is omitted.
     """
+    payload = {
+        "tree": tree.path,
+        "branch": tree.branch,
+        "base": tree.base,
+        "role": role,
+        "backend": backend,
+    }
+    if pr is not None:
+        payload["pr"] = pr["number"]
+        payload["pr_state"] = pr["state"]
+        payload["pr_is_draft"] = pr.get("isDraft")
     print("SPAWNED")
-    print(
-        json.dumps(
-            {
-                "tree": tree.path,
-                "branch": tree.branch,
-                "base": tree.base,
-                "role": role,
-                "backend": backend,
-                "pr": pr["number"],
-                "pr_state": pr["state"],
-                "pr_is_draft": pr.get("isDraft"),
-            },
-            indent=2,
-        )
-    )
+    print(json.dumps(payload, indent=2))
