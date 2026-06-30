@@ -1,9 +1,11 @@
-"""Unit tests for the headless-``claude`` launcher (:mod:`shipit.spawn.launch`).
+"""Unit tests for the backend-agnostic launcher (:mod:`shipit.spawn.launch`).
 
-The launch contract is ADR-0019: the exact argv, ``cwd`` = the Tree, ``stdin`` from
-``/dev/null``, and ``ANTHROPIC_API_KEY`` scrubbed from the child env. These tests
-pin each piece WITHOUT spawning a real ``claude`` — the pure builders directly, and
-the subprocess seam by patching ``subprocess.run`` / injecting a fake runner.
+The per-backend argv/auth-env/read-only-posture moved behind the ADR-0020 adapter
+seam (covered in ``test_spawn_backend_claude.py``); what stays here is the *shared*
+launch machinery: ``cwd`` = the Tree, ``stdin`` from ``/dev/null`` (the subprocess
+seam), and the English PR-contract prompts. These tests pin each piece WITHOUT
+spawning a real child — the prompts directly, and the subprocess seam by patching
+``subprocess.run`` / injecting a fake runner.
 """
 
 from __future__ import annotations
@@ -11,48 +13,6 @@ from __future__ import annotations
 import subprocess
 
 from shipit.spawn import launch
-
-
-def test_build_command_is_the_adr_contract():
-    cmd = launch.build_command("do the thing", "implementer")
-
-    # The literal ADR-0019 §1 invocation, in order.
-    assert cmd == [
-        "claude",
-        "-p",
-        "do the thing",
-        "--agent",
-        "implementer",
-        "--permission-mode",
-        "bypassPermissions",
-        "--output-format",
-        "json",
-    ]
-
-
-def test_build_command_carries_the_role_verbatim():
-    # --agent <role> is load-bearing (ADR-0019 §2): it conveys the role to the
-    # harness so the guard allows the Run's own edits. The role rides through as-is.
-    cmd = launch.build_command("t", "shepherd")
-    assert cmd[cmd.index("--agent") + 1] == "shepherd"
-
-
-def test_build_command_omits_tools_when_none():
-    # A write Run passes no allow-list: the --tools flag must be absent so the role
-    # inherits its full toolset.
-    cmd = launch.build_command("t", "implementer")
-    assert "--tools" not in cmd
-
-
-def test_build_command_adds_readonly_tools_for_a_reviewer():
-    # A reviewer narrows tool access (ADR-0019 §4): --tools carries the read-only
-    # allow-list as a comma-joined string, and crucially excludes Write/Edit.
-    cmd = launch.build_command("t", "reviewer", tools=launch.REVIEWER_TOOLS)
-    allowlist = cmd[cmd.index("--tools") + 1]
-    assert allowlist == "Read,Grep,Glob,Bash"
-    assert "Write" not in allowlist and "Edit" not in allowlist
-    # The flag sits before --output-format, preserving the envelope arg at the tail.
-    assert cmd.index("--tools") < cmd.index("--output-format")
 
 
 def test_reviewer_task_names_the_branch_and_posts_a_review():
@@ -70,33 +30,6 @@ def test_reviewer_task_reads_the_diff_with_gh_pr_diff_not_a_hardcoded_base():
     task = launch.reviewer_task("TRE03/WS03")
     assert "gh pr diff" in task
     assert "origin/main" not in task
-
-
-def test_child_env_scrubs_anthropic_api_key():
-    parent = {"PATH": "/bin", "ANTHROPIC_API_KEY": "stale-key", "HOME": "/home/a"}
-
-    env = launch.child_env(parent)
-
-    # The hard contract requirement (ADR-0019 §3): the key is gone, the rest stays.
-    assert "ANTHROPIC_API_KEY" not in env
-    assert env == {"PATH": "/bin", "HOME": "/home/a"}
-
-
-def test_child_env_without_key_is_a_plain_copy():
-    parent = {"PATH": "/bin"}
-    env = launch.child_env(parent)
-    assert env == {"PATH": "/bin"}
-    assert env is not parent  # a copy, never the caller's dict
-
-
-def test_child_env_defaults_to_os_environ_and_scrubs_it(monkeypatch):
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "from-os-environ")
-    monkeypatch.setenv("SHIPIT_SPAWN_MARKER", "present")
-
-    env = launch.child_env()
-
-    assert "ANTHROPIC_API_KEY" not in env
-    assert env.get("SHIPIT_SPAWN_MARKER") == "present"
 
 
 def test_launch_routes_through_the_injected_runner():

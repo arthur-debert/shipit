@@ -1,50 +1,31 @@
-"""``spawn/launch`` — the headless-``claude`` child-process launcher (ADR-0019).
+"""``spawn/launch`` — the **backend-agnostic** child-process launch machinery.
 
-The launch contract WS01 implements *verbatim* from the WS00 spike. For the
-``claude`` backend the Run is the ``claude`` CLI in headless print mode —
-``claude -p "<task>" --agent <role> --permission-mode bypassPermissions
---output-format json`` — run as a subprocess with **``cwd`` = the Tree**, **stdin
-from ``/dev/null``**, and **``ANTHROPIC_API_KEY`` scrubbed from the child env**.
+The pieces here are the same whatever the backend is (``claude``, ``codex``,
+``antigravity``) — they are the shared half of the ADR-0020 seam. What *varies* per
+backend (the argv, the auth-env scrub, the reviewer read-only posture) lives behind a
+:class:`~shipit.spawn.backends.base.BackendAdapter` in :mod:`shipit.spawn.backends`; this
+module holds everything that does NOT vary:
 
-Two of those are non-obvious, load-bearing spike findings (ADR-0019 §2/§3) that a
-paper decision would have missed:
+- :func:`launch` — runs a resolved ``cmd``/``cwd``/``env`` through an injectable
+  ``runner``, rooting the child in the Tree (``cwd`` = the Tree, **stdin from
+  ``/dev/null``**). The runner is the subprocess seam, swapped for a fake in tests.
+- :func:`write_task` / :func:`reviewer_task` — the English PR-contract prompts a Run is
+  handed. These are backend-agnostic: they convey *what work to do and how to report
+  it* (the PR is the result channel, ADR-0019 §6), not how any particular CLI is shaped.
 
-- **``--agent <role>``** is not cosmetic: a headless ``claude -p`` child is a fresh
-  *top-level* session, so its ``PreToolUse`` payload carries no ``agent_type`` —
-  which :func:`shipit.harness.role.resolve_role` maps to ``coordinator``, the role
-  the guard forbids from editing. The native ``--agent`` flag populates
-  ``agent_type`` so the guard allows the spawned Run's own edits. No change to
-  ``resolve_role`` is needed; the launcher just passes the flag.
-- **Scrubbing ``ANTHROPIC_API_KEY``** is a hard requirement: a stale/invalid key in
-  the env takes precedence over the claude.ai OAuth/keychain login and breaks the
-  child's auth ("Invalid API key"). Removing it makes the child use the keychain
-  login the parent is already logged in with.
-
-The module is split pure-from-effectful so the whole contract is table-tested
-without spawning a real ``claude``: :func:`build_command` / :func:`child_env` are
-pure, and :func:`launch` takes an injectable ``runner`` (defaulting to the real
-:func:`_subprocess_runner`).
+Rooting is the OS process ``cwd`` (ADR-0019 §1), NOT a ``cd`` — so the child's writes
+land in the Tree with no leak to the parent checkout, sidestepping the bash-cwd-reset
+footgun. The module is split pure-from-effectful so the contract is table-tested without
+spawning a real child: :func:`launch` takes an injectable ``runner`` (defaulting to the
+real :func:`_subprocess_runner`).
 """
 
 from __future__ import annotations
 
-import os
 import subprocess
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-
-#: The env var the launcher MUST remove from the child env (ADR-0019 §3): a
-#: stale/invalid value takes precedence over the claude.ai OAuth/keychain login and
-#: breaks auth. Scrubbing it is a hard contract requirement, not a nicety.
-ANTHROPIC_API_KEY = "ANTHROPIC_API_KEY"
-
-#: The read-only tool allow-list for a **reviewer** Run (ADR-0018 / ADR-0019 §4): a
-#: reviewer reads the diff and code and posts a review, so it gets the read tools plus
-#: ``Bash`` (to run ``gh pr diff`` and ``gh pr review``) but NOT ``Write`` / ``Edit`` —
-#: the read-only posture rides the ``--tools`` allow-list, mirroring the reviewer
-#: agent-def frontmatter. Passed to :func:`build_command` as ``tools``.
-REVIEWER_TOOLS = ("Read", "Grep", "Glob", "Bash")
 
 
 @dataclass(frozen=True)
@@ -68,58 +49,6 @@ class LaunchResult:
 Runner = Callable[..., LaunchResult]
 
 
-def build_command(
-    task: str,
-    role: str,
-    *,
-    output_format: str = "json",
-    tools: tuple[str, ...] | list[str] | None = None,
-) -> list[str]:
-    """The exact ``claude`` print-mode argv ADR-0019 §1 specifies.
-
-    ``claude -p "<task>" --agent <role> --permission-mode bypassPermissions
-    [--tools "<allowlist>"] --output-format json``. Two args are load-bearing:
-    ``--agent <role>`` populates the hook payload's ``agent_type`` so the
-    coordinator-guard allows the Run's own edits (§2), and ``--permission-mode
-    bypassPermissions`` is the write-Run mode (§4) — still bounded by the guard,
-    which fires inside the child. ``-p`` makes it a blocking foreground Run;
-    ``--output-format json`` yields the single result envelope the parent treats as
-    the exit signal.
-
-    ``tools`` narrows tool access per role (§4): a **reviewer** passes
-    :data:`REVIEWER_TOOLS` so the child gets only read-only tools (no ``Write`` /
-    ``Edit``) via ``--tools "<comma-joined>"``. ``None`` (a write Run) omits the flag
-    and inherits the role's full toolset.
-    """
-    cmd = [
-        "claude",
-        "-p",
-        task,
-        "--agent",
-        role,
-        "--permission-mode",
-        "bypassPermissions",
-    ]
-    if tools:
-        cmd += ["--tools", ",".join(tools)]
-    cmd += ["--output-format", output_format]
-    return cmd
-
-
-def child_env(parent_env: Mapping[str, str] | None = None) -> dict[str, str]:
-    """The child's environment: the parent's, with ``ANTHROPIC_API_KEY`` REMOVED.
-
-    ADR-0019 §3 (a load-bearing spike finding): a stale/invalid
-    ``ANTHROPIC_API_KEY`` in the env takes precedence over the claude.ai
-    OAuth/keychain login and breaks the child's auth. Scrubbing it is a hard
-    contract requirement so the keychain login is used; everything else inherits.
-    ``parent_env`` defaults to the live :data:`os.environ` and is injectable for
-    tests.
-    """
-    source = os.environ if parent_env is None else parent_env
-    return {key: value for key, value in source.items() if key != ANTHROPIC_API_KEY}
-
-
 def launch(
     cmd: list[str],
     *,
@@ -127,13 +56,14 @@ def launch(
     env: Mapping[str, str],
     runner: Runner | None = None,
 ) -> LaunchResult:
-    """Run the headless-``claude`` child rooted in the Tree and return its result.
+    """Run the resolved backend child rooted in the Tree and return its result.
 
-    Rooting is the OS process ``cwd`` (ADR-0019 §1) — NOT a ``cd`` — so the child's
-    writes land in the Tree with no leak to the parent checkout, sidestepping the
-    bash-cwd-reset footgun (a subagent's bash resets to the parent repo per call;
-    the process itself being rooted does not). ``runner`` is injectable so the
-    contract is unit-tested without spawning a real ``claude``; it defaults to
+    ``cmd`` / ``env`` come from the selected backend's adapter (ADR-0020); this launcher
+    is backend-agnostic. Rooting is the OS process ``cwd`` (ADR-0019 §1) — NOT a ``cd``
+    — so the child's writes land in the Tree with no leak to the parent checkout,
+    sidestepping the bash-cwd-reset footgun (a subagent's bash resets to the parent repo
+    per call; the process itself being rooted does not). ``runner`` is injectable so the
+    contract is unit-tested without spawning a real child; it defaults to
     :func:`_subprocess_runner`, which redirects ``stdin`` from ``/dev/null``.
     """
     if runner is None:
@@ -144,12 +74,12 @@ def launch(
 def _subprocess_runner(
     cmd: list[str], *, cwd: str, env: dict[str, str]
 ) -> LaunchResult:
-    """The real subprocess seam: ``claude`` in print mode, ``stdin`` from ``/dev/null``.
+    """The real subprocess seam: the backend child, ``stdin`` from ``/dev/null``.
 
     ``stdin`` is redirected from ``/dev/null`` because a TTY-less child otherwise
     waits ~3 s for stdin and warns (ADR-0019 §1). ``env`` REPLACES the child's
-    environment (the caller has already scrubbed ``ANTHROPIC_API_KEY`` via
-    :func:`child_env`) rather than merging over :data:`os.environ` the way
+    environment (the adapter's ``child_env`` has already scrubbed the backend's
+    auth-shadowing vars) rather than merging over :data:`os.environ` the way
     :func:`shipit.proc.run` does — a scrubbed key must not creep back in. ``check``
     is False: a nonzero child is a normal lifecycle outcome the verb reports, not an
     exception.
@@ -204,7 +134,7 @@ def reviewer_task(branch: str) -> str:
     (the PR head), so its result is delivered THROUGH the PR (ADR-0017): it reads the
     diff and the surrounding code, then posts exactly one review with ``gh pr review``
     (approve / request-changes / comment) for the PR on this branch. It never edits,
-    builds, pushes, or merges — the read-only ``--tools`` allow-list and the
+    builds, pushes, or merges — the backend's read-only tool allow-list and the
     ``chmod``'d working files enforce that; the prompt states the intent.
 
     The diff is read with ``gh pr diff`` — NOT a hardcoded ``git diff origin/main…``:
