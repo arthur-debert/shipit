@@ -43,10 +43,11 @@ dependencies.
     which mints the ready *Tree* on the WS branch (`EPIC/WSnn` — see [./naming.lex])
     and roots the Run in it (ADR-0017 / ADR-0019) — no hand `shipit tree create`; the
     implementer stops at PR-open. The epic topology is that each WS PR targets the EPIC
-    branch (not `main`) — but NOTE: the shipped `shipit spawn subagent` verb currently
-    provisions the WS Tree off `origin/main` and opens its draft PR against `main`;
-    epic-base resolution (`origin/E/umbrella` + epic-branch PR target) BY THE VERB is
-    deferred (follow-up #176). The coordinator owns the wait and the flip;
+    branch (not `main`): the `shipit spawn subagent` verb provisions the WS Tree off
+    the epic-grouped base `origin/E/umbrella` and opens its draft PR against the epic
+    branch `E/umbrella` (\#176, closed). It fail-closes if `origin/E/umbrella` is
+    missing on the remote — a loud exit, never a silent fallback to `origin/main`. The
+    coordinator owns the wait and the flip;
     a fresh shepherd handles each addressing round. The 6 / nitpick breaker applies to
     every workstream PR.
 

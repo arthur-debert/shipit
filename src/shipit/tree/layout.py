@@ -66,6 +66,32 @@ _SLUG_SEP = re.compile(r"[\s/.:]+")
 _EPIC_CODE = re.compile(r"[A-Za-z0-9]+")
 
 
+def epic_umbrella_base(epic: str) -> str:
+    """The remote base ref a work stream Tree is cut from: ``origin/<E>/umbrella``.
+
+    The single place that builds the epic-grouped base string, so the planner
+    (:func:`_plan_epic_ws`) and any caller that must resolve the base WITHOUT going
+    through :func:`plan` (the ``shipit spawn subagent`` verb, which fail-closes on
+    the umbrella branch's existence before creating the Tree) agree by construction.
+
+    A work stream ``E/WSnn`` and its siblings under ``refs/heads/E/`` are all cut
+    from the epic's umbrella branch (naming.lex §3); the umbrella name dodges the
+    bare-``E`` ref/dir collision. ``epic`` is validated as a single alphanumeric
+    token (:data:`_EPIC_CODE`) — the same invariant :func:`_plan_epic_ws` pins — so
+    an empty/whitespace or separator/``..`` code can never build a malformed
+    ``origin//umbrella`` ref or a path-traversing one. The type is checked before
+    the regex so a non-``str`` (e.g. ``None``) raises the documented
+    :class:`ValueError` rather than an escaping ``TypeError`` — the fail-closed
+    contract holds for ANY caller. Raises :class:`ValueError`.
+    """
+    if not isinstance(epic, str) or not _EPIC_CODE.fullmatch(epic):
+        raise ValueError(
+            "tree.layout.epic_umbrella_base: epic code must be a single alphanumeric "
+            f"token (naming.lex §3 THEME+NN, e.g. 'HAR02'); got {epic!r}."
+        )
+    return f"origin/{epic}/umbrella"
+
+
 def central_root() -> Path:
     """The central root every Tree lives under (env override, else the default).
 
@@ -218,7 +244,7 @@ def _plan_epic_ws(spec: TreeSpec) -> TreePlan:
         )
     ws_code = f"WS{spec.ws:02d}"
     branch = f"{spec.epic}/{ws_code}"
-    base = f"origin/{spec.epic}/umbrella"
+    base = epic_umbrella_base(spec.epic)
     slug = sanitize_slug(spec.slug)
     leaf = (
         f"{ws_code}-{slug}-{spec.agent_hash}"

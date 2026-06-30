@@ -323,6 +323,39 @@ def git_current_branch(*, cwd: str) -> str | None:
     return None if (not name or name == "HEAD") else name
 
 
+def epic_umbrella_exists(epic: str, *, cwd: str) -> bool:
+    """Whether ``<epic>/umbrella`` exists as a branch in the checkout at ``cwd``.
+
+    The semantic test for "is ``<epic>`` a real epic?": ADR-0016 gives every epic an
+    ``<epic>/umbrella`` branch, so the umbrella's existence IS the epic's existence —
+    a sturdier signal than any branch-name *grammar* proxy (robust to naming drift).
+    The WorktreeCreate hook uses it to tell a true epic prefix (``TRE04`` →
+    ``TRE04/umbrella`` exists) from an ordinary slash-branch a coordinator happens to
+    sit on (``feature/foo`` → no ``feature/umbrella``), so only a real epic namespaces
+    the holding branch.
+
+    A **LOCAL** ref lookup, deliberately NOT a network ``git ls-remote``: the hook
+    fires synchronously inside a spawn, and the coordinator's clone already carries the
+    umbrella's tracking ref — so no network round-trip gates the spawn. Checks the
+    remote-tracking ref first (``refs/remotes/origin/<epic>/umbrella``, the usual shape
+    in a clone), then a local head (``refs/heads/<epic>/umbrella``). Uses ``git
+    show-ref --verify`` with the EXACT full ref (never a pattern — avoids a glob
+    matching an unrelated ref), so a garbage ``epic`` (separators, ``..``) simply
+    yields a ref that does not resolve → ``False`` → the caller's safe epic-less
+    fallback. Never raises: any git failure (the ref is absent) reads as "not an epic".
+    """
+    for ref in (
+        f"refs/remotes/origin/{epic}/umbrella",
+        f"refs/heads/{epic}/umbrella",
+    ):
+        try:
+            _git(["show-ref", "--verify", "--quiet", ref], cwd=cwd)
+            return True
+        except GhError:
+            continue
+    return False
+
+
 def git_ls_files(*, cwd: str) -> list[str]:
     """Tracked files (``git ls-files``), repo-root-relative, in git's order.
 
@@ -432,6 +465,49 @@ def git_reset_hard(ref: str, *, cwd: str) -> None:
 def git_remote_url(*, cwd: str, remote: str = "origin") -> str:
     """The configured URL of ``remote`` for the checkout at ``cwd``."""
     return _git(["remote", "get-url", remote], cwd=cwd).strip()
+
+
+def remote_branch_exists(
+    branch: str, *, cwd: str | None = None, remote: str = "origin"
+) -> bool:
+    """Whether ``branch`` exists on ``remote`` (``git ls-remote --heads``).
+
+    A live query of the remote — not the local tracking refs — so a caller can
+    fail-closed on a missing base branch BEFORE cloning, without relying on a prior
+    fetch having populated a tracking ref. Raises :class:`GhError` if the
+    ``git ls-remote`` call itself fails (no network / bad remote), so an
+    undetermined remote state is never silently read as "branch absent".
+
+    Exact, not pattern. ``git ls-remote`` treats its final argument as a ref
+    *pattern*, so a bare branch name carrying a glob metacharacter (``*``,
+    ``?``, ``[``) or one that happens to match a *different* head could be
+    reported as present even when ``refs/heads/<branch>`` is absent — a false
+    positive that would defeat the fail-closed precondition. Two guards make
+    this exact:
+
+    * a branch name carrying a glob metacharacter can never name a real git
+      ref (git forbids those characters in refnames), so it short-circuits to
+      ``False`` and is never sent to ``git`` as a pattern; and
+    * the query asks for the fully-qualified ``refs/heads/<branch>`` and the
+      output is parsed line-by-line (``<sha>\\t<refname>``), returning ``True``
+      only when some line's refname column equals exactly ``refs/heads/<branch>``
+      — never merely "the output was non-empty".
+
+    The net guarantee: returns ``True`` iff ``refs/heads/<branch>`` genuinely
+    exists on ``remote``.
+    """
+    # A real git refname can never contain these; refuse to send one as a pattern.
+    if any(ch in branch for ch in "*?["):
+        return False
+    ref = f"refs/heads/{branch}"
+    base = ["git", "-C", cwd] if cwd is not None else ["git"]
+    args = [*base, "ls-remote", "--heads", remote, ref]
+    for line in _run(args).splitlines():
+        # Each line is "<sha>\t<refname>"; require exact refname equality.
+        parts = line.split("\t")
+        if len(parts) == 2 and parts[1] == ref:
+            return True
+    return False
 
 
 # --------------------------------------------------------------------------

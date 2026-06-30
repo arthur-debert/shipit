@@ -18,22 +18,33 @@ import pytest
 
 from shipit import gh, proc
 from shipit.spawn import launch
+from shipit.tree import layout
 from shipit.tree.create import Tree
 from shipit.verbs import spawn as spawn_verb
 
 
 def _patch_identity(monkeypatch, *, root="/repo", org_repo="acme/widget"):
-    """Mock the gh boundary so run_subagent resolves a fixed repo identity."""
+    """Mock the gh boundary so run_subagent resolves a fixed repo identity.
+
+    Also stubs ``remote_branch_exists`` → True: the write path fail-closes on the
+    epic umbrella branch existing on the remote (#176), so a happy-path test must see
+    it present. Tests that exercise the MISSING-branch fail-closed path override it.
+    """
     monkeypatch.setattr(gh, "repo_root", lambda: root)
     monkeypatch.setattr(gh, "current_repo", lambda: org_repo)
     monkeypatch.setattr(gh, "git_remote_url", lambda *, cwd: "git@example:" + org_repo)
+    monkeypatch.setattr(gh, "remote_branch_exists", lambda *a, **k: True)
 
 
 def _fake_create(monkeypatch, tree_dir: Path) -> dict:
     """Replace the orchestrator with a spy that 'creates' a Tree at ``tree_dir``.
 
     Returns the dict the spec/args are recorded into. The dir is made on disk so the
-    Tree the verb roots the launch in (and resolves the PR from) is a real path.
+    Tree the verb roots the launch in (and resolves the PR from) is a real path. The
+    branch/base are resolved from the spec through the REAL pure planner
+    (:func:`shipit.tree.layout.plan`), so the fake reflects the true epic-grouped
+    base (``origin/E/umbrella``) the verb now selects — the PR-target check in the
+    verb reads ``tree.base``, so a hardcoded base would not exercise it faithfully.
     """
     captured: dict = {}
 
@@ -42,7 +53,8 @@ def _fake_create(monkeypatch, tree_dir: Path) -> dict:
         captured["source_repo"] = source_repo
         captured["github_url"] = github_url
         tree_dir.mkdir(parents=True, exist_ok=True)
-        return Tree(path=str(tree_dir), branch=spec.branch, base="origin/main")
+        tp = layout.plan(spec)
+        return Tree(path=str(tree_dir), branch=tp.branch, base=tp.base)
 
     monkeypatch.setattr(spawn_verb, "create", fake_create)
     return captured
@@ -90,7 +102,12 @@ def test_run_subagent_happy_path(tmp_path, monkeypatch, capsys):
     runner, calls = _launcher()
     _patch_pr(
         monkeypatch,
-        {"number": 321, "state": "OPEN", "isDraft": True, "baseRefName": "main"},
+        {
+            "number": 321,
+            "state": "OPEN",
+            "isDraft": True,
+            "baseRefName": "TRE03/umbrella",
+        },
     )
 
     rc = spawn_verb.run_subagent(
@@ -103,12 +120,14 @@ def test_run_subagent_happy_path(tmp_path, monkeypatch, capsys):
     )
 
     assert rc == 0
-    # The Tree was created via the reused path, with the dumb origin/main base and
-    # the slash-namespaced E/WSnn branch (freeform shape).
+    # The Tree was created via the reused path with the EPIC shape (#176): the
+    # slash-namespaced E/WSnn branch cut from the epic-grouped umbrella base
+    # (origin/E/umbrella), NOT the dumb origin/main — so the draft PR targets the
+    # epic branch.
     spec = captured["spec"]
     assert spec.org == "acme" and spec.repo == "widget"
-    assert spec.branch == "TRE03/WS01"
-    assert spec.issue is None and spec.epic is None and spec.ws is None
+    assert spec.epic == "TRE03" and spec.ws == 1
+    assert spec.issue is None and spec.branch is None
     assert captured["source_repo"] == str(parent)
     # The launch contract: cwd IS the Tree, the role rides --agent, the key is gone.
     assert calls["cwd"] == str(tree_dir)
@@ -123,7 +142,7 @@ def test_run_subagent_happy_path(tmp_path, monkeypatch, capsys):
     payload = json.loads("\n".join(out.splitlines()[1:]))
     assert payload["tree"] == str(tree_dir)
     assert payload["branch"] == "TRE03/WS01"
-    assert payload["base"] == "origin/main"
+    assert payload["base"] == "origin/TRE03/umbrella"
     assert payload["role"] == "implementer"
     assert payload["backend"] == "claude"
     assert payload["pr"] == 321
@@ -143,7 +162,12 @@ def test_run_subagent_links_pr_from_the_tree_branch(tmp_path, monkeypatch, capsy
     runner, calls = _launcher()
     seen = _patch_pr(
         monkeypatch,
-        {"number": 7, "state": "OPEN", "isDraft": True, "baseRefName": "main"},
+        {
+            "number": 7,
+            "state": "OPEN",
+            "isDraft": True,
+            "baseRefName": "TRE03/umbrella",
+        },
     )
 
     rc = spawn_verb.run_subagent(
@@ -159,6 +183,135 @@ def test_run_subagent_links_pr_from_the_tree_branch(tmp_path, monkeypatch, capsy
     assert calls["cwd"] == str(tree_dir)  # the Run is rooted in the Tree
     assert seen["branch"] == "TRE03/WS02"  # link resolved from the Tree branch
     assert seen["cwd"] == str(tree_dir)  # ...read from inside the Tree
+
+
+def test_run_subagent_resolves_epic_grouped_base_and_pr_target(
+    tmp_path, monkeypatch, capsys
+):
+    # #176: --epic E --ws N resolves the epic-grouped base. The umbrella branch's
+    # existence is checked against the remote (E/umbrella, read from the source repo),
+    # the TreeSpec is the EPIC shape (so create cuts from origin/E/umbrella), and the
+    # Run's draft PR must target the epic branch E/umbrella — never main.
+    parent = tmp_path / "repo"
+    parent.mkdir()
+    tree_dir = tmp_path / "tree"
+    _patch_identity(monkeypatch, root=str(parent))
+    captured = _fake_create(monkeypatch, tree_dir)
+    checked: dict = {}
+
+    def fake_exists(branch, *, cwd=None, remote="origin"):
+        checked["branch"] = branch
+        checked["cwd"] = cwd
+        return True
+
+    monkeypatch.setattr(gh, "remote_branch_exists", fake_exists)
+    runner, _calls = _launcher()
+    _patch_pr(
+        monkeypatch,
+        {
+            "number": 42,
+            "state": "OPEN",
+            "isDraft": True,
+            "baseRefName": "TRE04/umbrella",
+        },
+    )
+
+    rc = spawn_verb.run_subagent(
+        repo="widget",
+        epic="TRE04",
+        ws=7,
+        issue=200,
+        role="implementer",
+        launcher=runner,
+    )
+
+    assert rc == 0
+    # Fail-closed precondition checked the EPIC umbrella branch on the remote, read
+    # from the source checkout.
+    assert checked["branch"] == "TRE04/umbrella"
+    assert checked["cwd"] == str(parent)
+    # The spec is the EPIC shape, so the real planner resolves origin/E/umbrella.
+    spec = captured["spec"]
+    assert spec.epic == "TRE04" and spec.ws == 7
+    assert layout.plan(spec).base == "origin/TRE04/umbrella"
+    out = capsys.readouterr().out
+    payload = json.loads("\n".join(out.splitlines()[1:]))
+    assert payload["base"] == "origin/TRE04/umbrella"
+
+
+def test_run_subagent_missing_epic_branch_fails_closed_no_main_fallback(
+    tmp_path, monkeypatch, capsys
+):
+    # #176 fail-closed: --epic E with NO origin/E/umbrella on the remote must exit 1
+    # LOUD and NEVER silently fall back to origin/main. The Tree is never created and
+    # nothing is launched — the precondition gates before any side effect.
+    _patch_identity(monkeypatch)
+    monkeypatch.setattr(gh, "remote_branch_exists", lambda *a, **k: False)
+    monkeypatch.setattr(
+        spawn_verb,
+        "create",
+        lambda *a, **k: pytest.fail("must not create a Tree on a missing epic base"),
+    )
+
+    launched: dict = {}
+
+    def runner(cmd, *, cwd, env):
+        launched["called"] = True
+        return launch.LaunchResult(0, "", "")
+
+    rc = spawn_verb.run_subagent(
+        repo="widget",
+        epic="TRE04",
+        ws=1,
+        issue=1,
+        role="implementer",
+        launcher=runner,
+    )
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "TRE04/umbrella" in err
+    assert "does not exist" in err
+    assert "origin/main" in err  # the diagnostic names the refused fallback
+    assert "called" not in launched  # nothing launched
+
+
+@pytest.mark.parametrize("bad_epic", ["", "   ", "TRE/04", "..", "TRE 04"])
+def test_run_subagent_invalid_epic_is_clean_exit_1(
+    tmp_path, monkeypatch, capsys, bad_epic
+):
+    # An invalid/empty epic code is not a single alphanumeric token, so the pure
+    # `epic_umbrella_base` helper raises ValueError. The verb must catch that and
+    # return a clean exit-1 with a stderr diagnostic — never let the traceback escape
+    # (the verb's "never a traceback" contract). The precondition gates before any
+    # side effect: no Tree is created and nothing is launched.
+    _patch_identity(monkeypatch)
+    monkeypatch.setattr(
+        spawn_verb,
+        "create",
+        lambda *a, **k: pytest.fail("must not create a Tree on an invalid epic code"),
+    )
+
+    launched: dict = {}
+
+    def runner(cmd, *, cwd, env):
+        launched["called"] = True
+        return launch.LaunchResult(0, "", "")
+
+    rc = spawn_verb.run_subagent(
+        repo="widget",
+        epic=bad_epic,
+        ws=1,
+        issue=1,
+        role="implementer",
+        launcher=runner,
+    )
+
+    assert rc == 1  # a clean exit code, NOT an escaping ValueError
+    err = capsys.readouterr().err
+    assert "spawn subagent:" in err
+    assert "epic code" in err  # the helper's diagnostic is surfaced
+    assert "called" not in launched  # nothing launched
 
 
 def test_run_subagent_tree_creation_failure_fails_closed(tmp_path, monkeypatch, capsys):
@@ -288,7 +441,12 @@ def test_run_subagent_repo_accepts_org_qualified_name(tmp_path, monkeypatch, cap
     runner, _calls = _launcher()
     _patch_pr(
         monkeypatch,
-        {"number": 5, "state": "OPEN", "isDraft": True, "baseRefName": "main"},
+        {
+            "number": 5,
+            "state": "OPEN",
+            "isDraft": True,
+            "baseRefName": "TRE03/umbrella",
+        },
     )
 
     rc = spawn_verb.run_subagent(
@@ -449,15 +607,15 @@ def test_run_subagent_non_draft_pr_is_exit_1(tmp_path, monkeypatch, capsys):
 
 def test_run_subagent_wrong_base_pr_is_exit_1(tmp_path, monkeypatch, capsys):
     # The PR is OPEN and draft, but targets a DIFFERENT base than the Tree's intended
-    # one (origin/main -> "main"). Reporting back against the wrong base is invalid, so
-    # the spawn is a clean exit-1.
+    # one (origin/E/umbrella -> "TRE03/umbrella"). Reporting back against the wrong
+    # base is invalid, so the spawn is a clean exit-1.
     tree_dir = tmp_path / "tree"
     _patch_identity(monkeypatch)
     _fake_create(monkeypatch, tree_dir)
     runner, _calls = _launcher(returncode=0)
     _patch_pr(
         monkeypatch,
-        {"number": 9, "state": "OPEN", "isDraft": True, "baseRefName": "develop"},
+        {"number": 9, "state": "OPEN", "isDraft": True, "baseRefName": "main"},
     )
 
     rc = spawn_verb.run_subagent(
@@ -466,8 +624,8 @@ def test_run_subagent_wrong_base_pr_is_exit_1(tmp_path, monkeypatch, capsys):
 
     assert rc == 1
     out = capsys.readouterr()
-    assert "targets base 'develop'" in out.err
-    assert "not the intended 'main'" in out.err
+    assert "targets base 'main'" in out.err
+    assert "not the intended 'TRE03/umbrella'" in out.err
     assert "SPAWNED" not in out.out
 
 
