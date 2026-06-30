@@ -49,9 +49,15 @@ class BackendAdapter(ABC):
     """The per-backend launch seam: argv, auth-env, and read-only posture (ADR-0020).
 
     One concrete subclass per backend, registered by :data:`~shipit.spawn.backends`'s
-    registry under :attr:`name` (the ``--backend`` token). Adapters are stateless —
-    the registry holds a single shared instance per backend. Everything an adapter does
-    NOT override (the Tree, the prompts, the subprocess, PR resolution) stays shared in
+    registry under :attr:`name` (the ``--backend`` token). An adapter MAY carry small
+    per-run configuration — ``codex`` pins a ``model``, ``agy`` a ``model`` and a
+    ``--print-timeout`` — so callers construct an instance per Run when they need to vary
+    it: the review funnel builds a fresh adapter per reviewer carrying that reviewer's
+    model/timeout (:mod:`shipit.review.producer`). The registry holds **one default
+    instance per backend** (default model/timeout) for the CLI gate and
+    :func:`~shipit.spawn.backends.supported_backends` — it is a shared default, not a
+    singleton every caller must reuse. Everything an adapter does NOT override (the Tree,
+    the prompts, the subprocess, PR resolution) stays shared in
     :mod:`shipit.spawn.launch` and :mod:`shipit.verbs.spawn`; this class is *only* the
     two things that genuinely differ per backend.
     """

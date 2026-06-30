@@ -134,8 +134,13 @@ def reviewer_task(branch: str) -> str:
     (the PR head), so its result is delivered THROUGH the PR (ADR-0017): it reads the
     diff and the surrounding code, then posts exactly one review with ``gh pr review``
     (approve / request-changes / comment) for the PR on this branch. It never edits,
-    builds, pushes, or merges — the backend's read-only tool allow-list and the
-    ``chmod``'d working files enforce that; the prompt states the intent.
+    builds, pushes, or merges — the ``chmod``'d read-only Tree is the load-bearing FS
+    guard across every backend (ADR-0018 / ADR-0020 §Decision 3), and each adapter adds
+    its own native read-only posture as best-effort defense-in-depth: ``claude`` narrows
+    to a read-only ``--tools`` allow-list, while ``codex`` / ``agy`` (no granular
+    allow-list) rely on a sandbox/permission posture (codex ``--sandbox`` + network
+    config; agy dropping ``--dangerously-skip-permissions``). The prompt states the
+    intent on top of that.
 
     The diff is read with ``gh pr diff`` — NOT a hardcoded ``git diff origin/main…``:
     a work stream / epic PR targets its umbrella branch, not ``main``, so a baked-in
