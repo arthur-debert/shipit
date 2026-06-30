@@ -155,6 +155,18 @@ def run_subagent(
         print(f"spawn subagent: {exc}", file=sys.stderr)
         return 1
 
+    if "/" not in org_repo:
+        # A well-formed ambient identity is always "org/repo"; a slashless value
+        # would put the whole string in ``org`` and leave ``repo_name`` empty, which
+        # can slip past the --repo guard below and feed an empty repo into the
+        # TreeSpec. Refuse it loud rather than build a malformed Tree.
+        print(
+            f"spawn subagent: ambient repo {org_repo!r} is not in org/repo form; "
+            "cannot resolve the target repo identity.",
+            file=sys.stderr,
+        )
+        return 1
+
     org, _, repo_name = org_repo.partition("/")
     # --repo is the wrong-checkout guard, not a repo SELECTOR yet: the skeleton
     # resolves identity from the ambient checkout, so a --repo that names a
@@ -193,7 +205,16 @@ def run_subagent(
     # cwd IS the Tree, ANTHROPIC_API_KEY is scrubbed, and --agent <role> conveys the
     # role to the harness so the guard allows the Run's own edits.
     cmd = launch.build_command(launch.skeleton_task(role), role)
-    result = launch.launch(cmd, cwd=tree.path, env=launch.child_env(), runner=launcher)
+    try:
+        result = launch.launch(
+            cmd, cwd=tree.path, env=launch.child_env(), runner=launcher
+        )
+    except OSError as exc:
+        # The child never started: `claude` is missing/not on PATH, or the Tree path
+        # became unavailable. The Tree exists, so this is a launch failure, not the
+        # fail-closed create path — still a clean exit-1, never an escaping traceback.
+        print(f"spawn subagent: {exc}", file=sys.stderr)
+        return 1
     if result.returncode != 0:
         detail = result.stderr.strip()
         print(

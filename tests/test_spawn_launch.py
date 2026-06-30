@@ -155,3 +155,20 @@ def test_sentinel_present_reflects_the_file(tmp_path):
     assert launch.sentinel_present(tmp_path) is False
     (tmp_path / launch.SENTINEL_NAME).write_text(launch.SENTINEL_BODY)
     assert launch.sentinel_present(tmp_path) is True
+
+
+def test_sentinel_present_rejects_wrong_or_empty_content(tmp_path):
+    # Existence is not enough (acceptance #155): a child that writes empty, truncated,
+    # or wrong contents did not do the work the skeleton task specified, so it must
+    # NOT be reported as a present sentinel.
+    sentinel = tmp_path / launch.SENTINEL_NAME
+    for bad in ("", "spawned by shipit", "garbage\n", launch.SENTINEL_BODY + "extra\n"):
+        sentinel.write_text(bad)
+        assert launch.sentinel_present(tmp_path) is False
+
+
+def test_sentinel_present_false_when_path_is_a_directory(tmp_path):
+    # A directory at the sentinel path is unreadable as text — treated as absent,
+    # never an escaping OSError.
+    (tmp_path / launch.SENTINEL_NAME).mkdir()
+    assert launch.sentinel_present(tmp_path) is False

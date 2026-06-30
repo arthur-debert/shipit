@@ -45,8 +45,9 @@ ANTHROPIC_API_KEY = "ANTHROPIC_API_KEY"
 #: later work streams; the sentinel is purely the walking skeleton's proof of life.
 SENTINEL_NAME = ".shipit-spawn-sentinel"
 
-#: The exact line the sentinel must contain — kept in one place so the task prompt
-#: that instructs the child and the observation that verifies it never drift.
+#: The exact, entire contents the sentinel must have — kept in one place so the task
+#: prompt that instructs the child and :func:`sentinel_present`, which verifies the
+#: child wrote precisely this, never drift.
 SENTINEL_BODY = "spawned by shipit\n"
 
 
@@ -181,5 +182,17 @@ def sentinel_path(tree_path: str | Path) -> Path:
 
 
 def sentinel_present(tree_path: str | Path) -> bool:
-    """Whether the spawned child wrote the sentinel into the Tree (proof it ran there)."""
-    return sentinel_path(tree_path).is_file()
+    """Whether the spawned child wrote the *correct* sentinel into the Tree.
+
+    The proof of life (acceptance #155) is not merely a file at the right path but a
+    file whose entire contents are :data:`SENTINEL_BODY` — the exact line the skeleton
+    task instructs the child to write. Existence alone is too weak: an empty,
+    truncated, or stray write would falsely report success. A missing file, an
+    unreadable one, or any content that is not :data:`SENTINEL_BODY` all count as
+    absent.
+    """
+    try:
+        return sentinel_path(tree_path).read_text() == SENTINEL_BODY
+    except OSError:
+        # Missing, a directory, or otherwise unreadable — all "not present".
+        return False

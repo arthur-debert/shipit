@@ -197,6 +197,20 @@ def test_run_subagent_repo_mismatch_is_exit_1(monkeypatch, capsys):
     assert "--repo 'gadget'" in err and "acme/widget" in err
 
 
+def test_run_subagent_slashless_ambient_repo_is_exit_1(monkeypatch, capsys):
+    # A slashless ambient identity would put the whole string in ``org`` and leave
+    # ``repo_name`` empty, which could slip past the --repo guard and feed an empty
+    # repo into the TreeSpec. It must be refused with a clean exit-1.
+    _patch_identity(monkeypatch, org_repo="widget")
+
+    rc = spawn_verb.run_subagent(repo="widget", epic="TRE03", ws=1, role="implementer")
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "not in org/repo form" in err
+    assert "widget" in err
+
+
 def test_run_subagent_repo_accepts_org_qualified_name(tmp_path, monkeypatch, capsys):
     # --repo may be given as either the bare name or the full org/repo slug.
     tree_dir = tmp_path / "tree"
@@ -248,6 +262,28 @@ def test_run_subagent_child_nonzero_exit_is_exit_1(tmp_path, monkeypatch, capsys
     err = capsys.readouterr().err
     assert "claude child exited 2" in err
     assert "boom" in err  # the child's stderr is surfaced, not swallowed
+
+
+def test_run_subagent_launch_oserror_is_clean_exit_1(tmp_path, monkeypatch, capsys):
+    # The child never starts — `claude` is not installed / not on PATH, so the
+    # launcher raises FileNotFoundError (an OSError). The Tree already exists, so this
+    # is a launch failure, and run_subagent promises a clean exit-1 with a stderr
+    # message, never an escaping traceback.
+    tree_dir = tmp_path / "tree"
+    _patch_identity(monkeypatch)
+    _fake_create(monkeypatch, tree_dir)
+
+    def runner(cmd, *, cwd, env):
+        raise FileNotFoundError("[Errno 2] No such file or directory: 'claude'")
+
+    rc = spawn_verb.run_subagent(
+        repo="widget", epic="TRE03", ws=1, role="implementer", launcher=runner
+    )
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "spawn subagent:" in err
+    assert "claude" in err
 
 
 def test_run_subagent_no_sentinel_is_exit_1(tmp_path, monkeypatch, capsys):
