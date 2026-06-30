@@ -85,11 +85,15 @@ def spawn() -> None:
 @click.option(
     "--issue",
     type=int,
-    required=True,
+    required=False,
+    default=None,
     help=(
         "The issue the Run implements. It rides the task prompt (the Run reads it "
         "with `gh issue view`) and the draft PR links it as `for #<issue>`, so the "
-        "spawned-Run PR flows through the normal engine like any hand-spawned one."
+        "spawned-Run PR flows through the normal engine like any hand-spawned one. "
+        "REQUIRED for a write role (validated in `run_subagent`); a `reviewer` Run "
+        "implements no issue, so it is OPTIONAL at the CLI to keep a valid reviewer "
+        "spawn (no `--issue`) from being rejected before `run_subagent` runs."
     ),
 )
 @click.option(
@@ -111,13 +115,14 @@ def spawn() -> None:
     help="The agent backend to launch. Only `claude` is wired today (ADR-0019).",
 )
 def subagent_cmd(
-    repo: str, epic: str, ws: int, issue: int, role: str, backend: str
+    repo: str, epic: str, ws: int, issue: int | None, role: str, backend: str
 ) -> None:
     """Create a write Tree and launch a backend-agent Run that reports via a draft PR.
 
     Resolve the ambient repo identity, create a write Tree by reusing
     ``shipit tree create`` (kept dumb — base ``origin/main``; the epic-grouped
-    umbrella base is a later WS), then launch a headless ``claude`` child whose
+    umbrella base is a later WS, deferred follow-up #176), then launch a headless
+    ``claude`` child whose
     ``cwd`` IS that Tree (ADR-0019). The Run implements ``--issue`` and opens a draft
     PR from the Tree's branch; ``spawn`` resolves that PR back from the branch and
     reports the Run↔PR linkage so the coordinator drives it with ``shipit pr status``.
@@ -252,7 +257,10 @@ def run_subagent(
 
     # Skeleton Tree: the slash-namespaced E/WSnn branch via the FREEFORM shape, so
     # the base stays the dumb origin/main; the epic-grouped umbrella base
-    # (origin/E/umbrella) is the semantic path a later WS swaps in.
+    # (origin/E/umbrella) — and the matching epic-branch PR target — is the semantic
+    # path a later WS swaps in. DEFERRED (maintainer decision, "keep it dumb"):
+    # follow-up #176. Docs that describe the verb are reconciled to this shipped
+    # origin/main behavior, not the deferred epic-base resolution.
     spec = TreeSpec(
         org=org,
         repo=repo_name,

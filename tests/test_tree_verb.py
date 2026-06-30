@@ -826,6 +826,36 @@ def test_run_gc_continues_past_a_failed_delete(tmp_path, monkeypatch, capsys):
     assert "removed 1, stale 0, kept 0" in captured.out  # count reflects disk reality
 
 
+def test_run_gc_does_not_count_an_already_gone_tree(tmp_path, monkeypatch, capsys):
+    # A removable Tree whose directory is ALREADY gone (a concurrent sweep, a manual
+    # rm) must not be counted or printed as REMOVED: remove_tree reports False (no-op),
+    # so `removed` reflects what actually came off disk, not what was merely planned.
+    root = tmp_path / "trees"
+    present = _make_tree_dir(root, "acme/widget/issues/1-present")
+    gone = root / "acme/widget/issues/2-gone"  # never created on disk
+    aged = 0.0
+    records = [
+        _record(path=str(present), branch="b1", dirty=False, ahead=0, mtime=aged),
+        _record(path=str(gone), branch="b2", dirty=False, ahead=0, mtime=aged),
+    ]
+    monkeypatch.setattr(tree_verb.layout, "central_root", lambda: str(root))
+    monkeypatch.setattr(tree_verb.registry, "scan", lambda r: records)
+    monkeypatch.setattr(
+        gh,
+        "pr_for_head",
+        lambda branch, *, cwd=None: {"number": 1, "state": "MERGED", "isDraft": False},
+    )
+
+    rc = tree_verb.run_gc()
+
+    assert rc == 0
+    assert not present.exists()  # the present Tree was reclaimed
+    captured = capsys.readouterr()
+    assert f"REMOVED {present}" in captured.out
+    assert f"REMOVED {gone}" not in captured.out  # nothing came off disk for it
+    assert "removed 1, stale 0, kept 0" in captured.out  # the gone Tree is uncounted
+
+
 def _gc_fleet(root, monkeypatch):
     """A four-Tree fixture for gc: one removable, one stale, one dirty-keep, one open-keep.
 

@@ -141,13 +141,16 @@ def test_remove_tree_reclaims_a_read_only_checkout(tmp_path):
     chmod_readonly(tree)
     assert not (tree / "pkg").stat().st_mode & 0o222  # precondition: read-only dir
 
-    remove_tree(tree)
+    deleted = remove_tree(tree)
 
     assert not tree.exists()
+    assert deleted is True  # a present Tree that came off disk reports True
 
 
 def test_remove_tree_is_a_noop_on_a_missing_path(tmp_path):
-    remove_tree(tmp_path / "does-not-exist")  # must not raise
+    # A missing path is a no-op AND reports False, so callers (gc) never credit a
+    # removal that did not happen.
+    assert remove_tree(tmp_path / "does-not-exist") is False  # must not raise
 
 
 def test_chmod_writable_restores_what_chmod_readonly_cleared(tmp_path):

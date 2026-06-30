@@ -262,7 +262,7 @@ def _guarded_paths(tree_dir: str | os.PathLike[str]) -> list[Path]:
     return paths
 
 
-def remove_tree(tree_dir: str | os.PathLike[str]) -> None:
+def remove_tree(tree_dir: str | os.PathLike[str]) -> bool:
     """``rmtree`` a Tree, restoring write perms on any read-only dir/file as it goes.
 
     The read-only guard (:func:`chmod_readonly`) clears the write bit on a reviewer
@@ -270,11 +270,16 @@ def remove_tree(tree_dir: str | os.PathLike[str]) -> None:
     a plain ``shutil.rmtree`` raises ``PermissionError`` partway through. This passes an
     error handler that restores the write bit on the offending path (and its parent dir)
     and retries the failed unlink/rmdir, so reclaim always completes — a writable write
-    Tree takes the same path with no extra work. A missing Tree is a no-op.
+    Tree takes the same path with no extra work.
+
+    Returns ``True`` when a Tree was present and is now off disk, ``False`` when the path
+    was already gone (a no-op). The boolean lets callers (``gc``) count only what they
+    actually reclaimed rather than crediting a removal that never happened.
     """
     if not os.path.lexists(tree_dir):
-        return
+        return False
     shutil.rmtree(tree_dir, onexc=_chmod_then_retry)
+    return True
 
 
 def _chmod_then_retry(func, path, _exc):  # type: ignore[no-untyped-def]

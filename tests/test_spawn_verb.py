@@ -237,10 +237,13 @@ def test_run_subagent_non_positive_ws_is_exit_1(monkeypatch, capsys):
     assert "--ws must be a positive integer" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("bad_issue", [0, -1])
+@pytest.mark.parametrize("bad_issue", [0, -1, None])
 def test_run_subagent_non_positive_issue_is_exit_1(monkeypatch, capsys, bad_issue):
     # --issue feeds the task prompt and the PR's `for #<issue>` link; a zero/negative
-    # value (which click's int type accepts) is refused before any Tree/child work.
+    # value (which click's int type accepts) — OR a MISSING value (None) for a write
+    # role — is refused inside run_subagent before any Tree/child work. The CLI layer
+    # makes --issue optional (so reviewer spawns aren't rejected), so this write-run
+    # requirement is enforced here, not at the Click boundary.
     rc = spawn_verb.run_subagent(
         repo="widget", epic="TRE03", ws=1, issue=bad_issue, role="implementer"
     )
@@ -589,3 +592,72 @@ def test_spawn_subagent_help_documents_the_verb():
     for token in ("--repo", "--epic", "--ws", "--issue", "--role", "--backend"):
         assert token in result.output
     assert "Tree" in result.output
+
+
+def test_cli_reviewer_spawn_without_issue_reaches_run_subagent(monkeypatch):
+    # The bug: --issue was required=True at the Click layer, so a reviewer spawn (which
+    # needs no issue — the dogfood harness invokes `spawn subagent --role reviewer`
+    # WITHOUT --issue) was rejected with a usage error (exit 2) before run_subagent ran.
+    # The CLI must now accept it and hand issue=None to run_subagent.
+    from click.testing import CliRunner
+
+    seen: dict = {}
+
+    def fake_run_subagent(**kwargs):
+        seen.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(spawn_verb, "run_subagent", fake_run_subagent)
+
+    result = CliRunner().invoke(
+        spawn_verb.spawn,
+        [
+            "subagent",
+            "--repo",
+            "widget",
+            "--epic",
+            "TRE03",
+            "--ws",
+            "3",
+            "--role",
+            "reviewer",
+        ],
+    )
+
+    assert result.exit_code == 0  # NOT a click usage error (2)
+    assert seen["role"] == "reviewer"
+    assert seen["issue"] is None  # no --issue reached run_subagent as None
+
+
+def test_cli_write_spawn_without_issue_is_not_a_usage_error(monkeypatch):
+    # A write role with no --issue must NOT be a Click usage error (exit 2) either: the
+    # requirement moved into run_subagent, which fails it cleanly (exit 1) with the
+    # positive-integer message. The CLI boundary just forwards issue=None.
+    from click.testing import CliRunner
+
+    seen: dict = {}
+
+    def fake_run_subagent(**kwargs):
+        seen.update(kwargs)
+        return 1
+
+    monkeypatch.setattr(spawn_verb, "run_subagent", fake_run_subagent)
+
+    result = CliRunner().invoke(
+        spawn_verb.spawn,
+        [
+            "subagent",
+            "--repo",
+            "widget",
+            "--epic",
+            "TRE03",
+            "--ws",
+            "3",
+            "--role",
+            "implementer",
+        ],
+    )
+
+    assert result.exit_code == 1  # run_subagent's clean exit, NOT click's usage exit 2
+    assert seen["role"] == "implementer"
+    assert seen["issue"] is None

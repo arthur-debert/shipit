@@ -616,9 +616,14 @@ def _emit_gc(decision: Cleanup, *, total: int, unknown: int) -> None:
     removed = 0
     for record in decision.removable:
         try:
-            remove_tree(record.path)
+            deleted = remove_tree(record.path)
         except OSError as exc:
             print(f"FAILED  {record.path}: {exc}", file=sys.stderr)
+            continue
+        if not deleted:
+            # The path was already gone (a concurrent sweep, a manual rm). Nothing came
+            # off disk, so it must not be counted or reported as REMOVED — the summary's
+            # `removed` reflects actual reclaim, per remove_tree's contract.
             continue
         removed += 1
         print(f"REMOVED {record.path}")
