@@ -122,6 +122,47 @@ def test_pr_for_head_unknown_when_fields_wrong_type(monkeypatch):
     assert gh.pr_for_head("fix/12", cwd="/x") is gh.UNKNOWN
 
 
+def test_epic_umbrella_exists_checks_remote_tracking_ref_first(monkeypatch):
+    # The semantic epic test: `<epic>/umbrella` present as the remote-tracking ref
+    # (the usual shape in a clone) -> True, via an EXACT `show-ref --verify` (never a
+    # pattern), and the remote ref is tried before any local head.
+    seen: list = []
+
+    def fake_git(args, *, cwd):
+        seen.append(args)
+        return ""  # `show-ref --verify --quiet` exits 0 when the ref resolves
+
+    monkeypatch.setattr(gh, "_git", fake_git)
+    assert gh.epic_umbrella_exists("TRE04", cwd="/x") is True
+    assert seen[0] == [
+        "show-ref",
+        "--verify",
+        "--quiet",
+        "refs/remotes/origin/TRE04/umbrella",
+    ]
+
+
+def test_epic_umbrella_exists_falls_back_to_local_head(monkeypatch):
+    # No remote-tracking ref but a local `refs/heads/<epic>/umbrella` -> still True.
+    def fake_git(args, *, cwd):
+        if args[-1] == "refs/heads/TRE04/umbrella":
+            return ""
+        raise gh.GhError("show-ref exited 1: ")
+
+    monkeypatch.setattr(gh, "_git", fake_git)
+    assert gh.epic_umbrella_exists("TRE04", cwd="/x") is True
+
+
+def test_epic_umbrella_exists_false_when_no_umbrella(monkeypatch):
+    # Neither ref resolves (an ordinary `feature/foo` -> no `feature/umbrella`): the
+    # seam swallows the git failure and reports "not an epic" rather than raising.
+    def boom(args, *, cwd):
+        raise gh.GhError("show-ref exited 1: ")
+
+    monkeypatch.setattr(gh, "_git", boom)
+    assert gh.epic_umbrella_exists("feature", cwd="/x") is False
+
+
 # --- remote_branch_exists: exact-ref equality (codex finding, gh.py:451) ---
 #
 # `git ls-remote` treats its final arg as a ref *pattern*, so the old

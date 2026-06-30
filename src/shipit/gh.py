@@ -323,6 +323,39 @@ def git_current_branch(*, cwd: str) -> str | None:
     return None if (not name or name == "HEAD") else name
 
 
+def epic_umbrella_exists(epic: str, *, cwd: str) -> bool:
+    """Whether ``<epic>/umbrella`` exists as a branch in the checkout at ``cwd``.
+
+    The semantic test for "is ``<epic>`` a real epic?": ADR-0016 gives every epic an
+    ``<epic>/umbrella`` branch, so the umbrella's existence IS the epic's existence —
+    a sturdier signal than any branch-name *grammar* proxy (robust to naming drift).
+    The WorktreeCreate hook uses it to tell a true epic prefix (``TRE04`` →
+    ``TRE04/umbrella`` exists) from an ordinary slash-branch a coordinator happens to
+    sit on (``feature/foo`` → no ``feature/umbrella``), so only a real epic namespaces
+    the holding branch.
+
+    A **LOCAL** ref lookup, deliberately NOT a network ``git ls-remote``: the hook
+    fires synchronously inside a spawn, and the coordinator's clone already carries the
+    umbrella's tracking ref — so no network round-trip gates the spawn. Checks the
+    remote-tracking ref first (``refs/remotes/origin/<epic>/umbrella``, the usual shape
+    in a clone), then a local head (``refs/heads/<epic>/umbrella``). Uses ``git
+    show-ref --verify`` with the EXACT full ref (never a pattern — avoids a glob
+    matching an unrelated ref), so a garbage ``epic`` (separators, ``..``) simply
+    yields a ref that does not resolve → ``False`` → the caller's safe epic-less
+    fallback. Never raises: any git failure (the ref is absent) reads as "not an epic".
+    """
+    for ref in (
+        f"refs/remotes/origin/{epic}/umbrella",
+        f"refs/heads/{epic}/umbrella",
+    ):
+        try:
+            _git(["show-ref", "--verify", "--quiet", ref], cwd=cwd)
+            return True
+        except GhError:
+            continue
+    return False
+
+
 def git_ls_files(*, cwd: str) -> list[str]:
     """Tracked files (``git ls-files``), repo-root-relative, in git's order.
 
