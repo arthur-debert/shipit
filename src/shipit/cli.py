@@ -122,16 +122,25 @@ def verify_apps_cmd(repo: str | None, agents: tuple[str, ...]) -> None:
     help="Break-glass: commit and push straight to the branch (admin), no PR.",
 )
 @click.option(
+    "--local",
+    is_flag=True,
+    help="Local-only: commit the managed set on the current branch; no push, no PR "
+    "(used by `tree create` provisioning).",
+)
+@click.option(
     "--dry-run", is_flag=True, help="Print the reconciliation plan; touch nothing."
 )
-def install_cmd(path: str | None, push: bool, dry_run: bool) -> None:
+def install_cmd(path: str | None, push: bool, local: bool, dry_run: bool) -> None:
     """Vendor + reconcile shipit's managed set into the consumer at PATH.
 
     PATH defaults to the current directory. By default install opens a DRAFT PR
     with the changes (pull, never push); a consumer-edited unit is surfaced in
     the PR rather than clobbered. Re-running with no changes is a clean no-op.
+
+    ``--local`` commits the managed set on the current branch and stops (no push,
+    no PR) — the mode Tree provisioning uses so creating a Tree never touches origin.
     """
-    rc = install.run(path, dry_run=dry_run, push=push)
+    rc = install.run(path, dry_run=dry_run, push=push, local=local)
     raise SystemExit(rc)
 
 
