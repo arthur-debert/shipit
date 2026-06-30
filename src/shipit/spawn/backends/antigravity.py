@@ -97,10 +97,12 @@ def role_prompt(task: str, role: str) -> str:
 class AntigravityAdapter(BackendAdapter):
     """The headless-``agy`` (Antigravity) **write** backend (ADR-0020 §Decision-per-backend).
 
-    Stateless and shared (one registry instance). ``model`` / ``timeout`` are construction
-    defaults — the registry instantiates with :data:`DEFAULT_MODEL` / :data:`DEFAULT_TIMEOUT`;
-    a consumer with different needs constructs its own. The ``--backend`` token is
-    ``antigravity`` (user-facing); the binary is ``agy``.
+    Carries per-run ``model`` / ``timeout`` config: the registry holds one default instance
+    (constructed with :data:`DEFAULT_MODEL` / :data:`DEFAULT_TIMEOUT`) for the CLI gate, while
+    a caller with different needs constructs its own per-run instance — the review funnel
+    builds one per reviewer carrying that reviewer's model/timeout
+    (:mod:`shipit.review.producer`). The ``--backend`` token is ``antigravity``
+    (user-facing); the binary is ``agy``.
     """
 
     name = "antigravity"
