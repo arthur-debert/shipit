@@ -166,35 +166,24 @@ def test_subprocess_runner_returns_nonzero_without_raising(monkeypatch):
     assert result.stderr == "boom"
 
 
-def test_skeleton_task_names_the_sentinel_and_the_role():
-    task = launch.skeleton_task("implementer")
-    assert launch.SENTINEL_NAME in task
+def test_write_task_names_the_role_issue_and_branch():
+    task = launch.write_task(
+        "implementer", issue=156, branch="TRE03/WS02", base_branch="main"
+    )
+    # The Run learns its role, which issue to implement, and the exact branch its
+    # draft PR must come from (the head shipit later resolves the PR↔Run link by).
     assert "implementer" in task
+    assert "#156" in task
+    assert "TRE03/WS02" in task
+    assert "main" in task
 
 
-def test_sentinel_path_is_under_the_tree(tmp_path):
-    path = launch.sentinel_path(tmp_path)
-    assert path == tmp_path / launch.SENTINEL_NAME
-
-
-def test_sentinel_present_reflects_the_file(tmp_path):
-    assert launch.sentinel_present(tmp_path) is False
-    (tmp_path / launch.SENTINEL_NAME).write_text(launch.SENTINEL_BODY)
-    assert launch.sentinel_present(tmp_path) is True
-
-
-def test_sentinel_present_rejects_wrong_or_empty_content(tmp_path):
-    # Existence is not enough (acceptance #155): a child that writes empty, truncated,
-    # or wrong contents did not do the work the skeleton task specified, so it must
-    # NOT be reported as a present sentinel.
-    sentinel = tmp_path / launch.SENTINEL_NAME
-    for bad in ("", "spawned by shipit", "garbage\n", launch.SENTINEL_BODY + "extra\n"):
-        sentinel.write_text(bad)
-        assert launch.sentinel_present(tmp_path) is False
-
-
-def test_sentinel_present_false_when_path_is_a_directory(tmp_path):
-    # A directory at the sentinel path is unreadable as text — treated as absent,
-    # never an escaping OSError.
-    (tmp_path / launch.SENTINEL_NAME).mkdir()
-    assert launch.sentinel_present(tmp_path) is False
+def test_write_task_instructs_a_draft_pr_and_to_stop():
+    # WS02 (acceptance #156): the Run reports back through a DRAFT PR and STOPS at
+    # PR-open — never flips ready or merges. Both are load-bearing in the prompt.
+    task = launch.write_task(
+        "implementer", issue=42, branch="X/WS01", base_branch="main"
+    )
+    assert "draft" in task.lower()
+    assert "for #42" in task
+    assert "stop" in task.lower()

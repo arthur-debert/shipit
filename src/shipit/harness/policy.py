@@ -94,23 +94,32 @@ def decide(role: Role, path: str, is_code: bool, break_glass: bool) -> Decision:
 # --- native-worktree deny guard (TRE01 / ADR-0014) -------------------------
 #
 # A second, role-independent deny surface on the SAME stable PreToolUse channel:
-# block the two ways an agent creates a NATIVE git worktree, because a Tree (the
-# isolated checkout where a write-session works) is a *dissociated clone*, not a
-# `git worktree` (ADR-0014). The deny reason redirects to `shipit tree create`.
+# block the two ways a *tool call* creates a NATIVE git worktree, because a Tree
+# (the isolated checkout where a write-session works) is a *dissociated clone*, not
+# a `git worktree` (ADR-0014). The deny reason now points at the shipit-owned spawn
+# path (ADR-0017): the supported route never mints a native worktree.
 #
-# This is **deny, not redirect**: it does NOT couple to Claude Code's
-# `WorktreeCreate`/undocumented hook — it rides the PreToolUse `deny` surface the
-# policy module already owns. The verdict is a pure function of the tool name +
-# (for Bash) the command string; the boundary reads those off the payload.
+# This is **deny, not redirect**: it rides the PreToolUse `deny` surface the policy
+# module already owns. The third native-worktree path — the harness-internal
+# `Agent(isolation:"worktree")` spawn, which PreToolUse cannot see (#139) — is
+# closed elsewhere, by the demoted `WorktreeCreate` hook
+# (`shipit hook worktreecreate`) that reroutes that spawn into a Tree (ADR-0017).
+# The verdict here is a pure function of the tool name + (for Bash) the command
+# string; the boundary reads those off the payload.
 
-#: The native-worktree deny reason — redirects to `shipit tree create` and cites
-#: ADR-0014 so the wall teaches WHY worktrees are refused, not just THAT they are.
+#: The native-worktree deny reason — points at the shipit-owned spawn path
+#: (ADR-0017) and cites ADR-0014 so the wall teaches WHY worktrees are refused, not
+#: just THAT they are. Keeps the `shipit tree create` primitive in view for a
+#: hand-driven checkout, and names `shipit spawn subagent` as the route for an
+#: isolated Run (the positive path that closes #139 by construction).
 WORKTREE_DENY_REASON = (
     "Trees are dissociated clones, not git worktrees (ADR-0014). Do not create a "
-    "native git worktree — run `shipit tree create` to get an isolated checkout. "
+    "native git worktree — to spawn an isolated Run use `shipit spawn subagent` "
+    "(ADR-0017), or run `shipit tree create` for a hand-driven isolated checkout. "
     "(A Tree is a full `git clone --reference --dissociate` in the central Trees "
     "root, so it can sit on any branch — including a branch another Tree holds — "
-    "and `rm -rf` is a safe delete; a worktree can do neither.)"
+    "and `rm -rf` is a safe delete; a worktree can do neither.) In-session "
+    '`Agent(isolation:"worktree")` is already rerouted into a Tree for you.'
 )
 
 #: Conservative fallback: match `git worktree add` as a raw substring. Used ONLY

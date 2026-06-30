@@ -40,12 +40,15 @@ def test_git_upstream_ref_none_when_absent(monkeypatch):
 
 
 def test_pr_for_head_parses_snapshot(monkeypatch):
-    payload = json.dumps({"number": 12, "state": "OPEN", "isDraft": True})
+    payload = json.dumps(
+        {"number": 12, "state": "OPEN", "isDraft": True, "baseRefName": "main"}
+    )
     monkeypatch.setattr(gh, "_run", lambda args, *, cwd=None: payload)
     assert gh.pr_for_head("fix/12", cwd="/x") == {
         "number": 12,
         "state": "OPEN",
         "isDraft": True,
+        "baseRefName": "main",
     }
 
 
