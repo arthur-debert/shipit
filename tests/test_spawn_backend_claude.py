@@ -109,7 +109,9 @@ def test_resolve_returns_the_claude_adapter():
 def test_resolve_unknown_backend_raises():
     # resolve() is reached only after the verb's explicit SUPPORTED_BACKENDS guard;
     # an unregistered key is a belt-and-braces KeyError, never a silent claude default.
+    # "nonexistent" is a permanently-unregistered token (never a real/planned backend),
+    # so this guardrail stays meaningful as more adapters land (e.g. antigravity in WS03).
     import pytest
 
     with pytest.raises(KeyError):
-        backends.resolve("antigravity")
+        backends.resolve("nonexistent")
