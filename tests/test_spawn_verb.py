@@ -220,12 +220,12 @@ def test_run_subagent_unsupported_backend_is_exit_1(monkeypatch, capsys):
         ws=1,
         issue=1,
         role="implementer",
-        backend="codex",
+        backend="nonexistent",
     )
 
     assert rc == 1
     err = capsys.readouterr().err
-    assert "unsupported backend" in err and "codex" in err
+    assert "unsupported backend" in err and "nonexistent" in err
 
 
 def test_run_subagent_non_positive_ws_is_exit_1(monkeypatch, capsys):

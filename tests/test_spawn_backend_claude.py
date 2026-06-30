@@ -93,10 +93,11 @@ def test_child_env_defaults_to_os_environ_and_scrubs_it(monkeypatch):
     assert env.get("SHIPIT_SPAWN_MARKER") == "present"
 
 
-def test_registry_supports_only_claude_today():
+def test_registry_includes_claude_and_codex():
     # SUPPORTED_BACKENDS is adapter-driven (ADR-0020 §Decision 2): derived from the
-    # registry, which holds only claude until WS02/WS03 add codex / antigravity.
-    assert backends.supported_backends() == ("claude",)
+    # registry. claude (adapter #0) and codex (WS02) are wired; antigravity lands in
+    # WS03. Registration order is preserved, claude first.
+    assert backends.supported_backends() == ("claude", "codex")
 
 
 def test_resolve_returns_the_claude_adapter():
@@ -108,7 +109,9 @@ def test_resolve_returns_the_claude_adapter():
 def test_resolve_unknown_backend_raises():
     # resolve() is reached only after the verb's explicit SUPPORTED_BACKENDS guard;
     # an unregistered key is a belt-and-braces KeyError, never a silent claude default.
+    # "nonexistent" is a permanently-unregistered token (never a real/planned backend),
+    # so this guardrail stays meaningful as more adapters land (e.g. antigravity in WS03).
     import pytest
 
     with pytest.raises(KeyError):
-        backends.resolve("codex")
+        backends.resolve("nonexistent")
