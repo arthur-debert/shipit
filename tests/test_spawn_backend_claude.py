@@ -118,3 +118,13 @@ def test_resolve_unknown_backend_raises():
 
     with pytest.raises(KeyError):
         backends.resolve("nonexistent")
+
+
+def test_output_schema_path_is_accepted_and_ignored():
+    # TRE05-WS04b: claude is not a funnel capture backend, so the seam's
+    # output_schema_path is accepted (uniform signature) but never appears in the argv.
+    cmd = CLAUDE.build_command(
+        "t", "reviewer", read_only=True, output_schema_path="/tmp/s.json"
+    )
+    assert "--output-schema" not in cmd
+    assert "/tmp/s.json" not in cmd

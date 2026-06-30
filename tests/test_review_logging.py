@@ -131,15 +131,12 @@ def test_parse_success_logs_full_raw_at_debug(caplog):
 
 
 def test_generate_review_logs_start_and_outcome(monkeypatch, caplog):
-    class _FakeBackend:
-        def preflight(self):
-            pass
-
-        def run(self, prompt, schema, *, cwd):
-            return _REVIEW
-
-    monkeypatch.setattr(service, "get_backend", lambda agent, **kwargs: _FakeBackend())
-    ctx = SimpleNamespace(diff=_DIFF, workdir="/tmp/wd")
+    """`generate_review` delegates to the Tree-fetch producer and records start +
+    outcome; the producer launch itself is faked so no Tree is cloned / model run."""
+    monkeypatch.setattr(
+        service.producer, "run_tree_review", lambda agent, ctx, **kw: dict(_REVIEW)
+    )
+    ctx = SimpleNamespace(diff=_DIFF, workdir="/tmp/wd", number=5, head_ref="b")
     with caplog.at_level(logging.DEBUG, logger="shipit.review"):
         service.generate_review("codex", ctx)
     text = "\n".join(r.getMessage() for r in caplog.records)

@@ -55,6 +55,7 @@ class ClaudeAdapter(BackendAdapter):
         *,
         read_only: bool = False,
         cwd: str | Path | None = None,
+        output_schema_path: str | None = None,
     ) -> list[str]:
         """The exact ``claude`` print-mode argv ADR-0019 §1 specifies.
 
@@ -78,8 +79,15 @@ class ClaudeAdapter(BackendAdapter):
         in the Tree through the OS process ``cwd`` that :func:`shipit.spawn.launch.launch`
         sets, so it needs no path in its argv (unlike ``agy``, which ignores process
         ``cwd`` and is handed the Tree via ``--add-dir``).
+
+        ``output_schema_path`` is accepted for the seam (TRE05-WS04b) but **ignored**:
+        ``claude`` is not a funnel *capture* backend (the funnel runs codex / agy), so it
+        never carries a native review-output schema. The argument exists only so codex
+        can honour it uniformly across the seam.
         """
-        del cwd  # claude roots via the process cwd; no path belongs in its argv.
+        # claude roots via the process cwd (no path in argv) and is not a funnel
+        # capture backend (never schema'd) — both seam args are ignored.
+        del cwd, output_schema_path
         cmd = [
             "claude",
             "-p",

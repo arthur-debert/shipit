@@ -1,24 +1,23 @@
-"""base — the review-backend interface.
+"""base — the review-backend output-parsing boundary + error vocabulary.
 
-A `Backend` wraps one agent CLI (codex, agy). The interface separates three
-concerns so `--dry-run` is honest:
+Since TRE05-WS04b the funnel no longer owns per-backend CLI wrappers: the codex /
+agy launch is driven through the shared spawn ``BackendAdapter`` reviewer posture
+(:mod:`shipit.spawn.backends`), and the producer (:mod:`shipit.review.producer`)
+captures the agent's stdout and feeds it through :func:`parse_review_output` here.
+So this module is now just the parse boundary and the error vocabulary the service
+layer maps to funnel outcomes:
 
-  * ``preflight()`` probes that the agent binary is reachable and raises a
-    clear, actionable :class:`BackendUnavailable` if not (it never auto-starts
-    anything);
-  * ``build_command()`` returns a pure description of what *would* run — argv,
-    stdin, and any temp files (by placeholder path) — which is exactly what
-    ``--dry-run`` prints;
-  * ``run()`` actually executes it: writes the temp files, invokes the CLI via
-    the shared ``proc`` helper, parses stdout via ``extract_json``, and cleans
-    up the temp files in a ``finally`` (mirroring the phos scripts).
+  * :func:`parse_review_output` — turn an agent's raw stdout into a review dict,
+    or raise :class:`BackendError` (carrying the full raw for the #76 salvage and,
+    when the agy timeout marker is present, flagging the timeout);
+  * :class:`BackendUnavailable` — the agent binary is not on PATH (preflight);
+  * :class:`BackendError` — the agent ran but produced no usable review;
+  * :data:`_TIMEOUT_MARKER` — the agy ``--print`` timeout signature.
 """
 
 from __future__ import annotations
 
 import logging
-import shutil
-from abc import ABC, abstractmethod
 
 #: The review path's logger — a child of the package ``shipit`` logger, so a record
 #: here reaches the OBS01 per-repo file sink (DEBUG-verbose). This is the ONE site
@@ -125,43 +124,3 @@ def parse_review_output(stdout: str, *, backend_name: str = "the agent") -> dict
         raw,
     )
     return review
-
-
-class Backend(ABC):
-    """Abstract review backend. One concrete subclass per agent CLI."""
-
-    #: Short backend identifier, e.g. ``"codex"`` / ``"agy"``.
-    name: str = ""
-
-    #: Name of the agent binary that must be on PATH for this backend to run.
-    binary: str = ""
-
-    def preflight(self) -> None:
-        """Verify the agent binary is reachable; raise :class:`BackendUnavailable`
-        with an actionable message otherwise. Does NOT auto-start anything."""
-        if shutil.which(self.binary) is None:
-            raise BackendUnavailable(
-                f"The '{self.name}' review backend requires the '{self.binary}' "
-                f"CLI on your PATH, but it was not found. Install it (and start "
-                f"its backend if it needs one), then re-run."
-            )
-
-    @abstractmethod
-    def build_command(self, prompt: str, schema: dict) -> dict:
-        """Describe — without executing — exactly what would run.
-
-        Returns ``{"argv": [...], "stdin": <str|None>, "files": {path: contents}}``
-        where ``files`` are any temp files that would be written (shown by a
-        placeholder path). This is what ``--dry-run`` prints.
-        """
-        raise NotImplementedError
-
-    @abstractmethod
-    def run(self, prompt: str, schema: dict, *, cwd: str | None = None) -> dict:
-        """Execute the backend for real and return the parsed review dict.
-
-        Writes any temp files, invokes the CLI (in ``cwd`` if given, so the
-        read-only agent can inspect the checkout's files), parses stdout via
-        ``extract_json``, and removes the temp files in a ``finally``.
-        """
-        raise NotImplementedError

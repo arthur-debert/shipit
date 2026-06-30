@@ -1,42 +1,22 @@
-"""backends — the review-backend registry.
+"""backends — the review-output parse boundary + error vocabulary.
 
-Adding a backend is adding it to ``_REGISTRY``; callers resolve one by name via
-``get_backend`` and depend only on the :class:`~.base.Backend` interface, never
-on a backend's concrete type.
+Since TRE05-WS04b the funnel has NO per-backend CLI wrappers of its own. The codex
+/ agy launch is driven through the shared spawn ``BackendAdapter`` reviewer posture
+(:mod:`shipit.spawn.backends`) by :mod:`shipit.review.producer`, which captures the
+agent's stdout. This package is now only the thin parse boundary that turns that
+stdout into a review dict — :func:`~shipit.review.backends.base.parse_review_output`
+— plus the error vocabulary (:class:`BackendError` / :class:`BackendUnavailable`)
+the service layer maps to funnel check-run outcomes. The old ``get_backend`` registry
+and the ``Backend`` ABC are retired (the front-loaded ``codex`` / ``agy`` ``run()``
+path is gone — ADR-0020 §Reviewer-path reconciliation, REPLACE).
 """
 
 from __future__ import annotations
 
-from .agy import AgyBackend
-from .base import Backend, BackendError, BackendUnavailable
-from .codex import CodexBackend
-
-_REGISTRY: dict[str, type[Backend]] = {
-    "codex": CodexBackend,
-    "agy": AgyBackend,
-}
+from .base import BackendError, BackendUnavailable, parse_review_output
 
 __all__ = [
-    "AgyBackend",
-    "Backend",
     "BackendError",
     "BackendUnavailable",
-    "CodexBackend",
-    "get_backend",
+    "parse_review_output",
 ]
-
-
-def get_backend(name: str, **kwargs) -> Backend:
-    """Return a fresh backend instance for ``name`` (one of ``codex`` / ``agy``).
-
-    Extra keyword arguments (e.g. ``model``) are forwarded to the backend
-    constructor. Raises :class:`ValueError` for an unknown name.
-    """
-    try:
-        cls = _REGISTRY[name]
-    except KeyError:
-        known = ", ".join(sorted(_REGISTRY))
-        raise ValueError(
-            f"Unknown review backend '{name}'. Known backends: {known}."
-        ) from None
-    return cls(**kwargs)

@@ -179,3 +179,14 @@ def test_registry_resolves_the_antigravity_adapter():
     assert isinstance(adapter, agy_backend.AntigravityAdapter)
     assert adapter.name == "antigravity"
     assert "antigravity" in backends.supported_backends()
+
+
+def test_output_schema_path_is_accepted_and_ignored():
+    # TRE05-WS04b: agy has no native --output-schema flag, so the seam's
+    # output_schema_path is accepted (uniform signature) but never appears in the argv —
+    # a capture reviewer's schema rides agy's prompt prose instead.
+    cmd = AGY.build_command(
+        "t", "reviewer", read_only=True, cwd="/tree", output_schema_path="/tmp/s.json"
+    )
+    assert "--output-schema" not in cmd
+    assert "/tmp/s.json" not in cmd

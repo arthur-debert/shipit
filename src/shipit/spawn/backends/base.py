@@ -68,6 +68,7 @@ class BackendAdapter(ABC):
         *,
         read_only: bool = False,
         cwd: str | Path | None = None,
+        output_schema_path: str | None = None,
     ) -> list[str]:
         """The backend's headless argv for ``task`` under ``role``.
 
@@ -102,6 +103,18 @@ class BackendAdapter(ABC):
         and must be handed the Tree explicitly (``--add-dir <cwd>``) or its writes land
         in ``~/.gemini/.../scratch`` instead of the Tree. An adapter that needs the
         path therefore reads it here; one that does not leaves it ``None``.
+
+        ``output_schema_path`` is the path to a JSON-schema file a **capture
+        reviewer** (the review funnel, TRE05-WS04b) wants the backend to enforce its
+        structured output against. It is meaningful ONLY for a reviewer whose result
+        is *captured* (shipit reads the agent's stdout and posts it via the
+        ``review:`` check-run gate), NOT for the self-posting spawn-surface reviewer
+        (which leaves it ``None``). Only ``codex`` has a native schema flag
+        (``--output-schema``) to honour it; ``claude`` / ``agy`` have no native schema
+        enforcement and IGNORE it (``agy`` instead carries the schema in its prompt
+        prose, ``claude`` is never a funnel backend). The load-bearing constraint
+        ADR-0020 §migration-cost pins is *keep codex ``--output-schema`` on the
+        reviewer* — that robustness win rides this argument.
         """
 
     @abstractmethod

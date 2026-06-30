@@ -115,3 +115,62 @@ A live run is a **deliberate, side-effecting act**:
 Clean up afterwards by closing the draft PR and deleting its branch, and reclaiming
 the Trees (`shipit tree` cleanup). The forced-fail-closed scenario sets a relative
 `SHIPIT_TREES_ROOT` for that one spawn only, so it creates nothing.
+
+## Non-Claude backend reviewers (codex / antigravity)
+
+The reviewer Run is **backend-parametrized**: `shipit spawn subagent --role reviewer
+--backend codex|antigravity` launches the non-Claude agent through the SAME shared
+read-only Tree (ADR-0018) and the SAME ADR-0020 `BackendAdapter` read-only posture
+(`build_command(..., read_only=True)`) — codex under `--ephemeral --sandbox
+workspace-write -c …network_access=true`, antigravity (`agy`) with
+`--dangerously-skip-permissions` dropped — with the chmod'd Tree as the load-bearing
+FS guard. On this **spawn surface** the reviewer **self-posts** via `gh pr review`
+(ADR-0020 §codex/agy reviewer posture). To dogfood a non-Claude reviewer Run, run the
+reviewer scenario with `--backend codex` (or `antigravity`) and confirm a real review
+lands on the write Run's PR and the shared Tree is reused + non-writable.
+
+### The funnel **capture** reviewer (TRE05-WS04b) — the `review: <agent>-local` gate
+
+The `-e review` funnel (the REQUIRED `codex-local` / `agy-local` reviewers the
+readiness engine reads) shares the SAME launch posture but a DIFFERENT result channel:
+the funnel **captures** the agent's structured stdout and posts it AS the bot App
+identity (`adr-<agent>-review[bot]`) onto the `review: <agent>-local` check-run — so
+REQUEST_CHANGES and the conclusion nuance are preserved. Since TRE05-WS04b the funnel
+producer is the Tree-fetch producer (`shipit.review.producer`): it provisions the
+shared read-only Tree on the PR head and the agent **fetches the scoped diff itself**
+with `gh pr diff` (the diff is no longer front-loaded into the prompt — ADR-0020
+§Reviewer-path reconciliation, REPLACE).
+
+Validate the funnel end-to-end on a throwaway canary PR (this is the WS04b acceptance
+canary; it spends real tokens and posts real reviews, so it is opt-in, never in CI):
+
+1. Open a **throwaway draft PR** with a planted bug (e.g. an unguarded
+   `total / len(numbers)`), separate from feature work.
+2. Drive the real funnel child body for each agent — the parent opens the
+   `in_progress` check-run, the child resolves the PR, runs the Tree-fetch producer,
+   posts as the App, and closes the run:
+
+   ```sh
+   pixi run -e review shipit pr review request <PR> --reviewer codex-local
+   pixi run -e review shipit pr review request <PR> --reviewer agy-local
+   ```
+
+3. Confirm the three load-bearing facts (the funnel reviews shipit's OWN PRs — the
+   dogfood loop — so these MUST hold):
+   - **App-identity posting** — `gh api /repos/<repo>/pulls/<PR>/reviews` shows the
+     review authored by `adr-codex-review[bot]` / `adr-agy-review[bot]` (NOT your `gh`
+     login), and a bug-bearing diff yields `CHANGES_REQUESTED` (REQUEST_CHANGES works
+     because the bot is a distinct identity).
+   - **Check-run conclusion** — `gh api /repos/<repo>/commits/<head>/check-runs` shows
+     `review: codex-local` / `review: agy-local` at `completed/success` (a posted
+     review, incl. a clean zero-findings one), authored by the same App.
+   - **Readiness gating** — `shipit pr status <PR>` reads the reviews and reports
+     `codex=done_*` / `agy=done_*`, so the engine gates on the funnel exactly as before.
+   - **Shared Tree reuse** — the second agent on the same `(repo, branch)` REUSES the
+     first agent's read-only Tree (the leaf is agent-hash-free), refreshed to the head.
+
+4. Tear down: close the PR, delete the branch, reclaim the read-only Tree (it is
+   chmod'd read-only — restore write bits before `rm`, or use `shipit tree` cleanup).
+
+`--dry-run` stays honest across the cutover: it prints the would-run Tree-launch argv
+(`cwd` + the codex/agy reviewer argv) and bills no model and posts nothing.

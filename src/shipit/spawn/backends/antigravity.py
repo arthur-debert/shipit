@@ -119,6 +119,7 @@ class AntigravityAdapter(BackendAdapter):
         *,
         read_only: bool = False,
         cwd: str | Path | None = None,
+        output_schema_path: str | None = None,
     ) -> list[str]:
         """The exact ``agy`` ``--print`` argv ADR-0020 §Decision-per-backend records.
 
@@ -144,7 +145,16 @@ class AntigravityAdapter(BackendAdapter):
           §Decision 3) — omitting the flag is best-effort defense-in-depth.
         - ``--print "<text>"`` is the headless invocation; the role is prepended to the
           task text (:func:`role_prompt`) since agy has no ``--agent`` flag.
+
+        ``output_schema_path`` is accepted for the seam (TRE05-WS04b) but **ignored**:
+        agy has no native ``--output-schema`` flag, so a capture reviewer's expected JSON
+        shape is conveyed in the prompt prose instead (the funnel producer builds the
+        agy task with the schema described inline). The argument exists only so codex —
+        the one backend with a native schema flag — can honour it uniformly.
         """
+        del (
+            output_schema_path
+        )  # agy has no native schema flag; schema rides the prompt.
         if cwd is None:
             raise ValueError(
                 "antigravity (agy) build_command requires cwd (the Tree path): agy "
