@@ -11,7 +11,7 @@ live git state) and the spawn's agent id, it resolves the holding branch the
 throwaway Tree is cut on — ``<epic>/agent-<id>``, or a safe epic-less
 ``agent-<id>`` when no (or a malformed) epic is in play. No I/O; the boundary
 (:mod:`shipit.verbs.hook.worktreecreate`) reads the payload, runs the git probe,
-and runs the create.
+**validates the epic against its umbrella branch**, and runs the create.
 
 How the epic is found (:func:`resolve_epic`): the WorktreeCreate payload carries
 the coordinator's ``cwd``, and ADR-0016's branch grammar (``EPIC/umbrella``,
@@ -21,6 +21,14 @@ from ``TRE04/WS01`` → epic ``TRE04`` → branch ``TRE04/agent-<id>``). The
 ``SHIPIT_EPIC`` env var survives ONLY as an optional explicit override for the rare
 cross-epic spawn (coordinator branch ≠ intended epic); when set it wins over the
 inferred branch prefix.
+
+The candidate this module extracts is only a *claim*: the boundary then confirms it
+names a real epic by checking that ``<epic>/umbrella`` actually exists as a branch
+(``gh.epic_umbrella_exists``, a local ref lookup). A prefix whose umbrella does not
+exist — an ordinary ``feature/foo`` a coordinator happens to sit on, or an override
+naming a dead epic — is rejected to ``None`` and takes the same epic-less fallback
+below. The umbrella's existence IS the epic's existence (the branch is the source of
+truth; Tree dirs derive from it), so this is the semantic test, not a name-shape proxy.
 
 Why epic-coarse and not per-spawn: the hook fires with no per-spawn intent — it
 cannot know the work stream or role, only the epic — so the branch it can build is
@@ -81,8 +89,14 @@ def normalize_agent_id(raw: str) -> str:
 
 
 def resolve_epic(override: str | None, branch: str | None) -> str | None:
-    """Resolve the epic namespace (pure): explicit override wins, else the branch
-    prefix.
+    """Resolve the epic namespace CANDIDATE (pure): explicit override wins, else the
+    branch prefix.
+
+    This is the I/O-free *extraction* half — it answers "what epic does this spawn
+    claim?" (the override, or the spawning branch's prefix), NOT "is that a real
+    epic?". The boundary (:func:`shipit.verbs.hook.worktreecreate._validated_epic`)
+    confirms the candidate against the live ``<epic>/umbrella`` branch and passes
+    ``None`` here when it does not exist — so this pure resolver never needs git.
 
     Precedence (the design decision in #173):
 

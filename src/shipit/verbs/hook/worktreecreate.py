@@ -11,8 +11,9 @@ construction* (the supported route can no longer reach a native worktree).
 
 THIN by design (mirrors `hook pretooluse`): read the `WorktreeCreate` payload on
 stdin → resolve the holding branch (`harness.worktree_adapter`) from the epic
-(inferred from the coordinator's `cwd` branch, or the `SHIPIT_EPIC` override) +
-the spawn's id → create the Tree (`tree.create`) → write its absolute path to
+(inferred from the coordinator's `cwd` branch, or the `SHIPIT_EPIC` override, then
+validated against the live `<epic>/umbrella` branch) + the spawn's id → create the
+Tree (`tree.create`) → write its absolute path to
 stdout. The branch is **deferred** (`<epic>/agent-<id>`, base `origin/main`): a
 coarse holding branch the spawned agent self-branches off, because the hook cannot
 know the per-spawn work stream/role (ADR-0017).
@@ -101,6 +102,13 @@ def _resolve_branch(payload: dict[str, object]) -> str:
     on a detached / no-slash / unreadable branch or a missing `cwd`, falling back
     safely to an epic-less branch.
 
+    The candidate epic (from the branch prefix OR the override) is then **validated
+    against the real `<epic>/umbrella` branch** (:func:`_validated_epic`): only a
+    prefix that names an actual epic (its umbrella exists) namespaces the branch, so a
+    coordinator on an ordinary `feature/foo` — or an override naming a dead epic —
+    degrades to the same safe epic-less fallback rather than minting a bogus
+    `feature/agent-…` holding branch.
+
     **Verified WorktreeCreate payload contract (live probe, Claude Code 2.1.196).**
     CC fires the hook with `{session_id, transcript_path, cwd, prompt_id,
     hook_event_name, name}`; the spawn-id field is **`name`** (value `agent-<agentId>`),
@@ -118,8 +126,47 @@ def _resolve_branch(payload: dict[str, object]) -> str:
         _ID_BYTES
     )
     override = os.environ.get(worktree_adapter.EPIC_MARKER_ENV)
-    epic = worktree_adapter.resolve_epic(override, _spawn_branch(payload))
+    candidate = worktree_adapter.resolve_epic(override, _spawn_branch(payload))
+    epic = _validated_epic(candidate, payload)
     return worktree_adapter.resolve_branch(epic, agent_id)
+
+
+def _validated_epic(candidate: str | None, payload: dict[str, object]) -> str | None:
+    """Confirm `candidate` names a REAL epic before it namespaces the holding branch.
+
+    The pure resolver only *extracts* a candidate epic — the spawning branch's prefix,
+    or the `SHIPIT_EPIC` override — and cannot tell `TRE04` (a real epic) from
+    `feature` (a coordinator merely sitting on `feature/foo`). The semantic test for
+    "is `<candidate>` a real epic?" is "does `<candidate>/umbrella` exist as a branch?"
+    (ADR-0016: every epic has an umbrella). This validates it with a LOCAL ref lookup
+    (`gh.epic_umbrella_exists`, no network) in the coordinator's checkout. The SAME
+    validation applies to an explicit override, so an override naming a non-existent
+    epic degrades just like an inferred non-epic prefix — consistent safe-degrade.
+
+    Returns the candidate only when its umbrella exists; otherwise `None` → the safe
+    epic-less `agent-<id>` fallback. `None` in, `None` out (nothing to validate).
+    """
+    if candidate is None:
+        return None
+    cwd = _ref_check_cwd(payload)
+    if cwd is None:
+        return None
+    return candidate if gh.epic_umbrella_exists(candidate, cwd=cwd) else None
+
+
+def _ref_check_cwd(payload: dict[str, object]) -> str | None:
+    """A checkout of the repo to run the umbrella-existence ref lookup in.
+
+    Prefers the payload `cwd` (the coordinator's checkout — the same place the
+    spawning branch was read), falling back to the ambient hook checkout
+    (`gh.repo_root()`) so an override-only spawn that carries no `cwd` can still be
+    validated. `None` when neither resolves, degrading the epic to the safe epic-less
+    fallback rather than guessing.
+    """
+    cwd = payload.get("cwd")
+    if isinstance(cwd, str) and cwd:
+        return cwd
+    return gh.repo_root()
 
 
 def _spawn_branch(payload: dict[str, object]) -> str | None:
