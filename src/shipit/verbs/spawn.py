@@ -31,16 +31,18 @@ import sys
 import click
 
 from .. import gh, proc
-from ..spawn import launch
+from ..spawn import backends, launch
 from ..tree.create import Tree, create, new_agent_hash
 from ..tree.layout import TreeSpec, epic_umbrella_base
 from ..tree.readonly import create_readonly, readonly_plan
 
-#: The backends ``spawn subagent`` can launch today. Only ``claude`` is wired
-#: (ADR-0019 is the claude-backend contract); codex / antigravity are a future WS
-#: (#153). A ``click.Choice`` over this gates the CLI, and :func:`run_subagent`
-#: re-checks it so the programmatic entry point is guarded too.
-SUPPORTED_BACKENDS = ("claude",)
+#: The backends ``spawn subagent`` can launch today — **adapter-driven** (ADR-0020
+#: §Decision 2): derived from the :mod:`shipit.spawn.backends` registry, not a
+#: hand-maintained constant, so wiring a backend is one registry entry. ``claude``
+#: (ADR-0019), ``codex``, and ``antigravity`` (the ``agy`` CLI) are all registered —
+#: write Runs (WS02/WS03) and reviewer Runs (WS04a). A ``click.Choice`` over this gates
+#: the CLI, and :func:`run_subagent` re-checks it so the programmatic entry is guarded too.
+SUPPORTED_BACKENDS = backends.supported_backends()
 
 #: The role that gets a shared **read-only Tree** + a **Reviewer Run** (ADR-0018)
 #: instead of the per-Run write Tree every other role gets: a reviewer is read-only
@@ -112,7 +114,11 @@ def spawn() -> None:
     type=click.Choice(SUPPORTED_BACKENDS),
     default="claude",
     show_default=True,
-    help="The agent backend to launch. Only `claude` is wired today (ADR-0019).",
+    help=(
+        "The agent backend to launch (derived from the adapter registry). `claude` "
+        "(ADR-0019) and `antigravity` — the `agy` CLI, write Runs (ADR-0020) — are "
+        "wired; `codex` lands alongside."
+    ),
 )
 def subagent_cmd(
     repo: str, epic: str, ws: int, issue: int | None, role: str, backend: str
@@ -180,10 +186,16 @@ def run_subagent(
         supported = ", ".join(SUPPORTED_BACKENDS)
         print(
             f"spawn subagent: unsupported backend {backend!r} (supported: "
-            f"{supported}); non-claude backends are a later WS (#153).",
+            f"{supported}); wiring a new backend is one entry in the adapter registry "
+            "(ADR-0020).",
             file=sys.stderr,
         )
         return 1
+    # The explicit guard above fails an unknown backend LOUD at the verb boundary (no
+    # silent default to claude); only then do we resolve its adapter (ADR-0020). The
+    # adapter supplies the per-backend argv / auth-env / read-only posture; everything
+    # else below (Tree, prompts, launch, PR resolution) is backend-agnostic.
+    adapter = backends.resolve(backend)
     if ws < 1:
         print(
             f"spawn subagent: --ws must be a positive integer (got {ws})",
@@ -254,7 +266,7 @@ def run_subagent(
             branch=branch,
             source_repo=root,
             github_url=url,
-            backend=backend,
+            adapter=adapter,
             launcher=launcher,
         )
 
@@ -312,20 +324,24 @@ def run_subagent(
         print(f"spawn subagent: tree creation failed: {exc}", file=sys.stderr)
         return 1
 
-    # Launch the headless claude child rooted in the Tree (ADR-0019 contract): the
-    # cwd IS the Tree, ANTHROPIC_API_KEY is scrubbed, and --agent <role> conveys the
-    # role to the harness so the guard allows the Run's own edits. The task tells the
-    # Run to implement the issue and open a draft PR from this branch (the result
-    # channel — ADR-0019 §6); base_branch drops the remote prefix off the Tree's base
-    # so the PR targets a branch name (origin/E/umbrella -> E/umbrella).
+    # Launch the backend child rooted in the Tree through its adapter (ADR-0020): the
+    # cwd IS the Tree, the adapter's child_env scrubs the backend's auth-shadowing vars
+    # (for claude, ANTHROPIC_API_KEY), and build_command conveys the role (for claude,
+    # --agent <role>, so the guard allows the Run's own edits). The task tells the Run to
+    # implement the issue and open a draft PR from this branch (the result channel —
+    # ADR-0019 §6); base_branch drops the remote prefix off the Tree's epic-grouped base
+    # so the PR targets a branch name (origin/E/umbrella -> E/umbrella, #176). The Tree
+    # path is passed as `cwd`: most backends root via the process cwd and ignore it, but
+    # `agy` ignores its process cwd and is rooted ONLY by `--add-dir <Tree>`, so the
+    # adapter needs the path (ADR-0020).
     base_branch = tree.base.split("/", 1)[-1] if "/" in tree.base else tree.base
     task = launch.write_task(
         role, issue=issue, branch=tree.branch, base_branch=base_branch
     )
-    cmd = launch.build_command(task, role)
+    cmd = adapter.build_command(task, role, cwd=tree.path)
     try:
         result = launch.launch(
-            cmd, cwd=tree.path, env=launch.child_env(), runner=launcher
+            cmd, cwd=tree.path, env=adapter.child_env(), runner=launcher
         )
     except OSError as exc:
         # The child never started: `claude` is missing/not on PATH, or the Tree path
@@ -336,7 +352,7 @@ def run_subagent(
     if result.returncode != 0:
         detail = result.stderr.strip()
         print(
-            f"spawn subagent: claude child exited {result.returncode}"
+            f"spawn subagent: {adapter.name} child exited {result.returncode}"
             + (f"\n{detail}" if detail else ""),
             file=sys.stderr,
         )
@@ -404,16 +420,20 @@ def _launch_reviewer(
     branch: str,
     source_repo: str,
     github_url: str,
-    backend: str,
+    adapter: backends.BackendAdapter,
     launcher: launch.Runner | None,
 ) -> int:
     """Provision the shared read-only Tree, launch the Reviewer Run, observe. Returns a code.
 
     The ADR-0018 reviewer path: resolve the shared per-``(repo, branch)`` read-only
-    Tree (a second reviewer on the same head REUSES the clone), then launch a headless
-    ``claude`` child rooted in it with the read-only ``--tools`` allow-list
-    (:data:`~shipit.spawn.launch.REVIEWER_TOOLS`) and the reviewer task — which reads
-    the diff and posts a review THROUGH the PR. Unlike the write path there is no
+    Tree (a second reviewer on the same head REUSES the clone), then launch the backend
+    child rooted in it with the adapter's **read-only posture** (``read_only=True`` on
+    :meth:`~shipit.spawn.backends.base.BackendAdapter.build_command` — for ``claude`` the
+    read-only ``--tools`` allow-list; for ``codex`` / ``agy``, which have no allow-list,
+    the least-privilege posture that still lets the agent self-post via ``gh pr review``,
+    with read-only enforced by the chmod'd Tree, ADR-0020 §Decision 3) and the reviewer
+    task — which reads the diff and posts a review THROUGH the PR. Backend-agnostic: the
+    same call drives claude, codex, and antigravity. Unlike the write path there is no
     Run↔PR linkage to resolve: the Run reports out-of-band (the review lands in the
     existing PR), so success is the child's clean exit. Fail-closed mirrors the write
     path — a read-only-Tree error exits 1 loud, never a fallback.
@@ -427,12 +447,21 @@ def _launch_reviewer(
         print(f"spawn subagent: read-only tree creation failed: {exc}", file=sys.stderr)
         return 1
 
-    cmd = launch.build_command(
-        launch.reviewer_task(branch), REVIEWER_ROLE, tools=launch.REVIEWER_TOOLS
+    # The reviewer posture (ADR-0020 §Decision 3): `read_only=True` builds the backend's
+    # reviewer argv (claude → read-only --tools; codex → workspace-write+network, NOT the
+    # write bypass; agy → drop --dangerously-skip-permissions). `cwd=tree.path` is
+    # required by the agy adapter (it ignores the process cwd and roots ONLY via
+    # `--add-dir <Tree>`) and ignored by the rest. The chmod'd read-only Tree is the
+    # load-bearing FS guard whatever the backend's native posture.
+    cmd = adapter.build_command(
+        launch.reviewer_task(branch),
+        REVIEWER_ROLE,
+        read_only=True,
+        cwd=tree.path,
     )
     try:
         result = launch.launch(
-            cmd, cwd=tree.path, env=launch.child_env(), runner=launcher
+            cmd, cwd=tree.path, env=adapter.child_env(), runner=launcher
         )
     except OSError as exc:
         print(f"spawn subagent: {exc}", file=sys.stderr)
@@ -440,13 +469,13 @@ def _launch_reviewer(
     if result.returncode != 0:
         detail = result.stderr.strip()
         print(
-            f"spawn subagent: claude child exited {result.returncode}"
+            f"spawn subagent: {adapter.name} child exited {result.returncode}"
             + (f"\n{detail}" if detail else ""),
             file=sys.stderr,
         )
         return 1
 
-    _emit_spawned(tree, role=REVIEWER_ROLE, backend=backend)
+    _emit_spawned(tree, role=REVIEWER_ROLE, backend=adapter.name)
     return 0
 
 

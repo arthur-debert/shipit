@@ -1,24 +1,23 @@
-"""base — the review-backend interface.
+"""base — the review-backend output-parsing boundary + error vocabulary.
 
-A `Backend` wraps one agent CLI (codex, agy). The interface separates three
-concerns so `--dry-run` is honest:
+Since TRE05-WS04b the funnel no longer owns per-backend CLI wrappers: the codex /
+agy launch is driven through the shared spawn ``BackendAdapter`` reviewer posture
+(:mod:`shipit.spawn.backends`), and the producer (:mod:`shipit.review.producer`)
+captures the agent's stdout and feeds it through :func:`parse_review_output` here.
+So this module is now just the parse boundary and the error vocabulary the service
+layer maps to funnel outcomes:
 
-  * ``preflight()`` probes that the agent binary is reachable and raises a
-    clear, actionable :class:`BackendUnavailable` if not (it never auto-starts
-    anything);
-  * ``build_command()`` returns a pure description of what *would* run — argv,
-    stdin, and any temp files (by placeholder path) — which is exactly what
-    ``--dry-run`` prints;
-  * ``run()`` actually executes it: writes the temp files, invokes the CLI via
-    the shared ``proc`` helper, parses stdout via ``extract_json``, and cleans
-    up the temp files in a ``finally`` (mirroring the phos scripts).
+  * :func:`parse_review_output` — turn an agent's raw stdout into a review dict,
+    or raise :class:`BackendError` (carrying the full raw for the #76 salvage and,
+    when the agy timeout marker is present, flagging the timeout);
+  * :class:`BackendUnavailable` — the agent binary is not on PATH (preflight);
+  * :class:`BackendError` — the agent ran but produced no usable review;
+  * :data:`_TIMEOUT_MARKER` — the agy ``--print`` timeout signature.
 """
 
 from __future__ import annotations
 
 import logging
-import shutil
-from abc import ABC, abstractmethod
 
 #: The review path's logger — a child of the package ``shipit`` logger, so a record
 #: here reaches the OBS01 per-repo file sink (DEBUG-verbose). This is the ONE site
@@ -53,12 +52,29 @@ class BackendError(RuntimeError):
     Carries the FULL raw agent stdout on ``raw`` (the message itself keeps only a
     head/tail snippet, the PR-surface budget). The service layer reads ``raw`` to
     SALVAGE content-but-unparseable output as a top-level review comment (#76) —
-    so the agent's prose isn't dropped just because its JSON was truncated."""
+    so the agent's prose isn't dropped just because its JSON was truncated.
 
-    def __init__(self, *args: object, raw: str = "") -> None:
+    Carries a STRUCTURED ``timed_out`` flag (not a string match): the service
+    layer splits the degraded funnel outcome ``timed_out`` vs ``empty`` on this
+    attribute alone, so a timeout settles ``timed_out`` even when the human-facing
+    message paraphrases the timeout instead of echoing :data:`_TIMEOUT_MARKER`
+    verbatim. ``timed_out`` may be set explicitly at the raise site (the robust
+    path — e.g. a nonzero child whose timeout signal is in *stderr*, not the
+    salvageable stdout ``raw``); when left ``None`` it is auto-derived from the
+    message + ``raw`` so a marker-bearing output is still classed as a timeout."""
+
+    def __init__(
+        self, *args: object, raw: str = "", timed_out: bool | None = None
+    ) -> None:
         super().__init__(*args)
         #: The full raw agent stdout (empty when there was nothing to salvage).
         self.raw = raw
+        if timed_out is None:
+            haystack = f"{' '.join(str(a) for a in args)}\n{raw}".lower()
+            timed_out = _TIMEOUT_MARKER in haystack
+        #: True when this failure is a TIMEOUT (-> funnel ``timed_out``), False
+        #: when it is a generic unparseable/empty non-delivery (-> ``empty``).
+        self.timed_out = timed_out
 
 
 def parse_review_output(stdout: str, *, backend_name: str = "the agent") -> dict:
@@ -103,7 +119,8 @@ def parse_review_output(stdout: str, *, backend_name: str = "the agent") -> dict
             backend_name,
             raw,
         )
-        if _TIMEOUT_MARKER in raw.lower():
+        timed_out = _TIMEOUT_MARKER in raw.lower()
+        if timed_out:
             hint = (
                 f"{backend_name} timed out before returning a complete review — "
                 "try a faster model or a smaller diff"
@@ -114,8 +131,12 @@ def parse_review_output(stdout: str, *, backend_name: str = "the agent") -> dict
                 "been truncated) — try a faster model or a smaller diff"
             )
         # Attach the full raw so the service can SALVAGE it (#76); the message keeps
-        # only the snippet (the PR-surface / terminal budget).
-        raise BackendError(f"{hint}\nraw output: {snippet}", raw=raw) from exc
+        # only the snippet (the PR-surface / terminal budget). The STRUCTURED
+        # ``timed_out`` flag (not a string match) is what the service splits the
+        # funnel outcome on.
+        raise BackendError(
+            f"{hint}\nraw output: {snippet}", raw=raw, timed_out=timed_out
+        ) from exc
     # Parse OK. Log the full raw at DEBUG — the always-on audit trail (#75) of what
     # the agent actually emitted, durable in the file sink for every run.
     logger.debug(
@@ -125,43 +146,3 @@ def parse_review_output(stdout: str, *, backend_name: str = "the agent") -> dict
         raw,
     )
     return review
-
-
-class Backend(ABC):
-    """Abstract review backend. One concrete subclass per agent CLI."""
-
-    #: Short backend identifier, e.g. ``"codex"`` / ``"agy"``.
-    name: str = ""
-
-    #: Name of the agent binary that must be on PATH for this backend to run.
-    binary: str = ""
-
-    def preflight(self) -> None:
-        """Verify the agent binary is reachable; raise :class:`BackendUnavailable`
-        with an actionable message otherwise. Does NOT auto-start anything."""
-        if shutil.which(self.binary) is None:
-            raise BackendUnavailable(
-                f"The '{self.name}' review backend requires the '{self.binary}' "
-                f"CLI on your PATH, but it was not found. Install it (and start "
-                f"its backend if it needs one), then re-run."
-            )
-
-    @abstractmethod
-    def build_command(self, prompt: str, schema: dict) -> dict:
-        """Describe — without executing — exactly what would run.
-
-        Returns ``{"argv": [...], "stdin": <str|None>, "files": {path: contents}}``
-        where ``files`` are any temp files that would be written (shown by a
-        placeholder path). This is what ``--dry-run`` prints.
-        """
-        raise NotImplementedError
-
-    @abstractmethod
-    def run(self, prompt: str, schema: dict, *, cwd: str | None = None) -> dict:
-        """Execute the backend for real and return the parsed review dict.
-
-        Writes any temp files, invokes the CLI (in ``cwd`` if given, so the
-        read-only agent can inspect the checkout's files), parses stdout via
-        ``extract_json``, and removes the temp files in a ``finally``.
-        """
-        raise NotImplementedError

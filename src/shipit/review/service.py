@@ -7,9 +7,11 @@ returns in-flight.
 
 Layered functions:
 
-  * :func:`generate_review` — resolve the backend, preflight it, build the shared
-    prompt over a resolved PR's diff, and run the backend → the parsed review
-    dict. No GitHub posting.
+  * :func:`generate_review` — delegate to the Tree-fetch producer
+    (:func:`shipit.review.producer.run_tree_review`): provision a shared read-only
+    Tree (ADR-0018) on the PR head, launch the agent through its spawn read-only
+    posture with a task that fetches the diff itself via ``gh pr diff``, and CAPTURE
+    its structured stdout → the parsed review dict. No GitHub posting.
   * :func:`start_detached_review` — the OBS03 PARENT entry the reviewer adapter
     calls: do the cheap synchronous work (resolve ``(repo, head_sha)``, reconcile
     against any in-flight run, open the ``in_progress`` breadcrumb), spawn a
@@ -35,13 +37,9 @@ import sys
 from collections.abc import Callable, Sequence
 
 from .. import gh
-from . import checkrun, post
-from .backends import get_backend
-from .backends.base import _TIMEOUT_MARKER, BackendError
+from . import checkrun, post, producer
+from .backends.base import BackendError
 from .diff import resolve_pr
-from .instructions import load_instructions
-from .prompt import build_prompt
-from .schema import REVIEW_SCHEMA
 
 #: The review path's logger — a child of the package ``shipit`` logger. A local
 #: review run (start, the backend/agent invoked, and the outcome) is recorded
@@ -57,38 +55,42 @@ def generate_review(
     instructions_path: str | None = None,
     model: str = "pro",
     timeout: str = "600s",
+    dry_run: bool = False,
 ) -> dict:
-    """Run ``agent`` over ``ctx``'s diff and return the parsed review dict.
+    """Run ``agent`` as a reviewer in a read-only Tree and return the parsed review.
 
-    Resolves the backend, preflights it (a missing CLI raises
-    :class:`~shipit.review.backends.base.BackendUnavailable`, which is allowed to
-    propagate — these are LOCAL backends and a missing binary must fail loud),
-    loads the review instructions (bundled default unless ``instructions_path``
-    is given), builds the shared prompt over ``ctx.diff`` (with the schema
-    described in-prose only for ``agy``, which has no native schema enforcement),
-    and runs the backend in ``ctx.workdir``.
+    The Tree-fetch producer (ADR-0020 §Reviewer-path reconciliation — REPLACE): instead
+    of front-loading ``ctx.diff`` into the prompt and running the CLI in the consumer's
+    checkout, this provisions a shared read-only Tree (ADR-0018) on the PR head, launches
+    the agent through its spawn read-only posture with a task that fetches the scoped diff
+    itself via ``gh pr diff`` (never assuming the base is ``main``) and emits structured
+    JSON, then CAPTURES that stdout into the review dict. Posting + the funnel check-run
+    are the caller's job, unchanged — this only PRODUCES the review.
 
-    ``timeout`` is the per-run agent timeout (a ``<N>s`` duration string,
-    defaulting to ``600s``); it is threaded to the backend, where ``agy`` applies
-    it as ``--print-timeout`` (``codex`` accepts it for interface parity).
+    Delegates to :func:`shipit.review.producer.run_tree_review`, which owns the Tree, the
+    spawn-adapter launch, and the parse. A missing CLI raises
+    :class:`~shipit.review.backends.base.BackendUnavailable` and an unparseable / timed-out
+    run raises :class:`~shipit.review.backends.base.BackendError` — both propagate exactly
+    as before so the service's outcome mapping is unchanged.
+
+    ``timeout`` is the per-run agent timeout (a ``<N>s`` duration string); it reaches
+    ``agy`` as ``--print-timeout`` (``codex`` has no per-run timeout flag — parity only).
+    ``dry_run`` prints the would-run Tree-launch argv and bills nothing.
     """
     logger.info(
-        "review run: agent=%s model=%s timeout=%s starting (backend resolve)",
+        "review run: agent=%s model=%s timeout=%s starting (read-only Tree producer)",
         agent,
         model,
         timeout,
     )
-    backend = get_backend(agent, model=model, timeout=timeout)
-    backend.preflight()
-    instructions = load_instructions(instructions_path)
-    prompt = build_prompt(instructions, ctx.diff, schema_inline=(agent == "agy"))
-    logger.debug(
-        "review run: agent=%s invoking backend over diff (%d bytes) in %s",
+    review = producer.run_tree_review(
         agent,
-        len(ctx.diff or ""),
-        ctx.workdir,
+        ctx,
+        model=model,
+        timeout=timeout,
+        instructions_path=instructions_path,
+        dry_run=dry_run,
     )
-    review = backend.run(prompt, REVIEW_SCHEMA, cwd=ctx.workdir)
     summary = (review.get("summary") or {}) if isinstance(review, dict) else {}
     logger.info(
         "review run: agent=%s complete -> status=%s, %d comment(s)",
@@ -128,6 +130,7 @@ def _generate_post_and_close(
             instructions_path=instructions_path,
             model=model,
             timeout=timeout,
+            dry_run=dry_run,
         )
         result = post.post_review(
             review,
@@ -138,11 +141,14 @@ def _generate_post_and_close(
             as_app=as_app,
         )
     except BackendError as exc:
-        # A backend that ran but produced no usable review: the agy timeout marker
-        # in its output means it TIMED OUT (-> timed_out); any other unparseable /
-        # empty output is the degraded "empty" non-delivery (-> failure, NOT
-        # success — distinct from a clean zero-findings review which posts).
-        outcome = "timed_out" if _TIMEOUT_MARKER in str(exc).lower() else "empty"
+        # A backend that ran but produced no usable review: a TIMEOUT means it
+        # settles ``timed_out``; any other unparseable / empty output is the
+        # degraded "empty" non-delivery (-> failure, NOT success — distinct from a
+        # clean zero-findings review which posts). We read the STRUCTURED
+        # ``exc.timed_out`` flag, NOT a string match on the message: a timeout
+        # whose signal lived in stderr (or whose message paraphrases the marker)
+        # is still classed correctly (the producer sets the flag explicitly).
+        outcome = "timed_out" if exc.timed_out else "empty"
         # SALVAGE (#76): the agent produced CONTENT but unparseable JSON — don't
         # drop it. Post the raw text as a single top-level comment so the human
         # still gets the feedback and the failure is debuggable from the PR. This is
