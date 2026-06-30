@@ -39,17 +39,6 @@ from pathlib import Path
 #: breaks auth. Scrubbing it is a hard contract requirement, not a nicety.
 ANTHROPIC_API_KEY = "ANTHROPIC_API_KEY"
 
-#: The trivial, verifiable artifact the skeleton's spawned child writes at the root
-#: of its Tree — the one observable that proves (acceptance #155) the Run executed
-#: IN the Tree, not the parent checkout. Real, PR-reported work replaces this in
-#: later work streams; the sentinel is purely the walking skeleton's proof of life.
-SENTINEL_NAME = ".shipit-spawn-sentinel"
-
-#: The exact, entire contents the sentinel must have — kept in one place so the task
-#: prompt that instructs the child and :func:`sentinel_present`, which verifies the
-#: child wrote precisely this, never drift.
-SENTINEL_BODY = "spawned by shipit\n"
-
 
 @dataclass(frozen=True)
 class LaunchResult:
@@ -160,39 +149,28 @@ def _subprocess_runner(
     )
 
 
-def skeleton_task(role: str) -> str:
-    """The trivial, verifiable task the skeleton's spawned child performs.
+def write_task(role: str, *, issue: int, branch: str, base_branch: str) -> str:
+    """The task a spawned WRITE Run performs: do the issue's work, report via a draft PR.
 
-    It instructs the child to write :data:`SENTINEL_NAME` (containing
-    :data:`SENTINEL_BODY`) at the root of its Tree — the one observable that proves
-    (acceptance #155) the Run executed IN the Tree, not the parent checkout. Real,
-    PR-reported work replaces this in later work streams.
+    WS02 replaces the WS01 sentinel skeleton with real, PR-reported work (acceptance
+    #156): the Run, rooted in its Tree on ``branch`` (cut from ``base_branch``),
+    implements issue ``#issue`` and opens a **draft** PR from that branch. The PR is
+    the deliverable channel (ADR-0019 §6) — the parent never scrapes the Tree; it
+    learns the result by resolving the PR the Run opened on ``branch``.
+
+    The draft-PR-and-stop discipline (open one draft PR linking ``for #issue``, then
+    STOP at PR-open — never flip ready or merge) lives in the role's own system prompt,
+    which ``--agent <role>`` loads; this task only conveys *which* issue and restates
+    the PR contract so the launched Run can never miss the one observable shipit reads
+    back: a draft PR whose head is exactly ``branch``.
     """
     return (
-        f"You are a spawned {role} Run launched by `shipit spawn subagent` to prove "
-        f"the Tree launch contract (ADR-0019). Create a file named {SENTINEL_NAME!r} "
-        f"at the root of this checkout whose entire contents are the single line "
-        f"{SENTINEL_BODY.strip()!r}. Do nothing else, then stop."
+        f"You are a spawned {role} Run launched by `shipit spawn subagent`, working in "
+        f"an isolated Tree checkout on branch {branch!r} (cut from {base_branch!r}). "
+        f"Implement issue #{issue}: read it with `gh issue view {issue}`, make the "
+        f"change with tests, and get the checks green. Then commit, push {branch!r}, and "
+        f"open a DRAFT pull request from it against {base_branch!r} "
+        f"(`gh pr create --draft --base {base_branch} --head {branch}`) whose body "
+        f"references `for #{issue}`. STOP once the draft PR is open — do not flip it "
+        f"ready, request reviews, or merge."
     )
-
-
-def sentinel_path(tree_path: str | Path) -> Path:
-    """Where the skeleton sentinel lives for a Tree at ``tree_path``."""
-    return Path(tree_path) / SENTINEL_NAME
-
-
-def sentinel_present(tree_path: str | Path) -> bool:
-    """Whether the spawned child wrote the *correct* sentinel into the Tree.
-
-    The proof of life (acceptance #155) is not merely a file at the right path but a
-    file whose entire contents are :data:`SENTINEL_BODY` — the exact line the skeleton
-    task instructs the child to write. Existence alone is too weak: an empty,
-    truncated, or stray write would falsely report success. A missing file, an
-    unreadable one, or any content that is not :data:`SENTINEL_BODY` all count as
-    absent.
-    """
-    try:
-        return sentinel_path(tree_path).read_text() == SENTINEL_BODY
-    except OSError:
-        # Missing, a directory, or otherwise unreadable — all "not present".
-        return False
