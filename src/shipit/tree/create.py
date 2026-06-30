@@ -137,36 +137,62 @@ def sccache_env(tree_dir: Path) -> dict[str, str]:
 #: install commit's pre-commit hook dies (#167). This is the same env-leak class as
 #: ADR-0019's ``ANTHROPIC_API_KEY`` finding — an inherited var breaking a child
 #: rooted elsewhere — and the fix is the same: scrub it. Cache-location vars are
-#: user-level (not project-bound), so they are kept (see :func:`is_leaked_pixi_var`)
+#: user-level (not project-bound), so they are kept (see :func:`is_leaked_env_var`)
 #: to preserve cross-Tree package-cache sharing.
 PIXI_CACHE_VARS = frozenset({"PIXI_CACHE_DIR", "RATTLER_CACHE_DIR"})
 
+#: The Conda **activation** vars that bind a process to the PARENT env — exactly the
+#: ones a ``conda activate`` (and pixi's own activation, which is conda-shaped) set on
+#: entry. They MUST be scrubbed for the same reason as the ``PIXI_*`` pointers: a leaked
+#: ``CONDA_PREFIX`` / ``CONDA_DEFAULT_ENV`` keeps a child bound to the PARENT env's
+#: activation, so ``python`` / tooling resolve there instead of the child's own Tree. The
+#: stacked ``CONDA_PREFIX_<n>`` an activation *stack* leaves behind is caught by prefix in
+#: :func:`is_leaked_env_var`. **Installation-level** vars (``CONDA_EXE``,
+#: ``CONDA_PYTHON_EXE``, ``CONDA_ROOT``, ``_CE_*``) are user-/install-level, NOT project
+#: pointers, so they are KEPT — dropping them wholesale could change subprocess behavior
+#: (including ``pixi run`` itself in a Conda-managed shell).
+CONDA_ACTIVATION_VARS = frozenset(
+    {"CONDA_PREFIX", "CONDA_DEFAULT_ENV", "CONDA_SHLVL", "CONDA_PROMPT_MODIFIER"}
+)
 
-def is_leaked_pixi_var(key: str) -> bool:
-    """Whether ``key`` is a parent-project ``PIXI_*`` pointer to scrub from a Tree child.
 
-    The single source of truth for "which ``PIXI_*`` vars bind to the PARENT project and
-    must not leak into a child rooted in a different clone". Both the provisioning env
-    (:func:`provision_env`) and the launch env (:func:`shipit.spawn.launch.scrub_tree_env`)
-    scrub on this predicate, so the two paths can never drift on the cache-var carve-out.
+def is_leaked_env_var(key: str) -> bool:
+    """Whether ``key`` is a parent-project env pointer to scrub from a Tree child.
+
+    The single source of truth for "which inherited vars bind to the PARENT project and
+    must not leak into a child rooted in a different clone". Two leak classes:
+
+    - ``PIXI_*`` project pointers (all ``PIXI_*`` except the user-level cache vars in
+      :data:`PIXI_CACHE_VARS`).
+    - Conda **activation** vars (:data:`CONDA_ACTIVATION_VARS` and the stacked
+      ``CONDA_PREFIX_<n>``) — SCOPED to activation-binding vars only; installation-level
+      ``CONDA_*`` (``CONDA_EXE`` / ``CONDA_PYTHON_EXE`` / ``CONDA_ROOT`` / ``_CE_*``) is
+      KEPT, since scrubbing all ``CONDA_*`` could break ``pixi run`` in a Conda shell.
+
+    Both the provisioning env (:func:`provision_env`) and the launch env
+    (:func:`shipit.spawn.launch.scrub_tree_env`) scrub SOLELY on this predicate, so the
+    two paths can never drift on either carve-out.
     """
-    return key.startswith("PIXI_") and key not in PIXI_CACHE_VARS
+    if key.startswith("PIXI_"):
+        return key not in PIXI_CACHE_VARS
+    if key in CONDA_ACTIVATION_VARS or key.startswith("CONDA_PREFIX_"):
+        return True
+    return False
 
 
 def provision_env(tree_dir: Path) -> dict[str, str]:
     """The COMPLETE environment for a provisioning command run inside ``tree_dir``.
 
-    A copy of the current environment with the parent's leaked ``PIXI_*`` project
-    pointers removed (:func:`is_leaked_pixi_var`) and the ADR-0015 build env
-    (:func:`sccache_env`) applied. Returned as the full env — not an overlay — so
-    :func:`run_provision` can hand it to :func:`shipit.proc.run` with
-    ``replace_env=True``: a merge could re-add the very ``PIXI_*`` vars we are
-    dropping (they live in ``os.environ``), so removal requires replacing the env,
-    not merging onto it. With the project pointers gone, the child ``pixi`` /
-    ``shipit`` re-resolves the project from its own cwd (the Tree), which is the
-    whole point.
+    A copy of the current environment with the parent's leaked ``PIXI_*`` / Conda
+    activation project pointers removed (:func:`is_leaked_env_var`) and the ADR-0015
+    build env (:func:`sccache_env`) applied. Returned as the full env — not an overlay —
+    so :func:`run_provision` can hand it to :func:`shipit.proc.run` with
+    ``replace_env=True``: a merge could re-add the very vars we are dropping (they live
+    in ``os.environ``), so removal requires replacing the env, not merging onto it. With
+    the project pointers gone, the child ``pixi`` / ``shipit`` re-resolves the project
+    from its own cwd (the Tree), which is the whole point.
     """
-    env = {k: v for k, v in os.environ.items() if not is_leaked_pixi_var(k)}
+    env = {k: v for k, v in os.environ.items() if not is_leaked_env_var(k)}
     env.update(sccache_env(tree_dir))
     return env
 

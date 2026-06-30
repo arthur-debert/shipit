@@ -140,9 +140,12 @@ and a **non-pixi repo** have no such env, so those stay **BARE** — routing the
 `pixi run` would force a solve into a chmod'd tree or fail outright.
 
 **Env strategy.** Decision #3's `ANTHROPIC_API_KEY` scrub stands, and the launch path now
-ALSO scrubs leaked `PIXI_*` / `CONDA_*` project pointers (mirroring
-`tree.create.provision_env`, reusing `is_leaked_pixi_var` so the `PIXI_*` cache-var
-carve-out cannot drift). `--clean-env` is **NOT** used.
+ALSO scrubs leaked `PIXI_*` project pointers and Conda **activation** vars (`CONDA_PREFIX`
+& friends; installation-level `CONDA_EXE` / `CONDA_PYTHON_EXE` are KEPT so a Conda-managed
+shell's `pixi run` is undisturbed). It mirrors `tree.create.provision_env` by relying
+SOLELY on the shared `is_leaked_env_var` predicate, so neither the `PIXI_*` cache-var
+carve-out nor the Conda activation-vs-installation carve-out can drift between the launch
+and provisioning paths. `--clean-env` is **NOT** used.
 
 **Spike evidence (2026-06-30).** A probe settled the mechanism:
 

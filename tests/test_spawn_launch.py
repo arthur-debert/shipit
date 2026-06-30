@@ -155,27 +155,39 @@ def test_pixi_wrap_accepts_a_str_tree_path(tmp_path):
     ]
 
 
-def test_scrub_tree_env_drops_leaked_pixi_and_conda_keeps_the_rest():
-    # On top of the adapter's auth scrub, the launch path drops parent-project PIXI_* /
-    # CONDA_* pointers (the #167 leak class) so the child re-resolves from the Tree.
+def test_scrub_tree_env_drops_leaked_pixi_and_conda_activation_keeps_the_rest():
+    # On top of the adapter's auth scrub, the launch path drops parent-project PIXI_*
+    # pointers and Conda ACTIVATION vars (the #167 leak class) so the child re-resolves
+    # from the Tree — but installation-level CONDA_* (CONDA_EXE / CONDA_PYTHON_EXE) is
+    # KEPT, since scrubbing all CONDA_* could break `pixi run` in a Conda-managed shell.
     env = {
         "HOME": "/home/a",
         "PATH": "/bin",
         "PIXI_PROJECT_MANIFEST": "/parent/pixi.toml",
         "PIXI_PROJECT_NAME": "parent",
         "CONDA_PREFIX": "/parent/.pixi/envs/default",
+        "CONDA_PREFIX_1": "/parent/.pixi/envs/stacked",
         "CONDA_DEFAULT_ENV": "default",
+        "CONDA_SHLVL": "2",
+        "CONDA_PROMPT_MODIFIER": "(default) ",
+        "CONDA_EXE": "/opt/conda/bin/conda",
+        "CONDA_PYTHON_EXE": "/opt/conda/bin/python",
     }
 
     scrubbed = launch.scrub_tree_env(env)
 
-    assert scrubbed == {"HOME": "/home/a", "PATH": "/bin"}
+    assert scrubbed == {
+        "HOME": "/home/a",
+        "PATH": "/bin",
+        "CONDA_EXE": "/opt/conda/bin/conda",
+        "CONDA_PYTHON_EXE": "/opt/conda/bin/python",
+    }
 
 
 def test_scrub_tree_env_keeps_pixi_cache_vars():
     # The cache-location vars are user-level (not project-bound), so they are KEPT to
     # preserve cross-Tree package-cache sharing — the same carve-out provisioning uses
-    # (reused via `is_leaked_pixi_var`, so the two paths cannot drift).
+    # (reused via `is_leaked_env_var`, so the two paths cannot drift).
     env = {"PIXI_CACHE_DIR": "/cache/pixi", "RATTLER_CACHE_DIR": "/cache/rattler"}
 
     assert launch.scrub_tree_env(env) == env

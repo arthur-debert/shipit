@@ -363,11 +363,12 @@ def _pixi_runs(tree_path: str) -> tuple[bool, str]:
     """Whether ``pixi`` resolves and runs the provisioned env inside ``tree_path``.
 
     Runs ``pixi run python -c "print('pixi-ok')"`` with the parent's leaked
-    ``PIXI_*`` project pointers scrubbed (the same leak class
-    :func:`shipit.tree.create.provision_env` guards against, reused here), so the
-    child ``pixi`` re-resolves the Tree's own manifest. Returns ``(ok, detail)``.
+    ``PIXI_*`` / Conda-activation project pointers scrubbed (the same leak class
+    :func:`shipit.tree.create.provision_env` guards against, via the shared
+    :func:`shipit.tree.create.is_leaked_env_var`), so the child ``pixi`` re-resolves the
+    Tree's own manifest. Returns ``(ok, detail)``.
     """
-    env = {k: v for k, v in os.environ.items() if not tree_create.is_leaked_pixi_var(k)}
+    env = {k: v for k, v in os.environ.items() if not tree_create.is_leaked_env_var(k)}
     try:
         completed = subprocess.run(  # noqa: S603,S607 — fixed argv, scrubbed env
             ["pixi", "run", "python", "-c", "print('pixi-ok')"],

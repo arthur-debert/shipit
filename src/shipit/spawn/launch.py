@@ -30,9 +30,11 @@ carries a provisioned env (``<tree>/.pixi/envs/default`` exists). A **reviewer's
 read-only Tree** (ADR-0018) and a **non-pixi repo** have none, so :func:`pixi_wrap`
 leaves their argv BARE — routing those through ``pixi run`` would force a solve into a
 chmod'd tree or fail outright. :func:`scrub_tree_env` mirrors the provisioning scrub
-(:func:`shipit.tree.create.provision_env`): on top of the adapter's auth-env scrub it
-drops leaked ``PIXI_*`` / ``CONDA_*`` project pointers so the child — and the agent's own
-``pixi`` calls — re-resolve from the Tree. ``--clean-env`` is NOT used: it was falsified
+(:func:`shipit.tree.create.provision_env`) — both rely SOLELY on the shared predicate
+:func:`shipit.tree.create.is_leaked_env_var`, so they cannot drift: on top of the
+adapter's auth-env scrub it drops leaked ``PIXI_*`` project pointers and Conda
+**activation** vars (``CONDA_PREFIX`` & friends; installation-level ``CONDA_EXE`` etc. are
+KEPT) so the child — and the agent's own ``pixi`` calls — re-resolve from the Tree. ``--clean-env`` is NOT used: it was falsified
 (it strips ``HOME``/``PATH``, so the child finds neither python nor the ``claude`` binary,
 rc 127); the curated passthrough keeps ``HOME``/``PATH`` intact (spike, 2026-06-30).
 """
@@ -44,7 +46,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..tree.create import is_leaked_pixi_var
+from ..tree.create import is_leaked_env_var
 
 
 @dataclass(frozen=True)
@@ -151,23 +153,23 @@ def pixi_wrap(argv: list[str], tree_path: str | Path) -> list[str]:
 
 
 def scrub_tree_env(env: Mapping[str, str]) -> dict[str, str]:
-    """Drop leaked ``PIXI_*`` / ``CONDA_*`` project pointers from a child's env.
+    """Drop leaked ``PIXI_*`` / Conda-activation project pointers from a child's env.
 
     Applied on TOP of the adapter's auth-env scrub (``BackendAdapter.child_env``), so the
     child inherits neither a stale auth var NOR a parent-project ``PIXI_PROJECT_MANIFEST``
     / ``CONDA_PREFIX`` that would bind it to the PARENT env. This mirrors the provisioning
     scrub (:func:`shipit.tree.create.provision_env`) on the launch path — the same leak
-    class shipit already fixed once (#167), reusing :func:`~shipit.tree.create.is_leaked_pixi_var`
-    so the ``PIXI_*`` cache-var carve-out cannot drift between the two paths. With explicit
-    ``--manifest-path`` (see :func:`pixi_wrap`) the scrub is belt-and-suspenders for the
-    child's own activation, but it still cleans the env the agent's *own* ``pixi`` calls
-    inherit. Returns a fresh dict (never the caller's).
+    class shipit already fixed once (#167) — by relying SOLELY on the shared predicate
+    :func:`~shipit.tree.create.is_leaked_env_var`, so the ``PIXI_*`` cache-var carve-out
+    AND the Conda activation-vs-installation carve-out cannot drift between the two paths.
+    The predicate scrubs only the Conda **activation** vars (``CONDA_PREFIX`` and friends),
+    KEEPING installation-level ``CONDA_EXE`` / ``CONDA_PYTHON_EXE`` so a Conda-managed
+    shell's ``pixi run`` is undisturbed. With explicit ``--manifest-path`` (see
+    :func:`pixi_wrap`) the scrub is belt-and-suspenders for the child's own activation, but
+    it still cleans the env the agent's *own* ``pixi`` calls inherit. Returns a fresh dict
+    (never the caller's).
     """
-    return {
-        key: value
-        for key, value in env.items()
-        if not is_leaked_pixi_var(key) and not key.startswith("CONDA_")
-    }
+    return {key: value for key, value in env.items() if not is_leaked_env_var(key)}
 
 
 def write_task(role: str, *, issue: int, branch: str, base_branch: str) -> str:
