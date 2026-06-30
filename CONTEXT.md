@@ -339,6 +339,11 @@ fails the spawn loud, never a silent fallback to a native worktree.
 *Avoid*: "the worktree hook" as the spawn mechanism — the `WorktreeCreate` hook is only a
 demoted convenience adapter for throwaway in-CC Claude helpers (epic-marker → `<epic>/agent-<id>`,
 Claude-only); real Runs go through `shipit spawn subagent`.
+*Known gap*: the hook reads the epic namespace from the session-stable `SHIPIT_EPIC` env
+marker (`harness/worktree_adapter.py`), the coordinator→hook handshake, but there is **no
+clean in-session mechanism for the coordinator to set it** — so in-CC hook spawns in
+practice land on epic-less `agent-<id>` holding branches and self-branch from there. Filed
+as #173 (follow-up off epic #154; needs a design decision; not a blocker).
 
 **Tree ownership** (extends the **Role** registry):
 Who provisions a **Tree** and who merely works in one — the role-keyed half of the

@@ -20,6 +20,14 @@ branch it can build is deliberately coarse (``<epic>/agent-<id>``) and the Tree 
 Anything that needs a real branch-pinned Run, a non-Claude backend, or a
 PR-reported result goes through ``shipit spawn subagent`` instead (ADR-0017
 Considered options).
+
+KNOWN GAP (filed as #173, a follow-up off epic #154; not a blocker): ``SHIPIT_EPIC`` is the
+coordinator→hook handshake, but there is no clean in-session mechanism for the
+coordinator to *set* it — so in practice in-CC hook spawns fall through to the
+epic-less ``agent-<id>`` branch and self-branch from there. The spawn still lands in a
+real Tree (never a native worktree); it just sits under a generic holding namespace
+rather than the epic's. Closing this needs a design decision on how the coordinator
+exports a session-stable marker into the hook's env.
 """
 
 from __future__ import annotations

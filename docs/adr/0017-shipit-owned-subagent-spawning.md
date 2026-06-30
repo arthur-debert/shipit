@@ -1,5 +1,10 @@
 # shipit owns subagent spawning; Trees are the Run substrate
 
+> **Refined by ADR-0019.** This ADR fixed *that* shipit launches the backend as a child
+> process rooted in the Tree but left the **launch mechanism** open; ADR-0019 settles it for
+> the `claude` backend (headless `claude -p --agent <role>`, `ANTHROPIC_API_KEY` scrubbed).
+> See also ADR-0018 (write vs read-only Trees).
+
 The coordinator launches every real **Run** through a shipit CLI —
 `shipit spawn subagent --repo R --epic E --ws N --role ROLE [--backend claude|codex|antigravity]`
 — which creates the **Tree**, launches the agent as a child process **rooted in that

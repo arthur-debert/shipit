@@ -26,21 +26,25 @@ dependencies.
     The coordinator is briefed as in the single-task cycle's information-gathering
     step in [../../AGENTS.lex] — via the epic tracker issue, the PRD, or a chat
     with the maintainer. It does the general reading/research, CREATES the epic
-    branch (`EPIC/umbrella` — see [./naming.lex]) by provisioning its own isolated
-    *Tree* to manage that branch (`shipit tree create`; a dissociated clone, never
-    a native `git worktree` — ADR-0014 / [../prd/where-to-do-work.md]), and asks the
-    maintainer for decisions/clarifications as needed.
+    branch (`EPIC/umbrella` — see [./naming.lex]) and provisions its OWN isolated
+    *Tree* to manage that branch with `shipit tree create` — the coordinator's own
+    workspace, the one legitimate hand-run of that primitive, distinct from how Runs
+    get their Tree ([#2]: a Run's Tree is minted FOR it by `shipit spawn subagent` or
+    the `WorktreeCreate` hook, never hand-created). The Tree is a dissociated clone,
+    never a native `git worktree` (ADR-0014 / [../prd/where-to-do-work.md]). It asks
+    the maintainer for decisions/clarifications as needed.
 
 2. Delegation per workstream
 
     The coordinator does NOT implement. It spins one IMPLEMENTER subagent per
     workstream — each scoped by its own Work Stream issue — and runs the
-    [../../AGENTS.lex] role split for each: the coordinator CREATES the WS branch
-    off the epic branch by provisioning the implementer with a ready *Tree*
-    (`shipit tree create --epic E --ws N` → branch `EPIC/WSnn` — see [./naming.lex]); the implementer stops
-    at PR-open, the only topology change being that its draft PR targets the EPIC
-    branch (not `main`); the coordinator owns the wait and the flip; a fresh
-    shepherd handles each addressing round. The 6 / nitpick breaker applies to
+    [../../AGENTS.lex] role split for each: the coordinator SPAWNS the implementer
+    with `shipit spawn subagent --repo R --epic E --ws N --issue I --role implementer`,
+    which mints the ready *Tree* on the WS branch (`EPIC/WSnn` — see [./naming.lex])
+    and roots the Run in it (ADR-0017 / ADR-0019) — no hand `shipit tree create`; the
+    implementer stops at PR-open, the only topology change being that its draft PR
+    targets the EPIC branch (not `main`); the coordinator owns the wait and the flip;
+    a fresh shepherd handles each addressing round. The 6 / nitpick breaker applies to
     every workstream PR.
 
     Parallel implementation, serialized integration. Subagents implement
