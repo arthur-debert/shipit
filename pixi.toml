@@ -84,6 +84,26 @@ verify-funnel = "python -m shipit.review.funnel_verify"
 #   pixi run -e review verify-apps arthur-debert/shipit-canary
 verify-apps = "shipit verify-apps"
 
+# The `dogfood` env carries shipit editable (it drives `shipit spawn subagent` as a
+# subprocess) for the OPT-IN, LIVE end-to-end spawn-verification harness. Like
+# `review` it is NON-DEFAULT — never part of `test` / CI / the `lint` (required-check)
+# surface, and off the locked `pixi.lock` check — because it spawns real `claude`
+# Runs and opens real PRs (token spend) against a SCRATCH checkout. Its assertion +
+# wiring logic is regression-covered in the normal test checks
+# (`tests/test_spawn_dogfood.py`) with every live seam FAKED. See
+# docs/dev/spawn-dogfood-verification.md.
+[feature.dogfood.pypi-dependencies]
+shipit = { path = ".", editable = true }
+
+[feature.dogfood.tasks]
+# The LIVE spawn-dogfood verification harness (TRE03-WS05) — opt-in (spawns real
+# claude Runs, opens real PRs), refuses to run without an explicit scratch checkout +
+# target. Run it deliberately, e.g.:
+#   pixi run -e dogfood verify-spawn --scratch ~/h/scratch/shipit \
+#     --repo arthur-debert/shipit --epic TRE03 --ws 5 --issue 159
+verify-spawn = "python -m shipit.spawn.dogfood"
+
 [environments]
 lint = ["lint"]
 review = ["review"]
+dogfood = ["dogfood"]

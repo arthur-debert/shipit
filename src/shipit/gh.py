@@ -198,10 +198,11 @@ def _merge_paginated(output: str) -> list:
 # --------------------------------------------------------------------------
 
 
-def current_repo() -> str:
-    """``owner/name`` of the repo in the current directory (via ``gh``)."""
+def current_repo(*, cwd: str | None = None) -> str:
+    """``owner/name`` of the repo in ``cwd`` — the current directory if omitted (via ``gh``)."""
     out = _run(
-        ["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"]
+        ["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
+        cwd=cwd,
     )
     return out.strip()
 
