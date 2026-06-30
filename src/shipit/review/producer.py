@@ -203,15 +203,23 @@ def _capture(agent: str, result: launch.LaunchResult) -> dict:
     (carrying the raw for the #76 salvage), exactly as before.
     """
     stdout = result.stdout or ""
+    stderr = result.stderr or ""
     if result.returncode != 0:
-        haystack = f"{stdout}\n{result.stderr or ''}".lower()
+        haystack = f"{stdout}\n{stderr}".lower()
         if _TIMEOUT_MARKER in haystack:
+            # A TIMEOUT, not a generic failure. The marker may live in *stderr*
+            # (not the salvageable stdout), so the human-facing message here does
+            # NOT echo it — we set the STRUCTURED ``timed_out`` flag explicitly so
+            # the service settles ``timed_out`` (not ``empty``) regardless. ``raw``
+            # carries combined stdout+stderr so the #76 salvage still has the marker
+            # context to surface.
             raise BackendError(
                 f"{agent} timed out before returning a complete review "
                 "(try a faster model or a smaller diff)",
-                raw=stdout,
+                raw=f"{stdout}\n{stderr}".strip(),
+                timed_out=True,
             )
-        detail = (result.stderr or "").strip() or stdout.strip()
+        detail = stderr.strip() or stdout.strip()
         raise RuntimeError(
             f"{agent} reviewer exited {result.returncode}: {detail[:500]}"
         )

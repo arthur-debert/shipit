@@ -52,12 +52,29 @@ class BackendError(RuntimeError):
     Carries the FULL raw agent stdout on ``raw`` (the message itself keeps only a
     head/tail snippet, the PR-surface budget). The service layer reads ``raw`` to
     SALVAGE content-but-unparseable output as a top-level review comment (#76) —
-    so the agent's prose isn't dropped just because its JSON was truncated."""
+    so the agent's prose isn't dropped just because its JSON was truncated.
 
-    def __init__(self, *args: object, raw: str = "") -> None:
+    Carries a STRUCTURED ``timed_out`` flag (not a string match): the service
+    layer splits the degraded funnel outcome ``timed_out`` vs ``empty`` on this
+    attribute alone, so a timeout settles ``timed_out`` even when the human-facing
+    message paraphrases the timeout instead of echoing :data:`_TIMEOUT_MARKER`
+    verbatim. ``timed_out`` may be set explicitly at the raise site (the robust
+    path — e.g. a nonzero child whose timeout signal is in *stderr*, not the
+    salvageable stdout ``raw``); when left ``None`` it is auto-derived from the
+    message + ``raw`` so a marker-bearing output is still classed as a timeout."""
+
+    def __init__(
+        self, *args: object, raw: str = "", timed_out: bool | None = None
+    ) -> None:
         super().__init__(*args)
         #: The full raw agent stdout (empty when there was nothing to salvage).
         self.raw = raw
+        if timed_out is None:
+            haystack = f"{' '.join(str(a) for a in args)}\n{raw}".lower()
+            timed_out = _TIMEOUT_MARKER in haystack
+        #: True when this failure is a TIMEOUT (-> funnel ``timed_out``), False
+        #: when it is a generic unparseable/empty non-delivery (-> ``empty``).
+        self.timed_out = timed_out
 
 
 def parse_review_output(stdout: str, *, backend_name: str = "the agent") -> dict:
@@ -102,7 +119,8 @@ def parse_review_output(stdout: str, *, backend_name: str = "the agent") -> dict
             backend_name,
             raw,
         )
-        if _TIMEOUT_MARKER in raw.lower():
+        timed_out = _TIMEOUT_MARKER in raw.lower()
+        if timed_out:
             hint = (
                 f"{backend_name} timed out before returning a complete review — "
                 "try a faster model or a smaller diff"
@@ -113,8 +131,12 @@ def parse_review_output(stdout: str, *, backend_name: str = "the agent") -> dict
                 "been truncated) — try a faster model or a smaller diff"
             )
         # Attach the full raw so the service can SALVAGE it (#76); the message keeps
-        # only the snippet (the PR-surface / terminal budget).
-        raise BackendError(f"{hint}\nraw output: {snippet}", raw=raw) from exc
+        # only the snippet (the PR-surface / terminal budget). The STRUCTURED
+        # ``timed_out`` flag (not a string match) is what the service splits the
+        # funnel outcome on.
+        raise BackendError(
+            f"{hint}\nraw output: {snippet}", raw=raw, timed_out=timed_out
+        ) from exc
     # Parse OK. Log the full raw at DEBUG — the always-on audit trail (#75) of what
     # the agent actually emitted, durable in the file sink for every run.
     logger.debug(

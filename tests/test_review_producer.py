@@ -125,6 +125,29 @@ def test_agy_timeout_marker_settles_as_timeout_not_failure(_faked):
     assert "timed out" in str(exc.value).lower()
 
 
+def test_nonzero_exit_with_timeout_marker_in_stderr_is_structurally_timed_out(_faked):
+    # Regression (Copilot #194): a real timeout can exit NONZERO with the marker in
+    # *stderr*, not stdout. The human-facing message paraphrases the timeout and does
+    # NOT echo `_TIMEOUT_MARKER`, so a string-match on the message would misclassify it
+    # as `empty`. The producer must instead set the STRUCTURED `timed_out` flag so the
+    # service settles `timed_out`. (Before the fix, `_capture` raised with the flag
+    # auto-derived False -> the funnel closed `neutral` instead of `timed_out`.)
+    def launcher(cmd, *, cwd, env):
+        return LaunchResult(
+            returncode=1,
+            stdout="",
+            stderr="agy: timed out waiting for response",
+        )
+
+    with pytest.raises(BackendError) as exc:
+        producer.run_tree_review("agy", _ctx(), launcher=launcher)
+    assert exc.value.timed_out is True  # structured -> service maps to timed_out
+    # the marker is NOT in the (paraphrased) message — a string match would have failed:
+    from shipit.review.backends.base import _TIMEOUT_MARKER
+
+    assert _TIMEOUT_MARKER not in str(exc.value).lower()
+
+
 def test_unparseable_output_raises_backend_error_with_raw_for_salvage(_faked):
     raw = "here is some prose but no json at all"
 
@@ -134,6 +157,8 @@ def test_unparseable_output_raises_backend_error_with_raw_for_salvage(_faked):
     with pytest.raises(BackendError) as exc:
         producer.run_tree_review("codex", _ctx(), launcher=launcher)
     assert exc.value.raw == raw  # the #76 salvage still gets the raw content
+    # A non-timeout unparseable result is NOT a timeout -> the service settles `empty`.
+    assert exc.value.timed_out is False
 
 
 def test_dry_run_prints_argv_and_never_launches_or_clones(monkeypatch, capsys):

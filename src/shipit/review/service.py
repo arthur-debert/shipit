@@ -38,7 +38,7 @@ from collections.abc import Callable, Sequence
 
 from .. import gh
 from . import checkrun, post, producer
-from .backends.base import _TIMEOUT_MARKER, BackendError
+from .backends.base import BackendError
 from .diff import resolve_pr
 
 #: The review path's logger — a child of the package ``shipit`` logger. A local
@@ -141,11 +141,14 @@ def _generate_post_and_close(
             as_app=as_app,
         )
     except BackendError as exc:
-        # A backend that ran but produced no usable review: the agy timeout marker
-        # in its output means it TIMED OUT (-> timed_out); any other unparseable /
-        # empty output is the degraded "empty" non-delivery (-> failure, NOT
-        # success — distinct from a clean zero-findings review which posts).
-        outcome = "timed_out" if _TIMEOUT_MARKER in str(exc).lower() else "empty"
+        # A backend that ran but produced no usable review: a TIMEOUT means it
+        # settles ``timed_out``; any other unparseable / empty output is the
+        # degraded "empty" non-delivery (-> failure, NOT success — distinct from a
+        # clean zero-findings review which posts). We read the STRUCTURED
+        # ``exc.timed_out`` flag, NOT a string match on the message: a timeout
+        # whose signal lived in stderr (or whose message paraphrases the marker)
+        # is still classed correctly (the producer sets the flag explicitly).
+        outcome = "timed_out" if exc.timed_out else "empty"
         # SALVAGE (#76): the agent produced CONTENT but unparseable JSON — don't
         # drop it. Post the raw text as a single top-level comment so the human
         # still gets the feedback and the failure is debuggable from the PR. This is
