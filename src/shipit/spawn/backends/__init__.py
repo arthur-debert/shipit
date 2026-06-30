@@ -6,20 +6,23 @@ exist: :func:`supported_backends` derives the ``SUPPORTED_BACKENDS`` tuple the C
 uses *from the registered adapters* (ADR-0020 §Decision 2), so wiring a new backend is
 one registry entry, not a constant edited in two places.
 
-Only ``claude`` is wired today (adapter #0, ADR-0019). ``codex`` / ``antigravity`` land
-in WS02/WS03 from the WS00 spike's recorded findings — NOT guessed here.
+``claude`` (adapter #0, ADR-0019) and ``codex`` (WS02, ADR-0020 §codex) are wired today;
+``antigravity`` lands in WS03 from the WS00 spike's recorded findings — NOT guessed here.
 """
 
 from __future__ import annotations
 
 from .base import BackendAdapter
 from .claude import ClaudeAdapter
+from .codex import CodexAdapter
 
 #: The backend registry: ``--backend`` token → the (stateless, shared) adapter instance.
-#: WS02/WS03 add ``"codex"`` / ``"antigravity"`` entries; nothing else changes, because
-#: the CLI gate and the verb both read the registry, not a hand-maintained constant.
+#: WS03 adds the ``"antigravity"`` entry; nothing else changes, because the CLI gate and
+#: the verb both read the registry (not a hand-maintained constant), so registering an
+#: adapter here makes ``--backend <token>`` selectable automatically.
 _ADAPTERS: dict[str, BackendAdapter] = {
     ClaudeAdapter.name: ClaudeAdapter(),
+    CodexAdapter.name: CodexAdapter(),
 }
 
 
@@ -45,4 +48,10 @@ def resolve(backend: str) -> BackendAdapter:
     return _ADAPTERS[backend]
 
 
-__all__ = ["BackendAdapter", "ClaudeAdapter", "resolve", "supported_backends"]
+__all__ = [
+    "BackendAdapter",
+    "ClaudeAdapter",
+    "CodexAdapter",
+    "resolve",
+    "supported_backends",
+]
