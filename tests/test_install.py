@@ -622,6 +622,17 @@ def test_local_flag_commits_on_current_branch_without_push_or_pr(tmp_path, rec):
     assert "pr_create" not in rec.names()
 
 
+def test_local_flag_fails_in_detached_head(tmp_path, monkeypatch, rec):
+    # --local commits on the CURRENT branch; in detached HEAD there is none, so
+    # git_current_branch is None and install must fail cleanly (exit 1) without
+    # committing anything.
+    monkeypatch.setattr(gh, "git_current_branch", lambda *, cwd: None)
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    rc = install.run(str(tmp_path), local=True)
+    assert rc == 1
+    assert "commit" not in rec.names()
+
+
 def test_stale_manifest_keys_are_dropped(tmp_path, rec):
     # A prior manifest claims a unit shipit no longer manages.
     config.write_manifest(

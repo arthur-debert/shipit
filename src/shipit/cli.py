@@ -140,6 +140,8 @@ def install_cmd(path: str | None, push: bool, local: bool, dry_run: bool) -> Non
     ``--local`` commits the managed set on the current branch and stops (no push,
     no PR) — the mode Tree provisioning uses so creating a Tree never touches origin.
     """
+    if local and push:
+        raise click.UsageError("--local and --push are mutually exclusive.")
     rc = install.run(path, dry_run=dry_run, push=push, local=local)
     raise SystemExit(rc)
 
