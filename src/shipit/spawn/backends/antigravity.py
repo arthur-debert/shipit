@@ -3,9 +3,10 @@
 The non-Claude **write** adapter for the Antigravity CLI. ``agy`` ≡ ``antigravity`` is a
 WS00 spike finding (ADR-0020 §Decision-per-backend): there is **one** binary, ``agy``
 (v1.0.14 at probe time), under two names — the user-facing ``--backend`` token is
-``antigravity``, the binary it shells out to is ``agy``. This is the same CLI
-``shipit.review.backends.agy`` already drives for the review funnel; this adapter is its
-**spawn-Tree write** counterpart.
+``antigravity``, the binary it shells out to is ``agy``. This is the same CLI the
+review funnel now drives THROUGH this very adapter's reviewer posture
+(:mod:`shipit.review.producer`, WS04b — the old ``review/backends/agy.py`` wrapper is
+retired); this is its **spawn-Tree write** counterpart.
 
 Three of agy's launch facts are non-obvious, **probe-confirmed** spike findings a paper
 decision would have missed (do NOT "simplify" them away):
@@ -29,7 +30,7 @@ decision would have missed (do NOT "simplify" them away):
 - **The model must be pinned to a capable, non-agentic name.** ``agy`` silently resolves a
   bare ``pro`` to Gemini Flash, which in ``--print`` mode goes **agentic** (runs
   shell/build instead of answering). :data:`MODEL_ALIASES` pins ``pro`` →
-  ``Gemini 3.1 Pro (High)`` (mirrors :mod:`shipit.review.backends.agy`).
+  ``Gemini 3.1 Pro (High)``.
 
 Auth rides agy's Antigravity OAuth login (creds under ``~/.gemini/antigravity-cli`` +
 ``~/.antigravity``, inherited by the child). The adapter scrubs :data:`SCRUBBED_AUTH_ENV`
@@ -50,8 +51,8 @@ from pathlib import Path
 
 from .base import BackendAdapter
 
-#: Legacy review aliases → agy's verbatim model names (``agy models``), copied from
-#: :mod:`shipit.review.backends.agy`. The default ``pro`` MUST resolve to a capable,
+#: Legacy review aliases → agy's verbatim model names (``agy models``). The default
+#: ``pro`` MUST resolve to a capable,
 #: NON-agentic model: a bare ``pro`` silently resolves to Gemini Flash, which in
 #: ``--print`` goes agentic (runs shell/build instead of answering) and never returns —
 #: so ``pro`` is pinned to ``Gemini 3.1 Pro (High)``. Spaces/parens are safe: the
