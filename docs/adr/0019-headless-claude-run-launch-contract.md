@@ -2,8 +2,8 @@
 
 `shipit spawn subagent` launches a backend agent as a **child process rooted in the
 Tree**. For the `claude` backend, that child is the **`claude` CLI in headless print
-mode** — `claude -p "<task>" --agent <role> --permission-mode bypassPermissions
---output-format json` run as a subprocess with **`cwd=<Tree>`**, stdin from `/dev/null`,
+mode** — `claude -p "<task>" --agent <role> --permission-mode bypassPermissions --output-format json`
+run as a subprocess with **`cwd=<Tree>`**, stdin from `/dev/null`,
 and **`ANTHROPIC_API_KEY` scrubbed from the child env**. The role is conveyed to the
 harness via the native **`--agent <role>`** flag — not a custom marker — and the parent
 learns start/finish from the **process exit + the JSON result envelope**, never by
@@ -27,9 +27,9 @@ findings that a paper decision would have missed — exactly the spike's value.
 
 The `claude`-backend launch contract WS01 implements verbatim:
 
-1. **Invocation.** Subprocess of the `claude` CLI in print mode:
-   `claude -p "<task prompt>" --agent <role> --permission-mode bypassPermissions
-   [--tools "<allowlist>"] --output-format json`, with the subprocess **`cwd` set to the
+1. **Invocation.** Subprocess of the `claude` CLI in print mode —
+   `claude -p "<task prompt>" --agent <role> --permission-mode bypassPermissions [--tools "<allowlist>"] --output-format json`
+   — with the subprocess **`cwd` set to the
    Tree** and **stdin redirected from `/dev/null`** (a TTY-less child otherwise waits ~3 s
    for stdin and warns). No `--cwd` flag exists; rooting is the OS process cwd — which the
    probe confirmed lands writes in the Tree with **no leak to the parent checkout**, and
