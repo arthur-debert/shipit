@@ -7,8 +7,9 @@
 > recorded findings → torn down). **The WS00 spike (#181) has now run** against the real
 > binaries (`codex-cli 0.139.0`, `agy` v1.0.14) and filled §Decision-per-backend below; the
 > per-backend **adapter code** still lands in WS02 (`codex`) / WS03 (`antigravity`) from these
-> recorded findings. §Open decisions records the spike's reviewer-path recommendation for
-> maintainer ratification at the WS00 gate. Until the adapters land, only `claude` is wired.
+> recorded findings. The reviewer-path reconciliation is **DECIDED** (maintainer-ratified at the
+> WS00 gate — REPLACE outright; see §Reviewer-path reconciliation). Until the adapters land, only
+> `claude` is wired.
 >
 > **Extends ADR-0019** (the `claude`-only launch contract) and **refines ADR-0017** (the
 > `--backend claude|codex|antigravity` surface it named but left at one backend).
@@ -197,7 +198,7 @@ explains the funnel's intermittent agy failure — see §Open decisions.**
   `Gemini 3.1 Pro (High)`). **stdin `/dev/null`** is mandatory (see the universal finding — this
   is the agy failure root cause). No background mode adopted.
 
-## Open decisions (WS00 recommendation, for maintainer ratification at the WS00 gate)
+## Reviewer-path reconciliation — DECIDED at the WS00 gate (maintainer-ratified)
 
 **Reviewer-path reconciliation.** shipit has two ways to get a codex/agy review on a PR: the
 existing **`-e review` check-runs funnel** (ADR-0005/0006; front-loads the diff into the prompt)
@@ -206,17 +207,20 @@ shared read-only Tree at the correct head and tells it to fetch the scoped diff 
 `reviewer_task()` in `src/shipit/spawn/launch.py` already does this). `agy` ≡ `antigravity` is
 **confirmed** (one adapter — see §Decision-per-backend).
 
-### Recommendation: **REPLACE** — consolidate on the spawn-Tree path as the single reviewer producer
+### Decision: **REPLACE — outright.** The spawn-Tree path is the single reviewer producer; the funnel is retired
 
-End-state: the spawn-Tree reviewer becomes the one producer feeding the readiness gate; the
-funnel's front-loading is retired. **But the rationale is architectural, not the robustness story
-the funnel's symptoms first suggested — the spike falsified that story, and honesty about it
-changes the migration plan.** Recommend "replace" on these grounds:
+The maintainer **ratified REPLACE outright** at the WS00 gate. End-state: the spawn-Tree reviewer
+is the one producer feeding the readiness check-run, and the funnel's front-loading is **retired
+as WS04's deliverable — not kept as a fallback**. There is **no permanent "alongside" phase**: a
+dual path was explicitly rejected as a crutch (problems found midway → revert to the funnel → the
+spawn path never gets finished → the funnel eventually breaks → nothing works). The grounds for
+replace are **architectural** — the spike falsified the robustness rationale the funnel's symptoms
+first suggested (see §"The falsified hypothesis" below), so the decision rests on these:
 
 1. **Tree fidelity at the correct head.** ADR-0018 gives a real shared read-only checkout at the
    PR's true head. The reviewer sees the *whole codebase*, not a context-free diff, and walks it
    lazily — codex tree-rooted returned **richer, code-located findings** (absolute path + line
-   range, cross-referenced against un-changed code) than a front-loaded diff can support.
+   range, cross-referenced against unchanged code) than a front-loaded diff can support.
 2. **Scoped diff without guessing the base.** The reviewer runs **`gh pr diff`** (which resolves
    the PR's real base/head — epic branch *or* `main`; do **not** assume `main`) inside the Tree,
    instead of the funnel front-loading a pre-computed diff. One reviewer prompt, no schema/diff
@@ -224,11 +228,11 @@ changes the migration plan.** Recommend "replace" on these grounds:
 3. **Uniformity.** One reviewer mechanism across claude/codex/antigravity over one Tree substrate,
    rather than a second, divergent review path.
 
-### The falsified hypothesis (this is the load-bearing spike result — read before ratifying)
+### The falsified hypothesis (the load-bearing spike result behind the architectural grounds)
 
 The maintainer's leading hypothesis was that **front-loading a large diff** causes agy's
-intermittent blank-text / truncated-JSON failures (`_TIMEOUT_MARKER = "timed out waiting for
-response"` in `src/shipit/review/backends/agy.py`), and that tree-rooting would fix it. The spike
+intermittent blank-text / truncated-JSON failures (the `_TIMEOUT_MARKER = "timed out waiting for
+response"` guard in `src/shipit/review/backends/base.py`), and that tree-rooting would fix it. The spike
 ran the A/B and **the evidence does not support that mechanism**:
 
 - agy front-loaded a **2804-line** diff completed in **35 s** with valid JSON **once stdin was
@@ -243,13 +247,14 @@ ran the A/B and **the evidence does not support that mechanism**:
   parent's stdin** (`proc.run` in `src/shipit/proc.py` passes `input` straight through and never
   sets `stdin=DEVNULL`). When shipit's own stdin is an open-but-idle pipe (CI, some spawn
   contexts), agy blocks → the exact intermittent blank/timeout failure. This is a **one-line fix**
-  (`stdin=subprocess.DEVNULL` in `proc.run`, or `input=""` for agy) **independent of the
-  replace decision** — recommend landing it regardless, now.
+  (`stdin=subprocess.DEVNULL` in `proc.run` when `input is None`, or `input=""` for agy),
+  **independent of the replace decision**. **Ratified to fold into the TRE05 convergence
+  workstream** — it ships inside this epic, not as a standalone patch to `main`.
 
-**Implication for ratification:** "replace" is worth doing for Tree-fidelity + scoped-diff +
-uniformity (grounds 1–3), **not** because it is the only cure for agy reliability — that cure is
-the cheap stdin fix above and applies whichever path wins. Do not let the replace work *gate* the
-agy reliability fix.
+**Implication of the decision:** "replace" stands on Tree-fidelity + scoped-diff + uniformity
+(grounds 1–3), **not** on being the only cure for agy reliability — that cure is the cheap stdin
+fix above, which is independent of the replace work and lands in TRE05 convergence regardless of
+the producer that wins.
 
 ### Migration cost — what the funnel does that the spawn path MUST preserve or consciously drop
 
@@ -271,11 +276,23 @@ WS04 cannot "replace" until these funnel responsibilities are accounted for:
 - **Dry-run honesty.** The funnel's dry-run/no-op path (don't bill a model, report what *would*
   run) must survive into the spawn path.
 
-Recommended sequencing: **(0)** land the `proc.run` stdin fix now (un-gated); **(1)** WS04 builds
-the spawn reviewer feeding the existing readiness check-run, runs it **alongside** the funnel
-behind the `reviewers:` config for one cycle to confirm parity; **(2)** retire the funnel's
-front-loading once parity holds. The maintainer ratifies "replace vs alongside-then-replace" at
-the WS00 gate.
+### De-risking — validation, not a parallel production cycle
+
+Confidence in the cutover comes from **real runs on the canary repo, not from running both
+producers in production** (the rejected alongside path). WS04 de-risks the outright replace with:
+
+- **(a) Unit tests on the seam inputs.** Thorough tests of the **argv + env construction** per
+  backend — `build_command()` (the headless argv incl. the sandbox/permission posture and stdin
+  contract) and `child_env()` (the auth-var scrub) — and the role/task prompt assembly. These are
+  the cheap, high-value seam inputs; assert them exhaustively.
+- **(b) Real-work validation on the canary.** Actually run the spawn codex/agy reviewers across
+  **many real scenarios in the shipit repo itself** (the maintainer's canary) before the funnel is
+  retired — real PRs, real diffs, real findings — and confirm parity with what the funnel produced.
+
+Only once (a) + (b) hold does WS04 retire the funnel's front-loading. The `proc.run` stdin fix
+ships in TRE05 convergence (above) independently. The migration-cost checklist above is still WS04's
+required scope — the only thing the ratification drops is any permanent "run both in production"
+step.
 
 ## Considered options
 
