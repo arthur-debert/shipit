@@ -16,7 +16,6 @@ lives in :mod:`shipit.tree`.
 from __future__ import annotations
 
 import json
-import shutil
 import sys
 import time
 from collections.abc import Callable
@@ -30,6 +29,7 @@ from ..tree import cleanup, layout, registry
 from ..tree.cleanup import Cleanup
 from ..tree.create import Tree, create, new_agent_hash
 from ..tree.layout import TreeSpec
+from ..tree.readonly import remove_tree
 from ..tree.registry import TreeRecord
 
 
@@ -405,7 +405,7 @@ def run_remove(
         print(f"tree remove: {block}", file=sys.stderr)
         return 1
     try:
-        shutil.rmtree(record.path)
+        remove_tree(record.path)
     except OSError as exc:
         print(f"tree remove: could not remove {record.path}: {exc}", file=sys.stderr)
         return 1
@@ -616,7 +616,7 @@ def _emit_gc(decision: Cleanup, *, total: int, unknown: int) -> None:
     removed = 0
     for record in decision.removable:
         try:
-            shutil.rmtree(record.path)
+            remove_tree(record.path)
         except OSError as exc:
             print(f"FAILED  {record.path}: {exc}", file=sys.stderr)
             continue

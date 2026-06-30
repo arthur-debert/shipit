@@ -15,6 +15,7 @@ real-git smoke proves the checkout + read-only chmod end to end.
 
 from __future__ import annotations
 
+import os
 import stat
 import subprocess
 from pathlib import Path
@@ -24,8 +25,10 @@ import pytest
 from shipit import gh
 from shipit.tree.readonly import (
     chmod_readonly,
+    chmod_writable,
     create_readonly,
     readonly_plan,
+    remove_tree,
 )
 
 
@@ -40,8 +43,10 @@ def test_readonly_plan_is_shared_per_repo_branch_with_no_hash(tmp_path):
     two = readonly_plan(org="acme", repo="widget", branch="TRE03/WS03", root=root)
 
     assert one == two
-    # `review` kind segment + a sanitized, hash-free leaf (slashes → '-', lowercased).
-    assert one.dir == root / "acme" / "widget" / "review" / "tre03-ws03"
+    # `review` kind segment + a leaf of the sanitized branch (slashes → '-', lowercased)
+    # plus a stable branch-name hash disambiguator — but NO per-Run agent hash.
+    assert one.dir.parent == root / "acme" / "widget" / "review"
+    assert one.dir.name.startswith("tre03-ws03-")
     # The branch is kept VERBATIM for the checkout (the real remote branch name).
     assert one.branch == "TRE03/WS03"
 
@@ -51,6 +56,20 @@ def test_readonly_plan_distinct_branches_get_distinct_dirs(tmp_path):
     a = readonly_plan(org="acme", repo="widget", branch="TRE03/WS03", root=root)
     b = readonly_plan(org="acme", repo="widget", branch="TRE03/WS04", root=root)
     assert a.dir != b.dir
+
+
+def test_readonly_plan_slug_colliding_branches_get_distinct_dirs(tmp_path):
+    # Sanitization is lossy: `feat/a-b` and `feat/a/b` both slug to `feat-a-b`. The
+    # branch-name hash disambiguator must keep them in DISTINCT shared slots so one PR's
+    # reviewer never reuses another PR's checkout — while the real branch (kept verbatim
+    # for checkout) is preserved on each.
+    root = tmp_path / "trees"
+    a = readonly_plan(org="acme", repo="widget", branch="feat/a-b", root=root)
+    b = readonly_plan(org="acme", repo="widget", branch="feat/a/b", root=root)
+
+    assert a.dir.parent == b.dir.parent  # same review/ kind dir
+    assert a.dir != b.dir  # ...but different leaves (the hash differs)
+    assert a.branch == "feat/a-b" and b.branch == "feat/a/b"  # verbatim for checkout
 
 
 @pytest.mark.parametrize("branch", ["", "   ", "///", "."])
@@ -78,8 +97,71 @@ def test_chmod_readonly_strips_write_bits_from_files_but_not_git(tmp_path):
     # A working file lost every write bit (owner/group/other).
     assert not (work.stat().st_mode & 0o222)
     assert work.stat().st_mode & stat.S_IRUSR  # still readable
+    # The working DIR is read-only too — on Unix, deleting/creating an entry is governed
+    # by the directory mode, so a writable dir would defeat the guard.
+    assert not ((tmp_path / "src").stat().st_mode & 0o222)
+    assert (tmp_path / "src").stat().st_mode & stat.S_IXUSR  # still traversable
+    # The Tree root itself is protected (no top-level file creation).
+    assert not (tmp_path.stat().st_mode & 0o222)
     # The repo database under .git is untouched (git still needs it writable).
     assert gitfile.stat().st_mode & stat.S_IWUSR
+    assert gitdir.stat().st_mode & stat.S_IWUSR
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlink semantics")
+def test_chmod_readonly_skips_symlinks_and_does_not_follow_them(tmp_path):
+    # `stat`/`chmod` follow symlinks, so a link in the checkout could otherwise
+    # re-permission a target OUTSIDE the Tree; a broken link would raise. The guard must
+    # skip symlinks entirely, leaving both the link and any target untouched.
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("external\n")
+    outside.chmod(0o644)
+    (tree / "good").symlink_to(outside)  # link to a real external target
+    (tree / "broken").symlink_to(tree / "nope")  # dangling link
+
+    chmod_readonly(tree)  # must not raise on the broken link
+
+    # The external target keeps its write bit — the guard did not follow the link.
+    assert outside.stat().st_mode & 0o222
+    # The links themselves are still links (untouched), the broken one still dangling.
+    assert (tree / "good").is_symlink() and (tree / "broken").is_symlink()
+    remove_tree(tree)  # tidy the read-only tree (and exercise the reclaim path)
+
+
+def test_remove_tree_reclaims_a_read_only_checkout(tmp_path):
+    # The guard makes dirs read-only, which would make a plain shutil.rmtree fail
+    # (deleting an entry needs a writable parent dir). remove_tree must restore perms
+    # and reclaim the Tree completely.
+    tree = tmp_path / "tree"
+    (tree / "pkg").mkdir(parents=True)
+    (tree / "pkg" / "mod.py").write_text("x = 1\n")
+    (tree / "top.txt").write_text("hi\n")
+    chmod_readonly(tree)
+    assert not (tree / "pkg").stat().st_mode & 0o222  # precondition: read-only dir
+
+    remove_tree(tree)
+
+    assert not tree.exists()
+
+
+def test_remove_tree_is_a_noop_on_a_missing_path(tmp_path):
+    remove_tree(tmp_path / "does-not-exist")  # must not raise
+
+
+def test_chmod_writable_restores_what_chmod_readonly_cleared(tmp_path):
+    tree = tmp_path / "tree"
+    (tree / "pkg").mkdir(parents=True)
+    f = tree / "pkg" / "mod.py"
+    f.write_text("x = 1\n")
+    chmod_readonly(tree)
+
+    chmod_writable(tree)
+
+    assert f.stat().st_mode & stat.S_IWUSR  # file writable again
+    assert (tree / "pkg").stat().st_mode & stat.S_IWUSR  # dir writable again
+    assert tree.stat().st_mode & stat.S_IWUSR  # root writable again
 
 
 # --- provisioning: the read-only variant (mocked git boundary) ---------------
@@ -91,7 +173,7 @@ def _mock_git_boundary(monkeypatch, *, files):
     Returns the call-count dict so a test can assert the clone ran exactly once
     (and is REUSED, not repeated, on a second create).
     """
-    counts = {"clone": 0, "fetch": 0, "checkout": 0}
+    counts = {"clone": 0, "fetch": 0, "checkout": 0, "reset": 0}
 
     def fake_clone(url, dest, *, reference):
         counts["clone"] += 1
@@ -109,6 +191,11 @@ def _mock_git_boundary(monkeypatch, *, files):
         gh,
         "git_checkout",
         lambda *a, **k: counts.__setitem__("checkout", counts["checkout"] + 1),
+    )
+    monkeypatch.setattr(
+        gh,
+        "git_reset_hard",
+        lambda *a, **k: counts.__setitem__("reset", counts["reset"] + 1),
     )
     return counts
 
@@ -136,10 +223,13 @@ def test_create_readonly_clones_checks_out_and_chmods_no_provisioning(
     assert Path(tree.path) == plan.dir
     assert tree.branch == "feat/x"
     assert tree.base == "origin/feat/x"
-    # clone + fetch + plain checkout of the EXISTING branch, each exactly once.
-    assert counts == {"clone": 1, "fetch": 1, "checkout": 1}
+    # clone + fetch + plain checkout of the EXISTING branch, each exactly once; a FRESH
+    # create does no reset (that is the reuse-refresh path only).
+    assert counts == {"clone": 1, "fetch": 1, "checkout": 1, "reset": 0}
     # The working file is left read-only (the ADR-0018 guardrail).
     assert not ((plan.dir / "README.md").stat().st_mode & 0o222)
+    # The temp clone path was renamed into the shared leaf — no leftover sibling.
+    assert not plan.dir.with_name(f"{plan.dir.name}.tmp-{os.getpid()}").exists()
 
 
 def test_create_readonly_skips_treeinclude(tmp_path, monkeypatch):
@@ -172,6 +262,29 @@ def test_create_readonly_second_reviewer_reuses_the_clone(tmp_path, monkeypatch)
 
     assert first.path == second.path
     assert counts["clone"] == 1  # the second reviewer did NOT re-clone
+
+
+def test_create_readonly_reuse_refreshes_to_current_head_and_re_guards(
+    tmp_path, monkeypatch
+):
+    # On reuse the shared clone must be REFRESHED to the current remote head (the PR may
+    # have advanced) and the read-only guard re-applied — never served stale. The refresh
+    # is fetch + checkout + reset --hard origin/<branch>.
+    plan = readonly_plan(
+        org="acme", repo="widget", branch="feat/x", root=tmp_path / "trees"
+    )
+    counts = _mock_git_boundary(monkeypatch, files={"README.md": "hi\n"})
+
+    create_readonly(plan, source_repo="/ref", github_url="url")  # first reviewer
+    work = plan.dir / "README.md"
+    # Simulate a co-tenant having relaxed perms; the re-guard must restore read-only.
+    work.chmod(0o644)
+
+    create_readonly(plan, source_repo="/ref", github_url="url")  # second reviewer
+
+    assert counts["clone"] == 1  # still the one shared clone
+    assert counts["reset"] == 1  # ...but reset --hard to the current head on reuse
+    assert not (work.stat().st_mode & 0o222)  # read-only guard re-applied
 
 
 def test_create_readonly_rolls_back_partial_tree_on_failure(tmp_path, monkeypatch):

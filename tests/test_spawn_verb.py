@@ -518,8 +518,9 @@ def test_run_subagent_reviewer_provisions_readonly_tree_and_posts_review(
     # The read-only plan is shared per (repo, branch): the WS PR head, no agent hash.
     plan = captured["plan"]
     assert plan.branch == "TRE03/WS03"
-    assert plan.dir.name == "tre03-ws03"
-    assert "review" in plan.dir.parts
+    # The leaf is the sanitized branch plus a stable branch-name hash disambiguator.
+    assert plan.dir.name.startswith("tre03-ws03-")
+    assert plan.dir.parent.name == "review"
     assert captured["source_repo"] == str(parent)
     # Launch contract for a reviewer: cwd = the read-only Tree, --agent reviewer, the
     # read-only --tools allow-list (no Write), key scrubbed.

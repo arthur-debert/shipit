@@ -230,6 +230,20 @@ def test_review_tree_defaults_to_no_live_reviewer():
     assert len(decision.removable) == 1
 
 
+def test_write_tree_under_a_review_named_org_is_not_a_review_tree():
+    # `_is_review_tree` keys off the leaf's PARENT segment, not "review anywhere in the
+    # path": a write Tree whose org/repo happens to be named "review" must still take the
+    # write ladder. Here a dirty + merged write Tree must be KEPT (dirty protects it); if
+    # it were misclassified as a review Tree the merge would make it removable.
+    path = "/trees/review/widget/branches/feat-x-deadbeef"
+    record = _record(path=path, dirty=True)
+    decision = classify(
+        [record], now=NOW, pr_states={path: "MERGED"}, max_age_seconds=THRESHOLD
+    )
+    assert [r.path for r in decision.keep] == [path]
+    assert not decision.removable
+
+
 # --- parse_duration: the pure --threshold helper -------------------------------
 
 # (input, expected seconds) — one row per accepted shape. Each unit and a couple of

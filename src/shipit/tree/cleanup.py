@@ -124,11 +124,17 @@ def _is_review_tree(path: str) -> bool:
     """``True`` when ``path`` is a shared read-only (reviewer) Tree.
 
     Keyed off the :data:`~shipit.tree.layout.REVIEW_KIND` dir segment the read-only
-    planner stamps (``…/<org>/<repo>/review/<branch>``), which ADR-0018 makes the
-    naming source of truth for the mode — there is no manifest, so the path IS the
-    signal, exactly as the rest of the registry reads state off disk.
+    planner stamps (``…/<org>/<repo>/review/<leaf>``), which ADR-0018 makes the naming
+    source of truth for the mode — there is no manifest, so the path IS the signal,
+    exactly as the rest of the registry reads state off disk.
+
+    The kind is matched as the leaf's PARENT segment specifically, not "anywhere in the
+    path" — a substring/``in parts`` test would misclassify a write Tree whose org, repo,
+    or central-root happens to contain a ``review`` segment, bypassing the dirty/ahead/age
+    safety ladder. The layout pins the kind to exactly ``<leaf>``'s parent, so that is
+    the only segment checked.
     """
-    return REVIEW_KIND in Path(path).parts
+    return Path(path).parent.name == REVIEW_KIND
 
 
 def _is_unknown(state: str | None) -> bool:

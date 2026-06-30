@@ -63,6 +63,15 @@ def test_reviewer_task_names_the_branch_and_posts_a_review():
     assert "READ-ONLY" in task
 
 
+def test_reviewer_task_reads_the_diff_with_gh_pr_diff_not_a_hardcoded_base():
+    # The diff instruction must use `gh pr diff` (the PR's actual base/head), NOT a baked
+    # `git diff origin/main...HEAD` — an epic/umbrella PR has a non-main base, so a
+    # hardcoded base would compute the wrong range.
+    task = launch.reviewer_task("TRE03/WS03")
+    assert "gh pr diff" in task
+    assert "origin/main" not in task
+
+
 def test_child_env_scrubs_anthropic_api_key():
     parent = {"PATH": "/bin", "ANTHROPIC_API_KEY": "stale-key", "HOME": "/home/a"}
 
