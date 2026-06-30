@@ -18,6 +18,7 @@ from .verbs import gh_setup, install, lint, logs, verify_apps
 from .verbs.eval import eval_group
 from .verbs.hook import hook as hook_group
 from .verbs.pr import pr as pr_group
+from .verbs.spawn import spawn as spawn_group
 from .verbs.tree import tree as tree_group
 
 
@@ -205,6 +206,10 @@ root.add_command(eval_group)
 # The nested `tree` group (TRE01) — isolated Trees: independent dissociated
 # clones a write-session works in (ADR-0014). Attached like `pr`.
 root.add_command(tree_group)
+
+# The nested `spawn` group (TRE03) — shipit-owned subagent spawning: create a
+# write Tree and launch a backend-agent Run rooted in it (ADR-0017/0019).
+root.add_command(spawn_group)
 
 
 def main(argv: list[str] | None = None) -> int:
