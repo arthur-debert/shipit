@@ -80,7 +80,7 @@ silently rot.
 ```sh
 pixi run -e dogfood verify-spawn \
   --scratch ~/h/scratch/shipit \
-  --repo shipit \
+  --repo arthur-debert/shipit \
   --epic TRE03 \
   --ws 5 \
   --issue 159
@@ -90,7 +90,7 @@ or via env (same effect):
 
 ```sh
 SHIPIT_DOGFOOD_SCRATCH=~/h/scratch/shipit \
-SHIPIT_DOGFOOD_REPO=shipit \
+SHIPIT_DOGFOOD_REPO=arthur-debert/shipit \
 SHIPIT_DOGFOOD_EPIC=TRE03 \
 SHIPIT_DOGFOOD_WS=5 \
 SHIPIT_DOGFOOD_ISSUE=159 \

@@ -213,12 +213,19 @@ def assert_distinct_from_scratch(
 def assert_readonly_worktree(
     report: Report, tree_path: str | None, *, label: str
 ) -> None:
-    """Read-only-Tree invariant (ADR-0018): **no working file is writable**, while
-    ``.git`` **stays writable** (git's own reads need it).
+    """Read-only-Tree invariant (ADR-0018): **nothing in the working tree is
+    writable** — not the files, not the directories — while ``.git`` **stays
+    writable** (git's own reads need it).
 
     Walks the working tree (skipping ``.git`` and symlinks) and asserts every file
-    has its write bits cleared (:func:`shipit.tree.readonly.chmod_readonly`'s
-    guardrail), then asserts ``.git`` itself is still a writable directory.
+    AND every directory (the Tree root included) has its write bits cleared. A
+    writable directory is a real hole, not a nit: on Unix the right to create or
+    delete an entry is governed by the *containing* directory's mode, so a reviewer
+    with ``Bash`` could add files even with every file read-only — exactly the bits
+    :func:`shipit.tree.readonly.chmod_readonly` clears. It then actively attempts to
+    create a file in the working tree and requires that write to FAIL (the guardrail
+    proven by behaviour, not just bits), and finally asserts ``.git`` itself is still
+    a writable directory.
     """
     if not _has_path(report, tree_path, label):
         return
@@ -228,17 +235,32 @@ def assert_readonly_worktree(
     for dirpath, dirnames, filenames in os.walk(root):
         if ".git" in dirnames:
             dirnames.remove(".git")
-        for name in filenames:
-            fp = Path(dirpath) / name
-            if fp.is_symlink():
+        # ``os.walk`` visits the Tree root and then every surviving subdir as a
+        # ``dirpath`` exactly once, so checking ``dirpath`` each pass covers every
+        # directory; ``filenames`` covers the files in it.
+        for entry in (Path(dirpath), *(Path(dirpath) / name for name in filenames)):
+            if entry.is_symlink():
                 continue
             checked += 1
-            if fp.stat().st_mode & 0o222:
-                writable.append(str(fp))
+            if entry.stat().st_mode & 0o222:
+                writable.append(str(entry))
     report.record(
-        f"{label}: read-only Tree has no writable working file",
+        f"{label}: read-only Tree has no writable working file or directory",
         checked > 0 and not writable,
         f"checked={checked} writable={writable[:3]}",
+    )
+    probe = root / ".shipit-dogfood-write-probe"
+    write_failed = False
+    try:
+        probe.write_text("probe")
+    except OSError:
+        write_failed = True
+    else:
+        probe.unlink()  # it must NOT have succeeded; clean up if the guardrail leaked
+    report.record(
+        f"{label}: read-only Tree refuses a new file (an actual write fails)",
+        write_failed,
+        f"probe={probe}",
     )
     git = root / ".git"
     report.record(
@@ -394,6 +416,26 @@ def _pr_reviews(repo: str, pr: int) -> list[dict]:
     return [r for r in obj if isinstance(r, dict)] if isinstance(obj, list) else []
 
 
+def _resolve_repo_slug(repo: str, *, scratch: str) -> str:
+    """Resolve the spawn ``--repo`` value to a canonical GitHub ``owner/name`` for the
+    REST seams.
+
+    ``--repo`` accepts a bare repo *code* (e.g. ``shipit``) because ``shipit spawn
+    subagent`` resolves identity from the ambient (scratch) checkout and uses
+    ``--repo`` only as a wrong-checkout guard — but the ``/repos/{owner}/{name}/...``
+    endpoints :func:`_open_pr_heads` and :func:`_pr_reviews` hit require the full
+    slug, so passing the documented ``shipit`` straight through would request
+    ``/repos/shipit/pulls`` and misreport the origin-side-effect / review checks.
+    The spawn target IS the scratch checkout's repo (the verb refuses any other), so a
+    slashless code resolves to the scratch checkout's ``owner/name``
+    (:func:`shipit.gh.current_repo`); a value already in ``owner/name`` form is
+    normalised to its canonical slug (:func:`shipit.gh.repo_canonical`).
+    """
+    if "/" in repo:
+        return gh.repo_canonical(repo)
+    return gh.current_repo(cwd=scratch)
+
+
 # --------------------------------------------------------------------------
 # Orchestration — drives the live scenarios through the seams above and the pure
 # assertions, accumulating one Report. Each scenario degrades to recorded FAILs
@@ -479,13 +521,14 @@ def verify_write_run(report: Report, cfg: DogfoodConfig) -> dict | None:
         ok, detail = _pixi_runs(tree_path)
         report.record("pixi runs inside the write Tree", ok, detail)
 
+    dirty = _scratch_dirty(cfg.scratch)
     report.record(
         "no cwd leak: scratch checkout stayed clean",
-        _scratch_dirty(cfg.scratch) == "",
-        "dirty" if _scratch_dirty(cfg.scratch) else "clean",
+        dirty == "",
+        "dirty" if dirty else "clean",
     )
 
-    heads = _open_pr_heads(cfg.repo)
+    heads = _open_pr_heads(_resolve_repo_slug(cfg.repo, scratch=cfg.scratch))
     report.record(
         "no origin side effect: provisioning opened no shipit/install PR",
         "shipit/install" not in heads,
@@ -503,7 +546,9 @@ def verify_reviewer_run(
     the spawn exited 0 and emitted a SPAWNED summary with NO PR linkage (a reviewer
     reports through the PR); the isolation invariants hold; the Tree is genuinely
     read-only; a SECOND reviewer spawn REUSES the same Tree (shared per
-    ``(repo, branch)``, ADR-0018); and a review actually landed on the write Run's PR.
+    ``(repo, branch)``, ADR-0018); and a NEW review actually landed on the write Run's
+    PR — counted as a delta against the reviews present BEFORE this spawn, so a
+    pre-existing review can never make the check pass on its own.
     """
     branch = f"{cfg.epic}/WS{cfg.ws:02d}"
     argv = [
@@ -518,6 +563,15 @@ def verify_reviewer_run(
         "--role",
         "reviewer",
     ]
+    # Snapshot the PR's reviews BEFORE spawning the reviewer, so the post-spawn check
+    # asserts a NEW review (a count delta), not merely "≥1 review exists".
+    have_pr = bool(write_payload) and write_payload.get("pr") is not None
+    repo_slug = _resolve_repo_slug(cfg.repo, scratch=cfg.scratch) if have_pr else ""
+    reviews_before = (
+        _pr_reviews(repo_slug, int(write_payload["pr"]))  # type: ignore[index]
+        if have_pr
+        else []
+    )
     result = _run_spawn(argv, cwd=cfg.scratch)
     if not report.record(
         "reviewer spawn exited 0",
@@ -564,16 +618,17 @@ def verify_reviewer_run(
         f"first={tree_path!r} second={second_payload.get('tree') if second_payload else None!r}",
     )
 
-    if write_payload and write_payload.get("pr") is not None:
-        reviews = _pr_reviews(cfg.repo, int(write_payload["pr"]))
+    if have_pr:
+        reviews_after = _pr_reviews(repo_slug, int(write_payload["pr"]))  # type: ignore[index]
         report.record(
-            "reviewer Run posted a review on the PR",
-            len(reviews) > 0,
-            f"pr=#{write_payload['pr']} reviews={len(reviews)}",
+            "reviewer Run posted a NEW review on the PR",
+            len(reviews_after) > len(reviews_before),
+            f"pr=#{write_payload['pr']} before={len(reviews_before)} "  # type: ignore[index]
+            f"after={len(reviews_after)}",
         )
     else:
         report.record(
-            "reviewer Run posted a review on the PR",
+            "reviewer Run posted a NEW review on the PR",
             False,
             "no write-Run PR to read reviews from (write scenario did not open one)",
         )
@@ -615,10 +670,13 @@ def verify_fail_closed(report: Report, cfg: DogfoodConfig) -> None:
         f"stderr={result.stderr.strip()[:200]}",
     )
     native = Path(cfg.scratch) / ".claude" / "worktrees"
+    # Guard ``iterdir`` with ``is_dir``: if ``.claude/worktrees`` exists as a FILE or a
+    # broken symlink it is not a worktree home, and ``iterdir`` would raise
+    # ``NotADirectoryError`` — the harness must report a clean PASS/FAIL, never crash.
     report.record(
         "fail-closed left NO native worktree fallback",
-        not native.exists() or not any(native.iterdir()),
-        f"{native} exists={native.exists()}",
+        not native.is_dir() or not any(native.iterdir()),
+        f"{native} exists={native.exists()} is_dir={native.is_dir()}",
     )
 
 
@@ -628,9 +686,11 @@ def verify(cfg: DogfoodConfig) -> Report:
 
     Resolves the central root (when ``cfg.central_root`` is empty), then runs the
     three scenarios in order: the write Run (whose PR the reviewer reviews), the
-    reviewer Run, and the forced fail-closed. It NEVER raises — every scenario
-    degrades to recorded FAILs — so the harness always prints a PASS/FAIL report and
-    exits 0/1.
+    reviewer Run, and the forced fail-closed. It NEVER raises — each scenario calls
+    live seams (``gh.rest``, git, pixi, the filesystem), and any one of them could
+    throw, so each scenario is run under :func:`_guard`, which turns an unexpected
+    exception into a recorded FAIL. The structured PASS/FAIL report is therefore
+    always produced, and the harness always exits 0/1.
     """
     central_root = cfg.central_root or str(layout.central_root())
     cfg = DogfoodConfig(
@@ -643,10 +703,36 @@ def verify(cfg: DogfoodConfig) -> Report:
         central_root=central_root,
     )
     report = Report()
-    write_payload = verify_write_run(report, cfg)
-    verify_reviewer_run(report, cfg, write_payload)
-    verify_fail_closed(report, cfg)
+    write_payload = _guard(
+        report, "write Run scenario", lambda: verify_write_run(report, cfg)
+    )
+    _guard(
+        report,
+        "reviewer Run scenario",
+        lambda: verify_reviewer_run(report, cfg, write_payload),
+    )
+    _guard(report, "fail-closed scenario", lambda: verify_fail_closed(report, cfg))
     return report
+
+
+def _guard(report: Report, scenario: str, fn):
+    """Run one scenario, converting an unexpected exception into a recorded FAIL.
+
+    The orchestration promises :func:`verify` never raises and always prints the
+    report, but the scenarios drive live seams that can throw. Wrapping each one here
+    means a thrown ``gh``/git/pixi/fs error becomes one failed :class:`Check` (carrying
+    the exception detail) on top of whatever checks the scenario already recorded
+    before it threw — so the structured report still prints. Returns the scenario's
+    value on success, or ``None`` when it threw (so a caller can keep chaining)."""
+    try:
+        return fn()
+    except Exception as exc:  # noqa: BLE001 — the whole point is to never let one escape
+        report.record(
+            f"{scenario} ran without an unexpected error",
+            False,
+            f"{type(exc).__name__}: {exc}",
+        )
+        return None
 
 
 def format_report(report: Report, *, cfg: DogfoodConfig) -> str:
@@ -696,7 +782,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--repo",
         default=os.environ.get("SHIPIT_DOGFOOD_REPO"),
-        help="org/repo (or just repo) the spawn targets (or SHIPIT_DOGFOOD_REPO).",
+        help="repo the spawn targets, as owner/name (e.g. arthur-debert/shipit) or a "
+        "bare repo code resolved against the scratch checkout (or SHIPIT_DOGFOOD_REPO).",
     )
     parser.add_argument(
         "--epic",

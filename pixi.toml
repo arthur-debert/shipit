@@ -100,7 +100,7 @@ shipit = { path = ".", editable = true }
 # claude Runs, opens real PRs), refuses to run without an explicit scratch checkout +
 # target. Run it deliberately, e.g.:
 #   pixi run -e dogfood verify-spawn --scratch ~/h/scratch/shipit \
-#     --repo shipit --epic TRE03 --ws 5 --issue 159
+#     --repo arthur-debert/shipit --epic TRE03 --ws 5 --issue 159
 verify-spawn = "python -m shipit.spawn.dogfood"
 
 [environments]

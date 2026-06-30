@@ -24,11 +24,25 @@ from pathlib import Path
 import pytest
 
 from shipit.spawn import dogfood
+from shipit.tree import readonly
 
 
 # --------------------------------------------------------------------------
 # Fixtures: plant a Tree-shaped directory on disk.
 # --------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _restore_tmp_path_perms(tmp_path):
+    """Some tests chmod a planted Tree read-only (directories included, mirroring
+    :func:`shipit.tree.readonly.chmod_readonly`). Restore write bits after the test so
+    pytest's ``tmp_path`` teardown can remove read-only dirs on every platform."""
+    yield
+    for p in (tmp_path, *tmp_path.rglob("*")):
+        try:
+            p.chmod(p.stat().st_mode | 0o222)
+        except OSError:
+            pass
 
 
 def _make_clone(root: Path, *, dissociated: bool = True) -> Path:
@@ -161,14 +175,16 @@ def test_distinct_from_scratch_fails_when_nested_in_scratch(tmp_path):
 # --------------------------------------------------------------------------
 
 
-def test_readonly_worktree_passes_when_files_are_readonly(tmp_path):
+def test_readonly_worktree_passes_when_tree_is_readonly(tmp_path):
     tree = _make_clone(tmp_path)
-    # strip write bits off the working file, keep .git writable
-    f = tree / "file.txt"
-    f.chmod(f.stat().st_mode & ~0o222)
+    # The real guardrail clears write bits on every working dir AND file (keeping
+    # .git writable) — use it so the fixture matches what a live Tree looks like.
+    readonly.chmod_readonly(str(tree))
     report = dogfood.Report()
     dogfood.assert_readonly_worktree(report, str(tree), label="t")
-    assert report.passed
+    assert report.passed, [c for c in report.checks if not c.passed]
+    names = " | ".join(c.name for c in report.checks)
+    assert "refuses a new file" in names
 
 
 def test_readonly_worktree_fails_when_a_file_is_writable(tmp_path):
@@ -178,6 +194,25 @@ def test_readonly_worktree_fails_when_a_file_is_writable(tmp_path):
     no_writable = next(c for c in report.checks if "no writable working file" in c.name)
     assert not no_writable.passed
     assert "file.txt" in no_writable.detail
+
+
+def test_readonly_worktree_fails_when_a_directory_is_writable(tmp_path):
+    """A Tree whose FILES are read-only but whose DIRECTORIES keep their write bits is
+    still mutable — a reviewer could create files in any writable dir — so the
+    read-only check (and the active write probe) must FAIL."""
+    tree = _make_clone(tmp_path)
+    # Clear write bits on the files only; leave the directories writable.
+    for p in tree.rglob("*"):
+        if p.is_file() and ".git" not in p.parts:
+            p.chmod(p.stat().st_mode & ~0o222)
+    report = dogfood.Report()
+    dogfood.assert_readonly_worktree(report, str(tree), label="t")
+    no_writable = next(
+        c for c in report.checks if "no writable working file or directory" in c.name
+    )
+    assert not no_writable.passed
+    probe = next(c for c in report.checks if "refuses a new file" in c.name)
+    assert not probe.passed
 
 
 # --------------------------------------------------------------------------
@@ -231,6 +266,7 @@ def _seam_a_write_tree(monkeypatch, tmp_path, *, branch="TRE03/WS05"):
     monkeypatch.setattr(dogfood, "_pixi_runs", lambda p: (True, "rc=0"))
     monkeypatch.setattr(dogfood, "_scratch_dirty", lambda p: "")
     monkeypatch.setattr(dogfood, "_open_pr_heads", lambda repo: [branch])
+    monkeypatch.setattr(dogfood, "_resolve_repo_slug", lambda repo, *, scratch: repo)
     cfg = dogfood.DogfoodConfig(
         scratch=str(scratch),
         repo="acme/widget",
@@ -320,6 +356,7 @@ def test_verify_write_run_fails_on_non_draft_pr(tmp_path, monkeypatch):
     monkeypatch.setattr(dogfood, "_pixi_runs", lambda p: (True, ""))
     monkeypatch.setattr(dogfood, "_scratch_dirty", lambda p: "")
     monkeypatch.setattr(dogfood, "_open_pr_heads", lambda repo: [])
+    monkeypatch.setattr(dogfood, "_resolve_repo_slug", lambda repo, *, scratch: repo)
     cfg = dogfood.DogfoodConfig(
         scratch=str(scratch),
         repo="acme/widget",
@@ -342,9 +379,9 @@ def test_verify_write_run_fails_on_non_draft_pr(tmp_path, monkeypatch):
 def _seam_a_reviewer_tree(monkeypatch, tmp_path, *, branch="TRE03/WS05"):
     review_tree = tmp_path / "org" / "repo" / "review" / "tre03-ws05-abcd1234"
     (review_tree / ".git" / "objects" / "info").mkdir(parents=True)
-    f = review_tree / "file.txt"
-    f.write_text("code")
-    f.chmod(f.stat().st_mode & ~0o222)  # read-only working file
+    (review_tree / "file.txt").write_text("code")
+    # genuinely read-only working tree (dirs + files, .git left writable)
+    readonly.chmod_readonly(str(review_tree))
     scratch = tmp_path / "scratch"
     scratch.mkdir()
     payload = {
@@ -360,9 +397,15 @@ def _seam_a_reviewer_tree(monkeypatch, tmp_path, *, branch="TRE03/WS05"):
         "_run_spawn",
         lambda a, *, cwd, env=None: dogfood.SpawnInvocation(0, out, ""),
     )
-    monkeypatch.setattr(
-        dogfood, "_pr_reviews", lambda repo, pr: [{"id": 1, "state": "COMMENTED"}]
-    )
+    # The reviewer-review check is a DELTA: no reviews before the spawn, one after.
+    review_calls = {"n": 0}
+
+    def _pr_reviews(repo, pr):
+        review_calls["n"] += 1
+        return [] if review_calls["n"] == 1 else [{"id": 1, "state": "COMMENTED"}]
+
+    monkeypatch.setattr(dogfood, "_pr_reviews", _pr_reviews)
+    monkeypatch.setattr(dogfood, "_resolve_repo_slug", lambda repo, *, scratch: repo)
     cfg = dogfood.DogfoodConfig(
         scratch=str(scratch),
         repo="acme/widget",
@@ -383,7 +426,7 @@ def test_verify_reviewer_run_passes_on_healthy_seams(tmp_path, monkeypatch):
     assert "no PR linkage" in names
     assert "shared per (repo,branch)" in names
     assert "read-only Tree has no writable working file" in names
-    assert "posted a review" in names
+    assert "posted a NEW review" in names
 
 
 def test_verify_reviewer_run_detects_unshared_tree(tmp_path, monkeypatch):
@@ -405,12 +448,15 @@ def test_verify_reviewer_run_detects_unshared_tree(tmp_path, monkeypatch):
     assert not shared.passed
 
 
-def test_verify_reviewer_run_fails_when_no_review_posted(tmp_path, monkeypatch):
+def test_verify_reviewer_run_fails_when_no_new_review_posted(tmp_path, monkeypatch):
+    """A PR whose review count does not GROW across the spawn — even with a
+    pre-existing review present both before and after — FAILS the delta check."""
     cfg, _tree, _payload = _seam_a_reviewer_tree(monkeypatch, tmp_path)
-    monkeypatch.setattr(dogfood, "_pr_reviews", lambda repo, pr: [])
+    # A stale review exists before AND after the spawn → zero delta → must FAIL.
+    monkeypatch.setattr(dogfood, "_pr_reviews", lambda repo, pr: [{"id": 7}])
     report = dogfood.Report()
     dogfood.verify_reviewer_run(report, cfg, {"pr": 42})
-    posted = next(c for c in report.checks if "posted a review" in c.name)
+    posted = next(c for c in report.checks if "posted a NEW review" in c.name)
     assert not posted.passed
 
 
@@ -519,9 +565,8 @@ def test_verify_runs_all_three_scenarios(tmp_path, monkeypatch):
     write_tree = _make_clone(tmp_path, dissociated=True)
     review_tree = tmp_path / "org" / "repo" / "review" / "tre03-ws05-abcd1234"
     (review_tree / ".git" / "objects" / "info").mkdir(parents=True)
-    rf = review_tree / "f"
-    rf.write_text("x")
-    rf.chmod(rf.stat().st_mode & ~0o222)
+    (review_tree / "f").write_text("x")
+    readonly.chmod_readonly(str(review_tree))
     scratch = tmp_path / "scratch"
     scratch.mkdir()
 
@@ -551,7 +596,14 @@ def test_verify_runs_all_three_scenarios(tmp_path, monkeypatch):
     monkeypatch.setattr(dogfood, "_pixi_runs", lambda p: (True, ""))
     monkeypatch.setattr(dogfood, "_scratch_dirty", lambda p: "")
     monkeypatch.setattr(dogfood, "_open_pr_heads", lambda repo: [branch])
-    monkeypatch.setattr(dogfood, "_pr_reviews", lambda repo, pr: [{"id": 1}])
+    monkeypatch.setattr(dogfood, "_resolve_repo_slug", lambda repo, *, scratch: repo)
+    review_calls = {"n": 0}
+
+    def pr_reviews(repo, pr):
+        review_calls["n"] += 1
+        return [] if review_calls["n"] == 1 else [{"id": 1}]
+
+    monkeypatch.setattr(dogfood, "_pr_reviews", pr_reviews)
 
     cfg = dogfood.DogfoodConfig(
         scratch=str(scratch),
@@ -567,6 +619,62 @@ def test_verify_runs_all_three_scenarios(tmp_path, monkeypatch):
     assert "PASS" in text
     for c in report.checks:
         assert c.name in text
+
+
+def test_verify_records_failure_when_a_seam_raises(tmp_path, monkeypatch):
+    """A live seam throwing must NOT abort the harness: ``verify`` catches it, records
+    a failed check carrying the exception detail, and still returns a report."""
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+
+    def boom(*_a, **_k):
+        raise RuntimeError("live seam exploded")
+
+    monkeypatch.setattr(dogfood, "_run_spawn", boom)
+    cfg = dogfood.DogfoodConfig(
+        scratch=str(scratch),
+        repo="acme/widget",
+        epic="TRE03",
+        ws=5,
+        issue=159,
+        central_root=str(tmp_path),
+    )
+    report = dogfood.verify(cfg)  # must NOT raise
+    assert not report.passed
+    assert any(
+        not c.passed and "RuntimeError: live seam exploded" in c.detail
+        for c in report.checks
+    )
+
+
+# --------------------------------------------------------------------------
+# _resolve_repo_slug — the repo-code → owner/name resolution for the REST seams.
+# --------------------------------------------------------------------------
+
+
+def test_resolve_repo_slug_canonicalises_an_owner_name(monkeypatch):
+    """A value already in owner/name form is normalised via gh.repo_canonical."""
+    monkeypatch.setattr(
+        dogfood.gh, "repo_canonical", lambda slug: f"canon/{slug.split('/')[-1]}"
+    )
+    assert dogfood._resolve_repo_slug("acme/widget", scratch="/s") == "canon/widget"
+
+
+def test_resolve_repo_slug_resolves_a_bare_code_from_the_scratch_checkout(monkeypatch):
+    """A slashless repo code resolves to the scratch checkout's owner/name (the spawn
+    target), so the REST seams never request ``/repos/shipit/...``."""
+    seen = {}
+
+    def current_repo(*, cwd=None):
+        seen["cwd"] = cwd
+        return "arthur-debert/shipit"
+
+    monkeypatch.setattr(dogfood.gh, "current_repo", current_repo)
+    assert (
+        dogfood._resolve_repo_slug("shipit", scratch="/scratch/x")
+        == "arthur-debert/shipit"
+    )
+    assert seen["cwd"] == "/scratch/x"
 
 
 def test_main_requires_explicit_target(monkeypatch):
