@@ -32,6 +32,7 @@ _FIXTURE = RoleDefs(
         Role.IMPLEMENTER: "IMPL-OVERLAY: implement with tests and open one draft PR.",
         Role.SHEPHERD: "SHEP-OVERLAY: address exactly one review round, then hand back.",
         Role.EXPLORER: "EXPL-OVERLAY: read-only and search-scoped; mutate nothing.",
+        Role.REVIEWER: "REVW-OVERLAY: read a PR head and post one review; mutate nothing.",
     },
 )
 
@@ -96,6 +97,7 @@ def test_real_role_prompts_read_as_their_role():
     assert "You are an IMPLEMENTER" in rendered.role_prompts[Role.IMPLEMENTER]
     assert "You are a SHEPHERD" in rendered.role_prompts[Role.SHEPHERD]
     assert "You are an EXPLORER" in rendered.role_prompts[Role.EXPLORER]
+    assert "You are a REVIEWER" in rendered.role_prompts[Role.REVIEWER]
 
 
 # --- the committed derived surfaces (no drift from the source) ---------------

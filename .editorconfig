@@ -1,18 +1,17 @@
 # Indentation shfmt honors for the shell leg of `shipit lint` (it reads
 # .editorconfig when no explicit -i/-ci flags are passed). 4-space, indented
-# case bodies — the house style of shipit's own scripts. The glob covers both
-# *.sh and the extensionless bootstrap (src/shipit/data/bootstrap/shipit), which
-# shfmt would otherwise format with its tab default, leaving the installed
-# launcher inconsistent with the rest of the tree.
+# case bodies — the house style of shipit's own *.sh scripts.
+#
+# The bootstrap launcher (src/shipit/data/bootstrap/shipit) is DELIBERATELY left
+# off this list: `shipit install` copies it verbatim to a consumer's `bin/shipit`,
+# a path no shipit-owned .editorconfig governs, so shfmt lints the installed copy
+# with its TAB default. The source must therefore be tab-indented too (shfmt
+# default) — otherwise the installed `bin/shipit` is shfmt-dirty in every clone
+# (TRE03-WS07 #167). Keeping the source on the same tab default keeps the source
+# and its installed projection byte-identical and both shfmt-clean.
 root = true
 
 [*.sh]
-indent_style = space
-indent_size = 4
-switch_case_indent = true
-binary_next_line = true
-
-[**/bootstrap/shipit]
 indent_style = space
 indent_size = 4
 switch_case_indent = true

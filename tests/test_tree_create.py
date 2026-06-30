@@ -15,8 +15,10 @@ import pytest
 
 from shipit import gh
 from shipit.tree import create as create_mod
+from shipit.tree import layout
 from shipit.tree.create import create, create_from_source
 from shipit.tree.layout import TreeSpec
+from shipit.verbs import install as install_mod
 
 
 def _git(args: list[str], cwd: Path) -> str:
@@ -112,6 +114,125 @@ def test_create_from_source_resolves_origin_url(
     assert not (dest / ".git" / "objects" / "info" / "alternates").exists()
 
 
+def test_tree_satisfies_the_critical_isolation_invariants(
+    tmp_path: Path, remote: Path, reference: Path
+):
+    """The three non-negotiable invariants of the Tree the WorktreeCreate hook returns
+    (ADR-0014), pinned as real assertions on a real git clone so a regression in the
+    clone strategy fails loud:
+
+    (a) it lives under the central trees root and inside NO ``.claude`` directory —
+        a Tree must never land in the harness's own ``.claude/worktrees`` (the #139
+        trap the demoted adapter exists to close);
+    (b) it is a real dissociated CLONE — ``.git`` is a DIRECTORY, not the ``.git``
+        *file* pointer a ``git worktree`` checkout leaves behind;
+    (c) it borrows NO objects — ``--dissociate`` copied them, so there is no
+        ``objects/info/alternates`` link back to the reference.
+    """
+    trees_root = tmp_path / "trees"
+    spec = _spec(tmp_path)  # spec.root == tmp_path / "trees"
+    tree = create(spec, source_repo=str(reference), github_url=str(remote))
+    dest = Path(tree.path)
+
+    # (a) Under the central trees root, within NO `.claude` directory.
+    assert dest.is_relative_to(trees_root)
+    assert ".claude" not in dest.parts
+
+    # (b) A real dissociated clone: `.git` is a directory, not a worktree pointer file.
+    git_path = dest / ".git"
+    assert git_path.is_dir()
+    assert not git_path.is_file()
+
+    # (c) No borrowed objects.
+    assert not (dest / ".git" / "objects" / "info" / "alternates").exists()
+
+
+def test_central_root_is_absolute_and_outside_any_claude_dir(monkeypatch):
+    """The central root every Tree hangs off is absolute and `.claude`-free, so a Tree
+    provisioned WITHOUT an explicit root (the WorktreeCreate hook path, which calls
+    `create_from_source`) cannot land inside the harness's `.claude/worktrees`
+    (ADR-0014 isolation). Covers both the default and an env-override central root."""
+    monkeypatch.delenv(layout.CENTRAL_ROOT_ENV, raising=False)
+    default_root = create_mod.central_root()
+    assert default_root.is_absolute()
+    assert ".claude" not in default_root.parts
+
+    monkeypatch.setenv(layout.CENTRAL_ROOT_ENV, "/srv/agents/trees")
+    override_root = create_mod.central_root()
+    assert override_root.is_absolute()
+    assert ".claude" not in override_root.parts
+
+
+def test_create_provisions_local_only_on_planned_branch_no_origin_side_effects(
+    tmp_path: Path, remote: Path, reference: Path, monkeypatch
+):
+    # #170 end-to-end against REAL git: a Tree whose source carries `.shipit.toml`
+    # gets the managed set committed on its PLANNED branch by a LOCAL-ONLY install
+    # — and `tree create` makes NO push and opens NO PR. The provisioning install
+    # step is run in-process via `install.run(local=True)`; the pixi/npm steps are
+    # no-ops here (covered elsewhere).
+
+    # The Tree's clone carries `.shipit.toml`, so `_provision` runs the install step.
+    (remote / ".shipit.toml").write_text('[shipit]\nversion = "seed"\n')
+    _git(["add", "."], cwd=remote)
+    _git(["commit", "-m", "add manifest"], cwd=remote)
+
+    # A deterministic commit identity for the real local commit `install --local` makes.
+    for var, val in {
+        "GIT_AUTHOR_NAME": "Test",
+        "GIT_AUTHOR_EMAIL": "test@example.com",
+        "GIT_COMMITTER_NAME": "Test",
+        "GIT_COMMITTER_EMAIL": "test@example.com",
+    }.items():
+        monkeypatch.setenv(var, val)
+
+    # ANY push / PR / branch-switch during provisioning is the bug — make it fail loud.
+    def no_push(*a, **k):
+        raise AssertionError("tree create provisioning must NOT push to origin (#170)")
+
+    def no_pr(*a, **k):
+        raise AssertionError("tree create provisioning must NOT open a PR (#170)")
+
+    def no_switch(*a, **k):
+        raise AssertionError("local-only install must NOT switch branches (#170)")
+
+    monkeypatch.setattr(gh, "git_push", no_push)
+    monkeypatch.setattr(gh, "pr_create", no_pr)
+    monkeypatch.setattr(gh, "git_switch_create", no_switch)
+
+    # Drive the real install through the provisioning boundary in local mode; skip
+    # the real pixi/npm spawns. The injected lefthook boundary keeps it hermetic.
+    def fake_provision(cmd, *, cwd, env):
+        if cmd[:2] == ["shipit", "install"]:
+            assert "--local" in cmd
+            rc = install_mod.run(
+                str(cwd), local=True, activate_hooks=lambda root: (0, "")
+            )
+            assert rc == 0
+
+    monkeypatch.setattr(create_mod, "run_provision", fake_provision)
+
+    tree = create(_spec(tmp_path), source_repo=str(reference), github_url=str(remote))
+    dest = Path(tree.path)
+
+    # HEAD is on the PLANNED branch (never `shipit/install`).
+    assert _git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=dest) == "fix/123-smoke"
+    assert tree.branch == "fix/123-smoke"
+
+    # The managed set is present AND committed on the planned branch.
+    assert (dest / "bin" / "shipit").is_file()
+    tracked = _git(["ls-files"], cwd=dest).splitlines()
+    assert "bin/shipit" in tracked
+    assert _git(["log", "-1", "--format=%s"], cwd=dest) == install_mod.COMMIT_MESSAGE
+    # Nothing left uncommitted by provisioning.
+    assert _git(["status", "--porcelain"], cwd=dest) == ""
+
+    # The 3 isolation invariants still hold (unchanged by this WS).
+    assert (dest / ".git").is_dir()
+    assert not (dest / ".git" / "objects" / "info" / "alternates").exists()
+    assert ".claude" not in dest.parts
+
+
 def test_create_rolls_back_partial_tree_on_failure(
     tmp_path: Path, remote: Path, reference: Path, monkeypatch
 ):
@@ -203,9 +324,11 @@ def test_create_copies_treeinclude_and_provisions_deps(tmp_path: Path, monkeypat
     assert (dest / ".env").read_text() == "TOKEN=1"
     assert (dest / "models" / "saml.bin").read_text() == "BIN"
 
-    # Step 4: shipit install, then pixi install, then npm ci — each in the Tree dir.
+    # Step 4: shipit install (LOCAL-ONLY, #170), then pixi install, then npm ci —
+    # each in the Tree dir. The install MUST carry --local so Tree provisioning
+    # never switches branches, pushes, or opens a PR (no origin pollution).
     assert [c[0] for c in calls] == [
-        ["shipit", "install", "."],
+        ["shipit", "install", ".", "--local"],
         ["pixi", "install"],
         ["npm", "ci"],
     ]
@@ -242,6 +365,62 @@ def test_sccache_env_applies_per_tree_target_and_cache_settings(tmp_path: Path):
         "SCCACHE_BASEDIRS": str(tmp_path / "t"),
         "CARGO_INCREMENTAL": "0",
     }
+
+
+def test_provision_env_scrubs_leaked_parent_pixi_pointers(tmp_path: Path, monkeypatch):
+    # The regression for #167 defect 4: the env shipit builds for in-clone
+    # git/install must NOT carry the parent's PIXI_* project pointers — a leaked
+    # PIXI_PROJECT_MANIFEST makes the clone's `pixi run lint` resolve the parent
+    # manifest (ambiguous across default/lint/review) and the install commit dies.
+    monkeypatch.setenv("PIXI_PROJECT_MANIFEST", "/parent/pixi.toml")
+    monkeypatch.setenv("PIXI_PROJECT_ROOT", "/parent")
+    monkeypatch.setenv("PIXI_ENVIRONMENT_NAME", "default")
+    monkeypatch.setenv("PIXI_EXE", "/parent/.pixi/bin/pixi")
+    # User-level cache vars are NOT project pointers — they must survive so the
+    # child `pixi install` keeps sharing the package cache across Trees.
+    monkeypatch.setenv("PIXI_CACHE_DIR", "/home/me/.cache/rattler")
+    # An unrelated var the child still needs (e.g. PATH) must pass through.
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+
+    env = create_mod.provision_env(tmp_path / "tree")
+
+    # Every leaked project/environment PIXI_* pointer is gone.
+    assert "PIXI_PROJECT_MANIFEST" not in env
+    assert "PIXI_PROJECT_ROOT" not in env
+    assert "PIXI_ENVIRONMENT_NAME" not in env
+    assert "PIXI_EXE" not in env
+    # Cache var and unrelated vars are preserved.
+    assert env["PIXI_CACHE_DIR"] == "/home/me/.cache/rattler"
+    assert env["PATH"] == "/usr/bin:/bin"
+    # The ADR-0015 build env is still applied on top.
+    assert env["CARGO_TARGET_DIR"] == str(tmp_path / "tree" / "target")
+    assert env["SCCACHE_BASEDIRS"] == str(tmp_path / "tree")
+    assert env["CARGO_INCREMENTAL"] == "0"
+
+
+def test_run_provision_uses_scrubbed_env_verbatim_not_merged(
+    tmp_path: Path, monkeypatch
+):
+    # run_provision must hand proc.run the env with replace_env=True, so a parent
+    # PIXI_PROJECT_MANIFEST in os.environ cannot creep back in via a merge.
+    monkeypatch.setenv("PIXI_PROJECT_MANIFEST", "/parent/pixi.toml")
+
+    captured: dict[str, object] = {}
+
+    def fake_run(cmd, *, cwd, env, replace_env=False, **kwargs):
+        captured["env"] = env
+        captured["replace_env"] = replace_env
+
+    monkeypatch.setattr(create_mod.proc, "run", fake_run)
+
+    create_mod.run_provision(
+        ["shipit", "install", "."],
+        cwd=tmp_path,
+        env=create_mod.provision_env(tmp_path),
+    )
+
+    assert captured["replace_env"] is True
+    assert "PIXI_PROJECT_MANIFEST" not in captured["env"]
 
 
 def test_check_same_filesystem_warns_only_across_filesystems(

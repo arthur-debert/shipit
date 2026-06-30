@@ -1,5 +1,10 @@
 # shipit owns subagent spawning; Trees are the Run substrate
 
+> **Refined by ADR-0019.** This ADR fixed *that* shipit launches the backend as a child
+> process rooted in the Tree but left the **launch mechanism** open; ADR-0019 settles it for
+> the `claude` backend (headless `claude -p --agent <role>`, `ANTHROPIC_API_KEY` scrubbed).
+> See also ADR-0018 (write vs read-only Trees).
+
 The coordinator launches every real **Run** through a shipit CLI —
 `shipit spawn subagent --repo R --epic E --ws N --role ROLE [--backend claude|codex|antigravity]`
 — which creates the **Tree**, launches the agent as a child process **rooted in that
@@ -37,7 +42,13 @@ start **non-Claude backends** (codex, antigravity) behind the same verb.
 
 The verb:
 
-1. resolves the base ref and plans the **Tree** (`tree/layout.py`, ADR-0014/0016);
+1. resolves the base ref and plans the **Tree** (`tree/layout.py`, ADR-0014/0016).
+   *Shipped scope:* the verb today plans the WS Tree via the FREEFORM shape — base
+   `origin/main` for every spawn, and the Run's draft PR targets `main`. Epic-base
+   resolution by this verb (`--epic E --ws N` → `origin/E/umbrella` + an epic-branch
+   PR target) is **deferred** (follow-up #176); the `origin/<EPIC>/umbrella` base
+   shape itself lives in `tree/layout.py` for `shipit tree create`, the verb just does
+   not select it yet;
 2. creates the Tree (`tree/create.py`) — a **write Tree** for a writer, a **read-only
    Tree** for a reviewer (ADR-0018);
 3. launches the backend agent as a **child process whose cwd is the Tree**, so there is

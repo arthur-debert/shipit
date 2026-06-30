@@ -198,10 +198,11 @@ def _merge_paginated(output: str) -> list:
 # --------------------------------------------------------------------------
 
 
-def current_repo() -> str:
-    """``owner/name`` of the repo in the current directory (via ``gh``)."""
+def current_repo(*, cwd: str | None = None) -> str:
+    """``owner/name`` of the repo in ``cwd`` — the current directory if omitted (via ``gh``)."""
     out = _run(
-        ["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"]
+        ["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
+        cwd=cwd,
     )
     return out.strip()
 
@@ -405,6 +406,29 @@ def git_checkout_new_branch(branch: str, base: str, *, cwd: str) -> None:
     _git(["checkout", "-b", branch, base], cwd=cwd)
 
 
+def git_checkout(branch: str, *, cwd: str) -> None:
+    """``git checkout <branch>`` — switch to an EXISTING branch (no ``-b``).
+
+    The read-only-Tree counterpart of :func:`git_checkout_new_branch`: a reviewer
+    Tree checks out a branch that already exists on ``origin`` (the PR head) rather
+    than cutting a new one. After a ``git fetch`` the plain checkout DWIMs a local
+    tracking branch from ``origin/<branch>``, so the read-only clone lands on the
+    exact head under review.
+    """
+    _git(["checkout", branch], cwd=cwd)
+
+
+def git_reset_hard(ref: str, *, cwd: str) -> None:
+    """``git reset --hard <ref>`` — force HEAD, index, and working tree to ``ref``.
+
+    The read-only-Tree reuse counterpart of :func:`git_checkout`: when a shared review
+    clone is reused after the PR head advanced, a ``git fetch`` followed by a hard reset
+    to ``origin/<branch>`` re-pins the working tree to the CURRENT head, so a second
+    reviewer never reads the stale commit the first clone happened to land on.
+    """
+    _git(["reset", "--hard", ref], cwd=cwd)
+
+
 def git_remote_url(*, cwd: str, remote: str = "origin") -> str:
     """The configured URL of ``remote`` for the checkout at ``cwd``."""
     return _git(["remote", "get-url", remote], cwd=cwd).strip()
@@ -457,11 +481,11 @@ def git_ahead_behind(*, cwd: str) -> tuple[int, int]:
 
 
 def pr_for_head(branch: str, *, cwd: str | None = None) -> dict | None | UnknownPr:
-    """The PR whose head is ``branch`` as ``{number, state, isDraft}`` — or ``None`` /
-    :data:`UNKNOWN`.
+    """The PR whose head is ``branch`` as ``{number, state, isDraft, baseRefName}`` — or
+    ``None`` / :data:`UNKNOWN`.
 
-    Reads ``gh pr view <branch> --json number,state,isDraft`` from inside the Tree
-    (``cwd``) and returns a THREE-way result, never crashing the fleet scan:
+    Reads ``gh pr view <branch> --json number,state,isDraft,baseRefName`` from inside
+    the Tree (``cwd``) and returns a THREE-way result, never crashing the fleet scan:
 
     - the PR snapshot ``dict`` when a PR is read cleanly;
     - ``None`` when the branch *provably* has no PR — ``gh`` exits non-zero with its
@@ -476,7 +500,8 @@ def pr_for_head(branch: str, *, cwd: str | None = None) -> dict | None | Unknown
     """
     try:
         out = _run(
-            ["gh", "pr", "view", branch, "--json", "number,state,isDraft"], cwd=cwd
+            ["gh", "pr", "view", branch, "--json", "number,state,isDraft,baseRefName"],
+            cwd=cwd,
         ).strip()
     except GhError as exc:
         return None if _is_no_pr_error(exc) else UNKNOWN
@@ -500,6 +525,7 @@ def pr_for_head(branch: str, *, cwd: str | None = None) -> dict | None | Unknown
         "number": number,
         "state": state,
         "isDraft": data.get("isDraft"),
+        "baseRefName": data.get("baseRefName"),
     }
 
 

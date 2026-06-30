@@ -148,6 +148,102 @@ def test_default_threshold_is_two_weeks():
     )
 
 
+# --- shared read-only (reviewer) Tree reclaim (ADR-0018) -----------------------
+
+#: A review Tree's path carries the `review` kind segment (the classify marker).
+REVIEW_PATH = "/trees/acme/widget/review/tre03-ws03"
+
+
+def _review_record(**over) -> TreeRecord:
+    """A review-Tree record: read-only (clean, level) and aged by default."""
+    return _record(path=REVIEW_PATH, branch="TRE03/WS03", **over)
+
+
+def _classify_review(state, *, live: bool) -> str:
+    decision = classify(
+        [_review_record()],
+        now=NOW,
+        pr_states={REVIEW_PATH: state},
+        max_age_seconds=THRESHOLD,
+        live_reviews={REVIEW_PATH: live},
+    )
+    for name in ("removable", "stale", "keep"):
+        if getattr(decision, name):
+            return name
+    raise AssertionError("record landed in no bucket")
+
+
+# (description, pr-state, reviewer-live) -> expected bucket. The review reclaim rule:
+# removable iff (merged OR closed) AND no reviewer is live; else keep; never stale.
+REVIEW_TABLE = [
+    ("merged + no live reviewer -> removable", "MERGED", False, "removable"),
+    ("closed + no live reviewer -> removable", "CLOSED", False, "removable"),
+    ("merged but a reviewer is live -> keep", "MERGED", True, "keep"),
+    ("closed but a reviewer is live -> keep", "CLOSED", True, "keep"),
+    ("open PR (in flight) -> keep", "OPEN", False, "keep"),
+    ("draft PR (in flight) -> keep", "DRAFT", False, "keep"),
+    ("UNKNOWN state -> keep (never guess)", "UNKNOWN", False, "keep"),
+    ("no PR -> keep", None, False, "keep"),
+]
+
+
+@pytest.mark.parametrize(
+    "desc, state, live, expected", REVIEW_TABLE, ids=[r[0] for r in REVIEW_TABLE]
+)
+def test_review_tree_reclaim_truth_table(desc, state, live, expected):
+    assert _classify_review(state, live=live) == expected
+
+
+def test_review_tree_is_never_stale():
+    # A review Tree is a cheap shared clone: it is either removable or kept, never the
+    # "needs-a-human" stale bucket (unlike a write Tree with no/closed PR).
+    for state in (None, "CLOSED", "UNKNOWN"):
+        decision = classify(
+            [_review_record()],
+            now=NOW,
+            pr_states={REVIEW_PATH: state},
+            max_age_seconds=THRESHOLD,
+        )
+        assert decision.stale == []
+
+
+def test_review_tree_ignores_age_for_reclaim():
+    # The review rule is checked BEFORE the age ladder, so a merged review Tree is
+    # removable even when freshly touched — age does not protect a shared clone whose
+    # PR is done (and no reviewer is live).
+    recent = _review_record(mtime=RECENT_MTIME)
+    decision = classify(
+        [recent], now=NOW, pr_states={REVIEW_PATH: "MERGED"}, max_age_seconds=THRESHOLD
+    )
+    assert [r.path for r in decision.removable] == [REVIEW_PATH]
+
+
+def test_review_tree_defaults_to_no_live_reviewer():
+    # Omitting live_reviews entirely (the gc default) treats every review Tree as
+    # having no live reviewer, so a merged one is reclaimable.
+    decision = classify(
+        [_review_record()],
+        now=NOW,
+        pr_states={REVIEW_PATH: "MERGED"},
+        max_age_seconds=THRESHOLD,
+    )
+    assert len(decision.removable) == 1
+
+
+def test_write_tree_under_a_review_named_org_is_not_a_review_tree():
+    # `_is_review_tree` keys off the leaf's PARENT segment, not "review anywhere in the
+    # path": a write Tree whose org/repo happens to be named "review" must still take the
+    # write ladder. Here a dirty + merged write Tree must be KEPT (dirty protects it); if
+    # it were misclassified as a review Tree the merge would make it removable.
+    path = "/trees/review/widget/branches/feat-x-deadbeef"
+    record = _record(path=path, dirty=True)
+    decision = classify(
+        [record], now=NOW, pr_states={path: "MERGED"}, max_age_seconds=THRESHOLD
+    )
+    assert [r.path for r in decision.keep] == [path]
+    assert not decision.removable
+
+
 # --- parse_duration: the pure --threshold helper -------------------------------
 
 # (input, expected seconds) — one row per accepted shape. Each unit and a couple of

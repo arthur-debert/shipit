@@ -1,17 +1,57 @@
 # Thin lefthook caller — ALL lint-check logic lives in the `shipit lint` binary,
-# invoked through `pixi run lint`. lefthook is intentionally dumb
+# invoked through `pixi run -e lint lint`. lefthook is intentionally dumb
 # (docs/prd/lint-checks.md, architecture.lex §7): one definition, run everywhere, so CI and the hooks
 # cannot drift into two transcriptions of the rules.
 #
-# Whole-tree (not staged-only) for now: `pixi run lint` lints `git ls-files`, so
-# a green hook never lies about an unstaged edit. (`pixi run test` joins pre-push
+# The `-e lint` is pinned (not bare `pixi run lint`): when `shipit install` commits
+# inside a freshly cloned Tree, an inherited `PIXI_PROJECT_MANIFEST` made bare
+# `pixi run lint` ambiguous (default, lint, review) and the commit's pre-commit died.
+# Pinning the environment removes the ambiguity regardless of the inherited env
+# (the root cause — the PIXI_* env-leak — is also scrubbed in shipit.tree.create).
+#
+# Whole-tree (not staged-only) for now: `pixi run -e lint lint` lints `git ls-files`,
+# so a green hook never lies about an unstaged edit. (`pixi run test` joins pre-push
 # when Step 5 supplies the test task.)
+# `piped: true` runs the commands in priority order and stops on the first
+# failure, so the mirror regen (priority 1) always lands BEFORE the lint check
+# (priority 2) reads the tree.
 pre-commit:
+  piped: true
   commands:
+    # Auto-regenerate every committed .lex→.md mirror whose .lex is staged, then
+    # stage the regenerated .md into THIS commit — so a .lex edit and its .md
+    # projection ship together and the mirrors can never silently drift. Only
+    # mirrors that already exist are regenerated (source-only .lex stay un-mirrored).
+    # Runs through `pixi run -e lint` so lexd + the pinned prettier are on PATH.
+    #
+    # The staged set is read from `git diff --cached` (NOT lefthook's {staged_files}
+    # or a `glob:`) so that: every `.lex` ANYWHERE in the tree is covered, not just
+    # the repo root; paths with spaces survive (NUL-delimited); and a `.lex` staged
+    # for deletion/rename — absent from the working tree — is excluded
+    # (`--diff-filter=d`) so the converter never runs on a missing file.
+    lex-mirror:
+      priority: 1
+      run: |
+        pixi run -e lint bash -c '
+          set -euo pipefail
+          git diff --cached --name-only -z --diff-filter=d | while IFS= read -r -d "" f; do
+            case "$f" in
+              *.lex) ;;
+              *) continue ;;
+            esac
+            [ -f "$f" ] || continue
+            md="${f%.lex}.md"
+            if [ -f "$md" ]; then
+              bash tools/lex-convert-doc.sh "$f"
+              git add "$md"
+            fi
+          done
+        '
     lint:
-      run: pixi run lint
+      priority: 2
+      run: pixi run -e lint lint
 
 pre-push:
   commands:
     lint:
-      run: pixi run lint
+      run: pixi run -e lint lint

@@ -54,3 +54,13 @@ def test_tree_create_help(capsys):
     assert rc == 0
     out = capsys.readouterr().out
     assert "--issue" in out
+
+
+def test_install_local_and_push_are_mutually_exclusive():
+    # --local and --push are mutually exclusive modes; passing both is a usage
+    # error (click exits 2), not a silently-resolved precedence.
+    from click.testing import CliRunner
+
+    result = CliRunner().invoke(cli.root, ["install", "--local", "--push", "."])
+    assert result.exit_code == 2
+    assert "mutually exclusive" in result.output

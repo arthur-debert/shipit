@@ -795,9 +795,22 @@ def run(
     *,
     dry_run: bool = False,
     push: bool = False,
+    local: bool = False,
     activate_hooks: Callable[[Path], tuple[int, str]] | None = None,
 ) -> int:
     """Install/reconcile the managed set into the consumer at ``path``.
+
+    Three write modes, in order of precedence:
+
+      - ``local``  — commit the managed set on the CURRENT branch and stop: no
+        branch switch, no push, no PR. This is the Tree-provisioning mode
+        (``tree create``): the Tree is already on its planned holding branch and
+        provisioning only needs the managed files committed there, never an origin
+        side effect (no ``shipit/install`` branch, no draft PR). See #170.
+      - ``push``   — break-glass: commit on the current branch and push straight
+        to it (admin bypass), no PR.
+      - default    — switch to the ``shipit/install`` branch, commit, force-push,
+        and open a DRAFT PR (the consumer-onboarding flow).
 
     ``activate_hooks`` injects the lefthook boundary so tests exercise the
     activation contract without mutating a real ``.git/hooks`` (mirrors how
@@ -889,6 +902,20 @@ def run(
     cwd = str(root)
 
     try:
+        if local:
+            # Local-only (Tree provisioning, #170): commit the managed set on the
+            # current branch and stop — NO branch switch, NO push, NO PR. The Tree
+            # is already on its planned holding branch, so provisioning lands the
+            # managed files there with zero origin side effects.
+            branch = gh.git_current_branch(cwd=cwd)
+            if branch is None:
+                print("install: --local needs a checked-out branch", file=sys.stderr)
+                return 1
+            gh.git_add(changed_paths, cwd=cwd)
+            gh.git_commit(COMMIT_MESSAGE, changed_paths, cwd=cwd)
+            print(f"  committed to {branch} (local-only --local)")
+            return 0
+
         if push:
             # Break-glass: commit on the current branch and push straight to it
             # (relies on the repo's admin bypass). Reserved for bootstrapping a
