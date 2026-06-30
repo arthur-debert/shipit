@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
+from pathlib import Path
 
 from .base import BackendAdapter
 
@@ -51,6 +52,7 @@ class ClaudeAdapter(BackendAdapter):
         role: str,
         *,
         tools: tuple[str, ...] | list[str] | None = None,
+        cwd: str | Path | None = None,
     ) -> list[str]:
         """The exact ``claude`` print-mode argv ADR-0019 §1 specifies.
 
@@ -67,7 +69,13 @@ class ClaudeAdapter(BackendAdapter):
         :attr:`reviewer_tools` so the child gets only read-only tools (no ``Write`` /
         ``Edit``) via ``--tools "<comma-joined>"``. ``None`` (a write Run) omits the
         flag and inherits the role's full toolset.
+
+        ``cwd`` is accepted for the seam (ADR-0020) but **ignored**: ``claude`` roots
+        in the Tree through the OS process ``cwd`` that :func:`shipit.spawn.launch.launch`
+        sets, so it needs no path in its argv (unlike ``agy``, which ignores process
+        ``cwd`` and is handed the Tree via ``--add-dir``).
         """
+        del cwd  # claude roots via the process cwd; no path belongs in its argv.
         cmd = [
             "claude",
             "-p",

@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
+from pathlib import Path
 
 from .base import BackendAdapter
 
@@ -78,6 +79,7 @@ class CodexAdapter(BackendAdapter):
         role: str,
         *,
         tools: tuple[str, ...] | list[str] | None = None,
+        cwd: str | Path | None = None,
     ) -> list[str]:
         """The exact ``codex exec`` WRITE argv ADR-0020 §codex specifies.
 
@@ -93,10 +95,16 @@ class CodexAdapter(BackendAdapter):
         allow-list (its read-only posture is the ``--sandbox read-only`` flag, surfaced
         by :attr:`reviewer_tools` as ``None``). This builds the WRITE argv only.
 
+        ``cwd`` is accepted for the seam (ADR-0020) but **ignored**: like ``claude``,
+        codex roots in the Tree through the OS process ``cwd`` that
+        :func:`shipit.spawn.launch.launch` sets, so no path belongs in its argv (unlike
+        ``agy``, which ignores process ``cwd`` and is handed the Tree via ``--add-dir``).
+
         WS04: the reviewer variant (``--ephemeral --sandbox read-only`` against a shared
         read-only Tree, ADR-0020 §codex reviewer Run) is a separate launch path and is
         NOT branched here — do not fold a reviewer mode into this write argv.
         """
+        del cwd  # codex roots via the process cwd; no path belongs in its argv.
         prompt = f"{_role_preamble(role)}\n\n{task}"
         return [
             "codex",
