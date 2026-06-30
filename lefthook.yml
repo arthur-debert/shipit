@@ -1,10 +1,16 @@
 # Thin lefthook caller — ALL lint-check logic lives in the `shipit lint` binary,
-# invoked through `pixi run lint`. lefthook is intentionally dumb
+# invoked through `pixi run -e lint lint`. lefthook is intentionally dumb
 # (docs/prd/lint-checks.md, architecture.lex §7): one definition, run everywhere, so CI and the hooks
 # cannot drift into two transcriptions of the rules.
 #
-# Whole-tree (not staged-only) for now: `pixi run lint` lints `git ls-files`, so
-# a green hook never lies about an unstaged edit. (`pixi run test` joins pre-push
+# The `-e lint` is pinned (not bare `pixi run lint`): when `shipit install` commits
+# inside a freshly cloned Tree, an inherited `PIXI_PROJECT_MANIFEST` made bare
+# `pixi run lint` ambiguous (default, lint, review) and the commit's pre-commit died.
+# Pinning the environment removes the ambiguity regardless of the inherited env
+# (the root cause — the PIXI_* env-leak — is also scrubbed in shipit.tree.create).
+#
+# Whole-tree (not staged-only) for now: `pixi run -e lint lint` lints `git ls-files`,
+# so a green hook never lies about an unstaged edit. (`pixi run test` joins pre-push
 # when Step 5 supplies the test task.)
 # `piped: true` runs the commands in priority order and stops on the first
 # failure, so the mirror regen (priority 1) always lands BEFORE the lint check
@@ -43,9 +49,9 @@ pre-commit:
         '
     lint:
       priority: 2
-      run: pixi run lint
+      run: pixi run -e lint lint
 
 pre-push:
   commands:
     lint:
-      run: pixi run lint
+      run: pixi run -e lint lint

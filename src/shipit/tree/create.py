@@ -129,14 +129,52 @@ def sccache_env(tree_dir: Path) -> dict[str, str]:
     }
 
 
+#: ``PIXI_*`` variables the parent ``pixi run`` injects that bind to the PARENT
+#: project/manifest/environment. They MUST NOT leak into a child shipit/pixi
+#: operating inside a DIFFERENT clone: a leaked ``PIXI_PROJECT_MANIFEST`` makes the
+#: clone's ``pixi run lint`` resolve the parent manifest, where ``lint`` is
+#: ambiguous across the ``default``/``lint``/``review`` environments, so the
+#: install commit's pre-commit hook dies (#167). This is the same env-leak class as
+#: ADR-0019's ``ANTHROPIC_API_KEY`` finding — an inherited var breaking a child
+#: rooted elsewhere — and the fix is the same: scrub it. Cache-location vars are
+#: user-level (not project-bound), so they are kept (see :func:`_is_leaked_pixi_var`)
+#: to preserve cross-Tree package-cache sharing.
+PIXI_CACHE_VARS = frozenset({"PIXI_CACHE_DIR", "RATTLER_CACHE_DIR"})
+
+
+def _is_leaked_pixi_var(key: str) -> bool:
+    """Whether ``key`` is a parent-project ``PIXI_*`` pointer to scrub from a Tree child."""
+    return key.startswith("PIXI_") and key not in PIXI_CACHE_VARS
+
+
+def provision_env(tree_dir: Path) -> dict[str, str]:
+    """The COMPLETE environment for a provisioning command run inside ``tree_dir``.
+
+    A copy of the current environment with the parent's leaked ``PIXI_*`` project
+    pointers removed (:func:`_is_leaked_pixi_var`) and the ADR-0015 build env
+    (:func:`sccache_env`) applied. Returned as the full env — not an overlay — so
+    :func:`run_provision` can hand it to :func:`shipit.proc.run` with
+    ``replace_env=True``: a merge could re-add the very ``PIXI_*`` vars we are
+    dropping (they live in ``os.environ``), so removal requires replacing the env,
+    not merging onto it. With the project pointers gone, the child ``pixi`` /
+    ``shipit`` re-resolves the project from its own cwd (the Tree), which is the
+    whole point.
+    """
+    env = {k: v for k, v in os.environ.items() if not _is_leaked_pixi_var(k)}
+    env.update(sccache_env(tree_dir))
+    return env
+
+
 def run_provision(cmd: list[str], *, cwd: Path, env: dict[str, str]) -> None:
     """Run one provisioning command in the Tree (the patchable provisioning boundary).
 
-    A thin wrapper over :func:`shipit.proc.run` (no shell; ``env`` MERGED over the
-    process environment) so tests assert *which* commands provisioning would run and
-    *with what env* without spawning ``pixi`` / ``npm``.
+    A thin wrapper over :func:`shipit.proc.run` (no shell) so tests assert *which*
+    commands provisioning would run and *with what env* without spawning ``pixi`` /
+    ``npm``. ``env`` is the COMPLETE child environment (built by
+    :func:`provision_env`) and is used verbatim (``replace_env=True``) so the
+    scrubbed ``PIXI_*`` vars cannot creep back in via a merge over ``os.environ``.
     """
-    proc.run(cmd, cwd=str(cwd), env=env)
+    proc.run(cmd, cwd=str(cwd), env=env, replace_env=True)
 
 
 def _provision(dest: Path, *, trees_root: Path) -> None:
@@ -147,7 +185,7 @@ def _provision(dest: Path, *, trees_root: Path) -> None:
     each run with the ADR-0015 build env. Before ``pixi install`` it checks (and
     only *warns* about — #119) the pixi-cache / Trees-root same-filesystem invariant.
     """
-    env = sccache_env(dest)
+    env = provision_env(dest)
     if (dest / config.CONFIG_NAME).is_file():
         run_provision(["shipit", "install", "."], cwd=dest, env=env)
     if (dest / PIXI_MANIFEST).is_file():

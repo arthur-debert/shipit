@@ -51,15 +51,15 @@ def _run(payload_text: str) -> tuple[int, str]:
 
 def test_spawn_lands_in_a_tree_on_epic_branch(monkeypatch, fake_repo):
     # With the session-stable epic marker set, the spawn provisions a Tree on
-    # `<epic>/agent-<id>` and prints its path (which CC adopts as the cwd).
+    # `<epic>/agent-<id>` and prints its path (which CC adopts as the cwd). The id
+    # is read from the VERIFIED payload field `name` (= `agent-<agentId>`).
     monkeypatch.setenv(worktree_adapter.EPIC_MARKER_ENV, "TRE03")
-    payload = json.dumps(
-        {"hook_event_name": "WorktreeCreate", "worktree_name": "agent-a5d633b0"}
-    )
+    payload = json.dumps({"hook_event_name": "WorktreeCreate", "name": "agent-abc123"})
     code, out = _run(payload)
     assert code == 0
     spec = fake_repo["spec"]
-    assert spec.branch == "TRE03/agent-a5d633b0"  # branch-deferred holding branch
+    # The branch carries the id from `name` — `abc123`, NOT a synthesized random.
+    assert spec.branch == "TRE03/agent-abc123"  # branch-deferred holding branch
     assert (spec.org, spec.repo) == ("acme", "widget")
     assert fake_repo["source_repo"] == "/repo"
     assert out.strip() == f"/trees/acme/widget/branches/{spec.agent_hash}"
@@ -68,18 +68,33 @@ def test_spawn_lands_in_a_tree_on_epic_branch(monkeypatch, fake_repo):
 def test_missing_marker_falls_back_to_epicless_branch(monkeypatch, fake_repo):
     # No marker → a safe epic-less branch; the spawn STILL lands in a real Tree.
     monkeypatch.delenv(worktree_adapter.EPIC_MARKER_ENV, raising=False)
-    payload = json.dumps({"worktree_name": "agent-a5d633b0"})
+    payload = json.dumps({"name": "agent-abc123"})
     code, out = _run(payload)
     assert code == 0
-    assert fake_repo["spec"].branch == "agent-a5d633b0"
+    assert fake_repo["spec"].branch == "agent-abc123"
     assert out.strip().startswith("/trees/")
 
 
-def test_missing_worktree_name_synthesizes_an_id(monkeypatch, fake_repo):
-    # A payload with no usable id still resolves a branch (random id), never blocks.
+@pytest.mark.parametrize("payload", [{}, {"name": ""}, {"name": "   "}])
+def test_missing_or_empty_name_synthesizes_an_id(payload, monkeypatch, fake_repo):
+    # A payload with no usable `name` still resolves a VALID branch (random id) and
+    # never crashes — the spawn is never blocked on a missing/empty name.
     monkeypatch.setenv(worktree_adapter.EPIC_MARKER_ENV, "TRE03")
-    code, out = _run(json.dumps({"hook_event_name": "WorktreeCreate"}))
+    code, out = _run(json.dumps({"hook_event_name": "WorktreeCreate", **payload}))
     assert code == 0
+    assert re.fullmatch(r"TRE03/agent-[0-9a-f]+", fake_repo["spec"].branch)
+    assert out.strip().startswith("/trees/")
+
+
+def test_legacy_worktree_name_field_is_ignored(monkeypatch, fake_repo):
+    # Regression pin for the field-contract bug: the spawn id lives in `name`, not
+    # the old `worktree_name` guess. A payload carrying ONLY `worktree_name` must
+    # NOT adopt that value — it synthesizes a random id instead. If someone reverts
+    # `_resolve_branch` to read `worktree_name`, this test fails loud.
+    monkeypatch.setenv(worktree_adapter.EPIC_MARKER_ENV, "TRE03")
+    code, _ = _run(json.dumps({"worktree_name": "agent-shouldnotwin"}))
+    assert code == 0
+    assert "shouldnotwin" not in fake_repo["spec"].branch
     assert re.fullmatch(r"TRE03/agent-[0-9a-f]+", fake_repo["spec"].branch)
 
 
@@ -90,7 +105,7 @@ def test_fail_closed_when_tree_create_errors(monkeypatch, fake_repo, capsys):
         raise RuntimeError("clone exploded")
 
     monkeypatch.setattr(worktreecreate, "create_from_source", boom)
-    code, out = _run(json.dumps({"worktree_name": "x"}))
+    code, out = _run(json.dumps({"name": "x"}))
     assert code == 1
     assert out == ""  # CC treats empty stdout + nonzero as a failed spawn
     assert "clone exploded" in capsys.readouterr().err
@@ -98,7 +113,7 @@ def test_fail_closed_when_tree_create_errors(monkeypatch, fake_repo, capsys):
 
 def test_fail_closed_when_not_in_a_checkout(monkeypatch, fake_repo, capsys):
     monkeypatch.setattr(worktreecreate.gh, "repo_root", lambda: None)
-    code, out = _run(json.dumps({"worktree_name": "x"}))
+    code, out = _run(json.dumps({"name": "x"}))
     assert code == 1
     assert out == ""
     assert "not inside a git checkout" in capsys.readouterr().err
@@ -118,7 +133,7 @@ def test_fail_closed_on_malformed_repo_slug(slug, monkeypatch, fake_repo, capsys
     # spawn LOUD — exit 1, nothing on stdout, and NO Tree provisioned (no partial
     # `TreeSpec(repo="")` reaching the orchestrator).
     monkeypatch.setattr(worktreecreate.gh, "current_repo", lambda: slug)
-    code, out = _run(json.dumps({"worktree_name": "x"}))
+    code, out = _run(json.dumps({"name": "x"}))
     assert code == 1
     assert out == ""  # CC treats empty stdout + nonzero as a failed spawn
     assert "malformed repo slug" in capsys.readouterr().err

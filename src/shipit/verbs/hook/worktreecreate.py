@@ -87,13 +87,24 @@ def run(stdin: TextIO | None = None, stdout: TextIO | None = None) -> int:
 def _resolve_branch(payload: dict[str, object]) -> str:
     """The holding branch for this spawn: `<epic>/agent-<id>` (epic from the marker).
 
-    The id comes from the payload's `worktree_name` (Claude Code's own throwaway
-    name), normalized to a safe ref component; if it normalizes to nothing a random
-    id is synthesized so the spawn is never blocked on a missing name. The epic
-    comes from the session-stable marker env var, falling back safely to an
-    epic-less branch when unset or malformed.
+    The id comes from the payload's **`name`** field — Claude Code's own throwaway
+    spawn id, e.g. `"name": "agent-a567b7e2…"` — normalized to a safe ref component;
+    if it normalizes to nothing a random id is synthesized so the spawn is never
+    blocked on a missing name. The epic comes from the session-stable marker env
+    var, falling back safely to an epic-less branch when unset or malformed.
+
+    **Verified WorktreeCreate payload contract (live probe, Claude Code 2.1.196).**
+    CC fires the hook with `{session_id, transcript_path, cwd, prompt_id,
+    hook_event_name, name}`; the spawn-id field is **`name`** (value `agent-<agentId>`),
+    NOT `worktree_name` (an earlier guess that is always absent, so reading it always
+    fell through to the random-id fallback and silently broke the agent-id→branch
+    link). CC then adopts the **bare path printed to stdout** as the subagent's cwd
+    **without validating it** — so a dissociated clone path is adopted verbatim,
+    which is exactly how this fail-closed adapter relocates the spawn into a Tree.
+    (This contract was lost between the #139 spike and WS04; it is pinned here so it
+    cannot be lost again.)
     """
-    raw_id = str(payload.get("worktree_name") or "")
+    raw_id = str(payload.get("name") or "")
     agent_id = worktree_adapter.normalize_agent_id(raw_id) or secrets.token_hex(
         _ID_BYTES
     )
