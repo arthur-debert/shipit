@@ -10,7 +10,7 @@ Before execution, a new feature is planned via `/shipit-planning` — the orches
 
 ## 1. Information gathering
 
-The coordinator is briefed as in the single-task cycle's information-gathering step [in](../../AGENTS.lex) — via the epic tracker issue, the PRD, or a chat with the maintainer. It does the general reading/research, CREATES the epic branch (`EPIC/umbrella` — [see](./naming.lex)) and provisions its OWN isolated **Tree** to manage that branch with `shipit tree create` — the coordinator's own workspace, the one legitimate hand-run of that primitive, distinct from how Runs get their Tree (\[\#2\]: a Run's Tree is minted FOR it by `shipit spawn subagent` or the `WorktreeCreate` hook, never hand-created). The Tree is a dissociated clone, never a native `git worktree` (ADR-0014 / \[../prd/where-to-do-work.md\]). It asks the maintainer for decisions/clarifications as needed.
+The coordinator is briefed as in the single-task cycle's information-gathering step [in](../../AGENTS.lex) — via the epic tracker issue, the PRD, or a chat with the maintainer. It does the general reading/research, CREATES the epic branch (`EPIC/umbrella` — [see](./naming.lex)) and provisions its OWN isolated **Tree** to manage that branch with `shipit tree create` — the coordinator's own workspace, the one legitimate hand-run of that primitive, distinct from how Runs get their Tree (covered under Delegation per workstream — a Run's Tree is minted FOR it by `shipit spawn subagent` or the `WorktreeCreate` hook, never hand-created). The Tree is a dissociated clone, never a native `git worktree` (ADR-0014 / [see](../prd/where-to-do-work.md)). It asks the maintainer for decisions/clarifications as needed.
 
 ## 2. Delegation per workstream
 

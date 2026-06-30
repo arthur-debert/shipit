@@ -76,16 +76,16 @@ The PR lifecycle (draft -> ready -> stop):
         The coordinator SPAWNS an IMPLEMENTER to do the task + tests — shipit OWNS
         spawning (ADR-0017 / ADR-0019), so the *Tree* is always minted FOR the Run,
         never provisioned by hand. Two launch paths, both routing the Run into an
-        isolated Tree: the `shipit spawn subagent --repo R --epic E --ws N --issue I
-        --role implementer` verb (it resolves the base — `origin/main` for standalone
+        isolated Tree: the `shipit spawn subagent --repo R --epic E --ws N --issue I --role implementer`
+        verb (it resolves the base — `origin/main` for standalone
         work, the epic branch for a workstream — creates the Tree, and roots a headless
         agent in it), or the in-CC `Agent(isolation:"worktree")` tool, whose spawn the
         `WorktreeCreate` hook auto-routes into a Tree. The coordinator never runs
         `shipit tree create` by hand to provision a Run and never points an Agent tool at
         an external checkout. A Tree is a dissociated clone rooted as the Run's cwd (no
         bash-cwd footgun), NOT a native `git worktree` — that path is denied (ADR-0014) —
-        so concurrent agents never collide on one checkout; see
-        [./docs/prd/where-to-do-work.md]. The implementer runs the checks (`shipit lint`)
+        so concurrent agents never collide on one checkout;
+        see [./docs/prd/where-to-do-work.md]. The implementer runs the checks (`shipit lint`)
         and tests (`pixi run test`) green BEFORE opening the PR — CI runs the same as
         required checks, so local green is necessary for CI green.
 
