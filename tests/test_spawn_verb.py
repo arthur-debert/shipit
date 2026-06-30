@@ -88,7 +88,10 @@ def test_run_subagent_happy_path(tmp_path, monkeypatch, capsys):
     captured = _fake_create(monkeypatch, tree_dir)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "stale")
     runner, calls = _launcher()
-    _patch_pr(monkeypatch, {"number": 321, "state": "OPEN", "isDraft": True})
+    _patch_pr(
+        monkeypatch,
+        {"number": 321, "state": "OPEN", "isDraft": True, "baseRefName": "main"},
+    )
 
     rc = spawn_verb.run_subagent(
         repo="widget",
@@ -138,7 +141,10 @@ def test_run_subagent_links_pr_from_the_tree_branch(tmp_path, monkeypatch, capsy
     _patch_identity(monkeypatch, root=str(parent))
     _fake_create(monkeypatch, tree_dir)
     runner, calls = _launcher()
-    seen = _patch_pr(monkeypatch, {"number": 7, "state": "OPEN", "isDraft": True})
+    seen = _patch_pr(
+        monkeypatch,
+        {"number": 7, "state": "OPEN", "isDraft": True, "baseRefName": "main"},
+    )
 
     rc = spawn_verb.run_subagent(
         repo="widget",
@@ -231,6 +237,18 @@ def test_run_subagent_non_positive_ws_is_exit_1(monkeypatch, capsys):
     assert "--ws must be a positive integer" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("bad_issue", [0, -1])
+def test_run_subagent_non_positive_issue_is_exit_1(monkeypatch, capsys, bad_issue):
+    # --issue feeds the task prompt and the PR's `for #<issue>` link; a zero/negative
+    # value (which click's int type accepts) is refused before any Tree/child work.
+    rc = spawn_verb.run_subagent(
+        repo="widget", epic="TRE03", ws=1, issue=bad_issue, role="implementer"
+    )
+
+    assert rc == 1
+    assert "--issue must be a positive integer" in capsys.readouterr().err
+
+
 def test_run_subagent_repo_mismatch_is_exit_1(monkeypatch, capsys):
     _patch_identity(monkeypatch, org_repo="acme/widget")
 
@@ -265,7 +283,10 @@ def test_run_subagent_repo_accepts_org_qualified_name(tmp_path, monkeypatch, cap
     _patch_identity(monkeypatch, org_repo="acme/widget")
     _fake_create(monkeypatch, tree_dir)
     runner, _calls = _launcher()
-    _patch_pr(monkeypatch, {"number": 5, "state": "OPEN", "isDraft": True})
+    _patch_pr(
+        monkeypatch,
+        {"number": 5, "state": "OPEN", "isDraft": True, "baseRefName": "main"},
+    )
 
     rc = spawn_verb.run_subagent(
         repo="acme/widget",
@@ -376,6 +397,75 @@ def test_run_subagent_unknown_pr_state_is_exit_1(tmp_path, monkeypatch, capsys):
 
     assert rc == 1
     assert "could not be read" in capsys.readouterr().err
+
+
+def test_run_subagent_non_open_pr_is_exit_1(tmp_path, monkeypatch, capsys):
+    # A PR exists on the branch, but it is CLOSED — an invalid lifecycle state. The Run
+    # did not report back through an OPEN draft PR, so the spawn is a clean exit-1 and
+    # emits no SPAWNED line.
+    tree_dir = tmp_path / "tree"
+    _patch_identity(monkeypatch)
+    _fake_create(monkeypatch, tree_dir)
+    runner, _calls = _launcher(returncode=0)
+    _patch_pr(
+        monkeypatch,
+        {"number": 9, "state": "CLOSED", "isDraft": True, "baseRefName": "main"},
+    )
+
+    rc = spawn_verb.run_subagent(
+        repo="widget", epic="TRE03", ws=1, issue=1, role="implementer", launcher=runner
+    )
+
+    assert rc == 1
+    out = capsys.readouterr()
+    assert "is CLOSED, not OPEN" in out.err
+    assert "SPAWNED" not in out.out
+
+
+def test_run_subagent_non_draft_pr_is_exit_1(tmp_path, monkeypatch, capsys):
+    # The PR is OPEN but already flipped to ready-for-review — the draft turn-signal the
+    # coordinator drives is gone. That is an invalid handoff state -> clean exit-1.
+    tree_dir = tmp_path / "tree"
+    _patch_identity(monkeypatch)
+    _fake_create(monkeypatch, tree_dir)
+    runner, _calls = _launcher(returncode=0)
+    _patch_pr(
+        monkeypatch,
+        {"number": 9, "state": "OPEN", "isDraft": False, "baseRefName": "main"},
+    )
+
+    rc = spawn_verb.run_subagent(
+        repo="widget", epic="TRE03", ws=1, issue=1, role="implementer", launcher=runner
+    )
+
+    assert rc == 1
+    out = capsys.readouterr()
+    assert "is not a draft" in out.err
+    assert "SPAWNED" not in out.out
+
+
+def test_run_subagent_wrong_base_pr_is_exit_1(tmp_path, monkeypatch, capsys):
+    # The PR is OPEN and draft, but targets a DIFFERENT base than the Tree's intended
+    # one (origin/main -> "main"). Reporting back against the wrong base is invalid, so
+    # the spawn is a clean exit-1.
+    tree_dir = tmp_path / "tree"
+    _patch_identity(monkeypatch)
+    _fake_create(monkeypatch, tree_dir)
+    runner, _calls = _launcher(returncode=0)
+    _patch_pr(
+        monkeypatch,
+        {"number": 9, "state": "OPEN", "isDraft": True, "baseRefName": "develop"},
+    )
+
+    rc = spawn_verb.run_subagent(
+        repo="widget", epic="TRE03", ws=1, issue=1, role="implementer", launcher=runner
+    )
+
+    assert rc == 1
+    out = capsys.readouterr()
+    assert "targets base 'develop'" in out.err
+    assert "not the intended 'main'" in out.err
+    assert "SPAWNED" not in out.out
 
 
 def test_spawn_subagent_help_documents_the_verb():

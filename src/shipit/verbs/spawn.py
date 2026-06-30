@@ -115,8 +115,9 @@ def subagent_cmd(
     reports the Run↔PR linkage so the coordinator drives it with ``shipit pr status``.
 
     Fail-closed: a Tree-creation error exits 1 loudly — never a silent fallback to a
-    native ``git worktree``. A child that exits nonzero, or that exits 0 without
-    having opened a PR on the Tree's branch, is also a clean exit-1.
+    native ``git worktree``. A child that exits nonzero, that exits 0 without having
+    opened a PR on the Tree's branch, or that opened a PR which is not an OPEN, DRAFT PR
+    targeting the intended base, is also a clean exit-1.
     """
     raise SystemExit(
         run_subagent(
@@ -140,11 +141,13 @@ def run_subagent(
     Returns 0 once a headless ``claude`` child has run rooted in a freshly-created
     write Tree and opened a PR on that Tree's branch — the Run↔PR linkage the
     SPAWNED summary reports for ``shipit pr status``. Returns 1 with a clean stderr
-    message (never a traceback) when the backend is unsupported, ``--ws`` is not
-    positive, ``--repo`` disagrees with the ambient checkout, the command is not run
-    inside a GitHub checkout, a git/gh call fails, **Tree creation fails**
-    (fail-closed — no native-worktree fallback), the child exits nonzero, the child
-    exits 0 without opening a PR on the branch, or that PR's state cannot be read.
+    message (never a traceback) when the backend is unsupported, ``--ws`` or
+    ``--issue`` is not positive, ``--repo`` disagrees with the ambient checkout, the
+    command is not run inside a GitHub checkout, a git/gh call fails, **Tree creation
+    fails** (fail-closed — no native-worktree fallback), the child exits nonzero, the
+    child exits 0 without opening a PR on the branch, that PR's state cannot be read,
+    or the PR is not an OPEN, DRAFT PR targeting the Tree's intended base (an invalid
+    lifecycle state the coordinator must not be handed).
 
     ``launcher`` injects the subprocess seam so the launch contract is unit-tested
     without spawning a real ``claude``; ``None`` uses the real
@@ -161,6 +164,16 @@ def run_subagent(
     if ws < 1:
         print(
             f"spawn subagent: --ws must be a positive integer (got {ws})",
+            file=sys.stderr,
+        )
+        return 1
+    if issue < 1:
+        # ``--issue`` rides the task prompt and the draft PR's ``for #<issue>`` link;
+        # a zero/negative value (which click's int type still accepts) would forge a
+        # nonsensical issue reference. Refuse it before any Tree/child work, mirroring
+        # the ``--ws`` guard above.
+        print(
+            f"spawn subagent: --issue must be a positive integer (got {issue})",
             file=sys.stderr,
         )
         return 1
@@ -269,6 +282,36 @@ def run_subagent(
         print(
             f"spawn subagent: child exited 0 but the PR state for {tree.branch!r} "
             "could not be read (gh unreadable); not claiming success.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # A PR existing on the branch is necessary but not sufficient: the WS02 contract is
+    # that the Run reported back through an OPEN, DRAFT PR targeting the Tree's intended
+    # base. A ready-for-review PR, a closed/merged one, or one opened against the wrong
+    # base is an INVALID lifecycle state the coordinator must not be handed as success —
+    # each is a clean exit-1, never a SPAWNED line.
+    if pr["state"] != "OPEN":
+        print(
+            f"spawn subagent: child exited 0 but the PR on {tree.branch!r} is "
+            f"{pr['state']}, not OPEN; the Run did not report back through an open "
+            "draft PR.",
+            file=sys.stderr,
+        )
+        return 1
+    if pr.get("isDraft") is not True:
+        print(
+            f"spawn subagent: child exited 0 but the PR on {tree.branch!r} is not a "
+            "draft; the Run must report back through a draft PR (the turn-signal the "
+            "coordinator drives).",
+            file=sys.stderr,
+        )
+        return 1
+    if pr.get("baseRefName") != base_branch:
+        print(
+            f"spawn subagent: child exited 0 but the PR on {tree.branch!r} targets "
+            f"base {pr.get('baseRefName')!r}, not the intended {base_branch!r}; the "
+            "Run reported back against the wrong base.",
             file=sys.stderr,
         )
         return 1
