@@ -9,7 +9,8 @@ and the whole contract is unit-tested without ever spawning a real child:
 
 - :mod:`shipit.spawn.backends` — the per-backend
   :class:`~shipit.spawn.backends.base.BackendAdapter` registry (ADR-0020): each adapter
-  fills exactly what varies (``build_command`` / ``child_env`` / ``reviewer_tools``).
+  fills exactly what varies (``build_command`` — write-vs-reviewer posture via its
+  ``read_only`` flag — and ``child_env``).
   ``claude`` is adapter #0 (ADR-0019). ``--backend`` resolves one from this registry.
 - :mod:`shipit.spawn.launch` — the **backend-agnostic** launch machinery: the injectable
   subprocess seam (:func:`~shipit.spawn.launch.launch`) that roots the child in the Tree

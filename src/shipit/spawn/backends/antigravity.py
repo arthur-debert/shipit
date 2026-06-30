@@ -18,9 +18,14 @@ decision would have missed (do NOT "simplify" them away):
   :meth:`build_command`'s ``cwd`` and emits ``--add-dir <cwd>``; without it writes never
   land in the Tree. (This is why ADR-0020 threads ``cwd`` into the seam's ``build_command``.)
 - **``--dangerously-skip-permissions``** is agy's ``bypassPermissions`` equivalent
-  (auto-approve every tool/shell request). Without it a non-interactive ``--print`` write
-  Run stalls on permission prompts. Mandatory for a WRITE Run (a reviewer Run — WS04 —
-  omits it; not implemented here).
+  (auto-approve every tool/shell request). Without it a non-interactive ``--print``
+  **write** Run stalls on permission prompts editing files. A **reviewer** Run
+  (``read_only=True``, WS04a) **omits** it: WS04a probed agy 1.0.14 — a ``--print`` Run
+  *without* ``--dangerously-skip-permissions`` still runs network shell commands (it ran
+  ``curl https://api.github.com/zen`` and returned the result), so the reviewer can
+  ``gh pr diff`` / ``gh pr review`` to self-post without the dangerous flag. Read-only is
+  enforced by the chmod'd Tree (ADR-0020 §Decision 3); omitting the flag is best-effort
+  defense-in-depth on top.
 - **The model must be pinned to a capable, non-agentic name.** ``agy`` silently resolves a
   bare ``pro`` to Gemini Flash, which in ``--print`` mode goes **agentic** (runs
   shell/build instead of answering). :data:`MODEL_ALIASES` pins ``pro`` →
@@ -31,10 +36,10 @@ Auth rides agy's Antigravity OAuth login (creds under ``~/.gemini/antigravity-cl
 (``GEMINI_API_KEY`` / ``GOOGLE_API_KEY``) so a stale key can't shadow that login, and never
 writes a secret into the Tree (ADR-0020 §Decision 3 — auth hygiene).
 
-agy has **no** granular native tool allow-list / read-only sandbox for a reviewer, so
-:attr:`AntigravityAdapter.reviewer_tools` is ``None`` — a reviewer Run's read-only
-guarantee rides **solely** on the chmod'd shared read-only Tree (ADR-0018), the
-load-bearing guard. The reviewer (read-only) Run itself is **WS04**, not built here.
+agy has **no** granular native tool allow-list / read-only sandbox for a reviewer, so a
+reviewer Run's read-only guarantee rides **solely** on the chmod'd shared read-only Tree
+(ADR-0018), the load-bearing guard — the seam's ``read_only`` flag only drops the
+write Run's ``--dangerously-skip-permissions`` (best-effort defense-in-depth).
 """
 
 from __future__ import annotations
@@ -112,13 +117,13 @@ class AntigravityAdapter(BackendAdapter):
         task: str,
         role: str,
         *,
-        tools: tuple[str, ...] | list[str] | None = None,
+        read_only: bool = False,
         cwd: str | Path | None = None,
     ) -> list[str]:
-        """The exact ``agy`` ``--print`` WRITE argv ADR-0020 §Decision-per-backend records.
+        """The exact ``agy`` ``--print`` argv ADR-0020 §Decision-per-backend records.
 
         ``agy --new-project --add-dir <cwd> --model=<name> --print-timeout=<dur>
-        --dangerously-skip-permissions --print "<role-prefixed task>"``, run with the
+        [--dangerously-skip-permissions] --print "<role-prefixed task>"``, run with the
         OS process ``cwd`` = the Tree and stdin ``/dev/null`` (both owned by the shared
         :func:`shipit.spawn.launch` path). Every flag is load-bearing:
 
@@ -126,27 +131,27 @@ class AntigravityAdapter(BackendAdapter):
           process ``cwd``** for its workspace, so this is the ONLY thing that makes its
           writes land in the Tree (probe-confirmed); ``cwd`` is therefore **required** —
           a missing path is a programming error raised loud (cwd-rooting invariant,
-          ADR-0020 §Decision 3), never a silent write to agy's scratch dir.
+          ADR-0020 §Decision 3), never a silent write to agy's scratch dir. Required for
+          BOTH postures: the reviewer reads the diff inside the same rooted Tree.
         - ``--model=<name>`` pins a capable non-agentic model (see :data:`MODEL_ALIASES`).
         - ``--print-timeout=<dur>`` bounds the blocking ``--print`` Run.
-        - ``--dangerously-skip-permissions`` is agy's bypassPermissions equivalent — a
-          non-interactive WRITE Run stalls on permission prompts without it.
+        - ``--dangerously-skip-permissions`` (agy's bypassPermissions equivalent) is added
+          ONLY for a **write** Run (``read_only=False``) — without it a non-interactive
+          write Run stalls on permission prompts editing files. A **reviewer**
+          (``read_only=True``) **omits** it: WS04a probe-confirmed agy still runs network
+          shell commands (``gh pr diff`` / ``gh pr review``) without it, so the reviewer
+          can self-post, and read-only is enforced by the chmod'd Tree (ADR-0020
+          §Decision 3) — omitting the flag is best-effort defense-in-depth.
         - ``--print "<text>"`` is the headless invocation; the role is prepended to the
           task text (:func:`role_prompt`) since agy has no ``--agent`` flag.
-
-        ``tools`` is ignored: agy has no native allow-list (:attr:`reviewer_tools` is
-        ``None``), so a reviewer Run's read-only posture rides solely on the chmod'd Tree
-        (ADR-0018). The reviewer (read-only) Run is **WS04** and is not built here.
         """
-        # agy has no native tool allow-list (reviewer_tools is None); `tools` is unused —
-        # a reviewer Run's read-only posture rides solely on the chmod'd Tree (ADR-0018).
-        del tools
         if cwd is None:
             raise ValueError(
                 "antigravity (agy) build_command requires cwd (the Tree path): agy "
                 "ignores its process cwd and roots only via `--add-dir <Tree>`; without "
                 "it the Run's writes land in agy's scratch dir, not the Tree."
             )
+        permission = [] if read_only else ["--dangerously-skip-permissions"]
         return [
             "agy",
             "--new-project",
@@ -154,7 +159,7 @@ class AntigravityAdapter(BackendAdapter):
             str(cwd),
             f"--model={self.model}",
             f"--print-timeout={self.timeout}",
-            "--dangerously-skip-permissions",
+            *permission,
             "--print",
             role_prompt(task, role),
         ]
@@ -174,16 +179,3 @@ class AntigravityAdapter(BackendAdapter):
         return {
             key: value for key, value in source.items() if key not in SCRUBBED_AUTH_ENV
         }
-
-    @property
-    def reviewer_tools(self) -> tuple[str, ...] | None:
-        """``None`` — agy has no native read-only tool allow-list (ADR-0020 §Decision 3).
-
-        Unlike ``claude``, agy exposes no granular tool allow-list / native read-only
-        sandbox for a reviewer (its ``--sandbox`` flag only "enables terminal
-        restrictions", best-effort). So a reviewer Run's read-only guarantee rides
-        **solely** on the chmod'd shared read-only Tree (ADR-0018) — the load-bearing,
-        backend-agnostic guard — exactly the asymmetry the seam's ``None`` return
-        anticipates. (The reviewer Run is WS04.)
-        """
-        return None

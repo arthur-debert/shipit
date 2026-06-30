@@ -3,9 +3,10 @@
 The per-backend WRITE launch contract recorded by the WS00 spike — the exact
 ``agy --new-project --add-dir … --print`` argv (with the load-bearing ``--add-dir``
 cwd-rooting quirk and ``--dangerously-skip-permissions``), the ``GEMINI_API_KEY`` /
-``GOOGLE_API_KEY`` scrub, the native role-prepend, and the ``None`` read-only posture —
-asserted through the adapter and the injectable seam, mirroring
-``test_spawn_backend_claude.py``. No real ``agy`` binary is ever invoked.
+``GOOGLE_API_KEY`` scrub, and the native role-prepend) plus the WS04a **reviewer**
+posture (``read_only=True`` drops ``--dangerously-skip-permissions``; read-only rides the
+chmod'd Tree, ADR-0020 §Decision 3) — asserted through the adapter and the injectable
+seam, mirroring ``test_spawn_backend_claude.py``. No real ``agy`` binary is ever invoked.
 """
 
 from __future__ import annotations
@@ -61,6 +62,42 @@ def test_build_command_carries_bypass_permissions_for_a_write_run():
     assert "--dangerously-skip-permissions" in cmd
 
 
+def test_reviewer_build_command_drops_skip_permissions():
+    # WS04a reviewer posture: a reviewer (read_only=True) OMITS
+    # --dangerously-skip-permissions — probe-confirmed agy still runs the network shell
+    # commands (gh pr diff / gh pr review) without it, so the reviewer self-posts, and
+    # read-only rides the chmod'd Tree (ADR-0020 §Decision 3). Everything else
+    # (--add-dir cwd-rooting, model, timeout, --print) is unchanged.
+    cmd = AGY.build_command("review it", "reviewer", cwd=TREE, read_only=True)
+    assert "--dangerously-skip-permissions" not in cmd
+    assert cmd == [
+        "agy",
+        "--new-project",
+        "--add-dir",
+        TREE,
+        "--model=Gemini 3.1 Pro (High)",
+        "--print-timeout=600s",
+        "--print",
+        "You are acting as the 'reviewer' role for this Run.\n\nreview it",
+    ]
+
+
+def test_reviewer_build_command_still_requires_cwd():
+    # The cwd-rooting invariant holds for the reviewer too: agy reads the diff inside the
+    # same --add-dir-rooted Tree, so a missing cwd is still a loud error.
+    with pytest.raises(ValueError, match="requires cwd"):
+        AGY.build_command("t", "reviewer", read_only=True)
+
+
+def test_write_and_reviewer_argv_differ_only_in_skip_permissions():
+    # The single posture difference is the skip-permissions flag; the reviewer argv is
+    # the write argv minus that one flag (same rooting/model/timeout/prompt assembly).
+    write = AGY.build_command("t", "reviewer", cwd=TREE)
+    reviewer = AGY.build_command("t", "reviewer", cwd=TREE, read_only=True)
+    assert write != reviewer
+    assert [a for a in write if a != "--dangerously-skip-permissions"] == reviewer
+
+
 def test_build_command_prepends_the_role_natively():
     # agy has NO --agent flag, so the role rides in the --print text (prompt-prepend,
     # ADR-0020). The role name appears, and the original task is preserved verbatim.
@@ -74,12 +111,12 @@ def test_build_command_prepends_the_role_natively():
     assert print_text.endswith("implement #7")
 
 
-def test_build_command_ignores_tools_no_native_allowlist():
-    # agy has no native tool allow-list (reviewer_tools is None); passing `tools` must
-    # NOT inject any --tools flag — read-only rides the chmod'd Tree (ADR-0018).
-    cmd = AGY.build_command("t", "reviewer", cwd=TREE, tools=("Read", "Grep"))
-    assert "--tools" not in cmd
-    assert "Read,Grep" not in cmd
+def test_build_command_never_emits_a_tools_flag():
+    # agy has no native tool allow-list (the read-only signal is the read_only flag, not
+    # a tool tuple): no --tools flag appears in either posture — read-only rides the
+    # chmod'd Tree (ADR-0018).
+    assert "--tools" not in AGY.build_command("t", "reviewer", cwd=TREE, read_only=True)
+    assert "--tools" not in AGY.build_command("t", "implementer", cwd=TREE)
 
 
 def test_build_command_honours_construction_model_and_timeout():
@@ -135,12 +172,6 @@ def test_child_env_defaults_to_os_environ_and_scrubs_it(monkeypatch):
     assert "GEMINI_API_KEY" not in env
     assert "GOOGLE_API_KEY" not in env
     assert env.get("SHIPIT_SPAWN_MARKER") == "present"
-
-
-def test_reviewer_tools_is_none_no_native_allowlist():
-    # agy has no native read-only allow-list, so the posture is None: read-only rides
-    # SOLELY on the chmod'd shared Tree (ADR-0018), the load-bearing guard.
-    assert AGY.reviewer_tools is None
 
 
 def test_registry_resolves_the_antigravity_adapter():

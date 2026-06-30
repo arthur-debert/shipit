@@ -26,12 +26,22 @@ NOT from guessed flags. Three facts are load-bearing and non-obvious:
   and ``CODEX_API_KEY`` so a stale key can never shadow the login, and **no** secret is
   ever written into the Tree.
 
-**Read-only / reviewer posture is WS04's job, not this WS's.** codex's reviewer
-constraint is a ``--sandbox read-only`` *flag*, not a tool allow-list — so
-:attr:`reviewer_tools` is ``None`` (read-only rides the chmod'd Tree, ADR-0018, plus
-the flag as defense-in-depth). This adapter builds only the **write** argv; the
-reviewer launch path (the ``--ephemeral --sandbox read-only`` variant the ADR records)
-lands in WS04 and is deliberately not implemented here.
+**Reviewer (read-only) posture — WS04a, probed, NOT the ADR's first guess.** The ADR
+recorded ``--ephemeral --sandbox read-only`` for a reviewer Run, but that decision was
+taken when the reviewer *returned* its findings on stdout (the funnel captured them). In
+the spawn-Tree path the reviewer **self-posts** via ``gh pr review`` — which needs the
+**network**. WS04a probed codex 0.139 directly and found ``--sandbox read-only`` **blocks
+the network** (``curl … → Could not resolve host``), so a read-only-sandbox reviewer
+**cannot post its review**. Per ADR-0020 §Decision 3 the load-bearing read-only guarantee
+is the **chmod'd Tree** (the FS layer), not the native sandbox, so the chosen reviewer
+posture is the *least-privilege codex sandbox that still grants the network*:
+``--ephemeral --sandbox workspace-write -c sandbox_workspace_write.network_access=true``
+(probe-confirmed to reach the network). It deliberately does **NOT** carry the write Run's
+``--dangerously-bypass-approvals-and-sandbox``: the chmod'd Tree makes the workspace
+non-writable (the real guard), and ``workspace-write`` still confines any escape to
+``[workdir, /tmp, $TMPDIR]`` as best-effort defense-in-depth. Selected by ``read_only=True``
+on :meth:`build_command`. **WS04a scope ends at the reviewer launch posture** — the funnel
+replacement + check-run/readiness wiring is WS04b.
 """
 
 from __future__ import annotations
@@ -53,6 +63,13 @@ AUTH_ENV_VARS = ("OPENAI_API_KEY", "CODEX_API_KEY")
 #: local constant rather than imported across subsystems). The seam passes no per-Run
 #: model, so a sane capable default is pinned here.
 DEFAULT_MODEL = "gpt-5.5"
+
+#: The codex ``-c`` override that enables outbound network inside the reviewer's
+#: ``workspace-write`` sandbox (WS04a probe). Without it the sandbox blocks the network a
+#: self-posting reviewer needs for ``gh pr diff`` / ``gh pr review`` (``read-only`` blocks
+#: the network outright, with no override that re-grants it). Value is a TOML literal codex
+#: parses (``foo.bar=true``).
+NETWORK_ACCESS_OVERRIDE = "sandbox_workspace_write.network_access=true"
 
 
 def _role_preamble(role: str) -> str:
@@ -78,39 +95,55 @@ class CodexAdapter(BackendAdapter):
         task: str,
         role: str,
         *,
-        tools: tuple[str, ...] | list[str] | None = None,
+        read_only: bool = False,
         cwd: str | Path | None = None,
     ) -> list[str]:
-        """The exact ``codex exec`` WRITE argv ADR-0020 §codex specifies.
+        """The exact ``codex exec`` argv ADR-0020 §codex specifies, per posture.
 
-        ``codex exec --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox
-        --model <id> "<role-preamble + task>"``. The task prompt is the first positional
-        arg, with the role prepended (:func:`_role_preamble`) because codex has no
-        ``--agent`` flag. The bypass flag is load-bearing: codex's default
-        ``workspace-write`` sandbox blocks ``.git`` writes and the network, so a Run that
-        must ``git commit`` / ``git push`` / ``gh pr create`` needs the unsandboxed
-        posture — the chmod'd Tree (ADR-0018) is the external sandbox that flag documents.
+        Common shell: ``codex exec --skip-git-repo-check <posture flags> --model <id>
+        "<role-preamble + task>"``. The task prompt is the first positional arg, with the
+        role prepended (:func:`_role_preamble`) because codex has no ``--agent`` flag.
 
-        ``tools`` is accepted for seam parity but **ignored**: codex has no tool
-        allow-list (its read-only posture is the ``--sandbox read-only`` flag, surfaced
-        by :attr:`reviewer_tools` as ``None``). This builds the WRITE argv only.
+        ``read_only`` selects the posture flags:
+
+        - **write** (``read_only=False``, default): ``--dangerously-bypass-approvals-and-sandbox``.
+          Load-bearing — codex's default ``workspace-write`` sandbox blocks ``.git`` writes
+          and the network, so a Run that must ``git commit`` / ``git push`` / ``gh pr create``
+          needs the unsandboxed posture; the chmod'd Tree (ADR-0018) is the external sandbox
+          that flag documents.
+        - **reviewer** (``read_only=True``): ``--ephemeral --sandbox workspace-write
+          -c sandbox_workspace_write.network_access=true``. WS04a probed codex 0.139: a
+          reviewer **self-posts** via ``gh pr review``, which needs the network, but
+          ``--sandbox read-only`` (the ADR's first guess, taken when the funnel captured
+          stdout) **blocks the network** — so the reviewer uses the least-privilege sandbox
+          that still grants the network. It deliberately omits the write bypass flag: the
+          chmod'd Tree is the load-bearing read-only guard (ADR-0020 §Decision 3), and
+          ``workspace-write`` confines any escape to ``[workdir, /tmp, $TMPDIR]`` as
+          best-effort defense-in-depth. ``--ephemeral`` skips session persistence.
 
         ``cwd`` is accepted for the seam (ADR-0020) but **ignored**: like ``claude``,
         codex roots in the Tree through the OS process ``cwd`` that
         :func:`shipit.spawn.launch.launch` sets, so no path belongs in its argv (unlike
         ``agy``, which ignores process ``cwd`` and is handed the Tree via ``--add-dir``).
-
-        WS04: the reviewer variant (``--ephemeral --sandbox read-only`` against a shared
-        read-only Tree, ADR-0020 §codex reviewer Run) is a separate launch path and is
-        NOT branched here — do not fold a reviewer mode into this write argv.
         """
         del cwd  # codex roots via the process cwd; no path belongs in its argv.
         prompt = f"{_role_preamble(role)}\n\n{task}"
+        posture = (
+            [
+                "--ephemeral",
+                "--sandbox",
+                "workspace-write",
+                "-c",
+                NETWORK_ACCESS_OVERRIDE,
+            ]
+            if read_only
+            else ["--dangerously-bypass-approvals-and-sandbox"]
+        )
         return [
             "codex",
             "exec",
             "--skip-git-repo-check",
-            "--dangerously-bypass-approvals-and-sandbox",
+            *posture,
             "--model",
             DEFAULT_MODEL,
             prompt,
@@ -128,15 +161,3 @@ class CodexAdapter(BackendAdapter):
         """
         source = os.environ if parent_env is None else parent_env
         return {key: value for key, value in source.items() if key not in AUTH_ENV_VARS}
-
-    @property
-    def reviewer_tools(self) -> None:
-        """``None`` — codex has no tool allow-list (ADR-0020 §codex Read-only posture).
-
-        codex's reviewer constraint is the ``--sandbox read-only`` flag, not a tool
-        allow-list, so there is nothing to hand :meth:`build_command`'s ``tools``. A
-        reviewer Run's read-only guarantee rests on the chmod'd shared Tree (ADR-0018,
-        the load-bearing guard), with ``--sandbox read-only`` as defense-in-depth — wired
-        by WS04, not here.
-        """
-        return None

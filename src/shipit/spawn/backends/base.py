@@ -5,28 +5,37 @@ PR-contract prompts it is handed (:func:`shipit.spawn.launch.write_task` /
 :func:`~shipit.spawn.launch.reviewer_task`), the subprocess that runs it
 (:func:`~shipit.spawn.launch.launch`), and the PR it reports back through are *the
 same* whether the child is ``claude``, ``codex``, or ``antigravity``. What actually
-*varies* per backend is small and sharply bounded — exactly three things — and this
+*varies* per backend is small and sharply bounded — exactly two things — and this
 ABC is that boundary:
 
 - **:meth:`build_command`** — the backend's headless argv (how the task prompt and
-  the role are passed, the non-interactive/result mode). ``claude`` is ``claude -p
-  … --agent <role> …``; a foreign runtime is shaped entirely differently. This is
-  per-backend private business, discovered by spike (ADR-0020 §Decision-per-backend),
-  NOT a paper guess at CLI flags.
+  the role are passed, the non-interactive/result mode, **and the write-vs-reviewer
+  posture**). ``claude`` is ``claude -p … --agent <role> …``; a foreign runtime is
+  shaped entirely differently. This is per-backend private business, discovered by
+  spike (ADR-0020 §Decision-per-backend), NOT a paper guess at CLI flags.
+
+  The **read-only posture** a *reviewer* Run carries *beyond* the chmod'd shared Tree
+  (ADR-0018) is expressed as a single keyword-only flag on this method —
+  ``read_only: bool`` — not as a separate seam member. ``read_only=False`` (the
+  default) builds the **write** argv (the backend's bypass/skip-permissions posture so
+  the Run can commit + push + open a PR); ``read_only=True`` builds the **reviewer**
+  argv, and what that means is the adapter's private business: ``claude`` narrows to its
+  read-only ``--tools`` allow-list; ``codex`` / ``agy`` have no granular allow-list, so
+  their reviewer posture is *whatever lets the agent post its review through the PR while
+  the chmod'd Tree remains the load-bearing FS guard* (ADR-0020 §Decision 3 — the native
+  sandbox is best-effort defense-in-depth on top of the chmod, never the guarantee). The
+  flag, not a tool tuple, is the signal **because a tool allow-list does not generalize**
+  — codex/agy have none, so "non-``None`` ``tools``" could not distinguish a reviewer
+  from a write Run for them.
 - **:meth:`child_env`** — the backend's auth-env transform. Every backend has its own
   auth hazard (a stale var shadowing a logged-in session); the *principle* ("scrub the
   vars that would break this backend's preferred login") generalizes, the *specific
-  var* does not — so the transform is the adapter's, not a shared constant.
-- **:attr:`reviewer_tools`** — the **read-only posture** a reviewer Run carries
-  *beyond* the chmod'd shared Tree (ADR-0018). A backend with a native tool allow-list
-  returns it (``claude`` → its read-only tools); a backend with no such knob returns
-  ``None`` — read-only then **rides solely on the chmod'd Tree**, which is the
-  load-bearing, backend-agnostic guarantee. The native allow-list is defense-in-depth
-  on top, best-effort (ADR-0020 §Decision 3).
+  var* does not — so the transform is the adapter's, not a shared constant. The same
+  scrub applies to write and reviewer Runs (auth is posture-independent).
 
 The cross-backend **invariants** (cwd = the Tree, PR-only result channel, fail-closed
 Tree creation, FS-enforced read-only reviewers) live in the *shared* launch/verb code
-and are NOT re-expressed per adapter — an adapter only fills the three holes above.
+and are NOT re-expressed per adapter — an adapter only fills the two holes above.
 """
 
 from __future__ import annotations
@@ -44,7 +53,7 @@ class BackendAdapter(ABC):
     the registry holds a single shared instance per backend. Everything an adapter does
     NOT override (the Tree, the prompts, the subprocess, PR resolution) stays shared in
     :mod:`shipit.spawn.launch` and :mod:`shipit.verbs.spawn`; this class is *only* the
-    three things that genuinely differ per backend.
+    two things that genuinely differ per backend.
     """
 
     #: The backend's ``--backend`` token (e.g. ``"claude"``). The registry key and the
@@ -57,7 +66,7 @@ class BackendAdapter(ABC):
         task: str,
         role: str,
         *,
-        tools: tuple[str, ...] | list[str] | None = None,
+        read_only: bool = False,
         cwd: str | Path | None = None,
     ) -> list[str]:
         """The backend's headless argv for ``task`` under ``role``.
@@ -65,10 +74,26 @@ class BackendAdapter(ABC):
         Returns the exact non-shell argv to run as the child. ``role`` is conveyed
         however the backend conveys a system prompt / agent identity (for ``claude``,
         the native ``--agent`` flag; a backend with no such flag prepends the role to
-        the prompt text). ``tools`` narrows a reviewer Run's tool access when the
-        backend supports an allow-list (the value of :attr:`reviewer_tools`); a write
-        Run passes ``None`` and inherits the role's full toolset. A backend with no
-        allow-list ignores ``tools`` — its read-only posture rides the Tree.
+        the prompt text).
+
+        ``read_only`` selects the **posture**, and IS the write-vs-reviewer signal
+        (ADR-0020 §Decision 3) — there is no separate ``tools`` argument, because a
+        tool allow-list does not generalize (codex/agy have none, so it could not tell
+        a reviewer from a write Run for them):
+
+        - ``read_only=False`` (default) — the **write** argv: the backend's
+          bypass/skip-permissions posture so the Run can edit, commit, push, and open a
+          draft PR (claude ``bypassPermissions``; codex
+          ``--dangerously-bypass-approvals-and-sandbox``; agy
+          ``--dangerously-skip-permissions``).
+        - ``read_only=True`` — the **reviewer** argv. What it constrains is the
+          adapter's private business: ``claude`` narrows to its read-only ``--tools``
+          allow-list; ``codex`` / ``agy``, having no allow-list, instead build the
+          *least-privilege posture that still lets the agent post its review through the
+          PR* (`gh pr review` needs the network — see the per-adapter docstrings for the
+          probed posture). The load-bearing read-only guarantee is ALWAYS the chmod'd
+          shared Tree (ADR-0018), at the FS layer; the backend's native restriction is
+          best-effort defense-in-depth on top, never the guarantee.
 
         ``cwd`` is the **Tree path** the child is rooted in. Most backends honour the
         OS process ``cwd`` (which :func:`shipit.spawn.launch.launch` sets) and so
@@ -86,17 +111,6 @@ class BackendAdapter(ABC):
         Returns a fresh dict (never the caller's). ``parent_env`` defaults to the live
         :data:`os.environ` and is injectable for tests. The adapter removes exactly the
         vars that would shadow its backend's preferred login and NEVER writes a secret
-        to disk in the Tree (ADR-0020 §Decision 3 — auth hygiene).
-        """
-
-    @property
-    @abstractmethod
-    def reviewer_tools(self) -> tuple[str, ...] | None:
-        """The read-only tool allow-list for a reviewer Run, or ``None``.
-
-        A backend with a native allow-list returns the read-only toolset (no
-        ``Write`` / ``Edit``) to pass to :meth:`build_command`'s ``tools``; a backend
-        without one returns ``None`` — the reviewer's read-only guarantee then rests
-        solely on the chmod'd shared Tree (ADR-0018), which is the load-bearing,
-        backend-agnostic enforcement. Any native restriction is defense-in-depth.
+        to disk in the Tree (ADR-0020 §Decision 3 — auth hygiene). The scrub is the same
+        for write and reviewer Runs — auth is posture-independent.
         """
