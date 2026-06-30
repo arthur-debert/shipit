@@ -434,6 +434,25 @@ def git_remote_url(*, cwd: str, remote: str = "origin") -> str:
     return _git(["remote", "get-url", remote], cwd=cwd).strip()
 
 
+def remote_branch_exists(
+    branch: str, *, cwd: str | None = None, remote: str = "origin"
+) -> bool:
+    """Whether ``branch`` exists on ``remote`` (``git ls-remote --heads``).
+
+    A live query of the remote — not the local tracking refs — so a caller can
+    fail-closed on a missing base branch BEFORE cloning, without relying on a prior
+    fetch having populated a tracking ref. Returns ``True`` only when the remote
+    reports a matching head ref. Raises :class:`GhError` if the ``git ls-remote``
+    call itself fails (no network / bad remote), so an undetermined remote state is
+    never silently read as "branch absent".
+    """
+    if cwd is not None:
+        args = ["git", "-C", cwd, "ls-remote", "--heads", remote, branch]
+    else:
+        args = ["git", "ls-remote", "--heads", remote, branch]
+    return bool(_run(args).strip())
+
+
 # --------------------------------------------------------------------------
 # git + gh — the Tree-registry boundary (scan reads; never mutates)
 # --------------------------------------------------------------------------

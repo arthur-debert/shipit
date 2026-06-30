@@ -142,6 +142,31 @@ def test_epic_base_is_origin_epic_umbrella():
     assert plan(_epic_spec()).base == "origin/HAR02/umbrella"
 
 
+def test_epic_umbrella_base_helper_builds_origin_epic_umbrella():
+    # The pure helper the planner AND the spawn verb share (#176): one place builds
+    # the epic-grouped base, so the verb's fail-closed pre-clone check and the
+    # planner agree by construction.
+    assert layout.epic_umbrella_base("HAR02") == "origin/HAR02/umbrella"
+    # And the planner's resolved base IS exactly what the helper produces.
+    assert plan(_epic_spec()).base == layout.epic_umbrella_base("HAR02")
+
+
+@pytest.mark.parametrize("bad_epic", ["", "  ", "HAR/02", "..", "a b"])
+def test_epic_umbrella_base_rejects_unsafe_epic_code(bad_epic):
+    # The helper validates the epic code the same way the planner does: a non
+    # alphanumeric token would build a malformed origin//umbrella or path-traversing
+    # ref, so it is refused rather than returned.
+    with pytest.raises(ValueError):
+        layout.epic_umbrella_base(bad_epic)
+
+
+def test_non_epic_shapes_keep_origin_main_base():
+    # The #176 change is scoped to the EPIC shape: the issue and freeform shapes (a
+    # standalone, no-epic Tree) still cut from origin/main — never the umbrella base.
+    assert plan(_issue_spec()).base == "origin/main"
+    assert plan(_freeform_spec()).base == "origin/main"
+
+
 def test_epic_dir_is_epics_kind_with_hash_on_leaf():
     p = plan(_epic_spec())
     assert p.dir == ROOT / "acme" / "widget" / "epics" / "HAR02" / "WS02-deadbeef"
