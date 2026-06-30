@@ -102,3 +102,25 @@ def test_resolve_epic_to_resolve_branch_end_to_end():
     # the holding branch.
     epic = wa.resolve_epic(None, "TRE04/WS01")
     assert wa.resolve_branch(epic, "abc123") == "TRE04/agent-abc123"
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        "bad/epic",  # a ref separator — would mangle the branch
+        "A/B/C",  # nested separators
+        "epic with space",  # whitespace inside the token
+        "..",  # path traversal
+        "TRE-03",  # hyphen is outside the alphanumeric token grammar
+    ],
+)
+def test_resolve_epic_malformed_override_degrades_to_epicless_not_cwd(override):
+    # PRECEDENCE CONTRACT (#173): an explicit-but-MALFORMED override is a user error
+    # that must degrade to the epic-less `agent-<id>` fallback — it must NOT silently
+    # fall through to cwd-branch inference. `resolve_epic` returns the non-empty
+    # override verbatim (never reaching the branch-prefix path, so the live
+    # `TRE04/WS01` branch is ignored), and the composed `resolve_branch` then rejects
+    # the malformed token. The load-bearing assertion is the negative one: the result
+    # is `agent-abc123`, NOT `TRE04/agent-abc123`.
+    epic = wa.resolve_epic(override, "TRE04/WS01")
+    assert wa.resolve_branch(epic, "abc123") == "agent-abc123"
