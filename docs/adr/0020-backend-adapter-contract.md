@@ -1,11 +1,14 @@
 # A uniform backend-adapter contract for spawned Runs
 
-> **Status: Proposed (stub).** This ADR fixes the *shape* of the multi-backend seam and
-> the invariants every backend must honour, but deliberately leaves the per-backend
-> **launch specifics** (exact argv, role/instruction injection, auth-env scrub, read-only
-> posture) as **load-bearing unknowns for a WS00 spike to settle** — the same discipline
-> ADR-0019 used for the `claude` backend (real probe → recorded findings → torn down).
-> Until the spike fills §Decision-per-backend, only `claude` is wired.
+> **Status: Proposed.** This ADR fixes the *shape* of the multi-backend seam and the
+> invariants every backend must honour. The per-backend **launch specifics** (exact argv,
+> role/instruction injection, auth-env scrub, read-only posture) were left as load-bearing
+> unknowns for a WS00 spike — the same discipline ADR-0019 used for `claude` (real probe →
+> recorded findings → torn down). **The WS00 spike (#181) has now run** against the real
+> binaries (`codex-cli 0.139.0`, `agy` v1.0.14) and filled §Decision-per-backend below; the
+> per-backend **adapter code** still lands in WS02 (`codex`) / WS03 (`antigravity`) from these
+> recorded findings. §Open decisions records the spike's reviewer-path recommendation for
+> maintainer ratification at the WS00 gate. Until the adapters land, only `claude` is wired.
 >
 > **Extends ADR-0019** (the `claude`-only launch contract) and **refines ADR-0017** (the
 > `--backend claude|codex|antigravity` surface it named but left at one backend).
@@ -81,34 +84,198 @@ not pre-decide it.
      preferred login (the generalization of ADR-0019 §3), and **never** writes a secret to
      disk in the Tree.
 
-## Decision-per-backend — STUB, to be filled by the WS00 spike
+## Decision-per-backend — recorded by the WS00 spike (#181)
 
-For each of `codex` and `antigravity`, the spike runs a real headless probe in a scratch Tree
-(then in the shipit repo) and records, ADR-0019-style:
+Probed against the real binaries (`codex-cli 0.139.0`, `agy` v1.0.14) in throwaway git repos
+(write Runs confirmed by a landed commit; reviewer Runs confirmed against a 2804-line planted-bug
+diff). Throwaway probe scripts torn down (all under the scratchpad, never in the repo).
 
-- **Invocation.** The exact non-interactive/headless argv: how the task prompt is passed,
-  whether a `-p`-equivalent exists, the output/result mode.
-- **Role / instruction conveyance.** How the role's system prompt is injected (native
-  `--system-prompt` / agent-def file / config) — *without* relying on the shipit guard, which
-  this backend does not run.
-- **Auth.** Which env vars to scrub, and how the backend authenticates (key vs. OAuth/login).
-- **Read-only posture.** Whether the backend can express a tool allow-list / sandbox for a
-  reviewer Run, or whether read-only rides solely on the chmod'd Tree.
-- **Lifecycle quirks.** TTY/stdin needs, exit-code semantics, any background mode (not adopted
-  unless foreground pooling bottlenecks — cf. ADR-0019 §7).
+**`agy` ≡ `antigravity` — CONFIRMED.** There is **one** non-Claude review/spawn binary for this
+backend: `agy` (the Antigravity CLI, v1.0.14; `src/shipit/review/backends/agy.py` is literally
+"the Antigravity (agy) CLI backend"). There is **no** separate `antigravity` binary. The
+`--backend antigravity` surface drives the `agy` binary; treat "antigravity" and "agy" as the
+same adapter under two names (the user-facing `--backend` value is `antigravity`; the binary it
+shells out to is `agy`). WS03 builds **one** adapter.
 
-> ⚠️ Do not implement `codex` / `antigravity` adapters from this stub by guessing the CLI
-> flags — that is precisely the kind of paper decision ADR-0019's spike caught out. Run the
-> probe, fill this section, *then* wire the adapter.
+### The one universal, load-bearing operational finding (both backends)
 
-## Open decisions (resolve in WS00, before WS04)
+**stdin MUST be `/dev/null`** (generalizes ADR-0019 §1's claude stdin rule to *every* backend).
+Both binaries **hang waiting on stdin** when launched non-interactively with the prompt passed
+as an argument and an open (non-TTY, unclosed) stdin inherited from the parent:
 
-- **Reviewer path reconciliation.** Does a spawn-based `--backend codex --role reviewer`
-  **replace** the existing `-e review` check-runs funnel (ADR-0005/0006) for codex/agy, run
-  **alongside** it, or feed the *same* readiness gate from a new producer? This is the highest
-  -leverage fork — settle it before WS04 builds the reviewer Run, so the two review mechanisms
-  don't drift. (`agy` vs `antigravity`: confirm whether they are the same backend under two
-  names or two distinct adapters.)
+- `codex exec "<prompt>"` with an open pipe on stdin blocks on `Reading additional input from
+  stdin...` indefinitely (it appends piped stdin as a `<stdin>` block, so it waits for EOF).
+- `agy --print "<prompt>"` with inherited stdin blocks and eventually emits the live
+  `timed out waiting for response` / blank-output failure.
+
+Redirecting **stdin from `/dev/null`** (or, for codex, piping the prompt on stdin and closing it
+at EOF — what `src/shipit/review/backends/codex.py` already does via `input=prompt`) eliminates
+the hang for both: probe write/review Runs that hung indefinitely completed in **10–35 s** once
+stdin was closed. The adapter's `launch()` MUST set the child's stdin to `/dev/null` (the shared
+launch path already owns this for `claude`; the seam keeps it shared). **This finding directly
+explains the funnel's intermittent agy failure — see §Open decisions.**
+
+### codex (`codex-cli` 0.139.0)
+
+- **Invocation — write Run.** `codex exec --skip-git-repo-check
+  --dangerously-bypass-approvals-and-sandbox --model <id> "<task prompt>"`, subprocess `cwd` =
+  the Tree, stdin `/dev/null`. The task prompt is the first positional arg (or `-`/stdin). The
+  **sandbox choice is load-bearing**: codex's `--sandbox` has three modes — `read-only`,
+  `workspace-write`, `danger-full-access`. Probed directly: under `workspace-write` codex can
+  edit files **but cannot commit** — it is denied `.git/index.lock` (`Operation not permitted`)
+  and has **no network** (so `git push` / `gh` would also fail). A write Run that must
+  **commit + push + open a draft PR via `gh`** therefore needs the unsandboxed posture:
+  `--dangerously-bypass-approvals-and-sandbox` (the flag codex documents for *"environments that
+  are externally sandboxed"* — our chmod'd Tree **is** that external sandbox) or equivalently
+  `--sandbox danger-full-access`. Probe-confirmed: with the bypass flag, a file edit followed by
+  `git add` and `git commit` landed a real commit. Result mode: foreground, final message on stdout; optional
+  `--json` (JSONL events), `--output-schema <f>` (native JSON shape), `-o/--output-last-message
+  <f>` (capture final message to a file). The parent reads only start + exit (PR is the channel).
+- **Invocation — reviewer Run (read-only).** `codex exec --skip-git-repo-check --ephemeral
+  --sandbox read-only --model <id> "<reviewer task>"`, `cwd` = the shared read-only Tree, stdin
+  `/dev/null`. Probe-confirmed against the 2804-line diff: codex **lazily walked the code** (ran
+  `git diff` / grep itself) and returned rich, code-located findings (absolute path + line range)
+  for **both** planted bugs in ~26 s. (This is the existing review backend's invocation minus the
+  `--output-schema` temp file; `src/shipit/review/backends/codex.py` already runs exactly this
+  for the funnel.)
+- **Role / instruction conveyance.** **No** native `--system-prompt`/`--agent` flag exists. The
+  role's system prompt is conveyed by **prepending it to the task prompt** (the shared
+  `write_task()` / `reviewer_task()` text). codex *also* honours an `AGENTS.md` project-memory
+  file and `-c experimental_instructions_file=…`, but writing either into the Tree would pollute
+  the PR, so **prompt-prepend is the chosen mechanism** (the funnel already proves prompt-only
+  conveyance works).
+- **Auth.** Authenticates via **ChatGPT OAuth** (tokens in `~/.codex/auth.json`, dir overridable
+  via `CODEX_HOME`), inherited by the child. Probe: a **bogus `OPENAI_API_KEY` in the env did
+  NOT break** `codex exec` on this box — codex 0.139 preferred the stored ChatGPT tokens. Still,
+  the safe generalization of ADR-0019 §3 holds: the adapter **scrubs `OPENAI_API_KEY` (and
+  `CODEX_API_KEY`)** from the child env so the login wins, unless a known-valid key is passed
+  deliberately. **Never** write the key/token into the Tree; auth stays in `CODEX_HOME`.
+- **Read-only posture.** codex **has a real native sandbox**: `--sandbox read-only` is a genuine
+  reviewer constraint (no writes, no network) and is **defense-in-depth on top of** the chmod'd
+  Tree (ADR-0018), which remains the load-bearing guard.
+- **Lifecycle quirks.** Foreground/blocking; exit 0 on success. `--ephemeral` skips session
+  persistence; `-C/--cd` sets a working root but OS-process `cwd` is the rooting mechanism
+  (ADR-0019). **stdin `/dev/null`** mandatory (see universal finding). No background mode adopted.
+
+### antigravity (`agy` v1.0.14)
+
+- **Invocation — write Run.** `agy --new-project --add-dir <Tree> --model="<verbatim name>"
+  --print-timeout=<dur> --dangerously-skip-permissions --print "<task prompt>"`, subprocess `cwd`
+  = the Tree, stdin `/dev/null`. **Two agy-specific gotchas, both probe-confirmed:**
+  1. **agy IGNORES the process `cwd` for its workspace.** A bare `agy --print` rooted at the Tree
+     wrote its file into `~/.gemini/antigravity-cli/scratch/…` and reported *"you didn't have an
+     active workspace set"*. The agent is rooted in the Tree only by **`--new-project --add-dir
+     <Tree>`** (establishes an active project + grants write access to that dir). With those flags
+     and `cwd` = Tree, a file edit followed by `git add` and `git commit` landed a real commit in the Tree.
+  2. **`--dangerously-skip-permissions`** is agy's bypassPermissions equivalent (auto-approve all
+     tool/shell requests); without it a non-interactive `--print` write Run stalls on permission
+     prompts.
+- **Invocation — reviewer Run (read-only).** Same shape **without** `--dangerously-skip-permissions`
+  (a reviewer needs no write/exec approval): `agy --new-project --add-dir <Tree> --model="<name>"
+  --print-timeout=<dur> --print "<reviewer task>"`, `cwd` = the read-only Tree, stdin `/dev/null`.
+  Probe-confirmed: tree-rooted, told to run `git diff` itself, agy returned valid JSON findings in
+  ~10 s.
+- **Role / instruction conveyance.** **No** native `--system-prompt`/agent-def flag. Role + task
+  are conveyed in the **`--print` instruction text** (or a prompt tempfile the instruction points
+  at by absolute path — what `src/shipit/review/backends/agy.py` does today). Prompt-prepend is the
+  mechanism.
+- **Auth.** Authenticates via the **Antigravity OAuth login** (creds under
+  `~/.gemini/antigravity-cli` + `~/.antigravity`), inherited by the child. Probe: a `GEMINI_API_KEY`
+  *was* present in the env and agy still used its OAuth login. Safe generalization: the adapter
+  **scrubs `GEMINI_API_KEY` / `GOOGLE_API_KEY`** so a stale key can't shadow the login. Never write
+  creds into the Tree.
+- **Read-only posture.** agy has **no granular tool allow-list / native read-only sandbox** for a
+  reviewer (its `--sandbox` flag only "enables terminal restrictions", best-effort). So a reviewer
+  Run's read-only guarantee **rides solely on the chmod'd shared read-only Tree (ADR-0018)** — the
+  load-bearing guard — with "omit `--dangerously-skip-permissions`" (and optionally `--sandbox`) as
+  best-effort defense-in-depth. This is exactly the asymmetry §Decision invariant 4 anticipated.
+- **Lifecycle quirks.** `--print` is foreground/blocking with `--print-timeout` (default 5m; pin
+  higher for big reviews). Models via `--model="<verbatim name>"`, the verbatim name taken from
+  the `agy models` list; a bare
+  `pro` silently resolves to Gemini Flash, which in `--print` goes **agentic** (runs shell/build
+  instead of answering) — pin a capable non-agentic model (the funnel pins
+  `Gemini 3.1 Pro (High)`). **stdin `/dev/null`** is mandatory (see the universal finding — this
+  is the agy failure root cause). No background mode adopted.
+
+## Open decisions (WS00 recommendation, for maintainer ratification at the WS00 gate)
+
+**Reviewer-path reconciliation.** shipit has two ways to get a codex/agy review on a PR: the
+existing **`-e review` check-runs funnel** (ADR-0005/0006; front-loads the diff into the prompt)
+and the new **spawn-Tree path** (`--backend codex --role reviewer`, drops the backend into a
+shared read-only Tree at the correct head and tells it to fetch the scoped diff itself —
+`reviewer_task()` in `src/shipit/spawn/launch.py` already does this). `agy` ≡ `antigravity` is
+**confirmed** (one adapter — see §Decision-per-backend).
+
+### Recommendation: **REPLACE** — consolidate on the spawn-Tree path as the single reviewer producer
+
+End-state: the spawn-Tree reviewer becomes the one producer feeding the readiness gate; the
+funnel's front-loading is retired. **But the rationale is architectural, not the robustness story
+the funnel's symptoms first suggested — the spike falsified that story, and honesty about it
+changes the migration plan.** Recommend "replace" on these grounds:
+
+1. **Tree fidelity at the correct head.** ADR-0018 gives a real shared read-only checkout at the
+   PR's true head. The reviewer sees the *whole codebase*, not a context-free diff, and walks it
+   lazily — codex tree-rooted returned **richer, code-located findings** (absolute path + line
+   range, cross-referenced against un-changed code) than a front-loaded diff can support.
+2. **Scoped diff without guessing the base.** The reviewer runs **`gh pr diff`** (which resolves
+   the PR's real base/head — epic branch *or* `main`; do **not** assume `main`) inside the Tree,
+   instead of the funnel front-loading a pre-computed diff. One reviewer prompt, no schema/diff
+   temp-file plumbing.
+3. **Uniformity.** One reviewer mechanism across claude/codex/antigravity over one Tree substrate,
+   rather than a second, divergent review path.
+
+### The falsified hypothesis (this is the load-bearing spike result — read before ratifying)
+
+The maintainer's leading hypothesis was that **front-loading a large diff** causes agy's
+intermittent blank-text / truncated-JSON failures (`_TIMEOUT_MARKER = "timed out waiting for
+response"` in `src/shipit/review/backends/agy.py`), and that tree-rooting would fix it. The spike
+ran the A/B and **the evidence does not support that mechanism**:
+
+- agy front-loaded a **2804-line** diff completed in **35 s** with valid JSON **once stdin was
+  `/dev/null`**; a 455-line front-load completed in 16 s. Front-load size up to 2804 lines is
+  **not** what breaks agy.
+- **Every** agy hang in the spike — front-loaded *and* tree-rooted, Flash *and* Pro — was the
+  **inherited-stdin hang** (agy `--print` waiting on an unclosed stdin), cleared the instant stdin
+  was `/dev/null`.
+- **Root cause located in the funnel itself:** `src/shipit/review/backends/codex.py` runs
+  `proc.run(..., input=prompt)` → stdin is piped and **closed** at EOF → codex review is reliable.
+  `src/shipit/review/backends/agy.py` runs `proc.run(..., input=None)` → the child **inherits the
+  parent's stdin** (`proc.run` in `src/shipit/proc.py` passes `input` straight through and never
+  sets `stdin=DEVNULL`). When shipit's own stdin is an open-but-idle pipe (CI, some spawn
+  contexts), agy blocks → the exact intermittent blank/timeout failure. This is a **one-line fix**
+  (`stdin=subprocess.DEVNULL` in `proc.run`, or `input=""` for agy) **independent of the
+  replace decision** — recommend landing it regardless, now.
+
+**Implication for ratification:** "replace" is worth doing for Tree-fidelity + scoped-diff +
+uniformity (grounds 1–3), **not** because it is the only cure for agy reliability — that cure is
+the cheap stdin fix above and applies whichever path wins. Do not let the replace work *gate* the
+agy reliability fix.
+
+### Migration cost — what the funnel does that the spawn path MUST preserve or consciously drop
+
+WS04 cannot "replace" until these funnel responsibilities are accounted for:
+
+- **Check-run integration.** The funnel posts each review as a GitHub **check-run** that the
+  readiness engine reads. The spawn-Tree reviewer currently delivers *through the PR* (review
+  comment/exit). WS04 MUST wire the spawn reviewer's result back to the **same readiness
+  check-run** (a new producer feeding the existing gate), or readiness gating regresses. *(This is
+  the real integration work; treat it as WS04's core.)*
+- **Readiness gating.** `prstate/reviewers*.py` decides REQUEST / RE-REQUEST / stale-after-push per
+  reviewer. The spawn path must feed the same gate so per-reviewer `rerun:` semantics still hold.
+- **`reviewers:` config.** The model/timeout/`rerun` map in `.shipit.toml` / `.release-sync.yaml`
+  drives the funnel today. The spawn reviewer must read the **same config** (model alias → backend
+  model, per-reviewer timeout) so consumers don't re-configure.
+- **Native schema enforcement (codex).** The funnel uses `--output-schema` for guaranteed JSON;
+  the tree-rooted reviewer relies on prompt-instructed JSON. WS04 should keep `--output-schema` on
+  the codex reviewer (cheap, and it is a real robustness win the spike confirmed).
+- **Dry-run honesty.** The funnel's dry-run/no-op path (don't bill a model, report what *would*
+  run) must survive into the spawn path.
+
+Recommended sequencing: **(0)** land the `proc.run` stdin fix now (un-gated); **(1)** WS04 builds
+the spawn reviewer feeding the existing readiness check-run, runs it **alongside** the funnel
+behind the `reviewers:` config for one cycle to confirm parity; **(2)** retire the funnel's
+front-loading once parity holds. The maintainer ratifies "replace vs alongside-then-replace" at
+the WS00 gate.
 
 ## Considered options
 
