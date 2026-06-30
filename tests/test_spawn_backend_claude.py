@@ -93,11 +93,11 @@ def test_child_env_defaults_to_os_environ_and_scrubs_it(monkeypatch):
     assert env.get("SHIPIT_SPAWN_MARKER") == "present"
 
 
-def test_registry_includes_claude_and_codex():
+def test_registry_includes_claude_codex_and_antigravity():
     # SUPPORTED_BACKENDS is adapter-driven (ADR-0020 §Decision 2): derived from the
-    # registry. claude (adapter #0) and codex (WS02) are wired; antigravity lands in
-    # WS03. Registration order is preserved, claude first.
-    assert backends.supported_backends() == ("claude", "codex")
+    # registry. claude (adapter #0), codex (WS02), and antigravity (WS03) are all wired.
+    # Registration order is preserved, claude first.
+    assert backends.supported_backends() == ("claude", "codex", "antigravity")
 
 
 def test_resolve_returns_the_claude_adapter():

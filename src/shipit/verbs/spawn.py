@@ -114,7 +114,11 @@ def spawn() -> None:
     type=click.Choice(SUPPORTED_BACKENDS),
     default="claude",
     show_default=True,
-    help="The agent backend to launch. Only `claude` is wired today (ADR-0019).",
+    help=(
+        "The agent backend to launch (derived from the adapter registry). `claude` "
+        "(ADR-0019) and `antigravity` — the `agy` CLI, write Runs (ADR-0020) — are "
+        "wired; `codex` lands alongside."
+    ),
 )
 def subagent_cmd(
     repo: str, epic: str, ws: int, issue: int | None, role: str, backend: str
@@ -290,12 +294,14 @@ def run_subagent(
     # --agent <role>, so the guard allows the Run's own edits). The task tells the Run to
     # implement the issue and open a draft PR from this branch (the result channel —
     # ADR-0019 §6); base_branch drops the remote prefix off the Tree's base so the PR
-    # targets a branch name (origin/main -> main).
+    # targets a branch name (origin/main -> main). The Tree path is passed as `cwd`: most
+    # backends root via the process cwd and ignore it, but `agy` ignores its process cwd
+    # and is rooted ONLY by `--add-dir <Tree>`, so the adapter needs the path (ADR-0020).
     base_branch = tree.base.split("/", 1)[-1] if "/" in tree.base else tree.base
     task = launch.write_task(
         role, issue=issue, branch=tree.branch, base_branch=base_branch
     )
-    cmd = adapter.build_command(task, role)
+    cmd = adapter.build_command(task, role, cwd=tree.path)
     try:
         result = launch.launch(
             cmd, cwd=tree.path, env=adapter.child_env(), runner=launcher
@@ -402,8 +408,17 @@ def _launch_reviewer(
         print(f"spawn subagent: read-only tree creation failed: {exc}", file=sys.stderr)
         return 1
 
+    # `cwd=tree.path` is threaded here exactly as on the write path: most backends ignore
+    # it (they root via the process cwd), but `agy` is rooted ONLY by `--add-dir <Tree>`,
+    # so `build_command` must never be called without it — otherwise `--backend antigravity
+    # --role reviewer` would raise ValueError and leak a traceback. The read-only Tree path
+    # is the right root here. Full non-Claude reviewer semantics (read-only posture) are
+    # WS04; this only unifies the call signature so the traceback can't occur.
     cmd = adapter.build_command(
-        launch.reviewer_task(branch), REVIEWER_ROLE, tools=adapter.reviewer_tools
+        launch.reviewer_task(branch),
+        REVIEWER_ROLE,
+        tools=adapter.reviewer_tools,
+        cwd=tree.path,
     )
     try:
         result = launch.launch(

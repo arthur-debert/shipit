@@ -33,6 +33,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
+from pathlib import Path
 
 
 class BackendAdapter(ABC):
@@ -57,15 +58,25 @@ class BackendAdapter(ABC):
         role: str,
         *,
         tools: tuple[str, ...] | list[str] | None = None,
+        cwd: str | Path | None = None,
     ) -> list[str]:
         """The backend's headless argv for ``task`` under ``role``.
 
         Returns the exact non-shell argv to run as the child. ``role`` is conveyed
         however the backend conveys a system prompt / agent identity (for ``claude``,
-        the native ``--agent`` flag). ``tools`` narrows a reviewer Run's tool access
-        when the backend supports an allow-list (the value of :attr:`reviewer_tools`);
-        a write Run passes ``None`` and inherits the role's full toolset. A backend
-        with no allow-list ignores ``tools`` — its read-only posture rides the Tree.
+        the native ``--agent`` flag; a backend with no such flag prepends the role to
+        the prompt text). ``tools`` narrows a reviewer Run's tool access when the
+        backend supports an allow-list (the value of :attr:`reviewer_tools`); a write
+        Run passes ``None`` and inherits the role's full toolset. A backend with no
+        allow-list ignores ``tools`` — its read-only posture rides the Tree.
+
+        ``cwd`` is the **Tree path** the child is rooted in. Most backends honour the
+        OS process ``cwd`` (which :func:`shipit.spawn.launch.launch` sets) and so
+        ignore this argument — it is here for the load-bearing exception (ADR-0020
+        §Decision-per-backend): ``agy`` IGNORES its process ``cwd`` for the workspace
+        and must be handed the Tree explicitly (``--add-dir <cwd>``) or its writes land
+        in ``~/.gemini/.../scratch`` instead of the Tree. An adapter that needs the
+        path therefore reads it here; one that does not leaves it ``None``.
         """
 
     @abstractmethod
