@@ -10,12 +10,13 @@ So even the throwaway in-CC path lands in a real Tree, closing #139 *by
 construction* (the supported route can no longer reach a native worktree).
 
 THIN by design (mirrors `hook pretooluse`): read the `WorktreeCreate` payload on
-stdin → resolve the holding branch (`harness.worktree_adapter`) from the
-session-stable epic marker + the spawn's id → create the Tree
-(`tree.create`) → write its absolute path to stdout. The branch is **deferred**
-(`<epic>/agent-<id>`, base `origin/main`): a coarse holding branch the spawned
-agent self-branches off, because the hook cannot know the per-spawn work
-stream/role (ADR-0017).
+stdin → resolve the holding branch (`harness.worktree_adapter`) from the epic
+(inferred from the coordinator's `cwd` branch, or the `SHIPIT_EPIC` override, then
+validated against the live `<epic>/umbrella` branch) + the spawn's id → create the
+Tree (`tree.create`) → write its absolute path to
+stdout. The branch is **deferred** (`<epic>/agent-<id>`, base `origin/main`): a
+coarse holding branch the spawned agent self-branches off, because the hook cannot
+know the per-spawn work stream/role (ADR-0017).
 
 **Fail-CLOSED — the OPPOSITE of `hook pretooluse`.** Claude Code adopts the path a
 zero-exit hook prints and aborts the spawn on a non-zero exit. A silent fallback
@@ -85,31 +86,102 @@ def run(stdin: TextIO | None = None, stdout: TextIO | None = None) -> int:
 
 
 def _resolve_branch(payload: dict[str, object]) -> str:
-    """The holding branch for this spawn: `<epic>/agent-<id>` (epic from the marker).
+    """The holding branch for this spawn: `<epic>/agent-<id>` (epic inferred from cwd).
 
     The id comes from the payload's **`name`** field — Claude Code's own throwaway
     spawn id, e.g. `"name": "agent-a567b7e2…"` — normalized to a safe ref component;
     if it normalizes to nothing a random id is synthesized so the spawn is never
-    blocked on a missing name. The epic comes from the session-stable marker env
-    var, falling back safely to an epic-less branch when unset or malformed.
+    blocked on a missing name.
+
+    The epic is inferred from **live git state** (#173): the coordinator's spawning
+    branch — read by probing the branch of the payload's `cwd` — already encodes the
+    epic per ADR-0016 (`EPIC/WSnn`), so its prefix before the first `/` is the epic
+    (`TRE04/WS01` → `TRE04`). The `SHIPIT_EPIC` env var stays supported only as an
+    optional explicit override (wins over the inferred branch) for the rare
+    cross-epic spawn. Both the git probe and the prefix extraction degrade to `None`
+    on a detached / no-slash / unreadable branch or a missing `cwd`, falling back
+    safely to an epic-less branch.
+
+    The candidate epic (from the branch prefix OR the override) is then **validated
+    against the real `<epic>/umbrella` branch** (:func:`_validated_epic`): only a
+    prefix that names an actual epic (its umbrella exists) namespaces the branch, so a
+    coordinator on an ordinary `feature/foo` — or an override naming a dead epic —
+    degrades to the same safe epic-less fallback rather than minting a bogus
+    `feature/agent-…` holding branch.
 
     **Verified WorktreeCreate payload contract (live probe, Claude Code 2.1.196).**
     CC fires the hook with `{session_id, transcript_path, cwd, prompt_id,
     hook_event_name, name}`; the spawn-id field is **`name`** (value `agent-<agentId>`),
     NOT `worktree_name` (an earlier guess that is always absent, so reading it always
     fell through to the random-id fallback and silently broke the agent-id→branch
-    link). CC then adopts the **bare path printed to stdout** as the subagent's cwd
-    **without validating it** — so a dissociated clone path is adopted verbatim,
-    which is exactly how this fail-closed adapter relocates the spawn into a Tree.
-    (This contract was lost between the #139 spike and WS04; it is pinned here so it
-    cannot be lost again.)
+    link). `cwd` is the coordinator's working dir, used to infer the epic. CC then
+    adopts the **bare path printed to stdout** as the subagent's cwd **without
+    validating it** — so a dissociated clone path is adopted verbatim, which is
+    exactly how this fail-closed adapter relocates the spawn into a Tree. (This
+    contract was lost between the #139 spike and WS04; it is pinned here so it cannot
+    be lost again.)
     """
     raw_id = str(payload.get("name") or "")
     agent_id = worktree_adapter.normalize_agent_id(raw_id) or secrets.token_hex(
         _ID_BYTES
     )
-    epic = os.environ.get(worktree_adapter.EPIC_MARKER_ENV)
+    override = os.environ.get(worktree_adapter.EPIC_MARKER_ENV)
+    candidate = worktree_adapter.resolve_epic(override, _spawn_branch(payload))
+    epic = _validated_epic(candidate, payload)
     return worktree_adapter.resolve_branch(epic, agent_id)
+
+
+def _validated_epic(candidate: str | None, payload: dict[str, object]) -> str | None:
+    """Confirm `candidate` names a REAL epic before it namespaces the holding branch.
+
+    The pure resolver only *extracts* a candidate epic — the spawning branch's prefix,
+    or the `SHIPIT_EPIC` override — and cannot tell `TRE04` (a real epic) from
+    `feature` (a coordinator merely sitting on `feature/foo`). The semantic test for
+    "is `<candidate>` a real epic?" is "does `<candidate>/umbrella` exist as a branch?"
+    (ADR-0016: every epic has an umbrella). This validates it with a LOCAL ref lookup
+    (`gh.epic_umbrella_exists`, no network) in the coordinator's checkout. The SAME
+    validation applies to an explicit override, so an override naming a non-existent
+    epic degrades just like an inferred non-epic prefix — consistent safe-degrade.
+
+    Returns the candidate only when its umbrella exists; otherwise `None` → the safe
+    epic-less `agent-<id>` fallback. `None` in, `None` out (nothing to validate).
+    """
+    if candidate is None:
+        return None
+    cwd = _ref_check_cwd(payload)
+    if cwd is None:
+        return None
+    return candidate if gh.epic_umbrella_exists(candidate, cwd=cwd) else None
+
+
+def _ref_check_cwd(payload: dict[str, object]) -> str | None:
+    """A checkout of the repo to run the umbrella-existence ref lookup in.
+
+    Prefers the payload `cwd` (the coordinator's checkout — the same place the
+    spawning branch was read), falling back to the ambient hook checkout
+    (`gh.repo_root()`) so an override-only spawn that carries no `cwd` can still be
+    validated. `None` when neither resolves, degrading the epic to the safe epic-less
+    fallback rather than guessing.
+    """
+    cwd = payload.get("cwd")
+    if isinstance(cwd, str) and cwd:
+        return cwd
+    return gh.repo_root()
+
+
+def _spawn_branch(payload: dict[str, object]) -> str | None:
+    """The coordinator's current branch — the live state the epic is inferred from.
+
+    Probes `git rev-parse --abbrev-ref HEAD` in the payload's `cwd` via
+    :func:`gh.git_current_branch`, which already yields `None` on a detached/unborn
+    HEAD or any git error. Returns `None` when the payload carries no usable `cwd`,
+    so a malformed payload degrades to the epic-less fallback rather than crashing
+    the hook.
+    """
+    cwd = payload.get("cwd")
+    if not isinstance(cwd, str) or not cwd:
+        return None
+    return gh.git_current_branch(cwd=cwd)
 
 
 def _create_tree(branch: str) -> str:

@@ -78,10 +78,11 @@ The PR lifecycle (draft -> ready -> stop):
         never provisioned by hand. Two launch paths, both routing the Run into an
         isolated Tree: the `shipit spawn subagent --repo R --epic E --ws N --issue I --role implementer`
         verb (it resolves the base and creates the Tree, then roots a headless
-        agent in it — TODAY the verb provisions the WS Tree off `origin/main` and its
-        draft PR targets `main` for EVERY spawn; the epic-grouped base
-        (`origin/E/umbrella`) and epic-branch PR target *by this verb* are deferred,
-        see follow-up #176), or the in-CC `Agent(isolation:"worktree")` tool, whose spawn the
+        agent in it — for a work stream (`--epic E --ws N`) the verb cuts the WS Tree
+        off the epic-grouped base `origin/E/umbrella` and its draft PR targets the
+        epic branch `E/umbrella`, matching the coordinator-driven epic topology; it
+        fail-closes loudly if `origin/E/umbrella` is absent on the remote — never a
+        silent fallback to `origin/main` (#176, closed)), or the in-CC `Agent(isolation:"worktree")` tool, whose spawn the
         `WorktreeCreate` hook auto-routes into a Tree. The coordinator never runs
         `shipit tree create` by hand to provision a Run and never points an Agent tool at
         an external checkout. A Tree is a dissociated clone rooted as the Run's cwd (no

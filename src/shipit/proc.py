@@ -44,6 +44,15 @@ def run(
     or override a key but never drop one. The Tree provisioner relies on it to keep
     a parent's ``PIXI_*`` project pointers from leaking into a child operating in a
     different clone. On a nonzero exit with ``check=True`` raise :class:`ProcError`.
+
+    Stdin (ADR-0020): when no ``input`` is supplied the child's stdin is redirected
+    from ``os.devnull`` rather than left to INHERIT the parent's. Inheriting an idle
+    parent pipe is the root cause of an intermittent hang — a child that reads stdin
+    (notably ``agy --print``) blocks forever on a pipe that never closes, surfacing as
+    a blank-text timeout. ``gh``/``git`` never read stdin, so ``DEVNULL`` is a no-op
+    for them; for any stdin-reading child it is the difference between a clean EOF and
+    a hang. When ``input`` IS given, ``subprocess.run`` opens its own pipe and closes
+    it after writing, so ``stdin`` is left to subprocess (passing both is a ValueError).
     """
     if env is None:
         merged_env = None
@@ -56,6 +65,9 @@ def run(
         cwd=cwd,
         env=merged_env,
         input=input,
+        # ``input`` and ``stdin`` are mutually exclusive in subprocess.run: only pin
+        # stdin to DEVNULL when we are NOT piping input (otherwise subprocess owns it).
+        stdin=subprocess.DEVNULL if input is None else None,
         capture_output=capture_output,
         text=True,
         check=False,
