@@ -114,3 +114,49 @@ never a silent fallback to a native worktree.
 This **refines ADR-0017** (the launch mechanism it left open) and **does not amend** the
 role model of ADR-0011/0012 — the spike confirmed `--agent` makes the existing
 `resolve_role` rule reach headless children unchanged.
+
+## Amendment (2026-06-30): the launch routes through pixi for provisioned Trees
+
+Decision #1's **bare `claude` invocation is corrected**. Setting the subprocess
+`cwd=<Tree>` roots the child's *writes* in the Tree but does **NOT activate the Tree's
+pixi env** — pixi activation is a PATH/`CONDA_PREFIX` transform, not a property of the
+cwd. So a bare `claude …` child inherits the **coordinator's (or system) environment**:
+its `python` / `pytest` / `ruff` / `shipit` resolve to the WRONG `.pixi` env (a different
+Tree's, or none), and the Tree we just provisioned is silently bypassed — a correctness
+bug the original contract never considered (it only weighed auth and role conveyance).
+
+**Corrected invocation.** For a **provisioned (write) Tree** the child MUST launch
+*through* pixi:
+
+```text
+pixi run --manifest-path <tree>/pixi.toml -- claude -p "<task>" --agent <role> … --output-format json
+```
+
+The `--` separates pixi's args from the `claude` argv; the explicit `--manifest-path`
+overrides any leaked `PIXI_PROJECT_MANIFEST`. The child then lands in the Tree's own env.
+This routing is **gated on the Tree carrying a provisioned env** (`<tree>/.pixi/envs/default`
+exists): a **reviewer's read-only Tree** (ADR-0018 — clone+checkout, never provisioned)
+and a **non-pixi repo** have no such env, so those stay **BARE** — routing them through
+`pixi run` would force a solve into a chmod'd tree or fail outright.
+
+**Env strategy.** Decision #3's `ANTHROPIC_API_KEY` scrub stands, and the launch path now
+ALSO scrubs leaked `PIXI_*` / `CONDA_*` project pointers (mirroring
+`tree.create.provision_env`, reusing `is_leaked_pixi_var` so the `PIXI_*` cache-var
+carve-out cannot drift). `--clean-env` is **NOT** used.
+
+**Spike evidence (2026-06-30).** A probe settled the mechanism:
+
+- **Bare launch** → the child lands in the *coordinator's* env (bug reproduced).
+- **`pixi run --clean-env`** → **FALSIFIED**: it strips `HOME` and `PATH`, so the child
+  finds neither python (no Tree activation) nor the `claude` binary
+  (`claude: command not found`, rc 127).
+- **CURATED passthrough** (the adopted form) → `pixi run --manifest-path <tree>/pixi.toml
+  -- claude …` with `env=` the parent minus `ANTHROPIC_API_KEY` + leaked
+  `PIXI_*`/`CONDA_*` → the child lands in the Tree env, `HOME` intact, claude
+  authenticates (**rc 0**), stdout JSON clean, stderr empty. The explicit
+  `--manifest-path` already overrides a leaked `PIXI_PROJECT_MANIFEST`, so the env scrub
+  is belt-and-suspenders for activation (it still cleans the agent's own `pixi` calls).
+
+Implemented in `src/shipit/spawn/launch.py` (`pixi_wrap` / `scrub_tree_env`), wired at the
+`shipit.verbs.spawn` launch call sites. The full verified contract lives in
+`docs/dev/pixi.lex` §7/§8.

@@ -367,9 +367,7 @@ def _pixi_runs(tree_path: str) -> tuple[bool, str]:
     :func:`shipit.tree.create.provision_env` guards against, reused here), so the
     child ``pixi`` re-resolves the Tree's own manifest. Returns ``(ok, detail)``.
     """
-    env = {
-        k: v for k, v in os.environ.items() if not tree_create._is_leaked_pixi_var(k)
-    }
+    env = {k: v for k, v in os.environ.items() if not tree_create.is_leaked_pixi_var(k)}
     try:
         completed = subprocess.run(  # noqa: S603,S607 — fixed argv, scrubbed env
             ["pixi", "run", "python", "-c", "print('pixi-ok')"],

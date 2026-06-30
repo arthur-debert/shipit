@@ -137,13 +137,19 @@ def sccache_env(tree_dir: Path) -> dict[str, str]:
 #: install commit's pre-commit hook dies (#167). This is the same env-leak class as
 #: ADR-0019's ``ANTHROPIC_API_KEY`` finding — an inherited var breaking a child
 #: rooted elsewhere — and the fix is the same: scrub it. Cache-location vars are
-#: user-level (not project-bound), so they are kept (see :func:`_is_leaked_pixi_var`)
+#: user-level (not project-bound), so they are kept (see :func:`is_leaked_pixi_var`)
 #: to preserve cross-Tree package-cache sharing.
 PIXI_CACHE_VARS = frozenset({"PIXI_CACHE_DIR", "RATTLER_CACHE_DIR"})
 
 
-def _is_leaked_pixi_var(key: str) -> bool:
-    """Whether ``key`` is a parent-project ``PIXI_*`` pointer to scrub from a Tree child."""
+def is_leaked_pixi_var(key: str) -> bool:
+    """Whether ``key`` is a parent-project ``PIXI_*`` pointer to scrub from a Tree child.
+
+    The single source of truth for "which ``PIXI_*`` vars bind to the PARENT project and
+    must not leak into a child rooted in a different clone". Both the provisioning env
+    (:func:`provision_env`) and the launch env (:func:`shipit.spawn.launch.scrub_tree_env`)
+    scrub on this predicate, so the two paths can never drift on the cache-var carve-out.
+    """
     return key.startswith("PIXI_") and key not in PIXI_CACHE_VARS
 
 
@@ -151,7 +157,7 @@ def provision_env(tree_dir: Path) -> dict[str, str]:
     """The COMPLETE environment for a provisioning command run inside ``tree_dir``.
 
     A copy of the current environment with the parent's leaked ``PIXI_*`` project
-    pointers removed (:func:`_is_leaked_pixi_var`) and the ADR-0015 build env
+    pointers removed (:func:`is_leaked_pixi_var`) and the ADR-0015 build env
     (:func:`sccache_env`) applied. Returned as the full env — not an overlay — so
     :func:`run_provision` can hand it to :func:`shipit.proc.run` with
     ``replace_env=True``: a merge could re-add the very ``PIXI_*`` vars we are
@@ -160,7 +166,7 @@ def provision_env(tree_dir: Path) -> dict[str, str]:
     ``shipit`` re-resolves the project from its own cwd (the Tree), which is the
     whole point.
     """
-    env = {k: v for k, v in os.environ.items() if not _is_leaked_pixi_var(k)}
+    env = {k: v for k, v in os.environ.items() if not is_leaked_pixi_var(k)}
     env.update(sccache_env(tree_dir))
     return env
 
