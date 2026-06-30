@@ -15,6 +15,7 @@ import pytest
 
 from shipit import gh
 from shipit.tree import create as create_mod
+from shipit.tree import layout
 from shipit.tree.create import create, create_from_source
 from shipit.tree.layout import TreeSpec
 
@@ -110,6 +111,55 @@ def test_create_from_source_resolves_origin_url(
     dest = Path(tree.path)
     assert _git(["remote", "get-url", "origin"], cwd=dest) == str(remote)
     assert not (dest / ".git" / "objects" / "info" / "alternates").exists()
+
+
+def test_tree_satisfies_the_critical_isolation_invariants(
+    tmp_path: Path, remote: Path, reference: Path
+):
+    """The three non-negotiable invariants of the Tree the WorktreeCreate hook returns
+    (ADR-0014), pinned as real assertions on a real git clone so a regression in the
+    clone strategy fails loud:
+
+    (a) it lives under the central trees root and inside NO ``.claude`` directory —
+        a Tree must never land in the harness's own ``.claude/worktrees`` (the #139
+        trap the demoted adapter exists to close);
+    (b) it is a real dissociated CLONE — ``.git`` is a DIRECTORY, not the ``.git``
+        *file* pointer a ``git worktree`` checkout leaves behind;
+    (c) it borrows NO objects — ``--dissociate`` copied them, so there is no
+        ``objects/info/alternates`` link back to the reference.
+    """
+    trees_root = tmp_path / "trees"
+    spec = _spec(tmp_path)  # spec.root == tmp_path / "trees"
+    tree = create(spec, source_repo=str(reference), github_url=str(remote))
+    dest = Path(tree.path)
+
+    # (a) Under the central trees root, within NO `.claude` directory.
+    assert dest.is_relative_to(trees_root)
+    assert ".claude" not in dest.parts
+
+    # (b) A real dissociated clone: `.git` is a directory, not a worktree pointer file.
+    git_path = dest / ".git"
+    assert git_path.is_dir()
+    assert not git_path.is_file()
+
+    # (c) No borrowed objects.
+    assert not (dest / ".git" / "objects" / "info" / "alternates").exists()
+
+
+def test_central_root_is_absolute_and_outside_any_claude_dir(monkeypatch):
+    """The central root every Tree hangs off is absolute and `.claude`-free, so a Tree
+    provisioned WITHOUT an explicit root (the WorktreeCreate hook path, which calls
+    `create_from_source`) cannot land inside the harness's `.claude/worktrees`
+    (ADR-0014 isolation). Covers both the default and an env-override central root."""
+    monkeypatch.delenv(layout.CENTRAL_ROOT_ENV, raising=False)
+    default_root = create_mod.central_root()
+    assert default_root.is_absolute()
+    assert ".claude" not in default_root.parts
+
+    monkeypatch.setenv(layout.CENTRAL_ROOT_ENV, "/srv/agents/trees")
+    override_root = create_mod.central_root()
+    assert override_root.is_absolute()
+    assert ".claude" not in override_root.parts
 
 
 def test_create_rolls_back_partial_tree_on_failure(
