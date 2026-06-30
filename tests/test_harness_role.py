@@ -23,6 +23,7 @@ from shipit.harness.role import Role, resolve_role
         ({"agent_type": "Implementer"}, Role.IMPLEMENTER),
         ({"agent_type": "shepherd"}, Role.SHEPHERD),
         ({"agent_type": "explorer"}, Role.EXPLORER),
+        ({"agent_type": "reviewer"}, Role.REVIEWER),
         ({"agent_type": "coordinator"}, Role.COORDINATOR),
         # An unrecognized named subagent is NOT the coordinator.
         ({"agent_type": "general-purpose"}, Role.IMPLEMENTER),

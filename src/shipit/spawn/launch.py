@@ -50,6 +50,13 @@ SENTINEL_NAME = ".shipit-spawn-sentinel"
 #: child wrote precisely this, never drift.
 SENTINEL_BODY = "spawned by shipit\n"
 
+#: The read-only tool allow-list for a **reviewer** Run (ADR-0018 / ADR-0019 §4): a
+#: reviewer reads the diff and code and posts a review, so it gets the read tools plus
+#: ``Bash`` (to run ``git diff`` and ``gh pr review``) but NOT ``Write`` / ``Edit`` —
+#: the read-only posture rides the ``--tools`` allow-list, mirroring the reviewer
+#: agent-def frontmatter. Passed to :func:`build_command` as ``tools``.
+REVIEWER_TOOLS = ("Read", "Grep", "Glob", "Bash")
+
 
 @dataclass(frozen=True)
 class LaunchResult:
@@ -72,18 +79,30 @@ class LaunchResult:
 Runner = Callable[..., LaunchResult]
 
 
-def build_command(task: str, role: str, *, output_format: str = "json") -> list[str]:
+def build_command(
+    task: str,
+    role: str,
+    *,
+    output_format: str = "json",
+    tools: tuple[str, ...] | list[str] | None = None,
+) -> list[str]:
     """The exact ``claude`` print-mode argv ADR-0019 §1 specifies.
 
     ``claude -p "<task>" --agent <role> --permission-mode bypassPermissions
-    --output-format json``. Two args are load-bearing: ``--agent <role>`` populates
-    the hook payload's ``agent_type`` so the coordinator-guard allows the Run's own
-    edits (§2), and ``--permission-mode bypassPermissions`` is the write-Run mode
-    (§4) — still bounded by the guard, which fires inside the child. ``-p`` makes it
-    a blocking foreground Run; ``--output-format json`` yields the single result
-    envelope the parent treats as the exit signal.
+    [--tools "<allowlist>"] --output-format json``. Two args are load-bearing:
+    ``--agent <role>`` populates the hook payload's ``agent_type`` so the
+    coordinator-guard allows the Run's own edits (§2), and ``--permission-mode
+    bypassPermissions`` is the write-Run mode (§4) — still bounded by the guard,
+    which fires inside the child. ``-p`` makes it a blocking foreground Run;
+    ``--output-format json`` yields the single result envelope the parent treats as
+    the exit signal.
+
+    ``tools`` narrows tool access per role (§4): a **reviewer** passes
+    :data:`REVIEWER_TOOLS` so the child gets only read-only tools (no ``Write`` /
+    ``Edit``) via ``--tools "<comma-joined>"``. ``None`` (a write Run) omits the flag
+    and inherits the role's full toolset.
     """
-    return [
+    cmd = [
         "claude",
         "-p",
         task,
@@ -91,9 +110,11 @@ def build_command(task: str, role: str, *, output_format: str = "json") -> list[
         role,
         "--permission-mode",
         "bypassPermissions",
-        "--output-format",
-        output_format,
     ]
+    if tools:
+        cmd += ["--tools", ",".join(tools)]
+    cmd += ["--output-format", output_format]
+    return cmd
 
 
 def child_env(parent_env: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -173,6 +194,27 @@ def skeleton_task(role: str) -> str:
         f"the Tree launch contract (ADR-0019). Create a file named {SENTINEL_NAME!r} "
         f"at the root of this checkout whose entire contents are the single line "
         f"{SENTINEL_BODY.strip()!r}. Do nothing else, then stop."
+    )
+
+
+def reviewer_task(branch: str) -> str:
+    """The task a spawned **reviewer** Run performs (ADR-0018): read the diff, review.
+
+    The reviewer runs in a SHARED read-only Tree already checked out on ``branch``
+    (the PR head), so its result is delivered THROUGH the PR (ADR-0017): it reads the
+    diff and the surrounding code, then posts exactly one review with ``gh pr review``
+    (approve / request-changes / comment) for the PR on this branch. It never edits,
+    builds, pushes, or merges — the read-only ``--tools`` allow-list and the
+    ``chmod``'d working files enforce that; the prompt states the intent.
+    """
+    return (
+        "You are a spawned reviewer Run launched by `shipit spawn subagent`. You are "
+        f"in a shared READ-ONLY checkout of the PR head `{branch}`. Read the PR's diff "
+        "(`git diff origin/main...HEAD` or `gh pr diff`) and the code it touches, "
+        "judge it against the issue it closes and this repo's conventions, then post "
+        "exactly ONE review through the PR with `gh pr review` (approve, "
+        "request-changes, or comment). Do not edit, build, push, or merge — if a "
+        "change is needed, say so in the review. Then stop."
     )
 
 

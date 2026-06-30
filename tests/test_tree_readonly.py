@@ -1,0 +1,274 @@
+"""Tests for ``tree.readonly`` — the shared, read-only (reviewer) Tree (ADR-0018).
+
+Three things to pin, mirroring ``test_tree_create.py`` / ``test_tree_layout.py``:
+
+- the PURE planner (``readonly_plan``) resolves a deterministic, hash-free leaf so a
+  Tree is shared per ``(repo, branch)`` and rejects a branch that sanitizes to nothing;
+- provisioning is the read-only VARIANT — clone + checkout only, NO ``.treeinclude``
+  copy, NO pixi/provisioning, and the working files left ``chmod``'d read-only — and a
+  second reviewer on the same head REUSES the clone instead of re-cloning;
+- ``chmod_readonly`` strips the write bits from working files but never from ``.git``.
+
+The reuse + "no provisioning" assertions mock the git boundary (no real clone); one
+real-git smoke proves the checkout + read-only chmod end to end.
+"""
+
+from __future__ import annotations
+
+import stat
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from shipit import gh
+from shipit.tree.readonly import (
+    chmod_readonly,
+    create_readonly,
+    readonly_plan,
+)
+
+
+# --- the pure planner --------------------------------------------------------
+
+
+def test_readonly_plan_is_shared_per_repo_branch_with_no_hash(tmp_path):
+    # The leaf is deterministic from (org, repo, branch) — no agent hash — so two
+    # reviewers on the same head resolve to the IDENTICAL dir (the sharing key).
+    root = tmp_path / "trees"
+    one = readonly_plan(org="acme", repo="widget", branch="TRE03/WS03", root=root)
+    two = readonly_plan(org="acme", repo="widget", branch="TRE03/WS03", root=root)
+
+    assert one == two
+    # `review` kind segment + a sanitized, hash-free leaf (slashes → '-', lowercased).
+    assert one.dir == root / "acme" / "widget" / "review" / "tre03-ws03"
+    # The branch is kept VERBATIM for the checkout (the real remote branch name).
+    assert one.branch == "TRE03/WS03"
+
+
+def test_readonly_plan_distinct_branches_get_distinct_dirs(tmp_path):
+    root = tmp_path / "trees"
+    a = readonly_plan(org="acme", repo="widget", branch="TRE03/WS03", root=root)
+    b = readonly_plan(org="acme", repo="widget", branch="TRE03/WS04", root=root)
+    assert a.dir != b.dir
+
+
+@pytest.mark.parametrize("branch", ["", "   ", "///", "."])
+def test_readonly_plan_rejects_empty_sanitized_branch(tmp_path, branch):
+    with pytest.raises(ValueError, match="alphanumeric"):
+        readonly_plan(org="acme", repo="widget", branch=branch, root=tmp_path)
+
+
+# --- chmod_readonly ----------------------------------------------------------
+
+
+def test_chmod_readonly_strips_write_bits_from_files_but_not_git(tmp_path):
+    (tmp_path / "src").mkdir()
+    work = tmp_path / "src" / "main.py"
+    work.write_text("print('hi')\n")
+    work.chmod(0o644)
+    gitdir = tmp_path / ".git"
+    gitdir.mkdir()
+    gitfile = gitdir / "HEAD"
+    gitfile.write_text("ref: refs/heads/main\n")
+    gitfile.chmod(0o644)
+
+    chmod_readonly(tmp_path)
+
+    # A working file lost every write bit (owner/group/other).
+    assert not (work.stat().st_mode & 0o222)
+    assert work.stat().st_mode & stat.S_IRUSR  # still readable
+    # The repo database under .git is untouched (git still needs it writable).
+    assert gitfile.stat().st_mode & stat.S_IWUSR
+
+
+# --- provisioning: the read-only variant (mocked git boundary) ---------------
+
+
+def _mock_git_boundary(monkeypatch, *, files):
+    """Patch the git boundary so a "clone" just makes the dest + the given files.
+
+    Returns the call-count dict so a test can assert the clone ran exactly once
+    (and is REUSED, not repeated, on a second create).
+    """
+    counts = {"clone": 0, "fetch": 0, "checkout": 0}
+
+    def fake_clone(url, dest, *, reference):
+        counts["clone"] += 1
+        d = Path(dest)
+        d.mkdir(parents=True)
+        (d / ".git").mkdir()  # mark it a real clone (reuse keys off this)
+        for name, body in files.items():
+            (d / name).write_text(body)
+
+    monkeypatch.setattr(gh, "git_clone_dissociated", fake_clone)
+    monkeypatch.setattr(
+        gh, "git_fetch", lambda **k: counts.__setitem__("fetch", counts["fetch"] + 1)
+    )
+    monkeypatch.setattr(
+        gh,
+        "git_checkout",
+        lambda *a, **k: counts.__setitem__("checkout", counts["checkout"] + 1),
+    )
+    return counts
+
+
+def test_create_readonly_clones_checks_out_and_chmods_no_provisioning(
+    tmp_path, monkeypatch
+):
+    plan = readonly_plan(
+        org="acme", repo="widget", branch="feat/x", root=tmp_path / "trees"
+    )
+    counts = _mock_git_boundary(monkeypatch, files={"README.md": "hi\n"})
+
+    # A reviewer Tree must NEVER provision: if provisioning were wired, this guard
+    # would fire. (readonly.py imports no run_provision; this pins that structurally.)
+    import shipit.tree.create as create_mod
+
+    monkeypatch.setattr(
+        create_mod,
+        "run_provision",
+        lambda *a, **k: pytest.fail("a read-only Tree must not provision"),
+    )
+
+    tree = create_readonly(plan, source_repo="/ref", github_url="url")
+
+    assert Path(tree.path) == plan.dir
+    assert tree.branch == "feat/x"
+    assert tree.base == "origin/feat/x"
+    # clone + fetch + plain checkout of the EXISTING branch, each exactly once.
+    assert counts == {"clone": 1, "fetch": 1, "checkout": 1}
+    # The working file is left read-only (the ADR-0018 guardrail).
+    assert not ((plan.dir / "README.md").stat().st_mode & 0o222)
+
+
+def test_create_readonly_skips_treeinclude(tmp_path, monkeypatch):
+    # The read-only variant does NOT apply .treeinclude: a gitignored-but-needed file
+    # in the source is NOT copied into a reviewer Tree (it only reads tracked code).
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / ".treeinclude").write_text(".env\n")
+    (source / ".env").write_text("TOKEN=1")
+    _mock_git_boundary(monkeypatch, files={"README.md": "hi\n"})
+
+    plan = readonly_plan(
+        org="acme", repo="widget", branch="feat/x", root=tmp_path / "trees"
+    )
+    create_readonly(plan, source_repo=str(source), github_url="url")
+
+    assert not (plan.dir / ".env").exists()  # .treeinclude was NOT applied
+
+
+def test_create_readonly_second_reviewer_reuses_the_clone(tmp_path, monkeypatch):
+    # Acceptance #157: a second reviewer on the same (repo, branch) REUSES the shared
+    # clone — it does not re-clone.
+    plan = readonly_plan(
+        org="acme", repo="widget", branch="feat/x", root=tmp_path / "trees"
+    )
+    counts = _mock_git_boundary(monkeypatch, files={"README.md": "hi\n"})
+
+    first = create_readonly(plan, source_repo="/ref", github_url="url")
+    second = create_readonly(plan, source_repo="/ref", github_url="url")
+
+    assert first.path == second.path
+    assert counts["clone"] == 1  # the second reviewer did NOT re-clone
+
+
+def test_create_readonly_rolls_back_partial_tree_on_failure(tmp_path, monkeypatch):
+    # If a post-clone step fails, the half-built leaf must not survive — otherwise the
+    # next reviewer would "reuse" a broken clone.
+    plan = readonly_plan(
+        org="acme", repo="widget", branch="feat/x", root=tmp_path / "trees"
+    )
+    _mock_git_boundary(monkeypatch, files={"README.md": "hi\n"})
+    monkeypatch.setattr(
+        gh, "git_checkout", lambda *a, **k: (_ for _ in ()).throw(gh.GhError("boom"))
+    )
+
+    with pytest.raises(gh.GhError):
+        create_readonly(plan, source_repo="/ref", github_url="url")
+    assert not plan.dir.exists()
+
+
+def test_create_readonly_refuses_non_clone_in_the_shared_slot(tmp_path, monkeypatch):
+    # A pre-existing leaf that is NOT a clone (no .git) is refused, not cloned into or
+    # deleted — it would be a stray dir squatting the shared review slot.
+    plan = readonly_plan(
+        org="acme", repo="widget", branch="feat/x", root=tmp_path / "trees"
+    )
+    plan.dir.mkdir(parents=True)
+    (plan.dir / "stray.txt").write_text("not a clone")
+
+    def boom(*a, **k):
+        raise AssertionError("must not clone into an occupied non-clone slot")
+
+    monkeypatch.setattr(gh, "git_clone_dissociated", boom)
+
+    with pytest.raises(FileExistsError, match="not a clone"):
+        create_readonly(plan, source_repo="/ref", github_url="url")
+    assert (plan.dir / "stray.txt").read_text() == "not a clone"  # untouched
+
+
+# --- one real-git smoke: checkout of an existing branch + read-only ----------
+
+
+def _git(args, cwd):
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.email=t@e.com",
+            "-c",
+            "user.name=T",
+            "-c",
+            "init.defaultBranch=main",
+            "-c",
+            "protocol.file.allow=always",
+            *args,
+        ],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_create_readonly_real_git_checks_out_existing_branch_read_only(tmp_path):
+    remote = tmp_path / "remote"
+    remote.mkdir()
+    _git(["init"], remote)
+    (remote / "README.md").write_text("hello\n")
+    _git(["add", "."], remote)
+    _git(["commit", "-m", "init"], remote)
+    _git(["branch", "-M", "main"], remote)
+    # The PR head the reviewer will check out.
+    _git(["checkout", "-b", "feat/x"], remote)
+    (remote / "feature.txt").write_text("under review\n")
+    _git(["add", "."], remote)
+    _git(["commit", "-m", "feat"], remote)
+    _git(["checkout", "main"], remote)
+
+    reference = tmp_path / "ref"
+    _git(["clone", str(remote), str(reference)], tmp_path)
+
+    plan = readonly_plan(
+        org="acme", repo="widget", branch="feat/x", root=tmp_path / "trees"
+    )
+    tree = create_readonly(plan, source_repo=str(reference), github_url=str(remote))
+    dest = Path(tree.path)
+
+    # On the EXISTING PR-head branch, with that branch's content present.
+    assert (
+        subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=dest,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        == "feat/x"
+    )
+    assert (dest / "feature.txt").read_text() == "under review\n"
+    # Independent clone (dissociated) and working files left read-only.
+    assert not (dest / ".git" / "objects" / "info" / "alternates").exists()
+    assert not (dest / "README.md").stat().st_mode & 0o222
+    assert not (dest / "feature.txt").stat().st_mode & 0o222

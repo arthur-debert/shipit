@@ -301,6 +301,117 @@ def test_run_subagent_no_sentinel_is_exit_1(tmp_path, monkeypatch, capsys):
     assert "left no sentinel" in capsys.readouterr().err
 
 
+def _fake_create_readonly(monkeypatch, tree_dir: Path) -> dict:
+    """Replace the read-only orchestrator with a spy that 'creates' a Tree at ``tree_dir``.
+
+    Mirrors :func:`_fake_create` for the reviewer path: records the plan/args and makes
+    the dir on disk so the launcher has a real cwd to act on. Returns the capture dict.
+    """
+    captured: dict = {}
+
+    def fake(plan, *, source_repo, github_url):
+        captured["plan"] = plan
+        captured["source_repo"] = source_repo
+        captured["github_url"] = github_url
+        tree_dir.mkdir(parents=True, exist_ok=True)
+        return Tree(
+            path=str(tree_dir), branch=plan.branch, base=f"origin/{plan.branch}"
+        )
+
+    monkeypatch.setattr(spawn_verb, "create_readonly", fake)
+    return captured
+
+
+def test_run_subagent_reviewer_provisions_readonly_tree_and_posts_review(
+    tmp_path, monkeypatch, capsys
+):
+    # Acceptance #157: --role reviewer takes the read-only path (create_readonly, NOT
+    # the write create), launches with --agent reviewer + the read-only --tools
+    # allow-list, and reports SPAWNED. No sentinel is required — the review lands in
+    # the PR (the fake launcher writes none, yet the Run still succeeds).
+    parent = tmp_path / "repo"
+    parent.mkdir()
+    tree_dir = tmp_path / "review"
+    _patch_identity(monkeypatch, root=str(parent))
+    captured = _fake_create_readonly(monkeypatch, tree_dir)
+    # If the WRITE path were taken this would fire — the reviewer must not use it.
+    monkeypatch.setattr(
+        spawn_verb,
+        "create",
+        lambda *a, **k: pytest.fail("reviewer must not create a write Tree"),
+    )
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "stale")
+    runner, calls = _launcher(write_sentinel=False)
+
+    rc = spawn_verb.run_subagent(
+        repo="widget", epic="TRE03", ws=3, role="reviewer", launcher=runner
+    )
+
+    assert rc == 0
+    # The read-only plan is shared per (repo, branch): the WS PR head, no agent hash.
+    plan = captured["plan"]
+    assert plan.branch == "TRE03/WS03"
+    assert plan.dir.name == "tre03-ws03"
+    assert "review" in plan.dir.parts
+    assert captured["source_repo"] == str(parent)
+    # Launch contract for a reviewer: cwd = the read-only Tree, --agent reviewer, the
+    # read-only --tools allow-list (no Write), key scrubbed.
+    assert calls["cwd"] == str(tree_dir)
+    assert calls["cmd"][calls["cmd"].index("--agent") + 1] == "reviewer"
+    allowlist = calls["cmd"][calls["cmd"].index("--tools") + 1]
+    assert "Write" not in allowlist and "Edit" not in allowlist
+    assert "ANTHROPIC_API_KEY" not in calls["env"]
+    # SPAWNED summary: role reviewer, and NO sentinel key (the Run reports via the PR).
+    out = capsys.readouterr().out
+    assert out.splitlines()[0] == "SPAWNED"
+    payload = json.loads("\n".join(out.splitlines()[1:]))
+    assert payload["role"] == "reviewer"
+    assert payload["branch"] == "TRE03/WS03"
+    assert "sentinel" not in payload
+
+
+def test_run_subagent_reviewer_readonly_tree_failure_is_clean_exit_1(
+    tmp_path, monkeypatch, capsys
+):
+    # Fail-closed for the reviewer path too: a read-only-Tree error exits 1 loud, and
+    # the launcher is never reached.
+    _patch_identity(monkeypatch)
+
+    def boom(plan, *, source_repo, github_url):
+        raise gh.GhError("clone failed")
+
+    monkeypatch.setattr(spawn_verb, "create_readonly", boom)
+    launched: dict = {}
+
+    def runner(cmd, *, cwd, env):
+        launched["called"] = True
+        return launch.LaunchResult(0, "", "")
+
+    rc = spawn_verb.run_subagent(
+        repo="widget", epic="TRE03", ws=3, role="reviewer", launcher=runner
+    )
+
+    assert rc == 1
+    assert "read-only tree creation failed" in capsys.readouterr().err
+    assert "called" not in launched
+
+
+def test_run_subagent_reviewer_child_nonzero_exit_is_exit_1(
+    tmp_path, monkeypatch, capsys
+):
+    tree_dir = tmp_path / "review"
+    _patch_identity(monkeypatch)
+    _fake_create_readonly(monkeypatch, tree_dir)
+    runner, _calls = _launcher(returncode=3, write_sentinel=False)
+
+    rc = spawn_verb.run_subagent(
+        repo="widget", epic="TRE03", ws=3, role="reviewer", launcher=runner
+    )
+
+    assert rc == 1
+    assert "claude child exited 3" in capsys.readouterr().err
+
+
 def test_spawn_subagent_help_documents_the_verb():
     from click.testing import CliRunner
 
