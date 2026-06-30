@@ -276,6 +276,44 @@ def test_run_subagent_missing_epic_branch_fails_closed_no_main_fallback(
     assert "called" not in launched  # nothing launched
 
 
+@pytest.mark.parametrize("bad_epic", ["", "   ", "TRE/04", "..", "TRE 04"])
+def test_run_subagent_invalid_epic_is_clean_exit_1(
+    tmp_path, monkeypatch, capsys, bad_epic
+):
+    # An invalid/empty epic code is not a single alphanumeric token, so the pure
+    # `epic_umbrella_base` helper raises ValueError. The verb must catch that and
+    # return a clean exit-1 with a stderr diagnostic — never let the traceback escape
+    # (the verb's "never a traceback" contract). The precondition gates before any
+    # side effect: no Tree is created and nothing is launched.
+    _patch_identity(monkeypatch)
+    monkeypatch.setattr(
+        spawn_verb,
+        "create",
+        lambda *a, **k: pytest.fail("must not create a Tree on an invalid epic code"),
+    )
+
+    launched: dict = {}
+
+    def runner(cmd, *, cwd, env):
+        launched["called"] = True
+        return launch.LaunchResult(0, "", "")
+
+    rc = spawn_verb.run_subagent(
+        repo="widget",
+        epic=bad_epic,
+        ws=1,
+        issue=1,
+        role="implementer",
+        launcher=runner,
+    )
+
+    assert rc == 1  # a clean exit code, NOT an escaping ValueError
+    err = capsys.readouterr().err
+    assert "spawn subagent:" in err
+    assert "epic code" in err  # the helper's diagnostic is surfaced
+    assert "called" not in launched  # nothing launched
+
+
 def test_run_subagent_tree_creation_failure_fails_closed(tmp_path, monkeypatch, capsys):
     # Fail-closed (ADR-0017/0019): a Tree-creation error fails the spawn loud, and
     # NEVER falls back to launching anything — the launcher must not be called.

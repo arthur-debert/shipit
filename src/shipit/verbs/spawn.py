@@ -264,7 +264,16 @@ def run_subagent(
     # resolves both — branch E/WSnn, base origin/E/umbrella — through the same pure
     # planner `shipit tree create` uses; the PR target falls out of `tree.base` below
     # (origin/E/umbrella -> E/umbrella), exactly as origin/main -> main did.
-    umbrella_base = epic_umbrella_base(epic)  # origin/E/umbrella
+    try:
+        umbrella_base = epic_umbrella_base(epic)  # origin/E/umbrella
+    except ValueError as exc:
+        # An invalid/empty epic code (not a single alphanumeric token) would build a
+        # malformed or path-traversing umbrella ref, so the pure helper refuses it.
+        # Catch that here and emit the same clean exit-1-with-diagnostic the rest of
+        # the verb uses for fail-closed paths — never an escaping traceback (the verb's
+        # documented contract).
+        print(f"spawn subagent: {exc}", file=sys.stderr)
+        return 1
     umbrella_branch = umbrella_base.split("/", 1)[-1]  # E/umbrella
     # Fail-closed (ADR-0017/0019): the epic umbrella branch MUST exist on the remote
     # before we cut a work stream from it. If it does not, refuse LOUD — never
