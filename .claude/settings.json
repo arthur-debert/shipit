@@ -40,6 +40,16 @@
           }
         ]
       }
+    ],
+    "WorktreeCreate": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "pixi run shipit hook worktreecreate"
+          }
+        ]
+      }
     ]
   }
 }
