@@ -2,15 +2,20 @@
 
 A NESTED click group mirroring ``shipit tree``: ``shipit spawn <verb>`` is the
 surface for launching backend-agent **Runs** that shipit owns end to end. The
-first verb, ``subagent``, is the walking skeleton (TRE03-WS01): it creates a write
-**Tree** by REUSING the tree-creation path, then launches a headless ``claude``
-child rooted in that Tree per the ADR-0019 launch contract, and observes the child
-did its (trivial) work IN the Tree.
+first verb, ``subagent``, creates a write **Tree** by REUSING the tree-creation
+path, then launches a headless ``claude`` child rooted in that Tree per the
+ADR-0019 launch contract. The Run does real work that **culminates in a draft PR**
+(TRE03-WS02): it implements its issue and opens a draft PR from the Tree's branch,
+and ``spawn`` surfaces the Run↔PR linkage so the coordinator drives that PR with
+the existing ``shipit pr status <N>`` engine — exactly as a hand-spawned
+implementer does.
 
 The verb is thin: resolve the ambient repo identity at the gh/git boundary, hand a
 typed :class:`TreeSpec` to the existing pure planner + effectful orchestrator
-(:func:`shipit.tree.create.create`) — Tree creation is never reimplemented — then
-launch the child through the unit-testable :mod:`shipit.spawn.launch` seam.
+(:func:`shipit.tree.create.create`) — Tree creation is never reimplemented — launch
+the child through the unit-testable :mod:`shipit.spawn.launch` seam, then resolve the
+PR the Run opened on the Tree's branch back through the same :mod:`shipit.gh`
+boundary the fleet scan uses (no side database — the PR on the branch IS the link).
 
 **Fail-closed** (ADR-0017/0019): a Tree-creation error fails the spawn loud —
 NEVER a silent fallback to a native ``git worktree``. The launcher is reached only
@@ -72,6 +77,16 @@ def spawn() -> None:
     help="Work stream number N (the WSnn half of the Tree branch E/WSnn).",
 )
 @click.option(
+    "--issue",
+    type=int,
+    required=True,
+    help=(
+        "The issue the Run implements. It rides the task prompt (the Run reads it "
+        "with `gh issue view`) and the draft PR links it as `for #<issue>`, so the "
+        "spawned-Run PR flows through the normal engine like any hand-spawned one."
+    ),
+)
+@click.option(
     "--role",
     required=True,
     help=(
@@ -87,22 +102,27 @@ def spawn() -> None:
     show_default=True,
     help="The agent backend to launch. Only `claude` is wired today (ADR-0019).",
 )
-def subagent_cmd(repo: str, epic: str, ws: int, role: str, backend: str) -> None:
-    """Create a write Tree and launch a backend-agent Run rooted in it.
+def subagent_cmd(
+    repo: str, epic: str, ws: int, issue: int, role: str, backend: str
+) -> None:
+    """Create a write Tree and launch a backend-agent Run that reports via a draft PR.
 
-    The walking skeleton (TRE03-WS01): resolve the ambient repo identity, create a
-    write Tree by reusing ``shipit tree create`` (kept dumb — base ``origin/main``;
-    the epic-grouped umbrella base is a later WS), then launch a headless ``claude``
-    child whose ``cwd`` IS that Tree (ADR-0019). The child performs one trivial,
-    verifiable action — writing a sentinel file — and ``spawn`` confirms it happened
-    in the Tree, not the parent checkout.
+    Resolve the ambient repo identity, create a write Tree by reusing
+    ``shipit tree create`` (kept dumb — base ``origin/main``; the epic-grouped
+    umbrella base is a later WS), then launch a headless ``claude`` child whose
+    ``cwd`` IS that Tree (ADR-0019). The Run implements ``--issue`` and opens a draft
+    PR from the Tree's branch; ``spawn`` resolves that PR back from the branch and
+    reports the Run↔PR linkage so the coordinator drives it with ``shipit pr status``.
 
     Fail-closed: a Tree-creation error exits 1 loudly — never a silent fallback to a
-    native ``git worktree``. A child that exits nonzero, or that exits 0 without
-    leaving the sentinel in the Tree, is also a clean exit-1.
+    native ``git worktree``. A child that exits nonzero, that exits 0 without having
+    opened a PR on the Tree's branch, or that opened a PR which is not an OPEN, DRAFT PR
+    targeting the intended base, is also a clean exit-1.
     """
     raise SystemExit(
-        run_subagent(repo=repo, epic=epic, ws=ws, role=role, backend=backend)
+        run_subagent(
+            repo=repo, epic=epic, ws=ws, issue=issue, role=role, backend=backend
+        )
     )
 
 
@@ -111,19 +131,23 @@ def run_subagent(
     repo: str,
     epic: str,
     ws: int,
+    issue: int,
     role: str,
     backend: str = "claude",
     launcher: launch.Runner | None = None,
 ) -> int:
-    """Resolve identity → create the Tree → launch the child → observe. Returns a code.
+    """Resolve identity → create the Tree → launch the Run → link its PR. Returns a code.
 
     Returns 0 once a headless ``claude`` child has run rooted in a freshly-created
-    write Tree and left its sentinel there. Returns 1 with a clean stderr message
-    (never a traceback) when the backend is unsupported, ``--ws`` is not positive,
-    ``--repo`` disagrees with the ambient checkout, the command is not run inside a
-    GitHub checkout, a git/gh call fails, **Tree creation fails** (fail-closed — no
-    native-worktree fallback), the child exits nonzero, or the child exits 0 without
-    writing the sentinel into the Tree.
+    write Tree and opened a PR on that Tree's branch — the Run↔PR linkage the
+    SPAWNED summary reports for ``shipit pr status``. Returns 1 with a clean stderr
+    message (never a traceback) when the backend is unsupported, ``--ws`` or
+    ``--issue`` is not positive, ``--repo`` disagrees with the ambient checkout, the
+    command is not run inside a GitHub checkout, a git/gh call fails, **Tree creation
+    fails** (fail-closed — no native-worktree fallback), the child exits nonzero, the
+    child exits 0 without opening a PR on the branch, that PR's state cannot be read,
+    or the PR is not an OPEN, DRAFT PR targeting the Tree's intended base (an invalid
+    lifecycle state the coordinator must not be handed).
 
     ``launcher`` injects the subprocess seam so the launch contract is unit-tested
     without spawning a real ``claude``; ``None`` uses the real
@@ -140,6 +164,16 @@ def run_subagent(
     if ws < 1:
         print(
             f"spawn subagent: --ws must be a positive integer (got {ws})",
+            file=sys.stderr,
+        )
+        return 1
+    if issue < 1:
+        # ``--issue`` rides the task prompt and the draft PR's ``for #<issue>`` link;
+        # a zero/negative value (which click's int type still accepts) would forge a
+        # nonsensical issue reference. Refuse it before any Tree/child work, mirroring
+        # the ``--ws`` guard above.
+        print(
+            f"spawn subagent: --issue must be a positive integer (got {issue})",
             file=sys.stderr,
         )
         return 1
@@ -203,8 +237,15 @@ def run_subagent(
 
     # Launch the headless claude child rooted in the Tree (ADR-0019 contract): the
     # cwd IS the Tree, ANTHROPIC_API_KEY is scrubbed, and --agent <role> conveys the
-    # role to the harness so the guard allows the Run's own edits.
-    cmd = launch.build_command(launch.skeleton_task(role), role)
+    # role to the harness so the guard allows the Run's own edits. The task tells the
+    # Run to implement the issue and open a draft PR from this branch (the result
+    # channel — ADR-0019 §6); base_branch drops the remote prefix off the Tree's base
+    # so the PR targets a branch name (origin/main -> main).
+    base_branch = tree.base.split("/", 1)[-1] if "/" in tree.base else tree.base
+    task = launch.write_task(
+        role, issue=issue, branch=tree.branch, base_branch=base_branch
+    )
+    cmd = launch.build_command(task, role)
     try:
         result = launch.launch(
             cmd, cwd=tree.path, env=launch.child_env(), runner=launcher
@@ -223,20 +264,70 @@ def run_subagent(
             file=sys.stderr,
         )
         return 1
-    if not launch.sentinel_present(tree.path):
+
+    # The Run reports back through the PR (ADR-0019 §6): resolve the PR it opened on
+    # the Tree's branch through the SAME gh boundary the fleet scan uses — no side
+    # database, the PR on the branch IS the Run↔PR link. A branch with provably no PR
+    # means the Run did not report back; an undetermined state must not masquerade as
+    # success. Both are a clean exit-1.
+    pr = gh.pr_for_head(tree.branch, cwd=tree.path)
+    if pr is None:
         print(
-            "spawn subagent: child exited 0 but left no sentinel at "
-            f"{launch.sentinel_path(tree.path)}; the Run did not run in the Tree.",
+            f"spawn subagent: child exited 0 but opened no PR on {tree.branch!r}; "
+            "the Run did not report back through a draft PR.",
+            file=sys.stderr,
+        )
+        return 1
+    if pr is gh.UNKNOWN:
+        print(
+            f"spawn subagent: child exited 0 but the PR state for {tree.branch!r} "
+            "could not be read (gh unreadable); not claiming success.",
             file=sys.stderr,
         )
         return 1
 
-    _emit_spawned(tree, role=role, backend=backend)
+    # A PR existing on the branch is necessary but not sufficient: the WS02 contract is
+    # that the Run reported back through an OPEN, DRAFT PR targeting the Tree's intended
+    # base. A ready-for-review PR, a closed/merged one, or one opened against the wrong
+    # base is an INVALID lifecycle state the coordinator must not be handed as success —
+    # each is a clean exit-1, never a SPAWNED line.
+    if pr["state"] != "OPEN":
+        print(
+            f"spawn subagent: child exited 0 but the PR on {tree.branch!r} is "
+            f"{pr['state']}, not OPEN; the Run did not report back through an open "
+            "draft PR.",
+            file=sys.stderr,
+        )
+        return 1
+    if pr.get("isDraft") is not True:
+        print(
+            f"spawn subagent: child exited 0 but the PR on {tree.branch!r} is not a "
+            "draft; the Run must report back through a draft PR (the turn-signal the "
+            "coordinator drives).",
+            file=sys.stderr,
+        )
+        return 1
+    if pr.get("baseRefName") != base_branch:
+        print(
+            f"spawn subagent: child exited 0 but the PR on {tree.branch!r} targets "
+            f"base {pr.get('baseRefName')!r}, not the intended {base_branch!r}; the "
+            "Run reported back against the wrong base.",
+            file=sys.stderr,
+        )
+        return 1
+
+    _emit_spawned(tree, role=role, backend=backend, pr=pr)
     return 0
 
 
-def _emit_spawned(tree: Tree, *, role: str, backend: str) -> None:
-    """Print the SPAWNED summary: a ``SPAWNED`` line plus the Run's coordinates as JSON."""
+def _emit_spawned(tree: Tree, *, role: str, backend: str, pr: dict) -> None:
+    """Print the SPAWNED summary: a ``SPAWNED`` line plus the Run's coordinates as JSON.
+
+    The ``pr`` block is the Run↔PR linkage the coordinator acts on: ``number`` is what
+    feeds ``shipit pr status <N>`` to drive the spawned-Run PR through the normal engine
+    (reviews, ready, merge) exactly like a hand-spawned implementer's; ``state`` /
+    ``is_draft`` echo how the Run left it (a draft, per the role's PR protocol).
+    """
     print("SPAWNED")
     print(
         json.dumps(
@@ -246,7 +337,9 @@ def _emit_spawned(tree: Tree, *, role: str, backend: str) -> None:
                 "base": tree.base,
                 "role": role,
                 "backend": backend,
-                "sentinel": str(launch.sentinel_path(tree.path)),
+                "pr": pr["number"],
+                "pr_state": pr["state"],
+                "pr_is_draft": pr.get("isDraft"),
             },
             indent=2,
         )

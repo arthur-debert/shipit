@@ -457,11 +457,11 @@ def git_ahead_behind(*, cwd: str) -> tuple[int, int]:
 
 
 def pr_for_head(branch: str, *, cwd: str | None = None) -> dict | None | UnknownPr:
-    """The PR whose head is ``branch`` as ``{number, state, isDraft}`` — or ``None`` /
-    :data:`UNKNOWN`.
+    """The PR whose head is ``branch`` as ``{number, state, isDraft, baseRefName}`` — or
+    ``None`` / :data:`UNKNOWN`.
 
-    Reads ``gh pr view <branch> --json number,state,isDraft`` from inside the Tree
-    (``cwd``) and returns a THREE-way result, never crashing the fleet scan:
+    Reads ``gh pr view <branch> --json number,state,isDraft,baseRefName`` from inside
+    the Tree (``cwd``) and returns a THREE-way result, never crashing the fleet scan:
 
     - the PR snapshot ``dict`` when a PR is read cleanly;
     - ``None`` when the branch *provably* has no PR — ``gh`` exits non-zero with its
@@ -476,7 +476,8 @@ def pr_for_head(branch: str, *, cwd: str | None = None) -> dict | None | Unknown
     """
     try:
         out = _run(
-            ["gh", "pr", "view", branch, "--json", "number,state,isDraft"], cwd=cwd
+            ["gh", "pr", "view", branch, "--json", "number,state,isDraft,baseRefName"],
+            cwd=cwd,
         ).strip()
     except GhError as exc:
         return None if _is_no_pr_error(exc) else UNKNOWN
@@ -500,6 +501,7 @@ def pr_for_head(branch: str, *, cwd: str | None = None) -> dict | None | Unknown
         "number": number,
         "state": state,
         "isDraft": data.get("isDraft"),
+        "baseRefName": data.get("baseRefName"),
     }
 
 

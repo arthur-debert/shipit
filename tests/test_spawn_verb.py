@@ -1,10 +1,11 @@
 """Unit tests for the ``shipit spawn subagent`` verb handler (``run_subagent``).
 
 The verb is thin glue: resolve repo identity at the gh boundary, REUSE the
-tree-creation path, then launch a headless ``claude`` child rooted in the Tree
-(ADR-0019). These tests mock the ``gh``/``create`` boundary and inject a fake
-launcher so they pin the glue — the launch contract (cwd = Tree, ``--agent <role>``,
-``ANTHROPIC_API_KEY`` scrubbed), the sentinel observation, the fail-closed Tree-
+tree-creation path, launch a headless ``claude`` child rooted in the Tree
+(ADR-0019), then resolve the PR the Run opened on the Tree's branch (WS02). These
+tests mock the ``gh``/``create`` boundary and inject a fake launcher so they pin the
+glue — the launch contract (cwd = Tree, ``--agent <role>``, ``ANTHROPIC_API_KEY``
+scrubbed), the Run↔PR linkage resolved from the branch, the fail-closed Tree-
 creation path, and the exit codes — without touching real git or spawning claude.
 """
 
@@ -32,7 +33,7 @@ def _fake_create(monkeypatch, tree_dir: Path) -> dict:
     """Replace the orchestrator with a spy that 'creates' a Tree at ``tree_dir``.
 
     Returns the dict the spec/args are recorded into. The dir is made on disk so the
-    launcher's sentinel write (and the verb's observation) have a real Tree to act on.
+    Tree the verb roots the launch in (and resolves the PR from) is a real path.
     """
     captured: dict = {}
 
@@ -47,19 +48,36 @@ def _fake_create(monkeypatch, tree_dir: Path) -> dict:
     return captured
 
 
-def _launcher(*, returncode=0, write_sentinel=True):
-    """A fake launcher recording its call; optionally writes the sentinel into cwd."""
+def _launcher(*, returncode=0):
+    """A fake launcher recording its call (never touches the Tree — the Run is faked)."""
     calls: dict = {}
 
     def runner(cmd, *, cwd, env):
         calls["cmd"] = cmd
         calls["cwd"] = cwd
         calls["env"] = env
-        if write_sentinel:
-            (Path(cwd) / launch.SENTINEL_NAME).write_text(launch.SENTINEL_BODY)
         return launch.LaunchResult(returncode=returncode, stdout="{}", stderr="boom")
 
     return runner, calls
+
+
+def _patch_pr(monkeypatch, pr):
+    """Patch ``gh.pr_for_head`` (the Run↔PR resolution boundary) and record its args.
+
+    ``pr`` is the resolution result the verb sees: a snapshot dict (a PR was opened
+    on the branch), ``None`` (the branch provably has no PR), or ``gh.UNKNOWN`` (the
+    state is undetermined). Returns the dict the call's ``branch``/``cwd`` land in so
+    a test can assert the link is resolved from the *Tree's* branch and cwd.
+    """
+    seen: dict = {}
+
+    def fake_pr_for_head(branch, *, cwd=None):
+        seen["branch"] = branch
+        seen["cwd"] = cwd
+        return pr
+
+    monkeypatch.setattr(gh, "pr_for_head", fake_pr_for_head)
+    return seen
 
 
 def test_run_subagent_happy_path(tmp_path, monkeypatch, capsys):
@@ -70,9 +88,18 @@ def test_run_subagent_happy_path(tmp_path, monkeypatch, capsys):
     captured = _fake_create(monkeypatch, tree_dir)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "stale")
     runner, calls = _launcher()
+    _patch_pr(
+        monkeypatch,
+        {"number": 321, "state": "OPEN", "isDraft": True, "baseRefName": "main"},
+    )
 
     rc = spawn_verb.run_subagent(
-        repo="widget", epic="TRE03", ws=1, role="implementer", launcher=runner
+        repo="widget",
+        epic="TRE03",
+        ws=1,
+        issue=156,
+        role="implementer",
+        launcher=runner,
     )
 
     assert rc == 0
@@ -87,7 +114,10 @@ def test_run_subagent_happy_path(tmp_path, monkeypatch, capsys):
     assert calls["cwd"] == str(tree_dir)
     assert calls["cmd"][calls["cmd"].index("--agent") + 1] == "implementer"
     assert "ANTHROPIC_API_KEY" not in calls["env"]
-    # The SPAWNED summary reports the Run's coordinates.
+    # The task tells the Run which issue to implement and the branch to PR from.
+    task = calls["cmd"][calls["cmd"].index("-p") + 1]
+    assert "#156" in task and "TRE03/WS01" in task
+    # The SPAWNED summary reports the Run's coordinates AND the Run↔PR linkage.
     out = capsys.readouterr().out
     assert out.splitlines()[0] == "SPAWNED"
     payload = json.loads("\n".join(out.splitlines()[1:]))
@@ -96,26 +126,39 @@ def test_run_subagent_happy_path(tmp_path, monkeypatch, capsys):
     assert payload["base"] == "origin/main"
     assert payload["role"] == "implementer"
     assert payload["backend"] == "claude"
+    assert payload["pr"] == 321
+    assert payload["pr_state"] == "OPEN"
+    assert payload["pr_is_draft"] is True
 
 
-def test_run_subagent_work_lands_in_tree_not_parent(tmp_path, monkeypatch, capsys):
-    # Acceptance #155: the child's work demonstrably happens in the Tree, not the
-    # parent checkout. The fake launcher writes the sentinel into the cwd it is given;
-    # we assert it lands in the Tree and never leaks to the parent root.
+def test_run_subagent_links_pr_from_the_tree_branch(tmp_path, monkeypatch, capsys):
+    # Acceptance #156: the Run↔PR link is resolved from the *Tree's* branch, read
+    # inside the Tree (cwd) — the PR on the branch IS the link, no side database. And
+    # the launch is rooted in the Tree (cwd), so the Run never runs in the parent.
     parent = tmp_path / "repo"
     parent.mkdir()
     tree_dir = tmp_path / "tree"
     _patch_identity(monkeypatch, root=str(parent))
     _fake_create(monkeypatch, tree_dir)
-    runner, _calls = _launcher()
+    runner, calls = _launcher()
+    seen = _patch_pr(
+        monkeypatch,
+        {"number": 7, "state": "OPEN", "isDraft": True, "baseRefName": "main"},
+    )
 
     rc = spawn_verb.run_subagent(
-        repo="widget", epic="TRE03", ws=2, role="implementer", launcher=runner
+        repo="widget",
+        epic="TRE03",
+        ws=2,
+        issue=99,
+        role="implementer",
+        launcher=runner,
     )
 
     assert rc == 0
-    assert (tree_dir / launch.SENTINEL_NAME).is_file()  # ran in the Tree
-    assert not (parent / launch.SENTINEL_NAME).exists()  # no leak to the parent
+    assert calls["cwd"] == str(tree_dir)  # the Run is rooted in the Tree
+    assert seen["branch"] == "TRE03/WS02"  # link resolved from the Tree branch
+    assert seen["cwd"] == str(tree_dir)  # ...read from inside the Tree
 
 
 def test_run_subagent_tree_creation_failure_fails_closed(tmp_path, monkeypatch, capsys):
@@ -135,7 +178,7 @@ def test_run_subagent_tree_creation_failure_fails_closed(tmp_path, monkeypatch, 
         return launch.LaunchResult(0, "", "")
 
     rc = spawn_verb.run_subagent(
-        repo="widget", epic="TRE03", ws=1, role="implementer", launcher=runner
+        repo="widget", epic="TRE03", ws=1, issue=1, role="implementer", launcher=runner
     )
 
     assert rc == 1
@@ -162,7 +205,7 @@ def test_run_subagent_maps_create_failures_to_clean_exit_1(monkeypatch, capsys, 
     runner, _calls = _launcher()
 
     rc = spawn_verb.run_subagent(
-        repo="widget", epic="TRE03", ws=1, role="implementer", launcher=runner
+        repo="widget", epic="TRE03", ws=1, issue=1, role="implementer", launcher=runner
     )
 
     assert rc == 1
@@ -172,7 +215,12 @@ def test_run_subagent_maps_create_failures_to_clean_exit_1(monkeypatch, capsys, 
 def test_run_subagent_unsupported_backend_is_exit_1(monkeypatch, capsys):
     # The backend gate fires before any repo resolution or Tree creation.
     rc = spawn_verb.run_subagent(
-        repo="widget", epic="TRE03", ws=1, role="implementer", backend="codex"
+        repo="widget",
+        epic="TRE03",
+        ws=1,
+        issue=1,
+        role="implementer",
+        backend="codex",
     )
 
     assert rc == 1
@@ -181,16 +229,32 @@ def test_run_subagent_unsupported_backend_is_exit_1(monkeypatch, capsys):
 
 
 def test_run_subagent_non_positive_ws_is_exit_1(monkeypatch, capsys):
-    rc = spawn_verb.run_subagent(repo="widget", epic="TRE03", ws=0, role="implementer")
+    rc = spawn_verb.run_subagent(
+        repo="widget", epic="TRE03", ws=0, issue=1, role="implementer"
+    )
 
     assert rc == 1
     assert "--ws must be a positive integer" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("bad_issue", [0, -1])
+def test_run_subagent_non_positive_issue_is_exit_1(monkeypatch, capsys, bad_issue):
+    # --issue feeds the task prompt and the PR's `for #<issue>` link; a zero/negative
+    # value (which click's int type accepts) is refused before any Tree/child work.
+    rc = spawn_verb.run_subagent(
+        repo="widget", epic="TRE03", ws=1, issue=bad_issue, role="implementer"
+    )
+
+    assert rc == 1
+    assert "--issue must be a positive integer" in capsys.readouterr().err
+
+
 def test_run_subagent_repo_mismatch_is_exit_1(monkeypatch, capsys):
     _patch_identity(monkeypatch, org_repo="acme/widget")
 
-    rc = spawn_verb.run_subagent(repo="gadget", epic="TRE03", ws=1, role="implementer")
+    rc = spawn_verb.run_subagent(
+        repo="gadget", epic="TRE03", ws=1, issue=1, role="implementer"
+    )
 
     assert rc == 1
     err = capsys.readouterr().err
@@ -203,7 +267,9 @@ def test_run_subagent_slashless_ambient_repo_is_exit_1(monkeypatch, capsys):
     # repo into the TreeSpec. It must be refused with a clean exit-1.
     _patch_identity(monkeypatch, org_repo="widget")
 
-    rc = spawn_verb.run_subagent(repo="widget", epic="TRE03", ws=1, role="implementer")
+    rc = spawn_verb.run_subagent(
+        repo="widget", epic="TRE03", ws=1, issue=1, role="implementer"
+    )
 
     assert rc == 1
     err = capsys.readouterr().err
@@ -217,9 +283,18 @@ def test_run_subagent_repo_accepts_org_qualified_name(tmp_path, monkeypatch, cap
     _patch_identity(monkeypatch, org_repo="acme/widget")
     _fake_create(monkeypatch, tree_dir)
     runner, _calls = _launcher()
+    _patch_pr(
+        monkeypatch,
+        {"number": 5, "state": "OPEN", "isDraft": True, "baseRefName": "main"},
+    )
 
     rc = spawn_verb.run_subagent(
-        repo="acme/widget", epic="TRE03", ws=1, role="implementer", launcher=runner
+        repo="acme/widget",
+        epic="TRE03",
+        ws=1,
+        issue=1,
+        role="implementer",
+        launcher=runner,
     )
 
     assert rc == 0
@@ -228,7 +303,9 @@ def test_run_subagent_repo_accepts_org_qualified_name(tmp_path, monkeypatch, cap
 def test_run_subagent_not_inside_checkout_is_exit_1(monkeypatch, capsys):
     monkeypatch.setattr(gh, "repo_root", lambda: None)
 
-    rc = spawn_verb.run_subagent(repo="widget", epic="TRE03", ws=1, role="implementer")
+    rc = spawn_verb.run_subagent(
+        repo="widget", epic="TRE03", ws=1, issue=1, role="implementer"
+    )
 
     assert rc == 1
     assert "not inside a git checkout" in capsys.readouterr().err
@@ -242,7 +319,9 @@ def test_run_subagent_reports_gh_error_cleanly(monkeypatch, capsys):
 
     monkeypatch.setattr(gh, "current_repo", boom)
 
-    rc = spawn_verb.run_subagent(repo="widget", epic="TRE03", ws=1, role="implementer")
+    rc = spawn_verb.run_subagent(
+        repo="widget", epic="TRE03", ws=1, issue=1, role="implementer"
+    )
 
     assert rc == 1
     assert "spawn subagent:" in capsys.readouterr().err
@@ -252,10 +331,10 @@ def test_run_subagent_child_nonzero_exit_is_exit_1(tmp_path, monkeypatch, capsys
     tree_dir = tmp_path / "tree"
     _patch_identity(monkeypatch)
     _fake_create(monkeypatch, tree_dir)
-    runner, _calls = _launcher(returncode=2, write_sentinel=False)
+    runner, _calls = _launcher(returncode=2)
 
     rc = spawn_verb.run_subagent(
-        repo="widget", epic="TRE03", ws=1, role="implementer", launcher=runner
+        repo="widget", epic="TRE03", ws=1, issue=1, role="implementer", launcher=runner
     )
 
     assert rc == 1
@@ -277,7 +356,7 @@ def test_run_subagent_launch_oserror_is_clean_exit_1(tmp_path, monkeypatch, caps
         raise FileNotFoundError("[Errno 2] No such file or directory: 'claude'")
 
     rc = spawn_verb.run_subagent(
-        repo="widget", epic="TRE03", ws=1, role="implementer", launcher=runner
+        repo="widget", epic="TRE03", ws=1, issue=1, role="implementer", launcher=runner
     )
 
     assert rc == 1
@@ -286,19 +365,107 @@ def test_run_subagent_launch_oserror_is_clean_exit_1(tmp_path, monkeypatch, caps
     assert "claude" in err
 
 
-def test_run_subagent_no_sentinel_is_exit_1(tmp_path, monkeypatch, capsys):
-    # A child that exits 0 but leaves no sentinel did NOT do its work in the Tree.
+def test_run_subagent_no_pr_on_branch_is_exit_1(tmp_path, monkeypatch, capsys):
+    # A child that exits 0 but opened NO PR on the Tree's branch did not report back
+    # (acceptance #156): the Run↔PR link is absent, so the spawn is a clean exit-1.
     tree_dir = tmp_path / "tree"
     _patch_identity(monkeypatch)
     _fake_create(monkeypatch, tree_dir)
-    runner, _calls = _launcher(returncode=0, write_sentinel=False)
+    runner, _calls = _launcher(returncode=0)
+    _patch_pr(monkeypatch, None)  # gh: provably no PR for this branch
 
     rc = spawn_verb.run_subagent(
-        repo="widget", epic="TRE03", ws=1, role="implementer", launcher=runner
+        repo="widget", epic="TRE03", ws=1, issue=1, role="implementer", launcher=runner
     )
 
     assert rc == 1
-    assert "left no sentinel" in capsys.readouterr().err
+    assert "opened no PR" in capsys.readouterr().err
+
+
+def test_run_subagent_unknown_pr_state_is_exit_1(tmp_path, monkeypatch, capsys):
+    # An UNDETERMINED PR state (gh unreadable — auth/network) must NOT masquerade as
+    # success: the verb cannot claim the Run reported back, so it is a clean exit-1.
+    tree_dir = tmp_path / "tree"
+    _patch_identity(monkeypatch)
+    _fake_create(monkeypatch, tree_dir)
+    runner, _calls = _launcher(returncode=0)
+    _patch_pr(monkeypatch, gh.UNKNOWN)
+
+    rc = spawn_verb.run_subagent(
+        repo="widget", epic="TRE03", ws=1, issue=1, role="implementer", launcher=runner
+    )
+
+    assert rc == 1
+    assert "could not be read" in capsys.readouterr().err
+
+
+def test_run_subagent_non_open_pr_is_exit_1(tmp_path, monkeypatch, capsys):
+    # A PR exists on the branch, but it is CLOSED — an invalid lifecycle state. The Run
+    # did not report back through an OPEN draft PR, so the spawn is a clean exit-1 and
+    # emits no SPAWNED line.
+    tree_dir = tmp_path / "tree"
+    _patch_identity(monkeypatch)
+    _fake_create(monkeypatch, tree_dir)
+    runner, _calls = _launcher(returncode=0)
+    _patch_pr(
+        monkeypatch,
+        {"number": 9, "state": "CLOSED", "isDraft": True, "baseRefName": "main"},
+    )
+
+    rc = spawn_verb.run_subagent(
+        repo="widget", epic="TRE03", ws=1, issue=1, role="implementer", launcher=runner
+    )
+
+    assert rc == 1
+    out = capsys.readouterr()
+    assert "is CLOSED, not OPEN" in out.err
+    assert "SPAWNED" not in out.out
+
+
+def test_run_subagent_non_draft_pr_is_exit_1(tmp_path, monkeypatch, capsys):
+    # The PR is OPEN but already flipped to ready-for-review — the draft turn-signal the
+    # coordinator drives is gone. That is an invalid handoff state -> clean exit-1.
+    tree_dir = tmp_path / "tree"
+    _patch_identity(monkeypatch)
+    _fake_create(monkeypatch, tree_dir)
+    runner, _calls = _launcher(returncode=0)
+    _patch_pr(
+        monkeypatch,
+        {"number": 9, "state": "OPEN", "isDraft": False, "baseRefName": "main"},
+    )
+
+    rc = spawn_verb.run_subagent(
+        repo="widget", epic="TRE03", ws=1, issue=1, role="implementer", launcher=runner
+    )
+
+    assert rc == 1
+    out = capsys.readouterr()
+    assert "is not a draft" in out.err
+    assert "SPAWNED" not in out.out
+
+
+def test_run_subagent_wrong_base_pr_is_exit_1(tmp_path, monkeypatch, capsys):
+    # The PR is OPEN and draft, but targets a DIFFERENT base than the Tree's intended
+    # one (origin/main -> "main"). Reporting back against the wrong base is invalid, so
+    # the spawn is a clean exit-1.
+    tree_dir = tmp_path / "tree"
+    _patch_identity(monkeypatch)
+    _fake_create(monkeypatch, tree_dir)
+    runner, _calls = _launcher(returncode=0)
+    _patch_pr(
+        monkeypatch,
+        {"number": 9, "state": "OPEN", "isDraft": True, "baseRefName": "develop"},
+    )
+
+    rc = spawn_verb.run_subagent(
+        repo="widget", epic="TRE03", ws=1, issue=1, role="implementer", launcher=runner
+    )
+
+    assert rc == 1
+    out = capsys.readouterr()
+    assert "targets base 'develop'" in out.err
+    assert "not the intended 'main'" in out.err
+    assert "SPAWNED" not in out.out
 
 
 def test_spawn_subagent_help_documents_the_verb():
@@ -307,6 +474,6 @@ def test_spawn_subagent_help_documents_the_verb():
     result = CliRunner().invoke(spawn_verb.spawn, ["subagent", "--help"])
 
     assert result.exit_code == 0
-    for token in ("--repo", "--epic", "--ws", "--role", "--backend"):
+    for token in ("--repo", "--epic", "--ws", "--issue", "--role", "--backend"):
         assert token in result.output
     assert "Tree" in result.output
