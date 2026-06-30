@@ -180,14 +180,21 @@ def run_provision(cmd: list[str], *, cwd: Path, env: dict[str, str]) -> None:
 def _provision(dest: Path, *, trees_root: Path) -> None:
     """Provision the freshly-checked-out Tree so a write-session starts ready.
 
-    Runs ``shipit install`` (when the repo carries ``.shipit.toml``), then the
-    path's ``pixi install`` / ``npm ci``, each gated on its manifest existing and
+    Runs ``shipit install --local`` (when the repo carries ``.shipit.toml``), then
+    the path's ``pixi install`` / ``npm ci``, each gated on its manifest existing and
     each run with the ADR-0015 build env. Before ``pixi install`` it checks (and
     only *warns* about — #119) the pixi-cache / Trees-root same-filesystem invariant.
+
+    The install runs in ``--local`` mode (#170): it commits the managed set on the
+    Tree's already-checked-out planned branch with NO branch switch, NO push, and NO
+    PR. The default consumer-onboarding install would instead switch to
+    ``shipit/install``, force-push it, and open a draft PR — polluting origin on
+    every Tree creation and leaving HEAD on the wrong branch. Provisioning only
+    needs the managed files committed in the Tree, never any origin side effect.
     """
     env = provision_env(dest)
     if (dest / config.CONFIG_NAME).is_file():
-        run_provision(["shipit", "install", "."], cwd=dest, env=env)
+        run_provision(["shipit", "install", ".", "--local"], cwd=dest, env=env)
     if (dest / PIXI_MANIFEST).is_file():
         _warn_if_cache_cross_filesystem(trees_root)
         run_provision(["pixi", "install"], cwd=dest, env=env)

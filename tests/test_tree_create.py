@@ -18,6 +18,7 @@ from shipit.tree import create as create_mod
 from shipit.tree import layout
 from shipit.tree.create import create, create_from_source
 from shipit.tree.layout import TreeSpec
+from shipit.verbs import install as install_mod
 
 
 def _git(args: list[str], cwd: Path) -> str:
@@ -162,6 +163,76 @@ def test_central_root_is_absolute_and_outside_any_claude_dir(monkeypatch):
     assert ".claude" not in override_root.parts
 
 
+def test_create_provisions_local_only_on_planned_branch_no_origin_side_effects(
+    tmp_path: Path, remote: Path, reference: Path, monkeypatch
+):
+    # #170 end-to-end against REAL git: a Tree whose source carries `.shipit.toml`
+    # gets the managed set committed on its PLANNED branch by a LOCAL-ONLY install
+    # — and `tree create` makes NO push and opens NO PR. The provisioning install
+    # step is run in-process via `install.run(local=True)`; the pixi/npm steps are
+    # no-ops here (covered elsewhere).
+
+    # The Tree's clone carries `.shipit.toml`, so `_provision` runs the install step.
+    (remote / ".shipit.toml").write_text('[shipit]\nversion = "seed"\n')
+    _git(["add", "."], cwd=remote)
+    _git(["commit", "-m", "add manifest"], cwd=remote)
+
+    # A deterministic commit identity for the real local commit `install --local` makes.
+    for var, val in {
+        "GIT_AUTHOR_NAME": "Test",
+        "GIT_AUTHOR_EMAIL": "test@example.com",
+        "GIT_COMMITTER_NAME": "Test",
+        "GIT_COMMITTER_EMAIL": "test@example.com",
+    }.items():
+        monkeypatch.setenv(var, val)
+
+    # ANY push / PR / branch-switch during provisioning is the bug — make it fail loud.
+    def no_push(*a, **k):
+        raise AssertionError("tree create provisioning must NOT push to origin (#170)")
+
+    def no_pr(*a, **k):
+        raise AssertionError("tree create provisioning must NOT open a PR (#170)")
+
+    def no_switch(*a, **k):
+        raise AssertionError("local-only install must NOT switch branches (#170)")
+
+    monkeypatch.setattr(gh, "git_push", no_push)
+    monkeypatch.setattr(gh, "pr_create", no_pr)
+    monkeypatch.setattr(gh, "git_switch_create", no_switch)
+
+    # Drive the real install through the provisioning boundary in local mode; skip
+    # the real pixi/npm spawns. The injected lefthook boundary keeps it hermetic.
+    def fake_provision(cmd, *, cwd, env):
+        if cmd[:2] == ["shipit", "install"]:
+            assert "--local" in cmd
+            rc = install_mod.run(
+                str(cwd), local=True, activate_hooks=lambda root: (0, "")
+            )
+            assert rc == 0
+
+    monkeypatch.setattr(create_mod, "run_provision", fake_provision)
+
+    tree = create(_spec(tmp_path), source_repo=str(reference), github_url=str(remote))
+    dest = Path(tree.path)
+
+    # HEAD is on the PLANNED branch (never `shipit/install`).
+    assert _git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=dest) == "fix/123-smoke"
+    assert tree.branch == "fix/123-smoke"
+
+    # The managed set is present AND committed on the planned branch.
+    assert (dest / "bin" / "shipit").is_file()
+    tracked = _git(["ls-files"], cwd=dest).splitlines()
+    assert "bin/shipit" in tracked
+    assert _git(["log", "-1", "--format=%s"], cwd=dest) == install_mod.COMMIT_MESSAGE
+    # Nothing left uncommitted by provisioning.
+    assert _git(["status", "--porcelain"], cwd=dest) == ""
+
+    # The 3 isolation invariants still hold (unchanged by this WS).
+    assert (dest / ".git").is_dir()
+    assert not (dest / ".git" / "objects" / "info" / "alternates").exists()
+    assert ".claude" not in dest.parts
+
+
 def test_create_rolls_back_partial_tree_on_failure(
     tmp_path: Path, remote: Path, reference: Path, monkeypatch
 ):
@@ -253,9 +324,11 @@ def test_create_copies_treeinclude_and_provisions_deps(tmp_path: Path, monkeypat
     assert (dest / ".env").read_text() == "TOKEN=1"
     assert (dest / "models" / "saml.bin").read_text() == "BIN"
 
-    # Step 4: shipit install, then pixi install, then npm ci — each in the Tree dir.
+    # Step 4: shipit install (LOCAL-ONLY, #170), then pixi install, then npm ci —
+    # each in the Tree dir. The install MUST carry --local so Tree provisioning
+    # never switches branches, pushes, or opens a PR (no origin pollution).
     assert [c[0] for c in calls] == [
-        ["shipit", "install", "."],
+        ["shipit", "install", ".", "--local"],
         ["pixi", "install"],
         ["npm", "ci"],
     ]
