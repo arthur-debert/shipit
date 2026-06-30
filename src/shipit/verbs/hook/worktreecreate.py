@@ -104,16 +104,23 @@ def _resolve_branch(payload: dict[str, object]) -> str:
 def _create_tree(branch: str) -> str:
     """Provision the Tree on `branch` from the ambient checkout; return its path.
 
-    Resolves repo identity (local root + `org/repo`) at the gh/git boundary, hands
-    a freeform-`branch` :class:`TreeSpec` to the orchestrator, and returns the
-    dissociated clone's path. Raises on any failure so :func:`run` fails closed —
-    there is no native-worktree fallback.
+    Resolves repo identity (local root + `org/repo`) at the gh/git boundary,
+    validates the slug is a well-formed `org/repo` before trusting it, hands a
+    freeform-`branch` :class:`TreeSpec` to the orchestrator, and returns the
+    dissociated clone's path. Raises on any failure — a missing checkout OR a
+    malformed slug — so :func:`run` fails closed; there is no native-worktree
+    fallback.
     """
     root = gh.repo_root()
     if not root:
         raise RuntimeError("not inside a git checkout — cannot provision a Tree")
     org_repo = gh.current_repo()
-    org, _, repo = org_repo.partition("/")
+    org, sep, repo = org_repo.partition("/")
+    if not (org and sep and repo):
+        raise RuntimeError(
+            f"malformed repo slug {org_repo!r} (expected 'org/repo') — "
+            "cannot provision a Tree"
+        )
     spec = TreeSpec(
         org=org,
         repo=repo,

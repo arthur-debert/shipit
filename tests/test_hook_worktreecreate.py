@@ -105,6 +105,27 @@ def test_fail_closed_when_not_in_a_checkout(monkeypatch, fake_repo, capsys):
 
 
 @pytest.mark.parametrize(
+    "slug",
+    [
+        "",  # remote missing/unresolved → empty string
+        "widget",  # bare name, no org and no separator
+        "/widget",  # empty org
+        "acme/",  # empty repo
+    ],
+)
+def test_fail_closed_on_malformed_repo_slug(slug, monkeypatch, fake_repo, capsys):
+    # A user-facing boundary: a missing/malformed `org/repo` slug must abort the
+    # spawn LOUD — exit 1, nothing on stdout, and NO Tree provisioned (no partial
+    # `TreeSpec(repo="")` reaching the orchestrator).
+    monkeypatch.setattr(worktreecreate.gh, "current_repo", lambda: slug)
+    code, out = _run(json.dumps({"worktree_name": "x"}))
+    assert code == 1
+    assert out == ""  # CC treats empty stdout + nonzero as a failed spawn
+    assert "malformed repo slug" in capsys.readouterr().err
+    assert "spec" not in fake_repo  # create_from_source was never reached
+
+
+@pytest.mark.parametrize(
     "garbage",
     [
         "",  # empty stdin
