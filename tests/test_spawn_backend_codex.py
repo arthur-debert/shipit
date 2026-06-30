@@ -101,6 +101,46 @@ def test_write_and_reviewer_argv_differ_in_posture():
     assert "--sandbox" not in write
 
 
+def test_default_model_is_resolved_and_write_path_is_unchanged():
+    # The registry instance uses DEFAULT_MODEL (a verbatim id), so resolve_model leaves
+    # it unchanged — the write argv is byte-for-byte what it was before the model param.
+    assert CODEX.model == codex_backend.DEFAULT_MODEL
+    assert codex_backend.resolve_model("pro") == "gpt-5.5"
+    assert (
+        codex_backend.resolve_model("gpt-5.5") == "gpt-5.5"
+    )  # verbatim passes through
+
+
+def test_constructed_with_a_legacy_alias_resolves_the_model():
+    # The funnel constructs an instance with its per-reviewer `model` (a legacy alias);
+    # the adapter resolves it to the Codex model id and threads it into build_command.
+    adapter = codex_backend.CodexAdapter(model="pro")
+    cmd = adapter.build_command("t", "reviewer", read_only=True)
+    assert cmd[cmd.index("--model") + 1] == "gpt-5.5"
+
+
+def test_reviewer_output_schema_adds_the_native_schema_flag():
+    # TRE05-WS04b: a capture reviewer passes the schema temp-file path; codex enforces
+    # the JSON shape natively via --output-schema (the robustness win ADR-0020 keeps).
+    cmd = CODEX.build_command(
+        "review it", "reviewer", read_only=True, output_schema_path="/tmp/schema.json"
+    )
+    assert cmd[cmd.index("--output-schema") + 1] == "/tmp/schema.json"
+    # It rides the reviewer posture, before the model + prompt.
+    assert cmd.index("--output-schema") < cmd.index("--model")
+    # The self-posting spawn-surface reviewer (no schema) omits it entirely.
+    assert "--output-schema" not in CODEX.build_command("t", "reviewer", read_only=True)
+
+
+def test_write_run_never_carries_output_schema_even_if_passed():
+    # A write Run emits no captured JSON, so --output-schema is never added to it — the
+    # flag is gated on read_only as well as a provided path.
+    cmd = CODEX.build_command(
+        "t", "implementer", read_only=False, output_schema_path="/tmp/schema.json"
+    )
+    assert "--output-schema" not in cmd
+
+
 def test_child_env_scrubs_codex_auth_vars():
     parent = {
         "PATH": "/bin",

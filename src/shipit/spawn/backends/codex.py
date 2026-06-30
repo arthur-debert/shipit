@@ -58,11 +58,27 @@ from .base import BackendAdapter
 #: them so the OAuth session wins; everything else inherits.
 AUTH_ENV_VARS = ("OPENAI_API_KEY", "CODEX_API_KEY")
 
-#: The default codex model for a write Run — the capable "pro" tier (mirrors the legacy
-#: review alias ``pro -> gpt-5.5`` in :mod:`shipit.review.backends.codex`, kept as a
-#: local constant rather than imported across subsystems). The seam passes no per-Run
-#: model, so a sane capable default is pinned here.
+#: Legacy review aliases → Codex model ids. The funnel's per-reviewer ``model`` config
+#: (``.shipit.toml [reviewers]``) speaks the legacy ``pro`` / ``flash`` aliases, so a
+#: capture reviewer constructed with one resolves it here; a write Run takes
+#: :data:`DEFAULT_MODEL`. An already-verbatim id (``gpt-5.5``) passes through.
+MODEL_ALIASES = {
+    "pro": "gpt-5.5",
+    "flash": "gpt-5.4-mini",
+    "flash_lite": "gpt-5.4-mini",
+}
+
+#: The default codex model for a write Run — the capable "pro" tier. The registry
+#: instantiates :class:`CodexAdapter` with this; the funnel constructs its own instance
+#: with the per-reviewer model. ``resolve_model`` leaves it unchanged (it is already a
+#: verbatim id), so the write path is byte-for-byte unchanged.
 DEFAULT_MODEL = "gpt-5.5"
+
+
+def resolve_model(model: str) -> str:
+    """Map a legacy review alias to its Codex model id (pass-through otherwise)."""
+    return MODEL_ALIASES.get(model, model)
+
 
 #: The codex ``-c`` override that enables outbound network inside the reviewer's
 #: ``workspace-write`` sandbox (WS04a probe). Without it the sandbox blocks the network a
@@ -90,6 +106,12 @@ class CodexAdapter(BackendAdapter):
 
     name = "codex"
 
+    def __init__(self, model: str = DEFAULT_MODEL) -> None:
+        #: The Codex model id (alias resolved once at construction). The registry's
+        #: shared instance uses :data:`DEFAULT_MODEL`; the funnel constructs an instance
+        #: with its per-reviewer ``model`` so the capture reviewer honours the config.
+        self.model = resolve_model(model)
+
     def build_command(
         self,
         task: str,
@@ -97,6 +119,7 @@ class CodexAdapter(BackendAdapter):
         *,
         read_only: bool = False,
         cwd: str | Path | None = None,
+        output_schema_path: str | None = None,
     ) -> list[str]:
         """The exact ``codex exec`` argv ADR-0020 §codex specifies, per posture.
 
@@ -125,6 +148,13 @@ class CodexAdapter(BackendAdapter):
         codex roots in the Tree through the OS process ``cwd`` that
         :func:`shipit.spawn.launch.launch` sets, so no path belongs in its argv (unlike
         ``agy``, which ignores process ``cwd`` and is handed the Tree via ``--add-dir``).
+
+        ``output_schema_path`` (TRE05-WS04b) — when given AND ``read_only`` — adds
+        ``--output-schema <path>`` so codex enforces its structured output against the
+        review JSON schema natively. It is the funnel **capture** reviewer's robustness
+        win (ADR-0020 §migration-cost: *keep ``--output-schema`` on the codex reviewer*);
+        the self-posting spawn-surface reviewer leaves it ``None`` and so omits the flag.
+        It is never added to a WRITE Run (a write Run emits no captured JSON).
         """
         del cwd  # codex roots via the process cwd; no path belongs in its argv.
         prompt = f"{_role_preamble(role)}\n\n{task}"
@@ -139,13 +169,15 @@ class CodexAdapter(BackendAdapter):
             if read_only
             else ["--dangerously-bypass-approvals-and-sandbox"]
         )
+        if read_only and output_schema_path is not None:
+            posture += ["--output-schema", output_schema_path]
         return [
             "codex",
             "exec",
             "--skip-git-repo-check",
             *posture,
             "--model",
-            DEFAULT_MODEL,
+            self.model,
             prompt,
         ]
 

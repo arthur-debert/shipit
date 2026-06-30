@@ -45,6 +45,12 @@ class PRContext:
     diff: str
     changed_files: list[str] = field(default_factory=list)
     workdir: str = "."
+    # The PR head BRANCH name (``headRefName`` from `gh pr view`). The funnel
+    # producer (`shipit.review.producer`) needs it to provision the shared
+    # read-only Tree (ADR-0018) on the PR head — `resolve_pr` already reads it for
+    # the head fetch, so it is surfaced here rather than re-resolved. Empty only
+    # for a hand-built context (tests); a resolved PR always carries it.
+    head_ref: str = ""
 
 
 def _git_toplevel(workdir: str) -> str | None:
@@ -266,4 +272,5 @@ def resolve_pr(
         diff=diff,
         changed_files=changed_files,
         workdir=workdir,
+        head_ref=head_ref,
     )

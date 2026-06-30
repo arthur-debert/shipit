@@ -207,6 +207,26 @@ shared read-only Tree at the correct head and tells it to fetch the scoped diff 
 `reviewer_task()` in `src/shipit/spawn/launch.py` already does this). `agy` ≡ `antigravity` is
 **confirmed** (one adapter — see §Decision-per-backend).
 
+> **As built (TRE05-WS04b).** The REPLACE landed: the funnel's front-loaded `codex` /
+> `agy` review backends (`src/shipit/review/backends/{codex,agy}.py`, which pasted a
+> pre-computed diff into the prompt and ran the CLI in the consumer's checkout) are
+> **retired**. The single funnel producer is now `src/shipit/review/producer.py`
+> (`run_tree_review`): it provisions the shared read-only Tree (ADR-0018) on the PR head
+> via `create_readonly`, launches the agent through the SAME spawn `BackendAdapter`
+> read-only posture the spawn surface uses (`build_command(..., read_only=True)` — one
+> definition of "launch codex/agy as a reviewer"), and the agent **fetches the scoped
+> diff itself** with `gh pr diff` (the diff is no longer in the prompt). shipit then
+> **captures** the agent's structured stdout and posts it AS the bot App identity through
+> the EXISTING `post.py` onto the EXISTING `review: <agent>-local` check-run — so the
+> readiness engine, the App-identity posting, the `reviewers:` config, dry-run honesty,
+> and codex `--output-schema` are all preserved (the migration-cost checklist below).
+> codex `--output-schema` rides a new `output_schema_path` argument on the seam's
+> `build_command` (codex honours it; claude/agy ignore it — agy carries the schema in
+> prose). The `proc.run` stdin fix shipped earlier in the epic. Canary-validated end to
+> end on a throwaway PR: both `codex-local` and `agy-local` posted `CHANGES_REQUESTED`
+> reviews as their bot App, both `review: *-local` check-runs closed `completed/success`,
+> and `shipit pr status` read them as done — the second agent reused the first's Tree.
+
 ### Decision: **REPLACE — outright.** The spawn-Tree path is the single reviewer producer; the funnel is retired
 
 The maintainer **ratified REPLACE outright** at the WS00 gate. End-state: the spawn-Tree reviewer

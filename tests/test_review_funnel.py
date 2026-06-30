@@ -388,6 +388,36 @@ def test_run_detached_timeout_marker_transitions_to_timed_out(
     assert patch["body"]["conclusion"] == "timed_out"
 
 
+def test_run_detached_structured_timeout_flag_transitions_to_timed_out(
+    monkeypatch, _stub_pipeline
+):
+    """Regression (Copilot #194): the outcome split reads the STRUCTURED
+    `BackendError.timed_out` flag, NOT a string match on the message. A timeout whose
+    `_capture` message PARAPHRASES the timeout (no `_TIMEOUT_MARKER` in the text — the
+    real nonzero-exit / marker-in-stderr path) must still close the run `timed_out`,
+    not `empty`/`neutral`. Before the fix the string match found no marker and
+    misclassified it as `empty`."""
+    from shipit.review.backends.base import _TIMEOUT_MARKER
+
+    calls = _fake_checkrun_boundary(monkeypatch)
+
+    msg = "agy timed out before returning a complete review (try a faster model)"
+    assert _TIMEOUT_MARKER not in msg.lower()  # the message does NOT carry the marker
+
+    def _timed(agent, ctx, **kw):
+        raise BackendError(msg, raw="", timed_out=True)
+
+    monkeypatch.setattr(service, "generate_review", _timed)
+
+    with pytest.raises(BackendError):
+        service.run_detached_review("agy", 5, repo="owner/repo", run_id=555)
+
+    assert not [c for c in calls if c["method"] == "POST"]  # child never creates
+    patch = next(c for c in calls if c["method"] == "PATCH")
+    assert patch["path"] == "/repos/owner/repo/check-runs/555"
+    assert patch["body"]["conclusion"] == "timed_out"  # NOT neutral/empty
+
+
 # --- #76: salvage content-but-unparseable output as a top-level comment ------
 # A local agent (agy) routinely returns review PROSE but truncated/invalid JSON on a
 # large diff -> `BackendError`. Rather than drop it, the content is posted as a single
