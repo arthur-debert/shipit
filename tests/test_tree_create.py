@@ -244,6 +244,62 @@ def test_sccache_env_applies_per_tree_target_and_cache_settings(tmp_path: Path):
     }
 
 
+def test_provision_env_scrubs_leaked_parent_pixi_pointers(tmp_path: Path, monkeypatch):
+    # The regression for #167 defect 4: the env shipit builds for in-clone
+    # git/install must NOT carry the parent's PIXI_* project pointers — a leaked
+    # PIXI_PROJECT_MANIFEST makes the clone's `pixi run lint` resolve the parent
+    # manifest (ambiguous across default/lint/review) and the install commit dies.
+    monkeypatch.setenv("PIXI_PROJECT_MANIFEST", "/parent/pixi.toml")
+    monkeypatch.setenv("PIXI_PROJECT_ROOT", "/parent")
+    monkeypatch.setenv("PIXI_ENVIRONMENT_NAME", "default")
+    monkeypatch.setenv("PIXI_EXE", "/parent/.pixi/bin/pixi")
+    # User-level cache vars are NOT project pointers — they must survive so the
+    # child `pixi install` keeps sharing the package cache across Trees.
+    monkeypatch.setenv("PIXI_CACHE_DIR", "/home/me/.cache/rattler")
+    # An unrelated var the child still needs (e.g. PATH) must pass through.
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+
+    env = create_mod.provision_env(tmp_path / "tree")
+
+    # Every leaked project/environment PIXI_* pointer is gone.
+    assert "PIXI_PROJECT_MANIFEST" not in env
+    assert "PIXI_PROJECT_ROOT" not in env
+    assert "PIXI_ENVIRONMENT_NAME" not in env
+    assert "PIXI_EXE" not in env
+    # Cache var and unrelated vars are preserved.
+    assert env["PIXI_CACHE_DIR"] == "/home/me/.cache/rattler"
+    assert env["PATH"] == "/usr/bin:/bin"
+    # The ADR-0015 build env is still applied on top.
+    assert env["CARGO_TARGET_DIR"] == str(tmp_path / "tree" / "target")
+    assert env["SCCACHE_BASEDIRS"] == str(tmp_path / "tree")
+    assert env["CARGO_INCREMENTAL"] == "0"
+
+
+def test_run_provision_uses_scrubbed_env_verbatim_not_merged(
+    tmp_path: Path, monkeypatch
+):
+    # run_provision must hand proc.run the env with replace_env=True, so a parent
+    # PIXI_PROJECT_MANIFEST in os.environ cannot creep back in via a merge.
+    monkeypatch.setenv("PIXI_PROJECT_MANIFEST", "/parent/pixi.toml")
+
+    captured: dict[str, object] = {}
+
+    def fake_run(cmd, *, cwd, env, replace_env=False, **kwargs):
+        captured["env"] = env
+        captured["replace_env"] = replace_env
+
+    monkeypatch.setattr(create_mod.proc, "run", fake_run)
+
+    create_mod.run_provision(
+        ["shipit", "install", "."],
+        cwd=tmp_path,
+        env=create_mod.provision_env(tmp_path),
+    )
+
+    assert captured["replace_env"] is True
+    assert "PIXI_PROJECT_MANIFEST" not in captured["env"]
+
+
 def test_check_same_filesystem_warns_only_across_filesystems(
     tmp_path: Path, monkeypatch
 ):
