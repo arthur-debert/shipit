@@ -337,13 +337,18 @@ launches the backend agent as a **child process rooted in it** (cwd = the Tree �
 footgun), and the Run reports back **through the PR**. **Fail-closed**: a Tree-creation error
 fails the spawn loud, never a silent fallback to a native worktree.
 *Avoid*: "the worktree hook" as the spawn mechanism — the `WorktreeCreate` hook is only a
-demoted convenience adapter for throwaway in-CC Claude helpers (epic-marker → `<epic>/agent-<id>`,
-Claude-only); real Runs go through `shipit spawn subagent`.
-*Known gap*: the hook reads the epic namespace from the session-stable `SHIPIT_EPIC` env
-marker (`harness/worktree_adapter.py`), the coordinator→hook handshake, but there is **no
-clean in-session mechanism for the coordinator to set it** — so in-CC hook spawns in
-practice land on epic-less `agent-<id>` holding branches and self-branch from there. Filed
-as #173 (follow-up off epic #154; needs a design decision; not a blocker).
+demoted convenience adapter for throwaway in-CC Claude helpers (epic-grouped
+`<epic>/agent-<id>`, Claude-only); real Runs go through `shipit spawn subagent`.
+*Epic inference* (#173, resolved): the hook infers the epic from **live git state**, not an
+out-of-band set step. The `WorktreeCreate` payload carries the coordinator's `cwd`; the hook
+reads that branch (`git -C <cwd> rev-parse --abbrev-ref HEAD`) and takes the prefix before
+the first `/` as the epic per ADR-0016 (`TRE04/WS01` → `TRE04` → spawn branch
+`TRE04/agent-<id>`). The `SHIPIT_EPIC` env var survives only as an *optional explicit
+override* (wins over the inferred branch) for the rare cross-epic spawn. Safe fallback: with
+no override and a detached / no-slash / unreadable branch (or a missing `cwd`), the spawn
+lands on the epic-less `agent-<id>` holding branch and self-branches from there — it never
+crashes the hook. (`harness/worktree_adapter.py` `resolve_epic`/`resolve_branch`;
+`verbs/hook/worktreecreate.py` `_resolve_branch`.)
 
 **Tree ownership** (extends the **Role** registry):
 Who provisions a **Tree** and who merely works in one — the role-keyed half of the

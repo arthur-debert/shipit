@@ -39,6 +39,9 @@ def fake_repo(monkeypatch):
 
     monkeypatch.setattr(worktreecreate.gh, "repo_root", lambda: "/repo")
     monkeypatch.setattr(worktreecreate.gh, "current_repo", lambda: "acme/widget")
+    # Default: the cwd-branch probe finds no branch, so a test that does not opt
+    # into a branch never touches real git (its epic comes from the env override).
+    monkeypatch.setattr(worktreecreate.gh, "git_current_branch", lambda *, cwd: None)
     monkeypatch.setattr(worktreecreate, "create_from_source", fake_create)
     return captured
 
@@ -50,7 +53,7 @@ def _run(payload_text: str) -> tuple[int, str]:
 
 
 def test_spawn_lands_in_a_tree_on_epic_branch(monkeypatch, fake_repo):
-    # With the session-stable epic marker set, the spawn provisions a Tree on
+    # With the SHIPIT_EPIC override set, the spawn provisions a Tree on
     # `<epic>/agent-<id>` and prints its path (which CC adopts as the cwd). The id
     # is read from the VERIFIED payload field `name` (= `agent-<agentId>`).
     monkeypatch.setenv(worktree_adapter.EPIC_MARKER_ENV, "TRE03")
@@ -65,11 +68,56 @@ def test_spawn_lands_in_a_tree_on_epic_branch(monkeypatch, fake_repo):
     assert out.strip() == f"/trees/acme/widget/branches/{spec.agent_hash}"
 
 
-def test_missing_marker_falls_back_to_epicless_branch(monkeypatch, fake_repo):
-    # No marker → a safe epic-less branch; the spawn STILL lands in a real Tree.
+def test_epic_inferred_from_cwd_branch(monkeypatch, fake_repo):
+    # #173: with NO override, the epic is inferred from the coordinator's branch —
+    # the hook probes the payload `cwd`'s branch and takes the prefix before `/`.
     monkeypatch.delenv(worktree_adapter.EPIC_MARKER_ENV, raising=False)
-    payload = json.dumps({"name": "agent-abc123"})
-    code, out = _run(payload)
+    seen: dict = {}
+
+    def fake_branch(*, cwd):
+        seen["cwd"] = cwd
+        return "TRE04/WS01"
+
+    monkeypatch.setattr(worktreecreate.gh, "git_current_branch", fake_branch)
+    payload = json.dumps({"name": "agent-abc123", "cwd": "/coordinator/checkout"})
+    code, _ = _run(payload)
+    assert code == 0
+    assert seen["cwd"] == "/coordinator/checkout"  # probe ran against the payload cwd
+    assert fake_repo["spec"].branch == "TRE04/agent-abc123"
+
+
+def test_override_wins_over_inferred_cwd_branch(monkeypatch, fake_repo):
+    # The SHIPIT_EPIC override takes precedence over the inferred branch prefix
+    # (the rare cross-epic spawn).
+    monkeypatch.setenv(worktree_adapter.EPIC_MARKER_ENV, "HAR02")
+    monkeypatch.setattr(
+        worktreecreate.gh, "git_current_branch", lambda *, cwd: "TRE04/WS01"
+    )
+    payload = json.dumps({"name": "agent-abc123", "cwd": "/coordinator/checkout"})
+    code, _ = _run(payload)
+    assert code == 0
+    assert fake_repo["spec"].branch == "HAR02/agent-abc123"
+
+
+@pytest.mark.parametrize(
+    "branch,cwd",
+    [
+        (None, "/coordinator/checkout"),  # detached / unborn / git error → None
+        ("main", "/coordinator/checkout"),  # no `/` prefix
+        (None, None),  # payload carries no cwd → probe never runs
+    ],
+)
+def test_no_inferable_epic_falls_back_to_epicless_branch(
+    branch, cwd, monkeypatch, fake_repo
+):
+    # No override AND no inferable epic (detached/no-slash/unreadable branch or a
+    # missing cwd) → a safe epic-less branch; the spawn STILL lands in a real Tree.
+    monkeypatch.delenv(worktree_adapter.EPIC_MARKER_ENV, raising=False)
+    monkeypatch.setattr(worktreecreate.gh, "git_current_branch", lambda *, cwd: branch)
+    body = {"name": "agent-abc123"}
+    if cwd is not None:
+        body["cwd"] = cwd
+    code, out = _run(json.dumps(body))
     assert code == 0
     assert fake_repo["spec"].branch == "agent-abc123"
     assert out.strip().startswith("/trees/")

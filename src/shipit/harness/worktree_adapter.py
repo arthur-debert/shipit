@@ -6,40 +6,45 @@ The in-CC ``Agent(isolation:"worktree")`` spawn fires Claude Code's
 a **dissociated Tree clone** as the subagent's cwd — closing the #139 enforcement
 gap *by construction* (the in-CC path can no longer reach a native worktree).
 
-This module is the PURE half of that adapter: given the **session-stable epic
-marker** and the spawn's agent id, it resolves the holding branch the throwaway
-Tree is cut on — ``<epic>/agent-<id>``, or a safe epic-less ``agent-<id>`` when no
-(or a malformed) marker is set. No I/O; the boundary
-(:mod:`shipit.verbs.hook.worktreecreate`) reads the env + payload and runs the
-create.
+This module is the PURE half of that adapter: given the **epic** (resolved from
+live git state) and the spawn's agent id, it resolves the holding branch the
+throwaway Tree is cut on — ``<epic>/agent-<id>``, or a safe epic-less
+``agent-<id>`` when no (or a malformed) epic is in play. No I/O; the boundary
+(:mod:`shipit.verbs.hook.worktreecreate`) reads the payload, runs the git probe,
+and runs the create.
 
-Why a *session-stable* marker and not a per-spawn one: the hook fires with no
-per-spawn intent — it cannot know the work stream or role, only the epic — so the
-branch it can build is deliberately coarse (``<epic>/agent-<id>``) and the Tree is
-**branch-deferred** (the spawned agent self-branches to its real working branch).
-Anything that needs a real branch-pinned Run, a non-Claude backend, or a
-PR-reported result goes through ``shipit spawn subagent`` instead (ADR-0017
-Considered options).
+How the epic is found (:func:`resolve_epic`): the WorktreeCreate payload carries
+the coordinator's ``cwd``, and ADR-0016's branch grammar (``EPIC/umbrella``,
+``EPIC/WSnn``) already encodes the epic in the live branch — so the boundary reads
+that branch and this module takes the prefix BEFORE the first ``/`` (e.g. spawning
+from ``TRE04/WS01`` → epic ``TRE04`` → branch ``TRE04/agent-<id>``). The
+``SHIPIT_EPIC`` env var survives ONLY as an optional explicit override for the rare
+cross-epic spawn (coordinator branch ≠ intended epic); when set it wins over the
+inferred branch prefix.
 
-KNOWN GAP (filed as #173, a follow-up off epic #154; not a blocker):
-``SHIPIT_EPIC`` is the coordinator→hook handshake, but there is no clean
-in-session mechanism for the coordinator to *set* it — so in practice in-CC
-hook spawns fall through to the epic-less ``agent-<id>`` branch and self-branch
-from there. The spawn still lands in a real Tree (never a native worktree); it
-just sits under a generic holding namespace rather than the epic's. Closing
-this needs a design decision on how the coordinator exports a session-stable
-marker into the hook's env.
+Why epic-coarse and not per-spawn: the hook fires with no per-spawn intent — it
+cannot know the work stream or role, only the epic — so the branch it can build is
+deliberately coarse (``<epic>/agent-<id>``) and the Tree is **branch-deferred** (the
+spawned agent self-branches to its real working branch). Anything that needs a real
+branch-pinned Run, a non-Claude backend, or a PR-reported result goes through
+``shipit spawn subagent`` instead (ADR-0017 Considered options).
+
+Safe fallback: when there is no override AND the spawning branch is detached / has
+no ``/`` prefix / could not be read (the git probe is the boundary's job and yields
+``None`` in all those cases), the epic is ``None`` → the spawn lands on the
+epic-less ``agent-<id>`` holding branch and self-branches from there. It still lands
+in a real Tree (never a native worktree); it just sits under a generic holding
+namespace rather than the epic's.
 """
 
 from __future__ import annotations
 
 import re
 
-#: The session-stable epic marker — an env var the coordinator sets ONCE per
-#: session so every in-CC ``Agent(isolation:"worktree")`` spawn lands its
-#: throwaway Tree under the right epic namespace. Session-stable (not per-spawn)
-#: because the hook fires with no per-spawn intent; the epic is the most it can
-#: know (ADR-0017).
+#: The epic OVERRIDE env var. The epic is normally inferred from the spawning
+#: branch's prefix (:func:`resolve_epic`); this var is an *optional* explicit
+#: override for the rare cross-epic spawn where the coordinator's branch is not the
+#: intended epic. When set it takes precedence over the inferred prefix.
 EPIC_MARKER_ENV = "SHIPIT_EPIC"
 
 #: The branch stem each spawn's id hangs off: ``<epic>/agent-<id>`` (or bare
@@ -75,11 +80,37 @@ def normalize_agent_id(raw: str) -> str:
     return _ID_SEP.sub("-", cleaned.lower()).strip("-")
 
 
+def resolve_epic(override: str | None, branch: str | None) -> str | None:
+    """Resolve the epic namespace (pure): explicit override wins, else the branch
+    prefix.
+
+    Precedence (the design decision in #173):
+
+    * a non-empty ``override`` (the :data:`EPIC_MARKER_ENV` value) is returned
+      verbatim — it wins even over a live branch prefix, for the rare cross-epic
+      spawn. (A garbage override still degrades safely: :func:`resolve_branch`
+      validates the token and falls back to epic-less if it is malformed.)
+    * otherwise the epic is the prefix of ``branch`` BEFORE the first ``/`` —
+      ADR-0016's grammar (``EPIC/umbrella``, ``EPIC/WSnn``) — so ``TRE04/WS01``
+      yields ``TRE04``.
+    * ``None`` when neither applies: no override and ``branch`` is ``None``
+      (detached / unreadable, the boundary's git probe yields ``None``) or carries
+      no ``/`` prefix (e.g. ``main``). The caller then lands on the epic-less branch.
+    """
+    override = (override or "").strip()
+    if override:
+        return override
+    prefix, sep, _ = (branch or "").strip().partition("/")
+    if sep and prefix:
+        return prefix
+    return None
+
+
 def resolve_branch(epic: str | None, agent_id: str) -> str:
     """Resolve the holding branch the throwaway Tree is cut on (pure).
 
-    ``<epic>/agent-<id>`` when the session-stable epic marker is a usable
-    alphanumeric token; a safe, epic-less ``agent-<id>`` when the marker is
+    ``<epic>/agent-<id>`` when ``epic`` (see :func:`resolve_epic`) is a usable
+    alphanumeric token; a safe, epic-less ``agent-<id>`` when the epic is
     missing OR malformed — so such a spawn still lands in a real Tree (never a
     native worktree), just under a generic holding namespace rather than an
     epic's. ``agent_id`` must already be a non-empty, normalized ref component
