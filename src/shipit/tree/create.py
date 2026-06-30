@@ -151,7 +151,7 @@ def provision_env(tree_dir: Path) -> dict[str, str]:
     """The COMPLETE environment for a provisioning command run inside ``tree_dir``.
 
     A copy of the current environment with the parent's leaked ``PIXI_*`` project
-    pointers removed (:data:`_is_leaked_pixi_var`) and the ADR-0015 build env
+    pointers removed (:func:`_is_leaked_pixi_var`) and the ADR-0015 build env
     (:func:`sccache_env`) applied. Returned as the full env — not an overlay — so
     :func:`run_provision` can hand it to :func:`shipit.proc.run` with
     ``replace_env=True``: a merge could re-add the very ``PIXI_*`` vars we are
