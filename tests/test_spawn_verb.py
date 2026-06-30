@@ -541,6 +541,84 @@ def test_run_subagent_reviewer_provisions_readonly_tree_and_posts_review(
     assert "sentinel" not in payload
 
 
+def test_run_subagent_codex_reviewer_launches_with_read_only_posture(
+    tmp_path, monkeypatch, capsys
+):
+    # #185 bullet 1: a non-Claude reviewer (--backend codex --role reviewer) takes the
+    # SAME shared read-only Tree path and launches with the codex reviewer posture —
+    # the network-capable workspace-write sandbox, NOT the write bypass flag. The verb
+    # passes read_only=True; the adapter builds the argv. The chmod'd Tree (asserted in
+    # tests/test_tree_readonly.py) is the FS guard.
+    parent = tmp_path / "repo"
+    parent.mkdir()
+    tree_dir = tmp_path / "review"
+    _patch_identity(monkeypatch, root=str(parent))
+    _fake_create_readonly(monkeypatch, tree_dir)
+    monkeypatch.setattr(
+        spawn_verb,
+        "create",
+        lambda *a, **k: pytest.fail("reviewer must not create a write Tree"),
+    )
+    monkeypatch.setenv("OPENAI_API_KEY", "stale")
+    runner, calls = _launcher()
+
+    rc = spawn_verb.run_subagent(
+        repo="widget",
+        epic="TRE03",
+        ws=3,
+        role="reviewer",
+        backend="codex",
+        launcher=runner,
+    )
+
+    assert rc == 0
+    cmd = calls["cmd"]
+    assert cmd[:2] == ["codex", "exec"]
+    # Reviewer posture: network-capable sandbox, no write bypass, no --tools.
+    assert cmd[cmd.index("--sandbox") + 1] == "workspace-write"
+    assert "--dangerously-bypass-approvals-and-sandbox" not in cmd
+    assert "--tools" not in cmd
+    # Rooted in the read-only Tree, codex auth scrubbed.
+    assert calls["cwd"] == str(tree_dir)
+    assert "OPENAI_API_KEY" not in calls["env"]
+    out = capsys.readouterr().out
+    assert out.splitlines()[0] == "SPAWNED"
+    payload = json.loads("\n".join(out.splitlines()[1:]))
+    assert payload["role"] == "reviewer"
+    assert payload["backend"] == "codex"
+
+
+def test_run_subagent_antigravity_reviewer_drops_skip_permissions(
+    tmp_path, monkeypatch, capsys
+):
+    # The agy reviewer path: read_only=True drops --dangerously-skip-permissions and is
+    # rooted in the read-only Tree via --add-dir <Tree> (agy ignores the process cwd).
+    parent = tmp_path / "repo"
+    parent.mkdir()
+    tree_dir = tmp_path / "review"
+    _patch_identity(monkeypatch, root=str(parent))
+    _fake_create_readonly(monkeypatch, tree_dir)
+    monkeypatch.setenv("GEMINI_API_KEY", "stale")
+    runner, calls = _launcher()
+
+    rc = spawn_verb.run_subagent(
+        repo="widget",
+        epic="TRE03",
+        ws=3,
+        role="reviewer",
+        backend="antigravity",
+        launcher=runner,
+    )
+
+    assert rc == 0
+    cmd = calls["cmd"]
+    assert cmd[0] == "agy"
+    assert "--dangerously-skip-permissions" not in cmd
+    # agy is rooted ONLY by --add-dir <Tree> (it ignores the process cwd).
+    assert cmd[cmd.index("--add-dir") + 1] == str(tree_dir)
+    assert "GEMINI_API_KEY" not in calls["env"]
+
+
 def test_run_subagent_reviewer_readonly_tree_failure_is_clean_exit_1(
     tmp_path, monkeypatch, capsys
 ):

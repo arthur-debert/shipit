@@ -36,10 +36,10 @@ def test_build_command_is_the_adr_write_contract():
     assert len(cmd) == 7
 
 
-def test_build_command_has_no_workspace_write_or_readonly_sandbox():
+def test_build_command_has_no_sandbox_for_a_write_run():
     # WRITE Run must NOT carry a constraining --sandbox: the bypass flag is the whole
-    # point (probe: workspace-write cannot commit). The reviewer --sandbox read-only
-    # path is WS04's, not built here.
+    # point (probe: workspace-write cannot commit). The reviewer sandbox posture is a
+    # separate branch (read_only=True), never folded into the write argv.
     cmd = CODEX.build_command("t", "implementer")
     assert "--sandbox" not in cmd
     assert "read-only" not in cmd
@@ -62,19 +62,43 @@ def test_build_command_carries_the_role_verbatim():
     assert "shepherd" in cmd[-1]
 
 
-def test_build_command_ignores_tools_seam_parity():
-    # codex has no tool allow-list; `tools` is accepted for seam parity but ignored
-    # (no --tools flag in the argv whatever is passed).
-    with_tools = CODEX.build_command("t", "reviewer", tools=("Read", "Grep"))
-    without = CODEX.build_command("t", "reviewer")
-    assert with_tools == without
-    assert "--tools" not in with_tools
+def test_build_command_has_no_tools_flag_either_posture():
+    # codex has no tool allow-list (the read-only signal is the read_only flag, not a
+    # tool tuple): --tools never appears, write OR reviewer.
+    assert "--tools" not in CODEX.build_command("t", "reviewer", read_only=True)
+    assert "--tools" not in CODEX.build_command("t", "implementer")
 
 
-def test_reviewer_tools_is_none():
-    # codex's read-only posture is a --sandbox flag, NOT an allow-list, so there is no
-    # tuple to hand build_command — read-only rides the chmod'd Tree (ADR-0018) + WS04.
-    assert CODEX.reviewer_tools is None
+def test_reviewer_build_command_is_network_capable_non_bypass_sandbox():
+    # WS04a probe: a reviewer self-posts via `gh pr review` (needs the network), and
+    # codex --sandbox read-only BLOCKS the network — so the reviewer posture is the
+    # least-privilege sandbox that still grants network: workspace-write + the
+    # network_access override, NOT the write Run's bypass flag. The chmod'd Tree
+    # (ADR-0018) is the load-bearing FS read-only guard.
+    cmd = CODEX.build_command("review it", "reviewer", read_only=True)
+    assert cmd[:3] == ["codex", "exec", "--skip-git-repo-check"]
+    assert "--ephemeral" in cmd
+    assert cmd[cmd.index("--sandbox") + 1] == "workspace-write"
+    assert cmd[cmd.index("-c") + 1] == codex_backend.NETWORK_ACCESS_OVERRIDE
+    # Crucially the reviewer does NOT carry the write/bypass posture.
+    assert "--dangerously-bypass-approvals-and-sandbox" not in cmd
+    assert "read-only" not in cmd  # the ADR's first guess — falsified by the probe
+    # The model + prompt still trail in order; prompt is the single positional.
+    assert cmd[cmd.index("--model") + 1] == codex_backend.DEFAULT_MODEL
+    assert cmd[-1] == f"{codex_backend._role_preamble('reviewer')}\n\nreview it"
+
+
+def test_write_and_reviewer_argv_differ_in_posture():
+    # The two postures are distinct argv — the reviewer must never be the write argv
+    # (the whole point of read_only): write carries the bypass flag, reviewer the
+    # network-capable sandbox.
+    write = CODEX.build_command("t", "implementer")
+    reviewer = CODEX.build_command("t", "reviewer", read_only=True)
+    assert write != reviewer
+    assert "--dangerously-bypass-approvals-and-sandbox" in write
+    assert "--dangerously-bypass-approvals-and-sandbox" not in reviewer
+    assert "--sandbox" in reviewer
+    assert "--sandbox" not in write
 
 
 def test_child_env_scrubs_codex_auth_vars():

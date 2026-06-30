@@ -38,10 +38,10 @@ from ..tree.readonly import create_readonly, readonly_plan
 
 #: The backends ``spawn subagent`` can launch today — **adapter-driven** (ADR-0020
 #: §Decision 2): derived from the :mod:`shipit.spawn.backends` registry, not a
-#: hand-maintained constant, so wiring a backend is one registry entry. Only ``claude``
-#: is registered (ADR-0019 is the claude-backend contract); codex / antigravity are a
-#: future WS (#153). A ``click.Choice`` over this gates the CLI, and
-#: :func:`run_subagent` re-checks it so the programmatic entry point is guarded too.
+#: hand-maintained constant, so wiring a backend is one registry entry. ``claude``
+#: (ADR-0019), ``codex``, and ``antigravity`` (the ``agy`` CLI) are all registered —
+#: write Runs (WS02/WS03) and reviewer Runs (WS04a). A ``click.Choice`` over this gates
+#: the CLI, and :func:`run_subagent` re-checks it so the programmatic entry is guarded too.
 SUPPORTED_BACKENDS = backends.supported_backends()
 
 #: The role that gets a shared **read-only Tree** + a **Reviewer Run** (ADR-0018)
@@ -390,11 +390,13 @@ def _launch_reviewer(
 
     The ADR-0018 reviewer path: resolve the shared per-``(repo, branch)`` read-only
     Tree (a second reviewer on the same head REUSES the clone), then launch the backend
-    child rooted in it with the adapter's **read-only posture**
-    (:attr:`~shipit.spawn.backends.base.BackendAdapter.reviewer_tools` — for ``claude``
-    the read-only allow-list; a backend with no allow-list returns ``None`` and read-only
-    rides solely on the chmod'd Tree, ADR-0020 §Decision 3) and the reviewer task — which
-    reads the diff and posts a review THROUGH the PR. Unlike the write path there is no
+    child rooted in it with the adapter's **read-only posture** (``read_only=True`` on
+    :meth:`~shipit.spawn.backends.base.BackendAdapter.build_command` — for ``claude`` the
+    read-only ``--tools`` allow-list; for ``codex`` / ``agy``, which have no allow-list,
+    the least-privilege posture that still lets the agent self-post via ``gh pr review``,
+    with read-only enforced by the chmod'd Tree, ADR-0020 §Decision 3) and the reviewer
+    task — which reads the diff and posts a review THROUGH the PR. Backend-agnostic: the
+    same call drives claude, codex, and antigravity. Unlike the write path there is no
     Run↔PR linkage to resolve: the Run reports out-of-band (the review lands in the
     existing PR), so success is the child's clean exit. Fail-closed mirrors the write
     path — a read-only-Tree error exits 1 loud, never a fallback.
@@ -408,16 +410,16 @@ def _launch_reviewer(
         print(f"spawn subagent: read-only tree creation failed: {exc}", file=sys.stderr)
         return 1
 
-    # `cwd=tree.path` is threaded here exactly as on the write path: most backends ignore
-    # it (they root via the process cwd), but `agy` is rooted ONLY by `--add-dir <Tree>`,
-    # so `build_command` must never be called without it — otherwise `--backend antigravity
-    # --role reviewer` would raise ValueError and leak a traceback. The read-only Tree path
-    # is the right root here. Full non-Claude reviewer semantics (read-only posture) are
-    # WS04; this only unifies the call signature so the traceback can't occur.
+    # The reviewer posture (ADR-0020 §Decision 3): `read_only=True` builds the backend's
+    # reviewer argv (claude → read-only --tools; codex → workspace-write+network, NOT the
+    # write bypass; agy → drop --dangerously-skip-permissions). `cwd=tree.path` is
+    # required by the agy adapter (it ignores the process cwd and roots ONLY via
+    # `--add-dir <Tree>`) and ignored by the rest. The chmod'd read-only Tree is the
+    # load-bearing FS guard whatever the backend's native posture.
     cmd = adapter.build_command(
         launch.reviewer_task(branch),
         REVIEWER_ROLE,
-        tools=adapter.reviewer_tools,
+        read_only=True,
         cwd=tree.path,
     )
     try:

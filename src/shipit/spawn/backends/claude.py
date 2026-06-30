@@ -37,7 +37,9 @@ ANTHROPIC_API_KEY = "ANTHROPIC_API_KEY"
 #: reviewer reads the diff and code and posts a review, so it gets the read tools plus
 #: ``Bash`` (to run ``gh pr diff`` and ``gh pr review``) but NOT ``Write`` / ``Edit`` —
 #: the read-only posture rides the ``--tools`` allow-list, mirroring the reviewer
-#: agent-def frontmatter. Exposed as :attr:`ClaudeAdapter.reviewer_tools`.
+#: agent-def frontmatter. ``claude`` is the one backend with a native allow-list, so its
+#: ``read_only=True`` posture is this tuple; codex/agy have none and instead build a
+#: sandbox/permission posture (their adapters), with the chmod'd Tree as the FS guard.
 REVIEWER_TOOLS = ("Read", "Grep", "Glob", "Bash")
 
 
@@ -51,7 +53,7 @@ class ClaudeAdapter(BackendAdapter):
         task: str,
         role: str,
         *,
-        tools: tuple[str, ...] | list[str] | None = None,
+        read_only: bool = False,
         cwd: str | Path | None = None,
     ) -> list[str]:
         """The exact ``claude`` print-mode argv ADR-0019 §1 specifies.
@@ -65,10 +67,12 @@ class ClaudeAdapter(BackendAdapter):
         ``--output-format json`` yields the single result envelope the parent treats as
         the exit signal.
 
-        ``tools`` narrows tool access per role (§4): a **reviewer** passes
-        :attr:`reviewer_tools` so the child gets only read-only tools (no ``Write`` /
-        ``Edit``) via ``--tools "<comma-joined>"``. ``None`` (a write Run) omits the
-        flag and inherits the role's full toolset.
+        ``read_only`` selects the posture (§4): a **reviewer** (``read_only=True``)
+        narrows tool access to claude's native read-only allow-list (:data:`REVIEWER_TOOLS`
+        — no ``Write`` / ``Edit``) via ``--tools "<comma-joined>"``; a **write** Run
+        (the default) omits the flag and inherits the role's full toolset. claude is the
+        one backend with a native allow-list, so it reads :data:`REVIEWER_TOOLS` itself —
+        the seam carries only the boolean, since codex/agy have no allow-list to pass.
 
         ``cwd`` is accepted for the seam (ADR-0020) but **ignored**: ``claude`` roots
         in the Tree through the OS process ``cwd`` that :func:`shipit.spawn.launch.launch`
@@ -85,8 +89,8 @@ class ClaudeAdapter(BackendAdapter):
             "--permission-mode",
             "bypassPermissions",
         ]
-        if tools:
-            cmd += ["--tools", ",".join(tools)]
+        if read_only:
+            cmd += ["--tools", ",".join(REVIEWER_TOOLS)]
         cmd += ["--output-format", "json"]
         return cmd
 
@@ -102,13 +106,3 @@ class ClaudeAdapter(BackendAdapter):
         """
         source = os.environ if parent_env is None else parent_env
         return {key: value for key, value in source.items() if key != ANTHROPIC_API_KEY}
-
-    @property
-    def reviewer_tools(self) -> tuple[str, ...]:
-        """``claude``'s read-only reviewer allow-list (:data:`REVIEWER_TOOLS`).
-
-        ``claude`` *has* a native tool allow-list, so its read-only posture is expressed
-        as ``--tools`` (defense-in-depth atop the chmod'd Tree, ADR-0018). A backend with
-        no allow-list would return ``None`` here instead.
-        """
-        return REVIEWER_TOOLS

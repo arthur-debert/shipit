@@ -40,17 +40,20 @@ def test_build_command_carries_the_role_verbatim():
     assert cmd[cmd.index("--agent") + 1] == "shepherd"
 
 
-def test_build_command_omits_tools_when_none():
-    # A write Run passes no allow-list: the --tools flag must be absent so the role
-    # inherits its full toolset.
+def test_build_command_omits_tools_for_a_write_run():
+    # A write Run (read_only=False, the default) passes no allow-list: the --tools flag
+    # must be absent so the role inherits its full toolset, AND it must still carry the
+    # bypassPermissions write posture.
     cmd = CLAUDE.build_command("t", "implementer")
     assert "--tools" not in cmd
+    assert cmd[cmd.index("--permission-mode") + 1] == "bypassPermissions"
 
 
 def test_build_command_adds_readonly_tools_for_a_reviewer():
-    # A reviewer narrows tool access (ADR-0019 §4): --tools carries the read-only
-    # allow-list as a comma-joined string, and crucially excludes Write/Edit.
-    cmd = CLAUDE.build_command("t", "reviewer", tools=CLAUDE.reviewer_tools)
+    # A reviewer (read_only=True) narrows tool access (ADR-0019 §4): --tools carries the
+    # read-only allow-list as a comma-joined string, and crucially excludes Write/Edit.
+    # claude reads its own REVIEWER_TOOLS internally — the seam carries only the flag.
+    cmd = CLAUDE.build_command("t", "reviewer", read_only=True)
     allowlist = cmd[cmd.index("--tools") + 1]
     assert allowlist == "Read,Grep,Glob,Bash"
     assert "Write" not in allowlist and "Edit" not in allowlist
@@ -58,12 +61,12 @@ def test_build_command_adds_readonly_tools_for_a_reviewer():
     assert cmd.index("--tools") < cmd.index("--output-format")
 
 
-def test_reviewer_tools_is_the_readonly_posture():
+def test_reviewer_tools_constant_is_the_readonly_posture():
     # claude HAS a native allow-list, so the read-only posture is a concrete tuple
-    # (defense-in-depth atop the chmod'd Tree), not None.
-    assert CLAUDE.reviewer_tools == ("Read", "Grep", "Glob", "Bash")
-    assert "Write" not in CLAUDE.reviewer_tools
-    assert "Edit" not in CLAUDE.reviewer_tools
+    # (defense-in-depth atop the chmod'd Tree) it splices in when read_only=True.
+    assert claude_backend.REVIEWER_TOOLS == ("Read", "Grep", "Glob", "Bash")
+    assert "Write" not in claude_backend.REVIEWER_TOOLS
+    assert "Edit" not in claude_backend.REVIEWER_TOOLS
 
 
 def test_child_env_scrubs_anthropic_api_key():
