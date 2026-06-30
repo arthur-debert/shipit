@@ -43,12 +43,11 @@ start **non-Claude backends** (codex, antigravity) behind the same verb.
 The verb:
 
 1. resolves the base ref and plans the **Tree** (`tree/layout.py`, ADR-0014/0016).
-   *Shipped scope:* the verb today plans the WS Tree via the FREEFORM shape — base
-   `origin/main` for every spawn, and the Run's draft PR targets `main`. Epic-base
-   resolution by this verb (`--epic E --ws N` → `origin/E/umbrella` + an epic-branch
-   PR target) is **deferred** (follow-up #176); the `origin/<EPIC>/umbrella` base
-   shape itself lives in `tree/layout.py` for `shipit tree create`, the verb just does
-   not select it yet;
+   For a work stream (`--epic E --ws N`) the verb plans via the EPIC shape — base
+   `origin/E/umbrella` — and the Run's draft PR targets the **epic branch**
+   `E/umbrella`, matching the coordinator-driven epic topology (#176, closed). Before
+   cloning it fail-closes on the umbrella branch existing on the remote: a missing
+   `origin/E/umbrella` exits loud, never a silent fallback to `origin/main`;
 2. creates the Tree (`tree/create.py`) — a **write Tree** for a writer, a **read-only
    Tree** for a reviewer (ADR-0018);
 3. launches the backend agent as a **child process whose cwd is the Tree**, so there is

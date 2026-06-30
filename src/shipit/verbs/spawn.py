@@ -33,7 +33,7 @@ import click
 from .. import gh, proc
 from ..spawn import launch
 from ..tree.create import Tree, create, new_agent_hash
-from ..tree.layout import TreeSpec
+from ..tree.layout import TreeSpec, epic_umbrella_base
 from ..tree.readonly import create_readonly, readonly_plan
 
 #: The backends ``spawn subagent`` can launch today. Only ``claude`` is wired
@@ -120,17 +120,19 @@ def subagent_cmd(
     """Create a write Tree and launch a backend-agent Run that reports via a draft PR.
 
     Resolve the ambient repo identity, create a write Tree by reusing
-    ``shipit tree create`` (kept dumb — base ``origin/main``; the epic-grouped
-    umbrella base is a later WS, deferred follow-up #176), then launch a headless
-    ``claude`` child whose
+    ``shipit tree create`` cut from the epic-grouped umbrella base
+    (``origin/E/umbrella``) so the Run's draft PR targets the EPIC branch
+    (``E/umbrella``), matching the coordinator-driven epic topology (#176), then
+    launch a headless ``claude`` child whose
     ``cwd`` IS that Tree (ADR-0019). The Run implements ``--issue`` and opens a draft
     PR from the Tree's branch; ``spawn`` resolves that PR back from the branch and
     reports the Run↔PR linkage so the coordinator drives it with ``shipit pr status``.
 
-    Fail-closed: a Tree-creation error exits 1 loudly — never a silent fallback to a
-    native ``git worktree``. A child that exits nonzero, that exits 0 without having
-    opened a PR on the Tree's branch, or that opened a PR which is not an OPEN, DRAFT PR
-    targeting the intended base, is also a clean exit-1.
+    Fail-closed: if the epic umbrella branch is absent on the remote, or a
+    Tree-creation error occurs, the spawn exits 1 loudly — never a silent fallback
+    to ``origin/main`` or to a native ``git worktree``. A child that exits nonzero,
+    that exits 0 without having opened a PR on the Tree's branch, or that opened a PR
+    which is not an OPEN, DRAFT PR targeting the intended base, is also a clean exit-1.
     """
     raise SystemExit(
         run_subagent(
@@ -238,7 +240,8 @@ def run_subagent(
         return 1
 
     # The slash-namespaced E/WSnn branch — the WS PR head. A reviewer reviews THIS
-    # head; a write Run cuts a fresh branch of this name via the FREEFORM shape.
+    # head; a write Run cuts a fresh branch of this name via the EPIC shape (below),
+    # which also resolves the epic-grouped base. Built here so both modes share it.
     branch = f"{epic}/WS{ws:02d}"
 
     # Reviewer Run (ADR-0018): a shared READ-ONLY Tree on the existing PR head, not a
@@ -255,17 +258,49 @@ def run_subagent(
             launcher=launcher,
         )
 
-    # Skeleton Tree: the slash-namespaced E/WSnn branch via the FREEFORM shape, so
-    # the base stays the dumb origin/main; the epic-grouped umbrella base
-    # (origin/E/umbrella) — and the matching epic-branch PR target — is the semantic
-    # path a later WS swaps in. DEFERRED (maintainer decision, "keep it dumb"):
-    # follow-up #176. Docs that describe the verb are reconciled to this shipped
-    # origin/main behavior, not the deferred epic-base resolution.
+    # Epic-base resolution (#176): a work stream rides the epic topology, so its Tree
+    # is cut from the epic-grouped umbrella base (origin/E/umbrella) and its draft PR
+    # targets the EPIC branch (E/umbrella), NOT main. The EPIC shape of the TreeSpec
+    # resolves both — branch E/WSnn, base origin/E/umbrella — through the same pure
+    # planner `shipit tree create` uses; the PR target falls out of `tree.base` below
+    # (origin/E/umbrella -> E/umbrella), exactly as origin/main -> main did.
+    try:
+        umbrella_base = epic_umbrella_base(epic)  # origin/E/umbrella
+    except ValueError as exc:
+        # An invalid/empty epic code (not a single alphanumeric token) would build a
+        # malformed or path-traversing umbrella ref, so the pure helper refuses it.
+        # Catch that here and emit the same clean exit-1-with-diagnostic the rest of
+        # the verb uses for fail-closed paths — never an escaping traceback (the verb's
+        # documented contract).
+        print(f"spawn subagent: {exc}", file=sys.stderr)
+        return 1
+    umbrella_branch = umbrella_base.split("/", 1)[-1]  # E/umbrella
+    # Fail-closed (ADR-0017/0019): the epic umbrella branch MUST exist on the remote
+    # before we cut a work stream from it. If it does not, refuse LOUD — never
+    # silently fall back to origin/main, which would land the WS PR on the wrong base
+    # and break the coordinator-driven epic topology. Checked against the remote here
+    # (pre-clone) so the diagnostic names the missing epic branch precisely, rather
+    # than surfacing as an opaque `git checkout` failure deep in tree creation.
+    try:
+        umbrella_exists = gh.remote_branch_exists(umbrella_branch, cwd=root)
+    except gh.GhError as exc:
+        print(f"spawn subagent: {exc}", file=sys.stderr)
+        return 1
+    if not umbrella_exists:
+        print(
+            f"spawn subagent: epic base branch {umbrella_branch!r} does not exist on "
+            f"origin; cannot cut work stream {branch!r} from it. Create the epic "
+            "umbrella branch first — refusing to fall back to origin/main, which "
+            "would target the WS PR at the wrong base (#176, fail-closed).",
+            file=sys.stderr,
+        )
+        return 1
     spec = TreeSpec(
         org=org,
         repo=repo_name,
         agent_hash=new_agent_hash(),
-        branch=branch,
+        epic=epic,
+        ws=ws,
     )
     try:
         tree = create(spec, source_repo=root, github_url=url)
@@ -282,7 +317,7 @@ def run_subagent(
     # role to the harness so the guard allows the Run's own edits. The task tells the
     # Run to implement the issue and open a draft PR from this branch (the result
     # channel — ADR-0019 §6); base_branch drops the remote prefix off the Tree's base
-    # so the PR targets a branch name (origin/main -> main).
+    # so the PR targets a branch name (origin/E/umbrella -> E/umbrella).
     base_branch = tree.base.split("/", 1)[-1] if "/" in tree.base else tree.base
     task = launch.write_task(
         role, issue=issue, branch=tree.branch, base_branch=base_branch
