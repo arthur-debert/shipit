@@ -103,6 +103,15 @@ def test_missing_head_sha_fails_loud():
         core_from_node({"number": 1, "isDraft": False}, REPO)
 
 
+@pytest.mark.parametrize("bad", [None, "true", 1, 0])
+def test_nonbool_is_draft_fails_loud_not_coerced(bad):
+    # A present-but-non-bool `isDraft` (e.g. GitHub returning `null`) must RAISE, not
+    # be silently coerced by `bool(...)` — a `null` would become `False` and defeat
+    # the fail-loud-core invariant this boundary enforces.
+    with pytest.raises(ValueError):
+        core_from_node({"number": 1, "headRefOid": "abc", "isDraft": bad}, REPO)
+
+
 def test_repo_from_slug_matches_local_identity():
     # A slug-derived Repo shares identity with a locally-resolved one (both lowercased).
     assert repo_from_slug("Octocat/Hello-World") == REPO

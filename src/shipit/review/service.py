@@ -492,7 +492,20 @@ def _resolve_target(pr: int) -> tuple[str, str]:
     # above) so the request fails loud instead of degrading, BEFORE building the core.
     if not (isinstance(data, dict) and data.get("headRefOid")):
         raise gh.GhError(f"`gh pr view` output for #{pr} has no headRefOid: {raw!r}")
-    core = core_from_node(data, repo_from_slug(repo))
+    # Both boundary reads can raise raw, untyped errors on a malformed upstream:
+    # `repo_from_slug` raises `ValueError` when `gh.current_repo()` returned an
+    # empty/non-`owner/name` slug, and `core_from_node` raises `KeyError`/`ValueError`
+    # when the node omits a required core key or carries a non-bool `isDraft`. This
+    # is the fast synchronous boundary, so normalize either to `gh.GhError` (like the
+    # unparseable/headRefOid cases above) — a clear, typed message instead of a raw
+    # traceback leaking out of the request path.
+    try:
+        core = core_from_node(data, repo_from_slug(repo))
+    except (ValueError, KeyError) as exc:
+        raise gh.GhError(
+            f"could not resolve target repo/core for #{pr} from `gh` output "
+            f"(repo={repo!r}): {exc}"
+        ) from exc
     return core.slug, core.head_sha
 
 

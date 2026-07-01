@@ -82,10 +82,20 @@ class ReviewView:
         return self.pr.base_ref
 
     @property
-    def repo(self) -> str:
+    def repo(self) -> str | None:
         """The ``owner/name`` slug the review posts to — the PR identity's repo,
         resolved once at :func:`resolve_pr`. Downstream posters/producers read this
-        as a slug string exactly as they did the old ``PRContext.repo``."""
+        as a slug string exactly as they did the old ``PRContext.repo``.
+
+        Returns ``None`` — NOT the ``local/local`` placeholder slug — when this view
+        was hand-built without a known repo (the :data:`_HANDBUILT_REPO` identity).
+        That preserves the old ``PRContext.repo`` FALSEY contract (ADR-0024): the
+        review path's ``repo`` is authoritative for a resolved PR, but a hand-built
+        context honestly reports "repo not independently known" so downstream
+        posters/producers keep their ``gh repo view`` fallback instead of silently
+        posting/provisioning against ``local/local``."""
+        if self.pr.repo == _HANDBUILT_REPO:
+            return None
         return self.pr.repo.slug
 
 
@@ -96,8 +106,8 @@ def review_view(
     base_ref: str | None,
     base_sha: str,
     diff: str,
+    is_draft: bool,
     repo: str | None = None,
-    is_draft: bool = False,
     merge_state: str | None = None,
     changed_files: list[str] | None = None,
     workdir: str = ".",
@@ -107,9 +117,15 @@ def review_view(
     for callers (and tests) that hold the values directly rather than a raw node.
 
     ``repo`` is an ``owner/name`` slug (parsed into the PR identity's
-    :class:`shipit.identity.Repo`); ``None`` yields a placeholder identity for a
-    hand-built context. The review path never reads ``is_draft`` / ``merge_state``,
-    but the shared ``PR`` core carries them, so they are accepted (defaulting) here.
+    :class:`shipit.identity.Repo`); ``None`` yields the :data:`_HANDBUILT_REPO`
+    placeholder identity (which :attr:`ReviewView.repo` surfaces as ``None``) for a
+    hand-built context. ``is_draft`` is REQUIRED (no default) — mirroring
+    :func:`shipit.prstate.model.readiness_view`: the shared ``PR`` core carries
+    ``is_draft`` and the real review path genuinely fetches it (:func:`resolve_pr`
+    → :func:`core_from_node`), so this convenience builder must not silently
+    fabricate a ``False`` and reintroduce the defaulted-core-field trap this WS
+    exists to remove (ADR-0024). The review path never READS ``is_draft`` /
+    ``merge_state`` off the view, but the core still carries what it fetched.
     """
     pr = PR(
         repo=repo_from_slug(repo) if repo else _HANDBUILT_REPO,

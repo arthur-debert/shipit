@@ -191,3 +191,35 @@ def test_resolve_pr_rejects_non_checkout(monkeypatch):
     monkeypatch.setattr(diff, "_git_toplevel", lambda wd: None)
     with pytest.raises(diff.ReviewError, match="not a git checkout"):
         diff.resolve_pr(5, workdir="/tmp/nope")
+
+
+def test_review_view_repo_is_slug_when_known():
+    """A view built with an explicit slug reports it — the resolved-PR source of
+    truth downstream posters/producers post to."""
+    ctx = diff.review_view(
+        number=5,
+        repo="owner/repo",
+        head_sha="h",
+        base_ref="main",
+        base_sha="b",
+        diff="",
+        is_draft=False,
+    )
+    assert ctx.repo == "owner/repo"
+
+
+def test_review_view_repo_is_none_for_handbuilt_context():
+    """A hand-built view WITHOUT a slug reports `repo is None` — NOT the
+    `local/local` placeholder slug — so downstream `_resolve_repo` /
+    `_resolve_org_repo` honestly fall back to `gh repo view` instead of silently
+    posting/provisioning against a placeholder (ADR-0024 falsey-repo contract)."""
+    ctx = diff.review_view(
+        number=5,
+        repo=None,
+        head_sha="h",
+        base_ref="main",
+        base_sha="b",
+        diff="",
+        is_draft=False,
+    )
+    assert ctx.repo is None

@@ -371,7 +371,7 @@ def _green_checks() -> list[dict]:
     return [{"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "SUCCESS"}]
 
 
-def _ctx_with_reviews(*authors_on_head: str) -> readiness_view:
+def _ctx_with_reviews(*authors_on_head: str) -> ReadinessView:
     """A draft PR, green + mergeable, with an APPROVED review on the head per
     named author — everything but the review set held constant. `merge_state`
     is CLEAN so the merge-state check (release#675) doesn't hold back a context

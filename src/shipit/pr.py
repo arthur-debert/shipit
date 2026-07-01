@@ -88,15 +88,24 @@ def core_from_node(node: dict, repo: Repo) -> PR:
     ``number``, ``headRefOid`` and ``isDraft`` are read with ``node[...]`` (required
     keys) so a payload that omitted them fails LOUD here rather than silently
     defaulting a core field — the anti-``is_draft=False`` discipline enforced at the
-    boundary. ``baseRefName`` / ``mergeStateStatus`` use ``.get`` because GitHub
-    itself returns them null.
+    boundary. ``isDraft`` is additionally required to be a real ``bool``: a ``null``
+    or non-bool value is a malformed node and RAISES rather than being silently
+    coerced to ``False`` by ``bool(...)`` (which would undermine the very
+    fail-loud-core invariant this boundary exists to enforce). ``baseRefName`` /
+    ``mergeStateStatus`` use ``.get`` because GitHub itself returns them null.
     """
+    is_draft = node["isDraft"]
+    if not isinstance(is_draft, bool):
+        raise ValueError(
+            f"malformed PR node: isDraft must be a bool, got {is_draft!r} "
+            f"({type(is_draft).__name__})"
+        )
     return PR(
         repo=repo,
         number=node["number"],
         head_sha=node["headRefOid"],
         base_ref=node.get("baseRefName"),
-        is_draft=bool(node["isDraft"]),
+        is_draft=is_draft,
         merge_state=node.get("mergeStateStatus"),
     )
 

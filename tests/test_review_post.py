@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 
 from shipit.review import post
-from shipit.review.diff import review_view
+from shipit.review.diff import ReviewView, review_view
 
 _DIFF = """\
 diff --git a/foo.py b/foo.py
@@ -23,7 +23,7 @@ diff --git a/foo.py b/foo.py
 """
 
 
-def _ctx() -> object:
+def _ctx() -> ReviewView:
     return review_view(
         number=5,
         repo="owner/repo",
@@ -31,6 +31,7 @@ def _ctx() -> object:
         base_ref="main",
         base_sha="cafe",
         diff=_DIFF,
+        is_draft=False,
         changed_files=["foo.py"],
     )
 
@@ -122,3 +123,33 @@ def test_post_as_app_auth_failure_is_actionable(monkeypatch):
     monkeypatch.setattr(post.ghauth, "installation_token", boom)
     with pytest.raises(RuntimeError, match="Could not authenticate"):
         post.post_review(review, _ctx(), agent_name="codex", as_app=True)
+
+
+def test_resolve_repo_uses_the_view_slug_when_known(monkeypatch):
+    """The resolved-PR source of truth: a view carrying a real slug posts there and
+    NEVER re-infers via `gh repo view`."""
+    monkeypatch.setattr(
+        post.gh,
+        "current_repo",
+        lambda: (_ for _ in ()).throw(AssertionError("must not infer when repo known")),
+    )
+    assert post._resolve_repo(_ctx()) == "owner/repo"
+
+
+def test_resolve_repo_falls_back_to_gh_for_handbuilt_context(monkeypatch):
+    """The falsey-repo fallback (ADR-0024): a hand-built view (`repo is None`) infers
+    the post target via `gh repo view` rather than posting to a `local/local`
+    placeholder."""
+    ctx = review_view(
+        number=5,
+        repo=None,
+        head_sha="deadbeef",
+        base_ref="main",
+        base_sha="cafe",
+        diff=_DIFF,
+        is_draft=False,
+        changed_files=["foo.py"],
+    )
+    assert ctx.repo is None
+    monkeypatch.setattr(post.gh, "current_repo", lambda: "inferred/repo")
+    assert post._resolve_repo(ctx) == "inferred/repo"
