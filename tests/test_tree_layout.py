@@ -232,6 +232,34 @@ def test_issue_branch_helper_rejects_empty_session(bad_session):
         layout.issue_branch(42, bad_session)
 
 
+def test_work_stream_branch_helper_builds_e_wsnn():
+    # The pure helper the planner AND the spawn reviewer path share: one place builds
+    # AND validates the E/WSnn branch, so both fail loud identically on a bad epic/ws.
+    assert layout.work_stream_branch("HAR02", 2) == "HAR02/WS02"
+    assert layout.work_stream_branch("GPU02", 12) == "GPU02/WS12"
+    # And the planner's resolved branch IS exactly what the helper produces.
+    assert plan(_epic_spec()).branch == layout.work_stream_branch("HAR02", 2)
+
+
+@pytest.mark.parametrize("bad_epic", ["", "  ", "HAR/02", "..", "a b"])
+def test_work_stream_branch_helper_rejects_unsafe_epic(bad_epic):
+    with pytest.raises(ValueError, match="epic code"):
+        layout.work_stream_branch(bad_epic, 2)
+
+
+@pytest.mark.parametrize("bad_ws", [0, -1, -12])
+def test_work_stream_branch_helper_rejects_non_positive_ws(bad_ws):
+    with pytest.raises(ValueError, match="positive integer"):
+        layout.work_stream_branch("HAR02", bad_ws)
+
+
+def test_work_stream_branch_helper_none_epic_raises_valueerror_not_typeerror():
+    # The type is guarded BEFORE the regex, so a non-str (e.g. None) honors the
+    # documented ValueError contract rather than leaking a TypeError.
+    with pytest.raises(ValueError, match="epic code"):
+        layout.work_stream_branch(None, 2)
+
+
 def test_non_epic_shapes_keep_origin_main_base():
     # The #176 change is scoped to the EPIC shape: the issue and freeform shapes (a
     # standalone, no-epic Tree) still cut from origin/main — never the umbrella base.

@@ -169,6 +169,40 @@ def issue_branch(issue: int, session: str) -> str:
     return f"issues/{issue}/{normalized}"
 
 
+def work_stream_branch(epic: str, ws: int) -> str:
+    """The work-stream branch ``E/WSnn`` (validated) — the epic-shape analog of
+    :func:`issue_branch`.
+
+    The single place that builds the slash-namespaced work-stream branch AND validates
+    its two user-controlled inputs, so the planner (:func:`_plan_epic_ws`) and any caller
+    that must resolve the branch WITHOUT going through :func:`plan` (the ``shipit spawn
+    subagent`` verb's reviewer path, which read-only-checks out an existing WS head) fail
+    loud IDENTICALLY on a bad epic/ws — never silently yield a malformed ``/WS01`` from an
+    empty epic. The type is checked before the regex so a non-``str`` (e.g. ``None``)
+    raises the documented :class:`ValueError` rather than an escaping ``TypeError``.
+
+    ``epic`` must be a single alphanumeric token (:data:`_EPIC_CODE`) — the code becomes
+    both a branch ref component and a path segment, so empty/whitespace values and
+    separators or ``..`` (a path-traversal risk) are rejected — and ``ws`` must be a
+    positive integer (rejecting out-of-grammar ``WS00`` / ``WS-1``). Both raise
+    :class:`ValueError`.
+    """
+    if not isinstance(epic, str) or not _EPIC_CODE.fullmatch(epic):
+        raise ValueError(
+            "tree.layout.work_stream_branch: epic code must be a single alphanumeric "
+            f"token (naming.lex §3 THEME+NN, e.g. 'HAR02'); got {epic!r}. The code "
+            "becomes both a branch ref and a path segment, so empty/whitespace values "
+            "and separators or '..' (a path-traversal risk) are rejected."
+        )
+    if ws < 1:
+        raise ValueError(
+            "tree.layout.work_stream_branch: work stream number must be a positive "
+            f"integer (the WSnn grammar, naming.lex §3); got ws={ws!r}. Zero or negative "
+            "values produce out-of-grammar branches like 'WS00'/'WS-1'."
+        )
+    return f"{epic}/WS{ws:02d}"
+
+
 @dataclass(frozen=True)
 class TreeSpec:
     """A request to materialize a Tree — exactly one of the three shapes is set.
@@ -271,26 +305,14 @@ def _plan_epic_ws(spec: TreeSpec) -> TreePlan:
 
     Both user-controlled inputs are validated at this invariant boundary so a
     malformed ref or a path-traversing segment never reaches git or the filesystem:
-    the epic code must be a single alphanumeric token (rejecting empty/whitespace
-    codes and separators / ``..``), and ``ws`` must be a positive integer
-    (rejecting ``WS00`` / ``WS-1``). Both raise :class:`ValueError`.
+    :func:`work_stream_branch` requires the epic code to be a single alphanumeric token
+    (rejecting empty/whitespace codes and separators / ``..``) and ``ws`` to be a positive
+    integer (rejecting ``WS00`` / ``WS-1``), raising :class:`ValueError` on either — the
+    SAME validator the reviewer spawn path uses, so both fail loud identically.
     """
     assert spec.epic is not None and spec.ws is not None  # guaranteed by plan()
-    if not _EPIC_CODE.fullmatch(spec.epic):
-        raise ValueError(
-            "tree.layout.plan: epic code must be a single alphanumeric token "
-            f"(naming.lex §3 THEME+NN, e.g. 'HAR02'); got {spec.epic!r}. The code "
-            "becomes both a branch ref and a path segment, so empty/whitespace "
-            "values and separators or '..' (a path-traversal risk) are rejected."
-        )
-    if spec.ws < 1:
-        raise ValueError(
-            "tree.layout.plan: work stream number must be a positive integer "
-            f"(the WSnn grammar, naming.lex §3); got ws={spec.ws!r}. Zero or "
-            "negative values produce out-of-grammar branches like 'WS00'/'WS-1'."
-        )
+    branch = work_stream_branch(spec.epic, spec.ws)  # validates epic + ws
     ws_code = f"WS{spec.ws:02d}"
-    branch = f"{spec.epic}/{ws_code}"
     base = epic_umbrella_base(spec.epic)
     slug = sanitize_slug(spec.slug)
     leaf = (
@@ -361,7 +383,10 @@ def _plan_issue(spec: TreeSpec) -> TreePlan:
     """
     assert spec.issue is not None  # guaranteed by plan()
     branch = issue_branch(spec.issue, spec.session)  # validates issue + session
-    session = sanitize_slug(spec.session)
+    # Take the normalized session from the branch's last segment rather than
+    # re-sanitizing spec.session: the dir leaf then matches the branch BY CONSTRUCTION
+    # and cannot drift from issue_branch's normalization if the rules ever change.
+    session = branch.rsplit("/", 1)[-1]
     slug = sanitize_slug(spec.slug)
     leaf = (
         f"{session}-{slug}-{spec.agent_hash}"

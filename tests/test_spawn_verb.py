@@ -314,6 +314,38 @@ def test_run_subagent_invalid_epic_is_clean_exit_1(
     assert "called" not in launched  # nothing launched
 
 
+@pytest.mark.parametrize("bad_epic", ["", "   ", "TRE/04", "..", "TRE 04"])
+def test_run_subagent_reviewer_invalid_epic_is_clean_exit_1(
+    tmp_path, monkeypatch, capsys, bad_epic
+):
+    # Fail-closed CONSISTENCY (Copilot #1): the reviewer (read) epic/ws shape must
+    # validate the epic code the SAME way the write path does — via
+    # `work_stream_branch` — so an empty/invalid epic exits 1 LOUD instead of silently
+    # building a malformed "/WS01" head. No read-only Tree is created, nothing launched.
+    _patch_identity(monkeypatch)
+    monkeypatch.setattr(
+        spawn_verb,
+        "create_readonly",
+        lambda *a, **k: pytest.fail("must not create a Tree on an invalid epic code"),
+    )
+
+    launched: dict = {}
+
+    def runner(cmd, *, cwd, env):
+        launched["called"] = True
+        return launch.LaunchResult(0, "", "")
+
+    rc = spawn_verb.run_subagent(
+        repo="widget", epic=bad_epic, ws=3, role="reviewer", launcher=runner
+    )
+
+    assert rc == 1  # a clean exit code, NOT an escaping ValueError, NOT a "/WS03" head
+    err = capsys.readouterr().err
+    assert "spawn subagent:" in err
+    assert "epic code" in err  # the shared validator's diagnostic is surfaced
+    assert "called" not in launched  # nothing launched
+
+
 def test_run_subagent_tree_creation_failure_fails_closed(tmp_path, monkeypatch, capsys):
     # Fail-closed (ADR-0017/0019): a Tree-creation error fails the spawn loud, and
     # NEVER falls back to launching anything — the launcher must not be called.

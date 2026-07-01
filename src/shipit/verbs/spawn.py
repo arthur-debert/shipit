@@ -33,7 +33,12 @@ import click
 from .. import gh, proc
 from ..spawn import backends, launch
 from ..tree.create import Tree, create, new_agent_hash
-from ..tree.layout import TreeSpec, epic_umbrella_base, issue_branch
+from ..tree.layout import (
+    TreeSpec,
+    epic_umbrella_base,
+    issue_branch,
+    work_stream_branch,
+)
 from ..tree.readonly import create_readonly, readonly_plan
 
 #: The backends ``spawn subagent`` can launch today — **adapter-driven** (ADR-0020
@@ -224,7 +229,8 @@ def run_subagent(
     Returns 1 with a clean stderr message (never a traceback) when the backend is
     unsupported, ``--epic``/``--ws`` are given only half (incomplete epic shape), ``--ws``
     is not positive, ``--issue`` is missing/not positive for a WRITE Run, neither shape is
-    given for a reviewer, ``--session`` is empty, ``--repo`` disagrees with the ambient
+    given for a reviewer, ``--session`` is empty for a standalone-issue Run (it is ignored
+    by the ``--epic``/``--ws`` shape), ``--repo`` disagrees with the ambient
     checkout, the command is not run inside a GitHub checkout, a git/gh call fails,
     **Tree creation fails** (fail-closed — no native-worktree fallback), or the child
     exits nonzero. For a write Run it also fails when the child exits 0 without opening a
@@ -337,11 +343,15 @@ def run_subagent(
     if role == REVIEWER_ROLE:
         try:
             review_branch = (
-                f"{epic}/WS{ws:02d}" if has_epic else issue_branch(issue, session)
+                work_stream_branch(epic, ws)
+                if has_epic
+                else issue_branch(issue, session)
             )
         except ValueError as exc:
-            # A bad --session (empty after sanitization) is the only ValueError here;
-            # surface it as the verb's clean exit-1, never a traceback.
+            # Fail loud, identically to the write path: work_stream_branch validates the
+            # epic code (an empty/invalid epic must NOT silently yield "/WS01") and
+            # issue_branch validates the session — both raise ValueError, surfaced here as
+            # the verb's clean exit-1, never a traceback.
             print(f"spawn subagent: {exc}", file=sys.stderr)
             return 1
         return _launch_reviewer(
