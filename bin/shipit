@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# shipit bootstrap launcher — installed and managed by `shipit install`.
+#
+# This is the MINIMAL bootstrap (docs/prd/install-reconciliation.md): it makes the `shipit` CLI
+# reachable from a stable in-repo path and execs it. The pinned-version
+# auto-provision (a pixi dependency on the shipit package at the commit recorded
+# in .shipit.toml's [shipit].version) lands with the pixi integration in Step 5;
+# until then this launcher defers to a shipit already on PATH.
+#
+# Do not edit — `shipit install` overwrites this file.
+set -euo pipefail
+
+if command -v shipit >/dev/null 2>&1; then
+	exec shipit "$@"
+fi
+
+echo "shipit: the shipit CLI is not on PATH." >&2
+echo "Install it (see this repo's .shipit.toml [shipit].version pin), then re-run." >&2
+exit 127
