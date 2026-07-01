@@ -82,13 +82,18 @@ version = ">=8"
 
 # The `lint` FEATURE carries no deps of its own (issue #210, option (a)): the linter
 # toolchain moved to the DEFAULT env above, and the `lint` environment inherits it
-# through the default feature. What stays here is the lexd-provisioning + task wiring
-# that is the CANONICAL lint path — `pixi run -e lint lint`, which lefthook and CI pin
-# (docs/prd/lint-checks.md, architecture.lex §7). This `lint` task carries the
-# `provision-lexd` dependency the managed default-env `lint = "shipit lint"` cannot
-# (the managed block is a fixed plain-string task), so `-e lint lint` always fetches
-# the pinned lexd before running; the default-env `pixi run lint` runs the same
-# `shipit lint` with whatever tools the default env carries.
+# through the default feature. It deliberately does NOT define its own `lint` task:
+# `lint` lives in EXACTLY ONE place — the managed `[tasks] lint = "shipit lint"` in the
+# default env above — so a bare `pixi run lint` resolves UNAMBIGUOUSLY (a duplicate
+# `lint` in both the default feature and this one is what historically made bare
+# `pixi run lint` ambiguous across default/lint/review; the lefthook `-e lint` pin was
+# the mitigation — see lefthook.yml). `pixi run -e lint lint` runs that same managed
+# task INSIDE the lint env (the canonical, lefthook/CI-pinned path). What stays here is
+# the lexd provisioning + the lexd-dependent helpers (fmt, regen-roles). Because the
+# managed `lint` is a fixed plain-string task, it cannot carry a `provision-lexd`
+# depends-on; the pinned lexd is provisioned onto the `-e lint` PATH explicitly — CI
+# runs `provision-lexd` before `lint` (.github/workflows/ci.yml), and locally the lint
+# env inherits any host `lexd` on PATH (the fetch is a no-op when the pin is present).
 [feature.lint.tasks]
 # lexd is not on conda-forge; fetch the pinned prebuilt before every lint run
 # (idempotent). The lint checks depend on it, so CI and the hook provision identically.
@@ -107,7 +112,6 @@ version = ">=8"
 provision-lexd = { cmd = "bash tools/provision-lexd.sh", inputs = [
     "tools/provision-lexd.sh",
 ] }
-lint = { cmd = "shipit lint", depends-on = ["provision-lexd"] }
 fmt = { cmd = "shipit lint --fix", depends-on = ["provision-lexd"] }
 # One command from a fresh clone to working lint checks (the `--install-hook` equiv).
 install-hooks = "lefthook install"

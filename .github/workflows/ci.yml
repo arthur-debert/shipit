@@ -27,6 +27,12 @@ jobs:
           environments: >-
             default
             lint
+      # Fetch the pinned lexd into the lint env before linting. The managed
+      # `lint = "shipit lint"` task is a fixed plain string (no `provision-lexd`
+      # depends-on), so the lex leg's tool is provisioned here explicitly (idempotent;
+      # a no-op when the pin is already present) — issue #210, option (a).
+      - name: Provision lexd
+        run: pixi run -e lint provision-lexd
       - name: Lint
         run: pixi run -e lint lint
       - name: Test
