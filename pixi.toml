@@ -23,10 +23,6 @@ python = "3.13.*"
 shipit = { path = ".", editable = true }
 
 [tasks]
-# >>> shipit-managed tasks (do not edit; regenerate via `shipit install`) >>>
-lint = "shipit lint"
-logs = "shipit logs"
-# <<< shipit-managed tasks <<<
 # Provisional test task (the full pixi-test encapsulation is Step 5); shipit
 # supplies its own `test` so CI's required `check` keeps running the suite.
 test = "python -m pytest -q"
