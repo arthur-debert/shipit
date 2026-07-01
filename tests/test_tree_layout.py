@@ -258,6 +258,16 @@ def test_issue_branch_helper_rejects_empty_session(bad_session):
         layout.issue_branch(42, bad_session)
 
 
+@pytest.mark.parametrize("not_a_str", [None, 3.0, 7, ["work"]])
+def test_issue_branch_helper_non_str_session_raises_valueerror_not_attributeerror(
+    not_a_str,
+):
+    # Parity with the issue guard: a non-str session must raise a clean ValueError, not
+    # an AttributeError/TypeError from `sanitize_slug(None).strip()`.
+    with pytest.raises(ValueError, match="session"):
+        layout.issue_branch(1, not_a_str)
+
+
 # --------------------------------------------------------------------------
 # git-ref hardening (codex CHANGES_REQUESTED): session/slug becomes a git REF
 # component, so sanitize_slug must strip EVERY char git forbids — not just the old

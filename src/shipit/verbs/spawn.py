@@ -290,10 +290,12 @@ def run_subagent(
     if not has_epic and issue is None:
         # Reachable only for a reviewer (a write role already required --issue above):
         # with neither an epic shape nor an issue there is no branch to resolve a head
-        # from. Refuse it loud with a clear message HERE — otherwise the reviewer dispatch
-        # below would take the issue path and call `issue_branch(None, session)`, whose
-        # `None < 1` guard raises a TypeError: an ugly traceback instead of this clean
-        # exit-1 (the shape dispatch no longer builds a stringified `None/WS…` branch).
+        # from. Refuse it loud with a clear, reviewer-specific message HERE — otherwise the
+        # reviewer dispatch below would take the issue path and call
+        # `issue_branch(None, session)`, which raises a generic ValueError ("issue number
+        # must be a positive integer", via its isinstance/`< 1` guard). A clean exit-1
+        # either way, but this message names the ACTUAL problem (no shape given), not a
+        # confusing complaint about the issue number.
         print(
             "spawn subagent: a reviewer needs a branch to review — give --epic E --ws N "
             "or --issue N.",

@@ -180,6 +180,15 @@ def issue_branch(issue: int, session: str) -> str:
             "Zero or negative values produce out-of-grammar branches like "
             "'issues/0/work'."
         )
+    if not isinstance(session, str):
+        # Parity with the issue guard above (and work_stream_branch): a non-str session
+        # would hit `sanitize_slug(session).strip()` and raise an AttributeError, breaking
+        # this function's documented "raises ValueError on invalid" contract. Reject it
+        # cleanly instead.
+        raise ValueError(
+            "tree.layout.issue_branch: session must be a string "
+            f"(the issues/<id>/<session> grammar, naming.lex §3); got {session!r}."
+        )
     normalized = sanitize_slug(session)
     if not normalized:
         raise ValueError(
