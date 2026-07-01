@@ -6,6 +6,7 @@ called git": the planner is pure, so the plan IS the contract.
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,22 @@ from shipit.tree import layout
 from shipit.tree.layout import TreeSpec, plan, sanitize_slug
 
 ROOT = Path("/trees")
+
+
+def _git_accepts_branch(branch: str) -> bool:
+    """True iff git itself considers ``branch`` a valid ref name.
+
+    ``git check-ref-format`` is a pure format check (no repo needed), so a test can
+    prove the branch a shape produces is a REAL git ref — not one that only blows up
+    later inside ``git checkout -b`` during ``tree create``/``spawn``.
+    """
+    return (
+        subprocess.run(
+            ["git", "check-ref-format", f"refs/heads/{branch}"],
+            capture_output=True,
+        ).returncode
+        == 0
+    )
 
 
 def _issue_spec(**over) -> TreeSpec:
@@ -230,6 +247,89 @@ def test_issue_branch_helper_rejects_empty_session(bad_session):
     # file-vs-directory collision the suffix dodges can never be reintroduced.
     with pytest.raises(ValueError, match="session"):
         layout.issue_branch(42, bad_session)
+
+
+# --------------------------------------------------------------------------
+# git-ref hardening (codex CHANGES_REQUESTED): session/slug becomes a git REF
+# component, so sanitize_slug must strip EVERY char git forbids — not just the old
+# separators — and issue_branch is always a VALID ref or a clean ValueError.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "session, expected",
+    [
+        ("foo~bar", "foo-bar"),  # tilde
+        ("foo^bar", "foo-bar"),  # caret
+        ("foo:bar", "foo-bar"),  # colon
+        ("foo?bar", "foo-bar"),  # question mark
+        ("foo*bar", "foo-bar"),  # asterisk
+        ("foo[bar", "foo-bar"),  # open bracket
+        ("back\\slash", "back-slash"),  # backslash
+        ("foo.lock", "foo-lock"),  # trailing .lock (no dot survives)
+        ("foo..bar", "foo-bar"),  # doubled dot
+        ("@{tricky", "tricky"),  # the @{ reflog sequence
+        ("a b c", "a-b-c"),  # spaces
+        (".leading.", "leading"),  # leading/trailing dot
+        ("ctrl\x01char", "ctrl-char"),  # control char
+    ],
+)
+def test_issue_branch_sanitizes_git_ref_invalid_chars(session, expected):
+    # Every git-ref-forbidden character collapses to '-', so the branch is a valid ref
+    # rather than one that only fails later inside `git checkout -b`.
+    assert layout.issue_branch(5, session) == f"issues/5/{expected}"
+
+
+@pytest.mark.parametrize("bad", ["@{", "~", "^", "\\", "??", "***", "[", ":::"])
+def test_issue_branch_rejects_session_that_is_all_invalid(bad):
+    # A session made ENTIRELY of ref-invalid chars sanitizes to '' → the one rejection
+    # policy: fail loud (never a bare `issues/<id>/` ref).
+    with pytest.raises(ValueError, match="session"):
+        layout.issue_branch(5, bad)
+
+
+@pytest.mark.parametrize(
+    "session",
+    [
+        "foo~bar",
+        "foo.lock",
+        "foo..bar",
+        "@{tricky",
+        "back\\slash",
+        "foo^bar",
+        "foo:bar",
+        "foo?bar",
+        "foo*bar",
+        "foo[bar",
+        "a b c",
+        "trailing.",
+        ".leading",
+        "ctrl\x01char",
+        "Mixed/Case.Session",
+        "work",
+        "onboard",
+    ],
+)
+def test_issue_branch_is_always_a_valid_git_ref_or_rejected(session):
+    # Prove it with git itself: whatever issue_branch RETURNS, `git check-ref-format`
+    # accepts; anything it cannot make valid it REJECTS with ValueError. No middle ground
+    # (an invalid ref reaching `tree create`/`spawn` is exactly the codex bug).
+    try:
+        branch = layout.issue_branch(5, session)
+    except ValueError:
+        return
+    assert branch.startswith("issues/5/")
+    assert _git_accepts_branch(branch), f"git rejected {branch!r}"
+
+
+def test_sanitize_slug_is_an_allowlist_to_a_z0_9_dash():
+    # Only [a-z0-9] survive; every other run collapses to '-'. Normal cases unchanged.
+    assert sanitize_slug("Foo~Bar^Baz") == "foo-bar-baz"
+    assert sanitize_slug("has space") == "has-space"
+    assert sanitize_slug("a@{b") == "a-b"
+    assert sanitize_slug("v1.2.lock") == "v1-2-lock"
+    assert sanitize_slug("work") == "work"
+    assert sanitize_slug("header-align") == "header-align"
 
 
 def test_work_stream_branch_helper_builds_e_wsnn():

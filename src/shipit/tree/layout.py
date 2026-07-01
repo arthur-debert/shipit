@@ -19,8 +19,10 @@ The three load-bearing invariants the tests pin (from the PRD):
   ``EPIC/WSnn`` cut from ``origin/EPIC/umbrella``, siblings under ``refs/heads/EPIC/``
   — the umbrella name dodges the bare-``EPIC`` ref/dir collision. The plain-language
   identifier stays hyphenated (``EPIC-WSnn`` in titles/logs); only the branch slashes; and
-- slug sanitization (lowercase; ``/`` ``.`` ``:`` and space → ``-``) lives HERE,
-  so every shape that grows a slug gets the same normalization for free.
+- slug/session sanitization lives HERE (:func:`sanitize_slug`), so every shape that
+  grows a slug or session gets the same normalization for free — an allow-list to
+  ``[a-z0-9-]`` that guarantees a valid git ref component (git-check-ref-format), not
+  just a separators denylist.
 """
 
 from __future__ import annotations
@@ -49,10 +51,17 @@ DEFAULT_CENTRAL_ROOT = "~/workspace/trees"
 #: (:mod:`shipit.tree.readonly`) and ``cleanup`` name it from one place.
 REVIEW_KIND = "review"
 
-#: Characters a slug is normalized on: path/ref separators, dots, colons, and
-#: whitespace all collapse to ``-`` so a slug is safe in both a branch ref and a
-#: directory name.
-_SLUG_SEP = re.compile(r"[\s/.:]+")
+#: A slug/ref component keeps ONLY lowercase ASCII alphanumerics; EVERY run of any
+#: other character collapses to a single ``-``. This is an ALLOW-list, not a
+#: separators denylist: it catches the old separators (whitespace, ``/`` ``.`` ``:``)
+#: AND every other character ``git check-ref-format`` forbids in a ref component —
+#: ``~ ^ ? * [ \\``, space, the ``@{`` sequence, control chars, ``..`` runs, and a
+#: trailing ``.lock`` (there is no ``.`` left at all). The output is a pure
+#: ``[a-z0-9-]`` token (then trimmed of ``-``), so it is simultaneously a
+#: filesystem-safe dir leaf AND a VALID git ref path component — a session/slug that
+#: rides ``issues/<id>/<session>`` can never yield an invalid ref that only blows up
+#: later inside ``tree create`` / ``spawn`` (codex CHANGES_REQUESTED).
+_SLUG_UNSAFE = re.compile(r"[^a-z0-9]+")
 
 #: An epic code is a human-assigned identifier (naming.lex §3: uppercase
 #: ``THEME+NN``, e.g. ``HAR02``). Unlike a slug it is kept VERBATIM and becomes
@@ -117,13 +126,19 @@ def central_root() -> Path:
 
 
 def sanitize_slug(slug: str) -> str:
-    """Normalize a free-text slug to the lowercase ``-``-joined form used in refs.
+    """Normalize free text to the lowercase ``[a-z0-9-]`` form used in refs and dir leaves.
 
-    Lowercases, collapses every run of separator characters (whitespace, ``/``,
-    ``.``, ``:``) to a single ``-``, and trims leading/trailing ``-``. An empty or
-    all-separator slug normalizes to ``""``.
+    Lowercases, then collapses every run of characters OUTSIDE ``[a-z0-9]`` — the old
+    separators (whitespace, ``/`` ``.`` ``:``) AND every other git-ref-forbidden
+    character (``~ ^ ? * [ \\``, space, ``@{``, control chars, ``..`` runs, a trailing
+    ``.lock``) — to a single ``-``, and trims leading/trailing ``-``. The output is a
+    pure ``[a-z0-9-]`` token, so it is simultaneously a filesystem-safe dir leaf and a
+    VALID git ref path component: any NON-EMPTY result contains at least one
+    alphanumeric and carries none of the characters/sequences ``git check-ref-format``
+    rejects. An empty or all-unsafe input normalizes to ``""`` — the caller rejects it
+    (e.g. :func:`issue_branch` fails loud so a bare ``issues/<id>/`` ref is never built).
     """
-    collapsed = _SLUG_SEP.sub("-", slug.strip().lower())
+    collapsed = _SLUG_UNSAFE.sub("-", slug.strip().lower())
     return collapsed.strip("-")
 
 
@@ -146,10 +161,14 @@ def issue_branch(issue: int, session: str) -> str:
     Both inputs are validated at this invariant boundary: ``issue`` must be a positive
     integer (``click`` accepts ``0``/negatives, but they yield out-of-grammar branches
     like ``issues/0/work``), and ``session`` must contain at least one alphanumeric
-    character (it is sanitized like a slug — lowercased, separators → ``-`` — and becomes
-    both a ref component and a dir-leaf component, so an empty/all-separator session would
-    yield a bare ``issues/<id>/`` ref and reintroduce the collision). Both raise
-    :class:`ValueError`.
+    character. The session is sanitized by :func:`sanitize_slug` — an allow-list to
+    ``[a-z0-9-]`` that strips every git-ref-forbidden character (``~ ^ ? * [ \\`` , space,
+    ``@{``, dots, control chars, …), so ``foo~bar`` → ``foo-bar`` and the resulting
+    ``issues/<id>/<session>`` is ALWAYS a valid git ref, never one that only fails later
+    inside ``tree create``/``spawn``. It becomes both a ref component and a dir-leaf
+    component, so a session that sanitizes to EMPTY (``@{``, ``~``, all-separator …) is
+    rejected — it would yield a bare ``issues/<id>/`` ref and reintroduce the collision.
+    Both raise :class:`ValueError`.
     """
     if issue < 1:
         raise ValueError(
