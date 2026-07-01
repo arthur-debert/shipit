@@ -155,6 +155,31 @@ def shipit_version(cfg: dict) -> str | None:
     return str(value) if value is not None else None
 
 
+def is_onboarded(path: str | Path) -> bool:
+    """Whether the ``.shipit.toml`` at ``path`` carries the ONBOARDED marker.
+
+    ``shipit install`` writes a ``[shipit]`` version pin plus a ``[managed]``
+    pristine-hash map (:func:`write_manifest`); the presence of either table is what
+    marks a repo as ONBOARDED — i.e. as having a managed set shipit reconciles. A
+    ``.shipit.toml`` that carries ONLY consumer policy (``[secrets]`` /
+    ``[reviewers]`` / ``[project]``) is NOT onboarded — shipit-self is exactly this
+    case: it ships policy config but has no managed block on ``main``.
+
+    Pure (reads, never writes). Returns ``False`` when the file is absent or
+    malformed: a config we cannot read as onboarded is treated as not onboarded, so
+    a caller (Tree provisioning) never onboards a repo as a side effect.
+    """
+    p = Path(path)
+    if not p.is_file():
+        return False
+    try:
+        with p.open("rb") as fh:
+            cfg = tomllib.load(fh)
+    except tomllib.TOMLDecodeError:
+        return False
+    return isinstance(cfg.get("shipit"), dict) or isinstance(cfg.get("managed"), dict)
+
+
 def _toml_key(key: str) -> str:
     """A TOML key, bare when it can be and quoted (paths, ``#``) otherwise."""
     if _BARE_KEY.fullmatch(key):

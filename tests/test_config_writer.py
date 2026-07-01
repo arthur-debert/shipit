@@ -63,6 +63,30 @@ def test_write_manifest_replaces_prior_shipit_tables(tmp_path):
     assert p.read_text().count("[shipit]") == 1
 
 
+def test_is_onboarded_true_when_shipit_or_managed_block_present(tmp_path):
+    # The [shipit]/[managed] block `shipit install` writes IS the onboarded marker.
+    p = tmp_path / ".shipit.toml"
+    config.write_manifest(p, version="v1", managed={"bin/shipit": "sha256:x"})
+    assert config.is_onboarded(p) is True
+
+    # A bare [managed] table (no [shipit]) is also the marker.
+    q = tmp_path / "managed-only.toml"
+    q.write_text("[managed]\n")
+    assert config.is_onboarded(q) is True
+
+
+def test_is_onboarded_false_for_policy_only_config(tmp_path):
+    # shipit-self's case: policy config ([secrets]/[reviewers]/[project]) but no
+    # managed block — NOT onboarded, so Tree provisioning must not reconcile/onboard.
+    p = tmp_path / ".shipit.toml"
+    p.write_text('[secrets]\nGH_PAT = { env = "X" }\n\n[reviewers]\ncopilot = {}\n')
+    assert config.is_onboarded(p) is False
+
+
+def test_is_onboarded_false_when_file_missing(tmp_path):
+    assert config.is_onboarded(tmp_path / "nope.toml") is False
+
+
 # --------------------------------------------------------------------------
 # Seed-if-absent consumer policy ([secrets] App mappings + [reviewers] set)
 # --------------------------------------------------------------------------
