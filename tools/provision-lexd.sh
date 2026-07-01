@@ -15,8 +15,9 @@
 # Platform note: the pinned v0.18.2 release ships linux (x86_64 / aarch64 gnu) AND an
 # arm64 macOS asset (aarch64-apple-darwin) — so macOS arm64 fetches the PINNED binary
 # exactly like linux, with NO reliance on a host `lexd`. There is NO x86_64 (Intel)
-# macOS asset at this pin, so Intel-mac falls back LOUDLY to a host `lexd` (e.g. a
-# cargo build) and fails loudly if none is present — never a silent skip.
+# macOS asset at this pin, so Intel-mac FAILS LOUD immediately: there is nothing to
+# provision (no pinned asset), so the script exits 1 with an instruction to provision
+# lexd — never a PATH walk, never a host-lexd fallback, never a silent skip.
 
 set -euo pipefail
 
@@ -77,35 +78,14 @@ case "${os}" in
                 triple="aarch64-apple-darwin"
                 ;;
             x86_64)
-                # No x86_64 (Intel) macOS asset at this pin. Fail LOUD, never a silent
-                # skip: fall back to an EXTERNAL host `lexd` if one is on PATH (noting any
-                # version drift), else instruct — the pinned fetch is unavailable here.
-                #
-                # $CONDA_PREFIX/bin is FIRST on PATH, so the first `lexd` found can be our
-                # OWN install target ($dest). Walk PATH and take the first candidate that
-                # is NOT $dest (inode compare via `-ef`, symlink-safe), so a real host
-                # lexd later on PATH still wins; only fail if none qualifies.
-                host_lexd=""
-                IFS=':' read -ra _path_dirs <<<"$PATH"
-                for _dir in "${_path_dirs[@]}"; do
-                    [ -n "$_dir" ] || continue
-                    _cand="$_dir/lexd"
-                    [ -x "$_cand" ] || continue
-                    [ -e "$dest" ] && [ "$_cand" -ef "$dest" ] && continue
-                    host_lexd="$_cand"
-                    break
-                done
-                if [ -n "$host_lexd" ]; then
-                    ln -sf "$host_lexd" "$dest"
-                    got="$("$host_lexd" --version 2>/dev/null || echo '?')"
-                    case "$got" in
-                        *"$PIN"*) : ;;
-                        *) echo "provision-lexd: using host lexd (${got#lexd }); pin is ${PIN}, no x86_64-apple-darwin asset at this pin" >&2 ;;
-                    esac
-                    exit 0
-                fi
-                echo "provision-lexd: no pinned macOS-x86_64 (Intel) asset at ${PIN} and no external host lexd. Install it" >&2
-                echo "  (cargo install --git https://github.com/${REPO} lexd) and re-run." >&2
+                # No x86_64 (Intel) macOS asset at this pin. There is nothing to
+                # provision here, so FAIL LOUD immediately — no PATH walk, no host-lexd
+                # fallback, no version-drift symlink. Provisioning either fetches the
+                # pinned binary or it does not run; it never limps along on whatever
+                # host `lexd` happens to be around.
+                echo "provision-lexd: no pinned macOS-x86_64 (Intel) asset at ${PIN} — lexd is not provisioned on this platform." >&2
+                echo "  Provision it from the pinned source and re-run, e.g.:" >&2
+                echo "    cargo install --git https://github.com/${REPO} --tag ${TAG} lexd" >&2
                 exit 1
                 ;;
             *)
