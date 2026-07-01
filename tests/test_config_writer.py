@@ -63,6 +63,30 @@ def test_write_manifest_replaces_prior_shipit_tables(tmp_path):
     assert p.read_text().count("[shipit]") == 1
 
 
+def test_is_onboarded_true_when_shipit_or_managed_block_present(tmp_path):
+    # The [shipit]/[managed] block `shipit install` writes IS the onboarded marker.
+    p = tmp_path / ".shipit.toml"
+    config.write_manifest(p, version="v1", managed={"bin/shipit": "sha256:x"})
+    assert config.is_onboarded(p) is True
+
+    # A bare [managed] table (no [shipit]) is also the marker.
+    q = tmp_path / "managed-only.toml"
+    q.write_text("[managed]\n")
+    assert config.is_onboarded(q) is True
+
+
+def test_is_onboarded_false_for_policy_only_config(tmp_path):
+    # shipit-self's case: policy config ([secrets]/[reviewers]/[project]) but no
+    # managed block — NOT onboarded, so Tree provisioning must not reconcile/onboard.
+    p = tmp_path / ".shipit.toml"
+    p.write_text('[secrets]\nGH_PAT = { env = "X" }\n\n[reviewers]\ncopilot = {}\n')
+    assert config.is_onboarded(p) is False
+
+
+def test_is_onboarded_false_when_file_missing(tmp_path):
+    assert config.is_onboarded(tmp_path / "nope.toml") is False
+
+
 # --------------------------------------------------------------------------
 # Seed-if-absent consumer policy ([secrets] App mappings + [reviewers] set)
 # --------------------------------------------------------------------------
@@ -127,7 +151,12 @@ def test_seeded_reviewers_resolve_to_required_set(tmp_path):
     p = tmp_path / ".shipit.toml"
     config.apply_policy_seed(p)
     override = rcfg.load_override(str(tmp_path))
-    assert rcfg.resolve_required_names(override) == ("copilot", "codex", "agy")
+    # The install scaffold is rendered from the SINGLE required-reviewer default
+    # (ADR-0025 / COR01-WS02), so a freshly-seeded repo requires exactly what the
+    # code-default requires — Copilot only. codex/agy are opt-in per repo (their
+    # review Apps are not installed everywhere), never seeded by default.
+    assert rcfg.resolve_required_names(override) == tuple(rcfg.DEFAULT_REVIEWERS)
+    assert rcfg.resolve_required_names(override) == ("copilot",)
 
 
 def test_plan_policy_seed_raises_on_malformed(tmp_path):

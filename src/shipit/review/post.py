@@ -8,7 +8,7 @@ carrying a summary body plus inline comments anchored to changed lines.
 Two functions, kept separable so the payload build is unit-testable without any
 network:
 
-* :func:`build_review_payload` — pure data transform (review + PRContext →
+* :func:`build_review_payload` — pure data transform (review + ReviewView →
   GitHub payload dict). No I/O.
 * :func:`post_review` — builds the payload and (unless ``dry_run``) POSTs it via
   the :mod:`shipit.gh` boundary, AS the agent's GitHub App when ``as_app``.
@@ -32,7 +32,7 @@ import logging
 
 from .. import gh
 from . import ghauth
-from .diff import PRContext
+from .diff import ReviewView
 
 #: The review-post logger — a child of the package ``shipit`` logger. The post
 #: (target, identity, outcome) is recorded at DEBUG/INFO; the minted installation
@@ -123,7 +123,7 @@ def _comment_body(
 
 def build_review_payload(
     review: dict,
-    ctx: PRContext,
+    ctx: ReviewView,
     *,
     agent_name: str,
     event: str | None = None,
@@ -193,7 +193,7 @@ def build_review_payload(
     return payload
 
 
-def _resolve_repo(ctx: PRContext) -> str:
+def _resolve_repo(ctx: ReviewView) -> str:
     """The ``OWNER/NAME`` slug to POST to: ``ctx.repo`` if set, else inferred via
     ``gh repo view``. Raises a clear error if it can't be determined."""
     if ctx.repo:
@@ -216,7 +216,7 @@ def _resolve_repo(ctx: PRContext) -> str:
 
 def post_review(
     review: dict,
-    ctx: PRContext,
+    ctx: ReviewView,
     *,
     agent_name: str,
     event: str | None = None,

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from shipit.prstate.model import PullContext, Review, ReviewComment, Thread
+from shipit.prstate.model import readiness_view, Review, ReviewComment, Thread
 
 
 def _thread(thread_id, resolved, *comments):
@@ -27,7 +27,7 @@ def test_empty_thread_has_no_location():
 
 
 def test_reviews_on_head_filters_stale():
-    ctx = PullContext(
+    ctx = readiness_view(
         number=1,
         head_sha="head",
         is_draft=True,
@@ -40,7 +40,7 @@ def test_reviews_on_head_filters_stale():
 
 
 def test_open_threads_excludes_resolved():
-    ctx = PullContext(
+    ctx = readiness_view(
         number=1,
         head_sha="head",
         is_draft=True,

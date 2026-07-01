@@ -113,7 +113,8 @@ PR flips).
 
 ### Snapshot carries the funnel + now
 
-- The snapshot (`PullContext`) is extended to carry the OBS02 funnel breadcrumbs
+- The snapshot (the readiness view over the `PR` core in `prstate.model`) carries
+  the OBS02 funnel breadcrumbs
   / check-run state per reviewer **and** an injected **"now"**. The engine reads
   both; it never calls a clock itself. A fixed "now" + a recorded snapshot →
   a deterministic state.

@@ -95,9 +95,9 @@ def test_gemini_review_on_earlier_head_still_counts_as_done():
     # The exact #345-fixup case: Gemini reviewed the OLD head, a fixup made a new
     # head, and the lingering eyes reaction must NOT downgrade Gemini to
     # in_progress — it reviews once and won't re-review the push.
-    from shipit.prstate.model import PullContext, Review
+    from shipit.prstate.model import readiness_view, Review
 
-    ctx = PullContext(
+    ctx = readiness_view(
         number=1,
         head_sha="new",
         is_draft=True,
@@ -109,9 +109,9 @@ def test_gemini_review_on_earlier_head_still_counts_as_done():
 
 def test_copilot_review_on_earlier_head_counts_done_review_once():
     # DEFAULT (review-once): an earlier-head Copilot review still counts as done.
-    from shipit.prstate.model import PullContext, Review
+    from shipit.prstate.model import readiness_view, Review
 
-    ctx = PullContext(
+    ctx = readiness_view(
         number=1,
         head_sha="new",
         is_draft=True,
@@ -126,9 +126,9 @@ def test_copilot_review_on_earlier_head_counts_done_review_once():
 
 def test_copilot_review_on_earlier_head_does_NOT_count_done_when_rerun():
     # rerun=True: Copilot is head-strict — a review on an old head is stale.
-    from shipit.prstate.model import PullContext, Review
+    from shipit.prstate.model import readiness_view, Review
 
-    ctx = PullContext(
+    ctx = readiness_view(
         number=1,
         head_sha="new",
         is_draft=True,
@@ -142,22 +142,22 @@ def test_copilot_review_on_earlier_head_does_NOT_count_done_when_rerun():
 def test_copilot_never_reviewed_is_requested_or_not_requested():
     # Never reviewed: REQUESTED when currently requested, else NOT_REQUESTED —
     # independent of the rerun flag.
-    from shipit.prstate.model import PullContext
+    from shipit.prstate.model import readiness_view
 
-    requested = PullContext(
+    requested = readiness_view(
         number=1, head_sha="h", is_draft=True, requested_logins=["Copilot"]
     )
     assert COPILOT.detect(requested) == ReviewLifecycle.REQUESTED
-    bare = PullContext(number=1, head_sha="h", is_draft=True)
+    bare = readiness_view(number=1, head_sha="h", is_draft=True)
     assert COPILOT.detect(bare) == ReviewLifecycle.NOT_REQUESTED
 
 
 def test_dismissed_copilot_review_on_head_does_NOT_count_done():
     # A DISMISSED review (cleared by an admin/author) is retracted — even on the
     # current head it must not read as done; the PR falls back to REQUESTED.
-    from shipit.prstate.model import PullContext, Review
+    from shipit.prstate.model import readiness_view, Review
 
-    ctx = PullContext(
+    ctx = readiness_view(
         number=1,
         head_sha="new",
         is_draft=True,
@@ -169,9 +169,9 @@ def test_dismissed_copilot_review_on_head_does_NOT_count_done():
 
 def test_dismissed_gemini_review_does_NOT_count_done():
     # Same for best-effort Gemini: a dismissed review is not a standing verdict.
-    from shipit.prstate.model import PullContext, Review
+    from shipit.prstate.model import readiness_view, Review
 
-    ctx = PullContext(
+    ctx = readiness_view(
         number=1,
         head_sha="new",
         is_draft=True,
@@ -265,14 +265,14 @@ def test_coderabbit_matches_its_bot_login():
 
 def test_coderabbit_done_on_head_with_open_comment():
     # Head-strict + leaves a thread → DONE_COMMENTS, with the open thread tracked.
-    from shipit.prstate.model import PullContext, Review, ReviewComment, Thread
+    from shipit.prstate.model import readiness_view, Review, ReviewComment, Thread
 
     thread = Thread(
         thread_id="PRT_cr1",
         is_resolved=False,
         comments=(ReviewComment(1, "a.py", 3, "nit", "coderabbitai[bot]"),),
     )
-    ctx = PullContext(
+    ctx = readiness_view(
         number=1,
         head_sha="h",
         is_draft=True,
@@ -285,9 +285,9 @@ def test_coderabbit_done_on_head_with_open_comment():
 
 def test_coderabbit_review_once_by_default_counts_earlier_head():
     # DEFAULT review-once: an earlier-head CodeRabbit review counts as done.
-    from shipit.prstate.model import PullContext, Review
+    from shipit.prstate.model import readiness_view, Review
 
-    ctx = PullContext(
+    ctx = readiness_view(
         number=1,
         head_sha="new",
         is_draft=True,
@@ -302,9 +302,9 @@ def test_coderabbit_review_once_by_default_counts_earlier_head():
 
 def test_coderabbit_is_head_strict_when_rerun():
     # rerun=True: a review on an earlier head is stale — must NOT read as done.
-    from shipit.prstate.model import PullContext, Review
+    from shipit.prstate.model import readiness_view, Review
 
-    ctx = PullContext(
+    ctx = readiness_view(
         number=1,
         head_sha="new",
         is_draft=True,
@@ -316,9 +316,9 @@ def test_coderabbit_is_head_strict_when_rerun():
 
 
 def test_dismissed_coderabbit_review_does_not_count_done():
-    from shipit.prstate.model import PullContext, Review
+    from shipit.prstate.model import readiness_view, Review
 
-    ctx = PullContext(
+    ctx = readiness_view(
         number=1,
         head_sha="h",
         is_draft=True,
@@ -388,9 +388,9 @@ def test_codex_and_agy_require_bot_as_suffix_not_substring():
 
 def test_codex_detect_done_on_head():
     # A review by the codex bot on the current head reads as done (head-strict).
-    from shipit.prstate.model import PullContext, Review
+    from shipit.prstate.model import readiness_view, Review
 
-    ctx = PullContext(
+    ctx = readiness_view(
         number=1,
         head_sha="h",
         is_draft=True,
@@ -405,18 +405,18 @@ def test_codex_detect_done_on_head():
 def test_codex_detect_not_requested_when_empty():
     # No review by the local reviewer → NOT_REQUESTED (no requested edge exists
     # for a local backend, so requested_logins is never consulted).
-    from shipit.prstate.model import PullContext
+    from shipit.prstate.model import readiness_view
 
-    ctx = PullContext(number=1, head_sha="h", is_draft=True)
+    ctx = readiness_view(number=1, head_sha="h", is_draft=True)
     assert CODEX.detect(ctx) == ReviewLifecycle.NOT_REQUESTED
     assert AGY.detect(ctx) == ReviewLifecycle.NOT_REQUESTED
 
 
 def test_codex_detect_stale_review_counts_done_review_once():
     # DEFAULT review-once: an earlier-head local review still counts as done.
-    from shipit.prstate.model import PullContext, Review
+    from shipit.prstate.model import readiness_view, Review
 
-    ctx = PullContext(
+    ctx = readiness_view(
         number=1,
         head_sha="new",
         is_draft=True,
@@ -432,9 +432,9 @@ def test_codex_detect_stale_review_is_not_done_when_rerun():
     # rerun=True: head-strict — a review against an earlier head is stale. A local
     # backend has no requested edge, so a staled review reads NOT_REQUESTED (it
     # must be re-run), never REQUESTED.
-    from shipit.prstate.model import PullContext, Review
+    from shipit.prstate.model import readiness_view, Review
 
-    ctx = PullContext(
+    ctx = readiness_view(
         number=1,
         head_sha="new",
         is_draft=True,
@@ -445,9 +445,9 @@ def test_codex_detect_stale_review_is_not_done_when_rerun():
 
 
 def test_dismissed_codex_review_does_not_count_done():
-    from shipit.prstate.model import PullContext, Review
+    from shipit.prstate.model import readiness_view, Review
 
-    ctx = PullContext(
+    ctx = readiness_view(
         number=1,
         head_sha="h",
         is_draft=True,

@@ -41,6 +41,7 @@ import urllib.error
 import urllib.request
 
 from .. import secretsrc
+from ..agent import backend as _agent_backend
 
 #: Per-request timeout (seconds) for the bearer-JWT urllib calls.
 _HTTP_TIMEOUT = 30
@@ -55,19 +56,13 @@ _API_BASE = "https://api.github.com"
 _JWT_IAT_SKEW = 60
 _JWT_TTL = 540
 
-#: Per-agent Doppler key names for the App PEM + app id. The agent's review bot
-#: is ``adr-<agent>-review[bot]``; the App credentials are provisioned into
-#: Doppler ``github/prd`` under these keys (pre-work, already done).
-_DOPPLER_KEYS: dict[str, dict[str, str]] = {
-    "codex": {
-        "pem": "CODEX_REVIEW_APP_PRIVATE_KEY",
-        "app_id": "CODEX_REVIEW_APP_ID",
-    },
-    "agy": {
-        "pem": "AGY_REVIEW_APP_PRIVATE_KEY",
-        "app_id": "AGY_REVIEW_APP_ID",
-    },
-}
+#: Per-agent Doppler key names for the App PEM + app id — DERIVED from the ONE
+#: agent-backend identity registry (:func:`shipit.agent.backend.funnel_doppler_keys`),
+#: NOT a table duplicated here (ADR-0025: every backend alias, the Doppler key names
+#: included, is defined once and shared by the launch + funnel axes). The agent's review
+#: bot is ``adr-<agent>-review[bot]``; the App credentials are provisioned into Doppler
+#: ``github/prd`` under these keys (pre-work, already done).
+_DOPPLER_KEYS: dict[str, dict[str, str]] = _agent_backend.funnel_doppler_keys()
 
 
 class ReviewAuthError(Exception):

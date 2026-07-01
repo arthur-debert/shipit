@@ -121,12 +121,23 @@ def test_review_requested_edge_time_carried_for_the_app_wait_window(monkeypatch)
 
 
 def _reviews_page(
-    review_requests: list[dict], reviews: list[dict], head: str = "abc1234"
+    review_requests: list[dict],
+    reviews: list[dict],
+    head: str = "abc1234",
+    *,
+    is_draft: bool = False,
 ) -> dict:
+    # The light query now selects the full PR core (number/isDraft/baseRefName/
+    # mergeStateStatus) alongside the head sha, so the core rides on the ONE call
+    # already in flight and `gather_reviews` no longer hardcodes `is_draft`.
     return {
         "repository": {
             "pullRequest": {
+                "number": 558,
                 "headRefOid": head,
+                "baseRefName": "main",
+                "isDraft": is_draft,
+                "mergeStateStatus": "CLEAN",
                 "reviewRequests": {"nodes": review_requests},
                 "reviews": {"nodes": reviews},
             }
@@ -165,10 +176,15 @@ def test_gather_reviews_fetches_only_the_skip_decision_inputs(monkeypatch):
                     "author": {"login": "Copilot"},
                 }
             ],
+            is_draft=True,
         ),
     )
     ctx = fetch.gather_reviews(558)
     assert ctx.head_sha == "abc1234"
+    # The core is REAL now, not hardcoded: the light path reads `is_draft` off its
+    # own query (the killed `is_draft=False` trap) and composes the PR identity.
+    assert ctx.is_draft is True
+    assert ctx.pr.number == 558
     assert ctx.requested_logins == ["Copilot"]
     assert [(r.review_id, r.author, r.commit_id) for r in ctx.reviews] == [
         (11, "Copilot", "abc1234")

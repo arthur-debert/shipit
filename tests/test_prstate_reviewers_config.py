@@ -15,6 +15,7 @@ Ported from release-core: the pure-seam tests are unchanged (re-pointed to
 
 from __future__ import annotations
 
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -53,6 +54,36 @@ def test_default_is_copilot_only_review_once():
     assert resolve_reviewers(None) == {"copilot": False}
     assert resolve_required_names(None) == ("copilot",)
     assert reviewer_rerun(None) == {"copilot": False}
+
+
+def test_scaffold_body_renders_from_the_default_map_and_round_trips():
+    # The install scaffold is rendered FAITHFULLY from DEFAULT_REVIEWERS (keys AND
+    # values), so the seeded `.shipit.toml` and the engine default cannot diverge:
+    # parsing the scaffold back must yield exactly the default map.
+    body = reviewers_config.default_reviewers_scaffold_body()
+    assert body.startswith("[reviewers]\n")
+    parsed = tomllib.loads(body)
+    assert reviewers_config._parse_override_value(parsed["reviewers"]) == dict(
+        DEFAULT_REVIEWERS
+    )
+
+
+def test_scaffold_body_renders_each_reviewers_rerun_flag(monkeypatch):
+    # The renderer must honour the map VALUES, not just its keys: a reviewer with
+    # rerun=True renders `{ rerun = true }`, one with rerun=False the empty `{}`.
+    # (Guards against the renderer silently dropping a future rerun default.)
+    monkeypatch.setattr(
+        reviewers_config, "DEFAULT_REVIEWERS", {"copilot": True, "codex": False}
+    )
+    body = reviewers_config.default_reviewers_scaffold_body()
+    assert "copilot = { rerun = true }" in body
+    assert "codex = {}" in body
+    # And it round-trips back to the (patched) map's rerun flags.
+    parsed = tomllib.loads(body)
+    assert reviewers_config._parse_override_value(parsed["reviewers"]) == {
+        "copilot": True,
+        "codex": False,
+    }
 
 
 def test_empty_override_falls_back_to_default():

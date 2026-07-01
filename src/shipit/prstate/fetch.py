@@ -1,21 +1,30 @@
-"""Gather all raw GitHub state for one PR into a `PullContext`.
+"""Gather all raw GitHub state for one PR into a `ReadinessView`.
 
 The only module that calls `ghapi` on read paths. The raw-JSON -> model parsing
-is split out (`context_from_raw`) so tests can build a context from recorded
+is split out (`context_from_raw`) so tests can build a view from recorded
 fixtures without the network, exercising the exact code `gather()` runs live.
+
+The view's cheap CORE (`head_sha`, `base_ref`, `is_draft`, `merge_state`) is read
+off the fetched GitHub `pullRequest` node through the ONE `pr.core_from_node`
+boundary (ADR-0024) — the SAME builder the review path uses — so `head_sha` is
+fetched exactly one way and the light `gather_reviews` path can no longer hardcode
+`is_draft`.
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from ..identity import Repo
+from ..pr import core_from_node, repo_from_slug
 from . import ghapi
 from .model import (
-    PullContext,
+    ReadinessView,
     Review,
     ReviewComment,
     ReviewFunnelCheck,
     Thread,
+    _HANDBUILT_REPO,
 )
 
 # The OBS02/ADR-0005 funnel check runs are named `review: <reviewer>` (see
@@ -228,7 +237,11 @@ _REVIEWS_QUERY = """
 query($owner: String!, $name: String!, $pr: Int!) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $pr) {
+      number
       headRefOid
+      baseRefName
+      isDraft
+      mergeStateStatus
       reviewRequests(first: 100) {
         nodes {
           requestedReviewer {
@@ -252,7 +265,7 @@ query($owner: String!, $name: String!, $pr: Int!) {
 """
 
 
-def gather_reviews(pr: int) -> PullContext:
+def gather_reviews(pr: int) -> ReadinessView:
     """A LIGHT context sufficient for `detect()` — head SHA + reviews + pending
     review requests + the rerun policy, nothing else.
 
@@ -289,17 +302,20 @@ def gather_reviews(pr: int) -> PullContext:
         )
         for n in pull["reviews"]["nodes"]
     ]
-    return PullContext(
-        number=pr,
-        head_sha=pull["headRefOid"],
-        is_draft=False,
+    # The core is read off the SAME `pullRequest` node through the one
+    # `core_from_node` boundary — so this light path fetches `is_draft` (and the
+    # rest of the core) for real off its GraphQL query, never hardcoding it. The
+    # threads/reactions/issue-comments pagination the full `gather` runs is still
+    # skipped; only the cheap core rides along on the query already in flight.
+    return ReadinessView(
+        pr=core_from_node(pull, repo_from_slug(f"{owner}/{name}")),
         reviews=reviews,
         requested_logins=requested,
         reviewer_rerun=reviewer_rerun(),
     )
 
 
-def gather(pr: int) -> PullContext:
+def gather(pr: int) -> ReadinessView:
     """Fetch every raw input the engine needs for `pr`, live, via `gh`."""
     # Resolved from config (cached) at the build edge — the per-reviewer rerun
     # policy rides on the context so adapter detection stays pure (it reads the
@@ -319,6 +335,8 @@ def gather(pr: int) -> PullContext:
     # the node shape ({login} / {slug}) is what _requested_logins consumes.
     meta["reviewRequests"] = review_requests
     return context_from_raw(
+        # The PR identity's repo, derived from the live slug (ADR-0024).
+        repo=repo_from_slug(f"{owner}/{name}"),
         meta=meta,
         reviews_json=ghapi.rest(f"{base}/pulls/{pr}/reviews", paginate=True) or [],
         thread_nodes=thread_nodes,
@@ -344,12 +362,20 @@ def context_from_raw(
     thread_nodes: list[dict],
     reactions: list[dict],
     issue_comments: list[dict],
+    repo: Repo | None = None,
     reviewer_rerun: dict[str, bool] | None = None,
     reviewer_window: dict[str, int] | None = None,
     requested_at: dict[str, str] | None = None,
     now: datetime | None = None,
-) -> PullContext:
-    """Pure: assemble a `PullContext` from raw gh payloads. No network.
+) -> ReadinessView:
+    """Pure: assemble a `ReadinessView` from raw gh payloads. No network.
+
+    The cheap CORE (`head_sha`, `base_ref`, `is_draft`, `merge_state`) is read off
+    `meta` through the one `pr.core_from_node` boundary and packed into the composed
+    `PR` — the identical extraction the review path uses. `repo` is the PR identity's
+    repo; it defaults to a placeholder because the readiness engine keys on `number`,
+    never repo identity (a fixture may omit it), while `gather()` passes the real,
+    origin-derived one.
 
     `reviewer_rerun` is the per-reviewer rerun policy (name -> bool) resolved
     from config at the build site; it defaults to empty (every reviewer
@@ -368,13 +394,11 @@ def context_from_raw(
     only "now" the engine ever sees is the one handed in here.
     """
     ci_checks, review_funnel = _partition_checks(meta.get("statusCheckRollup") or [])
-    return PullContext(
-        number=meta["number"],
-        head_sha=meta["headRefOid"],
-        is_draft=bool(meta.get("isDraft")),
-        base_ref=meta.get("baseRefName"),
+    return ReadinessView(
+        pr=core_from_node(meta, repo or _HANDBUILT_REPO),
+        # `mergeable` is readiness-only (the async-stale merge fallback), so it stays
+        # on the view — the shared PR core carries the authoritative `merge_state`.
         mergeable=meta.get("mergeable"),
-        merge_state=meta.get("mergeStateStatus"),
         reviews=[_review(r) for r in reviews_json],
         threads=[_thread(n) for n in thread_nodes],
         reactions=reactions,
