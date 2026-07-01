@@ -437,6 +437,33 @@ def test_run_subagent_non_positive_issue_is_exit_1(monkeypatch, capsys, bad_issu
     assert "--issue must be a positive integer" in capsys.readouterr().err
 
 
+def test_run_subagent_epic_shape_negative_issue_creates_no_tree(monkeypatch, capsys):
+    # Fail-closed gap agy flagged: on the EPIC write shape the issue never routes through
+    # `issue_branch`'s `issue < 1` check (it rides only the prompt/PR link), so the guard
+    # in run_subagent is the ONLY thing catching a negative --issue. `issue < 1` (not the
+    # truthy `not issue`, which would miss negatives) rejects it BEFORE any Tree/gh work —
+    # no Tree is created, nothing launched.
+    monkeypatch.setattr(
+        spawn_verb,
+        "create",
+        lambda *a, **k: pytest.fail("negative --issue must not reach Tree creation"),
+    )
+
+    launched: dict = {}
+
+    def runner(cmd, *, cwd, env):
+        launched["called"] = True
+        return launch.LaunchResult(0, "", "")
+
+    rc = spawn_verb.run_subagent(
+        repo="widget", epic="TRE03", ws=2, issue=-1, role="implementer", launcher=runner
+    )
+
+    assert rc == 1
+    assert "--issue must be a positive integer" in capsys.readouterr().err
+    assert "called" not in launched  # nothing launched
+
+
 def test_run_subagent_repo_mismatch_is_exit_1(monkeypatch, capsys):
     _patch_identity(monkeypatch, org_repo="acme/widget")
 

@@ -159,8 +159,11 @@ def issue_branch(issue: int, session: str) -> str:
     (``issues/<id>/onboard``) coexist with the default ``issues/<id>/work``.
 
     Both inputs are validated at this invariant boundary: ``issue`` must be a positive
-    integer (``click`` accepts ``0``/negatives, but they yield out-of-grammar branches
-    like ``issues/0/work``), and ``session`` must contain at least one alphanumeric
+    integer — the type is checked before the comparison (parity with
+    :func:`work_stream_branch`) so a non-``int`` (e.g. ``None``) raises the documented
+    :class:`ValueError` rather than an escaping ``TypeError`` from ``None < 1`` — (``click``
+    accepts ``0``/negatives, but they yield out-of-grammar branches like ``issues/0/work``),
+    and ``session`` must contain at least one alphanumeric
     character. The session is sanitized by :func:`sanitize_slug` — an allow-list to
     ``[a-z0-9-]`` that strips every git-ref-forbidden character (``~ ^ ? * [ \\`` , space,
     ``@{``, dots, control chars, …), so ``foo~bar`` → ``foo-bar`` and the resulting
@@ -170,7 +173,7 @@ def issue_branch(issue: int, session: str) -> str:
     rejected — it would yield a bare ``issues/<id>/`` ref and reintroduce the collision.
     Both raise :class:`ValueError`.
     """
-    if issue < 1:
+    if not isinstance(issue, int) or issue < 1:
         raise ValueError(
             "tree.layout.issue_branch: issue number must be a positive integer "
             f"(the issues/<id>/<session> grammar, naming.lex §3); got issue={issue!r}. "

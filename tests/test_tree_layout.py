@@ -241,6 +241,15 @@ def test_issue_branch_helper_rejects_non_positive_issue(bad_issue):
         layout.issue_branch(bad_issue, "work")
 
 
+@pytest.mark.parametrize("not_an_int", [None, "5", 3.0])
+def test_issue_branch_helper_non_int_issue_raises_valueerror_not_typeerror(not_an_int):
+    # Parity with work_stream_branch: the type is guarded BEFORE the comparison, so a
+    # non-int (e.g. None) honors the documented ValueError contract rather than leaking a
+    # TypeError from `None < 1`.
+    with pytest.raises(ValueError, match="positive integer"):
+        layout.issue_branch(not_an_int, "work")
+
+
 @pytest.mark.parametrize("bad_session", ["", "   ", "///", " . / : "])
 def test_issue_branch_helper_rejects_empty_session(bad_session):
     # An empty session would build a bare `issues/<id>/` ref — refused so the
