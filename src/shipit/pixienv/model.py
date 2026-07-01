@@ -73,10 +73,27 @@ class Activation:
     read-only mapping so the snapshot cannot be mutated after capture. ``activation_scripts``
     is the (usually empty) list of extra scripts pixi sources. This is the ONLY source of
     activation truth shipit uses — the delta transforms below read it, they never recompute it.
+
+    ``frozen=True`` freezes only the *field binding*, not the referent: a caller could pass
+    (and retain a handle to) a mutable ``dict``. :meth:`__post_init__` therefore snapshots
+    whatever ``Mapping`` is passed into a private fresh ``dict`` the caller cannot reach and
+    re-binds the field to a :class:`~types.MappingProxyType` view of it — so the value object
+    is genuinely read-only end to end (ADR-0021 value-object discipline), regardless of how it
+    was constructed.
     """
 
     environment_variables: Mapping[str, str]
     activation_scripts: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        # object.__setattr__ is the frozen-dataclass-sanctioned way to normalize a field
+        # in __post_init__: copy into a fresh dict (severing any caller-held reference),
+        # then expose it through a read-only MappingProxyType.
+        object.__setattr__(
+            self,
+            "environment_variables",
+            MappingProxyType(dict(self.environment_variables)),
+        )
 
 
 def _platform(data: Mapping[str, object]) -> Platform:
@@ -110,8 +127,9 @@ def activation_from_dict(data: Mapping[str, object]) -> Activation:
     env = data.get("environment_variables") or {}
     scripts = data.get("activation_scripts") or ()
     env_map = {str(k): str(v) for k, v in dict(env).items()}
+    # `Activation.__post_init__` snapshots + freezes this dict into a read-only view.
     return Activation(
-        environment_variables=MappingProxyType(env_map),
+        environment_variables=env_map,
         activation_scripts=tuple(str(s) for s in scripts),
     )
 

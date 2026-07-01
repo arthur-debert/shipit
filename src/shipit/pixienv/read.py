@@ -30,9 +30,17 @@ def env_identity_path(prefix: Path) -> Path:
     return Path(prefix) / CONDA_META / ENV_IDENTITY_FILE
 
 
-def read_env_identity(prefix: Path) -> EnvIdentity:
-    """Read + parse ``<prefix>/conda-meta/pixi`` into an :class:`EnvIdentity`."""
-    return parse_env_identity(env_identity_path(prefix).read_text())
+def read_env_identity(prefix: Path) -> EnvIdentity | None:
+    """Read + parse ``<prefix>/conda-meta/pixi`` into an :class:`EnvIdentity`.
+
+    Returns ``None`` when the file is absent (an un-provisioned or partially-built
+    prefix has no ``conda-meta/pixi`` yet), mirroring :func:`read_fingerprint` rather
+    than raising ``FileNotFoundError`` — the caller decides what a missing identity means.
+    """
+    path = env_identity_path(prefix)
+    if not path.exists():
+        return None
+    return parse_env_identity(path.read_text())
 
 
 def read_fingerprint(prefix: Path) -> str | None:
