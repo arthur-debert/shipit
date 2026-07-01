@@ -4,6 +4,12 @@
 > process rooted in the Tree but left the **launch mechanism** open; ADR-0019 settles it for
 > the `claude` backend (headless `claude -p --agent <role>`, `ANTHROPIC_API_KEY` scrubbed).
 > See also ADR-0018 (write vs read-only Trees).
+>
+> **Extended by ADR-0026.** `--epic`/`--ws` are no longer required: the verb also spawns a
+> **standalone issue** — `shipit spawn subagent --repo R --issue N --role ROLE` (NO
+> `--epic`/`--ws`) — which cuts the branch `issues/<id>/<session>` (session default `work`)
+> from `origin/main` and targets its draft PR at `main`. The verb dispatches on shape; the
+> epic/work-stream path below is unchanged.
 
 The coordinator launches every real **Run** through a shipit CLI —
 `shipit spawn subagent --repo R --epic E --ws N --role ROLE [--backend claude|codex|antigravity]`
@@ -35,8 +41,9 @@ belongs in code.
 ## Decision
 
 shipit owns subagent spawning. The coordinator never points an Agent tool at a worktree;
-it calls `shipit spawn subagent` and passes **intent as arguments** — `--repo`, `--epic`,
-`--ws`, `--role`, `--backend`. Because intent arrives explicitly, shipit never has to
+it calls `shipit spawn subagent` and passes **intent as arguments** — `--repo`, the shape
+(`--epic E --ws N` for a work stream or `--issue N` for a standalone issue, ADR-0026),
+`--role`, `--backend`. Because intent arrives explicitly, shipit never has to
 *infer* it, which dissolves the per-spawn handshake race (below) and frees the launcher to
 start **non-Claude backends** (codex, antigravity) behind the same verb.
 
@@ -47,7 +54,10 @@ The verb:
    `origin/E/umbrella` — and the Run's draft PR targets the **epic branch**
    `E/umbrella`, matching the coordinator-driven epic topology (#176, closed). Before
    cloning it fail-closes on the umbrella branch existing on the remote: a missing
-   `origin/E/umbrella` exits loud, never a silent fallback to `origin/main`;
+   `origin/E/umbrella` exits loud, never a silent fallback to `origin/main`. For a
+   standalone issue (`--issue N`, no `--epic`/`--ws`) it plans via the ISSUE shape —
+   branch `issues/<id>/<session>` (session default `work`) cut from `origin/main`, the
+   draft PR targeting `main` (ADR-0026);
 2. creates the Tree (`tree/create.py`) — a **write Tree** for a writer, a **read-only
    Tree** for a reviewer (ADR-0018);
 3. launches the backend agent as a **child process whose cwd is the Tree**, so there is

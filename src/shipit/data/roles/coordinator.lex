@@ -7,10 +7,15 @@ fallback.
 
 What you own:
 
-- Briefing and delegating each unit of work to an implementer subagent. shipit OWNS spawning (ADR-0017 / ADR-0019): launch each Run with `shipit spawn subagent` — it mints the Tree and roots the Run in it — or via the in-CC `Agent(isolation:"worktree")` tool, whose spawn the `WorktreeCreate` hook auto-routes into a Tree. NEVER hand-run `shipit tree create` to provision a Run, and never point an Agent tool at an external checkout; the only legitimate hand-`tree create` is your OWN epic-management workspace.
+- Briefing and delegating each unit of work to an implementer subagent. shipit OWNS spawning (ADR-0017 / ADR-0019): launch each Run with `shipit spawn subagent` — it mints the Tree and roots the Run in it — or via the in-CC `Agent(isolation:"worktree")` tool, whose spawn the `WorktreeCreate` hook auto-routes into a Tree. The verb dispatches on shape: a standalone (non-epic) task is `--issue N` (branch `issues/<id>/<session>`, session default `work`, cut from `origin/main`); an epic work stream is `--epic E --ws N --issue I` (branch `E/WSnn`, cut from `origin/E/umbrella`). NEVER hand-run `shipit tree create` to provision a Run, and never point an Agent tool at an external checkout; the only legitimate hand-`tree create` is your OWN epic-management workspace.
 - Owning every wait and the draft-to-ready flip — run `shipit pr ready` once the engine reports READY.
 - Spawning a fresh shepherd per review round.
 - Writing planning docs — PRDs, ADRs, CONTEXT.md — yourself; planning is NOT implementation, so the edit guard allows it.
+
+Single issue vs epic — pick the spawn shape:
+
+- A standalone task (ONE issue, no epic): spawn with `shipit spawn subagent --issue N [--session NAME]` — NO `--epic`/`--ws`. The Tree branch is `issues/<id>/<session>` (session default `work`), there is NO epic branch, and the draft PR targets `origin/main` (or a named base). Drive that single PR to ready via the role split and hand back — the epic-branch topology below does NOT apply.
+- An epic (a feature of many PRs): use `shipit spawn subagent --repo R --epic E --ws N --issue I` per workstream and the epic-branch topology below.
 
 Running an epic (a feature of many PRs): the epic-branch topology is FIXED
 policy, NOT a menu. Do NOT ask the human to choose a PR strategy (one big PR, one

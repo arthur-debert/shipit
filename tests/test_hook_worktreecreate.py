@@ -111,7 +111,11 @@ def test_override_wins_over_inferred_cwd_branch(monkeypatch, fake_repo):
         # codex regression (#178): an ordinary slash-branch a coordinator happens to
         # sit on is NOT an epic — only a prefix whose `<prefix>/umbrella` exists is.
         ("feature/foo", set(), "agent-abc123"),  # (a) no `feature/umbrella` → epic-less
-        ("fix/123-slug", set(), "agent-abc123"),  # (b) no `fix/umbrella` → epic-less
+        (
+            "issues/123/work",
+            set(),
+            "agent-abc123",
+        ),  # (b) no `issues/umbrella` → epic-less
         # (c) real epic: `TRE04/umbrella` exists → the prefix DOES namespace the branch.
         ("TRE04/WS01", {"TRE04"}, "TRE04/agent-abc123"),
         # (d) nested spawn (coordinator already on an `agent-` holding branch) still

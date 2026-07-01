@@ -84,16 +84,26 @@ def test_create_produces_an_independent_dissociated_clone(
 
     dest = Path(tree.path)
 
-    # READY summary is the planned {path, branch, base}.
-    assert dest == tmp_path / "trees" / "acme" / "widget" / "issues" / "123-abcd1234"
-    assert tree.branch == "fix/123-smoke"
+    # READY summary is the planned {path, branch, base}. The slug ("smoke") rides the
+    # DIR leaf after the default `work` session; the branch stays issues/<id>/<session>.
+    assert (
+        dest
+        == tmp_path
+        / "trees"
+        / "acme"
+        / "widget"
+        / "issues"
+        / "123"
+        / "work-smoke-abcd1234"
+    )
+    assert tree.branch == "issues/123/work"
     assert tree.base == "origin/main"
 
     # Independent: --dissociate removed the alternates link entirely.
     assert not (dest / ".git" / "objects" / "info" / "alternates").exists()
 
     # On the planned branch.
-    assert _git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=dest) == "fix/123-smoke"
+    assert _git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=dest) == "issues/123/work"
 
     # origin points at the remote, so git/gh work inside the Tree.
     assert _git(["remote", "get-url", "origin"], cwd=dest) == str(remote)
@@ -216,8 +226,8 @@ def test_create_provisions_local_only_on_planned_branch_no_origin_side_effects(
     dest = Path(tree.path)
 
     # HEAD is on the PLANNED branch (never `shipit/install`).
-    assert _git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=dest) == "fix/123-smoke"
-    assert tree.branch == "fix/123-smoke"
+    assert _git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=dest) == "issues/123/work"
+    assert tree.branch == "issues/123/work"
 
     # The managed set is present AND committed on the planned branch.
     assert (dest / "bin" / "shipit").is_file()
@@ -248,7 +258,15 @@ def test_create_rolls_back_partial_tree_on_failure(
     with pytest.raises(gh.GhError):
         create(spec, source_repo=str(reference), github_url=str(remote))
 
-    dest = tmp_path / "trees" / "acme" / "widget" / "issues" / "123-abcd1234"
+    dest = (
+        tmp_path
+        / "trees"
+        / "acme"
+        / "widget"
+        / "issues"
+        / "123"
+        / "work-smoke-abcd1234"
+    )
     assert not dest.exists()
 
 
@@ -258,7 +276,15 @@ def test_create_refuses_a_preexisting_dest_without_clobbering_it(
     # A pre-existing dest (deterministic/colliding hash, or a rerun) must be refused
     # BEFORE any clone, and the rollback must NEVER delete that prior directory.
     spec = _spec(tmp_path)
-    dest = tmp_path / "trees" / "acme" / "widget" / "issues" / "123-abcd1234"
+    dest = (
+        tmp_path
+        / "trees"
+        / "acme"
+        / "widget"
+        / "issues"
+        / "123"
+        / "work-smoke-abcd1234"
+    )
     dest.mkdir(parents=True)
     (dest / "precious.txt").write_text("do not delete")
 

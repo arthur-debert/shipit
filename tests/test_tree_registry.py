@@ -38,14 +38,14 @@ def fleet(tmp_path: Path, monkeypatch):
     """A central root with two Tree clones and a non-Tree dir, with the gh boundary
     patched to report per-clone state keyed by directory path."""
     root = tmp_path / "trees"
-    a = _make_clone(root, "acme/widget/issues/123-aaaa")
-    b = _make_clone(root, "acme/widget/issues/456-bbbb")
+    a = _make_clone(root, "acme/widget/issues/123/work-aaaa")
+    b = _make_clone(root, "acme/widget/issues/456/work-bbbb")
     # A stray directory that is NOT a clone — must be ignored by scan.
     _make_plain_dir(root, "acme/widget/issues/scratch-notatree")
 
     state = {
         str(a): {
-            "branch": "fix/123-thing",
+            "branch": "issues/123/work",
             "base": "origin/main",
             "dirty": " M file.py\n",
             "ahead_behind": (2, 0),
@@ -58,7 +58,7 @@ def fleet(tmp_path: Path, monkeypatch):
         },
     }
     pr_by_branch = {
-        "fix/123-thing": {"number": 7, "state": "OPEN", "isDraft": True},
+        "issues/123/work": {"number": 7, "state": "OPEN", "isDraft": True},
         "HAR02/WS02": {"number": 9, "state": "MERGED", "isDraft": False},
     }
 
@@ -87,7 +87,7 @@ def test_scan_reads_branch_base_dirty_and_ahead_behind(fleet):
     by_path = {r.path: r for r in registry.scan(root)}
 
     ra = by_path[str(a)]
-    assert ra.branch == "fix/123-thing"
+    assert ra.branch == "issues/123/work"
     assert ra.base == "origin/main"
     assert ra.dirty is True
     assert (ra.ahead, ra.behind) == (2, 0)
@@ -110,8 +110,8 @@ def test_scan_renders_pr_state_label_with_draft(fleet):
 
 def test_scan_branch_without_pr_has_none(tmp_path: Path, monkeypatch):
     root = tmp_path / "trees"
-    clone = _make_clone(root, "acme/widget/issues/1-zzzz")
-    monkeypatch.setattr(gh, "git_current_branch", lambda *, cwd: "fix/1")
+    clone = _make_clone(root, "acme/widget/issues/1/work-zzzz")
+    monkeypatch.setattr(gh, "git_current_branch", lambda *, cwd: "issues/1/work")
     monkeypatch.setattr(gh, "git_upstream_ref", lambda *, cwd: None)
     monkeypatch.setattr(gh, "git_status_porcelain", lambda *, cwd: "")
     monkeypatch.setattr(gh, "git_ahead_behind", lambda *, cwd: (0, 0))
@@ -128,8 +128,8 @@ def test_scan_unreadable_pr_renders_unknown_label(tmp_path: Path, monkeypatch):
     # An unreadable PR state (gh.pr_for_head -> UNKNOWN) renders as a bare "UNKNOWN"
     # label, distinct from the None a genuinely-PR-less Tree shows.
     root = tmp_path / "trees"
-    clone = _make_clone(root, "acme/widget/issues/1-zzzz")
-    monkeypatch.setattr(gh, "git_current_branch", lambda *, cwd: "fix/1")
+    clone = _make_clone(root, "acme/widget/issues/1/work-zzzz")
+    monkeypatch.setattr(gh, "git_current_branch", lambda *, cwd: "issues/1/work")
     monkeypatch.setattr(gh, "git_upstream_ref", lambda *, cwd: "origin/main")
     monkeypatch.setattr(gh, "git_status_porcelain", lambda *, cwd: "")
     monkeypatch.setattr(gh, "git_ahead_behind", lambda *, cwd: (0, 0))
@@ -148,10 +148,10 @@ def test_scan_does_not_descend_into_a_clone(tmp_path: Path, monkeypatch):
     # A path that looks like a clone nested INSIDE another clone must not be
     # reported as a second Tree — scan stops at the first .git it meets.
     root = tmp_path / "trees"
-    outer = _make_clone(root, "acme/widget/issues/1-aaaa")
+    outer = _make_clone(root, "acme/widget/issues/1/work-aaaa")
     (outer / "vendor" / "dep" / ".git").mkdir(parents=True)
 
-    monkeypatch.setattr(gh, "git_current_branch", lambda *, cwd: "fix/1")
+    monkeypatch.setattr(gh, "git_current_branch", lambda *, cwd: "issues/1/work")
     monkeypatch.setattr(gh, "git_upstream_ref", lambda *, cwd: "origin/main")
     monkeypatch.setattr(gh, "git_status_porcelain", lambda *, cwd: "")
     monkeypatch.setattr(gh, "git_ahead_behind", lambda *, cwd: (0, 0))
@@ -167,7 +167,7 @@ def _patch_trivial_gh(monkeypatch, *, branch_hook=None):
     def _branch(*, cwd):
         if branch_hook is not None:
             branch_hook(cwd)
-        return "fix/1"
+        return "issues/1/work"
 
     monkeypatch.setattr(gh, "git_current_branch", _branch)
     monkeypatch.setattr(gh, "git_upstream_ref", lambda *, cwd: "origin/main")
@@ -183,9 +183,9 @@ def test_scan_output_order_is_deterministic_regardless_of_completion_order(
     opposite order — the post-gather sort, not completion order, fixes the listing."""
     root = tmp_path / "trees"
     rels = [
-        "acme/widget/issues/1-aaaa",
-        "acme/widget/issues/2-bbbb",
-        "acme/widget/issues/3-cccc",
+        "acme/widget/issues/1/work-aaaa",
+        "acme/widget/issues/2/work-bbbb",
+        "acme/widget/issues/3/work-cccc",
     ]
     clones = [_make_clone(root, rel) for rel in rels]
     want = sorted(str(c) for c in clones)

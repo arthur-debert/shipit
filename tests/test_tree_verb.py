@@ -29,7 +29,7 @@ def test_run_create_happy_path(monkeypatch, capsys):
         captured["spec"] = spec
         captured["source_repo"] = source_repo
         captured["github_url"] = github_url
-        return Tree(path="/repo/trees/x", branch="fix/7-thing", base="origin/main")
+        return Tree(path="/repo/trees/x", branch="issues/7/work", base="origin/main")
 
     monkeypatch.setattr(tree_verb, "create", fake_create)
 
@@ -49,7 +49,7 @@ def test_run_create_happy_path(monkeypatch, capsys):
     payload = json.loads("\n".join(out.splitlines()[1:]))
     assert payload == {
         "path": "/repo/trees/x",
-        "branch": "fix/7-thing",
+        "branch": "issues/7/work",
         "base": "origin/main",
     }
 
@@ -127,7 +127,7 @@ def test_run_create_issue_shape_unchanged(monkeypatch, capsys):
     _patch_identity(monkeypatch)
     captured = _capture_create(
         monkeypatch,
-        Tree(path="/repo/trees/i", branch="fix/7-thing", base="origin/main"),
+        Tree(path="/repo/trees/i", branch="issues/7/work", base="origin/main"),
     )
 
     rc = tree_verb.run_create(issue=7, slug="Thing")
@@ -208,8 +208,8 @@ def test_run_create_reports_gh_error_cleanly(monkeypatch, capsys):
 
 def _record(**over) -> TreeRecord:
     base = dict(
-        path="/trees/acme/widget/issues/7-aaaa",
-        branch="fix/7-thing",
+        path="/trees/acme/widget/issues/7/work-aaaa",
+        branch="issues/7/work",
         base="origin/main",
         dirty=False,
         ahead=0,
@@ -244,7 +244,7 @@ def test_run_list_renders_fleet_table(monkeypatch, capsys):
     out = capsys.readouterr().out
     # Header + both Trees render, with branch, base, dirty state, and PR label.
     assert "BRANCH" in out and "BASE" in out and "PR" in out
-    assert "fix/7-thing" in out
+    assert "issues/7/work" in out
     assert "HAR02/WS02" in out
     assert "clean" in out and "dirty" in out
     assert "#7 DRAFT" in out and "#9 OPEN" in out
@@ -266,10 +266,10 @@ def test_run_list_over_a_fixture_root_renders(tmp_path, monkeypatch, capsys):
     # End to end: a real fixture central root + a real scan, only the gh boundary
     # patched. `shipit tree list` must render the clone without error.
     root = tmp_path / "trees"
-    clone = root / "acme" / "widget" / "issues" / "7-aaaa"
+    clone = root / "acme" / "widget" / "issues" / "7" / "work-aaaa"
     (clone / ".git").mkdir(parents=True)
     monkeypatch.setenv("SHIPIT_TREES_ROOT", str(root))
-    monkeypatch.setattr(gh, "git_current_branch", lambda *, cwd: "fix/7-thing")
+    monkeypatch.setattr(gh, "git_current_branch", lambda *, cwd: "issues/7/work")
     monkeypatch.setattr(gh, "git_upstream_ref", lambda *, cwd: "origin/main")
     monkeypatch.setattr(gh, "git_status_porcelain", lambda *, cwd: "")
     monkeypatch.setattr(gh, "git_ahead_behind", lambda *, cwd: (0, 0))
@@ -279,7 +279,7 @@ def test_run_list_over_a_fixture_root_renders(tmp_path, monkeypatch, capsys):
 
     assert rc == 0
     out = capsys.readouterr().out
-    assert "fix/7-thing" in out
+    assert "issues/7/work" in out
     assert str(clone) in out
 
 
@@ -388,8 +388,8 @@ def _make_tree_dir(root, rel: str):
 
 def test_run_remove_deletes_exactly_one_tree(tmp_path, monkeypatch, capsys):
     root = tmp_path / "trees"
-    target = _make_tree_dir(root, "acme/widget/issues/7-aaaa")
-    other = _make_tree_dir(root, "acme/widget/issues/9-bbbb")
+    target = _make_tree_dir(root, "acme/widget/issues/7/work-aaaa")
+    other = _make_tree_dir(root, "acme/widget/issues/9/work-bbbb")
     monkeypatch.setattr(tree_verb.layout, "central_root", lambda: str(root))
     monkeypatch.setattr(
         tree_verb.registry,
@@ -407,13 +407,13 @@ def test_run_remove_deletes_exactly_one_tree(tmp_path, monkeypatch, capsys):
 
 def test_run_remove_matches_by_dir_name(tmp_path, monkeypatch, capsys):
     root = tmp_path / "trees"
-    target = _make_tree_dir(root, "acme/widget/issues/7-aaaa")
+    target = _make_tree_dir(root, "acme/widget/issues/7/work-aaaa")
     monkeypatch.setattr(tree_verb.layout, "central_root", lambda: str(root))
     monkeypatch.setattr(
         tree_verb.registry, "scan", lambda r: [_record(path=str(target))]
     )
 
-    rc = tree_verb.run_remove("7-aaaa")  # short id, not the full path
+    rc = tree_verb.run_remove("work-aaaa")  # short dir-name, not the full path
 
     assert rc == 0
     assert not target.exists()
@@ -432,8 +432,10 @@ def test_run_remove_no_match_is_an_error(tmp_path, monkeypatch, capsys):
 
 def test_run_remove_ambiguous_match_refuses(tmp_path, monkeypatch, capsys):
     root = tmp_path / "trees"
-    a = _make_tree_dir(root, "acme/widget/issues/7-aaaa")
-    b = _make_tree_dir(root, "acme/gadget/issues/7-aaaa")  # same dir name, two repos
+    a = _make_tree_dir(root, "acme/widget/issues/7/work-aaaa")
+    b = _make_tree_dir(
+        root, "acme/gadget/issues/7/work-aaaa"
+    )  # same dir name, two repos
     monkeypatch.setattr(tree_verb.layout, "central_root", lambda: str(root))
     monkeypatch.setattr(
         tree_verb.registry,
@@ -441,7 +443,7 @@ def test_run_remove_ambiguous_match_refuses(tmp_path, monkeypatch, capsys):
         lambda r: [_record(path=str(a)), _record(path=str(b))],
     )
 
-    rc = tree_verb.run_remove("7-aaaa")
+    rc = tree_verb.run_remove("work-aaaa")  # the shared leaf name — matches both repos
 
     assert rc == 1
     assert "ambiguous" in capsys.readouterr().err
@@ -451,7 +453,7 @@ def test_run_remove_ambiguous_match_refuses(tmp_path, monkeypatch, capsys):
 def test_run_remove_reports_rmtree_failure_cleanly(tmp_path, monkeypatch, capsys):
     # A failed delete (read-only file, lock, vanished dir) must surface as a clean
     # exit-1 + stderr message, never an unhandled traceback that breaks the contract.
-    target = _make_tree_dir(tmp_path / "trees", "acme/widget/issues/7-aaaa")
+    target = _make_tree_dir(tmp_path / "trees", "acme/widget/issues/7/work-aaaa")
     monkeypatch.setattr(tree_verb.layout, "central_root", lambda: str(tmp_path))
     monkeypatch.setattr(
         tree_verb.registry, "scan", lambda r: [_record(path=str(target))]
@@ -566,7 +568,7 @@ def test_run_remove_dirty_tree_prompts_and_decline_keeps_it(
     tmp_path, monkeypatch, capsys
 ):
     root = tmp_path / "trees"
-    target = _make_tree_dir(root, "acme/widget/issues/7-aaaa")
+    target = _make_tree_dir(root, "acme/widget/issues/7/work-aaaa")
     monkeypatch.setattr(tree_verb.layout, "central_root", lambda: str(root))
     monkeypatch.setattr(
         tree_verb.registry,
@@ -585,7 +587,7 @@ def test_run_remove_dirty_tree_prompts_and_decline_keeps_it(
 
 def test_run_remove_dirty_tree_confirm_deletes(tmp_path, monkeypatch, capsys):
     root = tmp_path / "trees"
-    target = _make_tree_dir(root, "acme/widget/issues/7-aaaa")
+    target = _make_tree_dir(root, "acme/widget/issues/7/work-aaaa")
     monkeypatch.setattr(tree_verb.layout, "central_root", lambda: str(root))
     monkeypatch.setattr(
         tree_verb.registry,
@@ -605,7 +607,7 @@ def test_run_remove_dirty_tree_confirm_deletes(tmp_path, monkeypatch, capsys):
 def test_run_remove_unpushed_tree_prompts(tmp_path, monkeypatch, capsys):
     # Unpushed commits (ahead > 0) are risky even with a clean working tree.
     root = tmp_path / "trees"
-    target = _make_tree_dir(root, "acme/widget/issues/7-aaaa")
+    target = _make_tree_dir(root, "acme/widget/issues/7/work-aaaa")
     monkeypatch.setattr(tree_verb.layout, "central_root", lambda: str(root))
     monkeypatch.setattr(
         tree_verb.registry,
@@ -623,7 +625,7 @@ def test_run_remove_unpushed_tree_prompts(tmp_path, monkeypatch, capsys):
 
 def test_run_remove_clean_tree_deletes_without_prompt(tmp_path, monkeypatch, capsys):
     root = tmp_path / "trees"
-    target = _make_tree_dir(root, "acme/widget/issues/7-aaaa")
+    target = _make_tree_dir(root, "acme/widget/issues/7/work-aaaa")
     monkeypatch.setattr(tree_verb.layout, "central_root", lambda: str(root))
     monkeypatch.setattr(
         tree_verb.registry,
@@ -641,7 +643,7 @@ def test_run_remove_clean_tree_deletes_without_prompt(tmp_path, monkeypatch, cap
 
 def test_run_remove_yes_flag_skips_prompt(tmp_path, monkeypatch, capsys):
     root = tmp_path / "trees"
-    target = _make_tree_dir(root, "acme/widget/issues/7-aaaa")
+    target = _make_tree_dir(root, "acme/widget/issues/7/work-aaaa")
     monkeypatch.setattr(tree_verb.layout, "central_root", lambda: str(root))
     monkeypatch.setattr(
         tree_verb.registry,
@@ -664,7 +666,7 @@ def test_run_remove_risky_non_interactive_refuses_and_does_not_hang(
 ):
     # No TTY and no --yes: a risky remove is refused, never blocking on a prompt.
     root = tmp_path / "trees"
-    target = _make_tree_dir(root, "acme/widget/issues/7-aaaa")
+    target = _make_tree_dir(root, "acme/widget/issues/7/work-aaaa")
     monkeypatch.setattr(tree_verb.layout, "central_root", lambda: str(root))
     monkeypatch.setattr(
         tree_verb.registry,
@@ -684,7 +686,7 @@ def test_run_remove_risky_non_interactive_refuses_and_does_not_hang(
 def test_run_remove_clean_tree_non_interactive_deletes(tmp_path, monkeypatch, capsys):
     # The safe non-interactive path: a clean+pushed Tree is removed without --yes.
     root = tmp_path / "trees"
-    target = _make_tree_dir(root, "acme/widget/issues/7-aaaa")
+    target = _make_tree_dir(root, "acme/widget/issues/7/work-aaaa")
     monkeypatch.setattr(tree_verb.layout, "central_root", lambda: str(root))
     monkeypatch.setattr(
         tree_verb.registry, "scan", lambda r: [_record(path=str(target))]
@@ -740,10 +742,10 @@ def test_run_gc_removes_only_removable_lists_stale_keeps_rest(
     root = tmp_path / "trees"
     # Four Trees: one removable (merged+aged), one stale (no PR+aged), one kept dirty,
     # one kept in-flight (open PR). gc must delete ONLY the removable one.
-    removable = _make_tree_dir(root, "acme/widget/issues/1-merged")
-    stale = _make_tree_dir(root, "acme/widget/issues/2-orphan")
-    keep_dirty = _make_tree_dir(root, "acme/widget/issues/3-dirty")
-    keep_open = _make_tree_dir(root, "acme/widget/issues/4-open")
+    removable = _make_tree_dir(root, "acme/widget/issues/1/work-merged")
+    stale = _make_tree_dir(root, "acme/widget/issues/2/work-orphan")
+    keep_dirty = _make_tree_dir(root, "acme/widget/issues/3/work-dirty")
+    keep_open = _make_tree_dir(root, "acme/widget/issues/4/work-open")
 
     aged = 0.0  # mtime far in the past -> always aged vs time.time()
     records = [
@@ -792,8 +794,8 @@ def test_run_gc_continues_past_a_failed_delete(tmp_path, monkeypatch, capsys):
     # Two removable Trees; the first delete fails. The sweep must continue to the
     # second, report the failure on stderr, and count only the delete that landed.
     root = tmp_path / "trees"
-    bad = _make_tree_dir(root, "acme/widget/issues/1-bad")
-    good = _make_tree_dir(root, "acme/widget/issues/2-good")
+    bad = _make_tree_dir(root, "acme/widget/issues/1/work-bad")
+    good = _make_tree_dir(root, "acme/widget/issues/2/work-good")
     aged = 0.0
     records = [
         _record(path=str(bad), branch="b1", dirty=False, ahead=0, mtime=aged),
@@ -831,8 +833,8 @@ def test_run_gc_does_not_count_an_already_gone_tree(tmp_path, monkeypatch, capsy
     # rm) must not be counted or printed as REMOVED: remove_tree reports False (no-op),
     # so `removed` reflects what actually came off disk, not what was merely planned.
     root = tmp_path / "trees"
-    present = _make_tree_dir(root, "acme/widget/issues/1-present")
-    gone = root / "acme/widget/issues/2-gone"  # never created on disk
+    present = _make_tree_dir(root, "acme/widget/issues/1/work-present")
+    gone = root / "acme/widget/issues/2/work-gone"  # never created on disk
     aged = 0.0
     records = [
         _record(path=str(present), branch="b1", dirty=False, ahead=0, mtime=aged),
@@ -863,10 +865,10 @@ def _gc_fleet(root, monkeypatch):
     ``central_root``/``scan``/``pr_for_head`` so both ``run_gc()`` and its dry-run share
     one fleet. The removable Tree (merged + clean + aged) is the only delete candidate.
     """
-    removable = _make_tree_dir(root, "acme/widget/issues/1-merged")
-    stale = _make_tree_dir(root, "acme/widget/issues/2-orphan")
-    keep_dirty = _make_tree_dir(root, "acme/widget/issues/3-dirty")
-    keep_open = _make_tree_dir(root, "acme/widget/issues/4-open")
+    removable = _make_tree_dir(root, "acme/widget/issues/1/work-merged")
+    stale = _make_tree_dir(root, "acme/widget/issues/2/work-orphan")
+    keep_dirty = _make_tree_dir(root, "acme/widget/issues/3/work-dirty")
+    keep_open = _make_tree_dir(root, "acme/widget/issues/4/work-open")
     aged = 0.0  # mtime far in the past -> always aged vs time.time()
     records = [
         _record(path=str(removable), branch="b1", dirty=False, ahead=0, mtime=aged),
@@ -1032,8 +1034,8 @@ def test_run_gc_warns_on_incomplete_sweep(tmp_path, monkeypatch, capsys):
     # the operator knows the sweep did not see the whole fleet. The UNKNOWN Tree is
     # classified conservatively (stale -> never removed).
     root = tmp_path / "trees"
-    merged = _make_tree_dir(root, "acme/widget/issues/1-merged")
-    unknown = _make_tree_dir(root, "acme/widget/issues/2-unknown")
+    merged = _make_tree_dir(root, "acme/widget/issues/1/work-merged")
+    unknown = _make_tree_dir(root, "acme/widget/issues/2/work-unknown")
     aged = 0.0
     records = [
         _record(path=str(merged), branch="b1", dirty=False, ahead=0, mtime=aged),
@@ -1067,8 +1069,8 @@ def test_run_gc_dry_run_warns_on_unknown_and_deletes_nothing(
     # fleet that contains an unreadable-state Tree must still surface the incomplete-view
     # warning, yet touch nothing on disk. The UNKNOWN Tree lands in STALE (conservative).
     root = tmp_path / "trees"
-    merged = _make_tree_dir(root, "acme/widget/issues/1-merged")
-    unknown = _make_tree_dir(root, "acme/widget/issues/2-unknown")
+    merged = _make_tree_dir(root, "acme/widget/issues/1/work-merged")
+    unknown = _make_tree_dir(root, "acme/widget/issues/2/work-unknown")
     aged = 0.0
     records = [
         _record(path=str(merged), branch="b1", dirty=False, ahead=0, mtime=aged),
@@ -1105,7 +1107,7 @@ def test_run_gc_dry_run_warns_on_unknown_and_deletes_nothing(
 def test_run_gc_no_warning_when_no_unknown(tmp_path, monkeypatch, capsys):
     # A sweep where every PR state is readable prints NO incomplete-sweep warning.
     root = tmp_path / "trees"
-    merged = _make_tree_dir(root, "acme/widget/issues/1-merged")
+    merged = _make_tree_dir(root, "acme/widget/issues/1/work-merged")
     records = [
         _record(path=str(merged), branch="b1", dirty=False, ahead=0, mtime=0.0),
     ]

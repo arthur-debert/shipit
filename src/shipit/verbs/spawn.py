@@ -33,7 +33,12 @@ import click
 from .. import gh, proc
 from ..spawn import backends, launch
 from ..tree.create import Tree, create, new_agent_hash
-from ..tree.layout import TreeSpec, epic_umbrella_base
+from ..tree.layout import (
+    TreeSpec,
+    epic_umbrella_base,
+    issue_branch,
+    work_stream_branch,
+)
 from ..tree.readonly import create_readonly, readonly_plan
 
 #: The backends ``spawn subagent`` can launch today — **adapter-driven** (ADR-0020
@@ -75,14 +80,23 @@ def spawn() -> None:
 )
 @click.option(
     "--epic",
-    required=True,
-    help="Epic code the Run belongs to, e.g. TRE03 (rides the Tree branch E/WSnn).",
+    required=False,
+    default=None,
+    help=(
+        "Epic code the Run belongs to, e.g. TRE03 (rides the Tree branch E/WSnn). The "
+        "EPIC shape: give it WITH --ws. Omit BOTH for a standalone --issue Tree "
+        "(branch issues/<id>/<session>, base origin/main)."
+    ),
 )
 @click.option(
     "--ws",
     type=int,
-    required=True,
-    help="Work stream number N (the WSnn half of the Tree branch E/WSnn).",
+    required=False,
+    default=None,
+    help=(
+        "Work stream number N (the WSnn half of the Tree branch E/WSnn). Give it WITH "
+        "--epic; omit both for a standalone --issue Tree."
+    ),
 )
 @click.option(
     "--issue",
@@ -95,7 +109,20 @@ def spawn() -> None:
         "spawned-Run PR flows through the normal engine like any hand-spawned one. "
         "REQUIRED for a write role (validated in `run_subagent`); a `reviewer` Run "
         "implements no issue, so it is OPTIONAL at the CLI to keep a valid reviewer "
-        "spawn (no `--issue`) from being rejected before `run_subagent` runs."
+        "spawn (no `--issue`) from being rejected before `run_subagent` runs. Without "
+        "--epic/--ws it ALSO selects the standalone-issue shape (branch "
+        "issues/<id>/<session>)."
+    ),
+)
+@click.option(
+    "--session",
+    default="work",
+    show_default=True,
+    help=(
+        "Session name for a standalone-issue Tree's branch issues/<id>/<session>. The "
+        "suffix keeps issues/<id>/ a ref DIRECTORY so a +1 session on the same issue "
+        "(e.g. --session onboard) coexists with the default `work` (naming.lex §3). "
+        "Ignored by the --epic/--ws (work-stream) shape."
     ),
 )
 @click.option(
@@ -121,18 +148,32 @@ def spawn() -> None:
     ),
 )
 def subagent_cmd(
-    repo: str, epic: str, ws: int, issue: int | None, role: str, backend: str
+    repo: str,
+    epic: str | None,
+    ws: int | None,
+    issue: int | None,
+    role: str,
+    session: str,
+    backend: str,
 ) -> None:
     """Create a write Tree and launch a backend-agent Run that reports via a draft PR.
 
     Resolve the ambient repo identity, create a write Tree by reusing
-    ``shipit tree create`` cut from the epic-grouped umbrella base
-    (``origin/E/umbrella``) so the Run's draft PR targets the EPIC branch
-    (``E/umbrella``), matching the coordinator-driven epic topology (#176), then
-    launch a headless ``claude`` child whose
-    ``cwd`` IS that Tree (ADR-0019). The Run implements ``--issue`` and opens a draft
-    PR from the Tree's branch; ``spawn`` resolves that PR back from the branch and
-    reports the Run↔PR linkage so the coordinator drives it with ``shipit pr status``.
+    ``shipit tree create``, then launch a headless ``claude`` child whose ``cwd`` IS
+    that Tree (ADR-0019). Two write shapes, dispatched on whether ``--epic``/``--ws``
+    are given:
+
+    \b
+    - **epic/work stream** (``--epic E --ws N``): the Tree is cut from the epic-grouped
+      umbrella base (``origin/E/umbrella``) so the Run's draft PR targets the EPIC
+      branch (``E/umbrella``), matching the coordinator-driven epic topology (#176).
+    - **standalone issue** (``--issue N`` with NO ``--epic``/``--ws``): the Tree is cut
+      from ``origin/main`` on branch ``issues/<id>/<session>`` (session default
+      ``work``), so the Run's draft PR targets ``main``.
+
+    Either way the Run implements ``--issue`` and opens a draft PR from the Tree's
+    branch; ``spawn`` resolves that PR back from the branch and reports the Run↔PR
+    linkage so the coordinator drives it with ``shipit pr status``.
 
     Fail-closed: if the epic umbrella branch is absent on the remote, or a
     Tree-creation error occurs, the spawn exits 1 loudly — never a silent fallback
@@ -142,7 +183,13 @@ def subagent_cmd(
     """
     raise SystemExit(
         run_subagent(
-            repo=repo, epic=epic, ws=ws, issue=issue, role=role, backend=backend
+            repo=repo,
+            epic=epic,
+            ws=ws,
+            issue=issue,
+            role=role,
+            session=session,
+            backend=backend,
         )
     )
 
@@ -150,33 +197,46 @@ def subagent_cmd(
 def run_subagent(
     *,
     repo: str,
-    epic: str,
-    ws: int,
     role: str,
+    epic: str | None = None,
+    ws: int | None = None,
     issue: int | None = None,
+    session: str = "work",
     backend: str = "claude",
     launcher: launch.Runner | None = None,
 ) -> int:
     """Resolve identity → create the Tree → launch the Run → link its PR. Returns a code.
 
-    Tree. There are two modes, dispatched on ``role``:
+    Two axes decide the Tree. **Role** picks write vs read-only:
 
-    - every role but ``reviewer`` gets a per-Run **write** Tree (WS02): the child
-      implements ``--issue`` and opens a draft PR on the Tree's branch, and the proof
-      is that Run↔PR linkage — the SPAWNED summary reports it for ``shipit pr status``;
+    - every role but ``reviewer`` gets a per-Run **write** Tree: the child implements
+      ``--issue`` and opens a draft PR on the Tree's branch, and the proof is that
+      Run↔PR linkage — the SPAWNED summary reports it for ``shipit pr status``;
     - ``reviewer`` (ADR-0018) gets a shared **read-only** Tree on the existing PR head
       and posts its review THROUGH that PR, so it needs no ``--issue`` and leaves no
-      Run↔PR linkage to resolve — its proof is the child's clean exit (the review is
-      out-of-band, in the PR).
+      Run↔PR linkage to resolve — its proof is the child's clean exit.
+
+    **Shape** picks the branch/base, dispatched on whether ``--epic``/``--ws`` are given:
+
+    - **epic/work stream** (``--epic E --ws N``): branch ``E/WSnn`` cut from the
+      epic-grouped umbrella base (``origin/E/umbrella``, #176), so the draft PR targets
+      the epic branch ``E/umbrella``;
+    - **standalone issue** (``--issue N`` with NO ``--epic``/``--ws``): branch
+      ``issues/<id>/<session>`` (session default ``work``) cut from ``origin/main``, so
+      the draft PR targets ``main``. A reviewer follows the same two shapes to resolve
+      the head it reviews.
 
     Returns 1 with a clean stderr message (never a traceback) when the backend is
-    unsupported, ``--ws`` is not positive, ``--issue`` is missing/not positive for a
-    WRITE Run, ``--repo`` disagrees with the ambient checkout, the command is not run
-    inside a GitHub checkout, a git/gh call fails, **Tree creation fails** (fail-closed
-    — no native-worktree fallback), or the child exits nonzero. For a write Run it also
-    fails when the child exits 0 without opening a PR on the branch, that PR's state
-    cannot be read, or the PR is not an OPEN, DRAFT PR targeting the Tree's intended
-    base (an invalid lifecycle state the coordinator must not be handed).
+    unsupported, ``--epic``/``--ws`` are given only half (incomplete epic shape), ``--ws``
+    is not positive, ``--issue`` is missing/not positive for a WRITE Run, neither shape is
+    given for a reviewer, ``--session`` is empty for a standalone-issue Run (it is ignored
+    by the ``--epic``/``--ws`` shape), ``--repo`` disagrees with the ambient
+    checkout, the command is not run inside a GitHub checkout, a git/gh call fails,
+    **Tree creation fails** (fail-closed — no native-worktree fallback), or the child
+    exits nonzero. For a write Run it also fails when the child exits 0 without opening a
+    PR on the branch, that PR's state cannot be read, or the PR is not an OPEN, DRAFT PR
+    targeting the Tree's intended base (an invalid lifecycle state the coordinator must
+    not be handed).
 
     ``launcher`` injects the subprocess seam so the launch contract is unit-tested
     without spawning a real ``claude``; ``None`` uses the real
@@ -196,7 +256,19 @@ def run_subagent(
     # adapter supplies the per-backend argv / auth-env / read-only posture; everything
     # else below (Tree, prompts, launch, PR resolution) is backend-agnostic.
     adapter = backends.resolve(backend)
-    if ws < 1:
+
+    # Shape gate (before any I/O). --epic and --ws are a PAIR (the epic/work-stream
+    # shape); one without the other is an incomplete shape and refused loud. Their
+    # ABSENCE selects the standalone-issue shape (branch issues/<id>/<session>).
+    has_epic = epic is not None or ws is not None
+    if has_epic and (epic is None or ws is None):
+        print(
+            "spawn subagent: the epic shape needs both --epic and --ws "
+            f"(got epic={epic!r}, ws={ws!r}); omit both for a standalone --issue Tree.",
+            file=sys.stderr,
+        )
+        return 1
+    if has_epic and ws < 1:
         print(
             f"spawn subagent: --ws must be a positive integer (got {ws})",
             file=sys.stderr,
@@ -207,9 +279,26 @@ def run_subagent(
         # a missing or zero/negative value (which click's int type still accepts) would
         # forge a nonsensical issue reference. Refuse it before any Tree/child work,
         # mirroring the ``--ws`` guard above. A reviewer Run implements no issue (it
-        # reviews an existing PR head), so the requirement does not apply to it.
+        # reviews an existing PR head), so the requirement does not apply to it. This
+        # holds for BOTH write shapes — the epic Run's PR links ``for #<issue>`` and the
+        # standalone Run's issue also names its branch.
         print(
             f"spawn subagent: --issue must be a positive integer (got {issue})",
+            file=sys.stderr,
+        )
+        return 1
+    if not has_epic and issue is None:
+        # Reachable only for a reviewer (a write role already required --issue above):
+        # with neither an epic shape nor an issue there is no branch to resolve a head
+        # from. Refuse it loud with a clear, reviewer-specific message HERE — otherwise the
+        # reviewer dispatch below would take the issue path and call
+        # `issue_branch(None, session)`, which raises a generic ValueError ("issue number
+        # must be a positive integer", via its isinstance/`< 1` guard). A clean exit-1
+        # either way, but this message names the ACTUAL problem (no shape given), not a
+        # confusing complaint about the issue number.
+        print(
+            "spawn subagent: a reviewer needs a branch to review — give --epic E --ws N "
+            "or --issue N.",
             file=sys.stderr,
         )
         return 1
@@ -251,71 +340,139 @@ def run_subagent(
         )
         return 1
 
-    # The slash-namespaced E/WSnn branch — the WS PR head. A reviewer reviews THIS
-    # head; a write Run cuts a fresh branch of this name via the EPIC shape (below),
-    # which also resolves the epic-grouped base. Built here so both modes share it.
-    branch = f"{epic}/WS{ws:02d}"
-
     # Reviewer Run (ADR-0018): a shared READ-ONLY Tree on the existing PR head, not a
-    # per-Run write Tree. Dispatched before building the write TreeSpec so the two
-    # modes never share provisioning.
+    # per-Run write Tree. Its target branch follows the SHAPE — the epic work-stream head
+    # E/WSnn, or a standalone-issue head issues/<id>/<session> — built from the same
+    # grammar helpers the write planner uses so a reviewer pins exactly the branch a
+    # write Run pushed. Dispatched before the write path so the two never share provisioning.
     if role == REVIEWER_ROLE:
+        try:
+            review_branch = (
+                work_stream_branch(epic, ws)
+                if has_epic
+                else issue_branch(issue, session)
+            )
+        except ValueError as exc:
+            # Fail loud, identically to the write path: work_stream_branch validates the
+            # epic code (an empty/invalid epic must NOT silently yield "/WS01") and
+            # issue_branch validates the session — both raise ValueError, surfaced here as
+            # the verb's clean exit-1, never a traceback.
+            print(f"spawn subagent: {exc}", file=sys.stderr)
+            return 1
         return _launch_reviewer(
             org=org,
             repo_name=repo_name,
-            branch=branch,
+            branch=review_branch,
             source_repo=root,
             github_url=url,
             adapter=adapter,
             launcher=launcher,
         )
 
-    # Epic-base resolution (#176): a work stream rides the epic topology, so its Tree
-    # is cut from the epic-grouped umbrella base (origin/E/umbrella) and its draft PR
-    # targets the EPIC branch (E/umbrella), NOT main. The EPIC shape of the TreeSpec
-    # resolves both — branch E/WSnn, base origin/E/umbrella — through the same pure
-    # planner `shipit tree create` uses; the PR target falls out of `tree.base` below
-    # (origin/E/umbrella -> E/umbrella), exactly as origin/main -> main did.
-    try:
-        umbrella_base = epic_umbrella_base(epic)  # origin/E/umbrella
-    except ValueError as exc:
-        # An invalid/empty epic code (not a single alphanumeric token) would build a
-        # malformed or path-traversing umbrella ref, so the pure helper refuses it.
-        # Catch that here and emit the same clean exit-1-with-diagnostic the rest of
-        # the verb uses for fail-closed paths — never an escaping traceback (the verb's
-        # documented contract).
-        print(f"spawn subagent: {exc}", file=sys.stderr)
-        return 1
-    umbrella_branch = umbrella_base.split("/", 1)[-1]  # E/umbrella
-    # Fail-closed (ADR-0017/0019): the epic umbrella branch MUST exist on the remote
-    # before we cut a work stream from it. If it does not, refuse LOUD — never
-    # silently fall back to origin/main, which would land the WS PR on the wrong base
-    # and break the coordinator-driven epic topology. Checked against the remote here
-    # (pre-clone) so the diagnostic names the missing epic branch precisely, rather
-    # than surfacing as an opaque `git checkout` failure deep in tree creation.
-    try:
-        umbrella_exists = gh.remote_branch_exists(umbrella_branch, cwd=root)
-    except gh.GhError as exc:
-        print(f"spawn subagent: {exc}", file=sys.stderr)
-        return 1
-    if not umbrella_exists:
-        print(
-            f"spawn subagent: epic base branch {umbrella_branch!r} does not exist on "
-            f"origin; cannot cut work stream {branch!r} from it. Create the epic "
-            "umbrella branch first — refusing to fall back to origin/main, which "
-            "would target the WS PR at the wrong base (#176, fail-closed).",
-            file=sys.stderr,
+    # WRITE Run: build the shape's TreeSpec, then hand off to the shared launch tail.
+    if has_epic:
+        # Epic-base resolution (#176): a work stream rides the epic topology, so its Tree
+        # is cut from the epic-grouped umbrella base (origin/E/umbrella) and its draft PR
+        # targets the EPIC branch (E/umbrella), NOT main. The EPIC shape of the TreeSpec
+        # resolves both — branch E/WSnn, base origin/E/umbrella — through the same pure
+        # planner `shipit tree create` uses; the PR target falls out of `tree.base` in
+        # `_launch_write` (origin/E/umbrella -> E/umbrella), exactly as origin/main -> main.
+        try:
+            umbrella_base = epic_umbrella_base(epic)  # origin/E/umbrella
+        except ValueError as exc:
+            # An invalid/empty epic code (not a single alphanumeric token) would build a
+            # malformed or path-traversing umbrella ref, so the pure helper refuses it.
+            # Catch that here and emit the same clean exit-1-with-diagnostic the rest of
+            # the verb uses for fail-closed paths — never an escaping traceback.
+            print(f"spawn subagent: {exc}", file=sys.stderr)
+            return 1
+        umbrella_branch = umbrella_base.split("/", 1)[-1]  # E/umbrella
+        # Fail-closed (ADR-0017/0019): the epic umbrella branch MUST exist on the remote
+        # before we cut a work stream from it. If it does not, refuse LOUD — never
+        # silently fall back to origin/main, which would land the WS PR on the wrong base
+        # and break the coordinator-driven epic topology. Checked against the remote here
+        # (pre-clone) so the diagnostic names the missing epic branch precisely, rather
+        # than surfacing as an opaque `git checkout` failure deep in tree creation.
+        try:
+            umbrella_exists = gh.remote_branch_exists(umbrella_branch, cwd=root)
+        except gh.GhError as exc:
+            print(f"spawn subagent: {exc}", file=sys.stderr)
+            return 1
+        if not umbrella_exists:
+            print(
+                f"spawn subagent: epic base branch {umbrella_branch!r} does not exist "
+                f"on origin; cannot cut work stream {epic}/WS{ws:02d} from it. Create "
+                "the epic umbrella branch first — refusing to fall back to origin/main, "
+                "which would target the WS PR at the wrong base (#176, fail-closed).",
+                file=sys.stderr,
+            )
+            return 1
+        spec = TreeSpec(
+            org=org,
+            repo=repo_name,
+            agent_hash=new_agent_hash(),
+            epic=epic,
+            ws=ws,
         )
-        return 1
-    spec = TreeSpec(
-        org=org,
-        repo=repo_name,
-        agent_hash=new_agent_hash(),
-        epic=epic,
-        ws=ws,
+    else:
+        # Standalone-issue shape (no epic): branch issues/<id>/<session>, base
+        # origin/main. Validate the branch grammar (positive issue, non-empty session)
+        # BEFORE any side effect, mirroring the epic umbrella pre-check — a bad --session
+        # must fail loud here, not deep in tree creation. `origin/main` always exists, so
+        # there is no umbrella-style remote pre-check to run.
+        try:
+            issue_branch(issue, session)  # validation only; the spec re-plans it
+        except ValueError as exc:
+            print(f"spawn subagent: {exc}", file=sys.stderr)
+            return 1
+        spec = TreeSpec(
+            org=org,
+            repo=repo_name,
+            agent_hash=new_agent_hash(),
+            issue=issue,
+            session=session,
+        )
+
+    return _launch_write(
+        spec,
+        source_repo=root,
+        github_url=url,
+        role=role,
+        issue=issue,
+        backend=backend,
+        adapter=adapter,
+        launcher=launcher,
     )
+
+
+def _launch_write(
+    spec: TreeSpec,
+    *,
+    source_repo: str,
+    github_url: str,
+    role: str,
+    issue: int | None,
+    backend: str,
+    adapter: backends.BackendAdapter,
+    launcher: launch.Runner | None,
+) -> int:
+    """Create the write Tree from ``spec``, launch the Run, resolve its PR. Returns a code.
+
+    The shared write tail for BOTH shapes (epic/work stream and standalone issue): the
+    caller builds the shape's :class:`TreeSpec` and does any shape-specific pre-checks
+    (the epic umbrella existence), then this seam materializes the Tree, launches the
+    backend child rooted in it, and resolves the Run↔PR linkage the coordinator drives —
+    identically whichever shape produced the spec, since ``tree.base``/``tree.branch``
+    already encode it.
+
+    Fail-closed (ADR-0017/0019): a Tree-creation error fails LOUD with no native-worktree
+    fallback (the launcher is unreachable unless a real Tree exists). After a clean child
+    exit it also fails when no PR was opened on the branch, the PR state is unreadable, or
+    the PR is not an OPEN, DRAFT PR targeting ``tree.base`` — each a clean exit-1, never a
+    SPAWNED line.
+    """
     try:
-        tree = create(spec, source_repo=root, github_url=url)
+        tree = create(spec, source_repo=source_repo, github_url=github_url)
     except (gh.GhError, ValueError, proc.ProcError, OSError) as exc:
         # Fail-closed (ADR-0017/0019): a Tree-creation error fails the spawn LOUD.
         # There is deliberately no native-worktree fallback — the launcher below is
@@ -329,11 +486,10 @@ def run_subagent(
     # (for claude, ANTHROPIC_API_KEY), and build_command conveys the role (for claude,
     # --agent <role>, so the guard allows the Run's own edits). The task tells the Run to
     # implement the issue and open a draft PR from this branch (the result channel —
-    # ADR-0019 §6); base_branch drops the remote prefix off the Tree's epic-grouped base
-    # so the PR targets a branch name (origin/E/umbrella -> E/umbrella, #176). The Tree
-    # path is passed as `cwd`: most backends root via the process cwd and ignore it, but
-    # `agy` ignores its process cwd and is rooted ONLY by `--add-dir <Tree>`, so the
-    # adapter needs the path (ADR-0020).
+    # ADR-0019 §6); base_branch drops the remote prefix off the Tree's base so the PR
+    # targets a branch name (origin/E/umbrella -> E/umbrella, origin/main -> main). The
+    # Tree path is passed as `cwd`: most backends root via the process cwd and ignore it,
+    # but `agy` ignores its process cwd and is rooted ONLY by `--add-dir <Tree>`.
     base_branch = tree.base.split("/", 1)[-1] if "/" in tree.base else tree.base
     task = launch.write_task(
         role, issue=issue, branch=tree.branch, base_branch=base_branch
@@ -387,11 +543,11 @@ def run_subagent(
         )
         return 1
 
-    # A PR existing on the branch is necessary but not sufficient: the WS02 contract is
-    # that the Run reported back through an OPEN, DRAFT PR targeting the Tree's intended
-    # base. A ready-for-review PR, a closed/merged one, or one opened against the wrong
-    # base is an INVALID lifecycle state the coordinator must not be handed as success —
-    # each is a clean exit-1, never a SPAWNED line.
+    # A PR existing on the branch is necessary but not sufficient: the contract is that
+    # the Run reported back through an OPEN, DRAFT PR targeting the Tree's intended base.
+    # A ready-for-review PR, a closed/merged one, or one opened against the wrong base is
+    # an INVALID lifecycle state the coordinator must not be handed as success — each is a
+    # clean exit-1, never a SPAWNED line.
     if pr["state"] != "OPEN":
         print(
             f"spawn subagent: child exited 0 but the PR on {tree.branch!r} is "

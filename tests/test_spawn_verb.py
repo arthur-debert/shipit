@@ -314,6 +314,38 @@ def test_run_subagent_invalid_epic_is_clean_exit_1(
     assert "called" not in launched  # nothing launched
 
 
+@pytest.mark.parametrize("bad_epic", ["", "   ", "TRE/04", "..", "TRE 04"])
+def test_run_subagent_reviewer_invalid_epic_is_clean_exit_1(
+    tmp_path, monkeypatch, capsys, bad_epic
+):
+    # Fail-closed CONSISTENCY (Copilot #1): the reviewer (read) epic/ws shape must
+    # validate the epic code the SAME way the write path does — via
+    # `work_stream_branch` — so an empty/invalid epic exits 1 LOUD instead of silently
+    # building a malformed "/WS01" head. No read-only Tree is created, nothing launched.
+    _patch_identity(monkeypatch)
+    monkeypatch.setattr(
+        spawn_verb,
+        "create_readonly",
+        lambda *a, **k: pytest.fail("must not create a Tree on an invalid epic code"),
+    )
+
+    launched: dict = {}
+
+    def runner(cmd, *, cwd, env):
+        launched["called"] = True
+        return launch.LaunchResult(0, "", "")
+
+    rc = spawn_verb.run_subagent(
+        repo="widget", epic=bad_epic, ws=3, role="reviewer", launcher=runner
+    )
+
+    assert rc == 1  # a clean exit code, NOT an escaping ValueError, NOT a "/WS03" head
+    err = capsys.readouterr().err
+    assert "spawn subagent:" in err
+    assert "epic code" in err  # the shared validator's diagnostic is surfaced
+    assert "called" not in launched  # nothing launched
+
+
 def test_run_subagent_tree_creation_failure_fails_closed(tmp_path, monkeypatch, capsys):
     # Fail-closed (ADR-0017/0019): a Tree-creation error fails the spawn loud, and
     # NEVER falls back to launching anything — the launcher must not be called.
@@ -403,6 +435,33 @@ def test_run_subagent_non_positive_issue_is_exit_1(monkeypatch, capsys, bad_issu
 
     assert rc == 1
     assert "--issue must be a positive integer" in capsys.readouterr().err
+
+
+def test_run_subagent_epic_shape_negative_issue_creates_no_tree(monkeypatch, capsys):
+    # Fail-closed gap agy flagged: on the EPIC write shape the issue never routes through
+    # `issue_branch`'s `issue < 1` check (it rides only the prompt/PR link), so the guard
+    # in run_subagent is the ONLY thing catching a negative --issue. `issue < 1` (not the
+    # truthy `not issue`, which would miss negatives) rejects it BEFORE any Tree/gh work —
+    # no Tree is created, nothing launched.
+    monkeypatch.setattr(
+        spawn_verb,
+        "create",
+        lambda *a, **k: pytest.fail("negative --issue must not reach Tree creation"),
+    )
+
+    launched: dict = {}
+
+    def runner(cmd, *, cwd, env):
+        launched["called"] = True
+        return launch.LaunchResult(0, "", "")
+
+    rc = spawn_verb.run_subagent(
+        repo="widget", epic="TRE03", ws=2, issue=-1, role="implementer", launcher=runner
+    )
+
+    assert rc == 1
+    assert "--issue must be a positive integer" in capsys.readouterr().err
+    assert "called" not in launched  # nothing launched
 
 
 def test_run_subagent_repo_mismatch_is_exit_1(monkeypatch, capsys):
@@ -629,6 +688,178 @@ def test_run_subagent_wrong_base_pr_is_exit_1(tmp_path, monkeypatch, capsys):
     assert "SPAWNED" not in out.out
 
 
+# --------------------------------------------------------------------------
+# standalone-issue shape (ADR-0026): --issue with NO --epic/--ws
+# --------------------------------------------------------------------------
+
+
+def test_run_subagent_issue_only_builds_issue_shape_spec(tmp_path, monkeypatch, capsys):
+    # --issue with NO --epic/--ws builds the standalone issue shape: branch
+    # issues/<id>/<session> (default work), base origin/main, so the draft PR targets
+    # main. The write path launches + links its PR exactly like the epic shape.
+    parent = tmp_path / "repo"
+    parent.mkdir()
+    tree_dir = tmp_path / "tree"
+    _patch_identity(monkeypatch, root=str(parent))
+    captured = _fake_create(monkeypatch, tree_dir)
+    runner, calls = _launcher()
+    _patch_pr(
+        monkeypatch,
+        {"number": 77, "state": "OPEN", "isDraft": True, "baseRefName": "main"},
+    )
+
+    rc = spawn_verb.run_subagent(
+        repo="widget", issue=210, role="implementer", launcher=runner
+    )
+
+    assert rc == 0
+    spec = captured["spec"]
+    assert spec.issue == 210 and spec.session == "work"
+    assert spec.epic is None and spec.ws is None and spec.branch is None
+    # The task names the issue and the standalone-issue branch to PR from.
+    task = calls["cmd"][calls["cmd"].index("-p") + 1]
+    assert "#210" in task and "issues/210/work" in task
+    out = capsys.readouterr().out
+    payload = json.loads("\n".join(out.splitlines()[1:]))
+    assert payload["branch"] == "issues/210/work"
+    assert payload["base"] == "origin/main"
+    assert payload["pr"] == 77
+
+
+def test_run_subagent_issue_only_uses_a_non_default_session(
+    tmp_path, monkeypatch, capsys
+):
+    # --session rides the standalone-issue branch: issues/<id>/<session>.
+    parent = tmp_path / "repo"
+    parent.mkdir()
+    tree_dir = tmp_path / "tree"
+    _patch_identity(monkeypatch, root=str(parent))
+    captured = _fake_create(monkeypatch, tree_dir)
+    runner, _calls = _launcher()
+    seen = _patch_pr(
+        monkeypatch,
+        {"number": 5, "state": "OPEN", "isDraft": True, "baseRefName": "main"},
+    )
+
+    rc = spawn_verb.run_subagent(
+        repo="widget",
+        issue=210,
+        session="onboard",
+        role="implementer",
+        launcher=runner,
+    )
+
+    assert rc == 0
+    assert captured["spec"].session == "onboard"
+    assert seen["branch"] == "issues/210/onboard"  # PR linked from the session branch
+
+
+def test_run_subagent_issue_only_does_not_check_epic_umbrella(
+    tmp_path, monkeypatch, capsys
+):
+    # The standalone-issue path cuts from origin/main, so it must NOT run the epic
+    # umbrella remote pre-check (that guard belongs to the epic shape only).
+    parent = tmp_path / "repo"
+    parent.mkdir()
+    tree_dir = tmp_path / "tree"
+    _patch_identity(monkeypatch, root=str(parent))
+    _fake_create(monkeypatch, tree_dir)
+    monkeypatch.setattr(
+        gh,
+        "remote_branch_exists",
+        lambda *a, **k: pytest.fail("issue shape must not probe an epic umbrella"),
+    )
+    runner, _calls = _launcher()
+    _patch_pr(
+        monkeypatch,
+        {"number": 9, "state": "OPEN", "isDraft": True, "baseRefName": "main"},
+    )
+
+    rc = spawn_verb.run_subagent(
+        repo="widget", issue=210, role="implementer", launcher=runner
+    )
+
+    assert rc == 0
+
+
+@pytest.mark.parametrize("bad_session", ["", "   ", "///"])
+def test_run_subagent_issue_only_empty_session_is_exit_1(
+    monkeypatch, capsys, bad_session
+):
+    # A --session that sanitizes to nothing would build a bare `issues/<id>/` ref; it
+    # is refused with a clean exit-1 BEFORE any Tree side effect.
+    _patch_identity(monkeypatch)
+    monkeypatch.setattr(
+        spawn_verb,
+        "create",
+        lambda *a, **k: pytest.fail("must not create a Tree on an empty session"),
+    )
+
+    rc = spawn_verb.run_subagent(
+        repo="widget", issue=210, session=bad_session, role="implementer"
+    )
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "spawn subagent:" in err and "session" in err
+
+
+def test_run_subagent_epic_without_ws_is_exit_1(monkeypatch, capsys):
+    # --epic without --ws is an incomplete epic shape — refused before any I/O.
+    rc = spawn_verb.run_subagent(
+        repo="widget", epic="TRE03", issue=1, role="implementer"
+    )
+
+    assert rc == 1
+    assert "both --epic and --ws" in capsys.readouterr().err
+
+
+def test_run_subagent_ws_without_epic_is_exit_1(monkeypatch, capsys):
+    # --ws without --epic is likewise incomplete — refused before any I/O.
+    rc = spawn_verb.run_subagent(repo="widget", ws=3, issue=1, role="implementer")
+
+    assert rc == 1
+    assert "both --epic and --ws" in capsys.readouterr().err
+
+
+def test_run_subagent_reviewer_without_any_shape_is_exit_1(monkeypatch, capsys):
+    # A reviewer with neither an epic shape nor an issue has no branch to review — a
+    # clean exit-1, not a `None/WS…` branch.
+    rc = spawn_verb.run_subagent(repo="widget", role="reviewer")
+
+    assert rc == 1
+    assert "needs a branch to review" in capsys.readouterr().err
+
+
+def test_run_subagent_issue_only_reviewer_pins_the_issue_head(
+    tmp_path, monkeypatch, capsys
+):
+    # A reviewer follows the same shapes: --issue with no epic pins the standalone-issue
+    # head issues/<id>/<session> for the shared read-only Tree.
+    parent = tmp_path / "repo"
+    parent.mkdir()
+    tree_dir = tmp_path / "review"
+    _patch_identity(monkeypatch, root=str(parent))
+    captured = _fake_create_readonly(monkeypatch, tree_dir)
+    monkeypatch.setattr(
+        spawn_verb,
+        "create",
+        lambda *a, **k: pytest.fail("reviewer must not create a write Tree"),
+    )
+    runner, _calls = _launcher()
+
+    rc = spawn_verb.run_subagent(
+        repo="widget", issue=210, role="reviewer", launcher=runner
+    )
+
+    assert rc == 0
+    assert captured["plan"].branch == "issues/210/work"
+    out = capsys.readouterr().out
+    payload = json.loads("\n".join(out.splitlines()[1:]))
+    assert payload["role"] == "reviewer"
+    assert payload["branch"] == "issues/210/work"
+
+
 def _fake_create_readonly(monkeypatch, tree_dir: Path) -> dict:
     """Replace the read-only orchestrator with a spy that 'creates' a Tree at ``tree_dir``.
 
@@ -825,7 +1056,15 @@ def test_spawn_subagent_help_documents_the_verb():
     result = CliRunner().invoke(spawn_verb.spawn, ["subagent", "--help"])
 
     assert result.exit_code == 0
-    for token in ("--repo", "--epic", "--ws", "--issue", "--role", "--backend"):
+    for token in (
+        "--repo",
+        "--epic",
+        "--ws",
+        "--issue",
+        "--session",
+        "--role",
+        "--backend",
+    ):
         assert token in result.output
     assert "Tree" in result.output
 

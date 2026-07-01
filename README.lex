@@ -99,10 +99,11 @@ Scope
 
         - `shipit tree create` provisions a ready Tree — its own clone, on a
           fresh branch, deps installed, gitignored-but-needed files copied in —
-          then prints a READY summary. It takes exactly one of three shapes: `--issue N`
-          (branch `fix/<n>-<slug>`), `--epic E --ws N` (branch `E/WSnn`, cut from
-          `origin/E/umbrella`), or `--branch NAME` (verbatim, cut from
-          `origin/main`).
+          then prints a READY summary. It takes exactly one of three shapes:
+          `--issue N [--session S]` (branch `issues/<n>/<session>`, session
+          default `work`, cut from `origin/main`), `--epic E --ws N` (branch
+          `E/WSnn`, cut from `origin/E/umbrella`), or `--branch NAME` (verbatim,
+          cut from `origin/main`).
         - `shipit tree list` renders the whole fleet — path, branch, base, age,
           dirty?, PR state — derived purely by scanning the central root (no
           manifest). A Tree whose PR state cannot be read shows `UNKNOWN`,
