@@ -8,6 +8,54 @@ inherited from release-core and the build/release vocabulary.
 
 ## Language
 
+### Core identities
+
+**Repo**:
+A GitHub repository as shipit's identity value object — `(owner, name)`, derived
+*locally* from the origin remote (`git remote get-url origin`), never from a live
+API call. It is the stable key every Repo-scoped join uses — notably the **eval
+record** store. The **path→toolchain map** is the *same* repo's content; identity
+and content are two facets of one noun.
+*Avoid*: "org/repo" as the identity pair (an owner may be a user, not an org);
+keying a Repo by filesystem path (that scatters one repo across every clone — the
+bug WS-Repo removes).
+
+**Owner**:
+The account that owns a **Repo** — `(login, kind)`. `login` is always known
+offline; `kind` is an OPTIONAL, lazily-resolved enrichment and is **not** part of
+Repo identity/equality (so the store key is stable whether or not kind is known).
+*Avoid*: "org" as a synonym for owner (an organization is one **OwnerKind**, not
+the whole concept).
+
+**OwnerKind**:
+The closed registry of what an **Owner** can be — `user | organization` (mirrors
+**Role** / **Toolchain**: adding one is an entry, nothing downstream changes).
+Names the capabilities that exist only on organizations (org rulesets, Actions org
+policy) so future org-only features have a place to hang. Resolved via API on
+demand, never required to identify a **Repo**.
+*Avoid*: a boolean `is_org` (a closed set reads clearer and extends cleanly).
+
+**WorkingDir**:
+An on-disk checkout embodying a **Repo** at a revision — `(path, repo,
+revision{branch, commit})`. The single resolver for "what repo + revision is
+checked out at this path," replacing the scattered `git rev-parse
+--show-toplevel` re-derivations. A **Tree** *has* a WorkingDir (values compose);
+the **main checkout** is a WorkingDir that is not a **Tree**.
+*Avoid*: making Tree a *subclass* of WorkingDir (value objects compose, they do
+not inherit); treating a WorkingDir as an identity (its **Repo** is the identity —
+a WorkingDir is a *location*, so two clones of one repo are two WorkingDirs but
+one Repo).
+
+**PR**:
+A GitHub pull request as a value object — identity `(repo, number)` plus cheap
+**core** state (`head_sha`, `base_ref`, `is_draft`, `merge_state`). The readiness
+path and the review path build distinct richer **views** that *compose* a PR
+(readiness view: + reviews / threads / funnel / timing; review view: + diff /
+changed_files / workdir), never parallel half-overlapping snapshots.
+*Avoid*: two competing PR snapshot types (`PullContext` / `PRContext`); a field on
+the core that only one path populates (e.g. a defaulted `is_draft` — it belongs on
+the view that fetched it); fetching `head_sha` more than one way.
+
 ### PR flow
 
 **PR state engine**:
@@ -298,6 +346,48 @@ coordinator on **path→toolchain map** paths — implementation it should deleg
 unless a break-glass marker is present). Each use is recorded, so its frequency is a
 signal the harness can measure (an HAR02 metric) and tighten on, rather than a silent
 bypass. *Avoid*: "override", "force" as the noun — break-glass is logged and rare.
+
+**Backend**:
+The agent harness/CLI that drives a **Run** — a closed registry `claude | codex |
+antigravity` (ADR-0020). Owns *how to launch* (argv, auth-env, read-only posture)
+and a single **identity** — its canonical name plus every alias (funnel login
+`adr-<name>-review[bot]`, check-run `<name>-local`, spawn `--backend` token,
+Doppler key prefix) defined **once** and shared with the **Reviewer adapter**.
+Orthogonal to **Model** and to **Role**: one backend serves implementer / shepherd
+/ reviewer runs and can drive different models.
+*Avoid*: conflating a **Backend** with a **Reviewer adapter** (launch axis vs
+PR-funnel axis — they share *identity*, not behaviour) or with a **Model** (the
+harness is not the LLM).
+
+**Model**:
+The LLM a **Backend** drives — `(id, provider, reasoning_capability)`, identity =
+the canonical model id. Decoupled from Backend: a model of one **Provider** may run
+under a backend of another. Its reasoning *capability* (which **ReasoningLevel**s
+it supports, if any) is intrinsic to it.
+*Avoid*: treating the model as a property of the **Backend** — they are orthogonal
+axes.
+
+**Provider**:
+The vendor of a **Model** — closed registry `anthropic | openai | google | …`. The
+hook for auth / billing and cross-backend model use; never part of a **Repo** or
+**Run** identity.
+
+**ReasoningLevel**:
+The thinking-effort knob chosen for one **Invocation** — closed registry `low |
+medium | high`, normalized so eval compares across backends; each **Backend** maps
+it to its native control. A *chosen level* (on the invocation), distinct from a
+**Model**'s reasoning *capability*.
+
+**Invocation**:
+The configured launch of one **Run** — a **Backend** driving a **Model** at a
+**ReasoningLevel** (plus `permission_mode`). Threaded spawn → Run → **eval
+record** (the *observed* config extracted from the transcript, alongside the
+*intended*), and a group-by dimension for `shipit eval report` — the data that
+lets the harness compare configurations. Backend×Model validity is a lookup, not a
+structural constraint.
+*Avoid*: "AgentConfig" (implies the model belongs to the agent — it does not);
+conflating it with **Variant** (the prompt/policy content-hash axis, a different
+attribution).
 
 ### Trees (where work happens)
 
