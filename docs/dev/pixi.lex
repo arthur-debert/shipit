@@ -259,17 +259,19 @@ behaves and how we ride it.
 
 8. How to leverage pixi well
 
-    Ranked, each with the concrete mechanism (the P0 launch-through-pixi item is
-    now DONE — PR #197 — so the live opportunities are:):
+    Ranked, each with the concrete mechanism. Two items have since landed and are
+    marked DONE below — the P0 launch-through-pixi (PR #197) and moving the build
+    env into `[activation.env]` (COR01). The rest are live opportunities:
 
-        1. Move shipit's hand-built build env (sccache/cargo) into pixi
-           `[activation.env]` so pixi sets it on EVERY activation — this is the
-           clearest remaining "compute what `[activation]` already computes"
-           reinvention (`sccache_env()` in `src/shipit/tree/create.py`).
-           Tellingly, that env does NOT currently reach the agent's own in-Tree
-           `cargo` (only the provisioning subprocess gets it); `[activation.env]`
-           fixes that for free. Verify pixi template vars express per-Tree
-           absolute paths (`SCCACHE_BASEDIRS = <tree>`) first.
+        1. DONE (COR01): shipit's hand-built build env (sccache/cargo) moved into
+           pixi `[activation.env]`, so pixi sets it on EVERY activation instead of
+           shipit recomputing what `[activation]` already computes. The old
+           `sccache_env()` helper in `src/shipit/tree/create.py` is gone; the
+           `CARGO_*` / `SCCACHE_BASEDIRS` build vars now come from
+           `[activation.env]`, and inherited PARENT values are scrubbed at
+           `is_leaked_env_var` so the per-Tree value stays authoritative. This also
+           closed the gap where that env did NOT reach the agent's own in-Tree
+           `cargo` (only the provisioning subprocess had got it).
         2. Turn on pixi's task `inputs`/`outputs` cache — it is entirely idle
            today. `provision-lexd` re-fetches lexd on every `lint`/`fmt` via
            `depends-on`, and every `pixi run lint` re-runs all linters. Declare
