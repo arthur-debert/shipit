@@ -338,10 +338,18 @@ def run_subagent(
     task = launch.write_task(
         role, issue=issue, branch=tree.branch, base_branch=base_branch
     )
-    cmd = adapter.build_command(task, role, cwd=tree.path)
+    # Route the write Run THROUGH the Tree's pixi env (ADR-0019 amendment): a provisioned
+    # write Tree carries `.pixi/envs/default`, so `pixi_wrap` re-expresses the argv as
+    # `pixi run --manifest-path <tree>/pixi.toml -- <argv>` and the child's tools resolve
+    # to its OWN env (else they'd resolve the coordinator's env — docs/dev/pixi.lex §7).
+    # `scrub_tree_env` drops leaked PIXI_*/CONDA_* on top of the adapter's auth scrub.
+    cmd = launch.pixi_wrap(adapter.build_command(task, role, cwd=tree.path), tree.path)
     try:
         result = launch.launch(
-            cmd, cwd=tree.path, env=adapter.child_env(), runner=launcher
+            cmd,
+            cwd=tree.path,
+            env=launch.scrub_tree_env(adapter.child_env()),
+            runner=launcher,
         )
     except OSError as exc:
         # The child never started: `claude` is missing/not on PATH, or the Tree path
@@ -453,15 +461,24 @@ def _launch_reviewer(
     # required by the agy adapter (it ignores the process cwd and roots ONLY via
     # `--add-dir <Tree>`) and ignored by the rest. The chmod'd read-only Tree is the
     # load-bearing FS guard whatever the backend's native posture.
-    cmd = adapter.build_command(
-        launch.reviewer_task(branch),
-        REVIEWER_ROLE,
-        read_only=True,
-        cwd=tree.path,
+    # `pixi_wrap` is a no-op here by design: a reviewer's read-only Tree is clone+checkout
+    # with NO provisioned `.pixi/envs/default`, so it stays BARE (routing a chmod'd tree
+    # through `pixi run` would force a solve / fail). The gate, not the call site, decides.
+    cmd = launch.pixi_wrap(
+        adapter.build_command(
+            launch.reviewer_task(branch),
+            REVIEWER_ROLE,
+            read_only=True,
+            cwd=tree.path,
+        ),
+        tree.path,
     )
     try:
         result = launch.launch(
-            cmd, cwd=tree.path, env=adapter.child_env(), runner=launcher
+            cmd,
+            cwd=tree.path,
+            env=launch.scrub_tree_env(adapter.child_env()),
+            runner=launcher,
         )
     except OSError as exc:
         print(f"spawn subagent: {exc}", file=sys.stderr)

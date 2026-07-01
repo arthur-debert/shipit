@@ -108,6 +108,96 @@ def test_subprocess_runner_returns_nonzero_without_raising(monkeypatch):
     assert result.stderr == "boom"
 
 
+def test_pixi_wrap_routes_through_pixi_for_a_provisioned_tree(tmp_path):
+    # A WRITE Tree is `pixi install`-provisioned → it carries `.pixi/envs/default`, so the
+    # backend argv is re-expressed to run THROUGH the Tree's pixi env (ADR-0019 amendment):
+    # `pixi run --manifest-path <tree>/pixi.toml -- <argv>`. The `--` separates pixi's args
+    # from the child argv, and the manifest path is the Tree's own pixi.toml.
+    (tmp_path / ".pixi" / "envs" / "default").mkdir(parents=True)
+    argv = ["claude", "-p", "do the thing", "--agent", "implementer"]
+
+    wrapped = launch.pixi_wrap(argv, tmp_path)
+
+    assert wrapped == [
+        "pixi",
+        "run",
+        "--manifest-path",
+        str(tmp_path / "pixi.toml"),
+        "--",
+        "claude",
+        "-p",
+        "do the thing",
+        "--agent",
+        "implementer",
+    ]
+
+
+def test_pixi_wrap_stays_bare_for_an_unprovisioned_tree(tmp_path):
+    # A reviewer's READ-ONLY Tree (ADR-0018, clone+checkout, no provision) and a non-pixi
+    # repo carry no `.pixi/envs/default`, so the argv is returned UNCHANGED — routing those
+    # through `pixi run` would force a solve into a chmod'd tree or fail outright.
+    argv = ["claude", "-p", "review", "--agent", "reviewer"]
+
+    assert launch.pixi_wrap(argv, tmp_path) == argv
+
+
+def test_pixi_wrap_accepts_a_str_tree_path(tmp_path):
+    # The call site passes `tree.path` (a str); the gate probe must work on a str too.
+    (tmp_path / ".pixi" / "envs" / "default").mkdir(parents=True)
+
+    wrapped = launch.pixi_wrap(["claude"], str(tmp_path))
+
+    assert wrapped[:4] == [
+        "pixi",
+        "run",
+        "--manifest-path",
+        str(tmp_path / "pixi.toml"),
+    ]
+
+
+def test_scrub_tree_env_drops_leaked_pixi_and_conda_activation_keeps_the_rest():
+    # On top of the adapter's auth scrub, the launch path drops parent-project PIXI_*
+    # pointers and Conda ACTIVATION vars (the #167 leak class) so the child re-resolves
+    # from the Tree — but installation-level CONDA_* (CONDA_EXE / CONDA_PYTHON_EXE) is
+    # KEPT, since scrubbing all CONDA_* could break `pixi run` in a Conda-managed shell.
+    env = {
+        "HOME": "/home/a",
+        "PATH": "/bin",
+        "PIXI_PROJECT_MANIFEST": "/parent/pixi.toml",
+        "PIXI_PROJECT_NAME": "parent",
+        "CONDA_PREFIX": "/parent/.pixi/envs/default",
+        "CONDA_PREFIX_1": "/parent/.pixi/envs/stacked",
+        "CONDA_DEFAULT_ENV": "default",
+        "CONDA_SHLVL": "2",
+        "CONDA_PROMPT_MODIFIER": "(default) ",
+        "CONDA_EXE": "/opt/conda/bin/conda",
+        "CONDA_PYTHON_EXE": "/opt/conda/bin/python",
+    }
+
+    scrubbed = launch.scrub_tree_env(env)
+
+    assert scrubbed == {
+        "HOME": "/home/a",
+        "PATH": "/bin",
+        "CONDA_EXE": "/opt/conda/bin/conda",
+        "CONDA_PYTHON_EXE": "/opt/conda/bin/python",
+    }
+
+
+def test_scrub_tree_env_keeps_pixi_cache_vars():
+    # The cache-location vars are user-level (not project-bound), so they are KEPT to
+    # preserve cross-Tree package-cache sharing — the same carve-out provisioning uses
+    # (reused via `is_leaked_env_var`, so the two paths cannot drift).
+    env = {"PIXI_CACHE_DIR": "/cache/pixi", "RATTLER_CACHE_DIR": "/cache/rattler"}
+
+    assert launch.scrub_tree_env(env) == env
+
+
+def test_scrub_tree_env_returns_a_fresh_dict():
+    env = {"PATH": "/bin"}
+    assert launch.scrub_tree_env(env) is not env
+
+
 def test_write_task_names_the_role_issue_and_branch():
     task = launch.write_task(
         "implementer", issue=156, branch="TRE03/WS02", base_branch="main"

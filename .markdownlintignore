@@ -10,3 +10,10 @@
 AGENTS.md
 README.md
 skills/
+# docs/dev/pixi.md — same .lex-projection case as AGENTS.md/README.md: generated
+# by `bash tools/lex-convert-doc.sh docs/dev/pixi.lex` (carries the "do not hand
+# edit" preamble) and gated at its source by `lexd check`. lexd's section-number
+# cross-references (`[see](#7)`) and label-colon section titles are valid Lex
+# projection but markdownlint miscategorizes them (MD051/MD026), so it is linted
+# at the .lex, not the .md.
+docs/dev/pixi.md
