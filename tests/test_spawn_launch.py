@@ -184,6 +184,30 @@ def test_scrub_tree_env_drops_leaked_pixi_and_conda_activation_keeps_the_rest():
     }
 
 
+def test_scrub_tree_env_drops_leaked_build_env_keeps_sccache_backend_vars():
+    # agy ERROR: the launch env feeds a child that runs `cargo` via the Tree's own pixi
+    # activation (pixi_wrap → `pixi run`). A leaked PARENT CARGO_TARGET_DIR / SCCACHE_BASEDIRS
+    # would shadow the Tree's own `[activation.env]` value, so the child writes artifacts to
+    # the PARENT Tree. Scrub the three per-Tree build vars; KEEP the sccache binary pointer
+    # and cache credential (not per-Tree; the child needs them to reach the shared cache).
+    env = {
+        "PATH": "/bin",
+        "CARGO_TARGET_DIR": "/parent/tree/target",
+        "SCCACHE_BASEDIRS": "/parent/tree",
+        "CARGO_INCREMENTAL": "0",
+        "RUSTC_WRAPPER": "/usr/bin/sccache",
+        "SCCACHE_GCS_KEY": "creds",
+    }
+
+    scrubbed = launch.scrub_tree_env(env)
+
+    assert scrubbed == {
+        "PATH": "/bin",
+        "RUSTC_WRAPPER": "/usr/bin/sccache",
+        "SCCACHE_GCS_KEY": "creds",
+    }
+
+
 def test_scrub_tree_env_keeps_pixi_cache_vars():
     # The cache-location vars are user-level (not project-bound), so they are KEPT to
     # preserve cross-Tree package-cache sharing — the same carve-out provisioning uses
