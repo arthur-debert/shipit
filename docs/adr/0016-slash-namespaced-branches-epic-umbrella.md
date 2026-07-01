@@ -2,7 +2,9 @@
 
 Repo branches use a slash-namespaced grammar — `EPIC/WSnn` for work streams and
 **`EPIC/umbrella`** for the epic branch (e.g. `GPU02/umbrella`, `GPU02/WS03`),
-`fix/<issue>-<slug>` for standalone work. This **reverses** the previous documented
+`issues/<id>/<session>` for standalone work (session default `work`; ADR-0026
+applies this same slash/ref-collision reasoning to the standalone form, which
+originally read `fix/<issue>-<slug>` here). This **reverses** the previous documented
 rule (`naming.lex` previously stated "`EPIC-WSnn`, hyphen, NOT slash; the epic branch
 is the bare epic code") — a reversal worth recording because the old rule carried an
 explicit git-collision rationale that a future reader would otherwise re-derive and

@@ -23,18 +23,41 @@ def _issue_spec(**over) -> TreeSpec:
 
 
 # --------------------------------------------------------------------------
-# branch
+# branch — issues/<id>/<session>, session default 'work' (ADR-0026)
 # --------------------------------------------------------------------------
 
 
-def test_branch_is_fix_issue_with_slug():
+def test_branch_is_issues_id_session_default_work():
+    # No --session → the default 'work' leaf. The branch is slash-namespaced and
+    # carries neither slug nor hash.
+    assert plan(_issue_spec()).branch == "issues/123/work"
+
+
+def test_branch_uses_a_non_default_session():
+    assert plan(_issue_spec(session="onboard")).branch == "issues/123/onboard"
+
+
+def test_branch_session_is_sanitized_like_a_slug():
+    # A session becomes a ref component, so it is lowercased and separator-collapsed
+    # the same way a slug is.
+    assert plan(_issue_spec(session="Spike Two")).branch == "issues/123/spike-two"
+
+
+def test_branch_slug_does_not_reach_the_issue_branch():
+    # The slug rides the DIR leaf only; the canonical branch stays issues/<id>/<session>.
     p = plan(_issue_spec(slug="header-align"))
-    assert p.branch == "fix/123-header-align"
+    assert p.branch == "issues/123/work"
 
 
-def test_branch_is_bare_fix_issue_when_slug_empty():
-    p = plan(_issue_spec(slug=""))
-    assert p.branch == "fix/123"
+def test_issue_branch_is_never_the_bare_issues_id_ref_collision_safety():
+    # The whole point of the <session> suffix (ADR-0026): the branch is ALWAYS a
+    # three-segment ref directory (issues/<id>/<session>), never a bare `issues/<id>`
+    # that would occupy `refs/heads/issues/<id>` as a FILE and block a sibling session.
+    for session in ("work", "onboard", "spike"):
+        branch = plan(_issue_spec(session=session)).branch
+        assert branch == f"issues/123/{session}"
+        assert branch.count("/") == 2
+        assert branch != "issues/123"
 
 
 def test_branch_never_carries_the_agent_hash():
@@ -45,30 +68,45 @@ def test_branch_never_carries_the_agent_hash():
 @pytest.mark.parametrize("bad_issue", [0, -1, -42])
 def test_issue_rejects_non_positive_number(bad_issue):
     # click accepts 0 and negatives; they format as out-of-grammar branches like
-    # 'fix/0'/'fix/-1', so the planner rejects them at this invariant boundary.
+    # 'issues/0/work', so the planner rejects them at this invariant boundary.
     with pytest.raises(ValueError, match="positive integer"):
         plan(_issue_spec(issue=bad_issue))
 
 
+@pytest.mark.parametrize("bad_session", ["", "   ", "///", " . / : "])
+def test_issue_rejects_empty_session(bad_session):
+    # A session that sanitizes to nothing would yield a bare `issues/<id>/` ref and
+    # reintroduce the file-vs-directory collision the suffix dodges — rejected.
+    with pytest.raises(ValueError, match="session"):
+        plan(_issue_spec(session=bad_session))
+
+
 # --------------------------------------------------------------------------
-# dir — hash lands HERE, keyed by issue, under the central root
+# dir — issues/<id>/<session>[-<slug>]-<hash>, hash on the leaf (ADR-0026)
 # --------------------------------------------------------------------------
 
 
-def test_dir_is_central_root_org_repo_issues_n_hash():
+def test_dir_is_central_root_org_repo_issues_id_session_hash():
     p = plan(_issue_spec())
-    assert p.dir == ROOT / "acme" / "widget" / "issues" / "123-deadbeef"
+    assert p.dir == ROOT / "acme" / "widget" / "issues" / "123" / "work-deadbeef"
+
+
+def test_dir_uses_a_non_default_session_leaf():
+    p = plan(_issue_spec(session="onboard"))
+    assert p.dir == ROOT / "acme" / "widget" / "issues" / "123" / "onboard-deadbeef"
 
 
 def test_dir_carries_the_agent_hash():
     p = plan(_issue_spec(agent_hash="abc99999"))
-    assert p.dir.name == "123-abc99999"
+    assert p.dir.name == "work-abc99999"
 
 
-def test_dir_leaf_does_not_use_the_slug():
-    # The slug shapes the branch, not the dir leaf (which is issue + hash).
-    p = plan(_issue_spec(slug="some-words"))
-    assert p.dir.name == "123-deadbeef"
+def test_dir_leaf_carries_the_slug_after_the_session():
+    # Mirrors the epic shape: the slug rides the DIR leaf (session-slug-hash), never
+    # the branch.
+    p = plan(_issue_spec(slug="some words"))
+    assert p.dir.name == "work-some-words-deadbeef"
+    assert p.branch == "issues/123/work"
 
 
 # --------------------------------------------------------------------------
@@ -97,9 +135,9 @@ def test_sanitize_all_separators_is_empty():
     assert sanitize_slug("  ///  ") == ""
 
 
-def test_plan_applies_slug_sanitization_to_the_branch():
+def test_plan_applies_slug_sanitization_to_the_dir_leaf():
     p = plan(_issue_spec(slug="Fix The Thing"))
-    assert p.branch == "fix/123-fix-the-thing"
+    assert p.dir.name == "work-fix-the-thing-deadbeef"
 
 
 # --------------------------------------------------------------------------
@@ -168,6 +206,30 @@ def test_epic_umbrella_base_none_raises_valueerror_not_typeerror():
     # ValueError` in the spawn verb would NOT catch a TypeError.)
     with pytest.raises(ValueError, match="epic code"):
         layout.epic_umbrella_base(None)
+
+
+def test_issue_branch_helper_builds_issues_id_session():
+    # The pure helper the planner AND the spawn verb's reviewer path share (ADR-0026):
+    # one place builds the standalone-issue branch, so a reviewer pins exactly the
+    # branch a write Run's planner produced.
+    assert layout.issue_branch(123, "work") == "issues/123/work"
+    assert layout.issue_branch(123, "onboard") == "issues/123/onboard"
+    # And the planner's resolved branch IS exactly what the helper produces.
+    assert plan(_issue_spec()).branch == layout.issue_branch(123, "work")
+
+
+@pytest.mark.parametrize("bad_issue", [0, -1, -42])
+def test_issue_branch_helper_rejects_non_positive_issue(bad_issue):
+    with pytest.raises(ValueError, match="positive integer"):
+        layout.issue_branch(bad_issue, "work")
+
+
+@pytest.mark.parametrize("bad_session", ["", "   ", "///", " . / : "])
+def test_issue_branch_helper_rejects_empty_session(bad_session):
+    # An empty session would build a bare `issues/<id>/` ref — refused so the
+    # file-vs-directory collision the suffix dodges can never be reintroduced.
+    with pytest.raises(ValueError, match="session"):
+        layout.issue_branch(42, bad_session)
 
 
 def test_non_epic_shapes_keep_origin_main_base():
@@ -356,4 +418,7 @@ def test_central_root_rejects_relative_override(monkeypatch):
 def test_plan_uses_central_root_when_spec_root_is_none(monkeypatch):
     monkeypatch.setenv(layout.CENTRAL_ROOT_ENV, "/env/trees")
     p = plan(_issue_spec(root=None))
-    assert p.dir == Path("/env/trees") / "acme" / "widget" / "issues" / "123-deadbeef"
+    assert (
+        p.dir
+        == Path("/env/trees") / "acme" / "widget" / "issues" / "123" / "work-deadbeef"
+    )

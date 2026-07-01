@@ -29,7 +29,7 @@ def test_run_create_happy_path(monkeypatch, capsys):
         captured["spec"] = spec
         captured["source_repo"] = source_repo
         captured["github_url"] = github_url
-        return Tree(path="/repo/trees/x", branch="fix/7-thing", base="origin/main")
+        return Tree(path="/repo/trees/x", branch="issues/7/work", base="origin/main")
 
     monkeypatch.setattr(tree_verb, "create", fake_create)
 
@@ -49,7 +49,7 @@ def test_run_create_happy_path(monkeypatch, capsys):
     payload = json.loads("\n".join(out.splitlines()[1:]))
     assert payload == {
         "path": "/repo/trees/x",
-        "branch": "fix/7-thing",
+        "branch": "issues/7/work",
         "base": "origin/main",
     }
 
@@ -127,7 +127,7 @@ def test_run_create_issue_shape_unchanged(monkeypatch, capsys):
     _patch_identity(monkeypatch)
     captured = _capture_create(
         monkeypatch,
-        Tree(path="/repo/trees/i", branch="fix/7-thing", base="origin/main"),
+        Tree(path="/repo/trees/i", branch="issues/7/work", base="origin/main"),
     )
 
     rc = tree_verb.run_create(issue=7, slug="Thing")
@@ -209,7 +209,7 @@ def test_run_create_reports_gh_error_cleanly(monkeypatch, capsys):
 def _record(**over) -> TreeRecord:
     base = dict(
         path="/trees/acme/widget/issues/7-aaaa",
-        branch="fix/7-thing",
+        branch="issues/7/work",
         base="origin/main",
         dirty=False,
         ahead=0,
@@ -244,7 +244,7 @@ def test_run_list_renders_fleet_table(monkeypatch, capsys):
     out = capsys.readouterr().out
     # Header + both Trees render, with branch, base, dirty state, and PR label.
     assert "BRANCH" in out and "BASE" in out and "PR" in out
-    assert "fix/7-thing" in out
+    assert "issues/7/work" in out
     assert "HAR02/WS02" in out
     assert "clean" in out and "dirty" in out
     assert "#7 DRAFT" in out and "#9 OPEN" in out
@@ -269,7 +269,7 @@ def test_run_list_over_a_fixture_root_renders(tmp_path, monkeypatch, capsys):
     clone = root / "acme" / "widget" / "issues" / "7-aaaa"
     (clone / ".git").mkdir(parents=True)
     monkeypatch.setenv("SHIPIT_TREES_ROOT", str(root))
-    monkeypatch.setattr(gh, "git_current_branch", lambda *, cwd: "fix/7-thing")
+    monkeypatch.setattr(gh, "git_current_branch", lambda *, cwd: "issues/7/work")
     monkeypatch.setattr(gh, "git_upstream_ref", lambda *, cwd: "origin/main")
     monkeypatch.setattr(gh, "git_status_porcelain", lambda *, cwd: "")
     monkeypatch.setattr(gh, "git_ahead_behind", lambda *, cwd: (0, 0))
@@ -279,7 +279,7 @@ def test_run_list_over_a_fixture_root_renders(tmp_path, monkeypatch, capsys):
 
     assert rc == 0
     out = capsys.readouterr().out
-    assert "fix/7-thing" in out
+    assert "issues/7/work" in out
     assert str(clone) in out
 
 

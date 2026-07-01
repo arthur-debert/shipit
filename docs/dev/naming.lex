@@ -42,8 +42,14 @@ mid-stream. Agents derive WS codes and all names from them.
     `EPIC` precisely to dodge the git ref collision: a bare `refs/heads/GPU02`
     file cannot coexist with the `refs/heads/GPU02/WS03` directory, so the
     umbrella name keeps the epic branch a sibling of its workstreams under
-    `refs/heads/GPU02/`. Standalone (non-epic) work uses `fix/<issue>-<slug>` —
-    e.g. `fix/433-header-align`. The
+    `refs/heads/GPU02/`. Standalone (non-epic) work uses `issues/<id>/<session>`
+    — e.g. `issues/433/work` — where `<session>` defaults to `work`. The
+    `<session>` suffix is there for the SAME ref-collision reason as the epic
+    umbrella name: a bare `issues/<id>` branch would occupy `refs/heads/issues/433`
+    as a ref FILE, which cannot coexist with the `refs/heads/issues/433/` ref
+    DIRECTORY a sibling session needs — so the suffix keeps `issues/433/` a
+    directory and lets a +1 session on one issue (e.g. `issues/433/onboard`)
+    coexist with the default `issues/433/work`. The
     plain-language identifier (§1) stays hyphenated — `GPU02-WS03` in titles,
     logs, cross-refs — only the git branch form is slashed.
 

@@ -50,7 +50,18 @@ def tree() -> None:
     "--issue",
     type=int,
     default=None,
-    help="Issue shape: provision a Tree for issue N (branch fix/<n>-<slug>).",
+    help="Issue shape: provision a Tree for issue N (branch issues/<n>/<session>).",
+)
+@click.option(
+    "--session",
+    default="work",
+    show_default=True,
+    help=(
+        "Issue shape: session name in the branch issues/<n>/<session>. The suffix "
+        "keeps issues/<n>/ a ref directory so a +1 session on the same issue "
+        "(e.g. --session onboard) coexists with the default `work` (naming.lex §3). "
+        "Ignored by the --epic/--ws and --branch shapes."
+    ),
 )
 @click.option(
     "--epic",
@@ -72,13 +83,14 @@ def tree() -> None:
     "--slug",
     default="",
     help=(
-        "Optional short label, sanitized to lowercase-dashed. Per shape: --issue "
-        "puts it in the branch (fix/<n>-<slug>); --epic rides the Tree dir only "
-        "(branch stays E/WSnn); ignored for --branch."
+        "Optional short label, sanitized to lowercase-dashed. Rides the Tree DIR leaf "
+        "only (never the branch): --issue and --epic both keep their canonical branch "
+        "(issues/<n>/<session>, E/WSnn); ignored for --branch."
     ),
 )
 def create_cmd(
     issue: int | None,
+    session: str,
     epic: str | None,
     ws: int | None,
     branch: str | None,
@@ -90,9 +102,10 @@ def create_cmd(
     to a concrete dir/branch/base:
 
     \b
-    - ``--issue N [--slug S]``       → branch ``fix/<n>-<slug>``, base ``origin/main``
-    - ``--epic E --ws N [--slug S]`` → branch ``E/WSnn``, base ``origin/E/umbrella``
-    - ``--branch NAME``              → branch ``NAME`` verbatim, base ``origin/main``
+    - ``--issue N [--session S] [--slug S]`` → branch ``issues/<n>/<session>``,
+      base ``origin/main``
+    - ``--epic E --ws N [--slug S]``         → branch ``E/WSnn``, base ``origin/E/umbrella``
+    - ``--branch NAME``                      → branch ``NAME`` verbatim, base ``origin/main``
 
     Creates a fully-independent clone under the central root on the resolved branch,
     then prints ``READY {path, branch, base}``. The clone's ``origin`` is the repo's
@@ -101,13 +114,16 @@ def create_cmd(
     error.
     """
     raise SystemExit(
-        run_create(issue=issue, epic=epic, ws=ws, branch=branch, slug=slug)
+        run_create(
+            issue=issue, session=session, epic=epic, ws=ws, branch=branch, slug=slug
+        )
     )
 
 
 def run_create(
     *,
     issue: int | None = None,
+    session: str = "work",
     epic: str | None = None,
     ws: int | None = None,
     branch: str | None = None,
@@ -142,6 +158,7 @@ def run_create(
         repo=repo,
         agent_hash=new_agent_hash(),
         issue=issue,
+        session=session,
         epic=epic,
         ws=ws,
         branch=branch,

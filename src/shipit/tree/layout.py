@@ -5,7 +5,7 @@
 on disk, the **branch** to check out, and the **base** ref to cut it from — with
 no I/O, so the truth table is unit-tested directly (Testing Decisions in the PRD).
 
-:func:`plan` resolves EVERY spec shape — ``--issue N [--slug S]``,
+:func:`plan` resolves EVERY spec shape — ``--issue N [--session S] [--slug S]``,
 ``--epic E --ws N [--slug S]``, and freeform ``--branch NAME`` (naming.lex §3).
 :class:`TreeSpec` stays a single typed entry point: adding a shape is adding a field
 plus a branch in :func:`plan`, not reshaping callers.
@@ -127,6 +127,48 @@ def sanitize_slug(slug: str) -> str:
     return collapsed.strip("-")
 
 
+def issue_branch(issue: int, session: str) -> str:
+    """The standalone-issue branch: ``issues/<id>/<session>`` (session default ``work``).
+
+    The single place that builds the slash-namespaced standalone-issue branch, so the
+    planner (:func:`_plan_issue`) and any caller that must resolve the branch WITHOUT
+    going through :func:`plan` (the ``shipit spawn subagent`` verb's reviewer path, which
+    read-only-checks out an existing issue head) agree by construction — the analog of
+    :func:`epic_umbrella_base` for the epic shape.
+
+    Why the ``<session>`` suffix (and never a bare ``issues/<id>``): a bare branch would
+    occupy ``refs/heads/issues/<id>`` as a git ref FILE, which cannot coexist with the
+    ``refs/heads/issues/<id>/`` ref DIRECTORY a sibling session would need — the same
+    file-vs-directory ref collision the epic umbrella name dodges (ADR-0016 / naming.lex
+    §3). Keeping ``issues/<id>/`` a ref directory lets a +1 session on the same issue
+    (``issues/<id>/onboard``) coexist with the default ``issues/<id>/work``.
+
+    Both inputs are validated at this invariant boundary: ``issue`` must be a positive
+    integer (``click`` accepts ``0``/negatives, but they yield out-of-grammar branches
+    like ``issues/0/work``), and ``session`` must contain at least one alphanumeric
+    character (it is sanitized like a slug — lowercased, separators → ``-`` — and becomes
+    both a ref component and a dir-leaf component, so an empty/all-separator session would
+    yield a bare ``issues/<id>/`` ref and reintroduce the collision). Both raise
+    :class:`ValueError`.
+    """
+    if issue < 1:
+        raise ValueError(
+            "tree.layout.issue_branch: issue number must be a positive integer "
+            f"(the issues/<id>/<session> grammar, naming.lex §3); got issue={issue!r}. "
+            "Zero or negative values produce out-of-grammar branches like "
+            "'issues/0/work'."
+        )
+    normalized = sanitize_slug(session)
+    if not normalized:
+        raise ValueError(
+            "tree.layout.issue_branch: session must contain at least one alphanumeric "
+            f"character (it becomes the issues/<id>/<session> ref/dir leaf); got "
+            f"{session!r}, which sanitizes to an empty name — a bare 'issues/<id>/' ref "
+            "that reintroduces the file-vs-directory collision the session suffix dodges."
+        )
+    return f"issues/{issue}/{normalized}"
+
+
 @dataclass(frozen=True)
 class TreeSpec:
     """A request to materialize a Tree — exactly one of the three shapes is set.
@@ -135,12 +177,16 @@ class TreeSpec:
     disambiguates the dir for two Trees on one branch (it never reaches the
     branch). ``root`` overrides the central root for tests; ``None`` resolves
     :func:`central_root`. ``slug`` is the optional human label applied per shape.
+    ``session`` names the standalone-issue branch's leaf — ``issues/<id>/<session>``,
+    default ``work`` — so a +1 session on the same issue (``issues/<id>/onboard``)
+    coexists under the ``issues/<id>/`` ref directory (see :func:`_plan_issue`); it is
+    unused by the epic and freeform shapes.
 
     The three shapes :func:`plan` dispatches on (and validates as mutually
     exclusive):
 
     - **epic/work stream** — ``epic`` + ``ws`` both set (``--epic E --ws N``);
-    - **issue** — ``issue`` set (``--issue N``); and
+    - **issue** — ``issue`` set (``--issue N`` ``[--session S]``); and
     - **freeform** — ``branch`` set (``--branch <name>``).
     """
 
@@ -152,6 +198,7 @@ class TreeSpec:
     ws: int | None = None
     branch: str | None = None
     slug: str = ""
+    session: str = "work"
     root: Path | None = None
 
 
@@ -290,32 +337,37 @@ def _plan_freeform(spec: TreeSpec) -> TreePlan:
 
 
 def _plan_issue(spec: TreeSpec) -> TreePlan:
-    """Resolve the ``--issue N`` shape.
+    """Resolve the ``--issue N [--session S] [--slug S]`` (standalone-issue) shape.
 
-    - **branch**: ``fix/<n>-<slug>`` (naming.lex §3), or bare ``fix/<n>`` when no
-      slug is given — never carries the agent hash.
-    - **dir**: ``<root>/<org>/<repo>/issues/<n>-<agent-hash>`` — the hash lands on
-      the dir leaf, keyed by issue, so duplicate Trees never collide on disk.
-    - **base**: ``origin/main`` (a standalone issue is cut from the default branch;
-      a work stream's epic-branch base is WS02's concern).
+    Mirrors the epic shape (:func:`_plan_epic_ws`): the ``<session>`` (default ``work``)
+    plays the structural role ``WSnn`` does, so branch and dir share it, an optional slug
+    rides the DIR leaf only, and the hash lands on the leaf, never the branch.
 
-    ``issue`` is validated as a positive integer at this invariant boundary, the
-    same way ``ws`` is in :func:`_plan_epic_ws`: ``click`` accepts ``0`` and
-    negatives, but they yield out-of-grammar branches like ``fix/0`` / ``fix/-1``,
-    so they raise :class:`ValueError`.
+    - **branch**: ``issues/<id>/<session>`` — slash-namespaced (:func:`issue_branch`),
+      NEVER the bare ``issues/<id>`` (which would occupy ``refs/heads/issues/<id>`` as a
+      ref FILE and block a sibling session); the session suffix keeps ``issues/<id>/`` a
+      ref directory so ``issues/<id>/onboard`` can coexist with ``issues/<id>/work``. The
+      branch carries neither slug nor hash.
+    - **base**: ``origin/main`` — a standalone issue is cut from the default branch (a
+      work stream's epic-branch base is the epic shape's concern).
+    - **dir**: ``<root>/<org>/<repo>/issues/<id>/<session>[-<slug>]-<agent-hash>`` — the
+      branch path under the ``issues`` kind, hash on the leaf. An optional sanitized slug
+      rides the DIR only (never the canonical branch), so a Tree reads as
+      ``work-header-align-deadbeef`` on disk while the branch stays ``issues/<id>/work``.
+
+    Both ``issue`` (positive integer) and ``session`` (non-empty after sanitization) are
+    validated at this invariant boundary by :func:`issue_branch`, so a malformed ref
+    never reaches git or the filesystem. Raises :class:`ValueError`.
     """
     assert spec.issue is not None  # guaranteed by plan()
-    if spec.issue < 1:
-        raise ValueError(
-            "tree.layout.plan: issue number must be a positive integer "
-            f"(the fix/<issue> grammar, naming.lex §3); got issue={spec.issue!r}. "
-            "Zero or negative values produce out-of-grammar branches like "
-            "'fix/0'/'fix/-1'."
-        )
+    branch = issue_branch(spec.issue, spec.session)  # validates issue + session
+    session = sanitize_slug(spec.session)
     slug = sanitize_slug(spec.slug)
-    branch = f"fix/{spec.issue}-{slug}" if slug else f"fix/{spec.issue}"
-    root = spec.root if spec.root is not None else central_root()
-    directory = (
-        Path(root) / spec.org / spec.repo / "issues" / f"{spec.issue}-{spec.agent_hash}"
+    leaf = (
+        f"{session}-{slug}-{spec.agent_hash}"
+        if slug
+        else f"{session}-{spec.agent_hash}"
     )
+    root = spec.root if spec.root is not None else central_root()
+    directory = Path(root) / spec.org / spec.repo / "issues" / str(spec.issue) / leaf
     return TreePlan(dir=directory, branch=branch, base="origin/main")

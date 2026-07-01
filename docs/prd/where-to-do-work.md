@@ -81,7 +81,7 @@ that's an accepted, mild cost (and a useful record of provenance).
     the branch still reads as a meaningful namespace.
 13. As any agent, I want a Tree's *directory path* and its **branch** to share one slash
     namespace (`…/epics/HAR02/WS02-<hash>` on disk, branch `HAR02/WS02`; the epic branch is
-    `HAR02/umbrella`, standalone work is `fix/433-…`, per `naming.lex §3`), so that an
+    `HAR02/umbrella`, standalone work is `issues/433/work`, per `naming.lex §3`), so that an
     epic's Trees and branches group cleanly under `HAR02/` without the epic branch
     colliding with its work-stream refs.
 14. As a **coordinator**, I want `shipit tree list` to show every Tree with its branch,
@@ -119,9 +119,9 @@ that's an accepted, mild cost (and a useful record of provenance).
 built from small testable pieces in the `prstate` "snapshot → decision" idiom:
 
 - **`tree/layout.py` (deep, pure, rarely changes).** `plan(spec) -> TreePlan{dir, branch,
-  base}`. Resolves the three spec shapes — `--epic E --ws N [--slug S]`, `--issue N`,
-  `--branch <freeform>` — into:
-  - **branch** (stable, no hash): `EPIC/WSnn` (e.g. `HAR02/WS02`), `fix/<issue>-<slug>`,
+  base}`. Resolves the three spec shapes — `--epic E --ws N [--slug S]`,
+  `--issue N [--session S]`, `--branch <freeform>` — into:
+  - **branch** (stable, no hash): `EPIC/WSnn` (e.g. `HAR02/WS02`), `issues/<id>/<session>`,
     or the freeform name — the slash-namespaced grammar (`naming.lex §3`). The epic
     (umbrella) branch is `EPIC/umbrella`, never bare `EPIC`: that keeps the epic branch a
     sibling of its work streams under `refs/heads/HAR02/` instead of colliding with them
