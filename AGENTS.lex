@@ -82,7 +82,10 @@ The PR lifecycle (draft -> ready -> stop):
         off the epic-grouped base `origin/E/umbrella` and its draft PR targets the
         epic branch `E/umbrella`, matching the coordinator-driven epic topology; it
         fail-closes loudly if `origin/E/umbrella` is absent on the remote — never a
-        silent fallback to `origin/main` (#176, closed)), or the in-CC `Agent(isolation:"worktree")` tool, whose spawn the
+        silent fallback to `origin/main` (#176, closed). For a standalone issue
+        (`--issue N` with NO `--epic`/`--ws`) the same verb cuts `issues/<id>/<session>`
+        (session default `work`) off `origin/main`, its draft PR targeting `main` — the
+        single-issue analog of the work-stream path (ADR-0026)), or the in-CC `Agent(isolation:"worktree")` tool, whose spawn the
         `WorktreeCreate` hook auto-routes into a Tree. The coordinator never runs
         `shipit tree create` by hand to provision a Run and never points an Agent tool at
         an external checkout. A Tree is a dissociated clone rooted as the Run's cwd (no
