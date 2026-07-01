@@ -142,8 +142,9 @@ CONDA_ACTIVATION_VARS = frozenset(
 
 #: The ADR-0015 build-env vars that pixi ``[activation.env]`` now OWNS and re-sets to a
 #: PER-TREE value (via ``$PIXI_PROJECT_ROOT``) on every activation (COR01 / ADR-0022).
-#: These are exactly the three keys declared in ``pixi.toml``'s ``[activation.env]``. Once
-#: ``sccache_env()`` stopped injecting them in Python, an inherited PARENT value would
+#: These are exactly the three keys declared in ``pixi.toml``'s ``[activation.env]``. Because
+#: the build env now comes from pixi ``[activation.env]`` (no longer injected in Python), an
+#: inherited PARENT value would
 #: SHADOW the Tree's activation value — a leaked ``CARGO_TARGET_DIR`` / ``SCCACHE_BASEDIRS``
 #: points the child's ``cargo`` at the PARENT Tree's ``target/`` and keys sccache on the
 #: PARENT path, so build artifacts land in — and cache-hit against — the WRONG Tree. They
