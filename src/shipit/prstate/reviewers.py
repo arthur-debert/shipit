@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+from ..agent import backend as _agent_backend
 from . import ghapi
 from .model import (
     FunnelState,
@@ -649,9 +650,12 @@ class CodexAdapter(_LocalReviewAdapter):
     identity. See :class:`_LocalReviewAdapter` for the synchronous-request /
     no-cancel / head-strict contract."""
 
-    name = "codex"
+    # Name + login slug fragment come from the ONE agent-backend identity registry
+    # (ADR-0025), so the funnel axis and the launch axis share one definition of the
+    # codex identity — no duplicated alias tables.
+    name = _agent_backend.CODEX.name
     instruction_files = (".github/codex-review-instructions.md",)
-    bot_slug_fragment = "codex-review"
+    bot_slug_fragment = _agent_backend.CODEX.bot_slug_fragment
 
 
 class AgyAdapter(_LocalReviewAdapter):
@@ -662,9 +666,10 @@ class AgyAdapter(_LocalReviewAdapter):
     auto-triggering GeminiAdapter). See :class:`_LocalReviewAdapter` for the
     request/cancel/detect contract."""
 
-    name = "agy"
+    # Name + login slug fragment come from the shared agent-backend identity (ADR-0025).
+    name = _agent_backend.ANTIGRAVITY.funnel_agent
     instruction_files = (".github/agy-review-instructions.md",)
-    bot_slug_fragment = "agy-review"
+    bot_slug_fragment = _agent_backend.ANTIGRAVITY.bot_slug_fragment
 
 
 # The adapter CATALOG: every reviewer the engine knows how to read/request. This

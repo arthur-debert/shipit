@@ -18,13 +18,17 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from ...agent import invocation as agent_invocation
 from ..role import Role
 from .variant import role_of_meta
 
 #: Bump when the record's field set changes, so an aggregator can read mixed stores.
 #: v2 adds the full WS02 objective metric set (tool-call vector, turn count,
 #: stuck-loop, check-bypass / break-glass, error / retry, tokens, exit-hygiene).
-SCHEMA_VERSION = 2
+#: v3 (COR01-WS02) adds ``eval.invocation`` — the observed + intended
+#: Backend × Model × ReasoningLevel launch config (ADR-0025), a group-by dimension
+#: for ``shipit eval report``.
+SCHEMA_VERSION = 3
 
 #: The role recorded for a SUBAGENT run whose meta is absent/unreadable. The locator
 #: still classifies it as a subagent (off the transcript filename), but with no
@@ -94,7 +98,25 @@ def build(
         "eval.exit_hygiene.dirty_file_count": hygiene.get("dirty_file_count"),
         "eval.exit_hygiene.stray_pid_count": hygiene.get("stray_pid_count"),
         "eval.variant": variant,
+        "eval.invocation": _invocation_record(meta),
         "git.commit": commit,
+    }
+
+
+def _invocation_record(meta: Mapping[str, Any] | None) -> dict[str, Any]:
+    """The run's :class:`shipit.agent.Invocation` attribution — observed + intended.
+
+    The **observed** launch config (Backend × Model × ReasoningLevel + permission_mode)
+    is read from the run's ``.meta.json`` (:func:`shipit.agent.observed_from_meta`); the
+    **intended** side is a clean seam — ``None`` until the spawn surface stamps an
+    ``invocation`` intent block into the meta (:func:`shipit.agent.intended_from_meta`),
+    mirroring how ``variant`` was staged. ``shipit eval report`` groups by the observed
+    config, so the harness can compare configurations (ADR-0025).
+    """
+    intended = agent_invocation.intended_from_meta(meta)
+    return {
+        "observed": agent_invocation.observed_from_meta(meta).as_record(),
+        "intended": intended.as_record() if intended is not None else None,
     }
 
 

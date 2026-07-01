@@ -27,9 +27,11 @@ def _variant(content_hash, label=None):
     return Variant(content_hash=content_hash, label=label).as_record()
 
 
-def _write(base, repo, *, role, tool_calls, variant, timestamp):
+def _write(base, repo, *, role, tool_calls, variant, timestamp, meta_extra=None):
     """Append one realistic eval record (built by the real builder) to the store."""
     meta = None if role == "coordinator" else {"agentType": role}
+    if meta is not None and meta_extra:
+        meta = {**meta, **meta_extra}
     record = build(
         metrics={"tool_call_count": tool_calls},
         meta=meta,
@@ -44,6 +46,27 @@ def _write(base, repo, *, role, tool_calls, variant, timestamp):
 #: The variant content-hashes the seeded runs carry — the real ``sha256:`` key shape.
 _V1 = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
 _V2 = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+
+
+def _write_legacy(base, repo, *, role, tool_calls, variant, timestamp):
+    """Append a PRE-v3 eval record — one with NO ``eval.invocation`` key at all.
+
+    Simulates a record written before WS02 added the invocation dimension (including
+    ones already in the current Repo-keyed store from the WS01→WS02 window): the real
+    builder always stamps `eval.invocation` now, so we build a normal record and strip
+    the key to reproduce the old on-disk shape. A store of only these has NO
+    `eval.invocation` column for DuckDB to bind."""
+    meta = None if role == "coordinator" else {"agentType": role}
+    record = build(
+        metrics={"tool_call_count": tool_calls},
+        meta=meta,
+        variant=variant,
+        commit="abc123",
+        timestamp=timestamp,
+        is_coordinator=role == "coordinator",
+    )
+    record.pop("eval.invocation", None)
+    store.append_record(record, repo, base_dir=base)
 
 
 def _seed(tmp_path):
@@ -100,6 +123,125 @@ def test_aggregate_groups_by_variant(tmp_path):
     assert result.by_variant == [
         report.GroupRow(key=_V1, runs=2, avg_tool_calls=15.0),
         report.GroupRow(key=_V2, runs=1, avg_tool_calls=6.0),
+    ]
+
+
+def test_aggregate_groups_by_invocation(tmp_path):
+    # The observed Backend × Model × ReasoningLevel launch config (ADR-0025) is a
+    # group-by dimension: two runs at the same (backend, model, reasoning) pool; a
+    # different reasoning level (or model) separates. Records carry the model /
+    # reasoning in their meta (the observed config the harness reads).
+    base = tmp_path / "state"
+    repo = _REPO
+    _write(
+        base,
+        repo,
+        role="implementer",
+        tool_calls=10,
+        variant=_variant(_V1),
+        timestamp="2026-06-01T08:00:00+00:00",
+        meta_extra={"model": "gpt-5.5", "reasoning": "high", "backend": "codex"},
+    )
+    _write(
+        base,
+        repo,
+        role="implementer",
+        tool_calls=20,
+        variant=_variant(_V1),
+        timestamp="2026-06-01T09:00:00+00:00",
+        meta_extra={"model": "gpt-5.5", "reasoning": "high", "backend": "codex"},
+    )
+    _write(
+        base,
+        repo,
+        role="implementer",
+        tool_calls=4,
+        variant=_variant(_V1),
+        timestamp="2026-06-01T10:00:00+00:00",
+        meta_extra={"model": "gpt-5.5", "reasoning": "low", "backend": "codex"},
+    )
+    path = store.store_path(repo, base_dir=base)
+    result = report.aggregate(path)
+    assert result.by_invocation == [
+        report.GroupRow(key="codex/gpt-5.5 (high)", runs=2, avg_tool_calls=15.0),
+        report.GroupRow(key="codex/gpt-5.5 (low)", runs=1, avg_tool_calls=4.0),
+    ]
+
+
+def test_invocation_with_no_observed_model_buckets_under_backend(tmp_path):
+    # Every record records an observed invocation (backend defaults to claude for a
+    # Claude Code run), so a run whose meta names no model still groups — under
+    # "claude/?" (the '?' standing in for the unknown model) rather than vanishing.
+    # The seeded runs carry meta without a model, so all bucket together.
+    _, _, path = _seed(tmp_path)
+    result = report.aggregate(path)
+    keys = {row.key for row in result.by_invocation}
+    assert keys == {"claude/?"}
+
+
+def test_aggregate_tolerates_store_with_no_invocation_column(tmp_path):
+    # A store of ONLY pre-v3 records (no `eval.invocation` key on any row) has NO
+    # such column for DuckDB to infer, so a naive query naming it would fail to bind.
+    # The report must stay schema-tolerant: it buckets every old row under "(none)"
+    # and still rolls up the other dimensions, rather than raising. (Forward-compat
+    # WITHIN the store's own history — NOT compat with the orphaned path-keyed stores.)
+    base = tmp_path / "state"
+    repo = _REPO
+    _write_legacy(
+        base,
+        repo,
+        role="implementer",
+        tool_calls=10,
+        variant=_variant(_V1),
+        timestamp="2026-06-01T08:00:00+00:00",
+    )
+    _write_legacy(
+        base,
+        repo,
+        role="implementer",
+        tool_calls=20,
+        variant=_variant(_V1),
+        timestamp="2026-06-01T09:00:00+00:00",
+    )
+    result = report.aggregate(store.store_path(repo, base_dir=base))
+    assert result.total_runs == 2
+    assert result.by_invocation == [
+        report.GroupRow(key="(none)", runs=2, avg_tool_calls=15.0),
+    ]
+    # The other roll-ups still work over the mixed/old shape.
+    assert result.by_role == [
+        report.GroupRow(key="implementer", runs=2, avg_tool_calls=15.0),
+    ]
+
+
+def test_aggregate_tolerates_mixed_invocation_schema(tmp_path):
+    # A store with SOME rows carrying `eval.invocation` and some missing it (the
+    # WS01→WS02 window): the new rows group by their observed config, the old rows
+    # fall under "(none)" — the report never raises on the mixed schema.
+    base = tmp_path / "state"
+    repo = _REPO
+    _write_legacy(
+        base,
+        repo,
+        role="implementer",
+        tool_calls=4,
+        variant=_variant(_V1),
+        timestamp="2026-06-01T07:00:00+00:00",
+    )
+    _write(
+        base,
+        repo,
+        role="implementer",
+        tool_calls=10,
+        variant=_variant(_V1),
+        timestamp="2026-06-01T08:00:00+00:00",
+        meta_extra={"model": "gpt-5.5", "reasoning": "high", "backend": "codex"},
+    )
+    result = report.aggregate(store.store_path(repo, base_dir=base))
+    assert result.total_runs == 2
+    assert result.by_invocation == [
+        report.GroupRow(key="(none)", runs=1, avg_tool_calls=4.0),
+        report.GroupRow(key="codex/gpt-5.5 (high)", runs=1, avg_tool_calls=10.0),
     ]
 
 
@@ -203,7 +345,7 @@ def test_aggregate_empty_store_is_empty_report(tmp_path):
     missing = tmp_path / "state" / "nope.jsonl"
     result = report.aggregate(missing)
     assert result == report.EvalReport(
-        total_runs=0, by_role=[], by_variant=[], by_day=[]
+        total_runs=0, by_role=[], by_variant=[], by_invocation=[], by_day=[]
     )
 
 
