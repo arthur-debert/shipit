@@ -1,0 +1,51 @@
+# Core identities: Repo, WorkingDir, PR (origin-derived; identity vs content/views)
+
+> **Status: Proposed.** Core Model epic (COR01); anchors WS-Repo and WS-PR.
+
+shipit gains **canonical identity value objects** for its core nouns — `Repo`,
+`WorkingDir`, `PR` — so each is defined once and every subsystem keys on the same thing.
+
+## Context
+
+shipit had no canonical value objects for its core nouns, so each subsystem invented its
+own key. The worst was **Repo**: the eval store keyed by *resolved filesystem path* while
+`logsetup` keyed by origin `owner/repo` — unjoinable, and every Tree clone scattered a new
+eval store (60 of 61 stores orphaned). `git rev-parse --show-toplevel` was re-implemented
+four times because `gh.repo_root()` lacked a `cwd`. **PR** was modeled twice
+(`PullContext` / `PRContext`) with `head_sha` fetched three ways, and one builder hardcoded
+`is_draft=False` — a latent trap.
+
+## Decision
+
+- **`Repo` = `(owner, name)`**, identity derived **locally** from the origin remote
+  (`git remote get-url origin`) — offline, Tree-safe, deliberately *not* the API-based
+  `gh.current_repo()`. **`Owner` = `(login, kind)`**; **`OwnerKind ∈ {user,
+  organization}`** is an OPTIONAL, lazily-resolved enrichment and is **not** part of Repo
+  identity/equality (so the store key is stable whether or not kind is known). The
+  **path→toolchain map** is the *same* repo's content — identity and content are two
+  facets of one noun.
+- **`WorkingDir` = `(path, Repo, revision)`** — the single resolver for "what repo +
+  revision is checked out at this path," replacing the 4× re-derivation. **Composition,
+  not inheritance:** a **Tree** *has-a* WorkingDir; the **main checkout** is a WorkingDir
+  that is not a Tree.
+- **`PR` = identity `(repo, number)` + cheap core** (`head_sha`, `base_ref`, `is_draft`,
+  `merge_state`). The readiness path and the review path build **distinct richer views
+  that compose a `PR`**, never parallel half-overlapping snapshots. **One `head_sha`
+  fetch** boundary.
+- The **eval store re-keys by `Repo` identity**. No compat: existing path-keyed stores
+  **orphan** (local, uncommitted, regenerable data).
+
+## Considered options
+
+- **API-derived repo identity** — rejected: needs network, breaks Tree/offline use.
+- **`kind` in Repo identity** — rejected: re-orphans the store the moment kind is enriched.
+- **One mega-`PR` object with optional-everything** — rejected: reintroduces the
+  `is_draft=False` latent trap; a field belongs on the view that fetched it.
+- **A migration shim for old eval stores** — rejected: no-compat rule; the data is
+  regenerable.
+
+## Consequences
+
+WS-Repo lands `Repo`/`Owner`/`WorkingDir`, re-keys the eval store, and gives `repo_root` a
+`cwd` (killing the 4× re-impl). WS-PR unifies the two PR contexts. Telemetry and logs for
+one repo now join on one stable key.
