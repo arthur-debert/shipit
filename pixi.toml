@@ -89,11 +89,16 @@ version = ">=8"
 # `pixi run lint` ambiguous across default/lint/review; the lefthook `-e lint` pin was
 # the mitigation — see lefthook.yml). `pixi run -e lint lint` runs that same managed
 # task INSIDE the lint env (the canonical, lefthook/CI-pinned path). What stays here is
-# the lexd provisioning + the lexd-dependent helpers (fmt, regen-roles). Because the
-# managed `lint` is a fixed plain-string task, it cannot carry a `provision-lexd`
-# depends-on; the pinned lexd is provisioned onto the `-e lint` PATH explicitly — CI
-# runs `provision-lexd` before `lint` (.github/workflows/ci.yml), and locally the lint
-# env inherits any host `lexd` on PATH (the fetch is a no-op when the pin is present).
+# the lexd provisioning + the lexd-dependent helpers (fmt, regen-roles, install-hooks).
+# Because the managed `lint` is a fixed plain-string task, it cannot carry a
+# `provision-lexd` depends-on; instead lexd is provisioned onto the lint env's PATH by
+# the NON-managed setup tasks that gate it — `install-hooks` (the one-time hook
+# activation every dev runs on a fresh clone) depends on `provision-lexd`, so lexd is
+# fetched into `.pixi/envs/lint/bin/` at hook-setup time and PERSISTS there for every
+# subsequent `-e lint lint` the pre-commit / pre-push hooks run. CI provisions it the
+# same way via an explicit step (.github/workflows/ci.yml). This keeps lexd off the
+# managed `lint`/`lefthook.yml` surface (so the reconcile stays a 0-change no-op) while
+# never leaving a fresh clone's lex leg un-provisioned.
 [feature.lint.tasks]
 # lexd is not on conda-forge; fetch the pinned prebuilt before every lint run
 # (idempotent). The lint checks depend on it, so CI and the hook provision identically.
@@ -113,8 +118,11 @@ provision-lexd = { cmd = "bash tools/provision-lexd.sh", inputs = [
     "tools/provision-lexd.sh",
 ] }
 fmt = { cmd = "shipit lint --fix", depends-on = ["provision-lexd"] }
-# One command from a fresh clone to working lint checks (the `--install-hook` equiv).
-install-hooks = "lefthook install"
+# One command from a fresh clone to working lint checks (the `--install-hook` equiv):
+# activates the git hooks AND (via `provision-lexd`) fetches the pinned lexd into the
+# lint env, so the pre-commit / pre-push `pixi run -e lint lint` the hooks fire find
+# lexd on PATH without the managed `lint` task needing a depends-on it cannot carry.
+install-hooks = { cmd = "lefthook install", depends-on = ["provision-lexd"] }
 # Re-flow every role-prompt surface from the lex fragments (HAR01-WS03, ADR-0011):
 # mirror src/shipit/data/roles/*.lex -> .md, then compose the agent-defs, the
 # bundled coordinator deny slice, and the AGENTS.md union. Needs lexd + prettier
