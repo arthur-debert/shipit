@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
-from shipit.prstate.model import PullContext, Review
+from shipit.prstate.model import ReadinessView, readiness_view, Review
 from shipit.prstate.reviewers import by_name
 from shipit.prstate.state import (
     ChecksState,
@@ -12,6 +14,19 @@ from shipit.prstate.state import (
     evaluate,
     no_pr,
 )
+
+# The PR CORE now lives on the composed (frozen) `PR`, so overriding a core field
+# means replacing `view.pr`, not the view. This helper routes core overrides
+# (number/head_sha/is_draft/base_ref/merge_state) to the PR and everything else
+# (mergeable/checks/reviews/…) to the view — a core-aware `dataclasses.replace`.
+_CORE_FIELDS = {"number", "head_sha", "is_draft", "base_ref", "merge_state"}
+
+
+def _replace(ctx: ReadinessView, **overrides) -> ReadinessView:
+    core = {k: v for k, v in overrides.items() if k in _CORE_FIELDS}
+    view = {k: v for k, v in overrides.items() if k not in _CORE_FIELDS}
+    new_pr = dataclasses.replace(ctx.pr, **core) if core else ctx.pr
+    return dataclasses.replace(ctx, pr=new_pr, **view)
 
 
 def test_no_pr():
@@ -85,9 +100,8 @@ def test_evaluate_states(context, fixture, expected):
     ],
 )
 def test_ready_requires_clean_merge_state(context, mergeable, merge_state, expected):
-    import dataclasses
 
-    ctx = dataclasses.replace(
+    ctx = _replace(
         context("ready_checks_green"), mergeable=mergeable, merge_state=merge_state
     )
     status = evaluate(ctx)
@@ -95,16 +109,14 @@ def test_ready_requires_clean_merge_state(context, mergeable, merge_state, expec
 
 
 def test_dirty_merge_state_names_the_conflict_fix(context):
-    import dataclasses
 
-    ctx = dataclasses.replace(context("ready_checks_green"), merge_state="DIRTY")
+    ctx = _replace(context("ready_checks_green"), merge_state="DIRTY")
     assert "conflict" in evaluate(ctx).next_action
 
 
 def test_behind_base_says_update_the_branch(context):
-    import dataclasses
 
-    ctx = dataclasses.replace(context("ready_checks_green"), merge_state="BEHIND")
+    ctx = _replace(context("ready_checks_green"), merge_state="BEHIND")
     status = evaluate(ctx)
     assert status.state is TaskState.BLOCKED
     assert "behind" in status.next_action and "update" in status.next_action
@@ -114,12 +126,9 @@ def test_behind_base_takes_precedence_over_pending_ci(context):
     # A moved base re-stales CI, so a behind PR with pending checks must give the
     # actionable "update the branch" next action, not "wait for checks" — BEHIND
     # is evaluated before CI state (release#675).
-    import dataclasses
 
     pending = [{"__typename": "CheckRun", "status": "IN_PROGRESS", "conclusion": None}]
-    ctx = dataclasses.replace(
-        context("ready_checks_green"), merge_state="BEHIND", checks=pending
-    )
+    ctx = _replace(context("ready_checks_green"), merge_state="BEHIND", checks=pending)
     status = evaluate(ctx)
     assert status.state is TaskState.BLOCKED
     assert "behind" in status.next_action
@@ -129,9 +138,8 @@ def test_non_clean_block_message_names_the_merge_state(context):
     # A genuine computed non-CLEAN merge state the rollup can't disprove (BLOCKED:
     # e.g. a missing required status) stays BLOCKED and names mergeStateStatus in
     # the next action. (UNSTABLE is handled separately — see the #715 tests.)
-    import dataclasses
 
-    ctx = dataclasses.replace(context("ready_checks_green"), merge_state="BLOCKED")
+    ctx = _replace(context("ready_checks_green"), merge_state="BLOCKED")
     status = evaluate(ctx)
     assert status.state is TaskState.BLOCKED
     assert "BLOCKED" in status.next_action
@@ -148,7 +156,6 @@ def test_non_clean_block_message_names_the_merge_state(context):
 def test_unstable_with_green_rollup_is_ready(context):
     # The exact #715 scenario: green rollup (a SKIPPED e2e-gpu among them) but
     # mergeStateStatus lags at UNSTABLE — defer to the rollup → READY.
-    import dataclasses
 
     rollup = [
         {"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "SUCCESS"},
@@ -159,9 +166,7 @@ def test_unstable_with_green_rollup_is_ready(context):
             "conclusion": "SKIPPED",
         },
     ]
-    ctx = dataclasses.replace(
-        context("ready_checks_green"), merge_state="UNSTABLE", checks=rollup
-    )
+    ctx = _replace(context("ready_checks_green"), merge_state="UNSTABLE", checks=rollup)
     status = evaluate(ctx)
     assert status.state is TaskState.READY
     assert "shipit pr ready" in status.next_action  # draft fixture → flip
@@ -171,7 +176,6 @@ def test_unstable_with_green_rollup_is_ready(context):
 def test_unstable_with_a_genuinely_failing_check_is_still_blocked(context):
     # UNSTABLE must NOT mask a real failure: a FAILING rollup is caught by the CI
     # checks BEFORE the merge-state branch, so it stays BLOCKED with the CI message.
-    import dataclasses
 
     rollup = [
         {"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "SUCCESS"},
@@ -182,9 +186,7 @@ def test_unstable_with_a_genuinely_failing_check_is_still_blocked(context):
             "conclusion": "FAILURE",
         },
     ]
-    ctx = dataclasses.replace(
-        context("ready_checks_green"), merge_state="UNSTABLE", checks=rollup
-    )
+    ctx = _replace(context("ready_checks_green"), merge_state="UNSTABLE", checks=rollup)
     status = evaluate(ctx)
     assert status.state is TaskState.BLOCKED
     assert "failing" in status.next_action
@@ -194,11 +196,8 @@ def test_unstable_with_no_rollup_is_not_promoted(context):
     # #737 review: an empty/absent rollup (ChecksState.NONE) is NOT evidence the
     # checks passed, so an UNSTABLE-with-no-rollup must NOT be blindly promoted to
     # READY — only an EXPLICITLY GREEN rollup tolerates UNSTABLE.
-    import dataclasses
 
-    ctx = dataclasses.replace(
-        context("ready_checks_green"), merge_state="UNSTABLE", checks=[]
-    )
+    ctx = _replace(context("ready_checks_green"), merge_state="UNSTABLE", checks=[])
     status = evaluate(ctx)
     assert status.state is not TaskState.READY
 
@@ -207,7 +206,6 @@ def test_unstable_with_a_re_running_check_is_validating(context):
     # The check is genuinely mid-re-run (IN_PROGRESS) → the rollup is PENDING, so
     # the CI checks report VALIDATING (wait for checks), never a flip. Only an
     # already-green rollup reaches READY.
-    import dataclasses
 
     rollup = [
         {"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "SUCCESS"},
@@ -218,9 +216,7 @@ def test_unstable_with_a_re_running_check_is_validating(context):
             "conclusion": None,
         },
     ]
-    ctx = dataclasses.replace(
-        context("ready_checks_green"), merge_state="UNSTABLE", checks=rollup
-    )
+    ctx = _replace(context("ready_checks_green"), merge_state="UNSTABLE", checks=rollup)
     status = evaluate(ctx)
     assert status.state is TaskState.VALIDATING
 
@@ -228,10 +224,9 @@ def test_unstable_with_a_re_running_check_is_validating(context):
 def test_unstable_non_draft_says_done_not_flip(context):
     # Post-flip (already ready-for-review) UNSTABLE-with-green-rollup must say
     # done/await merge, never re-prescribe the flip the agent already made.
-    import dataclasses
 
-    ctx = dataclasses.replace(context("ready_checks_green"), merge_state="UNSTABLE")
-    ctx.is_draft = False
+    ctx = _replace(context("ready_checks_green"), merge_state="UNSTABLE")
+    ctx = _replace(ctx, is_draft=False)
     status = evaluate(ctx)
     assert status.state is TaskState.READY
     assert "shipit pr ready" not in status.next_action
@@ -276,7 +271,7 @@ def test_ready_non_draft_says_done_not_flip(context):
     # Post-flip a READY PR is in the human's hands: the next action must say
     # done/await merge, never re-prescribe the flip the agent already made.
     ctx = context("ready_checks_green")
-    ctx.is_draft = False
+    ctx = _replace(ctx, is_draft=False)
     status = evaluate(ctx)
     assert status.state is TaskState.READY
     assert "shipit pr ready" not in status.next_action
@@ -376,12 +371,12 @@ def _green_checks() -> list[dict]:
     return [{"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "SUCCESS"}]
 
 
-def _ctx_with_reviews(*authors_on_head: str) -> PullContext:
+def _ctx_with_reviews(*authors_on_head: str) -> ReadinessView:
     """A draft PR, green + mergeable, with an APPROVED review on the head per
     named author — everything but the review set held constant. `merge_state`
     is CLEAN so the merge-state check (release#675) doesn't hold back a context
     built to isolate REVIEWER logic."""
-    return PullContext(
+    return readiness_view(
         number=1,
         head_sha="h",
         is_draft=True,
@@ -466,7 +461,7 @@ def test_a_push_re_stales_both_required_reviewers_when_rerun():
     # rerun (head-strict), both are now stale → the engine asks to RE-REQUEST
     # both for the current head. (Under the review-once default both would count
     # as done — see test_review_once_both_earlier_head_reaches_ready.)
-    ctx = PullContext(
+    ctx = readiness_view(
         number=1,
         head_sha="new",
         is_draft=True,
@@ -489,7 +484,7 @@ def test_review_once_both_earlier_head_reaches_ready():
     # The DEFAULT (review-once): the SAME both-reviewed-an-earlier-head context,
     # with no rerun opt-in, reaches READY — neither earlier-head review is stale,
     # so a push does NOT re-open the review holds (the whole point of the policy).
-    ctx = PullContext(
+    ctx = readiness_view(
         number=1,
         head_sha="new",
         is_draft=True,

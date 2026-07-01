@@ -1,6 +1,6 @@
 """The PR lifecycle state machine — the stable core.
 
-`evaluate()` is a pure function from a `PullContext` snapshot to one
+`evaluate()` is a pure function from a `ReadinessView` snapshot to one
 `TaskStatus`: where the PR stands and the single next action. It never mutates
 (it *reports* READY; the caller does the draft->ready flip) and never branches
 on a reviewer's name — it consumes the adapter interface only.
@@ -55,7 +55,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 
 from .breakers import evaluate_breakers
-from .model import FunnelState, PullContext, ReviewLifecycle
+from .model import FunnelState, ReadinessView, ReviewLifecycle
 from .reviewers import REGISTRY, ReviewerAdapter, required_reviewers
 
 # --- ADR-0001 divergence (OBS04) -------------------------------------------
@@ -232,7 +232,7 @@ def no_pr() -> TaskStatus:
 
 
 def evaluate(
-    ctx: PullContext,
+    ctx: ReadinessView,
     registry: list[ReviewerAdapter] | None = None,
     required: list[ReviewerAdapter] | None = None,
 ) -> TaskStatus:
@@ -261,7 +261,7 @@ def evaluate(
 
 
 def _evaluate(
-    ctx: PullContext,
+    ctx: ReadinessView,
     registry: list[ReviewerAdapter] | None = None,
     required: list[ReviewerAdapter] | None = None,
 ) -> TaskStatus:
@@ -529,7 +529,7 @@ def _evaluate(
 
 
 def _classify_pending(
-    ctx: PullContext,
+    ctx: ReadinessView,
     pending: list[ReviewerAdapter],
     funnel_states: dict[str, FunnelState],
 ) -> tuple[list[str], list[str], list[str]]:
@@ -599,7 +599,7 @@ def _reviews_pending_action(
     )
 
 
-def _has_stale_review(ctx: PullContext, adapter: ReviewerAdapter) -> bool:
+def _has_stale_review(ctx: ReadinessView, adapter: ReviewerAdapter) -> bool:
     """True iff this reviewer should be RE-REQUESTED because a push staled its
     review — i.e. it has a review on some commit OTHER than the current head.
 

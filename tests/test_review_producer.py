@@ -14,21 +14,22 @@ import pytest
 
 from shipit.review import producer
 from shipit.review.backends import BackendError, BackendUnavailable
-from shipit.review.diff import PRContext
+from shipit.review.diff import ReviewView, review_view
 from shipit.spawn.launch import LaunchResult
 from shipit.tree.create import Tree
 
 _VALID = '{"summary": {"status": "COMMENT", "overall_feedback": "ok"}, "comments": []}'
 
 
-def _ctx() -> PRContext:
-    return PRContext(
+def _ctx() -> ReviewView:
+    return review_view(
         number=42,
         repo="arthur-debert/shipit",
         head_sha="deadbeef",
         base_ref="TRE05/umbrella",
         base_sha="cafe",
         diff="diff --git a/x b/x\n",
+        is_draft=False,
         changed_files=["x"],
         workdir="/checkout",
         head_ref="TRE05/WS04b",
@@ -193,3 +194,32 @@ def test_missing_head_branch_is_a_clean_failure(_faked):
     with pytest.raises(RuntimeError) as exc:
         producer.run_tree_review("codex", ctx, launcher=_faked["launcher"])
     assert "head branch" in str(exc.value)
+
+
+def test_resolve_org_repo_uses_the_view_slug_when_known(monkeypatch):
+    """A resolved view's slug is the source of truth for the read-only Tree's
+    org/repo — no `gh repo view` re-inference."""
+    monkeypatch.setattr(
+        producer.gh,
+        "current_repo",
+        lambda: (_ for _ in ()).throw(AssertionError("must not infer when repo known")),
+    )
+    assert producer._resolve_org_repo(_ctx()) == ("arthur-debert", "shipit")
+
+
+def test_resolve_org_repo_falls_back_to_gh_for_handbuilt_context(monkeypatch):
+    """The falsey-repo fallback (ADR-0024): a hand-built view (`repo is None`)
+    provisions the Tree under the `gh repo view`-inferred org/repo rather than a
+    `local/local` placeholder."""
+    ctx = review_view(
+        number=42,
+        repo=None,
+        head_sha="deadbeef",
+        base_ref="main",
+        base_sha="cafe",
+        diff="",
+        is_draft=False,
+    )
+    assert ctx.repo is None
+    monkeypatch.setattr(producer.gh, "current_repo", lambda: "inferred/repo")
+    assert producer._resolve_org_repo(ctx) == ("inferred", "repo")

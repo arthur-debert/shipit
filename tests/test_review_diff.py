@@ -38,10 +38,15 @@ def test_resolve_pr_normalizes_workdir_to_toplevel(monkeypatch):
     agent's cwd) against the repo ROOT, not the subdir."""
     monkeypatch.setattr(diff, "_git_toplevel", lambda wd: "/repo/root")
     monkeypatch.setattr(
+        diff.identity,
+        "resolve_repo",
+        lambda cwd, **k: diff.repo_from_slug("owner/repo"),
+    )
+    monkeypatch.setattr(
         diff.gh,
         "pr_view",
         lambda *a, **k: (
-            '{"number": 5, "headRefName": "feat", '
+            '{"number": 5, "isDraft": false, "mergeStateStatus": "CLEAN", "headRefName": "feat", '
             '"headRefOid": "headsha", "baseRefName": "main", "baseRefOid": "basesha"}'
         ),
     )
@@ -65,7 +70,7 @@ def test_resolve_pr_normalizes_workdir_to_toplevel(monkeypatch):
 
     ctx = diff.resolve_pr(5, workdir="/repo/root/src/deep")
     assert ctx.workdir == "/repo/root"
-    # The PRContext base is the authoritative base sha (baseRefOid), not a local
+    # The ReviewView base is the authoritative base sha (baseRefOid), not a local
     # `origin/<base>` ref.
     assert ctx.base_sha == "basesha"
     # The diff endpoint is the MERGE BASE of the authoritative base + head (the PR
@@ -81,10 +86,15 @@ def test_resolve_pr_no_common_ancestor_fails_loud(monkeypatch):
     loud rather than degrading to a base-tip diff."""
     monkeypatch.setattr(diff, "_git_toplevel", lambda wd: "/repo/root")
     monkeypatch.setattr(
+        diff.identity,
+        "resolve_repo",
+        lambda cwd, **k: diff.repo_from_slug("owner/repo"),
+    )
+    monkeypatch.setattr(
         diff.gh,
         "pr_view",
         lambda *a, **k: (
-            '{"number": 5, "headRefName": "feat", "headRefOid": "headsha", '
+            '{"number": 5, "isDraft": false, "mergeStateStatus": "CLEAN", "headRefName": "feat", "headRefOid": "headsha", '
             '"baseRefName": "main", "baseRefOid": "basesha"}'
         ),
     )
@@ -116,10 +126,15 @@ def test_resolve_pr_missing_base_oid_fails_loud(monkeypatch):
     a base, so the review can't run against a wrong one."""
     monkeypatch.setattr(diff, "_git_toplevel", lambda wd: "/repo/root")
     monkeypatch.setattr(
+        diff.identity,
+        "resolve_repo",
+        lambda cwd, **k: diff.repo_from_slug("owner/repo"),
+    )
+    monkeypatch.setattr(
         diff.gh,
         "pr_view",
         lambda *a, **k: (
-            '{"number": 5, "headRefName": "feat", '
+            '{"number": 5, "isDraft": false, "mergeStateStatus": "CLEAN", "headRefName": "feat", '
             '"headRefOid": "headsha", "baseRefName": "main"}'
         ),
     )
@@ -135,10 +150,15 @@ def test_resolve_pr_stale_base_fetch_fails_loud(monkeypatch):
     silently degrading to a local ref or the base tip (no wrong-base diff)."""
     monkeypatch.setattr(diff, "_git_toplevel", lambda wd: "/repo/root")
     monkeypatch.setattr(
+        diff.identity,
+        "resolve_repo",
+        lambda cwd, **k: diff.repo_from_slug("owner/repo"),
+    )
+    monkeypatch.setattr(
         diff.gh,
         "pr_view",
         lambda *a, **k: (
-            '{"number": 5, "headRefName": "feat", "headRefOid": "headsha", '
+            '{"number": 5, "isDraft": false, "mergeStateStatus": "CLEAN", "headRefName": "feat", "headRefOid": "headsha", '
             '"baseRefName": "main", "baseRefOid": "basesha"}'
         ),
     )
@@ -171,3 +191,35 @@ def test_resolve_pr_rejects_non_checkout(monkeypatch):
     monkeypatch.setattr(diff, "_git_toplevel", lambda wd: None)
     with pytest.raises(diff.ReviewError, match="not a git checkout"):
         diff.resolve_pr(5, workdir="/tmp/nope")
+
+
+def test_review_view_repo_is_slug_when_known():
+    """A view built with an explicit slug reports it — the resolved-PR source of
+    truth downstream posters/producers post to."""
+    ctx = diff.review_view(
+        number=5,
+        repo="owner/repo",
+        head_sha="h",
+        base_ref="main",
+        base_sha="b",
+        diff="",
+        is_draft=False,
+    )
+    assert ctx.repo == "owner/repo"
+
+
+def test_review_view_repo_is_none_for_handbuilt_context():
+    """A hand-built view WITHOUT a slug reports `repo is None` — NOT the
+    `local/local` placeholder slug — so downstream `_resolve_repo` /
+    `_resolve_org_repo` honestly fall back to `gh repo view` instead of silently
+    posting/provisioning against a placeholder (ADR-0024 falsey-repo contract)."""
+    ctx = diff.review_view(
+        number=5,
+        repo=None,
+        head_sha="h",
+        base_ref="main",
+        base_sha="b",
+        diff="",
+        is_draft=False,
+    )
+    assert ctx.repo is None

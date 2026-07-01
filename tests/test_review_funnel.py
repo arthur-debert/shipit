@@ -34,7 +34,7 @@ import pytest
 
 from shipit.review import service
 from shipit.review.backends.base import BackendError
-from shipit.review.diff import PRContext
+from shipit.review.diff import ReviewView, review_view
 
 _DIFF = """\
 diff --git a/foo.py b/foo.py
@@ -52,14 +52,15 @@ _REVIEW = {
 }
 
 
-def _ctx(repo: str | None = "owner/repo") -> PRContext:
-    return PRContext(
+def _ctx(repo: str | None = "owner/repo") -> ReviewView:
+    return review_view(
         number=5,
         repo=repo,
         head_sha="deadbeef",
         base_ref="main",
         base_sha="cafe",
         diff=_DIFF,
+        is_draft=False,
         changed_files=["foo.py"],
         workdir="/tmp/wd",
     )
@@ -198,6 +199,34 @@ def test_resolve_target_raises_on_non_dict_json(monkeypatch):
     monkeypatch.setattr(service.gh, "pr_view", lambda pr, json_fields=None: "[1]")
 
     with pytest.raises(service.gh.GhError, match="no headRefOid"):
+        service._resolve_target(5)
+
+
+def test_resolve_target_normalizes_malformed_repo_slug(monkeypatch):
+    """`gh.current_repo()` returning an empty/non-`owner/name` slug makes
+    `repo_from_slug` raise raw `ValueError`. The synchronous boundary normalizes it
+    to a typed `GhError` with a clear message, not a leaked traceback."""
+    monkeypatch.setattr(service.gh, "current_repo", lambda: "not-a-slug")
+    monkeypatch.setattr(
+        service.gh,
+        "pr_view",
+        lambda pr, json_fields=None: '{"headRefOid": "abc", "isDraft": false}',
+    )
+    with pytest.raises(service.gh.GhError, match="could not resolve target"):
+        service._resolve_target(5)
+
+
+def test_resolve_target_normalizes_missing_core_key(monkeypatch):
+    """A node with `headRefOid` present but a required core key (`number`) missing
+    makes `core_from_node` raise raw `KeyError`; the boundary normalizes it to a
+    typed `GhError` rather than leaking the `KeyError`."""
+    monkeypatch.setattr(service.gh, "current_repo", lambda: "owner/repo")
+    monkeypatch.setattr(
+        service.gh,
+        "pr_view",
+        lambda pr, json_fields=None: '{"headRefOid": "abc", "isDraft": false}',
+    )
+    with pytest.raises(service.gh.GhError, match="could not resolve target"):
         service._resolve_target(5)
 
 

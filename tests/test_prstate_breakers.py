@@ -16,7 +16,7 @@ from shipit.prstate.breakers import (
     evaluate_breakers,
     is_all_nitpick_round,
 )
-from shipit.prstate.model import PullContext, Review, ReviewComment, Thread
+from shipit.prstate.model import readiness_view, Review, ReviewComment, Thread
 from shipit.prstate.reviewers import by_name
 from shipit.prstate.state import TaskState, evaluate
 
@@ -57,7 +57,7 @@ def ctx(
     merge_state="CLEAN",
     checks=None,
 ):
-    return PullContext(
+    return readiness_view(
         number=1,
         head_sha=head or (reviews[-1].commit_id if reviews else "h"),
         is_draft=True,
