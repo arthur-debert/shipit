@@ -26,6 +26,7 @@ import os
 from collections.abc import Mapping
 from pathlib import Path
 
+from ...agent.backend import CLAUDE as _IDENTITY
 from .base import BackendAdapter
 
 #: The env var the ``claude`` adapter MUST remove from the child env (ADR-0019 §3): a
@@ -46,7 +47,7 @@ REVIEWER_TOOLS = ("Read", "Grep", "Glob", "Bash")
 class ClaudeAdapter(BackendAdapter):
     """The headless-``claude`` backend (ADR-0019), adapter #0 of the ADR-0020 seam."""
 
-    name = "claude"
+    name = _IDENTITY.name
 
     def build_command(
         self,

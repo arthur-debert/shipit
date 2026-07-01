@@ -695,10 +695,12 @@ def test_fresh_install_seeds_required_reviewer_set(tmp_path, rec):
     (tmp_path / "AGENTS.md").write_text("# Acme\n")
     install.run(str(tmp_path))
 
-    # The seeded [reviewers] table requires all three — copilot + the codex/agy
-    # local-agent backends — matching shipit's own .shipit.toml.
+    # The seeded [reviewers] table is rendered from the SINGLE required-reviewer
+    # default (ADR-0025 / COR01-WS02), so a fresh install requires exactly what the
+    # engine code-default does — Copilot only. codex/agy are opt-in per repo (their
+    # review Apps are not installed everywhere); shipit's own .shipit.toml opts them in.
     override = rcfg.load_override(str(tmp_path))
-    assert rcfg.resolve_required_names(override) == ("copilot", "codex", "agy")
+    assert rcfg.resolve_required_names(override) == ("copilot",)
 
 
 def test_install_preserves_existing_secrets_and_reviewers(tmp_path, rec):
