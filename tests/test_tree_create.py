@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from shipit import gh
+from shipit import config, gh
 from shipit.tree import create as create_mod
 from shipit.tree import layout
 from shipit.tree.create import create, create_from_source
@@ -288,7 +288,13 @@ def _mock_git_boundary(monkeypatch, *, manifests: list[str]):
         d = Path(dest)
         d.mkdir(parents=True)
         for name in manifests:
-            (d / name).write_text("# stub\n")
+            # A stub `.shipit.toml` carries the ONBOARDED marker (a [shipit] block) so
+            # `_provision` runs the managed-set reconcile — that gate is
+            # `config.is_onboarded`, not mere file presence (#205).
+            content = (
+                '[shipit]\nversion = "stub"\n' if name == ".shipit.toml" else "# stub\n"
+            )
+            (d / name).write_text(content)
 
     monkeypatch.setattr(gh, "git_clone_dissociated", fake_clone)
     monkeypatch.setattr(gh, "git_fetch", lambda **k: None)
@@ -356,6 +362,40 @@ def test_create_skips_provisioning_steps_whose_manifest_is_absent(
 
     create(_spec(tmp_path), source_repo=str(source), github_url="url")
     assert calls == [["pixi", "install"]]
+
+
+def test_provision_skips_install_when_repo_not_onboarded(tmp_path: Path, monkeypatch):
+    # #205: a `.shipit.toml` that carries only consumer policy (no [shipit]/[managed]
+    # block) is NOT onboarded. `_provision` must NOT run `shipit install` — doing so
+    # would onboard the repo fresh on every spawn and commit the onboarding artifacts
+    # into the Tree branch. The pixi step (its manifest present) still runs.
+    dest = tmp_path / "tree"
+    dest.mkdir()
+    (dest / config.CONFIG_NAME).write_text('[secrets]\nGH_PAT = { env = "X" }\n')
+    (dest / create_mod.PIXI_MANIFEST).write_text("# stub\n")
+
+    calls: list[list[str]] = []
+    monkeypatch.setattr(create_mod, "run_provision", lambda cmd, **k: calls.append(cmd))
+    monkeypatch.setattr(create_mod, "_st_dev", lambda p: 1)
+
+    create_mod._provision(dest, trees_root=tmp_path / "trees")
+    assert calls == [["pixi", "install"]]
+
+
+def test_provision_runs_install_when_repo_onboarded(tmp_path: Path, monkeypatch):
+    # An ALREADY-ONBOARDED `.shipit.toml` (it carries the [shipit]/[managed] block)
+    # DOES get the managed-set reconcile — reconciling an existing managed set is the
+    # legitimate #170 behavior.
+    dest = tmp_path / "tree"
+    dest.mkdir()
+    (dest / config.CONFIG_NAME).write_text('[shipit]\nversion = "seed"\n\n[managed]\n')
+
+    calls: list[list[str]] = []
+    monkeypatch.setattr(create_mod, "run_provision", lambda cmd, **k: calls.append(cmd))
+    monkeypatch.setattr(create_mod, "_st_dev", lambda p: 1)
+
+    create_mod._provision(dest, trees_root=tmp_path / "trees")
+    assert calls == [["shipit", "install", ".", "--local"]]
 
 
 def test_sccache_env_applies_per_tree_target_and_cache_settings(tmp_path: Path):
