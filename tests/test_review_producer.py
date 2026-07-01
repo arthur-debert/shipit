@@ -14,15 +14,15 @@ import pytest
 
 from shipit.review import producer
 from shipit.review.backends import BackendError, BackendUnavailable
-from shipit.review.diff import PRContext
+from shipit.review.diff import review_view
 from shipit.spawn.launch import LaunchResult
 from shipit.tree.create import Tree
 
 _VALID = '{"summary": {"status": "COMMENT", "overall_feedback": "ok"}, "comments": []}'
 
 
-def _ctx() -> PRContext:
-    return PRContext(
+def _ctx() -> object:
+    return review_view(
         number=42,
         repo="arthur-debert/shipit",
         head_sha="deadbeef",

@@ -38,10 +38,15 @@ def test_resolve_pr_normalizes_workdir_to_toplevel(monkeypatch):
     agent's cwd) against the repo ROOT, not the subdir."""
     monkeypatch.setattr(diff, "_git_toplevel", lambda wd: "/repo/root")
     monkeypatch.setattr(
+        diff.identity,
+        "resolve_repo",
+        lambda cwd, **k: diff.repo_from_slug("owner/repo"),
+    )
+    monkeypatch.setattr(
         diff.gh,
         "pr_view",
         lambda *a, **k: (
-            '{"number": 5, "headRefName": "feat", '
+            '{"number": 5, "isDraft": false, "mergeStateStatus": "CLEAN", "headRefName": "feat", '
             '"headRefOid": "headsha", "baseRefName": "main", "baseRefOid": "basesha"}'
         ),
     )
@@ -65,7 +70,7 @@ def test_resolve_pr_normalizes_workdir_to_toplevel(monkeypatch):
 
     ctx = diff.resolve_pr(5, workdir="/repo/root/src/deep")
     assert ctx.workdir == "/repo/root"
-    # The PRContext base is the authoritative base sha (baseRefOid), not a local
+    # The ReviewView base is the authoritative base sha (baseRefOid), not a local
     # `origin/<base>` ref.
     assert ctx.base_sha == "basesha"
     # The diff endpoint is the MERGE BASE of the authoritative base + head (the PR
@@ -81,10 +86,15 @@ def test_resolve_pr_no_common_ancestor_fails_loud(monkeypatch):
     loud rather than degrading to a base-tip diff."""
     monkeypatch.setattr(diff, "_git_toplevel", lambda wd: "/repo/root")
     monkeypatch.setattr(
+        diff.identity,
+        "resolve_repo",
+        lambda cwd, **k: diff.repo_from_slug("owner/repo"),
+    )
+    monkeypatch.setattr(
         diff.gh,
         "pr_view",
         lambda *a, **k: (
-            '{"number": 5, "headRefName": "feat", "headRefOid": "headsha", '
+            '{"number": 5, "isDraft": false, "mergeStateStatus": "CLEAN", "headRefName": "feat", "headRefOid": "headsha", '
             '"baseRefName": "main", "baseRefOid": "basesha"}'
         ),
     )
@@ -116,10 +126,15 @@ def test_resolve_pr_missing_base_oid_fails_loud(monkeypatch):
     a base, so the review can't run against a wrong one."""
     monkeypatch.setattr(diff, "_git_toplevel", lambda wd: "/repo/root")
     monkeypatch.setattr(
+        diff.identity,
+        "resolve_repo",
+        lambda cwd, **k: diff.repo_from_slug("owner/repo"),
+    )
+    monkeypatch.setattr(
         diff.gh,
         "pr_view",
         lambda *a, **k: (
-            '{"number": 5, "headRefName": "feat", '
+            '{"number": 5, "isDraft": false, "mergeStateStatus": "CLEAN", "headRefName": "feat", '
             '"headRefOid": "headsha", "baseRefName": "main"}'
         ),
     )
@@ -135,10 +150,15 @@ def test_resolve_pr_stale_base_fetch_fails_loud(monkeypatch):
     silently degrading to a local ref or the base tip (no wrong-base diff)."""
     monkeypatch.setattr(diff, "_git_toplevel", lambda wd: "/repo/root")
     monkeypatch.setattr(
+        diff.identity,
+        "resolve_repo",
+        lambda cwd, **k: diff.repo_from_slug("owner/repo"),
+    )
+    monkeypatch.setattr(
         diff.gh,
         "pr_view",
         lambda *a, **k: (
-            '{"number": 5, "headRefName": "feat", "headRefOid": "headsha", '
+            '{"number": 5, "isDraft": false, "mergeStateStatus": "CLEAN", "headRefName": "feat", "headRefOid": "headsha", '
             '"baseRefName": "main", "baseRefOid": "basesha"}'
         ),
     )

@@ -6,7 +6,7 @@ for the PR's base/head refs, make the base + head available locally (FETCH only 
 never a branch switch, so the user's working tree is untouched), and compute the
 three-dot diff and changed-file list the agent reviews.
 
-The CHECKOUT model: the agent backend reads files from ``PRContext.workdir`` so
+The CHECKOUT model: the agent backend reads files from ``ReviewView.workdir`` so
 it can open the surrounding source for context. When the review runs in the
 consumer's own checkout of the PR (``workdir`` defaults to cwd) the head is
 typically already at ``HEAD``; otherwise we fetch the PR head as an object and
@@ -14,6 +14,14 @@ diff against it. We never switch branches — if the head isn't the current
 working tree, the agent can still read the changed content via the diff and via
 ``git show <sha>:<path>``, but a full file-tree read of the head requires that
 the head actually be checked out (documented limitation, not a branch switch).
+
+``ReviewView`` is the **review path's** richer view (ADR-0024): it *composes* a
+canonical :class:`shipit.pr.PR` (identity + cheap core) and adds the diff /
+changed_files / workdir the review runs over. It replaces the old ``PRContext``
+snapshot — the core (``number`` / ``head_sha`` / ``base_ref``) now lives on the
+composed ``PR``, read via delegating properties, and the PR identity's repo is
+resolved ONCE here (from the explicit slug or the checkout's origin) rather than
+inferred piecemeal downstream.
 """
 
 from __future__ import annotations
@@ -23,7 +31,8 @@ import os
 import subprocess
 from dataclasses import dataclass, field
 
-from .. import gh, proc
+from .. import gh, identity, proc
+from ..pr import PR, core_from_node, repo_from_slug
 
 
 class ReviewError(RuntimeError):
@@ -34,13 +43,20 @@ class ReviewError(RuntimeError):
 
 
 @dataclass
-class PRContext:
-    """Everything the review needs about one PR, resolved and ready to diff."""
+class ReviewView:
+    """The review path's view of one PR: a canonical :class:`shipit.pr.PR`
+    (identity + cheap core) enriched with the diff + changed files + workdir the
+    review runs over.
 
-    number: int
-    repo: str | None
-    head_sha: str
-    base_ref: str
+    Composes a ``PR`` rather than re-declaring the core (ADR-0024): ``number`` /
+    ``head_sha`` / ``base_ref`` are read straight off ``self.pr`` via delegating
+    properties, so the review path exposes exactly the core its ``PR`` fetched.
+    ``base_sha`` / ``diff`` / ``changed_files`` / ``workdir`` / ``head_ref`` are
+    review-ONLY enrichments the readiness path never fetches, so they live on the
+    view, not the shared core.
+    """
+
+    pr: PR
     base_sha: str
     diff: str
     changed_files: list[str] = field(default_factory=list)
@@ -51,6 +67,71 @@ class PRContext:
     # the head fetch, so it is surfaced here rather than re-resolved. Empty only
     # for a hand-built context (tests); a resolved PR always carries it.
     head_ref: str = ""
+
+    # --- core + identity, delegated to the composed PR (ADR-0024) -----------
+    @property
+    def number(self) -> int:
+        return self.pr.number
+
+    @property
+    def head_sha(self) -> str:
+        return self.pr.head_sha
+
+    @property
+    def base_ref(self) -> str | None:
+        return self.pr.base_ref
+
+    @property
+    def repo(self) -> str:
+        """The ``owner/name`` slug the review posts to — the PR identity's repo,
+        resolved once at :func:`resolve_pr`. Downstream posters/producers read this
+        as a slug string exactly as they did the old ``PRContext.repo``."""
+        return self.pr.repo.slug
+
+
+def review_view(
+    *,
+    number: int,
+    head_sha: str,
+    base_ref: str | None,
+    base_sha: str,
+    diff: str,
+    repo: str | None = None,
+    is_draft: bool = False,
+    merge_state: str | None = None,
+    changed_files: list[str] | None = None,
+    workdir: str = ".",
+    head_ref: str = "",
+) -> ReviewView:
+    """Compose a :class:`ReviewView` from flattened fields — the ergonomic builder
+    for callers (and tests) that hold the values directly rather than a raw node.
+
+    ``repo`` is an ``owner/name`` slug (parsed into the PR identity's
+    :class:`shipit.identity.Repo`); ``None`` yields a placeholder identity for a
+    hand-built context. The review path never reads ``is_draft`` / ``merge_state``,
+    but the shared ``PR`` core carries them, so they are accepted (defaulting) here.
+    """
+    pr = PR(
+        repo=repo_from_slug(repo) if repo else _HANDBUILT_REPO,
+        number=number,
+        head_sha=head_sha,
+        base_ref=base_ref,
+        is_draft=is_draft,
+        merge_state=merge_state,
+    )
+    return ReviewView(
+        pr=pr,
+        base_sha=base_sha,
+        diff=diff,
+        changed_files=changed_files if changed_files is not None else [],
+        workdir=workdir,
+        head_ref=head_ref,
+    )
+
+
+#: Placeholder repo identity for a hand-built :class:`ReviewView` with no slug —
+#: a resolved PR always carries its real, canonical repo (see :func:`resolve_pr`).
+_HANDBUILT_REPO = repo_from_slug("local/local")
 
 
 def _git_toplevel(workdir: str) -> str | None:
@@ -94,11 +175,18 @@ def _pr_meta(pr: int, repo: str | None) -> dict:
             str(pr),
             repo=repo,
             json_fields=[
+                # The PR CORE (`pr.CORE_JSON_FIELDS`: number/headRefOid/baseRefName/
+                # isDraft/mergeStateStatus) so the view's core is built through the
+                # one `core_from_node` boundary — the SAME extraction the readiness
+                # path uses — plus the review-only endpoints (headRefName for the
+                # head fetch + Tree, baseRefOid for the authoritative base diff).
                 "number",
                 "headRefName",
                 "headRefOid",
                 "baseRefName",
                 "baseRefOid",
+                "isDraft",
+                "mergeStateStatus",
             ],
         )
     except gh.GhError as exc:
@@ -120,11 +208,11 @@ def resolve_pr(
     *,
     repo: str | None = None,
     workdir: str | None = None,
-) -> PRContext:
-    """Resolve PR ``pr`` to a :class:`PRContext` (diff + changed files + workdir).
+) -> ReviewView:
+    """Resolve PR ``pr`` to a :class:`ReviewView` (diff + changed files + workdir).
 
-    * ``repo`` (``OWNER/NAME``) targets a specific repo; ``None`` lets ``gh``
-      infer the repo from ``workdir``'s remote.
+    * ``repo`` (``OWNER/NAME``) targets a specific repo; ``None`` derives the PR
+      identity's repo LOCALLY from ``workdir``'s origin remote (ADR-0024).
     * ``workdir`` is the checkout the agent reads files from; defaults to the
       current directory (the consumer reviewing their own PR).
 
@@ -167,10 +255,21 @@ def resolve_pr(
                 f"`gh repo view`: {exc}"
             ) from exc
 
+    # The PR identity's repo, resolved ONCE here (ADR-0024): the canonical explicit
+    # slug, or — when unspecified — derived LOCALLY from the checkout's origin remote
+    # (offline, Tree-safe). Downstream posters/producers read `ctx.repo` off this,
+    # rather than each re-inferring the slug.
+    repo_obj = repo_from_slug(repo) if repo else identity.resolve_repo(cwd=workdir)
+
     meta = _pr_meta(pr, repo)
-    base_ref = meta.get("baseRefName") or "main"
+    # The CORE (number/head_sha/base_ref/is_draft/merge_state) is read off `meta`
+    # through the one `core_from_node` boundary — the SAME extraction the readiness
+    # path uses, so `head_sha` is fetched exactly one way. The review-only endpoints
+    # (base sha + head branch) are read alongside it for the git diff + Tree.
+    pr_core = core_from_node(meta, repo_obj)
+    base_ref = pr_core.base_ref or "main"
     base_sha = meta.get("baseRefOid") or ""
-    head_sha = meta.get("headRefOid") or ""
+    head_sha = pr_core.head_sha
     head_ref = meta.get("headRefName") or ""
 
     # The head endpoint of the diff is ALWAYS the resolved head sha
@@ -259,11 +358,8 @@ def resolve_pr(
         ) from exc
     changed_files = [line for line in names.splitlines() if line.strip()]
 
-    return PRContext(
-        number=pr,
-        repo=repo,
-        head_sha=head_sha,
-        base_ref=base_ref,
+    return ReviewView(
+        pr=pr_core,
         base_sha=base_sha,
         diff=diff,
         changed_files=changed_files,

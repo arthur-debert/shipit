@@ -421,7 +421,7 @@ def reviewer_window(root: str | None = None) -> dict[str, int]:
     from the per-run `timeout` (the agent-execution cap on a local review's model
     run); a reviewer may set either, both, or neither.
 
-    Threaded onto `PullContext.reviewer_window` at the build site (`fetch.gather`),
+    Threaded onto `ReadinessView.reviewer_window` at the build site (`fetch.gather`),
     exactly like `reviewer_rerun`, so the engine reads the window off the snapshot
     and never the filesystem. Mirrors `reviewer_run_options`' read shape — the one
     in-process `tomllib` seam, re-read at the build site (no separate cache: `gather`

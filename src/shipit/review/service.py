@@ -37,6 +37,7 @@ import sys
 from collections.abc import Callable, Sequence
 
 from .. import gh
+from ..pr import CORE_JSON_FIELDS, core_from_node, repo_from_slug
 from . import checkrun, post, producer
 from .backends.base import BackendError
 from .diff import resolve_pr
@@ -470,27 +471,29 @@ def run_detached_review(
 def _resolve_target(pr: int) -> tuple[str, str]:
     """Cheaply resolve ``(repo, head_sha)`` for ``pr`` — the FAST synchronous path.
 
-    Uses the lightweight ``gh repo view`` + ``gh pr view`` (the same ``headRefOid``
-    source :func:`resolve_pr` reads), NOT the full diff resolve — that
-    fetch/merge-base/diff is the detached child's work, so the request stays fast.
-    A ``gh``/auth failure PROPAGATES (the reviewer adapter normalizes it to
-    ``GhError``); the breadcrumb create that follows is the only best-effort step.
+    Uses the lightweight ``gh repo view`` + ``gh pr view``, then reads the PR core
+    through the ONE :func:`shipit.pr.core_from_node` boundary — the SAME extraction
+    :func:`resolve_pr` and the readiness path use, so ``head_sha`` is fetched exactly
+    one way. It is NOT the full diff resolve — that fetch/merge-base/diff is the
+    detached child's work, so the request stays fast. A ``gh``/auth failure
+    PROPAGATES (the reviewer adapter normalizes it to ``GhError``); the breadcrumb
+    create that follows is the only best-effort step.
     """
     repo = gh.current_repo()
-    raw = gh.pr_view(str(pr), json_fields=["headRefOid"])
+    raw = gh.pr_view(str(pr), json_fields=list(CORE_JSON_FIELDS))
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as exc:
         raise gh.GhError(f"unparseable `gh pr view` output for #{pr}: {exc}") from exc
-    # A truthy non-dict (e.g. a JSON list) would AttributeError on `.get`; and a
+    # A truthy non-dict (e.g. a JSON list) would fail on the core read; and a
     # missing/empty `headRefOid` would silently degrade the breadcrumb create to an
     # in-flight reply with no target commit. This is the synchronous validation
     # path, so both are real failures — raise `GhError` (like the unparseable case
-    # above) so the request fails loud instead of degrading.
-    head_sha = data.get("headRefOid") if isinstance(data, dict) else None
-    if not head_sha:
+    # above) so the request fails loud instead of degrading, BEFORE building the core.
+    if not (isinstance(data, dict) and data.get("headRefOid")):
         raise gh.GhError(f"`gh pr view` output for #{pr} has no headRefOid: {raw!r}")
-    return repo, head_sha
+    core = core_from_node(data, repo_from_slug(repo))
+    return core.slug, core.head_sha
 
 
 def _child_argv(

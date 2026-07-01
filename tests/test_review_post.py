@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 
 from shipit.review import post
-from shipit.review.diff import PRContext
+from shipit.review.diff import review_view
 
 _DIFF = """\
 diff --git a/foo.py b/foo.py
@@ -23,8 +23,8 @@ diff --git a/foo.py b/foo.py
 """
 
 
-def _ctx() -> PRContext:
-    return PRContext(
+def _ctx() -> object:
+    return review_view(
         number=5,
         repo="owner/repo",
         head_sha="deadbeef",

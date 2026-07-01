@@ -34,7 +34,7 @@ import pytest
 
 from shipit.review import service
 from shipit.review.backends.base import BackendError
-from shipit.review.diff import PRContext
+from shipit.review.diff import review_view
 
 _DIFF = """\
 diff --git a/foo.py b/foo.py
@@ -52,8 +52,8 @@ _REVIEW = {
 }
 
 
-def _ctx(repo: str | None = "owner/repo") -> PRContext:
-    return PRContext(
+def _ctx(repo: str | None = "owner/repo") -> object:
+    return review_view(
         number=5,
         repo=repo,
         head_sha="deadbeef",

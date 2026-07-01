@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 from . import ghapi
 from .model import (
     FunnelState,
-    PullContext,
+    ReadinessView,
     ReviewFunnelCheck,
     ReviewLifecycle,
     Thread,
@@ -158,7 +158,7 @@ class ReviewerAdapter:
     def matches(self, login: str) -> bool:
         raise NotImplementedError
 
-    def _rerun(self, ctx: PullContext) -> bool:
+    def _rerun(self, ctx: ReadinessView) -> bool:
         """This reviewer's rerun policy for `ctx` (default False = review-once).
 
         rerun comes from config (`reviewers_config.reviewer_rerun`), threaded
@@ -167,7 +167,7 @@ class ReviewerAdapter:
         re-reviewing each push is explicit opt-in)."""
         return ctx.reviewer_rerun.get(self.name, False)
 
-    def _window(self, ctx: PullContext) -> timedelta:
+    def _window(self, ctx: ReadinessView) -> timedelta:
         """This reviewer's wait window — the per-reviewer `[reviewers]` `window`
         override (seconds, threaded onto `ctx.reviewer_window`) or the shipped 20m
         default. Read off the context like `_rerun`, so the engine never touches
@@ -175,7 +175,7 @@ class ReviewerAdapter:
         seconds = ctx.reviewer_window.get(self.name)
         return timedelta(seconds=seconds) if seconds else DEFAULT_WAIT_WINDOW
 
-    def _requested_at(self, ctx: PullContext) -> str | None:
+    def _requested_at(self, ctx: ReadinessView) -> str | None:
         """This reviewer's `review_requested` edge time (App side), matched off
         `ctx.requested_at` by login — the timestamp WS03 ages an App reviewer's
         wait window against. None when this reviewer has no recorded request edge:
@@ -187,7 +187,7 @@ class ReviewerAdapter:
                 return ts
         return None
 
-    def detect(self, ctx: PullContext) -> ReviewLifecycle:
+    def detect(self, ctx: ReadinessView) -> ReviewLifecycle:
         """Where this reviewer stands — rerun-aware, shared across adapters.
 
         The lifecycle depends on the reviewer's rerun flag:
@@ -251,7 +251,9 @@ class ReviewerAdapter:
         name the check run is published under), not the bare ``codex``."""
         return self.name
 
-    def funnel_state(self, ctx: PullContext, lifecycle: ReviewLifecycle) -> FunnelState:
+    def funnel_state(
+        self, ctx: ReadinessView, lifecycle: ReviewLifecycle
+    ) -> FunnelState:
         """This reviewer's normalized OBS04 funnel state (ADR-0006).
 
         The App/native side: an App reviewer (Copilot / CodeRabbit / Gemini) has no
@@ -273,7 +275,7 @@ class ReviewerAdapter:
             state, self._requested_at(ctx), self._window(ctx), ctx.now
         )
 
-    def funnel_check(self, ctx: PullContext) -> ReviewFunnelCheck | None:
+    def funnel_check(self, ctx: ReadinessView) -> ReviewFunnelCheck | None:
         """This reviewer's OBS02/ADR-0005 funnel check-run breadcrumb, if any.
 
         Base: ``None``. App/native reviewers (Copilot, CodeRabbit, Gemini) source
@@ -289,15 +291,15 @@ class ReviewerAdapter:
         """
         return None
 
-    def authored_threads(self, ctx: PullContext) -> list[Thread]:
+    def authored_threads(self, ctx: ReadinessView) -> list[Thread]:
         """All threads (resolved or not) rooted in a comment by this reviewer."""
         return [t for t in ctx.threads if t.author and self.matches(t.author)]
 
-    def open_threads(self, ctx: PullContext) -> list[Thread]:
+    def open_threads(self, ctx: ReadinessView) -> list[Thread]:
         """Unresolved threads by this reviewer — the ones still needing action."""
         return [t for t in self.authored_threads(ctx) if not t.is_resolved]
 
-    def _done_state(self, ctx: PullContext) -> ReviewLifecycle:
+    def _done_state(self, ctx: ReadinessView) -> ReviewLifecycle:
         return (
             ReviewLifecycle.DONE_COMMENTS
             if self.authored_threads(ctx)
@@ -420,7 +422,7 @@ class GeminiAdapter(ReviewerAdapter):
     def cancel(self, pr: int) -> bool:
         return False
 
-    def detect(self, ctx: PullContext) -> ReviewLifecycle:
+    def detect(self, ctx: ReadinessView) -> ReviewLifecycle:
         # Any-head, not head-strict: Gemini won't review the new head again.
         # A DISMISSED review is retracted, so it doesn't count as done.
         if any(self.matches(r.author) and r.state != "DISMISSED" for r in ctx.reviews):
@@ -434,7 +436,7 @@ class GeminiAdapter(ReviewerAdapter):
             return ReviewLifecycle.IN_PROGRESS
         return ReviewLifecycle.NOT_REQUESTED
 
-    def _is_looking(self, ctx: PullContext) -> bool:
+    def _is_looking(self, ctx: ReadinessView) -> bool:
         return any(
             r.get("content") == "eyes"
             and self.matches((r.get("user") or {}).get("login", ""))
@@ -572,7 +574,9 @@ class _LocalReviewAdapter(ReviewerAdapter):
         # (`codex-local`), so a degraded annotation matches the PR's funnel run.
         return self.funnel_reviewer_name()
 
-    def funnel_state(self, ctx: PullContext, lifecycle: ReviewLifecycle) -> FunnelState:
+    def funnel_state(
+        self, ctx: ReadinessView, lifecycle: ReviewLifecycle
+    ) -> FunnelState:
         """A local-agent reviewer's funnel state, read from its breadcrumb (ADR-0006).
 
         Two sources fold here, in priority order:
@@ -619,7 +623,7 @@ class _LocalReviewAdapter(ReviewerAdapter):
             ctx.now,
         )
 
-    def funnel_check(self, ctx: PullContext) -> ReviewFunnelCheck | None:
+    def funnel_check(self, ctx: ReadinessView) -> ReviewFunnelCheck | None:
         """This local reviewer's funnel breadcrumb off `ctx.review_funnel`.
 
         Matches the `review: <agent>-local` check run by its funnel reviewer name.
@@ -722,7 +726,7 @@ def reviewer_rerun() -> dict[str, bool]:
     """The per-reviewer rerun policy (name -> bool), resolved from config (cached).
 
     Default False for every required reviewer that doesn't opt in. Threaded into
-    the `PullContext` at the build site so adapter detection is head-strict only
+    the `ReadinessView` at the build site so adapter detection is head-strict only
     for rerun=True reviewers and review-once (any-head) for everyone else."""
     _resolve_config()
     assert _RERUN_CACHE is not None
