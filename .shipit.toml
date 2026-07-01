@@ -93,7 +93,7 @@ simple-gal = [
 standout = [{ repo = "arthur-debert/standout", path = "standout" }]
 
 [shipit]
-version = "51fdb102c52ecb7df4baba2d67f07000a3e31e63"
+version = "c27232363985f0860cb2fa56893c510fa34384b3"
 
 [managed]
 "skills/lex-primer/SKILL.md" = "sha256:ff616c1c447661298fb8e06a8a8a6ce60400d838c7c881b9e8bd526128e32901"
@@ -104,7 +104,7 @@ version = "51fdb102c52ecb7df4baba2d67f07000a3e31e63"
 "skills/shipit-to-issues/SKILL.md" = "sha256:2e70e4220c8e9843ebf4b60439eaee25884fe8d2150190730e4120ace05d5ef8"
 "skills/shipit-to-prd/SKILL.md" = "sha256:3f11af08f88382929b1cd3b8b93d61c6eeac0e8322c5b9f7ba5835925d6b87cc"
 "AGENTS.md#shipit-block" = "sha256:62f7da748372021951746e9dad0ae10353c4e7640d11a0857bdb30550b26b954"
-"bin/shipit" = "sha256:ef5864dc93ad925a0562a021c89f3221d6ec1029c4ba3ba5038290027540f8b8"
+"bin/shipit" = "sha256:b305b90ca3f746acbee0f457d26f5c213d63d0c2cfa31b6baf1b5903f83816bd"
 "lefthook.yml" = "sha256:d64af3253189084f33e8495cc25d860294eafab55acc61dfe1f84801d22cb079"
 "pixi.toml#shipit-tasks" = "sha256:21737ae76129ac0518e2c9e2a647e4ece71f946a43565ddb2cc263d9b32d5268"
 ".claude/agents/explorer.md" = "sha256:fb2d15b201fc8ebb4f4bca0599e853b8195f784f37a6e70dd91788a2917ff4bc"

@@ -23,7 +23,7 @@ IFS=':' read -ra _path_dirs <<<"$PATH"
 for _dir in "${_path_dirs[@]}"; do
 	[ -n "$_dir" ] || continue
 	_cand="$_dir/shipit"
-	[ -x "$_cand" ] || continue
+	[ -f "$_cand" ] && [ -x "$_cand" ] || continue
 	[ "$_cand" -ef "$self" ] && continue
 	exec "$_cand" "$@"
 done
