@@ -292,7 +292,7 @@ def test_create_rolls_back_partial_tree_on_failure(
 
 
 def test_create_fails_closed_and_rolls_back_on_a_non_onboarded_source(
-    tmp_path: Path, remote: Path, reference: Path
+    tmp_path: Path, remote: Path, reference: Path, monkeypatch
 ):
     # #210 end-to-end: cloning a Tree from a repo with NO managed block fails closed at
     # provisioning — `create` raises the clean ValueError AND rolls back the half-built
@@ -300,6 +300,18 @@ def test_create_fails_closed_and_rolls_back_on_a_non_onboarded_source(
     # fixture is onboarded by default; strip its marker to make it non-onboarded.)
     (remote / ".shipit.toml").unlink()
     _git(["commit", "-am", "de-onboard"], cwd=remote)
+
+    # Fail LOUD if provisioning is even attempted: the fail-closed check must raise
+    # BEFORE any provisioning subprocess. Stubbing `run_provision` to blow up means a
+    # regressed impl (one that DIDN'T fail closed) surfaces here as "provisioning ran"
+    # instead of silently spawning a real `shipit install` / `pixi install` during the
+    # unit run.
+    def _must_not_provision(*_a, **_k):
+        raise AssertionError(
+            "fail-closed breached: provisioning ran on a non-onboarded repo"
+        )
+
+    monkeypatch.setattr(create_mod, "run_provision", _must_not_provision)
 
     spec = _spec(tmp_path)
     with pytest.raises(ValueError, match="not onboarded — run `shipit install`"):

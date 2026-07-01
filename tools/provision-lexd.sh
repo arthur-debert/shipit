@@ -55,6 +55,19 @@ if have_pinned "$dest"; then
     exit 0
 fi
 
+# Canonicalize a path (follow symlinks) as portably as we can; print it unchanged when
+# no resolver is available. Used to tell an EXTERNAL host lexd apart from our own $dest
+# (which is first on PATH), so the Intel-mac fallback never self-symlinks the target.
+_resolve() {
+    if command -v realpath >/dev/null 2>&1; then
+        realpath "$1" 2>/dev/null || printf '%s\n' "$1"
+    elif readlink -f "$1" >/dev/null 2>&1; then
+        readlink -f "$1"
+    else
+        printf '%s\n' "$1"
+    fi
+}
+
 os="$(uname -s)"
 arch="$(uname -m)"
 
@@ -78,9 +91,17 @@ case "${os}" in
                 ;;
             x86_64)
                 # No x86_64 (Intel) macOS asset at this pin. Fail LOUD, never a silent
-                # skip: fall back to a host `lexd` if present (noting any version drift),
-                # else instruct — the pinned fetch simply is not available here.
-                if existing="$(command -v lexd 2>/dev/null)"; then
+                # skip: fall back to an EXTERNAL host `lexd` if present (noting any
+                # version drift), else instruct — the pinned fetch is unavailable here.
+                #
+                # $CONDA_PREFIX/bin is FIRST on PATH, so `command -v lexd` can resolve to
+                # our own install target ($dest); reject that self-match — symlinking
+                # $dest to itself (or reusing a stale env-local binary) is not a real
+                # host fallback. Compare canonical paths so a symlink-to-$dest is caught.
+                existing="$(command -v lexd 2>/dev/null || true)"
+                existing_real="$(_resolve "$existing")"
+                dest_real="$(_resolve "$dest")"
+                if [ -n "$existing" ] && [ "$existing_real" != "$dest_real" ]; then
                     ln -sf "$existing" "$dest"
                     got="$("$existing" --version 2>/dev/null || echo '?')"
                     case "$got" in
@@ -89,7 +110,7 @@ case "${os}" in
                     esac
                     exit 0
                 fi
-                echo "provision-lexd: no pinned macOS-x86_64 (Intel) asset at ${PIN} and no lexd on PATH. Install it" >&2
+                echo "provision-lexd: no pinned macOS-x86_64 (Intel) asset at ${PIN} and no external host lexd. Install it" >&2
                 echo "  (cargo install --git https://github.com/${REPO} lexd) and re-run." >&2
                 exit 1
                 ;;

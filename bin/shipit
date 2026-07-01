@@ -1,19 +1,44 @@
 #!/usr/bin/env bash
 # shipit bootstrap launcher — installed and managed by `shipit install`.
 #
-# This is the MINIMAL bootstrap (docs/prd/install-reconciliation.md): it makes the `shipit` CLI
-# reachable from a stable in-repo path and execs it. The pinned-version
-# auto-provision (a pixi dependency on the shipit package at the commit recorded
-# in .shipit.toml's [shipit].version) lands with the pixi integration in Step 5;
-# until then this launcher defers to a shipit already on PATH.
+# This is the MINIMAL bootstrap (docs/prd/install-reconciliation.md): it makes the
+# `shipit` CLI reachable from a stable in-repo path and execs it. The pinned-version
+# auto-provision (a pixi dependency on the shipit package at the commit recorded in
+# .shipit.toml's [shipit].version) lands with the pixi integration in Step 5; until
+# then this launcher defers to a shipit already on PATH — EXCEPT itself.
+#
+# Self-exec guard: this file is `bin/shipit`, so if the repo's `bin/` is on PATH a
+# bare `command -v shipit` resolves to THIS launcher and `exec`-ing it would fork-bomb.
+# So we walk PATH and exec the first `shipit` whose REAL path differs from our own.
 #
 # Do not edit — `shipit install` overwrites this file.
 set -euo pipefail
 
-if command -v shipit >/dev/null 2>&1; then
-	exec shipit "$@"
-fi
+# Canonicalize a path (follow symlinks) as portably as we can; print it unchanged
+# when no resolver is available — enough to compare file identity on macOS + linux.
+_resolve() {
+	if command -v realpath >/dev/null 2>&1; then
+		realpath "$1" 2>/dev/null || printf '%s\n' "$1"
+	elif readlink -f "$1" >/dev/null 2>&1; then
+		readlink -f "$1"
+	else
+		printf '%s\n' "$1"
+	fi
+}
 
-echo "shipit: the shipit CLI is not on PATH." >&2
+self="$(_resolve "${BASH_SOURCE[0]:-$0}")"
+
+# Exec the first `shipit` on PATH that is NOT this launcher (skip the self-match that
+# would loop). Splitting PATH on ':' with the shell is intentional here.
+IFS=':' read -ra _path_dirs <<<"$PATH"
+for _dir in "${_path_dirs[@]}"; do
+	[ -n "$_dir" ] || continue
+	_cand="$_dir/shipit"
+	[ -x "$_cand" ] || continue
+	[ "$(_resolve "$_cand")" = "$self" ] && continue
+	exec "$_cand" "$@"
+done
+
+echo "shipit: the shipit CLI is not on PATH (only this in-repo launcher)." >&2
 echo "Install it (see this repo's .shipit.toml [shipit].version pin), then re-run." >&2
 exit 127
