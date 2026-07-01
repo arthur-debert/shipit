@@ -235,13 +235,54 @@ def pr_view(pr: str, *, repo: str | None = None, json_fields: list[str]) -> str:
     return _run(args).strip()
 
 
-def repo_root() -> str | None:
-    """The local git working-tree root, or ``None`` when not inside one."""
+def repo_root(*, cwd: str | None = None) -> str | None:
+    """The git working-tree root for ``cwd`` (the current directory if omitted).
+
+    ``None`` when ``cwd`` is not inside a checkout. This is THE single
+    ``git rev-parse --show-toplevel`` boundary — the ``cwd`` parameter (ADR-0024)
+    is what lets every caller route through it instead of re-implementing the
+    command (``identity.resolve_working_dir``, the eval hook / report, review
+    diff), so the toplevel is derived one way, in one place.
+    """
+    args = ["git"]
+    if cwd is not None:
+        args += ["-C", cwd]
+    args += ["rev-parse", "--show-toplevel"]
     try:
-        out = _run(["git", "rev-parse", "--show-toplevel"])
+        out = _run(args)
     except GhError:
         return None
     return out.strip() or None
+
+
+def git_head_commit(*, cwd: str) -> str | None:
+    """The current ``HEAD`` commit SHA for the checkout at ``cwd``, or ``None``.
+
+    ``None`` on any git failure (detached/unborn HEAD, not a checkout) — the
+    revision half of a :class:`shipit.identity.WorkingDir`, and the eval record's
+    ``git.commit`` stamp, are both best-effort: an unresolvable commit degrades to
+    ``None`` rather than raising.
+    """
+    try:
+        out = _git(["rev-parse", "HEAD"], cwd=cwd)
+    except GhError:
+        return None
+    return out.strip() or None
+
+
+def owner_kind(login: str) -> str:
+    """The account type of ``login`` — ``"User"`` or ``"Organization"`` (via ``gh api``).
+
+    The ONE identity call that needs the network: :func:`shipit.identity.Repo`
+    identity derives locally from the origin remote, but an **Owner**'s *kind* is a
+    lazily-resolved enrichment (:func:`shipit.identity.resolve_owner_kind`) read
+    from ``gh api users/<login>``, whose ``type`` field is ``User`` for a user
+    account and ``Organization`` for an org (the endpoint serves both).
+    """
+    info = rest(f"users/{login}")
+    if not isinstance(info, dict) or "type" not in info:
+        raise GhError(f"could not resolve owner kind for {login!r}")
+    return str(info["type"])
 
 
 def default_branch(repo: str) -> str:

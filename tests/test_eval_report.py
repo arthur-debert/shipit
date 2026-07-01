@@ -13,7 +13,12 @@ import io
 from shipit.harness.eval import store
 from shipit.harness.eval.record import build
 from shipit.harness.eval.variant import Variant
+from shipit.identity import Owner, Repo
 from shipit.verbs.eval import report
+
+#: The identity every seeded run keys under — the store is keyed by `Repo` identity
+#: (origin owner/name), not a filesystem path (ADR-0024).
+_REPO = Repo(owner=Owner(login="acme"), name="widget")
 
 
 def _variant(content_hash, label=None):
@@ -47,7 +52,7 @@ def _seed(tmp_path):
     shape the hook persists, so the by-variant grouping is exercised against the
     actual stored type, not a plain-string stand-in."""
     base = tmp_path / "state"
-    repo = tmp_path / "repo"
+    repo = _REPO
     _write(
         base,
         repo,
@@ -103,7 +108,7 @@ def test_aggregate_separates_ab_label_arms_of_the_same_prompt(tmp_path):
     labels must separate into distinct variant buckets — that is what makes a
     same-prompt A/B separable by data (CONTEXT.md "variant")."""
     base = tmp_path / "state"
-    repo = tmp_path / "repo"
+    repo = _REPO
     _write(
         base,
         repo,
@@ -145,7 +150,7 @@ def test_aggregate_trends_by_day_is_chronological_not_by_run_count(tmp_path):
     proves the day roll-up orders by the date key, not by run count.
     """
     base = tmp_path / "state"
-    repo = tmp_path / "repo"
+    repo = _REPO
     _write(
         base,
         repo,
@@ -179,7 +184,7 @@ def test_aggregate_trends_by_day_is_chronological_not_by_run_count(tmp_path):
 
 def test_null_variant_buckets_as_none(tmp_path):
     base = tmp_path / "state"
-    repo = tmp_path / "repo"
+    repo = _REPO
     _write(
         base,
         repo,
@@ -202,10 +207,14 @@ def test_aggregate_empty_store_is_empty_report(tmp_path):
     )
 
 
-def test_run_prints_report_for_repo_store(tmp_path):
+def test_run_prints_report_for_repo_store(tmp_path, monkeypatch):
+    # The verb resolves its path argument to a `Repo` identity (via the origin
+    # remote) and reads THAT store — so the reader lands on exactly the store the
+    # seeded runs wrote under. The resolver is stubbed to the seeded repo.
     base, repo, _ = _seed(tmp_path)
+    monkeypatch.setattr(report.identity, "resolve_repo", lambda cwd, **k: repo)
     buf = io.StringIO()
-    rc = report.run(str(repo), base_dir=base, out=buf)
+    rc = report.run("/some/checkout", base_dir=base, out=buf)
     text = buf.getvalue()
     assert rc == 0
     assert "3 run(s)" in text
@@ -214,10 +223,25 @@ def test_run_prints_report_for_repo_store(tmp_path):
     assert "2026-06-01" in text
 
 
-def test_run_on_empty_store_reports_no_records(tmp_path):
+def test_run_on_empty_store_reports_no_records(tmp_path, monkeypatch):
     base = tmp_path / "state"
-    repo = tmp_path / "repo"  # never written to
+    monkeypatch.setattr(report.identity, "resolve_repo", lambda cwd, **k: _REPO)
     buf = io.StringIO()
-    rc = report.run(str(repo), base_dir=base, out=buf)
+    rc = report.run("/some/checkout", base_dir=base, out=buf)
+    assert rc == 0
+    assert "empty" in buf.getvalue().lower()
+
+
+def test_run_on_a_non_checkout_reports_no_records(tmp_path, monkeypatch):
+    # A path that is not a checkout (or has no origin) has no per-repo store: the
+    # resolver raises and the verb degrades to the empty report rather than erroring.
+    from shipit import gh
+
+    def boom(cwd, **k):
+        raise gh.GhError("not a git repository")
+
+    monkeypatch.setattr(report.identity, "resolve_repo", boom)
+    buf = io.StringIO()
+    rc = report.run("/not/a/repo", base_dir=tmp_path / "state", out=buf)
     assert rc == 0
     assert "empty" in buf.getvalue().lower()

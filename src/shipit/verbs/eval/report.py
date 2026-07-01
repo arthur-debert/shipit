@@ -30,7 +30,7 @@ from typing import TextIO
 
 import click
 
-from ... import gh
+from ... import gh, identity
 from ...harness.eval import store
 
 #: The eval-record fields the aggregator groups and measures over (the WS01 record
@@ -82,6 +82,11 @@ class EvalReport:
     by_role: list[GroupRow]
     by_variant: list[GroupRow]
     by_day: list[GroupRow]
+
+
+#: The "no runs recorded" report — returned for an empty/missing store AND when the
+#: target path has no per-repo store to read (not a checkout / no origin remote).
+_EMPTY_REPORT = EvalReport(total_runs=0, by_role=[], by_variant=[], by_day=[])
 
 
 #: Default roll-up ordering: most runs first, then key — a "top buckets" view for
@@ -191,25 +196,22 @@ def format_report(report: EvalReport) -> str:
     return "\n".join(sections)
 
 
-def _repo_root(start: str) -> str:
-    """The git working-tree root for ``start`` (the store's repo key), else ``start``.
+def _resolve_repo(start: str) -> identity.Repo:
+    """The :class:`shipit.identity.Repo` identity for the checkout at ``start``.
 
     Mirrors the hook's resolution so the verb reads exactly the store the hook
-    wrote: keyed by the repo's filesystem root, not its ``owner/repo`` slug.
+    wrote: keyed by the repo's origin ``owner/name`` identity (ADR-0024), not its
+    filesystem path. Derived LOCALLY from the origin remote (offline / Tree-safe).
 
-    ``start`` may name a *file* inside the repo, but ``git -C`` needs a directory,
-    so a file path is normalized to its parent before the ``rev-parse`` — otherwise
-    git errors and we'd fall back to the file path as the store key, missing the
-    repo's actual store.
+    ``start`` may name a *file* inside the repo, but the git boundary needs a
+    directory, so a file path is normalized to its parent first. Raises
+    :class:`shipit.gh.GhError` (no checkout / no origin) or :class:`ValueError`
+    (unparseable remote) — the caller degrades those to an empty report.
     """
     cwd = Path(start)
     if cwd.is_file():
         cwd = cwd.parent
-    try:
-        root = gh._git(["rev-parse", "--show-toplevel"], cwd=str(cwd)).strip()
-    except gh.GhError:
-        return start
-    return root or start
+    return identity.resolve_repo(str(cwd))
 
 
 def run(
@@ -220,15 +222,22 @@ def run(
 ) -> int:
     """Aggregate the local eval store for a repo and print the report. Returns 0.
 
-    ``repo_root`` defaults to the current checkout (resolved to its git toplevel);
-    ``base_dir`` overrides the store root (injected by tests, mirroring
-    :func:`shipit.harness.eval.store.store_path`). The store path is computed by
-    the store module — the single source of truth — so reader and writer can never
-    disagree about where records live.
+    ``repo_root`` is a path inside the repo whose store to read; it defaults to the
+    current checkout, resolved to its origin ``owner/name`` identity (the store
+    key, ADR-0024). ``base_dir`` overrides the store root (injected by tests,
+    mirroring :func:`shipit.harness.eval.store.store_path`). The store path is
+    computed by the store module — the single source of truth — so reader and
+    writer can never disagree about where records live. A path that is not a
+    checkout (or has no origin) has no per-repo store, so it prints the empty
+    report rather than erroring.
     """
     out = out or sys.stdout
-    root = _repo_root(repo_root if repo_root is not None else ".")
-    path = store.store_path(root, base_dir if base_dir is None else Path(base_dir))
+    try:
+        repo = _resolve_repo(repo_root if repo_root is not None else ".")
+    except (gh.GhError, ValueError):
+        print(format_report(_EMPTY_REPORT), file=out)
+        return 0
+    path = store.store_path(repo, base_dir if base_dir is None else Path(base_dir))
     report = aggregate(path)
     print(format_report(report), file=out)
     return 0

@@ -1,8 +1,11 @@
-"""Local eval store: records append as JSONL and land OUTSIDE the repo tree.
+"""Local eval store: records append as JSONL, keyed by `Repo` IDENTITY, and land
+OUTSIDE the repo tree.
 
-The store is keyed by repo and rooted under a platformdirs *state* dir — never
-inside any working tree — so process telemetry can never dirty product history
-(the HAR02 "local, never committed" contract).
+The store is keyed by the repo's origin ``owner/name`` identity (ADR-0024) — NOT
+its filesystem path — and rooted under a platformdirs *state* dir, never inside any
+working tree, so process telemetry can never dirty product history (the HAR02
+"local, never committed" contract). The load-bearing property this file pins is the
+scatter-bug fix: two clones of one repo at different paths share ONE store file.
 """
 
 from __future__ import annotations
@@ -10,11 +13,16 @@ from __future__ import annotations
 import json
 
 from shipit.harness.eval import store
+from shipit.identity import Owner, OwnerKind, Repo
+
+
+def _repo(owner="acme", name="widget", kind=None):
+    return Repo(owner=Owner(login=owner, kind=kind), name=name)
 
 
 def test_append_writes_jsonl_lines_keyed_by_repo(tmp_path):
     base = tmp_path / "state"
-    repo = tmp_path / "repo"
+    repo = _repo()
     path = store.append_record({"a": 1}, repo, base_dir=base)
     store.append_record({"a": 2}, repo, base_dir=base)
     lines = path.read_text(encoding="utf-8").splitlines()
@@ -23,11 +31,9 @@ def test_append_writes_jsonl_lines_keyed_by_repo(tmp_path):
 
 def test_store_path_is_outside_the_repo_tree(tmp_path):
     base = tmp_path / "state"
-    repo = tmp_path / "repo"
-    path = store.append_record({"x": 1}, repo, base_dir=base)
-    # The record must NOT live anywhere under the repo working tree.
+    path = store.append_record({"x": 1}, _repo(), base_dir=base)
+    # The record must live under the injected state root, never a repo working tree.
     assert base in path.parents
-    assert repo not in path.parents
 
 
 def test_default_store_dir_is_under_platformdirs_state(monkeypatch, tmp_path):
@@ -39,22 +45,41 @@ def test_default_store_dir_is_under_platformdirs_state(monkeypatch, tmp_path):
 
 def test_distinct_repos_get_distinct_store_files(tmp_path):
     base = tmp_path / "state"
-    a = store.store_path(tmp_path / "repo-a", base_dir=base)
-    b = store.store_path(tmp_path / "repo-b", base_dir=base)
+    a = store.store_path(_repo(name="repo-a"), base_dir=base)
+    b = store.store_path(_repo(name="repo-b"), base_dir=base)
     assert a != b
     assert a.suffix == ".jsonl"
 
 
-def test_repo_key_is_a_path_slug():
-    key = store.repo_key("/Users/x/h/shipit")
+def test_repo_key_is_the_owner_name_identity_slug():
+    key = store.repo_key(_repo(owner="arthur-debert", name="shipit"))
     assert "/" not in key
-    assert key.endswith("shipit")
+    assert key == "arthur-debert-shipit"
 
 
-def test_repo_key_sanitizes_drive_colon():
-    # A Windows-style drive colon is not a legal filename character, so the slug must
-    # not carry one (nor a path separator) — otherwise the per-repo store write fails.
-    key = store.repo_key("C:/Users/x/shipit")
-    assert ":" not in key
-    assert "/" not in key
-    assert key.endswith("shipit")
+def test_two_clone_paths_of_one_repo_share_one_store_file(tmp_path):
+    # THE scatter-bug regression: the store keys by origin identity, not by clone
+    # path — so two Trees/clones of the same repo (constructed identically, standing
+    # in for two different filesystem checkouts) resolve to ONE store file, and a
+    # repo's runs pool instead of orphaning a fresh store per clone.
+    base = tmp_path / "state"
+    clone_a = _repo()  # e.g. checked out at /trees/x/widget
+    clone_b = _repo()  # e.g. checked out at /home/y/widget
+    pa = store.append_record({"run": "a"}, clone_a, base_dir=base)
+    pb = store.append_record({"run": "b"}, clone_b, base_dir=base)
+    assert pa == pb
+    records = [json.loads(line) for line in pa.read_text().splitlines()]
+    assert records == [{"run": "a"}, {"run": "b"}]
+
+
+def test_ownerkind_enrichment_does_not_move_the_store_key(tmp_path):
+    # OwnerKind is excluded from Repo identity, so enriching it must NOT change the
+    # store key — the same repo's records stay in one file before and after the kind
+    # is known (ADR-0024: "same store key before and after enrichment").
+    base = tmp_path / "state"
+    bare = _repo(kind=None)
+    enriched = _repo(kind=OwnerKind.ORGANIZATION)
+    assert store.repo_key(bare) == store.repo_key(enriched)
+    assert store.store_path(bare, base_dir=base) == store.store_path(
+        enriched, base_dir=base
+    )

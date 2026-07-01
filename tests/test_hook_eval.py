@@ -18,9 +18,24 @@ from shipit.verbs.hook.eval import run
 
 @pytest.fixture
 def state_dir(monkeypatch, tmp_path):
-    """Redirect the eval store to a tmp state dir (never the real platformdirs one)."""
+    """Redirect the eval store to a tmp state dir, and stub the git-identity boundary.
+
+    The store keys by `Repo` identity (origin owner/name, ADR-0024), so the hook
+    resolves a `Repo` from the payload's cwd via `identity.resolve_working_dir` —
+    which reads the origin remote. The tmp cwd is not a real checkout, so the git
+    boundary the resolver uses is stubbed to a known repo; every seeded record then
+    lands under one deterministic `owner-name.jsonl` store file.
+    """
     base = tmp_path / "state"
     monkeypatch.setattr(store.platformdirs, "user_state_dir", lambda *a, **k: str(base))
+    monkeypatch.setattr(gh, "repo_root", lambda *, cwd=None: cwd)
+    monkeypatch.setattr(
+        gh,
+        "git_remote_url",
+        lambda *, cwd, remote="origin": "git@github.com:acme/widget.git",
+    )
+    monkeypatch.setattr(gh, "git_current_branch", lambda *, cwd: "COR01/WS01")
+    monkeypatch.setattr(gh, "git_head_commit", lambda *, cwd: "cafe1234")
     return base
 
 

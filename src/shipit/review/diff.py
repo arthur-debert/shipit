@@ -60,15 +60,11 @@ def _git_toplevel(workdir: str) -> str | None:
     paths relative to the REPO ROOT, so running from a nested subdir would leave
     repo-relative paths unopenable. Normalizing ``workdir`` to the toplevel makes
     the agent's cwd the repo root regardless of where the command was invoked.
+
+    Routes through the single :func:`shipit.gh.repo_root` boundary (ADR-0024)
+    rather than re-implementing ``git rev-parse --show-toplevel``.
     """
-    result = proc.run(
-        ["git", "-C", workdir, "rev-parse", "--show-toplevel"],
-        check=False,
-    )
-    if result.returncode != 0:
-        return None
-    top = result.stdout.strip()
-    return top or None
+    return gh.repo_root(cwd=workdir)
 
 
 def _git(

@@ -13,30 +13,23 @@ import pytest
 from shipit.review import diff
 
 
-def test_git_toplevel_returns_repo_root(tmp_path, monkeypatch):
-    calls: list[list[str]] = []
+def test_git_toplevel_returns_repo_root(monkeypatch):
+    # Routes through the single `gh.repo_root(cwd=...)` boundary (ADR-0024), passing
+    # the workdir through as `cwd` and returning its resolved toplevel.
+    calls: list[str] = []
 
-    def fake_run(cmd, **kwargs):
-        calls.append(cmd)
+    def fake_repo_root(*, cwd):
+        calls.append(cwd)
+        return "/repo/root"
 
-        class R:
-            returncode = 0
-            stdout = "/repo/root\n"
-
-        return R()
-
-    monkeypatch.setattr(diff.proc, "run", fake_run)
+    monkeypatch.setattr(diff.gh, "repo_root", fake_repo_root)
     assert diff._git_toplevel("/repo/root/src/deep") == "/repo/root"
-    assert calls[0][:2] == ["git", "-C"]
-    assert "--show-toplevel" in calls[0]
+    assert calls == ["/repo/root/src/deep"]
 
 
 def test_git_toplevel_none_outside_checkout(monkeypatch):
-    class R:
-        returncode = 128
-        stdout = ""
-
-    monkeypatch.setattr(diff.proc, "run", lambda cmd, **kw: R())
+    # The boundary returns None outside a checkout; `_git_toplevel` passes it through.
+    monkeypatch.setattr(diff.gh, "repo_root", lambda *, cwd: None)
     assert diff._git_toplevel("/tmp/not-a-repo") is None
 
 
