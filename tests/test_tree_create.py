@@ -322,6 +322,13 @@ def test_create_copies_treeinclude_and_provisions_deps(tmp_path: Path, monkeypat
     )
     # Pin the FS check so it never warns here (covered by its own test).
     monkeypatch.setattr(create_mod, "_st_dev", lambda p: 1)
+    # The PARENT (this test's env, or a real coordinator) may carry the ADR-0015 build
+    # vars pointing at ITS OWN Tree. They MUST be scrubbed from the child provisioning
+    # env: a leaked value would shadow the child Tree's own pixi `[activation.env]` value
+    # and mis-route build artifacts to the parent Tree (agy ERROR).
+    monkeypatch.setenv("CARGO_TARGET_DIR", "/parent/tree/target")
+    monkeypatch.setenv("SCCACHE_BASEDIRS", "/parent/tree")
+    monkeypatch.setenv("CARGO_INCREMENTAL", "0")
 
     tree = create(_spec(tmp_path), source_repo=str(source), github_url="url")
     dest = Path(tree.path)
@@ -340,12 +347,16 @@ def test_create_copies_treeinclude_and_provisions_deps(tmp_path: Path, monkeypat
     ]
     assert all(cwd == dest for _, cwd, _ in calls)
 
-    # ADR-0015 build env on every provisioning command: per-Tree target/, the
-    # sccache base dir, and incremental off.
+    # The ADR-0015 build env is NO LONGER synthesized by shipit for the provisioning
+    # subprocess (COR01): it moved to pixi `[activation.env]` so pixi sets it on every
+    # activation and it reaches the agent's own in-Tree cargo. shipit therefore never
+    # rewrites CARGO_TARGET_DIR to a per-`dest` value here — and, critically, the leaked
+    # PARENT values set above are SCRUBBED, not carried, so pixi's per-Tree activation
+    # value is authoritative on activation.
     for _, _, env in calls:
-        assert env["CARGO_TARGET_DIR"] == str(dest / "target")
-        assert env["SCCACHE_BASEDIRS"] == str(dest)
-        assert env["CARGO_INCREMENTAL"] == "0"
+        assert "CARGO_TARGET_DIR" not in env
+        assert "SCCACHE_BASEDIRS" not in env
+        assert "CARGO_INCREMENTAL" not in env
 
 
 def test_create_skips_provisioning_steps_whose_manifest_is_absent(
@@ -362,6 +373,36 @@ def test_create_skips_provisioning_steps_whose_manifest_is_absent(
 
     create(_spec(tmp_path), source_repo=str(source), github_url="url")
     assert calls == [["pixi", "install"]]
+
+
+def test_is_leaked_env_var_scrubs_build_env_but_keeps_sccache_backend_vars():
+    # agy ERROR: the ADR-0015 build vars that pixi `[activation.env]` now re-sets PER-TREE
+    # must be scrubbed so a leaked parent value cannot shadow the Tree's own value.
+    assert create_mod.is_leaked_env_var("CARGO_TARGET_DIR")
+    assert create_mod.is_leaked_env_var("SCCACHE_BASEDIRS")
+    assert create_mod.is_leaked_env_var("CARGO_INCREMENTAL")
+    # Install-/backend-level vars are NOT per-Tree paths and the child NEEDS them: the
+    # sccache binary pointer and the cache location/credential must survive (else sccache
+    # is disabled or cut off from the shared cache backend).
+    assert not create_mod.is_leaked_env_var("RUSTC_WRAPPER")
+    assert not create_mod.is_leaked_env_var("SCCACHE_DIR")
+    assert not create_mod.is_leaked_env_var("SCCACHE_GCS_KEY")
+
+
+def test_provision_env_scrubs_leaked_parent_build_env(monkeypatch):
+    # COR01: the ADR-0015 build env moved to pixi `[activation.env]`; shipit no longer
+    # builds it in Python AND a leaked parent value is scrubbed so it cannot shadow the
+    # child Tree's per-activation value (agy ERROR). A parent SCCACHE_GCS_KEY (the cache
+    # backend credential) must survive so the child keeps hitting the shared cache.
+    monkeypatch.setenv("CARGO_TARGET_DIR", "/parent/tree/target")
+    monkeypatch.setenv("SCCACHE_BASEDIRS", "/parent/tree")
+    monkeypatch.setenv("CARGO_INCREMENTAL", "0")
+    monkeypatch.setenv("SCCACHE_GCS_KEY", "creds")
+    env = create_mod.provision_env()
+    assert "CARGO_TARGET_DIR" not in env
+    assert "SCCACHE_BASEDIRS" not in env
+    assert "CARGO_INCREMENTAL" not in env
+    assert env["SCCACHE_GCS_KEY"] == "creds"
 
 
 def test_provision_skips_install_when_repo_not_onboarded(tmp_path: Path, monkeypatch):
@@ -398,15 +439,6 @@ def test_provision_runs_install_when_repo_onboarded(tmp_path: Path, monkeypatch)
     assert calls == [["shipit", "install", ".", "--local"]]
 
 
-def test_sccache_env_applies_per_tree_target_and_cache_settings(tmp_path: Path):
-    env = create_mod.sccache_env(tmp_path / "t")
-    assert env == {
-        "CARGO_TARGET_DIR": str(tmp_path / "t" / "target"),
-        "SCCACHE_BASEDIRS": str(tmp_path / "t"),
-        "CARGO_INCREMENTAL": "0",
-    }
-
-
 def test_provision_env_scrubs_leaked_parent_pixi_pointers(tmp_path: Path, monkeypatch):
     # The regression for #167 defect 4: the env shipit builds for in-clone
     # git/install must NOT carry the parent's PIXI_* project pointers — a leaked
@@ -422,7 +454,7 @@ def test_provision_env_scrubs_leaked_parent_pixi_pointers(tmp_path: Path, monkey
     # An unrelated var the child still needs (e.g. PATH) must pass through.
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
 
-    env = create_mod.provision_env(tmp_path / "tree")
+    env = create_mod.provision_env()
 
     # Every leaked project/environment PIXI_* pointer is gone.
     assert "PIXI_PROJECT_MANIFEST" not in env
@@ -432,10 +464,6 @@ def test_provision_env_scrubs_leaked_parent_pixi_pointers(tmp_path: Path, monkey
     # Cache var and unrelated vars are preserved.
     assert env["PIXI_CACHE_DIR"] == "/home/me/.cache/rattler"
     assert env["PATH"] == "/usr/bin:/bin"
-    # The ADR-0015 build env is still applied on top.
-    assert env["CARGO_TARGET_DIR"] == str(tmp_path / "tree" / "target")
-    assert env["SCCACHE_BASEDIRS"] == str(tmp_path / "tree")
-    assert env["CARGO_INCREMENTAL"] == "0"
 
 
 def test_run_provision_uses_scrubbed_env_verbatim_not_merged(
@@ -456,7 +484,7 @@ def test_run_provision_uses_scrubbed_env_verbatim_not_merged(
     create_mod.run_provision(
         ["shipit", "install", "."],
         cwd=tmp_path,
-        env=create_mod.provision_env(tmp_path),
+        env=create_mod.provision_env(),
     )
 
     assert captured["replace_env"] is True

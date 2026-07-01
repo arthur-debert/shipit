@@ -22,6 +22,25 @@ python = "3.13.*"
 # that runs the lint checks must carry the package under test.
 shipit = { path = ".", editable = true }
 
+# The ADR-0015 build env, declared where pixi OWNS it — set on EVERY activation
+# (`pixi run` / `pixi shell` / `shell-hook`) rather than hand-built in Python and
+# applied only to the provisioning subprocess (COR01: `sccache_env()` removed from
+# `tree/create.py`). Because pixi expands `$PIXI_PROJECT_ROOT` at activation time,
+# these resolve to PER-TREE absolute paths — each Tree is its own clone with its own
+# project root — so the per-Tree `target/` + cross-Tree sccache guarantees hold, and
+# the env now reaches the agent's OWN in-Tree `cargo` (not just provisioning), which
+# it did not before. Consumer repos that build Rust declare the same block; shipit
+# dogfoods it here (it also documents the pattern — docs/dev/pixi).
+[activation.env]
+# Per-Tree target dir: Cargo locks `target/`, so a shared one serializes the fleet.
+CARGO_TARGET_DIR = "$PIXI_PROJECT_ROOT/target"
+# sccache keys on the absolute build path; pinning the base dir to the Tree root is
+# what lets distinct Tree paths share the cross-Tree cache.
+SCCACHE_BASEDIRS = "$PIXI_PROJECT_ROOT"
+# sccache disables incremental anyway, and incremental bakes absolute paths that
+# break under any copy.
+CARGO_INCREMENTAL = "0"
+
 [tasks]
 # Provisional test task (the full pixi-test encapsulation is Step 5); shipit
 # supplies its own `test` so CI's required `check` keeps running the suite.
@@ -50,7 +69,21 @@ curl = "*"
 [feature.lint.tasks]
 # lexd is not on conda-forge; fetch the pinned prebuilt before every lint run
 # (idempotent). The lint checks depend on it, so CI and the hook provision identically.
-provision-lexd = "bash tools/provision-lexd.sh"
+#
+# `inputs` turns on pixi's skip-if-unchanged cache (COR01) so lexd is NOT re-fetched
+# on every `lint`/`fmt`: the fetch re-runs only when the provision script changes (a
+# pin bump moves the `inputs` fingerprint) or the env's package state changes (a fresh
+# / reinstalled env has no cache entry, so the first run always provisions). We do NOT
+# declare `outputs`: the installed binary lands under `.pixi/envs/lint/bin/`, which is
+# GITIGNORED — pixi's glob walker skips gitignored paths, so an `outputs` glob there
+# matches nothing (perpetual "No files matched" WARN) and the task would never cache.
+# The cache is scoped to THIS idempotent fetch ONLY — never to `lint`/`fmt`, which stay
+# uncached and re-run every time — so a real failure on the hard-fail lint path can
+# never be masked by a stale cache. (A failed fetch also exits nonzero and writes no
+# cache entry, so it always re-attempts.)
+provision-lexd = { cmd = "bash tools/provision-lexd.sh", inputs = [
+    "tools/provision-lexd.sh",
+] }
 lint = { cmd = "shipit lint", depends-on = ["provision-lexd"] }
 fmt = { cmd = "shipit lint --fix", depends-on = ["provision-lexd"] }
 # One command from a fresh clone to working lint checks (the `--install-hook` equiv).

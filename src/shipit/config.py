@@ -263,22 +263,33 @@ AGY_REVIEW_APP_PRIVATE_KEY   = { doppler = "AGY_REVIEW_APP_PRIVATE_KEY" }
 AGY_REVIEW_APP_ID            = { doppler = "AGY_REVIEW_APP_ID" }
 """
 
-# Written verbatim when a consumer's ``.shipit.toml`` has no ``[reviewers]`` table.
-# The required-reviewer SET: every key must be DONE to flip Ready. Seeded with
-# shipit's required-for-all set (copilot + the codex/agy local-agent backends),
-# matching shipit's own .shipit.toml. Review-once (rerun defaults OFF for all).
-REVIEWERS_SCAFFOLD = """\
+# The explanatory comment prepended to the seeded ``[reviewers]`` table. The TABLE
+# ITSELF is rendered from the SINGLE required-reviewer default
+# (``prstate.reviewers_config.DEFAULT_REVIEWERS``) by :func:`reviewers_scaffold`, so the
+# install scaffold and the engine's code-default can never disagree (ADR-0025 / COR01-WS02).
+_REVIEWERS_SCAFFOLD_HEADER = """\
 # [reviewers] — the required-reviewer SET for this repo's PRs (the map KEYS are
-# required; ALL must be DONE to flip Ready). Seeded with shipit's required-for-all
-# set: Copilot plus the codex/agy local-agent backends (which post as their App
-# bots). Per-repo rollout (ROL01) installs each consumer's review GitHub Apps
-# before adoption. Review-once: `rerun` defaults OFF (token-billed; opt in per
-# reviewer with e.g. `codex = { rerun = true }`).
-[reviewers]
-copilot = {}
-codex = {}
-agy = {}
-"""
+# required; ALL must be DONE to flip Ready). Seeded with shipit's shipped default
+# (Copilot, review-once), rendered from the single source in
+# `prstate.reviewers_config.DEFAULT_REVIEWERS`. codex/agy are NOT seeded by default —
+# their review GitHub Apps are not installed on an arbitrary repo, so requiring them
+# would park PRs at REVIEWS_PENDING; a repo that HAS the Apps opts them in here (e.g.
+# `codex = {}`). Review-once: `rerun` defaults OFF (token-billed; opt in per reviewer
+# with e.g. `copilot = { rerun = true }`)."""
+
+
+def reviewers_scaffold() -> str:
+    """The ``[reviewers]`` block ``shipit install`` seeds when a consumer has none.
+
+    The comment header plus the table body rendered from the SINGLE required-reviewer
+    default (:data:`shipit.prstate.reviewers_config.DEFAULT_REVIEWERS`), imported lazily
+    so ``config`` stays free of a ``prstate`` import at module load. Because the seeded
+    set comes from the same map the engine defaults to, a freshly-installed repo and a
+    repo with no config require exactly the same reviewers.
+    """
+    from .prstate import reviewers_config
+
+    return f"{_REVIEWERS_SCAFFOLD_HEADER}\n{reviewers_config.default_reviewers_scaffold_body()}"
 
 
 def _seeded_secret_line(name: str) -> str:
@@ -341,7 +352,7 @@ def _plan_seed(text: str, path: str | Path) -> tuple[list[str], str]:
         seeded += [f"[secrets].{n}" for n in missing]
 
     if "reviewers" not in cfg:
-        text = _append_lines(text, REVIEWERS_SCAFFOLD.splitlines())
+        text = _append_lines(text, reviewers_scaffold().splitlines())
         seeded.append("[reviewers]")
     return seeded, text
 

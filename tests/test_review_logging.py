@@ -12,7 +12,7 @@ import logging
 from types import SimpleNamespace
 
 from shipit.review import post, service
-from shipit.review.diff import PRContext
+from shipit.review.diff import ReviewView, review_view
 
 _DIFF = """\
 diff --git a/foo.py b/foo.py
@@ -25,14 +25,15 @@ diff --git a/foo.py b/foo.py
 """
 
 
-def _ctx() -> PRContext:
-    return PRContext(
+def _ctx() -> ReviewView:
+    return review_view(
         number=5,
         repo="owner/repo",
         head_sha="deadbeef",
         base_ref="main",
         base_sha="cafe",
         diff=_DIFF,
+        is_draft=False,
         changed_files=["foo.py"],
     )
 

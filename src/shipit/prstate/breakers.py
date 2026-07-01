@@ -29,7 +29,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from .model import PullContext
+from .model import ReadinessView
 from .reviewers import ReviewerAdapter, required_reviewers
 
 ROUND_CAP = 6  # the 6th round is the last; there is no 7th
@@ -93,7 +93,7 @@ class BreakerVerdict:
 
 
 def build_rounds(
-    ctx: PullContext,
+    ctx: ReadinessView,
     required: list[ReviewerAdapter] | None = None,
 ) -> list[Round]:
     """One Round per HEAD SHA reviewed by a required reviewer, chronological.
@@ -153,7 +153,7 @@ def is_all_nitpick_round(rnd: Round) -> bool:
 
 
 def evaluate_breakers(
-    ctx: PullContext,
+    ctx: ReadinessView,
     required: list[ReviewerAdapter] | None = None,
 ) -> BreakerVerdict:
     """Apply the stopping rule. First condition to hit wins.

@@ -30,6 +30,51 @@ def test_subagent_record_carries_role_and_metrics_from_meta():
     assert record["eval.timestamp"] == "2026-06-29T00:00:00+00:00"
 
 
+def test_record_carries_observed_and_intended_invocation():
+    # ADR-0025 / COR01-WS02: the record threads the Backend × Model × ReasoningLevel
+    # launch config — observed from the meta, intended a seam (None until stamped).
+    record = build(
+        metrics={"tool_call_count": 7},
+        meta={
+            "agentType": "implementer",
+            "spawnMode": "bypassPermissions",
+            "model": "gpt-5.5",
+            "reasoning": "high",
+            "backend": "codex",
+        },
+        variant=None,
+        commit="abc123",
+        timestamp="2026-06-29T00:00:00+00:00",
+        is_coordinator=False,
+    )
+    assert record["eval.invocation"] == {
+        "observed": {
+            "backend": "codex",
+            "model": "gpt-5.5",
+            "provider": "openai",
+            "reasoning_level": "high",
+            "permission_mode": "bypassPermissions",
+        },
+        "intended": None,
+    }
+
+
+def test_coordinator_record_still_records_observed_invocation():
+    # Even the coordinator run (meta=None) records an observed invocation: the eval
+    # hooks fire for Claude Code, so the backend defaults to claude.
+    record = build(
+        metrics={"tool_call_count": 0},
+        meta=None,
+        variant=None,
+        commit="deadbeef",
+        timestamp="2026-06-29T00:00:00+00:00",
+        is_coordinator=True,
+    )
+    assert record["eval.invocation"]["observed"]["backend"] == "claude"
+    assert record["eval.invocation"]["observed"]["model"] is None
+    assert record["eval.invocation"]["intended"] is None
+
+
 def test_coordinator_record_defaults_role_when_meta_absent():
     # The coordinator run has no `.meta.json`; the locator's `is_coordinator` (NOT a
     # parsed meta) is the coordinator signal.

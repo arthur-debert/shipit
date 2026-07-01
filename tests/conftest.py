@@ -1,7 +1,7 @@
 """Shared fixture loader for the prstate (PR state engine) tests.
 
 Each JSON file under prstate_fixtures/ holds the raw `gh` payloads for one PR
-scenario; `context` builds a PullContext from one exactly as `fetch.gather()`
+scenario; `context` builds a ReadinessView from one exactly as `fetch.gather()`
 would, minus the network. Copied with the engine from release-core (ADR-0001),
 re-pointed to `shipit.prstate.*`.
 """
@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 from shipit.prstate.fetch import context_from_raw
-from shipit.prstate.model import PullContext
+from shipit.prstate.model import ReadinessView
 
 FIXTURES = Path(__file__).parent / "prstate_fixtures"
 
@@ -26,7 +26,7 @@ FIXTURES = Path(__file__).parent / "prstate_fixtures"
 DEFAULT_NOW = datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
 
 
-def load_context(name: str, now: datetime | None = None) -> PullContext:
+def load_context(name: str, now: datetime | None = None) -> ReadinessView:
     data = json.loads((FIXTURES / f"{name}.json").read_text())
     if now is None:
         raw_now = data.get("now")

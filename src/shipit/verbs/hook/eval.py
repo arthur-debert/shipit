@@ -25,7 +25,7 @@ from typing import TextIO
 
 import click
 
-from ... import gh
+from ... import identity
 from ...harness.eval.extractors import exit_hygiene, extract
 from ...harness.eval.locate import locate_run
 from ...harness.eval.record import build
@@ -60,23 +60,27 @@ def run(stdin: TextIO | None = None) -> int:
         if run_files is None:
             return 0  # nothing named to evaluate — no-op.
         meta = _read_meta(run_files.meta)
-        repo_root = _repo_root(str(payload.get("cwd") or os.getcwd()))
+        # One resolve of the checkout's identity: the WorkingDir gives the repo-root
+        # path (for exit-hygiene), the `Repo` IDENTITY the store keys on (ADR-0024 —
+        # so a run's record pools by origin owner/name, not by clone path), and the
+        # revision's HEAD commit for the record's `git.commit` stamp.
+        wd = identity.resolve_working_dir(str(payload.get("cwd") or os.getcwd()))
         metrics = extract(run_files.transcript)
         if run_files.is_coordinator:
             # The coordinator run gets the one live check — exit-hygiene (clean
             # worktree + no stray PIDs) at its terminal hook. Gated on run KIND, not
             # on `meta is None`: a subagent with an unreadable/missing meta sidecar
             # also parses to None but must NOT run this coordinator-only check.
-            metrics["exit_hygiene"] = exit_hygiene(repo_root)
+            metrics["exit_hygiene"] = exit_hygiene(wd.path)
         record = build(
             metrics=metrics,
             meta=meta,
             variant=_variant(meta),
-            commit=_git_commit(repo_root),
+            commit=wd.revision.commit,
             timestamp=_now_iso(),
             is_coordinator=run_files.is_coordinator,
         )
-        append_record(record, repo_root)
+        append_record(record, wd.repo)
     except Exception:  # noqa: BLE001 — fail-open is the whole point.
         logger.debug("eval hook failed open (no record written)", exc_info=True)
     return 0
@@ -106,23 +110,6 @@ def _read_meta(meta_path: object) -> dict | None:
     except (OSError, json.JSONDecodeError):
         return None
     return data if isinstance(data, dict) else None
-
-
-def _repo_root(cwd: str) -> str:
-    """The git working-tree root for ``cwd`` (the store's repo key), else ``cwd``."""
-    try:
-        root = gh._git(["rev-parse", "--show-toplevel"], cwd=cwd).strip()
-    except gh.GhError:
-        return cwd
-    return root or cwd
-
-
-def _git_commit(repo_root: str) -> str | None:
-    """The current commit SHA for ``repo_root``, or ``None`` if unresolvable."""
-    try:
-        return gh._git(["rev-parse", "HEAD"], cwd=repo_root).strip() or None
-    except gh.GhError:
-        return None
 
 
 def _now_iso() -> str:

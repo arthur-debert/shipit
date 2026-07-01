@@ -1,9 +1,16 @@
 """Typed data model for the PR state engine.
 
 Plain dataclasses + enums over the raw JSON `gh` returns. Holding the raw
-snapshot in a `PullContext` is what keeps the rest of the package pure: a
-test builds a context from recorded JSON and asserts on adapter/state output
+snapshot in a `ReadinessView` is what keeps the rest of the package pure: a
+test builds a view from recorded JSON and asserts on adapter/state output
 without touching the network.
+
+`ReadinessView` is the **readiness path's** richer view (ADR-0024): it *composes*
+a canonical `PR` (identity + cheap core) and adds the reviews / threads / funnel /
+timing the engine reads. It replaces the old ``PullContext`` snapshot — the core
+(`head_sha`, `is_draft`, `base_ref`, `merge_state`) now lives on the composed `PR`,
+read via delegating properties so a core field is fetched one way (`pr.core_from_node`)
+and never defaulted-in on this path.
 """
 
 from __future__ import annotations
@@ -11,6 +18,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
+
+from ..identity import Repo
+from ..pr import PR, repo_from_slug
 
 
 class ReviewLifecycle(StrEnum):
@@ -151,19 +161,25 @@ class ReviewFunnelCheck:
 
 
 @dataclass
-class PullContext:
-    """Snapshot of all raw GitHub state the engine reads for one PR.
+class ReadinessView:
+    """The readiness path's view of one PR: a canonical :class:`shipit.pr.PR`
+    (identity + cheap core) enriched with all the raw GitHub state the engine reads.
 
-    Built once per call by `fetch.gather()`, then handed to the (pure)
-    reviewer adapters and — in Phase 2 — the state machine.
+    Built once per call by `fetch.gather()`, then handed to the (pure) reviewer
+    adapters and the state machine. It *composes* a :class:`PR` rather than
+    re-declaring the core (ADR-0024): ``number`` / ``head_sha`` / ``is_draft`` /
+    ``base_ref`` / ``merge_state`` are read straight off ``self.pr`` via delegating
+    properties, so this path exposes exactly the core its ``PR`` fetched — no
+    defaulted ``is_draft`` trap — while the engine's ``ctx.head_sha`` reads are
+    unchanged.
+
+    ``mergeable`` (gh: MERGEABLE / CONFLICTING / UNKNOWN) is a readiness-ONLY field
+    — the async-stale fallback the merge-state check consults — so it lives on the
+    view, not the shared core (the review path never fetches it).
     """
 
-    number: int
-    head_sha: str
-    is_draft: bool
-    base_ref: str | None = None  # base branch name (for diff-size breaker)
+    pr: PR
     mergeable: str | None = None  # gh: MERGEABLE / CONFLICTING / UNKNOWN
-    merge_state: str | None = None  # gh: CLEAN / BLOCKED / BEHIND / ...
     reviews: list[Review] = field(default_factory=list)
     threads: list[Thread] = field(default_factory=list)
     reactions: list[dict] = field(default_factory=list)  # issue-level (Gemini eyes)
@@ -206,6 +222,30 @@ class PullContext:
     # instead) and so never appears here. Empty in a light/skip context.
     requested_at: dict[str, str] = field(default_factory=dict)
 
+    # --- core, delegated to the composed PR (ADR-0024) ----------------------
+    # The engine and adapters read `ctx.head_sha` / `ctx.is_draft` / … as before;
+    # the fields themselves live once, on `self.pr`, so this path can only expose
+    # a core it actually fetched (no re-declared, defaultable copy).
+    @property
+    def number(self) -> int:
+        return self.pr.number
+
+    @property
+    def head_sha(self) -> str:
+        return self.pr.head_sha
+
+    @property
+    def is_draft(self) -> bool:
+        return self.pr.is_draft
+
+    @property
+    def base_ref(self) -> str | None:
+        return self.pr.base_ref
+
+    @property
+    def merge_state(self) -> str | None:
+        return self.pr.merge_state
+
     def reviews_on_head(self) -> list[Review]:
         """Reviews made against the current head — stale reviews don't count."""
         return [r for r in self.reviews if r.commit_id == self.head_sha]
@@ -218,3 +258,66 @@ class PullContext:
 
     def open_threads(self) -> list[Thread]:
         return [t for t in self.threads if not t.is_resolved]
+
+
+#: The placeholder :class:`Repo` a hand-built :class:`ReadinessView` composes when
+#: no repo identity is supplied. The readiness ENGINE keys on ``number``, never repo
+#: identity, so a fixture/unit-test view that omits the repo still resolves
+#: deterministically — the placeholder is invisible to every readiness decision. The
+#: live path (`fetch.gather`) always passes the real, origin-derived repo.
+_HANDBUILT_REPO = repo_from_slug("local/local")
+
+
+def readiness_view(
+    *,
+    number: int,
+    head_sha: str,
+    is_draft: bool,
+    base_ref: str | None = None,
+    merge_state: str | None = None,
+    repo: Repo | None = None,
+    mergeable: str | None = None,
+    reviews: list[Review] | None = None,
+    threads: list[Thread] | None = None,
+    reactions: list[dict] | None = None,
+    issue_comments: list[dict] | None = None,
+    requested_logins: list[str] | None = None,
+    checks: list[dict] | None = None,
+    review_funnel: list[ReviewFunnelCheck] | None = None,
+    now: datetime | None = None,
+    reviewer_rerun: dict[str, bool] | None = None,
+    reviewer_window: dict[str, int] | None = None,
+    requested_at: dict[str, str] | None = None,
+) -> ReadinessView:
+    """Compose a :class:`ReadinessView` from flattened core values — the ergonomic
+    builder for callers (and tests) that hold the core directly rather than a raw
+    GitHub node.
+
+    The core (`number`/`head_sha`/`is_draft`/`base_ref`/`merge_state`) is packed
+    into a :class:`PR` — ``is_draft`` is required here too, so this convenience
+    cannot reintroduce the defaulted-``is_draft`` trap. ``repo`` defaults to a
+    placeholder identity because the readiness engine never keys on it.
+    """
+    pr = PR(
+        repo=repo or _HANDBUILT_REPO,
+        number=number,
+        head_sha=head_sha,
+        base_ref=base_ref,
+        is_draft=is_draft,
+        merge_state=merge_state,
+    )
+    return ReadinessView(
+        pr=pr,
+        mergeable=mergeable,
+        reviews=reviews if reviews is not None else [],
+        threads=threads if threads is not None else [],
+        reactions=reactions if reactions is not None else [],
+        issue_comments=issue_comments if issue_comments is not None else [],
+        requested_logins=requested_logins if requested_logins is not None else [],
+        checks=checks if checks is not None else [],
+        review_funnel=review_funnel if review_funnel is not None else [],
+        now=now,
+        reviewer_rerun=reviewer_rerun if reviewer_rerun is not None else {},
+        reviewer_window=reviewer_window if reviewer_window is not None else {},
+        requested_at=requested_at if requested_at is not None else {},
+    )
