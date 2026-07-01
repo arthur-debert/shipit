@@ -19,9 +19,10 @@ the head actually be checked out (documented limitation, not a branch switch).
 canonical :class:`shipit.pr.PR` (identity + cheap core) and adds the diff /
 changed_files / workdir the review runs over. It replaces the old ``PRContext``
 snapshot — the core (``number`` / ``head_sha`` / ``base_ref``) now lives on the
-composed ``PR``, read via delegating properties, and the PR identity's repo is
-resolved ONCE here (from the explicit slug or the checkout's origin) rather than
-inferred piecemeal downstream.
+composed ``PR``, read via delegating properties, and the PR identity's repo is set
+authoritatively ONLY from an explicit ``--repo`` slug (canonicalized here); an
+omitted ``--repo`` leaves it the honest-None placeholder so downstream canonicalizes
+via ``gh repo view`` rather than trusting the checkout's (possibly aliased) origin.
 """
 
 from __future__ import annotations
@@ -31,7 +32,7 @@ import os
 import subprocess
 from dataclasses import dataclass, field
 
-from .. import gh, identity, proc
+from .. import gh, proc
 from ..pr import PR, core_from_node, repo_from_slug
 
 
@@ -227,8 +228,10 @@ def resolve_pr(
 ) -> ReviewView:
     """Resolve PR ``pr`` to a :class:`ReviewView` (diff + changed files + workdir).
 
-    * ``repo`` (``OWNER/NAME``) targets a specific repo; ``None`` derives the PR
-      identity's repo LOCALLY from ``workdir``'s origin remote (ADR-0024).
+    * ``repo`` (``OWNER/NAME``) targets a specific repo (canonicalized here); ``None``
+      leaves the PR identity's repo the honest-None placeholder so downstream
+      posters/producers canonicalize via ``gh repo view`` — NOT the checkout's
+      (possibly aliased) origin, which would 307 on write (ADR-0024).
     * ``workdir`` is the checkout the agent reads files from; defaults to the
       current directory (the consumer reviewing their own PR).
 
@@ -271,11 +274,18 @@ def resolve_pr(
                 f"`gh repo view`: {exc}"
             ) from exc
 
-    # The PR identity's repo, resolved ONCE here (ADR-0024): the canonical explicit
-    # slug, or — when unspecified — derived LOCALLY from the checkout's origin remote
-    # (offline, Tree-safe). Downstream posters/producers read `ctx.repo` off this,
-    # rather than each re-inferring the slug.
-    repo_obj = repo_from_slug(repo) if repo else identity.resolve_repo(cwd=workdir)
+    # The PR identity's repo is authoritative ONLY when it came from an explicit
+    # `--repo` slug — which we canonicalized just above via `gh repo view`, following
+    # GitHub's 307 for a transferred/renamed repo. When `--repo` is OMITTED we do NOT
+    # synthesize an authoritative repo from the checkout's origin remote: that slug is
+    # LOCAL and un-canonicalized (`identity.resolve_repo` is deliberately offline/
+    # Tree-safe, ADR-0022/0024), so a checkout whose `origin` still points at an
+    # old/alias slug would make downstream POST reviews / mint app-installation auth
+    # against the alias (which 307s on write). Instead we leave the identity's repo the
+    # honest-None placeholder (:data:`_HANDBUILT_REPO`, surfaced as `ReviewView.repo is
+    # None`) so `post._resolve_repo` / the producer keep their `gh repo view` fallback,
+    # which canonicalizes (follows the 307) exactly as before this epic.
+    repo_obj = repo_from_slug(repo) if repo else _HANDBUILT_REPO
 
     meta = _pr_meta(pr, repo)
     # The CORE (number/head_sha/base_ref/is_draft/merge_state) is read off `meta`

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from shipit.review import diff
+from shipit.review import diff, post
 
 
 def test_git_toplevel_returns_repo_root(monkeypatch):
@@ -37,11 +37,6 @@ def test_resolve_pr_normalizes_workdir_to_toplevel(monkeypatch):
     """`resolve_pr` invoked from a nested subdir resolves the diff (and the
     agent's cwd) against the repo ROOT, not the subdir."""
     monkeypatch.setattr(diff, "_git_toplevel", lambda wd: "/repo/root")
-    monkeypatch.setattr(
-        diff.identity,
-        "resolve_repo",
-        lambda cwd, **k: diff.repo_from_slug("owner/repo"),
-    )
     monkeypatch.setattr(
         diff.gh,
         "pr_view",
@@ -81,15 +76,64 @@ def test_resolve_pr_normalizes_workdir_to_toplevel(monkeypatch):
     assert set(seen_workdirs) == {"/repo/root"}
 
 
+def test_resolve_pr_omitted_repo_canonicalizes_via_gh_not_alias_origin(monkeypatch):
+    """Regression (codex ERROR): with `--repo` OMITTED, `resolve_pr` must NOT adopt
+    the checkout's (possibly stale/alias) origin slug as the authoritative
+    ``ctx.repo``. `identity.resolve_repo` is deliberately offline/Tree-safe and does
+    NOT follow GitHub's 307, so a checkout whose ``origin`` still points at an
+    old/transferred slug would make downstream POST reviews / mint app-auth against
+    the ALIAS (which 307s on write). The fix keeps the locally-derived slug
+    non-authoritative: ``ctx.repo`` stays the honest-None placeholder so
+    ``post._resolve_repo`` falls back to ``gh repo view`` and canonicalizes exactly as
+    before this epic."""
+    monkeypatch.setattr(diff, "_git_toplevel", lambda wd: "/repo/root")
+    monkeypatch.setattr(
+        diff.gh,
+        "pr_view",
+        lambda *a, **k: (
+            '{"number": 5, "isDraft": false, "mergeStateStatus": "CLEAN", '
+            '"headRefName": "feat", "headRefOid": "headsha", '
+            '"baseRefName": "main", "baseRefOid": "basesha"}'
+        ),
+    )
+    monkeypatch.setattr(diff, "_sha_present", lambda wd, sha: True)
+
+    def fake_git(workdir, args, *, check=True):
+        class R:
+            returncode = 0
+            stdout = "mergebasesha\n" if args[:1] == ["merge-base"] else "the diff\n"
+
+        return R()
+
+    monkeypatch.setattr(diff, "_git", fake_git)
+
+    # If resolve_pr fell back to the local origin (an alias, here), it would surface
+    # a truthy slug and downstream would skip `gh repo view`. Guard against that by
+    # making any accidental local-origin resolution loud.
+    monkeypatch.setattr(
+        diff.gh,
+        "current_repo",
+        lambda **k: "alias-owner/alias-repo",
+        raising=False,
+    )
+
+    ctx = diff.resolve_pr(5, workdir="/repo/root")  # --repo OMITTED
+    # The locally-derived origin is NOT authoritative — repo stays None so the
+    # downstream `gh repo view` (307) fallback still runs.
+    assert ctx.repo is None
+
+    # Downstream POST path: `gh repo view` canonicalizes the alias origin to the
+    # repo's CURRENT slug, and the review posts there — never the alias.
+    monkeypatch.setattr(
+        post.gh, "current_repo", lambda **k: "canonical-owner/canonical-repo"
+    )
+    assert post._resolve_repo(ctx) == "canonical-owner/canonical-repo"
+
+
 def test_resolve_pr_no_common_ancestor_fails_loud(monkeypatch):
     """When the authoritative base and head share no merge base, resolve_pr fails
     loud rather than degrading to a base-tip diff."""
     monkeypatch.setattr(diff, "_git_toplevel", lambda wd: "/repo/root")
-    monkeypatch.setattr(
-        diff.identity,
-        "resolve_repo",
-        lambda cwd, **k: diff.repo_from_slug("owner/repo"),
-    )
     monkeypatch.setattr(
         diff.gh,
         "pr_view",
@@ -126,11 +170,6 @@ def test_resolve_pr_missing_base_oid_fails_loud(monkeypatch):
     a base, so the review can't run against a wrong one."""
     monkeypatch.setattr(diff, "_git_toplevel", lambda wd: "/repo/root")
     monkeypatch.setattr(
-        diff.identity,
-        "resolve_repo",
-        lambda cwd, **k: diff.repo_from_slug("owner/repo"),
-    )
-    monkeypatch.setattr(
         diff.gh,
         "pr_view",
         lambda *a, **k: (
@@ -149,11 +188,6 @@ def test_resolve_pr_stale_base_fetch_fails_loud(monkeypatch):
     `origin/<base>` and an unfetchable sha — resolve_pr fails loud instead of
     silently degrading to a local ref or the base tip (no wrong-base diff)."""
     monkeypatch.setattr(diff, "_git_toplevel", lambda wd: "/repo/root")
-    monkeypatch.setattr(
-        diff.identity,
-        "resolve_repo",
-        lambda cwd, **k: diff.repo_from_slug("owner/repo"),
-    )
     monkeypatch.setattr(
         diff.gh,
         "pr_view",
