@@ -12,7 +12,7 @@ is stale for a fast-moving tool. It complements [./architecture.lex] section 1
 ("pixi as the substrate"), which records WHY pixi was chosen; this records HOW it
 behaves and how we ride it.
 
-:: note :: Verified against pixi 0.71.0 on 2026-06-30. pixi moves fast — when the pinned version bumps, re-run the checks in [#9] and update the affected facts before trusting them.
+:: note :: Facts verified against pixi 0.71.0 (the pinned version) on 2026-06-30. Upstream latest is 0.71.3 (2026-06-30); 0.71.1–0.71.3 are packaging/fix-only releases that do NOT touch run identity, logging, JSON output, the plugin/extension surface, activation, or the task-cache model — so bumping the pin re-verifies as a near-no-op. The launch bypass documented in [#7] was FIXED by PR #197 for write Trees; the section is kept as the record of the bug and marks what remains. pixi moves fast — when the pin bumps, re-run the checks in [#9] and update affected facts before trusting them.
 
 1. What pixi is to shipit
 
@@ -25,13 +25,19 @@ behaves and how we ride it.
         - Provisioning — `pixi install` materialises a Tree's environment.
         - Hook invocations — every Claude Code hook fires as `pixi run shipit
           hook <name>` (a transient `pixi run` per firing).
+        - The write-Run agent session — as of PR #197, `shipit spawn` re-expresses
+          the backend argv as `pixi run --manifest-path <tree>/pixi.toml -- <argv>`
+          for a provisioned write Tree, so the agent runs INSIDE its Tree's env
+          (see [#6], [#7]).
 
     What pixi is NOT the parent of:
 
-        The spawned agent session. `shipit spawn subagent` launches `claude -p`
-        as a bare subprocess, NOT under `pixi run` (see [#6] and the bug in
-        [#7]). So pixi is absent from the agent's process tree — it sits only in
-        front of provisioning and each hook.
+        The reviewer (read-only) agent session. A reviewer Tree is clone+checkout
+        with the working tree `chmod`'d read-only and NO `.pixi/envs/default`
+        (`src/shipit/tree/readonly.py`), so routing it through `pixi run` would
+        force a solve into a read-only dir. Its launch stays a bare subprocess —
+        tolerable because a reviewer only runs `gh pr diff`/`gh pr review` off the
+        ambient PATH, not the Tree's toolchain (see [#7]).
 
     What pixi does NOT own (carried from [./architecture.lex]): building and
     signing distributable artifacts. `pixi build` is preview-grade and emits
@@ -52,19 +58,33 @@ behaves and how we ride it.
           resolved lock. Present + matching = "this env is provisioned and
           consistent with the lock". It is a SYNC-STATE digest, not a stable
           identity: it changes when the lock changes.
+        - `.pixi/envs/<env>/conda-meta/pixi` — a RICHER env-identity record (JSON)
+          the bare fingerprint does not give you: `manifest_path`,
+          `environment_name`, `pixi_version`, `environment_lock_file_hash`,
+          `resolved_platform`, `minimum_supported_platform`. This is the natural
+          thing to read to answer "which manifest / env / lock / pixi-version
+          materialised this prefix?". NOTE its `environment_lock_file_hash` is a
+          DIFFERENT digest from the fingerprint (observed `99f00798db0ea80c` vs
+          the fingerprint's `99b739d0fedb92eb`) — do not conflate them. A sibling
+          `conda-meta/pixi_env_prefix` points back at the prefix.
         - `.pixi/envs/<env>/conda-meta/<pkg>-<ver>-<build>.json` — one manifest
           per installed package. `conda-meta/history` is a stub.
-        - `.pixi/task-cache-v0/<env>-<task>-<hash>.json` — `{"hash": "..."}`, a
-          content hash of a task's inputs so pixi can skip unchanged re-runs.
-          Records THAT a task ran with a given input hash — not when, nor its
-          exit code, nor a run id. Only `pixi run <task>` writes these; `pixi
-          install` does not.
+        - `.pixi/task-cache-v0/<env>-<task>-<hash>.json` — `{"hash": "..."}`, the
+          key pixi's skip-if-unchanged cache writes. It is invalidated on THREE
+          conditions: env-package state changed, the task's declared
+          `inputs`/`outputs` file fingerprints changed, or the command string
+          changed. It records THAT a task ran with a given input hash — not when,
+          nor its exit code, nor a run id. Only `pixi run <task>` writes these
+          (and only for tasks that declare `inputs`/`outputs`); `pixi install`
+          does not. shipit declares no `inputs`/`outputs`, so this cache is
+          currently idle (see [#8]).
 
     `pixi.lock` (version 7) is the stable description of "this exact resolved
     environment": per-environment, per-platform, fully-resolved packages each
     with `sha256`/`md5`. There is NO top-level `content-hash` field (unlike
-    Poetry). The closest thing to a per-env identity is the pair `(env name,
-    .pixi-environment-fingerprint)` or hashing the env's slice of `pixi.lock`
+    Poetry). The closest thing to a per-env identity is `conda-meta/pixi`'s
+    `environment_lock_file_hash`, the pair `(env name,
+    .pixi-environment-fingerprint)`, or hashing the env's slice of `pixi.lock`
     yourself.
 
     What pixi does NOT persist:
@@ -80,8 +100,10 @@ behaves and how we ride it.
     pixi assigns NO usable correlation key:
 
         - No `pixi run` invocation id (no flag, no output, no log).
-        - No environment UUID — envs are keyed by name; the only digest is the
-          sync-state fingerprint ([#2]), which is not a stable identity.
+        - No environment UUID — envs are keyed by name; the digests
+          (`.pixi-environment-fingerprint` and `conda-meta/pixi`'s
+          `environment_lock_file_hash`, which differ — see [#2]) are SYNC-STATE,
+          not stable identity.
         - No install id.
 
     Therefore the only stable per-run identifier is Claude Code's own
@@ -106,7 +128,11 @@ behaves and how we ride it.
           runs; default env when no `-e`). Human stderr only.
         - `pixi run [-e env] <cmd|task>` — activate the env, then exec. The ONLY
           way (besides `shell`/sourcing `shell-hook`) that pixi activation
-          happens. No run id, no JSON.
+          happens. No run id, no JSON. Useful flags: `--dry-run`/`-n` (print the
+          exact command pixi would exec — a cheap way to learn the resolved
+          argv), `--skip-deps`, `-x/--executable`, and the experimental
+          activation cache (`--use-environment-activation-cache` / `--force-activate`,
+          see [#7]).
         - `pixi info --json` — env metadata: `name`, `prefix`, `platform`,
           `dependencies`, `tasks`, `channels`, cache dirs. No hashes/ids.
         - `pixi list [-e env] --json` — installed packages (per-package
@@ -117,6 +143,8 @@ behaves and how we ride it.
           Tree env outside `pixi run` (see [#7]).
         - `pixi exec` — run a command in an ephemeral throwaway env (not a
           workspace env). Not relevant to Tree runs.
+        - `pixi workspace <channel|platform|version|environment|feature|export|...>`
+          — structured manifest edits, scriptable instead of hand-editing TOML.
 
 5. Extension surface — there essentially is none
 
@@ -136,18 +164,23 @@ behaves and how we ride it.
             the sccache build env) BELONGS — but it only fires when execution goes
             through pixi.
 
-        Task `depends-on`:
-            Pre-task chaining only (`pixi task add --depends-on`, plus `--env`,
-            `--cwd`, `--clean-env`, `--args`). There is NO native post-task or
-            wrapper hook — shipit behaviour can hang off the FRONT of a task, not
-            wrap it.
+        Task fields (`depends-on`, `inputs`/`outputs`, `args`, `env`, `cwd`, `clean-env`):
+            `depends-on` is pre-task chaining only (`pixi task add --depends-on`,
+            plus `--env`, `--cwd`, `--clean-env`, `--args`) — there is NO native
+            post-task or wrapper hook, so shipit behaviour can hang off the FRONT
+            of a task, not wrap it. `inputs`/`outputs` are glob lists that drive
+            the skip-if-unchanged cache ([#2]); `args` declares named args with
+            defaults/validation; both support MiniJinja templating. An
+            `[environments]` entry can set a `default-environment` for a task.
 
         External `pixi-<name>` subcommands:
-            git/cargo-style dispatch — `pixi foo` execs a `pixi-foo` on PATH
-            (`pixi --list` shows installed extensions). This is dispatch
-            convenience only: an external subcommand gets NO pixi internals, env
-            callbacks, or activation injection. It would let `pixi shipit ...`
-            work; it would not let shipit's concerns run inside pixi's lifecycle.
+            git/cargo-style dispatch — `pixi foo` execs a `pixi-foo` on PATH. This
+            is dispatch convenience only: an external subcommand gets NO pixi
+            internals, env callbacks, or activation injection. It would let `pixi
+            shipit ...` work; it would not let shipit's concerns run inside pixi's
+            lifecycle. (Note: `pixi --list` prints "Installed Commands:" = the full
+            built-in command table, NOT an extensions-only view — it does not
+            enumerate `pixi-<name>` externals.)
 
 6. The shipit ↔ pixi contract today
 
@@ -165,46 +198,53 @@ behaves and how we ride it.
         installed editable into each env, not because it is a pixi task. pixi is a
         transient wrapper per hook firing.
 
-    Agent launch — `src/shipit/spawn/launch.py`:
-        `build_command` constructs `claude -p <task> --agent <role>
-        --permission-mode bypassPermissions \[--tools ...\] --output-format json` —
-        with NO pixi prefix — and `_subprocess_runner` execs it directly via
-        `subprocess.run(cwd=tree, env=child_env(), stdin=DEVNULL)`. `child_env`
-        only drops `ANTHROPIC_API_KEY`. This is the path that bypasses pixi (see
-        [#7]).
+    Agent launch — `src/shipit/spawn/launch.py` + `src/shipit/verbs/spawn.py`:
+        The per-backend `BackendAdapter` (`spawn/backends/`) builds the argv
+        (`claude -p ... --output-format json`, or the codex/antigravity
+        equivalents). For a provisioned write Tree, `pixi_wrap()` re-expresses it
+        as `pixi run --manifest-path <tree>/pixi.toml -- <argv>` (gated on
+        `<tree>/.pixi/envs/default` existing), and `scrub_tree_env()` drops the
+        API key plus leaked `PIXI_*`/`CONDA_*` vars. The launch and provisioning
+        scrubs now share ONE predicate, `tree.create.is_leaked_env_var`, so they
+        cannot drift. For a reviewer read-only Tree `pixi_wrap` is a deliberate
+        no-op (no env to route into) — that launch stays bare (see [#7]).
 
 7. Gotchas and known bugs
 
-    Agent runs OUTSIDE its Tree's pixi env (correctness bug, P0):
-        `child_env` (`src/shipit/spawn/launch.py`) does ZERO activation, and
-        `cwd=<tree>` does not activate pixi — so `<tree>/.pixi/envs/default/bin`
-        is never on the child's PATH. The agent inherits the spawn process's
-        environment: either the COORDINATOR's pixi env (a different Tree's
-        `.pixi`) or the bare system env. Its `python`/`pytest`/`ruff`/`shipit`
-        resolve to the WRONG environment — the Tree is provisioned, then bypassed.
-        `pixi shell-hook --json` shows exactly what is missing (PATH prepend of
-        the env bin, `CONDA_PREFIX`, `PIXI_PROJECT_*`). Fix: launch through pixi —
-        `pixi run --manifest-path <tree>/pixi.toml claude -p ...`
-        (API-key scrub still via `env=`; child JSON stays on stdout while pixi
-        progress goes to stderr). VERIFIED by spike (2026-06-30): use CURATED
-        passthrough, NOT `--clean-env`. `--clean-env` was FALSIFIED — it strips
-        `HOME` and `PATH`, so the child gets neither the Tree activation (no
-        `python`) nor the `claude` binary (`claude: command not found`, rc 127).
-        CURATED works: pass `env=` the parent minus `ANTHROPIC_API_KEY` +
-        `PIXI_*`/`CONDA_*`; the child lands in the Tree env, `HOME` intact, claude
-        authenticates (rc 0), stdout JSON clean, stderr empty. Explicit
-        `--manifest-path` already overrides a leaked `PIXI_PROJECT_MANIFEST`, so
-        the scrub is belt-and-suspenders, not load-bearing. This revises ADR-0019,
-        whose launch contract never considered activation.
+    Agent runs OUTSIDE its Tree's pixi env (was P0 — FIXED for write Trees by PR #197):
+        Historically `child_env` did ZERO activation and `cwd=<tree>` does not
+        activate pixi, so `<tree>/.pixi/envs/default/bin` was never on the child's
+        PATH — the agent inherited the COORDINATOR's pixi env (a different Tree's
+        `.pixi`) or the bare system env, and its `python`/`pytest`/`ruff`/`shipit`
+        resolved to the WRONG environment (provisioned, then bypassed). FIXED:
+        write-Run launch now routes through `pixi run --manifest-path
+        <tree>/pixi.toml -- ...` with a CURATED env scrub (`scrub_tree_env`), so
+        the agent lands in its own Tree's env. VERIFIED by spike (2026-06-30): use
+        CURATED passthrough, NOT `--clean-env` — `--clean-env` was FALSIFIED (it
+        strips `HOME`/`PATH`, so the child gets neither the Tree activation nor the
+        `claude` binary, rc 127). Explicit `--manifest-path` overrides a leaked
+        `PIXI_PROJECT_MANIFEST`, so the scrub is belt-and-suspenders. This revised
+        ADR-0019, whose launch contract never considered activation.
 
-    Leaked `PIXI_*` project pointers (#167):
+        STILL OPEN, by design: the reviewer read-only Tree launch stays bare
+        (no `.pixi/envs/default` to route into — a `chmod`'d clone). Tolerable
+        because a reviewer only needs `gh` off the ambient PATH; it becomes a
+        latent wrong-env bug only if a reviewer ever needs a Tree-pinned tool. The
+        decision is centralised in the `pixi_wrap` gate, so a future "provision a
+        read-only pixi env" change flips it in one place.
+
+        Amortising activation cost: `pixi run` has an experimental activation
+        cache (`--use-environment-activation-cache`, with `--force-activate` to
+        bypass). Relevant if per-launch activation cost on the spawn path matters;
+        mark experimental before relying on it.
+
+    Leaked `PIXI_*` project pointers (#167) — CLOSED on the launch path:
         An inherited `PIXI_PROJECT_MANIFEST` makes a child's `pixi run` resolve
-        the PARENT manifest and die. Provisioning DEFENDS against this —
-        `provision_env()` scrubs leaked `PIXI_*` vars
-        (`src/shipit/tree/create.py`) — but the launch path does NOT, so the
-        agent is exposed to the exact leak class shipit already fixed once. The
-        asymmetry is the tell that [#7]'s bypass is an oversight. routing through `pixi run --manifest-path` with the scrubbed env (see
-        [#7]) closes this leak on the launch path too.
+        the PARENT manifest and die. Provisioning always defended against this
+        (`provision_env()` scrubs leaked `PIXI_*`); as of PR #197 the launch path
+        does too, via the shared `is_leaked_env_var` predicate (`scrub_tree_env`),
+        which now also strips the `CONDA_*` activation family. The old asymmetry
+        that made this a live bug is gone.
 
     Cross-filesystem cache (#119):
         Provisioning warns when the pixi/rattler cache and the Tree are on
@@ -219,25 +259,34 @@ behaves and how we ride it.
 
 8. How to leverage pixi well
 
-    Ranked, each with the concrete mechanism:
+    Ranked, each with the concrete mechanism (the P0 launch-through-pixi item is
+    now DONE — PR #197 — so the live opportunities are:):
 
-        1. Launch the agent THROUGH pixi, not around it (P0 correctness) —
-           `pixi run --manifest-path <tree>/pixi.toml claude -p ...` (scrubbed env, no `--clean-env`)
-           in `src/shipit/spawn/launch.py`. The agent's tools then resolve
-           to its OWN Tree's env.
-        2. Mirror the provisioning scrub on the launch path (drop
-           `ANTHROPIC_API_KEY` + leaked `PIXI_*`/`CONDA_*`) — closes the #167 leak
-           the launch path re-opened. `--clean-env` was falsified (strips
-           `HOME`/`PATH`); see [#7].
-        3. Move shipit's hand-built build env (sccache/cargo) into pixi
-           `[activation.env]` so pixi sets it on activation — verify pixi template
-           vars for per-Tree absolute paths first.
-        4. Express the agent run as a pixi task (`depends-on = ["install"]`) so
-           "provision then run" is one pixi-owned entrypoint — removes shipit's
-           parallel env/PATH derivation entirely.
-        5. Read pixi's persisted env identity instead of re-deriving it — `pixi
-           info --json` for prefix/env, the `.pixi-environment-fingerprint` for
-           "provisioned-and-consistent".
+        1. Move shipit's hand-built build env (sccache/cargo) into pixi
+           `[activation.env]` so pixi sets it on EVERY activation — this is the
+           clearest remaining "compute what `[activation]` already computes"
+           reinvention (`sccache_env()` in `src/shipit/tree/create.py`).
+           Tellingly, that env does NOT currently reach the agent's own in-Tree
+           `cargo` (only the provisioning subprocess gets it); `[activation.env]`
+           fixes that for free. Verify pixi template vars express per-Tree
+           absolute paths (`SCCACHE_BASEDIRS = <tree>`) first.
+        2. Turn on pixi's task `inputs`/`outputs` cache — it is entirely idle
+           today. `provision-lexd` re-fetches lexd on every `lint`/`fmt` via
+           `depends-on`, and every `pixi run lint` re-runs all linters. Declare
+           `inputs`/`outputs` (start with `provision-lexd`) for pixi-native
+           skip-if-unchanged. Scope carefully: lint is deliberately hard-fail/
+           no-skip, so caching must not mask a real failure.
+        3. Read pixi's persisted env identity instead of re-deriving it — prefer
+           `conda-meta/pixi` (manifest path + env name + pixi version +
+           `environment_lock_file_hash`) over the bare fingerprint; `pixi info
+           --json` for prefix/env.
+        4. Express the write-Run as a pixi task (`depends-on = ["install"]`) so
+           "provision then run" is one pixi-owned entrypoint — LOW priority: the
+           argv is dynamic per Run and pixi tasks are static in the manifest, so
+           this likely is not worth the bespoke `pixi_wrap` it would delete.
+        5. If `default`/`review`/`dogfood` ever need to agree on package versions,
+           use a pixi `solve-group` (every env currently has `solve_group: null`)
+           rather than pinning by hand.
 
 9. Refreshing this document
 
@@ -249,9 +298,10 @@ behaves and how we ride it.
           any new JSON/structured-output or run-id flag ([#3], [#4]).
         - `pixi --help` / `pixi --list` — re-check the extension surface for any
           new plugin/hook mechanism ([#5]).
-        - `pixi info --json`; `ls .pixi/envs/<env>/conda-meta/` — re-check the
-          persisted state shape ([#2]).
+        - `pixi info --json`; `ls .pixi/envs/<env>/conda-meta/` and
+          `cat .pixi/envs/<env>/conda-meta/pixi` — re-check the persisted state
+          shape and the two digests ([#2]).
         - `pixi shell-hook --json` — re-check what activation injects ([#7]).
         - Re-read the integration seams: `_provision`/`run_provision`
-          (`src/shipit/tree/create.py`), `build_command`/`child_env`
+          (`src/shipit/tree/create.py`), `pixi_wrap`/`scrub_tree_env`
           (`src/shipit/spawn/launch.py`).
