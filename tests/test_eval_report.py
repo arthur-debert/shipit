@@ -27,9 +27,11 @@ def _variant(content_hash, label=None):
     return Variant(content_hash=content_hash, label=label).as_record()
 
 
-def _write(base, repo, *, role, tool_calls, variant, timestamp):
+def _write(base, repo, *, role, tool_calls, variant, timestamp, meta_extra=None):
     """Append one realistic eval record (built by the real builder) to the store."""
     meta = None if role == "coordinator" else {"agentType": role}
+    if meta is not None and meta_extra:
+        meta = {**meta, **meta_extra}
     record = build(
         metrics={"tool_call_count": tool_calls},
         meta=meta,
@@ -101,6 +103,59 @@ def test_aggregate_groups_by_variant(tmp_path):
         report.GroupRow(key=_V1, runs=2, avg_tool_calls=15.0),
         report.GroupRow(key=_V2, runs=1, avg_tool_calls=6.0),
     ]
+
+
+def test_aggregate_groups_by_invocation(tmp_path):
+    # The observed Backend × Model × ReasoningLevel launch config (ADR-0025) is a
+    # group-by dimension: two runs at the same (backend, model, reasoning) pool; a
+    # different reasoning level (or model) separates. Records carry the model /
+    # reasoning in their meta (the observed config the harness reads).
+    base = tmp_path / "state"
+    repo = _REPO
+    _write(
+        base,
+        repo,
+        role="implementer",
+        tool_calls=10,
+        variant=_variant(_V1),
+        timestamp="2026-06-01T08:00:00+00:00",
+        meta_extra={"model": "gpt-5.5", "reasoning": "high", "backend": "codex"},
+    )
+    _write(
+        base,
+        repo,
+        role="implementer",
+        tool_calls=20,
+        variant=_variant(_V1),
+        timestamp="2026-06-01T09:00:00+00:00",
+        meta_extra={"model": "gpt-5.5", "reasoning": "high", "backend": "codex"},
+    )
+    _write(
+        base,
+        repo,
+        role="implementer",
+        tool_calls=4,
+        variant=_variant(_V1),
+        timestamp="2026-06-01T10:00:00+00:00",
+        meta_extra={"model": "gpt-5.5", "reasoning": "low", "backend": "codex"},
+    )
+    path = store.store_path(repo, base_dir=base)
+    result = report.aggregate(path)
+    assert result.by_invocation == [
+        report.GroupRow(key="codex/gpt-5.5 (high)", runs=2, avg_tool_calls=15.0),
+        report.GroupRow(key="codex/gpt-5.5 (low)", runs=1, avg_tool_calls=4.0),
+    ]
+
+
+def test_invocation_with_no_observed_model_buckets_under_backend(tmp_path):
+    # Every record records an observed invocation (backend defaults to claude for a
+    # Claude Code run), so a run whose meta names no model still groups — under
+    # "claude/?" (the '?' standing in for the unknown model) rather than vanishing.
+    # The seeded runs carry meta without a model, so all bucket together.
+    _, _, path = _seed(tmp_path)
+    result = report.aggregate(path)
+    keys = {row.key for row in result.by_invocation}
+    assert keys == {"claude/?"}
 
 
 def test_aggregate_separates_ab_label_arms_of_the_same_prompt(tmp_path):
@@ -203,7 +258,7 @@ def test_aggregate_empty_store_is_empty_report(tmp_path):
     missing = tmp_path / "state" / "nope.jsonl"
     result = report.aggregate(missing)
     assert result == report.EvalReport(
-        total_runs=0, by_role=[], by_variant=[], by_day=[]
+        total_runs=0, by_role=[], by_variant=[], by_invocation=[], by_day=[]
     )
 
 

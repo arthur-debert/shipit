@@ -3,12 +3,14 @@
 A THIN wrapper over DuckDB/SQL (PRD har02 module #6): the harness terminal-hooks
 append one **eval record** per run to a never-committed JSONL store keyed by repo
 (:mod:`shipit.harness.eval.store`); this verb reads that store *directly* with
-DuckDB's ``read_json_auto`` and rolls it up three ways —
+DuckDB's ``read_json_auto`` and rolls it up four ways —
 
 - **by role** (``gen_ai.agent.name``): how implementer runs are doing vs shepherd
   vs coordinator (PRD user story 6);
 - **by variant** (``eval.variant``): which version of a role prompt / policy
   produced which results, so an A/B is separable (user stories 7-8);
+- **by invocation** (``eval.invocation``): which Backend × Model × ReasoningLevel
+  launch config produced which results, so configurations are comparable (ADR-0025);
 - **trend over time** (the ``eval.timestamp`` day): metrics run-over-run, so the
   harness's improvement (or regression) is a query, not a guess (user story 11).
 
@@ -38,12 +40,14 @@ from ...harness.eval import store
 #: harness-local ``eval.*`` names), which DuckDB reads as literal column names.
 _ROLE_FIELD = '"gen_ai.agent.name"'
 _VARIANT_FIELD = '"eval.variant"'
+_INVOCATION_FIELD = '"eval.invocation"'
 _TIMESTAMP_FIELD = '"eval.timestamp"'
 _TOOL_CALLS_FIELD = '"eval.tool_call_count"'
 
 #: Substituted for a NULL group key so a row with no variant (a fail-open run writes
 #: ``None``) still aggregates under a stable, printable bucket instead of vanishing.
 _NO_VARIANT = "(none)"
+_NO_INVOCATION = "(none)"
 _UNKNOWN_ROLE = "(unknown)"
 
 #: The variant is persisted as a nested object — ``{"content_hash": …, "label": …}``
@@ -63,6 +67,31 @@ _VARIANT_KEY = f"""CASE
         ELSE CAST({_VARIANT_HASH} AS VARCHAR) || ' [' || CAST({_VARIANT_LABEL} AS VARCHAR) || ']'
     END"""
 
+#: The invocation is persisted as ``{"observed": {backend, model, provider,
+#: reasoning_level, permission_mode}, "intended": …}`` (ADR-0025;
+#: :func:`shipit.harness.eval.record._invocation_record`). Grouping keys on the
+#: OBSERVED launch config — the ``backend/model (reasoning_level)`` tuple the harness
+#: compares configurations by — so two Runs of the same role under different backends
+#: or reasoning levels separate. A null invocation (an old/fail-open record) buckets
+#: under :data:`_NO_INVOCATION`; a null backend/model collapses to ``?``; a null
+#: reasoning level drops the suffix. Struct-field access is null-safe across the
+#: inferred column types (STRUCT for a populated store, JSON for an all-null one), so a
+#: store of only-null invocations does not error.
+_INV_OBSERVED = f"{_INVOCATION_FIELD}.observed"
+_INV_BACKEND = f"{_INV_OBSERVED}.backend"
+_INV_MODEL = f"{_INV_OBSERVED}.model"
+_INV_REASONING = f"{_INV_OBSERVED}.reasoning_level"
+_INVOCATION_KEY = f"""CASE
+        WHEN {_INVOCATION_FIELD} IS NULL OR {_INV_OBSERVED} IS NULL THEN '{_NO_INVOCATION}'
+        ELSE
+            COALESCE(CAST({_INV_BACKEND} AS VARCHAR), '?') || '/' ||
+            COALESCE(CAST({_INV_MODEL} AS VARCHAR), '?') ||
+            CASE
+                WHEN {_INV_REASONING} IS NULL THEN ''
+                ELSE ' (' || CAST({_INV_REASONING} AS VARCHAR) || ')'
+            END
+    END"""
+
 
 @dataclass(frozen=True)
 class GroupRow:
@@ -76,17 +105,21 @@ class GroupRow:
 
 @dataclass(frozen=True)
 class EvalReport:
-    """The full aggregation: the total run count plus the three roll-ups."""
+    """The full aggregation: the total run count plus the roll-ups (role, variant,
+    invocation, day)."""
 
     total_runs: int
     by_role: list[GroupRow]
     by_variant: list[GroupRow]
+    by_invocation: list[GroupRow]
     by_day: list[GroupRow]
 
 
 #: The "no runs recorded" report — returned for an empty/missing store AND when the
 #: target path has no per-repo store to read (not a checkout / no origin remote).
-_EMPTY_REPORT = EvalReport(total_runs=0, by_role=[], by_variant=[], by_day=[])
+_EMPTY_REPORT = EvalReport(
+    total_runs=0, by_role=[], by_variant=[], by_invocation=[], by_day=[]
+)
 
 
 #: Default roll-up ordering: most runs first, then key — a "top buckets" view for
@@ -126,7 +159,7 @@ def aggregate(store_path: str | Path) -> EvalReport:
     """
     path = Path(store_path)
     if not path.exists() or path.stat().st_size == 0:
-        return EvalReport(total_runs=0, by_role=[], by_variant=[], by_day=[])
+        return _EMPTY_REPORT
 
     import duckdb  # lazy: only the eval verb needs the query engine.
 
@@ -134,12 +167,14 @@ def aggregate(store_path: str | Path) -> EvalReport:
     try:
         role_key = f"COALESCE(CAST({_ROLE_FIELD} AS VARCHAR), '{_UNKNOWN_ROLE}')"
         variant_key = _VARIANT_KEY
+        invocation_key = _INVOCATION_KEY
         # The day bucket is the ISO timestamp's date prefix — taken as the leading
         # 10 chars so it never depends on DuckDB parsing the timezone offset.
         day_key = f"SUBSTR(CAST({_TIMESTAMP_FIELD} AS VARCHAR), 1, 10)"
 
         by_role = _run_group(con, role_key, str(path), _ORDER_BY_RUNS)
         by_variant = _run_group(con, variant_key, str(path), _ORDER_BY_RUNS)
+        by_invocation = _run_group(con, invocation_key, str(path), _ORDER_BY_RUNS)
         # The day trend orders chronologically by the date key, not by run count,
         # so a busy older day cannot jump ahead of a quieter newer one.
         by_day = _run_group(con, day_key, str(path), _ORDER_BY_KEY)
@@ -148,6 +183,7 @@ def aggregate(store_path: str | Path) -> EvalReport:
             total_runs=total,
             by_role=by_role,
             by_variant=by_variant,
+            by_invocation=by_invocation,
             by_day=by_day,
         )
     finally:
@@ -190,6 +226,8 @@ def format_report(report: EvalReport) -> str:
         *_render_section("By role:", "role", report.by_role),
         "",
         *_render_section("By variant:", "variant", report.by_variant),
+        "",
+        *_render_section("By invocation:", "invocation", report.by_invocation),
         "",
         *_render_section("Trend (by day):", "day", report.by_day),
     ]

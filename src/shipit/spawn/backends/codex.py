@@ -50,6 +50,7 @@ import os
 from collections.abc import Mapping
 from pathlib import Path
 
+from ...agent.backend import CODEX as _IDENTITY
 from .base import BackendAdapter
 
 #: The codex auth-env vars :meth:`CodexAdapter.child_env` scrubs (ADR-0020 §codex
@@ -58,26 +59,26 @@ from .base import BackendAdapter
 #: them so the OAuth session wins; everything else inherits.
 AUTH_ENV_VARS = ("OPENAI_API_KEY", "CODEX_API_KEY")
 
-#: Legacy review aliases → Codex model ids. The funnel's per-reviewer ``model`` config
-#: (``.shipit.toml [reviewers]``) speaks the legacy ``pro`` / ``flash`` aliases, so a
-#: capture reviewer constructed with one resolves it here; a write Run takes
-#: :data:`DEFAULT_MODEL`. An already-verbatim id (``gpt-5.5``) passes through.
-MODEL_ALIASES = {
-    "pro": "gpt-5.5",
-    "flash": "gpt-5.4-mini",
-    "flash_lite": "gpt-5.4-mini",
-}
+#: Legacy review aliases → Codex model ids — sourced from the ONE agent-backend
+#: identity registry (:data:`shipit.agent.backend.CODEX`), NOT a duplicate table here
+#: (ADR-0025: the alias table is defined once and shared by the launch + funnel axes).
+#: The funnel's per-reviewer ``model`` config (``.shipit.toml [reviewers]``) speaks the
+#: legacy ``pro`` / ``flash`` aliases, so a capture reviewer constructed with one
+#: resolves it here; a write Run takes :data:`DEFAULT_MODEL`. A verbatim id passes through.
+MODEL_ALIASES = _IDENTITY.model_aliases
 
-#: The default codex model for a write Run — the capable "pro" tier. The registry
-#: instantiates :class:`CodexAdapter` with this; the funnel constructs its own instance
-#: with the per-reviewer model. ``resolve_model`` leaves it unchanged (it is already a
-#: verbatim id), so the write path is byte-for-byte unchanged.
-DEFAULT_MODEL = "gpt-5.5"
+#: The default codex model for a write Run — the capable "pro" tier (from the shared
+#: identity). The registry instantiates :class:`CodexAdapter` with this; the funnel
+#: constructs its own instance with the per-reviewer model. ``resolve_model`` leaves it
+#: unchanged (already a verbatim id), so the write path is byte-for-byte unchanged.
+DEFAULT_MODEL = _IDENTITY.default_model
 
 
 def resolve_model(model: str) -> str:
-    """Map a legacy review alias to its Codex model id (pass-through otherwise)."""
-    return MODEL_ALIASES.get(model, model)
+    """Map a legacy review alias to its Codex model id (pass-through otherwise).
+
+    Delegates to the shared agent-backend identity so there is ONE alias table."""
+    return _IDENTITY.resolve_model(model)
 
 
 #: The codex ``-c`` override that enables outbound network inside the reviewer's
@@ -104,7 +105,7 @@ def _role_preamble(role: str) -> str:
 class CodexAdapter(BackendAdapter):
     """The headless-``codex`` backend (ADR-0020 §codex), adapter #1 of the seam."""
 
-    name = "codex"
+    name = _IDENTITY.name
 
     def __init__(self, model: str = DEFAULT_MODEL) -> None:
         #: The Codex model id (alias resolved once at construction). The registry's

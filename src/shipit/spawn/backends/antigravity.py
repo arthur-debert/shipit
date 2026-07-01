@@ -49,23 +49,23 @@ import os
 from collections.abc import Mapping
 from pathlib import Path
 
+from ...agent.backend import ANTIGRAVITY as _IDENTITY
 from .base import BackendAdapter
 
-#: Legacy review aliases → agy's verbatim model names (``agy models``). The default
-#: ``pro`` MUST resolve to a capable,
-#: NON-agentic model: a bare ``pro`` silently resolves to Gemini Flash, which in
-#: ``--print`` goes agentic (runs shell/build instead of answering) and never returns —
-#: so ``pro`` is pinned to ``Gemini 3.1 Pro (High)``. Spaces/parens are safe: the
-#: invocation is a plain argv list (never shell-interpolated), so no quoting is needed.
-MODEL_ALIASES = {
-    "pro": "Gemini 3.1 Pro (High)",
-    "flash": "Gemini 3.5 Flash (High)",
-    "flash_lite": "Gemini 3.5 Flash (Low)",
-}
+#: Legacy review aliases → agy's verbatim model names — sourced from the ONE
+#: agent-backend identity registry (:data:`shipit.agent.backend.ANTIGRAVITY`), NOT a
+#: duplicate table here (ADR-0025: one alias table, shared by the launch + funnel axes).
+#: The default ``pro`` MUST resolve to a capable, NON-agentic model: a bare ``pro``
+#: silently resolves to Gemini Flash, which in ``--print`` goes agentic (runs shell/build
+#: instead of answering) and never returns — so ``pro`` is pinned to
+#: ``Gemini 3.1 Pro (High)``. Spaces/parens are safe: the invocation is a plain argv list
+#: (never shell-interpolated), so no quoting is needed.
+MODEL_ALIASES = _IDENTITY.model_aliases
 
-#: The default model alias — a sane, capable, non-agentic default for a write Run (see
-#: :data:`MODEL_ALIASES`). Resolved through :func:`resolve_model` at construction.
-DEFAULT_MODEL = "pro"
+#: The default model alias — a sane, capable, non-agentic default for a write Run (from
+#: the shared identity; see :data:`MODEL_ALIASES`). Resolved through
+#: :func:`resolve_model` at construction.
+DEFAULT_MODEL = _IDENTITY.default_model
 
 #: agy's ``--print`` timeout (default 5m). A big write Run can exceed that and return a
 #: truncated result + ``timed out waiting for response``; 10m gives headroom. A consumer
@@ -79,8 +79,10 @@ SCRUBBED_AUTH_ENV = ("GEMINI_API_KEY", "GOOGLE_API_KEY")
 
 
 def resolve_model(model: str) -> str:
-    """Map a model alias to agy's verbatim name (pass-through for an already-verbatim name)."""
-    return MODEL_ALIASES.get(model, model)
+    """Map a model alias to agy's verbatim name (pass-through for an already-verbatim name).
+
+    Delegates to the shared agent-backend identity so there is ONE alias table."""
+    return _IDENTITY.resolve_model(model)
 
 
 def role_prompt(task: str, role: str) -> str:
@@ -105,7 +107,7 @@ class AntigravityAdapter(BackendAdapter):
     (user-facing); the binary is ``agy``.
     """
 
-    name = "antigravity"
+    name = _IDENTITY.name
 
     def __init__(
         self, model: str = DEFAULT_MODEL, timeout: str = DEFAULT_TIMEOUT

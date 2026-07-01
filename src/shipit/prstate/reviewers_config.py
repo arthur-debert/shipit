@@ -60,11 +60,30 @@ from pathlib import Path
 
 from .reviewers import REGISTRY, ReviewerAdapter, by_name
 
-# The shipped default: Copilot required, review-once. Changing the required set
-# (or a rerun flag) for ALL consumers is editing this one literal; a single
-# consumer overrides it in its own `.shipit.toml` (the phos pilot repos add
-# coderabbit there — see module docstring).
+# The shipped default: Copilot required, review-once. This is the SINGLE
+# required-reviewer default (ADR-0025 / COR01-WS02): the install scaffold that seeds
+# a consumer's `[reviewers]` table (`shipit.config`) RENDERS its body from this map
+# (see `default_reviewers_scaffold_body`), so the code-default and the install-scaffold
+# can never disagree — a consumer with no `.shipit.toml` and a consumer that just ran
+# `shipit install` both require exactly Copilot. codex/agy are deliberately NOT in the
+# default set: their review GitHub Apps are not installed on an arbitrary consumer repo,
+# so requiring them by default would silently park every PR at REVIEWS_PENDING. A repo
+# that HAS the Apps opts them in via its own `.shipit.toml` `[reviewers]` (shipit's own
+# repo does exactly this). Changing the required set (or a rerun flag) for ALL consumers
+# is editing this one literal.
 DEFAULT_REVIEWERS: dict[str, bool] = {"copilot": False}
+
+
+def default_reviewers_scaffold_body() -> str:
+    """The `[reviewers]` TOML table body the install scaffold seeds when a consumer
+    has none — rendered from :data:`DEFAULT_REVIEWERS`, the SINGLE source of the
+    required-reviewer default (ADR-0025). Each default reviewer becomes a `name = {}`
+    entry (defaults: rerun off). Because both the engine default and the seeded config
+    come from the same map, a freshly-installed repo requires exactly what a repo with
+    no config does — the code-default vs install-scaffold disagreement is gone."""
+    lines = [f"{name} = {{}}" for name in DEFAULT_REVIEWERS]
+    return "[reviewers]\n" + "\n".join(lines) + "\n"
+
 
 # The override key + the file that carries it (the `[reviewers]` table in the
 # consumer's `.shipit.toml`). Named here so the doc and the loader agree.
