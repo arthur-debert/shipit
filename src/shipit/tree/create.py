@@ -13,8 +13,10 @@ summary (``{path, branch, base}``). The whole pipeline hides behind this one cal
    Doppler config, models) from the source checkout into the new Tree
    (:mod:`shipit.tree.include`).
 4. provision: ``shipit install`` then the path's ``pixi install`` / ``npm ci``,
-   run with the ADR-0015 build env (per-Tree ``target/``, ``SCCACHE_BASEDIRS``,
-   ``CARGO_INCREMENTAL=0``) so a cold Tree's first build is sccache-warm.
+   run with the parent's project-pointer env scrubbed (:func:`provision_env`). The
+   ADR-0015 build env (per-Tree ``target/``, ``SCCACHE_BASEDIRS``, ``CARGO_INCREMENTAL=0``)
+   is no longer injected here — it lives in pixi ``[activation.env]`` (COR01 / ADR-0022),
+   so pixi sets it on every activation and it reaches the agent's own in-Tree ``cargo``.
 
 Materialization stays atomic from the caller's view: if any step fails, the
 half-built leaf is removed before the error propagates. Every git call goes
@@ -109,26 +111,6 @@ def create(spec: TreeSpec, *, source_repo: str, github_url: str) -> Tree:
     return Tree(path=str(dest), branch=tree_plan.branch, base=tree_plan.base)
 
 
-def sccache_env(tree_dir: Path) -> dict[str, str]:
-    """The ADR-0015 build env that makes a cold Tree's first build sccache-warm.
-
-    - ``CARGO_TARGET_DIR`` → the Tree's own ``target/``: artifacts are **per-Tree**
-      (ADR-0015 rejects a shared target dir — Cargo locks it, serializing the fleet).
-    - ``SCCACHE_BASEDIRS`` → the Tree dir: sccache's cache key includes the absolute
-      build path, so without this every distinct Tree path misses the cross-Tree cache.
-    - ``CARGO_INCREMENTAL=0``: sccache disables incremental anyway, and incremental
-      bakes absolute paths that break under any copy.
-
-    Merged over the child's environment (it does not replace it) by
-    :func:`run_provision`.
-    """
-    return {
-        "CARGO_TARGET_DIR": str(tree_dir / "target"),
-        "SCCACHE_BASEDIRS": str(tree_dir),
-        "CARGO_INCREMENTAL": "0",
-    }
-
-
 #: ``PIXI_*`` variables the parent ``pixi run`` injects that bind to the PARENT
 #: project/manifest/environment. They MUST NOT leak into a child shipit/pixi
 #: operating inside a DIFFERENT clone: a leaked ``PIXI_PROJECT_MANIFEST`` makes the
@@ -155,12 +137,30 @@ CONDA_ACTIVATION_VARS = frozenset(
     {"CONDA_PREFIX", "CONDA_DEFAULT_ENV", "CONDA_SHLVL", "CONDA_PROMPT_MODIFIER"}
 )
 
+#: The ADR-0015 build-env vars that pixi ``[activation.env]`` now OWNS and re-sets to a
+#: PER-TREE value (via ``$PIXI_PROJECT_ROOT``) on every activation (COR01 / ADR-0022).
+#: These are exactly the three keys declared in ``pixi.toml``'s ``[activation.env]``. Once
+#: ``sccache_env()`` stopped injecting them in Python, an inherited PARENT value would
+#: SHADOW the Tree's activation value — a leaked ``CARGO_TARGET_DIR`` / ``SCCACHE_BASEDIRS``
+#: points the child's ``cargo`` at the PARENT Tree's ``target/`` and keys sccache on the
+#: PARENT path, so build artifacts land in — and cache-hit against — the WRONG Tree. They
+#: are the same leak class as the ``PIXI_*`` / Conda pointers: strip the inherited value so
+#: pixi's per-Tree ``[activation.env]`` value is authoritative. NOT scrubbed (kept, same as
+#: the cache/installation carve-outs): ``RUSTC_WRAPPER`` (the install-level sccache binary
+#: pointer — dropping it would DISABLE sccache in the child, and it is not per-Tree) and the
+#: ``SCCACHE_*`` cache/credential vars (``SCCACHE_DIR`` / ``SCCACHE_GCS_KEY`` — the child
+#: NEEDS them to reach the shared cache backend; they are user-/backend-level, not per-Tree
+#: paths).
+BUILD_ENV_VARS = frozenset(
+    {"CARGO_TARGET_DIR", "SCCACHE_BASEDIRS", "CARGO_INCREMENTAL"}
+)
+
 
 def is_leaked_env_var(key: str) -> bool:
     """Whether ``key`` is a parent-project env pointer to scrub from a Tree child.
 
     The single source of truth for "which inherited vars bind to the PARENT project and
-    must not leak into a child rooted in a different clone". Two leak classes:
+    must not leak into a child rooted in a different clone". Three leak classes:
 
     - ``PIXI_*`` project pointers (all ``PIXI_*`` except the user-level cache vars in
       :data:`PIXI_CACHE_VARS`).
@@ -168,33 +168,45 @@ def is_leaked_env_var(key: str) -> bool:
       ``CONDA_PREFIX_<n>``) — SCOPED to activation-binding vars only; installation-level
       ``CONDA_*`` (``CONDA_EXE`` / ``CONDA_PYTHON_EXE`` / ``CONDA_ROOT`` / ``_CE_*``) is
       KEPT, since scrubbing all ``CONDA_*`` could break ``pixi run`` in a Conda shell.
+    - ADR-0015 **build-env** vars (:data:`BUILD_ENV_VARS`) that pixi ``[activation.env]``
+      re-sets PER-TREE — SCOPED to the three per-Tree-path keys; install-/backend-level
+      ``RUSTC_WRAPPER`` and ``SCCACHE_*`` cache/credential vars are KEPT (dropping them
+      would disable sccache or cut the child off from the shared cache).
 
     Both the provisioning env (:func:`provision_env`) and the launch env
     (:func:`shipit.spawn.launch.scrub_tree_env`) scrub SOLELY on this predicate, so the
-    two paths can never drift on either carve-out.
+    two paths can never drift on any carve-out.
     """
     if key.startswith("PIXI_"):
         return key not in PIXI_CACHE_VARS
     if key in CONDA_ACTIVATION_VARS or key.startswith("CONDA_PREFIX_"):
         return True
+    if key in BUILD_ENV_VARS:
+        return True
     return False
 
 
-def provision_env(tree_dir: Path) -> dict[str, str]:
-    """The COMPLETE environment for a provisioning command run inside ``tree_dir``.
+def provision_env() -> dict[str, str]:
+    """The COMPLETE environment for a provisioning command run inside a Tree.
 
     A copy of the current environment with the parent's leaked ``PIXI_*`` / Conda
-    activation project pointers removed (:func:`is_leaked_env_var`) and the ADR-0015
-    build env (:func:`sccache_env`) applied. Returned as the full env — not an overlay —
-    so :func:`run_provision` can hand it to :func:`shipit.proc.run` with
-    ``replace_env=True``: a merge could re-add the very vars we are dropping (they live
-    in ``os.environ``), so removal requires replacing the env, not merging onto it. With
-    the project pointers gone, the child ``pixi`` / ``shipit`` re-resolves the project
-    from its own cwd (the Tree), which is the whole point.
+    activation / ADR-0015 build-env project pointers removed (:func:`is_leaked_env_var`).
+    Returned as the full env — not an overlay — so :func:`run_provision` can hand it to
+    :func:`shipit.proc.run` with ``replace_env=True``: a merge could re-add the very vars
+    we are dropping (they live in ``os.environ``), so removal requires replacing the env,
+    not merging onto it. With the project pointers gone, the child ``pixi`` / ``shipit``
+    re-resolves the project from its own cwd (the Tree), which is the whole point.
+
+    The ADR-0015 build env (per-Tree ``target/`` + ``SCCACHE_BASEDIRS`` +
+    ``CARGO_INCREMENTAL=0``) is NO LONGER built here: it lives in pixi ``[activation.env]``
+    (COR01 / ADR-0022), where ``$PIXI_PROJECT_ROOT`` expands to the same per-Tree absolute
+    paths on EVERY activation — so it now reaches the agent's own in-Tree ``cargo``, not
+    just this provisioning subprocess (which never builds Rust anyway). A parent value for
+    those same keys is now SCRUBBED (:data:`BUILD_ENV_VARS` in :func:`is_leaked_env_var`)
+    so an inherited ``CARGO_TARGET_DIR`` / ``SCCACHE_BASEDIRS`` can never shadow the Tree's
+    own per-activation value and mis-route the child's build artifacts.
     """
-    env = {k: v for k, v in os.environ.items() if not is_leaked_env_var(k)}
-    env.update(sccache_env(tree_dir))
-    return env
+    return {k: v for k, v in os.environ.items() if not is_leaked_env_var(k)}
 
 
 def run_provision(cmd: list[str], *, cwd: Path, env: dict[str, str]) -> None:
@@ -214,8 +226,10 @@ def _provision(dest: Path, *, trees_root: Path) -> None:
 
     Runs ``shipit install --local`` (when the repo carries ``.shipit.toml``), then
     the path's ``pixi install`` / ``npm ci``, each gated on its manifest existing and
-    each run with the ADR-0015 build env. Before ``pixi install`` it checks (and
-    only *warns* about — #119) the pixi-cache / Trees-root same-filesystem invariant.
+    each run with the scrubbed provisioning env (:func:`provision_env` — parent project
+    pointers removed; the ADR-0015 build env is no longer injected here, it comes from
+    pixi ``[activation.env]`` on activation). Before ``pixi install`` it checks (and only
+    *warns* about — #119) the pixi-cache / Trees-root same-filesystem invariant.
 
     The install runs in ``--local`` mode (#170): it commits the managed set on the
     Tree's already-checked-out planned branch with NO branch switch, NO push, and NO
@@ -224,7 +238,7 @@ def _provision(dest: Path, *, trees_root: Path) -> None:
     every Tree creation and leaving HEAD on the wrong branch. Provisioning only
     needs the managed files committed in the Tree, never any origin side effect.
     """
-    env = provision_env(dest)
+    env = provision_env()
     if (dest / config.CONFIG_NAME).is_file():
         run_provision(["shipit", "install", ".", "--local"], cwd=dest, env=env)
     if (dest / PIXI_MANIFEST).is_file():
