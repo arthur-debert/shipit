@@ -43,13 +43,12 @@ from .layout import TreeSpec, central_root, plan
 
 logger = logging.getLogger("shipit.tree")
 
-#: Provisioning is driven by which manifests the checkout carries: an ALREADY-ONBOARDED
-#: ``.shipit.toml`` (one with a ``[shipit]``/``[managed]`` block —
-#: :func:`shipit.config.is_onboarded`) gets the managed-set reconcile, a ``pixi.toml``
-#: gets ``pixi install``, a ``package.json`` gets ``npm ci``. Each dep step is gated on
-#: its file existing, so a repo that uses only one toolchain runs only that step; the
-#: install step additionally requires the onboarded marker so provisioning never
-#: onboards a repo as a side effect (#205).
+#: Provisioning REQUIRES an ALREADY-ONBOARDED ``.shipit.toml`` (one with a
+#: ``[shipit]``/``[managed]`` block — :func:`shipit.config.is_onboarded`): a
+#: non-onboarded target fails closed (#210). Given an onboarded repo, the checkout's
+#: manifests drive the rest: the managed-set reconcile always runs, a ``pixi.toml``
+#: gets ``pixi install``, a ``package.json`` gets ``npm ci`` — each dep step gated on
+#: its file existing, so a repo that uses only one toolchain runs only that step.
 PIXI_MANIFEST = "pixi.toml"
 NPM_MANIFEST = "package.json"
 
@@ -242,18 +241,27 @@ def _provision(dest: Path, *, trees_root: Path) -> None:
     every Tree creation and leaving HEAD on the wrong branch. Provisioning only
     needs the managed files committed in the Tree, never any origin side effect.
 
-    The install step is gated on :func:`shipit.config.is_onboarded`, NOT on the mere
-    presence of ``.shipit.toml`` — onboarding a repo is a deliberate act, never a
-    Tree-prep side effect. A repo that carries ``.shipit.toml`` for consumer policy
-    (``[secrets]`` / ``[reviewers]`` / ``[project]``) but has no ``[shipit]``/
-    ``[managed]`` block (shipit-self on ``main``) would otherwise be ONBOARDED fresh
-    on every spawn, committing the onboarding artifacts into the spawned branch and
-    polluting every work-stream PR (#205). Reconciling the managed set only makes
-    sense once a repo already has one.
+    Provisioning is gated on :func:`shipit.config.is_onboarded` and FAILS CLOSED: a
+    Tree cut from a repo with no ``[shipit]``/``[managed]`` block raises, rather than
+    silently skipping the reconcile (#210, revisiting #206). "Operate on a
+    non-onboarded repo" is meaningless in steady state — a repo shipit spawns Trees in
+    IS onboarded by definition — so a non-onboarded target is a real misconfiguration,
+    and shipit's ethos everywhere else is to fail loud (ADR-0017), never to tolerate a
+    degraded state silently. Onboarding a repo is a deliberate act (``shipit install``),
+    never a Tree-prep side effect: a repo that carries ``.shipit.toml`` for consumer
+    policy (``[secrets]`` / ``[reviewers]`` / ``[project]``) but no managed block would
+    otherwise be ONBOARDED fresh on every spawn, committing the onboarding artifacts
+    into the spawned branch and polluting every work-stream PR (#205). The loud
+    :class:`ValueError` is caught by the spawn/tree callers and rendered as a clean
+    exit-1 pointing at ``shipit install`` (never an escaping traceback).
     """
+    if not config.is_onboarded(dest / config.CONFIG_NAME):
+        raise ValueError(
+            f"repo {dest} is not onboarded — run `shipit install` first "
+            "(a Tree can only be provisioned from a repo shipit manages)"
+        )
     env = provision_env()
-    if config.is_onboarded(dest / config.CONFIG_NAME):
-        run_provision(["shipit", "install", ".", "--local"], cwd=dest, env=env)
+    run_provision(["shipit", "install", ".", "--local"], cwd=dest, env=env)
     if (dest / PIXI_MANIFEST).is_file():
         _warn_if_cache_cross_filesystem(trees_root)
         run_provision(["pixi", "install"], cwd=dest, env=env)
