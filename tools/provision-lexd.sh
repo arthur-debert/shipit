@@ -55,19 +55,6 @@ if have_pinned "$dest"; then
     exit 0
 fi
 
-# Canonicalize a path (follow symlinks) as portably as we can; print it unchanged when
-# no resolver is available. Used to tell an EXTERNAL host lexd apart from our own $dest
-# (which is first on PATH), so the Intel-mac fallback never self-symlinks the target.
-_resolve() {
-    if command -v realpath >/dev/null 2>&1; then
-        realpath "$1" 2>/dev/null || printf '%s\n' "$1"
-    elif readlink -f "$1" >/dev/null 2>&1; then
-        readlink -f "$1"
-    else
-        printf '%s\n' "$1"
-    fi
-}
-
 os="$(uname -s)"
 arch="$(uname -m)"
 
@@ -91,19 +78,26 @@ case "${os}" in
                 ;;
             x86_64)
                 # No x86_64 (Intel) macOS asset at this pin. Fail LOUD, never a silent
-                # skip: fall back to an EXTERNAL host `lexd` if present (noting any
+                # skip: fall back to an EXTERNAL host `lexd` if one is on PATH (noting any
                 # version drift), else instruct — the pinned fetch is unavailable here.
                 #
-                # $CONDA_PREFIX/bin is FIRST on PATH, so `command -v lexd` can resolve to
-                # our own install target ($dest); reject that self-match — symlinking
-                # $dest to itself (or reusing a stale env-local binary) is not a real
-                # host fallback. Compare canonical paths so a symlink-to-$dest is caught.
-                existing="$(command -v lexd 2>/dev/null || true)"
-                existing_real="$(_resolve "$existing")"
-                dest_real="$(_resolve "$dest")"
-                if [ -n "$existing" ] && [ "$existing_real" != "$dest_real" ]; then
-                    ln -sf "$existing" "$dest"
-                    got="$("$existing" --version 2>/dev/null || echo '?')"
+                # $CONDA_PREFIX/bin is FIRST on PATH, so the first `lexd` found can be our
+                # OWN install target ($dest). Walk PATH and take the first candidate that
+                # is NOT $dest (inode compare via `-ef`, symlink-safe), so a real host
+                # lexd later on PATH still wins; only fail if none qualifies.
+                host_lexd=""
+                IFS=':' read -ra _path_dirs <<<"$PATH"
+                for _dir in "${_path_dirs[@]}"; do
+                    [ -n "$_dir" ] || continue
+                    _cand="$_dir/lexd"
+                    [ -x "$_cand" ] || continue
+                    [ -e "$dest" ] && [ "$_cand" -ef "$dest" ] && continue
+                    host_lexd="$_cand"
+                    break
+                done
+                if [ -n "$host_lexd" ]; then
+                    ln -sf "$host_lexd" "$dest"
+                    got="$("$host_lexd" --version 2>/dev/null || echo '?')"
                     case "$got" in
                         *"$PIN"*) : ;;
                         *) echo "provision-lexd: using host lexd (${got#lexd }); pin is ${PIN}, no x86_64-apple-darwin asset at this pin" >&2 ;;
