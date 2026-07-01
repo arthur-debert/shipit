@@ -46,7 +46,8 @@ def store_dir(base_dir: Path | None = None) -> Path:
 
 
 def repo_key(repo: "Repo") -> str:
-    """A filesystem-safe key for a repo — its origin ``owner-name`` identity slug.
+    """A collision-free, filesystem-safe key for a repo — its origin identity as a
+    nested ``<owner>/<name>`` path.
 
     Keyed by :class:`shipit.identity.Repo` IDENTITY (origin owner + name), NOT the
     resolved filesystem path (ADR-0024): two clones of one repo at different paths
@@ -55,16 +56,28 @@ def repo_key(repo: "Repo") -> str:
     deliberately absent from the key (it is excluded from :class:`Repo` identity),
     so the key is stable whether or not the owner's kind has been enriched.
 
-    ``owner`` and ``name`` come from GitHub's own refname grammar (no path
-    separators), but any separator — ``os.sep``, ``os.altsep``, or the drive-letter
-    ``:`` / URL ``/`` — is slugified to ``-`` belt-and-suspenders so the per-repo
-    store write can never break.
+    The key is a **nested ``<owner>/<name>`` path**, the same origin-keyed scheme
+    :mod:`shipit.logsetup` proved (``<base>/<owner>/<repo>/``). This is provably
+    collision-free where a flat ``owner-name`` join is NOT: ``-`` is legal in both a
+    GitHub owner login and a repo name, so owner ``a-b`` + name ``c`` and owner ``a``
+    + name ``b-c`` both flatten to ``a-b-c`` and would silently merge two distinct
+    repos' records into one file. A ``/`` separator can never collide because
+    neither a GitHub owner login nor a repo name may contain ``/`` — each is one
+    unambiguous path segment. Each component is still slugified
+    belt-and-suspenders (any stray ``os.sep`` / ``os.altsep`` / drive ``:`` inside a
+    component → ``-``) so a per-repo store write can never escape its segment.
     """
-    return f"{_slug(repo.owner.login)}-{_slug(repo.name)}"
+    return f"{_slug(repo.owner.login)}/{_slug(repo.name)}"
 
 
 def _slug(text: str) -> str:
-    """Slugify a key component: every path/URL separator → ``-``, trimmed."""
+    """Slugify one key component: every path separator → ``-``, trimmed.
+
+    Operates on a SINGLE ``<owner>``/``<name>`` segment (the structural ``/`` that
+    separates them in :func:`repo_key` is added around slugged components, never
+    within one), so ``/`` is folded here too — a stray separator inside a component
+    must not spill into a second path segment.
+    """
     seps = {os.sep, os.altsep, ":", "/"} - {None}
     for sep in seps:
         text = text.replace(sep, "-")
@@ -72,7 +85,11 @@ def _slug(text: str) -> str:
 
 
 def store_path(repo: "Repo", base_dir: Path | None = None) -> Path:
-    """The JSONL store file for ``repo``'s identity."""
+    """The JSONL store file for ``repo``'s identity: ``<root>/<owner>/<name>.jsonl``.
+
+    The nested ``<owner>/<name>`` key (:func:`repo_key`) becomes a nested store
+    file, so distinct repos never share a path (see the collision note there).
+    """
     return store_dir(base_dir) / f"{repo_key(repo)}.jsonl"
 
 

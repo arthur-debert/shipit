@@ -156,10 +156,15 @@ def resolve_working_dir(cwd: str = ".", *, boundary=gh) -> WorkingDir:
 
     The single resolver replacing the ``git rev-parse --show-toplevel``
     re-derivations: the path is the git toplevel (via the one
-    :func:`shipit.gh.repo_root` boundary), falling back to ``cwd`` when ``cwd`` is
-    not a checkout. The :class:`Repo` and :class:`Revision` are read against that
-    root, so identity and revision describe the same checkout. Identity resolution
-    is local/offline (see :func:`resolve_repo`).
+    :func:`shipit.gh.repo_root` boundary), falling back to ``cwd`` only when
+    ``repo_root`` yields nothing. The :class:`Repo` and :class:`Revision` are read
+    against that root, so identity and revision describe the same checkout.
+
+    This REQUIRES a checkout. A :class:`WorkingDir` *has-a* :class:`Repo`, and a
+    :class:`Repo` needs an origin remote, so outside a checkout (no origin) this
+    raises :class:`shipit.gh.GhError`, propagated from :func:`resolve_repo` — it
+    does NOT fabricate an identity-less WorkingDir. Identity resolution is
+    local/offline (see :func:`resolve_repo`).
     """
     root = boundary.repo_root(cwd=cwd) or cwd
     repo = resolve_repo(root, boundary=boundary)

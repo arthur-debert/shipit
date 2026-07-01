@@ -24,7 +24,7 @@ def state_dir(monkeypatch, tmp_path):
     resolves a `Repo` from the payload's cwd via `identity.resolve_working_dir` —
     which reads the origin remote. The tmp cwd is not a real checkout, so the git
     boundary the resolver uses is stubbed to a known repo; every seeded record then
-    lands under one deterministic `owner-name.jsonl` store file.
+    lands under one deterministic nested `<owner>/<name>.jsonl` store file.
     """
     base = tmp_path / "state"
     monkeypatch.setattr(store.platformdirs, "user_state_dir", lambda *a, **k: str(base))
@@ -40,7 +40,7 @@ def state_dir(monkeypatch, tmp_path):
 
 
 def _records(state_dir):
-    files = list((state_dir / "eval").glob("*.jsonl"))
+    files = list((state_dir / "eval").rglob("*.jsonl"))
     if not files:
         return []
     return [json.loads(line) for line in files[0].read_text().splitlines()]

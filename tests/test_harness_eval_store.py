@@ -51,10 +51,27 @@ def test_distinct_repos_get_distinct_store_files(tmp_path):
     assert a.suffix == ".jsonl"
 
 
-def test_repo_key_is_the_owner_name_identity_slug():
+def test_repo_key_is_the_nested_owner_name_identity_path():
+    # The key is a nested ``<owner>/<name>`` path (the logsetup-proven origin scheme),
+    # NOT a flat ``owner-name`` join — the ``/`` is the collision-free separator that
+    # neither a GitHub owner login nor a repo name may contain.
     key = store.repo_key(_repo(owner="arthur-debert", name="shipit"))
-    assert "/" not in key
-    assert key == "arthur-debert-shipit"
+    assert key == "arthur-debert/shipit"
+
+
+def test_repo_key_does_not_collide_across_hyphen_ambiguous_repos(tmp_path):
+    # REGRESSION for the flat ``owner-name`` collision: owner ``a-b`` + name ``c`` and
+    # owner ``a`` + name ``b-c`` both flatten to ``a-b-c`` and would MERGE two distinct
+    # repos' records into one file. The nested-path key keeps them distinct.
+    base = tmp_path / "state"
+    left = _repo(owner="a-b", name="c")
+    right = _repo(owner="a", name="b-c")
+    assert store.repo_key(left) != store.repo_key(right)
+    lp = store.append_record({"who": "left"}, left, base_dir=base)
+    rp = store.append_record({"who": "right"}, right, base_dir=base)
+    assert lp != rp
+    assert [json.loads(x) for x in lp.read_text().splitlines()] == [{"who": "left"}]
+    assert [json.loads(x) for x in rp.read_text().splitlines()] == [{"who": "right"}]
 
 
 def test_two_clone_paths_of_one_repo_share_one_store_file(tmp_path):
