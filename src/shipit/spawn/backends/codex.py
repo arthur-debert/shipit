@@ -70,8 +70,12 @@ MODEL_ALIASES = _IDENTITY.model_aliases
 #: The default codex model for a write Run — the capable "pro" tier (from the shared
 #: identity). The registry instantiates :class:`CodexAdapter` with this; the funnel
 #: constructs its own instance with the per-reviewer model. ``resolve_model`` leaves it
-#: unchanged (already a verbatim id), so the write path is byte-for-byte unchanged.
-DEFAULT_MODEL = _IDENTITY.default_model
+#: unchanged (already a verbatim id), so the write path is byte-for-byte unchanged. The
+#: identity types ``default_model`` as ``str | None`` (a backend MAY require an explicit
+#: model), but codex always pins one, so narrow to a definite ``str`` — the adapter's
+#: ``model`` default expects a non-optional value.
+assert _IDENTITY.default_model is not None
+DEFAULT_MODEL: str = _IDENTITY.default_model
 
 
 def resolve_model(model: str) -> str:

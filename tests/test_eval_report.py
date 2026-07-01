@@ -48,6 +48,27 @@ _V1 = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
 _V2 = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
 
 
+def _write_legacy(base, repo, *, role, tool_calls, variant, timestamp):
+    """Append a PRE-v3 eval record — one with NO ``eval.invocation`` key at all.
+
+    Simulates a record written before WS02 added the invocation dimension (including
+    ones already in the current Repo-keyed store from the WS01→WS02 window): the real
+    builder always stamps `eval.invocation` now, so we build a normal record and strip
+    the key to reproduce the old on-disk shape. A store of only these has NO
+    `eval.invocation` column for DuckDB to bind."""
+    meta = None if role == "coordinator" else {"agentType": role}
+    record = build(
+        metrics={"tool_call_count": tool_calls},
+        meta=meta,
+        variant=variant,
+        commit="abc123",
+        timestamp=timestamp,
+        is_coordinator=role == "coordinator",
+    )
+    record.pop("eval.invocation", None)
+    store.append_record(record, repo, base_dir=base)
+
+
 def _seed(tmp_path):
     """Three records: two implementer runs (variant V1, day 06-01), one
     coordinator run (variant V2, day 06-02). Variants are the real nested-object
@@ -156,6 +177,72 @@ def test_invocation_with_no_observed_model_buckets_under_backend(tmp_path):
     result = report.aggregate(path)
     keys = {row.key for row in result.by_invocation}
     assert keys == {"claude/?"}
+
+
+def test_aggregate_tolerates_store_with_no_invocation_column(tmp_path):
+    # A store of ONLY pre-v3 records (no `eval.invocation` key on any row) has NO
+    # such column for DuckDB to infer, so a naive query naming it would fail to bind.
+    # The report must stay schema-tolerant: it buckets every old row under "(none)"
+    # and still rolls up the other dimensions, rather than raising. (Forward-compat
+    # WITHIN the store's own history — NOT compat with the orphaned path-keyed stores.)
+    base = tmp_path / "state"
+    repo = _REPO
+    _write_legacy(
+        base,
+        repo,
+        role="implementer",
+        tool_calls=10,
+        variant=_variant(_V1),
+        timestamp="2026-06-01T08:00:00+00:00",
+    )
+    _write_legacy(
+        base,
+        repo,
+        role="implementer",
+        tool_calls=20,
+        variant=_variant(_V1),
+        timestamp="2026-06-01T09:00:00+00:00",
+    )
+    result = report.aggregate(store.store_path(repo, base_dir=base))
+    assert result.total_runs == 2
+    assert result.by_invocation == [
+        report.GroupRow(key="(none)", runs=2, avg_tool_calls=15.0),
+    ]
+    # The other roll-ups still work over the mixed/old shape.
+    assert result.by_role == [
+        report.GroupRow(key="implementer", runs=2, avg_tool_calls=15.0),
+    ]
+
+
+def test_aggregate_tolerates_mixed_invocation_schema(tmp_path):
+    # A store with SOME rows carrying `eval.invocation` and some missing it (the
+    # WS01→WS02 window): the new rows group by their observed config, the old rows
+    # fall under "(none)" — the report never raises on the mixed schema.
+    base = tmp_path / "state"
+    repo = _REPO
+    _write_legacy(
+        base,
+        repo,
+        role="implementer",
+        tool_calls=4,
+        variant=_variant(_V1),
+        timestamp="2026-06-01T07:00:00+00:00",
+    )
+    _write(
+        base,
+        repo,
+        role="implementer",
+        tool_calls=10,
+        variant=_variant(_V1),
+        timestamp="2026-06-01T08:00:00+00:00",
+        meta_extra={"model": "gpt-5.5", "reasoning": "high", "backend": "codex"},
+    )
+    result = report.aggregate(store.store_path(repo, base_dir=base))
+    assert result.total_runs == 2
+    assert result.by_invocation == [
+        report.GroupRow(key="(none)", runs=1, avg_tool_calls=4.0),
+        report.GroupRow(key="codex/gpt-5.5 (high)", runs=1, avg_tool_calls=10.0),
+    ]
 
 
 def test_aggregate_separates_ab_label_arms_of_the_same_prompt(tmp_path):

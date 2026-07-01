@@ -225,14 +225,11 @@ def intended_from_meta(meta: Mapping[str, Any] | None) -> Invocation | None:
     model = None
     if model_id:
         provider = Provider.coerce(intent.get("provider"))
+        # `model_id` is truthy here, so `model_of_id` never returns None (it only
+        # returns None for a blank/absent id) — the base Model always exists.
         base = model_of_id(model_id)
-        model = (
-            Model(
-                id=str(model_id), provider=provider or (base.provider if base else None)
-            )
-            if base is None
-            else Model(id=base.id, provider=provider or base.provider)
-        )
+        assert base is not None
+        model = Model(id=base.id, provider=provider or base.provider)
     permission = intent.get("permission_mode") or intent.get("permissionMode")
     return Invocation(
         backend=(str(intent.get("backend")).strip() or None)

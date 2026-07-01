@@ -76,7 +76,11 @@ _VARIANT_KEY = f"""CASE
 #: under :data:`_NO_INVOCATION`; a null backend/model collapses to ``?``; a null
 #: reasoning level drops the suffix. Struct-field access is null-safe across the
 #: inferred column types (STRUCT for a populated store, JSON for an all-null one), so a
-#: store of only-null invocations does not error.
+#: store of only-null invocations does not error. A store predating v3 has NO
+#: ``eval.invocation`` column at all (not merely null rows) — DuckDB would fail to bind
+#: it, so :func:`aggregate` checks the column's PRESENCE (:func:`_present_columns`) and
+#: substitutes the constant ``(none)`` bucket when it is absent (forward-compat within
+#: the store's own history — pre-v3 rows show a null invocation dimension).
 _INV_OBSERVED = f"{_INVOCATION_FIELD}.observed"
 _INV_BACKEND = f"{_INV_OBSERVED}.backend"
 _INV_MODEL = f"{_INV_OBSERVED}.model"
@@ -165,9 +169,19 @@ def aggregate(store_path: str | Path) -> EvalReport:
 
     con = duckdb.connect(":memory:")
     try:
+        # A store whose rows predate a field's introduction has NO such column at
+        # all, so a query referencing it would fail to bind. Consult the inferred
+        # schema and fall back to the constant bucket for an absent group column, so
+        # the report is tolerant of a mixed-schema store (e.g. pre-v3 records with no
+        # `eval.invocation`) instead of raising.
+        present = _present_columns(con, str(path))
         role_key = f"COALESCE(CAST({_ROLE_FIELD} AS VARCHAR), '{_UNKNOWN_ROLE}')"
         variant_key = _VARIANT_KEY
-        invocation_key = _INVOCATION_KEY
+        invocation_key = (
+            _INVOCATION_KEY
+            if _column(_INVOCATION_FIELD) in present
+            else f"'{_NO_INVOCATION}'"
+        )
         # The day bucket is the ISO timestamp's date prefix — taken as the leading
         # 10 chars so it never depends on DuckDB parsing the timezone offset.
         day_key = f"SUBSTR(CAST({_TIMESTAMP_FIELD} AS VARCHAR), 1, 10)"
@@ -188,6 +202,27 @@ def aggregate(store_path: str | Path) -> EvalReport:
         )
     finally:
         con.close()
+
+
+def _column(field: str) -> str:
+    """The bare column name for a quoted SQL field literal (``"eval.invocation"`` →
+    ``eval.invocation``) — how it appears in the inferred schema (:func:`_present_columns`)."""
+    return field.strip('"')
+
+
+def _present_columns(con: object, path: str) -> set[str]:
+    """The top-level column names DuckDB infers for the store at ``path``.
+
+    A store whose rows all predate a field (a pre-v3 record with no
+    ``eval.invocation``) yields NO such column, so a query naming it fails to bind.
+    The aggregator consults this to fall back to a constant bucket for an absent group
+    column, keeping the report tolerant of the store's own schema history (NOT compat
+    with the orphaned path-keyed stores — those stay orphaned)."""
+    rows = con.execute(  # type: ignore[attr-defined]
+        "DESCRIBE SELECT * FROM read_json_auto(?, format='newline_delimited')",
+        [path],
+    ).fetchall()
+    return {str(row[0]) for row in rows}
 
 
 def _run_group(con: object, key_expr: str, path: str, order_by: str) -> list[GroupRow]:

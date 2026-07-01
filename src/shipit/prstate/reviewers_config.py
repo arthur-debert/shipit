@@ -76,12 +76,20 @@ DEFAULT_REVIEWERS: dict[str, bool] = {"copilot": False}
 
 def default_reviewers_scaffold_body() -> str:
     """The `[reviewers]` TOML table body the install scaffold seeds when a consumer
-    has none — rendered from :data:`DEFAULT_REVIEWERS`, the SINGLE source of the
-    required-reviewer default (ADR-0025). Each default reviewer becomes a `name = {}`
-    entry (defaults: rerun off). Because both the engine default and the seeded config
-    come from the same map, a freshly-installed repo requires exactly what a repo with
-    no config does — the code-default vs install-scaffold disagreement is gone."""
-    lines = [f"{name} = {{}}" for name in DEFAULT_REVIEWERS]
+    has none — rendered FAITHFULLY from :data:`DEFAULT_REVIEWERS`, the SINGLE source of
+    the required-reviewer default (ADR-0025). Each default reviewer becomes a
+    `name = { rerun = <bool> }` entry when it sets rerun, else the empty-options
+    `name = {}` (rerun defaults off). Rendering the map VALUES (not just its keys) keeps
+    the scaffold truly single-sourced: if a future default flips a reviewer to
+    `rerun = true`, the seeded `.shipit.toml` tracks it instead of silently diverging
+    from the engine default (which reads the same map). Because both the engine default
+    and the seeded config come from this one map, a freshly-installed repo requires
+    exactly what a repo with no config does — the code-default vs install-scaffold
+    disagreement is gone."""
+    lines = [
+        f"{name} = {{ rerun = true }}" if rerun else f"{name} = {{}}"
+        for name, rerun in DEFAULT_REVIEWERS.items()
+    ]
     return "[reviewers]\n" + "\n".join(lines) + "\n"
 
 

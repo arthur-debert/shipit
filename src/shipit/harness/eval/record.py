@@ -103,7 +103,7 @@ def build(
     }
 
 
-def _invocation_record(meta: Mapping[str, Any]) -> dict[str, Any]:
+def _invocation_record(meta: Mapping[str, Any] | None) -> dict[str, Any]:
     """The run's :class:`shipit.agent.Invocation` attribution — observed + intended.
 
     The **observed** launch config (Backend × Model × ReasoningLevel + permission_mode)

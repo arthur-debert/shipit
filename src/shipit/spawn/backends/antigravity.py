@@ -64,8 +64,12 @@ MODEL_ALIASES = _IDENTITY.model_aliases
 
 #: The default model alias — a sane, capable, non-agentic default for a write Run (from
 #: the shared identity; see :data:`MODEL_ALIASES`). Resolved through
-#: :func:`resolve_model` at construction.
-DEFAULT_MODEL = _IDENTITY.default_model
+#: :func:`resolve_model` at construction. The identity types ``default_model`` as
+#: ``str | None`` (a backend MAY require an explicit model), but antigravity always
+#: pins one (``pro``), so narrow to a definite ``str`` here — the adapter's ``model``
+#: default and downstream ``resolve_model`` expect a non-optional value.
+assert _IDENTITY.default_model is not None
+DEFAULT_MODEL: str = _IDENTITY.default_model
 
 #: agy's ``--print`` timeout (default 5m). A big write Run can exceed that and return a
 #: truncated result + ``timed out waiting for response``; 10m gives headroom. A consumer
