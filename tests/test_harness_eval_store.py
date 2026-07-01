@@ -74,6 +74,33 @@ def test_repo_key_does_not_collide_across_hyphen_ambiguous_repos(tmp_path):
     assert [json.loads(x) for x in rp.read_text().splitlines()] == [{"who": "right"}]
 
 
+def test_case_varying_origins_of_one_repo_share_one_store_file(tmp_path):
+    # Case-fragmentation regression: GitHub owner/repo are case-INSENSITIVE, so a
+    # clone whose origin reads `Acme/Widget` and one reading `acme/widget` are ONE
+    # repo. `resolve_repo` lowercases to the canonical identity (test_identity), so
+    # both resolve to the SAME store key/file here — the store never fragments per
+    # origin case.
+    from shipit.identity import Owner, Repo, resolve_repo
+
+    class _FakeGit:
+        def __init__(self, url):
+            self._url = url
+
+        def git_remote_url(self, *, cwd, remote="origin"):
+            return self._url
+
+    base = tmp_path / "state"
+    mixed = resolve_repo(".", boundary=_FakeGit("git@github.com:Acme/Widget.git"))
+    lower = resolve_repo(".", boundary=_FakeGit("https://github.com/acme/widget"))
+    assert mixed == lower == Repo(owner=Owner("acme"), name="widget")
+    assert store.repo_key(mixed) == store.repo_key(lower)
+    pa = store.append_record({"run": "mixed"}, mixed, base_dir=base)
+    pb = store.append_record({"run": "lower"}, lower, base_dir=base)
+    assert pa == pb
+    records = [json.loads(line) for line in pa.read_text().splitlines()]
+    assert records == [{"run": "mixed"}, {"run": "lower"}]
+
+
 def test_two_clone_paths_of_one_repo_share_one_store_file(tmp_path):
     # THE scatter-bug regression: the store keys by origin identity, not by clone
     # path — so two Trees/clones of the same repo (constructed identically, standing

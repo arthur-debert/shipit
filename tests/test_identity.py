@@ -149,6 +149,21 @@ def test_resolve_repo_derives_identity_locally_offline():
     assert git.remote_url_cwds == ["/checkout/widget/src/deep"]
 
 
+def test_resolve_repo_is_case_insensitive_like_github():
+    # GitHub owner/repo are case-INSENSITIVE, but origin URLs vary in case between
+    # clones (`Acme/Widget` vs `acme/widget`). resolve_repo lowercases to the
+    # canonical form so both clones yield the SAME Repo identity — otherwise the
+    # single-store goal fragments per case, the same class as the `-` collision.
+    mixed = resolve_repo(
+        "/checkout", boundary=FakeGit(remote_url="git@github.com:Acme/Widget.git")
+    )
+    lower = resolve_repo(
+        "/checkout", boundary=FakeGit(remote_url="https://github.com/acme/widget")
+    )
+    assert mixed == lower == Repo(owner=Owner("acme"), name="widget")
+    assert hash(mixed) == hash(lower)
+
+
 def test_resolve_working_dir_composes_path_repo_and_revision():
     git = FakeGit(toplevel="/checkout/widget", branch="COR01/WS01", commit="cafe1234")
     wd = resolve_working_dir("/checkout/widget/src", boundary=git)

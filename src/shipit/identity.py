@@ -32,8 +32,31 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import Protocol
 
 from . import gh
+
+
+class GitBoundary(Protocol):
+    """The narrow git/gh surface the resolvers depend on — an injected boundary.
+
+    Captures ONLY the methods the resolvers actually call (ADR-0021's
+    injected-boundary style), not the whole :mod:`shipit.gh` module: the four
+    local, offline git reads that derive identity/revision, plus the one
+    API-touching :meth:`owner_kind` used solely by :func:`resolve_owner_kind`. A
+    :class:`typing.Protocol` (structural) so both the real :mod:`shipit.gh` module
+    and a test's fake satisfy it without inheriting anything.
+    """
+
+    def git_remote_url(self, *, cwd: str, remote: str = "origin") -> str: ...
+
+    def repo_root(self, *, cwd: str | None = None) -> str | None: ...
+
+    def git_current_branch(self, *, cwd: str) -> str | None: ...
+
+    def git_head_commit(self, *, cwd: str) -> str | None: ...
+
+    def owner_kind(self, login: str) -> str: ...
 
 
 class OwnerKind(Enum):
@@ -137,7 +160,7 @@ def parse_remote_url(url: str) -> tuple[str, str]:
     return match.group("owner"), match.group("name")
 
 
-def resolve_repo(cwd: str = ".", *, boundary=gh) -> Repo:
+def resolve_repo(cwd: str = ".", *, boundary: GitBoundary = gh) -> Repo:
     """The :class:`Repo` checked out at ``cwd`` — derived LOCALLY from origin.
 
     Reads ``git remote get-url origin`` (via the injected ``boundary``, default
@@ -145,13 +168,21 @@ def resolve_repo(cwd: str = ".", *, boundary=gh) -> Repo:
     deliberately NOT the API-based ``gh.current_repo()``. Raises :class:`shipit.gh.GhError`
     when there is no origin remote and :class:`ValueError` when the URL is
     unparseable.
+
+    Owner and name are **lowercased** to their canonical form: GitHub owner logins
+    and repo names are case-INSENSITIVE (``Acme/Widget`` and ``acme/widget`` are one
+    repo, and the lowercased slug still resolves via the API), but origin URLs vary
+    in case between clones. Normalising HERE makes the :class:`Repo` identity itself
+    case-insensitive, so EVERY Repo-keyed join (most load-bearingly the eval store)
+    is stable across case-varying origins — the fix belongs at the identity, not at
+    each key site.
     """
     url = boundary.git_remote_url(cwd=cwd)
     owner_login, name = parse_remote_url(url)
-    return Repo(owner=Owner(login=owner_login), name=name)
+    return Repo(owner=Owner(login=owner_login.lower()), name=name.lower())
 
 
-def resolve_working_dir(cwd: str = ".", *, boundary=gh) -> WorkingDir:
+def resolve_working_dir(cwd: str = ".", *, boundary: GitBoundary = gh) -> WorkingDir:
     """The :class:`WorkingDir` at ``cwd`` — its repo-root path, :class:`Repo`, revision.
 
     The single resolver replacing the ``git rev-parse --show-toplevel``
@@ -175,7 +206,7 @@ def resolve_working_dir(cwd: str = ".", *, boundary=gh) -> WorkingDir:
     return WorkingDir(path=root, repo=repo, revision=revision)
 
 
-def resolve_owner_kind(repo: Repo, *, boundary=gh) -> OwnerKind:
+def resolve_owner_kind(repo: Repo, *, boundary: GitBoundary = gh) -> OwnerKind:
     """The :class:`OwnerKind` of ``repo``'s owner — the ONE API-touching resolver.
 
     A lazily-resolved enrichment, NOT part of :class:`Repo` identity: it queries

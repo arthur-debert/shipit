@@ -45,7 +45,7 @@ def store_dir(base_dir: Path | None = None) -> Path:
     return Path(platformdirs.user_state_dir("shipit")) / "eval"
 
 
-def repo_key(repo: "Repo") -> str:
+def repo_key(repo: Repo) -> str:
     """A collision-free, filesystem-safe key for a repo — its origin identity as a
     nested ``<owner>/<name>`` path.
 
@@ -84,7 +84,7 @@ def _slug(text: str) -> str:
     return text.strip("-") or "_"
 
 
-def store_path(repo: "Repo", base_dir: Path | None = None) -> Path:
+def store_path(repo: Repo, base_dir: Path | None = None) -> Path:
     """The JSONL store file for ``repo``'s identity: ``<root>/<owner>/<name>.jsonl``.
 
     The nested ``<owner>/<name>`` key (:func:`repo_key`) becomes a nested store
@@ -94,7 +94,7 @@ def store_path(repo: "Repo", base_dir: Path | None = None) -> Path:
 
 
 def append_record(
-    record: dict[str, Any], repo: "Repo", base_dir: Path | None = None
+    record: dict[str, Any], repo: Repo, base_dir: Path | None = None
 ) -> Path:
     """Append one eval record as a JSONL line to the repo's store; return its path.
 
