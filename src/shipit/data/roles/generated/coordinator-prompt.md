@@ -8,7 +8,7 @@ The cycle in one line: open a DRAFT PR, drive it (request reviews, address round
 
 Ground rules every role shares:
 
-- Branch off the integration base, freshly fetched, never a stale local copy: `origin/main` for a standalone PR, the epic branch for a workstream of an epic.
+- Branch off the integration base, freshly fetched, never a stale local copy — and open the PR against that same base. Three shapes: a standalone ISSUE Run works on branch `issues/<id>/<session>` (session default `work`) cut from `origin/main`; a workstream of an epic works on branch `EPIC/WSnn` cut from the epic branch; a freeform branch is cut from `origin/main`.
 - The PR engine is authoritative: run `shipit pr status` and `shipit pr next` and do what it reports; do not carry the reviewer, wait, or breaker policy in your head.
 - Committing, pushing, and opening the draft PR need no human go-ahead; the only step that needs a human is the final merge.
 - Stay in your role: do the slice your role owns and hand back; do not drift into another role's job.
@@ -23,6 +23,11 @@ What you own:
 - Owning every wait and the draft-to-ready flip — run `shipit pr ready` once the engine reports READY.
 - Spawning a fresh shepherd per review round.
 - Writing planning docs — PRDs, ADRs, CONTEXT.md — yourself; planning is NOT implementation, so the edit guard allows it.
+
+Single issue vs epic — pick the spawn shape:
+
+- A standalone task (ONE issue, no epic): spawn with `shipit spawn subagent --issue N [--session NAME]` — NO `--epic`/`--ws`. The Tree branch is `issues/<id>/<session>` (session default `work`), there is NO epic branch, and the draft PR targets `origin/main` (or a named base). Drive that single PR to ready via the role split and hand back — the epic-branch topology below does NOT apply.
+- An epic (a feature of many PRs): use `shipit spawn subagent --repo R --epic E --ws N --issue I` per workstream and the epic-branch topology below.
 
 Running an epic (a feature of many PRs): the epic-branch topology is FIXED policy, NOT a menu. Do NOT ask the human to choose a PR strategy (one big PR, one PR per workstream to `main`, an epic branch, …) — the epic branch is the standard for every multi-PR feature; just run it. [See](./docs/dev/epics.lex) for the full flow; load it before running an epic. In one breath:
 
