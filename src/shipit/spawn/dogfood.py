@@ -54,6 +54,7 @@ from pathlib import Path
 from .. import execrun, gh
 from ..tree import create as tree_create
 from ..tree import layout
+from . import launch
 
 logger = logging.getLogger("shipit.spawn")
 
@@ -333,21 +334,22 @@ def _run_spawn(
 ) -> SpawnInvocation:
     """Run ``shipit <argv>`` in ``cwd`` and capture it (the live spawn seam).
 
-    Goes through the one Exec runner (ADR-0028): ``env`` overlays the inherited
-    environment (the runner's default merge — used by the fail-closed scenario to
-    inject a relative ``SHIPIT_TREES_ROOT``), stdin is pinned to ``/dev/null`` so
-    a TTY-less child never blocks, and ``check=False`` because a nonzero spawn is
-    a normal outcome the harness asserts on, not an exception. ``timeout=None``
-    is the explicit long-runner choice: a live spawn drives a real ``claude``
-    Run whose duration is unbounded token generation, so no bound is honest —
-    and a wedged run is the maintainer's deliberate, watched act to interrupt.
+    An Exec through the one runner (ADR-0028), with the launch path's own
+    semantics: ``env`` overlays the inherited environment (the runner's merge
+    default; used by the fail-closed scenario to inject a relative
+    ``SHIPIT_TREES_ROOT``), the runner pins ``stdin`` to ``/dev/null`` so a
+    TTY-less child never blocks, and ``check=False``: a nonzero spawn is a normal
+    outcome the harness asserts on, not an exception. ``timeout`` is the
+    **explicit** ``None`` of the launch path (:data:`shipit.spawn.launch.LAUNCH_TIMEOUT`):
+    the spawn runs an entire agent Run to completion, so the runner's 5-minute
+    default must never kill it mid-work.
     """
     result = execrun.run(
         ["shipit", *argv],
         cwd=cwd,
         env=dict(env) if env else None,
         check=False,
-        timeout=None,
+        timeout=launch.LAUNCH_TIMEOUT,
     )
     return SpawnInvocation(result.rc, result.stdout, result.stderr)
 
@@ -382,6 +384,8 @@ def _pixi_runs(tree_path: str) -> tuple[bool, str]:
             timeout=tree_create.PROVISION_TIMEOUT,
         )
     except execrun.ExecError as exc:
+        # Transport failure (missing pixi, timeout on a wedged solve): the probe's
+        # answer is "not launchable", not an escaping error.
         return False, f"pixi not launchable: {exc}"
     ok = result.ok and "pixi-ok" in result.stdout
     return ok, f"rc={result.rc}"
