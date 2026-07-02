@@ -60,8 +60,9 @@ matching is the explicit `matches_prefix` ask. The identity that review
 staleness ("is this review on the current head?") and Tree provenance key on —
 `PR.head_sha` and a review's `commit_id` carry it. Commit identity leaves the
 Tool adapters AS a `Sha` (PROC03/ADR-0028): the git adapter's commit reads
-(`head_commit`, `merge_base`, `commits_between`, `unpushed_shas`) and the gh
-adapter's PR-core read return the type, and the review-diff path threads it end
+(`head_commit`, `merge_base`, `commits_between`, `unpushed_shas`) return it
+directly and the gh adapter's PR-core read (`pr_core`) returns a `PR` that
+carries it as `head_sha`, and the review-diff path threads it end
 to end (`ReviewView.base_sha` alongside the core's `head_sha`) — a `Sha`
 stringifies only at a serialization seam or the one mixed-refspec seam
 (`git.fetch_ref`, which also takes branch names and `pull/<n>/head`).
@@ -438,11 +439,13 @@ adding an adapter; nothing downstream changes (mirrors **Reviewer adapter** /
 specialization that additionally owns launch posture. Any tool argv built
 outside its Tool adapter is a defect. Reads return the EXISTING core value
 objects (PROC03/ADR-0028) — a repo read returns a `Repo`, a commit read a
-**Sha**, a PR-core read a `PR`, the pixi reads the pixienv model types — never
+`Sha`, a PR-core read a `PR`, the pixi reads the pixienv model types — never
 dicts or adapter-shaped parallel snapshots; raw output survives only where no
-core noun exists yet. The adapter owns the parse: a call that exited 0 but
-produced unusable output is the adapter's `ValueError`, never a caller-side
-re-parse.
+core noun exists yet (e.g. `gh.pr_view`'s field-list read, or the PR-number
+probe whose number/no-PR/failure trichotomy resolves in the verb layer off a
+raw `ExecResult`). The adapter owns the parse for the typed reads: a call that
+exited 0 but produced unusable output is the adapter's `ValueError`, not a
+caller-side re-parse.
 *Avoid*: two half-adapters for one tool (the two-`GhError` disease); "wrapper"
 (an adapter is the registry pattern, not ad-hoc convenience); callers running
 `json.loads`/string-splitting on a tool's output (that knowledge belongs in the
