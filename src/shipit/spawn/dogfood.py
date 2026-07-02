@@ -374,8 +374,14 @@ def _pixi_runs(tree_path: str) -> tuple[bool, str]:
             ["pixi", "run", "python", "-c", "print('pixi-ok')"],
             cwd=tree_path,
             env=env,
+            # The scrubbed env is the COMPLETE child environment: the runner's
+            # default merge over os.environ would re-add the very pointers the
+            # scrub removed.
             replace_env=True,
             check=False,
+            # The probe's worst case is a first activation re-solving the Tree's
+            # env — provisioning-shaped work, so it shares provisioning's bound.
+            timeout=tree_create.PROVISION_TIMEOUT,
         )
     except execrun.ExecError as exc:
         # Transport failure (missing pixi, timeout on a wedged solve): the probe's
