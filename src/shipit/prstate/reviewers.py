@@ -10,6 +10,7 @@ shifts.
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 
 from ..agent import backend as _agent_backend
@@ -22,6 +23,29 @@ from .model import (
     ReviewLifecycle,
     Thread,
 )
+
+#: The engine's logger (shared name with :mod:`shipit.prstate.state`): reviewer
+#: request/cancel transitions are lifecycle milestones (glassbox spray, LOG02) —
+#: today their only record is the verb's user-facing print, which vanishes with
+#: the terminal, so the transition is ALSO recorded here at the adapter act.
+logger = logging.getLogger("shipit.prstate")
+
+
+def _log_request_transition(reviewer: str, pr: int, transition: str) -> None:
+    """One INFO record per reviewer request-edge transition (placed/withdrawn).
+
+    Recorded HERE, at the adapter act, so every requestable adapter logs the
+    same shape without each caller re-rolling it: flat ``reviewer``/``pr``/
+    ``transition`` fields under the human-readable line.
+    """
+    logger.info(
+        "reviewer %s: %s on pr#%s",
+        reviewer,
+        transition,
+        pr,
+        extra={"reviewer": reviewer, "pr": pr, "transition": transition},
+    )
+
 
 # The shipped uniform wait window (ADR-0006): a required reviewer still in flight /
 # requested-but-silent that ages PAST this window settles as TIMED_OUT. 20m
@@ -331,10 +355,12 @@ class CopilotAdapter(ReviewerAdapter):
         # node_id (via ghapi.pr_edit_reviewer; the REST requested_reviewers
         # POST silently no-ops for Copilot). Re-request is the same call.
         ghapi.pr_edit_reviewer(pr, "@copilot")
+        _log_request_transition(self.name, pr, "request placed")
         return True
 
     def cancel(self, pr: int) -> bool:
         ghapi.pr_edit_reviewer(pr, "@copilot", remove=True)
+        _log_request_transition(self.name, pr, "request withdrawn")
         return True
 
 
@@ -382,10 +408,12 @@ class CodeRabbitAdapter(ReviewerAdapter):
         # real node id and creates a real review_requested edge (the REST
         # requested_reviewers POST silently no-ops for App reviewers).
         ghapi.pr_edit_reviewer(pr, self._REVIEWER_HANDLE)
+        _log_request_transition(self.name, pr, "request placed")
         return True
 
     def cancel(self, pr: int) -> bool:
         ghapi.pr_edit_reviewer(pr, self._REVIEWER_HANDLE, remove=True)
+        _log_request_transition(self.name, pr, "request withdrawn")
         return True
 
 
@@ -419,6 +447,13 @@ class GeminiAdapter(ReviewerAdapter):
     def request(self, pr: int) -> bool:
         # The Gemini app auto-triggers on PR open; there is no request
         # mechanism, and it is best-effort anyway — a no-op, not an error.
+        # A mechanic, not a milestone: no edge changed, so it records at DEBUG.
+        logger.debug(
+            "reviewer %s: no request mechanism (auto-triggers) — no-op on pr#%s",
+            self.name,
+            pr,
+            extra={"reviewer": self.name, "pr": pr},
+        )
         return False
 
     def cancel(self, pr: int) -> bool:
@@ -545,13 +580,36 @@ class _LocalReviewAdapter(ReviewerAdapter):
             run_kwargs["timeout"] = options["timeout"]
 
         try:
-            service.start_detached_review(self.name, pr, **run_kwargs)
-        except PrStateError:
-            raise
-        except Exception as exc:  # noqa: BLE001 - normalize every failure mode uniformly
+            started = service.start_detached_review(self.name, pr, **run_kwargs)
+        except Exception as exc:
+            # A propagating failure (glassbox spray): the request act died before
+            # the review could even detach — record it at ERROR with the exception
+            # attached, then normalize to the one error the CLI renders cleanly.
+            logger.error(
+                "reviewer %s: local review request failed on pr#%s",
+                self.display_name,
+                pr,
+                exc_info=True,
+                extra={"reviewer": self.display_name, "pr": pr},
+            )
+            if isinstance(exc, PrStateError):
+                raise
             raise PrStateError(
                 f"{self.name}-local review failed on #{pr}: {exc}"
             ) from exc
+        if started:
+            # A fresh child was detached: a real request edge to narrate.
+            _log_request_transition(self.display_name, pr, "detached local review")
+        else:
+            # Reconciled against an already in-flight run (idempotent re-request):
+            # nothing transitioned, so it is a DEBUG mechanic, not an INFO edge.
+            logger.debug(
+                "reviewer %s: re-request reconciled against an in-flight run on "
+                "pr#%s — no new detach",
+                self.display_name,
+                pr,
+                extra={"reviewer": self.display_name, "pr": pr},
+            )
         return True
 
     def cancel(self, pr: int) -> bool:

@@ -73,9 +73,9 @@ from .reviewers import REGISTRY, ReviewerAdapter, required_reviewers
 
 #: The lifecycle engine's logger — a child of the package ``shipit`` logger, so
 #: it inherits the configured sinks. The resolved next-action decision (what
-#: ``pr next`` / ``pr status`` will report) is recorded here at DEBUG, so the
-#: state machine's reasoning is reconstructable after the fact without changing
-#: any user-facing output.
+#: ``pr next`` / ``pr status`` will report) is a lifecycle milestone recorded
+#: here at INFO (glassbox spray, LOG02), so the state machine's reasoning is
+#: reconstructable after the fact without changing any user-facing output.
 logger = logging.getLogger("shipit.prstate")
 
 # The funnel-state readiness verdicts (ADR-0006). A required reviewer is SETTLED at any
@@ -239,13 +239,34 @@ def evaluate(
     """Compute the PR's lifecycle state from a snapshot, recording the decision.
 
     A thin observable wrapper over :func:`_evaluate` (the pure engine): it logs
-    the resolved lifecycle state + next action at DEBUG so a ``pr next`` /
-    ``pr status`` decision is reconstructable after the run, then returns the
-    snapshot unchanged. The engine itself stays pure — the log is the only
-    side effect, and it never touches user-facing output.
+    the resolved lifecycle state + next action at INFO — a state decision is a
+    lifecycle milestone (glassbox spray, LOG02) — with the decision's inputs as
+    flat event fields, so a ``pr next`` / ``pr status`` decision is
+    reconstructable (and jq-sliceable by ``pr``) after the run. Reviewers that
+    settled DEGRADED (failed / empty / timed-out — non-blocking but never
+    silently "fine") are additionally surfaced at WARNING. The engine itself
+    stays pure — the log is the only side effect, and it never touches
+    user-facing output.
     """
     status = _evaluate(ctx, registry, required)
-    logger.debug(
+    # Flat event fields (ADR-0029): present-when-meaningful, never null-stuffed.
+    fields: dict[str, object] = {
+        "pr": status.pr,
+        "state": status.state.value,
+        "checks": status.checks.value,
+        "open_threads": status.open_threads,
+        "cycles": status.cycles,
+        "funnel": ",".join(
+            f"{name}={rf.state.value}" for name, rf in status.reviewer_funnel.items()
+        ),
+    }
+    if status.mergeable is not None:
+        fields["mergeable"] = status.mergeable
+    if status.breaker is not None:
+        fields["breaker"] = status.breaker
+    if status.to_request:
+        fields["to_request"] = ",".join(status.to_request)
+    logger.info(
         "decision pr#%s: state=%s checks=%s mergeable=%s open_threads=%s "
         "cycles=%s breaker=%s -> next_action=%r",
         status.pr,
@@ -256,7 +277,22 @@ def evaluate(
         status.cycles,
         status.breaker,
         status.next_action,
+        extra=fields,
     )
+    if status.degraded:
+        # A degraded-but-continuing outcome (ADR-0006): the reviewer settled at a
+        # non-success terminal state and no longer holds Ready — loud, not fatal.
+        logger.warning(
+            "pr#%s: degraded reviewer(s) — settled non-success, not holding Ready: %s",
+            status.pr,
+            ", ".join(f"{name}={why}" for name, why in status.degraded.items()),
+            extra={
+                "pr": status.pr,
+                "degraded": ",".join(
+                    f"{name}={why}" for name, why in status.degraded.items()
+                ),
+            },
+        )
     return status
 
 

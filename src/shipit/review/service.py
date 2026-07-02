@@ -33,6 +33,7 @@ import json
 import logging
 import re
 import sys
+import time
 from collections.abc import Callable, Mapping, Sequence
 
 from .. import execrun, gh, logcontext
@@ -82,7 +83,9 @@ def generate_review(
         agent,
         model,
         timeout,
+        extra={"reviewer": agent, "pr": ctx.number},
     )
+    start = time.monotonic()
     review = producer.run_tree_review(
         agent,
         ctx,
@@ -91,12 +94,15 @@ def generate_review(
         instructions_path=instructions_path,
         dry_run=dry_run,
     )
+    duration_ms = int((time.monotonic() - start) * 1000)
     summary = (review.get("summary") or {}) if isinstance(review, dict) else {}
     logger.info(
-        "review run: agent=%s complete -> status=%s, %d comment(s)",
+        "review run: agent=%s complete in %dms -> status=%s, %d comment(s)",
         agent,
+        duration_ms,
         summary.get("status"),
         len((review.get("comments") or []) if isinstance(review, dict) else []),
+        extra={"reviewer": agent, "pr": ctx.number, "duration_ms": duration_ms},
     )
     return review
 
@@ -282,16 +288,22 @@ def start_detached_review(
     spawn: Callable[[Sequence[str], Mapping[str, str]], None] | None = None,
     find: Callable[[str, str, str], int | None] | None = None,
 ) -> bool:
-    """Open the in_progress funnel run, DETACH the review, return in-flight (OBS03).
+    """Open the in_progress funnel run, DETACH the review, report what it did (OBS03).
 
     The PARENT half of the async inversion: it does ONLY the cheap, synchronous
     work — resolve ``(repo, head_sha)`` via the lightweight ``gh pr view``,
     RECONCILE against any in-flight run, and open the OBS02 ``in_progress``
     breadcrumb (best-effort) — then spawns a DETACHED child (``shipit pr review
     _run``) that runs the model, posts the review, and closes the SAME ``run_id`` to
-    its terminal state. It returns ``True`` (in-flight) WITHOUT blocking on the model
-    run; the outcome is read LATER from the PR (the funnel check run + the posted
-    review), never from this return.
+    its terminal state. It does NOT block on the model run; the review's outcome is
+    read LATER from the PR (the funnel check run + the posted review), never from
+    this call.
+
+    The return says WHICH path it took, both of which leave the review in-flight:
+    ``True`` when it opened + spawned a fresh detached child, ``False`` when it
+    RECONCILED against an already in-flight run (no breadcrumb, no spawn). The
+    reviewer adapter narrates only a real start as a request transition; a
+    reconcile is an idempotent no-op, not a new request edge.
 
     **Idempotent reconcile (OBS03-WS03, issue #41):** because the check run IS the
     store, a re-request for a reviewer whose funnel run is already non-terminal on
@@ -333,7 +345,7 @@ def start_detached_review(
             pr,
             existing,
         )
-        return True
+        return False  # reconciled: in-flight, but no new child was started
     # Bind the seam's domain keys (ADR-0029): from here on the parent's records
     # carry pr/repo, and the export below hands them (plus the run id, which is
     # the CHILD's correlation, not this parent's) across the process boundary.
@@ -371,7 +383,7 @@ def start_detached_review(
         pr,
         run_id,
     )
-    return True
+    return True  # started: a fresh detached child was opened + spawned
 
 
 def run_detached_review(
@@ -421,12 +433,14 @@ def run_detached_review(
     ageing that timestamp. WS03 does NOT implement that window — it only relies on it
     as the backstop (PRD "Failure & Timeout").
     """
+    start = time.monotonic()
     logger.info(
         "run_detached_review: agent=%s pr=#%s repo=%s run_id=%s — child start",
         agent,
         pr,
         repo,
         run_id,
+        extra={"reviewer": agent, "pr": pr},
     )
     try:
         ctx = resolve_pr(pr, repo=repo)
@@ -448,38 +462,71 @@ def run_detached_review(
         # Close it `failed` (only when the parent actually opened a run) and RE-RAISE
         # so the failure is still surfaced. This is the ONLY close on the resolve
         # path; the helper below owns every post-resolve outcome's close.
+        # The failure PROPAGATES (re-raised below), so it records at ERROR with
+        # the exception attached (glassbox spray) — plus the start→settle
+        # duration, since the failed resolve is this run's terminal settle.
+        duration_ms = int((time.monotonic() - start) * 1000)
         if run_id is not None:
             _close_funnel_breadcrumb(
                 agent, repo, run_id, outcome="failed", detail=str(exc)
             )
-            logger.warning(
-                "run_detached_review: agent=%s pr=#%s resolve failed — closed run "
-                "%s as failed: %s",
+            logger.error(
+                "run_detached_review: agent=%s pr=#%s resolve failed after %dms — "
+                "closed run %s as failed",
                 agent,
                 pr,
+                duration_ms,
                 run_id,
-                exc,
+                exc_info=True,
+                extra={"reviewer": agent, "pr": pr, "duration_ms": duration_ms},
             )
         else:
-            logger.warning(
-                "run_detached_review: agent=%s pr=#%s resolve failed — no run to "
-                "close (parent opened none): %s",
+            logger.error(
+                "run_detached_review: agent=%s pr=#%s resolve failed after %dms — "
+                "no run to close (parent opened none)",
                 agent,
                 pr,
-                exc,
+                duration_ms,
+                exc_info=True,
+                extra={"reviewer": agent, "pr": pr, "duration_ms": duration_ms},
             )
         raise
-    result = _generate_post_and_close(
+    try:
+        result = _generate_post_and_close(
+            agent,
+            ctx,
+            run_id,
+            repo,
+            model=model,
+            timeout=timeout,
+            instructions_path=instructions_path,
+            as_app=as_app,
+        )
+    except Exception:
+        # The helper already closed the funnel run to its own terminal state
+        # (timed_out / empty / failed) — this records the SETTLE of the child
+        # itself: a propagating failure at ERROR with the exception attached and
+        # the start→settle duration (glassbox spray).
+        duration_ms = int((time.monotonic() - start) * 1000)
+        logger.error(
+            "run_detached_review: agent=%s pr=#%s — child failed after %dms",
+            agent,
+            pr,
+            duration_ms,
+            exc_info=True,
+            extra={"reviewer": agent, "pr": pr, "duration_ms": duration_ms},
+        )
+        raise
+    # The review's start→settle duration (LOG02): child start (moments after the
+    # parent's request) to the terminal close `_generate_post_and_close` just made.
+    duration_ms = int((time.monotonic() - start) * 1000)
+    logger.info(
+        "run_detached_review: agent=%s pr=#%s — child done in %dms",
         agent,
-        ctx,
-        run_id,
-        repo,
-        model=model,
-        timeout=timeout,
-        instructions_path=instructions_path,
-        as_app=as_app,
+        pr,
+        duration_ms,
+        extra={"reviewer": agent, "pr": pr, "duration_ms": duration_ms},
     )
-    logger.info("run_detached_review: agent=%s pr=#%s — child done", agent, pr)
     return result
 
 
