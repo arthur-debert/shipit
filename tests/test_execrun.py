@@ -10,6 +10,9 @@ The contract under test, via an injected fake process (monkeypatched
   honored, expiry raises ``ExecError`` with a timeout cause and partial output;
 - missing binary / OS launch failures normalize into ``ExecError`` — no raw
   ``OSError``/``FileNotFoundError`` escapes;
+- chained causes (#317): the raw exception a failure wraps stays reachable via
+  ``__cause__``, so it is sanitized of its stream payloads before chaining —
+  the chain (type, message) survives, the raw streams do not;
 - record emission: exactly one record per Exec (success DEBUG, failure ERROR
   with both stream tails), redacted at format time by the central
   ``redact_event`` processor (#277 — no per-site masking);
@@ -216,6 +219,108 @@ def test_timeout_real_child_is_killed():
     with pytest.raises(execrun.ExecError) as excinfo:
         execrun.run([sys.executable, "-c", "import time; time.sleep(30)"], timeout=0.2)
     assert excinfo.value.cause == execrun.CAUSE_TIMEOUT
+
+
+# ---------------------------------------------------------------------------
+# Chained causes — __cause__ carries no raw stream payloads (#317)
+# ---------------------------------------------------------------------------
+
+
+def test_timeout_cause_is_sanitized_of_stream_payloads(monkeypatch):
+    # `raise ExecError from exc` keeps the raw TimeoutExpired reachable via
+    # __cause__ — its .stdout/.stderr held the unredacted partial streams. The
+    # runner must null them before chaining, while keeping the chain itself
+    # (type + message) for diagnostics.
+    def fake_run(argv, **kwargs):
+        raise subprocess.TimeoutExpired(
+            argv, 0.1, output="raw partial stdout", stderr="raw partial stderr"
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(execrun.ExecError) as excinfo:
+        execrun.run(["slow-tool"], timeout=0.1)
+    err = excinfo.value
+    # The wrapper still hands the caller the (redacted) streams...
+    assert err.stdout == "raw partial stdout"
+    # ...but the chained raw exception has been stripped of them.
+    cause = err.__cause__
+    assert isinstance(cause, subprocess.TimeoutExpired)
+    assert cause.output is None
+    assert cause.stdout is None  # the property reads .output
+    assert cause.stderr is None
+    # The chain's diagnostic value survives: type and message intact.
+    assert "timed out" in str(cause)
+    assert "raw partial" not in repr(vars(cause))
+
+
+def test_timeout_cause_carries_no_secret_with_secret_stdout(monkeypatch):
+    # The sharp case: secret_stdout=True suppresses the wrapper's stdout, but
+    # before #317 the cause kept a back-door copy of the partial secret.
+    def fake_run(argv, **kwargs):
+        raise subprocess.TimeoutExpired(
+            argv, 0.1, output="s3cret-partial", stderr="doppler: deadline"
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(execrun.ExecError) as excinfo:
+        execrun.run(["doppler", "get"], timeout=0.1, secret_stdout=True)
+    err = excinfo.value
+    assert err.stdout == execrun.SECRET_STDOUT_PLACEHOLDER
+    cause = err.__cause__
+    assert cause.output is None
+    assert cause.stdout is None
+    assert cause.stderr is None
+    assert "s3cret-partial" not in repr(vars(cause))
+    assert "s3cret-partial" not in str(cause)
+
+
+def test_timeout_cause_cmd_is_redacted(monkeypatch, _clean_registry):
+    # TimeoutExpired.__str__ names the command; a registered secret riding argv
+    # must be masked on the cause exactly as ExecError masks its own argv.
+    redact.register_secret("s3cret-value")
+
+    def fake_run(argv, **kwargs):
+        raise subprocess.TimeoutExpired(argv, 0.1)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(execrun.ExecError) as excinfo:
+        execrun.run(["tool", "--token", "s3cret-value"], timeout=0.1)
+    cause = excinfo.value.__cause__
+    assert "s3cret-value" not in " ".join(cause.cmd)
+    assert "s3cret-value" not in str(cause)
+
+
+def test_timeout_real_child_cause_is_sanitized():
+    # End-to-end: a real killed child's chained TimeoutExpired carries no
+    # stream payloads either.
+    with pytest.raises(execrun.ExecError) as excinfo:
+        execrun.run(
+            [sys.executable, "-c", "import time; print('partial'); time.sleep(30)"],
+            timeout=0.2,
+        )
+    cause = excinfo.value.__cause__
+    assert isinstance(cause, subprocess.TimeoutExpired)
+    assert cause.output is None
+    assert cause.stdout is None
+    assert cause.stderr is None
+
+
+def test_os_error_causes_carry_no_stream_payloads(monkeypatch):
+    # OS-level causes (missing binary / launch failure) never had stream
+    # attributes — pinned so the contract holds for every cause the runner
+    # chains, not just the timeout.
+    def fake_run(argv, **kwargs):
+        raise FileNotFoundError(2, "No such file or directory", argv[0])
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(execrun.ExecError) as excinfo:
+        execrun.run(["no-such-binary"])
+    cause = excinfo.value.__cause__
+    assert isinstance(cause, FileNotFoundError)
+    for attr in ("output", "stdout", "stderr"):
+        assert getattr(cause, attr, None) is None
+    # The chain's diagnostics survive.
+    assert "No such file" in str(cause)
 
 
 # ---------------------------------------------------------------------------
