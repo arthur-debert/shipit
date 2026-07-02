@@ -32,8 +32,11 @@ The contract, in full:
     no completion — see :func:`spawn_detached`).
 
   So "all Execs slower than 10s" or "all nonzero exits" is a query on the raw
-  log (``jq 'select(.duration_ms > 10000)'``, ``jq 'select(.rc != 0)'``),
-  never a parse of ``msg`` (glassbox PRD story 14). Success logs at DEBUG,
+  log (``jq 'select(.duration_ms > 10000)'``, ``jq 'select(has("rc") and
+  .rc != 0)'`` — the ``has`` guard is load-bearing: ``rc`` is ABSENT on a
+  record with no exit code, and in jq ``null != 0`` is true, so the bare
+  ``.rc != 0`` would wrongly match timeouts, launch failures, and detached
+  spawns), never a parse of ``msg`` (glassbox PRD story 14). Success logs at DEBUG,
   failure at ERROR. A nonzero exit under ``check=False`` is the caller's
   *normal* outcome (a liveness probe of a dead pid, ``git cat-file -e``), so
   it records at DEBUG, not ERROR.
@@ -175,7 +178,9 @@ def _record_fields(
         "argv": shlex.join(argv),
         "cwd": str(cwd or "."),
     }
-    fields.update({key: value for key, value in outcome.items() if value is not None})
+    for key, value in outcome.items():
+        if value is not None:
+            fields[key] = value
     return fields
 
 

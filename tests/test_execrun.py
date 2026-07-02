@@ -581,7 +581,9 @@ def test_spawn_detached_record_carries_pid_not_rc(monkeypatch, tmp_path):
 def test_jq_style_slices_work_on_the_raw_log(monkeypatch, tmp_path):
     # The acceptance query shapes from the PRD: "all Execs slower than 10s"
     # and "all nonzero exits" as field selections over the raw JSONL — the
-    # exact slices that used to require regexing the msg.
+    # exact slices that used to require regexing the msg. The log includes a
+    # launch failure (rc ABSENT, not null) so the nonzero-exit query's
+    # has("rc") guard is genuinely exercised.
     def emit():
         monkeypatch.setattr(subprocess, "run", _fake_completed(rc=0))
         execrun.run(["fast-tool"])
@@ -594,16 +596,32 @@ def test_jq_style_slices_work_on_the_raw_log(monkeypatch, tmp_path):
         with pytest.raises(execrun.ExecError):
             execrun.run(["gh", "broken"])
 
+        def missing(argv, **kwargs):
+            raise FileNotFoundError(2, "No such file or directory", argv[0])
+
+        monkeypatch.setattr(subprocess, "run", missing)
+        with pytest.raises(execrun.ExecError):
+            execrun.run(["no-such-binary"])
+
     records = _jsonl_records(tmp_path, emit)
-    assert len(records) == 4
+    assert len(records) == 5
 
     # jq 'select(.duration_ms > 10000)'
     slow = [r for r in records if r.get("duration_ms", 0) > 10000]
     assert [r["argv"] for r in slow] == ["slow-tool"]
 
-    # jq 'select(.rc != 0)'
+    # jq 'select(has("rc") and .rc != 0)' — the has("rc") guard is
+    # load-bearing: the launch-failure record carries no rc at all, and in jq
+    # a missing field reads as null, so the bare `select(.rc != 0)` would
+    # wrongly match it (null != 0 is true).
+    assert any("rc" not in r for r in records)
     nonzero = [r for r in records if "rc" in r and r["rc"] != 0]
     assert sorted(r["argv"] for r in nonzero) == ["gh broken", "gh probe"]
+
+    # The bare query really is wrong on this log — the documented guard is
+    # not decorative.
+    naive = [r for r in records if r.get("rc") != 0]
+    assert "no-such-binary" in [r["argv"] for r in naive]
 
 
 def test_structured_fields_are_redacted_post_format(monkeypatch, tmp_path):
