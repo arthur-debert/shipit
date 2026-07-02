@@ -58,6 +58,17 @@ in the adapter.
 
 ## Consequences
 
+- The adapter owns the parse (landed by PROC03): callers never `json.loads`
+  or string-split a *typed read's* output. A call that exited 0 but produced an
+  unusable answer (unparseable/empty JSON, a malformed slug or sha) is a
+  data-shape failure the adapter raises as `ValueError` at its boundary —
+  distinct from the transport failure, which stays `ExecError`. Raw JSON
+  survives only where no core noun exists yet (e.g. `gh.pr_view`'s field-list
+  read, or the PR-number probe whose number/no-PR/failure trichotomy resolves
+  in the verb layer off a raw `ExecResult`); commit-identity reads that are
+  best-effort by contract (e.g.
+  `git.head_commit`) degrade unvalidatable output to their documented `None`
+  rather than raising.
 - Agent launches keep `LaunchResult` semantics as a consumer view over the
   runner — a nonzero child stays a normal lifecycle outcome (ADR-0019/0020),
   not an `ExecError`.
