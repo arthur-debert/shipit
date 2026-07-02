@@ -131,8 +131,11 @@ def _head_pr_from_json(data: dict) -> HeadPr:
     posture): a payload whose load-bearing fields are missing or mistyped raises
     :class:`ValueError` naming the offending field, so a malformed answer can
     never flow on as a half-usable snapshot (the old ``#None None`` bug).
-    ``state`` is upper-cased here so callers compare against the GitHub
-    vocabulary without re-normalizing.
+    ``state`` and ``baseRefName`` are stripped and ``state`` upper-cased here,
+    so callers compare against the GitHub vocabulary without re-normalizing —
+    the validation checks the stripped value, so the returned snapshot must
+    carry the stripped value too (whitespace would silently break the
+    ``base_ref`` equality checks in ``spawn``).
     """
     number = data.get("number")
     if isinstance(number, bool) or not isinstance(number, int):
@@ -157,7 +160,10 @@ def _head_pr_from_json(data: dict) -> HeadPr:
             f"got {base_ref!r}"
         )
     return HeadPr(
-        number=number, state=state.upper(), is_draft=is_draft, base_ref=base_ref
+        number=number,
+        state=state.strip().upper(),
+        is_draft=is_draft,
+        base_ref=base_ref.strip(),
     )
 
 

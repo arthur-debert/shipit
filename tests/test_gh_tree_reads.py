@@ -50,6 +50,18 @@ def test_pr_for_head_normalizes_state_case(monkeypatch):
     assert pr == gh.HeadPr(number=12, state="MERGED", is_draft=False, base_ref="main")
 
 
+def test_pr_for_head_strips_whitespace_from_str_fields(monkeypatch):
+    # Validation checks the *stripped* value, so construction must return the
+    # stripped value too — otherwise "main\n" passes validation but breaks
+    # spawn's `pr.base_ref != base_branch` comparison downstream.
+    payload = json.dumps(
+        {"number": 12, "state": "open ", "isDraft": False, "baseRefName": " main\n"}
+    )
+    monkeypatch.setattr(gh, "_run_probe", lambda args, *, cwd=None: _ok(payload))
+    pr = gh.pr_for_head("issues/12/work", cwd="/x")
+    assert pr == gh.HeadPr(number=12, state="OPEN", is_draft=False, base_ref="main")
+
+
 def test_pr_for_head_none_when_no_pr(monkeypatch):
     # gh's documented "no pull requests found" exit is a PROVABLE absence -> None,
     # distinct from UNKNOWN (an undetermined state).
