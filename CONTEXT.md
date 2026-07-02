@@ -13,12 +13,17 @@ inherited from release-core and the build/release vocabulary.
 **Repo**:
 A GitHub repository as shipit's identity value object — `(owner, name)`, derived
 *locally* from the origin remote (`git remote get-url origin`), never from a live
-API call. It is the stable key every Repo-scoped join uses — notably the **eval
-record** store. The **path→toolchain map** is the *same* repo's content; identity
-and content are two facets of one noun.
+API call, and **lowercase-canonical** (GitHub owners/names are case-insensitive),
+so case-varying origins or API slugs share one identity instead of forking one
+repo's Tree paths and log dirs. An `owner/name` string becomes a Repo only
+through the one canonical parser (`identity.repo_from_slug`). It is the stable
+key every Repo-scoped join uses — notably the **eval record** store. The
+**path→toolchain map** is the *same* repo's content; identity and content are two
+facets of one noun.
 *Avoid*: "org/repo" as the identity pair (an owner may be a user, not an org);
 keying a Repo by filesystem path (that scatters one repo across every clone — the
-bug WS-Repo removes).
+bug WS-Repo removed); hand-splitting a slug at a call site (each split is a place
+for the case-divergence bug to come back).
 
 **Owner**:
 The account that owns a **Repo** — `(login, kind)`. `login` is always known
@@ -47,17 +52,21 @@ a WorkingDir is a *location*, so two clones of one repo are two WorkingDirs but
 one Repo).
 
 **Sha**:
-A commit identity as a value object — validated hex, lowercase-normalized,
-never silently compared prefix-against-full (equality is full-vs-full; prefix
-matching is an explicit ask). The identity that review staleness ("is this
-review on the current head?") and Tree provenance key on.
+A commit identity as a value object — a validated FULL git object id (40 or 64
+hex chars), lowercase-normalized at construction, never silently compared
+prefix-against-full: equality is full-vs-full and Sha-vs-Sha only (comparing
+against a raw string *raises* rather than quietly answering false), and prefix
+matching is the explicit `matches_prefix` ask. The identity that review
+staleness ("is this review on the current head?") and Tree provenance key on —
+`PR.head_sha` and a review's `commit_id` carry it.
 *Avoid*: raw string SHAs compared with `==` (short-vs-full or case mismatch
 silently flips staleness); "commit" as the noun (a Sha *names* a commit; the
 commit is the git object).
 
 **PR**:
 A GitHub pull request as a value object — identity `(repo, number)` plus cheap
-**core** state (`head_sha`, `base_ref`, `is_draft`, `merge_state`). The readiness
+**core** state (`head_sha` — carried as a **Sha**, minted at the one wire read —
+`base_ref`, `is_draft`, `merge_state`). The readiness
 path and the review path build distinct richer **views** that *compose* a PR
 (readiness view: + reviews / threads / funnel / timing; review view: + diff /
 changed_files / workdir), never parallel half-overlapping snapshots.
@@ -360,13 +369,17 @@ bypass. *Avoid*: "override", "force" as the noun — break-glass is logged and r
 The agent harness/CLI that drives a **Run** — a closed registry `claude | codex |
 antigravity` (ADR-0020). Owns *how to launch* (argv, auth-env, read-only posture)
 and a single **identity** — its canonical name plus every alias (funnel login
-`adr-<name>-review[bot]`, check-run `<name>-local`, spawn `--backend` token,
-Doppler key prefix) defined **once** and shared with the **Reviewer adapter**.
-Orthogonal to **Model** and to **Role**: one backend serves implementer / shepherd
-/ reviewer runs and can drive different models.
+`adr-<name>-review[bot]`, check-run `<name>-local`, spawn `--backend` token, CLI
+binary, Doppler key prefix, model-alias table) defined **once** and shared with
+the **Reviewer adapter**. The review funnel threads the Backend value object
+itself, so every derived name comes only off its registry entry — a backend with
+no funnel App (`claude`) simply has no funnel identity, and its funnel-only
+aliases refuse to mint. Orthogonal to **Model** and to **Role**: one backend
+serves implementer / shepherd / reviewer runs and can drive different models.
 *Avoid*: conflating a **Backend** with a **Reviewer adapter** (launch axis vs
 PR-funnel axis — they share *identity*, not behaviour) or with a **Model** (the
-harness is not the LLM).
+harness is not the LLM); passing a bare agent-name string where the Backend
+identity should flow (retyped names are how alias tables drift apart).
 
 **Model**:
 The LLM a **Backend** drives — `(id, provider, reasoning_capability)`, identity =
