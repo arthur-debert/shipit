@@ -46,6 +46,15 @@ not inherit); treating a WorkingDir as an identity (its **Repo** is the identity
 a WorkingDir is a *location*, so two clones of one repo are two WorkingDirs but
 one Repo).
 
+**Sha**:
+A commit identity as a value object — validated hex, lowercase-normalized,
+never silently compared prefix-against-full (equality is full-vs-full; prefix
+matching is an explicit ask). The identity that review staleness ("is this
+review on the current head?") and Tree provenance key on.
+*Avoid*: raw string SHAs compared with `==` (short-vs-full or case mismatch
+silently flips staleness); "commit" as the noun (a Sha *names* a commit; the
+commit is the git object).
+
 **PR**:
 A GitHub pull request as a value object — identity `(repo, number)` plus cheap
 **core** state (`head_sha`, `base_ref`, `is_draft`, `merge_state`). The readiness
@@ -388,6 +397,29 @@ structural constraint.
 *Avoid*: "AgentConfig" (implies the model belongs to the agent — it does not);
 conflating it with **Variant** (the prompt/policy content-hash axis, a different
 attribution).
+
+### Execution (external commands)
+
+**Exec**:
+One execution of an external binary by shipit — argv in, run to completion, a
+normalized result or error out, exactly one structured record of what happened.
+Every subprocess shipit spawns is an Exec (pixi, git, gh, a **Backend** launch);
+an agent **Run** is *started by* an Exec, but the Run is the transcript-bounded
+work, not the process call.
+*Avoid*: "Run" for a subprocess call (that's the agent-eval unit); "command" (a
+CLI verb of shipit's own); "process" (the OS mechanism, not the bounded
+call-with-result).
+
+**Tool adapter**:
+The only place that knows one external tool's mechanics — how to encode an
+**Exec**'s argv, which structured output to harvest (native JSON, porcelain,
+converted), and which failures translate to semantic errors. Adding a tool is
+adding an adapter; nothing downstream changes (mirrors **Reviewer adapter** /
+**Endpoint adapter**). The **Backend** adapter (ADR-0020) is a Tool adapter
+specialization that additionally owns launch posture. Any tool argv built
+outside its Tool adapter is a defect.
+*Avoid*: two half-adapters for one tool (the two-`GhError` disease); "wrapper"
+(an adapter is the registry pattern, not ad-hoc convenience).
 
 ### Trees (where work happens)
 
