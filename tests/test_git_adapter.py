@@ -193,6 +193,83 @@ def test_epic_umbrella_exists_launch_failure_raises_not_false(monkeypatch):
         git.epic_umbrella_exists("TRE04", cwd="/x")
 
 
+# --- review-diff reads: typed commit-identity plumbing (PROC03-WS03) --------
+#
+# The review-diff endpoints are commit identities, so the adapter takes/returns
+# `Sha` value objects (`commit_present` / `merge_base` / `diff_range` /
+# `diff_name_only`) — the argv still carries the plain string form, and
+# `fetch_ref` stays the one deliberately-str refspec seam. Pinned through the
+# injected runner seam (`_git` / `_probe`), never a real subprocess.
+
+
+def test_commit_present_takes_sha_and_probes_cat_file(monkeypatch):
+    seen = {}
+
+    def fake(args, *, cwd):
+        seen["args"] = args
+        return _ok()
+
+    monkeypatch.setattr(git, "_probe", fake)
+    assert git.commit_present(Sha("a" * 40), cwd="/x") is True
+    # The typed identity stringifies only INTO the argv.
+    assert seen["args"] == ["cat-file", "-e", f"{'a' * 40}^{{commit}}"]
+    monkeypatch.setattr(git, "_probe", lambda args, *, cwd: _fail())
+    assert git.commit_present(Sha("a" * 40), cwd="/x") is False
+
+
+def test_merge_base_returns_a_sha_value_object(monkeypatch):
+    # The merge base IS a commit identity, so it leaves the adapter typed
+    # (PROC03) — lowercase-normalized by the Sha constructor.
+    seen = {}
+
+    def fake(args, *, cwd):
+        seen["args"] = args
+        return _ok(f"{'AB' * 20}\n")
+
+    monkeypatch.setattr(git, "_probe", fake)
+    base = git.merge_base(Sha("a" * 40), Sha("b" * 40), cwd="/x")
+    assert base == Sha("ab" * 20)
+    assert isinstance(base, Sha)
+    assert seen["args"] == ["merge-base", "a" * 40, "b" * 40]
+
+
+def test_merge_base_none_on_no_ancestor_or_malformed_output(monkeypatch):
+    # Nonzero exit = no common ancestor (the caller fails loud); malformed
+    # output degrades to the same None — nothing rather than something wrong.
+    monkeypatch.setattr(git, "_probe", lambda args, *, cwd: _fail("no ancestor"))
+    assert git.merge_base(Sha("a" * 40), Sha("b" * 40), cwd="/x") is None
+    monkeypatch.setattr(git, "_probe", lambda args, *, cwd: _ok("not-a-sha\n"))
+    assert git.merge_base(Sha("a" * 40), Sha("b" * 40), cwd="/x") is None
+
+
+def test_diff_range_takes_sha_endpoints(monkeypatch):
+    seen = {}
+
+    def fake(args, *, cwd):
+        seen["args"] = args
+        return "the diff\n"
+
+    monkeypatch.setattr(git, "_git", fake)
+    out = git.diff_range(Sha("a" * 40), Sha("b" * 40), cwd="/x")
+    assert out == "the diff\n"
+    assert seen["args"] == ["diff", f"{'a' * 40}..{'b' * 40}"]
+
+
+def test_diff_name_only_takes_sha_endpoints_and_parses_lines(monkeypatch):
+    seen = {}
+
+    def fake(args, *, cwd):
+        seen["args"] = args
+        return "a.py\n\nb/c.py\n"
+
+    monkeypatch.setattr(git, "_git", fake)
+    assert git.diff_name_only(Sha("a" * 40), Sha("b" * 40), cwd="/x") == [
+        "a.py",
+        "b/c.py",
+    ]
+    assert seen["args"] == ["diff", "--name-only", f"{'a' * 40}..{'b' * 40}"]
+
+
 # --- remote_branch_exists: exact-ref equality (codex finding, gh.py:451) ---
 #
 # `git ls-remote` treats its final arg as a ref *pattern*, so the old

@@ -29,7 +29,7 @@ def _ctx() -> ReviewView:
         repo="arthur-debert/shipit",
         head_sha="deadbeef" * 5,  # a full 40-hex sha (COR02)
         base_ref="TRE05/umbrella",
-        base_sha="cafe",
+        base_sha="cafe" * 10,  # a full 40-hex sha (PROC03)
         diff="diff --git a/x b/x\n",
         is_draft=False,
         changed_files=["x"],
@@ -229,7 +229,7 @@ def test_resolve_repo_falls_back_to_gh_for_handbuilt_context(monkeypatch):
         repo=None,
         head_sha="deadbeef" * 5,  # a full 40-hex sha (COR02)
         base_ref="main",
-        base_sha="cafe",
+        base_sha="cafe" * 10,  # a full 40-hex sha (PROC03)
         diff="",
         is_draft=False,
     )
@@ -249,7 +249,7 @@ def test_resolve_repo_error_names_gh_view_for_the_empty_slug_fallback(monkeypatc
         repo=None,
         head_sha="deadbeef" * 5,
         base_ref="main",
-        base_sha="cafe",
+        base_sha="cafe" * 10,  # a full 40-hex sha (PROC03)
         diff="",
         is_draft=False,
     )

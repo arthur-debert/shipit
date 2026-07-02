@@ -385,20 +385,20 @@ def _validated_shas(out: str) -> list[Sha] | None:
 # --------------------------------------------------------------------------
 
 
-def commit_present(sha: str, *, cwd: str) -> bool:
+def commit_present(sha: Sha, *, cwd: str) -> bool:
     """True if ``sha`` is a commit object reachable in ``cwd`` (no fetch).
 
     ``git cat-file -e <sha>^{commit}`` as a probe: the review-diff path asks it
     before and after each fetch attempt to decide whether a PR endpoint is
-    locally available. An empty ``sha`` is trivially absent.
+    locally available. The endpoint is a commit identity, so it arrives as a
+    :class:`~shipit.identity.Sha` (PROC03) — the old "empty sha is trivially
+    absent" guard is gone because an empty ``Sha`` is unconstructible.
 
     A launch-level failure (missing git, timeout) is NOT "absent": ``_probe``
     already answers a normal nonzero exit as ``ok=False`` (the sha is genuinely
     not present), so its :class:`ExecError` — raised only for a failed
     invocation — propagates rather than being misread as a clean absence.
     """
-    if not sha:
-        return False
     return _probe(["cat-file", "-e", f"{sha}^{{commit}}"], cwd=cwd).ok
 
 
@@ -412,39 +412,62 @@ def fetch_ref(refspec: str, *, cwd: str, remote: str = "origin") -> bool:
     ``_probe`` reports it as ``ok=False``. A launch-level failure (missing git,
     timeout) is not a normal answer: its :class:`ExecError` propagates rather
     than masquerading as a cleanly-absent ref.
+
+    ``refspec`` stays ``str`` — deliberately, while the surrounding diff
+    plumbing is typed (PROC03): this is the one seam that takes MIXED refspecs
+    (branch names, ``pull/<n>/head``, bare shas), so a caller holding a
+    :class:`~shipit.identity.Sha` stringifies HERE rather than the adapter
+    pretending every refspec is a commit identity.
     """
     return _probe(
         ["fetch", "--quiet", remote, refspec], cwd=cwd, timeout=_NETWORK_TIMEOUT
     ).ok
 
 
-def merge_base(a: str, b: str, *, cwd: str) -> str | None:
+def merge_base(a: Sha, b: Sha, *, cwd: str) -> Sha | None:
     """The merge base of commits ``a`` and ``b``, or ``None`` when they share no ancestor.
+
+    Typed at both ends (PROC03): the endpoints are commit identities and the
+    merge base IS one, so it leaves the adapter as a validated
+    :class:`~shipit.identity.Sha` — the review-diff path hands it straight to
+    :func:`diff_range` / :func:`diff_name_only` without a raw-string hop.
 
     ``None`` — never a guessed endpoint — so the review-diff path can FAIL LOUD
     on unrelated histories instead of silently diffing against the base tip.
-    ``None`` means exactly "no common ancestor" (``_probe`` reports the nonzero
-    exit as ``ok=False``); a launch-level failure raises :class:`ExecError`
-    rather than collapsing into that same ``None``.
+    ``None`` means "no usable merge base": the nonzero exit for no common
+    ancestor (``_probe`` reports it as ``ok=False``) and, per the adapter's
+    conservative parse contract, output that does not validate as a full sha —
+    return nothing rather than something wrong. A launch-level failure raises
+    :class:`ExecError` rather than collapsing into that same ``None``.
     """
-    result = _probe(["merge-base", a, b], cwd=cwd)
+    from .identity import Sha  # lazy: see module-top TYPE_CHECKING note.
+
+    result = _probe(["merge-base", str(a), str(b)], cwd=cwd)
     if not result.ok:
         return None
-    return result.stdout.strip() or None
+    raw = result.stdout.strip()
+    if not raw:
+        return None
+    try:
+        return Sha(raw)
+    except ValueError:
+        return None
 
 
-def diff_range(base: str, head: str, *, cwd: str) -> str:
+def diff_range(base: Sha, head: Sha, *, cwd: str) -> str:
     """The two-dot diff ``git diff <base>..<head>`` — the patch text between two commits.
 
-    The review path passes an explicitly computed :func:`merge_base` as ``base``,
-    which makes this GitHub's three-dot "Files changed" diff with an unambiguous,
-    pre-resolved endpoint. Raises :class:`ExecError` on failure — by the time the
-    diff runs both endpoints are proven present, so a failure is exceptional.
+    The endpoints are commit identities, taken as :class:`~shipit.identity.Sha`
+    (PROC03) and stringified only into the argv here. The review path passes an
+    explicitly computed :func:`merge_base` as ``base``, which makes this
+    GitHub's three-dot "Files changed" diff with an unambiguous, pre-resolved
+    endpoint. Raises :class:`ExecError` on failure — by the time the diff runs
+    both endpoints are proven present, so a failure is exceptional.
     """
     return _git(["diff", f"{base}..{head}"], cwd=cwd)
 
 
-def diff_name_only(base: str, head: str, *, cwd: str) -> list[str]:
+def diff_name_only(base: Sha, head: Sha, *, cwd: str) -> list[str]:
     """The paths changed between two commits (``git diff --name-only <base>..<head>``).
 
     Parsed to a list here (the adapter owns output parsing); same endpoint
