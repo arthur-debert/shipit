@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from ..identity import Repo, repo_from_slug
+from ..identity import Repo, Sha, repo_from_slug
 from ..pr import core_from_node
 from . import ghapi
 from .model import (
@@ -297,7 +297,7 @@ def gather_reviews(pr: int) -> ReadinessView:
             review_id=n["databaseId"],
             author=(n.get("author") or {}).get("login", ""),
             state=n.get("state", ""),
-            commit_id=(n.get("commit") or {}).get("oid", ""),
+            commit_id=_commit_id((n.get("commit") or {}).get("oid")),
             body="",
         )
         for n in pull["reviews"]["nodes"]
@@ -445,12 +445,23 @@ def _partition_checks(
     return ci_checks, funnel
 
 
+def _commit_id(oid: str | None) -> Sha | None:
+    """Mint a review's raw ``oid`` into a :class:`Sha` — ``None`` stays ``None``.
+
+    The one wire-read for a review's commit identity (COR02): a review node that
+    carries no commit reads as honestly-unknown ``None`` (never a fake empty
+    string), while a present-but-malformed oid raises :class:`ValueError` loudly
+    at the boundary instead of flowing on to silently fail the staleness compare.
+    """
+    return None if oid is None else Sha(oid)
+
+
 def _review(raw: dict) -> Review:
     return Review(
         review_id=raw["id"],
         author=(raw.get("user") or {}).get("login", ""),
         state=raw.get("state", ""),
-        commit_id=raw.get("commit_id", ""),
+        commit_id=_commit_id(raw.get("commit_id")),
         body=raw.get("body") or "",
     )
 

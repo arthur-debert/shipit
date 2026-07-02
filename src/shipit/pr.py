@@ -32,7 +32,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .identity import Repo
+from .identity import Repo, Sha
 
 #: The GitHub ``pullRequest`` node fields the PR core is read from. The
 #: ``gh pr view --json`` field list AND a GraphQL ``pullRequest`` selection set
@@ -56,6 +56,11 @@ class PR:
     (ADR-0024): a PR is the same identity regardless of which VIEW enriched it, and
     every PR-scoped join keys on ``(repo, number)``.
 
+    ``head_sha`` is a :class:`shipit.identity.Sha` (COR02): validated full hex,
+    lowercase-normalized at the boundary, equality full-vs-full only — so a case
+    or length mismatch can never silently flip a downstream comparison (most
+    load-bearingly review staleness).
+
     The four core fields are **required** — no defaults. ``base_ref`` and
     ``merge_state`` are ``| None`` because GitHub itself returns them null (a base
     always exists, but ``mergeStateStatus`` is ``UNKNOWN``/absent until GitHub
@@ -67,7 +72,7 @@ class PR:
 
     repo: Repo
     number: int
-    head_sha: str
+    head_sha: Sha
     base_ref: str | None
     is_draft: bool
     merge_state: str | None
@@ -90,7 +95,10 @@ def core_from_node(node: dict, repo: Repo) -> PR:
     ``number``, ``headRefOid`` and ``isDraft`` are read with ``node[...]`` (required
     keys) so a payload that omitted them fails LOUD here rather than silently
     defaulting a core field — the anti-``is_draft=False`` discipline enforced at the
-    boundary. ``isDraft`` is additionally required to be a real ``bool``: a ``null``
+    boundary. ``headRefOid`` is minted into a :class:`shipit.identity.Sha` HERE, so
+    a malformed/abbreviated/empty head sha raises :class:`ValueError` at the one
+    wire read instead of flowing on as a bogus commit identity. ``isDraft`` is
+    additionally required to be a real ``bool``: a ``null``
     or non-bool value is a malformed node and RAISES rather than being silently
     coerced to ``False`` by ``bool(...)`` (which would undermine the very
     fail-loud-core invariant this boundary exists to enforce). ``baseRefName`` /
@@ -105,7 +113,7 @@ def core_from_node(node: dict, repo: Repo) -> PR:
     return PR(
         repo=repo,
         number=node["number"],
-        head_sha=node["headRefOid"],
+        head_sha=Sha(node["headRefOid"]),
         base_ref=node.get("baseRefName"),
         is_draft=is_draft,
         merge_state=node.get("mergeStateStatus"),

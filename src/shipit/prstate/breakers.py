@@ -29,6 +29,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from ..identity import Sha
 from .model import ReadinessView
 from .reviewers import ReviewerAdapter, required_reviewers
 
@@ -80,7 +81,7 @@ _NITPICK_RE = re.compile(
 @dataclass(frozen=True)
 class Round:
     index: int  # 1-based, chronological
-    commit_id: str
+    commit_id: Sha | None  # the round's head; None when the wire carried no commit
     bodies: tuple[str, ...]  # the round's finding comment bodies
 
 
@@ -120,7 +121,7 @@ def build_rounds(
 
     # Group by head SHA, preserving first-seen (chronological) order. Each head
     # is one round; its findings union every required review on that head.
-    review_ids_by_head: dict[str, list[int]] = {}
+    review_ids_by_head: dict[Sha | None, list[int]] = {}
     for review in reviews:
         review_ids_by_head.setdefault(review.commit_id, []).append(review.review_id)
 

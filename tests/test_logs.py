@@ -456,6 +456,30 @@ def test_gh_error_resolving_repo_is_graceful(tmp_path, capsys):
     assert "owner/repo" in err
 
 
+def test_default_repo_resolves_locally_not_via_gh(tmp_path, capsys, monkeypatch):
+    # Reader/writer agreement (COR02): with no explicit repo, the DEFAULT resolves
+    # the cwd repo the SAME way the WRITER namespaces its log — LOCALLY off the
+    # origin remote (identity.resolve_repo) — NOT gh.current_repo. So a log written
+    # in a checkout where `gh` is unavailable is still found. gh.current_repo is
+    # wired to explode to prove the reader never touches it.
+    from shipit import gh, identity
+
+    def gh_boom(*args, **kwargs) -> str:
+        raise ExecError(["gh"], rc=1, stderr="gh unavailable")
+
+    monkeypatch.setattr(gh, "current_repo", gh_boom)
+    monkeypatch.setattr(identity, "resolve_repo", lambda *a, **k: repo_from_slug("o/r"))
+
+    # The writer left a JSONL log under the locally-resolved repo's dir.
+    log = tmp_path / "o" / "r" / "shipit.log"
+    log.parent.mkdir(parents=True)
+    log.write_text(_record("tree opened", tree="w1") + "\n", encoding="utf-8")
+
+    rc = logs.run(base_dir=tmp_path)
+    assert rc == 0
+    assert "tree opened" in capsys.readouterr().out
+
+
 # --------------------------------------------------------------------------
 # Single source of truth — path comes from logsetup, never recomputed here
 # --------------------------------------------------------------------------

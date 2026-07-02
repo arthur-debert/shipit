@@ -26,7 +26,7 @@ def _ctx() -> ReviewView:
     return review_view(
         number=42,
         repo="arthur-debert/shipit",
-        head_sha="deadbeef",
+        head_sha="deadbeef" * 5,  # a full 40-hex sha (COR02)
         base_ref="TRE05/umbrella",
         base_sha="cafe",
         diff="diff --git a/x b/x\n",
@@ -216,7 +216,7 @@ def test_resolve_repo_falls_back_to_gh_for_handbuilt_context(monkeypatch):
     ctx = review_view(
         number=42,
         repo=None,
-        head_sha="deadbeef",
+        head_sha="deadbeef" * 5,  # a full 40-hex sha (COR02)
         base_ref="main",
         base_sha="cafe",
         diff="",

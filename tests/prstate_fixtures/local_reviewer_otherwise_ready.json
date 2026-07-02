@@ -2,7 +2,7 @@
   "now": "2026-01-01T00:30:00+00:00",
   "meta": {
     "number": 480,
-    "headRefOid": "beef03",
+    "headRefOid": "beef030000000000000000000000000000000000",
     "isDraft": true,
     "mergeable": "MERGEABLE",
     "mergeStateStatus": "CLEAN",
@@ -19,9 +19,11 @@
   "reviews": [
     {
       "id": 9101,
-      "user": { "login": "Copilot" },
+      "user": {
+        "login": "Copilot"
+      },
       "state": "APPROVED",
-      "commit_id": "beef03",
+      "commit_id": "beef030000000000000000000000000000000000",
       "body": ""
     }
   ],

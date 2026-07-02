@@ -7,6 +7,7 @@ import dataclasses
 import pytest
 from shipit.prstate.model import ReadinessView, readiness_view, Review
 from shipit.prstate.reviewers import by_name
+from shipit.identity import Sha
 from shipit.prstate.state import (
     ChecksState,
     TaskState,
@@ -14,6 +15,12 @@ from shipit.prstate.state import (
     evaluate,
     no_pr,
 )
+
+# Full, validated commit identities (COR02): the current head, an earlier
+# (stale) head, and a generic head for single-commit scenarios.
+NEW = Sha("beef" * 10)
+OLD = Sha("dead" * 10)
+HEAD = Sha("abcd" * 10)
 
 # The PR CORE now lives on the composed (frozen) `PR`, so overriding a core field
 # means replacing `view.pr`, not the view. This helper routes core overrides
@@ -378,12 +385,12 @@ def _ctx_with_reviews(*authors_on_head: str) -> ReadinessView:
     built to isolate REVIEWER logic."""
     return readiness_view(
         number=1,
-        head_sha="h",
+        head_sha=HEAD,
         is_draft=True,
         mergeable="MERGEABLE",
         merge_state="CLEAN",
         reviews=[
-            Review(i, a, "APPROVED", "h", "") for i, a in enumerate(authors_on_head, 1)
+            Review(i, a, "APPROVED", HEAD, "") for i, a in enumerate(authors_on_head, 1)
         ],
         checks=_green_checks(),
     )
@@ -463,12 +470,12 @@ def test_a_push_re_stales_both_required_reviewers_when_rerun():
     # as done — see test_review_once_both_earlier_head_reaches_ready.)
     ctx = readiness_view(
         number=1,
-        head_sha="new",
+        head_sha=NEW,
         is_draft=True,
         mergeable="MERGEABLE",
         reviews=[
-            Review(1, "Copilot", "APPROVED", "old", ""),
-            Review(2, "coderabbitai[bot]", "APPROVED", "old", ""),
+            Review(1, "Copilot", "APPROVED", OLD, ""),
+            Review(2, "coderabbitai[bot]", "APPROVED", OLD, ""),
         ],
         checks=_green_checks(),
         reviewer_rerun={"copilot": True, "coderabbit": True},
@@ -486,13 +493,13 @@ def test_review_once_both_earlier_head_reaches_ready():
     # so a push does NOT re-open the review holds (the whole point of the policy).
     ctx = readiness_view(
         number=1,
-        head_sha="new",
+        head_sha=NEW,
         is_draft=True,
         mergeable="MERGEABLE",
         merge_state="CLEAN",
         reviews=[
-            Review(1, "Copilot", "APPROVED", "old", ""),
-            Review(2, "coderabbitai[bot]", "APPROVED", "old", ""),
+            Review(1, "Copilot", "APPROVED", OLD, ""),
+            Review(2, "coderabbitai[bot]", "APPROVED", OLD, ""),
         ],
         checks=_green_checks(),
     )
