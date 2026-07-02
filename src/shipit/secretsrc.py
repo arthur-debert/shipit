@@ -8,7 +8,11 @@ The ``doppler`` call goes through the one Exec runner (:mod:`shipit.execrun`,
 ADR-0028) with ``check=False``: a nonzero rc is this layer's *semantic* failure
 (:class:`SecretSourceError`), not a transport error — and, crucially, a
 completed run under ``check=False`` records argv only (never the streams), so
-the fetched secret in stdout can never ride the Exec record to a sink.
+the fetched secret in stdout can never ride the Exec record to a sink. The one
+path that DOES capture stdout on failure is a timeout (partial output of a
+killed child), so the call also passes ``secret_stdout=True`` — the runner then
+suppresses that stdout from the failure record and the raised ``ExecError``,
+closing the last gap through which the secret could reach a sink.
 """
 
 from __future__ import annotations
@@ -40,6 +44,10 @@ def doppler_get(key: str) -> str:
                 "prd",
             ],
             check=False,
+            # stdout carries the fetched secret; mark it so a timeout (which
+            # captures the partial secret the child had written) never rides an
+            # Exec failure record or a re-logged ExecError to a sink.
+            secret_stdout=True,
         )
     except execrun.ExecError as exc:
         # The transport failures (missing binary, timeout, OS launch error) all

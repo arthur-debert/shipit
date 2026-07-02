@@ -917,16 +917,24 @@ def run(
         try:
             activation = activate(root)
         except execrun.ExecError as exc:
-            # A launch failure — lefthook missing from PATH or not executable.
-            # `lefthook install` is the canonical activation in BOTH repos (a
-            # consumer's pixi.toml has no install-hooks task), so that is the
-            # recovery we point at.
+            # A transport failure from the runner. The common case is a missing
+            # or unlaunchable binary; branch on the cause so a timeout or other
+            # OS error is not mislabelled as "install lefthook". `lefthook
+            # install` is the canonical activation in BOTH repos (a consumer's
+            # pixi.toml has no install-hooks task), so that is the recovery we
+            # point the missing-binary case at.
             hooks_activated = False
-            detail = (
-                f"{LEFTHOOK_BINARY}: could not run ({exc}) — ensure lefthook is "
-                f"installed and on PATH, then `lefthook install` to activate "
-                f"the checks"
-            )
+            if exc.cause == execrun.CAUSE_MISSING_BINARY:
+                detail = (
+                    f"{LEFTHOOK_BINARY}: not found on PATH — ensure lefthook is "
+                    f"installed and on PATH, then `lefthook install` to activate "
+                    f"the checks"
+                )
+            else:
+                detail = (
+                    f"{LEFTHOOK_BINARY}: could not run ({exc}) — resolve the "
+                    f"failure above, then `lefthook install` to activate the checks"
+                )
         else:
             hooks_activated = activation.ok
             detail = _activation_output(activation)

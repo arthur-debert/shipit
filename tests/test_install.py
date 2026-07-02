@@ -1089,6 +1089,32 @@ def test_install_warns_but_succeeds_when_lefthook_missing(
     # Points at the canonical recovery, which works in a consumer repo too.
     err = capsys.readouterr().err
     assert "could not activate git hooks" in err
+    assert "not found on PATH" in err
+    assert "lefthook install` to activate the checks" in err
+
+
+def test_install_activation_timeout_does_not_claim_missing_binary(
+    tmp_path, monkeypatch, rec, capsys
+):
+    # A NON-missing-binary transport failure (e.g. a timeout) must not be
+    # mislabelled "not found on PATH": the warning branches on exc.cause and
+    # points at resolving the failure, still ending in the canonical recovery.
+    rec.hook_activations.clear()
+
+    def boom(root):
+        raise execrun.ExecError(
+            ["lefthook", "install"], rc=None, cause=execrun.CAUSE_TIMEOUT
+        )
+
+    monkeypatch.setattr(install, "_activate_hooks", boom)
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    rc = install.run(str(tmp_path))
+    assert rc == 0
+    assert ("pr_create", True) in rec.calls
+    err = capsys.readouterr().err
+    assert "could not activate git hooks" in err
+    assert "not found on PATH" not in err
+    assert "could not run" in err
     assert "lefthook install` to activate the checks" in err
 
 

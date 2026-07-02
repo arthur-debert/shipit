@@ -71,17 +71,20 @@ def _doppler_result(rc: int, stdout: str = "", stderr: str = "") -> execrun.Exec
 def test_doppler_get_runs_the_canonical_argv_check_false(monkeypatch):
     # check=False is load-bearing twice over: a nonzero rc is this layer's
     # SEMANTIC failure, and a completed run's Exec record then carries argv only
-    # — never the secret riding stdout.
+    # — never the secret riding stdout. secret_stdout closes the timeout gap: a
+    # killed fetch's partial stdout is suppressed from the failure record too.
     captured = {}
 
-    def fake_run(argv, *, check=True, **kw):
+    def fake_run(argv, *, check=True, secret_stdout=False, **kw):
         captured["argv"] = argv
         captured["check"] = check
+        captured["secret_stdout"] = secret_stdout
         return _doppler_result(0, stdout="s3cret\n")
 
     monkeypatch.setattr(secretsrc.execrun, "run", fake_run)
     assert secretsrc.doppler_get("GH_PAT") == "s3cret"
     assert captured["check"] is False
+    assert captured["secret_stdout"] is True
     assert captured["argv"] == [
         "doppler",
         "secrets",

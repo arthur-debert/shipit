@@ -55,6 +55,16 @@ DEFAULT_TIMEOUT: float = 300.0
 #: :class:`ExecError` itself.
 TAIL_CHARS = 2000
 
+#: What a ``secret_stdout=True`` Exec's stdout is replaced with the moment it
+#: fails. A completed run's stdout is never recorded (success logs argv only),
+#: but a TIMEOUT captures whatever partial stdout the child had already written
+#: and a failure record / re-logged :class:`ExecError` would carry it. For a
+#: secret-bearing stdout channel (``doppler ... --plain``) that value is not yet
+#: registered with the redactor, so it would ride to a sink unredacted. When the
+#: caller marks the Exec ``secret_stdout``, the error carries this placeholder in
+#: place of stdout instead — the failure is still surfaced, the secret never is.
+SECRET_STDOUT_PLACEHOLDER = "<redacted: secret-bearing stdout>"
+
 #: :attr:`ExecError.cause` tags — the one axis callers may branch on.
 CAUSE_EXIT = "exit"  # the child completed with a nonzero rc (check=True)
 CAUSE_TIMEOUT = "timeout"  # the timeout expired; the child was killed
@@ -122,6 +132,7 @@ def run(
     input: str | None = None,  # noqa: A002 — mirrors subprocess.run's parameter name
     check: bool = True,
     timeout: float | None = DEFAULT_TIMEOUT,
+    secret_stdout: bool = False,
 ) -> ExecResult:
     """Execute one Exec (no shell), capturing text stdout/stderr.
 
@@ -145,6 +156,15 @@ def run(
     stdin-reading child (notably ``agy --print``) must get a clean EOF, not
     block forever on an idle inherited pipe. When ``input`` IS given,
     ``subprocess.run`` owns the pipe (passing both is a ValueError).
+
+    ``secret_stdout`` marks this Exec's stdout as secret-bearing (a
+    ``doppler ... --plain`` fetch): the returned :class:`ExecResult` still
+    carries the real stdout for the caller, but any :class:`ExecError` — most
+    sharply a timeout, which captures the partial secret the child had already
+    written — carries :data:`SECRET_STDOUT_PLACEHOLDER` in place of stdout, so
+    neither the failure record nor a re-logged error can leak it. The value is
+    not yet registered with the redactor at this point, so suppression (not
+    redaction) is the only safe move.
     """
     # argv is typed list[str], but subprocess.run natively accepts Path/numeric
     # elements — which would later crash redaction (``arg.replace``) or the
@@ -173,10 +193,16 @@ def run(
             timeout=timeout,
         )
     except subprocess.TimeoutExpired as exc:
+        # A timeout is the sharp case for secret_stdout: the child was killed
+        # mid-write, so exc.stdout holds a partial secret the redactor cannot
+        # yet know. Suppress it before it can reach the record or a re-log.
+        timeout_stdout = (
+            SECRET_STDOUT_PLACEHOLDER if secret_stdout else _stream_text(exc.stdout)
+        )
         error = ExecError(
             argv,
             rc=None,
-            stdout=_stream_text(exc.stdout),
+            stdout=timeout_stdout,
             stderr=_stream_text(exc.stderr),
             duration_ms=_elapsed_ms(start),
             cause=CAUSE_TIMEOUT,
@@ -208,7 +234,7 @@ def run(
         error = ExecError(
             argv,
             rc=proc.returncode,
-            stdout=proc.stdout,
+            stdout=SECRET_STDOUT_PLACEHOLDER if secret_stdout else proc.stdout,
             stderr=proc.stderr,
             duration_ms=duration_ms,
             cause=CAUSE_EXIT,
