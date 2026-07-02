@@ -451,8 +451,11 @@ record); nesting or an OTel log model (fields stay flat and top-level).
 
 **Domain keys**:
 The CLOSED correlation vocabulary — `session`, `tree`, `pr`, `run`, `repo` —
-bound via context (`logcontext`) at the CLI entry and the spawn/detach seams,
-carried across process boundaries as `SHIPIT_LOG_CTX_*` env vars and rebound at
+bound via context (`logcontext`) at the seam where the value becomes known: the
+CLI entry, the spawn/detach seams, or the moment a subsystem starts working on
+the noun (the PR-engine's fetch; a Tree creation binds `tree` for exactly that
+operation via `logcontext.scoped` — LOG02). Keys are carried across process
+boundaries as `SHIPIT_LOG_CTX_*` env vars and rebound at
 the child's logging setup, so a Run's records correlate to their parent.
 Present-when-bound: an unbound key is ABSENT from the record, never null; an
 unknown key name raises, so a typo cannot mint vocabulary. No synthetic
@@ -470,7 +473,23 @@ blocks. Mask is `***`. No redaction package is adopted (none credible —
 ADR-0029 records the survey).
 *Avoid*: per-call-site scrubbing as the safety story (the pipeline seam is the
 guarantee; `gh.py`'s argv masking is belt-and-suspenders for non-log channels);
-"sanitize"/"filter" (redaction masks values, it does not drop records).
+"sanitize"/"filter" (redaction masks values, it does not drop records). The one
+deliberate construction-time redaction is `ExecError`'s attributes — that object
+surfaces to callers OUTSIDE the logging chain (LOG02, #277); log records
+themselves are never pre-masked at the call site.
+
+**Lifecycle narration**:
+The leveled, correlated record every subsystem keeps of its own milestones
+(glassbox PRD; sprayed by LOG02): milestones at INFO with `duration_ms` where
+meaningful, mechanics at DEBUG, degraded-but-continuing outcomes at WARNING,
+propagating failures at ERROR with `exc_info=True`. Event `msg`s are domain
+phrases ("tree created …", "review posted …"), a PR renders as `pr#N` with the
+`pr` key bound, and anything whose only record is a user-facing `print` must
+also log. The canon lives in `shipit.logsetup`'s docstring and is enforced by
+`tests/test_logging_adoption_scoped.py`'s convention sweeps.
+*Avoid*: code identifiers as event names (`post_review:` — the sweep rejects
+them); `exc_info=<instance>` or re-interpolating the exception into the message;
+demoting the only record of an action to print-only.
 
 ### Trees (where work happens)
 

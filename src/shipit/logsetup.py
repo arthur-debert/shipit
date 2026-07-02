@@ -39,6 +39,33 @@ The three level controls are independent: the file sink is always verbose
 handler this module attaches carries a ``shipit-`` name prefix so a repeated
 :func:`configure_logging` call replaces exactly its own handlers and never
 double-attaches, while leaving any foreign handler alone.
+
+**What a record looks like — the spray canon (LOG02).** Every module logs on a
+``shipit.*`` logger to these conventions, fixed by the glassbox PRD and settled
+across the codebase by the LOG02 spray + convergence (#245/#285); the mechanical
+parts are ENFORCED by ``tests/test_logging_adoption_scoped.py``'s sweeps, so a
+new module inherits them by test failure, not by memory:
+
+- **Levels.** Lifecycle milestones at INFO (with ``duration_ms`` where
+  meaningful); mechanics at DEBUG; degraded-but-continuing outcomes at WARNING;
+  failures that propagate at ERROR with the exception attached. User-facing
+  verb output remains ``print``/``echo`` — but anything that is the ONLY record
+  of an action must also log.
+- **Event names.** The human ``msg`` is a domain phrase — domain noun +
+  past-tense/imperative ("tree created …", "review posted …") — NEVER a code
+  identifier (no ``function_name:`` / ``module.attr:`` prefixes).
+- **PR identity.** A PR renders as ``pr#N`` in messages (never ``pr=#N`` or
+  ``owner/repo#N``), and the ``pr`` domain key is bound (:mod:`shipit.logcontext`)
+  or passed in ``extra`` wherever the number is known, so the record is
+  jq-sliceable as well as readable.
+- **Exceptions.** Attach via ``exc_info=True`` — never ``exc_info=<instance>``,
+  and never ALSO interpolated into the message text (the formatter renders the
+  traceback; interpolation duplicates it).
+- **Redaction.** Never mask per call site: the :func:`shipit.redact.redact_event`
+  step in :data:`_PIPELINE` masks every record, on every sink, at format time
+  (#277). The one deliberate exception is :class:`shipit.execrun.ExecError`,
+  redacted at construction because the object surfaces to callers OUTSIDE the
+  logging chain.
 """
 
 from __future__ import annotations
