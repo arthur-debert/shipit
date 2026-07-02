@@ -22,6 +22,7 @@ import builtins
 
 import pytest
 
+from shipit.agent import backend as agent_backend
 from shipit.review import ghauth
 
 
@@ -68,7 +69,7 @@ def test_make_app_jwt_sources_from_doppler_and_signs_in_memory(
     requested, served = doppler_stub
     captured = _stub_jwt(monkeypatch)
 
-    token = ghauth.make_app_jwt("codex")
+    token = ghauth.make_app_jwt(agent_backend.CODEX)
 
     assert token == "signed.jwt.token"
     # PEM + app id came from Doppler under the agent-derived key names.
@@ -85,7 +86,7 @@ def test_make_app_jwt_sources_from_doppler_and_signs_in_memory(
 def test_make_app_jwt_agy_uses_agy_keys(monkeypatch, doppler_stub):
     requested, served = doppler_stub
     captured = _stub_jwt(monkeypatch)
-    ghauth.make_app_jwt("agy")
+    ghauth.make_app_jwt(agent_backend.ANTIGRAVITY)
     assert "AGY_REVIEW_APP_PRIVATE_KEY" in requested
     assert captured["key"] == served["AGY_REVIEW_APP_PRIVATE_KEY"]
     assert captured["payload"]["iss"] == "222222"
@@ -101,7 +102,7 @@ def test_make_app_jwt_never_reads_disk(monkeypatch, doppler_stub):
 
     monkeypatch.setattr(builtins, "open", guard_open)
     try:
-        ghauth.make_app_jwt("codex")
+        ghauth.make_app_jwt(agent_backend.CODEX)
     finally:
         monkeypatch.setattr(builtins, "open", real_open)
 
@@ -117,13 +118,15 @@ def test_make_app_jwt_clean_error_when_pyjwt_absent(monkeypatch, doppler_stub):
 
     monkeypatch.setattr(builtins, "__import__", no_jwt)
     with pytest.raises(ghauth.ReviewAuthError, match="pyjwt"):
-        ghauth.make_app_jwt("codex")
+        ghauth.make_app_jwt(agent_backend.CODEX)
 
 
-def test_unknown_agent_is_a_clean_error(monkeypatch, doppler_stub):
+def test_no_funnel_backend_is_a_clean_error(monkeypatch, doppler_stub):
+    # A backend with no funnel App (claude) fails loud with an actionable message —
+    # the registry-derived key names are never fabricated for it.
     _stub_jwt(monkeypatch)
     with pytest.raises(ghauth.ReviewAuthError, match="No GitHub App credentials"):
-        ghauth.make_app_jwt("bogus")
+        ghauth.make_app_jwt(agent_backend.CLAUDE)
 
 
 def test_doppler_failure_is_normalized(monkeypatch):
@@ -135,7 +138,7 @@ def test_doppler_failure_is_normalized(monkeypatch):
 
     monkeypatch.setattr(ghauth.secretsrc, "doppler_get", boom)
     with pytest.raises(ghauth.ReviewAuthError, match="from\n? *Doppler|from Doppler"):
-        ghauth.make_app_jwt("codex")
+        ghauth.make_app_jwt(agent_backend.CODEX)
 
 
 def test_installation_token_runs_the_three_hops(monkeypatch, doppler_stub):
@@ -156,7 +159,7 @@ def test_installation_token_runs_the_three_hops(monkeypatch, doppler_stub):
     monkeypatch.setattr(ghauth, "_api_get", fake_get)
     monkeypatch.setattr(ghauth, "_api_post", fake_post)
 
-    tok = ghauth.installation_token("codex", "owner/repo")
+    tok = ghauth.installation_token(agent_backend.CODEX, "owner/repo")
     assert tok == "ghs_installation_tok"
     assert gets == ["/repos/owner/repo/installation"]
     assert posts == ["/app/installations/42/access_tokens"]
@@ -179,11 +182,14 @@ def test_installation_auth_returns_token_and_granted_permissions(
         },
     )
 
-    auth = ghauth.installation_auth("codex", "owner/repo")
+    auth = ghauth.installation_auth(agent_backend.CODEX, "owner/repo")
     assert auth["token"] == "ghs_installation_tok"
     assert auth["permissions"]["checks"] == "write"
     # The string-only helper rides the same mint.
-    assert ghauth.installation_token("codex", "owner/repo") == "ghs_installation_tok"
+    assert (
+        ghauth.installation_token(agent_backend.CODEX, "owner/repo")
+        == "ghs_installation_tok"
+    )
 
 
 def test_installation_auth_raises_when_no_token(monkeypatch, doppler_stub):
@@ -192,7 +198,7 @@ def test_installation_auth_raises_when_no_token(monkeypatch, doppler_stub):
     monkeypatch.setattr(ghauth, "_api_get", lambda path, token: {"id": 42})
     monkeypatch.setattr(ghauth, "_api_post", lambda path, token: {"permissions": {}})
     with pytest.raises(ghauth.ReviewAuthError, match="no\n? *'token'|no 'token'"):
-        ghauth.installation_auth("codex", "owner/repo")
+        ghauth.installation_auth(agent_backend.CODEX, "owner/repo")
 
 
 def test_installation_id_404_is_actionable(monkeypatch, doppler_stub):
@@ -203,4 +209,6 @@ def test_installation_id_404_is_actionable(monkeypatch, doppler_stub):
 
     monkeypatch.setattr(ghauth, "_api_get", not_installed)
     with pytest.raises(ghauth.ReviewAuthError, match="not installed"):
-        ghauth.installation_id("codex", "owner/repo", jwt="signed.jwt.token")
+        ghauth.installation_id(
+            agent_backend.CODEX, "owner/repo", jwt="signed.jwt.token"
+        )

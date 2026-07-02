@@ -483,9 +483,18 @@ class _LocalReviewAdapter(ReviewerAdapter):
     # No `review_requested` edge: the review is generated + posted synchronously,
     # so base `detect` must never consult `requested_logins` for these.
     has_requested_edge = False
-    # The stable bot-login slug fragment this reviewer matches (set by each
-    # subclass). `matches` requires the `[bot]` suffix AND this fragment.
-    bot_slug_fragment: str = ""
+    # The ONE agent-backend identity this adapter fronts (ADR-0025) — set by each
+    # subclass to a registry entry. Every derived name below (`name`, the login
+    # slug fragment, the funnel reviewer name) reads off it, and `request` threads
+    # it into `shipit.review.service`, so the funnel path never re-composes or
+    # re-parses an identity string.
+    backend: _agent_backend.Backend
+
+    @property
+    def bot_slug_fragment(self) -> str:
+        """The stable bot-login slug fragment `matches` requires (with the `[bot]`
+        suffix) — the registry's `<agent>-review` alias, never composed here."""
+        return self.backend.bot_slug_fragment
 
     def matches(self, login: str) -> bool:
         # Require the GitHub App `[bot]` SUFFIX (not just the substring
@@ -531,7 +540,8 @@ class _LocalReviewAdapter(ReviewerAdapter):
             from ..review import service
         except ImportError as exc:  # pragma: no cover - only when the extra is absent
             raise PrStateError(
-                f"{self.name}-local review needs the optional `review` extra "
+                f"{self.funnel_reviewer_name()} review needs the optional `review` "
+                f"extra "
                 f"(pyjwt): install shipit with `pip install 'shipit[review]'`. ({exc})"
             ) from exc
 
@@ -545,12 +555,12 @@ class _LocalReviewAdapter(ReviewerAdapter):
             run_kwargs["timeout"] = options["timeout"]
 
         try:
-            service.start_detached_review(self.name, pr, **run_kwargs)
+            service.start_detached_review(self.backend, pr, **run_kwargs)
         except PrStateError:
             raise
         except Exception as exc:  # noqa: BLE001 - normalize every failure mode uniformly
             raise PrStateError(
-                f"{self.name}-local review failed on #{pr}: {exc}"
+                f"{self.funnel_reviewer_name()} review failed on #{pr}: {exc}"
             ) from exc
         return True
 
@@ -564,11 +574,12 @@ class _LocalReviewAdapter(ReviewerAdapter):
         return False
 
     def funnel_reviewer_name(self) -> str:
-        """The funnel reviewer name (`codex` → `codex-local`) — the suffix the
-        OBS02 check run is named after (`review: <agent>-local`, ADR-0005). Mirror
-        of `shipit.review.checkrun.reviewer_name`, kept here so prstate reads the
-        funnel without importing the optional `review` extra."""
-        return f"{self.name}-local"
+        """The funnel reviewer name (`codex-local`) — the suffix the OBS02 check
+        run is named after (`review: <agent>-local`, ADR-0005). The registry's
+        `check_run_name` alias (ADR-0025), read off the backend identity — never
+        composed here — and available without importing the optional `review`
+        extra."""
+        return self.backend.check_run_name
 
     @property
     def display_name(self) -> str:
@@ -651,12 +662,13 @@ class CodexAdapter(_LocalReviewAdapter):
     identity. See :class:`_LocalReviewAdapter` for the synchronous-request /
     no-cancel / head-strict contract."""
 
-    # Name + login slug fragment come from the ONE agent-backend identity registry
-    # (ADR-0025), so the funnel axis and the launch axis share one definition of the
-    # codex identity — no duplicated alias tables.
-    name = _agent_backend.CODEX.name
+    # ONE registry entry (ADR-0025) — the adapter fronts this identity; the name
+    # (and, via the base class, the login slug fragment + funnel reviewer name)
+    # derive from it, so the funnel axis and the launch axis share one definition
+    # of the codex identity — no duplicated alias tables.
+    backend = _agent_backend.CODEX
+    name = backend.funnel_agent or backend.name
     instruction_files = (".github/codex-review-instructions.md",)
-    bot_slug_fragment = _agent_backend.CODEX.bot_slug_fragment
 
 
 class AgyAdapter(_LocalReviewAdapter):
@@ -667,10 +679,11 @@ class AgyAdapter(_LocalReviewAdapter):
     auto-triggering GeminiAdapter). See :class:`_LocalReviewAdapter` for the
     request/cancel/detect contract."""
 
-    # Name + login slug fragment come from the shared agent-backend identity (ADR-0025).
-    name = _agent_backend.ANTIGRAVITY.funnel_agent
+    # ONE registry entry (ADR-0025): the adapter's registry name is the backend's
+    # funnel-agent alias (`agy`); every other derived name reads off the identity.
+    backend = _agent_backend.ANTIGRAVITY
+    name = backend.funnel_agent or backend.name
     instruction_files = (".github/agy-review-instructions.md",)
-    bot_slug_fragment = _agent_backend.ANTIGRAVITY.bot_slug_fragment
 
 
 # The adapter CATALOG: every reviewer the engine knows how to read/request. This

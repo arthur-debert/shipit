@@ -226,7 +226,7 @@ def test_local_agent_request_detaches_in_flight(monkeypatch, capsys):
     monkeypatch.setattr(
         service,
         "start_detached_review",
-        lambda agent, pr, **kw: detached.append((agent, pr)) or True,
+        lambda backend, pr, **kw: detached.append((backend.funnel_agent, pr)) or True,
     )
     rc = review_verb.run(7, reviewer="codex")
     assert rc == 0
@@ -242,7 +242,9 @@ def test_local_agent_spec_alias_detaches(monkeypatch, capsys, name):
     from shipit.review import service
 
     monkeypatch.setattr(review_verb, "resolve_pr", lambda pr: 7)
-    monkeypatch.setattr(service, "start_detached_review", lambda agent, pr, **kw: True)
+    monkeypatch.setattr(
+        service, "start_detached_review", lambda backend, pr, **kw: True
+    )
     rc = review_verb.run(7, reviewer=name)
     assert rc == 0
     out = capsys.readouterr().out
@@ -359,8 +361,8 @@ def test_pr_review_run_invokes_detached_child(monkeypatch):
 
     captured: dict = {}
 
-    def fake_child(agent, pr, **kw):
-        captured.update({"agent": agent, "pr": pr, **kw})
+    def fake_child(backend, pr, **kw):
+        captured.update({"backend": backend, "pr": pr, **kw})
         return {}
 
     monkeypatch.setattr(service, "run_detached_review", fake_child)
@@ -380,7 +382,10 @@ def test_pr_review_run_invokes_detached_child(monkeypatch):
         ]
     )
     assert rc == 0
-    assert captured["agent"] == "codex"
+    # The child boundary resolved `--agent codex` back to the ONE registry identity.
+    from shipit.agent import backend as agent_backend
+
+    assert captured["backend"] is agent_backend.CODEX
     assert captured["pr"] == 5
     assert captured["repo"] == "owner/repo"
     assert captured["run_id"] == 555

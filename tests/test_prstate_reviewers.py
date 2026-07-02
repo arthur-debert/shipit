@@ -8,6 +8,7 @@ resolved-thread filter, and Gemini's weak (reaction/comment) signals.
 from __future__ import annotations
 
 import pytest
+from shipit.agent import backend as _agent_backend
 from shipit.identity import Sha
 from shipit.prstate.model import ReviewLifecycle
 from shipit.prstate.errors import PrStateError
@@ -473,8 +474,8 @@ def test_local_request_detaches_via_service(monkeypatch, tmp_path):
 
     calls: list[tuple] = []
 
-    def fake_start_detached(agent, pr, **kwargs):
-        calls.append((agent, pr, kwargs))
+    def fake_start_detached(backend, pr, **kwargs):
+        calls.append((backend, pr, kwargs))
         return True
 
     monkeypatch.setattr(service, "start_detached_review", fake_start_detached)
@@ -483,9 +484,10 @@ def test_local_request_detaches_via_service(monkeypatch, tmp_path):
 
     assert CODEX.request(7) is True
     assert AGY.request(9) is True
-    assert calls[0][0] == "codex" and calls[0][1] == 7
+    # The adapters hand the service their ONE registry identity (COR02-WS03).
+    assert calls[0][0] is _agent_backend.CODEX and calls[0][1] == 7
     assert calls[0][2]["as_app"] is True
-    assert calls[1][0] == "agy" and calls[1][1] == 9
+    assert calls[1][0] is _agent_backend.ANTIGRAVITY and calls[1][1] == 9
 
 
 def test_local_request_threads_model_and_instructions_from_config(
