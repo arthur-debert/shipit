@@ -156,7 +156,8 @@ Turn the black hole into a glass box, in layers:
   failure at error level.
 - Redaction is central and fail-safe: the secrets layer registers every
   fetched value with the redactor; pattern rules (GitHub token prefixes, PEM
-  blocks) catch inherited tokens. Redaction applies to everything the runner
+  blocks, Doppler token prefixes) catch inherited tokens. Redaction applies to
+  everything the runner
   logs or attaches to errors. No redaction package is adopted (none is
   credible; ADR-0029 notes the survey).
 - The spawn launch path becomes a consumer view over the runner, keeping its
