@@ -67,7 +67,7 @@ def _helper(body: dict) -> str:
     the hook to the coordinator/ephemeral path (ADR-0027), so every helper-path
     payload in this file carries one — exactly like the live payloads do.
     """
-    return json.dumps({"prompt_id": "c2f52d57-prompt", **body})
+    return json.dumps({"prompt_id": "c2f52d57-4f6e-4d0a-9b1c-8e3a5d7f2b91", **body})
 
 
 def test_spawn_lands_in_a_tree_on_epic_branch(monkeypatch, fake_repo):
@@ -218,7 +218,7 @@ def test_no_inferable_epic_falls_back_to_epicless_branch(
     # missing cwd) → a safe epic-less branch; the spawn STILL lands in a real Tree.
     monkeypatch.delenv(worktree_adapter.EPIC_MARKER_ENV, raising=False)
     monkeypatch.setattr(worktreecreate.gh, "git_current_branch", lambda *, cwd: branch)
-    body = {"name": "agent-abc123", "prompt_id": "c2f52d57-prompt"}
+    body = {"name": "agent-abc123", "prompt_id": "c2f52d57-4f6e-4d0a-9b1c-8e3a5d7f2b91"}
     if cwd is not None:
         body["cwd"] = cwd
     code, out = _run(json.dumps(body))
