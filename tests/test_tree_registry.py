@@ -61,8 +61,12 @@ def fleet(tmp_path: Path, monkeypatch):
         },
     }
     pr_by_branch = {
-        "issues/123/work": {"number": 7, "state": "OPEN", "isDraft": True},
-        "HAR02/WS02": {"number": 9, "state": "MERGED", "isDraft": False},
+        "issues/123/work": gh.HeadPr(
+            number=7, state="OPEN", is_draft=True, base_ref="main"
+        ),
+        "HAR02/WS02": gh.HeadPr(
+            number=9, state="MERGED", is_draft=False, base_ref="HAR02/umbrella"
+        ),
     }
 
     monkeypatch.setattr(git, "current_branch", lambda *, cwd: state[cwd]["branch"])
