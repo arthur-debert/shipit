@@ -118,6 +118,18 @@ def test_seeded_secrets_derivation_is_golden():
     )
 
 
+def test_secrets_scaffold_with_no_funnel_backends_is_header_only(monkeypatch):
+    """An empty Backend registry (no funnel backends) renders a header-only
+    ``[secrets]`` table instead of raising (``max()`` over the empty name set)."""
+    from shipit.agent import backend
+
+    monkeypatch.setattr(backend, "REGISTRY", ())
+    assert config.seeded_app_secrets() == ()
+    scaffold = config.secrets_scaffold()
+    assert scaffold.endswith("[secrets]\n")
+    assert tomllib.loads(scaffold) == {"secrets": {}}
+
+
 def test_plan_policy_seed_fresh_lists_secrets_and_reviewers(tmp_path):
     p = tmp_path / ".shipit.toml"  # absent
     seeded = config.plan_policy_seed(p)

@@ -285,9 +285,9 @@ def secrets_scaffold() -> str:
     rendering byte-identical to the retired literal.
     """
     names = seeded_app_secrets()
-    width = max(len(n) for n in names)
-    body = "\n".join(f'{n:<{width}} = {{ doppler = "{n}" }}' for n in names)
-    return f"{_SECRETS_SCAFFOLD_HEADER}\n{body}\n"
+    width = max((len(n) for n in names), default=0)
+    lines = [f'{n:<{width}} = {{ doppler = "{n}" }}' for n in names]
+    return "\n".join([_SECRETS_SCAFFOLD_HEADER, *lines]) + "\n"
 
 
 # The explanatory comment prepended to the seeded ``[reviewers]`` table. The TABLE
