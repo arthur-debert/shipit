@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 from shipit import cli, logsetup
+from shipit.execrun import ExecError
 
 
 @pytest.fixture(autouse=True)
@@ -326,7 +327,7 @@ def test_resolve_current_owner_repo_is_best_effort(monkeypatch):
     monkeypatch.setattr(
         logsetup.gh,
         "current_repo",
-        lambda: (_ for _ in ()).throw(logsetup.gh.GhError("no repo")),
+        lambda: (_ for _ in ()).throw(ExecError(["gh"], rc=1, stderr="no repo")),
     )
     assert logsetup.resolve_current_owner_repo() is None
 

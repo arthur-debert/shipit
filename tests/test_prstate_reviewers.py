@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import pytest
 from shipit.prstate.model import ReviewLifecycle
+from shipit.prstate.errors import PrStateError
 from shipit.prstate.reviewers import (
     REGISTRY,
     AgyAdapter,
@@ -509,11 +510,10 @@ def test_local_request_threads_model_and_instructions_from_config(
     assert captured["instructions_path"] == str(tmp_path / "docs" / "rev.md")
 
 
-def test_local_request_normalizes_failure_to_gherror(monkeypatch, tmp_path):
+def test_local_request_normalizes_failure_to_prstateerror(monkeypatch, tmp_path):
     # Any failure in the synchronous detach (a `gh`/auth failure, a spawn failure)
-    # is normalized to a clean GhError (the one error type the CLI renders + exit
+    # is normalized to a clean PrStateError (the one error type the CLI renders + exit
     # 1) — never a raw traceback.
-    from shipit.prstate import ghapi
     from shipit.review import service
 
     def boom(agent, pr, **kwargs):
@@ -522,7 +522,7 @@ def test_local_request_normalizes_failure_to_gherror(monkeypatch, tmp_path):
     monkeypatch.setattr(service, "start_detached_review", boom)
     monkeypatch.chdir(tmp_path)
 
-    with pytest.raises(ghapi.GhError, match="codex-local review failed") as excinfo:
+    with pytest.raises(PrStateError, match="codex-local review failed") as excinfo:
         CODEX.request(7)
     # The original failure was WRAPPED (normalized), not re-raised: the chained
     # cause is the underlying RuntimeError, so no raw traceback escapes.

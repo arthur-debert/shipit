@@ -22,7 +22,7 @@ import time
 from pathlib import Path
 from typing import Callable
 
-from .. import gh, logsetup
+from .. import execrun, gh, logsetup
 
 #: Default number of trailing lines the no-flag invocation prints.
 DEFAULT_TAIL = 50
@@ -133,7 +133,7 @@ def run(
     try:
         slug = repo if repo is not None else current_repo()
         owner_repo = _owner_repo(slug)
-    except gh.GhError as exc:
+    except execrun.ExecError as exc:
         # Resolving the cwd repo shelled out and failed — not a checkout, or gh
         # is unavailable. Keep the verb's promise of a clean message, no traceback.
         print(

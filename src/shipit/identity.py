@@ -165,7 +165,7 @@ def resolve_repo(cwd: str = ".", *, boundary: GitBoundary = gh) -> Repo:
 
     Reads ``git remote get-url origin`` (via the injected ``boundary``, default
     :mod:`shipit.gh`) and parses its ``owner/name`` tail — offline and Tree-safe,
-    deliberately NOT the API-based ``gh.current_repo()``. Raises :class:`shipit.gh.GhError`
+    deliberately NOT the API-based ``gh.current_repo()``. Raises :class:`shipit.execrun.ExecError`
     when there is no origin remote and :class:`ValueError` when the URL is
     unparseable.
 
@@ -193,7 +193,7 @@ def resolve_working_dir(cwd: str = ".", *, boundary: GitBoundary = gh) -> Workin
 
     This REQUIRES a checkout. A :class:`WorkingDir` *has-a* :class:`Repo`, and a
     :class:`Repo` needs an origin remote, so outside a checkout (no origin) this
-    raises :class:`shipit.gh.GhError`, propagated from :func:`resolve_repo` — it
+    raises :class:`shipit.execrun.ExecError`, propagated from :func:`resolve_repo` — it
     does NOT fabricate an identity-less WorkingDir. Identity resolution is
     local/offline (see :func:`resolve_repo`).
     """

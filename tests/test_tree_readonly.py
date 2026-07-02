@@ -23,6 +23,7 @@ from pathlib import Path
 import pytest
 
 from shipit import gh
+from shipit.execrun import ExecError
 from shipit.tree.readonly import (
     chmod_readonly,
     chmod_writable,
@@ -298,10 +299,12 @@ def test_create_readonly_rolls_back_partial_tree_on_failure(tmp_path, monkeypatc
     )
     _mock_git_boundary(monkeypatch, files={"README.md": "hi\n"})
     monkeypatch.setattr(
-        gh, "git_checkout", lambda *a, **k: (_ for _ in ()).throw(gh.GhError("boom"))
+        gh,
+        "git_checkout",
+        lambda *a, **k: (_ for _ in ()).throw(ExecError(["gh"], rc=1, stderr="boom")),
     )
 
-    with pytest.raises(gh.GhError):
+    with pytest.raises(ExecError):
         create_readonly(plan, source_repo="/ref", github_url="url")
     assert not plan.dir.exists()
 

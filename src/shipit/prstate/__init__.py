@@ -18,7 +18,8 @@ PRD "two gh boundaries"):
     load-bearing for the stdlib-only guarantee here. They are not merged.
 
 Boundary discipline: every GitHub call goes through `ghapi` (shell out to
-`gh`); everything else is pure transformation over recorded data, so it unit-
-tests against captured JSON with no network. stdlib only — no third-party
-runtime deps.
+`gh`, executed by the one Exec runner `shipit.execrun` — ADR-0028); everything
+else is pure transformation over recorded data, so it unit-tests against
+captured JSON with no network. stdlib only — no third-party runtime deps
+(`shipit.execrun`/`shipit.redact` are themselves stdlib-only).
 """

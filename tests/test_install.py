@@ -11,6 +11,7 @@ import pytest
 
 from shipit import config, gh
 from shipit.verbs import install
+from shipit.execrun import ExecError
 
 
 # --------------------------------------------------------------------------
@@ -858,7 +859,7 @@ def test_stale_manifest_keys_are_dropped(tmp_path, rec):
 
 def test_gh_failure_is_a_clean_nonzero_exit(tmp_path, monkeypatch, rec):
     def boom(*a, **k):
-        raise gh.GhError("no remote configured")
+        raise ExecError(["gh"], rc=1, stderr="no remote configured")
 
     monkeypatch.setattr(gh, "git_switch_create", boom)
     (tmp_path / "AGENTS.md").write_text("# Acme\n")

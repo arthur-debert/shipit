@@ -35,6 +35,7 @@ import pytest
 from shipit.review import service
 from shipit.review.backends.base import BackendError
 from shipit.review.diff import ReviewView, review_view
+from shipit.execrun import ExecError
 
 _DIFF = """\
 diff --git a/foo.py b/foo.py
@@ -162,7 +163,9 @@ def test_start_detached_still_spawns_when_breadcrumb_create_fails(monkeypatch):
     )
 
     def boom_rest(path, *, method=None, body=None, token=None):
-        raise service.gh.GhError("403 Resource not accessible by integration")
+        raise ExecError(
+            ["gh"], rc=1, stderr="403 Resource not accessible by integration"
+        )
 
     monkeypatch.setattr(service.checkrun.gh, "rest", boom_rest)
     monkeypatch.setattr(
@@ -181,52 +184,52 @@ def test_start_detached_still_spawns_when_breadcrumb_create_fails(monkeypatch):
 
 def test_resolve_target_raises_on_missing_headrefoid(monkeypatch):
     """The synchronous validation path: a `gh pr view` response without
-    `headRefOid` (schema change / unexpected output) must raise `GhError`, NOT
+    `headRefOid` (schema change / unexpected output) must raise `ReviewError`, NOT
     silently return an empty SHA — otherwise the request reports in-flight with no
     target commit for the funnel check."""
     monkeypatch.setattr(service.gh, "current_repo", lambda: "owner/repo")
     monkeypatch.setattr(service.gh, "pr_view", lambda pr, json_fields=None: "{}")
 
-    with pytest.raises(service.gh.GhError, match="no headRefOid"):
+    with pytest.raises(service.ReviewError, match="no headRefOid"):
         service._resolve_target(5)
 
 
 def test_resolve_target_raises_on_non_dict_json(monkeypatch):
     """A truthy non-dict (e.g. a JSON list) must not `AttributeError` out of
-    `_resolve_target` — it is parseable but malformed, so it raises `GhError` like
+    `_resolve_target` — it is parseable but malformed, so it raises `ReviewError` like
     the other malformed-output cases."""
     monkeypatch.setattr(service.gh, "current_repo", lambda: "owner/repo")
     monkeypatch.setattr(service.gh, "pr_view", lambda pr, json_fields=None: "[1]")
 
-    with pytest.raises(service.gh.GhError, match="no headRefOid"):
+    with pytest.raises(service.ReviewError, match="no headRefOid"):
         service._resolve_target(5)
 
 
 def test_resolve_target_normalizes_malformed_repo_slug(monkeypatch):
     """`gh.current_repo()` returning an empty/non-`owner/name` slug makes
     `repo_from_slug` raise raw `ValueError`. The synchronous boundary normalizes it
-    to a typed `GhError` with a clear message, not a leaked traceback."""
+    to a typed `ReviewError` with a clear message, not a leaked traceback."""
     monkeypatch.setattr(service.gh, "current_repo", lambda: "not-a-slug")
     monkeypatch.setattr(
         service.gh,
         "pr_view",
         lambda pr, json_fields=None: '{"headRefOid": "abc", "isDraft": false}',
     )
-    with pytest.raises(service.gh.GhError, match="could not resolve target"):
+    with pytest.raises(service.ReviewError, match="could not resolve target"):
         service._resolve_target(5)
 
 
 def test_resolve_target_normalizes_missing_core_key(monkeypatch):
     """A node with `headRefOid` present but a required core key (`number`) missing
     makes `core_from_node` raise raw `KeyError`; the boundary normalizes it to a
-    typed `GhError` rather than leaking the `KeyError`."""
+    typed `ReviewError` rather than leaking the `KeyError`."""
     monkeypatch.setattr(service.gh, "current_repo", lambda: "owner/repo")
     monkeypatch.setattr(
         service.gh,
         "pr_view",
         lambda pr, json_fields=None: '{"headRefOid": "abc", "isDraft": false}',
     )
-    with pytest.raises(service.gh.GhError, match="could not resolve target"):
+    with pytest.raises(service.ReviewError, match="could not resolve target"):
         service._resolve_target(5)
 
 
@@ -234,7 +237,7 @@ def test_start_detached_closes_run_when_spawn_fails(monkeypatch):
     """If the detached spawn fails AFTER the parent opened the `in_progress` run,
     that run would hang forever with no child to close it. The parent closes it as
     failed (terminal PATCH on the SAME run) and re-raises so the adapter still
-    normalizes the failure to `GhError`."""
+    normalizes the failure to `PrStateError`."""
     calls = _fake_checkrun_boundary(monkeypatch)  # create POST -> run id 555
     monkeypatch.setattr(
         service, "_resolve_target", lambda pr: ("owner/repo", "deadbeef")
@@ -272,7 +275,9 @@ def test_start_detached_spawn_failure_with_no_run_just_reraises(monkeypatch):
     def fake_rest(path, *, method=None, body=None, token=None):
         calls.append({"method": method, "path": path, "body": body})
         if method == "POST":
-            raise service.gh.GhError("403 Resource not accessible by integration")
+            raise ExecError(
+                ["gh"], rc=1, stderr="403 Resource not accessible by integration"
+            )
         return {}
 
     monkeypatch.setattr(service.checkrun.gh, "rest", fake_rest)
@@ -635,7 +640,9 @@ def test_run_detached_transition_failure_does_not_mask_success(
 
     def fake_rest(path, *, method=None, body=None, token=None):
         # The child never creates (parent did); the only call is the terminal PATCH.
-        raise service.gh.GhError("PATCH 403 Resource not accessible by integration")
+        raise ExecError(
+            ["gh"], rc=1, stderr="PATCH 403 Resource not accessible by integration"
+        )
 
     monkeypatch.setattr(service.checkrun.gh, "rest", fake_rest)
 
@@ -658,7 +665,7 @@ def test_run_detached_transition_failure_on_error_path_still_raises(
     )
 
     def fake_rest(path, *, method=None, body=None, token=None):
-        raise service.gh.GhError("PATCH failed")
+        raise ExecError(["gh"], rc=1, stderr="PATCH failed")
 
     monkeypatch.setattr(service.checkrun.gh, "rest", fake_rest)
 
@@ -690,7 +697,7 @@ def test_run_detached_close_never_leaks_token(monkeypatch, _stub_pipeline, caplo
     secret = "ghs_leakCanary000111222333"
 
     def fake_rest(path, *, method=None, body=None, token=None):
-        raise service.gh.GhError("transition failed")
+        raise ExecError(["gh"], rc=1, stderr="transition failed")
 
     monkeypatch.setattr(
         service.checkrun.ghauth, "installation_token", lambda agent, repo: secret
@@ -787,11 +794,11 @@ def test_run_detached_resolve_failure_closes_run_failed_and_reraises(monkeypatch
     calls = _fake_checkrun_boundary(monkeypatch)
 
     def boom_resolve(pr, repo=None):
-        raise service.gh.GhError("could not fetch PR diff for #5")
+        raise ExecError(["gh"], rc=1, stderr="could not fetch PR diff for #5")
 
     monkeypatch.setattr(service, "resolve_pr", boom_resolve)
 
-    with pytest.raises(service.gh.GhError, match="could not fetch PR diff"):
+    with pytest.raises(ExecError, match="could not fetch PR diff"):
         service.run_detached_review("codex", 5, repo="owner/repo", run_id=555)
 
     assert not [c for c in calls if c["method"] == "POST"]  # child never creates
@@ -809,11 +816,11 @@ def test_run_detached_resolve_failure_with_no_run_id_just_reraises(monkeypatch):
     calls = _fake_checkrun_boundary(monkeypatch)
 
     def boom_resolve(pr, repo=None):
-        raise service.gh.GhError("could not fetch PR diff")
+        raise ExecError(["gh"], rc=1, stderr="could not fetch PR diff")
 
     monkeypatch.setattr(service, "resolve_pr", boom_resolve)
 
-    with pytest.raises(service.gh.GhError):
+    with pytest.raises(ExecError):
         service.run_detached_review("codex", 5, repo="owner/repo", run_id=None)
 
     assert not [c for c in calls if c["method"] == "PATCH"]
@@ -935,7 +942,9 @@ def test_start_detached_reconcile_lookup_failure_proceeds_to_spawn(monkeypatch, 
     )
 
     def boom_find(agent, repo, head_sha):
-        raise service.gh.GhError("403 Resource not accessible by integration")
+        raise ExecError(
+            ["gh"], rc=1, stderr="403 Resource not accessible by integration"
+        )
 
     spawned: list = []
     with caplog.at_level(logging.WARNING, logger="shipit.review"):

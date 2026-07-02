@@ -38,7 +38,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from ... import gh
+from ... import execrun, gh
 from .. import breakglass
 
 #: A single (tool, args) fingerprint occurring MORE than this many times WITHIN ONE
@@ -363,7 +363,7 @@ def exit_hygiene(
     """
     try:
         porcelain = gh.git_status_porcelain(cwd=str(repo_root))
-    except gh.GhError:
+    except execrun.ExecError:
         worktree_clean: bool | None = None
         dirty_file_count: int | None = None
     else:

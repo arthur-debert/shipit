@@ -21,6 +21,7 @@ from shipit.spawn import launch
 from shipit.tree import layout
 from shipit.tree.create import Tree
 from shipit.verbs import spawn as spawn_verb
+from shipit.execrun import ExecError
 
 
 def _patch_identity(monkeypatch, *, root="/repo", org_repo="acme/widget"):
@@ -352,7 +353,7 @@ def test_run_subagent_tree_creation_failure_fails_closed(tmp_path, monkeypatch, 
     _patch_identity(monkeypatch)
 
     def boom(spec, *, source_repo, github_url):
-        raise gh.GhError("clone failed")
+        raise ExecError(["gh"], rc=1, stderr="clone failed")
 
     monkeypatch.setattr(spawn_verb, "create", boom)
 
@@ -537,7 +538,7 @@ def test_run_subagent_reports_gh_error_cleanly(monkeypatch, capsys):
     monkeypatch.setattr(gh, "repo_root", lambda: "/repo")
 
     def boom():
-        raise gh.GhError("could not resolve repo")
+        raise ExecError(["gh"], rc=1, stderr="could not resolve repo")
 
     monkeypatch.setattr(gh, "current_repo", boom)
 
@@ -1018,7 +1019,7 @@ def test_run_subagent_reviewer_readonly_tree_failure_is_clean_exit_1(
     _patch_identity(monkeypatch)
 
     def boom(plan, *, source_repo, github_url):
-        raise gh.GhError("clone failed")
+        raise ExecError(["gh"], rc=1, stderr="clone failed")
 
     monkeypatch.setattr(spawn_verb, "create_readonly", boom)
     launched: dict = {}

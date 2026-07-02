@@ -5,34 +5,49 @@ environment the engine runs in (local, Cloud), handles auth + pagination, and
 — crucially — speaks GraphQL, where the PR review-thread and resolution data
 live. Keeping the boundary here means the rest of the package is pure data
 transformation and unit-tests without the network.
+
+Execution routes through the one Exec runner (ADR-0028): every `gh` call is an
+Exec via :func:`shipit.execrun.run` with a stated timeout, one structured
+record per Exec, and central redaction (:mod:`shipit.redact`) on everything
+logged or raised. A failed invocation — nonzero exit, timeout, or a missing
+`gh` binary — raises the single transport error
+:class:`shipit.execrun.ExecError`; this boundary defines no transport error of
+its own (the legacy ``GhError`` is deleted, no alias). The one SEMANTIC error
+the engine raises is :class:`shipit.prstate.errors.PrStateError`.
 """
 
 from __future__ import annotations
 
 import json
-import shutil
-import subprocess
 
+from .. import execrun
+from .errors import PrStateError
 
-class GhError(RuntimeError):
-    """A `gh` invocation failed, or `gh` is unavailable."""
+#: The stated per-Exec timeout (ADR-0028: every Exec carries one). Every call
+#: through this boundary talks to GitHub, so each gets the runner's generous
+#: network default.
+_GH_TIMEOUT: float = execrun.DEFAULT_TIMEOUT
 
 
 def _gh(args: list[str], *, input_text: str | None = None) -> str:
-    if shutil.which("gh") is None:
-        raise GhError("`gh` CLI not found on PATH")
-    proc = subprocess.run(  # noqa: S603 — args are constructed, never shell-interpolated
-        ["gh", *args],
-        capture_output=True,
-        text=True,
-        input=input_text,
-        check=False,
+    """``gh <args>`` through the Exec runner, returning stdout.
+
+    Raises :class:`shipit.execrun.ExecError` on any failure — nonzero exit,
+    timeout expiry, or a missing ``gh`` binary (normalized by the runner; no
+    ``shutil.which`` pre-check needed).
+    """
+    return execrun.run(["gh", *args], input=input_text, timeout=_GH_TIMEOUT).stdout
+
+
+def _gh_probe(args: list[str], *, input_text: str | None = None) -> execrun.ExecResult:
+    """``gh <args>`` with ``check=False`` — for probes where a nonzero exit is
+    a NORMAL answer (the no-PR read on every ``pr`` verb without an explicit
+    number). The Exec records at DEBUG, not ERROR (ADR-0028); the caller
+    branches on the result's ``rc``/``stderr``.
+    """
+    return execrun.run(
+        ["gh", *args], input=input_text, check=False, timeout=_GH_TIMEOUT
     )
-    if proc.returncode != 0:
-        raise GhError(
-            f"gh {' '.join(args)} failed ({proc.returncode}): {proc.stderr.strip()}"
-        )
-    return proc.stdout
 
 
 def rest(
@@ -90,7 +105,8 @@ def graphql(query: str, **variables: object) -> dict:
 
     A future caller needing explicit-null variables, or float/enum/list
     variables, must not reach for this — build that call against ``gh api
-    graphql`` directly. Raises :class:`GhError` if the response carries errors.
+    graphql`` directly. Raises :class:`PrStateError` if the response carries
+    errors (a semantic failure: the Exec succeeded, the answer is unusable).
     """
     args = ["api", "graphql", "-f", f"query={query}"]
     for key, value in variables.items():
@@ -104,7 +120,7 @@ def graphql(query: str, **variables: object) -> dict:
         args += [flag, f"{key}={value}"]
     payload = json.loads(_gh(args))
     if payload.get("errors"):
-        raise GhError(f"graphql errors: {payload['errors']}")
+        raise PrStateError(f"graphql errors: {payload['errors']}")
     return payload["data"]
 
 

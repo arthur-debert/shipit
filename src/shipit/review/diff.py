@@ -203,7 +203,7 @@ def _pr_meta(pr: int, repo: str | None) -> dict:
                 "mergeStateStatus",
             ],
         )
-    except gh.GhError as exc:
+    except execrun.ExecError as exc:
         raise ReviewError(
             f"Could not resolve PR #{pr}"
             + (f" in {repo}" if repo else "")
@@ -265,7 +265,7 @@ def resolve_pr(
     if repo is not None:
         try:
             repo = gh.repo_canonical(repo)
-        except gh.GhError as exc:
+        except execrun.ExecError as exc:
             raise ReviewError(
                 f"Could not resolve repo {repo!r} to its canonical owner/name via "
                 f"`gh repo view`: {exc}"

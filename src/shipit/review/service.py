@@ -40,7 +40,7 @@ from .. import gh
 from ..pr import CORE_JSON_FIELDS, core_from_node, repo_from_slug
 from . import checkrun, post, producer
 from .backends.base import BackendError
-from .diff import resolve_pr
+from .diff import ReviewError, resolve_pr
 
 #: The review path's logger — a child of the package ``shipit`` logger. A local
 #: review run (start, the backend/agent invoked, and the outcome) is recorded
@@ -161,7 +161,7 @@ def _generate_post_and_close(
             agent, run_repo, run_id, outcome=outcome, detail=str(exc)
         )
         # Record the breadcrumb, then RE-RAISE so the caller still sees the real
-        # review failure (the adapter normalizes it to GhError).
+        # review failure (the adapter normalizes it to PrStateError).
         raise
     except Exception as exc:  # noqa: BLE001 - any other failure is a degraded run
         # The agent errored (missing CLI, crash) or the review POST failed.
@@ -342,7 +342,7 @@ def start_detached_review(
         # fails AFTER the parent opened the in_progress run, no child will ever
         # close that run — it would hang `in_progress` forever. Close it as failed
         # here (only when a run was actually opened), then re-raise so the reviewer
-        # adapter still normalizes the request failure to `GhError`. (This is only
+        # adapter still normalizes the request failure to `PrStateError`. (This is only
         # the PARENT-observed spawn failure; the child's own self-resolution
         # catch-all is OBS03-WS03's deliverable, issue #41.)
         if run_id is not None:
@@ -476,7 +476,7 @@ def _resolve_target(pr: int) -> tuple[str, str]:
     :func:`resolve_pr` and the readiness path use, so ``head_sha`` is fetched exactly
     one way. It is NOT the full diff resolve — that fetch/merge-base/diff is the
     detached child's work, so the request stays fast. A ``gh``/auth failure
-    PROPAGATES (the reviewer adapter normalizes it to ``GhError``); the breadcrumb
+    PROPAGATES (the reviewer adapter normalizes it to ``PrStateError``); the breadcrumb
     create that follows is the only best-effort step.
     """
     repo = gh.current_repo()
@@ -484,25 +484,25 @@ def _resolve_target(pr: int) -> tuple[str, str]:
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as exc:
-        raise gh.GhError(f"unparseable `gh pr view` output for #{pr}: {exc}") from exc
+        raise ReviewError(f"unparseable `gh pr view` output for #{pr}: {exc}") from exc
     # A truthy non-dict (e.g. a JSON list) would fail on the core read; and a
     # missing/empty `headRefOid` would silently degrade the breadcrumb create to an
     # in-flight reply with no target commit. This is the synchronous validation
-    # path, so both are real failures — raise `GhError` (like the unparseable case
+    # path, so both are real failures — raise `ReviewError` (like the unparseable case
     # above) so the request fails loud instead of degrading, BEFORE building the core.
     if not (isinstance(data, dict) and data.get("headRefOid")):
-        raise gh.GhError(f"`gh pr view` output for #{pr} has no headRefOid: {raw!r}")
+        raise ReviewError(f"`gh pr view` output for #{pr} has no headRefOid: {raw!r}")
     # Both boundary reads can raise raw, untyped errors on a malformed upstream:
     # `repo_from_slug` raises `ValueError` when `gh.current_repo()` returned an
     # empty/non-`owner/name` slug, and `core_from_node` raises `KeyError`/`ValueError`
     # when the node omits a required core key or carries a non-bool `isDraft`. This
-    # is the fast synchronous boundary, so normalize either to `gh.GhError` (like the
+    # is the fast synchronous boundary, so normalize either to `ReviewError` (like the
     # unparseable/headRefOid cases above) — a clear, typed message instead of a raw
     # traceback leaking out of the request path.
     try:
         core = core_from_node(data, repo_from_slug(repo))
     except (ValueError, KeyError) as exc:
-        raise gh.GhError(
+        raise ReviewError(
             f"could not resolve target repo/core for #{pr} from `gh` output "
             f"(repo={repo!r}): {exc}"
         ) from exc

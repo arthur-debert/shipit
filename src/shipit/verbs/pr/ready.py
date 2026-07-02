@@ -19,7 +19,9 @@ import sys
 
 import click
 
+from ... import execrun
 from ...prstate import ghapi
+from ...prstate.errors import PrStateError
 from ...prstate.fetch import gather
 from ...prstate.reviewers import required_reviewers
 from ...prstate.state import TaskState, TaskStatus, evaluate
@@ -101,7 +103,7 @@ def run(pr: int | None = None, *, undo: bool = False) -> int:
     except NotReady as exc:
         print(f"refusing to flip: {exc}", file=sys.stderr)
         return 1
-    except ghapi.GhError as exc:
+    except (execrun.ExecError, PrStateError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     print(f"PR #{status.pr}: flipped draft→ready — {status.next_action}")

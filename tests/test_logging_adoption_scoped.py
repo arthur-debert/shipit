@@ -13,8 +13,11 @@ import logging
 
 
 def test_three_boundaries_have_a_shipit_logger():
+    # The gh boundary's per-call record moved to the one Exec runner
+    # (PROC01-WS02 / ADR-0028): `shipit.gh` no longer logs itself — every
+    # subprocess it runs is recorded by `shipit.execrun` on `shipit.exec`.
     for modname, expected in [
-        ("shipit.gh", "shipit.gh"),
+        ("shipit.execrun", "shipit.exec"),
         ("shipit.prstate.state", "shipit.prstate"),
         ("shipit.review.service", "shipit.review"),
         ("shipit.review.post", "shipit.review"),

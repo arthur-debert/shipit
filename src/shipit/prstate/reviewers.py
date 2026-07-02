@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 
 from ..agent import backend as _agent_backend
 from . import ghapi
+from .errors import PrStateError
 from .model import (
     FunnelState,
     ReadinessView,
@@ -515,7 +516,7 @@ class _LocalReviewAdapter(ReviewerAdapter):
         the detached child.
 
         Any failure in the SYNCHRONOUS part — a `gh`/auth failure resolving the PR,
-        a spawn failure — is normalized to `ghapi.GhError`, the one error type the
+        a spawn failure — is normalized to `PrStateError`, the one error type the
         `pr review request` CLI renders as a clean message + exit 1, so a request
         never crashes with a raw traceback. (A failure INSIDE the detached child
         resolves to a visible failed/timed-out check run on the PR, not to this
@@ -529,7 +530,7 @@ class _LocalReviewAdapter(ReviewerAdapter):
         try:
             from ..review import service
         except ImportError as exc:  # pragma: no cover - only when the extra is absent
-            raise ghapi.GhError(
+            raise PrStateError(
                 f"{self.name}-local review needs the optional `review` extra "
                 f"(pyjwt): install shipit with `pip install 'shipit[review]'`. ({exc})"
             ) from exc
@@ -545,10 +546,10 @@ class _LocalReviewAdapter(ReviewerAdapter):
 
         try:
             service.start_detached_review(self.name, pr, **run_kwargs)
-        except ghapi.GhError:
+        except PrStateError:
             raise
         except Exception as exc:  # noqa: BLE001 - normalize every failure mode uniformly
-            raise ghapi.GhError(
+            raise PrStateError(
                 f"{self.name}-local review failed on #{pr}: {exc}"
             ) from exc
         return True

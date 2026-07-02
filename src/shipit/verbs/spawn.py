@@ -310,7 +310,7 @@ def run_subagent(
     try:
         org_repo = gh.current_repo()
         url = gh.git_remote_url(cwd=root)
-    except gh.GhError as exc:
+    except execrun.ExecError as exc:
         print(f"spawn subagent: {exc}", file=sys.stderr)
         return 1
 
@@ -395,7 +395,7 @@ def run_subagent(
         # than surfacing as an opaque `git checkout` failure deep in tree creation.
         try:
             umbrella_exists = gh.remote_branch_exists(umbrella_branch, cwd=root)
-        except gh.GhError as exc:
+        except execrun.ExecError as exc:
             print(f"spawn subagent: {exc}", file=sys.stderr)
             return 1
         if not umbrella_exists:
@@ -473,7 +473,7 @@ def _launch_write(
     """
     try:
         tree = create(spec, source_repo=source_repo, github_url=github_url)
-    except (gh.GhError, ValueError, execrun.ExecError, OSError) as exc:
+    except (ValueError, execrun.ExecError, OSError) as exc:
         # Fail-closed (ADR-0017/0019): a Tree-creation error fails the spawn LOUD.
         # There is deliberately no native-worktree fallback — the launcher below is
         # unreachable unless a real Tree exists, so a failed create can never end up
@@ -605,7 +605,7 @@ def _launch_reviewer(
     plan = readonly_plan(org=org, repo=repo_name, branch=branch)
     try:
         tree = create_readonly(plan, source_repo=source_repo, github_url=github_url)
-    except (gh.GhError, ValueError, execrun.ExecError, OSError) as exc:
+    except (ValueError, execrun.ExecError, OSError) as exc:
         # Fail-closed (ADR-0017/0018): a read-only-Tree error fails the spawn LOUD;
         # the launcher below is unreachable unless a real Tree exists.
         print(f"spawn subagent: read-only tree creation failed: {exc}", file=sys.stderr)

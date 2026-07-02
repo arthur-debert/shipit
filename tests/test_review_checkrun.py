@@ -18,6 +18,7 @@ import logging
 import pytest
 
 from shipit.review import checkrun
+from shipit.execrun import ExecError
 
 
 def _fake_token(monkeypatch, sink: dict, value: str = "ghs_tok") -> None:
@@ -258,10 +259,10 @@ def test_transition_propagates_failure(monkeypatch):
     _fake_token(monkeypatch, {})
 
     def boom(path, *, method=None, body=None, token=None):
-        raise checkrun.gh.GhError("403 Resource not accessible")
+        raise ExecError(["gh"], rc=1, stderr="403 Resource not accessible")
 
     monkeypatch.setattr(checkrun.gh, "rest", boom)
-    with pytest.raises(checkrun.gh.GhError):
+    with pytest.raises(ExecError):
         checkrun.transition(
             "codex", "owner/repo", 1, conclusion="success", title="t", summary="s"
         )
