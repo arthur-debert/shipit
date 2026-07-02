@@ -93,7 +93,7 @@ simple-gal = [
 standout = [{ repo = "arthur-debert/standout", path = "standout" }]
 
 [shipit]
-version = "c27232363985f0860cb2fa56893c510fa34384b3"
+version = "1f0b42c7ccd5929dd95f942992b29aef9bec83aa"
 
 [managed]
 "skills/lex-primer/SKILL.md" = "sha256:ff616c1c447661298fb8e06a8a8a6ce60400d838c7c881b9e8bd526128e32901"
@@ -105,6 +105,7 @@ version = "c27232363985f0860cb2fa56893c510fa34384b3"
 "skills/shipit-to-prd/SKILL.md" = "sha256:3f11af08f88382929b1cd3b8b93d61c6eeac0e8322c5b9f7ba5835925d6b87cc"
 "AGENTS.md#shipit-block" = "sha256:62f7da748372021951746e9dad0ae10353c4e7640d11a0857bdb30550b26b954"
 "bin/shipit" = "sha256:b305b90ca3f746acbee0f457d26f5c213d63d0c2cfa31b6baf1b5903f83816bd"
+claude-start = "sha256:d543da07faa93302a87bd601adeae63ff8393d028c02964fcd1c18f8bed64f7d"
 "lefthook.yml" = "sha256:d64af3253189084f33e8495cc25d860294eafab55acc61dfe1f84801d22cb079"
 "pixi.toml#shipit-tasks" = "sha256:21737ae76129ac0518e2c9e2a647e4ece71f946a43565ddb2cc263d9b32d5268"
 ".claude/agents/explorer.md" = "sha256:fb2d15b201fc8ebb4f4bca0599e853b8195f784f37a6e70dd91788a2917ff4bc"
@@ -114,3 +115,4 @@ version = "c27232363985f0860cb2fa56893c510fa34384b3"
 ".claude/settings.json#shipit-pretooluse-hook" = "sha256:e9dad00143c17cddb9a8ceef485a043f6d3ac4c02d06e0c8e9bff4305b2de1f8"
 ".claude/settings.json#shipit-stop-hook" = "sha256:0b936c78ec1a099d43ace303a7497f15a7ece6bb5bb6c9a0e9cffc103c348d82"
 ".claude/settings.json#shipit-subagentstop-hook" = "sha256:0fbeea302c1aa9fe040ba6f84032f14a3805e09ed3aead663be187673d1554b0"
+".claude/settings.json#shipit-sessionstart-hook" = "sha256:38d3907265b0b17fcd8f5242d3e604eb40efbbd7893039633c8c47bc4e79240b"

@@ -193,8 +193,9 @@ behaves and how we ride it.
         a failure survives, inside the raised `ProcError`.
 
     Hooks — `.claude/settings.json`:
-        Every hook is `pixi run shipit hook <name>` (plus a `SessionStart` entry
-        running `pixi run -e lint install-hooks`). `shipit` is on PATH because the
+        Every hook is `pixi run shipit hook <name>` (plus two `SessionStart`
+        entries: `pixi run -e lint install-hooks` and the ADR-0027 activation,
+        `pixi run shipit hook sessionstart`). `shipit` is on PATH because the
         package is installed editable into each env, not because it is a pixi
         task. pixi is a transient wrapper per hook firing.
 
