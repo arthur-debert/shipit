@@ -18,6 +18,7 @@ is caught mechanically.
 from __future__ import annotations
 
 import ast
+import functools
 import pathlib
 
 import pytest
@@ -25,6 +26,15 @@ import pytest
 import shipit
 
 _SRC_ROOT = pathlib.Path(shipit.__file__).parent
+
+
+@functools.cache
+def _parsed(path: pathlib.Path) -> ast.Module:
+    """Parse ``path`` once across all parametrized runs — the sweep walks the
+    whole package once per guarded tool head, and the source never changes
+    mid-suite, so each file is read+parsed at most once."""
+    return ast.parse(path.read_text(encoding="utf-8"))
+
 
 #: The guard table: tool binary name → the module(s) allowed to assemble its
 #: argv. One entry per guarded tool; extending the guard to the next tool is a
@@ -57,8 +67,7 @@ def test_no_tool_argv_outside_its_adapter(head: str, homes: tuple[str, ...]):
     for path in sorted(_SRC_ROOT.rglob("*.py")):
         if path in allowed:
             continue
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
+        for node in ast.walk(_parsed(path)):
             if (
                 isinstance(node, (ast.List, ast.Tuple))
                 and node.elts
