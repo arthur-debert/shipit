@@ -280,6 +280,17 @@ def test_parse_ps_output_rejects_garbage():
     assert liveness._parse_ps_output("garbage here\nmore garbage", now=NOW) is None
 
 
+def test_parse_ps_output_non_dict_row_is_unreadable_not_a_crash(monkeypatch):
+    # jc's documented contract is a list of dicts, but the adapter owns the
+    # row-usability check (#297): a converter quirk yielding a non-dict row
+    # reads as an unreadable table (None), never an AttributeError escaping
+    # the probe's `ProcessInfo | None` contract.
+    monkeypatch.setattr(
+        liveness.jc, "parse", lambda *args, **kwargs: ["PID PPID ELAPSED ARGS"]
+    )
+    assert liveness._parse_ps_output(PS_TABLE, now=NOW) is None
+
+
 def test_parse_ps_output_bad_etime_degrades_to_unverifiable():
     # Alive but with an unparseable elapsed time -> create_time None (is_live
     # then reads it as not live), NOT a discarded row.

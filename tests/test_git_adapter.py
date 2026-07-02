@@ -11,8 +11,10 @@ return an :class:`ExecResult` with the rc under test rather than raising.
 
 from __future__ import annotations
 
+import pytest
+
 from shipit import git
-from shipit.execrun import ExecResult
+from shipit.execrun import CAUSE_MISSING_BINARY, ExecError, ExecResult
 
 
 def _ok(stdout: str = "") -> ExecResult:
@@ -150,6 +152,20 @@ def test_epic_umbrella_exists_false_when_no_umbrella(monkeypatch):
     # probe reads the nonzero exit as "not an epic" rather than raising.
     monkeypatch.setattr(git, "_probe", lambda args, *, cwd: _fail())
     assert git.epic_umbrella_exists("feature", cwd="/x") is False
+
+
+def test_epic_umbrella_exists_launch_failure_raises_not_false(monkeypatch):
+    # WS03-FX01 alignment (#297): an absent ref is a normal answer (ok=False ->
+    # False, above), but a launch-level failure (missing git, timeout) must NOT
+    # read as "not an epic" — it propagates, and the fail-CLOSED WorktreeCreate
+    # hook aborts the spawn loudly instead of silently minting a mis-based
+    # epic-less holding branch.
+    def boom(args, *, cwd):
+        raise ExecError(["git", "show-ref"], rc=None, cause=CAUSE_MISSING_BINARY)
+
+    monkeypatch.setattr(git, "_probe", boom)
+    with pytest.raises(ExecError):
+        git.epic_umbrella_exists("TRE04", cwd="/x")
 
 
 # --- remote_branch_exists: exact-ref equality (codex finding, gh.py:451) ---

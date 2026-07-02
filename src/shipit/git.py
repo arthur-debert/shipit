@@ -179,17 +179,23 @@ def epic_umbrella_exists(epic: str, *, cwd: str) -> bool:
     show-ref --verify`` with the EXACT full ref (never a pattern — avoids a glob
     matching an unrelated ref), so a garbage ``epic`` (separators, ``..``) simply
     yields a ref that does not resolve → ``False`` → the caller's safe epic-less
-    fallback. Never raises: any git failure (the ref is absent) reads as "not an epic".
+    fallback.
+
+    An absent ref is a NORMAL answer (``_probe`` reports the nonzero exit as
+    ``ok=False`` → "not an epic"); a launch-level failure (missing git, timeout)
+    raises :class:`ExecError` instead of masquerading as that same ``False`` —
+    the disposition shared with the other probe reads (:func:`commit_present`,
+    :func:`fetch_ref`, :func:`merge_base`). The one caller is the fail-CLOSED
+    WorktreeCreate hook, whose catch-all turns the raise into a loudly aborted
+    spawn — strictly better than silently degrading a real epic's spawn to a
+    mis-based epic-less holding branch.
     """
     for ref in (
         f"refs/remotes/origin/{epic}/umbrella",
         f"refs/heads/{epic}/umbrella",
     ):
-        try:
-            if _probe(["show-ref", "--verify", "--quiet", ref], cwd=cwd).ok:
-                return True
-        except ExecError:
-            continue
+        if _probe(["show-ref", "--verify", "--quiet", ref], cwd=cwd).ok:
+            return True
     return False
 
 
