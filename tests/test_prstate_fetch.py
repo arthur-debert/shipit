@@ -237,6 +237,106 @@ def test_gather_reviews_threads_the_rerun_policy(monkeypatch):
     assert CopilotAdapter().detect(ctx) is ReviewLifecycle.REQUESTED
 
 
+# --- identity/decision fields die loudly at the wire boundary (#330) --------
+
+
+def _thread_node(**overrides) -> dict:
+    node = {
+        "id": "RT_kwDOq1",
+        "isResolved": False,
+        "comments": {
+            "nodes": [
+                {
+                    "databaseId": 7,
+                    "path": "a.py",
+                    "line": 3,
+                    "body": "finding",
+                    "author": {"login": "codex"},
+                    "pullRequestReview": {"databaseId": 11},
+                }
+            ]
+        },
+    }
+    node.update(overrides)
+    return node
+
+
+def test_gather_reviews_rejects_malformed_review_database_id(monkeypatch):
+    # The GraphQL light path: a non-int (or bool) databaseId is a malformed
+    # review node and raises at the parse site, naming the wire field.
+    monkeypatch.setattr(fetch.gh, "current_repo", lambda: repo_from_slug("owner/repo"))
+    monkeypatch.setattr(
+        fetch.gh,
+        "graphql",
+        lambda query, **vars: _reviews_page(
+            [],
+            [
+                {
+                    "databaseId": True,
+                    "state": "COMMENTED",
+                    "commit": {"oid": HEAD},
+                    "author": {"login": "Copilot"},
+                }
+            ],
+        ),
+    )
+    with pytest.raises(ValueError, match="databaseId must be int"):
+        fetch.gather_reviews(558)
+
+
+def test_rest_review_id_happy_path_and_malformed():
+    review = fetch._review({"id": 42, "state": "APPROVED", "user": {"login": "codex"}})
+    assert review.review_id == 42
+    for bad in (True, "42", None):
+        with pytest.raises(ValueError, match="id must be int"):
+            fetch._review({"id": bad, "state": "APPROVED"})
+
+
+def test_thread_happy_path():
+    thread = fetch._thread(_thread_node())
+    assert thread.thread_id == "RT_kwDOq1"
+    assert thread.is_resolved is False
+    assert [c.comment_id for c in thread.comments] == [7]
+
+
+def test_thread_id_must_be_non_empty_str():
+    for bad in ("", None, 12):
+        with pytest.raises(ValueError, match="id must be a non-empty str"):
+            fetch._thread(_thread_node(id=bad))
+
+
+def test_is_resolved_must_be_exact_bool():
+    # The readiness gate: a truthy non-bool like "false" must never read as
+    # resolved — it raises instead.
+    for bad in ("false", "true", 1, None):
+        with pytest.raises(ValueError, match="isResolved must be a bool"):
+            fetch._thread(_thread_node(isResolved=bad))
+
+
+def test_comment_database_id_must_be_int():
+    for bad in (True, "7", None):
+        node = _thread_node()
+        node["comments"]["nodes"][0]["databaseId"] = bad
+        with pytest.raises(ValueError, match="databaseId must be int"):
+            fetch._thread(node)
+
+
+def test_comment_review_id_none_allowed_but_present_must_be_int():
+    # `review_id` associates the comment with its round in build_rounds();
+    # a detached comment reads as None, but a present value must be an exact
+    # int — a malformed "11" or True must never silently break the association.
+    node = _thread_node()
+    node["comments"]["nodes"][0]["pullRequestReview"] = None
+    assert fetch._thread(node).comments[0].review_id is None
+    for bad in (True, "11"):
+        node = _thread_node()
+        node["comments"]["nodes"][0]["pullRequestReview"] = {"databaseId": bad}
+        with pytest.raises(
+            ValueError, match=r"pullRequestReview\.databaseId must be int"
+        ):
+            fetch._thread(node)
+
+
 def test_commit_id_boundary_none_stays_none_and_present_is_validated():
     """`_commit_id` distinguishes an absent oid from a present-but-malformed one.
 

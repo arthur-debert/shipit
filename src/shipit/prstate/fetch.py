@@ -305,16 +305,22 @@ def gather_reviews(pr: int) -> ReadinessView:
             if rr.get("requestedReviewer")
         ]
     )
-    reviews = [
-        Review(
-            review_id=n["databaseId"],
-            author=(n.get("author") or {}).get("login", ""),
-            state=n.get("state", ""),
-            commit_id=_commit_id((n.get("commit") or {}).get("oid")),
-            body="",
+    reviews = []
+    for n in pull["reviews"]["nodes"]:
+        review_id = n["databaseId"]
+        if type(review_id) is not int:
+            raise ValueError(
+                f"malformed review node: databaseId must be int, got {review_id!r}"
+            )
+        reviews.append(
+            Review(
+                review_id=review_id,
+                author=(n.get("author") or {}).get("login", ""),
+                state=n.get("state", ""),
+                commit_id=_commit_id((n.get("commit") or {}).get("oid")),
+                body="",
+            )
         )
-        for n in pull["reviews"]["nodes"]
-    ]
     # The core is read off the SAME `pullRequest` node through the one
     # `core_from_node` boundary — so this light path fetches `is_draft` (and the
     # rest of the core) for real off its GraphQL query, never hardcoding it. The
@@ -515,8 +521,11 @@ def _commit_id(oid: str | None) -> Sha | None:
 
 
 def _review(raw: dict) -> Review:
+    review_id = raw["id"]
+    if type(review_id) is not int:
+        raise ValueError(f"malformed review payload: id must be int, got {review_id!r}")
     return Review(
-        review_id=raw["id"],
+        review_id=review_id,
         author=(raw.get("user") or {}).get("login", ""),
         state=raw.get("state", ""),
         commit_id=_commit_id(raw.get("commit_id")),
@@ -525,19 +534,45 @@ def _review(raw: dict) -> Review:
 
 
 def _thread(node: dict) -> Thread:
-    comments = tuple(
-        ReviewComment(
-            comment_id=c["databaseId"],
-            path=c.get("path") or "",
-            line=c.get("line") or c.get("originalLine"),
-            body=c.get("body") or "",
-            author=(c.get("author") or {}).get("login", ""),
-            review_id=(c.get("pullRequestReview") or {}).get("databaseId"),
+    thread_id = node["id"]
+    if not isinstance(thread_id, str) or not thread_id:
+        raise ValueError(
+            f"malformed thread node: id must be a non-empty str, got {thread_id!r}"
         )
-        for c in node["comments"]["nodes"]
-    )
+    is_resolved = node["isResolved"]
+    if not isinstance(is_resolved, bool):
+        raise ValueError(
+            f"malformed thread node: isResolved must be a bool, got {is_resolved!r}"
+        )
+    comments = []
+    for c in node["comments"]["nodes"]:
+        comment_id = c["databaseId"]
+        if type(comment_id) is not int:
+            raise ValueError(
+                f"malformed review comment node: databaseId must be int, "
+                f"got {comment_id!r}"
+            )
+        # `review_id` ties the comment back to its review round in
+        # `breakers.build_rounds()` — an identity field too. A comment may
+        # carry no review (None), but a present value must be an exact int.
+        review_id = (c.get("pullRequestReview") or {}).get("databaseId")
+        if review_id is not None and type(review_id) is not int:
+            raise ValueError(
+                f"malformed review comment node: pullRequestReview.databaseId "
+                f"must be int, got {review_id!r}"
+            )
+        comments.append(
+            ReviewComment(
+                comment_id=comment_id,
+                path=c.get("path") or "",
+                line=c.get("line") or c.get("originalLine"),
+                body=c.get("body") or "",
+                author=(c.get("author") or {}).get("login", ""),
+                review_id=review_id,
+            )
+        )
     return Thread(
-        thread_id=node["id"], is_resolved=node["isResolved"], comments=comments
+        thread_id=thread_id, is_resolved=is_resolved, comments=tuple(comments)
     )
 
 
