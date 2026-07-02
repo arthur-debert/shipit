@@ -325,7 +325,7 @@ def test_verify_apps_verdict_carries_the_run_fields(capsys, caplog):
         caplog.records, logging.INFO, "repo", "apps", "live", "rc", "duration_ms"
     )
     assert verdicts and verdicts[0].repo == "o/r" and verdicts[0].rc == 0
-    assert verdicts[0].live == verdicts[0].apps > 0
+    assert verdicts[0].apps > 0 and verdicts[0].live == verdicts[0].apps
     # An all-live run carries NO not_live_apps field — absent, not null-stuffed.
     assert not hasattr(verdicts[0], "not_live_apps")
     # Per-App passes are mechanics: each probe's outcome lands at DEBUG.
@@ -342,8 +342,11 @@ def test_verify_apps_failing_verdict_names_the_not_live_apps(capsys, caplog):
     verdicts = _with_fields(caplog.records, logging.INFO, "rc", "not_live_apps")
     assert verdicts and verdicts[0].rc == 1 and verdicts[0].live == 0
     # The probe raising (App not installed) is the failure path: ERROR + exception.
-    errors = _with_fields(caplog.records, logging.ERROR, "repo", "agent", "app")
+    errors = _with_fields(
+        caplog.records, logging.ERROR, "repo", "agent", "app", "live", "duration_ms"
+    )
     assert errors and all(r.exc_info for r in errors)
+    assert all(r.live is False for r in errors)
 
 
 def test_verify_apps_degraded_permission_is_a_warning(capsys, caplog):
@@ -352,7 +355,7 @@ def test_verify_apps_degraded_permission_is_a_warning(capsys, caplog):
     assert rc == 1
     # Reachable but missing checks:write — degraded, so WARNING, not ERROR.
     warnings = _with_fields(
-        caplog.records, logging.WARNING, "repo", "agent", "app", "live"
+        caplog.records, logging.WARNING, "repo", "agent", "app", "live", "duration_ms"
     )
     assert warnings and warnings[0].live is False
     assert not [r for r in caplog.records if r.levelno == logging.ERROR]
