@@ -103,62 +103,65 @@ def create(spec: TreeSpec, *, source_repo: str, github_url: str) -> Tree:
     tree_plan = plan(spec)
     dest = tree_plan.dir
     trees_root = spec.root if spec.root is not None else central_root()
-    # The Tree-birth seam binds its domain keys (ADR-0029): every record of the
-    # creation pipeline — including the Exec runner's own transport records for
-    # the git/provisioning subprocesses — carries the Tree it belongs to. The
-    # session identity is bound when the shape carries one: the ephemeral leaf
-    # IS the per-launch session id (ADR-0027), and the issue shape names its
-    # branch-leaf session (`issues/<id>/<session>`); `bind` drops the `None`
-    # the other shapes yield (present-when-bound, absent-not-null).
+    # The Tree-birth seam binds its domain keys (ADR-0029), but SCOPED to the
+    # creation pipeline: every record of the birth — including the Exec runner's
+    # own transport records for the git/provisioning subprocesses — carries the
+    # Tree it belongs to, and the binding is unwound when `create` returns so a
+    # later in-process record (an embedded caller that then lists/gcs/removes a
+    # DIFFERENT Tree) never inherits this Tree/session and corrupts the durable
+    # correlation. The session identity is bound when the shape carries one: the
+    # ephemeral leaf IS the per-launch session id (ADR-0027), and the issue shape
+    # names its branch-leaf session (`issues/<id>/<session>`); `scoped` drops the
+    # `None` the other shapes yield (present-when-bound, absent-not-null).
     session = spec.ephemeral or (spec.session if spec.issue is not None else None)
-    logcontext.bind(tree=str(dest), session=session)
-    if dest.exists():
-        raise FileExistsError(
-            f"tree dir already exists: {dest}; refusing to clone so a failed "
-            "create never deletes a pre-existing checkout (rerun, or hash collision)."
-        )
-    dest.parent.mkdir(parents=True, exist_ok=True)
+    with logcontext.scoped(tree=str(dest), session=session):
+        if dest.exists():
+            raise FileExistsError(
+                f"tree dir already exists: {dest}; refusing to clone so a failed "
+                "create never deletes a pre-existing checkout (rerun, or hash collision)."
+            )
+        dest.parent.mkdir(parents=True, exist_ok=True)
 
-    started = time.monotonic()
-    logger.debug(
-        "tree create: cloning %s -> %s (branch %s, base %s)",
-        github_url,
-        dest,
-        tree_plan.branch,
-        tree_plan.base,
-    )
-    try:
-        gh.git_clone_dissociated(github_url, str(dest), reference=source_repo)
-        gh.git_fetch(cwd=str(dest))
-        gh.git_checkout_new_branch(tree_plan.branch, tree_plan.base, cwd=str(dest))
-        copied = include.apply(source_repo, dest)
+        started = time.monotonic()
         logger.debug(
-            "tree create: copied %d .treeinclude file(s) into %s", len(copied), dest
-        )
-        _provision(dest, trees_root=Path(trees_root))
-    except BaseException:
-        # The propagating failure's ERROR record (spray convention): the whole
-        # birth story — how far it got, how long it took, the exception — plus
-        # the rollback the atomicity contract performs, in one durable record.
-        logger.error(
-            "tree create failed after %dms; removing half-built leaf %s",
-            _elapsed_ms(started),
+            "tree create: cloning %s -> %s (branch %s, base %s)",
+            github_url,
             dest,
-            exc_info=True,
+            tree_plan.branch,
+            tree_plan.base,
         )
-        shutil.rmtree(dest, ignore_errors=True)
-        raise
+        try:
+            gh.git_clone_dissociated(github_url, str(dest), reference=source_repo)
+            gh.git_fetch(cwd=str(dest))
+            gh.git_checkout_new_branch(tree_plan.branch, tree_plan.base, cwd=str(dest))
+            copied = include.apply(source_repo, dest)
+            logger.debug(
+                "tree create: copied %d .treeinclude file(s) into %s", len(copied), dest
+            )
+            _provision(dest, trees_root=Path(trees_root))
+        except BaseException:
+            # The propagating failure's ERROR record (spray convention): the whole
+            # birth story — how far it got, how long it took, the exception — plus
+            # the rollback the atomicity contract performs, in one durable record.
+            logger.error(
+                "tree create failed after %dms; removing half-built leaf %s",
+                _elapsed_ms(started),
+                dest,
+                exc_info=True,
+            )
+            shutil.rmtree(dest, ignore_errors=True)
+            raise
 
-    duration_ms = _elapsed_ms(started)
-    logger.info(
-        "tree created at %s (branch %s, base %s) in %dms",
-        dest,
-        tree_plan.branch,
-        tree_plan.base,
-        duration_ms,
-        extra={"duration_ms": duration_ms},
-    )
-    return Tree(path=str(dest), branch=tree_plan.branch, base=tree_plan.base)
+        duration_ms = _elapsed_ms(started)
+        logger.info(
+            "tree created at %s (branch %s, base %s) in %dms",
+            dest,
+            tree_plan.branch,
+            tree_plan.base,
+            duration_ms,
+            extra={"duration_ms": duration_ms},
+        )
+        return Tree(path=str(dest), branch=tree_plan.branch, base=tree_plan.base)
 
 
 def _elapsed_ms(started: float) -> int:

@@ -197,6 +197,22 @@ def test_ephemeral_shape_binds_its_session_id(tmp_path, monkeypatch, jsonl_log):
     assert all(r.get("session") == "sess-1234" for r in records)
 
 
+def test_create_binding_does_not_leak_past_return(tmp_path, monkeypatch, jsonl_log):
+    """The Tree-birth bind is SCOPED to the pipeline: a record emitted after
+    ``create`` returns must NOT inherit the created Tree/session, else the
+    durable correlation of a later, unrelated Tree is silently corrupted."""
+    _mock_write_boundary(monkeypatch)
+    create(_spec(tmp_path), source_repo=_source(tmp_path), github_url="url")
+
+    logging.getLogger("shipit.tree").info("after create, unrelated to any tree")
+
+    later = [
+        r for r in jsonl_log() if r.get("msg") == "after create, unrelated to any tree"
+    ]
+    assert later, "the post-create record must be captured"
+    assert all("tree" not in r and "session" not in r for r in later)
+
+
 # --------------------------------------------------------------------------
 # Record writes — the provisioning-commit record narrates its write
 # --------------------------------------------------------------------------
@@ -415,8 +431,12 @@ def test_readonly_create_and_reuse_are_info_milestones_with_the_tree(
     caplog.clear()
     with caplog.at_level(logging.INFO, logger="shipit.tree"):
         create_readonly(plan, source_repo="/ref", github_url="url")
-    # Shared reuse (the second reviewer): an INFO milestone carrying the Tree.
+    # Shared reuse (the second reviewer): an INFO milestone carrying the Tree AND
+    # its refresh cost as the structured `duration_ms` field (not only in the
+    # message text), so reuse cost is queryable like the fresh-creation record.
     assert any(
-        r.levelno == logging.INFO and getattr(r, "tree", None) == str(plan.dir)
+        r.levelno == logging.INFO
+        and getattr(r, "tree", None) == str(plan.dir)
+        and isinstance(getattr(r, "duration_ms", None), int)
         for r in caplog.records
     )

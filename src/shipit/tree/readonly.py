@@ -200,12 +200,13 @@ def _reuse_or_refuse(dest: Path, branch: str) -> Tree:
     if (dest / _GIT_DIR).exists():
         started = time.monotonic()
         _refresh_readonly(dest, branch)
+        duration_ms = int((time.monotonic() - started) * 1000)
         logger.info(
             "read-only tree reused at %s (branch %s, refreshed to head in %dms)",
             dest,
             branch,
-            int((time.monotonic() - started) * 1000),
-            extra={"tree": str(dest)},
+            duration_ms,
+            extra={"tree": str(dest), "duration_ms": duration_ms},
         )
         return _summary(dest, branch)
     raise FileExistsError(
