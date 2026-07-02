@@ -81,8 +81,7 @@ def run(
         script = activation.activation_script(toolchain, captured)
         if not script:
             return 0
-        with open(env_file, "a", encoding="utf-8") as handle:
-            handle.write(script + "\n")
+        _append(Path(env_file), script + "\n")
         logger.debug(
             "sessionstart: wrote %s activation for %s into %s",
             toolchain.kind,
@@ -94,6 +93,36 @@ def run(
             "sessionstart hook failed open (no activation written)", exc_info=True
         )
     return 0
+
+
+def _append(env_file: Path, text: str) -> None:
+    """Append ``text``, rolling the env file back to its prior state on failure.
+
+    The env file is sourced before EVERY subsequent Bash call, so a torn append
+    (disk full, transient I/O error) is WORSE than none: a truncated ``export``
+    line — an unterminated quote — would corrupt the whole session's preamble.
+    "Write nothing" on failure therefore means exactly that: on any write error,
+    best-effort restore the file to its pre-hook bytes (truncate back, or remove
+    it if this hook created it), then re-raise into the fail-open boundary.
+    """
+    existed = env_file.exists()
+    original_size = env_file.stat().st_size if existed else 0
+    try:
+        with open(env_file, "a", encoding="utf-8") as handle:
+            handle.write(text)
+    except Exception:
+        try:
+            if existed:
+                os.truncate(env_file, original_size)
+            else:
+                env_file.unlink(missing_ok=True)
+        except OSError:
+            logger.debug(
+                "sessionstart: could not roll back partial append to %s",
+                env_file,
+                exc_info=True,
+            )
+        raise
 
 
 def _payload_cwd(raw: str) -> Path:

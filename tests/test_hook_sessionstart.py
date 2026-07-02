@@ -10,6 +10,7 @@ activation is additive, never load-bearing).
 
 from __future__ import annotations
 
+import builtins
 import io
 import json
 import subprocess
@@ -225,6 +226,68 @@ def test_pixi_failure_fails_open(pixi_repo, tmp_path):
         {"cwd": str(pixi_repo)},
         {"CLAUDE_ENV_FILE": str(env_file)},
         runner=failing_runner,
+    )
+    assert code == 0
+    assert not env_file.exists()
+
+
+def _torn_open(monkeypatch, env_file: Path) -> None:
+    """Make writes to ``env_file`` tear: half the text lands, then OSError.
+
+    Simulates a mid-append failure (disk full, transient I/O error) so the
+    rollback contract is exercised: the file must end up EXACTLY as it was.
+    """
+    real_open = builtins.open
+
+    class TornHandle:
+        def __init__(self, *args, **kwargs):
+            self._handle = real_open(*args, **kwargs)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self._handle.close()
+            return False
+
+        def write(self, text):
+            self._handle.write(text[: len(text) // 2])
+            self._handle.flush()
+            raise OSError("no space left on device")
+
+    def torn(file, *args, **kwargs):
+        if str(file) == str(env_file):
+            return TornHandle(file, *args, **kwargs)
+        return real_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", torn)
+
+
+def test_torn_write_rolls_back_to_the_prior_bytes(pixi_repo, tmp_path, monkeypatch):
+    # A write failing MID-append must not leave a truncated export line: the env
+    # file is sourced before every Bash call, so torn content is worse than none.
+    # Fail-open means the shared seam ends up byte-identical to before the hook.
+    env_file = tmp_path / "claude-env"
+    env_file.write_text("export OTHER_HOOK=kept\n")
+    _torn_open(monkeypatch, env_file)
+    code = _run(
+        {"cwd": str(pixi_repo)},
+        {"CLAUDE_ENV_FILE": str(env_file)},
+        runner=_fake_runner({}),
+    )
+    assert code == 0
+    assert env_file.read_text() == "export OTHER_HOOK=kept\n"
+
+
+def test_torn_write_removes_a_file_the_hook_created(pixi_repo, tmp_path, monkeypatch):
+    # Same tear, but the hook itself created the file: rollback removes it rather
+    # than leaving a half-written preamble behind.
+    env_file = tmp_path / "claude-env"
+    _torn_open(monkeypatch, env_file)
+    code = _run(
+        {"cwd": str(pixi_repo)},
+        {"CLAUDE_ENV_FILE": str(env_file)},
+        runner=_fake_runner({}),
     )
     assert code == 0
     assert not env_file.exists()
