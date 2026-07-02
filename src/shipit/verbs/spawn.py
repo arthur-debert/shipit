@@ -30,7 +30,7 @@ import sys
 
 import click
 
-from .. import execrun, gh
+from .. import execrun, gh, logcontext
 from ..spawn import backends, launch
 from ..tree.create import Tree, create, new_agent_hash
 from ..tree.layout import (
@@ -491,6 +491,13 @@ def _launch_write(
     # targets a branch name (origin/E/umbrella -> E/umbrella, origin/main -> main). The
     # Tree path is passed as `cwd`: most backends root via the process cwd and ignore it,
     # but `agy` ignores its process cwd and is rooted ONLY by `--add-dir <Tree>`.
+    # SPAWN SEAM for the domain-key context (ADR-0029): the Tree's identity binds
+    # here — the coordinator's records from this point carry `tree` (its path, the
+    # same identity the SPAWNED payload reports) — and `env_export` below threads
+    # every bound key (tree, plus the repo bound at the CLI entry) into the Run's
+    # environment, so each `shipit` command the Run executes inside the Tree
+    # rebinds them at its own logging setup and its records correlate back here.
+    logcontext.bind(tree=tree.path)
     base_branch = tree.base.split("/", 1)[-1] if "/" in tree.base else tree.base
     task = launch.write_task(
         role, issue=issue, branch=tree.branch, base_branch=base_branch
@@ -505,7 +512,7 @@ def _launch_write(
         result = launch.launch(
             cmd,
             cwd=tree.path,
-            env=launch.scrub_tree_env(adapter.child_env()),
+            env=launch.scrub_tree_env(logcontext.env_export(adapter.child_env())),
             runner=launcher,
         )
     except execrun.ExecError as exc:
@@ -615,6 +622,11 @@ def _launch_reviewer(
         print(f"spawn subagent: read-only tree creation failed: {exc}", file=sys.stderr)
         return 1
 
+    # SPAWN SEAM (ADR-0029), mirroring the write path: the shared read-only Tree's
+    # identity binds here, and `env_export` at the launch threads the bound keys
+    # into the Reviewer Run's environment so its `shipit`/`gh` activity correlates.
+    logcontext.bind(tree=tree.path)
+
     # The reviewer posture (ADR-0020 §Decision 3): `read_only=True` builds the backend's
     # reviewer argv (claude → read-only --tools; codex → workspace-write+network, NOT the
     # write bypass; agy → drop --dangerously-skip-permissions). `cwd=tree.path` is
@@ -637,7 +649,7 @@ def _launch_reviewer(
         result = launch.launch(
             cmd,
             cwd=tree.path,
-            env=launch.scrub_tree_env(adapter.child_env()),
+            env=launch.scrub_tree_env(logcontext.env_export(adapter.child_env())),
             runner=launcher,
         )
     except execrun.ExecError as exc:

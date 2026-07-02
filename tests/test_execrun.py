@@ -309,12 +309,14 @@ def test_failure_emits_exactly_one_error_record_with_both_tails(monkeypatch, cap
 
 
 @pytest.fixture()
-def _clean_registry(monkeypatch):
-    monkeypatch.setattr(redact, "_registered", set())
+def _clean_registry():
+    redact.clear_registered_secrets()
+    yield
+    redact.clear_registered_secrets()
 
 
 def test_error_and_record_are_redacted(monkeypatch, caplog, _clean_registry):
-    redact.register("s3cret-value")
+    redact.register_secret("s3cret-value")
     monkeypatch.setattr(
         subprocess,
         "run",
@@ -346,7 +348,7 @@ def test_success_record_argv_is_redacted(monkeypatch, caplog, _clean_registry):
 def test_success_record_cwd_is_redacted(monkeypatch, caplog, _clean_registry):
     # cwd is a logged field, so it passes through the redactor too: a secret in
     # the working-directory path must not leak via the success record.
-    redact.register("s3cret-dir")
+    redact.register_secret("s3cret-dir")
     monkeypatch.setattr(subprocess, "run", _fake_completed(rc=0))
     with caplog.at_level(logging.DEBUG, logger="shipit.exec"):
         execrun.run(["tool"], cwd="/work/s3cret-dir/clone")
@@ -357,7 +359,7 @@ def test_success_record_cwd_is_redacted(monkeypatch, caplog, _clean_registry):
 
 def test_failure_record_cwd_is_redacted(monkeypatch, caplog, _clean_registry):
     # Same contract on the failure record, which logs cwd via _record_failure.
-    redact.register("s3cret-dir")
+    redact.register_secret("s3cret-dir")
     monkeypatch.setattr(subprocess, "run", _fake_completed(rc=2, stderr="boom"))
     with caplog.at_level(logging.DEBUG, logger="shipit.exec"):
         with pytest.raises(execrun.ExecError):
@@ -500,7 +502,7 @@ def test_spawn_detached_emits_one_debug_record_with_argv_cwd_pid(monkeypatch, ca
 
 
 def test_spawn_detached_record_is_redacted(monkeypatch, caplog, _clean_registry):
-    redact.register("s3cret-value")
+    redact.register_secret("s3cret-value")
     captured: dict = {}
     monkeypatch.setattr(subprocess, "Popen", _FakePopen(captured))
     with caplog.at_level(logging.DEBUG, logger="shipit.exec"):

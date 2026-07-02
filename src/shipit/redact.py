@@ -1,70 +1,116 @@
-"""redact — the central redactor: exact-value registry + pattern rules.
+"""The central redactor (ADR-0028/0029): every log record is masked here.
 
-ADR-0028/0029: redaction is central and fail-safe. Two layers:
+Two rules, one seam:
 
-- **Registered values** — the secrets layer registers every value it fetches
-  (:func:`register`); a registered value is masked EXACTLY wherever it appears.
-  (Wiring ``secretsrc`` to call :func:`register` at fetch time is LOG01-WS02's
-  slice; the registry seam lives here so the Exec runner and the logging chain
-  share one redactor.)
-- **Pattern rules** — GitHub-minted token shapes and PEM private-key blocks,
-  catching inherited tokens nobody registered.
+- **Exact-value masking.** :mod:`shipit.secretsrc` registers every fetched
+  secret value at fetch time (:func:`register_secret`); a registered value can
+  then never appear in any rendered record, on any sink. This is the guarantee
+  no off-the-shelf package can offer (ADR-0029 records the survey) — the app
+  knows its own secrets, so it masks them exactly rather than guessing.
+- **Pattern masking.** Compiled shapes for secrets that arrive from OUTSIDE the
+  secretsrc boundary (a token pasted into an error message, a PEM block read
+  off disk): GitHub-minted token prefixes and PEM-armored blocks.
 
-Everything the Exec runner (:mod:`shipit.execrun`) logs or attaches to a raised
-error passes through :func:`redact`; the JSONL logging chain (LOG01) attaches
-the same function as a processor so masking behavior can never diverge between
-sinks and errors.
+Both are applied by :func:`redact_event`, the processor slotted into
+``logsetup._PIPELINE`` — the ONE chain every sink shares — so everything
+logged, file JSONL and stderr alike, passes through here before rendering.
+
+The registry is process-lifetime module state, deliberately: secrets are
+fetched once and must stay masked for the rest of the process, across any
+number of ``configure_logging`` calls. :func:`clear_registered_secrets` is the
+test seam.
 """
 
 from __future__ import annotations
 
 import re
+import threading
+from collections.abc import MutableMapping
+from typing import Any
 
-#: The placeholder a masked secret is replaced with.
+#: The placeholder a masked secret is replaced with (matches the existing
+#: convention in :mod:`shipit.gh`).
 MASK = "***"
 
-#: Compiled pattern rules, applied to every text passed through :func:`redact`:
-#: GitHub token shapes (PAT / OAuth / user / server / refresh, plus fine-grained
-#: ``github_pat_``) and PEM private-key/certificate blocks (BEGIN…END, any label).
+#: Compiled shapes for secrets that never pass through secretsrc. GitHub token
+#: prefixes (PAT / OAuth / user / installation / refresh, plus fine-grained
+#: ``github_pat_``) and PEM-armored blocks (private keys, certs — the armor
+#: lines and everything between them go, as one mask).
 _PATTERNS = (
     re.compile(r"gh[posru]_[A-Za-z0-9]+|github_pat_[A-Za-z0-9_]+"),
-    re.compile(r"-----BEGIN [^-]+-----.*?-----END [^-]+-----", re.DOTALL),
+    re.compile(r"-----BEGIN [A-Z0-9 ]+-----.*?-----END [A-Z0-9 ]+-----", re.DOTALL),
 )
 
-#: A registered value shorter than this is IGNORED: masking one- or two-char
-#: fragments would shred ordinary text (fail-safe means masking secrets, not
-#: destroying the record's legibility). Real secrets are never this short.
-_MIN_VALUE_LEN = 4
+#: Every secret value fetched this process — exact strings, masked verbatim.
+#: An immutable tuple, pre-sorted longest-first at registration time: the hot
+#: read path (:func:`redact_text`, every string field of every record) never
+#: sorts and never iterates a mutating collection — it reads one immutable
+#: snapshot. Writes are rare (once per fetched secret) and lock-guarded.
+_REGISTRY: tuple[str, ...] = ()
+_REGISTRY_LOCK = threading.Lock()
 
-#: The exact secret values registered so far (process-lifetime; secrets are
-#: fetched once per process and never un-become secret).
-_registered: set[str] = set()
 
+def register_secret(value: str | None) -> None:
+    """Register a fetched secret value for exact masking in every log record.
 
-def register(value: str | None) -> None:
-    """Register an exact secret ``value`` to be masked by every :func:`redact` call.
-
-    ``None``, empty, and too-short values are ignored (see :data:`_MIN_VALUE_LEN`)
-    so a degenerate registration can never blank out the record. A non-string
-    value is coerced to ``str`` defensively: the redactor is fail-safe
-    (ADR-0029), and a stray ``int``/``UUID`` in the registry must never poison
-    every later :func:`redact` call with a ``TypeError`` in ``str.replace``.
+    Called by :mod:`shipit.secretsrc` at fetch time — the one moment the
+    application provably holds a secret. Empty / ``None`` / whitespace-only
+    values are ignored (nothing to mask; registering ``""`` or ``" "`` would
+    mangle every record).
     """
-    if value is None:
+    global _REGISTRY
+    if not value or not value.strip():
         return
-    value = str(value)
-    if len(value) >= _MIN_VALUE_LEN:
-        _registered.add(value)
+    with _REGISTRY_LOCK:
+        if value not in _REGISTRY:
+            _REGISTRY = tuple(sorted({*_REGISTRY, value}, key=len, reverse=True))
 
 
-def redact(text: str) -> str:
+def clear_registered_secrets() -> None:
+    """Reset the registry — a test seam, never called in production."""
+    global _REGISTRY
+    with _REGISTRY_LOCK:
+        _REGISTRY = ()
+
+
+def redact_text(text: str) -> str:
     """Mask every registered value and every pattern match in ``text``.
 
-    Registered values are replaced longest-first so a value that contains
-    another registered value is masked whole, never left half-recognizable.
+    Registered values are replaced longest-first, so a secret that contains
+    another registered secret as a substring is masked whole rather than
+    leaving its distinctive remainder behind. The registry snapshot is
+    immutable and pre-sorted, so this loop is safe against a concurrent
+    :func:`register_secret` and does no per-call sorting.
     """
-    for value in sorted(_registered, key=len, reverse=True):
+    for value in _REGISTRY:
         text = text.replace(value, MASK)
     for pattern in _PATTERNS:
         text = pattern.sub(MASK, text)
     return text
+
+
+def redact_event(
+    logger: object, method_name: str, event_dict: MutableMapping[str, Any]
+) -> MutableMapping[str, Any]:
+    """The redaction processor (ADR-0028/0029) in ``logsetup._PIPELINE``.
+
+    Runs after enrichment and before rendering, on every record, for every
+    sink. String values (``event``/msg, extras, the flattened ``exception``)
+    are masked in place. A non-scalar value (a bound object that a renderer
+    would later stringify) is checked via BOTH representations a downstream
+    renderer may use — ``repr`` (the file sink's ``_flatten_to_scalars``) and
+    ``str`` (the human surface's ``f"{k}={v}"``): if masking changes either,
+    the value degrades to the masked repr string — so a secret can never ride
+    an object past the redactor into any renderer. Clean values keep their
+    type untouched.
+    """
+    for key, value in event_dict.items():
+        if isinstance(value, str):
+            event_dict[key] = redact_text(value)
+        elif value is not None and not isinstance(value, (int, float, bool)):
+            rendered = repr(value)
+            masked = redact_text(rendered)
+            stringified = str(value)
+            if masked != rendered or redact_text(stringified) != stringified:
+                event_dict[key] = masked
+    return event_dict

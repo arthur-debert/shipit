@@ -44,6 +44,7 @@ import os
 import shlex
 import subprocess
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from . import redact
@@ -117,10 +118,10 @@ class ExecError(RuntimeError):
         duration_ms: int = 0,
         cause: str = CAUSE_EXIT,
     ) -> None:
-        self.argv = tuple(redact.redact(arg) for arg in argv)
+        self.argv = tuple(redact.redact_text(arg) for arg in argv)
         self.rc = rc
-        self.stdout = redact.redact(stdout)
-        self.stderr = redact.redact(stderr)
+        self.stdout = redact.redact_text(stdout)
+        self.stderr = redact.redact_text(stderr)
         self.duration_ms = duration_ms
         self.cause = cause
         detail = _tail(self.stderr) or _tail(self.stdout)
@@ -261,8 +262,8 @@ def run(
     # channel) — failures carry their tails via _record_failure above.
     logger.debug(
         "exec %s (cwd=%s) -> rc=%d in %dms",
-        redact.redact(shlex.join(result.argv)),
-        redact.redact(str(cwd or ".")),
+        redact.redact_text(shlex.join(result.argv)),
+        redact.redact_text(str(cwd or ".")),
         result.rc,
         result.duration_ms,
     )
@@ -273,6 +274,7 @@ def spawn_detached(
     argv: list[str] | tuple[str, ...],
     *,
     cwd: str | os.PathLike | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> None:
     """Spawn ``argv`` as a DETACHED fire-and-forget child — the seam's one non-Exec.
 
@@ -298,6 +300,12 @@ def spawn_detached(
     :class:`ExecError` exactly as a failed Exec launch would (``rc=None``,
     ``cause`` of ``missing-binary``/``os-error``, one ERROR record); no raw
     ``OSError`` ever escapes.
+
+    ``env``, when given, is the child's FULL environment (the caller builds it,
+    e.g. via :func:`shipit.logcontext.env_export`, so it is the parent's
+    environment plus the ``SHIPIT_LOG_CTX_*`` domain keys the child rebinds at
+    its logging setup — the ADR-0029 cross-process context seam). ``None``
+    inherits the parent's environment unchanged.
     """
     argv = [str(arg) for arg in argv]
     start = time.monotonic()
@@ -305,6 +313,7 @@ def spawn_detached(
         proc = subprocess.Popen(  # noqa: S603 — argv is a constructed list, never shell-interpolated
             argv,
             cwd=cwd,
+            env=None if env is None else dict(env),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -332,8 +341,8 @@ def spawn_detached(
     # a log reader has to correlate the child's own records back to this spawn.
     logger.debug(
         "exec-detach %s (cwd=%s) -> pid=%d",
-        redact.redact(shlex.join(argv)),
-        redact.redact(str(cwd or ".")),
+        redact.redact_text(shlex.join(argv)),
+        redact.redact_text(str(cwd or ".")),
         proc.pid,
     )
 
@@ -347,7 +356,7 @@ def _record_failure(error: ExecError, cwd: str | os.PathLike | None) -> None:
     logger.error(
         "exec %s (cwd=%s) -> %s (rc=%s) in %dms\nstdout tail: %s\nstderr tail: %s",
         shlex.join(error.argv),
-        redact.redact(str(cwd or ".")),
+        redact.redact_text(str(cwd or ".")),
         error.cause,
         error.rc,
         error.duration_ms,

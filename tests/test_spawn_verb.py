@@ -134,6 +134,13 @@ def test_run_subagent_happy_path(tmp_path, monkeypatch, capsys):
     assert calls["cwd"] == str(tree_dir)
     assert calls["cmd"][calls["cmd"].index("--agent") + 1] == "implementer"
     assert "ANTHROPIC_API_KEY" not in calls["env"]
+    # The SPAWN SEAM for the domain-key context (LOG01-WS03, ADR-0029): the Tree's
+    # identity binds in the parent AND rides the Run's env, so every `shipit`
+    # command the Run executes inside the Tree rebinds it at its logging setup.
+    from shipit import logcontext
+
+    assert calls["env"]["SHIPIT_LOG_CTX_TREE"] == str(tree_dir)
+    assert logcontext.bound()["tree"] == str(tree_dir)
     # The task tells the Run which issue to implement and the branch to PR from.
     task = calls["cmd"][calls["cmd"].index("-p") + 1]
     assert "#156" in task and "TRE03/WS01" in task

@@ -9,12 +9,15 @@ injected so nothing ever writes to a real ``$HOME``.
 
 from __future__ import annotations
 
+import datetime
+import json
 import logging
 import tomllib
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 import pytest
+import structlog
 from shipit import cli, logsetup
 from shipit.execrun import ExecError
 
@@ -52,6 +55,15 @@ def _no_ambient_ci(monkeypatch):
     leaves them untouched."""
     for var in logsetup._CI_ENV_VARS:
         monkeypatch.delenv(var, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _clean_structlog_contextvars():
+    """No bound domain key may leak between tests — the absent-when-unbound
+    contract is only assertable from a clean context."""
+    structlog.contextvars.clear_contextvars()
+    yield
+    structlog.contextvars.clear_contextvars()
 
 
 def _emit(level: int, message: str) -> None:
@@ -373,8 +385,165 @@ def test_console_level_independent_of_file_handler(capfd, tmp_path):
 
 
 # ==========================================================================
+# File sink — the JSONL record contract (LOG01-WS01, ADR-0029)
+# ==========================================================================
+
+
+def _file_records(base_dir: Path) -> list[dict]:
+    """Parse the file sink's JSONL under the injected base — flushed first, one
+    JSON object per non-empty line."""
+    for handler in logging.getLogger(logsetup.LOGGER_NAME).handlers:
+        handler.flush()
+    text = (base_dir / "o" / "r" / "shipit.log").read_text(encoding="utf-8")
+    return [json.loads(line) for line in text.splitlines() if line]
+
+
+def test_file_sink_emits_one_json_object_per_record(tmp_path):
+    logsetup.configure_logging(env={}, owner_repo=("o", "r"), base_dir=tmp_path)
+    _emit(logging.INFO, "first record")
+    _emit(logging.WARNING, "second record")
+    records = _file_records(tmp_path)
+    assert [r["msg"] for r in records] == ["first record", "second record"]
+
+
+def test_file_record_contract_flat_ts_level_logger_msg(tmp_path):
+    logsetup.configure_logging(env={}, owner_repo=("o", "r"), base_dir=tmp_path)
+    logging.getLogger("shipit.sub.module").warning("contract %s", "check")
+    (record,) = _file_records(tmp_path)
+    # The flat core fields, with %-style args resolved into msg.
+    assert record["level"] == "warning"
+    assert record["logger"] == "shipit.sub.module"
+    assert record["msg"] == "contract check"
+    # ts is ISO-8601 UTC (fromisoformat accepts both 'Z' and '+00:00').
+    ts = datetime.datetime.fromisoformat(record["ts"])
+    assert ts.utcoffset() == datetime.timedelta(0)
+    # Flat: no nested objects or arrays anywhere in the record.
+    assert all(not isinstance(v, (dict, list)) for v in record.values()), record
+
+
+def test_unbound_fields_are_absent_not_null(tmp_path):
+    logsetup.configure_logging(env={}, owner_repo=("o", "r"), base_dir=tmp_path)
+    _emit(logging.INFO, "bare record")
+    (record,) = _file_records(tmp_path)
+    assert set(record) == {"ts", "level", "logger", "msg"}
+    assert None not in record.values()
+
+
+def test_bound_domain_keys_land_flat_and_leave_on_unbind(tmp_path):
+    logsetup.configure_logging(env={}, owner_repo=("o", "r"), base_dir=tmp_path)
+    structlog.contextvars.bind_contextvars(pr=231, session="work")
+    _emit(logging.INFO, "bound record")
+    structlog.contextvars.clear_contextvars()
+    _emit(logging.INFO, "unbound record")
+    bound, unbound = _file_records(tmp_path)
+    # Bound keys are flat, top-level, jq-sliceable (`select(.pr==231)`)...
+    assert bound["pr"] == 231
+    assert bound["session"] == "work"
+    # ...and absent (not null) once unbound.
+    assert "pr" not in unbound
+    assert "session" not in unbound
+
+
+def test_only_domain_keys_merge_from_context_never_rogue_contextvars(tmp_path):
+    # The correlation vocabulary is CLOSED (ADR-0029): the pipeline merges
+    # exactly logcontext's domain keys. A contextvar bound around the
+    # logcontext seam (a direct structlog bind — i.e. a typo or an unsanctioned
+    # correlation key) never mints a top-level JSONL field.
+    logsetup.configure_logging(env={}, owner_repo=("o", "r"), base_dir=tmp_path)
+    structlog.contextvars.bind_contextvars(pr=231, request_id="rogue-77")
+    _emit(logging.INFO, "vocabulary record")
+    (record,) = _file_records(tmp_path)
+    assert record["pr"] == 231
+    assert "request_id" not in record
+
+
+def test_stdlib_extra_lands_as_flat_event_extras(tmp_path):
+    # The supported call-site idiom is untouched stdlib logging, so per-event
+    # extras arrive the stdlib way — `extra={...}` — and must land as flat
+    # top-level fields in the JSONL record (ExtraAdder in the pipeline;
+    # ProcessorFormatter alone would silently drop them).
+    logsetup.configure_logging(env={}, owner_repo=("o", "r"), base_dir=tmp_path)
+    logging.getLogger("shipit.spawn").info(
+        "child launched", extra={"phase": "spawn", "attempt": 2}
+    )
+    (record,) = _file_records(tmp_path)
+    assert record["msg"] == "child launched"
+    assert record["phase"] == "spawn"
+    assert record["attempt"] == 2
+
+
+def test_container_extras_degrade_to_repr_never_nest(tmp_path):
+    # The flat contract is ENFORCED, not assumed: a container extra (dict,
+    # list, tuple — all JSON-serializable, so a bare JSONRenderer would nest
+    # them) degrades to its repr string, and a non-serializable object does
+    # too, without crashing the log call.
+    logsetup.configure_logging(env={}, owner_repo=("o", "r"), base_dir=tmp_path)
+    logging.getLogger("shipit.containers").info(
+        "container record",
+        extra={
+            "mapping": {"a": 1},
+            "sequence": [1, 2],
+            "pair": (3, 4),
+            "opaque": object(),
+        },
+    )
+    (record,) = _file_records(tmp_path)
+    assert record["mapping"] == "{'a': 1}"
+    assert record["sequence"] == "[1, 2]"
+    assert record["pair"] == "(3, 4)"
+    assert record["opaque"].startswith("<object object at ")
+    # Nothing nested anywhere in the record.
+    assert all(not isinstance(v, (dict, list)) for v in record.values()), record
+
+
+def test_foreign_stdlib_records_flow_through_the_chain(tmp_path):
+    # An untouched stdlib call site — logging.getLogger + %-args, no structlog
+    # import — must yield the same contract record, INCLUDING bound context
+    # (the foreign_pre_chain is the same pipeline).
+    logsetup.configure_logging(env={}, owner_repo=("o", "r"), base_dir=tmp_path)
+    structlog.contextvars.bind_contextvars(tree="WS01")
+    logging.getLogger("shipit.foreign").info("plain %d sites", 2)
+    (record,) = _file_records(tmp_path)
+    assert record["msg"] == "plain 2 sites"
+    assert record["logger"] == "shipit.foreign"
+    assert record["tree"] == "WS01"
+
+
+def test_exception_is_flattened_to_a_string_field(tmp_path):
+    # exc_info must not break the one-line JSON contract: the traceback is a
+    # single flat string field, the record still parses line-per-record.
+    logsetup.configure_logging(env={}, owner_repo=("o", "r"), base_dir=tmp_path)
+    try:
+        raise RuntimeError("boom")
+    except RuntimeError:
+        logging.getLogger("shipit.err").exception("it failed")
+    (record,) = _file_records(tmp_path)
+    assert record["msg"] == "it failed"
+    assert record["level"] == "error"
+    assert isinstance(record["exception"], str)
+    assert "RuntimeError: boom" in record["exception"]
+
+
+def test_console_stays_human_not_json(capfd, tmp_path):
+    # Hard cutover applies to the FILE format only: stderr keeps the human
+    # `LEVEL logger: message` shape, not JSON.
+    logsetup.configure_logging(env={}, owner_repo=("o", "r"), base_dir=tmp_path)
+    _emit(logging.WARNING, "surfaced warning")
+    err = capfd.readouterr().err
+    assert "WARNING shipit: surfaced warning" in err
+    assert not err.lstrip().startswith("{")
+
+
+# ==========================================================================
 # Dependency + single-source-of-truth constraints
 # ==========================================================================
+
+
+def test_structlog_declared_as_dependency():
+    root = Path(__file__).resolve().parents[1]
+    meta = tomllib.loads((root / "pyproject.toml").read_text())
+    deps = meta["project"]["dependencies"]
+    assert any(d.lower().startswith("structlog") for d in deps), deps
 
 
 def test_platformdirs_declared_as_dependency():

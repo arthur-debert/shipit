@@ -15,11 +15,16 @@ requires-python = ">=3.13"
 #   duckdb       — the SQL query engine behind `shipit eval report` (HAR02-WS04):
 #                  it reads the local JSONL eval store directly (read_json_auto) so
 #                  aggregation is plain SQL with no platform/infra (ADR-0013).
+#   structlog    — the JSONL log pipeline (LOG01 logging, ADR-0029): its
+#                  ProcessorFormatter attaches to the logsetup handlers so the
+#                  file sink emits JSONL while console stderr stays human;
+#                  zero transitive dependencies.
 dependencies = [
     "click>=8,<9",
     "PyYAML>=6",
     "platformdirs>=4",
     "duckdb>=1",
+    "structlog>=25",
 ]
 
 [project.optional-dependencies]
