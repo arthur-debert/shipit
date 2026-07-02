@@ -401,8 +401,23 @@ a **write Tree** (one per write-Run; `.treeinclude` + pixi + sccache; read-write
 The unit `shipit spawn subagent` provisions for a Run (ADR-0017).
 *Avoid*: "worktree" for this unit (that names the git feature we deliberately reject —
 see ADR-0014); note Claude Code's `WorktreeCreate` hook is the *harness event we adapt*
-for throwaway in-CC helpers, NOT our Tree unit; "workspace" (collides with
-Cargo/pixi/editor "workspace").
+for both throwaway in-CC helpers and the coordinator's **Session Tree**, NOT our Tree
+unit; "workspace" (collides with Cargo/pixi/editor "workspace").
+
+**Session Tree** (a kind of **Tree**):
+The **coordinator**'s own isolated workspace — the Tree the top-level session runs in,
+minted at **launch** via `claude --worktree <id>` (which fires the `WorktreeCreate`
+hook; ADR-0027). **Ephemeral-by-path, work-by-branch**: its directory identity is the
+*session* (`…/ephemeral/<id>`, cut from `origin/main`, disposable, **never renamed**),
+while the *branch* checked out inside it becomes the real work (`docs/<slug>`,
+`EPIC/umbrella`, …) as the session discovers its task. There is **no mid-flight path
+move** — the session cwd is immutable after launch, so the coordinator switches branches
+*within* the clone instead. It is the one **Tree** `shipit spawn subagent` cannot mint
+(it is the session's *own*, and the cwd is fixed before any shipit code runs). Reclaimed
+by a liveness-based **gc** rule (no PR to key off), gated by the dirty/unpushed check.
+*Avoid*: binding it to an epic/issue at launch (the work is usually unknown then; a full
+clone switches branches freely); treating dir↔branch mirroring as an invariant here (it
+holds at birth, then the branch moves and the dir stays — by design).
 
 **Read-only Tree**:
 A **Tree** mode for a **Reviewer** — clone + `git checkout` only (no `.treeinclude`, no
@@ -426,9 +441,11 @@ The model (ADR-0017) where the **coordinator** launches every real **Run** throu
 launches the backend agent as a **child process rooted in it** (cwd = the Tree → no bash-cwd
 footgun), and the Run reports back **through the PR**. **Fail-closed**: a Tree-creation error
 fails the spawn loud, never a silent fallback to a native worktree.
-*Avoid*: "the worktree hook" as the spawn mechanism — the `WorktreeCreate` hook is only a
-demoted convenience adapter for throwaway in-CC Claude helpers (epic-grouped
-`<epic>/agent-<id>`, Claude-only); real Runs go through `shipit spawn subagent`.
+*Avoid*: "the worktree hook" as the spawn mechanism for **Runs** — the `WorktreeCreate`
+hook mints Trees only in two cases: throwaway in-CC Claude helpers (epic-grouped
+`<epic>/agent-<id>`, Claude-only) and the coordinator's own **Session Tree**
+(`ephemeral/<id>`, ADR-0027); real *Runs the coordinator launches* go through
+`shipit spawn subagent`.
 *Epic inference* (#173, resolved): the hook infers the epic from **live git state**, not an
 out-of-band set step. The `WorktreeCreate` payload carries the coordinator's `cwd`; the hook
 reads that branch (`git -C <cwd> rev-parse --abbrev-ref HEAD`) and takes the prefix before
@@ -442,9 +459,10 @@ crashes the hook. (`harness/worktree_adapter.py` `resolve_epic`/`resolve_branch`
 
 **Tree ownership** (extends the **Role** registry):
 Who provisions a **Tree** and who merely works in one — the role-keyed half of the
-Tree primitive. The **coordinator** provisions and assigns by **spawning** (via
-`shipit spawn subagent`, ADR-0017): its own epic Tree at session start, then a ready Tree
-minted for each Run it launches — a **write Tree** for an **implementer** / **shepherd**, a
+Tree primitive. The **coordinator** works in its own **Session Tree** (an ephemeral Tree minted at launch
+via `--worktree`, ADR-0027 — not the retired manual `shipit tree create --epic` hand-run),
+and provisions/assigns Trees for *other* Runs by **spawning** (via `shipit spawn subagent`,
+ADR-0017): a ready Tree minted for each Run it launches — a **write Tree** for an **implementer** / **shepherd**, a
 shared **Read-only Tree** for a **Reviewer**. Those Runs START inside the Tree they were
 handed and **never self-provision**. Only an **ambient** explorer survives the exemption:
 open-ended (no branch) read-only investigation runs in the **main checkout with no Tree**
