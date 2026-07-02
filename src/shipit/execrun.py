@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shlex
 import subprocess
 import time
 from dataclasses import dataclass
@@ -223,7 +224,7 @@ def run(
         # ``exc.filename``; distinguish it so a bad cwd reports as an OS error,
         # not as a missing binary (which names argv[0]).
         is_missing_binary = isinstance(exc, FileNotFoundError) and (
-            cwd is None or str(exc.filename) != str(cwd)
+            cwd is None or str(exc.filename) != os.fspath(cwd)
         )
         cause = CAUSE_MISSING_BINARY if is_missing_binary else CAUSE_OS
         error = ExecError(
@@ -260,7 +261,7 @@ def run(
     # channel) — failures carry their tails via _record_failure above.
     logger.debug(
         "exec %s (cwd=%s) -> rc=%d in %dms",
-        redact.redact(" ".join(result.argv)),
+        redact.redact(shlex.join(result.argv)),
         redact.redact(str(cwd or ".")),
         result.rc,
         result.duration_ms,
@@ -290,8 +291,8 @@ def spawn_detached(
     the review child), not a pipe the parent would have to drain; the handle
     is deliberately not retained and never waited on.
 
-    What the seam's contract DOES still apply: one structured record at spawn
-    time — argv, cwd, pid, all redacted — so the detached child stays on the
+    What parts of the seam's contract DO still apply: one structured record at
+    spawn time — argv, cwd, pid, all redacted — so the detached child stays on the
     causal record chain (glassbox PRD story 3), and launch normalization — a
     missing binary or any other OS-level spawn failure raises
     :class:`ExecError` exactly as a failed Exec launch would (``rc=None``,
@@ -315,7 +316,7 @@ def spawn_detached(
         # argv[0] is a missing binary; one naming a bad cwd (or any other
         # OSError) is an os-error. No raw OSError escapes the seam.
         is_missing_binary = isinstance(exc, FileNotFoundError) and (
-            cwd is None or str(exc.filename) != str(cwd)
+            cwd is None or str(exc.filename) != os.fspath(cwd)
         )
         error = ExecError(
             argv,
@@ -331,7 +332,7 @@ def spawn_detached(
     # a log reader has to correlate the child's own records back to this spawn.
     logger.debug(
         "exec-detach %s (cwd=%s) -> pid=%d",
-        redact.redact(" ".join(argv)),
+        redact.redact(shlex.join(argv)),
         redact.redact(str(cwd or ".")),
         proc.pid,
     )
@@ -345,7 +346,7 @@ def _record_failure(error: ExecError, cwd: str | os.PathLike | None) -> None:
     """
     logger.error(
         "exec %s (cwd=%s) -> %s (rc=%s) in %dms\nstdout tail: %s\nstderr tail: %s",
-        " ".join(error.argv),
+        shlex.join(error.argv),
         redact.redact(str(cwd or ".")),
         error.cause,
         error.rc,
