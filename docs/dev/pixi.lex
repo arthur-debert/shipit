@@ -122,7 +122,10 @@ behaves and how we ride it.
 
     Only `pixi list` and `pixi info` have machine-readable (`--json`) output;
     `pixi run` and `pixi install` do not. Verbosity flags (`-v`..`-vvvv`, `-q`)
-    control human stderr text, not structured output.
+    control human stderr text, not structured output. All three JSON reads are
+    wrapped as structured adapter reads in `shipit.pixienv.read`
+    (`shell_hook` / `list_packages` / `info`, PROC02-WS02), and the execution
+    side (`install`, run-wrapping) lives beside them in `shipit.pixienv.run`.
 
     Commands shipit relies on or could use:
 
@@ -233,7 +236,9 @@ behaves and how we ride it.
         as `pixi run --manifest-path <tree>/pixi.toml -- <argv>` (gated on
         `<tree>/.pixi/envs/default` existing), and `scrub_tree_env()` drops the
         API key plus leaked `PIXI_*`/`CONDA_*` vars. The launch and provisioning
-        scrubs now share ONE predicate, `tree.create.is_leaked_env_var`, so they
+        scrubs share ONE predicate — `pixienv.is_leaked_env_var`, in the pixi
+        adapter since PROC02-WS02 (the wrapped argv and the sentinel gate live
+        there too, as `pixienv.run_argv` / `pixienv.has_default_env`) — so they
         cannot drift. For a reviewer read-only Tree `pixi_wrap` is a deliberate
         no-op (no env to route into) — that launch stays bare (see [#7]).
 
@@ -271,8 +276,9 @@ behaves and how we ride it.
         the PARENT manifest and die. Provisioning always defended against this
         (`provision_env()` scrubs leaked `PIXI_*`); as of PR #197 the launch path
         does too, via the shared `is_leaked_env_var` predicate (`scrub_tree_env`),
-        which now also strips the `CONDA_*` activation family. The old asymmetry
-        that made this a live bug is gone.
+        which now also strips the `CONDA_*` activation family — the predicate's
+        home is `shipit.pixienv.scrub` (PROC02-WS02). The old asymmetry that made
+        this a live bug is gone.
 
     Cross-filesystem cache (#119):
         Provisioning warns when the pixi/rattler cache and the Tree are on

@@ -23,9 +23,8 @@ from pathlib import Path
 
 import pytest
 
-from shipit import execrun
+from shipit import execrun, pixienv
 from shipit.spawn import dogfood
-from shipit.tree import create as tree_create
 from shipit.tree import readonly
 
 
@@ -272,8 +271,9 @@ def test_run_spawn_drives_the_shipped_cli_through_the_runner(monkeypatch):
 def test_pixi_runs_probes_with_scrubbed_env_verbatim(monkeypatch):
     # The scrubbed env is the COMPLETE child environment (replace_env=True): the
     # runner's default merge over os.environ would re-add the very parent
-    # PIXI_* / Conda pointers the scrub removed. The probe shares provisioning's
-    # generous bound (its worst case is a first-activation re-solve).
+    # PIXI_* / Conda pointers the scrub removed. The probe runs through the pixi
+    # adapter's run-wrap (explicit --manifest-path, PROC02-WS02) and shares pixi's
+    # provisioning-shaped bound (its worst case is a first-activation re-solve).
     monkeypatch.setenv("PIXI_PROJECT_MANIFEST", "/parent/pixi.toml")
     captured = {}
 
@@ -285,9 +285,19 @@ def test_pixi_runs_probes_with_scrubbed_env_verbatim(monkeypatch):
     ok, detail = dogfood._pixi_runs("/tree")
     assert ok
     assert detail == "rc=0"
+    assert captured["argv"] == [
+        "pixi",
+        "run",
+        "--manifest-path",
+        str(Path("/tree") / "pixi.toml"),
+        "--",
+        "python",
+        "-c",
+        "print('pixi-ok')",
+    ]
     assert captured["replace_env"] is True
     assert "PIXI_PROJECT_MANIFEST" not in captured["env"]
-    assert captured["timeout"] == tree_create.PROVISION_TIMEOUT
+    assert captured["timeout"] == pixienv.INSTALL_TIMEOUT
 
 
 def test_pixi_runs_reports_a_launch_failure_as_a_failed_check(monkeypatch):

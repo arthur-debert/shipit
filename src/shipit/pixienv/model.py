@@ -5,7 +5,7 @@ persisted env identity and its activation snapshot become **thin, frozen value
 objects**, and "what activation adds" is a **pure transform over immutable env
 snapshots** — never a hand-derived rival to pixi's own computation.
 
-Two shapes are mirrored, each straight from pixi's JSON:
+Four shapes are mirrored, each straight from pixi's JSON:
 
 - :class:`EnvIdentity` ← ``.pixi/envs/<env>/conda-meta/pixi`` — the RICH env-identity
   record (which manifest / env / lock-hash / pixi-version materialised this prefix).
@@ -16,6 +16,11 @@ Two shapes are mirrored, each straight from pixi's JSON:
 - :class:`Activation` ← ``pixi shell-hook --json`` — the env vars pixi sets on EVERY
   activation plus its ``activation_scripts``. shipit never re-derives this; it consumes
   pixi's output and transforms it (:func:`activation_delta` / :func:`activated_env`).
+- :class:`InstalledPackage` ← ``pixi list --json`` — what one environment actually
+  holds, per package (identity, resolver kind, explicitness).
+- :class:`Info` (+ :class:`ProjectInfo` / :class:`EnvironmentInfo`) ←
+  ``pixi info --json`` — the machine/workspace snapshot: pixi version, platform,
+  cache dir, and each declared environment's surface.
 
 Everything here is pure: the parse functions take an already-captured JSON string and
 return value objects, so a fixture pixi-JSON blob feeds straight in (Testing Decisions).
@@ -163,6 +168,128 @@ def activated_env(base: Mapping[str, str], activation: Activation) -> dict[str, 
     are untouched.
     """
     return {**base, **activation.environment_variables}
+
+
+@dataclass(frozen=True)
+class InstalledPackage:
+    """One installed package, straight from a ``pixi list --json`` entry.
+
+    A thin mirror of the fields shipit reasons about — identity (``name`` /
+    ``version`` / ``build``), which resolver owns it (``kind``: ``conda`` or
+    ``pypi``), and whether the workspace asked for it directly (``is_explicit``).
+    ``version`` and ``build`` are ``None`` where pixi reports null (an editable
+    path dependency has no version; a pypi package has no conda build string).
+    """
+
+    name: str
+    version: str | None
+    build: str | None
+    kind: str
+    is_explicit: bool
+
+
+def installed_package_from_dict(data: Mapping[str, object]) -> InstalledPackage:
+    """Build an :class:`InstalledPackage` from one parsed ``pixi list`` entry."""
+    version = data.get("version")
+    build = data.get("build")
+    return InstalledPackage(
+        name=str(data["name"]),
+        version=None if version is None else str(version),
+        build=None if build is None else str(build),
+        kind=str(data.get("kind", "")),
+        is_explicit=bool(data.get("is_explicit", False)),
+    )
+
+
+def parse_installed_packages(text: str) -> tuple[InstalledPackage, ...]:
+    """Parse the JSON text of ``pixi list --json`` into installed packages."""
+    return tuple(installed_package_from_dict(entry) for entry in json.loads(text))
+
+
+@dataclass(frozen=True)
+class ProjectInfo:
+    """The ``project_info`` block of ``pixi info --json``: which workspace this is."""
+
+    name: str
+    manifest_path: Path
+
+
+@dataclass(frozen=True)
+class EnvironmentInfo:
+    """One ``environments_info`` entry of ``pixi info --json``.
+
+    The declared surface of one pixi environment — its features, dependency names
+    (conda and pypi), task names, and the prefix pixi materializes it at.
+    """
+
+    name: str
+    features: tuple[str, ...]
+    dependencies: tuple[str, ...]
+    pypi_dependencies: tuple[str, ...]
+    tasks: tuple[str, ...]
+    prefix: Path
+
+
+@dataclass(frozen=True)
+class Info:
+    """The ``pixi info --json`` snapshot shipit consumes.
+
+    ``pixi_version`` mirrors pixi's top-level ``version`` field (renamed for the
+    same reason :class:`EnvIdentity` calls it ``pixi_version``: at a call site a
+    bare ``version`` reads as the PROJECT's). ``project`` is ``None`` outside a
+    workspace — ``pixi info`` answers machine-level questions there too.
+    """
+
+    pixi_version: str
+    platform: str
+    cache_dir: Path | None
+    project: ProjectInfo | None
+    environments: tuple[EnvironmentInfo, ...]
+
+
+def _environment_info(data: Mapping[str, object]) -> EnvironmentInfo:
+    """Build an :class:`EnvironmentInfo` from one parsed ``environments_info`` entry."""
+
+    def names(key: str) -> tuple[str, ...]:
+        return tuple(str(item) for item in (data.get(key) or ()))
+
+    return EnvironmentInfo(
+        name=str(data.get("name", "")),
+        features=names("features"),
+        dependencies=names("dependencies"),
+        pypi_dependencies=names("pypi_dependencies"),
+        tasks=names("tasks"),
+        prefix=Path(str(data.get("prefix", ""))),
+    )
+
+
+def info_from_dict(data: Mapping[str, object]) -> Info:
+    """Build an :class:`Info` from an already-parsed ``pixi info --json`` object."""
+    project = data.get("project_info")
+    cache = data.get("cache_dir")
+    return Info(
+        pixi_version=str(data.get("version", "")),
+        platform=str(data.get("platform", "")),
+        cache_dir=None if cache is None else Path(str(cache)),
+        project=(
+            None
+            if not isinstance(project, Mapping)
+            else ProjectInfo(
+                name=str(project.get("name", "")),
+                manifest_path=Path(str(project["manifest_path"])),
+            )
+        ),
+        environments=tuple(
+            _environment_info(entry)
+            for entry in (data.get("environments_info") or ())
+            if isinstance(entry, Mapping)
+        ),
+    )
+
+
+def parse_info(text: str) -> Info:
+    """Parse the JSON text of ``pixi info --json`` into an :class:`Info`."""
+    return info_from_dict(json.loads(text))
 
 
 def path_entries(activation: Activation) -> tuple[str, ...]:

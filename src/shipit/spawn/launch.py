@@ -38,9 +38,14 @@ this by re-expressing the backend argv as ``pixi run --manifest-path <tree>/pixi
 carries a provisioned env (``<tree>/.pixi/envs/default`` exists). A **reviewer's
 read-only Tree** (ADR-0018) and a **non-pixi repo** have none, so :func:`pixi_wrap`
 leaves their argv BARE — routing those through ``pixi run`` would force a solve into a
-chmod'd tree or fail outright. :func:`scrub_tree_env` mirrors the provisioning scrub
-(:func:`shipit.tree.create.provision_env`) — both rely SOLELY on the shared predicate
-:func:`shipit.tree.create.is_leaked_env_var`, so they cannot drift: on top of the
+chmod'd tree or fail outright. The pixi knowledge behind both halves — the
+provisioned-env sentinel and the wrapped argv — lives in the pixi adapter
+(:func:`shipit.pixienv.has_default_env` / :func:`shipit.pixienv.run_argv`,
+ADR-0028); this module keeps only the launch-side ROUTING DECISION and its
+narration. :func:`scrub_tree_env` mirrors the provisioning scrub
+(:func:`shipit.tree.create.provision_env`) — both rely SOLELY on the adapter's shared
+predicate (:func:`shipit.pixienv.scrub_env` over
+:func:`shipit.pixienv.is_leaked_env_var`), so they cannot drift: on top of the
 adapter's auth-env scrub it drops leaked ``PIXI_*`` project pointers and Conda
 **activation** vars (``CONDA_PREFIX`` & friends; installation-level ``CONDA_EXE`` etc. are
 KEPT) so the child — and the agent's own ``pixi`` calls — re-resolve from the Tree. ``--clean-env`` is NOT used: it was falsified
@@ -55,8 +60,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from .. import execrun
-from ..tree.create import is_leaked_env_var
+from .. import execrun, pixienv
 
 #: The spawn subsystem's logger (shared with the verb): launch MECHANICS narrate
 #: at DEBUG per the spray conventions (ADR-0029) — the pixi-routing decision and
@@ -158,33 +162,27 @@ def _exec_runner(cmd: list[str], *, cwd: str, env: dict[str, str]) -> LaunchResu
     )
 
 
-#: The provisioned-env sentinel: a Tree carries a usable pixi env iff this directory
-#: exists under it (``pixi install`` materializes ``<tree>/.pixi/envs/default``). It is
-#: the gate :func:`pixi_wrap` keys on — present ⇒ route the child through ``pixi run``;
-#: absent (a reviewer's read-only Tree, or a non-pixi repo) ⇒ leave the argv bare.
-PIXI_DEFAULT_ENV = (".pixi", "envs", "default")
-
-
 def pixi_wrap(argv: list[str], tree_path: str | Path) -> list[str]:
     """Re-express ``argv`` to run THROUGH the Tree's pixi env — when the Tree has one.
 
     The launch bug (``docs/dev/pixi.lex`` §7, ADR-0019 amendment): ``cwd=<Tree>`` roots
     the child's writes in the Tree but does not activate pixi, so the child inherits the
     coordinator/system env and its tools resolve to the WRONG ``.pixi`` env. The fix is to
-    launch the backend child *through* pixi:
-    ``pixi run --manifest-path <tree>/pixi.toml -- <argv>`` (the ``--`` separates pixi's
-    own args from the child argv; explicit ``--manifest-path`` overrides any leaked
-    ``PIXI_PROJECT_MANIFEST``).
+    launch the backend child *through* pixi — the wrapped argv is built by the pixi
+    adapter (:func:`shipit.pixienv.run_argv`: explicit ``--manifest-path`` overrides
+    any leaked ``PIXI_PROJECT_MANIFEST``; ADR-0028 puts the argv in pixi's domain
+    home, this launcher keeps the routing decision).
 
-    The wrap is GATED on the Tree carrying a provisioned env (:data:`PIXI_DEFAULT_ENV`
-    exists): a **write** Tree is ``pixi install``-provisioned, so it is routed; a
-    **reviewer's read-only** Tree (ADR-0018, clone+checkout, no provision) and a
-    **non-pixi repo** have no such env, so their argv is returned UNCHANGED — routing
-    them through ``pixi run`` would force a solve into a chmod'd tree or fail outright.
-    Pure (a filesystem ``exists`` probe only), so the gate is table-tested without pixi.
+    The wrap is GATED on the Tree carrying a provisioned env
+    (:func:`shipit.pixienv.has_default_env`): a **write** Tree is ``pixi
+    install``-provisioned, so it is routed; a **reviewer's read-only** Tree
+    (ADR-0018, clone+checkout, no provision) and a **non-pixi repo** have no such
+    env, so their argv is returned UNCHANGED — routing them through ``pixi run``
+    would force a solve into a chmod'd tree or fail outright. Pure (a filesystem
+    ``exists`` probe only), so the gate is table-tested without pixi.
     """
     tree = Path(tree_path)
-    if not tree.joinpath(*PIXI_DEFAULT_ENV).exists():
+    if not pixienv.has_default_env(tree):
         # Mechanics at DEBUG (ADR-0029): the routing DECISION is the diagnosis-
         # relevant fact when a child resolves the wrong tools — record which way
         # the gate went, and why.
@@ -200,7 +198,7 @@ def pixi_wrap(argv: list[str], tree_path: str | Path) -> list[str]:
         tree,
         extra={"pixi_wrapped": True},
     )
-    return ["pixi", "run", "--manifest-path", str(tree / "pixi.toml"), "--", *argv]
+    return pixienv.run_argv(argv, tree)
 
 
 def scrub_tree_env(env: Mapping[str, str]) -> dict[str, str]:
@@ -210,8 +208,9 @@ def scrub_tree_env(env: Mapping[str, str]) -> dict[str, str]:
     child inherits neither a stale auth var NOR a parent-project ``PIXI_PROJECT_MANIFEST``
     / ``CONDA_PREFIX`` that would bind it to the PARENT env. This mirrors the provisioning
     scrub (:func:`shipit.tree.create.provision_env`) on the launch path — the same leak
-    class shipit already fixed once (#167) — by relying SOLELY on the shared predicate
-    :func:`~shipit.tree.create.is_leaked_env_var`, so the ``PIXI_*`` cache-var carve-out
+    class shipit already fixed once (#167) — by relying SOLELY on the pixi adapter's
+    shared scrub (:func:`shipit.pixienv.scrub_env` over
+    :func:`shipit.pixienv.is_leaked_env_var`), so the ``PIXI_*`` cache-var carve-out
     AND the Conda activation-vs-installation carve-out cannot drift between the two paths.
     The predicate scrubs only the Conda **activation** vars (``CONDA_PREFIX`` and friends),
     KEEPING installation-level ``CONDA_EXE`` / ``CONDA_PYTHON_EXE`` so a Conda-managed
@@ -220,7 +219,7 @@ def scrub_tree_env(env: Mapping[str, str]) -> dict[str, str]:
     it still cleans the env the agent's *own* ``pixi`` calls inherit. Returns a fresh dict
     (never the caller's).
     """
-    scrubbed = {key: value for key, value in env.items() if not is_leaked_env_var(key)}
+    scrubbed = pixienv.scrub_env(env)
     dropped = sorted(set(env) - set(scrubbed))
     if dropped:
         # Mechanics at DEBUG (ADR-0029): variable NAMES only — never values, which
