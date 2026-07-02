@@ -229,7 +229,10 @@ def _payload_session_id(raw: str) -> str:
         if isinstance(sid, str):
             return sid
     except ValueError:
-        logger.warning("sessionstart: unparseable payload — no session id recorded")
+        logger.warning(
+            "sessionstart: unparseable payload — no session id recorded",
+            exc_info=True,
+        )
     return ""
 
 
@@ -247,5 +250,8 @@ def _payload_cwd(raw: str) -> Path:
         if isinstance(cwd, str) and cwd:
             return Path(cwd)
     except ValueError:
-        logger.warning("sessionstart: unparseable payload — falling back to cwd")
+        logger.warning(
+            "sessionstart: unparseable payload — falling back to cwd",
+            exc_info=True,
+        )
     return Path.cwd()

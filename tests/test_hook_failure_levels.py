@@ -19,6 +19,7 @@ import logging
 
 import pytest
 
+from shipit.session import liveness
 from shipit.verbs.hook import eval as hook_eval
 from shipit.verbs.hook import pretooluse, sessionstart, worktreecreate, worktreeremove
 
@@ -116,4 +117,33 @@ def test_fail_open_failure_logs_warning_and_continues(force_failure, caplog):
     assert any(r.exc_info for r in warnings)
     # Uniform calibration: a swallowed failure is degraded, never a propagating
     # failure — no ERROR record for a fail-open arm.
+    assert not _records(caplog, logging.ERROR)
+
+
+def test_sessionstart_malformed_payload_warns_with_exception_on_each_arm(
+    monkeypatch, tmp_path, caplog
+):
+    # A malformed payload is swallowed INSIDE the liveness half, past the
+    # top-level stdin read: once in the cwd fallback and once in the session-id
+    # fallback. The canon applies to every swallowing arm, so each of these
+    # inner swallows must be a WARNING with the exception attached too.
+    (tmp_path / ".git").mkdir()  # the cwd fallback must land in a clone shape
+    monkeypatch.chdir(tmp_path)
+    ancestry = {  # hook (300) → claude (100): the session-id arm is reached
+        300: liveness.ProcessInfo(
+            pid=300, ppid=100, create_time=1.0, argv="shipit hook sessionstart"
+        ),
+        100: liveness.ProcessInfo(pid=100, ppid=1, create_time=1.0, argv="claude"),
+    }
+    with caplog.at_level(logging.DEBUG, logger=HOOK_LOGGER):
+        rc = sessionstart.run(
+            stdin=io.StringIO("{not json"),
+            environ={},
+            probe=ancestry.get,
+            self_pid=300,
+        )
+    assert rc == 0  # fail-open: the session start continues
+    warnings = _records(caplog, logging.WARNING)
+    assert len(warnings) == 2, "both swallowed parse arms must produce a WARNING"
+    assert all(r.exc_info for r in warnings)
     assert not _records(caplog, logging.ERROR)
