@@ -37,6 +37,8 @@ import logging
 from collections.abc import Sequence
 from pathlib import Path
 
+from ..identity import Sha
+
 logger = logging.getLogger("shipit.tree")
 
 #: The record's name inside the clone's ``.git`` directory (see module docstring
@@ -52,10 +54,12 @@ def record_path(tree: str | Path) -> Path:
     return Path(tree) / ".git" / PROVISION_RECORD_NAME
 
 
-def write_record(tree: str | Path, shas: Sequence[str]) -> None:
+def write_record(tree: str | Path, shas: Sequence[Sha]) -> None:
     """Record ``shas`` as the commits provisioning made in ``tree``.
 
-    Called at Tree birth, only when the managed-set install actually committed
+    ``shas`` are :class:`~shipit.identity.Sha` value objects — the typed range
+    :func:`shipit.git.commits_between` returned (PROC03) — stringified HERE, at
+    the JSON serialization seam, and nowhere upstream. Called at Tree birth, only when the managed-set install actually committed
     (steady-state provisioning is a no-op and writes nothing — an absent record
     is the norm, not an error). Raises :class:`OSError` when the Tree has no
     ``.git`` directory to hold it or the write fails; the caller
@@ -68,7 +72,7 @@ def write_record(tree: str | Path, shas: Sequence[str]) -> None:
             f"{path.parent} is not a directory — {tree} is not a git clone, "
             "so there is nowhere safe to record the provisioning commit"
         )
-    payload = {_COMMITS_KEY: list(shas)}
+    payload = {_COMMITS_KEY: [str(sha) for sha in shas]}
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     # A lifecycle milestone (spray convention): the record is what later lets a
     # gc sweep reclaim this Tree past the unpushed floor, so its write — today
@@ -81,12 +85,16 @@ def write_record(tree: str | Path, shas: Sequence[str]) -> None:
     )
 
 
-def read_provision_shas(tree: str | Path) -> frozenset[str]:
+def read_provision_shas(tree: str | Path) -> frozenset[Sha]:
     """The SHAs provisioning committed in ``tree`` — the gc floor's exclusion set.
 
-    EMPTY on every degenerate case — no record (the steady-state norm), an
-    unreadable file, malformed JSON, a mis-typed or empty entry — because an
-    empty exclusion set means the unpushed floor keeps the Tree, exactly the
+    Returned as :class:`~shipit.identity.Sha` value objects (PROC03), parsed —
+    and therefore VALIDATED — at this read boundary, so the exclusion set
+    compares against :func:`shipit.git.unpushed_shas`'s typed list through the
+    type, never via raw-string equality. EMPTY on every degenerate case — no
+    record (the steady-state norm), an unreadable file, malformed JSON, a
+    mis-typed entry, or an entry that is not a full sha — because an empty
+    exclusion set means the unpushed floor keeps the Tree, exactly the
     conservative direction (#232): a corrupt record must never widen what a
     fleet-wide sweep may delete, and must never crash it.
     """
@@ -97,7 +105,10 @@ def read_provision_shas(tree: str | Path) -> frozenset[str]:
         if isinstance(commits, list) and all(
             isinstance(sha, str) and sha for sha in commits
         ):
-            return frozenset(commits)
+            # `Sha(...)` raising ValueError on a non-sha entry falls through to
+            # the same degenerate-case handling: an invalid identity excludes
+            # NOTHING (the floor keeps the Tree) rather than crashing the sweep.
+            return frozenset(Sha(sha) for sha in commits)
         logger.debug("provision record for %s has mis-typed commits: %r", tree, data)
     except (OSError, ValueError, TypeError, KeyError):
         logger.debug("provision record unreadable for %s", tree, exc_info=True)

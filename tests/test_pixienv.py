@@ -399,6 +399,9 @@ def test_list_packages_runs_pixi_list_json_and_parses():
         "--manifest-path",
         "/x/pixi.toml",
     ]
+    # PROC03: the read surface returns the pixi MODEL type — InstalledPackage
+    # value objects — never raw dicts for callers to re-parse.
+    assert all(isinstance(p, pixienv.InstalledPackage) for p in packages)
     assert [p.name for p in packages] == ["bzip2", "shipit"]
 
 
@@ -490,6 +493,9 @@ def test_info_runs_pixi_info_json_and_parses():
     parsed = read.info(Path("/x/pixi.toml"), runner=fake_runner)
 
     assert seen["cmd"] == ["pixi", "info", "--json", "--manifest-path", "/x/pixi.toml"]
+    # PROC03: the read surface returns the pixi MODEL type — an Info value
+    # object — never a raw dict for callers to re-parse.
+    assert isinstance(parsed, pixienv.Info)
     assert parsed.project.name == "shipit"
 
 

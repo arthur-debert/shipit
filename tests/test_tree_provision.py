@@ -14,10 +14,11 @@ from pathlib import Path
 
 import pytest
 
+from shipit.identity import Sha
 from shipit.tree import provision
 
-SHA_A = "a" * 40
-SHA_B = "b" * 40
+SHA_A = Sha("a" * 40)
+SHA_B = Sha("b" * 40)
 
 
 @pytest.fixture
@@ -67,10 +68,21 @@ def test_malformed_json_reads_as_empty(tree: Path):
         {"commits": "not-a-list"},
         {"commits": [123]},
         {"commits": [""]},  # an empty sha could never match; treat as mis-typed
+        {
+            "commits": ["not-a-sha"]
+        },  # not a full sha: an invalid IDENTITY excludes nothing
         {"commits": None},
-        [SHA_A],  # not even an object
+        [str(SHA_A)],  # not even an object
     ],
-    ids=["no-key", "not-a-list", "non-str", "empty-str", "null", "not-an-object"],
+    ids=[
+        "no-key",
+        "not-a-list",
+        "non-str",
+        "empty-str",
+        "not-a-sha",
+        "null",
+        "not-an-object",
+    ],
 )
 def test_mistyped_record_reads_as_empty(tree: Path, payload):
     provision.record_path(tree).write_text(json.dumps(payload), encoding="utf-8")
