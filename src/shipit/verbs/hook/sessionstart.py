@@ -25,9 +25,13 @@ the committed ``pixi run shipit hook …`` lines keep their prefix, and the gc
 ladder's liveness-independent rungs (the dirty/unpushed floor, the grace window,
 the hard cap) carry teardown safety even with no pidfile. ANY failure in either
 step (no ``CLAUDE_ENV_FILE``, bad payload, no toolchain, a pixi error, an
-unwritable file, no claude ancestor) must therefore cost the session NOTHING: log
-at DEBUG, skip that write, exit 0 — and the steps fail open INDEPENDENTLY, so a
-broken activation never costs the session its liveness record or vice versa.
+unwritable file, no claude ancestor) must therefore cost the session NOTHING:
+skip that write and exit 0 — and the steps fail open INDEPENDENTLY, so a broken
+activation never costs the session its liveness record or vice versa. Levels
+follow the fail-open canon in :mod:`shipit.verbs.hook`: a swallowed exception is
+a degraded-but-continuing outcome and logs at WARNING; a clean no-op (no
+``CLAUDE_ENV_FILE``, no toolchain, no claude ancestor, not a clone) is mechanics
+and stays at DEBUG.
 
 The env file is opened in APPEND mode: ``CLAUDE_ENV_FILE`` is a shared seam other
 SessionStart hooks may also write to, and this boundary owns only its own lines —
@@ -89,7 +93,7 @@ def run(
     try:
         raw = (stdin if stdin is not None else sys.stdin).read()
     except Exception:  # noqa: BLE001 — fail-open: no payload, nothing to do.
-        logger.debug("sessionstart: could not read the payload", exc_info=True)
+        logger.warning("sessionstart: could not read the payload", exc_info=True)
         return 0
     _write_activation(raw, env, runner)
     _write_liveness(raw, probe=probe, self_pid=self_pid)
@@ -99,8 +103,8 @@ def run(
 def _write_activation(raw: str, env, runner) -> None:
     """The activation half: toolchain → captured env → append to CLAUDE_ENV_FILE.
 
-    Fail-open in isolation: any error logs at DEBUG and writes nothing, without
-    touching the liveness half.
+    Fail-open in isolation: any error logs at WARNING (the swallow is a degraded
+    outcome) and writes nothing, without touching the liveness half.
     """
     try:
         env_file = env.get(ENV_FILE_VAR)
@@ -123,7 +127,7 @@ def _write_activation(raw: str, env, runner) -> None:
             env_file,
         )
     except Exception:  # noqa: BLE001 — fail-open: activation is additive, never load-bearing.
-        logger.debug(
+        logger.warning(
             "sessionstart hook failed open (no activation written)", exc_info=True
         )
 
@@ -171,7 +175,7 @@ def _write_liveness(
         )
     except Exception:  # noqa: BLE001 — fail-open: liveness is additive; the gc ladder's
         # liveness-independent rungs carry teardown safety without it.
-        logger.debug(
+        logger.warning(
             "sessionstart hook failed open (no pidfile written)", exc_info=True
         )
 
@@ -202,7 +206,9 @@ def _append(env_file: Path, text: str) -> None:
             else:
                 env_file.unlink(missing_ok=True)
         except OSError:
-            logger.debug(
+            # A torn append that could not be rolled back may leave a corrupt
+            # preamble — degraded-but-continuing, so WARNING per the canon.
+            logger.warning(
                 "sessionstart: could not roll back partial append to %s",
                 env_file,
                 exc_info=True,
@@ -223,7 +229,7 @@ def _payload_session_id(raw: str) -> str:
         if isinstance(sid, str):
             return sid
     except ValueError:
-        logger.debug("sessionstart: unparseable payload — no session id recorded")
+        logger.warning("sessionstart: unparseable payload — no session id recorded")
     return ""
 
 
@@ -241,5 +247,5 @@ def _payload_cwd(raw: str) -> Path:
         if isinstance(cwd, str) and cwd:
             return Path(cwd)
     except ValueError:
-        logger.debug("sessionstart: unparseable payload — falling back to cwd")
+        logger.warning("sessionstart: unparseable payload — falling back to cwd")
     return Path.cwd()

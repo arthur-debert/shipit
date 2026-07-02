@@ -9,8 +9,10 @@ closed run's transcript + meta → extract objective metrics → build the eval 
 
 **Fail-open is the contract.** Eval must NEVER break a real session: any error —
 bad stdin, malformed JSON, a missing transcript, a git failure — is swallowed,
-logged at DEBUG, and the hook exits 0 having written nothing. The hook emits no
-stdout decision (these events take none); its only effect is the record on disk.
+logged at WARNING (the fail-open canon in :mod:`shipit.verbs.hook`: a swallowed
+failure is a degraded-but-continuing outcome), and the hook exits 0 having
+written nothing. The hook emits no stdout decision (these events take none); its
+only effect is the record on disk.
 """
 
 from __future__ import annotations
@@ -84,7 +86,7 @@ def run(stdin: TextIO | None = None) -> int:
         )
         append_record(record, wd.repo)
     except Exception:  # noqa: BLE001 — fail-open is the whole point.
-        logger.debug("eval hook failed open (no record written)", exc_info=True)
+        logger.warning("eval hook failed open (no record written)", exc_info=True)
     return 0
 
 
@@ -99,17 +101,27 @@ def _variant(meta: dict | None) -> dict | None:
     try:
         return resolve_variant(meta).as_record()
     except Exception:  # noqa: BLE001 — variant is best-effort; never drop the record.
-        logger.debug("variant resolution failed; stamping null", exc_info=True)
+        logger.warning("variant resolution failed; stamping null", exc_info=True)
         return None
 
 
 def _read_meta(meta_path: object) -> dict | None:
-    """Parse a run's `.meta.json`, or ``None`` (coordinator, or unreadable)."""
+    """Parse a run's `.meta.json`, or ``None`` (coordinator, or unreadable).
+
+    A coordinator run has no sidecar (``meta_path is None``) — a clean no-op. An
+    unreadable/unparseable sidecar the locator DID find is a swallowed failure
+    (the record proceeds meta-less) → WARNING per the fail-open canon.
+    """
     if meta_path is None:
         return None
     try:
         data = json.loads(Path(str(meta_path)).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
+        logger.warning(
+            "eval: unreadable run meta %s — record proceeds without it",
+            meta_path,
+            exc_info=True,
+        )
         return None
     return data if isinstance(data, dict) else None
 
