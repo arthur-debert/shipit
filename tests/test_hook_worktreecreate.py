@@ -1,9 +1,11 @@
 """Hook boundary: a `WorktreeCreate` payload on stdin → the Tree path on stdout.
 
-The demoted WorktreeCreate adapter (ADR-0017). Covers the three things the boundary
-owns: the **branch-deferred** `tree create` call (the right freeform spec reaches
-the orchestrator), marker resolution + safe fallback, and the **fail-CLOSED**
-contract (any error → exit 1, NOTHING on stdout, so the spawn aborts rather than
+The WorktreeCreate adapter (ADR-0017 + ADR-0027). Covers the four things the
+boundary owns: the **coordinator-vs-helper fork** (`prompt_id` absent ⇒ the
+coordinator's ephemeral session Tree; present ⇒ the helper holding branch), the
+**branch-deferred** `tree create` call (the right spec shape reaches the
+orchestrator), marker resolution + safe fallback, and the **fail-CLOSED** contract
+(any error → exit 1, NOTHING on stdout, so the spawn/launch aborts rather than
 escaping to a native worktree).
 """
 
@@ -58,12 +60,22 @@ def _run(payload_text: str) -> tuple[int, str]:
     return code, out.getvalue()
 
 
+def _helper(body: dict) -> str:
+    """A helper-spawn payload: an in-CC spawn ALWAYS carries a `prompt_id`.
+
+    The verified contract (SES02-WS01 spike): `prompt_id`'s absence is what flips
+    the hook to the coordinator/ephemeral path (ADR-0027), so every helper-path
+    payload in this file carries one — exactly like the live payloads do.
+    """
+    return json.dumps({"prompt_id": "c2f52d57-prompt", **body})
+
+
 def test_spawn_lands_in_a_tree_on_epic_branch(monkeypatch, fake_repo):
     # With the SHIPIT_EPIC override set, the spawn provisions a Tree on
     # `<epic>/agent-<id>` and prints its path (which CC adopts as the cwd). The id
     # is read from the VERIFIED payload field `name` (= `agent-<agentId>`).
     monkeypatch.setenv(worktree_adapter.EPIC_MARKER_ENV, "TRE03")
-    payload = json.dumps({"hook_event_name": "WorktreeCreate", "name": "agent-abc123"})
+    payload = _helper({"hook_event_name": "WorktreeCreate", "name": "agent-abc123"})
     code, out = _run(payload)
     assert code == 0
     spec = fake_repo["spec"]
@@ -85,7 +97,7 @@ def test_epic_inferred_from_cwd_branch(monkeypatch, fake_repo):
         return "TRE04/WS01"
 
     monkeypatch.setattr(worktreecreate.gh, "git_current_branch", fake_branch)
-    payload = json.dumps({"name": "agent-abc123", "cwd": "/coordinator/checkout"})
+    payload = _helper({"name": "agent-abc123", "cwd": "/coordinator/checkout"})
     code, _ = _run(payload)
     assert code == 0
     assert seen["cwd"] == "/coordinator/checkout"  # probe ran against the payload cwd
@@ -99,7 +111,7 @@ def test_override_wins_over_inferred_cwd_branch(monkeypatch, fake_repo):
     monkeypatch.setattr(
         worktreecreate.gh, "git_current_branch", lambda *, cwd: "TRE04/WS01"
     )
-    payload = json.dumps({"name": "agent-abc123", "cwd": "/coordinator/checkout"})
+    payload = _helper({"name": "agent-abc123", "cwd": "/coordinator/checkout"})
     code, _ = _run(payload)
     assert code == 0
     assert fake_repo["spec"].branch == "HAR02/agent-abc123"
@@ -136,7 +148,7 @@ def test_epic_namespacing_gated_on_umbrella_existence(
         "epic_umbrella_exists",
         lambda epic, *, cwd: epic in existing,
     )
-    payload = json.dumps({"name": "agent-abc123", "cwd": "/coordinator/checkout"})
+    payload = _helper({"name": "agent-abc123", "cwd": "/coordinator/checkout"})
     code, _ = _run(payload)
     assert code == 0
     assert fake_repo["spec"].branch == expected
@@ -157,7 +169,7 @@ def test_existence_check_runs_against_the_payload_cwd(monkeypatch, fake_repo):
         worktreecreate.gh, "git_current_branch", lambda *, cwd: "TRE04/WS01"
     )
     monkeypatch.setattr(worktreecreate.gh, "epic_umbrella_exists", fake_exists)
-    _run(json.dumps({"name": "agent-abc123", "cwd": "/coordinator/checkout"}))
+    _run(_helper({"name": "agent-abc123", "cwd": "/coordinator/checkout"}))
     assert seen == {"epic": "TRE04", "cwd": "/coordinator/checkout"}
 
 
@@ -169,7 +181,7 @@ def test_override_naming_a_dead_epic_degrades_to_epicless(monkeypatch, fake_repo
     monkeypatch.setattr(
         worktreecreate.gh, "epic_umbrella_exists", lambda epic, *, cwd: False
     )
-    payload = json.dumps({"name": "agent-abc123", "cwd": "/coordinator/checkout"})
+    payload = _helper({"name": "agent-abc123", "cwd": "/coordinator/checkout"})
     code, _ = _run(payload)
     assert code == 0
     assert fake_repo["spec"].branch == "agent-abc123"
@@ -186,7 +198,7 @@ def test_override_without_cwd_validates_in_ambient_checkout(monkeypatch, fake_re
         return True
 
     monkeypatch.setattr(worktreecreate.gh, "epic_umbrella_exists", fake_exists)
-    _run(json.dumps({"name": "agent-abc123"}))  # no cwd in payload
+    _run(_helper({"name": "agent-abc123"}))  # no cwd in payload
     assert seen["cwd"] == "/repo"  # gh.repo_root() fallback
     assert fake_repo["spec"].branch == "TRE03/agent-abc123"
 
@@ -206,7 +218,7 @@ def test_no_inferable_epic_falls_back_to_epicless_branch(
     # missing cwd) → a safe epic-less branch; the spawn STILL lands in a real Tree.
     monkeypatch.delenv(worktree_adapter.EPIC_MARKER_ENV, raising=False)
     monkeypatch.setattr(worktreecreate.gh, "git_current_branch", lambda *, cwd: branch)
-    body = {"name": "agent-abc123"}
+    body = {"name": "agent-abc123", "prompt_id": "c2f52d57-prompt"}
     if cwd is not None:
         body["cwd"] = cwd
     code, out = _run(json.dumps(body))
@@ -220,7 +232,7 @@ def test_missing_or_empty_name_synthesizes_an_id(payload, monkeypatch, fake_repo
     # A payload with no usable `name` still resolves a VALID branch (random id) and
     # never crashes — the spawn is never blocked on a missing/empty name.
     monkeypatch.setenv(worktree_adapter.EPIC_MARKER_ENV, "TRE03")
-    code, out = _run(json.dumps({"hook_event_name": "WorktreeCreate", **payload}))
+    code, out = _run(_helper({"hook_event_name": "WorktreeCreate", **payload}))
     assert code == 0
     assert re.fullmatch(r"TRE03/agent-[0-9a-f]+", fake_repo["spec"].branch)
     assert out.strip().startswith("/trees/")
@@ -232,7 +244,7 @@ def test_legacy_worktree_name_field_is_ignored(monkeypatch, fake_repo):
     # NOT adopt that value — it synthesizes a random id instead. If someone reverts
     # `_resolve_branch` to read `worktree_name`, this test fails loud.
     monkeypatch.setenv(worktree_adapter.EPIC_MARKER_ENV, "TRE03")
-    code, _ = _run(json.dumps({"worktree_name": "agent-shouldnotwin"}))
+    code, _ = _run(_helper({"worktree_name": "agent-shouldnotwin"}))
     assert code == 0
     assert "shouldnotwin" not in fake_repo["spec"].branch
     assert re.fullmatch(r"TRE03/agent-[0-9a-f]+", fake_repo["spec"].branch)
@@ -296,3 +308,78 @@ def test_fail_closed_on_malformed_input(garbage, capsys):
     assert code == 1
     assert out == ""
     assert capsys.readouterr().err  # a diagnostic is surfaced
+
+
+# --------------------------------------------------------------------------
+# the ADR-0027 fork: a coordinator launch (no prompt_id) → the ephemeral shape
+# --------------------------------------------------------------------------
+
+
+def test_coordinator_launch_provisions_the_ephemeral_shape(fake_repo):
+    # The spike-verified top-level `--worktree` payload (no `prompt_id`) takes the
+    # ephemeral fork: the spec carries the session id in `ephemeral` and NO
+    # freeform branch — the planner resolves ephemeral/<id> off origin/main.
+    payload = json.dumps(
+        {
+            "session_id": "c6010bf9",
+            "transcript_path": "/t/c6010bf9.jsonl",
+            "cwd": "/coordinator/checkout",
+            "hook_event_name": "WorktreeCreate",
+            "name": "sess-20260702-121314-4242",
+        }
+    )
+    code, out = _run(payload)
+    assert code == 0
+    spec = fake_repo["spec"]
+    assert spec.ephemeral == "sess-20260702-121314-4242"
+    assert spec.branch is None  # NOT the freeform helper shape
+    assert (spec.org, spec.repo) == ("acme", "widget")
+    assert out.strip()  # the printed path is what CC adopts as the root cwd
+
+
+def test_helper_spawn_with_prompt_id_keeps_the_holding_branch(monkeypatch, fake_repo):
+    # The same payload WITH a prompt_id is an in-CC helper spawn — the existing
+    # <epic>/agent-<id> holding branch, unchanged by ADR-0027.
+    monkeypatch.delenv(worktree_adapter.EPIC_MARKER_ENV, raising=False)
+    monkeypatch.setattr(
+        worktreecreate.gh, "git_current_branch", lambda *, cwd: "TRE04/WS01"
+    )
+    payload = _helper({"name": "agent-abc123", "cwd": "/coordinator/checkout"})
+    code, _ = _run(payload)
+    assert code == 0
+    spec = fake_repo["spec"]
+    assert spec.branch == "TRE04/agent-abc123"
+    assert spec.ephemeral is None
+
+
+def test_coordinator_launch_never_runs_the_epic_probe(monkeypatch, fake_repo):
+    # The ephemeral fork does not resolve a holding branch, so the coordinator
+    # launch never probes the cwd branch or the umbrella ref — the session Tree is
+    # always off origin/main regardless of what branch the launch dir sits on.
+    def explode(*a, **k):
+        raise AssertionError("the coordinator fork must not probe git state")
+
+    monkeypatch.setattr(worktreecreate.gh, "git_current_branch", explode)
+    monkeypatch.setattr(worktreecreate.gh, "epic_umbrella_exists", explode)
+    payload = json.dumps({"name": "sess-x", "cwd": "/coordinator/checkout"})
+    code, _ = _run(payload)
+    assert code == 0
+    assert fake_repo["spec"].ephemeral == "sess-x"
+
+
+@pytest.mark.parametrize("payload", [{}, {"name": ""}, {"name": "@{"}])
+def test_coordinator_launch_with_degenerate_name_synthesizes_an_id(payload, fake_repo):
+    # A missing/empty/all-ref-forbidden `-w` value still yields a valid ephemeral
+    # id (random hex) — a launch is never blocked on a degenerate name, mirroring
+    # the helper path's missing-`name` fallback.
+    code, out = _run(json.dumps({"hook_event_name": "WorktreeCreate", **payload}))
+    assert code == 0
+    assert re.fullmatch(r"[0-9a-f]+", fake_repo["spec"].ephemeral)
+    assert out.strip()
+
+
+def test_empty_prompt_id_takes_the_coordinator_fork(fake_repo):
+    # A null prompt_id counts as absent (no prompt exists at launch) — coordinator.
+    code, _ = _run(json.dumps({"name": "sess-y", "prompt_id": None}))
+    assert code == 0
+    assert fake_repo["spec"].ephemeral == "sess-y"

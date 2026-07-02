@@ -53,6 +53,19 @@ mid-stream. Agents derive WS codes and all names from them.
     plain-language identifier (§1) stays hyphenated — `GPU02-WS03` in titles,
     logs, cross-refs — only the git branch form is slashed.
 
+    A coordinator session Tree is born on `ephemeral/<id>` — e.g.
+    `ephemeral/sess-20260702-121314-4242` — cut from `origin/main`, where `<id>`
+    is the per-launch session id (the `claude --worktree <id>` value, minted by
+    `claude-start`). The slash groups every session branch under the `ephemeral/`
+    ref directory, mirroring the Tree dir `<root>/<org>/<repo>/ephemeral/<id>`.
+    Unlike every other form, this branch is NOT the work's name: a session Tree
+    is ephemeral-by-path, work-by-branch (ADR-0027). The dir leaf is the SESSION
+    — disposable, never renamed — while the branch mirrors it only at birth and
+    is expected to move to the real work (`EPIC/umbrella`, `docs/<slug>`,
+    `issues/<id>/<session>`, …) inside the fixed dir as the session discovers
+    what it is doing; `shipit tree list` reads the live branch, so nothing is
+    lost but the cosmetic dir-branch symmetry.
+
     Grandfathered: epics already in-flight when this slash scheme landed keep
     their original hyphen form (bare `EPIC` epic branch, `EPIC-WSnn` workstreams)
     — e.g. `HAR02` / `HAR02-WS03`. The slash/umbrella form applies to epics

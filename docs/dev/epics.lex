@@ -25,14 +25,19 @@ dependencies.
 
     The coordinator is briefed as in the single-task cycle's information-gathering
     step in [../../AGENTS.lex] — via the epic tracker issue, the PRD, or a chat
-    with the maintainer. It does the general reading/research, CREATES the epic
-    branch (`EPIC/umbrella` — see [./naming.lex]) and provisions its OWN isolated
-    *Tree* to manage that branch with `shipit tree create` — the coordinator's own
-    workspace, the one legitimate hand-run of that primitive, distinct from how Runs
-    get their Tree (covered under Delegation per workstream — a Run's Tree is minted FOR it by `shipit spawn subagent` or
-    the `WorktreeCreate` hook, never hand-created). The Tree is a dissociated clone,
-    never a native `git worktree` (ADR-0014 / see [../prd/where-to-do-work.md]). It asks
-    the maintainer for decisions/clarifications as needed.
+    with the maintainer. It does the general reading/research and CREATES the epic
+    branch (`EPIC/umbrella` — see [./naming.lex]). Its workspace needs no manual
+    step: a coordinator session already runs inside its own ephemeral
+    *session Tree* from launch (`claude --worktree`, usually via `claude-start` —
+    ADR-0027), born on `ephemeral/<id>` off `origin/main`, so it creates and manages the epic
+    branch by switching branches INSIDE that same Tree (ephemeral-by-path,
+    work-by-branch: the dir stays, the branch becomes the work). The old
+    session-start hand-run of `shipit tree create` is retired — that primitive is
+    how Runs get their Tree minted FOR them (covered under Delegation per
+    workstream — by `shipit spawn subagent` or the `WorktreeCreate` hook, never
+    hand-created). The Tree is a dissociated clone, never a native `git worktree`
+    (ADR-0014 / see [../prd/where-to-do-work.md]). It asks the maintainer for
+    decisions/clarifications as needed.
 
 2. Delegation per workstream
 
@@ -64,7 +69,7 @@ dependencies.
     is READY (CI green + reviewed + mergeable) — its own go/no-go, no user
     approval needed for these intra-epic merges. This is the one place the
     coordinator merges: workstreams INTO the epic branch, never the epic branch
-    into `main`. The user's approval gate is the umbrella PR ([#6]), not the
+    into `main`. The user's approval gate is the umbrella PR (§6), not the
     individual workstreams.
 
 4. Convergence — clearing the fallouts
