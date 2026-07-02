@@ -2,16 +2,18 @@
 
 The per-backend argv/auth-env/read-only-posture moved behind the ADR-0020 adapter
 seam (covered in ``test_spawn_backend_claude.py``); what stays here is the *shared*
-launch machinery: ``cwd`` = the Tree, ``stdin`` from ``/dev/null`` (the subprocess
-seam), and the English PR-contract prompts. These tests pin each piece WITHOUT
-spawning a real child — the prompts directly, and the subprocess seam by patching
-``subprocess.run`` / injecting a fake runner.
+launch machinery: ``cwd`` = the Tree, the Exec-runner consumer view (PROC01-WS04:
+the real runner is one Exec through :func:`shipit.execrun.run`, with the launch
+contract's semantics pinned as explicit parameters), and the English PR-contract
+prompts. These tests pin each piece WITHOUT spawning a real child — the prompts
+directly, and the Exec seam by faking ``execrun.run`` / injecting a fake runner.
 """
 
 from __future__ import annotations
 
-import subprocess
+import pytest
 
+from shipit import execrun
 from shipit.spawn import launch
 
 
@@ -69,43 +71,92 @@ def test_launch_stringifies_a_path_cwd():
     assert isinstance(seen["cwd"], str)
 
 
-def test_subprocess_runner_redirects_stdin_from_devnull(monkeypatch):
+def test_exec_runner_is_a_consumer_view_over_the_exec_runner(monkeypatch):
+    # PROC01-WS04: the real launch seam is ONE Exec through execrun.run (ADR-0028),
+    # with every launch-contract semantic pinned as an explicit parameter.
     captured: dict = {}
 
-    def fake_run(cmd, **kwargs):
-        captured["cmd"] = cmd
+    def fake_exec_run(argv, **kwargs):
+        captured["argv"] = argv
         captured["kwargs"] = kwargs
-        return subprocess.CompletedProcess(cmd, 0, stdout="out", stderr="err")
+        return execrun.ExecResult(
+            argv=tuple(argv), rc=0, stdout="out", stderr="err", duration_ms=12
+        )
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(launch.execrun, "run", fake_exec_run)
 
-    result = launch._subprocess_runner(
+    result = launch._exec_runner(
         ["claude", "-p", "t"], cwd="/trees/x", env={"PATH": "/bin"}
     )
 
     assert result == launch.LaunchResult(returncode=0, stdout="out", stderr="err")
+    assert captured["argv"] == ["claude", "-p", "t"]
     kwargs = captured["kwargs"]
-    # The TTY-less child must not block on stdin (ADR-0019 §1).
-    assert kwargs["stdin"] is subprocess.DEVNULL
-    # Rooted in the Tree, with the (already-scrubbed) env passed as-is.
+    # Rooted in the Tree, with the (already-scrubbed) env REPLACING the child's
+    # environment — a scrubbed key must not creep back in via the runner's merge.
     assert kwargs["cwd"] == "/trees/x"
     assert kwargs["env"] == {"PATH": "/bin"}
-    # Captured text, and a nonzero child is a result not an exception.
-    assert kwargs["capture_output"] is True
-    assert kwargs["text"] is True
+    assert kwargs["replace_env"] is True
+    # A nonzero child is a result, not an exception (ADR-0019 §6).
     assert kwargs["check"] is False
+    # The EXPLICIT timeout override: no default (5m or otherwise) may kill a Run.
+    assert "timeout" in kwargs
+    assert kwargs["timeout"] is None
+    assert launch.LAUNCH_TIMEOUT is None
 
 
-def test_subprocess_runner_returns_nonzero_without_raising(monkeypatch):
-    def fake_run(cmd, **kwargs):
-        return subprocess.CompletedProcess(cmd, 7, stdout="", stderr="boom")
+def test_exec_runner_returns_nonzero_without_raising(monkeypatch):
+    # check=False rides the Exec: a nonzero agent child comes back as a
+    # LaunchResult the verb reports — never an ExecError (ADR-0019/0020).
+    def fake_exec_run(argv, **kwargs):
+        return execrun.ExecResult(
+            argv=tuple(argv), rc=7, stdout="", stderr="boom", duration_ms=3
+        )
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(launch.execrun, "run", fake_exec_run)
 
-    result = launch._subprocess_runner(["claude"], cwd="/x", env={})
+    result = launch._exec_runner(["claude"], cwd="/x", env={})
 
     assert result.returncode == 7
     assert result.stderr == "boom"
+
+
+def test_exec_runner_normalizes_a_missing_binary_into_execerror(tmp_path):
+    # The transport itself failing (backend binary not on PATH) IS an ExecError —
+    # the runner normalizes the raw FileNotFoundError (ADR-0028), and the spawn
+    # verb maps it to a clean exit-1. Driven against the REAL runner: the exec
+    # never happens, so this is fast and hermetic.
+    with pytest.raises(execrun.ExecError) as excinfo:
+        launch._exec_runner(
+            ["definitely-not-a-real-backend-binary"],
+            cwd=str(tmp_path),
+            env={"PATH": str(tmp_path)},
+        )
+
+    assert excinfo.value.cause == execrun.CAUSE_MISSING_BINARY
+
+
+def test_exec_runner_emits_the_exec_record_with_duration(monkeypatch, caplog):
+    # Acceptance (PROC01-WS04): a launch Exec appears in the structured record with
+    # duration like any other Exec. Fake the subprocess layer INSIDE execrun so the
+    # real runner produces its one record for the launch.
+    import subprocess
+
+    def fake_run(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(execrun.subprocess, "run", fake_run)
+
+    with caplog.at_level("DEBUG", logger="shipit.exec"):
+        launch._exec_runner(["claude", "-p", "t"], cwd="/trees/x", env={})
+
+    records = [r for r in caplog.records if r.name == "shipit.exec"]
+    assert len(records) == 1  # exactly one record per Exec
+    message = records[0].getMessage()
+    assert "claude -p t" in message
+    assert "cwd=/trees/x" in message
+    assert "rc=0" in message
+    assert "ms" in message  # the duration rides the record
 
 
 def test_pixi_wrap_routes_through_pixi_for_a_provisioned_tree(tmp_path):

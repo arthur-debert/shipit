@@ -3,7 +3,7 @@
 The thin **edge** (ADR-0021): read the on-disk ``conda-meta/pixi`` and shell out to
 ``pixi shell-hook --json``, then delegate to the pure parsers in
 :mod:`shipit.pixienv.model`. All effects live here so the core stays fixture-testable;
-the subprocess call takes an injectable ``runner`` (default :func:`shipit.proc.run`) so
+the Exec takes an injectable ``runner`` (default :func:`shipit.execrun.run`) so
 tests assert argv/parse without spawning ``pixi``.
 """
 
@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .. import proc
+from .. import execrun
 from .model import Activation, EnvIdentity, parse_activation, parse_env_identity
 
 #: The ``conda-meta`` subdirectory of an env prefix, where pixi persists per-env state.
@@ -59,12 +59,12 @@ def shell_hook(
     manifest_path: Path,
     *,
     environment: str | None = None,
-    runner=proc.run,
+    runner=execrun.run,
 ) -> Activation:
     """Run ``pixi shell-hook --json`` for ``manifest_path`` and parse the :class:`Activation`.
 
     ``environment`` selects a non-default pixi environment. ``runner`` is the injectable
-    subprocess boundary (default :func:`shipit.proc.run`); it must return an object with a
+    Exec boundary (default :func:`shipit.execrun.run`); it must return an object with a
     ``.stdout`` string. shipit consumes pixi's activation output here rather than computing
     a rival (ADR-0022).
     """

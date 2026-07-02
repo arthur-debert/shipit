@@ -12,6 +12,7 @@ import json
 
 import pytest
 from shipit.harness.eval import extractors
+from shipit.execrun import ExecError
 from shipit.harness.eval.extractors import (
     break_glass_count,
     error_count,
@@ -414,7 +415,7 @@ def test_exit_hygiene_counts_injected_stray_pids(monkeypatch):
 
 def test_exit_hygiene_degrades_on_git_failure(monkeypatch):
     def _boom(*, cwd):
-        raise extractors.gh.GhError("not a git repo")
+        raise ExecError(["gh"], rc=1, stderr="not a git repo")
 
     monkeypatch.setattr(extractors.gh, "git_status_porcelain", _boom)
     result = exit_hygiene("/repo")

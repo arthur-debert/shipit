@@ -16,11 +16,12 @@ from pathlib import Path
 
 import pytest
 
-from shipit import gh, proc
+from shipit import execrun, gh
 from shipit.spawn import launch
 from shipit.tree import layout
 from shipit.tree.create import Tree
 from shipit.verbs import spawn as spawn_verb
+from shipit.execrun import ExecError
 
 
 def _patch_identity(monkeypatch, *, root="/repo", org_repo="acme/widget"):
@@ -359,7 +360,7 @@ def test_run_subagent_tree_creation_failure_fails_closed(tmp_path, monkeypatch, 
     _patch_identity(monkeypatch)
 
     def boom(spec, *, source_repo, github_url):
-        raise gh.GhError("clone failed")
+        raise ExecError(["gh"], rc=1, stderr="clone failed")
 
     monkeypatch.setattr(spawn_verb, "create", boom)
 
@@ -381,7 +382,9 @@ def test_run_subagent_tree_creation_failure_fails_closed(tmp_path, monkeypatch, 
 @pytest.mark.parametrize(
     "exc",
     [
-        proc.ProcError(["pixi", "install"], 1, "boom"),  # provisioning failed
+        execrun.ExecError(
+            ["pixi", "install"], rc=1, stderr="boom"
+        ),  # provisioning failed
         OSError("disk full"),  # a filesystem step failed
         ValueError("planner rejected the spec"),  # the planner refused
         FileExistsError("tree dir already exists"),
@@ -542,7 +545,7 @@ def test_run_subagent_reports_gh_error_cleanly(monkeypatch, capsys):
     monkeypatch.setattr(gh, "repo_root", lambda: "/repo")
 
     def boom():
-        raise gh.GhError("could not resolve repo")
+        raise ExecError(["gh"], rc=1, stderr="could not resolve repo")
 
     monkeypatch.setattr(gh, "current_repo", boom)
 
@@ -570,17 +573,18 @@ def test_run_subagent_child_nonzero_exit_is_exit_1(tmp_path, monkeypatch, capsys
     assert "boom" in err  # the child's stderr is surfaced, not swallowed
 
 
-def test_run_subagent_launch_oserror_is_clean_exit_1(tmp_path, monkeypatch, capsys):
+def test_run_subagent_launch_execerror_is_clean_exit_1(tmp_path, monkeypatch, capsys):
     # The child never starts — `claude` is not installed / not on PATH, so the
-    # launcher raises FileNotFoundError (an OSError). The Tree already exists, so this
-    # is a launch failure, and run_subagent promises a clean exit-1 with a stderr
-    # message, never an escaping traceback.
+    # launcher raises ExecError (PROC01: the Exec runner normalizes the raw
+    # FileNotFoundError, ADR-0028). The Tree already exists, so this is a launch
+    # failure, and run_subagent promises a clean exit-1 with a stderr message,
+    # never an escaping traceback.
     tree_dir = tmp_path / "tree"
     _patch_identity(monkeypatch)
     _fake_create(monkeypatch, tree_dir)
 
     def runner(cmd, *, cwd, env):
-        raise FileNotFoundError("[Errno 2] No such file or directory: 'claude'")
+        raise execrun.ExecError(["claude"], rc=None, cause=execrun.CAUSE_MISSING_BINARY)
 
     rc = spawn_verb.run_subagent(
         repo="widget", epic="TRE03", ws=1, issue=1, role="implementer", launcher=runner
@@ -1023,7 +1027,7 @@ def test_run_subagent_reviewer_readonly_tree_failure_is_clean_exit_1(
     _patch_identity(monkeypatch)
 
     def boom(plan, *, source_repo, github_url):
-        raise gh.GhError("clone failed")
+        raise ExecError(["gh"], rc=1, stderr="clone failed")
 
     monkeypatch.setattr(spawn_verb, "create_readonly", boom)
     launched: dict = {}

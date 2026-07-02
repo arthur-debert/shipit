@@ -10,9 +10,9 @@ from __future__ import annotations
 
 import pytest
 
-from shipit.prstate import ghapi
 from shipit.prstate.state import ChecksState, TaskState, TaskStatus
 from shipit.verbs.pr import ready as ready_verb
+from shipit.execrun import ExecError
 
 
 def _status(state: TaskState, pr: int = 42) -> TaskStatus:
@@ -131,7 +131,7 @@ def test_run_gh_failure_nonzero(monkeypatch, capsys):
     monkeypatch.setattr(ready_verb, "resolve_pr", lambda pr: 42)
 
     def boom(pr):
-        raise ghapi.GhError("gh boom")
+        raise ExecError(["gh"], rc=1, stderr="gh boom")
 
     monkeypatch.setattr(ready_verb, "guarded_flip", boom)
     rc = ready_verb.run()

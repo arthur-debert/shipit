@@ -9,6 +9,15 @@ module holds everything that does NOT vary:
 - :func:`launch` — runs a resolved ``cmd``/``cwd``/``env`` through an injectable
   ``runner``, rooting the child in the Tree (``cwd`` = the Tree, **stdin from
   ``/dev/null``**). The runner is the subprocess seam, swapped for a fake in tests.
+  The real runner is a **consumer view over the one Exec runner**
+  (:func:`shipit.execrun.run`, ADR-0028) with the launch contract's own semantics
+  pinned on top: ``check=False`` (a nonzero agent child is a normal lifecycle
+  outcome the verb reports — never an :class:`~shipit.execrun.ExecError`, ADR-0019
+  §6), ``replace_env=True`` (the adapter's scrubbed env IS the child env), and an
+  **explicit** :data:`LAUNCH_TIMEOUT` override of ``None`` (an agent Run
+  legitimately runs far past the runner's 5-minute default; the default must never
+  kill one). In exchange, every launch is an Exec like any other: one structured
+  record with argv, cwd, rc, and ``duration_ms``.
 - :func:`write_task` / :func:`reviewer_task` — the English PR-contract prompts a Run is
   handed. These are backend-agnostic: they convey *what work to do and how to report
   it* (the PR is the result channel, ADR-0019 §6), not how any particular CLI is shaped.
@@ -17,7 +26,7 @@ Rooting is the OS process ``cwd`` (ADR-0019 §1), NOT a ``cd`` — so the child'
 land in the Tree with no leak to the parent checkout, sidestepping the bash-cwd-reset
 footgun. The module is split pure-from-effectful so the contract is table-tested without
 spawning a real child: :func:`launch` takes an injectable ``runner`` (defaulting to the
-real :func:`_subprocess_runner`).
+real :func:`_exec_runner`).
 
 **Routing the child through pixi (ADR-0019 amendment 2026-06-30).** ``cwd=<Tree>`` roots
 the child's writes in the Tree but does NOT activate the Tree's pixi env, so the child
@@ -41,12 +50,22 @@ rc 127); the curated passthrough keeps ``HOME``/``PATH`` intact (spike, 2026-06-
 
 from __future__ import annotations
 
-import subprocess
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from .. import execrun
 from ..tree.create import is_leaked_env_var
+
+#: The launch path's per-Exec timeout: **explicitly** ``None`` (ADR-0028 allows it
+#: as a deliberate per-call choice, never the default). An agent Run is the ONE
+#: legitimate arbitrarily-long child shipit launches — an implementer Run works an
+#: entire issue end-to-end — so no bound the Exec runner could enforce here is safe:
+#: the runner's 5-minute :data:`shipit.execrun.DEFAULT_TIMEOUT` (or any "generous"
+#: multiple of it) must never be what kills a Run mid-work. The Run's lifecycle end
+#: is its process exit (ADR-0019 §6); backends that want a bound carry their own
+#: (e.g. ``agy --print-timeout``).
+LAUNCH_TIMEOUT: float | None = None
 
 
 @dataclass(frozen=True)
@@ -66,7 +85,7 @@ class LaunchResult:
 #: The injectable subprocess seam: given the resolved ``cmd``/``cwd``/``env`` it runs
 #: the child and returns its :class:`LaunchResult`. Tests pass a fake so the launch
 #: contract is asserted WITHOUT spawning a real ``claude``; production uses
-#: :func:`_subprocess_runner`.
+#: :func:`_exec_runner`.
 Runner = Callable[..., LaunchResult]
 
 
@@ -85,39 +104,49 @@ def launch(
     sidestepping the bash-cwd-reset footgun (a subagent's bash resets to the parent repo
     per call; the process itself being rooted does not). ``runner`` is injectable so the
     contract is unit-tested without spawning a real child; it defaults to
-    :func:`_subprocess_runner`, which redirects ``stdin`` from ``/dev/null``.
+    :func:`_exec_runner`, whose Exec pins ``stdin`` to ``/dev/null``.
     """
     if runner is None:
-        runner = _subprocess_runner
+        runner = _exec_runner
     return runner(cmd, cwd=str(cwd), env=dict(env))
 
 
-def _subprocess_runner(
-    cmd: list[str], *, cwd: str, env: dict[str, str]
-) -> LaunchResult:
-    """The real subprocess seam: the backend child, ``stdin`` from ``/dev/null``.
+def _exec_runner(cmd: list[str], *, cwd: str, env: dict[str, str]) -> LaunchResult:
+    """The real seam: one Exec through the runner (ADR-0028), as a consumer view.
 
-    ``stdin`` is redirected from ``/dev/null`` because a TTY-less child otherwise
-    waits ~3 s for stdin and warns (ADR-0019 §1). ``env`` REPLACES the child's
-    environment (the adapter's ``child_env`` has already scrubbed the backend's
-    auth-shadowing vars) rather than merging over :data:`os.environ` the way
-    :func:`shipit.proc.run` does — a scrubbed key must not creep back in. ``check``
-    is False: a nonzero child is a normal lifecycle outcome the verb reports, not an
-    exception.
+    The launch contract's semantics ride on the runner's parameters, each one
+    load-bearing:
+
+    - ``check=False`` — a nonzero child is a normal lifecycle outcome the verb
+      reports (ADR-0019 §6), a :class:`LaunchResult`, never an
+      :class:`~shipit.execrun.ExecError`. The runner records it at DEBUG, like any
+      other caller-declared-normal rc.
+    - ``replace_env=True`` — ``env`` REPLACES the child's environment (the
+      adapter's ``child_env`` has already scrubbed the backend's auth-shadowing
+      vars) rather than merging over ``os.environ``; a scrubbed key must not creep
+      back in.
+    - ``timeout=LAUNCH_TIMEOUT`` — the **explicit** ``None`` override: the
+      runner's 5-minute default must never kill a legitimately long agent Run.
+    - stdin: the runner pins a no-``input`` Exec's stdin to ``/dev/null``
+      (ADR-0020) — a TTY-less child otherwise waits ~3 s for stdin and warns
+      (ADR-0019 §1).
+
+    What can still raise is the transport itself: a missing backend binary or any
+    OS-level launch failure surfaces as :class:`~shipit.execrun.ExecError` (no raw
+    ``OSError`` escapes the runner), which the spawn verb maps to its clean exit-1.
     """
-    completed = subprocess.run(  # noqa: S603 — cmd is a constructed list, never shell-interpolated
+    result = execrun.run(
         cmd,
         cwd=cwd,
         env=env,
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        text=True,
+        replace_env=True,
         check=False,
+        timeout=LAUNCH_TIMEOUT,
     )
     return LaunchResult(
-        returncode=completed.returncode,
-        stdout=completed.stdout,
-        stderr=completed.stderr,
+        returncode=result.rc,
+        stdout=result.stdout,
+        stderr=result.stderr,
     )
 
 

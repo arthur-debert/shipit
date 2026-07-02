@@ -29,7 +29,8 @@ import sys
 
 import click
 
-from ...prstate import ghapi
+from ... import execrun
+from ...prstate.errors import PrStateError
 from ...prstate.fetch import gather
 from ...prstate.reviewers import required_reviewers
 from ...prstate.state import TaskStatus, evaluate, no_pr
@@ -81,7 +82,7 @@ class _NextActs:
             ALREADY filtered to the reviewers that need acting on; the helper then
             places each request and polls until its `review_requested` edge is
             verified (or reports it dropped). A silently-dropped edge is a hard
-            failure: surface it as a `GhError` so the verb renders a clean stderr
+            failure: surface it as a `PrStateError` so the verb renders a clean stderr
             + non-zero exit, exactly like `pr review request`.
         """
         by_name = {r.name: r for r in required_reviewers()}
@@ -89,13 +90,13 @@ class _NextActs:
         if not selected:
             return f"no requestable reviewer to (re-)request — {status.next_action}"
         # force=True: selection is done above, so the helper requests exactly
-        # these and attach-verifies each remote edge. GhError (e.g. a deferred
+        # these and attach-verifies each remote edge. ExecError/PrStateError (e.g. a deferred
         # local-agent reviewer, or a gh failure) propagates to the verb.
         result = request_reviewers(self._pr, selected, force=True)
         if not result.ok:
             # A remote request edge was silently dropped (#614) — fail loud rather
             # than park the PR invisibly at reviews-pending.
-            raise ghapi.GhError(
+            raise PrStateError(
                 "review request dropped by GitHub (no review_requested edge "
                 f"attached): {', '.join(result.dropped)} — re-run `pr next`"
             )
@@ -149,7 +150,7 @@ def run(pr: int | None = None, *, as_json: bool = False) -> int:
         # and the flip. Report the real (refused) status as a clean non-zero.
         print(f"refusing to flip: {exc}", file=sys.stderr)
         return 1
-    except ghapi.GhError as exc:
+    except (execrun.ExecError, PrStateError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     # Re-read the status AFTER a mutating act so the reported snapshot reflects

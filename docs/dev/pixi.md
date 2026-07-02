@@ -25,7 +25,7 @@ pixi is used for four things at once: provisioning native tooling, running tasks
 
 ### What pixi is NOT the parent of:
 
-The reviewer (read-only) agent session. A reviewer Tree is clone+checkout with the working tree `chmod`'d read-only and NO `.pixi/envs/default` (`src/shipit/tree/readonly.py`), so routing it through `pixi run` would force a solve into a read-only dir. Its launch stays a bare subprocess — tolerable because a reviewer only runs `gh pr diff`/`gh pr review` off the ambient PATH, not the Tree's toolchain [(see](#7)).
+The reviewer (read-only) agent session. A reviewer Tree is clone+checkout with the working tree `chmod`'d read-only and NO `.pixi/envs/default` (`src/shipit/tree/readonly.py`), so routing it through `pixi run` would force a solve into a read-only dir. Its launch argv stays bare — no `pixi run` wrapping (though the spawn itself is still an Exec through the one runner, ADR-0028) — tolerable because a reviewer only runs `gh pr diff`/`gh pr review` off the ambient PATH, not the Tree's toolchain [(see](#7)).
 
 What pixi does NOT own (carried [from](./architecture.lex)): building and signing distributable artifacts. `pixi build` is preview-grade and emits conda packages. shipit keeps the real builders and uses pixi to PROVISION and RUN them.
 
@@ -87,7 +87,7 @@ External `pixi-<name>` subcommands
 
 Provisioning — `src/shipit/tree/create.py`
 
-: `_provision()` runs, each gated on a manifest existing: \`shipit install . --local\` (if `.shipit.toml`), `pixi install` (if `pixi.toml`, default env), `npm ci` (if `package.json`). All funnel through one seam, `run_provision()`, which calls `proc.run` (captures stdout/stderr/exit) but DISCARDS the result — so on success pixi's output is thrown away; only a failure survives, inside the raised `ProcError`.
+: `_provision()` runs, each gated on a manifest existing: \`shipit install . --local\` (if `.shipit.toml`), `pixi install` (if `pixi.toml`, default env), `npm ci` (if `package.json`). All funnel through one seam, `run_provision()`, an Exec through the one runner (`shipit.execrun.run`, ADR-0028) with the generous explicit `PROVISION_TIMEOUT` (cold `pixi install`/`npm ci` legitimately outlive the 5-minute default) and a durable record per step — timing on success, both stream tails on failure. A failed step raises the runner's single transport error, `ExecError`.
 
 Hooks — `.claude/settings.json`
 
@@ -119,9 +119,9 @@ Cross-filesystem cache (\#119)
 
 : Provisioning warns when the pixi/rattler cache and the Tree are on different filesystems (no reflink → slow copies).
 
-No provisioning logs
+No provisioning logs — CLOSED (PROC01)
 
-: Because `run_provision` discards the captured output, there is today no durable record of what `pixi install` printed during a Tree's provisioning. The thin fix is to stop discarding it and log cmd/returncode/duration through the existing logsetup file sink — no pixi cooperation needed.
+: `run_provision` used to discard the captured output, leaving no durable record of what `pixi install` printed during a Tree's provisioning. Every provisioning step is now an Exec through the one runner (ADR-0028): one structured record per step with cmd/rc/duration, both stream tails kept on failure — exactly where a broken `pixi install` writes its real diagnostics. No pixi cooperation was needed.
 
 ## 8. How to leverage pixi well
 

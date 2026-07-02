@@ -52,7 +52,7 @@ import os
 import sys
 from dataclasses import dataclass, field
 
-from .. import gh
+from .. import execrun, gh
 from . import checkrun, ghauth
 
 logger = logging.getLogger("shipit.review")
@@ -102,7 +102,7 @@ def verify(agent: str, repo: str, pr: int, *, conclusion: str = "success") -> Re
 
     Returns a :class:`Report`; it NEVER raises — every failure, an *assertion*
     miss OR a boundary error (``ReviewAuthError`` minting the App token,
-    ``GhError`` on a REST call), becomes a recorded failed check so the harness
+    ``ExecError`` on a REST call), becomes a recorded failed check so the harness
     always prints a PASS/FAIL report and exits 0/1. It stops early (returning the
     partial report) when a step's failure makes the rest meaningless (no token, no
     head sha, no created run).
@@ -135,7 +135,7 @@ def verify(agent: str, repo: str, pr: int, *, conclusion: str = "success") -> Re
     # check, not raised.
     try:
         head_sha = _pr_head_sha(repo, pr)
-    except gh.GhError as exc:
+    except execrun.ExecError as exc:
         report.record("resolved canary PR head sha", False, f"{repo}#{pr}: {exc}")
         return report
     if not report.record(
@@ -148,12 +148,12 @@ def verify(agent: str, repo: str, pr: int, *, conclusion: str = "success") -> Re
 
     # 2. Kickoff create — drive WS01's real code. A returned run id means
     #    POST .../check-runs was a 201; a missing checks:write scope would 403,
-    #    which `gh` surfaces as a GhError (and a token mint can ReviewAuthError) —
+    #    which `gh` surfaces as an ExecError (and a token mint can ReviewAuthError) —
     #    both caught here and recorded as the failed "201, not 403" check rather
     #    than crashing the harness.
     try:
         run_id = checkrun.create(agent, repo, head_sha)
-    except (gh.GhError, ghauth.ReviewAuthError) as exc:
+    except (execrun.ExecError, ghauth.ReviewAuthError) as exc:
         report.record(
             "POST /repos/<repo>/check-runs returned 201 (not 403)",
             False,
@@ -193,7 +193,7 @@ def verify(agent: str, repo: str, pr: int, *, conclusion: str = "success") -> Re
         checkrun.transition(
             agent, repo, run_id, conclusion=conclusion, title=title, summary=summary
         )
-    except (gh.GhError, ghauth.ReviewAuthError) as exc:
+    except (execrun.ExecError, ghauth.ReviewAuthError) as exc:
         report.record(
             f"run conclusion is {conclusion}",
             False,
@@ -245,7 +245,7 @@ def _read_run(report: Report, repo: str, run_id: int, phase: str) -> object:
     FAILs instead of crashing the harness."""
     try:
         return _get_run(repo, run_id)
-    except gh.GhError as exc:
+    except execrun.ExecError as exc:
         report.record(f"read back the {phase} run", False, f"read failed: {exc}")
         return {}
 

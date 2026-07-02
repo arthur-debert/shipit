@@ -41,7 +41,7 @@ SHELL_HOOK_JSON = json.dumps(
 
 
 def _fake_runner(captured: dict):
-    """A `proc.run`-shaped stub that records argv and returns the fixture JSON."""
+    """An `execrun.run`-shaped stub that records argv and returns the fixture JSON."""
 
     def runner(cmd, **kwargs):
         captured["cmd"] = cmd

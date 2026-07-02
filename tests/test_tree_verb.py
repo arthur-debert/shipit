@@ -12,10 +12,11 @@ import json
 
 import pytest
 
-from shipit import gh, proc
+from shipit import execrun, gh
 from shipit.tree.create import Tree
 from shipit.tree.registry import TreeRecord
 from shipit.verbs import tree as tree_verb
+from shipit.execrun import ExecError
 
 
 def test_run_create_happy_path(monkeypatch, capsys):
@@ -196,7 +197,7 @@ def test_run_create_reports_gh_error_cleanly(monkeypatch, capsys):
     monkeypatch.setattr(gh, "repo_root", lambda: "/repo")
 
     def boom():
-        raise gh.GhError("could not resolve repo")
+        raise ExecError(["gh"], rc=1, stderr="could not resolve repo")
 
     monkeypatch.setattr(gh, "current_repo", boom)
 
@@ -308,7 +309,7 @@ def test_run_create_maps_create_failure_to_exit_1(monkeypatch, capsys):
     monkeypatch.setattr(gh, "git_remote_url", lambda *, cwd: "git@example:acme/widget")
 
     def boom(spec, *, source_repo, github_url):
-        raise gh.GhError("clone failed")
+        raise ExecError(["gh"], rc=1, stderr="clone failed")
 
     monkeypatch.setattr(tree_verb, "create", boom)
 
@@ -321,7 +322,9 @@ def test_run_create_maps_create_failure_to_exit_1(monkeypatch, capsys):
 @pytest.mark.parametrize(
     "exc",
     [
-        proc.ProcError(["pixi", "install"], 1, "boom"),  # provisioning failed
+        execrun.ExecError(
+            ["pixi", "install"], rc=1, stderr="boom"
+        ),  # provisioning failed
         OSError("disk full"),  # a filesystem step failed
         FileExistsError("tree dir already exists: /trees/...; refusing to clone"),
     ],
@@ -330,7 +333,7 @@ def test_run_create_maps_provisioning_and_fs_failures_to_clean_exit_1(
     monkeypatch, capsys, exc
 ):
     # The create contract: git/gh/provisioning/filesystem failures are a clean
-    # exit-1 message, never a traceback. ProcError (provisioning), OSError (mkdir/
+    # exit-1 message, never a traceback. ExecError (provisioning), OSError (mkdir/
     # copy/stat), and the pre-existing-dest FileExistsError all funnel through here.
     monkeypatch.setattr(gh, "repo_root", lambda: "/repo")
     monkeypatch.setattr(gh, "current_repo", lambda: "acme/widget")

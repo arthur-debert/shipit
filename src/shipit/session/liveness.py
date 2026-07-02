@@ -45,7 +45,7 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from .. import proc
+from .. import execrun
 
 logger = logging.getLogger("shipit.session")
 
@@ -315,12 +315,12 @@ def os_probe(pid: int) -> ProcessInfo | None:
     """
     if pid <= 0:
         return None
-    result = proc.run(
+    result = execrun.run(
         ["ps", "-p", str(pid), "-o", "pid=,ppid=,lstart=,args="],
         env={"LC_ALL": "C"},
         check=False,
     )
-    if result.returncode != 0:
+    if result.rc != 0:
         return None
     return _parse_ps_row(result.stdout)
 

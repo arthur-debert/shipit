@@ -17,6 +17,7 @@ from __future__ import annotations
 import pytest
 
 from shipit.review import funnel_verify
+from shipit.execrun import ExecError
 
 
 class _FakeGitHub:
@@ -41,9 +42,9 @@ class _FakeGitHub:
         # Create a run (POST) -> a fresh in_progress run (the 201 body).
         if method == "POST" and path.endswith("/check-runs"):
             if self.create_403:
-                from shipit import gh
-
-                raise gh.GhError("403 Resource not accessible by integration")
+                raise ExecError(
+                    ["gh"], rc=1, stderr="403 Resource not accessible by integration"
+                )
             run_id = self._next_id
             self._next_id += 1
             run = {
@@ -207,7 +208,7 @@ def test_verify_records_auth_failure_without_raising(monkeypatch):
 
 
 def test_verify_records_head_sha_gh_error_without_raising(monkeypatch):
-    """A `GhError` resolving the PR head sha is recorded, not raised."""
+    """An `ExecError` resolving the PR head sha is recorded, not raised."""
     monkeypatch.setattr(
         funnel_verify.ghauth,
         "installation_auth",
@@ -215,9 +216,8 @@ def test_verify_records_head_sha_gh_error_without_raising(monkeypatch):
     )
 
     def rest(path, *, method=None, body=None, paginate=False, token=None):
-        from shipit import gh
 
-        raise gh.GhError("PR not accessible")
+        raise ExecError(["gh"], rc=1, stderr="PR not accessible")
 
     monkeypatch.setattr(funnel_verify.gh, "rest", rest)
 
@@ -229,15 +229,14 @@ def test_verify_records_head_sha_gh_error_without_raising(monkeypatch):
 
 
 def test_verify_records_transition_failure_without_raising(monkeypatch):
-    """A `GhError` on the terminal PATCH is recorded as a failed conclusion check,
+    """An `ExecError` on the terminal PATCH is recorded as a failed conclusion check,
     not raised — the harness still prints a structured FAIL."""
     fake = _FakeGitHub()
 
     def rest(path, *, method=None, body=None, paginate=False, token=None):
-        from shipit import gh
 
         if method == "PATCH":
-            raise gh.GhError("PATCH 403")
+            raise ExecError(["gh"], rc=1, stderr="PATCH 403")
         return fake.rest(path, method=method, body=body, token=token)
 
     monkeypatch.setattr(funnel_verify.gh, "rest", rest)

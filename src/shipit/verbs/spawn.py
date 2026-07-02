@@ -30,7 +30,7 @@ import sys
 
 import click
 
-from .. import gh, logcontext, proc
+from .. import execrun, gh, logcontext
 from ..spawn import backends, launch
 from ..tree.create import Tree, create, new_agent_hash
 from ..tree.layout import (
@@ -240,7 +240,8 @@ def run_subagent(
 
     ``launcher`` injects the subprocess seam so the launch contract is unit-tested
     without spawning a real ``claude``; ``None`` uses the real
-    :func:`shipit.spawn.launch._subprocess_runner`.
+    :func:`shipit.spawn.launch._exec_runner` (a consumer view over
+    :func:`shipit.execrun.run`).
     """
     if backend not in SUPPORTED_BACKENDS:
         supported = ", ".join(SUPPORTED_BACKENDS)
@@ -310,7 +311,7 @@ def run_subagent(
     try:
         org_repo = gh.current_repo()
         url = gh.git_remote_url(cwd=root)
-    except gh.GhError as exc:
+    except execrun.ExecError as exc:
         print(f"spawn subagent: {exc}", file=sys.stderr)
         return 1
 
@@ -395,7 +396,7 @@ def run_subagent(
         # than surfacing as an opaque `git checkout` failure deep in tree creation.
         try:
             umbrella_exists = gh.remote_branch_exists(umbrella_branch, cwd=root)
-        except gh.GhError as exc:
+        except execrun.ExecError as exc:
             print(f"spawn subagent: {exc}", file=sys.stderr)
             return 1
         if not umbrella_exists:
@@ -473,7 +474,7 @@ def _launch_write(
     """
     try:
         tree = create(spec, source_repo=source_repo, github_url=github_url)
-    except (gh.GhError, ValueError, proc.ProcError, OSError) as exc:
+    except (ValueError, execrun.ExecError, OSError) as exc:
         # Fail-closed (ADR-0017/0019): a Tree-creation error fails the spawn LOUD.
         # There is deliberately no native-worktree fallback — the launcher below is
         # unreachable unless a real Tree exists, so a failed create can never end up
@@ -514,10 +515,13 @@ def _launch_write(
             env=launch.scrub_tree_env(logcontext.env_export(adapter.child_env())),
             runner=launcher,
         )
-    except OSError as exc:
+    except execrun.ExecError as exc:
         # The child never started: `claude` is missing/not on PATH, or the Tree path
-        # became unavailable. The Tree exists, so this is a launch failure, not the
-        # fail-closed create path — still a clean exit-1, never an escaping traceback.
+        # became unavailable. The Exec runner normalizes every launch-level OS failure
+        # into ExecError (ADR-0028) — a nonzero CHILD is a LaunchResult, never raised
+        # (check=False), so reaching here always means a transport failure. The Tree
+        # exists, so this is a launch failure, not the fail-closed create path — still
+        # a clean exit-1, never an escaping traceback.
         print(f"spawn subagent: {exc}", file=sys.stderr)
         return 1
     if result.returncode != 0:
@@ -612,7 +616,7 @@ def _launch_reviewer(
     plan = readonly_plan(org=org, repo=repo_name, branch=branch)
     try:
         tree = create_readonly(plan, source_repo=source_repo, github_url=github_url)
-    except (gh.GhError, ValueError, proc.ProcError, OSError) as exc:
+    except (ValueError, execrun.ExecError, OSError) as exc:
         # Fail-closed (ADR-0017/0018): a read-only-Tree error fails the spawn LOUD;
         # the launcher below is unreachable unless a real Tree exists.
         print(f"spawn subagent: read-only tree creation failed: {exc}", file=sys.stderr)
@@ -648,7 +652,9 @@ def _launch_reviewer(
             env=launch.scrub_tree_env(logcontext.env_export(adapter.child_env())),
             runner=launcher,
         )
-    except OSError as exc:
+    except execrun.ExecError as exc:
+        # Transport failure only (ADR-0028): the runner raised because the child never
+        # started; a nonzero reviewer child is a LaunchResult handled below.
         print(f"spawn subagent: {exc}", file=sys.stderr)
         return 1
     if result.returncode != 0:

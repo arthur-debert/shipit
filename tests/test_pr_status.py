@@ -13,6 +13,7 @@ import json
 import pytest
 
 from shipit import cli
+from shipit.execrun import ExecError, ExecResult
 from shipit.prstate import ghapi
 from shipit.prstate.state import ChecksState, TaskState, TaskStatus
 from shipit.verbs.pr import status as status_verb
@@ -153,7 +154,7 @@ def test_gh_failure_on_known_pr_exits_nonzero(monkeypatch, capsys):
     monkeypatch.setattr(status_verb, "resolve_pr", lambda pr: 42)
 
     def boom(pr):
-        raise ghapi.GhError("gh exploded")
+        raise ExecError(["gh"], rc=1, stderr="gh exploded")
 
     monkeypatch.setattr(status_verb, "gather", boom)
     rc = cli.main(["pr", "status"])
@@ -164,10 +165,10 @@ def test_gh_failure_on_known_pr_exits_nonzero(monkeypatch, capsys):
 def test_gh_failure_during_resolution_is_fatal(monkeypatch, capsys):
     """A REAL gh/auth failure resolving the branch's PR is fatal — NOT a silent
     no_pr. The resolver returns None for the genuine "no PR for branch" case, so a
-    GhError reaching the verb is always a real failure (PRD: stderr + non-zero)."""
+    ExecError reaching the verb is always a real failure (PRD: stderr + non-zero)."""
 
     def boom(pr):
-        raise ghapi.GhError("gh auth exploded")
+        raise ExecError(["gh"], rc=1, stderr="gh auth exploded")
 
     monkeypatch.setattr(status_verb, "resolve_pr", boom)
     rc = cli.main(["pr", "status"])
@@ -184,29 +185,35 @@ def test_resolver_explicit_pr_passthrough():
     assert resolve_pr(7) == 7
 
 
+def _probe_result(rc: int, stdout: str = "", stderr: str = "") -> ExecResult:
+    return ExecResult(argv=("gh",), rc=rc, stdout=stdout, stderr=stderr, duration_ms=1)
+
+
 def test_resolver_no_pr_marker_maps_to_none(monkeypatch):
     """gh's "no pull requests found for branch" exit is a normal no-PR state -> None."""
-
-    def fake_gh(args, **kw):
-        raise ghapi.GhError(
-            'gh pr view failed (1): no pull requests found for branch "x"'
-        )
-
-    monkeypatch.setattr(ghapi, "_gh", fake_gh)
+    monkeypatch.setattr(
+        ghapi,
+        "_gh_probe",
+        lambda args, **kw: _probe_result(
+            1, stderr='no pull requests found for branch "x"'
+        ),
+    )
     assert resolve_pr(None) is None
 
 
 def test_resolver_real_gh_error_propagates(monkeypatch):
-    """Any other gh failure stays a GhError — never collapsed into None."""
-
-    def fake_gh(args, **kw):
-        raise ghapi.GhError("gh pr view failed (1): could not authenticate")
-
-    monkeypatch.setattr(ghapi, "_gh", fake_gh)
-    with pytest.raises(ghapi.GhError):
+    """Any other gh failure becomes an ExecError — never collapsed into None."""
+    monkeypatch.setattr(
+        ghapi,
+        "_gh_probe",
+        lambda args, **kw: _probe_result(1, stderr="could not authenticate"),
+    )
+    with pytest.raises(ExecError):
         resolve_pr(None)
 
 
 def test_resolver_parses_number(monkeypatch):
-    monkeypatch.setattr(ghapi, "_gh", lambda args, **kw: '{"number": 99}')
+    monkeypatch.setattr(
+        ghapi, "_gh_probe", lambda args, **kw: _probe_result(0, stdout='{"number": 99}')
+    )
     assert resolve_pr(None) == 99

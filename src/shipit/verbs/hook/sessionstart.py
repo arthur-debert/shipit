@@ -45,7 +45,7 @@ from typing import TextIO
 
 import click
 
-from ... import proc
+from ... import execrun
 from ...harness import activation
 from ...pixienv import shell_hook
 from ...session import liveness
@@ -71,14 +71,14 @@ def cmd() -> None:
 def run(
     stdin: TextIO | None = None,
     environ: dict[str, str] | None = None,
-    runner=proc.run,
+    runner=execrun.run,
     probe: liveness.Probe | None = None,
     self_pid: int | None = None,
 ) -> int:
     """Parse stdin → write activation → write the liveness pidfile. Returns 0 always.
 
     ``environ``, ``runner``, ``probe``, and ``self_pid`` are the injectable
-    boundaries (defaults: the real ``os.environ`` / :func:`shipit.proc.run` /
+    boundaries (defaults: the real ``os.environ`` / :func:`shipit.execrun.run` /
     :func:`shipit.session.liveness.os_probe` / ``os.getpid()``) so tests assert
     both writes without a live pixi or a real claude process tree. Each write is
     wrapped fail-open on its own, so a bad payload, a pixi failure, an unwritable

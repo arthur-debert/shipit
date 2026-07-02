@@ -144,7 +144,7 @@ def request_reviewers(
     flips `result.ok` False. Local reviewers DETACH an async review (recorded
     `"in_flight"`); no-mechanism backends record `"no_op"`. Neither is verified.
 
-    Raises `ghapi.GhError` straight through when a `gh` call fails (the skip read,
+    Raises `execrun.ExecError` straight through when a `gh` call fails (the skip read,
     a `request()` placement, or the attach poll) — the caller renders it as a
     clean stderr + non-zero exit, exactly as the read verbs do. This helper never
     swallows a boundary failure into a false success.

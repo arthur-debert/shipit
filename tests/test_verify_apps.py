@@ -15,6 +15,7 @@ from __future__ import annotations
 from shipit import cli
 from shipit.review import ghauth
 from shipit.verbs import verify_apps
+from shipit.execrun import ExecError
 
 
 def _granted(checks: str | None) -> dict:
@@ -131,9 +132,8 @@ def test_run_errors_without_a_repo_or_checkout(capsys, monkeypatch):
     """No repo arg and not in a checkout -> exit 1 with a clear message."""
 
     def no_repo():
-        from shipit import gh
 
-        raise gh.GhError("not a repo")
+        raise ExecError(["gh"], rc=1, stderr="not a repo")
 
     monkeypatch.setattr(verify_apps.gh, "current_repo", no_repo)
     rc = verify_apps.run(None, mint=_mint_live)

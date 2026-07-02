@@ -46,7 +46,7 @@ class BackendError(RuntimeError):
 
     Raised when ``extract_json`` can't parse the agent's stdout (truncated /
     non-JSON output — commonly an agent timeout). Subclasses ``RuntimeError``
-    so ``_LocalReviewAdapter.request`` already normalizes it to ``GhError``
+    so ``_LocalReviewAdapter.request`` already normalizes it to ``PrStateError``
     (clean error + exit 1, never a raw traceback).
 
     Carries the FULL raw agent stdout on ``raw`` (the message itself keeps only a

@@ -21,6 +21,7 @@ from shipit import gh
 from shipit.session import liveness
 from shipit.tree import layout, provision
 from shipit.verbs.hook import worktreeremove
+from shipit.execrun import ExecError
 
 SESSION_RECORD = liveness.LivenessRecord(
     pid=100, session_id="sess-abc", create_time=1_750_000_000.0
@@ -194,7 +195,7 @@ def test_bad_payload_fails_open(root):
 def test_git_read_failure_fails_open(ephemeral_tree, monkeypatch):
     # An unreadable dirty state must refuse the removal, never crash the exit.
     def boom(*, cwd):
-        raise gh.GhError("git went away")
+        raise ExecError(["gh"], rc=1, stderr="git went away")
 
     monkeypatch.setattr(gh, "git_status_porcelain", boom)
     assert _run({"cwd": str(ephemeral_tree)}) == 0

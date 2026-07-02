@@ -23,7 +23,9 @@ from pathlib import Path
 
 import pytest
 
+from shipit import execrun
 from shipit.spawn import dogfood
+from shipit.tree import create as tree_create
 from shipit.tree import readonly
 
 
@@ -233,6 +235,71 @@ def test_parse_spawned_returns_none_without_a_spawned_line():
 def test_parse_spawned_tolerates_leading_noise():
     stdout = 'warming up...\nSPAWNED\n{"tree": "/t", "branch": "E/WS05"}\n'
     assert dogfood.parse_spawned(stdout) == {"tree": "/t", "branch": "E/WS05"}
+
+
+# --------------------------------------------------------------------------
+# The live seams — through the Exec runner (faked here)
+# --------------------------------------------------------------------------
+
+
+def _exec_result(rc: int, stdout: str = "", stderr: str = "") -> execrun.ExecResult:
+    return execrun.ExecResult(
+        argv=("x",), rc=rc, stdout=stdout, stderr=stderr, duration_ms=1
+    )
+
+
+def test_run_spawn_drives_the_shipped_cli_through_the_runner(monkeypatch):
+    # check=False (a nonzero spawn is a normal asserted outcome) and an EXPLICIT
+    # timeout=None (a live claude Run is unbounded token generation — the one
+    # legitimate no-bound choice, made per call, never by default). `env`
+    # overlays the inherited environment via the runner's default merge.
+    captured = {}
+
+    def fake_run(argv, *, cwd=None, env=None, check=True, timeout="unset", **kw):
+        captured.update(argv=argv, cwd=cwd, env=env, check=check, timeout=timeout)
+        return _exec_result(2, stdout="SPAWNED", stderr="boom")
+
+    monkeypatch.setattr(dogfood.execrun, "run", fake_run)
+    result = dogfood._run_spawn(["spawn", "subagent"], cwd="/scratch", env={"K": "V"})
+    assert result == dogfood.SpawnInvocation(2, "SPAWNED", "boom")
+    assert captured["argv"] == ["shipit", "spawn", "subagent"]
+    assert captured["cwd"] == "/scratch"
+    assert captured["env"] == {"K": "V"}
+    assert captured["check"] is False
+    assert captured["timeout"] is None
+
+
+def test_pixi_runs_probes_with_scrubbed_env_verbatim(monkeypatch):
+    # The scrubbed env is the COMPLETE child environment (replace_env=True): the
+    # runner's default merge over os.environ would re-add the very parent
+    # PIXI_* / Conda pointers the scrub removed. The probe shares provisioning's
+    # generous bound (its worst case is a first-activation re-solve).
+    monkeypatch.setenv("PIXI_PROJECT_MANIFEST", "/parent/pixi.toml")
+    captured = {}
+
+    def fake_run(argv, *, cwd=None, env=None, replace_env=False, timeout=None, **kw):
+        captured.update(argv=argv, env=env, replace_env=replace_env, timeout=timeout)
+        return _exec_result(0, stdout="pixi-ok\n")
+
+    monkeypatch.setattr(dogfood.execrun, "run", fake_run)
+    ok, detail = dogfood._pixi_runs("/tree")
+    assert ok
+    assert detail == "rc=0"
+    assert captured["replace_env"] is True
+    assert "PIXI_PROJECT_MANIFEST" not in captured["env"]
+    assert captured["timeout"] == tree_create.PROVISION_TIMEOUT
+
+
+def test_pixi_runs_reports_a_launch_failure_as_a_failed_check(monkeypatch):
+    # A missing pixi normalizes into the runner's ExecError; the probe degrades
+    # to a recorded FAIL detail, never an escaping exception.
+    def boom(argv, **kw):
+        raise execrun.ExecError(argv, rc=None, cause=execrun.CAUSE_MISSING_BINARY)
+
+    monkeypatch.setattr(dogfood.execrun, "run", boom)
+    ok, detail = dogfood._pixi_runs("/tree")
+    assert not ok
+    assert "pixi not launchable" in detail
 
 
 # --------------------------------------------------------------------------

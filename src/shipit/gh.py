@@ -3,45 +3,30 @@
 Every call that shells out to ``gh`` or ``git`` lives here, so the rest of the
 package is pure and unit-testable by patching this one module. This is the slim
 descendant of release-core's ``gh.py`` — only the surface ``gh-setup`` needs.
+
+Execution routes through the one Exec runner (ADR-0028): every call here is an
+Exec via :func:`shipit.execrun.run` with a stated timeout, one structured
+record per Exec, and central redaction (:mod:`shipit.redact`) applied to
+everything the runner logs or attaches to an error. A failed invocation raises
+the single transport error :class:`shipit.execrun.ExecError` — this boundary
+defines no error class of its own (the legacy ``GhError`` is deleted, no alias).
 """
 
 from __future__ import annotations
 
 import json
-import logging
-import re
-import subprocess
 
-#: The boundary's logger — a child of the package ``shipit`` logger, so it
-#: inherits the sinks :func:`shipit.logsetup.configure_logging` attaches. Every
-#: ``gh`` / ``git`` call and its outcome is recorded here at DEBUG (the verbose
-#: file/CI record), so the console surface (WARNING+) stays unchanged.
-logger = logging.getLogger("shipit.gh")
+from . import execrun
+from .execrun import ExecError
 
-#: Token shapes GitHub mints (PAT / OAuth / user / installation / refresh, plus
-#: the fine-grained ``github_pat_`` prefix). Used to MASK any token-shaped
-#: argument before a call's argv is logged — so a secret accidentally placed in
-#: argv never reaches a sink. Tokens normally travel in the env (never argv);
-#: this is the load-bearing no-secrets guard, applied belt-and-suspenders.
-_TOKEN_RE = re.compile(r"gh[posru]_[A-Za-z0-9]+|github_pat_[A-Za-z0-9_]+")
-
-#: The placeholder a masked secret is replaced with in a log record.
-_REDACTED = "***"
-
-
-def _argv_for_log(args: list[str]) -> str:
-    """A single redacted command string for a log record.
-
-    Only the argv is ever logged — never the child env, the ``token``, or any
-    stdin body (``input_text``): those are the secret-bearing channels and are
-    deliberately kept out of every record. Any token-shaped argument is masked
-    too, as defence in depth.
-    """
-    return _TOKEN_RE.sub(_REDACTED, " ".join(args))
-
-
-class GhError(RuntimeError):
-    """A ``gh`` / ``git`` invocation failed (non-zero exit)."""
+#: Stated per-Exec timeouts (ADR-0028: every Exec carries one; nothing hangs by
+#: default). Calls that talk to GitHub (``gh``, and ``git`` against origin) get
+#: the runner's generous default; local git plumbing is near-instant and gets a
+#: tight bound; the dissociated clone copies the full object store into the new
+#: checkout (ADR-0014), so it alone gets a larger ceiling.
+_NETWORK_TIMEOUT: float = execrun.DEFAULT_TIMEOUT
+_LOCAL_GIT_TIMEOUT: float = 60.0
+_CLONE_TIMEOUT: float = 600.0
 
 
 class UnknownPr:
@@ -88,50 +73,64 @@ def _run(
     input_text: str | None = None,
     cwd: str | None = None,
     token: str | None = None,
+    timeout: float | None = _NETWORK_TIMEOUT,
 ) -> str:
-    """Run a command, returning stdout. Raise :class:`GhError` on failure.
+    """Run a command through the Exec runner, returning stdout.
+
+    Raises :class:`ExecError` on failure — the runner normalizes a nonzero
+    exit, a timeout expiry, and a missing binary into that one transport error,
+    records each Exec exactly once, and redacts everything it logs or raises
+    (:mod:`shipit.redact`), so nothing secret rides a record or an exception
+    to a sink. The token / child env / stdin body are never logged at all.
 
     ``token``, when given, runs the subprocess with ``GH_TOKEN=<token>`` (and
-    ``GITHUB_TOKEN`` cleared) so a ``gh`` call authenticates as that token rather
-    than the user's login (see :func:`_token_env`).
+    ``GITHUB_TOKEN`` removed) so a ``gh`` call authenticates as that token
+    rather than the user's login (see :func:`_token_env`). ``replace_env`` is
+    what makes the *removal* possible — an env merge can only add or override.
     """
     env = None
+    replace_env = False
     if token is not None:
         import os
 
         # Drop GITHUB_TOKEN entirely (not blank it) so only GH_TOKEN remains.
         env = {k: v for k, v in os.environ.items() if k != "GITHUB_TOKEN"}
         env.update(_token_env(token))
-    cmd = _argv_for_log(args)
-    # Record the call before it runs: the redacted argv, the cwd, and the auth
-    # mode (a bare boolean — NEVER the token value). The token / env / stdin body
-    # are the secret-bearing channels and are intentionally absent from the log.
-    logger.debug(
-        "run %s (cwd=%s, auth=%s)", cmd, cwd or ".", "token" if token else "default"
+        replace_env = True
+    result = execrun.run(
+        args,
+        input=input_text,
+        cwd=cwd,
+        env=env,
+        replace_env=replace_env,
+        timeout=timeout,
     )
-    try:
-        proc = subprocess.run(
-            args,
-            input=input_text,
-            capture_output=True,
-            text=True,
-            check=False,
-            cwd=cwd,
-            env=env,
-        )
-    except FileNotFoundError as exc:
-        logger.debug("run %s -> %r not found on PATH", cmd, args[0])
-        raise GhError(f"{args[0]!r} not found on PATH") from exc
-    if proc.returncode != 0:
-        # Redact the argv AND the stderr in BOTH the log record and the raised
-        # error: GhError messages are surfaced and re-logged by callers (e.g.
-        # review.post logs the exc), so a token echoed in argv/stderr must never
-        # ride the exception text to a sink either.
-        stderr = _TOKEN_RE.sub(_REDACTED, proc.stderr.strip())
-        logger.debug("run %s -> exit %s: %s", cmd, proc.returncode, stderr)
-        raise GhError(f"{cmd} exited {proc.returncode}: {stderr}")
-    logger.debug("run %s -> ok (%d bytes stdout)", cmd, len(proc.stdout))
-    return proc.stdout
+    return result.stdout
+
+
+def _run_probe(
+    args: list[str],
+    *,
+    cwd: str | None = None,
+    timeout: float | None = _NETWORK_TIMEOUT,
+) -> execrun.ExecResult:
+    """Run a command whose nonzero exit is a NORMAL answer, not a failure.
+
+    ``check=False`` through the runner (ADR-0028): the Exec still gets its one
+    record, but at DEBUG — a no-PR lookup, an absent-ref check, or a
+    not-a-checkout read happens on every routine scan/hook and must not spray
+    ERROR records over normal flows. The caller branches on the result's
+    ``rc``/``stderr`` instead of catching :class:`ExecError` (which the runner
+    still raises for launch-level failures: missing binary, timeout).
+    """
+    return execrun.run(args, cwd=cwd, check=False, timeout=timeout)
+
+
+def _git_probe(
+    args: list[str], *, cwd: str, timeout: float | None = _LOCAL_GIT_TIMEOUT
+) -> execrun.ExecResult:
+    """``git -C <cwd> <args>`` as a probe (see :func:`_run_probe`)."""
+    return _run_probe(["git", "-C", cwd, *args], timeout=timeout)
 
 
 # --------------------------------------------------------------------------
@@ -225,7 +224,7 @@ def repo_canonical(slug: str) -> str:
 def pr_view(pr: str, *, repo: str | None = None, json_fields: list[str]) -> str:
     """``gh pr view <pr> [--repo …] --json <fields>`` → stripped stdout (the JSON).
 
-    Raises :class:`GhError` if gh fails (e.g. the PR can't be resolved); the
+    Raises :class:`ExecError` if gh fails (e.g. the PR can't be resolved); the
     caller parses the returned JSON object.
     """
     args = ["gh", "pr", "view", pr]
@@ -249,10 +248,12 @@ def repo_root(*, cwd: str | None = None) -> str | None:
         args += ["-C", cwd]
     args += ["rev-parse", "--show-toplevel"]
     try:
-        out = _run(args)
-    except GhError:
+        result = _run_probe(args, timeout=_LOCAL_GIT_TIMEOUT)
+    except ExecError:
         return None
-    return out.strip() or None
+    if not result.ok:
+        return None
+    return result.stdout.strip() or None
 
 
 def git_head_commit(*, cwd: str) -> str | None:
@@ -264,10 +265,12 @@ def git_head_commit(*, cwd: str) -> str | None:
     ``None`` rather than raising.
     """
     try:
-        out = _git(["rev-parse", "HEAD"], cwd=cwd)
-    except GhError:
+        result = _git_probe(["rev-parse", "HEAD"], cwd=cwd)
+    except ExecError:
         return None
-    return out.strip() or None
+    if not result.ok:
+        return None
+    return result.stdout.strip() or None
 
 
 def owner_kind(login: str) -> str:
@@ -278,18 +281,26 @@ def owner_kind(login: str) -> str:
     lazily-resolved enrichment (:func:`shipit.identity.resolve_owner_kind`) read
     from ``gh api users/<login>``, whose ``type`` field is ``User`` for a user
     account and ``Organization`` for an org (the endpoint serves both).
+
+    Raises :class:`ValueError` when the call succeeded but the response is not
+    a usable answer (missing/mistyped ``type``) — a data-shape problem, distinct
+    from the transport :class:`ExecError` a failed ``gh`` call raises.
     """
     info = rest(f"users/{login}")
     if not isinstance(info, dict) or "type" not in info:
-        raise GhError(f"could not resolve owner kind for {login!r}")
+        raise ValueError(f"could not resolve owner kind for {login!r}")
     return str(info["type"])
 
 
 def default_branch(repo: str) -> str:
-    """The repo's default branch name."""
+    """The repo's default branch name.
+
+    Raises :class:`ValueError` on a response with no usable ``default_branch``
+    (a data-shape problem — the transport failure is :class:`ExecError`).
+    """
     info = rest(f"repos/{repo}")
     if not isinstance(info, dict) or "default_branch" not in info:
-        raise GhError(f"could not resolve default branch for {repo}")
+        raise ValueError(f"could not resolve default branch for {repo}")
     return str(info["default_branch"])
 
 
@@ -340,9 +351,15 @@ def secret_list(repo: str) -> list[str]:
 # --------------------------------------------------------------------------
 
 
-def _git(args: list[str], *, cwd: str) -> str:
-    """``git -C <cwd> <args>`` via :func:`_run`."""
-    return _run(["git", "-C", cwd, *args])
+def _git(
+    args: list[str], *, cwd: str, timeout: float | None = _LOCAL_GIT_TIMEOUT
+) -> str:
+    """``git -C <cwd> <args>`` via :func:`_run`.
+
+    Local plumbing by default (:data:`_LOCAL_GIT_TIMEOUT`); the git calls that
+    talk to origin (fetch/push) state :data:`_NETWORK_TIMEOUT` instead.
+    """
+    return _run(["git", "-C", cwd, *args], timeout=timeout)
 
 
 def git_status_porcelain(*, cwd: str) -> str:
@@ -358,9 +375,12 @@ def git_status_porcelain(*, cwd: str) -> str:
 def git_current_branch(*, cwd: str) -> str | None:
     """The current branch name, or ``None`` on a detached/unborn HEAD."""
     try:
-        name = _git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=cwd).strip()
-    except GhError:
+        result = _git_probe(["rev-parse", "--abbrev-ref", "HEAD"], cwd=cwd)
+    except ExecError:
         return None
+    if not result.ok:
+        return None
+    name = result.stdout.strip()
     return None if (not name or name == "HEAD") else name
 
 
@@ -390,9 +410,9 @@ def epic_umbrella_exists(epic: str, *, cwd: str) -> bool:
         f"refs/heads/{epic}/umbrella",
     ):
         try:
-            _git(["show-ref", "--verify", "--quiet", ref], cwd=cwd)
-            return True
-        except GhError:
+            if _git_probe(["show-ref", "--verify", "--quiet", ref], cwd=cwd).ok:
+                return True
+        except ExecError:
             continue
     return False
 
@@ -449,7 +469,7 @@ def git_push(
     if force:
         args.append("--force")
     args += [remote, branch]
-    _git(args, cwd=cwd)
+    _git(args, cwd=cwd, timeout=_NETWORK_TIMEOUT)
 
 
 # --------------------------------------------------------------------------
@@ -467,12 +487,15 @@ def git_clone_dissociated(url: str, dest: str, *, reference: str) -> None:
     and is safe to ``rm -rf`` (ADR-0014). ``origin`` is set to ``url`` — the GitHub
     URL — so ``gh``/``git`` work inside the Tree unchanged.
     """
-    _run(["git", "clone", "--reference", reference, "--dissociate", url, dest])
+    _run(
+        ["git", "clone", "--reference", reference, "--dissociate", url, dest],
+        timeout=_CLONE_TIMEOUT,
+    )
 
 
 def git_fetch(*, cwd: str, remote: str = "origin") -> None:
     """``git fetch <remote>`` inside the Tree, so its base ref is up to date."""
-    _git(["fetch", remote], cwd=cwd)
+    _git(["fetch", remote], cwd=cwd, timeout=_NETWORK_TIMEOUT)
 
 
 def git_checkout_new_branch(branch: str, base: str, *, cwd: str) -> None:
@@ -515,7 +538,7 @@ def remote_branch_exists(
 
     A live query of the remote — not the local tracking refs — so a caller can
     fail-closed on a missing base branch BEFORE cloning, without relying on a prior
-    fetch having populated a tracking ref. Raises :class:`GhError` if the
+    fetch having populated a tracking ref. Raises :class:`ExecError` if the
     ``git ls-remote`` call itself fails (no network / bad remote), so an
     undetermined remote state is never silently read as "branch absent".
 
@@ -565,13 +588,15 @@ def git_upstream_ref(*, cwd: str) -> str | None:
     the branch has no upstream (never pushed / set), which ``scan`` surfaces as such.
     """
     try:
-        out = _git(
+        result = _git_probe(
             ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
             cwd=cwd,
-        ).strip()
-    except GhError:
+        )
+    except ExecError:
         return None
-    return out or None
+    if not result.ok:
+        return None
+    return result.stdout.strip() or None
 
 
 def git_ahead_behind(*, cwd: str) -> tuple[int, int]:
@@ -582,12 +607,14 @@ def git_ahead_behind(*, cwd: str) -> tuple[int, int]:
     (or the rev-list fails), so a freshly-cut Tree reads as level rather than erroring.
     """
     try:
-        out = _git(
+        result = _git_probe(
             ["rev-list", "--left-right", "--count", "@{upstream}...HEAD"], cwd=cwd
-        ).strip()
-    except GhError:
+        )
+    except ExecError:
         return (0, 0)
-    parts = out.split()
+    if not result.ok:
+        return (0, 0)
+    parts = result.stdout.strip().split()
     if len(parts) != 2:
         return (0, 0)
     try:
@@ -615,10 +642,12 @@ def git_unpushed_shas(*, cwd: str) -> tuple[str, ...] | None:
     and collapsing it to "nothing unpushed" would point the failure mode at data loss.
     """
     try:
-        out = _git(["rev-list", "HEAD", "--not", "--remotes"], cwd=cwd)
-    except GhError:
+        result = _git_probe(["rev-list", "HEAD", "--not", "--remotes"], cwd=cwd)
+    except ExecError:
         return None
-    shas = tuple(line.strip() for line in out.splitlines() if line.strip())
+    if not result.ok:
+        return None
+    shas = tuple(line.strip() for line in result.stdout.splitlines() if line.strip())
     if any(not _looks_like_sha(sha) for sha in shas):
         return None
     return shas
@@ -633,10 +662,12 @@ def git_commits_between(base: str, head: str, *, cwd: str) -> list[str] | None:
     than something wrong — an unrecorded provisioning commit only KEEPS the Tree.
     """
     try:
-        out = _git(["rev-list", f"{base}..{head}"], cwd=cwd)
-    except GhError:
+        result = _git_probe(["rev-list", f"{base}..{head}"], cwd=cwd)
+    except ExecError:
         return None
-    shas = [line.strip() for line in out.splitlines() if line.strip()]
+    if not result.ok:
+        return None
+    shas = [line.strip() for line in result.stdout.splitlines() if line.strip()]
     if any(not _looks_like_sha(sha) for sha in shas):
         return None
     return shas
@@ -668,12 +699,17 @@ def pr_for_head(branch: str, *, cwd: str | None = None) -> dict | None | Unknown
     keep treating it conservatively, but they can now tell the two apart.
     """
     try:
-        out = _run(
+        result = _run_probe(
             ["gh", "pr", "view", branch, "--json", "number,state,isDraft,baseRefName"],
             cwd=cwd,
-        ).strip()
-    except GhError as exc:
-        return None if _is_no_pr_error(exc) else UNKNOWN
+        )
+    except ExecError:
+        return UNKNOWN
+    if result.rc != 0:
+        # gh's documented no-PR message is the one provable absence; every other
+        # failure (auth/network/rate-limit) leaves the state undetermined.
+        return None if _NO_PR_MARKER in result.stderr.lower() else UNKNOWN
+    out = result.stdout.strip()
     if not out:
         return UNKNOWN
     try:
@@ -699,23 +735,13 @@ def pr_for_head(branch: str, *, cwd: str | None = None) -> dict | None | Unknown
 
 
 # gh's exact wording when a head has no associated PR — the SAME marker
-# verbs/pr/_resolve.py keys on (_NO_PR_MARKER). Kept narrow on purpose: a
-# broader substring risks classifying an unrelated gh failure as a provable
-# no-PR and collapsing it to None instead of UNKNOWN.
+# verbs/pr/_resolve.py keys on (_NO_PR_MARKER).
+#: ``gh`` exits non-zero with this message when a head simply has no associated
+#: PR — the one failure that is a provable *absence*, not an undetermined state
+#: (the exit code is a bare ``1`` for both cases, so the stderr message is the
+#: only signal). Matched narrowly on purpose so an unrelated failure is never
+#: mistaken for a provable absence.
 _NO_PR_MARKER = "no pull requests found for branch"
-
-
-def _is_no_pr_error(exc: GhError) -> bool:
-    """``True`` when a ``gh pr view`` failure means "this branch has no PR".
-
-    ``gh`` exits non-zero with a "no pull requests found for branch ..." message when
-    a head simply has no associated PR — the one failure that is a provable *absence*,
-    not an undetermined state. Every other ``GhError`` (auth, network, rate-limit) is
-    left as :data:`UNKNOWN`. Matched on ``gh``'s precise no-PR marker (the exit code is
-    a bare ``1`` for both cases, so the message is the only signal) — narrow on
-    purpose so an unrelated failure is never mistaken for a provable absence.
-    """
-    return _NO_PR_MARKER in str(exc).lower()
 
 
 def pr_url_for_head(branch: str, *, cwd: str | None = None) -> str | None:

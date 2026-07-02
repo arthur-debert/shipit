@@ -46,15 +46,15 @@ import argparse
 import json
 import logging
 import os
-import subprocess
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .. import gh
+from .. import execrun, gh
 from ..tree import create as tree_create
 from ..tree import layout
+from . import launch
 
 logger = logging.getLogger("shipit.spawn")
 
@@ -334,24 +334,24 @@ def _run_spawn(
 ) -> SpawnInvocation:
     """Run ``shipit <argv>`` in ``cwd`` and capture it (the live spawn seam).
 
-    ``env`` overlays the inherited environment (used by the fail-closed scenario to
-    inject a relative ``SHIPIT_TREES_ROOT``). ``stdin`` is ``/dev/null`` so a
-    TTY-less child never blocks. ``check=False``: a nonzero spawn is a normal outcome
-    the harness asserts on, not an exception.
+    An Exec through the one runner (ADR-0028), with the launch path's own
+    semantics: ``env`` overlays the inherited environment (the runner's merge
+    default; used by the fail-closed scenario to inject a relative
+    ``SHIPIT_TREES_ROOT``), the runner pins ``stdin`` to ``/dev/null`` so a
+    TTY-less child never blocks, and ``check=False``: a nonzero spawn is a normal
+    outcome the harness asserts on, not an exception. ``timeout`` is the
+    **explicit** ``None`` of the launch path (:data:`shipit.spawn.launch.LAUNCH_TIMEOUT`):
+    the spawn runs an entire agent Run to completion, so the runner's 5-minute
+    default must never kill it mid-work.
     """
-    full_env = dict(os.environ)
-    if env:
-        full_env.update(env)
-    completed = subprocess.run(  # noqa: S603 — argv is a constructed list, never shell
+    result = execrun.run(
         ["shipit", *argv],
         cwd=cwd,
-        env=full_env,
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        text=True,
+        env=dict(env) if env else None,
         check=False,
+        timeout=launch.LAUNCH_TIMEOUT,
     )
-    return SpawnInvocation(completed.returncode, completed.stdout, completed.stderr)
+    return SpawnInvocation(result.rc, result.stdout, result.stderr)
 
 
 def _current_branch(tree_path: str) -> str | None:
@@ -370,18 +370,25 @@ def _pixi_runs(tree_path: str) -> tuple[bool, str]:
     """
     env = {k: v for k, v in os.environ.items() if not tree_create.is_leaked_env_var(k)}
     try:
-        completed = subprocess.run(  # noqa: S603,S607 — fixed argv, scrubbed env
+        result = execrun.run(
             ["pixi", "run", "python", "-c", "print('pixi-ok')"],
             cwd=tree_path,
             env=env,
-            capture_output=True,
-            text=True,
+            # The scrubbed env is the COMPLETE child environment: the runner's
+            # default merge over os.environ would re-add the very pointers the
+            # scrub removed.
+            replace_env=True,
             check=False,
+            # The probe's worst case is a first activation re-solving the Tree's
+            # env — provisioning-shaped work, so it shares provisioning's bound.
+            timeout=tree_create.PROVISION_TIMEOUT,
         )
-    except OSError as exc:
+    except execrun.ExecError as exc:
+        # Transport failure (missing pixi, timeout on a wedged solve): the probe's
+        # answer is "not launchable", not an escaping error.
         return False, f"pixi not launchable: {exc}"
-    ok = completed.returncode == 0 and "pixi-ok" in completed.stdout
-    return ok, f"rc={completed.returncode}"
+    ok = result.ok and "pixi-ok" in result.stdout
+    return ok, f"rc={result.rc}"
 
 
 def _scratch_dirty(scratch: str) -> str:

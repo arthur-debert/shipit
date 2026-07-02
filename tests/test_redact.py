@@ -17,7 +17,7 @@ import logging
 
 import pytest
 import structlog
-from shipit import logsetup, redact, secretsrc
+from shipit import execrun, logsetup, redact, secretsrc
 from shipit.config import SecretSource
 
 SECRET = "s3cr3t-hunter2-value"
@@ -186,13 +186,12 @@ def test_resolve_prompt_registers_fetched_value():
 
 def test_doppler_get_registers_directly(monkeypatch):
     # ghauth calls doppler_get without going through resolve(); that path must
-    # register too.
-    class FakeProc:
-        returncode = 0
-        stdout = SECRET + "\n"
-        stderr = ""
-
-    monkeypatch.setattr(secretsrc.subprocess, "run", lambda *a, **kw: FakeProc())
+    # register too. doppler_get fetches through the Exec seam (ADR-0028), so the
+    # boundary faked here is execrun.run returning a completed ExecResult.
+    result = execrun.ExecResult(
+        argv=("doppler",), rc=0, stdout=SECRET + "\n", stderr="", duration_ms=1
+    )
+    monkeypatch.setattr(secretsrc.execrun, "run", lambda *a, **kw: result)
     assert secretsrc.doppler_get("TOK") == SECRET
     assert redact.redact_text(SECRET) == redact.MASK
 

@@ -52,7 +52,7 @@ from typing import Any
 import platformdirs
 import structlog
 
-from . import gh, logcontext, redact
+from . import execrun, gh, logcontext, redact
 
 #: The package logger every shipit module logs through (``logging.getLogger``
 #: of a child name propagates here).
@@ -368,7 +368,7 @@ def resolve_current_owner_repo() -> tuple[str, str] | None:
     """
     try:
         return _current_owner_repo()
-    except (gh.GhError, ValueError):
+    except (execrun.ExecError, ValueError):
         return None
 
 

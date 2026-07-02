@@ -11,27 +11,31 @@ errors to find them (the WS04 review caught this conflation):
 
   * an explicit / resolved PR number  -> returned as an ``int``
   * the branch genuinely has no PR    -> ``None`` (a normal state, not an error)
-  * a real gh/auth failure            -> raises ``ghapi.GhError``
+  * a real gh/auth failure            -> raises ``execrun.ExecError``
 
 The no-PR case is teased apart from a genuine failure by ``gh``'s own signal:
 on a branch with no PR, ``gh pr view`` exits non-zero with empty stdout and the
-stderr line ``no pull requests found for branch "<name>"`` (carried into the
-``GhError`` message). That maps to ``None``; every other failure (missing gh,
-auth, transient API error) keeps its ``GhError`` so a verb can surface it as a
-clean stderr + non-zero exit per the PRD. A read-only verb maps ``None`` to
-``no_pr``; a mutating verb treats both ``None`` and ``GhError`` as fatal — but
-each decides, because the cases arrive distinct.
+stderr line ``no pull requests found for branch "<name>"``. That maps to
+``None``; every other failure (missing gh, auth, transient API error) becomes
+an ``ExecError`` so a verb can surface it as a clean stderr + non-zero exit per
+the PRD. The lookup runs as a PROBE (``check=False`` through the Exec runner):
+a nonzero exit is this call's normal answer on every PR-less branch, so it
+records at DEBUG, never as a spurious ERROR (ADR-0028). A read-only verb maps
+``None`` to ``no_pr``; a mutating verb treats both ``None`` and ``ExecError``
+as fatal — but each decides, because the cases arrive distinct.
 """
 
 from __future__ import annotations
 
 import json
 
+from ... import execrun
 from ...prstate import ghapi
+from ...prstate.errors import PrStateError
 
 # gh's wording when the current branch has no associated PR. This is the
 # normal "no PR yet" state, NOT a gh/auth failure — so it resolves to None
-# rather than propagating as a GhError.
+# rather than propagating as an ExecError.
 _NO_PR_MARKER = "no pull requests found for branch"
 
 
@@ -40,25 +44,33 @@ def resolve_pr(pr: int | None) -> int | None:
 
     ``pr`` passed through untouched when explicit. Otherwise asks ``gh`` for the
     current branch's PR number; returns ``None`` when the branch genuinely has
-    no PR. Raises :class:`ghapi.GhError` when ``gh`` itself fails (missing gh,
+    no PR. Raises :class:`shipit.execrun.ExecError` when ``gh`` itself fails (missing gh,
     auth, transient API error) — never collapses that into ``None``.
     """
     if pr is not None:
         return pr
-    try:
-        out = ghapi._gh(["pr", "view", "--json", "number"])
-    except ghapi.GhError as exc:
+    result = ghapi._gh_probe(["pr", "view", "--json", "number"])
+    if result.rc != 0:
         # "no PR for this branch" is a normal state, not a failure: gh exits
-        # non-zero with this marker. Anything else is a real gh/auth failure.
-        if _NO_PR_MARKER in str(exc):
+        # non-zero with this marker. Anything else is a real gh/auth failure —
+        # surface the failed Exec as its transport error (pre-redacted by the
+        # ExecError constructor), never collapse it into None.
+        if _NO_PR_MARKER in result.stderr.lower():
             return None
-        raise
+        raise execrun.ExecError(
+            result.argv,
+            rc=result.rc,
+            stdout=result.stdout,
+            stderr=result.stderr,
+            duration_ms=result.duration_ms,
+        )
+    out = result.stdout
     if not out.strip():
         # Defensive: a non-erroring empty body also means no PR.
         return None
     try:
         data = json.loads(out)
     except json.JSONDecodeError as exc:
-        raise ghapi.GhError(f"unparseable `gh pr view` output: {exc}") from exc
+        raise PrStateError(f"unparseable `gh pr view` output: {exc}") from exc
     number = data.get("number")
     return int(number) if number is not None else None
