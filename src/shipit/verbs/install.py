@@ -32,13 +32,17 @@ from __future__ import annotations
 
 import difflib
 import json
+import logging
 import sys
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
 
 from .. import __version__, config, execrun, gh
+
+logger = logging.getLogger("shipit.install")
 
 # --------------------------------------------------------------------------
 # Constants
@@ -843,9 +847,11 @@ def run(
     :func:`shipit.verbs.lint.run` injects ``run_tool``).
     """
     activate = activate_hooks or _activate_hooks
+    started = time.monotonic()
     root = Path(path or ".").resolve()
     if not root.is_dir():
         print(f"install: {root} is not a directory", file=sys.stderr)
+        logger.error("install target is not a directory", extra={"root": str(root)})
         return 1
 
     units = load_units()
@@ -864,11 +870,31 @@ def run(
         seed_plan = config.plan_policy_seed(cfg_path)
     except config.ConfigError as exc:
         print(f"install: ignoring unreadable manifest: {exc}", file=sys.stderr)
+        # Degraded-but-continuing: the reconcile proceeds against an empty
+        # pristine map, so consumer edits will surface as OVERRIDEs.
+        logger.warning(
+            "ignoring unreadable manifest",
+            exc_info=True,
+            extra={"root": str(root), "manifest": str(cfg_path)},
+        )
 
     decisions = plan(units, consumer_hashes, pristine)
     # ADD/UPDATE/OVERRIDE all write onto the branch; only NOOP writes nothing.
     writes = [d for d in decisions if d.action in (ADD, UPDATE, OVERRIDE)]
     overrides = [d for d in decisions if d.action == OVERRIDE]
+    # The reconcile plan is mechanics: the decided counts, before any write.
+    logger.debug(
+        "reconcile plan decided",
+        extra={
+            "root": str(root),
+            "adds": sum(1 for d in decisions if d.action == ADD),
+            "updates": sum(1 for d in decisions if d.action == UPDATE),
+            "overrides": len(overrides),
+            "noops": sum(1 for d in decisions if d.action == NOOP),
+            "seeds": len(seed_plan),
+            "dry_run": dry_run,
+        },
+    )
 
     print(f"install: {root}{' (dry-run)' if dry_run else ''}")
     for d in decisions:
@@ -881,6 +907,9 @@ def run(
     # the policy is in place.
     if not writes and not seed_plan:
         print("  nothing to do — managed set is current.")
+        logger.debug(
+            "managed set is current — nothing to do", extra={"root": str(root)}
+        )
         return 0
 
     if dry_run:
@@ -906,6 +935,18 @@ def run(
         config.apply_policy_seed(cfg_path)
     new_managed = {d.unit.key: d.desired_hash for d in decisions}
     config.write_manifest(cfg_path, version=_shipit_version(), managed=new_managed)
+    # The reconcile milestone: the managed set (and manifest) is on disk. The
+    # writes above are the action whose only record was the per-unit print.
+    logger.info(
+        "managed set written",
+        extra={
+            "root": str(root),
+            "adds": sum(1 for d in writes if d.action == ADD),
+            "updates": sum(1 for d in writes if d.action == UPDATE),
+            "overrides": len(overrides),
+            "seeds": len(seed_plan),
+        },
+    )
 
     # Turn the checks on: with lefthook.yml on disk, activate the local hooks so
     # `pixi run lint` fires at commit time — the checks ship LIVE, not dormant.
@@ -940,10 +981,21 @@ def run(
             detail = _activation_output(activation)
         if hooks_activated:
             print("  activated git hooks (lefthook install) — the checks are live")
+            logger.info(
+                "git hooks activated",
+                extra={"root": str(root), "duration_ms": activation.duration_ms},
+            )
         else:
             print(
                 f"install: could not activate git hooks: {detail.strip()}",
                 file=sys.stderr,
+            )
+            # Degraded-but-continuing: the config shipped, only local activation
+            # was deferred — the PR body tells the merger to activate.
+            logger.warning(
+                "could not activate git hooks: %s",
+                detail.strip(),
+                extra={"root": str(root)},
             )
 
     changed_paths = sorted({d.unit.dest for d in writes} | {config.CONFIG_NAME})
@@ -962,6 +1014,15 @@ def run(
             gh.git_add(changed_paths, cwd=cwd)
             gh.git_commit(COMMIT_MESSAGE, changed_paths, cwd=cwd)
             print(f"  committed to {branch} (local-only --local)")
+            logger.info(
+                "install committed locally",
+                extra={
+                    "root": str(root),
+                    "branch": branch,
+                    "mode": "local",
+                    "duration_ms": int((time.monotonic() - started) * 1000),
+                },
+            )
             return 0
 
         if push:
@@ -976,6 +1037,15 @@ def run(
             gh.git_commit(COMMIT_MESSAGE, changed_paths, cwd=cwd)
             gh.git_push(branch, cwd=cwd)
             print(f"  pushed to {branch} (break-glass --push)")
+            logger.info(
+                "install pushed break-glass",
+                extra={
+                    "root": str(root),
+                    "branch": branch,
+                    "mode": "push",
+                    "duration_ms": int((time.monotonic() - started) * 1000),
+                },
+            )
             return 0
 
         # Default: stage onto an install branch, push it, open a DRAFT PR.
@@ -989,6 +1059,15 @@ def run(
         if existing:
             # The force-push already refreshed the open PR's diff.
             print(f"  updated draft PR: {existing}")
+            logger.info(
+                "install draft PR updated",
+                extra={
+                    "root": str(root),
+                    "branch": INSTALL_BRANCH,
+                    "url": existing,
+                    "duration_ms": int((time.monotonic() - started) * 1000),
+                },
+            )
             return 0
         url = gh.pr_create(
             head=INSTALL_BRANCH,
@@ -998,9 +1077,23 @@ def run(
             cwd=cwd,
         )
         print(f"  opened draft PR: {url}")
+        logger.info(
+            "install draft PR opened",
+            extra={
+                "root": str(root),
+                "branch": INSTALL_BRANCH,
+                "url": url,
+                "duration_ms": int((time.monotonic() - started) * 1000),
+            },
+        )
         return 0
     except execrun.ExecError as exc:
         # Match gh_setup: a boundary failure (no remote, auth, not a repo) is a
-        # clean CLI error + non-zero exit, not a raw traceback.
+        # clean CLI error + non-zero exit, not a raw traceback. The failure
+        # propagates (non-zero exit), so it is recorded at ERROR with the
+        # exception attached.
         print(f"install: git/gh step failed: {exc}", file=sys.stderr)
+        logger.error(
+            "install git/gh step failed", exc_info=True, extra={"root": str(root)}
+        )
         return 1

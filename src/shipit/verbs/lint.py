@@ -30,12 +30,16 @@ hard-fail ``127``.
 
 from __future__ import annotations
 
+import logging
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
 from .. import execrun, gh
+
+logger = logging.getLogger("shipit.lint")
 
 # --------------------------------------------------------------------------
 # The toolchain registry — the slim, valuable part of release-core's checks
@@ -253,9 +257,11 @@ def run(
     run_tool: Callable[[str, list[str], Path], execrun.ExecResult] | None = None,
 ) -> int:
     """Run the checks over the tree at ``path`` (default ``.``). Returns 0/1."""
+    started = time.monotonic()
     root = Path(path or ".").resolve()
     if not root.is_dir():
         print(f"lint: {root} is not a directory", file=sys.stderr)
+        logger.error("lint target is not a directory", extra={"root": str(root)})
         return 1
 
     discover = discover or _discover
@@ -269,6 +275,17 @@ def run(
     print(f"lint: {root} ({mode})")
     if not routed:
         print("  no recognized files — nothing to check.")
+        logger.info(
+            "lint complete — no recognized files",
+            extra={
+                "root": str(root),
+                "mode": mode,
+                "checks": 0,
+                "failed": 0,
+                "rc": 0,
+                "duration_ms": int((time.monotonic() - started) * 1000),
+            },
+        )
         return 0
 
     runs: list[ToolRun] = []
@@ -283,6 +300,7 @@ def run(
             except execrun.ExecError as exc:
                 # A binary missing from PATH (or any launch failure) is the
                 # HARD-fail signal: 127 + a clear note, never a silent skip.
+                # It propagates (the run's verdict fails), so ERROR + exception.
                 rc = 127
                 if exc.cause == execrun.CAUSE_MISSING_BINARY:
                     out = (
@@ -291,8 +309,24 @@ def run(
                     )
                 else:
                     out = f"{tool.binary}: could not run: {exc}"
+                logger.error(
+                    "lint tool could not run",
+                    exc_info=True,
+                    extra={"lang": lang.name, "tool": tool.binary, "rc": rc},
+                )
             else:
                 rc, out = result.rc, result.stdout + result.stderr
+                # Per-tool outcomes are mechanics; the run summary is the milestone.
+                logger.debug(
+                    "lint tool finished",
+                    extra={
+                        "lang": lang.name,
+                        "tool": tool.binary,
+                        "rc": rc,
+                        "files": len(paths),
+                        "duration_ms": result.duration_ms,
+                    },
+                )
             runs.append(ToolRun(lang.name, tool.binary, label, rc, out))
             mark = "ok  " if rc == 0 else "FAIL"
             count = f"{len(paths)} file{'s' if len(paths) != 1 else ''}"
@@ -301,9 +335,23 @@ def run(
                 print(_indent(out.strip()))
 
     rc = verdict(runs)
+    failed = sorted({f"{r.lang}:{r.binary}" for r in runs if not r.ok})
     if rc == 0:
         print(f"LINT: OK ({len(runs)} checks)")
     else:
-        failed = sorted({f"{r.lang}:{r.binary}" for r in runs if not r.ok})
         print(f"LINT: FAILED ({', '.join(failed)})")
+    # The orchestration summary — one milestone per run, pass or fail: the
+    # verdict propagates through the exit code, not an exception.
+    summary = {
+        "root": str(root),
+        "mode": mode,
+        "checks": len(runs),
+        "failed": len(failed),
+        "rc": rc,
+        "duration_ms": int((time.monotonic() - started) * 1000),
+    }
+    if failed:
+        # Present only when meaningful — the absent-not-null record contract.
+        summary["failed_checks"] = ", ".join(failed)
+    logger.info("lint complete", extra=summary)
     return rc
