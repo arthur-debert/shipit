@@ -120,12 +120,13 @@ behaves and how we ride it.
 
 4. The CLI surface that matters
 
-    Only `pixi list` and `pixi info` have machine-readable (`--json`) output;
-    `pixi run` and `pixi install` do not. Verbosity flags (`-v`..`-vvvv`, `-q`)
-    control human stderr text, not structured output. All three JSON reads are
-    wrapped as structured adapter reads in `shipit.pixienv.read`
-    (`shell_hook` / `list_packages` / `info`, PROC02-WS02), and the execution
-    side (`install`, run-wrapping) lives beside them in `shipit.pixienv.run`.
+    `pixi shell-hook`, `pixi list`, and `pixi info` all have machine-readable
+    (`--json`) output; `pixi run` and `pixi install` do not. Verbosity flags
+    (`-v`..`-vvvv`, `-q`) control human stderr text, not structured output. All
+    three JSON reads are wrapped as structured adapter reads in
+    `shipit.pixienv.read` (`shell_hook` / `list_packages` / `info`, PROC02-WS02),
+    and the execution side (`install`, run-wrapping) lives beside them in
+    `shipit.pixienv.run`.
 
     Commands shipit relies on or could use:
 
@@ -192,13 +193,17 @@ behaves and how we ride it.
     Provisioning — `src/shipit/tree/create.py`:
         `_provision()` runs, each gated on a manifest existing: `shipit install .
         --local` (if `.shipit.toml`), `pixi install` (if `pixi.toml`, default
-        env), `npm ci` (if `package.json`). All funnel through one seam,
-        `run_provision()`, an Exec through the one runner (`shipit.execrun.run`,
-        ADR-0028) with the generous explicit `PROVISION_TIMEOUT` (cold
-        `pixi install`/`npm ci` legitimately outlive the 5-minute default) and a
-        durable record per step — timing on success, both stream tails on
-        failure. A failed step raises the runner's single transport error,
-        `ExecError`.
+        env), `npm ci` (if `package.json`). The `shipit install` and `npm ci`
+        steps funnel through the `run_provision()` seam, an Exec through the one
+        runner (`shipit.execrun.run`, ADR-0028) with the generous explicit
+        `PROVISION_TIMEOUT` (cold `npm ci` legitimately outlives the 5-minute
+        default). The pixi step instead runs through the pixi adapter,
+        `shipit.pixienv.install()`, which carries pixi's own long-runner bound
+        (`INSTALL_TIMEOUT`, 30 min — a cold solve+download outlives the default)
+        — the pixi argv and its timeout live in the adapter, not the Tree code.
+        Both paths share one narration (`_narrate_step`) and a durable record per
+        step — timing on success, both stream tails on failure. A failed step
+        raises the runner's single transport error, `ExecError`.
 
     Hooks — `.claude/settings.json`:
         Every hook is `pixi run shipit hook <name>` (plus two `SessionStart`

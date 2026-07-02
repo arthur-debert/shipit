@@ -71,7 +71,7 @@ def shell_hook(
     manifest_path: Path,
     *,
     environment: str | None = None,
-    runner=execrun.run,
+    runner=None,
 ) -> Activation:
     """Run ``pixi shell-hook --json`` for ``manifest_path`` and parse the :class:`Activation`.
 
@@ -80,6 +80,8 @@ def shell_hook(
     ``.stdout`` string. shipit consumes pixi's activation output here rather than computing
     a rival (ADR-0022).
     """
+    if runner is None:
+        runner = execrun.run
     cmd = ["pixi", "shell-hook", "--json", "--manifest-path", str(manifest_path)]
     if environment is not None:
         cmd += ["--environment", environment]
@@ -91,7 +93,7 @@ def list_packages(
     manifest_path: Path,
     *,
     environment: str | None = None,
-    runner=execrun.run,
+    runner=None,
 ) -> tuple[InstalledPackage, ...]:
     """Run ``pixi list --json`` for ``manifest_path`` and parse the installed packages.
 
@@ -101,6 +103,8 @@ def list_packages(
     injectable Exec boundary. The Exec keeps the runner's 5-minute default timeout —
     a read verb against a provisioned env answers in seconds.
     """
+    if runner is None:
+        runner = execrun.run
     cmd = ["pixi", "list", "--json", "--manifest-path", str(manifest_path)]
     if environment is not None:
         cmd += ["--environment", environment]
@@ -108,7 +112,7 @@ def list_packages(
     return parse_installed_packages(result.stdout)
 
 
-def info(manifest_path: Path, *, runner=execrun.run) -> Info:
+def info(manifest_path: Path, *, runner=None) -> Info:
     """Run ``pixi info --json`` for ``manifest_path`` and parse the :class:`Info`.
 
     The machine/workspace snapshot straight from pixi's own JSON (ADR-0022: borrow,
@@ -116,5 +120,7 @@ def info(manifest_path: Path, *, runner=execrun.run) -> Info:
     environment's surface. ``runner`` is the injectable Exec boundary; the runner's
     default timeout applies (a pure read, no solve).
     """
+    if runner is None:
+        runner = execrun.run
     result = runner(["pixi", "info", "--json", "--manifest-path", str(manifest_path)])
     return parse_info(result.stdout)
