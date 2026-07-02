@@ -12,9 +12,11 @@ are all preserved; only the producer changed.
 
 What this module owns (and ONLY this):
 
-  * map the funnel agent (``codex`` / ``agy``) to its spawn ``BackendAdapter``
-    (``codex`` / ``antigravity``) — ONE definition of "launch codex/agy as a
-    reviewer", shared with the spawn surface (the WS04a read-only posture);
+  * map the funnel :class:`~shipit.agent.backend.Backend` identity (``CODEX`` /
+    ``ANTIGRAVITY``, ADR-0025) to its spawn ``BackendAdapter`` — keyed by the
+    registry value objects themselves, never a retyped agent-name string — ONE
+    definition of "launch codex/agy as a reviewer", shared with the spawn
+    surface (the WS04a read-only posture);
   * provision the shared read-only Tree on the PR head (reusing
     :func:`shipit.tree.readonly.create_readonly` — a second reviewer on the same
     ``(repo, branch)`` reuses the clone);
