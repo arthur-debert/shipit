@@ -202,9 +202,10 @@ def logs_cmd(
     recomputed platform location. --path prints just that absolute path so an
     agent can `cat`/`grep` it. -f/--follow streams new records; with no flag it
     prints the path plus the last N records, rendered legibly (ts LEVEL logger:
-    msg, domain keys trailing). --raw passes the stored JSONL through unmodified
-    for jq; a malformed line is skipped with a note. A log not written yet is
-    reported, not crashed.
+    msg, domain keys trailing); a malformed line is skipped with a stderr note.
+    --raw passes the stored lines through unmodified for jq — no parsing, no
+    skipping, malformed lines included. A log not written yet is reported, not
+    crashed.
     """
     rc = logs.run(repo, path_only=path_only, follow=follow, raw=raw, tail=lines)
     raise SystemExit(rc)

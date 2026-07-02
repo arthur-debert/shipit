@@ -441,6 +441,9 @@ def test_writer_to_reader_round_trip(tmp_path, capsys):
     handler = logsetup.build_file_handler(("o", "r"), base_dir=tmp_path)
     logger = logging.getLogger("shipit.roundtrip")
     logger.setLevel(logging.DEBUG)
+    # Process-lifetime logger: keep the record off any handlers other tests may
+    # have hung on the parent `shipit` logger — this test owns its one handler.
+    logger.propagate = False
     logger.addHandler(handler)
     structlog.contextvars.bind_contextvars(pr=231)
     try:

@@ -7,16 +7,18 @@ present-when-bound); this verb finds it and shows it. It NEVER recomputes the
 location — it consumes :func:`shipit.logsetup.log_file_path` (``resolve_log_dir``
 + the handler's ``LOG_FILENAME``), the single source of truth, so reader and
 writer can never disagree about where the log lives. No platform ``if`` branch,
-no bespoke log-dir env var (the path library owns the location, per the epic
-``docs/prd/obs01-logging.md``).
+no bespoke log-dir env var (the path library owns the location, per the glassbox
+PRD ``docs/prd/glassbox.md``).
 
 The verb reads JSONL ONLY — a hard cutover, no dual-format sniffing (ADR-0029;
 pre-cutover freeform files age out via rotation). Two output modes: the default
 renders each record legibly for humans (``ts LEVEL logger: msg [key=value …]``);
-``--raw`` passes the JSONL lines through unmodified — and prints nothing else —
-so stdout pipes straight into jq. A line that is not a JSON object is skipped
-with a stderr note, never a crash: the log is diagnosis data, and one corrupt
-line (a torn write, a rotation seam) must not take down the reader.
+``--raw`` passes the stored lines through unmodified — and prints nothing else —
+so stdout pipes straight into jq. In the rendered view, a line that is not a
+JSON object is skipped with a stderr note, never a crash: the log is diagnosis
+data, and one corrupt line (a torn write, a rotation seam) must not take down
+the reader. ``--raw`` does not parse at all — malformed lines pass through
+untouched, because judging them is the downstream tool's job.
 
 The repo whose log we read defaults to the current checkout, resolved through the
 :mod:`shipit.gh` boundary (the same source the sink uses); an explicit
