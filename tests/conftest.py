@@ -9,6 +9,7 @@ re-pointed to `shipit.prstate.*`.
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -56,10 +57,24 @@ def _clean_domain_key_context():
     CLI entry, the review detach, the spawn verb), so without this a test that
     drives one of those paths would leak `pr`/`repo`/`tree` onto every record a
     LATER test emits — and the absent-when-unbound contract is only assertable
-    from a clean context."""
+    from a clean context.
+
+    Ambient `SHIPIT_LOG_CTX_*` env vars are scrubbed for the test's duration
+    too (and restored afterwards): `logsetup.configure_logging()` rebinds from
+    `os.environ` when no explicit `env` is passed, so a developer/CI shell that
+    carries the seam's vars (e.g. a test run spawned BY a shipit process) would
+    otherwise make the suite non-deterministic."""
+    from shipit import logcontext
+
+    saved = {
+        name: os.environ.pop(name)
+        for name in list(os.environ)
+        if name.startswith(logcontext.ENV_PREFIX)
+    }
     structlog.contextvars.clear_contextvars()
     yield
     structlog.contextvars.clear_contextvars()
+    os.environ.update(saved)
 
 
 @pytest.fixture(autouse=True)

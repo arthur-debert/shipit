@@ -25,7 +25,7 @@ site, so a typo can never silently mint a new correlation vocabulary.
 from __future__ import annotations
 
 import os
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 import structlog
@@ -45,7 +45,7 @@ ENV_PREFIX = "SHIPIT_LOG_CTX_"
 _INT_KEYS = frozenset({"pr", "run"})
 
 
-def _check_names(names: Any) -> None:
+def _check_names(names: Iterable[str]) -> None:
     """Reject any name outside :data:`DOMAIN_KEYS` — fail loud at the bind site."""
     unknown = sorted(set(names) - set(DOMAIN_KEYS))
     if unknown:
@@ -76,7 +76,8 @@ def unbind(*names: str) -> None:
     unknown key name raises :class:`ValueError`.
     """
     _check_names(names)
-    structlog.contextvars.unbind_contextvars(*names)
+    if names:
+        structlog.contextvars.unbind_contextvars(*names)
 
 
 def bound() -> dict[str, Any]:
@@ -94,7 +95,12 @@ def env_export(env: Mapping[str, str] | None = None, **extra: Any) -> dict[str, 
 
     Returns a COPY of ``env`` (default: ``os.environ``) with one
     ``SHIPIT_LOG_CTX_<KEY>`` entry per bound key; the input mapping is never
-    mutated. ``extra`` adds seam-known keys to the CHILD's context without
+    mutated. Any ``SHIPIT_LOG_CTX_*`` entry the input environment already
+    carried (e.g. inherited from THIS process's own parent) is scrubbed first,
+    so the export reflects exactly the keys bound HERE — a key that is unbound
+    (or explicitly ``None``) is ABSENT from the child environment, never a
+    stale inherited value (the absent-when-unbound contract crosses the seam
+    intact). ``extra`` adds seam-known keys to the CHILD's context without
     binding them in this parent (e.g. the detach seam threads ``run=run_id``,
     which belongs to the child's story); an ``extra`` overrides a bound key of
     the same name, and ``None`` extras are dropped like :func:`bind` drops them.
@@ -102,6 +108,8 @@ def env_export(env: Mapping[str, str] | None = None, **extra: Any) -> dict[str, 
     """
     _check_names(extra)
     merged = dict(os.environ if env is None else env)
+    for name in DOMAIN_KEYS:
+        merged.pop(ENV_PREFIX + name.upper(), None)
     for name, value in {**bound(), **extra}.items():
         if value is not None:
             merged[ENV_PREFIX + name.upper()] = str(value)
@@ -119,6 +127,7 @@ def bind_from_env(env: Mapping[str, str] | None = None) -> None:
     value degrades to its raw string rather than crashing logging setup.
     """
     env = os.environ if env is None else env
+    values: dict[str, Any] = {}
     for name in DOMAIN_KEYS:
         raw = env.get(ENV_PREFIX + name.upper())
         if not raw:
@@ -129,4 +138,6 @@ def bind_from_env(env: Mapping[str, str] | None = None) -> None:
                 value = int(raw)
             except ValueError:
                 pass
-        structlog.contextvars.bind_contextvars(**{name: value})
+        values[name] = value
+    if values:
+        structlog.contextvars.bind_contextvars(**values)

@@ -170,6 +170,34 @@ def test_env_export_extra_reaches_the_child_without_binding_the_parent():
     assert logcontext.bound() == {"pr": 5}  # the extra never bound here
 
 
+def test_env_export_scrubs_inherited_ctx_vars_for_unbound_keys():
+    """A stale inherited SHIPIT_LOG_CTX_* entry never leaks into the child.
+
+    The regression the reviewers flagged: this process may itself have been
+    spawned with an env_export environment (so ``env`` carries e.g.
+    ``SHIPIT_LOG_CTX_RUN``), but the key is unbound HERE — or explicitly
+    ``None`` at the seam (the detach seam passing ``run=None`` when the
+    breadcrumb is absent). The export must reflect only THIS process's bound
+    keys: absent-when-unbound, not the ancestor's stale correlation."""
+    inherited = {"SHIPIT_LOG_CTX_RUN": "111", "SHIPIT_LOG_CTX_PR": "9", "PATH": "/x"}
+
+    # Unbound key: the inherited entry is scrubbed, not passed through.
+    child_env = logcontext.env_export(inherited)
+    assert "SHIPIT_LOG_CTX_RUN" not in child_env
+    assert "SHIPIT_LOG_CTX_PR" not in child_env
+    assert child_env["PATH"] == "/x"
+
+    # Explicit run=None at the seam behaves the same — None drops, and the
+    # inherited value cannot resurrect it.
+    child_env = logcontext.env_export(inherited, run=None)
+    assert "SHIPIT_LOG_CTX_RUN" not in child_env
+
+    # A key bound HERE still wins over the inherited entry.
+    logcontext.bind(pr=231)
+    child_env = logcontext.env_export(inherited)
+    assert child_env["SHIPIT_LOG_CTX_PR"] == "231"
+
+
 def test_bind_from_env_round_trips_bound_keys_with_types():
     """The full seam: bind → export → (new process) rebind reproduces the SAME
     context, ints included — the acceptance-criteria round-trip."""
