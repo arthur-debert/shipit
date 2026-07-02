@@ -30,7 +30,7 @@ def _ctx() -> ReviewView:
     return review_view(
         number=5,
         repo="owner/repo",
-        head_sha="deadbeef",
+        head_sha="deadbeef" * 5,  # a full 40-hex sha (COR02)
         base_ref="main",
         base_sha="cafe",
         diff=_DIFF,

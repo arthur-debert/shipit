@@ -1,7 +1,7 @@
 {
   "meta": {
     "number": 105,
-    "headRefOid": "eee555",
+    "headRefOid": "eee5550000000000000000000000000000000000",
     "isDraft": true,
     "mergeable": "MERGEABLE",
     "mergeStateStatus": "CLEAN",
@@ -10,16 +10,20 @@
   "reviews": [
     {
       "id": 5301,
-      "user": { "login": "Copilot" },
+      "user": {
+        "login": "Copilot"
+      },
       "state": "COMMENTED",
-      "commit_id": "eee555",
+      "commit_id": "eee5550000000000000000000000000000000000",
       "body": "One note, since addressed."
     },
     {
       "id": 5302,
-      "user": { "login": "coderabbitai[bot]" },
+      "user": {
+        "login": "coderabbitai[bot]"
+      },
       "state": "APPROVED",
-      "commit_id": "eee555",
+      "commit_id": "eee5550000000000000000000000000000000000",
       "body": "Approved."
     }
   ],
@@ -35,7 +39,9 @@
             "line": 12,
             "originalLine": 12,
             "body": "Quote this expansion.",
-            "author": { "login": "Copilot" }
+            "author": {
+              "login": "Copilot"
+            }
           }
         ]
       }

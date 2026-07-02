@@ -1,7 +1,7 @@
 {
   "meta": {
     "number": 105,
-    "headRefOid": "eee555",
+    "headRefOid": "eee5550000000000000000000000000000000000",
     "isDraft": true,
     "mergeable": "MERGEABLE",
     "mergeStateStatus": "BLOCKED",
@@ -10,9 +10,11 @@
   "reviews": [
     {
       "id": 5301,
-      "user": { "login": "Copilot" },
+      "user": {
+        "login": "Copilot"
+      },
       "state": "COMMENTED",
-      "commit_id": "old111",
+      "commit_id": "01d1110000000000000000000000000000000000",
       "body": "Reviewed an earlier push; a fixup has since moved the head and reset the request."
     }
   ],
