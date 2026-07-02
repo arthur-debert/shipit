@@ -82,7 +82,8 @@ def test_post_as_app_never_logs_the_token(monkeypatch, caplog):
     assert captured["token"] == secret  # the seam still injects the real token
     full = "\n".join(r.getMessage() for r in caplog.records)
     assert secret not in full
-    assert "posting review to owner/repo#5" in full
+    # LOG02-WS05 (#285): one PR rendering — pr#N — with the repo alongside.
+    assert "posting to pr#5" in full
 
 
 def test_parse_failure_full_raw_at_debug_snippet_at_warning(caplog):

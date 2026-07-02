@@ -169,6 +169,18 @@ def pr_ready(pr: int, *, undo: bool = False) -> None:
     if undo:
         args.append("--undo")
     _gh(args)
+    # The draft-flag flip is the ONE human hand-off signal in the whole cycle
+    # (LOG02 convergence): give it a durable INFO milestone at the boundary that
+    # performed it — before this, its only record was the Exec runner's DEBUG
+    # line, invisible to an INFO-level read of the story.
+    logger.info(
+        "pr#%s draft flag flipped %s on %s/%s",
+        pr,
+        "ready→draft" if undo else "draft→ready",
+        owner,
+        name,
+        extra={"pr": pr, "repo": f"{owner}/{name}"},
+    )
 
 
 def pr_review_reply(pr: int, comment_id: int, body: str) -> None:

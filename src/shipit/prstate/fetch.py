@@ -330,7 +330,7 @@ def gather_reviews(pr: int) -> ReadinessView:
     # lifecycle milestone — record it at DEBUG (the full `gather` is the info one).
     duration_ms = int((time.monotonic() - start) * 1000)
     logger.debug(
-        "gather_reviews: pr#%s light snapshot fetched in %dms (%d review(s), "
+        "pr#%s light review snapshot fetched in %dms (%d review(s), "
         "%d pending request(s))",
         pr,
         duration_ms,
@@ -394,8 +394,7 @@ def gather(pr: int) -> ReadinessView:
     # lifecycle record — at info, with the pr key bound above.
     duration_ms = int((time.monotonic() - start) * 1000)
     logger.info(
-        "gather: pr#%s snapshot fetched in %dms (%d review(s), %d thread(s), "
-        "%d check(s))",
+        "pr#%s snapshot gathered in %dms (%d review(s), %d thread(s), %d check(s))",
         pr,
         duration_ms,
         len(ctx.reviews),

@@ -15,6 +15,7 @@ moments earlier) is what makes the flip safe against a state that moved.
 
 from __future__ import annotations
 
+import logging
 import sys
 
 import click
@@ -26,6 +27,11 @@ from ...prstate.fetch import gather
 from ...prstate.reviewers import required_reviewers
 from ...prstate.state import TaskState, TaskStatus, evaluate
 from ._resolve import resolve_pr
+
+#: The `pr` verbs' logger (LOG02 spray, ADR-0029): the flip and its undo are
+#: lifecycle milestones, so they log at INFO alongside the user-facing print —
+#: before this, the print was the ONLY record of the one human hand-off signal.
+logger = logging.getLogger("shipit.pr")
 
 
 class NotReady(RuntimeError):
@@ -89,6 +95,7 @@ def run(pr: int | None = None, *, undo: bool = False) -> int:
     gh/auth failure. A branch with no PR is a clean non-zero error here (unlike
     the read-only `pr status`, a mutating verb has nothing to flip).
     """
+    resolved: int | None = None
     try:
         resolved = resolve_pr(pr)
         if resolved is None:
@@ -97,14 +104,42 @@ def run(pr: int | None = None, *, undo: bool = False) -> int:
         if undo:
             # Always allowed: revert ready→draft. No readiness hold.
             ghapi.pr_ready(resolved, undo=True)
+            logger.info(
+                "pr#%s reverted ready→draft (undo)",
+                resolved,
+                extra={"pr": resolved},
+            )
             print(f"PR #{resolved}: reverted ready→draft")
             return 0
         status = guarded_flip(resolved)
     except NotReady as exc:
+        # A refused flip is a degraded-but-continuing outcome: the verb exits
+        # cleanly non-zero and nothing mutated — loud in the record, not fatal.
+        logger.warning(
+            "pr#%s flip refused — not Ready (state=%s)",
+            exc.status.pr,
+            exc.status.state.value,
+            extra={"pr": exc.status.pr},
+        )
         print(f"refusing to flip: {exc}", file=sys.stderr)
         return 1
     except (execrun.ExecError, PrStateError) as exc:
+        # Bind `pr` when resolution got far enough to know it (the mutating call
+        # is what failed); when resolution ITSELF failed, `resolved` is None and
+        # the key stays absent — the record contract is present-when-bound, never
+        # null.
+        logger.error(
+            "pr ready failed",
+            exc_info=True,
+            extra={"pr": resolved} if resolved is not None else None,
+        )
         print(f"error: {exc}", file=sys.stderr)
         return 1
+    logger.info(
+        "pr#%s flipped draft→ready — %s",
+        status.pr,
+        status.next_action,
+        extra={"pr": status.pr},
+    )
     print(f"PR #{status.pr}: flipped draft→ready — {status.next_action}")
     return 0
