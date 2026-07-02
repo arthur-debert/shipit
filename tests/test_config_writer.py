@@ -92,11 +92,49 @@ def test_is_onboarded_false_when_file_missing(tmp_path):
 # --------------------------------------------------------------------------
 
 
+def test_seeded_secrets_derivation_is_golden():
+    """#313: the App-secret seed names and the ``[secrets]`` scaffold DERIVE from
+    the Backend registry (``funnel_backends()``) — no hand-written key literal in
+    config. This pins the rendered output for the CURRENT registry byte-identical
+    to the former literals (the scaffold seeds real Doppler-backed projects), so
+    the derivation is provably a refactor."""
+    assert config.seeded_app_secrets() == (
+        "CODEX_REVIEW_APP_PRIVATE_KEY",
+        "CODEX_REVIEW_APP_ID",
+        "AGY_REVIEW_APP_PRIVATE_KEY",
+        "AGY_REVIEW_APP_ID",
+    )
+    assert config.secrets_scaffold() == (
+        "# [secrets] — repo Actions secrets. Each table key is the GitHub secret NAME; the\n"
+        '# value names exactly one source ({ doppler = "KEY" } / { env = "VAR" } /\n'
+        "# { prompt = true }). Seeded with shipit's local-reviewer (codex/agy) GitHub App\n"
+        "# credentials, each sourced from Doppler github/prd. `shipit gh-setup` only pushes\n"
+        "# a secret when its source resolves, so these are safe before the App is installed.\n"
+        "[secrets]\n"
+        'CODEX_REVIEW_APP_PRIVATE_KEY = { doppler = "CODEX_REVIEW_APP_PRIVATE_KEY" }\n'
+        'CODEX_REVIEW_APP_ID          = { doppler = "CODEX_REVIEW_APP_ID" }\n'
+        'AGY_REVIEW_APP_PRIVATE_KEY   = { doppler = "AGY_REVIEW_APP_PRIVATE_KEY" }\n'
+        'AGY_REVIEW_APP_ID            = { doppler = "AGY_REVIEW_APP_ID" }\n'
+    )
+
+
+def test_secrets_scaffold_with_no_funnel_backends_is_header_only(monkeypatch):
+    """An empty Backend registry (no funnel backends) renders a header-only
+    ``[secrets]`` table instead of raising (``max()`` over the empty name set)."""
+    from shipit.agent import backend
+
+    monkeypatch.setattr(backend, "REGISTRY", ())
+    assert config.seeded_app_secrets() == ()
+    scaffold = config.secrets_scaffold()
+    assert scaffold.endswith("[secrets]\n")
+    assert tomllib.loads(scaffold) == {"secrets": {}}
+
+
 def test_plan_policy_seed_fresh_lists_secrets_and_reviewers(tmp_path):
     p = tmp_path / ".shipit.toml"  # absent
     seeded = config.plan_policy_seed(p)
     assert "[reviewers]" in seeded
-    for name in config.SEEDED_APP_SECRETS:
+    for name in config.seeded_app_secrets():
         assert f"[secrets].{name}" in seeded
     # Pure: planning twice gives the same answer and writes nothing.
     assert config.plan_policy_seed(p) == seeded
@@ -109,7 +147,9 @@ def test_apply_policy_seed_is_idempotent(tmp_path):
     assert first  # something was seeded
     # The seeded file is valid and carries both tables.
     cfg = config.load(p)
-    assert {s.name for s in config.load_secrets(cfg)} == set(config.SEEDED_APP_SECRETS)
+    assert {s.name for s in config.load_secrets(cfg)} == set(
+        config.seeded_app_secrets()
+    )
     assert "reviewers" in cfg
 
     again = config.apply_policy_seed(p)
@@ -174,7 +214,7 @@ def test_apply_policy_seed_merges_under_header_with_comment(tmp_path):
     config.apply_policy_seed(p)
     secrets = {s.name: s for s in config.load_secrets(config.load(p))}
     assert secrets["MY"].kind == "env"  # preserved
-    assert set(config.SEEDED_APP_SECRETS) <= set(secrets)  # merged in, parses
+    assert set(config.seeded_app_secrets()) <= set(secrets)  # merged in, parses
 
 
 @pytest.mark.parametrize(

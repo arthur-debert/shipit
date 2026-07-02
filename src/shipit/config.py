@@ -236,32 +236,59 @@ def write_manifest(path: str | Path, *, version: str, managed: dict[str, str]) -
 # config is a no-op. This keeps the seam inside the existing model — no new drift
 # engine (issue #25 / INS01).
 
-# The local-reviewer (codex/agy) GitHub App credential mappings install seeds into
-# a consumer's ``[secrets]``. Each GitHub secret NAME is sourced from the Doppler
+# The local-reviewer GitHub App credential mappings install seeds into a
+# consumer's ``[secrets]``. Each GitHub secret NAME is sourced from the Doppler
 # github/prd key of the SAME name; the credentials let a CI-side review post as the
 # App bot with the same key the local path sources directly (CI parity). The
 # generic gh-setup push only provisions a secret when its source RESOLVES, so
 # seeding the mapping is safe even before a consumer's GitHub App is installed.
-SEEDED_APP_SECRETS = (
-    "CODEX_REVIEW_APP_PRIVATE_KEY",
-    "CODEX_REVIEW_APP_ID",
-    "AGY_REVIEW_APP_PRIVATE_KEY",
-    "AGY_REVIEW_APP_ID",
-)
+#
+# The key NAMES are never spelled here: they DERIVE from the Backend registry
+# (:func:`shipit.agent.backend.funnel_backends` → ``doppler_pem_key`` /
+# ``doppler_app_id_key``), the ONE source of every registry-derived name
+# (ADR-0025 / COR02). Wiring a new funnel backend is its registry entry alone —
+# its App-secret mappings appear in the seeds and scaffold with zero config edits.
 
-# Written verbatim when a consumer's ``.shipit.toml`` has no ``[secrets]`` table.
-SECRETS_SCAFFOLD = """\
+
+def seeded_app_secrets() -> tuple[str, ...]:
+    """The GitHub secret NAMES ``shipit install`` seeds into ``[secrets]`` — one
+    (PEM, App-id) pair per funnel backend, read off the Backend registry in
+    registry order. Imported lazily so ``config`` stays free of an ``agent``
+    import at module load (mirror of :func:`reviewers_scaffold`)."""
+    from .agent import backend
+
+    return tuple(
+        key
+        for b in backend.funnel_backends()
+        for key in (b.doppler_pem_key, b.doppler_app_id_key)
+    )
+
+
+# The explanatory comment heading the seeded ``[secrets]`` table. The TABLE ITSELF
+# is rendered from the Backend registry by :func:`secrets_scaffold`.
+_SECRETS_SCAFFOLD_HEADER = """\
 # [secrets] — repo Actions secrets. Each table key is the GitHub secret NAME; the
 # value names exactly one source ({ doppler = "KEY" } / { env = "VAR" } /
 # { prompt = true }). Seeded with shipit's local-reviewer (codex/agy) GitHub App
 # credentials, each sourced from Doppler github/prd. `shipit gh-setup` only pushes
 # a secret when its source resolves, so these are safe before the App is installed.
-[secrets]
-CODEX_REVIEW_APP_PRIVATE_KEY = { doppler = "CODEX_REVIEW_APP_PRIVATE_KEY" }
-CODEX_REVIEW_APP_ID          = { doppler = "CODEX_REVIEW_APP_ID" }
-AGY_REVIEW_APP_PRIVATE_KEY   = { doppler = "AGY_REVIEW_APP_PRIVATE_KEY" }
-AGY_REVIEW_APP_ID            = { doppler = "AGY_REVIEW_APP_ID" }
-"""
+[secrets]"""
+
+
+def secrets_scaffold() -> str:
+    """The ``[secrets]`` block ``shipit install`` seeds when a consumer has none.
+
+    The comment header plus one column-aligned entry per seeded App-secret name
+    (:func:`seeded_app_secrets` — i.e. the Backend registry), each mapped to its
+    like-named Doppler key. Rendered, never hand-written, so the scaffold and the
+    registry can never disagree; the golden test pins the current registry's
+    rendering byte-identical to the retired literal.
+    """
+    names = seeded_app_secrets()
+    width = max((len(n) for n in names), default=0)
+    lines = [f'{n:<{width}} = {{ doppler = "{n}" }}' for n in names]
+    return "\n".join([_SECRETS_SCAFFOLD_HEADER, *lines]) + "\n"
+
 
 # The explanatory comment prepended to the seeded ``[reviewers]`` table. The TABLE
 # ITSELF is rendered from the SINGLE required-reviewer default
@@ -340,11 +367,11 @@ def _plan_seed(text: str, path: str | Path) -> tuple[list[str], str]:
     secrets = _require_table(cfg, "secrets", path)
     _require_table(cfg, "reviewers", path)  # validate shape; preserved if present
 
-    missing = [n for n in SEEDED_APP_SECRETS if n not in (secrets or {})]
+    missing = [n for n in seeded_app_secrets() if n not in (secrets or {})]
     seeded: list[str] = []
     if missing:
         if secrets is None:
-            text = _append_lines(text, SECRETS_SCAFFOLD.splitlines())
+            text = _append_lines(text, secrets_scaffold().splitlines())
         else:
             text = _insert_after_header(
                 text, "secrets", [_seeded_secret_line(n) for n in missing], path
@@ -375,7 +402,7 @@ def apply_policy_seed(path: str | Path) -> list[str]:
 
     Merge-preserving: a present ``[secrets]`` table keeps all its entries and only
     the missing App mappings are inserted under its header; an absent table gets
-    the full :data:`SECRETS_SCAFFOLD`. ``[reviewers]`` is written only when its
+    the full :func:`secrets_scaffold`. ``[reviewers]`` is written only when its
     table is entirely absent — a consumer's own ``[reviewers]`` is never touched.
     Writes the file only when something is seeded, so an already-seeded config is
     left byte-identical (a clean no-op). Raises identically to
