@@ -82,7 +82,7 @@ def test_resolve_pr_normalizes_workdir_to_toplevel(monkeypatch):
     )
     monkeypatch.setattr(diff.git, "commit_present", _present_recording(seen := []))
 
-    seen_diff_specs: list[tuple] = []
+    seen_diff_specs: list[tuple[Sha, Sha]] = []
 
     def fake_diff_range(base, head, *, cwd):
         seen.append(cwd)
