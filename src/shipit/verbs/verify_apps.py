@@ -56,7 +56,15 @@ def known_agents() -> list[str]:
     funnel App reviewers (``codex`` / ``agy``); a reviewer with no App
     (``copilot``) has no installation token to probe and is not a local-agent App.
     """
-    return sorted(b.funnel_agent or "" for b in _agent_backend.funnel_backends())
+    # ``funnel_backends()`` already guarantees a funnel identity; the truthy filter
+    # narrows ``funnel_agent`` to ``str`` and refuses to fabricate a blank alias
+    # (matching this module's raise-don't-fabricate stance) rather than leaking a
+    # ``""`` choice into CLI help that would then fail at ``by_funnel_agent("")``.
+    return sorted(
+        b.funnel_agent
+        for b in _agent_backend.funnel_backends()
+        if b.funnel_agent
+    )
 
 
 @dataclass(frozen=True)
