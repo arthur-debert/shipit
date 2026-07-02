@@ -15,7 +15,7 @@ import pytest
 
 from shipit import config, gh
 from shipit.tree import create as create_mod
-from shipit.tree import layout
+from shipit.tree import layout, provision
 from shipit.tree.create import create, create_from_source
 from shipit.tree.layout import TreeSpec
 from shipit.verbs import install as install_mod
@@ -258,10 +258,29 @@ def test_create_provisions_local_only_on_planned_branch_no_origin_side_effects(
     # Nothing left uncommitted by provisioning.
     assert _git(["status", "--porcelain"], cwd=dest) == ""
 
+    # #232: the install commit's identity was recorded in .git/shipit-provision.json
+    # so the ephemeral gc floor (and the WorktreeRemove fast path) can exclude
+    # exactly it from the unpushed read.
+    install_sha = _git(["rev-parse", "HEAD"], cwd=dest)
+    assert provision.read_provision_shas(dest) == frozenset({install_sha})
+
     # The 3 isolation invariants still hold (unchanged by this WS).
     assert (dest / ".git").is_dir()
     assert not (dest / ".git" / "objects" / "info" / "alternates").exists()
     assert ".claude" not in dest.parts
+
+
+def test_create_writes_no_provision_record_when_install_is_a_noop(
+    tmp_path: Path, remote: Path, reference: Path, monkeypatch
+):
+    # Steady state (#232): the managed-set reconcile makes NO commit, so no
+    # provision record is written — the absent record is the norm, and the gc
+    # exclusion set stays empty.
+    _stub_provision(monkeypatch)  # provisioning runs nothing, so HEAD never moves
+    tree = create(_spec(tmp_path), source_repo=str(reference), github_url=str(remote))
+    dest = Path(tree.path)
+    assert not provision.record_path(dest).exists()
+    assert provision.read_provision_shas(dest) == frozenset()
 
 
 def test_create_rolls_back_partial_tree_on_failure(

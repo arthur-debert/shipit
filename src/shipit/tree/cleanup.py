@@ -44,6 +44,11 @@ liveness-INDEPENDENT backstops: a hard time cap so a stale pidfile can never str
 a Tree forever, and a grace window so a just-launched session is not raced before
 its pidfile lands. Like a review Tree it is binary — removable or kept, never
 *stale*: a disposable per-launch clone is either provably safe to reclaim or kept.
+Its never-lose-work floor additionally excludes **exactly the provisioning
+commit(s)** recorded at the Tree's birth (:mod:`shipit.tree.provision`, the
+``provision_shas`` input): a managed-set drift window makes provisioning commit the
+reconcile on every fresh Tree, and without the exclusion that shipit-made,
+no-remote commit would hold an abandoned session Tree forever (#232).
 """
 
 from __future__ import annotations
@@ -163,6 +168,7 @@ def classify(
     max_age_seconds: float = DEFAULT_MAX_AGE_SECONDS,
     live_reviews: Mapping[str, bool] | None = None,
     live_sessions: Mapping[str, bool] | None = None,
+    provision_shas: Mapping[str, frozenset[str]] | None = None,
     hard_cap_seconds: float = EPHEMERAL_HARD_CAP_SECONDS,
     grace_seconds: float = EPHEMERAL_GRACE_SECONDS,
 ) -> Cleanup:
@@ -176,9 +182,13 @@ def classify(
     maps a *review* Tree's ``path`` to whether a reviewer Run is still live against it
     (default: none live); ``live_sessions`` maps an *ephemeral* Tree's ``path`` to
     whether its recorded Claude session is still live (the ``session/liveness``
-    pidfile decision; default: none live). All are INPUTS, so this function holds no
-    clock and does no I/O. ``hard_cap_seconds`` / ``grace_seconds`` override the
-    ephemeral ladder's time backstops so its boundaries are exhaustively table-tested.
+    pidfile decision; default: none live); ``provision_shas`` maps an *ephemeral*
+    Tree's ``path`` to the commit SHAs its provisioning recorded at birth
+    (:mod:`shipit.tree.provision` — default: none, so nothing is excluded from the
+    unpushed floor and every local-only commit protects). All are INPUTS, so this
+    function holds no clock and does no I/O. ``hard_cap_seconds`` /
+    ``grace_seconds`` override the ephemeral ladder's time backstops so its
+    boundaries are exhaustively table-tested.
 
     The rules, in precedence order (the first that matches wins):
 
@@ -211,6 +221,7 @@ def classify(
     """
     reviews = live_reviews or {}
     sessions = live_sessions or {}
+    provisioned = provision_shas or {}
     buckets: dict[str, list[TreeRecord]] = {"removable": [], "stale": [], "keep": []}
     for record in records:
         label = _bucket_for(
@@ -220,6 +231,7 @@ def classify(
             max_age_seconds=max_age_seconds,
             reviewer_live=reviews.get(record.path, False),
             session_live=sessions.get(record.path, False),
+            provision=provisioned.get(record.path, frozenset()),
             hard_cap_seconds=hard_cap_seconds,
             grace_seconds=grace_seconds,
         )
@@ -239,6 +251,7 @@ def _bucket_for(
     max_age_seconds: float,
     reviewer_live: bool,
     session_live: bool,
+    provision: frozenset[str],
     hard_cap_seconds: float,
     grace_seconds: float,
 ) -> str:
@@ -258,6 +271,7 @@ def _bucket_for(
             now=now,
             state=state,
             live=session_live,
+            provision=provision,
             hard_cap_seconds=hard_cap_seconds,
             grace_seconds=grace_seconds,
         )
@@ -303,6 +317,7 @@ def _ephemeral_bucket(
     now: float,
     state: str | None,
     live: bool,
+    provision: frozenset[str],
     hard_cap_seconds: float,
     grace_seconds: float,
 ) -> str:
@@ -317,6 +332,13 @@ def _ephemeral_bucket(
        definition (commits on no remote at all), because a fresh ``ephemeral/<id>``
        branch has no upstream and ``ahead`` would read it as level — a missing
        upstream must never by itself block reclaim, and never by itself permit it.
+       One carve-out (#232): the commit SHAs *provisioning itself* recorded at the
+       Tree's birth (``provision``) are excluded from the count — a managed-set
+       drift window commits the reconcile on every fresh Tree, and that shipit-made
+       commit is not the session's work, so it must not strand the Tree past every
+       liveness-independent backstop. The exclusion is exact-SHA-only: any OTHER
+       local-only commit, an unreadable list, or a rebased/amended (SHA-changed)
+       provisioning commit still keeps — the floor stays absolute for real work.
     2. **merged PR → removable** — the session's branch moved to real work and it
        merged; "done" is provable, nothing is lost (reuses the standard vocabulary).
     3. **live ∧ younger than the hard cap → keep** — the pidfile says the session
@@ -328,7 +350,7 @@ def _ephemeral_bucket(
        session is provably gone and nothing local remains; the grace window keeps a
        just-launched Tree from being raced before its pidfile lands.
     """
-    if _has_local_only_work(record):
+    if _has_local_only_work(record, exclude=provision):
         return "keep"
     if _is_merged(state):
         return "removable"
@@ -340,18 +362,35 @@ def _ephemeral_bucket(
     return "removable" if age > grace_seconds else "keep"
 
 
-def _has_local_only_work(record: TreeRecord) -> bool:
+def _has_local_only_work(
+    record: TreeRecord, *, exclude: frozenset[str] = frozenset()
+) -> bool:
     """Whether ``record`` holds work that exists ONLY in this clone. Pure.
 
     The never-lose-work floor shared by the write AND ephemeral ladders (the
     review ladder needs none: a read-only shared clone holds no local work by
-    construction): uncommitted changes (``dirty``),
-    commits ahead of a configured upstream (``ahead``), or commits on NO remote at
-    all (``unpushed`` — the upstream-independent count, which alone covers the
-    fresh no-upstream ``ephemeral/<id>`` branch that ``ahead`` reads as level).
-    An UNREADABLE count (``unpushed is None``) reads as "has local work": the safe
-    direction — collapsing unknown to "pushed" would point a git hiccup at data loss.
+    construction): uncommitted changes (``dirty``), commits on NO remote at all
+    (``unpushed_shas`` — the upstream-independent list, which alone covers the
+    fresh no-upstream ``ephemeral/<id>`` branch that ``ahead`` reads as level), or
+    commits ahead of a configured upstream (``ahead``). An UNREADABLE list
+    (``unpushed_shas is None``) reads as "has local work": the safe direction —
+    collapsing unknown to "pushed" would point a git hiccup at data loss.
+
+    ``exclude`` is the ephemeral ladder's provisioning-commit carve-out (#232):
+    SHAs known to be shipit's own managed-set reconcile, not the session's work.
+    They are subtracted from the local-only list, and — because an excluded commit
+    also sits ahead of the upstream it was cut from — from the ``ahead`` reading:
+    ``ahead`` is local work only when it exceeds what the exclusion accounts for
+    (an ahead count it does NOT explain may be commits pushed to some other
+    branch, which conservatively still keeps, exactly as before). With the default
+    empty ``exclude`` (every non-ephemeral caller), the semantics are unchanged.
     """
-    if record.dirty or record.ahead > 0:
+    if record.dirty:
         return True
-    return record.unpushed is None or record.unpushed > 0
+    if record.unpushed_shas is None:
+        return True
+    if any(sha not in exclude for sha in record.unpushed_shas):
+        return True
+    # Every local-only commit is an excluded provisioning commit; `ahead` beyond
+    # those is either work pushed elsewhere (keep, conservatively) or a miscount.
+    return record.ahead > len(record.unpushed_shas)

@@ -26,7 +26,7 @@ import click
 
 from .. import gh, proc
 from ..session import liveness
-from ..tree import cleanup, layout, registry
+from ..tree import cleanup, layout, provision, registry
 from ..tree.cleanup import Cleanup
 from ..tree.create import Tree, create, new_agent_hash
 from ..tree.layout import TreeSpec
@@ -590,6 +590,7 @@ def _scan_and_classify(
         pr_states=pr_states,
         max_age_seconds=max_age_seconds,
         live_sessions=_live_sessions(records),
+        provision_shas=_provision_shas(records),
     )
     unknown = sum(1 for state in pr_states.values() if state == "UNKNOWN")
     return decision, len(records), unknown
@@ -615,6 +616,23 @@ def _live_sessions(records: list[TreeRecord]) -> dict[str, bool]:
             session, liveness.os_probe
         )
     return live
+
+
+def _provision_shas(records: list[TreeRecord]) -> dict[str, frozenset[str]]:
+    """Per-ephemeral-Tree provisioning-commit SHAs — ``classify``'s exclusion input.
+
+    For each *ephemeral* Tree (the only ladder that consults the exclusion, #232),
+    read the ``.git/shipit-provision.json`` record its birth provisioning wrote.
+    A missing or unreadable record reads as the EMPTY set — nothing excluded, so
+    the pure ladder's unpushed floor keeps the Tree: the safe direction. Other
+    kinds are simply absent from the map (``classify`` defaults them to empty,
+    and their ladders never exclude).
+    """
+    return {
+        record.path: provision.read_provision_shas(record.path)
+        for record in records
+        if layout.tree_kind(record.path) == layout.EPHEMERAL_KIND
+    }
 
 
 def _pr_state(record: TreeRecord) -> str | None:

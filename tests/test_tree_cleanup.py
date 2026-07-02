@@ -25,10 +25,16 @@ AGED_MTIME = NOW - (THRESHOLD + 50)
 RECENT_MTIME = NOW - (THRESHOLD - 50)
 
 
+#: Stand-in full SHAs for truth-table rows (git SHAs are 40 hex chars).
+SHA_PROVISION = "a" * 40
+SHA_WORK = "b" * 40
+SHA_OTHER = "c" * 40
+
+
 def _record(path: str = "/trees/t", **over) -> TreeRecord:
-    # `unpushed=0` (every commit reachable from SOME remote) is the baseline the
-    # non-floor rows need: the write ladder's floor is `_has_local_only_work`,
-    # which reads the TreeRecord default (`unpushed=None`, count unreadable)
+    # `unpushed_shas=()` (every commit reachable from SOME remote) is the baseline
+    # the non-floor rows need: the write ladder's floor is `_has_local_only_work`,
+    # which reads the TreeRecord default (`unpushed_shas=None`, list unreadable)
     # conservatively as has-work.
     base = dict(
         path=path,
@@ -39,7 +45,7 @@ def _record(path: str = "/trees/t", **over) -> TreeRecord:
         behind=0,
         pr=None,
         mtime=AGED_MTIME,
-        unpushed=0,
+        unpushed_shas=(),
     )
     base.update(over)
     return TreeRecord(**base)
@@ -65,15 +71,20 @@ TABLE = [
     # The upstream-INDEPENDENT floor (codex review): a branch with no tracking
     # upstream reads ahead==0 while still holding commits on no remote at all —
     # e.g. extra commits made after the remote branch was deleted on merge. The
-    # `unpushed` count alone must protect it, and an UNREADABLE count must read
+    # `unpushed` list alone must protect it, and an UNREADABLE list must read
     # as has-work (a git hiccup must never point at data loss).
     (
         "unpushed (on no remote, ahead==0) is protected",
-        {"unpushed": 3},
+        {"unpushed_shas": (SHA_WORK, SHA_OTHER, SHA_PROVISION)},
         "MERGED",
         "keep",
     ),
-    ("UNREADABLE unpushed count is protected", {"unpushed": None}, "MERGED", "keep"),
+    (
+        "UNREADABLE unpushed list is protected",
+        {"unpushed_shas": None},
+        "MERGED",
+        "keep",
+    ),
     ("open/unmerged PR is in flight", {}, "OPEN", "keep"),
     ("draft PR is in flight", {}, "DRAFT", "keep"),
     ("recent (merged but young) is kept", {"mtime": RECENT_MTIME}, "MERGED", "keep"),
@@ -280,28 +291,35 @@ def _ephemeral_record(**over) -> TreeRecord:
     """An ephemeral-Tree record: clean, fully pushed, NO upstream (the birth shape).
 
     ``base=None`` + ``ahead=0`` is exactly the fresh ``ephemeral/<id>`` branch the
-    upstream-independent ``unpushed`` count exists for; ``unpushed=0`` means every
-    commit is on some remote.
+    upstream-independent ``unpushed`` list exists for; ``unpushed_shas=()`` means
+    every commit is on some remote.
     """
     base = dict(
         path=EPHEMERAL_PATH,
         branch="ephemeral/sess-20260702-1234",
         base=None,
         ahead=0,
-        unpushed=0,
+        unpushed_shas=(),
         mtime=PAST_GRACE,
     )
     base.update(over)
     return _record(**base)
 
 
-def _classify_ephemeral(record: TreeRecord, state: str | None, *, live: bool) -> str:
+def _classify_ephemeral(
+    record: TreeRecord,
+    state: str | None,
+    *,
+    live: bool,
+    provision: frozenset[str] | None = None,
+) -> str:
     decision = classify(
         [record],
         now=NOW,
         pr_states={record.path: state},
         max_age_seconds=THRESHOLD,
         live_sessions={record.path: live},
+        provision_shas=None if provision is None else {record.path: provision},
         hard_cap_seconds=HARD_CAP,
         grace_seconds=GRACE,
     )
@@ -326,14 +344,14 @@ EPHEMERAL_TABLE = [
     ),
     (
         "unpushed commits (no upstream at all) -> keep",
-        {"unpushed": 2},
+        {"unpushed_shas": (SHA_WORK, SHA_OTHER)},
         None,
         False,
         "keep",
     ),
     (
         "unpushed past the hard cap is still kept",
-        {"unpushed": 1, "mtime": PAST_HARD_CAP},
+        {"unpushed_shas": (SHA_WORK,), "mtime": PAST_HARD_CAP},
         None,
         False,
         "keep",
@@ -346,8 +364,8 @@ EPHEMERAL_TABLE = [
         "keep",
     ),
     (
-        "UNREADABLE unpushed count is conservatively kept",
-        {"unpushed": None},
+        "UNREADABLE unpushed list is conservatively kept",
+        {"unpushed_shas": None},
         None,
         False,
         "keep",
@@ -397,6 +415,131 @@ EPHEMERAL_TABLE = [
 )
 def test_ephemeral_ladder_truth_table(desc, over, state, live, expected):
     assert _classify_ephemeral(_ephemeral_record(**over), state, live=live) == expected
+
+
+# --- the rung-1 provisioning-commit carve-out (#232) ----------------------------
+#
+# A managed-set drift window makes provisioning commit the reconcile at Tree birth:
+# one local-only commit on every fresh ephemeral Tree, which the absolute floor
+# would otherwise KEEP forever (even the hard cap requires "pushed"). The recorded
+# SHA — and exactly it — is excluded; every mismatch stays conservative.
+#
+# The validation-observed drift shape: upstream `origin/main`, the provisioning
+# commit both ahead-of-upstream (ahead=1) and on no remote.
+_DRIFT_SHAPE = {
+    "base": "origin/main",
+    "ahead": 1,
+    "unpushed_shas": (SHA_PROVISION,),
+}
+
+# (description, record-overrides, live, provision-exclusion-set) -> expected bucket.
+PROVISION_TABLE = [
+    # The recorded provisioning commit is NOT work: the Tree falls THROUGH rung 1
+    # to the liveness rungs — kept while live, reclaimed once the session is gone.
+    (
+        "provisioning-commit-only, dead past grace -> removable",
+        _DRIFT_SHAPE,
+        False,
+        frozenset({SHA_PROVISION}),
+        "removable",
+    ),
+    (
+        "provisioning-commit-only, live -> keep via rung 3 (not the floor)",
+        _DRIFT_SHAPE,
+        True,
+        frozenset({SHA_PROVISION}),
+        "keep",
+    ),
+    (
+        "provisioning-commit-only, past the hard cap -> removable even if live",
+        {**_DRIFT_SHAPE, "mtime": PAST_HARD_CAP},
+        True,
+        frozenset({SHA_PROVISION}),
+        "removable",
+    ),
+    # The floor stays ABSOLUTE for real work: any other local-only commit keeps,
+    # exclusion or not.
+    (
+        "provisioning + one real commit -> keep",
+        {
+            "base": "origin/main",
+            "ahead": 2,
+            "unpushed_shas": (SHA_PROVISION, SHA_WORK),
+        },
+        False,
+        frozenset({SHA_PROVISION}),
+        "keep",
+    ),
+    # Missing metadata (no record was written / unreadable -> empty exclusion set):
+    # the provisioning commit reads as work -> KEEP, the pre-#232 behavior.
+    (
+        "metadata missing -> keep",
+        _DRIFT_SHAPE,
+        False,
+        frozenset(),
+        "keep",
+    ),
+    # SHA mismatch (a rebase/amend changed the commit id): identity is the SHA,
+    # never the message, so the mismatch falls back to KEEP — the safe direction.
+    (
+        "recorded SHA does not match the local commit (rebase) -> keep",
+        {**_DRIFT_SHAPE, "unpushed_shas": (SHA_OTHER,)},
+        False,
+        frozenset({SHA_PROVISION}),
+        "keep",
+    ),
+    # An UNREADABLE local-only list keeps even with a recorded exclusion: unknown
+    # must never read as "nothing to lose".
+    (
+        "unreadable unpushed list -> keep despite a recorded exclusion",
+        {"base": "origin/main", "ahead": 1, "unpushed_shas": None},
+        False,
+        frozenset({SHA_PROVISION}),
+        "keep",
+    ),
+    # Dirty still beats everything — the exclusion narrows only the unpushed read.
+    (
+        "dirty -> keep despite a recorded exclusion",
+        {**_DRIFT_SHAPE, "dirty": True},
+        False,
+        frozenset({SHA_PROVISION}),
+        "keep",
+    ),
+    # `ahead` beyond what the exclusion explains is conservatively still work
+    # (commits pushed to some other branch, or a miscount): keep.
+    (
+        "ahead beyond the excluded provisioning commit -> keep",
+        {**_DRIFT_SHAPE, "ahead": 2},
+        False,
+        frozenset({SHA_PROVISION}),
+        "keep",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "desc, over, live, provision, expected",
+    PROVISION_TABLE,
+    ids=[row[0] for row in PROVISION_TABLE],
+)
+def test_ephemeral_provision_commit_carveout(desc, over, live, provision, expected):
+    record = _ephemeral_record(**over)
+    assert _classify_ephemeral(record, None, live=live, provision=provision) == expected
+
+
+def test_provision_exclusion_never_reaches_the_write_ladder():
+    # The carve-out is EPHEMERAL-ONLY: a write Tree whose path appears in
+    # provision_shas still keeps on its local-only commit (the write floor takes
+    # no exclusion), aged and merged or not.
+    record = _record(unpushed_shas=(SHA_PROVISION,))
+    decision = classify(
+        [record],
+        now=NOW,
+        pr_states={record.path: "MERGED"},
+        max_age_seconds=THRESHOLD,
+        provision_shas={record.path: frozenset({SHA_PROVISION})},
+    )
+    assert [r.path for r in decision.keep] == [record.path]
 
 
 def test_ephemeral_tree_is_never_stale():

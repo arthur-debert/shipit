@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 from shipit import gh
 from shipit.session import liveness
-from shipit.tree import layout
+from shipit.tree import layout, provision
 from shipit.verbs.hook import worktreeremove
 
 SESSION_RECORD = liveness.LivenessRecord(
@@ -48,7 +48,7 @@ def ephemeral_tree(root):
 def clean_git(monkeypatch):
     """A gh boundary reporting a clean, fully-pushed clone."""
     monkeypatch.setattr(gh, "git_status_porcelain", lambda *, cwd: "")
-    monkeypatch.setattr(gh, "git_unpushed_count", lambda *, cwd: 0)
+    monkeypatch.setattr(gh, "git_unpushed_shas", lambda *, cwd: ())
 
 
 def _run(payload) -> int:
@@ -71,7 +71,7 @@ def test_any_plausible_payload_path_field_is_honored(ephemeral_tree, clean_git, 
 
 def test_dirty_tree_is_never_auto_removed(ephemeral_tree, monkeypatch):
     monkeypatch.setattr(gh, "git_status_porcelain", lambda *, cwd: " M f.py\n")
-    monkeypatch.setattr(gh, "git_unpushed_count", lambda *, cwd: 0)
+    monkeypatch.setattr(gh, "git_unpushed_shas", lambda *, cwd: ())
     assert _run({"cwd": str(ephemeral_tree)}) == 0
     assert ephemeral_tree.exists()
     # The pidfile stays too: on a refusal the hook touches NOTHING.
@@ -82,15 +82,51 @@ def test_unpushed_tree_is_never_auto_removed(ephemeral_tree, monkeypatch):
     # Commits on NO remote (the upstream-independent count): the never-lose-work
     # floor holds on the fast path exactly as in the gc ladder.
     monkeypatch.setattr(gh, "git_status_porcelain", lambda *, cwd: "")
-    monkeypatch.setattr(gh, "git_unpushed_count", lambda *, cwd: 2)
+    monkeypatch.setattr(gh, "git_unpushed_shas", lambda *, cwd: ("a" * 40, "b" * 40))
     assert _run({"cwd": str(ephemeral_tree)}) == 0
     assert ephemeral_tree.exists()
 
 
-def test_unreadable_unpushed_count_blocks_removal(ephemeral_tree, monkeypatch):
-    # Unknown must never read as "nothing to lose".
+def test_unreadable_unpushed_list_blocks_removal(ephemeral_tree, monkeypatch):
+    # Unknown must never read as "nothing to lose" — even a recorded provisioning
+    # exclusion cannot rescue an unreadable local-only list.
     monkeypatch.setattr(gh, "git_status_porcelain", lambda *, cwd: "")
-    monkeypatch.setattr(gh, "git_unpushed_count", lambda *, cwd: None)
+    monkeypatch.setattr(gh, "git_unpushed_shas", lambda *, cwd: None)
+    provision.write_record(ephemeral_tree, ["a" * 40])
+    assert _run({"cwd": str(ephemeral_tree)}) == 0
+    assert ephemeral_tree.exists()
+
+
+def test_recorded_provisioning_commit_does_not_block_removal(
+    ephemeral_tree, monkeypatch
+):
+    # #232: the drift-window shape — the ONLY local-only commit is the managed-set
+    # reconcile provisioning recorded at birth. The fast path mirrors the gc
+    # ladder's carve-out and removes the clean Tree on session exit.
+    sha = "a" * 40
+    monkeypatch.setattr(gh, "git_status_porcelain", lambda *, cwd: "")
+    monkeypatch.setattr(gh, "git_unpushed_shas", lambda *, cwd: (sha,))
+    provision.write_record(ephemeral_tree, [sha])
+    assert _run({"cwd": str(ephemeral_tree)}) == 0
+    assert not ephemeral_tree.exists()
+
+
+def test_provisioning_plus_real_commit_still_blocks(ephemeral_tree, monkeypatch):
+    # The floor stays absolute for real work: any local-only commit BEYOND the
+    # recorded provisioning SHA refuses the fast path.
+    monkeypatch.setattr(gh, "git_status_porcelain", lambda *, cwd: "")
+    monkeypatch.setattr(gh, "git_unpushed_shas", lambda *, cwd: ("a" * 40, "b" * 40))
+    provision.write_record(ephemeral_tree, ["a" * 40])
+    assert _run({"cwd": str(ephemeral_tree)}) == 0
+    assert ephemeral_tree.exists()
+
+
+def test_mismatched_provision_record_still_blocks(ephemeral_tree, monkeypatch):
+    # A rebase/amend changed the SHA: identity is the SHA, never the message, so
+    # the mismatch conservatively refuses (falls back to the gc ladder).
+    monkeypatch.setattr(gh, "git_status_porcelain", lambda *, cwd: "")
+    monkeypatch.setattr(gh, "git_unpushed_shas", lambda *, cwd: ("b" * 40,))
+    provision.write_record(ephemeral_tree, ["a" * 40])
     assert _run({"cwd": str(ephemeral_tree)}) == 0
     assert ephemeral_tree.exists()
 

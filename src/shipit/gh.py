@@ -597,29 +597,56 @@ def git_ahead_behind(*, cwd: str) -> tuple[int, int]:
     return (ahead, behind)
 
 
-def git_unpushed_count(*, cwd: str) -> int | None:
-    """How many commits on ``HEAD`` exist on NO remote at all — or ``None`` if unreadable.
+def git_unpushed_shas(*, cwd: str) -> tuple[str, ...] | None:
+    """The SHAs of commits on ``HEAD`` that exist on NO remote — ``None`` if unreadable.
 
     The upstream-independent "unpushed" signal ADR-0027's ephemeral gc ladder is
     defined over: :func:`git_ahead_behind`'s ``ahead`` reads ``(0, 0)`` for a branch
     with **no upstream**, so a fresh ``ephemeral/<id>`` branch carrying local-only
     commits would look level — exactly the misread that loses work. ``rev-list HEAD
-    --not --remotes`` counts commits reachable from ``HEAD`` but from no remote ref,
-    so a missing upstream never by itself blocks reclaim (0 = everything on some
-    remote) while a genuinely local commit is always counted.
+    --not --remotes`` lists commits reachable from ``HEAD`` but from no remote ref,
+    so a missing upstream never by itself blocks reclaim (empty = everything on some
+    remote) while a genuinely local commit is always listed. The SHAs — not just a
+    count — are what lets the ephemeral floor exclude exactly the recorded
+    provisioning commit (#232) while any OTHER local-only commit still protects.
 
-    ``None`` — not ``0`` — when the count cannot be read (detached/unborn HEAD, a git
+    ``None`` — not empty — when the list cannot be read (detached/unborn HEAD, a git
     failure, malformed output): the CALLER must treat "unknown" conservatively (keep),
     and collapsing it to "nothing unpushed" would point the failure mode at data loss.
     """
     try:
-        out = _git(["rev-list", "--count", "HEAD", "--not", "--remotes"], cwd=cwd)
+        out = _git(["rev-list", "HEAD", "--not", "--remotes"], cwd=cwd)
     except GhError:
         return None
-    try:
-        return int(out.strip())
-    except ValueError:
+    shas = tuple(line.strip() for line in out.splitlines() if line.strip())
+    if any(not _looks_like_sha(sha) for sha in shas):
         return None
+    return shas
+
+
+def git_commits_between(base: str, head: str, *, cwd: str) -> list[str] | None:
+    """The SHAs reachable from ``head`` but not ``base`` (``rev-list base..head``).
+
+    Used at Tree provisioning to identify exactly what the managed-set install
+    committed (#232): the SHAs between the pre- and post-install ``HEAD``. ``None``
+    on any git failure or malformed output so the caller records nothing rather
+    than something wrong — an unrecorded provisioning commit only KEEPS the Tree.
+    """
+    try:
+        out = _git(["rev-list", f"{base}..{head}"], cwd=cwd)
+    except GhError:
+        return None
+    shas = [line.strip() for line in out.splitlines() if line.strip()]
+    if any(not _looks_like_sha(sha) for sha in shas):
+        return None
+    return shas
+
+
+def _looks_like_sha(text: str) -> bool:
+    """Whether ``text`` is a plausible full git object SHA (hex, 40/64 chars)."""
+    if len(text) not in (40, 64):
+        return False
+    return all(c in "0123456789abcdef" for c in text.lower())
 
 
 def pr_for_head(branch: str, *, cwd: str | None = None) -> dict | None | UnknownPr:

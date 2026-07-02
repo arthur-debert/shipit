@@ -21,10 +21,15 @@ Fast does not mean careless — the ladder's absolute floor holds here too:
   shared review clone, an arbitrary path in the payload — is left to its own
   reclaim rule; a hook fed a hostile or confused path deletes nothing.
 - A **dirty** Tree or one with **unpushed** commits (the upstream-independent
-  count — commits on NO remote, so a fresh no-upstream ``ephemeral/<id>`` branch
+  list — commits on NO remote, so a fresh no-upstream ``ephemeral/<id>`` branch
   is judged by what it actually holds) is NEVER auto-removed, even on a clean
   exit; it ages into the gc ladder where the same floor keeps it. An UNREADABLE
-  count blocks removal the same way — unknown must never read as "nothing to lose".
+  list blocks removal the same way — unknown must never read as "nothing to lose".
+  Mirroring that ladder's rung-1 carve-out (#232), the commit SHA(s) recorded by
+  the Tree's own provisioning (:mod:`shipit.tree.provision` — the managed-set
+  reconcile a drift window commits at birth) are excluded from the block: they
+  are shipit's commit, not the session's work, and without the exclusion every
+  drift-window session Tree would dodge the fast path on a clean exit.
 """
 
 from __future__ import annotations
@@ -39,6 +44,7 @@ import click
 
 from ... import gh
 from ...session import liveness
+from ...tree import provision
 from ...tree.layout import EPHEMERAL_KIND, central_root, tree_kind
 from ...tree.readonly import remove_tree
 
@@ -128,15 +134,20 @@ def _removal_blocker(tree: Path) -> str | None:
     or commits that exist on no remote (read fresh through the ``gh`` boundary —
     the hook has no registry scan to lean on) block removal; the Tree then simply
     ages into the ``gc`` sweep, whose ladder keeps it for the same reason. An
-    unreadable unpushed count blocks too: unknown never reads as "nothing to lose".
+    unreadable unpushed list blocks too: unknown never reads as "nothing to lose".
+    The one carve-out mirrors the ladder's (#232): SHAs the Tree's own provisioning
+    recorded at birth are shipit's managed-set reconcile, not session work, so
+    exactly they — and nothing else — do not block.
     """
     cwd = str(tree)
     if gh.git_status_porcelain(cwd=cwd).strip():
         return "uncommitted changes"
-    unpushed = gh.git_unpushed_count(cwd=cwd)
+    unpushed = gh.git_unpushed_shas(cwd=cwd)
     if unpushed is None:
-        return "an unreadable unpushed-commit count"
-    if unpushed > 0:
-        plural = "s" if unpushed != 1 else ""
-        return f"{unpushed} unpushed commit{plural}"
+        return "an unreadable unpushed-commit list"
+    provisioned = provision.read_provision_shas(tree)
+    remaining = [sha for sha in unpushed if sha not in provisioned]
+    if remaining:
+        plural = "s" if len(remaining) != 1 else ""
+        return f"{len(remaining)} unpushed commit{plural}"
     return None

@@ -49,14 +49,14 @@ def fleet(tmp_path: Path, monkeypatch):
             "base": "origin/main",
             "dirty": " M file.py\n",
             "ahead_behind": (2, 0),
-            "unpushed": 2,
+            "unpushed_shas": ("a" * 40, "b" * 40),
         },
         str(b): {
             "branch": "HAR02/WS02",
             "base": "origin/HAR02/umbrella",
             "dirty": "",
             "ahead_behind": (0, 3),
-            "unpushed": 0,
+            "unpushed_shas": (),
         },
     }
     pr_by_branch = {
@@ -70,7 +70,9 @@ def fleet(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(
         gh, "git_ahead_behind", lambda *, cwd: state[cwd]["ahead_behind"]
     )
-    monkeypatch.setattr(gh, "git_unpushed_count", lambda *, cwd: state[cwd]["unpushed"])
+    monkeypatch.setattr(
+        gh, "git_unpushed_shas", lambda *, cwd: state[cwd]["unpushed_shas"]
+    )
     monkeypatch.setattr(
         gh, "pr_for_head", lambda branch, *, cwd=None: pr_by_branch.get(branch)
     )
@@ -102,12 +104,16 @@ def test_scan_reads_branch_base_dirty_and_ahead_behind(fleet):
     assert (rb.ahead, rb.behind) == (0, 3)
 
 
-def test_scan_reads_the_upstream_independent_unpushed_count(fleet):
-    # The `unpushed` field is the ephemeral gc ladder's never-lose-work signal:
-    # commits on NO remote at all, read independently of any upstream.
+def test_scan_reads_the_upstream_independent_unpushed_shas(fleet):
+    # `unpushed_shas` is the ephemeral gc ladder's never-lose-work signal: the
+    # commits on NO remote at all, read independently of any upstream, by identity
+    # (so the ladder can exclude exactly the recorded provisioning commit, #232).
+    # The `unpushed` count is derived from the same stored fact.
     root, a, b = fleet
     by_path = {r.path: r for r in registry.scan(root)}
+    assert by_path[str(a)].unpushed_shas == ("a" * 40, "b" * 40)
     assert by_path[str(a)].unpushed == 2
+    assert by_path[str(b)].unpushed_shas == ()
     assert by_path[str(b)].unpushed == 0
 
 
