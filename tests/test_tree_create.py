@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from shipit import config, execrun, gh
+from shipit import config, execrun, gh, pixienv
 from shipit.tree import create as create_mod
 from shipit.tree import layout, provision
 from shipit.tree.create import create, create_from_source
@@ -75,15 +75,24 @@ def remote(tmp_path: Path) -> Path:
     return repo
 
 
+def _pixi_result() -> execrun.ExecResult:
+    """A canned successful ``pixi install`` ExecResult for the stubbed adapter step."""
+    return execrun.ExecResult(
+        argv=("pixi", "install"), rc=0, stdout="", stderr="", duration_ms=1
+    )
+
+
 def _stub_provision(monkeypatch):
     """No-op the provisioning subprocess boundary.
 
-    ``create`` runs ``shipit install`` / ``pixi install`` / ``npm ci`` through
-    :func:`run_provision`; clone-mechanics tests exercise the REAL git clone (from the
-    onboarded ``remote`` fixture, so provisioning is not fail-closed) but must never
-    spawn those real subprocesses.
+    ``create`` runs ``shipit install`` / ``npm ci`` through :func:`run_provision`
+    and ``pixi install`` through the pixi adapter (:func:`shipit.pixienv.install`);
+    clone-mechanics tests exercise the REAL git clone (from the onboarded ``remote``
+    fixture, so provisioning is not fail-closed) but must never spawn those real
+    subprocesses.
     """
     monkeypatch.setattr(create_mod, "run_provision", lambda *a, **k: None)
+    monkeypatch.setattr(create_mod.pixienv, "install", lambda *a, **k: _pixi_result())
 
 
 @pytest.fixture
@@ -242,7 +251,9 @@ def test_create_provisions_local_only_on_planned_branch_no_origin_side_effects(
     monkeypatch.setattr(gh, "git_switch_create", no_switch)
 
     # Drive the real install through the provisioning boundary in local mode; skip
-    # the real pixi/npm spawns. The injected lefthook boundary keeps it hermetic.
+    # the real pixi/npm spawns (the managed set writes a pixi.toml tasks block, so
+    # the adapter's install step must be stubbed too). The injected lefthook
+    # boundary keeps it hermetic.
     def fake_provision(cmd, *, cwd, env):
         if cmd[:2] == ["shipit", "install"]:
             assert "--local" in cmd
@@ -252,6 +263,7 @@ def test_create_provisions_local_only_on_planned_branch_no_origin_side_effects(
             assert rc == 0
 
     monkeypatch.setattr(create_mod, "run_provision", fake_provision)
+    monkeypatch.setattr(create_mod.pixienv, "install", lambda *a, **k: _pixi_result())
 
     tree = create(_spec(tmp_path), source_repo=str(reference), github_url=str(remote))
     dest = Path(tree.path)
@@ -341,6 +353,7 @@ def test_create_fails_closed_and_rolls_back_on_a_non_onboarded_source(
         )
 
     monkeypatch.setattr(create_mod, "run_provision", _must_not_provision)
+    monkeypatch.setattr(create_mod.pixienv, "install", _must_not_provision)
 
     spec = _spec(tmp_path)
     with pytest.raises(ValueError, match="not onboarded — run `shipit install`"):
@@ -434,6 +447,14 @@ def test_create_copies_treeinclude_and_provisions_deps(tmp_path: Path, monkeypat
         "run_provision",
         lambda cmd, *, cwd, env: calls.append((cmd, Path(cwd), env)),
     )
+
+    # The pixi step runs through the pixi adapter (PROC02-WS02), not run_provision:
+    # capture it into the SAME call list so the step ORDER stays assertable.
+    def fake_pixi_install(root, *, env=None, **_k):
+        calls.append((["pixi", "install"], Path(root), env))
+        return _pixi_result()
+
+    monkeypatch.setattr(create_mod.pixienv, "install", fake_pixi_install)
     # Pin the FS check so it never warns here (covered by its own test).
     monkeypatch.setattr(create_mod, "_st_dev", lambda p: 1)
     # The PARENT (this test's env, or a real coordinator) may carry the ADR-0015 build
@@ -451,9 +472,10 @@ def test_create_copies_treeinclude_and_provisions_deps(tmp_path: Path, monkeypat
     assert (dest / ".env").read_text() == "TOKEN=1"
     assert (dest / "models" / "saml.bin").read_text() == "BIN"
 
-    # Step 4: shipit install (LOCAL-ONLY, #170), then pixi install, then npm ci —
-    # each in the Tree dir. The install MUST carry --local so Tree provisioning
-    # never switches branches, pushes, or opens a PR (no origin pollution).
+    # Step 4: shipit install (LOCAL-ONLY, #170), then pixi install (through the
+    # pixi adapter), then npm ci — each in the Tree dir. The install MUST carry
+    # --local so Tree provisioning never switches branches, pushes, or opens a PR
+    # (no origin pollution).
     assert [c[0] for c in calls] == [
         ["shipit", "install", ".", "--local"],
         ["pixi", "install"],
@@ -486,24 +508,16 @@ def test_create_skips_provisioning_steps_whose_manifest_is_absent(
 
     calls: list[list[str]] = []
     monkeypatch.setattr(create_mod, "run_provision", lambda cmd, **k: calls.append(cmd))
+
+    def fake_pixi_install(root, **_k):
+        calls.append(["pixi", "install"])
+        return _pixi_result()
+
+    monkeypatch.setattr(create_mod.pixienv, "install", fake_pixi_install)
     monkeypatch.setattr(create_mod, "_st_dev", lambda p: 1)
 
     create(_spec(tmp_path), source_repo=str(source), github_url="url")
     assert calls == [["shipit", "install", ".", "--local"], ["pixi", "install"]]
-
-
-def test_is_leaked_env_var_scrubs_build_env_but_keeps_sccache_backend_vars():
-    # agy ERROR: the ADR-0015 build vars that pixi `[activation.env]` now re-sets PER-TREE
-    # must be scrubbed so a leaked parent value cannot shadow the Tree's own value.
-    assert create_mod.is_leaked_env_var("CARGO_TARGET_DIR")
-    assert create_mod.is_leaked_env_var("SCCACHE_BASEDIRS")
-    assert create_mod.is_leaked_env_var("CARGO_INCREMENTAL")
-    # Install-/backend-level vars are NOT per-Tree paths and the child NEEDS them: the
-    # sccache binary pointer and the cache location/credential must survive (else sccache
-    # is disabled or cut off from the shared cache backend).
-    assert not create_mod.is_leaked_env_var("RUSTC_WRAPPER")
-    assert not create_mod.is_leaked_env_var("SCCACHE_DIR")
-    assert not create_mod.is_leaked_env_var("SCCACHE_GCS_KEY")
 
 
 def test_provision_env_scrubs_leaked_parent_build_env(monkeypatch):
@@ -530,10 +544,15 @@ def test_provision_fails_closed_when_repo_not_onboarded(tmp_path: Path, monkeypa
     dest = tmp_path / "tree"
     dest.mkdir()
     (dest / config.CONFIG_NAME).write_text('[secrets]\nGH_PAT = { env = "X" }\n')
-    (dest / create_mod.PIXI_MANIFEST).write_text("# stub\n")
+    (dest / pixienv.MANIFEST_NAME).write_text("# stub\n")
 
     calls: list[list[str]] = []
     monkeypatch.setattr(create_mod, "run_provision", lambda cmd, **k: calls.append(cmd))
+    monkeypatch.setattr(
+        create_mod.pixienv,
+        "install",
+        lambda root, **k: calls.append(["pixi", "install"]),
+    )
     monkeypatch.setattr(create_mod, "_st_dev", lambda p: 1)
 
     with pytest.raises(ValueError, match="not onboarded — run `shipit install`"):
@@ -635,11 +654,27 @@ def test_run_provision_narrates_step_timing_at_info(
         ),
     )
     with caplog.at_level(logging.INFO, logger="shipit.tree"):
-        create_mod.run_provision(
-            ["pixi", "install"], cwd=tmp_path, env={"PATH": "/usr/bin"}
-        )
+        create_mod.run_provision(["npm", "ci"], cwd=tmp_path, env={"PATH": "/usr/bin"})
     messages = [r.getMessage() for r in caplog.records]
-    assert any("pixi install" in m and "1234ms" in m for m in messages)
+    assert any("npm ci" in m and "1234ms" in m for m in messages)
+
+
+def test_pixi_install_step_narrates_timing_at_info(tmp_path: Path, monkeypatch, caplog):
+    # The pixi step now runs through the pixi adapter (PROC02-WS02) rather than
+    # run_provision, but it must land in the domain log the same way: one INFO
+    # record with argv + duration via _narrate_step. Patching the one Exec seam
+    # (execrun.run) proves the adapter call feeds the narration end to end.
+    monkeypatch.setattr(
+        create_mod.execrun,
+        "run",
+        lambda cmd, **kw: execrun.ExecResult(
+            argv=tuple(cmd), rc=0, stdout="", stderr="", duration_ms=987
+        ),
+    )
+    with caplog.at_level(logging.INFO, logger="shipit.tree"):
+        create_mod._narrate_step(pixienv.install(tmp_path, env={"PATH": "/usr/bin"}))
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("pixi install" in m and "987ms" in m for m in messages)
 
 
 def test_run_provision_failure_leaves_durable_record_with_both_streams(
@@ -725,10 +760,12 @@ def test_create_warns_when_pixi_cache_on_other_filesystem(
     # cache-filesystem check — a non-onboarded repo would fail closed first (#210).
     _mock_git_boundary(monkeypatch, manifests=[".shipit.toml", "pixi.toml"])
     monkeypatch.setattr(create_mod, "run_provision", lambda *a, **k: None)
+    monkeypatch.setattr(create_mod.pixienv, "install", lambda *a, **k: _pixi_result())
 
     cache = tmp_path / "cache"
     cache.mkdir()
-    monkeypatch.setattr(create_mod, "pixi_cache_dir", lambda: cache)
+    # Where the cache lives is pixi-adapter knowledge now (PROC02-WS02).
+    monkeypatch.setattr(create_mod.pixienv, "cache_dir", lambda: cache)
     # Cache on a different device than everything else (the Trees root).
     monkeypatch.setattr(create_mod, "_st_dev", lambda p: 9 if Path(p) == cache else 1)
 

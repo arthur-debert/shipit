@@ -5,6 +5,14 @@
 > `docs/adr/0007-repo-as-path-toolchain-map.md`, `docs/adr/0010-reusable-workflows-and-producing-logic-home.md`;
 > design rationale `docs/dev/{architecture,workflows}.lex`. Map: `docs/prd/FUTURE_WORK.md`.
 > First epic of the Workflows family; unblocks WF02..WF06.
+>
+> **Reconciliation (PROC02-WS02, 2026-07):** the *pixi-encapsulation* half of this
+> PRD's title is superseded by the glassbox program's pixi Tool adapter
+> (`docs/prd/glassbox.md`, ADR-0028): pixi execution (`install`, run-wrapping), the
+> env-scrub rules, the cache-dir knowledge, and the structured `list`/`info` reads
+> now live in `shipit.pixienv` — the one adapter in pixi's domain home. The
+> *generic-CI* half below (toolchain map, lanes, generic reusable workflow,
+> actionlint/act harness) is untouched and remains this epic's scope.
 
 ## Problem Statement
 

@@ -3,8 +3,9 @@
 The whole module is a functional core over an injected boundary (ADR-0021/0022), so the
 tests feed CAPTURED pixi JSON (the shapes observed live against pixi 0.71.0) and assert
 the returned value objects and the pure env transforms — no live pixi, no network. The
-one I/O helper (:func:`shipit.pixienv.read.shell_hook`) is exercised through an injected
-fake runner, and the on-disk readers through a ``tmp_path`` prefix.
+I/O helpers (:mod:`shipit.pixienv.read`'s ``shell-hook``/``list``/``info`` reads and
+:mod:`shipit.pixienv.run`'s install/run-wrap execution, PROC02-WS02) are exercised
+through injected fake runners, and the on-disk readers through a ``tmp_path`` prefix.
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from shipit import pixienv
+from shipit import execrun, pixienv
 from shipit.pixienv import read
 
 #: The repo root (tests/ lives directly under it) — used to read the real `pixi.toml`
@@ -329,3 +330,310 @@ def test_declared_activation_env_appears_in_real_shell_hook():
     assert _shell_hook_value(env, "CARGO_TARGET_DIR") == str(REPO_ROOT / "target")
     assert _shell_hook_value(env, "SCCACHE_BASEDIRS") == str(REPO_ROOT)
     assert _shell_hook_value(env, "CARGO_INCREMENTAL") == "0"
+
+
+# --------------------------------------------------------------------------
+# InstalledPackage — parse pixi list --json (PROC02-WS02)
+# --------------------------------------------------------------------------
+
+# Two faithful `pixi list --json` entries (pixi 0.71.0, trimmed to the fields the
+# parser sees plus a few it must ignore): a conda package and a pypi EDITABLE path
+# dependency — the null-heavy shape (no version, no build) the mirror must tolerate.
+PIXI_LIST_JSON = json.dumps(
+    [
+        {
+            "name": "bzip2",
+            "version": "1.0.8",
+            "build": "hd037594_9",
+            "build_number": 9,
+            "size_bytes": 124834,
+            "kind": "conda",
+            "source": "https://conda.anaconda.org/conda-forge",
+            "is_explicit": False,
+            "subdir": "osx-arm64",
+        },
+        {
+            "name": "shipit",
+            "version": None,
+            "build": None,
+            "build_number": None,
+            "size_bytes": None,
+            "kind": "pypi",
+            "source": "./",
+            "is_explicit": True,
+            "requested_spec": '{ path = ".", editable = true }',
+        },
+    ]
+)
+
+
+def test_parse_installed_packages_mirrors_pixi_list():
+    packages = pixienv.parse_installed_packages(PIXI_LIST_JSON)
+    assert packages == (
+        pixienv.InstalledPackage(
+            name="bzip2",
+            version="1.0.8",
+            build="hd037594_9",
+            kind="conda",
+            is_explicit=False,
+        ),
+        pixienv.InstalledPackage(
+            name="shipit", version=None, build=None, kind="pypi", is_explicit=True
+        ),
+    )
+
+
+def test_list_packages_runs_pixi_list_json_and_parses():
+    seen: dict[str, list[str]] = {}
+
+    def fake_runner(cmd):
+        seen["cmd"] = cmd
+        return _FakeResult(PIXI_LIST_JSON)
+
+    packages = read.list_packages(Path("/x/pixi.toml"), runner=fake_runner)
+
+    assert seen["cmd"] == [
+        "pixi",
+        "list",
+        "--json",
+        "--manifest-path",
+        "/x/pixi.toml",
+    ]
+    assert [p.name for p in packages] == ["bzip2", "shipit"]
+
+
+def test_list_packages_passes_environment_flag():
+    seen: dict[str, list[str]] = {}
+
+    def fake_runner(cmd):
+        seen["cmd"] = cmd
+        return _FakeResult("[]")
+
+    read.list_packages(Path("/x/pixi.toml"), environment="lint", runner=fake_runner)
+    assert seen["cmd"][seen["cmd"].index("--environment") + 1] == "lint"
+
+
+# --------------------------------------------------------------------------
+# Info — parse pixi info --json (PROC02-WS02)
+# --------------------------------------------------------------------------
+
+# A faithful `pixi info --json` blob (pixi 0.71.0), trimmed: the top-level machine
+# facts, the project block, and one environments_info entry.
+PIXI_INFO_JSON = json.dumps(
+    {
+        "platform": "osx-arm64",
+        "virtual_packages": ["__unix=0=0", "__osx=26.5=0"],
+        "version": "0.71.0",
+        "cache_dir": "/Users/me/Library/Caches/rattler/cache",
+        "cache_size": None,
+        "project_info": {
+            "name": "shipit",
+            "manifest_path": "/trees/COR01/WS04/pixi.toml",
+            "last_updated": "02-07-2026 11:21:32",
+            "version": None,
+        },
+        "environments_info": [
+            {
+                "name": "default",
+                "features": ["default"],
+                "solve_group": None,
+                "dependencies": ["python", "ruff"],
+                "pypi_dependencies": ["shipit"],
+                "tasks": ["lint", "test"],
+                "channels": ["conda-forge"],
+                "prefix": "/trees/COR01/WS04/.pixi/envs/default",
+            }
+        ],
+    }
+)
+
+
+def test_parse_info_mirrors_pixi_info():
+    parsed = pixienv.parse_info(PIXI_INFO_JSON)
+    assert parsed.pixi_version == "0.71.0"
+    assert parsed.platform == "osx-arm64"
+    assert parsed.cache_dir == Path("/Users/me/Library/Caches/rattler/cache")
+    assert parsed.project == pixienv.ProjectInfo(
+        name="shipit", manifest_path=Path("/trees/COR01/WS04/pixi.toml")
+    )
+    assert parsed.environments == (
+        pixienv.EnvironmentInfo(
+            name="default",
+            features=("default",),
+            dependencies=("python", "ruff"),
+            pypi_dependencies=("shipit",),
+            tasks=("lint", "test"),
+            prefix=Path("/trees/COR01/WS04/.pixi/envs/default"),
+        ),
+    )
+
+
+def test_parse_info_tolerates_no_project():
+    # `pixi info` answers machine-level questions outside a workspace too:
+    # project_info is null and environments_info is empty.
+    data = json.loads(PIXI_INFO_JSON)
+    data["project_info"] = None
+    data["environments_info"] = []
+    parsed = pixienv.parse_info(json.dumps(data))
+    assert parsed.project is None
+    assert parsed.environments == ()
+    assert parsed.pixi_version == "0.71.0"
+
+
+def test_info_runs_pixi_info_json_and_parses():
+    seen: dict[str, list[str]] = {}
+
+    def fake_runner(cmd):
+        seen["cmd"] = cmd
+        return _FakeResult(PIXI_INFO_JSON)
+
+    parsed = read.info(Path("/x/pixi.toml"), runner=fake_runner)
+
+    assert seen["cmd"] == ["pixi", "info", "--json", "--manifest-path", "/x/pixi.toml"]
+    assert parsed.project.name == "shipit"
+
+
+# --------------------------------------------------------------------------
+# scrub — the one env-leak predicate + transform (absorbed from the Tree code)
+# --------------------------------------------------------------------------
+
+
+def test_is_leaked_env_var_scrubs_pixi_pointers_keeps_cache_vars():
+    # #167: parent project/environment PIXI_* pointers leak; user-level cache
+    # locations do not (they preserve cross-Tree package-cache sharing).
+    for key in ("PIXI_PROJECT_MANIFEST", "PIXI_PROJECT_ROOT", "PIXI_EXE"):
+        assert pixienv.is_leaked_env_var(key)
+    for key in ("PIXI_CACHE_DIR", "RATTLER_CACHE_DIR"):
+        assert not pixienv.is_leaked_env_var(key)
+
+
+def test_is_leaked_env_var_scrubs_conda_activation_keeps_installation():
+    # Activation-binding vars (and the stacked CONDA_PREFIX_<n>) leak; the
+    # installation-level vars are KEPT — scrubbing all CONDA_* could break
+    # `pixi run` in a Conda-managed shell.
+    for key in ("CONDA_PREFIX", "CONDA_DEFAULT_ENV", "CONDA_SHLVL", "CONDA_PREFIX_1"):
+        assert pixienv.is_leaked_env_var(key)
+    for key in ("CONDA_EXE", "CONDA_PYTHON_EXE", "CONDA_ROOT"):
+        assert not pixienv.is_leaked_env_var(key)
+
+
+def test_is_leaked_env_var_scrubs_build_env_but_keeps_sccache_backend_vars():
+    # agy ERROR: the ADR-0015 build vars that pixi `[activation.env]` re-sets PER-TREE
+    # must be scrubbed so a leaked parent value cannot shadow the Tree's own value.
+    assert pixienv.is_leaked_env_var("CARGO_TARGET_DIR")
+    assert pixienv.is_leaked_env_var("SCCACHE_BASEDIRS")
+    assert pixienv.is_leaked_env_var("CARGO_INCREMENTAL")
+    # Install-/backend-level vars are NOT per-Tree paths and the child NEEDS them: the
+    # sccache binary pointer and the cache location/credential must survive (else sccache
+    # is disabled or cut off from the shared cache backend).
+    assert not pixienv.is_leaked_env_var("RUSTC_WRAPPER")
+    assert not pixienv.is_leaked_env_var("SCCACHE_DIR")
+    assert not pixienv.is_leaked_env_var("SCCACHE_GCS_KEY")
+
+
+def test_scrub_env_filters_on_the_predicate_and_returns_a_fresh_dict():
+    env = {
+        "HOME": "/home/a",
+        "PIXI_PROJECT_MANIFEST": "/parent/pixi.toml",
+        "PIXI_CACHE_DIR": "/cache",
+        "CONDA_PREFIX": "/parent/.pixi/envs/default",
+    }
+    scrubbed = pixienv.scrub_env(env)
+    assert scrubbed == {"HOME": "/home/a", "PIXI_CACHE_DIR": "/cache"}
+    assert scrubbed is not env
+    # The input snapshot is untouched (pure transform).
+    assert "PIXI_PROJECT_MANIFEST" in env
+
+
+# --------------------------------------------------------------------------
+# Execution side — install, run-wrapping, sentinel, cache dir (PROC02-WS02)
+# --------------------------------------------------------------------------
+
+
+def test_run_argv_wraps_through_the_projects_manifest(tmp_path: Path):
+    wrapped = pixienv.run_argv(["claude", "-p", "go"], tmp_path)
+    assert wrapped == [
+        "pixi",
+        "run",
+        "--manifest-path",
+        str(tmp_path / "pixi.toml"),
+        "--",
+        "claude",
+        "-p",
+        "go",
+    ]
+
+
+def test_has_default_env_keys_on_the_provisioned_sentinel(tmp_path: Path):
+    assert not pixienv.has_default_env(tmp_path)
+    tmp_path.joinpath(*pixienv.DEFAULT_ENV_DIR).mkdir(parents=True)
+    assert pixienv.has_default_env(tmp_path)
+    assert pixienv.has_default_env(str(tmp_path))  # str roots work too
+
+
+def _capture_runner(seen: dict, stdout: str = ""):
+    def runner(cmd, **kwargs):
+        seen["cmd"] = cmd
+        seen.update(kwargs)
+        return execrun.ExecResult(
+            argv=tuple(cmd), rc=0, stdout=stdout, stderr="", duration_ms=1
+        )
+
+    return runner
+
+
+def test_install_runs_pixi_install_with_the_long_runner_bound(tmp_path: Path):
+    seen: dict = {}
+    result = pixienv.install(
+        tmp_path, env={"PATH": "/usr/bin"}, runner=_capture_runner(seen)
+    )
+    assert seen["cmd"] == ["pixi", "install"]
+    assert seen["cwd"] == str(tmp_path)
+    # A given env is the COMPLETE child environment: replace, never merge — a merge
+    # over os.environ would re-add the very pointers the caller scrubbed.
+    assert seen["env"] == {"PATH": "/usr/bin"}
+    assert seen["replace_env"] is True
+    # pixi's own timeout default (ADR-0028): a cold install outlives the runner's
+    # 5-minute default; a wedged solve must still die at a known bound.
+    assert seen["timeout"] == pixienv.INSTALL_TIMEOUT
+    assert result.ok
+
+
+def test_install_without_env_inherits_the_environment(tmp_path: Path):
+    seen: dict = {}
+    pixienv.install(tmp_path, runner=_capture_runner(seen))
+    assert seen["env"] is None
+    assert seen["replace_env"] is False
+
+
+def test_run_in_env_executes_the_wrapped_argv(tmp_path: Path):
+    seen: dict = {}
+    result = pixienv.run_in_env(
+        ["python", "-c", "print('ok')"],
+        tmp_path,
+        env={"PATH": "/usr/bin"},
+        check=False,
+        runner=_capture_runner(seen, stdout="ok\n"),
+    )
+    assert seen["cmd"] == pixienv.run_argv(["python", "-c", "print('ok')"], tmp_path)
+    assert seen["cwd"] == str(tmp_path)
+    assert seen["replace_env"] is True
+    assert seen["check"] is False
+    # A first activation may re-solve the env — provisioning-shaped work, so the
+    # default bound is pixi's long-runner timeout, not the runner's 5 minutes.
+    assert seen["timeout"] == pixienv.INSTALL_TIMEOUT
+    assert result.stdout == "ok\n"
+
+
+def test_cache_dir_honors_overrides_else_platform_default(monkeypatch):
+    monkeypatch.setenv("PIXI_CACHE_DIR", "/override/pixi")
+    assert pixienv.cache_dir() == Path("/override/pixi")
+
+    monkeypatch.delenv("PIXI_CACHE_DIR", raising=False)
+    monkeypatch.setenv("RATTLER_CACHE_DIR", "/override/rattler")
+    assert pixienv.cache_dir() == Path("/override/rattler")
+
+    monkeypatch.delenv("RATTLER_CACHE_DIR", raising=False)
+    default = pixienv.cache_dir()
+    assert default.is_absolute()
+    assert default.parts[-2:] == ("rattler", "cache") or "rattler" in str(default)
