@@ -273,6 +273,36 @@ def test_validation_refusals_are_no_longer_print_only(monkeypatch, caplog):
     assert errors[0].backend == "nonexistent"
 
 
+def test_refused_spawn_does_not_inherit_the_previous_spawns_tree(
+    tmp_path, monkeypatch, caplog
+):
+    """ADR-0029 record contract: `tree` appears once ASSIGNED for THIS spawn.
+
+    A prior spawn binds `tree` in the process-global log context (and a nested
+    spawn inherits it from the parent's exported ``SHIPIT_LOG_CTX_TREE``); a
+    fresh spawn refused BEFORE it mints its own Tree must not carry that stale
+    value on its request/refusal records. ``run_subagent`` drops any inherited
+    tree at entry, so the refused spawn's context is tree-less.
+    """
+    from shipit import logcontext
+
+    try:
+        # A prior spawn succeeds and leaves its own tree bound in the context.
+        assert _write_spawn(tmp_path, monkeypatch) == 0
+        assert logcontext.bound().get("tree") == str(tmp_path / "tree")
+
+        # A fresh spawn refused before Tree creation (unsupported backend) must
+        # not carry the previous spawn's tree: entry drops it, nothing rebinds it.
+        caplog.clear()
+        rc = spawn_verb.run_subagent(
+            repo="widget", issue=1, role="implementer", backend="nonexistent"
+        )
+        assert rc == 1
+        assert "tree" not in logcontext.bound()
+    finally:
+        logcontext.unbind("tree")
+
+
 def test_the_request_is_recorded_even_when_refused(monkeypatch, caplog):
     """The spawn REQUEST milestone precedes the gates: a refused spawn still
     leaves a durable record of what was asked."""

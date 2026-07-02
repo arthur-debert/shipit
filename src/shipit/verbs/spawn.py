@@ -278,6 +278,14 @@ def run_subagent(
     :func:`shipit.spawn.launch._exec_runner` (a consumer view over
     :func:`shipit.execrun.run`).
     """
+    # A fresh spawn MINTS its own Tree; any `tree` already bound in the process
+    # log context is stale for THIS spawn's story — a nested spawn inherits the
+    # parent's `SHIPIT_LOG_CTX_TREE` (rebound at logging setup), and a prior spawn
+    # in the same process leaves its assignment bound. Drop it at the entry so the
+    # request milestone and any pre-Tree refusal record NO tree (absent-not-null),
+    # and the assignment below is the single seam that binds `tree` — it appears
+    # once, when assigned for this spawn (ADR-0029 record contract).
+    logcontext.unbind("tree")
     # Lifecycle milestone (ADR-0029): the spawn REQUEST, narrated as received —
     # before any gate — so even a refused spawn leaves a durable record of what
     # was asked. The shape fields ride as flat extras (absent when not given);
