@@ -76,7 +76,7 @@ def test_whitespace_only_registration_is_ignored():
 
 
 # ==========================================================================
-# Pattern masking — GitHub tokens + PEM blocks
+# Pattern masking — GitHub tokens + PEM blocks + Doppler tokens
 # ==========================================================================
 
 
@@ -107,6 +107,37 @@ def test_pem_block_is_masked_whole():
     assert "PRIVATE KEY" not in out
     assert "MIIEowIBAAKCAQEA7bq" not in out
     assert out == f"key was:\n{redact.MASK}\ndone"
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        "dp.st.prd_backend.AbCdEf0123456789xyz",  # service token, config slug
+        "dp.st.dev.9zYxWv8765",
+        "dp.pt.AbCdEf0123456789xyz",  # personal token
+    ],
+)
+def test_doppler_token_shapes_are_masked(token):
+    # The pattern layer is the fail-safe for a token that arrives OUTSIDE the
+    # registry (inherited env, config mistake) — unregistered values must mask.
+    out = redact.redact_text(f"fetched with {token} ok")
+    assert token not in out
+    assert redact.MASK in out
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "dp.station reported clean",  # no dot after the prefix letters
+        "the dept.pt file was moved",  # 'pt' without the dp. prefix
+        "endpoint dp.st is up",  # bare prefix, no token body
+        "dp and st and pt are separate words",
+    ],
+)
+def test_doppler_near_misses_pass_through(text):
+    # The pattern must not over-mask ordinary text that merely resembles the
+    # prefix — only the full dp.st./dp.pt. token shape earns the mask.
+    assert redact.redact_text(text) == text
 
 
 def test_non_secret_text_is_untouched():
@@ -272,3 +303,35 @@ def test_pattern_masking_applies_through_the_chain(
     assert record["msg"] == f"auth with {redact.MASK} failed"
     err = capfd.readouterr().err
     assert token not in err
+
+
+def test_doppler_tokens_masked_registered_and_unregistered_alike(
+    capfd, tmp_path, _reset_package_logger
+):
+    # The Doppler pattern must mask on BOTH sides of the registry boundary:
+    # a token secretsrc fetched (registered, exact-value masking) and one that
+    # arrived outside the registry (pattern masking only) — asserted post-format
+    # on what the sinks actually write.
+    structlog.contextvars.clear_contextvars()
+    logsetup.configure_logging(env={}, repo=repo_from_slug("o/r"), base_dir=tmp_path)
+    registered = "dp.st.prd_backend.RegisteredAbc123"
+    unregistered = "dp.pt.NeverRegisteredXyz789"
+    source = SecretSource(name="DOPPLER_TOKEN", kind="env", key="DOPPLER_TOKEN")
+    secretsrc.resolve(source, env={"DOPPLER_TOKEN": registered})
+
+    logging.getLogger("shipit.ws08").warning(
+        "config carried %s and %s", registered, unregistered
+    )
+
+    logger = logging.getLogger(logsetup.LOGGER_NAME)
+    for handler in logger.handlers:
+        handler.flush()
+
+    lines = (tmp_path / "o" / "r" / "shipit.log").read_text().splitlines()
+    (record,) = [json.loads(line) for line in lines if line]
+    assert registered not in json.dumps(record)
+    assert unregistered not in json.dumps(record)
+    assert record["msg"] == f"config carried {redact.MASK} and {redact.MASK}"
+    err = capfd.readouterr().err
+    assert registered not in err
+    assert unregistered not in err

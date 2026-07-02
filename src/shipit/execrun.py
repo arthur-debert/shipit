@@ -42,8 +42,12 @@ The contract, in full:
   it records at DEBUG, not ERROR.
 - **Everything redacted.** Every attribute of an :class:`ExecError` is masked
   at construction (:mod:`shipit.redact`) — the error object surfaces to callers
-  OUTSIDE the logging chain, so it can never carry a secret anywhere. The log
-  records themselves carry no per-site masking (#277): the central
+  OUTSIDE the logging chain, so it can never carry a secret anywhere. That
+  guarantee extends to the exception CHAIN (#317): the raw stdlib exception a
+  failure wraps stays reachable via ``__cause__``, so it is sanitized of its
+  captured stream payloads before chaining (:func:`_sanitize_cause`) — the
+  chain's diagnostic value (type, message) survives; the raw streams do not.
+  The log records themselves carry no per-site masking (#277): the central
   ``redact.redact_event`` processor in ``logsetup._PIPELINE`` masks every
   record, on every sink, at format time.
 
@@ -277,7 +281,7 @@ def run(
             cause=CAUSE_TIMEOUT,
         )
         _record_failure(error, cwd)
-        raise error from exc
+        raise error from _sanitize_cause(exc)
     except OSError as exc:
         # Normalize EVERY launch-level OS failure into the transport error: a
         # missing binary (FileNotFoundError — the semantically distinct case) or
@@ -297,7 +301,7 @@ def run(
             cause=cause,
         )
         _record_failure(error, cwd)
-        raise error from exc
+        raise error from _sanitize_cause(exc)
     duration_ms = _elapsed_ms(start)
     if check and proc.returncode != 0:
         error = ExecError(
@@ -405,7 +409,7 @@ def spawn_detached(
             cause=CAUSE_MISSING_BINARY if is_missing_binary else CAUSE_OS,
         )
         _record_failure(error, cwd)
-        raise error from exc
+        raise error from _sanitize_cause(exc)
     # The one record for a detached spawn: what was launched, from where, as
     # what pid — as structured fields (the _record_fields vocabulary: pid in
     # place of rc/duration_ms, since there is no completion) and inline in the
@@ -420,6 +424,48 @@ def spawn_detached(
         proc.pid,
         extra=fields,
     )
+
+
+def _sanitize_cause(exc: BaseException) -> BaseException:
+    """Scrub raw stream payloads off ``exc`` before chaining it as ``__cause__``.
+
+    Every failure path raises ``ExecError from exc``, and the chained cause
+    stays reachable via ``err.__cause__`` for as long as the error lives.
+    :class:`subprocess.TimeoutExpired` carries the child's raw partial streams
+    (``.output``/``.stderr``) — unredacted, and untouched even when
+    ``secret_stdout=True`` scrubbed the wrapping :class:`ExecError` (#317).
+    Traceback RENDERING happens to be safe today (the sink formatter's
+    flattened exception text passes through ``redact_text``, and
+    ``TimeoutExpired.__str__`` prints no output), but the seam's contract must
+    not depend on how stdlib exceptions happen to stringify: null the
+    payload-bearing attributes so ``err.__cause__`` is as safe as ``err``.
+
+    The chain itself is preserved — the cause's type and message ("Command
+    '...' timed out after 0.1 seconds") are diagnostic value; only its captured
+    streams are the hazard. The command the message names is redacted in place,
+    matching the redaction ``ExecError`` applies to its own ``argv``. OS-level
+    causes (``FileNotFoundError`` & co.) carry no stream payloads and pass
+    through untouched.
+
+    Attribute rewrites alone are not enough: ``BaseException.__new__``
+    snapshots the positional constructor arguments onto ``.args``, and
+    ``repr(exc)`` renders THAT tuple — so ``.args`` must be rebuilt from the
+    sanitized values or the raw ``cmd`` (and any positionally-passed streams)
+    leaks straight through the redacted attributes.
+    """
+    if isinstance(exc, subprocess.TimeoutExpired):
+        exc.output = None  # ``.stdout`` is a property over ``.output``
+        exc.stderr = None
+        # ``cmd`` is a str when the child was launched through a shell; this
+        # seam's contract holds for any constructor shape, not just the list
+        # argv :func:`run` itself enforces.
+        exc.cmd = (
+            redact.redact_text(exc.cmd)
+            if isinstance(exc.cmd, str)
+            else [redact.redact_text(str(arg)) for arg in exc.cmd]
+        )
+        exc.args = (exc.cmd, exc.timeout, None, None)[: len(exc.args)]
+    return exc
 
 
 def _record_failure(error: ExecError, cwd: str | os.PathLike | None) -> None:
