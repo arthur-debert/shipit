@@ -580,7 +580,7 @@ class _LocalReviewAdapter(ReviewerAdapter):
             run_kwargs["timeout"] = options["timeout"]
 
         try:
-            service.start_detached_review(self.name, pr, **run_kwargs)
+            started = service.start_detached_review(self.name, pr, **run_kwargs)
         except Exception as exc:
             # A propagating failure (glassbox spray): the request act died before
             # the review could even detach — record it at ERROR with the exception
@@ -597,7 +597,19 @@ class _LocalReviewAdapter(ReviewerAdapter):
             raise PrStateError(
                 f"{self.name}-local review failed on #{pr}: {exc}"
             ) from exc
-        _log_request_transition(self.display_name, pr, "detached local review")
+        if started:
+            # A fresh child was detached: a real request edge to narrate.
+            _log_request_transition(self.display_name, pr, "detached local review")
+        else:
+            # Reconciled against an already in-flight run (idempotent re-request):
+            # nothing transitioned, so it is a DEBUG mechanic, not an INFO edge.
+            logger.debug(
+                "reviewer %s: re-request reconciled against an in-flight run on "
+                "pr#%s — no new detach",
+                self.display_name,
+                pr,
+                extra={"reviewer": self.display_name, "pr": pr},
+            )
         return True
 
     def cancel(self, pr: int) -> bool:

@@ -127,15 +127,19 @@ def graphql(query: str, **variables: object) -> dict:
         args += [flag, f"{key}={value}"]
     payload = json.loads(_gh(args))
     if payload.get("errors"):
-        error = PrStateError(f"graphql errors: {payload['errors']}")
         # A propagating semantic failure the Exec record cannot carry (the gh
         # call exited 0): record it at ERROR with the exception attached
-        # (glassbox spray) before it leaves this boundary.
-        logger.error(
-            "gh graphql call returned errors (Exec succeeded, answer unusable)",
-            exc_info=error,
-        )
-        raise error
+        # (glassbox spray) before it leaves this boundary. Raise-then-log so the
+        # record carries a real traceback — `exc_info=<unraised instance>` would
+        # attach only the type+value (its `__traceback__` is still None).
+        try:
+            raise PrStateError(f"graphql errors: {payload['errors']}")
+        except PrStateError:
+            logger.error(
+                "gh graphql call returned errors (Exec succeeded, answer unusable)",
+                exc_info=True,
+            )
+            raise
     return payload["data"]
 
 

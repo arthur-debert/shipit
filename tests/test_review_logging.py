@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 from types import SimpleNamespace
 
+import pytest
 from shipit.review import post, service
 from shipit.review.diff import ReviewView, review_view
 
@@ -90,7 +91,6 @@ def test_parse_failure_full_raw_at_debug_snippet_at_warning(caplog):
     surface (console / CI handler) carries ONLY the head/tail snippet, never the full
     raw. The `BackendError` message — the PR-surface / terminal budget — likewise keeps
     only the snippet."""
-    import pytest
 
     from shipit.review.backends import base
 
@@ -213,7 +213,6 @@ def test_detached_child_failure_settles_at_error_with_exception_and_duration(
         lambda pr, repo=None: SimpleNamespace(changed_files=["foo.py"], diff=_DIFF),
     )
     monkeypatch.setattr(service, "_generate_post_and_close", boom)
-    import pytest
 
     with caplog.at_level(logging.INFO, logger="shipit.review"):
         with pytest.raises(RuntimeError):
@@ -236,7 +235,6 @@ def test_resolve_failure_settles_at_error_with_exception_and_duration(
         raise RuntimeError("could not fetch PR")
 
     monkeypatch.setattr(service, "resolve_pr", boom_resolve)
-    import pytest
 
     with caplog.at_level(logging.INFO, logger="shipit.review"):
         with pytest.raises(RuntimeError):
@@ -255,7 +253,6 @@ def test_post_failure_records_error_with_exception(monkeypatch, caplog):
         raise execrun.ExecError(["gh", "api"], rc=1, stderr="422 sad")
 
     monkeypatch.setattr(post.gh, "rest", boom_rest)
-    import pytest
 
     with caplog.at_level(logging.INFO, logger="shipit.review"):
         with pytest.raises(RuntimeError):

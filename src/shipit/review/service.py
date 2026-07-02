@@ -288,16 +288,22 @@ def start_detached_review(
     spawn: Callable[[Sequence[str], Mapping[str, str]], None] | None = None,
     find: Callable[[str, str, str], int | None] | None = None,
 ) -> bool:
-    """Open the in_progress funnel run, DETACH the review, return in-flight (OBS03).
+    """Open the in_progress funnel run, DETACH the review, report what it did (OBS03).
 
     The PARENT half of the async inversion: it does ONLY the cheap, synchronous
     work — resolve ``(repo, head_sha)`` via the lightweight ``gh pr view``,
     RECONCILE against any in-flight run, and open the OBS02 ``in_progress``
     breadcrumb (best-effort) — then spawns a DETACHED child (``shipit pr review
     _run``) that runs the model, posts the review, and closes the SAME ``run_id`` to
-    its terminal state. It returns ``True`` (in-flight) WITHOUT blocking on the model
-    run; the outcome is read LATER from the PR (the funnel check run + the posted
-    review), never from this return.
+    its terminal state. It does NOT block on the model run; the review's outcome is
+    read LATER from the PR (the funnel check run + the posted review), never from
+    this call.
+
+    The return says WHICH path it took, both of which leave the review in-flight:
+    ``True`` when it opened + spawned a fresh detached child, ``False`` when it
+    RECONCILED against an already in-flight run (no breadcrumb, no spawn). The
+    reviewer adapter narrates only a real start as a request transition; a
+    reconcile is an idempotent no-op, not a new request edge.
 
     **Idempotent reconcile (OBS03-WS03, issue #41):** because the check run IS the
     store, a re-request for a reviewer whose funnel run is already non-terminal on
@@ -339,7 +345,7 @@ def start_detached_review(
             pr,
             existing,
         )
-        return True
+        return False  # reconciled: in-flight, but no new child was started
     # Bind the seam's domain keys (ADR-0029): from here on the parent's records
     # carry pr/repo, and the export below hands them (plus the run id, which is
     # the CHILD's correlation, not this parent's) across the process boundary.
@@ -377,7 +383,7 @@ def start_detached_review(
         pr,
         run_id,
     )
-    return True
+    return True  # started: a fresh detached child was opened + spawned
 
 
 def run_detached_review(

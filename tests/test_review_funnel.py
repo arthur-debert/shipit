@@ -948,7 +948,7 @@ def test_start_detached_reconciles_against_existing_inflight_run(monkeypatch):
         find=lambda agent, repo, head_sha: 999,
     )
 
-    assert rc is True  # reported in-flight
+    assert rc is False  # in-flight, but RECONCILED — no fresh child started
     assert spawned == []  # no duplicate child spawned
     # No breadcrumb create and no terminal PATCH — reconciled against run 999.
     assert not [c for c in calls if c["method"] in {"POST", "PATCH"}]
