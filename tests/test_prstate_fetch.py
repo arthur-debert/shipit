@@ -235,3 +235,17 @@ def test_gather_reviews_threads_the_rerun_policy(monkeypatch):
     reviewers._reset_required_cache()
     assert ctx.reviewer_rerun.get("copilot") is True
     assert CopilotAdapter().detect(ctx) is ReviewLifecycle.REQUESTED
+
+
+def test_commit_id_boundary_none_stays_none_and_present_is_validated():
+    """`_commit_id` distinguishes an absent oid from a present-but-malformed one.
+
+    A review that carries no commit reads as honestly-unknown ``None``. A present
+    value — including an empty string, the classic silent-falsey trap — is handed
+    to :class:`Sha`, which raises loudly rather than masquerading as unknown (the
+    fail-loud staleness boundary this WS exists to add).
+    """
+    assert fetch._commit_id(None) is None
+    assert fetch._commit_id(HEAD) == Sha(HEAD)
+    with pytest.raises(ValueError):
+        fetch._commit_id("")

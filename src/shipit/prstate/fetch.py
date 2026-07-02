@@ -453,7 +453,7 @@ def _commit_id(oid: str | None) -> Sha | None:
     string), while a present-but-malformed oid raises :class:`ValueError` loudly
     at the boundary instead of flowing on to silently fail the staleness compare.
     """
-    return Sha(oid) if oid else None
+    return None if oid is None else Sha(oid)
 
 
 def _review(raw: dict) -> Review:
