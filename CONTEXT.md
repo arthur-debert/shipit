@@ -65,7 +65,7 @@ commit is the git object).
 
 **PR**:
 A GitHub pull request as a value object — identity `(repo, number)` plus cheap
-**core** state (`head_sha` — carried as a **Sha**, minted at the one wire read —
+**core** state (`head_sha` (carried as a **Sha**, minted at the one wire read),
 `base_ref`, `is_draft`, `merge_state`). The readiness
 path and the review path build distinct richer **views** that *compose* a PR
 (readiness view: + reviews / threads / funnel / timing; review view: + diff /
