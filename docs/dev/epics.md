@@ -10,7 +10,7 @@ Before execution, a new feature is planned via `/shipit-planning` — the orches
 
 ## 1. Information gathering
 
-The coordinator is briefed as in the single-task cycle's information-gathering step [in](../../AGENTS.lex) — via the epic tracker issue, the PRD, or a chat with the maintainer. It does the general reading/research, CREATES the epic branch (`EPIC/umbrella` — [see](./naming.lex)) and provisions its OWN isolated **Tree** to manage that branch with `shipit tree create` — the coordinator's own workspace, the one legitimate hand-run of that primitive, distinct from how Runs get their Tree (covered under Delegation per workstream — a Run's Tree is minted FOR it by `shipit spawn subagent` or the `WorktreeCreate` hook, never hand-created). The Tree is a dissociated clone, never a native `git worktree` (ADR-0014 / [see](../prd/where-to-do-work.md)). It asks the maintainer for decisions/clarifications as needed.
+The coordinator is briefed as in the single-task cycle's information-gathering step [in](../../AGENTS.lex) — via the epic tracker issue, the PRD, or a chat with the maintainer. It does the general reading/research and CREATES the epic branch (`EPIC/umbrella` — [see](./naming.lex)). Its workspace needs no manual step: a coordinator session already runs inside its own ephemeral **session Tree** from launch (`claude --worktree`, usually via `claude-start` — ADR-0027), born on `ephemeral/<id>` off `origin/main`, so it creates and manages the epic branch by switching branches INSIDE that same Tree (ephemeral-by-path, work-by-branch: the dir stays, the branch becomes the work). The old session-start hand-run of `shipit tree create` is retired — that primitive is how Runs get their Tree minted FOR them (covered under Delegation per workstream — by `shipit spawn subagent` or the `WorktreeCreate` hook, never hand-created). The Tree is a dissociated clone, never a native `git worktree` (ADR-0014 / [see](../prd/where-to-do-work.md)). It asks the maintainer for decisions/clarifications as needed.
 
 ## 2. Delegation per workstream
 
@@ -20,7 +20,7 @@ Parallel implementation, serialized integration. Subagents implement eligible wo
 
 ## 3. Integration
 
-The COORDINATOR merges each workstream PR into the epic branch once that PR is READY (CI green + reviewed + mergeable) — its own go/no-go, no user approval needed for these intra-epic merges. This is the one place the coordinator merges: workstreams INTO the epic branch, never the epic branch into `main`. The user's approval gate is the umbrella PR (\[\#6\]), not the individual workstreams.
+The COORDINATOR merges each workstream PR into the epic branch once that PR is READY (CI green + reviewed + mergeable) — its own go/no-go, no user approval needed for these intra-epic merges. This is the one place the coordinator merges: workstreams INTO the epic branch, never the epic branch into `main`. The user's approval gate is the umbrella PR (§6), not the individual workstreams.
 
 ## 4. Convergence — clearing the fallouts
 
@@ -36,4 +36,4 @@ When the convergence workstream merges, the coordinator delegates an exploration
 
 With the work and docs in, the coordinator opens the feature's umbrella PR. It double-checks which issues the PR actually closes, writes a high-level description of the whole epic pointing to the related issues, and drives the PR (epic branch -\> `main`) through the SAME role split — the coordinator waits and flips, a fresh shepherd handles each review round — then flips it to READY and stops. The HUMAN merges the umbrella PR to `main`; the coordinator does not auto-merge it.
 
-Changelog and release come later: shipit has no `changelog` or `release` / `cut` command yet — they arrive with the Workflows epic (see \[./workflows.lex\]). Until then there is no changelog-fragment step in a PR and no release phase here.
+Changelog and release come later: shipit has no `changelog` or `release` / `cut` command yet — they arrive with the Workflows epic (see [./workflows.lex](./workflows.lex)). Until then there is no changelog-fragment step in a PR and no release phase here.
