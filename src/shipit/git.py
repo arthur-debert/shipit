@@ -359,13 +359,15 @@ def commit_present(sha: str, *, cwd: str) -> bool:
     ``git cat-file -e <sha>^{commit}`` as a probe: the review-diff path asks it
     before and after each fetch attempt to decide whether a PR endpoint is
     locally available. An empty ``sha`` is trivially absent.
+
+    A launch-level failure (missing git, timeout) is NOT "absent": ``_probe``
+    already answers a normal nonzero exit as ``ok=False`` (the sha is genuinely
+    not present), so its :class:`ExecError` — raised only for a failed
+    invocation — propagates rather than being misread as a clean absence.
     """
     if not sha:
         return False
-    try:
-        return _probe(["cat-file", "-e", f"{sha}^{{commit}}"], cwd=cwd).ok
-    except ExecError:
-        return False
+    return _probe(["cat-file", "-e", f"{sha}^{{commit}}"], cwd=cwd).ok
 
 
 def fetch_ref(refspec: str, *, cwd: str, remote: str = "origin") -> bool:
@@ -374,14 +376,14 @@ def fetch_ref(refspec: str, *, cwd: str, remote: str = "origin") -> bool:
     A PROBE, not a mutation contract: the review-diff path tries several
     candidate refspecs for a PR endpoint (``pull/<n>/head``, the head branch,
     the bare sha) and re-checks :func:`commit_present` after each, so an
-    individual fetch failing (ref absent on the remote) is a normal answer.
+    individual fetch failing (ref absent on the remote) is a normal answer —
+    ``_probe`` reports it as ``ok=False``. A launch-level failure (missing git,
+    timeout) is not a normal answer: its :class:`ExecError` propagates rather
+    than masquerading as a cleanly-absent ref.
     """
-    try:
-        return _probe(
-            ["fetch", "--quiet", remote, refspec], cwd=cwd, timeout=_NETWORK_TIMEOUT
-        ).ok
-    except ExecError:
-        return False
+    return _probe(
+        ["fetch", "--quiet", remote, refspec], cwd=cwd, timeout=_NETWORK_TIMEOUT
+    ).ok
 
 
 def merge_base(a: str, b: str, *, cwd: str) -> str | None:
@@ -389,11 +391,11 @@ def merge_base(a: str, b: str, *, cwd: str) -> str | None:
 
     ``None`` — never a guessed endpoint — so the review-diff path can FAIL LOUD
     on unrelated histories instead of silently diffing against the base tip.
+    ``None`` means exactly "no common ancestor" (``_probe`` reports the nonzero
+    exit as ``ok=False``); a launch-level failure raises :class:`ExecError`
+    rather than collapsing into that same ``None``.
     """
-    try:
-        result = _probe(["merge-base", a, b], cwd=cwd)
-    except ExecError:
-        return None
+    result = _probe(["merge-base", a, b], cwd=cwd)
     if not result.ok:
         return None
     return result.stdout.strip() or None
