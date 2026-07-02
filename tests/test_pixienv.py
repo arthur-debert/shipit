@@ -229,7 +229,7 @@ class _FakeResult:
 
 
 def test_shell_hook_runs_pixi_json_and_parses():
-    seen: dict[str, list[str]] = {}
+    seen: dict = {}
 
     def fake_runner(cmd, **kwargs):
         seen["cmd"] = cmd
@@ -253,7 +253,7 @@ def test_shell_hook_runs_pixi_json_and_parses():
 
 
 def test_shell_hook_passes_environment_flag():
-    seen: dict[str, list[str]] = {}
+    seen: dict = {}
 
     def fake_runner(cmd, **kwargs):
         seen["cmd"] = cmd
@@ -390,7 +390,7 @@ def test_parse_installed_packages_mirrors_pixi_list():
 
 
 def test_list_packages_runs_pixi_list_json_and_parses():
-    seen: dict[str, list[str]] = {}
+    seen: dict = {}
 
     def fake_runner(cmd, **kwargs):
         seen["cmd"] = cmd
@@ -414,7 +414,7 @@ def test_list_packages_runs_pixi_list_json_and_parses():
 
 
 def test_list_packages_passes_environment_flag():
-    seen: dict[str, list[str]] = {}
+    seen: dict = {}
 
     def fake_runner(cmd, **kwargs):
         seen["cmd"] = cmd
@@ -493,7 +493,7 @@ def test_parse_info_tolerates_no_project():
 
 
 def test_info_runs_pixi_info_json_and_parses():
-    seen: dict[str, list[str]] = {}
+    seen: dict = {}
 
     def fake_runner(cmd, **kwargs):
         seen["cmd"] = cmd
