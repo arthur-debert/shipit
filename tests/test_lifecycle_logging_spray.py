@@ -4,8 +4,9 @@ Convention-level assertions ONLY (PRD glassbox, Testing Decisions): the key
 lifecycle events exist at the conventional level and carry their required flat
 fields — matched by FIELD PRESENCE, never per-message string assertions, so
 wording can evolve without breaking the pin. Covered surfaces: install/reconcile
-actions, gh-setup mutations, the lint orchestration summary, and the session
-liveness probes + pidfile lifecycle.
+actions, gh-setup mutations, the lint orchestration summary, the session
+liveness probes + pidfile lifecycle, and the verify-apps liveness verdict
+(LOG03-WS03).
 """
 
 from __future__ import annotations
@@ -16,9 +17,11 @@ from pathlib import Path
 import pytest
 
 from shipit import execrun, gh, git
+from shipit.agent import backend as agent_backend
 from shipit.config import SecretSource
+from shipit.review import ghauth
 from shipit.session import liveness
-from shipit.verbs import gh_setup, install, lint
+from shipit.verbs import gh_setup, install, lint, verify_apps
 
 
 def _with_fields(records, level, *fields):
@@ -288,6 +291,96 @@ def test_pidfile_write_and_remove_are_info_milestones(tmp_path, caplog):
     with caplog.at_level(logging.DEBUG, logger="shipit.session"):
         liveness.remove_pidfile(tree)
     assert not caplog.records
+
+
+# --------------------------------------------------------------------------
+# verify-apps — the App-liveness verdict (the report a rollout reads)
+# --------------------------------------------------------------------------
+
+
+def _minted(checks: str | None) -> dict:
+    perms = {"pull_requests": "write"}
+    if checks is not None:
+        perms["checks"] = checks
+    return {"token": "ghs_tok", "permissions": perms}
+
+
+def _mint_live(backend, repo):
+    return _minted("write")
+
+
+def _mint_degraded(backend, repo):
+    return _minted("read")
+
+
+def _mint_not_installed(backend, repo):
+    raise ghauth.ReviewAuthError("not installed")
+
+
+def test_verify_apps_verdict_carries_the_run_fields(capsys, caplog):
+    with caplog.at_level(logging.DEBUG, logger="shipit.verifyapps"):
+        rc = verify_apps.run("o/r", mint=_mint_live)
+    assert rc == 0
+    verdicts = _with_fields(
+        caplog.records, logging.INFO, "repo", "apps", "live", "rc", "duration_ms"
+    )
+    assert verdicts and verdicts[0].repo == "o/r" and verdicts[0].rc == 0
+    assert verdicts[0].live == verdicts[0].apps > 0
+    # An all-live run carries NO not_live_apps field — absent, not null-stuffed.
+    assert not hasattr(verdicts[0], "not_live_apps")
+    # Per-App passes are mechanics: each probe's outcome lands at DEBUG.
+    probes = _with_fields(
+        caplog.records, logging.DEBUG, "repo", "agent", "app", "live", "duration_ms"
+    )
+    assert len(probes) == verdicts[0].apps and all(p.live for p in probes)
+
+
+def test_verify_apps_failing_verdict_names_the_not_live_apps(capsys, caplog):
+    with caplog.at_level(logging.DEBUG, logger="shipit.verifyapps"):
+        rc = verify_apps.run("o/r", mint=_mint_not_installed)
+    assert rc == 1
+    verdicts = _with_fields(caplog.records, logging.INFO, "rc", "not_live_apps")
+    assert verdicts and verdicts[0].rc == 1 and verdicts[0].live == 0
+    # The probe raising (App not installed) is the failure path: ERROR + exception.
+    errors = _with_fields(caplog.records, logging.ERROR, "repo", "agent", "app")
+    assert errors and all(r.exc_info for r in errors)
+
+
+def test_verify_apps_degraded_permission_is_a_warning(capsys, caplog):
+    with caplog.at_level(logging.DEBUG, logger="shipit.verifyapps"):
+        rc = verify_apps.run("o/r", agents=["codex"], mint=_mint_degraded)
+    assert rc == 1
+    # Reachable but missing checks:write — degraded, so WARNING, not ERROR.
+    warnings = _with_fields(
+        caplog.records, logging.WARNING, "repo", "agent", "app", "live"
+    )
+    assert warnings and warnings[0].live is False
+    assert not [r for r in caplog.records if r.levelno == logging.ERROR]
+
+
+def test_verify_apps_no_repo_dead_end_is_an_error_with_the_exception(
+    capsys, monkeypatch, caplog
+):
+    def no_repo():
+        raise execrun.ExecError(["gh"], rc=1, stderr="not a repo")
+
+    monkeypatch.setattr(verify_apps.gh, "current_repo", no_repo)
+    with caplog.at_level(logging.DEBUG, logger="shipit.verifyapps"):
+        rc = verify_apps.run(None, mint=_mint_live)
+    assert rc == 1
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert errors and any(r.exc_info for r in errors)
+
+
+def test_verify_apps_printed_report_is_unchanged_by_the_spray(capsys, caplog):
+    """The log records are additive: the printed report stays the verb's product."""
+    with caplog.at_level(logging.DEBUG, logger="shipit.verifyapps"):
+        verify_apps.run("o/r", mint=_mint_live)
+    results = [
+        verify_apps.verify_app(agent_backend.by_funnel_agent(a), "o/r", mint=_mint_live)
+        for a in verify_apps.known_agents()
+    ]
+    assert capsys.readouterr().out == verify_apps.format_report("o/r", results) + "\n"
 
 
 def test_liveness_probe_verdict_is_recorded_at_debug(caplog):
