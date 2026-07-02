@@ -67,6 +67,13 @@ def test_empty_and_none_registrations_are_ignored():
     assert redact.redact_text("plain text") == "plain text"
 
 
+def test_whitespace_only_registration_is_ignored():
+    # Registering " " would replace every space in every record with the mask.
+    redact.register_secret(" ")
+    redact.register_secret("\t\n")
+    assert redact.redact_text("plain text") == "plain text"
+
+
 # ==========================================================================
 # Pattern masking — GitHub tokens + PEM blocks
 # ==========================================================================
@@ -129,6 +136,26 @@ def test_processor_masks_secret_riding_a_container():
     assert SECRET not in str(out["args"])
     assert redact.MASK in out["args"]
     assert out["clean"] == [1, 2]  # clean container keeps its type
+
+
+def test_processor_masks_secret_visible_only_via_str():
+    # The human surface renders extras with str(), the file sink with repr();
+    # an object whose repr is clean but whose str carries the secret must
+    # still degrade — to its (clean) repr string — so neither renderer can
+    # stringify the secret out of it downstream.
+    class CleanReprDirtyStr:
+        def __repr__(self) -> str:
+            return "<opaque>"
+
+        def __str__(self) -> str:
+            return f"holds {SECRET}"
+
+    redact.register_secret(SECRET)
+    out = redact.redact_event(None, "info", {"event": "m", "obj": CleanReprDirtyStr()})
+    assert isinstance(out["obj"], str)
+    assert SECRET not in out["obj"]
+    assert SECRET not in str(out["obj"])
+    assert out["obj"] == "<opaque>"
 
 
 # ==========================================================================

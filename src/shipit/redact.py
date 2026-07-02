@@ -24,6 +24,7 @@ test seam.
 from __future__ import annotations
 
 import re
+import threading
 from collections.abc import MutableMapping
 from typing import Any
 
@@ -41,23 +42,35 @@ _PATTERNS = (
 )
 
 #: Every secret value fetched this process — exact strings, masked verbatim.
-_REGISTRY: set[str] = set()
+#: An immutable tuple, pre-sorted longest-first at registration time: the hot
+#: read path (:func:`redact_text`, every string field of every record) never
+#: sorts and never iterates a mutating collection — it reads one immutable
+#: snapshot. Writes are rare (once per fetched secret) and lock-guarded.
+_REGISTRY: tuple[str, ...] = ()
+_REGISTRY_LOCK = threading.Lock()
 
 
 def register_secret(value: str | None) -> None:
     """Register a fetched secret value for exact masking in every log record.
 
     Called by :mod:`shipit.secretsrc` at fetch time — the one moment the
-    application provably holds a secret. Empty / ``None`` values are ignored
-    (nothing to mask; registering ``""`` would mangle every record).
+    application provably holds a secret. Empty / ``None`` / whitespace-only
+    values are ignored (nothing to mask; registering ``""`` or ``" "`` would
+    mangle every record).
     """
-    if value:
-        _REGISTRY.add(value)
+    global _REGISTRY
+    if not value or not value.strip():
+        return
+    with _REGISTRY_LOCK:
+        if value not in _REGISTRY:
+            _REGISTRY = tuple(sorted({*_REGISTRY, value}, key=len, reverse=True))
 
 
 def clear_registered_secrets() -> None:
     """Reset the registry — a test seam, never called in production."""
-    _REGISTRY.clear()
+    global _REGISTRY
+    with _REGISTRY_LOCK:
+        _REGISTRY = ()
 
 
 def redact_text(text: str) -> str:
@@ -65,9 +78,11 @@ def redact_text(text: str) -> str:
 
     Registered values are replaced longest-first, so a secret that contains
     another registered secret as a substring is masked whole rather than
-    leaving its distinctive remainder behind.
+    leaving its distinctive remainder behind. The registry snapshot is
+    immutable and pre-sorted, so this loop is safe against a concurrent
+    :func:`register_secret` and does no per-call sorting.
     """
-    for value in sorted(_REGISTRY, key=len, reverse=True):
+    for value in _REGISTRY:
         text = text.replace(value, MASK)
     for pattern in _PATTERNS:
         text = pattern.sub(MASK, text)
@@ -81,10 +96,12 @@ def redact_event(
 
     Runs after enrichment and before rendering, on every record, for every
     sink. String values (``event``/msg, extras, the flattened ``exception``)
-    are masked in place. A non-scalar value (a bound container that a renderer
-    would later stringify) is checked via its ``repr``: if masking changes it,
+    are masked in place. A non-scalar value (a bound object that a renderer
+    would later stringify) is checked via BOTH representations a downstream
+    renderer may use — ``repr`` (the file sink's ``_flatten_to_scalars``) and
+    ``str`` (the human surface's ``f"{k}={v}"``): if masking changes either,
     the value degrades to the masked repr string — so a secret can never ride
-    a container past the redactor into a renderer. Clean values keep their
+    an object past the redactor into any renderer. Clean values keep their
     type untouched.
     """
     for key, value in event_dict.items():
@@ -93,6 +110,7 @@ def redact_event(
         elif value is not None and not isinstance(value, (int, float, bool)):
             rendered = repr(value)
             masked = redact_text(rendered)
-            if masked != rendered:
+            stringified = str(value)
+            if masked != rendered or redact_text(stringified) != stringified:
                 event_dict[key] = masked
     return event_dict
