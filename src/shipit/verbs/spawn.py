@@ -30,7 +30,7 @@ import sys
 
 import click
 
-from .. import gh, proc
+from .. import execrun, gh
 from ..spawn import backends, launch
 from ..tree.create import Tree, create, new_agent_hash
 from ..tree.layout import (
@@ -473,7 +473,7 @@ def _launch_write(
     """
     try:
         tree = create(spec, source_repo=source_repo, github_url=github_url)
-    except (gh.GhError, ValueError, proc.ProcError, OSError) as exc:
+    except (gh.GhError, ValueError, execrun.ExecError, OSError) as exc:
         # Fail-closed (ADR-0017/0019): a Tree-creation error fails the spawn LOUD.
         # There is deliberately no native-worktree fallback — the launcher below is
         # unreachable unless a real Tree exists, so a failed create can never end up
@@ -605,7 +605,7 @@ def _launch_reviewer(
     plan = readonly_plan(org=org, repo=repo_name, branch=branch)
     try:
         tree = create_readonly(plan, source_repo=source_repo, github_url=github_url)
-    except (gh.GhError, ValueError, proc.ProcError, OSError) as exc:
+    except (gh.GhError, ValueError, execrun.ExecError, OSError) as exc:
         # Fail-closed (ADR-0017/0018): a read-only-Tree error fails the spawn LOUD;
         # the launcher below is unreachable unless a real Tree exists.
         print(f"spawn subagent: read-only tree creation failed: {exc}", file=sys.stderr)

@@ -101,7 +101,7 @@ def _subprocess_runner(
     waits ~3 s for stdin and warns (ADR-0019 §1). ``env`` REPLACES the child's
     environment (the adapter's ``child_env`` has already scrubbed the backend's
     auth-shadowing vars) rather than merging over :data:`os.environ` the way
-    :func:`shipit.proc.run` does — a scrubbed key must not creep back in. ``check``
+    :func:`shipit.execrun.run` does — a scrubbed key must not creep back in. ``check``
     is False: a nonzero child is a normal lifecycle outcome the verb reports, not an
     exception.
     """

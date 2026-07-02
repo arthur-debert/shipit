@@ -296,11 +296,11 @@ def test_os_probe_pins_the_c_locale_on_ps(monkeypatch):
         seen["env"] = kwargs.get("env")
 
         class R:
-            returncode = 1
+            rc = 1
             stdout = ""
 
         return R()
 
-    monkeypatch.setattr(liveness.proc, "run", fake_run)
+    monkeypatch.setattr(liveness.execrun, "run", fake_run)
     liveness.os_probe(4242)
     assert seen["env"] == {"LC_ALL": "C"}

@@ -12,7 +12,7 @@ import json
 
 import pytest
 
-from shipit import gh, proc
+from shipit import execrun, gh
 from shipit.tree.create import Tree
 from shipit.tree.registry import TreeRecord
 from shipit.verbs import tree as tree_verb
@@ -321,7 +321,9 @@ def test_run_create_maps_create_failure_to_exit_1(monkeypatch, capsys):
 @pytest.mark.parametrize(
     "exc",
     [
-        proc.ProcError(["pixi", "install"], 1, "boom"),  # provisioning failed
+        execrun.ExecError(
+            ["pixi", "install"], rc=1, stderr="boom"
+        ),  # provisioning failed
         OSError("disk full"),  # a filesystem step failed
         FileExistsError("tree dir already exists: /trees/...; refusing to clone"),
     ],
@@ -330,7 +332,7 @@ def test_run_create_maps_provisioning_and_fs_failures_to_clean_exit_1(
     monkeypatch, capsys, exc
 ):
     # The create contract: git/gh/provisioning/filesystem failures are a clean
-    # exit-1 message, never a traceback. ProcError (provisioning), OSError (mkdir/
+    # exit-1 message, never a traceback. ExecError (provisioning), OSError (mkdir/
     # copy/stat), and the pre-existing-dest FileExistsError all funnel through here.
     monkeypatch.setattr(gh, "repo_root", lambda: "/repo")
     monkeypatch.setattr(gh, "current_repo", lambda: "acme/widget")

@@ -581,7 +581,7 @@ def test_provision_env_scrubs_leaked_parent_pixi_pointers(tmp_path: Path, monkey
 def test_run_provision_uses_scrubbed_env_verbatim_not_merged(
     tmp_path: Path, monkeypatch
 ):
-    # run_provision must hand proc.run the env with replace_env=True, so a parent
+    # run_provision must hand execrun.run the env with replace_env=True, so a parent
     # PIXI_PROJECT_MANIFEST in os.environ cannot creep back in via a merge.
     monkeypatch.setenv("PIXI_PROJECT_MANIFEST", "/parent/pixi.toml")
 
@@ -591,7 +591,7 @@ def test_run_provision_uses_scrubbed_env_verbatim_not_merged(
         captured["env"] = env
         captured["replace_env"] = replace_env
 
-    monkeypatch.setattr(create_mod.proc, "run", fake_run)
+    monkeypatch.setattr(create_mod.execrun, "run", fake_run)
 
     create_mod.run_provision(
         ["shipit", "install", "."],
