@@ -443,6 +443,26 @@ def test_bound_domain_keys_land_flat_and_leave_on_unbind(tmp_path):
     assert "session" not in unbound
 
 
+def test_bound_containers_degrade_to_repr_never_nest(tmp_path):
+    # The flat contract is ENFORCED, not assumed: a bound container (dict,
+    # list, tuple — all JSON-serializable, so a bare JSONRenderer would nest
+    # them) degrades to its repr string, and a non-serializable object does
+    # too, without crashing the log call.
+    logsetup.configure_logging(env={}, owner_repo=("o", "r"), base_dir=tmp_path)
+    structlog.contextvars.bind_contextvars(
+        mapping={"a": 1}, sequence=[1, 2], pair=(3, 4), opaque=object()
+    )
+    _emit(logging.INFO, "container record")
+    structlog.contextvars.clear_contextvars()
+    (record,) = _file_records(tmp_path)
+    assert record["mapping"] == "{'a': 1}"
+    assert record["sequence"] == "[1, 2]"
+    assert record["pair"] == "(3, 4)"
+    assert record["opaque"].startswith("<object object at ")
+    # Nothing nested anywhere in the record.
+    assert all(not isinstance(v, (dict, list)) for v in record.values()), record
+
+
 def test_foreign_stdlib_records_flow_through_the_chain(tmp_path):
     # An untouched stdlib call site — logging.getLogger + %-args, no structlog
     # import — must yield the same contract record, INCLUDING bound context

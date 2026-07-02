@@ -112,20 +112,38 @@ _PIPELINE = (
 )
 
 
+def _flatten_to_scalars(
+    logger: object, method_name: str, event_dict: MutableMapping[str, Any]
+) -> MutableMapping[str, Any]:
+    """Enforce the flat-record contract (ADR-0029) at the JSONL render seam.
+
+    Any value that is not a JSON scalar (``str``/``int``/``float``/``bool``/
+    ``None``) degrades to its ``repr`` — so a bound container (dict, list,
+    tuple, …) can never nest the record, and a non-serializable object can
+    never crash the log call. One mechanism covers both, which is why the
+    renderer below needs no ``default=`` escape hatch.
+    """
+    for key, value in event_dict.items():
+        if value is not None and not isinstance(value, (str, int, float, bool)):
+            event_dict[key] = repr(value)
+    return event_dict
+
+
 def _file_formatter() -> logging.Formatter:
     """The JSONL renderer for the file sink: one flat JSON object per record.
 
     ``event`` is renamed to ``msg`` (the contract's human-readable message
-    field) and the dict is serialized as-is — flat fields, nothing nested,
-    unbound keys simply absent. ``default=repr`` guarantees a non-serializable
-    bound value degrades to its repr rather than crashing the log call.
+    field), every value is forced to a JSON scalar
+    (:func:`_flatten_to_scalars` — flat fields, nothing nested, contract
+    enforced rather than assumed), and unbound keys are simply absent.
     """
     return structlog.stdlib.ProcessorFormatter(
         foreign_pre_chain=_PIPELINE,
         processors=[
             structlog.stdlib.ProcessorFormatter.remove_processors_meta,
             structlog.processors.EventRenamer("msg"),
-            structlog.processors.JSONRenderer(default=repr),
+            _flatten_to_scalars,
+            structlog.processors.JSONRenderer(),
         ],
     )
 
