@@ -114,6 +114,27 @@ def test_other_oserror_normalizes_into_execerror(monkeypatch):
     assert excinfo.value.rc is None
 
 
+def test_missing_cwd_normalizes_to_os_error_not_missing_binary(monkeypatch):
+    # A missing cwd raises FileNotFoundError too, but names the DIRECTORY, not
+    # argv[0]: it must classify as an OS error, not masquerade as a missing
+    # binary (which would mislead callers branching on the cause).
+    def fake_run(argv, **kwargs):
+        raise FileNotFoundError(2, "No such file or directory", kwargs["cwd"])
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(execrun.ExecError) as excinfo:
+        execrun.run(["tool"], cwd="/no/such/dir")
+    assert excinfo.value.cause == execrun.CAUSE_OS
+
+
+def test_missing_cwd_real_child():
+    # End-to-end: a genuinely absent cwd surfaces as the transport error with
+    # the OS cause, not the missing-binary cause.
+    with pytest.raises(execrun.ExecError) as excinfo:
+        execrun.run(["true"], cwd="/shipit/no/such/dir/xyzzy")
+    assert excinfo.value.cause == execrun.CAUSE_OS
+
+
 def test_missing_binary_real_child():
     # End-to-end: a genuinely absent binary raises the transport error, not a
     # raw FileNotFoundError.
@@ -268,6 +289,45 @@ def test_success_record_argv_is_redacted(monkeypatch, caplog, _clean_registry):
     full_log = "\n".join(r.getMessage() for r in caplog.records)
     assert "ghp_tok3nvalue" not in full_log
     assert redact.MASK in full_log
+
+
+def test_success_record_cwd_is_redacted(monkeypatch, caplog, _clean_registry):
+    # cwd is a logged field, so it passes through the redactor too: a secret in
+    # the working-directory path must not leak via the success record.
+    redact.register("s3cret-dir")
+    monkeypatch.setattr(subprocess, "run", _fake_completed(rc=0))
+    with caplog.at_level(logging.DEBUG, logger="shipit.exec"):
+        execrun.run(["tool"], cwd="/work/s3cret-dir/clone")
+    full_log = "\n".join(r.getMessage() for r in caplog.records)
+    assert "s3cret-dir" not in full_log
+    assert redact.MASK in full_log
+
+
+def test_failure_record_cwd_is_redacted(monkeypatch, caplog, _clean_registry):
+    # Same contract on the failure record, which logs cwd via _record_failure.
+    redact.register("s3cret-dir")
+    monkeypatch.setattr(subprocess, "run", _fake_completed(rc=2, stderr="boom"))
+    with caplog.at_level(logging.DEBUG, logger="shipit.exec"):
+        with pytest.raises(execrun.ExecError):
+            execrun.run(["tool"], cwd="/work/s3cret-dir/clone")
+    full_log = "\n".join(r.getMessage() for r in caplog.records)
+    assert "s3cret-dir" not in full_log
+    assert redact.MASK in full_log
+
+
+def test_argv_non_string_elements_are_coerced(monkeypatch, caplog, _clean_registry):
+    # subprocess.run natively accepts Path/numeric argv elements; the seam
+    # coerces them to str so the record and ExecResult.argv are honest strings
+    # and redaction never crashes on a non-str element.
+    import pathlib
+
+    monkeypatch.setattr(subprocess, "run", _fake_completed(rc=0))
+    with caplog.at_level(logging.DEBUG, logger="shipit.exec"):
+        result = execrun.run(["tool", pathlib.Path("/some/path"), 42])
+    assert result.argv == ("tool", "/some/path", "42")
+    assert all(isinstance(a, str) for a in result.argv)
+    message = "\n".join(r.getMessage() for r in caplog.records)
+    assert "/some/path" in message
 
 
 # ---------------------------------------------------------------------------

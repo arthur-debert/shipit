@@ -146,6 +146,11 @@ def run(
     block forever on an idle inherited pipe. When ``input`` IS given,
     ``subprocess.run`` owns the pipe (passing both is a ValueError).
     """
+    # argv is typed list[str], but subprocess.run natively accepts Path/numeric
+    # elements — which would later crash redaction (``arg.replace``) or the
+    # ``" ".join`` in the record. Coerce once here so both the record and the
+    # ``ExecResult.argv`` tuple are honestly strings whatever the caller passed.
+    argv = [str(arg) for arg in argv]
     if env is None:
         merged_env = None
     elif replace_env:
@@ -182,7 +187,13 @@ def run(
         # Normalize EVERY launch-level OS failure into the transport error: a
         # missing binary (FileNotFoundError — the semantically distinct case) or
         # anything else (permissions, a bad cwd). No raw OSError escapes.
-        cause = CAUSE_MISSING_BINARY if isinstance(exc, FileNotFoundError) else CAUSE_OS
+        # A missing cwd ALSO raises FileNotFoundError, but names the directory in
+        # ``exc.filename``; distinguish it so a bad cwd reports as an OS error,
+        # not as a missing binary (which names argv[0]).
+        is_missing_binary = isinstance(exc, FileNotFoundError) and (
+            cwd is None or str(exc.filename) != str(cwd)
+        )
+        cause = CAUSE_MISSING_BINARY if is_missing_binary else CAUSE_OS
         error = ExecError(
             argv,
             rc=None,
@@ -218,7 +229,7 @@ def run(
     logger.debug(
         "exec %s (cwd=%s) -> rc=%d in %dms",
         redact.redact(" ".join(result.argv)),
-        cwd or ".",
+        redact.redact(str(cwd or ".")),
         result.rc,
         result.duration_ms,
     )
@@ -234,7 +245,7 @@ def _record_failure(error: ExecError, cwd: str | os.PathLike | None) -> None:
     logger.error(
         "exec %s (cwd=%s) -> %s (rc=%s) in %dms\nstdout tail: %s\nstderr tail: %s",
         " ".join(error.argv),
-        cwd or ".",
+        redact.redact(str(cwd or ".")),
         error.cause,
         error.rc,
         error.duration_ms,

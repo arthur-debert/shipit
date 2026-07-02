@@ -45,9 +45,15 @@ def register(value: str | None) -> None:
     """Register an exact secret ``value`` to be masked by every :func:`redact` call.
 
     ``None``, empty, and too-short values are ignored (see :data:`_MIN_VALUE_LEN`)
-    so a degenerate registration can never blank out the record.
+    so a degenerate registration can never blank out the record. A non-string
+    value is coerced to ``str`` defensively: the redactor is fail-safe
+    (ADR-0029), and a stray ``int``/``UUID`` in the registry must never poison
+    every later :func:`redact` call with a ``TypeError`` in ``str.replace``.
     """
-    if value and len(value) >= _MIN_VALUE_LEN:
+    if value is None:
+        return
+    value = str(value)
+    if len(value) >= _MIN_VALUE_LEN:
         _registered.add(value)
 
 

@@ -64,3 +64,16 @@ def test_empty_and_short_values_are_ignored():
     redact.register("")
     redact.register("abc")  # below the minimum length — masking it would shred text
     assert redact.redact("abc def") == "abc def"
+
+
+def test_non_string_value_is_coerced_not_crash():
+    # A non-string registration (e.g. a UUID or int accidentally passed) must be
+    # coerced to str, never left to poison every later redact() call with a
+    # TypeError inside str.replace — the redactor is fail-safe (ADR-0029).
+    import uuid
+
+    token = uuid.UUID("12345678-1234-5678-1234-567812345678")
+    redact.register(token)
+    out = redact.redact(f"using {token} now")
+    assert str(token) not in out
+    assert redact.MASK in out
