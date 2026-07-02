@@ -14,7 +14,7 @@ import pytest
 
 from shipit import cli
 from shipit.execrun import ExecError, ExecResult
-from shipit.prstate import ghapi
+from shipit import gh
 from shipit.prstate.state import ChecksState, TaskState, TaskStatus
 from shipit.verbs.pr import status as status_verb
 
@@ -192,11 +192,9 @@ def _probe_result(rc: int, stdout: str = "", stderr: str = "") -> ExecResult:
 def test_resolver_no_pr_marker_maps_to_none(monkeypatch):
     """gh's "no pull requests found for branch" exit is a normal no-PR state -> None."""
     monkeypatch.setattr(
-        ghapi,
-        "_gh_probe",
-        lambda args, **kw: _probe_result(
-            1, stderr='no pull requests found for branch "x"'
-        ),
+        gh,
+        "pr_number_probe",
+        lambda: _probe_result(1, stderr='no pull requests found for branch "x"'),
     )
     assert resolve_pr(None) is None
 
@@ -204,9 +202,9 @@ def test_resolver_no_pr_marker_maps_to_none(monkeypatch):
 def test_resolver_real_gh_error_propagates(monkeypatch):
     """Any other gh failure becomes an ExecError — never collapsed into None."""
     monkeypatch.setattr(
-        ghapi,
-        "_gh_probe",
-        lambda args, **kw: _probe_result(1, stderr="could not authenticate"),
+        gh,
+        "pr_number_probe",
+        lambda: _probe_result(1, stderr="could not authenticate"),
     )
     with pytest.raises(ExecError):
         resolve_pr(None)
@@ -214,6 +212,6 @@ def test_resolver_real_gh_error_propagates(monkeypatch):
 
 def test_resolver_parses_number(monkeypatch):
     monkeypatch.setattr(
-        ghapi, "_gh_probe", lambda args, **kw: _probe_result(0, stdout='{"number": 99}')
+        gh, "pr_number_probe", lambda: _probe_result(0, stdout='{"number": 99}')
     )
     assert resolve_pr(None) == 99

@@ -8,7 +8,7 @@ read REQUESTED — `pr status` kept demanding "request for the current head"
 even with the request already pending. Requested reviewers therefore come from
 GraphQL `reviewRequests` (whose union includes Bots), riding along on the
 review-threads query. These tests pin `gather()`'s assembly of that path with
-the network mocked at the ghapi boundary.
+the network mocked at the gh-adapter boundary.
 """
 
 from __future__ import annotations
@@ -47,9 +47,9 @@ def _graphql_page(
 
 
 def _wire(monkeypatch, review_requests: list[dict], timeline: list[dict] | None = None):
-    monkeypatch.setattr(fetch.ghapi, "repo_slug", lambda: ("owner", "repo"))
+    monkeypatch.setattr(fetch.gh, "repo_slug", lambda: ("owner", "repo"))
     monkeypatch.setattr(
-        fetch.ghapi,
+        fetch.gh,
         "pr_meta",
         lambda pr: {
             # The live gh-view payload: no reviewRequests key at all (pr_meta
@@ -63,11 +63,11 @@ def _wire(monkeypatch, review_requests: list[dict], timeline: list[dict] | None 
         },
     )
     monkeypatch.setattr(
-        fetch.ghapi,
+        fetch.gh,
         "graphql",
         lambda query, **vars: _graphql_page(review_requests, timeline=timeline),
     )
-    monkeypatch.setattr(fetch.ghapi, "rest", lambda *args, **kwargs: [])
+    monkeypatch.setattr(fetch.gh, "rest", lambda *args, **kwargs: [])
 
 
 def test_bot_typed_request_yields_copilot_requested(monkeypatch):
@@ -156,9 +156,9 @@ def test_gather_reviews_fetches_only_the_skip_decision_inputs(monkeypatch):
     # call for head sha + reviews + requested reviewers + rerun policy, and NO
     # threads-cursor walk or reactions/issue-comment REST pagination. `rest` is
     # wired to blow up so any stray pagination fails the test.
-    monkeypatch.setattr(fetch.ghapi, "repo_slug", lambda: ("owner", "repo"))
+    monkeypatch.setattr(fetch.gh, "repo_slug", lambda: ("owner", "repo"))
     monkeypatch.setattr(
-        fetch.ghapi,
+        fetch.gh,
         "rest",
         lambda *a, **k: pytest.fail(
             "gather_reviews must not hit the REST pagination paths"
@@ -170,7 +170,7 @@ def test_gather_reviews_fetches_only_the_skip_decision_inputs(monkeypatch):
         lambda *a, **k: pytest.fail("no threads walk"),
     )
     monkeypatch.setattr(
-        fetch.ghapi,
+        fetch.gh,
         "graphql",
         lambda query, **vars: _reviews_page(
             [{"requestedReviewer": {"login": "Copilot"}}],
@@ -207,8 +207,8 @@ def test_gather_reviews_threads_the_rerun_policy(monkeypatch):
     # The rerun policy must ride on the light context so detect() is head-strict
     # for rerun=True reviewers. With copilot rerun=True and the only review on an
     # OLD head, copilot is stale → reads back REQUESTED (still pending), not DONE.
-    monkeypatch.setattr(fetch.ghapi, "repo_slug", lambda: ("owner", "repo"))
-    monkeypatch.setattr(fetch.ghapi, "rest", lambda *a, **k: [])
+    monkeypatch.setattr(fetch.gh, "repo_slug", lambda: ("owner", "repo"))
+    monkeypatch.setattr(fetch.gh, "rest", lambda *a, **k: [])
     from shipit.prstate import reviewers, reviewers_config
 
     reviewers._reset_required_cache()
@@ -216,7 +216,7 @@ def test_gather_reviews_threads_the_rerun_policy(monkeypatch):
         reviewers_config, "load_override", lambda root=None: {"copilot": True}
     )
     monkeypatch.setattr(
-        fetch.ghapi,
+        fetch.gh,
         "graphql",
         lambda query, **vars: _reviews_page(
             [{"requestedReviewer": {"login": "Copilot"}}],

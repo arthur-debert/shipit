@@ -47,7 +47,7 @@ required reviewer.
 
 `resolve_reviewers` takes the override as data (already parsed), keeping THIS
 module pure and unit-testable; the thin `load_override` seam is the only thing
-that touches the filesystem, mirroring `ghapi`/`secretsrc` boundaries. It reads
+that touches the filesystem, mirroring the `gh`/`secretsrc` boundaries. It reads
 the `[reviewers]` table from `.shipit.toml` in-process via `tomllib` (no `yq`
 subprocess, so no process-lifetime config cache is needed here — the engine's
 own `_REQUIRED_CACHE` in `reviewers.py` still exists for the `evaluate` path).

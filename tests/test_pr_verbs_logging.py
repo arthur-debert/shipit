@@ -6,7 +6,7 @@ action was print-only: the one human hand-off signal in the whole dev cycle
 CONVENTION, not the prose (no per-message string assertions, per the epic):
 
 - the flip and its `--undo` are INFO milestones carrying the ``pr`` key;
-- the flip has a durable milestone at the ``ghapi`` boundary that performs it;
+- the flip has a durable milestone at the gh-adapter boundary that performs it;
 - `pr next`'s action-taken is an INFO milestone carrying the ``pr`` key;
 - each review-request outcome records at its conventional level (INFO for a
   placed/in-flight request, DEBUG for a deliberate non-act, WARNING for a
@@ -62,7 +62,7 @@ def test_flip_is_an_info_milestone_with_the_pr_key(monkeypatch, caplog):
 
 def test_undo_is_an_info_milestone_with_the_pr_key(monkeypatch, caplog):
     monkeypatch.setattr(ready_verb, "resolve_pr", lambda pr: 42)
-    monkeypatch.setattr(ready_verb.ghapi, "pr_ready", lambda pr, undo=False: None)
+    monkeypatch.setattr(ready_verb.gh, "pr_ready", lambda pr, undo=False: None)
     with caplog.at_level(logging.INFO, logger="shipit.pr"):
         assert ready_verb.run(42, undo=True) == 0
     milestones = _pr_records(caplog, logging.INFO)
@@ -84,15 +84,15 @@ def test_refused_flip_is_a_warning_with_the_pr_key(monkeypatch, caplog):
     assert warnings[0].pr == 42
 
 
-def test_ghapi_flip_leaves_a_durable_milestone(monkeypatch, caplog):
+def test_gh_adapter_flip_leaves_a_durable_milestone(monkeypatch, caplog):
     """The boundary that PERFORMS the flip records it (before #285 its only
     record was the Exec runner's DEBUG line)."""
-    from shipit.prstate import ghapi
+    from shipit import gh
 
-    monkeypatch.setattr(ghapi, "repo_slug", lambda: ("owner", "repo"))
-    monkeypatch.setattr(ghapi, "_gh", lambda args, **k: "")
-    with caplog.at_level(logging.INFO, logger="shipit.prstate"):
-        ghapi.pr_ready(7)
+    monkeypatch.setattr(gh, "repo_slug", lambda: ("owner", "repo"))
+    monkeypatch.setattr(gh, "_run", lambda args, **k: "")
+    with caplog.at_level(logging.INFO, logger="shipit.gh"):
+        gh.pr_ready(7)
     milestones = [
         r
         for r in caplog.records
