@@ -34,9 +34,9 @@ import logging
 import re
 import subprocess
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 
-from .. import gh
+from .. import gh, logcontext
 from ..pr import CORE_JSON_FIELDS, core_from_node, repo_from_slug
 from . import checkrun, post, producer
 from .backends.base import BackendError
@@ -280,7 +280,7 @@ def start_detached_review(
     timeout: str = "600s",
     instructions_path: str | None = None,
     as_app: bool = True,
-    spawn: Callable[[Sequence[str]], None] | None = None,
+    spawn: Callable[[Sequence[str], Mapping[str, str]], None] | None = None,
     find: Callable[[str, str, str], int | None] | None = None,
 ) -> bool:
     """Open the in_progress funnel run, DETACH the review, return in-flight (OBS03).
@@ -305,10 +305,19 @@ def start_detached_review(
     The breadcrumb create is BEST-EFFORT — a 403 before the ``checks:write``
     re-grant (or any failure) must not fail the request, so the child still runs
     with ``run_id=None`` (no in_progress marker, but the review still posts).
-    ``spawn`` is the injected detach boundary (default: a new-session, no-daemon
-    :func:`_spawn_detached`) and ``find`` the injected reconcile-lookup boundary
-    (default: :func:`shipit.review.checkrun.find_nonterminal`) — mirrored injectable
+    ``spawn`` is the injected detach boundary — ``(argv, env)``, default the
+    new-session, no-daemon :func:`_spawn_detached` — and ``find`` the injected
+    reconcile-lookup boundary (default:
+    :func:`shipit.review.checkrun.find_nonterminal`) — mirrored injectable
     seams so a test asserts reconcile + detach WITHOUT the network or a fork.
+
+    This is a DETACH SEAM for the domain-key context (ADR-0029): ``pr`` and
+    ``repo`` bind here — the parent's own records from this point carry them —
+    and the child's environment (:func:`shipit.logcontext.env_export`) carries
+    every bound key plus the freshly-opened funnel ``run`` id (the child's
+    story, so it is exported without binding in this parent). The child rebinds
+    them at its logging setup, so the detached run's records correlate to the
+    same ``pr``/``repo``/``run`` with no shared state.
     """
     logger.info(
         "start_detached_review: agent=%s pr=#%s — resolving + detaching", agent, pr
@@ -324,7 +333,12 @@ def start_detached_review(
             existing,
         )
         return True
+    # Bind the seam's domain keys (ADR-0029): from here on the parent's records
+    # carry pr/repo, and the export below hands them (plus the run id, which is
+    # the CHILD's correlation, not this parent's) across the process boundary.
+    logcontext.bind(pr=pr, repo=repo)
     run_id = _open_breadcrumb(agent, repo, head_sha)
+    child_env = logcontext.env_export(run=run_id)
     argv = _child_argv(
         agent,
         pr,
@@ -336,7 +350,7 @@ def start_detached_review(
         as_app=as_app,
     )
     try:
-        (spawn or _spawn_detached)(argv)
+        (spawn or _spawn_detached)(argv, child_env)
     except Exception as exc:  # noqa: BLE001 - any spawn failure must still close the run
         # The spawn is what the child relies on to reach its terminal close. If it
         # fails AFTER the parent opened the in_progress run, no child will ever
@@ -553,7 +567,7 @@ def _child_argv(
     return argv
 
 
-def _spawn_detached(argv: Sequence[str]) -> None:
+def _spawn_detached(argv: Sequence[str], env: Mapping[str, str]) -> None:
     """Spawn ``argv`` as a DETACHED child — survives the parent exiting, no daemon.
 
     ``start_new_session=True`` puts the child in its own session/process group, so
@@ -561,9 +575,15 @@ def _spawn_detached(argv: Sequence[str]) -> None:
     is redirected to ``/dev/null`` because the child's diagnostics go to the OBS01
     file sink, not a pipe the parent would have to drain. Fire-and-forget: the
     handle is intentionally not retained — the PR + check run are the only state.
+
+    ``env`` is the child's FULL environment (the caller builds it via
+    :func:`shipit.logcontext.env_export`, so it is the parent's environment plus
+    the ``SHIPIT_LOG_CTX_*`` domain keys the child rebinds at its logging setup —
+    the ADR-0029 cross-process seam).
     """
     subprocess.Popen(  # noqa: S603 - argv is built internally, not from user input
         list(argv),
+        env=dict(env),
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,

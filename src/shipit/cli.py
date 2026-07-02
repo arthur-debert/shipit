@@ -12,7 +12,7 @@ import sys
 
 import click
 
-from . import __version__
+from . import __version__, logcontext
 from .logsetup import configure_logging, resolve_current_owner_repo
 from .verbs import gh_setup, install, lint, logs, verify_apps
 from .verbs.eval import eval_group
@@ -44,8 +44,17 @@ def root(verbose: bool) -> None:
     the quiet stderr console (raised by ``-v``), the CI sinks when in CI, and the
     durable per-repo file sink. The repo is resolved best-effort, so a run outside
     a checkout just skips the file sink rather than failing.
+
+    This is also the CLI-entry half of the domain-key context (ADR-0029): the
+    resolved repo binds as the ``repo`` correlation key BEFORE logging setup, so
+    every record of the run carries it — and so a parent-exported
+    ``SHIPIT_LOG_CTX_*`` key (rebound inside ``configure_logging``, the child
+    half of the seam) deliberately wins over this best-effort cwd resolution.
     """
-    configure_logging(verbose=verbose, owner_repo=resolve_current_owner_repo())
+    owner_repo = resolve_current_owner_repo()
+    if owner_repo is not None:
+        logcontext.bind(repo="/".join(owner_repo))
+    configure_logging(verbose=verbose, owner_repo=owner_repo)
 
 
 @root.command(name="gh-setup")

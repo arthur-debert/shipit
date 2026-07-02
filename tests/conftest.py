@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+import structlog
 from shipit.prstate.fetch import context_from_raw
 from shipit.prstate.model import ReadinessView
 
@@ -45,6 +46,20 @@ def load_context(name: str, now: datetime | None = None) -> ReadinessView:
 def context():
     """Return the loader so a test can pick its scenario: `context('name')`."""
     return load_context
+
+
+@pytest.fixture(autouse=True)
+def _clean_domain_key_context():
+    """Isolate the ADR-0029 domain-key log context around every test.
+
+    Binding is a process-context side effect of several production seams (the
+    CLI entry, the review detach, the spawn verb), so without this a test that
+    drives one of those paths would leak `pr`/`repo`/`tree` onto every record a
+    LATER test emits — and the absent-when-unbound contract is only assertable
+    from a clean context."""
+    structlog.contextvars.clear_contextvars()
+    yield
+    structlog.contextvars.clear_contextvars()
 
 
 @pytest.fixture(autouse=True)
