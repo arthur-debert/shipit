@@ -17,6 +17,31 @@ platforms = ["linux-64", "osx-arm64", "osx-64", "linux-aarch64"]
 [dependencies]
 python = "3.13.*"
 
+# The lint toolchain rides in the DEFAULT env (issue #210, option (a)): `shipit
+# install` writes a managed `[tasks] lint = "shipit lint"` into the default env,
+# and `shipit lint` (verbs/lint.py) SHELLS OUT to these binaries — so they must be
+# on PATH in the default env for the managed task to work as installed. This aligns
+# shipit-self with the standard consumer layout (architecture.lex §5/§7: one lint
+# definition, thin managed tasks) rather than pinning an env-specific override the
+# reconcile would surface as drift forever. The `-e lint` environment keeps its own
+# `lint` task (below) — the lexd-provisioning, lefthook/CI-pinned canonical path —
+# and inherits these same deps through the default feature.
+#
+# The linters are required-check-path tools, so they are conda-forge packages PINNED
+# in pixi.lock and CI runs `--locked` (architecture.lex §2) — version bumps arrive as
+# auto-PRs, never silently. The lone exception is `lexd` (not on conda-forge), fetched
+# at a pin by tools/provision-lexd.sh (the `-e lint` `provision-lexd` task).
+ruff = "0.15.*"
+shellcheck = "0.11.*"
+go-shfmt = "3.*"               # conda-forge name for the `shfmt` binary
+yamllint = "1.38.*"
+prettier = "3.8.*"
+markdownlint-cli = "0.49.*"
+lefthook = "2.1.*"
+# curl provisions the pinned lexd (tools/provision-lexd.sh); pinning it here
+# keeps the lint checks from depending on a host-provided curl ("identical everywhere").
+curl = "*"
+
 [pypi-dependencies]
 # shipit itself, editable — `shipit lint` is the lint orchestrator, so the env
 # that runs the lint checks must carry the package under test.
@@ -42,6 +67,10 @@ SCCACHE_BASEDIRS = "$PIXI_PROJECT_ROOT"
 CARGO_INCREMENTAL = "0"
 
 [tasks]
+# >>> shipit-managed tasks (do not edit; regenerate via `shipit install`) >>>
+lint = "shipit lint"
+logs = "shipit logs"
+# <<< shipit-managed tasks <<<
 # Provisional test task (the full pixi-test encapsulation is Step 5); shipit
 # supplies its own `test` so CI's required `check` keeps running the suite.
 test = "python -m pytest -q"
@@ -51,21 +80,25 @@ test = "python -m pytest -q"
 [dependencies.pytest]
 version = ">=8"
 
-[feature.lint.dependencies]
-# Pins ported from release-core toolset.py as a baseline, RE-PINNED through
-# conda-forge (prettier + markdownlint-cli ARE on conda-forge, so the npm path
-# the roadmap anticipated is unnecessary — everything below is locked).
-ruff = "0.15.*"
-shellcheck = "0.11.*"
-go-shfmt = "3.*"               # conda-forge name for the `shfmt` binary
-yamllint = "1.38.*"
-prettier = "3.8.*"
-markdownlint-cli = "0.49.*"
-lefthook = "2.1.*"
-# curl provisions the pinned lexd (tools/provision-lexd.sh); pinning it here
-# keeps the lint checks from depending on a host-provided curl ("identical everywhere").
-curl = "*"
-
+# The `lint` FEATURE carries no deps of its own (issue #210, option (a)): the linter
+# toolchain moved to the DEFAULT env above, and the `lint` environment inherits it
+# through the default feature. It deliberately does NOT define its own `lint` task:
+# `lint` lives in EXACTLY ONE place — the managed `[tasks] lint = "shipit lint"` in the
+# default env above — so a bare `pixi run lint` resolves UNAMBIGUOUSLY (a duplicate
+# `lint` in both the default feature and this one is what historically made bare
+# `pixi run lint` ambiguous across default/lint/review; the lefthook `-e lint` pin was
+# the mitigation — see lefthook.yml). `pixi run -e lint lint` runs that same managed
+# task INSIDE the lint env (the canonical, lefthook/CI-pinned path). What stays here is
+# the lexd provisioning + the lexd-dependent helpers (fmt, regen-roles, install-hooks).
+# Because the managed `lint` is a fixed plain-string task, it cannot carry a
+# `provision-lexd` depends-on; instead lexd is provisioned onto the lint env's PATH by
+# the NON-managed setup tasks that gate it — `install-hooks` (the one-time hook
+# activation every dev runs on a fresh clone) depends on `provision-lexd`, so lexd is
+# fetched into `.pixi/envs/lint/bin/` at hook-setup time and PERSISTS there for every
+# subsequent `-e lint lint` the pre-commit / pre-push hooks run. CI provisions it the
+# same way via an explicit step (.github/workflows/ci.yml). This keeps lexd off the
+# managed `lint`/`lefthook.yml` surface (so the reconcile stays a 0-change no-op) while
+# never leaving a fresh clone's lex leg un-provisioned.
 [feature.lint.tasks]
 # lexd is not on conda-forge; fetch the pinned prebuilt before every lint run
 # (idempotent). The lint checks depend on it, so CI and the hook provision identically.
@@ -84,10 +117,12 @@ curl = "*"
 provision-lexd = { cmd = "bash tools/provision-lexd.sh", inputs = [
     "tools/provision-lexd.sh",
 ] }
-lint = { cmd = "shipit lint", depends-on = ["provision-lexd"] }
 fmt = { cmd = "shipit lint --fix", depends-on = ["provision-lexd"] }
-# One command from a fresh clone to working lint checks (the `--install-hook` equiv).
-install-hooks = "lefthook install"
+# One command from a fresh clone to working lint checks (the `--install-hook` equiv):
+# activates the git hooks AND (via `provision-lexd`) fetches the pinned lexd into the
+# lint env, so the pre-commit / pre-push `pixi run -e lint lint` the hooks fire find
+# lexd on PATH without the managed `lint` task needing a depends-on it cannot carry.
+install-hooks = { cmd = "lefthook install", depends-on = ["provision-lexd"] }
 # Re-flow every role-prompt surface from the lex fragments (HAR01-WS03, ADR-0011):
 # mirror src/shipit/data/roles/*.lex -> .md, then compose the agent-defs, the
 # bundled coordinator deny slice, and the AGENTS.md union. Needs lexd + prettier

@@ -8,17 +8,20 @@
 # pinned prebuilt binary" pattern Spike 0 used for wasm-bindgen.
 #
 # Idempotent: a no-op when the pinned lexd is already installed in the env. The
-# `lint` pixi task depends on this, so `pixi run lint` (CI and the pre-commit
-# hook alike) provisions lexd identically — the hard gate never silently skips
-# the lex leg.
+# non-managed `install-hooks` pixi task depends on this (and the CI lint job runs it
+# explicitly), so a fresh clone / CI run provisions lexd into the lint env before the
+# hooks' / CI's `pixi run -e lint lint` — the hard gate never silently skips the lex leg.
 #
-# Platform note: the v0.18.4 release ships linux (gnu/musl) + windows binaries,
-# but NO macOS asset. On Darwin this falls back to a `lexd` already on PATH
-# (e.g. a cargo-built ~/.cargo/bin/lexd) and fails loudly if none is present.
+# Platform note: the pinned v0.18.2 release ships linux (x86_64 / aarch64 gnu) AND an
+# arm64 macOS asset (aarch64-apple-darwin) — so macOS arm64 fetches the PINNED binary
+# exactly like linux, with NO reliance on a host `lexd`. There is NO x86_64 (Intel)
+# macOS asset at this pin, so Intel-mac FAILS LOUD immediately: there is nothing to
+# provision (no pinned asset), so the script exits 1 with an instruction to provision
+# lexd — never a PATH walk, never a host-lexd fallback, never a silent skip.
 
 set -euo pipefail
 
-PIN="0.18.4"
+PIN="0.18.2"
 TAG="v${PIN}"
 REPO="lex-fmt/lex"
 
@@ -29,10 +32,13 @@ REPO="lex-fmt/lex"
 sha_for() {
     case "$1" in
         x86_64-unknown-linux-gnu)
-            echo "ac7706d9d841e9d90ca8ccef86cb3ad476da033084a00cc7bde3a46663f8c78f"
+            echo "f0465c12b7398debae9d4b8d97a88730b86a4e9cd97e8dcc02ae1949e0a2d833"
             ;;
         aarch64-unknown-linux-gnu)
-            echo "93d7a540e98e74a583c38479f2803c23d04821e11ca40d56317cef6e73c9b6b6"
+            echo "36ad2105c5b7e6fbbb5d8cbad2c2ab07fd3e6e27db24acc30bdc48daf65e1771"
+            ;;
+        aarch64-apple-darwin)
+            echo "474073b0ae9f0a877e25d563ecf3e58601bb6cdc0eacfee72573860009ff096e"
             ;;
         *) echo "" ;;
     esac
@@ -65,21 +71,28 @@ case "${os}" in
         esac
         ;;
     Darwin)
-        # The v0.18.4 release ships NO macOS asset, so the pin cannot be fetched
-        # here. Fall back to any lexd already on PATH (e.g. a cargo build), which
-        # is enough for local dev — the pin is enforced where it gates: linux CI.
-        if existing="$(command -v lexd 2>/dev/null)"; then
-            ln -sf "$existing" "$dest"
-            got="$("$existing" --version 2>/dev/null || echo '?')"
-            case "$got" in
-                *"$PIN"*) : ;;
-                *) echo "provision-lexd: using PATH lexd (${got#lexd }); pin is ${PIN}, no macOS asset to fetch" >&2 ;;
-            esac
-            exit 0
-        fi
-        echo "provision-lexd: no lexd on PATH and no macOS release asset. Install it" >&2
-        echo "  (cargo install --git https://github.com/${REPO} lexd) and re-run." >&2
-        exit 1
+        case "${arch}" in
+            arm64 | aarch64)
+                # v0.18.2 publishes an arm64 macOS asset, so fetch the PINNED binary
+                # exactly like linux (fall through to the download + checksum below).
+                triple="aarch64-apple-darwin"
+                ;;
+            x86_64)
+                # No x86_64 (Intel) macOS asset at this pin. There is nothing to
+                # provision here, so FAIL LOUD immediately — no PATH walk, no host-lexd
+                # fallback, no version-drift symlink. Provisioning either fetches the
+                # pinned binary or it does not run; it never limps along on whatever
+                # host `lexd` happens to be around.
+                echo "provision-lexd: no pinned macOS-x86_64 (Intel) asset at ${PIN} — lexd is not provisioned on this platform." >&2
+                echo "  Provision it from the pinned source and re-run, e.g.:" >&2
+                echo "    cargo install --git https://github.com/${REPO} --tag ${TAG} lexd" >&2
+                exit 1
+                ;;
+            *)
+                echo "provision-lexd: unsupported darwin arch '${arch}'" >&2
+                exit 1
+                ;;
+        esac
         ;;
     *)
         echo "provision-lexd: unsupported OS '${os}'" >&2

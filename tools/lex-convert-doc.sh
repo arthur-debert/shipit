@@ -89,20 +89,21 @@ fi
 # Format the result with the repo's pinned prettier so trivial formatting
 # (trailing whitespace, stray internal spacing) can never fail the gate, and so
 # a freshly generated mirror is byte-stable (idempotent). The temp has no .md
-# extension, so the markdown parser is named explicitly. prettier is in the
-# `lint` pixi env; if it is absent (a bare developer shell), degrade gracefully:
-# warn and emit the unformatted document rather than fail the conversion.
-if command -v prettier >/dev/null 2>&1; then
-    fmt="$(mktemp)"
-    if prettier --parser markdown "$out" >"$fmt" 2>/dev/null; then
-        mv "$fmt" "$out"
-    else
-        rm -f "$fmt"
-        echo "Error: prettier formatting failed for: $src" >&2
-        exit 1
-    fi
+# extension, so the markdown parser is named explicitly. prettier is a
+# provisioned tool (it lives in the `lint` pixi env); if it is absent, FAIL LOUD
+# rather than emit degraded/unformatted output — run this inside the provisioned
+# env (e.g. `pixi run -e lint …`).
+if ! command -v prettier >/dev/null 2>&1; then
+    echo "Error: prettier is not provisioned — run this inside the provisioned env (e.g. 'pixi run -e lint …')." >&2
+    exit 1
+fi
+fmt="$(mktemp)"
+if prettier --parser markdown "$out" >"$fmt" 2>/dev/null; then
+    mv "$fmt" "$out"
 else
-    echo "Warning: prettier not on PATH; emitting unformatted markdown for $src" >&2
+    rm -f "$fmt"
+    echo "Error: prettier formatting failed for: $src" >&2
+    exit 1
 fi
 
 mv "$out" "$dest"

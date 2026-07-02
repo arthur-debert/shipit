@@ -1,6 +1,10 @@
 """Unit tests for install — reconciliation decisions, block splicing, and the verb."""
 
 import json
+import os
+import stat
+import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -142,6 +146,76 @@ def test_load_units_has_skills_agents_and_bootstrap():
     assert agents.kind == "block"
     boot = next(u for u in units if u.key == "bin/shipit")
     assert boot.executable is True
+
+
+def _write_launcher(dir_path: Path) -> Path:
+    """Write the MANAGED bin/shipit launcher (the shipped template) into dir_path/shipit."""
+    unit = next(u for u in install.load_units() if u.key == "bin/shipit")
+    binp = dir_path / "shipit"
+    binp.write_bytes(unit.content)
+    binp.chmod(binp.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+    return binp
+
+
+def _path_without_shipit() -> str:
+    """The real PATH minus any dir that already holds a `shipit` — so the launcher's
+    shebang tools (bash/env/realpath) are present but the ONLY `shipit` the test sees is
+    the one(s) it plants. Prevents the ambient pixi-env shipit from shadowing the guard."""
+    keep = [
+        d
+        for d in os.environ.get("PATH", "").split(os.pathsep)
+        if d and not (Path(d) / "shipit").exists()
+    ]
+    return os.pathsep.join(keep)
+
+
+def test_bootstrap_launcher_does_not_self_exec_when_its_dir_is_on_path(tmp_path: Path):
+    # Fork-bomb guard (codex/agy ERROR): with the launcher's OWN dir the only one on
+    # PATH, a bare `command -v shipit` resolves to the launcher itself — exec'ing it
+    # would loop forever. The launcher must detect the self-match, refuse to exec
+    # itself, and fail loud (exit 127). `os.defpath` supplies bash/env without a real
+    # `shipit`; the 10s timeout would trip (test failure) if it ever self-loops.
+    binhome = tmp_path / "bin"
+    binhome.mkdir()
+    launcher = _write_launcher(binhome)
+
+    proc = subprocess.run(
+        [str(launcher), "--version"],
+        env={"PATH": str(binhome) + os.pathsep + _path_without_shipit()},
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert proc.returncode == 127
+    assert "only this in-repo launcher" in proc.stderr
+
+
+def test_bootstrap_launcher_execs_the_real_shipit_elsewhere_on_path(tmp_path: Path):
+    # Normal case preserved: with the launcher's dir first on PATH (a self-match it
+    # skips) and a REAL shipit later on PATH, the launcher execs the real one.
+    binhome = tmp_path / "bin"
+    binhome.mkdir()
+    _write_launcher(binhome)
+
+    realdir = tmp_path / "realbin"
+    realdir.mkdir()
+    real = realdir / "shipit"
+    real.write_text('#!/usr/bin/env bash\necho "REAL-SHIPIT-RAN $*"\n')
+    real.chmod(real.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+
+    proc = subprocess.run(
+        [str(binhome / "shipit"), "arg1"],
+        env={
+            "PATH": os.pathsep.join(
+                [str(binhome), str(realdir), _path_without_shipit()]
+            )
+        },
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert proc.returncode == 0
+    assert "REAL-SHIPIT-RAN arg1" in proc.stdout
 
 
 # --------------------------------------------------------------------------

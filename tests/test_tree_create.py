@@ -46,15 +46,33 @@ def _git(args: list[str], cwd: Path) -> str:
 
 @pytest.fixture
 def remote(tmp_path: Path) -> Path:
-    """A real upstream repo (stands in for the GitHub URL) with one commit on main."""
+    """A real upstream repo (stands in for the GitHub URL) with one commit on main.
+
+    It carries an ONBOARDED ``.shipit.toml`` (a ``[shipit]``/``[managed]`` block) because
+    provisioning now FAILS CLOSED on a non-onboarded repo (#210): a repo shipit cuts Trees
+    from is onboarded by definition, so the shared fixture reflects that steady state. The
+    clone-mechanics tests stub the provisioning subprocess itself via :func:`_stub_provision`.
+    """
     repo = tmp_path / "remote"
     repo.mkdir()
     _git(["init"], cwd=repo)
     (repo / "README.md").write_text("hello tree\n")
+    (repo / ".shipit.toml").write_text('[shipit]\nversion = "seed"\n\n[managed]\n')
     _git(["add", "."], cwd=repo)
     _git(["commit", "-m", "init"], cwd=repo)
     _git(["branch", "-M", "main"], cwd=repo)
     return repo
+
+
+def _stub_provision(monkeypatch):
+    """No-op the provisioning subprocess boundary.
+
+    ``create`` runs ``shipit install`` / ``pixi install`` / ``npm ci`` through
+    :func:`run_provision`; clone-mechanics tests exercise the REAL git clone (from the
+    onboarded ``remote`` fixture, so provisioning is not fail-closed) but must never
+    spawn those real subprocesses.
+    """
+    monkeypatch.setattr(create_mod, "run_provision", lambda *a, **k: None)
 
 
 @pytest.fixture
@@ -77,8 +95,9 @@ def _spec(tmp_path: Path) -> TreeSpec:
 
 
 def test_create_produces_an_independent_dissociated_clone(
-    tmp_path: Path, remote: Path, reference: Path
+    tmp_path: Path, remote: Path, reference: Path, monkeypatch
 ):
+    _stub_provision(monkeypatch)
     spec = _spec(tmp_path)
     tree = create(spec, source_repo=str(reference), github_url=str(remote))
 
@@ -113,8 +132,9 @@ def test_create_produces_an_independent_dissociated_clone(
 
 
 def test_create_from_source_resolves_origin_url(
-    tmp_path: Path, remote: Path, reference: Path
+    tmp_path: Path, remote: Path, reference: Path, monkeypatch
 ):
+    _stub_provision(monkeypatch)
     # create_from_source clones from the URL the reference checkout already uses.
     spec = _spec(tmp_path)
     tree = create_from_source(spec, source_repo=str(reference))
@@ -125,7 +145,7 @@ def test_create_from_source_resolves_origin_url(
 
 
 def test_tree_satisfies_the_critical_isolation_invariants(
-    tmp_path: Path, remote: Path, reference: Path
+    tmp_path: Path, remote: Path, reference: Path, monkeypatch
 ):
     """The three non-negotiable invariants of the Tree the WorktreeCreate hook returns
     (ADR-0014), pinned as real assertions on a real git clone so a regression in the
@@ -139,6 +159,7 @@ def test_tree_satisfies_the_critical_isolation_invariants(
     (c) it borrows NO objects — ``--dissociate`` copied them, so there is no
         ``objects/info/alternates`` link back to the reference.
     """
+    _stub_provision(monkeypatch)
     trees_root = tmp_path / "trees"
     spec = _spec(tmp_path)  # spec.root == tmp_path / "trees"
     tree = create(spec, source_repo=str(reference), github_url=str(remote))
@@ -256,6 +277,44 @@ def test_create_rolls_back_partial_tree_on_failure(
     monkeypatch.setattr(gh, "git_checkout_new_branch", boom)
 
     with pytest.raises(gh.GhError):
+        create(spec, source_repo=str(reference), github_url=str(remote))
+
+    dest = (
+        tmp_path
+        / "trees"
+        / "acme"
+        / "widget"
+        / "issues"
+        / "123"
+        / "work-smoke-abcd1234"
+    )
+    assert not dest.exists()
+
+
+def test_create_fails_closed_and_rolls_back_on_a_non_onboarded_source(
+    tmp_path: Path, remote: Path, reference: Path, monkeypatch
+):
+    # #210 end-to-end: cloning a Tree from a repo with NO managed block fails closed at
+    # provisioning — `create` raises the clean ValueError AND rolls back the half-built
+    # leaf, so a non-onboarded source never leaves a partial Tree on disk. (The `remote`
+    # fixture is onboarded by default; strip its marker to make it non-onboarded.)
+    (remote / ".shipit.toml").unlink()
+    _git(["commit", "-am", "de-onboard"], cwd=remote)
+
+    # Fail LOUD if provisioning is even attempted: the fail-closed check must raise
+    # BEFORE any provisioning subprocess. Stubbing `run_provision` to blow up means a
+    # regressed impl (one that DIDN'T fail closed) surfaces here as "provisioning ran"
+    # instead of silently spawning a real `shipit install` / `pixi install` during the
+    # unit run.
+    def _must_not_provision(*_a, **_k):
+        raise AssertionError(
+            "fail-closed breached: provisioning ran on a non-onboarded repo"
+        )
+
+    monkeypatch.setattr(create_mod, "run_provision", _must_not_provision)
+
+    spec = _spec(tmp_path)
+    with pytest.raises(ValueError, match="not onboarded — run `shipit install`"):
         create(spec, source_repo=str(reference), github_url=str(remote))
 
     dest = (
@@ -388,17 +447,20 @@ def test_create_copies_treeinclude_and_provisions_deps(tmp_path: Path, monkeypat
 def test_create_skips_provisioning_steps_whose_manifest_is_absent(
     tmp_path: Path, monkeypatch
 ):
-    # A pixi-only repo runs ONLY `pixi install` — no shipit install, no npm ci.
+    # An onboarded repo with pixi.toml but NO package.json runs the managed-set reconcile
+    # + `pixi install`, and SKIPS `npm ci` — each dep step still gated on its manifest
+    # existing. (The install step no longer skips: an onboarded repo always reconciles;
+    # a non-onboarded one fails closed — see test_provision_fails_closed_*.)
     source = tmp_path / "source"
     source.mkdir()
-    _mock_git_boundary(monkeypatch, manifests=["pixi.toml"])
+    _mock_git_boundary(monkeypatch, manifests=[".shipit.toml", "pixi.toml"])
 
     calls: list[list[str]] = []
     monkeypatch.setattr(create_mod, "run_provision", lambda cmd, **k: calls.append(cmd))
     monkeypatch.setattr(create_mod, "_st_dev", lambda p: 1)
 
     create(_spec(tmp_path), source_repo=str(source), github_url="url")
-    assert calls == [["pixi", "install"]]
+    assert calls == [["shipit", "install", ".", "--local"], ["pixi", "install"]]
 
 
 def test_is_leaked_env_var_scrubs_build_env_but_keeps_sccache_backend_vars():
@@ -431,11 +493,11 @@ def test_provision_env_scrubs_leaked_parent_build_env(monkeypatch):
     assert env["SCCACHE_GCS_KEY"] == "creds"
 
 
-def test_provision_skips_install_when_repo_not_onboarded(tmp_path: Path, monkeypatch):
-    # #205: a `.shipit.toml` that carries only consumer policy (no [shipit]/[managed]
-    # block) is NOT onboarded. `_provision` must NOT run `shipit install` — doing so
-    # would onboard the repo fresh on every spawn and commit the onboarding artifacts
-    # into the Tree branch. The pixi step (its manifest present) still runs.
+def test_provision_fails_closed_when_repo_not_onboarded(tmp_path: Path, monkeypatch):
+    # #210 (revisiting #206): a `.shipit.toml` that carries only consumer policy (no
+    # [shipit]/[managed] block) is NOT onboarded. `_provision` now FAILS CLOSED — it
+    # raises a clean ValueError pointing at `shipit install`, rather than silently
+    # skipping the reconcile and running the other dep steps. Nothing is provisioned.
     dest = tmp_path / "tree"
     dest.mkdir()
     (dest / config.CONFIG_NAME).write_text('[secrets]\nGH_PAT = { env = "X" }\n')
@@ -445,14 +507,19 @@ def test_provision_skips_install_when_repo_not_onboarded(tmp_path: Path, monkeyp
     monkeypatch.setattr(create_mod, "run_provision", lambda cmd, **k: calls.append(cmd))
     monkeypatch.setattr(create_mod, "_st_dev", lambda p: 1)
 
-    create_mod._provision(dest, trees_root=tmp_path / "trees")
-    assert calls == [["pixi", "install"]]
+    with pytest.raises(ValueError, match="not onboarded — run `shipit install`"):
+        create_mod._provision(dest, trees_root=tmp_path / "trees")
+    # Fail-closed: NOT even the manifest-gated `pixi install` runs on a non-onboarded repo.
+    assert calls == []
 
 
-def test_provision_runs_install_when_repo_onboarded(tmp_path: Path, monkeypatch):
+def test_provision_is_clean_noop_reconcile_when_repo_onboarded(
+    tmp_path: Path, monkeypatch
+):
     # An ALREADY-ONBOARDED `.shipit.toml` (it carries the [shipit]/[managed] block)
-    # DOES get the managed-set reconcile — reconciling an existing managed set is the
-    # legitimate #170 behavior.
+    # provisions cleanly: the managed-set reconcile runs (a no-op once the set is
+    # current) — reconciling an existing managed set is the legitimate #170 behavior,
+    # and the onboarded path is exactly the one fail-closed protects.
     dest = tmp_path / "tree"
     dest.mkdir()
     (dest / config.CONFIG_NAME).write_text('[shipit]\nversion = "seed"\n\n[managed]\n')
@@ -569,7 +636,9 @@ def test_create_warns_when_pixi_cache_on_other_filesystem(
 ):
     source = tmp_path / "source"
     source.mkdir()
-    _mock_git_boundary(monkeypatch, manifests=["pixi.toml"])
+    # Onboarded (a [shipit] block) so provisioning reaches the pixi step and its
+    # cache-filesystem check — a non-onboarded repo would fail closed first (#210).
+    _mock_git_boundary(monkeypatch, manifests=[".shipit.toml", "pixi.toml"])
     monkeypatch.setattr(create_mod, "run_provision", lambda *a, **k: None)
 
     cache = tmp_path / "cache"
