@@ -22,6 +22,16 @@ Three sinks, chosen for where shipit runs (PRD ``docs/prd/obs01-logging.md``):
   the ``(owner, repo)`` namespace are injectable so tests cross the boundary
   without writing to a real ``$HOME``.
 
+The file sink emits **JSONL** (ADR-0029, agents-first): one JSON object per
+record with flat top-level fields — ``ts`` (ISO-8601 UTC), ``level``,
+``logger``, ``msg``, plus any bound domain keys, present-when-bound (absent,
+not null). The console / CI surfaces stay human-formatted. Both renderings
+hang off the ONE processor pipeline (:data:`_PIPELINE`: context-merge →
+enrich → redact seam), applied per sink by structlog's
+:class:`~structlog.stdlib.ProcessorFormatter` — attached as each handler's
+formatter, so untouched stdlib ``logging.getLogger`` call sites participate
+via the foreign-record chain and only the final renderer differs.
+
 The three level controls are independent: the file sink is always verbose
 (DEBUG); the console is quiet unless ``-v``; the CI sink is verbose. Every
 handler this module attaches carries a ``shipit-`` name prefix so a repeated
@@ -34,11 +44,13 @@ from __future__ import annotations
 import logging
 import os
 import sys
-from collections.abc import Mapping
+from collections.abc import Mapping, MutableMapping
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from typing import Any
 
 import platformdirs
+import structlog
 
 from . import gh
 
@@ -68,16 +80,109 @@ BACKUP_COUNT = 3
 #: idempotency sweep covers it too.
 _FILE_HANDLER_NAME = _HANDLER_PREFIX + "file"
 
-#: The verbose file record format — timestamp, level, logger, message.
-_FILE_FORMAT = "%(asctime)s %(levelname)-7s %(name)s %(message)s"
+# --------------------------------------------------------------------------
+# The processor pipeline — the ONE chain both renderings share (ADR-0029)
+# --------------------------------------------------------------------------
 
-#: The plain record format shared by the console / CI surface sinks.
-_SURFACE_FORMAT = "%(levelname)s %(name)s: %(message)s"
+
+def _redact(
+    logger: object, method_name: str, event_dict: MutableMapping[str, Any]
+) -> MutableMapping[str, Any]:
+    """The redaction seam (ADR-0028/0029): every record passes through here
+    after enrichment and before rendering. A no-op until the in-repo redactor
+    lands; it exists NOW so redaction slots into the pipeline without any sink
+    rewiring."""
+    return event_dict
+
+
+#: The one processor pipeline every sink shares — context-merge (bound domain
+#: keys land on the record, absent when unbound) → enrichment (``logger``,
+#: ``level``, ISO-8601-UTC ``ts``, exceptions flattened to a string) → the
+#: redact seam. Applied via :class:`~structlog.stdlib.ProcessorFormatter`'s
+#: ``foreign_pre_chain``, so records from untouched stdlib ``logging`` call
+#: sites (all of shipit today) flow through it; only the renderer differs per
+#: sink (JSONL for the file, human for the surfaces).
+_PIPELINE = (
+    structlog.contextvars.merge_contextvars,
+    structlog.stdlib.add_logger_name,
+    structlog.stdlib.add_log_level,
+    structlog.processors.TimeStamper(fmt="iso", utc=True, key="ts"),
+    structlog.processors.format_exc_info,
+    _redact,
+)
+
+
+def _flatten_to_scalars(
+    logger: object, method_name: str, event_dict: MutableMapping[str, Any]
+) -> MutableMapping[str, Any]:
+    """Enforce the flat-record contract (ADR-0029) at the JSONL render seam.
+
+    Any value that is not a JSON scalar (``str``/``int``/``float``/``bool``/
+    ``None``) degrades to its ``repr`` — so a bound container (dict, list,
+    tuple, …) can never nest the record, and a non-serializable object can
+    never crash the log call. One mechanism covers both, which is why the
+    renderer below needs no ``default=`` escape hatch.
+    """
+    for key, value in event_dict.items():
+        if value is not None and not isinstance(value, (str, int, float, bool)):
+            event_dict[key] = repr(value)
+    return event_dict
+
+
+def _file_formatter() -> logging.Formatter:
+    """The JSONL renderer for the file sink: one flat JSON object per record.
+
+    ``event`` is renamed to ``msg`` (the contract's human-readable message
+    field), every value is forced to a JSON scalar
+    (:func:`_flatten_to_scalars` — flat fields, nothing nested, contract
+    enforced rather than assumed), and unbound keys are simply absent.
+    """
+    return structlog.stdlib.ProcessorFormatter(
+        foreign_pre_chain=_PIPELINE,
+        processors=[
+            structlog.stdlib.ProcessorFormatter.remove_processors_meta,
+            structlog.processors.EventRenamer("msg"),
+            _flatten_to_scalars,
+            structlog.processors.JSONRenderer(),
+        ],
+    )
+
+
+def _render_surface(
+    logger: object, method_name: str, event_dict: MutableMapping[str, Any]
+) -> str:
+    """Render a processed record for the human surfaces (console / CI).
+
+    Preserves the historical shape — ``LEVEL logger: message`` — with any bound
+    domain keys appended as ``key=value`` and an exception's traceback on the
+    following lines (mirroring stdlib formatting). No timestamp: the terminal
+    is live; the durable timestamped record is the file sink's job.
+    """
+    level = str(event_dict.pop("level", "")).upper()
+    name = event_dict.pop("logger", "")
+    message = event_dict.pop("event", "")
+    event_dict.pop("ts", None)
+    exception = event_dict.pop("exception", None)
+    line = f"{level} {name}: {message}"
+    extras = " ".join(f"{k}={v}" for k, v in sorted(event_dict.items()))
+    if extras:
+        line = f"{line} [{extras}]"
+    if exception:
+        line = f"{line}\n{exception}"
+    return line
 
 
 def _surface_formatter() -> logging.Formatter:
-    """The plain record format shared by the console / CI surface sinks."""
-    return logging.Formatter(_SURFACE_FORMAT)
+    """The human-format renderer shared by the console / CI surface sinks —
+    the same :data:`_PIPELINE` as the file sink, differing only in the final
+    render step."""
+    return structlog.stdlib.ProcessorFormatter(
+        foreign_pre_chain=_PIPELINE,
+        processors=[
+            structlog.stdlib.ProcessorFormatter.remove_processors_meta,
+            _render_surface,
+        ],
+    )
 
 
 # --------------------------------------------------------------------------
@@ -191,8 +296,9 @@ def build_file_handler(
 
     A :class:`~logging.handlers.RotatingFileHandler` bounded at :data:`MAX_BYTES`
     × :data:`BACKUP_COUNT` so it rolls over rather than growing without limit. It
-    emits at ``DEBUG`` (the verbose record), independent of the console level. The
-    per-repo directory is created on demand.
+    emits at ``DEBUG`` (the verbose record), independent of the console level, as
+    JSONL (:func:`_file_formatter` — one flat JSON object per record, ADR-0029).
+    The per-repo directory is created on demand.
     """
     log_dir = resolve_log_dir(owner_repo, base_dir=base_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -204,7 +310,7 @@ def build_file_handler(
     )
     handler.set_name(_FILE_HANDLER_NAME)
     handler.setLevel(logging.DEBUG)
-    handler.setFormatter(logging.Formatter(_FILE_FORMAT))
+    handler.setFormatter(_file_formatter())
     return handler
 
 
