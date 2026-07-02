@@ -1,10 +1,12 @@
-"""Unit tests for ``harness.worktree_adapter`` — the demoted WorktreeCreate
-adapter's PURE branch resolution (ADR-0017).
+"""Unit tests for ``harness.worktree_adapter`` — the WorktreeCreate adapter's PURE
+resolution (ADR-0017, elevated by ADR-0027).
 
-Pins the load-bearing truth table: the session-stable epic marker yields
-``<epic>/agent-<id>``; a missing OR malformed marker falls back safely to an
-epic-less ``agent-<id>`` (so the spawn still lands in a real Tree); and a raw agent
-id is normalized into one safe ``agent-<id>`` ref component.
+Pins the load-bearing truth tables: the coordinator-vs-helper discriminator
+(``prompt_id`` absent ⇒ coordinator launch — the SES02-WS01 spike); the
+session-stable epic marker yields ``<epic>/agent-<id>``; a missing OR malformed
+marker falls back safely to an epic-less ``agent-<id>`` (so the spawn still lands
+in a real Tree); and a raw agent id is normalized into one safe ``agent-<id>`` ref
+component.
 """
 
 from __future__ import annotations
@@ -124,3 +126,50 @@ def test_resolve_epic_malformed_override_degrades_to_epicless_not_cwd(override):
     # is `agent-abc123`, NOT `TRE04/agent-abc123`.
     epic = wa.resolve_epic(override, "TRE04/WS01")
     assert wa.resolve_branch(epic, "abc123") == "agent-abc123"
+
+
+# --- is_coordinator_launch: the ADR-0027 discriminator --------------------------
+#
+# The SES02-WS01 spike (docs/dev/ses02-worktreecreate-discriminator-spike.md, CC
+# 2.1.198): a top-level `claude --worktree` launch fires the hook WITHOUT a
+# `prompt_id` (no prompt exists at process startup); an in-CC
+# Agent(isolation:"worktree") spawn always carries one.
+
+
+def test_coordinator_launch_payload_has_no_prompt_id():
+    # The verbatim field set the spike captured for a top-level --worktree launch.
+    payload = {
+        "session_id": "c6010bf9",
+        "transcript_path": "/t/c6010bf9.jsonl",
+        "cwd": "/repo",
+        "hook_event_name": "WorktreeCreate",
+        "name": "sess-20260702-121314-4242",
+    }
+    assert wa.is_coordinator_launch(payload) is True
+
+
+def test_helper_spawn_payload_carries_prompt_id():
+    # The verbatim field set the spike captured for an in-CC worktree spawn.
+    payload = {
+        "session_id": "571d0dfe",
+        "transcript_path": "/t/571d0dfe.jsonl",
+        "cwd": "/repo",
+        "prompt_id": "c2f52d57-6eb7-469b-b8ef-3001e450ecaf",
+        "hook_event_name": "WorktreeCreate",
+        "name": "agent-ac36b2efb04c97d80",
+    }
+    assert wa.is_coordinator_launch(payload) is False
+
+
+@pytest.mark.parametrize("prompt_id", [None, ""])
+def test_empty_prompt_id_counts_as_absent(prompt_id):
+    # A null/empty prompt_id is no prompt — classified as the coordinator launch.
+    assert wa.is_coordinator_launch({"name": "x", "prompt_id": prompt_id}) is True
+
+
+def test_discriminator_is_the_field_not_the_name_prefix():
+    # The `agent-`/`sess-` name conventions are corroborating evidence only; the
+    # payload FIELD decides. A pathological `-w agent-foo` launch (no prompt_id) is
+    # still the coordinator; a helper spawn is a helper whatever its name says.
+    assert wa.is_coordinator_launch({"name": "agent-foo"}) is True
+    assert wa.is_coordinator_launch({"name": "sess-foo", "prompt_id": "p1"}) is False

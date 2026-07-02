@@ -163,6 +163,29 @@ real branch; nothing is lost but the cosmetic dir↔branch symmetry.
   no activatable toolchain, extensible per toolchain), not a hardcoded `pixi shell-hook`
   that would error on a non-pixi consumer.
 
-Layers A + D implemented in SES01 (WS01 `harness/activation.py` + `verbs/hook/sessionstart.py`;
-WS02 `data/bootstrap/claude-start` + `shipit install` wiring); Layers B (ephemeral Tree) and C
-(liveness/gc) pending (SES02).
+All four layers implemented. Layers A + D in SES01 (WS01 `harness/activation.py` +
+`verbs/hook/sessionstart.py`; WS02 `data/bootstrap/claude-start` + `shipit install` wiring).
+Layer B (ephemeral Tree) in SES02-WS01: `tree/layout.py` ephemeral shape;
+`verbs/hook/worktreecreate.py` forks on `harness/worktree_adapter.is_coordinator_launch`
+(`prompt_id` absent ⇒ coordinator). Layer C (liveness/gc) in SES02-WS02:
+`session/liveness.py` pidfile; the `tree/cleanup.classify` ephemeral ladder;
+`verbs/hook/worktreeremove.py` fast path.
+
+**Amendment (SES02-WS04, #232): the rung-1 floor excludes exactly the recorded
+provisioning commit.** SES02 validation found that in a managed-set *drift window*
+(the repo's committed managed set lags the running shipit — every upgrade), Tree
+provisioning's fail-closed `shipit install --local` commits the reconcile on the
+just-cut `ephemeral/<id>` branch. That shipit-made commit exists on no remote, so
+rung 1 ("dirty ∨ unpushed → KEEP") — deliberately upstream-independent and
+liveness-independent — stranded every abandoned drift-window session Tree
+**forever**: even the rung-4 hard cap requires "pushed". Decision: provisioning
+records the SHA(s) of the commit it makes in `.git/shipit-provision.json`
+(`tree/provision.py`, beside the liveness pidfile and inside `.git` for the same
+reason — it must never dirty the tree), and the ephemeral floor (plus the
+`WorktreeRemove` fast path) subtracts **exactly those SHAs** from the local-only
+commit list. Identity is the SHA, never the commit message: a rebase/amend changes
+the SHA, fails the exclusion, and falls back to KEEP — the safe direction. Missing
+or unreadable metadata, or ANY other local-only commit, likewise keeps: the floor
+stays absolute for real work. Rejected: not committing the managed set in ephemeral
+Trees (just moves the stranding from `unpushed` to `dirty`), and accept-and-document
+(leaves every drift-window Tree stranded, defeating Layer C).

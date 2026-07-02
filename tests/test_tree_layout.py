@@ -498,6 +498,103 @@ def test_freeform_rejects_branch_that_sanitizes_to_empty(bad_branch):
 
 
 # --------------------------------------------------------------------------
+# ephemeral shape — the coordinator's session Tree (ADR-0027): branch
+# ephemeral/<id> at birth, dir <root>/<org>/<repo>/ephemeral/<id> (leaf = the id,
+# NO hash), base origin/main
+# --------------------------------------------------------------------------
+
+
+def _ephemeral_spec(**over) -> TreeSpec:
+    base = dict(
+        org="acme",
+        repo="widget",
+        agent_hash="deadbeef",
+        ephemeral="sess-20260702-121314-4242",
+        root=ROOT,
+    )
+    base.update(over)
+    return TreeSpec(**base)
+
+
+def test_ephemeral_branch_is_ephemeral_id():
+    assert plan(_ephemeral_spec()).branch == "ephemeral/sess-20260702-121314-4242"
+
+
+def test_ephemeral_base_is_origin_main():
+    # At launch the work is unknown — there is nothing to bind the Tree to but main.
+    assert plan(_ephemeral_spec()).base == "origin/main"
+
+
+def test_ephemeral_dir_is_ephemeral_kind_with_id_leaf_and_no_hash():
+    # Ephemeral-by-path: the dir leaf IS the session id — the Tree's identity is
+    # the session, so the leaf carries NO agent hash (the launcher-minted id is
+    # per-launch unique; the id disambiguates, a hash would be noise).
+    p = plan(_ephemeral_spec())
+    assert p.dir == ROOT / "acme" / "widget" / "ephemeral" / "sess-20260702-121314-4242"
+    assert "deadbeef" not in p.dir.name
+
+
+def test_ephemeral_dir_and_branch_mirror_at_birth():
+    # The id rides BOTH the dir leaf and the branch at birth (the branch then moves
+    # to the real work; the dir stays) — matched by construction.
+    p = plan(_ephemeral_spec(ephemeral="My Session"))
+    assert p.branch == f"ephemeral/{p.dir.name}"
+
+
+def test_ephemeral_id_is_sanitized_like_every_other_leaf():
+    # The id becomes a ref component AND the dir leaf, so it gets the same
+    # [a-z0-9-] allow-list normalization as sessions/slugs.
+    p = plan(_ephemeral_spec(ephemeral="Sess 42/Foo.Bar"))
+    assert p.branch == "ephemeral/sess-42-foo-bar"
+    assert p.dir.name == "sess-42-foo-bar"
+
+
+@pytest.mark.parametrize("bad_id", ["", "   ", "///", " . / : ", "@{", "~"])
+def test_ephemeral_rejects_id_that_sanitizes_to_empty(bad_id):
+    # A degenerate id would yield a bare 'ephemeral/' ref and the kind dir as the
+    # leaf — rejected loud (the hook synthesizes a random id before calling in).
+    with pytest.raises(ValueError, match="session id"):
+        plan(_ephemeral_spec(ephemeral=bad_id))
+
+
+def test_ephemeral_branch_helper_builds_and_validates():
+    # The pure helper the planner and any direct caller share: one place builds
+    # AND validates the ephemeral/<id> branch.
+    assert layout.ephemeral_branch("sess-1-2") == "ephemeral/sess-1-2"
+    assert plan(
+        _ephemeral_spec(ephemeral="sess-1-2")
+    ).branch == layout.ephemeral_branch("sess-1-2")
+
+
+def test_ephemeral_branch_helper_non_str_raises_valueerror_not_attributeerror():
+    # Parity with issue_branch/work_stream_branch: a non-str honors the documented
+    # ValueError contract rather than leaking an AttributeError from sanitize_slug.
+    with pytest.raises(ValueError, match="session id"):
+        layout.ephemeral_branch(None)
+
+
+@pytest.mark.parametrize(
+    "session_id",
+    ["sess-20260702-121314-4242", "My Session", "spike/foo", "a@{b", "v1.2"],
+)
+def test_ephemeral_branch_is_always_a_valid_git_ref_or_rejected(session_id):
+    # Same guarantee as the issue shape: whatever ephemeral_branch RETURNS, git
+    # itself accepts; anything it cannot normalize it REJECTS. No middle ground.
+    try:
+        branch = layout.ephemeral_branch(session_id)
+    except ValueError:
+        return
+    assert branch.startswith("ephemeral/")
+    assert _git_accepts_branch(branch), f"git rejected {branch!r}"
+
+
+def test_ephemeral_kind_constant_names_the_dir_segment():
+    # The cleanup gc rule (SES02 Layer C) keys off this segment; pin that the
+    # planner and the constant agree.
+    assert plan(_ephemeral_spec()).dir.parent.name == layout.EPHEMERAL_KIND
+
+
+# --------------------------------------------------------------------------
 # the hash NEVER lands on the branch, for ANY shape
 # --------------------------------------------------------------------------
 
@@ -508,6 +605,7 @@ def test_freeform_rejects_branch_that_sanitizes_to_empty(bad_branch):
         _issue_spec(agent_hash="cafef00d", slug="x"),
         _epic_spec(agent_hash="cafef00d", slug="x"),
         _freeform_spec(agent_hash="cafef00d", branch="spike/foo"),
+        _ephemeral_spec(agent_hash="cafef00d"),
     ],
 )
 def test_hash_never_appears_in_any_branch(spec):
@@ -531,6 +629,9 @@ def test_plan_rejects_no_shape():
         dict(issue=1, branch="x"),
         dict(issue=1, epic="HAR02", ws=2),
         dict(branch="x", epic="HAR02", ws=2),
+        dict(ephemeral="sess-1", issue=1),
+        dict(ephemeral="sess-1", branch="x"),
+        dict(ephemeral="sess-1", epic="HAR02", ws=2),
     ],
 )
 def test_plan_rejects_more_than_one_shape(over):
@@ -569,3 +670,39 @@ def test_plan_uses_central_root_when_spec_root_is_none(monkeypatch):
         p.dir
         == Path("/env/trees") / "acme" / "widget" / "issues" / "123" / "work-deadbeef"
     )
+
+
+# --- tree_kind: the path→reclaim-family mapping (ADR-0018/0027) -----------------
+
+
+def test_tree_kind_maps_the_leaf_parent_segment():
+    assert layout.tree_kind("/t/acme/widget/review/tre03-ws03") == layout.REVIEW_KIND
+    assert layout.tree_kind("/t/acme/widget/ephemeral/sess-1") == layout.EPHEMERAL_KIND
+    for write in (
+        "/t/acme/widget/epics/HAR02/WS02-deadbeef",
+        "/t/acme/widget/issues/123/work-deadbeef",
+        "/t/acme/widget/branches/feat-x-deadbeef",
+    ):
+        assert layout.tree_kind(write) == layout.WRITE_KIND
+
+
+def test_tree_kind_never_matches_mid_path_segments():
+    # Kind is the leaf's PARENT only: an org/repo named after a kind must not
+    # smuggle a write Tree onto another kind's reclaim ladder.
+    assert layout.tree_kind("/t/review/widget/branches/x-aa") == layout.WRITE_KIND
+    assert layout.tree_kind("/t/ephemeral/widget/branches/x-aa") == layout.WRITE_KIND
+
+
+def test_tree_kind_epic_or_issue_named_after_a_kind_is_still_a_write_tree():
+    # An epic write Tree is epics/<epic>/<leaf>, so the leaf's PARENT is the
+    # free-form epic code — and `ephemeral`/`review` are valid epic codes (agy
+    # review). The nested-namespace grandparent check must keep such Trees on the
+    # write ladder: on the ephemeral ladder a clean, pushed one would be removable
+    # after an hour idle, and `sessionstart` would hand it a pidfile.
+    assert (
+        layout.tree_kind("/t/acme/widget/epics/ephemeral/WS01-aa") == layout.WRITE_KIND
+    )
+    assert layout.tree_kind("/t/acme/widget/epics/review/WS01-aa") == layout.WRITE_KIND
+    # The issues namespace has the same nested shape (issues/<id>/<leaf>); its ids
+    # are numeric today, but the guard is structural, not name-based.
+    assert layout.tree_kind("/t/acme/widget/issues/ephemeral/w-aa") == layout.WRITE_KIND

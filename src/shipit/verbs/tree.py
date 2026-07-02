@@ -25,7 +25,8 @@ from pathlib import Path
 import click
 
 from .. import gh, proc
-from ..tree import cleanup, layout, registry
+from ..session import liveness
+from ..tree import cleanup, layout, provision, registry
 from ..tree.cleanup import Cleanup
 from ..tree.create import Tree, create, new_agent_hash
 from ..tree.layout import TreeSpec
@@ -262,6 +263,7 @@ def run_list() -> int:
 #: A new column is one tuple here — the renderer widths every column to its content.
 _LIST_COLUMNS: tuple[tuple[str, str], ...] = (
     ("PATH", "path"),
+    ("KIND", "kind"),
     ("BRANCH", "branch"),
     ("BASE", "base"),
     ("AGE", "age"),
@@ -291,6 +293,10 @@ def _row_cells(record: TreeRecord, *, now: float) -> list[str]:
     """The rendered string cells for one Tree row, in :data:`_LIST_COLUMNS` order."""
     values = {
         "path": record.path,
+        # The Tree's reclaim family — write / review / ephemeral — is first-class
+        # fleet state (ADR-0018/0027): each kind takes a different gc ladder, so
+        # the listing says which one applies rather than leaving it implied by path.
+        "kind": layout.tree_kind(record.path),
         "branch": record.branch or "(detached)",
         "base": _base_cell(record),
         "age": _format_age(now - record.mtime),
@@ -583,9 +589,50 @@ def _scan_and_classify(
         now=time.time(),
         pr_states=pr_states,
         max_age_seconds=max_age_seconds,
+        live_sessions=_live_sessions(records),
+        provision_shas=_provision_shas(records),
     )
     unknown = sum(1 for state in pr_states.values() if state == "UNKNOWN")
     return decision, len(records), unknown
+
+
+def _live_sessions(records: list[TreeRecord]) -> dict[str, bool]:
+    """Per-ephemeral-Tree session liveness — the ``live_sessions`` input ``classify`` needs.
+
+    For each *ephemeral* Tree (the only kind whose ladder consults liveness), read
+    its pidfile and decide :func:`~shipit.session.liveness.is_live` against the
+    real OS probe. No pidfile / an unreadable one reads as NOT live — the safe
+    direction, because the pure ladder still protects such a Tree through its
+    liveness-independent rungs (the dirty/unpushed floor, the grace window). Other
+    kinds are simply absent from the map (``classify`` defaults them to not-live,
+    and their ladders never look).
+    """
+    live: dict[str, bool] = {}
+    for record in records:
+        if layout.tree_kind(record.path) != layout.EPHEMERAL_KIND:
+            continue
+        session = liveness.read_pidfile(record.path)
+        live[record.path] = session is not None and liveness.is_live(
+            session, liveness.os_probe
+        )
+    return live
+
+
+def _provision_shas(records: list[TreeRecord]) -> dict[str, frozenset[str]]:
+    """Per-ephemeral-Tree provisioning-commit SHAs — ``classify``'s exclusion input.
+
+    For each *ephemeral* Tree (the only ladder that consults the exclusion, #232),
+    read the ``.git/shipit-provision.json`` record its birth provisioning wrote.
+    A missing or unreadable record reads as the EMPTY set — nothing excluded, so
+    the pure ladder's unpushed floor keeps the Tree: the safe direction. Other
+    kinds are simply absent from the map (``classify`` defaults them to empty,
+    and their ladders never exclude).
+    """
+    return {
+        record.path: provision.read_provision_shas(record.path)
+        for record in records
+        if layout.tree_kind(record.path) == layout.EPHEMERAL_KIND
+    }
 
 
 def _pr_state(record: TreeRecord) -> str | None:

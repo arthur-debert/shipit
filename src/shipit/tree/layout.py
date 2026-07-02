@@ -6,15 +6,19 @@ on disk, the **branch** to check out, and the **base** ref to cut it from — wi
 no I/O, so the truth table is unit-tested directly (Testing Decisions in the PRD).
 
 :func:`plan` resolves EVERY spec shape — ``--issue N [--session S] [--slug S]``,
-``--epic E --ws N [--slug S]``, and freeform ``--branch NAME`` (naming.lex §3).
-:class:`TreeSpec` stays a single typed entry point: adding a shape is adding a field
-plus a branch in :func:`plan`, not reshaping callers.
+``--epic E --ws N [--slug S]``, freeform ``--branch NAME``, and the coordinator's
+``ephemeral`` session Tree (naming.lex §3; ADR-0027). :class:`TreeSpec` stays a
+single typed entry point: adding a shape is adding a field plus a branch in
+:func:`plan`, not reshaping callers.
 
 The three load-bearing invariants the tests pin (from the PRD):
 
 - the **agent hash lands on the dir, never on the branch** — two sessions sharing
   one branch is fine, two Trees in one dir is not; the hash disambiguates the dir
-  while the branch stays a stable, meaningful namespace;
+  while the branch stays a stable, meaningful namespace. Two shapes carry no hash
+  at all: a ``review`` Tree is *shared* per ``(repo, branch)`` (ADR-0018), and an
+  ``ephemeral`` session Tree's dir leaf IS the per-launch session id (ADR-0027) —
+  in both, the leaf itself is the disambiguator, so a hash would be noise;
 - the **git branch form is slash-namespaced** (naming.lex §3): a work stream is
   ``EPIC/WSnn`` cut from ``origin/EPIC/umbrella``, siblings under ``refs/heads/EPIC/``
   — the umbrella name dodges the bare-``EPIC`` ref/dir collision. The plain-language
@@ -50,6 +54,65 @@ DEFAULT_CENTRAL_ROOT = "~/workspace/trees"
 #: keys its reclaim rule off. Defined here so the read-only planner
 #: (:mod:`shipit.tree.readonly`) and ``cleanup`` name it from one place.
 REVIEW_KIND = "review"
+
+#: The dir-namespace segment for the coordinator's **ephemeral session Tree**
+#: (ADR-0027): ``<root>/<org>/<repo>/ephemeral/<id>``. The session Tree is
+#: *ephemeral-by-path, work-by-branch*: the dir leaf is the per-launch session id
+#: (the ``claude --worktree <id>`` value — the Tree's identity IS the session, so
+#: the leaf carries NO agent hash and is never renamed), while the branch starts as
+#: the mirroring ``ephemeral/<id>`` and then MOVES to the real work
+#: (``EPIC/umbrella``, ``docs/<slug>``, …) as the session discovers what it is
+#: doing — the dir stays. Defined here so the planner and the ``cleanup`` gc rule
+#: for the ephemeral kind (SES02 Layer C) name the segment from one place.
+EPHEMERAL_KIND = "ephemeral"
+
+#: The kind label for every per-Run write Tree (``epics`` / ``issues`` /
+#: ``branches`` namespaces): the default a path that is neither a shared review
+#: clone nor an ephemeral session Tree falls to in :func:`tree_kind`.
+WRITE_KIND = "write"
+
+#: The write-Tree dir namespaces whose leaf sits one level DEEPER than the kind
+#: segment (``epics/<epic>/<leaf>``, ``issues/<id>/<leaf>``): the segments
+#: :func:`tree_kind` must check at grandparent depth, because the leaf's PARENT
+#: there is a free-form epic code / issue id that could legitimately be named
+#: ``review`` or ``ephemeral`` (``branches/<leaf>`` needs no entry — its parent
+#: is the literal ``branches``, which collides with no kind segment).
+_NESTED_WRITE_NAMESPACES = frozenset({"epics", "issues"})
+
+
+def tree_kind(path: str | os.PathLike[str]) -> str:
+    """Which reclaim family ``path`` belongs to: ``review``/``ephemeral``/``write``.
+
+    There is no manifest — the path IS the signal (ADR-0018/0027), and the kind is
+    pinned to exactly the LEAF's parent segment, never "anywhere in the path": a
+    substring test would misclassify a write Tree whose org, repo, or central root
+    happens to contain a ``review``/``ephemeral`` segment, bypassing the safety
+    ladder that matches its true kind. Both the ``cleanup`` classifier (which
+    dispatches its per-kind ladders on this) and the ``list`` verb (which renders
+    the kind as a first-class column) name the mapping from this one place. Any
+    path that is neither special kind is a per-Run **write** Tree
+    (:data:`WRITE_KIND`) — the ``epics``/``issues``/``branches`` namespaces.
+
+    The nested write namespaces are checked FIRST, at grandparent depth
+    (:data:`_NESTED_WRITE_NAMESPACES`): an epic write Tree is
+    ``…/epics/<epic>/<leaf>``, so the leaf's parent is the free-form epic code —
+    and ``ephemeral``/``review`` are perfectly valid epic codes (agy review). A
+    parent-segment test alone would put an epic named ``ephemeral``'s write Trees
+    on the session-Tree gc ladder (removable after a mere hour idle) and hand them
+    ``SessionStart`` pidfiles; the grandparent check keeps every ``epics``/
+    ``issues`` Tree on the write ladder regardless of what its epic code or issue
+    id is named.
+    """
+    p = Path(path)
+    if len(p.parts) >= 3 and p.parts[-3] in _NESTED_WRITE_NAMESPACES:
+        return WRITE_KIND
+    parent = p.parent.name
+    if parent == REVIEW_KIND:
+        return REVIEW_KIND
+    if parent == EPHEMERAL_KIND:
+        return EPHEMERAL_KIND
+    return WRITE_KIND
+
 
 #: A slug/ref component keeps ONLY lowercase ASCII alphanumerics; EVERY run of any
 #: other character collapses to a single ``-``. This is an ALLOW-list, not a
@@ -234,25 +297,70 @@ def work_stream_branch(epic: str, ws: int) -> str:
     return f"{epic}/WS{ws:02d}"
 
 
+def ephemeral_branch(session_id: str) -> str:
+    """The session Tree's birth branch: ``ephemeral/<id>`` (validated + normalized).
+
+    The single place that builds the ephemeral branch, the analog of
+    :func:`issue_branch` / :func:`work_stream_branch` for the coordinator's session
+    Tree (ADR-0027), so the planner (:func:`_plan_ephemeral`) and any caller that
+    must name the branch WITHOUT going through :func:`plan` agree by construction.
+
+    This is only the branch AT BIRTH: the session Tree is *ephemeral-by-path,
+    work-by-branch*, so the branch is expected to move to the real work
+    (``EPIC/umbrella``, ``docs/<slug>``, …) mid-session while the dir keeps the id.
+    The slash form keeps every session branch grouped under the ``ephemeral/`` ref
+    directory, mirroring the dir kind segment (:data:`EPHEMERAL_KIND`).
+
+    The id is normalized by :func:`sanitize_slug` — it becomes both a ref component
+    and the dir leaf, so it gets the same ``[a-z0-9-]`` allow-list every other
+    shape's leaf gets. A non-``str`` or an id that sanitizes to EMPTY (all
+    separators / ref-forbidden chars) is rejected with :class:`ValueError` — it
+    would yield a bare ``ephemeral/`` ref and a kind dir as the leaf; the boundary
+    (the WorktreeCreate hook) synthesizes a random id BEFORE calling in, so a
+    launch is never blocked on a degenerate ``--worktree`` value.
+    """
+    if not isinstance(session_id, str):
+        # Parity with issue_branch/work_stream_branch: a non-str must honor the
+        # documented ValueError contract, not leak an AttributeError from
+        # sanitize_slug(None).
+        raise ValueError(
+            "tree.layout.ephemeral_branch: session id must be a string "
+            f"(the ephemeral/<id> grammar, ADR-0027); got {session_id!r}."
+        )
+    normalized = sanitize_slug(session_id)
+    if not normalized:
+        raise ValueError(
+            "tree.layout.ephemeral_branch: session id must contain at least one "
+            f"alphanumeric character (it becomes the ephemeral/<id> ref AND the dir "
+            f"leaf); got {session_id!r}, which sanitizes to an empty name — a bare "
+            "'ephemeral/' ref and a leaf-less dir."
+        )
+    return f"ephemeral/{normalized}"
+
+
 @dataclass(frozen=True)
 class TreeSpec:
-    """A request to materialize a Tree — exactly one of the three shapes is set.
+    """A request to materialize a Tree — exactly one of the four shapes is set.
 
     ``org`` / ``repo`` namespace the dir under the central root; ``agent_hash``
     disambiguates the dir for two Trees on one branch (it never reaches the
-    branch). ``root`` overrides the central root for tests; ``None`` resolves
+    branch; the ephemeral shape ignores it — its leaf is the session id itself).
+    ``root`` overrides the central root for tests; ``None`` resolves
     :func:`central_root`. ``slug`` is the optional human label applied per shape.
     ``session`` names the standalone-issue branch's leaf — ``issues/<id>/<session>``,
     default ``work`` — so a +1 session on the same issue (``issues/<id>/onboard``)
     coexists under the ``issues/<id>/`` ref directory (see :func:`_plan_issue`); it is
-    unused by the epic and freeform shapes.
+    unused by the epic, freeform, and ephemeral shapes.
 
-    The three shapes :func:`plan` dispatches on (and validates as mutually
+    The four shapes :func:`plan` dispatches on (and validates as mutually
     exclusive):
 
     - **epic/work stream** — ``epic`` + ``ws`` both set (``--epic E --ws N``);
-    - **issue** — ``issue`` set (``--issue N`` ``[--session S]``); and
-    - **freeform** — ``branch`` set (``--branch <name>``).
+    - **issue** — ``issue`` set (``--issue N`` ``[--session S]``);
+    - **freeform** — ``branch`` set (``--branch <name>``); and
+    - **ephemeral** — ``ephemeral`` set to the per-launch session id (the
+      coordinator's session Tree, minted by the WorktreeCreate hook on
+      ``claude --worktree <id>`` — ADR-0027; no CLI flag mints one by hand).
     """
 
     org: str
@@ -262,6 +370,7 @@ class TreeSpec:
     epic: str | None = None
     ws: int | None = None
     branch: str | None = None
+    ephemeral: str | None = None
     slug: str = ""
     session: str = "work"
     root: Path | None = None
@@ -279,11 +388,12 @@ class TreePlan:
 def plan(spec: TreeSpec) -> TreePlan:
     """Resolve ``spec`` into a concrete :class:`TreePlan` (pure, no I/O).
 
-    Dispatches on which of the three mutually exclusive shapes the spec carries —
-    epic/work stream (``epic`` + ``ws``), issue (``issue``), or freeform
-    (``branch``). Exactly one must be set: zero shapes or more than one raises
-    :class:`ValueError` rather than guessing, since the dir/branch/base each shape
-    resolves to are genuinely different and a silent pick would mis-place a Tree.
+    Dispatches on which of the four mutually exclusive shapes the spec carries —
+    epic/work stream (``epic`` + ``ws``), issue (``issue``), freeform (``branch``),
+    or ephemeral (``ephemeral``). Exactly one must be set: zero shapes or more than
+    one raises :class:`ValueError` rather than guessing, since the dir/branch/base
+    each shape resolves to are genuinely different and a silent pick would
+    mis-place a Tree.
 
     A partial epic shape — only ``epic`` or only ``ws`` — also raises: a work
     stream branch ``EPIC/WSnn`` is meaningless without both halves.
@@ -301,13 +411,14 @@ def plan(spec: TreeSpec) -> TreePlan:
             ("epic", has_epic),
             ("issue", spec.issue is not None),
             ("branch", spec.branch is not None),
+            ("ephemeral", spec.ephemeral is not None),
         )
         if present
     ]
     if len(shapes) != 1:
         raise ValueError(
             "tree.layout.plan: exactly one shape must be set "
-            "(--epic/--ws, --issue, or --branch); "
+            "(--epic/--ws, --issue, --branch, or ephemeral); "
             f"got {shapes or 'none'}"
         )
 
@@ -316,6 +427,8 @@ def plan(spec: TreeSpec) -> TreePlan:
         return _plan_epic_ws(spec)
     if shape == "issue":
         return _plan_issue(spec)
+    if shape == "ephemeral":
+        return _plan_ephemeral(spec)
     return _plan_freeform(spec)
 
 
@@ -426,4 +539,35 @@ def _plan_issue(spec: TreeSpec) -> TreePlan:
     )
     root = spec.root if spec.root is not None else central_root()
     directory = Path(root) / spec.org / spec.repo / "issues" / str(spec.issue) / leaf
+    return TreePlan(dir=directory, branch=branch, base="origin/main")
+
+
+def _plan_ephemeral(spec: TreeSpec) -> TreePlan:
+    """Resolve the ``ephemeral`` (coordinator session Tree) shape (ADR-0027).
+
+    - **branch**: ``ephemeral/<id>`` (:func:`ephemeral_branch`) — the branch AT
+      BIRTH only. The session Tree is *ephemeral-by-path, work-by-branch*: the
+      coordinator switches this branch to the real work (``EPIC/umbrella``,
+      ``docs/<slug>``, …) inside the fixed dir as the session learns its task, so
+      dir and branch mirror only at birth and are EXPECTED to diverge.
+    - **base**: ``origin/main`` — at launch the work is unknown (the session may be
+      planning/triage before any epic or issue exists), so there is nothing to bind
+      the Tree to but the default branch.
+    - **dir**: ``<root>/<org>/<repo>/ephemeral/<id>`` (:data:`EPHEMERAL_KIND`) —
+      the leaf is the normalized session id itself, taken from the branch's last
+      segment so dir and branch match at birth BY CONSTRUCTION. It carries **no
+      agent hash and no slug**: the dir's identity IS the session (one per launch,
+      never renamed), the launcher mints a per-launch-unique id
+      (``sess-<utc-stamp>-<pid>``), and a hand-picked duplicate ``--worktree``
+      value fails loud in ``create()``'s pre-existing-dir refusal rather than
+      silently landing two sessions in one dir.
+
+    The id is validated + normalized by :func:`ephemeral_branch` (same allow-list
+    as every other leaf); a degenerate id raises :class:`ValueError`.
+    """
+    assert spec.ephemeral is not None  # guaranteed by plan()
+    branch = ephemeral_branch(spec.ephemeral)  # validates + normalizes the id
+    leaf = branch.rsplit("/", 1)[-1]
+    root = spec.root if spec.root is not None else central_root()
+    directory = Path(root) / spec.org / spec.repo / EPHEMERAL_KIND / leaf
     return TreePlan(dir=directory, branch=branch, base="origin/main")

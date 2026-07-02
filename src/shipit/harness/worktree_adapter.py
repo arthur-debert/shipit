@@ -1,17 +1,25 @@
-"""Branch resolution for the *demoted* WorktreeCreate adapter (ADR-0017).
+"""Pure resolution for the WorktreeCreate adapter (ADR-0017, elevated by ADR-0027).
 
-The in-CC ``Agent(isolation:"worktree")`` spawn fires Claude Code's
-``WorktreeCreate`` hook. Instead of letting the harness mint a native
-``.claude/worktrees`` worktree, the hook calls ``shipit tree create`` and returns
-a **dissociated Tree clone** as the subagent's cwd — closing the #139 enforcement
-gap *by construction* (the in-CC path can no longer reach a native worktree).
+Claude Code's ``WorktreeCreate`` hook fires for TWO callers, and instead of letting
+the harness mint a native ``.claude/worktrees`` worktree, the hook calls ``shipit
+tree create`` and returns a **dissociated Tree clone** as the cwd — closing the
+#139 enforcement gap *by construction* (neither path can reach a native worktree):
 
-This module is the PURE half of that adapter: given the **epic** (resolved from
-live git state) and the spawn's agent id, it resolves the holding branch the
-throwaway Tree is cut on — ``<epic>/agent-<id>``, or a safe epic-less
-``agent-<id>`` when no (or a malformed) epic is in play. No I/O; the boundary
-(:mod:`shipit.verbs.hook.worktreecreate`) reads the payload, runs the git probe,
-**validates the epic against its umbrella branch**, and runs the create.
+- the **coordinator's own launch** (``claude --worktree <id>``, usually via
+  ``claude-start``): the one pre-launch seam that can set the immutable root
+  session cwd, so the hook mints the coordinator's **ephemeral session Tree**
+  (branch ``ephemeral/<id>`` off ``origin/main`` — ADR-0027; no longer a
+  "throwaway" path but the coordinator's primary workspace); and
+- an in-CC ``Agent(isolation:"worktree")`` **helper spawn**: the original demoted
+  path (ADR-0017), landing on a coarse ``<epic>/agent-<id>`` holding branch.
+
+This module is the PURE half of that adapter: :func:`is_coordinator_launch` tells
+the two callers apart from the payload alone, and — for the helper path — given the
+**epic** (resolved from live git state) and the spawn's agent id, it resolves the
+holding branch the throwaway Tree is cut on: ``<epic>/agent-<id>``, or a safe
+epic-less ``agent-<id>`` when no (or a malformed) epic is in play. No I/O; the
+boundary (:mod:`shipit.verbs.hook.worktreecreate`) reads the payload, runs the git
+probe, **validates the epic against its umbrella branch**, and runs the create.
 
 How the epic is found (:func:`resolve_epic`): the WorktreeCreate payload carries
 the coordinator's ``cwd``, and ADR-0016's branch grammar (``EPIC/umbrella``,
@@ -71,6 +79,35 @@ _ID_SEP = re.compile(r"[\s/.:]+")
 #: that would mangle the ref — is treated as *no marker* and falls back safely, so a
 #: garbage marker can never produce a broken branch like ``/agent-x``.
 _EPIC_TOKEN = re.compile(r"[A-Za-z0-9]+")
+
+
+def is_coordinator_launch(payload: dict[str, object]) -> bool:
+    """Whether this WorktreeCreate payload is the coordinator's OWN launch (pure).
+
+    The discriminator ADR-0027 needs: the same hook, with near-identical payloads,
+    serves both the top-level ``claude --worktree`` launch (→ the ephemeral session
+    Tree) and an in-CC ``Agent(isolation:"worktree")`` helper spawn (→ the
+    ``<epic>/agent-<id>`` holding branch), so the fork must be decided from the
+    payload alone.
+
+    **The signal is ``prompt_id``: absent ⇒ coordinator launch.** Confirmed by a
+    live spike against Claude Code 2.1.198 (SES02-WS01, see
+    ``docs/dev/ses02-worktreecreate-discriminator-spike.md``): a top-level
+    ``--worktree`` launch fires ``{session_id, transcript_path, cwd,
+    hook_event_name, name}`` — **no ``prompt_id``** (there is no prompt yet; the
+    hook runs during process startup) — while an in-CC helper spawn carries a
+    ``prompt_id`` UUID (the user turn that triggered the Agent call). The spike
+    also confirmed the corroborating name convention — helper spawns are always
+    ``name: agent-<agentId>``, a coordinator's ``name`` is the ``--worktree`` value
+    verbatim (``sess-…`` via ``claude-start``) — but the payload field is the
+    primary signal; the prefix is evidence, not the mechanism (a user may pass any
+    ``-w`` name, including one starting with ``agent-``).
+
+    An empty/None ``prompt_id`` counts as absent. Misclassification degrades
+    safely in BOTH directions — either way the caller still lands in a real,
+    provisioned Tree (never a native worktree), just under the other namespace.
+    """
+    return not payload.get("prompt_id")
 
 
 def normalize_agent_id(raw: str) -> str:

@@ -140,11 +140,12 @@ in any managed repo, with no per-command `pixi run` and no cross-session collisi
     `origin/main`);
   - in-CC `Agent(isolation:"worktree")` helper spawn → the existing `<epic>/agent-<id>`
     holding branch (unchanged).
-- **Discriminator (confirm via spike, not decided here).** The two invocations carry the
+- **Discriminator (settled — see
+  `docs/dev/ses02-worktreecreate-discriminator-spike.md`).** The two invocations carry the
   same payload fields, but the spike's top-level `--worktree` payload had **no `prompt_id`**
-  whereas ADR-0017 records in-CC spawns carrying one. Leading rule: *`prompt_id` absent ⇒
-  coordinator session Tree*; fallback: a `./claude-start` name-prefix convention. A short
-  spike comparing a real in-CC spawn payload to a top-level one settles it before build.
+  whereas ADR-0017 records in-CC spawns carrying one. Rule, confirmed live on CC 2.1.198:
+  *`prompt_id` absent ⇒ coordinator session Tree*; fallback: a `./claude-start` name-prefix
+  convention.
 - **Elevation of the hook (amends ADR-0017).** The `WorktreeCreate` hook is no longer
   "throwaway-only": it legitimately owns the coordinator's *own* Session Tree — the one
   Tree `shipit spawn subagent` structurally cannot mint (it's the session's own, and the
@@ -280,7 +281,9 @@ the prior art to mirror.
   Runs* by passing intent as arguments; it structurally cannot provision the coordinator's
   *own* Tree, because that Tree is the top-level session's and the session cwd is fixed
   before any shipit code runs. `--worktree` is the only pre-launch seam.
-- **The one build-time spike to run first:** confirm the coordinator-vs-helper discriminator
-  in the `WorktreeCreate` payload (candidate: absence of `prompt_id`) by comparing a real
-  in-CC `Agent(isolation:"worktree")` spawn payload against a top-level `--worktree` one.
-  Everything else in Layer B is verified.
+- **The one build-time spike to run first (settled):** confirm the coordinator-vs-helper
+  discriminator in the `WorktreeCreate` payload (candidate: absence of `prompt_id`) by
+  comparing a real in-CC `Agent(isolation:"worktree")` spawn payload against a top-level
+  `--worktree` one. Ran as `docs/dev/ses02-worktreecreate-discriminator-spike.md` —
+  verdict: *`prompt_id` absent ⇒ coordinator*, confirmed live on CC 2.1.198. Everything
+  else in Layer B is verified.

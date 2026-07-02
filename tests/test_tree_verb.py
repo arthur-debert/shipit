@@ -207,6 +207,9 @@ def test_run_create_reports_gh_error_cleanly(monkeypatch, capsys):
 
 
 def _record(**over) -> TreeRecord:
+    # `unpushed_shas=()` (every commit on some remote), NOT the TreeRecord default
+    # of None (list unreadable): classify's write/ephemeral ladders read None
+    # conservatively as has-local-work and would KEEP every record.
     base = dict(
         path="/trees/acme/widget/issues/7/work-aaaa",
         branch="issues/7/work",
@@ -216,6 +219,7 @@ def _record(**over) -> TreeRecord:
         behind=0,
         pr="#7 DRAFT",
         mtime=1000.0,
+        unpushed_shas=(),
     )
     base.update(over)
     return TreeRecord(**base)
@@ -1125,3 +1129,155 @@ def test_run_gc_no_warning_when_no_unknown(tmp_path, monkeypatch, capsys):
     captured = capsys.readouterr()
     assert "skipped (state unknown)" not in captured.err
     assert "skipped (state unknown)" not in captured.out
+
+
+# --- ephemeral kind as first-class fleet state (SES02, ADR-0027) ----------------
+
+
+def test_run_list_renders_the_kind_column(monkeypatch, capsys):
+    records = [
+        _record(),  # issues/<id>/... -> write
+        _record(
+            path="/trees/acme/widget/review/tre03-ws03",
+            branch="TRE03/WS03",
+            pr=None,
+        ),
+        _record(
+            path="/trees/acme/widget/ephemeral/sess-1",
+            branch="ephemeral/sess-1",
+            base=None,
+            pr=None,
+        ),
+    ]
+    monkeypatch.setattr(tree_verb.layout, "central_root", lambda: "/trees")
+    monkeypatch.setattr(tree_verb.registry, "scan", lambda root: records)
+
+    rc = tree_verb.run_list()
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "KIND" in out
+    rows = {line.split()[0]: line.split()[1] for line in out.splitlines()[1:]}
+    assert rows["/trees/acme/widget/issues/7/work-aaaa"] == "write"
+    assert rows["/trees/acme/widget/review/tre03-ws03"] == "review"
+    assert rows["/trees/acme/widget/ephemeral/sess-1"] == "ephemeral"
+
+
+def _ephemeral_clone(root, leaf: str) -> str:
+    tree = root / "acme" / "widget" / "ephemeral" / leaf
+    (tree / ".git").mkdir(parents=True)
+    return str(tree)
+
+
+def test_run_gc_keeps_a_live_session_and_reclaims_a_dead_one(
+    tmp_path, monkeypatch, capsys
+):
+    # End to end through the gc verb: liveness comes from the pidfile + probe, and
+    # the ephemeral ladder keeps the live session's Tree while reclaiming the dead
+    # one (both clean, pushed, and past the grace window).
+    import time as _time
+
+    from shipit.session import liveness
+
+    root = tmp_path / "trees"
+    live_path = _ephemeral_clone(root, "sess-live")
+    dead_path = _ephemeral_clone(root, "sess-dead")
+    created = 1_750_000_000.0
+    liveness.write_pidfile(
+        live_path, liveness.LivenessRecord(pid=100, session_id="a", create_time=created)
+    )
+    liveness.write_pidfile(
+        dead_path, liveness.LivenessRecord(pid=200, session_id="b", create_time=created)
+    )
+
+    #: pid 100 is alive and IS the recorded claude session; pid 200 is gone.
+    def probe(pid):
+        if pid == 100:
+            return liveness.ProcessInfo(
+                pid=100,
+                ppid=1,
+                create_time=created,
+                argv="node /x/claude-code/cli.js -w sess-live",
+            )
+        return None
+
+    monkeypatch.setattr(liveness, "os_probe", probe)
+    monkeypatch.setattr(tree_verb.layout, "central_root", lambda: str(root))
+
+    past_grace = _time.time() - (tree_verb.cleanup.EPHEMERAL_GRACE_SECONDS + 60)
+    records = [
+        _record(
+            path=live_path,
+            branch="ephemeral/sess-live",
+            base=None,
+            pr=None,
+            unpushed_shas=(),
+            mtime=past_grace,
+        ),
+        _record(
+            path=dead_path,
+            branch="ephemeral/sess-dead",
+            base=None,
+            pr=None,
+            unpushed_shas=(),
+            mtime=past_grace,
+        ),
+    ]
+    monkeypatch.setattr(tree_verb.registry, "scan", lambda root: records)
+    monkeypatch.setattr(gh, "pr_for_head", lambda branch, *, cwd=None: None)
+
+    rc = tree_verb.run_gc(dry_run=True)
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert f"KEEP      {live_path}" in out
+    assert f"REMOVABLE {dead_path}" in out
+
+
+def test_run_gc_excludes_the_recorded_provisioning_commit(
+    tmp_path, monkeypatch, capsys
+):
+    # End to end through the gc verb (#232): two dead, clean ephemeral Trees past
+    # the grace window, each carrying ONE local-only commit (the drift-window
+    # managed-set reconcile). The one whose provisioning RECORDED that commit's SHA
+    # is reclaimed; the one without a record keeps — the exclusion is
+    # exact-identity, never a guess.
+    import time as _time
+
+    from shipit.tree import provision as provision_mod
+
+    root = tmp_path / "trees"
+    recorded_path = _ephemeral_clone(root, "sess-recorded")
+    unrecorded_path = _ephemeral_clone(root, "sess-unrecorded")
+    sha = "a" * 40
+    provision_mod.write_record(recorded_path, [sha])
+
+    monkeypatch.setattr(tree_verb.layout, "central_root", lambda: str(root))
+    past_grace = _time.time() - (tree_verb.cleanup.EPHEMERAL_GRACE_SECONDS + 60)
+    records = [
+        _record(
+            path=recorded_path,
+            branch="ephemeral/sess-recorded",
+            base=None,
+            pr=None,
+            unpushed_shas=(sha,),
+            mtime=past_grace,
+        ),
+        _record(
+            path=unrecorded_path,
+            branch="ephemeral/sess-unrecorded",
+            base=None,
+            pr=None,
+            unpushed_shas=(sha,),
+            mtime=past_grace,
+        ),
+    ]
+    monkeypatch.setattr(tree_verb.registry, "scan", lambda root: records)
+    monkeypatch.setattr(gh, "pr_for_head", lambda branch, *, cwd=None: None)
+
+    rc = tree_verb.run_gc(dry_run=True)
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert f"REMOVABLE {recorded_path}" in out
+    assert f"KEEP      {unrecorded_path}" in out
