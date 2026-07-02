@@ -7,7 +7,10 @@ three buckets the ``gc`` verb acts on. It mirrors ``prstate``'s "snapshot → de
 idiom (cf. :func:`shipit.prstate.state.evaluate`): everything it needs is an INPUT —
 ``now`` and ``pr_states`` are passed in, so there is NO clock and NO I/O inside, and
 the whole truth table is unit-tested directly. The effectful removal (the verb layer)
-consumes this decision; the decision itself never deletes anything.
+consumes this decision; the decision itself never deletes anything. The one side
+effect is the per-Tree decision record at DEBUG (LOG02, mirroring
+:func:`shipit.prstate.state.evaluate`'s precedent) — the returned partition is
+untouched by it.
 
 The partition is **conservative by default** (PRD user story 16/17): a Tree is
 deleted ONLY when its loss is provably safe, anything that merely looks abandoned is
@@ -53,11 +56,14 @@ no-remote commit would hold an abandoned session Tree forever (#232).
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 
 from .layout import EPHEMERAL_KIND, REVIEW_KIND, tree_kind
 from .registry import TreeRecord
+
+logger = logging.getLogger("shipit.tree")
 
 #: Default age threshold (seconds): a Tree must be untouched for longer than this
 #: before it is even a candidate for removal. Two weeks is deliberately generous —
@@ -234,6 +240,20 @@ def classify(
             provision=provisioned.get(record.path, frozenset()),
             hard_cap_seconds=hard_cap_seconds,
             grace_seconds=grace_seconds,
+        )
+        # The ladder's per-Tree decision record (spray convention, mirroring
+        # `prstate.state.evaluate`): DEBUG, with the inputs that drove the rung —
+        # so a surprising delete/keep is reconstructable from the durable log.
+        # The log is the only side effect; the returned partition is unchanged.
+        logger.debug(
+            "gc ladder: %s -> %s (kind=%s, pr=%s, dirty=%s, unpushed=%s)",
+            record.path,
+            label,
+            tree_kind(record.path),
+            pr_states.get(record.path),
+            record.dirty,
+            record.unpushed,
+            extra={"tree": record.path, "bucket": label},
         )
         buckets[label].append(record)
     return Cleanup(
