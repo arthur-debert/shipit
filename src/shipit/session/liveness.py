@@ -376,7 +376,9 @@ def _parse_ps_output(output: str, *, now: float) -> ProcessInfo | None:
         rows = jc.parse("ps", output, quiet=True)
     except Exception:  # noqa: BLE001 — a conversion crash is "unreadable", never a probe crash.
         logger.debug(
-            "liveness: jc could not convert ps output %r", output, exc_info=True
+            "liveness: jc could not convert ps output (%d chars)",
+            len(output),
+            exc_info=True,
         )
         return None
     if not isinstance(rows, list) or not rows:
