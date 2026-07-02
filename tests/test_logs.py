@@ -10,8 +10,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from shipit import cli, gh
+from shipit import cli
 from shipit.verbs import logs
+from shipit.execrun import ExecError
 
 
 # --------------------------------------------------------------------------
@@ -180,7 +181,7 @@ def test_gh_error_resolving_repo_is_graceful(tmp_path, capsys):
     # No explicit repo and the cwd resolution shells out to gh and fails (not a
     # checkout / gh missing). That must be a clean usage error, never a traceback.
     def boom() -> str:
-        raise gh.GhError("not a git repository")
+        raise ExecError(["gh"], rc=1, stderr="not a git repository")
 
     rc = logs.run(base_dir=tmp_path, current_repo=boom)
     assert rc == 2

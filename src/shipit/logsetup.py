@@ -40,7 +40,7 @@ from pathlib import Path
 
 import platformdirs
 
-from . import gh
+from . import execrun, gh
 
 #: The package logger every shipit module logs through (``logging.getLogger``
 #: of a child name propagates here).
@@ -234,7 +234,7 @@ def resolve_current_owner_repo() -> tuple[str, str] | None:
     """
     try:
         return _current_owner_repo()
-    except (gh.GhError, ValueError):
+    except (execrun.ExecError, ValueError):
         return None
 
 

@@ -15,6 +15,7 @@ from shipit.harness.eval.record import build
 from shipit.harness.eval.variant import Variant
 from shipit.identity import Owner, Repo
 from shipit.verbs.eval import report
+from shipit.execrun import ExecError
 
 #: The identity every seeded run keys under — the store is keyed by `Repo` identity
 #: (origin owner/name), not a filesystem path (ADR-0024).
@@ -377,10 +378,9 @@ def test_run_on_empty_store_reports_no_records(tmp_path, monkeypatch):
 def test_run_on_a_non_checkout_reports_no_records(tmp_path, monkeypatch):
     # A path that is not a checkout (or has no origin) has no per-repo store: the
     # resolver raises and the verb degrades to the empty report rather than erroring.
-    from shipit import gh
 
     def boom(cwd, **k):
-        raise gh.GhError("not a git repository")
+        raise ExecError(["gh"], rc=1, stderr="not a git repository")
 
     monkeypatch.setattr(report.identity, "resolve_repo", boom)
     buf = io.StringIO()

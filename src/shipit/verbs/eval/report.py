@@ -32,7 +32,7 @@ from typing import TextIO
 
 import click
 
-from ... import gh, identity
+from ... import execrun, identity
 from ...harness.eval import store
 
 #: The eval-record fields the aggregator groups and measures over (the WS01 record
@@ -278,7 +278,7 @@ def _resolve_repo(start: str) -> identity.Repo:
 
     ``start`` may name a *file* inside the repo, but the git boundary needs a
     directory, so a file path is normalized to its parent first. Raises
-    :class:`shipit.gh.GhError` (no checkout / no origin) or :class:`ValueError`
+    :class:`shipit.execrun.ExecError` (no checkout / no origin) or :class:`ValueError`
     (unparseable remote) — the caller degrades those to an empty report.
     """
     cwd = Path(start)
@@ -307,7 +307,7 @@ def run(
     out = out or sys.stdout
     try:
         repo = _resolve_repo(repo_root if repo_root is not None else ".")
-    except (gh.GhError, ValueError):
+    except (execrun.ExecError, ValueError):
         print(format_report(_EMPTY_REPORT), file=out)
         return 0
     path = store.store_path(repo, base_dir if base_dir is None else Path(base_dir))

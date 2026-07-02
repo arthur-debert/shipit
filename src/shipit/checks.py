@@ -29,7 +29,7 @@ import sys
 
 import yaml
 
-from . import gh
+from . import execrun, gh
 
 _NON_CHECK_WORKFLOWS = ("copilot-review.yml", "copilot-review.yaml")
 
@@ -212,7 +212,7 @@ def _job_contexts(
     if uses not in cache:
         try:
             cache[uses] = _fetch_called_workflow(uses, toplevel)
-        except (gh.GhError, ValueError, OSError, yaml.YAMLError) as exc:
+        except (execrun.ExecError, ValueError, OSError, yaml.YAMLError) as exc:
             print(
                 f"warning: cannot resolve reusable workflow {uses!r} "
                 f"called by job {job_id!r}: {exc}",
@@ -263,7 +263,7 @@ def checks_from_runs(repo: str, default_branch: str, paths: list[str]) -> list[s
     found: set[str] = set()
     try:
         workflows_obj = gh.rest(f"repos/{repo}/actions/workflows")
-    except gh.GhError:
+    except execrun.ExecError:
         workflows_obj = None
     by_path: dict[str, object] = {}
     if isinstance(workflows_obj, dict):
@@ -279,7 +279,7 @@ def checks_from_runs(repo: str, default_branch: str, paths: list[str]) -> list[s
                 f"repos/{repo}/actions/workflows/{wid}/runs"
                 f"?branch={default_branch}&per_page=1"
             )
-        except gh.GhError:
+        except execrun.ExecError:
             continue
         runs = runs_obj.get("workflow_runs") if isinstance(runs_obj, dict) else None
         if not runs:
@@ -291,7 +291,7 @@ def checks_from_runs(repo: str, default_branch: str, paths: list[str]) -> list[s
             jobs_obj = gh.rest(
                 f"repos/{repo}/actions/runs/{run_id}/jobs", paginate=True
             )
-        except gh.GhError:
+        except execrun.ExecError:
             continue
         for job in jobs_obj or []:
             if isinstance(job, dict) and job.get("name"):

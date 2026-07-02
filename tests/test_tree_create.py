@@ -21,6 +21,7 @@ from shipit.tree import layout, provision
 from shipit.tree.create import create, create_from_source
 from shipit.tree.layout import TreeSpec
 from shipit.verbs import install as install_mod
+from shipit.execrun import ExecError
 
 
 def _hooks_ok() -> execrun.ExecResult:
@@ -300,11 +301,11 @@ def test_create_rolls_back_partial_tree_on_failure(
     spec = _spec(tmp_path)
 
     def boom(*args, **kwargs):
-        raise gh.GhError("checkout blew up")
+        raise ExecError(["gh"], rc=1, stderr="checkout blew up")
 
     monkeypatch.setattr(gh, "git_checkout_new_branch", boom)
 
-    with pytest.raises(gh.GhError):
+    with pytest.raises(ExecError):
         create(spec, source_repo=str(reference), github_url=str(remote))
 
     dest = (

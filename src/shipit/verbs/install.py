@@ -807,7 +807,7 @@ def _shipit_version() -> str:
     pkg_dir = Path(__file__).resolve().parents[1]
     try:
         return gh._git(["rev-parse", "HEAD"], cwd=str(pkg_dir)).strip()
-    except gh.GhError:
+    except execrun.ExecError:
         return __version__
 
 
@@ -999,7 +999,7 @@ def run(
         )
         print(f"  opened draft PR: {url}")
         return 0
-    except gh.GhError as exc:
+    except execrun.ExecError as exc:
         # Match gh_setup: a boundary failure (no remote, auth, not a repo) is a
         # clean CLI error + non-zero exit, not a raw traceback.
         print(f"install: git/gh step failed: {exc}", file=sys.stderr)

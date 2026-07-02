@@ -18,7 +18,7 @@ Scope:
 Errors map like `status.py`: a `gh`/auth failure (resolving the branch's PR, or
 inside the request/verify) prints a clean stderr line and exits non-zero. A
 local-agent reviewer (`codex-local`/`agy-local`) surfaces the foundation's guard
-— a clean `GhError` ("not yet available"), never a crash. A silently-dropped
+— a clean `PrStateError` ("not yet available"), never a crash. A silently-dropped
 remote request is a hard failure (non-zero exit), never a silent park.
 """
 
@@ -28,7 +28,8 @@ import sys
 
 import click
 
-from ...prstate import ghapi
+from ... import execrun
+from ...prstate.errors import PrStateError
 from ...prstate.reviewers import REGISTRY, ReviewerAdapter, by_name, required_reviewers
 from ._request import RequestResult, request_reviewers
 from ._resolve import resolve_pr
@@ -142,9 +143,9 @@ def run(pr: int | None = None, *, reviewer: str | None = None) -> int:
             )
             return 1
         result = request_reviewers(resolved, adapters, force=reviewer is not None)
-    except ghapi.GhError as exc:
+    except (execrun.ExecError, PrStateError) as exc:
         # A real gh/auth failure OR the local-agent guard (requesting
-        # codex-local/agy-local raises a clean GhError, not a crash). Both are
+        # codex-local/agy-local raises a clean PrStateError, not a crash). Both are
         # surfaced as a clean stderr line + non-zero exit.
         print(f"error: {exc}", file=sys.stderr)
         return 1

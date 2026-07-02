@@ -22,7 +22,7 @@ from importlib import resources
 from pathlib import Path
 
 from .. import checks as checks_mod
-from .. import config, gh, secretsrc
+from .. import config, execrun, gh, secretsrc
 
 RULESET_NAME = "main-branch-protection"
 
@@ -101,7 +101,7 @@ def apply_ruleset(repo: str, checks: list[str], *, dry_run: bool) -> str:
     body = build_payload(template, checks)
     try:
         rulesets = gh.rest(f"repos/{repo}/rulesets")
-    except gh.GhError:
+    except execrun.ExecError:
         rulesets = None
     existing = existing_ruleset_id(rulesets, RULESET_NAME)
 
@@ -194,7 +194,7 @@ def run(
     if toplevel:
         try:
             current = gh.current_repo()
-        except gh.GhError:
+        except execrun.ExecError:
             current = None
     target = repo or current
     if not target:

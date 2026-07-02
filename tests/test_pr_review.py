@@ -19,10 +19,10 @@ from __future__ import annotations
 import pytest
 
 from shipit import cli
-from shipit.prstate import ghapi
 from shipit.prstate.model import ReviewLifecycle
 from shipit.prstate.reviewers import ReviewerAdapter
 from shipit.verbs.pr import _request, review as review_verb
+from shipit.execrun import ExecError
 from shipit.verbs.pr._request import (
     ReviewerOutcome,
     _Boundary,
@@ -201,14 +201,14 @@ def test_gh_failure_in_skip_read_propagates():
     adapter = _FakeAdapter("copilot")
 
     def boom(pr):
-        raise ghapi.GhError("gh exploded reading reviews")
+        raise ExecError(["gh"], rc=1, stderr="gh exploded reading reviews")
 
     boundary = _Boundary(
         attach_state=lambda pr: ([], []),
         gather_reviews=boom,
         sleep=lambda s: None,
     )
-    with pytest.raises(ghapi.GhError):
+    with pytest.raises(ExecError):
         request_reviewers(7, [adapter], force=False, boundary=boundary)
 
 
@@ -281,7 +281,7 @@ def test_gh_failure_resolving_is_fatal(monkeypatch, capsys):
     """A real gh/auth failure resolving the branch's PR -> clean stderr + non-zero."""
 
     def boom(pr):
-        raise ghapi.GhError("gh auth exploded")
+        raise ExecError(["gh"], rc=1, stderr="gh auth exploded")
 
     monkeypatch.setattr(review_verb, "resolve_pr", boom)
     rc = review_verb.run(None, reviewer="copilot")
