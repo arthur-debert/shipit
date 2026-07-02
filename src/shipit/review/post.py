@@ -283,9 +283,23 @@ def post_review(
     try:
         response = gh.rest(path, method="POST", body=payload, token=token)
     except execrun.ExecError as exc:
-        logger.debug("post_review: post to %s#%s failed: %s", repo, ctx.number, exc)
+        # A propagating failure (glassbox spray): the post is the review's whole
+        # point, so its failure records at ERROR with the exception attached —
+        # the ExecError is pre-redacted, so the token can never ride this record.
+        logger.error(
+            "post_review: post to %s#%s failed",
+            repo,
+            ctx.number,
+            exc_info=True,
+            extra={"pr": ctx.number},
+        )
         raise RuntimeError(
             f"Failed to post review to {repo}#{ctx.number}: {exc}"
         ) from exc
-    logger.info("post_review: posted review to %s#%s", repo, ctx.number)
+    logger.info(
+        "post_review: posted review to %s#%s",
+        repo,
+        ctx.number,
+        extra={"pr": ctx.number},
+    )
     return response if isinstance(response, dict) else {"response": response}

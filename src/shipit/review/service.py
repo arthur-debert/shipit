@@ -33,6 +33,7 @@ import json
 import logging
 import re
 import sys
+import time
 from collections.abc import Callable, Mapping, Sequence
 
 from .. import execrun, gh, logcontext
@@ -82,7 +83,9 @@ def generate_review(
         agent,
         model,
         timeout,
+        extra={"reviewer": agent, "pr": ctx.number},
     )
+    start = time.monotonic()
     review = producer.run_tree_review(
         agent,
         ctx,
@@ -91,12 +94,15 @@ def generate_review(
         instructions_path=instructions_path,
         dry_run=dry_run,
     )
+    duration_ms = int((time.monotonic() - start) * 1000)
     summary = (review.get("summary") or {}) if isinstance(review, dict) else {}
     logger.info(
-        "review run: agent=%s complete -> status=%s, %d comment(s)",
+        "review run: agent=%s complete in %dms -> status=%s, %d comment(s)",
         agent,
+        duration_ms,
         summary.get("status"),
         len((review.get("comments") or []) if isinstance(review, dict) else []),
+        extra={"reviewer": agent, "pr": ctx.number, "duration_ms": duration_ms},
     )
     return review
 
@@ -421,12 +427,14 @@ def run_detached_review(
     ageing that timestamp. WS03 does NOT implement that window — it only relies on it
     as the backstop (PRD "Failure & Timeout").
     """
+    start = time.monotonic()
     logger.info(
         "run_detached_review: agent=%s pr=#%s repo=%s run_id=%s — child start",
         agent,
         pr,
         repo,
         run_id,
+        extra={"reviewer": agent, "pr": pr},
     )
     try:
         ctx = resolve_pr(pr, repo=repo)
@@ -448,38 +456,71 @@ def run_detached_review(
         # Close it `failed` (only when the parent actually opened a run) and RE-RAISE
         # so the failure is still surfaced. This is the ONLY close on the resolve
         # path; the helper below owns every post-resolve outcome's close.
+        # The failure PROPAGATES (re-raised below), so it records at ERROR with
+        # the exception attached (glassbox spray) — plus the start→settle
+        # duration, since the failed resolve is this run's terminal settle.
+        duration_ms = int((time.monotonic() - start) * 1000)
         if run_id is not None:
             _close_funnel_breadcrumb(
                 agent, repo, run_id, outcome="failed", detail=str(exc)
             )
-            logger.warning(
-                "run_detached_review: agent=%s pr=#%s resolve failed — closed run "
-                "%s as failed: %s",
+            logger.error(
+                "run_detached_review: agent=%s pr=#%s resolve failed after %dms — "
+                "closed run %s as failed",
                 agent,
                 pr,
+                duration_ms,
                 run_id,
-                exc,
+                exc_info=True,
+                extra={"reviewer": agent, "pr": pr, "duration_ms": duration_ms},
             )
         else:
-            logger.warning(
-                "run_detached_review: agent=%s pr=#%s resolve failed — no run to "
-                "close (parent opened none): %s",
+            logger.error(
+                "run_detached_review: agent=%s pr=#%s resolve failed after %dms — "
+                "no run to close (parent opened none)",
                 agent,
                 pr,
-                exc,
+                duration_ms,
+                exc_info=True,
+                extra={"reviewer": agent, "pr": pr, "duration_ms": duration_ms},
             )
         raise
-    result = _generate_post_and_close(
+    try:
+        result = _generate_post_and_close(
+            agent,
+            ctx,
+            run_id,
+            repo,
+            model=model,
+            timeout=timeout,
+            instructions_path=instructions_path,
+            as_app=as_app,
+        )
+    except Exception:
+        # The helper already closed the funnel run to its own terminal state
+        # (timed_out / empty / failed) — this records the SETTLE of the child
+        # itself: a propagating failure at ERROR with the exception attached and
+        # the start→settle duration (glassbox spray).
+        duration_ms = int((time.monotonic() - start) * 1000)
+        logger.error(
+            "run_detached_review: agent=%s pr=#%s — child failed after %dms",
+            agent,
+            pr,
+            duration_ms,
+            exc_info=True,
+            extra={"reviewer": agent, "pr": pr, "duration_ms": duration_ms},
+        )
+        raise
+    # The review's start→settle duration (LOG02): child start (moments after the
+    # parent's request) to the terminal close `_generate_post_and_close` just made.
+    duration_ms = int((time.monotonic() - start) * 1000)
+    logger.info(
+        "run_detached_review: agent=%s pr=#%s — child done in %dms",
         agent,
-        ctx,
-        run_id,
-        repo,
-        model=model,
-        timeout=timeout,
-        instructions_path=instructions_path,
-        as_app=as_app,
+        pr,
+        duration_ms,
+        extra={"reviewer": agent, "pr": pr, "duration_ms": duration_ms},
     )
-    logger.info("run_detached_review: agent=%s pr=#%s — child done", agent, pr)
     return result
 
 
