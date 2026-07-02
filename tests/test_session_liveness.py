@@ -20,6 +20,7 @@ from shipit.session.liveness import (
     ProcessInfo,
     find_claude_process,
     is_live,
+    looks_like_claude,
     pidfile_path,
     read_pidfile,
     remove_pidfile,
@@ -139,6 +140,63 @@ def test_walk_survives_a_self_parenting_probe():
 
 
 # --------------------------------------------------------------------------
+# looks_like_claude — the argv matcher (token-shaped, never whole-argv substring)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        # The native shim/binary, bare or fully-pathed, wherever installed.
+        "claude --dangerously-skip-permissions",
+        "/usr/local/bin/claude --worktree sess-1",
+        "/Users/x/.claude/local/claude",
+        # The Node entrypoint: the process NAME is `node`; only argv betrays it.
+        NODE_ARGV,
+        "node /Users/x/.nvm/versions/node/v22.1.0/lib/node_modules/@anthropic-ai/claude-code/cli.js",
+    ],
+)
+def test_real_session_argvs_look_like_claude(argv):
+    assert looks_like_claude(argv) is True
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        # The short-lived intermediates the SessionStart hook's ancestor walk
+        # crosses (codex review): an incidental `.claude/…` path segment must NOT
+        # read as the session, or the walk records a PID that dies immediately
+        # and gc misreads the live session as dead.
+        "/bin/zsh -c source /Users/x/.claude/shell-snapshots/snapshot-zsh-17.sh"
+        " && eval 'pixi run shipit hook sessionstart'",
+        "python /Users/x/.claude/hooks/on-session-start.py",
+        "sh -c $CLAUDE_PROJECT_DIR/.claude/hooks/run.sh",
+        # Prefixes/suffixes of the executable name are strangers, not the shim.
+        "/usr/local/bin/claudette --serve",
+        "myclaude --help",
+        "/usr/sbin/cupsd -l",
+    ],
+)
+def test_incidental_claude_mentions_do_not_look_like_claude(argv):
+    assert looks_like_claude(argv) is False
+
+
+def test_walk_passes_through_a_dot_claude_shell_wrapper():
+    # The chain as observed on a real machine: the hook's shell parent sources a
+    # `.claude/shell-snapshots/…` script, and its argv must be walked PAST so the
+    # recorded PID is the session's, not the shell's (codex regression).
+    wrapper = "/bin/zsh -c source /Users/x/.claude/shell-snapshots/snap.sh && eval '…'"
+    table = {
+        100: _info(pid=100, ppid=90, argv="python -m shipit hook sessionstart"),
+        90: _info(pid=90, ppid=80, argv=wrapper),
+        80: _info(pid=80, ppid=1, argv="claude --dangerously-skip-permissions"),
+    }
+    found = find_claude_process(100, table.get)
+    assert found is not None
+    assert found.pid == 80
+
+
+# --------------------------------------------------------------------------
 # Pidfile round-trip — lives in .git, never the working tree
 # --------------------------------------------------------------------------
 
@@ -226,3 +284,23 @@ def test_os_probe_self_is_alive():
     info = liveness.os_probe(os.getpid())
     assert info is not None
     assert info.pid == os.getpid()
+
+
+def test_os_probe_pins_the_c_locale_on_ps(monkeypatch):
+    # `lstart`'s day/month names are locale-dependent; without LC_ALL=C a
+    # non-English locale makes every create-time unparseable and every live
+    # session read as dead (copilot review). Pin the env the probe passes.
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["env"] = kwargs.get("env")
+
+        class R:
+            returncode = 1
+            stdout = ""
+
+        return R()
+
+    monkeypatch.setattr(liveness.proc, "run", fake_run)
+    liveness.os_probe(4242)
+    assert seen["env"] == {"LC_ALL": "C"}

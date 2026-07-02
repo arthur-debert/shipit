@@ -62,13 +62,27 @@ CREATE_TIME_TOLERANCE_SECONDS = 5.0
 #: Tree forever and the gc floor would never reclaim it).
 PIDFILE_NAME = "shipit-session.json"
 
-#: The substring that marks a command line as a Claude Code session. Matched
-#: case-insensitively against the WHOLE argv — the entrypoint is typically
-#: ``node …/claude-code/cli.js`` or a ``claude`` shim on PATH, so the process
-#: NAME is useless (``node``) but the command line always carries ``claude``.
-#: Deliberately permissive: argv is corroboration, the create-time match is the
-#: per-PID identity, so a false argv positive alone can never fake liveness.
-_CLAUDE_ARGV_MARKER = "claude"
+#: The npm package path that marks a Node-run Claude Code entrypoint
+#: (``node …/node_modules/@anthropic-ai/claude-code/cli.js``): matched as a
+#: substring of a single argv token, since the surrounding install prefix varies
+#: per machine/node-version-manager.
+_CLAUDE_ENTRYPOINT_MARKER = "@anthropic-ai/claude-code"
+
+#: The unscoped entrypoint suffix (``…/claude-code/cli.js``) some install layouts
+#: show instead of the full ``@anthropic-ai`` scope. Matched as a token SUFFIX —
+#: the token must BE the cli.js entrypoint, so a stranger process that merely
+#: lives under a directory named ``claude-code`` (e.g. a checkout of the repo)
+#: does not read as the session.
+_CLAUDE_ENTRYPOINT_SUFFIX = "claude-code/cli.js"
+
+#: Executable basenames that ARE Claude Code: the ``claude`` shim/binary on PATH
+#: (however deep its install prefix) and the ``claude-code`` alias some installs
+#: use. Matched against a token's BASENAME exactly — never as a substring of the
+#: whole command line, which would also match incidental ``.claude/…`` path
+#: segments (hook scripts, ``.claude/shell-snapshots/…`` shell wrappers) and make
+#: :func:`find_claude_process` record a short-lived intermediate instead of the
+#: session (codex review).
+_CLAUDE_EXECUTABLES = frozenset({"claude", "claude-code"})
 
 
 @dataclass(frozen=True)
@@ -112,12 +126,26 @@ class LivenessRecord:
 def looks_like_claude(argv: str) -> bool:
     """Whether ``argv`` reads as a Claude Code session's command line.
 
-    Case-insensitive substring match on the full command line — NEVER the OS
-    process name, which for the Node.js-based Claude Code is usually ``node``
-    (ADR-0027). Corroboration only: :func:`is_live` pairs this with the
-    create-time identity, so permissiveness here cannot fake a live session.
+    Matches the command line, NEVER the OS process name — which for the
+    Node.js-based Claude Code is usually ``node`` (ADR-0027). A token is a match
+    when its basename is a Claude executable (:data:`_CLAUDE_EXECUTABLES` — the
+    ``claude`` shim, wherever installed) or it carries the npm entrypoint path
+    (:data:`_CLAUDE_ENTRYPOINT_MARKER`). Deliberately NOT a whole-argv substring
+    test: ``claude`` appears incidentally in NON-session command lines — a hook
+    script under ``.claude/hooks/…``, the ``zsh -c 'source
+    ~/.claude/shell-snapshots/…'`` wrapper Claude Code runs commands through —
+    and :func:`find_claude_process` must walk PAST those short-lived
+    intermediates, not record them (a recorded hook/shell PID dies immediately
+    and gc would misread the live session as dead).
     """
-    return _CLAUDE_ARGV_MARKER in argv.lower()
+    for token in argv.lower().split():
+        if _CLAUDE_ENTRYPOINT_MARKER in token:
+            return True
+        if token.endswith(_CLAUDE_ENTRYPOINT_SUFFIX):
+            return True
+        if token.rstrip("/").rsplit("/", 1)[-1] in _CLAUDE_EXECUTABLES:
+            return True
+    return False
 
 
 def is_live(
@@ -261,7 +289,11 @@ def remove_pidfile(tree: str | Path) -> None:
 # --------------------------------------------------------------------------
 
 #: ``ps`` renders ``lstart`` in this fixed 5-token C-locale form
-#: (``Wed Jul  2 10:23:45 2026``) on both macOS and Linux.
+#: (``Wed Jul  2 10:23:45 2026``) on both macOS and Linux — PROVIDED the child
+#: runs under the C locale. ``lstart``'s day/month names are locale-dependent
+#: (procps localizes them), so :func:`os_probe` pins ``LC_ALL=C`` on the ``ps``
+#: call; without it a non-English locale would make every create-time
+#: unparseable and every live session read as dead (copilot review).
 _LSTART_FORMAT = "%a %b %d %H:%M:%S %Y"
 _LSTART_TOKENS = 5
 
@@ -271,15 +303,21 @@ def os_probe(pid: int) -> ProcessInfo | None:
 
     Shells out to ``ps -p <pid> -o pid=,ppid=,lstart=,args=`` — portable across
     macOS and Linux, no psutil dependency (the runtime deps stay pure-python
-    wheel pulls). ``None`` when the PID is not alive or the output cannot be
-    parsed; a row whose ``lstart`` fails to parse still returns the process with
-    ``create_time=None`` (alive, identity unverifiable — :func:`is_live` then
-    reads it as not live, the safe direction).
+    wheel pulls). The child is pinned to ``LC_ALL=C`` (merged over the inherited
+    environment) because ``lstart``'s rendering is locale-dependent: under a
+    non-English locale its day/month names would not parse as
+    :data:`_LSTART_FORMAT`, so every live session would degrade to
+    ``create_time=None`` and be misread as dead. ``None`` when the PID is not
+    alive or the output cannot be parsed; a row whose ``lstart`` fails to parse
+    still returns the process with ``create_time=None`` (alive, identity
+    unverifiable — :func:`is_live` then reads it as not live, the safe
+    direction).
     """
     if pid <= 0:
         return None
     result = proc.run(
         ["ps", "-p", str(pid), "-o", "pid=,ppid=,lstart=,args="],
+        env={"LC_ALL": "C"},
         check=False,
     )
     if result.returncode != 0:

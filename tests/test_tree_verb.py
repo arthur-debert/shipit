@@ -207,6 +207,9 @@ def test_run_create_reports_gh_error_cleanly(monkeypatch, capsys):
 
 
 def _record(**over) -> TreeRecord:
+    # `unpushed=0` (every commit on some remote), NOT the TreeRecord default of
+    # None (count unreadable): classify's write/ephemeral ladders read None
+    # conservatively as has-local-work and would KEEP every record.
     base = dict(
         path="/trees/acme/widget/issues/7/work-aaaa",
         branch="issues/7/work",
@@ -216,6 +219,7 @@ def _record(**over) -> TreeRecord:
         behind=0,
         pr="#7 DRAFT",
         mtime=1000.0,
+        unpushed=0,
     )
     base.update(over)
     return TreeRecord(**base)

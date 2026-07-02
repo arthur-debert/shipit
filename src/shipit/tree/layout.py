@@ -71,6 +71,14 @@ EPHEMERAL_KIND = "ephemeral"
 #: clone nor an ephemeral session Tree falls to in :func:`tree_kind`.
 WRITE_KIND = "write"
 
+#: The write-Tree dir namespaces whose leaf sits one level DEEPER than the kind
+#: segment (``epics/<epic>/<leaf>``, ``issues/<id>/<leaf>``): the segments
+#: :func:`tree_kind` must check at grandparent depth, because the leaf's PARENT
+#: there is a free-form epic code / issue id that could legitimately be named
+#: ``review`` or ``ephemeral`` (``branches/<leaf>`` needs no entry — its parent
+#: is the literal ``branches``, which collides with no kind segment).
+_NESTED_WRITE_NAMESPACES = frozenset({"epics", "issues"})
+
 
 def tree_kind(path: str | os.PathLike[str]) -> str:
     """Which reclaim family ``path`` belongs to: ``review``/``ephemeral``/``write``.
@@ -84,8 +92,21 @@ def tree_kind(path: str | os.PathLike[str]) -> str:
     the kind as a first-class column) name the mapping from this one place. Any
     path that is neither special kind is a per-Run **write** Tree
     (:data:`WRITE_KIND`) — the ``epics``/``issues``/``branches`` namespaces.
+
+    The nested write namespaces are checked FIRST, at grandparent depth
+    (:data:`_NESTED_WRITE_NAMESPACES`): an epic write Tree is
+    ``…/epics/<epic>/<leaf>``, so the leaf's parent is the free-form epic code —
+    and ``ephemeral``/``review`` are perfectly valid epic codes (agy review). A
+    parent-segment test alone would put an epic named ``ephemeral``'s write Trees
+    on the session-Tree gc ladder (removable after a mere hour idle) and hand them
+    ``SessionStart`` pidfiles; the grandparent check keeps every ``epics``/
+    ``issues`` Tree on the write ladder regardless of what its epic code or issue
+    id is named.
     """
-    parent = Path(path).parent.name
+    p = Path(path)
+    if len(p.parts) >= 3 and p.parts[-3] in _NESTED_WRITE_NAMESPACES:
+        return WRITE_KIND
+    parent = p.parent.name
     if parent == REVIEW_KIND:
         return REVIEW_KIND
     if parent == EPHEMERAL_KIND:

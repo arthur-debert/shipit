@@ -26,6 +26,10 @@ RECENT_MTIME = NOW - (THRESHOLD - 50)
 
 
 def _record(path: str = "/trees/t", **over) -> TreeRecord:
+    # `unpushed=0` (every commit reachable from SOME remote) is the baseline the
+    # non-floor rows need: the write ladder's floor is `_has_local_only_work`,
+    # which reads the TreeRecord default (`unpushed=None`, count unreadable)
+    # conservatively as has-work.
     base = dict(
         path=path,
         branch="issues/7/work",
@@ -35,6 +39,7 @@ def _record(path: str = "/trees/t", **over) -> TreeRecord:
         behind=0,
         pr=None,
         mtime=AGED_MTIME,
+        unpushed=0,
     )
     base.update(over)
     return TreeRecord(**base)
@@ -57,6 +62,18 @@ TABLE = [
     ("merged + clean + no-unpushed + aged", {}, "MERGED", "removable"),
     ("dirty (else removable) is protected", {"dirty": True}, "MERGED", "keep"),
     ("unpushed (ahead>0) is protected", {"ahead": 2}, "MERGED", "keep"),
+    # The upstream-INDEPENDENT floor (codex review): a branch with no tracking
+    # upstream reads ahead==0 while still holding commits on no remote at all —
+    # e.g. extra commits made after the remote branch was deleted on merge. The
+    # `unpushed` count alone must protect it, and an UNREADABLE count must read
+    # as has-work (a git hiccup must never point at data loss).
+    (
+        "unpushed (on no remote, ahead==0) is protected",
+        {"unpushed": 3},
+        "MERGED",
+        "keep",
+    ),
+    ("UNREADABLE unpushed count is protected", {"unpushed": None}, "MERGED", "keep"),
     ("open/unmerged PR is in flight", {}, "OPEN", "keep"),
     ("draft PR is in flight", {}, "DRAFT", "keep"),
     ("recent (merged but young) is kept", {"mtime": RECENT_MTIME}, "MERGED", "keep"),

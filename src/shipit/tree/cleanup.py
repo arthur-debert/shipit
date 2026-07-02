@@ -16,8 +16,9 @@ local work is *kept*.
 
 - **removable** — every safe-to-delete condition holds: the PR is **merged** on the
   remote ∧ the working tree is **clean** ∧ there are **no unpushed commits**
-  (``ahead == 0``) ∧ the Tree is **aged** past the threshold. There is nothing left
-  to lose, so ``gc`` reclaims it.
+  (neither ahead of an upstream nor on no remote at all — ``_has_local_only_work``)
+  ∧ the Tree is **aged** past the threshold. There is nothing left to lose, so
+  ``gc`` reclaims it.
 - **stale** — the Tree looks abandoned (aged, clean, nothing unpushed) but its PR did
   NOT merge and is no longer in flight (no PR, or a PR closed without merging). That
   is ambiguous — maybe finished elsewhere, maybe dropped — so it is **listed, never
@@ -191,8 +192,13 @@ def classify(
        per-launch workspace, decided by its own five-rung ladder
        (:func:`_ephemeral_bucket`, ADR-0027): liveness-gated, with liveness-
        independent backstops. Never *stale*.
-    1. **dirty or unpushed** (``ahead > 0``) → **keep** — local work is never at risk
-       from ``gc``, regardless of age or PR state.
+    1. **dirty or unpushed** → **keep** — local work is never at risk from ``gc``,
+       regardless of age or PR state. "Unpushed" is :func:`_has_local_only_work`'s
+       upstream-INDEPENDENT definition — ``ahead > 0`` *or* commits on no remote at
+       all (``unpushed``) — because a branch with no tracking upstream reads
+       ``ahead == 0`` while still holding local-only commits (e.g. extra commits
+       after the remote branch was deleted on merge); ``ahead`` alone would age
+       such a Tree into ``removable`` and lose them (codex review).
     2. **not aged** (``now - mtime <= max_age_seconds``) → **keep** — too recent to
        reclaim; a Tree's mtime bumps on every write, so a live Tree never ages.
     3. aged, clean, nothing unpushed — decide on the PR:
@@ -255,7 +261,7 @@ def _bucket_for(
             hard_cap_seconds=hard_cap_seconds,
             grace_seconds=grace_seconds,
         )
-    if record.dirty or record.ahead > 0:
+    if _has_local_only_work(record):
         return "keep"
     aged = (now - record.mtime) > max_age_seconds
     if not aged:
@@ -337,7 +343,9 @@ def _ephemeral_bucket(
 def _has_local_only_work(record: TreeRecord) -> bool:
     """Whether ``record`` holds work that exists ONLY in this clone. Pure.
 
-    The ephemeral ladder's never-lose-work floor: uncommitted changes (``dirty``),
+    The never-lose-work floor shared by the write AND ephemeral ladders (the
+    review ladder needs none: a read-only shared clone holds no local work by
+    construction): uncommitted changes (``dirty``),
     commits ahead of a configured upstream (``ahead``), or commits on NO remote at
     all (``unpushed`` — the upstream-independent count, which alone covers the
     fresh no-upstream ``ephemeral/<id>`` branch that ``ahead`` reads as level).
