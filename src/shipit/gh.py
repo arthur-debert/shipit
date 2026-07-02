@@ -25,10 +25,13 @@ The READ surface returns the existing core value objects (PROC03, ADR-0028):
 a repo read returns a :class:`shipit.identity.Repo`, a PR-core read returns a
 :class:`shipit.pr.PR` (with its :class:`shipit.identity.Sha`-typed head) built
 through the ONE :func:`shipit.pr.core_from_node` boundary — never an
-adapter-shaped parallel snapshot type. Raw JSON survives only where no core
-noun exists yet (a PR's lifecycle state in :func:`pr_for_head`, the
-field-list read :func:`pr_view` whose extra fields — head branch name, base
-oid — feed richer views). A data-shape failure on an Exec that succeeded
+adapter-shaped parallel snapshot type. The fleet reads' PR-lifecycle
+projection is this adapter's own small frozen value (:class:`HeadPr`, minted
+by :func:`pr_for_head`) — scan-shaped, not a parallel PR. Raw JSON survives
+only in the documented escapes: the field-list read :func:`pr_view` (whose
+extra fields — head branch name, base oid — feed richer views) and the
+engine-shaped node read :func:`pr_meta`. A data-shape failure on an Exec that
+succeeded
 (unparseable/empty JSON, a malformed slug) raises :class:`ValueError` at this
 boundary, the same posture :func:`owner_kind` / :func:`default_branch`
 already take.
@@ -38,6 +41,7 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from . import execrun
@@ -84,6 +88,83 @@ class UnknownPr:
 
 #: The singleton unreadable-PR-state sentinel (see :class:`UnknownPr`).
 UNKNOWN = UnknownPr()
+
+
+@dataclass(frozen=True)
+class HeadPr:
+    """The PR on one head, as the fleet reads consume it — :func:`pr_for_head`'s
+    typed hit.
+
+    A scan-shaped projection owned by this adapter, NOT a parallel
+    :class:`shipit.pr.PR` (which models a PR's identity + core for the engine
+    paths): ``tree list`` / ``tree gc`` / ``spawn`` need exactly the lifecycle
+    fields they branch on — the PR ``number``, its ``state``
+    (``OPEN``/``MERGED``/``CLOSED``, upper-cased at construction), whether it is
+    a draft, and the base it targets. Frozen and thin (ADR-0021); minted only by
+    :func:`_head_pr_from_json`, where the shape validation lives, so no caller
+    ever sees the raw ``gh pr view --json`` dict (PROC03).
+    """
+
+    number: int
+    state: str
+    is_draft: bool
+    base_ref: str
+
+    @property
+    def display_state(self) -> str:
+        """The fleet's ONE state vocabulary: an open draft reads as ``DRAFT``
+        (the turn-signal the dev cycle hinges on), otherwise the GitHub state
+        verbatim (``OPEN`` / ``MERGED`` / ``CLOSED``). Both fleet renderers
+        (``tree list``'s label, ``gc``'s classifier input) read this property,
+        so the draft normalization is written down exactly once.
+        """
+        if self.state == "OPEN" and self.is_draft:
+            return "DRAFT"
+        return self.state
+
+
+def _head_pr_from_json(data: dict) -> HeadPr:
+    """Build the :class:`HeadPr` from a ``gh pr view --json`` payload — the ONE
+    place this wire shape is read.
+
+    Fail-loud on shape drift (the ``pr_core``/:func:`shipit.pr.core_from_node`
+    posture): a payload whose load-bearing fields are missing or mistyped raises
+    :class:`ValueError` naming the offending field, so a malformed answer can
+    never flow on as a half-usable snapshot (the old ``#None None`` bug).
+    ``state`` and ``baseRefName`` are stripped and ``state`` upper-cased here,
+    so callers compare against the GitHub vocabulary without re-normalizing —
+    the validation checks the stripped value, so the returned snapshot must
+    carry the stripped value too (whitespace would silently break the
+    ``base_ref`` equality checks in ``spawn``).
+    """
+    number = data.get("number")
+    if isinstance(number, bool) or not isinstance(number, int):
+        raise ValueError(
+            f"malformed `gh pr view` payload: number must be an int, got {number!r}"
+        )
+    state = data.get("state")
+    if not isinstance(state, str) or not state.strip():
+        raise ValueError(
+            f"malformed `gh pr view` payload: state must be a non-empty str, "
+            f"got {state!r}"
+        )
+    is_draft = data.get("isDraft")
+    if not isinstance(is_draft, bool):
+        raise ValueError(
+            f"malformed `gh pr view` payload: isDraft must be a bool, got {is_draft!r}"
+        )
+    base_ref = data.get("baseRefName")
+    if not isinstance(base_ref, str) or not base_ref.strip():
+        raise ValueError(
+            f"malformed `gh pr view` payload: baseRefName must be a non-empty str, "
+            f"got {base_ref!r}"
+        )
+    return HeadPr(
+        number=number,
+        state=state.strip().upper(),
+        is_draft=is_draft,
+        base_ref=base_ref.strip(),
+    )
 
 
 def _token_env(token: str | None) -> dict[str, str] | None:
@@ -480,18 +561,19 @@ def secret_list(repo: str) -> list[str]:
 # --------------------------------------------------------------------------
 
 
-def pr_for_head(branch: str, *, cwd: str | None = None) -> dict | None | UnknownPr:
-    """The PR whose head is ``branch`` as ``{number, state, isDraft, baseRefName}`` — or
-    ``None`` / :data:`UNKNOWN`.
+def pr_for_head(branch: str, *, cwd: str | None = None) -> HeadPr | None | UnknownPr:
+    """The PR whose head is ``branch`` as a :class:`HeadPr` — or ``None`` /
+    :data:`UNKNOWN`.
 
     Reads ``gh pr view <branch> --json number,state,isDraft,baseRefName`` from inside
     the Tree (``cwd``) and returns a THREE-way result, never crashing the fleet scan:
 
-    - the PR snapshot ``dict`` when a PR is read cleanly;
+    - the typed :class:`HeadPr` snapshot when a PR is read cleanly;
     - ``None`` when the branch *provably* has no PR — ``gh`` exits non-zero with its
       documented "no pull requests found" message;
     - :data:`UNKNOWN` when the state is *undetermined* — any OTHER ``gh`` failure
-      (auth/network/rate-limit) or empty/malformed/non-JSON output.
+      (auth/network/rate-limit) or empty/malformed/non-JSON output, including a
+      payload :func:`_head_pr_from_json` rejects (missing/mistyped fields).
 
     The ``None`` vs :data:`UNKNOWN` split is load-bearing: an unreadable state must
     NOT masquerade as "no PR" (which would let a conservative caller treat it like an
@@ -518,20 +600,16 @@ def pr_for_head(branch: str, *, cwd: str | None = None) -> dict | None | Unknown
         return UNKNOWN
     if not isinstance(data, dict):
         return UNKNOWN
-    number = data.get("number")
-    state = data.get("state")
-    # A dict that decoded cleanly but is missing/mistyped its load-bearing fields
-    # (e.g. ``{}`` or ``{"number": null, "state": null}``) is NOT a usable PR
-    # snapshot — returning it would render as ``#None None`` in ``tree list``. Treat
-    # it as an undetermined state, the same as malformed/non-JSON output above.
-    if not isinstance(number, int) or not isinstance(state, str):
+    try:
+        return _head_pr_from_json(data)
+    except ValueError:
+        # A dict that decoded cleanly but is missing/mistyped its load-bearing
+        # fields (e.g. ``{}`` or ``{"number": null, "state": null}``) is NOT a
+        # usable PR snapshot — returning it would have rendered as ``#None None``
+        # in ``tree list``. The construction boundary rejected it loudly; for
+        # this never-crash scan read that means an undetermined state, the same
+        # as malformed/non-JSON output above.
         return UNKNOWN
-    return {
-        "number": number,
-        "state": state,
-        "isDraft": data.get("isDraft"),
-        "baseRefName": data.get("baseRefName"),
-    }
 
 
 #: ``gh`` exits non-zero with this message when a head simply has no associated

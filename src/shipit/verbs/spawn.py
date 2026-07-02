@@ -636,31 +636,31 @@ def _launch_write(
     # A ready-for-review PR, a closed/merged one, or one opened against the wrong base is
     # an INVALID lifecycle state the coordinator must not be handed as success — each is a
     # clean exit-1, never a SPAWNED line.
-    if pr["state"] != "OPEN":
+    if pr.state != "OPEN":
         return _fail(
             f"child exited 0 but the PR on {tree.branch!r} is "
-            f"{pr['state']}, not OPEN; the Run did not report back through an open "
+            f"{pr.state}, not OPEN; the Run did not report back through an open "
             "draft PR.",
             branch=tree.branch,
-            pr=pr["number"],
-            pr_state=pr["state"],
+            pr=pr.number,
+            pr_state=pr.state,
         )
-    if pr.get("isDraft") is not True:
+    if not pr.is_draft:
         return _fail(
             f"child exited 0 but the PR on {tree.branch!r} is not a "
             "draft; the Run must report back through a draft PR (the turn-signal the "
             "coordinator drives).",
             branch=tree.branch,
-            pr=pr["number"],
+            pr=pr.number,
         )
-    if pr.get("baseRefName") != base_branch:
+    if pr.base_ref != base_branch:
         return _fail(
             f"child exited 0 but the PR on {tree.branch!r} targets "
-            f"base {pr.get('baseRefName')!r}, not the intended {base_branch!r}; the "
+            f"base {pr.base_ref!r}, not the intended {base_branch!r}; the "
             "Run reported back against the wrong base.",
             branch=tree.branch,
-            pr=pr["number"],
-            pr_base=pr.get("baseRefName"),
+            pr=pr.number,
+            pr_base=pr.base_ref,
         )
 
     _emit_spawned(tree, role=role, backend=backend, pr=pr)
@@ -782,7 +782,7 @@ def _launch_reviewer(
 
 
 def _emit_spawned(
-    tree: Tree, *, role: str, backend: str, pr: dict | None = None
+    tree: Tree, *, role: str, backend: str, pr: gh.HeadPr | None = None
 ) -> None:
     """Print the SPAWNED summary: a ``SPAWNED`` line plus the Run's coordinates as JSON.
 
@@ -801,9 +801,9 @@ def _emit_spawned(
         "backend": backend,
     }
     if pr is not None:
-        payload["pr"] = pr["number"]
-        payload["pr_state"] = pr["state"]
-        payload["pr_is_draft"] = pr.get("isDraft")
+        payload["pr"] = pr.number
+        payload["pr_state"] = pr.state
+        payload["pr_is_draft"] = pr.is_draft
     # The spawn-handshake milestone (ADR-0029): the same coordinates the stdout
     # block hands the coordinator, on the durable record — for a write Run that
     # includes the Run↔PR linkage (`pr` doubles as the domain key, so
