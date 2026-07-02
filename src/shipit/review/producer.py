@@ -43,6 +43,7 @@ import tempfile
 from dataclasses import dataclass
 
 from .. import gh
+from ..identity import Repo, repo_from_slug
 from ..spawn import launch
 from ..spawn.backends.antigravity import AntigravityAdapter
 from ..spawn.backends.base import BackendAdapter
@@ -144,7 +145,7 @@ def run_tree_review(
         )
     _preflight(agent, spec, dry_run=dry_run)
 
-    org, repo_name = _resolve_org_repo(ctx)
+    repo = _resolve_repo(ctx)
     branch = (ctx.head_ref or "").strip()
     if not branch:
         raise RuntimeError(
@@ -161,13 +162,13 @@ def run_tree_review(
     schema_path: str | None = None
     try:
         if dry_run:
-            return _dry_run(agent, ctx, spec, adapter, task, org, repo_name, branch)
+            return _dry_run(agent, ctx, spec, adapter, task, repo, branch)
 
         if spec.native_schema:
             schema_path = _write_schema_tempfile()
 
         tree = create_readonly(
-            readonly_plan(org=org, repo=repo_name, branch=branch),
+            readonly_plan(repo=repo, branch=branch),
             source_repo=ctx.workdir,
             github_url=_github_url(ctx),
         )
@@ -232,8 +233,7 @@ def _dry_run(
     spec: _BackendSpec,
     adapter: BackendAdapter,
     task: str,
-    org: str,
-    repo_name: str,
+    repo: Repo,
     branch: str,
 ) -> dict:
     """Print the would-run Tree-launch argv WITHOUT cloning or billing; return empty.
@@ -244,7 +244,7 @@ def _dry_run(
     review flows on to ``post_review(dry_run=True)``, which prints the would-post payload
     — so the whole dry-run is honest end to end and bills nothing.
     """
-    plan = readonly_plan(org=org, repo=repo_name, branch=branch)
+    plan = readonly_plan(repo=repo, branch=branch)
     placeholder = "<review-schema-tempfile>.json" if spec.native_schema else None
     cmd = adapter.build_command(
         task,
@@ -278,24 +278,27 @@ def _preflight(agent: str, spec: _BackendSpec, *, dry_run: bool) -> None:
         )
 
 
-def _resolve_org_repo(ctx) -> tuple[str, str]:
-    """``(org, repo)`` for ``ctx`` — from ``ctx.repo`` (``owner/name``), else inferred.
+def _resolve_repo(ctx) -> Repo:
+    """The :class:`shipit.identity.Repo` for ``ctx`` — from ``ctx.repo``, else inferred.
 
     The detached child always resolves ``ctx`` with an explicit ``--repo``, so
     ``ctx.repo`` is normally set; a hand-built context falls back to ``gh repo view``.
-    A slug that is not ``owner/name`` fails loud rather than provisioning a Tree under a
-    malformed org.
+    Either slug routes through the ONE canonical parser
+    (:func:`shipit.identity.repo_from_slug`) so the read-only Tree's namespace is the
+    case-normalized identity — an API-cased slug can never land a divergent Tree path
+    (ADR-0024). A slug that is not ``owner/name`` fails loud rather than provisioning
+    a Tree under a malformed identity.
     """
     slug = (ctx.repo or "").strip()
     if not slug:
         slug = (gh.current_repo() or "").strip()
-    if "/" not in slug:
+    try:
+        return repo_from_slug(slug)
+    except ValueError as exc:
         raise RuntimeError(
             f"cannot review PR #{ctx.number}: the repo slug {slug!r} is not in "
-            "owner/name form, so the read-only Tree's org/repo cannot be resolved."
-        )
-    org, _, name = slug.partition("/")
-    return org, name
+            "owner/name form, so the read-only Tree's namespace cannot be resolved."
+        ) from exc
 
 
 def _github_url(ctx) -> str:

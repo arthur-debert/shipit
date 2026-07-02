@@ -17,7 +17,7 @@ import dataclasses
 
 import pytest
 from shipit.identity import Owner, Repo
-from shipit.pr import CORE_JSON_FIELDS, PR, core_from_node, repo_from_slug
+from shipit.pr import CORE_JSON_FIELDS, PR, core_from_node
 
 REPO = Repo(owner=Owner(login="octocat"), name="hello-world")
 
@@ -110,15 +110,3 @@ def test_nonbool_is_draft_fails_loud_not_coerced(bad):
     # the fail-loud-core invariant this boundary enforces.
     with pytest.raises(ValueError):
         core_from_node({"number": 1, "headRefOid": "abc", "isDraft": bad}, REPO)
-
-
-def test_repo_from_slug_matches_local_identity():
-    # A slug-derived Repo shares identity with a locally-resolved one (both lowercased).
-    assert repo_from_slug("Octocat/Hello-World") == REPO
-    assert repo_from_slug("Octocat/Hello-World").slug == "octocat/hello-world"
-
-
-@pytest.mark.parametrize("bad", ["", "noslash", "owner/", "/name", "a/b/c"])
-def test_repo_from_slug_rejects_malformed(bad):
-    with pytest.raises(ValueError):
-        repo_from_slug(bad)

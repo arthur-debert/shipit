@@ -13,7 +13,7 @@ import sys
 import click
 
 from . import __version__, logcontext
-from .logsetup import configure_logging, resolve_current_owner_repo
+from .logsetup import configure_logging, resolve_current_repo
 from .verbs import gh_setup, install, lint, logs, verify_apps
 from .verbs.eval import eval_group
 from .verbs.hook import hook as hook_group
@@ -51,10 +51,10 @@ def root(verbose: bool) -> None:
     ``SHIPIT_LOG_CTX_*`` key (rebound inside ``configure_logging``, the child
     half of the seam) deliberately wins over this best-effort cwd resolution.
     """
-    owner_repo = resolve_current_owner_repo()
-    if owner_repo is not None:
-        logcontext.bind(repo="/".join(owner_repo))
-    configure_logging(verbose=verbose, owner_repo=owner_repo)
+    repo = resolve_current_repo()
+    if repo is not None:
+        logcontext.bind(repo=repo.slug)
+    configure_logging(verbose=verbose, repo=repo)
 
 
 @root.command(name="gh-setup")

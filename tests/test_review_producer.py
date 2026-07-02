@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import pytest
 
+from shipit.identity import repo_from_slug
 from shipit.review import producer
 from shipit.review.backends import BackendError, BackendUnavailable
 from shipit.review.diff import ReviewView, review_view
@@ -196,20 +197,21 @@ def test_missing_head_branch_is_a_clean_failure(_faked):
     assert "head branch" in str(exc.value)
 
 
-def test_resolve_org_repo_uses_the_view_slug_when_known(monkeypatch):
+def test_resolve_repo_uses_the_view_slug_when_known(monkeypatch):
     """A resolved view's slug is the source of truth for the read-only Tree's
-    org/repo — no `gh repo view` re-inference."""
+    identity — no `gh repo view` re-inference — parsed by the ONE canonical
+    parser, so it lands the case-normalized Repo."""
     monkeypatch.setattr(
         producer.gh,
         "current_repo",
         lambda: (_ for _ in ()).throw(AssertionError("must not infer when repo known")),
     )
-    assert producer._resolve_org_repo(_ctx()) == ("arthur-debert", "shipit")
+    assert producer._resolve_repo(_ctx()) == repo_from_slug("arthur-debert/shipit")
 
 
-def test_resolve_org_repo_falls_back_to_gh_for_handbuilt_context(monkeypatch):
+def test_resolve_repo_falls_back_to_gh_for_handbuilt_context(monkeypatch):
     """The falsey-repo fallback (ADR-0024): a hand-built view (`repo is None`)
-    provisions the Tree under the `gh repo view`-inferred org/repo rather than a
+    provisions the Tree under the `gh repo view`-inferred identity rather than a
     `local/local` placeholder."""
     ctx = review_view(
         number=42,
@@ -221,5 +223,5 @@ def test_resolve_org_repo_falls_back_to_gh_for_handbuilt_context(monkeypatch):
         is_draft=False,
     )
     assert ctx.repo is None
-    monkeypatch.setattr(producer.gh, "current_repo", lambda: "inferred/repo")
-    assert producer._resolve_org_repo(ctx) == ("inferred", "repo")
+    monkeypatch.setattr(producer.gh, "current_repo", lambda: "Inferred/Repo")
+    assert producer._resolve_repo(ctx) == repo_from_slug("inferred/repo")

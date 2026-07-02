@@ -36,7 +36,7 @@ import time
 from pathlib import Path
 from typing import Callable
 
-from .. import execrun, gh, logsetup, redact
+from .. import execrun, gh, identity, logsetup, redact
 
 #: Default number of trailing lines the no-flag invocation prints.
 DEFAULT_TAIL = 50
@@ -50,18 +50,6 @@ _EXIT_NO_LOG = 1
 
 #: Exit code for a bad ``owner/repo`` (usage error).
 _EXIT_BAD_REPO = 2
-
-
-def _owner_repo(slug: str) -> tuple[str, str]:
-    """Split an ``owner/repo`` slug into its parts, rejecting anything else.
-
-    A value that is not a two-part slug is surfaced to the user rather than
-    silently targeting an empty/incorrect log directory.
-    """
-    owner, sep, repo = slug.partition("/")
-    if not sep or not owner or not repo:
-        raise ValueError(f"expected an 'owner/repo' slug, got {slug!r}")
-    return owner, repo
 
 
 def _last_n(lines: list[str], n: int) -> list[str]:
@@ -241,7 +229,10 @@ def run(
     current_repo = current_repo or gh.current_repo
     try:
         slug = repo if repo is not None else current_repo()
-        owner_repo = _owner_repo(slug)
+        # The ONE canonical slug parser (ADR-0024): lowercases owner/name, so an
+        # API-cased or hand-typed slug resolves the SAME log directory the writer
+        # (which namespaces by the canonical Repo identity) filled.
+        target = identity.repo_from_slug(slug)
     except execrun.ExecError as exc:
         # Resolving the cwd repo shelled out and failed — not a checkout, or gh
         # is unavailable. Keep the verb's promise of a clean message, no traceback.
@@ -255,7 +246,7 @@ def run(
         print(f"logs: {exc}", file=sys.stderr)
         return _EXIT_BAD_REPO
 
-    path = logsetup.log_file_path(owner_repo, base_dir=base_dir)
+    path = logsetup.log_file_path(target, base_dir=base_dir)
 
     if path_only:
         print(str(path))
@@ -264,7 +255,7 @@ def run(
     if not path.exists():
         print(
             f"logs: no log yet at {path} — it is created on the first shipit run "
-            f"that logs for {owner_repo[0]}/{owner_repo[1]}.",
+            f"that logs for {target.slug}.",
             file=sys.stderr,
         )
         return _EXIT_NO_LOG

@@ -160,6 +160,25 @@ def parse_remote_url(url: str) -> tuple[str, str]:
     return match.group("owner"), match.group("name")
 
 
+def repo_from_slug(slug: str) -> Repo:
+    """Parse an ``owner/name`` slug into a :class:`Repo` — THE canonical slug parser.
+
+    The one place an ``owner/name`` string becomes an identity, so every feeder —
+    logging setup, the ``logs`` verb, the tree/spawn/hook feeders, the review
+    producer — normalizes identically instead of hand-rolling ``partition("/")``.
+    Owner and name are **lowercased** to match :func:`resolve_repo`, so a
+    :class:`Repo` built from an API-supplied slug shares one identity with the same
+    repo resolved locally from origin — mixed-case sources can never split one
+    repo's identity across divergent Tree paths or log directories (ADR-0024).
+    Raises :class:`ValueError` on a slug that is not ``owner/name`` — a malformed
+    slug surfaces loudly rather than yielding a bogus identity.
+    """
+    owner, sep, name = slug.strip().partition("/")
+    if not sep or not owner or not name or "/" in name:
+        raise ValueError(f"not an owner/name slug: {slug!r}")
+    return Repo(owner=Owner(login=owner.lower()), name=name.lower())
+
+
 def resolve_repo(cwd: str = ".", *, boundary: GitBoundary = gh) -> Repo:
     """The :class:`Repo` checked out at ``cwd`` — derived LOCALLY from origin.
 

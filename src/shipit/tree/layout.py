@@ -36,6 +36,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..identity import Repo
+
 #: Env override for the central root all Trees live under. Unset → the default
 #: below. A module constant + env override is the whole config surface for WS01
 #: (the PRD's "keep it simple"); a richer config binding can supersede it later.
@@ -342,9 +344,14 @@ def ephemeral_branch(session_id: str) -> str:
 class TreeSpec:
     """A request to materialize a Tree — exactly one of the four shapes is set.
 
-    ``org`` / ``repo`` namespace the dir under the central root; ``agent_hash``
-    disambiguates the dir for two Trees on one branch (it never reaches the
-    branch; the ephemeral shape ignores it — its leaf is the session id itself).
+    ``repo`` is the :class:`shipit.identity.Repo` value object that namespaces the
+    dir under the central root (``<root>/<owner>/<name>/…``). It arrives already
+    canonical — lowercased owner/name from :func:`shipit.identity.resolve_repo` or
+    :func:`shipit.identity.repo_from_slug` — so case-varying origins or API slugs
+    can never split one repo's Trees across divergent paths (ADR-0024).
+    ``agent_hash`` disambiguates the dir for two Trees on one branch (it never
+    reaches the branch; the ephemeral shape ignores it — its leaf is the session
+    id itself).
     ``root`` overrides the central root for tests; ``None`` resolves
     :func:`central_root`. ``slug`` is the optional human label applied per shape.
     ``session`` names the standalone-issue branch's leaf — ``issues/<id>/<session>``,
@@ -363,8 +370,7 @@ class TreeSpec:
       ``claude --worktree <id>`` — ADR-0027; no CLI flag mints one by hand).
     """
 
-    org: str
-    repo: str
+    repo: Repo
     agent_hash: str
     issue: int | None = None
     epic: str | None = None
@@ -383,6 +389,24 @@ class TreePlan:
     dir: Path
     branch: str
     base: str
+
+
+def repo_dir(repo: Repo, root: Path | None = None) -> Path:
+    """The per-repo namespace every Tree of ``repo`` lives under: ``<root>/<owner>/<name>``.
+
+    The ONE place a :class:`shipit.identity.Repo` becomes Tree path segments, shared
+    by the four write shapes and the read-only (reviewer) planner — so the identity's
+    canonical (lowercased) owner/name is what lands on disk everywhere, and one repo
+    can never scatter across case-divergent directories (ADR-0024). ``root`` overrides
+    the central root for tests; ``None`` resolves :func:`central_root`.
+    """
+    base_root = root if root is not None else central_root()
+    return Path(base_root) / repo.owner.login / repo.name
+
+
+def _repo_dir(spec: TreeSpec) -> Path:
+    """``spec``'s per-repo namespace dir — :func:`repo_dir` over its repo + root."""
+    return repo_dir(spec.repo, spec.root)
 
 
 def plan(spec: TreeSpec) -> TreePlan:
@@ -464,8 +488,7 @@ def _plan_epic_ws(spec: TreeSpec) -> TreePlan:
         if slug
         else f"{ws_code}-{spec.agent_hash}"
     )
-    root = spec.root if spec.root is not None else central_root()
-    directory = Path(root) / spec.org / spec.repo / "epics" / spec.epic / leaf
+    directory = _repo_dir(spec) / "epics" / spec.epic / leaf
     return TreePlan(dir=directory, branch=branch, base=base)
 
 
@@ -496,9 +519,8 @@ def _plan_freeform(spec: TreeSpec) -> TreePlan:
             f"leaf); got {branch!r}, which sanitizes to an empty name — a leaf of "
             "just '-<hash>' and an unusable empty branch."
         )
-    root = spec.root if spec.root is not None else central_root()
     leaf = f"{sanitized}-{spec.agent_hash}"
-    directory = Path(root) / spec.org / spec.repo / "branches" / leaf
+    directory = _repo_dir(spec) / "branches" / leaf
     return TreePlan(dir=directory, branch=branch, base="origin/main")
 
 
@@ -537,8 +559,7 @@ def _plan_issue(spec: TreeSpec) -> TreePlan:
         if slug
         else f"{session}-{spec.agent_hash}"
     )
-    root = spec.root if spec.root is not None else central_root()
-    directory = Path(root) / spec.org / spec.repo / "issues" / str(spec.issue) / leaf
+    directory = _repo_dir(spec) / "issues" / str(spec.issue) / leaf
     return TreePlan(dir=directory, branch=branch, base="origin/main")
 
 
@@ -568,6 +589,5 @@ def _plan_ephemeral(spec: TreeSpec) -> TreePlan:
     assert spec.ephemeral is not None  # guaranteed by plan()
     branch = ephemeral_branch(spec.ephemeral)  # validates + normalizes the id
     leaf = branch.rsplit("/", 1)[-1]
-    root = spec.root if spec.root is not None else central_root()
-    directory = Path(root) / spec.org / spec.repo / EPHEMERAL_KIND / leaf
+    directory = _repo_dir(spec) / EPHEMERAL_KIND / leaf
     return TreePlan(dir=directory, branch=branch, base="origin/main")

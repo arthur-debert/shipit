@@ -15,8 +15,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from ..identity import Repo
-from ..pr import core_from_node, repo_from_slug
+from ..identity import Repo, repo_from_slug
+from ..pr import core_from_node
 from . import ghapi
 from .model import (
     ReadinessView,
