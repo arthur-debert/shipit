@@ -58,7 +58,7 @@ class GitBoundary(Protocol):
 
     def current_branch(self, *, cwd: str) -> str | None: ...
 
-    def head_commit(self, *, cwd: str) -> str | None: ...
+    def head_commit(self, *, cwd: str) -> Sha | None: ...
 
 
 class OwnerKindBoundary(Protocol):
@@ -205,13 +205,16 @@ class Repo:
 class Revision:
     """The revision half of a :class:`WorkingDir` — ``(branch, commit)``.
 
-    Both are best-effort and may be ``None`` (a detached/unborn HEAD has no branch;
-    an unresolvable HEAD has no commit) — a WorkingDir is a *location*, so a missing
-    revision never makes it un-constructible.
+    ``commit`` is a :class:`Sha` — commit identity rides the value object end to
+    end (PROC03); callers stringify only at a serialization seam (the eval
+    record's JSON stamp). Both fields are best-effort and may be ``None`` (a
+    detached/unborn HEAD has no branch; an unresolvable HEAD has no commit) — a
+    WorkingDir is a *location*, so a missing revision never makes it
+    un-constructible.
     """
 
     branch: str | None = None
-    commit: str | None = None
+    commit: Sha | None = None
 
 
 @dataclass(frozen=True)

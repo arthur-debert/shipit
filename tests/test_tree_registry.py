@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from shipit import gh, git
+from shipit.identity import Sha
 from shipit.tree import registry
 
 
@@ -49,7 +50,7 @@ def fleet(tmp_path: Path, monkeypatch):
             "base": "origin/main",
             "dirty": [" M file.py"],
             "ahead_behind": (2, 0),
-            "unpushed_shas": ("a" * 40, "b" * 40),
+            "unpushed_shas": (Sha("a" * 40), Sha("b" * 40)),
         },
         str(b): {
             "branch": "HAR02/WS02",
@@ -109,7 +110,7 @@ def test_scan_reads_the_upstream_independent_unpushed_shas(fleet):
     # The `unpushed` count is derived from the same stored fact.
     root, a, b = fleet
     by_path = {r.path: r for r in registry.scan(root)}
-    assert by_path[str(a)].unpushed_shas == ("a" * 40, "b" * 40)
+    assert by_path[str(a)].unpushed_shas == (Sha("a" * 40), Sha("b" * 40))
     assert by_path[str(a)].unpushed == 2
     assert by_path[str(b)].unpushed_shas == ()
     assert by_path[str(b)].unpushed == 0

@@ -24,7 +24,7 @@ from pathlib import Path
 import pytest
 
 from shipit import execrun, git, logsetup
-from shipit.identity import repo_from_slug
+from shipit.identity import Sha, repo_from_slug
 from shipit.tree import cleanup, provision
 from shipit.tree.create import create
 from shipit.tree.layout import TreeSpec
@@ -99,7 +99,7 @@ def _mock_write_boundary(monkeypatch):
     monkeypatch.setattr(git, "clone_dissociated", fake_clone)
     monkeypatch.setattr(git, "fetch", lambda **k: None)
     monkeypatch.setattr(git, "checkout_new_branch", lambda *a, **k: None)
-    monkeypatch.setattr(git, "head_commit", lambda **k: "abc123")
+    monkeypatch.setattr(git, "head_commit", lambda **k: Sha("abc123" + "0" * 34))
     monkeypatch.setattr(
         execrun,
         "run",
@@ -222,7 +222,7 @@ def test_write_record_narrates_the_record_write(tmp_path, caplog):
     (tree / ".git").mkdir(parents=True)
 
     with caplog.at_level(logging.INFO, logger="shipit.tree"):
-        provision.write_record(tree, ["sha1", "sha2"])
+        provision.write_record(tree, [Sha("1" * 40), Sha("2" * 40)])
 
     assert any(
         r.levelno == logging.INFO and getattr(r, "tree", None) == str(tree)

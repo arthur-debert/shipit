@@ -22,8 +22,12 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .. import gh, git
+
+if TYPE_CHECKING:
+    from ..identity import Sha
 
 logger = logging.getLogger("shipit.tree")
 
@@ -75,14 +79,14 @@ class TreeRecord:
     - ``dirty`` — ``True`` when the working tree has uncommitted/untracked changes.
     - ``ahead`` / ``behind`` — commits ahead of / behind the upstream (``0`` each
       when there is no upstream).
-    - ``unpushed_shas`` — the SHAs of commits on ``HEAD`` that exist on NO remote at
-      all, or ``None`` when they could not be read. Distinct from ``ahead``, which is
-      measured against the upstream and reads ``0`` for a branch with no upstream — a
-      fresh ``ephemeral/<id>`` branch would look level while carrying local-only
-      commits. The ephemeral gc ladder (ADR-0027) keys its never-lose-work floor off
-      this, and the SHAs (not a bare count) are what lets it exclude exactly the
-      recorded provisioning commit (#232). The count is the derived
-      :attr:`unpushed` property.
+    - ``unpushed_shas`` — the :class:`~shipit.identity.Sha`\\s of commits on ``HEAD``
+      that exist on NO remote at all, or ``None`` when they could not be read.
+      Distinct from ``ahead``, which is measured against the upstream and reads ``0``
+      for a branch with no upstream — a fresh ``ephemeral/<id>`` branch would look
+      level while carrying local-only commits. The ephemeral gc ladder (ADR-0027)
+      keys its never-lose-work floor off this, and the typed SHAs (not a bare count)
+      are what lets it exclude exactly the recorded provisioning commit (#232). The
+      count is the derived :attr:`unpushed` property.
     - ``pr`` — a short PR-state label (``"#123 OPEN"``, ``"#123 MERGED"``,
       ``"#123 DRAFT"``…), or ``None`` when the branch has no PR.
     - ``mtime`` — the directory's mtime (epoch seconds); the verb renders it as age.
@@ -96,7 +100,7 @@ class TreeRecord:
     behind: int
     pr: str | None
     mtime: float
-    unpushed_shas: tuple[str, ...] | None = None
+    unpushed_shas: tuple[Sha, ...] | None = None
 
     @property
     def unpushed(self) -> int | None:
