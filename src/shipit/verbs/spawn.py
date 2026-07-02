@@ -240,7 +240,8 @@ def run_subagent(
 
     ``launcher`` injects the subprocess seam so the launch contract is unit-tested
     without spawning a real ``claude``; ``None`` uses the real
-    :func:`shipit.spawn.launch._subprocess_runner`.
+    :func:`shipit.spawn.launch._exec_runner` (a consumer view over
+    :func:`shipit.execrun.run`).
     """
     if backend not in SUPPORTED_BACKENDS:
         supported = ", ".join(SUPPORTED_BACKENDS)
@@ -507,10 +508,13 @@ def _launch_write(
             env=launch.scrub_tree_env(adapter.child_env()),
             runner=launcher,
         )
-    except OSError as exc:
+    except execrun.ExecError as exc:
         # The child never started: `claude` is missing/not on PATH, or the Tree path
-        # became unavailable. The Tree exists, so this is a launch failure, not the
-        # fail-closed create path — still a clean exit-1, never an escaping traceback.
+        # became unavailable. The Exec runner normalizes every launch-level OS failure
+        # into ExecError (ADR-0028) — a nonzero CHILD is a LaunchResult, never raised
+        # (check=False), so reaching here always means a transport failure. The Tree
+        # exists, so this is a launch failure, not the fail-closed create path — still
+        # a clean exit-1, never an escaping traceback.
         print(f"spawn subagent: {exc}", file=sys.stderr)
         return 1
     if result.returncode != 0:
@@ -636,7 +640,9 @@ def _launch_reviewer(
             env=launch.scrub_tree_env(adapter.child_env()),
             runner=launcher,
         )
-    except OSError as exc:
+    except execrun.ExecError as exc:
+        # Transport failure only (ADR-0028): the runner raised because the child never
+        # started; a nonzero reviewer child is a LaunchResult handled below.
         print(f"spawn subagent: {exc}", file=sys.stderr)
         return 1
     if result.returncode != 0:
