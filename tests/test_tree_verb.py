@@ -207,8 +207,8 @@ def test_run_create_reports_gh_error_cleanly(monkeypatch, capsys):
 
 
 def _record(**over) -> TreeRecord:
-    # `unpushed=0` (every commit on some remote), NOT the TreeRecord default of
-    # None (count unreadable): classify's write/ephemeral ladders read None
+    # `unpushed_shas=()` (every commit on some remote), NOT the TreeRecord default
+    # of None (list unreadable): classify's write/ephemeral ladders read None
     # conservatively as has-local-work and would KEEP every record.
     base = dict(
         path="/trees/acme/widget/issues/7/work-aaaa",
@@ -219,7 +219,7 @@ def _record(**over) -> TreeRecord:
         behind=0,
         pr="#7 DRAFT",
         mtime=1000.0,
-        unpushed=0,
+        unpushed_shas=(),
     )
     base.update(over)
     return TreeRecord(**base)
@@ -1211,7 +1211,7 @@ def test_run_gc_keeps_a_live_session_and_reclaims_a_dead_one(
             branch="ephemeral/sess-live",
             base=None,
             pr=None,
-            unpushed=0,
+            unpushed_shas=(),
             mtime=past_grace,
         ),
         _record(
@@ -1219,7 +1219,7 @@ def test_run_gc_keeps_a_live_session_and_reclaims_a_dead_one(
             branch="ephemeral/sess-dead",
             base=None,
             pr=None,
-            unpushed=0,
+            unpushed_shas=(),
             mtime=past_grace,
         ),
     ]
@@ -1232,3 +1232,52 @@ def test_run_gc_keeps_a_live_session_and_reclaims_a_dead_one(
     out = capsys.readouterr().out
     assert f"KEEP      {live_path}" in out
     assert f"REMOVABLE {dead_path}" in out
+
+
+def test_run_gc_excludes_the_recorded_provisioning_commit(
+    tmp_path, monkeypatch, capsys
+):
+    # End to end through the gc verb (#232): two dead, clean ephemeral Trees past
+    # the grace window, each carrying ONE local-only commit (the drift-window
+    # managed-set reconcile). The one whose provisioning RECORDED that commit's SHA
+    # is reclaimed; the one without a record keeps — the exclusion is
+    # exact-identity, never a guess.
+    import time as _time
+
+    from shipit.tree import provision as provision_mod
+
+    root = tmp_path / "trees"
+    recorded_path = _ephemeral_clone(root, "sess-recorded")
+    unrecorded_path = _ephemeral_clone(root, "sess-unrecorded")
+    sha = "a" * 40
+    provision_mod.write_record(recorded_path, [sha])
+
+    monkeypatch.setattr(tree_verb.layout, "central_root", lambda: str(root))
+    past_grace = _time.time() - (tree_verb.cleanup.EPHEMERAL_GRACE_SECONDS + 60)
+    records = [
+        _record(
+            path=recorded_path,
+            branch="ephemeral/sess-recorded",
+            base=None,
+            pr=None,
+            unpushed_shas=(sha,),
+            mtime=past_grace,
+        ),
+        _record(
+            path=unrecorded_path,
+            branch="ephemeral/sess-unrecorded",
+            base=None,
+            pr=None,
+            unpushed_shas=(sha,),
+            mtime=past_grace,
+        ),
+    ]
+    monkeypatch.setattr(tree_verb.registry, "scan", lambda root: records)
+    monkeypatch.setattr(gh, "pr_for_head", lambda branch, *, cwd=None: None)
+
+    rc = tree_verb.run_gc(dry_run=True)
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert f"REMOVABLE {recorded_path}" in out
+    assert f"KEEP      {unrecorded_path}" in out

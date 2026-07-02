@@ -26,30 +26,66 @@ def test_git_ahead_behind_no_upstream_is_level(monkeypatch):
     assert gh.git_ahead_behind(cwd="/x") == (0, 0)
 
 
-def test_git_unpushed_count_parses_the_count(monkeypatch):
-    # `rev-list --count HEAD --not --remotes`: commits on NO remote at all — the
-    # upstream-independent "unpushed" the ephemeral gc ladder is defined over.
+def test_git_unpushed_shas_lists_the_local_only_commits(monkeypatch):
+    # `rev-list HEAD --not --remotes`: commits on NO remote at all — the
+    # upstream-independent "unpushed" the ephemeral gc ladder is defined over. The
+    # SHAs (not a bare count) are what lets the ladder exclude exactly the recorded
+    # provisioning commit (#232).
     seen = {}
 
     def fake(args, *, cwd):
         seen["args"] = args
-        return "4\n"
+        return f"{'a' * 40}\n{'b' * 40}\n"
 
     monkeypatch.setattr(gh, "_git", fake)
-    assert gh.git_unpushed_count(cwd="/x") == 4
-    assert seen["args"] == ["rev-list", "--count", "HEAD", "--not", "--remotes"]
+    assert gh.git_unpushed_shas(cwd="/x") == ("a" * 40, "b" * 40)
+    assert seen["args"] == ["rev-list", "HEAD", "--not", "--remotes"]
 
 
-def test_git_unpushed_count_unreadable_is_none_not_zero(monkeypatch):
-    # None (unknown) — NEVER 0 (provably pushed): the caller keeps on unknown, so
-    # a git failure must not read as "nothing to lose".
+def test_git_unpushed_shas_empty_when_everything_is_on_a_remote(monkeypatch):
+    # Empty output = every commit reachable from HEAD is on some remote: the
+    # provably-safe reading, distinct from None (unreadable).
+    monkeypatch.setattr(gh, "_git", lambda args, *, cwd: "")
+    assert gh.git_unpushed_shas(cwd="/x") == ()
+
+
+def test_git_unpushed_shas_unreadable_is_none_not_empty(monkeypatch):
+    # None (unknown) — NEVER () (provably pushed): the caller keeps on unknown, so
+    # a git failure must not read as "nothing to lose". Malformed output (a line
+    # that is not a SHA) is the same unreadable case.
     def boom(args, *, cwd):
         raise gh.GhError("unborn HEAD")
 
     monkeypatch.setattr(gh, "_git", boom)
-    assert gh.git_unpushed_count(cwd="/x") is None
-    monkeypatch.setattr(gh, "_git", lambda args, *, cwd: "not-a-number\n")
-    assert gh.git_unpushed_count(cwd="/x") is None
+    assert gh.git_unpushed_shas(cwd="/x") is None
+    monkeypatch.setattr(gh, "_git", lambda args, *, cwd: "not-a-sha\n")
+    assert gh.git_unpushed_shas(cwd="/x") is None
+
+
+def test_git_commits_between_lists_the_range(monkeypatch):
+    # `rev-list <base>..<head>`: exactly what provisioning committed (#232) — the
+    # SHAs recorded into .git/shipit-provision.json at Tree birth.
+    seen = {}
+
+    def fake(args, *, cwd):
+        seen["args"] = args
+        return f"{'c' * 40}\n"
+
+    monkeypatch.setattr(gh, "_git", fake)
+    assert gh.git_commits_between("a" * 40, "c" * 40, cwd="/x") == ["c" * 40]
+    assert seen["args"] == ["rev-list", f"{'a' * 40}..{'c' * 40}"]
+
+
+def test_git_commits_between_unreadable_is_none(monkeypatch):
+    # A failed or malformed rev-list -> None, so the caller records NOTHING rather
+    # than something wrong (an unrecorded provisioning commit only KEEPS the Tree).
+    def boom(args, *, cwd):
+        raise gh.GhError("bad ref")
+
+    monkeypatch.setattr(gh, "_git", boom)
+    assert gh.git_commits_between("a" * 40, "b" * 40, cwd="/x") is None
+    monkeypatch.setattr(gh, "_git", lambda args, *, cwd: "garbage\n")
+    assert gh.git_commits_between("a" * 40, "b" * 40, cwd="/x") is None
 
 
 def test_git_upstream_ref_returns_tracking_ref(monkeypatch):

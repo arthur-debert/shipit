@@ -38,7 +38,7 @@ from pathlib import Path
 import platformdirs
 
 from .. import config, gh, proc
-from . import include
+from . import include, provision
 from .layout import TreeSpec, central_root, plan
 
 logger = logging.getLogger("shipit.tree")
@@ -241,6 +241,15 @@ def _provision(dest: Path, *, trees_root: Path) -> None:
     every Tree creation and leaving HEAD on the wrong branch. Provisioning only
     needs the managed files committed in the Tree, never any origin side effect.
 
+    When that install DOES commit (a managed-set drift window — the repo's committed
+    set lags the running shipit), the commit SHA(s) are recorded in
+    ``.git/shipit-provision.json`` (:mod:`shipit.tree.provision`) so the ephemeral
+    gc ladder can exclude exactly them from its unpushed floor instead of keeping
+    the Tree forever over a commit shipit itself made (#232). Recording is
+    best-effort/additive (like the liveness pidfile): an unreadable HEAD, an
+    unresolvable range, or a failed write degrades to *not recorded*, which the
+    ladder reads conservatively as KEEP — never a failed Tree creation.
+
     Provisioning is gated on :func:`shipit.config.is_onboarded` and FAILS CLOSED: a
     Tree cut from a repo with no ``[shipit]``/``[managed]`` block raises, rather than
     silently skipping the reconcile (#210, revisiting #206). "Operate on a
@@ -261,12 +270,48 @@ def _provision(dest: Path, *, trees_root: Path) -> None:
             "(a Tree can only be provisioned from a repo shipit manages)"
         )
     env = provision_env()
+    head_before = gh.git_head_commit(cwd=str(dest))
     run_provision(["shipit", "install", ".", "--local"], cwd=dest, env=env)
+    _record_install_commits(dest, head_before=head_before)
     if (dest / PIXI_MANIFEST).is_file():
         _warn_if_cache_cross_filesystem(trees_root)
         run_provision(["pixi", "install"], cwd=dest, env=env)
     if (dest / NPM_MANIFEST).is_file():
         run_provision(["npm", "ci"], cwd=dest, env=env)
+
+
+def _record_install_commits(dest: Path, *, head_before: str | None) -> None:
+    """Record what the managed-set install just committed, best-effort (#232).
+
+    Compares ``HEAD`` before and after the ``shipit install --local`` step; when it
+    moved, the commits in between are the install's reconcile (the only step of the
+    provisioning pipeline that commits) and their SHAs go into the Tree's
+    ``.git/shipit-provision.json``. Every failure — an unreadable HEAD on either
+    side, an unresolvable range, a failed write — degrades to *no record* with a
+    WARNING: the gc ladder then simply keeps the Tree (the pre-#232 behavior), so
+    the record is purely additive and can never break Tree creation.
+    """
+    cwd = str(dest)
+    head_after = gh.git_head_commit(cwd=cwd)
+    if head_before is None or head_after is None or head_after == head_before:
+        return
+    shas = gh.git_commits_between(head_before, head_after, cwd=cwd)
+    if not shas:
+        logger.warning(
+            "provisioning moved HEAD in %s but the commit range was unreadable; "
+            "not recording a provision commit (gc will keep the Tree, #232)",
+            dest,
+        )
+        return
+    try:
+        provision.write_record(dest, shas)
+    except OSError:
+        logger.warning(
+            "could not record the provisioning commit(s) for %s; gc will keep "
+            "the Tree (#232)",
+            dest,
+            exc_info=True,
+        )
 
 
 # --------------------------------------------------------------------------
