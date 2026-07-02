@@ -32,11 +32,10 @@ from __future__ import annotations
 import json
 import logging
 import re
-import subprocess
 import sys
 from collections.abc import Callable, Sequence
 
-from .. import gh
+from .. import execrun, gh
 from ..pr import CORE_JSON_FIELDS, core_from_node, repo_from_slug
 from . import checkrun, post, producer
 from .backends.base import BackendError
@@ -305,8 +304,10 @@ def start_detached_review(
     The breadcrumb create is BEST-EFFORT — a 403 before the ``checks:write``
     re-grant (or any failure) must not fail the request, so the child still runs
     with ``run_id=None`` (no in_progress marker, but the review still posts).
-    ``spawn`` is the injected detach boundary (default: a new-session, no-daemon
-    :func:`_spawn_detached`) and ``find`` the injected reconcile-lookup boundary
+    ``spawn`` is the injected detach boundary (default: the exec seam's
+    fire-and-forget :func:`shipit.execrun.spawn_detached` — the one deliberate
+    non-Exec, kept in ``execrun`` so all subprocess use stays in one module,
+    ADR-0028) and ``find`` the injected reconcile-lookup boundary
     (default: :func:`shipit.review.checkrun.find_nonterminal`) — mirrored injectable
     seams so a test asserts reconcile + detach WITHOUT the network or a fork.
     """
@@ -336,7 +337,7 @@ def start_detached_review(
         as_app=as_app,
     )
     try:
-        (spawn or _spawn_detached)(argv)
+        (spawn or execrun.spawn_detached)(argv)
     except Exception as exc:  # noqa: BLE001 - any spawn failure must still close the run
         # The spawn is what the child relies on to reach its terminal close. If it
         # fails AFTER the parent opened the in_progress run, no child will ever
@@ -551,25 +552,6 @@ def _child_argv(
     if instructions_path is not None:
         argv += ["--instructions", instructions_path]
     return argv
-
-
-def _spawn_detached(argv: Sequence[str]) -> None:
-    """Spawn ``argv`` as a DETACHED child — survives the parent exiting, no daemon.
-
-    ``start_new_session=True`` puts the child in its own session/process group, so
-    it is not killed when the parent exits and has no controlling terminal; stdio
-    is redirected to ``/dev/null`` because the child's diagnostics go to the OBS01
-    file sink, not a pipe the parent would have to drain. Fire-and-forget: the
-    handle is intentionally not retained — the PR + check run are the only state.
-    """
-    subprocess.Popen(  # noqa: S603 - argv is built internally, not from user input
-        list(argv),
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-        close_fds=True,
-    )
 
 
 #: Funnel outcome → (check-run ``conclusion``, output ``title``, output

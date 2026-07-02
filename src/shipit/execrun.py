@@ -26,6 +26,12 @@ interpolate into a shell string — commands are argument lists. Stdin (ADR-0020
 with no ``input`` the child's stdin is pinned to ``DEVNULL`` so a stdin-reading
 child gets a clean EOF instead of hanging on an idle inherited pipe.
 
+One deliberate NON-Exec lives here too: :func:`spawn_detached`, the detached
+fire-and-forget spawn. It has no completion to normalize, so it is outside the
+Exec contract — but it stays in this module so that every ``subprocess`` import
+in shipit remains in exactly one file, and it keeps the parts of the contract
+that do apply (spawn-time record, redaction, launch-error normalization).
+
 Tests inject this seam rather than spawning tools: call sites take a ``runner``
 parameter defaulting to :func:`run`, and the runner's own suite fakes
 ``subprocess.run`` to assert the result/error/record contract.
@@ -35,6 +41,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shlex
 import subprocess
 import time
 from dataclasses import dataclass
@@ -217,7 +224,7 @@ def run(
         # ``exc.filename``; distinguish it so a bad cwd reports as an OS error,
         # not as a missing binary (which names argv[0]).
         is_missing_binary = isinstance(exc, FileNotFoundError) and (
-            cwd is None or str(exc.filename) != str(cwd)
+            cwd is None or str(exc.filename) != os.fspath(cwd)
         )
         cause = CAUSE_MISSING_BINARY if is_missing_binary else CAUSE_OS
         error = ExecError(
@@ -254,12 +261,81 @@ def run(
     # channel) — failures carry their tails via _record_failure above.
     logger.debug(
         "exec %s (cwd=%s) -> rc=%d in %dms",
-        redact.redact(" ".join(result.argv)),
+        redact.redact(shlex.join(result.argv)),
         redact.redact(str(cwd or ".")),
         result.rc,
         result.duration_ms,
     )
     return result
+
+
+def spawn_detached(
+    argv: list[str] | tuple[str, ...],
+    *,
+    cwd: str | os.PathLike | None = None,
+) -> None:
+    """Spawn ``argv`` as a DETACHED fire-and-forget child — the seam's one non-Exec.
+
+    A detached child has no completion to normalize — no rc, no streams, no
+    duration — so it cannot be an Exec (an Exec runs to completion; ADR-0028)
+    and there is no :class:`ExecResult` and no timeout (there is no wait for
+    one to bound). It lives HERE anyway so that every ``subprocess`` import in
+    shipit stays in this one module and "tool argv built outside its adapter"
+    stays a mechanically greppable review defect: ``git grep 'subprocess\\.'
+    src/`` matches only ``execrun.py``.
+
+    Detach semantics: ``start_new_session=True`` puts the child in its own
+    session/process group, so it survives the parent exiting and has no
+    controlling terminal; stdio is pinned to ``/dev/null`` because a detached
+    child's diagnostics go to its own durable sink (the OBS01 file sink for
+    the review child), not a pipe the parent would have to drain; the handle
+    is deliberately not retained and never waited on.
+
+    What parts of the seam's contract DO still apply: one structured record at
+    spawn time — argv, cwd, pid, all redacted — so the detached child stays on the
+    causal record chain (glassbox PRD story 3), and launch normalization — a
+    missing binary or any other OS-level spawn failure raises
+    :class:`ExecError` exactly as a failed Exec launch would (``rc=None``,
+    ``cause`` of ``missing-binary``/``os-error``, one ERROR record); no raw
+    ``OSError`` ever escapes.
+    """
+    argv = [str(arg) for arg in argv]
+    start = time.monotonic()
+    try:
+        proc = subprocess.Popen(  # noqa: S603 — argv is a constructed list, never shell-interpolated
+            argv,
+            cwd=cwd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            close_fds=True,
+        )
+    except OSError as exc:
+        # Same launch normalization as :func:`run`: FileNotFoundError naming
+        # argv[0] is a missing binary; one naming a bad cwd (or any other
+        # OSError) is an os-error. No raw OSError escapes the seam.
+        is_missing_binary = isinstance(exc, FileNotFoundError) and (
+            cwd is None or str(exc.filename) != os.fspath(cwd)
+        )
+        error = ExecError(
+            argv,
+            rc=None,
+            stderr=str(exc),
+            duration_ms=_elapsed_ms(start),
+            cause=CAUSE_MISSING_BINARY if is_missing_binary else CAUSE_OS,
+        )
+        _record_failure(error, cwd)
+        raise error from exc
+    # The one record for a detached spawn: what was launched, from where, as
+    # what pid. There is no completion to record — the pid is the only handle
+    # a log reader has to correlate the child's own records back to this spawn.
+    logger.debug(
+        "exec-detach %s (cwd=%s) -> pid=%d",
+        redact.redact(shlex.join(argv)),
+        redact.redact(str(cwd or ".")),
+        proc.pid,
+    )
 
 
 def _record_failure(error: ExecError, cwd: str | os.PathLike | None) -> None:
@@ -270,7 +346,7 @@ def _record_failure(error: ExecError, cwd: str | os.PathLike | None) -> None:
     """
     logger.error(
         "exec %s (cwd=%s) -> %s (rc=%s) in %dms\nstdout tail: %s\nstderr tail: %s",
-        " ".join(error.argv),
+        shlex.join(error.argv),
         redact.redact(str(cwd or ".")),
         error.cause,
         error.rc,

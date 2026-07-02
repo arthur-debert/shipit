@@ -153,6 +153,24 @@ def test_start_detached_opens_inprogress_then_spawns(monkeypatch):
     assert ran == []
 
 
+def test_start_detached_default_spawn_is_the_exec_seam(monkeypatch):
+    """With no injected ``spawn``, the detach boundary is the exec seam's
+    :func:`shipit.execrun.spawn_detached` (issue #272, ADR-0028): the review
+    path owns no raw subprocess call — the one non-Exec lives in execrun."""
+    _fake_checkrun_boundary(monkeypatch)
+    monkeypatch.setattr(
+        service, "_resolve_target", lambda pr: ("owner/repo", "deadbeef")
+    )
+    spawned: list = []
+    monkeypatch.setattr(
+        service.execrun, "spawn_detached", lambda argv: spawned.append(list(argv))
+    )
+
+    assert service.start_detached_review("codex", 5) is True
+    assert len(spawned) == 1
+    assert "_run" in spawned[0]
+
+
 def test_start_detached_still_spawns_when_breadcrumb_create_fails(monkeypatch):
     """The breadcrumb create is BEST-EFFORT: a 403 before the `checks:write`
     re-grant must not fail the request — the child is still spawned (with no
