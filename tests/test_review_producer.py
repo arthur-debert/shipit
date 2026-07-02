@@ -240,6 +240,31 @@ def test_resolve_repo_falls_back_to_gh_for_handbuilt_context(monkeypatch):
     assert producer._resolve_repo(ctx) == repo_from_slug("inferred/repo")
 
 
+def test_resolve_repo_error_names_gh_view_for_the_empty_slug_fallback(monkeypatch):
+    """A `ValueError` from the empty-slug `gh repo view` fallback blames
+    `gh repo view` (not the empty slug) and surfaces the underlying message, so
+    the malformed CLI output is debuggable from the top-line error (agy review)."""
+    ctx = review_view(
+        number=42,
+        repo=None,
+        head_sha="deadbeef" * 5,
+        base_ref="main",
+        base_sha="cafe",
+        diff="",
+        is_draft=False,
+    )
+    monkeypatch.setattr(
+        producer.gh,
+        "current_repo",
+        lambda: (_ for _ in ()).throw(ValueError("gh emitted 'not-a-slug'")),
+    )
+    with pytest.raises(RuntimeError) as exc:
+        producer._resolve_repo(ctx)
+    message = str(exc.value)
+    assert "`gh repo view`" in message
+    assert "gh emitted 'not-a-slug'" in message
+
+
 def test_launch_specs_are_keyed_by_the_backend_value_not_a_retyped_name():
     """The launch-spec table is keyed by the registry :class:`Backend` VALUE OBJECTS,
     not by a retyped canonical-name string (COR02-WS03 / codex review). Renaming a

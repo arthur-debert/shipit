@@ -309,9 +309,14 @@ def _resolve_repo(ctx) -> Repo:
         # `ValueError` on a non-`owner/name` answer.
         return repo_from_slug(slug) if slug else gh.current_repo()
     except ValueError as exc:
+        # Name the actual source: an explicit `ctx.repo` slug vs the empty-slug
+        # `gh repo view` fallback — and surface `exc` so the malformed output is
+        # in the message, not only the exception chain.
+        source = f"the repo slug {slug!r}" if slug else "`gh repo view`"
         raise RuntimeError(
-            f"cannot review PR #{ctx.number}: the repo slug {slug!r} is not in "
-            "owner/name form, so the read-only Tree's namespace cannot be resolved."
+            f"cannot review PR #{ctx.number}: {source} did not yield an "
+            f"owner/name identity ({exc}), so the read-only Tree's namespace "
+            "cannot be resolved."
         ) from exc
 
 
