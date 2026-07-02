@@ -8,18 +8,27 @@ The clone-strategy details are otherwise covered by the pure ``layout`` unit tes
 
 from __future__ import annotations
 
+import logging
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
-from shipit import config, gh
+from shipit import config, execrun, gh
 from shipit.tree import create as create_mod
 from shipit.tree import layout, provision
 from shipit.tree.create import create, create_from_source
 from shipit.tree.layout import TreeSpec
 from shipit.verbs import install as install_mod
 from shipit.execrun import ExecError
+
+
+def _hooks_ok() -> execrun.ExecResult:
+    """A canned successful lefthook-activation ExecResult for the injected boundary."""
+    return execrun.ExecResult(
+        argv=("lefthook", "install"), rc=0, stdout="", stderr="", duration_ms=1
+    )
 
 
 def _git(args: list[str], cwd: Path) -> str:
@@ -238,7 +247,7 @@ def test_create_provisions_local_only_on_planned_branch_no_origin_side_effects(
         if cmd[:2] == ["shipit", "install"]:
             assert "--local" in cmd
             rc = install_mod.run(
-                str(cwd), local=True, activate_hooks=lambda root: (0, "")
+                str(cwd), local=True, activate_hooks=lambda root: _hooks_ok()
             )
             assert rc == 0
 
@@ -591,6 +600,10 @@ def test_run_provision_uses_scrubbed_env_verbatim_not_merged(
     def fake_run(cmd, *, cwd, env, replace_env=False, **kwargs):
         captured["env"] = env
         captured["replace_env"] = replace_env
+        captured["timeout"] = kwargs.get("timeout")
+        return execrun.ExecResult(
+            argv=tuple(cmd), rc=0, stdout="", stderr="", duration_ms=1
+        )
 
     monkeypatch.setattr(create_mod.execrun, "run", fake_run)
 
@@ -602,6 +615,58 @@ def test_run_provision_uses_scrubbed_env_verbatim_not_merged(
 
     assert captured["replace_env"] is True
     assert "PIXI_PROJECT_MANIFEST" not in captured["env"]
+    # Every provisioning step carries the explicit generous bound (WS03): the
+    # runner's 5-minute default would kill a cold `pixi install` / `npm ci`,
+    # and WS01's `timeout=None` stopgap let a wedged step hang forever.
+    assert captured["timeout"] == create_mod.PROVISION_TIMEOUT
+
+
+def test_run_provision_narrates_step_timing_at_info(
+    tmp_path: Path, monkeypatch, caplog
+):
+    # WS03: provisioning steps are TIMED — beyond the runner's DEBUG Exec record,
+    # each step's duration lands as an INFO record on the tree logger, so
+    # Tree-birth timing is readable from the domain log.
+    monkeypatch.setattr(
+        create_mod.execrun,
+        "run",
+        lambda cmd, **kw: execrun.ExecResult(
+            argv=tuple(cmd), rc=0, stdout="", stderr="", duration_ms=1234
+        ),
+    )
+    with caplog.at_level(logging.INFO, logger="shipit.tree"):
+        create_mod.run_provision(
+            ["pixi", "install"], cwd=tmp_path, env={"PATH": "/usr/bin"}
+        )
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("pixi install" in m and "1234ms" in m for m in messages)
+
+
+def test_run_provision_failure_leaves_durable_record_with_both_streams(
+    tmp_path: Path, caplog
+):
+    # The documented "no provisioning logs" gap, closed (WS03): a failed
+    # provisioning Exec propagates the runner's single transport error AND leaves
+    # one durable ERROR record carrying the tails of BOTH streams — stdout is
+    # where pixi/npm write their real diagnostics. Driven through a real child so
+    # the wiring (run_provision -> execrun -> record) is proven end to end.
+    cmd = [
+        sys.executable,
+        "-c",
+        "import sys; print('out-diag'); print('err-diag', file=sys.stderr); sys.exit(3)",
+    ]
+    with caplog.at_level(logging.DEBUG, logger="shipit.exec"):
+        with pytest.raises(execrun.ExecError) as exc_info:
+            create_mod.run_provision(cmd, cwd=tmp_path, env=create_mod.provision_env())
+    error = exc_info.value
+    assert error.rc == 3
+    assert "out-diag" in error.stdout
+    assert "err-diag" in error.stderr
+    failures = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(failures) == 1
+    message = failures[0].getMessage()
+    assert "out-diag" in message
+    assert "err-diag" in message
 
 
 def test_check_same_filesystem_warns_only_across_filesystems(

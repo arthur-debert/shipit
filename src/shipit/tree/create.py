@@ -52,6 +52,14 @@ logger = logging.getLogger("shipit.tree")
 PIXI_MANIFEST = "pixi.toml"
 NPM_MANIFEST = "package.json"
 
+#: The per-step provisioning timeout, in seconds: 30 minutes. Provisioning is the
+#: known long-runner family (ADR-0028 names cold ``pixi install`` / ``npm ci``),
+#: so the runner's 5-minute default would kill legitimate cold installs — but
+#: ``None`` (the pre-WS03 stopgap) let a hung step hang Tree creation forever.
+#: 30 minutes is generous enough for a cold solve+download on a slow link, tight
+#: enough that a wedged step still dies at a known bound with a durable record.
+PROVISION_TIMEOUT: float = 30 * 60.0
+
 #: Bytes of randomness behind an agent hash → 8 hex chars. Enough to keep two
 #: concurrent Trees for the same issue from colliding on disk without bloating the
 #: dir name.
@@ -221,13 +229,23 @@ def run_provision(cmd: list[str], *, cwd: Path, env: dict[str, str]) -> None:
     :func:`provision_env`) and is used verbatim (``replace_env=True``) so the
     scrubbed ``PIXI_*`` vars cannot creep back in via a merge over ``os.environ``.
 
-    ``timeout=None``: cold ``pixi install`` / ``npm ci`` are legitimate
-    long-runners (ADR-0028 names them), so the runner's 5-minute default must
-    not kill them — matching today's no-timeout behavior. PROC01-WS03 (the
-    provisioning-durability slice) replaces ``None`` with an explicit generous
-    bound per step.
+    Every step carries the explicit generous :data:`PROVISION_TIMEOUT` (ADR-0028
+    names cold ``pixi install`` / ``npm ci`` as the legitimate long-runners the
+    5-minute default must not kill; the bound replaces WS01's ``timeout=None``
+    stopgap so a wedged step still dies at a known point). The runner gives every
+    step a durable record — timing on success (DEBUG), and on failure an ERROR
+    record carrying both stream tails, which is exactly where a broken
+    ``pixi install`` writes its real diagnostics — closing the documented
+    "no provisioning logs" gap. On top of the transport record, the step's timing
+    is narrated at INFO on the tree logger, so Tree-birth timing is readable from
+    the domain log without dropping to DEBUG.
     """
-    execrun.run(cmd, cwd=str(cwd), env=env, replace_env=True, timeout=None)
+    result = execrun.run(
+        cmd, cwd=str(cwd), env=env, replace_env=True, timeout=PROVISION_TIMEOUT
+    )
+    logger.info(
+        "provision step %s completed in %dms", " ".join(result.argv), result.duration_ms
+    )
 
 
 def _provision(dest: Path, *, trees_root: Path) -> None:

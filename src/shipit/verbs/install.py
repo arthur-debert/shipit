@@ -32,7 +32,6 @@ from __future__ import annotations
 
 import difflib
 import json
-import subprocess
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -655,37 +654,30 @@ def _write_unit(root: Path, unit: Unit) -> None:
         dest.chmod(0o755)
 
 
-def _activate_hooks(root: Path) -> tuple[int, str]:
+def _activate_hooks(root: Path) -> execrun.ExecResult:
     """Run ``lefthook install`` in ``root`` — the bounded side effect that turns
-    the ``lefthook.yml`` config into live ``.git/hooks``. Returns
-    ``(exit code, combined output)``.
+    the ``lefthook.yml`` config into live ``.git/hooks``.
 
     This is the same invocation the ``install-hooks`` pixi task wraps, so the
-    checks have one activation definition. A spawn failure — ``lefthook`` missing
-    from PATH or not executable — is reported (``127``) rather than crashing:
-    unlike the lint checks this is opportunistic setup, so install warns and still
-    finishes its PR rather than hard-failing.
+    checks have one activation definition. It goes through the one Exec runner
+    (ADR-0028): ``check=False`` because a nonzero rc is an outcome the caller
+    *warns* about (activation is opportunistic setup, never a hard-fail check);
+    a launch failure — ``lefthook`` missing from PATH or not executable —
+    surfaces as the runner's :class:`~shipit.execrun.ExecError`, which the
+    caller likewise renders as a warning and moves on.
     """
-    try:
-        proc = subprocess.run(
-            [LEFTHOOK_BINARY, *HOOK_ACTIVATE_ARGV],
-            cwd=str(root),
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    except OSError as exc:
-        # Covers a missing binary (FileNotFoundError) and a present-but-not-
-        # executable one (PermissionError) — both OSError. `lefthook install`
-        # is the canonical activation in BOTH repos (a consumer's pixi.toml has
-        # no install-hooks task), so that is the recovery we point at.
-        return 127, (
-            f"{LEFTHOOK_BINARY}: could not run ({exc}) — ensure lefthook is "
-            f"installed and on PATH, then `lefthook install` to activate the checks"
-        )
-    # Join with a newline so a stdout without a trailing newline does not run
-    # straight into stderr (e.g. `donefatal: ...`) in the warning we print.
-    return proc.returncode, "\n".join(s for s in (proc.stdout, proc.stderr) if s)
+    return execrun.run(
+        [LEFTHOOK_BINARY, *HOOK_ACTIVATE_ARGV], cwd=str(root), check=False
+    )
+
+
+def _activation_output(result: execrun.ExecResult) -> str:
+    """Both streams of an activation run, joined for the caller's warning.
+
+    Joined with a newline so a stdout without a trailing newline does not run
+    straight into stderr (e.g. ``donefatal: ...``) in the warning we print.
+    """
+    return "\n".join(s for s in (result.stdout, result.stderr) if s)
 
 
 # --------------------------------------------------------------------------
@@ -830,7 +822,7 @@ def run(
     dry_run: bool = False,
     push: bool = False,
     local: bool = False,
-    activate_hooks: Callable[[Path], tuple[int, str]] | None = None,
+    activate_hooks: Callable[[Path], execrun.ExecResult] | None = None,
 ) -> int:
     """Install/reconcile the managed set into the consumer at ``path``.
 
@@ -922,13 +914,35 @@ def run(
     # Only (re)activate when this install actually writes a managed unit; a
     # seed-only change touches just `.shipit.toml` and leaves the live hooks alone.
     if writes and activates_hooks(decisions):
-        rc_hooks, out_hooks = activate(root)
-        hooks_activated = rc_hooks == 0
+        try:
+            activation = activate(root)
+        except execrun.ExecError as exc:
+            # A transport failure from the runner. The common case is a missing
+            # or unlaunchable binary; branch on the cause so a timeout or other
+            # OS error is not mislabelled as "install lefthook". `lefthook
+            # install` is the canonical activation in BOTH repos (a consumer's
+            # pixi.toml has no install-hooks task), so that is the recovery we
+            # point the missing-binary case at.
+            hooks_activated = False
+            if exc.cause == execrun.CAUSE_MISSING_BINARY:
+                detail = (
+                    f"{LEFTHOOK_BINARY}: not found on PATH — ensure lefthook is "
+                    f"installed and on PATH, then `lefthook install` to activate "
+                    f"the checks"
+                )
+            else:
+                detail = (
+                    f"{LEFTHOOK_BINARY}: could not run ({exc}) — resolve the "
+                    f"failure above, then `lefthook install` to activate the checks"
+                )
+        else:
+            hooks_activated = activation.ok
+            detail = _activation_output(activation)
         if hooks_activated:
             print("  activated git hooks (lefthook install) — the checks are live")
         else:
             print(
-                f"install: could not activate git hooks: {out_hooks.strip()}",
+                f"install: could not activate git hooks: {detail.strip()}",
                 file=sys.stderr,
             )
 

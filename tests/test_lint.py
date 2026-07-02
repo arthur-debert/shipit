@@ -1,9 +1,13 @@
 """Unit tests for lint — routing, the registry, and the hard-fail check verb.
 
-The subprocess + git boundary is injected (``run`` takes ``discover`` /
-``run_tool``), so the orchestration is exercised with no real linters present.
+The Exec + git boundary is injected (``run`` takes ``discover`` / ``run_tool``,
+speaking the runner's ExecResult/ExecError contract), so the orchestration is
+exercised with no real linters present.
 """
 
+import pytest
+
+from shipit import execrun
 from shipit.verbs import lint
 
 
@@ -88,7 +92,7 @@ def _fake_discover(files):
 
 
 class _Recorder:
-    """Records tool invocations and returns a scripted exit code per binary."""
+    """Records tool invocations and returns a scripted ExecResult per binary."""
 
     def __init__(self, codes=None):
         self.codes = codes or {}
@@ -96,7 +100,12 @@ class _Recorder:
 
     def __call__(self, binary, args, cwd):
         self.calls.append((binary, tuple(args)))
-        return self.codes.get(binary, 0), ""
+        rc = self.codes.get(binary, 0)
+        if isinstance(rc, execrun.ExecError):
+            raise rc
+        return execrun.ExecResult(
+            argv=(binary, *args), rc=rc, stdout="", stderr="", duration_ms=1
+        )
 
 
 def test_clean_tree_passes(tmp_path, capsys):
@@ -132,12 +141,42 @@ def test_a_failing_tool_fails_the_checks(tmp_path, capsys):
     assert "python:ruff" in out
 
 
-def test_run_tool_missing_binary_is_hard_127(tmp_path):
-    # The real boundary, deterministic: a binary absent from PATH is 127 + a
-    # clear note, never a silent skip (the hard-fail-check contract).
-    rc, out = lint._run_tool("shipit-no-such-linter-xyz", ["a.py"], tmp_path)
-    assert rc == 127
+def test_run_tool_missing_binary_raises_exec_error(tmp_path):
+    # The real boundary, deterministic: a binary absent from PATH surfaces as
+    # the runner's single transport error, tagged missing-binary (ADR-0028) —
+    # never a raw FileNotFoundError, never a silent skip.
+    with pytest.raises(execrun.ExecError) as exc_info:
+        lint._run_tool("shipit-no-such-linter-xyz", ["a.py"], tmp_path)
+    assert exc_info.value.cause == execrun.CAUSE_MISSING_BINARY
+
+
+def test_missing_binary_is_hard_127_in_the_report(tmp_path, capsys):
+    # The orchestrator renders a missing-binary ExecError as the hard-fail 127
+    # note and fails the whole check run (hard, never skips).
+    boom = execrun.ExecError(
+        ["markdownlint"], rc=None, cause=execrun.CAUSE_MISSING_BINARY
+    )
+    rec = _Recorder(codes={"markdownlint": boom})
+    rc = lint.run(str(tmp_path), discover=_fake_discover(["b.md"]), run_tool=rec)
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "LINT: FAILED" in out
     assert "not found on PATH" in out
+
+
+def test_unlaunchable_tool_is_hard_127_with_the_error_detail(tmp_path, capsys):
+    # Any other launch failure (permissions, a bad cwd) also hard-fails, carrying
+    # the transport error's detail rather than the missing-binary note.
+    boom = execrun.ExecError(
+        ["markdownlint"], rc=None, stderr="Permission denied", cause=execrun.CAUSE_OS
+    )
+    rec = _Recorder(codes={"markdownlint": boom})
+    rc = lint.run(str(tmp_path), discover=_fake_discover(["b.md"]), run_tool=rec)
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "LINT: FAILED" in out
+    assert "could not run" in out
+    assert "Permission denied" in out
 
 
 def test_missing_tool_propagates_to_failed_checks(tmp_path, capsys):

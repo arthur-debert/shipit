@@ -202,6 +202,55 @@ def test_timeout_real_child_is_killed():
 
 
 # ---------------------------------------------------------------------------
+# secret_stdout — a secret-bearing stdout channel never rides a failure
+# ---------------------------------------------------------------------------
+
+
+def test_secret_stdout_suppresses_partial_stdout_on_timeout(monkeypatch, caplog):
+    # A killed secret fetch: subprocess attaches the partial secret it had
+    # written to stdout. With secret_stdout the runner must swap that for the
+    # placeholder on BOTH the raised error and the one ERROR record — the secret
+    # is not yet registered with the redactor, so suppression is the only guard.
+    def fake_run(argv, **kwargs):
+        raise subprocess.TimeoutExpired(
+            argv, 0.1, output="s3cret-plaintext", stderr="doppler: deadline"
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with caplog.at_level(logging.DEBUG, logger="shipit.exec"):
+        with pytest.raises(execrun.ExecError) as excinfo:
+            execrun.run(["doppler", "secrets", "get"], timeout=0.1, secret_stdout=True)
+    err = excinfo.value
+    assert err.cause == execrun.CAUSE_TIMEOUT
+    assert err.stdout == execrun.SECRET_STDOUT_PLACEHOLDER
+    assert "s3cret-plaintext" not in err.stdout
+    # stderr diagnostics survive — only the secret-bearing channel is dropped.
+    assert err.stderr == "doppler: deadline"
+    full_log = "\n".join(r.getMessage() for r in caplog.records)
+    assert "s3cret-plaintext" not in full_log
+
+
+def test_secret_stdout_success_still_returns_the_real_stdout(monkeypatch):
+    # The suppression is failure-only: a completed fetch must hand the caller the
+    # real secret (and a completed check=False run records argv only anyway).
+    monkeypatch.setattr(subprocess, "run", _fake_completed(rc=0, stdout="s3cret\n"))
+    result = execrun.run(["doppler", "get"], check=False, secret_stdout=True)
+    assert result.stdout == "s3cret\n"
+
+
+def test_secret_stdout_suppresses_stdout_on_nonzero_under_check(monkeypatch):
+    # If a secret call is run under check=True, a nonzero exit still scrubs the
+    # secret-bearing stdout from the raised error.
+    monkeypatch.setattr(
+        subprocess, "run", _fake_completed(rc=1, stdout="s3cret", stderr="denied")
+    )
+    with pytest.raises(execrun.ExecError) as excinfo:
+        execrun.run(["doppler", "get"], secret_stdout=True)
+    assert excinfo.value.stdout == execrun.SECRET_STDOUT_PLACEHOLDER
+    assert excinfo.value.stderr == "denied"
+
+
+# ---------------------------------------------------------------------------
 # Record emission — exactly one record per Exec
 # ---------------------------------------------------------------------------
 
