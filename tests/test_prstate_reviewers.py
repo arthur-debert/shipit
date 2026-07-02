@@ -8,6 +8,7 @@ resolved-thread filter, and Gemini's weak (reaction/comment) signals.
 from __future__ import annotations
 
 import pytest
+from shipit.identity import Sha
 from shipit.prstate.model import ReviewLifecycle
 from shipit.prstate.errors import PrStateError
 from shipit.prstate.reviewers import (
@@ -19,6 +20,12 @@ from shipit.prstate.reviewers import (
     GeminiAdapter,
     required_reviewers,
 )
+
+# Full, validated commit identities (COR02): the current head, an earlier
+# (stale) head, and a generic head for single-commit scenarios.
+NEW = Sha("beef" * 10)
+OLD = Sha("dead" * 10)
+HEAD = Sha("abcd" * 10)
 
 COPILOT = CopilotAdapter()
 CODERABBIT = CodeRabbitAdapter()
@@ -100,9 +107,9 @@ def test_gemini_review_on_earlier_head_still_counts_as_done():
 
     ctx = readiness_view(
         number=1,
-        head_sha="new",
+        head_sha=NEW,
         is_draft=True,
-        reviews=[Review(1, "gemini-code-assist[bot]", "COMMENTED", "old", "")],
+        reviews=[Review(1, "gemini-code-assist[bot]", "COMMENTED", OLD, "")],
         reactions=[{"content": "eyes", "user": {"login": "gemini-code-assist[bot]"}}],
     )
     assert GEMINI.detect(ctx) == ReviewLifecycle.DONE_CLEAN
@@ -114,9 +121,9 @@ def test_copilot_review_on_earlier_head_counts_done_review_once():
 
     ctx = readiness_view(
         number=1,
-        head_sha="new",
+        head_sha=NEW,
         is_draft=True,
-        reviews=[Review(1, "Copilot", "COMMENTED", "old", "")],
+        reviews=[Review(1, "Copilot", "COMMENTED", OLD, "")],
         requested_logins=["Copilot"],
     )
     assert COPILOT.detect(ctx) in (
@@ -131,9 +138,9 @@ def test_copilot_review_on_earlier_head_does_NOT_count_done_when_rerun():
 
     ctx = readiness_view(
         number=1,
-        head_sha="new",
+        head_sha=NEW,
         is_draft=True,
-        reviews=[Review(1, "Copilot", "COMMENTED", "old", "")],
+        reviews=[Review(1, "Copilot", "COMMENTED", OLD, "")],
         requested_logins=["Copilot"],
         reviewer_rerun={"copilot": True},
     )
@@ -146,10 +153,10 @@ def test_copilot_never_reviewed_is_requested_or_not_requested():
     from shipit.prstate.model import readiness_view
 
     requested = readiness_view(
-        number=1, head_sha="h", is_draft=True, requested_logins=["Copilot"]
+        number=1, head_sha=HEAD, is_draft=True, requested_logins=["Copilot"]
     )
     assert COPILOT.detect(requested) == ReviewLifecycle.REQUESTED
-    bare = readiness_view(number=1, head_sha="h", is_draft=True)
+    bare = readiness_view(number=1, head_sha=HEAD, is_draft=True)
     assert COPILOT.detect(bare) == ReviewLifecycle.NOT_REQUESTED
 
 
@@ -160,9 +167,9 @@ def test_dismissed_copilot_review_on_head_does_NOT_count_done():
 
     ctx = readiness_view(
         number=1,
-        head_sha="new",
+        head_sha=NEW,
         is_draft=True,
-        reviews=[Review(1, "Copilot", "DISMISSED", "new", "")],
+        reviews=[Review(1, "Copilot", "DISMISSED", NEW, "")],
         requested_logins=["Copilot"],
     )
     assert COPILOT.detect(ctx) == ReviewLifecycle.REQUESTED
@@ -174,9 +181,9 @@ def test_dismissed_gemini_review_does_NOT_count_done():
 
     ctx = readiness_view(
         number=1,
-        head_sha="new",
+        head_sha=NEW,
         is_draft=True,
-        reviews=[Review(1, "gemini-code-assist[bot]", "DISMISSED", "old", "")],
+        reviews=[Review(1, "gemini-code-assist[bot]", "DISMISSED", OLD, "")],
     )
     assert GEMINI.detect(ctx) == ReviewLifecycle.NOT_REQUESTED
 
@@ -275,9 +282,9 @@ def test_coderabbit_done_on_head_with_open_comment():
     )
     ctx = readiness_view(
         number=1,
-        head_sha="h",
+        head_sha=HEAD,
         is_draft=True,
-        reviews=[Review(1, "coderabbitai[bot]", "COMMENTED", "h", "")],
+        reviews=[Review(1, "coderabbitai[bot]", "COMMENTED", HEAD, "")],
         threads=[thread],
     )
     assert CODERABBIT.detect(ctx) == ReviewLifecycle.DONE_COMMENTS
@@ -290,9 +297,9 @@ def test_coderabbit_review_once_by_default_counts_earlier_head():
 
     ctx = readiness_view(
         number=1,
-        head_sha="new",
+        head_sha=NEW,
         is_draft=True,
-        reviews=[Review(1, "coderabbitai[bot]", "COMMENTED", "old", "")],
+        reviews=[Review(1, "coderabbitai[bot]", "COMMENTED", OLD, "")],
         requested_logins=["coderabbitai[bot]"],
     )
     assert CODERABBIT.detect(ctx) in (
@@ -307,9 +314,9 @@ def test_coderabbit_is_head_strict_when_rerun():
 
     ctx = readiness_view(
         number=1,
-        head_sha="new",
+        head_sha=NEW,
         is_draft=True,
-        reviews=[Review(1, "coderabbitai[bot]", "COMMENTED", "old", "")],
+        reviews=[Review(1, "coderabbitai[bot]", "COMMENTED", OLD, "")],
         requested_logins=["coderabbitai[bot]"],
         reviewer_rerun={"coderabbit": True},
     )
@@ -321,9 +328,9 @@ def test_dismissed_coderabbit_review_does_not_count_done():
 
     ctx = readiness_view(
         number=1,
-        head_sha="h",
+        head_sha=HEAD,
         is_draft=True,
-        reviews=[Review(1, "coderabbitai[bot]", "DISMISSED", "h", "")],
+        reviews=[Review(1, "coderabbitai[bot]", "DISMISSED", HEAD, "")],
         requested_logins=["coderabbitai[bot]"],
     )
     assert CODERABBIT.detect(ctx) == ReviewLifecycle.REQUESTED
@@ -393,9 +400,9 @@ def test_codex_detect_done_on_head():
 
     ctx = readiness_view(
         number=1,
-        head_sha="h",
+        head_sha=HEAD,
         is_draft=True,
-        reviews=[Review(1, "adr-codex-review[bot]", "COMMENTED", "h", "")],
+        reviews=[Review(1, "adr-codex-review[bot]", "COMMENTED", HEAD, "")],
     )
     assert CODEX.detect(ctx) in (
         ReviewLifecycle.DONE_CLEAN,
@@ -408,7 +415,7 @@ def test_codex_detect_not_requested_when_empty():
     # for a local backend, so requested_logins is never consulted).
     from shipit.prstate.model import readiness_view
 
-    ctx = readiness_view(number=1, head_sha="h", is_draft=True)
+    ctx = readiness_view(number=1, head_sha=HEAD, is_draft=True)
     assert CODEX.detect(ctx) == ReviewLifecycle.NOT_REQUESTED
     assert AGY.detect(ctx) == ReviewLifecycle.NOT_REQUESTED
 
@@ -419,9 +426,9 @@ def test_codex_detect_stale_review_counts_done_review_once():
 
     ctx = readiness_view(
         number=1,
-        head_sha="new",
+        head_sha=NEW,
         is_draft=True,
-        reviews=[Review(1, "adr-codex-review[bot]", "COMMENTED", "old", "")],
+        reviews=[Review(1, "adr-codex-review[bot]", "COMMENTED", OLD, "")],
     )
     assert CODEX.detect(ctx) in (
         ReviewLifecycle.DONE_CLEAN,
@@ -437,9 +444,9 @@ def test_codex_detect_stale_review_is_not_done_when_rerun():
 
     ctx = readiness_view(
         number=1,
-        head_sha="new",
+        head_sha=NEW,
         is_draft=True,
-        reviews=[Review(1, "adr-codex-review[bot]", "COMMENTED", "old", "")],
+        reviews=[Review(1, "adr-codex-review[bot]", "COMMENTED", OLD, "")],
         reviewer_rerun={"codex": True},
     )
     assert CODEX.detect(ctx) == ReviewLifecycle.NOT_REQUESTED
@@ -450,9 +457,9 @@ def test_dismissed_codex_review_does_not_count_done():
 
     ctx = readiness_view(
         number=1,
-        head_sha="h",
+        head_sha=HEAD,
         is_draft=True,
-        reviews=[Review(1, "adr-codex-review[bot]", "DISMISSED", "h", "")],
+        reviews=[Review(1, "adr-codex-review[bot]", "DISMISSED", HEAD, "")],
     )
     assert CODEX.detect(ctx) == ReviewLifecycle.NOT_REQUESTED
 

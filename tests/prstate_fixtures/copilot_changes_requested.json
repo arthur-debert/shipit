@@ -1,25 +1,33 @@
 {
   "meta": {
     "number": 101,
-    "headRefOid": "aaa111",
+    "headRefOid": "aaa1110000000000000000000000000000000000",
     "isDraft": true,
     "mergeable": "MERGEABLE",
     "mergeStateStatus": "BLOCKED",
-    "reviewRequests": [{ "login": "Copilot" }]
+    "reviewRequests": [
+      {
+        "login": "Copilot"
+      }
+    ]
   },
   "reviews": [
     {
       "id": 5001,
-      "user": { "login": "Copilot" },
+      "user": {
+        "login": "Copilot"
+      },
       "state": "COMMENTED",
-      "commit_id": "aaa111",
+      "commit_id": "aaa1110000000000000000000000000000000000",
       "body": "Left a few inline notes."
     },
     {
       "id": 5002,
-      "user": { "login": "coderabbitai[bot]" },
+      "user": {
+        "login": "coderabbitai[bot]"
+      },
       "state": "APPROVED",
-      "commit_id": "aaa111",
+      "commit_id": "aaa1110000000000000000000000000000000000",
       "body": "No blocking concerns."
     }
   ],
@@ -35,7 +43,9 @@
             "line": 42,
             "originalLine": 42,
             "body": "This branch is unreachable.",
-            "author": { "login": "Copilot" }
+            "author": {
+              "login": "Copilot"
+            }
           }
         ]
       }

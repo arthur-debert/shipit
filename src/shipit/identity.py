@@ -1,7 +1,8 @@
 """identity — shipit's canonical git-identity value objects + resolvers (ADR-0024).
 
 The **deep module** for shipit's core nouns as identity value objects: **`Repo`**
-(`owner`, `name`), **`Owner`** (`login`, `kind`) / **`OwnerKind`**, and
+(`owner`, `name`), **`Owner`** (`login`, `kind`) / **`OwnerKind`**, **`Sha`**
+(a full commit object id), and
 **`WorkingDir`** (`path`, `repo`, `revision`). Each is defined ONCE here so every
 subsystem keys on the same thing — most load-bearingly the eval store, which keys
 by :class:`Repo` identity so one repo's runs pool across every clone.
@@ -57,6 +58,92 @@ class GitBoundary(Protocol):
     def git_head_commit(self, *, cwd: str) -> str | None: ...
 
     def owner_kind(self, login: str) -> str: ...
+
+
+#: The two full git object-id lengths: SHA-1 (40 hex chars) and SHA-256 (64).
+_FULL_SHA_LENGTHS = (40, 64)
+
+#: Lowercase hex — what a normalized sha (or sha prefix) must be made of.
+_HEX_RE = re.compile(r"[0-9a-f]+")
+
+#: Git's floor for a usable abbreviated sha (``core.abbrev`` never goes below 4);
+#: :meth:`Sha.matches_prefix` refuses anything shorter as too ambiguous to name
+#: a commit at all.
+_MIN_PREFIX_LEN = 4
+
+
+@dataclass(frozen=True, eq=False)
+class Sha:
+    """A commit identity as a value object — a validated FULL git object sha.
+
+    Construction is the validity check (the retired ad-hoc "looks like a sha"
+    helpers): ``value`` must be full-length hex (40 chars for SHA-1, 64 for
+    SHA-256) and is **lowercase-normalized**, so a case-varying source can never
+    mint two identities for one commit. Anything else — empty, abbreviated, or
+    non-hex — raises :class:`ValueError` at the boundary instead of flowing on as
+    a bogus identity.
+
+    Equality is **full-vs-full only**, and only between ``Sha``\\s. Comparing a
+    ``Sha`` against a raw ``str`` raises :class:`TypeError` rather than silently
+    returning ``False`` — the silent ``==`` between a short/case-varying string
+    and a full sha is exactly the bug that flips review staleness (a review
+    reads stale because ``"ABC..." != "abc..."``), so it is impossible by
+    construction: a prefix cannot BE a ``Sha``, and a raw string refuses to
+    compare. Prefix matching is the explicit :meth:`matches_prefix` ask.
+
+    ``__hash__`` deliberately matches ``hash(self.value)``: a dict/set holding
+    ``Sha`` keys probed with an equal raw string lands in the same bucket and
+    then fails LOUD in ``__eq__`` — a divergent hash would silently miss instead.
+    """
+
+    value: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.value, str):
+            raise ValueError(f"sha must be a str, got {self.value!r}")
+        normalized = self.value.strip().lower()
+        if len(normalized) not in _FULL_SHA_LENGTHS or not _HEX_RE.fullmatch(
+            normalized
+        ):
+            raise ValueError(
+                f"not a full git object sha (40 or 64 hex chars): {self.value!r}"
+            )
+        object.__setattr__(self, "value", normalized)
+
+    def __str__(self) -> str:
+        return self.value
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, Sha):
+            return self.value == other.value
+        if isinstance(other, str):
+            raise TypeError(
+                "Sha compared against a raw str — construct a Sha for a full sha, "
+                "or use Sha.matches_prefix() for an abbreviated one"
+            )
+        return NotImplemented
+
+    def __hash__(self) -> int:
+        return hash(self.value)
+
+    def matches_prefix(self, prefix: str) -> bool:
+        """Whether ``prefix`` abbreviates this sha — the EXPLICIT prefix ask.
+
+        The one sanctioned way to compare an abbreviated sha against a full one
+        (``==`` refuses). ``prefix`` is lowercase-normalized like the sha itself,
+        must be hex, at least :data:`_MIN_PREFIX_LEN` chars (git's own
+        abbreviation floor — shorter is too ambiguous to name a commit), and no
+        longer than the full sha; anything else raises :class:`ValueError`
+        loudly rather than answering ``False`` for a non-prefix.
+        """
+        candidate = prefix.strip().lower()
+        if (
+            len(candidate) < _MIN_PREFIX_LEN
+            or len(candidate) > len(self.value)
+            or not _HEX_RE.fullmatch(candidate)
+        ):
+            raise ValueError(f"not a usable sha prefix (4+ hex chars): {prefix!r}")
+        return self.value.startswith(candidate)
 
 
 class OwnerKind(Enum):
