@@ -10,6 +10,13 @@
 > `--epic`/`--ws`) — which cuts the branch `issues/<id>/<session>` (session default `work`)
 > from `origin/main` and targets its draft PR at `main`. The verb dispatches on shape; the
 > epic/work-stream path below is unchanged.
+>
+> **Amended by ADR-0027.** The `WorktreeCreate` hook is elevated from throwaway-only: it
+> now also legitimately provisions the **coordinator's own ephemeral session Tree**
+> (branch `ephemeral/<id>` off `origin/main`, via `claude --worktree`) — the one Tree
+> `shipit spawn subagent` structurally *cannot* mint, because it is the top-level
+> session's and the session cwd is fixed before any shipit code runs. Helper spawns keep
+> the holding-branch shape described below.
 
 The coordinator launches every real **Run** through a shipit CLI —
 `shipit spawn subagent --repo R --epic E --ws N --role ROLE [--backend claude|codex|antigravity]`
@@ -17,7 +24,9 @@ The coordinator launches every real **Run** through a shipit CLI —
 Tree** (cwd = the Tree), and lets the Run report back **through the PR** (a draft PR for
 a writer, a posted review for a reviewer). Claude Code's in-session `Agent` tool + the
 `WorktreeCreate` hook are **demoted** to a convenience adapter for throwaway in-CC Claude
-helpers; native `git worktree` / `EnterWorktree` stays denied (WS06 / ADR-0014).
+helpers — and, since ADR-0027, the hook also legitimately owns the **coordinator's own
+ephemeral session Tree**, the one Tree `shipit spawn subagent` structurally cannot mint;
+native `git worktree` / `EnterWorktree` stays denied (WS06 / ADR-0014).
 
 ## Context
 
@@ -90,11 +99,13 @@ silent fallback to a native worktree.
 - #139 grows from "a small hook" into a **real subsystem**: backend adapters
   (claude / codex / antigravity), a Run lifecycle, and result capture via the PR. That is
   the intended scope of **Trees v2 / shipit-owned subagent spawning**.
-- The in-session `Agent` tool + `WorktreeCreate` hook survive only as a **convenience
-  adapter** for throwaway in-CC Claude helpers: it knows only the session-stable epic
-  marker, so it builds `<epic>/agent-<id>` and is Claude-only. Anything that needs a real
-  branch-pinned Run, a non-Claude backend, or a PR-reported result goes through
-  `shipit spawn subagent`.
+- The in-session `Agent` tool + `WorktreeCreate` hook survive as a **convenience
+  adapter** for throwaway in-CC Claude helpers — for a helper spawn the hook knows only
+  the session-stable epic marker, so it builds `<epic>/agent-<id>` and is Claude-only —
+  and, per ADR-0027, the hook additionally owns the **coordinator's own ephemeral
+  session Tree** (`ephemeral/<id>`), the one Tree `shipit spawn subagent` structurally
+  cannot mint. Anything that needs a real branch-pinned Run, a non-Claude backend, or a
+  PR-reported result goes through `shipit spawn subagent`.
 - Native `git worktree` / `EnterWorktree` stays **denied** (WS06, ADR-0014); this ADR adds
   the *positive* path the deny message points at, closing the #139 gap by construction
   (the supported route never mints a native worktree).

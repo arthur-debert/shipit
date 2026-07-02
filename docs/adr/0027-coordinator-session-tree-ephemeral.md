@@ -163,6 +163,10 @@ real branch; nothing is lost but the cosmetic dir↔branch symmetry.
   no activatable toolchain, extensible per toolchain), not a hardcoded `pixi shell-hook`
   that would error on a non-pixi consumer.
 
-Layers A + D implemented in SES01 (WS01 `harness/activation.py` + `verbs/hook/sessionstart.py`;
-WS02 `data/bootstrap/claude-start` + `shipit install` wiring); Layers B (ephemeral Tree) and C
-(liveness/gc) pending (SES02).
+All four layers implemented. Layers A + D in SES01 (WS01 `harness/activation.py` +
+`verbs/hook/sessionstart.py`; WS02 `data/bootstrap/claude-start` + `shipit install` wiring).
+Layer B (ephemeral Tree) in SES02-WS01: `tree/layout.py` ephemeral shape;
+`verbs/hook/worktreecreate.py` forks on `harness/worktree_adapter.is_coordinator_launch`
+(`prompt_id` absent ⇒ coordinator). Layer C (liveness/gc) in SES02-WS02:
+`session/liveness.py` pidfile; the `tree/cleanup.classify` ephemeral ladder;
+`verbs/hook/worktreeremove.py` fast path.
