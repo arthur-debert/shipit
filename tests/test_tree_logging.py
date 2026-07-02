@@ -24,6 +24,7 @@ from pathlib import Path
 import pytest
 
 from shipit import execrun, gh, logsetup
+from shipit.identity import repo_from_slug
 from shipit.tree import cleanup, provision
 from shipit.tree.create import create
 from shipit.tree.layout import TreeSpec
@@ -31,7 +32,7 @@ from shipit.tree.readonly import create_readonly, readonly_plan, remove_tree
 from shipit.tree.registry import TreeRecord
 from shipit.verbs import tree as tree_verb
 
-_OWNER_REPO = ("acme", "widget")
+_REPO = repo_from_slug("acme/widget")
 
 #: An onboarded .shipit.toml body — provisioning fails closed without one (#210).
 _ONBOARDED = '[shipit]\nversion = "seed"\n\n[managed]\n'
@@ -68,10 +69,10 @@ def jsonl_log(tmp_path):
     convention end to end: context-merge -> extras adoption -> flat JSONL.
     """
     base = tmp_path / "logbase"
-    logsetup.configure_logging(env={}, owner_repo=_OWNER_REPO, base_dir=base)
+    logsetup.configure_logging(env={}, repo=_REPO, base_dir=base)
 
     def read() -> list[dict]:
-        path = logsetup.log_file_path(_OWNER_REPO, base_dir=base)
+        path = logsetup.log_file_path(_REPO, base_dir=base)
         if not path.is_file():
             return []
         return [
@@ -110,8 +111,7 @@ def _mock_write_boundary(monkeypatch):
 
 def _spec(tmp_path: Path) -> TreeSpec:
     return TreeSpec(
-        org="acme",
-        repo="widget",
+        repo=_REPO,
         agent_hash="abcd1234",
         issue=7,
         root=tmp_path / "trees",
@@ -181,8 +181,7 @@ def test_create_failure_is_an_error_record_with_the_exception_attached(
 def test_ephemeral_shape_binds_its_session_id(tmp_path, monkeypatch, jsonl_log):
     _mock_write_boundary(monkeypatch)
     spec = TreeSpec(
-        org="acme",
-        repo="widget",
+        repo=_REPO,
         agent_hash="ignored",
         ephemeral="sess-1234",
         root=tmp_path / "trees",
@@ -379,8 +378,11 @@ def test_create_verb_prepipeline_failure_is_an_error_with_the_exception(
     still lands an ERROR record at the verb boundary — the stderr print is not
     the only record of the failed action."""
     monkeypatch.setattr(tree_verb.gh, "repo_root", lambda: "/checkout")
-    monkeypatch.setattr(tree_verb.gh, "current_repo", lambda: "acme/widget")
-    monkeypatch.setattr(tree_verb.gh, "git_remote_url", lambda **k: "url")
+    # Identity derives LOCALLY from the origin remote (ADR-0024): the patched
+    # remote URL is what identity.resolve_repo parses into the canonical Repo.
+    monkeypatch.setattr(
+        tree_verb.gh, "git_remote_url", lambda **k: "git@example:acme/widget"
+    )
     monkeypatch.setattr(
         tree_verb,
         "create",
@@ -415,9 +417,7 @@ def test_readonly_create_and_reuse_are_info_milestones_with_the_tree(
     tmp_path, monkeypatch, caplog
 ):
     _mock_readonly_boundary(monkeypatch)
-    plan = readonly_plan(
-        org="acme", repo="widget", branch="feat/x", root=tmp_path / "trees"
-    )
+    plan = readonly_plan(repo=_REPO, branch="feat/x", root=tmp_path / "trees")
 
     with caplog.at_level(logging.INFO, logger="shipit.tree"):
         create_readonly(plan, source_repo="/ref", github_url="url")

@@ -37,7 +37,9 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 
 from .. import execrun, gh, logcontext
-from ..pr import CORE_JSON_FIELDS, core_from_node, repo_from_slug
+from ..agent.backend import Backend
+from ..identity import repo_from_slug
+from ..pr import CORE_JSON_FIELDS, core_from_node
 from . import checkrun, post, producer
 from .backends.base import BackendError
 from .diff import ReviewError, resolve_pr
@@ -50,7 +52,7 @@ logger = logging.getLogger("shipit.review")
 
 
 def generate_review(
-    agent: str,
+    backend: Backend,
     ctx,
     *,
     instructions_path: str | None = None,
@@ -58,7 +60,8 @@ def generate_review(
     timeout: str = "600s",
     dry_run: bool = False,
 ) -> dict:
-    """Run ``agent`` as a reviewer in a read-only Tree and return the parsed review.
+    """Run ``backend`` as a reviewer in a read-only Tree and return the parsed
+    review.
 
     The Tree-fetch producer (ADR-0020 §Reviewer-path reconciliation — REPLACE): instead
     of front-loading ``ctx.diff`` into the prompt and running the CLI in the consumer's
@@ -78,6 +81,7 @@ def generate_review(
     ``agy`` as ``--print-timeout`` (``codex`` has no per-run timeout flag — parity only).
     ``dry_run`` prints the would-run Tree-launch argv and bills nothing.
     """
+    agent = backend.funnel_agent
     logger.info(
         "review run: agent=%s model=%s timeout=%s starting (read-only Tree producer)",
         agent,
@@ -87,7 +91,7 @@ def generate_review(
     )
     start = time.monotonic()
     review = producer.run_tree_review(
-        agent,
+        backend,
         ctx,
         model=model,
         timeout=timeout,
@@ -108,7 +112,7 @@ def generate_review(
 
 
 def _generate_post_and_close(
-    agent: str,
+    backend: Backend,
     ctx,
     run_id: int | None,
     run_repo: str | None,
@@ -131,7 +135,7 @@ def _generate_post_and_close(
     """
     try:
         review = generate_review(
-            agent,
+            backend,
             ctx,
             instructions_path=instructions_path,
             model=model,
@@ -141,7 +145,7 @@ def _generate_post_and_close(
         result = post.post_review(
             review,
             ctx,
-            agent_name=agent,
+            backend=backend,
             event=event,
             dry_run=dry_run,
             as_app=as_app,
@@ -161,9 +165,9 @@ def _generate_post_and_close(
         # ADDITIVE and best-effort: the funnel still records the degraded `outcome`
         # below (the salvage NEVER flips the run to success), and a degraded local
         # review stays non-blocking (ADR-0006).
-        _maybe_post_salvage(agent, ctx, exc, as_app=as_app, dry_run=dry_run)
+        _maybe_post_salvage(backend, ctx, exc, as_app=as_app, dry_run=dry_run)
         _close_funnel_breadcrumb(
-            agent, run_repo, run_id, outcome=outcome, detail=str(exc)
+            backend, run_repo, run_id, outcome=outcome, detail=str(exc)
         )
         # Record the breadcrumb, then RE-RAISE so the caller still sees the real
         # review failure (the adapter normalizes it to PrStateError).
@@ -171,12 +175,12 @@ def _generate_post_and_close(
     except Exception as exc:  # noqa: BLE001 - any other failure is a degraded run
         # The agent errored (missing CLI, crash) or the review POST failed.
         _close_funnel_breadcrumb(
-            agent, run_repo, run_id, outcome="failed", detail=str(exc)
+            backend, run_repo, run_id, outcome="failed", detail=str(exc)
         )
         raise
     # Success — incl. a clean zero-findings review: the review POST above already
     # fired unchanged; now close the funnel run to completed/success.
-    _close_funnel_breadcrumb(agent, run_repo, run_id, outcome="success")
+    _close_funnel_breadcrumb(backend, run_repo, run_id, outcome="success")
     return {"review": review, "post": result, "ctx_repo": ctx.repo, "pr": ctx.number}
 
 
@@ -202,7 +206,7 @@ def _safe_fence(content: str) -> str:
     return "`" * max(3, longest_run + 1)
 
 
-def _salvage_body(agent: str, raw: str) -> tuple[str, bool]:
+def _salvage_body(agent: str | None, raw: str) -> tuple[str, bool]:
     """Build the salvage comment body from the agent's raw output — (body, truncated).
 
     A clear marker that the STRUCTURED parse failed (so a reader never mistakes the
@@ -224,7 +228,7 @@ def _salvage_body(agent: str, raw: str) -> tuple[str, bool]:
 
 
 def _maybe_post_salvage(
-    agent: str, ctx, exc: BackendError, *, as_app: bool, dry_run: bool
+    backend: Backend, ctx, exc: BackendError, *, as_app: bool, dry_run: bool
 ) -> None:
     """Post unparseable-but-non-empty agent output as a top-level review COMMENT (#76).
 
@@ -244,7 +248,7 @@ def _maybe_post_salvage(
     if not raw:
         # Genuinely empty — there is nothing to salvage; behave exactly as before.
         return
-    body, truncated = _salvage_body(agent, raw)
+    body, truncated = _salvage_body(backend.funnel_agent, raw)
     review = {
         "summary": {"status": "COMMENT", "overall_feedback": body},
         "comments": [],
@@ -253,7 +257,7 @@ def _maybe_post_salvage(
         post.post_review(
             review,
             ctx,
-            agent_name=agent,
+            backend=backend,
             event="COMMENT",
             dry_run=dry_run,
             as_app=as_app,
@@ -261,7 +265,7 @@ def _maybe_post_salvage(
         logger.info(
             "salvaged unparseable %s review on pr#%s as a top-level comment "
             "(%d raw chars%s) — funnel still records the degraded outcome",
-            agent,
+            backend.funnel_agent,
             ctx.number,
             len(raw),
             ", truncated" if truncated else "",
@@ -278,7 +282,7 @@ def _maybe_post_salvage(
 
 
 def start_detached_review(
-    agent: str,
+    backend: Backend,
     pr: int,
     *,
     model: str = "pro",
@@ -286,7 +290,7 @@ def start_detached_review(
     instructions_path: str | None = None,
     as_app: bool = True,
     spawn: Callable[[Sequence[str], Mapping[str, str]], None] | None = None,
-    find: Callable[[str, str, str], int | None] | None = None,
+    find: Callable[[Backend, str, str], int | None] | None = None,
 ) -> bool:
     """Open the in_progress funnel run, DETACH the review, report what it did (OBS03).
 
@@ -335,7 +339,7 @@ def start_detached_review(
     logger.info(
         "review detach requested for pr#%s (agent=%s) — resolving + detaching",
         pr,
-        agent,
+        backend.funnel_agent,
         extra={"pr": pr},
     )
     repo, head_sha = _resolve_target(pr)
@@ -345,21 +349,21 @@ def start_detached_review(
     # below hands them (plus the run id, which is the CHILD's correlation, not
     # this parent's) across the process boundary.
     logcontext.bind(pr=pr, repo=repo)
-    existing = _reconcile_inflight(agent, repo, head_sha, find)
+    existing = _reconcile_inflight(backend, repo, head_sha, find)
     if existing is not None:
         logger.info(
             "review detach reconciled against an existing in-flight run (id=%s) "
             "for pr#%s (agent=%s) — not opening or spawning a duplicate",
             existing,
             pr,
-            agent,
+            backend.funnel_agent,
             extra={"pr": pr},
         )
         return False  # reconciled: in-flight, but no new child was started
-    run_id = _open_breadcrumb(agent, repo, head_sha)
+    run_id = _open_breadcrumb(backend, repo, head_sha)
     child_env = logcontext.env_export(run=run_id)
     argv = _child_argv(
-        agent,
+        backend,
         pr,
         repo=repo,
         run_id=run_id,
@@ -380,13 +384,13 @@ def start_detached_review(
         # catch-all is OBS03-WS03's deliverable, issue #41.)
         if run_id is not None:
             _close_funnel_breadcrumb(
-                agent, repo, run_id, outcome="failed", detail=str(exc)
+                backend, repo, run_id, outcome="failed", detail=str(exc)
             )
         raise
     logger.info(
         "review detached for pr#%s (agent=%s, run id=%s) — in-flight",
         pr,
-        agent,
+        backend.funnel_agent,
         run_id,
         extra={"pr": pr},
     )
@@ -394,7 +398,7 @@ def start_detached_review(
 
 
 def run_detached_review(
-    agent: str,
+    backend: Backend,
     pr: int,
     *,
     repo: str | None,
@@ -440,6 +444,7 @@ def run_detached_review(
     ageing that timestamp. WS03 does NOT implement that window — it only relies on it
     as the backstop (PRD "Failure & Timeout").
     """
+    agent = backend.funnel_agent
     start = time.monotonic()
     logger.info(
         "review child started for pr#%s (agent=%s, repo=%s, run_id=%s)",
@@ -476,7 +481,7 @@ def run_detached_review(
         duration_ms = int((time.monotonic() - start) * 1000)
         if run_id is not None:
             _close_funnel_breadcrumb(
-                agent, repo, run_id, outcome="failed", detail=str(exc)
+                backend, repo, run_id, outcome="failed", detail=str(exc)
             )
             logger.error(
                 "review resolve failed for pr#%s (agent=%s) after %dms — "
@@ -501,7 +506,7 @@ def run_detached_review(
         raise
     try:
         result = _generate_post_and_close(
-            agent,
+            backend,
             ctx,
             run_id,
             repo,
@@ -576,11 +581,13 @@ def _resolve_target(pr: int) -> tuple[str, str]:
             f"could not resolve target repo/core for #{pr} from `gh` output "
             f"(repo={repo!r}): {exc}"
         ) from exc
-    return core.slug, core.head_sha
+    # The core carries a typed `Sha` (COR02); this seam hands the wire-facing
+    # checkrun helpers (URL path / JSON payload) the string form.
+    return core.slug, str(core.head_sha)
 
 
 def _child_argv(
-    agent: str,
+    backend: Backend,
     pr: int,
     *,
     repo: str,
@@ -595,7 +602,9 @@ def _child_argv(
     The child reconstructs everything it needs from these arguments + the PR; it
     shares NO state with the parent (no daemon, no job-store file — the PR + check
     run are the only state). Invoked via ``python -m shipit`` so it does not depend
-    on the ``shipit`` console-script being on the child's PATH.
+    on the ``shipit`` console-script being on the child's PATH. ``--agent`` carries
+    the backend's funnel-agent alias; the child resolves it back to the SAME
+    registry identity (:func:`shipit.agent.backend.by_funnel_agent`).
     """
     argv = [
         sys.executable,
@@ -605,7 +614,7 @@ def _child_argv(
         "review",
         "_run",
         "--agent",
-        agent,
+        backend.funnel_agent or backend.name,
         "--pr",
         str(pr),
         "--repo",
@@ -665,10 +674,10 @@ _FUNNEL_TERMINAL: dict[str, tuple[str, str, str]] = {
 
 
 def _reconcile_inflight(
-    agent: str,
+    backend: Backend,
     repo: str,
     head_sha: str,
-    find: Callable[[str, str, str], int | None] | None,
+    find: Callable[[Backend, str, str], int | None] | None,
 ) -> int | None:
     """Look up an in-flight funnel run to RECONCILE against — BEST-EFFORT (OBS03-WS03).
 
@@ -686,19 +695,19 @@ def _reconcile_inflight(
     simulates "already in-flight" without the network.
     """
     try:
-        return (find or checkrun.find_nonterminal)(agent, repo, head_sha)
+        return (find or checkrun.find_nonterminal)(backend, repo, head_sha)
     except Exception:  # noqa: BLE001 - the reconcile read is best-effort
         logger.warning(
-            "review in-flight reconcile lookup failed for %s-local "
+            "review in-flight reconcile lookup failed for %s "
             "on %s (proceeding to open a fresh run)",
-            agent,
+            backend.check_run_name,
             repo,
             exc_info=True,
         )
         return None
 
 
-def _open_breadcrumb(agent: str, repo: str, head_sha: str) -> int | None:
+def _open_breadcrumb(backend: Backend, repo: str, head_sha: str) -> int | None:
     """Open the ``in_progress`` funnel check run on ``repo@head_sha`` — BEST-EFFORT.
 
     The create the async parent (:func:`start_detached_review`) opens its
@@ -710,10 +719,10 @@ def _open_breadcrumb(agent: str, repo: str, head_sha: str) -> int | None:
     breadcrumb. Returns the new run's id otherwise.
     """
     try:
-        run_id = checkrun.create(agent, repo, head_sha)
+        run_id = checkrun.create(backend, repo, head_sha)
         logger.info(
-            "funnel check run opened for %s-local on %s (run id=%s)",
-            agent,
+            "funnel check run opened for %s on %s (run id=%s)",
+            backend.check_run_name,
             repo,
             run_id,
         )
@@ -722,16 +731,15 @@ def _open_breadcrumb(agent: str, repo: str, head_sha: str) -> int | None:
         # Record the failure fact (never the token) and proceed — the review post
         # is unaffected by a missing/denied check-runs scope.
         logger.warning(
-            "funnel check run create failed for %s-local "
-            "(continuing to post the review)",
-            agent,
+            "funnel check run create failed for %s (continuing to post the review)",
+            backend.check_run_name,
             exc_info=True,
         )
         return None
 
 
 def _close_funnel_breadcrumb(
-    agent, repo, run_id, *, outcome: str, detail: str | None = None
+    backend: Backend, repo, run_id, *, outcome: str, detail: str | None = None
 ) -> None:
     """Transition the funnel run to its terminal ``outcome`` — BEST-EFFORT.
 
@@ -760,10 +768,9 @@ def _close_funnel_breadcrumb(
     terminal = _FUNNEL_TERMINAL.get(outcome)
     if terminal is None:
         logger.warning(
-            "unknown funnel outcome %r for %s-local "
-            "(run id=%s); recording it as 'failed'",
+            "unknown funnel outcome %r for %s (run id=%s); recording it as 'failed'",
             outcome,
-            agent,
+            backend.check_run_name,
             run_id,
         )
         terminal = _FUNNEL_TERMINAL["failed"]
@@ -771,11 +778,11 @@ def _close_funnel_breadcrumb(
     summary = f"{base_summary}\n\n{detail}" if detail else base_summary
     try:
         checkrun.transition(
-            agent, repo, run_id, conclusion=conclusion, title=title, summary=summary
+            backend, repo, run_id, conclusion=conclusion, title=title, summary=summary
         )
         logger.info(
-            "funnel check run closed for %s-local on %s (run id=%s) -> completed/%s",
-            agent,
+            "funnel check run closed for %s on %s (run id=%s) -> completed/%s",
+            backend.check_run_name,
             repo,
             run_id,
             conclusion,
@@ -783,8 +790,8 @@ def _close_funnel_breadcrumb(
     except Exception:  # noqa: BLE001 - best-effort; never masks the review outcome
         logger.warning(
             "funnel check run transition failed for "
-            "%s-local (run id=%s); the review outcome is unaffected",
-            agent,
+            "%s (run id=%s); the review outcome is unaffected",
+            backend.check_run_name,
             run_id,
             exc_info=True,
         )

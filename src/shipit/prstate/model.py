@@ -19,8 +19,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 
-from ..identity import Repo
-from ..pr import PR, repo_from_slug
+from ..identity import Repo, Sha, repo_from_slug
+from ..pr import PR
 
 
 class ReviewLifecycle(StrEnum):
@@ -125,12 +125,19 @@ class Thread:
 
 @dataclass(frozen=True)
 class Review:
-    """A submitted review — one per reviewer per cycle."""
+    """A submitted review — one per reviewer per cycle.
+
+    ``commit_id`` is the head the review was made against, carried as a
+    :class:`shipit.identity.Sha` (COR02) so the staleness comparison against the
+    PR's current head is full-vs-full by construction — a case or length mismatch
+    can no longer silently flip a review to stale. ``None`` when the wire carried
+    no commit (GitHub can omit it): honestly unknown, never a fake empty string.
+    """
 
     review_id: int
     author: str
     state: str  # APPROVED / CHANGES_REQUESTED / COMMENTED / ...
-    commit_id: str  # the head SHA this review was made against
+    commit_id: Sha | None  # the head SHA this review was made against
     body: str
 
 
@@ -231,7 +238,7 @@ class ReadinessView:
         return self.pr.number
 
     @property
-    def head_sha(self) -> str:
+    def head_sha(self) -> Sha:
         return self.pr.head_sha
 
     @property
@@ -247,8 +254,19 @@ class ReadinessView:
         return self.pr.merge_state
 
     def reviews_on_head(self) -> list[Review]:
-        """Reviews made against the current head — stale reviews don't count."""
-        return [r for r in self.reviews if r.commit_id == self.head_sha]
+        """Reviews made against the current head — stale reviews don't count.
+
+        A ``Sha``-vs-``Sha`` comparison (COR02): both sides are validated,
+        lowercase-normalized FULL shas, so a case or length mismatch can no
+        longer silently flip a review to stale — a raw-string ``commit_id``
+        would refuse to compare at all. ``commit_id is None`` (wire carried no
+        commit) honestly reads as not-on-head.
+        """
+        return [
+            r
+            for r in self.reviews
+            if r.commit_id is not None and r.commit_id == self.head_sha
+        ]
 
     def reviews_any_head(self) -> list[Review]:
         """All reviews on the PR, regardless of which commit they were made
@@ -271,7 +289,7 @@ _HANDBUILT_REPO = repo_from_slug("local/local")
 def readiness_view(
     *,
     number: int,
-    head_sha: str,
+    head_sha: str | Sha,
     is_draft: bool,
     base_ref: str | None = None,
     merge_state: str | None = None,
@@ -295,13 +313,17 @@ def readiness_view(
 
     The core (`number`/`head_sha`/`is_draft`/`base_ref`/`merge_state`) is packed
     into a :class:`PR` — ``is_draft`` is required here too, so this convenience
-    cannot reintroduce the defaulted-``is_draft`` trap. ``repo`` defaults to a
-    placeholder identity because the readiness engine never keys on it.
+    cannot reintroduce the defaulted-``is_draft`` trap. ``head_sha`` may arrive as
+    a raw string and is minted into a :class:`shipit.identity.Sha` HERE (mirroring
+    how ``review_view`` parses a slug into a ``Repo``), so a hand-built view
+    carries the same validated identity the wire path does — a malformed head
+    raises at construction. ``repo`` defaults to a placeholder identity because
+    the readiness engine never keys on it.
     """
     pr = PR(
         repo=repo or _HANDBUILT_REPO,
         number=number,
-        head_sha=head_sha,
+        head_sha=head_sha if isinstance(head_sha, Sha) else Sha(head_sha),
         base_ref=base_ref,
         is_draft=is_draft,
         merge_state=merge_state,

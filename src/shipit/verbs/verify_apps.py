@@ -40,6 +40,8 @@ import sys
 from dataclasses import dataclass
 
 from .. import execrun, gh
+from ..agent import backend as _agent_backend
+from ..agent.backend import Backend
 from ..review import ghauth
 
 #: The runbook for the one-time, owner-only install + ``checks: write`` re-consent.
@@ -47,19 +49,20 @@ from ..review import ghauth
 PROVISIONING_DOC = "docs/dev/review-app-provisioning.md"
 
 
-def app_slug(agent: str) -> str:
-    """The review App slug for ``agent`` (``codex`` → ``adr-codex-review``)."""
-    return f"adr-{agent}-review"
-
-
 def known_agents() -> list[str]:
-    """The local-agent reviewer Apps this verb can probe — the App-auth agents.
+    """The local-agent reviewer Apps this verb can probe — the funnel backends.
 
-    These are exactly the agents :mod:`shipit.review.ghauth` holds App credentials
-    for (``codex`` / ``agy``); a reviewer with no App (``copilot``) has no
-    installation token to probe and is not a local-agent App.
+    These are exactly the backends the ONE identity registry (ADR-0025) marks as
+    funnel App reviewers (``codex`` / ``agy``); a reviewer with no App
+    (``copilot``) has no installation token to probe and is not a local-agent App.
     """
-    return sorted(ghauth._DOPPLER_KEYS)
+    # ``funnel_backends()`` already guarantees a funnel identity; the truthy filter
+    # narrows ``funnel_agent`` to ``str`` and refuses to fabricate a blank alias
+    # (matching this module's raise-don't-fabricate stance) rather than leaking a
+    # ``""`` choice into CLI help that would then fail at ``by_funnel_agent("")``.
+    return sorted(
+        b.funnel_agent for b in _agent_backend.funnel_backends() if b.funnel_agent
+    )
 
 
 @dataclass(frozen=True)
@@ -78,8 +81,8 @@ class AppLiveness:
     reason: str = ""
 
 
-def verify_app(agent: str, repo: str, *, mint=None) -> AppLiveness:
-    """Probe whether ``agent``'s review App is LIVE on ``repo`` — pass-or-instruct.
+def verify_app(backend: Backend, repo: str, *, mint=None) -> AppLiveness:
+    """Probe whether ``backend``'s review App is LIVE on ``repo`` — pass-or-instruct.
 
     Mints the App installation token (``mint`` defaults to
     :func:`shipit.review.ghauth.installation_auth`) and reads the ``permissions``
@@ -98,9 +101,11 @@ def verify_app(agent: str, repo: str, *, mint=None) -> AppLiveness:
     Both point at :data:`PROVISIONING_DOC`. A pass returns ``reason=""``.
     """
     minter = mint if mint is not None else ghauth.installation_auth
-    slug = app_slug(agent)
+    agent = backend.funnel_agent or backend.name
+    # The App slug is a registry alias (ADR-0025), never composed here.
+    slug = backend.app_slug
     try:
-        auth = minter(agent, repo)
+        auth = minter(backend, repo)
     except ghauth.ReviewAuthError as exc:
         return AppLiveness(
             agent,
@@ -161,7 +166,13 @@ def run(repo: str | None, *, agents: list[str] | None = None, mint=None) -> int:
         return 1
 
     selected = agents or known_agents()
-    results = [verify_app(agent, target, mint=mint) for agent in selected]
+    # The CLI selects by the funnel-agent alias; resolve each back to the ONE
+    # registry identity (the `--agents` choices are built from the same registry,
+    # so the lookup cannot miss for CLI input).
+    results = [
+        verify_app(_agent_backend.by_funnel_agent(agent), target, mint=mint)
+        for agent in selected
+    ]
     print(format_report(target, results))
     # An empty probe set is NOT a pass: `all([])` is True, but a check with nothing
     # verified must fail (and `format_report` already renders empty as NOT LIVE).

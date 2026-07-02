@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from shipit.identity import repo_from_slug
 from shipit import execrun, gh
 from shipit.spawn import launch
 from shipit.tree import layout
@@ -32,7 +33,8 @@ def _patch_identity(monkeypatch, *, root="/repo", org_repo="acme/widget"):
     it present. Tests that exercise the MISSING-branch fail-closed path override it.
     """
     monkeypatch.setattr(gh, "repo_root", lambda: root)
-    monkeypatch.setattr(gh, "current_repo", lambda: org_repo)
+    # Identity now derives LOCALLY from the origin remote (ADR-0024): the patched
+    # remote URL is what identity.resolve_repo parses into the canonical Repo.
     monkeypatch.setattr(gh, "git_remote_url", lambda *, cwd: "git@example:" + org_repo)
     monkeypatch.setattr(gh, "remote_branch_exists", lambda *a, **k: True)
 
@@ -126,7 +128,7 @@ def test_run_subagent_happy_path(tmp_path, monkeypatch, capsys):
     # (origin/E/umbrella), NOT the dumb origin/main — so the draft PR targets the
     # epic branch.
     spec = captured["spec"]
-    assert spec.org == "acme" and spec.repo == "widget"
+    assert spec.repo == repo_from_slug("acme/widget")
     assert spec.epic == "TRE03" and spec.ws == 1
     assert spec.issue is None and spec.branch is None
     assert captured["source_repo"] == str(parent)
@@ -486,10 +488,10 @@ def test_run_subagent_repo_mismatch_is_exit_1(monkeypatch, capsys):
     assert "--repo 'gadget'" in err and "acme/widget" in err
 
 
-def test_run_subagent_slashless_ambient_repo_is_exit_1(monkeypatch, capsys):
-    # A slashless ambient identity would put the whole string in ``org`` and leave
-    # ``repo_name`` empty, which could slip past the --repo guard and feed an empty
-    # repo into the TreeSpec. It must be refused with a clean exit-1.
+def test_run_subagent_unparseable_origin_is_exit_1(monkeypatch, capsys):
+    # An origin remote with no owner/name tail cannot yield a Repo identity; the
+    # canonical resolver refuses it loud (ValueError) and the verb surfaces a clean
+    # exit-1 — a bogus identity never reaches the TreeSpec.
     _patch_identity(monkeypatch, org_repo="widget")
 
     rc = spawn_verb.run_subagent(
@@ -498,7 +500,7 @@ def test_run_subagent_slashless_ambient_repo_is_exit_1(monkeypatch, capsys):
 
     assert rc == 1
     err = capsys.readouterr().err
-    assert "not in org/repo form" in err
+    assert "cannot parse owner/name" in err
     assert "widget" in err
 
 
@@ -541,13 +543,13 @@ def test_run_subagent_not_inside_checkout_is_exit_1(monkeypatch, capsys):
     assert "not inside a git checkout" in capsys.readouterr().err
 
 
-def test_run_subagent_reports_gh_error_cleanly(monkeypatch, capsys):
+def test_run_subagent_reports_git_error_cleanly(monkeypatch, capsys):
     monkeypatch.setattr(gh, "repo_root", lambda: "/repo")
 
-    def boom():
-        raise ExecError(["gh"], rc=1, stderr="could not resolve repo")
+    def boom(*, cwd):
+        raise ExecError(["git"], rc=1, stderr="could not read origin remote")
 
-    monkeypatch.setattr(gh, "current_repo", boom)
+    monkeypatch.setattr(gh, "git_remote_url", boom)
 
     rc = spawn_verb.run_subagent(
         repo="widget", epic="TRE03", ws=1, issue=1, role="implementer"

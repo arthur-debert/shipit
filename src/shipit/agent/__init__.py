@@ -24,10 +24,10 @@ from .backend import (
     CODEX,
     REGISTRY,
     Backend,
+    by_check_run_name,
     by_funnel_agent,
     by_name,
     funnel_backends,
-    funnel_doppler_keys,
 )
 from .invocation import (
     Invocation,
@@ -50,10 +50,10 @@ __all__ = [
     "Model",
     "Provider",
     "ReasoningLevel",
+    "by_check_run_name",
     "by_funnel_agent",
     "by_name",
     "funnel_backends",
-    "funnel_doppler_keys",
     "intended_from_meta",
     "model_of_id",
     "observed_from_meta",

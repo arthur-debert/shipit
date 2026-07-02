@@ -17,10 +17,12 @@ Three sinks, chosen for where shipit runs (PRD ``docs/prd/obs01-logging.md``):
   to that file.
 - **File** — the durable, per-repo, rotating diagnosis record. Path resolution is
   :func:`platformdirs.user_log_dir` — the single source of truth (no platform
-  ``if`` branches, no bespoke override env var) — namespaced ``<base>/<owner>/<repo>/``
-  and bounded by a :class:`~logging.handlers.RotatingFileHandler`. The base and
-  the ``(owner, repo)`` namespace are injectable so tests cross the boundary
-  without writing to a real ``$HOME``.
+  ``if`` branches, no bespoke override env var) — namespaced ``<base>/<owner>/<name>/``
+  by the canonical :class:`shipit.identity.Repo` (lowercased, so case-varying
+  sources land ONE directory per repo) and bounded by a
+  :class:`~logging.handlers.RotatingFileHandler`. The base and the ``Repo``
+  namespace are injectable so tests cross the boundary without writing to a real
+  ``$HOME``.
 
 The file sink emits **JSONL** (ADR-0029, agents-first): one JSON object per
 record with flat top-level fields — ``ts`` (ISO-8601 UTC), ``level``,
@@ -79,7 +81,8 @@ from typing import Any
 import platformdirs
 import structlog
 
-from . import execrun, gh, logcontext, redact
+from . import execrun, identity, logcontext, redact
+from .identity import Repo
 
 #: The package logger every shipit module logs through (``logging.getLogger``
 #: of a child name propagates here).
@@ -306,32 +309,34 @@ def build_step_summary_handler(path: str) -> logging.Handler:
 
 
 def resolve_log_dir(
-    owner_repo: tuple[str, str],
+    repo: Repo,
     *,
     base_dir: str | Path | None = None,
 ) -> Path:
-    """The per-repo log directory ``<base>/<owner>/<repo>/``.
+    """The per-repo log directory ``<base>/<owner>/<name>/``.
 
-    ``base_dir`` is the platformdirs base; when ``None`` it is resolved via
-    ``platformdirs.user_log_dir("shipit")`` (macOS → ``~/Library/Logs/shipit``,
-    Linux → ``~/.local/state/shipit/log``). Tests inject ``base_dir`` (and the
-    ``owner_repo``) so the path is asserted without touching a real ``$HOME``.
+    ``repo`` is the canonical :class:`shipit.identity.Repo` — its lowercased
+    owner/name are the path segments, so mixed-case origins and API slugs land ONE
+    log directory per repo (ADR-0024). ``base_dir`` is the platformdirs base; when
+    ``None`` it is resolved via ``platformdirs.user_log_dir("shipit")`` (macOS →
+    ``~/Library/Logs/shipit``, Linux → ``~/.local/state/shipit/log``). Tests inject
+    ``base_dir`` (and the ``repo``) so the path is asserted without touching a real
+    ``$HOME``.
     """
     base = (
         Path(base_dir)
         if base_dir is not None
         else Path(platformdirs.user_log_dir("shipit"))
     )
-    owner, repo = owner_repo
-    return base / owner / repo
+    return base / repo.owner.login / repo.name
 
 
 def log_file_path(
-    owner_repo: tuple[str, str],
+    repo: Repo,
     *,
     base_dir: str | Path | None = None,
 ) -> Path:
-    """The absolute path to the active log FILE: ``<base>/<owner>/<repo>/shipit.log``.
+    """The absolute path to the active log FILE: ``<base>/<owner>/<name>/shipit.log``.
 
     The single source of truth for the concrete log file — the directory from
     :func:`resolve_log_dir` joined with :data:`LOG_FILENAME` (the basename the
@@ -339,11 +344,11 @@ def log_file_path(
     logs``) consume THIS rather than recomputing the platformdirs path, so the
     reader can never disagree with the writer about where the log lives.
     """
-    return resolve_log_dir(owner_repo, base_dir=base_dir) / LOG_FILENAME
+    return resolve_log_dir(repo, base_dir=base_dir) / LOG_FILENAME
 
 
 def build_file_handler(
-    owner_repo: tuple[str, str],
+    repo: Repo,
     *,
     base_dir: str | Path | None = None,
 ) -> RotatingFileHandler:
@@ -355,7 +360,7 @@ def build_file_handler(
     JSONL (:func:`_file_formatter` — one flat JSON object per record, ADR-0029).
     The per-repo directory is created on demand.
     """
-    log_dir = resolve_log_dir(owner_repo, base_dir=base_dir)
+    log_dir = resolve_log_dir(repo, base_dir=base_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
     handler = RotatingFileHandler(
         log_dir / LOG_FILENAME,
@@ -369,32 +374,28 @@ def build_file_handler(
     return handler
 
 
-def _current_owner_repo() -> tuple[str, str]:
-    """``(owner, repo)`` for the current checkout, via the :mod:`shipit.gh` boundary.
+def _current_repo() -> Repo:
+    """The canonical :class:`shipit.identity.Repo` for the current checkout.
 
-    The boundary returns ``owner/name`` (``gh repo view --json nameWithOwner``).
-    A value that is not a two-part slug is a real failure — fail loud rather than
-    silently writing to an empty/incorrect log directory.
+    Derived LOCALLY from the origin remote (:func:`shipit.identity.resolve_repo`,
+    ADR-0024) — offline and Tree-safe, with owner/name lowercased so every case
+    variant of one repo writes ONE log directory. No origin remote or an
+    unparseable URL is a real failure — fail loud rather than silently writing to
+    an empty/incorrect log directory.
     """
-    slug = gh.current_repo()
-    owner, sep, repo = slug.partition("/")
-    if not sep or not owner or not repo:
-        raise ValueError(
-            f"expected an 'owner/repo' slug from gh.current_repo(), got {slug!r}"
-        )
-    return owner, repo
+    return identity.resolve_repo()
 
 
-def resolve_current_owner_repo() -> tuple[str, str] | None:
-    """Best-effort ``(owner, repo)`` for the current checkout, or ``None``.
+def resolve_current_repo() -> Repo | None:
+    """Best-effort :class:`shipit.identity.Repo` for the current checkout, or ``None``.
 
     For the CLI entrypoint, where a logging-setup failure must never crash the
-    command: if the repo can't be determined (not a checkout, ``gh`` unavailable,
-    a malformed slug), return ``None`` so the caller simply runs without the file
-    sink rather than aborting.
+    command: if the repo can't be determined (not a checkout, no origin remote,
+    an unparseable remote URL), return ``None`` so the caller simply runs without
+    the file sink rather than aborting.
     """
     try:
-        return _current_owner_repo()
+        return _current_repo()
     except (execrun.ExecError, ValueError):
         return None
 
@@ -409,25 +410,25 @@ def configure_logging_for_slug(
 
     The detached review child (OBS03) knows its repo DETERMINISTICALLY from its
     ``--repo`` argument, so — unlike the CLI bootstrap, which resolves the repo
-    best-effort off cwd (:func:`resolve_current_owner_repo`, a ``gh`` call that can
-    degrade in a terminal-less child) — it can attach the file sink with certainty.
-    The child passes that slug here so the detached run's diagnostics can reach
-    ``<logdir>/<owner>/<repo>/shipit.log``, independent of cwd resolution — this is
-    what attempts to make good on OBS03 story 5 (a crashed detached run should leave
-    a durable "why", not just a terminal check run). Best-effort, not a hard
-    guarantee: see the return contract below.
+    best-effort off cwd (:func:`resolve_current_repo`, which can degrade outside a
+    checkout) — it can attach the file sink with certainty. The child passes that
+    slug here — parsed by the ONE canonical parser
+    (:func:`shipit.identity.repo_from_slug`), so an API-cased slug lands the same
+    log directory as the locally-resolved identity (ADR-0024) — so the detached
+    run's diagnostics can reach ``<logdir>/<owner>/<name>/shipit.log``, independent
+    of cwd resolution — this is what attempts to make good on OBS03 story 5 (a
+    crashed detached run should leave a durable "why", not just a terminal check
+    run). Best-effort, not a hard guarantee: see the return contract below.
 
     Returns whether the file sink was attached. Best-effort: a malformed slug or a
     logging-setup failure is swallowed (returns ``False``) — a logging glitch must
-    NEVER crash the review (mirrors :func:`resolve_current_owner_repo`'s posture).
+    NEVER crash the review (mirrors :func:`resolve_current_repo`'s posture).
     ``base_dir`` is the platformdirs base, injected by tests so the child's records
     are asserted without writing to a real ``$HOME``.
     """
     try:
-        owner, sep, repo = slug.partition("/")
-        if not sep or not owner or not repo:
-            return False
-        configure_logging(verbose=verbose, owner_repo=(owner, repo), base_dir=base_dir)
+        repo = identity.repo_from_slug(slug)
+        configure_logging(verbose=verbose, repo=repo, base_dir=base_dir)
         return True
     except Exception:  # noqa: BLE001 - logging setup must never crash the review
         return False
@@ -455,7 +456,7 @@ def configure_logging(
     verbose: bool = False,
     env: Mapping[str, str] | None = None,
     *,
-    owner_repo: tuple[str, str] | None = None,
+    repo: Repo | None = None,
     base_dir: str | Path | None = None,
 ) -> None:
     """Configure the ``shipit`` package logger and attach its sinks.
@@ -472,12 +473,13 @@ def configure_logging(
     - **CI** — attached only when :func:`is_ci` (``env`` is injectable, defaulting
       to ``os.environ``): a stderr handler (stdout stays clean for ``--json``
       output), plus a best-effort ``$GITHUB_STEP_SUMMARY`` appender.
-    - **File** — attached when a target repo is known, i.e. when ``owner_repo`` or
-      ``base_dir`` is provided. ``owner_repo`` / ``base_dir`` are injectable
-      boundaries for tests; with ``base_dir`` given but ``owner_repo`` omitted, the
-      repo is resolved (strictly) via :mod:`shipit.gh`. The CLI entrypoint resolves
-      ``owner_repo`` best-effort (:func:`resolve_current_owner_repo`) and passes it,
-      so a normal run gets the file sink and a non-repo run simply skips it.
+    - **File** — attached when a target repo is known, i.e. when ``repo`` (a
+      canonical :class:`shipit.identity.Repo`) or ``base_dir`` is provided.
+      ``repo`` / ``base_dir`` are injectable boundaries for tests; with
+      ``base_dir`` given but ``repo`` omitted, the repo is resolved (strictly) via
+      :func:`shipit.identity.resolve_repo`. The CLI entrypoint resolves the repo
+      best-effort (:func:`resolve_current_repo`) and passes it, so a normal run
+      gets the file sink and a non-repo run simply skips it.
 
     Logging setup is also the child half of the cross-process context seam
     (ADR-0029): any domain keys a parent shipit process exported into ``env``
@@ -521,7 +523,7 @@ def configure_logging(
 
     # File sink — the durable per-repo record, attached when a target repo is
     # known (a param was injected, or the CLI resolved and passed one).
-    if owner_repo is not None or base_dir is not None:
-        if owner_repo is None:
-            owner_repo = _current_owner_repo()
-        logger.addHandler(build_file_handler(owner_repo, base_dir=base_dir))
+    if repo is not None or base_dir is not None:
+        if repo is None:
+            repo = _current_repo()
+        logger.addHandler(build_file_handler(repo, base_dir=base_dir))

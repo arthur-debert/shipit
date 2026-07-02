@@ -1,16 +1,25 @@
 {
   "meta": {
     "number": 103,
-    "headRefOid": "ccc333",
+    "headRefOid": "ccc3330000000000000000000000000000000000",
     "isDraft": true,
     "mergeable": "UNKNOWN",
     "mergeStateStatus": "UNKNOWN",
-    "reviewRequests": [{ "login": "Copilot" }]
+    "reviewRequests": [
+      {
+        "login": "Copilot"
+      }
+    ]
   },
   "reviews": [],
   "threads": [],
   "reactions": [
-    { "content": "eyes", "user": { "login": "gemini-code-assist[bot]" } }
+    {
+      "content": "eyes",
+      "user": {
+        "login": "gemini-code-assist[bot]"
+      }
+    }
   ],
   "issue_comments": []
 }

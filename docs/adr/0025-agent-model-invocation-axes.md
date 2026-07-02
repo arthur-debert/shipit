@@ -1,7 +1,9 @@
 # Agent axes: Backend, Model, Invocation (and Backend ⊥ Reviewer)
 
-> **Status: Proposed.** Core Model epic (COR01). Refines ADR-0020 (backend adapter) and
-> ADR-0005/0006 (reviewer funnel); anchors WS-Reviewer.
+> **Status: Accepted (landed).** Landed by the Core Model epic (COR01: the registry +
+> axes) and completed by Identity threading (COR02): the review funnel threads the
+> `Backend` value object itself. Refines ADR-0020 (backend adapter) and ADR-0005/0006
+> (reviewer funnel).
 
 The agent layer is modeled as **orthogonal axes sharing a single identity** — `Backend`,
 `Model`, `Invocation` — rather than one merged "reviewer/backend" type.
@@ -48,7 +50,12 @@ agent** — but a model of one provider can run under a backend of another.
 
 ## Consequences
 
-WS-Reviewer deletes the dead ABC, extracts the shared agent-backend identity (referenced
-by both the funnel and launch axes), keeps the two axes distinct, and lands the single
-required-reviewer default. `Model`/`Invocation` give the eval loop its config dimensions;
-the config *optimizer* is deliberately future work (rich model now, build later).
+COR01's WS-Reviewer deleted the dead ABC, extracted the shared agent-backend identity
+(referenced by both the funnel and launch axes), kept the two axes distinct, and landed
+the single required-reviewer default. COR02 finished the threading: the funnel paths
+(producer, service, ghauth, checkrun, reviewer adapters) take the `Backend` value object
+— not a bare agent-name string — so every derived name (funnel login, check-run, CLI
+binary, Doppler keys) comes only off the registry entry, and a backend with no funnel
+App (`claude`) refuses to mint funnel-only aliases. `Model`/`Invocation` give the eval
+loop its config dimensions; the config *optimizer* is deliberately future work (rich
+model now, build later).

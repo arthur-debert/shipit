@@ -18,6 +18,7 @@ import logging
 import pytest
 import structlog
 from shipit import execrun, logsetup, redact, secretsrc
+from shipit.identity import repo_from_slug
 from shipit.config import SecretSource
 
 SECRET = "s3cr3t-hunter2-value"
@@ -228,7 +229,7 @@ def _reset_package_logger():
 
 def test_registered_secret_reaches_no_sink(capfd, tmp_path, _reset_package_logger):
     structlog.contextvars.clear_contextvars()
-    logsetup.configure_logging(env={}, owner_repo=("o", "r"), base_dir=tmp_path)
+    logsetup.configure_logging(env={}, repo=repo_from_slug("o/r"), base_dir=tmp_path)
     source = SecretSource(name="TOK", kind="env", key="TOK")
     secretsrc.resolve(source, env={"TOK": SECRET})
 
@@ -257,7 +258,7 @@ def test_pattern_masking_applies_through_the_chain(
     capfd, tmp_path, _reset_package_logger
 ):
     structlog.contextvars.clear_contextvars()
-    logsetup.configure_logging(env={}, owner_repo=("o", "r"), base_dir=tmp_path)
+    logsetup.configure_logging(env={}, repo=repo_from_slug("o/r"), base_dir=tmp_path)
     token = "ghp_abcDEF0123456789xyz"
     logging.getLogger("shipit.ws02").warning("auth with %s failed", token)
 

@@ -11,8 +11,13 @@ from pathlib import Path
 
 import pytest
 
+from shipit.identity import repo_from_slug
 from shipit.tree import layout
 from shipit.tree.layout import TreeSpec, plan, sanitize_slug
+
+#: The canonical Repo identity every spec in this file namespaces under —
+#: built through the ONE slug parser, exactly as the feeders build it.
+REPO = repo_from_slug("acme/widget")
 
 ROOT = Path("/trees")
 
@@ -34,7 +39,7 @@ def _git_accepts_branch(branch: str) -> bool:
 
 
 def _issue_spec(**over) -> TreeSpec:
-    base = dict(org="acme", repo="widget", agent_hash="deadbeef", issue=123, root=ROOT)
+    base = dict(repo=REPO, agent_hash="deadbeef", issue=123, root=ROOT)
     base.update(over)
     return TreeSpec(**base)
 
@@ -164,8 +169,7 @@ def test_plan_applies_slug_sanitization_to_the_dir_leaf():
 
 def _epic_spec(**over) -> TreeSpec:
     base = dict(
-        org="acme",
-        repo="widget",
+        repo=REPO,
         agent_hash="deadbeef",
         epic="HAR02",
         ws=2,
@@ -414,7 +418,7 @@ def test_epic_requires_both_epic_and_ws():
     with pytest.raises(ValueError, match="both --epic and --ws"):
         plan(_epic_spec(ws=None))
     with pytest.raises(ValueError, match="both --epic and --ws"):
-        plan(TreeSpec(org="o", repo="r", agent_hash="h", ws=3, root=ROOT))
+        plan(TreeSpec(repo=repo_from_slug("o/r"), agent_hash="h", ws=3, root=ROOT))
 
 
 # The epic code is used verbatim as BOTH a branch ref component and a path
@@ -452,9 +456,7 @@ def test_epic_rejects_non_positive_ws(bad_ws):
 
 
 def _freeform_spec(**over) -> TreeSpec:
-    base = dict(
-        org="acme", repo="widget", agent_hash="deadbeef", branch="spike/foo", root=ROOT
-    )
+    base = dict(repo=REPO, agent_hash="deadbeef", branch="spike/foo", root=ROOT)
     base.update(over)
     return TreeSpec(**base)
 
@@ -506,8 +508,7 @@ def test_freeform_rejects_branch_that_sanitizes_to_empty(bad_branch):
 
 def _ephemeral_spec(**over) -> TreeSpec:
     base = dict(
-        org="acme",
-        repo="widget",
+        repo=REPO,
         agent_hash="deadbeef",
         ephemeral="sess-20260702-121314-4242",
         root=ROOT,
@@ -618,7 +619,7 @@ def test_hash_never_appears_in_any_branch(spec):
 
 
 def test_plan_rejects_no_shape():
-    spec = TreeSpec(org="o", repo="r", agent_hash="h", root=ROOT)
+    spec = TreeSpec(repo=repo_from_slug("o/r"), agent_hash="h", root=ROOT)
     with pytest.raises(ValueError, match="exactly one shape"):
         plan(spec)
 
@@ -635,7 +636,7 @@ def test_plan_rejects_no_shape():
     ],
 )
 def test_plan_rejects_more_than_one_shape(over):
-    spec = TreeSpec(org="o", repo="r", agent_hash="h", root=ROOT, **over)
+    spec = TreeSpec(repo=repo_from_slug("o/r"), agent_hash="h", root=ROOT, **over)
     with pytest.raises(ValueError, match="exactly one shape"):
         plan(spec)
 
@@ -706,3 +707,44 @@ def test_tree_kind_epic_or_issue_named_after_a_kind_is_still_a_write_tree():
     # The issues namespace has the same nested shape (issues/<id>/<leaf>); its ids
     # are numeric today, but the guard is structural, not name-based.
     assert layout.tree_kind("/t/acme/widget/issues/ephemeral/w-aa") == layout.WRITE_KIND
+
+
+# --------------------------------------------------------------------------
+# identity threading (COR02-WS02, #252): one Repo, one Tree namespace
+# --------------------------------------------------------------------------
+
+
+class _CaseyGit:
+    """A fake git boundary whose origin remote carries a MIXED-case slug."""
+
+    def __init__(self, remote_url):
+        self._remote_url = remote_url
+
+    def git_remote_url(self, *, cwd, remote="origin"):
+        return self._remote_url
+
+
+def test_case_divergent_sources_land_one_tree_path():
+    # The ADR-0024 disease this WS removes from the plumbing: a mixed-case ORIGIN
+    # remote and a mixed-case API slug are ONE repo on GitHub, so they must land
+    # the IDENTICAL Tree dir — the Repo identity normalizes, not each key site.
+    from shipit.identity import resolve_repo
+
+    from_origin = resolve_repo(
+        "/checkout", boundary=_CaseyGit("https://github.com/AcMe/WiDgEt.git")
+    )
+    from_api_slug = repo_from_slug("ACME/Widget")
+
+    def _plan_dir(repo):
+        return plan(TreeSpec(repo=repo, agent_hash="deadbeef", issue=7, root=ROOT)).dir
+
+    assert _plan_dir(from_origin) == _plan_dir(from_api_slug)
+    assert _plan_dir(from_origin) == ROOT / "acme" / "widget" / "issues" / "7" / (
+        "work-deadbeef"
+    )
+
+
+def test_repo_dir_namespaces_by_canonical_identity():
+    # repo_dir is the ONE place a Repo becomes Tree path segments — shared by the
+    # write planner and the read-only planner, always the lowercased identity.
+    assert layout.repo_dir(REPO, ROOT) == ROOT / "acme" / "widget"
