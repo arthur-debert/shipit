@@ -183,7 +183,7 @@ def run_tree_review(
             ctx.number,
             agent,
             tree.path,
-            extra={"pr": ctx.number, "tree": tree.path},
+            extra={"pr": ctx.number, "tree": tree.path, "reviewer": agent},
         )
         result = launch.launch(
             cmd, cwd=tree.path, env=adapter.child_env(), runner=launcher

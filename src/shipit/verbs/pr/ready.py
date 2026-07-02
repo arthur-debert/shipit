@@ -95,6 +95,7 @@ def run(pr: int | None = None, *, undo: bool = False) -> int:
     gh/auth failure. A branch with no PR is a clean non-zero error here (unlike
     the read-only `pr status`, a mutating verb has nothing to flip).
     """
+    resolved: int | None = None
     try:
         resolved = resolve_pr(pr)
         if resolved is None:
@@ -123,7 +124,15 @@ def run(pr: int | None = None, *, undo: bool = False) -> int:
         print(f"refusing to flip: {exc}", file=sys.stderr)
         return 1
     except (execrun.ExecError, PrStateError) as exc:
-        logger.error("pr ready failed", exc_info=True)
+        # Bind `pr` when resolution got far enough to know it (the mutating call
+        # is what failed); when resolution ITSELF failed, `resolved` is None and
+        # the key stays absent — the record contract is present-when-bound, never
+        # null.
+        logger.error(
+            "pr ready failed",
+            exc_info=True,
+            extra={"pr": resolved} if resolved is not None else None,
+        )
         print(f"error: {exc}", file=sys.stderr)
         return 1
     logger.info(
