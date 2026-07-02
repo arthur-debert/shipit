@@ -296,5 +296,9 @@ def test_liveness_probe_verdict_is_recorded_at_debug(caplog):
         assert liveness.is_live(record, lambda pid: None) is False
         alive = liveness.ProcessInfo(pid=41, ppid=1, create_time=123.0, argv="claude")
         assert liveness.is_live(record, lambda pid: alive) is True
-    verdicts = _with_fields(caplog.records, logging.DEBUG, "pid", "session", "live")
+    verdicts = _with_fields(
+        caplog.records, logging.DEBUG, "pid", "session", "live", "rung"
+    )
     assert [v.live for v in verdicts] == [False, True]
+    assert verdicts[0].rung == "pid not alive"
+    assert verdicts[1].rung == "pid and create-time match"

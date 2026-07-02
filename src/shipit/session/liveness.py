@@ -183,7 +183,12 @@ def is_live(
     logger.debug(
         "liveness probe: %s",
         reason,
-        extra={"pid": record.pid, "session": record.session_id, "live": live},
+        extra={
+            "pid": record.pid,
+            "session": record.session_id,
+            "live": live,
+            "rung": reason,
+        },
     )
     return live
 
