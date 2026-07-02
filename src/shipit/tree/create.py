@@ -37,7 +37,7 @@ from pathlib import Path
 
 import platformdirs
 
-from .. import config, gh, proc
+from .. import config, execrun, gh
 from . import include, provision
 from .layout import TreeSpec, central_root, plan
 
@@ -195,7 +195,7 @@ def provision_env() -> dict[str, str]:
     A copy of the current environment with the parent's leaked ``PIXI_*`` / Conda
     activation / ADR-0015 build-env project pointers removed (:func:`is_leaked_env_var`).
     Returned as the full env — not an overlay — so :func:`run_provision` can hand it to
-    :func:`shipit.proc.run` with ``replace_env=True``: a merge could re-add the very vars
+    :func:`shipit.execrun.run` with ``replace_env=True``: a merge could re-add the very vars
     we are dropping (they live in ``os.environ``), so removal requires replacing the env,
     not merging onto it. With the project pointers gone, the child ``pixi`` / ``shipit``
     re-resolves the project from its own cwd (the Tree), which is the whole point.
@@ -215,13 +215,19 @@ def provision_env() -> dict[str, str]:
 def run_provision(cmd: list[str], *, cwd: Path, env: dict[str, str]) -> None:
     """Run one provisioning command in the Tree (the patchable provisioning boundary).
 
-    A thin wrapper over :func:`shipit.proc.run` (no shell) so tests assert *which*
+    A thin wrapper over :func:`shipit.execrun.run` (no shell) so tests assert *which*
     commands provisioning would run and *with what env* without spawning ``pixi`` /
     ``npm``. ``env`` is the COMPLETE child environment (built by
     :func:`provision_env`) and is used verbatim (``replace_env=True``) so the
     scrubbed ``PIXI_*`` vars cannot creep back in via a merge over ``os.environ``.
+
+    ``timeout=None``: cold ``pixi install`` / ``npm ci`` are legitimate
+    long-runners (ADR-0028 names them), so the runner's 5-minute default must
+    not kill them — matching today's no-timeout behavior. PROC01-WS03 (the
+    provisioning-durability slice) replaces ``None`` with an explicit generous
+    bound per step.
     """
-    proc.run(cmd, cwd=str(cwd), env=env, replace_env=True)
+    execrun.run(cmd, cwd=str(cwd), env=env, replace_env=True, timeout=None)
 
 
 def _provision(dest: Path, *, trees_root: Path) -> None:

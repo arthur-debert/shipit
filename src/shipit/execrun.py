@@ -1,0 +1,278 @@
+"""execrun — the one Exec seam: every external command shipit runs (ADR-0028).
+
+One execution of an external binary is an **Exec** (CONTEXT.md): argv in, run to
+completion, a normalized :class:`ExecResult` or the single transport error
+:class:`ExecError` out, and exactly one structured log record of what happened.
+The contract, in full:
+
+- **Result or one error.** Success (or any completed run with ``check=False``)
+  returns an :class:`ExecResult` carrying rc, both captured streams, and the
+  duration. Every failure — nonzero exit under ``check=True``, timeout expiry,
+  a missing binary, any OS-level launch error — raises :class:`ExecError`
+  carrying argv, rc, both streams, duration, and a ``cause`` tag. No raw
+  ``OSError``/``FileNotFoundError``/``TimeoutExpired`` ever escapes.
+- **Nothing hangs by default.** Every Exec carries a timeout, default
+  :data:`DEFAULT_TIMEOUT` (5 minutes). Legitimate long-runners override it
+  per call (``None`` allowed — an explicit choice, never the default).
+- **One record per Exec** — argv, cwd, rc, ``duration_ms``; on failure the
+  tails of both streams. Success logs at DEBUG, failure at ERROR. A nonzero
+  exit under ``check=False`` is the caller's *normal* outcome (a liveness
+  probe of a dead pid, ``git cat-file -e``), so it records at DEBUG, not ERROR.
+- **Everything redacted.** Whatever the runner logs or attaches to an error
+  passes through the central redactor (:mod:`shipit.redact`) first.
+
+Rules carried over from the retired proto-runner: never ``shell=True``; never
+interpolate into a shell string — commands are argument lists. Stdin (ADR-0020):
+with no ``input`` the child's stdin is pinned to ``DEVNULL`` so a stdin-reading
+child gets a clean EOF instead of hanging on an idle inherited pipe.
+
+Tests inject this seam rather than spawning tools: call sites take a ``runner``
+parameter defaulting to :func:`run`, and the runner's own suite fakes
+``subprocess.run`` to assert the result/error/record contract.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import subprocess
+import time
+from dataclasses import dataclass
+
+from . import redact
+
+#: The Exec record's logger — a child of the package ``shipit`` logger, so it
+#: inherits the sinks :func:`shipit.logsetup.configure_logging` attaches.
+logger = logging.getLogger("shipit.exec")
+
+#: The default per-Exec timeout, in seconds: 5 minutes — generous enough that
+#: no normal tool call trips it, tight enough that nothing hangs forever
+#: (ADR-0028). Known long-runners override per call; ``None`` disables.
+DEFAULT_TIMEOUT: float = 300.0
+
+#: How much of each stream a failure record / error message carries: the TAIL,
+#: where tools put their actual diagnostics. The full streams stay on the
+#: :class:`ExecError` itself.
+TAIL_CHARS = 2000
+
+#: :attr:`ExecError.cause` tags — the one axis callers may branch on.
+CAUSE_EXIT = "exit"  # the child completed with a nonzero rc (check=True)
+CAUSE_TIMEOUT = "timeout"  # the timeout expired; the child was killed
+CAUSE_MISSING_BINARY = "missing-binary"  # argv[0] not found on PATH
+CAUSE_OS = "os-error"  # any other OS-level launch failure
+
+
+@dataclass(frozen=True)
+class ExecResult:
+    """The normalized outcome of one completed Exec."""
+
+    argv: tuple[str, ...]
+    rc: int
+    stdout: str
+    stderr: str
+    duration_ms: int
+
+    @property
+    def ok(self) -> bool:
+        """Whether the child exited 0."""
+        return self.rc == 0
+
+
+class ExecError(RuntimeError):
+    """The single transport error: an Exec failed (ADR-0028).
+
+    Carries argv, rc (``None`` when the child never produced one — timeout or
+    launch failure), both captured streams (partial output on a timeout),
+    ``duration_ms``, and ``cause`` (one of the ``CAUSE_*`` tags — the only
+    axis a caller should branch on; there is no per-tool exception hierarchy).
+
+    Every attribute and the message are pre-redacted: an ExecError is surfaced
+    and re-logged by callers, so nothing secret may ride it to a sink.
+    """
+
+    def __init__(
+        self,
+        argv: list[str] | tuple[str, ...],
+        *,
+        rc: int | None,
+        stdout: str = "",
+        stderr: str = "",
+        duration_ms: int = 0,
+        cause: str = CAUSE_EXIT,
+    ) -> None:
+        self.argv = tuple(redact.redact(arg) for arg in argv)
+        self.rc = rc
+        self.stdout = redact.redact(stdout)
+        self.stderr = redact.redact(stderr)
+        self.duration_ms = duration_ms
+        self.cause = cause
+        detail = _tail(self.stderr) or _tail(self.stdout)
+        message = f"{' '.join(self.argv)} failed ({cause}, rc={rc}, {duration_ms}ms)"
+        if detail:
+            message += f": {detail}"
+        super().__init__(message)
+
+
+def run(
+    argv: list[str],
+    *,
+    cwd: str | os.PathLike | None = None,
+    env: dict[str, str] | None = None,
+    replace_env: bool = False,
+    input: str | None = None,  # noqa: A002 — mirrors subprocess.run's parameter name
+    check: bool = True,
+    timeout: float | None = DEFAULT_TIMEOUT,
+) -> ExecResult:
+    """Execute one Exec (no shell), capturing text stdout/stderr.
+
+    ``env``, when given, is MERGED over ``os.environ`` (the common case: add or
+    override a few keys). ``replace_env=True`` uses ``env`` as the COMPLETE child
+    environment instead — the only way to *remove* an inherited variable (the
+    Tree provisioner relies on it to keep a parent's ``PIXI_*`` project pointers
+    out of a child operating in a different clone).
+
+    ``check=True`` (the default) raises :class:`ExecError` on a nonzero exit;
+    ``check=False`` returns the :class:`ExecResult` whatever the rc — for call
+    sites where nonzero is a normal answer, not a failure.
+
+    ``timeout`` defaults to :data:`DEFAULT_TIMEOUT`; pass a larger value (or
+    ``None``, explicitly) for a legitimate long-runner. Expiry kills the child
+    and raises :class:`ExecError` with ``cause=CAUSE_TIMEOUT`` and whatever
+    partial output was captured.
+
+    Stdin (ADR-0020): when no ``input`` is supplied the child's stdin is
+    redirected from ``os.devnull`` rather than inheriting the parent's — a
+    stdin-reading child (notably ``agy --print``) must get a clean EOF, not
+    block forever on an idle inherited pipe. When ``input`` IS given,
+    ``subprocess.run`` owns the pipe (passing both is a ValueError).
+    """
+    # argv is typed list[str], but subprocess.run natively accepts Path/numeric
+    # elements — which would later crash redaction (``arg.replace``) or the
+    # ``" ".join`` in the record. Coerce once here so both the record and the
+    # ``ExecResult.argv`` tuple are honestly strings whatever the caller passed.
+    argv = [str(arg) for arg in argv]
+    if env is None:
+        merged_env = None
+    elif replace_env:
+        merged_env = env
+    else:
+        merged_env = {**os.environ, **env}
+    start = time.monotonic()
+    try:
+        proc = subprocess.run(  # noqa: S603 — argv is a constructed list, never shell-interpolated
+            argv,
+            cwd=cwd,
+            env=merged_env,
+            input=input,
+            # ``input`` and ``stdin`` are mutually exclusive in subprocess.run:
+            # pin stdin to DEVNULL only when we are NOT piping input.
+            stdin=subprocess.DEVNULL if input is None else None,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        error = ExecError(
+            argv,
+            rc=None,
+            stdout=_stream_text(exc.stdout),
+            stderr=_stream_text(exc.stderr),
+            duration_ms=_elapsed_ms(start),
+            cause=CAUSE_TIMEOUT,
+        )
+        _record_failure(error, cwd)
+        raise error from exc
+    except OSError as exc:
+        # Normalize EVERY launch-level OS failure into the transport error: a
+        # missing binary (FileNotFoundError — the semantically distinct case) or
+        # anything else (permissions, a bad cwd). No raw OSError escapes.
+        # A missing cwd ALSO raises FileNotFoundError, but names the directory in
+        # ``exc.filename``; distinguish it so a bad cwd reports as an OS error,
+        # not as a missing binary (which names argv[0]).
+        is_missing_binary = isinstance(exc, FileNotFoundError) and (
+            cwd is None or str(exc.filename) != str(cwd)
+        )
+        cause = CAUSE_MISSING_BINARY if is_missing_binary else CAUSE_OS
+        error = ExecError(
+            argv,
+            rc=None,
+            stderr=str(exc),
+            duration_ms=_elapsed_ms(start),
+            cause=cause,
+        )
+        _record_failure(error, cwd)
+        raise error from exc
+    duration_ms = _elapsed_ms(start)
+    if check and proc.returncode != 0:
+        error = ExecError(
+            argv,
+            rc=proc.returncode,
+            stdout=proc.stdout,
+            stderr=proc.stderr,
+            duration_ms=duration_ms,
+            cause=CAUSE_EXIT,
+        )
+        _record_failure(error, cwd)
+        raise error
+    result = ExecResult(
+        argv=tuple(argv),
+        rc=proc.returncode,
+        stdout=proc.stdout,
+        stderr=proc.stderr,
+        duration_ms=duration_ms,
+    )
+    # The one record for a completed Exec (DEBUG — success, or a nonzero rc the
+    # caller declared normal via check=False). Argv is redacted; streams are
+    # deliberately absent from success records (bulk, and the secret-bearing
+    # channel) — failures carry their tails via _record_failure above.
+    logger.debug(
+        "exec %s (cwd=%s) -> rc=%d in %dms",
+        redact.redact(" ".join(result.argv)),
+        redact.redact(str(cwd or ".")),
+        result.rc,
+        result.duration_ms,
+    )
+    return result
+
+
+def _record_failure(error: ExecError, cwd: str | os.PathLike | None) -> None:
+    """The one record for a failed Exec: ERROR, with both stream tails.
+
+    ``error``'s attributes are already redacted (:class:`ExecError` redacts at
+    construction), so this record is safe for every sink.
+    """
+    logger.error(
+        "exec %s (cwd=%s) -> %s (rc=%s) in %dms\nstdout tail: %s\nstderr tail: %s",
+        " ".join(error.argv),
+        redact.redact(str(cwd or ".")),
+        error.cause,
+        error.rc,
+        error.duration_ms,
+        _tail(error.stdout),
+        _tail(error.stderr),
+    )
+
+
+def _elapsed_ms(start: float) -> int:
+    """Milliseconds elapsed since ``start`` (a ``time.monotonic`` stamp)."""
+    return int((time.monotonic() - start) * 1000)
+
+
+def _tail(text: str) -> str:
+    """The last :data:`TAIL_CHARS` of ``text``, stripped — where diagnostics live."""
+    return text[-TAIL_CHARS:].strip()
+
+
+def _stream_text(stream: str | bytes | None) -> str:
+    """Normalize a ``TimeoutExpired`` partial stream to text.
+
+    ``subprocess`` attaches whatever it had read when the timeout struck; the
+    type is version- and platform-dependent (``None``, ``bytes`` even in text
+    mode, or ``str``), so normalize defensively rather than trusting one shape.
+    """
+    if stream is None:
+        return ""
+    if isinstance(stream, bytes):
+        return stream.decode("utf-8", errors="replace")
+    return stream

@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from shipit import gh, proc
+from shipit import execrun, gh
 from shipit.spawn import launch
 from shipit.tree import layout
 from shipit.tree.create import Tree
@@ -374,7 +374,9 @@ def test_run_subagent_tree_creation_failure_fails_closed(tmp_path, monkeypatch, 
 @pytest.mark.parametrize(
     "exc",
     [
-        proc.ProcError(["pixi", "install"], 1, "boom"),  # provisioning failed
+        execrun.ExecError(
+            ["pixi", "install"], rc=1, stderr="boom"
+        ),  # provisioning failed
         OSError("disk full"),  # a filesystem step failed
         ValueError("planner rejected the spec"),  # the planner refused
         FileExistsError("tree dir already exists"),
