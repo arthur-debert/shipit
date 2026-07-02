@@ -24,6 +24,7 @@ from pathlib import Path
 import pytest
 
 from shipit import execrun, pixienv
+from shipit.identity import repo_from_slug
 from shipit.spawn import dogfood
 from shipit.tree import readonly
 
@@ -732,7 +733,9 @@ def test_verify_records_failure_when_a_seam_raises(tmp_path, monkeypatch):
 def test_resolve_repo_slug_canonicalises_an_owner_name(monkeypatch):
     """A value already in owner/name form is normalised via gh.repo_canonical."""
     monkeypatch.setattr(
-        dogfood.gh, "repo_canonical", lambda slug: f"canon/{slug.split('/')[-1]}"
+        dogfood.gh,
+        "repo_canonical",
+        lambda slug: repo_from_slug(f"canon/{slug.split('/')[-1]}"),
     )
     assert dogfood._resolve_repo_slug("acme/widget", scratch="/s") == "canon/widget"
 
@@ -744,7 +747,7 @@ def test_resolve_repo_slug_resolves_a_bare_code_from_the_scratch_checkout(monkey
 
     def current_repo(*, cwd=None):
         seen["cwd"] = cwd
-        return "arthur-debert/shipit"
+        return repo_from_slug("arthur-debert/shipit")
 
     monkeypatch.setattr(dogfood.gh, "current_repo", current_repo)
     assert (

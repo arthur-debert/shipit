@@ -17,6 +17,7 @@ from shipit.identity import (
     OwnerKind,
     Repo,
     Revision,
+    Sha,
     WorkingDir,
     parse_remote_url,
     repo_from_slug,
@@ -166,12 +167,16 @@ def test_resolve_repo_is_case_insensitive_like_github():
 
 
 def test_resolve_working_dir_composes_path_repo_and_revision():
-    git = FakeGit(toplevel="/checkout/widget", branch="COR01/WS01", commit="cafe1234")
+    git = FakeGit(
+        toplevel="/checkout/widget",
+        branch="COR01/WS01",
+        commit=Sha("cafe1234" + "0" * 32),
+    )
     wd = resolve_working_dir("/checkout/widget/src", boundary=git)
     assert wd == WorkingDir(
         path="/checkout/widget",
         repo=Repo(owner=Owner("acme"), name="widget"),
-        revision=Revision(branch="COR01/WS01", commit="cafe1234"),
+        revision=Revision(branch="COR01/WS01", commit=Sha("cafe1234" + "0" * 32)),
     )
     # The toplevel is resolved from the given cwd; identity/revision read the ROOT.
     assert git.toplevel_cwds == ["/checkout/widget/src"]

@@ -88,8 +88,9 @@ def test_gh_adapter_flip_leaves_a_durable_milestone(monkeypatch, caplog):
     """The boundary that PERFORMS the flip records it (before #285 its only
     record was the Exec runner's DEBUG line)."""
     from shipit import gh
+    from shipit.identity import repo_from_slug
 
-    monkeypatch.setattr(gh, "repo_slug", lambda: ("owner", "repo"))
+    monkeypatch.setattr(gh, "current_repo", lambda: repo_from_slug("owner/repo"))
     monkeypatch.setattr(gh, "_run", lambda args, **k: "")
     with caplog.at_level(logging.INFO, logger="shipit.gh"):
         gh.pr_ready(7)

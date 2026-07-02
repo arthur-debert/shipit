@@ -29,7 +29,6 @@ detach a local review here.
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 import sys
@@ -38,8 +37,6 @@ from collections.abc import Callable, Mapping, Sequence
 
 from .. import execrun, gh, logcontext
 from ..agent.backend import Backend
-from ..identity import repo_from_slug
-from ..pr import CORE_JSON_FIELDS, core_from_node
 from . import checkrun, post, producer
 from .backends.base import BackendError
 from .diff import ReviewError, resolve_pr
@@ -546,40 +543,34 @@ def run_detached_review(
 def _resolve_target(pr: int) -> tuple[str, str]:
     """Cheaply resolve ``(repo, head_sha)`` for ``pr`` — the FAST synchronous path.
 
-    Uses the lightweight ``gh repo view`` + ``gh pr view``, then reads the PR core
-    through the ONE :func:`shipit.pr.core_from_node` boundary — the SAME extraction
+    Uses the TYPED adapter reads (PROC03): ``gh.current_repo()`` returns the
+    :class:`~shipit.identity.Repo` and ``gh.pr_core()`` returns the
+    :class:`~shipit.pr.PR` core, routed through the ONE
+    :func:`shipit.pr.core_from_node` boundary — the SAME extraction
     :func:`resolve_pr` and the readiness path use, so ``head_sha`` is fetched exactly
-    one way. It is NOT the full diff resolve — that fetch/merge-base/diff is the
-    detached child's work, so the request stays fast. A ``gh``/auth failure
-    PROPAGATES (the reviewer adapter normalizes it to ``PrStateError``); the breadcrumb
-    create that follows is the only best-effort step.
+    one way and no JSON is parsed here. It is NOT the full diff resolve — that
+    fetch/merge-base/diff is the detached child's work, so the request stays fast.
+    A ``gh``/auth failure PROPAGATES (the reviewer adapter normalizes it to
+    ``PrStateError``); the breadcrumb create that follows is the only best-effort step.
+
+    Both typed reads can raise raw, untyped errors on a malformed upstream —
+    ``ValueError`` for an unusable slug / unparseable output / malformed head sha /
+    non-bool ``isDraft``, ``KeyError`` for a missing required core key. This is the
+    fast synchronous boundary, so each is normalized to `ReviewError` — a clear,
+    typed message instead of a raw traceback leaking out of the request path.
     """
-    repo = gh.current_repo()
-    raw = gh.pr_view(str(pr), json_fields=list(CORE_JSON_FIELDS))
     try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise ReviewError(f"unparseable `gh pr view` output for #{pr}: {exc}") from exc
-    # A truthy non-dict (e.g. a JSON list) would fail on the core read; and a
-    # missing/empty `headRefOid` would silently degrade the breadcrumb create to an
-    # in-flight reply with no target commit. This is the synchronous validation
-    # path, so both are real failures — raise `ReviewError` (like the unparseable case
-    # above) so the request fails loud instead of degrading, BEFORE building the core.
-    if not (isinstance(data, dict) and data.get("headRefOid")):
-        raise ReviewError(f"`gh pr view` output for #{pr} has no headRefOid: {raw!r}")
-    # Both boundary reads can raise raw, untyped errors on a malformed upstream:
-    # `repo_from_slug` raises `ValueError` when `gh.current_repo()` returned an
-    # empty/non-`owner/name` slug, and `core_from_node` raises `KeyError`/`ValueError`
-    # when the node omits a required core key or carries a non-bool `isDraft`. This
-    # is the fast synchronous boundary, so normalize either to `ReviewError` (like the
-    # unparseable/headRefOid cases above) — a clear, typed message instead of a raw
-    # traceback leaking out of the request path.
+        repo = gh.current_repo()
+    except ValueError as exc:
+        raise ReviewError(
+            f"could not resolve the target repo for #{pr} from `gh repo view`: {exc}"
+        ) from exc
     try:
-        core = core_from_node(data, repo_from_slug(repo))
+        core = gh.pr_core(pr, repo)
     except (ValueError, KeyError) as exc:
         raise ReviewError(
-            f"could not resolve target repo/core for #{pr} from `gh` output "
-            f"(repo={repo!r}): {exc}"
+            f"could not resolve target core for #{pr} from `gh` output "
+            f"(repo={repo.slug!r}): {exc}"
         ) from exc
     # The core carries a typed `Sha` (COR02); this seam hands the wire-facing
     # checkrun helpers (URL path / JSON payload) the string form.

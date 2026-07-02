@@ -33,6 +33,7 @@ import logging
 import pytest
 
 from shipit.agent import backend as agent_backend
+from shipit.identity import repo_from_slug
 from shipit.review import service
 from shipit.review.backends.base import BackendError
 from shipit.review.diff import ReviewView, review_view
@@ -60,7 +61,7 @@ def _ctx(repo: str | None = "owner/repo") -> ReviewView:
         repo=repo,
         head_sha="deadbeef" * 5,  # a full 40-hex sha (COR02)
         base_ref="main",
-        base_sha="cafe",
+        base_sha="cafe" * 10,  # a full 40-hex sha (PROC03)
         diff=_DIFF,
         is_draft=False,
         changed_files=["foo.py"],
@@ -75,7 +76,9 @@ def _stub_pipeline(monkeypatch):
     # The detached child resolves the PR from its `--repo` arg; the stub returns a
     # ctx for it and also stubs `gh.current_repo()` for any slug inference path.
     monkeypatch.setattr(service, "resolve_pr", lambda pr, repo=None: _ctx(repo))
-    monkeypatch.setattr(service.gh, "current_repo", lambda: "owner/repo")
+    monkeypatch.setattr(
+        service.gh, "current_repo", lambda: repo_from_slug("owner/repo")
+    )
     monkeypatch.setattr(
         service, "generate_review", lambda agent, ctx, **kw: dict(_REVIEW)
     )
@@ -231,54 +234,96 @@ def test_start_detached_still_spawns_when_breadcrumb_create_fails(monkeypatch):
 
 
 def test_resolve_target_raises_on_missing_headrefoid(monkeypatch):
-    """The synchronous validation path: a `gh pr view` response without
-    `headRefOid` (schema change / unexpected output) must raise `ReviewError`, NOT
-    silently return an empty SHA — otherwise the request reports in-flight with no
-    target commit for the funnel check."""
-    monkeypatch.setattr(service.gh, "current_repo", lambda: "owner/repo")
-    monkeypatch.setattr(service.gh, "pr_view", lambda pr, json_fields=None: "{}")
+    """The synchronous validation path: a `gh pr view` node without `headRefOid`
+    (schema change / unexpected output) makes the typed core read
+    (`gh.pr_core` -> `core_from_node`) raise raw `KeyError` — normalized to
+    `ReviewError`, NOT silently returning an empty SHA that would report
+    in-flight with no target commit for the funnel check."""
+    monkeypatch.setattr(
+        service.gh, "current_repo", lambda: repo_from_slug("owner/repo")
+    )
+    monkeypatch.setattr(
+        service.gh,
+        "pr_view",
+        lambda pr, *, repo=None, json_fields=None: {"number": 5, "isDraft": False},
+    )
 
-    with pytest.raises(service.ReviewError, match="no headRefOid"):
+    with pytest.raises(service.ReviewError, match="could not resolve target core"):
         service._resolve_target(5)
 
 
-def test_resolve_target_raises_on_non_dict_json(monkeypatch):
-    """A truthy non-dict (e.g. a JSON list) must not `AttributeError` out of
-    `_resolve_target` — it is parseable but malformed, so it raises `ReviewError` like
-    the other malformed-output cases."""
-    monkeypatch.setattr(service.gh, "current_repo", lambda: "owner/repo")
-    monkeypatch.setattr(service.gh, "pr_view", lambda pr, json_fields=None: "[1]")
+def test_resolve_target_normalizes_adapter_value_error(monkeypatch):
+    """Unusable `gh pr view` output (unparseable / non-object JSON) raises
+    `ValueError` at the ADAPTER now (PROC03: the adapter owns the parse); the
+    synchronous boundary still normalizes it to a typed `ReviewError` instead of
+    leaking the raw error out of the request path."""
+    monkeypatch.setattr(
+        service.gh, "current_repo", lambda: repo_from_slug("owner/repo")
+    )
 
-    with pytest.raises(service.ReviewError, match="no headRefOid"):
+    def bad_view(pr, *, repo=None, json_fields=None):
+        raise ValueError("`gh pr view` output for '5' is not a JSON object: [1]")
+
+    monkeypatch.setattr(service.gh, "pr_view", bad_view)
+
+    with pytest.raises(service.ReviewError, match="could not resolve target core"):
         service._resolve_target(5)
 
 
 def test_resolve_target_normalizes_malformed_repo_slug(monkeypatch):
-    """`gh.current_repo()` returning an empty/non-`owner/name` slug makes
-    `repo_from_slug` raise raw `ValueError`. The synchronous boundary normalizes it
-    to a typed `ReviewError` with a clear message, not a leaked traceback."""
-    monkeypatch.setattr(service.gh, "current_repo", lambda: "not-a-slug")
-    monkeypatch.setattr(
-        service.gh,
-        "pr_view",
-        lambda pr, json_fields=None: '{"headRefOid": "abc", "isDraft": false}',
-    )
-    with pytest.raises(service.ReviewError, match="could not resolve target"):
+    """`gh.current_repo()` raising `ValueError` (an empty/non-`owner/name`
+    `gh repo view` answer — the adapter's typed read fails loud, PROC03) is
+    normalized to a typed `ReviewError` with a clear message, not a leaked
+    traceback."""
+
+    def bad_repo():
+        raise ValueError("not an owner/name slug: 'not-a-slug'")
+
+    monkeypatch.setattr(service.gh, "current_repo", bad_repo)
+    with pytest.raises(service.ReviewError, match="could not resolve the target repo"):
         service._resolve_target(5)
 
 
-def test_resolve_target_normalizes_missing_core_key(monkeypatch):
-    """A node with `headRefOid` present but a required core key (`number`) missing
-    makes `core_from_node` raise raw `KeyError`; the boundary normalizes it to a
-    typed `ReviewError` rather than leaking the `KeyError`."""
-    monkeypatch.setattr(service.gh, "current_repo", lambda: "owner/repo")
+def test_resolve_target_normalizes_malformed_head_sha(monkeypatch):
+    """A node whose `headRefOid` is not a full sha makes the typed core read raise
+    raw `ValueError` (the `Sha` mint at the one wire boundary); normalized to a
+    typed `ReviewError` rather than leaking."""
+    monkeypatch.setattr(
+        service.gh, "current_repo", lambda: repo_from_slug("owner/repo")
+    )
     monkeypatch.setattr(
         service.gh,
         "pr_view",
-        lambda pr, json_fields=None: '{"headRefOid": "abc", "isDraft": false}',
+        lambda pr, *, repo=None, json_fields=None: {
+            "number": 5,
+            "headRefOid": "abc",
+            "isDraft": False,
+        },
     )
-    with pytest.raises(service.ReviewError, match="could not resolve target"):
+    with pytest.raises(service.ReviewError, match="could not resolve target core"):
         service._resolve_target(5)
+
+
+def test_resolve_target_returns_typed_core_fields(monkeypatch):
+    """The happy path rides the TYPED adapter reads end to end: `current_repo()`
+    hands `pr_core` the Repo, and the returned pair is the core's slug + the
+    string form of its `Sha`-typed head."""
+    head = "cafe" * 10
+    monkeypatch.setattr(
+        service.gh, "current_repo", lambda: repo_from_slug("Owner/Repo")
+    )
+    monkeypatch.setattr(
+        service.gh,
+        "pr_view",
+        lambda pr, *, repo=None, json_fields=None: {
+            "number": 5,
+            "headRefOid": head.upper(),  # the Sha mint lowercase-normalizes
+            "baseRefName": "main",
+            "isDraft": False,
+            "mergeStateStatus": "CLEAN",
+        },
+    )
+    assert service._resolve_target(5) == ("owner/repo", head)
 
 
 def test_start_detached_closes_run_when_spawn_fails(monkeypatch):

@@ -22,6 +22,7 @@ import time
 from collections.abc import Callable
 from dataclasses import fields
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import click
 
@@ -33,6 +34,9 @@ from ..tree.create import Tree, create, new_agent_hash
 from ..tree.layout import TreeSpec
 from ..tree.readonly import remove_tree
 from ..tree.registry import TreeRecord
+
+if TYPE_CHECKING:
+    from ..identity import Sha
 
 #: The Tree axis logs on the shared ``shipit.tree`` logger (LOG02): the verb's
 #: user-facing ``print``/``echo`` output is unchanged, but the actions it is the
@@ -640,7 +644,7 @@ def _live_sessions(records: list[TreeRecord]) -> dict[str, bool]:
     return live
 
 
-def _provision_shas(records: list[TreeRecord]) -> dict[str, frozenset[str]]:
+def _provision_shas(records: list[TreeRecord]) -> dict[str, frozenset[Sha]]:
     """Per-ephemeral-Tree provisioning-commit SHAs — ``classify``'s exclusion input.
 
     For each *ephemeral* Tree (the only ladder that consults the exclusion, #232),

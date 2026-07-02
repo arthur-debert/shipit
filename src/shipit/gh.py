@@ -20,15 +20,32 @@ alias). The one SEMANTIC error raised here is the engine's user-renderable
 :class:`shipit.prstate.errors.PrStateError`, for the failure the Exec record
 cannot carry — a ``gh`` call that exited 0 but returned an unusable answer
 (a GraphQL response body carrying ``errors``).
+
+The READ surface returns the existing core value objects (PROC03, ADR-0028):
+a repo read returns a :class:`shipit.identity.Repo`, a PR-core read returns a
+:class:`shipit.pr.PR` (with its :class:`shipit.identity.Sha`-typed head) built
+through the ONE :func:`shipit.pr.core_from_node` boundary — never an
+adapter-shaped parallel snapshot type. Raw JSON survives only where no core
+noun exists yet (a PR's lifecycle state in :func:`pr_for_head`, the
+field-list read :func:`pr_view` whose extra fields — head branch name, base
+oid — feed richer views). A data-shape failure on an Exec that succeeded
+(unparseable/empty JSON, a malformed slug) raises :class:`ValueError` at this
+boundary, the same posture :func:`owner_kind` / :func:`default_branch`
+already take.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+from typing import TYPE_CHECKING
 
 from . import execrun
 from .execrun import ExecError
+
+if TYPE_CHECKING:  # the value objects gh returns; runtime import is deferred
+    from .identity import Repo
+    from .pr import PR
 
 # The engine's semantic error is safe to import here: `prstate.errors` is a
 # leaf module (stdlib-only, imports nothing from shipit), so no cycle — while
@@ -266,70 +283,122 @@ def graphql(query: str, **variables: object) -> dict:
 # --------------------------------------------------------------------------
 
 
-def current_repo(*, cwd: str | None = None) -> str:
-    """``owner/name`` of the repo in ``cwd`` — the current directory if omitted (via ``gh``)."""
+def current_repo(*, cwd: str | None = None) -> Repo:
+    """The :class:`~shipit.identity.Repo` in ``cwd`` — the current directory if
+    omitted (via ``gh``).
+
+    The API-side repo read (the offline/Tree-safe one is
+    :func:`shipit.identity.resolve_repo`): ``gh repo view`` resolves the checkout's
+    repo — following GitHub's redirect for a transferred/renamed origin, so the
+    answer is CANONICAL — and the slug routes through the ONE canonical parser
+    (:func:`shipit.identity.repo_from_slug`), typed at the boundary (PROC03).
+    Raises :class:`ValueError` when the Exec succeeded but the output is not a
+    usable ``owner/name`` slug (a data-shape problem — the transport failure is
+    :class:`ExecError`).
+    """
+    from .identity import repo_from_slug
+
     out = _run(
         ["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
         cwd=cwd,
     )
-    return out.strip()
+    return repo_from_slug(out)
 
 
-def repo_canonical(slug: str) -> str:
+def repo_canonical(slug: str) -> Repo:
     """Resolve a (possibly aliased/renamed) ``OWNER/NAME`` slug to its canonical
-    ``owner/name``.
+    :class:`~shipit.identity.Repo`.
 
     GitHub keeps a 307 redirect from an old/aliased slug to the repo's current
     canonical slug. ``gh api`` follows it for GET but NOT for POST, so a write to
     an aliased slug hard-fails with ``HTTP 307``. Normalizing the slug up front,
-    where it enters, keeps every write path on the canonical owner/name.
+    where it enters, keeps every write path on the canonical owner/name — and the
+    answer is a typed :class:`~shipit.identity.Repo` (PROC03), minted through the
+    one canonical parser. Raises :class:`ValueError` on unusable output (the
+    transport failure is :class:`ExecError`).
     """
+    from .identity import repo_from_slug
+
     out = _run(
         ["gh", "repo", "view", slug, "--json", "nameWithOwner", "-q", ".nameWithOwner"]
     )
-    return out.strip()
+    return repo_from_slug(out)
 
 
-def repo_slug() -> tuple[str, str]:
-    """Return (owner, name) for the current repo."""
-    data = json.loads(_run(["gh", "repo", "view", "--json", "owner,name"]))
-    return data["owner"]["login"], data["name"]
+def pr_view(pr: str, *, repo: str | None = None, json_fields: list[str]) -> dict:
+    """``gh pr view <pr> [--repo …] --json <fields>`` → the parsed JSON object.
 
-
-def pr_view(pr: str, *, repo: str | None = None, json_fields: list[str]) -> str:
-    """``gh pr view <pr> [--repo …] --json <fields>`` → stripped stdout (the JSON).
-
-    Raises :class:`ExecError` if gh fails (e.g. the PR can't be resolved); the
-    caller parses the returned JSON object.
+    The field-list PR read — the raw-JSON escape hatch for fields with no core
+    noun yet (head branch name, base oid). The typed core read is
+    :func:`pr_core`. The adapter owns the parse (PROC03: callers never
+    ``json.loads`` gh output): raises :class:`ExecError` if gh fails (e.g. the
+    PR can't be resolved) and :class:`ValueError` when gh exited 0 but the
+    output is not a JSON object (``gh pr view --json`` always emits one, so
+    anything else is unusable).
     """
     args = ["gh", "pr", "view", pr]
     if repo is not None:
         args += ["--repo", repo]
     args += ["--json", ",".join(json_fields)]
-    return _run(args).strip()
+    out = _run(args).strip()
+    try:
+        data = json.loads(out)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"unparseable `gh pr view` output for {pr!r}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError(
+            f"`gh pr view` output for {pr!r} is not a JSON object: {data!r}"
+        )
+    return data
+
+
+def pr_core(pr: int, repo: Repo) -> PR:
+    """The :class:`shipit.pr.PR` core of ``pr`` — the TYPED PR read (PROC03).
+
+    Fetches exactly the core field list (:data:`shipit.pr.CORE_JSON_FIELDS`) and
+    routes the node through the ONE :func:`shipit.pr.core_from_node` boundary, so
+    the returned core carries the :class:`~shipit.identity.Sha`-typed head and no
+    caller re-parses the wire shape. ``repo`` is the PR identity's repo — a PR
+    node does not carry its own slug, so the caller names which repo identity the
+    core composes (typically :func:`current_repo`).
+
+    Raises :class:`ExecError` on a failed gh call, :class:`ValueError` on
+    unusable output (unparseable JSON, a malformed/abbreviated head sha, a
+    non-bool ``isDraft``) and :class:`KeyError` when a required core key is
+    missing from the node — the fail-loud-core discipline enforced at the wire.
+    """
+    from .pr import CORE_JSON_FIELDS, core_from_node
+
+    node = pr_view(str(pr), repo=repo.slug, json_fields=list(CORE_JSON_FIELDS))
+    return core_from_node(node, repo)
 
 
 def pr_meta(pr: int) -> dict:
     """PR-level metadata the PR-state engine needs in one call.
+
+    A raw ``pullRequest`` node (dict), not a typed core: alongside the core
+    fields it carries the check rollup + mergeability the readiness view builder
+    (:func:`shipit.prstate.fetch.context_from_raw`) consumes — that builder routes
+    the core through :func:`shipit.pr.core_from_node` and partitions the checks
+    into the existing check value shapes, so no parallel snapshot type is minted
+    here (PROC03).
 
     Deliberately does NOT fetch ``reviewRequests``: ``gh pr view --json``
     silently omits Bot-typed requested reviewers (a requested Copilot reads as
     ``[]``), so the engine sources requested reviewers from GraphQL instead
     (`prstate.fetch._threads_and_review_requests`).
     """
-    return json.loads(
-        pr_view(
-            str(pr),
-            json_fields=[
-                "number",
-                "headRefOid",
-                "baseRefName",
-                "isDraft",
-                "mergeable",
-                "mergeStateStatus",
-                "statusCheckRollup",
-            ],
-        )
+    return pr_view(
+        str(pr),
+        json_fields=[
+            "number",
+            "headRefOid",
+            "baseRefName",
+            "isDraft",
+            "mergeable",
+            "mergeStateStatus",
+            "statusCheckRollup",
+        ],
     )
 
 
@@ -552,9 +621,9 @@ def pr_edit_reviewer(pr: int, reviewer: str, *, remove: bool = False) -> None:
     (returns 200 but leaves ``requested_reviewers`` empty) — never swap this
     for the REST call.
     """
-    owner, name = repo_slug()
+    slug = current_repo().slug
     flag = "--remove-reviewer" if remove else "--add-reviewer"
-    _run(["gh", "pr", "edit", str(pr), "--repo", f"{owner}/{name}", flag, reviewer])
+    _run(["gh", "pr", "edit", str(pr), "--repo", slug, flag, reviewer])
 
 
 def pr_ready(pr: int, *, undo: bool = False) -> None:
@@ -564,8 +633,8 @@ def pr_ready(pr: int, *, undo: bool = False) -> None:
     state prints a notice and exits 0, so callers don't need to pre-check the
     flag to stay safe — they pre-check only to *say* something more useful.
     """
-    owner, name = repo_slug()
-    args = ["gh", "pr", "ready", str(pr), "--repo", f"{owner}/{name}"]
+    slug = current_repo().slug
+    args = ["gh", "pr", "ready", str(pr), "--repo", slug]
     if undo:
         args.append("--undo")
     _run(args)
@@ -574,12 +643,11 @@ def pr_ready(pr: int, *, undo: bool = False) -> None:
     # performed it — before this, its only record was the Exec runner's DEBUG
     # line, invisible to an INFO-level read of the story.
     logger.info(
-        "pr#%s draft flag flipped %s on %s/%s",
+        "pr#%s draft flag flipped %s on %s",
         pr,
         "ready→draft" if undo else "draft→ready",
-        owner,
-        name,
-        extra={"pr": pr, "repo": f"{owner}/{name}"},
+        slug,
+        extra={"pr": pr, "repo": slug},
     )
 
 
@@ -593,9 +661,9 @@ def pr_review_reply(pr: int, comment_id: int, body: str) -> None:
     is the reply text. This is the push-back path: reply with rationale, then
     resolve the thread.
     """
-    owner, name = repo_slug()
+    slug = current_repo().slug
     rest(
-        f"repos/{owner}/{name}/pulls/{pr}/comments/{comment_id}/replies",
+        f"repos/{slug}/pulls/{pr}/comments/{comment_id}/replies",
         method="POST",
         fields={"body": body},
     )

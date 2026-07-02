@@ -27,12 +27,11 @@ via ``gh repo view`` rather than trusting the checkout's (possibly aliased) orig
 
 from __future__ import annotations
 
-import json
 import os
 from dataclasses import dataclass, field
 
 from .. import execrun, gh, git
-from ..identity import Sha, repo_from_slug
+from ..identity import Repo, Sha, repo_from_slug
 from ..pr import PR, core_from_node
 
 
@@ -54,11 +53,14 @@ class ReviewView:
     properties, so the review path exposes exactly the core its ``PR`` fetched.
     ``base_sha`` / ``diff`` / ``changed_files`` / ``workdir`` / ``head_ref`` are
     review-ONLY enrichments the readiness path never fetches, so they live on the
-    view, not the shared core.
+    view, not the shared core. ``base_sha`` is a commit identity like the core's
+    ``head_sha``, so it carries the same :class:`~shipit.identity.Sha` type
+    (ADR-0028 / PROC03) — minted once at :func:`resolve_pr` where ``baseRefOid``
+    enters from ``gh pr view``.
     """
 
     pr: PR
-    base_sha: str
+    base_sha: Sha
     diff: str
     changed_files: list[str] = field(default_factory=list)
     workdir: str = "."
@@ -105,7 +107,7 @@ def review_view(
     number: int,
     head_sha: str | Sha,
     base_ref: str | None,
-    base_sha: str,
+    base_sha: str | Sha,
     diff: str,
     is_draft: bool,
     repo: str | None = None,
@@ -127,6 +129,9 @@ def review_view(
     fabricate a ``False`` and reintroduce the defaulted-core-field trap this WS
     exists to remove (ADR-0024). The review path never READS ``is_draft`` /
     ``merge_state`` off the view, but the core still carries what it fetched.
+    Both sha fields accept ``str | Sha`` the same way: a raw string is minted
+    into the :class:`~shipit.identity.Sha` here (validity is construction), so
+    the composed view is fully typed regardless of what the caller held.
     """
     pr = PR(
         repo=repo_from_slug(repo) if repo else _HANDBUILT_REPO,
@@ -138,7 +143,7 @@ def review_view(
     )
     return ReviewView(
         pr=pr,
-        base_sha=base_sha,
+        base_sha=base_sha if isinstance(base_sha, Sha) else Sha(base_sha),
         diff=diff,
         changed_files=changed_files if changed_files is not None else [],
         workdir=workdir,
@@ -166,12 +171,14 @@ def _git_toplevel(workdir: str) -> str | None:
 
 
 def _pr_meta(pr: int, repo: str | None) -> dict:
-    """``gh pr view <pr> [--repo …] --json …`` → parsed metadata dict.
+    """``gh pr view <pr> [--repo …] --json …`` → the parsed metadata node.
 
-    Raises :class:`ReviewError` if gh can't resolve the PR.
+    The adapter owns the parse (PROC03): :func:`shipit.gh.pr_view` returns the
+    JSON object, raising :class:`ValueError` on unusable output — normalized here,
+    like the transport failure, to the review path's :class:`ReviewError`.
     """
     try:
-        raw = gh.pr_view(
+        return gh.pr_view(
             str(pr),
             repo=repo,
             json_fields=[
@@ -195,12 +202,8 @@ def _pr_meta(pr: int, repo: str | None) -> dict:
             + (f" in {repo}" if repo else "")
             + f" via `gh pr view`: {exc}"
         ) from exc
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise ReviewError(
-            f"Unparseable `gh pr view` output for PR #{pr}: {exc}"
-        ) from exc
+    except ValueError as exc:
+        raise ReviewError(f"Unusable `gh pr view` output for PR #{pr}: {exc}") from exc
 
 
 def resolve_pr(
@@ -247,11 +250,15 @@ def resolve_pr(
     # POST, so posting a review to it hard-fails with HTTP 307. Normalizing here
     # — at the boundary where the external slug enters — keeps ALL downstream
     # consumers (generation AND posting) on the canonical slug. When repo is
-    # None, gh infers it from the checkout, which is already canonical.
+    # None, gh infers it from the checkout, which is already canonical. The
+    # adapter returns the typed identity (PROC03) — `ValueError` is its
+    # data-shape failure (unusable `gh repo view` output), normalized alongside
+    # the transport error.
+    canonical: Repo | None = None
     if repo is not None:
         try:
-            repo = gh.repo_canonical(repo)
-        except execrun.ExecError as exc:
+            canonical = gh.repo_canonical(repo)
+        except (execrun.ExecError, ValueError) as exc:
             raise ReviewError(
                 f"Could not resolve repo {repo!r} to its canonical owner/name via "
                 f"`gh repo view`: {exc}"
@@ -268,9 +275,9 @@ def resolve_pr(
     # honest-None placeholder (:data:`_HANDBUILT_REPO`, surfaced as `ReviewView.repo is
     # None`) so `post._resolve_repo` / the producer keep their `gh repo view` fallback,
     # which canonicalizes (follows the 307) exactly as before this epic.
-    repo_obj = repo_from_slug(repo) if repo else _HANDBUILT_REPO
+    repo_obj = canonical if canonical is not None else _HANDBUILT_REPO
 
-    meta = _pr_meta(pr, repo)
+    meta = _pr_meta(pr, canonical.slug if canonical is not None else None)
     # The CORE (number/head_sha/base_ref/is_draft/merge_state) is read off `meta`
     # through the one `core_from_node` boundary — the SAME extraction the readiness
     # path uses, so `head_sha` is fetched exactly one way. The review-only endpoints
@@ -290,32 +297,43 @@ def resolve_pr(
             f"cannot resolve the PR head to review."
         ) from exc
     base_ref = pr_core.base_ref or "main"
-    base_sha = meta.get("baseRefOid") or ""
-    # The git plumbing below (fetch/rev-parse/diff argv) works on the string
-    # form; the composed `PR` core keeps the typed `Sha`.
-    head_sha = str(pr_core.head_sha)
+    head_sha = pr_core.head_sha
     head_ref = meta.get("headRefName") or ""
 
     # The base endpoint is resolved the SAME authoritative way as the head:
     # ``baseRefOid`` from `gh pr view` is a known commit object, so the review
     # diffs against the PR's REAL base — never against whatever a local
-    # `origin/<base>` happens to point at (which may be stale or missing). A
-    # missing baseRefOid fails loud rather than degrading to a guessed base.
-    if not base_sha:
+    # `origin/<base>` happens to point at (which may be stale or missing). Like
+    # the head, it is minted into a `Sha` HERE — the boundary where the raw
+    # value enters (PROC03) — so a missing, empty, or malformed `baseRefOid`
+    # fails loud rather than degrading to a guessed base, and no raw-string sha
+    # flows past this point.
+    raw_base = meta.get("baseRefOid") or ""
+    if not raw_base:
         raise ReviewError(
             f"PR #{pr} returned no base sha (baseRefOid) from `gh pr view` — "
             f"cannot resolve the PR base to review against."
         )
+    try:
+        base_sha = Sha(raw_base)
+    except ValueError as exc:
+        raise ReviewError(
+            f"PR #{pr} returned an unusable base sha (baseRefOid) from "
+            f"`gh pr view` ({exc}) — cannot resolve the PR base to review against."
+        ) from exc
 
     # Make the head commit object available locally (fetch only — never a
     # checkout-switch). Try the PR head ref namespace first (works without the
     # branch being local), then the named head branch, then the sha directly.
+    # `fetch_ref` is the one deliberately-str seam (it takes mixed refspecs —
+    # branch names, pull/<n>/head, bare shas), so the typed sha stringifies
+    # exactly there.
     if not git.commit_present(head_sha, cwd=workdir):
         git.fetch_ref(f"pull/{pr}/head", cwd=workdir)
         if not git.commit_present(head_sha, cwd=workdir) and head_ref:
             git.fetch_ref(head_ref, cwd=workdir)
         if not git.commit_present(head_sha, cwd=workdir):
-            git.fetch_ref(head_sha, cwd=workdir)
+            git.fetch_ref(str(head_sha), cwd=workdir)
 
     if not git.commit_present(head_sha, cwd=workdir):
         raise ReviewError(
@@ -335,7 +353,7 @@ def resolve_pr(
     if not git.commit_present(base_sha, cwd=workdir):
         git.fetch_ref(base_ref, cwd=workdir)
         if not git.commit_present(base_sha, cwd=workdir):
-            git.fetch_ref(base_sha, cwd=workdir)
+            git.fetch_ref(str(base_sha), cwd=workdir)
 
     if not git.commit_present(base_sha, cwd=workdir):
         raise ReviewError(

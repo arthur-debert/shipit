@@ -12,6 +12,7 @@ import json
 
 import pytest
 from shipit import git
+from shipit.identity import Sha
 from shipit.harness.eval import store
 from shipit.verbs.hook.eval import run
 
@@ -35,7 +36,7 @@ def state_dir(monkeypatch, tmp_path):
         lambda *, cwd, remote="origin": "git@github.com:acme/widget.git",
     )
     monkeypatch.setattr(git, "current_branch", lambda *, cwd: "COR01/WS01")
-    monkeypatch.setattr(git, "head_commit", lambda *, cwd: "cafe1234")
+    monkeypatch.setattr(git, "head_commit", lambda *, cwd: Sha("cafe1234" + "0" * 32))
     return base
 
 
@@ -79,7 +80,9 @@ def test_subagent_stop_writes_a_record_with_role_and_metric(state_dir, tmp_path)
     # WS03: the record now carries the implementer role-prompt content-hash.
     assert rec["eval.variant"]["content_hash"].startswith("sha256:")
     assert rec["eval.variant"]["label"] is None
-    assert "git.commit" in rec
+    # The typed Sha stringifies at the JSON seam: the record carries the plain
+    # lowercase full-sha string, never a repr of the value object (PROC03).
+    assert rec["git.commit"] == "cafe1234" + "0" * 32
     # A subagent run carries no exit-hygiene block (that check is coordinator-only).
     assert rec["eval.exit_hygiene.worktree_clean"] is None
 

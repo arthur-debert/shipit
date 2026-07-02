@@ -4,6 +4,8 @@
 > objects + the store re-key) and extended by Identity threading (COR02): `Sha`
 > joins the identity module, `repo_from_slug` is the one canonical slug parser,
 > and the identities are threaded through Tree planning, logging, and the PR paths.
+> Completed by Typed results (PROC03, ADR-0028): the Tool adapters now RETURN
+> these identities, so no caller re-parses a slug or sha at a call site.
 
 shipit gains **canonical identity value objects** for its core nouns — `Repo`,
 `WorkingDir`, `PR` — so each is defined once and every subsystem keys on the same thing.
@@ -62,3 +64,14 @@ one canonical `owner/name` parser (lowercased to match `resolve_repo`, making Re
 identity case-insensitive end to end), so Tree planning, logging setup, and the review
 paths share one Repo identity instead of hand-splitting slugs — mixed-case sources can
 no longer fork one repo's Tree paths or log directories.
+
+PROC03 (typed results, ADR-0028) then closed the arc at the adapter boundary: the
+gh/git adapters *return* the identities instead of the strings they parse from.
+`gh.current_repo` / `gh.repo_canonical` return a `Repo` (through `repo_from_slug`),
+the typed PR read `gh.pr_core` returns a `PR` (through `core_from_node`), and the
+git adapter's commit reads (`head_commit`, `merge_base`, `commits_between`,
+`unpushed_shas`) return `Sha` values — threaded end to end through the review-diff
+path (`ReviewView.base_sha` is a `Sha` minted where `baseRefOid` enters). The
+old tuple read `gh.repo_slug()` is deleted (callers ride `current_repo().slug`);
+raw JSON survives only where no core noun exists yet (`gh.pr_view`'s field-list
+read, `gh.pr_meta`'s readiness node).

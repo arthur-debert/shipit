@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from shipit import config, execrun, gh, git, pixienv
+from shipit.identity import Sha
 from shipit.tree import create as create_mod
 from shipit.tree import layout, provision
 from shipit.tree.create import create, create_from_source
@@ -284,7 +285,7 @@ def test_create_provisions_local_only_on_planned_branch_no_origin_side_effects(
     # so the ephemeral gc floor (and the WorktreeRemove fast path) can exclude
     # exactly it from the unpushed read.
     install_sha = _git(["rev-parse", "HEAD"], cwd=dest)
-    assert provision.read_provision_shas(dest) == frozenset({install_sha})
+    assert provision.read_provision_shas(dest) == frozenset({Sha(install_sha)})
 
     # The 3 isolation invariants still hold (unchanged by this WS).
     assert (dest / ".git").is_dir()

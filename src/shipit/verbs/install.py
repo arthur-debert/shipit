@@ -807,9 +807,14 @@ def _pr_body(
 
 
 def _shipit_version() -> str:
-    """The shipit commit that wrote the set (its repo HEAD), else the package version."""
+    """The shipit commit that wrote the set (its repo HEAD), else the package version.
+
+    The version string is a rendered artifact, so the typed :class:`Sha`
+    :func:`shipit.git.head_commit` returns stringifies here, at the seam.
+    """
     pkg_dir = Path(__file__).resolve().parents[1]
-    return git.head_commit(cwd=str(pkg_dir)) or __version__
+    head = git.head_commit(cwd=str(pkg_dir))
+    return str(head) if head is not None else __version__
 
 
 # --------------------------------------------------------------------------

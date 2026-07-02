@@ -10,6 +10,7 @@ from __future__ import annotations
 import pytest
 
 from shipit.agent import backend as agent_backend
+from shipit.identity import repo_from_slug
 from shipit.review import post
 from shipit.review.diff import ReviewView, review_view
 
@@ -30,7 +31,7 @@ def _ctx() -> ReviewView:
         repo="owner/repo",
         head_sha="deadbeef" * 5,  # a full 40-hex sha (COR02)
         base_ref="main",
-        base_sha="cafe",
+        base_sha="cafe" * 10,  # a full 40-hex sha (PROC03)
         diff=_DIFF,
         is_draft=False,
         changed_files=["foo.py"],
@@ -146,11 +147,13 @@ def test_resolve_repo_falls_back_to_gh_for_handbuilt_context(monkeypatch):
         repo=None,
         head_sha="deadbeef" * 5,  # a full 40-hex sha (COR02)
         base_ref="main",
-        base_sha="cafe",
+        base_sha="cafe" * 10,  # a full 40-hex sha (PROC03)
         diff=_DIFF,
         is_draft=False,
         changed_files=["foo.py"],
     )
     assert ctx.repo is None
-    monkeypatch.setattr(post.gh, "current_repo", lambda: "inferred/repo")
+    monkeypatch.setattr(
+        post.gh, "current_repo", lambda: repo_from_slug("inferred/repo")
+    )
     assert post._resolve_repo(ctx) == "inferred/repo"

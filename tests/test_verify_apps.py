@@ -15,6 +15,7 @@ from __future__ import annotations
 from shipit import cli
 from shipit.agent import backend as agent_backend
 from shipit.review import ghauth
+from shipit.identity import repo_from_slug
 from shipit.verbs import verify_apps
 from shipit.execrun import ExecError
 
@@ -148,7 +149,9 @@ def test_run_errors_without_a_repo_or_checkout(capsys, monkeypatch):
 
 def test_run_defaults_repo_to_current_checkout(capsys, monkeypatch):
     """Omitted repo resolves from the current checkout (like gh-setup / logs)."""
-    monkeypatch.setattr(verify_apps.gh, "current_repo", lambda: "owner/here")
+    monkeypatch.setattr(
+        verify_apps.gh, "current_repo", lambda: repo_from_slug("owner/here")
+    )
     rc = verify_apps.run(None, mint=_mint_live)
     assert rc == 0
     assert "owner/here" in capsys.readouterr().out

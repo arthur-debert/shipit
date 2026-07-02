@@ -432,9 +432,11 @@ def _resolve_repo_slug(repo: str, *, scratch: str) -> str:
     (:func:`shipit.gh.current_repo`); a value already in ``owner/name`` form is
     normalised to its canonical slug (:func:`shipit.gh.repo_canonical`).
     """
+    # Both adapter reads return the typed Repo (PROC03); the REST seams here
+    # consume the slug string.
     if "/" in repo:
-        return gh.repo_canonical(repo)
-    return gh.current_repo(cwd=scratch)
+        return gh.repo_canonical(repo).slug
+    return gh.current_repo(cwd=scratch).slug
 
 
 # --------------------------------------------------------------------------

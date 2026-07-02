@@ -233,8 +233,11 @@ def run(
     current = None
     if toplevel:
         try:
-            current = gh.current_repo()
-        except execrun.ExecError:
+            # The typed adapter read (PROC03); this verb's helpers speak slugs.
+            # ValueError is gh answering without a usable owner/name — treated
+            # like the transport failure: no inferable repo.
+            current = gh.current_repo().slug
+        except (execrun.ExecError, ValueError):
             current = None
     target = repo or current
     if not target:

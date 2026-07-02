@@ -15,6 +15,7 @@ import pytest
 
 from shipit import git
 from shipit.execrun import CAUSE_MISSING_BINARY, ExecError, ExecResult
+from shipit.identity import Sha
 
 
 def _ok(stdout: str = "") -> ExecResult:
@@ -42,7 +43,8 @@ def test_unpushed_shas_lists_the_local_only_commits(monkeypatch):
     # `rev-list HEAD --not --remotes`: commits on NO remote at all — the
     # upstream-independent "unpushed" the ephemeral gc ladder is defined over. The
     # SHAs (not a bare count) are what lets the ladder exclude exactly the recorded
-    # provisioning commit (#232).
+    # provisioning commit (#232) — and they come back as Sha VALUE OBJECTS
+    # (PROC03), so the exclusion compares identities through the type.
     seen = {}
 
     def fake(args, *, cwd):
@@ -50,7 +52,7 @@ def test_unpushed_shas_lists_the_local_only_commits(monkeypatch):
         return _ok(f"{'a' * 40}\n{'b' * 40}\n")
 
     monkeypatch.setattr(git, "_probe", fake)
-    assert git.unpushed_shas(cwd="/x") == ("a" * 40, "b" * 40)
+    assert git.unpushed_shas(cwd="/x") == (Sha("a" * 40), Sha("b" * 40))
     assert seen["args"] == ["rev-list", "HEAD", "--not", "--remotes"]
 
 
@@ -73,7 +75,9 @@ def test_unpushed_shas_unreadable_is_none_not_empty(monkeypatch):
 
 def test_commits_between_lists_the_range(monkeypatch):
     # `rev-list <base>..<head>`: exactly what provisioning committed (#232) — the
-    # SHAs recorded into .git/shipit-provision.json at Tree birth.
+    # SHAs recorded into .git/shipit-provision.json at Tree birth. Typed at both
+    # ends (PROC03): Sha endpoints in, Sha values out — the argv still carries
+    # the plain string form.
     seen = {}
 
     def fake(args, *, cwd):
@@ -81,7 +85,9 @@ def test_commits_between_lists_the_range(monkeypatch):
         return _ok(f"{'c' * 40}\n")
 
     monkeypatch.setattr(git, "_probe", fake)
-    assert git.commits_between("a" * 40, "c" * 40, cwd="/x") == ["c" * 40]
+    assert git.commits_between(Sha("a" * 40), Sha("c" * 40), cwd="/x") == [
+        Sha("c" * 40)
+    ]
     assert seen["args"] == ["rev-list", f"{'a' * 40}..{'c' * 40}"]
 
 
@@ -89,9 +95,28 @@ def test_commits_between_unreadable_is_none(monkeypatch):
     # A failed or malformed rev-list -> None, so the caller records NOTHING rather
     # than something wrong (an unrecorded provisioning commit only KEEPS the Tree).
     monkeypatch.setattr(git, "_probe", lambda args, *, cwd: _fail("bad ref"))
-    assert git.commits_between("a" * 40, "b" * 40, cwd="/x") is None
+    assert git.commits_between(Sha("a" * 40), Sha("b" * 40), cwd="/x") is None
     monkeypatch.setattr(git, "_probe", lambda args, *, cwd: _ok("garbage\n"))
-    assert git.commits_between("a" * 40, "b" * 40, cwd="/x") is None
+    assert git.commits_between(Sha("a" * 40), Sha("b" * 40), cwd="/x") is None
+
+
+def test_head_commit_returns_a_sha_value_object(monkeypatch):
+    # `rev-parse HEAD` is a commit-IDENTITY read (PROC03): the adapter returns
+    # the validated Sha value object — lowercase-normalized by the type — never
+    # a raw string.
+    monkeypatch.setattr(git, "_probe", lambda args, *, cwd: _ok(f"{'AB' * 20}\n"))
+    head = git.head_commit(cwd="/x")
+    assert head == Sha("ab" * 20)
+    assert isinstance(head, Sha)
+
+
+def test_head_commit_unresolvable_or_malformed_is_none(monkeypatch):
+    # Best-effort contract: a failed rev-parse (detached/unborn HEAD) AND output
+    # that does not validate as a full sha both degrade to None, never raise.
+    monkeypatch.setattr(git, "_probe", lambda args, *, cwd: _fail("unborn HEAD"))
+    assert git.head_commit(cwd="/x") is None
+    monkeypatch.setattr(git, "_probe", lambda args, *, cwd: _ok("not-a-sha\n"))
+    assert git.head_commit(cwd="/x") is None
 
 
 def test_upstream_ref_returns_tracking_ref(monkeypatch):
@@ -166,6 +191,83 @@ def test_epic_umbrella_exists_launch_failure_raises_not_false(monkeypatch):
     monkeypatch.setattr(git, "_probe", boom)
     with pytest.raises(ExecError):
         git.epic_umbrella_exists("TRE04", cwd="/x")
+
+
+# --- review-diff reads: typed commit-identity plumbing (PROC03-WS03) --------
+#
+# The review-diff endpoints are commit identities, so the adapter takes/returns
+# `Sha` value objects (`commit_present` / `merge_base` / `diff_range` /
+# `diff_name_only`) — the argv still carries the plain string form, and
+# `fetch_ref` stays the one deliberately-str refspec seam. Pinned through the
+# injected runner seam (`_git` / `_probe`), never a real subprocess.
+
+
+def test_commit_present_takes_sha_and_probes_cat_file(monkeypatch):
+    seen = {}
+
+    def fake(args, *, cwd):
+        seen["args"] = args
+        return _ok()
+
+    monkeypatch.setattr(git, "_probe", fake)
+    assert git.commit_present(Sha("a" * 40), cwd="/x") is True
+    # The typed identity stringifies only INTO the argv.
+    assert seen["args"] == ["cat-file", "-e", f"{'a' * 40}^{{commit}}"]
+    monkeypatch.setattr(git, "_probe", lambda args, *, cwd: _fail())
+    assert git.commit_present(Sha("a" * 40), cwd="/x") is False
+
+
+def test_merge_base_returns_a_sha_value_object(monkeypatch):
+    # The merge base IS a commit identity, so it leaves the adapter typed
+    # (PROC03) — lowercase-normalized by the Sha constructor.
+    seen = {}
+
+    def fake(args, *, cwd):
+        seen["args"] = args
+        return _ok(f"{'AB' * 20}\n")
+
+    monkeypatch.setattr(git, "_probe", fake)
+    base = git.merge_base(Sha("a" * 40), Sha("b" * 40), cwd="/x")
+    assert base == Sha("ab" * 20)
+    assert isinstance(base, Sha)
+    assert seen["args"] == ["merge-base", "a" * 40, "b" * 40]
+
+
+def test_merge_base_none_on_no_ancestor_or_malformed_output(monkeypatch):
+    # Nonzero exit = no common ancestor (the caller fails loud); malformed
+    # output degrades to the same None — nothing rather than something wrong.
+    monkeypatch.setattr(git, "_probe", lambda args, *, cwd: _fail("no ancestor"))
+    assert git.merge_base(Sha("a" * 40), Sha("b" * 40), cwd="/x") is None
+    monkeypatch.setattr(git, "_probe", lambda args, *, cwd: _ok("not-a-sha\n"))
+    assert git.merge_base(Sha("a" * 40), Sha("b" * 40), cwd="/x") is None
+
+
+def test_diff_range_takes_sha_endpoints(monkeypatch):
+    seen = {}
+
+    def fake(args, *, cwd):
+        seen["args"] = args
+        return "the diff\n"
+
+    monkeypatch.setattr(git, "_git", fake)
+    out = git.diff_range(Sha("a" * 40), Sha("b" * 40), cwd="/x")
+    assert out == "the diff\n"
+    assert seen["args"] == ["diff", f"{'a' * 40}..{'b' * 40}"]
+
+
+def test_diff_name_only_takes_sha_endpoints_and_parses_lines(monkeypatch):
+    seen = {}
+
+    def fake(args, *, cwd):
+        seen["args"] = args
+        return "a.py\n\nb/c.py\n"
+
+    monkeypatch.setattr(git, "_git", fake)
+    assert git.diff_name_only(Sha("a" * 40), Sha("b" * 40), cwd="/x") == [
+        "a.py",
+        "b/c.py",
+    ]
+    assert seen["args"] == ["diff", "--name-only", f"{'a' * 40}..{'b' * 40}"]
 
 
 # --- remote_branch_exists: exact-ref equality (codex finding, gh.py:451) ---

@@ -60,8 +60,13 @@ import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from typing import TYPE_CHECKING
+
 from .layout import EPHEMERAL_KIND, REVIEW_KIND, tree_kind
 from .registry import TreeRecord
+
+if TYPE_CHECKING:
+    from ..identity import Sha
 
 logger = logging.getLogger("shipit.tree")
 
@@ -174,7 +179,7 @@ def classify(
     max_age_seconds: float = DEFAULT_MAX_AGE_SECONDS,
     live_reviews: Mapping[str, bool] | None = None,
     live_sessions: Mapping[str, bool] | None = None,
-    provision_shas: Mapping[str, frozenset[str]] | None = None,
+    provision_shas: Mapping[str, frozenset[Sha]] | None = None,
     hard_cap_seconds: float = EPHEMERAL_HARD_CAP_SECONDS,
     grace_seconds: float = EPHEMERAL_GRACE_SECONDS,
 ) -> Cleanup:
@@ -271,7 +276,7 @@ def _bucket_for(
     max_age_seconds: float,
     reviewer_live: bool,
     session_live: bool,
-    provision: frozenset[str],
+    provision: frozenset[Sha],
     hard_cap_seconds: float,
     grace_seconds: float,
 ) -> str:
@@ -337,7 +342,7 @@ def _ephemeral_bucket(
     now: float,
     state: str | None,
     live: bool,
-    provision: frozenset[str],
+    provision: frozenset[Sha],
     hard_cap_seconds: float,
     grace_seconds: float,
 ) -> str:
@@ -383,7 +388,7 @@ def _ephemeral_bucket(
 
 
 def _has_local_only_work(
-    record: TreeRecord, *, exclude: frozenset[str] = frozenset()
+    record: TreeRecord, *, exclude: frozenset[Sha] = frozenset()
 ) -> bool:
     """Whether ``record`` holds work that exists ONLY in this clone. Pure.
 

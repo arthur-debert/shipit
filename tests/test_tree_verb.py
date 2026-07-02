@@ -13,7 +13,7 @@ import json
 import pytest
 
 from shipit import execrun, gh, git
-from shipit.identity import repo_from_slug
+from shipit.identity import Sha, repo_from_slug
 from shipit.tree.create import Tree
 from shipit.tree.registry import TreeRecord
 from shipit.verbs import tree as tree_verb
@@ -1256,7 +1256,7 @@ def test_run_gc_excludes_the_recorded_provisioning_commit(
     root = tmp_path / "trees"
     recorded_path = _ephemeral_clone(root, "sess-recorded")
     unrecorded_path = _ephemeral_clone(root, "sess-unrecorded")
-    sha = "a" * 40
+    sha = Sha("a" * 40)
     provision_mod.write_record(recorded_path, [sha])
 
     monkeypatch.setattr(tree_verb.layout, "central_root", lambda: str(root))
