@@ -2,8 +2,9 @@
 
 The contract under test: on a clean session exit the hook removes the ephemeral
 session Tree AND its liveness pidfile, but ONLY behind the same never-lose-work
-floor the gc ladder enforces — a dirty Tree or one with commits on no remote is
-never auto-removed; a non-ephemeral or out-of-root path is never touched; and the
+floor the gc ladder enforces — a dirty Tree, one with commits on no remote, or one
+ahead of its upstream beyond the provisioning carve-out is never auto-removed; a
+non-ephemeral or out-of-root path is never touched; and the
 whole boundary fails OPEN (exit 0, nothing removed) on any error, because the gc
 ladder — not this hook, which does not even fire headless — is the load-bearing
 cleanup.
@@ -46,9 +47,10 @@ def ephemeral_tree(root):
 
 @pytest.fixture
 def clean_git(monkeypatch):
-    """A gh boundary reporting a clean, fully-pushed clone."""
+    """A gh boundary reporting a clean, fully-pushed, upstream-level clone."""
     monkeypatch.setattr(gh, "git_status_porcelain", lambda *, cwd: "")
     monkeypatch.setattr(gh, "git_unpushed_shas", lambda *, cwd: ())
+    monkeypatch.setattr(gh, "git_ahead_behind", lambda *, cwd: (0, 0))
 
 
 def _run(payload) -> int:
@@ -106,6 +108,33 @@ def test_recorded_provisioning_commit_does_not_block_removal(
     sha = "a" * 40
     monkeypatch.setattr(gh, "git_status_porcelain", lambda *, cwd: "")
     monkeypatch.setattr(gh, "git_unpushed_shas", lambda *, cwd: (sha,))
+    monkeypatch.setattr(gh, "git_ahead_behind", lambda *, cwd: (0, 0))
+    provision.write_record(ephemeral_tree, [sha])
+    assert _run({"cwd": str(ephemeral_tree)}) == 0
+    assert not ephemeral_tree.exists()
+
+
+def test_ahead_of_upstream_beyond_carveout_blocks(ephemeral_tree, monkeypatch):
+    # The gc floor's `ahead` side (codex review on #233): commits ahead of a
+    # configured upstream that the local-only list does not explain — work pushed
+    # to some OTHER branch, or a miscount — must block the fast path exactly as
+    # `_has_local_only_work` conservatively keeps.
+    monkeypatch.setattr(gh, "git_status_porcelain", lambda *, cwd: "")
+    monkeypatch.setattr(gh, "git_unpushed_shas", lambda *, cwd: ())
+    monkeypatch.setattr(gh, "git_ahead_behind", lambda *, cwd: (2, 0))
+    assert _run({"cwd": str(ephemeral_tree)}) == 0
+    assert ephemeral_tree.exists()
+
+
+def test_ahead_fully_explained_by_provisioning_commit_removes(
+    ephemeral_tree, monkeypatch
+):
+    # The recorded provisioning commit also sits ahead of the upstream it was cut
+    # from; an `ahead` reading the carve-out fully accounts for does not block.
+    sha = "a" * 40
+    monkeypatch.setattr(gh, "git_status_porcelain", lambda *, cwd: "")
+    monkeypatch.setattr(gh, "git_unpushed_shas", lambda *, cwd: (sha,))
+    monkeypatch.setattr(gh, "git_ahead_behind", lambda *, cwd: (1, 0))
     provision.write_record(ephemeral_tree, [sha])
     assert _run({"cwd": str(ephemeral_tree)}) == 0
     assert not ephemeral_tree.exists()

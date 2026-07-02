@@ -29,7 +29,11 @@ Fast does not mean careless — the ladder's absolute floor holds here too:
   the Tree's own provisioning (:mod:`shipit.tree.provision` — the managed-set
   reconcile a drift window commits at birth) are excluded from the block: they
   are shipit's commit, not the session's work, and without the exclusion every
-  drift-window session Tree would dodge the fast path on a clean exit.
+  drift-window session Tree would dodge the fast path on a clean exit. The
+  ladder's ``ahead`` side holds too: an upstream-ahead count the exclusion does
+  not account for (commits pushed to some other branch, or a miscount) blocks
+  the fast path exactly as :func:`shipit.tree.cleanup._has_local_only_work`
+  conservatively keeps (codex review on #233).
 """
 
 from __future__ import annotations
@@ -137,7 +141,11 @@ def _removal_blocker(tree: Path) -> str | None:
     unreadable unpushed list blocks too: unknown never reads as "nothing to lose".
     The one carve-out mirrors the ladder's (#232): SHAs the Tree's own provisioning
     recorded at birth are shipit's managed-set reconcile, not session work, so
-    exactly they — and nothing else — do not block.
+    exactly they — and nothing else — do not block. And as in the ladder's
+    :func:`~shipit.tree.cleanup._has_local_only_work`, the carve-out must also
+    explain the ``ahead`` reading: an upstream-ahead count beyond the local-only
+    commits (work pushed to some other branch, or a miscount) blocks
+    conservatively rather than letting the fast path outrun the gc floor.
     """
     cwd = str(tree)
     if gh.git_status_porcelain(cwd=cwd).strip():
@@ -150,4 +158,10 @@ def _removal_blocker(tree: Path) -> str | None:
     if remaining:
         plural = "s" if len(remaining) != 1 else ""
         return f"{len(remaining)} unpushed commit{plural}"
+    ahead, _behind = gh.git_ahead_behind(cwd=cwd)
+    if ahead > len(unpushed):
+        return (
+            f"an upstream-ahead count ({ahead}) beyond its "
+            f"{len(unpushed)} excluded provisioning commit(s)"
+        )
     return None
