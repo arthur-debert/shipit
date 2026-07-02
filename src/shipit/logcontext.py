@@ -4,7 +4,7 @@ Correlation in shipit's durable JSONL record is **domain keys only** — the
 closed set :data:`DOMAIN_KEYS` (``session``, ``tree``, ``pr``, ``run``,
 ``repo``) — never synthetic trace/span ids. A key is bound ONCE, at the CLI
 entry or at a spawn/detach seam, via structlog's contextvars; from that point
-:data:`shipit.logsetup._PIPELINE`'s ``merge_contextvars`` step lands it on
+:data:`shipit.logsetup._PIPELINE`'s :func:`merge_domain_keys` step lands it on
 every subsequent record in-process. An unbound key is simply ABSENT from the
 record — never ``None`` — so :func:`bind` drops ``None`` values instead of
 binding them.
@@ -25,7 +25,7 @@ site, so a typo can never silently mint a new correlation vocabulary.
 from __future__ import annotations
 
 import os
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, MutableMapping
 from typing import Any
 
 import structlog
@@ -88,6 +88,26 @@ def bound() -> dict[str, Any]:
     """
     ctx = structlog.contextvars.get_contextvars()
     return {name: ctx[name] for name in DOMAIN_KEYS if name in ctx}
+
+
+def merge_domain_keys(
+    logger: object, method_name: str, event_dict: MutableMapping[str, Any]
+) -> MutableMapping[str, Any]:
+    """structlog processor: merge ONLY the bound domain keys into the record.
+
+    The vocabulary-preserving replacement for structlog's ``merge_contextvars``
+    in :data:`shipit.logsetup._PIPELINE`: where ``merge_contextvars`` would
+    land EVERY structlog contextvar on the durable record — letting a direct
+    ``structlog.contextvars.bind_contextvars(request_id=...)`` call mint a
+    top-level JSONL field outside the closed set — this merges exactly
+    :func:`bound`, i.e. :data:`DOMAIN_KEYS` and nothing else. Ambient context
+    is correlation vocabulary or it is nothing; per-event extras stay what
+    they always were (explicit keys on the log call). An explicit event key
+    wins over a bound one, mirroring ``merge_contextvars``.
+    """
+    for name, value in bound().items():
+        event_dict.setdefault(name, value)
+    return event_dict
 
 
 def env_export(env: Mapping[str, str] | None = None, **extra: Any) -> dict[str, str]:

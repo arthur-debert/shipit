@@ -84,17 +84,54 @@ _FILE_HANDLER_NAME = _HANDLER_PREFIX + "file"
 # The processor pipeline — the ONE chain both renderings share (ADR-0029)
 # --------------------------------------------------------------------------
 
-#: The one processor pipeline every sink shares — context-merge (bound domain
-#: keys land on the record, absent when unbound) → enrichment (``logger``,
-#: ``level``, ISO-8601-UTC ``ts``, exceptions flattened to a string) → the
-#: central redactor (:mod:`shipit.redact`, ADR-0028/0029: secretsrc-registered
-#: values and token/PEM patterns masked in ``msg`` and extras). Applied via
-#: :class:`~structlog.stdlib.ProcessorFormatter`'s ``foreign_pre_chain``, so
-#: records from untouched stdlib ``logging`` call sites (all of shipit today)
-#: flow through it; only the renderer differs per sink (JSONL for the file,
-#: human for the surfaces).
+#: The one processor pipeline every sink shares — context-merge
+#: (:func:`shipit.logcontext.merge_domain_keys`: the bound DOMAIN keys land on
+#: the record, absent when unbound — and ONLY the domain keys, so a stray
+#: contextvar bound outside :mod:`shipit.logcontext` can never mint a field
+#: beyond the closed correlation vocabulary) → stdlib ``extra=`` adoption
+#: (:class:`~structlog.stdlib.ExtraAdder` — a plain
+#: ``logger.info(..., extra={"phase": ...})`` lands ``phase`` as a flat event
+#: extra; without it ``ProcessorFormatter`` drops LogRecord extras) →
+#: enrichment (``logger``, ``level``, ISO-8601-UTC ``ts``, exceptions
+#: flattened to a string) → the central redactor (:mod:`shipit.redact`,
+#: ADR-0028/0029: secretsrc-registered values and token/PEM patterns masked in
+#: ``msg`` and extras — placed last so context and extras are masked too).
+#: Applied via :class:`~structlog.stdlib.ProcessorFormatter`'s
+#: ``foreign_pre_chain``, so records from untouched stdlib ``logging`` call
+#: sites (all of shipit today) flow through it; only the renderer differs per
+#: sink (JSONL for the file, human for the surfaces).
+
+
+#: Attributes stdlib ``Formatter.format`` plants ON the shared ``LogRecord``
+#: as a side effect of rendering. The pipeline runs once per handler against
+#: that one record, so by the second handler these look exactly like user
+#: extras to :class:`~structlog.stdlib.ExtraAdder` — strip them, or every
+#: multi-sink record grows a duplicate ``message`` field.
+_STDLIB_FORMAT_ARTIFACTS = ("message", "asctime")
+
+_EXTRA_ADDER = structlog.stdlib.ExtraAdder()
+
+
+def _add_stdlib_extras(
+    logger: object, method_name: str, event_dict: MutableMapping[str, Any]
+) -> MutableMapping[str, Any]:
+    """Adopt stdlib ``extra={...}`` fields into the record — the supported
+    call-site idiom is untouched stdlib logging, and without this step
+    :class:`~structlog.stdlib.ProcessorFormatter` silently drops LogRecord
+    extras. :class:`~structlog.stdlib.ExtraAdder` does the copying; the
+    wrapper removes stdlib formatting artifacts (see
+    :data:`_STDLIB_FORMAT_ARTIFACTS`) that an earlier handler's ``format()``
+    call left on the shared record.
+    """
+    event_dict = _EXTRA_ADDER(logger, method_name, event_dict)
+    for key in _STDLIB_FORMAT_ARTIFACTS:
+        event_dict.pop(key, None)
+    return event_dict
+
+
 _PIPELINE = (
-    structlog.contextvars.merge_contextvars,
+    logcontext.merge_domain_keys,
+    _add_stdlib_extras,
     structlog.stdlib.add_logger_name,
     structlog.stdlib.add_log_level,
     structlog.processors.TimeStamper(fmt="iso", utc=True, key="ts"),

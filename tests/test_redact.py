@@ -233,9 +233,9 @@ def test_registered_secret_reaches_no_sink(capfd, tmp_path, _reset_package_logge
     source = SecretSource(name="TOK", kind="env", key="TOK")
     secretsrc.resolve(source, env={"TOK": SECRET})
 
-    structlog.contextvars.bind_contextvars(detail=f"used {SECRET}")
-    logging.getLogger("shipit.ws02").warning("fetched %s ok", SECRET)
-    structlog.contextvars.clear_contextvars()
+    logging.getLogger("shipit.ws02").warning(
+        "fetched %s ok", SECRET, extra={"detail": f"used {SECRET}"}
+    )
 
     logger = logging.getLogger(logsetup.LOGGER_NAME)
     for handler in logger.handlers:

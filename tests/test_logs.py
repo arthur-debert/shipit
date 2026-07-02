@@ -148,6 +148,46 @@ def test_malformed_line_is_skipped_with_note_never_a_crash(tmp_path, capsys):
     assert "torn json" in captured.err
 
 
+def test_malformed_line_snippet_is_redacted_before_stderr(tmp_path, capsys):
+    # The skip note is the one path that echoes raw file content the writer's
+    # redaction pipeline never finished with (a torn write, a pre-cutover
+    # freeform line) — a secret in it must be masked, not sprayed onto stderr.
+    token = "ghp_" + "a1B2c3D4e5" * 4
+    log = tmp_path / "o" / "r" / "shipit.log"
+    log.parent.mkdir(parents=True)
+    log.write_text(f"{{ torn write carrying {token}\n")
+
+    rc = logs.run("o/r", base_dir=tmp_path, current_repo=lambda: "x/y")
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "skipped malformed line" in captured.err
+    assert token not in captured.err
+    assert "***" in captured.err
+
+
+def test_emit_flushes_stdout_for_live_piping(monkeypatch):
+    # `logs -f --raw | jq .` attaches stdout to a pipe, which Python
+    # block-buffers: without an explicit flush per record, a followed stream
+    # sits invisible in the buffer instead of arriving live.
+    import io
+    import sys as _sys
+
+    class _Recorder(io.StringIO):
+        def __init__(self) -> None:
+            super().__init__()
+            self.flushes = 0
+
+        def flush(self) -> None:  # noqa: A003 - mirrors TextIOBase
+            self.flushes += 1
+            super().flush()
+
+    fake_out = _Recorder()
+    monkeypatch.setattr(_sys, "stdout", fake_out)
+    logs._emit(_record("live"), raw=True)
+    logs._emit(_record("rendered"), raw=False)
+    assert fake_out.flushes >= 2
+
+
 def test_blank_lines_are_dropped_silently(tmp_path, capsys):
     log = tmp_path / "o" / "r" / "shipit.log"
     log.parent.mkdir(parents=True)
@@ -339,6 +379,47 @@ def test_follow_reopens_after_rotation(tmp_path, capsys):
     # The line written into the post-rotation file streamed through, proving the
     # follow loop reopened rather than clinging to the original handle.
     assert "after" in capsys.readouterr().out
+
+
+def test_follow_reopens_after_rename_rotation_even_when_new_file_is_larger(
+    tmp_path, capsys
+):
+    # RotatingFileHandler rotates by RENAME + fresh create. A size-only check
+    # races: a busy fresh file can outgrow the old read offset between polls,
+    # so the shrink is never observed and the follow clings to the renamed
+    # handle forever. Identity (inode) must be what detects the swap — here the
+    # replacement file is deliberately LARGER than the followed offset.
+    log = tmp_path / "o" / "r" / "shipit.log"
+    log.parent.mkdir(parents=True)
+    log.write_text(_record("old") + "\n")
+
+    def rotate() -> None:
+        log.rename(log.with_name("shipit.log.1"))
+        lines = [
+            _record(f"fresh-{i}-padding-so-the-new-file-is-bigger") for i in range(20)
+        ]
+        log.write_text("\n".join(lines) + "\n")
+
+    steps = [rotate]
+
+    def fake_sleep(_interval: float) -> None:
+        if steps:
+            steps.pop(0)()
+        else:
+            raise KeyboardInterrupt
+
+    rc = logs.run(
+        "o/r",
+        follow=True,
+        tail=0,
+        base_dir=tmp_path,
+        current_repo=lambda: "o/r",
+        sleep=fake_sleep,
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "fresh-0" in out
+    assert "fresh-19" in out
 
 
 # --------------------------------------------------------------------------

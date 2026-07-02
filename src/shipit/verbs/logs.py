@@ -30,12 +30,13 @@ and the follow-loop ``sleep`` are injected in tests so nothing touches a real
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from pathlib import Path
 from typing import Callable
 
-from .. import gh, logsetup
+from .. import gh, logsetup, redact
 
 #: Default number of trailing lines the no-flag invocation prints.
 DEFAULT_TAIL = 50
@@ -136,20 +137,33 @@ def _emit(line: str, *, raw: bool) -> None:
     line is rendered for humans; a blank line is dropped silently (file padding,
     not a record) and a malformed one is skipped with a stderr note — stdout
     carries only rendered records, and a corrupt line never crashes the reader.
+    The malformed-line snippet is the one path that echoes raw file content the
+    writer's pipeline never finished redacting (a torn write, a pre-cutover
+    freeform line), so it passes through :func:`shipit.redact.redact_text`
+    (token/PEM pattern masking) before reaching stderr.
+
+    Every ``print`` flushes: ``-f`` output is piped as often as watched
+    (``shipit logs -f --raw | jq .``), and Python block-buffers a
+    non-interactive stdout — without the flush, records would sit in the buffer
+    instead of streaming live.
     """
     if raw:
-        print(line)
+        print(line, flush=True)
         return
     if not line.strip():
         return
     rendered = _render_record(line)
     if rendered is None:
+        # Redact BEFORE truncating, so a secret straddling the snippet cut is
+        # still seen whole by the pattern matcher.
+        snippet = redact.redact_text(line)[:_SNIPPET_LEN]
         print(
-            f"logs: skipped malformed line: {line[:_SNIPPET_LEN]!r}",
+            f"logs: skipped malformed line: {snippet!r}",
             file=sys.stderr,
+            flush=True,
         )
         return
-    print(rendered)
+    print(rendered, flush=True)
 
 
 def _follow(path: Path, *, tail: int, raw: bool, sleep: Callable[[float], None]) -> int:
@@ -161,7 +175,7 @@ def _follow(path: Path, *, tail: int, raw: bool, sleep: Callable[[float], None])
     can drive the poll loop and stop it deterministically.
     """
     if not raw:
-        print(str(path))
+        print(str(path), flush=True)
     fh = path.open("r", encoding="utf-8", errors="replace")
     try:
         for line in _last_n(fh.read().splitlines(), tail):
@@ -174,11 +188,19 @@ def _follow(path: Path, *, tail: int, raw: bool, sleep: Callable[[float], None])
                 continue
             # No new data. The writer is a RotatingFileHandler, so the active
             # shipit.log can be rolled over mid-follow — at which point our open
-            # handle points at the stale renamed file and would go silent. Detect
-            # it: when the on-disk file is now SHORTER than our read position, it
-            # was rotated/truncated, so reopen and follow the fresh file.
+            # handle points at the stale renamed file and would go silent.
+            # Detect it by FILE IDENTITY: rollover is a rename + fresh create,
+            # so the path's inode no longer matches our handle's. (A size
+            # comparison alone is a race — a busy fresh file can outgrow our
+            # old read offset between polls and the shrink would never be
+            # seen.) The size check stays for the in-place truncation case,
+            # where the inode never changes.
             try:
-                rotated = path.stat().st_size < fh.tell()
+                disk = path.stat()
+                rotated = (
+                    disk.st_ino != os.fstat(fh.fileno()).st_ino
+                    or disk.st_size < fh.tell()
+                )
             except OSError:
                 rotated = False  # mid-rotation flicker; retry on the next tick
             if rotated:

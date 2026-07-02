@@ -443,17 +443,49 @@ def test_bound_domain_keys_land_flat_and_leave_on_unbind(tmp_path):
     assert "session" not in unbound
 
 
-def test_bound_containers_degrade_to_repr_never_nest(tmp_path):
-    # The flat contract is ENFORCED, not assumed: a bound container (dict,
+def test_only_domain_keys_merge_from_context_never_rogue_contextvars(tmp_path):
+    # The correlation vocabulary is CLOSED (ADR-0029): the pipeline merges
+    # exactly logcontext's domain keys. A contextvar bound around the
+    # logcontext seam (a direct structlog bind — i.e. a typo or an unsanctioned
+    # correlation key) never mints a top-level JSONL field.
+    logsetup.configure_logging(env={}, owner_repo=("o", "r"), base_dir=tmp_path)
+    structlog.contextvars.bind_contextvars(pr=231, request_id="rogue-77")
+    _emit(logging.INFO, "vocabulary record")
+    (record,) = _file_records(tmp_path)
+    assert record["pr"] == 231
+    assert "request_id" not in record
+
+
+def test_stdlib_extra_lands_as_flat_event_extras(tmp_path):
+    # The supported call-site idiom is untouched stdlib logging, so per-event
+    # extras arrive the stdlib way — `extra={...}` — and must land as flat
+    # top-level fields in the JSONL record (ExtraAdder in the pipeline;
+    # ProcessorFormatter alone would silently drop them).
+    logsetup.configure_logging(env={}, owner_repo=("o", "r"), base_dir=tmp_path)
+    logging.getLogger("shipit.spawn").info(
+        "child launched", extra={"phase": "spawn", "attempt": 2}
+    )
+    (record,) = _file_records(tmp_path)
+    assert record["msg"] == "child launched"
+    assert record["phase"] == "spawn"
+    assert record["attempt"] == 2
+
+
+def test_container_extras_degrade_to_repr_never_nest(tmp_path):
+    # The flat contract is ENFORCED, not assumed: a container extra (dict,
     # list, tuple — all JSON-serializable, so a bare JSONRenderer would nest
     # them) degrades to its repr string, and a non-serializable object does
     # too, without crashing the log call.
     logsetup.configure_logging(env={}, owner_repo=("o", "r"), base_dir=tmp_path)
-    structlog.contextvars.bind_contextvars(
-        mapping={"a": 1}, sequence=[1, 2], pair=(3, 4), opaque=object()
+    logging.getLogger("shipit.containers").info(
+        "container record",
+        extra={
+            "mapping": {"a": 1},
+            "sequence": [1, 2],
+            "pair": (3, 4),
+            "opaque": object(),
+        },
     )
-    _emit(logging.INFO, "container record")
-    structlog.contextvars.clear_contextvars()
     (record,) = _file_records(tmp_path)
     assert record["mapping"] == "{'a': 1}"
     assert record["sequence"] == "[1, 2]"
