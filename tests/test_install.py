@@ -1129,6 +1129,7 @@ def test_activate_hooks_boundary_runs_lefthook_install(tmp_path, monkeypatch):
         captured["argv"] = argv
         captured["cwd"] = cwd
         captured["check"] = check
+        captured["timeout"] = kw.get("timeout")
         return execrun.ExecResult(
             argv=tuple(argv),
             rc=0,
@@ -1143,6 +1144,11 @@ def test_activate_hooks_boundary_runs_lefthook_install(tmp_path, monkeypatch):
     assert captured["argv"] == ["lefthook", "install"]
     assert captured["cwd"] == str(tmp_path)
     assert captured["check"] is False
+    # The stated local bound rides the wire (ADR-0028): lefthook writes a few
+    # .git/hooks files locally — git's local tier, never the runner's implicit
+    # 5-minute default.
+    assert captured["timeout"] == install.HOOK_ACTIVATE_TIMEOUT
+    assert install.HOOK_ACTIVATE_TIMEOUT < execrun.DEFAULT_TIMEOUT
     assert "pre-commit" in install._activation_output(result)
 
 

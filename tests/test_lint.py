@@ -150,6 +150,23 @@ def test_run_tool_missing_binary_raises_exec_error(tmp_path):
     assert exc_info.value.cause == execrun.CAUSE_MISSING_BINARY
 
 
+def test_run_tool_states_its_timeout_on_the_wire(tmp_path, monkeypatch):
+    # The stated bound rides the wire (ADR-0028): it EQUALS the runner's
+    # default (a full-tree linter is legitimately slow), but deliberately —
+    # stated, never inherited implicitly.
+    captured = {}
+
+    def fake_run(argv, **kw):
+        captured["timeout"] = kw.get("timeout")
+        return execrun.ExecResult(
+            argv=tuple(argv), rc=0, stdout="", stderr="", duration_ms=1
+        )
+
+    monkeypatch.setattr(lint.execrun, "run", fake_run)
+    lint._run_tool("ruff", ["check", "a.py"], tmp_path)
+    assert captured["timeout"] == lint.CHECK_TIMEOUT
+
+
 def test_missing_binary_is_hard_127_in_the_report(tmp_path, capsys):
     # The orchestrator renders a missing-binary ExecError as the hard-fail 127
     # note and fails the whole check run (hard, never skips).

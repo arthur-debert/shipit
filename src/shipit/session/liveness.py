@@ -335,6 +335,16 @@ def remove_pidfile(tree: str | Path) -> None:
 #: evaluation, issue #258).
 _PS_COLUMNS = (("pid", "PID"), ("ppid", "PPID"), ("etime", "ELAPSED"), ("args", "ARGS"))
 
+#: The probe Exec's stated timeout, in seconds (ADR-0028: every Exec states its
+#: bound deliberately — never the runner's implicit 5-minute default). ``ps -p``
+#: reads the local process table and answers in milliseconds, and the gc sweep
+#: probes every ephemeral Tree's session in turn, so a wedged ``ps`` must fail
+#: the liveness question in seconds — the runner raises its timeout-cause
+#: :class:`~shipit.execrun.ExecError` (one ERROR record) and :func:`os_probe`
+#: degrades to the probe contract's ``None`` (unreadable → not live, the safe
+#: direction: gc deletes directories, never processes).
+_PS_TIMEOUT: float = 10.0
+
 
 def os_probe(pid: int) -> ProcessInfo | None:
     """Read one live process from the OS: the production :data:`Probe`.
@@ -350,13 +360,23 @@ def os_probe(pid: int) -> ProcessInfo | None:
     to parse still returns the process with ``create_time=None`` (alive,
     identity unverifiable — :func:`is_live` then reads it as not live, the safe
     direction).
+
+    The Exec states the tight local :data:`_PS_TIMEOUT`, and a failed launch —
+    a hung ``ps`` killed at that bound (the runner's timeout-cause
+    :class:`~shipit.execrun.ExecError`), a missing binary — degrades to the
+    :data:`Probe` contract's ``None`` ("cannot be read") rather than crashing
+    the caller's sweep: the runner already emitted the one ERROR record, and
+    an unreadable process reads as not live, the module's safe direction.
     """
     if pid <= 0:
         return None
     argv = ["ps", "-p", str(pid)]
     for keyword, header in _PS_COLUMNS:
         argv += ["-o", f"{keyword}={header}"]
-    result = execrun.run(argv, check=False)
+    try:
+        result = execrun.run(argv, check=False, timeout=_PS_TIMEOUT)
+    except execrun.ExecError:
+        return None
     if result.rc != 0:
         return None
     return _parse_ps_output(result.stdout, now=time.time())

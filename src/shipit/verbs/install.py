@@ -658,6 +658,15 @@ def _write_unit(root: Path, unit: Unit) -> None:
         dest.chmod(0o755)
 
 
+#: The activation Exec's stated timeout, in seconds (ADR-0028: every Exec
+#: states its bound deliberately — never the runner's implicit default).
+#: ``lefthook install`` writes a handful of ``.git/hooks`` files locally —
+#: git's local tier, not the runner's 5-minute default; a wedged activation
+#: dies at this bound as a timeout-cause :class:`~shipit.execrun.ExecError`,
+#: which the caller already renders as its move-on warning.
+HOOK_ACTIVATE_TIMEOUT: float = 60.0
+
+
 def _activate_hooks(root: Path) -> execrun.ExecResult:
     """Run ``lefthook install`` in ``root`` — the bounded side effect that turns
     the ``lefthook.yml`` config into live ``.git/hooks``.
@@ -666,12 +675,16 @@ def _activate_hooks(root: Path) -> execrun.ExecResult:
     checks have one activation definition. It goes through the one Exec runner
     (ADR-0028): ``check=False`` because a nonzero rc is an outcome the caller
     *warns* about (activation is opportunistic setup, never a hard-fail check);
-    a launch failure — ``lefthook`` missing from PATH or not executable —
-    surfaces as the runner's :class:`~shipit.execrun.ExecError`, which the
-    caller likewise renders as a warning and moves on.
+    a launch failure — ``lefthook`` missing from PATH or not executable, or a
+    hang killed at the stated :data:`HOOK_ACTIVATE_TIMEOUT` — surfaces as the
+    runner's :class:`~shipit.execrun.ExecError`, which the caller likewise
+    renders as a warning and moves on.
     """
     return execrun.run(
-        [LEFTHOOK_BINARY, *HOOK_ACTIVATE_ARGV], cwd=str(root), check=False
+        [LEFTHOOK_BINARY, *HOOK_ACTIVATE_ARGV],
+        cwd=str(root),
+        check=False,
+        timeout=HOOK_ACTIVATE_TIMEOUT,
     )
 
 
