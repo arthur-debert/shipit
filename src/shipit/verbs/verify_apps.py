@@ -36,13 +36,17 @@ verifying liveness leaves no breadcrumb on the target repo.
 
 from __future__ import annotations
 
+import logging
 import sys
+import time
 from dataclasses import dataclass
 
 from .. import execrun, gh
 from ..agent import backend as _agent_backend
 from ..agent.backend import Backend
 from ..review import ghauth
+
+logger = logging.getLogger("shipit.verifyapps")
 
 #: The runbook for the one-time, owner-only install + ``checks: write`` re-consent.
 #: Every not-live result points here (it is the authority on what "live" means).
@@ -104,9 +108,23 @@ def verify_app(backend: Backend, repo: str, *, mint=None) -> AppLiveness:
     agent = backend.funnel_agent or backend.name
     # The App slug is a registry alias (ADR-0025), never composed here.
     slug = backend.app_slug
+    started = time.monotonic()
     try:
         auth = minter(backend, repo)
     except ghauth.ReviewAuthError as exc:
+        # The probe raising IS the not-installed verdict — the failure path, so
+        # ERROR with the exception attached (the printed reason is the instruct).
+        logger.error(
+            "app installation token mint failed — app not live",
+            exc_info=True,
+            extra={
+                "repo": repo,
+                "agent": agent,
+                "app": slug,
+                "live": False,
+                "duration_ms": int((time.monotonic() - started) * 1000),
+            },
+        )
         return AppLiveness(
             agent,
             slug,
@@ -118,6 +136,18 @@ def verify_app(backend: Backend, repo: str, *, mint=None) -> AppLiveness:
     perms = auth.get("permissions", {}) if isinstance(auth, dict) else {}
     granted = perms.get("checks")
     if granted != "write":
+        # Reachable but missing the permission — degraded, not a hard failure.
+        record = {
+            "repo": repo,
+            "agent": agent,
+            "app": slug,
+            "live": False,
+            "duration_ms": int((time.monotonic() - started) * 1000),
+        }
+        if granted is not None:
+            # Present only when GitHub granted SOMETHING — absent, not null.
+            record["checks"] = granted
+        logger.warning("app token lacks checks-write — app not live", extra=record)
         return AppLiveness(
             agent,
             slug,
@@ -126,6 +156,17 @@ def verify_app(backend: Backend, repo: str, *, mint=None) -> AppLiveness:
             f"'checks: write' permission (checks={granted!r}). Accept the updated "
             f"permissions for this owner's installation per {PROVISIONING_DOC}.",
         )
+    # A per-App pass is a mechanic; the run verdict is the milestone.
+    logger.debug(
+        "app live",
+        extra={
+            "repo": repo,
+            "agent": agent,
+            "app": slug,
+            "live": True,
+            "duration_ms": int((time.monotonic() - started) * 1000),
+        },
+    )
     return AppLiveness(agent, slug, True)
 
 
@@ -152,6 +193,7 @@ def run(repo: str | None, *, agents: list[str] | None = None, mint=None) -> int:
     a pass-or-instruct line per App and returns ``0`` only when ALL are live, ``1``
     otherwise — the mechanical verdict a rollout reads.
     """
+    started = time.monotonic()
     target = repo
     if not target:
         try:
@@ -160,6 +202,11 @@ def run(repo: str | None, *, agents: list[str] | None = None, mint=None) -> int:
             # failure: no inferable repo.
             target = gh.current_repo().slug
         except (execrun.ExecError, ValueError):
+            # The no-repo dead end — the stderr line's durable twin, recorded
+            # while the resolution failure is still live so it rides the record.
+            logger.error(
+                "no repo given and not inside a GitHub checkout", exc_info=True
+            )
             target = None
     if not target:
         print(
@@ -180,4 +227,19 @@ def run(repo: str | None, *, agents: list[str] | None = None, mint=None) -> int:
     # An empty probe set is NOT a pass: `all([])` is True, but a check with nothing
     # verified must fail (and `format_report` already renders empty as NOT LIVE).
     # Mirror that verdict so the exit code and the printed report never disagree.
-    return 0 if (bool(results) and all(r.live for r in results)) else 1
+    rc = 0 if (bool(results) and all(r.live for r in results)) else 1
+    # The mechanical verdict a rollout reads — the lifecycle milestone, pass or
+    # fail (the verdict propagates through the exit code, not an exception).
+    not_live = sorted(r.app for r in results if not r.live)
+    summary = {
+        "repo": target,
+        "apps": len(results),
+        "live": sum(1 for r in results if r.live),
+        "rc": rc,
+        "duration_ms": int((time.monotonic() - started) * 1000),
+    }
+    if not_live:
+        # Present only when meaningful — the absent-not-null record contract.
+        summary["not_live_apps"] = ", ".join(not_live)
+    logger.info("app liveness verified", extra=summary)
+    return rc
