@@ -2,6 +2,7 @@
 
 import json
 import os
+import shutil
 import stat
 import subprocess
 from pathlib import Path
@@ -416,15 +417,17 @@ def test_claude_start_fails_loud_when_claude_is_not_on_path(tmp_path: Path):
     launcher.write_bytes(unit.content)
     launcher.chmod(0o755)
 
-    # bash/date are present via the system dirs; no `claude` anywhere on PATH.
-    no_claude = [
-        d
-        for d in os.environ.get("PATH", "").split(os.pathsep)
-        if d and not (Path(d) / "claude").exists()
-    ]
+    # A minimal PATH with exactly one entry: `bash` (the shebang's interpreter)
+    # and nothing else — deterministically no `claude`, regardless of where the
+    # developer machine keeps its binaries.
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    bash = shutil.which("bash")
+    assert bash is not None
+    (bindir / "bash").symlink_to(bash)
     proc = subprocess.run(
         [str(launcher)],
-        env={"PATH": os.pathsep.join(no_claude)},
+        env={"PATH": str(bindir)},
         capture_output=True,
         text=True,
         timeout=10,
