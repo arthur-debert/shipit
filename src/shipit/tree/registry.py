@@ -71,6 +71,11 @@ class TreeRecord:
     - ``dirty`` — ``True`` when the working tree has uncommitted/untracked changes.
     - ``ahead`` / ``behind`` — commits ahead of / behind the upstream (``0`` each
       when there is no upstream).
+    - ``unpushed`` — commits on ``HEAD`` that exist on NO remote at all, or ``None``
+      when the count could not be read. Distinct from ``ahead``, which is measured
+      against the upstream and reads ``0`` for a branch with no upstream — a fresh
+      ``ephemeral/<id>`` branch would look level while carrying local-only commits.
+      The ephemeral gc ladder (ADR-0027) keys its never-lose-work floor off this.
     - ``pr`` — a short PR-state label (``"#123 OPEN"``, ``"#123 MERGED"``,
       ``"#123 DRAFT"``…), or ``None`` when the branch has no PR.
     - ``mtime`` — the directory's mtime (epoch seconds); the verb renders it as age.
@@ -84,6 +89,7 @@ class TreeRecord:
     behind: int
     pr: str | None
     mtime: float
+    unpushed: int | None = None
 
 
 def scan(root: str | Path) -> list[TreeRecord]:
@@ -140,6 +146,7 @@ def _read_record(path: Path) -> TreeRecord:
     base = gh.git_upstream_ref(cwd=cwd)
     dirty = bool(gh.git_status_porcelain(cwd=cwd).strip())
     ahead, behind = gh.git_ahead_behind(cwd=cwd)
+    unpushed = gh.git_unpushed_count(cwd=cwd)
     pr = _pr_label(gh.pr_for_head(branch, cwd=cwd)) if branch else None
     mtime = path.stat().st_mtime
     return TreeRecord(
@@ -151,6 +158,7 @@ def _read_record(path: Path) -> TreeRecord:
         behind=behind,
         pr=pr,
         mtime=mtime,
+        unpushed=unpushed,
     )
 
 

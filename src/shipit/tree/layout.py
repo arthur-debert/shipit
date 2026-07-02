@@ -66,6 +66,33 @@ REVIEW_KIND = "review"
 #: for the ephemeral kind (SES02 Layer C) name the segment from one place.
 EPHEMERAL_KIND = "ephemeral"
 
+#: The kind label for every per-Run write Tree (``epics`` / ``issues`` /
+#: ``branches`` namespaces): the default a path that is neither a shared review
+#: clone nor an ephemeral session Tree falls to in :func:`tree_kind`.
+WRITE_KIND = "write"
+
+
+def tree_kind(path: str | os.PathLike[str]) -> str:
+    """Which reclaim family ``path`` belongs to: ``review``/``ephemeral``/``write``.
+
+    There is no manifest — the path IS the signal (ADR-0018/0027), and the kind is
+    pinned to exactly the LEAF's parent segment, never "anywhere in the path": a
+    substring test would misclassify a write Tree whose org, repo, or central root
+    happens to contain a ``review``/``ephemeral`` segment, bypassing the safety
+    ladder that matches its true kind. Both the ``cleanup`` classifier (which
+    dispatches its per-kind ladders on this) and the ``list`` verb (which renders
+    the kind as a first-class column) name the mapping from this one place. Any
+    path that is neither special kind is a per-Run **write** Tree
+    (:data:`WRITE_KIND`) — the ``epics``/``issues``/``branches`` namespaces.
+    """
+    parent = Path(path).parent.name
+    if parent == REVIEW_KIND:
+        return REVIEW_KIND
+    if parent == EPHEMERAL_KIND:
+        return EPHEMERAL_KIND
+    return WRITE_KIND
+
+
 #: A slug/ref component keeps ONLY lowercase ASCII alphanumerics; EVERY run of any
 #: other character collapses to a single ``-``. This is an ALLOW-list, not a
 #: separators denylist: it catches the old separators (whitespace, ``/`` ``.`` ``:``)

@@ -597,6 +597,31 @@ def git_ahead_behind(*, cwd: str) -> tuple[int, int]:
     return (ahead, behind)
 
 
+def git_unpushed_count(*, cwd: str) -> int | None:
+    """How many commits on ``HEAD`` exist on NO remote at all — or ``None`` if unreadable.
+
+    The upstream-independent "unpushed" signal ADR-0027's ephemeral gc ladder is
+    defined over: :func:`git_ahead_behind`'s ``ahead`` reads ``(0, 0)`` for a branch
+    with **no upstream**, so a fresh ``ephemeral/<id>`` branch carrying local-only
+    commits would look level — exactly the misread that loses work. ``rev-list HEAD
+    --not --remotes`` counts commits reachable from ``HEAD`` but from no remote ref,
+    so a missing upstream never by itself blocks reclaim (0 = everything on some
+    remote) while a genuinely local commit is always counted.
+
+    ``None`` — not ``0`` — when the count cannot be read (detached/unborn HEAD, a git
+    failure, malformed output): the CALLER must treat "unknown" conservatively (keep),
+    and collapsing it to "nothing unpushed" would point the failure mode at data loss.
+    """
+    try:
+        out = _git(["rev-list", "--count", "HEAD", "--not", "--remotes"], cwd=cwd)
+    except GhError:
+        return None
+    try:
+        return int(out.strip())
+    except ValueError:
+        return None
+
+
 def pr_for_head(branch: str, *, cwd: str | None = None) -> dict | None | UnknownPr:
     """The PR whose head is ``branch`` as ``{number, state, isDraft, baseRefName}`` — or
     ``None`` / :data:`UNKNOWN`.

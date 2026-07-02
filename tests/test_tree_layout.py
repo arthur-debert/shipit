@@ -670,3 +670,24 @@ def test_plan_uses_central_root_when_spec_root_is_none(monkeypatch):
         p.dir
         == Path("/env/trees") / "acme" / "widget" / "issues" / "123" / "work-deadbeef"
     )
+
+
+# --- tree_kind: the path→reclaim-family mapping (ADR-0018/0027) -----------------
+
+
+def test_tree_kind_maps_the_leaf_parent_segment():
+    assert layout.tree_kind("/t/acme/widget/review/tre03-ws03") == layout.REVIEW_KIND
+    assert layout.tree_kind("/t/acme/widget/ephemeral/sess-1") == layout.EPHEMERAL_KIND
+    for write in (
+        "/t/acme/widget/epics/HAR02/WS02-deadbeef",
+        "/t/acme/widget/issues/123/work-deadbeef",
+        "/t/acme/widget/branches/feat-x-deadbeef",
+    ):
+        assert layout.tree_kind(write) == layout.WRITE_KIND
+
+
+def test_tree_kind_never_matches_mid_path_segments():
+    # Kind is the leaf's PARENT only: an org/repo named after a kind must not
+    # smuggle a write Tree onto another kind's reclaim ladder.
+    assert layout.tree_kind("/t/review/widget/branches/x-aa") == layout.WRITE_KIND
+    assert layout.tree_kind("/t/ephemeral/widget/branches/x-aa") == layout.WRITE_KIND

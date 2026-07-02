@@ -1,0 +1,314 @@
+"""``session/liveness`` — is the Claude Code session that owns a Tree still alive?
+
+The liveness seam the ephemeral-Tree gc ladder reads (ADR-0027 Consequences). An
+ephemeral session Tree has no PR, so the merged-PR ladder alone strands it; and it
+is often *clean* (a planning session that never committed), so "clean + aged"
+alone would delete a Tree out from under a live idle session. The tiebreaker is a
+**pidfile** the ``SessionStart`` hook writes into the Tree recording the ``claude``
+session's PID, its ``session_id``, and the PID's **OS process create-time** (read
+from the OS at write time, not wall-clock "now" — the hook fires slightly after
+the process starts, so the two are close but not equal).
+
+The module mirrors the codebase's functional-core idiom (ADR-0021): the DECISION —
+:func:`is_live` — is pure over an injectable **process probe**
+(``probe(pid) -> ProcessInfo | None``), so the whole truth table (PID dead, PID
+reused by a stranger, create-time drift, a ``node``-named live session) is
+unit-tested with a faked probe; only :func:`os_probe` touches the OS. A Tree is
+live when the PID is alive **and** the process's command line looks like Claude
+Code **and** its create-time matches the recorded one within a small tolerance.
+
+Two deliberate asymmetries, both from the ADR:
+
+- **"Looks like Claude Code" matches the command line, never the process name.**
+  Claude Code is a Node.js app, so the OS comm is usually ``node`` (or a
+  versioned node path); asserting ``name == "claude"`` would misread every live
+  session as dead. Argv is corroboration; the create-time — already a strong
+  per-PID identity — is the primary signal.
+- **PID reuse fails safe.** ``gc`` deletes directories, never processes: a false
+  "alive" only lets a dead Tree linger until the hard time cap; a reused PID
+  belonging to some other process fails the create-time (and argv) test and reads
+  as dead — which is correct, and the dirty/unpushed floor still protects work.
+
+The pidfile lives INSIDE the clone's ``.git`` directory, not the working tree: a
+tracked-tree file would make every session Tree permanently *dirty* and thereby
+unreclaimable (the gc ladder's absolute floor keeps dirty Trees), defeating the
+entire mechanism. ``.git`` dies with the Tree, so the record's lifetime is the
+Tree's by construction.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import time
+from collections.abc import Callable
+from dataclasses import asdict, dataclass
+from pathlib import Path
+
+from .. import proc
+
+logger = logging.getLogger("shipit.session")
+
+#: How far apart (seconds) the recorded and the probed create-time may be while
+#: still identifying the SAME process. ``ps``'s ``lstart`` has one-second
+#: granularity and the write/read sides may round differently, so exact equality
+#: would misread every live session; a few seconds absorbs that measurement
+#: granularity while still making post-reboot PID reuse (minutes-to-days apart)
+#: fail the match.
+CREATE_TIME_TOLERANCE_SECONDS = 5.0
+
+#: The pidfile's name inside the clone's ``.git`` directory (see module docstring
+#: for why it must NOT live in the working tree: a tracked file would dirty the
+#: Tree forever and the gc floor would never reclaim it).
+PIDFILE_NAME = "shipit-session.json"
+
+#: The substring that marks a command line as a Claude Code session. Matched
+#: case-insensitively against the WHOLE argv — the entrypoint is typically
+#: ``node …/claude-code/cli.js`` or a ``claude`` shim on PATH, so the process
+#: NAME is useless (``node``) but the command line always carries ``claude``.
+#: Deliberately permissive: argv is corroboration, the create-time match is the
+#: per-PID identity, so a false argv positive alone can never fake liveness.
+_CLAUDE_ARGV_MARKER = "claude"
+
+
+@dataclass(frozen=True)
+class ProcessInfo:
+    """One process as the probe saw it — the whole OS surface ``is_live`` reads.
+
+    ``create_time`` is the process's start time in epoch seconds (``None`` when
+    the probe could not read it); ``argv`` is the full command line as one
+    string. ``ppid`` exists for :func:`find_claude_process`'s ancestor walk.
+    """
+
+    pid: int
+    ppid: int
+    create_time: float | None
+    argv: str
+
+
+#: The injectable process-probe seam: ``probe(pid)`` returns the live process's
+#: :class:`ProcessInfo`, or ``None`` when no such PID is alive (or it cannot be
+#: read). Tests fake it; production passes :func:`os_probe`.
+Probe = Callable[[int], ProcessInfo | None]
+
+
+@dataclass(frozen=True)
+class LivenessRecord:
+    """The pidfile's contents: which process owns this Tree, identified strongly.
+
+    ``pid`` alone is reusable after reboot/wraparound; ``create_time`` (the PID's
+    OS process create-time, epoch seconds, read at WRITE time) makes the pair a
+    practically unique process identity. ``session_id`` is Claude Code's own id
+    for the session — not consulted by :func:`is_live` (the OS cannot be asked
+    for it) but recorded so a human inspecting a Tree can join it back to a
+    transcript.
+    """
+
+    pid: int
+    session_id: str
+    create_time: float
+
+
+def looks_like_claude(argv: str) -> bool:
+    """Whether ``argv`` reads as a Claude Code session's command line.
+
+    Case-insensitive substring match on the full command line — NEVER the OS
+    process name, which for the Node.js-based Claude Code is usually ``node``
+    (ADR-0027). Corroboration only: :func:`is_live` pairs this with the
+    create-time identity, so permissiveness here cannot fake a live session.
+    """
+    return _CLAUDE_ARGV_MARKER in argv.lower()
+
+
+def is_live(
+    record: LivenessRecord,
+    probe: Probe,
+    *,
+    tolerance: float = CREATE_TIME_TOLERANCE_SECONDS,
+) -> bool:
+    """Whether the session ``record`` describes is still alive — pure over ``probe``.
+
+    Live means ALL of: the PID is alive (``probe`` found it), its command line
+    looks like Claude Code (:func:`looks_like_claude` — argv, never the ``node``
+    process name), and its create-time matches the recorded one within
+    ``tolerance`` seconds (the primary per-PID identity). A dead PID, a PID
+    reused by some other process (argv or create-time mismatch), or an unreadable
+    create-time all read as NOT live — the safe direction: ``gc`` deletes
+    directories, never processes, and the ladder's dirty/unpushed floor plus the
+    grace window still protect a misread Tree's work.
+    """
+    info = probe(record.pid)
+    if info is None:
+        return False
+    if not looks_like_claude(info.argv):
+        return False
+    if info.create_time is None:
+        return False
+    return abs(info.create_time - record.create_time) <= tolerance
+
+
+#: Upper bound on :func:`find_claude_process`'s parent walk. Any real chain is a
+#: handful of hops (claude → shell → pixi → python …); the cap only guards
+#: against a cyclic/ill-behaved probe fake.
+_MAX_ANCESTOR_HOPS = 32
+
+
+def find_claude_process(start_pid: int, probe: Probe) -> ProcessInfo | None:
+    """The nearest ancestor of ``start_pid`` (inclusive) that IS Claude Code.
+
+    The ``SessionStart`` hook runs as a great-grandchild of the session (claude →
+    shell → ``pixi run`` → ``shipit``), so its own PID is not the one to record;
+    this walks the ``ppid`` chain from ``start_pid`` upward and returns the first
+    process whose command line looks like Claude Code — the session process the
+    pidfile should name. ``None`` when the walk exhausts (reached init, a dead
+    link, or the hop cap) without a match, so a caller launched OUTSIDE any
+    Claude session records nothing rather than something wrong.
+    """
+    pid = start_pid
+    for _ in range(_MAX_ANCESTOR_HOPS):
+        if pid <= 1:
+            return None
+        info = probe(pid)
+        if info is None:
+            return None
+        if looks_like_claude(info.argv):
+            return info
+        if info.ppid == pid:  # a probe fake or a pid-1-like self-parent: stop.
+            return None
+        pid = info.ppid
+    return None
+
+
+# --------------------------------------------------------------------------
+# Pidfile I/O — the record's home inside the Tree's .git dir
+# --------------------------------------------------------------------------
+
+
+def pidfile_path(tree: str | Path) -> Path:
+    """Where ``tree``'s liveness pidfile lives: ``<tree>/.git/shipit-session.json``.
+
+    Inside ``.git`` deliberately: the working tree would show the pidfile as an
+    untracked file, making every session Tree permanently DIRTY — and the gc
+    ladder's absolute floor keeps dirty Trees, so the mechanism would strand the
+    very Trees it exists to reclaim. ``.git`` is also removed with the Tree, so
+    the record can never outlive its subject.
+    """
+    return Path(tree) / ".git" / PIDFILE_NAME
+
+
+def write_pidfile(tree: str | Path, record: LivenessRecord) -> None:
+    """Write ``record`` as ``tree``'s pidfile (overwriting a prior session's).
+
+    Raises :class:`OSError` when the Tree has no ``.git`` directory to hold it
+    (not a clone) or the write fails — the caller (the fail-open ``SessionStart``
+    hook) decides that liveness is additive and swallows it.
+    """
+    path = pidfile_path(tree)
+    if not path.parent.is_dir():
+        raise FileNotFoundError(
+            f"{path.parent} is not a directory — {tree} is not a git clone, "
+            "so there is nowhere safe to record session liveness"
+        )
+    path.write_text(json.dumps(asdict(record), indent=2) + "\n", encoding="utf-8")
+
+
+def read_pidfile(tree: str | Path) -> LivenessRecord | None:
+    """The Tree's recorded :class:`LivenessRecord`, or ``None`` when unreadable.
+
+    ``None`` covers every degenerate case — no pidfile, unreadable file, malformed
+    JSON, missing or mis-typed fields — because the READER (the gc ladder) treats
+    "no record" as "not live" and its liveness-independent rungs (the dirty floor,
+    the grace window, the hard cap) carry the safety; a corrupt pidfile must never
+    crash a fleet-wide sweep.
+    """
+    try:
+        raw = pidfile_path(tree).read_text(encoding="utf-8")
+        data = json.loads(raw)
+        pid = data["pid"]
+        session_id = data["session_id"]
+        create_time = data["create_time"]
+        if (
+            isinstance(pid, int)
+            and not isinstance(pid, bool)
+            and isinstance(session_id, str)
+            and isinstance(create_time, (int, float))
+            and not isinstance(create_time, bool)
+        ):
+            return LivenessRecord(
+                pid=pid, session_id=session_id, create_time=float(create_time)
+            )
+        logger.debug("liveness: pidfile for %s has mis-typed fields: %r", tree, data)
+    except (OSError, ValueError, TypeError, KeyError):
+        logger.debug("liveness: no readable pidfile for %s", tree, exc_info=True)
+    return None
+
+
+def remove_pidfile(tree: str | Path) -> None:
+    """Best-effort removal of the Tree's pidfile (the fast-path teardown half).
+
+    Missing-is-fine and errors are swallowed to a DEBUG log: the pidfile lives in
+    ``.git`` and dies with the Tree anyway, so removal is a tidy-up, never
+    load-bearing — the gc ladder's create-time check already defuses a stale one.
+    """
+    try:
+        pidfile_path(tree).unlink(missing_ok=True)
+    except OSError:
+        logger.debug("liveness: could not remove pidfile for %s", tree, exc_info=True)
+
+
+# --------------------------------------------------------------------------
+# The real probe — the one effectful function in the module
+# --------------------------------------------------------------------------
+
+#: ``ps`` renders ``lstart`` in this fixed 5-token C-locale form
+#: (``Wed Jul  2 10:23:45 2026``) on both macOS and Linux.
+_LSTART_FORMAT = "%a %b %d %H:%M:%S %Y"
+_LSTART_TOKENS = 5
+
+
+def os_probe(pid: int) -> ProcessInfo | None:
+    """Read one live process from the OS: the production :data:`Probe`.
+
+    Shells out to ``ps -p <pid> -o pid=,ppid=,lstart=,args=`` — portable across
+    macOS and Linux, no psutil dependency (the runtime deps stay pure-python
+    wheel pulls). ``None`` when the PID is not alive or the output cannot be
+    parsed; a row whose ``lstart`` fails to parse still returns the process with
+    ``create_time=None`` (alive, identity unverifiable — :func:`is_live` then
+    reads it as not live, the safe direction).
+    """
+    if pid <= 0:
+        return None
+    result = proc.run(
+        ["ps", "-p", str(pid), "-o", "pid=,ppid=,lstart=,args="],
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    return _parse_ps_row(result.stdout)
+
+
+def _parse_ps_row(row: str) -> ProcessInfo | None:
+    """Parse one ``pid ppid lstart(5 tokens) args…`` row into a :class:`ProcessInfo`.
+
+    ``lstart`` embeds spaces but is exactly :data:`_LSTART_TOKENS` tokens wide, so
+    the row splits positionally: tokens 0/1 are pid/ppid, the next five are the
+    start time, everything after is the command line (re-joined — argv separators
+    inside an argument are not recoverable from ``ps``, and the argv check is a
+    substring match anyway). ``None`` on a malformed row; a merely unparseable
+    ``lstart`` degrades to ``create_time=None`` rather than discarding a process
+    that is demonstrably alive.
+    """
+    tokens = row.split()
+    if len(tokens) < 2 + _LSTART_TOKENS + 1:
+        return None
+    try:
+        pid, ppid = int(tokens[0]), int(tokens[1])
+    except ValueError:
+        return None
+    lstart = " ".join(tokens[2 : 2 + _LSTART_TOKENS])
+    try:
+        create_time: float | None = time.mktime(time.strptime(lstart, _LSTART_FORMAT))
+    except (ValueError, OverflowError):
+        create_time = None
+    argv = " ".join(tokens[2 + _LSTART_TOKENS :])
+    return ProcessInfo(pid=pid, ppid=ppid, create_time=create_time, argv=argv)

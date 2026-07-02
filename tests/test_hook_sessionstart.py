@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 from shipit.harness import activation
 from shipit.pixienv import Activation, parse_activation
+from shipit.session import liveness
 from shipit.verbs.hook import sessionstart
 
 TREE_ROOT = "/trees/SES01/WS01"
@@ -348,3 +349,116 @@ def test_unwritable_env_file_fails_open(pixi_repo, tmp_path):
         runner=_fake_runner({}),
     )
     assert code == 0
+
+
+# --------------------------------------------------------------------------
+# Liveness pidfile — the second additive write (SES02, ADR-0027)
+# --------------------------------------------------------------------------
+
+CREATED = 1_750_000_000.0
+
+#: A realistic hook ancestry: shipit(300) <- pixi(200) <- claude(100). The claude
+#: process is node-named — only the command line betrays it (the ADR's misread
+#: guard: NEVER match the OS process name).
+ANCESTRY = {
+    300: liveness.ProcessInfo(
+        pid=300, ppid=200, create_time=CREATED + 9, argv="python -m shipit hook"
+    ),
+    200: liveness.ProcessInfo(
+        pid=200, ppid=100, create_time=CREATED + 8, argv="pixi run shipit hook"
+    ),
+    100: liveness.ProcessInfo(
+        pid=100,
+        ppid=1,
+        create_time=CREATED,
+        argv="node /x/@anthropic-ai/claude-code/cli.js -w sess-1",
+    ),
+}
+
+
+@pytest.fixture
+def clone(tmp_path):
+    """A session-Tree shape: a dir whose .git is a directory."""
+    (tmp_path / ".git").mkdir()
+    return tmp_path
+
+
+def _run_liveness(payload, *, probe=ANCESTRY.get, self_pid=300, env=None):
+    return sessionstart.run(
+        stdin=io.StringIO(json.dumps(payload)),
+        environ=env if env is not None else {},
+        probe=probe,
+        self_pid=self_pid,
+    )
+
+
+def test_pidfile_records_the_claude_ancestor(clone):
+    # The recorded PID is the claude ANCESTOR's (100), never the hook's own
+    # (300); create-time is the ancestor's OS create-time read at write time.
+    code = _run_liveness({"session_id": "sess-abc", "cwd": str(clone)})
+    assert code == 0
+    record = liveness.read_pidfile(clone)
+    assert record == liveness.LivenessRecord(
+        pid=100, session_id="sess-abc", create_time=CREATED
+    )
+
+
+def test_pidfile_lands_inside_dot_git_never_the_working_tree(clone):
+    # In the working tree the pidfile would dirty the Tree forever and the gc
+    # floor would never reclaim it.
+    _run_liveness({"session_id": "s", "cwd": str(clone)})
+    assert liveness.pidfile_path(clone).exists()
+    assert list(p.name for p in clone.iterdir()) == [".git"]
+
+
+def test_no_claude_ancestor_writes_no_pidfile(clone):
+    # Launched outside any Claude session: the chain tops out with no claude.
+    chain = {
+        300: liveness.ProcessInfo(
+            pid=300, ppid=1, create_time=CREATED, argv="/bin/zsh -l"
+        ),
+    }
+    code = _run_liveness({"cwd": str(clone)}, probe=chain.get)
+    assert code == 0
+    assert liveness.read_pidfile(clone) is None
+
+
+def test_non_clone_cwd_writes_no_pidfile(tmp_path):
+    code = _run_liveness({"session_id": "s", "cwd": str(tmp_path)})
+    assert code == 0
+    assert not (tmp_path / ".git").exists()
+
+
+def test_missing_session_id_degrades_to_empty(clone):
+    _run_liveness({"cwd": str(clone)})
+    record = liveness.read_pidfile(clone)
+    assert record is not None
+    assert record.session_id == ""
+
+
+def test_probe_explosion_fails_open(clone):
+    def boom(pid):
+        raise RuntimeError("ps went away")
+
+    code = _run_liveness({"cwd": str(clone)}, probe=boom)
+    assert code == 0
+    assert liveness.read_pidfile(clone) is None
+
+
+def test_liveness_write_survives_a_broken_activation(clone, tmp_path):
+    # The two writes fail open INDEPENDENTLY: an unwritable env file must not
+    # cost the session its liveness record.
+    env_file = tmp_path / "no-such-dir" / "claude-env"
+
+    def broken_runner(cmd, **kwargs):
+        raise RuntimeError("pixi exploded")
+
+    code = sessionstart.run(
+        stdin=io.StringIO(json.dumps({"session_id": "s", "cwd": str(clone)})),
+        environ={"CLAUDE_ENV_FILE": str(env_file)},
+        runner=broken_runner,
+        probe=ANCESTRY.get,
+        self_pid=300,
+    )
+    assert code == 0
+    assert liveness.read_pidfile(clone) is not None
