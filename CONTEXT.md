@@ -421,6 +421,44 @@ outside its Tool adapter is a defect.
 *Avoid*: two half-adapters for one tool (the two-`GhError` disease); "wrapper"
 (an adapter is the registry pattern, not ad-hoc convenience).
 
+### Logging (the durable record)
+
+**File log**:
+The durable, per-repo, rotating diagnosis record every shipit process writes —
+**JSONL**, one flat JSON object per record: `ts` (ISO-8601 UTC), `level`,
+`logger`, `msg`, plus **domain keys** and event extras, all flat (ADR-0029,
+agents-first). One processor pipeline in `logsetup` (context-merge → enrich →
+**redactor**) feeds every sink; only the final renderer differs — the file gets
+JSONL, the console/CI stderr surfaces stay human-formatted. `shipit logs` is its
+reader: the default view renders records legibly, `--raw` passes stored lines
+through for `jq`. The verb reads JSONL ONLY — hard cutover, no format sniffing;
+pre-cutover freeform files age out via rotation.
+*Avoid*: treating stderr as the record (it is the surface; the file is the
+record); nesting or an OTel log model (fields stay flat and top-level).
+
+**Domain keys**:
+The CLOSED correlation vocabulary — `session`, `tree`, `pr`, `run`, `repo` —
+bound via context (`logcontext`) at the CLI entry and the spawn/detach seams,
+carried across process boundaries as `SHIPIT_LOG_CTX_*` env vars and rebound at
+the child's logging setup, so a Run's records correlate to their parent.
+Present-when-bound: an unbound key is ABSENT from the record, never null; an
+unknown key name raises, so a typo cannot mint vocabulary. No synthetic
+trace/span ids (ADR-0029).
+*Avoid*: ad-hoc extras as correlation keys (extras describe the event; domain
+keys join records); binding a synthetic `session` (the key binds only when a
+seam knows the real identity).
+
+**Redactor**:
+The central masking processor (`shipit.redact`, ADR-0028/0029) in the one log
+pipeline, so everything logged on ANY sink is masked before rendering: exact
+values of every secret `secretsrc` fetches (registered at fetch time, held for
+the process lifetime) plus pattern rules for GitHub token prefixes and PEM
+blocks. Mask is `***`. No redaction package is adopted (none credible —
+ADR-0029 records the survey).
+*Avoid*: per-call-site scrubbing as the safety story (the pipeline seam is the
+guarantee; `gh.py`'s argv masking is belt-and-suspenders for non-log channels);
+"sanitize"/"filter" (redaction masks values, it does not drop records).
+
 ### Trees (where work happens)
 
 **Tree**:
