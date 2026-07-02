@@ -76,7 +76,9 @@ def run(stdin: TextIO | None = None) -> int:
             metrics=metrics,
             meta=meta,
             variant=_variant(meta),
-            commit=wd.revision.commit,
+            # The record is JSON: the Sha stringifies HERE, at the one
+            # serialization seam — commit identity is typed everywhere upstream.
+            commit=None if wd.revision.commit is None else str(wd.revision.commit),
             timestamp=_now_iso(),
             is_coordinator=run_files.is_coordinator,
         )

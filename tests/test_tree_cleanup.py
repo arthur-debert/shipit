@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import pytest
 
+from shipit.identity import Sha
 from shipit.tree.cleanup import (
     DEFAULT_MAX_AGE_SECONDS,
     classify,
@@ -26,9 +27,9 @@ RECENT_MTIME = NOW - (THRESHOLD - 50)
 
 
 #: Stand-in full SHAs for truth-table rows (git SHAs are 40 hex chars).
-SHA_PROVISION = "a" * 40
-SHA_WORK = "b" * 40
-SHA_OTHER = "c" * 40
+SHA_PROVISION = Sha("a" * 40)
+SHA_WORK = Sha("b" * 40)
+SHA_OTHER = Sha("c" * 40)
 
 
 def _record(path: str = "/trees/t", **over) -> TreeRecord:
@@ -311,7 +312,7 @@ def _classify_ephemeral(
     state: str | None,
     *,
     live: bool,
-    provision: frozenset[str] | None = None,
+    provision: frozenset[Sha] | None = None,
 ) -> str:
     decision = classify(
         [record],

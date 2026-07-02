@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pytest
 from shipit import git
+from shipit.identity import Sha
 from shipit.session import liveness
 from shipit.tree import layout, provision
 from shipit.verbs.hook import worktreeremove
@@ -85,7 +86,9 @@ def test_unpushed_tree_is_never_auto_removed(ephemeral_tree, monkeypatch):
     # Commits on NO remote (the upstream-independent count): the never-lose-work
     # floor holds on the fast path exactly as in the gc ladder.
     monkeypatch.setattr(git, "status_porcelain", lambda *, cwd: [])
-    monkeypatch.setattr(git, "unpushed_shas", lambda *, cwd: ("a" * 40, "b" * 40))
+    monkeypatch.setattr(
+        git, "unpushed_shas", lambda *, cwd: (Sha("a" * 40), Sha("b" * 40))
+    )
     assert _run({"cwd": str(ephemeral_tree)}) == 0
     assert ephemeral_tree.exists()
 
@@ -95,7 +98,7 @@ def test_unreadable_unpushed_list_blocks_removal(ephemeral_tree, monkeypatch):
     # exclusion cannot rescue an unreadable local-only list.
     monkeypatch.setattr(git, "status_porcelain", lambda *, cwd: [])
     monkeypatch.setattr(git, "unpushed_shas", lambda *, cwd: None)
-    provision.write_record(ephemeral_tree, ["a" * 40])
+    provision.write_record(ephemeral_tree, [Sha("a" * 40)])
     assert _run({"cwd": str(ephemeral_tree)}) == 0
     assert ephemeral_tree.exists()
 
@@ -106,7 +109,7 @@ def test_recorded_provisioning_commit_does_not_block_removal(
     # #232: the drift-window shape — the ONLY local-only commit is the managed-set
     # reconcile provisioning recorded at birth. The fast path mirrors the gc
     # ladder's carve-out and removes the clean Tree on session exit.
-    sha = "a" * 40
+    sha = Sha("a" * 40)
     monkeypatch.setattr(git, "status_porcelain", lambda *, cwd: [])
     monkeypatch.setattr(git, "unpushed_shas", lambda *, cwd: (sha,))
     monkeypatch.setattr(git, "ahead_behind", lambda *, cwd: (0, 0))
@@ -132,7 +135,7 @@ def test_ahead_fully_explained_by_provisioning_commit_removes(
 ):
     # The recorded provisioning commit also sits ahead of the upstream it was cut
     # from; an `ahead` reading the carve-out fully accounts for does not block.
-    sha = "a" * 40
+    sha = Sha("a" * 40)
     monkeypatch.setattr(git, "status_porcelain", lambda *, cwd: [])
     monkeypatch.setattr(git, "unpushed_shas", lambda *, cwd: (sha,))
     monkeypatch.setattr(git, "ahead_behind", lambda *, cwd: (1, 0))
@@ -145,8 +148,10 @@ def test_provisioning_plus_real_commit_still_blocks(ephemeral_tree, monkeypatch)
     # The floor stays absolute for real work: any local-only commit BEYOND the
     # recorded provisioning SHA refuses the fast path.
     monkeypatch.setattr(git, "status_porcelain", lambda *, cwd: [])
-    monkeypatch.setattr(git, "unpushed_shas", lambda *, cwd: ("a" * 40, "b" * 40))
-    provision.write_record(ephemeral_tree, ["a" * 40])
+    monkeypatch.setattr(
+        git, "unpushed_shas", lambda *, cwd: (Sha("a" * 40), Sha("b" * 40))
+    )
+    provision.write_record(ephemeral_tree, [Sha("a" * 40)])
     assert _run({"cwd": str(ephemeral_tree)}) == 0
     assert ephemeral_tree.exists()
 
@@ -155,8 +160,8 @@ def test_mismatched_provision_record_still_blocks(ephemeral_tree, monkeypatch):
     # A rebase/amend changed the SHA: identity is the SHA, never the message, so
     # the mismatch conservatively refuses (falls back to the gc ladder).
     monkeypatch.setattr(git, "status_porcelain", lambda *, cwd: [])
-    monkeypatch.setattr(git, "unpushed_shas", lambda *, cwd: ("b" * 40,))
-    provision.write_record(ephemeral_tree, ["a" * 40])
+    monkeypatch.setattr(git, "unpushed_shas", lambda *, cwd: (Sha("b" * 40),))
+    provision.write_record(ephemeral_tree, [Sha("a" * 40)])
     assert _run({"cwd": str(ephemeral_tree)}) == 0
     assert ephemeral_tree.exists()
 

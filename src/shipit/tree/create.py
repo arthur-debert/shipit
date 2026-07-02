@@ -36,10 +36,14 @@ import shutil
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .. import config, execrun, git, logcontext, pixienv
 from . import include, provision
 from .layout import TreeSpec, central_root, plan
+
+if TYPE_CHECKING:
+    from ..identity import Sha
 
 #: The Tree axis' shared logger (LOG02 spray, ADR-0029): the creation pipeline
 #: narrates its milestones at INFO with durations ("tree created …", per
@@ -301,7 +305,7 @@ def _provision(dest: Path, *, trees_root: Path) -> None:
         run_provision(["npm", "ci"], cwd=dest, env=env)
 
 
-def _record_install_commits(dest: Path, *, head_before: str | None) -> None:
+def _record_install_commits(dest: Path, *, head_before: Sha | None) -> None:
     """Record what the managed-set install just committed, best-effort (#232).
 
     Compares ``HEAD`` before and after the ``shipit install --local`` step; when it
