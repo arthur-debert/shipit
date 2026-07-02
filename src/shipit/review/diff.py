@@ -31,7 +31,7 @@ import json
 import os
 from dataclasses import dataclass, field
 
-from .. import execrun, gh
+from .. import execrun, gh, git
 from ..identity import Sha, repo_from_slug
 from ..pr import PR, core_from_node
 
@@ -159,25 +159,10 @@ def _git_toplevel(workdir: str) -> str | None:
     repo-relative paths unopenable. Normalizing ``workdir`` to the toplevel makes
     the agent's cwd the repo root regardless of where the command was invoked.
 
-    Routes through the single :func:`shipit.gh.repo_root` boundary (ADR-0024)
+    Routes through the single :func:`shipit.git.repo_root` boundary (ADR-0024)
     rather than re-implementing ``git rev-parse --show-toplevel``.
     """
-    return gh.repo_root(cwd=workdir)
-
-
-def _git(workdir: str, args: list[str], *, check: bool = True) -> execrun.ExecResult:
-    return execrun.run(["git", "-C", workdir, *args], check=check)
-
-
-def _sha_present(workdir: str, sha: str) -> bool:
-    """True if ``sha`` is a commit object reachable in ``workdir`` (no fetch)."""
-    if not sha:
-        return False
-    result = execrun.run(
-        ["git", "-C", workdir, "cat-file", "-e", f"{sha}^{{commit}}"],
-        check=False,
-    )
-    return result.rc == 0
+    return git.repo_root(cwd=workdir)
 
 
 def _pr_meta(pr: int, repo: str | None) -> dict:
@@ -325,14 +310,14 @@ def resolve_pr(
     # Make the head commit object available locally (fetch only — never a
     # checkout-switch). Try the PR head ref namespace first (works without the
     # branch being local), then the named head branch, then the sha directly.
-    if not _sha_present(workdir, head_sha):
-        _git(workdir, ["fetch", "--quiet", "origin", f"pull/{pr}/head"], check=False)
-        if not _sha_present(workdir, head_sha) and head_ref:
-            _git(workdir, ["fetch", "--quiet", "origin", head_ref], check=False)
-        if not _sha_present(workdir, head_sha):
-            _git(workdir, ["fetch", "--quiet", "origin", head_sha], check=False)
+    if not git.commit_present(head_sha, cwd=workdir):
+        git.fetch_ref(f"pull/{pr}/head", cwd=workdir)
+        if not git.commit_present(head_sha, cwd=workdir) and head_ref:
+            git.fetch_ref(head_ref, cwd=workdir)
+        if not git.commit_present(head_sha, cwd=workdir):
+            git.fetch_ref(head_sha, cwd=workdir)
 
-    if not _sha_present(workdir, head_sha):
+    if not git.commit_present(head_sha, cwd=workdir):
         raise ReviewError(
             f"Can't resolve PR #{pr} head {head_sha} — the commit isn't available "
             f"after fetching pull/{pr}/head, the head branch, and the sha directly. "
@@ -347,12 +332,12 @@ def resolve_pr(
     # isn't present. No silent degrade to a local `origin/<base>` ref or to the
     # base tip: an unfetchable base SHA stops the review rather than diffing
     # against the wrong base.
-    if not _sha_present(workdir, base_sha):
-        _git(workdir, ["fetch", "--quiet", "origin", base_ref], check=False)
-        if not _sha_present(workdir, base_sha):
-            _git(workdir, ["fetch", "--quiet", "origin", base_sha], check=False)
+    if not git.commit_present(base_sha, cwd=workdir):
+        git.fetch_ref(base_ref, cwd=workdir)
+        if not git.commit_present(base_sha, cwd=workdir):
+            git.fetch_ref(base_sha, cwd=workdir)
 
-    if not _sha_present(workdir, base_sha):
+    if not git.commit_present(base_sha, cwd=workdir):
         raise ReviewError(
             f"Can't resolve PR #{pr} base {base_sha} (baseRefOid) — the commit "
             f"isn't available after fetching the base branch '{base_ref}' and the "
@@ -367,25 +352,21 @@ def resolve_pr(
     # merge-base explicitly (rather than relying on git's `A...B` shorthand) so the
     # endpoint is unambiguous, and FAIL LOUD if there is no common ancestor instead
     # of silently degrading to the base tip.
-    merge_base = _git(workdir, ["merge-base", base_sha, head_point], check=False)
-    if merge_base.rc != 0 or not merge_base.stdout.strip():
+    base_point = git.merge_base(base_sha, head_point, cwd=workdir)
+    if base_point is None:
         raise ReviewError(
             f"PR #{pr} base {base_sha} and head {head_point} have no common "
             f"ancestor — cannot compute a meaningful review diff. The PR base/head "
             f"may be unrelated histories; resolve the base and re-run."
         )
-    base_point = merge_base.stdout.strip()
 
     try:
-        diff = _git(workdir, ["diff", f"{base_point}...{head_point}"]).stdout
-        names = _git(
-            workdir, ["diff", "--name-only", f"{base_point}...{head_point}"]
-        ).stdout
+        diff = git.diff_range(base_point, head_point, cwd=workdir)
+        changed_files = git.diff_name_only(base_point, head_point, cwd=workdir)
     except execrun.ExecError as exc:
         raise ReviewError(
-            f"failed to compute diff for PR #{pr} ({base_point}...{head_point}): {exc}"
+            f"failed to compute diff for PR #{pr} ({base_point}..{head_point}): {exc}"
         ) from exc
-    changed_files = [line for line in names.splitlines() if line.strip()]
 
     return ReviewView(
         pr=pr_core,

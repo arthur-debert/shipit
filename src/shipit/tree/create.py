@@ -7,7 +7,7 @@ summary (``{path, branch, base}``). The whole pipeline hides behind this one cal
 
 1. ``git clone --reference <local> --dissociate <github-url> <dir>`` — a tiny,
    instant, yet fully INDEPENDENT clone (ADR-0014); see
-   :func:`shipit.gh.git_clone_dissociated`.
+   :func:`shipit.git.clone_dissociated`.
 2. ``git fetch origin`` then ``git checkout -b <branch> <base>``.
 3. apply ``.treeinclude`` — copy the gitignored-but-needed files (``.env``,
    Doppler config, models) from the source checkout into the new Tree
@@ -37,7 +37,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from .. import config, execrun, gh, logcontext, pixienv
+from .. import config, execrun, git, logcontext, pixienv
 from . import include, provision
 from .layout import TreeSpec, central_root, plan
 
@@ -135,9 +135,9 @@ def create(spec: TreeSpec, *, source_repo: str, github_url: str) -> Tree:
             tree_plan.base,
         )
         try:
-            gh.git_clone_dissociated(github_url, str(dest), reference=source_repo)
-            gh.git_fetch(cwd=str(dest))
-            gh.git_checkout_new_branch(tree_plan.branch, tree_plan.base, cwd=str(dest))
+            git.clone_dissociated(github_url, str(dest), reference=source_repo)
+            git.fetch(cwd=str(dest))
+            git.checkout_new_branch(tree_plan.branch, tree_plan.base, cwd=str(dest))
             copied = include.apply(source_repo, dest)
             logger.debug(
                 "tree copied %d .treeinclude file(s) into %s", len(copied), dest
@@ -291,7 +291,7 @@ def _provision(dest: Path, *, trees_root: Path) -> None:
             "(a Tree can only be provisioned from a repo shipit manages)"
         )
     env = provision_env()
-    head_before = gh.git_head_commit(cwd=str(dest))
+    head_before = git.head_commit(cwd=str(dest))
     run_provision(["shipit", "install", ".", "--local"], cwd=dest, env=env)
     _record_install_commits(dest, head_before=head_before)
     if (dest / pixienv.MANIFEST_NAME).is_file():
@@ -313,10 +313,10 @@ def _record_install_commits(dest: Path, *, head_before: str | None) -> None:
     the record is purely additive and can never break Tree creation.
     """
     cwd = str(dest)
-    head_after = gh.git_head_commit(cwd=cwd)
+    head_after = git.head_commit(cwd=cwd)
     if head_before is None or head_after is None or head_after == head_before:
         return
-    shas = gh.git_commits_between(head_before, head_after, cwd=cwd)
+    shas = git.commits_between(head_before, head_after, cwd=cwd)
     if not shas:
         logger.warning(
             "provisioning moved HEAD in %s but the commit range was unreadable; "
@@ -409,5 +409,5 @@ def create_from_source(spec: TreeSpec, *, source_repo: str | Path) -> Tree:
     checkout already uses, so auth and ``gh`` behave identically inside the Tree.
     """
     source = str(source_repo)
-    url = gh.git_remote_url(cwd=source)
+    url = git.remote_url(cwd=source)
     return create(spec, source_repo=source, github_url=url)

@@ -1,9 +1,10 @@
 """Tests for `shipit.review.diff` — PR resolution + workdir normalization.
 
-The full `resolve_pr` shells out to git + `gh`; here we cover the workdir
+The full `resolve_pr` rides the git adapter + `gh`; here we cover the workdir
 normalization seam (`_git_toplevel`) and that `resolve_pr` anchors the agent's
-cwd to the repo root even when invoked from a nested subdir, with the git/gh
-boundary stubbed.
+cwd to the repo root even when invoked from a nested subdir, with the
+`shipit.git` adapter and gh boundary stubbed (PROC02-WS03: the review-diff
+path builds no git argv of its own — it patches the adapter's typed reads).
 """
 
 from __future__ import annotations
@@ -16,8 +17,28 @@ from shipit.review import diff, post
 HEAD = "cafe" * 10
 
 
+def _present_recording(seen: list):
+    """A `git.commit_present` fake that records each cwd and answers True."""
+
+    def fake(sha, *, cwd):
+        seen.append(cwd)
+        return True
+
+    return fake
+
+
+def _merge_base_recording(seen: list):
+    """A `git.merge_base` fake that records each cwd and answers a fixed sha."""
+
+    def fake(a, b, *, cwd):
+        seen.append(cwd)
+        return "mergebasesha"
+
+    return fake
+
+
 def test_git_toplevel_returns_repo_root(monkeypatch):
-    # Routes through the single `gh.repo_root(cwd=...)` boundary (ADR-0024), passing
+    # Routes through the single `git.repo_root(cwd=...)` boundary (ADR-0024), passing
     # the workdir through as `cwd` and returning its resolved toplevel.
     calls: list[str] = []
 
@@ -25,14 +46,14 @@ def test_git_toplevel_returns_repo_root(monkeypatch):
         calls.append(cwd)
         return "/repo/root"
 
-    monkeypatch.setattr(diff.gh, "repo_root", fake_repo_root)
+    monkeypatch.setattr(diff.git, "repo_root", fake_repo_root)
     assert diff._git_toplevel("/repo/root/src/deep") == "/repo/root"
     assert calls == ["/repo/root/src/deep"]
 
 
 def test_git_toplevel_none_outside_checkout(monkeypatch):
     # The boundary returns None outside a checkout; `_git_toplevel` passes it through.
-    monkeypatch.setattr(diff.gh, "repo_root", lambda *, cwd: None)
+    monkeypatch.setattr(diff.git, "repo_root", lambda *, cwd: None)
     assert diff._git_toplevel("/tmp/not-a-repo") is None
 
 
@@ -48,23 +69,23 @@ def test_resolve_pr_normalizes_workdir_to_toplevel(monkeypatch):
             '"headRefOid": "cafecafecafecafecafecafecafecafecafecafe", "baseRefName": "main", "baseRefOid": "basesha"}'
         ),
     )
-    monkeypatch.setattr(diff, "_sha_present", lambda wd, sha: True)
+    monkeypatch.setattr(diff.git, "commit_present", _present_recording(seen := []))
 
-    seen_workdirs: list[str] = []
-    seen_diff_specs: list[str] = []
+    seen_diff_specs: list[tuple[str, str]] = []
 
-    def fake_git(workdir, args, *, check=True):
-        seen_workdirs.append(workdir)
-        if args[:1] == ["diff"]:
-            seen_diff_specs.append(args[-1])
+    def fake_diff_range(base, head, *, cwd):
+        seen.append(cwd)
+        seen_diff_specs.append((base, head))
+        return "the diff\n"
 
-        class R:
-            rc = 0
-            stdout = "mergebasesha\n" if args[:1] == ["merge-base"] else "the diff\n"
+    def fake_diff_names(base, head, *, cwd):
+        seen.append(cwd)
+        seen_diff_specs.append((base, head))
+        return ["a.py"]
 
-        return R()
-
-    monkeypatch.setattr(diff, "_git", fake_git)
+    monkeypatch.setattr(diff.git, "merge_base", _merge_base_recording(seen))
+    monkeypatch.setattr(diff.git, "diff_range", fake_diff_range)
+    monkeypatch.setattr(diff.git, "diff_name_only", fake_diff_names)
 
     ctx = diff.resolve_pr(5, workdir="/repo/root/src/deep")
     assert ctx.workdir == "/repo/root"
@@ -74,9 +95,9 @@ def test_resolve_pr_normalizes_workdir_to_toplevel(monkeypatch):
     # The diff endpoint is the MERGE BASE of the authoritative base + head (the PR
     # branch point) — GitHub's three-dot diff — computed explicitly, not the raw
     # base tip.
-    assert seen_diff_specs == [f"mergebasesha...{HEAD}", f"mergebasesha...{HEAD}"]
+    assert seen_diff_specs == [("mergebasesha", HEAD), ("mergebasesha", HEAD)]
     # Every git invocation ran against the toplevel, not the nested subdir.
-    assert set(seen_workdirs) == {"/repo/root"}
+    assert set(seen) == {"/repo/root"}
 
 
 def test_resolve_pr_omitted_repo_canonicalizes_via_gh_not_alias_origin(monkeypatch):
@@ -99,16 +120,10 @@ def test_resolve_pr_omitted_repo_canonicalizes_via_gh_not_alias_origin(monkeypat
             '"baseRefName": "main", "baseRefOid": "basesha"}'
         ),
     )
-    monkeypatch.setattr(diff, "_sha_present", lambda wd, sha: True)
-
-    def fake_git(workdir, args, *, check=True):
-        class R:
-            rc = 0
-            stdout = "mergebasesha\n" if args[:1] == ["merge-base"] else "the diff\n"
-
-        return R()
-
-    monkeypatch.setattr(diff, "_git", fake_git)
+    monkeypatch.setattr(diff.git, "commit_present", lambda sha, *, cwd: True)
+    monkeypatch.setattr(diff.git, "merge_base", lambda a, b, *, cwd: "mergebasesha")
+    monkeypatch.setattr(diff.git, "diff_range", lambda base, head, *, cwd: "the diff\n")
+    monkeypatch.setattr(diff.git, "diff_name_only", lambda base, head, *, cwd: [])
 
     # If resolve_pr fell back to the local origin (an alias, here), it would surface
     # a truthy slug and downstream would skip `gh repo view`. Guard against that by
@@ -145,23 +160,19 @@ def test_resolve_pr_no_common_ancestor_fails_loud(monkeypatch):
             '"baseRefName": "main", "baseRefOid": "basesha"}'
         ),
     )
-    monkeypatch.setattr(diff, "_sha_present", lambda wd, sha: True)
+    monkeypatch.setattr(diff.git, "commit_present", lambda sha, *, cwd: True)
+    # merge-base finds no common ancestor.
+    monkeypatch.setattr(diff.git, "merge_base", lambda a, b, *, cwd: None)
 
     diff_attempted = False
 
-    def fake_git(workdir, args, *, check=True):
+    def fake_diff_range(base, head, *, cwd):
         nonlocal diff_attempted
-        if args[:1] == ["diff"]:
-            diff_attempted = True
+        diff_attempted = True
+        return ""
 
-        class R:
-            # merge-base finds no common ancestor (rc=1, empty stdout).
-            rc = 1 if args[:1] == ["merge-base"] else 0
-            stdout = ""
-
-        return R()
-
-    monkeypatch.setattr(diff, "_git", fake_git)
+    monkeypatch.setattr(diff.git, "diff_range", fake_diff_range)
+    monkeypatch.setattr(diff.git, "diff_name_only", lambda base, head, *, cwd: [])
 
     with pytest.raises(diff.ReviewError, match="no common ancestor"):
         diff.resolve_pr(5, workdir="/repo/root")
@@ -180,8 +191,7 @@ def test_resolve_pr_missing_base_oid_fails_loud(monkeypatch):
             '"headRefOid": "cafecafecafecafecafecafecafecafecafecafe", "baseRefName": "main"}'
         ),
     )
-    monkeypatch.setattr(diff, "_sha_present", lambda wd, sha: True)
-    monkeypatch.setattr(diff, "_git", lambda *a, **k: None)
+    monkeypatch.setattr(diff.git, "commit_present", lambda sha, *, cwd: True)
     with pytest.raises(diff.ReviewError, match="no base sha"):
         diff.resolve_pr(5, workdir="/repo/root")
 
@@ -201,22 +211,19 @@ def test_resolve_pr_stale_base_fetch_fails_loud(monkeypatch):
     )
     # The head is present; the base sha never becomes present (every fetch is a
     # no-op — the classic stale/missing `origin/main`).
-    monkeypatch.setattr(diff, "_sha_present", lambda wd, sha: sha == HEAD)
+    monkeypatch.setattr(diff.git, "commit_present", lambda sha, *, cwd: sha == HEAD)
+    monkeypatch.setattr(diff.git, "fetch_ref", lambda refspec, *, cwd: False)
 
     diff_attempted = False
 
-    def fake_git(workdir, args, *, check=True):
+    def fake_diff_range(base, head, *, cwd):
         nonlocal diff_attempted
-        if args[:1] == ["diff"]:
-            diff_attempted = True
+        diff_attempted = True
+        return ""
 
-        class R:
-            rc = 0
-            stdout = ""
-
-        return R()
-
-    monkeypatch.setattr(diff, "_git", fake_git)
+    monkeypatch.setattr(diff.git, "diff_range", fake_diff_range)
+    monkeypatch.setattr(diff.git, "merge_base", lambda a, b, *, cwd: "mergebasesha")
+    monkeypatch.setattr(diff.git, "diff_name_only", lambda base, head, *, cwd: [])
 
     with pytest.raises(diff.ReviewError, match="base basesha"):
         diff.resolve_pr(5, workdir="/repo/root")

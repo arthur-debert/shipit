@@ -11,7 +11,7 @@ import io
 import json
 
 import pytest
-from shipit import gh
+from shipit import git
 from shipit.harness.eval import store
 from shipit.verbs.hook.eval import run
 
@@ -28,14 +28,14 @@ def state_dir(monkeypatch, tmp_path):
     """
     base = tmp_path / "state"
     monkeypatch.setattr(store.platformdirs, "user_state_dir", lambda *a, **k: str(base))
-    monkeypatch.setattr(gh, "repo_root", lambda *, cwd=None: cwd)
+    monkeypatch.setattr(git, "repo_root", lambda *, cwd=None: cwd)
     monkeypatch.setattr(
-        gh,
-        "git_remote_url",
+        git,
+        "remote_url",
         lambda *, cwd, remote="origin": "git@github.com:acme/widget.git",
     )
-    monkeypatch.setattr(gh, "git_current_branch", lambda *, cwd: "COR01/WS01")
-    monkeypatch.setattr(gh, "git_head_commit", lambda *, cwd: "cafe1234")
+    monkeypatch.setattr(git, "current_branch", lambda *, cwd: "COR01/WS01")
+    monkeypatch.setattr(git, "head_commit", lambda *, cwd: "cafe1234")
     return base
 
 
@@ -92,7 +92,7 @@ def test_subagent_with_missing_meta_gets_no_exit_hygiene(
     # coordinator-only exit-hygiene check must NOT run. The git read is patched to a
     # clean tree so, were the check wrongly run, worktree_clean would be True; the
     # None assertion proves the gate is on run KIND, not on `meta is None`.
-    monkeypatch.setattr(gh, "git_status_porcelain", lambda *, cwd: "")
+    monkeypatch.setattr(git, "status_porcelain", lambda *, cwd: [])
     sub = tmp_path / "session" / "subagents"
     transcript = sub / "agent-nometa.jsonl"
     _write_transcript(transcript, "Read")  # deliberately no agent-nometa.meta.json
@@ -123,7 +123,7 @@ def test_stop_writes_a_coordinator_record(state_dir, tmp_path):
 
 def test_stop_record_carries_coordinator_exit_hygiene(state_dir, tmp_path, monkeypatch):
     # The coordinator run runs the one live check; a clean porcelain → worktree_clean.
-    monkeypatch.setattr(gh, "git_status_porcelain", lambda *, cwd: "")
+    monkeypatch.setattr(git, "status_porcelain", lambda *, cwd: [])
     transcript = tmp_path / "57d92339.jsonl"
     _write_transcript(transcript, "Read")
     payload = {"transcript_path": str(transcript), "cwd": str(tmp_path)}

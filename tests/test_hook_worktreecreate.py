@@ -40,7 +40,7 @@ def fake_repo(monkeypatch):
             base="origin/main",
         )
 
-    monkeypatch.setattr(worktreecreate.gh, "repo_root", lambda: "/repo")
+    monkeypatch.setattr(worktreecreate.git, "repo_root", lambda: "/repo")
     monkeypatch.setattr(
         worktreecreate.identity,
         "resolve_repo",
@@ -48,12 +48,12 @@ def fake_repo(monkeypatch):
     )
     # Default: the cwd-branch probe finds no branch, so a test that does not opt
     # into a branch never touches real git (its epic comes from the env override).
-    monkeypatch.setattr(worktreecreate.gh, "git_current_branch", lambda *, cwd: None)
+    monkeypatch.setattr(worktreecreate.git, "current_branch", lambda *, cwd: None)
     # Default: every candidate epic's umbrella "exists", so a test that does not
     # exercise the existence gate gets its epic namespaced; the gate-specific tests
     # below install their own fake keyed on which umbrellas are present.
     monkeypatch.setattr(
-        worktreecreate.gh, "epic_umbrella_exists", lambda epic, *, cwd: True
+        worktreecreate.git, "epic_umbrella_exists", lambda epic, *, cwd: True
     )
     monkeypatch.setattr(worktreecreate, "create_from_source", fake_create)
     return captured
@@ -101,7 +101,7 @@ def test_epic_inferred_from_cwd_branch(monkeypatch, fake_repo):
         seen["cwd"] = cwd
         return "TRE04/WS01"
 
-    monkeypatch.setattr(worktreecreate.gh, "git_current_branch", fake_branch)
+    monkeypatch.setattr(worktreecreate.git, "current_branch", fake_branch)
     payload = _helper({"name": "agent-abc123", "cwd": "/coordinator/checkout"})
     code, _ = _run(payload)
     assert code == 0
@@ -114,7 +114,7 @@ def test_override_wins_over_inferred_cwd_branch(monkeypatch, fake_repo):
     # (the rare cross-epic spawn).
     monkeypatch.setenv(worktree_adapter.EPIC_MARKER_ENV, "HAR02")
     monkeypatch.setattr(
-        worktreecreate.gh, "git_current_branch", lambda *, cwd: "TRE04/WS01"
+        worktreecreate.git, "current_branch", lambda *, cwd: "TRE04/WS01"
     )
     payload = _helper({"name": "agent-abc123", "cwd": "/coordinator/checkout"})
     code, _ = _run(payload)
@@ -147,9 +147,9 @@ def test_epic_namespacing_gated_on_umbrella_existence(
     # branch when it names a REAL epic (its umbrella branch exists). A non-epic prefix
     # degrades to the same safe epic-less fallback the module already documented.
     monkeypatch.delenv(worktree_adapter.EPIC_MARKER_ENV, raising=False)
-    monkeypatch.setattr(worktreecreate.gh, "git_current_branch", lambda *, cwd: branch)
+    monkeypatch.setattr(worktreecreate.git, "current_branch", lambda *, cwd: branch)
     monkeypatch.setattr(
-        worktreecreate.gh,
+        worktreecreate.git,
         "epic_umbrella_exists",
         lambda epic, *, cwd: epic in existing,
     )
@@ -171,9 +171,9 @@ def test_existence_check_runs_against_the_payload_cwd(monkeypatch, fake_repo):
         return True
 
     monkeypatch.setattr(
-        worktreecreate.gh, "git_current_branch", lambda *, cwd: "TRE04/WS01"
+        worktreecreate.git, "current_branch", lambda *, cwd: "TRE04/WS01"
     )
-    monkeypatch.setattr(worktreecreate.gh, "epic_umbrella_exists", fake_exists)
+    monkeypatch.setattr(worktreecreate.git, "epic_umbrella_exists", fake_exists)
     _run(_helper({"name": "agent-abc123", "cwd": "/coordinator/checkout"}))
     assert seen == {"epic": "TRE04", "cwd": "/coordinator/checkout"}
 
@@ -184,7 +184,7 @@ def test_override_naming_a_dead_epic_degrades_to_epicless(monkeypatch, fake_repo
     # epic-less fallback, consistent with an inferred non-epic prefix.
     monkeypatch.setenv(worktree_adapter.EPIC_MARKER_ENV, "GHOST")
     monkeypatch.setattr(
-        worktreecreate.gh, "epic_umbrella_exists", lambda epic, *, cwd: False
+        worktreecreate.git, "epic_umbrella_exists", lambda epic, *, cwd: False
     )
     payload = _helper({"name": "agent-abc123", "cwd": "/coordinator/checkout"})
     code, _ = _run(payload)
@@ -194,7 +194,7 @@ def test_override_naming_a_dead_epic_degrades_to_epicless(monkeypatch, fake_repo
 
 def test_override_without_cwd_validates_in_ambient_checkout(monkeypatch, fake_repo):
     # An override-only spawn carries no `cwd`; the existence check falls back to the
-    # ambient hook checkout (`gh.repo_root()`) so the override is still validated.
+    # ambient hook checkout (`git.repo_root()`) so the override is still validated.
     monkeypatch.setenv(worktree_adapter.EPIC_MARKER_ENV, "TRE03")
     seen: dict = {}
 
@@ -202,9 +202,9 @@ def test_override_without_cwd_validates_in_ambient_checkout(monkeypatch, fake_re
         seen["cwd"] = cwd
         return True
 
-    monkeypatch.setattr(worktreecreate.gh, "epic_umbrella_exists", fake_exists)
+    monkeypatch.setattr(worktreecreate.git, "epic_umbrella_exists", fake_exists)
     _run(_helper({"name": "agent-abc123"}))  # no cwd in payload
-    assert seen["cwd"] == "/repo"  # gh.repo_root() fallback
+    assert seen["cwd"] == "/repo"  # git.repo_root() fallback
     assert fake_repo["spec"].branch == "TRE03/agent-abc123"
 
 
@@ -222,7 +222,7 @@ def test_no_inferable_epic_falls_back_to_epicless_branch(
     # No override AND no inferable epic (detached/no-slash/unreadable branch or a
     # missing cwd) → a safe epic-less branch; the spawn STILL lands in a real Tree.
     monkeypatch.delenv(worktree_adapter.EPIC_MARKER_ENV, raising=False)
-    monkeypatch.setattr(worktreecreate.gh, "git_current_branch", lambda *, cwd: branch)
+    monkeypatch.setattr(worktreecreate.git, "current_branch", lambda *, cwd: branch)
     body = {"name": "agent-abc123", "prompt_id": "c2f52d57-4f6e-4d0a-9b1c-8e3a5d7f2b91"}
     if cwd is not None:
         body["cwd"] = cwd
@@ -269,7 +269,7 @@ def test_fail_closed_when_tree_create_errors(monkeypatch, fake_repo, capsys):
 
 
 def test_fail_closed_when_not_in_a_checkout(monkeypatch, fake_repo, capsys):
-    monkeypatch.setattr(worktreecreate.gh, "repo_root", lambda: None)
+    monkeypatch.setattr(worktreecreate.git, "repo_root", lambda: None)
     code, out = _run(json.dumps({"name": "x"}))
     assert code == 1
     assert out == ""
@@ -341,7 +341,7 @@ def test_helper_spawn_with_prompt_id_keeps_the_holding_branch(monkeypatch, fake_
     # <epic>/agent-<id> holding branch, unchanged by ADR-0027.
     monkeypatch.delenv(worktree_adapter.EPIC_MARKER_ENV, raising=False)
     monkeypatch.setattr(
-        worktreecreate.gh, "git_current_branch", lambda *, cwd: "TRE04/WS01"
+        worktreecreate.git, "current_branch", lambda *, cwd: "TRE04/WS01"
     )
     payload = _helper({"name": "agent-abc123", "cwd": "/coordinator/checkout"})
     code, _ = _run(payload)
@@ -358,8 +358,8 @@ def test_coordinator_launch_never_runs_the_epic_probe(monkeypatch, fake_repo):
     def explode(*a, **k):
         raise AssertionError("the coordinator fork must not probe git state")
 
-    monkeypatch.setattr(worktreecreate.gh, "git_current_branch", explode)
-    monkeypatch.setattr(worktreecreate.gh, "epic_umbrella_exists", explode)
+    monkeypatch.setattr(worktreecreate.git, "current_branch", explode)
+    monkeypatch.setattr(worktreecreate.git, "epic_umbrella_exists", explode)
     payload = json.dumps({"name": "sess-x", "cwd": "/coordinator/checkout"})
     code, _ = _run(payload)
     assert code == 0

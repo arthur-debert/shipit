@@ -32,7 +32,7 @@ inferred branch prefix.
 
 The candidate this module extracts is only a *claim*: the boundary then confirms it
 names a real epic by checking that ``<epic>/umbrella`` actually exists as a branch
-(``gh.epic_umbrella_exists``, a local ref lookup). A prefix whose umbrella does not
+(``git.epic_umbrella_exists``, a local ref lookup). A prefix whose umbrella does not
 exist — an ordinary ``feature/foo`` a coordinator happens to sit on, or an override
 naming a dead epic — is rejected to ``None`` and takes the same epic-less fallback
 below. The umbrella's existence IS the epic's existence (the branch is the source of

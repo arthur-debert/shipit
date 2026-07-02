@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-from shipit import execrun, gh, logsetup
+from shipit import execrun, git, logsetup
 from shipit.identity import repo_from_slug
 from shipit.tree import cleanup, provision
 from shipit.tree.create import create
@@ -96,10 +96,10 @@ def _mock_write_boundary(monkeypatch):
         (d / ".git").mkdir()
         (d / ".shipit.toml").write_text(_ONBOARDED)
 
-    monkeypatch.setattr(gh, "git_clone_dissociated", fake_clone)
-    monkeypatch.setattr(gh, "git_fetch", lambda **k: None)
-    monkeypatch.setattr(gh, "git_checkout_new_branch", lambda *a, **k: None)
-    monkeypatch.setattr(gh, "git_head_commit", lambda **k: "abc123")
+    monkeypatch.setattr(git, "clone_dissociated", fake_clone)
+    monkeypatch.setattr(git, "fetch", lambda **k: None)
+    monkeypatch.setattr(git, "checkout_new_branch", lambda *a, **k: None)
+    monkeypatch.setattr(git, "head_commit", lambda **k: "abc123")
     monkeypatch.setattr(
         execrun,
         "run",
@@ -160,8 +160,8 @@ def test_create_failure_is_an_error_record_with_the_exception_attached(
 ):
     _mock_write_boundary(monkeypatch)
     monkeypatch.setattr(
-        gh,
-        "git_checkout_new_branch",
+        git,
+        "checkout_new_branch",
         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")),
     )
 
@@ -377,11 +377,11 @@ def test_create_verb_prepipeline_failure_is_an_error_with_the_exception(
     """A failure `create`'s own rollback record never sees (e.g. a rejected spec)
     still lands an ERROR record at the verb boundary — the stderr print is not
     the only record of the failed action."""
-    monkeypatch.setattr(tree_verb.gh, "repo_root", lambda: "/checkout")
+    monkeypatch.setattr(tree_verb.git, "repo_root", lambda: "/checkout")
     # Identity derives LOCALLY from the origin remote (ADR-0024): the patched
     # remote URL is what identity.resolve_repo parses into the canonical Repo.
     monkeypatch.setattr(
-        tree_verb.gh, "git_remote_url", lambda **k: "git@example:acme/widget"
+        tree_verb.git, "remote_url", lambda **k: "git@example:acme/widget"
     )
     monkeypatch.setattr(
         tree_verb,
@@ -407,10 +407,10 @@ def _mock_readonly_boundary(monkeypatch):
         d.mkdir(parents=True)
         (d / ".git").mkdir()
 
-    monkeypatch.setattr(gh, "git_clone_dissociated", fake_clone)
-    monkeypatch.setattr(gh, "git_fetch", lambda **k: None)
-    monkeypatch.setattr(gh, "git_checkout", lambda *a, **k: None)
-    monkeypatch.setattr(gh, "git_reset_hard", lambda *a, **k: None)
+    monkeypatch.setattr(git, "clone_dissociated", fake_clone)
+    monkeypatch.setattr(git, "fetch", lambda **k: None)
+    monkeypatch.setattr(git, "checkout", lambda *a, **k: None)
+    monkeypatch.setattr(git, "reset_hard", lambda *a, **k: None)
 
 
 def test_readonly_create_and_reuse_are_info_milestones_with_the_tree(

@@ -1,13 +1,14 @@
-"""The ONE gh Tool adapter (and the git boundary) for shipit.
+"""The ``gh`` Tool adapter — shipit's single GitHub boundary (ADR-0028).
 
-Every call that shells out to ``gh`` or ``git`` lives here, so the rest of the
-package is pure and unit-testable by patching this one module. PROC02-WS01
-(ADR-0028, glassbox PRD) merged the PR-state engine's former second boundary
+Every call that shells out to ``gh`` lives here, so the rest of the package is
+pure and unit-testable by patching this one module. PROC02-WS01 (ADR-0028,
+glassbox PRD) merged the PR-state engine's former second boundary
 (``shipit/prstate/ghapi.py``) into this adapter: the REST and GraphQL helpers,
-the pagination-merging helper (defined exactly once, here), the PR-flow acts
-(``pr_ready`` / ``pr_edit_reviewer`` / …), and the per-tool timeout defaults
-all live in this module — building ``gh`` argv anywhere else is a review
-defect (ADR-0028).
+the pagination-merging helper (defined exactly once, here), and the PR-flow acts
+(``pr_ready`` / ``pr_edit_reviewer`` / …) all live here — building a ``gh`` argv
+anywhere else is a review defect. The git half of the old combined boundary
+lives in its own adapter, :mod:`shipit.git` (PROC02-WS03): building a ``git``
+argv here is as much a defect as building a ``gh`` argv there.
 
 Execution routes through the one Exec runner (ADR-0028): every call here is an
 Exec via :func:`shipit.execrun.run` with a stated timeout, one structured
@@ -40,14 +41,10 @@ from .prstate.errors import PrStateError
 #: the draft-flip milestone it performs on the engine's behalf.
 logger = logging.getLogger("shipit.gh")
 
-#: Stated per-Exec timeouts (ADR-0028: every Exec carries one; nothing hangs by
-#: default). Calls that talk to GitHub (``gh``, and ``git`` against origin) get
-#: the runner's generous default; local git plumbing is near-instant and gets a
-#: tight bound; the dissociated clone copies the full object store into the new
-#: checkout (ADR-0014), so it alone gets a larger ceiling.
+#: Stated per-Exec timeout (ADR-0028: every Exec carries one; nothing hangs by
+#: default). Every call here talks to GitHub, so all get the runner's generous
+#: network default.
 _NETWORK_TIMEOUT: float = execrun.DEFAULT_TIMEOUT
-_LOCAL_GIT_TIMEOUT: float = 60.0
-_CLONE_TIMEOUT: float = 600.0
 
 
 class UnknownPr:
@@ -145,13 +142,6 @@ def _run_probe(
     still raises for launch-level failures: missing binary, timeout).
     """
     return execrun.run(args, cwd=cwd, check=False, timeout=timeout)
-
-
-def _git_probe(
-    args: list[str], *, cwd: str, timeout: float | None = _LOCAL_GIT_TIMEOUT
-) -> execrun.ExecResult:
-    """``git -C <cwd> <args>`` as a probe (see :func:`_run_probe`)."""
-    return _run_probe(["git", "-C", cwd, *args], timeout=timeout)
 
 
 # --------------------------------------------------------------------------
@@ -343,45 +333,6 @@ def pr_meta(pr: int) -> dict:
     )
 
 
-def repo_root(*, cwd: str | None = None) -> str | None:
-    """The git working-tree root for ``cwd`` (the current directory if omitted).
-
-    ``None`` when ``cwd`` is not inside a checkout. This is THE single
-    ``git rev-parse --show-toplevel`` boundary — the ``cwd`` parameter (ADR-0024)
-    is what lets every caller route through it instead of re-implementing the
-    command (``identity.resolve_working_dir``, the eval hook / report, review
-    diff), so the toplevel is derived one way, in one place.
-    """
-    args = ["git"]
-    if cwd is not None:
-        args += ["-C", cwd]
-    args += ["rev-parse", "--show-toplevel"]
-    try:
-        result = _run_probe(args, timeout=_LOCAL_GIT_TIMEOUT)
-    except ExecError:
-        return None
-    if not result.ok:
-        return None
-    return result.stdout.strip() or None
-
-
-def git_head_commit(*, cwd: str) -> str | None:
-    """The current ``HEAD`` commit SHA for the checkout at ``cwd``, or ``None``.
-
-    ``None`` on any git failure (detached/unborn HEAD, not a checkout) — the
-    revision half of a :class:`shipit.identity.WorkingDir`, and the eval record's
-    ``git.commit`` stamp, are both best-effort: an unresolvable commit degrades to
-    ``None`` rather than raising.
-    """
-    try:
-        result = _git_probe(["rev-parse", "HEAD"], cwd=cwd)
-    except ExecError:
-        return None
-    if not result.ok:
-        return None
-    return result.stdout.strip() or None
-
-
 def owner_kind(login: str) -> str:
     """The account type of ``login`` — ``"User"`` or ``"Organization"`` (via ``gh api``).
 
@@ -456,344 +407,8 @@ def secret_list(repo: str) -> list[str]:
 
 
 # --------------------------------------------------------------------------
-# git + PR — the boundary ``install`` needs (pull, never push)
+# PR reads/writes (the git side of a head lives in :mod:`shipit.git`)
 # --------------------------------------------------------------------------
-
-
-def _git(
-    args: list[str], *, cwd: str, timeout: float | None = _LOCAL_GIT_TIMEOUT
-) -> str:
-    """``git -C <cwd> <args>`` via :func:`_run`.
-
-    Local plumbing by default (:data:`_LOCAL_GIT_TIMEOUT`); the git calls that
-    talk to origin (fetch/push) state :data:`_NETWORK_TIMEOUT` instead.
-    """
-    return _run(["git", "-C", cwd, *args], timeout=timeout)
-
-
-def git_status_porcelain(*, cwd: str) -> str:
-    """Machine-readable working-tree status (``git status --porcelain``).
-
-    Empty output means a clean tree; each non-empty line is one changed/untracked
-    path. The eval exit-hygiene check reads this to flag a coordinator run that
-    left a dirty worktree (uncommitted edits, conflict markers, stray files).
-    """
-    return _git(["status", "--porcelain"], cwd=cwd)
-
-
-def git_current_branch(*, cwd: str) -> str | None:
-    """The current branch name, or ``None`` on a detached/unborn HEAD."""
-    try:
-        result = _git_probe(["rev-parse", "--abbrev-ref", "HEAD"], cwd=cwd)
-    except ExecError:
-        return None
-    if not result.ok:
-        return None
-    name = result.stdout.strip()
-    return None if (not name or name == "HEAD") else name
-
-
-def epic_umbrella_exists(epic: str, *, cwd: str) -> bool:
-    """Whether ``<epic>/umbrella`` exists as a branch in the checkout at ``cwd``.
-
-    The semantic test for "is ``<epic>`` a real epic?": ADR-0016 gives every epic an
-    ``<epic>/umbrella`` branch, so the umbrella's existence IS the epic's existence —
-    a sturdier signal than any branch-name *grammar* proxy (robust to naming drift).
-    The WorktreeCreate hook uses it to tell a true epic prefix (``TRE04`` →
-    ``TRE04/umbrella`` exists) from an ordinary slash-branch a coordinator happens to
-    sit on (``feature/foo`` → no ``feature/umbrella``), so only a real epic namespaces
-    the holding branch.
-
-    A **LOCAL** ref lookup, deliberately NOT a network ``git ls-remote``: the hook
-    fires synchronously inside a spawn, and the coordinator's clone already carries the
-    umbrella's tracking ref — so no network round-trip gates the spawn. Checks the
-    remote-tracking ref first (``refs/remotes/origin/<epic>/umbrella``, the usual shape
-    in a clone), then a local head (``refs/heads/<epic>/umbrella``). Uses ``git
-    show-ref --verify`` with the EXACT full ref (never a pattern — avoids a glob
-    matching an unrelated ref), so a garbage ``epic`` (separators, ``..``) simply
-    yields a ref that does not resolve → ``False`` → the caller's safe epic-less
-    fallback. Never raises: any git failure (the ref is absent) reads as "not an epic".
-    """
-    for ref in (
-        f"refs/remotes/origin/{epic}/umbrella",
-        f"refs/heads/{epic}/umbrella",
-    ):
-        try:
-            if _git_probe(["show-ref", "--verify", "--quiet", ref], cwd=cwd).ok:
-                return True
-        except ExecError:
-            continue
-    return False
-
-
-def git_ls_files(*, cwd: str) -> list[str]:
-    """Tracked files (``git ls-files``), repo-root-relative, in git's order.
-
-    Tracked-only is deliberate: it keeps generated/ignored paths out of the lint
-    scope without an exclude list (docs/prd/lint-checks.md — "whole tree via git ls-files").
-    """
-    out = _git(["ls-files"], cwd=cwd)
-    return [line for line in out.splitlines() if line.strip()]
-
-
-def git_switch_create(branch: str, *, cwd: str) -> None:
-    """Create-or-reset ``branch`` from the current HEAD and switch to it.
-
-    ``-C`` (force) so a re-run that reuses the install branch name starts clean
-    rather than failing on an existing branch.
-    """
-    _git(["switch", "-C", branch], cwd=cwd)
-
-
-def git_add(paths: list[str], *, cwd: str) -> None:
-    """``git add -f -- <paths>`` — stage ONLY these pathspecs, never ``-A``.
-
-    ``-f`` because the managed paths are shipit-owned and must be tracked even if
-    a consumer ``.gitignore`` happens to cover one (plain ``git add`` errors on an
-    ignored path).
-    """
-    if not paths:
-        return
-    _git(["add", "-f", "--", *paths], cwd=cwd)
-
-
-def git_commit(message: str, paths: list[str], *, cwd: str) -> None:
-    """``git commit -m <message> -- <paths>`` — commit only the given pathspecs."""
-    _git(["commit", "-m", message, "--", *paths], cwd=cwd)
-
-
-def git_push(
-    branch: str, *, cwd: str, remote: str = "origin", force: bool = False
-) -> None:
-    """``git push <remote> <branch>``.
-
-    ``force`` plain-force-pushes the shipit-owned install branch, which install
-    regenerates from HEAD every run — so re-running with a prior install PR still
-    open updates that PR rather than failing non-fast-forward. (Plain ``--force``,
-    not ``--force-with-lease``: a freshly recreated branch has no remote-tracking
-    ref to lease against, and the branch is shipit-exclusive, so there is nothing
-    to protect.) The break-glass push to a real branch (main) never forces.
-    """
-    args = ["push"]
-    if force:
-        args.append("--force")
-    args += [remote, branch]
-    _git(args, cwd=cwd, timeout=_NETWORK_TIMEOUT)
-
-
-# --------------------------------------------------------------------------
-# git — the Tree-creation boundary (clone / fetch / checkout)
-# --------------------------------------------------------------------------
-
-
-def git_clone_dissociated(url: str, dest: str, *, reference: str) -> None:
-    """Clone ``url`` into ``dest`` as an INDEPENDENT, dissociated checkout.
-
-    ``--reference <reference>`` borrows the local checkout's object store so the
-    clone is near-instant and tiny over the wire; ``--dissociate`` then copies
-    every borrowed object into the new clone and drops the alternates link, so the
-    result shares NOTHING with the reference (no ``.git/objects/info/alternates``)
-    and is safe to ``rm -rf`` (ADR-0014). ``origin`` is set to ``url`` — the GitHub
-    URL — so ``gh``/``git`` work inside the Tree unchanged.
-    """
-    _run(
-        ["git", "clone", "--reference", reference, "--dissociate", url, dest],
-        timeout=_CLONE_TIMEOUT,
-    )
-
-
-def git_fetch(*, cwd: str, remote: str = "origin") -> None:
-    """``git fetch <remote>`` inside the Tree, so its base ref is up to date."""
-    _git(["fetch", remote], cwd=cwd, timeout=_NETWORK_TIMEOUT)
-
-
-def git_checkout_new_branch(branch: str, base: str, *, cwd: str) -> None:
-    """``git checkout -b <branch> <base>`` — cut ``branch`` from ``base`` and switch."""
-    _git(["checkout", "-b", branch, base], cwd=cwd)
-
-
-def git_checkout(branch: str, *, cwd: str) -> None:
-    """``git checkout <branch>`` — switch to an EXISTING branch (no ``-b``).
-
-    The read-only-Tree counterpart of :func:`git_checkout_new_branch`: a reviewer
-    Tree checks out a branch that already exists on ``origin`` (the PR head) rather
-    than cutting a new one. After a ``git fetch`` the plain checkout DWIMs a local
-    tracking branch from ``origin/<branch>``, so the read-only clone lands on the
-    exact head under review.
-    """
-    _git(["checkout", branch], cwd=cwd)
-
-
-def git_reset_hard(ref: str, *, cwd: str) -> None:
-    """``git reset --hard <ref>`` — force HEAD, index, and working tree to ``ref``.
-
-    The read-only-Tree reuse counterpart of :func:`git_checkout`: when a shared review
-    clone is reused after the PR head advanced, a ``git fetch`` followed by a hard reset
-    to ``origin/<branch>`` re-pins the working tree to the CURRENT head, so a second
-    reviewer never reads the stale commit the first clone happened to land on.
-    """
-    _git(["reset", "--hard", ref], cwd=cwd)
-
-
-def git_remote_url(*, cwd: str, remote: str = "origin") -> str:
-    """The configured URL of ``remote`` for the checkout at ``cwd``."""
-    return _git(["remote", "get-url", remote], cwd=cwd).strip()
-
-
-def remote_branch_exists(
-    branch: str, *, cwd: str | None = None, remote: str = "origin"
-) -> bool:
-    """Whether ``branch`` exists on ``remote`` (``git ls-remote --heads``).
-
-    A live query of the remote — not the local tracking refs — so a caller can
-    fail-closed on a missing base branch BEFORE cloning, without relying on a prior
-    fetch having populated a tracking ref. Raises :class:`ExecError` if the
-    ``git ls-remote`` call itself fails (no network / bad remote), so an
-    undetermined remote state is never silently read as "branch absent".
-
-    Exact, not pattern. ``git ls-remote`` treats its final argument as a ref
-    *pattern*, so a bare branch name carrying a glob metacharacter (``*``,
-    ``?``, ``[``) or one that happens to match a *different* head could be
-    reported as present even when ``refs/heads/<branch>`` is absent — a false
-    positive that would defeat the fail-closed precondition. Two guards make
-    this exact:
-
-    * a branch name carrying a glob metacharacter can never name a real git
-      ref (git forbids those characters in refnames), so it short-circuits to
-      ``False`` and is never sent to ``git`` as a pattern; and
-    * the query asks for the fully-qualified ``refs/heads/<branch>`` and the
-      output is parsed line-by-line (``<sha>\\t<refname>``), returning ``True``
-      only when some line's refname column equals exactly ``refs/heads/<branch>``
-      — never merely "the output was non-empty".
-
-    The net guarantee: returns ``True`` iff ``refs/heads/<branch>`` genuinely
-    exists on ``remote``.
-    """
-    # A real git refname can never contain these; refuse to send one as a pattern.
-    if any(ch in branch for ch in "*?["):
-        return False
-    ref = f"refs/heads/{branch}"
-    base = ["git", "-C", cwd] if cwd is not None else ["git"]
-    args = [*base, "ls-remote", "--heads", remote, ref]
-    for line in _run(args).splitlines():
-        # Each line is "<sha>\t<refname>"; require exact refname equality.
-        parts = line.split("\t")
-        if len(parts) == 2 and parts[1] == ref:
-            return True
-    return False
-
-
-# --------------------------------------------------------------------------
-# git + gh — the Tree-registry boundary (scan reads; never mutates)
-# --------------------------------------------------------------------------
-
-
-def git_upstream_ref(*, cwd: str) -> str | None:
-    """The branch's configured upstream tracking ref (e.g. ``origin/main``), or ``None``.
-
-    This is the only durable, on-disk record of what a Tree's branch is measured
-    against — there is NO manifest (PRD: the clones on disk are the whole store), so
-    ``scan`` reports the upstream git itself tracks as the Tree's *base*. ``None`` when
-    the branch has no upstream (never pushed / set), which ``scan`` surfaces as such.
-    """
-    try:
-        result = _git_probe(
-            ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
-            cwd=cwd,
-        )
-    except ExecError:
-        return None
-    if not result.ok:
-        return None
-    return result.stdout.strip() or None
-
-
-def git_ahead_behind(*, cwd: str) -> tuple[int, int]:
-    """``(ahead, behind)`` commit counts of ``HEAD`` vs its upstream.
-
-    ``ahead`` is commits on ``HEAD`` not yet on the upstream (unpushed); ``behind`` is
-    commits on the upstream not yet on ``HEAD``. ``(0, 0)`` when there is no upstream
-    (or the rev-list fails), so a freshly-cut Tree reads as level rather than erroring.
-    """
-    try:
-        result = _git_probe(
-            ["rev-list", "--left-right", "--count", "@{upstream}...HEAD"], cwd=cwd
-        )
-    except ExecError:
-        return (0, 0)
-    if not result.ok:
-        return (0, 0)
-    parts = result.stdout.strip().split()
-    if len(parts) != 2:
-        return (0, 0)
-    try:
-        behind, ahead = int(parts[0]), int(parts[1])
-    except ValueError:
-        return (0, 0)
-    return (ahead, behind)
-
-
-def git_unpushed_shas(*, cwd: str) -> tuple[str, ...] | None:
-    """The SHAs of commits on ``HEAD`` that exist on NO remote — ``None`` if unreadable.
-
-    The upstream-independent "unpushed" signal ADR-0027's ephemeral gc ladder is
-    defined over: :func:`git_ahead_behind`'s ``ahead`` reads ``(0, 0)`` for a branch
-    with **no upstream**, so a fresh ``ephemeral/<id>`` branch carrying local-only
-    commits would look level — exactly the misread that loses work. ``rev-list HEAD
-    --not --remotes`` lists commits reachable from ``HEAD`` but from no remote ref,
-    so a missing upstream never by itself blocks reclaim (empty = everything on some
-    remote) while a genuinely local commit is always listed. The SHAs — not just a
-    count — are what lets the ephemeral floor exclude exactly the recorded
-    provisioning commit (#232) while any OTHER local-only commit still protects.
-
-    ``None`` — not empty — when the list cannot be read (detached/unborn HEAD, a git
-    failure, malformed output): the CALLER must treat "unknown" conservatively (keep),
-    and collapsing it to "nothing unpushed" would point the failure mode at data loss.
-    """
-    try:
-        result = _git_probe(["rev-list", "HEAD", "--not", "--remotes"], cwd=cwd)
-    except ExecError:
-        return None
-    if not result.ok:
-        return None
-    shas = _validated_shas(result.stdout)
-    return tuple(shas) if shas is not None else None
-
-
-def git_commits_between(base: str, head: str, *, cwd: str) -> list[str] | None:
-    """The SHAs reachable from ``head`` but not ``base`` (``rev-list base..head``).
-
-    Used at Tree provisioning to identify exactly what the managed-set install
-    committed (#232): the SHAs between the pre- and post-install ``HEAD``. ``None``
-    on any git failure or malformed output so the caller records nothing rather
-    than something wrong — an unrecorded provisioning commit only KEEPS the Tree.
-    """
-    try:
-        result = _git_probe(["rev-list", f"{base}..{head}"], cwd=cwd)
-    except ExecError:
-        return None
-    if not result.ok:
-        return None
-    return _validated_shas(result.stdout)
-
-
-def _validated_shas(out: str) -> list[str] | None:
-    """Parse ``git rev-list`` output into validated, normalized sha strings.
-
-    Validity lives in the :class:`shipit.identity.Sha` constructor (COR02) — the
-    old ad-hoc "looks like a sha" check retired into the type. Malformed output
-    yields ``None`` (record nothing rather than something wrong), matching the
-    callers' conservative contract; the values returned are the type's
-    lowercase-normalized string forms.
-    """
-    # Imported here, not at module top: `identity` composes over this boundary
-    # module (its resolvers default to it), so a top-level import would cycle.
-    from .identity import Sha
-
-    try:
-        return [str(Sha(line.strip())) for line in out.splitlines() if line.strip()]
-    except ValueError:
-        return None
 
 
 def pr_for_head(branch: str, *, cwd: str | None = None) -> dict | None | UnknownPr:

@@ -23,7 +23,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
-from .. import gh
+from .. import gh, git
 
 logger = logging.getLogger("shipit.tree")
 
@@ -168,11 +168,11 @@ def _read_record(path: Path) -> TreeRecord:
     function holds only the mapping from those reads to a :class:`TreeRecord`.
     """
     cwd = str(path)
-    branch = gh.git_current_branch(cwd=cwd)
-    base = gh.git_upstream_ref(cwd=cwd)
-    dirty = bool(gh.git_status_porcelain(cwd=cwd).strip())
-    ahead, behind = gh.git_ahead_behind(cwd=cwd)
-    unpushed_shas = gh.git_unpushed_shas(cwd=cwd)
+    branch = git.current_branch(cwd=cwd)
+    base = git.upstream_ref(cwd=cwd)
+    dirty = bool(git.status_porcelain(cwd=cwd))
+    ahead, behind = git.ahead_behind(cwd=cwd)
+    unpushed_shas = git.unpushed_shas(cwd=cwd)
     pr = _pr_label(gh.pr_for_head(branch, cwd=cwd)) if branch else None
     mtime = path.stat().st_mtime
     return TreeRecord(

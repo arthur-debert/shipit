@@ -86,7 +86,7 @@ def test_case_varying_origins_of_one_repo_share_one_store_file(tmp_path):
         def __init__(self, url):
             self._url = url
 
-        def git_remote_url(self, *, cwd, remote="origin"):
+        def remote_url(self, *, cwd, remote="origin"):
             return self._url
 
     base = tmp_path / "state"

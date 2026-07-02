@@ -49,7 +49,7 @@ from typing import TextIO
 
 import click
 
-from ... import gh, identity
+from ... import git, identity
 from ...harness import worktree_adapter
 from ...tree.create import create_from_source, new_agent_hash
 from ...tree.layout import TreeSpec, sanitize_slug
@@ -178,7 +178,7 @@ def _validated_epic(candidate: str | None, payload: dict[str, object]) -> str | 
     `feature` (a coordinator merely sitting on `feature/foo`). The semantic test for
     "is `<candidate>` a real epic?" is "does `<candidate>/umbrella` exist as a branch?"
     (ADR-0016: every epic has an umbrella). This validates it with a LOCAL ref lookup
-    (`gh.epic_umbrella_exists`, no network) in the coordinator's checkout. The SAME
+    (`git.epic_umbrella_exists`, no network) in the coordinator's checkout. The SAME
     validation applies to an explicit override, so an override naming a non-existent
     epic degrades just like an inferred non-epic prefix — consistent safe-degrade.
 
@@ -190,7 +190,7 @@ def _validated_epic(candidate: str | None, payload: dict[str, object]) -> str | 
     cwd = _ref_check_cwd(payload)
     if cwd is None:
         return None
-    return candidate if gh.epic_umbrella_exists(candidate, cwd=cwd) else None
+    return candidate if git.epic_umbrella_exists(candidate, cwd=cwd) else None
 
 
 def _ref_check_cwd(payload: dict[str, object]) -> str | None:
@@ -198,21 +198,21 @@ def _ref_check_cwd(payload: dict[str, object]) -> str | None:
 
     Prefers the payload `cwd` (the coordinator's checkout — the same place the
     spawning branch was read), falling back to the ambient hook checkout
-    (`gh.repo_root()`) so an override-only spawn that carries no `cwd` can still be
+    (`git.repo_root()`) so an override-only spawn that carries no `cwd` can still be
     validated. `None` when neither resolves, degrading the epic to the safe epic-less
     fallback rather than guessing.
     """
     cwd = payload.get("cwd")
     if isinstance(cwd, str) and cwd:
         return cwd
-    return gh.repo_root()
+    return git.repo_root()
 
 
 def _spawn_branch(payload: dict[str, object]) -> str | None:
     """The coordinator's current branch — the live state the epic is inferred from.
 
     Probes `git rev-parse --abbrev-ref HEAD` in the payload's `cwd` via
-    :func:`gh.git_current_branch`, which already yields `None` on a detached/unborn
+    :func:`git.current_branch`, which already yields `None` on a detached/unborn
     HEAD or any git error. Returns `None` when the payload carries no usable `cwd`,
     so a malformed payload degrades to the epic-less fallback rather than crashing
     the hook.
@@ -220,7 +220,7 @@ def _spawn_branch(payload: dict[str, object]) -> str | None:
     cwd = payload.get("cwd")
     if not isinstance(cwd, str) or not cwd:
         return None
-    return gh.git_current_branch(cwd=cwd)
+    return git.current_branch(cwd=cwd)
 
 
 def _create_tree(*, branch: str | None = None, ephemeral: str | None = None) -> str:
@@ -237,7 +237,7 @@ def _create_tree(*, branch: str | None = None, ephemeral: str | None = None) -> 
     unparseable origin remote (`ValueError`) — so :func:`run` fails closed; there
     is no native-worktree fallback.
     """
-    root = gh.repo_root()
+    root = git.repo_root()
     if not root:
         raise RuntimeError("not inside a git checkout — cannot provision a Tree")
     spec = TreeSpec(

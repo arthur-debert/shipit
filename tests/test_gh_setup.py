@@ -162,7 +162,7 @@ def test_run_dry_run_end_to_end(monkeypatch, capsys):
     monkeypatch.setattr(gh_setup.gh, "rest", fake.rest)
     monkeypatch.setattr(gh_setup.gh, "label_create", fake.label_create)
     monkeypatch.setattr(gh_setup.gh, "secret_set", fake.secret_set)
-    monkeypatch.setattr(gh_setup.gh, "repo_root", lambda: "/somewhere/o-r")
+    monkeypatch.setattr(gh_setup.git, "repo_root", lambda: "/somewhere/o-r")
     monkeypatch.setattr(gh_setup.gh, "current_repo", lambda: "o/r")
     monkeypatch.setattr(gh_setup.gh, "default_branch", lambda repo: "main")
     monkeypatch.setattr(gh_setup.checks_mod, "discover", lambda *a, **k: ["c / check"])
@@ -182,7 +182,7 @@ def test_remote_target_does_not_read_local_workflows(monkeypatch):
     monkeypatch.setattr(gh_setup.gh, "rest", fake.rest)
     monkeypatch.setattr(gh_setup.gh, "label_create", fake.label_create)
     monkeypatch.setattr(gh_setup.gh, "secret_set", fake.secret_set)
-    monkeypatch.setattr(gh_setup.gh, "repo_root", lambda: "/somewhere/shipit")
+    monkeypatch.setattr(gh_setup.git, "repo_root", lambda: "/somewhere/shipit")
     monkeypatch.setattr(gh_setup.gh, "current_repo", lambda: "me/shipit")
     monkeypatch.setattr(gh_setup.gh, "default_branch", lambda repo: "main")
 
@@ -201,6 +201,6 @@ def test_remote_target_does_not_read_local_workflows(monkeypatch):
 
 
 def test_no_repo_and_no_checkout_errors(monkeypatch):
-    monkeypatch.setattr(gh_setup.gh, "repo_root", lambda: None)
+    monkeypatch.setattr(gh_setup.git, "repo_root", lambda: None)
     rc = gh_setup.run(None, config_path=None, checks_override=None, dry_run=True)
     assert rc == 1
