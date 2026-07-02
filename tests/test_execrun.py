@@ -18,11 +18,17 @@ The contract under test, via an injected fake process (monkeypatched
 - :func:`~shipit.execrun.spawn_detached`, the one deliberate non-Exec: detach
   semantics (own session, stdio to ``/dev/null``, no handle), the spawn-time
   record (argv/cwd/pid, redacted at format time), and launch normalization into
-  ``ExecError``.
+  ``ExecError``;
+- structured fields (#310, glassbox PRD story 14): every record carries the
+  ``_record_fields`` vocabulary (``argv``/``cwd``/``rc``/``duration_ms``, on
+  failure ``cause`` + both stream tails, on a detached spawn ``pid``) as FLAT
+  JSONL keys — asserted by parsing what the real file sink writes, never the
+  record object — so durations and outcomes are a query, not a msg parse.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import subprocess
 import sys
@@ -418,6 +424,230 @@ def test_argv_non_string_elements_are_coerced(monkeypatch, caplog, _clean_regist
     assert all(isinstance(a, str) for a in result.argv)
     message = "\n".join(r.getMessage() for r in caplog.records)
     assert "/some/path" in message
+
+
+# ---------------------------------------------------------------------------
+# Structured fields (#310) — the Exec record's data is a query, not a parse
+# ---------------------------------------------------------------------------
+
+
+def _jsonl_records(tmp_path, emit) -> list[dict]:
+    """Run ``emit`` with the REAL JSONL file sink attached; return parsed records.
+
+    The structured-field contract is about what lands in the raw log, so these
+    tests parse what :func:`shipit.logsetup.build_file_handler`'s sink actually
+    writes — never the in-memory record object (``caplog``), which would pass
+    even if the pipeline dropped the extras.
+    """
+    from shipit import logsetup
+    from shipit.identity import repo_from_slug
+
+    handler = logsetup.build_file_handler(repo_from_slug("o/r"), base_dir=tmp_path)
+    log = logging.getLogger("shipit.exec")
+    old_level, old_propagate = log.level, log.propagate
+    log.setLevel(logging.DEBUG)
+    log.propagate = False  # keep pytest's root handlers out of the picture
+    log.addHandler(handler)
+    try:
+        emit()
+    finally:
+        log.removeHandler(handler)
+        handler.close()
+        log.setLevel(old_level)
+        log.propagate = old_propagate
+    raw = (tmp_path / "o" / "r" / "shipit.log").read_text()
+    return [json.loads(line) for line in raw.splitlines()]
+
+
+def test_success_record_carries_flat_fields_and_human_msg(monkeypatch, tmp_path):
+    monkeypatch.setattr(subprocess, "run", _fake_completed(rc=0))
+
+    records = _jsonl_records(
+        tmp_path, lambda: execrun.run(["tool", "arg"], cwd="/work")
+    )
+
+    assert len(records) == 1
+    rec = records[0]
+    # The outcome as flat, typed JSONL keys — no msg parsing needed.
+    assert rec["argv"] == "tool arg"
+    assert rec["cwd"] == "/work"
+    assert rec["rc"] == 0
+    assert isinstance(rec["duration_ms"], int)
+    assert rec["level"] == "debug"
+    # The msg stays human-readable and self-sufficient: command and outcome
+    # inline (fields are additive, ADR-0029's "human msg inside" rule).
+    assert "tool arg" in rec["msg"]
+    assert "rc=0" in rec["msg"]
+
+
+def test_check_false_nonzero_record_carries_rc_field(monkeypatch, tmp_path):
+    monkeypatch.setattr(subprocess, "run", _fake_completed(rc=1))
+
+    records = _jsonl_records(
+        tmp_path, lambda: execrun.run(["ps", "-p", "1"], check=False)
+    )
+
+    assert records[0]["rc"] == 1
+    assert records[0]["level"] == "debug"
+
+
+def test_failure_record_carries_cause_and_stream_tail_fields(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        _fake_completed(rc=2, stdout="the stdout diagnostics", stderr="the stderr"),
+    )
+
+    def emit():
+        with pytest.raises(execrun.ExecError):
+            execrun.run(["pixi", "install"], cwd="/tree")
+
+    records = _jsonl_records(tmp_path, emit)
+    assert len(records) == 1
+    rec = records[0]
+    assert rec["level"] == "error"
+    assert rec["argv"] == "pixi install"
+    assert rec["cwd"] == "/tree"
+    assert rec["rc"] == 2
+    assert rec["cause"] == execrun.CAUSE_EXIT
+    assert rec["stdout_tail"] == "the stdout diagnostics"
+    assert rec["stderr_tail"] == "the stderr"
+    assert isinstance(rec["duration_ms"], int)
+    # The msg still tells a human the whole story inline.
+    assert "pixi install" in rec["msg"]
+    assert "rc=2" in rec["msg"]
+
+
+def test_timeout_record_fields_omit_rc_absent_not_null(monkeypatch, tmp_path):
+    # A timeout has no exit code: the rc field is ABSENT (ADR-0029's
+    # absent-not-null rule), never null — and the cause + partial tails ride
+    # as fields.
+    def fake_run(argv, **kwargs):
+        raise subprocess.TimeoutExpired(
+            argv, 0.1, output="partial stdout", stderr="partial stderr"
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    def emit():
+        with pytest.raises(execrun.ExecError):
+            execrun.run(["slow-tool"], timeout=0.1)
+
+    records = _jsonl_records(tmp_path, emit)
+    rec = records[0]
+    assert rec["cause"] == execrun.CAUSE_TIMEOUT
+    assert "rc" not in rec
+    assert rec["stdout_tail"] == "partial stdout"
+    assert rec["stderr_tail"] == "partial stderr"
+    assert isinstance(rec["duration_ms"], int)
+
+
+def test_missing_binary_record_fields(monkeypatch, tmp_path):
+    def fake_run(argv, **kwargs):
+        raise FileNotFoundError(2, "No such file or directory", argv[0])
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    def emit():
+        with pytest.raises(execrun.ExecError):
+            execrun.run(["no-such-binary"])
+
+    records = _jsonl_records(tmp_path, emit)
+    rec = records[0]
+    assert rec["cause"] == execrun.CAUSE_MISSING_BINARY
+    assert "rc" not in rec
+    assert rec["argv"] == "no-such-binary"
+
+
+def test_spawn_detached_record_carries_pid_not_rc(monkeypatch, tmp_path):
+    captured: dict = {}
+    monkeypatch.setattr(subprocess, "Popen", _FakePopen(captured))
+
+    records = _jsonl_records(
+        tmp_path,
+        lambda: execrun.spawn_detached(["tool", "--flag"], cwd="/work/tree"),
+    )
+
+    assert len(records) == 1
+    rec = records[0]
+    assert rec["argv"] == "tool --flag"
+    assert rec["cwd"] == "/work/tree"
+    assert rec["pid"] == 4321
+    # No completion → no completion fields on the detached-spawn record.
+    assert "rc" not in rec
+    assert "duration_ms" not in rec
+
+
+def test_jq_style_slices_work_on_the_raw_log(monkeypatch, tmp_path):
+    # The acceptance query shapes from the PRD: "all Execs slower than 10s"
+    # and "all nonzero exits" as field selections over the raw JSONL — the
+    # exact slices that used to require regexing the msg. The log includes a
+    # launch failure (rc ABSENT, not null) so the nonzero-exit query's
+    # has("rc") guard is genuinely exercised.
+    def emit():
+        monkeypatch.setattr(subprocess, "run", _fake_completed(rc=0))
+        execrun.run(["fast-tool"])
+        with monkeypatch.context() as m:
+            m.setattr(execrun, "_elapsed_ms", lambda start: 12500)
+            execrun.run(["slow-tool"])
+        monkeypatch.setattr(subprocess, "run", _fake_completed(rc=1))
+        execrun.run(["gh", "probe"], check=False)
+        monkeypatch.setattr(subprocess, "run", _fake_completed(rc=2, stderr="boom"))
+        with pytest.raises(execrun.ExecError):
+            execrun.run(["gh", "broken"])
+
+        def missing(argv, **kwargs):
+            raise FileNotFoundError(2, "No such file or directory", argv[0])
+
+        monkeypatch.setattr(subprocess, "run", missing)
+        with pytest.raises(execrun.ExecError):
+            execrun.run(["no-such-binary"])
+
+    records = _jsonl_records(tmp_path, emit)
+    assert len(records) == 5
+
+    # jq 'select(.duration_ms > 10000)'
+    slow = [r for r in records if r.get("duration_ms", 0) > 10000]
+    assert [r["argv"] for r in slow] == ["slow-tool"]
+
+    # jq 'select(has("rc") and .rc != 0)' — the has("rc") guard is
+    # load-bearing: the launch-failure record carries no rc at all, and in jq
+    # a missing field reads as null, so the bare `select(.rc != 0)` would
+    # wrongly match it (null != 0 is true).
+    assert any("rc" not in r for r in records)
+    nonzero = [r for r in records if "rc" in r and r["rc"] != 0]
+    assert sorted(r["argv"] for r in nonzero) == ["gh broken", "gh probe"]
+
+    # The bare query really is wrong on this log — the documented guard is
+    # not decorative.
+    naive = [r for r in records if r.get("rc") != 0]
+    assert "no-such-binary" in [r["argv"] for r in naive]
+
+
+def test_structured_fields_are_redacted_post_format(monkeypatch, tmp_path):
+    # argv and the stream tails are the secret-bearing fields: a registered
+    # secret riding either must never reach the sink — asserted on the raw
+    # bytes the real file sink writes (post-format, where redact_event runs).
+    redact.clear_registered_secrets()
+    redact.register_secret("s3cret-value")
+    try:
+        monkeypatch.setattr(
+            subprocess,
+            "run",
+            _fake_completed(rc=1, stderr="leaked s3cret-value in the tail"),
+        )
+
+        def emit():
+            with pytest.raises(execrun.ExecError):
+                execrun.run(["tool", "--token", "s3cret-value"])
+
+        records = _jsonl_records(tmp_path, emit)
+        rec = records[0]
+        assert "s3cret-value" not in json.dumps(rec)
+        assert redact.MASK in rec["argv"]
+        assert redact.MASK in rec["stderr_tail"]
+    finally:
+        redact.clear_registered_secrets()
 
 
 # ---------------------------------------------------------------------------
