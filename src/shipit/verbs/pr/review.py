@@ -29,6 +29,7 @@ import sys
 import click
 
 from ... import execrun
+from ...agent import backend as _agent_backend
 from ...prstate.errors import PrStateError
 from ...prstate.reviewers import REGISTRY, ReviewerAdapter, by_name, required_reviewers
 from ._request import RequestResult, request_reviewers
@@ -98,11 +99,12 @@ def run_internal_cmd(
     `--help`: humans use `pr review request`, which detaches this.
 
     Logging: the root group callback already configured logging, but it resolves
-    the repo best-effort off cwd (`resolve_current_owner_repo`) — which can degrade
+    the repo best-effort off cwd (`resolve_current_repo`) — which can degrade
     in a terminal-less child and leave the run with NO file sink. This child KNOWS
     its repo deterministically (the `--repo` arg), so it re-wires the OBS01 file
-    sink from that slug — best-effort — so the detached run's diagnostics normally
-    reach `<logdir>/<owner>/<repo>/shipit.log` (OBS03 story 5). A malformed slug or
+    sink from that slug (via the canonical `identity.repo_from_slug` parser) —
+    best-effort — so the detached run's diagnostics normally reach
+    `<logdir>/<owner>/<name>/shipit.log` (OBS03 story 5). A malformed slug or
     logging-setup failure is swallowed (returns False) and never crashes the review.
     """
     from ...logsetup import configure_logging_for_slug
@@ -110,8 +112,23 @@ def run_internal_cmd(
 
     configure_logging_for_slug(repo)
 
+    # `--agent` carries the funnel-agent alias (`codex` / `agy`); resolve it back
+    # to the ONE registry identity (ADR-0025) at this process boundary — the rest
+    # of the funnel path threads the Backend, never a bare name string.
+    try:
+        backend = _agent_backend.by_funnel_agent(agent)
+    except KeyError:
+        known = ", ".join(
+            b.funnel_agent or "" for b in _agent_backend.funnel_backends()
+        )
+        print(
+            f"error: unknown review agent {agent!r} (known: {known})",
+            file=sys.stderr,
+        )
+        raise SystemExit(1) from None
+
     service.run_detached_review(
-        agent,
+        backend,
         pr,
         repo=repo,
         run_id=run_id,
@@ -178,18 +195,20 @@ def _select(reviewer: str | None) -> list[ReviewerAdapter] | None:
 
 
 def _resolve_local_alias(reviewer: str) -> ReviewerAdapter | None:
-    """Resolve a ``<name>-local`` spec name to its base adapter, else None.
+    """Resolve a funnel reviewer name (``codex-local``) to its base adapter, else None.
 
-    Only a local-agent adapter (one with no requested edge) is reachable this
-    way, so ``copilot-local`` does not alias to ``copilot``: the suffix names the
-    local-agent reviewer family specifically.
+    A REGISTRY LOOKUP, not a string parse (COR02-WS03): the name resolves through
+    :func:`shipit.agent.backend.by_check_run_name` — the inverse of the registry's
+    ``check_run_name`` alias — so only a real funnel backend's reviewer name is
+    reachable this way (``copilot-local`` matches no registry entry and does not
+    alias to ``copilot``: the alias names the local-agent reviewer family
+    specifically).
     """
-    if not reviewer.endswith("-local"):
+    try:
+        backend = _agent_backend.by_check_run_name(reviewer)
+    except KeyError:
         return None
-    base = by_name(reviewer[: -len("-local")])
-    if base is not None and not base.has_requested_edge:
-        return base
-    return None
+    return by_name(backend.funnel_agent or backend.name)
 
 
 def _emit(pr: int, result: RequestResult) -> None:

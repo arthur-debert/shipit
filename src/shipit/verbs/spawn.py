@@ -30,7 +30,7 @@ import sys
 
 import click
 
-from .. import execrun, gh, logcontext
+from .. import execrun, gh, identity, logcontext
 from ..spawn import backends, launch
 from ..tree.create import Tree, create, new_agent_hash
 from ..tree.layout import (
@@ -309,33 +309,25 @@ def run_subagent(
         print("spawn subagent: not inside a git checkout", file=sys.stderr)
         return 1
     try:
-        org_repo = gh.current_repo()
+        # Identity derives LOCALLY from the origin remote (ADR-0024): one canonical,
+        # case-normalized Repo value object — a malformed remote fails loud
+        # (ValueError) rather than feeding a bogus identity into the TreeSpec.
+        repo_identity = identity.resolve_repo(root)
         url = gh.git_remote_url(cwd=root)
-    except execrun.ExecError as exc:
+    except (execrun.ExecError, ValueError) as exc:
         print(f"spawn subagent: {exc}", file=sys.stderr)
         return 1
 
-    if "/" not in org_repo:
-        # A well-formed ambient identity is always "org/repo"; a slashless value
-        # would put the whole string in ``org`` and leave ``repo_name`` empty, which
-        # can slip past the --repo guard below and feed an empty repo into the
-        # TreeSpec. Refuse it loud rather than build a malformed Tree.
-        print(
-            f"spawn subagent: ambient repo {org_repo!r} is not in org/repo form; "
-            "cannot resolve the target repo identity.",
-            file=sys.stderr,
-        )
-        return 1
-
-    org, _, repo_name = org_repo.partition("/")
     # --repo is the wrong-checkout guard, not a repo SELECTOR yet: the skeleton
     # resolves identity from the ambient checkout, so a --repo that names a
-    # different repo is refused rather than silently ignored. Multi-repo selection
-    # is a later WS.
-    if repo not in (repo_name, org_repo):
+    # different repo is refused rather than silently ignored. Compared through the
+    # canonical identity (lowercased — GitHub slugs are case-insensitive), so a
+    # mixed-case --repo never false-negatives against a case-varying origin.
+    # Multi-repo selection is a later WS.
+    if repo.strip().lower() not in (repo_identity.name, repo_identity.slug):
         print(
             f"spawn subagent: --repo {repo!r} but the ambient checkout is "
-            f"{org_repo!r}; the skeleton spawns from the target checkout "
+            f"{repo_identity.slug!r}; the skeleton spawns from the target checkout "
             "(multi-repo selection is a later WS).",
             file=sys.stderr,
         )
@@ -361,8 +353,7 @@ def run_subagent(
             print(f"spawn subagent: {exc}", file=sys.stderr)
             return 1
         return _launch_reviewer(
-            org=org,
-            repo_name=repo_name,
+            repo=repo_identity,
             branch=review_branch,
             source_repo=root,
             github_url=url,
@@ -409,8 +400,7 @@ def run_subagent(
             )
             return 1
         spec = TreeSpec(
-            org=org,
-            repo=repo_name,
+            repo=repo_identity,
             agent_hash=new_agent_hash(),
             epic=epic,
             ws=ws,
@@ -427,8 +417,7 @@ def run_subagent(
             print(f"spawn subagent: {exc}", file=sys.stderr)
             return 1
         spec = TreeSpec(
-            org=org,
-            repo=repo_name,
+            repo=repo_identity,
             agent_hash=new_agent_hash(),
             issue=issue,
             session=session,
@@ -590,8 +579,7 @@ def _launch_write(
 
 def _launch_reviewer(
     *,
-    org: str,
-    repo_name: str,
+    repo: identity.Repo,
     branch: str,
     source_repo: str,
     github_url: str,
@@ -613,7 +601,7 @@ def _launch_reviewer(
     existing PR), so success is the child's clean exit. Fail-closed mirrors the write
     path — a read-only-Tree error exits 1 loud, never a fallback.
     """
-    plan = readonly_plan(org=org, repo=repo_name, branch=branch)
+    plan = readonly_plan(repo=repo, branch=branch)
     try:
         tree = create_readonly(plan, source_repo=source_repo, github_url=github_url)
     except (ValueError, execrun.ExecError, OSError) as exc:

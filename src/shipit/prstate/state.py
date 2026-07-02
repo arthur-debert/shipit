@@ -609,13 +609,19 @@ def _has_stale_review(ctx: ReadinessView, adapter: ReviewerAdapter) -> bool:
     NEVER appear in the RE-REQUEST advice — re-running it would cost a token /
     model run for a review it already gave. The rerun guard makes that explicit
     even if a future caller passes a done reviewer in. DISMISSED reviews don't
-    count."""
+    count.
+
+    The head comparison is ``Sha``-vs-``Sha`` (COR02): both sides are validated,
+    lowercase-normalized FULL shas, so a case or length mismatch can no longer
+    silently read a current-head review as stale. A review whose wire node
+    carried no commit (``commit_id is None``) is explicitly treated as
+    not-on-this-head — stale, exactly as the old empty-string sentinel read."""
     if not adapter._rerun(ctx):
         return False
     return any(
         adapter.matches(r.author)
         and r.state != "DISMISSED"
-        and r.commit_id != ctx.head_sha
+        and (r.commit_id is None or r.commit_id != ctx.head_sha)
         for r in ctx.reviews
     )
 

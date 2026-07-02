@@ -84,10 +84,18 @@ class Backend:
         return self.funnel_agent
 
     @property
+    def app_slug(self) -> str:
+        """The review GitHub App's slug — ``adr-<agent>-review`` (the App the
+        funnel authenticates as; its bot login is :pyattr:`funnel_login`). Raises
+        if no funnel identity."""
+        return f"adr-{self._require_funnel('app_slug')}-review"
+
+    @property
     def funnel_login(self) -> str:
         """The GitHub App bot login a posted review is attributed to —
-        ``adr-<agent>-review[bot]`` (ADR-0025 alias). Raises if no funnel identity."""
-        return f"adr-{self._require_funnel('funnel_login')}-review[bot]"
+        ``adr-<agent>-review[bot]`` (ADR-0025 alias; the :pyattr:`app_slug` with
+        GitHub's ``[bot]`` suffix). Raises if no funnel identity."""
+        return f"{self.app_slug}[bot]"
 
     @property
     def bot_slug_fragment(self) -> str:
@@ -183,6 +191,9 @@ _BY_NAME: dict[str, Backend] = {b.name: b for b in REGISTRY}
 _BY_FUNNEL_AGENT: dict[str, Backend] = {
     b.funnel_agent: b for b in REGISTRY if b.funnel_agent is not None
 }
+_BY_CHECK_RUN_NAME: dict[str, Backend] = {
+    b.check_run_name: b for b in REGISTRY if b.has_funnel_identity
+}
 
 
 def by_name(name: str) -> Backend:
@@ -197,16 +208,16 @@ def by_funnel_agent(agent: str) -> Backend:
     return _BY_FUNNEL_AGENT[agent]
 
 
+def by_check_run_name(name: str) -> Backend:
+    """The :class:`Backend` whose funnel check-run reviewer name is ``name``
+    (``codex-local`` / ``agy-local``), or raise :class:`KeyError`.
+
+    The REGISTRY-LOOKUP inverse of :pyattr:`Backend.check_run_name` — the funnel
+    path resolves a reviewer name back to its backend HERE, never by slicing a
+    ``-local`` suffix off a string (COR02-WS03)."""
+    return _BY_CHECK_RUN_NAME[name]
+
+
 def funnel_backends() -> tuple[Backend, ...]:
     """The backends that ARE review-funnel App reviewers (codex / agy), in order."""
     return tuple(b for b in REGISTRY if b.has_funnel_identity)
-
-
-def funnel_doppler_keys() -> dict[str, dict[str, str]]:
-    """The funnel-agent → ``{"pem": …, "app_id": …}`` Doppler-key map — the single
-    source :mod:`shipit.review.ghauth` reads instead of its own hardcoded table."""
-    return {
-        b.funnel_agent: {"pem": b.doppler_pem_key, "app_id": b.doppler_app_id_key}
-        for b in funnel_backends()
-        if b.funnel_agent is not None  # narrow for the type checker; always true here
-    }

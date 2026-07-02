@@ -49,7 +49,7 @@ from typing import TextIO
 
 import click
 
-from ... import gh
+from ... import gh, identity
 from ...harness import worktree_adapter
 from ...tree.create import create_from_source, new_agent_hash
 from ...tree.layout import TreeSpec, sanitize_slug
@@ -229,26 +229,19 @@ def _create_tree(*, branch: str | None = None, ephemeral: str | None = None) -> 
     The two shapes this hook mints: a freeform-`branch` spec (the helper spawn's
     holding branch) or an `ephemeral` spec (the coordinator's session Tree — the
     planner resolves the `ephemeral/<id>` dir/branch/base, ADR-0027). Resolves repo
-    identity (local root + `org/repo`) at the gh/git boundary, validates the slug
-    is a well-formed `org/repo` before trusting it, hands the :class:`TreeSpec` to
-    the orchestrator, and returns the dissociated clone's path — provisioned like
-    any Tree (`tree.create`, gated on which manifests exist). Raises on any failure
-    — a missing checkout OR a malformed slug — so :func:`run` fails closed; there
+    identity at the git boundary — the canonical, case-normalized
+    :class:`shipit.identity.Repo`, derived locally from the origin remote
+    (ADR-0024) — hands the :class:`TreeSpec` to the orchestrator, and returns the
+    dissociated clone's path — provisioned like any Tree (`tree.create`, gated on
+    which manifests exist). Raises on any failure — a missing checkout OR an
+    unparseable origin remote (`ValueError`) — so :func:`run` fails closed; there
     is no native-worktree fallback.
     """
     root = gh.repo_root()
     if not root:
         raise RuntimeError("not inside a git checkout — cannot provision a Tree")
-    org_repo = gh.current_repo()
-    org, sep, repo = org_repo.partition("/")
-    if not (org and sep and repo):
-        raise RuntimeError(
-            f"malformed repo slug {org_repo!r} (expected 'org/repo') — "
-            "cannot provision a Tree"
-        )
     spec = TreeSpec(
-        org=org,
-        repo=repo,
+        repo=identity.resolve_repo(root),
         agent_hash=new_agent_hash(),
         branch=branch,
         ephemeral=ephemeral,

@@ -31,6 +31,7 @@ import json
 import logging
 
 from .. import execrun, gh
+from ..agent.backend import Backend
 from . import ghauth
 from .diff import ReviewView
 
@@ -184,7 +185,8 @@ def build_review_payload(
         )
 
     payload: dict = {
-        "commit_id": ctx.head_sha,
+        # The wire payload carries the string form of the typed head `Sha` (COR02).
+        "commit_id": str(ctx.head_sha),
         "event": resolved_event,
         "body": body,
     }
@@ -218,7 +220,7 @@ def post_review(
     review: dict,
     ctx: ReviewView,
     *,
-    agent_name: str,
+    backend: Backend,
     event: str | None = None,
     dry_run: bool = False,
     as_app: bool = False,
@@ -227,10 +229,10 @@ def post_review(
 
     With ``dry_run=True``: prints the payload as pretty JSON and returns it,
     WITHOUT calling ``gh`` and minting NO token — safe to run anywhere. When
-    ``as_app`` is also set, it notes the review would be authored by
-    ``adr-<agent>-review[bot]``.
+    ``as_app`` is also set, it notes the review would be authored by the
+    backend's funnel login (``adr-<agent>-review[bot]``, off the registry).
 
-    With ``as_app=True`` (and not dry-run): authenticates AS the agent's GitHub
+    With ``as_app=True`` (and not dry-run): authenticates AS the backend's GitHub
     App installation — mints a 1-hour installation token via
     :mod:`shipit.review.ghauth` (Doppler-sourced PEM → in-memory RS256 JWT →
     installation token) and passes it to ``gh.rest(..., token=…)`` so GitHub
@@ -239,6 +241,7 @@ def post_review(
 
     Raises ``RuntimeError`` on a ``gh`` / auth failure with an actionable message.
     """
+    agent_name = backend.funnel_agent or backend.name
     payload = build_review_payload(review, ctx, agent_name=agent_name, event=event)
 
     if dry_run:
@@ -251,7 +254,7 @@ def post_review(
         )
         print(json.dumps(payload, indent=2))
         if as_app:
-            print(f"(dry-run: would post as adr-{agent_name}-review[bot])")
+            print(f"(dry-run: would post as {backend.funnel_login})")
         return payload
 
     repo = _resolve_repo(ctx)
@@ -265,7 +268,7 @@ def post_review(
             "post_review: authenticating as the %r GitHub App for %s", agent_name, repo
         )
         try:
-            token = ghauth.installation_token(agent_name, repo)
+            token = ghauth.installation_token(backend, repo)
         except ghauth.ReviewAuthError as exc:
             raise RuntimeError(
                 f"Could not authenticate as the {agent_name!r} GitHub App to post "

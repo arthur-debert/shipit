@@ -8,8 +8,10 @@ problem still blocks on its own terms.
 
 from __future__ import annotations
 
+import hashlib
 from itertools import count
 
+from shipit.identity import Sha
 from shipit.prstate.breakers import (
     ROUND_CAP,
     build_rounds,
@@ -21,9 +23,15 @@ from shipit.prstate.reviewers import by_name
 from shipit.prstate.state import TaskState, evaluate
 
 
-def review(rid: int, sha: str, author: str = "Copilot") -> Review:
+def sha(seed: str) -> Sha:
+    """A deterministic full `Sha` from a short readable seed (COR02: a commit
+    identity must be a validated full sha, so tests derive one per label)."""
+    return Sha(hashlib.sha1(seed.encode()).hexdigest())
+
+
+def review(rid: int, head: str, author: str = "Copilot") -> Review:
     return Review(
-        review_id=rid, author=author, state="COMMENTED", commit_id=sha, body=""
+        review_id=rid, author=author, state="COMMENTED", commit_id=sha(head), body=""
     )
 
 
@@ -59,7 +67,9 @@ def ctx(
 ):
     return readiness_view(
         number=1,
-        head_sha=head or (reviews[-1].commit_id if reviews else "h"),
+        head_sha=sha(head)
+        if head
+        else (reviews[-1].commit_id if reviews else sha("h")),
         is_draft=True,
         base_ref="main",
         mergeable=mergeable,
@@ -84,7 +94,10 @@ def test_build_rounds_one_per_copilot_review_chronological():
     reviews = [review(10, "a"), review(20, "b"), review(5, "c", author="gemini-bot")]
     rounds = build_rounds(ctx(reviews))
     assert [r.index for r in rounds] == [1, 2]
-    assert [r.commit_id for r in rounds] == ["a", "b"]  # gemini excluded, id-ordered
+    assert [r.commit_id for r in rounds] == [
+        sha("a"),
+        sha("b"),
+    ]  # gemini excluded, id-ordered
 
 
 def test_build_rounds_matches_both_copilot_login_variants():
@@ -118,7 +131,10 @@ def test_two_required_reviewers_across_two_heads_is_two_rounds_not_four():
         review(4, "h2", author="coderabbitai[bot]"),
     ]
     rounds = build_rounds(ctx(reviews))
-    assert [r.commit_id for r in rounds] == ["h1", "h2"]  # one per head, not per review
+    assert [r.commit_id for r in rounds] == [
+        sha("h1"),
+        sha("h2"),
+    ]  # one per head, not per review
     assert len(rounds) == 2
     v = evaluate_breakers(ctx(reviews))
     assert v.cycles == 2

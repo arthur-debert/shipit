@@ -1,8 +1,8 @@
 {
-  "_note": "HAND-SHAPED after the release#502 regression (NOT captured reality — see the captured-fixture baseline): REST /pulls/{n}/comments surfaced only 3 of these 6 inline comments; GraphQL reviewThreads is the source of truth (release#515/#455). Re-capture from a live multi-bot PR to drop the baseline entry.",
+  "_note": "HAND-SHAPED after the release#502 regression (NOT captured reality \u2014 see the captured-fixture baseline): REST /pulls/{n}/comments surfaced only 3 of these 6 inline comments; GraphQL reviewThreads is the source of truth (release#515/#455). Re-capture from a live multi-bot PR to drop the baseline entry.",
   "meta": {
     "number": 502,
-    "headRefOid": "f00d15600d",
+    "headRefOid": "f00d15600d000000000000000000000000000000",
     "baseRefName": "main",
     "isDraft": true,
     "mergeable": "MERGEABLE",
@@ -22,16 +22,20 @@
   "reviews": [
     {
       "id": 7001,
-      "user": { "login": "copilot-pull-request-reviewer[bot]" },
+      "user": {
+        "login": "copilot-pull-request-reviewer[bot]"
+      },
       "state": "COMMENTED",
-      "commit_id": "f00d15600d",
+      "commit_id": "f00d15600d000000000000000000000000000000",
       "body": "## Pull request overview - left a few inline notes."
     },
     {
       "id": 7005,
-      "user": { "login": "coderabbitai[bot]" },
+      "user": {
+        "login": "coderabbitai[bot]"
+      },
       "state": "COMMENTED",
-      "commit_id": "f00d15600d",
+      "commit_id": "f00d15600d000000000000000000000000000000",
       "body": "CodeRabbit review: see inline."
     }
   ],
@@ -47,8 +51,12 @@
             "line": 3,
             "originalLine": 3,
             "body": "Guard against an empty list here.",
-            "author": { "login": "Copilot" },
-            "pullRequestReview": { "databaseId": 7001 }
+            "author": {
+              "login": "Copilot"
+            },
+            "pullRequestReview": {
+              "databaseId": 7001
+            }
           }
         ]
       }
@@ -64,17 +72,25 @@
             "line": 17,
             "originalLine": 17,
             "body": "This Kind branch is unreachable.",
-            "author": { "login": "copilot-pull-request-reviewer" },
-            "pullRequestReview": { "databaseId": 7001 }
+            "author": {
+              "login": "copilot-pull-request-reviewer"
+            },
+            "pullRequestReview": {
+              "databaseId": 7001
+            }
           },
           {
             "databaseId": 103,
             "path": "src/b.py",
             "line": 17,
             "originalLine": 17,
-            "body": "Good catch — fixed in the next push.",
-            "author": { "login": "arthur-debert" },
-            "pullRequestReview": { "databaseId": 7002 }
+            "body": "Good catch \u2014 fixed in the next push.",
+            "author": {
+              "login": "arthur-debert"
+            },
+            "pullRequestReview": {
+              "databaseId": 7002
+            }
           }
         ]
       }
@@ -90,8 +106,12 @@
             "line": 8,
             "originalLine": 8,
             "body": "Typo in the docstring.",
-            "author": { "login": "Copilot" },
-            "pullRequestReview": { "databaseId": 7001 }
+            "author": {
+              "login": "Copilot"
+            },
+            "pullRequestReview": {
+              "databaseId": 7001
+            }
           }
         ]
       }
@@ -107,8 +127,12 @@
             "line": 30,
             "originalLine": 30,
             "body": "Consider extracting this into a helper.",
-            "author": { "login": "coderabbitai" },
-            "pullRequestReview": { "databaseId": 7005 }
+            "author": {
+              "login": "coderabbitai"
+            },
+            "pullRequestReview": {
+              "databaseId": 7005
+            }
           }
         ]
       }
@@ -124,8 +148,12 @@
             "line": 2,
             "originalLine": 2,
             "body": "Please reword this sentence.",
-            "author": { "login": "some-human" },
-            "pullRequestReview": { "databaseId": 7006 }
+            "author": {
+              "login": "some-human"
+            },
+            "pullRequestReview": {
+              "databaseId": 7006
+            }
           }
         ]
       }

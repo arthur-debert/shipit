@@ -17,6 +17,7 @@ import re
 
 import pytest
 from shipit.harness import worktree_adapter
+from shipit.identity import repo_from_slug
 from shipit.tree.create import Tree
 from shipit.verbs.hook import worktreecreate
 
@@ -40,7 +41,11 @@ def fake_repo(monkeypatch):
         )
 
     monkeypatch.setattr(worktreecreate.gh, "repo_root", lambda: "/repo")
-    monkeypatch.setattr(worktreecreate.gh, "current_repo", lambda: "acme/widget")
+    monkeypatch.setattr(
+        worktreecreate.identity,
+        "resolve_repo",
+        lambda cwd=".", **kw: repo_from_slug("acme/widget"),
+    )
     # Default: the cwd-branch probe finds no branch, so a test that does not opt
     # into a branch never touches real git (its epic comes from the env override).
     monkeypatch.setattr(worktreecreate.gh, "git_current_branch", lambda *, cwd: None)
@@ -81,7 +86,7 @@ def test_spawn_lands_in_a_tree_on_epic_branch(monkeypatch, fake_repo):
     spec = fake_repo["spec"]
     # The branch carries the id from `name` — `abc123`, NOT a synthesized random.
     assert spec.branch == "TRE03/agent-abc123"  # branch-deferred holding branch
-    assert (spec.org, spec.repo) == ("acme", "widget")
+    assert spec.repo == repo_from_slug("acme/widget")
     assert fake_repo["source_repo"] == "/repo"
     assert out.strip() == f"/trees/acme/widget/branches/{spec.agent_hash}"
 
@@ -271,24 +276,18 @@ def test_fail_closed_when_not_in_a_checkout(monkeypatch, fake_repo, capsys):
     assert "not inside a git checkout" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize(
-    "slug",
-    [
-        "",  # remote missing/unresolved → empty string
-        "widget",  # bare name, no org and no separator
-        "/widget",  # empty org
-        "acme/",  # empty repo
-    ],
-)
-def test_fail_closed_on_malformed_repo_slug(slug, monkeypatch, fake_repo, capsys):
-    # A user-facing boundary: a missing/malformed `org/repo` slug must abort the
-    # spawn LOUD — exit 1, nothing on stdout, and NO Tree provisioned (no partial
-    # `TreeSpec(repo="")` reaching the orchestrator).
-    monkeypatch.setattr(worktreecreate.gh, "current_repo", lambda: slug)
+def test_fail_closed_on_unresolvable_identity(monkeypatch, fake_repo, capsys):
+    # A user-facing boundary: an origin remote the canonical resolver cannot parse
+    # must abort the spawn LOUD — exit 1, nothing on stdout, and NO Tree
+    # provisioned (no bogus identity reaching the orchestrator).
+    def _raise(cwd=".", **kw):
+        raise ValueError("cannot parse owner/name from remote url: 'garbage'")
+
+    monkeypatch.setattr(worktreecreate.identity, "resolve_repo", _raise)
     code, out = _run(json.dumps({"name": "x"}))
     assert code == 1
     assert out == ""  # CC treats empty stdout + nonzero as a failed spawn
-    assert "malformed repo slug" in capsys.readouterr().err
+    assert "cannot parse owner/name" in capsys.readouterr().err
     assert "spec" not in fake_repo  # create_from_source was never reached
 
 
@@ -333,7 +332,7 @@ def test_coordinator_launch_provisions_the_ephemeral_shape(fake_repo):
     spec = fake_repo["spec"]
     assert spec.ephemeral == "sess-20260702-121314-4242"
     assert spec.branch is None  # NOT the freeform helper shape
-    assert (spec.org, spec.repo) == ("acme", "widget")
+    assert spec.repo == repo_from_slug("acme/widget")
     assert out.strip()  # the printed path is what CC adopts as the root cwd
 
 
