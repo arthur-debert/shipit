@@ -55,7 +55,7 @@ def resolve_pr(pr: int | None) -> int | None:
         # non-zero with this marker. Anything else is a real gh/auth failure —
         # surface the failed Exec as its transport error (pre-redacted by the
         # ExecError constructor), never collapse it into None.
-        if _NO_PR_MARKER in result.stderr:
+        if _NO_PR_MARKER in result.stderr.lower():
             return None
         raise execrun.ExecError(
             result.argv,
