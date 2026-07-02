@@ -70,6 +70,15 @@ def write_record(tree: str | Path, shas: Sequence[str]) -> None:
         )
     payload = {_COMMITS_KEY: list(shas)}
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    # A lifecycle milestone (spray convention): the record is what later lets a
+    # gc sweep reclaim this Tree past the unpushed floor, so its write — today
+    # otherwise invisible — is narrated with the Tree it protects.
+    logger.info(
+        "provision: recorded %d provisioning commit(s) in %s",
+        len(shas),
+        tree,
+        extra={"tree": str(tree)},
+    )
 
 
 def read_provision_shas(tree: str | Path) -> frozenset[str]:
