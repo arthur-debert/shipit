@@ -2,6 +2,13 @@
 
 > Epic: **FLU01** · Status: planned · Plan: `docs/prd/FUTURE_WORK.md`
 > Glossary: `CONTEXT.md` (PR-flow terms)
+>
+> **Since superseded in part (PROC02, 2026-07):** `src/shipit/prstate/ghapi.py`
+> no longer exists — PROC02-WS01 (ADR-0028) merged it into the single `gh` Tool
+> adapter, `src/shipit/gh.py`. Item 1 below was **delivered** by that merge:
+> `graphql()` now lives in `shipit.gh` carrying exactly the purpose-built-scope
+> docstring this item asked for. The other items' file/line references predate
+> the adapter epic — re-verify against current code before working them.
 
 This epic tracks the **valid-but-deferred** findings from the PRF01 epic-PR review
 (GitHub issue **#24**). They are real improvements that were intentionally postponed

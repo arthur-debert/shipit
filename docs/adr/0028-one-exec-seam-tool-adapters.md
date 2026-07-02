@@ -18,6 +18,25 @@ natively offers (native JSON > porcelain formats > converted, e.g. `jc`) and
 return existing core value objects (`PR`, `Repo`, `Sha`), never
 adapter-shaped parallel types.
 
+The "converted" rung was evaluated live on the `session/liveness` ps probe
+(PROC02-WS04, epic #254): `jc` is adopted for JSON-less tools, with two
+load-bearing caveats an adapter reaching for it must honor:
+
+1. **jc's table parsers are header-driven, so the adapter must pin the tool's
+   output shape.** Default headers differ per platform (`ps`'s `args` →
+   `COMMAND` under procps) and multi-token fields (`lstart`) can't survive a
+   whitespace table split — the liveness adapter pins one `-o` per column and
+   uses the numeric `etime`. jc converts; it does not absolve the adapter of
+   choosing a convertible, portable output format.
+2. **jc validates nothing domain-shaped.** Garbage input yields `[]` or
+   nonsense-keyed dicts, not errors — the adapter still owns the "is this row
+   usable" checks (e.g. require int pid/ppid, degrade an unparseable field to
+   a safe answer rather than raising).
+
+Rule of thumb: reach for jc when the tool has no JSON/porcelain mode AND jc
+has a parser for it; pin the tool's output format explicitly; keep validation
+in the adapter.
+
 ## Considered options
 
 - **Per-tool exception hierarchy** (`GhError(ExecError)`, `PixiError(...)`) —

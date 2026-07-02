@@ -76,7 +76,8 @@ rebuild does fire.
 - **artifact resolver (deep module).** Pure decision `(content-key + store
   presence) → {reuse(download-ref) | build-then-upload}`. The store I/O (a
   content-addressed get/put against GCS) is an injected boundary, mocked in tests —
-  same pattern as `prstate` injecting its `Acts`/`ghapi` boundary.
+  same pattern as `prstate` reading GitHub only through the injectable `gh`
+  Tool adapter (`shipit.gh`, ADR-0028).
 - **Store boundary.** A thin content-addressed get/put over the existing GCS bucket
   (shared with sccache); keys are content-keys; values are the staged build outputs
   (binary + any co-staged payload, e.g. a `.app` reseal payload later). Not GitHub

@@ -3,6 +3,12 @@
 > Epic: **PRF01** · Status: ready-for-agent · Plan: `docs/prd/FUTURE_WORK.md`
 > ADRs: `docs/adr/0001-reuse-release-core-by-copy.md`, `docs/adr/0002-adapt-release-primitives-two-cli-conventions.md`
 > Glossary: `CONTEXT.md` (PR-flow terms)
+>
+> **Since superseded in part (PROC02, 2026-07):** the "two `gh` boundaries"
+> decision below (Reuse model; user story 24) is superseded by ADR-0028 —
+> PROC02-WS01 merged the engine's copied `ghapi` boundary into the single `gh`
+> Tool adapter, `src/shipit/gh.py`. Everything else stands; this PRD is the
+> historical record of the PR-flow build.
 
 ## Problem Statement
 
