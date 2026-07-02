@@ -52,7 +52,7 @@ from typing import Any
 import platformdirs
 import structlog
 
-from . import gh, redact
+from . import gh, logcontext, redact
 
 #: The package logger every shipit module logs through (``logging.getLogger``
 #: of a child name propagates here).
@@ -414,8 +414,20 @@ def configure_logging(
       repo is resolved (strictly) via :mod:`shipit.gh`. The CLI entrypoint resolves
       ``owner_repo`` best-effort (:func:`resolve_current_owner_repo`) and passes it,
       so a normal run gets the file sink and a non-repo run simply skips it.
+
+    Logging setup is also the child half of the cross-process context seam
+    (ADR-0029): any domain keys a parent shipit process exported into ``env``
+    (``SHIPIT_LOG_CTX_*``, :func:`shipit.logcontext.env_export`) are rebound here,
+    so a detached/spawned child's records carry the parent's ``pr``/``repo``/…
+    from its first record on — and an explicitly-exported key wins over anything
+    the child bound off its own best-effort cwd resolution before this call.
     """
     env = os.environ if env is None else env
+
+    # Rebind parent-exported domain keys FIRST (the child half of the ADR-0029
+    # env seam) so every sink attached below — and every record after — carries
+    # them. No-op when the environment carries no SHIPIT_LOG_CTX_* vars.
+    logcontext.bind_from_env(env)
 
     logger = logging.getLogger(LOGGER_NAME)
     logger.setLevel(logging.DEBUG)
