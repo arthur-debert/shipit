@@ -243,11 +243,12 @@ def post_review(
 
     if dry_run:
         logger.info(
-            "post_review: dry-run for %s#%s (event=%s, as_app=%s) — not posting",
-            ctx.repo,
+            "review post dry-run for pr#%s on %s (event=%s, as_app=%s) — not posting",
             ctx.number,
+            ctx.repo,
             payload.get("event"),
             as_app,
+            extra={"pr": ctx.number, "repo": ctx.repo},
         )
         print(json.dumps(payload, indent=2))
         if as_app:
@@ -262,7 +263,9 @@ def post_review(
         # token value never reaches a log record — only the fact that we are
         # authenticating as the app is recorded.
         logger.debug(
-            "post_review: authenticating as the %r GitHub App for %s", agent_name, repo
+            "review post authenticating as the %r GitHub App for %s",
+            agent_name,
+            repo,
         )
         try:
             token = ghauth.installation_token(agent_name, repo)
@@ -274,11 +277,12 @@ def post_review(
 
     path = f"/repos/{repo}/pulls/{ctx.number}/reviews"
     logger.info(
-        "post_review: posting review to %s#%s (event=%s, as_app=%s)",
-        repo,
+        "review posting to pr#%s on %s (event=%s, as_app=%s)",
         ctx.number,
+        repo,
         payload.get("event"),
         as_app,
+        extra={"pr": ctx.number, "repo": repo},
     )
     try:
         response = gh.rest(path, method="POST", body=payload, token=token)
@@ -287,19 +291,19 @@ def post_review(
         # point, so its failure records at ERROR with the exception attached —
         # the ExecError is pre-redacted, so the token can never ride this record.
         logger.error(
-            "post_review: post to %s#%s failed",
-            repo,
+            "review post to pr#%s on %s failed",
             ctx.number,
+            repo,
             exc_info=True,
-            extra={"pr": ctx.number},
+            extra={"pr": ctx.number, "repo": repo},
         )
         raise RuntimeError(
             f"Failed to post review to {repo}#{ctx.number}: {exc}"
         ) from exc
     logger.info(
-        "post_review: posted review to %s#%s",
-        repo,
+        "review posted to pr#%s on %s",
         ctx.number,
-        extra={"pr": ctx.number},
+        repo,
+        extra={"pr": ctx.number, "repo": repo},
     )
     return response if isinstance(response, dict) else {"response": response}

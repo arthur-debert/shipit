@@ -86,7 +86,12 @@ def _fail(message: str, *, exc: BaseException | None = None, **fields: object) -
     """
     print(f"spawn subagent: {message}", file=sys.stderr)
     extras = {name: value for name, value in fields.items() if value is not None}
-    logger.error("spawn subagent: %s", message, exc_info=exc, extra=extras)
+    # One exc_info form across the spray (LOG02 convergence): `exc_info=True`
+    # reads the ACTIVE exception — with its real traceback — where passing the
+    # instance would attach only type+value when it was never raised here. Every
+    # caller that passes `exc` does so from inside its `except` block, so the
+    # active exception is exactly `exc`.
+    logger.error("spawn subagent: %s", message, exc_info=exc is not None, extra=extras)
     return 1
 
 

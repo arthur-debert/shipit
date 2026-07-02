@@ -120,14 +120,23 @@ def test_no_token_value_in_any_record(monkeypatch, caplog):
 def test_token_shaped_argv_is_redacted_in_the_record(monkeypatch, caplog):
     """Defence in depth: a token-shaped argument is masked in the Exec record
     (the central redactor's GitHub-token pattern rule) even though tokens
-    normally never travel in argv."""
+    normally never travel in argv.
+
+    Asserted on POST-format output (#277): the runner's records carry no
+    per-site masking — the central ``redact_event`` processor masks at format
+    time, so redaction is asserted on what a sink actually writes, rendered
+    through the same ``ProcessorFormatter`` every sink shares (``caplog``
+    captures records pre-format)."""
+    from shipit import logsetup
+
     monkeypatch.setattr(
         execrun.subprocess, "run", lambda *a, **k: _fake_proc(stdout="{}")
     )
     leaked = "ghp_argvLeak0987654321abcDEF"
     with caplog.at_level(logging.DEBUG, logger="shipit.exec"):
         gh._run(["gh", "api", "-f", f"token={leaked}"])
-    full = "\n".join(r.getMessage() for r in caplog.records)
+    formatter = logsetup._file_formatter()
+    full = "\n".join(formatter.format(r) for r in caplog.records)
     assert leaked not in full
     assert redact.MASK in full
 

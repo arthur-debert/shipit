@@ -129,7 +129,7 @@ def scan(root: str | Path) -> list[TreeRecord]:
     """
     base = Path(root)
     if not base.is_dir():
-        logger.debug("scan: central root %s does not exist; empty fleet", base)
+        logger.debug("tree scan found no central root at %s; empty fleet", base)
         return []
 
     started = time.monotonic()
@@ -153,7 +153,7 @@ def scan(root: str | Path) -> list[TreeRecord]:
     # Mechanics at DEBUG (spray convention): the fleet-read's size + cost, so a
     # slow `list`/`gc` is attributable to the scan from the durable record.
     logger.debug(
-        "scan: read %d Tree(s) under %s in %dms",
+        "tree scan read %d Tree(s) under %s in %dms",
         len(records),
         base,
         int((time.monotonic() - started) * 1000),

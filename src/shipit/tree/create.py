@@ -124,7 +124,7 @@ def create(spec: TreeSpec, *, source_repo: str, github_url: str) -> Tree:
 
         started = time.monotonic()
         logger.debug(
-            "tree create: cloning %s -> %s (branch %s, base %s)",
+            "tree cloning %s -> %s (branch %s, base %s)",
             github_url,
             dest,
             tree_plan.branch,
@@ -136,7 +136,7 @@ def create(spec: TreeSpec, *, source_repo: str, github_url: str) -> Tree:
             gh.git_checkout_new_branch(tree_plan.branch, tree_plan.base, cwd=str(dest))
             copied = include.apply(source_repo, dest)
             logger.debug(
-                "tree create: copied %d .treeinclude file(s) into %s", len(copied), dest
+                "tree copied %d .treeinclude file(s) into %s", len(copied), dest
             )
             _provision(dest, trees_root=Path(trees_root))
         except BaseException:

@@ -182,7 +182,7 @@ def run_create(
         # The stderr line is the user surface; the durable ERROR record (with the
         # exception attached) covers the pre-pipeline failures — a rejected spec,
         # an existing dest — that `create`'s own rollback record never sees.
-        logger.error("tree create failed: %s", exc, exc_info=True)
+        logger.error("tree create failed", exc_info=True)
         print(f"tree create: {exc}", file=sys.stderr)
         return 1
     _emit_ready(result)
@@ -263,7 +263,7 @@ def run_list() -> int:
     try:
         root = layout.central_root()
     except ValueError as exc:
-        logger.error("tree list failed: %s", exc, exc_info=True)
+        logger.error("tree list failed", exc_info=True)
         print(f"tree list: {exc}", file=sys.stderr)
         return 1
     records = registry.scan(root)
@@ -421,7 +421,7 @@ def run_remove(
     try:
         root = layout.central_root()
     except ValueError as exc:
-        logger.error("tree remove failed: %s", exc, exc_info=True)
+        logger.error("tree remove failed", exc_info=True)
         print(f"tree remove: {exc}", file=sys.stderr)
         return 1
     records = registry.scan(root)
@@ -446,9 +446,8 @@ def run_remove(
         # Propagating failure (exit-1): ERROR with the exception attached; the
         # successful removal itself is recorded by `remove_tree` (the funnel).
         logger.error(
-            "tree remove failed for %s: %s",
+            "tree remove failed for %s",
             record.path,
-            exc,
             exc_info=True,
             extra={"tree": record.path},
         )
@@ -578,7 +577,7 @@ def run_gc(*, dry_run: bool = False, threshold: str | None = None) -> int:
             else cleanup.parse_duration(threshold)
         )
     except ValueError as exc:
-        logger.error("tree gc failed: %s", exc, exc_info=True)
+        logger.error("tree gc failed", exc_info=True)
         print(f"tree gc: {exc}", file=sys.stderr)
         return 1
     decision, total, unknown = _scan_and_classify(root, max_age_seconds=max_age_seconds)
@@ -708,9 +707,8 @@ def _emit_gc(decision: Cleanup, *, total: int, unknown: int) -> None:
             # Degraded-but-continuing (spray convention): the sweep carries on
             # past a failed rmtree, so it is a WARNING, exception attached.
             logger.warning(
-                "gc: could not remove %s: %s",
+                "tree gc could not remove %s",
                 record.path,
-                exc,
                 exc_info=True,
                 extra={"tree": record.path},
             )
@@ -729,12 +727,12 @@ def _emit_gc(decision: Cleanup, *, total: int, unknown: int) -> None:
     kept = len(decision.keep)
     # The sweep's lifecycle milestone: the print above is the user surface, this
     # is its durable twin (per-Tree removals are recorded by `remove_tree`).
-    logger.info("gc: removed %d, stale %d, kept %d", removed, stale, kept)
+    logger.info("tree gc removed %d, stale %d, kept %d", removed, stale, kept)
     print(f"gc: removed {removed}, stale {stale}, kept {kept}")
     if unknown:
         swept = total - unknown
         logger.warning(
-            "gc: swept %d of %d; %d skipped (PR state unknown — incomplete view "
+            "tree gc swept %d of %d; %d skipped (PR state unknown — incomplete view "
             "of the fleet)",
             swept,
             total,

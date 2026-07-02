@@ -11,12 +11,14 @@ The contract under test, via an injected fake process (monkeypatched
 - missing binary / OS launch failures normalize into ``ExecError`` — no raw
   ``OSError``/``FileNotFoundError`` escapes;
 - record emission: exactly one record per Exec (success DEBUG, failure ERROR
-  with both stream tails), everything redacted;
+  with both stream tails), redacted at format time by the central
+  ``redact_event`` processor (#277 — no per-site masking);
 - the stdin contract (ADR-0020, carried over from the retired proto-runner):
   no ``input`` → the child's stdin pinned to ``DEVNULL``;
 - :func:`~shipit.execrun.spawn_detached`, the one deliberate non-Exec: detach
   semantics (own session, stdio to ``/dev/null``, no handle), the spawn-time
-  record (argv/cwd/pid, redacted), and launch normalization into ``ExecError``.
+  record (argv/cwd/pid, redacted at format time), and launch normalization into
+  ``ExecError``.
 """
 
 from __future__ import annotations
@@ -327,6 +329,22 @@ def _clean_registry():
     redact.clear_registered_secrets()
 
 
+def _render(records) -> str:
+    """Render records through the shared sink pipeline — POST-format output.
+
+    The runner's records carry no per-site masking (#277): the central
+    ``redact.redact_event`` processor masks every record at FORMAT time, inside
+    ``logsetup._PIPELINE``. ``caplog`` captures records PRE-format, so redaction
+    must be asserted on what a sink actually writes — a record rendered through
+    the same :class:`~structlog.stdlib.ProcessorFormatter` every sink shares —
+    never on ``record.getMessage()``.
+    """
+    from shipit import logsetup
+
+    formatter = logsetup._file_formatter()
+    return "\n".join(formatter.format(r) for r in records)
+
+
 def test_error_and_record_are_redacted(monkeypatch, caplog, _clean_registry):
     redact.register_secret("s3cret-value")
     monkeypatch.setattr(
@@ -348,37 +366,43 @@ def test_error_and_record_are_redacted(monkeypatch, caplog, _clean_registry):
     assert "ghp_abc123token" not in full_log
 
 
-def test_success_record_argv_is_redacted(monkeypatch, caplog, _clean_registry):
+def test_success_record_argv_is_redacted_at_format_time(
+    monkeypatch, caplog, _clean_registry
+):
     monkeypatch.setattr(subprocess, "run", _fake_completed(rc=0))
     with caplog.at_level(logging.DEBUG, logger="shipit.exec"):
         execrun.run(["curl", "-H", "Authorization: ghp_tok3nvalue"])
-    full_log = "\n".join(r.getMessage() for r in caplog.records)
-    assert "ghp_tok3nvalue" not in full_log
-    assert redact.MASK in full_log
+    rendered = _render(caplog.records)
+    assert "ghp_tok3nvalue" not in rendered
+    assert redact.MASK in rendered
 
 
-def test_success_record_cwd_is_redacted(monkeypatch, caplog, _clean_registry):
-    # cwd is a logged field, so it passes through the redactor too: a secret in
-    # the working-directory path must not leak via the success record.
+def test_success_record_cwd_is_redacted_at_format_time(
+    monkeypatch, caplog, _clean_registry
+):
+    # cwd is a logged field, so it passes through the central redactor too: a
+    # secret in the working-directory path must not leak via the success record.
     redact.register_secret("s3cret-dir")
     monkeypatch.setattr(subprocess, "run", _fake_completed(rc=0))
     with caplog.at_level(logging.DEBUG, logger="shipit.exec"):
         execrun.run(["tool"], cwd="/work/s3cret-dir/clone")
-    full_log = "\n".join(r.getMessage() for r in caplog.records)
-    assert "s3cret-dir" not in full_log
-    assert redact.MASK in full_log
+    rendered = _render(caplog.records)
+    assert "s3cret-dir" not in rendered
+    assert redact.MASK in rendered
 
 
-def test_failure_record_cwd_is_redacted(monkeypatch, caplog, _clean_registry):
+def test_failure_record_cwd_is_redacted_at_format_time(
+    monkeypatch, caplog, _clean_registry
+):
     # Same contract on the failure record, which logs cwd via _record_failure.
     redact.register_secret("s3cret-dir")
     monkeypatch.setattr(subprocess, "run", _fake_completed(rc=2, stderr="boom"))
     with caplog.at_level(logging.DEBUG, logger="shipit.exec"):
         with pytest.raises(execrun.ExecError):
             execrun.run(["tool"], cwd="/work/s3cret-dir/clone")
-    full_log = "\n".join(r.getMessage() for r in caplog.records)
-    assert "s3cret-dir" not in full_log
-    assert redact.MASK in full_log
+    rendered = _render(caplog.records)
+    assert "s3cret-dir" not in rendered
+    assert redact.MASK in rendered
 
 
 def test_argv_non_string_elements_are_coerced(monkeypatch, caplog, _clean_registry):
@@ -513,7 +537,9 @@ def test_spawn_detached_emits_one_debug_record_with_argv_cwd_pid(monkeypatch, ca
     assert "pid=4321" in message
 
 
-def test_spawn_detached_record_is_redacted(monkeypatch, caplog, _clean_registry):
+def test_spawn_detached_record_is_redacted_at_format_time(
+    monkeypatch, caplog, _clean_registry
+):
     redact.register_secret("s3cret-value")
     captured: dict = {}
     monkeypatch.setattr(subprocess, "Popen", _FakePopen(captured))
@@ -521,9 +547,9 @@ def test_spawn_detached_record_is_redacted(monkeypatch, caplog, _clean_registry)
         execrun.spawn_detached(
             ["tool", "--token", "s3cret-value"], cwd="/work/s3cret-value/clone"
         )
-    full_log = "\n".join(r.getMessage() for r in caplog.records)
-    assert "s3cret-value" not in full_log
-    assert redact.MASK in full_log
+    rendered = _render(caplog.records)
+    assert "s3cret-value" not in rendered
+    assert redact.MASK in rendered
 
 
 def test_spawn_detached_missing_binary_normalizes_into_execerror(monkeypatch, caplog):
