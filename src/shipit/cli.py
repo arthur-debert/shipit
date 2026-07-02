@@ -179,25 +179,35 @@ def lint_cmd(path: str | None, fix: bool) -> None:
     help="Stream appended log lines live (tail -f); ends on Ctrl-C.",
 )
 @click.option(
+    "--raw",
+    is_flag=True,
+    help="Emit unmodified JSONL lines (no path header) for piping to jq.",
+)
+@click.option(
     "-n",
     "--lines",
     "lines",
     type=int,
     default=logs.DEFAULT_TAIL,
     show_default=True,
-    help="Trailing lines to print in the default (no-flag) view.",
+    help="Trailing records to print in the default (no-flag) view.",
 )
-def logs_cmd(repo: str | None, path_only: bool, follow: bool, lines: int) -> None:
-    """Locate and read shipit's durable per-repo log.
+def logs_cmd(
+    repo: str | None, path_only: bool, follow: bool, raw: bool, lines: int
+) -> None:
+    """Locate and read shipit's durable per-repo JSONL log.
 
     REPO is owner/name; omitted, it defaults to the current checkout's repo. The
     path is resolved by the file sink (logsetup), the single source of truth — no
     recomputed platform location. --path prints just that absolute path so an
-    agent can `cat`/`grep` it. -f/--follow streams new lines; with no flag it
-    prints the path plus the last N lines. A log not written yet is reported, not
+    agent can `cat`/`grep` it. -f/--follow streams new records; with no flag it
+    prints the path plus the last N records, rendered legibly (ts LEVEL logger:
+    msg, domain keys trailing); a malformed line is skipped with a stderr note.
+    --raw passes the stored lines through unmodified for jq — no parsing, no
+    skipping, malformed lines included. A log not written yet is reported, not
     crashed.
     """
-    rc = logs.run(repo, path_only=path_only, follow=follow, tail=lines)
+    rc = logs.run(repo, path_only=path_only, follow=follow, raw=raw, tail=lines)
     raise SystemExit(rc)
 
 
