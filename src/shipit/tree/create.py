@@ -43,6 +43,11 @@ from .. import config, execrun, gh, logcontext
 from . import include, provision
 from .layout import TreeSpec, central_root, plan
 
+#: The Tree axis' shared logger (LOG02 spray, ADR-0029): the creation pipeline
+#: narrates its milestones at INFO with durations ("tree created …", per
+#: provision step), mechanics at DEBUG, and a failed create at ERROR with the
+#: exception attached — under a :func:`shipit.logcontext.scoped` ``tree`` bind
+#: so every record of one materialization correlates.
 logger = logging.getLogger("shipit.tree")
 
 #: Provisioning REQUIRES an ALREADY-ONBOARDED ``.shipit.toml`` (one with a

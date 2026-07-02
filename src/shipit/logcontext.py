@@ -2,12 +2,17 @@
 
 Correlation in shipit's durable JSONL record is **domain keys only** — the
 closed set :data:`DOMAIN_KEYS` (``session``, ``tree``, ``pr``, ``run``,
-``repo``) — never synthetic trace/span ids. A key is bound ONCE, at the CLI
-entry or at a spawn/detach seam, via structlog's contextvars; from that point
+``repo``) — never synthetic trace/span ids. A key binds via structlog's
+contextvars at the seam where its value becomes known — the CLI entry, a
+spawn/detach seam, or the moment a subsystem starts working on the noun (the
+PR-engine's fetch, the review service's detach; LOG02) — and from that point
 :data:`shipit.logsetup._PIPELINE`'s :func:`merge_domain_keys` step lands it on
-every subsequent record in-process. An unbound key is simply ABSENT from the
-record — never ``None`` — so :func:`bind` drops ``None`` values instead of
-binding them.
+every subsequent record in-process. :func:`bind` is process-lifetime — right
+when the whole remaining run is about that noun; :func:`scoped` (LOG02) is the
+``with``-block form for a correlation LOCAL to one bounded operation (a single
+Tree's creation), unwound on exit so unrelated later records don't inherit it.
+An unbound key is simply ABSENT from the record — never ``None`` — so both
+forms drop ``None`` values instead of binding them.
 
 Cross-process propagation is the environment (ADR-0029: no package exists for
 this; it is ~10 lines at the seams): :func:`env_export` returns a child
