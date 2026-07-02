@@ -121,6 +121,11 @@ def test_missing_head_sha_fails_loud():
         core_from_node({"number": 1, "isDraft": False}, REPO)
 
 
+def test_missing_number_fails_loud():
+    with pytest.raises(KeyError):
+        core_from_node({"headRefOid": HEAD, "isDraft": False}, REPO)
+
+
 @pytest.mark.parametrize("bad", [None, "true", 1, 0])
 def test_nonbool_is_draft_fails_loud_not_coerced(bad):
     # A present-but-non-bool `isDraft` (e.g. GitHub returning `null`) must RAISE, not
@@ -128,3 +133,16 @@ def test_nonbool_is_draft_fails_loud_not_coerced(bad):
     # the fail-loud-core invariant this boundary enforces.
     with pytest.raises(ValueError):
         core_from_node({"number": 1, "headRefOid": HEAD, "isDraft": bad}, REPO)
+
+
+@pytest.mark.parametrize("bad", ["7", None, 7.0, True])
+def test_nonint_number_fails_loud(bad):
+    # `number` is the PR's identity field: a str/None/float/bool from fixture or
+    # API drift must RAISE at the one wire read, never mint a corrupt identity
+    # (`True` covered explicitly since `isinstance(True, int)` holds).
+    with pytest.raises(ValueError, match="number"):
+        core_from_node({**NODE, "number": bad}, REPO)
+
+
+def test_valid_int_number_parses():
+    assert core_from_node({**NODE, "number": 42}, REPO).number == 42
