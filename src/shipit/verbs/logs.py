@@ -1,12 +1,22 @@
-"""logs — locate and read shipit's durable per-repo log (OBS01-WS04).
+"""logs — locate and read shipit's durable per-repo JSONL log (LOG01-WS04).
 
 The READER half of WS01's file sink: the writer (:mod:`shipit.logsetup`) drops a
-durable, per-repo, rotating log; this verb finds it and shows it. It NEVER
-recomputes the location — it consumes :func:`shipit.logsetup.log_file_path`
-(``resolve_log_dir`` + the handler's ``LOG_FILENAME``), the single source of
-truth, so reader and writer can never disagree about where the log lives. No
-platform ``if`` branch, no bespoke log-dir env var (the path library owns the
-location, per the epic ``docs/prd/obs01-logging.md``).
+durable, per-repo, rotating **JSONL** log (ADR-0029 — one flat JSON object per
+record: ``ts``, ``level``, ``logger``, ``msg``, plus domain keys
+present-when-bound); this verb finds it and shows it. It NEVER recomputes the
+location — it consumes :func:`shipit.logsetup.log_file_path` (``resolve_log_dir``
++ the handler's ``LOG_FILENAME``), the single source of truth, so reader and
+writer can never disagree about where the log lives. No platform ``if`` branch,
+no bespoke log-dir env var (the path library owns the location, per the epic
+``docs/prd/obs01-logging.md``).
+
+The verb reads JSONL ONLY — a hard cutover, no dual-format sniffing (ADR-0029;
+pre-cutover freeform files age out via rotation). Two output modes: the default
+renders each record legibly for humans (``ts LEVEL logger: msg [key=value …]``);
+``--raw`` passes the JSONL lines through unmodified — and prints nothing else —
+so stdout pipes straight into jq. A line that is not a JSON object is skipped
+with a stderr note, never a crash: the log is diagnosis data, and one corrupt
+line (a torn write, a rotation seam) must not take down the reader.
 
 The repo whose log we read defaults to the current checkout, resolved through the
 :mod:`shipit.gh` boundary (the same source the sink uses); an explicit
@@ -17,6 +27,7 @@ and the follow-loop ``sleep`` are injected in tests so nothing touches a real
 
 from __future__ import annotations
 
+import json
 import sys
 import time
 from pathlib import Path
@@ -71,22 +82,93 @@ def _tail_lines(path: Path, n: int) -> list[str]:
     return _last_n(path.read_text(encoding="utf-8", errors="replace").splitlines(), n)
 
 
-def _follow(path: Path, *, tail: int, sleep: Callable[[float], None]) -> int:
-    """Stream the log live (``tail -f``): print the path + the last ``tail`` lines,
-    then echo each appended line as it lands. Ends cleanly on Ctrl-C (exit 0), the
-    way ``tail -f`` does. ``sleep`` is injected so a test can drive the poll loop
-    and stop it deterministically.
+#: Longest malformed-line snippet quoted in the skip note; enough to identify
+#: the line without spraying a whole corrupt record onto stderr.
+_SNIPPET_LEN = 80
+
+#: Record fields the renderer places explicitly (everything else — the bound
+#: domain keys and event extras — trails as ``key=value``).
+_RENDERED_FIELDS = ("ts", "level", "logger", "msg", "exception")
+
+
+def _render_record(line: str) -> str | None:
+    """Render one JSONL record for humans, or ``None`` when the line is not one.
+
+    The legible shape mirrors the console surface (``LEVEL logger: msg``) with
+    the durable record's extra facts folded in: the ``ts`` up front (the file's
+    reason to exist is the timestamped history) and every remaining flat field —
+    the bound domain keys (``pr``, ``session``, …) and event extras — trailing
+    as sorted ``key=value`` pairs. An ``exception`` (WS01 flattens tracebacks to
+    a string) lands on the following lines, the way stdlib formatting would.
+
+    Only a JSON *object* is a record; any other parse (or a parse failure) is
+    the caller's cue to skip the line with a note.
     """
-    print(str(path))
+    try:
+        record = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(record, dict):
+        return None
+    ts = record.get("ts", "")
+    level = str(record.get("level", "")).upper()
+    logger = record.get("logger", "")
+    msg = record.get("msg", "")
+    exception = record.get("exception")
+    rendered = f"{ts} {level} {logger}: {msg}"
+    extras = " ".join(
+        f"{k}={v}" for k, v in sorted(record.items()) if k not in _RENDERED_FIELDS
+    )
+    if extras:
+        rendered = f"{rendered} [{extras}]"
+    if exception:
+        rendered = f"{rendered}\n{exception}"
+    return rendered
+
+
+def _emit(line: str, *, raw: bool) -> None:
+    """Emit one log line in the chosen mode.
+
+    ``raw`` is the jq passthrough: the line goes out exactly as stored, parsed by
+    nobody (a malformed line is the downstream tool's to judge). Otherwise the
+    line is rendered for humans; a blank line is dropped silently (file padding,
+    not a record) and a malformed one is skipped with a stderr note — stdout
+    carries only rendered records, and a corrupt line never crashes the reader.
+    """
+    if raw:
+        print(line)
+        return
+    if not line.strip():
+        return
+    rendered = _render_record(line)
+    if rendered is None:
+        print(
+            f"logs: skipped malformed line: {line[:_SNIPPET_LEN]!r}",
+            file=sys.stderr,
+        )
+        return
+    print(rendered)
+
+
+def _follow(path: Path, *, tail: int, raw: bool, sleep: Callable[[float], None]) -> int:
+    """Stream the log live (``tail -f``): the last ``tail`` lines, then each
+    appended line as it lands — every line through :func:`_emit`, so follow and
+    the static view render (or pass through) identically. The path header prints
+    only in the human mode: raw stdout is reserved for JSONL. Ends cleanly on
+    Ctrl-C (exit 0), the way ``tail -f`` does. ``sleep`` is injected so a test
+    can drive the poll loop and stop it deterministically.
+    """
+    if not raw:
+        print(str(path))
     fh = path.open("r", encoding="utf-8", errors="replace")
     try:
         for line in _last_n(fh.read().splitlines(), tail):
-            print(line)
+            _emit(line, raw=raw)
         # fh is now positioned at EOF; subsequent appends are picked up by readline.
         while True:
             line = fh.readline()
             if line:
-                print(line.rstrip("\n"))
+                _emit(line.rstrip("\n"), raw=raw)
                 continue
             # No new data. The writer is a RotatingFileHandler, so the active
             # shipit.log can be rolled over mid-follow — at which point our open
@@ -113,18 +195,21 @@ def run(
     *,
     path_only: bool = False,
     follow: bool = False,
+    raw: bool = False,
     tail: int = DEFAULT_TAIL,
     base_dir: str | Path | None = None,
     current_repo: Callable[[], str] | None = None,
     sleep: Callable[[float], None] | None = None,
 ) -> int:
-    """Locate (and read) the per-repo log. Returns an int exit code.
+    """Locate (and read) the per-repo JSONL log. Returns an int exit code.
 
     ``repo`` overrides the default (the cwd checkout, resolved via the injected
     ``current_repo`` boundary). ``path_only`` prints just the resolved absolute
     path and exits 0 — locating the log never depends on it existing yet, so this
     always succeeds. Otherwise the file is read: ``follow`` streams appended lines
-    (``tail -f``); the default prints the path plus the last ``tail`` lines. A
+    (``tail -f``); the default prints the path plus the last ``tail`` records.
+    ``raw`` swaps the human rendering for an unmodified-JSONL passthrough (no
+    path header — stdout is pure JSONL for jq) and composes with both views. A
     missing log file is reported on stderr (no traceback) and exits non-zero.
 
     ``base_dir`` / ``current_repo`` / ``sleep`` are injected boundaries for tests.
@@ -161,9 +246,10 @@ def run(
         return _EXIT_NO_LOG
 
     if follow:
-        return _follow(path, tail=tail, sleep=sleep or time.sleep)
+        return _follow(path, tail=tail, raw=raw, sleep=sleep or time.sleep)
 
-    print(str(path))
+    if not raw:
+        print(str(path))
     for line in _tail_lines(path, tail):
-        print(line)
+        _emit(line, raw=raw)
     return 0
