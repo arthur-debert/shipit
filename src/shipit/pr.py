@@ -101,9 +101,16 @@ def core_from_node(node: dict, repo: Repo) -> PR:
     additionally required to be a real ``bool``: a ``null``
     or non-bool value is a malformed node and RAISES rather than being silently
     coerced to ``False`` by ``bool(...)`` (which would undermine the very
-    fail-loud-core invariant this boundary exists to enforce). ``baseRefName`` /
-    ``mergeStateStatus`` use ``.get`` because GitHub itself returns them null.
+    fail-loud-core invariant this boundary exists to enforce). ``number`` — the
+    PR's identity field — must likewise be a real ``int`` (``bool`` rejected,
+    since ``isinstance(True, int)`` holds), so a ``"7"``/``None``/``7.0`` from
+    fixture or API drift dies here instead of minting a corrupt identity.
+    ``baseRefName`` / ``mergeStateStatus`` use ``.get`` because GitHub itself
+    returns them null.
     """
+    number = node["number"]
+    if isinstance(number, bool) or not isinstance(number, int):
+        raise ValueError(f"malformed PR node: number must be int, got {number!r}")
     is_draft = node["isDraft"]
     if not isinstance(is_draft, bool):
         raise ValueError(
@@ -112,7 +119,7 @@ def core_from_node(node: dict, repo: Repo) -> PR:
         )
     return PR(
         repo=repo,
-        number=node["number"],
+        number=number,
         head_sha=Sha(node["headRefOid"]),
         base_ref=node.get("baseRefName"),
         is_draft=is_draft,
