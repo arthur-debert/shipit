@@ -13,7 +13,10 @@ The contract under test, via an injected fake process (monkeypatched
 - record emission: exactly one record per Exec (success DEBUG, failure ERROR
   with both stream tails), everything redacted;
 - the stdin contract (ADR-0020, carried over from the retired proto-runner):
-  no ``input`` → the child's stdin pinned to ``DEVNULL``.
+  no ``input`` → the child's stdin pinned to ``DEVNULL``;
+- :func:`~shipit.execrun.spawn_detached`, the one deliberate non-Exec: detach
+  semantics (own session, stdio to ``/dev/null``, no handle), the spawn-time
+  record (argv/cwd/pid, redacted), and launch normalization into ``ExecError``.
 """
 
 from __future__ import annotations
@@ -436,3 +439,139 @@ def test_run_does_not_hang_on_stdin_reading_child():
     """End-to-end: a child that reads ALL of stdin returns promptly, not hangs."""
     result = execrun.run([sys.executable, "-c", "import sys; sys.stdin.read()"])
     assert result.rc == 0
+
+
+# ---------------------------------------------------------------------------
+# spawn_detached — the seam's one deliberate non-Exec (fire-and-forget)
+# ---------------------------------------------------------------------------
+
+
+class _FakePopen:
+    pid = 4321
+
+    def __init__(self, captured: dict):
+        self._captured = captured
+
+    def __call__(self, argv, **kwargs):
+        self._captured["argv"] = argv
+        self._captured.update(kwargs)
+        return self
+
+
+def test_spawn_detached_semantics(monkeypatch):
+    """Own session, all three stdio streams to /dev/null, fds closed, no wait:
+    the exact Popen semantics the review path's original detach carried."""
+    captured: dict = {}
+    monkeypatch.setattr(subprocess, "Popen", _FakePopen(captured))
+    assert execrun.spawn_detached(["tool", "--flag"]) is None  # no handle retained
+    assert captured["argv"] == ["tool", "--flag"]
+    assert captured["stdin"] is subprocess.DEVNULL
+    assert captured["stdout"] is subprocess.DEVNULL
+    assert captured["stderr"] is subprocess.DEVNULL
+    assert captured["start_new_session"] is True
+    assert captured["close_fds"] is True
+
+
+def test_spawn_detached_coerces_argv_to_str(monkeypatch):
+    import pathlib
+
+    captured: dict = {}
+    monkeypatch.setattr(subprocess, "Popen", _FakePopen(captured))
+    execrun.spawn_detached(["tool", pathlib.Path("/some/path"), 42])
+    assert captured["argv"] == ["tool", "/some/path", "42"]
+    assert all(isinstance(a, str) for a in captured["argv"])
+
+
+def test_spawn_detached_emits_one_debug_record_with_argv_cwd_pid(monkeypatch, caplog):
+    """One structured record at spawn time (glassbox story 3): the detached
+    child stays on the causal record chain — argv, cwd, and the pid a reader
+    correlates the child's own records back to."""
+    captured: dict = {}
+    monkeypatch.setattr(subprocess, "Popen", _FakePopen(captured))
+    with caplog.at_level(logging.DEBUG, logger="shipit.exec"):
+        execrun.spawn_detached(["tool", "--flag"], cwd="/work/tree")
+    records = [r for r in caplog.records if r.name == "shipit.exec"]
+    assert len(records) == 1
+    assert records[0].levelno == logging.DEBUG
+    message = records[0].getMessage()
+    assert "tool --flag" in message
+    assert "/work/tree" in message
+    assert "pid=4321" in message
+
+
+def test_spawn_detached_record_is_redacted(monkeypatch, caplog, _clean_registry):
+    redact.register("s3cret-value")
+    captured: dict = {}
+    monkeypatch.setattr(subprocess, "Popen", _FakePopen(captured))
+    with caplog.at_level(logging.DEBUG, logger="shipit.exec"):
+        execrun.spawn_detached(
+            ["tool", "--token", "s3cret-value"], cwd="/work/s3cret-value/clone"
+        )
+    full_log = "\n".join(r.getMessage() for r in caplog.records)
+    assert "s3cret-value" not in full_log
+    assert redact.MASK in full_log
+
+
+def test_spawn_detached_missing_binary_normalizes_into_execerror(monkeypatch, caplog):
+    """Launch normalization still applies to the non-Exec: no raw OSError
+    escapes the seam, and the failure leaves its one ERROR record."""
+
+    def fake_popen(argv, **kwargs):
+        raise FileNotFoundError(2, "No such file or directory", argv[0])
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    with caplog.at_level(logging.DEBUG, logger="shipit.exec"):
+        with pytest.raises(execrun.ExecError) as excinfo:
+            execrun.spawn_detached(["no-such-tool-xyz"])
+    err = excinfo.value
+    assert err.cause == execrun.CAUSE_MISSING_BINARY
+    assert err.rc is None
+    records = [r for r in caplog.records if r.name == "shipit.exec"]
+    assert len(records) == 1
+    assert records[0].levelno == logging.ERROR
+
+
+def test_spawn_detached_missing_binary_real_child():
+    with pytest.raises(execrun.ExecError) as excinfo:
+        execrun.spawn_detached(["definitely-not-a-binary-xyz"])
+    assert excinfo.value.cause == execrun.CAUSE_MISSING_BINARY
+
+
+def test_spawn_detached_bad_cwd_normalizes_to_os_error(monkeypatch):
+    """A missing cwd also raises FileNotFoundError, but naming the directory —
+    it must report as an os-error, not as a missing binary."""
+
+    def fake_popen(argv, **kwargs):
+        raise FileNotFoundError(2, "No such file or directory", "/no/such/dir")
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    with pytest.raises(execrun.ExecError) as excinfo:
+        execrun.spawn_detached(["tool"], cwd="/no/such/dir")
+    assert excinfo.value.cause == execrun.CAUSE_OS
+
+
+def test_spawn_detached_real_child_runs_in_own_session(tmp_path):
+    """End-to-end detach: a real child lands in its OWN session (survives the
+    parent exiting, no controlling terminal) and actually runs — observed via
+    a file it writes, since its stdio is pinned to /dev/null."""
+    import os
+    import time
+
+    out = tmp_path / "sid"
+    execrun.spawn_detached(
+        [
+            sys.executable,
+            "-c",
+            "import os, sys; open(sys.argv[1], 'w').write(str(os.getsid(0)))",
+            str(out),
+        ]
+    )
+    deadline = time.monotonic() + 10
+    while not out.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert out.exists(), "detached child never ran"
+    # Read may race the child's write+close; poll until non-empty.
+    while not out.read_text() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    child_sid = int(out.read_text())
+    assert child_sid != os.getsid(0)  # own session, not the parent's
