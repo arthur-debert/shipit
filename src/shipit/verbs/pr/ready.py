@@ -20,8 +20,7 @@ import sys
 
 import click
 
-from ... import execrun
-from ...prstate import ghapi
+from ... import execrun, gh
 from ...prstate.errors import PrStateError
 from ...prstate.fetch import gather
 from ...prstate.reviewers import required_reviewers
@@ -45,7 +44,7 @@ class NotReady(RuntimeError):
         )
 
 
-def guarded_flip(pr: int, *, flip=ghapi.pr_ready, evaluate_status=None) -> TaskStatus:
+def guarded_flip(pr: int, *, flip=gh.pr_ready, evaluate_status=None) -> TaskStatus:
     """Re-evaluate the live PR and flip draft→ready ONLY if it is READY.
 
     The shared guarded re-check behind both `pr ready` and `pr next`'s ready act.
@@ -55,7 +54,7 @@ def guarded_flip(pr: int, *, flip=ghapi.pr_ready, evaluate_status=None) -> TaskS
     real status so the caller can report why it refused.
 
     `flip` / `evaluate_status` are injected for testing: `flip` is the
-    draft→ready boundary (default :func:`ghapi.pr_ready`); `evaluate_status`
+    draft→ready boundary (default :func:`shipit.gh.pr_ready`); `evaluate_status`
     yields the fresh `TaskStatus` (default: `gather` + `evaluate` with the
     config-resolved required set). A test injects both to drive the guard without
     a network.
@@ -103,7 +102,7 @@ def run(pr: int | None = None, *, undo: bool = False) -> int:
             return 1
         if undo:
             # Always allowed: revert ready→draft. No readiness hold.
-            ghapi.pr_ready(resolved, undo=True)
+            gh.pr_ready(resolved, undo=True)
             logger.info(
                 "pr#%s reverted ready→draft (undo)",
                 resolved,

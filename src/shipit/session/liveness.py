@@ -45,14 +45,17 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+import jc
+
 from .. import execrun
 
 logger = logging.getLogger("shipit.session")
 
 #: How far apart (seconds) the recorded and the probed create-time may be while
-#: still identifying the SAME process. ``ps``'s ``lstart`` has one-second
-#: granularity and the write/read sides may round differently, so exact equality
-#: would misread every live session; a few seconds absorbs that measurement
+#: still identifying the SAME process. The create-time is derived from ``ps``'s
+#: one-second-granular ``etime`` plus a wall-clock read, and the write/read
+#: sides each carry that rounding independently, so exact equality would
+#: misread every live session; a few seconds absorbs that measurement
 #: granularity while still making post-reboot PID reuse (minutes-to-days apart)
 #: fail the match.
 CREATE_TIME_TOLERANCE_SECONDS = 5.0
@@ -321,65 +324,96 @@ def remove_pidfile(tree: str | Path) -> None:
 # The real probe — the one effectful function in the module
 # --------------------------------------------------------------------------
 
-#: ``ps`` renders ``lstart`` in this fixed 5-token C-locale form
-#: (``Wed Jul  2 10:23:45 2026``) on both macOS and Linux — PROVIDED the child
-#: runs under the C locale. ``lstart``'s day/month names are locale-dependent
-#: (procps localizes them), so :func:`os_probe` pins ``LC_ALL=C`` on the ``ps``
-#: call; without it a non-English locale would make every create-time
-#: unparseable and every live session read as dead (copilot review).
-_LSTART_FORMAT = "%a %b %d %H:%M:%S %Y"
-_LSTART_TOKENS = 5
+#: The ``ps`` columns the probe reads, each with a PINNED header (POSIX
+#: ``keyword=HEADER`` renaming) so jc's header-driven table conversion sees the
+#: same column names on macOS and Linux (whose default headers differ — e.g.
+#: ``args`` prints as ``COMMAND`` under procps). Each pair rides its own ``-o``
+#: flag: in a combined comma list, everything after the first ``=`` becomes ONE
+#: header string. ``etime`` (elapsed ``[[dd-]hh:]mm:ss``) replaces ``lstart``
+#: deliberately — it is purely numeric, so there is no locale-dependent
+#: day/month rendering to pin (``LC_ALL=C``) or ``strptime`` (ADR-0028's jc
+#: evaluation, issue #258).
+_PS_COLUMNS = (("pid", "PID"), ("ppid", "PPID"), ("etime", "ELAPSED"), ("args", "ARGS"))
 
 
 def os_probe(pid: int) -> ProcessInfo | None:
     """Read one live process from the OS: the production :data:`Probe`.
 
-    Shells out to ``ps -p <pid> -o pid=,ppid=,lstart=,args=`` — portable across
-    macOS and Linux, no psutil dependency (the runtime deps stay pure-python
-    wheel pulls). The child is pinned to ``LC_ALL=C`` (merged over the inherited
-    environment) because ``lstart``'s rendering is locale-dependent: under a
-    non-English locale its day/month names would not parse as
-    :data:`_LSTART_FORMAT`, so every live session would degrade to
-    ``create_time=None`` and be misread as dead. ``None`` when the PID is not
-    alive or the output cannot be parsed; a row whose ``lstart`` fails to parse
-    still returns the process with ``create_time=None`` (alive, identity
-    unverifiable — :func:`is_live` then reads it as not live, the safe
+    Shells out to ``ps -p <pid>`` with the :data:`_PS_COLUMNS` format — portable
+    across macOS and Linux, no psutil dependency (the runtime deps stay
+    pure-python wheel pulls) — and hands the output to jc's ``ps`` converter
+    (ADR-0028: harvest the most structured form; ``ps`` has no native JSON, so
+    converted output is the top rung). The create-time is derived as ``now -
+    etime`` — elapsed time is purely numeric, so the old locale-pinned
+    ``lstart``/``strptime`` fragility is gone by construction. ``None`` when the
+    PID is not alive or the output cannot be parsed; a row whose ``etime`` fails
+    to parse still returns the process with ``create_time=None`` (alive,
+    identity unverifiable — :func:`is_live` then reads it as not live, the safe
     direction).
     """
     if pid <= 0:
         return None
-    result = execrun.run(
-        ["ps", "-p", str(pid), "-o", "pid=,ppid=,lstart=,args="],
-        env={"LC_ALL": "C"},
-        check=False,
-    )
+    argv = ["ps", "-p", str(pid)]
+    for keyword, header in _PS_COLUMNS:
+        argv += ["-o", f"{keyword}={header}"]
+    result = execrun.run(argv, check=False)
     if result.rc != 0:
         return None
-    return _parse_ps_row(result.stdout)
+    return _parse_ps_output(result.stdout, now=time.time())
 
 
-def _parse_ps_row(row: str) -> ProcessInfo | None:
-    """Parse one ``pid ppid lstart(5 tokens) args…`` row into a :class:`ProcessInfo`.
+def _parse_ps_output(output: str, *, now: float) -> ProcessInfo | None:
+    """Convert one header+row ``ps`` table into a :class:`ProcessInfo` — pure.
 
-    ``lstart`` embeds spaces but is exactly :data:`_LSTART_TOKENS` tokens wide, so
-    the row splits positionally: tokens 0/1 are pid/ppid, the next five are the
-    start time, everything after is the command line (re-joined — argv separators
-    inside an argument are not recoverable from ``ps``, and the argv check is a
-    substring match anyway). ``None`` on a malformed row; a merely unparseable
-    ``lstart`` degrades to ``create_time=None`` rather than discarding a process
-    that is demonstrably alive.
+    jc's ``ps`` parser does the table shaping (header-keyed dicts, pid/ppid
+    already ints; the trailing ``ARGS`` column keeps its embedded spaces —
+    argv separators inside an argument are not recoverable from ``ps``, and the
+    argv check is token-shaped anyway). ``None`` on a malformed table; a merely
+    unparseable ``etime`` degrades to ``create_time=None`` rather than
+    discarding a process that is demonstrably alive.
     """
-    tokens = row.split()
-    if len(tokens) < 2 + _LSTART_TOKENS + 1:
+    try:
+        rows = jc.parse("ps", output, quiet=True)
+    except Exception:  # noqa: BLE001 — a conversion crash is "unreadable", never a probe crash.
+        logger.debug(
+            "liveness: jc could not convert ps output (%d chars)",
+            len(output),
+            exc_info=True,
+        )
+        return None
+    if not isinstance(rows, list) or not rows:
+        return None
+    row = rows[0]
+    pid, ppid = row.get("pid"), row.get("ppid")
+    if not isinstance(pid, int) or not isinstance(ppid, int):
+        return None
+    elapsed = _elapsed_seconds(row.get("elapsed"))
+    create_time = None if elapsed is None else now - elapsed
+    return ProcessInfo(
+        pid=pid, ppid=ppid, create_time=create_time, argv=str(row.get("args") or "")
+    )
+
+
+def _elapsed_seconds(etime: object) -> float | None:
+    """``ps``'s ``etime`` (``[[dd-]hh:]mm:ss``) as seconds — purely numeric.
+
+    ``None`` on anything that does not read as the POSIX elapsed-time shape;
+    the caller degrades that to an unverifiable (not-live) identity.
+    """
+    if not isinstance(etime, str):
+        return None
+    days_part, dash, clock = etime.strip().partition("-")
+    if not dash:
+        days_part, clock = "0", etime.strip()
+    parts = clock.split(":")
+    if len(parts) not in (2, 3):
         return None
     try:
-        pid, ppid = int(tokens[0]), int(tokens[1])
+        days = int(days_part)
+        fields = [int(part) for part in parts]
     except ValueError:
         return None
-    lstart = " ".join(tokens[2 : 2 + _LSTART_TOKENS])
-    try:
-        create_time: float | None = time.mktime(time.strptime(lstart, _LSTART_FORMAT))
-    except (ValueError, OverflowError):
-        create_time = None
-    argv = " ".join(tokens[2 + _LSTART_TOKENS :])
-    return ProcessInfo(pid=pid, ppid=ppid, create_time=create_time, argv=argv)
+    if days < 0 or any(field < 0 for field in fields):
+        return None
+    hours, minutes, seconds = [0] * (3 - len(fields)) + fields
+    return float(((days * 24 + hours) * 60 + minutes) * 60 + seconds)

@@ -13,8 +13,8 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta, timezone
 
+from .. import gh
 from ..agent import backend as _agent_backend
-from . import ghapi
 from .errors import PrStateError
 from .model import (
     FunnelState,
@@ -352,14 +352,14 @@ class CopilotAdapter(ReviewerAdapter):
 
     def request(self, pr: int) -> bool:
         # `gh pr edit --add-reviewer @copilot` — GraphQL with the bot's real
-        # node_id (via ghapi.pr_edit_reviewer; the REST requested_reviewers
+        # node_id (via gh.pr_edit_reviewer; the REST requested_reviewers
         # POST silently no-ops for Copilot). Re-request is the same call.
-        ghapi.pr_edit_reviewer(pr, "@copilot")
+        gh.pr_edit_reviewer(pr, "@copilot")
         _log_request_transition(self.name, pr, "request placed")
         return True
 
     def cancel(self, pr: int) -> bool:
-        ghapi.pr_edit_reviewer(pr, "@copilot", remove=True)
+        gh.pr_edit_reviewer(pr, "@copilot", remove=True)
         _log_request_transition(self.name, pr, "request withdrawn")
         return True
 
@@ -407,12 +407,12 @@ class CodeRabbitAdapter(ReviewerAdapter):
         # Same GraphQL add-reviewer path Copilot uses: it resolves the App's
         # real node id and creates a real review_requested edge (the REST
         # requested_reviewers POST silently no-ops for App reviewers).
-        ghapi.pr_edit_reviewer(pr, self._REVIEWER_HANDLE)
+        gh.pr_edit_reviewer(pr, self._REVIEWER_HANDLE)
         _log_request_transition(self.name, pr, "request placed")
         return True
 
     def cancel(self, pr: int) -> bool:
-        ghapi.pr_edit_reviewer(pr, self._REVIEWER_HANDLE, remove=True)
+        gh.pr_edit_reviewer(pr, self._REVIEWER_HANDLE, remove=True)
         _log_request_transition(self.name, pr, "request withdrawn")
         return True
 
