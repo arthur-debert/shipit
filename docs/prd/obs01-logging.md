@@ -2,6 +2,11 @@
 
 > Epic: **OBS01** · Status: planned · Plan: `docs/prd/FUTURE_WORK.md`
 > Glossary: `CONTEXT.md`
+>
+> **Since superseded in part (LOG01, 2026-07):** the file sink's record format is now
+> **JSONL** (flat `ts`/`level`/`logger`/`msg` + domain keys) with central redaction and
+> a `shipit logs` reader — see `docs/prd/glassbox.md` and ADR-0029. The sink/path/level
+> decisions below still hold; this PRD is the historical record of the foundation.
 
 ## Problem Statement
 

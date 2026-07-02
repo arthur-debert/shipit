@@ -128,7 +128,7 @@ def test_start_detached_opens_inprogress_then_spawns(monkeypatch):
 
     spawned: list = []
     rc = service.start_detached_review(
-        "codex", 5, spawn=lambda argv: spawned.append(list(argv))
+        "codex", 5, spawn=lambda argv, env: spawned.append(list(argv))
     )
 
     assert rc is True  # in-flight
@@ -152,6 +152,33 @@ def test_start_detached_opens_inprogress_then_spawns(monkeypatch):
     assert ran == []
 
 
+def test_start_detached_exports_domain_keys_to_the_child_env(monkeypatch):
+    """The DETACH SEAM for the domain-key context (LOG01-WS03, ADR-0029): the
+    parent binds `pr`/`repo` at the seam — its own records from here carry them —
+    and the child's environment carries `pr`/`repo` PLUS the funnel `run` id as
+    `SHIPIT_LOG_CTX_*` vars (the run is exported to the child's story WITHOUT
+    binding in the parent). The child rebinds them at its logging setup."""
+    from shipit import logcontext
+
+    _fake_checkrun_boundary(monkeypatch)  # create POST -> run id 555
+    monkeypatch.setattr(
+        service, "_resolve_target", lambda pr: ("owner/repo", "deadbeef")
+    )
+
+    envs: list[dict] = []
+    rc = service.start_detached_review(
+        "codex", 5, spawn=lambda argv, env: envs.append(dict(env))
+    )
+
+    assert rc is True
+    (child_env,) = envs
+    assert child_env["SHIPIT_LOG_CTX_PR"] == "5"
+    assert child_env["SHIPIT_LOG_CTX_REPO"] == "owner/repo"
+    assert child_env["SHIPIT_LOG_CTX_RUN"] == "555"
+    # The parent bound the SEAM's keys (pr/repo) — but never the child's run id.
+    assert logcontext.bound() == {"pr": 5, "repo": "owner/repo"}
+
+
 def test_start_detached_still_spawns_when_breadcrumb_create_fails(monkeypatch):
     """The breadcrumb create is BEST-EFFORT: a 403 before the `checks:write`
     re-grant must not fail the request — the child is still spawned (with no
@@ -171,7 +198,7 @@ def test_start_detached_still_spawns_when_breadcrumb_create_fails(monkeypatch):
 
     spawned: list = []
     rc = service.start_detached_review(
-        "codex", 5, spawn=lambda argv: spawned.append(list(argv))
+        "codex", 5, spawn=lambda argv, env: spawned.append(list(argv))
     )
 
     assert rc is True
@@ -240,7 +267,7 @@ def test_start_detached_closes_run_when_spawn_fails(monkeypatch):
         service, "_resolve_target", lambda pr: ("owner/repo", "deadbeef")
     )
 
-    def boom_spawn(argv):
+    def boom_spawn(argv, env):
         raise OSError("cannot fork")
 
     with pytest.raises(OSError, match="cannot fork"):
@@ -280,7 +307,7 @@ def test_start_detached_spawn_failure_with_no_run_just_reraises(monkeypatch):
         service, "_resolve_target", lambda pr: ("owner/repo", "deadbeef")
     )
 
-    def boom_spawn(argv):
+    def boom_spawn(argv, env):
         raise OSError("cannot fork")
 
     with pytest.raises(OSError, match="cannot fork"):
@@ -319,7 +346,7 @@ def test_split_parent_creates_child_closes_one_run(monkeypatch, _stub_pipeline):
     parent_calls = _fake_checkrun_boundary(monkeypatch)
     spawned: list = []
     service.start_detached_review(
-        "codex", 5, spawn=lambda argv: spawned.append(list(argv))
+        "codex", 5, spawn=lambda argv, env: spawned.append(list(argv))
     )
     argv = spawned[0]
     run_id = int(argv[argv.index("--run-id") + 1])
@@ -890,7 +917,7 @@ def test_start_detached_reconciles_against_existing_inflight_run(monkeypatch):
     rc = service.start_detached_review(
         "codex",
         5,
-        spawn=lambda argv: spawned.append(list(argv)),
+        spawn=lambda argv, env: spawned.append(list(argv)),
         find=lambda agent, repo, head_sha: 999,
     )
 
@@ -913,7 +940,7 @@ def test_start_detached_no_inflight_run_creates_and_spawns(monkeypatch):
     rc = service.start_detached_review(
         "codex",
         5,
-        spawn=lambda argv: spawned.append(list(argv)),
+        spawn=lambda argv, env: spawned.append(list(argv)),
         find=lambda agent, repo, head_sha: None,
     )
 
@@ -940,7 +967,10 @@ def test_start_detached_reconcile_lookup_failure_proceeds_to_spawn(monkeypatch, 
     spawned: list = []
     with caplog.at_level(logging.WARNING, logger="shipit.review"):
         rc = service.start_detached_review(
-            "codex", 5, spawn=lambda argv: spawned.append(list(argv)), find=boom_find
+            "codex",
+            5,
+            spawn=lambda argv, env: spawned.append(list(argv)),
+            find=boom_find,
         )
 
     assert rc is True
