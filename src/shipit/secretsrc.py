@@ -1,16 +1,22 @@
 """Resolving a :class:`~shipit.config.SecretSource` to its plaintext value.
 
-The boundary (the ``doppler`` subprocess, the environment, the interactive
-prompt) is injected so the resolution policy — including the optional-skip rule —
-is pure and unit-testable.
+The boundary (the ``doppler`` Exec, the environment, the interactive prompt) is
+injected so the resolution policy — including the optional-skip rule — is pure
+and unit-testable.
+
+The ``doppler`` call goes through the one Exec runner (:mod:`shipit.execrun`,
+ADR-0028) with ``check=False``: a nonzero rc is this layer's *semantic* failure
+(:class:`SecretSourceError`), not a transport error — and, crucially, a
+completed run under ``check=False`` records argv only (never the streams), so
+the fetched secret in stdout can never ride the Exec record to a sink.
 """
 
 from __future__ import annotations
 
 import os
-import subprocess
 from collections.abc import Callable, Mapping
 
+from . import execrun
 from .config import SecretSource
 
 
@@ -21,7 +27,7 @@ class SecretSourceError(RuntimeError):
 def doppler_get(key: str) -> str:
     """``doppler secrets get <key> --plain --project github --config prd``."""
     try:
-        proc = subprocess.run(
+        result = execrun.run(
             [
                 "doppler",
                 "secrets",
@@ -33,15 +39,17 @@ def doppler_get(key: str) -> str:
                 "--config",
                 "prd",
             ],
-            capture_output=True,
-            text=True,
             check=False,
         )
-    except FileNotFoundError as exc:
-        raise SecretSourceError("doppler not found on PATH") from exc
-    if proc.returncode != 0:
-        raise SecretSourceError(f"doppler get {key} failed: {proc.stderr.strip()}")
-    return proc.stdout.rstrip("\n")
+    except execrun.ExecError as exc:
+        # The transport failures (missing binary, timeout, OS launch error) all
+        # normalize into ExecError; re-shape them as this layer's semantic error.
+        if exc.cause == execrun.CAUSE_MISSING_BINARY:
+            raise SecretSourceError("doppler not found on PATH") from exc
+        raise SecretSourceError(f"doppler get {key} failed: {exc}") from exc
+    if result.rc != 0:
+        raise SecretSourceError(f"doppler get {key} failed: {result.stderr.strip()}")
+    return result.stdout.rstrip("\n")
 
 
 def resolve(
