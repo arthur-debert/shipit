@@ -164,15 +164,33 @@ def is_live(
     create-time all read as NOT live — the safe direction: ``gc`` deletes
     directories, never processes, and the ladder's dirty/unpushed floor plus the
     grace window still protect a misread Tree's work.
+
+    Each probe records its verdict AND the rung that decided it at DEBUG
+    (mechanics — the gc decision built on it is the caller's milestone), so a
+    surprising sweep is reconstructable from the log without re-probing.
     """
     info = probe(record.pid)
     if info is None:
-        return False
-    if not looks_like_claude(info.argv):
-        return False
-    if info.create_time is None:
-        return False
-    return abs(info.create_time - record.create_time) <= tolerance
+        live, reason = False, "pid not alive"
+    elif not looks_like_claude(info.argv):
+        live, reason = False, "argv does not look like claude"
+    elif info.create_time is None:
+        live, reason = False, "create-time unreadable"
+    elif abs(info.create_time - record.create_time) <= tolerance:
+        live, reason = True, "pid and create-time match"
+    else:
+        live, reason = False, "create-time mismatch (pid reused)"
+    logger.debug(
+        "liveness probe: %s",
+        reason,
+        extra={
+            "pid": record.pid,
+            "session": record.session_id,
+            "live": live,
+            "rung": reason,
+        },
+    )
+    return live
 
 
 #: Upper bound on :func:`find_claude_process`'s parent walk. Any real chain is a
@@ -238,6 +256,16 @@ def write_pidfile(tree: str | Path, record: LivenessRecord) -> None:
             "so there is nowhere safe to record session liveness"
         )
     path.write_text(json.dumps(asdict(record), indent=2) + "\n", encoding="utf-8")
+    # The mutation milestone: which session now owns this Tree — the pidfile
+    # itself is the only other record, and it dies with the Tree.
+    logger.info(
+        "session pidfile written",
+        extra={
+            "tree": str(tree),
+            "session": record.session_id,
+            "pid": record.pid,
+        },
+    )
 
 
 def read_pidfile(tree: str | Path) -> LivenessRecord | None:
@@ -279,9 +307,14 @@ def remove_pidfile(tree: str | Path) -> None:
     load-bearing — the gc ladder's create-time check already defuses a stale one.
     """
     try:
-        pidfile_path(tree).unlink(missing_ok=True)
+        pidfile_path(tree).unlink()
+    except FileNotFoundError:
+        return  # missing-is-fine: nothing was removed, nothing to record.
     except OSError:
         logger.debug("liveness: could not remove pidfile for %s", tree, exc_info=True)
+        return
+    # The teardown half of the pidfile lifecycle — a real removal happened.
+    logger.info("session pidfile removed", extra={"tree": str(tree)})
 
 
 # --------------------------------------------------------------------------

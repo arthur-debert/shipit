@@ -16,12 +16,16 @@ renders. ``scan`` does NOT mutate anything — it is a pure read of the fleet.
 
 from __future__ import annotations
 
+import logging
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
 from .. import gh
+
+logger = logging.getLogger("shipit.tree")
 
 #: Upper bound on the per-clone read fan-out. Each task is I/O-bound — it blocks on
 #: ``git``/``gh`` subprocesses through the :mod:`shipit.gh` boundary, not on the GIL —
@@ -125,8 +129,10 @@ def scan(root: str | Path) -> list[TreeRecord]:
     """
     base = Path(root)
     if not base.is_dir():
+        logger.debug("scan: central root %s does not exist; empty fleet", base)
         return []
 
+    started = time.monotonic()
     clone_dirs: list[Path] = []
     for dirpath, dirnames, _filenames in os.walk(base):
         here = Path(dirpath)
@@ -144,6 +150,14 @@ def scan(root: str | Path) -> list[TreeRecord]:
     with ThreadPoolExecutor(max_workers=_scan_workers(len(clone_dirs))) as pool:
         records = list(pool.map(_read_record, clone_dirs))
     records.sort(key=lambda record: record.path)
+    # Mechanics at DEBUG (spray convention): the fleet-read's size + cost, so a
+    # slow `list`/`gc` is attributable to the scan from the durable record.
+    logger.debug(
+        "scan: read %d Tree(s) under %s in %dms",
+        len(records),
+        base,
+        int((time.monotonic() - started) * 1000),
+    )
     return records
 
 
