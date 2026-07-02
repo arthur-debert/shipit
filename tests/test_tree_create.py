@@ -19,6 +19,7 @@ from shipit import config, execrun, gh
 from shipit.tree import create as create_mod
 from shipit.tree import layout, provision
 from shipit.tree.create import create, create_from_source
+from shipit.identity import repo_from_slug
 from shipit.tree.layout import TreeSpec
 from shipit.verbs import install as install_mod
 from shipit.execrun import ExecError
@@ -95,8 +96,7 @@ def reference(tmp_path: Path, remote: Path) -> Path:
 
 def _spec(tmp_path: Path) -> TreeSpec:
     return TreeSpec(
-        org="acme",
-        repo="widget",
+        repo=repo_from_slug("acme/widget"),
         agent_hash="abcd1234",
         issue=123,
         slug="smoke",

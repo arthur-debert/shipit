@@ -36,7 +36,8 @@ import sys
 from collections.abc import Callable, Mapping, Sequence
 
 from .. import execrun, gh, logcontext
-from ..pr import CORE_JSON_FIELDS, core_from_node, repo_from_slug
+from ..identity import repo_from_slug
+from ..pr import CORE_JSON_FIELDS, core_from_node
 from . import checkrun, post, producer
 from .backends.base import BackendError
 from .diff import ReviewError, resolve_pr

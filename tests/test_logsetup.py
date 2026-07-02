@@ -3,8 +3,8 @@
 Asserts external behaviour in line with shipit's conventions — what reaches
 stderr / stdout / the step-summary file, the resolved file-sink path, the
 rotation bound, the handler levels, and the dependency / single-source-of-truth
-constraints. The platformdirs base and the ``(owner, repo)`` namespace are
-injected so nothing ever writes to a real ``$HOME``.
+constraints. The platformdirs base and the ``Repo`` namespace are injected so
+nothing ever writes to a real ``$HOME``.
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ import pytest
 import structlog
 from shipit import cli, logsetup
 from shipit.execrun import ExecError
+from shipit.identity import repo_from_slug
 
 
 @pytest.fixture(autouse=True)
@@ -197,7 +198,9 @@ def test_is_ci_injectable_and_ignores_falsey_values():
 
 def test_resolve_log_dir_is_per_repo_under_base(tmp_path):
     base = tmp_path / "Logs" / "shipit"
-    path = logsetup.resolve_log_dir(("octocat", "hello-world"), base_dir=base)
+    path = logsetup.resolve_log_dir(
+        repo_from_slug("octocat/hello-world"), base_dir=base
+    )
     assert path == base / "octocat" / "hello-world"
 
 
@@ -209,7 +212,7 @@ def test_resolve_log_dir_uses_platformdirs_when_base_omitted(monkeypatch, tmp_pa
         return str(tmp_path / "platform-base")
 
     monkeypatch.setattr(logsetup.platformdirs, "user_log_dir", fake_user_log_dir)
-    path = logsetup.resolve_log_dir(("acme", "widgets"))
+    path = logsetup.resolve_log_dir(repo_from_slug("acme/widgets"))
     # platformdirs owns the base, queried for the "shipit" app, then per-repo.
     assert captured["appname"] == "shipit"
     assert path == tmp_path / "platform-base" / "acme" / "widgets"
@@ -221,7 +224,7 @@ def test_resolve_log_dir_uses_platformdirs_when_base_omitted(monkeypatch, tmp_pa
 
 
 def test_file_handler_is_rotating_with_5mb_x_3_bound(tmp_path):
-    handler = logsetup.build_file_handler(("o", "r"), base_dir=tmp_path)
+    handler = logsetup.build_file_handler(repo_from_slug("o/r"), base_dir=tmp_path)
     try:
         assert isinstance(handler, RotatingFileHandler)
         assert handler.maxBytes == 5 * 1024 * 1024
@@ -231,7 +234,7 @@ def test_file_handler_is_rotating_with_5mb_x_3_bound(tmp_path):
 
 
 def test_file_handler_writes_to_per_repo_path(tmp_path):
-    handler = logsetup.build_file_handler(("o", "r"), base_dir=tmp_path)
+    handler = logsetup.build_file_handler(repo_from_slug("o/r"), base_dir=tmp_path)
     try:
         assert Path(handler.baseFilename) == tmp_path / "o" / "r" / "shipit.log"
         assert (tmp_path / "o" / "r").is_dir()
@@ -240,7 +243,7 @@ def test_file_handler_writes_to_per_repo_path(tmp_path):
 
 
 def test_file_handler_level_is_debug_independent_of_console(tmp_path):
-    handler = logsetup.build_file_handler(("o", "r"), base_dir=tmp_path)
+    handler = logsetup.build_file_handler(repo_from_slug("o/r"), base_dir=tmp_path)
     try:
         assert handler.level == logging.DEBUG
     finally:
@@ -251,7 +254,7 @@ def test_file_handler_rolls_over_rather_than_growing_unbounded(tmp_path, monkeyp
     # Shrink the bound so a handful of records forces a rollover, then assert the
     # backups exist and no single file exceeds the cap (it rolled, not grew).
     monkeypatch.setattr(logsetup, "MAX_BYTES", 512)
-    handler = logsetup.build_file_handler(("o", "r"), base_dir=tmp_path)
+    handler = logsetup.build_file_handler(repo_from_slug("o/r"), base_dir=tmp_path)
     log = logging.getLogger("shipit.test.rollover")
     log.setLevel(logging.DEBUG)
     log.addHandler(handler)
@@ -285,7 +288,7 @@ def test_file_handler_rolls_over_rather_than_growing_unbounded(tmp_path, monkeyp
 
 
 def test_configure_logging_attaches_one_file_handler(tmp_path):
-    logsetup.configure_logging(owner_repo=("o", "r"), base_dir=tmp_path)
+    logsetup.configure_logging(repo=repo_from_slug("o/r"), base_dir=tmp_path)
     logger = logging.getLogger(logsetup.LOGGER_NAME)
     file_handlers = [h for h in logger.handlers if isinstance(h, RotatingFileHandler)]
     assert len(file_handlers) == 1
@@ -293,16 +296,23 @@ def test_configure_logging_attaches_one_file_handler(tmp_path):
 
 
 def test_configure_logging_is_idempotent(tmp_path):
-    logsetup.configure_logging(owner_repo=("o", "r"), base_dir=tmp_path)
-    logsetup.configure_logging(owner_repo=("o", "r"), base_dir=tmp_path)
-    logsetup.configure_logging(owner_repo=("o", "r"), base_dir=tmp_path)
+    logsetup.configure_logging(repo=repo_from_slug("o/r"), base_dir=tmp_path)
+    logsetup.configure_logging(repo=repo_from_slug("o/r"), base_dir=tmp_path)
+    logsetup.configure_logging(repo=repo_from_slug("o/r"), base_dir=tmp_path)
     logger = logging.getLogger(logsetup.LOGGER_NAME)
     file_handlers = [h for h in logger.handlers if isinstance(h, RotatingFileHandler)]
     assert len(file_handlers) == 1, "duplicate handler attached on repeat call"
 
 
-def test_configure_logging_resolves_owner_repo_via_gh_boundary(tmp_path, monkeypatch):
-    monkeypatch.setattr(logsetup.gh, "current_repo", lambda: "arthur-debert/shipit")
+def test_configure_logging_resolves_repo_via_identity_boundary(tmp_path, monkeypatch):
+    # With base_dir given but repo omitted, the repo resolves strictly through the
+    # canonical local resolver (identity.resolve_repo, ADR-0024) — never a hand
+    # split slug.
+    monkeypatch.setattr(
+        logsetup.identity,
+        "resolve_repo",
+        lambda cwd=".", **kw: repo_from_slug("arthur-debert/shipit"),
+    )
     logsetup.configure_logging(base_dir=tmp_path)
     handler = next(
         h
@@ -318,36 +328,41 @@ def test_configure_logging_resolves_owner_repo_via_gh_boundary(tmp_path, monkeyp
         handler.close()
 
 
-def test_configure_logging_rejects_non_slug_from_gh(tmp_path, monkeypatch):
-    # A boundary value that is not an 'owner/repo' slug must fail loud rather than
+def test_configure_logging_rejects_unresolvable_identity(tmp_path, monkeypatch):
+    # An origin remote the canonical parser cannot read must fail loud rather than
     # silently target an empty/incorrect log directory.
-    monkeypatch.setattr(logsetup.gh, "current_repo", lambda: "not-a-slug")
-    with pytest.raises(ValueError, match="owner/repo"):
+    def _raise(cwd=".", **kw):
+        raise ValueError("cannot parse owner/name from remote url: 'not-a-url'")
+
+    monkeypatch.setattr(logsetup.identity, "resolve_repo", _raise)
+    with pytest.raises(ValueError, match="owner/name"):
         logsetup.configure_logging(base_dir=tmp_path)
 
 
 def test_no_file_params_means_no_file_handler():
     # The surface-only call style (console/CI, used by WS02 tests and the CLI when
-    # outside a repo): with neither owner_repo nor base_dir, no file sink and no
-    # gh boundary call.
+    # outside a repo): with neither repo nor base_dir, no file sink and no
+    # identity resolution.
     logsetup.configure_logging(verbose=False, env={})
     logger = logging.getLogger(logsetup.LOGGER_NAME)
     assert not any(isinstance(h, RotatingFileHandler) for h in logger.handlers)
 
 
-def test_resolve_current_owner_repo_is_best_effort(monkeypatch):
+def test_resolve_current_repo_is_best_effort(monkeypatch):
     monkeypatch.setattr(
-        logsetup.gh,
-        "current_repo",
-        lambda: (_ for _ in ()).throw(ExecError(["gh"], rc=1, stderr="no repo")),
+        logsetup.identity,
+        "resolve_repo",
+        lambda cwd=".", **kw: (_ for _ in ()).throw(
+            ExecError(["git"], rc=1, stderr="no origin")
+        ),
     )
-    assert logsetup.resolve_current_owner_repo() is None
+    assert logsetup.resolve_current_repo() is None
 
 
 def test_all_three_sinks_attach_together(capfd, tmp_path):
     # The merged shape: console + CI + file all on the logger at once.
     logsetup.configure_logging(
-        verbose=False, env={"CI": "true"}, owner_repo=("o", "r"), base_dir=tmp_path
+        verbose=False, env={"CI": "true"}, repo=repo_from_slug("o/r"), base_dir=tmp_path
     )
     logger = logging.getLogger(logsetup.LOGGER_NAME)
     names = {h.name for h in logger.handlers}
@@ -358,12 +373,12 @@ def test_all_three_sinks_attach_together(capfd, tmp_path):
 
 def test_repeated_configure_does_not_stack_handlers(tmp_path):
     logsetup.configure_logging(
-        verbose=False, env={"CI": "true"}, owner_repo=("o", "r"), base_dir=tmp_path
+        verbose=False, env={"CI": "true"}, repo=repo_from_slug("o/r"), base_dir=tmp_path
     )
     logger = logging.getLogger(logsetup.LOGGER_NAME)
     first = len([h for h in logger.handlers if (h.name or "").startswith("shipit-")])
     logsetup.configure_logging(
-        verbose=False, env={"CI": "true"}, owner_repo=("o", "r"), base_dir=tmp_path
+        verbose=False, env={"CI": "true"}, repo=repo_from_slug("o/r"), base_dir=tmp_path
     )
     second = len([h for h in logger.handlers if (h.name or "").startswith("shipit-")])
     assert first == second
@@ -372,7 +387,7 @@ def test_repeated_configure_does_not_stack_handlers(tmp_path):
 def test_console_level_independent_of_file_handler(capfd, tmp_path):
     # File sink at DEBUG must not change what the quiet console surfaces.
     logsetup.configure_logging(
-        verbose=False, env={}, owner_repo=("o", "r"), base_dir=tmp_path
+        verbose=False, env={}, repo=repo_from_slug("o/r"), base_dir=tmp_path
     )
     _emit(logging.INFO, "info-detail")
     # Console (stderr) stays quiet...
@@ -399,7 +414,7 @@ def _file_records(base_dir: Path) -> list[dict]:
 
 
 def test_file_sink_emits_one_json_object_per_record(tmp_path):
-    logsetup.configure_logging(env={}, owner_repo=("o", "r"), base_dir=tmp_path)
+    logsetup.configure_logging(env={}, repo=repo_from_slug("o/r"), base_dir=tmp_path)
     _emit(logging.INFO, "first record")
     _emit(logging.WARNING, "second record")
     records = _file_records(tmp_path)
@@ -407,7 +422,7 @@ def test_file_sink_emits_one_json_object_per_record(tmp_path):
 
 
 def test_file_record_contract_flat_ts_level_logger_msg(tmp_path):
-    logsetup.configure_logging(env={}, owner_repo=("o", "r"), base_dir=tmp_path)
+    logsetup.configure_logging(env={}, repo=repo_from_slug("o/r"), base_dir=tmp_path)
     logging.getLogger("shipit.sub.module").warning("contract %s", "check")
     (record,) = _file_records(tmp_path)
     # The flat core fields, with %-style args resolved into msg.
@@ -422,7 +437,7 @@ def test_file_record_contract_flat_ts_level_logger_msg(tmp_path):
 
 
 def test_unbound_fields_are_absent_not_null(tmp_path):
-    logsetup.configure_logging(env={}, owner_repo=("o", "r"), base_dir=tmp_path)
+    logsetup.configure_logging(env={}, repo=repo_from_slug("o/r"), base_dir=tmp_path)
     _emit(logging.INFO, "bare record")
     (record,) = _file_records(tmp_path)
     assert set(record) == {"ts", "level", "logger", "msg"}
@@ -430,7 +445,7 @@ def test_unbound_fields_are_absent_not_null(tmp_path):
 
 
 def test_bound_domain_keys_land_flat_and_leave_on_unbind(tmp_path):
-    logsetup.configure_logging(env={}, owner_repo=("o", "r"), base_dir=tmp_path)
+    logsetup.configure_logging(env={}, repo=repo_from_slug("o/r"), base_dir=tmp_path)
     structlog.contextvars.bind_contextvars(pr=231, session="work")
     _emit(logging.INFO, "bound record")
     structlog.contextvars.clear_contextvars()
@@ -449,7 +464,7 @@ def test_only_domain_keys_merge_from_context_never_rogue_contextvars(tmp_path):
     # exactly logcontext's domain keys. A contextvar bound around the
     # logcontext seam (a direct structlog bind — i.e. a typo or an unsanctioned
     # correlation key) never mints a top-level JSONL field.
-    logsetup.configure_logging(env={}, owner_repo=("o", "r"), base_dir=tmp_path)
+    logsetup.configure_logging(env={}, repo=repo_from_slug("o/r"), base_dir=tmp_path)
     structlog.contextvars.bind_contextvars(pr=231, request_id="rogue-77")
     _emit(logging.INFO, "vocabulary record")
     (record,) = _file_records(tmp_path)
@@ -462,7 +477,7 @@ def test_stdlib_extra_lands_as_flat_event_extras(tmp_path):
     # extras arrive the stdlib way — `extra={...}` — and must land as flat
     # top-level fields in the JSONL record (ExtraAdder in the pipeline;
     # ProcessorFormatter alone would silently drop them).
-    logsetup.configure_logging(env={}, owner_repo=("o", "r"), base_dir=tmp_path)
+    logsetup.configure_logging(env={}, repo=repo_from_slug("o/r"), base_dir=tmp_path)
     logging.getLogger("shipit.spawn").info(
         "child launched", extra={"phase": "spawn", "attempt": 2}
     )
@@ -477,7 +492,7 @@ def test_container_extras_degrade_to_repr_never_nest(tmp_path):
     # list, tuple — all JSON-serializable, so a bare JSONRenderer would nest
     # them) degrades to its repr string, and a non-serializable object does
     # too, without crashing the log call.
-    logsetup.configure_logging(env={}, owner_repo=("o", "r"), base_dir=tmp_path)
+    logsetup.configure_logging(env={}, repo=repo_from_slug("o/r"), base_dir=tmp_path)
     logging.getLogger("shipit.containers").info(
         "container record",
         extra={
@@ -500,7 +515,7 @@ def test_foreign_stdlib_records_flow_through_the_chain(tmp_path):
     # An untouched stdlib call site — logging.getLogger + %-args, no structlog
     # import — must yield the same contract record, INCLUDING bound context
     # (the foreign_pre_chain is the same pipeline).
-    logsetup.configure_logging(env={}, owner_repo=("o", "r"), base_dir=tmp_path)
+    logsetup.configure_logging(env={}, repo=repo_from_slug("o/r"), base_dir=tmp_path)
     structlog.contextvars.bind_contextvars(tree="WS01")
     logging.getLogger("shipit.foreign").info("plain %d sites", 2)
     (record,) = _file_records(tmp_path)
@@ -512,7 +527,7 @@ def test_foreign_stdlib_records_flow_through_the_chain(tmp_path):
 def test_exception_is_flattened_to_a_string_field(tmp_path):
     # exc_info must not break the one-line JSON contract: the traceback is a
     # single flat string field, the record still parses line-per-record.
-    logsetup.configure_logging(env={}, owner_repo=("o", "r"), base_dir=tmp_path)
+    logsetup.configure_logging(env={}, repo=repo_from_slug("o/r"), base_dir=tmp_path)
     try:
         raise RuntimeError("boom")
     except RuntimeError:
@@ -527,7 +542,7 @@ def test_exception_is_flattened_to_a_string_field(tmp_path):
 def test_console_stays_human_not_json(capfd, tmp_path):
     # Hard cutover applies to the FILE format only: stderr keeps the human
     # `LEVEL logger: message` shape, not JSON.
-    logsetup.configure_logging(env={}, owner_repo=("o", "r"), base_dir=tmp_path)
+    logsetup.configure_logging(env={}, repo=repo_from_slug("o/r"), base_dir=tmp_path)
     _emit(logging.WARNING, "surfaced warning")
     err = capfd.readouterr().err
     assert "WARNING shipit: surfaced warning" in err
@@ -560,3 +575,26 @@ def test_no_hand_rolled_platform_branch_or_env_override():
     assert "sys.platform" not in source
     assert "platform.system" not in source
     assert "SHIPIT_LOG_DIR" not in source
+
+
+# ==========================================================================
+# identity threading (COR02-WS02, #252): one Repo, one log directory
+# ==========================================================================
+
+
+def test_case_divergent_sources_land_one_log_dir(tmp_path):
+    # A mixed-case origin remote and a mixed-case API slug are ONE repo on GitHub,
+    # so both must resolve the IDENTICAL log directory (ADR-0024) — the canonical
+    # Repo identity normalizes, not each key site.
+    class _CaseyGit:
+        def git_remote_url(self, *, cwd, remote="origin"):
+            return "git@github.com:AcMe/WiDgEt.git"
+
+    from shipit.identity import resolve_repo
+
+    from_origin = resolve_repo("/checkout", boundary=_CaseyGit())
+    from_api_slug = repo_from_slug("ACME/Widget")
+
+    dir_from_origin = logsetup.resolve_log_dir(from_origin, base_dir=tmp_path)
+    dir_from_slug = logsetup.resolve_log_dir(from_api_slug, base_dir=tmp_path)
+    assert dir_from_origin == dir_from_slug == tmp_path / "acme" / "widget"

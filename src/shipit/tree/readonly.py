@@ -27,8 +27,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .. import gh
+from ..identity import Repo
 from .create import Tree
-from .layout import REVIEW_KIND, central_root, sanitize_slug
+from .layout import REVIEW_KIND, repo_dir, sanitize_slug
 
 #: Length (hex chars) of the branch-name disambiguator suffixed on a review-Tree leaf.
 #: A short ``blake2b`` digest of the VERBATIM branch keeps the sharing key deterministic
@@ -61,18 +62,20 @@ class ReadOnlyPlan:
     branch: str
 
 
-def readonly_plan(
-    *, org: str, repo: str, branch: str, root: Path | None = None
-) -> ReadOnlyPlan:
-    """Resolve a shared read-only Tree's ``(dir, branch)`` for ``(org, repo, branch)``. Pure.
+def readonly_plan(*, repo: Repo, branch: str, root: Path | None = None) -> ReadOnlyPlan:
+    """Resolve a shared read-only Tree's ``(dir, branch)`` for ``(repo, branch)``. Pure.
 
-    The dir is ``<root>/<org>/<repo>/review/<sanitized-branch>-<branch-hash>`` — the
-    ``review`` kind (:data:`~shipit.tree.layout.REVIEW_KIND`) with a leaf derived ONLY
-    from the branch, so it is **deterministic and agent-hash-free**: every reviewer on
-    the same ``(repo, branch)`` resolves to the identical leaf and thus shares one
-    clone. The ``branch`` is kept VERBATIM for the checkout (it is the real remote
-    branch name, e.g. ``TRE03/WS03``); the dir leaf is the sanitized branch (``/`` →
-    ``-``, lowercased) plus a short hash of the verbatim branch.
+    ``repo`` is the :class:`shipit.identity.Repo` value object — already canonical
+    (lowercased owner/name), so every reviewer resolves the same repo to the same
+    namespace regardless of how its slug was cased at the source (ADR-0024). The dir
+    is ``<root>/<owner>/<name>/review/<sanitized-branch>-<branch-hash>``
+    (:func:`~shipit.tree.layout.repo_dir` + :data:`~shipit.tree.layout.REVIEW_KIND`)
+    with a leaf derived ONLY from the branch, so it is **deterministic and
+    agent-hash-free**: every reviewer on the same ``(repo, branch)`` resolves to the
+    identical leaf and thus shares one clone. The ``branch`` is kept VERBATIM for the
+    checkout (it is the real remote branch name, e.g. ``TRE03/WS03``); the dir leaf
+    is the sanitized branch (``/`` → ``-``, lowercased) plus a short hash of the
+    verbatim branch.
 
     The hash suffix is load-bearing, not cosmetic: sanitization is lossy, so distinct
     branches can collapse to one slug — ``feat/a-b`` and ``feat/a/b`` both sanitize to
@@ -93,8 +96,7 @@ def readonly_plan(
             f"{branch!r}, which sanitizes to an empty name."
         )
     leaf = f"{slug}-{_branch_hash(branch)}"
-    base_root = root if root is not None else central_root()
-    directory = Path(base_root) / org / repo / REVIEW_KIND / leaf
+    directory = repo_dir(repo, root) / REVIEW_KIND / leaf
     return ReadOnlyPlan(dir=directory, branch=branch)
 
 
