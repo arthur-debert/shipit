@@ -103,8 +103,8 @@ Turn the black hole into a glass box, in layers:
 12. As a human, I want the `logs` verb to render the JSONL log legibly (and
     follow it live), so that the machine-first format costs me nothing.
 13. As an agent, I want fields absent when unbound rather than null-stuffed,
-    so that presence-based filters (`select(.pr)`) work naturally and records
-    stay small.
+    so that records stay small and every field present in a record is
+    meaningful (jq presence filters behave the same either way).
 14. As the eval/observability layer, I want Exec durations and outcomes as
     structured data, so that future analysis (e.g. provisioning-time trends)
     is a query, not a parse.
