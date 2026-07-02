@@ -162,3 +162,7 @@ real branch; nothing is lost but the cosmetic dir↔branch symmetry.
   `CLAUDE_ENV_FILE` (`pixi shell-hook` for a pixi repo, a graceful **no-op** where there is
   no activatable toolchain, extensible per toolchain), not a hardcoded `pixi shell-hook`
   that would error on a non-pixi consumer.
+
+Layers A + D implemented in SES01 (WS01 `harness/activation.py` + `verbs/hook/sessionstart.py`;
+WS02 `data/bootstrap/claude-start` + `shipit install` wiring); Layers B (ephemeral Tree) and C
+(liveness/gc) pending (SES02).

@@ -1,7 +1,8 @@
 """install — vendor shipit's managed "slow set" into a consumer and reconcile it.
 
 ``shipit install <path>`` copies the small, file-structure-dependent set (the
-skills, the AGENTS.md block, the bootstrap launcher) into a consumer repo,
+skills, the AGENTS.md block, the bootstrap launcher, the ``./claude-start``
+session launcher, the ``SessionStart`` activation hook) into a consumer repo,
 recording a per-unit pristine ``sha256`` in ``.shipit.toml``. On re-install it
 hash-compares each unit against its stored pristine and opens a DRAFT PR with the
 changes — never an admin push (docs/dev/architecture.lex §2, docs/prd/install-reconciliation.md).

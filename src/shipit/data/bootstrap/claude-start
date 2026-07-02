@@ -4,13 +4,13 @@
 #
 # THIN by design (docs/prd/session-bootstrap.md, Layer D): mint a per-launch
 # session id and `exec claude --worktree "<minted-id>" "$@"`. The `--worktree`
-# flag fires shipit's WorktreeCreate hook, so the root session lands in its own
-# provisioned Tree with the SessionStart activation (CLAUDE_ENV_FILE) live —
-# isolated from every other session on this repo.
+# flag fires shipit's WorktreeCreate hook (the isolated-Tree path), with the
+# SessionStart activation (CLAUDE_ENV_FILE) live in the session.
 #
 # Convenience only, never a requirement: `claude -w <name>` works identically
 # without this file. The minted id carries the `sess-` prefix so a claude-start
-# session is recognizable (the ADR-0027 name-prefix convention).
+# session is recognizable; the hook does not yet discriminate on it — the
+# ephemeral session Tree (ADR-0027 Layer B) lands in SES02.
 #
 # Do not edit — `shipit install` overwrites this file.
 set -euo pipefail
