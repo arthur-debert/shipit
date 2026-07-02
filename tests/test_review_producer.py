@@ -234,7 +234,9 @@ def test_resolve_repo_falls_back_to_gh_for_handbuilt_context(monkeypatch):
         is_draft=False,
     )
     assert ctx.repo is None
-    monkeypatch.setattr(producer.gh, "current_repo", lambda: "Inferred/Repo")
+    monkeypatch.setattr(
+        producer.gh, "current_repo", lambda: repo_from_slug("inferred/repo")
+    )
     assert producer._resolve_repo(ctx) == repo_from_slug("inferred/repo")
 
 

@@ -19,7 +19,7 @@ import time
 from datetime import datetime, timezone
 
 from .. import gh, logcontext
-from ..identity import Repo, Sha, repo_from_slug
+from ..identity import Repo, Sha
 from ..pr import core_from_node
 from .model import (
     ReadinessView,
@@ -210,8 +210,8 @@ def attach_state(pr: int) -> tuple[list[str], list[tuple[int, str]]]:
     a request the verb polls this until the reviewer shows up in the pending
     requests — or has already submitted a fresh review that consumed it.
     """
-    owner, name = gh.repo_slug()
-    data = gh.graphql(_ATTACH_QUERY, owner=owner, name=name, pr=pr)
+    repo = gh.current_repo()
+    data = gh.graphql(_ATTACH_QUERY, owner=repo.owner.login, name=repo.name, pr=pr)
     pull = data["repository"]["pullRequest"]
     logins = _requested_logins(
         [
@@ -289,12 +289,14 @@ def gather_reviews(pr: int) -> ReadinessView:
     from .reviewers import reviewer_rerun
 
     start = time.monotonic()
-    owner, name = gh.repo_slug()
+    # The typed repo read (PROC03): the adapter returns the identity value object,
+    # so the slug/owner/name are read off it rather than re-split at call sites.
+    repo = gh.current_repo()
     # Bind the domain keys at the fetch seam (ADR-0029): from the moment the
     # engine starts working on this PR, every subsequent record in-process —
     # including the gh Exec records the fetch itself produces — carries pr/repo.
-    logcontext.bind(pr=pr, repo=f"{owner}/{name}")
-    data = gh.graphql(_REVIEWS_QUERY, owner=owner, name=name, pr=pr)
+    logcontext.bind(pr=pr, repo=repo.slug)
+    data = gh.graphql(_REVIEWS_QUERY, owner=repo.owner.login, name=repo.name, pr=pr)
     pull = data["repository"]["pullRequest"]
     requested = _requested_logins(
         [
@@ -319,7 +321,7 @@ def gather_reviews(pr: int) -> ReadinessView:
     # threads/reactions/issue-comments pagination the full `gather` runs is still
     # skipped; only the cheap core rides along on the query already in flight.
     ctx = ReadinessView(
-        pr=core_from_node(pull, repo_from_slug(f"{owner}/{name}")),
+        pr=core_from_node(pull, repo),
         reviews=reviews,
         requested_logins=requested,
         reviewer_rerun=reviewer_rerun(),
@@ -355,22 +357,24 @@ def gather(pr: int) -> ReadinessView:
     from .reviewers_config import reviewer_window
 
     start = time.monotonic()
-    owner, name = gh.repo_slug()
+    # The typed repo read (PROC03): one Repo value object feeds the log context,
+    # the REST base path, the GraphQL variables, and the PR identity below.
+    repo = gh.current_repo()
     # Bind the domain keys at the fetch seam (ADR-0029): from the moment the
     # engine starts working on this PR, every subsequent record in-process —
     # including the gh Exec records the fetch itself produces — carries pr/repo.
-    logcontext.bind(pr=pr, repo=f"{owner}/{name}")
-    base = f"repos/{owner}/{name}"
+    logcontext.bind(pr=pr, repo=repo.slug)
+    base = f"repos/{repo.slug}"
     meta = gh.pr_meta(pr)
     thread_nodes, review_requests, requested_at = _threads_and_review_requests(
-        owner, name, pr
+        repo.owner.login, repo.name, pr
     )
     # Bot-typed requests only surface through GraphQL (see _THREADS_QUERY);
     # the node shape ({login} / {slug}) is what _requested_logins consumes.
     meta["reviewRequests"] = review_requests
     ctx = context_from_raw(
-        # The PR identity's repo, derived from the live slug (ADR-0024).
-        repo=repo_from_slug(f"{owner}/{name}"),
+        # The PR identity's repo — the typed adapter read above (ADR-0024/PROC03).
+        repo=repo,
         meta=meta,
         reviews_json=gh.rest(f"{base}/pulls/{pr}/reviews", paginate=True) or [],
         thread_nodes=thread_nodes,

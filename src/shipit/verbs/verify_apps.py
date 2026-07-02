@@ -155,8 +155,11 @@ def run(repo: str | None, *, agents: list[str] | None = None, mint=None) -> int:
     target = repo
     if not target:
         try:
-            target = gh.current_repo()
-        except execrun.ExecError:
+            # The typed adapter read (PROC03); the App probes speak slugs.
+            # ValueError (no usable owner/name from gh) reads like the transport
+            # failure: no inferable repo.
+            target = gh.current_repo().slug
+        except (execrun.ExecError, ValueError):
             target = None
     if not target:
         print(

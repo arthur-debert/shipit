@@ -26,6 +26,7 @@ import logging
 import pytest
 from shipit import logcontext
 from shipit import gh
+from shipit.identity import repo_from_slug
 from shipit.prstate import fetch
 from shipit.prstate.errors import PrStateError
 from shipit.prstate.reviewers import CodexAdapter, CopilotAdapter, GeminiAdapter
@@ -47,7 +48,7 @@ def _graphql_page(review_requests=None, threads=None, timeline=None) -> dict:
 
 
 def _wire_gather(monkeypatch):
-    monkeypatch.setattr(fetch.gh, "repo_slug", lambda: ("owner", "repo"))
+    monkeypatch.setattr(fetch.gh, "current_repo", lambda: repo_from_slug("owner/repo"))
     monkeypatch.setattr(
         fetch.gh,
         "pr_meta",
@@ -97,7 +98,7 @@ def test_gather_binds_the_pr_and_repo_domain_keys(monkeypatch):
 
 
 def test_gather_reviews_records_a_debug_mechanic_with_fields(monkeypatch, caplog):
-    monkeypatch.setattr(fetch.gh, "repo_slug", lambda: ("owner", "repo"))
+    monkeypatch.setattr(fetch.gh, "current_repo", lambda: repo_from_slug("owner/repo"))
     monkeypatch.setattr(
         fetch.gh,
         "graphql",

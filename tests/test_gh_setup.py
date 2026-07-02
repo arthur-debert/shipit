@@ -3,6 +3,7 @@
 import pytest
 
 from shipit.config import SecretSource
+from shipit.identity import repo_from_slug
 from shipit.verbs import gh_setup
 
 
@@ -163,7 +164,7 @@ def test_run_dry_run_end_to_end(monkeypatch, capsys):
     monkeypatch.setattr(gh_setup.gh, "label_create", fake.label_create)
     monkeypatch.setattr(gh_setup.gh, "secret_set", fake.secret_set)
     monkeypatch.setattr(gh_setup.git, "repo_root", lambda: "/somewhere/o-r")
-    monkeypatch.setattr(gh_setup.gh, "current_repo", lambda: "o/r")
+    monkeypatch.setattr(gh_setup.gh, "current_repo", lambda: repo_from_slug("o/r"))
     monkeypatch.setattr(gh_setup.gh, "default_branch", lambda repo: "main")
     monkeypatch.setattr(gh_setup.checks_mod, "discover", lambda *a, **k: ["c / check"])
 
@@ -183,7 +184,9 @@ def test_remote_target_does_not_read_local_workflows(monkeypatch):
     monkeypatch.setattr(gh_setup.gh, "label_create", fake.label_create)
     monkeypatch.setattr(gh_setup.gh, "secret_set", fake.secret_set)
     monkeypatch.setattr(gh_setup.git, "repo_root", lambda: "/somewhere/shipit")
-    monkeypatch.setattr(gh_setup.gh, "current_repo", lambda: "me/shipit")
+    monkeypatch.setattr(
+        gh_setup.gh, "current_repo", lambda: repo_from_slug("me/shipit")
+    )
     monkeypatch.setattr(gh_setup.gh, "default_branch", lambda repo: "main")
 
     seen = {}

@@ -302,10 +302,12 @@ def _resolve_repo(ctx) -> Repo:
     a Tree under a malformed identity.
     """
     slug = (ctx.repo or "").strip()
-    if not slug:
-        slug = (gh.current_repo() or "").strip()
     try:
-        return repo_from_slug(slug)
+        # `gh.current_repo()` already returns the typed identity (PROC03) — the
+        # fallback needs no slug round-trip; only an explicit `ctx.repo` slug is
+        # parsed, through the ONE canonical parser. Either path raises
+        # `ValueError` on a non-`owner/name` answer.
+        return repo_from_slug(slug) if slug else gh.current_repo()
     except ValueError as exc:
         raise RuntimeError(
             f"cannot review PR #{ctx.number}: the repo slug {slug!r} is not in "
