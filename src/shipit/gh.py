@@ -178,7 +178,13 @@ def rest(
     concatenated into one list. ``token``, when given, authenticates the call as
     that token (a GitHub App installation token) instead of the user's ``gh``
     login — the seam for posting a review AS ``<app-slug>[bot]``.
+
+    Raises :class:`ValueError` when both ``body`` and ``fields`` are given: the
+    two are alternative payload forms, and passing both yields an ambiguous
+    ``gh api`` invocation.
     """
+    if body is not None and fields:
+        raise ValueError("rest() takes body or fields, not both")
     args = ["gh", "api", path]
     if method:
         args += ["--method", method]

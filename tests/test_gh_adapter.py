@@ -103,6 +103,15 @@ def test_rest_sends_string_fields_as_dash_f(monkeypatch):
     ]
 
 
+def test_rest_rejects_body_and_fields_together(monkeypatch):
+    """`body` and `fields` are alternative payload forms; passing both would
+    yield an ambiguous `gh api` invocation, so the adapter fails fast."""
+    calls = _capture_run(monkeypatch, "{}")
+    with pytest.raises(ValueError):
+        gh.rest("repos/o/r", method="POST", body={"a": 1}, fields={"b": "2"})
+    assert calls == []
+
+
 def test_graphql_variable_encoding(monkeypatch):
     """None omitted entirely; int/bool type-infer via -F; str forced via -f
     (ID! variables must never be coerced to a number)."""
