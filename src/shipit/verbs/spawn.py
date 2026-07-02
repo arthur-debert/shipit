@@ -26,7 +26,9 @@ nothing is ever launched against the parent checkout.
 from __future__ import annotations
 
 import json
+import logging
 import sys
+import time
 
 import click
 
@@ -41,6 +43,15 @@ from ..tree.layout import (
 )
 from ..tree.readonly import create_readonly, readonly_plan
 
+#: The spawn subsystem's logger — a child of the package ``shipit`` logger, so its
+#: records ride the LOG01 pipeline (JSONL file sink, bound domain keys, redaction)
+#: with zero wiring here. Lifecycle narration follows the spray conventions
+#: (glassbox PRD / ADR-0029): milestones at INFO with durations where meaningful,
+#: mechanics at DEBUG, propagating failures at ERROR with the exception attached.
+#: The user-facing surface (the stderr diagnostics, the SPAWNED stdout block) is
+#: unchanged — logging is additive plumbing under it, never a replacement.
+logger = logging.getLogger("shipit.spawn")
+
 #: The backends ``spawn subagent`` can launch today — **adapter-driven** (ADR-0020
 #: §Decision 2): derived from the :mod:`shipit.spawn.backends` registry, not a
 #: hand-maintained constant, so wiring a backend is one registry entry. ``claude``
@@ -53,6 +64,35 @@ SUPPORTED_BACKENDS = backends.supported_backends()
 #: instead of the per-Run write Tree every other role gets: a reviewer is read-only
 #: and branch-pinned, so :func:`run_subagent` dispatches on this exact value.
 REVIEWER_ROLE = "reviewer"
+
+
+def _elapsed_ms(start: float) -> int:
+    """Milliseconds elapsed since ``start`` (a ``time.monotonic`` stamp)."""
+    return int((time.monotonic() - start) * 1000)
+
+
+def _fail(message: str, *, exc: BaseException | None = None, **fields: object) -> int:
+    """Refuse the spawn: the user-facing stderr line PLUS the durable error record.
+
+    Every refusal in this verb propagates as the clean exit-1, so it is a
+    *propagating failure* under the spray conventions (ADR-0029): logged at ERROR,
+    with the causing exception attached via ``exc`` when one exists. The stderr
+    ``print`` stays byte-identical to what the verb always emitted — it is the
+    user-facing surface; the log record is the durable one (before this, the print
+    was the ONLY record of a failed spawn). ``fields`` land as flat event extras
+    (:class:`structlog.stdlib.ExtraAdder` adopts stdlib ``extra=``); ``None``
+    values are dropped so the absent-not-null record contract holds for extras
+    exactly as it does for domain keys.
+    """
+    print(f"spawn subagent: {message}", file=sys.stderr)
+    extras = {name: value for name, value in fields.items() if value is not None}
+    # One exc_info form across the spray (LOG02 convergence): `exc_info=True`
+    # reads the ACTIVE exception — with its real traceback — where passing the
+    # instance would attach only type+value when it was never raised here. Every
+    # caller that passes `exc` does so from inside its `except` block, so the
+    # active exception is exactly `exc`.
+    logger.error("spawn subagent: %s", message, exc_info=exc is not None, extra=extras)
+    return 1
 
 
 @click.group(
@@ -243,15 +283,43 @@ def run_subagent(
     :func:`shipit.spawn.launch._exec_runner` (a consumer view over
     :func:`shipit.execrun.run`).
     """
+    # A fresh spawn MINTS its own Tree; any `tree` already bound in the process
+    # log context is stale for THIS spawn's story — a nested spawn inherits the
+    # parent's `SHIPIT_LOG_CTX_TREE` (rebound at logging setup), and a prior spawn
+    # in the same process leaves its assignment bound. Drop it at the entry so the
+    # request milestone and any pre-Tree refusal record NO tree (absent-not-null),
+    # and the assignment below is the single seam that binds `tree` — it appears
+    # once, when assigned for this spawn (ADR-0029 record contract).
+    logcontext.unbind("tree")
+    # Lifecycle milestone (ADR-0029): the spawn REQUEST, narrated as received —
+    # before any gate — so even a refused spawn leaves a durable record of what
+    # was asked. The shape fields ride as flat extras (absent when not given);
+    # the domain keys (`repo` from the CLI entry, `tree` once assigned below)
+    # bind via logcontext and land on this and every later record.
+    logger.info(
+        "spawn subagent: %s run requested on backend %s",
+        role,
+        backend,
+        extra={
+            name: value
+            for name, value in {
+                "role": role,
+                "backend": backend,
+                "epic": epic,
+                "ws": ws,
+                "issue": issue,
+                "session": session if epic is None and ws is None else None,
+            }.items()
+            if value is not None
+        },
+    )
     if backend not in SUPPORTED_BACKENDS:
         supported = ", ".join(SUPPORTED_BACKENDS)
-        print(
-            f"spawn subagent: unsupported backend {backend!r} (supported: "
-            f"{supported}); wiring a new backend is one entry in the adapter registry "
-            "(ADR-0020).",
-            file=sys.stderr,
+        return _fail(
+            f"unsupported backend {backend!r} (supported: {supported}); wiring a "
+            "new backend is one entry in the adapter registry (ADR-0020).",
+            backend=backend,
         )
-        return 1
     # The explicit guard above fails an unknown backend LOUD at the verb boundary (no
     # silent default to claude); only then do we resolve its adapter (ADR-0020). The
     # adapter supplies the per-backend argv / auth-env / read-only posture; everything
@@ -263,18 +331,14 @@ def run_subagent(
     # ABSENCE selects the standalone-issue shape (branch issues/<id>/<session>).
     has_epic = epic is not None or ws is not None
     if has_epic and (epic is None or ws is None):
-        print(
-            "spawn subagent: the epic shape needs both --epic and --ws "
+        return _fail(
+            "the epic shape needs both --epic and --ws "
             f"(got epic={epic!r}, ws={ws!r}); omit both for a standalone --issue Tree.",
-            file=sys.stderr,
+            epic=epic,
+            ws=ws,
         )
-        return 1
     if has_epic and ws < 1:
-        print(
-            f"spawn subagent: --ws must be a positive integer (got {ws})",
-            file=sys.stderr,
-        )
-        return 1
+        return _fail(f"--ws must be a positive integer (got {ws})", epic=epic, ws=ws)
     if role != REVIEWER_ROLE and (issue is None or issue < 1):
         # ``--issue`` rides the task prompt and the draft PR's ``for #<issue>`` link;
         # a missing or zero/negative value (which click's int type still accepts) would
@@ -283,11 +347,7 @@ def run_subagent(
         # reviews an existing PR head), so the requirement does not apply to it. This
         # holds for BOTH write shapes — the epic Run's PR links ``for #<issue>`` and the
         # standalone Run's issue also names its branch.
-        print(
-            f"spawn subagent: --issue must be a positive integer (got {issue})",
-            file=sys.stderr,
-        )
-        return 1
+        return _fail(f"--issue must be a positive integer (got {issue})", role=role)
     if not has_epic and issue is None:
         # Reachable only for a reviewer (a write role already required --issue above):
         # with neither an epic shape nor an issue there is no branch to resolve a head
@@ -297,17 +357,14 @@ def run_subagent(
         # must be a positive integer", via its isinstance/`< 1` guard). A clean exit-1
         # either way, but this message names the ACTUAL problem (no shape given), not a
         # confusing complaint about the issue number.
-        print(
-            "spawn subagent: a reviewer needs a branch to review — give --epic E --ws N "
-            "or --issue N.",
-            file=sys.stderr,
+        return _fail(
+            "a reviewer needs a branch to review — give --epic E --ws N or --issue N.",
+            role=role,
         )
-        return 1
 
     root = gh.repo_root()
     if not root:
-        print("spawn subagent: not inside a git checkout", file=sys.stderr)
-        return 1
+        return _fail("not inside a git checkout")
     try:
         # Identity derives LOCALLY from the origin remote (ADR-0024): one canonical,
         # case-normalized Repo value object — a malformed remote fails loud
@@ -315,8 +372,7 @@ def run_subagent(
         repo_identity = identity.resolve_repo(root)
         url = gh.git_remote_url(cwd=root)
     except (execrun.ExecError, ValueError) as exc:
-        print(f"spawn subagent: {exc}", file=sys.stderr)
-        return 1
+        return _fail(str(exc), exc=exc)
 
     # --repo is the wrong-checkout guard, not a repo SELECTOR yet: the skeleton
     # resolves identity from the ambient checkout, so a --repo that names a
@@ -325,13 +381,11 @@ def run_subagent(
     # mixed-case --repo never false-negatives against a case-varying origin.
     # Multi-repo selection is a later WS.
     if repo.strip().lower() not in (repo_identity.name, repo_identity.slug):
-        print(
-            f"spawn subagent: --repo {repo!r} but the ambient checkout is "
+        return _fail(
+            f"--repo {repo!r} but the ambient checkout is "
             f"{repo_identity.slug!r}; the skeleton spawns from the target checkout "
-            "(multi-repo selection is a later WS).",
-            file=sys.stderr,
+            "(multi-repo selection is a later WS)."
         )
-        return 1
 
     # Reviewer Run (ADR-0018): a shared READ-ONLY Tree on the existing PR head, not a
     # per-Run write Tree. Its target branch follows the SHAPE — the epic work-stream head
@@ -350,8 +404,7 @@ def run_subagent(
             # epic code (an empty/invalid epic must NOT silently yield "/WS01") and
             # issue_branch validates the session — both raise ValueError, surfaced here as
             # the verb's clean exit-1, never a traceback.
-            print(f"spawn subagent: {exc}", file=sys.stderr)
-            return 1
+            return _fail(str(exc), exc=exc)
         return _launch_reviewer(
             repo=repo_identity,
             branch=review_branch,
@@ -376,8 +429,7 @@ def run_subagent(
             # malformed or path-traversing umbrella ref, so the pure helper refuses it.
             # Catch that here and emit the same clean exit-1-with-diagnostic the rest of
             # the verb uses for fail-closed paths — never an escaping traceback.
-            print(f"spawn subagent: {exc}", file=sys.stderr)
-            return 1
+            return _fail(str(exc), exc=exc)
         umbrella_branch = umbrella_base.split("/", 1)[-1]  # E/umbrella
         # Fail-closed (ADR-0017/0019): the epic umbrella branch MUST exist on the remote
         # before we cut a work stream from it. If it does not, refuse LOUD — never
@@ -388,17 +440,16 @@ def run_subagent(
         try:
             umbrella_exists = gh.remote_branch_exists(umbrella_branch, cwd=root)
         except execrun.ExecError as exc:
-            print(f"spawn subagent: {exc}", file=sys.stderr)
-            return 1
+            return _fail(str(exc), exc=exc)
         if not umbrella_exists:
-            print(
-                f"spawn subagent: epic base branch {umbrella_branch!r} does not exist "
+            return _fail(
+                f"epic base branch {umbrella_branch!r} does not exist "
                 f"on origin; cannot cut work stream {epic}/WS{ws:02d} from it. Create "
                 "the epic umbrella branch first — refusing to fall back to origin/main, "
                 "which would target the WS PR at the wrong base (#176, fail-closed).",
-                file=sys.stderr,
+                epic=epic,
+                ws=ws,
             )
-            return 1
         spec = TreeSpec(
             repo=repo_identity,
             agent_hash=new_agent_hash(),
@@ -414,8 +465,7 @@ def run_subagent(
         try:
             issue_branch(issue, session)  # validation only; the spec re-plans it
         except ValueError as exc:
-            print(f"spawn subagent: {exc}", file=sys.stderr)
-            return 1
+            return _fail(str(exc), exc=exc)
         spec = TreeSpec(
             repo=repo_identity,
             agent_hash=new_agent_hash(),
@@ -461,6 +511,7 @@ def _launch_write(
     the PR is not an OPEN, DRAFT PR targeting ``tree.base`` — each a clean exit-1, never a
     SPAWNED line.
     """
+    create_start = time.monotonic()
     try:
         tree = create(spec, source_repo=source_repo, github_url=github_url)
     except (ValueError, execrun.ExecError, OSError) as exc:
@@ -468,8 +519,11 @@ def _launch_write(
         # There is deliberately no native-worktree fallback — the launcher below is
         # unreachable unless a real Tree exists, so a failed create can never end up
         # launching a Run against the parent checkout.
-        print(f"spawn subagent: tree creation failed: {exc}", file=sys.stderr)
-        return 1
+        return _fail(
+            f"tree creation failed: {exc}",
+            exc=exc,
+            duration_ms=_elapsed_ms(create_start),
+        )
 
     # Launch the backend child rooted in the Tree through its adapter (ADR-0020): the
     # cwd IS the Tree, the adapter's child_env scrubs the backend's auth-shadowing vars
@@ -487,6 +541,18 @@ def _launch_write(
     # environment, so each `shipit` command the Run executes inside the Tree
     # rebinds them at its own logging setup and its records correlate back here.
     logcontext.bind(tree=tree.path)
+    # Tree-assignment milestone (ADR-0029): the Run has a home. Tree birth is the
+    # slowest, most failure-prone leg of a spawn (clone + provision), so the
+    # duration is the meaningful one; the `tree` domain key bound above rides this
+    # and every later record.
+    create_ms = _elapsed_ms(create_start)
+    logger.info(
+        "spawn subagent: write tree assigned on %s (base %s) in %dms",
+        tree.branch,
+        tree.base,
+        create_ms,
+        extra={"branch": tree.branch, "base": tree.base, "duration_ms": create_ms},
+    )
     base_branch = tree.base.split("/", 1)[-1] if "/" in tree.base else tree.base
     task = launch.write_task(
         role, issue=issue, branch=tree.branch, base_branch=base_branch
@@ -497,6 +563,17 @@ def _launch_write(
     # to its OWN env (else they'd resolve the coordinator's env — docs/dev/pixi.lex §7).
     # `scrub_tree_env` drops leaked PIXI_*/CONDA_* on top of the adapter's auth scrub.
     cmd = launch.pixi_wrap(adapter.build_command(task, role, cwd=tree.path), tree.path)
+    # Launch milestone (ADR-0029). Argv-level detail (the full command, cwd) is
+    # deliberately NOT duplicated here: the launch is one Exec through the runner,
+    # whose DEBUG record already carries the redacted argv, cwd, rc, and
+    # duration_ms (ADR-0028).
+    logger.info(
+        "spawn subagent: launching %s child (role=%s) in the tree",
+        adapter.name,
+        role,
+        extra={"backend": adapter.name, "role": role, "cwd": tree.path},
+    )
+    launch_start = time.monotonic()
     try:
         result = launch.launch(
             cmd,
@@ -511,16 +588,29 @@ def _launch_write(
         # (check=False), so reaching here always means a transport failure. The Tree
         # exists, so this is a launch failure, not the fail-closed create path — still
         # a clean exit-1, never an escaping traceback.
-        print(f"spawn subagent: {exc}", file=sys.stderr)
-        return 1
+        return _fail(str(exc), exc=exc, backend=adapter.name)
+    child_ms = _elapsed_ms(launch_start)
     if result.returncode != 0:
         detail = result.stderr.strip()
-        print(
-            f"spawn subagent: {adapter.name} child exited {result.returncode}"
+        return _fail(
+            f"{adapter.name} child exited {result.returncode}"
             + (f"\n{detail}" if detail else ""),
-            file=sys.stderr,
+            backend=adapter.name,
+            rc=result.returncode,
+            duration_ms=child_ms,
         )
-        return 1
+    # Child-outcome milestone (ADR-0019 §6): the process exit IS the Run's
+    # lifecycle end, so the rc and the Run's wall-clock are the record.
+    logger.info(
+        "spawn subagent: %s child exited 0 in %dms",
+        adapter.name,
+        child_ms,
+        extra={
+            "backend": adapter.name,
+            "rc": result.returncode,
+            "duration_ms": child_ms,
+        },
+    )
 
     # The Run reports back through the PR (ADR-0019 §6): resolve the PR it opened on
     # the Tree's branch through the SAME gh boundary the fleet scan uses — no side
@@ -529,19 +619,17 @@ def _launch_write(
     # success. Both are a clean exit-1.
     pr = gh.pr_for_head(tree.branch, cwd=tree.path)
     if pr is None:
-        print(
-            f"spawn subagent: child exited 0 but opened no PR on {tree.branch!r}; "
+        return _fail(
+            f"child exited 0 but opened no PR on {tree.branch!r}; "
             "the Run did not report back through a draft PR.",
-            file=sys.stderr,
+            branch=tree.branch,
         )
-        return 1
     if pr is gh.UNKNOWN:
-        print(
-            f"spawn subagent: child exited 0 but the PR state for {tree.branch!r} "
+        return _fail(
+            f"child exited 0 but the PR state for {tree.branch!r} "
             "could not be read (gh unreadable); not claiming success.",
-            file=sys.stderr,
+            branch=tree.branch,
         )
-        return 1
 
     # A PR existing on the branch is necessary but not sufficient: the contract is that
     # the Run reported back through an OPEN, DRAFT PR targeting the Tree's intended base.
@@ -549,29 +637,31 @@ def _launch_write(
     # an INVALID lifecycle state the coordinator must not be handed as success — each is a
     # clean exit-1, never a SPAWNED line.
     if pr["state"] != "OPEN":
-        print(
-            f"spawn subagent: child exited 0 but the PR on {tree.branch!r} is "
+        return _fail(
+            f"child exited 0 but the PR on {tree.branch!r} is "
             f"{pr['state']}, not OPEN; the Run did not report back through an open "
             "draft PR.",
-            file=sys.stderr,
+            branch=tree.branch,
+            pr=pr["number"],
+            pr_state=pr["state"],
         )
-        return 1
     if pr.get("isDraft") is not True:
-        print(
-            f"spawn subagent: child exited 0 but the PR on {tree.branch!r} is not a "
+        return _fail(
+            f"child exited 0 but the PR on {tree.branch!r} is not a "
             "draft; the Run must report back through a draft PR (the turn-signal the "
             "coordinator drives).",
-            file=sys.stderr,
+            branch=tree.branch,
+            pr=pr["number"],
         )
-        return 1
     if pr.get("baseRefName") != base_branch:
-        print(
-            f"spawn subagent: child exited 0 but the PR on {tree.branch!r} targets "
+        return _fail(
+            f"child exited 0 but the PR on {tree.branch!r} targets "
             f"base {pr.get('baseRefName')!r}, not the intended {base_branch!r}; the "
             "Run reported back against the wrong base.",
-            file=sys.stderr,
+            branch=tree.branch,
+            pr=pr["number"],
+            pr_base=pr.get("baseRefName"),
         )
-        return 1
 
     _emit_spawned(tree, role=role, backend=backend, pr=pr)
     return 0
@@ -602,18 +692,29 @@ def _launch_reviewer(
     path — a read-only-Tree error exits 1 loud, never a fallback.
     """
     plan = readonly_plan(repo=repo, branch=branch)
+    create_start = time.monotonic()
     try:
         tree = create_readonly(plan, source_repo=source_repo, github_url=github_url)
     except (ValueError, execrun.ExecError, OSError) as exc:
         # Fail-closed (ADR-0017/0018): a read-only-Tree error fails the spawn LOUD;
         # the launcher below is unreachable unless a real Tree exists.
-        print(f"spawn subagent: read-only tree creation failed: {exc}", file=sys.stderr)
-        return 1
+        return _fail(
+            f"read-only tree creation failed: {exc}",
+            exc=exc,
+            duration_ms=_elapsed_ms(create_start),
+        )
 
     # SPAWN SEAM (ADR-0029), mirroring the write path: the shared read-only Tree's
     # identity binds here, and `env_export` at the launch threads the bound keys
     # into the Reviewer Run's environment so its `shipit`/`gh` activity correlates.
     logcontext.bind(tree=tree.path)
+    create_ms = _elapsed_ms(create_start)
+    logger.info(
+        "spawn subagent: read-only review tree assigned on %s in %dms",
+        tree.branch,
+        create_ms,
+        extra={"branch": tree.branch, "base": tree.base, "duration_ms": create_ms},
+    )
 
     # The reviewer posture (ADR-0020 §Decision 3): `read_only=True` builds the backend's
     # reviewer argv (claude → read-only --tools; codex → workspace-write+network, NOT the
@@ -633,6 +734,15 @@ def _launch_reviewer(
         ),
         tree.path,
     )
+    # Launch milestone, mirroring the write path; argv detail rides the Exec
+    # runner's DEBUG record (ADR-0028), not a duplicate here.
+    logger.info(
+        "spawn subagent: launching %s child (role=%s) in the tree",
+        adapter.name,
+        REVIEWER_ROLE,
+        extra={"backend": adapter.name, "role": REVIEWER_ROLE, "cwd": tree.path},
+    )
+    launch_start = time.monotonic()
     try:
         result = launch.launch(
             cmd,
@@ -643,16 +753,29 @@ def _launch_reviewer(
     except execrun.ExecError as exc:
         # Transport failure only (ADR-0028): the runner raised because the child never
         # started; a nonzero reviewer child is a LaunchResult handled below.
-        print(f"spawn subagent: {exc}", file=sys.stderr)
-        return 1
+        return _fail(str(exc), exc=exc, backend=adapter.name)
+    child_ms = _elapsed_ms(launch_start)
     if result.returncode != 0:
         detail = result.stderr.strip()
-        print(
-            f"spawn subagent: {adapter.name} child exited {result.returncode}"
+        return _fail(
+            f"{adapter.name} child exited {result.returncode}"
             + (f"\n{detail}" if detail else ""),
-            file=sys.stderr,
+            backend=adapter.name,
+            rc=result.returncode,
+            duration_ms=child_ms,
         )
-        return 1
+    # Child-outcome milestone: a reviewer reports out-of-band (the review lands in
+    # the existing PR), so its clean exit IS the success signal.
+    logger.info(
+        "spawn subagent: %s child exited 0 in %dms",
+        adapter.name,
+        child_ms,
+        extra={
+            "backend": adapter.name,
+            "rc": result.returncode,
+            "duration_ms": child_ms,
+        },
+    )
 
     _emit_spawned(tree, role=REVIEWER_ROLE, backend=adapter.name)
     return 0
@@ -681,5 +804,12 @@ def _emit_spawned(
         payload["pr"] = pr["number"]
         payload["pr_state"] = pr["state"]
         payload["pr_is_draft"] = pr.get("isDraft")
+    # The spawn-handshake milestone (ADR-0029): the same coordinates the stdout
+    # block hands the coordinator, on the durable record — for a write Run that
+    # includes the Run↔PR linkage (`pr` doubles as the domain key, so
+    # `jq 'select(.pr==N)'` finds the spawn that minted the PR).
+    logger.info(
+        "spawn subagent: SPAWNED %s run on %s", role, tree.branch, extra=dict(payload)
+    )
     print("SPAWNED")
     print(json.dumps(payload, indent=2))

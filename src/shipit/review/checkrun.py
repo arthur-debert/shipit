@@ -84,7 +84,7 @@ def create(backend: Backend, repo: str, head_sha: str) -> int | None:
         "started_at": datetime.now(timezone.utc).isoformat(),
     }
     logger.debug(
-        "checkrun.create: opening %r on %s @ %s (as the %r app)",
+        "check run %r opening on %s @ %s (as the %r app)",
         name,
         repo,
         head_sha,
@@ -94,7 +94,7 @@ def create(backend: Backend, repo: str, head_sha: str) -> int | None:
         f"/repos/{repo}/check-runs", method="POST", body=body, token=token
     )
     run_id = response.get("id") if isinstance(response, dict) else None
-    logger.info("checkrun.create: opened %r on %s (run id=%s)", name, repo, run_id)
+    logger.info("check run %r opened on %s (run id=%s)", name, repo, run_id)
     return int(run_id) if run_id is not None else None
 
 
@@ -137,8 +137,7 @@ def transition(
         "output": {"title": title, "summary": summary},
     }
     logger.debug(
-        "checkrun.transition: closing %r on %s (run id=%s) -> completed/%s "
-        "(as the %r app)",
+        "check run %r closing on %s (run id=%s) -> completed/%s (as the %r app)",
         name,
         repo,
         run_id,
@@ -149,7 +148,7 @@ def transition(
         f"/repos/{repo}/check-runs/{run_id}", method="PATCH", body=body, token=token
     )
     logger.info(
-        "checkrun.transition: closed %r on %s (run id=%s) -> completed/%s",
+        "check run %r closed on %s (run id=%s) -> completed/%s",
         name,
         repo,
         run_id,
@@ -182,7 +181,7 @@ def find_nonterminal(backend: Backend, repo: str, head_sha: str) -> int | None:
     # string is well formed (`gh api` passes the path through verbatim).
     path = f"/repos/{repo}/commits/{head_sha}/check-runs?check_name={quote(name)}"
     logger.debug(
-        "checkrun.find_nonterminal: reading %r on %s @ %s (as the %r app)",
+        "check run %r read on %s @ %s (as the %r app)",
         name,
         repo,
         head_sha,
@@ -195,8 +194,7 @@ def find_nonterminal(backend: Backend, repo: str, head_sha: str) -> int | None:
             run_id = run.get("id")
             if run_id is not None:
                 logger.info(
-                    "checkrun.find_nonterminal: %r on %s has an in-flight run "
-                    "(id=%s, status=%s)",
+                    "check run %r on %s has an in-flight run (id=%s, status=%s)",
                     name,
                     repo,
                     run_id,

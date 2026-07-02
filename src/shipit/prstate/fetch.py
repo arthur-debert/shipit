@@ -13,8 +13,11 @@ fetched exactly one way and the light `gather_reviews` path can no longer hardco
 
 from __future__ import annotations
 
+import logging
+import time
 from datetime import datetime, timezone
 
+from .. import logcontext
 from ..identity import Repo, Sha, repo_from_slug
 from ..pr import core_from_node
 from . import ghapi
@@ -26,6 +29,11 @@ from .model import (
     Thread,
     _HANDBUILT_REPO,
 )
+
+#: The engine's logger — a child of the package ``shipit`` logger, shared with
+#: :mod:`shipit.prstate.state` so the fetch milestones and the evaluation
+#: decision they feed read as one story under ``shipit.prstate``.
+logger = logging.getLogger("shipit.prstate")
 
 # The OBS02/ADR-0005 funnel check runs are named `review: <reviewer>` (see
 # `shipit.review.checkrun`). They arrive on the head commit's `statusCheckRollup`
@@ -282,7 +290,12 @@ def gather_reviews(pr: int) -> ReadinessView:
     """
     from .reviewers import reviewer_rerun
 
+    start = time.monotonic()
     owner, name = ghapi.repo_slug()
+    # Bind the domain keys at the fetch seam (ADR-0029): from the moment the
+    # engine starts working on this PR, every subsequent record in-process —
+    # including the gh Exec records the fetch itself produces — carries pr/repo.
+    logcontext.bind(pr=pr, repo=f"{owner}/{name}")
     data = ghapi.graphql(_REVIEWS_QUERY, owner=owner, name=name, pr=pr)
     pull = data["repository"]["pullRequest"]
     requested = _requested_logins(
@@ -307,12 +320,30 @@ def gather_reviews(pr: int) -> ReadinessView:
     # rest of the core) for real off its GraphQL query, never hardcoding it. The
     # threads/reactions/issue-comments pagination the full `gather` runs is still
     # skipped; only the cheap core rides along on the query already in flight.
-    return ReadinessView(
+    ctx = ReadinessView(
         pr=core_from_node(pull, repo_from_slug(f"{owner}/{name}")),
         reviews=reviews,
         requested_logins=requested,
         reviewer_rerun=reviewer_rerun(),
     )
+    # The light fetch is a mechanic of the request verb's skip decision, not a
+    # lifecycle milestone — record it at DEBUG (the full `gather` is the info one).
+    duration_ms = int((time.monotonic() - start) * 1000)
+    logger.debug(
+        "pr#%s light review snapshot fetched in %dms (%d review(s), "
+        "%d pending request(s))",
+        pr,
+        duration_ms,
+        len(reviews),
+        len(requested),
+        extra={
+            "pr": pr,
+            "duration_ms": duration_ms,
+            "reviews": len(reviews),
+            "requested": len(requested),
+        },
+    )
+    return ctx
 
 
 def gather(pr: int) -> ReadinessView:
@@ -325,7 +356,12 @@ def gather(pr: int) -> ReadinessView:
     from .reviewers import reviewer_rerun
     from .reviewers_config import reviewer_window
 
+    start = time.monotonic()
     owner, name = ghapi.repo_slug()
+    # Bind the domain keys at the fetch seam (ADR-0029): from the moment the
+    # engine starts working on this PR, every subsequent record in-process —
+    # including the gh Exec records the fetch itself produces — carries pr/repo.
+    logcontext.bind(pr=pr, repo=f"{owner}/{name}")
     base = f"repos/{owner}/{name}"
     meta = ghapi.pr_meta(pr)
     thread_nodes, review_requests, requested_at = _threads_and_review_requests(
@@ -334,7 +370,7 @@ def gather(pr: int) -> ReadinessView:
     # Bot-typed requests only surface through GraphQL (see _THREADS_QUERY);
     # the node shape ({login} / {slug}) is what _requested_logins consumes.
     meta["reviewRequests"] = review_requests
-    return context_from_raw(
+    ctx = context_from_raw(
         # The PR identity's repo, derived from the live slug (ADR-0024).
         repo=repo_from_slug(f"{owner}/{name}"),
         meta=meta,
@@ -353,6 +389,26 @@ def gather(pr: int) -> ReadinessView:
         # build edge, the same place every other impurity (config, network) does.
         now=datetime.now(timezone.utc),
     )
+    # The fetch milestone (glassbox spray): the full snapshot is the input every
+    # `pr status` / `pr next` decision reads, so its shape + duration are the
+    # lifecycle record — at info, with the pr key bound above.
+    duration_ms = int((time.monotonic() - start) * 1000)
+    logger.info(
+        "pr#%s snapshot gathered in %dms (%d review(s), %d thread(s), %d check(s))",
+        pr,
+        duration_ms,
+        len(ctx.reviews),
+        len(ctx.threads),
+        len(ctx.checks),
+        extra={
+            "pr": pr,
+            "duration_ms": duration_ms,
+            "reviews": len(ctx.reviews),
+            "threads": len(ctx.threads),
+            "checks_total": len(ctx.checks),
+        },
+    )
+    return ctx
 
 
 def context_from_raw(

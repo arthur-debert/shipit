@@ -11,6 +11,8 @@ from __future__ import annotations
 import logging
 from types import SimpleNamespace
 
+import pytest
+
 from shipit.agent import backend as agent_backend
 from shipit.review import post, service
 from shipit.review.diff import ReviewView, review_view
@@ -82,7 +84,8 @@ def test_post_as_app_never_logs_the_token(monkeypatch, caplog):
     assert captured["token"] == secret  # the seam still injects the real token
     full = "\n".join(r.getMessage() for r in caplog.records)
     assert secret not in full
-    assert "posting review to owner/repo#5" in full
+    # LOG02-WS05 (#285): one PR rendering — pr#N — with the repo alongside.
+    assert "posting to pr#5" in full
 
 
 def test_parse_failure_full_raw_at_debug_snippet_at_warning(caplog):
@@ -91,7 +94,6 @@ def test_parse_failure_full_raw_at_debug_snippet_at_warning(caplog):
     surface (console / CI handler) carries ONLY the head/tail snippet, never the full
     raw. The `BackendError` message — the PR-surface / terminal budget — likewise keeps
     only the snippet."""
-    import pytest
 
     from shipit.review.backends import base
 
@@ -144,3 +146,125 @@ def test_generate_review_logs_start_and_outcome(monkeypatch, caplog):
     text = "\n".join(r.getMessage() for r in caplog.records)
     assert "agent=codex" in text
     assert "complete" in text
+
+
+# --- LOG02-WS03: durations + the child's settle records (glassbox spray) --------
+# Convention-level: the key lifecycle events exist and carry the required flat
+# fields (reviewer / pr / duration_ms; exc_info on a propagating failure) —
+# identified by their fields, never by per-message string assertions.
+
+
+def _duration_records(caplog, level):
+    return [
+        r
+        for r in caplog.records
+        if r.levelno == level and getattr(r, "duration_ms", None) is not None
+    ]
+
+
+def test_generate_review_outcome_carries_duration_fields(monkeypatch, caplog):
+    """The model run is the review's expensive span — its completion record
+    carries reviewer/pr/duration_ms as flat fields."""
+    monkeypatch.setattr(
+        service.producer, "run_tree_review", lambda backend, ctx, **kw: dict(_REVIEW)
+    )
+    ctx = SimpleNamespace(diff=_DIFF, workdir="/tmp/wd", number=5, head_ref="b")
+    with caplog.at_level(logging.INFO, logger="shipit.review"):
+        service.generate_review(agent_backend.CODEX, ctx)
+    timed = _duration_records(caplog, logging.INFO)
+    assert len(timed) == 1
+    rec = timed[0]
+    assert rec.reviewer == "codex"
+    assert rec.pr == 5
+    assert rec.duration_ms >= 0
+
+
+def test_detached_child_settle_carries_start_to_settle_duration(monkeypatch, caplog):
+    """The review's start→settle duration (issue #248): the detached child's
+    terminal record — after `_generate_post_and_close` closed the funnel run —
+    carries reviewer/pr/duration_ms."""
+    monkeypatch.setattr(
+        service,
+        "resolve_pr",
+        lambda pr, repo=None: SimpleNamespace(changed_files=["foo.py"], diff=_DIFF),
+    )
+    monkeypatch.setattr(
+        service, "_generate_post_and_close", lambda *a, **kw: {"post": {"id": 1}}
+    )
+    with caplog.at_level(logging.INFO, logger="shipit.review"):
+        service.run_detached_review(agent_backend.CODEX, 5, repo="owner/repo", run_id=9)
+    settles = _duration_records(caplog, logging.INFO)
+    assert len(settles) == 1
+    rec = settles[0]
+    assert rec.reviewer == "codex"
+    assert rec.pr == 5
+    assert rec.duration_ms >= 0
+
+
+def test_detached_child_failure_settles_at_error_with_exception_and_duration(
+    monkeypatch, caplog
+):
+    """A child that dies is a PROPAGATING failure: the settle records at ERROR
+    with the exception attached (exc_info) and the start→settle duration."""
+
+    def boom(*a, **kw):
+        raise RuntimeError("backend crashed")
+
+    monkeypatch.setattr(
+        service,
+        "resolve_pr",
+        lambda pr, repo=None: SimpleNamespace(changed_files=["foo.py"], diff=_DIFF),
+    )
+    monkeypatch.setattr(service, "_generate_post_and_close", boom)
+
+    with caplog.at_level(logging.INFO, logger="shipit.review"):
+        with pytest.raises(RuntimeError):
+            service.run_detached_review(
+                agent_backend.CODEX, 5, repo="owner/repo", run_id=9
+            )
+    errors = _duration_records(caplog, logging.ERROR)
+    assert len(errors) == 1
+    rec = errors[0]
+    assert rec.reviewer == "codex"
+    assert rec.pr == 5
+    assert rec.exc_info is not None
+
+
+def test_resolve_failure_settles_at_error_with_exception_and_duration(
+    monkeypatch, caplog
+):
+    """The resolve region (outside `_generate_post_and_close`) is the other
+    propagating-failure settle: ERROR, exception attached, duration carried."""
+
+    def boom_resolve(pr, repo=None):
+        raise RuntimeError("could not fetch PR")
+
+    monkeypatch.setattr(service, "resolve_pr", boom_resolve)
+
+    with caplog.at_level(logging.INFO, logger="shipit.review"):
+        with pytest.raises(RuntimeError):
+            service.run_detached_review(
+                agent_backend.CODEX, 5, repo="owner/repo", run_id=None
+            )
+    errors = _duration_records(caplog, logging.ERROR)
+    assert len(errors) == 1
+    assert errors[0].exc_info is not None
+
+
+def test_post_failure_records_error_with_exception(monkeypatch, caplog):
+    """A failed review POST propagates (normalized to RuntimeError) — recorded
+    at ERROR with the exception attached and the pr field."""
+    from shipit import execrun
+
+    def boom_rest(path, *, method=None, body=None, token=None):
+        raise execrun.ExecError(["gh", "api"], rc=1, stderr="422 sad")
+
+    monkeypatch.setattr(post.gh, "rest", boom_rest)
+
+    with caplog.at_level(logging.INFO, logger="shipit.review"):
+        with pytest.raises(RuntimeError):
+            post.post_review(_REVIEW, _ctx(), backend=agent_backend.CODEX, as_app=False)
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(errors) == 1
+    assert errors[0].pr == 5
+    assert errors[0].exc_info is not None

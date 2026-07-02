@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import sys
+import time
 import tomllib
 from dataclasses import dataclass
 from importlib import resources
@@ -23,6 +25,8 @@ from pathlib import Path
 
 from .. import checks as checks_mod
 from .. import config, execrun, gh, secretsrc
+
+logger = logging.getLogger("shipit.ghsetup")
 
 RULESET_NAME = "main-branch-protection"
 
@@ -102,6 +106,13 @@ def apply_ruleset(repo: str, checks: list[str], *, dry_run: bool) -> str:
     try:
         rulesets = gh.rest(f"repos/{repo}/rulesets")
     except execrun.ExecError:
+        # Degraded-but-continuing: an unreadable listing reads as "no existing
+        # ruleset", so the pass falls through to a POST.
+        logger.warning(
+            "could not list rulesets — assuming none exists",
+            exc_info=True,
+            extra={"repo": repo},
+        )
         rulesets = None
     existing = existing_ruleset_id(rulesets, RULESET_NAME)
 
@@ -117,9 +128,17 @@ def apply_ruleset(repo: str, checks: list[str], *, dry_run: bool) -> str:
     if existing is not None:
         gh.rest(f"repos/{repo}/rulesets/{existing}", method="PUT", body=body)
         print("  ruleset updated")
+        logger.info(
+            "ruleset updated",
+            extra={"repo": repo, "ruleset": RULESET_NAME, "checks": len(checks)},
+        )
         return "updated"
     gh.rest(f"repos/{repo}/rulesets", method="POST", body=body)
     print("  ruleset created")
+    logger.info(
+        "ruleset created",
+        extra={"repo": repo, "ruleset": RULESET_NAME, "checks": len(checks)},
+    )
     return "created"
 
 
@@ -133,6 +152,10 @@ def ensure_labels(repo: str, labels: list[Label], *, dry_run: bool) -> int:
             repo, label.name, description=label.description, color=label.color
         )
         print(f"  label {label.name}")
+        # Per-label upserts are mechanics; the pass milestone is logged below.
+        logger.debug("label upserted", extra={"repo": repo, "label": label.name})
+    if not dry_run:
+        logger.info("labels ensured", extra={"repo": repo, "labels": len(labels)})
     return len(labels)
 
 
@@ -163,14 +186,30 @@ def push_secrets(
             value = secretsrc.resolve(source, prompt=prompt)
         except secretsrc.SecretSourceError as exc:
             print(f"  FAIL {source.name}: {exc}")
+            # Degraded-but-continuing: the pass keeps going so one bad secret
+            # never strands the others; the run's exit code carries the failure.
+            logger.warning(
+                "secret could not be resolved",
+                exc_info=True,
+                extra={"repo": repo, "secret": source.name, "source": source.kind},
+            )
             failed += 1
             continue
         if value is None:
             print(f"  skip {source.name} (optional source absent)")
+            logger.debug(
+                "secret skipped (optional source absent)",
+                extra={"repo": repo, "secret": source.name, "source": source.kind},
+            )
             skipped += 1
             continue
         gh.secret_set(source.name, value, repo=repo)
         print(f"  secret {source.name}")
+        # The secret NAME is the record; the value never reaches a log call.
+        logger.info(
+            "secret set",
+            extra={"repo": repo, "secret": source.name, "source": source.kind},
+        )
         set_count += 1
     return set_count, skipped, failed
 
@@ -189,6 +228,7 @@ def run(
     prompt=None,
 ) -> int:
     """Drive the three passes against ``repo`` (current checkout when omitted)."""
+    started = time.monotonic()
     toplevel = gh.repo_root()
     current = None
     if toplevel:
@@ -201,6 +241,7 @@ def run(
         print(
             "gh-setup: no repo given and not inside a GitHub checkout", file=sys.stderr
         )
+        logger.error("no repo given and not inside a GitHub checkout")
         return 1
     print(f"gh-setup: {target}{' (dry-run)' if dry_run else ''}")
 
@@ -220,6 +261,10 @@ def run(
             "empty required-checks set. Pass --checks a,b to set them explicitly.",
             file=sys.stderr,
         )
+        logger.warning(
+            "no required checks discovered — ruleset applied with an empty set",
+            extra={"repo": target},
+        )
     apply_ruleset(target, checks, dry_run=dry_run)
 
     # (b) labels
@@ -234,8 +279,10 @@ def run(
         sources = config.load_secrets(cfg)
     except config.ConfigError as exc:
         print(f"  no secrets applied: {exc}")
+        # Degraded-but-continuing: the ruleset/labels passes already applied.
+        logger.warning("no secrets applied", exc_info=True, extra={"repo": target})
         sources = []
-    failed = 0
+    set_count = skipped = failed = 0
     if sources:
         set_count, skipped, failed = push_secrets(
             target, sources, dry_run=dry_run, prompt=prompt
@@ -243,4 +290,18 @@ def run(
         print(f"  {set_count} secret(s) set, {skipped} skipped, {failed} failed")
 
     print("done.")
+    # The verb's milestone: every pass ran; a failed secret degrades the record
+    # to WARNING because the run's exit code propagates it.
+    log = logger.warning if failed else logger.info
+    log(
+        "gh-setup complete",
+        extra={
+            "repo": target,
+            "dry_run": dry_run,
+            "secrets_set": set_count,
+            "secrets_skipped": skipped,
+            "secrets_failed": failed,
+            "duration_ms": int((time.monotonic() - started) * 1000),
+        },
+    )
     return 1 if failed else 0

@@ -189,10 +189,11 @@ def run_tree_review(
             output_schema_path=schema_path,
         )
         logger.info(
-            "run_tree_review: agent=%s pr=#%s launching reviewer in read-only Tree %s",
-            agent,
+            "review launching for pr#%s (agent=%s) in read-only Tree %s",
             ctx.number,
+            agent,
             tree.path,
+            extra={"pr": ctx.number, "tree": tree.path, "reviewer": agent},
         )
         result = launch.launch(
             cmd, cwd=tree.path, env=adapter.child_env(), runner=launcher

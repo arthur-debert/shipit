@@ -50,12 +50,20 @@ rc 127); the curated passthrough keeps ``HOME``/``PATH`` intact (spike, 2026-06-
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
 from .. import execrun
 from ..tree.create import is_leaked_env_var
+
+#: The spawn subsystem's logger (shared with the verb): launch MECHANICS narrate
+#: at DEBUG per the spray conventions (ADR-0029) — the pixi-routing decision and
+#: the env scrub, the two silent gates a mis-rooted child is usually traced to.
+#: The launch itself is one Exec whose argv/rc/duration record the Exec runner
+#: already emits (ADR-0028), so nothing is duplicated here.
+logger = logging.getLogger("shipit.spawn")
 
 #: The launch path's per-Exec timeout: **explicitly** ``None`` (ADR-0028 allows it
 #: as a deliberate per-call choice, never the default). An agent Run is the ONE
@@ -177,7 +185,21 @@ def pixi_wrap(argv: list[str], tree_path: str | Path) -> list[str]:
     """
     tree = Path(tree_path)
     if not tree.joinpath(*PIXI_DEFAULT_ENV).exists():
+        # Mechanics at DEBUG (ADR-0029): the routing DECISION is the diagnosis-
+        # relevant fact when a child resolves the wrong tools — record which way
+        # the gate went, and why.
+        logger.debug(
+            "launch argv left bare: %s carries no provisioned pixi env "
+            "(read-only or non-pixi tree)",
+            tree,
+            extra={"pixi_wrapped": False},
+        )
         return argv
+    logger.debug(
+        "launch argv routed through the tree's pixi env at %s",
+        tree,
+        extra={"pixi_wrapped": True},
+    )
     return ["pixi", "run", "--manifest-path", str(tree / "pixi.toml"), "--", *argv]
 
 
@@ -198,7 +220,18 @@ def scrub_tree_env(env: Mapping[str, str]) -> dict[str, str]:
     it still cleans the env the agent's *own* ``pixi`` calls inherit. Returns a fresh dict
     (never the caller's).
     """
-    return {key: value for key, value in env.items() if not is_leaked_env_var(key)}
+    scrubbed = {key: value for key, value in env.items() if not is_leaked_env_var(key)}
+    dropped = sorted(set(env) - set(scrubbed))
+    if dropped:
+        # Mechanics at DEBUG (ADR-0029): variable NAMES only — never values, which
+        # is also why this logs the drop-list rather than the surviving env.
+        logger.debug(
+            "scrubbed %d leaked env var(s) from the child env: %s",
+            len(dropped),
+            ", ".join(dropped),
+            extra={"dropped": len(dropped)},
+        )
+    return scrubbed
 
 
 def write_task(role: str, *, issue: int, branch: str, base_branch: str) -> str:

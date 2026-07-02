@@ -24,6 +24,7 @@ remote request is a hard failure (non-zero exit), never a silent park.
 
 from __future__ import annotations
 
+import logging
 import sys
 
 import click
@@ -34,6 +35,10 @@ from ...prstate.errors import PrStateError
 from ...prstate.reviewers import REGISTRY, ReviewerAdapter, by_name, required_reviewers
 from ._request import RequestResult, request_reviewers
 from ._resolve import resolve_pr
+
+#: The `pr` verbs' logger (LOG02 spray, ADR-0029): each reviewer's request
+#: outcome is a lifecycle fact — before this, the prints were its only record.
+logger = logging.getLogger("shipit.pr")
 
 
 @click.group(
@@ -150,6 +155,7 @@ def run(pr: int | None = None, *, reviewer: str | None = None) -> int:
     if adapters is None:
         return 1
 
+    resolved: int | None = None
     try:
         resolved = resolve_pr(pr)
         if resolved is None:
@@ -164,6 +170,7 @@ def run(pr: int | None = None, *, reviewer: str | None = None) -> int:
         # A real gh/auth failure OR the local-agent guard (requesting
         # codex-local/agy-local raises a clean PrStateError, not a crash). Both are
         # surfaced as a clean stderr line + non-zero exit.
+        logger.error("pr review request failed", exc_info=True, extra={"pr": resolved})
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
@@ -212,17 +219,48 @@ def _resolve_local_alias(reviewer: str) -> ReviewerAdapter | None:
 
 
 def _emit(pr: int, result: RequestResult) -> None:
-    """Render each reviewer's outcome; dropped lines go to stderr."""
+    """Render each reviewer's outcome; dropped lines go to stderr.
+
+    Each outcome ALSO logs (LOG02 convergence — the prints were the only record
+    of the request act): the transitions that moved something (verified,
+    in-flight) are INFO milestones, the deliberate non-acts (skip, no-op) are
+    DEBUG mechanics, and a dropped request is a WARNING — degraded, surfaced
+    to the caller via the non-zero exit rather than an exception.
+    """
     for name in result.skipped:
+        logger.debug(
+            "reviewer %s already reviewed pr#%s (review-once) — skipped",
+            name,
+            pr,
+            extra={"pr": pr, "reviewer": name},
+        )
         print(f"{name}: already reviewed #{pr} (review-once) — skip")
     for name in result.no_op:
+        logger.debug(
+            "reviewer %s auto-triggers on pr#%s — no request mechanism, no-op",
+            name,
+            pr,
+            extra={"pr": pr, "reviewer": name},
+        )
         print(f"{name}: auto-triggers, no request mechanism — no-op")
     for name in result.in_flight:
+        logger.info(
+            "review in flight from %s on pr#%s (detached)",
+            name,
+            pr,
+            extra={"pr": pr, "reviewer": name},
+        )
         print(
             f"review in flight: {name} on #{pr} (detached — poll the PR for the "
             "outcome)"
         )
     for name in result.verified:
+        logger.info(
+            "review request from %s attached on pr#%s (verified)",
+            name,
+            pr,
+            extra={"pr": pr, "reviewer": name},
+        )
         print(f"verified: {name} request attached on #{pr}")
     # A bare run that skipped every reviewer placed nothing — say so explicitly
     # rather than exit silently.
@@ -230,6 +268,13 @@ def _emit(pr: int, result: RequestResult) -> None:
     if result.skipped and not acted:
         print(f"all required reviewers already reviewed #{pr} — nothing to request")
     for name in result.dropped:
+        logger.warning(
+            "review request from %s dropped by GitHub on pr#%s — no "
+            "review_requested edge created",
+            name,
+            pr,
+            extra={"pr": pr, "reviewer": name},
+        )
         print(
             f"{name}: request dropped by GitHub: no review_requested edge "
             "created (service stall / quota) — retry later",

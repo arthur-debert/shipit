@@ -1,0 +1,8 @@
+
+○ 1. Make root session run in tree
+○ 2. Encapsulate Root Session in pixit session
+○ 3. Ensure All Sessions run isomorphic and concurrency is safe
+○ 4. Improve logging: ensure a solid logging stream that is really helpful for debugging.
+○ 5. Ensure that Eval has the right Score points, new tools, add user generated feedback, etc
+○ 6. Test shipit update pineed version6 todo(s), 0 done
+

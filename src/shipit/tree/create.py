@@ -33,15 +33,21 @@ import os
 import secrets
 import shlex
 import shutil
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
 import platformdirs
 
-from .. import config, execrun, gh
+from .. import config, execrun, gh, logcontext
 from . import include, provision
 from .layout import TreeSpec, central_root, plan
 
+#: The Tree axis' shared logger (LOG02 spray, ADR-0029): the creation pipeline
+#: narrates its milestones at INFO with durations ("tree created …", per
+#: provision step), mechanics at DEBUG, and a failed create at ERROR with the
+#: exception attached — under a :func:`shipit.logcontext.scoped` ``tree`` bind
+#: so every record of one materialization correlates.
 logger = logging.getLogger("shipit.tree")
 
 #: Provisioning REQUIRES an ALREADY-ONBOARDED ``.shipit.toml`` (one with a
@@ -102,24 +108,70 @@ def create(spec: TreeSpec, *, source_repo: str, github_url: str) -> Tree:
     tree_plan = plan(spec)
     dest = tree_plan.dir
     trees_root = spec.root if spec.root is not None else central_root()
-    if dest.exists():
-        raise FileExistsError(
-            f"tree dir already exists: {dest}; refusing to clone so a failed "
-            "create never deletes a pre-existing checkout (rerun, or hash collision)."
+    # The Tree-birth seam binds its domain keys (ADR-0029), but SCOPED to the
+    # creation pipeline: every record of the birth — including the Exec runner's
+    # own transport records for the git/provisioning subprocesses — carries the
+    # Tree it belongs to, and the binding is unwound when `create` returns so a
+    # later in-process record (an embedded caller that then lists/gcs/removes a
+    # DIFFERENT Tree) never inherits this Tree/session and corrupts the durable
+    # correlation. The session identity is bound when the shape carries one: the
+    # ephemeral leaf IS the per-launch session id (ADR-0027), and the issue shape
+    # names its branch-leaf session (`issues/<id>/<session>`); `scoped` drops the
+    # `None` the other shapes yield (present-when-bound, absent-not-null).
+    session = spec.ephemeral or (spec.session if spec.issue is not None else None)
+    with logcontext.scoped(tree=str(dest), session=session):
+        if dest.exists():
+            raise FileExistsError(
+                f"tree dir already exists: {dest}; refusing to clone so a failed "
+                "create never deletes a pre-existing checkout (rerun, or hash collision)."
+            )
+        dest.parent.mkdir(parents=True, exist_ok=True)
+
+        started = time.monotonic()
+        logger.debug(
+            "tree cloning %s -> %s (branch %s, base %s)",
+            github_url,
+            dest,
+            tree_plan.branch,
+            tree_plan.base,
         )
-    dest.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            gh.git_clone_dissociated(github_url, str(dest), reference=source_repo)
+            gh.git_fetch(cwd=str(dest))
+            gh.git_checkout_new_branch(tree_plan.branch, tree_plan.base, cwd=str(dest))
+            copied = include.apply(source_repo, dest)
+            logger.debug(
+                "tree copied %d .treeinclude file(s) into %s", len(copied), dest
+            )
+            _provision(dest, trees_root=Path(trees_root))
+        except BaseException:
+            # The propagating failure's ERROR record (spray convention): the whole
+            # birth story — how far it got, how long it took, the exception — plus
+            # the rollback the atomicity contract performs, in one durable record.
+            logger.error(
+                "tree create failed after %dms; removing half-built leaf %s",
+                _elapsed_ms(started),
+                dest,
+                exc_info=True,
+            )
+            shutil.rmtree(dest, ignore_errors=True)
+            raise
 
-    try:
-        gh.git_clone_dissociated(github_url, str(dest), reference=source_repo)
-        gh.git_fetch(cwd=str(dest))
-        gh.git_checkout_new_branch(tree_plan.branch, tree_plan.base, cwd=str(dest))
-        include.apply(source_repo, dest)
-        _provision(dest, trees_root=Path(trees_root))
-    except BaseException:
-        shutil.rmtree(dest, ignore_errors=True)
-        raise
+        duration_ms = _elapsed_ms(started)
+        logger.info(
+            "tree created at %s (branch %s, base %s) in %dms",
+            dest,
+            tree_plan.branch,
+            tree_plan.base,
+            duration_ms,
+            extra={"duration_ms": duration_ms},
+        )
+        return Tree(path=str(dest), branch=tree_plan.branch, base=tree_plan.base)
 
-    return Tree(path=str(dest), branch=tree_plan.branch, base=tree_plan.base)
+
+def _elapsed_ms(started: float) -> int:
+    """Milliseconds elapsed since the ``time.monotonic()`` timestamp ``started``."""
+    return int((time.monotonic() - started) * 1000)
 
 
 #: ``PIXI_*`` variables the parent ``pixi run`` injects that bind to the PARENT
@@ -248,6 +300,7 @@ def run_provision(cmd: list[str], *, cwd: Path, env: dict[str, str]) -> None:
         "provision step %s completed in %dms",
         shlex.join(result.argv),
         result.duration_ms,
+        extra={"duration_ms": result.duration_ms},
     )
 
 

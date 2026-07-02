@@ -16,6 +16,7 @@ print the READY summary. All the real logic lives in :mod:`shipit.tree`.
 from __future__ import annotations
 
 import json
+import logging
 import sys
 import time
 from collections.abc import Callable
@@ -32,6 +33,12 @@ from ..tree.create import Tree, create, new_agent_hash
 from ..tree.layout import TreeSpec
 from ..tree.readonly import remove_tree
 from ..tree.registry import TreeRecord
+
+#: The Tree axis logs on the shared ``shipit.tree`` logger (LOG02): the verb's
+#: user-facing ``print``/``echo`` output is unchanged, but the actions it is the
+#: only record of — the gc sweep, a removal, a failed create — now also land in
+#: the durable JSONL record (spray convention, ADR-0029).
+logger = logging.getLogger("shipit.tree")
 
 
 @click.group(
@@ -172,6 +179,10 @@ def run_create(
         # rejects a spec (ValueError), a git/gh call or provisioning Exec fails (ExecError),
         # fails (ExecError), or a filesystem step — mkdir/copy/an existing
         # dest — fails (OSError). None of these should surface as a traceback.
+        # The stderr line is the user surface; the durable ERROR record (with the
+        # exception attached) covers the pre-pipeline failures — a rejected spec,
+        # an existing dest — that `create`'s own rollback record never sees.
+        logger.error("tree create failed", exc_info=True)
         print(f"tree create: {exc}", file=sys.stderr)
         return 1
     _emit_ready(result)
@@ -252,6 +263,7 @@ def run_list() -> int:
     try:
         root = layout.central_root()
     except ValueError as exc:
+        logger.error("tree list failed", exc_info=True)
         print(f"tree list: {exc}", file=sys.stderr)
         return 1
     records = registry.scan(root)
@@ -409,6 +421,7 @@ def run_remove(
     try:
         root = layout.central_root()
     except ValueError as exc:
+        logger.error("tree remove failed", exc_info=True)
         print(f"tree remove: {exc}", file=sys.stderr)
         return 1
     records = registry.scan(root)
@@ -430,6 +443,14 @@ def run_remove(
     try:
         remove_tree(record.path)
     except OSError as exc:
+        # Propagating failure (exit-1): ERROR with the exception attached; the
+        # successful removal itself is recorded by `remove_tree` (the funnel).
+        logger.error(
+            "tree remove failed for %s",
+            record.path,
+            exc_info=True,
+            extra={"tree": record.path},
+        )
         print(f"tree remove: could not remove {record.path}: {exc}", file=sys.stderr)
         return 1
     print(f"REMOVED {record.path}")
@@ -556,6 +577,7 @@ def run_gc(*, dry_run: bool = False, threshold: str | None = None) -> int:
             else cleanup.parse_duration(threshold)
         )
     except ValueError as exc:
+        logger.error("tree gc failed", exc_info=True)
         print(f"tree gc: {exc}", file=sys.stderr)
         return 1
     decision, total, unknown = _scan_and_classify(root, max_age_seconds=max_age_seconds)
@@ -682,6 +704,14 @@ def _emit_gc(decision: Cleanup, *, total: int, unknown: int) -> None:
         try:
             deleted = remove_tree(record.path)
         except OSError as exc:
+            # Degraded-but-continuing (spray convention): the sweep carries on
+            # past a failed rmtree, so it is a WARNING, exception attached.
+            logger.warning(
+                "tree gc could not remove %s",
+                record.path,
+                exc_info=True,
+                extra={"tree": record.path},
+            )
             print(f"FAILED  {record.path}: {exc}", file=sys.stderr)
             continue
         if not deleted:
@@ -695,9 +725,19 @@ def _emit_gc(decision: Cleanup, *, total: int, unknown: int) -> None:
         print(f"STALE   {record.path} (ambiguous — left for review, not removed)")
     stale = len(decision.stale)
     kept = len(decision.keep)
+    # The sweep's lifecycle milestone: the print above is the user surface, this
+    # is its durable twin (per-Tree removals are recorded by `remove_tree`).
+    logger.info("tree gc removed %d, stale %d, kept %d", removed, stale, kept)
     print(f"gc: removed {removed}, stale {stale}, kept {kept}")
     if unknown:
         swept = total - unknown
+        logger.warning(
+            "tree gc swept %d of %d; %d skipped (PR state unknown — incomplete view "
+            "of the fleet)",
+            swept,
+            total,
+            unknown,
+        )
         print(
             f"swept {swept} of {total}; {unknown} skipped (state unknown)",
             file=sys.stderr,
@@ -725,9 +765,19 @@ def _emit_gc_preview(decision: Cleanup, *, total: int, unknown: int) -> None:
         for record in bucket:
             print(f"{field.name.upper():<9} {record.path}")
         counts.append(f"{field.name} {len(bucket)}")
+    # Mechanics at DEBUG: a dry run deletes nothing, so its partition is not a
+    # milestone — the per-Tree ladder decisions are already recorded by classify.
+    logger.debug("gc --dry-run: %s", ", ".join(counts))
     print(f"gc --dry-run (no Trees deleted): {', '.join(counts)}")
     if unknown:
         swept = total - unknown
+        logger.warning(
+            "gc --dry-run: would sweep %d of %d; %d skipped (PR state unknown — "
+            "incomplete view of the fleet)",
+            swept,
+            total,
+            unknown,
+        )
         print(
             f"would sweep {swept} of {total}; {unknown} skipped (state unknown)",
             file=sys.stderr,

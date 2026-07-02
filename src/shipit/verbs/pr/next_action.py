@@ -25,6 +25,7 @@ shared helper's job.
 
 from __future__ import annotations
 
+import logging
 import sys
 
 import click
@@ -39,6 +40,10 @@ from . import status as status_verb
 from ._request import request_reviewers
 from ._resolve import resolve_pr
 from .dispatch import dispatch
+
+#: The `pr` verbs' logger (LOG02 spray, ADR-0029): the action `pr next` takes is
+#: a lifecycle milestone — before this, the "action:" print was its only record.
+logger = logging.getLogger("shipit.pr")
 
 
 class _NextActs:
@@ -137,6 +142,7 @@ def run(pr: int | None = None, *, as_json: bool = False) -> int:
     flip). A branch with no PR is a normal report (the act is the human's: create
     a draft PR), exit 0 — matching `pr status`.
     """
+    resolved: int | None = None
     try:
         resolved = resolve_pr(pr)
         if resolved is None:
@@ -148,11 +154,23 @@ def run(pr: int | None = None, *, as_json: bool = False) -> int:
     except ready_verb.NotReady as exc:
         # The guarded flip refused: the PR moved out of READY between the gather
         # and the flip. Report the real (refused) status as a clean non-zero.
+        logger.warning(
+            "pr#%s flip refused — not Ready (state=%s)",
+            exc.status.pr,
+            exc.status.state.value,
+            extra={"pr": exc.status.pr},
+        )
         print(f"refusing to flip: {exc}", file=sys.stderr)
         return 1
     except (execrun.ExecError, PrStateError) as exc:
+        logger.error("pr next failed", exc_info=True, extra={"pr": resolved})
         print(f"error: {exc}", file=sys.stderr)
         return 1
+    # The action-taken milestone (LOG02 convergence): the single step this
+    # invocation performed, durable alongside the user-facing "action:" print.
+    logger.info(
+        "pr#%s next action taken — %s", resolved, action, extra={"pr": resolved}
+    )
     # Re-read the status AFTER a mutating act so the reported snapshot reflects
     # what just happened (e.g. a freshly-requested reviewer now REQUESTED). A
     # second gather is cheap and keeps the report honest; on report-only acts it

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import base64
 import glob
+import logging
 import os
 import re
 import sys
@@ -30,6 +31,12 @@ import sys
 import yaml
 
 from . import execrun, gh
+
+#: This module's logger (LOG02 convergence): the degraded discovery outcomes —
+#: a too-deep nesting, an unresolvable reusable workflow — used to go ONLY to
+#: stderr, reaching no sink; they now also record at WARNING (the prints stay
+#: as the user-facing surface).
+logger = logging.getLogger("shipit.checks")
 
 _NON_CHECK_WORKFLOWS = ("copilot-review.yml", "copilot-review.yaml")
 
@@ -204,6 +211,9 @@ def _job_contexts(
     if not isinstance(uses, str):
         return [display]
     if depth >= _MAX_NESTING:
+        # Degraded-but-continuing (LOG02): discovery drops this job's contexts
+        # and carries on — loud on both the user surface and the durable record.
+        logger.warning("reusable-workflow nesting too deep at job %r", job_id)
         print(
             f"warning: reusable-workflow nesting too deep at job {job_id!r}",
             file=sys.stderr,
@@ -213,6 +223,14 @@ def _job_contexts(
         try:
             cache[uses] = _fetch_called_workflow(uses, toplevel)
         except (execrun.ExecError, ValueError, OSError, yaml.YAMLError) as exc:
+            # Degraded-but-continuing: the called workflow's contexts are
+            # skipped, not fatal — warning with the exception attached.
+            logger.warning(
+                "cannot resolve reusable workflow %r called by job %r",
+                uses,
+                job_id,
+                exc_info=True,
+            )
             print(
                 f"warning: cannot resolve reusable workflow {uses!r} "
                 f"called by job {job_id!r}: {exc}",

@@ -18,8 +18,12 @@ The contract, in full:
   tails of both streams. Success logs at DEBUG, failure at ERROR. A nonzero
   exit under ``check=False`` is the caller's *normal* outcome (a liveness
   probe of a dead pid, ``git cat-file -e``), so it records at DEBUG, not ERROR.
-- **Everything redacted.** Whatever the runner logs or attaches to an error
-  passes through the central redactor (:mod:`shipit.redact`) first.
+- **Everything redacted.** Every attribute of an :class:`ExecError` is masked
+  at construction (:mod:`shipit.redact`) — the error object surfaces to callers
+  OUTSIDE the logging chain, so it can never carry a secret anywhere. The log
+  records themselves carry no per-site masking (#277): the central
+  ``redact.redact_event`` processor in ``logsetup._PIPELINE`` masks every
+  record, on every sink, at format time.
 
 Rules carried over from the retired proto-runner: never ``shell=True``; never
 interpolate into a shell string — commands are argument lists. Stdin (ADR-0020):
@@ -265,13 +269,15 @@ def run(
         duration_ms=duration_ms,
     )
     # The one record for a completed Exec (DEBUG — success, or a nonzero rc the
-    # caller declared normal via check=False). Argv is redacted; streams are
-    # deliberately absent from success records (bulk, and the secret-bearing
+    # caller declared normal via check=False). No per-site redaction (#277): the
+    # central `redact.redact_event` processor masks EVERY record at format time,
+    # on every sink, so masking here would only run the redactor twice. Streams
+    # are deliberately absent from success records (bulk, and the secret-bearing
     # channel) — failures carry their tails via _record_failure above.
     logger.debug(
         "exec %s (cwd=%s) -> rc=%d in %dms",
-        redact.redact_text(shlex.join(result.argv)),
-        redact.redact_text(str(cwd or ".")),
+        shlex.join(result.argv),
+        str(cwd or "."),
         result.rc,
         result.duration_ms,
     )
@@ -347,10 +353,12 @@ def spawn_detached(
     # The one record for a detached spawn: what was launched, from where, as
     # what pid. There is no completion to record — the pid is the only handle
     # a log reader has to correlate the child's own records back to this spawn.
+    # No per-site redaction (#277): the central `redact.redact_event` processor
+    # masks every record at format time.
     logger.debug(
         "exec-detach %s (cwd=%s) -> pid=%d",
-        redact.redact_text(shlex.join(argv)),
-        redact.redact_text(str(cwd or ".")),
+        shlex.join(argv),
+        str(cwd or "."),
         proc.pid,
     )
 
@@ -358,13 +366,15 @@ def spawn_detached(
 def _record_failure(error: ExecError, cwd: str | os.PathLike | None) -> None:
     """The one record for a failed Exec: ERROR, with both stream tails.
 
-    ``error``'s attributes are already redacted (:class:`ExecError` redacts at
-    construction), so this record is safe for every sink.
+    ``error``'s attributes are redacted at construction — the ERROR object
+    surfaces to callers OUTSIDE the logging chain, so that redaction stays. The
+    record itself needs no per-site masking (#277): the central
+    ``redact.redact_event`` processor masks every record at format time.
     """
     logger.error(
         "exec %s (cwd=%s) -> %s (rc=%s) in %dms\nstdout tail: %s\nstderr tail: %s",
         shlex.join(error.argv),
-        redact.redact_text(str(cwd or ".")),
+        str(cwd or "."),
         error.cause,
         error.rc,
         error.duration_ms,

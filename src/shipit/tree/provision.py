@@ -70,6 +70,15 @@ def write_record(tree: str | Path, shas: Sequence[str]) -> None:
         )
     payload = {_COMMITS_KEY: list(shas)}
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    # A lifecycle milestone (spray convention): the record is what later lets a
+    # gc sweep reclaim this Tree past the unpushed floor, so its write — today
+    # otherwise invisible — is narrated with the Tree it protects.
+    logger.info(
+        "provision recorded %d commit(s) in %s",
+        len(shas),
+        tree,
+        extra={"tree": str(tree)},
+    )
 
 
 def read_provision_shas(tree: str | Path) -> frozenset[str]:
@@ -89,7 +98,7 @@ def read_provision_shas(tree: str | Path) -> frozenset[str]:
             isinstance(sha, str) and sha for sha in commits
         ):
             return frozenset(commits)
-        logger.debug("provision: record for %s has mis-typed commits: %r", tree, data)
+        logger.debug("provision record for %s has mis-typed commits: %r", tree, data)
     except (OSError, ValueError, TypeError, KeyError):
-        logger.debug("provision: no readable record for %s", tree, exc_info=True)
+        logger.debug("provision record unreadable for %s", tree, exc_info=True)
     return frozenset()

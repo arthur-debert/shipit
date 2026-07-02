@@ -19,9 +19,16 @@ the engine raises is :class:`shipit.prstate.errors.PrStateError`.
 from __future__ import annotations
 
 import json
+import logging
 
 from .. import execrun
 from .errors import PrStateError
+
+#: The engine's logger (shared name with the rest of ``shipit.prstate``). The
+#: TRANSPORT record for every call here is the Exec runner's (one record per
+#: Exec, ADR-0028); this boundary only records the one failure the runner can't
+#: see — a GraphQL response that completed but carries semantic errors.
+logger = logging.getLogger("shipit.prstate")
 
 #: The stated per-Exec timeout (ADR-0028: every Exec carries one). Every call
 #: through this boundary talks to GitHub, so each gets the runner's generous
@@ -120,7 +127,19 @@ def graphql(query: str, **variables: object) -> dict:
         args += [flag, f"{key}={value}"]
     payload = json.loads(_gh(args))
     if payload.get("errors"):
-        raise PrStateError(f"graphql errors: {payload['errors']}")
+        # A propagating semantic failure the Exec record cannot carry (the gh
+        # call exited 0): record it at ERROR with the exception attached
+        # (glassbox spray) before it leaves this boundary. Raise-then-log so the
+        # record carries a real traceback — `exc_info=<unraised instance>` would
+        # attach only the type+value (its `__traceback__` is still None).
+        try:
+            raise PrStateError(f"graphql errors: {payload['errors']}")
+        except PrStateError:
+            logger.error(
+                "gh graphql call returned errors (Exec succeeded, answer unusable)",
+                exc_info=True,
+            )
+            raise
     return payload["data"]
 
 
@@ -150,6 +169,18 @@ def pr_ready(pr: int, *, undo: bool = False) -> None:
     if undo:
         args.append("--undo")
     _gh(args)
+    # The draft-flag flip is the ONE human hand-off signal in the whole cycle
+    # (LOG02 convergence): give it a durable INFO milestone at the boundary that
+    # performed it — before this, its only record was the Exec runner's DEBUG
+    # line, invisible to an INFO-level read of the story.
+    logger.info(
+        "pr#%s draft flag flipped %s on %s/%s",
+        pr,
+        "ready→draft" if undo else "draft→ready",
+        owner,
+        name,
+        extra={"pr": pr, "repo": f"{owner}/{name}"},
+    )
 
 
 def pr_review_reply(pr: int, comment_id: int, body: str) -> None:
