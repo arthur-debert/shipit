@@ -32,6 +32,7 @@ from datetime import datetime, timezone
 from urllib.parse import quote
 
 from .. import gh
+from ..agent.backend import Backend
 from . import ghauth
 
 #: The funnel writes through the shared review logger (OBS01 sink). The minted
@@ -48,20 +49,22 @@ logger = logging.getLogger("shipit.review")
 _TERMINAL_STATUS = "completed"
 
 
-def reviewer_name(agent: str) -> str:
-    """The funnel reviewer name for ``agent`` (``codex`` → ``codex-local``).
+def _run_name(backend: Backend) -> str:
+    """The full funnel check-run name — ``review: <agent>-local``.
 
-    The local backends surface as the ``<agent>-local`` reviewer; the check run
-    is named ``review: <reviewer>`` so the funnel reads one run per reviewer.
+    The reviewer name itself (``codex-local``) is the backend's
+    :pyattr:`~shipit.agent.backend.Backend.check_run_name` registry alias — this
+    module only adds the reserved ``review: `` prefix, never composes the name.
     """
-    return f"{agent}-local"
+    return f"review: {backend.check_run_name}"
 
 
-def create(agent: str, repo: str, head_sha: str) -> int | None:
-    """Open the in-progress funnel check run for ``agent`` on ``repo``@``head_sha``.
+def create(backend: Backend, repo: str, head_sha: str) -> int | None:
+    """Open the in-progress funnel check run for ``backend`` on ``repo``@``head_sha``.
 
-    Mints the agent's App installation token (so GitHub attributes the run to
-    ``adr-<agent>-review[bot]``) and POSTs ``/repos/{repo}/check-runs`` with
+    Mints the backend's App installation token (so GitHub attributes the run to
+    its funnel login, e.g. ``adr-codex-review[bot]``) and POSTs
+    ``/repos/{repo}/check-runs`` with
     ``status=in_progress`` and ``started_at=now`` (an honest, tz-aware UTC
     timestamp — the breadcrumb OBS04 ages a wait window against). Returns the new
     run's id (or ``None`` if the response carried none).
@@ -72,8 +75,8 @@ def create(agent: str, repo: str, head_sha: str) -> int | None:
     :func:`shipit.review.service._open_breadcrumb` (the async parent's create), so
     this function stays a thin, reusable base for WS02's terminal transition.
     """
-    name = f"review: {reviewer_name(agent)}"
-    token = ghauth.installation_token(agent, repo)
+    name = _run_name(backend)
+    token = ghauth.installation_token(backend, repo)
     body = {
         "name": name,
         "head_sha": head_sha,
@@ -85,7 +88,7 @@ def create(agent: str, repo: str, head_sha: str) -> int | None:
         name,
         repo,
         head_sha,
-        agent,
+        backend.funnel_agent,
     )
     response = gh.rest(
         f"/repos/{repo}/check-runs", method="POST", body=body, token=token
@@ -96,7 +99,7 @@ def create(agent: str, repo: str, head_sha: str) -> int | None:
 
 
 def transition(
-    agent: str,
+    backend: Backend,
     repo: str,
     run_id: int,
     *,
@@ -114,8 +117,8 @@ def transition(
     ``summary``) message, and a tz-aware ``completed_at=now`` (the load-bearing
     timestamp OBS04 ages against, the mirror of ``create``'s ``started_at``).
 
-    Authored via the agent's App installation token, so GitHub keeps attributing
-    the run to ``adr-<agent>-review[bot]``; the token is threaded onto the ``gh``
+    Authored via the backend's App installation token, so GitHub keeps attributing
+    the run to the backend's funnel login; the token is threaded onto the ``gh``
     boundary but NEVER reaches a log record, mirroring :func:`create`.
 
     Honest by design like :func:`create`: any mint/PATCH failure PROPAGATES. The
@@ -125,8 +128,8 @@ def transition(
     close the async path runs through), so a breadcrumb failure never crashes the
     review and never masks its real outcome.
     """
-    name = f"review: {reviewer_name(agent)}"
-    token = ghauth.installation_token(agent, repo)
+    name = _run_name(backend)
+    token = ghauth.installation_token(backend, repo)
     body = {
         "status": "completed",
         "conclusion": conclusion,
@@ -140,7 +143,7 @@ def transition(
         repo,
         run_id,
         conclusion,
-        agent,
+        backend.funnel_agent,
     )
     gh.rest(
         f"/repos/{repo}/check-runs/{run_id}", method="PATCH", body=body, token=token
@@ -154,8 +157,9 @@ def transition(
     )
 
 
-def find_nonterminal(agent: str, repo: str, head_sha: str) -> int | None:
-    """Return the id of an IN-FLIGHT funnel run for ``agent`` on ``repo``@``head_sha``.
+def find_nonterminal(backend: Backend, repo: str, head_sha: str) -> int | None:
+    """Return the id of an IN-FLIGHT funnel run for ``backend`` on
+    ``repo``@``head_sha``.
 
     The idempotency read (OBS03-WS03): because the check run IS the store, a
     re-request must reconcile against a funnel run that is still in flight rather
@@ -172,8 +176,8 @@ def find_nonterminal(agent: str, repo: str, head_sha: str) -> int | None:
     PROPAGATES — the best-effort swallowing that keeps a reconcile-read failure from
     failing the request lives in :func:`shipit.review.service.start_detached_review`.
     """
-    name = f"review: {reviewer_name(agent)}"
-    token = ghauth.installation_token(agent, repo)
+    name = _run_name(backend)
+    token = ghauth.installation_token(backend, repo)
     # The `check_name` value carries a space + colon — url-encode it so the query
     # string is well formed (`gh api` passes the path through verbatim).
     path = f"/repos/{repo}/commits/{head_sha}/check-runs?check_name={quote(name)}"
@@ -182,7 +186,7 @@ def find_nonterminal(agent: str, repo: str, head_sha: str) -> int | None:
         name,
         repo,
         head_sha,
-        agent,
+        backend.funnel_agent,
     )
     response = gh.rest(path, token=token)
     runs = response.get("check_runs") if isinstance(response, dict) else None

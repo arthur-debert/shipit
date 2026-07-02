@@ -32,6 +32,7 @@ import logging
 
 import pytest
 
+from shipit.agent import backend as agent_backend
 from shipit.review import service
 from shipit.review.backends.base import BackendError
 from shipit.review.diff import ReviewView, review_view
@@ -80,9 +81,9 @@ def _stub_pipeline(monkeypatch):
     )
     posted: dict = {}
 
-    def fake_post_review(review, ctx, *, agent_name, event, dry_run, as_app):
+    def fake_post_review(review, ctx, *, backend, event, dry_run, as_app):
         posted["called"] = True
-        posted["agent"] = agent_name
+        posted["agent"] = backend.funnel_agent
         posted["review"] = review
         posted["event"] = event
         return {"id": 99}
@@ -129,7 +130,7 @@ def test_start_detached_opens_inprogress_then_spawns(monkeypatch):
 
     spawned: list = []
     rc = service.start_detached_review(
-        "codex", 5, spawn=lambda argv, env: spawned.append(list(argv))
+        agent_backend.CODEX, 5, spawn=lambda argv, env: spawned.append(list(argv))
     )
 
     assert rc is True  # in-flight
@@ -168,7 +169,7 @@ def test_start_detached_default_spawn_is_the_exec_seam(monkeypatch):
         lambda argv, **_: spawned.append(list(argv)),
     )
 
-    assert service.start_detached_review("codex", 5) is True
+    assert service.start_detached_review(agent_backend.CODEX, 5) is True
     assert len(spawned) == 1
     assert "_run" in spawned[0]
 
@@ -188,7 +189,7 @@ def test_start_detached_exports_domain_keys_to_the_child_env(monkeypatch):
 
     envs: list[dict] = []
     rc = service.start_detached_review(
-        "codex", 5, spawn=lambda argv, env: envs.append(dict(env))
+        agent_backend.CODEX, 5, spawn=lambda argv, env: envs.append(dict(env))
     )
 
     assert rc is True
@@ -221,7 +222,7 @@ def test_start_detached_still_spawns_when_breadcrumb_create_fails(monkeypatch):
 
     spawned: list = []
     rc = service.start_detached_review(
-        "codex", 5, spawn=lambda argv, env: spawned.append(list(argv))
+        agent_backend.CODEX, 5, spawn=lambda argv, env: spawned.append(list(argv))
     )
 
     assert rc is True
@@ -294,7 +295,7 @@ def test_start_detached_closes_run_when_spawn_fails(monkeypatch):
         raise OSError("cannot fork")
 
     with pytest.raises(OSError, match="cannot fork"):
-        service.start_detached_review("codex", 5, spawn=boom_spawn)
+        service.start_detached_review(agent_backend.CODEX, 5, spawn=boom_spawn)
 
     # The parent opened the run (POST) and then closed it as failed (terminal
     # PATCH on the SAME run) — no dangling in_progress.
@@ -336,7 +337,7 @@ def test_start_detached_spawn_failure_with_no_run_just_reraises(monkeypatch):
         raise OSError("cannot fork")
 
     with pytest.raises(OSError, match="cannot fork"):
-        service.start_detached_review("codex", 5, spawn=boom_spawn)
+        service.start_detached_review(agent_backend.CODEX, 5, spawn=boom_spawn)
 
     # No run was opened, so no terminal PATCH was attempted.
     assert not [c for c in calls if c["method"] == "PATCH"]
@@ -348,7 +349,9 @@ def test_run_detached_closes_passed_run_without_creating(monkeypatch, _stub_pipe
     generates + posts."""
     calls = _fake_checkrun_boundary(monkeypatch)
 
-    result = service.run_detached_review("codex", 5, repo="owner/repo", run_id=555)
+    result = service.run_detached_review(
+        agent_backend.CODEX, 5, repo="owner/repo", run_id=555
+    )
 
     assert not [c for c in calls if c["method"] == "POST"]  # child never creates
     patches = [c for c in calls if c["method"] == "PATCH"]
@@ -371,7 +374,7 @@ def test_split_parent_creates_child_closes_one_run(monkeypatch, _stub_pipeline):
     parent_calls = _fake_checkrun_boundary(monkeypatch)
     spawned: list = []
     service.start_detached_review(
-        "codex", 5, spawn=lambda argv, env: spawned.append(list(argv))
+        agent_backend.CODEX, 5, spawn=lambda argv, env: spawned.append(list(argv))
     )
     argv = spawned[0]
     run_id = int(argv[argv.index("--run-id") + 1])
@@ -380,7 +383,9 @@ def test_split_parent_creates_child_closes_one_run(monkeypatch, _stub_pipeline):
 
     # Child: hand it that run id; it closes the SAME run and creates none.
     child_calls = _fake_checkrun_boundary(monkeypatch)
-    service.run_detached_review("codex", 5, repo="owner/repo", run_id=run_id)
+    service.run_detached_review(
+        agent_backend.CODEX, 5, repo="owner/repo", run_id=run_id
+    )
     assert not [c for c in child_calls if c["method"] == "POST"]
     patches = [c for c in child_calls if c["method"] == "PATCH"]
     assert len(patches) == 1
@@ -409,7 +414,9 @@ def test_run_detached_empty_transitions_to_failure_with_empty_reason(
     monkeypatch.setattr(service, "generate_review", _empty)
 
     with pytest.raises(BackendError):
-        service.run_detached_review("codex", 5, repo="owner/repo", run_id=555)
+        service.run_detached_review(
+            agent_backend.CODEX, 5, repo="owner/repo", run_id=555
+        )
 
     assert not [c for c in calls if c["method"] == "POST"]  # child never creates
     patch = next(c for c in calls if c["method"] == "PATCH")
@@ -432,7 +439,9 @@ def test_run_detached_backend_error_transitions_to_failure(monkeypatch, _stub_pi
     monkeypatch.setattr(service, "generate_review", _boom)
 
     with pytest.raises(BackendUnavailable):
-        service.run_detached_review("codex", 5, repo="owner/repo", run_id=555)
+        service.run_detached_review(
+            agent_backend.CODEX, 5, repo="owner/repo", run_id=555
+        )
 
     assert not [c for c in calls if c["method"] == "POST"]  # child never creates
     patches = [c for c in calls if c["method"] == "PATCH"]
@@ -461,7 +470,9 @@ def test_run_detached_timeout_marker_transitions_to_timed_out(
     monkeypatch.setattr(service, "generate_review", _timed)
 
     with pytest.raises(BackendError):
-        service.run_detached_review("codex", 5, repo="owner/repo", run_id=555)
+        service.run_detached_review(
+            agent_backend.CODEX, 5, repo="owner/repo", run_id=555
+        )
 
     assert not [c for c in calls if c["method"] == "POST"]  # child never creates
     patch = next(c for c in calls if c["method"] == "PATCH")
@@ -491,7 +502,9 @@ def test_run_detached_structured_timeout_flag_transitions_to_timed_out(
     monkeypatch.setattr(service, "generate_review", _timed)
 
     with pytest.raises(BackendError):
-        service.run_detached_review("agy", 5, repo="owner/repo", run_id=555)
+        service.run_detached_review(
+            agent_backend.ANTIGRAVITY, 5, repo="owner/repo", run_id=555
+        )
 
     assert not [c for c in calls if c["method"] == "POST"]  # child never creates
     patch = next(c for c in calls if c["method"] == "PATCH")
@@ -522,7 +535,9 @@ def test_run_detached_salvages_unparseable_content_as_comment(
     monkeypatch.setattr(service, "generate_review", _unparseable)
 
     with pytest.raises(BackendError):
-        service.run_detached_review("agy", 5, repo="owner/repo", run_id=555)
+        service.run_detached_review(
+            agent_backend.ANTIGRAVITY, 5, repo="owner/repo", run_id=555
+        )
 
     # (a) the salvage comment was posted as a COMMENT carrying the raw + a marker.
     assert _stub_pipeline["called"] is True
@@ -550,7 +565,9 @@ def test_run_detached_empty_stdout_does_not_salvage(monkeypatch, _stub_pipeline)
     monkeypatch.setattr(service, "generate_review", _empty)
 
     with pytest.raises(BackendError):
-        service.run_detached_review("agy", 5, repo="owner/repo", run_id=555)
+        service.run_detached_review(
+            agent_backend.ANTIGRAVITY, 5, repo="owner/repo", run_id=555
+        )
 
     assert _stub_pipeline.get("called") is not True  # no salvage post
     patch = next(c for c in calls if c["method"] == "PATCH")
@@ -577,7 +594,9 @@ def test_run_detached_salvages_timeout_content_but_stays_timed_out(
     monkeypatch.setattr(service, "generate_review", _timed)
 
     with pytest.raises(BackendError):
-        service.run_detached_review("agy", 5, repo="owner/repo", run_id=555)
+        service.run_detached_review(
+            agent_backend.ANTIGRAVITY, 5, repo="owner/repo", run_id=555
+        )
 
     assert _stub_pipeline["called"] is True  # content salvaged
     patch = next(c for c in calls if c["method"] == "PATCH")
@@ -602,7 +621,9 @@ def test_run_detached_funnel_summary_carries_snippet_not_full_raw(
     monkeypatch.setattr(service, "generate_review", _unparseable)
 
     with pytest.raises(BackendError):
-        service.run_detached_review("agy", 5, repo="owner/repo", run_id=555)
+        service.run_detached_review(
+            agent_backend.ANTIGRAVITY, 5, repo="owner/repo", run_id=555
+        )
 
     patch = next(c for c in calls if c["method"] == "PATCH")
     summary = patch["body"]["output"]["summary"]
@@ -661,7 +682,9 @@ def test_run_detached_salvage_post_failure_does_not_mask_outcome(
     monkeypatch.setattr(service.post, "post_review", boom_post)
 
     with pytest.raises(BackendError):  # original error still propagates
-        service.run_detached_review("agy", 5, repo="owner/repo", run_id=555)
+        service.run_detached_review(
+            agent_backend.ANTIGRAVITY, 5, repo="owner/repo", run_id=555
+        )
 
     patch = next(c for c in calls if c["method"] == "PATCH")
     assert patch["body"]["conclusion"] in {"failure", "neutral"}  # degraded recorded
@@ -694,7 +717,9 @@ def test_run_detached_transition_failure_does_not_mask_success(
     monkeypatch.setattr(service.checkrun.gh, "rest", fake_rest)
 
     with caplog.at_level(logging.WARNING, logger="shipit.review"):
-        result = service.run_detached_review("codex", 5, repo="owner/repo", run_id=555)
+        result = service.run_detached_review(
+            agent_backend.CODEX, 5, repo="owner/repo", run_id=555
+        )
 
     assert _stub_pipeline["called"] is True
     assert result["post"] == {"id": 99}
@@ -722,7 +747,9 @@ def test_run_detached_transition_failure_on_error_path_still_raises(
     monkeypatch.setattr(service, "generate_review", _empty)
 
     with pytest.raises(BackendError):
-        service.run_detached_review("codex", 5, repo="owner/repo", run_id=555)
+        service.run_detached_review(
+            agent_backend.CODEX, 5, repo="owner/repo", run_id=555
+        )
 
 
 def test_run_detached_no_transition_when_no_run_id(monkeypatch, _stub_pipeline):
@@ -731,7 +758,9 @@ def test_run_detached_no_transition_when_no_run_id(monkeypatch, _stub_pipeline):
     still posts."""
     calls = _fake_checkrun_boundary(monkeypatch)
 
-    result = service.run_detached_review("codex", 5, repo="owner/repo", run_id=None)
+    result = service.run_detached_review(
+        agent_backend.CODEX, 5, repo="owner/repo", run_id=None
+    )
 
     assert not [c for c in calls if c["method"] == "PATCH"]
     assert _stub_pipeline["called"] is True
@@ -752,7 +781,9 @@ def test_run_detached_close_never_leaks_token(monkeypatch, _stub_pipeline, caplo
     monkeypatch.setattr(service.checkrun.gh, "rest", fake_rest)
 
     with caplog.at_level(logging.DEBUG, logger="shipit.review"):
-        service.run_detached_review("codex", 5, repo="owner/repo", run_id=555)
+        service.run_detached_review(
+            agent_backend.CODEX, 5, repo="owner/repo", run_id=555
+        )
 
     full = "\n".join(r.getMessage() for r in caplog.records)
     assert secret not in full
@@ -803,7 +834,7 @@ def test_detached_child_records_reach_the_file_sink(
     attached = logsetup.configure_logging_for_slug("owner/repo", base_dir=tmp_path)
     assert attached is True
 
-    service.run_detached_review("codex", 5, repo="owner/repo", run_id=555)
+    service.run_detached_review(agent_backend.CODEX, 5, repo="owner/repo", run_id=555)
 
     for handler in logging.getLogger("shipit").handlers:
         handler.flush()
@@ -846,7 +877,9 @@ def test_run_detached_resolve_failure_closes_run_failed_and_reraises(monkeypatch
     monkeypatch.setattr(service, "resolve_pr", boom_resolve)
 
     with pytest.raises(ExecError, match="could not fetch PR diff"):
-        service.run_detached_review("codex", 5, repo="owner/repo", run_id=555)
+        service.run_detached_review(
+            agent_backend.CODEX, 5, repo="owner/repo", run_id=555
+        )
 
     assert not [c for c in calls if c["method"] == "POST"]  # child never creates
     patches = [c for c in calls if c["method"] == "PATCH"]
@@ -868,7 +901,9 @@ def test_run_detached_resolve_failure_with_no_run_id_just_reraises(monkeypatch):
     monkeypatch.setattr(service, "resolve_pr", boom_resolve)
 
     with pytest.raises(ExecError):
-        service.run_detached_review("codex", 5, repo="owner/repo", run_id=None)
+        service.run_detached_review(
+            agent_backend.CODEX, 5, repo="owner/repo", run_id=None
+        )
 
     assert not [c for c in calls if c["method"] == "PATCH"]
 
@@ -893,7 +928,9 @@ def test_run_detached_resolve_guard_does_not_overwrite_timeout_close(
     monkeypatch.setattr(service, "generate_review", _timed)
 
     with pytest.raises(BackendError):
-        service.run_detached_review("codex", 5, repo="owner/repo", run_id=555)
+        service.run_detached_review(
+            agent_backend.CODEX, 5, repo="owner/repo", run_id=555
+        )
 
     patches = [c for c in calls if c["method"] == "PATCH"]
     assert len(patches) == 1  # closed exactly once...
@@ -914,7 +951,9 @@ def test_run_detached_resolve_guard_does_not_overwrite_empty_close(
     monkeypatch.setattr(service, "generate_review", _empty)
 
     with pytest.raises(BackendError):
-        service.run_detached_review("codex", 5, repo="owner/repo", run_id=555)
+        service.run_detached_review(
+            agent_backend.CODEX, 5, repo="owner/repo", run_id=555
+        )
 
     patches = [c for c in calls if c["method"] == "PATCH"]
     assert len(patches) == 1
@@ -942,7 +981,7 @@ def test_start_detached_reconciles_against_existing_inflight_run(monkeypatch):
 
     spawned: list = []
     rc = service.start_detached_review(
-        "codex",
+        agent_backend.CODEX,
         5,
         spawn=lambda argv, env: spawned.append(list(argv)),
         find=lambda agent, repo, head_sha: 999,
@@ -965,7 +1004,7 @@ def test_start_detached_no_inflight_run_creates_and_spawns(monkeypatch):
 
     spawned: list = []
     rc = service.start_detached_review(
-        "codex",
+        agent_backend.CODEX,
         5,
         spawn=lambda argv, env: spawned.append(list(argv)),
         find=lambda agent, repo, head_sha: None,
@@ -996,7 +1035,7 @@ def test_start_detached_reconcile_lookup_failure_proceeds_to_spawn(monkeypatch, 
     spawned: list = []
     with caplog.at_level(logging.WARNING, logger="shipit.review"):
         rc = service.start_detached_review(
-            "codex",
+            agent_backend.CODEX,
             5,
             spawn=lambda argv, env: spawned.append(list(argv)),
             find=boom_find,
@@ -1018,7 +1057,7 @@ def test_unknown_outcome_falls_back_to_failed_without_crashing(monkeypatch, capl
 
     with caplog.at_level(logging.WARNING, logger="shipit.review"):
         service._close_funnel_breadcrumb(
-            "codex", "owner/repo", 555, outcome="bogus-outcome"
+            agent_backend.CODEX, "owner/repo", 555, outcome="bogus-outcome"
         )
 
     patches = [c for c in calls if c["method"] == "PATCH"]

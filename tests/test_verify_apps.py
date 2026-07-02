@@ -13,6 +13,7 @@ to cover the three liveness shapes the rollout blocks on:
 from __future__ import annotations
 
 from shipit import cli
+from shipit.agent import backend as agent_backend
 from shipit.review import ghauth
 from shipit.verbs import verify_apps
 from shipit.execrun import ExecError
@@ -26,17 +27,17 @@ def _granted(checks: str | None) -> dict:
     return {"token": "ghs_tok", "permissions": perms}
 
 
-def _mint_live(agent, repo):
+def _mint_live(backend, repo):
     return _granted("write")
 
 
-def _mint_missing_checks(agent, repo):
+def _mint_missing_checks(backend, repo):
     return _granted("read")
 
 
-def _mint_not_installed(agent, repo):
+def _mint_not_installed(backend, repo):
     raise ghauth.ReviewAuthError(
-        f"The {agent!r} review app is not installed on {repo}'s owner."
+        f"The {backend.funnel_agent!r} review app is not installed on {repo}'s owner."
     )
 
 
@@ -47,7 +48,7 @@ def _mint_not_installed(agent, repo):
 
 def test_app_live_when_installed_with_checks_write():
     """Installed + token carries `checks: write` -> live, no instruct reason."""
-    result = verify_apps.verify_app("codex", "owner/repo", mint=_mint_live)
+    result = verify_apps.verify_app(agent_backend.CODEX, "owner/repo", mint=_mint_live)
     assert result.live is True
     assert result.reason == ""
     assert result.app == "adr-codex-review"
@@ -56,7 +57,9 @@ def test_app_live_when_installed_with_checks_write():
 
 def test_app_not_live_when_not_installed():
     """A mint ReviewAuthError (App not installed) -> not live, instruct to install."""
-    result = verify_apps.verify_app("agy", "owner/repo", mint=_mint_not_installed)
+    result = verify_apps.verify_app(
+        agent_backend.ANTIGRAVITY, "owner/repo", mint=_mint_not_installed
+    )
     assert result.live is False
     assert result.app == "adr-agy-review"
     assert "not installed" in result.reason
@@ -65,7 +68,9 @@ def test_app_not_live_when_not_installed():
 
 def test_app_not_live_when_missing_checks_write():
     """Installed but the token lacks `checks: write` -> not live, instruct to consent."""
-    result = verify_apps.verify_app("codex", "owner/repo", mint=_mint_missing_checks)
+    result = verify_apps.verify_app(
+        agent_backend.CODEX, "owner/repo", mint=_mint_missing_checks
+    )
     assert result.live is False
     assert "checks: write" in result.reason
     # Names the OBSERVED scope so a human sees what's actually granted.
@@ -76,7 +81,7 @@ def test_app_not_live_when_missing_checks_write():
 def test_app_not_live_when_checks_permission_absent():
     """No `checks` key at all (only the original scopes) -> not live, instruct."""
     result = verify_apps.verify_app(
-        "codex", "owner/repo", mint=lambda a, r: _granted(None)
+        agent_backend.CODEX, "owner/repo", mint=lambda b, r: _granted(None)
     )
     assert result.live is False
     assert "checks: write" in result.reason
@@ -154,9 +159,11 @@ def test_run_defaults_repo_to_current_checkout(capsys, monkeypatch):
 # --------------------------------------------------------------------------
 
 
-def test_known_agents_are_the_app_auth_agents():
-    """The probed set is exactly the agents ghauth holds App creds for."""
-    assert verify_apps.known_agents() == sorted(ghauth._DOPPLER_KEYS)
+def test_known_agents_are_the_funnel_backends():
+    """The probed set is exactly the registry's funnel App reviewers (ADR-0025)."""
+    assert verify_apps.known_agents() == sorted(
+        b.funnel_agent for b in agent_backend.funnel_backends()
+    )
 
 
 def test_cli_help_lists_verify_apps(capsys):

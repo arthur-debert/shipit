@@ -53,6 +53,8 @@ import sys
 from dataclasses import dataclass, field
 
 from .. import execrun, gh
+from ..agent import backend as _agent_backend
+from ..agent.backend import Backend
 from . import checkrun, ghauth
 
 logger = logging.getLogger("shipit.review")
@@ -88,10 +90,12 @@ class Report:
         return bool(self.checks) and all(c.passed for c in self.checks)
 
 
-def verify(agent: str, repo: str, pr: int, *, conclusion: str = "success") -> Report:
+def verify(
+    backend: Backend, repo: str, pr: int, *, conclusion: str = "success"
+) -> Report:
     """Drive the full OBS02 funnel lifecycle on ``repo``#``pr`` and assert it.
 
-    Mints the ``agent`` App installation token (asserting its granted
+    Mints the ``backend`` App installation token (asserting its granted
     ``permissions`` include ``checks: write``), resolves the canary PR's head sha,
     opens the kickoff check run via :func:`shipit.review.checkrun.create` (asserting
     a 201 — a run id came back, not a 403 — and that the run reads back
@@ -115,7 +119,7 @@ def verify(agent: str, repo: str, pr: int, *, conclusion: str = "success") -> Re
     #    failure (missing PyJWT, app not installed, API error) is recorded, not
     #    raised, so the harness still reports — there is nothing further to drive.
     try:
-        auth = ghauth.installation_auth(agent, repo)
+        auth = ghauth.installation_auth(backend, repo)
     except ghauth.ReviewAuthError as exc:
         report.record(
             "installation token granted checks: write",
@@ -152,7 +156,7 @@ def verify(agent: str, repo: str, pr: int, *, conclusion: str = "success") -> Re
     #    both caught here and recorded as the failed "201, not 403" check rather
     #    than crashing the harness.
     try:
-        run_id = checkrun.create(agent, repo, head_sha)
+        run_id = checkrun.create(backend, repo, head_sha)
     except (execrun.ExecError, ghauth.ReviewAuthError) as exc:
         report.record(
             "POST /repos/<repo>/check-runs returned 201 (not 403)",
@@ -184,14 +188,14 @@ def verify(agent: str, repo: str, pr: int, *, conclusion: str = "success") -> Re
     # 3. Terminal transition — drive WS02's real code on the SAME run id. A
     #    transition (or read-back) boundary error is recorded, not raised, so the
     #    harness still prints a structured FAIL report.
-    title = f"OBS02 funnel verify ({agent}-local)"
+    title = f"OBS02 funnel verify ({backend.check_run_name})"
     summary = (
         "Lifecycle verification harness drove this run to its terminal "
         f"conclusion ({conclusion})."
     )
     try:
         checkrun.transition(
-            agent, repo, run_id, conclusion=conclusion, title=title, summary=summary
+            backend, repo, run_id, conclusion=conclusion, title=title, summary=summary
         )
     except (execrun.ExecError, ghauth.ReviewAuthError) as exc:
         report.record(
@@ -306,7 +310,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--agent",
         default="codex",
-        choices=sorted(ghauth._DOPPLER_KEYS),
+        choices=sorted(b.funnel_agent or "" for b in _agent_backend.funnel_backends()),
         help="review agent whose App authors the run (default: codex).",
     )
     parser.add_argument(
@@ -324,7 +328,10 @@ def main(argv: list[str] | None = None) -> int:
             "hits LIVE GitHub and is never run by the test checks."
         )
 
-    report = verify(args.agent, args.repo, args.pr, conclusion=args.conclusion)
+    # The --agent value is the funnel-agent alias; resolve it back to the ONE
+    # registry identity (the choices above guarantee the lookup succeeds).
+    backend = _agent_backend.by_funnel_agent(args.agent)
+    report = verify(backend, args.repo, args.pr, conclusion=args.conclusion)
     print(format_report(report, agent=args.agent, repo=args.repo, pr=args.pr))
     return 0 if report.passed else 1
 

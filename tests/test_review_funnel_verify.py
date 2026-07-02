@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import pytest
 
+from shipit.agent import backend as agent_backend
 from shipit.review import funnel_verify
 from shipit.execrun import ExecError
 
@@ -92,7 +93,7 @@ def healthy(monkeypatch):
 def test_verify_passes_on_a_healthy_boundary(healthy):
     """The full lifecycle passes: every recorded check is green and the report
     verdict is PASS."""
-    report = funnel_verify.verify("codex", "owner/repo", 7)
+    report = funnel_verify.verify(agent_backend.CODEX, "owner/repo", 7)
 
     assert report.passed is True
     assert all(c.passed for c in report.checks)
@@ -107,7 +108,7 @@ def test_verify_passes_on_a_healthy_boundary(healthy):
 def test_verify_drives_one_create_then_one_patch_on_the_same_run(healthy):
     """Exactly one check-run create (201) and one terminal PATCH, both on the SAME
     run id — the harness proves WS01+WS02 share one run, never a second."""
-    report = funnel_verify.verify("codex", "owner/repo", 7)
+    report = funnel_verify.verify(agent_backend.CODEX, "owner/repo", 7)
 
     posts = [c for c in healthy.calls if c["method"] == "POST"]
     patches = [c for c in healthy.calls if c["method"] == "PATCH"]
@@ -121,7 +122,7 @@ def test_verify_drives_one_create_then_one_patch_on_the_same_run(healthy):
 
 def test_verify_asserts_started_at_and_completed_at(healthy):
     """The harness checks both load-bearing timestamps land on the run."""
-    report = funnel_verify.verify("codex", "owner/repo", 7)
+    report = funnel_verify.verify(agent_backend.CODEX, "owner/repo", 7)
     by_name = {c.name: c for c in report.checks}
     assert by_name["kickoff run has a started_at"].passed
     assert by_name["run has a completed_at"].passed
@@ -129,7 +130,9 @@ def test_verify_asserts_started_at_and_completed_at(healthy):
 
 def test_verify_drives_the_requested_conclusion(healthy):
     """A non-default conclusion is driven onto the run and asserted."""
-    report = funnel_verify.verify("agy", "owner/repo", 7, conclusion="timed_out")
+    report = funnel_verify.verify(
+        agent_backend.ANTIGRAVITY, "owner/repo", 7, conclusion="timed_out"
+    )
     assert report.passed is True
     patches = [c for c in healthy.calls if c["method"] == "PATCH"]
     assert patches[0]["body"]["conclusion"] == "timed_out"
@@ -150,7 +153,7 @@ def test_verify_fails_when_token_lacks_checks_write(monkeypatch):
         funnel_verify.ghauth, "installation_token", lambda agent, repo: "ghs_tok"
     )
 
-    report = funnel_verify.verify("codex", "owner/repo", 7)
+    report = funnel_verify.verify(agent_backend.CODEX, "owner/repo", 7)
 
     assert report.passed is False
     scope = next(c for c in report.checks if "checks: write" in c.name)
@@ -176,7 +179,7 @@ def test_verify_records_403_on_create_and_stops(monkeypatch):
         funnel_verify.ghauth, "installation_token", lambda agent, repo: "ghs_tok"
     )
 
-    report = funnel_verify.verify("codex", "owner/repo", 7)
+    report = funnel_verify.verify(agent_backend.CODEX, "owner/repo", 7)
 
     assert report.passed is False
     create_check = next(c for c in report.checks if "201" in c.name)
@@ -197,7 +200,7 @@ def test_verify_records_auth_failure_without_raising(monkeypatch):
 
     monkeypatch.setattr(funnel_verify.ghauth, "installation_auth", boom)
 
-    report = funnel_verify.verify("codex", "owner/repo", 7)
+    report = funnel_verify.verify(agent_backend.CODEX, "owner/repo", 7)
 
     assert report.passed is False
     scope = next(c for c in report.checks if "checks: write" in c.name)
@@ -221,7 +224,7 @@ def test_verify_records_head_sha_gh_error_without_raising(monkeypatch):
 
     monkeypatch.setattr(funnel_verify.gh, "rest", rest)
 
-    report = funnel_verify.verify("codex", "owner/repo", 7)
+    report = funnel_verify.verify(agent_backend.CODEX, "owner/repo", 7)
 
     assert report.passed is False
     head = next(c for c in report.checks if "head sha" in c.name)
@@ -249,7 +252,7 @@ def test_verify_records_transition_failure_without_raising(monkeypatch):
         funnel_verify.ghauth, "installation_token", lambda agent, repo: "ghs_tok"
     )
 
-    report = funnel_verify.verify("codex", "owner/repo", 7)
+    report = funnel_verify.verify(agent_backend.CODEX, "owner/repo", 7)
 
     assert report.passed is False
     concl = next(c for c in report.checks if "conclusion is success" in c.name)
@@ -277,7 +280,7 @@ def test_verify_fails_when_pr_head_cannot_be_resolved(monkeypatch):
         funnel_verify.ghauth, "installation_token", lambda agent, repo: "ghs_tok"
     )
 
-    report = funnel_verify.verify("codex", "owner/repo", 7)
+    report = funnel_verify.verify(agent_backend.CODEX, "owner/repo", 7)
 
     assert report.passed is False
     assert any("head sha" in c.name and not c.passed for c in report.checks)
@@ -285,7 +288,7 @@ def test_verify_fails_when_pr_head_cannot_be_resolved(monkeypatch):
 
 def test_format_report_shows_verdict_and_each_check(healthy):
     """The console report carries the PASS verdict and one line per check."""
-    report = funnel_verify.verify("codex", "owner/repo", 7)
+    report = funnel_verify.verify(agent_backend.CODEX, "owner/repo", 7)
     text = funnel_verify.format_report(report, agent="codex", repo="owner/repo", pr=7)
     assert "PASS" in text
     assert "checks: write" in text

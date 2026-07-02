@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import pytest
 
+from shipit.agent import backend as agent_backend
 from shipit.review import producer
 from shipit.review.backends import BackendError, BackendUnavailable
 from shipit.review.diff import ReviewView, review_view
@@ -65,7 +66,9 @@ def _faked(monkeypatch):
 
 
 def test_codex_launches_in_the_tree_and_captures_the_review(_faked):
-    review = producer.run_tree_review("codex", _ctx(), launcher=_faked["launcher"])
+    review = producer.run_tree_review(
+        agent_backend.CODEX, _ctx(), launcher=_faked["launcher"]
+    )
 
     assert review["summary"]["status"] == "COMMENT"  # captured + parsed from stdout
     cmd = _faked["cmd"]
@@ -84,7 +87,11 @@ def test_codex_launches_in_the_tree_and_captures_the_review(_faked):
 
 def test_agy_maps_to_the_antigravity_adapter_with_prose_schema(_faked):
     review = producer.run_tree_review(
-        "agy", _ctx(), model="pro", timeout="900s", launcher=_faked["launcher"]
+        agent_backend.ANTIGRAVITY,
+        _ctx(),
+        model="pro",
+        timeout="900s",
+        launcher=_faked["launcher"],
     )
 
     assert review["summary"]["status"] == "COMMENT"
@@ -105,7 +112,7 @@ def test_nonzero_exit_is_a_hard_failure(_faked):
         return LaunchResult(returncode=1, stdout="", stderr="codex: auth error")
 
     with pytest.raises(RuntimeError) as exc:
-        producer.run_tree_review("codex", _ctx(), launcher=launcher)
+        producer.run_tree_review(agent_backend.CODEX, _ctx(), launcher=launcher)
     # Not a BackendError (which would settle empty/timed_out) — a plain failure → failed.
     assert not isinstance(exc.value, BackendError)
     assert "auth error" in str(exc.value)
@@ -122,7 +129,7 @@ def test_agy_timeout_marker_settles_as_timeout_not_failure(_faked):
         )
 
     with pytest.raises(BackendError) as exc:
-        producer.run_tree_review("agy", _ctx(), launcher=launcher)
+        producer.run_tree_review(agent_backend.ANTIGRAVITY, _ctx(), launcher=launcher)
     assert "timed out" in str(exc.value).lower()
 
 
@@ -141,7 +148,7 @@ def test_nonzero_exit_with_timeout_marker_in_stderr_is_structurally_timed_out(_f
         )
 
     with pytest.raises(BackendError) as exc:
-        producer.run_tree_review("agy", _ctx(), launcher=launcher)
+        producer.run_tree_review(agent_backend.ANTIGRAVITY, _ctx(), launcher=launcher)
     assert exc.value.timed_out is True  # structured -> service maps to timed_out
     # the marker is NOT in the (paraphrased) message — a string match would have failed:
     from shipit.review.backends.base import _TIMEOUT_MARKER
@@ -156,7 +163,7 @@ def test_unparseable_output_raises_backend_error_with_raw_for_salvage(_faked):
         return LaunchResult(returncode=0, stdout=raw, stderr="")
 
     with pytest.raises(BackendError) as exc:
-        producer.run_tree_review("codex", _ctx(), launcher=launcher)
+        producer.run_tree_review(agent_backend.CODEX, _ctx(), launcher=launcher)
     assert exc.value.raw == raw  # the #76 salvage still gets the raw content
     # A non-timeout unparseable result is NOT a timeout -> the service settles `empty`.
     assert exc.value.timed_out is False
@@ -172,7 +179,9 @@ def test_dry_run_prints_argv_and_never_launches_or_clones(monkeypatch, capsys):
         launched.append(1)
         return LaunchResult(returncode=0, stdout=_VALID, stderr="")
 
-    review = producer.run_tree_review("codex", _ctx(), dry_run=True, launcher=launcher)
+    review = producer.run_tree_review(
+        agent_backend.CODEX, _ctx(), dry_run=True, launcher=launcher
+    )
 
     assert review["summary"]["overall_feedback"] == "(dry-run)"
     assert not cloned  # no Tree cloned
@@ -185,14 +194,16 @@ def test_dry_run_prints_argv_and_never_launches_or_clones(monkeypatch, capsys):
 def test_missing_cli_fails_loud(monkeypatch):
     monkeypatch.setattr(producer.shutil, "which", lambda binary: None)
     with pytest.raises(BackendUnavailable):
-        producer.run_tree_review("codex", _ctx(), launcher=lambda *a, **k: None)
+        producer.run_tree_review(
+            agent_backend.CODEX, _ctx(), launcher=lambda *a, **k: None
+        )
 
 
 def test_missing_head_branch_is_a_clean_failure(_faked):
     ctx = _ctx()
     ctx.head_ref = ""
     with pytest.raises(RuntimeError) as exc:
-        producer.run_tree_review("codex", ctx, launcher=_faked["launcher"])
+        producer.run_tree_review(agent_backend.CODEX, ctx, launcher=_faked["launcher"])
     assert "head branch" in str(exc.value)
 
 

@@ -43,6 +43,7 @@ import tempfile
 from dataclasses import dataclass
 
 from .. import gh
+from ..agent.backend import Backend
 from ..spawn import launch
 from ..spawn.backends.antigravity import AntigravityAdapter
 from ..spawn.backends.base import BackendAdapter
@@ -65,17 +66,18 @@ _REVIEWER_ROLE = "reviewer"
 
 @dataclass(frozen=True)
 class _BackendSpec:
-    """How one funnel agent maps onto the shared spawn launch seam.
+    """How one funnel backend maps onto the shared spawn launch seam.
 
     ``adapter_factory`` builds the spawn ``BackendAdapter`` carrying the model (and,
     for agy, the timeout) — the SAME adapter the spawn surface launches a reviewer
-    through, so there is one definition of the launch. ``binary`` is the CLI that must
-    be on PATH (preflight). ``schema_inline`` describes the schema in prose in the
-    prompt for a backend with no native ``--output-schema`` (agy); ``native_schema``
-    backends (codex) get the schema as a temp file passed to ``build_command``.
+    through, so there is one definition of the launch. The CLI binary that must be
+    on PATH (preflight) is NOT here — it is the :class:`Backend` identity's
+    ``binary`` alias (ADR-0025), read off the registry entry. ``schema_inline``
+    describes the schema in prose in the prompt for a backend with no native
+    ``--output-schema`` (agy); ``native_schema`` backends (codex) get the schema as
+    a temp file passed to ``build_command``.
     """
 
-    binary: str
     schema_inline: bool
     native_schema: bool
     adapter_factory: object  # Callable[[str, str], BackendAdapter]
@@ -92,19 +94,19 @@ def _agy_adapter(model: str, timeout: str) -> BackendAdapter:
     return AntigravityAdapter(model=model, timeout=timeout)
 
 
-#: funnel agent → how it launches as a reviewer. ``codex`` ≡ the ``codex`` spawn
-#: adapter (native ``--output-schema``); ``agy`` ≡ the ``antigravity`` spawn adapter
-#: (no native schema → prose schema in the prompt). This is the single place the two
-#: funnel agents are mapped onto the spawn seam.
+#: canonical backend name → how it launches as a reviewer. ``codex`` ≡ the ``codex``
+#: spawn adapter (native ``--output-schema``); ``antigravity`` ≡ the ``antigravity``
+#: spawn adapter (no native schema → prose schema in the prompt). Keyed by the
+#: :class:`Backend` identity's canonical name, so the funnel and launch axes meet on
+#: the ONE registry identity (ADR-0025) — this is the single place the funnel
+#: backends are mapped onto the spawn seam.
 _SPECS: dict[str, _BackendSpec] = {
     "codex": _BackendSpec(
-        binary="codex",
         schema_inline=False,
         native_schema=True,
         adapter_factory=_codex_adapter,
     ),
-    "agy": _BackendSpec(
-        binary="agy",
+    "antigravity": _BackendSpec(
         schema_inline=True,
         native_schema=False,
         adapter_factory=_agy_adapter,
@@ -113,7 +115,7 @@ _SPECS: dict[str, _BackendSpec] = {
 
 
 def run_tree_review(
-    agent: str,
+    backend: Backend,
     ctx,
     *,
     model: str = "pro",
@@ -122,7 +124,8 @@ def run_tree_review(
     dry_run: bool = False,
     launcher: launch.Runner | None = None,
 ) -> dict:
-    """Launch ``agent`` as a reviewer in a read-only Tree and CAPTURE its review dict.
+    """Launch ``backend`` as a reviewer in a read-only Tree and CAPTURE its review
+    dict.
 
     Provisions the shared read-only Tree on ``ctx``'s PR head, launches the backend
     through its spawn read-only posture with a task that fetches the diff via
@@ -137,12 +140,14 @@ def run_tree_review(
     prints the would-run Tree-launch argv, and returns an empty review — so a dry-run is
     honest (it shows exactly what would run and bills nothing).
     """
-    spec = _SPECS.get(agent)
+    agent = backend.funnel_agent or backend.name
+    spec = _SPECS.get(backend.name)
     if spec is None:
         raise ValueError(
-            f"unknown funnel review agent {agent!r} (known: {', '.join(_SPECS)})"
+            f"unknown funnel review backend {backend.name!r} "
+            f"(known: {', '.join(_SPECS)})"
         )
-    _preflight(agent, spec, dry_run=dry_run)
+    _preflight(backend, dry_run=dry_run)
 
     org, repo_name = _resolve_org_repo(ctx)
     branch = (ctx.head_ref or "").strip()
@@ -261,8 +266,9 @@ def _dry_run(
     }
 
 
-def _preflight(agent: str, spec: _BackendSpec, *, dry_run: bool) -> None:
-    """Verify the agent binary is on PATH; raise :class:`BackendUnavailable` otherwise.
+def _preflight(backend: Backend, *, dry_run: bool) -> None:
+    """Verify the backend's CLI binary (the registry's ``binary`` alias) is on
+    PATH; raise :class:`BackendUnavailable` otherwise.
 
     Skipped in ``dry_run`` (a dry-run only prints the would-run argv; it must work
     without the CLI installed, mirroring the spawn dry-run posture). A missing CLI on a
@@ -271,10 +277,11 @@ def _preflight(agent: str, spec: _BackendSpec, *, dry_run: bool) -> None:
     """
     if dry_run:
         return
-    if shutil.which(spec.binary) is None:
+    if shutil.which(backend.binary) is None:
         raise BackendUnavailable(
-            f"The '{agent}' review backend requires the '{spec.binary}' CLI on your "
-            f"PATH, but it was not found. Install it (and log it in), then re-run."
+            f"The '{backend.funnel_agent or backend.name}' review backend requires "
+            f"the '{backend.binary}' CLI on your PATH, but it was not found. "
+            f"Install it (and log it in), then re-run."
         )
 
 

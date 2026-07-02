@@ -42,6 +42,7 @@ import urllib.request
 
 from .. import secretsrc
 from ..agent import backend as _agent_backend
+from ..agent.backend import Backend
 
 #: Per-request timeout (seconds) for the bearer-JWT urllib calls.
 _HTTP_TIMEOUT = 30
@@ -56,14 +57,6 @@ _API_BASE = "https://api.github.com"
 _JWT_IAT_SKEW = 60
 _JWT_TTL = 540
 
-#: Per-agent Doppler key names for the App PEM + app id — DERIVED from the ONE
-#: agent-backend identity registry (:func:`shipit.agent.backend.funnel_doppler_keys`),
-#: NOT a table duplicated here (ADR-0025: every backend alias, the Doppler key names
-#: included, is defined once and shared by the launch + funnel axes). The agent's review
-#: bot is ``adr-<agent>-review[bot]``; the App credentials are provisioned into Doppler
-#: ``github/prd`` under these keys (pre-work, already done).
-_DOPPLER_KEYS: dict[str, dict[str, str]] = _agent_backend.funnel_doppler_keys()
-
 
 class ReviewAuthError(Exception):
     """App-installation auth failed (missing PyJWT, app not installed, API error,
@@ -73,16 +66,21 @@ class ReviewAuthError(Exception):
     """
 
 
-def _doppler_keys(agent: str) -> dict[str, str]:
-    """The Doppler key names for ``agent``, or raise an actionable error."""
-    keys = _DOPPLER_KEYS.get(agent)
-    if keys is None:
-        known = ", ".join(sorted(_DOPPLER_KEYS))
+def _doppler_keys(backend: Backend) -> dict[str, str]:
+    """The Doppler key names for ``backend`` — READ off the ONE agent-backend
+    identity registry (ADR-0025: the Doppler key names, like every backend alias,
+    are defined once and shared by the launch + funnel axes), never a table
+    duplicated here. Raises an actionable error for a backend with no funnel App
+    (``claude``)."""
+    if not backend.has_funnel_identity or backend.doppler_app_prefix is None:
+        known = ", ".join(
+            sorted(b.funnel_agent or "" for b in _agent_backend.funnel_backends())
+        )
         raise ReviewAuthError(
-            f"No GitHub App credentials are configured for agent {agent!r}. "
+            f"No GitHub App credentials are configured for backend {backend.name!r}. "
             f"Known local-review agents: {known}."
         )
-    return keys
+    return {"pem": backend.doppler_pem_key, "app_id": backend.doppler_app_id_key}
 
 
 def _doppler_get(key: str, *, what: str, agent: str) -> str:
@@ -103,13 +101,15 @@ def _doppler_get(key: str, *, what: str, agent: str) -> str:
     return value
 
 
-def make_app_jwt(agent: str) -> str:
-    """Sign an RS256 app JWT for ``agent`` (``iss = app_id``), valid ~9 minutes.
+def make_app_jwt(backend: Backend) -> str:
+    """Sign an RS256 app JWT for ``backend``'s review App (``iss = app_id``),
+    valid ~9 minutes.
 
-    Sources the agent's app id + private key (PEM) from Doppler via
-    :mod:`shipit.secretsrc` and signs the JWT FROM THE IN-MEMORY PEM STRING with
-    PyJWT — the PEM never touches disk. PyJWT (and its crypto backend) is imported
-    lazily; if it is missing, raises :class:`ReviewAuthError` with the install hint.
+    Sources the backend's app id + private key (PEM) from Doppler (under the key
+    names the identity registry defines) via :mod:`shipit.secretsrc` and signs the
+    JWT FROM THE IN-MEMORY PEM STRING with PyJWT — the PEM never touches disk.
+    PyJWT (and its crypto backend) is imported lazily; if it is missing, raises
+    :class:`ReviewAuthError` with the install hint.
     """
     try:
         import jwt  # noqa: PLC0415 — lazy: optional `review` extra
@@ -120,7 +120,8 @@ def make_app_jwt(agent: str) -> str:
             "(or install shipit with the `review` extra: pip install 'shipit[review]')."
         ) from exc
 
-    keys = _doppler_keys(agent)
+    agent = backend.funnel_agent or backend.name
+    keys = _doppler_keys(backend)
     app_id = _doppler_get(keys["app_id"], what="app id", agent=agent)
     private_key = _doppler_get(keys["pem"], what="private key", agent=agent)
 
@@ -195,14 +196,15 @@ def _api_post(path: str, jwt_token: str) -> object:
     return _api_request(path, jwt_token, method="POST")
 
 
-def installation_id(agent: str, repo: str, *, jwt: str | None = None) -> int:
-    """The app installation id for ``agent`` on ``repo``'s owner.
+def installation_id(backend: Backend, repo: str, *, jwt: str | None = None) -> int:
+    """The app installation id for ``backend``'s review App on ``repo``'s owner.
 
     ``GET /repos/{owner}/{repo}/installation`` with a bearer JWT (minted here if
     ``jwt`` isn't supplied) → ``id``. Raises :class:`ReviewAuthError` with an
     actionable message if the app isn't installed on the repo's owner (404).
     """
-    token = jwt if jwt is not None else make_app_jwt(agent)
+    agent = backend.funnel_agent or backend.name
+    token = jwt if jwt is not None else make_app_jwt(backend)
     try:
         resp = _api_get(f"/repos/{repo}/installation", token)
     except ReviewAuthError as exc:
@@ -219,8 +221,9 @@ def installation_id(agent: str, repo: str, *, jwt: str | None = None) -> int:
     return int(resp["id"])
 
 
-def installation_auth(agent: str, repo: str) -> dict:
-    """Mint a 1-hour installation token for ``agent`` on ``repo`` — full response.
+def installation_auth(backend: Backend, repo: str) -> dict:
+    """Mint a 1-hour installation token for ``backend``'s App on ``repo`` — full
+    response.
 
     The same three hops as :func:`installation_token` (JWT → installation id →
     ``POST /app/installations/{id}/access_tokens``), but returns the WHOLE
@@ -231,10 +234,11 @@ def installation_auth(agent: str, repo: str) -> dict:
     re-grant landed) before it drives a check-run create. Nothing is cached to
     disk. Raises :class:`ReviewAuthError` on any failure.
     """
-    jwt_token = make_app_jwt(agent)
-    inst_id = installation_id(agent, repo, jwt=jwt_token)
+    jwt_token = make_app_jwt(backend)
+    inst_id = installation_id(backend, repo, jwt=jwt_token)
     resp = _api_post(f"/app/installations/{inst_id}/access_tokens", jwt_token)
     if not isinstance(resp, dict) or not resp.get("token"):
+        agent = backend.funnel_agent or backend.name
         raise ReviewAuthError(
             f"Minting an installation token for {agent!r} on {repo} returned no "
             f"'token': {resp!r}"
@@ -242,8 +246,8 @@ def installation_auth(agent: str, repo: str) -> dict:
     return resp
 
 
-def installation_token(agent: str, repo: str) -> str:
-    """Mint a 1-hour installation access token for ``agent`` on ``repo``.
+def installation_token(backend: Backend, repo: str) -> str:
+    """Mint a 1-hour installation access token for ``backend``'s App on ``repo``.
 
     Orchestrates the three hops: JWT → installation id → ``POST
     /app/installations/{id}/access_tokens`` → the ``ghs_…`` token (the ``token``
@@ -251,4 +255,4 @@ def installation_token(agent: str, repo: str) -> str:
     token is returned for the caller to inject as ``gh.rest(..., token=...)``.
     Raises :class:`ReviewAuthError` on any failure.
     """
-    return str(installation_auth(agent, repo)["token"])
+    return str(installation_auth(backend, repo)["token"])
