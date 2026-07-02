@@ -250,57 +250,122 @@ def test_remove_pidfile_is_idempotent(tree):
 
 
 # --------------------------------------------------------------------------
-# The ps-row parser behind the real probe (pure — no live ps needed)
+# The jc-converted ps table behind the real probe (pure — no live ps needed)
 # --------------------------------------------------------------------------
 
+#: The exact table shape `os_probe`'s pinned-header format produces: one header
+#: line (the same names on macOS and Linux — that is what the pinning buys) and
+#: one row whose trailing ARGS column keeps its embedded spaces.
+PS_TABLE = (
+    "  PID  PPID     ELAPSED ARGS\n"
+    " 4242    80 05-18:13:55 node /x/claude-code/cli.js -w a\n"
+)
 
-def test_parse_ps_row_extracts_identity_and_argv():
-    row = "  4242    80 Wed Jul  1 10:23:45 2026 node /x/claude-code/cli.js -w a\n"
-    info = liveness._parse_ps_row(row)
+NOW = 2_000_000_000.0
+
+
+def test_parse_ps_output_extracts_identity_and_argv():
+    info = liveness._parse_ps_output(PS_TABLE, now=NOW)
+    assert info is not None
+    assert (info.pid, info.ppid) == (4242, 80)
+    # create-time is now minus the (numeric, locale-free) elapsed time.
+    assert info.create_time == NOW - (((5 * 24 + 18) * 60 + 13) * 60 + 55)
+    assert info.argv == "node /x/claude-code/cli.js -w a"
+
+
+def test_parse_ps_output_rejects_garbage():
+    assert liveness._parse_ps_output("", now=NOW) is None
+    assert liveness._parse_ps_output("not a ps table", now=NOW) is None
+    # A converted table with no pid/ppid identity is unusable, not a crash.
+    assert liveness._parse_ps_output("garbage here\nmore garbage", now=NOW) is None
+
+
+def test_parse_ps_output_non_dict_row_is_unreadable_not_a_crash(monkeypatch):
+    # jc's documented contract is a list of dicts, but the adapter owns the
+    # row-usability check (#297): a converter quirk yielding a non-dict row
+    # reads as an unreadable table (None), never an AttributeError escaping
+    # the probe's `ProcessInfo | None` contract.
+    monkeypatch.setattr(
+        liveness.jc, "parse", lambda *args, **kwargs: ["PID PPID ELAPSED ARGS"]
+    )
+    assert liveness._parse_ps_output(PS_TABLE, now=NOW) is None
+
+
+def test_parse_ps_output_bad_etime_degrades_to_unverifiable():
+    # Alive but with an unparseable elapsed time -> create_time None (is_live
+    # then reads it as not live), NOT a discarded row.
+    table = "PID PPID ELAPSED ARGS\n4242 80 whenever node /x/claude-code/cli.js\n"
+    info = liveness._parse_ps_output(table, now=NOW)
+    assert info is not None
+    assert info.create_time is None
+
+
+@pytest.mark.parametrize(
+    ("etime", "seconds"),
+    [
+        ("00:07", 7.0),  # mm:ss — a fresh process
+        ("01:02:03", 3_723.0),  # hh:mm:ss
+        ("05-18:13:55", ((5 * 24 + 18) * 60 + 13) * 60 + 55.0),  # dd-hh:mm:ss
+    ],
+)
+def test_elapsed_seconds_reads_every_posix_etime_shape(etime, seconds):
+    assert liveness._elapsed_seconds(etime) == seconds
+
+
+@pytest.mark.parametrize(
+    "etime",
+    [
+        None,
+        "",
+        "55",
+        "1:2:3:4",
+        "aa:bb",
+        "-1-00:00",
+        "1-00:00",  # a day prefix requires a full hh:mm:ss clock
+        "00:60",  # seconds out of range
+        "60:00",  # minutes out of range
+        "05-18:99:00",  # minutes out of range with a day prefix
+    ],
+)
+def test_elapsed_seconds_rejects_non_etime_shapes(etime):
+    assert liveness._elapsed_seconds(etime) is None
+
+
+def test_os_probe_parses_a_faked_ps_through_jc(monkeypatch):
+    # The probe end-to-end over a faked runner: the pinned-header argv goes out
+    # (identical column names everywhere — no locale to pin, nothing to
+    # strptime), the jc-converted row comes back as a ProcessInfo.
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["cmd"] = cmd
+
+        class R:
+            rc = 0
+            stdout = PS_TABLE
+
+        return R()
+
+    monkeypatch.setattr(liveness.execrun, "run", fake_run)
+    info = liveness.os_probe(4242)
+    assert seen["cmd"] == [
+        "ps", "-p", "4242",
+        "-o", "pid=PID", "-o", "ppid=PPID", "-o", "etime=ELAPSED", "-o", "args=ARGS",
+    ]  # fmt: skip
     assert info is not None
     assert (info.pid, info.ppid) == (4242, 80)
     assert info.create_time is not None
     assert "claude" in info.argv
 
 
-def test_parse_ps_row_rejects_garbage():
-    assert liveness._parse_ps_row("") is None
-    assert liveness._parse_ps_row("not a ps row") is None
-
-
-def test_parse_ps_row_bad_lstart_degrades_to_unverifiable():
-    # Alive but with an unparseable start time -> create_time None (is_live then
-    # reads it as not live), NOT a discarded row.
-    row = "4242 80 XXX YYY 2 10:23:45 2026bad node /x/claude-code/cli.js"
-    info = liveness._parse_ps_row(row)
-    assert info is not None
-    assert info.create_time is None
-
-
 def test_os_probe_self_is_alive():
-    # One live smoke test against the real ps: the current test process exists.
+    # One live smoke test against the real ps: the current test process exists,
+    # and its just-started elapsed time puts create_time within tolerance of now.
     import os
+    import time
 
     info = liveness.os_probe(os.getpid())
     assert info is not None
     assert info.pid == os.getpid()
-
-
-def test_os_probe_pins_the_c_locale_on_ps(monkeypatch):
-    # `lstart`'s day/month names are locale-dependent; without LC_ALL=C a
-    # non-English locale makes every create-time unparseable and every live
-    # session read as dead (copilot review). Pin the env the probe passes.
-    seen = {}
-
-    def fake_run(cmd, **kwargs):
-        seen["env"] = kwargs.get("env")
-
-        class R:
-            rc = 1
-            stdout = ""
-
-        return R()
-
-    monkeypatch.setattr(liveness.execrun, "run", fake_run)
-    liveness.os_probe(4242)
-    assert seen["env"] == {"LC_ALL": "C"}
+    assert info.create_time is not None
+    assert info.create_time <= time.time()

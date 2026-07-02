@@ -1,10 +1,13 @@
 """``pixienv/read`` — the I/O boundary that hands pixi's JSON to the functional core.
 
 The thin **edge** (ADR-0021): read the on-disk ``conda-meta/pixi`` and shell out to
-``pixi shell-hook --json``, then delegate to the pure parsers in
-:mod:`shipit.pixienv.model`. All effects live here so the core stays fixture-testable;
-the Exec takes an injectable ``runner`` (default :func:`shipit.execrun.run`) so
-tests assert argv/parse without spawning ``pixi``.
+pixi's machine-readable read verbs — ``shell-hook``/``list``/``info``, each
+harvested as ``--json`` (native JSON over any scrape, ADR-0028) — then delegate to
+the pure parsers in :mod:`shipit.pixienv.model`. All effects live here so the core
+stays fixture-testable; each Exec takes an injectable ``runner`` (default
+:func:`shipit.execrun.run`) so tests assert argv/parse without spawning ``pixi``.
+The execution side of the adapter (install, run-wrapping) is
+:mod:`shipit.pixienv.run`.
 """
 
 from __future__ import annotations
@@ -12,7 +15,16 @@ from __future__ import annotations
 from pathlib import Path
 
 from .. import execrun
-from .model import Activation, EnvIdentity, parse_activation, parse_env_identity
+from .model import (
+    Activation,
+    EnvIdentity,
+    Info,
+    InstalledPackage,
+    parse_activation,
+    parse_env_identity,
+    parse_info,
+    parse_installed_packages,
+)
 
 #: The ``conda-meta`` subdirectory of an env prefix, where pixi persists per-env state.
 CONDA_META = "conda-meta"
@@ -59,7 +71,7 @@ def shell_hook(
     manifest_path: Path,
     *,
     environment: str | None = None,
-    runner=execrun.run,
+    runner=None,
 ) -> Activation:
     """Run ``pixi shell-hook --json`` for ``manifest_path`` and parse the :class:`Activation`.
 
@@ -68,8 +80,47 @@ def shell_hook(
     ``.stdout`` string. shipit consumes pixi's activation output here rather than computing
     a rival (ADR-0022).
     """
+    if runner is None:
+        runner = execrun.run
     cmd = ["pixi", "shell-hook", "--json", "--manifest-path", str(manifest_path)]
     if environment is not None:
         cmd += ["--environment", environment]
     result = runner(cmd)
     return parse_activation(result.stdout)
+
+
+def list_packages(
+    manifest_path: Path,
+    *,
+    environment: str | None = None,
+    runner=None,
+) -> tuple[InstalledPackage, ...]:
+    """Run ``pixi list --json`` for ``manifest_path`` and parse the installed packages.
+
+    The native-JSON harvest of the read verb (ADR-0028): what an environment actually
+    holds, as :class:`InstalledPackage` value objects — never a scrape of the human
+    table. ``environment`` selects a non-default pixi environment; ``runner`` is the
+    injectable Exec boundary. The Exec keeps the runner's 5-minute default timeout —
+    a read verb against a provisioned env answers in seconds.
+    """
+    if runner is None:
+        runner = execrun.run
+    cmd = ["pixi", "list", "--json", "--manifest-path", str(manifest_path)]
+    if environment is not None:
+        cmd += ["--environment", environment]
+    result = runner(cmd)
+    return parse_installed_packages(result.stdout)
+
+
+def info(manifest_path: Path, *, runner=None) -> Info:
+    """Run ``pixi info --json`` for ``manifest_path`` and parse the :class:`Info`.
+
+    The machine/workspace snapshot straight from pixi's own JSON (ADR-0022: borrow,
+    never re-derive): pixi version, platform, cache dir, and every declared
+    environment's surface. ``runner`` is the injectable Exec boundary; the runner's
+    default timeout applies (a pure read, no solve).
+    """
+    if runner is None:
+        runner = execrun.run
+    result = runner(["pixi", "info", "--json", "--manifest-path", str(manifest_path)])
+    return parse_info(result.stdout)

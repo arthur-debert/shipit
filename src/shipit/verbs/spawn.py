@@ -32,7 +32,7 @@ import time
 
 import click
 
-from .. import execrun, gh, identity, logcontext
+from .. import execrun, gh, git, identity, logcontext
 from ..spawn import backends, launch
 from ..tree.create import Tree, create, new_agent_hash
 from ..tree.layout import (
@@ -362,7 +362,7 @@ def run_subagent(
             role=role,
         )
 
-    root = gh.repo_root()
+    root = git.repo_root()
     if not root:
         return _fail("not inside a git checkout")
     try:
@@ -370,7 +370,7 @@ def run_subagent(
         # case-normalized Repo value object — a malformed remote fails loud
         # (ValueError) rather than feeding a bogus identity into the TreeSpec.
         repo_identity = identity.resolve_repo(root)
-        url = gh.git_remote_url(cwd=root)
+        url = git.remote_url(cwd=root)
     except (execrun.ExecError, ValueError) as exc:
         return _fail(str(exc), exc=exc)
 
@@ -438,7 +438,7 @@ def run_subagent(
         # (pre-clone) so the diagnostic names the missing epic branch precisely, rather
         # than surfacing as an opaque `git checkout` failure deep in tree creation.
         try:
-            umbrella_exists = gh.remote_branch_exists(umbrella_branch, cwd=root)
+            umbrella_exists = git.remote_branch_exists(umbrella_branch, cwd=root)
         except execrun.ExecError as exc:
             return _fail(str(exc), exc=exc)
         if not umbrella_exists:

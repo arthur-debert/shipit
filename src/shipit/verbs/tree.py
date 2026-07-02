@@ -25,7 +25,7 @@ from pathlib import Path
 
 import click
 
-from .. import execrun, gh, identity
+from .. import execrun, gh, git, identity
 from ..session import liveness
 from ..tree import cleanup, layout, provision, registry
 from ..tree.cleanup import Cleanup
@@ -149,7 +149,7 @@ def run_create(
         print(f"tree create: {exc}", file=sys.stderr)
         return 1
 
-    root = gh.repo_root()
+    root = git.repo_root()
     if not root:
         print("tree create: not inside a git checkout", file=sys.stderr)
         return 1
@@ -157,7 +157,7 @@ def run_create(
         # Identity derives LOCALLY from the origin remote (ADR-0024): the one
         # canonical, case-normalized Repo — never an API slug re-split by hand.
         repo_identity = identity.resolve_repo(root)
-        url = gh.git_remote_url(cwd=root)
+        url = git.remote_url(cwd=root)
     except (execrun.ExecError, ValueError) as exc:
         print(f"tree create: {exc}", file=sys.stderr)
         return 1

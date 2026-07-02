@@ -46,7 +46,7 @@ from typing import TextIO
 
 import click
 
-from ... import gh
+from ... import git
 from ...session import liveness
 from ...tree import provision
 from ...tree.layout import EPHEMERAL_KIND, central_root, tree_kind
@@ -148,9 +148,9 @@ def _removal_blocker(tree: Path) -> str | None:
     conservatively rather than letting the fast path outrun the gc floor.
     """
     cwd = str(tree)
-    if gh.git_status_porcelain(cwd=cwd).strip():
+    if git.status_porcelain(cwd=cwd):
         return "uncommitted changes"
-    unpushed = gh.git_unpushed_shas(cwd=cwd)
+    unpushed = git.unpushed_shas(cwd=cwd)
     if unpushed is None:
         return "an unreadable unpushed-commit list"
     provisioned = provision.read_provision_shas(tree)
@@ -158,7 +158,7 @@ def _removal_blocker(tree: Path) -> str | None:
     if remaining:
         plural = "s" if len(remaining) != 1 else ""
         return f"{len(remaining)} unpushed commit{plural}"
-    ahead, _behind = gh.git_ahead_behind(cwd=cwd)
+    ahead, _behind = git.ahead_behind(cwd=cwd)
     if ahead > len(unpushed):
         return (
             f"an upstream-ahead count ({ahead}) beyond its "

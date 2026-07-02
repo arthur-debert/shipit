@@ -50,7 +50,7 @@ class FakeGit:
         self.remote_url_cwds: list[str] = []
         self.toplevel_cwds: list[str] = []
 
-    def git_remote_url(self, *, cwd, remote="origin"):
+    def remote_url(self, *, cwd, remote="origin"):
         self.remote_url_cwds.append(cwd)
         return self._remote_url
 
@@ -58,10 +58,10 @@ class FakeGit:
         self.toplevel_cwds.append(cwd)
         return self._toplevel
 
-    def git_current_branch(self, *, cwd):
+    def current_branch(self, *, cwd):
         return self._branch
 
-    def git_head_commit(self, *, cwd):
+    def head_commit(self, *, cwd):
         return self._commit
 
     def owner_kind(self, login):
@@ -228,10 +228,18 @@ def test_resolve_owner_kind_rejects_unknown_type():
         resolve_owner_kind(repo, boundary=git)
 
 
-def test_default_boundary_is_the_gh_module():
-    # The resolvers default their boundary to `shipit.gh`, so production callers get
-    # the real git/gh implementation without threading it through every call site.
+def test_default_boundaries_are_the_tool_adapters():
+    # The git-read resolvers default their boundary to the `shipit.git` adapter and
+    # the one API-touching resolver to `shipit.gh` (the PROC02 adapter split), so
+    # production callers get the real implementation without threading it through
+    # every call site.
     import inspect
 
-    for resolver in (resolve_repo, resolve_working_dir, resolve_owner_kind):
-        assert inspect.signature(resolver).parameters["boundary"].default is identity.gh
+    for resolver in (resolve_repo, resolve_working_dir):
+        assert (
+            inspect.signature(resolver).parameters["boundary"].default is identity.git
+        )
+    assert (
+        inspect.signature(resolve_owner_kind).parameters["boundary"].default
+        is identity.gh
+    )

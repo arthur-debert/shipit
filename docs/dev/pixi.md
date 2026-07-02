@@ -59,7 +59,7 @@ Therefore the only stable per-run identifier is Claude Code's own `session_id`, 
 
 ## 4. The CLI surface that matters
 
-Only `pixi list` and `pixi info` have machine-readable (`--json`) output; `pixi run` and `pixi install` do not. Verbosity flags (`-v`..`-vvvv`, `-q`) control human stderr text, not structured output.
+`pixi shell-hook`, `pixi list`, and `pixi info` all have machine-readable (`--json`) output; `pixi run` and `pixi install` do not. Verbosity flags (`-v`..`-vvvv`, `-q`) control human stderr text, not structured output. All three JSON reads are wrapped as structured adapter reads in `shipit.pixienv.read` (`shell_hook` / `list_packages` / `info`, PROC02-WS02), and the execution side (`install`, run-wrapping) lives beside them in `shipit.pixienv.run`.
 
 ### Commands shipit relies on or could use:
 
@@ -87,7 +87,7 @@ External `pixi-<name>` subcommands
 
 Provisioning — `src/shipit/tree/create.py`
 
-: `_provision()` runs, each gated on a manifest existing: \`shipit install . --local\` (if `.shipit.toml`), `pixi install` (if `pixi.toml`, default env), `npm ci` (if `package.json`). All funnel through one seam, `run_provision()`, an Exec through the one runner (`shipit.execrun.run`, ADR-0028) with the generous explicit `PROVISION_TIMEOUT` (cold `pixi install`/`npm ci` legitimately outlive the 5-minute default) and a durable record per step — timing on success, both stream tails on failure. A failed step raises the runner's single transport error, `ExecError`.
+: `_provision()` runs, each gated on a manifest existing: \`shipit install . --local\` (if `.shipit.toml`), `pixi install` (if `pixi.toml`, default env), `npm ci` (if `package.json`). The `shipit install` and `npm ci` steps funnel through the `run_provision()` seam, an Exec through the one runner (`shipit.execrun.run`, ADR-0028) with the generous explicit `PROVISION_TIMEOUT` (cold `npm ci` legitimately outlives the 5-minute default). The pixi step instead runs through the pixi adapter, `shipit.pixienv.install()`, which carries pixi's own long-runner bound (`INSTALL_TIMEOUT`, 30 min — a cold solve+download outlives the default) — the pixi argv and its timeout live in the adapter, not the Tree code. Both paths share one narration (`_narrate_step`) and a durable record per step — timing on success, both stream tails on failure. A failed step raises the runner's single transport error, `ExecError`.
 
 Hooks — `.claude/settings.json`
 
@@ -99,7 +99,7 @@ Coordinator activation — `shipit hook sessionstart` (ADR-0027, Layer A)
 
 Agent launch — `src/shipit/spawn/launch.py` + `src/shipit/verbs/spawn.py`
 
-: The per-backend `BackendAdapter` (`spawn/backends/`) builds the argv (`claude -p ... --output-format json`, or the codex/antigravity equivalents). For a provisioned write Tree, `pixi_wrap()` re-expresses it as `pixi run --manifest-path <tree>/pixi.toml -- <argv>` (gated on `<tree>/.pixi/envs/default` existing), and `scrub_tree_env()` drops the API key plus leaked `PIXI_*`/`CONDA_*` vars. The launch and provisioning scrubs now share ONE predicate, `tree.create.is_leaked_env_var`, so they cannot drift. For a reviewer read-only Tree `pixi_wrap` is a deliberate no-op (no env to route into) — that launch stays bare [(see](#7)).
+: The per-backend `BackendAdapter` (`spawn/backends/`) builds the argv (`claude -p ... --output-format json`, or the codex/antigravity equivalents). For a provisioned write Tree, `pixi_wrap()` re-expresses it as `pixi run --manifest-path <tree>/pixi.toml -- <argv>` (gated on `<tree>/.pixi/envs/default` existing), and `scrub_tree_env()` drops the API key plus leaked `PIXI_*`/`CONDA_*` vars. The launch and provisioning scrubs share ONE predicate — `pixienv.is_leaked_env_var`, in the pixi adapter since PROC02-WS02 (the wrapped argv and the sentinel gate live there too, as `pixienv.run_argv` / `pixienv.has_default_env`) — so they cannot drift. For a reviewer read-only Tree `pixi_wrap` is a deliberate no-op (no env to route into) — that launch stays bare [(see](#7)).
 
 ## 7. Gotchas and known bugs
 
@@ -113,7 +113,7 @@ Amortising activation cost: `pixi run` has an experimental activation cache (`--
 
 Leaked `PIXI_*` project pointers (\#167) — CLOSED on the launch path
 
-: An inherited `PIXI_PROJECT_MANIFEST` makes a child's `pixi run` resolve the PARENT manifest and die. Provisioning always defended against this (`provision_env()` scrubs leaked `PIXI_*`); as of PR \#197 the launch path does too, via the shared `is_leaked_env_var` predicate (`scrub_tree_env`), which now also strips the `CONDA_*` activation family. The old asymmetry that made this a live bug is gone.
+: An inherited `PIXI_PROJECT_MANIFEST` makes a child's `pixi run` resolve the PARENT manifest and die. Provisioning always defended against this (`provision_env()` scrubs leaked `PIXI_*`); as of PR \#197 the launch path does too, via the shared `is_leaked_env_var` predicate (`scrub_tree_env`), which now also strips the `CONDA_*` activation family — the predicate's home is `shipit.pixienv.scrub` (PROC02-WS02). The old asymmetry that made this a live bug is gone.
 
 Cross-filesystem cache (\#119)
 

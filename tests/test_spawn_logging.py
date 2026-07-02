@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from shipit import gh
+from shipit import gh, git, pixienv
 from shipit.execrun import ExecError
 from shipit.spawn import launch
 from shipit.tree import layout
@@ -31,10 +31,10 @@ from shipit.verbs import spawn as spawn_verb
 
 
 def _patch_identity(monkeypatch, *, root="/repo", org_repo="acme/widget"):
-    monkeypatch.setattr(gh, "repo_root", lambda: root)
+    monkeypatch.setattr(git, "repo_root", lambda: root)
     monkeypatch.setattr(gh, "current_repo", lambda: org_repo)
-    monkeypatch.setattr(gh, "git_remote_url", lambda *, cwd: "git@example:" + org_repo)
-    monkeypatch.setattr(gh, "remote_branch_exists", lambda *a, **k: True)
+    monkeypatch.setattr(git, "remote_url", lambda *, cwd: "git@example:" + org_repo)
+    monkeypatch.setattr(git, "remote_branch_exists", lambda *a, **k: True)
 
 
 def _fake_create(monkeypatch, tree_dir: Path) -> None:
@@ -329,7 +329,7 @@ def test_pixi_wrap_records_its_routing_decision_at_debug(tmp_path, caplog):
     assert len(bare) == 1 and bare[0].pixi_wrapped is False
 
     caplog.clear()
-    tmp_path.joinpath(*launch.PIXI_DEFAULT_ENV).mkdir(parents=True)
+    tmp_path.joinpath(*pixienv.DEFAULT_ENV_DIR).mkdir(parents=True)
     with caplog.at_level(logging.DEBUG, logger="shipit.spawn"):
         launch.pixi_wrap(["claude", "-p"], tmp_path)
     wrapped = [

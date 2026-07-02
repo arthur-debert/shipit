@@ -49,8 +49,7 @@ import shlex
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..pixienv import Activation
-from ..tree.create import PIXI_MANIFEST
+from ..pixienv import MANIFEST_NAME, Activation
 
 #: The one activatable toolchain kind today. The :class:`Toolchain` value object +
 #: the kind-keyed dispatch in :func:`activation_script` are the extension seam a
@@ -81,7 +80,7 @@ def detect_toolchain(cwd: Path) -> Toolchain | None:
     """
     base = Path(cwd).resolve()
     for directory in (base, *base.parents):
-        manifest = directory / PIXI_MANIFEST
+        manifest = directory / MANIFEST_NAME
         if manifest.is_file():
             return Toolchain(kind=PIXI, manifest=manifest)
     return None

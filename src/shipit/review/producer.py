@@ -44,7 +44,7 @@ import shutil
 import tempfile
 from dataclasses import dataclass
 
-from .. import gh
+from .. import gh, git
 from ..agent.backend import ANTIGRAVITY, CODEX, Backend
 from ..identity import Repo, repo_from_slug
 from ..spawn import launch
@@ -315,7 +315,7 @@ def _resolve_repo(ctx) -> Repo:
 
 def _github_url(ctx) -> str:
     """The clone URL for the read-only Tree — the consumer checkout's ``origin`` remote."""
-    return gh.git_remote_url(cwd=ctx.workdir)
+    return git.remote_url(cwd=ctx.workdir)
 
 
 def _write_schema_tempfile() -> str:

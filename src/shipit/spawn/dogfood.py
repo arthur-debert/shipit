@@ -51,8 +51,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .. import execrun, gh
-from ..tree import create as tree_create
+from .. import execrun, gh, git, pixienv
 from ..tree import layout
 from . import launch
 
@@ -356,32 +355,28 @@ def _run_spawn(
 
 def _current_branch(tree_path: str) -> str | None:
     """The branch ``tree_path`` has checked out (``git rev-parse --abbrev-ref HEAD``)."""
-    return gh.git_current_branch(cwd=tree_path)
+    return git.current_branch(cwd=tree_path)
 
 
 def _pixi_runs(tree_path: str) -> tuple[bool, str]:
     """Whether ``pixi`` resolves and runs the provisioned env inside ``tree_path``.
 
-    Runs ``pixi run python -c "print('pixi-ok')"`` with the parent's leaked
-    ``PIXI_*`` / Conda-activation project pointers scrubbed (the same leak class
-    :func:`shipit.tree.create.provision_env` guards against, via the shared
-    :func:`shipit.tree.create.is_leaked_env_var`), so the child ``pixi`` re-resolves the
-    Tree's own manifest. Returns ``(ok, detail)``.
+    Runs ``python -c "print('pixi-ok')"`` through the pixi adapter's run-wrap
+    (:func:`shipit.pixienv.run_in_env` — explicit ``--manifest-path``, the
+    scrubbed env as the COMPLETE child environment, and pixi's own
+    provisioning-shaped bound: a first activation may re-solve the Tree's env)
+    with the parent's leaked ``PIXI_*`` / Conda-activation project pointers
+    scrubbed (the same leak class :func:`shipit.tree.create.provision_env` guards
+    against, via the adapter's shared :func:`shipit.pixienv.scrub_env`), so the
+    child ``pixi`` re-resolves the Tree's own manifest. Returns ``(ok, detail)``.
     """
-    env = {k: v for k, v in os.environ.items() if not tree_create.is_leaked_env_var(k)}
     try:
-        result = execrun.run(
-            ["pixi", "run", "python", "-c", "print('pixi-ok')"],
-            cwd=tree_path,
-            env=env,
-            # The scrubbed env is the COMPLETE child environment: the runner's
-            # default merge over os.environ would re-add the very pointers the
-            # scrub removed.
-            replace_env=True,
+        result = pixienv.run_in_env(
+            ["python", "-c", "print('pixi-ok')"],
+            tree_path,
+            env=pixienv.scrub_env(os.environ),
+            # A nonzero child is the probe's normal "not ok" answer, not an error.
             check=False,
-            # The probe's worst case is a first activation re-solving the Tree's
-            # env — provisioning-shaped work, so it shares provisioning's bound.
-            timeout=tree_create.PROVISION_TIMEOUT,
         )
     except execrun.ExecError as exc:
         # Transport failure (missing pixi, timeout on a wedged solve): the probe's
@@ -394,7 +389,7 @@ def _pixi_runs(tree_path: str) -> tuple[bool, str]:
 def _scratch_dirty(scratch: str) -> str:
     """The scratch checkout's porcelain status (empty = clean). The no-cwd-leak read:
     a write Run rooted in its Tree must leave the scratch checkout untouched."""
-    return gh.git_status_porcelain(cwd=scratch).strip()
+    return "\n".join(git.status_porcelain(cwd=scratch))
 
 
 def _open_pr_heads(repo: str) -> list[str]:

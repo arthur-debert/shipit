@@ -35,9 +35,11 @@ _LOG_METHODS = frozenset({"debug", "info", "warning", "error", "critical"})
 
 
 def test_sprayed_modules_have_a_shipit_logger():
-    # The gh boundary's per-call record moved to the one Exec runner
-    # (PROC01-WS02 / ADR-0028): `shipit.gh` no longer logs itself — every
-    # subprocess it runs is recorded by `shipit.execrun` on `shipit.exec`.
+    # The gh boundary's per-call TRANSPORT record moved to the one Exec runner
+    # (PROC01-WS02 / ADR-0028): every subprocess is recorded by `shipit.execrun`
+    # on `shipit.exec`. The merged gh adapter (PROC02-WS01) logs only what the
+    # runner cannot see — the GraphQL semantic failure and the draft-flip
+    # milestone — on its own `shipit.gh` logger.
     for modname, expected in [
         ("shipit.execrun", "shipit.exec"),
         ("shipit.prstate.state", "shipit.prstate"),
@@ -60,7 +62,7 @@ def test_sprayed_modules_have_a_shipit_logger():
         ("shipit.verbs.spawn", "shipit.spawn"),
         ("shipit.prstate.fetch", "shipit.prstate"),
         ("shipit.prstate.reviewers", "shipit.prstate"),
-        ("shipit.prstate.ghapi", "shipit.prstate"),
+        ("shipit.gh", "shipit.gh"),
         ("shipit.review.checkrun", "shipit.review"),
         ("shipit.review.producer", "shipit.review"),
         # LOG02-WS05 (#285): the verbs/pr lifecycle gap + checks.py warnings.

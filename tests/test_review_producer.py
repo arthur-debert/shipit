@@ -52,7 +52,7 @@ def _faked(monkeypatch):
             base=f"origin/{plan.branch}",
         ),
     )
-    monkeypatch.setattr(producer.gh, "git_remote_url", lambda *, cwd: "https://x/y.git")
+    monkeypatch.setattr(producer.git, "remote_url", lambda *, cwd: "https://x/y.git")
     monkeypatch.setattr(producer.shutil, "which", lambda binary: f"/usr/bin/{binary}")
     captured: dict = {}
 

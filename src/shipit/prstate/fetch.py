@@ -1,8 +1,9 @@
 """Gather all raw GitHub state for one PR into a `ReadinessView`.
 
-The only module that calls `ghapi` on read paths. The raw-JSON -> model parsing
-is split out (`context_from_raw`) so tests can build a view from recorded
-fixtures without the network, exercising the exact code `gather()` runs live.
+The only module that calls the gh adapter (`shipit.gh`) on the engine's read
+paths. The raw-JSON -> model parsing is split out (`context_from_raw`) so tests
+can build a view from recorded fixtures without the network, exercising the
+exact code `gather()` runs live.
 
 The view's cheap CORE (`head_sha`, `base_ref`, `is_draft`, `merge_state`) is read
 off the fetched GitHub `pullRequest` node through the ONE `pr.core_from_node`
@@ -17,10 +18,9 @@ import logging
 import time
 from datetime import datetime, timezone
 
-from .. import logcontext
+from .. import gh, logcontext
 from ..identity import Repo, Sha, repo_from_slug
 from ..pr import core_from_node
-from . import ghapi
 from .model import (
     ReadinessView,
     Review,
@@ -134,9 +134,7 @@ def _threads_and_review_requests(
     requested_at: dict[str, str] = {}
     cursor: str | None = None
     while True:
-        data = ghapi.graphql(
-            _THREADS_QUERY, owner=owner, name=name, pr=pr, cursor=cursor
-        )
+        data = gh.graphql(_THREADS_QUERY, owner=owner, name=name, pr=pr, cursor=cursor)
         pull = data["repository"]["pullRequest"]
         if cursor is None:
             requests = [
@@ -212,8 +210,8 @@ def attach_state(pr: int) -> tuple[list[str], list[tuple[int, str]]]:
     a request the verb polls this until the reviewer shows up in the pending
     requests — or has already submitted a fresh review that consumed it.
     """
-    owner, name = ghapi.repo_slug()
-    data = ghapi.graphql(_ATTACH_QUERY, owner=owner, name=name, pr=pr)
+    owner, name = gh.repo_slug()
+    data = gh.graphql(_ATTACH_QUERY, owner=owner, name=name, pr=pr)
     pull = data["repository"]["pullRequest"]
     logins = _requested_logins(
         [
@@ -291,12 +289,12 @@ def gather_reviews(pr: int) -> ReadinessView:
     from .reviewers import reviewer_rerun
 
     start = time.monotonic()
-    owner, name = ghapi.repo_slug()
+    owner, name = gh.repo_slug()
     # Bind the domain keys at the fetch seam (ADR-0029): from the moment the
     # engine starts working on this PR, every subsequent record in-process —
     # including the gh Exec records the fetch itself produces — carries pr/repo.
     logcontext.bind(pr=pr, repo=f"{owner}/{name}")
-    data = ghapi.graphql(_REVIEWS_QUERY, owner=owner, name=name, pr=pr)
+    data = gh.graphql(_REVIEWS_QUERY, owner=owner, name=name, pr=pr)
     pull = data["repository"]["pullRequest"]
     requested = _requested_logins(
         [
@@ -357,13 +355,13 @@ def gather(pr: int) -> ReadinessView:
     from .reviewers_config import reviewer_window
 
     start = time.monotonic()
-    owner, name = ghapi.repo_slug()
+    owner, name = gh.repo_slug()
     # Bind the domain keys at the fetch seam (ADR-0029): from the moment the
     # engine starts working on this PR, every subsequent record in-process —
     # including the gh Exec records the fetch itself produces — carries pr/repo.
     logcontext.bind(pr=pr, repo=f"{owner}/{name}")
     base = f"repos/{owner}/{name}"
-    meta = ghapi.pr_meta(pr)
+    meta = gh.pr_meta(pr)
     thread_nodes, review_requests, requested_at = _threads_and_review_requests(
         owner, name, pr
     )
@@ -374,10 +372,10 @@ def gather(pr: int) -> ReadinessView:
         # The PR identity's repo, derived from the live slug (ADR-0024).
         repo=repo_from_slug(f"{owner}/{name}"),
         meta=meta,
-        reviews_json=ghapi.rest(f"{base}/pulls/{pr}/reviews", paginate=True) or [],
+        reviews_json=gh.rest(f"{base}/pulls/{pr}/reviews", paginate=True) or [],
         thread_nodes=thread_nodes,
-        reactions=ghapi.rest(f"{base}/issues/{pr}/reactions", paginate=True) or [],
-        issue_comments=ghapi.rest(f"{base}/issues/{pr}/comments", paginate=True) or [],
+        reactions=gh.rest(f"{base}/issues/{pr}/reactions", paginate=True) or [],
+        issue_comments=gh.rest(f"{base}/issues/{pr}/comments", paginate=True) or [],
         reviewer_rerun=reviewer_rerun(),
         # The per-reviewer wait-window override + the App `review_requested` edge
         # times — both resolved at the build edge and threaded on so the engine

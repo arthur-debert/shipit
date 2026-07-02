@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from shipit.identity import repo_from_slug
-from shipit import execrun, gh
+from shipit import execrun, gh, git
 from shipit.spawn import launch
 from shipit.tree import layout
 from shipit.tree.create import Tree
@@ -32,11 +32,11 @@ def _patch_identity(monkeypatch, *, root="/repo", org_repo="acme/widget"):
     epic umbrella branch existing on the remote (#176), so a happy-path test must see
     it present. Tests that exercise the MISSING-branch fail-closed path override it.
     """
-    monkeypatch.setattr(gh, "repo_root", lambda: root)
+    monkeypatch.setattr(git, "repo_root", lambda: root)
     # Identity now derives LOCALLY from the origin remote (ADR-0024): the patched
     # remote URL is what identity.resolve_repo parses into the canonical Repo.
-    monkeypatch.setattr(gh, "git_remote_url", lambda *, cwd: "git@example:" + org_repo)
-    monkeypatch.setattr(gh, "remote_branch_exists", lambda *a, **k: True)
+    monkeypatch.setattr(git, "remote_url", lambda *, cwd: "git@example:" + org_repo)
+    monkeypatch.setattr(git, "remote_branch_exists", lambda *a, **k: True)
 
 
 def _fake_create(monkeypatch, tree_dir: Path) -> dict:
@@ -214,7 +214,7 @@ def test_run_subagent_resolves_epic_grouped_base_and_pr_target(
         checked["cwd"] = cwd
         return True
 
-    monkeypatch.setattr(gh, "remote_branch_exists", fake_exists)
+    monkeypatch.setattr(git, "remote_branch_exists", fake_exists)
     runner, _calls = _launcher()
     _patch_pr(
         monkeypatch,
@@ -256,7 +256,7 @@ def test_run_subagent_missing_epic_branch_fails_closed_no_main_fallback(
     # LOUD and NEVER silently fall back to origin/main. The Tree is never created and
     # nothing is launched — the precondition gates before any side effect.
     _patch_identity(monkeypatch)
-    monkeypatch.setattr(gh, "remote_branch_exists", lambda *a, **k: False)
+    monkeypatch.setattr(git, "remote_branch_exists", lambda *a, **k: False)
     monkeypatch.setattr(
         spawn_verb,
         "create",
@@ -533,7 +533,7 @@ def test_run_subagent_repo_accepts_org_qualified_name(tmp_path, monkeypatch, cap
 
 
 def test_run_subagent_not_inside_checkout_is_exit_1(monkeypatch, capsys):
-    monkeypatch.setattr(gh, "repo_root", lambda: None)
+    monkeypatch.setattr(git, "repo_root", lambda: None)
 
     rc = spawn_verb.run_subagent(
         repo="widget", epic="TRE03", ws=1, issue=1, role="implementer"
@@ -544,12 +544,12 @@ def test_run_subagent_not_inside_checkout_is_exit_1(monkeypatch, capsys):
 
 
 def test_run_subagent_reports_git_error_cleanly(monkeypatch, capsys):
-    monkeypatch.setattr(gh, "repo_root", lambda: "/repo")
+    monkeypatch.setattr(git, "repo_root", lambda: "/repo")
 
     def boom(*, cwd):
         raise ExecError(["git"], rc=1, stderr="could not read origin remote")
 
-    monkeypatch.setattr(gh, "git_remote_url", boom)
+    monkeypatch.setattr(git, "remote_url", boom)
 
     rc = spawn_verb.run_subagent(
         repo="widget", epic="TRE03", ws=1, issue=1, role="implementer"
@@ -778,7 +778,7 @@ def test_run_subagent_issue_only_does_not_check_epic_umbrella(
     _patch_identity(monkeypatch, root=str(parent))
     _fake_create(monkeypatch, tree_dir)
     monkeypatch.setattr(
-        gh,
+        git,
         "remote_branch_exists",
         lambda *a, **k: pytest.fail("issue shape must not probe an epic umbrella"),
     )

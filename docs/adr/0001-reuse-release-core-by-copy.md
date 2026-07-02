@@ -1,5 +1,15 @@
 # Reuse release-core by copy, not dependency
 
+> **Superseded in part by [ADR-0028](0028-one-exec-seam-tool-adapters.md)
+> (PROC02-WS01, 2026-07):** the "two deliberate `gh` boundaries" consequence
+> below no longer holds — the engine's copied boundary
+> (`shipit/prstate/ghapi.py`) was merged into the ONE `gh` Tool adapter,
+> `src/shipit/gh.py`, which now carries the REST/GraphQL helpers, the
+> pagination-merging helper, and the PR-flow acts. The copy-not-dependency
+> decision itself, and the Divergences ledger below, still stand; this ADR is
+> kept as the historical record of why the engine arrived with its own
+> boundary.
+
 shipit reuses release-core's proven code (the `gh` boundary, the verbs, and —
 in Step 4 / epic PRF01 — the whole `prstate` PR-state engine) by **copying the
 source into shipit's own slim package and re-skinning its entry points**, never
@@ -38,3 +48,10 @@ here, so a future re-copy knows what NOT to clobber:
   `pr next` route on structured state rather than `next_action` prose (issue #24.1).
   Upstream release-core has none of these fields. See ADR-0006 and the module note
   in `prstate/state.py`.
+- **PROC02-WS01 (`prstate/ghapi.py` deleted)** — the engine's own `gh` boundary
+  is gone: the engine now calls the single `gh` Tool adapter (`shipit.gh`,
+  ADR-0028), which absorbed `ghapi`'s REST/GraphQL/pagination helpers and the
+  PR-act calls. A future re-copy must NOT restore `ghapi.py`; port any upstream
+  `ghapi` fix into `shipit/gh.py` instead. The stdlib-only guarantee that once
+  justified the separate boundary holds across the merge (`shipit.gh` and the
+  `execrun`/`redact` runner under it are stdlib-only).

@@ -390,7 +390,7 @@ def test_extract_on_missing_file_yields_empty_metrics(tmp_path):
 
 
 def test_exit_hygiene_clean_worktree(monkeypatch):
-    monkeypatch.setattr(extractors.gh, "git_status_porcelain", lambda *, cwd: "")
+    monkeypatch.setattr(extractors.git, "status_porcelain", lambda *, cwd: [])
     result = exit_hygiene("/repo")
     assert result == {
         "worktree_clean": True,
@@ -400,15 +400,16 @@ def test_exit_hygiene_clean_worktree(monkeypatch):
 
 
 def test_exit_hygiene_dirty_worktree(monkeypatch):
-    porcelain = " M src/a.py\n?? scratch.txt\nUU conflicted.py\n"
-    monkeypatch.setattr(extractors.gh, "git_status_porcelain", lambda *, cwd: porcelain)
+    # The adapter returns the PARSED porcelain lines (one per dirty entry).
+    porcelain = [" M src/a.py", "?? scratch.txt", "UU conflicted.py"]
+    monkeypatch.setattr(extractors.git, "status_porcelain", lambda *, cwd: porcelain)
     result = exit_hygiene("/repo")
     assert result["worktree_clean"] is False
     assert result["dirty_file_count"] == 3
 
 
 def test_exit_hygiene_counts_injected_stray_pids(monkeypatch):
-    monkeypatch.setattr(extractors.gh, "git_status_porcelain", lambda *, cwd: "")
+    monkeypatch.setattr(extractors.git, "status_porcelain", lambda *, cwd: [])
     result = exit_hygiene("/repo", list_stray_pids=lambda: [101, 202])
     assert result["stray_pid_count"] == 2
 
@@ -417,7 +418,7 @@ def test_exit_hygiene_degrades_on_git_failure(monkeypatch):
     def _boom(*, cwd):
         raise ExecError(["gh"], rc=1, stderr="not a git repo")
 
-    monkeypatch.setattr(extractors.gh, "git_status_porcelain", _boom)
+    monkeypatch.setattr(extractors.git, "status_porcelain", _boom)
     result = exit_hygiene("/repo")
     assert result["worktree_clean"] is None
     assert result["dirty_file_count"] is None

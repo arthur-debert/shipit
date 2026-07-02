@@ -40,7 +40,7 @@ from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
 
-from .. import __version__, config, execrun, gh
+from .. import __version__, config, execrun, gh, git
 
 logger = logging.getLogger("shipit.install")
 
@@ -809,10 +809,7 @@ def _pr_body(
 def _shipit_version() -> str:
     """The shipit commit that wrote the set (its repo HEAD), else the package version."""
     pkg_dir = Path(__file__).resolve().parents[1]
-    try:
-        return gh._git(["rev-parse", "HEAD"], cwd=str(pkg_dir)).strip()
-    except execrun.ExecError:
-        return __version__
+    return git.head_commit(cwd=str(pkg_dir)) or __version__
 
 
 # --------------------------------------------------------------------------
@@ -1007,12 +1004,12 @@ def run(
             # current branch and stop — NO branch switch, NO push, NO PR. The Tree
             # is already on its planned holding branch, so provisioning lands the
             # managed files there with zero origin side effects.
-            branch = gh.git_current_branch(cwd=cwd)
+            branch = git.current_branch(cwd=cwd)
             if branch is None:
                 print("install: --local needs a checked-out branch", file=sys.stderr)
                 return 1
-            gh.git_add(changed_paths, cwd=cwd)
-            gh.git_commit(COMMIT_MESSAGE, changed_paths, cwd=cwd)
+            git.add(changed_paths, cwd=cwd)
+            git.commit(COMMIT_MESSAGE, changed_paths, cwd=cwd)
             print(f"  committed to {branch} (local-only --local)")
             logger.info(
                 "install committed locally",
@@ -1029,13 +1026,13 @@ def run(
             # Break-glass: commit on the current branch and push straight to it
             # (relies on the repo's admin bypass). Reserved for bootstrapping a
             # repo that cannot yet run the PR loop.
-            branch = gh.git_current_branch(cwd=cwd)
+            branch = git.current_branch(cwd=cwd)
             if branch is None:
                 print("install: --push needs a checked-out branch", file=sys.stderr)
                 return 1
-            gh.git_add(changed_paths, cwd=cwd)
-            gh.git_commit(COMMIT_MESSAGE, changed_paths, cwd=cwd)
-            gh.git_push(branch, cwd=cwd)
+            git.add(changed_paths, cwd=cwd)
+            git.commit(COMMIT_MESSAGE, changed_paths, cwd=cwd)
+            git.push(branch, cwd=cwd)
             print(f"  pushed to {branch} (break-glass --push)")
             logger.info(
                 "install pushed break-glass",
@@ -1049,12 +1046,12 @@ def run(
             return 0
 
         # Default: stage onto an install branch, push it, open a DRAFT PR.
-        gh.git_switch_create(INSTALL_BRANCH, cwd=cwd)
-        gh.git_add(changed_paths, cwd=cwd)
-        gh.git_commit(COMMIT_MESSAGE, changed_paths, cwd=cwd)
+        git.switch_create(INSTALL_BRANCH, cwd=cwd)
+        git.add(changed_paths, cwd=cwd)
+        git.commit(COMMIT_MESSAGE, changed_paths, cwd=cwd)
         # The install branch is regenerated from HEAD each run; force so a re-run
         # with an open install PR updates it rather than failing non-fast-forward.
-        gh.git_push(INSTALL_BRANCH, cwd=cwd, force=True)
+        git.push(INSTALL_BRANCH, cwd=cwd, force=True)
         existing = gh.pr_url_for_head(INSTALL_BRANCH, cwd=cwd)
         if existing:
             # The force-push already refreshed the open PR's diff.
