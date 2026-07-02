@@ -21,14 +21,18 @@ catches an accidental write and keeps a shared clone trustworthy for its co-tena
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import shutil
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
 from .. import gh
 from .create import Tree
 from .layout import REVIEW_KIND, central_root, sanitize_slug
+
+logger = logging.getLogger("shipit.tree")
 
 #: Length (hex chars) of the branch-name disambiguator suffixed on a review-Tree leaf.
 #: A short ``blake2b`` digest of the VERBATIM branch keeps the sharing key deterministic
@@ -141,12 +145,22 @@ def create_readonly(plan: ReadOnlyPlan, *, source_repo: str, github_url: str) ->
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_name(f"{dest.name}.tmp-{os.getpid()}")
     remove_tree(tmp)  # clear any leftover temp from a crashed prior Run
+    started = time.monotonic()
     try:
         gh.git_clone_dissociated(github_url, str(tmp), reference=source_repo)
         gh.git_fetch(cwd=str(tmp))
         gh.git_checkout(plan.branch, cwd=str(tmp))
         chmod_readonly(tmp)
     except BaseException:
+        # Propagating failure at ERROR with the exception attached (spray
+        # convention), plus the temp-clone rollback the atomic two-step performs.
+        logger.error(
+            "read-only tree create failed after %dms; removing temp clone %s",
+            int((time.monotonic() - started) * 1000),
+            tmp,
+            exc_info=True,
+            extra={"tree": str(dest)},
+        )
         remove_tree(tmp)
         raise
 
@@ -155,9 +169,23 @@ def create_readonly(plan: ReadOnlyPlan, *, source_repo: str, github_url: str) ->
     except OSError:
         # A concurrent reviewer won the race and created the leaf first: discard our
         # temp clone and treat it as the shared-reuse case (refresh + return theirs).
+        logger.debug(
+            "read-only tree: lost the creation race for %s; reusing the "
+            "co-tenant's clone",
+            dest,
+            extra={"tree": str(dest)},
+        )
         remove_tree(tmp)
         return _reuse_or_refuse(dest, plan.branch)
 
+    duration_ms = int((time.monotonic() - started) * 1000)
+    logger.info(
+        "read-only tree created at %s (branch %s) in %dms",
+        dest,
+        plan.branch,
+        duration_ms,
+        extra={"tree": str(dest), "duration_ms": duration_ms},
+    )
     return _summary(dest, plan.branch)
 
 
@@ -170,7 +198,16 @@ def _reuse_or_refuse(dest: Path, branch: str) -> Tree:
     clone is a stray dir squatting the shared slot and is refused loud.
     """
     if (dest / _GIT_DIR).exists():
+        started = time.monotonic()
         _refresh_readonly(dest, branch)
+        duration_ms = int((time.monotonic() - started) * 1000)
+        logger.info(
+            "read-only tree reused at %s (branch %s, refreshed to head in %dms)",
+            dest,
+            branch,
+            duration_ms,
+            extra={"tree": str(dest), "duration_ms": duration_ms},
+        )
         return _summary(dest, branch)
     raise FileExistsError(
         f"review tree dir already exists but is not a clone: {dest}; refusing "
@@ -279,6 +316,10 @@ def remove_tree(tree_dir: str | os.PathLike[str]) -> bool:
     if not os.path.lexists(tree_dir):
         return False
     shutil.rmtree(tree_dir, onexc=_chmod_then_retry)
+    # The one funnel every Tree reclaim passes through (`remove`, `gc`, temp
+    # rollbacks), so removal — a lifecycle milestone whose only record was the
+    # verb's print — is narrated here once, with the Tree it took off disk.
+    logger.info("tree removed: %s", tree_dir, extra={"tree": str(tree_dir)})
     return True
 
 

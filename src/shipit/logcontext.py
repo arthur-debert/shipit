@@ -25,7 +25,8 @@ site, so a typo can never silently mint a new correlation vocabulary.
 from __future__ import annotations
 
 import os
-from collections.abc import Iterable, Mapping, MutableMapping
+from collections.abc import Iterable, Iterator, Mapping, MutableMapping
+from contextlib import contextmanager
 from typing import Any
 
 import structlog
@@ -67,6 +68,25 @@ def bind(**keys: Any) -> None:
     values = {name: value for name, value in keys.items() if value is not None}
     if values:
         structlog.contextvars.bind_contextvars(**values)
+
+
+@contextmanager
+def scoped(**keys: Any) -> Iterator[None]:
+    """Bind domain keys for the duration of the ``with`` block, then restore.
+
+    Same present-when-bound / absent-not-null contract as :func:`bind` (``None``
+    values dropped, unknown key names raise :class:`ValueError`), but the binding
+    is UNWOUND on exit — every record emitted inside the block carries the keys,
+    and a later in-process record does not inherit them. Use at a seam whose
+    correlation is LOCAL to a bounded operation (a single Tree's creation), where
+    a process-lifetime :func:`bind` would corrupt the correlation fields of every
+    subsequent, unrelated record. Prior values of the same keys are restored, so
+    nesting under an outer :func:`bind` leaves that outer binding intact.
+    """
+    _check_names(keys)
+    values = {name: value for name, value in keys.items() if value is not None}
+    with structlog.contextvars.bound_contextvars(**values):
+        yield
 
 
 def unbind(*names: str) -> None:
