@@ -51,6 +51,7 @@ from .model import (
     path_entries,
 )
 from .read import (
+    READ_TIMEOUT,
     info,
     list_packages,
     read_env_identity,
@@ -82,6 +83,7 @@ __all__ = [
     "INSTALL_TIMEOUT",
     "MANIFEST_NAME",
     "PIXI_CACHE_VARS",
+    "READ_TIMEOUT",
     "Activation",
     "EnvIdentity",
     "EnvironmentInfo",

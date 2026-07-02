@@ -33,6 +33,14 @@ class SecretSourceError(RuntimeError):
     """A required secret source could not be resolved."""
 
 
+#: The ``doppler`` Exec's stated timeout, in seconds (ADR-0028: every Exec
+#: states its bound deliberately — never the runner's implicit default). A
+#: secrets fetch is a network round-trip to Doppler's API, so the runner's
+#: generous default IS the right bound — stated on the wire rather than
+#: inherited, so the no-implicit-timeout sweep stays grep-verifiable.
+DOPPLER_TIMEOUT: float = execrun.DEFAULT_TIMEOUT
+
+
 def doppler_get(key: str) -> str:
     """``doppler secrets get <key> --plain --project github --config prd``."""
     try:
@@ -49,6 +57,7 @@ def doppler_get(key: str) -> str:
                 "prd",
             ],
             check=False,
+            timeout=DOPPLER_TIMEOUT,
             # stdout carries the fetched secret; mark it so a timeout (which
             # captures the partial secret the child had written) never rides an
             # Exec failure record or a re-logged ExecError to a sink.

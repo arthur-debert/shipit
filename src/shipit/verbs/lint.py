@@ -229,6 +229,14 @@ def _shebang(path: Path) -> str | None:
     return first[2:].strip() if first.startswith("#!") else None
 
 
+#: Each check Exec's stated timeout, in seconds (ADR-0028: every Exec states
+#: its bound deliberately — never the runner's implicit default). A linter over
+#: a whole tree is local but legitimately slow on a large repo, so the runner's
+#: generous default IS the right bound — stated on the wire rather than
+#: inherited, so the no-implicit-timeout sweep stays grep-verifiable.
+CHECK_TIMEOUT: float = execrun.DEFAULT_TIMEOUT
+
+
 def _run_tool(binary: str, args: list[str], cwd: Path) -> execrun.ExecResult:
     """Run ``binary args`` in ``cwd`` through the one Exec runner.
 
@@ -236,8 +244,12 @@ def _run_tool(binary: str, args: list[str], cwd: Path) -> execrun.ExecResult:
     outcome), not a transport failure. A launch failure — the binary missing from
     PATH, or any OS-level error — raises :class:`~shipit.execrun.ExecError`, which
     the orchestrator renders as the hard-fail ``127`` (never a silent skip).
+    Each Exec states :data:`CHECK_TIMEOUT`; a wedged linter dies at that bound
+    as a timeout-cause :class:`~shipit.execrun.ExecError` — the same hard-fail.
     """
-    return execrun.run([binary, *args], cwd=str(cwd), check=False)
+    return execrun.run(
+        [binary, *args], cwd=str(cwd), check=False, timeout=CHECK_TIMEOUT
+    )
 
 
 # --------------------------------------------------------------------------
