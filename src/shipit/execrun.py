@@ -125,7 +125,7 @@ class ExecError(RuntimeError):
         self.duration_ms = duration_ms
         self.cause = cause
         detail = _tail(self.stderr) or _tail(self.stdout)
-        message = f"{' '.join(self.argv)} failed ({cause}, rc={rc}, {duration_ms}ms)"
+        message = f"{shlex.join(self.argv)} failed ({cause}, rc={rc}, {duration_ms}ms)"
         if detail:
             message += f": {detail}"
         super().__init__(message)
@@ -196,7 +196,15 @@ def run(
             # pin stdin to DEVNULL only when we are NOT piping input.
             stdin=subprocess.DEVNULL if input is None else None,
             capture_output=True,
-            text=True,
+            # Decode text mode explicitly with errors="replace": a tool that
+            # emits bytes undecodable in the process encoding (git on binary or
+            # non-UTF-8 output) would make a bare text=True raise UnicodeDecodeError
+            # — a ValueError, caught by neither handler below — bypassing the
+            # one-error contract with a raw escape. Replacement keeps every Exec
+            # ending in an ExecResult/ExecError, matching _stream_text's defensive
+            # decode on the timeout path.
+            encoding="utf-8",
+            errors="replace",
             check=False,
             timeout=timeout,
         )

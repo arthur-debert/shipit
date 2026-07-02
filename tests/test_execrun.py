@@ -146,6 +146,18 @@ def test_missing_binary_real_child():
     assert excinfo.value.cause == execrun.CAUSE_MISSING_BINARY
 
 
+def test_undecodable_output_replaced_not_raised():
+    # End-to-end: a real child that writes bytes undecodable in the runner's
+    # encoding must still yield an ExecResult (with the bad bytes replaced), not
+    # let a raw UnicodeDecodeError escape and bypass the one-error contract.
+    result = execrun.run(
+        [sys.executable, "-c", r'import sys; sys.stdout.buffer.write(b"\xff\xfe ok")']
+    )
+    assert result.ok
+    assert "ok" in result.stdout
+    assert "�" in result.stdout  # the U+FFFD replacement char
+
+
 # ---------------------------------------------------------------------------
 # Timeout
 # ---------------------------------------------------------------------------

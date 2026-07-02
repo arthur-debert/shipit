@@ -31,6 +31,7 @@ from __future__ import annotations
 import logging
 import os
 import secrets
+import shlex
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -244,7 +245,9 @@ def run_provision(cmd: list[str], *, cwd: Path, env: dict[str, str]) -> None:
         cmd, cwd=str(cwd), env=env, replace_env=True, timeout=PROVISION_TIMEOUT
     )
     logger.info(
-        "provision step %s completed in %dms", " ".join(result.argv), result.duration_ms
+        "provision step %s completed in %dms",
+        shlex.join(result.argv),
+        result.duration_ms,
     )
 
 
