@@ -19,6 +19,7 @@ from shipit.identity import (
     Revision,
     WorkingDir,
     parse_remote_url,
+    repo_from_slug,
     resolve_owner_kind,
     resolve_repo,
     resolve_working_dir,
@@ -182,6 +183,30 @@ def test_resolve_working_dir_falls_back_to_cwd_when_no_toplevel():
     wd = resolve_working_dir("/some/dir", boundary=git)
     assert wd.path == "/some/dir"
     assert git.remote_url_cwds == ["/some/dir"]
+
+
+def test_repo_from_slug_matches_local_identity():
+    # THE canonical slug parser: a slug-derived Repo shares identity with a
+    # locally-resolved one (both lowercased), so an API-cased slug can never split
+    # one repo's identity from its origin-derived twin (ADR-0024).
+    assert repo_from_slug("Octocat/Hello-World") == Repo(
+        owner=Owner(login="octocat"), name="hello-world"
+    )
+    assert repo_from_slug("Octocat/Hello-World").slug == "octocat/hello-world"
+
+
+def test_repo_from_slug_agrees_with_resolve_repo_across_case_variants():
+    # The case-divergence fix, end to end at the identity layer: a MIXED-case origin
+    # remote and a MIXED-case API slug land the SAME Repo — the identity every
+    # Tree path and log dir is keyed by.
+    git = FakeGit(remote_url="git@github.com:AcMe/WiDgEt.git")
+    assert resolve_repo("/checkout", boundary=git) == repo_from_slug("ACME/Widget")
+
+
+@pytest.mark.parametrize("bad", ["", "noslash", "owner/", "/name", "a/b/c"])
+def test_repo_from_slug_rejects_malformed(bad):
+    with pytest.raises(ValueError):
+        repo_from_slug(bad)
 
 
 def test_resolve_owner_kind_is_the_only_api_touching_resolver():

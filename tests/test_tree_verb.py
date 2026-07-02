@@ -13,6 +13,7 @@ import json
 import pytest
 
 from shipit import execrun, gh
+from shipit.identity import repo_from_slug
 from shipit.tree.create import Tree
 from shipit.tree.registry import TreeRecord
 from shipit.verbs import tree as tree_verb
@@ -21,7 +22,8 @@ from shipit.execrun import ExecError
 
 def test_run_create_happy_path(monkeypatch, capsys):
     monkeypatch.setattr(gh, "repo_root", lambda: "/repo")
-    monkeypatch.setattr(gh, "current_repo", lambda: "acme/widget")
+    # Identity derives LOCALLY from the origin remote (ADR-0024): the patched
+    # remote URL is what identity.resolve_repo parses into the canonical Repo.
     monkeypatch.setattr(gh, "git_remote_url", lambda *, cwd: "git@example:acme/widget")
 
     captured: dict = {}
@@ -38,8 +40,7 @@ def test_run_create_happy_path(monkeypatch, capsys):
 
     assert rc == 0
     # The verb resolved identity into the spec it handed the orchestrator.
-    assert captured["spec"].org == "acme"
-    assert captured["spec"].repo == "widget"
+    assert captured["spec"].repo == repo_from_slug("acme/widget")
     assert captured["spec"].issue == 7
     assert captured["spec"].slug == "Thing"
     assert captured["source_repo"] == "/repo"
@@ -58,7 +59,8 @@ def test_run_create_happy_path(monkeypatch, capsys):
 def _patch_identity(monkeypatch):
     """Mock the gh boundary so run_create resolves a fixed repo identity (acme/widget)."""
     monkeypatch.setattr(gh, "repo_root", lambda: "/repo")
-    monkeypatch.setattr(gh, "current_repo", lambda: "acme/widget")
+    # Identity derives LOCALLY from the origin remote (ADR-0024): the patched
+    # remote URL is what identity.resolve_repo parses into the canonical Repo.
     monkeypatch.setattr(gh, "git_remote_url", lambda *, cwd: "git@example:acme/widget")
 
 
@@ -193,13 +195,13 @@ def test_run_create_not_inside_checkout(monkeypatch, capsys):
     assert "not inside a git checkout" in capsys.readouterr().err
 
 
-def test_run_create_reports_gh_error_cleanly(monkeypatch, capsys):
+def test_run_create_reports_git_error_cleanly(monkeypatch, capsys):
     monkeypatch.setattr(gh, "repo_root", lambda: "/repo")
 
-    def boom():
-        raise ExecError(["gh"], rc=1, stderr="could not resolve repo")
+    def boom(*, cwd):
+        raise ExecError(["git"], rc=1, stderr="could not read origin remote")
 
-    monkeypatch.setattr(gh, "current_repo", boom)
+    monkeypatch.setattr(gh, "git_remote_url", boom)
 
     rc = tree_verb.run_create(issue=7)
 
@@ -305,7 +307,8 @@ def test_run_list_scans_the_central_root(monkeypatch, capsys):
 
 def test_run_create_maps_create_failure_to_exit_1(monkeypatch, capsys):
     monkeypatch.setattr(gh, "repo_root", lambda: "/repo")
-    monkeypatch.setattr(gh, "current_repo", lambda: "acme/widget")
+    # Identity derives LOCALLY from the origin remote (ADR-0024): the patched
+    # remote URL is what identity.resolve_repo parses into the canonical Repo.
     monkeypatch.setattr(gh, "git_remote_url", lambda *, cwd: "git@example:acme/widget")
 
     def boom(spec, *, source_repo, github_url):
@@ -336,7 +339,8 @@ def test_run_create_maps_provisioning_and_fs_failures_to_clean_exit_1(
     # exit-1 message, never a traceback. ExecError (provisioning), OSError (mkdir/
     # copy/stat), and the pre-existing-dest FileExistsError all funnel through here.
     monkeypatch.setattr(gh, "repo_root", lambda: "/repo")
-    monkeypatch.setattr(gh, "current_repo", lambda: "acme/widget")
+    # Identity derives LOCALLY from the origin remote (ADR-0024): the patched
+    # remote URL is what identity.resolve_repo parses into the canonical Repo.
     monkeypatch.setattr(gh, "git_remote_url", lambda *, cwd: "git@example:acme/widget")
 
     def boom(spec, *, source_repo, github_url):

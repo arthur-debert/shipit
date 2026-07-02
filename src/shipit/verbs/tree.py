@@ -7,10 +7,10 @@ pure planner; ``list`` / ``remove`` / ``gc`` are sibling verbs, each its own
 ``@tree.command`` block in this module, so concurrent work streams touch disjoint
 lines.
 
-The verb is thin: resolve the ambient repo identity (org/repo, local checkout,
-origin URL) at the gh/git boundary, hand a typed :class:`TreeSpec` to the pure
-planner + effectful orchestrator, and print the READY summary. All the real logic
-lives in :mod:`shipit.tree`.
+The verb is thin: resolve the ambient repo identity — the canonical
+:class:`shipit.identity.Repo`, derived locally from the origin remote (ADR-0024) —
+hand a typed :class:`TreeSpec` to the pure planner + effectful orchestrator, and
+print the READY summary. All the real logic lives in :mod:`shipit.tree`.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from pathlib import Path
 
 import click
 
-from .. import execrun, gh
+from .. import execrun, gh, identity
 from ..session import liveness
 from ..tree import cleanup, layout, provision, registry
 from ..tree.cleanup import Cleanup
@@ -147,16 +147,16 @@ def run_create(
         print("tree create: not inside a git checkout", file=sys.stderr)
         return 1
     try:
-        org_repo = gh.current_repo()
+        # Identity derives LOCALLY from the origin remote (ADR-0024): the one
+        # canonical, case-normalized Repo — never an API slug re-split by hand.
+        repo_identity = identity.resolve_repo(root)
         url = gh.git_remote_url(cwd=root)
-    except execrun.ExecError as exc:
+    except (execrun.ExecError, ValueError) as exc:
         print(f"tree create: {exc}", file=sys.stderr)
         return 1
 
-    org, _, repo = org_repo.partition("/")
     spec = TreeSpec(
-        org=org,
-        repo=repo,
+        repo=repo_identity,
         agent_hash=new_agent_hash(),
         issue=issue,
         session=session,

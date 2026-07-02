@@ -22,15 +22,17 @@ its core through it, so ``head_sha`` is fetched exactly one way and no builder
 hardcodes a core field.
 
 Style per ADR-0021: a thin, frozen, composable value object with logic in free
-functions over it (:func:`core_from_node`, :func:`repo_from_slug`), so the module is
-unit-testable in isolation with plain dicts and fixtures.
+functions over it (:func:`core_from_node`), so the module is unit-testable in
+isolation with plain dicts and fixtures. Slug parsing is NOT here: an
+``owner/name`` string becomes a :class:`~shipit.identity.Repo` through the one
+canonical parser, :func:`shipit.identity.repo_from_slug`.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .identity import Owner, Repo, Sha
+from .identity import Repo, Sha
 
 #: The GitHub ``pullRequest`` node fields the PR core is read from. The
 #: ``gh pr view --json`` field list AND a GraphQL ``pullRequest`` selection set
@@ -116,18 +118,3 @@ def core_from_node(node: dict, repo: Repo) -> PR:
         is_draft=is_draft,
         merge_state=node.get("mergeStateStatus"),
     )
-
-
-def repo_from_slug(slug: str) -> Repo:
-    """Parse an ``owner/name`` slug into a :class:`shipit.identity.Repo`.
-
-    Owner and name are lowercased to match :func:`shipit.identity.resolve_repo`, so a
-    :class:`PR` built from an API-supplied slug shares one identity with the same
-    repo resolved locally from origin. Raises :class:`ValueError` on a slug that is
-    not ``owner/name`` — a malformed slug surfaces loudly rather than yielding a
-    bogus identity.
-    """
-    owner, sep, name = slug.strip().partition("/")
-    if not sep or not owner or not name or "/" in name:
-        raise ValueError(f"not an owner/name slug: {slug!r}")
-    return Repo(owner=Owner(login=owner.lower()), name=name.lower())

@@ -32,8 +32,8 @@ import os
 from dataclasses import dataclass, field
 
 from .. import execrun, gh
-from ..identity import Sha
-from ..pr import PR, core_from_node, repo_from_slug
+from ..identity import Sha, repo_from_slug
+from ..pr import PR, core_from_node
 
 
 class ReviewError(RuntimeError):

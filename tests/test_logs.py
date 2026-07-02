@@ -15,6 +15,7 @@ from pathlib import Path
 from shipit import cli
 from shipit.verbs import logs
 from shipit.execrun import ExecError
+from shipit.identity import repo_from_slug
 
 
 def _record(msg: str, **fields: object) -> str:
@@ -439,7 +440,7 @@ def test_missing_log_file_is_graceful(tmp_path, capsys):
 def test_bad_repo_slug_is_usage_error(tmp_path, capsys):
     rc = logs.run("not-a-slug", path_only=True, base_dir=tmp_path)
     assert rc == 2
-    assert "owner/repo" in capsys.readouterr().err
+    assert "owner/name" in capsys.readouterr().err
 
 
 def test_gh_error_resolving_repo_is_graceful(tmp_path, capsys):
@@ -455,6 +456,30 @@ def test_gh_error_resolving_repo_is_graceful(tmp_path, capsys):
     assert "owner/repo" in err
 
 
+def test_default_repo_resolves_locally_not_via_gh(tmp_path, capsys, monkeypatch):
+    # Reader/writer agreement (COR02): with no explicit repo, the DEFAULT resolves
+    # the cwd repo the SAME way the WRITER namespaces its log — LOCALLY off the
+    # origin remote (identity.resolve_repo) — NOT gh.current_repo. So a log written
+    # in a checkout where `gh` is unavailable is still found. gh.current_repo is
+    # wired to explode to prove the reader never touches it.
+    from shipit import gh, identity
+
+    def gh_boom(*args, **kwargs) -> str:
+        raise ExecError(["gh"], rc=1, stderr="gh unavailable")
+
+    monkeypatch.setattr(gh, "current_repo", gh_boom)
+    monkeypatch.setattr(identity, "resolve_repo", lambda *a, **k: repo_from_slug("o/r"))
+
+    # The writer left a JSONL log under the locally-resolved repo's dir.
+    log = tmp_path / "o" / "r" / "shipit.log"
+    log.parent.mkdir(parents=True)
+    log.write_text(_record("tree opened", tree="w1") + "\n", encoding="utf-8")
+
+    rc = logs.run(base_dir=tmp_path)
+    assert rc == 0
+    assert "tree opened" in capsys.readouterr().out
+
+
 # --------------------------------------------------------------------------
 # Single source of truth — path comes from logsetup, never recomputed here
 # --------------------------------------------------------------------------
@@ -464,8 +489,8 @@ def test_path_comes_from_logsetup_log_file_path(tmp_path, monkeypatch, capsys):
     sentinel = tmp_path / "sentinel" / "shipit.log"
     seen: dict[str, object] = {}
 
-    def fake_log_file_path(owner_repo, *, base_dir=None):
-        seen["owner_repo"] = owner_repo
+    def fake_log_file_path(repo, *, base_dir=None):
+        seen["repo"] = repo
         seen["base_dir"] = base_dir
         return sentinel
 
@@ -473,8 +498,9 @@ def test_path_comes_from_logsetup_log_file_path(tmp_path, monkeypatch, capsys):
     rc = logs.run("o/r", path_only=True, base_dir=tmp_path, current_repo=lambda: "x/y")
     assert rc == 0
     assert capsys.readouterr().out.strip() == str(sentinel)
-    # The reader hands the parsed slug + injected base straight to WS01's accessor.
-    assert seen["owner_repo"] == ("o", "r")
+    # The reader hands the canonically-parsed Repo + injected base straight to
+    # WS01's accessor.
+    assert seen["repo"] == repo_from_slug("o/r")
     assert seen["base_dir"] == tmp_path
 
 
@@ -520,7 +546,7 @@ def test_writer_to_reader_round_trip(tmp_path, capsys):
 
     from shipit import logsetup
 
-    handler = logsetup.build_file_handler(("o", "r"), base_dir=tmp_path)
+    handler = logsetup.build_file_handler(repo_from_slug("o/r"), base_dir=tmp_path)
     logger = logging.getLogger("shipit.roundtrip")
     logger.setLevel(logging.DEBUG)
     # Process-lifetime logger: keep the record off any handlers other tests may

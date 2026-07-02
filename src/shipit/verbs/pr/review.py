@@ -99,11 +99,12 @@ def run_internal_cmd(
     `--help`: humans use `pr review request`, which detaches this.
 
     Logging: the root group callback already configured logging, but it resolves
-    the repo best-effort off cwd (`resolve_current_owner_repo`) — which can degrade
+    the repo best-effort off cwd (`resolve_current_repo`) — which can degrade
     in a terminal-less child and leave the run with NO file sink. This child KNOWS
     its repo deterministically (the `--repo` arg), so it re-wires the OBS01 file
-    sink from that slug — best-effort — so the detached run's diagnostics normally
-    reach `<logdir>/<owner>/<repo>/shipit.log` (OBS03 story 5). A malformed slug or
+    sink from that slug (via the canonical `identity.repo_from_slug` parser) —
+    best-effort — so the detached run's diagnostics normally reach
+    `<logdir>/<owner>/<name>/shipit.log` (OBS03 story 5). A malformed slug or
     logging-setup failure is swallowed (returns False) and never crashes the review.
     """
     from ...logsetup import configure_logging_for_slug

@@ -19,8 +19,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 
-from ..identity import Repo, Sha
-from ..pr import PR, repo_from_slug
+from ..identity import Repo, Sha, repo_from_slug
+from ..pr import PR
 
 
 class ReviewLifecycle(StrEnum):
