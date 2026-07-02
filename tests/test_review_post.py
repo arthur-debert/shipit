@@ -31,7 +31,7 @@ def _ctx() -> ReviewView:
         repo="owner/repo",
         head_sha="deadbeef" * 5,  # a full 40-hex sha (COR02)
         base_ref="main",
-        base_sha="cafe",
+        base_sha="cafe" * 10,  # a full 40-hex sha (PROC03)
         diff=_DIFF,
         is_draft=False,
         changed_files=["foo.py"],
@@ -147,7 +147,7 @@ def test_resolve_repo_falls_back_to_gh_for_handbuilt_context(monkeypatch):
         repo=None,
         head_sha="deadbeef" * 5,  # a full 40-hex sha (COR02)
         base_ref="main",
-        base_sha="cafe",
+        base_sha="cafe" * 10,  # a full 40-hex sha (PROC03)
         diff=_DIFF,
         is_draft=False,
         changed_files=["foo.py"],

@@ -13,11 +13,18 @@ import json
 
 import pytest
 
-from shipit.identity import repo_from_slug
+from shipit.identity import Sha, repo_from_slug
 from shipit.review import diff, post
 
 #: The full 40-hex PR head every stubbed `gh pr view` payload carries (COR02).
 HEAD = "cafe" * 10
+#: The full 40-hex PR base (baseRefOid) the stubbed payloads carry — minted
+#: into a `Sha` at the resolve_pr boundary (PROC03), so the stub must be a
+#: valid full sha.
+BASE = "beef" * 10
+#: The merge base the stubbed `git.merge_base` answers — the adapter returns a
+#: typed `Sha` (PROC03), so the fakes model that contract.
+MERGE_BASE = Sha("ba5e" * 10)
 
 
 def _present_recording(seen: list):
@@ -31,11 +38,12 @@ def _present_recording(seen: list):
 
 
 def _merge_base_recording(seen: list):
-    """A `git.merge_base` fake that records each cwd and answers a fixed sha."""
+    """A `git.merge_base` fake that records each cwd and answers a fixed `Sha`
+    — the adapter's typed return (PROC03)."""
 
     def fake(a, b, *, cwd):
         seen.append(cwd)
-        return "mergebasesha"
+        return MERGE_BASE
 
     return fake
 
@@ -69,12 +77,12 @@ def test_resolve_pr_normalizes_workdir_to_toplevel(monkeypatch):
         "pr_view",
         lambda *a, **k: json.loads(
             '{"number": 5, "isDraft": false, "mergeStateStatus": "CLEAN", "headRefName": "feat", '
-            '"headRefOid": "cafecafecafecafecafecafecafecafecafecafe", "baseRefName": "main", "baseRefOid": "basesha"}'
+            f'"headRefOid": "{HEAD}", "baseRefName": "main", "baseRefOid": "{BASE}"}}'
         ),
     )
     monkeypatch.setattr(diff.git, "commit_present", _present_recording(seen := []))
 
-    seen_diff_specs: list[tuple[str, str]] = []
+    seen_diff_specs: list[tuple[Sha, Sha]] = []
 
     def fake_diff_range(base, head, *, cwd):
         seen.append(cwd)
@@ -93,12 +101,15 @@ def test_resolve_pr_normalizes_workdir_to_toplevel(monkeypatch):
     ctx = diff.resolve_pr(5, workdir="/repo/root/src/deep")
     assert ctx.workdir == "/repo/root"
     # The ReviewView base is the authoritative base sha (baseRefOid), not a local
-    # `origin/<base>` ref.
-    assert ctx.base_sha == "basesha"
+    # `origin/<base>` ref — minted into a typed `Sha` at the boundary (PROC03).
+    assert ctx.base_sha == Sha(BASE)
+    assert isinstance(ctx.base_sha, Sha)
     # The diff endpoint is the MERGE BASE of the authoritative base + head (the PR
     # branch point) — GitHub's three-dot diff — computed explicitly, not the raw
-    # base tip.
-    assert seen_diff_specs == [("mergebasesha", HEAD), ("mergebasesha", HEAD)]
+    # base tip. The endpoints flow through as typed `Sha`s (PROC03) — no raw
+    # string crosses the review-diff path.
+    assert seen_diff_specs == [(MERGE_BASE, Sha(HEAD)), (MERGE_BASE, Sha(HEAD))]
+    assert all(isinstance(end, Sha) for spec in seen_diff_specs for end in spec)
     # Every git invocation ran against the toplevel, not the nested subdir.
     assert set(seen) == {"/repo/root"}
 
@@ -119,12 +130,12 @@ def test_resolve_pr_omitted_repo_canonicalizes_via_gh_not_alias_origin(monkeypat
         "pr_view",
         lambda *a, **k: json.loads(
             '{"number": 5, "isDraft": false, "mergeStateStatus": "CLEAN", '
-            '"headRefName": "feat", "headRefOid": "cafecafecafecafecafecafecafecafecafecafe", '
-            '"baseRefName": "main", "baseRefOid": "basesha"}'
+            f'"headRefName": "feat", "headRefOid": "{HEAD}", '
+            f'"baseRefName": "main", "baseRefOid": "{BASE}"}}'
         ),
     )
     monkeypatch.setattr(diff.git, "commit_present", lambda sha, *, cwd: True)
-    monkeypatch.setattr(diff.git, "merge_base", lambda a, b, *, cwd: "mergebasesha")
+    monkeypatch.setattr(diff.git, "merge_base", lambda a, b, *, cwd: MERGE_BASE)
     monkeypatch.setattr(diff.git, "diff_range", lambda base, head, *, cwd: "the diff\n")
     monkeypatch.setattr(diff.git, "diff_name_only", lambda base, head, *, cwd: [])
 
@@ -161,8 +172,8 @@ def test_resolve_pr_no_common_ancestor_fails_loud(monkeypatch):
         diff.gh,
         "pr_view",
         lambda *a, **k: json.loads(
-            '{"number": 5, "isDraft": false, "mergeStateStatus": "CLEAN", "headRefName": "feat", "headRefOid": "cafecafecafecafecafecafecafecafecafecafe", '
-            '"baseRefName": "main", "baseRefOid": "basesha"}'
+            f'{{"number": 5, "isDraft": false, "mergeStateStatus": "CLEAN", "headRefName": "feat", "headRefOid": "{HEAD}", '
+            f'"baseRefName": "main", "baseRefOid": "{BASE}"}}'
         ),
     )
     monkeypatch.setattr(diff.git, "commit_present", lambda sha, *, cwd: True)
@@ -193,11 +204,28 @@ def test_resolve_pr_missing_base_oid_fails_loud(monkeypatch):
         "pr_view",
         lambda *a, **k: json.loads(
             '{"number": 5, "isDraft": false, "mergeStateStatus": "CLEAN", "headRefName": "feat", '
-            '"headRefOid": "cafecafecafecafecafecafecafecafecafecafe", "baseRefName": "main"}'
+            f'"headRefOid": "{HEAD}", "baseRefName": "main"}}'
         ),
     )
     monkeypatch.setattr(diff.git, "commit_present", lambda sha, *, cwd: True)
     with pytest.raises(diff.ReviewError, match="no base sha"):
+        diff.resolve_pr(5, workdir="/repo/root")
+
+
+def test_resolve_pr_malformed_base_oid_fails_loud(monkeypatch):
+    """A `baseRefOid` that does not validate as a full sha fails loud at the
+    minting boundary (PROC03) — the review never carries a bogus base identity."""
+    monkeypatch.setattr(diff, "_git_toplevel", lambda wd: "/repo/root")
+    monkeypatch.setattr(
+        diff.gh,
+        "pr_view",
+        lambda *a, **k: json.loads(
+            '{"number": 5, "isDraft": false, "mergeStateStatus": "CLEAN", "headRefName": "feat", '
+            f'"headRefOid": "{HEAD}", "baseRefName": "main", "baseRefOid": "not-a-sha"}}'
+        ),
+    )
+    monkeypatch.setattr(diff.git, "commit_present", lambda sha, *, cwd: True)
+    with pytest.raises(diff.ReviewError, match="unusable base sha"):
         diff.resolve_pr(5, workdir="/repo/root")
 
 
@@ -210,14 +238,25 @@ def test_resolve_pr_stale_base_fetch_fails_loud(monkeypatch):
         diff.gh,
         "pr_view",
         lambda *a, **k: json.loads(
-            '{"number": 5, "isDraft": false, "mergeStateStatus": "CLEAN", "headRefName": "feat", "headRefOid": "cafecafecafecafecafecafecafecafecafecafe", '
-            '"baseRefName": "main", "baseRefOid": "basesha"}'
+            f'{{"number": 5, "isDraft": false, "mergeStateStatus": "CLEAN", "headRefName": "feat", "headRefOid": "{HEAD}", '
+            f'"baseRefName": "main", "baseRefOid": "{BASE}"}}'
         ),
     )
     # The head is present; the base sha never becomes present (every fetch is a
-    # no-op — the classic stale/missing `origin/main`).
-    monkeypatch.setattr(diff.git, "commit_present", lambda sha, *, cwd: sha == HEAD)
-    monkeypatch.setattr(diff.git, "fetch_ref", lambda refspec, *, cwd: False)
+    # no-op — the classic stale/missing `origin/main`). The adapter probe takes
+    # the typed identity (PROC03), so the fake compares Sha-to-Sha.
+    monkeypatch.setattr(
+        diff.git, "commit_present", lambda sha, *, cwd: sha == Sha(HEAD)
+    )
+    # `fetch_ref` is the deliberately-str refspec seam: record what crosses it
+    # and pin that the caller stringified the typed sha there.
+    fetched: list = []
+
+    def fake_fetch_ref(refspec, *, cwd):
+        fetched.append(refspec)
+        return False
+
+    monkeypatch.setattr(diff.git, "fetch_ref", fake_fetch_ref)
 
     diff_attempted = False
 
@@ -227,13 +266,17 @@ def test_resolve_pr_stale_base_fetch_fails_loud(monkeypatch):
         return ""
 
     monkeypatch.setattr(diff.git, "diff_range", fake_diff_range)
-    monkeypatch.setattr(diff.git, "merge_base", lambda a, b, *, cwd: "mergebasesha")
+    monkeypatch.setattr(diff.git, "merge_base", lambda a, b, *, cwd: MERGE_BASE)
     monkeypatch.setattr(diff.git, "diff_name_only", lambda base, head, *, cwd: [])
 
-    with pytest.raises(diff.ReviewError, match="base basesha"):
+    with pytest.raises(diff.ReviewError, match=f"base {BASE}"):
         diff.resolve_pr(5, workdir="/repo/root")
     # It failed BEFORE computing any diff — never produced a wrong-base diff.
     assert diff_attempted is False
+    # The bare-sha fetch attempts crossed the refspec seam as plain strings —
+    # the ONE place the typed shas stringify (base branch first, then the sha).
+    assert fetched == ["main", BASE]
+    assert all(isinstance(r, str) for r in fetched)
 
 
 def test_resolve_pr_rejects_non_checkout(monkeypatch):
@@ -250,11 +293,15 @@ def test_review_view_repo_is_slug_when_known():
         repo="owner/repo",
         head_sha="ab" * 20,  # a full 40-hex sha (COR02)
         base_ref="main",
-        base_sha="b",
+        base_sha="ba" * 20,  # a full 40-hex sha — minted into Sha (PROC03)
         diff="",
         is_draft=False,
     )
     assert ctx.repo == "owner/repo"
+    # The builder mints the raw base string into the typed identity, mirroring
+    # head_sha — the composed view is fully typed however it was built.
+    assert ctx.base_sha == Sha("ba" * 20)
+    assert isinstance(ctx.base_sha, Sha)
 
 
 def test_review_view_repo_is_none_for_handbuilt_context():
@@ -267,7 +314,7 @@ def test_review_view_repo_is_none_for_handbuilt_context():
         repo=None,
         head_sha="ab" * 20,  # a full 40-hex sha (COR02)
         base_ref="main",
-        base_sha="b",
+        base_sha="ba" * 20,  # a full 40-hex sha — minted into Sha (PROC03)
         diff="",
         is_draft=False,
     )
