@@ -61,9 +61,7 @@ def known_agents() -> list[str]:
     # (matching this module's raise-don't-fabricate stance) rather than leaking a
     # ``""`` choice into CLI help that would then fail at ``by_funnel_agent("")``.
     return sorted(
-        b.funnel_agent
-        for b in _agent_backend.funnel_backends()
-        if b.funnel_agent
+        b.funnel_agent for b in _agent_backend.funnel_backends() if b.funnel_agent
     )
 
 
