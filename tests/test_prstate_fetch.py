@@ -321,6 +321,22 @@ def test_comment_database_id_must_be_int():
             fetch._thread(node)
 
 
+def test_comment_review_id_none_allowed_but_present_must_be_int():
+    # `review_id` associates the comment with its round in build_rounds();
+    # a detached comment reads as None, but a present value must be an exact
+    # int — a malformed "11" or True must never silently break the association.
+    node = _thread_node()
+    node["comments"]["nodes"][0]["pullRequestReview"] = None
+    assert fetch._thread(node).comments[0].review_id is None
+    for bad in (True, "11"):
+        node = _thread_node()
+        node["comments"]["nodes"][0]["pullRequestReview"] = {"databaseId": bad}
+        with pytest.raises(
+            ValueError, match=r"pullRequestReview\.databaseId must be int"
+        ):
+            fetch._thread(node)
+
+
 def test_commit_id_boundary_none_stays_none_and_present_is_validated():
     """`_commit_id` distinguishes an absent oid from a present-but-malformed one.
 

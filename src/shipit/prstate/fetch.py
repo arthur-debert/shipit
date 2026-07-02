@@ -308,7 +308,7 @@ def gather_reviews(pr: int) -> ReadinessView:
     reviews = []
     for n in pull["reviews"]["nodes"]:
         review_id = n["databaseId"]
-        if isinstance(review_id, bool) or not isinstance(review_id, int):
+        if type(review_id) is not int:
             raise ValueError(
                 f"malformed review node: databaseId must be int, got {review_id!r}"
             )
@@ -522,7 +522,7 @@ def _commit_id(oid: str | None) -> Sha | None:
 
 def _review(raw: dict) -> Review:
     review_id = raw["id"]
-    if isinstance(review_id, bool) or not isinstance(review_id, int):
+    if type(review_id) is not int:
         raise ValueError(f"malformed review payload: id must be int, got {review_id!r}")
     return Review(
         review_id=review_id,
@@ -547,10 +547,19 @@ def _thread(node: dict) -> Thread:
     comments = []
     for c in node["comments"]["nodes"]:
         comment_id = c["databaseId"]
-        if isinstance(comment_id, bool) or not isinstance(comment_id, int):
+        if type(comment_id) is not int:
             raise ValueError(
                 f"malformed review comment node: databaseId must be int, "
                 f"got {comment_id!r}"
+            )
+        # `review_id` ties the comment back to its review round in
+        # `breakers.build_rounds()` — an identity field too. A comment may
+        # carry no review (None), but a present value must be an exact int.
+        review_id = (c.get("pullRequestReview") or {}).get("databaseId")
+        if review_id is not None and type(review_id) is not int:
+            raise ValueError(
+                f"malformed review comment node: pullRequestReview.databaseId "
+                f"must be int, got {review_id!r}"
             )
         comments.append(
             ReviewComment(
@@ -559,7 +568,7 @@ def _thread(node: dict) -> Thread:
                 line=c.get("line") or c.get("originalLine"),
                 body=c.get("body") or "",
                 author=(c.get("author") or {}).get("login", ""),
-                review_id=(c.get("pullRequestReview") or {}).get("databaseId"),
+                review_id=review_id,
             )
         )
     return Thread(
