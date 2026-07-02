@@ -387,11 +387,25 @@ def _sanitize_cause(exc: BaseException) -> BaseException:
     matching the redaction ``ExecError`` applies to its own ``argv``. OS-level
     causes (``FileNotFoundError`` & co.) carry no stream payloads and pass
     through untouched.
+
+    Attribute rewrites alone are not enough: ``BaseException.__new__``
+    snapshots the positional constructor arguments onto ``.args``, and
+    ``repr(exc)`` renders THAT tuple — so ``.args`` must be rebuilt from the
+    sanitized values or the raw ``cmd`` (and any positionally-passed streams)
+    leaks straight through the redacted attributes.
     """
     if isinstance(exc, subprocess.TimeoutExpired):
         exc.output = None  # ``.stdout`` is a property over ``.output``
         exc.stderr = None
-        exc.cmd = [redact.redact_text(str(arg)) for arg in exc.cmd]
+        # ``cmd`` is a str when the child was launched through a shell; this
+        # seam's contract holds for any constructor shape, not just the list
+        # argv :func:`run` itself enforces.
+        exc.cmd = (
+            redact.redact_text(exc.cmd)
+            if isinstance(exc.cmd, str)
+            else [redact.redact_text(str(arg)) for arg in exc.cmd]
+        )
+        exc.args = (exc.cmd, exc.timeout, None, None)[: len(exc.args)]
     return exc
 
 

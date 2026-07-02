@@ -290,6 +290,42 @@ def test_timeout_cause_cmd_is_redacted(monkeypatch, _clean_registry):
     assert "s3cret-value" not in str(cause)
 
 
+def test_timeout_cause_args_tuple_is_sanitized(monkeypatch, _clean_registry):
+    # BaseException.__new__ snapshots the positional constructor arguments onto
+    # .args, and repr(exc) renders THAT tuple — rewriting .cmd/.output/.stderr
+    # alone leaves the raw values reachable via repr(cause) / cause.args. Pass
+    # the streams POSITIONALLY (the worst constructor shape) to pin that .args
+    # is rebuilt from the sanitized values.
+    redact.register_secret("s3cret-value")
+
+    def fake_run(argv, **kwargs):
+        raise subprocess.TimeoutExpired(argv, 0.1, "raw-stdout-payload", "raw-stderr")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(execrun.ExecError) as excinfo:
+        execrun.run(["tool", "--token", "s3cret-value"], timeout=0.1)
+    cause = excinfo.value.__cause__
+    assert cause.args == (cause.cmd, 0.1, None, None)
+    for leak in ("s3cret-value", "raw-stdout-payload", "raw-stderr"):
+        assert leak not in repr(cause)
+        assert leak not in repr(cause.args)
+
+
+def test_timeout_cause_string_cmd_survives_sanitization(_clean_registry):
+    # A TimeoutExpired built with a STRING cmd (shell=True upstream, or any
+    # caller outside run()'s list-argv enforcement) must not be exploded into a
+    # list of single characters by the per-arg redaction — the string is
+    # redacted whole and keeps its diagnostic value.
+    redact.register_secret("s3cret-value")
+    exc = subprocess.TimeoutExpired("tool --token s3cret-value", 0.1, output="raw")
+    sanitized = execrun._sanitize_cause(exc)
+    assert isinstance(sanitized.cmd, str)
+    assert sanitized.cmd.startswith("tool --token ")
+    assert "s3cret-value" not in sanitized.cmd
+    assert "s3cret-value" not in repr(sanitized)
+    assert sanitized.output is None
+
+
 def test_timeout_real_child_cause_is_sanitized():
     # End-to-end: a real killed child's chained TimeoutExpired carries no
     # stream payloads either.
