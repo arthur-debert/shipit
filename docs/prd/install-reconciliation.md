@@ -5,9 +5,9 @@
 > design + verification rationale survives the roadmap's retirement.
 > Decisions: `docs/adr/0003-install-reconciliation-pull-not-push.md` (open a PR,
 > never admin-push) · `architecture.lex §2` (the slow/fast split).
-> Since superseded in part (PROC02, 2026-07): the git primitives this plan put
-> in `gh.py` now live in the dedicated git Tool adapter, `src/shipit/git.py`
-> (ADR-0028; `gh.py` keeps only the `gh` surface).
+> **Since superseded in part (PROC02, 2026-07):** the git primitives this plan put
+> in `src/shipit/gh.py` now live in the dedicated git Tool adapter, `src/shipit/git.py`
+> (ADR-0028; `src/shipit/gh.py` keeps only the `gh` surface).
 
 ## Original design (reproduced)
 
