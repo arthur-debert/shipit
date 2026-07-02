@@ -52,7 +52,7 @@ from typing import Any
 import platformdirs
 import structlog
 
-from . import gh, logcontext
+from . import gh, logcontext, redact
 
 #: The package logger every shipit module logs through (``logging.getLogger``
 #: of a child name propagates here).
@@ -84,31 +84,22 @@ _FILE_HANDLER_NAME = _HANDLER_PREFIX + "file"
 # The processor pipeline — the ONE chain both renderings share (ADR-0029)
 # --------------------------------------------------------------------------
 
-
-def _redact(
-    logger: object, method_name: str, event_dict: MutableMapping[str, Any]
-) -> MutableMapping[str, Any]:
-    """The redaction seam (ADR-0028/0029): every record passes through here
-    after enrichment and before rendering. A no-op until the in-repo redactor
-    lands; it exists NOW so redaction slots into the pipeline without any sink
-    rewiring."""
-    return event_dict
-
-
 #: The one processor pipeline every sink shares — context-merge (bound domain
 #: keys land on the record, absent when unbound) → enrichment (``logger``,
 #: ``level``, ISO-8601-UTC ``ts``, exceptions flattened to a string) → the
-#: redact seam. Applied via :class:`~structlog.stdlib.ProcessorFormatter`'s
-#: ``foreign_pre_chain``, so records from untouched stdlib ``logging`` call
-#: sites (all of shipit today) flow through it; only the renderer differs per
-#: sink (JSONL for the file, human for the surfaces).
+#: central redactor (:mod:`shipit.redact`, ADR-0028/0029: secretsrc-registered
+#: values and token/PEM patterns masked in ``msg`` and extras). Applied via
+#: :class:`~structlog.stdlib.ProcessorFormatter`'s ``foreign_pre_chain``, so
+#: records from untouched stdlib ``logging`` call sites (all of shipit today)
+#: flow through it; only the renderer differs per sink (JSONL for the file,
+#: human for the surfaces).
 _PIPELINE = (
     structlog.contextvars.merge_contextvars,
     structlog.stdlib.add_logger_name,
     structlog.stdlib.add_log_level,
     structlog.processors.TimeStamper(fmt="iso", utc=True, key="ts"),
     structlog.processors.format_exc_info,
-    _redact,
+    redact.redact_event,
 )
 
 
