@@ -193,10 +193,33 @@ behaves and how we ride it.
         a failure survives, inside the raised `ProcError`.
 
     Hooks — `.claude/settings.json`:
-        Every hook is `pixi run shipit hook <name>` (and `SessionStart` is `pixi
-        run -e lint install-hooks`). `shipit` is on PATH because the package is
-        installed editable into each env, not because it is a pixi task. pixi is a
-        transient wrapper per hook firing.
+        Every hook is `pixi run shipit hook <name>` (plus two `SessionStart`
+        entries: `pixi run -e lint install-hooks` and the ADR-0027 activation,
+        `pixi run shipit hook sessionstart`). `shipit` is on PATH because the
+        package is installed editable into each env, not because it is a pixi
+        task. pixi is a transient wrapper per hook firing.
+
+    Coordinator activation — `shipit hook sessionstart` (ADR-0027, Layer A):
+        The top-level (coordinator) Claude Code session is a bare `claude` process
+        with pixi absent from its process tree, so without help every coordinator
+        Bash command needs a manual `pixi run` prefix — the coordinator-side twin
+        of the agent-launch gap `pixi_wrap` closes. The `SessionStart` hook closes
+        it: it detects the toolchain governing the session's cwd (manifest
+        discovery walks up, mirroring pixi's own), captures `pixi shell-hook
+        --json` for the default env (borrow pixi's activation, never re-derive it
+        — ADR-0022), renders the snapshot as `export KEY='value'` lines, and
+        APPENDS them to the file named by `CLAUDE_ENV_FILE`, which Claude Code
+        sources before every Bash tool call. Result: `shipit` / `python` /
+        `pytest` / `ruff` resolve inside the repo's default env with no wrapper
+        and no per-command prefix. The `--json` snapshot is rendered instead of
+        the plain `shell-hook` script because that script ends in a `pixi()`
+        shell FUNCTION wrapper, not pure exports (verified live, pixi 0.63+).
+        Additive, never load-bearing: the committed hooks keep their `pixi run`
+        prefix regardless, a repo with no activatable toolchain is a graceful
+        no-op, and any failure fails OPEN (nothing written, exit 0, DEBUG log).
+        Delivered to every managed repo by `shipit install` — the SessionStart
+        hook line and the `./claude-start` launcher are managed units — so the
+        capability is uniform, not shipit-only.
 
     Agent launch — `src/shipit/spawn/launch.py` + `src/shipit/verbs/spawn.py`:
         The per-backend `BackendAdapter` (`spawn/backends/`) builds the argv

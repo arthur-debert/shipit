@@ -1,7 +1,8 @@
 """install — vendor shipit's managed "slow set" into a consumer and reconcile it.
 
 ``shipit install <path>`` copies the small, file-structure-dependent set (the
-skills, the AGENTS.md block, the bootstrap launcher) into a consumer repo,
+skills, the AGENTS.md block, the bootstrap launcher, the ``./claude-start``
+session launcher, the ``SessionStart`` activation hook) into a consumer repo,
 recording a per-unit pristine ``sha256`` in ``.shipit.toml``. On re-install it
 hash-compares each unit against its stored pristine and opens a DRAFT PR with the
 changes — never an admin push (docs/dev/architecture.lex §2, docs/prd/install-reconciliation.md).
@@ -108,10 +109,23 @@ SETTINGS_STOP_MARKER = "shipit hook stop"
 SETTINGS_SUBAGENTSTOP_KEY = ".claude/settings.json#shipit-subagentstop-hook"
 SETTINGS_SUBAGENTSTOP_MARKER = "shipit hook subagent-stop"
 
+# The SES01 session-bootstrap set (docs/prd/session-bootstrap.md, ADR-0027): the
+# `./claude-start` launcher (Layer D — mint a session id and exec
+# `claude --worktree <id>`; convenience only, `claude -w <name>` works without it)
+# and the SessionStart activation hook line (Layer A — `shipit hook sessionstart`
+# writes the repo's toolchain activation into CLAUDE_ENV_FILE). Both join the
+# managed set so adopting a repo turns the capability on with no manual wiring.
+# The launcher ships like `bin/shipit` (a whole-file bootstrap unit); the hook
+# line is one more JSON-hook unit over the same settings.json, owning its event.
+LAUNCHER_FILE = "claude-start"
+SETTINGS_SESSIONSTART_KEY = ".claude/settings.json#shipit-sessionstart-hook"
+SETTINGS_SESSIONSTART_MARKER = "shipit hook sessionstart"
+
 # The settings.json hooks-event arrays each JSON-hook unit owns one entry of.
 EVENT_PRETOOLUSE = "PreToolUse"
 EVENT_STOP = "Stop"
 EVENT_SUBAGENTSTOP = "SubagentStop"
+EVENT_SESSIONSTART = "SessionStart"
 
 FMT_MARKERS = "markers"  # block splice via open/close comment markers (default)
 FMT_JSON_HOOK = "json-hook"  # block splice into a settings.json hooks-event array
@@ -256,6 +270,19 @@ def load_units() -> list[Unit]:
         )
     )
 
+    # The SES01 `./claude-start` launcher (session-bootstrap Layer D): a repo-root
+    # alias that mints a session id and execs `claude --worktree <id>`, shipped the
+    # same way the bin/shipit bootstrap is.
+    units.append(
+        Unit(
+            key=LAUNCHER_FILE,
+            dest=LAUNCHER_FILE,
+            kind="file",
+            content=_data_bytes("bootstrap", "claude-start"),
+            executable=True,
+        )
+    )
+
     # The lint-check units (docs/prd/lint-checks.md): the thin lefthook caller and the
     # `lint = "shipit lint"` task block in the consumer's pixi.toml.
     units.append(
@@ -293,8 +320,9 @@ def load_units() -> list[Unit]:
 
     # Store each desired entry already canonicalized, so its hash matches a consumer
     # entry extracted + canonicalized through the same function (formatting-immune).
-    # The PreToolUse coordinator-guard (HAR01) plus the HAR02 eval terminal hooks
-    # (Stop = the coordinator run, SubagentStop = each subagent run) are three
+    # The PreToolUse coordinator-guard (HAR01), the HAR02 eval terminal hooks
+    # (Stop = the coordinator run, SubagentStop = each subagent run), and the SES01
+    # SessionStart activation hook (coordinator env into CLAUDE_ENV_FILE) are four
     # JSON-hook units over the SAME settings.json, each owning one event array.
     for key, marker, event, data_file in (
         (
@@ -314,6 +342,12 @@ def load_units() -> list[Unit]:
             SETTINGS_SUBAGENTSTOP_MARKER,
             EVENT_SUBAGENTSTOP,
             "claude-settings-subagentstop.json",
+        ),
+        (
+            SETTINGS_SESSIONSTART_KEY,
+            SETTINGS_SESSIONSTART_MARKER,
+            EVENT_SESSIONSTART,
+            "claude-settings-sessionstart.json",
         ),
     ):
         hook_entry = json.loads(_data_bytes(data_file))

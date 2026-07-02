@@ -21,7 +21,7 @@ pixi is used for four things at once: provisioning native tooling, running tasks
 - Provisioning — `pixi install` materialises a Tree's environment.
 - Hook invocations — every Claude Code hook fires as \`pixi run shipit
 
-  hook \<name\>\` (a transient `pixi run` per firing). - The write-Run agent session — as of PR \#197, \`shipit spawn\` re-expresses the backend argv as `pixi run --manifest-path <tree>/pixi.toml -- <argv>` for a provisioned write Tree, so the agent runs INSIDE its Tree's env [(see](#6), \[\#7\]).
+  hook \<name\>\` (a transient `pixi run` per firing). - The write-Run agent session — as of PR \#197, \`shipit spawn\` re-expresses the backend argv as `pixi run --manifest-path <tree>/pixi.toml -- <argv>` for a provisioned write Tree, so the agent runs INSIDE its Tree's env [(see](#6), [\#7](#7)).
 
 ### What pixi is NOT the parent of:
 
@@ -77,7 +77,7 @@ pixi offers NO plugin API, NO backend SPI, NO event/config hook a tool can live 
 
 Task fields (`depends-on`, `inputs`/`outputs`, `args`, `env`, `cwd`, `clean-env`)
 
-: `depends-on` is pre-task chaining only (`pixi task add --depends-on`, plus `--env`, `--cwd`, `--clean-env`, `--args`) — there is NO native post-task or wrapper hook, so shipit behaviour can hang off the FRONT of a task, not wrap it. `inputs`/`outputs` are glob lists that drive the skip-if-unchanged cache (\[\#2\]); `args` declares named args with defaults/validation; both support MiniJinja templating. An `[environments]` entry can set a `default-environment` for a task.
+: `depends-on` is pre-task chaining only (`pixi task add --depends-on`, plus `--env`, `--cwd`, `--clean-env`, `--args`) — there is NO native post-task or wrapper hook, so shipit behaviour can hang off the FRONT of a task, not wrap it. `inputs`/`outputs` are glob lists that drive the skip-if-unchanged cache ([\#2](#2)); `args` declares named args with defaults/validation; both support MiniJinja templating. An `[environments]` entry can set a `default-environment` for a task.
 
 External `pixi-<name>` subcommands
 
@@ -91,7 +91,11 @@ Provisioning — `src/shipit/tree/create.py`
 
 Hooks — `.claude/settings.json`
 
-: Every hook is `pixi run shipit hook <name>` (and `SessionStart` is \`pixi run -e lint install-hooks\`). `shipit` is on PATH because the package is installed editable into each env, not because it is a pixi task. pixi is a transient wrapper per hook firing.
+: Every hook is `pixi run shipit hook <name>` (plus two `SessionStart` entries: `pixi run -e lint install-hooks` and the ADR-0027 activation, `pixi run shipit hook sessionstart`). `shipit` is on PATH because the package is installed editable into each env, not because it is a pixi task. pixi is a transient wrapper per hook firing.
+
+Coordinator activation — `shipit hook sessionstart` (ADR-0027, Layer A)
+
+: The top-level (coordinator) Claude Code session is a bare `claude` process with pixi absent from its process tree, so without help every coordinator Bash command needs a manual `pixi run` prefix — the coordinator-side twin of the agent-launch gap `pixi_wrap` closes. The `SessionStart` hook closes it: it detects the toolchain governing the session's cwd (manifest discovery walks up, mirroring pixi's own), captures \`pixi shell-hook --json\` for the default env (borrow pixi's activation, never re-derive it — ADR-0022), renders the snapshot as `export KEY='value'` lines, and APPENDS them to the file named by `CLAUDE_ENV_FILE`, which Claude Code sources before every Bash tool call. Result: `shipit` / `python` / `pytest` / `ruff` resolve inside the repo's default env with no wrapper and no per-command prefix. The `--json` snapshot is rendered instead of the plain `shell-hook` script because that script ends in a `pixi()` shell FUNCTION wrapper, not pure exports (verified live, pixi 0.63+). Additive, never load-bearing: the committed hooks keep their `pixi run` prefix regardless, a repo with no activatable toolchain is a graceful no-op, and any failure fails OPEN (nothing written, exit 0, DEBUG log). Delivered to every managed repo by `shipit install` — the SessionStart hook line and the `./claude-start` launcher are managed units — so the capability is uniform, not shipit-only.
 
 Agent launch — `src/shipit/spawn/launch.py` + `src/shipit/verbs/spawn.py`
 
@@ -132,9 +136,9 @@ When the pinned pixi version changes, re-verify before trusting the facts above.
 - `pixi --version` — confirm the new pin; update the stamp.
 - `pixi --help`, `pixi run --help`, `pixi install --help` — re-check for
 
-  any new JSON/structured-output or run-id flag (\[\#3\], \[\#4\]). - `pixi --help` / `pixi --list` — re-check the extension surface for any new plugin/hook mechanism (\[\#5\]). - `pixi info --json`; `ls .pixi/envs/<env>/conda-meta/` and `cat .pixi/envs/<env>/conda-meta/pixi` — re-check the persisted state shape and the two digests (\[\#2\]).
+  any new JSON/structured-output or run-id flag ([\#3](#3), [\#4](#4)). - `pixi --help` / `pixi --list` — re-check the extension surface for any new plugin/hook mechanism ([\#5](#5)). - `pixi info --json`; `ls .pixi/envs/<env>/conda-meta/` and `cat .pixi/envs/<env>/conda-meta/pixi` — re-check the persisted state shape and the two digests ([\#2](#2)).
 
-- `pixi shell-hook --json` — re-check what activation injects (\[\#7\]).
+- `pixi shell-hook --json` — re-check what activation injects ([\#7](#7)).
 - Re-read the integration seams: `_provision`/`run_provision`
 
   (`src/shipit/tree/create.py`), `pixi_wrap`/`scrub_tree_env` (`src/shipit/spawn/launch.py`).
