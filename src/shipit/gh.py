@@ -369,7 +369,7 @@ def pr_core(pr: int, repo: Repo) -> PR:
     """
     from .pr import CORE_JSON_FIELDS, core_from_node
 
-    node = pr_view(str(pr), json_fields=list(CORE_JSON_FIELDS))
+    node = pr_view(str(pr), repo=repo.slug, json_fields=list(CORE_JSON_FIELDS))
     return core_from_node(node, repo)
 
 

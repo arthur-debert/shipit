@@ -224,13 +224,16 @@ def test_pr_core_returns_the_typed_pr_with_sha_head(monkeypatch):
         True,
         "BLOCKED",
     )
-    # Exactly the CORE field list rides the argv — the one wire read (ADR-0024).
+    # Exactly the CORE field list rides the argv — the one wire read (ADR-0024) —
+    # scoped to the explicit repo so the read never depends on the cwd checkout.
     assert calls == [
         [
             "gh",
             "pr",
             "view",
             "7",
+            "--repo",
+            "owner/repo",
             "--json",
             "number,headRefOid,baseRefName,isDraft,mergeStateStatus",
         ]
