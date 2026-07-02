@@ -38,7 +38,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from ... import execrun, gh
+from ... import execrun, git
 from .. import breakglass
 
 #: A single (tool, args) fingerprint occurring MORE than this many times WITHIN ONE
@@ -357,17 +357,17 @@ def exit_hygiene(
     The one impure extractor — a cheap process/fs check gated to the coordinator
     run's end (PRD user story 13; the live-observed failure was a run that idled
     with conflict markers still in the tree). The worktree read goes through the
-    :mod:`shipit.gh` boundary (``git status --porcelain``); a git failure degrades
+    :mod:`shipit.git` adapter (``git status --porcelain``); a git failure degrades
     to ``worktree_clean=None`` rather than raising, honouring the hook's fail-open
     contract. ``list_stray_pids`` is the injectable PID seam (see :func:`_no_stray_pids`).
     """
     try:
-        porcelain = gh.git_status_porcelain(cwd=str(repo_root))
+        dirty = git.status_porcelain(cwd=str(repo_root))
     except execrun.ExecError:
         worktree_clean: bool | None = None
         dirty_file_count: int | None = None
     else:
-        dirty = [line for line in porcelain.splitlines() if line.strip()]
+        # The adapter returns the parsed porcelain lines (one per dirty entry).
         worktree_clean = not dirty
         dirty_file_count = len(dirty)
     stray = list(list_stray_pids())

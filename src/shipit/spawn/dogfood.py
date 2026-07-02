@@ -51,7 +51,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .. import execrun, gh
+from .. import execrun, gh, git
 from ..tree import create as tree_create
 from ..tree import layout
 from . import launch
@@ -356,7 +356,7 @@ def _run_spawn(
 
 def _current_branch(tree_path: str) -> str | None:
     """The branch ``tree_path`` has checked out (``git rev-parse --abbrev-ref HEAD``)."""
-    return gh.git_current_branch(cwd=tree_path)
+    return git.current_branch(cwd=tree_path)
 
 
 def _pixi_runs(tree_path: str) -> tuple[bool, str]:
@@ -394,7 +394,7 @@ def _pixi_runs(tree_path: str) -> tuple[bool, str]:
 def _scratch_dirty(scratch: str) -> str:
     """The scratch checkout's porcelain status (empty = clean). The no-cwd-leak read:
     a write Run rooted in its Tree must leave the scratch checkout untouched."""
-    return gh.git_status_porcelain(cwd=scratch).strip()
+    return "\n".join(git.status_porcelain(cwd=scratch))
 
 
 def _open_pr_heads(repo: str) -> list[str]:

@@ -37,7 +37,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from .. import execrun, gh
+from .. import execrun, git
 
 logger = logging.getLogger("shipit.lint")
 
@@ -216,7 +216,7 @@ def verdict(runs: list[ToolRun]) -> int:
 
 
 def _discover(root: Path) -> list[str]:
-    return gh.git_ls_files(cwd=str(root))
+    return git.ls_files(cwd=str(root))
 
 
 def _shebang(path: Path) -> str | None:

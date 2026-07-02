@@ -23,9 +23,10 @@ The value objects are thin, frozen, and composable (ADR-0021): a
 :class:`WorkingDir` *has-a* :class:`Repo`, a :class:`Repo` *has-an* :class:`Owner`
 — composition, never inheritance (a **Tree** *has* a WorkingDir; the **main
 checkout** is a WorkingDir that is not a Tree). Logic lives in free functions over
-them (``resolve_*``), each taking an injectable git ``boundary`` (defaulting to
-:mod:`shipit.gh`) so the module is unit-testable in isolation with a fake boundary
-and fixtures.
+them (``resolve_*``), each taking an injectable ``boundary`` — the git reads
+default to the :mod:`shipit.git` adapter, the one API-touching resolver to
+:mod:`shipit.gh` — so the module is unit-testable in isolation with a fake
+boundary and fixtures.
 """
 
 from __future__ import annotations
@@ -35,27 +36,33 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Protocol
 
-from . import gh
+from . import gh, git
 
 
 class GitBoundary(Protocol):
-    """The narrow git/gh surface the resolvers depend on — an injected boundary.
+    """The narrow git surface the identity resolvers depend on — an injected boundary.
 
     Captures ONLY the methods the resolvers actually call (ADR-0021's
-    injected-boundary style), not the whole :mod:`shipit.gh` module: the four
-    local, offline git reads that derive identity/revision, plus the one
-    API-touching :meth:`owner_kind` used solely by :func:`resolve_owner_kind`. A
-    :class:`typing.Protocol` (structural) so both the real :mod:`shipit.gh` module
-    and a test's fake satisfy it without inheriting anything.
+    injected-boundary style), not the whole :mod:`shipit.git` adapter: the four
+    local, offline git reads that derive identity/revision. A
+    :class:`typing.Protocol` (structural) so both the real :mod:`shipit.git`
+    module and a test's fake satisfy it without inheriting anything. The one
+    API-touching read used solely by :func:`resolve_owner_kind` lives on its own
+    :class:`OwnerKindBoundary` — the gh/git adapter split (PROC02-WS03) keeps
+    each resolver honest about which tool it rides.
     """
 
-    def git_remote_url(self, *, cwd: str, remote: str = "origin") -> str: ...
+    def remote_url(self, *, cwd: str, remote: str = "origin") -> str: ...
 
     def repo_root(self, *, cwd: str | None = None) -> str | None: ...
 
-    def git_current_branch(self, *, cwd: str) -> str | None: ...
+    def current_branch(self, *, cwd: str) -> str | None: ...
 
-    def git_head_commit(self, *, cwd: str) -> str | None: ...
+    def head_commit(self, *, cwd: str) -> str | None: ...
+
+
+class OwnerKindBoundary(Protocol):
+    """The one API-touching read :func:`resolve_owner_kind` needs (:mod:`shipit.gh`)."""
 
     def owner_kind(self, login: str) -> str: ...
 
@@ -266,11 +273,11 @@ def repo_from_slug(slug: str) -> Repo:
     return Repo(owner=Owner(login=owner.lower()), name=name.lower())
 
 
-def resolve_repo(cwd: str = ".", *, boundary: GitBoundary = gh) -> Repo:
+def resolve_repo(cwd: str = ".", *, boundary: GitBoundary = git) -> Repo:
     """The :class:`Repo` checked out at ``cwd`` — derived LOCALLY from origin.
 
     Reads ``git remote get-url origin`` (via the injected ``boundary``, default
-    :mod:`shipit.gh`) and parses its ``owner/name`` tail — offline and Tree-safe,
+    the :mod:`shipit.git` adapter) and parses its ``owner/name`` tail — offline and Tree-safe,
     deliberately NOT the API-based ``gh.current_repo()``. Raises :class:`shipit.execrun.ExecError`
     when there is no origin remote and :class:`ValueError` when the URL is
     unparseable.
@@ -283,17 +290,17 @@ def resolve_repo(cwd: str = ".", *, boundary: GitBoundary = gh) -> Repo:
     is stable across case-varying origins — the fix belongs at the identity, not at
     each key site.
     """
-    url = boundary.git_remote_url(cwd=cwd)
+    url = boundary.remote_url(cwd=cwd)
     owner_login, name = parse_remote_url(url)
     return Repo(owner=Owner(login=owner_login.lower()), name=name.lower())
 
 
-def resolve_working_dir(cwd: str = ".", *, boundary: GitBoundary = gh) -> WorkingDir:
+def resolve_working_dir(cwd: str = ".", *, boundary: GitBoundary = git) -> WorkingDir:
     """The :class:`WorkingDir` at ``cwd`` — its repo-root path, :class:`Repo`, revision.
 
     The single resolver replacing the ``git rev-parse --show-toplevel``
     re-derivations: the path is the git toplevel (via the one
-    :func:`shipit.gh.repo_root` boundary), falling back to ``cwd`` only when
+    :func:`shipit.git.repo_root` boundary), falling back to ``cwd`` only when
     ``repo_root`` yields nothing. The :class:`Repo` and :class:`Revision` are read
     against that root, so identity and revision describe the same checkout.
 
@@ -306,13 +313,13 @@ def resolve_working_dir(cwd: str = ".", *, boundary: GitBoundary = gh) -> Workin
     root = boundary.repo_root(cwd=cwd) or cwd
     repo = resolve_repo(root, boundary=boundary)
     revision = Revision(
-        branch=boundary.git_current_branch(cwd=root),
-        commit=boundary.git_head_commit(cwd=root),
+        branch=boundary.current_branch(cwd=root),
+        commit=boundary.head_commit(cwd=root),
     )
     return WorkingDir(path=root, repo=repo, revision=revision)
 
 
-def resolve_owner_kind(repo: Repo, *, boundary: GitBoundary = gh) -> OwnerKind:
+def resolve_owner_kind(repo: Repo, *, boundary: OwnerKindBoundary = gh) -> OwnerKind:
     """The :class:`OwnerKind` of ``repo``'s owner — the ONE API-touching resolver.
 
     A lazily-resolved enrichment, NOT part of :class:`Repo` identity: it queries

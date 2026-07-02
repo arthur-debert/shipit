@@ -24,7 +24,7 @@ from importlib import resources
 from pathlib import Path
 
 from .. import checks as checks_mod
-from .. import config, execrun, gh, secretsrc
+from .. import config, execrun, gh, git, secretsrc
 
 logger = logging.getLogger("shipit.ghsetup")
 
@@ -229,7 +229,7 @@ def run(
 ) -> int:
     """Drive the three passes against ``repo`` (current checkout when omitted)."""
     started = time.monotonic()
-    toplevel = gh.repo_root()
+    toplevel = git.repo_root()
     current = None
     if toplevel:
         try:

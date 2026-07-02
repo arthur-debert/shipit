@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from shipit import config, execrun, gh
+from shipit import config, execrun, gh, git
 from shipit.tree import create as create_mod
 from shipit.tree import layout, provision
 from shipit.tree.create import create, create_from_source
@@ -237,9 +237,9 @@ def test_create_provisions_local_only_on_planned_branch_no_origin_side_effects(
     def no_switch(*a, **k):
         raise AssertionError("local-only install must NOT switch branches (#170)")
 
-    monkeypatch.setattr(gh, "git_push", no_push)
+    monkeypatch.setattr(git, "push", no_push)
     monkeypatch.setattr(gh, "pr_create", no_pr)
-    monkeypatch.setattr(gh, "git_switch_create", no_switch)
+    monkeypatch.setattr(git, "switch_create", no_switch)
 
     # Drive the real install through the provisioning boundary in local mode; skip
     # the real pixi/npm spawns. The injected lefthook boundary keeps it hermetic.
@@ -303,7 +303,7 @@ def test_create_rolls_back_partial_tree_on_failure(
     def boom(*args, **kwargs):
         raise ExecError(["gh"], rc=1, stderr="checkout blew up")
 
-    monkeypatch.setattr(gh, "git_checkout_new_branch", boom)
+    monkeypatch.setattr(git, "checkout_new_branch", boom)
 
     with pytest.raises(ExecError):
         create(spec, source_repo=str(reference), github_url=str(remote))
@@ -380,7 +380,7 @@ def test_create_refuses_a_preexisting_dest_without_clobbering_it(
     def boom(*args, **kwargs):
         raise AssertionError("clone must not run when dest already exists")
 
-    monkeypatch.setattr(gh, "git_clone_dissociated", boom)
+    monkeypatch.setattr(git, "clone_dissociated", boom)
 
     with pytest.raises(FileExistsError, match="already exists"):
         create(spec, source_repo=str(reference), github_url=str(remote))
@@ -410,9 +410,9 @@ def _mock_git_boundary(monkeypatch, *, manifests: list[str]):
             )
             (d / name).write_text(content)
 
-    monkeypatch.setattr(gh, "git_clone_dissociated", fake_clone)
-    monkeypatch.setattr(gh, "git_fetch", lambda **k: None)
-    monkeypatch.setattr(gh, "git_checkout_new_branch", lambda *a, **k: None)
+    monkeypatch.setattr(git, "clone_dissociated", fake_clone)
+    monkeypatch.setattr(git, "fetch", lambda **k: None)
+    monkeypatch.setattr(git, "checkout_new_branch", lambda *a, **k: None)
 
 
 def test_create_copies_treeinclude_and_provisions_deps(tmp_path: Path, monkeypatch):

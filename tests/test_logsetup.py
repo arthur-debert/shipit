@@ -587,7 +587,7 @@ def test_case_divergent_sources_land_one_log_dir(tmp_path):
     # so both must resolve the IDENTICAL log directory (ADR-0024) — the canonical
     # Repo identity normalizes, not each key site.
     class _CaseyGit:
-        def git_remote_url(self, *, cwd, remote="origin"):
+        def remote_url(self, *, cwd, remote="origin"):
             return "git@github.com:AcMe/WiDgEt.git"
 
     from shipit.identity import resolve_repo

@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-from shipit import gh
+from shipit import git
 from shipit.execrun import ExecError
 from shipit.identity import repo_from_slug
 from shipit.tree.readonly import (
@@ -191,18 +191,18 @@ def _mock_git_boundary(monkeypatch, *, files):
         for name, body in files.items():
             (d / name).write_text(body)
 
-    monkeypatch.setattr(gh, "git_clone_dissociated", fake_clone)
+    monkeypatch.setattr(git, "clone_dissociated", fake_clone)
     monkeypatch.setattr(
-        gh, "git_fetch", lambda **k: counts.__setitem__("fetch", counts["fetch"] + 1)
+        git, "fetch", lambda **k: counts.__setitem__("fetch", counts["fetch"] + 1)
     )
     monkeypatch.setattr(
-        gh,
-        "git_checkout",
+        git,
+        "checkout",
         lambda *a, **k: counts.__setitem__("checkout", counts["checkout"] + 1),
     )
     monkeypatch.setattr(
-        gh,
-        "git_reset_hard",
+        git,
+        "reset_hard",
         lambda *a, **k: counts.__setitem__("reset", counts["reset"] + 1),
     )
     return counts
@@ -293,8 +293,8 @@ def test_create_readonly_rolls_back_partial_tree_on_failure(tmp_path, monkeypatc
     plan = readonly_plan(repo=REPO, branch="feat/x", root=tmp_path / "trees")
     _mock_git_boundary(monkeypatch, files={"README.md": "hi\n"})
     monkeypatch.setattr(
-        gh,
-        "git_checkout",
+        git,
+        "checkout",
         lambda *a, **k: (_ for _ in ()).throw(ExecError(["gh"], rc=1, stderr="boom")),
     )
 
@@ -313,7 +313,7 @@ def test_create_readonly_refuses_non_clone_in_the_shared_slot(tmp_path, monkeypa
     def boom(*a, **k):
         raise AssertionError("must not clone into an occupied non-clone slot")
 
-    monkeypatch.setattr(gh, "git_clone_dissociated", boom)
+    monkeypatch.setattr(git, "clone_dissociated", boom)
 
     with pytest.raises(FileExistsError, match="not a clone"):
         create_readonly(plan, source_repo="/ref", github_url="url")

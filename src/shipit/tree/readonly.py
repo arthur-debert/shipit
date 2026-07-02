@@ -28,7 +28,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from .. import gh
+from .. import git
 from ..identity import Repo
 from .create import Tree
 from .layout import REVIEW_KIND, repo_dir, sanitize_slug
@@ -149,9 +149,9 @@ def create_readonly(plan: ReadOnlyPlan, *, source_repo: str, github_url: str) ->
     remove_tree(tmp)  # clear any leftover temp from a crashed prior Run
     started = time.monotonic()
     try:
-        gh.git_clone_dissociated(github_url, str(tmp), reference=source_repo)
-        gh.git_fetch(cwd=str(tmp))
-        gh.git_checkout(plan.branch, cwd=str(tmp))
+        git.clone_dissociated(github_url, str(tmp), reference=source_repo)
+        git.fetch(cwd=str(tmp))
+        git.checkout(plan.branch, cwd=str(tmp))
         chmod_readonly(tmp)
     except BaseException:
         # Propagating failure at ERROR with the exception attached (spray
@@ -227,9 +227,9 @@ def _refresh_readonly(dest: Path, branch: str) -> None:
     co-tenant on a stale commit OR with stale (writable) permissions.
     """
     chmod_writable(dest)
-    gh.git_fetch(cwd=str(dest))
-    gh.git_checkout(branch, cwd=str(dest))
-    gh.git_reset_hard(f"origin/{branch}", cwd=str(dest))
+    git.fetch(cwd=str(dest))
+    git.checkout(branch, cwd=str(dest))
+    git.reset_hard(f"origin/{branch}", cwd=str(dest))
     chmod_readonly(dest)
 
 

@@ -18,7 +18,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from shipit import execrun, gh, redact
+from shipit import execrun, gh, git, redact
 from shipit.execrun import ExecError
 
 
@@ -54,8 +54,8 @@ def test_git_helper_states_a_local_timeout(monkeypatch):
         return _fake_proc(stdout="")
 
     monkeypatch.setattr(execrun.subprocess, "run", fake)
-    gh._git(["status", "--porcelain"], cwd="/x")
-    assert seen["kwargs"]["timeout"] == gh._LOCAL_GIT_TIMEOUT
+    git._git(["status", "--porcelain"], cwd="/x")
+    assert seen["kwargs"]["timeout"] == git._LOCAL_TIMEOUT
 
 
 def test_run_failure_raises_execerror(monkeypatch, caplog):

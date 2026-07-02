@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from shipit import config, execrun, gh
+from shipit import config, execrun, gh, git
 from shipit.verbs import install
 from shipit.execrun import ExecError
 
@@ -585,19 +585,19 @@ class _GhRecorder:
         self.hook_activations.append(root)
         return _exec_result(0)
 
-    def git_switch_create(self, branch, *, cwd):
+    def switch_create(self, branch, *, cwd):
         self.calls.append(("switch", branch))
 
-    def git_add(self, paths, *, cwd):
+    def add(self, paths, *, cwd):
         self.calls.append(("add", tuple(paths)))
 
-    def git_commit(self, message, paths, *, cwd):
+    def commit(self, message, paths, *, cwd):
         self.calls.append(("commit", message))
 
-    def git_push(self, branch, *, cwd, remote="origin", force=False):
+    def push(self, branch, *, cwd, remote="origin", force=False):
         self.calls.append(("push", branch))
 
-    def git_current_branch(self, *, cwd):
+    def current_branch(self, *, cwd):
         return "main"
 
     def pr_url_for_head(self, branch, *, cwd=None):
@@ -616,14 +616,14 @@ class _GhRecorder:
 def rec(monkeypatch):
     r = _GhRecorder()
     for name in (
-        "git_switch_create",
-        "git_add",
-        "git_commit",
-        "git_push",
-        "git_current_branch",
-        "pr_url_for_head",
-        "pr_create",
+        "switch_create",
+        "add",
+        "commit",
+        "push",
+        "current_branch",
     ):
+        monkeypatch.setattr(git, name, getattr(r, name))
+    for name in ("pr_url_for_head", "pr_create"):
         monkeypatch.setattr(gh, name, getattr(r, name))
     monkeypatch.setattr(install, "_shipit_version", lambda: "testhash")
     # Inject the lefthook boundary so no test spawns a real `lefthook install`
@@ -846,7 +846,7 @@ def test_local_flag_fails_in_detached_head(tmp_path, monkeypatch, rec):
     # --local commits on the CURRENT branch; in detached HEAD there is none, so
     # git_current_branch is None and install must fail cleanly (exit 1) without
     # committing anything.
-    monkeypatch.setattr(gh, "git_current_branch", lambda *, cwd: None)
+    monkeypatch.setattr(git, "current_branch", lambda *, cwd: None)
     (tmp_path / "AGENTS.md").write_text("# Acme\n")
     rc = install.run(str(tmp_path), local=True)
     assert rc == 1
@@ -872,7 +872,7 @@ def test_gh_failure_is_a_clean_nonzero_exit(tmp_path, monkeypatch, rec):
     def boom(*a, **k):
         raise ExecError(["gh"], rc=1, stderr="no remote configured")
 
-    monkeypatch.setattr(gh, "git_switch_create", boom)
+    monkeypatch.setattr(git, "switch_create", boom)
     (tmp_path / "AGENTS.md").write_text("# Acme\n")
     rc = install.run(str(tmp_path))
     assert rc == 1  # clean exit, not a raised traceback

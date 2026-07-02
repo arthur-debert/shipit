@@ -720,7 +720,7 @@ class _CaseyGit:
     def __init__(self, remote_url):
         self._remote_url = remote_url
 
-    def git_remote_url(self, *, cwd, remote="origin"):
+    def remote_url(self, *, cwd, remote="origin"):
         return self._remote_url
 
 

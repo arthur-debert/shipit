@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from shipit import gh
+from shipit import gh, git
 from shipit.tree import registry
 
 
@@ -64,14 +64,12 @@ def fleet(tmp_path: Path, monkeypatch):
         "HAR02/WS02": {"number": 9, "state": "MERGED", "isDraft": False},
     }
 
-    monkeypatch.setattr(gh, "git_current_branch", lambda *, cwd: state[cwd]["branch"])
-    monkeypatch.setattr(gh, "git_upstream_ref", lambda *, cwd: state[cwd]["base"])
-    monkeypatch.setattr(gh, "git_status_porcelain", lambda *, cwd: state[cwd]["dirty"])
+    monkeypatch.setattr(git, "current_branch", lambda *, cwd: state[cwd]["branch"])
+    monkeypatch.setattr(git, "upstream_ref", lambda *, cwd: state[cwd]["base"])
+    monkeypatch.setattr(git, "status_porcelain", lambda *, cwd: state[cwd]["dirty"])
+    monkeypatch.setattr(git, "ahead_behind", lambda *, cwd: state[cwd]["ahead_behind"])
     monkeypatch.setattr(
-        gh, "git_ahead_behind", lambda *, cwd: state[cwd]["ahead_behind"]
-    )
-    monkeypatch.setattr(
-        gh, "git_unpushed_shas", lambda *, cwd: state[cwd]["unpushed_shas"]
+        git, "unpushed_shas", lambda *, cwd: state[cwd]["unpushed_shas"]
     )
     monkeypatch.setattr(
         gh, "pr_for_head", lambda branch, *, cwd=None: pr_by_branch.get(branch)
@@ -129,10 +127,10 @@ def test_scan_renders_pr_state_label_with_draft(fleet):
 def test_scan_branch_without_pr_has_none(tmp_path: Path, monkeypatch):
     root = tmp_path / "trees"
     clone = _make_clone(root, "acme/widget/issues/1/work-zzzz")
-    monkeypatch.setattr(gh, "git_current_branch", lambda *, cwd: "issues/1/work")
-    monkeypatch.setattr(gh, "git_upstream_ref", lambda *, cwd: None)
-    monkeypatch.setattr(gh, "git_status_porcelain", lambda *, cwd: "")
-    monkeypatch.setattr(gh, "git_ahead_behind", lambda *, cwd: (0, 0))
+    monkeypatch.setattr(git, "current_branch", lambda *, cwd: "issues/1/work")
+    monkeypatch.setattr(git, "upstream_ref", lambda *, cwd: None)
+    monkeypatch.setattr(git, "status_porcelain", lambda *, cwd: "")
+    monkeypatch.setattr(git, "ahead_behind", lambda *, cwd: (0, 0))
     monkeypatch.setattr(gh, "pr_for_head", lambda branch, *, cwd=None: None)
 
     (record,) = registry.scan(root)
@@ -147,10 +145,10 @@ def test_scan_unreadable_pr_renders_unknown_label(tmp_path: Path, monkeypatch):
     # label, distinct from the None a genuinely-PR-less Tree shows.
     root = tmp_path / "trees"
     clone = _make_clone(root, "acme/widget/issues/1/work-zzzz")
-    monkeypatch.setattr(gh, "git_current_branch", lambda *, cwd: "issues/1/work")
-    monkeypatch.setattr(gh, "git_upstream_ref", lambda *, cwd: "origin/main")
-    monkeypatch.setattr(gh, "git_status_porcelain", lambda *, cwd: "")
-    monkeypatch.setattr(gh, "git_ahead_behind", lambda *, cwd: (0, 0))
+    monkeypatch.setattr(git, "current_branch", lambda *, cwd: "issues/1/work")
+    monkeypatch.setattr(git, "upstream_ref", lambda *, cwd: "origin/main")
+    monkeypatch.setattr(git, "status_porcelain", lambda *, cwd: "")
+    monkeypatch.setattr(git, "ahead_behind", lambda *, cwd: (0, 0))
     monkeypatch.setattr(gh, "pr_for_head", lambda branch, *, cwd=None: gh.UNKNOWN)
 
     (record,) = registry.scan(root)
@@ -169,10 +167,10 @@ def test_scan_does_not_descend_into_a_clone(tmp_path: Path, monkeypatch):
     outer = _make_clone(root, "acme/widget/issues/1/work-aaaa")
     (outer / "vendor" / "dep" / ".git").mkdir(parents=True)
 
-    monkeypatch.setattr(gh, "git_current_branch", lambda *, cwd: "issues/1/work")
-    monkeypatch.setattr(gh, "git_upstream_ref", lambda *, cwd: "origin/main")
-    monkeypatch.setattr(gh, "git_status_porcelain", lambda *, cwd: "")
-    monkeypatch.setattr(gh, "git_ahead_behind", lambda *, cwd: (0, 0))
+    monkeypatch.setattr(git, "current_branch", lambda *, cwd: "issues/1/work")
+    monkeypatch.setattr(git, "upstream_ref", lambda *, cwd: "origin/main")
+    monkeypatch.setattr(git, "status_porcelain", lambda *, cwd: "")
+    monkeypatch.setattr(git, "ahead_behind", lambda *, cwd: (0, 0))
     monkeypatch.setattr(gh, "pr_for_head", lambda branch, *, cwd=None: None)
 
     records = registry.scan(root)
@@ -187,10 +185,10 @@ def _patch_trivial_gh(monkeypatch, *, branch_hook=None):
             branch_hook(cwd)
         return "issues/1/work"
 
-    monkeypatch.setattr(gh, "git_current_branch", _branch)
-    monkeypatch.setattr(gh, "git_upstream_ref", lambda *, cwd: "origin/main")
-    monkeypatch.setattr(gh, "git_status_porcelain", lambda *, cwd: "")
-    monkeypatch.setattr(gh, "git_ahead_behind", lambda *, cwd: (0, 0))
+    monkeypatch.setattr(git, "current_branch", _branch)
+    monkeypatch.setattr(git, "upstream_ref", lambda *, cwd: "origin/main")
+    monkeypatch.setattr(git, "status_porcelain", lambda *, cwd: "")
+    monkeypatch.setattr(git, "ahead_behind", lambda *, cwd: (0, 0))
     monkeypatch.setattr(gh, "pr_for_head", lambda branch, *, cwd=None: None)
 
 

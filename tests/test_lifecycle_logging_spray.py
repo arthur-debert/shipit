@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from shipit import execrun, gh
+from shipit import execrun, gh, git
 from shipit.config import SecretSource
 from shipit.session import liveness
 from shipit.verbs import gh_setup, install, lint
@@ -39,20 +39,20 @@ class _GhRecorder:
     def __init__(self):
         self.fail_switch = False
 
-    def git_switch_create(self, branch, *, cwd):
+    def switch_create(self, branch, *, cwd):
         if self.fail_switch:
             raise execrun.ExecError(["git", "switch"], rc=1, stderr="boom")
 
-    def git_add(self, paths, *, cwd):
+    def add(self, paths, *, cwd):
         pass
 
-    def git_commit(self, message, paths, *, cwd):
+    def commit(self, message, paths, *, cwd):
         pass
 
-    def git_push(self, branch, *, cwd, remote="origin", force=False):
+    def push(self, branch, *, cwd, remote="origin", force=False):
         pass
 
-    def git_current_branch(self, *, cwd):
+    def current_branch(self, *, cwd):
         return "main"
 
     def pr_url_for_head(self, branch, *, cwd=None):
@@ -66,14 +66,14 @@ class _GhRecorder:
 def rec(monkeypatch):
     r = _GhRecorder()
     for name in (
-        "git_switch_create",
-        "git_add",
-        "git_commit",
-        "git_push",
-        "git_current_branch",
-        "pr_url_for_head",
-        "pr_create",
+        "switch_create",
+        "add",
+        "commit",
+        "push",
+        "current_branch",
     ):
+        monkeypatch.setattr(git, name, getattr(r, name))
+    for name in ("pr_url_for_head", "pr_create"):
         monkeypatch.setattr(gh, name, getattr(r, name))
     monkeypatch.setattr(install, "_shipit_version", lambda: "testhash")
     monkeypatch.setattr(
