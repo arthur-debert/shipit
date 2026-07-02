@@ -429,7 +429,7 @@ The durable, per-repo, rotating diagnosis record every shipit process writes —
 `logger`, `msg`, plus **domain keys** and event extras, all flat (ADR-0029,
 agents-first). One processor pipeline in `logsetup` (context-merge → enrich →
 **redactor**) feeds every sink; only the final renderer differs — the file gets
-JSON, the console/CI stderr surfaces stay human-formatted. `shipit logs` is its
+JSONL, the console/CI stderr surfaces stay human-formatted. `shipit logs` is its
 reader: the default view renders records legibly, `--raw` passes stored lines
 through for `jq`. The verb reads JSONL ONLY — hard cutover, no format sniffing;
 pre-cutover freeform files age out via rotation.
