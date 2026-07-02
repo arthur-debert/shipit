@@ -565,17 +565,18 @@ def test_run_subagent_child_nonzero_exit_is_exit_1(tmp_path, monkeypatch, capsys
     assert "boom" in err  # the child's stderr is surfaced, not swallowed
 
 
-def test_run_subagent_launch_oserror_is_clean_exit_1(tmp_path, monkeypatch, capsys):
+def test_run_subagent_launch_execerror_is_clean_exit_1(tmp_path, monkeypatch, capsys):
     # The child never starts — `claude` is not installed / not on PATH, so the
-    # launcher raises FileNotFoundError (an OSError). The Tree already exists, so this
-    # is a launch failure, and run_subagent promises a clean exit-1 with a stderr
-    # message, never an escaping traceback.
+    # launcher raises ExecError (PROC01: the Exec runner normalizes the raw
+    # FileNotFoundError, ADR-0028). The Tree already exists, so this is a launch
+    # failure, and run_subagent promises a clean exit-1 with a stderr message,
+    # never an escaping traceback.
     tree_dir = tmp_path / "tree"
     _patch_identity(monkeypatch)
     _fake_create(monkeypatch, tree_dir)
 
     def runner(cmd, *, cwd, env):
-        raise FileNotFoundError("[Errno 2] No such file or directory: 'claude'")
+        raise execrun.ExecError(["claude"], rc=None, cause=execrun.CAUSE_MISSING_BINARY)
 
     rc = spawn_verb.run_subagent(
         repo="widget", epic="TRE03", ws=1, issue=1, role="implementer", launcher=runner
