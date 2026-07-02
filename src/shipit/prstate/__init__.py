@@ -7,19 +7,17 @@ adapters so the core never names a reviewer.
 
 Copied from release-core (ADR-0001: shipit reuses the engine by COPY, never a
 wheel dependency); the pure core is near-byte-for-byte, only relative imports
-are rewritten to `shipit.prstate`. shipit keeps TWO `gh` boundaries (ADR-0002 /
-PRD "two gh boundaries"):
+are rewritten to `shipit.prstate`. The engine's former second `gh` boundary
+(`shipit.prstate.ghapi`) is gone: PROC02-WS01 (ADR-0028, glassbox PRD) merged
+it into the ONE gh Tool adapter, `shipit.gh` — which carries the GraphQL +
+PR-act calls the engine needs, the pagination-merging helper (defined exactly
+once), and the per-tool timeout defaults. The stdlib-only guarantee that once
+justified two boundaries holds trivially across the merge: `shipit.gh` (like
+`shipit.execrun`/`shipit.redact` under it) is itself stdlib-only.
 
-  * `shipit.gh` — the verb-layer boundary (gh-setup / install).
-  * `shipit.prstate.ghapi` — the ENGINE's own boundary, kept distinct: this
-    subpackage is stdlib-only (it runs the same in CI / Claude Cloud / local),
-    adding the GraphQL + PR-act calls the verb-layer boundary lacks. Both shell
-    out to `gh`; the small REST/pagination overlap is intentional and
-    load-bearing for the stdlib-only guarantee here. They are not merged.
-
-Boundary discipline: every GitHub call goes through `ghapi` (shell out to
-`gh`, executed by the one Exec runner `shipit.execrun` — ADR-0028); everything
-else is pure transformation over recorded data, so it unit-tests against
-captured JSON with no network. stdlib only — no third-party runtime deps
-(`shipit.execrun`/`shipit.redact` are themselves stdlib-only).
+Boundary discipline: every GitHub call goes through the `shipit.gh` adapter
+(shell out to `gh`, executed by the one Exec runner `shipit.execrun` —
+ADR-0028); everything else is pure transformation over recorded data, so it
+unit-tests against captured JSON with no network. stdlib only — no
+third-party runtime deps.
 """

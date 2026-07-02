@@ -25,7 +25,8 @@ import logging
 
 import pytest
 from shipit import logcontext
-from shipit.prstate import fetch, ghapi
+from shipit import gh
+from shipit.prstate import fetch
 from shipit.prstate.errors import PrStateError
 from shipit.prstate.reviewers import CodexAdapter, CopilotAdapter, GeminiAdapter
 
@@ -46,9 +47,9 @@ def _graphql_page(review_requests=None, threads=None, timeline=None) -> dict:
 
 
 def _wire_gather(monkeypatch):
-    monkeypatch.setattr(fetch.ghapi, "repo_slug", lambda: ("owner", "repo"))
+    monkeypatch.setattr(fetch.gh, "repo_slug", lambda: ("owner", "repo"))
     monkeypatch.setattr(
-        fetch.ghapi,
+        fetch.gh,
         "pr_meta",
         lambda pr: {
             "number": 558,
@@ -59,8 +60,8 @@ def _wire_gather(monkeypatch):
             "statusCheckRollup": [],
         },
     )
-    monkeypatch.setattr(fetch.ghapi, "graphql", lambda query, **v: _graphql_page())
-    monkeypatch.setattr(fetch.ghapi, "rest", lambda *a, **k: [])
+    monkeypatch.setattr(fetch.gh, "graphql", lambda query, **v: _graphql_page())
+    monkeypatch.setattr(fetch.gh, "rest", lambda *a, **k: [])
 
 
 # --- the fetch milestone ---------------------------------------------------
@@ -96,9 +97,9 @@ def test_gather_binds_the_pr_and_repo_domain_keys(monkeypatch):
 
 
 def test_gather_reviews_records_a_debug_mechanic_with_fields(monkeypatch, caplog):
-    monkeypatch.setattr(fetch.ghapi, "repo_slug", lambda: ("owner", "repo"))
+    monkeypatch.setattr(fetch.gh, "repo_slug", lambda: ("owner", "repo"))
     monkeypatch.setattr(
-        fetch.ghapi,
+        fetch.gh,
         "graphql",
         lambda query, **v: {
             "repository": {
@@ -136,9 +137,7 @@ def _transition_records(caplog):
 
 
 def test_request_placed_is_an_info_transition_record(monkeypatch, caplog):
-    monkeypatch.setattr(
-        ghapi, "pr_edit_reviewer", lambda pr, handle, remove=False: None
-    )
+    monkeypatch.setattr(gh, "pr_edit_reviewer", lambda pr, handle, remove=False: None)
     with caplog.at_level(logging.INFO, logger="shipit.prstate"):
         assert CopilotAdapter().request(41) is True
     transitions = _transition_records(caplog)
@@ -151,9 +150,7 @@ def test_request_placed_is_an_info_transition_record(monkeypatch, caplog):
 
 
 def test_cancel_is_an_info_transition_record(monkeypatch, caplog):
-    monkeypatch.setattr(
-        ghapi, "pr_edit_reviewer", lambda pr, handle, remove=False: None
-    )
+    monkeypatch.setattr(gh, "pr_edit_reviewer", lambda pr, handle, remove=False: None)
     with caplog.at_level(logging.INFO, logger="shipit.prstate"):
         assert CopilotAdapter().cancel(41) is True
     transitions = _transition_records(caplog)
@@ -250,10 +247,10 @@ def test_graphql_semantic_errors_record_error_with_exception(monkeypatch, caplog
     boundary records the propagating semantic failure at ERROR with the
     exception attached, then raises it."""
     payload = {"data": None, "errors": [{"message": "Could not resolve PR"}]}
-    monkeypatch.setattr(ghapi, "_gh", lambda args, **k: json.dumps(payload))
-    with caplog.at_level(logging.ERROR, logger="shipit.prstate"):
+    monkeypatch.setattr(gh, "_run", lambda args, **k: json.dumps(payload))
+    with caplog.at_level(logging.ERROR, logger="shipit.gh"):
         with pytest.raises(PrStateError):
-            ghapi.graphql("query {}", owner="o")
+            gh.graphql("query {}", owner="o")
     errors = [r for r in caplog.records if r.levelno == logging.ERROR]
     assert len(errors) == 1
     # Not just a truthy exc_info: a real PrStateError with a traceback rides the
