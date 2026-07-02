@@ -121,6 +121,11 @@ def test_missing_head_sha_fails_loud():
         core_from_node({"number": 1, "isDraft": False}, REPO)
 
 
+def test_missing_number_fails_loud():
+    with pytest.raises(KeyError):
+        core_from_node({"headRefOid": HEAD, "isDraft": False}, REPO)
+
+
 @pytest.mark.parametrize("bad", [None, "true", 1, 0])
 def test_nonbool_is_draft_fails_loud_not_coerced(bad):
     # A present-but-non-bool `isDraft` (e.g. GitHub returning `null`) must RAISE, not
