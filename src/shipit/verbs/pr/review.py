@@ -155,6 +155,7 @@ def run(pr: int | None = None, *, reviewer: str | None = None) -> int:
     if adapters is None:
         return 1
 
+    resolved: int | None = None
     try:
         resolved = resolve_pr(pr)
         if resolved is None:
@@ -169,7 +170,7 @@ def run(pr: int | None = None, *, reviewer: str | None = None) -> int:
         # A real gh/auth failure OR the local-agent guard (requesting
         # codex-local/agy-local raises a clean PrStateError, not a crash). Both are
         # surfaced as a clean stderr line + non-zero exit.
-        logger.error("pr review request failed", exc_info=True)
+        logger.error("pr review request failed", exc_info=True, extra={"pr": resolved})
         print(f"error: {exc}", file=sys.stderr)
         return 1
 

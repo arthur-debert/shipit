@@ -142,6 +142,7 @@ def run(pr: int | None = None, *, as_json: bool = False) -> int:
     flip). A branch with no PR is a normal report (the act is the human's: create
     a draft PR), exit 0 — matching `pr status`.
     """
+    resolved: int | None = None
     try:
         resolved = resolve_pr(pr)
         if resolved is None:
@@ -162,7 +163,7 @@ def run(pr: int | None = None, *, as_json: bool = False) -> int:
         print(f"refusing to flip: {exc}", file=sys.stderr)
         return 1
     except (execrun.ExecError, PrStateError) as exc:
-        logger.error("pr next failed", exc_info=True)
+        logger.error("pr next failed", exc_info=True, extra={"pr": resolved})
         print(f"error: {exc}", file=sys.stderr)
         return 1
     # The action-taken milestone (LOG02 convergence): the single step this

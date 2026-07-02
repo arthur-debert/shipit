@@ -19,6 +19,7 @@ import logging
 
 import pytest
 
+from shipit.prstate.errors import PrStateError
 from shipit.prstate.state import ChecksState, TaskState, TaskStatus
 from shipit.verbs.pr import next_action as next_verb
 from shipit.verbs.pr import ready as ready_verb
@@ -120,6 +121,23 @@ def test_next_action_taken_is_an_info_milestone_with_the_pr_key(monkeypatch, cap
     assert milestones[0].pr == 42
 
 
+def test_next_action_failure_is_an_error_with_the_pr_key(monkeypatch, caplog):
+    """A gh/state failure AFTER the PR resolved still records the ``pr`` key, so
+    the durable ERROR stays jq-sliceable by PR."""
+    monkeypatch.setattr(next_verb, "resolve_pr", lambda pr: 42)
+    monkeypatch.setattr(next_verb, "required_reviewers", lambda: [])
+
+    def boom(pr):
+        raise PrStateError("gh blew up")
+
+    monkeypatch.setattr(next_verb, "gather", boom)
+    with caplog.at_level(logging.ERROR, logger="shipit.pr"):
+        assert next_verb.run(42) == 1
+    errors = _pr_records(caplog, logging.ERROR)
+    assert len(errors) == 1
+    assert errors[0].pr == 42
+
+
 # --- pr review request: per-reviewer outcomes ----------------------------------
 
 
@@ -174,3 +192,20 @@ def test_dropped_outcome_is_a_warning_record(_request_run, caplog):
     assert len(warnings) == 1
     assert warnings[0].reviewer == "copilot"
     assert warnings[0].pr == 7
+
+
+def test_review_request_failure_is_an_error_with_the_pr_key(monkeypatch, caplog):
+    """A gh/auth failure (or the local-agent guard) AFTER the PR resolved still
+    records the ``pr`` key on its durable ERROR."""
+    monkeypatch.setattr(review_verb, "resolve_pr", lambda pr: 7)
+    monkeypatch.setattr(review_verb, "required_reviewers", lambda: [object()])
+
+    def boom(pr, adapters, force):
+        raise PrStateError("gh blew up")
+
+    monkeypatch.setattr(review_verb, "request_reviewers", boom)
+    with caplog.at_level(logging.ERROR, logger="shipit.pr"):
+        assert review_verb.run(7) == 1
+    errors = _pr_records(caplog, logging.ERROR)
+    assert len(errors) == 1
+    assert errors[0].pr == 7
