@@ -312,7 +312,21 @@ def test_elapsed_seconds_reads_every_posix_etime_shape(etime, seconds):
     assert liveness._elapsed_seconds(etime) == seconds
 
 
-@pytest.mark.parametrize("etime", [None, "", "55", "1:2:3:4", "aa:bb", "-1-00:00"])
+@pytest.mark.parametrize(
+    "etime",
+    [
+        None,
+        "",
+        "55",
+        "1:2:3:4",
+        "aa:bb",
+        "-1-00:00",
+        "1-00:00",  # a day prefix requires a full hh:mm:ss clock
+        "00:60",  # seconds out of range
+        "60:00",  # minutes out of range
+        "05-18:99:00",  # minutes out of range with a day prefix
+    ],
+)
 def test_elapsed_seconds_rejects_non_etime_shapes(etime):
     assert liveness._elapsed_seconds(etime) is None
 

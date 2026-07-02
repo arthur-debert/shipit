@@ -56,13 +56,15 @@ INSTALL_TIMEOUT: float = 30 * 60.0
 def has_default_env(root: str | Path) -> bool:
     """Whether ``root`` carries a provisioned default pixi env (the routing sentinel).
 
-    Pure (a filesystem ``exists`` probe only): ``pixi install`` materializes
-    :data:`DEFAULT_ENV_DIR`, so its presence is the gate for "route this child
-    through ``pixi run``" — absent (a reviewer's read-only Tree, ADR-0018, or a
-    non-pixi repo), wrapping would force a solve into a chmod'd tree or fail
-    outright.
+    Pure (a filesystem ``is_dir`` probe only): ``pixi install`` materializes
+    :data:`DEFAULT_ENV_DIR` as a directory, so its presence is the gate for
+    "route this child through ``pixi run``" — absent (a reviewer's read-only
+    Tree, ADR-0018, or a non-pixi repo), wrapping would force a solve into a
+    chmod'd tree or fail outright. ``is_dir`` (not ``exists``) matches the
+    sentinel's intent: a stray file at that path is not a provisioned env
+    (agy review).
     """
-    return Path(root).joinpath(*DEFAULT_ENV_DIR).exists()
+    return Path(root).joinpath(*DEFAULT_ENV_DIR).is_dir()
 
 
 def run_argv(argv: list[str], root: str | Path) -> list[str]:

@@ -414,14 +414,24 @@ def _elapsed_seconds(etime: object) -> float | None:
     if not dash:
         days_part, clock = "0", etime.strip()
     parts = clock.split(":")
-    if len(parts) not in (2, 3):
+    # POSIX etime is ``[[dd-]hh:]mm:ss``: the bare clock is ``mm:ss`` or
+    # ``hh:mm:ss``, but a day prefix REQUIRES the full ``hh:mm:ss`` — ``1-00:00``
+    # is not a shape ``ps`` emits, so accept it and the day math silently
+    # mis-scales (copilot review).
+    if len(parts) == 3:
+        pass
+    elif len(parts) == 2 and not dash:
+        pass
+    else:
         return None
     try:
         days = int(days_part)
         fields = [int(part) for part in parts]
     except ValueError:
         return None
-    if days < 0 or any(field < 0 for field in fields):
-        return None
     hours, minutes, seconds = [0] * (3 - len(fields)) + fields
+    # ``mm``/``ss`` are 0–59 by construction; a value outside that range is a
+    # malformed row, not a real elapsed time, so degrade it to unverifiable.
+    if days < 0 or hours < 0 or not 0 <= minutes < 60 or not 0 <= seconds < 60:
+        return None
     return float(((days * 24 + hours) * 60 + minutes) * 60 + seconds)
