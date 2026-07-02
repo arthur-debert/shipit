@@ -105,14 +105,18 @@ def _append(env_file: Path, text: str) -> None:
     best-effort restore the file to its pre-hook bytes (truncate back, or remove
     it if this hook created it), then re-raise into the fail-open boundary.
     """
-    existed = env_file.exists()
-    original_size = env_file.stat().st_size if existed else 0
+    # One stat() answers existence AND size atomically — an exists()/stat() pair
+    # would race a concurrent delete between the two calls (TOCTOU).
+    try:
+        original_size: int | None = env_file.stat().st_size
+    except FileNotFoundError:
+        original_size = None
     try:
         with open(env_file, "a", encoding="utf-8") as handle:
             handle.write(text)
     except Exception:
         try:
-            if existed:
+            if original_size is not None:
                 os.truncate(env_file, original_size)
             else:
                 env_file.unlink(missing_ok=True)

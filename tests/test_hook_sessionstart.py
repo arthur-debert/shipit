@@ -108,6 +108,26 @@ def test_export_lines_skip_non_identifier_keys():
     assert activation.export_lines(act) == "export OK=1"
 
 
+def test_activation_scripts_are_not_rendered_their_env_effects_already_are():
+    # pixi EXECUTES activation scripts while computing `shell-hook --json` and
+    # folds their env effects into environment_variables (probed live, pixi 0.71:
+    # a script's `export SCRIPT_VAR=…` appears in the JSON env map). So a
+    # non-empty activation_scripts list changes NOTHING here: the exports already
+    # match `pixi run`'s env, and the script paths themselves must never leak
+    # into the sourced preamble (re-sourcing would double-apply them).
+    toolchain = activation.Toolchain(kind=activation.PIXI, manifest=Path("pixi.toml"))
+    act = Activation(
+        environment_variables={"SCRIPT_VAR": "set-by-script", "DECLARED": "1"},
+        activation_scripts=("/repo/act.sh",),
+    )
+    script = activation.activation_script(toolchain, act)
+    assert script.splitlines() == [
+        "export SCRIPT_VAR=set-by-script",
+        "export DECLARED=1",
+    ]
+    assert "act.sh" not in script
+
+
 def test_export_lines_quote_hostile_values():
     # A value with quotes/spaces/expansions survives sourcing VERBATIM.
     act = Activation(
@@ -291,6 +311,32 @@ def test_torn_write_removes_a_file_the_hook_created(pixi_repo, tmp_path, monkeyp
     )
     assert code == 0
     assert not env_file.exists()
+
+
+def test_append_survives_env_file_vanishing_before_the_write(
+    pixi_repo, tmp_path, monkeypatch
+):
+    # TOCTOU shape: the env file exists when the hook starts but is deleted
+    # before the append. The single-stat existence check must not crash, and the
+    # append recreates the file with the activation lines.
+    env_file = tmp_path / "claude-env"
+    env_file.write_text("export DOOMED=1\n")
+    real_open = builtins.open
+
+    def deleting_open(file, *args, **kwargs):
+        if str(file) == str(env_file):
+            monkeypatch.setattr(builtins, "open", real_open)
+            env_file.unlink(missing_ok=True)  # vanish between stat() and open()
+        return real_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", deleting_open)
+    code = _run(
+        {"cwd": str(pixi_repo)},
+        {"CLAUDE_ENV_FILE": str(env_file)},
+        runner=_fake_runner({}),
+    )
+    assert code == 0
+    assert "export CONDA_DEFAULT_ENV=shipit" in env_file.read_text()
 
 
 def test_unwritable_env_file_fails_open(pixi_repo, tmp_path):

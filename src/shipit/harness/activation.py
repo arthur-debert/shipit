@@ -26,6 +26,16 @@ pixi-blessed pure form: the COMPLETE env-var snapshot activation produces
 computation, never hand-derived), which :func:`export_lines` renders as plain
 ``export KEY='value'`` lines. Pure exports by construction.
 
+**Why ``Activation.activation_scripts`` is deliberately not rendered**: pixi
+EXECUTES activation scripts (``[activation] scripts`` and conda packages') as
+part of computing ``shell-hook --json``, so their env-var effects are already
+folded into ``environment_variables`` — probed live (pixi 0.71): a script's
+``export SCRIPT_VAR=…`` shows up in the JSON env map, with ``activation_scripts``
+merely listing the paths that were run. Rendering the exports therefore matches
+the env ``pixi run`` produces; sourcing the scripts a second time from the
+preamble would double-apply them (and re-admit the non-preamble-safe constructs
+the ``--json`` form exists to avoid).
+
 Everything here is pure (the manifest probe is a filesystem ``is_file`` only,
 table-testable against a tmp dir — the same discipline as ``pixi_wrap``'s gate);
 the I/O — read stdin, shell out to ``pixi shell-hook --json``, write the env
