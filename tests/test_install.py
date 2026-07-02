@@ -9,8 +9,20 @@ from pathlib import Path
 
 import pytest
 
-from shipit import config, gh
+from shipit import config, execrun, gh
 from shipit.verbs import install
+from shipit.execrun import ExecError
+
+
+def _exec_result(rc: int, stdout: str = "", stderr: str = "") -> execrun.ExecResult:
+    """A canned ExecResult for the injected lefthook-activation boundary."""
+    return execrun.ExecResult(
+        argv=("lefthook", "install"),
+        rc=rc,
+        stdout=stdout,
+        stderr=stderr,
+        duration_ms=1,
+    )
 
 
 # --------------------------------------------------------------------------
@@ -571,7 +583,7 @@ class _GhRecorder:
     def activate_hooks(self, root):
         # Stand in for `lefthook install`: record the call, mutate nothing.
         self.hook_activations.append(root)
-        return (0, "")
+        return _exec_result(0)
 
     def git_switch_create(self, branch, *, cwd):
         self.calls.append(("switch", branch))
@@ -616,7 +628,7 @@ def rec(monkeypatch):
     monkeypatch.setattr(install, "_shipit_version", lambda: "testhash")
     # Inject the lefthook boundary so no test spawns a real `lefthook install`
     # (mirrors how lint tests inject run_tool). Real activation is covered
-    # directly against subprocess in test_activate_hooks_* below.
+    # directly against the Exec runner in test_activate_hooks_* below.
     monkeypatch.setattr(install, "_activate_hooks", r.activate_hooks)
     return r
 
@@ -858,7 +870,7 @@ def test_stale_manifest_keys_are_dropped(tmp_path, rec):
 
 def test_gh_failure_is_a_clean_nonzero_exit(tmp_path, monkeypatch, rec):
     def boom(*a, **k):
-        raise gh.GhError("no remote configured")
+        raise ExecError(["gh"], rc=1, stderr="no remote configured")
 
     monkeypatch.setattr(gh, "git_switch_create", boom)
     (tmp_path / "AGENTS.md").write_text("# Acme\n")
@@ -1034,12 +1046,15 @@ def test_reinstall_with_writes_reactivates_idempotently(tmp_path, rec):
     assert len(rec.hook_activations) == 2
 
 
-def test_install_warns_but_succeeds_when_lefthook_missing(tmp_path, monkeypatch, rec):
-    # The boundary reports a missing binary (127); install must still finish its
-    # PR rather than aborting — activation is opportunistic, not a hard-fail check.
+def test_install_warns_but_succeeds_when_activation_fails(tmp_path, monkeypatch, rec):
+    # The boundary reports a failed activation (nonzero rc); install must still
+    # finish its PR rather than aborting — activation is opportunistic, not a
+    # hard-fail check.
     rec.hook_activations.clear()
     monkeypatch.setattr(
-        install, "_activate_hooks", lambda root: (127, "lefthook: not found on PATH")
+        install,
+        "_activate_hooks",
+        lambda root: _exec_result(1, stderr="lefthook: broken config"),
     )
     (tmp_path / "AGENTS.md").write_text("# Acme\n")
     rc = install.run(str(tmp_path))
@@ -1052,47 +1067,98 @@ def test_install_warns_but_succeeds_when_lefthook_missing(tmp_path, monkeypatch,
     assert "lefthook install" in rec.pr_body
 
 
+def test_install_warns_but_succeeds_when_lefthook_missing(
+    tmp_path, monkeypatch, rec, capsys
+):
+    # A missing/unlaunchable lefthook surfaces as the runner's ExecError
+    # (ADR-0028); install must warn — pointing at the canonical recovery — and
+    # still finish its PR rather than aborting.
+    rec.hook_activations.clear()
+
+    def boom(root):
+        raise execrun.ExecError(
+            ["lefthook", "install"], rc=None, cause=execrun.CAUSE_MISSING_BINARY
+        )
+
+    monkeypatch.setattr(install, "_activate_hooks", boom)
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    rc = install.run(str(tmp_path))
+    assert rc == 0
+    assert ("pr_create", True) in rec.calls
+    assert "### Checks activated locally" not in rec.pr_body
+    assert "local activation skipped" in rec.pr_body
+    # Points at the canonical recovery, which works in a consumer repo too.
+    err = capsys.readouterr().err
+    assert "could not activate git hooks" in err
+    assert "not found on PATH" in err
+    assert "lefthook install` to activate the checks" in err
+
+
+def test_install_activation_timeout_does_not_claim_missing_binary(
+    tmp_path, monkeypatch, rec, capsys
+):
+    # A NON-missing-binary transport failure (e.g. a timeout) must not be
+    # mislabelled "not found on PATH": the warning branches on exc.cause and
+    # points at resolving the failure, still ending in the canonical recovery.
+    rec.hook_activations.clear()
+
+    def boom(root):
+        raise execrun.ExecError(
+            ["lefthook", "install"], rc=None, cause=execrun.CAUSE_TIMEOUT
+        )
+
+    monkeypatch.setattr(install, "_activate_hooks", boom)
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    rc = install.run(str(tmp_path))
+    assert rc == 0
+    assert ("pr_create", True) in rec.calls
+    err = capsys.readouterr().err
+    assert "could not activate git hooks" in err
+    assert "not found on PATH" not in err
+    assert "could not run" in err
+    assert "lefthook install` to activate the checks" in err
+
+
 def test_activate_hooks_boundary_runs_lefthook_install(tmp_path, monkeypatch):
-    # The real boundary shells out to `lefthook install` (the install-hooks task
-    # invocation), in the consumer root — never a re-implemented hook writer.
+    # The real boundary hands `lefthook install` to the one Exec runner (the
+    # install-hooks task invocation), in the consumer root, check=False — never
+    # a re-implemented hook writer, never a raised ExecError on a nonzero rc.
     captured = {}
 
-    class _Proc:
-        returncode = 0
-        stdout = "sync hooks: ✔️ pre-commit, ✔️ pre-push\n"
-        stderr = ""
-
-    def fake_run(argv, **kw):
+    def fake_run(argv, *, cwd=None, check=True, **kw):
         captured["argv"] = argv
-        captured["cwd"] = kw.get("cwd")
-        return _Proc()
+        captured["cwd"] = cwd
+        captured["check"] = check
+        return execrun.ExecResult(
+            argv=tuple(argv),
+            rc=0,
+            stdout="sync hooks: ✔️ pre-commit, ✔️ pre-push\n",
+            stderr="",
+            duration_ms=1,
+        )
 
-    monkeypatch.setattr(install.subprocess, "run", fake_run)
-    rc, out = install._activate_hooks(tmp_path)
-    assert rc == 0
+    monkeypatch.setattr(install.execrun, "run", fake_run)
+    result = install._activate_hooks(tmp_path)
+    assert result.ok
     assert captured["argv"] == ["lefthook", "install"]
     assert captured["cwd"] == str(tmp_path)
-    assert "pre-commit" in out
+    assert captured["check"] is False
+    assert "pre-commit" in install._activation_output(result)
 
 
-def test_activate_hooks_boundary_reports_missing_binary(tmp_path, monkeypatch):
-    def boom(*a, **k):
-        raise FileNotFoundError("lefthook")
-
-    monkeypatch.setattr(install.subprocess, "run", boom)
-    rc, out = install._activate_hooks(tmp_path)
-    assert rc == 127
-    # Points at the canonical recovery, which works in a consumer repo too.
-    assert "lefthook install" in out
+def test_activate_hooks_boundary_missing_binary_is_exec_error(tmp_path, monkeypatch):
+    # A binary absent from PATH surfaces as the runner's single transport error,
+    # tagged missing-binary — never a raw FileNotFoundError or a silent skip.
+    monkeypatch.setattr(install, "LEFTHOOK_BINARY", "shipit-no-such-lefthook-xyz")
+    with pytest.raises(execrun.ExecError) as exc_info:
+        install._activate_hooks(tmp_path)
+    assert exc_info.value.cause == execrun.CAUSE_MISSING_BINARY
 
 
-def test_activate_hooks_boundary_reports_unexecutable_binary(tmp_path, monkeypatch):
-    # A present-but-not-executable lefthook raises PermissionError (an OSError);
-    # install must warn, not crash, exactly as for a missing binary.
-    def boom(*a, **k):
-        raise PermissionError("Permission denied")
-
-    monkeypatch.setattr(install.subprocess, "run", boom)
-    rc, out = install._activate_hooks(tmp_path)
-    assert rc == 127
-    assert "lefthook install" in out
+def test_activation_output_joins_streams_with_newline(tmp_path):
+    # Join with a newline so a stdout without a trailing newline does not run
+    # straight into stderr (e.g. `donefatal: ...`) in the warning we print.
+    out = install._activation_output(
+        _exec_result(1, stdout="done", stderr="fatal: broken")
+    )
+    assert out == "done\nfatal: broken"

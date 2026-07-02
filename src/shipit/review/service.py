@@ -32,15 +32,14 @@ from __future__ import annotations
 import json
 import logging
 import re
-import subprocess
 import sys
 from collections.abc import Callable, Mapping, Sequence
 
-from .. import gh, logcontext
+from .. import execrun, gh, logcontext
 from ..pr import CORE_JSON_FIELDS, core_from_node, repo_from_slug
 from . import checkrun, post, producer
 from .backends.base import BackendError
-from .diff import resolve_pr
+from .diff import ReviewError, resolve_pr
 
 #: The review path's logger — a child of the package ``shipit`` logger. A local
 #: review run (start, the backend/agent invoked, and the outcome) is recorded
@@ -161,7 +160,7 @@ def _generate_post_and_close(
             agent, run_repo, run_id, outcome=outcome, detail=str(exc)
         )
         # Record the breadcrumb, then RE-RAISE so the caller still sees the real
-        # review failure (the adapter normalizes it to GhError).
+        # review failure (the adapter normalizes it to PrStateError).
         raise
     except Exception as exc:  # noqa: BLE001 - any other failure is a degraded run
         # The agent errored (missing CLI, crash) or the review POST failed.
@@ -305,9 +304,11 @@ def start_detached_review(
     The breadcrumb create is BEST-EFFORT — a 403 before the ``checks:write``
     re-grant (or any failure) must not fail the request, so the child still runs
     with ``run_id=None`` (no in_progress marker, but the review still posts).
-    ``spawn`` is the injected detach boundary — ``(argv, env)``, default the
-    new-session, no-daemon :func:`_spawn_detached` — and ``find`` the injected
-    reconcile-lookup boundary (default:
+    ``spawn`` is the injected detach boundary — called ``(argv, env)``, default
+    the exec seam's fire-and-forget :func:`shipit.execrun.spawn_detached` (the
+    one deliberate non-Exec, kept in ``execrun`` so all subprocess use stays in
+    one module, ADR-0028; ``env`` carries the ADR-0029 cross-process context) —
+    and ``find`` the injected reconcile-lookup boundary (default:
     :func:`shipit.review.checkrun.find_nonterminal`) — mirrored injectable
     seams so a test asserts reconcile + detach WITHOUT the network or a fork.
 
@@ -350,13 +351,13 @@ def start_detached_review(
         as_app=as_app,
     )
     try:
-        (spawn or _spawn_detached)(argv, child_env)
+        (spawn or execrun.spawn_detached)(argv, env=child_env)
     except Exception as exc:  # noqa: BLE001 - any spawn failure must still close the run
         # The spawn is what the child relies on to reach its terminal close. If it
         # fails AFTER the parent opened the in_progress run, no child will ever
         # close that run — it would hang `in_progress` forever. Close it as failed
         # here (only when a run was actually opened), then re-raise so the reviewer
-        # adapter still normalizes the request failure to `GhError`. (This is only
+        # adapter still normalizes the request failure to `PrStateError`. (This is only
         # the PARENT-observed spawn failure; the child's own self-resolution
         # catch-all is OBS03-WS03's deliverable, issue #41.)
         if run_id is not None:
@@ -490,7 +491,7 @@ def _resolve_target(pr: int) -> tuple[str, str]:
     :func:`resolve_pr` and the readiness path use, so ``head_sha`` is fetched exactly
     one way. It is NOT the full diff resolve — that fetch/merge-base/diff is the
     detached child's work, so the request stays fast. A ``gh``/auth failure
-    PROPAGATES (the reviewer adapter normalizes it to ``GhError``); the breadcrumb
+    PROPAGATES (the reviewer adapter normalizes it to ``PrStateError``); the breadcrumb
     create that follows is the only best-effort step.
     """
     repo = gh.current_repo()
@@ -498,25 +499,25 @@ def _resolve_target(pr: int) -> tuple[str, str]:
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as exc:
-        raise gh.GhError(f"unparseable `gh pr view` output for #{pr}: {exc}") from exc
+        raise ReviewError(f"unparseable `gh pr view` output for #{pr}: {exc}") from exc
     # A truthy non-dict (e.g. a JSON list) would fail on the core read; and a
     # missing/empty `headRefOid` would silently degrade the breadcrumb create to an
     # in-flight reply with no target commit. This is the synchronous validation
-    # path, so both are real failures — raise `GhError` (like the unparseable case
+    # path, so both are real failures — raise `ReviewError` (like the unparseable case
     # above) so the request fails loud instead of degrading, BEFORE building the core.
     if not (isinstance(data, dict) and data.get("headRefOid")):
-        raise gh.GhError(f"`gh pr view` output for #{pr} has no headRefOid: {raw!r}")
+        raise ReviewError(f"`gh pr view` output for #{pr} has no headRefOid: {raw!r}")
     # Both boundary reads can raise raw, untyped errors on a malformed upstream:
     # `repo_from_slug` raises `ValueError` when `gh.current_repo()` returned an
     # empty/non-`owner/name` slug, and `core_from_node` raises `KeyError`/`ValueError`
     # when the node omits a required core key or carries a non-bool `isDraft`. This
-    # is the fast synchronous boundary, so normalize either to `gh.GhError` (like the
+    # is the fast synchronous boundary, so normalize either to `ReviewError` (like the
     # unparseable/headRefOid cases above) — a clear, typed message instead of a raw
     # traceback leaking out of the request path.
     try:
         core = core_from_node(data, repo_from_slug(repo))
     except (ValueError, KeyError) as exc:
-        raise gh.GhError(
+        raise ReviewError(
             f"could not resolve target repo/core for #{pr} from `gh` output "
             f"(repo={repo!r}): {exc}"
         ) from exc
@@ -567,31 +568,6 @@ def _child_argv(
     if instructions_path is not None:
         argv += ["--instructions", instructions_path]
     return argv
-
-
-def _spawn_detached(argv: Sequence[str], env: Mapping[str, str]) -> None:
-    """Spawn ``argv`` as a DETACHED child — survives the parent exiting, no daemon.
-
-    ``start_new_session=True`` puts the child in its own session/process group, so
-    it is not killed when the parent exits and has no controlling terminal; stdio
-    is redirected to ``/dev/null`` because the child's diagnostics go to the OBS01
-    file sink, not a pipe the parent would have to drain. Fire-and-forget: the
-    handle is intentionally not retained — the PR + check run are the only state.
-
-    ``env`` is the child's FULL environment (the caller builds it via
-    :func:`shipit.logcontext.env_export`, so it is the parent's environment plus
-    the ``SHIPIT_LOG_CTX_*`` domain keys the child rebinds at its logging setup —
-    the ADR-0029 cross-process seam).
-    """
-    subprocess.Popen(  # noqa: S603 - argv is built internally, not from user input
-        list(argv),
-        env=dict(env),
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-        close_fds=True,
-    )
 
 
 #: Funnel outcome → (check-run ``conclusion``, output ``title``, output

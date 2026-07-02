@@ -31,13 +31,14 @@ from __future__ import annotations
 import logging
 import os
 import secrets
+import shlex
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
 import platformdirs
 
-from .. import config, gh, proc
+from .. import config, execrun, gh
 from . import include, provision
 from .layout import TreeSpec, central_root, plan
 
@@ -51,6 +52,14 @@ logger = logging.getLogger("shipit.tree")
 #: its file existing, so a repo that uses only one toolchain runs only that step.
 PIXI_MANIFEST = "pixi.toml"
 NPM_MANIFEST = "package.json"
+
+#: The per-step provisioning timeout, in seconds: 30 minutes. Provisioning is the
+#: known long-runner family (ADR-0028 names cold ``pixi install`` / ``npm ci``),
+#: so the runner's 5-minute default would kill legitimate cold installs — but
+#: ``None`` (the pre-WS03 stopgap) let a hung step hang Tree creation forever.
+#: 30 minutes is generous enough for a cold solve+download on a slow link, tight
+#: enough that a wedged step still dies at a known bound with a durable record.
+PROVISION_TIMEOUT: float = 30 * 60.0
 
 #: Bytes of randomness behind an agent hash → 8 hex chars. Enough to keep two
 #: concurrent Trees for the same issue from colliding on disk without bloating the
@@ -195,7 +204,7 @@ def provision_env() -> dict[str, str]:
     A copy of the current environment with the parent's leaked ``PIXI_*`` / Conda
     activation / ADR-0015 build-env project pointers removed (:func:`is_leaked_env_var`).
     Returned as the full env — not an overlay — so :func:`run_provision` can hand it to
-    :func:`shipit.proc.run` with ``replace_env=True``: a merge could re-add the very vars
+    :func:`shipit.execrun.run` with ``replace_env=True``: a merge could re-add the very vars
     we are dropping (they live in ``os.environ``), so removal requires replacing the env,
     not merging onto it. With the project pointers gone, the child ``pixi`` / ``shipit``
     re-resolves the project from its own cwd (the Tree), which is the whole point.
@@ -215,13 +224,31 @@ def provision_env() -> dict[str, str]:
 def run_provision(cmd: list[str], *, cwd: Path, env: dict[str, str]) -> None:
     """Run one provisioning command in the Tree (the patchable provisioning boundary).
 
-    A thin wrapper over :func:`shipit.proc.run` (no shell) so tests assert *which*
+    A thin wrapper over :func:`shipit.execrun.run` (no shell) so tests assert *which*
     commands provisioning would run and *with what env* without spawning ``pixi`` /
     ``npm``. ``env`` is the COMPLETE child environment (built by
     :func:`provision_env`) and is used verbatim (``replace_env=True``) so the
     scrubbed ``PIXI_*`` vars cannot creep back in via a merge over ``os.environ``.
+
+    Every step carries the explicit generous :data:`PROVISION_TIMEOUT` (ADR-0028
+    names cold ``pixi install`` / ``npm ci`` as the legitimate long-runners the
+    5-minute default must not kill; the bound replaces WS01's ``timeout=None``
+    stopgap so a wedged step still dies at a known point). The runner gives every
+    step a durable record — timing on success (DEBUG), and on failure an ERROR
+    record carrying both stream tails, which is exactly where a broken
+    ``pixi install`` writes its real diagnostics — closing the documented
+    "no provisioning logs" gap. On top of the transport record, the step's timing
+    is narrated at INFO on the tree logger, so Tree-birth timing is readable from
+    the domain log without dropping to DEBUG.
     """
-    proc.run(cmd, cwd=str(cwd), env=env, replace_env=True)
+    result = execrun.run(
+        cmd, cwd=str(cwd), env=env, replace_env=True, timeout=PROVISION_TIMEOUT
+    )
+    logger.info(
+        "provision step %s completed in %dms",
+        shlex.join(result.argv),
+        result.duration_ms,
+    )
 
 
 def _provision(dest: Path, *, trees_root: Path) -> None:

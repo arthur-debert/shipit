@@ -1,0 +1,591 @@
+"""Tests for :mod:`shipit.execrun` — the one Exec seam (ADR-0028).
+
+The contract under test, via an injected fake process (monkeypatched
+``subprocess.run``) plus a handful of real, fast children:
+
+- success/failure: an :class:`~shipit.execrun.ExecResult` carrying
+  rc/stdout/stderr/duration, or the single transport error
+  :class:`~shipit.execrun.ExecError` (argv, rc, both streams, duration, cause);
+- timeout: the 5-minute default is enforced, per-call override and ``None``
+  honored, expiry raises ``ExecError`` with a timeout cause and partial output;
+- missing binary / OS launch failures normalize into ``ExecError`` — no raw
+  ``OSError``/``FileNotFoundError`` escapes;
+- record emission: exactly one record per Exec (success DEBUG, failure ERROR
+  with both stream tails), everything redacted;
+- the stdin contract (ADR-0020, carried over from the retired proto-runner):
+  no ``input`` → the child's stdin pinned to ``DEVNULL``;
+- :func:`~shipit.execrun.spawn_detached`, the one deliberate non-Exec: detach
+  semantics (own session, stdio to ``/dev/null``, no handle), the spawn-time
+  record (argv/cwd/pid, redacted), and launch normalization into ``ExecError``.
+"""
+
+from __future__ import annotations
+
+import logging
+import subprocess
+import sys
+
+import pytest
+
+from shipit import execrun, redact
+
+
+def _fake_completed(rc: int = 0, stdout: str = "", stderr: str = ""):
+    def fake_run(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, rc, stdout=stdout, stderr=stderr)
+
+    return fake_run
+
+
+def _capture_kwargs(captured: dict):
+    def fake_run(argv, **kwargs):
+        captured["argv"] = argv
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    return fake_run
+
+
+# ---------------------------------------------------------------------------
+# Result contract
+# ---------------------------------------------------------------------------
+
+
+def test_success_returns_result_with_rc_streams_and_duration(monkeypatch):
+    monkeypatch.setattr(
+        subprocess, "run", _fake_completed(rc=0, stdout="out", stderr="err")
+    )
+    result = execrun.run(["tool", "arg"])
+    assert result.argv == ("tool", "arg")
+    assert result.rc == 0
+    assert result.ok
+    assert result.stdout == "out"
+    assert result.stderr == "err"
+    assert result.duration_ms >= 0
+
+
+def test_nonzero_with_check_raises_execerror_with_full_contract(monkeypatch):
+    monkeypatch.setattr(
+        subprocess, "run", _fake_completed(rc=3, stdout="partial out", stderr="boom")
+    )
+    with pytest.raises(execrun.ExecError) as excinfo:
+        execrun.run(["tool", "arg"])
+    err = excinfo.value
+    assert err.argv == ("tool", "arg")
+    assert err.rc == 3
+    assert err.stdout == "partial out"
+    assert err.stderr == "boom"
+    assert err.duration_ms >= 0
+    assert err.cause == execrun.CAUSE_EXIT
+    assert "boom" in str(err)
+
+
+def test_nonzero_with_check_false_returns_result(monkeypatch):
+    monkeypatch.setattr(subprocess, "run", _fake_completed(rc=1, stderr="dead"))
+    result = execrun.run(["ps", "-p", "999999"], check=False)
+    assert result.rc == 1
+    assert not result.ok
+
+
+# ---------------------------------------------------------------------------
+# Missing binary / OS normalization
+# ---------------------------------------------------------------------------
+
+
+def test_missing_binary_normalizes_into_execerror(monkeypatch):
+    def fake_run(argv, **kwargs):
+        raise FileNotFoundError(2, "No such file or directory", argv[0])
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(execrun.ExecError) as excinfo:
+        execrun.run(["no-such-binary"])
+    err = excinfo.value
+    assert err.cause == execrun.CAUSE_MISSING_BINARY
+    assert err.rc is None
+    # The OS exception rides as the chained cause, never as the raised type.
+    assert isinstance(err.__cause__, FileNotFoundError)
+
+
+def test_other_oserror_normalizes_into_execerror(monkeypatch):
+    def fake_run(argv, **kwargs):
+        raise PermissionError(13, "Permission denied", argv[0])
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(execrun.ExecError) as excinfo:
+        execrun.run(["locked-down"])
+    assert excinfo.value.cause == execrun.CAUSE_OS
+    assert excinfo.value.rc is None
+
+
+def test_missing_cwd_normalizes_to_os_error_not_missing_binary(monkeypatch):
+    # A missing cwd raises FileNotFoundError too, but names the DIRECTORY, not
+    # argv[0]: it must classify as an OS error, not masquerade as a missing
+    # binary (which would mislead callers branching on the cause).
+    def fake_run(argv, **kwargs):
+        raise FileNotFoundError(2, "No such file or directory", kwargs["cwd"])
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(execrun.ExecError) as excinfo:
+        execrun.run(["tool"], cwd="/no/such/dir")
+    assert excinfo.value.cause == execrun.CAUSE_OS
+
+
+def test_missing_cwd_real_child():
+    # End-to-end: a genuinely absent cwd surfaces as the transport error with
+    # the OS cause, not the missing-binary cause.
+    with pytest.raises(execrun.ExecError) as excinfo:
+        execrun.run(["true"], cwd="/shipit/no/such/dir/xyzzy")
+    assert excinfo.value.cause == execrun.CAUSE_OS
+
+
+def test_missing_binary_real_child():
+    # End-to-end: a genuinely absent binary raises the transport error, not a
+    # raw FileNotFoundError.
+    with pytest.raises(execrun.ExecError) as excinfo:
+        execrun.run(["shipit-no-such-binary-xyzzy"])
+    assert excinfo.value.cause == execrun.CAUSE_MISSING_BINARY
+
+
+def test_undecodable_output_replaced_not_raised():
+    # End-to-end: a real child that writes bytes undecodable in the runner's
+    # encoding must still yield an ExecResult (with the bad bytes replaced), not
+    # let a raw UnicodeDecodeError escape and bypass the one-error contract.
+    result = execrun.run(
+        [sys.executable, "-c", r'import sys; sys.stdout.buffer.write(b"\xff\xfe ok")']
+    )
+    assert result.ok
+    assert "ok" in result.stdout
+    assert "�" in result.stdout  # the U+FFFD replacement char
+
+
+# ---------------------------------------------------------------------------
+# Timeout
+# ---------------------------------------------------------------------------
+
+
+def test_default_timeout_is_five_minutes(monkeypatch):
+    captured: dict = {}
+    monkeypatch.setattr(subprocess, "run", _capture_kwargs(captured))
+    execrun.run(["tool"])
+    assert captured["timeout"] == execrun.DEFAULT_TIMEOUT == 300.0
+
+
+def test_timeout_override_and_none_are_honored(monkeypatch):
+    captured: dict = {}
+    monkeypatch.setattr(subprocess, "run", _capture_kwargs(captured))
+    execrun.run(["tool"], timeout=1800.0)
+    assert captured["timeout"] == 1800.0
+    execrun.run(["tool"], timeout=None)
+    assert captured["timeout"] is None
+
+
+def test_timeout_expiry_raises_execerror_with_partial_output(monkeypatch):
+    def fake_run(argv, **kwargs):
+        raise subprocess.TimeoutExpired(
+            argv, 0.1, output="partial stdout", stderr="partial stderr"
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(execrun.ExecError) as excinfo:
+        execrun.run(["slow-tool"], timeout=0.1)
+    err = excinfo.value
+    assert err.cause == execrun.CAUSE_TIMEOUT
+    assert err.rc is None
+    assert err.stdout == "partial stdout"
+    assert err.stderr == "partial stderr"
+
+
+def test_timeout_partial_bytes_output_normalized(monkeypatch):
+    # subprocess attaches partial streams as BYTES on some paths even in text
+    # mode; the runner must normalize rather than crash on the type.
+    def fake_run(argv, **kwargs):
+        raise subprocess.TimeoutExpired(argv, 0.1, output=b"partial", stderr=None)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(execrun.ExecError) as excinfo:
+        execrun.run(["slow-tool"], timeout=0.1)
+    assert excinfo.value.stdout == "partial"
+    assert excinfo.value.stderr == ""
+
+
+def test_timeout_real_child_is_killed():
+    # End-to-end: a real hanging child dies at the timeout and surfaces as the
+    # transport error with the timeout cause — nothing hangs by default.
+    with pytest.raises(execrun.ExecError) as excinfo:
+        execrun.run([sys.executable, "-c", "import time; time.sleep(30)"], timeout=0.2)
+    assert excinfo.value.cause == execrun.CAUSE_TIMEOUT
+
+
+# ---------------------------------------------------------------------------
+# secret_stdout — a secret-bearing stdout channel never rides a failure
+# ---------------------------------------------------------------------------
+
+
+def test_secret_stdout_suppresses_partial_stdout_on_timeout(monkeypatch, caplog):
+    # A killed secret fetch: subprocess attaches the partial secret it had
+    # written to stdout. With secret_stdout the runner must swap that for the
+    # placeholder on BOTH the raised error and the one ERROR record — the secret
+    # is not yet registered with the redactor, so suppression is the only guard.
+    def fake_run(argv, **kwargs):
+        raise subprocess.TimeoutExpired(
+            argv, 0.1, output="s3cret-plaintext", stderr="doppler: deadline"
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with caplog.at_level(logging.DEBUG, logger="shipit.exec"):
+        with pytest.raises(execrun.ExecError) as excinfo:
+            execrun.run(["doppler", "secrets", "get"], timeout=0.1, secret_stdout=True)
+    err = excinfo.value
+    assert err.cause == execrun.CAUSE_TIMEOUT
+    assert err.stdout == execrun.SECRET_STDOUT_PLACEHOLDER
+    assert "s3cret-plaintext" not in err.stdout
+    # stderr diagnostics survive — only the secret-bearing channel is dropped.
+    assert err.stderr == "doppler: deadline"
+    full_log = "\n".join(r.getMessage() for r in caplog.records)
+    assert "s3cret-plaintext" not in full_log
+
+
+def test_secret_stdout_success_still_returns_the_real_stdout(monkeypatch):
+    # The suppression is failure-only: a completed fetch must hand the caller the
+    # real secret (and a completed check=False run records argv only anyway).
+    monkeypatch.setattr(subprocess, "run", _fake_completed(rc=0, stdout="s3cret\n"))
+    result = execrun.run(["doppler", "get"], check=False, secret_stdout=True)
+    assert result.stdout == "s3cret\n"
+
+
+def test_secret_stdout_suppresses_stdout_on_nonzero_under_check(monkeypatch):
+    # If a secret call is run under check=True, a nonzero exit still scrubs the
+    # secret-bearing stdout from the raised error.
+    monkeypatch.setattr(
+        subprocess, "run", _fake_completed(rc=1, stdout="s3cret", stderr="denied")
+    )
+    with pytest.raises(execrun.ExecError) as excinfo:
+        execrun.run(["doppler", "get"], secret_stdout=True)
+    assert excinfo.value.stdout == execrun.SECRET_STDOUT_PLACEHOLDER
+    assert excinfo.value.stderr == "denied"
+
+
+# ---------------------------------------------------------------------------
+# Record emission — exactly one record per Exec
+# ---------------------------------------------------------------------------
+
+
+def test_success_emits_exactly_one_debug_record(monkeypatch, caplog):
+    monkeypatch.setattr(subprocess, "run", _fake_completed(rc=0, stdout="ok"))
+    with caplog.at_level(logging.DEBUG, logger="shipit.exec"):
+        execrun.run(["tool", "arg"], cwd="/work")
+    records = [r for r in caplog.records if r.name == "shipit.exec"]
+    assert len(records) == 1
+    assert records[0].levelno == logging.DEBUG
+    message = records[0].getMessage()
+    assert "tool arg" in message
+    assert "/work" in message
+    assert "rc=0" in message
+    assert "ms" in message
+
+
+def test_check_false_nonzero_records_at_debug_not_error(monkeypatch, caplog):
+    # A nonzero rc the caller declared normal (check=False) is not a failure:
+    # probing a dead pid must not spam the WARNING+ console sink.
+    monkeypatch.setattr(subprocess, "run", _fake_completed(rc=1))
+    with caplog.at_level(logging.DEBUG, logger="shipit.exec"):
+        execrun.run(["ps", "-p", "1"], check=False)
+    records = [r for r in caplog.records if r.name == "shipit.exec"]
+    assert len(records) == 1
+    assert records[0].levelno == logging.DEBUG
+
+
+def test_failure_emits_exactly_one_error_record_with_both_tails(monkeypatch, caplog):
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        _fake_completed(rc=2, stdout="the stdout diagnostics", stderr="the stderr"),
+    )
+    with caplog.at_level(logging.DEBUG, logger="shipit.exec"):
+        with pytest.raises(execrun.ExecError):
+            execrun.run(["pixi", "install"], cwd="/tree")
+    records = [r for r in caplog.records if r.name == "shipit.exec"]
+    assert len(records) == 1
+    assert records[0].levelno == logging.ERROR
+    message = records[0].getMessage()
+    assert "pixi install" in message
+    assert "/tree" in message
+    assert "rc=2" in message
+    assert "the stdout diagnostics" in message  # stdout tail preserved (PRD gap)
+    assert "the stderr" in message
+
+
+# ---------------------------------------------------------------------------
+# Redaction — everything logged or raised passes through the central redactor
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def _clean_registry():
+    redact.clear_registered_secrets()
+    yield
+    redact.clear_registered_secrets()
+
+
+def test_error_and_record_are_redacted(monkeypatch, caplog, _clean_registry):
+    redact.register_secret("s3cret-value")
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        _fake_completed(rc=1, stdout="ghp_abc123token", stderr="leaked s3cret-value"),
+    )
+    with caplog.at_level(logging.DEBUG, logger="shipit.exec"):
+        with pytest.raises(execrun.ExecError) as excinfo:
+            execrun.run(["tool", "--token", "s3cret-value"])
+    err = excinfo.value
+    # Raised channel: message and every attribute are masked.
+    for text in (str(err), err.stderr, err.stdout, " ".join(err.argv)):
+        assert "s3cret-value" not in text
+        assert "ghp_abc123token" not in text
+    # Logged channel: the one record is masked too.
+    full_log = "\n".join(r.getMessage() for r in caplog.records)
+    assert "s3cret-value" not in full_log
+    assert "ghp_abc123token" not in full_log
+
+
+def test_success_record_argv_is_redacted(monkeypatch, caplog, _clean_registry):
+    monkeypatch.setattr(subprocess, "run", _fake_completed(rc=0))
+    with caplog.at_level(logging.DEBUG, logger="shipit.exec"):
+        execrun.run(["curl", "-H", "Authorization: ghp_tok3nvalue"])
+    full_log = "\n".join(r.getMessage() for r in caplog.records)
+    assert "ghp_tok3nvalue" not in full_log
+    assert redact.MASK in full_log
+
+
+def test_success_record_cwd_is_redacted(monkeypatch, caplog, _clean_registry):
+    # cwd is a logged field, so it passes through the redactor too: a secret in
+    # the working-directory path must not leak via the success record.
+    redact.register_secret("s3cret-dir")
+    monkeypatch.setattr(subprocess, "run", _fake_completed(rc=0))
+    with caplog.at_level(logging.DEBUG, logger="shipit.exec"):
+        execrun.run(["tool"], cwd="/work/s3cret-dir/clone")
+    full_log = "\n".join(r.getMessage() for r in caplog.records)
+    assert "s3cret-dir" not in full_log
+    assert redact.MASK in full_log
+
+
+def test_failure_record_cwd_is_redacted(monkeypatch, caplog, _clean_registry):
+    # Same contract on the failure record, which logs cwd via _record_failure.
+    redact.register_secret("s3cret-dir")
+    monkeypatch.setattr(subprocess, "run", _fake_completed(rc=2, stderr="boom"))
+    with caplog.at_level(logging.DEBUG, logger="shipit.exec"):
+        with pytest.raises(execrun.ExecError):
+            execrun.run(["tool"], cwd="/work/s3cret-dir/clone")
+    full_log = "\n".join(r.getMessage() for r in caplog.records)
+    assert "s3cret-dir" not in full_log
+    assert redact.MASK in full_log
+
+
+def test_argv_non_string_elements_are_coerced(monkeypatch, caplog, _clean_registry):
+    # subprocess.run natively accepts Path/numeric argv elements; the seam
+    # coerces them to str so the record and ExecResult.argv are honest strings
+    # and redaction never crashes on a non-str element.
+    import pathlib
+
+    monkeypatch.setattr(subprocess, "run", _fake_completed(rc=0))
+    with caplog.at_level(logging.DEBUG, logger="shipit.exec"):
+        result = execrun.run(["tool", pathlib.Path("/some/path"), 42])
+    assert result.argv == ("tool", "/some/path", "42")
+    assert all(isinstance(a, str) for a in result.argv)
+    message = "\n".join(r.getMessage() for r in caplog.records)
+    assert "/some/path" in message
+
+
+# ---------------------------------------------------------------------------
+# Env and stdin plumbing (semantics carried over from the proto-runner)
+# ---------------------------------------------------------------------------
+
+
+def test_env_merges_over_environ_by_default(monkeypatch):
+    captured: dict = {}
+    monkeypatch.setattr(subprocess, "run", _capture_kwargs(captured))
+    monkeypatch.setenv("KEEP_ME", "yes")
+    execrun.run(["tool"], env={"LC_ALL": "C"})
+    assert captured["env"]["LC_ALL"] == "C"
+    assert captured["env"]["KEEP_ME"] == "yes"
+
+
+def test_replace_env_uses_env_verbatim(monkeypatch):
+    captured: dict = {}
+    monkeypatch.setattr(subprocess, "run", _capture_kwargs(captured))
+    monkeypatch.setenv("PIXI_PROJECT_MANIFEST", "/parent/pixi.toml")
+    execrun.run(["tool"], env={"ONLY": "this"}, replace_env=True)
+    assert captured["env"] == {"ONLY": "this"}
+
+
+def test_no_env_passes_none(monkeypatch):
+    captured: dict = {}
+    monkeypatch.setattr(subprocess, "run", _capture_kwargs(captured))
+    execrun.run(["tool"])
+    assert captured["env"] is None
+
+
+def test_run_redirects_stdin_from_devnull_when_no_input(monkeypatch):
+    """With no ``input``, the child's stdin is pinned to ``DEVNULL`` (ADR-0020).
+
+    Inheriting the parent's stdin is the root cause of the intermittent agy
+    hang: a child that reads an idle inherited pipe blocks forever.
+    """
+    captured: dict = {}
+    monkeypatch.setattr(subprocess, "run", _capture_kwargs(captured))
+    execrun.run(["true"])
+    assert captured["stdin"] is subprocess.DEVNULL
+    # input must be None (not piped) so the DEVNULL redirect is the one in
+    # effect — passing both input and stdin to subprocess.run is a ValueError.
+    assert captured["input"] is None
+
+
+def test_run_leaves_stdin_to_subprocess_when_input_given(monkeypatch):
+    """When ``input`` IS supplied, ``stdin`` is left as ``None`` for subprocess."""
+    captured: dict = {}
+    monkeypatch.setattr(subprocess, "run", _capture_kwargs(captured))
+    execrun.run(["cat"], input="hello")
+    assert captured["stdin"] is None
+    assert captured["input"] == "hello"
+
+
+def test_run_does_not_hang_on_stdin_reading_child():
+    """End-to-end: a child that reads ALL of stdin returns promptly, not hangs."""
+    result = execrun.run([sys.executable, "-c", "import sys; sys.stdin.read()"])
+    assert result.rc == 0
+
+
+# ---------------------------------------------------------------------------
+# spawn_detached — the seam's one deliberate non-Exec (fire-and-forget)
+# ---------------------------------------------------------------------------
+
+
+class _FakePopen:
+    pid = 4321
+
+    def __init__(self, captured: dict):
+        self._captured = captured
+
+    def __call__(self, argv, **kwargs):
+        self._captured["argv"] = argv
+        self._captured.update(kwargs)
+        return self
+
+
+def test_spawn_detached_semantics(monkeypatch):
+    """Own session, all three stdio streams to /dev/null, fds closed, no wait:
+    the exact Popen semantics the review path's original detach carried."""
+    captured: dict = {}
+    monkeypatch.setattr(subprocess, "Popen", _FakePopen(captured))
+    assert execrun.spawn_detached(["tool", "--flag"]) is None  # no handle retained
+    assert captured["argv"] == ["tool", "--flag"]
+    assert captured["stdin"] is subprocess.DEVNULL
+    assert captured["stdout"] is subprocess.DEVNULL
+    assert captured["stderr"] is subprocess.DEVNULL
+    assert captured["start_new_session"] is True
+    assert captured["close_fds"] is True
+
+
+def test_spawn_detached_coerces_argv_to_str(monkeypatch):
+    import pathlib
+
+    captured: dict = {}
+    monkeypatch.setattr(subprocess, "Popen", _FakePopen(captured))
+    execrun.spawn_detached(["tool", pathlib.Path("/some/path"), 42])
+    assert captured["argv"] == ["tool", "/some/path", "42"]
+    assert all(isinstance(a, str) for a in captured["argv"])
+
+
+def test_spawn_detached_emits_one_debug_record_with_argv_cwd_pid(monkeypatch, caplog):
+    """One structured record at spawn time (glassbox story 3): the detached
+    child stays on the causal record chain — argv, cwd, and the pid a reader
+    correlates the child's own records back to."""
+    captured: dict = {}
+    monkeypatch.setattr(subprocess, "Popen", _FakePopen(captured))
+    with caplog.at_level(logging.DEBUG, logger="shipit.exec"):
+        execrun.spawn_detached(["tool", "--flag"], cwd="/work/tree")
+    records = [r for r in caplog.records if r.name == "shipit.exec"]
+    assert len(records) == 1
+    assert records[0].levelno == logging.DEBUG
+    message = records[0].getMessage()
+    assert "tool --flag" in message
+    assert "/work/tree" in message
+    assert "pid=4321" in message
+
+
+def test_spawn_detached_record_is_redacted(monkeypatch, caplog, _clean_registry):
+    redact.register_secret("s3cret-value")
+    captured: dict = {}
+    monkeypatch.setattr(subprocess, "Popen", _FakePopen(captured))
+    with caplog.at_level(logging.DEBUG, logger="shipit.exec"):
+        execrun.spawn_detached(
+            ["tool", "--token", "s3cret-value"], cwd="/work/s3cret-value/clone"
+        )
+    full_log = "\n".join(r.getMessage() for r in caplog.records)
+    assert "s3cret-value" not in full_log
+    assert redact.MASK in full_log
+
+
+def test_spawn_detached_missing_binary_normalizes_into_execerror(monkeypatch, caplog):
+    """Launch normalization still applies to the non-Exec: no raw OSError
+    escapes the seam, and the failure leaves its one ERROR record."""
+
+    def fake_popen(argv, **kwargs):
+        raise FileNotFoundError(2, "No such file or directory", argv[0])
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    with caplog.at_level(logging.DEBUG, logger="shipit.exec"):
+        with pytest.raises(execrun.ExecError) as excinfo:
+            execrun.spawn_detached(["no-such-tool-xyz"])
+    err = excinfo.value
+    assert err.cause == execrun.CAUSE_MISSING_BINARY
+    assert err.rc is None
+    records = [r for r in caplog.records if r.name == "shipit.exec"]
+    assert len(records) == 1
+    assert records[0].levelno == logging.ERROR
+
+
+def test_spawn_detached_missing_binary_real_child():
+    with pytest.raises(execrun.ExecError) as excinfo:
+        execrun.spawn_detached(["definitely-not-a-binary-xyz"])
+    assert excinfo.value.cause == execrun.CAUSE_MISSING_BINARY
+
+
+def test_spawn_detached_bad_cwd_normalizes_to_os_error(monkeypatch):
+    """A missing cwd also raises FileNotFoundError, but naming the directory —
+    it must report as an os-error, not as a missing binary."""
+
+    def fake_popen(argv, **kwargs):
+        raise FileNotFoundError(2, "No such file or directory", "/no/such/dir")
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    with pytest.raises(execrun.ExecError) as excinfo:
+        execrun.spawn_detached(["tool"], cwd="/no/such/dir")
+    assert excinfo.value.cause == execrun.CAUSE_OS
+
+
+def test_spawn_detached_real_child_runs_in_own_session(tmp_path):
+    """End-to-end detach: a real child lands in its OWN session (survives the
+    parent exiting, no controlling terminal) and actually runs — observed via
+    a file it writes, since its stdio is pinned to /dev/null."""
+    import os
+    import time
+
+    out = tmp_path / "sid"
+    execrun.spawn_detached(
+        [
+            sys.executable,
+            "-c",
+            "import os, sys; open(sys.argv[1], 'w').write(str(os.getsid(0)))",
+            str(out),
+        ]
+    )
+    deadline = time.monotonic() + 10
+    while not out.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert out.exists(), "detached child never ran"
+    # Read may race the child's write+close; poll until non-empty.
+    while not out.read_text() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    child_sid = int(out.read_text())
+    assert child_sid != os.getsid(0)  # own session, not the parent's

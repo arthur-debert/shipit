@@ -59,7 +59,7 @@ def test_resolve_pr_normalizes_workdir_to_toplevel(monkeypatch):
             seen_diff_specs.append(args[-1])
 
         class R:
-            returncode = 0
+            rc = 0
             stdout = "mergebasesha\n" if args[:1] == ["merge-base"] else "the diff\n"
 
         return R()
@@ -103,7 +103,7 @@ def test_resolve_pr_omitted_repo_canonicalizes_via_gh_not_alias_origin(monkeypat
 
     def fake_git(workdir, args, *, check=True):
         class R:
-            returncode = 0
+            rc = 0
             stdout = "mergebasesha\n" if args[:1] == ["merge-base"] else "the diff\n"
 
         return R()
@@ -156,7 +156,7 @@ def test_resolve_pr_no_common_ancestor_fails_loud(monkeypatch):
 
         class R:
             # merge-base finds no common ancestor (rc=1, empty stdout).
-            returncode = 1 if args[:1] == ["merge-base"] else 0
+            rc = 1 if args[:1] == ["merge-base"] else 0
             stdout = ""
 
         return R()
@@ -211,7 +211,7 @@ def test_resolve_pr_stale_base_fetch_fails_loud(monkeypatch):
             diff_attempted = True
 
         class R:
-            returncode = 0
+            rc = 0
             stdout = ""
 
         return R()

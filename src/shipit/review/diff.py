@@ -29,10 +29,9 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 from dataclasses import dataclass, field
 
-from .. import gh, proc
+from .. import execrun, gh
 from ..identity import Sha
 from ..pr import PR, core_from_node, repo_from_slug
 
@@ -166,21 +165,19 @@ def _git_toplevel(workdir: str) -> str | None:
     return gh.repo_root(cwd=workdir)
 
 
-def _git(
-    workdir: str, args: list[str], *, check: bool = True
-) -> subprocess.CompletedProcess[str]:
-    return proc.run(["git", "-C", workdir, *args], check=check)
+def _git(workdir: str, args: list[str], *, check: bool = True) -> execrun.ExecResult:
+    return execrun.run(["git", "-C", workdir, *args], check=check)
 
 
 def _sha_present(workdir: str, sha: str) -> bool:
     """True if ``sha`` is a commit object reachable in ``workdir`` (no fetch)."""
     if not sha:
         return False
-    result = proc.run(
+    result = execrun.run(
         ["git", "-C", workdir, "cat-file", "-e", f"{sha}^{{commit}}"],
         check=False,
     )
-    return result.returncode == 0
+    return result.rc == 0
 
 
 def _pr_meta(pr: int, repo: str | None) -> dict:
@@ -207,7 +204,7 @@ def _pr_meta(pr: int, repo: str | None) -> dict:
                 "mergeStateStatus",
             ],
         )
-    except gh.GhError as exc:
+    except execrun.ExecError as exc:
         raise ReviewError(
             f"Could not resolve PR #{pr}"
             + (f" in {repo}" if repo else "")
@@ -269,7 +266,7 @@ def resolve_pr(
     if repo is not None:
         try:
             repo = gh.repo_canonical(repo)
-        except gh.GhError as exc:
+        except execrun.ExecError as exc:
             raise ReviewError(
                 f"Could not resolve repo {repo!r} to its canonical owner/name via "
                 f"`gh repo view`: {exc}"
@@ -371,7 +368,7 @@ def resolve_pr(
     # endpoint is unambiguous, and FAIL LOUD if there is no common ancestor instead
     # of silently degrading to the base tip.
     merge_base = _git(workdir, ["merge-base", base_sha, head_point], check=False)
-    if merge_base.returncode != 0 or not merge_base.stdout.strip():
+    if merge_base.rc != 0 or not merge_base.stdout.strip():
         raise ReviewError(
             f"PR #{pr} base {base_sha} and head {head_point} have no common "
             f"ancestor — cannot compute a meaningful review diff. The PR base/head "
@@ -384,7 +381,7 @@ def resolve_pr(
         names = _git(
             workdir, ["diff", "--name-only", f"{base_point}...{head_point}"]
         ).stdout
-    except proc.ProcError as exc:
+    except execrun.ExecError as exc:
         raise ReviewError(
             f"failed to compute diff for PR #{pr} ({base_point}...{head_point}): {exc}"
         ) from exc

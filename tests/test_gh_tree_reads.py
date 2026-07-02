@@ -2,7 +2,11 @@
 
 These pin the parsing/mapping the registry relies on — the ahead/behind left-right
 order, upstream-absent → ``None`` / ``(0, 0)``, and the PR-snapshot shape — by
-patching only the subprocess seam (``_run`` / ``_git``), never the network.
+patching only the Exec seam (``_run`` / ``_run_probe`` / ``_git_probe``), never
+the network. The registry reads are PROBES (``check=False`` through the Exec
+runner, ADR-0028): a nonzero exit is a normal answer for a scan over the fleet,
+so the fakes return an :class:`ExecResult` with the rc under test rather than
+raising.
 """
 
 from __future__ import annotations
@@ -10,19 +14,27 @@ from __future__ import annotations
 import json
 
 from shipit import gh
+from shipit.execrun import ExecResult
+
+
+def _ok(stdout: str = "") -> ExecResult:
+    return ExecResult(argv=("git",), rc=0, stdout=stdout, stderr="", duration_ms=1)
+
+
+def _fail(stderr: str = "", rc: int = 1) -> ExecResult:
+    return ExecResult(argv=("git",), rc=rc, stdout="", stderr=stderr, duration_ms=1)
 
 
 def test_git_ahead_behind_maps_left_right_to_behind_ahead(monkeypatch):
     # `rev-list --left-right --count @{upstream}...HEAD` prints "<behind> <ahead>".
-    monkeypatch.setattr(gh, "_git", lambda args, *, cwd: "3\t5\n")
+    monkeypatch.setattr(gh, "_git_probe", lambda args, *, cwd: _ok("3\t5\n"))
     assert gh.git_ahead_behind(cwd="/x") == (5, 3)
 
 
 def test_git_ahead_behind_no_upstream_is_level(monkeypatch):
-    def boom(args, *, cwd):
-        raise gh.GhError("no upstream configured")
-
-    monkeypatch.setattr(gh, "_git", boom)
+    monkeypatch.setattr(
+        gh, "_git_probe", lambda args, *, cwd: _fail("no upstream configured")
+    )
     assert gh.git_ahead_behind(cwd="/x") == (0, 0)
 
 
@@ -35,9 +47,9 @@ def test_git_unpushed_shas_lists_the_local_only_commits(monkeypatch):
 
     def fake(args, *, cwd):
         seen["args"] = args
-        return f"{'a' * 40}\n{'b' * 40}\n"
+        return _ok(f"{'a' * 40}\n{'b' * 40}\n")
 
-    monkeypatch.setattr(gh, "_git", fake)
+    monkeypatch.setattr(gh, "_git_probe", fake)
     assert gh.git_unpushed_shas(cwd="/x") == ("a" * 40, "b" * 40)
     assert seen["args"] == ["rev-list", "HEAD", "--not", "--remotes"]
 
@@ -45,7 +57,7 @@ def test_git_unpushed_shas_lists_the_local_only_commits(monkeypatch):
 def test_git_unpushed_shas_empty_when_everything_is_on_a_remote(monkeypatch):
     # Empty output = every commit reachable from HEAD is on some remote: the
     # provably-safe reading, distinct from None (unreadable).
-    monkeypatch.setattr(gh, "_git", lambda args, *, cwd: "")
+    monkeypatch.setattr(gh, "_git_probe", lambda args, *, cwd: _ok(""))
     assert gh.git_unpushed_shas(cwd="/x") == ()
 
 
@@ -53,12 +65,9 @@ def test_git_unpushed_shas_unreadable_is_none_not_empty(monkeypatch):
     # None (unknown) — NEVER () (provably pushed): the caller keeps on unknown, so
     # a git failure must not read as "nothing to lose". Malformed output (a line
     # that is not a SHA) is the same unreadable case.
-    def boom(args, *, cwd):
-        raise gh.GhError("unborn HEAD")
-
-    monkeypatch.setattr(gh, "_git", boom)
+    monkeypatch.setattr(gh, "_git_probe", lambda args, *, cwd: _fail("unborn HEAD"))
     assert gh.git_unpushed_shas(cwd="/x") is None
-    monkeypatch.setattr(gh, "_git", lambda args, *, cwd: "not-a-sha\n")
+    monkeypatch.setattr(gh, "_git_probe", lambda args, *, cwd: _ok("not-a-sha\n"))
     assert gh.git_unpushed_shas(cwd="/x") is None
 
 
@@ -69,9 +78,9 @@ def test_git_commits_between_lists_the_range(monkeypatch):
 
     def fake(args, *, cwd):
         seen["args"] = args
-        return f"{'c' * 40}\n"
+        return _ok(f"{'c' * 40}\n")
 
-    monkeypatch.setattr(gh, "_git", fake)
+    monkeypatch.setattr(gh, "_git_probe", fake)
     assert gh.git_commits_between("a" * 40, "c" * 40, cwd="/x") == ["c" * 40]
     assert seen["args"] == ["rev-list", f"{'a' * 40}..{'c' * 40}"]
 
@@ -79,25 +88,19 @@ def test_git_commits_between_lists_the_range(monkeypatch):
 def test_git_commits_between_unreadable_is_none(monkeypatch):
     # A failed or malformed rev-list -> None, so the caller records NOTHING rather
     # than something wrong (an unrecorded provisioning commit only KEEPS the Tree).
-    def boom(args, *, cwd):
-        raise gh.GhError("bad ref")
-
-    monkeypatch.setattr(gh, "_git", boom)
+    monkeypatch.setattr(gh, "_git_probe", lambda args, *, cwd: _fail("bad ref"))
     assert gh.git_commits_between("a" * 40, "b" * 40, cwd="/x") is None
-    monkeypatch.setattr(gh, "_git", lambda args, *, cwd: "garbage\n")
+    monkeypatch.setattr(gh, "_git_probe", lambda args, *, cwd: _ok("garbage\n"))
     assert gh.git_commits_between("a" * 40, "b" * 40, cwd="/x") is None
 
 
 def test_git_upstream_ref_returns_tracking_ref(monkeypatch):
-    monkeypatch.setattr(gh, "_git", lambda args, *, cwd: "origin/main\n")
+    monkeypatch.setattr(gh, "_git_probe", lambda args, *, cwd: _ok("origin/main\n"))
     assert gh.git_upstream_ref(cwd="/x") == "origin/main"
 
 
 def test_git_upstream_ref_none_when_absent(monkeypatch):
-    def boom(args, *, cwd):
-        raise gh.GhError("no upstream")
-
-    monkeypatch.setattr(gh, "_git", boom)
+    monkeypatch.setattr(gh, "_git_probe", lambda args, *, cwd: _fail("no upstream"))
     assert gh.git_upstream_ref(cwd="/x") is None
 
 
@@ -105,7 +108,7 @@ def test_pr_for_head_parses_snapshot(monkeypatch):
     payload = json.dumps(
         {"number": 12, "state": "OPEN", "isDraft": True, "baseRefName": "main"}
     )
-    monkeypatch.setattr(gh, "_run", lambda args, *, cwd=None: payload)
+    monkeypatch.setattr(gh, "_run_probe", lambda args, *, cwd=None: _ok(payload))
     assert gh.pr_for_head("issues/12/work", cwd="/x") == {
         "number": 12,
         "state": "OPEN",
@@ -117,10 +120,11 @@ def test_pr_for_head_parses_snapshot(monkeypatch):
 def test_pr_for_head_none_when_no_pr(monkeypatch):
     # gh's documented "no pull requests found" exit is a PROVABLE absence -> None,
     # distinct from UNKNOWN (an undetermined state).
-    def boom(args, *, cwd=None):
-        raise gh.GhError('gh pr view exited 1: no pull requests found for branch "x"')
-
-    monkeypatch.setattr(gh, "_run", boom)
+    monkeypatch.setattr(
+        gh,
+        "_run_probe",
+        lambda args, *, cwd=None: _fail('no pull requests found for branch "x"'),
+    )
     assert gh.pr_for_head("issues/12/work", cwd="/x") is None
 
 
@@ -129,20 +133,22 @@ def test_pr_for_head_unknown_on_loose_no_pr_phrasing(monkeypatch):
     # branch"), not the loose substring "no pull request": an unrelated failure
     # that merely mentions a pull request must stay UNDETERMINED (UNKNOWN), never
     # collapse to a provable absence (None) that would suppress the gc warning.
-    def boom(args, *, cwd=None):
-        raise gh.GhError("gh pr view exited 1: could not resolve no pull request here")
-
-    monkeypatch.setattr(gh, "_run", boom)
+    monkeypatch.setattr(
+        gh,
+        "_run_probe",
+        lambda args, *, cwd=None: _fail("could not resolve no pull request here"),
+    )
     assert gh.pr_for_head("issues/12/work", cwd="/x") is gh.UNKNOWN
 
 
 def test_pr_for_head_unknown_on_non_no_pr_error(monkeypatch):
     # Any OTHER gh failure (auth/network/rate-limit) leaves the state UNDETERMINED:
     # it returns the first-class UNKNOWN sentinel, NOT None ("no PR").
-    def boom(args, *, cwd=None):
-        raise gh.GhError("gh pr view exited 1: HTTP 401: Bad credentials")
-
-    monkeypatch.setattr(gh, "_run", boom)
+    monkeypatch.setattr(
+        gh,
+        "_run_probe",
+        lambda args, *, cwd=None: _fail("HTTP 401: Bad credentials"),
+    )
     assert gh.pr_for_head("issues/12/work", cwd="/x") is gh.UNKNOWN
 
 
@@ -150,20 +156,22 @@ def test_pr_for_head_unknown_when_output_not_json(monkeypatch):
     # A scan/read boundary over the whole fleet: malformed/non-JSON gh output
     # (warnings, prompts, garbage on stdout) must NOT crash `tree list`, but it is an
     # unreadable state -> UNKNOWN (distinct from None / "no PR"), not silently collapsed.
-    monkeypatch.setattr(gh, "_run", lambda args, *, cwd=None: "not json at all")
+    monkeypatch.setattr(
+        gh, "_run_probe", lambda args, *, cwd=None: _ok("not json at all")
+    )
     assert gh.pr_for_head("issues/12/work", cwd="/x") is gh.UNKNOWN
 
 
 def test_pr_for_head_unknown_when_output_empty(monkeypatch):
     # A clean run that yields no stdout is anomalous (a real PR always prints JSON):
     # treat it as an unreadable state, not "no PR".
-    monkeypatch.setattr(gh, "_run", lambda args, *, cwd=None: "   ")
+    monkeypatch.setattr(gh, "_run_probe", lambda args, *, cwd=None: _ok("   "))
     assert gh.pr_for_head("issues/12/work", cwd="/x") is gh.UNKNOWN
 
 
 def test_pr_for_head_unknown_when_not_a_dict(monkeypatch):
     # Valid JSON but not an object (a list / scalar) is malformed for this read.
-    monkeypatch.setattr(gh, "_run", lambda args, *, cwd=None: "[1, 2, 3]")
+    monkeypatch.setattr(gh, "_run_probe", lambda args, *, cwd=None: _ok("[1, 2, 3]"))
     assert gh.pr_for_head("issues/12/work", cwd="/x") is gh.UNKNOWN
 
 
@@ -171,7 +179,7 @@ def test_pr_for_head_unknown_when_dict_missing_fields(monkeypatch):
     # A JSON object that decoded cleanly but lacks the load-bearing fields (an empty
     # object) is NOT a usable snapshot: returning it would render as `#None None` in
     # `tree list`. Treat it as an unreadable state -> UNKNOWN.
-    monkeypatch.setattr(gh, "_run", lambda args, *, cwd=None: "{}")
+    monkeypatch.setattr(gh, "_run_probe", lambda args, *, cwd=None: _ok("{}"))
     assert gh.pr_for_head("issues/12/work", cwd="/x") is gh.UNKNOWN
 
 
@@ -180,7 +188,7 @@ def test_pr_for_head_unknown_when_fields_wrong_type(monkeypatch):
     # case the `#None None` bug came from: number must be an int and state a str,
     # else the snapshot is undetermined -> UNKNOWN.
     payload = json.dumps({"number": None, "state": None, "isDraft": False})
-    monkeypatch.setattr(gh, "_run", lambda args, *, cwd=None: payload)
+    monkeypatch.setattr(gh, "_run_probe", lambda args, *, cwd=None: _ok(payload))
     assert gh.pr_for_head("issues/12/work", cwd="/x") is gh.UNKNOWN
 
 
@@ -192,9 +200,9 @@ def test_epic_umbrella_exists_checks_remote_tracking_ref_first(monkeypatch):
 
     def fake_git(args, *, cwd):
         seen.append(args)
-        return ""  # `show-ref --verify --quiet` exits 0 when the ref resolves
+        return _ok()  # `show-ref --verify --quiet` exits 0 when the ref resolves
 
-    monkeypatch.setattr(gh, "_git", fake_git)
+    monkeypatch.setattr(gh, "_git_probe", fake_git)
     assert gh.epic_umbrella_exists("TRE04", cwd="/x") is True
     assert seen[0] == [
         "show-ref",
@@ -208,20 +216,17 @@ def test_epic_umbrella_exists_falls_back_to_local_head(monkeypatch):
     # No remote-tracking ref but a local `refs/heads/<epic>/umbrella` -> still True.
     def fake_git(args, *, cwd):
         if args[-1] == "refs/heads/TRE04/umbrella":
-            return ""
-        raise gh.GhError("show-ref exited 1: ")
+            return _ok()
+        return _fail()
 
-    monkeypatch.setattr(gh, "_git", fake_git)
+    monkeypatch.setattr(gh, "_git_probe", fake_git)
     assert gh.epic_umbrella_exists("TRE04", cwd="/x") is True
 
 
 def test_epic_umbrella_exists_false_when_no_umbrella(monkeypatch):
     # Neither ref resolves (an ordinary `feature/foo` -> no `feature/umbrella`): the
-    # seam swallows the git failure and reports "not an epic" rather than raising.
-    def boom(args, *, cwd):
-        raise gh.GhError("show-ref exited 1: ")
-
-    monkeypatch.setattr(gh, "_git", boom)
+    # probe reads the nonzero exit as "not an epic" rather than raising.
+    monkeypatch.setattr(gh, "_git_probe", lambda args, *, cwd: _fail())
     assert gh.epic_umbrella_exists("feature", cwd="/x") is False
 
 

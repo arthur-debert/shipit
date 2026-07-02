@@ -39,7 +39,7 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass
 
-from .. import gh
+from .. import execrun, gh
 from ..review import ghauth
 
 #: The runbook for the one-time, owner-only install + ``checks: write`` re-consent.
@@ -151,7 +151,7 @@ def run(repo: str | None, *, agents: list[str] | None = None, mint=None) -> int:
     if not target:
         try:
             target = gh.current_repo()
-        except gh.GhError:
+        except execrun.ExecError:
             target = None
     if not target:
         print(

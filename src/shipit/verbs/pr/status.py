@@ -15,7 +15,7 @@ the branch genuinely has no PR, which renders as ``no_pr``. A real `gh`/auth
 failure — at resolution OR at ``gather`` — is NOT collapsed into ``no_pr``; the
 PRD requires it to surface as a clean stderr message + non-zero exit so
 automation can detect it. The resolver keeps the two cases distinct, so this
-verb maps ``None`` -> ``no_pr`` and ``GhError`` -> fatal without guessing.
+verb maps ``None`` -> ``no_pr`` and ``ExecError`` -> fatal without guessing.
 """
 
 from __future__ import annotations
@@ -25,7 +25,8 @@ import sys
 
 import click
 
-from ...prstate import ghapi
+from ... import execrun
+from ...prstate.errors import PrStateError
 from ...prstate.fetch import gather
 from ...prstate.reviewers import required_reviewers
 from ...prstate.state import TaskState, TaskStatus, evaluate, no_pr
@@ -60,7 +61,7 @@ def run(pr: int | None = None, *, as_json: bool = False) -> int:
             _emit(no_pr(), as_json=as_json)
             return 0
         ctx = gather(resolved)
-    except ghapi.GhError as exc:
+    except (execrun.ExecError, PrStateError) as exc:
         # A genuine gh/auth failure (NOT "no PR for branch" — the resolver
         # returns None for that). The PRD requires this to be visible: clean
         # stderr + non-zero exit, never a silent no_pr.

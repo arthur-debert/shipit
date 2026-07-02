@@ -18,20 +18,24 @@ The checks are CHECK-ONLY by default (release's scar: ``prettier --write`` under
 participate; the rest still run as checks.
 
 The pure logic — the toolchain registry (:data:`LANGS`) and :func:`route` — is
-kept out of the subprocess boundary (:func:`_discover`, :func:`_shebang`,
+kept out of the Exec boundary (:func:`_discover`, :func:`_shebang`,
 :func:`_run_tool`) so it is unit-testable, the same split checks.py uses against
-its gh calls.
+its gh calls. Tool execution goes through the one Exec runner
+(:mod:`shipit.execrun`, ADR-0028): :func:`_run_tool` returns the runner's
+:class:`~shipit.execrun.ExecResult` (``check=False`` — a nonzero rc is the
+tool's verdict, not a transport failure) and lets a launch failure surface as
+:class:`~shipit.execrun.ExecError`, which the orchestrator renders as the
+hard-fail ``127``.
 """
 
 from __future__ import annotations
 
-import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from .. import gh
+from .. import execrun, gh
 
 # --------------------------------------------------------------------------
 # The toolchain registry — the slim, valuable part of release-core's checks
@@ -203,7 +207,7 @@ def verdict(runs: list[ToolRun]) -> int:
 
 
 # --------------------------------------------------------------------------
-# The subprocess + git boundary (patched in tests)
+# The Exec + git boundary (patched in tests)
 # --------------------------------------------------------------------------
 
 
@@ -221,23 +225,15 @@ def _shebang(path: Path) -> str | None:
     return first[2:].strip() if first.startswith("#!") else None
 
 
-def _run_tool(binary: str, args: list[str], cwd: Path) -> tuple[int, str]:
-    """Run ``binary args`` in ``cwd``; return (exit code, combined output).
+def _run_tool(binary: str, args: list[str], cwd: Path) -> execrun.ExecResult:
+    """Run ``binary args`` in ``cwd`` through the one Exec runner.
 
-    A binary missing from PATH is the HARD-fail signal: ``127`` + a clear note,
-    never a silent skip.
+    ``check=False``: a nonzero rc is the tool's *verdict* (the normal failing-check
+    outcome), not a transport failure. A launch failure — the binary missing from
+    PATH, or any OS-level error — raises :class:`~shipit.execrun.ExecError`, which
+    the orchestrator renders as the hard-fail ``127`` (never a silent skip).
     """
-    try:
-        proc = subprocess.run(
-            [binary, *args],
-            cwd=str(cwd),
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    except FileNotFoundError:
-        return 127, f"{binary}: not found on PATH (the check is hard — provision it)"
-    return proc.returncode, proc.stdout + proc.stderr
+    return execrun.run([binary, *args], cwd=str(cwd), check=False)
 
 
 # --------------------------------------------------------------------------
@@ -254,7 +250,7 @@ def run(
     *,
     fix: bool = False,
     discover: Callable[[Path], list[str]] | None = None,
-    run_tool: Callable[[str, list[str], Path], tuple[int, str]] | None = None,
+    run_tool: Callable[[str, list[str], Path], execrun.ExecResult] | None = None,
 ) -> int:
     """Run the checks over the tree at ``path`` (default ``.``). Returns 0/1."""
     root = Path(path or ".").resolve()
@@ -282,7 +278,21 @@ def run(
             # Label from the actual argv that ran, so fix mode never claims it
             # ran the check form when it ran the fix form.
             label = f"{tool.binary} {' '.join(prefix)}".strip()
-            rc, out = run_tool(tool.binary, [*prefix, *paths], root)
+            try:
+                result = run_tool(tool.binary, [*prefix, *paths], root)
+            except execrun.ExecError as exc:
+                # A binary missing from PATH (or any launch failure) is the
+                # HARD-fail signal: 127 + a clear note, never a silent skip.
+                rc = 127
+                if exc.cause == execrun.CAUSE_MISSING_BINARY:
+                    out = (
+                        f"{tool.binary}: not found on PATH "
+                        "(the check is hard — provision it)"
+                    )
+                else:
+                    out = f"{tool.binary}: could not run: {exc}"
+            else:
+                rc, out = result.rc, result.stdout + result.stderr
             runs.append(ToolRun(lang.name, tool.binary, label, rc, out))
             mark = "ok  " if rc == 0 else "FAIL"
             count = f"{len(paths)} file{'s' if len(paths) != 1 else ''}"

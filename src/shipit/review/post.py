@@ -30,7 +30,7 @@ from __future__ import annotations
 import json
 import logging
 
-from .. import gh
+from .. import execrun, gh
 from . import ghauth
 from .diff import ReviewView
 
@@ -201,7 +201,7 @@ def _resolve_repo(ctx: ReviewView) -> str:
         return ctx.repo
     try:
         slug = gh.current_repo()
-    except gh.GhError as exc:
+    except execrun.ExecError as exc:
         raise RuntimeError(
             "Could not determine the repository to post the review to: ctx.repo is "
             f"unset and `gh repo view` failed ({exc}). Pass --repo OWNER/NAME."
@@ -283,7 +283,7 @@ def post_review(
     )
     try:
         response = gh.rest(path, method="POST", body=payload, token=token)
-    except gh.GhError as exc:
+    except execrun.ExecError as exc:
         logger.debug("post_review: post to %s#%s failed: %s", repo, ctx.number, exc)
         raise RuntimeError(
             f"Failed to post review to {repo}#{ctx.number}: {exc}"

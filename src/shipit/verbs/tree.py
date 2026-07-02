@@ -24,7 +24,7 @@ from pathlib import Path
 
 import click
 
-from .. import gh, proc
+from .. import execrun, gh
 from ..session import liveness
 from ..tree import cleanup, layout, provision, registry
 from ..tree.cleanup import Cleanup
@@ -149,7 +149,7 @@ def run_create(
     try:
         org_repo = gh.current_repo()
         url = gh.git_remote_url(cwd=root)
-    except gh.GhError as exc:
+    except execrun.ExecError as exc:
         print(f"tree create: {exc}", file=sys.stderr)
         return 1
 
@@ -167,10 +167,10 @@ def run_create(
     )
     try:
         result = create(spec, source_repo=root, github_url=url)
-    except (gh.GhError, ValueError, proc.ProcError, OSError) as exc:
+    except (ValueError, execrun.ExecError, OSError) as exc:
         # The whole create pipeline collapses to a clean exit-1 here: the planner
-        # rejects a spec (ValueError), a git/gh call fails (GhError), provisioning
-        # exits nonzero (ProcError), or a filesystem step — mkdir/copy/an existing
+        # rejects a spec (ValueError), a git/gh call or provisioning Exec fails (ExecError),
+        # fails (ExecError), or a filesystem step — mkdir/copy/an existing
         # dest — fails (OSError). None of these should surface as a traceback.
         print(f"tree create: {exc}", file=sys.stderr)
         return 1
