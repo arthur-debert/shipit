@@ -49,12 +49,14 @@ def fleet(tmp_path: Path, monkeypatch):
             "base": "origin/main",
             "dirty": " M file.py\n",
             "ahead_behind": (2, 0),
+            "unpushed": 2,
         },
         str(b): {
             "branch": "HAR02/WS02",
             "base": "origin/HAR02/umbrella",
             "dirty": "",
             "ahead_behind": (0, 3),
+            "unpushed": 0,
         },
     }
     pr_by_branch = {
@@ -68,6 +70,7 @@ def fleet(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(
         gh, "git_ahead_behind", lambda *, cwd: state[cwd]["ahead_behind"]
     )
+    monkeypatch.setattr(gh, "git_unpushed_count", lambda *, cwd: state[cwd]["unpushed"])
     monkeypatch.setattr(
         gh, "pr_for_head", lambda branch, *, cwd=None: pr_by_branch.get(branch)
     )
@@ -97,6 +100,15 @@ def test_scan_reads_branch_base_dirty_and_ahead_behind(fleet):
     assert rb.base == "origin/HAR02/umbrella"
     assert rb.dirty is False
     assert (rb.ahead, rb.behind) == (0, 3)
+
+
+def test_scan_reads_the_upstream_independent_unpushed_count(fleet):
+    # The `unpushed` field is the ephemeral gc ladder's never-lose-work signal:
+    # commits on NO remote at all, read independently of any upstream.
+    root, a, b = fleet
+    by_path = {r.path: r for r in registry.scan(root)}
+    assert by_path[str(a)].unpushed == 2
+    assert by_path[str(b)].unpushed == 0
 
 
 def test_scan_renders_pr_state_label_with_draft(fleet):

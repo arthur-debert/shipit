@@ -26,6 +26,32 @@ def test_git_ahead_behind_no_upstream_is_level(monkeypatch):
     assert gh.git_ahead_behind(cwd="/x") == (0, 0)
 
 
+def test_git_unpushed_count_parses_the_count(monkeypatch):
+    # `rev-list --count HEAD --not --remotes`: commits on NO remote at all — the
+    # upstream-independent "unpushed" the ephemeral gc ladder is defined over.
+    seen = {}
+
+    def fake(args, *, cwd):
+        seen["args"] = args
+        return "4\n"
+
+    monkeypatch.setattr(gh, "_git", fake)
+    assert gh.git_unpushed_count(cwd="/x") == 4
+    assert seen["args"] == ["rev-list", "--count", "HEAD", "--not", "--remotes"]
+
+
+def test_git_unpushed_count_unreadable_is_none_not_zero(monkeypatch):
+    # None (unknown) — NEVER 0 (provably pushed): the caller keeps on unknown, so
+    # a git failure must not read as "nothing to lose".
+    def boom(args, *, cwd):
+        raise gh.GhError("unborn HEAD")
+
+    monkeypatch.setattr(gh, "_git", boom)
+    assert gh.git_unpushed_count(cwd="/x") is None
+    monkeypatch.setattr(gh, "_git", lambda args, *, cwd: "not-a-number\n")
+    assert gh.git_unpushed_count(cwd="/x") is None
+
+
 def test_git_upstream_ref_returns_tracking_ref(monkeypatch):
     monkeypatch.setattr(gh, "_git", lambda args, *, cwd: "origin/main\n")
     assert gh.git_upstream_ref(cwd="/x") == "origin/main"

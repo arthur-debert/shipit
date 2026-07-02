@@ -26,6 +26,10 @@ RECENT_MTIME = NOW - (THRESHOLD - 50)
 
 
 def _record(path: str = "/trees/t", **over) -> TreeRecord:
+    # `unpushed=0` (every commit reachable from SOME remote) is the baseline the
+    # non-floor rows need: the write ladder's floor is `_has_local_only_work`,
+    # which reads the TreeRecord default (`unpushed=None`, count unreadable)
+    # conservatively as has-work.
     base = dict(
         path=path,
         branch="issues/7/work",
@@ -35,6 +39,7 @@ def _record(path: str = "/trees/t", **over) -> TreeRecord:
         behind=0,
         pr=None,
         mtime=AGED_MTIME,
+        unpushed=0,
     )
     base.update(over)
     return TreeRecord(**base)
@@ -57,6 +62,18 @@ TABLE = [
     ("merged + clean + no-unpushed + aged", {}, "MERGED", "removable"),
     ("dirty (else removable) is protected", {"dirty": True}, "MERGED", "keep"),
     ("unpushed (ahead>0) is protected", {"ahead": 2}, "MERGED", "keep"),
+    # The upstream-INDEPENDENT floor (codex review): a branch with no tracking
+    # upstream reads ahead==0 while still holding commits on no remote at all —
+    # e.g. extra commits made after the remote branch was deleted on merge. The
+    # `unpushed` count alone must protect it, and an UNREADABLE count must read
+    # as has-work (a git hiccup must never point at data loss).
+    (
+        "unpushed (on no remote, ahead==0) is protected",
+        {"unpushed": 3},
+        "MERGED",
+        "keep",
+    ),
+    ("UNREADABLE unpushed count is protected", {"unpushed": None}, "MERGED", "keep"),
     ("open/unmerged PR is in flight", {}, "OPEN", "keep"),
     ("draft PR is in flight", {}, "DRAFT", "keep"),
     ("recent (merged but young) is kept", {"mtime": RECENT_MTIME}, "MERGED", "keep"),
@@ -242,6 +259,198 @@ def test_write_tree_under_a_review_named_org_is_not_a_review_tree():
     )
     assert [r.path for r in decision.keep] == [path]
     assert not decision.removable
+
+
+# --- ephemeral session Tree reclaim: the five-rung ladder (ADR-0027) -----------
+
+#: An ephemeral Tree's path carries the `ephemeral` kind segment (the classify marker).
+EPHEMERAL_PATH = "/trees/acme/widget/ephemeral/sess-20260702-1234"
+
+#: Ladder time backstops, overridden small so every boundary is table-testable.
+HARD_CAP = 1_000.0
+GRACE = 100.0
+
+#: Ages relative to NOW for each band of the ladder.
+WITHIN_GRACE = NOW - (GRACE - 10)
+PAST_GRACE = NOW - (GRACE + 10)  # past grace, still under the hard cap
+PAST_HARD_CAP = NOW - (HARD_CAP + 10)
+
+
+def _ephemeral_record(**over) -> TreeRecord:
+    """An ephemeral-Tree record: clean, fully pushed, NO upstream (the birth shape).
+
+    ``base=None`` + ``ahead=0`` is exactly the fresh ``ephemeral/<id>`` branch the
+    upstream-independent ``unpushed`` count exists for; ``unpushed=0`` means every
+    commit is on some remote.
+    """
+    base = dict(
+        path=EPHEMERAL_PATH,
+        branch="ephemeral/sess-20260702-1234",
+        base=None,
+        ahead=0,
+        unpushed=0,
+        mtime=PAST_GRACE,
+    )
+    base.update(over)
+    return _record(**base)
+
+
+def _classify_ephemeral(record: TreeRecord, state: str | None, *, live: bool) -> str:
+    decision = classify(
+        [record],
+        now=NOW,
+        pr_states={record.path: state},
+        max_age_seconds=THRESHOLD,
+        live_sessions={record.path: live},
+        hard_cap_seconds=HARD_CAP,
+        grace_seconds=GRACE,
+    )
+    for name in ("removable", "stale", "keep"):
+        if getattr(decision, name):
+            return name
+    raise AssertionError("record landed in no bucket")
+
+
+# (description, record-overrides, pr-state, live) -> expected bucket. One row per
+# rung of the ADR-0027 ladder plus the boundary cases each rung's wording pins.
+EPHEMERAL_TABLE = [
+    # Rung 1 — dirty or unpushed -> KEEP, the absolute floor: beats merged, live,
+    # and even the hard cap.
+    ("dirty beats everything -> keep", {"dirty": True}, "MERGED", True, "keep"),
+    (
+        "dirty past the hard cap is still kept",
+        {"dirty": True, "mtime": PAST_HARD_CAP},
+        None,
+        False,
+        "keep",
+    ),
+    (
+        "unpushed commits (no upstream at all) -> keep",
+        {"unpushed": 2},
+        None,
+        False,
+        "keep",
+    ),
+    (
+        "unpushed past the hard cap is still kept",
+        {"unpushed": 1, "mtime": PAST_HARD_CAP},
+        None,
+        False,
+        "keep",
+    ),
+    (
+        "ahead of an upstream -> keep",
+        {"base": "origin/main", "ahead": 1},
+        None,
+        False,
+        "keep",
+    ),
+    (
+        "UNREADABLE unpushed count is conservatively kept",
+        {"unpushed": None},
+        None,
+        False,
+        "keep",
+    ),
+    # Rung 2 — merged PR -> REMOVABLE (the branch moved to real work and merged);
+    # provable-done beats liveness and the grace window.
+    ("merged -> removable", {}, "MERGED", False, "removable"),
+    (
+        "merged wins over a live session",
+        {"mtime": WITHIN_GRACE},
+        "MERGED",
+        True,
+        "removable",
+    ),
+    # Rung 3 — live and younger than the hard cap -> KEEP (an idle live session
+    # keeps its workspace, however far past the grace window).
+    ("live under the hard cap -> keep", {}, None, True, "keep"),
+    ("live keeps an open-PR Tree too", {}, "OPEN", True, "keep"),
+    # Rung 4 — past the hard cap, clean + pushed -> REMOVABLE even if the pidfile
+    # claims live: the stale-pidfile escape hatch.
+    (
+        "hard cap overrides liveness",
+        {"mtime": PAST_HARD_CAP},
+        None,
+        True,
+        "removable",
+    ),
+    # Rung 5 — not live, clean, pushed -> REMOVABLE past the grace window...
+    ("dead past grace -> removable", {}, None, False, "removable"),
+    (
+        "dead + UNKNOWN PR state past grace -> removable",
+        {},
+        "UNKNOWN",
+        False,
+        "removable",
+    ),
+    # ...and KEPT within it (a just-launched session is not raced before its
+    # pidfile lands).
+    ("dead within grace -> keep", {"mtime": WITHIN_GRACE}, None, False, "keep"),
+]
+
+
+@pytest.mark.parametrize(
+    "desc, over, state, live, expected",
+    EPHEMERAL_TABLE,
+    ids=[row[0] for row in EPHEMERAL_TABLE],
+)
+def test_ephemeral_ladder_truth_table(desc, over, state, live, expected):
+    assert _classify_ephemeral(_ephemeral_record(**over), state, live=live) == expected
+
+
+def test_ephemeral_tree_is_never_stale():
+    # No PR is the ephemeral NORM (the standard ladder would strand it in stale
+    # forever) — the ladder resolves every shape to removable or keep.
+    for state in (None, "CLOSED", "UNKNOWN", "OPEN"):
+        for live in (False, True):
+            decision = classify(
+                [_ephemeral_record()],
+                now=NOW,
+                pr_states={EPHEMERAL_PATH: state},
+                max_age_seconds=THRESHOLD,
+                live_sessions={EPHEMERAL_PATH: live},
+                hard_cap_seconds=HARD_CAP,
+                grace_seconds=GRACE,
+            )
+            assert decision.stale == []
+
+
+def test_ephemeral_defaults_to_not_live():
+    # Omitting live_sessions entirely treats every session as gone: a clean, pushed
+    # Tree past the grace window is reclaimable (the pidfile-less default).
+    decision = classify(
+        [_ephemeral_record()],
+        now=NOW,
+        pr_states={EPHEMERAL_PATH: None},
+        max_age_seconds=THRESHOLD,
+        hard_cap_seconds=HARD_CAP,
+        grace_seconds=GRACE,
+    )
+    assert [r.path for r in decision.removable] == [EPHEMERAL_PATH]
+
+
+def test_ephemeral_grace_and_hard_cap_boundaries_are_exclusive():
+    # Exactly AT the grace window a dead Tree is still kept; exactly AT the hard
+    # cap a live Tree is still kept — both boundaries are "past", not "at".
+    at_grace = _ephemeral_record(mtime=NOW - GRACE)
+    assert _classify_ephemeral(at_grace, None, live=False) == "keep"
+    at_cap = _ephemeral_record(mtime=NOW - HARD_CAP)
+    assert _classify_ephemeral(at_cap, None, live=True) == "keep"
+    past_cap = _ephemeral_record(mtime=NOW - HARD_CAP - 1)
+    assert _classify_ephemeral(past_cap, None, live=True) == "removable"
+
+
+def test_write_tree_under_an_ephemeral_named_org_takes_the_write_ladder():
+    # Kind is the LEAF'S PARENT segment, never "ephemeral anywhere in the path": a
+    # write Tree under an org named `ephemeral` must take the write ladder — here
+    # aged + clean + no PR lands in STALE (a bucket the ephemeral ladder never uses).
+    path = "/trees/ephemeral/widget/branches/feat-x-deadbeef"
+    record = _record(path=path)
+    decision = classify(
+        [record], now=NOW, pr_states={path: None}, max_age_seconds=THRESHOLD
+    )
+    assert [r.path for r in decision.stale] == [path]
 
 
 # --- parse_duration: the pure --threshold helper -------------------------------

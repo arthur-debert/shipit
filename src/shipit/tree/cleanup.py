@@ -16,8 +16,9 @@ local work is *kept*.
 
 - **removable** — every safe-to-delete condition holds: the PR is **merged** on the
   remote ∧ the working tree is **clean** ∧ there are **no unpushed commits**
-  (``ahead == 0``) ∧ the Tree is **aged** past the threshold. There is nothing left
-  to lose, so ``gc`` reclaims it.
+  (neither ahead of an upstream nor on no remote at all — ``_has_local_only_work``)
+  ∧ the Tree is **aged** past the threshold. There is nothing left to lose, so
+  ``gc`` reclaims it.
 - **stale** — the Tree looks abandoned (aged, clean, nothing unpushed) but its PR did
   NOT merge and is no longer in flight (no PR, or a PR closed without merging). That
   is ambiguous — maybe finished elsewhere, maybe dropped — so it is **listed, never
@@ -32,15 +33,25 @@ not apply; instead it is **removable when its PR is merged or closed AND no revi
 is still live against it** (the ``live_reviews`` input), and **kept** otherwise (an
 in-flight PR, an unreadable state, or a live reviewer). It never lands in *stale*:
 a cheap shared clone is either provably reclaimable or kept.
+
+An **ephemeral session Tree** (ADR-0027; ``…/ephemeral/<id>``) is the third distinct
+case: the coordinator's own per-launch workspace. It usually has NO PR (the standard
+ladder would strand it in *stale* forever) and is often CLEAN (a planning session
+that never committed — "clean + aged" alone would delete a Tree out from under a
+live idle session), so its reclaim turns on a **liveness signal** (the
+``live_sessions`` input, fed from the pidfile ``session/liveness`` reads) plus
+liveness-INDEPENDENT backstops: a hard time cap so a stale pidfile can never strand
+a Tree forever, and a grace window so a just-launched session is not raced before
+its pidfile lands. Like a review Tree it is binary — removable or kept, never
+*stale*: a disposable per-launch clone is either provably safe to reclaim or kept.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path
 
-from .layout import REVIEW_KIND
+from .layout import EPHEMERAL_KIND, REVIEW_KIND, tree_kind
 from .registry import TreeRecord
 
 #: Default age threshold (seconds): a Tree must be untouched for longer than this
@@ -48,6 +59,18 @@ from .registry import TreeRecord
 #: ``gc`` is conservative, and a Tree's mtime bumps on any write, so an actively used
 #: Tree never ages. Overridable per call so the boundary is exhaustively table-tested.
 DEFAULT_MAX_AGE_SECONDS = 14 * 86_400
+
+#: The ephemeral ladder's HARD time cap (seconds): past this age a clean, fully-
+#: pushed session Tree is removable EVEN IF its pidfile claims live (ADR-0027 rung
+#: 4). ~4 days is "abandoned in practice" for an idle session, and the override is
+#: the escape hatch that keeps a wrong/forgotten/stale pidfile from stranding a
+#: Tree forever — liveness delays reclaim, it never vetoes it indefinitely.
+EPHEMERAL_HARD_CAP_SECONDS = 4 * 86_400
+
+#: The ephemeral ladder's grace window (seconds): a NOT-live, clean, pushed session
+#: Tree younger than this is still kept (rung 5), so a just-launched session is not
+#: raced by a gc sweep in the moments before its ``SessionStart`` pidfile lands.
+EPHEMERAL_GRACE_SECONDS = 3_600
 
 #: The duration suffixes ``parse_duration`` accepts → their length in seconds. Mirrors
 #: (and inverts) the units ``shipit.verbs.tree._format_age`` renders, so a Tree's printed
@@ -120,23 +143,6 @@ def _is_closed(state: str | None) -> bool:
     return (state or "").upper() == "CLOSED"
 
 
-def _is_review_tree(path: str) -> bool:
-    """``True`` when ``path`` is a shared read-only (reviewer) Tree.
-
-    Keyed off the :data:`~shipit.tree.layout.REVIEW_KIND` dir segment the read-only
-    planner stamps (``…/<org>/<repo>/review/<leaf>``), which ADR-0018 makes the naming
-    source of truth for the mode — there is no manifest, so the path IS the signal,
-    exactly as the rest of the registry reads state off disk.
-
-    The kind is matched as the leaf's PARENT segment specifically, not "anywhere in the
-    path" — a substring/``in parts`` test would misclassify a write Tree whose org, repo,
-    or central-root happens to contain a ``review`` segment, bypassing the dirty/ahead/age
-    safety ladder. The layout pins the kind to exactly ``<leaf>``'s parent, so that is
-    the only segment checked.
-    """
-    return Path(path).parent.name == REVIEW_KIND
-
-
 def _is_unknown(state: str | None) -> bool:
     """``True`` when the PR state could not be read (``"UNKNOWN"`` in the vocabulary).
 
@@ -156,6 +162,9 @@ def classify(
     *,
     max_age_seconds: float = DEFAULT_MAX_AGE_SECONDS,
     live_reviews: Mapping[str, bool] | None = None,
+    live_sessions: Mapping[str, bool] | None = None,
+    hard_cap_seconds: float = EPHEMERAL_HARD_CAP_SECONDS,
+    grace_seconds: float = EPHEMERAL_GRACE_SECONDS,
 ) -> Cleanup:
     """Partition ``records`` into removable / stale / keep — a pure, total decision.
 
@@ -165,8 +174,11 @@ def classify(
     ``path`` — not branch — is deliberate: two Trees can
     share one branch (PRD), so the path is the only unique handle. ``live_reviews``
     maps a *review* Tree's ``path`` to whether a reviewer Run is still live against it
-    (default: none live). All are INPUTS, so this function holds no clock and does no
-    I/O.
+    (default: none live); ``live_sessions`` maps an *ephemeral* Tree's ``path`` to
+    whether its recorded Claude session is still live (the ``session/liveness``
+    pidfile decision; default: none live). All are INPUTS, so this function holds no
+    clock and does no I/O. ``hard_cap_seconds`` / ``grace_seconds`` override the
+    ephemeral ladder's time backstops so its boundaries are exhaustively table-tested.
 
     The rules, in precedence order (the first that matches wins):
 
@@ -176,8 +188,17 @@ def classify(
        **merged or closed** ∧ **no reviewer is live** against it, and **keep**
        otherwise (in-flight PR, unreadable state, or a live reviewer). It is never
        *stale*.
-    1. **dirty or unpushed** (``ahead > 0``) → **keep** — local work is never at risk
-       from ``gc``, regardless of age or PR state.
+    0b. **ephemeral session Tree** (``…/ephemeral/<id>``) — the coordinator's own
+       per-launch workspace, decided by its own five-rung ladder
+       (:func:`_ephemeral_bucket`, ADR-0027): liveness-gated, with liveness-
+       independent backstops. Never *stale*.
+    1. **dirty or unpushed** → **keep** — local work is never at risk from ``gc``,
+       regardless of age or PR state. "Unpushed" is :func:`_has_local_only_work`'s
+       upstream-INDEPENDENT definition — ``ahead > 0`` *or* commits on no remote at
+       all (``unpushed``) — because a branch with no tracking upstream reads
+       ``ahead == 0`` while still holding local-only commits (e.g. extra commits
+       after the remote branch was deleted on merge); ``ahead`` alone would age
+       such a Tree into ``removable`` and lose them (codex review).
     2. **not aged** (``now - mtime <= max_age_seconds``) → **keep** — too recent to
        reclaim; a Tree's mtime bumps on every write, so a live Tree never ages.
     3. aged, clean, nothing unpushed — decide on the PR:
@@ -188,7 +209,8 @@ def classify(
          state is unreadable, not provably abandoned, so it is conservatively stale and
          ``gc`` raises an incomplete-sweep warning for it.
     """
-    live = live_reviews or {}
+    reviews = live_reviews or {}
+    sessions = live_sessions or {}
     buckets: dict[str, list[TreeRecord]] = {"removable": [], "stale": [], "keep": []}
     for record in records:
         label = _bucket_for(
@@ -196,7 +218,10 @@ def classify(
             now=now,
             state=pr_states.get(record.path),
             max_age_seconds=max_age_seconds,
-            reviewer_live=live.get(record.path, False),
+            reviewer_live=reviews.get(record.path, False),
+            session_live=sessions.get(record.path, False),
+            hard_cap_seconds=hard_cap_seconds,
+            grace_seconds=grace_seconds,
         )
         buckets[label].append(record)
     return Cleanup(
@@ -213,15 +238,30 @@ def _bucket_for(
     state: str | None,
     max_age_seconds: float,
     reviewer_live: bool,
+    session_live: bool,
+    hard_cap_seconds: float,
+    grace_seconds: float,
 ) -> str:
     """The bucket name (``"removable"`` / ``"stale"`` / ``"keep"``) for one Tree.
 
-    Encodes the precedence ladder documented on :func:`classify`. Pure: it reads only
-    its arguments.
+    Encodes the precedence ladder documented on :func:`classify`, dispatching on the
+    Tree's kind (:func:`~shipit.tree.layout.tree_kind` — the leaf's parent segment,
+    the naming source of truth; there is no manifest, so the path IS the signal).
+    Pure: it reads only its arguments.
     """
-    if _is_review_tree(record.path):
+    kind = tree_kind(record.path)
+    if kind == REVIEW_KIND:
         return _review_bucket(state, reviewer_live=reviewer_live)
-    if record.dirty or record.ahead > 0:
+    if kind == EPHEMERAL_KIND:
+        return _ephemeral_bucket(
+            record,
+            now=now,
+            state=state,
+            live=session_live,
+            hard_cap_seconds=hard_cap_seconds,
+            grace_seconds=grace_seconds,
+        )
+    if _has_local_only_work(record):
         return "keep"
     aged = (now - record.mtime) > max_age_seconds
     if not aged:
@@ -255,3 +295,63 @@ def _review_bucket(state: str | None, *, reviewer_live: bool) -> str:
     if _is_merged(state) or _is_closed(state):
         return "removable"
     return "keep"
+
+
+def _ephemeral_bucket(
+    record: TreeRecord,
+    *,
+    now: float,
+    state: str | None,
+    live: bool,
+    hard_cap_seconds: float,
+    grace_seconds: float,
+) -> str:
+    """The bucket for an ephemeral session Tree (ADR-0027). Pure.
+
+    Binary — ``removable`` or ``keep``, never ``stale``: a session Tree is a
+    disposable per-launch clone, so it is either provably safe to reclaim or kept.
+    The five rungs, first match wins:
+
+    1. **dirty or unpushed → keep** — the absolute floor; local work is never at
+       risk. "Unpushed" here is :func:`_has_local_only_work`'s upstream-INDEPENDENT
+       definition (commits on no remote at all), because a fresh ``ephemeral/<id>``
+       branch has no upstream and ``ahead`` would read it as level — a missing
+       upstream must never by itself block reclaim, and never by itself permit it.
+    2. **merged PR → removable** — the session's branch moved to real work and it
+       merged; "done" is provable, nothing is lost (reuses the standard vocabulary).
+    3. **live ∧ younger than the hard cap → keep** — the pidfile says the session
+       process is still running; an idle-but-live session keeps its workspace.
+    4. **past the hard cap (clean, pushed) → removable EVEN IF live** — the escape
+       hatch: a clean session idle for days is abandoned in practice, so a wrong or
+       stale pidfile can never strand a Tree forever.
+    5. **else (not live, clean, pushed) → removable past the grace window** — the
+       session is provably gone and nothing local remains; the grace window keeps a
+       just-launched Tree from being raced before its pidfile lands.
+    """
+    if _has_local_only_work(record):
+        return "keep"
+    if _is_merged(state):
+        return "removable"
+    age = now - record.mtime
+    if live and age <= hard_cap_seconds:
+        return "keep"
+    if age > hard_cap_seconds:
+        return "removable"
+    return "removable" if age > grace_seconds else "keep"
+
+
+def _has_local_only_work(record: TreeRecord) -> bool:
+    """Whether ``record`` holds work that exists ONLY in this clone. Pure.
+
+    The never-lose-work floor shared by the write AND ephemeral ladders (the
+    review ladder needs none: a read-only shared clone holds no local work by
+    construction): uncommitted changes (``dirty``),
+    commits ahead of a configured upstream (``ahead``), or commits on NO remote at
+    all (``unpushed`` — the upstream-independent count, which alone covers the
+    fresh no-upstream ``ephemeral/<id>`` branch that ``ahead`` reads as level).
+    An UNREADABLE count (``unpushed is None``) reads as "has local work": the safe
+    direction — collapsing unknown to "pushed" would point a git hiccup at data loss.
+    """
+    if record.dirty or record.ahead > 0:
+        return True
+    return record.unpushed is None or record.unpushed > 0

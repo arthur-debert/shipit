@@ -58,6 +58,16 @@
           }
         ]
       }
+    ],
+    "WorktreeRemove": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "pixi run shipit hook worktreeremove"
+          }
+        ]
+      }
     ]
   }
 }
