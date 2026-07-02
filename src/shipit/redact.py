@@ -9,7 +9,8 @@ Two rules, one seam:
   knows its own secrets, so it masks them exactly rather than guessing.
 - **Pattern masking.** Compiled shapes for secrets that arrive from OUTSIDE the
   secretsrc boundary (a token pasted into an error message, a PEM block read
-  off disk): GitHub-minted token prefixes and PEM-armored blocks.
+  off disk, a Doppler token inherited via the environment): GitHub-minted token
+  prefixes, PEM-armored blocks, and Doppler token prefixes.
 
 Both are applied by :func:`redact_event`, the processor slotted into
 ``logsetup._PIPELINE`` — the ONE chain every sink shares — so everything
@@ -32,13 +33,27 @@ from typing import Any
 #: convention in :mod:`shipit.gh`).
 MASK = "***"
 
-#: Compiled shapes for secrets that never pass through secretsrc. GitHub token
-#: prefixes (PAT / OAuth / user / installation / refresh, plus fine-grained
-#: ``github_pat_``) and PEM-armored blocks (private keys, certs — the armor
-#: lines and everything between them go, as one mask).
+#: Compiled shapes for secrets that never pass through secretsrc.
+#:
+#: PATTERN POLICY — what earns a compiled shape here: the token formats
+#: shipit's OWN toolchain mints or handles. This layer is the fail-safe for a
+#: credential that arrives outside the registry (inherited env, a config
+#: mistake, a token pasted into an error message) — so it covers exactly the
+#: credential kinds some shipit code path provably touches, and nothing else.
+#: It is NOT a kitchen-sink of every vendor's token format: a new pattern must
+#: name the shipit code path that handles that credential kind, or it does not
+#: go in. Current coverage, each with its handling path:
+#:
+#: - GitHub token prefixes (PAT / OAuth / user / installation / refresh, plus
+#:   fine-grained ``github_pat_``) — minted/used by ``gh``/``ghauth``.
+#: - PEM-armored blocks (private keys, certs — the armor lines and everything
+#:   between them go, as one mask) — the GitHub App key read off disk.
+#: - Doppler service/personal token prefixes (``dp.st.``/``dp.pt.``) — the very
+#:   credentials :mod:`shipit.secretsrc` fetches with.
 _PATTERNS = (
     re.compile(r"gh[posru]_[A-Za-z0-9]+|github_pat_[A-Za-z0-9_]+"),
     re.compile(r"-----BEGIN [A-Z0-9 ]+-----.*?-----END [A-Z0-9 ]+-----", re.DOTALL),
+    re.compile(r"dp\.(?:st|pt)\.[A-Za-z0-9._-]+"),
 )
 
 #: Every secret value fetched this process — exact strings, masked verbatim.

@@ -667,26 +667,22 @@ def _pr_state(record: TreeRecord) -> str | None:
 
     Reads through the same ``gh`` boundary the registry uses, from inside the clone, so
     ``gc`` sees the authoritative merge state rather than re-parsing the rendered label.
-    A draft open PR is normalized to ``"DRAFT"`` (mirroring ``registry._pr_label``) so the
-    fleet has ONE state vocabulary and ``cleanup.classify``'s draft branch is reachable.
-    An unreadable state (``gh.pr_for_head`` returns :data:`~shipit.gh.UNKNOWN`, or a PR
-    with a malformed state field) maps to ``"UNKNOWN"`` — distinct from ``None`` (no
-    branch / no PR) — so ``gc`` can both treat it conservatively and warn about it.
+    The vocabulary is the typed snapshot's own (:attr:`~shipit.gh.HeadPr.display_state`,
+    which normalizes a draft open PR to ``"DRAFT"``), so the fleet has ONE state
+    vocabulary and ``cleanup.classify``'s draft branch is reachable. An unreadable
+    state (``gh.pr_for_head`` returns :data:`~shipit.gh.UNKNOWN` — a gh failure or a
+    malformed payload the adapter's construction boundary rejected) maps to
+    ``"UNKNOWN"`` — distinct from ``None`` (no branch / no PR) — so ``gc`` can both
+    treat it conservatively and warn about it.
     """
     if not record.branch:
         return None
     pr = gh.pr_for_head(record.branch, cwd=record.path)
     if pr is gh.UNKNOWN:
         return "UNKNOWN"
-    if not pr:
+    if pr is None:
         return None
-    state = pr.get("state")
-    if not isinstance(state, str):
-        return "UNKNOWN"
-    state = state.upper()
-    if state == "OPEN" and pr.get("isDraft"):
-        return "DRAFT"
-    return state
+    return pr.display_state
 
 
 def _emit_gc(decision: Cleanup, *, total: int, unknown: int) -> None:

@@ -209,6 +209,12 @@ def test_run_create_reports_git_error_cleanly(monkeypatch, capsys):
     assert "tree create:" in capsys.readouterr().err
 
 
+def _head_pr(number: int, state: str, *, is_draft: bool = False) -> gh.HeadPr:
+    # The typed pr_for_head hit (PROC03): gc's classifier only branches on
+    # number/state/is_draft, so the base is a fixed placeholder.
+    return gh.HeadPr(number=number, state=state, is_draft=is_draft, base_ref="main")
+
+
 def _record(**over) -> TreeRecord:
     # `unpushed_shas=()` (every commit on some remote), NOT the TreeRecord default
     # of None (list unreadable): classify's write/ephemeral ladders read None
@@ -766,10 +772,10 @@ def test_run_gc_removes_only_removable_lists_stale_keeps_rest(
         _record(path=str(keep_open), branch="b4", dirty=False, ahead=0, mtime=aged),
     ]
     pr_by_branch = {
-        "b1": {"number": 1, "state": "MERGED", "isDraft": False},
+        "b1": _head_pr(1, "MERGED"),
         "b2": None,
-        "b3": {"number": 3, "state": "MERGED", "isDraft": False},
-        "b4": {"number": 4, "state": "OPEN", "isDraft": False},
+        "b3": _head_pr(3, "MERGED"),
+        "b4": _head_pr(4, "OPEN"),
     }
     monkeypatch.setattr(tree_verb.layout, "central_root", lambda: str(root))
     monkeypatch.setattr(tree_verb.registry, "scan", lambda r: records)
@@ -817,7 +823,7 @@ def test_run_gc_continues_past_a_failed_delete(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(
         gh,
         "pr_for_head",
-        lambda branch, *, cwd=None: {"number": 1, "state": "MERGED", "isDraft": False},
+        lambda branch, *, cwd=None: _head_pr(1, "MERGED"),
     )
 
     real_remove_tree = tree_verb.remove_tree
@@ -856,7 +862,7 @@ def test_run_gc_does_not_count_an_already_gone_tree(tmp_path, monkeypatch, capsy
     monkeypatch.setattr(
         gh,
         "pr_for_head",
-        lambda branch, *, cwd=None: {"number": 1, "state": "MERGED", "isDraft": False},
+        lambda branch, *, cwd=None: _head_pr(1, "MERGED"),
     )
 
     rc = tree_verb.run_gc()
@@ -888,10 +894,10 @@ def _gc_fleet(root, monkeypatch):
         _record(path=str(keep_open), branch="b4", dirty=False, ahead=0, mtime=aged),
     ]
     pr_by_branch = {
-        "b1": {"number": 1, "state": "MERGED", "isDraft": False},
+        "b1": _head_pr(1, "MERGED"),
         "b2": None,
-        "b3": {"number": 3, "state": "MERGED", "isDraft": False},
-        "b4": {"number": 4, "state": "OPEN", "isDraft": False},
+        "b3": _head_pr(3, "MERGED"),
+        "b4": _head_pr(4, "OPEN"),
     }
     monkeypatch.setattr(tree_verb.layout, "central_root", lambda: str(root))
     monkeypatch.setattr(tree_verb.registry, "scan", lambda r: records)
@@ -1016,7 +1022,7 @@ def test_pr_state_normalizes_draft(monkeypatch):
     monkeypatch.setattr(
         gh,
         "pr_for_head",
-        lambda branch, *, cwd=None: {"number": 7, "state": "OPEN", "isDraft": True},
+        lambda branch, *, cwd=None: _head_pr(7, "OPEN", is_draft=True),
     )
     record = _record(path="/trees/x", branch="b1")
 
@@ -1053,7 +1059,7 @@ def test_run_gc_warns_on_incomplete_sweep(tmp_path, monkeypatch, capsys):
         _record(path=str(unknown), branch="b2", dirty=False, ahead=0, mtime=aged),
     ]
     pr_by_branch = {
-        "b1": {"number": 1, "state": "MERGED", "isDraft": False},
+        "b1": _head_pr(1, "MERGED"),
         "b2": gh.UNKNOWN,
     }
     monkeypatch.setattr(tree_verb.layout, "central_root", lambda: str(root))
@@ -1088,7 +1094,7 @@ def test_run_gc_dry_run_warns_on_unknown_and_deletes_nothing(
         _record(path=str(unknown), branch="b2", dirty=False, ahead=0, mtime=aged),
     ]
     pr_by_branch = {
-        "b1": {"number": 1, "state": "MERGED", "isDraft": False},
+        "b1": _head_pr(1, "MERGED"),
         "b2": gh.UNKNOWN,
     }
     monkeypatch.setattr(tree_verb.layout, "central_root", lambda: str(root))
@@ -1127,7 +1133,7 @@ def test_run_gc_no_warning_when_no_unknown(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(
         gh,
         "pr_for_head",
-        lambda branch, *, cwd=None: {"number": 1, "state": "MERGED", "isDraft": False},
+        lambda branch, *, cwd=None: _head_pr(1, "MERGED"),
     )
 
     rc = tree_verb.run_gc()

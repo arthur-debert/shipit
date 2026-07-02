@@ -8,7 +8,9 @@ verdict lives in the pure core.
 **Fail-open is the contract.** This hook runs on EVERY matching tool call in
 real sessions — including this repo's own dev loop — so ANY unexpected internal
 error (bad stdin, malformed JSON, a missing field, an exception) must result in
-*no block*: the boundary swallows it, logs at DEBUG, and falls through to ALLOW.
+*no block*: the boundary swallows it, logs the swallow at WARNING (the fail-open
+canon in :mod:`shipit.verbs.hook` — a degraded-but-continuing outcome, per the
+spray conventions), and falls through to ALLOW.
 Only the one intended path — a `coordinator` `edit` on a code path — emits a
 `deny`. Exit code is 0 in all normal cases.
 
@@ -96,7 +98,9 @@ def run(stdin: TextIO | None = None, stdout: TextIO | None = None) -> int:
             )
         decision = decide(role, path, is_code, break_glass)
     except Exception:  # noqa: BLE001 — fail-open is the whole point.
-        logger.debug("pretooluse hook failed open (allowing)", exc_info=True)
+        # Fail-OPEN failure arm (hook canon, shipit.verbs.hook): the swallow is
+        # a degraded-but-continuing outcome → WARNING with the exception.
+        logger.warning("pretooluse hook failed open (allowing)", exc_info=True)
         decision = Decision(permission=Permission.ALLOW)
 
     if decision.permission is Permission.DENY:

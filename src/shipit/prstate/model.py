@@ -161,7 +161,17 @@ class ReviewFunnelCheck:
     (``SUCCESS`` / ``FAILURE`` / ``TIMED_OUT`` / ``NEUTRAL`` / ...), ``startedAt``.
     """
 
-    reviewer: str  # the funnel reviewer name, e.g. "codex-local"
+    # ``reviewer`` carries the WIRE name verbatim — the ``review: `` prefix
+    # stripped off the check-run's name — NOT a resolved Backend (#313, examined
+    # against COR02's derive-from-the-registry invariant; the wire shape wins).
+    # The rollup can legitimately carry funnel runs the registry cannot resolve
+    # (a stale run from a since-removed backend, a foreign run squatting on the
+    # reserved prefix), and the breadcrumb must carry those honestly rather than
+    # crash or drop them at the fetch boundary. Nothing re-DERIVES a name from
+    # this string: a consumer that needs the identity matches it against
+    # ``Backend.check_run_name`` (`reviewers.funnel_check`) or resolves it via
+    # ``agent.backend.by_check_run_name`` — the sanctioned registry inverse.
+    reviewer: str  # the funnel reviewer name off the wire, e.g. "codex-local"
     status: str | None  # gh CheckRun status (COMPLETED ⇒ terminal; else in flight)
     conclusion: str | None  # terminal conclusion, or None while in flight
     started_at: str | None  # ISO-8601 tz-aware; WS03 ages the wait window against it

@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 
 import pytest
+from shipit import execrun
 from shipit.session import liveness
 from shipit.session.liveness import (
     CREATE_TIME_TOLERANCE_SECONDS,
@@ -339,6 +340,7 @@ def test_os_probe_parses_a_faked_ps_through_jc(monkeypatch):
 
     def fake_run(cmd, **kwargs):
         seen["cmd"] = cmd
+        seen["timeout"] = kwargs.get("timeout")
 
         class R:
             rc = 0
@@ -352,10 +354,37 @@ def test_os_probe_parses_a_faked_ps_through_jc(monkeypatch):
         "ps", "-p", "4242",
         "-o", "pid=PID", "-o", "ppid=PPID", "-o", "etime=ELAPSED", "-o", "args=ARGS",
     ]  # fmt: skip
+    # The stated tight local bound rides the wire (ADR-0028): a local `ps -p`
+    # must fail the liveness question in seconds, never inherit the runner's
+    # implicit 5-minute default.
+    assert seen["timeout"] == liveness._PS_TIMEOUT
+    assert liveness._PS_TIMEOUT < execrun.DEFAULT_TIMEOUT
     assert info is not None
     assert (info.pid, info.ppid) == (4242, 80)
     assert info.create_time is not None
     assert "claude" in info.argv
+
+
+def test_os_probe_hung_ps_degrades_to_unreadable(monkeypatch):
+    # A ps wedged past _PS_TIMEOUT: the runner kills it and raises its
+    # timeout-cause ExecError; the probe degrades to the Probe contract's None
+    # ("cannot be read" → not live, the safe direction) instead of crashing the
+    # gc sweep or the sessionstart ancestor walk.
+    def hung_run(cmd, **kwargs):
+        raise execrun.ExecError(cmd, rc=None, cause=execrun.CAUSE_TIMEOUT)
+
+    monkeypatch.setattr(liveness.execrun, "run", hung_run)
+    assert liveness.os_probe(4242) is None
+
+
+def test_os_probe_missing_ps_degrades_to_unreadable(monkeypatch):
+    # Same degradation for the other launch-level failure: no `ps` on PATH is
+    # "cannot be read", never a raised ExecError out of the Probe contract.
+    def boom(cmd, **kwargs):
+        raise execrun.ExecError(cmd, rc=None, cause=execrun.CAUSE_MISSING_BINARY)
+
+    monkeypatch.setattr(liveness.execrun, "run", boom)
+    assert liveness.os_probe(4242) is None
 
 
 def test_os_probe_self_is_alive():

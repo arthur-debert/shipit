@@ -229,10 +229,11 @@ class _FakeResult:
 
 
 def test_shell_hook_runs_pixi_json_and_parses():
-    seen: dict[str, list[str]] = {}
+    seen: dict = {}
 
-    def fake_runner(cmd):
+    def fake_runner(cmd, **kwargs):
         seen["cmd"] = cmd
+        seen["timeout"] = kwargs.get("timeout")
         return _FakeResult(SHELL_HOOK_JSON)
 
     act = read.shell_hook(Path("/trees/COR01/WS04/pixi.toml"), runner=fake_runner)
@@ -244,14 +245,19 @@ def test_shell_hook_runs_pixi_json_and_parses():
         "--manifest-path",
         "/trees/COR01/WS04/pixi.toml",
     ]
+    # The stated read bound rides the wire (ADR-0028): it EQUALS the runner's
+    # default (a --json read answers in seconds), but deliberately — stated,
+    # never inherited implicitly.
+    assert seen["timeout"] == pixienv.READ_TIMEOUT
     assert act.environment_variables["CONDA_DEFAULT_ENV"] == "shipit"
 
 
 def test_shell_hook_passes_environment_flag():
-    seen: dict[str, list[str]] = {}
+    seen: dict = {}
 
-    def fake_runner(cmd):
+    def fake_runner(cmd, **kwargs):
         seen["cmd"] = cmd
+        seen["timeout"] = kwargs.get("timeout")
         return _FakeResult(SHELL_HOOK_JSON)
 
     read.shell_hook(Path("/x/pixi.toml"), environment="lint", runner=fake_runner)
@@ -384,10 +390,11 @@ def test_parse_installed_packages_mirrors_pixi_list():
 
 
 def test_list_packages_runs_pixi_list_json_and_parses():
-    seen: dict[str, list[str]] = {}
+    seen: dict = {}
 
-    def fake_runner(cmd):
+    def fake_runner(cmd, **kwargs):
         seen["cmd"] = cmd
+        seen["timeout"] = kwargs.get("timeout")
         return _FakeResult(PIXI_LIST_JSON)
 
     packages = read.list_packages(Path("/x/pixi.toml"), runner=fake_runner)
@@ -403,13 +410,15 @@ def test_list_packages_runs_pixi_list_json_and_parses():
     # value objects — never raw dicts for callers to re-parse.
     assert all(isinstance(p, pixienv.InstalledPackage) for p in packages)
     assert [p.name for p in packages] == ["bzip2", "shipit"]
+    assert seen["timeout"] == pixienv.READ_TIMEOUT
 
 
 def test_list_packages_passes_environment_flag():
-    seen: dict[str, list[str]] = {}
+    seen: dict = {}
 
-    def fake_runner(cmd):
+    def fake_runner(cmd, **kwargs):
         seen["cmd"] = cmd
+        seen["timeout"] = kwargs.get("timeout")
         return _FakeResult("[]")
 
     read.list_packages(Path("/x/pixi.toml"), environment="lint", runner=fake_runner)
@@ -484,15 +493,17 @@ def test_parse_info_tolerates_no_project():
 
 
 def test_info_runs_pixi_info_json_and_parses():
-    seen: dict[str, list[str]] = {}
+    seen: dict = {}
 
-    def fake_runner(cmd):
+    def fake_runner(cmd, **kwargs):
         seen["cmd"] = cmd
+        seen["timeout"] = kwargs.get("timeout")
         return _FakeResult(PIXI_INFO_JSON)
 
     parsed = read.info(Path("/x/pixi.toml"), runner=fake_runner)
 
     assert seen["cmd"] == ["pixi", "info", "--json", "--manifest-path", "/x/pixi.toml"]
+    assert seen["timeout"] == pixienv.READ_TIMEOUT
     # PROC03: the read surface returns the pixi MODEL type — an Info value
     # object — never a raw dict for callers to re-parse.
     assert isinstance(parsed, pixienv.Info)

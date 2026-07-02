@@ -105,12 +105,7 @@ def test_run_subagent_happy_path(tmp_path, monkeypatch, capsys):
     runner, calls = _launcher()
     _patch_pr(
         monkeypatch,
-        {
-            "number": 321,
-            "state": "OPEN",
-            "isDraft": True,
-            "baseRefName": "TRE03/umbrella",
-        },
+        gh.HeadPr(number=321, state="OPEN", is_draft=True, base_ref="TRE03/umbrella"),
     )
 
     rc = spawn_verb.run_subagent(
@@ -172,12 +167,7 @@ def test_run_subagent_links_pr_from_the_tree_branch(tmp_path, monkeypatch, capsy
     runner, calls = _launcher()
     seen = _patch_pr(
         monkeypatch,
-        {
-            "number": 7,
-            "state": "OPEN",
-            "isDraft": True,
-            "baseRefName": "TRE03/umbrella",
-        },
+        gh.HeadPr(number=7, state="OPEN", is_draft=True, base_ref="TRE03/umbrella"),
     )
 
     rc = spawn_verb.run_subagent(
@@ -218,12 +208,7 @@ def test_run_subagent_resolves_epic_grouped_base_and_pr_target(
     runner, _calls = _launcher()
     _patch_pr(
         monkeypatch,
-        {
-            "number": 42,
-            "state": "OPEN",
-            "isDraft": True,
-            "baseRefName": "TRE04/umbrella",
-        },
+        gh.HeadPr(number=42, state="OPEN", is_draft=True, base_ref="TRE04/umbrella"),
     )
 
     rc = spawn_verb.run_subagent(
@@ -512,12 +497,7 @@ def test_run_subagent_repo_accepts_org_qualified_name(tmp_path, monkeypatch, cap
     runner, _calls = _launcher()
     _patch_pr(
         monkeypatch,
-        {
-            "number": 5,
-            "state": "OPEN",
-            "isDraft": True,
-            "baseRefName": "TRE03/umbrella",
-        },
+        gh.HeadPr(number=5, state="OPEN", is_draft=True, base_ref="TRE03/umbrella"),
     )
 
     rc = spawn_verb.run_subagent(
@@ -642,7 +622,7 @@ def test_run_subagent_non_open_pr_is_exit_1(tmp_path, monkeypatch, capsys):
     runner, _calls = _launcher(returncode=0)
     _patch_pr(
         monkeypatch,
-        {"number": 9, "state": "CLOSED", "isDraft": True, "baseRefName": "main"},
+        gh.HeadPr(number=9, state="CLOSED", is_draft=True, base_ref="main"),
     )
 
     rc = spawn_verb.run_subagent(
@@ -664,7 +644,7 @@ def test_run_subagent_non_draft_pr_is_exit_1(tmp_path, monkeypatch, capsys):
     runner, _calls = _launcher(returncode=0)
     _patch_pr(
         monkeypatch,
-        {"number": 9, "state": "OPEN", "isDraft": False, "baseRefName": "main"},
+        gh.HeadPr(number=9, state="OPEN", is_draft=False, base_ref="main"),
     )
 
     rc = spawn_verb.run_subagent(
@@ -687,7 +667,7 @@ def test_run_subagent_wrong_base_pr_is_exit_1(tmp_path, monkeypatch, capsys):
     runner, _calls = _launcher(returncode=0)
     _patch_pr(
         monkeypatch,
-        {"number": 9, "state": "OPEN", "isDraft": True, "baseRefName": "main"},
+        gh.HeadPr(number=9, state="OPEN", is_draft=True, base_ref="main"),
     )
 
     rc = spawn_verb.run_subagent(
@@ -718,7 +698,7 @@ def test_run_subagent_issue_only_builds_issue_shape_spec(tmp_path, monkeypatch, 
     runner, calls = _launcher()
     _patch_pr(
         monkeypatch,
-        {"number": 77, "state": "OPEN", "isDraft": True, "baseRefName": "main"},
+        gh.HeadPr(number=77, state="OPEN", is_draft=True, base_ref="main"),
     )
 
     rc = spawn_verb.run_subagent(
@@ -751,7 +731,7 @@ def test_run_subagent_issue_only_uses_a_non_default_session(
     runner, _calls = _launcher()
     seen = _patch_pr(
         monkeypatch,
-        {"number": 5, "state": "OPEN", "isDraft": True, "baseRefName": "main"},
+        gh.HeadPr(number=5, state="OPEN", is_draft=True, base_ref="main"),
     )
 
     rc = spawn_verb.run_subagent(
@@ -785,7 +765,7 @@ def test_run_subagent_issue_only_does_not_check_epic_umbrella(
     runner, _calls = _launcher()
     _patch_pr(
         monkeypatch,
-        {"number": 9, "state": "OPEN", "isDraft": True, "baseRefName": "main"},
+        gh.HeadPr(number=9, state="OPEN", is_draft=True, base_ref="main"),
     )
 
     rc = spawn_verb.run_subagent(

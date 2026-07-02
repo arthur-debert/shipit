@@ -440,8 +440,11 @@ specialization that additionally owns launch posture. Any tool argv built
 outside its Tool adapter is a defect. Reads return the EXISTING core value
 objects (PROC03/ADR-0028) — a repo read returns a `Repo`, a commit read a
 `Sha`, a PR-core read a `PR`, the pixi reads the pixienv model types — never
-dicts or adapter-shaped parallel snapshots; raw output survives only where no
-core noun exists yet (e.g. `gh.pr_view`'s field-list read, or the PR-number
+dicts or adapter-shaped parallel snapshots; where no core noun fits a read's
+shape, a small frozen adapter-owned projection is legitimate (`gh.HeadPr`, the
+fleet reads' scan-shaped hit — a projection of the fields its callers branch
+on, not a parallel snapshot of a core object); raw output survives only where
+no core noun exists yet (e.g. `gh.pr_view`'s field-list read, or the PR-number
 probe whose number/no-PR/failure trichotomy resolves in the verb layer off a
 raw `ExecResult`). The adapter owns the parse for the typed reads: a call that
 exited 0 but produced unusable output is the adapter's `ValueError`, not a
@@ -485,15 +488,18 @@ seam knows the real identity).
 The central masking processor (`shipit.redact`, ADR-0028/0029) in the one log
 pipeline, so everything logged on ANY sink is masked before rendering: exact
 values of every secret `secretsrc` fetches (registered at fetch time, held for
-the process lifetime) plus pattern rules for GitHub token prefixes and PEM
-blocks. Mask is `***`. No redaction package is adopted (none credible —
-ADR-0029 records the survey).
+the process lifetime) plus pattern rules for GitHub token prefixes, PEM
+blocks, and Doppler token prefixes. The pattern list is policy-gated, not a
+vendor kitchen-sink: a new pattern must name the shipit code path that handles
+that credential kind (`redact.py` states the policy). Mask is `***`. No
+redaction package is adopted (none credible — ADR-0029 records the survey).
 *Avoid*: per-call-site scrubbing as the safety story (the pipeline seam is the
 guarantee; `gh.py`'s argv masking is belt-and-suspenders for non-log channels);
 "sanitize"/"filter" (redaction masks values, it does not drop records). The one
-deliberate construction-time redaction is `ExecError`'s attributes — that object
-surfaces to callers OUTSIDE the logging chain (LOG02, #277); log records
-themselves are never pre-masked at the call site.
+deliberate construction-time redaction is `ExecError`'s attributes, including
+its sanitized `__cause__` chain — that object surfaces to callers OUTSIDE the
+logging chain (LOG02, #277); log records themselves are never pre-masked at the
+call site.
 
 **Lifecycle narration**:
 The leveled, correlated record every subsystem keeps of its own milestones

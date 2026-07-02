@@ -172,6 +172,19 @@ def test_adding_a_backend_needs_only_a_registry_entry(monkeypatch):
         "app_id": "NEWBOT_REVIEW_APP_ID",
     }
 
+    # The CONFIG seam (#313): the install-seeded App-secret names and the
+    # `[secrets]` scaffold are DERIVED from `funnel_backends()`, so the new
+    # backend's Doppler keys appear in both with ZERO config edits.
+    from shipit import config
+
+    monkeypatch.setattr(backend, "REGISTRY", (*backend.REGISTRY, newbot))
+    seeds = config.seeded_app_secrets()
+    assert "NEWBOT_REVIEW_APP_PRIVATE_KEY" in seeds
+    assert "NEWBOT_REVIEW_APP_ID" in seeds
+    scaffold = config.secrets_scaffold()
+    assert '{ doppler = "NEWBOT_REVIEW_APP_PRIVATE_KEY" }' in scaffold
+    assert '{ doppler = "NEWBOT_REVIEW_APP_ID" }' in scaffold
+
 
 def test_backend_identity_is_the_name_alone():
     # Two references to the same backend compare/hash equal regardless of alias data.

@@ -7,9 +7,16 @@ the open threads with the handles those actions require.
 
 from __future__ import annotations
 
+import logging
+
 from .. import gh
 from . import fetch
 from .model import Thread
+
+#: The engine's logger (shared name with the rest of ``shipit.prstate``): a
+#: reply / resolve is a PR mutation, so it gets a lifecycle record here at the
+#: act (LOG03) — before this, the Exec debug transport line was its only trace.
+logger = logging.getLogger("shipit.prstate")
 
 _RESOLVE = """
 mutation($threadId: ID!) {
@@ -31,9 +38,48 @@ def reply(pr: int, comment_id: int, body: str) -> None:
     The endpoint knowledge lives in the adapter (:func:`shipit.gh.pr_review_reply`)
     — before the PROC02-WS01 merge this module re-spelled the same REST call.
     """
-    gh.pr_review_reply(pr, comment_id, body)
+    try:
+        gh.pr_review_reply(pr, comment_id, body)
+    except Exception:
+        # A propagating failure (glassbox spray): the mutation died — record it
+        # at ERROR with the exception attached, then let it propagate unchanged.
+        logger.error(
+            "review-thread reply failed on pr#%s (comment %s)",
+            pr,
+            comment_id,
+            exc_info=True,
+            extra={"pr": pr, "comment_id": comment_id},
+        )
+        raise
+    logger.info(
+        "review-thread reply posted on pr#%s (comment %s)",
+        pr,
+        comment_id,
+        extra={"pr": pr, "comment_id": comment_id},
+    )
 
 
-def resolve(thread_id: str) -> None:
-    """Mark a review thread resolved via the GraphQL mutation."""
-    gh.graphql(_RESOLVE, threadId=thread_id)
+def resolve(pr: int, thread_id: str) -> None:
+    """Mark a review thread resolved via the GraphQL mutation.
+
+    Takes the PR number alongside the thread handle so the mutation milestone
+    carries ``pr`` on the record itself (every caller holds it — threads come
+    from :func:`open_threads`), not only via an ambient context bind.
+    """
+    try:
+        gh.graphql(_RESOLVE, threadId=thread_id)
+    except Exception:
+        logger.error(
+            "review-thread resolve failed on pr#%s (thread %s)",
+            pr,
+            thread_id,
+            exc_info=True,
+            extra={"pr": pr, "thread_id": thread_id},
+        )
+        raise
+    logger.info(
+        "review-thread resolved on pr#%s (thread %s)",
+        pr,
+        thread_id,
+        extra={"pr": pr, "thread_id": thread_id},
+    )

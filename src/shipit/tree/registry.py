@@ -192,22 +192,19 @@ def _read_record(path: Path) -> TreeRecord:
     )
 
 
-def _pr_label(pr: dict | None | gh.UnknownPr) -> str | None:
+def _pr_label(pr: gh.HeadPr | None | gh.UnknownPr) -> str | None:
     """A short ``"#<n> <STATE>"`` label for a PR snapshot, or ``None`` when there is none.
 
-    A draft open PR reads as ``DRAFT`` (the turn-signal the dev cycle hinges on);
-    otherwise the GitHub state (``OPEN`` / ``MERGED`` / ``CLOSED``) is shown verbatim.
-    An :data:`~shipit.gh.UNKNOWN` snapshot (the state could not be read) renders as a
+    The state vocabulary is the snapshot's own
+    (:attr:`~shipit.gh.HeadPr.display_state`): a draft open PR reads as ``DRAFT``
+    (the turn-signal the dev cycle hinges on); otherwise the GitHub state
+    (``OPEN`` / ``MERGED`` / ``CLOSED``) is shown verbatim. An
+    :data:`~shipit.gh.UNKNOWN` snapshot (the state could not be read) renders as a
     bare ``UNKNOWN`` so an unreadable Tree is visible in ``list``, distinct from the
     ``-`` a genuinely-PR-less Tree shows.
     """
     if pr is gh.UNKNOWN:
         return "UNKNOWN"
-    if not pr:
+    if pr is None:
         return None
-    number = pr.get("number")
-    state = (pr.get("state") or "").upper()
-    if state == "OPEN" and pr.get("isDraft"):
-        state = "DRAFT"
-    head = f"#{number}" if number is not None else "#?"
-    return f"{head} {state}".strip()
+    return f"#{pr.number} {pr.display_state}"

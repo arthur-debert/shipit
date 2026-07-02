@@ -79,12 +79,16 @@ def test_doppler_get_runs_the_canonical_argv_check_false(monkeypatch):
         captured["argv"] = argv
         captured["check"] = check
         captured["secret_stdout"] = secret_stdout
+        captured["timeout"] = kw.get("timeout")
         return _doppler_result(0, stdout="s3cret\n")
 
     monkeypatch.setattr(secretsrc.execrun, "run", fake_run)
     assert secretsrc.doppler_get("GH_PAT") == "s3cret"
     assert captured["check"] is False
     assert captured["secret_stdout"] is True
+    # The stated network-ish bound rides the wire (ADR-0028): it EQUALS the
+    # runner's default, but deliberately — stated, never inherited implicitly.
+    assert captured["timeout"] == secretsrc.DOPPLER_TIMEOUT
     assert captured["argv"] == [
         "doppler",
         "secrets",

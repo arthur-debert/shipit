@@ -14,14 +14,40 @@ The contract, in full:
 - **Nothing hangs by default.** Every Exec carries a timeout, default
   :data:`DEFAULT_TIMEOUT` (5 minutes). Legitimate long-runners override it
   per call (``None`` allowed — an explicit choice, never the default).
-- **One record per Exec** — argv, cwd, rc, ``duration_ms``; on failure the
-  tails of both streams. Success logs at DEBUG, failure at ERROR. A nonzero
-  exit under ``check=False`` is the caller's *normal* outcome (a liveness
-  probe of a dead pid, ``git cat-file -e``), so it records at DEBUG, not ERROR.
+- **One record per Exec, structured** — the record carries the outcome as
+  FLAT FIELDS (stdlib ``extra=``, adopted into flat JSONL keys by the
+  ADR-0029 pipeline) alongside a human-readable ``msg`` that still states the
+  command and outcome inline. The field vocabulary, defined once in
+  :func:`_record_fields` and used on every record this module emits:
+
+  - ``argv`` — the command as ONE human-readable string (``shlex.join``;
+    JSONL fields are flat scalars, not arrays);
+  - ``cwd`` — the working directory (``"."`` when the caller passed none);
+  - ``rc`` — the exit code, an int; ABSENT (not null) when the child never
+    produced one (timeout, launch failure);
+  - ``duration_ms`` — wall-clock milliseconds, an int;
+  - on failure only: ``cause`` (a ``CAUSE_*`` tag) and ``stdout_tail`` /
+    ``stderr_tail`` (the last :data:`TAIL_CHARS` of each stream);
+  - on a detached spawn: ``pid`` instead of ``rc``/``duration_ms`` (there is
+    no completion — see :func:`spawn_detached`).
+
+  So "all Execs slower than 10s" or "all nonzero exits" is a query on the raw
+  log (``jq 'select(.duration_ms > 10000)'``, ``jq 'select(has("rc") and
+  .rc != 0)'`` — the ``has`` guard is load-bearing: ``rc`` is ABSENT on a
+  record with no exit code, and in jq ``null != 0`` is true, so the bare
+  ``.rc != 0`` would wrongly match timeouts, launch failures, and detached
+  spawns), never a parse of ``msg`` (glassbox PRD story 14). Success logs at DEBUG,
+  failure at ERROR. A nonzero exit under ``check=False`` is the caller's
+  *normal* outcome (a liveness probe of a dead pid, ``git cat-file -e``), so
+  it records at DEBUG, not ERROR.
 - **Everything redacted.** Every attribute of an :class:`ExecError` is masked
   at construction (:mod:`shipit.redact`) — the error object surfaces to callers
-  OUTSIDE the logging chain, so it can never carry a secret anywhere. The log
-  records themselves carry no per-site masking (#277): the central
+  OUTSIDE the logging chain, so it can never carry a secret anywhere. That
+  guarantee extends to the exception CHAIN (#317): the raw stdlib exception a
+  failure wraps stays reachable via ``__cause__``, so it is sanitized of its
+  captured stream payloads before chaining (:func:`_sanitize_cause`) — the
+  chain's diagnostic value (type, message) survives; the raw streams do not.
+  The log records themselves carry no per-site masking (#277): the central
   ``redact.redact_event`` processor in ``logsetup._PIPELINE`` masks every
   record, on every sink, at format time.
 
@@ -135,6 +161,33 @@ class ExecError(RuntimeError):
         super().__init__(message)
 
 
+def _record_fields(
+    argv: list[str] | tuple[str, ...],
+    cwd: str | os.PathLike | None,
+    **outcome: int | str | None,
+) -> dict[str, int | str]:
+    """The Exec record's structured fields — the ONE definition of the vocabulary.
+
+    Every record this module emits builds its ``extra=`` dict here, so the
+    field names (see the module docstring: ``argv``, ``cwd``, ``rc``,
+    ``duration_ms``, ``cause``, ``stdout_tail``, ``stderr_tail``, ``pid``)
+    can never drift between the success, failure, and detached-spawn records.
+    ``argv`` is joined to one human-readable string (flat JSONL scalars, not
+    arrays); a ``None`` outcome value (an rc that never existed — timeout,
+    launch failure) is DROPPED, honouring ADR-0029's absent-not-null rule.
+    No masking here (#277): the central ``redact.redact_event`` processor
+    masks every field, on every sink, at format time.
+    """
+    fields: dict[str, int | str] = {
+        "argv": shlex.join(argv),
+        "cwd": str(cwd or "."),
+    }
+    for key, value in outcome.items():
+        if value is not None:
+            fields[key] = value
+    return fields
+
+
 def run(
     argv: list[str],
     *,
@@ -228,7 +281,7 @@ def run(
             cause=CAUSE_TIMEOUT,
         )
         _record_failure(error, cwd)
-        raise error from exc
+        raise error from _sanitize_cause(exc)
     except OSError as exc:
         # Normalize EVERY launch-level OS failure into the transport error: a
         # missing binary (FileNotFoundError — the semantically distinct case) or
@@ -248,7 +301,7 @@ def run(
             cause=cause,
         )
         _record_failure(error, cwd)
-        raise error from exc
+        raise error from _sanitize_cause(exc)
     duration_ms = _elapsed_ms(start)
     if check and proc.returncode != 0:
         error = ExecError(
@@ -269,17 +322,24 @@ def run(
         duration_ms=duration_ms,
     )
     # The one record for a completed Exec (DEBUG — success, or a nonzero rc the
-    # caller declared normal via check=False). No per-site redaction (#277): the
-    # central `redact.redact_event` processor masks EVERY record at format time,
+    # caller declared normal via check=False). The outcome rides as structured
+    # fields (the _record_fields vocabulary → flat JSONL keys) AND inline in the
+    # human msg — fields are additive for the machine reader (ADR-0029's "human
+    # msg inside" rule). No per-site redaction (#277): the central
+    # `redact.redact_event` processor masks EVERY record at format time,
     # on every sink, so masking here would only run the redactor twice. Streams
     # are deliberately absent from success records (bulk, and the secret-bearing
     # channel) — failures carry their tails via _record_failure above.
+    fields = _record_fields(
+        result.argv, cwd, rc=result.rc, duration_ms=result.duration_ms
+    )
     logger.debug(
         "exec %s (cwd=%s) -> rc=%d in %dms",
-        shlex.join(result.argv),
-        str(cwd or "."),
+        fields["argv"],
+        fields["cwd"],
         result.rc,
         result.duration_ms,
+        extra=fields,
     )
     return result
 
@@ -349,37 +409,95 @@ def spawn_detached(
             cause=CAUSE_MISSING_BINARY if is_missing_binary else CAUSE_OS,
         )
         _record_failure(error, cwd)
-        raise error from exc
+        raise error from _sanitize_cause(exc)
     # The one record for a detached spawn: what was launched, from where, as
-    # what pid. There is no completion to record — the pid is the only handle
-    # a log reader has to correlate the child's own records back to this spawn.
-    # No per-site redaction (#277): the central `redact.redact_event` processor
-    # masks every record at format time.
+    # what pid — as structured fields (the _record_fields vocabulary: pid in
+    # place of rc/duration_ms, since there is no completion) and inline in the
+    # human msg. The pid is the only handle a log reader has to correlate the
+    # child's own records back to this spawn. No per-site redaction (#277): the
+    # central `redact.redact_event` processor masks every record at format time.
+    fields = _record_fields(argv, cwd, pid=proc.pid)
     logger.debug(
         "exec-detach %s (cwd=%s) -> pid=%d",
-        shlex.join(argv),
-        str(cwd or "."),
+        fields["argv"],
+        fields["cwd"],
         proc.pid,
+        extra=fields,
     )
+
+
+def _sanitize_cause(exc: BaseException) -> BaseException:
+    """Scrub raw stream payloads off ``exc`` before chaining it as ``__cause__``.
+
+    Every failure path raises ``ExecError from exc``, and the chained cause
+    stays reachable via ``err.__cause__`` for as long as the error lives.
+    :class:`subprocess.TimeoutExpired` carries the child's raw partial streams
+    (``.output``/``.stderr``) — unredacted, and untouched even when
+    ``secret_stdout=True`` scrubbed the wrapping :class:`ExecError` (#317).
+    Traceback RENDERING happens to be safe today (the sink formatter's
+    flattened exception text passes through ``redact_text``, and
+    ``TimeoutExpired.__str__`` prints no output), but the seam's contract must
+    not depend on how stdlib exceptions happen to stringify: null the
+    payload-bearing attributes so ``err.__cause__`` is as safe as ``err``.
+
+    The chain itself is preserved — the cause's type and message ("Command
+    '...' timed out after 0.1 seconds") are diagnostic value; only its captured
+    streams are the hazard. The command the message names is redacted in place,
+    matching the redaction ``ExecError`` applies to its own ``argv``. OS-level
+    causes (``FileNotFoundError`` & co.) carry no stream payloads and pass
+    through untouched.
+
+    Attribute rewrites alone are not enough: ``BaseException.__new__``
+    snapshots the positional constructor arguments onto ``.args``, and
+    ``repr(exc)`` renders THAT tuple — so ``.args`` must be rebuilt from the
+    sanitized values or the raw ``cmd`` (and any positionally-passed streams)
+    leaks straight through the redacted attributes.
+    """
+    if isinstance(exc, subprocess.TimeoutExpired):
+        exc.output = None  # ``.stdout`` is a property over ``.output``
+        exc.stderr = None
+        # ``cmd`` is a str when the child was launched through a shell; this
+        # seam's contract holds for any constructor shape, not just the list
+        # argv :func:`run` itself enforces.
+        exc.cmd = (
+            redact.redact_text(exc.cmd)
+            if isinstance(exc.cmd, str)
+            else [redact.redact_text(str(arg)) for arg in exc.cmd]
+        )
+        exc.args = (exc.cmd, exc.timeout, None, None)[: len(exc.args)]
+    return exc
 
 
 def _record_failure(error: ExecError, cwd: str | os.PathLike | None) -> None:
     """The one record for a failed Exec: ERROR, with both stream tails.
 
+    The outcome rides as structured fields (the :func:`_record_fields`
+    vocabulary — here including ``cause`` and both stream tails; ``rc`` is
+    absent when the child never produced one) and inline in the human msg.
     ``error``'s attributes are redacted at construction — the ERROR object
     surfaces to callers OUTSIDE the logging chain, so that redaction stays. The
     record itself needs no per-site masking (#277): the central
     ``redact.redact_event`` processor masks every record at format time.
     """
+    fields = _record_fields(
+        error.argv,
+        cwd,
+        rc=error.rc,
+        duration_ms=error.duration_ms,
+        cause=error.cause,
+        stdout_tail=_tail(error.stdout),
+        stderr_tail=_tail(error.stderr),
+    )
     logger.error(
         "exec %s (cwd=%s) -> %s (rc=%s) in %dms\nstdout tail: %s\nstderr tail: %s",
-        shlex.join(error.argv),
-        str(cwd or "."),
+        fields["argv"],
+        fields["cwd"],
         error.cause,
         error.rc,
         error.duration_ms,
-        _tail(error.stdout),
-        _tail(error.stderr),
+        fields["stdout_tail"],
+        fields["stderr_tail"],
+        extra=fields,
     )
 
 

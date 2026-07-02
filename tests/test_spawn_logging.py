@@ -15,6 +15,7 @@ here we only assert logging is ADDITIVE under it.
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from pathlib import Path
 
 from shipit import gh, git, pixienv
@@ -67,7 +68,7 @@ def _patch_pr(monkeypatch, pr):
     monkeypatch.setattr(gh, "pr_for_head", lambda branch, *, cwd=None: pr)
 
 
-_PR = {"number": 321, "state": "OPEN", "isDraft": True, "baseRefName": "TRE03/umbrella"}
+_PR = gh.HeadPr(number=321, state="OPEN", is_draft=True, base_ref="TRE03/umbrella")
 
 
 def _spawn_records(caplog, level=None):
@@ -253,7 +254,7 @@ def test_handshake_failure_wrong_state_logs_error_with_the_pr(
     tmp_path, monkeypatch, caplog
 ):
     with caplog.at_level(logging.DEBUG, logger="shipit.spawn"):
-        rc = _write_spawn(tmp_path, monkeypatch, pr={**_PR, "state": "MERGED"})
+        rc = _write_spawn(tmp_path, monkeypatch, pr=replace(_PR, state="MERGED"))
     assert rc == 1
     errors = _spawn_records(caplog, logging.ERROR)
     assert len(errors) == 1

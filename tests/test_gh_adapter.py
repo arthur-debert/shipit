@@ -2,11 +2,11 @@
 
 The engine's second boundary (`shipit/prstate/ghapi.py`) merged into
 `shipit.gh`: pure-logic tests for the merged surface (no subprocess), plus the
-mechanical sweeps that pin the merge's two structural guarantees —
-
-- gh argv is built ONLY inside the adapter ("tool argv built outside its Tool
-  adapter" is a statable defect, ADR-0028); and
-- the pagination-merging helper exists exactly once.
+mechanical sweep that pins one of the merge's structural guarantees — the
+pagination-merging helper exists exactly once. The other guarantee — gh argv is
+built ONLY inside the adapter ("tool argv built outside its Tool adapter" is a
+statable defect, ADR-0028) — is the ``gh`` row of the table-driven cross-tool
+sweep in ``test_tool_argv_sweep.py``.
 """
 
 from __future__ import annotations
@@ -49,28 +49,6 @@ def test_pagination_helper_exists_exactly_once():
             if isinstance(node, ast.FunctionDef) and node.name == "_merge_paginated":
                 definitions.append(path.relative_to(_SRC_ROOT.parent))
     assert definitions == [pathlib.Path("shipit/gh.py")]
-
-
-# --- gh argv is built only inside the adapter --------------------------------
-
-
-def test_no_gh_argv_outside_the_adapter():
-    """ADR-0028: any list/tuple argv literal starting with "gh" outside
-    `shipit/gh.py` is a review defect — the grep-clean criterion, pinned."""
-    offenders = []
-    for path in sorted(_SRC_ROOT.rglob("*.py")):
-        if path == _SRC_ROOT / "gh.py":
-            continue
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if (
-                isinstance(node, (ast.List, ast.Tuple))
-                and node.elts
-                and isinstance(node.elts[0], ast.Constant)
-                and node.elts[0].value == "gh"
-            ):
-                offenders.append(f"{path.relative_to(_SRC_ROOT.parent)}:{node.lineno}")
-    assert not offenders, "gh argv built outside the adapter:\n" + "\n".join(offenders)
 
 
 # --- the merged REST/GraphQL surface (transport mocked at `_run`) -------------

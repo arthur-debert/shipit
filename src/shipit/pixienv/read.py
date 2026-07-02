@@ -36,6 +36,14 @@ ENV_IDENTITY_FILE = "pixi"
 #: :attr:`EnvIdentity.environment_lock_file_hash` (docs/dev/pixi §2); do not conflate them.
 FINGERPRINT_FILE = ".pixi-environment-fingerprint"
 
+#: The read verbs' stated timeout, in seconds (ADR-0028: every Exec states its
+#: bound deliberately — never the runner's implicit default). A ``--json`` read
+#: against a provisioned env answers in seconds, so the runner's default IS the
+#: right bound — stated on the wire rather than inherited, so the
+#: no-implicit-timeout sweep stays grep-verifiable. The execution side's
+#: long-runner bound is :data:`shipit.pixienv.run.INSTALL_TIMEOUT`.
+READ_TIMEOUT: float = execrun.DEFAULT_TIMEOUT
+
 
 def env_identity_path(prefix: Path) -> Path:
     """The ``conda-meta/pixi`` path inside an env ``prefix``."""
@@ -77,15 +85,15 @@ def shell_hook(
 
     ``environment`` selects a non-default pixi environment. ``runner`` is the injectable
     Exec boundary (default :func:`shipit.execrun.run`); it must return an object with a
-    ``.stdout`` string. shipit consumes pixi's activation output here rather than computing
-    a rival (ADR-0022).
+    ``.stdout`` string. The Exec states :data:`READ_TIMEOUT`. shipit consumes pixi's
+    activation output here rather than computing a rival (ADR-0022).
     """
     if runner is None:
         runner = execrun.run
     cmd = ["pixi", "shell-hook", "--json", "--manifest-path", str(manifest_path)]
     if environment is not None:
         cmd += ["--environment", environment]
-    result = runner(cmd)
+    result = runner(cmd, timeout=READ_TIMEOUT)
     return parse_activation(result.stdout)
 
 
@@ -100,15 +108,15 @@ def list_packages(
     The native-JSON harvest of the read verb (ADR-0028): what an environment actually
     holds, as :class:`InstalledPackage` value objects — never a scrape of the human
     table. ``environment`` selects a non-default pixi environment; ``runner`` is the
-    injectable Exec boundary. The Exec keeps the runner's 5-minute default timeout —
-    a read verb against a provisioned env answers in seconds.
+    injectable Exec boundary. The Exec states :data:`READ_TIMEOUT` — a read verb
+    against a provisioned env answers in seconds.
     """
     if runner is None:
         runner = execrun.run
     cmd = ["pixi", "list", "--json", "--manifest-path", str(manifest_path)]
     if environment is not None:
         cmd += ["--environment", environment]
-    result = runner(cmd)
+    result = runner(cmd, timeout=READ_TIMEOUT)
     return parse_installed_packages(result.stdout)
 
 
@@ -117,10 +125,13 @@ def info(manifest_path: Path, *, runner=None) -> Info:
 
     The machine/workspace snapshot straight from pixi's own JSON (ADR-0022: borrow,
     never re-derive): pixi version, platform, cache dir, and every declared
-    environment's surface. ``runner`` is the injectable Exec boundary; the runner's
-    default timeout applies (a pure read, no solve).
+    environment's surface. ``runner`` is the injectable Exec boundary; the Exec
+    states :data:`READ_TIMEOUT` (a pure read, no solve).
     """
     if runner is None:
         runner = execrun.run
-    result = runner(["pixi", "info", "--json", "--manifest-path", str(manifest_path)])
+    result = runner(
+        ["pixi", "info", "--json", "--manifest-path", str(manifest_path)],
+        timeout=READ_TIMEOUT,
+    )
     return parse_info(result.stdout)
