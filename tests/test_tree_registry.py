@@ -47,14 +47,14 @@ def fleet(tmp_path: Path, monkeypatch):
         str(a): {
             "branch": "issues/123/work",
             "base": "origin/main",
-            "dirty": " M file.py\n",
+            "dirty": [" M file.py"],
             "ahead_behind": (2, 0),
             "unpushed_shas": ("a" * 40, "b" * 40),
         },
         str(b): {
             "branch": "HAR02/WS02",
             "base": "origin/HAR02/umbrella",
-            "dirty": "",
+            "dirty": [],
             "ahead_behind": (0, 3),
             "unpushed_shas": (),
         },
@@ -129,7 +129,7 @@ def test_scan_branch_without_pr_has_none(tmp_path: Path, monkeypatch):
     clone = _make_clone(root, "acme/widget/issues/1/work-zzzz")
     monkeypatch.setattr(git, "current_branch", lambda *, cwd: "issues/1/work")
     monkeypatch.setattr(git, "upstream_ref", lambda *, cwd: None)
-    monkeypatch.setattr(git, "status_porcelain", lambda *, cwd: "")
+    monkeypatch.setattr(git, "status_porcelain", lambda *, cwd: [])
     monkeypatch.setattr(git, "ahead_behind", lambda *, cwd: (0, 0))
     monkeypatch.setattr(gh, "pr_for_head", lambda branch, *, cwd=None: None)
 
@@ -147,7 +147,7 @@ def test_scan_unreadable_pr_renders_unknown_label(tmp_path: Path, monkeypatch):
     clone = _make_clone(root, "acme/widget/issues/1/work-zzzz")
     monkeypatch.setattr(git, "current_branch", lambda *, cwd: "issues/1/work")
     monkeypatch.setattr(git, "upstream_ref", lambda *, cwd: "origin/main")
-    monkeypatch.setattr(git, "status_porcelain", lambda *, cwd: "")
+    monkeypatch.setattr(git, "status_porcelain", lambda *, cwd: [])
     monkeypatch.setattr(git, "ahead_behind", lambda *, cwd: (0, 0))
     monkeypatch.setattr(gh, "pr_for_head", lambda branch, *, cwd=None: gh.UNKNOWN)
 
@@ -169,7 +169,7 @@ def test_scan_does_not_descend_into_a_clone(tmp_path: Path, monkeypatch):
 
     monkeypatch.setattr(git, "current_branch", lambda *, cwd: "issues/1/work")
     monkeypatch.setattr(git, "upstream_ref", lambda *, cwd: "origin/main")
-    monkeypatch.setattr(git, "status_porcelain", lambda *, cwd: "")
+    monkeypatch.setattr(git, "status_porcelain", lambda *, cwd: [])
     monkeypatch.setattr(git, "ahead_behind", lambda *, cwd: (0, 0))
     monkeypatch.setattr(gh, "pr_for_head", lambda branch, *, cwd=None: None)
 
@@ -187,7 +187,7 @@ def _patch_trivial_gh(monkeypatch, *, branch_hook=None):
 
     monkeypatch.setattr(git, "current_branch", _branch)
     monkeypatch.setattr(git, "upstream_ref", lambda *, cwd: "origin/main")
-    monkeypatch.setattr(git, "status_porcelain", lambda *, cwd: "")
+    monkeypatch.setattr(git, "status_porcelain", lambda *, cwd: [])
     monkeypatch.setattr(git, "ahead_behind", lambda *, cwd: (0, 0))
     monkeypatch.setattr(gh, "pr_for_head", lambda branch, *, cwd=None: None)
 

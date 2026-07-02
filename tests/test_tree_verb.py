@@ -278,7 +278,7 @@ def test_run_list_over_a_fixture_root_renders(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("SHIPIT_TREES_ROOT", str(root))
     monkeypatch.setattr(git, "current_branch", lambda *, cwd: "issues/7/work")
     monkeypatch.setattr(git, "upstream_ref", lambda *, cwd: "origin/main")
-    monkeypatch.setattr(git, "status_porcelain", lambda *, cwd: "")
+    monkeypatch.setattr(git, "status_porcelain", lambda *, cwd: [])
     monkeypatch.setattr(git, "ahead_behind", lambda *, cwd: (0, 0))
     monkeypatch.setattr(gh, "pr_for_head", lambda branch, *, cwd=None: None)
 

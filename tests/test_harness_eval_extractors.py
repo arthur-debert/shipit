@@ -390,7 +390,7 @@ def test_extract_on_missing_file_yields_empty_metrics(tmp_path):
 
 
 def test_exit_hygiene_clean_worktree(monkeypatch):
-    monkeypatch.setattr(extractors.git, "status_porcelain", lambda *, cwd: "")
+    monkeypatch.setattr(extractors.git, "status_porcelain", lambda *, cwd: [])
     result = exit_hygiene("/repo")
     assert result == {
         "worktree_clean": True,
@@ -409,7 +409,7 @@ def test_exit_hygiene_dirty_worktree(monkeypatch):
 
 
 def test_exit_hygiene_counts_injected_stray_pids(monkeypatch):
-    monkeypatch.setattr(extractors.git, "status_porcelain", lambda *, cwd: "")
+    monkeypatch.setattr(extractors.git, "status_porcelain", lambda *, cwd: [])
     result = exit_hygiene("/repo", list_stray_pids=lambda: [101, 202])
     assert result["stray_pid_count"] == 2
 
