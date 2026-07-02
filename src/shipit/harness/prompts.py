@@ -29,12 +29,18 @@ only the body composes.
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
 
 from .role import Role
+
+#: The harness subsystem's logger. Regeneration mutates the working tree (the
+#: agent-defs, the bundled generated docs), so each write gets a durable record
+#: (LOG03) — the ``regenerated <path>`` print stays as the user-facing surface.
+logger = logging.getLogger("shipit.harness")
 
 #: The subagent roles — every role EXCEPT the coordinator, which is the top-level
 #: session and has no agent-def (ADR-0011). These are the roles that get a
@@ -282,26 +288,34 @@ def regenerate(repo_root: Path | None = None) -> list[Path]:
     rendered = render(load_role_defs())
     written: list[Path] = []
 
+    def _write_surface(dest: Path, text: str) -> None:
+        # The one write seam: every regenerated surface lands through here, so
+        # each working-tree mutation carries its own record (path as a field).
+        dest.write_text(text, encoding="utf-8")
+        logger.info("role surface regenerated at %s", dest, extra={"path": str(dest)})
+        written.append(dest)
+
     agents_dir = root / ".claude" / "agents"
     agents_dir.mkdir(parents=True, exist_ok=True)
     for role in SUBAGENT_ROLES:
         dest = agents_dir / f"{role.value}.md"
-        dest.write_text(_agent_def(role, rendered.role_prompts[role]), encoding="utf-8")
-        written.append(dest)
+        _write_surface(dest, _agent_def(role, rendered.role_prompts[role]))
 
     generated_dir = root / "src" / "shipit" / "data" / "roles" / "generated"
     generated_dir.mkdir(parents=True, exist_ok=True)
 
-    coord = generated_dir / _COORDINATOR_SLICE_NAME
-    coord.write_text(
-        _generated_doc(rendered.role_prompts[Role.COORDINATOR]), encoding="utf-8"
+    _write_surface(
+        generated_dir / _COORDINATOR_SLICE_NAME,
+        _generated_doc(rendered.role_prompts[Role.COORDINATOR]),
     )
-    written.append(coord)
+    _write_surface(generated_dir / _UNION_NAME, _generated_doc(rendered.agents_union))
 
-    union = generated_dir / _UNION_NAME
-    union.write_text(_generated_doc(rendered.agents_union), encoding="utf-8")
-    written.append(union)
-
+    # The regeneration milestone: how many derived surfaces are now on disk.
+    logger.info(
+        "role surfaces regenerated: %d file(s)",
+        len(written),
+        extra={"files": len(written)},
+    )
     return written
 
 

@@ -9,6 +9,7 @@ shapes. Mirrors the pure-core / thin-boundary split of ``test_prstate_state.py``
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,7 @@ from shipit.harness.prompts import (
     RoleDefs,
     load_coordinator_slice,
     load_role_defs,
+    regenerate,
     render,
 )
 from shipit.harness.role import Role
@@ -128,3 +130,41 @@ def test_agent_def_files_exist_with_the_role_prompt_body(role):
 def test_no_coordinator_agent_def():
     """ADR-0011: the coordinator is the top-level session and has NO agent-def."""
     assert not (_ROOT / ".claude" / "agents" / "coordinator.md").exists()
+
+
+# --- regeneration records (LOG03: the writes are working-tree mutations) -----
+
+
+def test_regenerate_records_one_info_record_per_written_file(tmp_path, caplog):
+    """Every regenerated surface carries its own durable record with the path as
+    a flat field — convention-level: matched by fields, not message text."""
+    with caplog.at_level(logging.INFO, logger="shipit.harness"):
+        written = regenerate(tmp_path)
+    per_file = [r for r in caplog.records if hasattr(r, "path")]
+    assert len(per_file) == len(written)
+    assert {r.path for r in per_file} == {str(p) for p in written}
+    assert all(r.levelno == logging.INFO for r in per_file)
+
+
+def test_regenerate_records_a_summary_with_the_count(tmp_path, caplog):
+    with caplog.at_level(logging.INFO, logger="shipit.harness"):
+        written = regenerate(tmp_path)
+    summaries = [r for r in caplog.records if hasattr(r, "files")]
+    assert len(summaries) == 1
+    rec = summaries[0]
+    assert rec.levelno == logging.INFO
+    assert rec.files == len(written)
+
+
+def test_main_prints_one_line_per_regenerated_file(tmp_path, capsys, monkeypatch):
+    """The print stays the user-facing surface: one stdout line per written file
+    (the records are ADDITIVE — the CLI output did not change shape)."""
+    from shipit.harness import prompts
+
+    monkeypatch.setattr(prompts, "regenerate", lambda: regenerate(tmp_path))
+    prompts.main()
+    out_lines = [line for line in capsys.readouterr().out.splitlines() if line.strip()]
+    written = regenerate(tmp_path)  # same inputs → same surfaces
+    assert len(out_lines) == len(written)
+    for path in written:
+        assert any(str(path) in line for line in out_lines)
