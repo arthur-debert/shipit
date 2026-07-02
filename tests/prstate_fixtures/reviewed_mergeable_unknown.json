@@ -1,7 +1,7 @@
 {
   "meta": {
     "number": 205,
-    "headRefOid": "f00d05",
+    "headRefOid": "f00d050000000000000000000000000000000000",
     "isDraft": true,
     "mergeable": "UNKNOWN",
     "mergeStateStatus": "UNKNOWN",
@@ -11,16 +11,20 @@
   "reviews": [
     {
       "id": 7401,
-      "user": { "login": "Copilot" },
+      "user": {
+        "login": "Copilot"
+      },
       "state": "APPROVED",
-      "commit_id": "f00d05",
+      "commit_id": "f00d050000000000000000000000000000000000",
       "body": ""
     },
     {
       "id": 7402,
-      "user": { "login": "coderabbitai[bot]" },
+      "user": {
+        "login": "coderabbitai[bot]"
+      },
       "state": "APPROVED",
-      "commit_id": "f00d05",
+      "commit_id": "f00d050000000000000000000000000000000000",
       "body": ""
     }
   ],

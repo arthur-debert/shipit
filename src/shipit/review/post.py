@@ -184,7 +184,8 @@ def build_review_payload(
         )
 
     payload: dict = {
-        "commit_id": ctx.head_sha,
+        # The wire payload carries the string form of the typed head `Sha` (COR02).
+        "commit_id": str(ctx.head_sha),
         "event": resolved_event,
         "body": body,
     }

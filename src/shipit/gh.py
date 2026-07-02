@@ -618,10 +618,8 @@ def git_unpushed_shas(*, cwd: str) -> tuple[str, ...] | None:
         out = _git(["rev-list", "HEAD", "--not", "--remotes"], cwd=cwd)
     except GhError:
         return None
-    shas = tuple(line.strip() for line in out.splitlines() if line.strip())
-    if any(not _looks_like_sha(sha) for sha in shas):
-        return None
-    return shas
+    shas = _validated_shas(out)
+    return tuple(shas) if shas is not None else None
 
 
 def git_commits_between(base: str, head: str, *, cwd: str) -> list[str] | None:
@@ -636,17 +634,26 @@ def git_commits_between(base: str, head: str, *, cwd: str) -> list[str] | None:
         out = _git(["rev-list", f"{base}..{head}"], cwd=cwd)
     except GhError:
         return None
-    shas = [line.strip() for line in out.splitlines() if line.strip()]
-    if any(not _looks_like_sha(sha) for sha in shas):
+    return _validated_shas(out)
+
+
+def _validated_shas(out: str) -> list[str] | None:
+    """Parse ``git rev-list`` output into validated, normalized sha strings.
+
+    Validity lives in the :class:`shipit.identity.Sha` constructor (COR02) — the
+    old ad-hoc "looks like a sha" check retired into the type. Malformed output
+    yields ``None`` (record nothing rather than something wrong), matching the
+    callers' conservative contract; the values returned are the type's
+    lowercase-normalized string forms.
+    """
+    # Imported here, not at module top: `identity` composes over this boundary
+    # module (its resolvers default to it), so a top-level import would cycle.
+    from .identity import Sha
+
+    try:
+        return [str(Sha(line.strip())) for line in out.splitlines() if line.strip()]
+    except ValueError:
         return None
-    return shas
-
-
-def _looks_like_sha(text: str) -> bool:
-    """Whether ``text`` is a plausible full git object SHA (hex, 40/64 chars)."""
-    if len(text) not in (40, 64):
-        return False
-    return all(c in "0123456789abcdef" for c in text.lower())
 
 
 def pr_for_head(branch: str, *, cwd: str | None = None) -> dict | None | UnknownPr:

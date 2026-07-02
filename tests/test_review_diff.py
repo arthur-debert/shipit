@@ -12,6 +12,9 @@ import pytest
 
 from shipit.review import diff, post
 
+#: The full 40-hex PR head every stubbed `gh pr view` payload carries (COR02).
+HEAD = "cafe" * 10
+
 
 def test_git_toplevel_returns_repo_root(monkeypatch):
     # Routes through the single `gh.repo_root(cwd=...)` boundary (ADR-0024), passing
@@ -42,7 +45,7 @@ def test_resolve_pr_normalizes_workdir_to_toplevel(monkeypatch):
         "pr_view",
         lambda *a, **k: (
             '{"number": 5, "isDraft": false, "mergeStateStatus": "CLEAN", "headRefName": "feat", '
-            '"headRefOid": "headsha", "baseRefName": "main", "baseRefOid": "basesha"}'
+            '"headRefOid": "cafecafecafecafecafecafecafecafecafecafe", "baseRefName": "main", "baseRefOid": "basesha"}'
         ),
     )
     monkeypatch.setattr(diff, "_sha_present", lambda wd, sha: True)
@@ -71,7 +74,7 @@ def test_resolve_pr_normalizes_workdir_to_toplevel(monkeypatch):
     # The diff endpoint is the MERGE BASE of the authoritative base + head (the PR
     # branch point) — GitHub's three-dot diff — computed explicitly, not the raw
     # base tip.
-    assert seen_diff_specs == ["mergebasesha...headsha", "mergebasesha...headsha"]
+    assert seen_diff_specs == [f"mergebasesha...{HEAD}", f"mergebasesha...{HEAD}"]
     # Every git invocation ran against the toplevel, not the nested subdir.
     assert set(seen_workdirs) == {"/repo/root"}
 
@@ -92,7 +95,7 @@ def test_resolve_pr_omitted_repo_canonicalizes_via_gh_not_alias_origin(monkeypat
         "pr_view",
         lambda *a, **k: (
             '{"number": 5, "isDraft": false, "mergeStateStatus": "CLEAN", '
-            '"headRefName": "feat", "headRefOid": "headsha", '
+            '"headRefName": "feat", "headRefOid": "cafecafecafecafecafecafecafecafecafecafe", '
             '"baseRefName": "main", "baseRefOid": "basesha"}'
         ),
     )
@@ -138,7 +141,7 @@ def test_resolve_pr_no_common_ancestor_fails_loud(monkeypatch):
         diff.gh,
         "pr_view",
         lambda *a, **k: (
-            '{"number": 5, "isDraft": false, "mergeStateStatus": "CLEAN", "headRefName": "feat", "headRefOid": "headsha", '
+            '{"number": 5, "isDraft": false, "mergeStateStatus": "CLEAN", "headRefName": "feat", "headRefOid": "cafecafecafecafecafecafecafecafecafecafe", '
             '"baseRefName": "main", "baseRefOid": "basesha"}'
         ),
     )
@@ -174,7 +177,7 @@ def test_resolve_pr_missing_base_oid_fails_loud(monkeypatch):
         "pr_view",
         lambda *a, **k: (
             '{"number": 5, "isDraft": false, "mergeStateStatus": "CLEAN", "headRefName": "feat", '
-            '"headRefOid": "headsha", "baseRefName": "main"}'
+            '"headRefOid": "cafecafecafecafecafecafecafecafecafecafe", "baseRefName": "main"}'
         ),
     )
     monkeypatch.setattr(diff, "_sha_present", lambda wd, sha: True)
@@ -192,13 +195,13 @@ def test_resolve_pr_stale_base_fetch_fails_loud(monkeypatch):
         diff.gh,
         "pr_view",
         lambda *a, **k: (
-            '{"number": 5, "isDraft": false, "mergeStateStatus": "CLEAN", "headRefName": "feat", "headRefOid": "headsha", '
+            '{"number": 5, "isDraft": false, "mergeStateStatus": "CLEAN", "headRefName": "feat", "headRefOid": "cafecafecafecafecafecafecafecafecafecafe", '
             '"baseRefName": "main", "baseRefOid": "basesha"}'
         ),
     )
     # The head is present; the base sha never becomes present (every fetch is a
     # no-op — the classic stale/missing `origin/main`).
-    monkeypatch.setattr(diff, "_sha_present", lambda wd, sha: sha == "headsha")
+    monkeypatch.setattr(diff, "_sha_present", lambda wd, sha: sha == HEAD)
 
     diff_attempted = False
 
@@ -233,7 +236,7 @@ def test_review_view_repo_is_slug_when_known():
     ctx = diff.review_view(
         number=5,
         repo="owner/repo",
-        head_sha="h",
+        head_sha="ab" * 20,  # a full 40-hex sha (COR02)
         base_ref="main",
         base_sha="b",
         diff="",
@@ -250,7 +253,7 @@ def test_review_view_repo_is_none_for_handbuilt_context():
     ctx = diff.review_view(
         number=5,
         repo=None,
-        head_sha="h",
+        head_sha="ab" * 20,  # a full 40-hex sha (COR02)
         base_ref="main",
         base_sha="b",
         diff="",

@@ -14,9 +14,15 @@ the network mocked at the ghapi boundary.
 from __future__ import annotations
 
 import pytest
+from shipit.identity import Sha
 from shipit.prstate import fetch
 from shipit.prstate.model import ReviewLifecycle
 from shipit.prstate.reviewers import CopilotAdapter
+
+# Full, validated commit identities (COR02) for the wire fixtures.
+HEAD = "abc1234" + "0" * 33
+OLD = "dead" * 10
+NEW = "beef" * 10
 
 
 def _graphql_page(
@@ -49,7 +55,7 @@ def _wire(monkeypatch, review_requests: list[dict], timeline: list[dict] | None 
             # The live gh-view payload: no reviewRequests key at all (pr_meta
             # no longer asks for the field gh renders wrong for Bots).
             "number": 558,
-            "headRefOid": "abc1234",
+            "headRefOid": HEAD,
             "isDraft": True,
             "mergeable": "MERGEABLE",
             "mergeStateStatus": "BLOCKED",
@@ -123,7 +129,7 @@ def test_review_requested_edge_time_carried_for_the_app_wait_window(monkeypatch)
 def _reviews_page(
     review_requests: list[dict],
     reviews: list[dict],
-    head: str = "abc1234",
+    head: str = HEAD,
     *,
     is_draft: bool = False,
 ) -> dict:
@@ -172,7 +178,7 @@ def test_gather_reviews_fetches_only_the_skip_decision_inputs(monkeypatch):
                 {
                     "databaseId": 11,
                     "state": "COMMENTED",
-                    "commit": {"oid": "abc1234"},
+                    "commit": {"oid": HEAD},
                     "author": {"login": "Copilot"},
                 }
             ],
@@ -180,14 +186,14 @@ def test_gather_reviews_fetches_only_the_skip_decision_inputs(monkeypatch):
         ),
     )
     ctx = fetch.gather_reviews(558)
-    assert ctx.head_sha == "abc1234"
+    assert ctx.head_sha == Sha(HEAD)
     # The core is REAL now, not hardcoded: the light path reads `is_draft` off its
     # own query (the killed `is_draft=False` trap) and composes the PR identity.
     assert ctx.is_draft is True
     assert ctx.pr.number == 558
     assert ctx.requested_logins == ["Copilot"]
     assert [(r.review_id, r.author, r.commit_id) for r in ctx.reviews] == [
-        (11, "Copilot", "abc1234")
+        (11, "Copilot", Sha(HEAD))
     ]
     # A counting review on the head → DONE (review-once any-head); the skip
     # decision is correct off the light context.
@@ -218,11 +224,11 @@ def test_gather_reviews_threads_the_rerun_policy(monkeypatch):
                 {
                     "databaseId": 11,
                     "state": "COMMENTED",
-                    "commit": {"oid": "OLD-head"},
+                    "commit": {"oid": OLD},
                     "author": {"login": "Copilot"},
                 }
             ],
-            head="new-head",
+            head=NEW,
         ),
     )
     ctx = fetch.gather_reviews(558)

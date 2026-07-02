@@ -33,6 +33,7 @@ import subprocess
 from dataclasses import dataclass, field
 
 from .. import gh, proc
+from ..identity import Sha
 from ..pr import PR, core_from_node, repo_from_slug
 
 
@@ -75,7 +76,7 @@ class ReviewView:
         return self.pr.number
 
     @property
-    def head_sha(self) -> str:
+    def head_sha(self) -> Sha:
         return self.pr.head_sha
 
     @property
@@ -103,7 +104,7 @@ class ReviewView:
 def review_view(
     *,
     number: int,
-    head_sha: str,
+    head_sha: str | Sha,
     base_ref: str | None,
     base_sha: str,
     diff: str,
@@ -131,7 +132,7 @@ def review_view(
     pr = PR(
         repo=repo_from_slug(repo) if repo else _HANDBUILT_REPO,
         number=number,
-        head_sha=head_sha,
+        head_sha=head_sha if isinstance(head_sha, Sha) else Sha(head_sha),
         base_ref=base_ref,
         is_draft=is_draft,
         merge_state=merge_state,
@@ -292,21 +293,26 @@ def resolve_pr(
     # through the one `core_from_node` boundary — the SAME extraction the readiness
     # path uses, so `head_sha` is fetched exactly one way. The review-only endpoints
     # (base sha + head branch) are read alongside it for the git diff + Tree.
-    pr_core = core_from_node(meta, repo_obj)
-    base_ref = pr_core.base_ref or "main"
-    base_sha = meta.get("baseRefOid") or ""
-    head_sha = pr_core.head_sha
-    head_ref = meta.get("headRefName") or ""
-
     # The head endpoint of the diff is ALWAYS the resolved head sha
     # (``headRefOid`` from ``gh pr view``). We never fall back to FETCH_HEAD or
     # HEAD: FETCH_HEAD may point at the base ref we just fetched (silently
     # diffing the wrong thing), and HEAD is the user's unrelated working tree.
-    if not head_sha:
+    # `core_from_node` mints the head into a `Sha` (COR02), so a missing, empty,
+    # or malformed `headRefOid` — and any other unusable core field — fails HERE,
+    # normalized to the review path's actionable `ReviewError`.
+    try:
+        pr_core = core_from_node(meta, repo_obj)
+    except (KeyError, ValueError) as exc:
         raise ReviewError(
-            f"PR #{pr} returned no head sha (headRefOid) from `gh pr view` — "
+            f"PR #{pr} returned an unusable core from `gh pr view` ({exc}) — "
             f"cannot resolve the PR head to review."
-        )
+        ) from exc
+    base_ref = pr_core.base_ref or "main"
+    base_sha = meta.get("baseRefOid") or ""
+    # The git plumbing below (fetch/rev-parse/diff argv) works on the string
+    # form; the composed `PR` core keeps the typed `Sha`.
+    head_sha = str(pr_core.head_sha)
+    head_ref = meta.get("headRefName") or ""
 
     # The base endpoint is resolved the SAME authoritative way as the head:
     # ``baseRefOid`` from `gh pr view` is a known commit object, so the review

@@ -520,7 +520,9 @@ def _resolve_target(pr: int) -> tuple[str, str]:
             f"could not resolve target repo/core for #{pr} from `gh` output "
             f"(repo={repo!r}): {exc}"
         ) from exc
-    return core.slug, core.head_sha
+    # The core carries a typed `Sha` (COR02); this seam hands the wire-facing
+    # checkrun helpers (URL path / JSON payload) the string form.
+    return core.slug, str(core.head_sha)
 
 
 def _child_argv(

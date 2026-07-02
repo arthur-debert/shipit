@@ -1,7 +1,7 @@
 {
   "meta": {
     "number": 201,
-    "headRefOid": "f00d01",
+    "headRefOid": "f00d010000000000000000000000000000000000",
     "isDraft": true,
     "mergeable": "MERGEABLE",
     "mergeStateStatus": "CLEAN",
@@ -23,23 +23,29 @@
   "reviews": [
     {
       "id": 7001,
-      "user": { "login": "Copilot" },
+      "user": {
+        "login": "Copilot"
+      },
       "state": "APPROVED",
-      "commit_id": "f00d01",
+      "commit_id": "f00d010000000000000000000000000000000000",
       "body": ""
     },
     {
       "id": 7003,
-      "user": { "login": "coderabbitai[bot]" },
+      "user": {
+        "login": "coderabbitai[bot]"
+      },
       "state": "APPROVED",
-      "commit_id": "f00d01",
+      "commit_id": "f00d010000000000000000000000000000000000",
       "body": ""
     },
     {
       "id": 7002,
-      "user": { "login": "gemini-code-assist[bot]" },
+      "user": {
+        "login": "gemini-code-assist[bot]"
+      },
       "state": "COMMENTED",
-      "commit_id": "f00d01",
+      "commit_id": "f00d010000000000000000000000000000000000",
       "body": ""
     }
   ],

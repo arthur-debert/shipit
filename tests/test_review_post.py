@@ -27,7 +27,7 @@ def _ctx() -> ReviewView:
     return review_view(
         number=5,
         repo="owner/repo",
-        head_sha="deadbeef",
+        head_sha="deadbeef" * 5,  # a full 40-hex sha (COR02)
         base_ref="main",
         base_sha="cafe",
         diff=_DIFF,
@@ -63,7 +63,7 @@ def test_payload_anchors_in_diff_and_folds_unanchored():
         ],
     }
     payload = post.build_review_payload(review, _ctx(), agent_name="codex")
-    assert payload["commit_id"] == "deadbeef"
+    assert payload["commit_id"] == "deadbeef" * 5
     assert payload["event"] == "REQUEST_CHANGES"
     assert len(payload["comments"]) == 1
     assert payload["comments"][0]["line"] == 2
@@ -143,7 +143,7 @@ def test_resolve_repo_falls_back_to_gh_for_handbuilt_context(monkeypatch):
     ctx = review_view(
         number=5,
         repo=None,
-        head_sha="deadbeef",
+        head_sha="deadbeef" * 5,  # a full 40-hex sha (COR02)
         base_ref="main",
         base_sha="cafe",
         diff=_DIFF,
