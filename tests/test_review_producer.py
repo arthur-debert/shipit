@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import pytest
 
+from shipit.agent import backend as agent_backend
+from shipit.identity import repo_from_slug
 from shipit.review import producer
 from shipit.review.backends import BackendError, BackendUnavailable
 from shipit.review.diff import ReviewView, review_view
@@ -25,7 +27,7 @@ def _ctx() -> ReviewView:
     return review_view(
         number=42,
         repo="arthur-debert/shipit",
-        head_sha="deadbeef",
+        head_sha="deadbeef" * 5,  # a full 40-hex sha (COR02)
         base_ref="TRE05/umbrella",
         base_sha="cafe",
         diff="diff --git a/x b/x\n",
@@ -65,7 +67,9 @@ def _faked(monkeypatch):
 
 
 def test_codex_launches_in_the_tree_and_captures_the_review(_faked):
-    review = producer.run_tree_review("codex", _ctx(), launcher=_faked["launcher"])
+    review = producer.run_tree_review(
+        agent_backend.CODEX, _ctx(), launcher=_faked["launcher"]
+    )
 
     assert review["summary"]["status"] == "COMMENT"  # captured + parsed from stdout
     cmd = _faked["cmd"]
@@ -84,7 +88,11 @@ def test_codex_launches_in_the_tree_and_captures_the_review(_faked):
 
 def test_agy_maps_to_the_antigravity_adapter_with_prose_schema(_faked):
     review = producer.run_tree_review(
-        "agy", _ctx(), model="pro", timeout="900s", launcher=_faked["launcher"]
+        agent_backend.ANTIGRAVITY,
+        _ctx(),
+        model="pro",
+        timeout="900s",
+        launcher=_faked["launcher"],
     )
 
     assert review["summary"]["status"] == "COMMENT"
@@ -105,7 +113,7 @@ def test_nonzero_exit_is_a_hard_failure(_faked):
         return LaunchResult(returncode=1, stdout="", stderr="codex: auth error")
 
     with pytest.raises(RuntimeError) as exc:
-        producer.run_tree_review("codex", _ctx(), launcher=launcher)
+        producer.run_tree_review(agent_backend.CODEX, _ctx(), launcher=launcher)
     # Not a BackendError (which would settle empty/timed_out) — a plain failure → failed.
     assert not isinstance(exc.value, BackendError)
     assert "auth error" in str(exc.value)
@@ -122,7 +130,7 @@ def test_agy_timeout_marker_settles_as_timeout_not_failure(_faked):
         )
 
     with pytest.raises(BackendError) as exc:
-        producer.run_tree_review("agy", _ctx(), launcher=launcher)
+        producer.run_tree_review(agent_backend.ANTIGRAVITY, _ctx(), launcher=launcher)
     assert "timed out" in str(exc.value).lower()
 
 
@@ -141,7 +149,7 @@ def test_nonzero_exit_with_timeout_marker_in_stderr_is_structurally_timed_out(_f
         )
 
     with pytest.raises(BackendError) as exc:
-        producer.run_tree_review("agy", _ctx(), launcher=launcher)
+        producer.run_tree_review(agent_backend.ANTIGRAVITY, _ctx(), launcher=launcher)
     assert exc.value.timed_out is True  # structured -> service maps to timed_out
     # the marker is NOT in the (paraphrased) message — a string match would have failed:
     from shipit.review.backends.base import _TIMEOUT_MARKER
@@ -156,7 +164,7 @@ def test_unparseable_output_raises_backend_error_with_raw_for_salvage(_faked):
         return LaunchResult(returncode=0, stdout=raw, stderr="")
 
     with pytest.raises(BackendError) as exc:
-        producer.run_tree_review("codex", _ctx(), launcher=launcher)
+        producer.run_tree_review(agent_backend.CODEX, _ctx(), launcher=launcher)
     assert exc.value.raw == raw  # the #76 salvage still gets the raw content
     # A non-timeout unparseable result is NOT a timeout -> the service settles `empty`.
     assert exc.value.timed_out is False
@@ -172,7 +180,9 @@ def test_dry_run_prints_argv_and_never_launches_or_clones(monkeypatch, capsys):
         launched.append(1)
         return LaunchResult(returncode=0, stdout=_VALID, stderr="")
 
-    review = producer.run_tree_review("codex", _ctx(), dry_run=True, launcher=launcher)
+    review = producer.run_tree_review(
+        agent_backend.CODEX, _ctx(), dry_run=True, launcher=launcher
+    )
 
     assert review["summary"]["overall_feedback"] == "(dry-run)"
     assert not cloned  # no Tree cloned
@@ -185,41 +195,55 @@ def test_dry_run_prints_argv_and_never_launches_or_clones(monkeypatch, capsys):
 def test_missing_cli_fails_loud(monkeypatch):
     monkeypatch.setattr(producer.shutil, "which", lambda binary: None)
     with pytest.raises(BackendUnavailable):
-        producer.run_tree_review("codex", _ctx(), launcher=lambda *a, **k: None)
+        producer.run_tree_review(
+            agent_backend.CODEX, _ctx(), launcher=lambda *a, **k: None
+        )
 
 
 def test_missing_head_branch_is_a_clean_failure(_faked):
     ctx = _ctx()
     ctx.head_ref = ""
     with pytest.raises(RuntimeError) as exc:
-        producer.run_tree_review("codex", ctx, launcher=_faked["launcher"])
+        producer.run_tree_review(agent_backend.CODEX, ctx, launcher=_faked["launcher"])
     assert "head branch" in str(exc.value)
 
 
-def test_resolve_org_repo_uses_the_view_slug_when_known(monkeypatch):
+def test_resolve_repo_uses_the_view_slug_when_known(monkeypatch):
     """A resolved view's slug is the source of truth for the read-only Tree's
-    org/repo — no `gh repo view` re-inference."""
+    identity — no `gh repo view` re-inference — parsed by the ONE canonical
+    parser, so it lands the case-normalized Repo."""
     monkeypatch.setattr(
         producer.gh,
         "current_repo",
         lambda: (_ for _ in ()).throw(AssertionError("must not infer when repo known")),
     )
-    assert producer._resolve_org_repo(_ctx()) == ("arthur-debert", "shipit")
+    assert producer._resolve_repo(_ctx()) == repo_from_slug("arthur-debert/shipit")
 
 
-def test_resolve_org_repo_falls_back_to_gh_for_handbuilt_context(monkeypatch):
+def test_resolve_repo_falls_back_to_gh_for_handbuilt_context(monkeypatch):
     """The falsey-repo fallback (ADR-0024): a hand-built view (`repo is None`)
-    provisions the Tree under the `gh repo view`-inferred org/repo rather than a
+    provisions the Tree under the `gh repo view`-inferred identity rather than a
     `local/local` placeholder."""
     ctx = review_view(
         number=42,
         repo=None,
-        head_sha="deadbeef",
+        head_sha="deadbeef" * 5,  # a full 40-hex sha (COR02)
         base_ref="main",
         base_sha="cafe",
         diff="",
         is_draft=False,
     )
     assert ctx.repo is None
-    monkeypatch.setattr(producer.gh, "current_repo", lambda: "inferred/repo")
-    assert producer._resolve_org_repo(ctx) == ("inferred", "repo")
+    monkeypatch.setattr(producer.gh, "current_repo", lambda: "Inferred/Repo")
+    assert producer._resolve_repo(ctx) == repo_from_slug("inferred/repo")
+
+
+def test_launch_specs_are_keyed_by_the_backend_value_not_a_retyped_name():
+    """The launch-spec table is keyed by the registry :class:`Backend` VALUE OBJECTS,
+    not by a retyped canonical-name string (COR02-WS03 / codex review). Renaming a
+    backend is then a single registry edit — the key follows the constant's identity —
+    and the launch axis covers EXACTLY the funnel backends the registry declares, so a
+    newly registered funnel backend without a launch spec is caught here rather than
+    failing at run time with `unknown funnel review backend`."""
+    assert all(isinstance(k, agent_backend.Backend) for k in producer._SPECS)
+    assert set(producer._SPECS) == set(agent_backend.funnel_backends())

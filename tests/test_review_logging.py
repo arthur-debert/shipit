@@ -12,6 +12,8 @@ import logging
 from types import SimpleNamespace
 
 import pytest
+
+from shipit.agent import backend as agent_backend
 from shipit.review import post, service
 from shipit.review.diff import ReviewView, review_view
 
@@ -30,7 +32,7 @@ def _ctx() -> ReviewView:
     return review_view(
         number=5,
         repo="owner/repo",
-        head_sha="deadbeef",
+        head_sha="deadbeef" * 5,  # a full 40-hex sha (COR02)
         base_ref="main",
         base_sha="cafe",
         diff=_DIFF,
@@ -50,7 +52,7 @@ def test_dry_run_output_is_preserved_and_logged(capsys, caplog):
     note) — logging is additive plumbing under it, never on stdout."""
     with caplog.at_level(logging.DEBUG, logger="shipit.review"):
         payload = post.post_review(
-            _REVIEW, _ctx(), agent_name="codex", dry_run=True, as_app=True
+            _REVIEW, _ctx(), backend=agent_backend.CODEX, dry_run=True, as_app=True
         )
     out = capsys.readouterr().out
     import json
@@ -77,7 +79,7 @@ def test_post_as_app_never_logs_the_token(monkeypatch, caplog):
     monkeypatch.setattr(post.gh, "rest", _fake_rest)
 
     with caplog.at_level(logging.DEBUG, logger="shipit.review"):
-        post.post_review(_REVIEW, _ctx(), agent_name="codex", as_app=True)
+        post.post_review(_REVIEW, _ctx(), backend=agent_backend.CODEX, as_app=True)
 
     assert captured["token"] == secret  # the seam still injects the real token
     full = "\n".join(r.getMessage() for r in caplog.records)
@@ -136,11 +138,11 @@ def test_generate_review_logs_start_and_outcome(monkeypatch, caplog):
     """`generate_review` delegates to the Tree-fetch producer and records start +
     outcome; the producer launch itself is faked so no Tree is cloned / model run."""
     monkeypatch.setattr(
-        service.producer, "run_tree_review", lambda agent, ctx, **kw: dict(_REVIEW)
+        service.producer, "run_tree_review", lambda backend, ctx, **kw: dict(_REVIEW)
     )
     ctx = SimpleNamespace(diff=_DIFF, workdir="/tmp/wd", number=5, head_ref="b")
     with caplog.at_level(logging.DEBUG, logger="shipit.review"):
-        service.generate_review("codex", ctx)
+        service.generate_review(agent_backend.CODEX, ctx)
     text = "\n".join(r.getMessage() for r in caplog.records)
     assert "agent=codex" in text
     assert "complete" in text
@@ -164,11 +166,11 @@ def test_generate_review_outcome_carries_duration_fields(monkeypatch, caplog):
     """The model run is the review's expensive span — its completion record
     carries reviewer/pr/duration_ms as flat fields."""
     monkeypatch.setattr(
-        service.producer, "run_tree_review", lambda agent, ctx, **kw: dict(_REVIEW)
+        service.producer, "run_tree_review", lambda backend, ctx, **kw: dict(_REVIEW)
     )
     ctx = SimpleNamespace(diff=_DIFF, workdir="/tmp/wd", number=5, head_ref="b")
     with caplog.at_level(logging.INFO, logger="shipit.review"):
-        service.generate_review("codex", ctx)
+        service.generate_review(agent_backend.CODEX, ctx)
     timed = _duration_records(caplog, logging.INFO)
     assert len(timed) == 1
     rec = timed[0]
@@ -190,7 +192,7 @@ def test_detached_child_settle_carries_start_to_settle_duration(monkeypatch, cap
         service, "_generate_post_and_close", lambda *a, **kw: {"post": {"id": 1}}
     )
     with caplog.at_level(logging.INFO, logger="shipit.review"):
-        service.run_detached_review("codex", 5, repo="owner/repo", run_id=9)
+        service.run_detached_review(agent_backend.CODEX, 5, repo="owner/repo", run_id=9)
     settles = _duration_records(caplog, logging.INFO)
     assert len(settles) == 1
     rec = settles[0]
@@ -217,7 +219,9 @@ def test_detached_child_failure_settles_at_error_with_exception_and_duration(
 
     with caplog.at_level(logging.INFO, logger="shipit.review"):
         with pytest.raises(RuntimeError):
-            service.run_detached_review("codex", 5, repo="owner/repo", run_id=9)
+            service.run_detached_review(
+                agent_backend.CODEX, 5, repo="owner/repo", run_id=9
+            )
     errors = _duration_records(caplog, logging.ERROR)
     assert len(errors) == 1
     rec = errors[0]
@@ -239,7 +243,9 @@ def test_resolve_failure_settles_at_error_with_exception_and_duration(
 
     with caplog.at_level(logging.INFO, logger="shipit.review"):
         with pytest.raises(RuntimeError):
-            service.run_detached_review("codex", 5, repo="owner/repo", run_id=None)
+            service.run_detached_review(
+                agent_backend.CODEX, 5, repo="owner/repo", run_id=None
+            )
     errors = _duration_records(caplog, logging.ERROR)
     assert len(errors) == 1
     assert errors[0].exc_info is not None
@@ -257,7 +263,7 @@ def test_post_failure_records_error_with_exception(monkeypatch, caplog):
 
     with caplog.at_level(logging.INFO, logger="shipit.review"):
         with pytest.raises(RuntimeError):
-            post.post_review(_REVIEW, _ctx(), agent_name="codex", as_app=False)
+            post.post_review(_REVIEW, _ctx(), backend=agent_backend.CODEX, as_app=False)
     errors = [r for r in caplog.records if r.levelno == logging.ERROR]
     assert len(errors) == 1
     assert errors[0].pr == 5

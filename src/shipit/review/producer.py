@@ -12,9 +12,11 @@ are all preserved; only the producer changed.
 
 What this module owns (and ONLY this):
 
-  * map the funnel agent (``codex`` / ``agy``) to its spawn ``BackendAdapter``
-    (``codex`` / ``antigravity``) — ONE definition of "launch codex/agy as a
-    reviewer", shared with the spawn surface (the WS04a read-only posture);
+  * map the funnel :class:`~shipit.agent.backend.Backend` identity (``CODEX`` /
+    ``ANTIGRAVITY``, ADR-0025) to its spawn ``BackendAdapter`` — keyed by the
+    registry value objects themselves, never a retyped agent-name string — ONE
+    definition of "launch codex/agy as a reviewer", shared with the spawn
+    surface (the WS04a read-only posture);
   * provision the shared read-only Tree on the PR head (reusing
     :func:`shipit.tree.readonly.create_readonly` — a second reviewer on the same
     ``(repo, branch)`` reuses the clone);
@@ -43,6 +45,8 @@ import tempfile
 from dataclasses import dataclass
 
 from .. import gh
+from ..agent.backend import ANTIGRAVITY, CODEX, Backend
+from ..identity import Repo, repo_from_slug
 from ..spawn import launch
 from ..spawn.backends.antigravity import AntigravityAdapter
 from ..spawn.backends.base import BackendAdapter
@@ -65,17 +69,18 @@ _REVIEWER_ROLE = "reviewer"
 
 @dataclass(frozen=True)
 class _BackendSpec:
-    """How one funnel agent maps onto the shared spawn launch seam.
+    """How one funnel backend maps onto the shared spawn launch seam.
 
     ``adapter_factory`` builds the spawn ``BackendAdapter`` carrying the model (and,
     for agy, the timeout) — the SAME adapter the spawn surface launches a reviewer
-    through, so there is one definition of the launch. ``binary`` is the CLI that must
-    be on PATH (preflight). ``schema_inline`` describes the schema in prose in the
-    prompt for a backend with no native ``--output-schema`` (agy); ``native_schema``
-    backends (codex) get the schema as a temp file passed to ``build_command``.
+    through, so there is one definition of the launch. The CLI binary that must be
+    on PATH (preflight) is NOT here — it is the :class:`Backend` identity's
+    ``binary`` alias (ADR-0025), read off the registry entry. ``schema_inline``
+    describes the schema in prose in the prompt for a backend with no native
+    ``--output-schema`` (agy); ``native_schema`` backends (codex) get the schema as
+    a temp file passed to ``build_command``.
     """
 
-    binary: str
     schema_inline: bool
     native_schema: bool
     adapter_factory: object  # Callable[[str, str], BackendAdapter]
@@ -92,19 +97,21 @@ def _agy_adapter(model: str, timeout: str) -> BackendAdapter:
     return AntigravityAdapter(model=model, timeout=timeout)
 
 
-#: funnel agent → how it launches as a reviewer. ``codex`` ≡ the ``codex`` spawn
-#: adapter (native ``--output-schema``); ``agy`` ≡ the ``antigravity`` spawn adapter
-#: (no native schema → prose schema in the prompt). This is the single place the two
-#: funnel agents are mapped onto the spawn seam.
-_SPECS: dict[str, _BackendSpec] = {
-    "codex": _BackendSpec(
-        binary="codex",
+#: :class:`Backend` identity → how it launches as a reviewer. ``CODEX`` ≡ the ``codex``
+#: spawn adapter (native ``--output-schema``); ``ANTIGRAVITY`` ≡ the ``antigravity``
+#: spawn adapter (no native schema → prose schema in the prompt). Keyed by the
+#: registry :class:`Backend` VALUE OBJECTS themselves — not a retyped canonical-name
+#: string — so the funnel and launch axes meet on the ONE registry identity (ADR-0025)
+#: and renaming a backend is a single registry edit (the key follows the constant's
+#: identity, which is its canonical name). This is the single place the funnel backends
+#: are mapped onto the spawn seam.
+_SPECS: dict[Backend, _BackendSpec] = {
+    CODEX: _BackendSpec(
         schema_inline=False,
         native_schema=True,
         adapter_factory=_codex_adapter,
     ),
-    "agy": _BackendSpec(
-        binary="agy",
+    ANTIGRAVITY: _BackendSpec(
         schema_inline=True,
         native_schema=False,
         adapter_factory=_agy_adapter,
@@ -113,7 +120,7 @@ _SPECS: dict[str, _BackendSpec] = {
 
 
 def run_tree_review(
-    agent: str,
+    backend: Backend,
     ctx,
     *,
     model: str = "pro",
@@ -122,7 +129,8 @@ def run_tree_review(
     dry_run: bool = False,
     launcher: launch.Runner | None = None,
 ) -> dict:
-    """Launch ``agent`` as a reviewer in a read-only Tree and CAPTURE its review dict.
+    """Launch ``backend`` as a reviewer in a read-only Tree and CAPTURE its review
+    dict.
 
     Provisions the shared read-only Tree on ``ctx``'s PR head, launches the backend
     through its spawn read-only posture with a task that fetches the diff via
@@ -137,14 +145,16 @@ def run_tree_review(
     prints the would-run Tree-launch argv, and returns an empty review — so a dry-run is
     honest (it shows exactly what would run and bills nothing).
     """
-    spec = _SPECS.get(agent)
+    agent = backend.funnel_agent or backend.name
+    spec = _SPECS.get(backend)
     if spec is None:
         raise ValueError(
-            f"unknown funnel review agent {agent!r} (known: {', '.join(_SPECS)})"
+            f"unknown funnel review backend {backend.name!r} "
+            f"(known: {', '.join(b.name for b in _SPECS)})"
         )
-    _preflight(agent, spec, dry_run=dry_run)
+    _preflight(backend, dry_run=dry_run)
 
-    org, repo_name = _resolve_org_repo(ctx)
+    repo = _resolve_repo(ctx)
     branch = (ctx.head_ref or "").strip()
     if not branch:
         raise RuntimeError(
@@ -161,13 +171,13 @@ def run_tree_review(
     schema_path: str | None = None
     try:
         if dry_run:
-            return _dry_run(agent, ctx, spec, adapter, task, org, repo_name, branch)
+            return _dry_run(agent, ctx, spec, adapter, task, repo, branch)
 
         if spec.native_schema:
             schema_path = _write_schema_tempfile()
 
         tree = create_readonly(
-            readonly_plan(org=org, repo=repo_name, branch=branch),
+            readonly_plan(repo=repo, branch=branch),
             source_repo=ctx.workdir,
             github_url=_github_url(ctx),
         )
@@ -233,8 +243,7 @@ def _dry_run(
     spec: _BackendSpec,
     adapter: BackendAdapter,
     task: str,
-    org: str,
-    repo_name: str,
+    repo: Repo,
     branch: str,
 ) -> dict:
     """Print the would-run Tree-launch argv WITHOUT cloning or billing; return empty.
@@ -245,7 +254,7 @@ def _dry_run(
     review flows on to ``post_review(dry_run=True)``, which prints the would-post payload
     — so the whole dry-run is honest end to end and bills nothing.
     """
-    plan = readonly_plan(org=org, repo=repo_name, branch=branch)
+    plan = readonly_plan(repo=repo, branch=branch)
     placeholder = "<review-schema-tempfile>.json" if spec.native_schema else None
     cmd = adapter.build_command(
         task,
@@ -262,8 +271,9 @@ def _dry_run(
     }
 
 
-def _preflight(agent: str, spec: _BackendSpec, *, dry_run: bool) -> None:
-    """Verify the agent binary is on PATH; raise :class:`BackendUnavailable` otherwise.
+def _preflight(backend: Backend, *, dry_run: bool) -> None:
+    """Verify the backend's CLI binary (the registry's ``binary`` alias) is on
+    PATH; raise :class:`BackendUnavailable` otherwise.
 
     Skipped in ``dry_run`` (a dry-run only prints the would-run argv; it must work
     without the CLI installed, mirroring the spawn dry-run posture). A missing CLI on a
@@ -272,31 +282,35 @@ def _preflight(agent: str, spec: _BackendSpec, *, dry_run: bool) -> None:
     """
     if dry_run:
         return
-    if shutil.which(spec.binary) is None:
+    if shutil.which(backend.binary) is None:
         raise BackendUnavailable(
-            f"The '{agent}' review backend requires the '{spec.binary}' CLI on your "
-            f"PATH, but it was not found. Install it (and log it in), then re-run."
+            f"The '{backend.funnel_agent or backend.name}' review backend requires "
+            f"the '{backend.binary}' CLI on your PATH, but it was not found. "
+            f"Install it (and log it in), then re-run."
         )
 
 
-def _resolve_org_repo(ctx) -> tuple[str, str]:
-    """``(org, repo)`` for ``ctx`` — from ``ctx.repo`` (``owner/name``), else inferred.
+def _resolve_repo(ctx) -> Repo:
+    """The :class:`shipit.identity.Repo` for ``ctx`` — from ``ctx.repo``, else inferred.
 
     The detached child always resolves ``ctx`` with an explicit ``--repo``, so
     ``ctx.repo`` is normally set; a hand-built context falls back to ``gh repo view``.
-    A slug that is not ``owner/name`` fails loud rather than provisioning a Tree under a
-    malformed org.
+    Either slug routes through the ONE canonical parser
+    (:func:`shipit.identity.repo_from_slug`) so the read-only Tree's namespace is the
+    case-normalized identity — an API-cased slug can never land a divergent Tree path
+    (ADR-0024). A slug that is not ``owner/name`` fails loud rather than provisioning
+    a Tree under a malformed identity.
     """
     slug = (ctx.repo or "").strip()
     if not slug:
         slug = (gh.current_repo() or "").strip()
-    if "/" not in slug:
+    try:
+        return repo_from_slug(slug)
+    except ValueError as exc:
         raise RuntimeError(
             f"cannot review PR #{ctx.number}: the repo slug {slug!r} is not in "
-            "owner/name form, so the read-only Tree's org/repo cannot be resolved."
-        )
-    org, _, name = slug.partition("/")
-    return org, name
+            "owner/name form, so the read-only Tree's namespace cannot be resolved."
+        ) from exc
 
 
 def _github_url(ctx) -> str:

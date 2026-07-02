@@ -25,8 +25,9 @@ from pathlib import Path
 
 import pytest
 from shipit import logcontext, logsetup
+from shipit.identity import repo_from_slug
 
-OWNER_REPO = ("acme", "widget")
+REPO = repo_from_slug("acme/widget")
 
 
 @pytest.fixture(autouse=True)
@@ -53,7 +54,7 @@ def _reset_package_logger():
 
 def _records(base_dir: Path) -> list[dict]:
     """Every JSONL record the file sink wrote under the injected base."""
-    path = logsetup.log_file_path(OWNER_REPO, base_dir=base_dir)
+    path = logsetup.log_file_path(REPO, base_dir=base_dir)
     return [json.loads(line) for line in path.read_text().splitlines() if line]
 
 
@@ -69,7 +70,7 @@ def _emit(message: str) -> None:
 def test_bound_keys_land_on_every_subsequent_record(tmp_path):
     """A key bound once (the CLI-entry pattern) appears on EVERY record emitted
     after it — through the real pipeline, foreign stdlib call sites included."""
-    logsetup.configure_logging(env={}, owner_repo=OWNER_REPO, base_dir=tmp_path)
+    logsetup.configure_logging(env={}, repo=REPO, base_dir=tmp_path)
     logcontext.bind(repo="acme/widget", pr=231)
 
     _emit("first")
@@ -85,7 +86,7 @@ def test_bound_keys_land_on_every_subsequent_record(tmp_path):
 def test_unbound_keys_are_absent_not_null(tmp_path):
     """The absent-not-null contract: a record carries ONLY the bound keys — no
     ``"session": null`` placeholders for the rest of the domain set."""
-    logsetup.configure_logging(env={}, owner_repo=OWNER_REPO, base_dir=tmp_path)
+    logsetup.configure_logging(env={}, repo=REPO, base_dir=tmp_path)
     logcontext.bind(pr=7)
 
     _emit("hello")
@@ -97,7 +98,7 @@ def test_unbound_keys_are_absent_not_null(tmp_path):
 
 
 def test_unbind_removes_the_key_from_later_records(tmp_path):
-    logsetup.configure_logging(env={}, owner_repo=OWNER_REPO, base_dir=tmp_path)
+    logsetup.configure_logging(env={}, repo=REPO, base_dir=tmp_path)
     logcontext.bind(pr=7, repo="acme/widget")
 
     _emit("while-bound")
@@ -238,7 +239,7 @@ def test_configure_logging_rebinds_parent_exported_keys(tmp_path):
     review child's ``pr``/``repo`` story, in-process."""
     logsetup.configure_logging(
         env={"SHIPIT_LOG_CTX_PR": "231", "SHIPIT_LOG_CTX_REPO": "acme/widget"},
-        owner_repo=OWNER_REPO,
+        repo=REPO,
         base_dir=tmp_path,
     )
 
@@ -256,7 +257,7 @@ def test_cli_entry_binds_the_resolved_repo(monkeypatch):
     pins the entry glue without gh or real sinks."""
     from shipit import cli
 
-    monkeypatch.setattr(cli, "resolve_current_owner_repo", lambda: ("acme", "widget"))
+    monkeypatch.setattr(cli, "resolve_current_repo", lambda: REPO)
     seen: dict = {}
     monkeypatch.setattr(cli, "configure_logging", lambda **kw: seen.update(kw))
 
@@ -266,7 +267,7 @@ def test_cli_entry_binds_the_resolved_repo(monkeypatch):
 
     assert rc == 0
     assert logcontext.bound()["repo"] == "acme/widget"
-    assert seen["owner_repo"] == ("acme", "widget")  # resolved ONCE, then shared
+    assert seen["repo"] == REPO  # resolved ONCE, then shared
 
 
 def test_cli_entry_binds_nothing_outside_a_checkout(monkeypatch):
@@ -274,7 +275,7 @@ def test_cli_entry_binds_nothing_outside_a_checkout(monkeypatch):
     a null-ish placeholder — mirroring the skipped file sink."""
     from shipit import cli
 
-    monkeypatch.setattr(cli, "resolve_current_owner_repo", lambda: None)
+    monkeypatch.setattr(cli, "resolve_current_repo", lambda: None)
     monkeypatch.setattr(cli, "configure_logging", lambda **kw: None)
 
     rc = cli.main(["lint", "--help"])
@@ -290,7 +291,7 @@ def test_env_rebind_wins_over_an_earlier_best_effort_bind(tmp_path):
     logcontext.bind(repo="cwd/guess")
     logsetup.configure_logging(
         env={"SHIPIT_LOG_CTX_REPO": "parent/explicit"},
-        owner_repo=OWNER_REPO,
+        repo=REPO,
         base_dir=tmp_path,
     )
 

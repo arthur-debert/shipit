@@ -1,18 +1,24 @@
 {
   "meta": {
     "number": 104,
-    "headRefOid": "ddd444",
+    "headRefOid": "ddd4440000000000000000000000000000000000",
     "isDraft": true,
     "mergeable": "MERGEABLE",
     "mergeStateStatus": "BLOCKED",
-    "reviewRequests": [{ "login": "Copilot" }]
+    "reviewRequests": [
+      {
+        "login": "Copilot"
+      }
+    ]
   },
   "reviews": [
     {
       "id": 5201,
-      "user": { "login": "Copilot" },
+      "user": {
+        "login": "Copilot"
+      },
       "state": "COMMENTED",
-      "commit_id": "old000",
+      "commit_id": "01d0000000000000000000000000000000000000",
       "body": "Reviewed an earlier push."
     }
   ],

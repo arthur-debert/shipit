@@ -52,7 +52,7 @@ def _wire_gather(monkeypatch):
         "pr_meta",
         lambda pr: {
             "number": 558,
-            "headRefOid": "abc1234",
+            "headRefOid": "deadbeef" * 5,  # a full 40-hex sha (COR02)
             "isDraft": True,
             "mergeable": "MERGEABLE",
             "mergeStateStatus": "BLOCKED",
@@ -104,7 +104,7 @@ def test_gather_reviews_records_a_debug_mechanic_with_fields(monkeypatch, caplog
             "repository": {
                 "pullRequest": {
                     "number": 558,
-                    "headRefOid": "abc1234",
+                    "headRefOid": "deadbeef" * 5,  # a full 40-hex sha (COR02)
                     "isDraft": True,
                     "mergeStateStatus": "BLOCKED",
                     "reviewRequests": {"nodes": []},

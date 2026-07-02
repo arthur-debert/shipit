@@ -1,6 +1,9 @@
 # Core identities: Repo, WorkingDir, PR (origin-derived; identity vs content/views)
 
-> **Status: Proposed.** Core Model epic (COR01); anchors WS-Repo and WS-PR.
+> **Status: Accepted (landed).** Landed by the Core Model epic (COR01: the value
+> objects + the store re-key) and extended by Identity threading (COR02): `Sha`
+> joins the identity module, `repo_from_slug` is the one canonical slug parser,
+> and the identities are threaded through Tree planning, logging, and the PR paths.
 
 shipit gains **canonical identity value objects** for its core nouns — `Repo`,
 `WorkingDir`, `PR` — so each is defined once and every subsystem keys on the same thing.
@@ -46,6 +49,16 @@ four times because `gh.repo_root()` lacked a `cwd`. **PR** was modeled twice
 
 ## Consequences
 
-WS-Repo lands `Repo`/`Owner`/`WorkingDir`, re-keys the eval store, and gives `repo_root` a
-`cwd` (killing the 4× re-impl). WS-PR unifies the two PR contexts. Telemetry and logs for
-one repo now join on one stable key.
+COR01's WS-Repo landed `Repo`/`Owner`/`WorkingDir`, re-keyed the eval store, and gave
+`repo_root` a `cwd` (killing the 4× re-impl); WS-PR unified the two PR contexts.
+Telemetry and logs for one repo now join on one stable key.
+
+COR02 (identity threading) then pushed the identities through the layers that still
+re-parsed raw strings. **`Sha`** joined the identity module — a validated FULL git
+object id (40/64 hex), lowercase-normalized, equality full-vs-full and Sha-vs-Sha only
+(a raw-string compare raises) — minted at the one wire read (`core_from_node`, so
+`PR.head_sha` is a `Sha`) and keying review staleness. **`repo_from_slug`** became the
+one canonical `owner/name` parser (lowercased to match `resolve_repo`, making Repo
+identity case-insensitive end to end), so Tree planning, logging setup, and the review
+paths share one Repo identity instead of hand-splitting slugs — mixed-case sources can
+no longer fork one repo's Tree paths or log directories.

@@ -17,6 +17,7 @@ import logging
 
 import pytest
 
+from shipit.agent import backend as agent_backend
 from shipit.review import checkrun
 from shipit.execrun import ExecError
 
@@ -25,8 +26,8 @@ def _fake_token(monkeypatch, sink: dict, value: str = "ghs_tok") -> None:
     """Make `ghauth.installation_token` return a fixed token, recording its args —
     the PEM→JWT→token mint is faked in-memory; nothing touches disk or the wire."""
 
-    def _mint(agent, repo):
-        sink["agent"] = agent
+    def _mint(backend, repo):
+        sink["backend"] = backend
         sink["repo"] = repo
         return value
 
@@ -49,7 +50,7 @@ def test_create_opens_in_progress_run_with_name_status_started_at(monkeypatch):
 
     monkeypatch.setattr(checkrun.gh, "rest", fake_rest)
 
-    run_id = checkrun.create("codex", "owner/repo", "deadbeef")
+    run_id = checkrun.create(agent_backend.CODEX, "owner/repo", "deadbeef")
 
     assert run_id == 4242
     assert seen["path"] == "/repos/owner/repo/check-runs"
@@ -75,7 +76,7 @@ def test_create_names_run_per_reviewer(monkeypatch):
             seen.update(body=body) or {"id": 1}
         ),
     )
-    checkrun.create("agy", "owner/repo", "cafef00d")
+    checkrun.create(agent_backend.ANTIGRAVITY, "owner/repo", "cafef00d")
     assert seen["body"]["name"] == "review: agy-local"
 
 
@@ -93,10 +94,10 @@ def test_create_authored_via_installation_token(monkeypatch):
 
     monkeypatch.setattr(checkrun.gh, "rest", fake_rest)
 
-    checkrun.create("codex", "owner/repo", "deadbeef")
+    checkrun.create(agent_backend.CODEX, "owner/repo", "deadbeef")
 
     # The token was minted for THIS agent+repo and threaded onto the POST.
-    assert auth == {"agent": "codex", "repo": "owner/repo"}
+    assert auth == {"backend": agent_backend.CODEX, "repo": "owner/repo"}
     assert seen["token"] == "ghs_appInstallToken"
 
 
@@ -114,7 +115,7 @@ def test_create_run_is_non_required(monkeypatch):
 
     monkeypatch.setattr(checkrun.gh, "rest", fake_rest)
 
-    checkrun.create("codex", "owner/repo", "deadbeef")
+    checkrun.create(agent_backend.CODEX, "owner/repo", "deadbeef")
 
     # Created as an ordinary check run — not via the branch-protection /
     # required-status-checks surface, and carrying no "required" marker.
@@ -134,7 +135,7 @@ def test_create_never_logs_the_token(monkeypatch, caplog):
         lambda path, *, method=None, body=None, token=None: {"id": 3},
     )
     with caplog.at_level(logging.DEBUG, logger="shipit.review"):
-        checkrun.create("codex", "owner/repo", "deadbeef")
+        checkrun.create(agent_backend.CODEX, "owner/repo", "deadbeef")
     full = "\n".join(r.getMessage() for r in caplog.records)
     assert secret not in full
 
@@ -145,12 +146,12 @@ def test_create_propagates_auth_failure(monkeypatch):
     `service._open_breadcrumb`, not here (so WS02's `transition` shares the same
     honest base)."""
 
-    def boom(agent, repo):
+    def boom(backend, repo):
         raise checkrun.ghauth.ReviewAuthError("403 Resource not accessible")
 
     monkeypatch.setattr(checkrun.ghauth, "installation_token", boom)
     with pytest.raises(checkrun.ghauth.ReviewAuthError):
-        checkrun.create("codex", "owner/repo", "deadbeef")
+        checkrun.create(agent_backend.CODEX, "owner/repo", "deadbeef")
 
 
 # --------------------------------------------------------------------------
@@ -174,7 +175,7 @@ def test_transition_patches_run_to_terminal_conclusion(monkeypatch):
     monkeypatch.setattr(checkrun.gh, "rest", fake_rest)
 
     checkrun.transition(
-        "codex",
+        agent_backend.CODEX,
         "owner/repo",
         4242,
         conclusion="success",
@@ -207,10 +208,15 @@ def test_transition_authored_via_installation_token(monkeypatch):
     monkeypatch.setattr(checkrun.gh, "rest", fake_rest)
 
     checkrun.transition(
-        "agy", "owner/repo", 7, conclusion="failure", title="t", summary="s"
+        agent_backend.ANTIGRAVITY,
+        "owner/repo",
+        7,
+        conclusion="failure",
+        title="t",
+        summary="s",
     )
 
-    assert auth == {"agent": "agy", "repo": "owner/repo"}
+    assert auth == {"backend": agent_backend.ANTIGRAVITY, "repo": "owner/repo"}
     assert seen["token"] == "ghs_appInstallToken"
 
 
@@ -229,7 +235,12 @@ def test_transition_run_is_non_required(monkeypatch):
     monkeypatch.setattr(checkrun.gh, "rest", fake_rest)
 
     checkrun.transition(
-        "codex", "owner/repo", 9, conclusion="timed_out", title="t", summary="s"
+        agent_backend.CODEX,
+        "owner/repo",
+        9,
+        conclusion="timed_out",
+        title="t",
+        summary="s",
     )
 
     assert "protection" not in seen["path"]
@@ -246,7 +257,12 @@ def test_transition_never_logs_the_token(monkeypatch, caplog):
     )
     with caplog.at_level(logging.DEBUG, logger="shipit.review"):
         checkrun.transition(
-            "codex", "owner/repo", 3, conclusion="success", title="t", summary="s"
+            agent_backend.CODEX,
+            "owner/repo",
+            3,
+            conclusion="success",
+            title="t",
+            summary="s",
         )
     full = "\n".join(r.getMessage() for r in caplog.records)
     assert secret not in full
@@ -264,7 +280,12 @@ def test_transition_propagates_failure(monkeypatch):
     monkeypatch.setattr(checkrun.gh, "rest", boom)
     with pytest.raises(ExecError):
         checkrun.transition(
-            "codex", "owner/repo", 1, conclusion="success", title="t", summary="s"
+            agent_backend.CODEX,
+            "owner/repo",
+            1,
+            conclusion="success",
+            title="t",
+            summary="s",
         )
 
 
@@ -290,7 +311,7 @@ def test_find_nonterminal_returns_id_for_in_progress_run(monkeypatch):
 
     monkeypatch.setattr(checkrun.gh, "rest", fake_rest)
 
-    run_id = checkrun.find_nonterminal("codex", "owner/repo", "deadbeef")
+    run_id = checkrun.find_nonterminal(agent_backend.CODEX, "owner/repo", "deadbeef")
 
     assert run_id == 4242
     # A read (GET) of the head commit's check runs, filtered by the reviewer name.
@@ -314,7 +335,9 @@ def test_find_nonterminal_returns_id_for_other_unfinished_statuses(monkeypatch, 
             "check_runs": [{"id": 4242, "status": status, "conclusion": None}],
         },
     )
-    assert checkrun.find_nonterminal("codex", "owner/repo", "deadbeef") == 4242
+    assert (
+        checkrun.find_nonterminal(agent_backend.CODEX, "owner/repo", "deadbeef") == 4242
+    )
 
 
 def test_find_nonterminal_returns_none_for_terminal_run(monkeypatch):
@@ -329,7 +352,9 @@ def test_find_nonterminal_returns_none_for_terminal_run(monkeypatch):
             "check_runs": [{"id": 1, "status": "completed", "conclusion": "success"}],
         },
     )
-    assert checkrun.find_nonterminal("codex", "owner/repo", "deadbeef") is None
+    assert (
+        checkrun.find_nonterminal(agent_backend.CODEX, "owner/repo", "deadbeef") is None
+    )
 
 
 def test_find_nonterminal_returns_none_when_absent(monkeypatch):
@@ -343,7 +368,9 @@ def test_find_nonterminal_returns_none_when_absent(monkeypatch):
             "check_runs": [],
         },
     )
-    assert checkrun.find_nonterminal("codex", "owner/repo", "deadbeef") is None
+    assert (
+        checkrun.find_nonterminal(agent_backend.CODEX, "owner/repo", "deadbeef") is None
+    )
 
 
 def test_find_nonterminal_authored_via_installation_token(monkeypatch):
@@ -359,9 +386,9 @@ def test_find_nonterminal_authored_via_installation_token(monkeypatch):
 
     monkeypatch.setattr(checkrun.gh, "rest", fake_rest)
 
-    checkrun.find_nonterminal("codex", "owner/repo", "deadbeef")
+    checkrun.find_nonterminal(agent_backend.CODEX, "owner/repo", "deadbeef")
 
-    assert auth == {"agent": "codex", "repo": "owner/repo"}
+    assert auth == {"backend": agent_backend.CODEX, "repo": "owner/repo"}
     assert seen["token"] == "ghs_appInstallToken"
 
 
@@ -379,6 +406,6 @@ def test_find_nonterminal_filters_by_reviewer_name(monkeypatch):
 
     monkeypatch.setattr(checkrun.gh, "rest", fake_rest)
 
-    checkrun.find_nonterminal("agy", "owner/repo", "cafef00d")
+    checkrun.find_nonterminal(agent_backend.ANTIGRAVITY, "owner/repo", "cafef00d")
 
     assert quote("review: agy-local") in seen["path"]

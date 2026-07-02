@@ -20,11 +20,13 @@ data, and one corrupt line (a torn write, a rotation seam) must not take down
 the reader. ``--raw`` does not parse at all — malformed lines pass through
 untouched, because judging them is the downstream tool's job.
 
-The repo whose log we read defaults to the current checkout, resolved through the
-:mod:`shipit.gh` boundary (the same source the sink uses); an explicit
-``owner/repo`` argument overrides it. The ``gh`` boundary, the resolution base,
-and the follow-loop ``sleep`` are injected in tests so nothing touches a real
-``$HOME`` or shells out to ``gh``.
+The repo whose log we read defaults to the current checkout, resolved LOCALLY off
+the origin remote (:func:`shipit.identity.resolve_repo`) — the SAME resolver the
+sink namespaces the log by (:func:`shipit.logsetup._current_repo`), so a log
+written offline is readable offline (reader and writer never disagree on identity,
+and neither depends on ``gh``'s API shellout). An explicit ``owner/repo`` argument
+overrides it. The repo resolver, the resolution base, and the follow-loop
+``sleep`` are injected in tests so nothing touches a real ``$HOME``.
 """
 
 from __future__ import annotations
@@ -36,7 +38,7 @@ import time
 from pathlib import Path
 from typing import Callable
 
-from .. import execrun, gh, logsetup, redact
+from .. import execrun, identity, logsetup, redact
 
 #: Default number of trailing lines the no-flag invocation prints.
 DEFAULT_TAIL = 50
@@ -50,18 +52,6 @@ _EXIT_NO_LOG = 1
 
 #: Exit code for a bad ``owner/repo`` (usage error).
 _EXIT_BAD_REPO = 2
-
-
-def _owner_repo(slug: str) -> tuple[str, str]:
-    """Split an ``owner/repo`` slug into its parts, rejecting anything else.
-
-    A value that is not a two-part slug is surfaced to the user rather than
-    silently targeting an empty/incorrect log directory.
-    """
-    owner, sep, repo = slug.partition("/")
-    if not sep or not owner or not repo:
-        raise ValueError(f"expected an 'owner/repo' slug, got {slug!r}")
-    return owner, repo
 
 
 def _last_n(lines: list[str], n: int) -> list[str]:
@@ -214,6 +204,20 @@ def _follow(path: Path, *, tail: int, raw: bool, sleep: Callable[[float], None])
         fh.close()
 
 
+def _default_repo_slug() -> str:
+    """The cwd checkout's canonical slug — resolved LOCALLY off the origin remote.
+
+    Delegates to :func:`shipit.identity.resolve_repo`, the SAME resolver the log
+    WRITER namespaces by (:func:`shipit.logsetup._current_repo`), NOT the
+    ``gh.current_repo`` API shellout. Reader and writer must agree on the repo
+    identity, so a log written in a checkout where ``gh`` is unavailable is still
+    found by ``shipit logs`` without an explicit repo. Raises
+    :class:`shipit.execrun.ExecError` (no origin remote) or :class:`ValueError`
+    (unparseable origin URL), both handled by the caller.
+    """
+    return identity.resolve_repo().slug
+
+
 def run(
     repo: str | None = None,
     *,
@@ -238,16 +242,19 @@ def run(
 
     ``base_dir`` / ``current_repo`` / ``sleep`` are injected boundaries for tests.
     """
-    current_repo = current_repo or gh.current_repo
+    current_repo = current_repo or _default_repo_slug
     try:
         slug = repo if repo is not None else current_repo()
-        owner_repo = _owner_repo(slug)
+        # The ONE canonical slug parser (ADR-0024): lowercases owner/name, so an
+        # API-cased or hand-typed slug resolves the SAME log directory the writer
+        # (which namespaces by the canonical Repo identity) filled.
+        target = identity.repo_from_slug(slug)
     except execrun.ExecError as exc:
-        # Resolving the cwd repo shelled out and failed — not a checkout, or gh
-        # is unavailable. Keep the verb's promise of a clean message, no traceback.
+        # Resolving the cwd repo read the local origin remote and failed — not a
+        # checkout, or no 'origin'. Keep the verb's promise of a clean message.
         print(
             "logs: could not determine the current repo (not a git checkout, or "
-            f"gh unavailable); pass an explicit owner/repo. ({exc})",
+            f"no 'origin' remote); pass an explicit owner/repo. ({exc})",
             file=sys.stderr,
         )
         return _EXIT_BAD_REPO
@@ -255,7 +262,7 @@ def run(
         print(f"logs: {exc}", file=sys.stderr)
         return _EXIT_BAD_REPO
 
-    path = logsetup.log_file_path(owner_repo, base_dir=base_dir)
+    path = logsetup.log_file_path(target, base_dir=base_dir)
 
     if path_only:
         print(str(path))
@@ -264,7 +271,7 @@ def run(
     if not path.exists():
         print(
             f"logs: no log yet at {path} — it is created on the first shipit run "
-            f"that logs for {owner_repo[0]}/{owner_repo[1]}.",
+            f"that logs for {target.slug}.",
             file=sys.stderr,
         )
         return _EXIT_NO_LOG
