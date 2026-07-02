@@ -5,22 +5,25 @@ and the subprocess boundary had grown four parallel conventions — `ProcError`,
 two independent `GhError` classes, rc-tuple returns, `LaunchResult` — with no
 logging, no timing, no timeout policy, and stdout dropped on failure. We
 decided every subprocess call is an **Exec** (CONTEXT.md) through ONE runner:
-per-Exec structured record (argv, cwd, rc, duration; both streams captured on
-failure) whose flat-field contract — names, types, when a field is absent —
-is stated canonically in the `execrun.py` module docstring, one transport
-error `ExecError` (missing binary normalized into it, not a raw
-`FileNotFoundError`), a generous overridable default timeout (5
-minutes — nothing hangs by default; legitimate long-runners override, `None`
-allowed), and central redaction (mask exact values registered by `secretsrc`
-at fetch time, plus GitHub-token/PEM/Doppler-token patterns — the pattern
-policy in `redact.py` gates additions: a new pattern must name the shipit
-code path handling that credential kind). Per-tool knowledge lives in exactly
-one **Tool adapter** per tool, in the tool's domain home (pixi execution joins
-`pixienv/`; `gh.py` and `prstate/ghapi.py` merge into one gh adapter) — no
-physical `tools/` layer. Adapters harvest the most structured output the tool
-natively offers (native JSON > porcelain formats > converted, e.g. `jc`) and
-return existing core value objects (`PR`, `Repo`, `Sha`), never
-adapter-shaped parallel types.
+
+- a per-Exec structured record (argv, cwd, rc, duration; both streams
+  captured on failure) whose flat-field contract — names, types, when a field
+  is absent — is stated canonically in the `execrun.py` module docstring;
+- one transport error `ExecError` (missing binary normalized into it, not a
+  raw `FileNotFoundError`);
+- a generous overridable default timeout (5 minutes — nothing hangs by
+  default; legitimate long-runners override, `None` allowed);
+- central redaction (mask exact values registered by `secretsrc` at fetch
+  time, plus GitHub-token/PEM/Doppler-token patterns — the pattern policy in
+  `redact.py` gates additions: a new pattern must name the shipit code path
+  handling that credential kind).
+
+Per-tool knowledge lives in exactly one **Tool adapter** per tool, in the
+tool's domain home (pixi execution joins `pixienv/`; `gh.py` and
+`prstate/ghapi.py` merge into one gh adapter) — no physical `tools/` layer.
+Adapters harvest the most structured output the tool natively offers (native
+JSON > porcelain formats > converted, e.g. `jc`) and return existing core
+value objects (`PR`, `Repo`, `Sha`), never adapter-shaped parallel types.
 
 The "converted" rung was evaluated live on the `session/liveness` ps probe
 (PROC02-WS04, epic #254): `jc` is adopted for JSON-less tools, with two
