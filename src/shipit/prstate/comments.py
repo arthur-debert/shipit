@@ -7,7 +7,8 @@ the open threads with the handles those actions require.
 
 from __future__ import annotations
 
-from . import fetch, ghapi
+from .. import gh
+from . import fetch
 from .model import Thread
 
 _RESOLVE = """
@@ -25,15 +26,14 @@ def open_threads(pr: int) -> list[Thread]:
 
 
 def reply(pr: int, comment_id: int, body: str) -> None:
-    """Reply to a review comment, keeping the thread (does not resolve it)."""
-    owner, name = ghapi.repo_slug()
-    ghapi.rest(
-        f"repos/{owner}/{name}/pulls/{pr}/comments/{comment_id}/replies",
-        method="POST",
-        fields={"body": body},
-    )
+    """Reply to a review comment, keeping the thread (does not resolve it).
+
+    The endpoint knowledge lives in the adapter (:func:`shipit.gh.pr_review_reply`)
+    — before the PROC02-WS01 merge this module re-spelled the same REST call.
+    """
+    gh.pr_review_reply(pr, comment_id, body)
 
 
 def resolve(thread_id: str) -> None:
     """Mark a review thread resolved via the GraphQL mutation."""
-    ghapi.graphql(_RESOLVE, threadId=thread_id)
+    gh.graphql(_RESOLVE, threadId=thread_id)

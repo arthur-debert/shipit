@@ -215,11 +215,11 @@ def test_by_name_resolves_registry_adapters():
 def test_copilot_request_goes_through_gh_pr_edit_graphql(monkeypatch):
     # The GraphQL `gh pr edit --add-reviewer @copilot` path is load-bearing:
     # the REST requested_reviewers POST silently no-ops for Copilot.
-    from shipit.prstate import ghapi
+    from shipit import gh
 
     calls: list[tuple] = []
     monkeypatch.setattr(
-        ghapi,
+        gh,
         "pr_edit_reviewer",
         lambda pr, reviewer, remove=False: calls.append((pr, reviewer, remove)),
     )
@@ -228,11 +228,11 @@ def test_copilot_request_goes_through_gh_pr_edit_graphql(monkeypatch):
 
 
 def test_copilot_cancel_removes_the_reviewer(monkeypatch):
-    from shipit.prstate import ghapi
+    from shipit import gh
 
     calls: list[tuple] = []
     monkeypatch.setattr(
-        ghapi,
+        gh,
         "pr_edit_reviewer",
         lambda pr, reviewer, remove=False: calls.append((pr, reviewer, remove)),
     )
@@ -242,13 +242,13 @@ def test_copilot_cancel_removes_the_reviewer(monkeypatch):
 
 def test_gemini_request_and_cancel_are_noops(monkeypatch):
     # Gemini auto-triggers and is best-effort: no request mechanism, no gh call.
-    from shipit.prstate import ghapi
+    from shipit import gh
 
     def _boom(*a, **k):  # any gh traffic is a bug
         raise AssertionError("gemini must not touch gh")
 
-    monkeypatch.setattr(ghapi, "pr_edit_reviewer", _boom)
-    monkeypatch.setattr(ghapi, "_gh", _boom)
+    monkeypatch.setattr(gh, "pr_edit_reviewer", _boom)
+    monkeypatch.setattr(gh, "_run", _boom)
     assert GEMINI.request(91) is False
     assert GEMINI.cancel(91) is False
 
@@ -340,11 +340,11 @@ def test_dismissed_coderabbit_review_does_not_count_done():
 def test_coderabbit_request_and_cancel_go_through_gh_pr_edit(monkeypatch):
     # The same GraphQL add-reviewer path Copilot uses — it creates a real
     # review_requested edge, so the generic #614 attach-verification applies.
-    from shipit.prstate import ghapi
+    from shipit import gh
 
     calls: list[tuple] = []
     monkeypatch.setattr(
-        ghapi,
+        gh,
         "pr_edit_reviewer",
         lambda pr, reviewer, remove=False: calls.append((pr, reviewer, remove)),
     )

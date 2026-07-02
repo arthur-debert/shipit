@@ -103,7 +103,7 @@ def test_run_undo_always_allowed(monkeypatch, capsys):
     monkeypatch.setattr(ready_verb, "resolve_pr", lambda pr: 42)
     undos: list[tuple[int, bool]] = []
     monkeypatch.setattr(
-        ready_verb.ghapi,
+        ready_verb.gh,
         "pr_ready",
         lambda pr, *, undo=False: undos.append((pr, undo)),
     )
