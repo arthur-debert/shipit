@@ -19,12 +19,18 @@ requires-python = ">=3.13"
 #                  ProcessorFormatter attaches to the logsetup handlers so the
 #                  file sink emits JSONL while console stderr stays human;
 #                  zero transitive dependencies.
+#   jc           — ADR-0028's "converted" harvest rung for JSON-less tools:
+#                  turns classic CLI output (here: `ps` in session/liveness)
+#                  into structured dicts, replacing hand positional parsing.
+#                  Pure-python wheel; its transitive deps (ruamel.yaml,
+#                  xmltodict, Pygments) are pure-python wheels too.
 dependencies = [
     "click>=8,<9",
     "PyYAML>=6",
     "platformdirs>=4",
     "duckdb>=1",
     "structlog>=25",
+    "jc>=1.25",
 ]
 
 [project.optional-dependencies]
