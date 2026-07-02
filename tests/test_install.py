@@ -272,8 +272,8 @@ def test_load_units_includes_the_eval_terminal_hooks():
         assert marker in entry["hooks"][0]["command"]
 
 
-def test_three_hook_units_coexist_on_one_settings_file():
-    # Splicing all three event entries into one file leaves each in its own event
+def test_hook_units_coexist_on_one_settings_file():
+    # Splicing all four event entries into one file leaves each in its own event
     # array, none clobbering another — the consumer keeps a single valid settings.json.
     units = {u.key: u for u in install.load_units()}
     text = ""
@@ -281,6 +281,7 @@ def test_three_hook_units_coexist_on_one_settings_file():
         install.SETTINGS_KEY,
         install.SETTINGS_STOP_KEY,
         install.SETTINGS_SUBAGENTSTOP_KEY,
+        install.SETTINGS_SESSIONSTART_KEY,
     ):
         u = units[key]
         text = install.splice_settings_hook(text, u.desired_inner(), u.event, u.marker)
@@ -291,15 +292,145 @@ def test_three_hook_units_coexist_on_one_settings_file():
         install.SETTINGS_SUBAGENTSTOP_MARKER
         in hooks["SubagentStop"][0]["hooks"][0]["command"]
     )
-    # And each event unit reconciles to NOOP against the file carrying all three.
+    assert (
+        install.SETTINGS_SESSIONSTART_MARKER
+        in hooks["SessionStart"][0]["hooks"][0]["command"]
+    )
+    # And each event unit reconciles to NOOP against the file carrying all four.
     for key in (
         install.SETTINGS_KEY,
         install.SETTINGS_STOP_KEY,
         install.SETTINGS_SUBAGENTSTOP_KEY,
+        install.SETTINGS_SESSIONSTART_KEY,
     ):
         u = units[key]
         got = install.extract_settings_hook(text, u.event, u.marker)
         assert got == install._canonical_hook_entry(json.loads(u.desired_inner()))
+
+
+# --------------------------------------------------------------------------
+# The SES01 session-bootstrap units — ./claude-start launcher + SessionStart
+# activation hook (docs/prd/session-bootstrap.md Layers A & D, issue #218)
+# --------------------------------------------------------------------------
+
+
+def test_load_units_includes_the_claude_start_launcher():
+    units = {u.key: u for u in install.load_units()}
+    assert install.LAUNCHER_FILE in units
+    unit = units[install.LAUNCHER_FILE]
+    assert unit.kind == "file"
+    assert unit.dest == "claude-start"  # repo root, memorable entry point
+    assert unit.executable is True
+    text = unit.content.decode("utf-8")
+    # The launcher's whole job: exec `claude --worktree "<minted-id>" "$@"`.
+    assert "--worktree" in text
+    assert 'exec claude --worktree "sess-' in text
+
+
+def test_load_units_includes_the_sessionstart_activation_hook():
+    units = {u.key: u for u in install.load_units()}
+    assert install.SETTINGS_SESSIONSTART_KEY in units
+    unit = units[install.SETTINGS_SESSIONSTART_KEY]
+    assert unit.kind == "block"
+    assert unit.fmt == install.FMT_JSON_HOOK
+    assert unit.dest == install.SETTINGS_FILE
+    assert unit.event == install.EVENT_SESSIONSTART
+    assert unit.marker == install.SETTINGS_SESSIONSTART_MARKER
+    entry = json.loads(unit.desired_inner())
+    # SessionStart binds to no tool, so the entry carries no matcher.
+    assert "matcher" not in entry
+    assert install.SETTINGS_SESSIONSTART_MARKER in entry["hooks"][0]["command"]
+
+
+def test_fresh_install_lays_down_the_session_bootstrap_set_idempotently(tmp_path, rec):
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    rc = install.run(str(tmp_path))
+    assert rc == 0
+
+    # The launcher landed at the repo root, executable.
+    launcher = tmp_path / "claude-start"
+    assert launcher.is_file()
+    assert os.access(launcher, os.X_OK)
+    assert "--worktree" in launcher.read_text()
+
+    # The SessionStart activation hook landed in .claude/settings.json.
+    settings = json.loads((tmp_path / ".claude" / "settings.json").read_text())
+    entries = settings["hooks"]["SessionStart"]
+    assert any(
+        install._is_shipit_hook(e, install.SETTINGS_SESSIONSTART_MARKER)
+        for e in entries
+    )
+
+    # Both recorded a pristine hash in the manifest.
+    managed = config.load_managed(config.load(tmp_path / ".shipit.toml"))
+    assert install.LAUNCHER_FILE in managed
+    assert install.SETTINGS_SESSIONSTART_KEY in managed
+
+    # Idempotent: a second install reconciles both (and everything else) to NOOP —
+    # no writes, no git, no PR, artifacts byte-identical.
+    rec.calls.clear()
+    launcher_before = launcher.read_bytes()
+    settings_before = (tmp_path / ".claude" / "settings.json").read_bytes()
+    rc = install.run(str(tmp_path))
+    assert rc == 0
+    assert rec.calls == []
+    assert launcher.read_bytes() == launcher_before
+    assert (tmp_path / ".claude" / "settings.json").read_bytes() == settings_before
+
+
+def test_claude_start_execs_claude_with_a_minted_session_id(tmp_path: Path):
+    # Behavior of the shipped launcher: it execs `claude --worktree <minted-id>`
+    # forwarding its own args, with a fresh `sess-`-prefixed id per launch.
+    unit = next(u for u in install.load_units() if u.key == install.LAUNCHER_FILE)
+    launcher = tmp_path / "claude-start"
+    launcher.write_bytes(unit.content)
+    launcher.chmod(0o755)
+
+    # A fake `claude` first on PATH (shadowing any real one) that prints its argv.
+    fakedir = tmp_path / "bin"
+    fakedir.mkdir()
+    fake = fakedir / "claude"
+    fake.write_text('#!/usr/bin/env bash\nprintf "%s\\n" "$@"\n')
+    fake.chmod(0o755)
+    env = {"PATH": str(fakedir) + os.pathsep + os.environ.get("PATH", "")}
+
+    def launch(*args: str) -> list[str]:
+        proc = subprocess.run(
+            [str(launcher), *args], env=env, capture_output=True, text=True, timeout=10
+        )
+        assert proc.returncode == 0, proc.stderr
+        return proc.stdout.splitlines()
+
+    argv = launch("extra", "--args")
+    assert argv[0] == "--worktree"
+    assert argv[1].startswith("sess-")  # the minted, prefixed session id
+    assert argv[2:] == ["extra", "--args"]  # the launcher's args pass through
+
+    # A second launch mints a distinct id — no two sessions share a Tree id.
+    assert launch()[1] != argv[1]
+
+
+def test_claude_start_fails_loud_when_claude_is_not_on_path(tmp_path: Path):
+    unit = next(u for u in install.load_units() if u.key == install.LAUNCHER_FILE)
+    launcher = tmp_path / "claude-start"
+    launcher.write_bytes(unit.content)
+    launcher.chmod(0o755)
+
+    # bash/date are present via the system dirs; no `claude` anywhere on PATH.
+    no_claude = [
+        d
+        for d in os.environ.get("PATH", "").split(os.pathsep)
+        if d and not (Path(d) / "claude").exists()
+    ]
+    proc = subprocess.run(
+        [str(launcher)],
+        env={"PATH": os.pathsep.join(no_claude)},
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert proc.returncode == 127
+    assert "claude CLI is not on PATH" in proc.stderr
 
 
 def test_settings_hook_splice_preserves_other_settings():

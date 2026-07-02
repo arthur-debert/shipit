@@ -6,7 +6,11 @@
           {
             "type": "command",
             "command": "pixi run -e lint install-hooks"
-          },
+          }
+        ]
+      },
+      {
+        "hooks": [
           {
             "type": "command",
             "command": "pixi run shipit hook sessionstart"
