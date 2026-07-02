@@ -368,9 +368,11 @@ def _parse_ps_output(output: str, *, now: float) -> ProcessInfo | None:
     jc's ``ps`` parser does the table shaping (header-keyed dicts, pid/ppid
     already ints; the trailing ``ARGS`` column keeps its embedded spaces —
     argv separators inside an argument are not recoverable from ``ps``, and the
-    argv check is token-shaped anyway). ``None`` on a malformed table; a merely
-    unparseable ``etime`` degrades to ``create_time=None`` rather than
-    discarding a process that is demonstrably alive.
+    argv check is token-shaped anyway). ``None`` on a malformed table —
+    including a first row that is not a dict, since the adapter (not jc's
+    documented contract) owns the row-usability check; a merely unparseable
+    ``etime`` degrades to ``create_time=None`` rather than discarding a
+    process that is demonstrably alive.
     """
     try:
         rows = jc.parse("ps", output, quiet=True)
@@ -384,6 +386,12 @@ def _parse_ps_output(output: str, *, now: float) -> ProcessInfo | None:
     if not isinstance(rows, list) or not rows:
         return None
     row = rows[0]
+    if not isinstance(row, dict):
+        # The adapter owns the row-usability check (ADR-0028's jc evaluation):
+        # jc's contract is a list of dicts, but a converter quirk yielding
+        # anything else is the same "unreadable table" answer — never an
+        # AttributeError out of the probe's ``ProcessInfo | None`` contract.
+        return None
     pid, ppid = row.get("pid"), row.get("ppid")
     if not isinstance(pid, int) or not isinstance(ppid, int):
         return None
