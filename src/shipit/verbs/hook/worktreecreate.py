@@ -33,9 +33,11 @@ path to stdout.
 **Fail-CLOSED — the OPPOSITE of `hook pretooluse`.** Claude Code adopts the path a
 zero-exit hook prints and aborts the spawn (or the launch) on a non-zero exit. A
 silent fallback to a native worktree would re-open #139, so ANY failure here (bad
-payload, not in a checkout, a git/gh/provision error) prints a diagnostic to
-**stderr**, writes NOTHING to stdout, and exits non-zero — it fails loud rather
-than escaping to a native worktree.
+payload, not in a checkout, a git/gh/provision error) logs at **ERROR** with the
+exception attached (the fail-closed canon in :mod:`shipit.verbs.hook` — the abort
+is a propagating failure, and the log is the durable record), prints a diagnostic
+to **stderr**, writes NOTHING to stdout, and exits non-zero — it fails loud
+rather than escaping to a native worktree.
 """
 
 from __future__ import annotations
@@ -84,6 +86,7 @@ def run(stdin: TextIO | None = None, stdout: TextIO | None = None) -> int:
     the spawn/launch rather than minting a native worktree.
     """
     out = stdout if stdout is not None else sys.stdout
+    payload: object = None
     try:
         raw = (stdin if stdin is not None else sys.stdin).read()
         payload = json.loads(raw)
@@ -97,11 +100,34 @@ def run(stdin: TextIO | None = None, stdout: TextIO | None = None) -> int:
             # An in-CC helper spawn → the branch-deferred holding branch (ADR-0017).
             path = _create_tree(branch=_resolve_branch(payload))
     except Exception as exc:  # noqa: BLE001 — fail-CLOSED: any error aborts the spawn.
-        logger.debug("worktreecreate hook failed (aborting spawn)", exc_info=True)
+        # The fail-CLOSED failure arm (hook canon, shipit.verbs.hook): the abort
+        # is a propagating failure → ERROR with the exception attached and the
+        # domain keys the payload yields; the stderr print below is the hook
+        # protocol's user-facing surface, never the only record.
+        logger.error(
+            "worktreecreate hook failed (aborting spawn)",
+            exc_info=True,
+            extra=_domain_keys(payload),
+        )
         print(f"shipit hook worktreecreate: {exc}", file=sys.stderr)
         return 1
     out.write(path + "\n")
     return 0
+
+
+def _domain_keys(payload: object) -> dict[str, str]:
+    """The domain keys derivable from a (possibly unparsed) payload, for the abort record.
+
+    Nothing is bound via :mod:`shipit.logcontext` this early in a hook process, so
+    the abort record carries whatever the payload itself yields: ``session`` from
+    ``session_id`` when the payload parsed to an object that has one. A failure
+    before the parse (unreadable stdin, malformed JSON) derives nothing — the
+    record still carries the exception, which is the diagnostic that matters.
+    """
+    if not isinstance(payload, dict):
+        return {}
+    sid = payload.get("session_id")
+    return {"session": sid} if isinstance(sid, str) and sid else {}
 
 
 def _session_id(payload: dict[str, object]) -> str:

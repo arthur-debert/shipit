@@ -11,8 +11,11 @@ OPPOSITE of ``hook worktreecreate``. The spike behind ADR-0027 showed this event
 does NOT fire in headless mode, so nothing may depend on it: the ``gc`` ephemeral
 ladder (:func:`shipit.tree.cleanup.classify`) is the load-bearing cleanup and this
 hook is only its fast path. ANY failure — bad payload, unreadable git state, a
-failed delete — logs at DEBUG and exits 0; a teardown hiccup must never turn a
-clean session exit into an error.
+failed delete — logs at WARNING (the fail-open canon in :mod:`shipit.verbs.hook`:
+a swallowed failure is a degraded-but-continuing outcome) and exits 0; a teardown
+hiccup must never turn a clean session exit into an error. A by-design refusal
+(nothing ephemeral in the payload, a dirty/unpushed Tree left for the gc ladder)
+is a clean no-op and stays at DEBUG.
 
 Fast does not mean careless — the ladder's absolute floor holds here too:
 
@@ -100,7 +103,9 @@ def run(stdin: TextIO | None = None) -> int:
         remove_tree(tree)
         logger.debug("worktreeremove: reclaimed %s", tree)
     except Exception:  # noqa: BLE001 — fail-open: the gc ladder is the load-bearing cleanup.
-        logger.debug("worktreeremove hook failed open (nothing removed)", exc_info=True)
+        logger.warning(
+            "worktreeremove hook failed open (nothing removed)", exc_info=True
+        )
     return 0
 
 

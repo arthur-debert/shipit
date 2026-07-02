@@ -6,6 +6,27 @@ binary side of ADR-0012's enforcement — a thin committed line in
 logic ships in the versioned package, never in the hook wiring. Each event is
 its own module exposing a ``cmd`` click command, registered below by an
 append-only line.
+
+**Failure-arm log-level canon (LOG03 #311)** — every hook's failure arm is
+calibrated by the hook's fail-mode, per the glassbox spray conventions:
+
+- **Fail-CLOSED** (a failure aborts the operation — ``worktreecreate``): the
+  failure propagates out of the process as a non-zero exit, so it is a
+  propagating failure → log at **ERROR** with ``exc_info=True`` and whatever
+  domain keys are bound/derivable at that point (e.g. the payload's
+  ``session_id``), *before* exiting non-zero.
+- **Fail-OPEN** (a failure is swallowed and the session continues —
+  ``pretooluse``, ``sessionstart``, ``worktreeremove``, ``stop`` /
+  ``subagent-stop``): the swallow is a degraded-but-continuing outcome → log
+  at **WARNING** with ``exc_info=True``. This applies to every arm that
+  swallows an exception, not just the outermost guard. Clean no-ops (nothing
+  configured, nothing to do, a by-design conservative refusal) are mechanics
+  and stay at DEBUG.
+
+A hook's stderr print (where it has one) is the hook protocol's user-facing
+surface and stays — but it is never the ONLY record: the JSONL log line above
+is what makes the failure visible to anyone reading the story at info/error.
+The next hook author copies this canon, not an individual call site.
 """
 
 from __future__ import annotations
