@@ -41,7 +41,7 @@ the durable code is one slim versioned package; and configuration is explicit.
     Slow + file-structure-dependent:
 
         The bootstrap, the lefthook caller, the skills, the AGENTS.md block,
-        the `claude-start` launcher, the SessionStart activation hook.
+        the `./claude-start` launcher, the SessionStart activation hook.
         These rarely change and must live as real files in the consumer repo.
         They are committed into the consumer. On re-install, shipit
         hash-compares each managed file against the pristine hash stored in
