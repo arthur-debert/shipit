@@ -9,8 +9,11 @@ path builds no git argv of its own — it patches the adapter's typed reads).
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
+from shipit.identity import repo_from_slug
 from shipit.review import diff, post
 
 #: The full 40-hex PR head every stubbed `gh pr view` payload carries (COR02).
@@ -64,7 +67,7 @@ def test_resolve_pr_normalizes_workdir_to_toplevel(monkeypatch):
     monkeypatch.setattr(
         diff.gh,
         "pr_view",
-        lambda *a, **k: (
+        lambda *a, **k: json.loads(
             '{"number": 5, "isDraft": false, "mergeStateStatus": "CLEAN", "headRefName": "feat", '
             '"headRefOid": "cafecafecafecafecafecafecafecafecafecafe", "baseRefName": "main", "baseRefOid": "basesha"}'
         ),
@@ -114,7 +117,7 @@ def test_resolve_pr_omitted_repo_canonicalizes_via_gh_not_alias_origin(monkeypat
     monkeypatch.setattr(
         diff.gh,
         "pr_view",
-        lambda *a, **k: (
+        lambda *a, **k: json.loads(
             '{"number": 5, "isDraft": false, "mergeStateStatus": "CLEAN", '
             '"headRefName": "feat", "headRefOid": "cafecafecafecafecafecafecafecafecafecafe", '
             '"baseRefName": "main", "baseRefOid": "basesha"}'
@@ -131,7 +134,7 @@ def test_resolve_pr_omitted_repo_canonicalizes_via_gh_not_alias_origin(monkeypat
     monkeypatch.setattr(
         diff.gh,
         "current_repo",
-        lambda **k: "alias-owner/alias-repo",
+        lambda **k: repo_from_slug("alias-owner/alias-repo"),
         raising=False,
     )
 
@@ -143,7 +146,9 @@ def test_resolve_pr_omitted_repo_canonicalizes_via_gh_not_alias_origin(monkeypat
     # Downstream POST path: `gh repo view` canonicalizes the alias origin to the
     # repo's CURRENT slug, and the review posts there — never the alias.
     monkeypatch.setattr(
-        post.gh, "current_repo", lambda **k: "canonical-owner/canonical-repo"
+        post.gh,
+        "current_repo",
+        lambda **k: repo_from_slug("canonical-owner/canonical-repo"),
     )
     assert post._resolve_repo(ctx) == "canonical-owner/canonical-repo"
 
@@ -155,7 +160,7 @@ def test_resolve_pr_no_common_ancestor_fails_loud(monkeypatch):
     monkeypatch.setattr(
         diff.gh,
         "pr_view",
-        lambda *a, **k: (
+        lambda *a, **k: json.loads(
             '{"number": 5, "isDraft": false, "mergeStateStatus": "CLEAN", "headRefName": "feat", "headRefOid": "cafecafecafecafecafecafecafecafecafecafe", '
             '"baseRefName": "main", "baseRefOid": "basesha"}'
         ),
@@ -186,7 +191,7 @@ def test_resolve_pr_missing_base_oid_fails_loud(monkeypatch):
     monkeypatch.setattr(
         diff.gh,
         "pr_view",
-        lambda *a, **k: (
+        lambda *a, **k: json.loads(
             '{"number": 5, "isDraft": false, "mergeStateStatus": "CLEAN", "headRefName": "feat", '
             '"headRefOid": "cafecafecafecafecafecafecafecafecafecafe", "baseRefName": "main"}'
         ),
@@ -204,7 +209,7 @@ def test_resolve_pr_stale_base_fetch_fails_loud(monkeypatch):
     monkeypatch.setattr(
         diff.gh,
         "pr_view",
-        lambda *a, **k: (
+        lambda *a, **k: json.loads(
             '{"number": 5, "isDraft": false, "mergeStateStatus": "CLEAN", "headRefName": "feat", "headRefOid": "cafecafecafecafecafecafecafecafecafecafe", '
             '"baseRefName": "main", "baseRefOid": "basesha"}'
         ),

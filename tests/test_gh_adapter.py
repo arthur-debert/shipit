@@ -19,6 +19,8 @@ import pytest
 
 import shipit
 from shipit import gh
+from shipit.identity import Repo, Sha, repo_from_slug
+from shipit.pr import PR
 from shipit.prstate.errors import PrStateError
 
 _SRC_ROOT = pathlib.Path(shipit.__file__).parent
@@ -129,3 +131,147 @@ def test_graphql_errors_raise_the_semantic_error(monkeypatch):
     _capture_run(monkeypatch, json.dumps(payload))
     with pytest.raises(PrStateError):
         gh.graphql("query {}")
+
+
+# --- typed returns (PROC03, ADR-0028): core value objects off the read surface -
+
+
+def test_current_repo_returns_the_typed_repo(monkeypatch):
+    """The repo read returns the `Repo` identity value object — minted through the
+    ONE canonical slug parser, so an API-cased slug lands the case-normalized
+    identity (ADR-0024) and no caller re-splits owner/name."""
+    calls = _capture_run(monkeypatch, "Acme/Widget\n")
+    repo = gh.current_repo()
+    assert isinstance(repo, Repo)
+    assert repo == repo_from_slug("acme/widget")
+    assert repo.slug == "acme/widget"
+    assert calls == [
+        ["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"]
+    ]
+
+
+def test_current_repo_raises_on_unusable_output(monkeypatch):
+    """gh exited 0 but produced no usable owner/name: a data-shape `ValueError`
+    at the boundary (the transport failure is `ExecError`), never a bogus Repo."""
+    _capture_run(monkeypatch, "\n")
+    with pytest.raises(ValueError):
+        gh.current_repo()
+
+
+def test_repo_canonical_returns_the_typed_repo(monkeypatch):
+    calls = _capture_run(monkeypatch, "New-Owner/New-Name\n")
+    repo = gh.repo_canonical("old/alias")
+    assert repo == repo_from_slug("new-owner/new-name")
+    assert calls == [
+        [
+            "gh",
+            "repo",
+            "view",
+            "old/alias",
+            "--json",
+            "nameWithOwner",
+            "-q",
+            ".nameWithOwner",
+        ]
+    ]
+
+
+def test_pr_view_returns_the_parsed_object(monkeypatch):
+    """The adapter owns the JSON parse (PROC03): callers receive the object,
+    never a raw string to re-parse."""
+    calls = _capture_run(monkeypatch, '{"number": 7, "headRefName": "feat"}\n')
+    assert gh.pr_view("7", json_fields=["number", "headRefName"]) == {
+        "number": 7,
+        "headRefName": "feat",
+    }
+    assert calls == [["gh", "pr", "view", "7", "--json", "number,headRefName"]]
+
+
+def test_pr_view_raises_on_unparseable_and_non_object_output(monkeypatch):
+    _capture_run(monkeypatch, "not json")
+    with pytest.raises(ValueError):
+        gh.pr_view("7", json_fields=["number"])
+    _capture_run(monkeypatch, "[1]")
+    with pytest.raises(ValueError):
+        gh.pr_view("7", json_fields=["number"])
+
+
+def test_pr_core_returns_the_typed_pr_with_sha_head(monkeypatch):
+    """The typed PR read: exactly the core field list on the wire, routed through
+    the one `core_from_node` boundary — a `PR` with a `Sha`-typed, lowercase-
+    normalized head comes back, not a dict."""
+    head = "CAFE" * 10
+    repo = repo_from_slug("owner/repo")
+    calls = _capture_run(
+        monkeypatch,
+        json.dumps(
+            {
+                "number": 7,
+                "headRefOid": head,
+                "baseRefName": "main",
+                "isDraft": True,
+                "mergeStateStatus": "BLOCKED",
+            }
+        ),
+    )
+    core = gh.pr_core(7, repo)
+    assert isinstance(core, PR)
+    assert core.repo == repo
+    assert core.head_sha == Sha(head.lower())
+    assert (core.number, core.base_ref, core.is_draft, core.merge_state) == (
+        7,
+        "main",
+        True,
+        "BLOCKED",
+    )
+    # Exactly the CORE field list rides the argv — the one wire read (ADR-0024) —
+    # scoped to the explicit repo so the read never depends on the cwd checkout.
+    assert calls == [
+        [
+            "gh",
+            "pr",
+            "view",
+            "7",
+            "--repo",
+            "owner/repo",
+            "--json",
+            "number,headRefOid,baseRefName,isDraft,mergeStateStatus",
+        ]
+    ]
+
+
+def test_pr_core_fails_loud_on_a_malformed_core(monkeypatch):
+    """The fail-loud-core discipline at the wire: a missing required key raises
+    `KeyError`, a malformed head sha raises `ValueError` — never a defaulted or
+    bogus core field flowing on."""
+    _capture_run(monkeypatch, json.dumps({"number": 7, "isDraft": False}))
+    with pytest.raises(KeyError):
+        gh.pr_core(7, repo_from_slug("owner/repo"))
+    _capture_run(
+        monkeypatch, json.dumps({"number": 7, "headRefOid": "abc", "isDraft": False})
+    )
+    with pytest.raises(ValueError):
+        gh.pr_core(7, repo_from_slug("owner/repo"))
+
+
+def test_pr_meta_returns_the_raw_node_for_the_view_builder(monkeypatch):
+    """`pr_meta` stays the raw-node read (no core noun spans checks+mergeability):
+    the readiness view builder consumes it, routing the core through
+    `core_from_node` — no parallel snapshot type is minted at the adapter."""
+    node = {
+        "number": 7,
+        "headRefOid": "cafe" * 10,
+        "baseRefName": "main",
+        "isDraft": False,
+        "mergeable": "MERGEABLE",
+        "mergeStateStatus": "CLEAN",
+        "statusCheckRollup": [],
+    }
+    _capture_run(monkeypatch, json.dumps(node))
+    assert gh.pr_meta(7) == node
+
+
+def test_the_tuple_returning_repo_slug_is_gone():
+    """PROC03 review rule: the tuple-shaped repo read is deleted (no alias, no
+    fallback) — the typed `current_repo()` is the one repo read."""
+    assert not hasattr(gh, "repo_slug")

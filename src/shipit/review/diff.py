@@ -27,12 +27,11 @@ via ``gh repo view`` rather than trusting the checkout's (possibly aliased) orig
 
 from __future__ import annotations
 
-import json
 import os
 from dataclasses import dataclass, field
 
 from .. import execrun, gh, git
-from ..identity import Sha, repo_from_slug
+from ..identity import Repo, Sha, repo_from_slug
 from ..pr import PR, core_from_node
 
 
@@ -166,12 +165,14 @@ def _git_toplevel(workdir: str) -> str | None:
 
 
 def _pr_meta(pr: int, repo: str | None) -> dict:
-    """``gh pr view <pr> [--repo …] --json …`` → parsed metadata dict.
+    """``gh pr view <pr> [--repo …] --json …`` → the parsed metadata node.
 
-    Raises :class:`ReviewError` if gh can't resolve the PR.
+    The adapter owns the parse (PROC03): :func:`shipit.gh.pr_view` returns the
+    JSON object, raising :class:`ValueError` on unusable output — normalized here,
+    like the transport failure, to the review path's :class:`ReviewError`.
     """
     try:
-        raw = gh.pr_view(
+        return gh.pr_view(
             str(pr),
             repo=repo,
             json_fields=[
@@ -195,12 +196,8 @@ def _pr_meta(pr: int, repo: str | None) -> dict:
             + (f" in {repo}" if repo else "")
             + f" via `gh pr view`: {exc}"
         ) from exc
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise ReviewError(
-            f"Unparseable `gh pr view` output for PR #{pr}: {exc}"
-        ) from exc
+    except ValueError as exc:
+        raise ReviewError(f"Unusable `gh pr view` output for PR #{pr}: {exc}") from exc
 
 
 def resolve_pr(
@@ -247,11 +244,15 @@ def resolve_pr(
     # POST, so posting a review to it hard-fails with HTTP 307. Normalizing here
     # — at the boundary where the external slug enters — keeps ALL downstream
     # consumers (generation AND posting) on the canonical slug. When repo is
-    # None, gh infers it from the checkout, which is already canonical.
+    # None, gh infers it from the checkout, which is already canonical. The
+    # adapter returns the typed identity (PROC03) — `ValueError` is its
+    # data-shape failure (unusable `gh repo view` output), normalized alongside
+    # the transport error.
+    canonical: Repo | None = None
     if repo is not None:
         try:
-            repo = gh.repo_canonical(repo)
-        except execrun.ExecError as exc:
+            canonical = gh.repo_canonical(repo)
+        except (execrun.ExecError, ValueError) as exc:
             raise ReviewError(
                 f"Could not resolve repo {repo!r} to its canonical owner/name via "
                 f"`gh repo view`: {exc}"
@@ -268,9 +269,9 @@ def resolve_pr(
     # honest-None placeholder (:data:`_HANDBUILT_REPO`, surfaced as `ReviewView.repo is
     # None`) so `post._resolve_repo` / the producer keep their `gh repo view` fallback,
     # which canonicalizes (follows the 307) exactly as before this epic.
-    repo_obj = repo_from_slug(repo) if repo else _HANDBUILT_REPO
+    repo_obj = canonical if canonical is not None else _HANDBUILT_REPO
 
-    meta = _pr_meta(pr, repo)
+    meta = _pr_meta(pr, canonical.slug if canonical is not None else None)
     # The CORE (number/head_sha/base_ref/is_draft/merge_state) is read off `meta`
     # through the one `core_from_node` boundary — the SAME extraction the readiness
     # path uses, so `head_sha` is fetched exactly one way. The review-only endpoints

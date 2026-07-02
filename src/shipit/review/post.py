@@ -200,20 +200,22 @@ def _resolve_repo(ctx: ReviewView) -> str:
     ``gh repo view``. Raises a clear error if it can't be determined."""
     if ctx.repo:
         return ctx.repo
+    # The typed adapter read (PROC03): `gh.current_repo()` returns the
+    # :class:`~shipit.identity.Repo`; this wire-facing seam hands the REST path
+    # builders the slug string. Its `ValueError` is the empty/unusable
+    # `gh repo view` answer — normalized like the transport failure.
     try:
-        slug = gh.current_repo()
+        return gh.current_repo().slug
     except execrun.ExecError as exc:
         raise RuntimeError(
             "Could not determine the repository to post the review to: ctx.repo is "
             f"unset and `gh repo view` failed ({exc}). Pass --repo OWNER/NAME."
         ) from exc
-    slug = (slug or "").strip()
-    if not slug:
+    except ValueError as exc:
         raise RuntimeError(
-            "Could not determine the repository to post the review to (empty "
-            "`gh repo view` result). Pass --repo OWNER/NAME."
-        )
-    return slug
+            "Could not determine the repository to post the review to (unusable "
+            f"`gh repo view` result: {exc}). Pass --repo OWNER/NAME."
+        ) from exc
 
 
 def post_review(

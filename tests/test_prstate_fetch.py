@@ -14,7 +14,7 @@ the network mocked at the gh-adapter boundary.
 from __future__ import annotations
 
 import pytest
-from shipit.identity import Sha
+from shipit.identity import Sha, repo_from_slug
 from shipit.prstate import fetch
 from shipit.prstate.model import ReviewLifecycle
 from shipit.prstate.reviewers import CopilotAdapter
@@ -47,7 +47,7 @@ def _graphql_page(
 
 
 def _wire(monkeypatch, review_requests: list[dict], timeline: list[dict] | None = None):
-    monkeypatch.setattr(fetch.gh, "repo_slug", lambda: ("owner", "repo"))
+    monkeypatch.setattr(fetch.gh, "current_repo", lambda: repo_from_slug("owner/repo"))
     monkeypatch.setattr(
         fetch.gh,
         "pr_meta",
@@ -156,7 +156,7 @@ def test_gather_reviews_fetches_only_the_skip_decision_inputs(monkeypatch):
     # call for head sha + reviews + requested reviewers + rerun policy, and NO
     # threads-cursor walk or reactions/issue-comment REST pagination. `rest` is
     # wired to blow up so any stray pagination fails the test.
-    monkeypatch.setattr(fetch.gh, "repo_slug", lambda: ("owner", "repo"))
+    monkeypatch.setattr(fetch.gh, "current_repo", lambda: repo_from_slug("owner/repo"))
     monkeypatch.setattr(
         fetch.gh,
         "rest",
@@ -207,7 +207,7 @@ def test_gather_reviews_threads_the_rerun_policy(monkeypatch):
     # The rerun policy must ride on the light context so detect() is head-strict
     # for rerun=True reviewers. With copilot rerun=True and the only review on an
     # OLD head, copilot is stale → reads back REQUESTED (still pending), not DONE.
-    monkeypatch.setattr(fetch.gh, "repo_slug", lambda: ("owner", "repo"))
+    monkeypatch.setattr(fetch.gh, "current_repo", lambda: repo_from_slug("owner/repo"))
     monkeypatch.setattr(fetch.gh, "rest", lambda *a, **k: [])
     from shipit.prstate import reviewers, reviewers_config
 
