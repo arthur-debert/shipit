@@ -193,6 +193,24 @@ def test_e2e_never_requested_routes_to_request():
     assert acts.called == "request_review"
 
 
+def test_e2e_failing_checks_route_to_report_not_request():
+    """Failing checks outrank review requests (#352): the SAME never-requested
+    snapshot with a red rollup → engine suppresses `to_request` and ranks the CI
+    block → dispatch reports the fix-CI instruction, never `request_review` — no
+    token-billed review is burned on a head that is about to change."""
+    ctx = load_context("copilot_never_requested")
+    ctx.checks = [
+        {"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "FAILURE"}
+    ]
+    status = evaluate(ctx)
+    assert status.state is TaskState.BLOCKED
+    assert status.to_request == []
+    assert "fix CI first" in status.next_action
+    acts = RecordingActs()
+    dispatch(status, acts)
+    assert acts.called == "report"
+
+
 def test_e2e_stale_after_push_routes_to_request():
     """A rerun=True reviewer with a review staled by a push → re-request: same
     `to_request` set, same request act (request and re-request are one act)."""
