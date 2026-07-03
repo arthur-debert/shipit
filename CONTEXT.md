@@ -81,6 +81,17 @@ changed_files / workdir), never parallel half-overlapping snapshots.
 the core that only one path populates (e.g. a defaulted `is_draft` — it belongs on
 the view that fetched it); fetching `head_sha` more than one way.
 
+**PrId**:
+The identity half of a **PR** as its own value object — `(repo, number)`, nothing
+fetched. What a verb resolves at the CLI boundary and passes down, so knowing
+*which* PR never requires the wire read that mints the core (`PR` composes a
+PrId the way a view composes a PR — one noun at two granularities, not a second
+snapshot type).
+*Avoid*: a bare `int` PR number traveling through service signatures (the repo
+it belongs to rides along implicitly and gets re-derived); "PrRef" (`ref` is
+git-branch vocabulary — `base_ref` / `head_ref`); "PrTarget" (names the CLI's
+resolution ask, not the identity).
+
 ### PR flow
 
 **PR state engine**:
@@ -99,6 +110,19 @@ nothing downstream changes.
 A reviewer in the **required set** — every one must be **settled** before a PR can be Ready.
 The set is policy (config), not code.
 *Avoid*: "approver" (this fleet requires 0 approving GitHub reviews).
+
+**Roster**:
+The resolved, validated reviewer configuration as one value — every configured
+reviewer with its per-reviewer settings (**required**, **rerun**, **wait
+window**, run options), read once at a boundary and passed along, never
+re-resolved mid-flow. The Roster is *configuration about* reviewers; reviewer
+*identity* stays with the **Backend** / **Reviewer adapter** registries, and
+entries are keyed by reviewer name.
+*Avoid*: parallel per-setting lookups resolved separately (three dicts that can
+disagree); a cached module-global required/rerun set (the Roster is a passed
+value); "policy" for this noun (**Policy** is the per-**operation**
+blocking/advisory binding); a new Reviewer identity object (that would compete
+with **Backend**).
 
 **Best-effort reviewer**:
 A reviewer that never **holds** Ready — an absent or in-progress one never keeps
