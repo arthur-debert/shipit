@@ -42,6 +42,13 @@ options:
   * `model` / `instructions` — free-form strings consumed by the local-agent
     review RUN path; they do not affect the engine verdict.
 
+One table-level key is RESERVED (policy riding the same table, NOT a reviewer
+entry): `round_cap` — the review-round budget the stopping rule enforces (how
+many review rounds may happen before the engine stops opening another round).
+Unset means the shipped default (`breakers.ROUND_CAP`, 6); a non-int or < 1
+value fails loud at parse. It lands on `Roster.round_cap`, so it travels with
+the reviewer configuration as part of the ONE boundary value.
+
 The `[reviewers]` value is TABLE-ONLY: a list/array form (`reviewers =
 ["copilot", "codex"]`) is REJECTED loud, not silently accepted. The required
 set + per-reviewer options must be expressed as the table so every required
@@ -100,6 +107,11 @@ def default_reviewers_scaffold_body() -> str:
 OVERRIDE_FILE = ".shipit.toml"
 OVERRIDE_KEY = "reviewers"
 
+# Reserved TABLE-LEVEL keys in `[reviewers]`: policy values riding the table,
+# not reviewer entries. The entry parser skips them; each has its own parser.
+ROUND_CAP_KEY = "round_cap"
+_RESERVED_KEYS = (ROUND_CAP_KEY,)
+
 # The per-reviewer options that are accepted (see the module docstring for what
 # each means). An option not listed here fails loud.
 _RUN_STRING_OPTIONS = ("model", "instructions")
@@ -142,9 +154,12 @@ def load_roster(root: str | None = None) -> Roster:
     A missing config, a missing `[reviewers]` table, or an empty table → the
     shipped :func:`default_roster` — a consumer cannot accidentally disable ALL
     review enforcement by writing `reviewers = {}` (removing review enforcement
-    entirely is not a config the loop offers). Everything invalid — malformed
-    TOML, a non-table value, an unknown reviewer/option, a wrong-typed or
-    non-positive duration, a duplicate (case-colliding) name — raises
+    entirely is not a config the loop offers). The reserved table-level
+    `round_cap` key (the review-round budget) is parsed HERE too and lands on
+    :attr:`Roster.round_cap` — it applies even when no reviewer entry is set.
+    Everything invalid — malformed TOML, a non-table value, an unknown
+    reviewer/option, a wrong-typed or non-positive duration or `round_cap`, a
+    duplicate (case-colliding) name — raises
     :class:`RequiredReviewersConfigError` HERE, at load: a Roster in hand is
     always valid.
     """
@@ -160,11 +175,17 @@ def load_roster(root: str | None = None) -> Roster:
     if value is None:
         return default_roster()
     entries = _parse_table(value, config_dir=config.parent)
+    # `_parse_table` has already established `value` is a table; the reserved
+    # table-level policy key rides that same table (it is NOT a reviewer entry).
+    round_cap = _parse_round_cap(value)
     if not entries:
-        return default_roster()
+        # No reviewer entries → the shipped default required set. A table-level
+        # `round_cap` still applies: policy can be set without opting out of the
+        # default reviewers.
+        return Roster(default_roster().entries, round_cap=round_cap)
     _validate(tuple(e.name for e in entries))
     try:
-        return Roster(tuple(entries))
+        return Roster(tuple(entries), round_cap=round_cap)
     except ValueError as exc:
         # Belt-and-suspenders: `_validate` already rejects duplicate names, but
         # any Roster invariant that still trips must fail loud AS a config error
@@ -178,7 +199,9 @@ def _parse_table(value: object, *, config_dir: Path) -> list[RosterEntry]:
     TABLE-ONLY: the value MUST be a MAP `{copilot = {rerun = false}, codex =
     {rerun = true}}` — keys are the required reviewers, each value an options
     inline-table. A list/array form (or any other non-table) fails LOUD; the
-    list shorthand (a ported release behavior once accepted) is gone.
+    list shorthand (a ported release behavior once accepted) is gone. Reserved
+    table-level keys (`_RESERVED_KEYS`, e.g. `round_cap`) are SKIPPED here —
+    they are policy values, not reviewer entries, parsed by their own parsers.
 
     Wrong-typed values / unknown options fail LOUD. Reviewer-name keys are
     normalized to their canonical adapter name (lowercase) so the resulting
@@ -197,9 +220,26 @@ def _parse_table(value: object, *, config_dir: Path) -> list[RosterEntry]:
     entries: list[RosterEntry] = []
     seen: list[str] = []
     for name, opts in value.items():
+        if name in _RESERVED_KEYS:
+            # Table-level POLICY keys (e.g. `round_cap`) ride the same table but
+            # are not reviewer entries — each has its own parser in `load_roster`.
+            continue
         if not isinstance(name, str):
             raise RequiredReviewersConfigError(
                 f"{OVERRIDE_FILE} `{OVERRIDE_KEY}` keys must be reviewer names"
+            )
+        if name.lower() in _RESERVED_KEYS:
+            # A case-variant of a reserved policy key (`Round_Cap`) is never a
+            # reviewer name. Reserved keys are exact-lowercase like every other
+            # config key (`rerun`, `window`); only reviewer NAMES canonicalize
+            # case-insensitively (they resolve to adapter names). Rejecting the
+            # variant HERE fails loud with the right diagnosis instead of the
+            # misleading unknown-reviewer error — and guarantees the reserved-key
+            # parsers (exact-key lookups, e.g. `_parse_round_cap`) can never
+            # silently MISS a policy value the user meant to set.
+            raise RequiredReviewersConfigError(
+                f"{OVERRIDE_FILE} `{OVERRIDE_KEY}` reserved key must be spelled "
+                f"exactly `{name.lower()}`, got {name!r}"
             )
         key = _canonical_name(name)
         # The duplicate guard catches differently-cased keys that collide to
@@ -210,6 +250,27 @@ def _parse_table(value: object, *, config_dir: Path) -> list[RosterEntry]:
         seen.append(key)
         entries.append(_parse_entry(name, key, opts, config_dir=config_dir))
     return entries
+
+
+def _parse_round_cap(table: dict[str, object]) -> int | None:
+    """Parse the reserved table-level `round_cap` key — the review-round budget.
+
+    Absent → ``None`` (the engine's shipped default, ``breakers.ROUND_CAP``).
+    A bool, a non-int, or anything < 1 fails LOUD at parse — a bad budget is a
+    config error, never a silent default. ``bool`` is an ``int`` subclass, so it
+    is rejected explicitly (a ``round_cap = true`` is never "1 round"). The
+    lookup is EXACT-key on purpose: a case-variant spelling (`Round_Cap`) has
+    already been rejected loud by `_parse_table` (which always runs first), so
+    an absent exact key here really means "unset", never a missed variant."""
+    value = table.get(ROUND_CAP_KEY)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise RequiredReviewersConfigError(
+            f"{OVERRIDE_FILE} `{OVERRIDE_KEY}.{ROUND_CAP_KEY}` must be a positive "
+            f"integer of review rounds (e.g. `round_cap = 6`), got {value!r}"
+        )
+    return value
 
 
 def _parse_entry(name: str, key: str, opts: object, *, config_dir: Path) -> RosterEntry:

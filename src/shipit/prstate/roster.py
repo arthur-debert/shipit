@@ -96,15 +96,32 @@ class Roster:
     no module-global cache exists to reset in tests. The EMPTY roster (the
     dataclass default) is the honest fixture default: no reviewer required,
     every per-reviewer setting at its shipped default.
+
+    ``round_cap`` is the review-loop policy the roster carries ALONGSIDE the
+    per-reviewer entries (a table-level `[reviewers]` key, not a reviewer): the
+    maximum number of review rounds before the stopping rule fires. ``None``
+    (the default) means the shipped default (``breakers.ROUND_CAP``) — the same
+    None-means-shipped-default convention as ``RosterEntry.window_seconds``, so
+    the breaker rule keeps owning its own constant.
     """
 
     entries: tuple[RosterEntry, ...] = ()
+    round_cap: int | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.entries, tuple) or any(
             not isinstance(e, RosterEntry) for e in self.entries
         ):
             raise ValueError("Roster.entries must be a tuple of RosterEntry values")
+        if self.round_cap is not None and (
+            isinstance(self.round_cap, bool)
+            or not isinstance(self.round_cap, int)
+            or self.round_cap < 1
+        ):
+            raise ValueError(
+                f"Roster.round_cap must be a positive int of review rounds, "
+                f"got {self.round_cap!r}"
+            )
         names = [e.name for e in self.entries]
         duplicates = sorted({n for n in names if names.count(n) > 1})
         if duplicates:

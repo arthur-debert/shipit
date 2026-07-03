@@ -128,6 +128,54 @@ def test_rerun_defaults_false_when_options_absent(tmp_path):
     assert roster.entry("codex").rerun is False
 
 
+# --- the reserved table-level `round_cap` policy key -------------------------
+
+
+def test_round_cap_defaults_to_unset(tmp_path):
+    # Absent → None on the Roster: the engine falls back to its shipped
+    # `breakers.ROUND_CAP` default.
+    roster = load_roster(_write(tmp_path, "[reviewers]\ncopilot = {}\n"))
+    assert roster.round_cap is None
+    assert default_roster().round_cap is None
+
+
+def test_round_cap_is_table_level_policy_not_a_reviewer_entry(tmp_path):
+    # `round_cap` rides the `[reviewers]` table but is NOT a reviewer entry:
+    # it lands on Roster.round_cap and never reaches the unknown-reviewer
+    # validation (which would otherwise reject it loud).
+    root = _write(tmp_path, "[reviewers]\nround_cap = 3\ncopilot = {}\n")
+    roster = load_roster(root)
+    assert roster.round_cap == 3
+    assert roster.required_names == ("copilot",)
+
+
+def test_round_cap_applies_even_with_no_reviewer_entries(tmp_path):
+    # Policy without touching the reviewer set: the shipped default required
+    # set still applies, WITH the configured cap.
+    roster = load_roster(_write(tmp_path, "[reviewers]\nround_cap = 2\n"))
+    assert roster.required_names == default_roster().required_names
+    assert roster.round_cap == 2
+
+
+def test_round_cap_case_variant_key_fails_loud(tmp_path):
+    # Reserved policy keys are exact-lowercase (like every config key); a case
+    # variant (`Round_Cap`) is never a reviewer name, so it is rejected with
+    # the right diagnosis — not the misleading unknown-reviewer error, and
+    # never a silently-missed cap.
+    with pytest.raises(RequiredReviewersConfigError, match="round_cap"):
+        load_roster(_write(tmp_path, "[reviewers]\nRound_Cap = 3\n"))
+    with pytest.raises(RequiredReviewersConfigError, match="round_cap"):
+        load_roster(_write(tmp_path, "[reviewers]\nROUND_CAP = 3\ncopilot = {}\n"))
+
+
+def test_round_cap_rejects_non_int_and_non_positive_values(tmp_path):
+    # A bad budget is a loud config error, never a silent default — including
+    # `true` (bool is an int subclass; `round_cap = true` is never "1 round").
+    for bad in ("0", "-1", "true", '"6"', "2.5"):
+        with pytest.raises(RequiredReviewersConfigError, match="round_cap"):
+            load_roster(_write(tmp_path, f"[reviewers]\nround_cap = {bad}\n"))
+
+
 # --- run options (model / instructions / timeout) ride the entry ------------
 
 

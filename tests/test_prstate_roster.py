@@ -120,6 +120,19 @@ def test_roster_entries_must_be_a_tuple_of_entries():
         Roster(({"name": "copilot"},))  # type: ignore[arg-type]
 
 
+def test_roster_round_cap_defaults_to_none_meaning_shipped_default():
+    # None → the engine's shipped default (breakers.ROUND_CAP); the roster only
+    # carries an override, so the breaker rule keeps owning its own constant.
+    assert Roster().round_cap is None
+    assert Roster(round_cap=3).round_cap == 3
+
+
+def test_roster_round_cap_must_be_a_positive_int():
+    for bad in (0, -1, True, "3"):
+        with pytest.raises(ValueError, match="round_cap"):
+            Roster(round_cap=bad)  # type: ignore[arg-type]
+
+
 # --- required_adapters: the roster→registry mapping --------------------------
 
 

@@ -5,7 +5,9 @@ divergent-cycle model — there is no diff-trajectory / comment-set /
 repeat-finding / divergent-counting machinery any more):
 
     Each round, address every review comment, EXCEPT stop when either
-      • 6 rounds have already happened (there is no 7th round), or
+      • the round cap has been reached (default 6 — there is no 7th round;
+        repo policy can override it via `round_cap` in the `[reviewers]` table
+        of `.shipit.toml`, carried on `Roster.round_cap`), or
       • the current round is all nitpicks (docstring/wording fixes, micro perf
         with a low run-count, cosmetic style already settled — nothing that
         changes correctness or behaviour).
@@ -33,7 +35,11 @@ from ..identity import Sha
 from .model import ReadinessView
 from .reviewers import ReviewerAdapter, required_adapters
 
-ROUND_CAP = 6  # the 6th round is the last; there is no 7th
+# The SHIPPED default round cap: the 6th round is the last; there is no 7th.
+# Only the default — repo policy overrides it via `Roster.round_cap` (the
+# `round_cap` key in `.shipit.toml` `[reviewers]`), threaded onto the
+# `ReadinessView` at the verb boundary; no config is read in this module.
+ROUND_CAP = 6
 
 # Markers that tag a finding as a nitpick — matched case-insensitively against
 # the comment body. A round whose findings are ALL nitpicks stops the loop early
@@ -162,19 +168,23 @@ def evaluate_breakers(
     `required` is threaded through to `build_rounds` so round counting uses the
     SAME required set the engine evaluates (release#622).
 
-    Stop when 6 rounds have happened, or when the latest round is all nitpicks.
-    Either way the reported `cycles` is the raw round count (what the human
-    sees). The state machine decides what a stop means for routing (READY when
-    otherwise ready, else the real blocker).
+    Stop when the round cap has been reached, or when the latest round is all
+    nitpicks. The cap is the snapshot Roster's `round_cap` (`ctx.roster`, the
+    ONE boundary-loaded config value — the same value `build_rounds` defaults
+    its required set from), falling back to the shipped :data:`ROUND_CAP` when
+    unset. Either way the reported `cycles` is the raw round count (what the
+    human sees). The state machine decides what a stop means for routing (READY
+    when otherwise ready, else the real blocker).
     """
     rounds = build_rounds(ctx, required=required)
     n = len(rounds)
+    cap = ctx.roster.round_cap if ctx.roster.round_cap is not None else ROUND_CAP
 
-    if n >= ROUND_CAP:
+    if n >= cap:
         return BreakerVerdict(
             True,
             "round-cap",
-            f"{n} review rounds reached the cap of {ROUND_CAP} — there is no further round",
+            f"{n} review rounds reached the cap of {cap} — there is no further round",
             n,
         )
 
