@@ -21,10 +21,13 @@ import sys
 import click
 
 from ... import execrun, gh
+from ...identity import Repo
+from ...pr import PrId
 from ...prstate.errors import PrStateError
 from ...prstate.fetch import gather
 from ...prstate.reviewers import required_reviewers
 from ...prstate.state import TaskState, TaskStatus, evaluate
+from .._context import NoAmbientRepoError, current_root_context
 from ._resolve import resolve_pr
 
 #: The `pr` verbs' logger (LOG02 spray, ADR-0029): the flip and its undo are
@@ -44,14 +47,16 @@ class NotReady(RuntimeError):
         )
 
 
-def guarded_flip(pr: int, *, flip=gh.pr_ready, evaluate_status=None) -> TaskStatus:
+def guarded_flip(pr: PrId, *, flip=gh.pr_ready, evaluate_status=None) -> TaskStatus:
     """Re-evaluate the live PR and flip draft→ready ONLY if it is READY.
 
     The shared guarded re-check behind both `pr ready` and `pr next`'s ready act.
-    Gathers a FRESH snapshot and re-runs the engine (never trusting a status
-    computed earlier — the PR may have moved); on READY it performs the flip and
-    returns the READY status, otherwise it raises :class:`NotReady` carrying the
-    real status so the caller can report why it refused.
+    The target arrives as the typed :class:`~shipit.pr.PrId` (ADR-0030) — the
+    repo rides on the identity through both the re-gather and the flip, never
+    re-derived. Gathers a FRESH snapshot and re-runs the engine (never trusting
+    a status computed earlier — the PR may have moved); on READY it performs the
+    flip and returns the READY status, otherwise it raises :class:`NotReady`
+    carrying the real status so the caller can report why it refused.
 
     `flip` / `evaluate_status` are injected for testing: `flip` is the
     draft→ready boundary (default :func:`shipit.gh.pr_ready`); `evaluate_status`
@@ -70,7 +75,7 @@ def guarded_flip(pr: int, *, flip=gh.pr_ready, evaluate_status=None) -> TaskStat
 
 
 @click.command(name="ready")
-@click.argument("pr", required=False, type=int)
+@click.argument("pr", required=False, type=click.IntRange(min=1))
 @click.option(
     "--undo",
     is_flag=True,
@@ -87,30 +92,36 @@ def cmd(pr: int | None, undo: bool) -> None:
     raise SystemExit(run(pr, undo=undo))
 
 
-def run(pr: int | None = None, *, undo: bool = False) -> int:
+def run(pr: int | None = None, *, undo: bool = False, repo: Repo | None = None) -> int:
     """Resolve → (undo ? revert : guarded flip). Returns an int exit code.
+
+    ``repo`` is the identity half of the PR target: omitted (the CLI path), the
+    root context's ambient repo — resolved once per invocation (ADR-0030); a
+    direct caller (a test) injects it as a value.
 
     0 on a performed flip/undo; non-zero on a refusal (not Ready) or a real
     gh/auth failure. A branch with no PR is a clean non-zero error here (unlike
     the read-only `pr status`, a mutating verb has nothing to flip).
     """
-    resolved: int | None = None
+    target: PrId | None = None
     try:
-        resolved = resolve_pr(pr)
-        if resolved is None:
+        target = resolve_pr(
+            pr, repo if repo is not None else current_root_context().require_repo()
+        )
+        if target is None:
             print("error: no PR for this branch — nothing to flip", file=sys.stderr)
             return 1
         if undo:
             # Always allowed: revert ready→draft. No readiness hold.
-            gh.pr_ready(resolved, undo=True)
+            gh.pr_ready(target, undo=True)
             logger.info(
                 "pr#%s reverted ready→draft (undo)",
-                resolved,
-                extra={"pr": resolved},
+                target.number,
+                extra={"pr": target.number},
             )
-            print(f"PR #{resolved}: reverted ready→draft")
+            print(f"PR #{target.number}: reverted ready→draft")
             return 0
-        status = guarded_flip(resolved)
+        status = guarded_flip(target)
     except NotReady as exc:
         # A refused flip is a degraded-but-continuing outcome: the verb exits
         # cleanly non-zero and nothing mutated — loud in the record, not fatal.
@@ -122,15 +133,15 @@ def run(pr: int | None = None, *, undo: bool = False) -> int:
         )
         print(f"refusing to flip: {exc}", file=sys.stderr)
         return 1
-    except (execrun.ExecError, PrStateError) as exc:
+    except (execrun.ExecError, PrStateError, NoAmbientRepoError) as exc:
         # Bind `pr` when resolution got far enough to know it (the mutating call
-        # is what failed); when resolution ITSELF failed, `resolved` is None and
+        # is what failed); when resolution ITSELF failed, `target` is None and
         # the key stays absent — the record contract is present-when-bound, never
         # null.
         logger.error(
             "pr ready failed",
             exc_info=True,
-            extra={"pr": resolved} if resolved is not None else None,
+            extra={"pr": target.number} if target is not None else None,
         )
         print(f"error: {exc}", file=sys.stderr)
         return 1

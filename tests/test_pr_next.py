@@ -13,8 +13,12 @@ import json
 import pytest
 
 from shipit import cli
+from shipit.identity import repo_from_slug
+from shipit.pr import PrId
 from shipit.prstate.state import ChecksState, TaskState, TaskStatus
 from shipit.verbs.pr import next_action as next_verb
+
+REPO = repo_from_slug("owner/repo")
 
 
 def _status(state: TaskState, pr: int = 42, next_action: str = "do x") -> TaskStatus:
@@ -56,13 +60,16 @@ def test_ready_help(capsys):
 
 @pytest.fixture
 def patched_next(monkeypatch):
-    """resolve → 42; gather passes the number; evaluate yields the state under
-    test. The act boundary is the real `_NextActs` but its methods are exercised
-    via the dispatcher; tests that need a specific act stub it directly."""
+    """resolve → the typed PrId target (#42); gather passes the target through;
+    evaluate yields the state under test. The act boundary is the real
+    `_NextActs` but its methods are exercised via the dispatcher; tests that
+    need a specific act stub it directly."""
     monkeypatch.setattr(
-        next_verb, "resolve_pr", lambda pr: pr if pr is not None else 42
+        next_verb,
+        "resolve_pr",
+        lambda pr, repo: PrId(repo=repo, number=pr if pr is not None else 42),
     )
-    monkeypatch.setattr(next_verb, "gather", lambda pr: pr)
+    monkeypatch.setattr(next_verb, "gather", lambda target: target)
     monkeypatch.setattr(next_verb, "required_reviewers", lambda: [])
 
 
@@ -70,7 +77,9 @@ def test_next_reports_blocked(patched_next, monkeypatch, capsys):
     monkeypatch.setattr(
         next_verb,
         "evaluate",
-        lambda ctx, required: _status(TaskState.BLOCKED, ctx, "the real blocker"),
+        lambda ctx, required: _status(
+            TaskState.BLOCKED, ctx.number, "the real blocker"
+        ),
     )
     rc = cli.main(["pr", "next"])
     assert rc == 0
@@ -82,7 +91,9 @@ def test_next_reports_blocked(patched_next, monkeypatch, capsys):
 
 def test_next_json_carries_action_and_status(patched_next, monkeypatch, capsys):
     monkeypatch.setattr(
-        next_verb, "evaluate", lambda ctx, required: _status(TaskState.VALIDATING, ctx)
+        next_verb,
+        "evaluate",
+        lambda ctx, required: _status(TaskState.VALIDATING, ctx.number),
     )
     rc = cli.main(["pr", "next", "--json"])
     assert rc == 0
@@ -92,7 +103,7 @@ def test_next_json_carries_action_and_status(patched_next, monkeypatch, capsys):
 
 
 def test_next_no_pr_is_exit_zero_report(monkeypatch, capsys):
-    monkeypatch.setattr(next_verb, "resolve_pr", lambda pr: None)
+    monkeypatch.setattr(next_verb, "resolve_pr", lambda pr, repo: None)
     rc = cli.main(["pr", "next", "--json"])
     assert rc == 0
     payload = json.loads(capsys.readouterr().out)
@@ -102,10 +113,14 @@ def test_next_no_pr_is_exit_zero_report(monkeypatch, capsys):
 def test_next_ready_flips(patched_next, monkeypatch, capsys):
     """READY routes to the flip act; the guarded flip is stubbed to flip."""
     monkeypatch.setattr(
-        next_verb, "evaluate", lambda ctx, required: _status(TaskState.READY, ctx)
+        next_verb,
+        "evaluate",
+        lambda ctx, required: _status(TaskState.READY, ctx.number),
     )
     monkeypatch.setattr(
-        next_verb.ready_verb, "guarded_flip", lambda pr: _status(TaskState.READY, pr)
+        next_verb.ready_verb,
+        "guarded_flip",
+        lambda target: _status(TaskState.READY, target.number),
     )
     rc = cli.main(["pr", "next"])
     assert rc == 0
@@ -116,11 +131,13 @@ def test_next_ready_flips(patched_next, monkeypatch, capsys):
 def test_next_ready_refusal_is_nonzero(patched_next, monkeypatch, capsys):
     """If the PR moved out of READY between gather and the guarded flip, refuse."""
     monkeypatch.setattr(
-        next_verb, "evaluate", lambda ctx, required: _status(TaskState.READY, ctx)
+        next_verb,
+        "evaluate",
+        lambda ctx, required: _status(TaskState.READY, ctx.number),
     )
 
-    def refuse(pr):
-        raise next_verb.ready_verb.NotReady(_status(TaskState.BLOCKED, pr))
+    def refuse(target):
+        raise next_verb.ready_verb.NotReady(_status(TaskState.BLOCKED, target.number))
 
     monkeypatch.setattr(next_verb.ready_verb, "guarded_flip", refuse)
     rc = cli.main(["pr", "next"])
@@ -155,7 +172,7 @@ def test_next_request_act_requests_reviewer(patched_next, monkeypatch, capsys):
         lambda ctx, required: TaskStatus(
             state=TaskState.REVIEWS_PENDING,
             next_action="waiting on required review(s): copilot — request for the current head: copilot",
-            pr=ctx,
+            pr=ctx.number,
             reviewers={"copilot": "not_requested"},
             to_request=["copilot"],
         ),
@@ -172,7 +189,11 @@ def test_next_request_act_requests_reviewer(patched_next, monkeypatch, capsys):
     rc = cli.main(["pr", "next"])
     assert rc == 0
     assert "requested review(s): copilot" in capsys.readouterr().out
-    assert seen == {"pr": 42, "names": ["copilot"], "force": True}
+    # The act hands the request helper the TYPED target — the same PrId the
+    # resolver minted (repo + number), never a bare int.
+    assert seen["pr"].number == 42
+    assert seen["pr"].repo is not None
+    assert (seen["names"], seen["force"]) == (["copilot"], True)
 
 
 def test_next_request_act_skips_already_requested_reviewer(
@@ -197,7 +218,7 @@ def test_next_request_act_skips_already_requested_reviewer(
                 "request for the current head: copilot; "
                 "wait (already requested / in flight on the current head): coderabbit"
             ),
-            pr=ctx,
+            pr=ctx.number,
             reviewers={"copilot": "not_requested", "coderabbit": "requested"},
             to_request=["copilot"],
         ),
@@ -243,7 +264,7 @@ def test_next_request_act_excludes_in_flight_local_agent(
                 "request for the current head: copilot; "
                 "wait (already requested / in flight on the current head): codex"
             ),
-            pr=ctx,
+            pr=ctx.number,
             # codex's detached run is in-flight, but its lifecycle reads
             # not_requested (no requested edge) — the OLD selection would pick it.
             reviewers={"copilot": "not_requested", "codex": "not_requested"},
@@ -290,7 +311,7 @@ def test_next_request_act_selects_never_requested_and_stale(
                 "RE-REQUEST for the current head (a prior review is stale after a "
                 "push): coderabbit"
             ),
-            pr=ctx,
+            pr=ctx.number,
             reviewers={"copilot": "not_requested", "coderabbit": "not_requested"},
             to_request=["copilot", "coderabbit"],
         ),
@@ -319,7 +340,7 @@ def test_next_request_act_dropped_edge_is_error(patched_next, monkeypatch, capsy
         lambda ctx, required: TaskStatus(
             state=TaskState.REVIEWS_PENDING,
             next_action="waiting on required review(s): copilot — request for the current head: copilot",
-            pr=ctx,
+            pr=ctx.number,
             reviewers={"copilot": "not_requested"},
             to_request=["copilot"],
         ),

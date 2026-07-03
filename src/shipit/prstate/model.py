@@ -20,7 +20,7 @@ from datetime import datetime
 from enum import StrEnum
 
 from ..identity import Repo, Sha, repo_from_slug
-from ..pr import PR
+from ..pr import PR, PrId
 
 
 class ReviewLifecycle(StrEnum):
@@ -331,8 +331,7 @@ def readiness_view(
     the readiness engine never keys on it.
     """
     pr = PR(
-        repo=repo or _HANDBUILT_REPO,
-        number=number,
+        id=PrId(repo=repo or _HANDBUILT_REPO, number=number),
         head_sha=head_sha if isinstance(head_sha, Sha) else Sha(head_sha),
         base_ref=base_ref,
         is_draft=is_draft,

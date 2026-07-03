@@ -19,6 +19,8 @@ from __future__ import annotations
 import pytest
 
 from shipit import cli
+from shipit.identity import repo_from_slug
+from shipit.pr import PrId
 from shipit.prstate.model import ReviewLifecycle
 from shipit.prstate.reviewers import ReviewerAdapter
 from shipit.verbs.pr import _request, review as review_verb
@@ -28,6 +30,11 @@ from shipit.verbs.pr._request import (
     _Boundary,
     request_reviewers,
 )
+
+# The typed PR target (CLI01-WS02 / ADR-0030): the helper and the verb thread a
+# PrId — repo + number as ONE value — never a bare int.
+REPO = repo_from_slug("owner/repo")
+TARGET = PrId(repo=REPO, number=7)
 
 
 # --- test doubles -------------------------------------------------------------
@@ -49,7 +56,7 @@ class _FakeAdapter(ReviewerAdapter):
         self.has_requested_edge = has_edge
         self._request_returns = request_returns
         self._lifecycle = lifecycle
-        self.requested_with: list[int] = []
+        self.requested_with: list[PrId] = []
 
     def matches(self, login: str) -> bool:
         return self.name in login.lower()
@@ -57,7 +64,7 @@ class _FakeAdapter(ReviewerAdapter):
     def detect(self, ctx) -> ReviewLifecycle:  # noqa: ANN001
         return self._lifecycle
 
-    def request(self, pr: int) -> bool:
+    def request(self, pr: PrId) -> bool:
         self.requested_with.append(pr)
         return self._request_returns
 
@@ -86,12 +93,13 @@ def test_verifies_when_edge_attaches():
     """A remote request whose login shows up in pending requests verifies."""
     adapter = _FakeAdapter("copilot")
     result = request_reviewers(
-        7,
+        TARGET,
         [adapter],
         force=True,
         boundary=_boundary(requested_logins=["Copilot"]),
     )
-    assert adapter.requested_with == [7]
+    # The adapter received the TYPED target — repo riding on the identity.
+    assert adapter.requested_with == [TARGET]
     assert result.ok
     assert result.verified == ["copilot"]
     assert result.dropped == []
@@ -116,7 +124,7 @@ def test_verifies_via_fresh_review_when_bot_consumed_request():
         gather_reviews=lambda pr: object(),
         sleep=lambda s: None,
     )
-    result = request_reviewers(7, [adapter], force=True, boundary=boundary)
+    result = request_reviewers(TARGET, [adapter], force=True, boundary=boundary)
     assert result.ok
     assert result.verified == ["copilot"]
 
@@ -126,7 +134,7 @@ def test_dropped_when_edge_never_appears():
     failure: status `dropped`, result not ok."""
     adapter = _FakeAdapter("copilot")
     result = request_reviewers(
-        7,
+        TARGET,
         [adapter],
         force=True,
         boundary=_boundary(requested_logins=[], reviews=[]),
@@ -138,7 +146,7 @@ def test_dropped_when_edge_never_appears():
 def test_bare_run_skips_already_done_reviewer():
     """A bare run drops a reviewer already DONE on the head — never requested."""
     done = _FakeAdapter("copilot", lifecycle=ReviewLifecycle.DONE_CLEAN)
-    result = request_reviewers(7, [done], force=False, boundary=_boundary())
+    result = request_reviewers(TARGET, [done], force=False, boundary=_boundary())
     assert done.requested_with == []  # not re-poked
     assert result.skipped == ["copilot"]
     assert result.verified == []
@@ -148,12 +156,12 @@ def test_bare_run_requests_pending_reviewer():
     """A bare run DOES request a reviewer not yet done, and verifies it."""
     pending = _FakeAdapter("copilot", lifecycle=ReviewLifecycle.NOT_REQUESTED)
     result = request_reviewers(
-        7,
+        TARGET,
         [pending],
         force=False,
         boundary=_boundary(requested_logins=["Copilot"]),
     )
-    assert pending.requested_with == [7]
+    assert pending.requested_with == [TARGET]
     assert result.verified == ["copilot"]
 
 
@@ -161,12 +169,12 @@ def test_force_requests_already_done_reviewer():
     """`force=True` (the --reviewer escape hatch) requests even a DONE reviewer."""
     done = _FakeAdapter("copilot", lifecycle=ReviewLifecycle.DONE_CLEAN)
     result = request_reviewers(
-        7,
+        TARGET,
         [done],
         force=True,
         boundary=_boundary(requested_logins=["Copilot"]),
     )
-    assert done.requested_with == [7]  # forced despite being done
+    assert done.requested_with == [TARGET]  # forced despite being done
     assert result.skipped == []
     assert result.verified == ["copilot"]
 
@@ -182,7 +190,7 @@ def test_local_reviewer_in_flight_not_edge_verified():
     boundary = _Boundary(
         attach_state=boom, gather_reviews=lambda pr: object(), sleep=lambda s: None
     )
-    result = request_reviewers(7, [local], force=True, boundary=boundary)
+    result = request_reviewers(TARGET, [local], force=True, boundary=boundary)
     assert result.ok
     assert result.in_flight == ["codex"]
     assert result.verified == []
@@ -191,7 +199,7 @@ def test_local_reviewer_in_flight_not_edge_verified():
 def test_no_mechanism_backend_is_no_op():
     """A backend whose request() returns False records a no-op, never verified."""
     auto = _FakeAdapter("gemini", has_edge=False, request_returns=False)
-    result = request_reviewers(7, [auto], force=True, boundary=_boundary())
+    result = request_reviewers(TARGET, [auto], force=True, boundary=_boundary())
     assert result.ok
     assert result.no_op == ["gemini"]
 
@@ -209,7 +217,7 @@ def test_gh_failure_in_skip_read_propagates():
         sleep=lambda s: None,
     )
     with pytest.raises(ExecError):
-        request_reviewers(7, [adapter], force=False, boundary=boundary)
+        request_reviewers(TARGET, [adapter], force=False, boundary=boundary)
 
 
 # --- the local-agent guard via the CLI verb -----------------------------------
@@ -221,16 +229,17 @@ def test_local_agent_request_detaches_in_flight(monkeypatch, capsys):
     service detach boundary is faked so nothing forks."""
     from shipit.review import service
 
-    monkeypatch.setattr(review_verb, "resolve_pr", lambda pr: 7)
+    monkeypatch.setattr(review_verb, "resolve_pr", lambda pr, repo: TARGET)
     detached: list = []
     monkeypatch.setattr(
         service,
         "start_detached_review",
         lambda backend, pr, **kw: detached.append((backend.funnel_agent, pr)) or True,
     )
-    rc = review_verb.run(7, reviewer="codex")
+    rc = review_verb.run(7, reviewer="codex", repo=REPO)
     assert rc == 0
-    assert detached == [("codex", 7)]
+    # The detached-review entry received the TYPED target (ADR-0030).
+    assert detached == [("codex", TARGET)]
     assert "review in flight: codex on #7" in capsys.readouterr().out
 
 
@@ -241,11 +250,11 @@ def test_local_agent_spec_alias_detaches(monkeypatch, capsys, name):
     error."""
     from shipit.review import service
 
-    monkeypatch.setattr(review_verb, "resolve_pr", lambda pr: 7)
+    monkeypatch.setattr(review_verb, "resolve_pr", lambda pr, repo: TARGET)
     monkeypatch.setattr(
         service, "start_detached_review", lambda backend, pr, **kw: True
     )
-    rc = review_verb.run(7, reviewer=name)
+    rc = review_verb.run(7, reviewer=name, repo=REPO)
     assert rc == 0
     out = capsys.readouterr().out
     assert "review in flight:" in out
@@ -254,7 +263,7 @@ def test_local_agent_spec_alias_detaches(monkeypatch, capsys, name):
 def test_local_alias_does_not_match_app_reviewer(capsys):
     """`-local` aliases only the local-agent family — `copilot-local` is unknown
     (an app reviewer has a requested edge and is not a local backend)."""
-    rc = review_verb.run(7, reviewer="copilot-local")
+    rc = review_verb.run(7, reviewer="copilot-local", repo=REPO)
     assert rc != 0
     assert "unknown reviewer" in capsys.readouterr().err
 
@@ -264,7 +273,7 @@ def test_local_alias_does_not_match_app_reviewer(capsys):
 
 def test_unknown_reviewer_is_rejected(monkeypatch, capsys):
     """A typo'd --reviewer name fails loud (non-zero) listing the known names."""
-    rc = review_verb.run(7, reviewer="copliot")
+    rc = review_verb.run(7, reviewer="copliot", repo=REPO)
     assert rc != 0
     err = capsys.readouterr().err
     assert "unknown reviewer" in err
@@ -273,8 +282,8 @@ def test_unknown_reviewer_is_rejected(monkeypatch, capsys):
 
 def test_no_pr_for_branch_is_fatal(monkeypatch, capsys):
     """A mutating verb treats a branch with no PR as fatal (non-zero)."""
-    monkeypatch.setattr(review_verb, "resolve_pr", lambda pr: None)
-    rc = review_verb.run(None, reviewer="copilot")
+    monkeypatch.setattr(review_verb, "resolve_pr", lambda pr, repo: None)
+    rc = review_verb.run(None, reviewer="copilot", repo=REPO)
     assert rc != 0
     assert "no PR" in capsys.readouterr().err
 
@@ -282,18 +291,18 @@ def test_no_pr_for_branch_is_fatal(monkeypatch, capsys):
 def test_gh_failure_resolving_is_fatal(monkeypatch, capsys):
     """A real gh/auth failure resolving the branch's PR -> clean stderr + non-zero."""
 
-    def boom(pr):
+    def boom(pr, repo):
         raise ExecError(["gh"], rc=1, stderr="gh auth exploded")
 
     monkeypatch.setattr(review_verb, "resolve_pr", boom)
-    rc = review_verb.run(None, reviewer="copilot")
+    rc = review_verb.run(None, reviewer="copilot", repo=REPO)
     assert rc != 0
     assert "gh auth exploded" in capsys.readouterr().err
 
 
 def test_verb_renders_verified(monkeypatch, capsys):
     """The bare-run happy path: resolve -> request_reviewers -> render verified."""
-    monkeypatch.setattr(review_verb, "resolve_pr", lambda pr: 7)
+    monkeypatch.setattr(review_verb, "resolve_pr", lambda pr, repo: TARGET)
     monkeypatch.setattr(
         review_verb,
         "request_reviewers",
@@ -302,14 +311,14 @@ def test_verb_renders_verified(monkeypatch, capsys):
         ),
     )
     monkeypatch.setattr(review_verb, "required_reviewers", lambda: [object()])
-    rc = review_verb.run(7)
+    rc = review_verb.run(7, repo=REPO)
     assert rc == 0
     assert "verified: copilot" in capsys.readouterr().out
 
 
 def test_dropped_request_exits_nonzero(monkeypatch, capsys):
     """A dropped remote request -> stderr line + non-zero exit (never a silent park)."""
-    monkeypatch.setattr(review_verb, "resolve_pr", lambda pr: 7)
+    monkeypatch.setattr(review_verb, "resolve_pr", lambda pr, repo: TARGET)
     monkeypatch.setattr(
         review_verb,
         "request_reviewers",
@@ -318,7 +327,7 @@ def test_dropped_request_exits_nonzero(monkeypatch, capsys):
         ),
     )
     monkeypatch.setattr(review_verb, "required_reviewers", lambda: [object()])
-    rc = review_verb.run(7)
+    rc = review_verb.run(7, repo=REPO)
     assert rc != 0
     assert "dropped by GitHub" in capsys.readouterr().err
 
@@ -386,7 +395,9 @@ def test_pr_review_run_invokes_detached_child(monkeypatch):
     from shipit.agent import backend as agent_backend
 
     assert captured["backend"] is agent_backend.CODEX
-    assert captured["pr"] == 5
-    assert captured["repo"] == "owner/repo"
+    # The child's own entry point minted the PrId at the process boundary
+    # (explicit --repo/--pr — it never reads the root context).
+    assert captured["pr"] == PrId(repo=repo_from_slug("owner/repo"), number=5)
+    assert "repo" not in captured  # the repo rides ON the target now
     assert captured["run_id"] == 555
     assert captured["as_app"] is True

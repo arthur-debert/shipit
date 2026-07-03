@@ -19,12 +19,20 @@ import logging
 
 import pytest
 
+from shipit.identity import repo_from_slug
+from shipit.pr import PrId
 from shipit.prstate.errors import PrStateError
 from shipit.prstate.state import ChecksState, TaskState, TaskStatus
 from shipit.verbs.pr import next_action as next_verb
 from shipit.verbs.pr import ready as ready_verb
 from shipit.verbs.pr import review as review_verb
 from shipit.verbs.pr._request import RequestResult, ReviewerOutcome
+
+# The typed PR targets (CLI01-WS02): the verbs resolve a PrId; the records carry
+# its NUMBER. `repo=REPO` injects the identity half for direct `run()` calls.
+REPO = repo_from_slug("owner/repo")
+TARGET_42 = PrId(repo=REPO, number=42)
+TARGET_7 = PrId(repo=REPO, number=7)
 
 
 def _status(state: TaskState, pr: int = 42, next_action: str = "do x") -> TaskStatus:
@@ -49,35 +57,37 @@ def _pr_records(caplog, level: int):
 
 
 def test_flip_is_an_info_milestone_with_the_pr_key(monkeypatch, caplog):
-    monkeypatch.setattr(ready_verb, "resolve_pr", lambda pr: 42)
+    monkeypatch.setattr(ready_verb, "resolve_pr", lambda pr, repo: TARGET_42)
     monkeypatch.setattr(
-        ready_verb, "guarded_flip", lambda pr: _status(TaskState.READY, pr)
+        ready_verb,
+        "guarded_flip",
+        lambda target: _status(TaskState.READY, target.number),
     )
     with caplog.at_level(logging.INFO, logger="shipit.pr"):
-        assert ready_verb.run(42) == 0
+        assert ready_verb.run(42, repo=REPO) == 0
     milestones = _pr_records(caplog, logging.INFO)
     assert len(milestones) == 1
     assert milestones[0].pr == 42
 
 
 def test_undo_is_an_info_milestone_with_the_pr_key(monkeypatch, caplog):
-    monkeypatch.setattr(ready_verb, "resolve_pr", lambda pr: 42)
-    monkeypatch.setattr(ready_verb.gh, "pr_ready", lambda pr, undo=False: None)
+    monkeypatch.setattr(ready_verb, "resolve_pr", lambda pr, repo: TARGET_42)
+    monkeypatch.setattr(ready_verb.gh, "pr_ready", lambda target, undo=False: None)
     with caplog.at_level(logging.INFO, logger="shipit.pr"):
-        assert ready_verb.run(42, undo=True) == 0
+        assert ready_verb.run(42, undo=True, repo=REPO) == 0
     milestones = _pr_records(caplog, logging.INFO)
     assert len(milestones) == 1
     assert milestones[0].pr == 42
 
 
 def test_refused_flip_is_a_warning_with_the_pr_key(monkeypatch, caplog):
-    def refuse(pr):
-        raise ready_verb.NotReady(_status(TaskState.VALIDATING, pr))
+    def refuse(target):
+        raise ready_verb.NotReady(_status(TaskState.VALIDATING, target.number))
 
-    monkeypatch.setattr(ready_verb, "resolve_pr", lambda pr: 42)
+    monkeypatch.setattr(ready_verb, "resolve_pr", lambda pr, repo: TARGET_42)
     monkeypatch.setattr(ready_verb, "guarded_flip", refuse)
     with caplog.at_level(logging.INFO, logger="shipit.pr"):
-        assert ready_verb.run(42) == 1
+        assert ready_verb.run(42, repo=REPO) == 1
     assert not _pr_records(caplog, logging.INFO)  # nothing flipped, no milestone
     warnings = _pr_records(caplog, logging.WARNING)
     assert len(warnings) == 1
@@ -88,12 +98,10 @@ def test_gh_adapter_flip_leaves_a_durable_milestone(monkeypatch, caplog):
     """The boundary that PERFORMS the flip records it (before #285 its only
     record was the Exec runner's DEBUG line)."""
     from shipit import gh
-    from shipit.identity import repo_from_slug
 
-    monkeypatch.setattr(gh, "current_repo", lambda: repo_from_slug("owner/repo"))
     monkeypatch.setattr(gh, "_run", lambda args, **k: "")
     with caplog.at_level(logging.INFO, logger="shipit.gh"):
-        gh.pr_ready(7)
+        gh.pr_ready(TARGET_7)
     milestones = [
         r
         for r in caplog.records
@@ -107,16 +115,16 @@ def test_gh_adapter_flip_leaves_a_durable_milestone(monkeypatch, caplog):
 
 
 def test_next_action_taken_is_an_info_milestone_with_the_pr_key(monkeypatch, caplog):
-    monkeypatch.setattr(next_verb, "resolve_pr", lambda pr: 42)
-    monkeypatch.setattr(next_verb, "gather", lambda pr: pr)
+    monkeypatch.setattr(next_verb, "resolve_pr", lambda pr, repo: TARGET_42)
+    monkeypatch.setattr(next_verb, "gather", lambda target: target)
     monkeypatch.setattr(next_verb, "required_reviewers", lambda: [])
     monkeypatch.setattr(
         next_verb,
         "evaluate",
-        lambda ctx, required: _status(TaskState.BLOCKED, ctx, "the blocker"),
+        lambda ctx, required: _status(TaskState.BLOCKED, ctx.number, "the blocker"),
     )
     with caplog.at_level(logging.INFO, logger="shipit.pr"):
-        assert next_verb.run(42) == 0
+        assert next_verb.run(42, repo=REPO) == 0
     milestones = _pr_records(caplog, logging.INFO)
     assert len(milestones) == 1
     assert milestones[0].pr == 42
@@ -125,15 +133,15 @@ def test_next_action_taken_is_an_info_milestone_with_the_pr_key(monkeypatch, cap
 def test_next_action_failure_is_an_error_with_the_pr_key(monkeypatch, caplog):
     """A gh/state failure AFTER the PR resolved still records the ``pr`` key, so
     the durable ERROR stays jq-sliceable by PR."""
-    monkeypatch.setattr(next_verb, "resolve_pr", lambda pr: 42)
+    monkeypatch.setattr(next_verb, "resolve_pr", lambda pr, repo: TARGET_42)
     monkeypatch.setattr(next_verb, "required_reviewers", lambda: [])
 
-    def boom(pr):
+    def boom(target):
         raise PrStateError("gh blew up")
 
     monkeypatch.setattr(next_verb, "gather", boom)
     with caplog.at_level(logging.ERROR, logger="shipit.pr"):
-        assert next_verb.run(42) == 1
+        assert next_verb.run(42, repo=REPO) == 1
     errors = _pr_records(caplog, logging.ERROR)
     assert len(errors) == 1
     assert errors[0].pr == 42
@@ -147,12 +155,12 @@ def _request_run(monkeypatch):
     """Run the verb against an injected RequestResult; returns (run, caplog use)."""
 
     def runner(result: RequestResult) -> int:
-        monkeypatch.setattr(review_verb, "resolve_pr", lambda pr: 7)
+        monkeypatch.setattr(review_verb, "resolve_pr", lambda pr, repo: TARGET_7)
         monkeypatch.setattr(
             review_verb, "request_reviewers", lambda pr, adapters, force: result
         )
         monkeypatch.setattr(review_verb, "required_reviewers", lambda: [object()])
-        return review_verb.run(7)
+        return review_verb.run(7, repo=REPO)
 
     return runner
 
@@ -198,7 +206,7 @@ def test_dropped_outcome_is_a_warning_record(_request_run, caplog):
 def test_review_request_failure_is_an_error_with_the_pr_key(monkeypatch, caplog):
     """A gh/auth failure (or the local-agent guard) AFTER the PR resolved still
     records the ``pr`` key on its durable ERROR."""
-    monkeypatch.setattr(review_verb, "resolve_pr", lambda pr: 7)
+    monkeypatch.setattr(review_verb, "resolve_pr", lambda pr, repo: TARGET_7)
     monkeypatch.setattr(review_verb, "required_reviewers", lambda: [object()])
 
     def boom(pr, adapters, force):
@@ -206,7 +214,7 @@ def test_review_request_failure_is_an_error_with_the_pr_key(monkeypatch, caplog)
 
     monkeypatch.setattr(review_verb, "request_reviewers", boom)
     with caplog.at_level(logging.ERROR, logger="shipit.pr"):
-        assert review_verb.run(7) == 1
+        assert review_verb.run(7, repo=REPO) == 1
     errors = _pr_records(caplog, logging.ERROR)
     assert len(errors) == 1
     assert errors[0].pr == 7

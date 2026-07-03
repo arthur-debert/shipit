@@ -31,10 +31,13 @@ import sys
 import click
 
 from ... import execrun
+from ...identity import Repo
+from ...pr import PrId
 from ...prstate.errors import PrStateError
 from ...prstate.fetch import gather
 from ...prstate.reviewers import required_reviewers
 from ...prstate.state import TaskStatus, evaluate, no_pr
+from .._context import NoAmbientRepoError, current_root_context
 from . import ready as ready_verb
 from . import status as status_verb
 from ._request import request_reviewers
@@ -54,7 +57,7 @@ class _NextActs:
     `request_review` and `flip_ready` are the two mutating acts.
     """
 
-    def __init__(self, pr: int) -> None:
+    def __init__(self, pr: PrId) -> None:
         self._pr = pr
 
     def report(self, status: TaskStatus) -> str:
@@ -120,7 +123,7 @@ class _NextActs:
 
 
 @click.command(name="next")
-@click.argument("pr", required=False, type=int)
+@click.argument("pr", required=False, type=click.IntRange(min=1))
 @click.option(
     "--json", "as_json", is_flag=True, help="Emit the resulting status as JSON."
 )
@@ -134,23 +137,33 @@ def cmd(pr: int | None, as_json: bool) -> None:
     raise SystemExit(run(pr, as_json=as_json))
 
 
-def run(pr: int | None = None, *, as_json: bool = False) -> int:
+def run(
+    pr: int | None = None, *, as_json: bool = False, repo: Repo | None = None
+) -> int:
     """Resolve → gather → evaluate → dispatch → perform one act → report.
+
+    ``repo`` is the identity half of the PR target: omitted (the CLI path), the
+    root context's ambient repo — resolved once per invocation (ADR-0030); a
+    direct caller (a test) injects it as a value.
 
     Returns 0 on a performed/ reported action; non-zero on a real gh/auth failure
     or a guarded-flip refusal (a status that moved out of READY between gather and
     flip). A branch with no PR is a normal report (the act is the human's: create
     a draft PR), exit 0 — matching `pr status`.
     """
-    resolved: int | None = None
+    target: PrId | None = None
     try:
-        resolved = resolve_pr(pr)
-        if resolved is None:
+        target = resolve_pr(
+            pr, repo if repo is not None else current_root_context().require_repo()
+        )
+        if target is None:
             status = no_pr()
-            _report(_NextActs(0).report(status), status, as_json=as_json)
+            # The report act inline: with no PR there is no target to construct
+            # an act boundary around — the one action is the human's.
+            _report(f"no action taken — {status.next_action}", status, as_json=as_json)
             return 0
-        status = evaluate(gather(resolved), required=required_reviewers())
-        action = dispatch(status, _NextActs(resolved))
+        status = evaluate(gather(target), required=required_reviewers())
+        action = dispatch(status, _NextActs(target))
     except ready_verb.NotReady as exc:
         # The guarded flip refused: the PR moved out of READY between the gather
         # and the flip. Report the real (refused) status as a clean non-zero.
@@ -162,20 +175,27 @@ def run(pr: int | None = None, *, as_json: bool = False) -> int:
         )
         print(f"refusing to flip: {exc}", file=sys.stderr)
         return 1
-    except (execrun.ExecError, PrStateError) as exc:
-        logger.error("pr next failed", exc_info=True, extra={"pr": resolved})
+    except (execrun.ExecError, PrStateError, NoAmbientRepoError) as exc:
+        logger.error(
+            "pr next failed",
+            exc_info=True,
+            extra={"pr": target.number} if target is not None else None,
+        )
         print(f"error: {exc}", file=sys.stderr)
         return 1
     # The action-taken milestone (LOG02 convergence): the single step this
     # invocation performed, durable alongside the user-facing "action:" print.
     logger.info(
-        "pr#%s next action taken — %s", resolved, action, extra={"pr": resolved}
+        "pr#%s next action taken — %s",
+        target.number,
+        action,
+        extra={"pr": target.number},
     )
     # Re-read the status AFTER a mutating act so the reported snapshot reflects
     # what just happened (e.g. a freshly-requested reviewer now REQUESTED). A
     # second gather is cheap and keeps the report honest; on report-only acts it
     # is the same status. Skipped when there is no PR (handled above).
-    final = evaluate(gather(resolved), required=required_reviewers())
+    final = evaluate(gather(target), required=required_reviewers())
     _report(action, final, as_json=as_json)
     return 0
 

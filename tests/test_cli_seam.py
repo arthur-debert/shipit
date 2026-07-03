@@ -144,16 +144,22 @@ def test_pr_status_invocation_resolves_the_root_context_once(monkeypatch):
 
     def fake_resolve() -> RootContext:
         calls.append(1)
-        return RootContext(working_dir=None)
+        return RootContext(working_dir=WD)
 
     monkeypatch.setattr(cli, "resolve_root_context", fake_resolve)
     monkeypatch.setattr(cli, "configure_logging", lambda **kw: None)
-    monkeypatch.setattr(status_verb, "resolve_pr", lambda pr: None)
+    # The resolver receives the ROOT context's repo — the one ambient
+    # resolution — as the PrId's identity half (WS02, #336).
+    seen: list = []
+    monkeypatch.setattr(
+        status_verb, "resolve_pr", lambda pr, repo: seen.append(repo) or None
+    )
 
     rc = cli.main(["pr", "status", "--json"])
 
     assert rc == 0
     assert calls == [1]
+    assert seen == [WD.repo]
 
 
 # --- the parameter library (_params) -------------------------------------------

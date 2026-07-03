@@ -3,7 +3,9 @@ reusable, boundary-injected helper shared across `pr` verbs.
 
 This is the extraction of release's `#614` attach-verify logic (release's
 `cli/review.py`) into a composable function with NO click/CLI concerns: it takes
-a PR number and a list of reviewer adapters, places each request, and polls the
+the typed PR target (a `PrId`, ADR-0030 — the repo rides along on the identity,
+so no boundary re-derives it) and a list of reviewer adapters, places each
+request, and polls the
 PR's pending review-requests until every placed request's `review_requested`
 edge actually exists — failing loud (via the returned result) when GitHub
 silently drops an attach, so a dropped request never parks the PR invisibly at
@@ -42,6 +44,7 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
+from ...pr import PrId
 from ...prstate import fetch as _fetch
 from ...prstate.model import ReviewLifecycle
 from ...prstate.reviewers import ReviewerAdapter
@@ -115,15 +118,15 @@ class _Boundary:
     """The injected GitHub read side. Defaults wire the real engine functions;
     a test swaps in fakes so the poll runs without the network."""
 
-    attach_state: Callable[[int], tuple[list[str], list[tuple[int, str]]]] = (
+    attach_state: Callable[[PrId], tuple[list[str], list[tuple[int, str]]]] = (
         _fetch.attach_state
     )
-    gather_reviews: Callable[[int], object] = _fetch.gather_reviews
+    gather_reviews: Callable[[PrId], object] = _fetch.gather_reviews
     sleep: Callable[[float], None] = time.sleep
 
 
 def request_reviewers(
-    pr: int,
+    pr: PrId,
     adapters: Sequence[ReviewerAdapter],
     *,
     force: bool = False,
@@ -195,7 +198,7 @@ def request_reviewers(
 
 
 def _drop_already_done(
-    pr: int,
+    pr: PrId,
     adapters: list[ReviewerAdapter],
     result: RequestResult,
     boundary: _Boundary,
@@ -219,7 +222,7 @@ def _drop_already_done(
 
 
 def _verify_attached(
-    pr: int,
+    pr: PrId,
     placed: list[ReviewerAdapter],
     *,
     baseline_ids: set[int],
