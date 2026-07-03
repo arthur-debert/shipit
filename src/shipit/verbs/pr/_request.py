@@ -45,6 +45,7 @@ from dataclasses import dataclass, field
 from ...prstate import fetch as _fetch
 from ...prstate.model import ReviewLifecycle
 from ...prstate.reviewers import ReviewerAdapter
+from ...prstate.roster import Roster
 
 # Attach-verification poll (release#614). The request edge is normally created
 # synchronously — the first check usually verifies; the later checks absorb
@@ -118,13 +119,14 @@ class _Boundary:
     attach_state: Callable[[int], tuple[list[str], list[tuple[int, str]]]] = (
         _fetch.attach_state
     )
-    gather_reviews: Callable[[int], object] = _fetch.gather_reviews
+    gather_reviews: Callable[[int, Roster], object] = _fetch.gather_reviews
     sleep: Callable[[float], None] = time.sleep
 
 
 def request_reviewers(
     pr: int,
     adapters: Sequence[ReviewerAdapter],
+    roster: Roster,
     *,
     force: bool = False,
     boundary: _Boundary | None = None,
@@ -132,6 +134,13 @@ def request_reviewers(
     interval_seconds: float = ATTACH_VERIFY_INTERVAL_SECONDS,
 ) -> RequestResult:
     """Request `adapters` on `pr`, then verify each remote edge actually attached.
+
+    `roster` is the reviewer configuration as ONE value (CLI01-WS04), loaded
+    once at the calling verb's boundary: the skip decision reads the rerun flag
+    off it (via the light snapshot it is threaded onto), and each adapter's
+    `request` receives ITS entry so a local reviewer's run options (`model` /
+    `instructions` / `timeout`) arrive as values — settings are never
+    re-resolved from config inside this path.
 
     `force=False` (the bare/default scope): reviewers already DONE on the current
     head are SKIPPED (review-once — don't re-poke a finished reviewer); a
@@ -154,7 +163,7 @@ def request_reviewers(
 
     targets = list(adapters)
     if not force:
-        targets = _drop_already_done(pr, targets, result, bound)
+        targets = _drop_already_done(pr, targets, roster, result, bound)
         if not targets:
             return result
 
@@ -169,7 +178,7 @@ def request_reviewers(
 
     remote_placed: list[ReviewerAdapter] = []
     for adapter in targets:
-        if adapter.request(pr):
+        if adapter.request(pr, roster.entry(adapter.name)):
             if adapter.has_requested_edge:
                 remote_placed.append(adapter)
             else:
@@ -197,18 +206,19 @@ def request_reviewers(
 def _drop_already_done(
     pr: int,
     adapters: list[ReviewerAdapter],
+    roster: Roster,
     result: RequestResult,
     boundary: _Boundary,
 ) -> list[ReviewerAdapter]:
     """Return the adapters NOT already DONE on `pr`, recording each skip.
 
     Builds ONE light context (`gather_reviews` — head SHA + reviews + requested
-    logins + rerun policy, no thread/reaction pagination) and runs each adapter's
+    logins + the Roster, no thread/reaction pagination) and runs each adapter's
     rerun-aware `detect`: a review-once reviewer that has reviewed reads DONE and
     is dropped; a never-reviewed or push-staled reviewer is kept. A `gh` failure
     here propagates (we can't tell who is done — requesting blind would re-poke
     finished reviewers)."""
-    ctx = boundary.gather_reviews(pr)
+    ctx = boundary.gather_reviews(pr, roster)
     keep: list[ReviewerAdapter] = []
     for adapter in adapters:
         if adapter.detect(ctx) in _DONE_LIFECYCLES:

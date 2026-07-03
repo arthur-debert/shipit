@@ -5,10 +5,11 @@ action, in text by default or JSON with ``--json``. Resolves the PR for the
 current branch when no number is given. Read-only: it never edits the PR — it
 *reports* READY; a later verb does the flip.
 
-The read path is a thin shell over the engine: resolve the PR ->
-:func:`prstate.fetch.gather` -> :func:`prstate.state.evaluate` (with the
-config-resolved required reviewer set) -> render. All the lifecycle logic lives
-in the engine; this verb only resolves, renders, and maps errors to exit codes.
+The read path is a thin shell over the engine: resolve the PR -> load the
+reviewer Roster once (`load_roster`) -> :func:`prstate.fetch.gather` (the Roster
+rides the snapshot) -> :func:`prstate.state.evaluate` -> render. All the
+lifecycle logic lives in the engine; this verb only resolves, renders, and maps
+errors to exit codes.
 
 ``no_pr`` is a NORMAL state (exit 0): the shared resolver returns ``None`` when
 the branch genuinely has no PR, which renders as ``no_pr``. A real `gh`/auth
@@ -28,7 +29,7 @@ import click
 from ... import execrun
 from ...prstate.errors import PrStateError
 from ...prstate.fetch import gather
-from ...prstate.reviewers import required_reviewers
+from ...prstate.reviewers_config import load_roster
 from ...prstate.state import TaskState, TaskStatus, evaluate, no_pr
 from ._resolve import resolve_pr
 
@@ -60,14 +61,17 @@ def run(pr: int | None = None, *, as_json: bool = False) -> int:
         if resolved is None:
             _emit(no_pr(), as_json=as_json)
             return 0
-        ctx = gather(resolved)
+        # The ONE reviewer-config read of this invocation (CLI01-WS04): the
+        # Roster rides the snapshot from here — the engine and adapters read
+        # every per-reviewer setting off it as a value.
+        ctx = gather(resolved, load_roster())
     except (execrun.ExecError, PrStateError) as exc:
         # A genuine gh/auth failure (NOT "no PR for branch" — the resolver
         # returns None for that). The PRD requires this to be visible: clean
         # stderr + non-zero exit, never a silent no_pr.
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    status = evaluate(ctx, required=required_reviewers())
+    status = evaluate(ctx)
     _emit(status, as_json=as_json)
     return 0
 

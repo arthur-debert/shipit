@@ -33,7 +33,9 @@ import click
 from ... import execrun
 from ...prstate.errors import PrStateError
 from ...prstate.fetch import gather
-from ...prstate.reviewers import required_reviewers
+from ...prstate.reviewers import required_adapters
+from ...prstate.reviewers_config import load_roster
+from ...prstate.roster import Roster
 from ...prstate.state import TaskStatus, evaluate, no_pr
 from . import ready as ready_verb
 from . import status as status_verb
@@ -54,8 +56,13 @@ class _NextActs:
     `request_review` and `flip_ready` are the two mutating acts.
     """
 
-    def __init__(self, pr: int) -> None:
+    def __init__(self, pr: int, roster: Roster | None = None) -> None:
         self._pr = pr
+        # The verb's ONE loaded Roster (CLI01-WS04), threaded in so the request
+        # act reads reviewer settings off the same value the engine evaluated —
+        # never a config re-read. None only for the no-PR report path, which
+        # never requests.
+        self._roster = roster if roster is not None else Roster()
 
     def report(self, status: TaskStatus) -> str:
         # Report-only: nothing mutates. The engine's next_action already carries
@@ -90,14 +97,14 @@ class _NextActs:
             failure: surface it as a `PrStateError` so the verb renders a clean stderr
             + non-zero exit, exactly like `pr review request`.
         """
-        by_name = {r.name: r for r in required_reviewers()}
+        by_name = {r.name: r for r in required_adapters(self._roster)}
         selected = [by_name[name] for name in status.to_request if name in by_name]
         if not selected:
             return f"no requestable reviewer to (re-)request — {status.next_action}"
         # force=True: selection is done above, so the helper requests exactly
         # these and attach-verifies each remote edge. ExecError/PrStateError (e.g. a deferred
         # local-agent reviewer, or a gh failure) propagates to the verb.
-        result = request_reviewers(self._pr, selected, force=True)
+        result = request_reviewers(self._pr, selected, self._roster, force=True)
         if not result.ok:
             # A remote request edge was silently dropped (#614) — fail loud rather
             # than park the PR invisibly at reviews-pending.
@@ -115,7 +122,9 @@ class _NextActs:
         # The single hand-off. Go through the SHARED guarded re-check so a status
         # that moved since `gather` cannot flip a not-ready PR. guarded_flip
         # re-evaluates live and raises NotReady if it is no longer READY.
-        flipped = ready_verb.guarded_flip(self._pr)
+        # The verb's already-loaded Roster rides into the flip's re-check, so
+        # the READY path never resolves reviewer settings twice (CLI01-WS04).
+        flipped = ready_verb.guarded_flip(self._pr, self._roster)
         return f"flipped draft→ready — {flipped.next_action}"
 
 
@@ -149,8 +158,12 @@ def run(pr: int | None = None, *, as_json: bool = False) -> int:
             status = no_pr()
             _report(_NextActs(0).report(status), status, as_json=as_json)
             return 0
-        status = evaluate(gather(resolved), required=required_reviewers())
-        action = dispatch(status, _NextActs(resolved))
+        # The ONE reviewer-config read of this invocation (CLI01-WS04): the
+        # Roster rides the snapshot for BOTH evaluates below and feeds the
+        # request act's selection/run-options — one value, never re-resolved.
+        roster = load_roster()
+        status = evaluate(gather(resolved, roster))
+        action = dispatch(status, _NextActs(resolved, roster))
     except ready_verb.NotReady as exc:
         # The guarded flip refused: the PR moved out of READY between the gather
         # and the flip. Report the real (refused) status as a clean non-zero.
@@ -175,7 +188,7 @@ def run(pr: int | None = None, *, as_json: bool = False) -> int:
     # what just happened (e.g. a freshly-requested reviewer now REQUESTED). A
     # second gather is cheap and keeps the report honest; on report-only acts it
     # is the same status. Skipped when there is no PR (handled above).
-    final = evaluate(gather(resolved), required=required_reviewers())
+    final = evaluate(gather(resolved, roster))
     _report(action, final, as_json=as_json)
     return 0
 

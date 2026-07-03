@@ -32,7 +32,14 @@ import click
 from ... import execrun
 from ...agent import backend as _agent_backend
 from ...prstate.errors import PrStateError
-from ...prstate.reviewers import REGISTRY, ReviewerAdapter, by_name, required_reviewers
+from ...prstate.reviewers import (
+    REGISTRY,
+    ReviewerAdapter,
+    by_name,
+    required_adapters,
+)
+from ...prstate.reviewers_config import load_roster
+from ...prstate.roster import Roster
 from ._request import RequestResult, request_reviewers
 from ._resolve import resolve_pr
 
@@ -151,7 +158,11 @@ def run(pr: int | None = None, *, reviewer: str | None = None) -> int:
     non-zero on a bad reviewer name, an unresolvable PR, a `gh`/auth failure
     (including the local-agent guard), or a silently-dropped remote request.
     """
-    adapters = _select(reviewer)
+    # The ONE reviewer-config read of this invocation (CLI01-WS04): the Roster
+    # feeds the bare-run scope AND rides into the request path, where a local
+    # reviewer's run options are read off its entry — never re-resolved.
+    roster = load_roster()
+    adapters = _select(reviewer, roster)
     if adapters is None:
         return 1
 
@@ -165,7 +176,9 @@ def run(pr: int | None = None, *, reviewer: str | None = None) -> int:
                 file=sys.stderr,
             )
             return 1
-        result = request_reviewers(resolved, adapters, force=reviewer is not None)
+        result = request_reviewers(
+            resolved, adapters, roster, force=reviewer is not None
+        )
     except (execrun.ExecError, PrStateError) as exc:
         # A real gh/auth failure OR the local-agent guard (requesting
         # codex-local/agy-local raises a clean PrStateError, not a crash). Both are
@@ -178,8 +191,8 @@ def run(pr: int | None = None, *, reviewer: str | None = None) -> int:
     return 0 if result.ok else 1
 
 
-def _select(reviewer: str | None) -> list[ReviewerAdapter] | None:
-    """The adapters to act on: the required set, or the one named.
+def _select(reviewer: str | None, roster: Roster) -> list[ReviewerAdapter] | None:
+    """The adapters to act on: the Roster's required set, or the one named.
 
     Returns None (a usage failure) when ``--reviewer`` names an unknown reviewer,
     after printing the known names — a typo never silently drops a request.
@@ -192,7 +205,7 @@ def _select(reviewer: str | None) -> list[ReviewerAdapter] | None:
     being rejected as an unknown name.
     """
     if reviewer is None:
-        return required_reviewers()
+        return required_adapters(roster)
     adapter = by_name(reviewer) or _resolve_local_alias(reviewer)
     if adapter is None:
         known = ", ".join(r.name for r in REGISTRY)

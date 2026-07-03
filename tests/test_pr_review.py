@@ -23,11 +23,17 @@ from shipit.prstate.model import ReviewLifecycle
 from shipit.prstate.reviewers import ReviewerAdapter
 from shipit.verbs.pr import _request, review as review_verb
 from shipit.execrun import ExecError
+from shipit.prstate.roster import Roster
 from shipit.verbs.pr._request import (
     ReviewerOutcome,
     _Boundary,
     request_reviewers,
 )
+
+#: The empty Roster — reviewer settings all at defaults. The helper takes the
+#: roster as a VALUE (CLI01-WS04); these unit tests fake `detect`, so the
+#: defaults are all they need.
+EMPTY_ROSTER = Roster()
 
 
 # --- test doubles -------------------------------------------------------------
@@ -57,7 +63,7 @@ class _FakeAdapter(ReviewerAdapter):
     def detect(self, ctx) -> ReviewLifecycle:  # noqa: ANN001
         return self._lifecycle
 
-    def request(self, pr: int) -> bool:
+    def request(self, pr: int, entry=None) -> bool:  # noqa: ANN001
         self.requested_with.append(pr)
         return self._request_returns
 
@@ -74,7 +80,7 @@ def _boundary(
     revs = reviews or []
     return _Boundary(
         attach_state=lambda pr: (logins, revs),
-        gather_reviews=lambda pr: object(),
+        gather_reviews=lambda pr, roster: object(),
         sleep=lambda _seconds: None,
     )
 
@@ -88,6 +94,7 @@ def test_verifies_when_edge_attaches():
     result = request_reviewers(
         7,
         [adapter],
+        EMPTY_ROSTER,
         force=True,
         boundary=_boundary(requested_logins=["Copilot"]),
     )
@@ -113,10 +120,12 @@ def test_verifies_via_fresh_review_when_bot_consumed_request():
 
     boundary = _Boundary(
         attach_state=attach_state,
-        gather_reviews=lambda pr: object(),
+        gather_reviews=lambda pr, roster: object(),
         sleep=lambda s: None,
     )
-    result = request_reviewers(7, [adapter], force=True, boundary=boundary)
+    result = request_reviewers(
+        7, [adapter], EMPTY_ROSTER, force=True, boundary=boundary
+    )
     assert result.ok
     assert result.verified == ["copilot"]
 
@@ -128,6 +137,7 @@ def test_dropped_when_edge_never_appears():
     result = request_reviewers(
         7,
         [adapter],
+        EMPTY_ROSTER,
         force=True,
         boundary=_boundary(requested_logins=[], reviews=[]),
     )
@@ -138,7 +148,9 @@ def test_dropped_when_edge_never_appears():
 def test_bare_run_skips_already_done_reviewer():
     """A bare run drops a reviewer already DONE on the head — never requested."""
     done = _FakeAdapter("copilot", lifecycle=ReviewLifecycle.DONE_CLEAN)
-    result = request_reviewers(7, [done], force=False, boundary=_boundary())
+    result = request_reviewers(
+        7, [done], EMPTY_ROSTER, force=False, boundary=_boundary()
+    )
     assert done.requested_with == []  # not re-poked
     assert result.skipped == ["copilot"]
     assert result.verified == []
@@ -150,6 +162,7 @@ def test_bare_run_requests_pending_reviewer():
     result = request_reviewers(
         7,
         [pending],
+        EMPTY_ROSTER,
         force=False,
         boundary=_boundary(requested_logins=["Copilot"]),
     )
@@ -163,6 +176,7 @@ def test_force_requests_already_done_reviewer():
     result = request_reviewers(
         7,
         [done],
+        EMPTY_ROSTER,
         force=True,
         boundary=_boundary(requested_logins=["Copilot"]),
     )
@@ -180,9 +194,11 @@ def test_local_reviewer_in_flight_not_edge_verified():
         raise AssertionError("local reviewer must not be edge-verified")
 
     boundary = _Boundary(
-        attach_state=boom, gather_reviews=lambda pr: object(), sleep=lambda s: None
+        attach_state=boom,
+        gather_reviews=lambda pr, roster: object(),
+        sleep=lambda s: None,
     )
-    result = request_reviewers(7, [local], force=True, boundary=boundary)
+    result = request_reviewers(7, [local], EMPTY_ROSTER, force=True, boundary=boundary)
     assert result.ok
     assert result.in_flight == ["codex"]
     assert result.verified == []
@@ -191,7 +207,9 @@ def test_local_reviewer_in_flight_not_edge_verified():
 def test_no_mechanism_backend_is_no_op():
     """A backend whose request() returns False records a no-op, never verified."""
     auto = _FakeAdapter("gemini", has_edge=False, request_returns=False)
-    result = request_reviewers(7, [auto], force=True, boundary=_boundary())
+    result = request_reviewers(
+        7, [auto], EMPTY_ROSTER, force=True, boundary=_boundary()
+    )
     assert result.ok
     assert result.no_op == ["gemini"]
 
@@ -200,7 +218,7 @@ def test_gh_failure_in_skip_read_propagates():
     """A gh failure while reading who-is-done propagates (never a false success)."""
     adapter = _FakeAdapter("copilot")
 
-    def boom(pr):
+    def boom(pr, roster):
         raise ExecError(["gh"], rc=1, stderr="gh exploded reading reviews")
 
     boundary = _Boundary(
@@ -209,7 +227,7 @@ def test_gh_failure_in_skip_read_propagates():
         sleep=lambda s: None,
     )
     with pytest.raises(ExecError):
-        request_reviewers(7, [adapter], force=False, boundary=boundary)
+        request_reviewers(7, [adapter], EMPTY_ROSTER, force=False, boundary=boundary)
 
 
 # --- the local-agent guard via the CLI verb -----------------------------------
@@ -297,11 +315,12 @@ def test_verb_renders_verified(monkeypatch, capsys):
     monkeypatch.setattr(
         review_verb,
         "request_reviewers",
-        lambda pr, adapters, force: _request.RequestResult(
+        lambda pr, adapters, roster, force: _request.RequestResult(
             outcomes=[ReviewerOutcome("copilot", "verified")]
         ),
     )
-    monkeypatch.setattr(review_verb, "required_reviewers", lambda: [object()])
+    monkeypatch.setattr(review_verb, "load_roster", lambda: EMPTY_ROSTER)
+    monkeypatch.setattr(review_verb, "required_adapters", lambda roster: [object()])
     rc = review_verb.run(7)
     assert rc == 0
     assert "verified: copilot" in capsys.readouterr().out
@@ -313,11 +332,12 @@ def test_dropped_request_exits_nonzero(monkeypatch, capsys):
     monkeypatch.setattr(
         review_verb,
         "request_reviewers",
-        lambda pr, adapters, force: _request.RequestResult(
+        lambda pr, adapters, roster, force: _request.RequestResult(
             outcomes=[ReviewerOutcome("copilot", "dropped")]
         ),
     )
-    monkeypatch.setattr(review_verb, "required_reviewers", lambda: [object()])
+    monkeypatch.setattr(review_verb, "load_roster", lambda: EMPTY_ROSTER)
+    monkeypatch.setattr(review_verb, "required_adapters", lambda roster: [object()])
     rc = review_verb.run(7)
     assert rc != 0
     assert "dropped by GitHub" in capsys.readouterr().err

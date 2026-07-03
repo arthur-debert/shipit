@@ -11,6 +11,7 @@ from __future__ import annotations
 import pytest
 
 from conftest import load_context
+from shipit.prstate.roster import Roster, RosterEntry
 from shipit.prstate.model import ReviewFunnelCheck
 from shipit.prstate.reviewers import by_name
 from shipit.prstate.state import TaskState, TaskStatus, evaluate
@@ -184,7 +185,7 @@ def test_e2e_stale_after_push_routes_to_request():
     """A rerun=True reviewer with a review staled by a push → re-request: same
     `to_request` set, same request act (request and re-request are one act)."""
     ctx = load_context("copilot_stale_needs_rerequest")
-    ctx.reviewer_rerun = {"copilot": True}
+    ctx.roster = Roster((RosterEntry(name="copilot", required=True, rerun=True),))
     status = evaluate(ctx)
     assert status.state is TaskState.REVIEWS_PENDING
     assert status.to_request == ["copilot"]

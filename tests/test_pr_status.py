@@ -16,6 +16,7 @@ from shipit import cli
 from shipit.execrun import ExecError, ExecResult
 from shipit import gh
 from shipit.prstate.state import ChecksState, TaskState, TaskStatus
+from shipit.prstate.roster import Roster
 from shipit.verbs.pr import status as status_verb
 
 # The exact JSON field set `pr status --json` must emit.
@@ -56,11 +57,9 @@ def patched(monkeypatch):
     monkeypatch.setattr(
         status_verb, "resolve_pr", lambda pr: pr if pr is not None else 42
     )
-    monkeypatch.setattr(status_verb, "gather", lambda pr: pr)
-    monkeypatch.setattr(
-        status_verb, "evaluate", lambda ctx, required: _fake_status(ctx)
-    )
-    monkeypatch.setattr(status_verb, "required_reviewers", lambda: [])
+    monkeypatch.setattr(status_verb, "gather", lambda pr, roster: pr)
+    monkeypatch.setattr(status_verb, "load_roster", lambda: Roster())
+    monkeypatch.setattr(status_verb, "evaluate", lambda ctx: _fake_status(ctx))
 
 
 def test_pr_group_registered(capsys):
@@ -153,7 +152,7 @@ def test_gh_failure_on_known_pr_exits_nonzero(monkeypatch, capsys):
     """A gh/auth failure while reading a KNOWN PR surfaces as stderr + non-zero."""
     monkeypatch.setattr(status_verb, "resolve_pr", lambda pr: 42)
 
-    def boom(pr):
+    def boom(pr, roster):
         raise ExecError(["gh"], rc=1, stderr="gh exploded")
 
     monkeypatch.setattr(status_verb, "gather", boom)

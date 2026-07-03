@@ -13,6 +13,7 @@ import json
 import pytest
 
 from shipit import cli
+from shipit.prstate.roster import Roster
 from shipit.prstate.state import ChecksState, TaskState, TaskStatus
 from shipit.verbs.pr import next_action as next_verb
 
@@ -62,15 +63,16 @@ def patched_next(monkeypatch):
     monkeypatch.setattr(
         next_verb, "resolve_pr", lambda pr: pr if pr is not None else 42
     )
-    monkeypatch.setattr(next_verb, "gather", lambda pr: pr)
-    monkeypatch.setattr(next_verb, "required_reviewers", lambda: [])
+    monkeypatch.setattr(next_verb, "gather", lambda pr, roster: pr)
+    monkeypatch.setattr(next_verb, "load_roster", lambda: Roster())
+    monkeypatch.setattr(next_verb, "required_adapters", lambda roster: [])
 
 
 def test_next_reports_blocked(patched_next, monkeypatch, capsys):
     monkeypatch.setattr(
         next_verb,
         "evaluate",
-        lambda ctx, required: _status(TaskState.BLOCKED, ctx, "the real blocker"),
+        lambda ctx: _status(TaskState.BLOCKED, ctx, "the real blocker"),
     )
     rc = cli.main(["pr", "next"])
     assert rc == 0
@@ -82,7 +84,7 @@ def test_next_reports_blocked(patched_next, monkeypatch, capsys):
 
 def test_next_json_carries_action_and_status(patched_next, monkeypatch, capsys):
     monkeypatch.setattr(
-        next_verb, "evaluate", lambda ctx, required: _status(TaskState.VALIDATING, ctx)
+        next_verb, "evaluate", lambda ctx: _status(TaskState.VALIDATING, ctx)
     )
     rc = cli.main(["pr", "next", "--json"])
     assert rc == 0
@@ -102,10 +104,12 @@ def test_next_no_pr_is_exit_zero_report(monkeypatch, capsys):
 def test_next_ready_flips(patched_next, monkeypatch, capsys):
     """READY routes to the flip act; the guarded flip is stubbed to flip."""
     monkeypatch.setattr(
-        next_verb, "evaluate", lambda ctx, required: _status(TaskState.READY, ctx)
+        next_verb, "evaluate", lambda ctx: _status(TaskState.READY, ctx)
     )
     monkeypatch.setattr(
-        next_verb.ready_verb, "guarded_flip", lambda pr: _status(TaskState.READY, pr)
+        next_verb.ready_verb,
+        "guarded_flip",
+        lambda pr, roster: _status(TaskState.READY, pr),
     )
     rc = cli.main(["pr", "next"])
     assert rc == 0
@@ -116,10 +120,10 @@ def test_next_ready_flips(patched_next, monkeypatch, capsys):
 def test_next_ready_refusal_is_nonzero(patched_next, monkeypatch, capsys):
     """If the PR moved out of READY between gather and the guarded flip, refuse."""
     monkeypatch.setattr(
-        next_verb, "evaluate", lambda ctx, required: _status(TaskState.READY, ctx)
+        next_verb, "evaluate", lambda ctx: _status(TaskState.READY, ctx)
     )
 
-    def refuse(pr):
+    def refuse(pr, roster):
         raise next_verb.ready_verb.NotReady(_status(TaskState.BLOCKED, pr))
 
     monkeypatch.setattr(next_verb.ready_verb, "guarded_flip", refuse)
@@ -147,12 +151,12 @@ def test_next_request_act_requests_reviewer(patched_next, monkeypatch, capsys):
     """REVIEWS_PENDING with a reviewer to request fires the request act, which
     delegates execution to WS05's `request_reviewers` (attach-verify)."""
     monkeypatch.setattr(
-        next_verb, "required_reviewers", lambda: [FakeAdapter("copilot")]
+        next_verb, "required_adapters", lambda roster: [FakeAdapter("copilot")]
     )
     monkeypatch.setattr(
         next_verb,
         "evaluate",
-        lambda ctx, required: TaskStatus(
+        lambda ctx: TaskStatus(
             state=TaskState.REVIEWS_PENDING,
             next_action="waiting on required review(s): copilot — request for the current head: copilot",
             pr=ctx,
@@ -162,7 +166,7 @@ def test_next_request_act_requests_reviewer(patched_next, monkeypatch, capsys):
     )
     seen = {}
 
-    def fake_request(pr, adapters, *, force):
+    def fake_request(pr, adapters, roster, *, force):
         seen["pr"] = pr
         seen["names"] = [a.name for a in adapters]
         seen["force"] = force
@@ -184,13 +188,13 @@ def test_next_request_act_skips_already_requested_reviewer(
     what `request_reviewers` receives; execution is delegated to that helper."""
     monkeypatch.setattr(
         next_verb,
-        "required_reviewers",
-        lambda: [FakeAdapter("copilot"), FakeAdapter("coderabbit")],
+        "required_adapters",
+        lambda roster: [FakeAdapter("copilot"), FakeAdapter("coderabbit")],
     )
     monkeypatch.setattr(
         next_verb,
         "evaluate",
-        lambda ctx, required: TaskStatus(
+        lambda ctx: TaskStatus(
             state=TaskState.REVIEWS_PENDING,
             next_action=(
                 "waiting on required review(s): copilot, coderabbit — "
@@ -204,7 +208,7 @@ def test_next_request_act_skips_already_requested_reviewer(
     )
     selected = {}
 
-    def fake_request(pr, adapters, *, force):
+    def fake_request(pr, adapters, roster, *, force):
         selected["names"] = [a.name for a in adapters]
         return _fake_request_result([a.name for a in adapters])
 
@@ -230,13 +234,13 @@ def test_next_request_act_excludes_in_flight_local_agent(
     reaches the helper."""
     monkeypatch.setattr(
         next_verb,
-        "required_reviewers",
-        lambda: [FakeAdapter("copilot"), FakeAdapter("codex")],
+        "required_adapters",
+        lambda roster: [FakeAdapter("copilot"), FakeAdapter("codex")],
     )
     monkeypatch.setattr(
         next_verb,
         "evaluate",
-        lambda ctx, required: TaskStatus(
+        lambda ctx: TaskStatus(
             state=TaskState.REVIEWS_PENDING,
             next_action=(
                 "waiting on required review(s): copilot, codex — "
@@ -253,7 +257,7 @@ def test_next_request_act_excludes_in_flight_local_agent(
     )
     selected = {}
 
-    def fake_request(pr, adapters, *, force):
+    def fake_request(pr, adapters, roster, *, force):
         selected["names"] = [a.name for a in adapters]
         return _fake_request_result([a.name for a in adapters])
 
@@ -276,13 +280,13 @@ def test_next_request_act_selects_never_requested_and_stale(
     authority, so both reach the helper."""
     monkeypatch.setattr(
         next_verb,
-        "required_reviewers",
-        lambda: [FakeAdapter("copilot"), FakeAdapter("coderabbit")],
+        "required_adapters",
+        lambda roster: [FakeAdapter("copilot"), FakeAdapter("coderabbit")],
     )
     monkeypatch.setattr(
         next_verb,
         "evaluate",
-        lambda ctx, required: TaskStatus(
+        lambda ctx: TaskStatus(
             state=TaskState.REVIEWS_PENDING,
             next_action=(
                 "waiting on required review(s): copilot, coderabbit — "
@@ -297,7 +301,7 @@ def test_next_request_act_selects_never_requested_and_stale(
     )
     selected = {}
 
-    def fake_request(pr, adapters, *, force):
+    def fake_request(pr, adapters, roster, *, force):
         selected["names"] = [a.name for a in adapters]
         return _fake_request_result([a.name for a in adapters])
 
@@ -311,12 +315,12 @@ def test_next_request_act_selects_never_requested_and_stale(
 def test_next_request_act_dropped_edge_is_error(patched_next, monkeypatch, capsys):
     """A silently-dropped request edge (#614) → non-zero exit, named in stderr."""
     monkeypatch.setattr(
-        next_verb, "required_reviewers", lambda: [FakeAdapter("copilot")]
+        next_verb, "required_adapters", lambda roster: [FakeAdapter("copilot")]
     )
     monkeypatch.setattr(
         next_verb,
         "evaluate",
-        lambda ctx, required: TaskStatus(
+        lambda ctx: TaskStatus(
             state=TaskState.REVIEWS_PENDING,
             next_action="waiting on required review(s): copilot — request for the current head: copilot",
             pr=ctx,
@@ -329,7 +333,7 @@ def test_next_request_act_dropped_edge_is_error(patched_next, monkeypatch, capsy
     monkeypatch.setattr(
         next_verb,
         "request_reviewers",
-        lambda pr, adapters, *, force: RequestResult(
+        lambda pr, adapters, roster, *, force: RequestResult(
             outcomes=[ReviewerOutcome("copilot", "dropped")]
         ),
     )

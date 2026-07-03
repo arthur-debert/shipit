@@ -20,6 +20,7 @@ import logging
 import pytest
 
 from shipit.prstate.errors import PrStateError
+from shipit.prstate.roster import Roster
 from shipit.prstate.state import ChecksState, TaskState, TaskStatus
 from shipit.verbs.pr import next_action as next_verb
 from shipit.verbs.pr import ready as ready_verb
@@ -108,12 +109,12 @@ def test_gh_adapter_flip_leaves_a_durable_milestone(monkeypatch, caplog):
 
 def test_next_action_taken_is_an_info_milestone_with_the_pr_key(monkeypatch, caplog):
     monkeypatch.setattr(next_verb, "resolve_pr", lambda pr: 42)
-    monkeypatch.setattr(next_verb, "gather", lambda pr: pr)
-    monkeypatch.setattr(next_verb, "required_reviewers", lambda: [])
+    monkeypatch.setattr(next_verb, "gather", lambda pr, roster: pr)
+    monkeypatch.setattr(next_verb, "load_roster", lambda: Roster())
     monkeypatch.setattr(
         next_verb,
         "evaluate",
-        lambda ctx, required: _status(TaskState.BLOCKED, ctx, "the blocker"),
+        lambda ctx: _status(TaskState.BLOCKED, ctx, "the blocker"),
     )
     with caplog.at_level(logging.INFO, logger="shipit.pr"):
         assert next_verb.run(42) == 0
@@ -126,9 +127,9 @@ def test_next_action_failure_is_an_error_with_the_pr_key(monkeypatch, caplog):
     """A gh/state failure AFTER the PR resolved still records the ``pr`` key, so
     the durable ERROR stays jq-sliceable by PR."""
     monkeypatch.setattr(next_verb, "resolve_pr", lambda pr: 42)
-    monkeypatch.setattr(next_verb, "required_reviewers", lambda: [])
+    monkeypatch.setattr(next_verb, "load_roster", lambda: Roster())
 
-    def boom(pr):
+    def boom(pr, roster):
         raise PrStateError("gh blew up")
 
     monkeypatch.setattr(next_verb, "gather", boom)
@@ -149,9 +150,12 @@ def _request_run(monkeypatch):
     def runner(result: RequestResult) -> int:
         monkeypatch.setattr(review_verb, "resolve_pr", lambda pr: 7)
         monkeypatch.setattr(
-            review_verb, "request_reviewers", lambda pr, adapters, force: result
+            review_verb,
+            "request_reviewers",
+            lambda pr, adapters, roster, force: result,
         )
-        monkeypatch.setattr(review_verb, "required_reviewers", lambda: [object()])
+        monkeypatch.setattr(review_verb, "load_roster", lambda: Roster())
+        monkeypatch.setattr(review_verb, "required_adapters", lambda roster: [object()])
         return review_verb.run(7)
 
     return runner
@@ -199,9 +203,10 @@ def test_review_request_failure_is_an_error_with_the_pr_key(monkeypatch, caplog)
     """A gh/auth failure (or the local-agent guard) AFTER the PR resolved still
     records the ``pr`` key on its durable ERROR."""
     monkeypatch.setattr(review_verb, "resolve_pr", lambda pr: 7)
-    monkeypatch.setattr(review_verb, "required_reviewers", lambda: [object()])
+    monkeypatch.setattr(review_verb, "load_roster", lambda: Roster())
+    monkeypatch.setattr(review_verb, "required_adapters", lambda roster: [object()])
 
-    def boom(pr, adapters, force):
+    def boom(pr, adapters, roster, force):
         raise PrStateError("gh blew up")
 
     monkeypatch.setattr(review_verb, "request_reviewers", boom)

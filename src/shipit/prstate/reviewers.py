@@ -23,6 +23,7 @@ from .model import (
     ReviewLifecycle,
     Thread,
 )
+from .roster import Roster, RosterEntry
 
 #: The engine's logger (shared name with :mod:`shipit.prstate.state`): reviewer
 #: request/cancel transitions are lifecycle milestones (glassbox spray, LOG02) —
@@ -49,8 +50,8 @@ def _log_request_transition(reviewer: str, pr: int, transition: str) -> None:
 
 # The shipped uniform wait window (ADR-0006): a required reviewer still in flight /
 # requested-but-silent that ages PAST this window settles as TIMED_OUT. 20m
-# default, overridable per-reviewer via the `[reviewers]` `window` option (threaded
-# onto `ctx.reviewer_window`). Uniform across reviewer kinds — a local reviewer
+# default, overridable per-reviewer via the `[reviewers]` `window` option (carried
+# on the reviewer's Roster entry, `ctx.roster`). Uniform across reviewer kinds — a local reviewer
 # ages against its check run's `started_at`, an App reviewer against its
 # `review_requested` edge time — so a slow backend gets a longer window without
 # loosening it for everyone.
@@ -187,18 +188,19 @@ class ReviewerAdapter:
     def _rerun(self, ctx: ReadinessView) -> bool:
         """This reviewer's rerun policy for `ctx` (default False = review-once).
 
-        rerun comes from config (`reviewers_config.reviewer_rerun`), threaded
-        into the context at the build site. False is the shipped default for
-        EVERY reviewer (all reviewers are token-billed / cost a model run, so
-        re-reviewing each push is explicit opt-in)."""
-        return ctx.reviewer_rerun.get(self.name, False)
+        rerun is read off this reviewer's Roster ENTRY (`ctx.roster`, loaded
+        once at the verb boundary and threaded onto the context at the build
+        site). False is the shipped default for EVERY reviewer (all reviewers
+        are token-billed / cost a model run, so re-reviewing each push is
+        explicit opt-in)."""
+        return ctx.roster.entry(self.name).rerun
 
     def _window(self, ctx: ReadinessView) -> timedelta:
         """This reviewer's wait window — the per-reviewer `[reviewers]` `window`
-        override (seconds, threaded onto `ctx.reviewer_window`) or the shipped 20m
-        default. Read off the context like `_rerun`, so the engine never touches
-        config; a 0/absent override falls back to `DEFAULT_WAIT_WINDOW`."""
-        seconds = ctx.reviewer_window.get(self.name)
+        setting off its Roster entry, or the shipped 20m default. Read off the
+        context like `_rerun`, so the engine never touches config; an absent
+        setting falls back to `DEFAULT_WAIT_WINDOW`."""
+        seconds = ctx.roster.entry(self.name).window_seconds
         return timedelta(seconds=seconds) if seconds else DEFAULT_WAIT_WINDOW
 
     def _requested_at(self, ctx: ReadinessView) -> str | None:
@@ -243,7 +245,7 @@ class ReviewerAdapter:
             return ReviewLifecycle.REQUESTED
         return ReviewLifecycle.NOT_REQUESTED
 
-    def request(self, pr: int) -> bool:
+    def request(self, pr: int, entry: RosterEntry | None = None) -> bool:
         """Request — or re-request, same call — this reviewer on `pr`.
 
         Returns True when a request was actually placed, False when the
@@ -252,6 +254,13 @@ class ReviewerAdapter:
         the state machine's never-requested vs stale-after-push distinction
         is a read-side concern (`state._has_stale_review`); the act is the
         same either way.
+
+        `entry` is this reviewer's Roster entry (CLI01-WS04) — the request
+        path passes it so per-reviewer settings arrive as a VALUE, never
+        re-resolved from config here. Only the LOCAL-agent adapters read it
+        (their `model` / `instructions` / `timeout` run options); the App
+        adapters place a plain request edge and ignore it. `None` means
+        all-defaults (an unconfigured reviewer).
 
         Placement only: True means the call was accepted, not that the
         `review_requested` edge exists — GitHub can silently drop the attach
@@ -350,7 +359,7 @@ class CopilotAdapter(ReviewerAdapter):
     def matches(self, login: str) -> bool:
         return "copilot" in login.lower()
 
-    def request(self, pr: int) -> bool:
+    def request(self, pr: int, entry: RosterEntry | None = None) -> bool:
         # `gh pr edit --add-reviewer @copilot` — GraphQL with the bot's real
         # node_id (via gh.pr_edit_reviewer; the REST requested_reviewers
         # POST silently no-ops for Copilot). Re-request is the same call.
@@ -403,7 +412,7 @@ class CodeRabbitAdapter(ReviewerAdapter):
     def matches(self, login: str) -> bool:
         return "coderabbit" in login.lower()
 
-    def request(self, pr: int) -> bool:
+    def request(self, pr: int, entry: RosterEntry | None = None) -> bool:
         # Same GraphQL add-reviewer path Copilot uses: it resolves the App's
         # real node id and creates a real review_requested edge (the REST
         # requested_reviewers POST silently no-ops for App reviewers).
@@ -444,7 +453,7 @@ class GeminiAdapter(ReviewerAdapter):
     def matches(self, login: str) -> bool:
         return "gemini" in login.lower()
 
-    def request(self, pr: int) -> bool:
+    def request(self, pr: int, entry: RosterEntry | None = None) -> bool:
         # The Gemini app auto-triggers on PR open; there is no request
         # mechanism, and it is best-effort anyway — a no-op, not an error.
         # A mechanic, not a milestone: no edge changed, so it records at DEBUG.
@@ -539,7 +548,7 @@ class _LocalReviewAdapter(ReviewerAdapter):
         low = login.lower()
         return low.endswith("[bot]") and self.bot_slug_fragment in low
 
-    def request(self, pr: int) -> bool:
+    def request(self, pr: int, entry: RosterEntry | None = None) -> bool:
         """DETACH a local-agent review and return IN-FLIGHT (OBS03).
 
         Fire-and-forget: this does the cheap, synchronous work — resolve the PR's
@@ -556,8 +565,9 @@ class _LocalReviewAdapter(ReviewerAdapter):
         extra (pyjwt) is only pulled in when a local review is actually requested —
         the detection path and every non-local reviewer stay free of that
         dependency. The agent's per-reviewer `model` / `instructions` / `timeout`
-        (the `[reviewers]` options) are read from `.shipit.toml` and threaded to
-        the detached child.
+        (the `[reviewers]` options) are read OFF this reviewer's Roster `entry`
+        (CLI01-WS04) — a value the caller loaded once at the verb boundary,
+        never a config re-read here — and threaded to the detached child.
 
         Any failure in the SYNCHRONOUS part — a `gh`/auth failure resolving the PR,
         a spawn failure — is normalized to `PrStateError`, the one error type the
@@ -569,8 +579,6 @@ class _LocalReviewAdapter(ReviewerAdapter):
         # Lazy: keep the optional `review`/pyjwt import off the detection path
         # and out of every non-local reviewer. `review` never imports `prstate`,
         # so this one-way edge has no cycle.
-        from . import reviewers_config
-
         try:
             from ..review import service
         except ImportError as exc:  # pragma: no cover - only when the extra is absent
@@ -580,14 +588,14 @@ class _LocalReviewAdapter(ReviewerAdapter):
                 f"(pyjwt): install shipit with `pip install 'shipit[review]'`. ({exc})"
             ) from exc
 
-        options = reviewers_config.reviewer_run_options(self.name)
+        entry = entry if entry is not None else RosterEntry(name=self.name)
         run_kwargs: dict[str, object] = {"as_app": True}
-        if "model" in options:
-            run_kwargs["model"] = options["model"]
-        if "instructions" in options:
-            run_kwargs["instructions_path"] = options["instructions"]
-        if "timeout" in options:
-            run_kwargs["timeout"] = options["timeout"]
+        if entry.model is not None:
+            run_kwargs["model"] = entry.model
+        if entry.instructions is not None:
+            run_kwargs["instructions_path"] = entry.instructions
+        if entry.timeout is not None:
+            run_kwargs["timeout"] = entry.timeout
 
         try:
             started = service.start_detached_review(self.backend, pr, **run_kwargs)
@@ -759,62 +767,24 @@ REGISTRY: list[ReviewerAdapter] = [
 ]
 
 
-# Process-lifetime cache of the resolved config (required adapters + the
-# per-reviewer rerun map). Resolving reads the consumer's `.shipit.toml`
-# `[reviewers]` table; `evaluate` resolves the required set on every call, so
-# caching avoids re-reading + re-validating the config each time. The config
-# cannot change mid-command, so caching for the process lifetime is safe. The
-# adapter set is held as an IMMUTABLE tuple so a caller mutating the returned
-# list can't corrupt the cache; tests reset it via `_reset_required_cache()`.
-_REQUIRED_CACHE: tuple[ReviewerAdapter, ...] | None = None
-_RERUN_CACHE: dict[str, bool] | None = None
+def required_adapters(roster: Roster) -> list[ReviewerAdapter]:
+    """Map a Roster's required reviewers → their registry adapters, config order.
 
-
-def _resolve_config() -> None:
-    """Resolve the required adapters + rerun map from config into the caches."""
-    global _REQUIRED_CACHE, _RERUN_CACHE
-    if _REQUIRED_CACHE is not None and _RERUN_CACHE is not None:
-        return
-    from . import reviewers_config
-
-    override = reviewers_config.load_override()
-    resolved = reviewers_config.resolve_reviewers(override)
-    names = tuple(resolved)
-    _REQUIRED_CACHE = tuple(reviewers_config.required_reviewers(names))
-    _RERUN_CACHE = dict(resolved)
-
-
-def required_reviewers() -> list[ReviewerAdapter]:
-    """The currently-required reviewer adapters, resolved from config (cached).
-
-    The required SET is data (`reviewers_config`: a shipped default plus a
-    per-repo `.shipit.toml` `[reviewers]` override), not the registry's structure — so
-    swapping/re-ordering required reviewers is a one-line config edit. Names map
-    back to these adapters; an unknown name fails loud. Resolved once per
-    process (see `_REQUIRED_CACHE`); each call returns a FRESH list copy, so a
-    caller may mutate it freely without disturbing the cache.
-    """
-    _resolve_config()
-    assert _REQUIRED_CACHE is not None
-    return list(_REQUIRED_CACHE)
-
-
-def reviewer_rerun() -> dict[str, bool]:
-    """The per-reviewer rerun policy (name -> bool), resolved from config (cached).
-
-    Default False for every required reviewer that doesn't opt in. Threaded into
-    the `ReadinessView` at the build site so adapter detection is head-strict only
-    for rerun=True reviewers and review-once (any-head) for everyone else."""
-    _resolve_config()
-    assert _RERUN_CACHE is not None
-    return dict(_RERUN_CACHE)
-
-
-def _reset_required_cache() -> None:
-    """Clear the resolved-config cache — for tests that vary the config."""
-    global _REQUIRED_CACHE, _RERUN_CACHE
-    _REQUIRED_CACHE = None
-    _RERUN_CACHE = None
+    The required SET is data (the Roster, loaded once at a verb boundary by
+    `reviewers_config.load_roster`), not the registry's structure — so
+    swapping/re-ordering required reviewers is a one-line config edit. There is
+    no module-global cache anymore (CLI01-WS04): the caller holds the Roster
+    and passes it down, so this is a pure name→adapter mapping. The loader
+    guarantees every required name resolves; the explicit guard turns any
+    future registry/validation mismatch into a loud error instead of a None
+    leaking to callers."""
+    adapters: list[ReviewerAdapter] = []
+    for name in roster.required_names:
+        adapter = by_name(name)
+        if adapter is None:  # unreachable post-load_roster — fail loud if it isn't
+            raise PrStateError(f"required reviewer {name!r} has no adapter")
+        adapters.append(adapter)
+    return adapters
 
 
 def by_name(name: str) -> ReviewerAdapter | None:

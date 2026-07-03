@@ -18,6 +18,8 @@ from shipit.identity import Sha, repo_from_slug
 from shipit.prstate import fetch
 from shipit.prstate.model import ReviewLifecycle
 from shipit.prstate.reviewers import CopilotAdapter
+from shipit.prstate.reviewers_config import default_roster
+from shipit.prstate.roster import Roster, RosterEntry
 
 # Full, validated commit identities (COR02) for the wire fixtures.
 HEAD = "abc1234" + "0" * 33
@@ -74,7 +76,7 @@ def test_bot_typed_request_yields_copilot_requested(monkeypatch):
     # The regression: a Bot-typed requested reviewer (login "Copilot") must
     # surface in requested_logins and read as REQUESTED through the adapter.
     _wire(monkeypatch, [{"requestedReviewer": {"login": "Copilot"}}])
-    ctx = fetch.gather(558)
+    ctx = fetch.gather(558, default_roster())
     assert ctx.requested_logins == ["Copilot"]
     assert CopilotAdapter().detect(ctx) is ReviewLifecycle.REQUESTED
 
@@ -89,13 +91,13 @@ def test_team_request_surfaces_by_slug(monkeypatch):
             {"requestedReviewer": None},
         ],
     )
-    ctx = fetch.gather(558)
+    ctx = fetch.gather(558, default_roster())
     assert ctx.requested_logins == ["platform-team"]
 
 
 def test_no_pending_requests_reads_not_requested(monkeypatch):
     _wire(monkeypatch, [])
-    ctx = fetch.gather(558)
+    ctx = fetch.gather(558, default_roster())
     assert ctx.requested_logins == []
     assert CopilotAdapter().detect(ctx) is ReviewLifecycle.NOT_REQUESTED
 
@@ -119,7 +121,7 @@ def test_review_requested_edge_time_carried_for_the_app_wait_window(monkeypatch)
             },
         ],
     )
-    ctx = fetch.gather(558)
+    ctx = fetch.gather(558, default_roster())
     assert ctx.requested_at == {"Copilot": "2026-01-01T00:10:00Z"}
 
 
@@ -185,7 +187,7 @@ def test_gather_reviews_fetches_only_the_skip_decision_inputs(monkeypatch):
             is_draft=True,
         ),
     )
-    ctx = fetch.gather_reviews(558)
+    ctx = fetch.gather_reviews(558, default_roster())
     assert ctx.head_sha == Sha(HEAD)
     # The core is REAL now, not hardcoded: the light path reads `is_draft` off its
     # own query (the killed `is_draft=False` trap) and composes the PR identity.
@@ -209,12 +211,7 @@ def test_gather_reviews_threads_the_rerun_policy(monkeypatch):
     # OLD head, copilot is stale → reads back REQUESTED (still pending), not DONE.
     monkeypatch.setattr(fetch.gh, "current_repo", lambda: repo_from_slug("owner/repo"))
     monkeypatch.setattr(fetch.gh, "rest", lambda *a, **k: [])
-    from shipit.prstate import reviewers, reviewers_config
-
-    reviewers._reset_required_cache()
-    monkeypatch.setattr(
-        reviewers_config, "load_override", lambda root=None: {"copilot": True}
-    )
+    roster = Roster((RosterEntry(name="copilot", required=True, rerun=True),))
     monkeypatch.setattr(
         fetch.gh,
         "graphql",
@@ -231,9 +228,8 @@ def test_gather_reviews_threads_the_rerun_policy(monkeypatch):
             head=NEW,
         ),
     )
-    ctx = fetch.gather_reviews(558)
-    reviewers._reset_required_cache()
-    assert ctx.reviewer_rerun.get("copilot") is True
+    ctx = fetch.gather_reviews(558, roster)
+    assert ctx.roster.entry("copilot").rerun is True
     assert CopilotAdapter().detect(ctx) is ReviewLifecycle.REQUESTED
 
 
@@ -281,7 +277,7 @@ def test_gather_reviews_rejects_malformed_review_database_id(monkeypatch):
         ),
     )
     with pytest.raises(ValueError, match="databaseId must be int"):
-        fetch.gather_reviews(558)
+        fetch.gather_reviews(558, default_roster())
 
 
 def test_rest_review_id_happy_path_and_malformed():
