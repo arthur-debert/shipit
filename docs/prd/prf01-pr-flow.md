@@ -136,14 +136,15 @@ names resolve) but actually *running* a local review is deferred to a later step
 
 > **Superseded in part (CLI01 / ADR-0030, 2026-07, #334):** the PR-flow verbs
 > (`pr status` / `pr next` / `pr ready` / `pr review request`) were rebuilt onto
-> the ADR-0030 CLI seam and no longer follow the inline `run(...) -> int` shape
-> described below (click params mint value objects at parse; a domain function
-> returns a typed result; a render seam emits text or `--json`). The extracted
-> services named below — request-attach verify, the guarded flip, the
-> next-action dispatcher — now live in domain homes under
+> the ADR-0030 CLI seam. They **keep** the `run(...) -> int` wrapper contract
+> described below (the click command still `raise SystemExit(run(...))`), but the
+> `run` body is now thin glue: click params mint value objects at parse, a domain
+> function returns a typed result, and a render seam emits text or `--json`. The
+> extracted services named below — request-attach verification, the guarded flip,
+> the next-action dispatcher — now live in domain homes under
 > `src/shipit/prstate/` (`request.py`, `flip.py`, `dispatch.py`), not the verb
 > layer; their deep-module character is unchanged, only the shape and placement
-> moved. The setup verbs (lint / gh-setup) still use the `run(...) -> int` shape.
+> moved. The setup verbs (lint / gh-setup) keep the same `run(...) -> int` shape.
 
 - `pr` is shipit's first **nested** command group. All PR-flow verbs use shipit's single
   CLI convention (the inline command + `run(...) -> int` shape the setup verbs use). No

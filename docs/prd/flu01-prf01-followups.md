@@ -62,12 +62,18 @@ them out of the epic kept that PR landable. They remain worth doing:
    `backends/__init__.py:29`, `agy.py:50`). The timeout has no such knob: a consumer
    with consistently large diffs cannot raise it without editing code.
 
-   > **Superseded in part (CLI01 / ADR-0030, 2026-07, #334):**
-   > `reviewers_config.reviewer_run_options()` no longer exists — the per-setting
-   > dict resolvers collapsed into the `Roster` value (`prstate/roster.py`),
-   > loaded once at a verb boundary via `reviewers_config.load_roster()`. The
-   > per-reviewer `model`/`instructions`/`timeout` now ride on the roster entry;
-   > re-verify this item's plumbing against the Roster before working it.
+   > **Superseded in part — this item is now delivered (CLI01 / ADR-0030,
+   > 2026-07, #334):** `reviewers_config.reviewer_run_options()` no longer exists —
+   > the per-setting dict resolvers collapsed into the `Roster` value
+   > (`prstate/roster.py`), loaded once at a verb boundary via
+   > `reviewers_config.load_roster()`. That change also **closes the
+   > hardcoded-timeout gap this item describes:** the per-reviewer `timeout` now
+   > rides on `RosterEntry.timeout` and threads end to end — `prstate/reviewers.py`
+   > copies it into `run_kwargs`, `service.start_detached_review` carries it, and
+   > it reaches `agy` as `--print-timeout` (`spawn/backends/antigravity.py`). A
+   > consumer can now raise the timeout from `.shipit.toml` without editing code,
+   > so nothing below remains to build; the Solution/Acceptance text is retained
+   > verbatim as the write-time record.
 
 ## Solution
 
