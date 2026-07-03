@@ -105,6 +105,6 @@ dependencies.
     coordinator does not auto-merge it.
 
     Changelog and release come later: shipit has no `changelog` or `release` /
-    `cut` command yet — they arrive with the Workflows epic (see
-    [./workflows.lex]). Until then there is no changelog-fragment step in a PR
-    and no release phase here.
+    `cut` command yet — they arrive with the Workflows epic
+    (see [./workflows.lex]). Until then there is no changelog-fragment step in
+    a PR and no release phase here.

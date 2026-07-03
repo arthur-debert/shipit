@@ -36,4 +36,4 @@ When the convergence workstream merges, the coordinator delegates an exploration
 
 With the work and docs in, the coordinator opens the feature's umbrella PR. It double-checks which issues the PR actually closes, writes a high-level description of the whole epic pointing to the related issues, and drives the PR (epic branch -\> `main`) through the SAME role split — the coordinator waits and flips, a fresh shepherd handles each review round — then flips it to READY and stops. The HUMAN merges the umbrella PR to `main`; the coordinator does not auto-merge it.
 
-Changelog and release come later: shipit has no `changelog` or `release` / `cut` command yet — they arrive with the Workflows epic (see \[./workflows.lex\]). Until then there is no changelog-fragment step in a PR and no release phase here.
+Changelog and release come later: shipit has no `changelog` or `release` / `cut` command yet — they arrive with the Workflows epic [(see](./workflows.lex)). Until then there is no changelog-fragment step in a PR and no release phase here.
