@@ -1,85 +1,41 @@
-"""`shipit pr ready` — the guarded draft→ready flip (and `--undo`).
+"""`shipit pr ready` — the guarded draft→ready flip (and `--undo`), as glue.
 
 The flip is the one signal that says "done iterating — a human can validate and
 merge", so it is GUARDED: it refuses unless the engine says the PR is READY (all
-three Ready pillars — Reviewed + CI green + authoritative-mergeable). The refusal
-is a clean message + non-zero exit, never a silent no-op. `--undo` reverts
-ready→draft and is ALWAYS allowed — sending a PR back to draft when a human asks
-for changes is never held.
+three Ready pillars — Reviewed + CI green + authoritative-mergeable). The guard
+itself is the engine's :func:`shipit.prstate.flip.guarded_flip` (CLI01-WS03
+promoted it out of this verb) — the SAME guard `pr next`'s ready act flips
+through — and its refusal is the :class:`~shipit.prstate.flip.NotReady` domain
+exception, mapped to a clean ``error: …`` + exit 1 by the one
+:func:`~.._errors.cli_errors` shell. `--undo` reverts ready→draft and is ALWAYS
+allowed — sending a PR back to draft when a human asks for changes is never
+held; it goes straight to the gh adapter, whose boundary milestone is its
+durable record (ADR-0029).
 
-The guarded re-check lives in :func:`guarded_flip` so both this verb and
-`pr next`'s ready act flip through the SAME guard: re-evaluate the live snapshot,
-flip only on READY. Re-checking at flip time (not trusting a status computed
-moments earlier) is what makes the flip safe against a state that moved.
+This module is ADR-0030 glue + renderers only: parse the shared PR-target
+primitive, resolve the typed target, call the domain flip, render the pure
+``format_*`` line through the shared emit.
 """
 
 from __future__ import annotations
 
-import logging
-import sys
-
 import click
 
-from ... import execrun, gh
+from ... import gh
+from ...gh import resolve_pr
+from ...identity import Repo
+from ...pr import PrId
 from ...prstate.errors import PrStateError
-from ...prstate.fetch import gather
-from ...prstate.reviewers_config import load_roster
-from ...prstate.roster import Roster
-from ...prstate.state import TaskState, TaskStatus, evaluate
-from ._resolve import resolve_pr
-
-#: The `pr` verbs' logger (LOG02 spray, ADR-0029): the flip and its undo are
-#: lifecycle milestones, so they log at INFO alongside the user-facing print —
-#: before this, the print was the ONLY record of the one human hand-off signal.
-logger = logging.getLogger("shipit.pr")
-
-
-class NotReady(RuntimeError):
-    """The guarded flip was asked to flip a PR the engine does not call READY."""
-
-    def __init__(self, status: TaskStatus) -> None:
-        self.status = status
-        super().__init__(
-            f"PR #{status.pr} is not Ready (state: {status.state.value}) — "
-            f"{status.next_action}"
-        )
-
-
-def guarded_flip(
-    pr: int, roster: Roster | None = None, *, flip=gh.pr_ready, evaluate_status=None
-) -> TaskStatus:
-    """Re-evaluate the live PR and flip draft→ready ONLY if it is READY.
-
-    The shared guarded re-check behind both `pr ready` and `pr next`'s ready act.
-    Gathers a FRESH snapshot and re-runs the engine (never trusting a status
-    computed earlier — the PR may have moved); on READY it performs the flip and
-    returns the READY status, otherwise it raises :class:`NotReady` carrying the
-    real status so the caller can report why it refused.
-
-    `roster` is the reviewer configuration as ONE value (CLI01-WS04): a caller
-    that already loaded it this invocation (`pr next`'s ready act) passes it in
-    so the flip never resolves reviewer settings twice; ``None`` (the
-    standalone `pr ready` shape) loads it here — the verb's one config read.
-    The SNAPSHOT is re-gathered either way; only the config ride-along is
-    reused (config cannot change mid-command).
-
-    `flip` / `evaluate_status` are injected for testing: `flip` is the
-    draft→ready boundary (default :func:`shipit.gh.pr_ready`); `evaluate_status`
-    yields the fresh `TaskStatus` (default: `gather` + `evaluate` over the
-    roster above). A test injects both to drive the guard without a network.
-    """
-    if evaluate_status is None:
-        status = evaluate(gather(pr, roster if roster is not None else load_roster()))
-    else:
-        status = evaluate_status(pr)
-    if status.state is not TaskState.READY:
-        raise NotReady(status)
-    flip(pr)
-    return status
+from ...prstate.flip import NotReady, guarded_flip  # noqa: F401  (NotReady re-exported for callers/tests)
+from ...prstate.state import TaskStatus
+from .._context import current_root_context
+from .._errors import cli_errors
+from .._params import pr_number_argument
+from .._render import emit
 
 
 @click.command(name="ready")
-@click.argument("pr", required=False, type=int)
+@pr_number_argument
 @click.option(
     "--undo",
     is_flag=True,
@@ -96,58 +52,41 @@ def cmd(pr: int | None, undo: bool) -> None:
     raise SystemExit(run(pr, undo=undo))
 
 
-def run(pr: int | None = None, *, undo: bool = False) -> int:
-    """Resolve → (undo ? revert : guarded flip). Returns an int exit code.
+@cli_errors
+def run(pr: int | None = None, *, undo: bool = False, repo: Repo | None = None) -> int:
+    """Resolve → (undo ? revert : guarded flip) → render. Returns an exit code.
 
-    0 on a performed flip/undo; non-zero on a refusal (not Ready) or a real
-    gh/auth failure. A branch with no PR is a clean non-zero error here (unlike
-    the read-only `pr status`, a mutating verb has nothing to flip).
+    ``repo`` is the identity half of the PR target: omitted (the CLI path), the
+    root context's ambient repo — resolved once per invocation (ADR-0030); a
+    direct caller (a test) injects it as a value.
+
+    0 on a performed flip/undo; non-zero on a refusal (the engine's ``NotReady``
+    reaching the shell) or a real gh/auth failure. A branch with no PR is a
+    clean non-zero error here (unlike the read-only `pr status`, a mutating
+    verb has nothing to flip) — raised as the domain refusal, rendered by the
+    shell.
     """
-    resolved: int | None = None
-    try:
-        resolved = resolve_pr(pr)
-        if resolved is None:
-            print("error: no PR for this branch — nothing to flip", file=sys.stderr)
-            return 1
-        if undo:
-            # Always allowed: revert ready→draft. No readiness hold.
-            gh.pr_ready(resolved, undo=True)
-            logger.info(
-                "pr#%s reverted ready→draft (undo)",
-                resolved,
-                extra={"pr": resolved},
-            )
-            print(f"PR #{resolved}: reverted ready→draft")
-            return 0
-        status = guarded_flip(resolved)
-    except NotReady as exc:
-        # A refused flip is a degraded-but-continuing outcome: the verb exits
-        # cleanly non-zero and nothing mutated — loud in the record, not fatal.
-        logger.warning(
-            "pr#%s flip refused — not Ready (state=%s)",
-            exc.status.pr,
-            exc.status.state.value,
-            extra={"pr": exc.status.pr},
-        )
-        print(f"refusing to flip: {exc}", file=sys.stderr)
-        return 1
-    except (execrun.ExecError, PrStateError) as exc:
-        # Bind `pr` when resolution got far enough to know it (the mutating call
-        # is what failed); when resolution ITSELF failed, `resolved` is None and
-        # the key stays absent — the record contract is present-when-bound, never
-        # null.
-        logger.error(
-            "pr ready failed",
-            exc_info=True,
-            extra={"pr": resolved} if resolved is not None else None,
-        )
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
-    logger.info(
-        "pr#%s flipped draft→ready — %s",
-        status.pr,
-        status.next_action,
-        extra={"pr": status.pr},
+    target = resolve_pr(
+        pr, repo if repo is not None else current_root_context().require_repo()
     )
-    print(f"PR #{status.pr}: flipped draft→ready — {status.next_action}")
+    if target is None:
+        raise PrStateError("no PR for this branch — nothing to flip")
+    if undo:
+        # Always allowed: revert ready→draft. No readiness hold; the adapter's
+        # boundary milestone is the durable record.
+        gh.pr_ready(target, undo=True)
+        emit(target, format_undone)
+        return 0
+    status = guarded_flip(target)
+    emit(status, format_flipped)
     return 0
+
+
+def format_flipped(status: TaskStatus) -> str:
+    """The pure text renderer for a performed flip (the render seam owns stdout)."""
+    return f"PR #{status.pr}: flipped draft→ready — {status.next_action}"
+
+
+def format_undone(target: PrId) -> str:
+    """The pure text renderer for a performed ``--undo``."""
+    return f"PR #{target.number}: reverted ready→draft"

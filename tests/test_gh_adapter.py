@@ -20,7 +20,7 @@ import pytest
 import shipit
 from shipit import gh
 from shipit.identity import Repo, Sha, repo_from_slug
-from shipit.pr import PR
+from shipit.pr import PR, PrId
 from shipit.prstate.errors import PrStateError
 
 _SRC_ROOT = pathlib.Path(shipit.__file__).parent
@@ -180,6 +180,7 @@ def test_pr_core_returns_the_typed_pr_with_sha_head(monkeypatch):
     normalized head comes back, not a dict."""
     head = "CAFE" * 10
     repo = repo_from_slug("owner/repo")
+    target = PrId(repo=repo, number=7)
     calls = _capture_run(
         monkeypatch,
         json.dumps(
@@ -192,8 +193,9 @@ def test_pr_core_returns_the_typed_pr_with_sha_head(monkeypatch):
             }
         ),
     )
-    core = gh.pr_core(7, repo)
+    core = gh.pr_core(target)
     assert isinstance(core, PR)
+    assert core.id == target
     assert core.repo == repo
     assert core.head_sha == Sha(head.lower())
     assert (core.number, core.base_ref, core.is_draft, core.merge_state) == (
@@ -222,14 +224,15 @@ def test_pr_core_fails_loud_on_a_malformed_core(monkeypatch):
     """The fail-loud-core discipline at the wire: a missing required key raises
     `KeyError`, a malformed head sha raises `ValueError` — never a defaulted or
     bogus core field flowing on."""
+    target = PrId(repo=repo_from_slug("owner/repo"), number=7)
     _capture_run(monkeypatch, json.dumps({"number": 7, "isDraft": False}))
     with pytest.raises(KeyError):
-        gh.pr_core(7, repo_from_slug("owner/repo"))
+        gh.pr_core(target)
     _capture_run(
         monkeypatch, json.dumps({"number": 7, "headRefOid": "abc", "isDraft": False})
     )
     with pytest.raises(ValueError):
-        gh.pr_core(7, repo_from_slug("owner/repo"))
+        gh.pr_core(target)
 
 
 def test_pr_meta_returns_the_raw_node_for_the_view_builder(monkeypatch):
@@ -245,8 +248,10 @@ def test_pr_meta_returns_the_raw_node_for_the_view_builder(monkeypatch):
         "mergeStateStatus": "CLEAN",
         "statusCheckRollup": [],
     }
-    _capture_run(monkeypatch, json.dumps(node))
-    assert gh.pr_meta(7) == node
+    calls = _capture_run(monkeypatch, json.dumps(node))
+    assert gh.pr_meta(PrId(repo=repo_from_slug("owner/repo"), number=7)) == node
+    # The read is PINNED to the PrId's repo (ADR-0030) — never a cwd inference.
+    assert "--repo" in calls[0] and "owner/repo" in calls[0]
 
 
 def test_the_tuple_returning_repo_slug_is_gone():

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import pytest
 from shipit.identity import Sha, repo_from_slug
+from shipit.pr import PrId
 from shipit.prstate import fetch
 from shipit.prstate.model import ReviewLifecycle
 from shipit.prstate.reviewers import CopilotAdapter
@@ -25,6 +26,12 @@ from shipit.prstate.roster import Roster, RosterEntry
 HEAD = "abc1234" + "0" * 33
 OLD = "dead" * 10
 NEW = "beef" * 10
+
+# The typed PR target (CLI01-WS02 / ADR-0030): the repo identity rides in on the
+# PrId — minted once at the verb boundary — so the fetch path never resolves the
+# ambient repo itself.
+REPO = repo_from_slug("owner/repo")
+TARGET = PrId(repo=REPO, number=558)
 
 
 def _graphql_page(
@@ -49,7 +56,15 @@ def _graphql_page(
 
 
 def _wire(monkeypatch, review_requests: list[dict], timeline: list[dict] | None = None):
-    monkeypatch.setattr(fetch.gh, "current_repo", lambda: repo_from_slug("owner/repo"))
+    # The former per-gather ambient `gh repo view` shellout is DELETED (WS02):
+    # any call to it from the fetch path is a regression and fails the test.
+    monkeypatch.setattr(
+        fetch.gh,
+        "current_repo",
+        lambda *a, **k: pytest.fail(
+            "gather must not resolve the ambient repo — it rides in on the PrId"
+        ),
+    )
     monkeypatch.setattr(
         fetch.gh,
         "pr_meta",
@@ -76,7 +91,7 @@ def test_bot_typed_request_yields_copilot_requested(monkeypatch):
     # The regression: a Bot-typed requested reviewer (login "Copilot") must
     # surface in requested_logins and read as REQUESTED through the adapter.
     _wire(monkeypatch, [{"requestedReviewer": {"login": "Copilot"}}])
-    ctx = fetch.gather(558, default_roster())
+    ctx = fetch.gather(TARGET, default_roster())
     assert ctx.requested_logins == ["Copilot"]
     assert CopilotAdapter().detect(ctx) is ReviewLifecycle.REQUESTED
 
@@ -91,15 +106,52 @@ def test_team_request_surfaces_by_slug(monkeypatch):
             {"requestedReviewer": None},
         ],
     )
-    ctx = fetch.gather(558, default_roster())
+    ctx = fetch.gather(TARGET, default_roster())
     assert ctx.requested_logins == ["platform-team"]
 
 
 def test_no_pending_requests_reads_not_requested(monkeypatch):
     _wire(monkeypatch, [])
-    ctx = fetch.gather(558, default_roster())
+    ctx = fetch.gather(TARGET, default_roster())
     assert ctx.requested_logins == []
     assert CopilotAdapter().detect(ctx) is ReviewLifecycle.NOT_REQUESTED
+
+
+def test_gather_threads_the_prid_identity_not_an_ambient_resolution(monkeypatch):
+    """WS02 (#336): the PrId is the ONE identity source for the whole gather.
+
+    The composed view carries the target's repo, the GraphQL variables are read
+    off it (owner/name/number), and the typed `pr_meta` read receives the PrId
+    itself — while `_wire`'s fail-loud `current_repo` guard proves the former
+    per-gather ambient shellout is gone.
+    """
+    _wire(monkeypatch, [])
+    seen: dict = {}
+
+    def graphql(query, **variables):
+        seen.update(variables)
+        return _graphql_page([])
+
+    monkeypatch.setattr(fetch.gh, "graphql", graphql)
+    meta_targets: list = []
+
+    def pr_meta(pr):
+        meta_targets.append(pr)
+        return {
+            "number": 558,
+            "headRefOid": HEAD,
+            "isDraft": True,
+            "mergeable": "MERGEABLE",
+            "mergeStateStatus": "BLOCKED",
+            "statusCheckRollup": [],
+        }
+
+    monkeypatch.setattr(fetch.gh, "pr_meta", pr_meta)
+    ctx = fetch.gather(TARGET, default_roster())
+    assert ctx.pr.id == TARGET
+    assert ctx.pr.repo == REPO
+    assert meta_targets == [TARGET]
+    assert (seen["owner"], seen["name"], seen["pr"]) == ("owner", "repo", 558)
 
 
 def test_review_requested_edge_time_carried_for_the_app_wait_window(monkeypatch):
@@ -121,7 +173,7 @@ def test_review_requested_edge_time_carried_for_the_app_wait_window(monkeypatch)
             },
         ],
     )
-    ctx = fetch.gather(558, default_roster())
+    ctx = fetch.gather(TARGET, default_roster())
     assert ctx.requested_at == {"Copilot": "2026-01-01T00:10:00Z"}
 
 
@@ -158,7 +210,11 @@ def test_gather_reviews_fetches_only_the_skip_decision_inputs(monkeypatch):
     # call for head sha + reviews + requested reviewers + rerun policy, and NO
     # threads-cursor walk or reactions/issue-comment REST pagination. `rest` is
     # wired to blow up so any stray pagination fails the test.
-    monkeypatch.setattr(fetch.gh, "current_repo", lambda: repo_from_slug("owner/repo"))
+    monkeypatch.setattr(
+        fetch.gh,
+        "current_repo",
+        lambda *a, **k: pytest.fail("no ambient repo resolution on the light path"),
+    )
     monkeypatch.setattr(
         fetch.gh,
         "rest",
@@ -187,7 +243,7 @@ def test_gather_reviews_fetches_only_the_skip_decision_inputs(monkeypatch):
             is_draft=True,
         ),
     )
-    ctx = fetch.gather_reviews(558, default_roster())
+    ctx = fetch.gather_reviews(TARGET, default_roster())
     assert ctx.head_sha == Sha(HEAD)
     # The core is REAL now, not hardcoded: the light path reads `is_draft` off its
     # own query (the killed `is_draft=False` trap) and composes the PR identity.
@@ -209,7 +265,6 @@ def test_gather_reviews_threads_the_rerun_policy(monkeypatch):
     # The rerun policy must ride on the light context so detect() is head-strict
     # for rerun=True reviewers. With copilot rerun=True and the only review on an
     # OLD head, copilot is stale → reads back REQUESTED (still pending), not DONE.
-    monkeypatch.setattr(fetch.gh, "current_repo", lambda: repo_from_slug("owner/repo"))
     monkeypatch.setattr(fetch.gh, "rest", lambda *a, **k: [])
     roster = Roster((RosterEntry(name="copilot", required=True, rerun=True),))
     monkeypatch.setattr(
@@ -228,7 +283,7 @@ def test_gather_reviews_threads_the_rerun_policy(monkeypatch):
             head=NEW,
         ),
     )
-    ctx = fetch.gather_reviews(558, roster)
+    ctx = fetch.gather_reviews(TARGET, roster)
     assert ctx.roster.entry("copilot").rerun is True
     assert CopilotAdapter().detect(ctx) is ReviewLifecycle.REQUESTED
 
@@ -260,7 +315,6 @@ def _thread_node(**overrides) -> dict:
 def test_gather_reviews_rejects_malformed_review_database_id(monkeypatch):
     # The GraphQL light path: a non-int (or bool) databaseId is a malformed
     # review node and raises at the parse site, naming the wire field.
-    monkeypatch.setattr(fetch.gh, "current_repo", lambda: repo_from_slug("owner/repo"))
     monkeypatch.setattr(
         fetch.gh,
         "graphql",
@@ -277,7 +331,7 @@ def test_gather_reviews_rejects_malformed_review_database_id(monkeypatch):
         ),
     )
     with pytest.raises(ValueError, match="databaseId must be int"):
-        fetch.gather_reviews(558, default_roster())
+        fetch.gather_reviews(TARGET, default_roster())
 
 
 def test_rest_review_id_happy_path_and_malformed():

@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 
 from .. import gh
 from ..agent import backend as _agent_backend
+from ..pr import PrId
 from .errors import PrStateError
 from .model import (
     FunnelState,
@@ -32,7 +33,7 @@ from .roster import Roster, RosterEntry
 logger = logging.getLogger("shipit.prstate")
 
 
-def _log_request_transition(reviewer: str, pr: int, transition: str) -> None:
+def _log_request_transition(reviewer: str, pr: PrId, transition: str) -> None:
     """One INFO record per reviewer request-edge transition (placed/withdrawn).
 
     Recorded HERE, at the adapter act, so every requestable adapter logs the
@@ -43,8 +44,8 @@ def _log_request_transition(reviewer: str, pr: int, transition: str) -> None:
         "reviewer %s: %s on pr#%s",
         reviewer,
         transition,
-        pr,
-        extra={"reviewer": reviewer, "pr": pr, "transition": transition},
+        pr.number,
+        extra={"reviewer": reviewer, "pr": pr.number, "transition": transition},
     )
 
 
@@ -245,7 +246,7 @@ class ReviewerAdapter:
             return ReviewLifecycle.REQUESTED
         return ReviewLifecycle.NOT_REQUESTED
 
-    def request(self, pr: int, entry: RosterEntry | None = None) -> bool:
+    def request(self, pr: PrId, entry: RosterEntry | None = None) -> bool:
         """Request — or re-request, same call — this reviewer on `pr`.
 
         Returns True when a request was actually placed, False when the
@@ -270,7 +271,7 @@ class ReviewerAdapter:
         """
         raise NotImplementedError
 
-    def cancel(self, pr: int) -> bool:
+    def cancel(self, pr: PrId) -> bool:
         """Withdraw a pending review request on `pr`.
 
         Returns True when a request was withdrawn, False when there is no
@@ -359,7 +360,7 @@ class CopilotAdapter(ReviewerAdapter):
     def matches(self, login: str) -> bool:
         return "copilot" in login.lower()
 
-    def request(self, pr: int, entry: RosterEntry | None = None) -> bool:
+    def request(self, pr: PrId, entry: RosterEntry | None = None) -> bool:
         # `gh pr edit --add-reviewer @copilot` — GraphQL with the bot's real
         # node_id (via gh.pr_edit_reviewer; the REST requested_reviewers
         # POST silently no-ops for Copilot). Re-request is the same call.
@@ -367,7 +368,7 @@ class CopilotAdapter(ReviewerAdapter):
         _log_request_transition(self.name, pr, "request placed")
         return True
 
-    def cancel(self, pr: int) -> bool:
+    def cancel(self, pr: PrId) -> bool:
         gh.pr_edit_reviewer(pr, "@copilot", remove=True)
         _log_request_transition(self.name, pr, "request withdrawn")
         return True
@@ -412,7 +413,7 @@ class CodeRabbitAdapter(ReviewerAdapter):
     def matches(self, login: str) -> bool:
         return "coderabbit" in login.lower()
 
-    def request(self, pr: int, entry: RosterEntry | None = None) -> bool:
+    def request(self, pr: PrId, entry: RosterEntry | None = None) -> bool:
         # Same GraphQL add-reviewer path Copilot uses: it resolves the App's
         # real node id and creates a real review_requested edge (the REST
         # requested_reviewers POST silently no-ops for App reviewers).
@@ -420,7 +421,7 @@ class CodeRabbitAdapter(ReviewerAdapter):
         _log_request_transition(self.name, pr, "request placed")
         return True
 
-    def cancel(self, pr: int) -> bool:
+    def cancel(self, pr: PrId) -> bool:
         gh.pr_edit_reviewer(pr, self._REVIEWER_HANDLE, remove=True)
         _log_request_transition(self.name, pr, "request withdrawn")
         return True
@@ -453,19 +454,19 @@ class GeminiAdapter(ReviewerAdapter):
     def matches(self, login: str) -> bool:
         return "gemini" in login.lower()
 
-    def request(self, pr: int, entry: RosterEntry | None = None) -> bool:
+    def request(self, pr: PrId, entry: RosterEntry | None = None) -> bool:
         # The Gemini app auto-triggers on PR open; there is no request
         # mechanism, and it is best-effort anyway — a no-op, not an error.
         # A mechanic, not a milestone: no edge changed, so it records at DEBUG.
         logger.debug(
             "reviewer %s: no request mechanism (auto-triggers) — no-op on pr#%s",
             self.name,
-            pr,
-            extra={"reviewer": self.name, "pr": pr},
+            pr.number,
+            extra={"reviewer": self.name, "pr": pr.number},
         )
         return False
 
-    def cancel(self, pr: int) -> bool:
+    def cancel(self, pr: PrId) -> bool:
         return False
 
     def detect(self, ctx: ReadinessView) -> ReviewLifecycle:
@@ -548,7 +549,7 @@ class _LocalReviewAdapter(ReviewerAdapter):
         low = login.lower()
         return low.endswith("[bot]") and self.bot_slug_fragment in low
 
-    def request(self, pr: int, entry: RosterEntry | None = None) -> bool:
+    def request(self, pr: PrId, entry: RosterEntry | None = None) -> bool:
         """DETACH a local-agent review and return IN-FLIGHT (OBS03).
 
         Fire-and-forget: this does the cheap, synchronous work — resolve the PR's
@@ -606,14 +607,14 @@ class _LocalReviewAdapter(ReviewerAdapter):
             logger.error(
                 "reviewer %s: local review request failed on pr#%s",
                 self.display_name,
-                pr,
+                pr.number,
                 exc_info=True,
-                extra={"reviewer": self.display_name, "pr": pr},
+                extra={"reviewer": self.display_name, "pr": pr.number},
             )
             if isinstance(exc, PrStateError):
                 raise
             raise PrStateError(
-                f"{self.funnel_reviewer_name()} review failed on #{pr}: {exc}"
+                f"{self.funnel_reviewer_name()} review failed on #{pr.number}: {exc}"
             ) from exc
         if started:
             # A fresh child was detached: a real request edge to narrate.
@@ -625,12 +626,12 @@ class _LocalReviewAdapter(ReviewerAdapter):
                 "reviewer %s: re-request reconciled against an in-flight run on "
                 "pr#%s — no new detach",
                 self.display_name,
-                pr,
-                extra={"reviewer": self.display_name, "pr": pr},
+                pr.number,
+                extra={"reviewer": self.display_name, "pr": pr.number},
             )
         return True
 
-    def cancel(self, pr: int) -> bool:
+    def cancel(self, pr: PrId) -> bool:
         """No-op: a posted review can't be withdrawn.
 
         A local reviewer leaves a real, submitted review rather than a pending
@@ -793,3 +794,36 @@ def by_name(name: str) -> ReviewerAdapter | None:
         if r.name == name.lower():
             return r
     return None
+
+
+def resolve_reviewer(name: str) -> ReviewerAdapter:
+    """Resolve a ``--reviewer`` selector to its ONE adapter, or refuse loud.
+
+    The reviewer-name resolution the `pr review request` scope uses (CLI01-WS03
+    promoted it out of the verb: which adapter a name means is registry
+    knowledge, not click glue). Two spellings resolve:
+
+      * the adapter registry name (``copilot``, ``codex``, …) via :func:`by_name`;
+      * the PRD/glossary spelling of a local-agent reviewer (``codex-local`` /
+        ``agy-local``) — a REGISTRY LOOKUP, not a string parse (COR02-WS03): the
+        name resolves through :func:`shipit.agent.backend.by_check_run_name` —
+        the inverse of the registry's ``check_run_name`` alias — so only a real
+        funnel backend's reviewer name is reachable this way (``copilot-local``
+        matches no registry entry and does not alias to ``copilot``: the alias
+        names the local-agent reviewer family specifically).
+
+    An unknown name raises :class:`~shipit.prstate.errors.PrStateError` naming
+    the known reviewers — a typo never silently drops a request.
+    """
+    adapter = by_name(name)
+    if adapter is None:
+        try:
+            backend = _agent_backend.by_check_run_name(name)
+        except KeyError:
+            backend = None
+        if backend is not None:
+            adapter = by_name(backend.funnel_agent or backend.name)
+    if adapter is None:
+        known = ", ".join(r.name for r in REGISTRY)
+        raise PrStateError(f"unknown reviewer {name!r} (known: {known})")
+    return adapter

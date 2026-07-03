@@ -83,6 +83,20 @@ def path_argument(fn):
     return click.argument("path", required=False, default=_ambient_path)(fn)
 
 
+def pr_number_argument(fn):
+    """Optional PR argument — the shared PR-target primitive, defined once.
+
+    Click validates only the explicit primitive (a positive ``int`` a
+    :class:`~shipit.pr.PrId` could carry; anything else is a usage error, exit
+    2). Resolving "which PR" (explicit number vs the current branch's PR) is
+    the deliberate ADR-0030 exception: the verb hands the validated primitive
+    to :func:`shipit.gh.resolve_pr`, which MINTS the ``PrId`` at the runtime
+    boundary — because "no PR for this branch" is a runtime outcome, not a
+    usage error.
+    """
+    return click.argument("pr", required=False, type=click.IntRange(min=1))(fn)
+
+
 #: ``--json`` defined once — every user-facing read verb grows this flag,
 #: serialized from the typed result's ``to_dict()`` by the render seam.
 json_option = click.option(

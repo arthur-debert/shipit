@@ -438,6 +438,24 @@ def _clear_own_handlers(logger: logging.Logger) -> None:
             handler.close()
 
 
+def reset_logging() -> None:
+    """Detach shipit's own sinks from the package logger — the clean-slate the
+    CLI bootstrap assumes.
+
+    The CLI resolves identity BEFORE it wires sinks (:func:`configure_logging`
+    runs late so the file sink can be per-repo), which means the bootstrap phase
+    — the git-``exec`` identity resolution — must run with NO sink attached to
+    stay quiet, as the ``root`` entrypoint's contract intends. A one-shot
+    production process starts that way. But when several invocations share ONE
+    process (the test suite, or any in-process embedding), a prior invocation's
+    sinks are STILL attached when the next one resolves identity, so that
+    invocation's pre-config bootstrap records (the ``exec`` DEBUG lines) leak to
+    the earlier run's pinned stderr sink. Calling this at the very top of every
+    invocation restores the clean slate; in a one-shot process it is a no-op.
+    """
+    _clear_own_handlers(logging.getLogger(LOGGER_NAME))
+
+
 def configure_logging(
     verbose: bool = False,
     env: Mapping[str, str] | None = None,

@@ -5,6 +5,11 @@ paths. The raw-JSON -> model parsing is split out (`context_from_raw`) so tests
 can build a view from recorded fixtures without the network, exercising the
 exact code `gather()` runs live.
 
+The target arrives as a `PrId` (ADR-0030): the repo identity rides in on it —
+minted once at the verb boundary from the root context, per ADR-0024's offline
+identity source — so this path performs ZERO ambient-repo API resolutions (the
+former per-gather `gh repo view` shellouts, paid twice per `pr next`, are gone).
+
 The view's cheap CORE (`head_sha`, `base_ref`, `is_draft`, `merge_state`) is read
 off the fetched GitHub `pullRequest` node through the ONE `pr.core_from_node`
 boundary (ADR-0024) — the SAME builder the review path uses — so `head_sha` is
@@ -20,7 +25,7 @@ from datetime import datetime, timezone
 
 from .. import gh, logcontext
 from ..identity import Repo, Sha
-from ..pr import core_from_node
+from ..pr import PrId, core_from_node
 from .model import (
     ReadinessView,
     Review,
@@ -120,7 +125,7 @@ query($owner: String!, $name: String!, $pr: Int!, $cursor: String) {
 
 
 def _threads_and_review_requests(
-    owner: str, name: str, pr: int
+    pr: PrId,
 ) -> tuple[list[dict], list[dict], dict[str, str]]:
     """Every review-thread node for the PR, its pending review requests, and the
     per-login `review_requested` edge time.
@@ -135,7 +140,13 @@ def _threads_and_review_requests(
     requested_at: dict[str, str] = {}
     cursor: str | None = None
     while True:
-        data = gh.graphql(_THREADS_QUERY, owner=owner, name=name, pr=pr, cursor=cursor)
+        data = gh.graphql(
+            _THREADS_QUERY,
+            owner=pr.repo.owner.login,
+            name=pr.repo.name,
+            pr=pr.number,
+            cursor=cursor,
+        )
         pull = data["repository"]["pullRequest"]
         if cursor is None:
             requests = [
@@ -203,16 +214,21 @@ query($owner: String!, $name: String!, $pr: Int!) {
 """
 
 
-def attach_state(pr: int) -> tuple[list[str], list[tuple[int, str]]]:
+def attach_state(pr: PrId) -> tuple[list[str], list[tuple[int, str]]]:
     """Pending review-request logins + (review_id, author) of the newest reviews.
 
     The read side of request-attach verification (release#614): GitHub can
     accept a review-request call yet silently drop the edge, so after placing
     a request the verb polls this until the reviewer shows up in the pending
-    requests — or has already submitted a fresh review that consumed it.
+    requests — or has already submitted a fresh review that consumed it. The
+    repo rides in on the ``PrId`` (ADR-0030) — no ambient resolution per poll.
     """
-    repo = gh.current_repo()
-    data = gh.graphql(_ATTACH_QUERY, owner=repo.owner.login, name=repo.name, pr=pr)
+    data = gh.graphql(
+        _ATTACH_QUERY,
+        owner=pr.repo.owner.login,
+        name=pr.repo.name,
+        pr=pr.number,
+    )
     pull = data["repository"]["pullRequest"]
     logins = _requested_logins(
         [
@@ -272,7 +288,7 @@ query($owner: String!, $name: String!, $pr: Int!) {
 """
 
 
-def gather_reviews(pr: int, roster: Roster) -> ReadinessView:
+def gather_reviews(pr: PrId, roster: Roster) -> ReadinessView:
     """A LIGHT context sufficient for `detect()` — head SHA + reviews + pending
     review requests + the reviewer Roster, nothing else.
 
@@ -293,14 +309,17 @@ def gather_reviews(pr: int, roster: Roster) -> ReadinessView:
     config.
     """
     start = time.monotonic()
-    # The typed repo read (PROC03): the adapter returns the identity value object,
-    # so the slug/owner/name are read off it rather than re-split at call sites.
-    repo = gh.current_repo()
+    # The typed repo (ADR-0030/PROC03): the identity rides in on the PrId —
+    # minted once at the verb boundary — so the slug/owner/name are read off it
+    # rather than re-resolved ambiently per fetch.
+    repo = pr.repo
     # Bind the domain keys at the fetch seam (ADR-0029): from the moment the
     # engine starts working on this PR, every subsequent record in-process —
     # including the gh Exec records the fetch itself produces — carries pr/repo.
-    logcontext.bind(pr=pr, repo=repo.slug)
-    data = gh.graphql(_REVIEWS_QUERY, owner=repo.owner.login, name=repo.name, pr=pr)
+    logcontext.bind(pr=pr.number, repo=repo.slug)
+    data = gh.graphql(
+        _REVIEWS_QUERY, owner=repo.owner.login, name=repo.name, pr=pr.number
+    )
     pull = data["repository"]["pullRequest"]
     requested = _requested_logins(
         [
@@ -342,12 +361,12 @@ def gather_reviews(pr: int, roster: Roster) -> ReadinessView:
     logger.debug(
         "pr#%s light review snapshot fetched in %dms (%d review(s), "
         "%d pending request(s))",
-        pr,
+        pr.number,
         duration_ms,
         len(reviews),
         len(requested),
         extra={
-            "pr": pr,
+            "pr": pr.number,
             "duration_ms": duration_ms,
             "reviews": len(reviews),
             "requested": len(requested),
@@ -356,7 +375,7 @@ def gather_reviews(pr: int, roster: Roster) -> ReadinessView:
     return ctx
 
 
-def gather(pr: int, roster: Roster) -> ReadinessView:
+def gather(pr: PrId, roster: Roster) -> ReadinessView:
     """Fetch every raw input the engine needs for `pr`, live, via `gh`.
 
     `roster` is the reviewer configuration as ONE value (CLI01-WS04), loaded by
@@ -365,18 +384,18 @@ def gather(pr: int, roster: Roster) -> ReadinessView:
     per-reviewer setting off `ctx.roster`, never the config, and no call path
     resolves reviewer settings twice per verb invocation."""
     start = time.monotonic()
-    # The typed repo read (PROC03): one Repo value object feeds the log context,
-    # the REST base path, the GraphQL variables, and the PR identity below.
-    repo = gh.current_repo()
+    # The typed repo (ADR-0030/PROC03): one Repo value object — riding in on the
+    # PrId, minted once at the verb boundary — feeds the log context, the REST
+    # base path, the GraphQL variables, and the PR identity below. No per-gather
+    # ambient resolution.
+    repo = pr.repo
     # Bind the domain keys at the fetch seam (ADR-0029): from the moment the
     # engine starts working on this PR, every subsequent record in-process —
     # including the gh Exec records the fetch itself produces — carries pr/repo.
-    logcontext.bind(pr=pr, repo=repo.slug)
+    logcontext.bind(pr=pr.number, repo=repo.slug)
     base = f"repos/{repo.slug}"
     meta = gh.pr_meta(pr)
-    thread_nodes, review_requests, requested_at = _threads_and_review_requests(
-        repo.owner.login, repo.name, pr
-    )
+    thread_nodes, review_requests, requested_at = _threads_and_review_requests(pr)
     # Bot-typed requests only surface through GraphQL (see _THREADS_QUERY);
     # the node shape ({login} / {slug}) is what _requested_logins consumes.
     meta["reviewRequests"] = review_requests
@@ -384,10 +403,11 @@ def gather(pr: int, roster: Roster) -> ReadinessView:
         # The PR identity's repo — the typed adapter read above (ADR-0024/PROC03).
         repo=repo,
         meta=meta,
-        reviews_json=gh.rest(f"{base}/pulls/{pr}/reviews", paginate=True) or [],
+        reviews_json=gh.rest(f"{base}/pulls/{pr.number}/reviews", paginate=True) or [],
         thread_nodes=thread_nodes,
-        reactions=gh.rest(f"{base}/issues/{pr}/reactions", paginate=True) or [],
-        issue_comments=gh.rest(f"{base}/issues/{pr}/comments", paginate=True) or [],
+        reactions=gh.rest(f"{base}/issues/{pr.number}/reactions", paginate=True) or [],
+        issue_comments=gh.rest(f"{base}/issues/{pr.number}/comments", paginate=True)
+        or [],
         roster=roster,
         # The App `review_requested` edge times — resolved at the build edge and
         # threaded on so the engine ages the wait window off the snapshot, never
@@ -404,13 +424,13 @@ def gather(pr: int, roster: Roster) -> ReadinessView:
     duration_ms = int((time.monotonic() - start) * 1000)
     logger.info(
         "pr#%s snapshot gathered in %dms (%d review(s), %d thread(s), %d check(s))",
-        pr,
+        pr.number,
         duration_ms,
         len(ctx.reviews),
         len(ctx.threads),
         len(ctx.checks),
         extra={
-            "pr": pr,
+            "pr": pr.number,
             "duration_ms": duration_ms,
             "reviews": len(ctx.reviews),
             "threads": len(ctx.threads),

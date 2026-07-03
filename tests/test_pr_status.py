@@ -14,11 +14,18 @@ import json
 import pytest
 
 from shipit import cli
-from shipit.execrun import ExecError, ExecResult
-from shipit import gh
+from shipit.execrun import ExecError
+from shipit.identity import repo_from_slug
+from shipit.pr import PrId
 from shipit.prstate.state import ChecksState, TaskState, TaskStatus
 from shipit.prstate.roster import Roster
 from shipit.verbs.pr import status as status_verb
+
+# The typed PR target (CLI01-WS02 / ADR-0030): gh.resolve_pr mints a PrId at
+# the runtime boundary — repo from the root context, number explicit or from
+# the branch. The resolver itself is unit-tested at its gh-adapter home
+# (test_gh_resolve_pr.py, CLI01-WS03).
+REPO = repo_from_slug("owner/repo")
 
 # The exact JSON field set `pr status --json` must emit.
 EXPECTED_JSON_FIELDS = {
@@ -53,14 +60,19 @@ def _fake_status(pr: int) -> TaskStatus:
 
 @pytest.fixture
 def patched(monkeypatch):
-    """Stub the boundary: resolver -> PR 42 (or the explicit arg), gather carries
-    the PR through, evaluate builds the status off it. No network."""
-    monkeypatch.setattr(
-        status_verb, "resolve_pr", lambda pr: pr if pr is not None else 42
-    )
-    monkeypatch.setattr(status_verb, "gather", lambda pr, roster: pr)
+    """Stub the boundary: resolver -> the typed PrId target (42, or the explicit
+    arg), gather carries the target through, evaluate builds the status off it.
+    No network — and the CLI path proves the repo half arrives from the root
+    context (resolve_pr receives a real Repo, never re-derives one)."""
+
+    def resolve(pr, repo):
+        assert repo is not None  # the ambient identity arrived at the boundary
+        return PrId(repo=repo, number=pr if pr is not None else 42)
+
+    monkeypatch.setattr(status_verb, "resolve_pr", resolve)
+    monkeypatch.setattr(status_verb, "gather", lambda target, roster: target)
     monkeypatch.setattr(status_verb, "load_roster", lambda: Roster())
-    monkeypatch.setattr(status_verb, "evaluate", lambda ctx: _fake_status(ctx))
+    monkeypatch.setattr(status_verb, "evaluate", lambda ctx: _fake_status(ctx.number))
 
 
 def test_pr_group_registered(capsys):
@@ -153,7 +165,7 @@ def test_status_explicit_pr_argument(patched, capsys):
 
 def test_no_pr_is_normal_exit_zero(monkeypatch, capsys):
     """A branch with no PR is a normal state (exit 0), not an error."""
-    monkeypatch.setattr(status_verb, "resolve_pr", lambda pr: None)
+    monkeypatch.setattr(status_verb, "resolve_pr", lambda pr, repo: None)
     rc = cli.main(["pr", "status", "--json"])
     assert rc == 0
     payload = json.loads(capsys.readouterr().out)
@@ -165,9 +177,11 @@ def test_gh_failure_on_known_pr_is_runtime_tier_error_exit_1(monkeypatch, capsys
     """A gh/auth failure while reading a KNOWN PR is the RUNTIME tier of the
     two-tier exit contract: the shared error shell renders one uniform
     `error: …` stderr line and exits 1 (asserted exactly, not just non-zero)."""
-    monkeypatch.setattr(status_verb, "resolve_pr", lambda pr: 42)
+    monkeypatch.setattr(
+        status_verb, "resolve_pr", lambda pr, repo: PrId(repo=repo, number=42)
+    )
 
-    def boom(pr, roster):
+    def boom(target, roster):
         raise ExecError(["gh"], rc=1, stderr="gh exploded")
 
     monkeypatch.setattr(status_verb, "gather", boom)
@@ -183,7 +197,7 @@ def test_gh_failure_during_resolution_is_fatal(monkeypatch, capsys):
     no_pr. The resolver returns None for the genuine "no PR for branch" case, so a
     ExecError reaching the verb is always a real failure (PRD: stderr + non-zero)."""
 
-    def boom(pr):
+    def boom(pr, repo):
         raise ExecError(["gh"], rc=1, stderr="gh auth exploded")
 
     monkeypatch.setattr(status_verb, "resolve_pr", boom)
@@ -204,42 +218,9 @@ def test_malformed_pr_argument_is_usage_tier_exit_2(capsys):
     assert "not-a-number" in err
 
 
-# --- the shared resolver: no-PR vs real failure discrimination ----------------
-
-from shipit.verbs.pr._resolve import resolve_pr  # noqa: E402
-
-
-def test_resolver_explicit_pr_passthrough():
-    assert resolve_pr(7) == 7
-
-
-def _probe_result(rc: int, stdout: str = "", stderr: str = "") -> ExecResult:
-    return ExecResult(argv=("gh",), rc=rc, stdout=stdout, stderr=stderr, duration_ms=1)
-
-
-def test_resolver_no_pr_marker_maps_to_none(monkeypatch):
-    """gh's "no pull requests found for branch" exit is a normal no-PR state -> None."""
-    monkeypatch.setattr(
-        gh,
-        "pr_number_probe",
-        lambda: _probe_result(1, stderr='no pull requests found for branch "x"'),
-    )
-    assert resolve_pr(None) is None
-
-
-def test_resolver_real_gh_error_propagates(monkeypatch):
-    """Any other gh failure becomes an ExecError — never collapsed into None."""
-    monkeypatch.setattr(
-        gh,
-        "pr_number_probe",
-        lambda: _probe_result(1, stderr="could not authenticate"),
-    )
-    with pytest.raises(ExecError):
-        resolve_pr(None)
-
-
-def test_resolver_parses_number(monkeypatch):
-    monkeypatch.setattr(
-        gh, "pr_number_probe", lambda: _probe_result(0, stdout='{"number": 99}')
-    )
-    assert resolve_pr(None) == 99
+def test_nonpositive_pr_argument_is_usage_tier_exit_2(capsys):
+    """Click validates the explicit primitive (ADR-0030): a PR number a PrId
+    could never carry (0) dies at parse as a usage error, not in the verb body."""
+    rc = cli.main(["pr", "status", "0"])
+    assert rc == 2
+    assert "Usage:" in capsys.readouterr().err
