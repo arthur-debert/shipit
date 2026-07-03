@@ -44,6 +44,8 @@ AGY_REVIEW_APP_ID            = { doppler = "AGY_REVIEW_APP_ID" }
 # dogfoods its own local-review backends: `codex` and `agy` post as their App
 # bots and block the flip-to-Ready alongside Copilot. Review-once (rerun defaults
 # OFF): a token-billed local agent re-runs only on explicit opt-in, never per push.
+# The table-level key `round_cap` is RESERVED (not a reviewer): it sets the
+# review-round cap the engine's stopping breaker uses (default 6 when unset).
 [reviewers]
 copilot = {}
 codex = {}
