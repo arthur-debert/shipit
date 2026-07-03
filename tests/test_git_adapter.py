@@ -11,10 +11,18 @@ return an :class:`ExecResult` with the rc under test rather than raising.
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 from shipit import git
-from shipit.execrun import CAUSE_MISSING_BINARY, ExecError, ExecResult
+from shipit.execrun import (
+    CAUSE_EXIT,
+    CAUSE_MISSING_BINARY,
+    CAUSE_TIMEOUT,
+    ExecError,
+    ExecResult,
+)
 from shipit.identity import Sha
 
 
@@ -333,3 +341,139 @@ def test_remote_branch_exists_true_when_exact_ref_among_several(monkeypatch):
 
     monkeypatch.setattr(git, "_git", fake_run)
     assert git.remote_branch_exists("TRE04/umbrella", cwd="/x") is True
+
+
+# --------------------------------------------------------------------------
+# #353 — clone_dissociated fails open on a poisoned --reference donor.
+# The real failure (git 2.54, reference with a split commit-graph chain) is
+# pinned at the seam: the first Exec raises the exact ExecError shape the live
+# diagnosis captured, and the adapter must retry ONCE without --reference.
+# --------------------------------------------------------------------------
+
+
+def _poisoned_clone_error(argv: list[str]) -> ExecError:
+    # The live #353 signature: rc=128, "unable to parse commit" + git's
+    # "Clone succeeded, but checkout failed." epilogue.
+    return ExecError(
+        argv,
+        rc=128,
+        stderr=(
+            "fatal: unable to parse commit " + "a" * 40 + "\n"
+            "warning: Clone succeeded, but checkout failed.\n"
+            "You can inspect what was checked out with 'git status'\n"
+        ),
+        cause=CAUSE_EXIT,
+    )
+
+
+def test_clone_dissociated_retries_full_clone_on_poisoned_reference(
+    monkeypatch, caplog
+):
+    calls: list[list[str]] = []
+
+    def fake(args, *, cwd=None, timeout=None):
+        calls.append(args)
+        if "--reference" in args:
+            raise _poisoned_clone_error(["git", *args])
+        return ""
+
+    monkeypatch.setattr(git, "_git", fake)
+    with caplog.at_level(logging.WARNING, logger="shipit.git"):
+        git.clone_dissociated("https://x/r.git", "/trees/leaf", reference="/ref")
+
+    # Exactly two clones: the referenced attempt, then the bare full clone —
+    # no --reference (the poison) and no --dissociate (meaningless without it).
+    assert calls == [
+        [
+            "clone",
+            "--reference",
+            "/ref",
+            "--dissociate",
+            "https://x/r.git",
+            "/trees/leaf",
+        ],
+        ["clone", "https://x/r.git", "/trees/leaf"],
+    ]
+    # The degradation is narrated at WARNING with the poisoned reference path,
+    # so the trail shows WHY this Tree birth was slow.
+    warning = next(r for r in caplog.records if r.levelno == logging.WARNING)
+    assert "/ref" in warning.getMessage()
+    assert "#353" in warning.getMessage()
+
+
+def test_clone_dissociated_removes_leftover_dest_before_retry(monkeypatch, tmp_path):
+    # git leaves the cloned-but-not-checked-out dest behind on the #353 failure;
+    # the retry must not trip over those leftovers ("destination path already
+    # exists and is not an empty directory").
+    dest = tmp_path / "leaf"
+
+    def fake(args, *, cwd=None, timeout=None):
+        if "--reference" in args:
+            (dest / ".git").mkdir(parents=True)
+            raise _poisoned_clone_error(["git", *args])
+        assert not dest.exists(), "retry must start from a clean dest"
+        return ""
+
+    monkeypatch.setattr(git, "_git", fake)
+    git.clone_dissociated("https://x/r.git", str(dest), reference="/ref")
+
+
+def test_clone_dissociated_propagates_any_other_failure_without_retry(monkeypatch):
+    # A genuinely failed clone (bad URL, auth, no space) is NOT the poisoned-
+    # reference shape: it must propagate untouched, with no second clone attempt.
+    calls: list[list[str]] = []
+
+    def fake(args, *, cwd=None, timeout=None):
+        calls.append(args)
+        raise ExecError(
+            ["git", *args],
+            rc=128,
+            stderr="fatal: repository not found",
+            cause=CAUSE_EXIT,
+        )
+
+    monkeypatch.setattr(git, "_git", fake)
+    with pytest.raises(ExecError):
+        git.clone_dissociated("https://x/nope.git", "/trees/leaf", reference="/ref")
+    assert len(calls) == 1
+
+
+def test_clone_dissociated_never_retries_a_timeout(monkeypatch):
+    # Even marker-looking partial output does not qualify when the child never
+    # exited: retrying a full clone after a 10-minute hang would double the hang.
+    calls: list[list[str]] = []
+
+    def fake(args, *, cwd=None, timeout=None):
+        calls.append(args)
+        raise ExecError(
+            ["git", *args],
+            rc=None,
+            stderr="warning: Clone succeeded, but checkout failed.",
+            cause=CAUSE_TIMEOUT,
+        )
+
+    monkeypatch.setattr(git, "_git", fake)
+    with pytest.raises(ExecError):
+        git.clone_dissociated("https://x/r.git", "/trees/leaf", reference="/ref")
+    assert len(calls) == 1
+
+
+def test_configure_safe_reference_donor_writes_the_four_writer_knobs(monkeypatch):
+    # The suspenders half of #353: BOTH commit-graph write flags AND the auto-
+    # gc/auto-maintenance knobs (the live diagnosis proved the write flags alone
+    # are not enough — `git gc --auto` regenerated the chain regardless).
+    calls: list[tuple[list[str], str | None]] = []
+
+    def fake(args, *, cwd=None, timeout=None):
+        calls.append((args, cwd))
+        return ""
+
+    monkeypatch.setattr(git, "_git", fake)
+    git.configure_safe_reference_donor(cwd="/trees/leaf")
+
+    assert calls == [
+        (["config", "--local", "fetch.writeCommitGraph", "false"], "/trees/leaf"),
+        (["config", "--local", "gc.writeCommitGraph", "false"], "/trees/leaf"),
+        (["config", "--local", "gc.auto", "0"], "/trees/leaf"),
+        (["config", "--local", "maintenance.auto", "false"], "/trees/leaf"),
+    ]
