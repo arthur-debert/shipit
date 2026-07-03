@@ -62,6 +62,13 @@ them out of the epic kept that PR landable. They remain worth doing:
    `backends/__init__.py:29`, `agy.py:50`). The timeout has no such knob: a consumer
    with consistently large diffs cannot raise it without editing code.
 
+   > **Superseded in part (CLI01 / ADR-0030, 2026-07, #334):**
+   > `reviewers_config.reviewer_run_options()` no longer exists — the per-setting
+   > dict resolvers collapsed into the `Roster` value (`prstate/roster.py`),
+   > loaded once at a verb boundary via `reviewers_config.load_roster()`. The
+   > per-reviewer `model`/`instructions`/`timeout` now ride on the roster entry;
+   > re-verify this item's plumbing against the Roster before working it.
+
 ## Solution
 
 Each item is a self-contained fix. They share no code and can ship as four small PRs /
