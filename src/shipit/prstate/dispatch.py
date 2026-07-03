@@ -20,6 +20,11 @@ The mapping is the PRD's "`pr next` behavior" table (prf01-pr-flow.md):
     ready           → flip draft→ready (guarded), then stop
     blocked         → report the real blocker
 
+Failing checks outrank review requests (#352): a red-checks PR never reaches
+the request branch — the engine ranks it BLOCKED (fix CI first) with
+`to_request` suppressed, so `pr next` reports the CI fix instead of burning
+token-billed reviews on a head that is about to change.
+
 The split that keeps this a deep module: :func:`dispatch` decides WHICH act and
 with WHAT message from the (already-computed) `TaskStatus`; the `Acts` boundary
 decides HOW to carry it out (talk to `gh`). The decision never branches on a
