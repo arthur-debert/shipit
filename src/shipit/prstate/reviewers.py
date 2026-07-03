@@ -824,3 +824,36 @@ def by_name(name: str) -> ReviewerAdapter | None:
         if r.name == name.lower():
             return r
     return None
+
+
+def resolve_reviewer(name: str) -> ReviewerAdapter:
+    """Resolve a ``--reviewer`` selector to its ONE adapter, or refuse loud.
+
+    The reviewer-name resolution the `pr review request` scope uses (CLI01-WS03
+    promoted it out of the verb: which adapter a name means is registry
+    knowledge, not click glue). Two spellings resolve:
+
+      * the adapter registry name (``copilot``, ``codex``, …) via :func:`by_name`;
+      * the PRD/glossary spelling of a local-agent reviewer (``codex-local`` /
+        ``agy-local``) — a REGISTRY LOOKUP, not a string parse (COR02-WS03): the
+        name resolves through :func:`shipit.agent.backend.by_check_run_name` —
+        the inverse of the registry's ``check_run_name`` alias — so only a real
+        funnel backend's reviewer name is reachable this way (``copilot-local``
+        matches no registry entry and does not alias to ``copilot``: the alias
+        names the local-agent reviewer family specifically).
+
+    An unknown name raises :class:`~shipit.prstate.errors.PrStateError` naming
+    the known reviewers — a typo never silently drops a request.
+    """
+    adapter = by_name(name)
+    if adapter is None:
+        try:
+            backend = _agent_backend.by_check_run_name(name)
+        except KeyError:
+            backend = None
+        if backend is not None:
+            adapter = by_name(backend.funnel_agent or backend.name)
+    if adapter is None:
+        known = ", ".join(r.name for r in REGISTRY)
+        raise PrStateError(f"unknown reviewer {name!r} (known: {known})")
+    return adapter

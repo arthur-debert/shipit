@@ -7,8 +7,12 @@ line. WS05 (``review``) and WS06 (``next``/``ready``) each add one ``from .``
 import + one ``pr.add_command(...)`` line, so concurrent work streams touch
 disjoint lines and don't conflict.
 
-The shared PR-resolution helper lives in :mod:`._resolve` (``resolve_pr``) so
-every verb resolves the target PR identically.
+Verb modules are ADR-0030 glue + renderers only (CLI01-WS03): the shared
+PR-target resolver lives at the gh adapter (:func:`shipit.gh.resolve_pr`), the
+pr-flow services in the PR state engine (:mod:`shipit.prstate.request` /
+:mod:`.flip` / :mod:`.dispatch`), and the shared status renderer in
+:mod:`._format` — so every verb resolves, acts, and renders identically and no
+verb imports another verb's module.
 """
 
 from __future__ import annotations

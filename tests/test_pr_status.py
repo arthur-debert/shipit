@@ -14,16 +14,16 @@ import json
 import pytest
 
 from shipit import cli
-from shipit.execrun import ExecError, ExecResult
-from shipit import gh
+from shipit.execrun import ExecError
 from shipit.identity import repo_from_slug
 from shipit.pr import PrId
-from shipit.prstate.errors import PrStateError
 from shipit.prstate.state import ChecksState, TaskState, TaskStatus
 from shipit.verbs.pr import status as status_verb
 
-# The typed PR target (CLI01-WS02 / ADR-0030): resolve_pr mints a PrId at the
-# verb boundary — repo from the root context, number explicit or from the branch.
+# The typed PR target (CLI01-WS02 / ADR-0030): gh.resolve_pr mints a PrId at
+# the runtime boundary — repo from the root context, number explicit or from
+# the branch. The resolver itself is unit-tested at its gh-adapter home
+# (test_gh_resolve_pr.py, CLI01-WS03).
 REPO = repo_from_slug("owner/repo")
 
 # The exact JSON field set `pr status --json` must emit.
@@ -225,69 +225,3 @@ def test_nonpositive_pr_argument_is_usage_tier_exit_2(capsys):
     rc = cli.main(["pr", "status", "0"])
     assert rc == 2
     assert "Usage:" in capsys.readouterr().err
-
-
-# --- the shared resolver: no-PR vs real failure discrimination ----------------
-
-from shipit.verbs.pr._resolve import resolve_pr  # noqa: E402
-
-
-def test_resolver_explicit_pr_mints_the_typed_target():
-    # The resolver is where the PrId is MINTED (ADR-0030): explicit number +
-    # the root context's repo become the one typed target the services take.
-    assert resolve_pr(7, REPO) == PrId(repo=REPO, number=7)
-
-
-def test_resolver_rejects_a_corrupt_explicit_number():
-    # Construction-is-validation rides the mint: a non-positive number can
-    # never become a PR target.
-    with pytest.raises(ValueError, match="number"):
-        resolve_pr(0, REPO)
-
-
-def _probe_result(rc: int, stdout: str = "", stderr: str = "") -> ExecResult:
-    return ExecResult(argv=("gh",), rc=rc, stdout=stdout, stderr=stderr, duration_ms=1)
-
-
-def test_resolver_no_pr_marker_maps_to_none(monkeypatch):
-    """gh's "no pull requests found for branch" exit is a normal no-PR state -> None."""
-    monkeypatch.setattr(
-        gh,
-        "pr_number_probe",
-        lambda: _probe_result(1, stderr='no pull requests found for branch "x"'),
-    )
-    assert resolve_pr(None, REPO) is None
-
-
-def test_resolver_real_gh_error_propagates(monkeypatch):
-    """Any other gh failure becomes an ExecError — never collapsed into None."""
-    monkeypatch.setattr(
-        gh,
-        "pr_number_probe",
-        lambda: _probe_result(1, stderr="could not authenticate"),
-    )
-    with pytest.raises(ExecError):
-        resolve_pr(None, REPO)
-
-
-def test_resolver_parses_number_into_the_typed_target(monkeypatch):
-    monkeypatch.setattr(
-        gh, "pr_number_probe", lambda: _probe_result(0, stdout='{"number": 99}')
-    )
-    assert resolve_pr(None, REPO) == PrId(repo=REPO, number=99)
-
-
-@pytest.mark.parametrize("wire_number", ['"99"', "7.0", "true"])
-def test_resolver_rejects_a_malformed_wire_number(monkeypatch, wire_number):
-    # The wire read mints through PrId with NO coercion: a stringy/float/bool
-    # `number` from unexpected `gh` output would slip past a silent `int(...)`
-    # and mint the wrong target, so construction-is-validation (ADR-0030) must
-    # reject it here at the one wire read — surfaced as a PrStateError like the
-    # unparseable-JSON case.
-    monkeypatch.setattr(
-        gh,
-        "pr_number_probe",
-        lambda: _probe_result(0, stdout=f'{{"number": {wire_number}}}'),
-    )
-    with pytest.raises(PrStateError, match="number"):
-        resolve_pr(None, REPO)

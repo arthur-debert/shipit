@@ -619,9 +619,9 @@ def pr_for_head(branch: str, *, cwd: str | None = None) -> HeadPr | None | Unkno
 #: PR — the one failure that is a provable *absence*, not an undetermined state
 #: (the exit code is a bare ``1`` for both cases, so the stderr message is the
 #: only signal). Matched narrowly on purpose so an unrelated failure is never
-#: mistaken for a provable absence. Public: ``verbs/pr/_resolve.py`` keys on
-#: the SAME marker when branching on :func:`pr_number_probe`'s result, so the
-#: per-tool knowledge is written down exactly once.
+#: mistaken for a provable absence. :func:`resolve_pr` keys on the SAME marker
+#: when branching on :func:`pr_number_probe`'s result, so the per-tool
+#: knowledge is written down exactly once.
 NO_PR_MARKER = "no pull requests found for branch"
 
 
@@ -630,13 +630,83 @@ def pr_number_probe() -> execrun.ExecResult:
 
     The mechanics half of "which PR am I on?" — the argv lives here (ADR-0028:
     gh argv built outside the adapter is a defect) while the three-way
-    branching (a number / provably no PR / a real gh failure) stays with the
-    verb-layer resolver (``verbs/pr/_resolve``), which keys the no-PR case on
-    :data:`NO_PR_MARKER` in the result's stderr. A probe because a PR-less
-    branch is this call's NORMAL answer on every bare ``pr`` verb (records at
-    DEBUG, never a spurious ERROR).
+    branching (a number / provably no PR / a real gh failure) lives with
+    :func:`resolve_pr`, which keys the no-PR case on :data:`NO_PR_MARKER` in
+    the result's stderr. A probe because a PR-less branch is this call's
+    NORMAL answer on every bare ``pr`` verb (records at DEBUG, never a
+    spurious ERROR).
     """
     return _run_probe(["gh", "pr", "view", "--json", "number"])
+
+
+def resolve_pr(number: int | None, repo: Repo) -> PrId | None:
+    """The typed PR target: the given number, or the current branch's PR
+    (``None`` if there is none) — minted into a :class:`~shipit.pr.PrId`.
+
+    The PR-target resolver every ``pr`` verb shares (ADR-0030's deliberate
+    exception: click validates only the explicit primitive; "which PR" is a
+    runtime boundary call, because "no PR for this branch" is a runtime
+    outcome, not a usage error). It lives HERE, at the gh adapter (CLI01-WS03
+    promoted it out of ``verbs/pr/``), because it is per-tool knowledge over
+    :func:`pr_number_probe`'s answer — the three outcomes are kept DISTINCT so
+    callers never have to swallow errors to find them:
+
+      * an explicit / resolved PR number  -> minted into a ``PrId``
+      * the branch genuinely has no PR    -> ``None`` (a normal state, not an error)
+      * a real gh/auth failure            -> raises ``execrun.ExecError``
+
+    ``repo`` is the identity half of the target — the caller's ambient repo
+    from the root context (or an explicit override), never re-derived here. An
+    explicit ``number`` is minted directly. The no-PR case is teased apart
+    from a genuine failure by ``gh``'s own signal (:data:`NO_PR_MARKER`);
+    every other failure (missing gh, auth, transient API error) becomes an
+    :class:`~shipit.execrun.ExecError` so a verb can surface it as a clean
+    stderr + non-zero exit per the PRD. A read-only verb maps ``None`` to
+    ``no_pr``; a mutating verb treats both ``None`` and ``ExecError`` as fatal
+    — but each decides, because the cases arrive distinct.
+    """
+    from .pr import PrId
+
+    if number is not None:
+        return PrId(repo=repo, number=number)
+    result = pr_number_probe()
+    if result.rc != 0:
+        # "no PR for this branch" is a normal state, not a failure: gh exits
+        # non-zero with NO_PR_MARKER (per-tool knowledge written down once,
+        # above). Anything else is a real gh/auth failure — surface the failed
+        # Exec as its transport error (pre-redacted by the ExecError
+        # constructor), never collapse it into None.
+        if NO_PR_MARKER in result.stderr.lower():
+            return None
+        raise ExecError(
+            result.argv,
+            rc=result.rc,
+            stdout=result.stdout,
+            stderr=result.stderr,
+            duration_ms=result.duration_ms,
+        )
+    out = result.stdout
+    if not out.strip():
+        # Defensive: a non-erroring empty body also means no PR.
+        return None
+    try:
+        data = json.loads(out)
+    except json.JSONDecodeError as exc:
+        raise PrStateError(f"unparseable `gh pr view` output: {exc}") from exc
+    resolved = data.get("number")
+    if resolved is None:
+        return None
+    # Pass the raw wire value straight into PrId — its construction IS the
+    # validation (exact-int, positive, ADR-0030), the same discipline the
+    # sibling wire boundary `pr.core_from_node` applies. A silent `int(resolved)`
+    # coercion here would defeat that invariant, accepting a `"99"`/`7.0`/`True`
+    # from unexpected `gh` output and minting the wrong PR target. Re-raise with
+    # the wire context so a malformed number dies at this read, like the JSON
+    # decode above.
+    try:
+        return PrId(repo=repo, number=resolved)
+    except ValueError as exc:
+        raise PrStateError(f"malformed `gh pr view` number: {exc}") from exc
 
 
 def pr_url_for_head(branch: str, *, cwd: str | None = None) -> str | None:

@@ -1,5 +1,5 @@
 """Request (or re-request) reviewers and VERIFY the request attached — the
-reusable, boundary-injected helper shared across `pr` verbs.
+reviewer-request SERVICE of the PR state engine.
 
 This is the extraction of release's `#614` attach-verify logic (release's
 `cli/review.py`) into a composable function with NO click/CLI concerns: it takes
@@ -11,11 +11,13 @@ edge actually exists — failing loud (via the returned result) when GitHub
 silently drops an attach, so a dropped request never parks the PR invisibly at
 reviews-pending.
 
-Why a separate helper (not buried in the verb): WS05's `pr review request` AND
-WS06's `pr next` both need to "request the pending required reviewers and make
-sure it stuck". Keeping the request+verify here — pure orchestration over an
-injected boundary — lets both call it and lets it be unit-tested without the
-network or click.
+Why a domain service (not buried in a verb — CLI01-WS03 promoted it out of
+``verbs/pr/``): `pr review request` AND `pr next`'s request act both need to
+"request the pending required reviewers and make sure it stuck". Keeping the
+request+verify here — pure orchestration over an injected boundary — lets both
+call it and lets it be unit-tested without the network or click. Each outcome
+leaves its durable log twin HERE, where the act happens (ADR-0029); the verbs
+only render the returned :class:`RequestResult`.
 
 The split that makes #614 correct (carried over verbatim from release):
 
@@ -40,14 +42,20 @@ fakes GitHub deterministically; the default wires the real engine functions.
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
-from ...pr import PrId
-from ...prstate import fetch as _fetch
-from ...prstate.model import ReviewLifecycle
-from ...prstate.reviewers import ReviewerAdapter
+from ..pr import PrId
+from . import fetch as _fetch
+from .model import ReviewLifecycle
+from .reviewers import ReviewerAdapter
+
+#: The engine's logger (shared name across :mod:`shipit.prstate`): each
+#: reviewer-request outcome is a lifecycle fact, recorded at the service that
+#: produced it (LOG02 / ADR-0029) — the verb's print is only the rendering.
+logger = logging.getLogger("shipit.prstate")
 
 # Attach-verification poll (release#614). The request edge is normally created
 # synchronously — the first check usually verifies; the later checks absorb
@@ -114,7 +122,7 @@ class RequestResult:
 
 
 @dataclass
-class _Boundary:
+class Boundary:
     """The injected GitHub read side. Defaults wire the real engine functions;
     a test swaps in fakes so the poll runs without the network."""
 
@@ -125,12 +133,61 @@ class _Boundary:
     sleep: Callable[[float], None] = time.sleep
 
 
+def _record(result: RequestResult, pr: PrId, name: str, status: str) -> None:
+    """Append one outcome AND leave its durable log twin (LOG02 convergence).
+
+    The transitions that moved something (verified, in-flight) are INFO
+    milestones, the deliberate non-acts (skip, no-op) are DEBUG mechanics, and
+    a dropped request is a WARNING — degraded, surfaced to the caller via the
+    result's ``ok=False`` rather than an exception. Every record carries the
+    flat ``pr``/``reviewer`` keys so the story stays jq-sliceable.
+    """
+    result.outcomes.append(ReviewerOutcome(name, status))
+    extra = {"pr": pr.number, "reviewer": name}
+    if status == "verified":
+        logger.info(
+            "review request from %s attached on pr#%s (verified)",
+            name,
+            pr.number,
+            extra=extra,
+        )
+    elif status == "in_flight":
+        logger.info(
+            "review in flight from %s on pr#%s (detached)",
+            name,
+            pr.number,
+            extra=extra,
+        )
+    elif status == "dropped":
+        logger.warning(
+            "review request from %s dropped by GitHub on pr#%s — no "
+            "review_requested edge created",
+            name,
+            pr.number,
+            extra=extra,
+        )
+    elif status == "skipped":
+        logger.debug(
+            "reviewer %s already reviewed pr#%s (review-once) — skipped",
+            name,
+            pr.number,
+            extra=extra,
+        )
+    else:  # no_op
+        logger.debug(
+            "reviewer %s auto-triggers on pr#%s — no request mechanism, no-op",
+            name,
+            pr.number,
+            extra=extra,
+        )
+
+
 def request_reviewers(
     pr: PrId,
     adapters: Sequence[ReviewerAdapter],
     *,
     force: bool = False,
-    boundary: _Boundary | None = None,
+    boundary: Boundary | None = None,
     checks: int = ATTACH_VERIFY_CHECKS,
     interval_seconds: float = ATTACH_VERIFY_INTERVAL_SECONDS,
 ) -> RequestResult:
@@ -152,7 +209,7 @@ def request_reviewers(
     clean stderr + non-zero exit, exactly as the read verbs do. This helper never
     swallows a boundary failure into a false success.
     """
-    bound = boundary or _Boundary()
+    bound = boundary or Boundary()
     result = RequestResult()
 
     targets = list(adapters)
@@ -178,10 +235,10 @@ def request_reviewers(
             else:
                 # Local reviewer: request() detached an async review (OBS03) — it
                 # is now in-flight; there is no edge to poll.
-                result.outcomes.append(ReviewerOutcome(adapter.name, "in_flight"))
+                _record(result, pr, adapter.name, "in_flight")
         else:
             # No request mechanism (auto-triggering backend) — a no-op.
-            result.outcomes.append(ReviewerOutcome(adapter.name, "no_op"))
+            _record(result, pr, adapter.name, "no_op")
 
     dropped = _verify_attached(
         pr,
@@ -193,7 +250,7 @@ def request_reviewers(
     )
     for adapter in remote_placed:
         status = "dropped" if adapter in dropped else "verified"
-        result.outcomes.append(ReviewerOutcome(adapter.name, status))
+        _record(result, pr, adapter.name, status)
     return result
 
 
@@ -201,7 +258,7 @@ def _drop_already_done(
     pr: PrId,
     adapters: list[ReviewerAdapter],
     result: RequestResult,
-    boundary: _Boundary,
+    boundary: Boundary,
 ) -> list[ReviewerAdapter]:
     """Return the adapters NOT already DONE on `pr`, recording each skip.
 
@@ -215,7 +272,7 @@ def _drop_already_done(
     keep: list[ReviewerAdapter] = []
     for adapter in adapters:
         if adapter.detect(ctx) in _DONE_LIFECYCLES:
-            result.outcomes.append(ReviewerOutcome(adapter.name, "skipped"))
+            _record(result, pr, adapter.name, "skipped")
         else:
             keep.append(adapter)
     return keep
@@ -226,7 +283,7 @@ def _verify_attached(
     placed: list[ReviewerAdapter],
     *,
     baseline_ids: set[int],
-    boundary: _Boundary,
+    boundary: Boundary,
     checks: int,
     interval_seconds: float,
 ) -> list[ReviewerAdapter]:
