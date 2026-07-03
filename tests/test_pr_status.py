@@ -1,9 +1,10 @@
-"""Smoke tests for the `shipit pr status` CLI surface.
+"""Smoke tests for the `shipit pr status` CLI surface (through the ADR-0030 seam).
 
-These prove the WIRING (group + verb registered, JSON field set, text render,
-error -> non-zero exit) — NOT the engine's state logic, which is unit-tested
-directly in the prstate suite. The boundary (`gather` / `evaluate` / the PR
-resolver) is monkeypatched so there is no network.
+These prove the WIRING (group + verb registered, JSON field set, the pure
+`format_status` renderer, the two-tier exit contract: usage -> 2, runtime ->
+`error:` + 1) — NOT the engine's state logic, which is unit-tested directly in
+the prstate suite. The boundary (`gather` / `evaluate` / the PR resolver) is
+monkeypatched so there is no network.
 """
 
 from __future__ import annotations
@@ -100,9 +101,10 @@ def test_status_text_renders_state_and_next_action(patched, capsys):
     assert "run `pr ready`" in out
 
 
-def test_status_text_annotates_degraded_on_the_state_line(capsys):
+def test_format_status_annotates_degraded_on_the_state_line():
     """A clean-but-degraded PR reports "ready (degraded: codex-local failed)" inline
-    on the state line AND on a dedicated degraded line (OBS04-WS02 / ADR-0006)."""
+    on the state line AND on a dedicated degraded line (OBS04-WS02 / ADR-0006).
+    Asserted on the PURE renderer's return value — the ADR-0030 render seam."""
     status = TaskStatus(
         state=TaskState.READY,
         next_action="run `pr ready`",
@@ -112,21 +114,32 @@ def test_status_text_annotates_degraded_on_the_state_line(capsys):
         mergeable="MERGEABLE",
         degraded={"codex-local": "failed"},
     )
-    status_verb._emit(status, as_json=False)
-    out = capsys.readouterr().out
+    out = status_verb.format_status(status)
     assert "ready (degraded: codex-local failed)" in out
     assert "degraded:   codex-local failed" in out
 
 
+def test_format_status_renders_no_pr_as_the_short_two_line_form():
+    """The pure renderer's no_pr shape: state + next action, nothing else."""
+    from shipit.prstate.state import no_pr
+
+    out = status_verb.format_status(no_pr())
+    assert out.startswith("state:  no_pr\nnext:   ")
+    assert "reviewers" not in out
+
+
 def test_status_json_carries_the_structured_degraded_set(capsys):
-    """The degraded set rides the JSON surface as a structured map (name → why)."""
+    """The degraded set rides the JSON surface as a structured map (name → why),
+    serialized by the shared render seam from the result's to_dict()."""
+    from shipit.verbs._render import emit
+
     status = TaskStatus(
         state=TaskState.READY,
         next_action="run `pr ready`",
         pr=42,
         degraded={"codex-local": "timed_out"},
     )
-    status_verb._emit(status, as_json=True)
+    emit(status, status_verb.format_status, as_json=True)
     assert json.loads(capsys.readouterr().out)["degraded"] == {
         "codex-local": "timed_out"
     }
@@ -149,8 +162,10 @@ def test_no_pr_is_normal_exit_zero(monkeypatch, capsys):
     assert payload["pr"] is None
 
 
-def test_gh_failure_on_known_pr_exits_nonzero(monkeypatch, capsys):
-    """A gh/auth failure while reading a KNOWN PR surfaces as stderr + non-zero."""
+def test_gh_failure_on_known_pr_is_runtime_tier_error_exit_1(monkeypatch, capsys):
+    """A gh/auth failure while reading a KNOWN PR is the RUNTIME tier of the
+    two-tier exit contract: the shared error shell renders one uniform
+    `error: …` stderr line and exits 1 (asserted exactly, not just non-zero)."""
     monkeypatch.setattr(status_verb, "resolve_pr", lambda pr: 42)
 
     def boom(pr):
@@ -158,8 +173,10 @@ def test_gh_failure_on_known_pr_exits_nonzero(monkeypatch, capsys):
 
     monkeypatch.setattr(status_verb, "gather", boom)
     rc = cli.main(["pr", "status"])
-    assert rc != 0
-    assert "gh exploded" in capsys.readouterr().err
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert err.startswith("error: ")
+    assert "gh exploded" in err
 
 
 def test_gh_failure_during_resolution_is_fatal(monkeypatch, capsys):
@@ -172,8 +189,20 @@ def test_gh_failure_during_resolution_is_fatal(monkeypatch, capsys):
 
     monkeypatch.setattr(status_verb, "resolve_pr", boom)
     rc = cli.main(["pr", "status"])
-    assert rc != 0
-    assert "gh auth exploded" in capsys.readouterr().err
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert err.startswith("error: ")
+    assert "gh auth exploded" in err
+
+
+def test_malformed_pr_argument_is_usage_tier_exit_2(capsys):
+    """The USAGE tier: a non-integer PR argument dies at click's parse with a
+    usage message and exit 2 — it never reaches the verb body (ADR-0030)."""
+    rc = cli.main(["pr", "status", "not-a-number"])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "Usage:" in err
+    assert "not-a-number" in err
 
 
 # --- the shared resolver: no-PR vs real failure discrimination ----------------

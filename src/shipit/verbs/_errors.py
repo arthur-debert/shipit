@@ -1,0 +1,64 @@
+"""The CLI error shell (ADR-0030) — the runtime half of the two-tier exit contract.
+
+One of the four seam pieces: ONE decorator, :func:`cli_errors`, wraps each
+verb's ``run()`` and maps the known runtime exception set to a uniform
+``error: …`` line on stderr + exit 1 — replacing the per-verb copies of the
+same ``try/except`` block, so verb modules contain no error-mapping
+boilerplate.
+
+The two tiers (ADR-0030):
+
+- **exit 2 — usage.** Argument errors, raised at parse and owned by click
+  (the :mod:`._params` types fail there); they never reach this shell.
+- **exit 1 — runtime.** The known exception set below, mapped here.
+- **exit 0 — success.** The verb's own return.
+
+Hook verbs are exempt — their fail-open/fail-closed canon is untouched, so
+they never wear this decorator. An exception OUTSIDE the known set is a bug,
+not an outcome: it propagates as a loud traceback rather than being dressed
+up as a clean failure.
+"""
+
+from __future__ import annotations
+
+import functools
+import sys
+from typing import Callable
+
+from .. import execrun
+from ..config import ConfigError
+from ..prstate.errors import PrStateError
+from ..prstate.reviewers_config import RequiredReviewersConfigError
+from ._context import NoAmbientRepoError
+
+#: The KNOWN runtime exception set — a failed boundary exec, a PR-state
+#: violation, malformed/invalid config (both spellings), and the domain
+#: refusals the seam itself raises (the outside-a-checkout refusal). Extended
+#: deliberately, one entry per new domain refusal, as verbs adopt the shell.
+KNOWN_ERRORS: tuple[type[Exception], ...] = (
+    execrun.ExecError,
+    PrStateError,
+    ConfigError,
+    RequiredReviewersConfigError,
+    NoAmbientRepoError,
+)
+
+
+def cli_errors(run: Callable[..., int]) -> Callable[..., int]:
+    """Wrap a verb's ``run()`` in the uniform runtime-failure mapping.
+
+    On a :data:`KNOWN_ERRORS` exception: one ``error: {exc}`` line to stderr,
+    return 1. Everything else — including the return value on success — passes
+    through untouched. The wrapped function keeps its signature, so direct
+    (non-click) callers and tests drive it exactly like the bare ``run()``.
+    """
+
+    @functools.wraps(run)
+    def wrapper(*args, **kwargs) -> int:
+        try:
+            return run(*args, **kwargs)
+        except KNOWN_ERRORS as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+
+    return wrapper
