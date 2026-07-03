@@ -28,6 +28,7 @@ from typing import Callable, ParamSpec
 from .. import execrun
 from ..config import ConfigError
 from ..prstate.errors import PrStateError
+from ..prstate.flip import NotReady
 from ..prstate.reviewers_config import RequiredReviewersConfigError
 from ._context import NoAmbientRepoError
 
@@ -37,14 +38,16 @@ P = ParamSpec("P")
 
 #: The KNOWN runtime exception set — a failed boundary exec, a PR-state
 #: violation, malformed/invalid config (both spellings), and the domain
-#: refusals the seam itself raises (the outside-a-checkout refusal). Extended
-#: deliberately, one entry per new domain refusal, as verbs adopt the shell.
+#: refusals: the outside-a-checkout refusal the seam itself raises, and the
+#: engine's refused draft→ready flip (CLI01-WS03). Extended deliberately, one
+#: entry per new domain refusal, as verbs adopt the shell.
 KNOWN_ERRORS: tuple[type[Exception], ...] = (
     execrun.ExecError,
     PrStateError,
     ConfigError,
     RequiredReviewersConfigError,
     NoAmbientRepoError,
+    NotReady,
 )
 
 

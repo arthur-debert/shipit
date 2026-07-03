@@ -13,7 +13,7 @@ import sys
 import click
 
 from . import __version__, logcontext
-from .logsetup import configure_logging
+from .logsetup import configure_logging, reset_logging
 from .verbs import gh_setup, install, lint, logs, verify_apps
 from .verbs._context import resolve_root_context
 from .verbs.eval import eval_group
@@ -60,6 +60,12 @@ def root(ctx: click.Context, verbose: bool) -> None:
     ``SHIPIT_LOG_CTX_*`` key (rebound inside ``configure_logging``, the child
     half of the seam) deliberately wins over this best-effort cwd resolution.
     """
+    # Start from a clean slate: detach any sinks a prior in-process invocation
+    # left attached, so identity resolution below runs quiet (its bootstrap
+    # `exec` DEBUG records must not leak to a stale stderr sink) before
+    # `configure_logging` re-wires this invocation's own. A no-op in a one-shot
+    # production process; load-bearing when invocations share a process.
+    reset_logging()
     root_ctx = resolve_root_context()
     ctx.obj = root_ctx
     repo = root_ctx.repo

@@ -1,17 +1,11 @@
-"""Tests for `shipit pr review request` + the shared `_request` attach-verify
-helper.
+"""Smoke tests for the `shipit pr review request` CLI surface — glue + renderers.
 
-Two layers, matching the WS05 split:
-
-  * the reusable `_request.request_reviewers` helper, unit-tested with an
-    INJECTED/FAKED boundary (no network, no real `gh`): it confirms a remote
-    request attached; it reports `dropped` (→ not-ok) when GitHub silently drops
-    the edge; a bare run skips reviewers already DONE; `force=True` requests one
-    regardless of state.
-  * the `pr review request` CLI verb: the local-agent guard surfaces as a clean
-    error (non-zero), and a smoke test proves the subgroup + command are wired.
-
-The engine itself (adapter detection, the state machine) is NOT re-tested here.
+The reviewer-request service (attach-verify, bare-run skip) is the engine's
+(`shipit.prstate.request`, unit-tested in test_prstate_request.py); these prove
+the verb WIRING: scope selection through the registry, resolve → request →
+render through the seam, and the failure paths (unknown reviewer, no PR, gh
+failure, dropped edge) surfacing as the one uniform ``error: …`` + exit 1 via
+the shared shell. The engine itself is NOT re-tested here.
 """
 
 from __future__ import annotations
@@ -19,208 +13,19 @@ from __future__ import annotations
 import pytest
 
 from shipit import cli
+from shipit.execrun import ExecError
 from shipit.identity import repo_from_slug
 from shipit.pr import PrId
-from shipit.prstate.model import ReviewLifecycle
-from shipit.prstate.reviewers import ReviewerAdapter
-from shipit.verbs.pr import _request, review as review_verb
-from shipit.execrun import ExecError
-from shipit.verbs.pr._request import (
-    ReviewerOutcome,
-    _Boundary,
-    request_reviewers,
-)
+from shipit.prstate.request import RequestResult, ReviewerOutcome
+from shipit.verbs.pr import review as review_verb
 
-# The typed PR target (CLI01-WS02 / ADR-0030): the helper and the verb thread a
-# PrId — repo + number as ONE value — never a bare int.
+# The typed PR target (CLI01-WS02 / ADR-0030): the verb threads a PrId — repo +
+# number as ONE value — never a bare int.
 REPO = repo_from_slug("owner/repo")
 TARGET = PrId(repo=REPO, number=7)
 
 
-# --- test doubles -------------------------------------------------------------
-
-
-class _FakeAdapter(ReviewerAdapter):
-    """A controllable adapter: declares its edge model + lifecycle, records the
-    request call, and reports placement via `request_returns`."""
-
-    def __init__(
-        self,
-        name: str,
-        *,
-        has_edge: bool = True,
-        request_returns: bool = True,
-        lifecycle: ReviewLifecycle = ReviewLifecycle.NOT_REQUESTED,
-    ) -> None:
-        self.name = name
-        self.has_requested_edge = has_edge
-        self._request_returns = request_returns
-        self._lifecycle = lifecycle
-        self.requested_with: list[PrId] = []
-
-    def matches(self, login: str) -> bool:
-        return self.name in login.lower()
-
-    def detect(self, ctx) -> ReviewLifecycle:  # noqa: ANN001
-        return self._lifecycle
-
-    def request(self, pr: PrId) -> bool:
-        self.requested_with.append(pr)
-        return self._request_returns
-
-
-def _boundary(
-    *,
-    requested_logins: list[str] | None = None,
-    reviews: list[tuple[int, str]] | None = None,
-) -> _Boundary:
-    """A faked boundary: `attach_state` returns the given pending logins + review
-    tail; `gather_reviews` returns a sentinel ctx (adapters' fake `detect` ignores
-    it); `sleep` is a no-op so the poll runs instantly."""
-    logins = requested_logins or []
-    revs = reviews or []
-    return _Boundary(
-        attach_state=lambda pr: (logins, revs),
-        gather_reviews=lambda pr: object(),
-        sleep=lambda _seconds: None,
-    )
-
-
-# --- the attach-verify helper -------------------------------------------------
-
-
-def test_verifies_when_edge_attaches():
-    """A remote request whose login shows up in pending requests verifies."""
-    adapter = _FakeAdapter("copilot")
-    result = request_reviewers(
-        TARGET,
-        [adapter],
-        force=True,
-        boundary=_boundary(requested_logins=["Copilot"]),
-    )
-    # The adapter received the TYPED target — repo riding on the identity.
-    assert adapter.requested_with == [TARGET]
-    assert result.ok
-    assert result.verified == ["copilot"]
-    assert result.dropped == []
-
-
-def test_verifies_via_fresh_review_when_bot_consumed_request():
-    """A fast bot that submits a fresh review before the poll sees the edge still
-    verifies (the review id is not in the pre-request baseline)."""
-    adapter = _FakeAdapter("copilot")
-    # baseline (first attach_state call, pre-place) is empty; the poll then sees
-    # a NEW review by copilot — fresh, so verified.
-    calls = {"n": 0}
-
-    def attach_state(pr):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            return [], []  # baseline: no reviews yet
-        return [], [(99, "Copilot")]  # poll: fresh review consumed the request
-
-    boundary = _Boundary(
-        attach_state=attach_state,
-        gather_reviews=lambda pr: object(),
-        sleep=lambda s: None,
-    )
-    result = request_reviewers(TARGET, [adapter], force=True, boundary=boundary)
-    assert result.ok
-    assert result.verified == ["copilot"]
-
-
-def test_dropped_when_edge_never_appears():
-    """A silently-dropped attach (edge never appears, no fresh review) is a hard
-    failure: status `dropped`, result not ok."""
-    adapter = _FakeAdapter("copilot")
-    result = request_reviewers(
-        TARGET,
-        [adapter],
-        force=True,
-        boundary=_boundary(requested_logins=[], reviews=[]),
-    )
-    assert not result.ok
-    assert result.dropped == ["copilot"]
-
-
-def test_bare_run_skips_already_done_reviewer():
-    """A bare run drops a reviewer already DONE on the head — never requested."""
-    done = _FakeAdapter("copilot", lifecycle=ReviewLifecycle.DONE_CLEAN)
-    result = request_reviewers(TARGET, [done], force=False, boundary=_boundary())
-    assert done.requested_with == []  # not re-poked
-    assert result.skipped == ["copilot"]
-    assert result.verified == []
-
-
-def test_bare_run_requests_pending_reviewer():
-    """A bare run DOES request a reviewer not yet done, and verifies it."""
-    pending = _FakeAdapter("copilot", lifecycle=ReviewLifecycle.NOT_REQUESTED)
-    result = request_reviewers(
-        TARGET,
-        [pending],
-        force=False,
-        boundary=_boundary(requested_logins=["Copilot"]),
-    )
-    assert pending.requested_with == [TARGET]
-    assert result.verified == ["copilot"]
-
-
-def test_force_requests_already_done_reviewer():
-    """`force=True` (the --reviewer escape hatch) requests even a DONE reviewer."""
-    done = _FakeAdapter("copilot", lifecycle=ReviewLifecycle.DONE_CLEAN)
-    result = request_reviewers(
-        TARGET,
-        [done],
-        force=True,
-        boundary=_boundary(requested_logins=["Copilot"]),
-    )
-    assert done.requested_with == [TARGET]  # forced despite being done
-    assert result.skipped == []
-    assert result.verified == ["copilot"]
-
-
-def test_local_reviewer_in_flight_not_edge_verified():
-    """A local reviewer (no edge) that returns True is `in_flight`, never polled."""
-    local = _FakeAdapter("codex", has_edge=False, request_returns=True)
-    # attach_state would raise if the poll ran — proving locals skip verification.
-
-    def boom(pr):
-        raise AssertionError("local reviewer must not be edge-verified")
-
-    boundary = _Boundary(
-        attach_state=boom, gather_reviews=lambda pr: object(), sleep=lambda s: None
-    )
-    result = request_reviewers(TARGET, [local], force=True, boundary=boundary)
-    assert result.ok
-    assert result.in_flight == ["codex"]
-    assert result.verified == []
-
-
-def test_no_mechanism_backend_is_no_op():
-    """A backend whose request() returns False records a no-op, never verified."""
-    auto = _FakeAdapter("gemini", has_edge=False, request_returns=False)
-    result = request_reviewers(TARGET, [auto], force=True, boundary=_boundary())
-    assert result.ok
-    assert result.no_op == ["gemini"]
-
-
-def test_gh_failure_in_skip_read_propagates():
-    """A gh failure while reading who-is-done propagates (never a false success)."""
-    adapter = _FakeAdapter("copilot")
-
-    def boom(pr):
-        raise ExecError(["gh"], rc=1, stderr="gh exploded reading reviews")
-
-    boundary = _Boundary(
-        attach_state=lambda pr: ([], []),
-        gather_reviews=boom,
-        sleep=lambda s: None,
-    )
-    with pytest.raises(ExecError):
-        request_reviewers(TARGET, [adapter], force=False, boundary=boundary)
-
-
-# --- the local-agent guard via the CLI verb -----------------------------------
+# --- the local-agent scope via the CLI verb -----------------------------------
 
 
 def test_local_agent_request_detaches_in_flight(monkeypatch, capsys):
@@ -264,28 +69,33 @@ def test_local_alias_does_not_match_app_reviewer(capsys):
     """`-local` aliases only the local-agent family — `copilot-local` is unknown
     (an app reviewer has a requested edge and is not a local backend)."""
     rc = review_verb.run(7, reviewer="copilot-local", repo=REPO)
-    assert rc != 0
+    assert rc == 1
     assert "unknown reviewer" in capsys.readouterr().err
 
 
 # --- CLI verb wiring + behavior ----------------------------------------------
 
 
-def test_unknown_reviewer_is_rejected(monkeypatch, capsys):
-    """A typo'd --reviewer name fails loud (non-zero) listing the known names."""
+def test_unknown_reviewer_is_rejected(capsys):
+    """A typo'd --reviewer name fails loud (the registry's domain refusal through
+    the shell: `error: …` + exit 1) listing the known names."""
     rc = review_verb.run(7, reviewer="copliot", repo=REPO)
-    assert rc != 0
+    assert rc == 1
     err = capsys.readouterr().err
+    assert err.startswith("error: ")
     assert "unknown reviewer" in err
     assert "copilot" in err  # the known-names list
 
 
 def test_no_pr_for_branch_is_fatal(monkeypatch, capsys):
-    """A mutating verb treats a branch with no PR as fatal (non-zero)."""
+    """A mutating verb treats a branch with no PR as fatal (non-zero) — the
+    per-verb refusal wording survives as the exception message (ADR-0030)."""
     monkeypatch.setattr(review_verb, "resolve_pr", lambda pr, repo: None)
     rc = review_verb.run(None, reviewer="copilot", repo=REPO)
-    assert rc != 0
-    assert "no PR" in capsys.readouterr().err
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert err.startswith("error: ")
+    assert "no PR" in err
 
 
 def test_gh_failure_resolving_is_fatal(monkeypatch, capsys):
@@ -296,7 +106,7 @@ def test_gh_failure_resolving_is_fatal(monkeypatch, capsys):
 
     monkeypatch.setattr(review_verb, "resolve_pr", boom)
     rc = review_verb.run(None, reviewer="copilot", repo=REPO)
-    assert rc != 0
+    assert rc == 1
     assert "gh auth exploded" in capsys.readouterr().err
 
 
@@ -306,7 +116,7 @@ def test_verb_renders_verified(monkeypatch, capsys):
     monkeypatch.setattr(
         review_verb,
         "request_reviewers",
-        lambda pr, adapters, force: _request.RequestResult(
+        lambda pr, adapters, force: RequestResult(
             outcomes=[ReviewerOutcome("copilot", "verified")]
         ),
     )
@@ -317,19 +127,44 @@ def test_verb_renders_verified(monkeypatch, capsys):
 
 
 def test_dropped_request_exits_nonzero(monkeypatch, capsys):
-    """A dropped remote request -> stderr line + non-zero exit (never a silent park)."""
+    """A dropped remote request -> the uniform `error: …` stderr + non-zero exit
+    (never a silent park); the outcome block still names it on stdout."""
     monkeypatch.setattr(review_verb, "resolve_pr", lambda pr, repo: TARGET)
     monkeypatch.setattr(
         review_verb,
         "request_reviewers",
-        lambda pr, adapters, force: _request.RequestResult(
+        lambda pr, adapters, force: RequestResult(
             outcomes=[ReviewerOutcome("copilot", "dropped")]
         ),
     )
     monkeypatch.setattr(review_verb, "required_reviewers", lambda: [object()])
     rc = review_verb.run(7, repo=REPO)
-    assert rc != 0
-    assert "dropped by GitHub" in capsys.readouterr().err
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert captured.err.startswith("error: ")
+    assert "dropped by GitHub" in captured.err
+    assert "copilot" in captured.err
+
+
+def test_format_request_renders_each_outcome_and_the_all_skipped_note():
+    """The pure renderer (the render seam): one line per outcome; a bare run that
+    skipped everyone says so explicitly rather than rendering silence."""
+    result = RequestResult(
+        outcomes=[
+            ReviewerOutcome("copilot", "verified"),
+            ReviewerOutcome("codex", "in_flight"),
+            ReviewerOutcome("gemini", "no_op"),
+        ]
+    )
+    out = review_verb.format_request(7, result)
+    assert "verified: copilot request attached on #7" in out
+    assert "review in flight: codex on #7" in out
+    assert "gemini: auto-triggers, no request mechanism — no-op" in out
+
+    all_skipped = RequestResult(outcomes=[ReviewerOutcome("copilot", "skipped")])
+    out = review_verb.format_request(7, all_skipped)
+    assert "copilot: already reviewed #7 (review-once) — skip" in out
+    assert "nothing to request" in out
 
 
 # --- group/command registration smoke ----------------------------------------

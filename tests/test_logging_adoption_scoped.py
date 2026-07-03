@@ -65,10 +65,12 @@ def test_sprayed_modules_have_a_shipit_logger():
         ("shipit.gh", "shipit.gh"),
         ("shipit.review.checkrun", "shipit.review"),
         ("shipit.review.producer", "shipit.review"),
-        # LOG02-WS05 (#285): the verbs/pr lifecycle gap + checks.py warnings.
-        ("shipit.verbs.pr.ready", "shipit.pr"),
-        ("shipit.verbs.pr.next_action", "shipit.pr"),
-        ("shipit.verbs.pr.review", "shipit.pr"),
+        # LOG02-WS05 (#285) sprayed the pr verbs; CLI01-WS03 promoted the
+        # sprayed logic into the engine's services, whose records now live on
+        # the one prstate logger (the verbs are print-free glue + renderers).
+        ("shipit.prstate.request", "shipit.prstate"),
+        ("shipit.prstate.flip", "shipit.prstate"),
+        ("shipit.prstate.dispatch", "shipit.prstate"),
         ("shipit.checks", "shipit.checks"),
     ]:
         mod = importlib.import_module(modname)
@@ -78,11 +80,12 @@ def test_sprayed_modules_have_a_shipit_logger():
 
 def test_verbs_keep_print_for_user_facing_output():
     """The spray is ADDITIVE: logging joined the verbs, but the user-facing CLI
-    output still writes with ``print()`` — logging never replaced stdout."""
-    from shipit.verbs import gh_setup, install, lint
-    from shipit.verbs.pr import next_action, ready, review
+    output still writes with ``print()`` — logging never replaced stdout. The
+    pr family is exempt since CLI01-WS03: its verbs render through the shared
+    ADR-0030 emit seam (:mod:`shipit.verbs._render`), which owns the print."""
+    from shipit.verbs import _render, gh_setup, install, lint
 
-    for mod in (gh_setup, install, lint, ready, next_action, review):
+    for mod in (gh_setup, install, lint, _render):
         src = inspect.getsource(mod)
         assert "print(" in src, (
             f"{mod.__name__} should still use print() for CLI output"
