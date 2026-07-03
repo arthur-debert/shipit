@@ -309,6 +309,22 @@ def test_cli_errors_maps_the_known_set_to_error_line_and_exit_1(capsys, boom):
     assert str(boom).splitlines()[0] in err
 
 
+def test_cli_errors_collapses_a_multiline_message_to_one_stderr_line(capsys):
+    """The ``error: …`` contract is ONE stderr line: a known error whose message
+    carries embedded newlines (an ExecError tailing multi-line stderr) is
+    collapsed to a single line so stderr stays parseable."""
+
+    @cli_errors
+    def run() -> int:
+        raise ExecError(["gh"], rc=1, stderr="line one\nline two\nline three")
+
+    assert run() == 1
+    err = capsys.readouterr().err
+    assert err == "".join(err.splitlines()) + "\n"  # exactly one line
+    assert err.startswith("error: ")
+    assert "line one" in err and "line two" in err  # detail preserved, inline
+
+
 def test_cli_errors_passes_the_success_return_through(capsys):
     @cli_errors
     def run(value: int, *, flag: bool = False) -> int:

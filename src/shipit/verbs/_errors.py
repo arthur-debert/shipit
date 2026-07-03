@@ -23,13 +23,17 @@ from __future__ import annotations
 
 import functools
 import sys
-from typing import Callable
+from typing import Callable, ParamSpec
 
 from .. import execrun
 from ..config import ConfigError
 from ..prstate.errors import PrStateError
 from ..prstate.reviewers_config import RequiredReviewersConfigError
 from ._context import NoAmbientRepoError
+
+#: Preserves the wrapped ``run()``'s parameters through :func:`cli_errors`, so
+#: mypy sees the original signature rather than an erased ``Callable[..., int]``.
+P = ParamSpec("P")
 
 #: The KNOWN runtime exception set — a failed boundary exec, a PR-state
 #: violation, malformed/invalid config (both spellings), and the domain
@@ -44,21 +48,28 @@ KNOWN_ERRORS: tuple[type[Exception], ...] = (
 )
 
 
-def cli_errors(run: Callable[..., int]) -> Callable[..., int]:
+def cli_errors(run: Callable[P, int]) -> Callable[P, int]:
     """Wrap a verb's ``run()`` in the uniform runtime-failure mapping.
 
     On a :data:`KNOWN_ERRORS` exception: one ``error: {exc}`` line to stderr,
     return 1. Everything else — including the return value on success — passes
-    through untouched. The wrapped function keeps its signature, so direct
-    (non-click) callers and tests drive it exactly like the bare ``run()``.
+    through untouched. The wrapped function keeps its signature (``ParamSpec``),
+    so direct (non-click) callers and tests drive it exactly like the bare
+    ``run()``, and mypy sees the original parameters.
+
+    The message is collapsed to a single line before printing: some known
+    errors (notably :class:`~shipit.execrun.ExecError`, which tails captured
+    stdout/stderr) carry embedded newlines, and the ``error: …`` contract is
+    ONE stderr line.
     """
 
     @functools.wraps(run)
-    def wrapper(*args, **kwargs) -> int:
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> int:
         try:
             return run(*args, **kwargs)
         except KNOWN_ERRORS as exc:
-            print(f"error: {exc}", file=sys.stderr)
+            message = " ".join(str(exc).split())
+            print(f"error: {message}", file=sys.stderr)
             return 1
 
     return wrapper
