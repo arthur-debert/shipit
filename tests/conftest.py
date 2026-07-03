@@ -9,6 +9,7 @@ re-pointed to `shipit.prstate.*`.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -75,6 +76,34 @@ def _clean_domain_key_context():
     yield
     structlog.contextvars.clear_contextvars()
     os.environ.update(saved)
+
+
+@pytest.fixture(autouse=True)
+def _reset_shipit_logging():
+    """Detach shipit's sinks from the process-global logger around every test.
+
+    `logsetup.configure_logging()` attaches handlers to the ONE process-wide
+    `logging.getLogger("shipit")` singleton — including a stderr `StreamHandler`
+    that pins `sys.stderr` AT ATTACH TIME. Under pytest that stderr is the
+    per-test `capsys` `CaptureIO`, which pytest closes at the test boundary. A
+    handler left attached by one test therefore points at a CLOSED buffer, and
+    the next test's pre-`configure_logging` bootstrap records (e.g. the CLI's
+    identity-resolution `exec` DEBUG lines, emitted before its sinks are wired)
+    hit that dead handler — `ValueError: I/O operation on closed file` — which
+    the logging module reports by printing `--- Logging error ---` + traceback
+    to the LIVE stderr, corrupting the `error:`-line contract the CLI tests
+    assert (surfaces only in CI, where the DEBUG-level CI sink is attached).
+
+    Clearing shipit's own (`shipit-`prefixed) handlers before and after each
+    test keeps that per-test stream from leaking forward. Production is a
+    one-shot process with a stable stderr, so it never hits this; the reset is a
+    test-isolation concern for the shared singleton."""
+    from shipit import logsetup
+
+    logger = logging.getLogger(logsetup.LOGGER_NAME)
+    logsetup._clear_own_handlers(logger)
+    yield
+    logsetup._clear_own_handlers(logger)
 
 
 @pytest.fixture(autouse=True)
