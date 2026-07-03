@@ -18,6 +18,7 @@ from shipit.execrun import ExecError, ExecResult
 from shipit import gh
 from shipit.identity import repo_from_slug
 from shipit.pr import PrId
+from shipit.prstate.errors import PrStateError
 from shipit.prstate.state import ChecksState, TaskState, TaskStatus
 from shipit.verbs.pr import status as status_verb
 
@@ -274,3 +275,19 @@ def test_resolver_parses_number_into_the_typed_target(monkeypatch):
         gh, "pr_number_probe", lambda: _probe_result(0, stdout='{"number": 99}')
     )
     assert resolve_pr(None, REPO) == PrId(repo=REPO, number=99)
+
+
+@pytest.mark.parametrize("wire_number", ['"99"', "7.0", "true"])
+def test_resolver_rejects_a_malformed_wire_number(monkeypatch, wire_number):
+    # The wire read mints through PrId with NO coercion: a stringy/float/bool
+    # `number` from unexpected `gh` output would slip past a silent `int(...)`
+    # and mint the wrong target, so construction-is-validation (ADR-0030) must
+    # reject it here at the one wire read — surfaced as a PrStateError like the
+    # unparseable-JSON case.
+    monkeypatch.setattr(
+        gh,
+        "pr_number_probe",
+        lambda: _probe_result(0, stdout=f'{{"number": {wire_number}}}'),
+    )
+    with pytest.raises(PrStateError, match="number"):
+        resolve_pr(None, REPO)

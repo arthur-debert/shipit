@@ -83,4 +83,16 @@ def resolve_pr(number: int | None, repo: Repo) -> PrId | None:
     except json.JSONDecodeError as exc:
         raise PrStateError(f"unparseable `gh pr view` output: {exc}") from exc
     resolved = data.get("number")
-    return PrId(repo=repo, number=int(resolved)) if resolved is not None else None
+    if resolved is None:
+        return None
+    # Pass the raw wire value straight into PrId — its construction IS the
+    # validation (exact-int, positive, ADR-0030), the same discipline the
+    # sibling wire boundary `pr.core_from_node` applies. A silent `int(resolved)`
+    # coercion here would defeat that invariant, accepting a `"99"`/`7.0`/`True`
+    # from unexpected `gh` output and minting the wrong PR target. Re-raise with
+    # the wire context so a malformed number dies at this read, like the JSON
+    # decode above.
+    try:
+        return PrId(repo=repo, number=resolved)
+    except ValueError as exc:
+        raise PrStateError(f"malformed `gh pr view` number: {exc}") from exc
