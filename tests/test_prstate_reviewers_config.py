@@ -157,6 +157,17 @@ def test_round_cap_applies_even_with_no_reviewer_entries(tmp_path):
     assert roster.round_cap == 2
 
 
+def test_round_cap_case_variant_key_fails_loud(tmp_path):
+    # Reserved policy keys are exact-lowercase (like every config key); a case
+    # variant (`Round_Cap`) is never a reviewer name, so it is rejected with
+    # the right diagnosis — not the misleading unknown-reviewer error, and
+    # never a silently-missed cap.
+    with pytest.raises(RequiredReviewersConfigError, match="round_cap"):
+        load_roster(_write(tmp_path, "[reviewers]\nRound_Cap = 3\n"))
+    with pytest.raises(RequiredReviewersConfigError, match="round_cap"):
+        load_roster(_write(tmp_path, "[reviewers]\nROUND_CAP = 3\ncopilot = {}\n"))
+
+
 def test_round_cap_rejects_non_int_and_non_positive_values(tmp_path):
     # A bad budget is a loud config error, never a silent default — including
     # `true` (bool is an int subclass; `round_cap = true` is never "1 round").

@@ -228,6 +228,19 @@ def _parse_table(value: object, *, config_dir: Path) -> list[RosterEntry]:
             raise RequiredReviewersConfigError(
                 f"{OVERRIDE_FILE} `{OVERRIDE_KEY}` keys must be reviewer names"
             )
+        if name.lower() in _RESERVED_KEYS:
+            # A case-variant of a reserved policy key (`Round_Cap`) is never a
+            # reviewer name. Reserved keys are exact-lowercase like every other
+            # config key (`rerun`, `window`); only reviewer NAMES canonicalize
+            # case-insensitively (they resolve to adapter names). Rejecting the
+            # variant HERE fails loud with the right diagnosis instead of the
+            # misleading unknown-reviewer error — and guarantees the reserved-key
+            # parsers (exact-key lookups, e.g. `_parse_round_cap`) can never
+            # silently MISS a policy value the user meant to set.
+            raise RequiredReviewersConfigError(
+                f"{OVERRIDE_FILE} `{OVERRIDE_KEY}` reserved key must be spelled "
+                f"exactly `{name.lower()}`, got {name!r}"
+            )
         key = _canonical_name(name)
         # The duplicate guard catches differently-cased keys that collide to
         # one adapter (e.g. `Copilot` + `copilot`); fail on first overwrite so
@@ -239,13 +252,16 @@ def _parse_table(value: object, *, config_dir: Path) -> list[RosterEntry]:
     return entries
 
 
-def _parse_round_cap(table: dict) -> int | None:
+def _parse_round_cap(table: dict[str, object]) -> int | None:
     """Parse the reserved table-level `round_cap` key — the review-round budget.
 
     Absent → ``None`` (the engine's shipped default, ``breakers.ROUND_CAP``).
     A bool, a non-int, or anything < 1 fails LOUD at parse — a bad budget is a
     config error, never a silent default. ``bool`` is an ``int`` subclass, so it
-    is rejected explicitly (a ``round_cap = true`` is never "1 round")."""
+    is rejected explicitly (a ``round_cap = true`` is never "1 round"). The
+    lookup is EXACT-key on purpose: a case-variant spelling (`Round_Cap`) has
+    already been rejected loud by `_parse_table` (which always runs first), so
+    an absent exact key here really means "unset", never a missed variant."""
     value = table.get(ROUND_CAP_KEY)
     if value is None:
         return None
