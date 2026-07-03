@@ -22,7 +22,8 @@ import logging
 from .. import gh
 from ..pr import PrId
 from .fetch import gather
-from .reviewers import required_reviewers
+from .reviewers_config import load_roster
+from .roster import Roster
 from .state import TaskState, TaskStatus, evaluate
 
 #: The engine's logger (shared name across :mod:`shipit.prstate`): the flip is
@@ -42,7 +43,9 @@ class NotReady(RuntimeError):
         )
 
 
-def guarded_flip(pr: PrId, *, flip=gh.pr_ready, evaluate_status=None) -> TaskStatus:
+def guarded_flip(
+    pr: PrId, roster: Roster | None = None, *, flip=gh.pr_ready, evaluate_status=None
+) -> TaskStatus:
     """Re-evaluate the live PR and flip draft→ready ONLY if it is READY.
 
     The shared guarded re-check behind both `pr ready` and `pr next`'s ready act.
@@ -53,14 +56,20 @@ def guarded_flip(pr: PrId, *, flip=gh.pr_ready, evaluate_status=None) -> TaskSta
     flip and returns the READY status, otherwise it raises :class:`NotReady`
     carrying the real status so the caller can report why it refused.
 
+    `roster` is the reviewer configuration as ONE value (CLI01-WS04): a caller
+    that already loaded it this invocation (`pr next`'s ready act) passes it in
+    so the flip never resolves reviewer settings twice; ``None`` (the standalone
+    `pr ready` shape) loads it here — the verb's one config read. The SNAPSHOT is
+    re-gathered either way; only the config ride-along is reused (config cannot
+    change mid-command), and `evaluate` reads the required set off `ctx.roster`.
+
     `flip` / `evaluate_status` are injected for testing: `flip` is the
     draft→ready boundary (default :func:`shipit.gh.pr_ready`); `evaluate_status`
-    yields the fresh `TaskStatus` (default: `gather` + `evaluate` with the
-    config-resolved required set). A test injects both to drive the guard without
-    a network.
+    yields the fresh `TaskStatus` (default: `gather` + `evaluate` over the roster
+    above). A test injects both to drive the guard without a network.
     """
     if evaluate_status is None:
-        status = evaluate(gather(pr), required=required_reviewers())
+        status = evaluate(gather(pr, roster if roster is not None else load_roster()))
     else:
         status = evaluate_status(pr)
     if status.state is not TaskState.READY:

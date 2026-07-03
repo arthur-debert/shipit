@@ -40,7 +40,8 @@ from ..pr import PrId
 from .errors import PrStateError
 from .flip import guarded_flip
 from .request import request_reviewers
-from .reviewers import required_reviewers
+from .reviewers import required_adapters
+from .roster import Roster
 from .state import TaskState, TaskStatus
 
 #: The engine's logger (shared name across :mod:`shipit.prstate`): the single
@@ -142,8 +143,13 @@ class NextActs:
     which adapters) is engine logic (CLI01-WS03), not verb glue.
     """
 
-    def __init__(self, pr: PrId) -> None:
+    def __init__(self, pr: PrId, roster: Roster | None = None) -> None:
         self._pr = pr
+        # The verb's ONE loaded Roster (CLI01-WS04), threaded in so the request
+        # act reads reviewer settings off the same value the engine evaluated —
+        # never a config re-read. None only for the no-PR report path, which
+        # never requests.
+        self._roster = roster if roster is not None else Roster()
 
     def report(self, status: TaskStatus) -> str:
         # Report-only: nothing mutates. The engine's next_action already carries
@@ -179,14 +185,14 @@ class NextActs:
             so the caller renders a clean stderr + non-zero exit, exactly like
             `pr review request`.
         """
-        by_name = {r.name: r for r in required_reviewers()}
+        by_name = {r.name: r for r in required_adapters(self._roster)}
         selected = [by_name[name] for name in status.to_request if name in by_name]
         if not selected:
             return f"no requestable reviewer to (re-)request — {status.next_action}"
         # force=True: selection is done above, so the service requests exactly
         # these and attach-verifies each remote edge. ExecError/PrStateError (e.g. a
         # deferred local-agent reviewer, or a gh failure) propagates to the caller.
-        result = request_reviewers(self._pr, selected, force=True)
+        result = request_reviewers(self._pr, selected, self._roster, force=True)
         if not result.ok:
             # A remote request edge was silently dropped (#614) — fail loud rather
             # than park the PR invisibly at reviews-pending.
@@ -204,5 +210,7 @@ class NextActs:
         # The single hand-off. Go through the SHARED guarded re-check so a status
         # that moved since `gather` cannot flip a not-ready PR. guarded_flip
         # re-evaluates live and raises NotReady if it is no longer READY.
-        flipped = guarded_flip(self._pr)
+        # The verb's already-loaded Roster rides into the flip's re-check, so the
+        # READY path never resolves reviewer settings twice (CLI01-WS04).
+        flipped = guarded_flip(self._pr, self._roster)
         return f"flipped draft→ready — {flipped.next_action}"

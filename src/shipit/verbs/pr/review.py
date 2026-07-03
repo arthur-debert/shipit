@@ -38,7 +38,8 @@ from ...identity import Repo
 from ...pr import PrId
 from ...prstate.errors import PrStateError
 from ...prstate.request import RequestResult, request_reviewers
-from ...prstate.reviewers import required_reviewers, resolve_reviewer
+from ...prstate.reviewers import required_adapters, resolve_reviewer
+from ...prstate.reviewers_config import load_roster
 from .._context import current_root_context
 from .._errors import cli_errors
 from .._params import pr_number_argument
@@ -178,8 +179,12 @@ def run(
     the :func:`~shipit.verbs._errors.cli_errors` shell — one ``error: …``
     stderr line, exit 1.
     """
+    # The ONE reviewer-config read of this invocation (CLI01-WS04): the Roster
+    # feeds the bare-run required set AND rides into the request path, where a
+    # local reviewer's run options are read off its entry — never re-resolved.
+    roster = load_roster()
     adapters = (
-        required_reviewers() if reviewer is None else [resolve_reviewer(reviewer)]
+        required_adapters(roster) if reviewer is None else [resolve_reviewer(reviewer)]
     )
     target = resolve_pr(
         pr, repo if repo is not None else current_root_context().require_repo()
@@ -188,7 +193,7 @@ def run(
         raise PrStateError(
             "no PR for the current branch — open a draft PR first, or pass a PR number"
         )
-    result = request_reviewers(target, adapters, force=reviewer is not None)
+    result = request_reviewers(target, adapters, roster, force=reviewer is not None)
     emit(result, lambda outcome: format_request(target.number, outcome))
     if not result.ok:
         # A remote request edge was silently dropped (#614) — a hard runtime

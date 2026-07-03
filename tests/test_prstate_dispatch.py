@@ -26,6 +26,7 @@ from shipit.prstate.errors import PrStateError
 from shipit.prstate.model import ReviewFunnelCheck
 from shipit.prstate.request import RequestResult, ReviewerOutcome
 from shipit.prstate.reviewers import by_name
+from shipit.prstate.roster import Roster, RosterEntry
 from shipit.prstate.state import TaskState, TaskStatus, evaluate
 
 
@@ -196,7 +197,7 @@ def test_e2e_stale_after_push_routes_to_request():
     """A rerun=True reviewer with a review staled by a push → re-request: same
     `to_request` set, same request act (request and re-request are one act)."""
     ctx = load_context("copilot_stale_needs_rerequest")
-    ctx.reviewer_rerun = {"copilot": True}
+    ctx.roster = Roster((RosterEntry(name="copilot", required=True, rerun=True),))
     status = evaluate(ctx)
     assert status.state is TaskState.REVIEWS_PENDING
     assert status.to_request == ["copilot"]
@@ -271,11 +272,11 @@ def test_request_act_requests_the_engines_to_request_set(monkeypatch):
     canonical request service the TYPED target with force=True (selection is
     already done — the service must request exactly these)."""
     monkeypatch.setattr(
-        dispatch_mod, "required_reviewers", lambda: [FakeAdapter("copilot")]
+        dispatch_mod, "required_adapters", lambda roster: [FakeAdapter("copilot")]
     )
     seen = {}
 
-    def fake_request(pr, adapters, *, force):
+    def fake_request(pr, adapters, roster, *, force):
         seen["pr"] = pr
         seen["names"] = [a.name for a in adapters]
         seen["force"] = force
@@ -296,12 +297,12 @@ def test_request_act_selects_only_the_not_requested_reviewer(monkeypatch):
     re-poke a reviewer already mid-review (Copilot review on PR #19)."""
     monkeypatch.setattr(
         dispatch_mod,
-        "required_reviewers",
-        lambda: [FakeAdapter("copilot"), FakeAdapter("coderabbit")],
+        "required_adapters",
+        lambda roster: [FakeAdapter("copilot"), FakeAdapter("coderabbit")],
     )
     selected = {}
 
-    def fake_request(pr, adapters, *, force):
+    def fake_request(pr, adapters, roster, *, force):
         selected["names"] = [a.name for a in adapters]
         return _fake_request_result([a.name for a in adapters])
 
@@ -325,12 +326,12 @@ def test_request_act_excludes_in_flight_local_agent(monkeypatch):
     engine's `to_request`, which EXCLUDES the in-flight reviewer."""
     monkeypatch.setattr(
         dispatch_mod,
-        "required_reviewers",
-        lambda: [FakeAdapter("copilot"), FakeAdapter("codex")],
+        "required_adapters",
+        lambda roster: [FakeAdapter("copilot"), FakeAdapter("codex")],
     )
     selected = {}
 
-    def fake_request(pr, adapters, *, force):
+    def fake_request(pr, adapters, roster, *, force):
         selected["names"] = [a.name for a in adapters]
         return _fake_request_result([a.name for a in adapters])
 
@@ -354,12 +355,12 @@ def test_request_act_selects_never_requested_and_stale(monkeypatch):
     engine's `to_request` is the authority, so both reach the service."""
     monkeypatch.setattr(
         dispatch_mod,
-        "required_reviewers",
-        lambda: [FakeAdapter("copilot"), FakeAdapter("coderabbit")],
+        "required_adapters",
+        lambda roster: [FakeAdapter("copilot"), FakeAdapter("coderabbit")],
     )
     selected = {}
 
-    def fake_request(pr, adapters, *, force):
+    def fake_request(pr, adapters, roster, *, force):
         selected["names"] = [a.name for a in adapters]
         return _fake_request_result([a.name for a in adapters])
 
@@ -373,12 +374,12 @@ def test_request_act_dropped_edge_raises_prstate_error(monkeypatch):
     """A silently-dropped request edge (#614) → the domain refusal, naming the
     reviewer — the caller's error shell renders it as stderr + non-zero."""
     monkeypatch.setattr(
-        dispatch_mod, "required_reviewers", lambda: [FakeAdapter("copilot")]
+        dispatch_mod, "required_adapters", lambda roster: [FakeAdapter("copilot")]
     )
     monkeypatch.setattr(
         dispatch_mod,
         "request_reviewers",
-        lambda pr, adapters, *, force: RequestResult(
+        lambda pr, adapters, roster, *, force: RequestResult(
             outcomes=[ReviewerOutcome("copilot", "dropped")]
         ),
     )
@@ -390,9 +391,9 @@ def test_request_act_dropped_edge_raises_prstate_error(monkeypatch):
 def test_request_act_without_a_requestable_adapter_reports(monkeypatch):
     """`to_request` names with no matching required adapter → a report line,
     never a crash (and the request service is never called)."""
-    monkeypatch.setattr(dispatch_mod, "required_reviewers", lambda: [])
+    monkeypatch.setattr(dispatch_mod, "required_adapters", lambda roster: [])
 
-    def boom(pr, adapters, *, force):
+    def boom(pr, adapters, roster, *, force):
         raise AssertionError("request service must not be called")
 
     monkeypatch.setattr(dispatch_mod, "request_reviewers", boom)
@@ -405,7 +406,7 @@ def test_flip_act_goes_through_the_shared_guard(monkeypatch):
     the typed target travels into the guard."""
     flipped: list[PrId] = []
 
-    def fake_guard(target):
+    def fake_guard(target, roster):
         flipped.append(target)
         return _status(TaskState.READY, "human validates + merges")
 

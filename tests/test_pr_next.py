@@ -21,6 +21,7 @@ from shipit.pr import PrId
 from shipit.prstate import dispatch as dispatch_mod
 from shipit.prstate.flip import NotReady
 from shipit.prstate.request import RequestResult, ReviewerOutcome
+from shipit.prstate.roster import Roster
 from shipit.prstate.state import ChecksState, TaskState, TaskStatus
 from shipit.verbs.pr import next_action as next_verb
 
@@ -82,17 +83,15 @@ def patched_next(monkeypatch):
         "resolve_pr",
         lambda pr, repo: PrId(repo=repo, number=pr if pr is not None else 42),
     )
-    monkeypatch.setattr(next_verb, "gather", lambda target: target)
-    monkeypatch.setattr(next_verb, "required_reviewers", lambda: [])
+    monkeypatch.setattr(next_verb, "gather", lambda target, roster: target)
+    monkeypatch.setattr(next_verb, "load_roster", lambda: Roster())
 
 
 def test_next_reports_blocked(patched_next, monkeypatch, capsys):
     monkeypatch.setattr(
         next_verb,
         "evaluate",
-        lambda ctx, required: _status(
-            TaskState.BLOCKED, ctx.number, "the real blocker"
-        ),
+        lambda ctx: _status(TaskState.BLOCKED, ctx.number, "the real blocker"),
     )
     rc = cli.main(["pr", "next"])
     assert rc == 0
@@ -106,7 +105,7 @@ def test_next_json_carries_action_and_status(patched_next, monkeypatch, capsys):
     monkeypatch.setattr(
         next_verb,
         "evaluate",
-        lambda ctx, required: _status(TaskState.VALIDATING, ctx.number),
+        lambda ctx: _status(TaskState.VALIDATING, ctx.number),
     )
     rc = cli.main(["pr", "next", "--json"])
     assert rc == 0
@@ -128,12 +127,12 @@ def test_next_ready_flips(patched_next, monkeypatch, capsys):
     monkeypatch.setattr(
         next_verb,
         "evaluate",
-        lambda ctx, required: _status(TaskState.READY, ctx.number),
+        lambda ctx: _status(TaskState.READY, ctx.number),
     )
     monkeypatch.setattr(
         dispatch_mod,
         "guarded_flip",
-        lambda target: _status(TaskState.READY, target.number),
+        lambda target, roster: _status(TaskState.READY, target.number),
     )
     rc = cli.main(["pr", "next"])
     assert rc == 0
@@ -147,10 +146,10 @@ def test_next_ready_refusal_is_uniform_error_exit_1(patched_next, monkeypatch, c
     monkeypatch.setattr(
         next_verb,
         "evaluate",
-        lambda ctx, required: _status(TaskState.READY, ctx.number),
+        lambda ctx: _status(TaskState.READY, ctx.number),
     )
 
-    def refuse(target):
+    def refuse(target, roster):
         raise NotReady(_status(TaskState.BLOCKED, target.number))
 
     monkeypatch.setattr(dispatch_mod, "guarded_flip", refuse)
@@ -174,12 +173,12 @@ def test_next_request_act_renders_and_dropped_edge_is_error(
             self.name = name
 
     monkeypatch.setattr(
-        dispatch_mod, "required_reviewers", lambda: [FakeAdapter("copilot")]
+        dispatch_mod, "required_adapters", lambda roster: [FakeAdapter("copilot")]
     )
     monkeypatch.setattr(
         next_verb,
         "evaluate",
-        lambda ctx, required: TaskStatus(
+        lambda ctx: TaskStatus(
             state=TaskState.REVIEWS_PENDING,
             next_action="request for the current head: copilot",
             pr=ctx.number,
@@ -190,7 +189,7 @@ def test_next_request_act_renders_and_dropped_edge_is_error(
     monkeypatch.setattr(
         dispatch_mod,
         "request_reviewers",
-        lambda pr, adapters, *, force: RequestResult(
+        lambda pr, adapters, roster, *, force: RequestResult(
             outcomes=[ReviewerOutcome(a.name, "verified") for a in adapters]
         ),
     )
@@ -201,7 +200,7 @@ def test_next_request_act_renders_and_dropped_edge_is_error(
     monkeypatch.setattr(
         dispatch_mod,
         "request_reviewers",
-        lambda pr, adapters, *, force: RequestResult(
+        lambda pr, adapters, roster, *, force: RequestResult(
             outcomes=[ReviewerOutcome("copilot", "dropped")]
         ),
     )

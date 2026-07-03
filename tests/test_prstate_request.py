@@ -28,11 +28,13 @@ from shipit.prstate.request import (
     request_reviewers,
 )
 from shipit.prstate.reviewers import ReviewerAdapter
+from shipit.prstate.roster import Roster
 
 # The typed PR target (CLI01-WS02 / ADR-0030): the service threads a PrId —
 # repo + number as ONE value — never a bare int.
 REPO = repo_from_slug("owner/repo")
 TARGET = PrId(repo=REPO, number=7)
+EMPTY_ROSTER = Roster()
 
 
 # --- test doubles -------------------------------------------------------------
@@ -62,7 +64,7 @@ class _FakeAdapter(ReviewerAdapter):
     def detect(self, ctx) -> ReviewLifecycle:  # noqa: ANN001
         return self._lifecycle
 
-    def request(self, pr: PrId) -> bool:
+    def request(self, pr: PrId, entry=None) -> bool:
         self.requested_with.append(pr)
         return self._request_returns
 
@@ -79,7 +81,7 @@ def _boundary(
     revs = reviews or []
     return Boundary(
         attach_state=lambda pr: (logins, revs),
-        gather_reviews=lambda pr: object(),
+        gather_reviews=lambda pr, roster: object(),
         sleep=lambda _seconds: None,
     )
 
@@ -93,6 +95,7 @@ def test_verifies_when_edge_attaches():
     result = request_reviewers(
         TARGET,
         [adapter],
+        EMPTY_ROSTER,
         force=True,
         boundary=_boundary(requested_logins=["Copilot"]),
     )
@@ -119,10 +122,12 @@ def test_verifies_via_fresh_review_when_bot_consumed_request():
 
     boundary = Boundary(
         attach_state=attach_state,
-        gather_reviews=lambda pr: object(),
+        gather_reviews=lambda pr, roster: object(),
         sleep=lambda s: None,
     )
-    result = request_reviewers(TARGET, [adapter], force=True, boundary=boundary)
+    result = request_reviewers(
+        TARGET, [adapter], EMPTY_ROSTER, force=True, boundary=boundary
+    )
     assert result.ok
     assert result.verified == ["copilot"]
 
@@ -134,6 +139,7 @@ def test_dropped_when_edge_never_appears():
     result = request_reviewers(
         TARGET,
         [adapter],
+        EMPTY_ROSTER,
         force=True,
         boundary=_boundary(requested_logins=[], reviews=[]),
     )
@@ -144,7 +150,9 @@ def test_dropped_when_edge_never_appears():
 def test_bare_run_skips_already_done_reviewer():
     """A bare run drops a reviewer already DONE on the head — never requested."""
     done = _FakeAdapter("copilot", lifecycle=ReviewLifecycle.DONE_CLEAN)
-    result = request_reviewers(TARGET, [done], force=False, boundary=_boundary())
+    result = request_reviewers(
+        TARGET, [done], EMPTY_ROSTER, force=False, boundary=_boundary()
+    )
     assert done.requested_with == []  # not re-poked
     assert result.skipped == ["copilot"]
     assert result.verified == []
@@ -156,6 +164,7 @@ def test_bare_run_requests_pending_reviewer():
     result = request_reviewers(
         TARGET,
         [pending],
+        EMPTY_ROSTER,
         force=False,
         boundary=_boundary(requested_logins=["Copilot"]),
     )
@@ -169,6 +178,7 @@ def test_force_requests_already_done_reviewer():
     result = request_reviewers(
         TARGET,
         [done],
+        EMPTY_ROSTER,
         force=True,
         boundary=_boundary(requested_logins=["Copilot"]),
     )
@@ -186,9 +196,13 @@ def test_local_reviewer_in_flight_not_edge_verified():
         raise AssertionError("local reviewer must not be edge-verified")
 
     boundary = Boundary(
-        attach_state=boom, gather_reviews=lambda pr: object(), sleep=lambda s: None
+        attach_state=boom,
+        gather_reviews=lambda pr, roster: object(),
+        sleep=lambda s: None,
     )
-    result = request_reviewers(TARGET, [local], force=True, boundary=boundary)
+    result = request_reviewers(
+        TARGET, [local], EMPTY_ROSTER, force=True, boundary=boundary
+    )
     assert result.ok
     assert result.in_flight == ["codex"]
     assert result.verified == []
@@ -197,7 +211,9 @@ def test_local_reviewer_in_flight_not_edge_verified():
 def test_no_mechanism_backend_is_no_op():
     """A backend whose request() returns False records a no-op, never verified."""
     auto = _FakeAdapter("gemini", has_edge=False, request_returns=False)
-    result = request_reviewers(TARGET, [auto], force=True, boundary=_boundary())
+    result = request_reviewers(
+        TARGET, [auto], EMPTY_ROSTER, force=True, boundary=_boundary()
+    )
     assert result.ok
     assert result.no_op == ["gemini"]
 
@@ -206,7 +222,7 @@ def test_gh_failure_in_skip_read_propagates():
     """A gh failure while reading who-is-done propagates (never a false success)."""
     adapter = _FakeAdapter("copilot")
 
-    def boom(pr):
+    def boom(pr, roster):
         raise ExecError(["gh"], rc=1, stderr="gh exploded reading reviews")
 
     boundary = Boundary(
@@ -215,7 +231,9 @@ def test_gh_failure_in_skip_read_propagates():
         sleep=lambda s: None,
     )
     with pytest.raises(ExecError):
-        request_reviewers(TARGET, [adapter], force=False, boundary=boundary)
+        request_reviewers(
+            TARGET, [adapter], EMPTY_ROSTER, force=False, boundary=boundary
+        )
 
 
 # --- the RequestResult verdict surface -----------------------------------------
@@ -262,6 +280,7 @@ def test_verified_and_in_flight_outcomes_are_info_records(caplog):
         request_reviewers(
             TARGET,
             [remote, local],
+            EMPTY_ROSTER,
             force=True,
             boundary=_boundary(requested_logins=["Copilot"]),
         )
@@ -274,7 +293,9 @@ def test_skip_and_no_op_outcomes_are_debug_mechanics(caplog):
     done = _FakeAdapter("copilot", lifecycle=ReviewLifecycle.DONE_CLEAN)
     auto = _FakeAdapter("gemini", has_edge=False, request_returns=False)
     with caplog.at_level(logging.DEBUG, logger="shipit.prstate"):
-        request_reviewers(TARGET, [done, auto], force=False, boundary=_boundary())
+        request_reviewers(
+            TARGET, [done, auto], EMPTY_ROSTER, force=False, boundary=_boundary()
+        )
     assert not _prstate_records(caplog, logging.INFO)  # nothing transitioned
     mechanics = _prstate_records(caplog, logging.DEBUG)
     assert {r.reviewer for r in mechanics} == {"copilot", "gemini"}
@@ -284,7 +305,9 @@ def test_skip_and_no_op_outcomes_are_debug_mechanics(caplog):
 def test_dropped_outcome_is_a_warning_record(caplog):
     adapter = _FakeAdapter("copilot")
     with caplog.at_level(logging.DEBUG, logger="shipit.prstate"):
-        result = request_reviewers(TARGET, [adapter], force=True, boundary=_boundary())
+        result = request_reviewers(
+            TARGET, [adapter], EMPTY_ROSTER, force=True, boundary=_boundary()
+        )
     assert not result.ok
     warnings = _prstate_records(caplog, logging.WARNING)
     assert len(warnings) == 1

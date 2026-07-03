@@ -7,6 +7,7 @@ import dataclasses
 import pytest
 from shipit.prstate.model import ReadinessView, readiness_view, Review
 from shipit.prstate.reviewers import by_name
+from shipit.prstate.roster import Roster, RosterEntry
 from shipit.identity import Sha
 from shipit.prstate.state import (
     ChecksState,
@@ -333,7 +334,7 @@ def test_reviews_pending_stale_after_push_says_rerequest(context):
     # current head, and names the staleness. (Under the review-once default the
     # earlier-head review would simply count as done — see the reviewers tests.)
     ctx = context("copilot_stale_needs_rerequest")
-    ctx.reviewer_rerun = {"copilot": True}
+    ctx.roster = Roster((RosterEntry(name="copilot", required=True, rerun=True),))
     status = evaluate(ctx)
     assert status.state is TaskState.REVIEWS_PENDING
     assert "RE-REQUEST for the current head" in status.next_action
@@ -478,9 +479,16 @@ def test_a_push_re_stales_both_required_reviewers_when_rerun():
             Review(2, "coderabbitai[bot]", "APPROVED", OLD, ""),
         ],
         checks=_green_checks(),
-        reviewer_rerun={"copilot": True, "coderabbit": True},
+        roster=Roster(
+            (
+                RosterEntry(name="copilot", required=True, rerun=True),
+                RosterEntry(name="coderabbit", required=True, rerun=True),
+            )
+        ),
     )
-    status = evaluate(ctx, required=_both_required())
+    # The Roster already makes both reviewers required — derive the required set
+    # from it (the production shape) rather than re-passing an explicit override.
+    status = evaluate(ctx)
     assert status.state is TaskState.REVIEWS_PENDING
     assert "RE-REQUEST" in status.next_action
     assert "copilot" in status.next_action

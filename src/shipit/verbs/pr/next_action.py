@@ -29,7 +29,7 @@ from ...gh import resolve_pr
 from ...identity import Repo
 from ...prstate.dispatch import NextActs, dispatch
 from ...prstate.fetch import gather
-from ...prstate.reviewers import required_reviewers
+from ...prstate.reviewers_config import load_roster
 from ...prstate.state import TaskStatus, evaluate, no_pr
 from .._context import current_root_context
 from .._errors import cli_errors
@@ -107,12 +107,16 @@ def run(
             as_json=as_json,
         )
         return 0
-    status = evaluate(gather(target), required=required_reviewers())
-    action = dispatch(status, NextActs(target))
+    # The ONE reviewer-config read of this invocation (CLI01-WS04): the Roster
+    # rides the snapshot for BOTH evaluates below and feeds the request act's
+    # selection / run-options — one value, never re-resolved.
+    roster = load_roster()
+    status = evaluate(gather(target, roster))
+    action = dispatch(status, NextActs(target, roster))
     # Re-read the status AFTER a mutating act so the reported snapshot reflects
     # what just happened (e.g. a freshly-requested reviewer now REQUESTED). A
     # second gather is cheap and keeps the report honest; on report-only acts it
     # is the same status. Skipped when there is no PR (handled above).
-    final = evaluate(gather(target), required=required_reviewers())
+    final = evaluate(gather(target, roster))
     emit(NextResult(action, final), format_next, as_json=as_json)
     return 0

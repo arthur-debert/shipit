@@ -17,6 +17,7 @@ from shipit.execrun import ExecError
 from shipit.identity import repo_from_slug
 from shipit.pr import PrId
 from shipit.prstate.request import RequestResult, ReviewerOutcome
+from shipit.prstate.roster import Roster
 from shipit.verbs.pr import review as review_verb
 
 # The typed PR target (CLI01-WS02 / ADR-0030): the verb threads a PrId — repo +
@@ -116,11 +117,12 @@ def test_verb_renders_verified(monkeypatch, capsys):
     monkeypatch.setattr(
         review_verb,
         "request_reviewers",
-        lambda pr, adapters, force: RequestResult(
+        lambda pr, adapters, roster, *, force: RequestResult(
             outcomes=[ReviewerOutcome("copilot", "verified")]
         ),
     )
-    monkeypatch.setattr(review_verb, "required_reviewers", lambda: [object()])
+    monkeypatch.setattr(review_verb, "required_adapters", lambda roster: [object()])
+    monkeypatch.setattr(review_verb, "load_roster", lambda: Roster())
     rc = review_verb.run(7, repo=REPO)
     assert rc == 0
     assert "verified: copilot" in capsys.readouterr().out
@@ -133,11 +135,12 @@ def test_dropped_request_exits_nonzero(monkeypatch, capsys):
     monkeypatch.setattr(
         review_verb,
         "request_reviewers",
-        lambda pr, adapters, force: RequestResult(
+        lambda pr, adapters, roster, *, force: RequestResult(
             outcomes=[ReviewerOutcome("copilot", "dropped")]
         ),
     )
-    monkeypatch.setattr(review_verb, "required_reviewers", lambda: [object()])
+    monkeypatch.setattr(review_verb, "required_adapters", lambda roster: [object()])
+    monkeypatch.setattr(review_verb, "load_roster", lambda: Roster())
     rc = review_verb.run(7, repo=REPO)
     assert rc == 1
     captured = capsys.readouterr()

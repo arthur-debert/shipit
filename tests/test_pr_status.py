@@ -18,6 +18,7 @@ from shipit.execrun import ExecError
 from shipit.identity import repo_from_slug
 from shipit.pr import PrId
 from shipit.prstate.state import ChecksState, TaskState, TaskStatus
+from shipit.prstate.roster import Roster
 from shipit.verbs.pr import status as status_verb
 
 # The typed PR target (CLI01-WS02 / ADR-0030): gh.resolve_pr mints a PrId at
@@ -69,11 +70,9 @@ def patched(monkeypatch):
         return PrId(repo=repo, number=pr if pr is not None else 42)
 
     monkeypatch.setattr(status_verb, "resolve_pr", resolve)
-    monkeypatch.setattr(status_verb, "gather", lambda target: target)
-    monkeypatch.setattr(
-        status_verb, "evaluate", lambda ctx, required: _fake_status(ctx.number)
-    )
-    monkeypatch.setattr(status_verb, "required_reviewers", lambda: [])
+    monkeypatch.setattr(status_verb, "gather", lambda target, roster: target)
+    monkeypatch.setattr(status_verb, "load_roster", lambda: Roster())
+    monkeypatch.setattr(status_verb, "evaluate", lambda ctx: _fake_status(ctx.number))
 
 
 def test_pr_group_registered(capsys):
@@ -182,7 +181,7 @@ def test_gh_failure_on_known_pr_is_runtime_tier_error_exit_1(monkeypatch, capsys
         status_verb, "resolve_pr", lambda pr, repo: PrId(repo=repo, number=42)
     )
 
-    def boom(target):
+    def boom(target, roster):
         raise ExecError(["gh"], rc=1, stderr="gh exploded")
 
     monkeypatch.setattr(status_verb, "gather", boom)

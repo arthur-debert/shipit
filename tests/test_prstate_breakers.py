@@ -20,6 +20,7 @@ from shipit.prstate.breakers import (
 )
 from shipit.prstate.model import readiness_view, Review, ReviewComment, Thread
 from shipit.prstate.reviewers import by_name
+from shipit.prstate.reviewers_config import default_roster
 from shipit.prstate.state import TaskState, evaluate
 
 
@@ -77,6 +78,10 @@ def ctx(
         reviews=list(reviews),
         threads=[*(findings or []), *(threads or [])],
         checks=checks or [],
+        # The SHIPPED default roster as a passed value (CLI01-WS04): these
+        # tests count rounds against the default required set (copilot-only),
+        # not this repo's deployed `.shipit.toml` policy.
+        roster=default_roster(),
     )
 
 

@@ -31,7 +31,7 @@ from dataclasses import dataclass
 
 from ..identity import Sha
 from .model import ReadinessView
-from .reviewers import ReviewerAdapter, required_reviewers
+from .reviewers import ReviewerAdapter, required_adapters
 
 ROUND_CAP = 6  # the 6th round is the last; there is no 7th
 
@@ -108,11 +108,11 @@ def build_rounds(
     job — never re-roll an author filter here (a reviewer's review login and
     comment author can render differently; release#455).
 
-    `required` is the blocking set; defaults to the config-resolved one but the
-    engine threads its own set in so the stopping rule counts against the SAME
-    reviewers everything else blocks on.
+    `required` is the blocking set; defaults to the snapshot Roster's required
+    adapters (`ctx.roster`, CLI01-WS04) but the engine threads its own set in so
+    the stopping rule counts against the SAME reviewers everything else blocks on.
     """
-    required = required if required is not None else required_reviewers()
+    required = required if required is not None else required_adapters(ctx.roster)
     reviews = sorted(
         (r for r in ctx.reviews if any(a.matches(r.author) for a in required)),
         key=lambda r: r.review_id,

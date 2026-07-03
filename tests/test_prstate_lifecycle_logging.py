@@ -29,6 +29,7 @@ from shipit import gh
 from shipit.identity import repo_from_slug
 from shipit.pr import PrId
 from shipit.prstate import fetch
+from shipit.prstate.roster import Roster
 from shipit.prstate.errors import PrStateError
 from shipit.prstate.reviewers import CodexAdapter, CopilotAdapter, GeminiAdapter
 
@@ -77,7 +78,7 @@ def _wire_gather(monkeypatch):
 def test_gather_records_an_info_milestone_with_shape_and_duration(monkeypatch, caplog):
     _wire_gather(monkeypatch)
     with caplog.at_level(logging.INFO, logger="shipit.prstate"):
-        ctx = fetch.gather(TARGET)
+        ctx = fetch.gather(TARGET, Roster())
     milestones = [
         r
         for r in caplog.records
@@ -97,7 +98,7 @@ def test_gather_binds_the_pr_and_repo_domain_keys(monkeypatch):
     starts working on a PR, every subsequent record correlates to it."""
     _wire_gather(monkeypatch)
     assert "pr" not in logcontext.bound()  # clean context (conftest isolation)
-    fetch.gather(TARGET)
+    fetch.gather(TARGET, Roster())
     bound = logcontext.bound()
     assert bound["pr"] == 558
     assert bound["repo"] == "owner/repo"
@@ -121,7 +122,7 @@ def test_gather_reviews_records_a_debug_mechanic_with_fields(monkeypatch, caplog
         },
     )
     with caplog.at_level(logging.DEBUG, logger="shipit.prstate"):
-        fetch.gather_reviews(TARGET)
+        fetch.gather_reviews(TARGET, Roster())
     mechanics = [
         r
         for r in caplog.records
@@ -180,10 +181,8 @@ def test_no_mechanism_request_records_only_a_debug_mechanic(caplog):
 
 
 def test_local_detach_request_is_an_info_transition_record(monkeypatch, caplog):
-    from shipit.prstate import reviewers_config
     from shipit.review import service
 
-    monkeypatch.setattr(reviewers_config, "reviewer_run_options", lambda name: {})
     monkeypatch.setattr(service, "start_detached_review", lambda *a, **k: True)
     with caplog.at_level(logging.INFO, logger="shipit.prstate"):
         assert CodexAdapter().request(TARGET_41) is True
@@ -199,10 +198,8 @@ def test_local_reconcile_request_records_only_a_debug_mechanic(monkeypatch, capl
     (start_detached_review → False) detached NOTHING new: it must NOT narrate an
     INFO request transition — only a DEBUG mechanic, so the lifecycle log never
     claims a detach that didn't happen."""
-    from shipit.prstate import reviewers_config
     from shipit.review import service
 
-    monkeypatch.setattr(reviewers_config, "reviewer_run_options", lambda name: {})
     monkeypatch.setattr(service, "start_detached_review", lambda *a, **k: False)
     with caplog.at_level(logging.DEBUG, logger="shipit.prstate"):
         assert CodexAdapter().request(TARGET_41) is True  # still reported in-flight
@@ -219,10 +216,7 @@ def test_local_reconcile_request_records_only_a_debug_mechanic(monkeypatch, capl
 def test_local_request_failure_records_error_with_exception(monkeypatch, caplog):
     """A request act that dies is a PROPAGATING failure: ERROR, with the
     exception attached (exc_info), before it normalizes to PrStateError."""
-    from shipit.prstate import reviewers_config
     from shipit.review import service
-
-    monkeypatch.setattr(reviewers_config, "reviewer_run_options", lambda name: {})
 
     def boom(*a, **k):
         raise RuntimeError("spawn exploded")

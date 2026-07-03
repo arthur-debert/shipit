@@ -15,12 +15,13 @@ the pr family (and CLI02's promotions) copies. The three pieces:
   ``PrId`` at the runtime boundary — repo from the root context, number
   explicit or the current branch's PR — because "no PR for this branch" is a
   runtime outcome, not a usage error.
-- **domain call** — :func:`shipit.gh.resolve_pr` ->
-  :func:`shipit.prstate.fetch.gather` -> :func:`shipit.prstate.state.evaluate`
-  (with the config-resolved required reviewer set) returns the typed
-  :class:`~shipit.prstate.state.TaskStatus`; all lifecycle logic lives in the
-  engine. The target travels as the typed ``PrId`` — no service re-derives
-  the ambient repo per fetch (CLI01-WS02).
+- **domain call** — :func:`shipit.gh.resolve_pr` -> load the reviewer Roster
+  once (:func:`~...prstate.reviewers_config.load_roster`) ->
+  :func:`shipit.prstate.fetch.gather` (the Roster rides the snapshot) ->
+  :func:`shipit.prstate.state.evaluate` (which reads the required reviewer set
+  off the Roster) returns the typed :class:`~shipit.prstate.state.TaskStatus`;
+  all lifecycle logic lives in the engine. The target travels as the typed
+  ``PrId`` — no service re-derives the ambient repo per fetch (CLI01-WS02).
 - **render** — the pure :func:`~._format.format_status` string function (shared
   with `pr next` through the render seam, never a cross-verb import) through
   the shared :func:`~.._render.emit` (JSON from ``TaskStatus.to_dict()``); the
@@ -44,7 +45,7 @@ import click
 from ...gh import resolve_pr
 from ...identity import Repo
 from ...prstate.fetch import gather
-from ...prstate.reviewers import required_reviewers
+from ...prstate.reviewers_config import load_roster
 from ...prstate.state import evaluate, no_pr
 from .._context import current_root_context
 from .._errors import cli_errors
@@ -90,6 +91,10 @@ def run(
     if target is None:
         emit(no_pr(), format_status, as_json=as_json)
         return 0
-    status = evaluate(gather(target), required=required_reviewers())
+    # The ONE reviewer-config read of this invocation (CLI01-WS04): the Roster
+    # rides the snapshot from here — the engine and adapters read every
+    # per-reviewer setting off it as a value.
+    ctx = gather(target, load_roster())
+    status = evaluate(ctx)
     emit(status, format_status, as_json=as_json)
     return 0

@@ -34,6 +34,7 @@ from .model import (
     Thread,
     _HANDBUILT_REPO,
 )
+from .roster import Roster
 
 #: The engine's logger — a child of the package ``shipit`` logger, shared with
 #: :mod:`shipit.prstate.state` so the fetch milestones and the evaluation
@@ -287,23 +288,26 @@ query($owner: String!, $name: String!, $pr: Int!) {
 """
 
 
-def gather_reviews(pr: PrId) -> ReadinessView:
+def gather_reviews(pr: PrId, roster: Roster) -> ReadinessView:
     """A LIGHT context sufficient for `detect()` — head SHA + reviews + pending
-    review requests + the rerun policy, nothing else.
+    review requests + the reviewer Roster, nothing else.
 
     The read side of the bare `pr review request` skip decision (release#852):
     `detect()` reads only `reviews_on_head()`/`reviews_any_head()` (head SHA +
-    reviews), `requested_logins`, and `reviewer_rerun`. This fetches exactly
-    those in one GraphQL call, dropping the threads-cursor walk and the
+    reviews), `requested_logins`, and the rerun flag off the Roster. This fetches
+    exactly those in one GraphQL call, dropping the threads-cursor walk and the
     reactions/issue-comments REST pagination that the full `gather` runs. The
     returned context has empty `threads`/`reactions`/`issue_comments`, so the
     DONE_CLEAN vs DONE_COMMENTS refinement collapses to DONE_CLEAN — irrelevant
     to the skip decision (both are DONE) — and the Gemini adapter (which is not
     requestable, never in the required/skip set) is the only adapter that would
     read the omitted fields. The full `gather` is unchanged for every other path.
-    """
-    from .reviewers import reviewer_rerun
 
+    `roster` is the reviewer configuration the CALLER loaded once at its verb
+    boundary (`reviewers_config.load_roster`, CLI01-WS04) — threaded onto the
+    view here so adapter detection reads settings off the snapshot, never the
+    config.
+    """
     start = time.monotonic()
     # The typed repo (ADR-0030/PROC03): the identity rides in on the PrId —
     # minted once at the verb boundary — so the slug/owner/name are read off it
@@ -349,7 +353,7 @@ def gather_reviews(pr: PrId) -> ReadinessView:
         pr=core_from_node(pull, repo),
         reviews=reviews,
         requested_logins=requested,
-        reviewer_rerun=reviewer_rerun(),
+        roster=roster,
     )
     # The light fetch is a mechanic of the request verb's skip decision, not a
     # lifecycle milestone — record it at DEBUG (the full `gather` is the info one).
@@ -371,16 +375,14 @@ def gather_reviews(pr: PrId) -> ReadinessView:
     return ctx
 
 
-def gather(pr: PrId) -> ReadinessView:
-    """Fetch every raw input the engine needs for `pr`, live, via `gh`."""
-    # Resolved from config (cached) at the build edge — the per-reviewer rerun
-    # policy rides on the context so adapter detection stays pure (it reads the
-    # policy off `ctx`, never the config). Imported here, not at module top, to
-    # keep the import edge one-way (reviewers -> fetch is not a cycle, but the
-    # config read is genuinely a build-site concern).
-    from .reviewers import reviewer_rerun
-    from .reviewers_config import reviewer_window
+def gather(pr: PrId, roster: Roster) -> ReadinessView:
+    """Fetch every raw input the engine needs for `pr`, live, via `gh`.
 
+    `roster` is the reviewer configuration as ONE value (CLI01-WS04), loaded by
+    the CALLER once at its verb boundary (`reviewers_config.load_roster`) and
+    threaded onto the snapshot here — so the engine/adapters read every
+    per-reviewer setting off `ctx.roster`, never the config, and no call path
+    resolves reviewer settings twice per verb invocation."""
     start = time.monotonic()
     # The typed repo (ADR-0030/PROC03): one Repo value object — riding in on the
     # PrId, minted once at the verb boundary — feeds the log context, the REST
@@ -406,11 +408,10 @@ def gather(pr: PrId) -> ReadinessView:
         reactions=gh.rest(f"{base}/issues/{pr.number}/reactions", paginate=True) or [],
         issue_comments=gh.rest(f"{base}/issues/{pr.number}/comments", paginate=True)
         or [],
-        reviewer_rerun=reviewer_rerun(),
-        # The per-reviewer wait-window override + the App `review_requested` edge
-        # times — both resolved at the build edge and threaded on so the engine
-        # ages the window off the snapshot, never the config/clock (OBS04-WS03).
-        reviewer_window=reviewer_window(),
+        roster=roster,
+        # The App `review_requested` edge times — resolved at the build edge and
+        # threaded on so the engine ages the wait window off the snapshot, never
+        # the clock (OBS04-WS03).
         requested_at=requested_at,
         # Stamp "now" once, at fetch time. The engine NEVER calls a clock — it
         # reads this off the snapshot — so the wall-clock read lives here, at the
@@ -447,8 +448,7 @@ def context_from_raw(
     reactions: list[dict],
     issue_comments: list[dict],
     repo: Repo | None = None,
-    reviewer_rerun: dict[str, bool] | None = None,
-    reviewer_window: dict[str, int] | None = None,
+    roster: Roster | None = None,
     requested_at: dict[str, str] | None = None,
     now: datetime | None = None,
 ) -> ReadinessView:
@@ -461,15 +461,14 @@ def context_from_raw(
     never repo identity (a fixture may omit it), while `gather()` passes the real,
     origin-derived one.
 
-    `reviewer_rerun` is the per-reviewer rerun policy (name -> bool) resolved
-    from config at the build site; it defaults to empty (every reviewer
-    review-once) so a test/fixture context that omits it gets the shipped
-    default behaviour.
+    `roster` is the reviewer configuration as ONE value (CLI01-WS04), loaded at
+    the verb boundary and threaded onto the view; it defaults to the EMPTY
+    Roster (every reviewer at its shipped defaults: review-once, 20m window) so
+    a test/fixture context that omits it gets the default behaviour.
 
-    `reviewer_window` is the per-reviewer wait-window override (name -> seconds),
-    and `requested_at` the App `review_requested` edge times (login -> ISO-8601);
-    both default to empty so a fixture that omits them gets the shipped 20m window
-    and no App-side ageing (a local reviewer ages its own check-run `started_at`).
+    `requested_at` is the App `review_requested` edge times (login -> ISO-8601);
+    it defaults to empty so a fixture that omits it gets no App-side ageing (a
+    local reviewer ages its own check-run `started_at`).
 
     `now` is the injected wall-clock the snapshot carries (a tz-aware UTC
     datetime); `gather()` stamps it at fetch time and a test/fixture passes a
@@ -491,8 +490,7 @@ def context_from_raw(
         checks=ci_checks,
         review_funnel=review_funnel,
         now=now,
-        reviewer_rerun=reviewer_rerun or {},
-        reviewer_window=reviewer_window or {},
+        roster=roster if roster is not None else Roster(),
         requested_at=requested_at or {},
     )
 
