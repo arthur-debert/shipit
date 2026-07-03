@@ -5,40 +5,52 @@ action, in text by default or JSON with ``--json``. Resolves the PR for the
 current branch when no number is given. Read-only: it never edits the PR — it
 *reports* READY; a later verb does the flip.
 
-The read path is a thin shell over the engine: resolve the PR -> load the
-reviewer Roster once (`load_roster`) -> :func:`prstate.fetch.gather` (the Roster
-rides the snapshot) -> :func:`prstate.state.evaluate` -> render. All the
-lifecycle logic lives in the engine; this verb only resolves, renders, and maps
-errors to exit codes.
+The FIRST verb through the ADR-0030 seam — the walking skeleton the rest of
+the pr family (and CLI02's promotions) copies. The three pieces:
+
+- **params** — click validates the explicit primitives (`PR` as an ``int``,
+  the shared ``--json`` flag from :mod:`.._params`); a malformed argument is a
+  click usage error (exit 2), never verb-body code. The PR *target* is the
+  deliberate ADR-0030 exception: :func:`~._resolve.resolve_pr` resolves
+  "explicit number vs the current branch's PR" at the verb boundary, because
+  "no PR for this branch" is a runtime outcome, not a usage error.
+- **domain call** — :func:`~._resolve.resolve_pr` -> load the reviewer Roster
+  once (:func:`~...prstate.reviewers_config.load_roster`) ->
+  :func:`shipit.prstate.fetch.gather` (the Roster rides the snapshot) ->
+  :func:`shipit.prstate.state.evaluate` (which reads the required reviewer set
+  off the Roster) returns the typed :class:`~shipit.prstate.state.TaskStatus`;
+  all lifecycle logic lives in the engine.
+- **render** — the pure :func:`format_status` string function through the
+  shared :func:`~.._render.emit` (JSON from ``TaskStatus.to_dict()``); the
+  exit code derives from the result, with runtime failures mapped by the
+  one :func:`~.._errors.cli_errors` shell (``error: …`` + exit 1) instead of
+  a per-verb ``try/except``.
 
 ``no_pr`` is a NORMAL state (exit 0): the shared resolver returns ``None`` when
 the branch genuinely has no PR, which renders as ``no_pr``. A real `gh`/auth
 failure — at resolution OR at ``gather`` — is NOT collapsed into ``no_pr``; the
 PRD requires it to surface as a clean stderr message + non-zero exit so
 automation can detect it. The resolver keeps the two cases distinct, so this
-verb maps ``None`` -> ``no_pr`` and ``ExecError`` -> fatal without guessing.
+verb maps ``None`` -> ``no_pr`` and lets ``ExecError`` reach the shell without
+guessing.
 """
 
 from __future__ import annotations
 
-import json
-import sys
-
 import click
 
-from ... import execrun
-from ...prstate.errors import PrStateError
 from ...prstate.fetch import gather
 from ...prstate.reviewers_config import load_roster
 from ...prstate.state import TaskState, TaskStatus, evaluate, no_pr
+from .._errors import cli_errors
+from .._params import json_option
+from .._render import emit
 from ._resolve import resolve_pr
 
 
 @click.command(name="status")
 @click.argument("pr", required=False, type=int)
-@click.option(
-    "--json", "as_json", is_flag=True, help="Emit the status as a JSON object."
-)
+@json_option
 def cmd(pr: int | None, as_json: bool) -> None:
     """Report where PR stands in the review loop + the single next action.
 
@@ -50,41 +62,37 @@ def cmd(pr: int | None, as_json: bool) -> None:
     raise SystemExit(run(pr, as_json=as_json))
 
 
+@cli_errors
 def run(pr: int | None = None, *, as_json: bool = False) -> int:
     """Resolve -> gather -> evaluate -> render. Returns an int exit code.
 
-    Returns 0 on a printed status (including ``no_pr``); non-zero on a real
-    gh/auth failure, whether resolving the branch's PR or reading a known one.
+    Returns 0 on a printed status (including ``no_pr``). A real gh/auth failure
+    — whether resolving the branch's PR or reading a known one — propagates to
+    the :func:`~shipit.verbs._errors.cli_errors` shell (clean ``error: …``
+    stderr + exit 1, per the PRD; never a silent ``no_pr``).
     """
-    try:
-        resolved = resolve_pr(pr)
-        if resolved is None:
-            _emit(no_pr(), as_json=as_json)
-            return 0
-        # The ONE reviewer-config read of this invocation (CLI01-WS04): the
-        # Roster rides the snapshot from here — the engine and adapters read
-        # every per-reviewer setting off it as a value.
-        ctx = gather(resolved, load_roster())
-    except (execrun.ExecError, PrStateError) as exc:
-        # A genuine gh/auth failure (NOT "no PR for branch" — the resolver
-        # returns None for that). The PRD requires this to be visible: clean
-        # stderr + non-zero exit, never a silent no_pr.
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
+    resolved = resolve_pr(pr)
+    if resolved is None:
+        emit(no_pr(), format_status, as_json=as_json)
+        return 0
+    # The ONE reviewer-config read of this invocation (CLI01-WS04): the Roster
+    # rides the snapshot from here — the engine and adapters read every
+    # per-reviewer setting off it as a value.
+    ctx = gather(resolved, load_roster())
     status = evaluate(ctx)
-    _emit(status, as_json=as_json)
+    emit(status, format_status, as_json=as_json)
     return 0
 
 
-def _emit(status: TaskStatus, *, as_json: bool = False) -> None:
-    """Render a TaskStatus: JSON object with --json, else a readable block."""
-    if as_json:
-        print(json.dumps(status.to_dict(), indent=2))
-        return
+def format_status(status: TaskStatus) -> str:
+    """The pure text renderer: a :class:`TaskStatus` as the readable block.
+
+    A plain string function (no printing — the render seam owns the terminal),
+    so text-output tests assert on the return value. ``no_pr`` renders the
+    short two-line form; a full status renders the labelled block.
+    """
     if status.state is TaskState.NO_PR:
-        print("state:  no_pr")
-        print(f"next:   {status.next_action}")
-        return
+        return f"state:  no_pr\nnext:   {status.next_action}"
     reviewers = "  ".join(f"{name}={lc}" for name, lc in status.reviewers.items())
     # A degraded PR is annotated INLINE on the state line — "ready (degraded:
     # codex-local failed)" — so the one line a reader scans already carries the
@@ -94,15 +102,18 @@ def _emit(status: TaskStatus, *, as_json: bool = False) -> None:
         f"{name} {reason}" for name, reason in status.degraded.items()
     )
     degraded_note = f" (degraded: {degraded_list})" if status.degraded else ""
-    print(f"PR #{status.pr}")
-    print(f"state:      {status.state.value}{degraded_note}")
-    print(f"next:       {status.next_action}")
-    print(f"reviewers:  {reviewers}")
-    print(f"threads:    {status.open_threads} open")
-    print(f"checks:     {status.checks.value}")
-    print(f"mergeable:  {status.mergeable}")
-    print(f"cycles:     {status.cycles}")
+    lines = [
+        f"PR #{status.pr}",
+        f"state:      {status.state.value}{degraded_note}",
+        f"next:       {status.next_action}",
+        f"reviewers:  {reviewers}",
+        f"threads:    {status.open_threads} open",
+        f"checks:     {status.checks.value}",
+        f"mergeable:  {status.mergeable}",
+        f"cycles:     {status.cycles}",
+    ]
     if status.degraded:
-        print(f"degraded:   {degraded_list}")
+        lines.append(f"degraded:   {degraded_list}")
     if status.breaker:
-        print(f"breaker:    {status.breaker}")
+        lines.append(f"breaker:    {status.breaker}")
+    return "\n".join(lines)
