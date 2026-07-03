@@ -183,9 +183,9 @@ def run(pr: int | None = None, *, as_json: bool = False) -> int:
 def _report(action: str, status: TaskStatus, *, as_json: bool) -> None:
     """Print the action taken, then the resulting status (reusing `status`'s render).
 
-    Reuses :func:`status._emit` for the status block so `pr next` and `pr status`
-    render identically. The action line is printed first (text) or carried under
-    an ``action`` key (JSON).
+    Reuses :func:`status.format_status` (the ADR-0030 pure renderer) for the
+    status block so `pr next` and `pr status` render identically. The action
+    line is printed first (text) or carried under an ``action`` key (JSON).
     """
     if as_json:
         import json
@@ -194,4 +194,4 @@ def _report(action: str, status: TaskStatus, *, as_json: bool) -> None:
         print(json.dumps(payload, indent=2))
         return
     print(f"action: {action}")
-    status_verb._emit(status, as_json=False)
+    print(status_verb.format_status(status))
