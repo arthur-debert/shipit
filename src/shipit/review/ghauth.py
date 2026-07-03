@@ -116,8 +116,11 @@ def make_app_jwt(backend: Backend) -> str:
     except ImportError as exc:  # pragma: no cover - exercised only when extra absent
         raise ReviewAuthError(
             "Posting a review as a GitHub App needs PyJWT (with its crypto "
-            'backend). Install it with: pip install "pyjwt[crypto]" '
-            "(or install shipit with the `review` extra: pip install 'shipit[review]')."
+            "backend), which this environment lacks. In a pixi checkout the "
+            "`review` env carries it — re-run the same command there, e.g. "
+            "`pixi run -e review shipit pr next <PR>`. Or install it directly: "
+            'pip install "pyjwt[crypto]" (or shipit with the `review` extra: '
+            "pip install 'shipit[review]')."
         ) from exc
 
     agent = backend.funnel_agent or backend.name
