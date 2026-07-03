@@ -37,6 +37,16 @@ def _write(tmp_path, body: str) -> str:
     return str(tmp_path)
 
 
+def test_config_error_is_a_prstate_error():
+    # A bad `.shipit.toml` is a user-renderable engine failure: the `pr` verbs
+    # catch `(ExecError, PrStateError)` and render a clean `error: …` line, so
+    # the config error MUST be a PrStateError (not a bare RuntimeError that would
+    # escape the catch as an unhandled traceback).
+    from shipit.prstate.errors import PrStateError
+
+    assert issubclass(RequiredReviewersConfigError, PrStateError)
+
+
 def test_shipit_own_repo_requires_copilot_codex_agy():
     # Task A / FLU01: shipit DOGFOODS its local reviewers — its own
     # `.shipit.toml` `[reviewers]` table holds Ready on copilot + codex + agy
@@ -138,10 +148,32 @@ def test_run_options_are_carried_on_the_entry(tmp_path):
 
 
 def test_run_option_must_be_a_string(tmp_path):
-    with pytest.raises(RequiredReviewersConfigError, match="must be a string"):
+    with pytest.raises(
+        RequiredReviewersConfigError, match="must be a non-empty string"
+    ):
         load_roster(_write(tmp_path, "[reviewers]\ncodex = { model = 3 }\n"))
-    with pytest.raises(RequiredReviewersConfigError, match="must be a string"):
+    with pytest.raises(
+        RequiredReviewersConfigError, match="must be a non-empty string"
+    ):
         load_roster(_write(tmp_path, "[reviewers]\ncodex = { instructions = true }\n"))
+
+
+def test_empty_run_option_string_rejected_at_load(tmp_path):
+    # An empty (or whitespace-only) `model`/`instructions` is a config error at
+    # LOAD, not a raw RosterEntry ValueError later. `instructions = ""` is the
+    # dangerous one: `Path("").expanduser()` resolves to `.` and joins with the
+    # config dir into a NON-empty directory path, so it would slip past
+    # RosterEntry's non-empty guard and only blow up as IsADirectoryError on the
+    # run path — reject it here, before the path expansion.
+    for opt in ("model", "instructions"):
+        with pytest.raises(
+            RequiredReviewersConfigError, match="must be a non-empty string"
+        ):
+            load_roster(_write(tmp_path, f'[reviewers]\ncodex = {{ {opt} = "" }}\n'))
+        with pytest.raises(
+            RequiredReviewersConfigError, match="must be a non-empty string"
+        ):
+            load_roster(_write(tmp_path, f'[reviewers]\ncodex = {{ {opt} = "   " }}\n'))
 
 
 def test_instructions_anchored_to_config_dir_not_cwd(tmp_path, monkeypatch):

@@ -12,6 +12,7 @@ import logging
 from .. import gh
 from . import fetch
 from .model import Thread
+from .roster import Roster
 
 #: The engine's logger (shared name with the rest of ``shipit.prstate``): a
 #: reply / resolve is a PR mutation, so it gets a lifecycle record here at the
@@ -28,8 +29,14 @@ mutation($threadId: ID!) {
 
 
 def open_threads(pr: int) -> list[Thread]:
-    """All unresolved review threads on the PR (each carries path/line/ids)."""
-    return fetch.gather(pr).open_threads()
+    """All unresolved review threads on the PR (each carries path/line/ids).
+
+    Thread listing is independent of reviewer configuration — `open_threads`
+    reads the raw thread set off the snapshot, which `gather` fetches regardless
+    of the Roster — so this passes the EMPTY :class:`Roster` rather than paying
+    for a config read (`load_roster`) whose per-reviewer settings nothing here
+    consults."""
+    return fetch.gather(pr, Roster()).open_threads()
 
 
 def reply(pr: int, comment_id: int, body: str) -> None:

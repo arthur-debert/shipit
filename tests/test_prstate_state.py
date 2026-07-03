@@ -486,7 +486,9 @@ def test_a_push_re_stales_both_required_reviewers_when_rerun():
             )
         ),
     )
-    status = evaluate(ctx, required=_both_required())
+    # The Roster already makes both reviewers required — derive the required set
+    # from it (the production shape) rather than re-passing an explicit override.
+    status = evaluate(ctx)
     assert status.state is TaskState.REVIEWS_PENDING
     assert "RE-REQUEST" in status.next_action
     assert "copilot" in status.next_action

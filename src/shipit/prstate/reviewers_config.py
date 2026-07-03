@@ -58,6 +58,7 @@ from __future__ import annotations
 import tomllib
 from pathlib import Path
 
+from .errors import PrStateError
 from .reviewers import REGISTRY, by_name
 from .roster import Roster, RosterEntry
 
@@ -105,11 +106,16 @@ _RUN_STRING_OPTIONS = ("model", "instructions")
 _KNOWN_OPTIONS = ("rerun", "timeout", "window", *_RUN_STRING_OPTIONS)
 
 
-class RequiredReviewersConfigError(RuntimeError):
+class RequiredReviewersConfigError(PrStateError):
     """The `[reviewers]` config is invalid — any of: an unknown name, a
     non-requestable reviewer in the required set, a duplicate name, a wrong-typed
     value, or an unknown per-reviewer option. One error type for the whole config
-    surface; the message says which."""
+    surface; the message says which.
+
+    A :class:`~.errors.PrStateError`: a bad `.shipit.toml` is a user-renderable
+    engine failure, so the `pr` verbs that catch `(ExecError, PrStateError)`
+    report it as a clean `error: …` line instead of a traceback — the config
+    surface fails loud the same way a bad `gh`/GraphQL payload does."""
 
 
 def default_roster() -> Roster:
@@ -157,7 +163,13 @@ def load_roster(root: str | None = None) -> Roster:
     if not entries:
         return default_roster()
     _validate(tuple(e.name for e in entries))
-    return Roster(tuple(entries))
+    try:
+        return Roster(tuple(entries))
+    except ValueError as exc:
+        # Belt-and-suspenders: `_validate` already rejects duplicate names, but
+        # any Roster invariant that still trips must fail loud AS a config error
+        # (with the file path), not a raw ValueError escaping into a traceback.
+        raise RequiredReviewersConfigError(f"{config}: {exc}") from exc
 
 
 def _parse_table(value: object, *, config_dir: Path) -> list[RosterEntry]:
@@ -216,7 +228,7 @@ def _parse_entry(name: str, key: str, opts: object, *, config_dir: Path) -> Rost
     against the wrong directory and fail to open it. The entry carries the
     absolute path."""
     if opts is None:
-        return RosterEntry(name=key, required=True)
+        return _build_entry(name, name=key, required=True)
     if not isinstance(opts, dict):
         raise RequiredReviewersConfigError(
             f"{OVERRIDE_FILE} `{OVERRIDE_KEY}.{name}` must be an options table "
@@ -231,9 +243,18 @@ def _parse_entry(name: str, key: str, opts: object, *, config_dir: Path) -> Rost
             "`model`/`instructions`/`timeout` are read by the local-agent run path)"
         )
     for field in _RUN_STRING_OPTIONS:
-        if field in opts and not isinstance(opts[field], str):
+        if field in opts and (
+            not isinstance(opts[field], str) or not opts[field].strip()
+        ):
+            # Reject empty/whitespace HERE, before `instructions` path expansion:
+            # an empty string is a non-empty PATH once resolved against config_dir
+            # (`Path("").expanduser()` → `.` → the config directory itself), so it
+            # would slip past RosterEntry's non-empty guard and only blow up later
+            # as an IsADirectoryError on the run path. An empty `model` likewise
+            # must fail loud as a config error, not a raw RosterEntry ValueError.
             raise RequiredReviewersConfigError(
-                f"{OVERRIDE_FILE} `{OVERRIDE_KEY}.{name}.{field}` must be a string"
+                f"{OVERRIDE_FILE} `{OVERRIDE_KEY}.{name}.{field}` must be a "
+                "non-empty string"
             )
     rerun = opts.get("rerun", False)
     if not isinstance(rerun, bool):
@@ -248,7 +269,8 @@ def _parse_entry(name: str, key: str, opts: object, *, config_dir: Path) -> Rost
         if not expanded.is_absolute():
             expanded = config_dir / expanded
         instructions = str(expanded)
-    return RosterEntry(
+    return _build_entry(
+        name,
         name=key,
         required=True,
         rerun=rerun,
@@ -265,6 +287,23 @@ def _parse_entry(name: str, key: str, opts: object, *, config_dir: Path) -> Rost
             else None
         ),
     )
+
+
+def _build_entry(config_name: str, **kwargs: object) -> RosterEntry:
+    """Construct a :class:`RosterEntry`, translating its construction-is-validation
+    ``ValueError`` into a :class:`RequiredReviewersConfigError`.
+
+    The loader validates every field before it gets here, so this is the
+    defense-in-depth boundary: if a value still trips a RosterEntry invariant
+    (`__post_init__`), the failure surfaces as a config error naming the
+    offending reviewer — never a raw ``ValueError`` escaping the domain-error
+    boundary into an unhandled CLI traceback."""
+    try:
+        return RosterEntry(**kwargs)  # type: ignore[arg-type]
+    except ValueError as exc:
+        raise RequiredReviewersConfigError(
+            f"{OVERRIDE_FILE} `{OVERRIDE_KEY}.{config_name}`: {exc}"
+        ) from exc
 
 
 def _validate(names: tuple[str, ...]) -> None:

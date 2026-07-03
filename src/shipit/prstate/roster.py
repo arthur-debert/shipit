@@ -109,7 +109,7 @@ class Roster:
         duplicates = sorted({n for n in names if names.count(n) > 1})
         if duplicates:
             raise ValueError(
-                f"Roster has duplicate reviewer entr(ies) {duplicates} — "
+                f"Roster has duplicate reviewer entries {duplicates} — "
                 "one entry per reviewer"
             )
 
