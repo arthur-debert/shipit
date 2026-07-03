@@ -93,7 +93,7 @@ simple-gal = [
 standout = [{ repo = "arthur-debert/standout", path = "standout" }]
 
 [shipit]
-version = "1f0b42c7ccd5929dd95f942992b29aef9bec83aa"
+version = "6f0f6531ac94cd91c915d640bb8ab64bfb0be7dc"
 
 [managed]
 "skills/lex-primer/SKILL.md" = "sha256:ff616c1c447661298fb8e06a8a8a6ce60400d838c7c881b9e8bd526128e32901"
@@ -103,15 +103,15 @@ version = "1f0b42c7ccd5929dd95f942992b29aef9bec83aa"
 "skills/shipit-planning/SKILL.md" = "sha256:f51d83b5fbd9a38688cdb13e5b9d251ede8c54a2bad3374c1f4068c9f9039837"
 "skills/shipit-to-issues/SKILL.md" = "sha256:2e70e4220c8e9843ebf4b60439eaee25884fe8d2150190730e4120ace05d5ef8"
 "skills/shipit-to-prd/SKILL.md" = "sha256:3f11af08f88382929b1cd3b8b93d61c6eeac0e8322c5b9f7ba5835925d6b87cc"
-"AGENTS.md#shipit-block" = "sha256:62f7da748372021951746e9dad0ae10353c4e7640d11a0857bdb30550b26b954"
+"AGENTS.md#shipit-block" = "sha256:3206446780a0c71fe10f2584e43dd8e0fe188a73a5510c75b0f4ee948cf82f9f"
 "bin/shipit" = "sha256:b305b90ca3f746acbee0f457d26f5c213d63d0c2cfa31b6baf1b5903f83816bd"
-claude-start = "sha256:d543da07faa93302a87bd601adeae63ff8393d028c02964fcd1c18f8bed64f7d"
+claude-start = "sha256:8a658d5d88269a0444e9843d5cddbf133e4ac9fb2e6862701980991bbd4d379c"
 "lefthook.yml" = "sha256:d64af3253189084f33e8495cc25d860294eafab55acc61dfe1f84801d22cb079"
 "pixi.toml#shipit-tasks" = "sha256:21737ae76129ac0518e2c9e2a647e4ece71f946a43565ddb2cc263d9b32d5268"
-".claude/agents/explorer.md" = "sha256:fb2d15b201fc8ebb4f4bca0599e853b8195f784f37a6e70dd91788a2917ff4bc"
-".claude/agents/implementer.md" = "sha256:9d975c77b54ee7e87545683cca81b884ec287200f733ea7a89f1ca8e6a02d181"
-".claude/agents/reviewer.md" = "sha256:941efe8c86904599b58916d19498ae7c3b3339a614f630a6d11886ad458f6622"
-".claude/agents/shepherd.md" = "sha256:c1da2a76a6df10271c66d2d6d4d06017084f5585493ba4052c2e935f60d8a57d"
+".claude/agents/explorer.md" = "sha256:10a15ec8980182d48db2e87d9f870210828e161b20d27bbd284852cb72b70eac"
+".claude/agents/implementer.md" = "sha256:a0770980171a97dd7dce49e53d0b90c69b357225dd350fe86cadb9d999d5ac46"
+".claude/agents/reviewer.md" = "sha256:2eab753f05aa0d2060d40d9b588fd802671c2b767cc2975bc96971027ab585e1"
+".claude/agents/shepherd.md" = "sha256:e9570b7cbbfa018f401729321fba672e8e31b635364f0595e4335cc28774953a"
 ".claude/settings.json#shipit-pretooluse-hook" = "sha256:e9dad00143c17cddb9a8ceef485a043f6d3ac4c02d06e0c8e9bff4305b2de1f8"
 ".claude/settings.json#shipit-stop-hook" = "sha256:0b936c78ec1a099d43ace303a7497f15a7ece6bb5bb6c9a0e9cffc103c348d82"
 ".claude/settings.json#shipit-subagentstop-hook" = "sha256:0fbeea302c1aa9fe040ba6f84032f14a3805e09ed3aead663be187673d1554b0"
