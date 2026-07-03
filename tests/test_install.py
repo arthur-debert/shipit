@@ -643,7 +643,7 @@ def test_dry_run_has_no_side_effects(tmp_path, rec):
 
 def test_fresh_install_writes_set_and_opens_draft_pr(tmp_path, rec):
     (tmp_path / "AGENTS.md").write_text("# Acme\n\nConsumer text.\n")
-    rc = install.run(str(tmp_path))
+    rc = install.run(str(tmp_path), pr=True)
     assert rc == 0
 
     # Managed files landed.
@@ -732,7 +732,7 @@ def test_consumer_edit_to_settings_hook_surfaces_as_override(tmp_path, rec):
             entry["matcher"] = "Edit"
     settings_path.write_text(json.dumps(data, indent=2))
 
-    rc = install.run(str(tmp_path))
+    rc = install.run(str(tmp_path), pr=True)
     assert rc == 0
     assert ("pr_create", True) in rec.calls
     # The edited unit is surfaced as an override with its diff, never clobbered blind.
@@ -746,7 +746,7 @@ def test_consumer_edit_to_agent_def_surfaces_as_override(tmp_path, rec):
     rec.calls.clear()
 
     (tmp_path / ".claude" / "agents" / "implementer.md").write_text("HAND EDIT\n")
-    rc = install.run(str(tmp_path))
+    rc = install.run(str(tmp_path), pr=True)
     assert rc == 0
     assert ("pr_create", True) in rec.calls
     assert "### Overrides" in rec.pr_body
@@ -764,7 +764,7 @@ def test_install_against_malformed_settings_json_does_not_crash(tmp_path, rec):
     garbage = '{ "permissions": [ this is not valid json,,, ]\n'
     settings_path.write_text(garbage)
 
-    rc = install.run(str(tmp_path))
+    rc = install.run(str(tmp_path), pr=True)
 
     assert rc == 0  # completed without raising
     # The malformed file was left exactly as it was — never overwritten.
@@ -794,7 +794,7 @@ def test_consumer_edit_surfaces_as_override(tmp_path, rec):
     skill = tmp_path / "skills" / "shipit-to-prd" / "SKILL.md"
     skill.write_text("CONSUMER EDIT\n")
 
-    rc = install.run(str(tmp_path))
+    rc = install.run(str(tmp_path), pr=True)
     assert rc == 0
     assert ("pr_create", True) in rec.calls
     assert "### Overrides" in rec.pr_body
@@ -811,11 +811,54 @@ def test_open_install_pr_is_updated_not_recreated(tmp_path, rec, monkeypatch):
         gh, "pr_url_for_head", lambda branch, cwd=None: "https://x/pull/7"
     )
     (tmp_path / "AGENTS.md").write_text("# Acme\n")
-    rc = install.run(str(tmp_path))
+    rc = install.run(str(tmp_path), pr=True)
     assert rc == 0
     # The branch was force-pushed, but no second PR was created.
     assert "push" in rec.names()
     assert "pr_create" not in rec.names()
+
+
+def test_default_install_refreshes_working_tree_without_git_or_pr(tmp_path, rec):
+    # #359: the DEFAULT mode is a working-tree refresh — the managed set and
+    # manifest land on disk uncommitted, and the git/gh side-effect set is
+    # empty: no branch switch, no commit, no push, no PR. Committing the
+    # refresh into the caller's own work is the caller's job.
+    (tmp_path / "AGENTS.md").write_text("# Acme\n\nConsumer text.\n")
+    rc = install.run(str(tmp_path))
+    assert rc == 0
+
+    # The managed set + manifest are on disk...
+    assert (tmp_path / "bin" / "shipit").is_file()
+    agents = (tmp_path / "AGENTS.md").read_text()
+    assert "Consumer text." in agents
+    assert install.BLOCK_OPEN in agents
+    managed = config.load_managed(config.load(tmp_path / ".shipit.toml"))
+    assert "bin/shipit" in managed
+    # ...and not one git/gh call was made.
+    assert rec.calls == []
+
+
+def test_default_install_mid_drift_never_branches_or_opens_pr(tmp_path, rec, capsys):
+    # The #359 trap as a regression test: managed-file drift mid-workstream,
+    # install run with no flags → the drift is refreshed in place (a
+    # consumer-edited unit included, warned on stderr) and NOTHING touches git
+    # or origin — no shipit/install branch, no stray draft PR racing to main.
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    install.run(str(tmp_path))
+    rec.calls.clear()
+
+    skill = tmp_path / "skills" / "shipit-to-prd" / "SKILL.md"
+    skill.write_text("CONSUMER EDIT\n")
+    rc = install.run(str(tmp_path))
+    assert rc == 0
+    # The drifted unit was refreshed to shipit's content, in the working tree.
+    assert "CONSUMER EDIT" not in skill.read_text()
+    # No switch, no add, no commit, no push, no pr_create — the trap is closed.
+    assert rec.calls == []
+    # The override was surfaced loudly for the caller, not silently swallowed.
+    err = capsys.readouterr().err
+    assert "consumer-edited" in err
+    assert "skills/shipit-to-prd/SKILL.md" in err
 
 
 def test_push_flag_pushes_to_branch_without_pr(tmp_path, rec):
@@ -874,7 +917,7 @@ def test_gh_failure_is_a_clean_nonzero_exit(tmp_path, monkeypatch, rec):
 
     monkeypatch.setattr(git, "switch_create", boom)
     (tmp_path / "AGENTS.md").write_text("# Acme\n")
-    rc = install.run(str(tmp_path))
+    rc = install.run(str(tmp_path), pr=True)
     assert rc == 1  # clean exit, not a raised traceback
 
 
@@ -890,7 +933,7 @@ def _secrets_by_name(root):
 
 def test_fresh_install_seeds_app_secret_mappings(tmp_path, rec):
     (tmp_path / "AGENTS.md").write_text("# Acme\n")
-    rc = install.run(str(tmp_path))
+    rc = install.run(str(tmp_path), pr=True)
     assert rc == 0
 
     secrets = _secrets_by_name(tmp_path)
@@ -972,7 +1015,7 @@ def test_install_reseeds_policy_when_missing_even_if_managed_current(tmp_path, r
     cfg_path.write_text(config.dump_manifest("testhash", managed))  # policy stripped
 
     rec.calls.clear()
-    rc = install.run(str(tmp_path))
+    rc = install.run(str(tmp_path), pr=True)
     assert rc == 0
     # A seed-only change still opens a DRAFT PR (managed set NOOP, policy seeded)...
     assert ("pr_create", True) in rec.calls
@@ -1010,7 +1053,7 @@ def test_activates_hooks_is_true_iff_lefthook_is_managed():
 
 def test_fresh_install_activates_the_check_hooks(tmp_path, rec):
     (tmp_path / "AGENTS.md").write_text("# Acme\n")
-    rc = install.run(str(tmp_path))
+    rc = install.run(str(tmp_path), pr=True)
     assert rc == 0
     # The lefthook boundary was invoked exactly once, on the consumer root.
     assert len(rec.hook_activations) == 1
@@ -1056,7 +1099,7 @@ def test_install_warns_but_succeeds_when_activation_fails(tmp_path, monkeypatch,
         lambda root: _exec_result(1, stderr="lefthook: broken config"),
     )
     (tmp_path / "AGENTS.md").write_text("# Acme\n")
-    rc = install.run(str(tmp_path))
+    rc = install.run(str(tmp_path), pr=True)
     assert rc == 0
     assert ("pr_create", True) in rec.calls
     # The PR body must NOT claim the checks went live on this failure path; it
@@ -1081,7 +1124,7 @@ def test_install_warns_but_succeeds_when_lefthook_missing(
 
     monkeypatch.setattr(install, "_activate_hooks", boom)
     (tmp_path / "AGENTS.md").write_text("# Acme\n")
-    rc = install.run(str(tmp_path))
+    rc = install.run(str(tmp_path), pr=True)
     assert rc == 0
     assert ("pr_create", True) in rec.calls
     assert "### Checks activated locally" not in rec.pr_body
@@ -1108,7 +1151,7 @@ def test_install_activation_timeout_does_not_claim_missing_binary(
 
     monkeypatch.setattr(install, "_activate_hooks", boom)
     (tmp_path / "AGENTS.md").write_text("# Acme\n")
-    rc = install.run(str(tmp_path))
+    rc = install.run(str(tmp_path), pr=True)
     assert rc == 0
     assert ("pr_create", True) in rec.calls
     err = capsys.readouterr().err

@@ -91,7 +91,7 @@ def rec(monkeypatch):
 
 def test_install_logs_the_write_and_pr_milestones(tmp_path, rec, caplog):
     with caplog.at_level(logging.DEBUG, logger="shipit.install"):
-        assert install.run(str(tmp_path)) == 0
+        assert install.run(str(tmp_path), pr=True) == 0
     # The reconcile milestone: the managed set landed, with the decided counts.
     written = _with_fields(
         caplog.records, logging.INFO, "root", "adds", "updates", "overrides", "seeds"
@@ -114,7 +114,7 @@ def test_noop_reinstall_emits_no_mutation_milestone(tmp_path, rec, caplog):
 def test_install_boundary_failure_is_an_error_with_the_exception(tmp_path, rec, caplog):
     rec.fail_switch = True
     with caplog.at_level(logging.DEBUG, logger="shipit.install"):
-        assert install.run(str(tmp_path)) == 1
+        assert install.run(str(tmp_path), pr=True) == 1
     errors = [r for r in caplog.records if r.levelno == logging.ERROR]
     assert errors and any(r.exc_info for r in errors)
 

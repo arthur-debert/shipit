@@ -48,8 +48,15 @@ the durable code is one slim versioned package; and configuration is explicit.
         .shipit.toml at the previous install:
 
         - Unchanged in the consumer: overwritten silently.
-        - Edited in the consumer: surfaced in the install PR (the override is
-          shown), never clobbered.
+        - Edited in the consumer: surfaced loudly (a stderr warning on the
+          default working-tree refresh; the override diff in the `--pr`
+          reconcile PR), never clobbered blind.
+
+        By default the refresh lands in the WORKING TREE, uncommitted — the
+        caller folds it into their own commit. Only `install --pr` stages the
+        set on the `shipit/install` branch and opens the draft reconcile PR
+        (the standalone onboarding flow); mid-workstream, install never
+        branches, pushes, or opens a PR on its own (#359).
 
         Reconciliation is a hash compare, not a subsystem. The moment it grows
         features it has become the drift engine this design exists to avoid.
@@ -108,7 +115,8 @@ the durable code is one slim versioned package; and configuration is explicit.
     The durable logic is one small binary, `shipit`, with git-style
     subcommands:
 
-    - install — provision + reconcile the managed files (open a PR).
+    - install — provision + reconcile the managed files in the working
+      tree (`--pr` opens the standalone reconcile draft PR).
     - gh-setup — labels, ruleset, secrets.
     - lint — run the standardized checks.
     - pr status / pr next — the PR-lifecycle state machine.
