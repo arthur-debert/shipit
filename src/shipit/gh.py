@@ -49,7 +49,7 @@ from .execrun import ExecError
 
 if TYPE_CHECKING:  # the value objects gh returns; runtime import is deferred
     from .identity import Repo
-    from .pr import PR
+    from .pr import PR, PrId
 
 # The engine's semantic error is safe to import here: `prstate.errors` is a
 # leaf module (stdlib-only, imports nothing from shipit), so no cycle — while
@@ -433,15 +433,15 @@ def pr_view(pr: str, *, repo: str | None = None, json_fields: list[str]) -> dict
     return data
 
 
-def pr_core(pr: int, repo: Repo) -> PR:
+def pr_core(pr: PrId) -> PR:
     """The :class:`shipit.pr.PR` core of ``pr`` — the TYPED PR read (PROC03).
 
     Fetches exactly the core field list (:data:`shipit.pr.CORE_JSON_FIELDS`) and
     routes the node through the ONE :func:`shipit.pr.core_from_node` boundary, so
     the returned core carries the :class:`~shipit.identity.Sha`-typed head and no
-    caller re-parses the wire shape. ``repo`` is the PR identity's repo — a PR
-    node does not carry its own slug, so the caller names which repo identity the
-    core composes (typically :func:`current_repo`).
+    caller re-parses the wire shape. The target arrives as a
+    :class:`~shipit.pr.PrId` (ADR-0030): the repo identity the core composes
+    rides along on it — never re-derived here per fetch.
 
     Raises :class:`ExecError` on a failed gh call, :class:`ValueError` on
     unusable output (unparseable JSON, a malformed/abbreviated head sha, a
@@ -450,11 +450,11 @@ def pr_core(pr: int, repo: Repo) -> PR:
     """
     from .pr import CORE_JSON_FIELDS, core_from_node
 
-    node = pr_view(str(pr), repo=repo.slug, json_fields=list(CORE_JSON_FIELDS))
-    return core_from_node(node, repo)
+    node = pr_view(str(pr.number), repo=pr.slug, json_fields=list(CORE_JSON_FIELDS))
+    return core_from_node(node, pr.repo)
 
 
-def pr_meta(pr: int) -> dict:
+def pr_meta(pr: PrId) -> dict:
     """PR-level metadata the PR-state engine needs in one call.
 
     A raw ``pullRequest`` node (dict), not a typed core: alongside the core
@@ -462,7 +462,9 @@ def pr_meta(pr: int) -> dict:
     (:func:`shipit.prstate.fetch.context_from_raw`) consumes — that builder routes
     the core through :func:`shipit.pr.core_from_node` and partitions the checks
     into the existing check value shapes, so no parallel snapshot type is minted
-    here (PROC03).
+    here (PROC03). The target arrives as a :class:`~shipit.pr.PrId` (ADR-0030):
+    the read is pinned to the identity's repo, never to an ambient cwd
+    inference.
 
     Deliberately does NOT fetch ``reviewRequests``: ``gh pr view --json``
     silently omits Bot-typed requested reviewers (a requested Copilot reads as
@@ -470,7 +472,8 @@ def pr_meta(pr: int) -> dict:
     (`prstate.fetch._threads_and_review_requests`).
     """
     return pr_view(
-        str(pr),
+        str(pr.number),
+        repo=pr.slug,
         json_fields=[
             "number",
             "headRefOid",
@@ -616,24 +619,117 @@ def pr_for_head(branch: str, *, cwd: str | None = None) -> HeadPr | None | Unkno
 #: PR — the one failure that is a provable *absence*, not an undetermined state
 #: (the exit code is a bare ``1`` for both cases, so the stderr message is the
 #: only signal). Matched narrowly on purpose so an unrelated failure is never
-#: mistaken for a provable absence. Public: ``verbs/pr/_resolve.py`` keys on
-#: the SAME marker when branching on :func:`pr_number_probe`'s result, so the
-#: per-tool knowledge is written down exactly once.
+#: mistaken for a provable absence. :func:`resolve_pr` keys on the SAME marker
+#: when branching on :func:`pr_number_probe`'s result, so the per-tool
+#: knowledge is written down exactly once.
 NO_PR_MARKER = "no pull requests found for branch"
 
 
-def pr_number_probe() -> execrun.ExecResult:
-    """``gh pr view --json number`` for the CURRENT branch, as a probe.
+def pr_number_probe(repo: Repo, branch: str) -> execrun.ExecResult:
+    """``gh pr view <branch> --repo <slug> --json number``, as a probe.
 
-    The mechanics half of "which PR am I on?" — the argv lives here (ADR-0028:
-    gh argv built outside the adapter is a defect) while the three-way
-    branching (a number / provably no PR / a real gh failure) stays with the
-    verb-layer resolver (``verbs/pr/_resolve``), which keys the no-PR case on
-    :data:`NO_PR_MARKER` in the result's stderr. A probe because a PR-less
-    branch is this call's NORMAL answer on every bare ``pr`` verb (records at
-    DEBUG, never a spurious ERROR).
+    The mechanics half of "which PR is this branch on?" — the argv lives here
+    (ADR-0028: gh argv built outside the adapter is a defect) while the
+    three-way branching (a number / provably no PR / a real gh failure) lives
+    with :func:`resolve_pr`, which keys the no-PR case on :data:`NO_PR_MARKER`
+    in the result's stderr. A probe because a PR-less branch is this call's
+    NORMAL answer on every bare ``pr`` verb (records at DEBUG, never a spurious
+    ERROR).
+
+    BOTH the repo and the branch are PINNED into the argv. ``--repo <slug>``
+    forces the lookup against the SAME origin-derived :class:`~shipit.identity.Repo`
+    the caller mints the target with — never ``gh``'s ambient inference
+    (``GH_REPO``, ``gh repo set-default``, a non-origin remote), which
+    :func:`shipit.identity.resolve_repo` deliberately does not consult. Left
+    ambient, the probe could read a number out of one repo while
+    :func:`resolve_pr` minted it under another, so a bare mutating verb
+    (``pr ready`` / ``pr review request``) would act on the WRONG PR. ``gh``
+    requires an explicit selector once ``--repo`` is given, so the current
+    branch name is passed positionally — it is the PR head shipit pushes, and a
+    genuinely PR-less branch still exits with :data:`NO_PR_MARKER`.
     """
-    return _run_probe(["gh", "pr", "view", "--json", "number"])
+    return _run_probe(
+        ["gh", "pr", "view", branch, "--repo", repo.slug, "--json", "number"]
+    )
+
+
+def resolve_pr(number: int | None, repo: Repo, branch: str | None) -> PrId | None:
+    """The typed PR target: the given number, or the current branch's PR
+    (``None`` if there is none) — minted into a :class:`~shipit.pr.PrId`.
+
+    The PR-target resolver every ``pr`` verb shares (ADR-0030's deliberate
+    exception: click validates only the explicit primitive; "which PR" is a
+    runtime boundary call, because "no PR for this branch" is a runtime
+    outcome, not a usage error). It lives HERE, at the gh adapter (CLI01-WS03
+    promoted it out of ``verbs/pr/``), because it is per-tool knowledge over
+    :func:`pr_number_probe`'s answer — the three outcomes are kept DISTINCT so
+    callers never have to swallow errors to find them:
+
+      * an explicit / resolved PR number  -> minted into a ``PrId``
+      * the branch genuinely has no PR    -> ``None`` (a normal state, not an error)
+      * a real gh/auth failure            -> raises ``execrun.ExecError``
+
+    ``repo`` and ``branch`` are the identity the target is resolved against —
+    BOTH the caller's ambient checkout (the root context) or an explicit
+    override, never re-derived here, and ALWAYS describing the same checkout, so
+    the branch whose PR is probed and the repo the ``PrId`` is minted with can
+    never diverge (:func:`pr_number_probe` pins ``--repo`` to this ``repo``, not
+    ``gh``'s ambient inference). An explicit ``number`` is minted directly. A
+    ``None`` ``branch`` (detached / unborn HEAD) is a normal no-PR state — there
+    is no current branch, hence no branch PR. The no-PR case is otherwise teased
+    apart from a genuine failure by ``gh``'s own signal (:data:`NO_PR_MARKER`);
+    every other failure (missing gh, auth, transient API error) becomes an
+    :class:`~shipit.execrun.ExecError` so a verb can surface it as a clean
+    stderr + non-zero exit per the PRD. A read-only verb maps ``None`` to
+    ``no_pr``; a mutating verb treats both ``None`` and ``ExecError`` as fatal
+    — but each decides, because the cases arrive distinct.
+    """
+    from .pr import PrId
+
+    if number is not None:
+        return PrId(repo=repo, number=number)
+    if branch is None:
+        # No current branch (detached / unborn HEAD) -> no branch PR. A normal
+        # no-PR state, kept distinct from a failure exactly like NO_PR_MARKER.
+        return None
+    result = pr_number_probe(repo, branch)
+    if result.rc != 0:
+        # "no PR for this branch" is a normal state, not a failure: gh exits
+        # non-zero with NO_PR_MARKER (per-tool knowledge written down once,
+        # above). Anything else is a real gh/auth failure — surface the failed
+        # Exec as its transport error (pre-redacted by the ExecError
+        # constructor), never collapse it into None.
+        if NO_PR_MARKER in result.stderr.lower():
+            return None
+        raise ExecError(
+            result.argv,
+            rc=result.rc,
+            stdout=result.stdout,
+            stderr=result.stderr,
+            duration_ms=result.duration_ms,
+        )
+    out = result.stdout
+    if not out.strip():
+        # Defensive: a non-erroring empty body also means no PR.
+        return None
+    try:
+        data = json.loads(out)
+    except json.JSONDecodeError as exc:
+        raise PrStateError(f"unparseable `gh pr view` output: {exc}") from exc
+    resolved = data.get("number")
+    if resolved is None:
+        return None
+    # Pass the raw wire value straight into PrId — its construction IS the
+    # validation (exact-int, positive, ADR-0030), the same discipline the
+    # sibling wire boundary `pr.core_from_node` applies. A silent `int(resolved)`
+    # coercion here would defeat that invariant, accepting a `"99"`/`7.0`/`True`
+    # from unexpected `gh` output and minting the wrong PR target. Re-raise with
+    # the wire context so a malformed number dies at this read, like the JSON
+    # decode above.
+    try:
+        return PrId(repo=repo, number=resolved)
+    except ValueError as exc:
+        raise PrStateError(f"malformed `gh pr view` number: {exc}") from exc
 
 
 def pr_url_for_head(branch: str, *, cwd: str | None = None) -> str | None:
@@ -690,29 +786,30 @@ def pr_create(
 # --------------------------------------------------------------------------
 
 
-def pr_edit_reviewer(pr: int, reviewer: str, *, remove: bool = False) -> None:
+def pr_edit_reviewer(pr: PrId, reviewer: str, *, remove: bool = False) -> None:
     """Add (or remove) a reviewer on a PR via ``gh pr edit``.
 
     ``gh pr edit --add-reviewer`` resolves the reviewer handle to its real
     node id and mutates through GraphQL. That path is load-bearing for bot
     reviewers: the REST ``requested_reviewers`` POST silently no-ops for them
     (returns 200 but leaves ``requested_reviewers`` empty) — never swap this
-    for the REST call.
+    for the REST call. The target arrives as a :class:`~shipit.pr.PrId`
+    (ADR-0030): the repo rides on the identity, never re-resolved here.
     """
-    slug = current_repo().slug
     flag = "--remove-reviewer" if remove else "--add-reviewer"
-    _run(["gh", "pr", "edit", str(pr), "--repo", slug, flag, reviewer])
+    _run(["gh", "pr", "edit", str(pr.number), "--repo", pr.slug, flag, reviewer])
 
 
-def pr_ready(pr: int, *, undo: bool = False) -> None:
+def pr_ready(pr: PrId, *, undo: bool = False) -> None:
     """Flip a PR's draft flag via ``gh pr ready`` (``--undo`` for ready→draft).
 
     ``gh pr ready`` is idempotent: flipping a PR that is already in the target
     state prints a notice and exits 0, so callers don't need to pre-check the
-    flag to stay safe — they pre-check only to *say* something more useful.
+    flag to stay safe — they pre-check only to *say* something more useful. The
+    target arrives as a :class:`~shipit.pr.PrId` (ADR-0030): the repo rides on
+    the identity, never re-resolved here.
     """
-    slug = current_repo().slug
-    args = ["gh", "pr", "ready", str(pr), "--repo", slug]
+    args = ["gh", "pr", "ready", str(pr.number), "--repo", pr.slug]
     if undo:
         args.append("--undo")
     _run(args)
@@ -722,14 +819,14 @@ def pr_ready(pr: int, *, undo: bool = False) -> None:
     # line, invisible to an INFO-level read of the story.
     logger.info(
         "pr#%s draft flag flipped %s on %s",
-        pr,
+        pr.number,
         "ready→draft" if undo else "draft→ready",
-        slug,
-        extra={"pr": pr, "repo": slug},
+        pr.slug,
+        extra={"pr": pr.number, "repo": pr.slug},
     )
 
 
-def pr_review_reply(pr: int, comment_id: int, body: str) -> None:
+def pr_review_reply(pr: PrId, comment_id: int, body: str) -> None:
     """Post a threaded reply to an existing PR review comment.
 
     Wraps ``POST /repos/{owner}/{name}/pulls/{pr}/comments/{comment_id}/replies``
@@ -737,11 +834,11 @@ def pr_review_reply(pr: int, comment_id: int, body: str) -> None:
     target rather than starting a fresh top-level review comment. ``comment_id``
     is the numeric REST id (the same handle ``pr resolve-thread`` takes); ``body``
     is the reply text. This is the push-back path: reply with rationale, then
-    resolve the thread.
+    resolve the thread. The target arrives as a :class:`~shipit.pr.PrId`
+    (ADR-0030): the repo rides on the identity, never re-resolved here.
     """
-    slug = current_repo().slug
     rest(
-        f"repos/{slug}/pulls/{pr}/comments/{comment_id}/replies",
+        f"repos/{pr.slug}/pulls/{pr.number}/comments/{comment_id}/replies",
         method="POST",
         fields={"body": body},
     )

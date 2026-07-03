@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import pytest
 from shipit.agent import backend as _agent_backend
-from shipit.identity import Sha
+from shipit.identity import Sha, repo_from_slug
+from shipit.pr import PrId
 from shipit.prstate.model import ReviewLifecycle
 from shipit.prstate.errors import PrStateError
 from shipit.prstate.reviewers import (
@@ -19,8 +20,19 @@ from shipit.prstate.reviewers import (
     CodexAdapter,
     CopilotAdapter,
     GeminiAdapter,
-    required_reviewers,
+    required_adapters,
 )
+from shipit.prstate.reviewers_config import default_roster
+from shipit.prstate.roster import Roster, RosterEntry
+
+# The typed PR target (CLI01-WS02 / ADR-0030): the act side takes a PrId — the
+# repo rides on the identity into `gh.pr_edit_reviewer` / the detach service.
+_TARGET_REPO = repo_from_slug("owner/repo")
+
+
+def _target(number: int) -> PrId:
+    return PrId(repo=_TARGET_REPO, number=number)
+
 
 # Full, validated commit identities (COR02): the current head, an earlier
 # (stale) head, and a generic head for single-commit scenarios.
@@ -33,6 +45,11 @@ CODERABBIT = CodeRabbitAdapter()
 GEMINI = GeminiAdapter()
 CODEX = CodexAdapter()
 AGY = AgyAdapter()
+
+
+def _rerun_roster(name: str) -> Roster:
+    """A Roster flipping `name` to rerun=True — the head-strict opt-in as a value."""
+    return Roster((RosterEntry(name=name, required=True, rerun=True),))
 
 
 def test_registry_catalogs_all_adapters():
@@ -59,7 +76,7 @@ def test_registry_catalogs_all_adapters():
 def test_default_required_set_is_copilot_only():
     # The shipped default config: Copilot holds Ready. CodeRabbit is a phos-org
     # pilot — requestable (eligible), but required only where a repo opts in.
-    assert [r.name for r in required_reviewers()] == ["copilot"]
+    assert [r.name for r in required_adapters(default_roster())] == ["copilot"]
 
 
 def test_copilot_done_with_open_comment(context):
@@ -96,7 +113,7 @@ def test_stale_copilot_review_does_not_count_as_done_when_rerun(context):
     # rerun=True (opt-in, head-strict): a review against an earlier commit is
     # stale and must not read as done on this head.
     ctx = context("copilot_stale_review")
-    ctx.reviewer_rerun = {"copilot": True}
+    ctx.roster = _rerun_roster("copilot")
     assert COPILOT.detect(ctx) == ReviewLifecycle.REQUESTED
 
 
@@ -143,7 +160,7 @@ def test_copilot_review_on_earlier_head_does_NOT_count_done_when_rerun():
         is_draft=True,
         reviews=[Review(1, "Copilot", "COMMENTED", OLD, "")],
         requested_logins=["Copilot"],
-        reviewer_rerun={"copilot": True},
+        roster=_rerun_roster("copilot"),
     )
     assert COPILOT.detect(ctx) == ReviewLifecycle.REQUESTED
 
@@ -223,8 +240,8 @@ def test_copilot_request_goes_through_gh_pr_edit_graphql(monkeypatch):
         "pr_edit_reviewer",
         lambda pr, reviewer, remove=False: calls.append((pr, reviewer, remove)),
     )
-    assert COPILOT.request(91) is True
-    assert calls == [(91, "@copilot", False)]
+    assert COPILOT.request(_target(91)) is True
+    assert calls == [(_target(91), "@copilot", False)]
 
 
 def test_copilot_cancel_removes_the_reviewer(monkeypatch):
@@ -236,8 +253,8 @@ def test_copilot_cancel_removes_the_reviewer(monkeypatch):
         "pr_edit_reviewer",
         lambda pr, reviewer, remove=False: calls.append((pr, reviewer, remove)),
     )
-    assert COPILOT.cancel(91) is True
-    assert calls == [(91, "@copilot", True)]
+    assert COPILOT.cancel(_target(91)) is True
+    assert calls == [(_target(91), "@copilot", True)]
 
 
 def test_gemini_request_and_cancel_are_noops(monkeypatch):
@@ -249,8 +266,8 @@ def test_gemini_request_and_cancel_are_noops(monkeypatch):
 
     monkeypatch.setattr(gh, "pr_edit_reviewer", _boom)
     monkeypatch.setattr(gh, "_run", _boom)
-    assert GEMINI.request(91) is False
-    assert GEMINI.cancel(91) is False
+    assert GEMINI.request(_target(91)) is False
+    assert GEMINI.cancel(_target(91)) is False
 
 
 def test_adapters_declare_their_instruction_files():
@@ -319,7 +336,7 @@ def test_coderabbit_is_head_strict_when_rerun():
         is_draft=True,
         reviews=[Review(1, "coderabbitai[bot]", "COMMENTED", OLD, "")],
         requested_logins=["coderabbitai[bot]"],
-        reviewer_rerun={"coderabbit": True},
+        roster=_rerun_roster("coderabbit"),
     )
     assert CODERABBIT.detect(ctx) == ReviewLifecycle.REQUESTED
 
@@ -348,9 +365,12 @@ def test_coderabbit_request_and_cancel_go_through_gh_pr_edit(monkeypatch):
         "pr_edit_reviewer",
         lambda pr, reviewer, remove=False: calls.append((pr, reviewer, remove)),
     )
-    assert CODERABBIT.request(55) is True
-    assert CODERABBIT.cancel(55) is True
-    assert calls == [(55, "coderabbitai[bot]", False), (55, "coderabbitai[bot]", True)]
+    assert CODERABBIT.request(_target(55)) is True
+    assert CODERABBIT.cancel(_target(55)) is True
+    assert calls == [
+        (_target(55), "coderabbitai[bot]", False),
+        (_target(55), "coderabbitai[bot]", True),
+    ]
 
 
 # --- local review backends: codex / agy (Phase 3) ---------------------------
@@ -448,7 +468,7 @@ def test_codex_detect_stale_review_is_not_done_when_rerun():
         head_sha=NEW,
         is_draft=True,
         reviews=[Review(1, "adr-codex-review[bot]", "COMMENTED", OLD, "")],
-        reviewer_rerun={"codex": True},
+        roster=_rerun_roster("codex"),
     )
     assert CODEX.detect(ctx) == ReviewLifecycle.NOT_REQUESTED
 
@@ -479,23 +499,27 @@ def test_local_request_detaches_via_service(monkeypatch, tmp_path):
         return True
 
     monkeypatch.setattr(service, "start_detached_review", fake_start_detached)
-    # No `.shipit.toml` in tmp cwd → no per-reviewer model/instructions options.
+    # No Roster entry passed → the all-defaults entry: no per-reviewer
+    # model/instructions/timeout options reach the child.
     monkeypatch.chdir(tmp_path)
 
-    assert CODEX.request(7) is True
-    assert AGY.request(9) is True
-    # The adapters hand the service their ONE registry identity (COR02-WS03).
-    assert calls[0][0] is _agent_backend.CODEX and calls[0][1] == 7
+    assert CODEX.request(_target(7)) is True
+    assert AGY.request(_target(9)) is True
+    # The adapters hand the service their ONE registry identity (COR02-WS03)
+    # and the TYPED target (ADR-0030).
+    assert calls[0][0] is _agent_backend.CODEX and calls[0][1] == _target(7)
     assert calls[0][2]["as_app"] is True
-    assert calls[1][0] is _agent_backend.ANTIGRAVITY and calls[1][1] == 9
+    assert calls[1][0] is _agent_backend.ANTIGRAVITY and calls[1][1] == _target(9)
 
 
-def test_local_request_threads_model_and_instructions_from_config(
+def test_local_request_threads_model_and_instructions_from_the_entry(
     monkeypatch, tmp_path
 ):
-    # The per-reviewer `model` / `instructions` from `[reviewers]` are read and
-    # threaded to the detached child (force scope: codex need not be a required
-    # (holding) reviewer).
+    # The per-reviewer `model` / `instructions` arrive on the reviewer's Roster
+    # ENTRY (CLI01-WS04) — loaded once from `[reviewers]` at the verb boundary
+    # and passed as a value — and are threaded to the detached child (force
+    # scope: codex need not be a required (holding) reviewer to carry options).
+    from shipit.prstate.reviewers_config import load_roster
     from shipit.review import service
 
     (tmp_path / ".shipit.toml").write_text(
@@ -504,7 +528,6 @@ def test_local_request_threads_model_and_instructions_from_config(
         'codex = { model = "flash", instructions = "docs/rev.md" }\n',
         encoding="utf-8",
     )
-    monkeypatch.chdir(tmp_path)
 
     captured: dict = {}
 
@@ -513,9 +536,10 @@ def test_local_request_threads_model_and_instructions_from_config(
         return True
 
     monkeypatch.setattr(service, "start_detached_review", fake_start_detached)
-    assert CODEX.request(3) is True
+    entry = load_roster(str(tmp_path)).entry("codex")
+    assert CODEX.request(_target(3), entry) is True
     assert captured["model"] == "flash"
-    # The instructions path is anchored to the config dir (absolute).
+    # The instructions path was anchored to the config dir at LOAD (absolute).
     assert captured["instructions_path"] == str(tmp_path / "docs" / "rev.md")
 
 
@@ -532,7 +556,7 @@ def test_local_request_normalizes_failure_to_prstateerror(monkeypatch, tmp_path)
     monkeypatch.chdir(tmp_path)
 
     with pytest.raises(PrStateError, match="codex-local review failed") as excinfo:
-        CODEX.request(7)
+        CODEX.request(_target(7))
     # The original failure was WRAPPED (normalized), not re-raised: the chained
     # cause is the underlying RuntimeError, so no raw traceback escapes.
     assert isinstance(excinfo.value.__cause__, RuntimeError)
@@ -542,5 +566,5 @@ def test_local_request_normalizes_failure_to_prstateerror(monkeypatch, tmp_path)
 def test_local_cancel_is_a_noop():
     # A posted review can't be withdrawn — cancel returns False, like a
     # no-mechanism backend.
-    assert CODEX.cancel(7) is False
-    assert AGY.cancel(9) is False
+    assert CODEX.cancel(_target(7)) is False
+    assert AGY.cancel(_target(9)) is False

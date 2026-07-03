@@ -1,19 +1,23 @@
 """Request (or re-request) reviewers and VERIFY the request attached — the
-reusable, boundary-injected helper shared across `pr` verbs.
+reviewer-request SERVICE of the PR state engine.
 
 This is the extraction of release's `#614` attach-verify logic (release's
 `cli/review.py`) into a composable function with NO click/CLI concerns: it takes
-a PR number and a list of reviewer adapters, places each request, and polls the
+the typed PR target (a `PrId`, ADR-0030 — the repo rides along on the identity,
+so no boundary re-derives it) and a list of reviewer adapters, places each
+request, and polls the
 PR's pending review-requests until every placed request's `review_requested`
 edge actually exists — failing loud (via the returned result) when GitHub
 silently drops an attach, so a dropped request never parks the PR invisibly at
 reviews-pending.
 
-Why a separate helper (not buried in the verb): WS05's `pr review request` AND
-WS06's `pr next` both need to "request the pending required reviewers and make
-sure it stuck". Keeping the request+verify here — pure orchestration over an
-injected boundary — lets both call it and lets it be unit-tested without the
-network or click.
+Why a domain service (not buried in a verb — CLI01-WS03 promoted it out of
+``verbs/pr/``): `pr review request` AND `pr next`'s request act both need to
+"request the pending required reviewers and make sure it stuck". Keeping the
+request+verify here — pure orchestration over an injected boundary — lets both
+call it and lets it be unit-tested without the network or click. Each outcome
+leaves its durable log twin HERE, where the act happens (ADR-0029); the verbs
+only render the returned :class:`RequestResult`.
 
 The split that makes #614 correct (carried over verbatim from release):
 
@@ -38,13 +42,21 @@ fakes GitHub deterministically; the default wires the real engine functions.
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
-from ...prstate import fetch as _fetch
-from ...prstate.model import ReviewLifecycle
-from ...prstate.reviewers import ReviewerAdapter
+from ..pr import PrId
+from . import fetch as _fetch
+from .model import ReviewLifecycle
+from .reviewers import ReviewerAdapter
+from .roster import Roster
+
+#: The engine's logger (shared name across :mod:`shipit.prstate`): each
+#: reviewer-request outcome is a lifecycle fact, recorded at the service that
+#: produced it (LOG02 / ADR-0029) — the verb's print is only the rendering.
+logger = logging.getLogger("shipit.prstate")
 
 # Attach-verification poll (release#614). The request edge is normally created
 # synchronously — the first check usually verifies; the later checks absorb
@@ -111,27 +123,84 @@ class RequestResult:
 
 
 @dataclass
-class _Boundary:
+class Boundary:
     """The injected GitHub read side. Defaults wire the real engine functions;
     a test swaps in fakes so the poll runs without the network."""
 
-    attach_state: Callable[[int], tuple[list[str], list[tuple[int, str]]]] = (
+    attach_state: Callable[[PrId], tuple[list[str], list[tuple[int, str]]]] = (
         _fetch.attach_state
     )
-    gather_reviews: Callable[[int], object] = _fetch.gather_reviews
+    gather_reviews: Callable[[PrId, Roster], object] = _fetch.gather_reviews
     sleep: Callable[[float], None] = time.sleep
 
 
+def _record(result: RequestResult, pr: PrId, name: str, status: str) -> None:
+    """Append one outcome AND leave its durable log twin (LOG02 convergence).
+
+    The transitions that moved something (verified, in-flight) are INFO
+    milestones, the deliberate non-acts (skip, no-op) are DEBUG mechanics, and
+    a dropped request is a WARNING — degraded, surfaced to the caller via the
+    result's ``ok=False`` rather than an exception. Every record carries the
+    flat ``pr``/``reviewer`` keys so the story stays jq-sliceable.
+    """
+    result.outcomes.append(ReviewerOutcome(name, status))
+    extra = {"pr": pr.number, "reviewer": name}
+    if status == "verified":
+        logger.info(
+            "review request from %s attached on pr#%s (verified)",
+            name,
+            pr.number,
+            extra=extra,
+        )
+    elif status == "in_flight":
+        logger.info(
+            "review in flight from %s on pr#%s (detached)",
+            name,
+            pr.number,
+            extra=extra,
+        )
+    elif status == "dropped":
+        logger.warning(
+            "review request from %s dropped by GitHub on pr#%s — no "
+            "review_requested edge created",
+            name,
+            pr.number,
+            extra=extra,
+        )
+    elif status == "skipped":
+        logger.debug(
+            "reviewer %s already reviewed pr#%s (review-once) — skipped",
+            name,
+            pr.number,
+            extra=extra,
+        )
+    else:  # no_op
+        logger.debug(
+            "reviewer %s auto-triggers on pr#%s — no request mechanism, no-op",
+            name,
+            pr.number,
+            extra=extra,
+        )
+
+
 def request_reviewers(
-    pr: int,
+    pr: PrId,
     adapters: Sequence[ReviewerAdapter],
+    roster: Roster,
     *,
     force: bool = False,
-    boundary: _Boundary | None = None,
+    boundary: Boundary | None = None,
     checks: int = ATTACH_VERIFY_CHECKS,
     interval_seconds: float = ATTACH_VERIFY_INTERVAL_SECONDS,
 ) -> RequestResult:
     """Request `adapters` on `pr`, then verify each remote edge actually attached.
+
+    `roster` is the reviewer configuration as ONE value (CLI01-WS04), loaded
+    once at the calling verb's boundary: the skip decision reads the rerun flag
+    off it (via the light snapshot it is threaded onto), and each adapter's
+    `request` receives ITS entry so a local reviewer's run options (`model` /
+    `instructions` / `timeout`) arrive as values — settings are never
+    re-resolved from config inside this path.
 
     `force=False` (the bare/default scope): reviewers already DONE on the current
     head are SKIPPED (review-once — don't re-poke a finished reviewer); a
@@ -149,12 +218,12 @@ def request_reviewers(
     clean stderr + non-zero exit, exactly as the read verbs do. This helper never
     swallows a boundary failure into a false success.
     """
-    bound = boundary or _Boundary()
+    bound = boundary or Boundary()
     result = RequestResult()
 
     targets = list(adapters)
     if not force:
-        targets = _drop_already_done(pr, targets, result, bound)
+        targets = _drop_already_done(pr, targets, roster, result, bound)
         if not targets:
             return result
 
@@ -169,16 +238,16 @@ def request_reviewers(
 
     remote_placed: list[ReviewerAdapter] = []
     for adapter in targets:
-        if adapter.request(pr):
+        if adapter.request(pr, roster.entry(adapter.name)):
             if adapter.has_requested_edge:
                 remote_placed.append(adapter)
             else:
                 # Local reviewer: request() detached an async review (OBS03) — it
                 # is now in-flight; there is no edge to poll.
-                result.outcomes.append(ReviewerOutcome(adapter.name, "in_flight"))
+                _record(result, pr, adapter.name, "in_flight")
         else:
             # No request mechanism (auto-triggering backend) — a no-op.
-            result.outcomes.append(ReviewerOutcome(adapter.name, "no_op"))
+            _record(result, pr, adapter.name, "no_op")
 
     dropped = _verify_attached(
         pr,
@@ -190,40 +259,41 @@ def request_reviewers(
     )
     for adapter in remote_placed:
         status = "dropped" if adapter in dropped else "verified"
-        result.outcomes.append(ReviewerOutcome(adapter.name, status))
+        _record(result, pr, adapter.name, status)
     return result
 
 
 def _drop_already_done(
-    pr: int,
+    pr: PrId,
     adapters: list[ReviewerAdapter],
+    roster: Roster,
     result: RequestResult,
-    boundary: _Boundary,
+    boundary: Boundary,
 ) -> list[ReviewerAdapter]:
     """Return the adapters NOT already DONE on `pr`, recording each skip.
 
     Builds ONE light context (`gather_reviews` — head SHA + reviews + requested
-    logins + rerun policy, no thread/reaction pagination) and runs each adapter's
+    logins + the Roster, no thread/reaction pagination) and runs each adapter's
     rerun-aware `detect`: a review-once reviewer that has reviewed reads DONE and
     is dropped; a never-reviewed or push-staled reviewer is kept. A `gh` failure
     here propagates (we can't tell who is done — requesting blind would re-poke
     finished reviewers)."""
-    ctx = boundary.gather_reviews(pr)
+    ctx = boundary.gather_reviews(pr, roster)
     keep: list[ReviewerAdapter] = []
     for adapter in adapters:
         if adapter.detect(ctx) in _DONE_LIFECYCLES:
-            result.outcomes.append(ReviewerOutcome(adapter.name, "skipped"))
+            _record(result, pr, adapter.name, "skipped")
         else:
             keep.append(adapter)
     return keep
 
 
 def _verify_attached(
-    pr: int,
+    pr: PrId,
     placed: list[ReviewerAdapter],
     *,
     baseline_ids: set[int],
-    boundary: _Boundary,
+    boundary: Boundary,
     checks: int,
     interval_seconds: float,
 ) -> list[ReviewerAdapter]:

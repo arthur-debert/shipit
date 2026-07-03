@@ -56,7 +56,7 @@ from enum import StrEnum
 
 from .breakers import evaluate_breakers
 from .model import FunnelState, ReadinessView, ReviewLifecycle
-from .reviewers import REGISTRY, ReviewerAdapter, required_reviewers
+from .reviewers import REGISTRY, ReviewerAdapter, required_adapters
 
 # --- ADR-0001 divergence (OBS04) -------------------------------------------
 # `prstate` is a VERBATIM copy of release-core's engine (ADR-0001: reuse by copy,
@@ -303,18 +303,18 @@ def _evaluate(
 ) -> TaskStatus:
     """Compute the PR's lifecycle state from a snapshot.
 
-    Pure when `required` is supplied: a function of `ctx` + the given reviewer
-    set. The CLI entrypoints resolve the required set once and pass it in, so
-    the production paths stay pure — config resolution lives at the edge, not in
-    the engine.
+    PURE: a function of `ctx` (+ an optional explicit reviewer set). The
+    reviewer configuration rides the snapshot as ONE value — `ctx.roster`,
+    loaded once at the verb boundary (CLI01-WS04) — so config resolution lives
+    at the edge, never in the engine, and no call path resolves reviewer
+    settings twice per verb invocation.
 
     `required` is the blocking reviewer SET; every reviewer in it holds Ready
     (parallel-required, release#622), reviewers outside it are best-effort and
-    never block. A test passes a DIFFERENT set to prove the engine is
-    data-driven, not hard-coded to any reviewer. The `None` default is a
-    convenience for REPL/ad-hoc callers ONLY — it resolves the config-default
-    set (`reviewers.required_reviewers()`, which reads the `[reviewers]` table
-    from `.shipit.toml`), the one impurity, which is why the CLI never relies on it.
+    never block. Defaulted (`None`), it is derived from the snapshot's Roster
+    (`required_adapters(ctx.roster)`) — the production shape. A test passes a
+    DIFFERENT set to prove the engine is data-driven, not hard-coded to any
+    reviewer.
 
     The stopping rule (breakers.py) decides when the review loop has run its
     course: 6 rounds reached, or the latest round is all nitpicks. When it fires
@@ -325,7 +325,7 @@ def _evaluate(
     stopping rule never invents a block of its own.
     """
     registry = registry if registry is not None else REGISTRY
-    required = required if required is not None else required_reviewers()
+    required = required if required is not None else required_adapters(ctx.roster)
     # Detect over the union of the catalog and the required set so a required
     # reviewer is always evaluated even if (in a test) it isn't in `registry`.
     to_detect = {r.name: r for r in (*registry, *required)}.values()

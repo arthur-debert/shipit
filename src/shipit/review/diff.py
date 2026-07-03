@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 
 from .. import execrun, gh, git
 from ..identity import Repo, Sha, repo_from_slug
-from ..pr import PR, core_from_node
+from ..pr import PR, PrId, core_from_node
 
 
 class ReviewError(RuntimeError):
@@ -134,8 +134,7 @@ def review_view(
     the composed view is fully typed regardless of what the caller held.
     """
     pr = PR(
-        repo=repo_from_slug(repo) if repo else _HANDBUILT_REPO,
-        number=number,
+        id=PrId(repo=repo_from_slug(repo) if repo else _HANDBUILT_REPO, number=number),
         head_sha=head_sha if isinstance(head_sha, Sha) else Sha(head_sha),
         base_ref=base_ref,
         is_draft=is_draft,

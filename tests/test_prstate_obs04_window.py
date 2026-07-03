@@ -9,8 +9,9 @@ calls no clock — so every case is deterministic with a FIXED injected "now":
     against its `review: <agent>-local` check run's `started_at`; an APP reviewer
     ages against its `review_requested` edge time (`ctx.requested_at`).
   * **20m default + per-reviewer override.** Uniform across reviewer kinds. The
-    `[reviewers]` `window` option (threaded onto `ctx.reviewer_window`) lengthens
-    OR shortens it for one reviewer without touching the others.
+    `[reviewers]` `window` option (carried on the reviewer's Roster entry,
+    `ctx.roster`) lengthens OR shortens it for one reviewer without touching the
+    others.
   * **Within window → holds; past window → timed-out → settled + degraded.**
   * **No timestamp → never ages.** A reviewer with no recorded request time can't
     be aged — the window never invents a timeout from absent data.
@@ -28,6 +29,7 @@ import pytest
 from conftest import load_context
 from shipit.prstate.model import FunnelState, ReviewFunnelCheck
 from shipit.prstate.reviewers import DEFAULT_WAIT_WINDOW, by_name
+from shipit.prstate.roster import Roster, RosterEntry
 from shipit.prstate.state import TaskState, evaluate
 
 # The base fixture's injected "now". Every request timestamp below is expressed as
@@ -54,7 +56,7 @@ def _local_ctx(age_min: float, window: int | None = None):
         ReviewFunnelCheck("codex-local", "IN_PROGRESS", None, _iso(age_min))
     ]
     if window is not None:
-        ctx.reviewer_window = {"codex": window}
+        ctx.roster = Roster((RosterEntry(name="codex", window_seconds=window),))
     return ctx, [by_name("codex")]
 
 
@@ -67,7 +69,7 @@ def _app_ctx(age_min: float, window: int | None = None):
     ctx.requested_logins = ["Copilot"]
     ctx.requested_at = {"Copilot": _iso(age_min)}
     if window is not None:
-        ctx.reviewer_window = {"copilot": window}
+        ctx.roster = Roster((RosterEntry(name="copilot", window_seconds=window),))
     return ctx, [by_name("copilot")]
 
 

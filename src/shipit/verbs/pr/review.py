@@ -1,44 +1,49 @@
 """`shipit pr review request` — request (or re-request) reviewer(s), verifying
-the request actually attached.
+the request actually attached. Glue + renderers.
 
 `pr review` is a SUBGROUP under `pr` (so the invocation is
 `shipit pr review request [PR] [--reviewer NAME]`), leaving room for sibling
 review verbs later without crowding the top-level `pr` group. This module owns
-only the thin CLI: parse args -> resolve the PR -> pick the adapter scope ->
-call the shared `_request.request_reviewers` helper -> render its outcomes ->
-map to an exit code. All the request/verify logic (the #614 attach poll, the
-bare-run skip) lives in `_request`, which WS06's `pr next` reuses.
+only the thin CLI: parse args -> resolve the typed PR target -> pick the
+adapter scope -> call the engine's reviewer-request service
+(:func:`shipit.prstate.request.request_reviewers` — CLI01-WS03 promoted it out
+of this package) -> render its outcomes through the shared emit. All the
+request/verify logic (the #614 attach poll, the bare-run skip) and its durable
+per-outcome logging live in the service, which `pr next`'s request act reuses.
 
 Scope:
   * bare run (no `--reviewer`): the REQUIRED reviewer set, SKIPPING any reviewer
     already done on the current head (don't re-poke a finished reviewer).
   * `--reviewer NAME`: force that one reviewer regardless of state (the manual
-    re-run escape hatch); the name resolves through the adapter registry.
+    re-run escape hatch); the name resolves through the adapter registry
+    (:func:`shipit.prstate.reviewers.resolve_reviewer`, which also accepts the
+    PRD spelling `codex-local`/`agy-local` of a local-agent reviewer).
 
-Errors map like `status.py`: a `gh`/auth failure (resolving the branch's PR, or
-inside the request/verify) prints a clean stderr line and exits non-zero. A
-local-agent reviewer (`codex-local`/`agy-local`) surfaces the foundation's guard
-— a clean `PrStateError` ("not yet available"), never a crash. A silently-dropped
-remote request is a hard failure (non-zero exit), never a silent park.
+Errors route through the one :func:`~.._errors.cli_errors` shell: a `gh`/auth
+failure (resolving the branch's PR, or inside the request/verify), an unknown
+reviewer name, a branch with no PR, the local-agent guard's clean refusal, and
+a silently-dropped remote request all surface as one uniform ``error: …``
+stderr line + exit 1 — never a crash, never a silent park.
 """
 
 from __future__ import annotations
 
-import logging
 import sys
 
 import click
 
-from ... import execrun
 from ...agent import backend as _agent_backend
+from ...gh import resolve_pr
+from ...identity import Repo
+from ...pr import PrId
 from ...prstate.errors import PrStateError
-from ...prstate.reviewers import REGISTRY, ReviewerAdapter, by_name, required_reviewers
-from ._request import RequestResult, request_reviewers
-from ._resolve import resolve_pr
-
-#: The `pr` verbs' logger (LOG02 spray, ADR-0029): each reviewer's request
-#: outcome is a lifecycle fact — before this, the prints were its only record.
-logger = logging.getLogger("shipit.pr")
+from ...prstate.request import RequestResult, request_reviewers
+from ...prstate.reviewers import required_adapters, resolve_reviewer
+from ...prstate.reviewers_config import load_roster
+from .._context import ambient_identity
+from .._errors import cli_errors
+from .._params import pr_number_argument
+from .._render import emit
 
 
 @click.group(
@@ -54,7 +59,7 @@ def cmd() -> None:
 
 
 @cmd.command(name="request")
-@click.argument("pr", required=False, type=int)
+@pr_number_argument
 @click.option(
     "--reviewer",
     "reviewer",
@@ -104,7 +109,7 @@ def run_internal_cmd(
     `--help`: humans use `pr review request`, which detaches this.
 
     Logging: the root group callback already configured logging, but it resolves
-    the repo best-effort off cwd (`resolve_current_repo`) — which can degrade
+    the ambient identity best-effort off cwd (the ADR-0030 root context) — which can degrade
     in a terminal-less child and leave the run with NO file sink. This child KNOWS
     its repo deterministically (the `--repo` arg), so it re-wires the OBS01 file
     sink from that slug (via the canonical `identity.repo_from_slug` parser) —
@@ -112,6 +117,7 @@ def run_internal_cmd(
     `<logdir>/<owner>/<name>/shipit.log` (OBS03 story 5). A malformed slug or
     logging-setup failure is swallowed (returns False) and never crashes the review.
     """
+    from ...identity import repo_from_slug
     from ...logsetup import configure_logging_for_slug
     from ...review import service
 
@@ -132,10 +138,20 @@ def run_internal_cmd(
         )
         raise SystemExit(1) from None
 
+    # The child's own entry point (ADR-0030): it does NOT read the root
+    # context — its repo arrives deterministic and explicit (`--repo`), and the
+    # PrId is minted HERE, at the process boundary, through the one canonical
+    # slug parser.
+    try:
+        target = PrId(repo=repo_from_slug(repo), number=pr)
+    except ValueError as exc:
+        print(
+            f"error: invalid --repo/--pr for the review child: {exc}", file=sys.stderr
+        )
+        raise SystemExit(1) from None
     service.run_detached_review(
         backend,
-        pr,
-        repo=repo,
+        target,
         run_id=run_id,
         model=model,
         timeout=timeout,
@@ -144,139 +160,80 @@ def run_internal_cmd(
     )
 
 
-def run(pr: int | None = None, *, reviewer: str | None = None) -> int:
+@cli_errors
+def run(
+    pr: int | None = None,
+    *,
+    reviewer: str | None = None,
+    repo: Repo | None = None,
+) -> int:
     """Resolve -> select scope -> request + verify -> render. Returns an exit code.
 
-    0 when every request placed AND verified (or was a recorded no-op / skip);
-    non-zero on a bad reviewer name, an unresolvable PR, a `gh`/auth failure
-    (including the local-agent guard), or a silently-dropped remote request.
+    ``repo`` is the identity half of the PR target: omitted (the CLI path), the
+    root context's ambient repo — resolved once per invocation (ADR-0030); a
+    direct caller (a test) injects it as a value.
+
+    0 when every request placed AND verified (or was a recorded no-op / skip).
+    A bad reviewer name, an unresolvable PR, a `gh`/auth failure (including the
+    local-agent guard), and a silently-dropped remote request all raise into
+    the :func:`~shipit.verbs._errors.cli_errors` shell — one ``error: …``
+    stderr line, exit 1.
     """
-    adapters = _select(reviewer)
-    if adapters is None:
-        return 1
-
-    resolved: int | None = None
-    try:
-        resolved = resolve_pr(pr)
-        if resolved is None:
-            print(
-                "error: no PR for the current branch — open a draft PR first, "
-                "or pass a PR number",
-                file=sys.stderr,
-            )
-            return 1
-        result = request_reviewers(resolved, adapters, force=reviewer is not None)
-    except (execrun.ExecError, PrStateError) as exc:
-        # A real gh/auth failure OR the local-agent guard (requesting
-        # codex-local/agy-local raises a clean PrStateError, not a crash). Both are
-        # surfaced as a clean stderr line + non-zero exit.
-        logger.error("pr review request failed", exc_info=True, extra={"pr": resolved})
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
-
-    _emit(resolved, result)
-    return 0 if result.ok else 1
+    # The ONE reviewer-config read of this invocation (CLI01-WS04): the Roster
+    # feeds the bare-run required set AND rides into the request path, where a
+    # local reviewer's run options are read off its entry — never re-resolved.
+    roster = load_roster()
+    adapters = (
+        required_adapters(roster) if reviewer is None else [resolve_reviewer(reviewer)]
+    )
+    target = resolve_pr(pr, *ambient_identity(repo))
+    if target is None:
+        raise PrStateError(
+            "no PR for the current branch — open a draft PR first, or pass a PR number"
+        )
+    result = request_reviewers(target, adapters, roster, force=reviewer is not None)
+    emit(result, lambda outcome: format_request(target.number, outcome))
+    if not result.ok:
+        # A remote request edge was silently dropped (#614) — a hard runtime
+        # failure through the shell, never a silent park at reviews-pending.
+        raise PrStateError(
+            "review request dropped by GitHub (no review_requested edge "
+            f"created): {', '.join(result.dropped)} (service stall / quota) — "
+            "retry later"
+        )
+    return 0
 
 
-def _select(reviewer: str | None) -> list[ReviewerAdapter] | None:
-    """The adapters to act on: the required set, or the one named.
+def format_request(pr: int, result: RequestResult) -> str:
+    """The pure text renderer: each reviewer's outcome, one line apiece.
 
-    Returns None (a usage failure) when ``--reviewer`` names an unknown reviewer,
-    after printing the known names — a typo never silently drops a request.
-
-    The local-agent reviewers are spelled ``codex-local`` / ``agy-local`` in the
-    PRD/glossary (and in the foundation guard's own message), but their adapter
-    registry names are the bare ``codex`` / ``agy``. So a ``-local`` suffix is
-    accepted as an alias for the base adapter: ``--reviewer codex-local`` resolves
-    the ``codex`` adapter and therefore surfaces the local-agent guard, rather than
-    being rejected as an unknown name.
+    A plain string function (the render seam owns the terminal; the durable
+    per-outcome records live with the service, ADR-0029). A bare run that
+    skipped every reviewer placed nothing — said explicitly rather than
+    rendering silence.
     """
-    if reviewer is None:
-        return required_reviewers()
-    adapter = by_name(reviewer) or _resolve_local_alias(reviewer)
-    if adapter is None:
-        known = ", ".join(r.name for r in REGISTRY)
-        print(f"error: unknown reviewer {reviewer!r} (known: {known})", file=sys.stderr)
-        return None
-    return [adapter]
-
-
-def _resolve_local_alias(reviewer: str) -> ReviewerAdapter | None:
-    """Resolve a funnel reviewer name (``codex-local``) to its base adapter, else None.
-
-    A REGISTRY LOOKUP, not a string parse (COR02-WS03): the name resolves through
-    :func:`shipit.agent.backend.by_check_run_name` — the inverse of the registry's
-    ``check_run_name`` alias — so only a real funnel backend's reviewer name is
-    reachable this way (``copilot-local`` matches no registry entry and does not
-    alias to ``copilot``: the alias names the local-agent reviewer family
-    specifically).
-    """
-    try:
-        backend = _agent_backend.by_check_run_name(reviewer)
-    except KeyError:
-        return None
-    return by_name(backend.funnel_agent or backend.name)
-
-
-def _emit(pr: int, result: RequestResult) -> None:
-    """Render each reviewer's outcome; dropped lines go to stderr.
-
-    Each outcome ALSO logs (LOG02 convergence — the prints were the only record
-    of the request act): the transitions that moved something (verified,
-    in-flight) are INFO milestones, the deliberate non-acts (skip, no-op) are
-    DEBUG mechanics, and a dropped request is a WARNING — degraded, surfaced
-    to the caller via the non-zero exit rather than an exception.
-    """
-    for name in result.skipped:
-        logger.debug(
-            "reviewer %s already reviewed pr#%s (review-once) — skipped",
-            name,
-            pr,
-            extra={"pr": pr, "reviewer": name},
-        )
-        print(f"{name}: already reviewed #{pr} (review-once) — skip")
-    for name in result.no_op:
-        logger.debug(
-            "reviewer %s auto-triggers on pr#%s — no request mechanism, no-op",
-            name,
-            pr,
-            extra={"pr": pr, "reviewer": name},
-        )
-        print(f"{name}: auto-triggers, no request mechanism — no-op")
-    for name in result.in_flight:
-        logger.info(
-            "review in flight from %s on pr#%s (detached)",
-            name,
-            pr,
-            extra={"pr": pr, "reviewer": name},
-        )
-        print(
-            f"review in flight: {name} on #{pr} (detached — poll the PR for the "
-            "outcome)"
-        )
-    for name in result.verified:
-        logger.info(
-            "review request from %s attached on pr#%s (verified)",
-            name,
-            pr,
-            extra={"pr": pr, "reviewer": name},
-        )
-        print(f"verified: {name} request attached on #{pr}")
-    # A bare run that skipped every reviewer placed nothing — say so explicitly
-    # rather than exit silently.
+    lines = [
+        *(
+            f"{name}: already reviewed #{pr} (review-once) — skip"
+            for name in result.skipped
+        ),
+        *(
+            f"{name}: auto-triggers, no request mechanism — no-op"
+            for name in result.no_op
+        ),
+        *(
+            f"review in flight: {name} on #{pr} (detached — poll the PR for the outcome)"
+            for name in result.in_flight
+        ),
+        *(f"verified: {name} request attached on #{pr}" for name in result.verified),
+        *(
+            f"{name}: request dropped by GitHub — no review_requested edge created"
+            for name in result.dropped
+        ),
+    ]
     acted = result.no_op + result.in_flight + result.verified + result.dropped
     if result.skipped and not acted:
-        print(f"all required reviewers already reviewed #{pr} — nothing to request")
-    for name in result.dropped:
-        logger.warning(
-            "review request from %s dropped by GitHub on pr#%s — no "
-            "review_requested edge created",
-            name,
-            pr,
-            extra={"pr": pr, "reviewer": name},
+        lines.append(
+            f"all required reviewers already reviewed #{pr} — nothing to request"
         )
-        print(
-            f"{name}: request dropped by GitHub: no review_requested edge "
-            "created (service stall / quota) — retry later",
-            file=sys.stderr,
-        )
+    return "\n".join(lines)

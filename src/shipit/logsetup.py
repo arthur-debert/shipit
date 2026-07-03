@@ -81,7 +81,7 @@ from typing import Any
 import platformdirs
 import structlog
 
-from . import execrun, identity, logcontext, redact
+from . import identity, logcontext, redact
 from .identity import Repo
 
 #: The package logger every shipit module logs through (``logging.getLogger``
@@ -386,20 +386,6 @@ def _current_repo() -> Repo:
     return identity.resolve_repo()
 
 
-def resolve_current_repo() -> Repo | None:
-    """Best-effort :class:`shipit.identity.Repo` for the current checkout, or ``None``.
-
-    For the CLI entrypoint, where a logging-setup failure must never crash the
-    command: if the repo can't be determined (not a checkout, no origin remote,
-    an unparseable remote URL), return ``None`` so the caller simply runs without
-    the file sink rather than aborting.
-    """
-    try:
-        return _current_repo()
-    except (execrun.ExecError, ValueError):
-        return None
-
-
 def configure_logging_for_slug(
     slug: str,
     *,
@@ -409,9 +395,9 @@ def configure_logging_for_slug(
     """Wire the per-repo file sink from a KNOWN ``owner/repo`` slug — best-effort.
 
     The detached review child (OBS03) knows its repo DETERMINISTICALLY from its
-    ``--repo`` argument, so — unlike the CLI bootstrap, which resolves the repo
-    best-effort off cwd (:func:`resolve_current_repo`, which can degrade outside a
-    checkout) — it can attach the file sink with certainty. The child passes that
+    ``--repo`` argument, so — unlike the CLI bootstrap, which resolves the ambient
+    identity best-effort off cwd (the ADR-0030 root context, which can degrade
+    outside a checkout) — it can attach the file sink with certainty. The child passes that
     slug here — parsed by the ONE canonical parser
     (:func:`shipit.identity.repo_from_slug`), so an API-cased slug lands the same
     log directory as the locally-resolved identity (ADR-0024) — so the detached
@@ -422,7 +408,7 @@ def configure_logging_for_slug(
 
     Returns whether the file sink was attached. Best-effort: a malformed slug or a
     logging-setup failure is swallowed (returns ``False``) — a logging glitch must
-    NEVER crash the review (mirrors :func:`resolve_current_repo`'s posture).
+    NEVER crash the review (mirrors the CLI root's best-effort posture).
     ``base_dir`` is the platformdirs base, injected by tests so the child's records
     are asserted without writing to a real ``$HOME``.
     """
@@ -452,6 +438,24 @@ def _clear_own_handlers(logger: logging.Logger) -> None:
             handler.close()
 
 
+def reset_logging() -> None:
+    """Detach shipit's own sinks from the package logger — the clean-slate the
+    CLI bootstrap assumes.
+
+    The CLI resolves identity BEFORE it wires sinks (:func:`configure_logging`
+    runs late so the file sink can be per-repo), which means the bootstrap phase
+    — the git-``exec`` identity resolution — must run with NO sink attached to
+    stay quiet, as the ``root`` entrypoint's contract intends. A one-shot
+    production process starts that way. But when several invocations share ONE
+    process (the test suite, or any in-process embedding), a prior invocation's
+    sinks are STILL attached when the next one resolves identity, so that
+    invocation's pre-config bootstrap records (the ``exec`` DEBUG lines) leak to
+    the earlier run's pinned stderr sink. Calling this at the very top of every
+    invocation restores the clean slate; in a one-shot process it is a no-op.
+    """
+    _clear_own_handlers(logging.getLogger(LOGGER_NAME))
+
+
 def configure_logging(
     verbose: bool = False,
     env: Mapping[str, str] | None = None,
@@ -477,9 +481,9 @@ def configure_logging(
       canonical :class:`shipit.identity.Repo`) or ``base_dir`` is provided.
       ``repo`` / ``base_dir`` are injectable boundaries for tests; with
       ``base_dir`` given but ``repo`` omitted, the repo is resolved (strictly) via
-      :func:`shipit.identity.resolve_repo`. The CLI entrypoint resolves the repo
-      best-effort (:func:`resolve_current_repo`) and passes it, so a normal run
-      gets the file sink and a non-repo run simply skips it.
+      :func:`shipit.identity.resolve_repo`. The CLI entrypoint resolves the ambient
+      identity best-effort (the ADR-0030 root context) and passes its repo, so a
+      normal run gets the file sink and a non-repo run simply skips it.
 
     Logging setup is also the child half of the cross-process context seam
     (ADR-0029): any domain keys a parent shipit process exported into ``env``

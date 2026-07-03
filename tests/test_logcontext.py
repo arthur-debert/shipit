@@ -253,11 +253,17 @@ def test_configure_logging_rebinds_parent_exported_keys(tmp_path):
 def test_cli_entry_binds_the_resolved_repo(monkeypatch):
     """The CLI-ENTRY half (ADR-0029): the root group binds the best-effort
     resolved repo as the `repo` key BEFORE logging setup, so every record of the
-    run carries it. The resolution and setup boundaries are stubbed so the test
-    pins the entry glue without gh or real sinks."""
+    run carries it. The repo now arrives via the ADR-0030 root context — the ONE
+    ambient resolution per invocation. The resolution and setup boundaries are
+    stubbed so the test pins the entry glue without gh or real sinks."""
     from shipit import cli
+    from shipit.identity import Revision, WorkingDir
+    from shipit.verbs._context import RootContext
 
-    monkeypatch.setattr(cli, "resolve_current_repo", lambda: REPO)
+    root_ctx = RootContext(
+        working_dir=WorkingDir(path=".", repo=REPO, revision=Revision())
+    )
+    monkeypatch.setattr(cli, "resolve_root_context", lambda: root_ctx)
     seen: dict = {}
     monkeypatch.setattr(cli, "configure_logging", lambda **kw: seen.update(kw))
 
@@ -275,7 +281,11 @@ def test_cli_entry_binds_nothing_outside_a_checkout(monkeypatch):
     a null-ish placeholder — mirroring the skipped file sink."""
     from shipit import cli
 
-    monkeypatch.setattr(cli, "resolve_current_repo", lambda: None)
+    from shipit.verbs._context import RootContext
+
+    monkeypatch.setattr(
+        cli, "resolve_root_context", lambda: RootContext(working_dir=None)
+    )
     monkeypatch.setattr(cli, "configure_logging", lambda **kw: None)
 
     rc = cli.main(["lint", "--help"])

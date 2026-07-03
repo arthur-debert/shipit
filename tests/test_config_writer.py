@@ -190,13 +190,13 @@ def test_seeded_reviewers_resolve_to_required_set(tmp_path):
 
     p = tmp_path / ".shipit.toml"
     config.apply_policy_seed(p)
-    override = rcfg.load_override(str(tmp_path))
+    roster = rcfg.load_roster(str(tmp_path))
     # The install scaffold is rendered from the SINGLE required-reviewer default
     # (ADR-0025 / COR01-WS02), so a freshly-seeded repo requires exactly what the
     # code-default requires — Copilot only. codex/agy are opt-in per repo (their
     # review Apps are not installed everywhere), never seeded by default.
-    assert rcfg.resolve_required_names(override) == tuple(rcfg.DEFAULT_REVIEWERS)
-    assert rcfg.resolve_required_names(override) == ("copilot",)
+    assert roster.required_names == tuple(rcfg.DEFAULT_REVIEWERS)
+    assert roster.required_names == ("copilot",)
 
 
 def test_plan_policy_seed_raises_on_malformed(tmp_path):

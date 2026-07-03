@@ -919,8 +919,7 @@ def test_fresh_install_seeds_required_reviewer_set(tmp_path, rec):
     # default (ADR-0025 / COR01-WS02), so a fresh install requires exactly what the
     # engine code-default does — Copilot only. codex/agy are opt-in per repo (their
     # review Apps are not installed everywhere); shipit's own .shipit.toml opts them in.
-    override = rcfg.load_override(str(tmp_path))
-    assert rcfg.resolve_required_names(override) == ("copilot",)
+    assert rcfg.load_roster(str(tmp_path)).required_names == ("copilot",)
 
 
 def test_install_preserves_existing_secrets_and_reviewers(tmp_path, rec):

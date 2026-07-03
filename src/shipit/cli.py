@@ -13,8 +13,9 @@ import sys
 import click
 
 from . import __version__, logcontext
-from .logsetup import configure_logging, resolve_current_repo
+from .logsetup import configure_logging, reset_logging
 from .verbs import gh_setup, install, lint, logs, verify_apps
+from .verbs._context import resolve_root_context
 from .verbs.eval import eval_group
 from .verbs.hook import hook as hook_group
 from .verbs.pr import pr as pr_group
@@ -37,13 +38,21 @@ from .verbs.tree import tree as tree_group
     is_flag=True,
     help="Raise the console log level so INFO/DEBUG detail appears.",
 )
-def root(verbose: bool) -> None:
+@click.pass_context
+def root(ctx: click.Context, verbose: bool) -> None:
     """Root group; subcommands are attached below.
 
-    Configures logging before any subcommand runs, so every verb is covered:
-    the quiet stderr console (raised by ``-v``), the CI sinks when in CI, and the
-    durable per-repo file sink. The repo is resolved best-effort, so a run outside
-    a checkout just skips the file sink rather than failing.
+    Resolves the ambient identity ONCE per invocation (ADR-0030): the current
+    checkout's ``WorkingDir`` (offline, origin-derived per ADR-0024) becomes the
+    frozen ``RootContext`` on click's context, the single source shared params
+    and verbs read instead of re-deriving identity. Resolution is best-effort —
+    outside a checkout the context is empty and each verb decides whether that
+    is fatal.
+
+    The same resolution then configures logging before any subcommand runs, so
+    every verb is covered: the quiet stderr console (raised by ``-v``), the CI
+    sinks when in CI, and the durable per-repo file sink (skipped outside a
+    checkout rather than failing).
 
     This is also the CLI-entry half of the domain-key context (ADR-0029): the
     resolved repo binds as the ``repo`` correlation key BEFORE logging setup, so
@@ -51,7 +60,15 @@ def root(verbose: bool) -> None:
     ``SHIPIT_LOG_CTX_*`` key (rebound inside ``configure_logging``, the child
     half of the seam) deliberately wins over this best-effort cwd resolution.
     """
-    repo = resolve_current_repo()
+    # Start from a clean slate: detach any sinks a prior in-process invocation
+    # left attached, so identity resolution below runs quiet (its bootstrap
+    # `exec` DEBUG records must not leak to a stale stderr sink) before
+    # `configure_logging` re-wires this invocation's own. A no-op in a one-shot
+    # production process; load-bearing when invocations share a process.
+    reset_logging()
+    root_ctx = resolve_root_context()
+    ctx.obj = root_ctx
+    repo = root_ctx.repo
     if repo is not None:
         logcontext.bind(repo=repo.slug)
     configure_logging(verbose=verbose, repo=repo)

@@ -20,7 +20,8 @@ from datetime import datetime
 from enum import StrEnum
 
 from ..identity import Repo, Sha, repo_from_slug
-from ..pr import PR
+from ..pr import PR, PrId
+from .roster import Roster
 
 
 class ReviewLifecycle(StrEnum):
@@ -216,21 +217,21 @@ class ReadinessView:
     # snapshot + a fixed "now" yields a deterministic state. WS01 only carries it;
     # OBS04-WS03 reads it to age the per-reviewer wait window.
     now: datetime | None = None
-    # Per-reviewer rerun policy (name -> rerun flag), resolved from config at the
-    # build site (`fetch`/the CLI). rerun=True means head-strict (re-review every
-    # push); rerun=False (the DEFAULT for any reviewer absent here) means
-    # review-once: a review on ANY commit of the PR counts as done and is never
-    # stale-after-push. The adapters read this to pick head-strict vs any-head
-    # detection — keeping the policy data here, not a code branch per reviewer.
-    reviewer_rerun: dict[str, bool] = field(default_factory=dict)
-    # Per-reviewer wait-window override in SECONDS (name -> seconds), resolved from
-    # the `[reviewers]` `window` option at the build site and threaded on here
-    # EXACTLY like `reviewer_rerun` — so the engine reads the window off the
-    # snapshot, never the filesystem. A reviewer ABSENT here uses the shipped 20m
-    # default (`reviewers.DEFAULT_WAIT_WINDOW`, applied by the adapter). OBS04-WS03
-    # ages an in-flight / requested-but-silent reviewer past this window into
-    # TIMED_OUT (settled + degraded). Empty in a light/skip context that never holds.
-    reviewer_window: dict[str, int] = field(default_factory=dict)
+    # The reviewer configuration as ONE value (CLI01-WS04): the Roster, loaded
+    # once at a verb boundary (`reviewers_config.load_roster`) and threaded on
+    # here at the build site — so the engine/adapters read every per-reviewer
+    # setting (required, rerun, wait window, run options) off the snapshot,
+    # never the filesystem, and the settings can never disagree with each other.
+    # rerun=True means head-strict (re-review every push); rerun=False (the
+    # DEFAULT for any reviewer absent from the roster) means review-once: a
+    # review on ANY commit of the PR counts as done and is never
+    # stale-after-push. A reviewer without a `window_seconds` uses the shipped
+    # 20m default (`reviewers.DEFAULT_WAIT_WINDOW`, applied by the adapter);
+    # OBS04-WS03 ages an in-flight / requested-but-silent reviewer past its
+    # window into TIMED_OUT (settled + degraded). The EMPTY roster is the
+    # honest fixture default: no reviewer required, every setting at its
+    # shipped default.
+    roster: Roster = field(default_factory=Roster)
     # The `review_requested` edge time per requested login (login -> ISO-8601
     # tz-aware), sourced from the PR timeline's ReviewRequestedEvent at the build
     # site. GraphQL `reviewRequests` carries NO timestamp, so this is where an App
@@ -313,8 +314,7 @@ def readiness_view(
     checks: list[dict] | None = None,
     review_funnel: list[ReviewFunnelCheck] | None = None,
     now: datetime | None = None,
-    reviewer_rerun: dict[str, bool] | None = None,
-    reviewer_window: dict[str, int] | None = None,
+    roster: Roster | None = None,
     requested_at: dict[str, str] | None = None,
 ) -> ReadinessView:
     """Compose a :class:`ReadinessView` from flattened core values — the ergonomic
@@ -331,8 +331,7 @@ def readiness_view(
     the readiness engine never keys on it.
     """
     pr = PR(
-        repo=repo or _HANDBUILT_REPO,
-        number=number,
+        id=PrId(repo=repo or _HANDBUILT_REPO, number=number),
         head_sha=head_sha if isinstance(head_sha, Sha) else Sha(head_sha),
         base_ref=base_ref,
         is_draft=is_draft,
@@ -349,7 +348,6 @@ def readiness_view(
         checks=checks if checks is not None else [],
         review_funnel=review_funnel if review_funnel is not None else [],
         now=now,
-        reviewer_rerun=reviewer_rerun if reviewer_rerun is not None else {},
-        reviewer_window=reviewer_window if reviewer_window is not None else {},
+        roster=roster if roster is not None else Roster(),
         requested_at=requested_at if requested_at is not None else {},
     )

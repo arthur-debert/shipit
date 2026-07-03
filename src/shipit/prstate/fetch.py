@@ -5,6 +5,11 @@ paths. The raw-JSON -> model parsing is split out (`context_from_raw`) so tests
 can build a view from recorded fixtures without the network, exercising the
 exact code `gather()` runs live.
 
+The target arrives as a `PrId` (ADR-0030): the repo identity rides in on it —
+minted once at the verb boundary from the root context, per ADR-0024's offline
+identity source — so this path performs ZERO ambient-repo API resolutions (the
+former per-gather `gh repo view` shellouts, paid twice per `pr next`, are gone).
+
 The view's cheap CORE (`head_sha`, `base_ref`, `is_draft`, `merge_state`) is read
 off the fetched GitHub `pullRequest` node through the ONE `pr.core_from_node`
 boundary (ADR-0024) — the SAME builder the review path uses — so `head_sha` is
@@ -20,7 +25,7 @@ from datetime import datetime, timezone
 
 from .. import gh, logcontext
 from ..identity import Repo, Sha
-from ..pr import core_from_node
+from ..pr import PrId, core_from_node
 from .model import (
     ReadinessView,
     Review,
@@ -29,6 +34,7 @@ from .model import (
     Thread,
     _HANDBUILT_REPO,
 )
+from .roster import Roster
 
 #: The engine's logger — a child of the package ``shipit`` logger, shared with
 #: :mod:`shipit.prstate.state` so the fetch milestones and the evaluation
@@ -119,7 +125,7 @@ query($owner: String!, $name: String!, $pr: Int!, $cursor: String) {
 
 
 def _threads_and_review_requests(
-    owner: str, name: str, pr: int
+    pr: PrId,
 ) -> tuple[list[dict], list[dict], dict[str, str]]:
     """Every review-thread node for the PR, its pending review requests, and the
     per-login `review_requested` edge time.
@@ -134,7 +140,13 @@ def _threads_and_review_requests(
     requested_at: dict[str, str] = {}
     cursor: str | None = None
     while True:
-        data = gh.graphql(_THREADS_QUERY, owner=owner, name=name, pr=pr, cursor=cursor)
+        data = gh.graphql(
+            _THREADS_QUERY,
+            owner=pr.repo.owner.login,
+            name=pr.repo.name,
+            pr=pr.number,
+            cursor=cursor,
+        )
         pull = data["repository"]["pullRequest"]
         if cursor is None:
             requests = [
@@ -202,16 +214,21 @@ query($owner: String!, $name: String!, $pr: Int!) {
 """
 
 
-def attach_state(pr: int) -> tuple[list[str], list[tuple[int, str]]]:
+def attach_state(pr: PrId) -> tuple[list[str], list[tuple[int, str]]]:
     """Pending review-request logins + (review_id, author) of the newest reviews.
 
     The read side of request-attach verification (release#614): GitHub can
     accept a review-request call yet silently drop the edge, so after placing
     a request the verb polls this until the reviewer shows up in the pending
-    requests — or has already submitted a fresh review that consumed it.
+    requests — or has already submitted a fresh review that consumed it. The
+    repo rides in on the ``PrId`` (ADR-0030) — no ambient resolution per poll.
     """
-    repo = gh.current_repo()
-    data = gh.graphql(_ATTACH_QUERY, owner=repo.owner.login, name=repo.name, pr=pr)
+    data = gh.graphql(
+        _ATTACH_QUERY,
+        owner=pr.repo.owner.login,
+        name=pr.repo.name,
+        pr=pr.number,
+    )
     pull = data["repository"]["pullRequest"]
     logins = _requested_logins(
         [
@@ -271,32 +288,38 @@ query($owner: String!, $name: String!, $pr: Int!) {
 """
 
 
-def gather_reviews(pr: int) -> ReadinessView:
+def gather_reviews(pr: PrId, roster: Roster) -> ReadinessView:
     """A LIGHT context sufficient for `detect()` — head SHA + reviews + pending
-    review requests + the rerun policy, nothing else.
+    review requests + the reviewer Roster, nothing else.
 
     The read side of the bare `pr review request` skip decision (release#852):
     `detect()` reads only `reviews_on_head()`/`reviews_any_head()` (head SHA +
-    reviews), `requested_logins`, and `reviewer_rerun`. This fetches exactly
-    those in one GraphQL call, dropping the threads-cursor walk and the
+    reviews), `requested_logins`, and the rerun flag off the Roster. This fetches
+    exactly those in one GraphQL call, dropping the threads-cursor walk and the
     reactions/issue-comments REST pagination that the full `gather` runs. The
     returned context has empty `threads`/`reactions`/`issue_comments`, so the
     DONE_CLEAN vs DONE_COMMENTS refinement collapses to DONE_CLEAN — irrelevant
     to the skip decision (both are DONE) — and the Gemini adapter (which is not
     requestable, never in the required/skip set) is the only adapter that would
     read the omitted fields. The full `gather` is unchanged for every other path.
-    """
-    from .reviewers import reviewer_rerun
 
+    `roster` is the reviewer configuration the CALLER loaded once at its verb
+    boundary (`reviewers_config.load_roster`, CLI01-WS04) — threaded onto the
+    view here so adapter detection reads settings off the snapshot, never the
+    config.
+    """
     start = time.monotonic()
-    # The typed repo read (PROC03): the adapter returns the identity value object,
-    # so the slug/owner/name are read off it rather than re-split at call sites.
-    repo = gh.current_repo()
+    # The typed repo (ADR-0030/PROC03): the identity rides in on the PrId —
+    # minted once at the verb boundary — so the slug/owner/name are read off it
+    # rather than re-resolved ambiently per fetch.
+    repo = pr.repo
     # Bind the domain keys at the fetch seam (ADR-0029): from the moment the
     # engine starts working on this PR, every subsequent record in-process —
     # including the gh Exec records the fetch itself produces — carries pr/repo.
-    logcontext.bind(pr=pr, repo=repo.slug)
-    data = gh.graphql(_REVIEWS_QUERY, owner=repo.owner.login, name=repo.name, pr=pr)
+    logcontext.bind(pr=pr.number, repo=repo.slug)
+    data = gh.graphql(
+        _REVIEWS_QUERY, owner=repo.owner.login, name=repo.name, pr=pr.number
+    )
     pull = data["repository"]["pullRequest"]
     requested = _requested_logins(
         [
@@ -330,7 +353,7 @@ def gather_reviews(pr: int) -> ReadinessView:
         pr=core_from_node(pull, repo),
         reviews=reviews,
         requested_logins=requested,
-        reviewer_rerun=reviewer_rerun(),
+        roster=roster,
     )
     # The light fetch is a mechanic of the request verb's skip decision, not a
     # lifecycle milestone — record it at DEBUG (the full `gather` is the info one).
@@ -338,12 +361,12 @@ def gather_reviews(pr: int) -> ReadinessView:
     logger.debug(
         "pr#%s light review snapshot fetched in %dms (%d review(s), "
         "%d pending request(s))",
-        pr,
+        pr.number,
         duration_ms,
         len(reviews),
         len(requested),
         extra={
-            "pr": pr,
+            "pr": pr.number,
             "duration_ms": duration_ms,
             "reviews": len(reviews),
             "requested": len(requested),
@@ -352,29 +375,27 @@ def gather_reviews(pr: int) -> ReadinessView:
     return ctx
 
 
-def gather(pr: int) -> ReadinessView:
-    """Fetch every raw input the engine needs for `pr`, live, via `gh`."""
-    # Resolved from config (cached) at the build edge — the per-reviewer rerun
-    # policy rides on the context so adapter detection stays pure (it reads the
-    # policy off `ctx`, never the config). Imported here, not at module top, to
-    # keep the import edge one-way (reviewers -> fetch is not a cycle, but the
-    # config read is genuinely a build-site concern).
-    from .reviewers import reviewer_rerun
-    from .reviewers_config import reviewer_window
+def gather(pr: PrId, roster: Roster) -> ReadinessView:
+    """Fetch every raw input the engine needs for `pr`, live, via `gh`.
 
+    `roster` is the reviewer configuration as ONE value (CLI01-WS04), loaded by
+    the CALLER once at its verb boundary (`reviewers_config.load_roster`) and
+    threaded onto the snapshot here — so the engine/adapters read every
+    per-reviewer setting off `ctx.roster`, never the config, and no call path
+    resolves reviewer settings twice per verb invocation."""
     start = time.monotonic()
-    # The typed repo read (PROC03): one Repo value object feeds the log context,
-    # the REST base path, the GraphQL variables, and the PR identity below.
-    repo = gh.current_repo()
+    # The typed repo (ADR-0030/PROC03): one Repo value object — riding in on the
+    # PrId, minted once at the verb boundary — feeds the log context, the REST
+    # base path, the GraphQL variables, and the PR identity below. No per-gather
+    # ambient resolution.
+    repo = pr.repo
     # Bind the domain keys at the fetch seam (ADR-0029): from the moment the
     # engine starts working on this PR, every subsequent record in-process —
     # including the gh Exec records the fetch itself produces — carries pr/repo.
-    logcontext.bind(pr=pr, repo=repo.slug)
+    logcontext.bind(pr=pr.number, repo=repo.slug)
     base = f"repos/{repo.slug}"
     meta = gh.pr_meta(pr)
-    thread_nodes, review_requests, requested_at = _threads_and_review_requests(
-        repo.owner.login, repo.name, pr
-    )
+    thread_nodes, review_requests, requested_at = _threads_and_review_requests(pr)
     # Bot-typed requests only surface through GraphQL (see _THREADS_QUERY);
     # the node shape ({login} / {slug}) is what _requested_logins consumes.
     meta["reviewRequests"] = review_requests
@@ -382,15 +403,15 @@ def gather(pr: int) -> ReadinessView:
         # The PR identity's repo — the typed adapter read above (ADR-0024/PROC03).
         repo=repo,
         meta=meta,
-        reviews_json=gh.rest(f"{base}/pulls/{pr}/reviews", paginate=True) or [],
+        reviews_json=gh.rest(f"{base}/pulls/{pr.number}/reviews", paginate=True) or [],
         thread_nodes=thread_nodes,
-        reactions=gh.rest(f"{base}/issues/{pr}/reactions", paginate=True) or [],
-        issue_comments=gh.rest(f"{base}/issues/{pr}/comments", paginate=True) or [],
-        reviewer_rerun=reviewer_rerun(),
-        # The per-reviewer wait-window override + the App `review_requested` edge
-        # times — both resolved at the build edge and threaded on so the engine
-        # ages the window off the snapshot, never the config/clock (OBS04-WS03).
-        reviewer_window=reviewer_window(),
+        reactions=gh.rest(f"{base}/issues/{pr.number}/reactions", paginate=True) or [],
+        issue_comments=gh.rest(f"{base}/issues/{pr.number}/comments", paginate=True)
+        or [],
+        roster=roster,
+        # The App `review_requested` edge times — resolved at the build edge and
+        # threaded on so the engine ages the wait window off the snapshot, never
+        # the clock (OBS04-WS03).
         requested_at=requested_at,
         # Stamp "now" once, at fetch time. The engine NEVER calls a clock — it
         # reads this off the snapshot — so the wall-clock read lives here, at the
@@ -403,13 +424,13 @@ def gather(pr: int) -> ReadinessView:
     duration_ms = int((time.monotonic() - start) * 1000)
     logger.info(
         "pr#%s snapshot gathered in %dms (%d review(s), %d thread(s), %d check(s))",
-        pr,
+        pr.number,
         duration_ms,
         len(ctx.reviews),
         len(ctx.threads),
         len(ctx.checks),
         extra={
-            "pr": pr,
+            "pr": pr.number,
             "duration_ms": duration_ms,
             "reviews": len(ctx.reviews),
             "threads": len(ctx.threads),
@@ -427,8 +448,7 @@ def context_from_raw(
     reactions: list[dict],
     issue_comments: list[dict],
     repo: Repo | None = None,
-    reviewer_rerun: dict[str, bool] | None = None,
-    reviewer_window: dict[str, int] | None = None,
+    roster: Roster | None = None,
     requested_at: dict[str, str] | None = None,
     now: datetime | None = None,
 ) -> ReadinessView:
@@ -441,15 +461,14 @@ def context_from_raw(
     never repo identity (a fixture may omit it), while `gather()` passes the real,
     origin-derived one.
 
-    `reviewer_rerun` is the per-reviewer rerun policy (name -> bool) resolved
-    from config at the build site; it defaults to empty (every reviewer
-    review-once) so a test/fixture context that omits it gets the shipped
-    default behaviour.
+    `roster` is the reviewer configuration as ONE value (CLI01-WS04), loaded at
+    the verb boundary and threaded onto the view; it defaults to the EMPTY
+    Roster (every reviewer at its shipped defaults: review-once, 20m window) so
+    a test/fixture context that omits it gets the default behaviour.
 
-    `reviewer_window` is the per-reviewer wait-window override (name -> seconds),
-    and `requested_at` the App `review_requested` edge times (login -> ISO-8601);
-    both default to empty so a fixture that omits them gets the shipped 20m window
-    and no App-side ageing (a local reviewer ages its own check-run `started_at`).
+    `requested_at` is the App `review_requested` edge times (login -> ISO-8601);
+    it defaults to empty so a fixture that omits it gets no App-side ageing (a
+    local reviewer ages its own check-run `started_at`).
 
     `now` is the injected wall-clock the snapshot carries (a tz-aware UTC
     datetime); `gather()` stamps it at fetch time and a test/fixture passes a
@@ -471,8 +490,7 @@ def context_from_raw(
         checks=ci_checks,
         review_funnel=review_funnel,
         now=now,
-        reviewer_rerun=reviewer_rerun or {},
-        reviewer_window=reviewer_window or {},
+        roster=roster if roster is not None else Roster(),
         requested_at=requested_at or {},
     )
 

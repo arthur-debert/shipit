@@ -19,7 +19,6 @@ from pathlib import Path
 import pytest
 import structlog
 from shipit import cli, logsetup
-from shipit.execrun import ExecError
 from shipit.identity import repo_from_slug
 
 
@@ -346,17 +345,6 @@ def test_no_file_params_means_no_file_handler():
     logsetup.configure_logging(verbose=False, env={})
     logger = logging.getLogger(logsetup.LOGGER_NAME)
     assert not any(isinstance(h, RotatingFileHandler) for h in logger.handlers)
-
-
-def test_resolve_current_repo_is_best_effort(monkeypatch):
-    monkeypatch.setattr(
-        logsetup.identity,
-        "resolve_repo",
-        lambda cwd=".", **kw: (_ for _ in ()).throw(
-            ExecError(["git"], rc=1, stderr="no origin")
-        ),
-    )
-    assert logsetup.resolve_current_repo() is None
 
 
 def test_all_three_sinks_attach_together(capfd, tmp_path):

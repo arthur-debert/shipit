@@ -27,9 +27,17 @@ import pytest
 from shipit import logcontext
 from shipit import gh
 from shipit.identity import repo_from_slug
+from shipit.pr import PrId
 from shipit.prstate import fetch
+from shipit.prstate.roster import Roster
 from shipit.prstate.errors import PrStateError
 from shipit.prstate.reviewers import CodexAdapter, CopilotAdapter, GeminiAdapter
+
+# The typed PR targets (CLI01-WS02): every pr-family service takes a PrId; the
+# lifecycle records carry its NUMBER.
+REPO = repo_from_slug("owner/repo")
+TARGET = PrId(repo=REPO, number=558)
+TARGET_41 = PrId(repo=REPO, number=41)
 
 
 def _graphql_page(review_requests=None, threads=None, timeline=None) -> dict:
@@ -48,7 +56,6 @@ def _graphql_page(review_requests=None, threads=None, timeline=None) -> dict:
 
 
 def _wire_gather(monkeypatch):
-    monkeypatch.setattr(fetch.gh, "current_repo", lambda: repo_from_slug("owner/repo"))
     monkeypatch.setattr(
         fetch.gh,
         "pr_meta",
@@ -71,7 +78,7 @@ def _wire_gather(monkeypatch):
 def test_gather_records_an_info_milestone_with_shape_and_duration(monkeypatch, caplog):
     _wire_gather(monkeypatch)
     with caplog.at_level(logging.INFO, logger="shipit.prstate"):
-        ctx = fetch.gather(558)
+        ctx = fetch.gather(TARGET, Roster())
     milestones = [
         r
         for r in caplog.records
@@ -91,14 +98,13 @@ def test_gather_binds_the_pr_and_repo_domain_keys(monkeypatch):
     starts working on a PR, every subsequent record correlates to it."""
     _wire_gather(monkeypatch)
     assert "pr" not in logcontext.bound()  # clean context (conftest isolation)
-    fetch.gather(558)
+    fetch.gather(TARGET, Roster())
     bound = logcontext.bound()
     assert bound["pr"] == 558
     assert bound["repo"] == "owner/repo"
 
 
 def test_gather_reviews_records_a_debug_mechanic_with_fields(monkeypatch, caplog):
-    monkeypatch.setattr(fetch.gh, "current_repo", lambda: repo_from_slug("owner/repo"))
     monkeypatch.setattr(
         fetch.gh,
         "graphql",
@@ -116,7 +122,7 @@ def test_gather_reviews_records_a_debug_mechanic_with_fields(monkeypatch, caplog
         },
     )
     with caplog.at_level(logging.DEBUG, logger="shipit.prstate"):
-        fetch.gather_reviews(558)
+        fetch.gather_reviews(TARGET, Roster())
     mechanics = [
         r
         for r in caplog.records
@@ -140,7 +146,7 @@ def _transition_records(caplog):
 def test_request_placed_is_an_info_transition_record(monkeypatch, caplog):
     monkeypatch.setattr(gh, "pr_edit_reviewer", lambda pr, handle, remove=False: None)
     with caplog.at_level(logging.INFO, logger="shipit.prstate"):
-        assert CopilotAdapter().request(41) is True
+        assert CopilotAdapter().request(TARGET_41) is True
     transitions = _transition_records(caplog)
     assert len(transitions) == 1
     rec = transitions[0]
@@ -153,7 +159,7 @@ def test_request_placed_is_an_info_transition_record(monkeypatch, caplog):
 def test_cancel_is_an_info_transition_record(monkeypatch, caplog):
     monkeypatch.setattr(gh, "pr_edit_reviewer", lambda pr, handle, remove=False: None)
     with caplog.at_level(logging.INFO, logger="shipit.prstate"):
-        assert CopilotAdapter().cancel(41) is True
+        assert CopilotAdapter().cancel(TARGET_41) is True
     transitions = _transition_records(caplog)
     assert len(transitions) == 1
     assert transitions[0].transition == "request withdrawn"
@@ -163,7 +169,7 @@ def test_no_mechanism_request_records_only_a_debug_mechanic(caplog):
     """Gemini has no request edge: nothing transitioned, so no INFO transition
     record — a DEBUG mechanic carrying reviewer/pr is the only trace."""
     with caplog.at_level(logging.DEBUG, logger="shipit.prstate"):
-        assert GeminiAdapter().request(41) is False
+        assert GeminiAdapter().request(TARGET_41) is False
     assert not _transition_records(caplog)
     mechanics = [
         r
@@ -175,13 +181,11 @@ def test_no_mechanism_request_records_only_a_debug_mechanic(caplog):
 
 
 def test_local_detach_request_is_an_info_transition_record(monkeypatch, caplog):
-    from shipit.prstate import reviewers_config
     from shipit.review import service
 
-    monkeypatch.setattr(reviewers_config, "reviewer_run_options", lambda name: {})
     monkeypatch.setattr(service, "start_detached_review", lambda *a, **k: True)
     with caplog.at_level(logging.INFO, logger="shipit.prstate"):
-        assert CodexAdapter().request(41) is True
+        assert CodexAdapter().request(TARGET_41) is True
     transitions = _transition_records(caplog)
     assert len(transitions) == 1
     rec = transitions[0]
@@ -194,13 +198,11 @@ def test_local_reconcile_request_records_only_a_debug_mechanic(monkeypatch, capl
     (start_detached_review → False) detached NOTHING new: it must NOT narrate an
     INFO request transition — only a DEBUG mechanic, so the lifecycle log never
     claims a detach that didn't happen."""
-    from shipit.prstate import reviewers_config
     from shipit.review import service
 
-    monkeypatch.setattr(reviewers_config, "reviewer_run_options", lambda name: {})
     monkeypatch.setattr(service, "start_detached_review", lambda *a, **k: False)
     with caplog.at_level(logging.DEBUG, logger="shipit.prstate"):
-        assert CodexAdapter().request(41) is True  # still reported in-flight
+        assert CodexAdapter().request(TARGET_41) is True  # still reported in-flight
     assert not _transition_records(caplog)  # no INFO edge for a no-op
     mechanics = [
         r
@@ -214,10 +216,7 @@ def test_local_reconcile_request_records_only_a_debug_mechanic(monkeypatch, capl
 def test_local_request_failure_records_error_with_exception(monkeypatch, caplog):
     """A request act that dies is a PROPAGATING failure: ERROR, with the
     exception attached (exc_info), before it normalizes to PrStateError."""
-    from shipit.prstate import reviewers_config
     from shipit.review import service
-
-    monkeypatch.setattr(reviewers_config, "reviewer_run_options", lambda name: {})
 
     def boom(*a, **k):
         raise RuntimeError("spawn exploded")
@@ -225,7 +224,7 @@ def test_local_request_failure_records_error_with_exception(monkeypatch, caplog)
     monkeypatch.setattr(service, "start_detached_review", boom)
     with caplog.at_level(logging.ERROR, logger="shipit.prstate"):
         with pytest.raises(PrStateError):
-            CodexAdapter().request(41)
+            CodexAdapter().request(TARGET_41)
     errors = [r for r in caplog.records if r.levelno == logging.ERROR]
     assert len(errors) == 1
     rec = errors[0]

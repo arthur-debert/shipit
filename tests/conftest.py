@@ -9,6 +9,7 @@ re-pointed to `shipit.prstate.*`.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,6 +18,8 @@ import pytest
 import structlog
 from shipit.prstate.fetch import context_from_raw
 from shipit.prstate.model import ReadinessView
+from shipit.prstate.reviewers_config import default_roster
+from shipit.prstate.roster import Roster
 
 FIXTURES = Path(__file__).parent / "prstate_fixtures"
 
@@ -28,7 +31,17 @@ FIXTURES = Path(__file__).parent / "prstate_fixtures"
 DEFAULT_NOW = datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
 
 
-def load_context(name: str, now: datetime | None = None) -> ReadinessView:
+def load_context(
+    name: str, now: datetime | None = None, roster: Roster | None = None
+) -> ReadinessView:
+    """Build a ReadinessView from one recorded scenario, as `fetch.gather()` would.
+
+    `roster` defaults to the SHIPPED default Roster (copilot-only, review-once)
+    passed as a VALUE (CLI01-WS04) — so the recorded-snapshot tests evaluate
+    against the shipped default, never against THIS repo's deployed
+    `.shipit.toml` `[reviewers]` policy (shipit dogfoods copilot+codex+agy), and
+    there is no module-global cache to pre-seed or reset. A test that varies the
+    reviewer configuration passes its own Roster."""
     data = json.loads((FIXTURES / f"{name}.json").read_text())
     if now is None:
         raw_now = data.get("now")
@@ -40,6 +53,7 @@ def load_context(name: str, now: datetime | None = None) -> ReadinessView:
         reactions=data.get("reactions", []),
         issue_comments=data.get("issue_comments", []),
         now=now,
+        roster=roster if roster is not None else default_roster(),
     )
 
 
@@ -78,32 +92,28 @@ def _clean_domain_key_context():
 
 
 @pytest.fixture(autouse=True)
-def _reset_required_cache():
-    """Isolate the required-reviewer cache around every prstate test.
+def _reset_shipit_logging():
+    """Detach shipit's sinks from the process-global logger around every test.
 
-    Two jobs:
+    `logsetup.configure_logging()` attaches handlers to the ONE process-wide
+    `logging.getLogger("shipit")` singleton — including a stderr `StreamHandler`
+    that pins `sys.stderr` AT ATTACH TIME. Under pytest that stderr is the
+    per-test `capsys` `CaptureIO`, which pytest closes at the test boundary. A
+    handler left attached by one test therefore points at a CLOSED buffer, and
+    the next test's pre-`configure_logging` bootstrap records (e.g. the CLI's
+    identity-resolution `exec` DEBUG lines, emitted before its sinks are wired)
+    hit that dead handler — `ValueError: I/O operation on closed file` — which
+    the logging module reports by printing `--- Logging error ---` + traceback
+    to the LIVE stderr, corrupting the `error:`-line contract the CLI tests
+    assert (surfaces only in CI, where the DEBUG-level CI sink is attached).
 
-    * clear the process-lifetime cache before/after each test, so a test that
-      resolves the required set never leaks its result into the next; and
-    * PRE-SEED the cache with the shipped DEFAULT reviewer set (copilot-only) so
-      the state-machine unit tests resolve against that default, NOT against THIS
-      repo's deployed `[reviewers]` policy. shipit dogfoods its local reviewers —
-      its own `.shipit.toml` now requires copilot+codex+agy — but the engine unit
-      tests assert behaviour for a known set and must not couple to the repo's
-      deployment config. A test that varies the config resets the cache itself
-      (and drives resolution via a monkeypatched `load_override`), so the seed is
-      transparent to it.
+    Clearing shipit's own (`shipit-`prefixed) handlers before and after each
+    test keeps that per-test stream from leaking forward. Production is a
+    one-shot process with a stable stderr, so it never hits this; the reset is a
+    test-isolation concern for the shared singleton."""
+    from shipit import logsetup
 
-    Importing `shipit.prstate.reviewers` is cheap and side-effect-free, so this
-    autouse fixture is harmless for the non-prstate suites that also run under
-    this conftest (they never read the cache)."""
-    from shipit.prstate import reviewers, reviewers_config
-
-    reviewers._reset_required_cache()
-    default_names = tuple(reviewers_config.DEFAULT_REVIEWERS)
-    reviewers._REQUIRED_CACHE = tuple(
-        reviewers_config.required_reviewers(default_names)
-    )
-    reviewers._RERUN_CACHE = dict(reviewers_config.DEFAULT_REVIEWERS)
+    logger = logging.getLogger(logsetup.LOGGER_NAME)
+    logsetup._clear_own_handlers(logger)
     yield
-    reviewers._reset_required_cache()
+    logsetup._clear_own_handlers(logger)
