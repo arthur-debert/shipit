@@ -155,7 +155,7 @@ defaults, the shared shape-option stack with its exclusivity validation, the
 mapping the known runtime exception set — exec, PR-state, config, domain
 refusals — to a uniform `error: …` stderr line and exit 1); a render seam
 (the `emit` helper plus the `format_*` convention, JSON serialized from the
-result's `to_dict`).
+result's `to_dict()`).
 
 **Two-tier exit contract.** Exit 2 = usage (argument errors, raised at parse,
 owned by click); exit 1 = runtime failure (via the error shell); exit 0 =
@@ -213,7 +213,7 @@ in-code argv literals, bootstrap shims) pin the surface. Additions only.
 
 **Epic split.** CLI01 = the seam machinery + identity threading + PrId +
 Roster + the pr family promoted as the proof of the contract. CLI02 = the
-four offender promotions (install, spawn, tree, gh-setup + log reader),
+five offender promotions (install, spawn, tree, gh-setup, the log reader),
 planned after CLI01 merges, each a mechanical adoption of the landed pattern.
 
 ## Testing Decisions

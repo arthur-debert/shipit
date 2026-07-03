@@ -30,9 +30,12 @@ rendered whitespace.
 
 1. **Parse to values at click.** A shared parameter library (custom
    `ParamType`s + reusable decorators) mints value objects at argv parse:
-   `Repo` via `repo_from_slug`, the PR target as a `PrId`, the shared
-   tree/spawn shape options. Construction-is-validation; a malformed argument
-   is a click usage error, never verb-body code.
+   `Repo` via `repo_from_slug`, the shared tree/spawn shape options.
+   Construction-is-validation; a malformed argument is a click usage error,
+   never verb-body code. The PR target is the deliberate exception: click
+   validates only the explicit primitive; the PR-target resolver mints the
+   `PrId` at the verb boundary (explicit number vs the current branch's PR),
+   because "no PR for this branch" is a runtime outcome, not a usage error.
 2. **Two-tier exit contract.** rc 2 = usage (argument errors, raised at
    parse); rc 1 = runtime failure; rc 0 = success. One `@cli_errors` shell on
    each verb's `run()` maps the known exception set (`ExecError`,
