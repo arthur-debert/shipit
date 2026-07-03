@@ -123,10 +123,11 @@ def test_fail_open_failure_logs_warning_and_continues(force_failure, caplog):
 def test_sessionstart_malformed_payload_warns_with_exception_on_each_arm(
     monkeypatch, tmp_path, caplog
 ):
-    # A malformed payload is swallowed INSIDE the liveness half, past the
-    # top-level stdin read: once in the cwd fallback and once in the session-id
-    # fallback. The canon applies to every swallowing arm, so each of these
-    # inner swallows must be a WARNING with the exception attached too.
+    # A malformed payload is swallowed INSIDE the checks, past the top-level
+    # stdin read: once per cwd fallback (the source-clone warning check and the
+    # liveness half each parse the payload independently) and once in the
+    # session-id fallback. The canon applies to every swallowing arm, so each
+    # of these inner swallows must be a WARNING with the exception attached too.
     (tmp_path / ".git").mkdir()  # the cwd fallback must land in a clone shape
     monkeypatch.chdir(tmp_path)
     ancestry = {  # hook (300) → claude (100): the session-id arm is reached
@@ -144,6 +145,6 @@ def test_sessionstart_malformed_payload_warns_with_exception_on_each_arm(
         )
     assert rc == 0  # fail-open: the session start continues
     warnings = _records(caplog, logging.WARNING)
-    assert len(warnings) == 2, "both swallowed parse arms must produce a WARNING"
+    assert len(warnings) == 3, "every swallowed parse arm must produce a WARNING"
     assert all(r.exc_info for r in warnings)
     assert not _records(caplog, logging.ERROR)

@@ -13,6 +13,7 @@ from __future__ import annotations
 import builtins
 import io
 import json
+import logging
 import subprocess
 from pathlib import Path
 
@@ -20,6 +21,7 @@ import pytest
 from shipit.harness import activation
 from shipit.pixienv import Activation, parse_activation
 from shipit.session import liveness
+from shipit.tree import layout
 from shipit.verbs.hook import sessionstart
 
 TREE_ROOT = "/trees/SES01/WS01"
@@ -443,6 +445,131 @@ def test_probe_explosion_fails_open(clone):
     code = _run_liveness({"cwd": str(clone)}, probe=boom)
     assert code == 0
     assert liveness.read_pidfile(clone) is None
+
+
+# --------------------------------------------------------------------------
+# Source-clone warning — the third independent, fail-open check (REL01 #348)
+# --------------------------------------------------------------------------
+
+HOOK_LOGGER = "shipit.hook"
+
+
+def _clone_shape(path: Path) -> Path:
+    """Give ``path`` the two source-clone markers: .shipit.toml + a .git dir."""
+    path.mkdir(parents=True, exist_ok=True)
+    (path / ".git").mkdir()
+    (path / ".shipit.toml").write_text("[secrets]\n")
+    return path
+
+
+def _run_warning_check(cwd: Path) -> tuple[int, str]:
+    """Run the hook with the warning check isolated: no env file (activation
+    no-ops before pixi), an empty ancestry (liveness no-ops before the pidfile)."""
+    out = io.StringIO()
+    code = sessionstart.run(
+        stdin=io.StringIO(json.dumps({"cwd": str(cwd)})),
+        stdout=out,
+        environ={},
+        probe={}.get,
+        self_pid=1,
+    )
+    return code, out.getvalue()
+
+
+def test_source_clone_cwd_warns_on_stdout(tmp_path, monkeypatch, caplog):
+    # The launch the check exists for: claude started directly in the source
+    # clone (has .shipit.toml, is a git repo, NOT under the central root). The
+    # warning lands on stdout (→ session context) and a WARNING record rides
+    # along as the durable trail.
+    clone = _clone_shape(tmp_path / "src-clone")
+    monkeypatch.setenv(layout.CENTRAL_ROOT_ENV, str(tmp_path / "trees"))
+    with caplog.at_level(logging.DEBUG, logger=HOOK_LOGGER):
+        code, out = _run_warning_check(clone)
+    assert code == 0
+    assert out == sessionstart.SOURCE_CLONE_WARNING + "\n"
+    assert any(
+        r.levelno == logging.WARNING and r.name == HOOK_LOGGER for r in caplog.records
+    )
+
+
+def test_ephemeral_tree_cwd_is_silent(tmp_path, monkeypatch):
+    # A session Tree is a clone of the same repo — it carries BOTH markers — but
+    # it lives under the central root, so it must never warn (the no-false-
+    # positives constraint). The branch is irrelevant: session Trees move off
+    # ephemeral/* mid-session (work-by-branch), which is exactly why the
+    # discriminator is the path.
+    root = tmp_path / "trees"
+    tree = _clone_shape(root / "org" / "repo" / "ephemeral" / "sess-20260703-1")
+    monkeypatch.setenv(layout.CENTRAL_ROOT_ENV, str(root))
+    code, out = _run_warning_check(tree)
+    assert code == 0
+    assert out == ""
+
+
+def test_branch_tree_cwd_is_silent(tmp_path, monkeypatch):
+    # Same for a per-Run write Tree (branches/ namespace): under the root → silent.
+    root = tmp_path / "trees"
+    tree = _clone_shape(root / "org" / "repo" / "branches" / "spike-foo-deadbeef")
+    monkeypatch.setenv(layout.CENTRAL_ROOT_ENV, str(root))
+    code, out = _run_warning_check(tree)
+    assert code == 0
+    assert out == ""
+
+
+def test_non_clone_cwd_is_silent(tmp_path, monkeypatch):
+    # Neither marker alone is a source clone: a shipit repo that is not a git
+    # repo (no .git), and a git repo that is not a shipit repo (no .shipit.toml).
+    monkeypatch.setenv(layout.CENTRAL_ROOT_ENV, str(tmp_path / "trees"))
+    no_git = tmp_path / "no-git"
+    no_git.mkdir()
+    (no_git / ".shipit.toml").write_text("[secrets]\n")
+    code, out = _run_warning_check(no_git)
+    assert code == 0
+    assert out == ""
+
+    no_toml = tmp_path / "no-toml"
+    no_toml.mkdir()
+    (no_toml / ".git").mkdir()
+    code, out = _run_warning_check(no_toml)
+    assert code == 0
+    assert out == ""
+
+
+def test_detection_error_is_silent_and_debug(tmp_path, monkeypatch, caplog):
+    # A broken detection environment (here: a relative SHIPIT_TREES_ROOT, which
+    # central_root() rejects) costs the session NOTHING: exit 0, empty stdout,
+    # and the swallow logs at DEBUG — #348's explicit calibration exception to
+    # the WARNING canon, because the check writes nothing durable.
+    clone = _clone_shape(tmp_path / "src-clone")
+    monkeypatch.setenv(layout.CENTRAL_ROOT_ENV, "relative/trees")
+    with caplog.at_level(logging.DEBUG, logger=HOOK_LOGGER):
+        code, out = _run_warning_check(clone)
+    assert code == 0
+    assert out == ""
+    hook_records = [r for r in caplog.records if r.name == HOOK_LOGGER]
+    assert not [r for r in hook_records if r.levelno > logging.DEBUG]
+    assert any(r.levelno == logging.DEBUG and r.exc_info for r in hook_records)
+
+
+def test_warning_never_suppresses_the_writes(tmp_path, monkeypatch, pixi_repo):
+    # Independence: the warning firing must not cost the session its activation
+    # (the pixi_repo here is a source clone too — .shipit.toml + .git + pixi.toml).
+    (pixi_repo / ".git").mkdir()
+    (pixi_repo / ".shipit.toml").write_text("[secrets]\n")
+    monkeypatch.setenv(layout.CENTRAL_ROOT_ENV, str(tmp_path / "trees"))
+    env_file = tmp_path / "claude-env"
+    out = io.StringIO()
+    code = sessionstart.run(
+        stdin=io.StringIO(json.dumps({"cwd": str(pixi_repo)})),
+        stdout=out,
+        environ={"CLAUDE_ENV_FILE": str(env_file)},
+        runner=_fake_runner({}),
+        probe={}.get,
+        self_pid=1,
+    )
+    assert code == 0
+    assert out.getvalue() == sessionstart.SOURCE_CLONE_WARNING + "\n"
+    assert "export CONDA_DEFAULT_ENV=shipit" in env_file.read_text()
 
 
 def test_liveness_write_survives_a_broken_activation(clone, tmp_path):
