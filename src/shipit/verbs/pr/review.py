@@ -31,8 +31,11 @@ import click
 
 from ... import execrun
 from ...agent import backend as _agent_backend
+from ...identity import Repo
+from ...pr import PrId
 from ...prstate.errors import PrStateError
 from ...prstate.reviewers import REGISTRY, ReviewerAdapter, by_name, required_reviewers
+from .._context import NoAmbientRepoError, current_root_context
 from ._request import RequestResult, request_reviewers
 from ._resolve import resolve_pr
 
@@ -54,7 +57,7 @@ def cmd() -> None:
 
 
 @cmd.command(name="request")
-@click.argument("pr", required=False, type=int)
+@click.argument("pr", required=False, type=click.IntRange(min=1))
 @click.option(
     "--reviewer",
     "reviewer",
@@ -112,6 +115,7 @@ def run_internal_cmd(
     `<logdir>/<owner>/<name>/shipit.log` (OBS03 story 5). A malformed slug or
     logging-setup failure is swallowed (returns False) and never crashes the review.
     """
+    from ...identity import repo_from_slug
     from ...logsetup import configure_logging_for_slug
     from ...review import service
 
@@ -132,10 +136,20 @@ def run_internal_cmd(
         )
         raise SystemExit(1) from None
 
+    # The child's own entry point (ADR-0030): it does NOT read the root
+    # context — its repo arrives deterministic and explicit (`--repo`), and the
+    # PrId is minted HERE, at the process boundary, through the one canonical
+    # slug parser.
+    try:
+        target = PrId(repo=repo_from_slug(repo), number=pr)
+    except ValueError as exc:
+        print(
+            f"error: invalid --repo/--pr for the review child: {exc}", file=sys.stderr
+        )
+        raise SystemExit(1) from None
     service.run_detached_review(
         backend,
-        pr,
-        repo=repo,
+        target,
         run_id=run_id,
         model=model,
         timeout=timeout,
@@ -144,8 +158,17 @@ def run_internal_cmd(
     )
 
 
-def run(pr: int | None = None, *, reviewer: str | None = None) -> int:
+def run(
+    pr: int | None = None,
+    *,
+    reviewer: str | None = None,
+    repo: Repo | None = None,
+) -> int:
     """Resolve -> select scope -> request + verify -> render. Returns an exit code.
+
+    ``repo`` is the identity half of the PR target: omitted (the CLI path), the
+    root context's ambient repo — resolved once per invocation (ADR-0030); a
+    direct caller (a test) injects it as a value.
 
     0 when every request placed AND verified (or was a recorded no-op / skip);
     non-zero on a bad reviewer name, an unresolvable PR, a `gh`/auth failure
@@ -155,26 +178,32 @@ def run(pr: int | None = None, *, reviewer: str | None = None) -> int:
     if adapters is None:
         return 1
 
-    resolved: int | None = None
+    target: PrId | None = None
     try:
-        resolved = resolve_pr(pr)
-        if resolved is None:
+        target = resolve_pr(
+            pr, repo if repo is not None else current_root_context().require_repo()
+        )
+        if target is None:
             print(
                 "error: no PR for the current branch — open a draft PR first, "
                 "or pass a PR number",
                 file=sys.stderr,
             )
             return 1
-        result = request_reviewers(resolved, adapters, force=reviewer is not None)
-    except (execrun.ExecError, PrStateError) as exc:
+        result = request_reviewers(target, adapters, force=reviewer is not None)
+    except (execrun.ExecError, PrStateError, NoAmbientRepoError) as exc:
         # A real gh/auth failure OR the local-agent guard (requesting
         # codex-local/agy-local raises a clean PrStateError, not a crash). Both are
         # surfaced as a clean stderr line + non-zero exit.
-        logger.error("pr review request failed", exc_info=True, extra={"pr": resolved})
+        logger.error(
+            "pr review request failed",
+            exc_info=True,
+            extra={"pr": target.number} if target is not None else None,
+        )
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
-    _emit(resolved, result)
+    _emit(target.number, result)
     return 0 if result.ok else 1
 
 

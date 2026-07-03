@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 
 from .. import gh
+from ..pr import PrId
 from . import fetch
 from .model import Thread
 
@@ -27,12 +28,12 @@ mutation($threadId: ID!) {
 """
 
 
-def open_threads(pr: int) -> list[Thread]:
+def open_threads(pr: PrId) -> list[Thread]:
     """All unresolved review threads on the PR (each carries path/line/ids)."""
     return fetch.gather(pr).open_threads()
 
 
-def reply(pr: int, comment_id: int, body: str) -> None:
+def reply(pr: PrId, comment_id: int, body: str) -> None:
     """Reply to a review comment, keeping the thread (does not resolve it).
 
     The endpoint knowledge lives in the adapter (:func:`shipit.gh.pr_review_reply`)
@@ -45,21 +46,21 @@ def reply(pr: int, comment_id: int, body: str) -> None:
         # at ERROR with the exception attached, then let it propagate unchanged.
         logger.error(
             "review-thread reply failed on pr#%s (comment %s)",
-            pr,
+            pr.number,
             comment_id,
             exc_info=True,
-            extra={"pr": pr, "comment_id": comment_id},
+            extra={"pr": pr.number, "comment_id": comment_id},
         )
         raise
     logger.info(
         "review-thread reply posted on pr#%s (comment %s)",
-        pr,
+        pr.number,
         comment_id,
-        extra={"pr": pr, "comment_id": comment_id},
+        extra={"pr": pr.number, "comment_id": comment_id},
     )
 
 
-def resolve(pr: int, thread_id: str) -> None:
+def resolve(pr: PrId, thread_id: str) -> None:
     """Mark a review thread resolved via the GraphQL mutation.
 
     Takes the PR number alongside the thread handle so the mutation milestone
@@ -71,15 +72,15 @@ def resolve(pr: int, thread_id: str) -> None:
     except Exception:
         logger.error(
             "review-thread resolve failed on pr#%s (thread %s)",
-            pr,
+            pr.number,
             thread_id,
             exc_info=True,
-            extra={"pr": pr, "thread_id": thread_id},
+            extra={"pr": pr.number, "thread_id": thread_id},
         )
         raise
     logger.info(
         "review-thread resolved on pr#%s (thread %s)",
-        pr,
+        pr.number,
         thread_id,
-        extra={"pr": pr, "thread_id": thread_id},
+        extra={"pr": pr.number, "thread_id": thread_id},
     )

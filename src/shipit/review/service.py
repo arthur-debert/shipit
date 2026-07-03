@@ -37,6 +37,7 @@ from collections.abc import Callable, Mapping, Sequence
 
 from .. import execrun, gh, logcontext
 from ..agent.backend import Backend
+from ..pr import PrId
 from . import checkrun, post, producer
 from .backends.base import BackendError
 from .diff import ReviewError, resolve_pr
@@ -280,7 +281,7 @@ def _maybe_post_salvage(
 
 def start_detached_review(
     backend: Backend,
-    pr: int,
+    pr: PrId,
     *,
     model: str = "pro",
     timeout: str = "600s",
@@ -335,26 +336,29 @@ def start_detached_review(
     """
     logger.info(
         "review detach requested for pr#%s (agent=%s) — resolving + detaching",
-        pr,
+        pr.number,
         backend.funnel_agent,
-        extra={"pr": pr},
+        extra={"pr": pr.number},
     )
-    repo, head_sha = _resolve_target(pr)
+    # The repo rides in on the PrId (ADR-0030) — the former ambient
+    # `gh.current_repo()` resolution is gone; only the head sha needs the wire.
+    repo = pr.slug
+    head_sha = _resolve_head_sha(pr)
     # Bind the seam's domain keys (ADR-0029) as soon as both are known: from
     # here on the parent's records — including the reconcile lookup's and the
     # breadcrumb's, which only NAME the repo — carry pr/repo, and the export
     # below hands them (plus the run id, which is the CHILD's correlation, not
     # this parent's) across the process boundary.
-    logcontext.bind(pr=pr, repo=repo)
+    logcontext.bind(pr=pr.number, repo=repo)
     existing = _reconcile_inflight(backend, repo, head_sha, find)
     if existing is not None:
         logger.info(
             "review detach reconciled against an existing in-flight run (id=%s) "
             "for pr#%s (agent=%s) — not opening or spawning a duplicate",
             existing,
-            pr,
+            pr.number,
             backend.funnel_agent,
-            extra={"pr": pr},
+            extra={"pr": pr.number},
         )
         return False  # reconciled: in-flight, but no new child was started
     run_id = _open_breadcrumb(backend, repo, head_sha)
@@ -362,7 +366,6 @@ def start_detached_review(
     argv = _child_argv(
         backend,
         pr,
-        repo=repo,
         run_id=run_id,
         model=model,
         timeout=timeout,
@@ -386,19 +389,18 @@ def start_detached_review(
         raise
     logger.info(
         "review detached for pr#%s (agent=%s, run id=%s) — in-flight",
-        pr,
+        pr.number,
         backend.funnel_agent,
         run_id,
-        extra={"pr": pr},
+        extra={"pr": pr.number},
     )
     return True  # started: a fresh detached child was opened + spawned
 
 
 def run_detached_review(
     backend: Backend,
-    pr: int,
+    pr: PrId,
     *,
-    repo: str | None,
     run_id: int | None,
     model: str = "pro",
     timeout: str = "600s",
@@ -442,28 +444,32 @@ def run_detached_review(
     as the backstop (PRD "Failure & Timeout").
     """
     agent = backend.funnel_agent
+    # The repo rides in on the PrId (ADR-0030): the child entry point minted it
+    # from its explicit ``--repo`` argument, so the slug feeds the review-path
+    # resolve and the funnel close without a separate parameter.
+    repo = pr.slug
     start = time.monotonic()
     logger.info(
         "review child started for pr#%s (agent=%s, repo=%s, run_id=%s)",
-        pr,
+        pr.number,
         agent,
         repo,
         run_id,
-        extra={"reviewer": agent, "pr": pr},
+        extra={"reviewer": agent, "pr": pr.number},
     )
     try:
-        ctx = resolve_pr(pr, repo=repo)
+        ctx = resolve_pr(pr.number, repo=repo)
         # The heavy resolve (fetch + merge-base + diff) the request path deliberately
         # skipped is now done — record its shape (NOT the diff text) so the detached
         # run's file-sink record shows what was reviewed.
         logger.info(
             "review target resolved for pr#%s (agent=%s) — %d changed file(s), "
             "%d chars diff; generating + posting",
-            pr,
+            pr.number,
             agent,
             len(ctx.changed_files or []),
             len(ctx.diff or ""),
-            extra={"reviewer": agent, "pr": pr},
+            extra={"reviewer": agent, "pr": pr.number},
         )
     except Exception as exc:  # noqa: BLE001 - any resolve failure must still resolve the run
         # The resolve region is OUTSIDE `_generate_post_and_close`'s own
@@ -483,22 +489,22 @@ def run_detached_review(
             logger.error(
                 "review resolve failed for pr#%s (agent=%s) after %dms — "
                 "closed run %s as failed",
-                pr,
+                pr.number,
                 agent,
                 duration_ms,
                 run_id,
                 exc_info=True,
-                extra={"reviewer": agent, "pr": pr, "duration_ms": duration_ms},
+                extra={"reviewer": agent, "pr": pr.number, "duration_ms": duration_ms},
             )
         else:
             logger.error(
                 "review resolve failed for pr#%s (agent=%s) after %dms — "
                 "no run to close (parent opened none)",
-                pr,
+                pr.number,
                 agent,
                 duration_ms,
                 exc_info=True,
-                extra={"reviewer": agent, "pr": pr, "duration_ms": duration_ms},
+                extra={"reviewer": agent, "pr": pr.number, "duration_ms": duration_ms},
             )
         raise
     try:
@@ -520,11 +526,11 @@ def run_detached_review(
         duration_ms = int((time.monotonic() - start) * 1000)
         logger.error(
             "review child failed for pr#%s (agent=%s) after %dms",
-            pr,
+            pr.number,
             agent,
             duration_ms,
             exc_info=True,
-            extra={"reviewer": agent, "pr": pr, "duration_ms": duration_ms},
+            extra={"reviewer": agent, "pr": pr.number, "duration_ms": duration_ms},
         )
         raise
     # The review's start→settle duration (LOG02): child start (moments after the
@@ -532,56 +538,50 @@ def run_detached_review(
     duration_ms = int((time.monotonic() - start) * 1000)
     logger.info(
         "review child done for pr#%s (agent=%s) in %dms",
-        pr,
+        pr.number,
         agent,
         duration_ms,
-        extra={"reviewer": agent, "pr": pr, "duration_ms": duration_ms},
+        extra={"reviewer": agent, "pr": pr.number, "duration_ms": duration_ms},
     )
     return result
 
 
-def _resolve_target(pr: int) -> tuple[str, str]:
-    """Cheaply resolve ``(repo, head_sha)`` for ``pr`` — the FAST synchronous path.
+def _resolve_head_sha(pr: PrId) -> str:
+    """Cheaply resolve the head sha for ``pr`` — the FAST synchronous path.
 
-    Uses the TYPED adapter reads (PROC03): ``gh.current_repo()`` returns the
-    :class:`~shipit.identity.Repo` and ``gh.pr_core()`` returns the
+    Uses the TYPED adapter read (PROC03): ``gh.pr_core()`` returns the
     :class:`~shipit.pr.PR` core, routed through the ONE
     :func:`shipit.pr.core_from_node` boundary — the SAME extraction
     :func:`resolve_pr` and the readiness path use, so ``head_sha`` is fetched exactly
-    one way and no JSON is parsed here. It is NOT the full diff resolve — that
+    one way and no JSON is parsed here. The repo needs NO resolving at all: it
+    rides in on the :class:`~shipit.pr.PrId` (ADR-0030) — the former ambient
+    ``gh.current_repo()`` shellout is gone. It is NOT the full diff resolve — that
     fetch/merge-base/diff is the detached child's work, so the request stays fast.
     A ``gh``/auth failure PROPAGATES (the reviewer adapter normalizes it to
     ``PrStateError``); the breadcrumb create that follows is the only best-effort step.
 
-    Both typed reads can raise raw, untyped errors on a malformed upstream —
-    ``ValueError`` for an unusable slug / unparseable output / malformed head sha /
+    The typed read can raise raw, untyped errors on a malformed upstream —
+    ``ValueError`` for unparseable output / a malformed head sha /
     non-bool ``isDraft``, ``KeyError`` for a missing required core key. This is the
     fast synchronous boundary, so each is normalized to `ReviewError` — a clear,
     typed message instead of a raw traceback leaking out of the request path.
     """
     try:
-        repo = gh.current_repo()
-    except ValueError as exc:
-        raise ReviewError(
-            f"could not resolve the target repo for #{pr} from `gh repo view`: {exc}"
-        ) from exc
-    try:
-        core = gh.pr_core(pr, repo)
+        core = gh.pr_core(pr)
     except (ValueError, KeyError) as exc:
         raise ReviewError(
-            f"could not resolve target core for #{pr} from `gh` output "
-            f"(repo={repo.slug!r}): {exc}"
+            f"could not resolve target core for #{pr.number} from `gh` output "
+            f"(repo={pr.slug!r}): {exc}"
         ) from exc
     # The core carries a typed `Sha` (COR02); this seam hands the wire-facing
     # checkrun helpers (URL path / JSON payload) the string form.
-    return core.slug, str(core.head_sha)
+    return str(core.head_sha)
 
 
 def _child_argv(
     backend: Backend,
-    pr: int,
+    pr: PrId,
     *,
-    repo: str,
     run_id: int | None,
     model: str,
     timeout: str,
@@ -607,9 +607,9 @@ def _child_argv(
         "--agent",
         backend.funnel_agent or backend.name,
         "--pr",
-        str(pr),
+        str(pr.number),
         "--repo",
-        repo,
+        pr.slug,
         "--model",
         model,
         "--timeout",

@@ -14,8 +14,13 @@ from types import SimpleNamespace
 import pytest
 
 from shipit.agent import backend as agent_backend
+from shipit.identity import repo_from_slug
+from shipit.pr import PrId
 from shipit.review import post, service
 from shipit.review.diff import ReviewView, review_view
+
+# The typed PR target (CLI01-WS02): the detached child takes a PrId.
+TARGET = PrId(repo=repo_from_slug("owner/repo"), number=5)
 
 _DIFF = """\
 diff --git a/foo.py b/foo.py
@@ -192,7 +197,7 @@ def test_detached_child_settle_carries_start_to_settle_duration(monkeypatch, cap
         service, "_generate_post_and_close", lambda *a, **kw: {"post": {"id": 1}}
     )
     with caplog.at_level(logging.INFO, logger="shipit.review"):
-        service.run_detached_review(agent_backend.CODEX, 5, repo="owner/repo", run_id=9)
+        service.run_detached_review(agent_backend.CODEX, TARGET, run_id=9)
     settles = _duration_records(caplog, logging.INFO)
     assert len(settles) == 1
     rec = settles[0]
@@ -219,9 +224,7 @@ def test_detached_child_failure_settles_at_error_with_exception_and_duration(
 
     with caplog.at_level(logging.INFO, logger="shipit.review"):
         with pytest.raises(RuntimeError):
-            service.run_detached_review(
-                agent_backend.CODEX, 5, repo="owner/repo", run_id=9
-            )
+            service.run_detached_review(agent_backend.CODEX, TARGET, run_id=9)
     errors = _duration_records(caplog, logging.ERROR)
     assert len(errors) == 1
     rec = errors[0]
@@ -243,9 +246,7 @@ def test_resolve_failure_settles_at_error_with_exception_and_duration(
 
     with caplog.at_level(logging.INFO, logger="shipit.review"):
         with pytest.raises(RuntimeError):
-            service.run_detached_review(
-                agent_backend.CODEX, 5, repo="owner/repo", run_id=None
-            )
+            service.run_detached_review(agent_backend.CODEX, TARGET, run_id=None)
     errors = _duration_records(caplog, logging.ERROR)
     assert len(errors) == 1
     assert errors[0].exc_info is not None

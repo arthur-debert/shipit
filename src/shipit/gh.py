@@ -49,7 +49,7 @@ from .execrun import ExecError
 
 if TYPE_CHECKING:  # the value objects gh returns; runtime import is deferred
     from .identity import Repo
-    from .pr import PR
+    from .pr import PR, PrId
 
 # The engine's semantic error is safe to import here: `prstate.errors` is a
 # leaf module (stdlib-only, imports nothing from shipit), so no cycle — while
@@ -433,15 +433,15 @@ def pr_view(pr: str, *, repo: str | None = None, json_fields: list[str]) -> dict
     return data
 
 
-def pr_core(pr: int, repo: Repo) -> PR:
+def pr_core(pr: PrId) -> PR:
     """The :class:`shipit.pr.PR` core of ``pr`` — the TYPED PR read (PROC03).
 
     Fetches exactly the core field list (:data:`shipit.pr.CORE_JSON_FIELDS`) and
     routes the node through the ONE :func:`shipit.pr.core_from_node` boundary, so
     the returned core carries the :class:`~shipit.identity.Sha`-typed head and no
-    caller re-parses the wire shape. ``repo`` is the PR identity's repo — a PR
-    node does not carry its own slug, so the caller names which repo identity the
-    core composes (typically :func:`current_repo`).
+    caller re-parses the wire shape. The target arrives as a
+    :class:`~shipit.pr.PrId` (ADR-0030): the repo identity the core composes
+    rides along on it — never re-derived here per fetch.
 
     Raises :class:`ExecError` on a failed gh call, :class:`ValueError` on
     unusable output (unparseable JSON, a malformed/abbreviated head sha, a
@@ -450,11 +450,11 @@ def pr_core(pr: int, repo: Repo) -> PR:
     """
     from .pr import CORE_JSON_FIELDS, core_from_node
 
-    node = pr_view(str(pr), repo=repo.slug, json_fields=list(CORE_JSON_FIELDS))
-    return core_from_node(node, repo)
+    node = pr_view(str(pr.number), repo=pr.slug, json_fields=list(CORE_JSON_FIELDS))
+    return core_from_node(node, pr.repo)
 
 
-def pr_meta(pr: int) -> dict:
+def pr_meta(pr: PrId) -> dict:
     """PR-level metadata the PR-state engine needs in one call.
 
     A raw ``pullRequest`` node (dict), not a typed core: alongside the core
@@ -462,7 +462,9 @@ def pr_meta(pr: int) -> dict:
     (:func:`shipit.prstate.fetch.context_from_raw`) consumes — that builder routes
     the core through :func:`shipit.pr.core_from_node` and partitions the checks
     into the existing check value shapes, so no parallel snapshot type is minted
-    here (PROC03).
+    here (PROC03). The target arrives as a :class:`~shipit.pr.PrId` (ADR-0030):
+    the read is pinned to the identity's repo, never to an ambient cwd
+    inference.
 
     Deliberately does NOT fetch ``reviewRequests``: ``gh pr view --json``
     silently omits Bot-typed requested reviewers (a requested Copilot reads as
@@ -470,7 +472,8 @@ def pr_meta(pr: int) -> dict:
     (`prstate.fetch._threads_and_review_requests`).
     """
     return pr_view(
-        str(pr),
+        str(pr.number),
+        repo=pr.slug,
         json_fields=[
             "number",
             "headRefOid",
@@ -690,29 +693,30 @@ def pr_create(
 # --------------------------------------------------------------------------
 
 
-def pr_edit_reviewer(pr: int, reviewer: str, *, remove: bool = False) -> None:
+def pr_edit_reviewer(pr: PrId, reviewer: str, *, remove: bool = False) -> None:
     """Add (or remove) a reviewer on a PR via ``gh pr edit``.
 
     ``gh pr edit --add-reviewer`` resolves the reviewer handle to its real
     node id and mutates through GraphQL. That path is load-bearing for bot
     reviewers: the REST ``requested_reviewers`` POST silently no-ops for them
     (returns 200 but leaves ``requested_reviewers`` empty) — never swap this
-    for the REST call.
+    for the REST call. The target arrives as a :class:`~shipit.pr.PrId`
+    (ADR-0030): the repo rides on the identity, never re-resolved here.
     """
-    slug = current_repo().slug
     flag = "--remove-reviewer" if remove else "--add-reviewer"
-    _run(["gh", "pr", "edit", str(pr), "--repo", slug, flag, reviewer])
+    _run(["gh", "pr", "edit", str(pr.number), "--repo", pr.slug, flag, reviewer])
 
 
-def pr_ready(pr: int, *, undo: bool = False) -> None:
+def pr_ready(pr: PrId, *, undo: bool = False) -> None:
     """Flip a PR's draft flag via ``gh pr ready`` (``--undo`` for ready→draft).
 
     ``gh pr ready`` is idempotent: flipping a PR that is already in the target
     state prints a notice and exits 0, so callers don't need to pre-check the
-    flag to stay safe — they pre-check only to *say* something more useful.
+    flag to stay safe — they pre-check only to *say* something more useful. The
+    target arrives as a :class:`~shipit.pr.PrId` (ADR-0030): the repo rides on
+    the identity, never re-resolved here.
     """
-    slug = current_repo().slug
-    args = ["gh", "pr", "ready", str(pr), "--repo", slug]
+    args = ["gh", "pr", "ready", str(pr.number), "--repo", pr.slug]
     if undo:
         args.append("--undo")
     _run(args)
@@ -722,14 +726,14 @@ def pr_ready(pr: int, *, undo: bool = False) -> None:
     # line, invisible to an INFO-level read of the story.
     logger.info(
         "pr#%s draft flag flipped %s on %s",
-        pr,
+        pr.number,
         "ready→draft" if undo else "draft→ready",
-        slug,
-        extra={"pr": pr, "repo": slug},
+        pr.slug,
+        extra={"pr": pr.number, "repo": pr.slug},
     )
 
 
-def pr_review_reply(pr: int, comment_id: int, body: str) -> None:
+def pr_review_reply(pr: PrId, comment_id: int, body: str) -> None:
     """Post a threaded reply to an existing PR review comment.
 
     Wraps ``POST /repos/{owner}/{name}/pulls/{pr}/comments/{comment_id}/replies``
@@ -737,11 +741,11 @@ def pr_review_reply(pr: int, comment_id: int, body: str) -> None:
     target rather than starting a fresh top-level review comment. ``comment_id``
     is the numeric REST id (the same handle ``pr resolve-thread`` takes); ``body``
     is the reply text. This is the push-back path: reply with rationale, then
-    resolve the thread.
+    resolve the thread. The target arrives as a :class:`~shipit.pr.PrId`
+    (ADR-0030): the repo rides on the identity, never re-resolved here.
     """
-    slug = current_repo().slug
     rest(
-        f"repos/{slug}/pulls/{pr}/comments/{comment_id}/replies",
+        f"repos/{pr.slug}/pulls/{pr.number}/comments/{comment_id}/replies",
         method="POST",
         fields={"body": body},
     )

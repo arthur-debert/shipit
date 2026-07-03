@@ -8,17 +8,20 @@ current branch when no number is given. Read-only: it never edits the PR — it
 The FIRST verb through the ADR-0030 seam — the walking skeleton the rest of
 the pr family (and CLI02's promotions) copies. The three pieces:
 
-- **params** — click validates the explicit primitives (`PR` as an ``int``,
-  the shared ``--json`` flag from :mod:`.._params`); a malformed argument is a
-  click usage error (exit 2), never verb-body code. The PR *target* is the
-  deliberate ADR-0030 exception: :func:`~._resolve.resolve_pr` resolves
-  "explicit number vs the current branch's PR" at the verb boundary, because
-  "no PR for this branch" is a runtime outcome, not a usage error.
+- **params** — click validates the explicit primitives (`PR` as a positive
+  ``int`` a :class:`~shipit.pr.PrId` could carry, the shared ``--json`` flag
+  from :mod:`.._params`); a malformed argument is a click usage error (exit
+  2), never verb-body code. The PR *target* is the deliberate ADR-0030
+  exception: :func:`~._resolve.resolve_pr` MINTS the ``PrId`` at the verb
+  boundary — repo from the root context, number explicit or the current
+  branch's PR — because "no PR for this branch" is a runtime outcome, not a
+  usage error.
 - **domain call** — :func:`~._resolve.resolve_pr` ->
   :func:`shipit.prstate.fetch.gather` -> :func:`shipit.prstate.state.evaluate`
   (with the config-resolved required reviewer set) returns the typed
   :class:`~shipit.prstate.state.TaskStatus`; all lifecycle logic lives in the
-  engine.
+  engine. The target travels as the typed ``PrId`` — no service re-derives
+  the ambient repo per fetch (CLI01-WS02).
 - **render** — the pure :func:`format_status` string function through the
   shared :func:`~.._render.emit` (JSON from ``TaskStatus.to_dict()``); the
   exit code derives from the result, with runtime failures mapped by the
@@ -38,9 +41,11 @@ from __future__ import annotations
 
 import click
 
+from ...identity import Repo
 from ...prstate.fetch import gather
 from ...prstate.reviewers import required_reviewers
 from ...prstate.state import TaskState, TaskStatus, evaluate, no_pr
+from .._context import current_root_context
 from .._errors import cli_errors
 from .._params import json_option
 from .._render import emit
@@ -48,7 +53,7 @@ from ._resolve import resolve_pr
 
 
 @click.command(name="status")
-@click.argument("pr", required=False, type=int)
+@click.argument("pr", required=False, type=click.IntRange(min=1))
 @json_option
 def cmd(pr: int | None, as_json: bool) -> None:
     """Report where PR stands in the review loop + the single next action.
@@ -62,19 +67,29 @@ def cmd(pr: int | None, as_json: bool) -> None:
 
 
 @cli_errors
-def run(pr: int | None = None, *, as_json: bool = False) -> int:
+def run(
+    pr: int | None = None, *, as_json: bool = False, repo: Repo | None = None
+) -> int:
     """Resolve -> gather -> evaluate -> render. Returns an int exit code.
+
+    ``repo`` is the identity half of the PR target: omitted (the CLI path), the
+    root context's ambient repo — resolved once per invocation (ADR-0030); a
+    direct caller (a test) injects it as a value. Outside a checkout the ONE
+    uniform refusal (:class:`~.._context.NoAmbientRepoError`) maps to
+    ``error: …`` + exit 1 via the shell below.
 
     Returns 0 on a printed status (including ``no_pr``). A real gh/auth failure
     — whether resolving the branch's PR or reading a known one — propagates to
     the :func:`~shipit.verbs._errors.cli_errors` shell (clean ``error: …``
     stderr + exit 1, per the PRD; never a silent ``no_pr``).
     """
-    resolved = resolve_pr(pr)
-    if resolved is None:
+    target = resolve_pr(
+        pr, repo if repo is not None else current_root_context().require_repo()
+    )
+    if target is None:
         emit(no_pr(), format_status, as_json=as_json)
         return 0
-    status = evaluate(gather(resolved), required=required_reviewers())
+    status = evaluate(gather(target), required=required_reviewers())
     emit(status, format_status, as_json=as_json)
     return 0
 

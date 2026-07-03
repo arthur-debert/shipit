@@ -1,16 +1,24 @@
 """Resolve the target PR for a `shipit pr` subcommand — the SHARED helper.
 
 Every `pr` verb takes an optional PR number; omitted, it means "the PR for the
-current branch". This module is the single place that turns that into a number,
-so WS05/WS06's verbs (`review`, `next`, `ready`) reuse the exact same resolution
-and error semantics rather than each re-implementing the branch lookup.
+current branch". This module is the single place that turns that into the typed
+:class:`~shipit.pr.PrId` target (ADR-0030), so every verb (`status`, `review`,
+`next`, `ready`) reuses the exact same resolution and error semantics rather
+than each re-implementing the branch lookup.
 
-The boundary is the gh adapter (`shipit.gh.pr_number_probe`) — `gh pr view
---json number` for the current branch. Three outcomes, kept DISTINCT so
-callers never have to swallow
+The resolver MINTS the PrId at the verb boundary: the repo half comes from the
+root context (the verb passes :meth:`RootContext.require_repo`'s ambient
+identity — resolved once per invocation, offline per ADR-0024), the number half
+is the explicit argument or the current branch's PR. From here down the target
+travels typed — the pr-family services take the PrId, and none of them
+re-derives the repo per fetch.
+
+The branch lookup boundary is the gh adapter (`shipit.gh.pr_number_probe`) —
+`gh pr view --json number` for the current branch. Three outcomes, kept
+DISTINCT so callers never have to swallow
 errors to find them (the WS04 review caught this conflation):
 
-  * an explicit / resolved PR number  -> returned as an ``int``
+  * an explicit / resolved PR number  -> minted into a ``PrId``
   * the branch genuinely has no PR    -> ``None`` (a normal state, not an error)
   * a real gh/auth failure            -> raises ``execrun.ExecError``
 
@@ -31,19 +39,25 @@ from __future__ import annotations
 import json
 
 from ... import execrun, gh
+from ...identity import Repo
+from ...pr import PrId
 from ...prstate.errors import PrStateError
 
 
-def resolve_pr(pr: int | None) -> int | None:
-    """The given PR number, or the current branch's PR (``None`` if there is none).
+def resolve_pr(number: int | None, repo: Repo) -> PrId | None:
+    """The typed PR target: the given number, or the current branch's PR
+    (``None`` if there is none) — minted into a :class:`~shipit.pr.PrId`.
 
-    ``pr`` passed through untouched when explicit. Otherwise asks ``gh`` for the
+    ``repo`` is the identity half of the target — the verb's ambient repo from
+    the root context (or an explicit override), never re-derived here. An
+    explicit ``number`` is minted directly. Otherwise asks ``gh`` for the
     current branch's PR number; returns ``None`` when the branch genuinely has
-    no PR. Raises :class:`shipit.execrun.ExecError` when ``gh`` itself fails (missing gh,
-    auth, transient API error) — never collapses that into ``None``.
+    no PR. Raises :class:`shipit.execrun.ExecError` when ``gh`` itself fails
+    (missing gh, auth, transient API error) — never collapses that into
+    ``None``.
     """
-    if pr is not None:
-        return pr
+    if number is not None:
+        return PrId(repo=repo, number=number)
     result = gh.pr_number_probe()
     if result.rc != 0:
         # "no PR for this branch" is a normal state, not a failure: gh exits
@@ -68,5 +82,17 @@ def resolve_pr(pr: int | None) -> int | None:
         data = json.loads(out)
     except json.JSONDecodeError as exc:
         raise PrStateError(f"unparseable `gh pr view` output: {exc}") from exc
-    number = data.get("number")
-    return int(number) if number is not None else None
+    resolved = data.get("number")
+    if resolved is None:
+        return None
+    # Pass the raw wire value straight into PrId — its construction IS the
+    # validation (exact-int, positive, ADR-0030), the same discipline the
+    # sibling wire boundary `pr.core_from_node` applies. A silent `int(resolved)`
+    # coercion here would defeat that invariant, accepting a `"99"`/`7.0`/`True`
+    # from unexpected `gh` output and minting the wrong PR target. Re-raise with
+    # the wire context so a malformed number dies at this read, like the JSON
+    # decode above.
+    try:
+        return PrId(repo=repo, number=resolved)
+    except ValueError as exc:
+        raise PrStateError(f"malformed `gh pr view` number: {exc}") from exc
