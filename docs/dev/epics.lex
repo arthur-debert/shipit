@@ -53,8 +53,8 @@ dependencies.
     branch `E/umbrella` (\#176, closed). It fail-closes if `origin/E/umbrella` is
     missing on the remote — a loud exit, never a silent fallback to `origin/main`. The
     coordinator owns the wait and the flip;
-    a fresh shepherd handles each addressing round. The 6 / nitpick breaker applies to
-    every workstream PR.
+    a fresh shepherd handles each addressing round. The round-cap / nitpick breaker
+    (`round_cap` in `[reviewers]`, default 6) applies to every workstream PR.
 
     Parallel implementation, serialized integration. Subagents implement
     eligible workstreams concurrently per the dependency graph, but the

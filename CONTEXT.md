@@ -195,8 +195,10 @@ than double-posting. Read-then-decide against the check run only; no local/daemo
 state to consult.
 
 **Breaker** (stopping rule):
-The rule that ends the review loop instead of iterating forever: stop when 6
-rounds are reached, or when the latest round is all nitpicks.
+The rule that ends the review loop instead of iterating forever: stop when the
+configured round cap is reached (`round_cap`, a reserved table-level key in
+`[reviewers]` of `.shipit.toml`, landing on `Roster.round_cap`; default 6), or
+when the latest round is all nitpicks.
 
 **Nitpick**:
 A comment about wording, naming, or style with no correctness, behavioral, or
