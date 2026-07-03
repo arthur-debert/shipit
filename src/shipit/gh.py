@@ -625,21 +625,35 @@ def pr_for_head(branch: str, *, cwd: str | None = None) -> HeadPr | None | Unkno
 NO_PR_MARKER = "no pull requests found for branch"
 
 
-def pr_number_probe() -> execrun.ExecResult:
-    """``gh pr view --json number`` for the CURRENT branch, as a probe.
+def pr_number_probe(repo: Repo, branch: str) -> execrun.ExecResult:
+    """``gh pr view <branch> --repo <slug> --json number``, as a probe.
 
-    The mechanics half of "which PR am I on?" — the argv lives here (ADR-0028:
-    gh argv built outside the adapter is a defect) while the three-way
-    branching (a number / provably no PR / a real gh failure) lives with
-    :func:`resolve_pr`, which keys the no-PR case on :data:`NO_PR_MARKER` in
-    the result's stderr. A probe because a PR-less branch is this call's
-    NORMAL answer on every bare ``pr`` verb (records at DEBUG, never a
-    spurious ERROR).
+    The mechanics half of "which PR is this branch on?" — the argv lives here
+    (ADR-0028: gh argv built outside the adapter is a defect) while the
+    three-way branching (a number / provably no PR / a real gh failure) lives
+    with :func:`resolve_pr`, which keys the no-PR case on :data:`NO_PR_MARKER`
+    in the result's stderr. A probe because a PR-less branch is this call's
+    NORMAL answer on every bare ``pr`` verb (records at DEBUG, never a spurious
+    ERROR).
+
+    BOTH the repo and the branch are PINNED into the argv. ``--repo <slug>``
+    forces the lookup against the SAME origin-derived :class:`~shipit.identity.Repo`
+    the caller mints the target with — never ``gh``'s ambient inference
+    (``GH_REPO``, ``gh repo set-default``, a non-origin remote), which
+    :func:`shipit.identity.resolve_repo` deliberately does not consult. Left
+    ambient, the probe could read a number out of one repo while
+    :func:`resolve_pr` minted it under another, so a bare mutating verb
+    (``pr ready`` / ``pr review request``) would act on the WRONG PR. ``gh``
+    requires an explicit selector once ``--repo`` is given, so the current
+    branch name is passed positionally — it is the PR head shipit pushes, and a
+    genuinely PR-less branch still exits with :data:`NO_PR_MARKER`.
     """
-    return _run_probe(["gh", "pr", "view", "--json", "number"])
+    return _run_probe(
+        ["gh", "pr", "view", branch, "--repo", repo.slug, "--json", "number"]
+    )
 
 
-def resolve_pr(number: int | None, repo: Repo) -> PrId | None:
+def resolve_pr(number: int | None, repo: Repo, branch: str | None) -> PrId | None:
     """The typed PR target: the given number, or the current branch's PR
     (``None`` if there is none) — minted into a :class:`~shipit.pr.PrId`.
 
@@ -655,10 +669,15 @@ def resolve_pr(number: int | None, repo: Repo) -> PrId | None:
       * the branch genuinely has no PR    -> ``None`` (a normal state, not an error)
       * a real gh/auth failure            -> raises ``execrun.ExecError``
 
-    ``repo`` is the identity half of the target — the caller's ambient repo
-    from the root context (or an explicit override), never re-derived here. An
-    explicit ``number`` is minted directly. The no-PR case is teased apart
-    from a genuine failure by ``gh``'s own signal (:data:`NO_PR_MARKER`);
+    ``repo`` and ``branch`` are the identity the target is resolved against —
+    BOTH the caller's ambient checkout (the root context) or an explicit
+    override, never re-derived here, and ALWAYS describing the same checkout, so
+    the branch whose PR is probed and the repo the ``PrId`` is minted with can
+    never diverge (:func:`pr_number_probe` pins ``--repo`` to this ``repo``, not
+    ``gh``'s ambient inference). An explicit ``number`` is minted directly. A
+    ``None`` ``branch`` (detached / unborn HEAD) is a normal no-PR state — there
+    is no current branch, hence no branch PR. The no-PR case is otherwise teased
+    apart from a genuine failure by ``gh``'s own signal (:data:`NO_PR_MARKER`);
     every other failure (missing gh, auth, transient API error) becomes an
     :class:`~shipit.execrun.ExecError` so a verb can surface it as a clean
     stderr + non-zero exit per the PRD. A read-only verb maps ``None`` to
@@ -669,7 +688,11 @@ def resolve_pr(number: int | None, repo: Repo) -> PrId | None:
 
     if number is not None:
         return PrId(repo=repo, number=number)
-    result = pr_number_probe()
+    if branch is None:
+        # No current branch (detached / unborn HEAD) -> no branch PR. A normal
+        # no-PR state, kept distinct from a failure exactly like NO_PR_MARKER.
+        return None
+    result = pr_number_probe(repo, branch)
     if result.rc != 0:
         # "no PR for this branch" is a normal state, not a failure: gh exits
         # non-zero with NO_PR_MARKER (per-tool knowledge written down once,

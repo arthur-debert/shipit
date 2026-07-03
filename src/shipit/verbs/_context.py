@@ -99,6 +99,24 @@ def resolve_root_context(cwd: str = ".") -> RootContext:
         return RootContext(working_dir=None)
 
 
+def ambient_identity(explicit_repo: Repo | None) -> tuple[Repo, str | None]:
+    """The ``(repo, branch)`` a ``pr`` verb resolves its target against.
+
+    Both halves come from a SINGLE working-dir resolution (ADR-0030): the repo
+    the target is minted under and the branch its PR is probed for describe the
+    same checkout, so :func:`shipit.gh.resolve_pr` can never read a PR number
+    out of one repo and mint it under another. An explicit ``repo`` override (a
+    direct / test caller) wins for the repo and carries no branch — such a
+    caller resolves by explicit number, not branch inference. Outside a checkout
+    the ambient path raises the ONE uniform refusal
+    (:meth:`RootContext.require_working_dir`).
+    """
+    if explicit_repo is not None:
+        return explicit_repo, None
+    wd = current_root_context().require_working_dir()
+    return wd.repo, wd.revision.branch
+
+
 def current_root_context() -> RootContext:
     """The :class:`RootContext` the CLI root threaded onto click's context.
 

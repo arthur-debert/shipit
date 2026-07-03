@@ -31,7 +31,7 @@ from ...prstate.dispatch import NextActs, dispatch
 from ...prstate.fetch import gather
 from ...prstate.reviewers_config import load_roster
 from ...prstate.state import TaskStatus, evaluate, no_pr
-from .._context import current_root_context
+from .._context import ambient_identity
 from .._errors import cli_errors
 from .._params import json_option, pr_number_argument
 from .._render import emit
@@ -94,9 +94,7 @@ def run(
     ``error: …`` stderr + exit 1). A branch with no PR is a normal report (the
     act is the human's: create a draft PR), exit 0 — matching `pr status`.
     """
-    target = resolve_pr(
-        pr, repo if repo is not None else current_root_context().require_repo()
-    )
+    target = resolve_pr(pr, *ambient_identity(repo))
     if target is None:
         status = no_pr()
         # The report act inline: with no PR there is no target to construct

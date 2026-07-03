@@ -40,7 +40,7 @@ from ...prstate.errors import PrStateError
 from ...prstate.request import RequestResult, request_reviewers
 from ...prstate.reviewers import required_adapters, resolve_reviewer
 from ...prstate.reviewers_config import load_roster
-from .._context import current_root_context
+from .._context import ambient_identity
 from .._errors import cli_errors
 from .._params import pr_number_argument
 from .._render import emit
@@ -186,9 +186,7 @@ def run(
     adapters = (
         required_adapters(roster) if reviewer is None else [resolve_reviewer(reviewer)]
     )
-    target = resolve_pr(
-        pr, repo if repo is not None else current_root_context().require_repo()
-    )
+    target = resolve_pr(pr, *ambient_identity(repo))
     if target is None:
         raise PrStateError(
             "no PR for the current branch — open a draft PR first, or pass a PR number"

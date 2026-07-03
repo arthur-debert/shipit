@@ -65,7 +65,7 @@ def patched(monkeypatch):
     No network — and the CLI path proves the repo half arrives from the root
     context (resolve_pr receives a real Repo, never re-derives one)."""
 
-    def resolve(pr, repo):
+    def resolve(pr, repo, branch):
         assert repo is not None  # the ambient identity arrived at the boundary
         return PrId(repo=repo, number=pr if pr is not None else 42)
 
@@ -165,7 +165,7 @@ def test_status_explicit_pr_argument(patched, capsys):
 
 def test_no_pr_is_normal_exit_zero(monkeypatch, capsys):
     """A branch with no PR is a normal state (exit 0), not an error."""
-    monkeypatch.setattr(status_verb, "resolve_pr", lambda pr, repo: None)
+    monkeypatch.setattr(status_verb, "resolve_pr", lambda pr, repo, branch: None)
     rc = cli.main(["pr", "status", "--json"])
     assert rc == 0
     payload = json.loads(capsys.readouterr().out)
@@ -178,7 +178,7 @@ def test_gh_failure_on_known_pr_is_runtime_tier_error_exit_1(monkeypatch, capsys
     two-tier exit contract: the shared error shell renders one uniform
     `error: …` stderr line and exits 1 (asserted exactly, not just non-zero)."""
     monkeypatch.setattr(
-        status_verb, "resolve_pr", lambda pr, repo: PrId(repo=repo, number=42)
+        status_verb, "resolve_pr", lambda pr, repo, branch: PrId(repo=repo, number=42)
     )
 
     def boom(target, roster):
@@ -197,7 +197,7 @@ def test_gh_failure_during_resolution_is_fatal(monkeypatch, capsys):
     no_pr. The resolver returns None for the genuine "no PR for branch" case, so a
     ExecError reaching the verb is always a real failure (PRD: stderr + non-zero)."""
 
-    def boom(pr, repo):
+    def boom(pr, repo, branch):
         raise ExecError(["gh"], rc=1, stderr="gh auth exploded")
 
     monkeypatch.setattr(status_verb, "resolve_pr", boom)

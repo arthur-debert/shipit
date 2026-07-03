@@ -28,7 +28,7 @@ from ...pr import PrId
 from ...prstate.errors import PrStateError
 from ...prstate.flip import NotReady, guarded_flip  # noqa: F401  (NotReady re-exported for callers/tests)
 from ...prstate.state import TaskStatus
-from .._context import current_root_context
+from .._context import ambient_identity
 from .._errors import cli_errors
 from .._params import pr_number_argument
 from .._render import emit
@@ -66,9 +66,7 @@ def run(pr: int | None = None, *, undo: bool = False, repo: Repo | None = None) 
     verb has nothing to flip) — raised as the domain refusal, rendered by the
     shell.
     """
-    target = resolve_pr(
-        pr, repo if repo is not None else current_root_context().require_repo()
-    )
+    target = resolve_pr(pr, *ambient_identity(repo))
     if target is None:
         raise PrStateError("no PR for this branch — nothing to flip")
     if undo:

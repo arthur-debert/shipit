@@ -152,7 +152,7 @@ def test_pr_status_invocation_resolves_the_root_context_once(monkeypatch):
     # resolution — as the PrId's identity half (WS02, #336).
     seen: list = []
     monkeypatch.setattr(
-        status_verb, "resolve_pr", lambda pr, repo: seen.append(repo) or None
+        status_verb, "resolve_pr", lambda pr, repo, branch: seen.append(repo) or None
     )
 
     rc = cli.main(["pr", "status", "--json"])

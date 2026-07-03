@@ -36,7 +36,7 @@ def _ready_pr(monkeypatch):
     monkeypatch.setattr(
         ready_verb,
         "resolve_pr",
-        lambda pr, repo: PrId(repo=repo, number=pr if pr is not None else 42),
+        lambda pr, repo, branch: PrId(repo=repo, number=pr if pr is not None else 42),
     )
     monkeypatch.setattr(
         ready_verb,
@@ -55,7 +55,7 @@ def test_run_flips_when_ready(monkeypatch, capsys):
 def test_run_refuses_when_not_ready(monkeypatch, capsys):
     """The engine's NotReady refusal reaches the shared error shell: one uniform
     `error: …` stderr line carrying the refusal wording, exit 1."""
-    monkeypatch.setattr(ready_verb, "resolve_pr", lambda pr, repo: TARGET)
+    monkeypatch.setattr(ready_verb, "resolve_pr", lambda pr, repo, branch: TARGET)
 
     def refuse(target):
         raise ready_verb.NotReady(_status(TaskState.BLOCKED))
@@ -70,7 +70,7 @@ def test_run_refuses_when_not_ready(monkeypatch, capsys):
 
 def test_run_undo_always_allowed(monkeypatch, capsys):
     """--undo reverts ready→draft without any readiness check."""
-    monkeypatch.setattr(ready_verb, "resolve_pr", lambda pr, repo: TARGET)
+    monkeypatch.setattr(ready_verb, "resolve_pr", lambda pr, repo, branch: TARGET)
     undos: list[tuple[PrId, bool]] = []
     monkeypatch.setattr(
         ready_verb.gh,
@@ -93,7 +93,7 @@ def test_run_undo_always_allowed(monkeypatch, capsys):
 def test_run_no_pr_is_error(monkeypatch, capsys):
     """A mutating verb on a branch with no PR is a clean non-zero error — the
     per-verb refusal wording survives as the exception message (ADR-0030)."""
-    monkeypatch.setattr(ready_verb, "resolve_pr", lambda pr, repo: None)
+    monkeypatch.setattr(ready_verb, "resolve_pr", lambda pr, repo, branch: None)
     rc = ready_verb.run(repo=REPO)
     assert rc == 1
     err = capsys.readouterr().err
@@ -102,7 +102,7 @@ def test_run_no_pr_is_error(monkeypatch, capsys):
 
 
 def test_run_gh_failure_nonzero(monkeypatch, capsys):
-    monkeypatch.setattr(ready_verb, "resolve_pr", lambda pr, repo: TARGET)
+    monkeypatch.setattr(ready_verb, "resolve_pr", lambda pr, repo, branch: TARGET)
 
     def boom(target):
         raise ExecError(["gh"], rc=1, stderr="gh boom")

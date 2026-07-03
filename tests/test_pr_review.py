@@ -35,7 +35,7 @@ def test_local_agent_request_detaches_in_flight(monkeypatch, capsys):
     service detach boundary is faked so nothing forks."""
     from shipit.review import service
 
-    monkeypatch.setattr(review_verb, "resolve_pr", lambda pr, repo: TARGET)
+    monkeypatch.setattr(review_verb, "resolve_pr", lambda pr, repo, branch: TARGET)
     detached: list = []
     monkeypatch.setattr(
         service,
@@ -56,7 +56,7 @@ def test_local_agent_spec_alias_detaches(monkeypatch, capsys, name):
     error."""
     from shipit.review import service
 
-    monkeypatch.setattr(review_verb, "resolve_pr", lambda pr, repo: TARGET)
+    monkeypatch.setattr(review_verb, "resolve_pr", lambda pr, repo, branch: TARGET)
     monkeypatch.setattr(
         service, "start_detached_review", lambda backend, pr, **kw: True
     )
@@ -91,7 +91,7 @@ def test_unknown_reviewer_is_rejected(capsys):
 def test_no_pr_for_branch_is_fatal(monkeypatch, capsys):
     """A mutating verb treats a branch with no PR as fatal (non-zero) — the
     per-verb refusal wording survives as the exception message (ADR-0030)."""
-    monkeypatch.setattr(review_verb, "resolve_pr", lambda pr, repo: None)
+    monkeypatch.setattr(review_verb, "resolve_pr", lambda pr, repo, branch: None)
     rc = review_verb.run(None, reviewer="copilot", repo=REPO)
     assert rc == 1
     err = capsys.readouterr().err
@@ -102,7 +102,7 @@ def test_no_pr_for_branch_is_fatal(monkeypatch, capsys):
 def test_gh_failure_resolving_is_fatal(monkeypatch, capsys):
     """A real gh/auth failure resolving the branch's PR -> clean stderr + non-zero."""
 
-    def boom(pr, repo):
+    def boom(pr, repo, branch):
         raise ExecError(["gh"], rc=1, stderr="gh auth exploded")
 
     monkeypatch.setattr(review_verb, "resolve_pr", boom)
@@ -113,7 +113,7 @@ def test_gh_failure_resolving_is_fatal(monkeypatch, capsys):
 
 def test_verb_renders_verified(monkeypatch, capsys):
     """The bare-run happy path: resolve -> request_reviewers -> render verified."""
-    monkeypatch.setattr(review_verb, "resolve_pr", lambda pr, repo: TARGET)
+    monkeypatch.setattr(review_verb, "resolve_pr", lambda pr, repo, branch: TARGET)
     monkeypatch.setattr(
         review_verb,
         "request_reviewers",
@@ -131,7 +131,7 @@ def test_verb_renders_verified(monkeypatch, capsys):
 def test_dropped_request_exits_nonzero(monkeypatch, capsys):
     """A dropped remote request -> the uniform `error: …` stderr + non-zero exit
     (never a silent park); the outcome block still names it on stdout."""
-    monkeypatch.setattr(review_verb, "resolve_pr", lambda pr, repo: TARGET)
+    monkeypatch.setattr(review_verb, "resolve_pr", lambda pr, repo, branch: TARGET)
     monkeypatch.setattr(
         review_verb,
         "request_reviewers",

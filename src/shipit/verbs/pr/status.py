@@ -47,7 +47,7 @@ from ...identity import Repo
 from ...prstate.fetch import gather
 from ...prstate.reviewers_config import load_roster
 from ...prstate.state import evaluate, no_pr
-from .._context import current_root_context
+from .._context import ambient_identity
 from .._errors import cli_errors
 from .._params import json_option, pr_number_argument
 from .._render import emit
@@ -85,9 +85,7 @@ def run(
     the :func:`~shipit.verbs._errors.cli_errors` shell (clean ``error: …``
     stderr + exit 1, per the PRD; never a silent ``no_pr``).
     """
-    target = resolve_pr(
-        pr, repo if repo is not None else current_root_context().require_repo()
-    )
+    target = resolve_pr(pr, *ambient_identity(repo))
     if target is None:
         emit(no_pr(), format_status, as_json=as_json)
         return 0

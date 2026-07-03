@@ -81,7 +81,7 @@ def patched_next(monkeypatch):
     monkeypatch.setattr(
         next_verb,
         "resolve_pr",
-        lambda pr, repo: PrId(repo=repo, number=pr if pr is not None else 42),
+        lambda pr, repo, branch: PrId(repo=repo, number=pr if pr is not None else 42),
     )
     monkeypatch.setattr(next_verb, "gather", lambda target, roster: target)
     monkeypatch.setattr(next_verb, "load_roster", lambda: Roster())
@@ -115,7 +115,7 @@ def test_next_json_carries_action_and_status(patched_next, monkeypatch, capsys):
 
 
 def test_next_no_pr_is_exit_zero_report(monkeypatch, capsys):
-    monkeypatch.setattr(next_verb, "resolve_pr", lambda pr, repo: None)
+    monkeypatch.setattr(next_verb, "resolve_pr", lambda pr, repo, branch: None)
     rc = cli.main(["pr", "next", "--json"])
     assert rc == 0
     payload = json.loads(capsys.readouterr().out)
