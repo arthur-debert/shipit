@@ -312,7 +312,7 @@ def start_detached_review(
     THIS head must NOT open a second breadcrumb + spawn a second child that
     double-posts. So BEFORE creating + spawning, this reads whether such a run exists
     (:func:`shipit.review.checkrun.find_nonterminal`) and, if so, reconciles —
-    reports in-flight and returns ``True`` without creating or spawning. No local /
+    reports in-flight and returns ``False`` without creating or spawning. No local /
     daemon state: the check run is the only source of truth (ADR-0005 / #41).
 
     The breadcrumb create is BEST-EFFORT — a 403 before the ``checks:write``
