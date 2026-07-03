@@ -218,6 +218,27 @@ def test_no_mechanism_backend_is_no_op():
     assert result.no_op == ["gemini"]
 
 
+def test_local_request_failure_propagates_and_records_no_in_flight(caplog):
+    """#347: a local adapter whose placement RAISES (`PrStateError` — e.g. the
+    detach died on an auth/env precondition) propagates out of the service: no
+    result is returned to claim the reviewer, and no `in flight` durable record
+    is left for the failed reviewer — a failed placement can never surface as a
+    placed one."""
+    from shipit.prstate.errors import PrStateError
+
+    class _BoomLocal(_FakeAdapter):
+        def request(self, pr: PrId, entry=None) -> bool:
+            raise PrStateError("codex-local review failed on #7: auth unavailable")
+
+    adapter = _BoomLocal("codex", has_edge=False)
+    with caplog.at_level(logging.INFO, logger="shipit.prstate"):
+        with pytest.raises(PrStateError, match="codex-local"):
+            request_reviewers(
+                TARGET, [adapter], EMPTY_ROSTER, force=True, boundary=_boundary()
+            )
+    assert not [r for r in caplog.records if "in flight" in r.getMessage()]
+
+
 def test_gh_failure_in_skip_read_propagates():
     """A gh failure while reading who-is-done propagates (never a false success)."""
     adapter = _FakeAdapter("copilot")

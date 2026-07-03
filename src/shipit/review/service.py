@@ -38,7 +38,7 @@ from collections.abc import Callable, Mapping, Sequence
 from .. import execrun, gh, logcontext
 from ..agent.backend import Backend
 from ..pr import PrId
-from . import checkrun, post, producer
+from . import checkrun, ghauth, post, producer
 from .backends.base import BackendError
 from .diff import ReviewError, resolve_pr
 
@@ -312,12 +312,23 @@ def start_detached_review(
     THIS head must NOT open a second breadcrumb + spawn a second child that
     double-posts. So BEFORE creating + spawning, this reads whether such a run exists
     (:func:`shipit.review.checkrun.find_nonterminal`) and, if so, reconciles —
-    reports in-flight and returns ``True`` without creating or spawning. No local /
+    reports in-flight and returns ``False`` without creating or spawning. No local /
     daemon state: the check run is the only source of truth (ADR-0005 / #41).
 
     The breadcrumb create is BEST-EFFORT — a 403 before the ``checks:write``
     re-grant (or any failure) must not fail the request, so the child still runs
     with ``run_id=None`` (no in_progress marker, but the review still posts).
+    ONE precondition pierces that rule (#347, #343 gap 6): with ``as_app`` a
+    :class:`~shipit.review.ghauth.ReviewAuthError` on the synchronous path (the
+    App token could not be minted — PyJWT absent outside the `review` env, missing
+    Doppler creds, the App not installed) PROPAGATES instead of being swallowed:
+    the detached child needs that SAME auth to post the review and close its run,
+    so proceeding would fire a doomed child with NO visible breadcrumb while this
+    parent reports a false in-flight — the caller would render
+    ``requested review(s): …`` for a request that never happened. The reviewer
+    adapter normalizes the propagated error to ``PrStateError`` (clean stderr +
+    non-zero exit). The child spawns via ``sys.executable`` — the parent's own
+    env — so the parent's auth env IS a faithful precondition for the child's.
     ``spawn`` is the injected detach boundary — called ``(argv, env)``, default
     the exec seam's fire-and-forget :func:`shipit.execrun.spawn_detached` (the
     one deliberate non-Exec, kept in ``execrun`` so all subprocess use stays in
@@ -350,7 +361,7 @@ def start_detached_review(
     # below hands them (plus the run id, which is the CHILD's correlation, not
     # this parent's) across the process boundary.
     logcontext.bind(pr=pr.number, repo=repo)
-    existing = _reconcile_inflight(backend, repo, head_sha, find)
+    existing = _reconcile_inflight(backend, repo, head_sha, find, auth_fatal=as_app)
     if existing is not None:
         logger.info(
             "review detach reconciled against an existing in-flight run (id=%s) "
@@ -361,7 +372,7 @@ def start_detached_review(
             extra={"pr": pr.number},
         )
         return False  # reconciled: in-flight, but no new child was started
-    run_id = _open_breadcrumb(backend, repo, head_sha)
+    run_id = _open_breadcrumb(backend, repo, head_sha, auth_fatal=as_app)
     child_env = logcontext.env_export(run=run_id)
     argv = _child_argv(
         backend,
@@ -669,6 +680,8 @@ def _reconcile_inflight(
     repo: str,
     head_sha: str,
     find: Callable[[Backend, str, str], int | None] | None,
+    *,
+    auth_fatal: bool,
 ) -> int | None:
     """Look up an in-flight funnel run to RECONCILE against — BEST-EFFORT (OBS03-WS03).
 
@@ -684,10 +697,19 @@ def _reconcile_inflight(
     installation token never reaches a record) and treated as "no in-flight run" — at
     worst a duplicate run, never a blocked request. ``find`` is injected so a test
     simulates "already in-flight" without the network.
+
+    The one exception (#347): with ``auth_fatal`` (the review posts AS the App),
+    a :class:`~shipit.review.ghauth.ReviewAuthError` — the App token could not even
+    be MINTED (PyJWT absent outside the `review` env, missing Doppler creds, the
+    App not installed) — is a PRECONDITION failure, not a degraded read: the child
+    needs the SAME auth to post the review, so swallowing it here would detach a
+    doomed child and report a false in-flight. It propagates.
     """
     try:
         return (find or checkrun.find_nonterminal)(backend, repo, head_sha)
-    except Exception:  # noqa: BLE001 - the reconcile read is best-effort
+    except Exception as exc:  # noqa: BLE001 - the reconcile read is best-effort
+        if auth_fatal and isinstance(exc, ghauth.ReviewAuthError):
+            raise
         logger.warning(
             "review in-flight reconcile lookup failed for %s "
             "on %s (proceeding to open a fresh run)",
@@ -698,7 +720,9 @@ def _reconcile_inflight(
         return None
 
 
-def _open_breadcrumb(backend: Backend, repo: str, head_sha: str) -> int | None:
+def _open_breadcrumb(
+    backend: Backend, repo: str, head_sha: str, *, auth_fatal: bool
+) -> int | None:
     """Open the ``in_progress`` funnel check run on ``repo@head_sha`` — BEST-EFFORT.
 
     The create the async parent (:func:`start_detached_review`) opens its
@@ -708,6 +732,12 @@ def _open_breadcrumb(backend: Backend, repo: str, head_sha: str) -> int | None:
     OBS01 sink (the failure FACT only — the installation token never reaches a
     record) and swallowed, returning ``None`` so the flow proceeds with no
     breadcrumb. Returns the new run's id otherwise.
+
+    The one exception (#347), mirroring :func:`_reconcile_inflight`: with
+    ``auth_fatal`` (the review posts AS the App), a
+    :class:`~shipit.review.ghauth.ReviewAuthError` — the App token could not even
+    be minted — dooms the child's post too, so it is a precondition failure of
+    the whole request and propagates rather than degrading to "no breadcrumb".
     """
     try:
         run_id = checkrun.create(backend, repo, head_sha)
@@ -718,7 +748,9 @@ def _open_breadcrumb(backend: Backend, repo: str, head_sha: str) -> int | None:
             run_id,
         )
         return run_id
-    except Exception:  # noqa: BLE001 - the breadcrumb is best-effort, never fatal
+    except Exception as exc:  # noqa: BLE001 - the breadcrumb is best-effort, never fatal
+        if auth_fatal and isinstance(exc, ghauth.ReviewAuthError):
+            raise
         # Record the failure fact (never the token) and proceed — the review post
         # is unaffected by a missing/denied check-runs scope.
         logger.warning(
