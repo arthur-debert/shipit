@@ -22,6 +22,7 @@ from shipit.tree import layout, provision
 from shipit.tree.create import create, create_from_source
 from shipit.identity import repo_from_slug
 from shipit.tree.layout import TreeSpec
+from shipit.install import units as iunits
 from shipit.install.apply import COMMIT_MESSAGE as INSTALL_COMMIT_MESSAGE
 from shipit.verbs import install as install_mod
 from shipit.execrun import ExecError
@@ -95,6 +96,9 @@ def _stub_provision(monkeypatch):
     """
     monkeypatch.setattr(create_mod, "run_provision", lambda *a, **k: None)
     monkeypatch.setattr(create_mod.pixienv, "install", lambda *a, **k: _pixi_result())
+    # The #443 hook-activation step runs through the SAME pixi adapter — stub it
+    # too so a Tree that carries lefthook.yml never spawns a real `pixi run`.
+    monkeypatch.setattr(create_mod.pixienv, "run_in_env", lambda *a, **k: _hooks_ok())
 
 
 @pytest.fixture
@@ -361,8 +365,21 @@ def test_create_provisions_local_only_on_planned_branch_no_origin_side_effects(
     monkeypatch.setattr(create_mod, "run_provision", fake_provision)
     monkeypatch.setattr(create_mod.pixienv, "install", lambda *a, **k: _pixi_result())
 
+    # The real install just wrote the managed lefthook.yml + pixi blocks, so the
+    # #443 activation step fires: stub its adapter boundary (no real `pixi run`)
+    # and assert the Tree armed its hooks through ITS OWN lint env.
+    activations: list[tuple[list[str], str | None]] = []
+
+    def fake_run_in_env(argv, root, *, environment=None, **_k):
+        activations.append((list(argv), environment))
+        return _hooks_ok()
+
+    monkeypatch.setattr(create_mod.pixienv, "run_in_env", fake_run_in_env)
+
     tree = create(_spec(tmp_path), source_repo=str(reference), github_url=str(remote))
     dest = Path(tree.path)
+
+    assert activations == [(["lefthook", "install"], "lint")]
 
     # HEAD is on the PLANNED branch (never `shipit/install`).
     assert _git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=dest) == "issues/123/work"
@@ -675,6 +692,144 @@ def test_provision_is_clean_noop_reconcile_when_repo_onboarded(
 
     create_mod._provision(dest, trees_root=tmp_path / "trees")
     assert calls == [["shipit", "install", ".", "--local"]]
+
+
+# --------------------------------------------------------------------------
+# #443 Finding A — a provisioned Tree comes up ARMED: git hooks do not clone,
+# so when the clone carries the managed lefthook.yml, provisioning activates
+# them (`lefthook install` through the Tree's OWN pixi lint env).
+# --------------------------------------------------------------------------
+
+
+def _provision_stubs(monkeypatch) -> list[tuple[list[str], Path, object]]:
+    """Stub all three provisioning boundaries into ONE ordered call list."""
+    calls: list[tuple[list[str], Path, object]] = []
+    monkeypatch.setattr(
+        create_mod,
+        "run_provision",
+        lambda cmd, *, cwd, env: calls.append((cmd, Path(cwd), env)),
+    )
+
+    def fake_pixi_install(root, *, env=None, **_k):
+        calls.append((["pixi", "install"], Path(root), env))
+        return _pixi_result()
+
+    def fake_run_in_env(argv, root, *, environment=None, env=None, **_k):
+        calls.append((["pixi", "run", "-e", str(environment), *argv], Path(root), env))
+        return execrun.ExecResult(
+            argv=tuple(pixienv.run_argv(argv, root, environment=environment)),
+            rc=0,
+            stdout="",
+            stderr="",
+            duration_ms=1,
+        )
+
+    monkeypatch.setattr(create_mod.pixienv, "install", fake_pixi_install)
+    monkeypatch.setattr(create_mod.pixienv, "run_in_env", fake_run_in_env)
+    monkeypatch.setattr(create_mod, "_st_dev", lambda p: 1)
+    return calls
+
+
+def test_provision_activates_hooks_when_the_clone_carries_lefthook(
+    tmp_path: Path, monkeypatch
+):
+    # The steady-state spawn/tree-create case (#443): the clone already carries
+    # the managed set (lefthook.yml + the pixi blocks), the reconcile is a NOOP —
+    # so provisioning itself must run `lefthook install`, via the lint env where
+    # the managed blocks pin lefthook, right after the env provision and before
+    # the npm step.
+    dest = tmp_path / "tree"
+    dest.mkdir()
+    (dest / config.CONFIG_NAME).write_text('[shipit]\nversion = "seed"\n\n[managed]\n')
+    (dest / pixienv.MANIFEST_NAME).write_text("# stub\n")
+    (dest / iunits.LEFTHOOK_FILE).write_text("# stub\n")
+    (dest / "package.json").write_text("{}\n")
+
+    calls = _provision_stubs(monkeypatch)
+    create_mod._provision(dest, trees_root=tmp_path / "trees")
+
+    assert [c[0] for c in calls] == [
+        ["shipit", "install", ".", "--local"],
+        ["pixi", "install"],
+        ["pixi", "run", "-e", "lint", "lefthook", "install"],
+        ["npm", "ci"],
+    ]
+    # Every step — activation included — runs in the Tree with the SAME scrubbed
+    # provisioning env (never a merge back over os.environ).
+    assert all(cwd == dest for _, cwd, _ in calls)
+    envs = [env for _, _, env in calls]
+    assert all(env is envs[0] and env is not None for env in envs)
+
+
+def test_provision_skips_hook_activation_without_a_lefthook_config(
+    tmp_path: Path, monkeypatch
+):
+    # No lefthook.yml → nothing to activate: the step is gated on its manifest
+    # existing, like every other dep step.
+    dest = tmp_path / "tree"
+    dest.mkdir()
+    (dest / config.CONFIG_NAME).write_text('[shipit]\nversion = "seed"\n\n[managed]\n')
+    (dest / pixienv.MANIFEST_NAME).write_text("# stub\n")
+
+    calls = _provision_stubs(monkeypatch)
+    create_mod._provision(dest, trees_root=tmp_path / "trees")
+    assert [c[0] for c in calls] == [
+        ["shipit", "install", ".", "--local"],
+        ["pixi", "install"],
+    ]
+
+
+def test_provision_skips_hook_activation_without_a_pixi_manifest(
+    tmp_path: Path, monkeypatch
+):
+    # A lefthook.yml with NO pixi.toml has no lint env to activate through — the
+    # activation rides the pixi branch (the lint env IS a pixi env), so it is
+    # skipped with the rest of the pixi steps rather than spawning a doomed
+    # `pixi run` in a manifest-less checkout.
+    dest = tmp_path / "tree"
+    dest.mkdir()
+    (dest / config.CONFIG_NAME).write_text('[shipit]\nversion = "seed"\n\n[managed]\n')
+    (dest / iunits.LEFTHOOK_FILE).write_text("# stub\n")
+
+    calls = _provision_stubs(monkeypatch)
+    create_mod._provision(dest, trees_root=tmp_path / "trees")
+    assert [c[0] for c in calls] == [["shipit", "install", ".", "--local"]]
+
+
+def test_provision_hook_activation_failure_fails_the_create(
+    tmp_path: Path, monkeypatch
+):
+    # Unlike apply's opportunistic activation, the Tree step is CHECKED: a Tree
+    # that cannot arm its hooks is a failed materialization (#443 — a disarmed
+    # Tree is exactly the bug), so the ExecError propagates like any other
+    # provisioning failure and `create` rolls the half-built leaf back.
+    source = tmp_path / "source"
+    source.mkdir()
+    _mock_git_boundary(
+        monkeypatch, manifests=[".shipit.toml", "pixi.toml", iunits.LEFTHOOK_FILE]
+    )
+    monkeypatch.setattr(create_mod, "run_provision", lambda *a, **k: None)
+    monkeypatch.setattr(create_mod.pixienv, "install", lambda *a, **k: _pixi_result())
+    monkeypatch.setattr(create_mod, "_st_dev", lambda p: 1)
+
+    def failing_activation(argv, root, **_k):
+        raise ExecError(tuple(argv), rc=1, stderr="lefthook: boom")
+
+    monkeypatch.setattr(create_mod.pixienv, "run_in_env", failing_activation)
+
+    with pytest.raises(ExecError):
+        create(_spec(tmp_path), source_repo=str(source), github_url="url")
+    # Atomicity: the half-built leaf was rolled back.
+    leaf = (
+        tmp_path
+        / "trees"
+        / "acme"
+        / "widget"
+        / "issues"
+        / "123"
+        / "work-smoke-abcd1234"
+    )
+    assert not leaf.exists()
 
 
 def test_provision_env_scrubs_leaked_parent_pixi_pointers(tmp_path: Path, monkeypatch):

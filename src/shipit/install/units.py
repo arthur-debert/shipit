@@ -80,6 +80,13 @@ PIXI_ENVS_OPEN = "# >>> shipit-managed environments (do not edit; regenerate via
 PIXI_ENVS_CLOSE = "# <<< shipit-managed environments <<<"
 PIXI_ENVS_ANCHOR = "[environments]"
 
+#: The name of the managed lint environment the env block above defines
+#: (``pixi-lint-env-block.toml``: ``lint = ["lint"]``) — where the fleet-pinned
+#: toolchain (including ``lefthook``) lives on every consumer. Callers that must
+#: run a lint-env binary (Tree provisioning's hook activation, #443) pin this
+#: environment rather than guessing at PATH.
+LINT_ENV = "lint"
+
 # The pixi-manifest seed (ADP00-WS09, #432). A stock consumer with NO pixi.toml
 # is the headline adoption case, but the three managed blocks above are tables
 # and keys only — pixi refuses a manifest with no `[workspace]`/`[project]`/
@@ -172,11 +179,23 @@ LAUNCHER_FILE = "claude-start"
 SETTINGS_SESSIONSTART_KEY = ".claude/settings.json#shipit-sessionstart-hook"
 SETTINGS_SESSIONSTART_MARKER = "shipit hook sessionstart"
 
+# The ADR-0027 WorktreeCreate adapter wiring (#443, Finding B): the managed
+# `claude-start` launcher promises that `claude --worktree` provisions the
+# session Tree via `shipit hook worktreecreate`, and shipit's own settings wire
+# that hook — but the managed settings variant drifted and never did, so a
+# stock consumer's `--worktree` fell through to Claude Code's NATIVE worktree
+# (`.claude/worktrees/<id>`), contradicting ADR-0014/0027 (Trees are
+# dissociated clones, never native worktrees). One more JSON-hook unit over the
+# same settings.json, owning its event, reconciled like the other four.
+SETTINGS_WORKTREECREATE_KEY = ".claude/settings.json#shipit-worktreecreate-hook"
+SETTINGS_WORKTREECREATE_MARKER = "shipit hook worktreecreate"
+
 # The settings.json hooks-event arrays each JSON-hook unit owns one entry of.
 EVENT_PRETOOLUSE = "PreToolUse"
 EVENT_STOP = "Stop"
 EVENT_SUBAGENTSTOP = "SubagentStop"
 EVENT_SESSIONSTART = "SessionStart"
+EVENT_WORKTREECREATE = "WorktreeCreate"
 
 FMT_MARKERS = "markers"  # block splice via open/close comment markers (default)
 FMT_JSON_HOOK = "json-hook"  # block splice into a settings.json hooks-event array
@@ -392,9 +411,11 @@ def load_units() -> list[Unit]:
     # Store each desired entry already canonicalized, so its hash matches a consumer
     # entry extracted + canonicalized through the same function (formatting-immune).
     # The PreToolUse coordinator-guard (HAR01), the HAR02 eval terminal hooks
-    # (Stop = the coordinator run, SubagentStop = each subagent run), and the SES01
-    # SessionStart activation hook (coordinator env into CLAUDE_ENV_FILE) are four
-    # JSON-hook units over the SAME settings.json, each owning one event array.
+    # (Stop = the coordinator run, SubagentStop = each subagent run), the SES01
+    # SessionStart activation hook (coordinator env into CLAUDE_ENV_FILE), and the
+    # ADR-0027 WorktreeCreate adapter (#443: `claude --worktree` mints a central-root
+    # Tree, never a native worktree) are five JSON-hook units over the SAME
+    # settings.json, each owning one event array.
     for key, marker, event, data_file in (
         (
             SETTINGS_KEY,
@@ -419,6 +440,12 @@ def load_units() -> list[Unit]:
             SETTINGS_SESSIONSTART_MARKER,
             EVENT_SESSIONSTART,
             "claude-settings-sessionstart.json",
+        ),
+        (
+            SETTINGS_WORKTREECREATE_KEY,
+            SETTINGS_WORKTREECREATE_MARKER,
+            EVENT_WORKTREECREATE,
+            "claude-settings-worktreecreate.json",
         ),
     ):
         hook_entry = json.loads(data_bytes(data_file))

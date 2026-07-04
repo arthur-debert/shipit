@@ -1,0 +1,8 @@
+{
+  "hooks": [
+    {
+      "command": "pixi run shipit hook worktreecreate",
+      "type": "command"
+    }
+  ]
+}
