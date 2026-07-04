@@ -98,7 +98,7 @@ simple-gal = [
 standout = [{ repo = "arthur-debert/standout", path = "standout" }]
 
 [shipit]
-version = "f46eb68a4222636bec5c29211ef9e1808f5b8961"
+version = "2e6f7648e3c0c92273063e8958c019877022e697"
 
 [managed]
 "skills/lex-primer/SKILL.md" = "sha256:ff616c1c447661298fb8e06a8a8a6ce60400d838c7c881b9e8bd526128e32901"
@@ -109,15 +109,15 @@ version = "f46eb68a4222636bec5c29211ef9e1808f5b8961"
 "skills/shipit-session-status/SKILL.md" = "sha256:4720ad9b381d57c32dfd2aca6cb2a4b338dfa69cac90eedd85a71f7f2f8db962"
 "skills/shipit-to-issues/SKILL.md" = "sha256:4df3706b12c89fb7d844521800addea1c9ab9f448cd7f926b993a5d92f46869b"
 "skills/shipit-to-prd/SKILL.md" = "sha256:0f13f20cad06161baff87628ea6b1cf5bac0cc7919beb6176535f9cdf9ae42d8"
-"AGENTS.md#shipit-block" = "sha256:3206446780a0c71fe10f2584e43dd8e0fe188a73a5510c75b0f4ee948cf82f9f"
+"AGENTS.md#shipit-block" = "sha256:fc2a3c40751a94e16b1cb577c32ddea74c0af28d679bba1f64bbdb4b51d9ae5e"
 "bin/shipit" = "sha256:b305b90ca3f746acbee0f457d26f5c213d63d0c2cfa31b6baf1b5903f83816bd"
 claude-start = "sha256:8a658d5d88269a0444e9843d5cddbf133e4ac9fb2e6862701980991bbd4d379c"
-"lefthook.yml" = "sha256:86e3412c6f72201f16de0128000792d6e473544956827a2666b0b6379d1826cd"
+"lefthook.yml" = "sha256:063e877c8ae591d485c18b20542b36fb67fa835f89229ccf46d68cc60d44e57b"
 "pixi.toml#shipit-tasks" = "sha256:21737ae76129ac0518e2c9e2a647e4ece71f946a43565ddb2cc263d9b32d5268"
 ".claude/agents/explorer.md" = "sha256:db4cc109e24df71c9062f31e55a92d1f0a9fdd25118649c729853195e6623657"
 ".claude/agents/implementer.md" = "sha256:2ba631fb2f1c939a70adef06a53312d56f95b28fb7229b87293aa42bfb79c9c5"
 ".claude/agents/reviewer.md" = "sha256:d4bd8bee97471c6539c19f0858b8fc7c5e449273c39482a20b5dd729a2b4e647"
-".claude/agents/shepherd.md" = "sha256:ba6d99b629578d804d529bdfc3b1ea0100f81884aee641066cd4e569c82db21f"
+".claude/agents/shepherd.md" = "sha256:5ccffca46b80dcccf426fcf77af808d23b6fec58836599a9e767be23a5035ba8"
 ".claude/settings.json#shipit-pretooluse-hook" = "sha256:e9dad00143c17cddb9a8ceef485a043f6d3ac4c02d06e0c8e9bff4305b2de1f8"
 ".claude/settings.json#shipit-stop-hook" = "sha256:0b936c78ec1a099d43ace303a7497f15a7ece6bb5bb6c9a0e9cffc103c348d82"
 ".claude/settings.json#shipit-subagentstop-hook" = "sha256:0fbeea302c1aa9fe040ba6f84032f14a3805e09ed3aead663be187673d1554b0"

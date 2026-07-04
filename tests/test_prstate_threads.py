@@ -84,10 +84,15 @@ def test_unresolved_second_bot_thread_blocks_done(context):
 
 
 def test_resolving_every_thread_is_the_done_signal(context):
-    # The inverse: with ALL threads resolved (same PR otherwise), the snapshot
-    # reads READY — "0 unresolved threads" is the trustworthy done-signal.
+    # The inverse: with ALL threads resolved (same PR otherwise) and every
+    # round finding carrying a recorded verdict (#423 — resolution clears the
+    # thread hold; the verdicts clear the classify gate), the snapshot reads
+    # READY — resolved + classified is the trustworthy done-signal.
     ctx = context("multi_bot_threads")
     ctx.threads = [replace(t, is_resolved=True) for t in ctx.threads]
+    ctx.verdicts = {
+        c.comment_id: "substantive" for t in ctx.threads for c in t.comments
+    }
     status = evaluate(ctx)
     assert status.state is TaskState.READY
     assert status.open_threads == 0

@@ -8,9 +8,20 @@ repeat-finding / divergent-counting machinery any more):
       • the round cap has been reached (default 6 — there is no 7th round;
         repo policy can override it via `round_cap` in the `[reviewers]` table
         of `.shipit.toml`, carried on `Roster.round_cap`), or
-      • the current round is all nitpicks (docstring/wording fixes, micro perf
-        with a low run-count, cosmetic style already settled — nothing that
-        changes correctness or behaviour).
+      • the current round's RECORDED verdicts are all nitpick (#423): the agent
+        that addressed the round classified every finding, and every verdict is
+        `nitpick` (docstring/wording fixes, cosmetic style already settled —
+        nothing that changes correctness or behaviour).
+
+There is NO auto-classification of any kind — no marker list, no body regex,
+no model call (the old ``_NITPICK_MARKERS`` machinery is DELETED, #423): any
+auto-classifier just chases reviewer phrasing forever. The agent addressing
+the round has already judged each finding's weight by deciding fix-vs-reply;
+`shipit pr classify` records that judgment into the dev-cycle event log
+(write-once, keyed by finding comment id — :mod:`.verdicts`), the snapshot
+carries it (``ReadinessView.verdicts``), and this rule CONSUMES it. A round
+with any unclassified finding is not all-nitpick — and the state machine's
+CLASSIFY gate refuses to advance past an unclassified round anyway.
 
 A *round* is one ITERATION — one head SHA that got re-reviewed — NOT one review
 object. That distinction is load-bearing once there are several required
@@ -22,18 +33,22 @@ of truth for inline comments; release#515).
 
 When the rule fires on an otherwise-ready PR (CI green, merge state CLEAN), the
 state machine routes to READY and hands it to the human — it does NOT open
-another round. When the PR is not otherwise ready (failing CI, conflict), the
-real reason BLOCKS it; the stopping rule never invents a block of its own.
+another round. An all-nitpick stop additionally suppresses every RE-REQUEST:
+the nit-fix push stales no one back into the loop (not even a `rerun: true`
+reviewer) — the loop terminates by simply not asking again. When the PR is not
+otherwise ready (failing CI, conflict), the real reason BLOCKS it; the stopping
+rule never invents a block of its own.
 """
 
 from __future__ import annotations
 
-import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from ..identity import Sha
-from .model import ReadinessView
+from .model import ReadinessView, ReviewComment
 from .reviewers import ReviewerAdapter, required_adapters
+from .verdicts import NITPICK
 
 # The SHIPPED default round cap: the 6th round is the last; there is no 7th.
 # Only the default — repo policy overrides it via `Roster.round_cap` (the
@@ -41,54 +56,12 @@ from .reviewers import ReviewerAdapter, required_adapters
 # `ReadinessView` at the verb boundary; no config is read in this module.
 ROUND_CAP = 6
 
-# Markers that tag a finding as a nitpick — matched case-insensitively against
-# the comment body. A round whose findings are ALL nitpicks stops the loop early
-# (the agent flips to READY rather than opening another round for cosmetic-only
-# feedback). Reviewers (Copilot, CodeRabbit, …) tag low-stakes comments with
-# these markers; a plain comment with none of them is treated as substantive, so
-# the rule only ever stops EARLY when the round is unambiguously cosmetic.
-#
-# Each marker is matched on a LEFT word boundary (`\b`) so a short token like
-# `nit:` cannot fire on a substring of an unrelated word — e.g. "unit: add a
-# test" must NOT read as a nitpick. The right side is left open because several
-# markers end in punctuation (`nit:`, `(nit)`, `optional:`) that already
-# delimits them.
-_NITPICK_MARKERS = (
-    "nitpick",
-    "nit:",
-    "(nit)",
-    "minor:",
-    "minor nit",
-    "super minor",
-    "typo",
-    "wording",
-    "docstring",
-    "cosmetic",
-    "style suggestion",
-    "optional:",
-    "(optional)",
-)
-
-
-def _marker_pattern(marker: str) -> str:
-    # Anchor a left word boundary only when the marker starts with a word
-    # character (so `nit:` won't fire inside "unit:"). Markers that open with
-    # punctuation (`(nit)`, `(optional)`) are already delimited by that punctuation.
-    escaped = re.escape(marker)
-    return (r"\b" + escaped) if marker[:1].isalnum() else escaped
-
-
-_NITPICK_RE = re.compile(
-    "|".join(_marker_pattern(marker) for marker in _NITPICK_MARKERS),
-    re.IGNORECASE,
-)
-
 
 @dataclass(frozen=True)
 class Round:
     index: int  # 1-based, chronological
     commit_id: Sha | None  # the round's head; None when the wire carried no commit
-    bodies: tuple[str, ...]  # the round's finding comment bodies
+    findings: tuple[ReviewComment, ...]  # the round's finding comments
 
 
 @dataclass(frozen=True)
@@ -110,7 +83,10 @@ def build_rounds(
     multiply the round count (release#622). A round's findings are the UNION of
     those reviews' thread comments (resolved or not — a resolved finding was
     still a finding of that round), keyed by the review each comment was
-    submitted with (`ReviewComment.review_id`). Login matching is the adapter's
+    submitted with (`ReviewComment.review_id`). The comments ride WHOLE (id +
+    body + location): the comment id is the verdict key (#423) and the body the
+    human-facing excerpt, so every consumer — the breaker, the classify verb,
+    the gate — reads the same finding identity. Login matching is the adapter's
     job — never re-roll an author filter here (a reviewer's review login and
     comment author can render differently; release#455).
 
@@ -136,27 +112,40 @@ def build_rounds(
         review_ids_by_head.items(), start=1
     ):
         id_set = set(review_ids)
-        bodies = tuple(c.body for c in thread_comments if c.review_id in id_set)
-        rounds.append(Round(index, commit_id, bodies))
+        findings = tuple(c for c in thread_comments if c.review_id in id_set)
+        rounds.append(Round(index, commit_id, findings))
     return rounds
 
 
-def _is_nitpick(body: str) -> bool:
-    """True iff a comment body carries a nitpick marker (case-insensitive).
+def unclassified_findings(
+    rnd: Round, verdicts: Mapping[int, str]
+) -> tuple[ReviewComment, ...]:
+    """The round's findings with NO recorded verdict, in round order.
 
-    Markers match on a left word boundary, so `nit:` fires on "nit: rename"
-    but NOT on "unit: add a test".
+    The CLASSIFY gate's structured input (#423): while this is non-empty for
+    the LATEST round, the state machine reports CLASSIFY and refuses to
+    advance (no RE-REQUEST, no READY) — and the pre-push tripwire blocks the
+    push with the same message. An id is unclassified iff absent from
+    ``verdicts``; nothing here inspects a body.
     """
-    return _NITPICK_RE.search(body) is not None
+    return tuple(f for f in rnd.findings if f.comment_id not in verdicts)
 
 
-def is_all_nitpick_round(rnd: Round) -> bool:
-    """True iff the round has findings and EVERY finding is a nitpick.
+def is_all_nitpick_round(rnd: Round, verdicts: Mapping[int, str]) -> bool:
+    """True iff the round has findings and EVERY finding's RECORDED verdict is
+    ``nitpick`` (#423).
 
-    An empty round (a clean/approving pass, no findings) is not "all nitpicks" —
-    there is nothing to address, so the normal readiness checks handle it.
+    Consumes verdicts only — the agent's recorded fix-vs-reply judgment, keyed
+    by finding comment id — never the comment body: there is no marker list and
+    no fallback. A finding with no verdict is NOT a nitpick (the round is
+    simply not all-nitpick yet; the CLASSIFY gate keeps the loop from advancing
+    past it). An empty round (a clean/approving pass, no findings) is not "all
+    nitpicks" — there is nothing to address, so the normal readiness checks
+    handle it.
     """
-    return bool(rnd.bodies) and all(_is_nitpick(b) for b in rnd.bodies)
+    return bool(rnd.findings) and all(
+        verdicts.get(f.comment_id) == NITPICK for f in rnd.findings
+    )
 
 
 def evaluate_breakers(
@@ -168,13 +157,15 @@ def evaluate_breakers(
     `required` is threaded through to `build_rounds` so round counting uses the
     SAME required set the engine evaluates (release#622).
 
-    Stop when the round cap has been reached, or when the latest round is all
-    nitpicks. The cap is the snapshot Roster's `round_cap` (`ctx.roster`, the
-    ONE boundary-loaded config value — the same value `build_rounds` defaults
-    its required set from), falling back to the shipped :data:`ROUND_CAP` when
-    unset. Either way the reported `cycles` is the raw round count (what the
-    human sees). The state machine decides what a stop means for routing (READY
-    when otherwise ready, else the real blocker).
+    Stop when the round cap has been reached, or when the latest round's
+    recorded verdicts (``ctx.verdicts``, the dev-cycle log read folded onto the
+    snapshot at the gather seam) are all nitpick. The cap is the snapshot
+    Roster's `round_cap` (`ctx.roster`, the ONE boundary-loaded config value —
+    the same value `build_rounds` defaults its required set from), falling back
+    to the shipped :data:`ROUND_CAP` when unset. Either way the reported
+    `cycles` is the raw round count (what the human sees). The state machine
+    decides what a stop means for routing (READY when otherwise ready, else the
+    real blocker — and for all-nitpick, no re-request at all).
     """
     rounds = build_rounds(ctx, required=required)
     n = len(rounds)
@@ -188,12 +179,13 @@ def evaluate_breakers(
             n,
         )
 
-    if rounds and is_all_nitpick_round(rounds[-1]):
+    if rounds and is_all_nitpick_round(rounds[-1], ctx.verdicts):
         return BreakerVerdict(
             True,
             "all-nitpick",
-            "the latest review round is all nitpicks (nothing that changes "
-            "correctness or behaviour) — stop rather than open another round",
+            "every finding of the latest review round is classified nitpick "
+            "(nothing that changes correctness or behaviour) — stop rather "
+            "than open another round",
             n,
         )
 
