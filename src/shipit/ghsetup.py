@@ -97,13 +97,15 @@ def build_payload(template: dict, checks: list[str]) -> dict:
     contexts = checks_mod.checks_json(checks)
     rules = body.get("rules", [])
     if not contexts:
-        body["rules"] = [
-            rule
-            for rule in rules
-            if not (
-                isinstance(rule, dict) and rule.get("type") == "required_status_checks"
-            )
-        ]
+        if "rules" in body:
+            body["rules"] = [
+                rule
+                for rule in rules
+                if not (
+                    isinstance(rule, dict)
+                    and rule.get("type") == "required_status_checks"
+                )
+            ]
         return body
     for rule in rules:
         if isinstance(rule, dict) and rule.get("type") == "required_status_checks":
@@ -404,7 +406,7 @@ def setup(
         checks = checks_mod.discover(slug, default_branch, toplevel=local_checkout)
     if not checks:
         logger.warning(
-            "no required checks discovered — ruleset applied without a "
+            "no required checks found — ruleset applied without a "
             "required-status-checks gate",
             extra={"repo": slug},
         )
