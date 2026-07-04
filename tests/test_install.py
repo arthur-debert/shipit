@@ -128,10 +128,16 @@ def test_load_units_includes_lefthook_and_pixi_task_block():
     assert pixi.kind == "block"
     assert pixi.dest == "pixi.toml"
     assert pixi.anchor == "[tasks]"
-    # The tasks block stays the thin task lines ONLY; the linter deps ride in
-    # their own sibling block (ADP00, docs/prd/adoption.md — amending the lint
-    # PRD's task-line-only decision), tested below.
-    assert pixi.desired_inner() == 'lint = "shipit lint"\nlogs = "shipit logs"'
+    # The managed pixi TASKS block stays the thin task lines ONLY; the linter
+    # deps ride in their own sibling `[feature.lint.dependencies]` block (ADP00,
+    # docs/prd/adoption.md — amending the lint PRD's task-line-only decision),
+    # tested below. `provision-lexd` invokes the binary's provision subcommand
+    # (ADP00-WS03), so no provisioning script is ever distributed.
+    assert pixi.desired_inner() == (
+        'lint = "shipit lint"\n'
+        'logs = "shipit logs"\n'
+        'provision-lexd = "shipit provision lexd"'
+    )
 
 
 def test_pixi_block_inserts_under_existing_tasks_table():

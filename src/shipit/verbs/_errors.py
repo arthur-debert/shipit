@@ -29,6 +29,7 @@ from .. import execrun
 from ..config import ConfigError
 from ..events import EventNotRecordedError, UnknownEventError
 from ..install.errors import InstallError
+from ..provision.lexd import ProvisionError
 from ..prstate.errors import PrStateError
 from ..prstate.flip import NotReady
 from ..prstate.reviewers_config import RequiredReviewersConfigError
@@ -49,8 +50,9 @@ P = ParamSpec("P")
 #: misconfigured central Tree root, a refused/failed
 #: Tree removal (CLI02-WS03), and the constrained dev-cycle write path's two
 #: refusals (an out-of-vocabulary event name, an emission that failed past
-#: validation — CLI02-WS05). Extended deliberately, one entry per new domain
-#: refusal, as verbs adopt the shell.
+#: validation — CLI02-WS05), and the tool-provisioning refusal (unsupported
+#: platform, checksum mismatch, malformed release — ADP00-WS03). Extended
+#: deliberately, one entry per new domain refusal, as verbs adopt the shell.
 KNOWN_ERRORS: tuple[type[Exception], ...] = (
     execrun.ExecError,
     PrStateError,
@@ -64,6 +66,7 @@ KNOWN_ERRORS: tuple[type[Exception], ...] = (
     RemovalError,
     UnknownEventError,
     EventNotRecordedError,
+    ProvisionError,
 )
 
 
