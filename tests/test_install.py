@@ -1210,3 +1210,161 @@ def test_activation_output_joins_streams_with_newline(tmp_path):
         _exec_result(1, stdout="done", stderr="fatal: broken")
     )
     assert out == "done\nfatal: broken"
+
+
+# --------------------------------------------------------------------------
+# Retired files (docs/prd/rvw01-sole-requester.md, ADR-0031)
+# --------------------------------------------------------------------------
+
+# A pristine copy of the retired Copilot caller workflow, snapshotted before
+# the epic deletes it from this repo — the e2e tests below plant it into a
+# consumer, and its hash pins the packaged manifest to real historical content.
+PRISTINE_WORKFLOW = Path(__file__).parent / "data" / "copilot-review-pristine.yml"
+RETIRED_WORKFLOW_PATH = ".github/workflows/copilot-review.yml"
+
+
+def test_decide_retired_covers_the_matrix():
+    # absent -> no-op
+    assert (
+        install.decide_retired(actual_hash=None, pristine_hashes=("a", "b"))
+        == install.NOOP
+    )
+    # pristine match -> delete
+    assert (
+        install.decide_retired(actual_hash="a", pristine_hashes=("a",))
+        == install.DELETE
+    )
+    # any of several known historical versions -> delete
+    assert (
+        install.decide_retired(actual_hash="b", pristine_hashes=("a", "b", "c"))
+        == install.DELETE
+    )
+    # modified content (matches NO known version) -> warn-and-keep
+    assert (
+        install.decide_retired(actual_hash="x", pristine_hashes=("a", "b"))
+        == install.KEEP
+    )
+    # present but the manifest knows no versions at all -> keep (never guess)
+    assert install.decide_retired(actual_hash="x", pristine_hashes=()) == install.KEEP
+
+
+def test_plan_retired_decides_every_manifest_entry():
+    entries = [
+        install.RetiredFile(path="a.yml", pristine_hashes=("h1",)),
+        install.RetiredFile(path="b.yml", pristine_hashes=("h2",)),
+        install.RetiredFile(path="c.yml", pristine_hashes=("h3",)),
+    ]
+    decisions = install.plan_retired(
+        entries, {"a.yml": "h1", "b.yml": "edited", "c.yml": None}
+    )
+    assert [d.action for d in decisions] == [
+        install.DELETE,
+        install.KEEP,
+        install.NOOP,
+    ]
+
+
+def test_retired_manifest_carries_the_copilot_workflow_history():
+    # The packaged manifest's first entry is the Copilot caller workflow, with
+    # its known pristine hashes from this repo's git history — including the
+    # last-shipped version the fixture snapshots.
+    retired = install.load_retired()
+    entry = next(r for r in retired if r.path == RETIRED_WORKFLOW_PATH)
+    assert all(h.startswith("sha256:") for h in entry.pristine_hashes)
+    fixture_hash = config.content_hash(PRISTINE_WORKFLOW.read_bytes())
+    assert fixture_hash in entry.pristine_hashes
+
+
+def test_install_deletes_a_pristine_retired_file(tmp_path, rec, capsys):
+    # End-to-end: a checkout that still has a pristine copy of the retired
+    # workflow sheds it on install, and the outcome is reported.
+    victim = tmp_path / RETIRED_WORKFLOW_PATH
+    victim.parent.mkdir(parents=True)
+    victim.write_bytes(PRISTINE_WORKFLOW.read_bytes())
+
+    rc = install.run(str(tmp_path))
+    assert rc == 0
+    assert not victim.exists()
+    out = capsys.readouterr().out
+    assert f"delete   {RETIRED_WORKFLOW_PATH} (retired)" in out
+
+
+def test_install_keeps_a_modified_retired_file_with_warning(tmp_path, rec, capsys):
+    # A locally modified copy is NEVER destroyed: kept on disk, warned loudly.
+    victim = tmp_path / RETIRED_WORKFLOW_PATH
+    victim.parent.mkdir(parents=True)
+    victim.write_text(PRISTINE_WORKFLOW.read_text() + "# local tweak\n")
+
+    rc = install.run(str(tmp_path))
+    assert rc == 0
+    assert victim.is_file()
+    assert "# local tweak" in victim.read_text()
+    captured = capsys.readouterr()
+    assert f"keep     {RETIRED_WORKFLOW_PATH} (retired; locally modified)" in (
+        captured.out
+    )
+    assert f"retired file kept: {RETIRED_WORKFLOW_PATH}" in captured.err
+
+
+def test_retired_delete_alone_is_still_a_write(tmp_path, rec, capsys):
+    # A consumer whose managed set is fully current still sheds a pristine
+    # retired file on re-install — the cleanup is not gated on managed drift.
+    assert install.run(str(tmp_path)) == 0
+    victim = tmp_path / RETIRED_WORKFLOW_PATH
+    victim.parent.mkdir(parents=True)
+    victim.write_bytes(PRISTINE_WORKFLOW.read_bytes())
+    capsys.readouterr()
+
+    rc = install.run(str(tmp_path))
+    assert rc == 0
+    assert not victim.exists()
+    out = capsys.readouterr().out
+    assert "nothing to do" not in out
+    assert f"delete   {RETIRED_WORKFLOW_PATH} (retired)" in out
+
+    # And once gone, a further re-install is back to a clean no-op (absent -> no-op).
+    assert install.run(str(tmp_path)) == 0
+    assert "nothing to do" in capsys.readouterr().out
+
+
+def test_dry_run_reports_but_keeps_a_pristine_retired_file(tmp_path, rec, capsys):
+    victim = tmp_path / RETIRED_WORKFLOW_PATH
+    victim.parent.mkdir(parents=True)
+    victim.write_bytes(PRISTINE_WORKFLOW.read_bytes())
+
+    rc = install.run(str(tmp_path), dry_run=True)
+    assert rc == 0
+    assert victim.is_file()  # nothing deleted
+    out = capsys.readouterr().out
+    assert f"delete   {RETIRED_WORKFLOW_PATH} (retired)" in out
+    assert "1 retired delete(s)" in out
+    assert rec.calls == []
+
+
+def test_pr_install_commits_the_retired_deletion_and_reports_it(tmp_path, rec):
+    victim = tmp_path / RETIRED_WORKFLOW_PATH
+    victim.parent.mkdir(parents=True)
+    victim.write_bytes(PRISTINE_WORKFLOW.read_bytes())
+
+    rc = install.run(str(tmp_path), pr=True)
+    assert rc == 0
+    assert not victim.exists()
+    # The deleted path is staged with the rest of the set, so the PR carries it.
+    added = next(paths for name, paths in rec.calls if name == "add")
+    assert RETIRED_WORKFLOW_PATH in added
+    assert "### Retired files removed" in rec.pr_body
+    assert RETIRED_WORKFLOW_PATH in rec.pr_body
+
+
+def test_pr_body_lists_a_kept_retired_file(tmp_path, rec):
+    victim = tmp_path / RETIRED_WORKFLOW_PATH
+    victim.parent.mkdir(parents=True)
+    victim.write_text(PRISTINE_WORKFLOW.read_text() + "# local tweak\n")
+
+    rc = install.run(str(tmp_path), pr=True)
+    assert rc == 0
+    assert victim.is_file()
+    added = next(paths for name, paths in rec.calls if name == "add")
+    assert RETIRED_WORKFLOW_PATH not in added  # kept files are never staged
+    assert "### Retired files kept — locally modified" in rec.pr_body
+    assert RETIRED_WORKFLOW_PATH in rec.pr_body

@@ -1,0 +1,29 @@
+name: Copilot Review
+
+# Trigger policy (canonical, mirrored from the portfolio):
+#   - Fires once at PR creation (`opened`), regardless of draft state.
+#     Drafts get Copilot too — the agent can address comments while the PR
+#     is still draft.
+#   - `ready_for_review` is intentionally NOT in the types list — going
+#     draft → ready does not re-trigger Copilot (it already reviewed at open).
+#   - Fork PRs are skipped (security: don't pass RELEASE_TOKEN to untrusted
+#     source).
+#
+# Not a required check — this requests a review, so `shipit gh-setup` excludes
+# it from the branch ruleset's required checks.
+
+on:
+  pull_request:
+    types: [opened]
+
+jobs:
+  request:
+    if: github.event.pull_request.head.repo.fork == false
+    permissions:
+      contents: read
+      pull-requests: write
+    uses: arthur-debert/release/.github/workflows/copilot-review.yml@v3
+    with:
+      pr_number: ${{ github.event.pull_request.number }}
+    secrets:
+      gh_token: ${{ secrets.RELEASE_TOKEN }}
