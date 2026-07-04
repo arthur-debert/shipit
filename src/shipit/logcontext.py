@@ -112,6 +112,29 @@ def unbind(*names: str) -> None:
         structlog.contextvars.unbind_contextvars(*names)
 
 
+@contextmanager
+def cleared(*names: str) -> Iterator[None]:
+    """Ensure domain keys are ABSENT for the duration of the block, then restore.
+
+    The scoped inverse of :func:`scoped`: where ``scoped`` binds a value local
+    to a block, this removes a key local to a block — every record emitted
+    inside carries it as absent (never ``None``), and the prior value, if any,
+    is restored on exit. A seam needs this when the LOCAL truth is that a key
+    does not apply: an umbrella branch carries an epic but no Work Stream, so it
+    must suppress an env-propagated ``ws`` for its emission rather than let a
+    stale value fuse into a mixed identity. An unknown key name raises
+    :class:`ValueError`.
+    """
+    _check_names(names)
+    saved = {name: value for name, value in bound().items() if name in names}
+    unbind(*names)
+    try:
+        yield
+    finally:
+        if saved:
+            structlog.contextvars.bind_contextvars(**saved)
+
+
 def bound() -> dict[str, Any]:
     """The currently-bound domain keys — ONLY the domain keys.
 

@@ -111,6 +111,35 @@ def test_unbind_removes_the_key_from_later_records(tmp_path):
     assert after["repo"] == "acme/widget"  # the other key survives the unbind
 
 
+def test_cleared_suppresses_a_key_for_the_block_then_restores_it(tmp_path):
+    """The scoped inverse of ``scoped``: a key bound outside the block is absent
+    from records inside it, and its prior value is restored on exit."""
+    logsetup.configure_logging(env={}, repo=REPO, base_dir=tmp_path)
+    logcontext.bind(ws=3, epic="OLD01")
+
+    with logcontext.cleared("ws"):
+        _emit("inside")
+    _emit("after")
+
+    inside, after = _records(tmp_path)
+    assert "ws" not in inside  # absent for the block, not null
+    assert inside["epic"] == "OLD01"  # a key not named stays bound
+    assert after["ws"] == 3  # prior value restored on exit
+
+
+def test_cleared_of_an_unbound_key_is_a_noop_and_restores_nothing(tmp_path):
+    logsetup.configure_logging(env={}, repo=REPO, base_dir=tmp_path)
+    with logcontext.cleared("ws"):
+        pass
+    assert "ws" not in logcontext.bound()
+
+
+def test_cleared_rejects_unknown_names():
+    with pytest.raises(ValueError, match="unknown domain key"):
+        with logcontext.cleared("wsss"):
+            pass
+
+
 def test_bind_drops_none_values():
     """A seam can pass a maybe-known value (``run=run_id``) without guarding:
     ``None`` never binds, so the key stays ABSENT rather than null."""
