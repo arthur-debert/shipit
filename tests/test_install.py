@@ -1,4 +1,17 @@
-"""Unit tests for install — reconciliation decisions, block splicing, and the verb."""
+"""Tests for the install domain (CLI02-WS01) — typed values in, typed values out.
+
+The layout mirrors the promoted seam (ADR-0030):
+
+- the pure cores test as plain functions: the four-case managed decision and
+  three-case retired decision (:mod:`shipit.install.reconcile`), the text
+  splicers (:mod:`shipit.install.splice`), the packaged catalog
+  (:mod:`shipit.install.units`);
+- ``gather → reconcile`` asserts on the frozen ``Plan``; ``apply`` asserts on
+  the typed ``InstallResult`` + the real filesystem + the recorded git/gh
+  boundary — no capsys parsing of report text;
+- the renderers (:mod:`shipit.verbs.install`) test as pure string functions;
+- a thin argv→exit-code smoke layer drives the click command.
+"""
 
 import json
 import os
@@ -10,8 +23,12 @@ from pathlib import Path
 import pytest
 
 from shipit import config, execrun, gh, git
-from shipit.verbs import install
 from shipit.execrun import ExecError
+from shipit.install import apply as iapply
+from shipit.install import reconcile as irec
+from shipit.install import splice, units as iunits
+from shipit.install.errors import InstallError
+from shipit.verbs import install as verb
 
 
 def _exec_result(rc: int, stdout: str = "", stderr: str = "") -> execrun.ExecResult:
@@ -25,6 +42,27 @@ def _exec_result(rc: int, stdout: str = "", stderr: str = "") -> execrun.ExecRes
     )
 
 
+def _plan(root) -> irec.Plan:
+    """gather → reconcile: the typed pipeline up to (and excluding) any write."""
+    units = iunits.load_units()
+    retired = irec.load_retired()
+    state = irec.gather(Path(root), units, retired)
+    return irec.reconcile(units, retired, state)
+
+
+def _apply(root, mode: str = iapply.MODE_TREE, **kw) -> iapply.InstallResult:
+    """reconcile + apply with the verb's PR-body renderer injected (the wiring
+    `run()` performs), so PR-mode tests see the real rendered body."""
+    plan = _plan(root)
+    assert not plan.nothing_to_do, "test drove apply on a no-op plan"
+    return iapply.apply(
+        plan,
+        mode,
+        pr_body=lambda before, hooks: verb.format_pr_body(plan, before, hooks),
+        **kw,
+    )
+
+
 # --------------------------------------------------------------------------
 # Pure reconciliation
 # --------------------------------------------------------------------------
@@ -33,47 +71,46 @@ def _exec_result(rc: int, stdout: str = "", stderr: str = "") -> execrun.ExecRes
 def test_decide_covers_four_cases():
     # absent -> ADD
     assert (
-        install.decide(consumer_hash=None, pristine_hash=None, desired_hash="d")
-        == install.ADD
+        irec.decide(consumer_hash=None, pristine_hash=None, desired_hash="d")
+        == irec.ADD
     )
     # already current -> NOOP
     assert (
-        install.decide(consumer_hash="d", pristine_hash="p", desired_hash="d")
-        == install.NOOP
+        irec.decide(consumer_hash="d", pristine_hash="p", desired_hash="d") == irec.NOOP
     )
     # untouched since last install -> UPDATE
     assert (
-        install.decide(consumer_hash="p", pristine_hash="p", desired_hash="d")
-        == install.UPDATE
+        irec.decide(consumer_hash="p", pristine_hash="p", desired_hash="d")
+        == irec.UPDATE
     )
     # consumer-edited -> OVERRIDE
     assert (
-        install.decide(consumer_hash="x", pristine_hash="p", desired_hash="d")
-        == install.OVERRIDE
+        irec.decide(consumer_hash="x", pristine_hash="p", desired_hash="d")
+        == irec.OVERRIDE
     )
     # present but never installed by shipit (no pristine) and divergent -> OVERRIDE
     assert (
-        install.decide(consumer_hash="x", pristine_hash=None, desired_hash="d")
-        == install.OVERRIDE
+        irec.decide(consumer_hash="x", pristine_hash=None, desired_hash="d")
+        == irec.OVERRIDE
     )
 
 
 def test_block_extract_and_splice_roundtrip():
     base = "# Consumer AGENTS\n\nSome consumer-owned text.\n"
-    spliced = install.splice_block(base, "managed body")
-    assert install.BLOCK_OPEN in spliced and install.BLOCK_CLOSE in spliced
+    spliced = splice.splice_block(base, "managed body")
+    assert iunits.BLOCK_OPEN in spliced and iunits.BLOCK_CLOSE in spliced
     # The consumer's own text is preserved.
     assert "Some consumer-owned text." in spliced
-    assert install.extract_block(spliced) == "managed body"
+    assert splice.extract_block(spliced) == "managed body"
     # Re-splicing replaces only the block, leaving one block.
-    again = install.splice_block(spliced, "new body")
-    assert install.extract_block(again) == "new body"
-    assert again.count(install.BLOCK_OPEN) == 1
+    again = splice.splice_block(spliced, "new body")
+    assert splice.extract_block(again) == "new body"
+    assert again.count(iunits.BLOCK_OPEN) == 1
     assert "Some consumer-owned text." in again
 
 
 def test_extract_block_absent_is_none():
-    assert install.extract_block("no markers here") is None
+    assert splice.extract_block("no markers here") is None
 
 
 # --------------------------------------------------------------------------
@@ -82,11 +119,11 @@ def test_extract_block_absent_is_none():
 
 
 def test_load_units_includes_lefthook_and_pixi_task_block():
-    units = {u.key: u for u in install.load_units()}
-    assert install.LEFTHOOK_FILE in units
-    assert units[install.LEFTHOOK_FILE].kind == "file"
+    units = {u.key: u for u in iunits.load_units()}
+    assert iunits.LEFTHOOK_FILE in units
+    assert units[iunits.LEFTHOOK_FILE].kind == "file"
 
-    pixi = units[install.PIXI_KEY]
+    pixi = units[iunits.PIXI_KEY]
     assert pixi.kind == "block"
     assert pixi.dest == "pixi.toml"
     assert pixi.anchor == "[tasks]"
@@ -97,11 +134,11 @@ def test_load_units_includes_lefthook_and_pixi_task_block():
 
 def test_pixi_block_inserts_under_existing_tasks_table():
     consumer = '[project]\nname = "acme"\n\n[tasks]\ntest = "pytest"\n'
-    out = install.splice_block(
+    out = splice.splice_block(
         consumer,
         'lint = "shipit lint"',
-        install.PIXI_OPEN,
-        install.PIXI_CLOSE,
+        iunits.PIXI_OPEN,
+        iunits.PIXI_CLOSE,
         anchor="[tasks]",
     )
     # The managed line lands inside [tasks], not after some later table.
@@ -113,18 +150,18 @@ def test_pixi_block_inserts_under_existing_tasks_table():
     assert 'test = "pytest"' in out
     # Round-trips through extract with the pixi markers.
     assert (
-        install.extract_block(out, install.PIXI_OPEN, install.PIXI_CLOSE)
+        splice.extract_block(out, iunits.PIXI_OPEN, iunits.PIXI_CLOSE)
         == 'lint = "shipit lint"'
     )
 
 
 def test_pixi_block_creates_tasks_table_when_absent():
     consumer = '[project]\nname = "acme"\n'
-    out = install.splice_block(
+    out = splice.splice_block(
         consumer,
         'lint = "shipit lint"',
-        install.PIXI_OPEN,
-        install.PIXI_CLOSE,
+        iunits.PIXI_OPEN,
+        iunits.PIXI_CLOSE,
         anchor="[tasks]",
     )
     assert "[tasks]" in out
@@ -134,23 +171,23 @@ def test_pixi_block_creates_tasks_table_when_absent():
 
 def test_pixi_block_reinstall_replaces_in_place():
     consumer = '[tasks]\ntest = "pytest"\n'
-    once = install.splice_block(
+    once = splice.splice_block(
         consumer,
         'lint = "shipit lint"',
-        install.PIXI_OPEN,
-        install.PIXI_CLOSE,
+        iunits.PIXI_OPEN,
+        iunits.PIXI_CLOSE,
         "[tasks]",
     )
-    twice = install.splice_block(
-        once, 'lint = "shipit lint"', install.PIXI_OPEN, install.PIXI_CLOSE, "[tasks]"
+    twice = splice.splice_block(
+        once, 'lint = "shipit lint"', iunits.PIXI_OPEN, iunits.PIXI_CLOSE, "[tasks]"
     )
     # Idempotent: exactly one managed block after a second install.
-    assert twice.count(install.PIXI_OPEN) == 1
+    assert twice.count(iunits.PIXI_OPEN) == 1
     assert twice == once
 
 
 def test_load_units_has_skills_agents_and_bootstrap():
-    units = install.load_units()
+    units = iunits.load_units()
     keys = {u.key for u in units}
     assert "AGENTS.md#shipit-block" in keys
     assert "bin/shipit" in keys
@@ -163,7 +200,7 @@ def test_load_units_has_skills_agents_and_bootstrap():
 
 def _write_launcher(dir_path: Path) -> Path:
     """Write the MANAGED bin/shipit launcher (the shipped template) into dir_path/shipit."""
-    unit = next(u for u in install.load_units() if u.key == "bin/shipit")
+    unit = next(u for u in iunits.load_units() if u.key == "bin/shipit")
     binp = dir_path / "shipit"
     binp.write_bytes(unit.content)
     binp.chmod(binp.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
@@ -238,9 +275,9 @@ def test_bootstrap_launcher_execs_the_real_shipit_elsewhere_on_path(tmp_path: Pa
 
 
 def test_load_units_includes_the_three_agent_defs():
-    units = {u.key: u for u in install.load_units()}
+    units = {u.key: u for u in iunits.load_units()}
     for role in ("implementer", "shepherd", "explorer"):
-        key = f"{install.AGENTS_DEF_DIR}/{role}.md"
+        key = f"{iunits.AGENTS_DEF_DIR}/{role}.md"
         assert key in units, f"{key} not registered"
         unit = units[key]
         assert unit.kind == "file"
@@ -250,33 +287,33 @@ def test_load_units_includes_the_three_agent_defs():
 
 
 def test_load_units_includes_the_settings_hook_block():
-    units = {u.key: u for u in install.load_units()}
-    assert install.SETTINGS_KEY in units
-    unit = units[install.SETTINGS_KEY]
+    units = {u.key: u for u in iunits.load_units()}
+    assert iunits.SETTINGS_KEY in units
+    unit = units[iunits.SETTINGS_KEY]
     assert unit.kind == "block"
-    assert unit.fmt == install.FMT_JSON_HOOK
-    assert unit.dest == install.SETTINGS_FILE
+    assert unit.fmt == iunits.FMT_JSON_HOOK
+    assert unit.dest == iunits.SETTINGS_FILE
     # The managed region is shipit's PreToolUse entry (canonical JSON), nothing else.
     entry = json.loads(unit.desired_inner())
     assert entry["matcher"] == "Edit|Write|MultiEdit|NotebookEdit"
-    assert install.SETTINGS_HOOK_MARKER in entry["hooks"][0]["command"]
+    assert iunits.SETTINGS_HOOK_MARKER in entry["hooks"][0]["command"]
 
 
 def test_load_units_includes_the_eval_terminal_hooks():
     # HAR02 adds the Stop (coordinator) + SubagentStop (subagent) eval hook lines as
     # two more JSON-hook units over the same settings.json, each owning its event.
-    units = {u.key: u for u in install.load_units()}
+    units = {u.key: u for u in iunits.load_units()}
     for key, event, marker in (
-        (install.SETTINGS_STOP_KEY, install.EVENT_STOP, install.SETTINGS_STOP_MARKER),
+        (iunits.SETTINGS_STOP_KEY, iunits.EVENT_STOP, iunits.SETTINGS_STOP_MARKER),
         (
-            install.SETTINGS_SUBAGENTSTOP_KEY,
-            install.EVENT_SUBAGENTSTOP,
-            install.SETTINGS_SUBAGENTSTOP_MARKER,
+            iunits.SETTINGS_SUBAGENTSTOP_KEY,
+            iunits.EVENT_SUBAGENTSTOP,
+            iunits.SETTINGS_SUBAGENTSTOP_MARKER,
         ),
     ):
         unit = units[key]
-        assert unit.fmt == install.FMT_JSON_HOOK
-        assert unit.dest == install.SETTINGS_FILE
+        assert unit.fmt == iunits.FMT_JSON_HOOK
+        assert unit.dest == iunits.SETTINGS_FILE
         assert unit.event == event
         assert unit.marker == marker
         entry = json.loads(unit.desired_inner())
@@ -288,37 +325,37 @@ def test_load_units_includes_the_eval_terminal_hooks():
 def test_hook_units_coexist_on_one_settings_file():
     # Splicing all four event entries into one file leaves each in its own event
     # array, none clobbering another — the consumer keeps a single valid settings.json.
-    units = {u.key: u for u in install.load_units()}
+    units = {u.key: u for u in iunits.load_units()}
     text = ""
     for key in (
-        install.SETTINGS_KEY,
-        install.SETTINGS_STOP_KEY,
-        install.SETTINGS_SUBAGENTSTOP_KEY,
-        install.SETTINGS_SESSIONSTART_KEY,
+        iunits.SETTINGS_KEY,
+        iunits.SETTINGS_STOP_KEY,
+        iunits.SETTINGS_SUBAGENTSTOP_KEY,
+        iunits.SETTINGS_SESSIONSTART_KEY,
     ):
         u = units[key]
-        text = install.splice_settings_hook(text, u.desired_inner(), u.event, u.marker)
+        text = splice.splice_settings_hook(text, u.desired_inner(), u.event, u.marker)
     hooks = json.loads(text)["hooks"]
-    assert install.SETTINGS_HOOK_MARKER in hooks["PreToolUse"][0]["hooks"][0]["command"]
-    assert install.SETTINGS_STOP_MARKER in hooks["Stop"][0]["hooks"][0]["command"]
+    assert iunits.SETTINGS_HOOK_MARKER in hooks["PreToolUse"][0]["hooks"][0]["command"]
+    assert iunits.SETTINGS_STOP_MARKER in hooks["Stop"][0]["hooks"][0]["command"]
     assert (
-        install.SETTINGS_SUBAGENTSTOP_MARKER
+        iunits.SETTINGS_SUBAGENTSTOP_MARKER
         in hooks["SubagentStop"][0]["hooks"][0]["command"]
     )
     assert (
-        install.SETTINGS_SESSIONSTART_MARKER
+        iunits.SETTINGS_SESSIONSTART_MARKER
         in hooks["SessionStart"][0]["hooks"][0]["command"]
     )
     # And each event unit reconciles to NOOP against the file carrying all four.
     for key in (
-        install.SETTINGS_KEY,
-        install.SETTINGS_STOP_KEY,
-        install.SETTINGS_SUBAGENTSTOP_KEY,
-        install.SETTINGS_SESSIONSTART_KEY,
+        iunits.SETTINGS_KEY,
+        iunits.SETTINGS_STOP_KEY,
+        iunits.SETTINGS_SUBAGENTSTOP_KEY,
+        iunits.SETTINGS_SESSIONSTART_KEY,
     ):
         u = units[key]
-        got = install.extract_settings_hook(text, u.event, u.marker)
-        assert got == install._canonical_hook_entry(json.loads(u.desired_inner()))
+        got = splice.extract_settings_hook(text, u.event, u.marker)
+        assert got == iunits.canonical_hook_entry(json.loads(u.desired_inner()))
 
 
 # --------------------------------------------------------------------------
@@ -328,9 +365,9 @@ def test_hook_units_coexist_on_one_settings_file():
 
 
 def test_load_units_includes_the_claude_start_launcher():
-    units = {u.key: u for u in install.load_units()}
-    assert install.LAUNCHER_FILE in units
-    unit = units[install.LAUNCHER_FILE]
+    units = {u.key: u for u in iunits.load_units()}
+    assert iunits.LAUNCHER_FILE in units
+    unit = units[iunits.LAUNCHER_FILE]
     assert unit.kind == "file"
     assert unit.dest == "claude-start"  # repo root, memorable entry point
     assert unit.executable is True
@@ -341,24 +378,24 @@ def test_load_units_includes_the_claude_start_launcher():
 
 
 def test_load_units_includes_the_sessionstart_activation_hook():
-    units = {u.key: u for u in install.load_units()}
-    assert install.SETTINGS_SESSIONSTART_KEY in units
-    unit = units[install.SETTINGS_SESSIONSTART_KEY]
+    units = {u.key: u for u in iunits.load_units()}
+    assert iunits.SETTINGS_SESSIONSTART_KEY in units
+    unit = units[iunits.SETTINGS_SESSIONSTART_KEY]
     assert unit.kind == "block"
-    assert unit.fmt == install.FMT_JSON_HOOK
-    assert unit.dest == install.SETTINGS_FILE
-    assert unit.event == install.EVENT_SESSIONSTART
-    assert unit.marker == install.SETTINGS_SESSIONSTART_MARKER
+    assert unit.fmt == iunits.FMT_JSON_HOOK
+    assert unit.dest == iunits.SETTINGS_FILE
+    assert unit.event == iunits.EVENT_SESSIONSTART
+    assert unit.marker == iunits.SETTINGS_SESSIONSTART_MARKER
     entry = json.loads(unit.desired_inner())
     # SessionStart binds to no tool, so the entry carries no matcher.
     assert "matcher" not in entry
-    assert install.SETTINGS_SESSIONSTART_MARKER in entry["hooks"][0]["command"]
+    assert iunits.SETTINGS_SESSIONSTART_MARKER in entry["hooks"][0]["command"]
 
 
 def test_fresh_install_lays_down_the_session_bootstrap_set_idempotently(tmp_path, rec):
     (tmp_path / "AGENTS.md").write_text("# Acme\n")
-    rc = install.run(str(tmp_path))
-    assert rc == 0
+    result = _apply(tmp_path)
+    assert result.mode == iapply.MODE_TREE
 
     # The launcher landed at the repo root, executable.
     launcher = tmp_path / "claude-start"
@@ -370,22 +407,21 @@ def test_fresh_install_lays_down_the_session_bootstrap_set_idempotently(tmp_path
     settings = json.loads((tmp_path / ".claude" / "settings.json").read_text())
     entries = settings["hooks"]["SessionStart"]
     assert any(
-        install._is_shipit_hook(e, install.SETTINGS_SESSIONSTART_MARKER)
-        for e in entries
+        splice.is_shipit_hook(e, iunits.SETTINGS_SESSIONSTART_MARKER) for e in entries
     )
 
     # Both recorded a pristine hash in the manifest.
     managed = config.load_managed(config.load(tmp_path / ".shipit.toml"))
-    assert install.LAUNCHER_FILE in managed
-    assert install.SETTINGS_SESSIONSTART_KEY in managed
+    assert iunits.LAUNCHER_FILE in managed
+    assert iunits.SETTINGS_SESSIONSTART_KEY in managed
 
-    # Idempotent: a second install reconciles both (and everything else) to NOOP —
-    # no writes, no git, no PR, artifacts byte-identical.
+    # Idempotent: a second reconcile decides NOOP for everything — nothing to
+    # apply, no git, no PR, artifacts byte-identical.
     rec.calls.clear()
     launcher_before = launcher.read_bytes()
     settings_before = (tmp_path / ".claude" / "settings.json").read_bytes()
-    rc = install.run(str(tmp_path))
-    assert rc == 0
+    again = _plan(tmp_path)
+    assert again.nothing_to_do
     assert rec.calls == []
     assert launcher.read_bytes() == launcher_before
     assert (tmp_path / ".claude" / "settings.json").read_bytes() == settings_before
@@ -394,7 +430,7 @@ def test_fresh_install_lays_down_the_session_bootstrap_set_idempotently(tmp_path
 def test_claude_start_execs_claude_with_a_minted_session_id(tmp_path: Path):
     # Behavior of the shipped launcher: it execs `claude --worktree <minted-id>`
     # forwarding its own args, with a fresh `sess-`-prefixed id per launch.
-    unit = next(u for u in install.load_units() if u.key == install.LAUNCHER_FILE)
+    unit = next(u for u in iunits.load_units() if u.key == iunits.LAUNCHER_FILE)
     launcher = tmp_path / "claude-start"
     launcher.write_bytes(unit.content)
     launcher.chmod(0o755)
@@ -424,7 +460,7 @@ def test_claude_start_execs_claude_with_a_minted_session_id(tmp_path: Path):
 
 
 def test_claude_start_fails_loud_when_claude_is_not_on_path(tmp_path: Path):
-    unit = next(u for u in install.load_units() if u.key == install.LAUNCHER_FILE)
+    unit = next(u for u in iunits.load_units() if u.key == iunits.LAUNCHER_FILE)
     launcher = tmp_path / "claude-start"
     launcher.write_bytes(unit.content)
     launcher.chmod(0o755)
@@ -465,115 +501,115 @@ def test_settings_hook_splice_preserves_other_settings():
             ],
         }
     )
-    out = install.splice_settings_hook(consumer, inner)
+    out = splice.splice_settings_hook(consumer, inner)
     data = json.loads(out)
     # The consumer's unrelated settings survive untouched.
     assert data["permissions"] == {"allow": ["Bash(ls:*)"]}
     assert data["hooks"]["SessionStart"][0]["hooks"][0]["command"] == "echo hi"
     # shipit's entry is now present in PreToolUse.
-    assert install.extract_settings_hook(out) == install._canonical_hook_entry(
+    assert splice.extract_settings_hook(out) == iunits.canonical_hook_entry(
         json.loads(inner)
     )
 
 
 def _unit(key):
-    return next(u for u in install.load_units() if u.key == key)
+    return next(u for u in iunits.load_units() if u.key == key)
 
 
 def test_settings_hook_splice_is_idempotent_and_replaces_in_place():
-    inner = _unit(install.SETTINGS_KEY).desired_inner()
-    once = install.splice_settings_hook("", inner)
-    twice = install.splice_settings_hook(once, inner)
+    inner = _unit(iunits.SETTINGS_KEY).desired_inner()
+    once = splice.splice_settings_hook("", inner)
+    twice = splice.splice_settings_hook(once, inner)
     assert twice == once
     # Exactly one shipit PreToolUse entry, even after a second splice.
     pre = json.loads(twice)["hooks"]["PreToolUse"]
-    assert sum(install._is_shipit_hook(e) for e in pre) == 1
+    assert sum(splice.is_shipit_hook(e) for e in pre) == 1
 
 
 def test_settings_hook_extract_is_none_when_absent():
     # Genuinely "absent" (→ ADD): empty file, an empty object, or an object that
     # carries only the consumer's own hooks (no shipit entry).
-    assert install.extract_settings_hook("") is None
-    assert install.extract_settings_hook("{}") is None
+    assert splice.extract_settings_hook("") is None
+    assert splice.extract_settings_hook("{}") is None
     other = json.dumps(
         {"hooks": {"PreToolUse": [{"hooks": [{"command": "echo other"}]}]}}
     )
-    assert install.extract_settings_hook(other) is None
+    assert splice.extract_settings_hook(other) is None
 
 
 def test_settings_hook_extract_flags_malformed_as_non_none():
     # A present-but-malformed file is NOT "absent": extract returns a non-None
     # sentinel so the reconciler reads it as present-but-divergent (→ OVERRIDE),
     # never an ADD onto a file it cannot parse.
-    assert install.extract_settings_hook("not json") is not None
-    assert install.extract_settings_hook("{bad json,,}") is not None
+    assert splice.extract_settings_hook("not json") is not None
+    assert splice.extract_settings_hook("{bad json,,}") is not None
     # Valid JSON that is not an object is also a conflict, not an absent file.
-    assert install.extract_settings_hook("[1, 2, 3]") is not None
-    assert install.extract_settings_hook('"a string"') is not None
+    assert splice.extract_settings_hook("[1, 2, 3]") is not None
+    assert splice.extract_settings_hook('"a string"') is not None
 
 
 def test_is_shipit_hook_is_defensive_against_malformed_entries():
     # Malformed PreToolUse entries must answer "not a shipit hook", never raise.
-    assert install._is_shipit_hook({"hooks": None}) is False  # noqa: E711
-    assert install._is_shipit_hook({"hooks": "not-a-list"}) is False
-    assert install._is_shipit_hook({"hooks": [None, "x", 7]}) is False
-    assert install._is_shipit_hook({}) is False
-    assert install._is_shipit_hook("not-a-dict") is False
-    assert install._is_shipit_hook(None) is False
+    assert splice.is_shipit_hook({"hooks": None}) is False
+    assert splice.is_shipit_hook({"hooks": "not-a-list"}) is False
+    assert splice.is_shipit_hook({"hooks": [None, "x", 7]}) is False
+    assert splice.is_shipit_hook({}) is False
+    assert splice.is_shipit_hook("not-a-dict") is False
+    assert splice.is_shipit_hook(None) is False
     # A hook whose `command` is null/non-string must not crash on `marker in None`.
-    assert install._is_shipit_hook({"hooks": [{"command": None}]}) is False
-    assert install._is_shipit_hook({"hooks": [{"command": 7}]}) is False
-    assert install._is_shipit_hook({"hooks": [{}]}) is False
+    assert splice.is_shipit_hook({"hooks": [{"command": None}]}) is False
+    assert splice.is_shipit_hook({"hooks": [{"command": 7}]}) is False
+    assert splice.is_shipit_hook({"hooks": [{}]}) is False
 
 
 def test_settings_hook_splice_preserves_a_malformed_file_verbatim():
     # The write path agrees with the read path: an unparseable consumer file (or
     # one that is not a JSON object) is preserved byte-for-byte, never clobbered
     # and never a JSONDecodeError crash.
-    inner = _unit(install.SETTINGS_KEY).desired_inner()
+    inner = _unit(iunits.SETTINGS_KEY).desired_inner()
     malformed = '{ "permissions": [ this is not json ]\n'
-    assert install.splice_settings_hook(malformed, inner) == malformed
+    assert splice.splice_settings_hook(malformed, inner) == malformed
     not_an_object = "[1, 2, 3]\n"
-    assert install.splice_settings_hook(not_an_object, inner) == not_an_object
+    assert splice.splice_settings_hook(not_an_object, inner) == not_an_object
 
 
 def test_settings_hook_reconciles_through_the_four_cases():
     """The settings hook unit gives the standard ADD/NOOP/UPDATE/OVERRIDE decisions."""
-    unit = _unit(install.SETTINGS_KEY)
+    unit = _unit(iunits.SETTINGS_KEY)
     desired = unit.desired_hash()
-    extract = install.extract_settings_hook
+    extract = splice.extract_settings_hook
     h = lambda inner: config.content_hash(inner.encode("utf-8"))  # noqa: E731
 
     # absent → ADD
     assert (
-        install.decide(consumer_hash=None, pristine_hash=None, desired_hash=desired)
-        == install.ADD
+        irec.decide(consumer_hash=None, pristine_hash=None, desired_hash=desired)
+        == irec.ADD
     )
     # unchanged (consumer carries shipit's exact entry) → NOOP
-    on_disk = install.splice_settings_hook("", unit.desired_inner())
+    on_disk = splice.splice_settings_hook("", unit.desired_inner())
     cur = h(extract(on_disk))
     assert cur == desired
     assert (
-        install.decide(consumer_hash=cur, pristine_hash=desired, desired_hash=desired)
-        == install.NOOP
+        irec.decide(consumer_hash=cur, pristine_hash=desired, desired_hash=desired)
+        == irec.NOOP
     )
     # consumer edited shipit's own entry → OVERRIDE (not clobbered, surfaced in PR)
     edited = on_disk.replace("Edit|Write|MultiEdit|NotebookEdit", "Edit")
     cedit = h(extract(edited))
     assert cedit != desired
     assert (
-        install.decide(consumer_hash=cedit, pristine_hash=desired, desired_hash=desired)
-        == install.OVERRIDE
+        irec.decide(consumer_hash=cedit, pristine_hash=desired, desired_hash=desired)
+        == irec.OVERRIDE
     )
 
 
 # --------------------------------------------------------------------------
-# The verb — gh boundary patched
+# apply — typed InstallResult in/out, the git/PR boundary recorded
 # --------------------------------------------------------------------------
 
 
 class _GhRecorder:
-    """Records the git/PR boundary calls install makes, doing nothing real."""
+    """Records the git/PR boundary calls apply makes, doing nothing real."""
 
     def __init__(self):
         self.calls = []
@@ -625,26 +661,33 @@ def rec(monkeypatch):
         monkeypatch.setattr(git, name, getattr(r, name))
     for name in ("pr_url_for_head", "pr_create"):
         monkeypatch.setattr(gh, name, getattr(r, name))
-    monkeypatch.setattr(install, "_shipit_version", lambda: "testhash")
+    monkeypatch.setattr(iapply, "_shipit_version", lambda: "testhash")
     # Inject the lefthook boundary so no test spawns a real `lefthook install`
     # (mirrors how lint tests inject run_tool). Real activation is covered
     # directly against the Exec runner in test_activate_hooks_* below.
-    monkeypatch.setattr(install, "_activate_hooks", r.activate_hooks)
+    monkeypatch.setattr(iapply, "_activate_hooks", r.activate_hooks)
     return r
 
 
 def test_dry_run_has_no_side_effects(tmp_path, rec):
-    rc = install.run(str(tmp_path), dry_run=True)
+    # The verb's dry-run stops at the Plan: reconcile reads, nothing writes.
+    rc = verb.run(str(tmp_path), dry_run=True)
     assert rc == 0
     assert not (tmp_path / ".shipit.toml").exists()
     assert not (tmp_path / "skills").exists()
     assert rec.calls == []  # no git, no PR
+    assert rec.hook_activations == []  # no side effect on dry-run
 
 
 def test_fresh_install_writes_set_and_opens_draft_pr(tmp_path, rec):
     (tmp_path / "AGENTS.md").write_text("# Acme\n\nConsumer text.\n")
-    rc = install.run(str(tmp_path), pr=True)
-    assert rc == 0
+    result = _apply(tmp_path, iapply.MODE_PR)
+
+    # The typed result names the PR outcome.
+    assert result.mode == iapply.MODE_PR
+    assert result.branch == iapply.INSTALL_BRANCH
+    assert result.pr_url == "https://github.com/acme/repo/pull/1"
+    assert result.pr_updated is False
 
     # Managed files landed.
     assert (tmp_path / "skills" / "shipit-to-prd" / "SKILL.md").is_file()
@@ -652,7 +695,7 @@ def test_fresh_install_writes_set_and_opens_draft_pr(tmp_path, rec):
     # The AGENTS block was spliced in without losing the consumer's text.
     agents = (tmp_path / "AGENTS.md").read_text()
     assert "Consumer text." in agents
-    assert install.BLOCK_OPEN in agents
+    assert iunits.BLOCK_OPEN in agents
 
     # Manifest written with version + a pristine for every unit.
     cfg = config.load(tmp_path / ".shipit.toml")
@@ -660,7 +703,7 @@ def test_fresh_install_writes_set_and_opens_draft_pr(tmp_path, rec):
     managed = config.load_managed(cfg)
     assert "bin/shipit" in managed and "AGENTS.md#shipit-block" in managed
 
-    # A DRAFT PR was opened; the body lists the additions.
+    # A DRAFT PR was opened; the rendered body lists the additions.
     assert ("pr_create", True) in rec.calls
     assert "### Added" in rec.pr_body
     # Order: branch -> add -> commit -> push -> pr.
@@ -669,8 +712,7 @@ def test_fresh_install_writes_set_and_opens_draft_pr(tmp_path, rec):
 
 def test_fresh_install_provisions_agent_defs_and_settings_hook(tmp_path, rec):
     (tmp_path / "AGENTS.md").write_text("# Acme\n")
-    rc = install.run(str(tmp_path))
-    assert rc == 0
+    _apply(tmp_path)
 
     # The three generated agent-defs land under .claude/agents/.
     for role in ("implementer", "shepherd", "explorer"):
@@ -681,12 +723,12 @@ def test_fresh_install_provisions_agent_defs_and_settings_hook(tmp_path, rec):
     # The PreToolUse hook line lands in .claude/settings.json.
     settings = json.loads((tmp_path / ".claude" / "settings.json").read_text())
     pre = settings["hooks"]["PreToolUse"]
-    assert any(install._is_shipit_hook(e) for e in pre)
+    assert any(splice.is_shipit_hook(e) for e in pre)
 
     # Both kinds recorded a pristine hash in the manifest.
     managed = config.load_managed(config.load(tmp_path / ".shipit.toml"))
     assert ".claude/agents/implementer.md" in managed
-    assert install.SETTINGS_KEY in managed
+    assert iunits.SETTINGS_KEY in managed
 
 
 def test_install_merges_settings_hook_without_clobbering_consumer_settings(
@@ -709,45 +751,46 @@ def test_install_merges_settings_hook_without_clobbering_consumer_settings(
             indent=2,
         )
     )
-    rc = install.run(str(tmp_path))
-    assert rc == 0
+    _apply(tmp_path)
 
     merged = json.loads(settings_path.read_text())
     # The consumer's settings are intact, and shipit's hook was merged alongside.
     assert merged["permissions"] == {"allow": ["Bash(ls:*)"]}
     assert merged["hooks"]["SessionStart"][0]["hooks"][0]["command"] == "echo hi"
-    assert any(install._is_shipit_hook(e) for e in merged["hooks"]["PreToolUse"])
+    assert any(splice.is_shipit_hook(e) for e in merged["hooks"]["PreToolUse"])
 
 
 def test_consumer_edit_to_settings_hook_surfaces_as_override(tmp_path, rec):
     (tmp_path / "AGENTS.md").write_text("# Acme\n")
-    install.run(str(tmp_path))
+    _apply(tmp_path)
     rec.calls.clear()
 
     # The consumer narrows shipit's managed PreToolUse matcher.
     settings_path = tmp_path / ".claude" / "settings.json"
     data = json.loads(settings_path.read_text())
     for entry in data["hooks"]["PreToolUse"]:
-        if install._is_shipit_hook(entry):
+        if splice.is_shipit_hook(entry):
             entry["matcher"] = "Edit"
     settings_path.write_text(json.dumps(data, indent=2))
 
-    rc = install.run(str(tmp_path), pr=True)
-    assert rc == 0
+    # The edit is a typed OVERRIDE decision on the plan...
+    plan = _plan(tmp_path)
+    assert [d.unit.key for d in plan.overrides] == [iunits.SETTINGS_KEY]
+    # ...and the PR-mode apply surfaces it in the body, never clobbered blind.
+    result = _apply(tmp_path, iapply.MODE_PR)
+    assert result.pr_url is not None
     assert ("pr_create", True) in rec.calls
-    # The edited unit is surfaced as an override with its diff, never clobbered blind.
     assert "### Overrides" in rec.pr_body
-    assert install.SETTINGS_FILE in rec.pr_body
+    assert iunits.SETTINGS_FILE in rec.pr_body
 
 
 def test_consumer_edit_to_agent_def_surfaces_as_override(tmp_path, rec):
     (tmp_path / "AGENTS.md").write_text("# Acme\n")
-    install.run(str(tmp_path))
+    _apply(tmp_path)
     rec.calls.clear()
 
     (tmp_path / ".claude" / "agents" / "implementer.md").write_text("HAND EDIT\n")
-    rc = install.run(str(tmp_path), pr=True)
-    assert rc == 0
+    _apply(tmp_path, iapply.MODE_PR)
     assert ("pr_create", True) in rec.calls
     assert "### Overrides" in rec.pr_body
     assert ".claude/agents/implementer.md" in rec.pr_body
@@ -757,29 +800,31 @@ def test_consumer_edit_to_agent_def_surfaces_as_override(tmp_path, rec):
 def test_install_against_malformed_settings_json_does_not_crash(tmp_path, rec):
     # A consumer whose .claude/settings.json is unparseable must NOT crash install
     # and must NOT be clobbered: the file is left byte-for-byte untouched and the
-    # conflict is surfaced as an OVERRIDE for a human (WS04: reconcile, never clobber).
+    # conflict is surfaced as an OVERRIDE for a human (reconcile, never clobber).
     (tmp_path / "AGENTS.md").write_text("# Acme\n")
     settings_path = tmp_path / ".claude" / "settings.json"
     settings_path.parent.mkdir(parents=True)
     garbage = '{ "permissions": [ this is not valid json,,, ]\n'
     settings_path.write_text(garbage)
 
-    rc = install.run(str(tmp_path), pr=True)
+    result = _apply(tmp_path, iapply.MODE_PR)
 
-    assert rc == 0  # completed without raising
+    assert result.pr_url is not None  # completed without raising
     # The malformed file was left exactly as it was — never overwritten.
     assert settings_path.read_text() == garbage
     # The conflict is surfaced for the human, not silently swallowed.
     assert ("pr_create", True) in rec.calls
     assert "### Overrides" in rec.pr_body
-    assert install.SETTINGS_FILE in rec.pr_body
+    assert iunits.SETTINGS_FILE in rec.pr_body
 
 
 def test_reinstall_with_no_changes_is_a_clean_noop(tmp_path, rec):
     (tmp_path / "AGENTS.md").write_text("# Acme\n")
-    install.run(str(tmp_path))
+    _apply(tmp_path)
     rec.calls.clear()
-    rc = install.run(str(tmp_path))
+    # The second reconcile decides a no-op plan; the verb never applies it.
+    assert _plan(tmp_path).nothing_to_do
+    rc = verb.run(str(tmp_path))
     assert rc == 0
     # Nothing committed, no PR opened the second time.
     assert rec.calls == []
@@ -787,15 +832,14 @@ def test_reinstall_with_no_changes_is_a_clean_noop(tmp_path, rec):
 
 def test_consumer_edit_surfaces_as_override(tmp_path, rec):
     (tmp_path / "AGENTS.md").write_text("# Acme\n")
-    install.run(str(tmp_path))
+    _apply(tmp_path)
     rec.calls.clear()
 
     # The consumer edits a managed skill file.
     skill = tmp_path / "skills" / "shipit-to-prd" / "SKILL.md"
     skill.write_text("CONSUMER EDIT\n")
 
-    rc = install.run(str(tmp_path), pr=True)
-    assert rc == 0
+    _apply(tmp_path, iapply.MODE_PR)
     assert ("pr_create", True) in rec.calls
     assert "### Overrides" in rec.pr_body
     assert "skills/shipit-to-prd/SKILL.md" in rec.pr_body
@@ -811,9 +855,11 @@ def test_open_install_pr_is_updated_not_recreated(tmp_path, rec, monkeypatch):
         gh, "pr_url_for_head", lambda branch, cwd=None: "https://x/pull/7"
     )
     (tmp_path / "AGENTS.md").write_text("# Acme\n")
-    rc = install.run(str(tmp_path), pr=True)
-    assert rc == 0
-    # The branch was force-pushed, but no second PR was created.
+    result = _apply(tmp_path, iapply.MODE_PR)
+    # The branch was force-pushed, but no second PR was created — the typed
+    # result says which of the two happened.
+    assert result.pr_updated is True
+    assert result.pr_url == "https://x/pull/7"
     assert "push" in rec.names()
     assert "pr_create" not in rec.names()
 
@@ -824,47 +870,48 @@ def test_default_install_refreshes_working_tree_without_git_or_pr(tmp_path, rec)
     # empty: no branch switch, no commit, no push, no PR. Committing the
     # refresh into the caller's own work is the caller's job.
     (tmp_path / "AGENTS.md").write_text("# Acme\n\nConsumer text.\n")
-    rc = install.run(str(tmp_path))
-    assert rc == 0
+    result = _apply(tmp_path)
+    assert result.mode == iapply.MODE_TREE
+    assert result.branch is None and result.pr_url is None
 
     # The managed set + manifest are on disk...
     assert (tmp_path / "bin" / "shipit").is_file()
     agents = (tmp_path / "AGENTS.md").read_text()
     assert "Consumer text." in agents
-    assert install.BLOCK_OPEN in agents
+    assert iunits.BLOCK_OPEN in agents
     managed = config.load_managed(config.load(tmp_path / ".shipit.toml"))
     assert "bin/shipit" in managed
     # ...and not one git/gh call was made.
     assert rec.calls == []
 
 
-def test_default_install_mid_drift_never_branches_or_opens_pr(tmp_path, rec, capsys):
+def test_default_install_mid_drift_never_branches_or_opens_pr(tmp_path, rec):
     # The #359 trap as a regression test: managed-file drift mid-workstream,
-    # install run with no flags → the drift is refreshed in place (a
-    # consumer-edited unit included, warned on stderr) and NOTHING touches git
-    # or origin — no shipit/install branch, no stray draft PR racing to main.
+    # install run in the default mode → the drift is refreshed in place (a
+    # consumer-edited unit included, surfaced by the renderer) and NOTHING
+    # touches git or origin — no shipit/install branch, no stray draft PR.
     (tmp_path / "AGENTS.md").write_text("# Acme\n")
-    install.run(str(tmp_path))
+    _apply(tmp_path)
     rec.calls.clear()
 
     skill = tmp_path / "skills" / "shipit-to-prd" / "SKILL.md"
     skill.write_text("CONSUMER EDIT\n")
-    rc = install.run(str(tmp_path))
-    assert rc == 0
+    result = _apply(tmp_path)
     # The drifted unit was refreshed to shipit's content, in the working tree.
     assert "CONSUMER EDIT" not in skill.read_text()
     # No switch, no add, no commit, no push, no pr_create — the trap is closed.
     assert rec.calls == []
-    # The override was surfaced loudly for the caller, not silently swallowed.
-    err = capsys.readouterr().err
-    assert "consumer-edited" in err
-    assert "skills/shipit-to-prd/SKILL.md" in err
+    # The override is surfaced loudly for the caller, not silently swallowed:
+    # the renderer's stderr warning derives from the typed result.
+    warning = verb.format_result_warnings(result)
+    assert "consumer-edited" in warning
+    assert "skills/shipit-to-prd/SKILL.md" in warning
 
 
 def test_push_flag_pushes_to_branch_without_pr(tmp_path, rec):
     (tmp_path / "AGENTS.md").write_text("# Acme\n")
-    rc = install.run(str(tmp_path), push=True)
-    assert rc == 0
+    result = _apply(tmp_path, iapply.MODE_PUSH)
+    assert result.branch == "main"
     assert ("push", "main") in rec.calls
     assert "pr_create" not in rec.names()
 
@@ -874,8 +921,8 @@ def test_local_flag_commits_on_current_branch_without_push_or_pr(tmp_path, rec):
     # — no branch switch, no push, no PR. This is what Tree provisioning runs so
     # `tree create` never touches origin.
     (tmp_path / "AGENTS.md").write_text("# Acme\n")
-    rc = install.run(str(tmp_path), local=True)
-    assert rc == 0
+    result = _apply(tmp_path, iapply.MODE_LOCAL)
+    assert result.branch == "main"
     # The managed set was written and committed.
     assert (tmp_path / "bin" / "shipit").is_file()
     assert rec.names() == ["add", "commit"]
@@ -885,15 +932,28 @@ def test_local_flag_commits_on_current_branch_without_push_or_pr(tmp_path, rec):
     assert "pr_create" not in rec.names()
 
 
-def test_local_flag_fails_in_detached_head(tmp_path, monkeypatch, rec):
+def test_local_mode_fails_in_detached_head(tmp_path, monkeypatch, rec):
     # --local commits on the CURRENT branch; in detached HEAD there is none, so
-    # git_current_branch is None and install must fail cleanly (exit 1) without
-    # committing anything.
+    # the apply refuses with the typed domain error and commits nothing.
     monkeypatch.setattr(git, "current_branch", lambda *, cwd: None)
     (tmp_path / "AGENTS.md").write_text("# Acme\n")
-    rc = install.run(str(tmp_path), local=True)
+    with pytest.raises(InstallError, match="--local needs a checked-out branch"):
+        _apply(tmp_path, iapply.MODE_LOCAL)
+    assert "commit" not in rec.names()
+
+
+def test_local_flag_detached_head_is_a_clean_exit_through_the_shell(
+    tmp_path, monkeypatch, rec, capsys
+):
+    # Through the verb, the same refusal is the uniform `error: …` + exit 1.
+    monkeypatch.setattr(git, "current_branch", lambda *, cwd: None)
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    rc = verb.run(str(tmp_path), local=True)
     assert rc == 1
     assert "commit" not in rec.names()
+    err = capsys.readouterr().err
+    assert err.startswith("error: ") or "error: " in err
+    assert "--local needs a checked-out branch" in err
 
 
 def test_stale_manifest_keys_are_dropped(tmp_path, rec):
@@ -904,21 +964,39 @@ def test_stale_manifest_keys_are_dropped(tmp_path, rec):
         managed={"skills/retired/SKILL.md": "sha256:dead", "bin/shipit": "sha256:old"},
     )
     (tmp_path / "AGENTS.md").write_text("# Acme\n")
-    install.run(str(tmp_path))
+    _apply(tmp_path)
     managed = config.load_managed(config.load(tmp_path / ".shipit.toml"))
     # The retired key is gone; the manifest reflects only the current set.
     assert "skills/retired/SKILL.md" not in managed
-    assert set(managed) == {u.key for u in install.load_units()}
+    assert set(managed) == {u.key for u in iunits.load_units()}
 
 
-def test_gh_failure_is_a_clean_nonzero_exit(tmp_path, monkeypatch, rec):
+def test_gh_failure_is_a_clean_nonzero_exit(tmp_path, monkeypatch, rec, capsys):
     def boom(*a, **k):
         raise ExecError(["gh"], rc=1, stderr="no remote configured")
 
     monkeypatch.setattr(git, "switch_create", boom)
     (tmp_path / "AGENTS.md").write_text("# Acme\n")
-    rc = install.run(str(tmp_path), pr=True)
-    assert rc == 1  # clean exit, not a raised traceback
+    rc = verb.run(str(tmp_path), pr=True)
+    assert rc == 1  # clean exit through the error shell, not a raised traceback
+    assert "error: " in capsys.readouterr().err
+
+
+def test_gather_refuses_a_non_directory_target(tmp_path):
+    # The domain refusal for a direct caller; at the CLI the same validation
+    # lives at parse (click.Path, exit 2 — see the smoke layer below).
+    with pytest.raises(InstallError, match="is not a directory"):
+        irec.gather(tmp_path / "nope", iunits.load_units(), irec.load_retired())
+
+
+def test_unreadable_manifest_degrades_to_empty_pristine(tmp_path, rec):
+    (tmp_path / ".shipit.toml").write_text("not [ valid toml")
+    plan = _plan(tmp_path)
+    # The reason rides the Plan for the renderer's warning...
+    assert plan.manifest_error is not None
+    assert "manifest" in verb.format_plan_warnings(plan)
+    # ...and the reconcile proceeds against an empty pristine map.
+    assert plan.writes
 
 
 # --------------------------------------------------------------------------
@@ -933,8 +1011,10 @@ def _secrets_by_name(root):
 
 def test_fresh_install_seeds_app_secret_mappings(tmp_path, rec):
     (tmp_path / "AGENTS.md").write_text("# Acme\n")
-    rc = install.run(str(tmp_path), pr=True)
-    assert rc == 0
+    plan = _plan(tmp_path)
+    # The seeds ride the Plan as typed entries...
+    assert "[secrets].CODEX_REVIEW_APP_PRIVATE_KEY" in plan.seeds
+    _apply(tmp_path, iapply.MODE_PR)
 
     secrets = _secrets_by_name(tmp_path)
     for name in (
@@ -956,7 +1036,7 @@ def test_fresh_install_seeds_required_reviewer_set(tmp_path, rec):
     from shipit.prstate import reviewers_config as rcfg
 
     (tmp_path / "AGENTS.md").write_text("# Acme\n")
-    install.run(str(tmp_path))
+    _apply(tmp_path)
 
     # The seeded [reviewers] table is rendered from the SINGLE required-reviewer
     # default (ADR-0025 / COR01-WS02), so a fresh install requires exactly what the
@@ -976,8 +1056,7 @@ def test_install_preserves_existing_secrets_and_reviewers(tmp_path, rec):
         "\n[reviewers]\n"
         "copilot = { rerun = true }\n"
     )
-    rc = install.run(str(tmp_path))
-    assert rc == 0
+    _apply(tmp_path)
 
     secrets = _secrets_by_name(tmp_path)
     # Consumer entries are left exactly as written.
@@ -994,13 +1073,14 @@ def test_install_preserves_existing_secrets_and_reviewers(tmp_path, rec):
 
 def test_reinstall_does_not_reseed_policy(tmp_path, rec):
     (tmp_path / "AGENTS.md").write_text("# Acme\n")
-    install.run(str(tmp_path))
+    _apply(tmp_path)
     before = (tmp_path / ".shipit.toml").read_text()
 
     rec.calls.clear()
-    rc = install.run(str(tmp_path))
-    assert rc == 0
-    # Clean no-op: no PR, and the policy text is byte-identical (not re-appended).
+    plan = _plan(tmp_path)
+    # Clean no-op: no seeds decided, nothing to apply, policy text untouched.
+    assert plan.seeds == ()
+    assert plan.nothing_to_do
     assert rec.calls == []
     assert (tmp_path / ".shipit.toml").read_text() == before
 
@@ -1009,18 +1089,22 @@ def test_install_reseeds_policy_when_missing_even_if_managed_current(tmp_path, r
     # Simulate an older install (or a consumer who dropped the policy tables): the
     # managed set is fully current but `[secrets]`/`[reviewers]` are absent.
     (tmp_path / "AGENTS.md").write_text("# Acme\n")
-    install.run(str(tmp_path))
+    _apply(tmp_path)
     cfg_path = tmp_path / ".shipit.toml"
     managed = config.load_managed(config.load(cfg_path))
     cfg_path.write_text(config.dump_manifest("testhash", managed))  # policy stripped
 
     rec.calls.clear()
-    rc = install.run(str(tmp_path), pr=True)
-    assert rc == 0
-    # A seed-only change still opens a DRAFT PR (managed set NOOP, policy seeded)...
+    plan = _plan(tmp_path)
+    # A seed-only change still counts as work (managed set NOOP, policy seeded)...
+    assert not plan.writes and plan.seeds
+    assert not plan.nothing_to_do
+    result = _apply(tmp_path, iapply.MODE_PR)
     assert ("pr_create", True) in rec.calls
     assert "### Policy seeded" in rec.pr_body
-    # ...but it does NOT claim to (re)activate the checks — no managed unit was written.
+    # ...but it does NOT claim to (re)activate the checks — no managed unit was
+    # written, so the typed result records no activation at all.
+    assert result.hooks_activated is None
     assert "### Checks activated locally" not in rec.pr_body
     # ...and the policy is back in place.
     secrets = _secrets_by_name(tmp_path)
@@ -1030,7 +1114,7 @@ def test_install_reseeds_policy_when_missing_even_if_managed_current(tmp_path, r
 
 def test_dry_run_does_not_seed_policy(tmp_path, rec):
     (tmp_path / "AGENTS.md").write_text("# Acme\n")
-    rc = install.run(str(tmp_path), dry_run=True)
+    rc = verb.run(str(tmp_path), dry_run=True)
     assert rc == 0
     # No file written on a dry-run, so nothing is seeded.
     assert not (tmp_path / ".shipit.toml").exists()
@@ -1042,20 +1126,21 @@ def test_dry_run_does_not_seed_policy(tmp_path, rec):
 
 
 def test_activates_hooks_is_true_iff_lefthook_is_managed():
-    units = install.load_units()
-    decisions = install.plan(units, {}, {})
-    assert install.activates_hooks(decisions) is True
+    units = iunits.load_units()
+    decisions = irec.plan(units, {}, {})
+    assert irec.activates_hooks(decisions) is True
 
     # A set with no lefthook unit does not activate.
-    others = [d for d in decisions if d.unit.key != install.LEFTHOOK_FILE]
-    assert install.activates_hooks(others) is False
+    others = [d for d in decisions if d.unit.key != iunits.LEFTHOOK_FILE]
+    assert irec.activates_hooks(others) is False
 
 
 def test_fresh_install_activates_the_check_hooks(tmp_path, rec):
     (tmp_path / "AGENTS.md").write_text("# Acme\n")
-    rc = install.run(str(tmp_path), pr=True)
-    assert rc == 0
-    # The lefthook boundary was invoked exactly once, on the consumer root.
+    result = _apply(tmp_path, iapply.MODE_PR)
+    # The lefthook boundary was invoked exactly once, on the consumer root,
+    # and the typed result records the live outcome.
+    assert result.hooks_activated is True
     assert len(rec.hook_activations) == 1
     assert rec.hook_activations[0] == tmp_path.resolve()
     # The PR body announces the checks are live.
@@ -1065,100 +1150,85 @@ def test_fresh_install_activates_the_check_hooks(tmp_path, rec):
 
 def test_break_glass_push_also_activates_hooks(tmp_path, rec):
     (tmp_path / "AGENTS.md").write_text("# Acme\n")
-    rc = install.run(str(tmp_path), push=True)
-    assert rc == 0
+    result = _apply(tmp_path, iapply.MODE_PUSH)
+    assert result.hooks_activated is True
     assert len(rec.hook_activations) == 1
-
-
-def test_dry_run_does_not_activate_hooks(tmp_path, rec):
-    rc = install.run(str(tmp_path), dry_run=True)
-    assert rc == 0
-    assert rec.hook_activations == []  # no side effect on dry-run
 
 
 def test_reinstall_with_writes_reactivates_idempotently(tmp_path, rec):
     (tmp_path / "AGENTS.md").write_text("# Acme\n")
-    install.run(str(tmp_path))
+    _apply(tmp_path)
     assert len(rec.hook_activations) == 1
     # A consumer edit forces a writing re-install; activation re-runs (safe
     # because `lefthook install` is idempotent — we never hand-roll a hook).
     (tmp_path / "lefthook.yml").write_text("CONSUMER EDIT\n")
     rec.calls.clear()
-    install.run(str(tmp_path))
+    _apply(tmp_path)
     assert len(rec.hook_activations) == 2
 
 
-def test_install_warns_but_succeeds_when_activation_fails(tmp_path, monkeypatch, rec):
-    # The boundary reports a failed activation (nonzero rc); install must still
+def test_install_degrades_but_succeeds_when_activation_fails(tmp_path, rec):
+    # The boundary reports a failed activation (nonzero rc); apply must still
     # finish its PR rather than aborting — activation is opportunistic, not a
     # hard-fail check.
-    rec.hook_activations.clear()
-    monkeypatch.setattr(
-        install,
-        "_activate_hooks",
-        lambda root: _exec_result(1, stderr="lefthook: broken config"),
-    )
     (tmp_path / "AGENTS.md").write_text("# Acme\n")
-    rc = install.run(str(tmp_path), pr=True)
-    assert rc == 0
+    result = _apply(
+        tmp_path,
+        iapply.MODE_PR,
+        activate_hooks=lambda root: _exec_result(1, stderr="lefthook: broken config"),
+    )
     assert ("pr_create", True) in rec.calls
-    # The PR body must NOT claim the checks went live on this failure path; it
-    # records that local activation was deferred so a merger knows to act.
+    # The typed result records the degraded outcome + its detail...
+    assert result.hooks_activated is False
+    assert "lefthook: broken config" in result.hooks_detail
+    # ...the renderer's stderr warning derives from it...
+    assert "could not activate git hooks" in verb.format_result_warnings(result)
+    # ...and the PR body must NOT claim the checks went live; it records that
+    # local activation was deferred so a merger knows to act.
     assert "### Checks activated locally" not in rec.pr_body
     assert "local activation skipped" in rec.pr_body
     assert "lefthook install" in rec.pr_body
 
 
-def test_install_warns_but_succeeds_when_lefthook_missing(
-    tmp_path, monkeypatch, rec, capsys
-):
+def test_install_degrades_but_succeeds_when_lefthook_missing(tmp_path, rec):
     # A missing/unlaunchable lefthook surfaces as the runner's ExecError
-    # (ADR-0028); install must warn — pointing at the canonical recovery — and
+    # (ADR-0028); apply must degrade — pointing at the canonical recovery — and
     # still finish its PR rather than aborting.
-    rec.hook_activations.clear()
-
     def boom(root):
         raise execrun.ExecError(
             ["lefthook", "install"], rc=None, cause=execrun.CAUSE_MISSING_BINARY
         )
 
-    monkeypatch.setattr(install, "_activate_hooks", boom)
     (tmp_path / "AGENTS.md").write_text("# Acme\n")
-    rc = install.run(str(tmp_path), pr=True)
-    assert rc == 0
+    result = _apply(tmp_path, iapply.MODE_PR, activate_hooks=boom)
     assert ("pr_create", True) in rec.calls
+    assert result.hooks_activated is False
     assert "### Checks activated locally" not in rec.pr_body
     assert "local activation skipped" in rec.pr_body
     # Points at the canonical recovery, which works in a consumer repo too.
-    err = capsys.readouterr().err
-    assert "could not activate git hooks" in err
-    assert "not found on PATH" in err
-    assert "lefthook install` to activate the checks" in err
+    warning = verb.format_result_warnings(result)
+    assert "could not activate git hooks" in warning
+    assert "not found on PATH" in warning
+    assert "lefthook install` to activate the checks" in warning
 
 
-def test_install_activation_timeout_does_not_claim_missing_binary(
-    tmp_path, monkeypatch, rec, capsys
-):
+def test_install_activation_timeout_does_not_claim_missing_binary(tmp_path, rec):
     # A NON-missing-binary transport failure (e.g. a timeout) must not be
-    # mislabelled "not found on PATH": the warning branches on exc.cause and
+    # mislabelled "not found on PATH": the detail branches on exc.cause and
     # points at resolving the failure, still ending in the canonical recovery.
-    rec.hook_activations.clear()
-
     def boom(root):
         raise execrun.ExecError(
             ["lefthook", "install"], rc=None, cause=execrun.CAUSE_TIMEOUT
         )
 
-    monkeypatch.setattr(install, "_activate_hooks", boom)
     (tmp_path / "AGENTS.md").write_text("# Acme\n")
-    rc = install.run(str(tmp_path), pr=True)
-    assert rc == 0
+    result = _apply(tmp_path, iapply.MODE_PR, activate_hooks=boom)
     assert ("pr_create", True) in rec.calls
-    err = capsys.readouterr().err
-    assert "could not activate git hooks" in err
-    assert "not found on PATH" not in err
-    assert "could not run" in err
-    assert "lefthook install` to activate the checks" in err
+    warning = verb.format_result_warnings(result)
+    assert "could not activate git hooks" in warning
+    assert "not found on PATH" not in warning
+    assert "could not run" in warning
+    assert "lefthook install` to activate the checks" in warning
 
 
 def test_activate_hooks_boundary_runs_lefthook_install(tmp_path, monkeypatch):
@@ -1180,8 +1250,8 @@ def test_activate_hooks_boundary_runs_lefthook_install(tmp_path, monkeypatch):
             duration_ms=1,
         )
 
-    monkeypatch.setattr(install.execrun, "run", fake_run)
-    result = install._activate_hooks(tmp_path)
+    monkeypatch.setattr(iapply.execrun, "run", fake_run)
+    result = iapply._activate_hooks(tmp_path)
     assert result.ok
     assert captured["argv"] == ["lefthook", "install"]
     assert captured["cwd"] == str(tmp_path)
@@ -1189,24 +1259,24 @@ def test_activate_hooks_boundary_runs_lefthook_install(tmp_path, monkeypatch):
     # The stated local bound rides the wire (ADR-0028): lefthook writes a few
     # .git/hooks files locally — git's local tier, never the runner's implicit
     # 5-minute default.
-    assert captured["timeout"] == install.HOOK_ACTIVATE_TIMEOUT
-    assert install.HOOK_ACTIVATE_TIMEOUT < execrun.DEFAULT_TIMEOUT
-    assert "pre-commit" in install._activation_output(result)
+    assert captured["timeout"] == iapply.HOOK_ACTIVATE_TIMEOUT
+    assert iapply.HOOK_ACTIVATE_TIMEOUT < execrun.DEFAULT_TIMEOUT
+    assert "pre-commit" in iapply._activation_output(result)
 
 
 def test_activate_hooks_boundary_missing_binary_is_exec_error(tmp_path, monkeypatch):
     # A binary absent from PATH surfaces as the runner's single transport error,
     # tagged missing-binary — never a raw FileNotFoundError or a silent skip.
-    monkeypatch.setattr(install, "LEFTHOOK_BINARY", "shipit-no-such-lefthook-xyz")
+    monkeypatch.setattr(iapply, "LEFTHOOK_BINARY", "shipit-no-such-lefthook-xyz")
     with pytest.raises(execrun.ExecError) as exc_info:
-        install._activate_hooks(tmp_path)
+        iapply._activate_hooks(tmp_path)
     assert exc_info.value.cause == execrun.CAUSE_MISSING_BINARY
 
 
 def test_activation_output_joins_streams_with_newline(tmp_path):
     # Join with a newline so a stdout without a trailing newline does not run
     # straight into stderr (e.g. `donefatal: ...`) in the warning we print.
-    out = install._activation_output(
+    out = iapply._activation_output(
         _exec_result(1, stdout="done", stderr="fatal: broken")
     )
     assert out == "done\nfatal: broken"
@@ -1226,41 +1296,34 @@ RETIRED_WORKFLOW_PATH = ".github/workflows/copilot-review.yml"
 def test_decide_retired_covers_the_matrix():
     # absent -> no-op
     assert (
-        install.decide_retired(actual_hash=None, pristine_hashes=("a", "b"))
-        == install.NOOP
+        irec.decide_retired(actual_hash=None, pristine_hashes=("a", "b")) == irec.NOOP
     )
     # pristine match -> delete
-    assert (
-        install.decide_retired(actual_hash="a", pristine_hashes=("a",))
-        == install.DELETE
-    )
+    assert irec.decide_retired(actual_hash="a", pristine_hashes=("a",)) == irec.DELETE
     # any of several known historical versions -> delete
     assert (
-        install.decide_retired(actual_hash="b", pristine_hashes=("a", "b", "c"))
-        == install.DELETE
+        irec.decide_retired(actual_hash="b", pristine_hashes=("a", "b", "c"))
+        == irec.DELETE
     )
     # modified content (matches NO known version) -> warn-and-keep
-    assert (
-        install.decide_retired(actual_hash="x", pristine_hashes=("a", "b"))
-        == install.KEEP
-    )
+    assert irec.decide_retired(actual_hash="x", pristine_hashes=("a", "b")) == irec.KEEP
     # present but the manifest knows no versions at all -> keep (never guess)
-    assert install.decide_retired(actual_hash="x", pristine_hashes=()) == install.KEEP
+    assert irec.decide_retired(actual_hash="x", pristine_hashes=()) == irec.KEEP
 
 
 def test_plan_retired_decides_every_manifest_entry():
     entries = [
-        install.RetiredFile(path="a.yml", pristine_hashes=("h1",)),
-        install.RetiredFile(path="b.yml", pristine_hashes=("h2",)),
-        install.RetiredFile(path="c.yml", pristine_hashes=("h3",)),
+        irec.RetiredFile(path="a.yml", pristine_hashes=("h1",)),
+        irec.RetiredFile(path="b.yml", pristine_hashes=("h2",)),
+        irec.RetiredFile(path="c.yml", pristine_hashes=("h3",)),
     ]
-    decisions = install.plan_retired(
+    decisions = irec.plan_retired(
         entries, {"a.yml": "h1", "b.yml": "edited", "c.yml": None}
     )
     assert [d.action for d in decisions] == [
-        install.DELETE,
-        install.KEEP,
-        install.NOOP,
+        irec.DELETE,
+        irec.KEEP,
+        irec.NOOP,
     ]
 
 
@@ -1281,56 +1344,58 @@ def test_retired_path_rejects_unsafe_manifest_entries(bad):
     # Every manifest entry names a file the IO pass will unlink, so a path
     # that could escape the consumer root fails the load closed.
     with pytest.raises(ValueError, match="unsafe path"):
-        install._retired_path(bad)
+        irec._retired_path(bad)
 
 
 def test_retired_path_accepts_a_plain_relative_path():
-    assert install._retired_path(".github/workflows/x.yml") == ".github/workflows/x.yml"
+    assert irec._retired_path(".github/workflows/x.yml") == ".github/workflows/x.yml"
 
 
 def test_retired_manifest_carries_the_copilot_workflow_history():
     # The packaged manifest's first entry is the Copilot caller workflow, with
     # its known pristine hashes from this repo's git history — including the
     # last-shipped version the fixture snapshots.
-    retired = install.load_retired()
+    retired = irec.load_retired()
     entry = next(r for r in retired if r.path == RETIRED_WORKFLOW_PATH)
     assert all(h.startswith("sha256:") for h in entry.pristine_hashes)
     fixture_hash = config.content_hash(PRISTINE_WORKFLOW.read_bytes())
     assert fixture_hash in entry.pristine_hashes
 
 
-def test_install_deletes_a_pristine_retired_file(tmp_path, rec, capsys):
+def test_install_deletes_a_pristine_retired_file(tmp_path, rec):
     # End-to-end: a checkout that still has a pristine copy of the retired
-    # workflow sheds it on install, and the outcome is reported.
+    # workflow sheds it on install, and the Plan/report both carry the outcome.
     victim = tmp_path / RETIRED_WORKFLOW_PATH
     victim.parent.mkdir(parents=True)
     victim.write_bytes(PRISTINE_WORKFLOW.read_bytes())
 
-    rc = install.run(str(tmp_path))
-    assert rc == 0
+    plan = _plan(tmp_path)
+    assert [d.retired.path for d in plan.retire_deletes] == [RETIRED_WORKFLOW_PATH]
+    assert f"delete   {RETIRED_WORKFLOW_PATH} (retired)" in verb.format_plan(plan)
+    _apply(tmp_path)
     assert not victim.exists()
-    out = capsys.readouterr().out
-    assert f"delete   {RETIRED_WORKFLOW_PATH} (retired)" in out
 
 
-def test_install_keeps_a_modified_retired_file_with_warning(tmp_path, rec, capsys):
+def test_install_keeps_a_modified_retired_file_with_warning(tmp_path, rec):
     # A locally modified copy is NEVER destroyed: kept on disk, warned loudly.
     victim = tmp_path / RETIRED_WORKFLOW_PATH
     victim.parent.mkdir(parents=True)
     victim.write_text(PRISTINE_WORKFLOW.read_text() + "# local tweak\n")
 
-    rc = install.run(str(tmp_path))
-    assert rc == 0
+    plan = _plan(tmp_path)
+    assert [d.retired.path for d in plan.retire_keeps] == [RETIRED_WORKFLOW_PATH]
+    assert f"keep     {RETIRED_WORKFLOW_PATH} (retired; locally modified)" in (
+        verb.format_plan(plan)
+    )
+    assert f"retired file kept: {RETIRED_WORKFLOW_PATH}" in (
+        verb.format_plan_warnings(plan)
+    )
+    _apply(tmp_path)
     assert victim.is_file()
     assert "# local tweak" in victim.read_text()
-    captured = capsys.readouterr()
-    assert f"keep     {RETIRED_WORKFLOW_PATH} (retired; locally modified)" in (
-        captured.out
-    )
-    assert f"retired file kept: {RETIRED_WORKFLOW_PATH}" in captured.err
 
 
-def test_install_keeps_a_symlink_at_a_retired_path(tmp_path, rec, capsys):
+def test_install_keeps_a_symlink_at_a_retired_path(tmp_path, rec):
     # `is_file()` follows symlinks: a link whose TARGET carries pristine
     # content must not be deleted — the link is not shipit's output. It is
     # kept and warned like any locally modified copy.
@@ -1340,65 +1405,66 @@ def test_install_keeps_a_symlink_at_a_retired_path(tmp_path, rec, capsys):
     victim.parent.mkdir(parents=True)
     victim.symlink_to(target)
 
-    rc = install.run(str(tmp_path))
-    assert rc == 0
+    plan = _plan(tmp_path)
+    assert [d.retired.path for d in plan.retire_keeps] == [RETIRED_WORKFLOW_PATH]
+    _apply(tmp_path)
     assert victim.is_symlink()
-    captured = capsys.readouterr()
     assert f"keep     {RETIRED_WORKFLOW_PATH} (retired; locally modified)" in (
-        captured.out
+        verb.format_plan(plan)
     )
 
 
-def test_retired_delete_alone_is_still_a_write(tmp_path, rec, capsys):
+def test_retired_delete_alone_is_still_a_write(tmp_path, rec):
     # A consumer whose managed set is fully current still sheds a pristine
     # retired file on re-install — the cleanup is not gated on managed drift.
-    assert install.run(str(tmp_path)) == 0
+    _apply(tmp_path)
     victim = tmp_path / RETIRED_WORKFLOW_PATH
     victim.parent.mkdir(parents=True)
     victim.write_bytes(PRISTINE_WORKFLOW.read_bytes())
-    capsys.readouterr()
 
-    rc = install.run(str(tmp_path))
-    assert rc == 0
+    plan = _plan(tmp_path)
+    assert not plan.writes and plan.retire_deletes
+    assert not plan.nothing_to_do
+    assert "nothing to do" not in verb.format_plan(plan)
+    _apply(tmp_path)
     assert not victim.exists()
-    out = capsys.readouterr().out
-    assert "nothing to do" not in out
-    assert f"delete   {RETIRED_WORKFLOW_PATH} (retired)" in out
 
     # And once gone, a further re-install is back to a clean no-op (absent -> no-op).
-    assert install.run(str(tmp_path)) == 0
-    assert "nothing to do" in capsys.readouterr().out
+    again = _plan(tmp_path)
+    assert again.nothing_to_do
+    assert "nothing to do" in verb.format_plan(again)
 
 
-def test_kept_retired_file_changes_the_nothing_to_do_wording(tmp_path, rec, capsys):
+def test_kept_retired_file_changes_the_nothing_to_do_wording(tmp_path, rec):
     # Managed set current + a kept (locally modified) retired file: the loud
     # keep warning must not be followed by "managed set is current", which
     # would read as a contradiction.
-    assert install.run(str(tmp_path)) == 0
+    _apply(tmp_path)
     victim = tmp_path / RETIRED_WORKFLOW_PATH
     victim.parent.mkdir(parents=True)
     victim.write_text(PRISTINE_WORKFLOW.read_text() + "# local tweak\n")
-    capsys.readouterr()
 
-    rc = install.run(str(tmp_path))
-    assert rc == 0
+    plan = _plan(tmp_path)
+    assert plan.nothing_to_do and plan.retire_keeps
+    report = verb.format_plan(plan)
+    assert "nothing to do — no automated changes to apply." in report
+    assert "managed set is current" not in report
     assert victim.is_file()
-    out = capsys.readouterr().out
-    assert "nothing to do — no automated changes to apply." in out
-    assert "managed set is current" not in out
 
 
-def test_dry_run_reports_but_keeps_a_pristine_retired_file(tmp_path, rec, capsys):
+def test_dry_run_reports_but_keeps_a_pristine_retired_file(tmp_path, rec):
     victim = tmp_path / RETIRED_WORKFLOW_PATH
     victim.parent.mkdir(parents=True)
     victim.write_bytes(PRISTINE_WORKFLOW.read_bytes())
 
-    rc = install.run(str(tmp_path), dry_run=True)
+    plan = _plan(tmp_path)
+    report = verb.format_plan(plan, dry_run=True)
+    assert f"delete   {RETIRED_WORKFLOW_PATH} (retired)" in report
+    assert "1 retired delete(s)" in report
+    # Through the verb, dry-run touches nothing: no delete, no git, no PR.
+    rc = verb.run(str(tmp_path), dry_run=True)
     assert rc == 0
     assert victim.is_file()  # nothing deleted
-    out = capsys.readouterr().out
-    assert f"delete   {RETIRED_WORKFLOW_PATH} (retired)" in out
-    assert "1 retired delete(s)" in out
     assert rec.calls == []
 
 
@@ -1407,8 +1473,10 @@ def test_pr_install_commits_the_retired_deletion_and_reports_it(tmp_path, rec):
     victim.parent.mkdir(parents=True)
     victim.write_bytes(PRISTINE_WORKFLOW.read_bytes())
 
-    rc = install.run(str(tmp_path), pr=True)
-    assert rc == 0
+    plan = _plan(tmp_path)
+    # The deleted path joins the typed commit set, so every mode carries it.
+    assert RETIRED_WORKFLOW_PATH in plan.changed_paths
+    _apply(tmp_path, iapply.MODE_PR)
     assert not victim.exists()
     # The deleted path is staged with the rest of the set, so the PR carries it.
     added = next(paths for name, paths in rec.calls if name == "add")
@@ -1422,10 +1490,126 @@ def test_pr_body_lists_a_kept_retired_file(tmp_path, rec):
     victim.parent.mkdir(parents=True)
     victim.write_text(PRISTINE_WORKFLOW.read_text() + "# local tweak\n")
 
-    rc = install.run(str(tmp_path), pr=True)
-    assert rc == 0
+    plan = _plan(tmp_path)
+    assert RETIRED_WORKFLOW_PATH not in plan.changed_paths  # kept files never staged
+    _apply(tmp_path, iapply.MODE_PR)
     assert victim.is_file()
     added = next(paths for name, paths in rec.calls if name == "add")
-    assert RETIRED_WORKFLOW_PATH not in added  # kept files are never staged
+    assert RETIRED_WORKFLOW_PATH not in added
     assert "### Retired files kept — locally modified" in rec.pr_body
     assert RETIRED_WORKFLOW_PATH in rec.pr_body
+
+
+# --------------------------------------------------------------------------
+# Renderers — pure string functions over Plan / InstallResult
+# --------------------------------------------------------------------------
+
+
+def test_format_plan_reports_the_decided_actions(tmp_path, rec):
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    plan = _plan(tmp_path)
+    report = verb.format_plan(plan)
+    assert report.startswith(f"install: {tmp_path.resolve()}")
+    assert "add      AGENTS.md" in report
+    assert "seed     [reviewers]" in report
+    assert "(dry-run)" not in report
+    # The dry-run header + summary line render off the SAME plan.
+    dry = verb.format_plan(plan, dry_run=True)
+    assert "(dry-run)" in dry
+    assert "— dry-run, nothing written" in dry
+    assert f"{len(plan.writes)} to write" in dry
+
+
+def test_format_plan_omits_noop_units(tmp_path, rec):
+    _apply(tmp_path)
+    plan = _plan(tmp_path)
+    report = verb.format_plan(plan)
+    # All units are NOOP now: none renders, only the nothing-to-do line.
+    assert "add      " not in report
+    assert "nothing to do — managed set is current." in report
+
+
+def test_format_result_renders_the_mode_outcomes():
+    plan = irec.Plan(root="/x", decisions=(), retired=(), seeds=())
+    tree = iapply.InstallResult(plan=plan, mode=iapply.MODE_TREE)
+    assert "refreshed the managed set in the working tree" in verb.format_result(tree)
+    local = iapply.InstallResult(plan=plan, mode=iapply.MODE_LOCAL, branch="main")
+    assert "committed to main (local-only --local)" in verb.format_result(local)
+    push = iapply.InstallResult(plan=plan, mode=iapply.MODE_PUSH, branch="main")
+    assert "pushed to main (break-glass --push)" in verb.format_result(push)
+    opened = iapply.InstallResult(
+        plan=plan, mode=iapply.MODE_PR, branch="shipit/install", pr_url="https://x/1"
+    )
+    assert "opened draft PR: https://x/1" in verb.format_result(opened)
+    updated = iapply.InstallResult(
+        plan=plan,
+        mode=iapply.MODE_PR,
+        branch="shipit/install",
+        pr_url="https://x/1",
+        pr_updated=True,
+    )
+    assert "updated draft PR: https://x/1" in verb.format_result(updated)
+    # The activation line leads the outcome when the checks went live.
+    live = iapply.InstallResult(plan=plan, mode=iapply.MODE_TREE, hooks_activated=True)
+    assert verb.format_result(live).splitlines()[0] == (
+        "  activated git hooks (lefthook install) — the checks are live"
+    )
+
+
+def test_format_pr_body_sections_render_from_the_plan(tmp_path, rec):
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    plan = _plan(tmp_path)
+    body = verb.format_pr_body(plan, {}, True)
+    assert body.startswith("`shipit install` reconciled the managed set.")
+    assert "### Added" in body
+    assert "### Policy seeded" in body
+    assert "### Checks activated locally" in body
+    # The degraded-activation body flips to the deferred wording.
+    deferred = verb.format_pr_body(plan, {}, False)
+    assert "### Checks configured — local activation skipped" in deferred
+    # No activation attempted -> neither section renders.
+    silent = verb.format_pr_body(plan, {}, None)
+    assert "Checks activated" not in silent and "activation skipped" not in silent
+
+
+# --------------------------------------------------------------------------
+# The argv smoke layer — parse-to-values wiring + the two-tier exit contract
+# --------------------------------------------------------------------------
+
+
+def test_cmd_dry_run_wires_argv_to_the_report(tmp_path):
+    from click.testing import CliRunner
+
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    result = CliRunner().invoke(verb.cmd, [str(tmp_path), "--dry-run"])
+    assert result.exit_code == 0
+    assert "(dry-run)" in result.output
+    assert "— dry-run, nothing written" in result.output
+
+
+def test_cmd_rejects_a_missing_path_at_parse(tmp_path):
+    # The PATH validation moved to parse (ADR-0030): a nonexistent target is a
+    # click usage error — exit 2 — never verb-body code.
+    from click.testing import CliRunner
+
+    result = CliRunner().invoke(verb.cmd, [str(tmp_path / "nope")])
+    assert result.exit_code == 2
+    assert "does not exist" in result.output
+
+
+def test_cmd_rejects_a_file_path_at_parse(tmp_path):
+    from click.testing import CliRunner
+
+    victim = tmp_path / "a-file"
+    victim.write_text("x\n")
+    result = CliRunner().invoke(verb.cmd, [str(victim)])
+    assert result.exit_code == 2
+
+
+def test_cmd_mode_flags_are_mutually_exclusive():
+    from click.testing import CliRunner
+
+    for pair in (["--local", "--push"], ["--pr", "--local"], ["--pr", "--push"]):
+        result = CliRunner().invoke(verb.cmd, [*pair, "."])
+        assert result.exit_code == 2
+        assert "mutually exclusive" in result.output

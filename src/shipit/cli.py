@@ -107,49 +107,10 @@ def verify_apps_cmd(repo: str | None, agents: tuple[str, ...]) -> None:
     raise SystemExit(rc)
 
 
-@root.command(name="install")
-@click.argument("path", required=False)
-@click.option(
-    "--pr",
-    is_flag=True,
-    help="Stage the managed set on the `shipit/install` branch and open a DRAFT "
-    "PR (the standalone onboarding/reconcile flow).",
-)
-@click.option(
-    "--push",
-    is_flag=True,
-    help="Break-glass: commit and push straight to the branch (admin), no PR.",
-)
-@click.option(
-    "--local",
-    is_flag=True,
-    help="Local-only: commit the managed set on the current branch; no push, no PR "
-    "(used by `tree create` provisioning).",
-)
-@click.option(
-    "--dry-run", is_flag=True, help="Print the reconciliation plan; touch nothing."
-)
-def install_cmd(
-    path: str | None, pr: bool, push: bool, local: bool, dry_run: bool
-) -> None:
-    """Vendor + reconcile shipit's managed set into the consumer at PATH.
-
-    PATH defaults to the current directory. By default install refreshes the
-    managed set IN THE WORKING TREE and stops — no commit, no branch, no push,
-    no PR — so a mid-workstream refresh lands in the caller's own commit, never
-    in a stray parallel PR (#359). Re-running with no changes is a clean no-op.
-
-    ``--pr`` opts into the standalone reconcile flow: stage on the
-    `shipit/install` branch and open a DRAFT PR (pull, never push); a
-    consumer-edited unit is surfaced in the PR body rather than clobbered blind.
-
-    ``--local`` commits the managed set on the current branch and stops (no push,
-    no PR) — the mode Tree provisioning uses so creating a Tree never touches origin.
-    """
-    if sum((pr, push, local)) > 1:
-        raise click.UsageError("--pr, --push, and --local are mutually exclusive.")
-    rc = install.run(path, dry_run=dry_run, pr=pr, push=push, local=local)
-    raise SystemExit(rc)
+# The install family is promoted onto the ADR-0030 contract (CLI02-WS01): its
+# command lives with its renderers in verbs/install.py; the domain (plan/apply)
+# is the shipit.install package.
+root.add_command(install.cmd)
 
 
 @root.command(name="lint")

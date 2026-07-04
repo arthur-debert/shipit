@@ -21,6 +21,7 @@ from shipit.agent import backend as agent_backend
 from shipit.config import SecretSource
 from shipit.review import ghauth
 from shipit.session import liveness
+from shipit.install import apply as install_apply
 from shipit.verbs import install, lint, verify_apps
 
 
@@ -78,9 +79,9 @@ def rec(monkeypatch):
         monkeypatch.setattr(git, name, getattr(r, name))
     for name in ("pr_url_for_head", "pr_create"):
         monkeypatch.setattr(gh, name, getattr(r, name))
-    monkeypatch.setattr(install, "_shipit_version", lambda: "testhash")
+    monkeypatch.setattr(install_apply, "_shipit_version", lambda: "testhash")
     monkeypatch.setattr(
-        install,
+        install_apply,
         "_activate_hooks",
         lambda root: execrun.ExecResult(
             argv=("lefthook", "install"), rc=0, stdout="", stderr="", duration_ms=1
@@ -99,7 +100,7 @@ def test_install_logs_the_write_and_pr_milestones(tmp_path, rec, caplog):
     assert written and written[0].adds > 0
     # The PR milestone: the branch and its draft-PR URL, timed.
     pr = _with_fields(caplog.records, logging.INFO, "branch", "url", "duration_ms")
-    assert pr and pr[0].branch == install.INSTALL_BRANCH
+    assert pr and pr[0].branch == install_apply.INSTALL_BRANCH
 
 
 def test_noop_reinstall_emits_no_mutation_milestone(tmp_path, rec, caplog):
