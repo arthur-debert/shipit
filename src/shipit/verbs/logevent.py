@@ -26,13 +26,15 @@ cannot become an agent diary (the narration constraint governs event *types*;
 ``--from-hook`` declares the hook-witnessed calling context and makes the verb
 fail OPEN past name validation: any emission failure is swallowed to exit 0
 (WARNING per the hook fail-open canon), because a broken log path must never
-block — or noise — git.
+block git.
 """
 
 from __future__ import annotations
 
 import logging
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 import click
 
@@ -69,6 +71,28 @@ def _compose_msg(
     if name == "commit.created" and commit is not None:
         return f"commit created {str(commit)[:_SHORT_SHA]}", {"sha": str(commit)}
     return name.replace(".", " "), {}
+
+
+@contextmanager
+def _scoped_identity(identity: branchid.BranchIdentity) -> Iterator[None]:
+    """Bind the branch-derived identity for ONE emission, then restore.
+
+    An in-grammar branch (it derived an epic) is the local truth for the WHOLE
+    ``(epic, ws)`` pair: a work stream binds both halves; an umbrella branch
+    binds epic and SUPPRESSES ``ws`` (via :func:`logcontext.cleared`), so a
+    stale env-propagated Work Stream cannot fuse onto an epic-only branch into a
+    mixed identity. An out-of-grammar branch derived nothing and touches
+    nothing — the env-bound identity shows through untouched.
+    """
+    if identity.epic is None:
+        yield
+        return
+    if identity.ws is not None:
+        with logcontext.scoped(epic=identity.epic, ws=identity.ws):
+            yield
+        return
+    with logcontext.scoped(epic=identity.epic), logcontext.cleared("ws"):
+        yield
 
 
 def run(
@@ -109,9 +133,10 @@ def run(
         identity = branchid.derive(branch)
         msg, extra = _compose_msg(name, about, commit)
         # Scoped, not process-lifetime: the binding is local to this one
-        # emission, and a derived half overrides an env-bound one for its
-        # duration (absent halves drop, so env-bound identity shows through).
-        with logcontext.scoped(epic=identity.epic, ws=identity.ws):
+        # emission. An in-grammar branch is the local truth for the whole
+        # identity (an umbrella suppresses env ws); an out-of-grammar branch
+        # touches nothing, so env-bound identity shows through.
+        with _scoped_identity(identity):
             events.emit(logger, name, msg, extra=extra or None)
         return 0
     except Exception as exc:  # noqa: BLE001 - the verb IS the fail-open seam

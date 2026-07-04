@@ -61,7 +61,7 @@ pre-push:
 # per-repo JSONL log via the constrained write verb. Registered names only;
 # domain keys (session from the env, epic/ws from the branch) are picked up by
 # the verb, not passed here. `--from-hook` makes the verb fail OPEN (exit 0,
-# WARNING) so a broken log path can never block — or noise — git. Same pinned
+# WARNING) so a broken log path can never block git. Same pinned
 # `-e lint` env as the lint caller above: shipit is on that env's PATH and the
 # pin dodges the inherited-PIXI_PROJECT_MANIFEST ambiguity.
 post-commit:

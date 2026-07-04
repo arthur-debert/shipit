@@ -81,6 +81,21 @@ def test_umbrella_branch_derives_epic_only(tmp_path):
     assert "ws" not in record
 
 
+def test_umbrella_branch_suppresses_an_env_bound_ws(tmp_path):
+    """The umbrella branch is the local truth for the WHOLE identity: it carries
+    an epic but no Work Stream, so an env-propagated `ws` must NOT fuse onto it
+    into a mixed identity (env epic=OLD01/ws=3 + branch NEW01/umbrella must not
+    yield epic=NEW01/ws=3)."""
+    _configure(
+        tmp_path,
+        env={"SHIPIT_LOG_CTX_EPIC": "OLD01", "SHIPIT_LOG_CTX_WS": "3"},
+    )
+    assert logevent.run("breaker.fired", branch="NEW01/umbrella") == 0
+    (record,) = _records(tmp_path)
+    assert record["epic"] == "NEW01"
+    assert "ws" not in record
+
+
 @pytest.mark.parametrize(
     "branch",
     ["issues/375/work", "ephemeral/sess-20260703-1234", "main", None],
