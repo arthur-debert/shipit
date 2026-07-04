@@ -246,6 +246,53 @@ def lint_cmd(path: str | None, fix: bool) -> None:
     metavar="N",
     help="Only records whose bound `pr` domain key equals this PR number.",
 )
+@click.option(
+    "--session",
+    "session",
+    default=None,
+    metavar="ID|current",
+    help="Only this session's records; `current` resolves from the session "
+    "environment (or the ephemeral Tree cwd).",
+)
+@click.option(
+    "--epic",
+    "epic",
+    default=None,
+    metavar="CODE",
+    help="Only records whose bound `epic` domain key equals this code.",
+)
+@click.option(
+    "--ws",
+    "ws",
+    default=None,
+    metavar="N",
+    help="Only this Work Stream's records; accepts 1, 01, or WS01.",
+)
+@click.option(
+    "--agent",
+    "agent",
+    default=None,
+    metavar="ID",
+    help="Only records whose bound `agent` domain key equals this spawn id.",
+)
+@click.option(
+    "--role",
+    "role",
+    default=None,
+    metavar="NAME",
+    help="Only records whose bound `role` domain key equals this Role name.",
+)
+@click.option(
+    "--flow",
+    is_flag=True,
+    help="Render the filtered records as the session story (implies --events).",
+)
+@click.option(
+    "--agent-ids",
+    "show_agents",
+    is_flag=True,
+    help="Show agent ids on flow lines (always collected, displayed on request).",
+)
 def logs_cmd(
     repo: str | None,
     path_only: bool,
@@ -254,6 +301,13 @@ def logs_cmd(
     lines: int,
     events_only: bool,
     pr: int | None,
+    session: str | None,
+    epic: str | None,
+    ws: str | None,
+    agent: str | None,
+    role: str | None,
+    flow: bool,
+    show_agents: bool,
 ) -> None:
     """Locate and read shipit's durable per-repo JSONL log.
 
@@ -264,11 +318,14 @@ def logs_cmd(
     prints the path plus the last N records, rendered legibly (ts LEVEL logger:
     msg, domain keys trailing); a malformed line is skipped with a stderr note.
     --raw passes the stored lines through unmodified for jq — no parsing, no
-    skipping, malformed lines included — UNLESS a filter is active. --events /
-    --pr filter records (AND, applied before the tail count) and compose with
-    every view; selecting on a field requires parsing, so under an active filter
-    even --raw parses and drops a malformed line rather than passing it through.
-    A log not written yet is reported, not crashed.
+    skipping, malformed lines included — UNLESS a filter is active. --events and
+    the domain-key filters (--pr/--session/--epic/--ws/--agent/--role) compose
+    as AND, apply before the tail count, and work with every view; selecting on
+    a field requires parsing, so under an active filter even --raw parses and
+    drops a malformed line rather than passing it through. --flow renders the
+    session story (intent/theme header, relative times, EPIC-WSnn prefixes;
+    --agent-ids reveals agent ids) and implies --events. A log not written yet
+    is reported, not crashed.
     """
     rc = logs.run(
         repo,
@@ -278,6 +335,13 @@ def logs_cmd(
         tail=lines,
         events_only=events_only,
         pr=pr,
+        session=session,
+        epic=epic,
+        ws=ws,
+        agent=agent,
+        role=role,
+        flow=flow,
+        show_agents=show_agents,
     )
     raise SystemExit(rc)
 
