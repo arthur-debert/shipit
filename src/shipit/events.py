@@ -109,6 +109,30 @@ SKILL_SCRIPTED_NAMES = frozenset(
 )
 
 
+class UnknownEventError(ValueError):
+    """A caller named a dev-cycle event outside the closed vocabulary.
+
+    The USER-FACING spelling of the closed-vocabulary guard: raised by the
+    constrained write path (``shipit log event``) when the asked-for name is
+    not in :data:`EVENT_NAMES`, and mapped to a clean ``error: …`` + exit 1 by
+    the CLI error shell (ADR-0030). Distinct from the plain :class:`ValueError`
+    :func:`emit` raises for the same condition — an in-code emit with an
+    unregistered name is a BUG that must stay a loud traceback, not an input
+    error to be dressed up.
+    """
+
+
+class EventNotRecordedError(RuntimeError):
+    """A dev-cycle emission failed past name validation.
+
+    The constrained write path's residual-failure refusal (the identity and
+    binding seams around the emission — the durable write itself already fails
+    open at logging setup): raised by ``shipit log event`` outside hook
+    context so the error shell renders it uniformly; hook context swallows the
+    same failure to exit 0 instead (fail-open, per the hook canon).
+    """
+
+
 def emit(
     log: logging.Logger,
     name: str,
