@@ -98,7 +98,7 @@ simple-gal = [
 standout = [{ repo = "arthur-debert/standout", path = "standout" }]
 
 [shipit]
-version = "59a6852ac4798707b27012fc319ed1339051630e"
+version = "aa54970a5a4be5afc351e7208c1583001b808bf3"
 
 [managed]
 "skills/lex-primer/SKILL.md" = "sha256:ff616c1c447661298fb8e06a8a8a6ce60400d838c7c881b9e8bd526128e32901"
@@ -106,6 +106,7 @@ version = "59a6852ac4798707b27012fc319ed1339051630e"
 "skills/shipit-grill-with-docs/CONTEXT-FORMAT.md" = "sha256:886ce0e96fd0f76f4c72c337c049cf4655227c599862ce920a62297e0929beae"
 "skills/shipit-grill-with-docs/SKILL.md" = "sha256:ca98401e4e9b036e6f3467631f48f66fbf1f3dcd7e5e5c1fe8f8f03ef8c003cc"
 "skills/shipit-planning/SKILL.md" = "sha256:f51d83b5fbd9a38688cdb13e5b9d251ede8c54a2bad3374c1f4068c9f9039837"
+"skills/shipit-session-status/SKILL.md" = "sha256:4720ad9b381d57c32dfd2aca6cb2a4b338dfa69cac90eedd85a71f7f2f8db962"
 "skills/shipit-to-issues/SKILL.md" = "sha256:2e70e4220c8e9843ebf4b60439eaee25884fe8d2150190730e4120ace05d5ef8"
 "skills/shipit-to-prd/SKILL.md" = "sha256:3f11af08f88382929b1cd3b8b93d61c6eeac0e8322c5b9f7ba5835925d6b87cc"
 "AGENTS.md#shipit-block" = "sha256:3206446780a0c71fe10f2584e43dd8e0fe188a73a5510c75b0f4ee948cf82f9f"

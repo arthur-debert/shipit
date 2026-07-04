@@ -9,6 +9,13 @@ name: shipit-grill-with-docs
 ---
 <what-to-do>
 
+Before the first question, record the grill in the dev-cycle log (best-effort — ADR-0032; on any error continue silently, a skipped emission is a missing event, never a broken step):
+
+```sh
+shipit log event session.intent --about "planning session: <topic>"
+shipit log event planning.grill.started
+```
+
 Interview me relentlessly about every aspect of this plan until we reach a shared understanding. Walk down each branch of the design tree, resolving dependencies between decisions one-by-one. For each question, provide your recommended answer.
 
 Ask the questions one at a time, waiting for feedback on each question before continuing.
@@ -88,5 +95,11 @@ Only offer to create an ADR when all three are true:
 3. **The result of a real trade-off** — there were genuine alternatives and you picked one for specific reasons
 
 If any of the three is missing, skip the ADR. Use the format in [ADR-FORMAT.md](./ADR-FORMAT.md).
+
+Each time an ADR file is written, record it in the dev-cycle log (best-effort; continue on error):
+
+```sh
+shipit log event planning.adr.written --about "ADR-NNNN: <title>"
+```
 
 </supporting-info>
