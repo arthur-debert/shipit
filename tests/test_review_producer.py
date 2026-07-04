@@ -187,9 +187,38 @@ def test_seam_timeout_becomes_a_timed_out_backend_error_with_raw_salvage(_faked)
         producer.run_tree_review(agent_backend.CODEX, _ctx(), launcher=launcher)
     assert exc.value.timed_out is True  # structured -> service maps to timed_out
     assert "timed out" in str(exc.value).lower()
+    # The message reports the ACTUAL seam deadline the backstop fired at (codex has no
+    # native timeout, so no headroom: the default 600s IS the kill deadline).
+    assert "600s" in str(exc.value)
     # The partial stdout+stderr rides `raw` so the #76 salvage can still surface it.
     assert "partial review body" in exc.value.raw
     assert "killed at deadline" in exc.value.raw
+
+
+def test_seam_timeout_message_reports_agys_headroom_deadline_not_the_bare_timeout(
+    _faked,
+):
+    # For a NATIVE-timeout backend (agy) the seam sits ABOVE the native flag by
+    # `_SEAM_HEADROOM_SECONDS`, so the backstop fires at `timeout + headroom`, NOT the
+    # bare configured `--timeout`. The message must name that actual kill deadline so a
+    # debugger isn't misled about when/why the seam backstop triggered.
+    def launcher(cmd, *, cwd, env, timeout=None):
+        raise execrun.ExecError(
+            cmd,
+            rc=None,
+            stdout="partial",
+            stderr="killed at deadline",
+            cause=execrun.CAUSE_TIMEOUT,
+        )
+
+    with pytest.raises(BackendError) as exc:
+        producer.run_tree_review(
+            agent_backend.ANTIGRAVITY, _ctx(), model="pro", launcher=launcher
+        )
+    # Default 600s + 60s headroom = 660s actual seam kill, while the configured
+    # `--timeout` string (600s) is still surfaced for context.
+    assert "660s" in str(exc.value)
+    assert "600s" in str(exc.value)
 
 
 def test_non_timeout_launch_execerror_propagates_as_a_plain_failure(_faked):

@@ -262,8 +262,10 @@ def run_tree_review(
             # carrying the partial stdout+stderr as `raw` so the #76 salvage can still
             # surface whatever the backend had written before it hung.
             raise BackendError(
-                f"{agent} timed out after {timeout} before returning a review "
-                "(the launch seam killed it — try a faster model or a smaller diff)",
+                f"{agent} timed out before returning a review — the launch seam "
+                f"killed it at {_seam_deadline(timeout, spec):.0f}s "
+                f"(configured --timeout {timeout}); try a faster model or a smaller "
+                "diff",
                 raw=f"{exc.stdout}\n{exc.stderr}".strip(),
                 timed_out=True,
             ) from exc
