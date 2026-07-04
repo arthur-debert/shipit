@@ -55,16 +55,3 @@ pre-push:
   commands:
     lint:
       run: pixi run -e lint lint
-
-# Hook-witnessed dev-cycle tier (ADR-0032 / LOG04): POST-commit — the commit
-# exists and has a sha to record — emit `commit.created` into the durable
-# per-repo JSONL log via the constrained write verb. Registered names only;
-# domain keys (session from the env, epic/ws from the branch) are picked up by
-# the verb, not passed here. `--from-hook` makes the verb fail OPEN (exit 0,
-# WARNING) so a broken log path can never block git. Same pinned
-# `-e lint` env as the lint caller above: shipit is on that env's PATH and the
-# pin dodges the inherited-PIXI_PROJECT_MANIFEST ambiguity.
-post-commit:
-  commands:
-    dev-cycle-event:
-      run: pixi run -e lint shipit log event commit.created --from-hook
