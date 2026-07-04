@@ -36,8 +36,9 @@ from ._render import emit
 #: stderr (not part of the rendered report) so piped/--json consumers still
 #: see it without it polluting the result stream.
 _NO_CHECKS_WARNING = (
-    "  warning: no required checks discovered — applying ruleset with an "
-    "empty required-checks set. Pass --checks a,b to set them explicitly."
+    "  warning: no required checks found — the ruleset carries no "
+    "required-status-checks gate (the API rejects an empty set). "
+    "Pass --checks a,b to set them explicitly."
 )
 
 

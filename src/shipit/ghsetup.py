@@ -86,10 +86,28 @@ def load_labels() -> list[Label]:
 
 
 def build_payload(template: dict, checks: list[str]) -> dict:
-    """Inject ``checks`` into the template's ``required_status_checks`` rule."""
+    """Inject ``checks`` into the template's ``required_status_checks`` rule.
+
+    With zero checks (none discovered, none passed) the rule is OMITTED from
+    the payload entirely: the live rulesets API rejects an empty
+    ``required_status_checks`` array with a 422 ("Expected at least 1
+    elements" — #441), so an empty set must never be sent.
+    """
     body = copy.deepcopy(template)
     contexts = checks_mod.checks_json(checks)
-    for rule in body.get("rules", []):
+    rules = body.get("rules", [])
+    if not contexts:
+        if "rules" in body:
+            body["rules"] = [
+                rule
+                for rule in rules
+                if not (
+                    isinstance(rule, dict)
+                    and rule.get("type") == "required_status_checks"
+                )
+            ]
+        return body
+    for rule in rules:
         if isinstance(rule, dict) and rule.get("type") == "required_status_checks":
             rule.setdefault("parameters", {})["required_status_checks"] = contexts
     return body
@@ -388,7 +406,8 @@ def setup(
         checks = checks_mod.discover(slug, default_branch, toplevel=local_checkout)
     if not checks:
         logger.warning(
-            "no required checks discovered — ruleset applied with an empty set",
+            "no required checks found — ruleset applied without a "
+            "required-status-checks gate",
             extra={"repo": slug},
         )
 
