@@ -21,7 +21,7 @@ from .. import __version__, config, execrun, gh, git
 from .errors import InstallError
 from .reconcile import Plan, consumer_inner
 from .splice import SETTINGS_MALFORMED, splice_block, splice_settings_hook
-from .units import FMT_JSON_HOOK, Unit
+from .units import FMT_JSON_HOOK, PIXI_FILE, Unit, pixi_manifest_seed
 
 logger = logging.getLogger("shipit.install")
 
@@ -253,6 +253,21 @@ def apply(
         if mode == MODE_PR
         else {}
     )
+
+    # Seed the minimal valid pixi manifest BEFORE the unit writes (#432): the
+    # pixi block splices below land inside a file pixi can parse, so the very
+    # first commit — which fires the freshly-synced pre-commit hook, which
+    # shells into pixi — sees a valid manifest. Guarded on the file still being
+    # absent so a pixi.toml that appeared in the gather→apply window is never
+    # clobbered (the same idempotence stance as the retired unlinks).
+    if plan.seed_pixi_manifest:
+        pixi_path = root / PIXI_FILE
+        if not pixi_path.is_file():
+            pixi_path.write_text(pixi_manifest_seed(root.name), encoding="utf-8")
+            logger.info(
+                "seeded pixi manifest",
+                extra={"root": str(root), "path": PIXI_FILE},
+            )
 
     for d in plan.writes:
         write_unit(root, d.unit)

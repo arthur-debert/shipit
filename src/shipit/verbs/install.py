@@ -170,6 +170,10 @@ def format_plan(plan: Plan, *, dry_run: bool = False) -> str:
     for d in plan.decisions:
         if d.action != NOOP:
             lines.append(f"  {d.action:8} {d.unit.dest}")
+    if plan.seed_pixi_manifest:
+        lines.append(
+            f"  {'seed':8} pixi.toml ([workspace] table — consumer has no manifest)"
+        )
     for item in plan.seeds:
         lines.append(f"  {'seed':8} {item}")
     for d in plan.retire_deletes:
@@ -331,6 +335,15 @@ def format_pr_body(
             "longer needed:"
         )
         lines += [f"- `{d.retired.path}`" for d in plan.retire_keeps]
+        lines.append("")
+    if plan.seed_pixi_manifest:
+        lines.append("### Pixi manifest seeded")
+        lines.append(
+            "The consumer had no `pixi.toml`, so this install seeded a minimal "
+            "valid `[workspace]` table around the managed blocks (pixi requires "
+            "one). The table is consumer-owned from here on — edit the name, "
+            "channels, or platforms freely; a re-install never rewrites it."
+        )
         lines.append("")
     if plan.seeds:
         lines.append("### Policy seeded")

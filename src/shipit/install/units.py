@@ -11,6 +11,7 @@ call site.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
@@ -60,6 +61,52 @@ PIXI_ENVS_KEY = "pixi.toml#shipit-environments"
 PIXI_ENVS_OPEN = "# >>> shipit-managed environments (do not edit; regenerate via `shipit install`) >>>"
 PIXI_ENVS_CLOSE = "# <<< shipit-managed environments <<<"
 PIXI_ENVS_ANCHOR = "[environments]"
+
+# The pixi-manifest seed (ADP00-WS09, #432). A stock consumer with NO pixi.toml
+# is the headline adoption case, but the three managed blocks above are tables
+# and keys only — pixi refuses a manifest with no `[workspace]`/`[project]`/
+# `[package]` table — so splicing them into an empty file self-blocks the very
+# first install commit (the freshly-synced pre-commit hook shells into pixi,
+# which rejects the manifest). When the consumer has no pixi.toml at all, a
+# fresh install first seeds this minimal VALID `[workspace]` table and then
+# splices the managed blocks under it. The seed is SCAFFOLD, not a managed
+# unit: written once, never hashed into `[managed]`, consumer-owned (and
+# freely editable) from its first commit — a consumer WITH a manifest never
+# sees it, and a re-install never rewrites it.
+PIXI_SEED_CHANNELS = ("conda-forge",)
+PIXI_SEED_PLATFORMS = ("linux-64", "linux-aarch64", "osx-64", "osx-arm64")
+
+
+def workspace_name(raw: str) -> str:
+    """A pixi-safe workspace name from a repo directory name.
+
+    Conservative slug: keep the characters directory-and-repo names ordinarily
+    carry (alphanumerics, ``-``, ``_``, ``.``), collapse anything else to ``-``,
+    and never return empty — so an exotic directory name can neither break the
+    seeded TOML string nor produce a name pixi rejects.
+    """
+    name = re.sub(r"[^A-Za-z0-9._-]+", "-", raw).strip("-.")
+    return name or "workspace"
+
+
+def pixi_manifest_seed(name: str) -> str:
+    """The minimal VALID pixi manifest seeded when a consumer has none.
+
+    Just the required ``[workspace]`` table — name from the consumer root,
+    default channels/platforms — so pixi parses the file from the first
+    commit. The managed blocks splice in beneath it via their own anchors.
+    """
+    channels = ", ".join(f'"{c}"' for c in PIXI_SEED_CHANNELS)
+    platforms = ", ".join(f'"{p}"' for p in PIXI_SEED_PLATFORMS)
+    return (
+        "# pixi workspace — seeded by `shipit install` (the managed blocks below\n"
+        "# need a valid manifest). Consumer-owned from here on: edit freely.\n"
+        "[workspace]\n"
+        f'name = "{workspace_name(name)}"\n'
+        f"channels = [{channels}]\n"
+        f"platforms = [{platforms}]\n"
+    )
+
 
 # The HAR01 agent harness (docs/prd/har01-coordinator-guard-and-role-prompts.md):
 # the three GENERATED subagent agent-defs and the committed `PreToolUse` hook line
