@@ -532,17 +532,23 @@ def push(branch: str, *, cwd: str, remote: str = "origin", force: bool = False) 
     _git(args, cwd=cwd, timeout=_NETWORK_TIMEOUT)
 
 
-#: The stderr signatures of a REFERENCE-POISONED clone (#353). On git 2.54 a
-#: reference repo carrying a split commit-graph chain
-#: (``.git/objects/info/commit-graphs/``) makes ``clone --reference --dissociate``
-#: fail DETERMINISTICALLY at the clone-time checkout: git prints ``fatal: unable
-#: to parse commit <sha>`` and ``Clone succeeded, but checkout failed.`` and
-#: exits 128 — even though the resulting clone is self-consistent after the fact
-#: (the object is present; a manual checkout succeeds). Matching requires BOTH
-#: message fragments (lowercased, across both streams) rather than the bare rc:
-#: 128 is git's generic fatal exit, and either fragment alone has innocent
-#: causes (real object corruption; a checkout killed by disk space or an
-#: unrepresentable filename) that must propagate, not trigger a full re-clone.
+#: The stderr signatures of a REFERENCE-POISONED clone (#353, diagnosis
+#: narrowed in #372). On git 2.54 a reference repo carrying ANY commit-graph —
+#: a plain ``objects/info/commit-graph`` file or a split chain under
+#: ``objects/info/commit-graphs/`` (a MIDX alone is incidental) — makes
+#: ``clone --reference --dissociate`` fail DETERMINISTICALLY at the clone-time
+#: checkout: git prints ``fatal: unable to parse commit <sha>`` and ``Clone
+#: succeeded, but checkout failed.`` and exits 128. No object is lost — the
+#: failure is STALE IN-PROCESS STATE inside the single clone invocation: the
+#: clone process reads the reference's commit-graph through the alternates
+#: link, ``--dissociate`` repacks and severs the alternate, and the clone-time
+#: checkout then dies on the stale graph. After the fact the clone is
+#: self-consistent (the object is present; fsck is clean; a fresh-process
+#: checkout succeeds). Matching requires BOTH message fragments (lowercased,
+#: across both streams) rather than the bare rc: 128 is git's generic fatal
+#: exit, and either fragment alone has innocent causes (real object
+#: corruption; a checkout killed by disk space or an unrepresentable filename)
+#: that must propagate, not trigger a full re-clone.
 _POISONED_REFERENCE_MARKERS: tuple[str, ...] = (
     "clone succeeded, but checkout failed",
     "unable to parse commit",
@@ -572,22 +578,42 @@ def clone_dissociated(url: str, dest: str, *, reference: str) -> None:
     and is safe to ``rm -rf`` (ADR-0014). ``origin`` is set to ``url`` — the GitHub
     URL — so ``gh``/``git`` work inside the Tree unchanged.
 
-    FAIL-OPEN on a poisoned reference (#353): when the referenced clone dies with
-    the clone-succeeded-checkout-failed signature (git 2.54 + a reference whose
-    object store carries a split commit-graph chain — see
-    :func:`_is_poisoned_reference_failure`), the half-checked-out ``dest`` is
-    removed and the clone is retried ONCE without ``--reference`` (and therefore
-    without ``--dissociate`` — a full clone is already independent). The retry
-    trades the near-instant borrow for a full transfer, so the degradation is
+    ``-c core.commitGraph=false`` disables commit-graph READING for the clone
+    process only (#372): on git 2.54 a reference carrying ANY commit-graph
+    kills the stock command at clone-time checkout — the clone process reads
+    the donor's graph through the alternates link, ``--dissociate`` severs the
+    alternate, and the checkout dies on the stale in-process graph state
+    (``fatal: unable to parse commit <sha>``). With graph reading off the
+    borrow works against any donor. The ``-c`` sits BEFORE the subcommand, so
+    it scopes to this one process and persists nothing in the new clone's
+    config.
+
+    FAIL-OPEN on a poisoned reference (#353): when the referenced clone still
+    dies with the clone-succeeded-checkout-failed signature (see
+    :func:`_is_poisoned_reference_failure` — with the #372 fix this should be
+    unreachable for the commit-graph trigger, but it guards donor pathologies
+    not yet met), the half-checked-out ``dest`` is removed and the clone is
+    retried ONCE without ``--reference`` (and therefore without
+    ``--dissociate`` — a full clone is already independent). The retry trades
+    the near-instant borrow for a full transfer, so the degradation is
     narrated at WARNING with the reference path; any other failure — and a
-    failure of the retry itself — propagates untouched. This one seam keeps BOTH
-    consumers (write-Tree ``tree.create`` and read-only ``tree.readonly``)
+    failure of the retry itself — propagates untouched. This one seam keeps
+    BOTH consumers (write-Tree ``tree.create`` and read-only ``tree.readonly``)
     working without having to suppress every commit-graph writer in every
     possible donor.
     """
     try:
         _git(
-            ["clone", "--reference", reference, "--dissociate", url, dest],
+            [
+                "-c",
+                "core.commitGraph=false",
+                "clone",
+                "--reference",
+                reference,
+                "--dissociate",
+                url,
+                dest,
+            ],
             timeout=_CLONE_TIMEOUT,
         )
     except ExecError as err:
