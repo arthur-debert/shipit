@@ -86,6 +86,7 @@ import click
 from ... import config, execrun, logcontext
 from ...harness import activation
 from ...pixienv import shell_hook
+from ...session import current as session_current
 from ...session import liveness
 from ...tree import layout
 
@@ -300,29 +301,15 @@ def _write_log_context(raw: str, env) -> None:
 def _ephemeral_tree(cwd: Path) -> Path | None:
     """The RESOLVED ephemeral session-Tree dir when ``cwd`` is one, else ``None``.
 
-    The path IS the signal (ADR-0018/0027): an ephemeral Tree lives at exactly
-    ``<root>/<org>/<repo>/ephemeral/<leaf>`` (the shape ``tree/create.py``
-    mints), and its leaf is the per-launch session id. Containment under
-    :func:`shipit.tree.layout.central_root` is checked FIRST so a random
-    directory that merely happens to sit in an ``ephemeral/`` folder never mints
-    a bogus session key; both sides are resolved so a symlinked root (macOS
-    ``/tmp`` → ``/private/tmp``) cannot split one dir into "inside" and
-    "outside" spellings — the same discipline as :func:`_is_source_clone`.
-    Depth below the root is then pinned to the minted shape's four segments:
-    :func:`shipit.tree.layout.tree_kind` alone reads only the leaf's parent
-    segment, so a nested ``…/ephemeral/<x>`` dir INSIDE the root (e.g. a
-    directory named ``ephemeral`` inside a Tree's clone) would otherwise pass
-    the kind check and bind misleading log context.
+    Delegates to :func:`shipit.session.current.ephemeral_session_tree` — the ONE
+    path-is-the-signal detection (ADR-0018/0027), shared with the resolvers that
+    read the id back (``shipit logs --session current``, LOG04) — so the
+    exporter and every reader agree on what an ephemeral session Tree looks
+    like by construction. Kept as a local seam so this hook's fail-open
+    calibration (detection errors skip at DEBUG, per #348) stays wrapped around
+    one call site.
     """
-    resolved = cwd.resolve()
-    root = layout.central_root().resolve()
-    if not resolved.is_relative_to(root):
-        return None
-    if len(resolved.relative_to(root).parts) != 4:
-        return None
-    if layout.tree_kind(resolved) != layout.EPHEMERAL_KIND:
-        return None
-    return resolved
+    return session_current.ephemeral_session_tree(cwd)
 
 
 def _log_context_exports(tree: Path) -> str:

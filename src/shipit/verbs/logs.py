@@ -21,14 +21,27 @@ the reader. With NO filter active, ``--raw`` does not parse at all — malformed
 lines pass through untouched, because judging them is the downstream tool's job.
 
 The reader grows FILTERS, not a sibling (LOG04 / ADR-0032): ``--events`` keeps
-only ``event``-tagged dev-cycle records and ``--pr <n>`` keeps records whose
-``pr`` domain key equals the number — AND-composed, applied client-side before
-the tail count (the file is bounded by rotation, so whole-file filtering is
-cheap), and uniform across the static, ``--raw``, and ``--follow`` views.
-Selecting on a field means PARSING, so with ANY filter active even ``--raw``
-parses each line and a malformed one (which has no fields to match) is dropped
-rather than passed through — the passthrough contract holds only when no filter
-is asked for.
+only ``event``-tagged dev-cycle records, and one flag per domain key selects on
+the record's flat fields — ``--pr <n>``, ``--session <id|current>`` (``current``
+resolved via :mod:`shipit.session.current`: the session environment first, the
+ephemeral Tree leaf second, ADR-0027), ``--epic <code>``, ``--ws <n>``
+(accepting ``1``, ``01``, or ``WS01`` — the display form is never data, so all
+three normalize to the int the record carries), ``--agent <id>``, and
+``--role <name>``. All AND-composed, applied client-side before the tail count
+(the file is bounded by rotation, so whole-file filtering is cheap — no index
+until a real slicing gap shows, per the PRD), and uniform across the static,
+``--raw``, and ``--follow`` views. Selecting on a field means PARSING, so with
+ANY filter active even ``--raw`` parses each line and a malformed one (which
+has no fields to match) is dropped rather than passed through — the passthrough
+contract holds only when no filter is asked for.
+
+``--flow`` renders the filtered records as the session STORY instead of a
+record listing: selection stays here (``--flow`` implies ``--events``; the
+domain-key filters compose as usual), the LOOK is the pure renderer's
+(:mod:`shipit.flowview` — intent/theme header, relative times, ``EPIC-WSnn:``
+prefixes, agent ids behind ``--agent-ids``). A story is a bounded rendering of
+the static view, so ``--flow`` refuses ``--raw`` and ``--follow`` rather than
+guessing what a raw or followed story would mean.
 
 The repo whose log we read defaults to the current checkout, resolved LOCALLY off
 the origin remote (:func:`shipit.identity.resolve_repo`) — the SAME resolver the
@@ -45,10 +58,12 @@ import json
 import os
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
-from .. import execrun, identity, logsetup, redact
+from .. import execrun, flowview, identity, logcontext, logsetup, redact
+from ..session import current as session_current
 
 #: Default number of trailing lines the no-flag invocation prints.
 DEFAULT_TAIL = 50
@@ -76,16 +91,63 @@ def _last_n(lines: list[str], n: int) -> list[str]:
     return lines[-n:] if n > 0 else []
 
 
+def _parse_record(line: str) -> dict[str, Any] | None:
+    """The line as ONE JSONL record (a JSON object), or ``None``.
+
+    The single parse every selecting/rendering path shares: only a JSON object
+    is a record — any other parse (a torn write, a bare JSON string) is the
+    caller's cue to apply its own resilience contract (skip with a note, drop
+    silently under a filter), never a crash.
+    """
+    try:
+        record = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    return record if isinstance(record, dict) else None
+
+
+def normalize_ws(value: int | str) -> int:
+    """The Work Stream index ``value`` names, as the INT the record carries.
+
+    The CLI never punishes the display form (PRD): ``1``, ``01``, and ``WS01``
+    (any case) all name Work Stream 1 — the ``WS`` prefix and zero-padding are
+    rendering, stripped here, because the durable record's ``ws`` domain key is
+    int-typed (ADR-0032) and selection compares against THAT. Anything else —
+    garbage text, or a non-positive index the branch grammar could never have
+    written (``shipit.branchid`` derives ``WS00`` to nothing for the same
+    reason) — raises :class:`ValueError` for the caller to report as a usage
+    error.
+    """
+    text = str(value).strip()
+    if text.upper().startswith("WS"):
+        text = text[2:]
+    if not text.isdigit():
+        raise ValueError(
+            f"--ws must be a Work Stream index (1, 01, or WS01); got {value!r}"
+        )
+    index = int(text)
+    if index < 1:
+        raise ValueError(
+            f"--ws must be a positive Work Stream index (the branch grammar "
+            f"starts at WS01); got {value!r}"
+        )
+    return index
+
+
 class _Filter:
-    """The record filters (LOG04: ``--events``, ``--pr``) as ONE predicate.
+    """The record filters (LOG04) as ONE predicate.
 
     Filters compose as AND and are applied BEFORE the tail count and before
     either output mode, so ``-n 5 --pr 231`` means "the last 5 records about
     pr#231" and ``--raw`` pipes exactly the matching stored lines to jq.
     Selection is on the record's flat fields: ``--events`` keeps only records
     carrying an ``event`` field (a dev-cycle event, ADR-0032 — presence is the
-    test, never a name list of the reader's own), ``--pr`` keeps records whose
-    ``pr`` domain key equals the number (int-typed on the record, ADR-0029).
+    test, never a name list of the reader's own); each domain-key filter
+    (``pr``, ``session``, ``epic``, ``ws``, ``agent``, ``role``) keeps records
+    whose key EQUALS the value — typed as the record carries it (``pr``/``ws``
+    int, the rest strings, ADR-0029/0032), which is why the CLI boundary
+    normalizes ``WS01`` to ``1`` before it gets here. A record without the key
+    cannot match it: absent means unbound, not wildcard.
 
     Filtering requires parsing, so with any filter ACTIVE a non-record line
     (blank padding, a torn write) simply cannot match and is dropped silently —
@@ -95,28 +157,47 @@ class _Filter:
     (raw passes malformed lines through; rendered notes them on stderr).
     """
 
-    def __init__(self, *, events_only: bool = False, pr: int | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        events_only: bool = False,
+        pr: int | None = None,
+        session: str | None = None,
+        epic: str | None = None,
+        ws: int | None = None,
+        agent: str | None = None,
+        role: str | None = None,
+    ) -> None:
         self.events_only = events_only
-        self.pr = pr
+        self.fields = {
+            name: value
+            for name, value in {
+                "pr": pr,
+                "session": session,
+                "epic": epic,
+                "ws": ws,
+                "agent": agent,
+                "role": role,
+            }.items()
+            if value is not None
+        }
 
     @property
     def active(self) -> bool:
-        return self.events_only or self.pr is not None
+        return self.events_only or bool(self.fields)
+
+    def matches_record(self, record: dict[str, Any]) -> bool:
+        if self.events_only and "event" not in record:
+            return False
+        return all(record.get(name) == value for name, value in self.fields.items())
 
     def matches(self, line: str) -> bool:
         if not self.active:
             return True
-        try:
-            record = json.loads(line)
-        except json.JSONDecodeError:
+        record = _parse_record(line)
+        if record is None:
             return False
-        if not isinstance(record, dict):
-            return False
-        if self.events_only and "event" not in record:
-            return False
-        if self.pr is not None and record.get("pr") != self.pr:
-            return False
-        return True
+        return self.matches_record(record)
 
 
 #: Longest malformed-line snippet quoted in the skip note; enough to identify
@@ -141,11 +222,8 @@ def _render_record(line: str) -> str | None:
     Only a JSON *object* is a record; any other parse (or a parse failure) is
     the caller's cue to skip the line with a note.
     """
-    try:
-        record = json.loads(line)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(record, dict):
+    record = _parse_record(line)
+    if record is None:
         return None
     ts = record.get("ts", "")
     level = str(record.get("level", "")).upper()
@@ -293,9 +371,18 @@ def run(
     tail: int = DEFAULT_TAIL,
     events_only: bool = False,
     pr: int | None = None,
+    session: str | None = None,
+    epic: str | None = None,
+    ws: int | str | None = None,
+    agent: str | None = None,
+    role: str | None = None,
+    flow: bool = False,
+    show_agents: bool = False,
     base_dir: str | Path | None = None,
     current_repo: Callable[[], str] | None = None,
+    current_session: Callable[[], str | None] | None = None,
     sleep: Callable[[float], None] | None = None,
+    now: Callable[[], datetime] | None = None,
 ) -> int:
     """Locate (and read) the per-repo JSONL log. Returns an int exit code.
 
@@ -308,15 +395,57 @@ def run(
     path header — stdout is pure JSONL for jq) and composes with both views. A
     missing log file is reported on stderr (no traceback) and exits non-zero.
 
-    ``events_only`` / ``pr`` are the LOG04 record filters (AND-composed, applied
-    before the tail count, uniform across the static/follow/raw views): only
-    ``event``-tagged dev-cycle records, only records whose ``pr`` domain key
-    equals the number.
+    ``events_only`` / ``pr`` / ``session`` / ``epic`` / ``ws`` / ``agent`` /
+    ``role`` are the LOG04 record filters (AND-composed, applied before the
+    tail count, uniform across the static/follow/raw views). ``session`` takes
+    the sentinel ``current``, resolved via the injected ``current_session``
+    boundary (default :func:`shipit.session.current.current_session_id`) —
+    unresolvable is a usage error, since the caller asked for a session this
+    process is not in. ``ws`` accepts the int or any display form
+    (:func:`normalize_ws`); a form that names no Work Stream is a usage error.
 
-    ``base_dir`` / ``current_repo`` / ``sleep`` are injected boundaries for tests.
+    ``flow`` renders the filtered records as the session story instead of a
+    listing (:mod:`shipit.flowview`) — it implies ``events_only``, refuses
+    ``raw``/``follow``, and ``show_agents`` toggles the agent-id display.
+
+    ``base_dir`` / ``current_repo`` / ``current_session`` / ``sleep`` / ``now``
+    are injected boundaries for tests.
     """
     current_repo = current_repo or _default_repo_slug
-    record_filter = _Filter(events_only=events_only, pr=pr)
+    if flow and (raw or follow):
+        print(
+            "logs: --flow is a rendered story view; it does not compose with "
+            "--raw or --follow.",
+            file=sys.stderr,
+        )
+        return _EXIT_BAD_REPO
+    if flow:
+        events_only = True  # --flow implies --events (ADR-0032)
+    if ws is not None:
+        try:
+            ws = normalize_ws(ws)
+        except ValueError as exc:
+            print(f"logs: {exc}", file=sys.stderr)
+            return _EXIT_BAD_REPO
+    if session == "current":
+        session = (current_session or session_current.current_session_id)()
+        if session is None:
+            print(
+                "logs: --session current, but no session is resolvable — neither "
+                f"{logcontext.ENV_PREFIX}SESSION in the environment nor "
+                "an ephemeral session-Tree cwd (ADR-0027); pass the session id.",
+                file=sys.stderr,
+            )
+            return _EXIT_BAD_REPO
+    record_filter = _Filter(
+        events_only=events_only,
+        pr=pr,
+        session=session,
+        epic=epic,
+        ws=ws,
+        agent=agent,
+        role=role,
+    )
     try:
         slug = repo if repo is not None else current_repo()
         # The ONE canonical slug parser (ADR-0024): lowercases owner/name, so an
@@ -359,9 +488,27 @@ def run(
             sleep=sleep or time.sleep,
         )
 
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+
+    if flow:
+        # The story view: same selection (parse → filter → tail), rendering
+        # delegated whole to the pure module. A malformed line has no fields to
+        # match and is dropped silently — the filter is always active here
+        # (--flow implies --events), so the active-filter contract applies.
+        records = [
+            record
+            for record in (_parse_record(ln) for ln in lines)
+            if record is not None and record_filter.matches_record(record)
+        ]
+        instant = (now or (lambda: datetime.now(timezone.utc)))()
+        for rendered in flowview.render(
+            _last_n(records, tail), now=instant, show_agents=show_agents
+        ):
+            print(rendered, flush=True)
+        return 0
+
     if not raw:
         print(str(path))
-    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     for line in _last_n([ln for ln in lines if record_filter.matches(ln)], tail):
         _emit(line, raw=raw)
     return 0
