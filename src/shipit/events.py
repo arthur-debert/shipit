@@ -102,5 +102,7 @@ def emit(
             f"{sorted(EVENT_NAMES)} (ADR-0032) — register a new name in "
             "shipit.events.EVENT_NAMES before emitting it"
         )
-    fields = {k: v for k, v in dict(extra or {}).items() if k != RECORD_KEY}
+    fields = {
+        k: v for k, v in dict(extra or {}).items() if k not in (RECORD_KEY, EXTRA_KEY)
+    }
     log.info(msg, *args, extra={**fields, EXTRA_KEY: name})

@@ -263,9 +263,11 @@ def logs_cmd(
     prints the path plus the last N records, rendered legibly (ts LEVEL logger:
     msg, domain keys trailing); a malformed line is skipped with a stderr note.
     --raw passes the stored lines through unmodified for jq — no parsing, no
-    skipping, malformed lines included. --events / --pr filter records (AND,
-    applied before the tail count) and compose with every view. A log not
-    written yet is reported, not crashed.
+    skipping, malformed lines included — UNLESS a filter is active. --events /
+    --pr filter records (AND, applied before the tail count) and compose with
+    every view; selecting on a field requires parsing, so under an active filter
+    even --raw parses and drops a malformed line rather than passing it through.
+    A log not written yet is reported, not crashed.
     """
     rc = logs.run(
         repo,

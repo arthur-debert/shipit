@@ -17,14 +17,18 @@ renders each record legibly for humans (``ts LEVEL logger: msg [key=value …]``
 so stdout pipes straight into jq. In the rendered view, a line that is not a
 JSON object is skipped with a stderr note, never a crash: the log is diagnosis
 data, and one corrupt line (a torn write, a rotation seam) must not take down
-the reader. ``--raw`` does not parse at all — malformed lines pass through
-untouched, because judging them is the downstream tool's job.
+the reader. With NO filter active, ``--raw`` does not parse at all — malformed
+lines pass through untouched, because judging them is the downstream tool's job.
 
 The reader grows FILTERS, not a sibling (LOG04 / ADR-0032): ``--events`` keeps
 only ``event``-tagged dev-cycle records and ``--pr <n>`` keeps records whose
 ``pr`` domain key equals the number — AND-composed, applied client-side before
 the tail count (the file is bounded by rotation, so whole-file filtering is
 cheap), and uniform across the static, ``--raw``, and ``--follow`` views.
+Selecting on a field means PARSING, so with ANY filter active even ``--raw``
+parses each line and a malformed one (which has no fields to match) is dropped
+rather than passed through — the passthrough contract holds only when no filter
+is asked for.
 
 The repo whose log we read defaults to the current checkout, resolved LOCALLY off
 the origin remote (:func:`shipit.identity.resolve_repo`) — the SAME resolver the
@@ -220,10 +224,21 @@ def _follow(
         for line in _last_n(matching, tail):
             _emit(line, raw=raw)
         # fh is now positioned at EOF; subsequent appends are picked up by readline.
+        pending = ""
         while True:
-            line = fh.readline()
-            if line:
-                stripped = line.rstrip("\n")
+            chunk = fh.readline()
+            if chunk:
+                # A concurrent write can be read mid-line, so readline() may
+                # return a fragment with no trailing newline. Buffer until the
+                # newline lands before judging the line: a torn read is not a
+                # malformed record, and under an active filter parsing a half
+                # line would drop it — permanently, since its remainder (read
+                # next) is not valid JSON on its own either.
+                pending += chunk
+                if not pending.endswith("\n"):
+                    continue
+                stripped = pending.rstrip("\n")
+                pending = ""
                 if record_filter.matches(stripped):
                     _emit(stripped, raw=raw)
                 continue

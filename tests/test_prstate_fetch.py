@@ -346,6 +346,42 @@ def test_gather_binds_epic_ws_from_the_meta_head_branch(monkeypatch):
     assert "ws" not in bound  # the umbrella carries the epic only
 
 
+def test_fetch_seam_head_branch_is_authoritative_over_stale_identity(monkeypatch):
+    # The head branch OWNS epic/ws at the fetch seam: a prior operation's
+    # identity, still bound in this process, must not leak into a later PR's
+    # records. `logcontext.bind` drops None (it can never clear a key), so the
+    # seam unbinds first — an umbrella head drops the stale ws, a non-namespaced
+    # head drops both. Regression for the stale-context leak (codex/Copilot).
+    from shipit import logcontext
+
+    # A previous WS02 operation left epic/ws bound in this process.
+    logcontext.bind(epic="RVW01", ws=2)
+
+    # Now the engine fetches an umbrella PR: epic is replaced, the stale ws is
+    # gone (the umbrella carries no Work Stream).
+    monkeypatch.setattr(
+        fetch.gh,
+        "graphql",
+        lambda query, **vars: _reviews_page([], [], head_ref="LOG04/umbrella"),
+    )
+    fetch.gather_reviews(TARGET, default_roster())
+    bound = logcontext.bound()
+    assert bound["epic"] == "LOG04"
+    assert "ws" not in bound
+
+    # And a standalone-issue PR fetched next clears BOTH — no placeholder, the
+    # earlier epic does not survive either.
+    monkeypatch.setattr(
+        fetch.gh,
+        "graphql",
+        lambda query, **vars: _reviews_page([], [], head_ref="issues/375/work"),
+    )
+    fetch.gather_reviews(TARGET, default_roster())
+    bound = logcontext.bound()
+    assert "epic" not in bound
+    assert "ws" not in bound
+
+
 # --- identity/decision fields die loudly at the wire boundary (#330) --------
 
 

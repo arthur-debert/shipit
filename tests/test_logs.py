@@ -413,6 +413,44 @@ def test_filters_compose_with_follow(tmp_path, capsys):
     assert "codex" not in out  # pr 7's event fails the AND
 
 
+def test_follow_reassembles_a_torn_write_before_filtering(tmp_path, capsys):
+    # A concurrent write can be read mid-line, so readline() returns a fragment
+    # with no trailing newline. A field filter parses to select, so a naive read
+    # would drop the fragment AND its remainder (neither half is valid JSON) —
+    # losing the record permanently. The follow loop buffers until the newline
+    # lands, then judges the whole line. Regression for the torn-read drop (agy).
+    log = tmp_path / "o" / "r" / "shipit.log"
+    log.parent.mkdir(parents=True)
+    log.write_text(_record("pre", pr=231, event="pr.ready") + "\n")
+
+    whole = _record("torn but tagged", pr=231, event="pr.ready")
+    cut = len(whole) // 2
+    # Tick 1 writes the first half (no newline); tick 2 completes it.
+    fragments = [whole[:cut], whole[cut:] + "\n"]
+
+    def fake_sleep(_interval: float) -> None:
+        if fragments:
+            with log.open("a", encoding="utf-8") as fh:
+                fh.write(fragments.pop(0))
+        else:
+            raise KeyboardInterrupt
+
+    rc = logs.run(
+        "o/r",
+        follow=True,
+        events_only=True,
+        pr=231,
+        tail=-1,
+        base_dir=tmp_path,
+        current_repo=lambda: "o/r",
+        sleep=fake_sleep,
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    # The record survives being split across two reads under an active filter.
+    assert "torn but tagged" in out
+
+
 def test_active_filter_drops_malformed_lines_silently(tmp_path, capsys):
     # A field filter cannot be evaluated on a torn line — under an active
     # filter it is dropped in BOTH modes (no false positive, no stderr note),

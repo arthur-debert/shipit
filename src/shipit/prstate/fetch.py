@@ -295,11 +295,16 @@ def _bind_branch_identity(head_ref: object) -> None:
     The PR verbs' per-operation binding site: the fetch is the moment the engine
     learns the PR's head branch, so the dev-cycle identity binds HERE — the same
     seam that binds ``pr``/``repo`` — through the ONE branch-identity parser
-    (:func:`shipit.branchid.derive`). A non-namespaced head (a standalone-issue
-    or freeform branch) derives to nothing and binds nothing: absent keys stay
-    absent, never a placeholder (present-when-bound, ADR-0029).
+    (:func:`shipit.branchid.derive`). This head branch is AUTHORITATIVE for
+    ``epic``/``ws``: a prior operation in the same process may have bound a
+    different PR's identity, and ``logcontext.bind`` drops ``None`` (so it can
+    never CLEAR a key), so the stale halves are unbound first. A non-namespaced
+    head (a standalone-issue or freeform branch) derives to nothing and thus
+    leaves both keys absent; an umbrella head binds ``epic`` and clears ``ws``.
+    Absent keys stay absent, never a placeholder (present-when-bound, ADR-0029).
     """
     identity = branchid.derive(head_ref)
+    logcontext.unbind("epic", "ws")
     logcontext.bind(epic=identity.epic, ws=identity.ws)
 
 
