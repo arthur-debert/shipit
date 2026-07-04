@@ -59,9 +59,17 @@ Iterate until the user approves the breakdown. Before publishing, confirm the hu
 
 Work one epic at a time. For each approved epic:
 
-**a. Create the epic umbrella issue first.** This is the **execution tracker**, not the spec — use the epic template below. Title: `<REPO>-<EPIC>: Epic: <Epic Name>`. It carries a summary of the PRD, pointers to the authoritative PRD (`docs/prd/…`) and the relevant ADRs, and the WS list/topology. Apply the correct triage label unless instructed otherwise.
+**a. Create the epic umbrella issue first.** This is the **execution tracker**, not the spec — use the epic template below. Title: `<REPO>-<EPIC>: Epic: <Epic Name>`. It carries a summary of the PRD, pointers to the authoritative PRD (`docs/prd/…`) and the relevant ADRs, and the WS list/topology. Apply the correct triage label unless instructed otherwise. Once the umbrella issue exists, record it in the dev-cycle log (best-effort — ADR-0032; continue on error):
 
-**b. Then publish its Work Streams** as sub-issues of that epic umbrella (formal sub-issue links improve progress tracking in the GitHub UI). Use the `<ws-template>` below. These are considered ready for AFK agents, so publish them with the correct triage label unless instructed otherwise. Publish in dependency order (blockers first) so you can reference real issue identifiers in the "Blocked by" field.
+```sh
+shipit log event planning.epic.minted --about "<EPIC>: <Epic Name> (#<issue>)"
+```
+
+**b. Then publish its Work Streams** as sub-issues of that epic umbrella (formal sub-issue links improve progress tracking in the GitHub UI). Use the `<ws-template>` below. These are considered ready for AFK agents, so publish them with the correct triage label unless instructed otherwise. Publish in dependency order (blockers first) so you can reference real issue identifiers in the "Blocked by" field. After each WS sub-issue is created, record it (best-effort; continue on error):
+
+```sh
+shipit log event planning.ws.minted --about "<EPIC>-WSnn: <WS title> (#<issue>)"
+```
 
 The WS code (`WSnn`, scoped per epic+repo) is assigned here; the epic code comes from the human. Use the identifier in the WS title: `<REPO>-<EPIC>-<WSnn>: Epic: <Epic Name> - Workstream: <WS Name>`.
 
