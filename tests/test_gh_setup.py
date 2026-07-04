@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from shipit import ghsetup
+from shipit import execrun, ghsetup
 from shipit.config import SecretSource
 from shipit.identity import Revision, WorkingDir, repo_from_slug
 from shipit.verbs import gh_setup as gh_setup_verb
@@ -166,6 +166,25 @@ def test_apply_ruleset_dry_run_sends_nothing_and_carries_the_payload(fake_gh):
     # The would-be payload rides the outcome, checks injected.
     rule = get_rule(outcome.payload, "required_status_checks")
     assert rule["parameters"]["required_status_checks"] == [{"context": "c1"}]
+
+
+def test_apply_ruleset_unlistable_is_a_report_fact(monkeypatch):
+    """A failed listing degrades to "assume none" — and says so on the outcome,
+    so a --json consumer can tell "verified absent" from "could not list"."""
+    fake = FakeGh()
+
+    def rest(path, *, method=None, body=None, paginate=False):
+        if method is None:
+            raise execrun.ExecError(["gh", "api"], rc=1, stderr="HTTP 403")
+        return fake.rest(path, method=method, body=body)
+
+    monkeypatch.setattr(ghsetup.gh, "rest", rest)
+    outcome = ghsetup.apply_ruleset("o/r", ["c1"], dry_run=False)
+    assert outcome.action == "created"  # fell through to POST
+    assert outcome.existing_id is None
+    assert outcome.list_error is not None and "HTTP 403" in outcome.list_error
+    assert ("rest", "repos/o/r/rulesets", "POST") in fake.calls
+    assert outcome.to_dict()["list_error"] == outcome.list_error
 
 
 def test_ensure_labels_upserts_all(fake_gh):
@@ -325,7 +344,10 @@ def test_report_json_field_set():
         "checks",
         "action",
         "payload",
+        "list_error",
     }
+    # A clean listing is the explicit null, not an absent key.
+    assert payload["ruleset"]["list_error"] is None
     assert payload["labels"] == [{"name": "bug", "action": "upserted"}]
     assert payload["secrets"][1] == {
         "name": "X",
@@ -420,6 +442,28 @@ def test_format_setup_dry_run_renders_off_the_same_shape():
         "  1 secret(s) set, 0 skipped, 0 failed\n"
         "done."
     )
+
+
+def test_format_setup_list_error_warning_line():
+    """The degraded listing renders a warning ahead of the ruleset line —
+    absent entirely on a clean run (the frozen text surface is unchanged)."""
+    report = _report(
+        ruleset=ghsetup.RulesetOutcome(
+            name=ghsetup.RULESET_NAME,
+            existing_id=None,
+            checks=("c / check",),
+            action="created",
+            payload={"name": ghsetup.RULESET_NAME},
+            list_error="gh api failed (exit, rc=1, 5ms): HTTP 403",
+        ),
+    )
+    out = gh_setup_verb.format_setup(report)
+    assert (
+        "ruleset:\n"
+        "  warning: could not list rulesets — assumed none exists"
+        " (gh api failed (exit, rc=1, 5ms): HTTP 403)\n"
+        "  ruleset: main-branch-protection (existing id: none)\n"
+    ) in out
 
 
 def test_format_setup_config_error_line():

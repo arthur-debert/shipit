@@ -115,7 +115,9 @@ class RulesetOutcome:
     ``action`` is ``"created"`` / ``"updated"`` (a mutation happened) or
     ``"dry-run"`` (nothing sent). ``payload`` is the full ruleset body that was
     sent — or, on a dry run, WOULD have been sent — so a caller can see exactly
-    what would change.
+    what would change. ``list_error`` records the degraded-but-continuing
+    listing failure: when it is set, ``existing_id is None`` means "could not
+    list, assumed none", NOT "verified absent".
     """
 
     name: str
@@ -123,6 +125,7 @@ class RulesetOutcome:
     checks: tuple[str, ...]
     action: str
     payload: dict[str, Any]
+    list_error: str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -131,6 +134,7 @@ class RulesetOutcome:
             "checks": list(self.checks),
             "action": self.action,
             "payload": self.payload,
+            "list_error": self.list_error,
         }
 
 
@@ -216,17 +220,21 @@ def apply_ruleset(repo: str, checks: list[str], *, dry_run: bool) -> RulesetOutc
     """Pass (a). Create-or-update the standard ruleset; returns its outcome."""
     template = load_template()
     body = build_payload(template, checks)
+    list_error: str | None = None
     try:
         rulesets = gh.rest(f"repos/{repo}/rulesets")
-    except execrun.ExecError:
+    except execrun.ExecError as exc:
         # Degraded-but-continuing: an unreadable listing reads as "no existing
-        # ruleset", so the pass falls through to a POST.
+        # ruleset", so the pass falls through to a POST — and the guess is a
+        # report fact (``list_error``), so a consumer can tell "verified
+        # absent" from "could not list, assumed none".
         logger.warning(
             "could not list rulesets — assuming none exists",
             exc_info=True,
             extra={"repo": repo},
         )
         rulesets = None
+        list_error = str(exc)
     existing = existing_ruleset_id(rulesets, RULESET_NAME)
 
     def outcome(action: str) -> RulesetOutcome:
@@ -236,6 +244,7 @@ def apply_ruleset(repo: str, checks: list[str], *, dry_run: bool) -> RulesetOutc
             checks=tuple(checks),
             action=action,
             payload=body,
+            list_error=list_error,
         )
 
     if dry_run:

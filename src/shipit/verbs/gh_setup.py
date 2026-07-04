@@ -1,13 +1,16 @@
 """`shipit gh-setup` — ADR-0030 glue + renderer over the gh-setup domain.
 
-The verb is click glue and a pure renderer only (CLI02-WS04): the three setup
-passes live in :mod:`shipit.ghsetup` and return one typed
+The verb is click glue and a renderer (CLI02-WS04): the three setup passes
+live in :mod:`shipit.ghsetup` and return one typed
 :class:`~shipit.ghsetup.SetupReport`; this module resolves the ambient identity
 (the root context — never a per-run API shellout), threads it as values, and
 renders the report through the shared :func:`~._render.emit` seam (``--json``
-serializes ``SetupReport.to_dict()``). The exit code derives from the report —
-any failed secret makes the run rc 1 — with runtime failures mapped by the one
-:func:`~._errors.cli_errors` shell (``error: …`` + exit 1).
+serializes ``SetupReport.to_dict()``). One deliberate out-of-band write stays
+outside that seam: the empty-checks warning goes to stderr (derived from the
+report, kept off the result stream so ``--json`` output stays clean). The exit
+code derives from the report — any failed secret makes the run rc 1 — with
+runtime failures mapped by the one :func:`~._errors.cli_errors` shell
+(``error: …`` + exit 1).
 
 Dry-run renders off the SAME report shape: the domain performs no mutations
 and the renderer shows exactly what would change, payload included.
@@ -138,6 +141,13 @@ def format_setup(report: SetupReport) -> str:
 
     rs = report.ruleset
     lines.append("ruleset:")
+    if rs.list_error is not None:
+        # Degraded path only: the listing failed and the pass assumed no
+        # existing ruleset — say so, or "existing id: none" reads as verified.
+        lines.append(
+            "  warning: could not list rulesets — assumed none exists"
+            f" ({rs.list_error})"
+        )
     lines.append(
         f"  ruleset: {rs.name} "
         f"(existing id: {rs.existing_id if rs.existing_id is not None else 'none'})"
