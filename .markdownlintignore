@@ -17,3 +17,7 @@ skills/
 # projection but markdownlint miscategorizes them (MD051/MD026), so it is linted
 # at the .lex, not the .md.
 docs/dev/pixi.md
+# docs/dev/adoption-runbook.md — same .lex-projection case: generated from
+# adoption-runbook.lex, gated at the source by `lexd check`; the projection's
+# bold verbatim subjects and label-colon titles trip MD036/MD026.
+docs/dev/adoption-runbook.md
