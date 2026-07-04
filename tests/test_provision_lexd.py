@@ -93,6 +93,10 @@ def test_release_url_pins_tag_and_triple():
         ("lexd 0.9.9", False),  # older pin → reinstall
         (f"lexd {lexd.PIN}", True),
         (f"lexd {lexd.PIN} (release)", True),
+        # A longer version that merely EMBEDS the pin is not the pin — the
+        # tightened token match rejects what a bare `PIN in output` accepted.
+        (f"lexd {lexd.PIN}5", False),  # 0.18.25 starts with 0.18.2
+        (f"lexd 1{lexd.PIN}5", False),  # 10.18.25 embeds 0.18.2
     ],
 )
 def test_is_pinned(output, pinned):

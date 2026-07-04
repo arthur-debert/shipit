@@ -35,6 +35,7 @@ import hashlib
 import logging
 import os
 import platform
+import re
 import tarfile
 import tempfile
 import time
@@ -169,15 +170,25 @@ def expected_sha(triple: str) -> str:
     return sha
 
 
+#: Matches a ``lexd --version`` line whose version token is EXACTLY the pin —
+#: ``lexd 0.18.2`` / ``lexd 0.18.2 (release)`` pass; a bare-substring near-miss
+#: (``lexd 0.18.25``, ``lexd 10.18.25``) does NOT. The trailing ``\b`` pins the
+#: token's right edge so a longer version that merely starts with the pin can't
+#: read as pinned; ``re.escape`` keeps the dotted pin from acting as a regex.
+_PINNED_RE = re.compile(rf"\blexd {re.escape(PIN)}\b")
+
+
 def is_pinned(version_output: str | None) -> bool:
     """Whether a ``lexd --version`` output shows the pinned version.
 
     ``None`` means the probe could not run at all (no binary); any output not
     carrying the pin (an older lexd, garbage from a broken binary) routes to
-    reinstall — the same ``grep -q "$PIN"`` idempotence test the retired script
-    applied.
+    reinstall. The match is the ``lexd <version>`` token, not a bare substring:
+    the retired script's ``grep -q "$PIN"`` would false-positive on a longer
+    version string that embeds the pin (``0.18.25``, ``10.18.25``), so the
+    binary tightens the idempotence test to the exact ``lexd <PIN>`` token.
     """
-    return version_output is not None and PIN in version_output
+    return version_output is not None and _PINNED_RE.search(version_output) is not None
 
 
 # --------------------------------------------------------------------------
@@ -304,10 +315,22 @@ def _install(binary: bytes, dest: Path) -> None:
 
     The rename is atomic within ``dest``'s directory, so a crash mid-install
     leaves either the old lexd or the new one on the gate path — never a
-    truncated binary a later ``lint`` would execute.
+    truncated binary a later ``lint`` would execute. The staging file gets a
+    UNIQUE name (``mkstemp``) rather than a fixed ``.lexd.provision-tmp``: two
+    provisioners racing in the same env (parallel CI jobs, simultaneous git
+    hooks) would otherwise truncate and write the same temp file, and one
+    could rename a half-written binary into ``dest``.
     """
     dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_name(f".{dest.name}.provision-tmp")
-    tmp.write_bytes(binary)
-    tmp.chmod(0o755)
-    tmp.replace(dest)
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(dest.parent), prefix=f".{dest.name}.", suffix=".provision-tmp"
+    )
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(binary)
+        tmp.chmod(0o755)
+        tmp.replace(dest)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
