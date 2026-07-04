@@ -15,7 +15,7 @@ from GitHub tabs and terminal scrollback; agents are oblivious to the log
 entirely (there is nothing in it shaped for them to consume, and no way for
 the planning cycle to appear in it at all). Correlation stops at
 `session/tree/pr/run/repo` — the log cannot answer "show me everything for
-epic RVW01 work stream 1" or "what did this shepherd agent do" — and the one
+epic RVW01 Work Stream 1" or "what did this shepherd agent do" — and the one
 reader offers no filters beyond repo and tail count. As orchestration is
 tuned and verified, there is no cheap way to observe whether the high-level
 flow actually happened as designed.

@@ -24,8 +24,8 @@ event, emitted when intent crystallizes).
 Emission has **three tiers, strongest preferred**. *Verb-witnessed*: the verb
 performing the milestone emits it — unforgeable, zero prompt tokens, the dev
 cycle's tier. *Hook-witnessed*: a shipit-managed git hook emits (post-commit
-→ `commit.created`) — automatic, skippable only by a hook bypass the eval
-store already counts. *Skill-scripted*: a skill's instructions include the
+→ `commit.created`) — automatic, skippable only by a hook bypass, which the
+eval store already counts. *Skill-scripted*: a skill's instructions include the
 emission step — best-effort, and accepted as such; this is how the planning
 cycle (grill, ADR/PRD written, epic/WS minted) enters the record at all,
 since its milestones pass through skills and `gh`, not shipit verbs. The
