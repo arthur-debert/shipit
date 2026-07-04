@@ -8,10 +8,11 @@ nothing here prints, parses for rendering, or knows a terminal exists.
 each appended matching line as it lands, with the two liveness hazards owned
 HERE so every consumer inherits them —
 
-- **torn writes**: a concurrent write can be read mid-line, so a fragment is
-  buffered until its newline lands before the line is judged (a torn read is
-  not a malformed record, and under an active filter parsing a half line
-  would drop the record permanently);
+- **torn writes**: a concurrent write can be read mid-line, so a fragment —
+  whether it arrives through the append loop or is already the file's final
+  line at open — is buffered until its newline lands before the line is
+  judged (a torn read is not a malformed record, and under an active filter
+  parsing a half line would drop the record permanently);
 - **rotation**: the writer is a ``RotatingFileHandler``, so the active file
   can be rolled over mid-follow — detected by FILE IDENTITY (the path's inode
   no longer matches the open handle's; a size check alone races a busy fresh
@@ -92,10 +93,19 @@ def follow_lines(
     sleep = sleep or time.sleep
     fh = path.open("r", encoding="utf-8", errors="replace")
     try:
-        matching = [ln for ln in fh.read().splitlines() if record_filter.matches(ln)]
+        initial = fh.read()
+        # A torn final line (content with no trailing newline) is NOT a record
+        # yet: seed it into the SAME `pending` buffer the append loop uses so
+        # its remainder — read next once the writer finishes the line —
+        # reunites here, instead of yielding the head now and the tail later
+        # as two split records. Symmetric with the readline path below.
+        pending = ""
+        tail_lines = initial.splitlines()
+        if initial and not initial.endswith("\n"):
+            pending = tail_lines.pop()
+        matching = [ln for ln in tail_lines if record_filter.matches(ln)]
         yield from last_n(matching, tail)
         # fh is now positioned at EOF; subsequent appends are picked up by readline.
-        pending = ""
         while True:
             chunk = fh.readline()
             if chunk:

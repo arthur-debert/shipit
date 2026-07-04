@@ -278,6 +278,31 @@ def test_follow_reassembles_a_torn_write_before_filtering(tmp_path):
     assert whole in got  # survived being split across two reads
 
 
+def test_follow_reassembles_a_torn_line_present_at_start(tmp_path):
+    # agy [ERROR]: the initial tail read must be buffer-aware too, not just the
+    # append loop. If the file ALREADY ends in a torn write (no newline) when
+    # follow opens, a naive `read().splitlines()` yields the head now, then the
+    # append loop reads the remainder and yields it — one record split into two.
+    # The initial read seeds the same `pending` buffer, so the halves reunite.
+    log = tmp_path / "shipit.log"
+    whole = _record("torn at start", pr=231, event="pr.ready")
+    cut = len(whole) // 2
+    # File opens with only the first half on disk (no trailing newline).
+    log.write_text(whole[:cut])
+    remainder = [whole[cut:] + "\n"]
+
+    def fake_sleep(_interval: float) -> None:
+        if remainder:
+            with log.open("a", encoding="utf-8") as fh:
+                fh.write(remainder.pop(0))
+        else:
+            raise KeyboardInterrupt
+
+    got = _drain(follow_lines(log, Filter(), tail=-1, sleep=fake_sleep))
+    # The record comes out exactly once, whole — not head then tail.
+    assert got == [whole]
+
+
 def test_follow_reopens_after_in_place_truncation(tmp_path):
     # The writer is a RotatingFileHandler: the active shipit.log can be rolled
     # over mid-follow. A follow that holds one handle would then track the stale
