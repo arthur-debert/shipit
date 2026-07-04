@@ -113,7 +113,9 @@ the verbs they already must run.
   Starting vocabulary (additive registry): `session.started`,
   `session.intent`, `tree.created`, `agent.spawned`, `agent.done`,
   `commit.created`, `review.requested`, `review.received`,
-  `review.degraded`, `round.detected`, `breaker.fired`, `pr.ready`, and the
+  `review.degraded`, `round.detected`, `breaker.fired`, `pr.ready`,
+  `pr.unready` (the guarded flip's undo — a human pushing the PR back into
+  the agent's court), and the
   planning family `planning.grill.started`, `planning.adr.written`,
   `planning.prd.written`, `planning.epic.minted`, `planning.ws.minted`.
 - **Three witness tiers, strongest preferred** (ADR-0032): verb-witnessed
@@ -124,7 +126,13 @@ the verbs they already must run.
 - **One constrained write verb** (`shipit log event <name> [--about]`) serves
   the hook and skill tiers: registered names only, keys from the environment
   plus branch derivation, fail-open when invoked from hooks. There is no
-  freeform write path on any tier.
+  freeform write path on any tier. `--about` serializes as the record's human
+  `msg` — the same freeform-prose slot every log record already has — capped
+  to one short line and honored only for skill-scripted events
+  (`session.intent`, the planning family); verb- and hook-witnessed events
+  compose their own `msg`. The narration constraint governs event *types*,
+  not prose: the closed name is the type, and `msg` stays a bounded domain
+  phrase, so the verb cannot become an open-ended diary.
 - **Branch-identity derivation is a deep module**: a pure parse from a branch
   name to (epic, ws) — epic umbrella branches yield epic only, non-namespaced
   branches yield nothing. Shared by PR verbs, the emit verb, and the hook
