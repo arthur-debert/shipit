@@ -186,6 +186,14 @@ ready           → flip draft→ready (guarded), then stop
 blocked         → report the real blocker (conflict / behind / failing CI / merge blocked)
 ```
 
+Ranking rule (#352): **failing checks outrank review requests**. When the check rollup is
+FAILING, a PR that would otherwise be `reviews_pending` ranks `blocked` with a "fix CI
+first" next action and an empty `to_request` — every reviewer is token-billed and a CI fix
+always pushes a new head, so `pr next` never requests a review on a red-checks PR. The
+prose names the deferred reviewers ("review requests deferred (…)") so the hold reads
+intentional. PENDING (still-running) checks do **not** defer requests — reviewing in
+parallel with a running, green-bound CI run is deliberate.
+
 It is the single-shot form of release's looping `wait` — the polling loop is dropped; the
 guarded flip reuses the shared `ready` helper.
 

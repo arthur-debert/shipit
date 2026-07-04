@@ -1,14 +1,16 @@
 """The review-round stopping rule + its fold-in to the state machine.
 
-The rule: address every comment each round EXCEPT stop when 6 rounds have
-happened, or when the latest round is all nitpicks. A stop on an otherwise-ready
-PR routes to READY (the leftover threads no longer hold Ready); a real CI/merge
+The rule: address every comment each round EXCEPT stop when the round cap is
+reached (shipped default 6; repo policy overrides it via `Roster.round_cap`),
+or when the latest round is all nitpicks. A stop on an otherwise-ready PR
+routes to READY (the leftover threads no longer hold Ready); a real CI/merge
 problem still blocks on its own terms.
 """
 
 from __future__ import annotations
 
 import hashlib
+from dataclasses import replace
 from itertools import count
 
 from shipit.identity import Sha
@@ -65,6 +67,7 @@ def ctx(
     mergeable="MERGEABLE",
     merge_state="CLEAN",
     checks=None,
+    roster=None,
 ):
     return readiness_view(
         number=1,
@@ -80,8 +83,9 @@ def ctx(
         checks=checks or [],
         # The SHIPPED default roster as a passed value (CLI01-WS04): these
         # tests count rounds against the default required set (copilot-only),
-        # not this repo's deployed `.shipit.toml` policy.
-        roster=default_roster(),
+        # not this repo's deployed `.shipit.toml` policy. Pass `roster` to
+        # model a repo policy override (e.g. a configured `round_cap`).
+        roster=roster if roster is not None else default_roster(),
     )
 
 
@@ -161,10 +165,10 @@ def test_a_round_unions_both_reviewers_findings_on_the_same_head():
     assert set(rounds[0].bodies) == {"fix A", "fix B"}
 
 
-# --- the 6-round hard cap -------------------------------------------------
+# --- the round cap (shipped default 6, configurable) -----------------------
 
 
-def test_cap_is_six():
+def test_shipped_default_cap_is_six():
     assert ROUND_CAP == 6
 
 
@@ -191,6 +195,30 @@ def test_cap_fires_regardless_of_finding_content():
     findings = [finding(i, f"f{i}.py", i, "real correctness bug") for i in range(1, 7)]
     v = evaluate_breakers(ctx(reviews, findings=findings))
     assert v.stop and v.breaker == "round-cap"
+
+
+def test_configured_cap_of_two_fires_on_round_two():
+    # The cap is repo policy on the snapshot roster (`[reviewers].round_cap` →
+    # Roster.round_cap): with a cap of 2, the 2nd round is the last — the
+    # breaker fires well under the shipped default of 6, and the reason
+    # reports the CONFIGURED cap, not the constant.
+    capped = replace(default_roster(), round_cap=2)
+    reviews = [review(1, "c1"), review(2, "c2")]
+    findings = [finding(1, "a.py", 1), finding(2, "b.py", 2)]
+    v = evaluate_breakers(ctx(reviews, findings=findings, roster=capped))
+    assert v.stop and v.breaker == "round-cap" and v.cycles == 2
+    assert "cap of 2" in v.reason
+
+
+def test_configured_cap_looser_than_default_defers_the_stop():
+    # A cap ABOVE the shipped default also holds: 6 rounds under a cap of 8
+    # do not stop — the roster value replaces the constant in both directions.
+    capped = replace(default_roster(), round_cap=8)
+    reviews = [review(i, f"c{i}") for i in range(1, 7)]
+    findings = [finding(i, f"f{i}.py", i) for i in range(1, 7)]
+    v = evaluate_breakers(ctx(reviews, findings=findings, roster=capped))
+    assert not v.stop
+    assert v.cycles == 6
 
 
 # --- the all-nitpick early stop -------------------------------------------

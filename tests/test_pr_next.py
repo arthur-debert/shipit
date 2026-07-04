@@ -210,3 +210,56 @@ def test_next_request_act_renders_and_dropped_edge_is_error(
     assert err.startswith("error: ")
     assert "dropped" in err
     assert "copilot" in err
+
+
+def test_next_local_auth_failure_is_error_never_a_requested_line(
+    patched_next, monkeypatch, capsys
+):
+    """#347 regression (#343 gap 6): a local reviewer whose detach dies on
+    `ReviewAuthError` (App auth unavailable — e.g. PyJWT lives only in the
+    `review` pixi env) must NEVER render `action: requested review(s): codex`.
+    The actuator's invariant is "the action line reports exactly what happened":
+    the failed placement surfaces as a clean `error: …` + exit 1 (the same shape
+    `pr review request` renders a `PrStateError`), no in-flight is recorded, and
+    no doomed child is detached. Drives the REAL path — dispatch → NextActs →
+    request_reviewers → the codex adapter → `service.start_detached_review` —
+    with only the auth mint + head-sha resolve faked."""
+    from shipit.prstate.reviewers import by_name
+    from shipit.review import service
+    from shipit.review.ghauth import ReviewAuthError
+
+    monkeypatch.setattr(
+        dispatch_mod, "required_adapters", lambda roster: [by_name("codex")]
+    )
+    monkeypatch.setattr(
+        next_verb,
+        "evaluate",
+        lambda ctx: TaskStatus(
+            state=TaskState.REVIEWS_PENDING,
+            next_action="request for the current head: codex",
+            pr=ctx.number,
+            reviewers={"codex": "not_requested"},
+            to_request=["codex"],
+        ),
+    )
+    monkeypatch.setattr(service, "_resolve_head_sha", lambda pr: "deadbeef")
+
+    def no_auth(agent, repo):
+        raise ReviewAuthError("Posting a review as a GitHub App needs PyJWT")
+
+    monkeypatch.setattr(service.checkrun.ghauth, "installation_token", no_auth)
+    spawned: list = []
+    monkeypatch.setattr(
+        service.execrun, "spawn_detached", lambda argv, **_: spawned.append(list(argv))
+    )
+
+    rc = cli.main(["pr", "next"])
+    out, err = capsys.readouterr()
+    assert rc == 1
+    # The one clean error line (the adapter's PrStateError through the shared
+    # shell), naming the failed reviewer. (The glassbox ERROR log record may also
+    # reach stderr, so assert the line's presence, not stderr's first byte.)
+    assert "error: codex-local review failed" in err
+    # The false-success line the bug printed — must never claim a failed placement.
+    assert "requested review(s)" not in out
+    assert spawned == []  # no doomed child was detached

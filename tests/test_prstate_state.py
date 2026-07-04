@@ -364,6 +364,67 @@ def test_reviews_pending_already_requested_says_wait(context):
     assert "RE-REQUEST" not in status.next_action
 
 
+# --- failing checks outrank review requests (#352) ---------------------------
+#
+# Every reviewer is token-billed and a CI fix always pushes a new head, so a
+# red-checks PR must never advise (or structurally route to) a review request:
+# it ranks BLOCKED/fix-CI with `to_request` suppressed. PENDING checks do NOT
+# defer — reviewing in parallel with a running CI run is deliberate.
+
+
+def _failing_rollup() -> list[dict]:
+    return [{"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "FAILURE"}]
+
+
+def _pending_rollup() -> list[dict]:
+    return [{"__typename": "CheckRun", "status": "IN_PROGRESS", "conclusion": None}]
+
+
+def test_failing_checks_outrank_review_requests(context):
+    # Never-requested required reviewer + red checks → fix CI is the next action;
+    # `to_request` is suppressed so `pr next` cannot burn a review on this head.
+    ctx = _replace(context("copilot_never_requested"), checks=_failing_rollup())
+    status = evaluate(ctx)
+    assert status.state is TaskState.BLOCKED
+    assert status.to_request == []
+    assert "fix CI first" in status.next_action
+    # The deferral is named — held intentionally, not forgotten.
+    assert "review requests deferred" in status.next_action
+    assert "copilot" in status.next_action
+
+
+def test_same_snapshot_with_green_checks_requests_reviewers(context):
+    # The green-checks twin of the test above: the reviewer surfaces in
+    # `to_request` again, proving the suppression keys purely off the rollup.
+    green = [{"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "SUCCESS"}]
+    status = evaluate(_replace(context("copilot_never_requested"), checks=green))
+    assert status.state is TaskState.REVIEWS_PENDING
+    assert status.to_request == ["copilot"]
+
+
+def test_pending_checks_still_allow_requesting(context):
+    # Regression-pin the parallelism: checks still RUNNING (not failed) must not
+    # defer review requests — a green outcome wastes nothing.
+    ctx = _replace(context("copilot_never_requested"), checks=_pending_rollup())
+    status = evaluate(ctx)
+    assert status.state is TaskState.REVIEWS_PENDING
+    assert status.to_request == ["copilot"]
+
+
+def test_failing_checks_with_only_in_flight_reviewers_says_fix_ci(context):
+    # Copilot already requested (nothing to defer) + red checks: still ranks
+    # fix-CI — there is no request to hold, but "wait for the review" is the
+    # wrong next action when the head is known-doomed. The in-flight reviewer is
+    # still named so the state stays legible.
+    ctx = _replace(context("gemini_eyes_copilot_requested"), checks=_failing_rollup())
+    status = evaluate(ctx)
+    assert status.state is TaskState.BLOCKED
+    assert status.to_request == []
+    assert "fix CI first" in status.next_action
+    assert "review requests deferred" not in status.next_action
+    assert "copilot" in status.next_action
+
+
 # --- parallel-required: BOTH reviewers hold (release#622) -------------------
 #
 # The dual set is no longer the shipped default (coderabbit is a phos-org

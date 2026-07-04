@@ -12,6 +12,8 @@ Ground rules every role shares:
 - The PR engine is authoritative: run `shipit pr status` and `shipit pr next` and do what it reports; do not carry the reviewer, wait, or breaker policy in your head.
 - Committing, pushing, and opening the draft PR need no human go-ahead; the only step that needs a human is the final merge.
 - Stay in your role: do the slice your role owns and hand back; do not drift into another role's job.
+- The git hooks run the full lint suite (the same command as CI) at commit and push, so do not run linters as a separate verification step. Run `shipit lint --fix` only when you expect formatting damage, then commit and let the hook be the check.
+- Never persist shipit workflow facts, tool verdicts, or workarounds to agent memory: the PR engine (`shipit pr status` / `shipit pr next`), your role prompt, and the repo docs are authoritative, and memory will lose to them. If a shipit tool misbehaves, file or report it instead of remembering around it.
 
 ## Your role
 

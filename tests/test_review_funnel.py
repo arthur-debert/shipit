@@ -230,6 +230,57 @@ def test_start_detached_still_spawns_when_breadcrumb_create_fails(monkeypatch):
     assert "--run-id" not in spawned[0]  # no run was opened, so none is threaded
 
 
+def test_start_detached_as_app_auth_failure_fails_loud_and_does_not_spawn(monkeypatch):
+    """#347 (#343 gap 6): an App-auth failure on the SYNCHRONOUS parent path
+    (`ReviewAuthError` — PyJWT absent outside the `review` env, missing Doppler
+    creds, a failed mint) is a PRECONDITION failure, not a best-effort breadcrumb
+    miss: the SAME auth the parent failed to mint is what the as_app child needs
+    to post the review and close its run, so proceeding would detach a doomed
+    child whose failure is invisible (no breadcrumb ever opened) while the
+    request reports a false in-flight. It must propagate — and nothing may spawn."""
+    from shipit.review.ghauth import ReviewAuthError
+
+    def no_auth(agent, repo):
+        raise ReviewAuthError("Posting a review as a GitHub App needs PyJWT")
+
+    monkeypatch.setattr(service.checkrun.ghauth, "installation_token", no_auth)
+    monkeypatch.setattr(service, "_resolve_head_sha", lambda pr: "deadbeef")
+
+    spawned: list = []
+    with pytest.raises(ReviewAuthError, match="PyJWT"):
+        service.start_detached_review(
+            agent_backend.CODEX,
+            TARGET,
+            spawn=lambda argv, env: spawned.append(list(argv)),
+        )
+    assert spawned == []  # a doomed child was never detached
+
+
+def test_start_detached_no_as_app_auth_failure_stays_best_effort(monkeypatch):
+    """Without ``as_app`` the review posts as the USER — App auth is only the
+    breadcrumb's concern, so a mint failure stays best-effort: the child still
+    spawns (with no `--run-id`) and the request reports in-flight."""
+    from shipit.review.ghauth import ReviewAuthError
+
+    def no_auth(agent, repo):
+        raise ReviewAuthError("Posting a review as a GitHub App needs PyJWT")
+
+    monkeypatch.setattr(service.checkrun.ghauth, "installation_token", no_auth)
+    monkeypatch.setattr(service, "_resolve_head_sha", lambda pr: "deadbeef")
+
+    spawned: list = []
+    rc = service.start_detached_review(
+        agent_backend.CODEX,
+        TARGET,
+        as_app=False,
+        spawn=lambda argv, env: spawned.append(list(argv)),
+    )
+
+    assert rc is True
+    assert len(spawned) == 1
+    assert "--run-id" not in spawned[0]  # no run was opened, so none is threaded
+
+
 def test_resolve_head_sha_raises_on_missing_headrefoid(monkeypatch):
     """The synchronous validation path: a `gh pr view` node without `headRefOid`
     (schema change / unexpected output) makes the typed core read

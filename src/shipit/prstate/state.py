@@ -29,6 +29,12 @@ Two definitions anchor it (ADR-0006 redefines the first):
              merge state re-polls; any remaining computed non-CLEAN state
              (BLOCKED/HAS_HOOKS) is BLOCKED (release#675).
 
+FAILING checks outrank review requests (#352): every reviewer is token-billed,
+and a CI fix always pushes a new head, so a red-checks PR never advises (or
+routes to) a review request — it ranks BLOCKED/fix-CI with `to_request`
+suppressed, naming the deferred reviewers in the prose. PENDING (still-running)
+checks do not defer: reviewing in parallel with a green-bound run wastes nothing.
+
 Best-effort reviewers (Gemini) never hold: an absent or in-progress best-effort
 reviewer does not hold the PR in REVIEWS_PENDING. The *skip-after-timeout*
 decision is the polling caller's, not the snapshot's — the snapshot is
@@ -399,6 +405,23 @@ def _evaluate(
         request_names, rerequest_names, waiting_names = _classify_pending(
             ctx, holding, funnel_states
         )
+        # FAILING checks OUTRANK review requests (#352): every reviewer is
+        # token-billed (a review is a real model run), so requesting a review on
+        # a head that is known to be about to change — a CI fix ALWAYS pushes a
+        # new head — burns review budget for nothing. Rank the state as the CI
+        # block and SUPPRESS `to_request` (the funnel split above is still
+        # computed and rides `reviewer_funnel`; it just must not surface as the
+        # action), so neither `pr next` (routes on the structured field) nor a
+        # coordinator following the prose requests on a doomed head. The prose
+        # names the deferred reviewers so the hold reads intentional, not
+        # forgotten. PENDING (still-running) checks deliberately do NOT defer:
+        # reviewing in parallel with a green-bound CI run wastes nothing.
+        if checks == ChecksState.FAILING:
+            status.state = TaskState.BLOCKED
+            status.next_action = _checks_failing_deferral_action(
+                request_names + rerequest_names, waiting_names
+            )
+            return status
         status.state = TaskState.REVIEWS_PENDING
         # request ∪ re-request both route to the single `request_review` act; only
         # the wait set (`waiting_names`) leaves `to_request` empty → the dispatcher
@@ -633,6 +656,22 @@ def _reviews_pending_action(
     return f"waiting on required review(s): {', '.join(all_names)} — " + "; ".join(
         clauses
     )
+
+
+def _checks_failing_deferral_action(
+    deferred_names: list[str], waiting_names: list[str]
+) -> str:
+    """Render the fix-CI-first next-action for a red-checks PR with reviewers
+    still holding (#352). PURE human-facing prose (the dispatcher routes on the
+    suppressed `to_request`, never this text). It names the deferred reviewers —
+    the (re-)requests the engine is intentionally holding until CI is green — so
+    a coordinator reading the prose knows they are deferred, not forgotten."""
+    action = "CI check(s) failing — fix CI first"
+    if deferred_names:
+        action += f"; review requests deferred ({', '.join(deferred_names)} pending)"
+    if waiting_names:
+        action += f"; already requested / in flight: {', '.join(waiting_names)}"
+    return action
 
 
 def _has_stale_review(ctx: ReadinessView, adapter: ReviewerAdapter) -> bool:

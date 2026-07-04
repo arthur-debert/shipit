@@ -134,7 +134,8 @@ The PR lifecycle (draft -> ready -> stop):
 
         `shipit pr next` / `status` own the reviewer set, the re-request rules
         (per-reviewer, default review-once — a push does NOT re-stale a
-        review-once reviewer), and the stopping breaker (stop at 6 rounds, or when
+        review-once reviewer), and the stopping breaker (stop at the configured
+        round cap — `round_cap` in `[reviewers]` of `.shipit.toml`, default 6 — or when
         a round is all *nitpicks* — wording/naming/style with no correctness,
         behavior, or security impact). Do what the engine reports rather than
         re-deriving these; on break it routes straight to READY, and a real

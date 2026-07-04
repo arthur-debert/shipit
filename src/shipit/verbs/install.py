@@ -4,8 +4,13 @@
 skills, the AGENTS.md block, the bootstrap launcher, the ``./claude-start``
 session launcher, the ``SessionStart`` activation hook) into a consumer repo,
 recording a per-unit pristine ``sha256`` in ``.shipit.toml``. On re-install it
-hash-compares each unit against its stored pristine and opens a DRAFT PR with the
-changes — never an admin push (docs/dev/architecture.lex §2, docs/prd/install-reconciliation.md).
+hash-compares each unit against its stored pristine and refreshes the drift IN
+THE WORKING TREE — committing the result is the caller's job. Only ``--pr``
+opts into the standalone reconcile flow that stages the set on the
+``shipit/install`` branch and opens a DRAFT PR — never an admin push
+(docs/dev/architecture.lex §2, docs/prd/install-reconciliation.md; #359: the
+branch/PR side effect is explicit opt-in, so an install run mid-workstream
+never races its own stray PR to main).
 
 Reconciliation is a HASH COMPARE, not a subsystem. Per unit there are four
 outcomes and no more — the moment it grows features it has become the drift
@@ -19,10 +24,14 @@ engine this design exists to delete (docs/dev/lessons-learned.lex §4):
                                                     branch, but FLAG it with a diff
                                                     so the human decides at merge)
 
-ADD/UPDATE/OVERRIDE all write onto the install BRANCH, never to the consumer's
-main — nothing lands without the human merging the draft PR (pull, never push).
-The OVERRIDE/UPDATE split is the human signal: an UPDATE is safe to merge blind;
-an OVERRIDE would discard a consumer edit, so the PR surfaces its diff loudly.
+ADD/UPDATE/OVERRIDE all write shipit's content; only NOOP writes nothing. In
+the default working-tree mode the writes land uncommitted, so ``git diff`` is
+the review surface before the caller commits them into their own work. On the
+``--pr`` path they land on the install BRANCH, never on the consumer's main —
+nothing lands without the human merging the draft PR (pull, never push). The
+OVERRIDE/UPDATE split is the human signal either way: an UPDATE is safe to take
+blind; an OVERRIDE would discard a consumer edit, so it is surfaced loudly (a
+stderr warning in the working tree, the diff in the PR body).
 
 The pure decision logic (:func:`decide` / :func:`plan`) is kept out of the
 filesystem + gh boundary so it is unit-testable, the same split checks.py uses.
@@ -839,13 +848,14 @@ def run(
     path: str | None,
     *,
     dry_run: bool = False,
+    pr: bool = False,
     push: bool = False,
     local: bool = False,
     activate_hooks: Callable[[Path], execrun.ExecResult] | None = None,
 ) -> int:
     """Install/reconcile the managed set into the consumer at ``path``.
 
-    Three write modes, in order of precedence:
+    Four write modes, in order of precedence:
 
       - ``local``  — commit the managed set on the CURRENT branch and stop: no
         branch switch, no push, no PR. This is the Tree-provisioning mode
@@ -854,8 +864,12 @@ def run(
         side effect (no ``shipit/install`` branch, no draft PR). See #170.
       - ``push``   — break-glass: commit on the current branch and push straight
         to it (admin bypass), no PR.
-      - default    — switch to the ``shipit/install`` branch, commit, force-push,
-        and open a DRAFT PR (the consumer-onboarding flow).
+      - ``pr``     — switch to the ``shipit/install`` branch, commit, force-push,
+        and open a DRAFT PR (the standalone consumer-onboarding/reconcile flow).
+      - default    — refresh the managed set IN THE WORKING TREE and stop: no
+        commit, no branch, no push, no PR. Committing the refresh is the
+        caller's job — mid-workstream the refreshed files belong in the
+        caller's own commit/PR, never in a parallel PR racing it to main (#359).
 
     ``activate_hooks`` injects the lefthook boundary so tests exercise the
     activation contract without mutating a real ``.git/hooks`` (mirrors how
@@ -917,9 +931,9 @@ def run(
             print(f"  {d.action:8} {d.unit.dest}")
     for item in seed_plan:
         print(f"  {'seed':8} {item}")
-    # A seed-only change (managed set current, policy missing) still warrants a PR,
-    # so a re-install picks up policy a consumer never had — but stays a no-op once
-    # the policy is in place.
+    # A seed-only change (managed set current, policy missing) still counts as a
+    # write, so a re-install picks up policy a consumer never had — but stays a
+    # no-op once the policy is in place.
     if not writes and not seed_plan:
         print("  nothing to do — managed set is current.")
         logger.debug(
@@ -1016,6 +1030,37 @@ def run(
     changed_paths = sorted({d.unit.dest for d in writes} | {config.CONFIG_NAME})
     cwd = str(root)
 
+    if not (local or push or pr):
+        # Default: working-tree refresh ONLY (#359). The managed set and the
+        # manifest are on disk, uncommitted — `git diff` is the review surface,
+        # and the caller folds the refresh into their own commit/PR. Zero git/gh
+        # side effects: no commit, no branch, no push, no PR.
+        print(
+            "  refreshed the managed set in the working tree — review with "
+            "`git diff` and commit it with your own work (use --pr for the "
+            "standalone reconcile draft PR)"
+        )
+        if overrides:
+            names = ", ".join(sorted(d.unit.dest for d in overrides))
+            print(
+                f"install: {len(overrides)} consumer-edited unit(s) overwritten "
+                f"with shipit's content in the working tree: {names} — review "
+                f"`git diff` before committing (recover yours from git history "
+                f"if the edit was committed)",
+                file=sys.stderr,
+            )
+        logger.info(
+            "install refreshed working tree",
+            extra={
+                "root": str(root),
+                "mode": "tree",
+                "writes": len(writes),
+                "overrides": len(overrides),
+                "duration_ms": int((time.monotonic() - started) * 1000),
+            },
+        )
+        return 0
+
     try:
         if local:
             # Local-only (Tree provisioning, #170): commit the managed set on the
@@ -1063,7 +1108,8 @@ def run(
             )
             return 0
 
-        # Default: stage onto an install branch, push it, open a DRAFT PR.
+        # --pr: stage onto the install branch, push it, open a DRAFT PR — the
+        # standalone consumer-onboarding/reconcile flow, explicit opt-in only.
         git.switch_create(INSTALL_BRANCH, cwd=cwd)
         git.add(changed_paths, cwd=cwd)
         git.commit(COMMIT_MESSAGE, changed_paths, cwd=cwd)

@@ -74,7 +74,7 @@ The single PR targets its base (`main`, or the epic branch for a workstream); th
 
 ### Engine-owned policy — trust the tool, don't carry it in your head:
 
-`shipit pr next` / `status` own the reviewer set, the re-request rules (per-reviewer, default review-once — a push does NOT re-stale a review-once reviewer), and the stopping breaker (stop at 6 rounds, or when a round is all **nitpicks** — wording/naming/style with no correctness, behavior, or security impact). Do what the engine reports rather than re-deriving these; on break it routes straight to READY, and a real blocker (failing CI, conflict) still blocks on its own terms.
+`shipit pr next` / `status` own the reviewer set, the re-request rules (per-reviewer, default review-once — a push does NOT re-stale a review-once reviewer), and the stopping breaker (stop at the configured round cap — `round_cap` in `[reviewers]` of `.shipit.toml`, default 6 — or when a round is all **nitpicks** — wording/naming/style with no correctness, behavior, or security impact). Do what the engine reports rather than re-deriving these; on break it routes straight to READY, and a real blocker (failing CI, conflict) still blocks on its own terms.
 
 ## 2. Epics (multiple PRs)
 
@@ -158,9 +158,10 @@ coordinator shepherds to READY, then stops for the human to merge.
 - **Coordinator** (the agent the human addresses): never implements. Delegates the work;
   owns every wait and the flip; spawns a fresh shepherd per review round; in an epic, merges
   READY workstream PRs into the epic branch.
-- **Implementer** (subagent): implements + tests, gets the checks green (`pixi run lint &&
-  pixi run test`), opens the DRAFT PR with a `## Context` handoff note (why this approach,
-  what's out of scope), then **stops at PR-open** — never handles a review round.
+- **Implementer** (subagent): implements + tests, gets the tests green (`pixi run test`;
+  the commit/push hooks run the lint suite), opens the DRAFT PR with a `## Context` handoff
+  note (why this approach, what's out of scope), then **stops at PR-open** — never handles
+  a review round.
 - **Shepherd** (fresh subagent, one per round): triages open threads — the local agent has
   the final word, so fix-or-pushback and resolve each — pushes the round's commits at once,
   hands back.

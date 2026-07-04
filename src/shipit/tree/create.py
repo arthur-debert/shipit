@@ -8,7 +8,9 @@ summary (``{path, branch, base}``). The whole pipeline hides behind this one cal
 1. ``git clone --reference <local> --dissociate <github-url> <dir>`` — a tiny,
    instant, yet fully INDEPENDENT clone (ADR-0014); see
    :func:`shipit.git.clone_dissociated`.
-2. ``git fetch origin`` then ``git checkout -b <branch> <base>``.
+2. harden the fresh clone as a future ``--reference`` donor
+   (:func:`shipit.git.configure_safe_reference_donor`, #353), then
+   ``git fetch origin`` and ``git checkout -b <branch> <base>``.
 3. apply ``.treeinclude`` — copy the gitignored-but-needed files (``.env``,
    Doppler config, models) from the source checkout into the new Tree
    (:mod:`shipit.tree.include`).
@@ -140,6 +142,11 @@ def create(spec: TreeSpec, *, source_repo: str, github_url: str) -> Tree:
         )
         try:
             git.clone_dissociated(github_url, str(dest), reference=source_repo)
+            # BEFORE the first fetch: a minted Tree must never grow the split
+            # commit-graph chain that poisons it as a `--reference` donor for
+            # its own children's clones (#353) — and `fetch.writeCommitGraph`
+            # is exactly a fetch-time writer.
+            git.configure_safe_reference_donor(cwd=str(dest))
             git.fetch(cwd=str(dest))
             git.checkout_new_branch(tree_plan.branch, tree_plan.base, cwd=str(dest))
             copied = include.apply(source_repo, dest)
@@ -291,7 +298,7 @@ def _provision(dest: Path, *, trees_root: Path) -> None:
     """
     if not config.is_onboarded(dest / config.CONFIG_NAME):
         raise ValueError(
-            f"repo {dest} is not onboarded — run `shipit install` first "
+            f"repo {dest} is not onboarded — run `shipit install --pr` first "
             "(a Tree can only be provisioned from a repo shipit manages)"
         )
     env = provision_env()
