@@ -29,6 +29,24 @@ BLOCK_CLOSE = "<!-- End shipit-managed block. -->"
 # are invalid TOML) and anchor under a table header so the managed keys land in
 # the right table on a first install.
 LEFTHOOK_FILE = "lefthook.yml"
+
+# The lint tool configs the managed gate needs (ADP00-WS10, #436). The managed
+# lefthook caller runs the whole-tree lint, and markdownlint/yamllint
+# auto-discover their config from the repo root — so the exact configs
+# shipit's own gate relies on are managed whole-file units, and a stock
+# consumer lints with what shipit dogfoods (drift is caught by the
+# reconcile-to-noop tests over shipit's own copies, the WS01 pattern).
+# Packaged names drop the leading dot so the data files stay visible to
+# directory listings and packaging globs; ``dest`` restores it.
+MARKDOWNLINT_FILE = ".markdownlint.yaml"
+MARKDOWNLINTIGNORE_FILE = ".markdownlintignore"
+YAMLLINT_FILE = ".yamllint.yaml"
+LINT_CONFIG_UNITS = (
+    (MARKDOWNLINT_FILE, "markdownlint.yaml"),
+    (MARKDOWNLINTIGNORE_FILE, "markdownlintignore"),
+    (YAMLLINT_FILE, "yamllint.yaml"),
+)
+
 PIXI_FILE = "pixi.toml"
 PIXI_KEY = "pixi.toml#shipit-tasks"
 PIXI_OPEN = (
@@ -313,6 +331,13 @@ def load_units() -> list[Unit]:
             content=data_bytes("lefthook.yml"),
         )
     )
+    # The lint tool configs (#436): markdownlint and yamllint auto-discover
+    # these at the repo root, so delivering them is what makes the managed
+    # caller's whole-tree lint green on a stock consumer right after install.
+    for dest, data_file in LINT_CONFIG_UNITS:
+        units.append(
+            Unit(key=dest, dest=dest, kind="file", content=data_bytes(data_file))
+        )
     units.append(
         Unit(
             key=PIXI_KEY,

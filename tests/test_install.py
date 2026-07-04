@@ -371,6 +371,90 @@ def test_lefthook_unit_reconciles_add_noop_override(tmp_path, rec):
     assert decision().action == irec.OVERRIDE
 
 
+# --------------------------------------------------------------------------
+# The ADP00-WS10 lint tool configs (#436) — the managed set delivers the
+# configs its own gate needs (markdownlint/yamllint auto-discover them from
+# the repo root), so a stock consumer's whole-tree lint is green right after
+# install with the managed set present.
+# --------------------------------------------------------------------------
+
+
+def test_load_units_includes_the_lint_tool_configs():
+    units = {u.key: u for u in iunits.load_units()}
+    for dest, data_file in iunits.LINT_CONFIG_UNITS:
+        unit = units[dest]
+        assert unit.kind == "file"
+        assert unit.dest == dest
+        assert unit.content == iunits.data_bytes(data_file)
+
+
+def test_managed_markdownlint_config_relaxes_exactly_two_rules():
+    """MD013/MD041 off for the managed set's markdown genre; every other rule
+    stays at markdownlint's defaults so real structural issues still fail."""
+    cfg = yaml.safe_load(iunits.data_bytes("markdownlint.yaml"))
+    assert cfg == {"default": True, "MD013": False, "MD041": False}
+
+
+def test_managed_yamllint_config_extends_default_with_three_relaxations():
+    cfg = yaml.safe_load(iunits.data_bytes("yamllint.yaml"))
+    assert cfg == {
+        "extends": "default",
+        "rules": {
+            "document-start": "disable",
+            "truthy": {"check-keys": False},
+            "line-length": {"max": 120},
+        },
+    }
+
+
+def test_managed_markdownlintignore_covers_managed_paths_only():
+    """The ignore file excludes exactly the managed/vendored markdown — never
+    a consumer-authored file (a consumer's README.md is theirs; shipit's own
+    README is skipped only because it is a lex projection, which `shipit lint`
+    routes to the lexd leg with no ignore entry — tested in test_lint.py)."""
+    entries = [
+        line
+        for line in iunits.data_bytes("markdownlintignore").decode().splitlines()
+        if line and not line.startswith("#")
+    ]
+    assert entries == ["skills/", "AGENTS.md"]
+
+
+def test_shipits_own_lint_configs_reconcile_to_noop():
+    """The dogfood drift check, extended from the WS01 version pattern to
+    config: shipit self-installs at Tree provisioning, so its own
+    auto-discovered lint configs must stay BYTE-IDENTICAL to the managed
+    units — a consumer lints with exactly what shipit's own gate runs, and a
+    config edit is one data-file change mirrored here (or this test fails)."""
+    root = Path(__file__).resolve().parents[1]
+    units = {u.key: u for u in iunits.load_units()}
+    for dest, _ in iunits.LINT_CONFIG_UNITS:
+        unit = units[dest]
+        assert irec.consumer_hash(root, unit) == unit.desired_hash(), dest
+
+
+def test_lint_config_units_reconcile_add_noop_override(tmp_path, rec):
+    """Fresh consumer install ADDs the three config units, a re-install NOOPs,
+    and a consumer edit surfaces as OVERRIDE (never silently kept)."""
+    keys = {dest for dest, _ in iunits.LINT_CONFIG_UNITS}
+
+    def actions():
+        return {
+            d.unit.key: d.action
+            for d in _plan(tmp_path).decisions
+            if d.unit.key in keys
+        }
+
+    assert set(actions().values()) == {irec.ADD}
+    _apply(tmp_path)
+    for dest, data_file in iunits.LINT_CONFIG_UNITS:
+        assert (tmp_path / dest).read_bytes() == iunits.data_bytes(data_file)
+    assert set(actions().values()) == {irec.NOOP}
+    (tmp_path / iunits.YAMLLINT_FILE).write_text("extends: relaxed\n")
+    assert actions()[iunits.YAMLLINT_FILE] == irec.OVERRIDE
+    assert actions()[iunits.MARKDOWNLINT_FILE] == irec.NOOP
+
+
 def test_load_units_has_skills_agents_and_bootstrap():
     units = iunits.load_units()
     keys = {u.key for u in units}
