@@ -1098,6 +1098,111 @@ def test_consumer_edit_to_lint_deps_block_surfaces_as_override(tmp_path, rec):
     assert 'ruff = "0.99.*"' in rec.pr_body
 
 
+# --------------------------------------------------------------------------
+# The pixi-manifest seed (ADP00-WS09, #432) — a stock consumer with NO
+# pixi.toml gets a minimal VALID [workspace] table around the managed blocks
+# --------------------------------------------------------------------------
+
+
+def test_pixi_manifest_seed_is_valid_toml_with_a_sanitized_name():
+    # The pure seed renderer: parseable TOML carrying the one table pixi
+    # requires, with the name slugged so an exotic directory name can neither
+    # break the TOML string nor produce a name pixi rejects.
+    seed = tomllib.loads(iunits.pixi_manifest_seed("shipit-canary"))
+    assert seed["workspace"]["name"] == "shipit-canary"
+    assert seed["workspace"]["channels"] == list(iunits.PIXI_SEED_CHANNELS)
+    assert seed["workspace"]["platforms"] == list(iunits.PIXI_SEED_PLATFORMS)
+
+    weird = tomllib.loads(iunits.pixi_manifest_seed('my repo "v2"!'))
+    assert weird["workspace"]["name"] == "my-repo-v2"
+    # Never empty, even from a name with no salvageable characters.
+    assert tomllib.loads(iunits.pixi_manifest_seed("«»"))["workspace"]["name"]
+
+
+def test_fresh_consumer_without_pixi_manifest_gets_a_valid_seed(tmp_path, rec):
+    # The #432 canary failure: no pixi.toml at all is the STOCK adoption case.
+    # Install must leave a manifest pixi parses — a [workspace] table plus the
+    # three managed blocks — from the very first commit.
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+
+    plan = _plan(tmp_path)
+    assert plan.seed_pixi_manifest is True
+    # The dry-run report announces the seed before anything is written.
+    assert "pixi.toml ([workspace] table" in verb.format_plan(plan, dry_run=True)
+
+    _apply(tmp_path, iapply.MODE_PR)
+
+    manifest = tomllib.loads((tmp_path / "pixi.toml").read_text())  # valid TOML
+    # The seeded required table, named from the consumer root.
+    assert manifest["workspace"]["name"] == iunits.workspace_name(tmp_path.name)
+    assert manifest["workspace"]["channels"] == list(iunits.PIXI_SEED_CHANNELS)
+    # ...and everything `pixi run -e lint lint` needs, spliced in beneath it.
+    assert manifest["tasks"]["lint"] == "shipit lint"
+    assert set(manifest["feature"]["lint"]["dependencies"]) == set(LINT_TOOLS)
+    assert manifest["environments"]["lint"] == ["lint"]
+
+    # The seed is scaffold, not a managed unit: only the three block units are
+    # recorded, so the [workspace] table is consumer-owned from here on.
+    managed = config.load_managed(config.load(tmp_path / ".shipit.toml"))
+    pixi_keys = {k for k in managed if k.startswith("pixi.toml")}
+    assert pixi_keys == {
+        iunits.PIXI_KEY,
+        iunits.PIXI_LINT_DEPS_KEY,
+        iunits.PIXI_ENVS_KEY,
+    }
+
+    # The PR body tells the merger the table was seeded and is theirs to edit.
+    assert "### Pixi manifest seeded" in rec.pr_body
+
+    # A re-install is a clean NOOP — the seed decision does not resurface.
+    replan = _plan(tmp_path)
+    assert replan.nothing_to_do and replan.seed_pixi_manifest is False
+
+
+def test_seeded_workspace_table_is_consumer_owned(tmp_path, rec):
+    # A consumer edit to the seeded [workspace] table is NOT drift: the table
+    # was never hashed into [managed], so a re-install stays a clean no-op.
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    _apply(tmp_path)
+
+    pixi_path = tmp_path / "pixi.toml"
+    pixi_path.write_text(
+        pixi_path.read_text().replace("platforms = [", 'license = "MIT"\nplatforms = [')
+    )
+    assert _plan(tmp_path).nothing_to_do
+
+
+def test_existing_pixi_manifest_is_never_seeded(tmp_path, rec):
+    # A consumer WITH a manifest keeps today's behavior: blocks reconciled into
+    # it, header untouched, no seed decided.
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    (tmp_path / "pixi.toml").write_text('[workspace]\nname = "acme"\n')
+
+    plan = _plan(tmp_path)
+    assert plan.seed_pixi_manifest is False
+
+    _apply(tmp_path)
+    manifest = tomllib.loads((tmp_path / "pixi.toml").read_text())
+    assert manifest["workspace"] == {"name": "acme"}  # untouched
+    assert manifest["tasks"]["lint"] == "shipit lint"
+
+
+def test_seed_never_clobbers_a_manifest_created_after_gather(tmp_path, rec):
+    # The gather→apply window: a pixi.toml that appeared after the plan was
+    # decided is a consumer file — the seed write is skipped, the blocks still
+    # splice into it.
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    plan = _plan(tmp_path)
+    assert plan.seed_pixi_manifest is True
+
+    (tmp_path / "pixi.toml").write_text('[workspace]\nname = "late"\n')
+    iapply.apply(plan)
+
+    manifest = tomllib.loads((tmp_path / "pixi.toml").read_text())
+    assert manifest["workspace"] == {"name": "late"}
+    assert manifest["tasks"]["lint"] == "shipit lint"
+
+
 def test_open_install_pr_is_updated_not_recreated(tmp_path, rec, monkeypatch):
     # An install PR already exists for the branch (a prior unmerged install).
     monkeypatch.setattr(

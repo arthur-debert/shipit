@@ -41,7 +41,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from .. import config
 from .errors import InstallError
 from .splice import extract_block, extract_settings_hook
-from .units import FMT_JSON_HOOK, LEFTHOOK_FILE, Unit, data_bytes
+from .units import FMT_JSON_HOOK, LEFTHOOK_FILE, PIXI_FILE, Unit, data_bytes
 
 logger = logging.getLogger("shipit.install")
 
@@ -280,6 +280,11 @@ class ConsumerState:
     pristine: Mapping[str, str]  # unit key -> stored pristine hash
     retired_hashes: Mapping[str, str | None]  # retired path -> current hash
     seeds: tuple[str, ...]  # policy entries the seed pass would add
+    # No pixi.toml at all (#432) — distinct from "present without the managed
+    # blocks", which the per-unit hashes already encode as ADDs: pixi requires a
+    # [workspace]/[project]/[package] table, so an applying install must seed a
+    # minimal valid manifest before the block splices land.
+    pixi_manifest_missing: bool = False
     manifest_error: str | None = None
 
 
@@ -323,6 +328,7 @@ def gather(
         pristine=pristine,
         retired_hashes={r.path: retired_actual_hash(root, r) for r in retired},
         seeds=tuple(seeds),
+        pixi_manifest_missing=not (root / PIXI_FILE).is_file(),
         manifest_error=manifest_error,
     )
 
@@ -345,6 +351,11 @@ class Plan:
     decisions: tuple[Decision, ...]
     retired: tuple[RetiredDecision, ...]
     seeds: tuple[str, ...]
+    # The consumer has no pixi.toml, and this plan writes pixi block units into
+    # one (#432): apply seeds the minimal valid [workspace] manifest first, so
+    # pixi parses the file from the very first commit. One-time scaffold —
+    # never hashed into [managed], consumer-owned after the seed.
+    seed_pixi_manifest: bool = False
     manifest_error: str | None = None
 
     @property
@@ -411,11 +422,20 @@ def reconcile(
     (a locally modified copy shipit refuses to destroy, WARNING) — the durable
     twin (ADR-0029); the terminal report is the renderer's.
     """
+    decisions = tuple(plan(units, state.consumer_hashes, state.pristine))
     result = Plan(
         root=state.root,
-        decisions=tuple(plan(units, state.consumer_hashes, state.pristine)),
+        decisions=decisions,
         retired=tuple(plan_retired(retired, state.retired_hashes)),
         seeds=state.seeds,
+        # Seed only when a write will actually create pixi.toml: no manifest on
+        # the consumer AND a pixi block unit in this plan's write set (with the
+        # file absent every pixi unit decides ADD, so this is one condition,
+        # stated fully).
+        seed_pixi_manifest=state.pixi_manifest_missing
+        and any(
+            d.unit.dest == PIXI_FILE for d in decisions if d.action in (ADD, UPDATE)
+        ),
         manifest_error=state.manifest_error,
     )
     logger.debug(
@@ -427,6 +447,7 @@ def reconcile(
             "overrides": len(result.overrides),
             "noops": sum(1 for d in result.decisions if d.action == NOOP),
             "seeds": len(result.seeds),
+            "pixi_seed": result.seed_pixi_manifest,
             "retire_deletes": len(result.retire_deletes),
             "retire_keeps": len(result.retire_keeps),
         },
