@@ -7,6 +7,11 @@ from shipit.identity import repo_from_slug
 from shipit.verbs import gh_setup
 
 
+def get_rule(ruleset, rule_type):
+    """Return the single rule of the given type from a ruleset dict."""
+    return next(r for r in ruleset["rules"] if r["type"] == rule_type)
+
+
 # --------------------------------------------------------------------------
 # Packaged data
 # --------------------------------------------------------------------------
@@ -19,7 +24,7 @@ def test_template_is_cleaned():
     assert "source" not in tmpl
     assert "source_type" not in tmpl
     assert tmpl["name"] == gh_setup.RULESET_NAME
-    rule = next(r for r in tmpl["rules"] if r["type"] == "required_status_checks")
+    rule = get_rule(tmpl, "required_status_checks")
     assert rule["parameters"]["required_status_checks"] == []
 
 
@@ -28,7 +33,7 @@ def test_template_pins_automatic_copilot_review_off():
     explicitly pins automatic Copilot review off, so re-running gh-setup erases
     any hand-enabled auto-review."""
     tmpl = gh_setup.load_template()
-    rule = next(r for r in tmpl["rules"] if r["type"] == "pull_request")
+    rule = get_rule(tmpl, "pull_request")
     assert rule["parameters"]["automatic_copilot_code_review_enabled"] is False
 
 
@@ -56,22 +61,24 @@ def test_load_labels_full_set_with_colors():
 def test_build_payload_injects_checks_only():
     tmpl = gh_setup.load_template()
     body = gh_setup.build_payload(tmpl, ["app-ui / check", "wire / check"])
-    rule = next(r for r in body["rules"] if r["type"] == "required_status_checks")
+    rule = get_rule(body, "required_status_checks")
     assert rule["parameters"]["required_status_checks"] == [
         {"context": "app-ui / check"},
         {"context": "wire / check"},
     ]
     # The template is not mutated (deepcopy).
-    src_rule = next(r for r in tmpl["rules"] if r["type"] == "required_status_checks")
+    src_rule = get_rule(tmpl, "required_status_checks")
     assert src_rule["parameters"]["required_status_checks"] == []
 
 
 def test_build_payload_preserves_copilot_pin():
-    """Injecting required checks must not disturb the pull_request rule — the
-    automatic-Copilot-review pin survives into the built payload."""
+    """Injecting required checks must not disturb the pull_request rule — it
+    flows into the built payload strictly equal to the template's rule,
+    Copilot pin included."""
     tmpl = gh_setup.load_template()
     body = gh_setup.build_payload(tmpl, ["app-ui / check"])
-    rule = next(r for r in body["rules"] if r["type"] == "pull_request")
+    rule = get_rule(body, "pull_request")
+    assert rule == get_rule(tmpl, "pull_request")
     assert rule["parameters"]["automatic_copilot_code_review_enabled"] is False
 
 
