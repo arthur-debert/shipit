@@ -23,7 +23,7 @@ import logging
 import time
 from datetime import datetime, timezone
 
-from .. import branchid, gh, logcontext
+from .. import branchid, events, gh, logcontext
 from ..identity import Repo, Sha
 from ..pr import PrId, core_from_node
 from .model import (
@@ -308,6 +308,21 @@ def _bind_branch_identity(head_ref: object) -> None:
     logcontext.bind(epic=identity.epic, ws=identity.ws)
 
 
+def bind_pr_identity(pr: PrId) -> None:
+    """Bind ``pr``/``repo`` + the head branch's ``epic``/``ws`` WITHOUT a gather.
+
+    The per-operation ADR-0032 binding for a PR verb that mutates without ever
+    building a snapshot (today: the ready→draft undo). ``gather`` /
+    ``gather_reviews`` bind as a side effect of the fetch they already run; this
+    helper is the same seam for a verb with no fetch of its own — one light
+    ``headRefName`` read, then the ONE branch-identity parser. A non-namespaced
+    head leaves ``epic``/``ws`` absent, exactly as at the gather seams.
+    """
+    logcontext.bind(pr=pr.number, repo=pr.repo.slug)
+    meta = gh.pr_view(str(pr.number), repo=pr.slug, json_fields=["headRefName"])
+    _bind_branch_identity(meta.get("headRefName"))
+
+
 def gather_reviews(pr: PrId, roster: Roster) -> ReadinessView:
     """A LIGHT context sufficient for `detect()` — head SHA + reviews + pending
     review requests + the reviewer Roster, nothing else.
@@ -445,6 +460,32 @@ def gather(pr: PrId, roster: Roster) -> ReadinessView:
         # build edge, the same place every other impurity (config, network) does.
         now=datetime.now(timezone.utc),
     )
+    # The `review.received` dev-cycle event (ADR-0032 / LOG04-WS02): the gather
+    # is the engine's first sight of a LANDED review — nothing in shipit posts
+    # a remote reviewer's review, so the fetch seam is the strongest witness
+    # there is. `emit_once` scopes "first" to the process (one `pr next`
+    # invocation gathers up to three times; ADR-0029/0032 reject a cross-run
+    # store), keyed by the review's own identity so a reader can dedupe on
+    # data. A PENDING review has not landed (it is an unsubmitted draft) and is
+    # not sighted.
+    for review in ctx.reviews:
+        if review.state == "PENDING":
+            continue
+        events.emit_once(
+            logger,
+            "review.received",
+            (repo.slug, pr.number, review.review_id),
+            "review received from %s on pr#%s (%s)",
+            review.author,
+            pr.number,
+            review.state.lower(),
+            extra={
+                "pr": pr.number,
+                "reviewer": review.author,
+                "review_id": review.review_id,
+                "review_state": review.state,
+            },
+        )
     # The fetch milestone (glassbox spray): the full snapshot is the input every
     # `pr status` / `pr next` decision reads, so its shape + duration are the
     # lifecycle record — at info, with the pr key bound above.

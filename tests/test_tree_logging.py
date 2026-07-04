@@ -440,3 +440,22 @@ def test_readonly_create_and_reuse_are_info_milestones_with_the_tree(
         and isinstance(getattr(r, "duration_ms", None), int)
         for r in caplog.records
     )
+
+
+def test_create_milestone_is_the_tree_created_event(tmp_path, monkeypatch, jsonl_log):
+    """The birth milestone IS the `tree.created` dev-cycle event (LOG04-WS02 /
+    ADR-0032): the same INFO record, tagged with the durable `event` field and
+    carrying the scoped tree/session keys — exactly one birth per create."""
+    _mock_write_boundary(monkeypatch)
+
+    tree = create(_spec(tmp_path), source_repo=_source(tmp_path), github_url="url")
+
+    tagged = [r for r in jsonl_log() if r.get("event") == "tree.created"]
+    assert len(tagged) == 1
+    record = tagged[0]
+    assert record["level"] == "info"
+    assert record["tree"] == tree.path
+    assert record["session"] == "work"
+    assert isinstance(record["duration_ms"], int)
+    # No other event name was minted by the creation pipeline.
+    assert {r["event"] for r in jsonl_log() if r.get("event")} == {"tree.created"}

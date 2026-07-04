@@ -92,6 +92,21 @@ def _clean_domain_key_context():
 
 
 @pytest.fixture(autouse=True)
+def _reset_event_first_sight():
+    """Reset the dev-cycle events' first-sight registry around every test.
+
+    :func:`shipit.events.emit_once` dedupes observational events (ADR-0032 /
+    LOG04-WS02) for the PROCESS lifetime — which under pytest is the whole
+    suite, so without this a fixture PR evaluated by one test would silently
+    suppress the same milestone's emission in a later test."""
+    from shipit import events
+
+    events._seen.clear()
+    yield
+    events._seen.clear()
+
+
+@pytest.fixture(autouse=True)
 def _reset_shipit_logging():
     """Detach shipit's sinks from the process-global logger around every test.
 

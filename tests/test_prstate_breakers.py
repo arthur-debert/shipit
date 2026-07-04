@@ -407,3 +407,78 @@ def test_converged_pr_not_stopped_under_cap():
     assert status.state is TaskState.READY
     assert status.cycles == 4
     assert status.breaker is None
+
+
+# --- round.detected / breaker.fired dev-cycle events (LOG04-WS02 / ADR-0032) --
+# The engine's evaluation is the seam that SEES a reviewed head and a fired
+# breaker, so `evaluate` tags them — on first sight per process
+# (`events.emit_once`; `pr next` evaluates several snapshots per invocation),
+# with the round/breaker identity flat on the record.
+
+
+def _events_named(caplog, name):
+    import logging
+
+    from shipit import events
+
+    return [
+        r
+        for r in caplog.records
+        if getattr(r, events.EXTRA_KEY, None) == name and r.levelno == logging.INFO
+    ]
+
+
+def test_evaluate_tags_one_round_detected_per_reviewed_head(caplog):
+    import logging
+
+    reviews = [review(10, "a"), review(20, "b")]
+    with caplog.at_level(logging.INFO, logger="shipit.prstate"):
+        evaluate(ctx(reviews))
+    rounds = _events_named(caplog, "round.detected")
+    assert [(r.round, r.commit) for r in rounds] == [
+        (1, str(sha("a"))),
+        (2, str(sha("b"))),
+    ]
+
+    # Re-evaluating the same snapshot in the same process re-reads the same
+    # heads — not a new milestone, nothing re-tagged.
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="shipit.prstate"):
+        evaluate(ctx(reviews))
+    assert not _events_named(caplog, "round.detected")
+
+    # A NEW head reviewed later IS a new round — only the new one is tagged.
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="shipit.prstate"):
+        evaluate(ctx([*reviews, review(30, "c")]))
+    (fresh,) = _events_named(caplog, "round.detected")
+    assert (fresh.round, fresh.commit) == (3, str(sha("c")))
+
+
+def test_evaluate_tags_breaker_fired_once(caplog):
+    import logging
+
+    # The round cap fires the stopping rule (default 6 — no 7th round).
+    reviews = [review(10 * i, f"h{i}") for i in range(1, ROUND_CAP + 1)]
+    with caplog.at_level(logging.INFO, logger="shipit.prstate"):
+        status = evaluate(ctx(reviews))
+    assert status.breaker == "round-cap"
+    (fired,) = _events_named(caplog, "breaker.fired")
+    assert fired.breaker == "round-cap"
+    assert fired.cycles == ROUND_CAP
+    assert fired.pr == status.pr
+
+    # Same breaker on a re-evaluation: already witnessed, not re-tagged.
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="shipit.prstate"):
+        evaluate(ctx(reviews))
+    assert not _events_named(caplog, "breaker.fired")
+
+
+def test_no_breaker_means_no_breaker_event(caplog):
+    import logging
+
+    with caplog.at_level(logging.INFO, logger="shipit.prstate"):
+        status = evaluate(ctx([review(10, "a")]))
+    assert status.breaker is None
+    assert not _events_named(caplog, "breaker.fired")

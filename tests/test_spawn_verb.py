@@ -1129,3 +1129,110 @@ def test_cli_write_spawn_without_issue_is_not_a_usage_error(monkeypatch):
     assert result.exit_code == 1  # run_subagent's clean exit, NOT click's usage exit 2
     assert seen["role"] == "implementer"
     assert seen["issue"] is None
+
+
+# --- the spawn-seam identity binding + export (LOG04-WS02 / ADR-0032) ---------
+# The spawn seam binds the worker's dev-cycle identity from its OWN arguments
+# (`epic`/`ws`/`role`, plus the minted `agent` spawn id) and `env_export`
+# threads every bound key into the Run's environment as SHIPIT_LOG_CTX_* — so
+# every shipit command the worker runs correlates to its Work Stream with zero
+# worker cooperation. Extends the existing SHIPIT_LOG_CTX_TREE propagation
+# pattern (test_run_subagent_happy_path).
+
+
+def test_epic_spawn_exports_all_four_dev_cycle_keys(tmp_path, monkeypatch, capsys):
+    from shipit import logcontext
+
+    parent = tmp_path / "repo"
+    parent.mkdir()
+    tree_dir = tmp_path / "tree"
+    _patch_identity(monkeypatch, root=str(parent))
+    captured = _fake_create(monkeypatch, tree_dir)
+    runner, calls = _launcher()
+    _patch_pr(
+        monkeypatch,
+        gh.HeadPr(number=321, state="OPEN", is_draft=True, base_ref="TRE03/umbrella"),
+    )
+
+    rc = spawn_verb.run_subagent(
+        repo="widget",
+        epic="TRE03",
+        ws=1,
+        issue=156,
+        role="implementer",
+        launcher=runner,
+    )
+
+    assert rc == 0
+    env = calls["env"]
+    # The child env carries the whole identity (`ws` stringified — the child's
+    # bind_from_env casts it back to int; the int-typed round-trip is pinned in
+    # test_logcontext).
+    assert env["SHIPIT_LOG_CTX_EPIC"] == "TRE03"
+    assert env["SHIPIT_LOG_CTX_WS"] == "1"
+    assert env["SHIPIT_LOG_CTX_ROLE"] == "implementer"
+    # The agent spawn id IS the Tree dir's disambiguating hash, so the log key
+    # and the Tree leaf name agree.
+    assert env["SHIPIT_LOG_CTX_AGENT"] == captured["spec"].agent_hash
+    # And the parent's own records carry the same identity from the seam on.
+    bound = logcontext.bound()
+    assert bound["epic"] == "TRE03" and bound["ws"] == 1
+    assert bound["role"] == "implementer"
+    assert bound["agent"] == captured["spec"].agent_hash
+
+
+def test_issue_spawn_exports_no_epic_ws_keys(tmp_path, monkeypatch, capsys):
+    # A standalone-issue spawn has no epic/ws: the keys stay ABSENT from the
+    # child env (present-when-bound crosses the seam) — role/agent still ride.
+    parent = tmp_path / "repo"
+    parent.mkdir()
+    tree_dir = tmp_path / "tree"
+    _patch_identity(monkeypatch, root=str(parent))
+    captured = _fake_create(monkeypatch, tree_dir)
+    runner, calls = _launcher()
+    _patch_pr(
+        monkeypatch,
+        gh.HeadPr(number=77, state="OPEN", is_draft=True, base_ref="main"),
+    )
+
+    rc = spawn_verb.run_subagent(
+        repo="widget", issue=210, role="implementer", launcher=runner
+    )
+
+    assert rc == 0
+    env = calls["env"]
+    assert "SHIPIT_LOG_CTX_EPIC" not in env
+    assert "SHIPIT_LOG_CTX_WS" not in env
+    assert env["SHIPIT_LOG_CTX_ROLE"] == "implementer"
+    assert env["SHIPIT_LOG_CTX_AGENT"] == captured["spec"].agent_hash
+
+
+def test_reviewer_spawn_exports_identity_with_a_minted_agent_id(
+    tmp_path, monkeypatch, capsys
+):
+    # The reviewer's Tree is SHARED per (repo, branch) — no per-Run hash of its
+    # own — so the seam mints a fresh agent id for the Run's identity.
+    parent = tmp_path / "repo"
+    parent.mkdir()
+    review_dir = tmp_path / "review"
+
+    def fake_readonly(plan, *, source_repo, github_url):
+        review_dir.mkdir(parents=True, exist_ok=True)
+        return Tree(
+            path=str(review_dir), branch=plan.branch, base=f"origin/{plan.branch}"
+        )
+
+    _patch_identity(monkeypatch, root=str(parent))
+    monkeypatch.setattr(spawn_verb, "create_readonly", fake_readonly)
+    runner, calls = _launcher()
+
+    rc = spawn_verb.run_subagent(
+        repo="widget", epic="TRE03", ws=3, role="reviewer", launcher=runner
+    )
+
+    assert rc == 0
+    env = calls["env"]
+    assert env["SHIPIT_LOG_CTX_EPIC"] == "TRE03"
+    assert env["SHIPIT_LOG_CTX_WS"] == "3"
+    assert env["SHIPIT_LOG_CTX_ROLE"] == "reviewer"
+    assert env["SHIPIT_LOG_CTX_AGENT"]  # minted per Run, non-empty hex

@@ -784,3 +784,77 @@ def test_liveness_write_survives_a_broken_activation(clone, tmp_path):
     )
     assert code == 0
     assert liveness.read_pidfile(clone) is not None
+
+
+# --------------------------------------------------------------------------
+# The session.started dev-cycle event (LOG04-WS02 / ADR-0032)
+# --------------------------------------------------------------------------
+
+
+def _session_started_records(caplog):
+    from shipit import events
+
+    return [
+        r
+        for r in caplog.records
+        if getattr(r, events.EXTRA_KEY, None) == "session.started"
+    ]
+
+
+def test_every_session_start_emits_session_started(tmp_path, monkeypatch, caplog):
+    # The hook is the one verb that witnesses a session beginning — a plain
+    # checkout (a spawned worker's write Tree, or any cwd) still emits; its
+    # spawn-seam identity would ride in from the environment, not from here.
+    monkeypatch.setenv(layout.CENTRAL_ROOT_ENV, str(tmp_path / "trees"))
+    cwd = tmp_path / "checkout"
+    cwd.mkdir()
+    with caplog.at_level(logging.INFO, logger="shipit.hook"):
+        code = _run_log_context(cwd, tmp_path / "claude-env")
+    assert code == 0
+    (started,) = _session_started_records(caplog)
+    assert started.levelno == logging.INFO
+    # The payload carried no Claude session_id → the extra is ABSENT, never null.
+    assert not hasattr(started, "session_id")
+
+
+def test_session_started_binds_the_ephemeral_session_scoped(tmp_path, monkeypatch):
+    # In an ephemeral session Tree the event carries the per-launch session id
+    # (the dir leaf, ADR-0027) — bound SCOPED, so it lands on this record via
+    # the pipeline without leaking into the hook's later records.
+    import structlog as _structlog
+
+    root = tmp_path / "trees"
+    tree = _ephemeral_tree(root)
+    monkeypatch.setenv(layout.CENTRAL_ROOT_ENV, str(root))
+
+    seen: dict = {}
+    real_emit = sessionstart.events.emit
+
+    def spy(log, name, msg, *args, **kwargs):
+        seen[name] = dict(logcontext.bound())
+        return real_emit(log, name, msg, *args, **kwargs)
+
+    _structlog.contextvars.clear_contextvars()
+    monkeypatch.setattr(sessionstart.events, "emit", spy)
+    code = _run_log_context(tree, tmp_path / "claude-env")
+    assert code == 0
+    assert seen["session.started"]["session"] == SESSION_LEAF
+    assert seen["session.started"]["tree"] == str(tree.resolve())
+    # Scoped: unwound after the emit — nothing leaks past the hook step.
+    assert "session" not in logcontext.bound()
+
+
+def test_session_started_emission_failure_is_fail_open(tmp_path, monkeypatch, caplog):
+    # The fail-open canon: a broken emission costs the session NOTHING — exit 0,
+    # a DEBUG breadcrumb only (nothing durable degrades; one record goes untagged).
+    monkeypatch.setattr(
+        sessionstart.events,
+        "emit",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    cwd = tmp_path / "checkout"
+    cwd.mkdir()
+    with caplog.at_level(logging.DEBUG, logger="shipit.hook"):
+        code = _run_log_context(cwd, tmp_path / "claude-env")
+    assert code == 0
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]

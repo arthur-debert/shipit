@@ -69,14 +69,11 @@ def test_run_refuses_when_not_ready(monkeypatch, capsys):
 
 
 def test_run_undo_always_allowed(monkeypatch, capsys):
-    """--undo reverts ready→draft without any readiness check."""
+    """--undo reverts ready→draft without any readiness check — routed through
+    the engine's `undo_flip` seam (LOG04-WS02), never the guarded flip."""
     monkeypatch.setattr(ready_verb, "resolve_pr", lambda pr, repo, branch: TARGET)
-    undos: list[tuple[PrId, bool]] = []
-    monkeypatch.setattr(
-        ready_verb.gh,
-        "pr_ready",
-        lambda target, *, undo=False: undos.append((target, undo)),
-    )
+    undone: list[PrId] = []
+    monkeypatch.setattr(ready_verb, "undo_flip", lambda target: undone.append(target))
     # guarded_flip must NOT be consulted on --undo.
     monkeypatch.setattr(
         ready_verb,
@@ -85,8 +82,8 @@ def test_run_undo_always_allowed(monkeypatch, capsys):
     )
     rc = ready_verb.run(undo=True, repo=REPO)
     assert rc == 0
-    # The adapter received the TYPED target — the repo rides on the identity.
-    assert undos == [(TARGET, True)]
+    # The engine seam received the TYPED target — the repo rides on the identity.
+    assert undone == [TARGET]
     assert "reverted ready→draft" in capsys.readouterr().out
 
 

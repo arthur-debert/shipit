@@ -60,7 +60,8 @@ import logging
 from dataclasses import dataclass, field
 from enum import StrEnum
 
-from .breakers import evaluate_breakers
+from .. import events
+from .breakers import build_rounds, evaluate_breakers
 from .model import FunnelState, ReadinessView, ReviewLifecycle
 from .reviewers import REGISTRY, ReviewerAdapter, required_adapters
 
@@ -253,6 +254,20 @@ def evaluate(
     silently "fine") are additionally surfaced at WARNING. The engine itself
     stays pure — the log is the only side effect, and it never touches
     user-facing output.
+
+    The wrapper also emits the engine's OBSERVATIONAL dev-cycle events
+    (ADR-0032 / LOG04-WS02) — milestones the engine can only witness by
+    reading the snapshot, tagged on first sight per process
+    (:func:`shipit.events.emit_once`; ``pr next`` evaluates up to three
+    snapshots per invocation, and each event carries its identity flat so a
+    reader can dedupe on data):
+
+    - ``round.detected`` — a head SHA the required reviewers reviewed (one per
+      round the stopping rule counts);
+    - ``breaker.fired`` — the stopping rule stopped the loop (round-cap /
+      all-nitpick);
+    - ``review.degraded`` — a required reviewer settled at a non-success
+      terminal outcome (failed / empty / timed-out), one per reviewer.
     """
     status = _evaluate(ctx, registry, required)
     # Flat event fields (ADR-0029): present-when-meaningful, never null-stuffed.
@@ -299,7 +314,68 @@ def evaluate(
                 ),
             },
         )
+    _emit_snapshot_events(ctx, status, required)
     return status
+
+
+def _emit_snapshot_events(
+    ctx: ReadinessView,
+    status: TaskStatus,
+    required: list[ReviewerAdapter] | None,
+) -> None:
+    """Emit the observational dev-cycle events one evaluation witnessed.
+
+    Each is keyed by its own identity — ``(slug, pr, …)``, since one process can
+    evaluate several repos — and deduped for the process lifetime by
+    :func:`shipit.events.emit_once` (the WARNING above deliberately still
+    repeats per evaluation; the milestone TRAIL does not). The bound domain keys
+    (``pr``/``repo`` and any ``epic``/``ws`` from the fetch seam) ride in via
+    the pipeline; the flat extras carry the identity for data-level dedup.
+    """
+    slug = ctx.pr.repo.slug
+    required = required if required is not None else required_adapters(ctx.roster)
+    # `round.detected`: one per head the required reviewers reviewed — the same
+    # round vocabulary the stopping rule counts (breakers.build_rounds), so the
+    # trail and the cap can never disagree on what a round was.
+    for rnd in build_rounds(ctx, required=required):
+        head = str(rnd.commit_id) if rnd.commit_id is not None else None
+        events.emit_once(
+            logger,
+            "round.detected",
+            (slug, status.pr, head),
+            "review round %d detected on pr#%s (%d finding(s))",
+            rnd.index,
+            status.pr,
+            len(rnd.bodies),
+            extra={
+                "pr": status.pr,
+                "round": rnd.index,
+                "findings": len(rnd.bodies),
+                **({"commit": head} if head else {}),
+            },
+        )
+    if status.breaker is not None:
+        events.emit_once(
+            logger,
+            "breaker.fired",
+            (slug, status.pr, status.breaker),
+            "review-loop breaker %s fired on pr#%s after %d round(s)",
+            status.breaker,
+            status.pr,
+            status.cycles,
+            extra={"pr": status.pr, "breaker": status.breaker, "cycles": status.cycles},
+        )
+    for name, why in status.degraded.items():
+        events.emit_once(
+            logger,
+            "review.degraded",
+            (slug, status.pr, name, why),
+            "reviewer %s settled degraded on pr#%s (%s)",
+            name,
+            status.pr,
+            why,
+            extra={"pr": status.pr, "reviewer": name, "reason": why},
+        )
 
 
 def _evaluate(

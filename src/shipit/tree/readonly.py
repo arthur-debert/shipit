@@ -28,7 +28,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from .. import git
+from .. import events, git
 from ..identity import Repo
 from .create import Tree
 from .layout import REVIEW_KIND, repo_dir, sanitize_slug
@@ -181,7 +181,12 @@ def create_readonly(plan: ReadOnlyPlan, *, source_repo: str, github_url: str) ->
         return _reuse_or_refuse(dest, plan.branch)
 
     duration_ms = int((time.monotonic() - started) * 1000)
-    logger.info(
+    # A fresh shared read-only Tree is a Tree birth too — the `tree.created`
+    # dev-cycle event (ADR-0032). A REUSED leaf (`_reuse_or_refuse`) stays an
+    # untagged milestone: nothing was created, so the trail records no birth.
+    events.emit(
+        logger,
+        "tree.created",
         "read-only tree created at %s (branch %s) in %dms",
         dest,
         plan.branch,

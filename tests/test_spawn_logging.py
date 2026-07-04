@@ -364,3 +364,52 @@ def test_scrub_tree_env_is_silent_when_nothing_leaks(caplog):
     assert not [
         r for r in _spawn_records(caplog, logging.DEBUG) if hasattr(r, "dropped")
     ]
+
+
+# ---------------------------------------------------------------------------
+# The agent.spawned / agent.done dev-cycle events (LOG04-WS02 / ADR-0032)
+# ---------------------------------------------------------------------------
+
+
+def _event_tags(caplog):
+    from shipit import events
+
+    return [
+        getattr(r, events.EXTRA_KEY)
+        for r in _spawn_records(caplog)
+        if getattr(r, events.EXTRA_KEY, None)
+    ]
+
+
+def test_write_spawn_tags_agent_spawned_and_agent_done(tmp_path, monkeypatch, caplog):
+    """The launch milestone IS `agent.spawned`, the clean child exit IS
+    `agent.done` — the same records as before, tagged (verb-witnessed tier)."""
+    with caplog.at_level(logging.INFO, logger="shipit.spawn"):
+        rc = _write_spawn(tmp_path, monkeypatch)
+    assert rc == 0
+    assert _event_tags(caplog) == ["agent.spawned", "agent.done"]
+
+
+def test_reviewer_spawn_tags_agent_spawned_and_agent_done(
+    tmp_path, monkeypatch, caplog
+):
+    parent = tmp_path / "repo"
+    parent.mkdir()
+    _patch_identity(monkeypatch, root=str(parent))
+    _fake_create_readonly(monkeypatch, tmp_path / "review")
+    with caplog.at_level(logging.INFO, logger="shipit.spawn"):
+        rc = spawn_verb.run_subagent(
+            repo="widget", epic="TRE03", ws=3, role="reviewer", launcher=_launcher()
+        )
+    assert rc == 0
+    assert _event_tags(caplog) == ["agent.spawned", "agent.done"]
+
+
+def test_nonzero_child_exit_tags_no_agent_done(tmp_path, monkeypatch, caplog):
+    """A crashed Run is a failed spawn, not a lifecycle end the cycle builds on:
+    the milestone trail records `agent.spawned` only — the exit stays the
+    untagged `_fail` ERROR (the dropped-request precedent, WS01)."""
+    with caplog.at_level(logging.INFO, logger="shipit.spawn"):
+        rc = _write_spawn(tmp_path, monkeypatch, launcher=_launcher(returncode=3))
+    assert rc == 1
+    assert _event_tags(caplog) == ["agent.spawned"]
