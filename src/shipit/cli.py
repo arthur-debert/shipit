@@ -20,6 +20,7 @@ from .verbs.eval import eval_group
 from .verbs.hook import hook as hook_group
 from .verbs.logevent import log as log_group
 from .verbs.pr import pr as pr_group
+from .verbs.provision import provision as provision_group
 from .verbs.spawn import spawn as spawn_group
 from .verbs.tree import tree as tree_group
 
@@ -135,6 +136,12 @@ def lint_cmd(path: str | None, fix: bool) -> None:
 # CLI02): the command, its query minting, and the renderers live in the verb
 # module; the read engine in the `logread` domain package.
 root.add_command(logs.logs_cmd)
+
+
+# The nested `provision` group (ADP00-WS03) — pinned external tools delivered
+# by the binary (`shipit provision lexd`): the consumer's managed task line
+# invokes it, so no provisioning script is ever distributed or reconciled.
+root.add_command(provision_group)
 
 
 # The nested `pr` group (PR flow) is a click.Group assembled in its own package

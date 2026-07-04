@@ -129,7 +129,13 @@ def test_load_units_includes_lefthook_and_pixi_task_block():
     assert pixi.anchor == "[tasks]"
     # The managed pixi block is the thin task lines ONLY — never a linter-dep
     # block (deps ride in as shipit's own package deps, architecture.lex §5).
-    assert pixi.desired_inner() == 'lint = "shipit lint"\nlogs = "shipit logs"'
+    # `provision-lexd` invokes the binary's provision subcommand (ADP00-WS03),
+    # so no provisioning script is ever distributed.
+    assert pixi.desired_inner() == (
+        'lint = "shipit lint"\n'
+        'logs = "shipit logs"\n'
+        'provision-lexd = "shipit provision lexd"'
+    )
 
 
 def test_pixi_block_inserts_under_existing_tasks_table():
