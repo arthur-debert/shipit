@@ -257,10 +257,11 @@ def evaluate(
 
     The wrapper also emits the engine's OBSERVATIONAL dev-cycle events
     (ADR-0032 / LOG04-WS02) — milestones the engine can only witness by
-    reading the snapshot, tagged on first sight per process
-    (:func:`shipit.events.emit_once`; ``pr next`` evaluates up to three
-    snapshots per invocation, and each event carries its identity flat so a
-    reader can dedupe on data):
+    reading the snapshot, tagged on first sight against the invocation's
+    :class:`~shipit.events.Sightings` registry riding the snapshot
+    (``ctx.sightings``; ``pr next`` evaluates up to three snapshots per
+    invocation and threads ONE registry through its gathers, and each event
+    carries its identity flat so a reader can dedupe on data):
 
     - ``round.detected`` — a head SHA the required reviewers reviewed (one per
       round the stopping rule counts);
@@ -325,14 +326,16 @@ def _emit_snapshot_events(
 ) -> None:
     """Emit the observational dev-cycle events one evaluation witnessed.
 
-    Each is keyed by its own identity — ``(slug, pr, …)``, since one process can
-    evaluate several repos — and deduped for the process lifetime by
-    :func:`shipit.events.emit_once` (the WARNING above deliberately still
-    repeats per evaluation; the milestone TRAIL does not). The bound domain keys
-    (``pr``/``repo`` and any ``epic``/``ws`` from the fetch seam) ride in via
-    the pipeline; the flat extras carry the identity for data-level dedup.
+    Each is keyed by its own identity — ``(slug, pr, …)``, since one invocation
+    can evaluate several repos — and deduped against the snapshot's
+    :class:`~shipit.events.Sightings` registry by :func:`shipit.events.emit_once`
+    (the WARNING above deliberately still repeats per evaluation; the milestone
+    TRAIL does not). The bound domain keys (``pr``/``repo`` and any
+    ``epic``/``ws`` from the fetch seam) ride in via the pipeline; the flat
+    extras carry the identity for data-level dedup.
     """
     slug = ctx.pr.repo.slug
+    sightings = ctx.sightings
     required = required if required is not None else required_adapters(ctx.roster)
     # `round.detected`: one per head the required reviewers reviewed — the same
     # round vocabulary the stopping rule counts (breakers.build_rounds), so the
@@ -340,6 +343,7 @@ def _emit_snapshot_events(
     for rnd in build_rounds(ctx, required=required):
         head = str(rnd.commit_id) if rnd.commit_id is not None else None
         events.emit_once(
+            sightings,
             logger,
             "round.detected",
             (slug, status.pr, head),
@@ -356,6 +360,7 @@ def _emit_snapshot_events(
         )
     if status.breaker is not None:
         events.emit_once(
+            sightings,
             logger,
             "breaker.fired",
             (slug, status.pr, status.breaker),
@@ -367,6 +372,7 @@ def _emit_snapshot_events(
         )
     for name, why in status.degraded.items():
         events.emit_once(
+            sightings,
             logger,
             "review.degraded",
             (slug, status.pr, name, why),

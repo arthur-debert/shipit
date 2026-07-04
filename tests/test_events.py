@@ -147,24 +147,26 @@ def test_the_event_field_is_reserved_for_the_registered_name(tmp_path):
     assert record["event"] == "review.requested"
 
 
-# --- emit_once: first sight per process (LOG04-WS02) ------------------------
+# --- emit_once: first sight per Sightings registry (LOG04-WS02 / CLI02-WS02) --
 
 
 def test_emit_once_dedupes_on_the_identity_key(tmp_path):
-    """The first sighting of ``(name, *key)`` emits the ordinary tagged record;
-    a re-sighting in the same process leaves NO record at all — re-reading known
-    state is not a milestone. A DIFFERENT key is a different milestone."""
+    """The first sighting of ``(name, *key)`` in a registry emits the ordinary
+    tagged record; a re-sighting through the SAME registry leaves NO record at
+    all — re-reading known state is not a milestone. A DIFFERENT key is a
+    different milestone."""
     logsetup.configure_logging(env={}, repo=REPO, base_dir=tmp_path)
     log = logging.getLogger("shipit.prstate")
+    sightings = events.Sightings()
 
     assert events.emit_once(
-        log, "review.received", ("acme/widget", 368, 11), "review received"
+        sightings, log, "review.received", ("acme/widget", 368, 11), "review received"
     )
     assert not events.emit_once(
-        log, "review.received", ("acme/widget", 368, 11), "review received"
+        sightings, log, "review.received", ("acme/widget", 368, 11), "review received"
     )
     assert events.emit_once(
-        log, "review.received", ("acme/widget", 368, 12), "review received"
+        sightings, log, "review.received", ("acme/widget", 368, 12), "review received"
     )
 
     records = _records(tmp_path)
@@ -172,14 +174,42 @@ def test_emit_once_dedupes_on_the_identity_key(tmp_path):
     assert {r["event"] for r in records} == {"review.received"}
 
 
+def test_emit_once_scope_is_the_registry_value_not_the_process(tmp_path):
+    """The first-sight scope IS the passed :class:`Sightings` value (ADR-0021
+    rule 4 — no module-global registry, nothing for a test suite to reset): a
+    fresh registry legitimately re-witnesses what an earlier one saw."""
+    logsetup.configure_logging(env={}, repo=REPO, base_dir=tmp_path)
+    log = logging.getLogger("shipit.prstate")
+
+    first = events.Sightings()
+    assert events.emit_once(
+        first, log, "review.received", ("acme/widget", 368, 11), "review received"
+    )
+    # A later invocation mints its own registry — the same milestone identity
+    # is a fresh sighting there, suppressed nowhere but within `first`.
+    second = events.Sightings()
+    assert events.emit_once(
+        second, log, "review.received", ("acme/widget", 368, 11), "review received"
+    )
+    assert not events.emit_once(
+        first, log, "review.received", ("acme/widget", 368, 11), "review received"
+    )
+    assert len(_records(tmp_path)) == 2
+
+
 def test_emit_once_keys_are_scoped_per_event_name(tmp_path):
     """The registry keys on ``(name, *key)``: one identity tuple sighted under
     two event names is two milestones, never a cross-name suppression."""
     logsetup.configure_logging(env={}, repo=REPO, base_dir=tmp_path)
     log = logging.getLogger("shipit.prstate")
+    sightings = events.Sightings()
 
-    assert events.emit_once(log, "round.detected", ("acme/widget", 368), "round")
-    assert events.emit_once(log, "breaker.fired", ("acme/widget", 368), "breaker")
+    assert events.emit_once(
+        sightings, log, "round.detected", ("acme/widget", 368), "round"
+    )
+    assert events.emit_once(
+        sightings, log, "breaker.fired", ("acme/widget", 368), "breaker"
+    )
     assert [r["event"] for r in _records(tmp_path)] == [
         "round.detected",
         "breaker.fired",
@@ -191,11 +221,14 @@ def test_emit_once_unknown_name_raises_and_never_poisons_the_registry(tmp_path):
     a later correct emission with the same key still fires."""
     logsetup.configure_logging(env={}, repo=REPO, base_dir=tmp_path)
     log = logging.getLogger("shipit.prstate")
+    sightings = events.Sightings()
 
     with pytest.raises(ValueError, match="unknown dev-cycle event"):
-        events.emit_once(log, "review.recieved", ("acme/widget", 368, 11), "typo")
+        events.emit_once(
+            sightings, log, "review.recieved", ("acme/widget", 368, 11), "typo"
+        )
     assert _records(tmp_path) == []
     assert events.emit_once(
-        log, "review.received", ("acme/widget", 368, 11), "review received"
+        sightings, log, "review.received", ("acme/widget", 368, 11), "review received"
     )
     assert len(_records(tmp_path)) == 1

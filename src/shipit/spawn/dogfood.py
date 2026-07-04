@@ -59,7 +59,7 @@ logger = logging.getLogger("shipit.spawn")
 
 #: The env var whose RELATIVE value forces a deterministic, real fail-closed:
 #: :func:`shipit.tree.layout.central_root` rejects a non-absolute Trees root with
-#: ``ValueError``, which ``run_subagent`` catches on its fail-closed Tree-create
+#: ``ValueError``, which the spawn pipeline catches on its fail-closed Tree-create
 #: branch → a clean loud exit-1 with no native-worktree fallback. The forced-failure
 #: scenario sets this so the harness exercises the REAL fail-closed code path.
 TREES_ROOT_ENV = layout.CENTRAL_ROOT_ENV
@@ -303,7 +303,7 @@ def parse_spawned(stdout: str) -> dict | None:
     """Extract the ``SPAWNED`` JSON summary from a ``shipit spawn subagent`` stdout.
 
     The verb prints a ``SPAWNED`` line followed by a ``json.dumps(..., indent=2)``
-    block (:func:`shipit.verbs.spawn._emit_spawned`) — the Run's coordinates
+    block (:func:`shipit.verbs.spawn.format_spawned`) — the Run's coordinates
     (``tree``/``branch``/``base``/``role``/``backend`` and, for a write Run,
     ``pr``/``pr_state``/``pr_is_draft``). Returns the parsed dict, or ``None`` when
     no parseable SPAWNED block is present (a failed/silent spawn). Tolerates trailing
@@ -643,7 +643,7 @@ def verify_fail_closed(report: Report, cfg: DogfoodConfig) -> None:
 
     Forces a deterministic, REAL create failure by setting ``SHIPIT_TREES_ROOT`` to a
     RELATIVE path: :func:`shipit.tree.layout.central_root` rejects it with
-    ``ValueError``, which ``run_subagent`` catches on its fail-closed branch. Asserts
+    ``ValueError``, which the spawn pipeline catches on its fail-closed branch. Asserts
     the spawn exits nonzero, emits a loud ``tree creation failed`` diagnostic on
     stderr, and left NO native ``.claude/worktrees`` checkout under the scratch repo.
     """

@@ -498,10 +498,11 @@ def test_commit_id_boundary_none_stays_none_and_present_is_validated():
 # --- review.received: the gather is the first sight of a landed review ------
 # (LOG04-WS02 / ADR-0032). The engine never posts a remote reviewer's review,
 # so the FULL gather — the snapshot every `pr status` / `pr next` decision
-# reads — is the strongest witnessing seam there is. First sight is per
-# process (`events.emit_once`): one invocation gathers up to three times and
-# must tag each landed review exactly once; the record carries the review's
-# own identity flat, so a reader dedupes on data.
+# reads — is the strongest witnessing seam there is. First sight is scoped by
+# the `events.Sightings` registry, a passed value (ADR-0021 rule 4): one
+# invocation gathers up to three times threading ONE registry and must tag
+# each landed review exactly once; the record carries the review's own
+# identity flat, so a reader dedupes on data.
 
 
 def _wire_with_reviews(monkeypatch, reviews_json: list[dict]) -> None:
@@ -526,8 +527,10 @@ def _received_records(caplog):
     ]
 
 
-def test_gather_tags_each_landed_review_once_per_process(monkeypatch, caplog):
+def test_gather_tags_each_landed_review_once_per_invocation(monkeypatch, caplog):
     import logging as _logging
+
+    from shipit import events
 
     _wire_with_reviews(
         monkeypatch,
@@ -536,8 +539,12 @@ def test_gather_tags_each_landed_review_once_per_process(monkeypatch, caplog):
             {"id": 12, "user": {"login": "codex-bot"}, "state": "APPROVED"},
         ],
     )
+    # The verb's invocation-wide first-sight registry (ADR-0021 rule 4: a
+    # passed value, no module global) — `pr next` threads ONE across its
+    # gathers exactly like this.
+    sightings = events.Sightings()
     with caplog.at_level(_logging.INFO, logger="shipit.prstate"):
-        fetch.gather(TARGET, default_roster())
+        fetch.gather(TARGET, default_roster(), sightings=sightings)
     tagged = _received_records(caplog)
     assert {(r.reviewer, r.review_id, r.review_state) for r in tagged} == {
         ("Copilot", 11, "COMMENTED"),
@@ -545,12 +552,20 @@ def test_gather_tags_each_landed_review_once_per_process(monkeypatch, caplog):
     }
     assert all(r.pr == TARGET.number for r in tagged)
 
-    # A re-gather in the same process (pr next gathers again for the guarded
-    # flip) re-reads the same reviews — NOT a new milestone, nothing re-tagged.
+    # A re-gather in the same invocation (pr next gathers again for the guarded
+    # flip, threading the SAME registry) re-reads the same reviews — NOT a new
+    # milestone, nothing re-tagged.
+    caplog.clear()
+    with caplog.at_level(_logging.INFO, logger="shipit.prstate"):
+        fetch.gather(TARGET, default_roster(), sightings=sightings)
+    assert not _received_records(caplog)
+
+    # A FRESH invocation (its own registry) legitimately re-witnesses what it
+    # re-reads — the old process-global set is gone, the scope is the value.
     caplog.clear()
     with caplog.at_level(_logging.INFO, logger="shipit.prstate"):
         fetch.gather(TARGET, default_roster())
-    assert not _received_records(caplog)
+    assert len(_received_records(caplog)) == 2
 
 
 def test_gather_does_not_sight_a_pending_review(monkeypatch, caplog):

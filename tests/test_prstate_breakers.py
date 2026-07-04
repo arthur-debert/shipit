@@ -68,6 +68,7 @@ def ctx(
     merge_state="CLEAN",
     checks=None,
     roster=None,
+    sightings=None,
 ):
     return readiness_view(
         number=1,
@@ -86,6 +87,9 @@ def ctx(
         # not this repo's deployed `.shipit.toml` policy. Pass `roster` to
         # model a repo policy override (e.g. a configured `round_cap`).
         roster=roster if roster is not None else default_roster(),
+        # The invocation's first-sight registry (ADR-0021 rule 4): pass one to
+        # thread it across several views, as `pr next`'s gathers do.
+        sightings=sightings,
     )
 
 
@@ -411,9 +415,10 @@ def test_converged_pr_not_stopped_under_cap():
 
 # --- round.detected / breaker.fired dev-cycle events (LOG04-WS02 / ADR-0032) --
 # The engine's evaluation is the seam that SEES a reviewed head and a fired
-# breaker, so `evaluate` tags them — on first sight per process
-# (`events.emit_once`; `pr next` evaluates several snapshots per invocation),
-# with the round/breaker identity flat on the record.
+# breaker, so `evaluate` tags them — on first sight against the snapshot's
+# `events.Sightings` registry (a passed value, ADR-0021 rule 4; `pr next`
+# evaluates several snapshots per invocation and threads ONE registry), with
+# the round/breaker identity flat on the record.
 
 
 def _events_named(caplog, name):
@@ -431,26 +436,31 @@ def _events_named(caplog, name):
 def test_evaluate_tags_one_round_detected_per_reviewed_head(caplog):
     import logging
 
+    from shipit import events
+
+    # ONE first-sight registry threaded across the invocation's snapshots —
+    # exactly how `pr next` threads its Sightings through every gather.
+    sightings = events.Sightings()
     reviews = [review(10, "a"), review(20, "b")]
     with caplog.at_level(logging.INFO, logger="shipit.prstate"):
-        evaluate(ctx(reviews))
+        evaluate(ctx(reviews, sightings=sightings))
     rounds = _events_named(caplog, "round.detected")
     assert [(r.round, r.commit) for r in rounds] == [
         (1, str(sha("a"))),
         (2, str(sha("b"))),
     ]
 
-    # Re-evaluating the same snapshot in the same process re-reads the same
-    # heads — not a new milestone, nothing re-tagged.
+    # Re-evaluating the same milestones in the same invocation re-reads the
+    # same heads — not a new milestone, nothing re-tagged.
     caplog.clear()
     with caplog.at_level(logging.INFO, logger="shipit.prstate"):
-        evaluate(ctx(reviews))
+        evaluate(ctx(reviews, sightings=sightings))
     assert not _events_named(caplog, "round.detected")
 
     # A NEW head reviewed later IS a new round — only the new one is tagged.
     caplog.clear()
     with caplog.at_level(logging.INFO, logger="shipit.prstate"):
-        evaluate(ctx([*reviews, review(30, "c")]))
+        evaluate(ctx([*reviews, review(30, "c")], sightings=sightings))
     (fresh,) = _events_named(caplog, "round.detected")
     assert (fresh.round, fresh.commit) == (3, str(sha("c")))
 
@@ -458,20 +468,25 @@ def test_evaluate_tags_one_round_detected_per_reviewed_head(caplog):
 def test_evaluate_tags_breaker_fired_once(caplog):
     import logging
 
-    # The round cap fires the stopping rule (default 6 — no 7th round).
+    from shipit import events
+
+    # The round cap fires the stopping rule (default 6 — no 7th round). One
+    # Sightings registry threads the invocation's evaluations, as `pr next` does.
+    sightings = events.Sightings()
     reviews = [review(10 * i, f"h{i}") for i in range(1, ROUND_CAP + 1)]
     with caplog.at_level(logging.INFO, logger="shipit.prstate"):
-        status = evaluate(ctx(reviews))
+        status = evaluate(ctx(reviews, sightings=sightings))
     assert status.breaker == "round-cap"
     (fired,) = _events_named(caplog, "breaker.fired")
     assert fired.breaker == "round-cap"
     assert fired.cycles == ROUND_CAP
     assert fired.pr == status.pr
 
-    # Same breaker on a re-evaluation: already witnessed, not re-tagged.
+    # Same breaker on a re-evaluation in the same invocation: already
+    # witnessed, not re-tagged.
     caplog.clear()
     with caplog.at_level(logging.INFO, logger="shipit.prstate"):
-        evaluate(ctx(reviews))
+        evaluate(ctx(reviews, sightings=sightings))
     assert not _events_named(caplog, "breaker.fired")
 
 
