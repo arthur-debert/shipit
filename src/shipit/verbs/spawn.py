@@ -139,9 +139,9 @@ def format_spawned(result: subagent.SpawnResult) -> str:
     (the result's own ``to_dict()``, so the surface is exactly the typed
     result's declared field set). A WRITE Run's payload carries the Run↔PR
     linkage (``pr``/``pr_state``/``pr_is_draft``) the coordinator acts on; a
-    reviewer Run reports through the existing PR and opens none, so the block
-    is omitted. Frozen agent-facing output (the PRD's sentinel contract) — do
-    not restyle.
+    reviewer Run reports through the existing PR and opens none, so its block
+    renders WITHOUT the linkage keys (``to_dict`` drops them, absent-not-null).
+    Frozen agent-facing output (the PRD's sentinel contract) — do not restyle.
     """
     return "SPAWNED\n" + json.dumps(result.to_dict(), indent=2)
 

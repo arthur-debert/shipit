@@ -219,14 +219,19 @@ def spawn_subagent(spec: SubagentSpec, bounds: Boundaries | None = None) -> Spaw
     production (the real adapters).
     """
     bounds = bounds if bounds is not None else BOUNDARIES
-    # A fresh spawn MINTS its own Tree; any `tree` already bound in the process
-    # log context is stale for THIS spawn's story — a nested spawn inherits the
-    # parent's `SHIPIT_LOG_CTX_TREE` (rebound at logging setup), and a prior spawn
-    # in the same process leaves its assignment bound. Drop it at the entry so the
-    # request milestone and any pre-Tree refusal record NO tree (absent-not-null),
-    # and the assignment below is the single seam that binds `tree` — it appears
-    # once, when assigned for this spawn (ADR-0029 record contract).
-    logcontext.unbind("tree")
+    # A fresh spawn OWNS the whole spawn-identity key set: `tree`/`agent` are
+    # minted below, and `epic`/`ws`/`role` are THIS spawn's arguments (ADR-0032
+    # — the spawn's args ARE the worker's identity). Any of them already bound
+    # is stale for this spawn's story — a nested spawn inherits the parent's
+    # `SHIPIT_LOG_CTX_*` (rebound at logging setup), and a prior spawn in the
+    # same process leaves its bindings behind. Because `bind` DROPS `None`
+    # halves (absent-not-null), a standalone-issue spawn would otherwise keep a
+    # stale `epic`/`ws` bound and `env_export` would thread the previous
+    # workstream's identity into the new child. Drop them all at the entry so
+    # the request milestone and any pre-Tree refusal carry NO spawn identity,
+    # and each key appears exactly once — at the seam that binds it for this
+    # spawn (ADR-0029 record contract).
+    logcontext.unbind("tree", "agent", "epic", "ws", "role")
     # Lifecycle milestone (ADR-0029): the spawn REQUEST, narrated as received —
     # before any gate — so even a refused spawn leaves a durable record of what
     # was asked. The shape fields ride as flat extras (absent when not given);

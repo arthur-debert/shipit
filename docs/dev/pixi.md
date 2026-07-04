@@ -21,7 +21,7 @@ pixi is used for four things at once: provisioning native tooling, running tasks
 - Provisioning — `pixi install` materialises a Tree's environment.
 - Hook invocations — every Claude Code hook fires as \`pixi run shipit
 
-  hook \<name\>\` (a transient `pixi run` per firing). - The write-Run agent session — as of PR \#197, \`shipit spawn\` re-expresses the backend argv as `pixi run --manifest-path <tree>/pixi.toml -- <argv>` for a provisioned write Tree, so the agent runs INSIDE its Tree's env [(see](#6), \[\#7\]).
+  hook \<name\>\` (a transient `pixi run` per firing). - The write-Run agent session — as of PR \#197, \`shipit spawn\` re-expresses the backend argv as `pixi run --manifest-path <tree>/pixi.toml -- <argv>` for a provisioned write Tree, so the agent runs INSIDE its Tree's env [(see](#6), [\#7](#7)).
 
 ### What pixi is NOT the parent of:
 
@@ -77,7 +77,7 @@ pixi offers NO plugin API, NO backend SPI, NO event/config hook a tool can live 
 
 Task fields (`depends-on`, `inputs`/`outputs`, `args`, `env`, `cwd`, `clean-env`)
 
-: `depends-on` is pre-task chaining only (`pixi task add --depends-on`, plus `--env`, `--cwd`, `--clean-env`, `--args`) — there is NO native post-task or wrapper hook, so shipit behaviour can hang off the FRONT of a task, not wrap it. `inputs`/`outputs` are glob lists that drive the skip-if-unchanged cache (\[\#2\]); `args` declares named args with defaults/validation; both support MiniJinja templating. An `[environments]` entry can set a `default-environment` for a task.
+: `depends-on` is pre-task chaining only (`pixi task add --depends-on`, plus `--env`, `--cwd`, `--clean-env`, `--args`) — there is NO native post-task or wrapper hook, so shipit behaviour can hang off the FRONT of a task, not wrap it. `inputs`/`outputs` are glob lists that drive the skip-if-unchanged cache ([\#2](#2)); `args` declares named args with defaults/validation; both support MiniJinja templating. An `[environments]` entry can set a `default-environment` for a task.
 
 External `pixi-<name>` subcommands
 
@@ -136,9 +136,9 @@ When the pinned pixi version changes, re-verify before trusting the facts above.
 - `pixi --version` — confirm the new pin; update the stamp.
 - `pixi --help`, `pixi run --help`, `pixi install --help` — re-check for
 
-  any new JSON/structured-output or run-id flag (\[\#3\], \[\#4\]). - `pixi --help` / `pixi --list` — re-check the extension surface for any new plugin/hook mechanism (\[\#5\]). - `pixi info --json`; `ls .pixi/envs/<env>/conda-meta/` and `cat .pixi/envs/<env>/conda-meta/pixi` — re-check the persisted state shape and the two digests (\[\#2\]).
+  any new JSON/structured-output or run-id flag ([\#3](#3), [\#4](#4)). - `pixi --help` / `pixi --list` — re-check the extension surface for any new plugin/hook mechanism ([\#5](#5)). - `pixi info --json`; `ls .pixi/envs/<env>/conda-meta/` and `cat .pixi/envs/<env>/conda-meta/pixi` — re-check the persisted state shape and the two digests ([\#2](#2)).
 
-- `pixi shell-hook --json` — re-check what activation injects (\[\#7\]).
+- `pixi shell-hook --json` — re-check what activation injects ([\#7](#7)).
 - Re-read the integration seams: `_provision`/`run_provision`
 
   (`src/shipit/tree/create.py`), `pixi_wrap`/`scrub_tree_env` (`src/shipit/spawn/launch.py`).

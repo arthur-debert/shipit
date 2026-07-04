@@ -641,6 +641,26 @@ def test_issue_spawn_exports_no_epic_ws_keys(tmp_path):
     assert env["SHIPIT_LOG_CTX_AGENT"] == calls["spec"].agent_hash
 
 
+def test_issue_spawn_does_not_inherit_a_prior_spawns_epic_identity(tmp_path):
+    # The pipeline OWNS the spawn-identity keys at entry: `bind` drops `None`
+    # halves, so without the entry unbind a standalone-issue spawn in a process
+    # that already carries epic/ws (a prior spawn here, or a nested spawn's
+    # inherited SHIPIT_LOG_CTX_* rebound at logging setup) would export the OLD
+    # workstream's identity into its child. The stale keys must not cross.
+    b_epic, _ = bounds(tmp_path)
+    spawn_subagent(spec(), b_epic)  # leaves epic/ws/role/agent/tree bound
+
+    b_issue, calls = bounds(tmp_path, pr=replace(_PR, number=77, base_ref="main"))
+    spawn_subagent(spec(epic=None, ws=None, issue=210), b_issue)
+
+    env = calls["env"]
+    assert "SHIPIT_LOG_CTX_EPIC" not in env
+    assert "SHIPIT_LOG_CTX_WS" not in env
+    assert env["SHIPIT_LOG_CTX_AGENT"] == calls["spec"].agent_hash  # THIS spawn's
+    bound = logcontext.bound()
+    assert "epic" not in bound and "ws" not in bound
+
+
 def test_reviewer_spawn_exports_identity_with_a_minted_agent_id(tmp_path):
     # The reviewer's Tree is SHARED per (repo, branch) — no per-Run hash of its
     # own — so the seam mints a fresh agent id for the Run's identity.
