@@ -49,8 +49,8 @@ def stub_path(tmp_path: Path) -> dict[str, str]:
     bindir.mkdir()
     # %b so the repr's \n escapes become real newlines in the stub's output.
     _stub(bindir, "lexd", f"printf '%b' {LEXD_BODY!r}")
-    # The script calls `prettier --parser markdown <file>`; cat the file arg.
-    _stub(bindir, "prettier", 'cat "${@: -1}"')
+    # The script calls `prettier --parser markdown <file>`; cat the file arg ($3).
+    _stub(bindir, "prettier", 'cat "$3"')
     return {**os.environ, "PATH": f"{bindir}:{os.environ['PATH']}"}
 
 
