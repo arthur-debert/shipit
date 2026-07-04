@@ -30,6 +30,8 @@ Two call styles, matching the two kinds of git asks:
 
 from __future__ import annotations
 
+import logging
+import shutil
 from typing import TYPE_CHECKING
 
 from . import execrun
@@ -40,6 +42,11 @@ if TYPE_CHECKING:
     # default to it), so a runtime top-level import would cycle. Construction
     # sites import `Sha` lazily inside the function instead.
     from .identity import Sha
+
+#: The adapter's own logger (ADR-0029 spray): the Exec runner already records
+#: every git subprocess, so this logger speaks only when the adapter makes a
+#: DECISION of its own — today, the #353 degraded-clone retry WARNING.
+logger = logging.getLogger("shipit.git")
 
 #: Stated per-Exec timeouts (ADR-0028: every Exec carries one; nothing hangs by
 #: default). Local git plumbing is near-instant and gets a tight bound; the
@@ -525,6 +532,36 @@ def push(branch: str, *, cwd: str, remote: str = "origin", force: bool = False) 
     _git(args, cwd=cwd, timeout=_NETWORK_TIMEOUT)
 
 
+#: The stderr signatures of a REFERENCE-POISONED clone (#353). On git 2.54 a
+#: reference repo carrying a split commit-graph chain
+#: (``.git/objects/info/commit-graphs/``) makes ``clone --reference --dissociate``
+#: fail DETERMINISTICALLY at the clone-time checkout: git prints ``fatal: unable
+#: to parse commit <sha>`` and ``Clone succeeded, but checkout failed.`` and
+#: exits 128 — even though the resulting clone is self-consistent after the fact
+#: (the object is present; a manual checkout succeeds). Matching requires BOTH
+#: message fragments (lowercased, across both streams) rather than the bare rc:
+#: 128 is git's generic fatal exit, and either fragment alone has innocent
+#: causes (real object corruption; a checkout killed by disk space or an
+#: unrepresentable filename) that must propagate, not trigger a full re-clone.
+_POISONED_REFERENCE_MARKERS: tuple[str, ...] = (
+    "clone succeeded, but checkout failed",
+    "unable to parse commit",
+)
+
+
+def _is_poisoned_reference_failure(err: ExecError) -> bool:
+    """Whether ``err`` is the #353 clone-succeeded-checkout-failed signature.
+
+    Only a real child EXIT qualifies — a timeout or launch failure is never the
+    poisoned-reference shape, and retrying a full clone after a 10-minute
+    timeout would double the hang instead of degrading gracefully.
+    """
+    if err.cause != execrun.CAUSE_EXIT:
+        return False
+    text = f"{err.stderr}\n{err.stdout}".lower()
+    return all(marker in text for marker in _POISONED_REFERENCE_MARKERS)
+
+
 def clone_dissociated(url: str, dest: str, *, reference: str) -> None:
     """Clone ``url`` into ``dest`` as an INDEPENDENT, dissociated checkout.
 
@@ -534,11 +571,70 @@ def clone_dissociated(url: str, dest: str, *, reference: str) -> None:
     result shares NOTHING with the reference (no ``.git/objects/info/alternates``)
     and is safe to ``rm -rf`` (ADR-0014). ``origin`` is set to ``url`` — the GitHub
     URL — so ``gh``/``git`` work inside the Tree unchanged.
+
+    FAIL-OPEN on a poisoned reference (#353): when the referenced clone dies with
+    the clone-succeeded-checkout-failed signature (git 2.54 + a reference whose
+    object store carries a split commit-graph chain — see
+    :func:`_is_poisoned_reference_failure`), the half-checked-out ``dest`` is
+    removed and the clone is retried ONCE without ``--reference`` (and therefore
+    without ``--dissociate`` — a full clone is already independent). The retry
+    trades the near-instant borrow for a full transfer, so the degradation is
+    narrated at WARNING with the reference path; any other failure — and a
+    failure of the retry itself — propagates untouched. This one seam keeps BOTH
+    consumers (write-Tree ``tree.create`` and read-only ``tree.readonly``)
+    working without having to suppress every commit-graph writer in every
+    possible donor.
     """
-    _git(
-        ["clone", "--reference", reference, "--dissociate", url, dest],
-        timeout=_CLONE_TIMEOUT,
-    )
+    try:
+        _git(
+            ["clone", "--reference", reference, "--dissociate", url, dest],
+            timeout=_CLONE_TIMEOUT,
+        )
+    except ExecError as err:
+        if not _is_poisoned_reference_failure(err):
+            raise
+        logger.warning(
+            "reference clone of %s failed at clone-time checkout (reference %s "
+            "is a poisoned donor — commit-graph chain, #353); retrying once as "
+            "a full clone without --reference",
+            url,
+            reference,
+            exc_info=True,
+        )
+        # git leaves the cloned-but-not-checked-out dest behind on this failure;
+        # a retry into a non-empty dir would fail on the leftovers, not the bug.
+        shutil.rmtree(dest, ignore_errors=True)
+        _git(["clone", url, dest], timeout=_CLONE_TIMEOUT)
+
+
+#: The four local-config keys that make a checkout a SAFE ``--reference`` donor
+#: (#353): the two commit-graph writers off, plus auto-gc/auto-maintenance off —
+#: proven necessary in the live diagnosis, where a routine ``git gc --auto``
+#: (fired after fetches) regenerated ``objects/info/commit-graphs/`` even with
+#: both write flags false. Disabling auto-gc in a Tree is acceptable: Trees are
+#: short-lived leaves, so unbounded loose objects never accumulate enough to
+#: matter before the Tree is removed.
+SAFE_DONOR_CONFIG: tuple[tuple[str, str], ...] = (
+    ("fetch.writeCommitGraph", "false"),
+    ("gc.writeCommitGraph", "false"),
+    ("gc.auto", "0"),
+    ("maintenance.auto", "false"),
+)
+
+
+def configure_safe_reference_donor(*, cwd: str) -> None:
+    """Write the :data:`SAFE_DONOR_CONFIG` keys into ``cwd``'s local git config.
+
+    Tree provisioning calls this on every Tree it mints — BEFORE the Tree's
+    first ``git fetch`` — so a session Tree never grows the split commit-graph
+    chain that poisons it as a ``--reference`` donor for its children's clones
+    (#353). Belt and suspenders with the :func:`clone_dissociated` retry: the
+    retry keeps clones working against ANY poisoned donor (e.g. a user checkout
+    that predates this config), while this keeps shipit-minted Trees fast donors
+    that never need the degraded full-clone path in the first place.
+    """
+    for key, value in SAFE_DONOR_CONFIG:
+        _git(["config", "--local", key, value], cwd=cwd)
 
 
 def fetch(*, cwd: str, remote: str = "origin") -> None:
