@@ -291,7 +291,7 @@ def _provision(dest: Path, *, trees_root: Path) -> None:
     """
     if not config.is_onboarded(dest / config.CONFIG_NAME):
         raise ValueError(
-            f"repo {dest} is not onboarded — run `shipit install` first "
+            f"repo {dest} is not onboarded — run `shipit install --pr` first "
             "(a Tree can only be provisioned from a repo shipit manages)"
         )
     env = provision_env()

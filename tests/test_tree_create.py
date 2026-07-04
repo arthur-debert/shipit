@@ -357,7 +357,7 @@ def test_create_fails_closed_and_rolls_back_on_a_non_onboarded_source(
     monkeypatch.setattr(create_mod.pixienv, "install", _must_not_provision)
 
     spec = _spec(tmp_path)
-    with pytest.raises(ValueError, match="not onboarded — run `shipit install`"):
+    with pytest.raises(ValueError, match="not onboarded — run `shipit install --pr`"):
         create(spec, source_repo=str(reference), github_url=str(remote))
 
     dest = (
@@ -556,7 +556,7 @@ def test_provision_fails_closed_when_repo_not_onboarded(tmp_path: Path, monkeypa
     )
     monkeypatch.setattr(create_mod, "_st_dev", lambda p: 1)
 
-    with pytest.raises(ValueError, match="not onboarded — run `shipit install`"):
+    with pytest.raises(ValueError, match="not onboarded — run `shipit install --pr`"):
         create_mod._provision(dest, trees_root=tmp_path / "trees")
     # Fail-closed: NOT even the manifest-gated `pixi install` runs on a non-onboarded repo.
     assert calls == []
