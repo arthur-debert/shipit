@@ -414,15 +414,26 @@ def gather_reviews(pr: PrId, roster: Roster) -> ReadinessView:
     return ctx
 
 
-def gather(pr: PrId, roster: Roster) -> ReadinessView:
+def gather(
+    pr: PrId, roster: Roster, *, sightings: events.Sightings | None = None
+) -> ReadinessView:
     """Fetch every raw input the engine needs for `pr`, live, via `gh`.
 
     `roster` is the reviewer configuration as ONE value (CLI01-WS04), loaded by
     the CALLER once at its verb boundary (`reviewers_config.load_roster`) and
     threaded onto the snapshot here — so the engine/adapters read every
     per-reviewer setting off `ctx.roster`, never the config, and no call path
-    resolves reviewer settings twice per verb invocation."""
+    resolves reviewer settings twice per verb invocation.
+
+    `sightings` is the invocation's first-sight registry for the observational
+    dev-cycle events (ADR-0032) — a passed value, never a module global
+    (ADR-0021 rule 4). A verb that gathers more than once per invocation
+    (`pr next`) mints ONE and threads it here each time, so a milestone the
+    second gather re-reads (a landed review, a reviewed head) is tagged once
+    per invocation; omitted, this gather mints a fresh registry scoped to the
+    snapshot it builds — the right scope for a single-gather verb."""
     start = time.monotonic()
+    sightings = sightings if sightings is not None else events.Sightings()
     # The typed repo (ADR-0030/PROC03): one Repo value object — riding in on the
     # PrId, minted once at the verb boundary — feeds the log context, the REST
     # base path, the GraphQL variables, and the PR identity below. No per-gather
@@ -459,19 +470,24 @@ def gather(pr: PrId, roster: Roster) -> ReadinessView:
         # reads this off the snapshot — so the wall-clock read lives here, at the
         # build edge, the same place every other impurity (config, network) does.
         now=datetime.now(timezone.utc),
+        # The invocation's first-sight registry rides the snapshot from here, so
+        # `evaluate`'s observational events dedupe against the SAME registry the
+        # gather-side sightings below use.
+        sightings=sightings,
     )
     # The `review.received` dev-cycle event (ADR-0032 / LOG04-WS02): the gather
     # is the engine's first sight of a LANDED review — nothing in shipit posts
     # a remote reviewer's review, so the fetch seam is the strongest witness
-    # there is. `emit_once` scopes "first" to the process (one `pr next`
-    # invocation gathers up to three times; ADR-0029/0032 reject a cross-run
-    # store), keyed by the review's own identity so a reader can dedupe on
-    # data. A PENDING review has not landed (it is an unsubmitted draft) and is
-    # not sighted.
+    # there is. `emit_once` scopes "first" to the invocation's Sightings
+    # registry (one `pr next` invocation gathers up to three times and threads
+    # ONE registry; ADR-0029/0032 reject a cross-run store), keyed by the
+    # review's own identity so a reader can dedupe on data. A PENDING review
+    # has not landed (it is an unsubmitted draft) and is not sighted.
     for review in ctx.reviews:
         if review.state == "PENDING":
             continue
         events.emit_once(
+            sightings,
             logger,
             "review.received",
             (repo.slug, pr.number, review.review_id),
@@ -519,6 +535,7 @@ def context_from_raw(
     roster: Roster | None = None,
     requested_at: dict[str, str] | None = None,
     now: datetime | None = None,
+    sightings: events.Sightings | None = None,
 ) -> ReadinessView:
     """Pure: assemble a `ReadinessView` from raw gh payloads. No network.
 
@@ -543,6 +560,11 @@ def context_from_raw(
     FIXED value so a recorded snapshot is deterministic. It is a parameter — not
     a default `datetime.now()` — precisely so the engine stays clock-free: the
     only "now" the engine ever sees is the one handed in here.
+
+    `sightings` is the first-sight registry the view's evaluations dedupe their
+    observational dev-cycle events against (ADR-0032); `gather()` threads the
+    invocation's registry, while a fixture-built view defaults to a fresh one —
+    isolated by construction, nothing to reset between tests.
     """
     ci_checks, review_funnel = _partition_checks(meta.get("statusCheckRollup") or [])
     return ReadinessView(
@@ -560,6 +582,7 @@ def context_from_raw(
         now=now,
         roster=roster if roster is not None else Roster(),
         requested_at=requested_at or {},
+        sightings=sightings if sightings is not None else events.Sightings(),
     )
 
 

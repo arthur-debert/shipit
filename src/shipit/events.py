@@ -26,10 +26,12 @@ change (a landed review at gather, a reviewed head, a fired breaker). A verb
 like ``pr next`` evaluates the same snapshot shape several times in one
 invocation (gather → act → the guarded flip's re-gather), so a plain
 :func:`emit` at those seams would tag the same milestone two or three times per
-run. :func:`emit_once` dedupes on a caller-supplied identity key for the LIFE
-OF THE PROCESS — exactly the scope shipit state has (ADR-0029/0032 reject any
-side store or index): one CLI invocation witnesses each milestone at most once,
-while a later invocation legitimately re-witnesses what it re-reads. Every such
+run. :func:`emit_once` dedupes on a caller-supplied identity key against a
+:class:`Sightings` registry — a passed VALUE (ADR-0021 rule 4: no module-global
+mutable state), minted at a verb boundary and threaded through the invocation's
+evaluations, so one CLI invocation witnesses each milestone at most once while
+a later invocation (a fresh registry) legitimately re-witnesses what it
+re-reads (ADR-0029/0032 reject any cross-run side store or index). Every such
 event carries its identifying fields flat on the record (``review_id``, the
 round's head sha, the breaker name), so a reader that wants cross-invocation
 uniqueness can dedupe on data, not on record count.
@@ -109,6 +111,30 @@ SKILL_SCRIPTED_NAMES = frozenset(
 )
 
 
+class UnknownEventError(ValueError):
+    """A caller named a dev-cycle event outside the closed vocabulary.
+
+    The USER-FACING spelling of the closed-vocabulary guard: raised by the
+    constrained write path (``shipit log event``) when the asked-for name is
+    not in :data:`EVENT_NAMES`, and mapped to a clean ``error: …`` + exit 1 by
+    the CLI error shell (ADR-0030). Distinct from the plain :class:`ValueError`
+    :func:`emit` raises for the same condition — an in-code emit with an
+    unregistered name is a BUG that must stay a loud traceback, not an input
+    error to be dressed up.
+    """
+
+
+class EventNotRecordedError(RuntimeError):
+    """A dev-cycle emission failed past name validation.
+
+    The constrained write path's residual-failure refusal (the identity and
+    binding seams around the emission — the durable write itself already fails
+    open at logging setup): raised by ``shipit log event`` outside hook
+    context so the error shell renders it uniformly; hook context swallows the
+    same failure to exit 0 instead (fail-open, per the hook canon).
+    """
+
+
 def emit(
     log: logging.Logger,
     name: str,
@@ -144,15 +170,30 @@ def emit(
     log.info(msg, *args, extra={**fields, EXTRA_KEY: name})
 
 
-#: The process-lifetime first-sight registry behind :func:`emit_once`:
-#: ``(name, *key)`` tuples already emitted by THIS process. Never persisted —
-#: cross-process dedup would need the side store ADR-0029/0032 reject; a fresh
-#: invocation re-witnesses what it re-reads, carrying the identity fields that
-#: let a reader dedupe on data. Tests reset it via the conftest fixture.
-_seen: set[tuple[Hashable, ...]] = set()
+class Sightings:
+    """The first-sight registry behind :func:`emit_once` — a passed VALUE.
+
+    Holds the ``(name, *key)`` tuples already emitted through it. It is minted
+    at a boundary and threaded, never a module global (ADR-0021 rule 4): the
+    readiness ``gather`` stamps one onto the snapshot it builds (so evaluating
+    the same view twice tags each milestone once), and a verb that gathers more
+    than once per invocation (``pr next``: gather → act → the guarded flip's
+    re-gather) mints ONE and threads it through every gather, giving "first
+    sight" exactly the invocation scope the old process-global set approximated
+    — with nothing for a test suite to reset. Never persisted: cross-process
+    dedup would need the side store ADR-0029/0032 reject; a fresh invocation
+    re-witnesses what it re-reads, carrying the identity fields that let a
+    reader dedupe on data.
+    """
+
+    __slots__ = ("_seen",)
+
+    def __init__(self) -> None:
+        self._seen: set[tuple[Hashable, ...]] = set()
 
 
 def emit_once(
+    sightings: Sightings,
     log: logging.Logger,
     name: str,
     key: tuple[Hashable, ...],
@@ -160,12 +201,12 @@ def emit_once(
     *args: object,
     extra: Mapping[str, object] | None = None,
 ) -> bool:
-    """:func:`emit` the event only on FIRST SIGHT of ``(name, *key)`` this process.
+    """:func:`emit` the event only on FIRST SIGHT of ``(name, *key)`` in ``sightings``.
 
     ``key`` is the milestone's identity — the tuple that makes two sightings the
     SAME milestone (``(slug, pr, review_id)`` for a landed review; ``(slug, pr,
     head_sha)`` for a reviewed head). Include the repo slug where the other
-    halves are only repo-unique: one process can touch several repos. Returns
+    halves are only repo-unique: one invocation can touch several repos. Returns
     whether the event was emitted, so an emitting seam can assert/act on the
     outcome; a suppressed re-sighting leaves NO record at all (not even DEBUG —
     re-reading known state is not a milestone). Same closed-vocabulary guard as
@@ -179,8 +220,8 @@ def emit_once(
             "shipit.events.EVENT_NAMES before emitting it"
         )
     marker = (name, *key)
-    if marker in _seen:
+    if marker in sightings._seen:
         return False
-    _seen.add(marker)
+    sightings._seen.add(marker)
     emit(log, name, msg, *args, extra=extra)
     return True

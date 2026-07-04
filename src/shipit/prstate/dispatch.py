@@ -41,6 +41,7 @@ from __future__ import annotations
 import logging
 from typing import Protocol
 
+from .. import events
 from ..pr import PrId
 from .errors import PrStateError
 from .flip import guarded_flip
@@ -148,13 +149,22 @@ class NextActs:
     which adapters) is engine logic (CLI01-WS03), not verb glue.
     """
 
-    def __init__(self, pr: PrId, roster: Roster | None = None) -> None:
+    def __init__(
+        self,
+        pr: PrId,
+        roster: Roster | None = None,
+        sightings: events.Sightings | None = None,
+    ) -> None:
         self._pr = pr
         # The verb's ONE loaded Roster (CLI01-WS04), threaded in so the request
         # act reads reviewer settings off the same value the engine evaluated —
         # never a config re-read. None only for the no-PR report path, which
         # never requests.
         self._roster = roster if roster is not None else Roster()
+        # The verb's invocation-wide first-sight registry (ADR-0032 / ADR-0021
+        # rule 4): threaded into the ready act's guarded re-gather so a
+        # milestone the first gather already tagged is not re-tagged there.
+        self._sightings = sightings
 
     def report(self, status: TaskStatus) -> str:
         # Report-only: nothing mutates. The engine's next_action already carries
@@ -217,5 +227,5 @@ class NextActs:
         # re-evaluates live and raises NotReady if it is no longer READY.
         # The verb's already-loaded Roster rides into the flip's re-check, so the
         # READY path never resolves reviewer settings twice (CLI01-WS04).
-        flipped = guarded_flip(self._pr, self._roster)
+        flipped = guarded_flip(self._pr, self._roster, sightings=self._sightings)
         return f"flipped draft→ready — {flipped.next_action}"

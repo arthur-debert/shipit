@@ -65,7 +65,7 @@ from .schema import REVIEW_SCHEMA
 logger = logging.getLogger("shipit.review")
 
 #: The reviewer role the spawn adapter's read-only posture is built for (mirrors
-#: :data:`shipit.verbs.spawn.REVIEWER_ROLE`). It anchors the role preamble codex / agy
+#: :data:`shipit.spawn.subagent.REVIEWER_ROLE`). It anchors the role preamble codex / agy
 #: prepend to the task; the funnel result channel is shipit's capture-and-post, not the
 #: agent self-posting, so the task itself tells the agent NOT to post.
 _REVIEWER_ROLE = "reviewer"

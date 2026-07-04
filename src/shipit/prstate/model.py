@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 
+from .. import events
 from ..identity import Repo, Sha, repo_from_slug
 from ..pr import PR, PrId
 from .roster import Roster
@@ -239,6 +240,18 @@ class ReadinessView:
     # LOCAL reviewer has no requested edge (it ages its check run's `started_at`
     # instead) and so never appears here. Empty in a light/skip context.
     requested_at: dict[str, str] = field(default_factory=dict)
+    # The first-sight registry for the OBSERVATIONAL dev-cycle events this
+    # snapshot's evaluations witness (`round.detected`, `breaker.fired`,
+    # `review.degraded` — ADR-0032). A passed value, never a module global
+    # (ADR-0021 rule 4): `gather()` stamps the invocation's registry here (a
+    # multi-gather verb like `pr next` threads ONE across its gathers), so
+    # re-evaluating the same milestone within an invocation tags it once,
+    # while a fresh view (a test fixture, a later invocation) starts clean.
+    # Excluded from equality: it is invocation bookkeeping riding the view,
+    # not snapshot data.
+    sightings: events.Sightings = field(
+        default_factory=events.Sightings, repr=False, compare=False
+    )
 
     # --- core, delegated to the composed PR (ADR-0024) ----------------------
     # The engine and adapters read `ctx.head_sha` / `ctx.is_draft` / … as before;
@@ -316,6 +329,7 @@ def readiness_view(
     now: datetime | None = None,
     roster: Roster | None = None,
     requested_at: dict[str, str] | None = None,
+    sightings: events.Sightings | None = None,
 ) -> ReadinessView:
     """Compose a :class:`ReadinessView` from flattened core values — the ergonomic
     builder for callers (and tests) that hold the core directly rather than a raw
@@ -328,7 +342,9 @@ def readiness_view(
     how ``review_view`` parses a slug into a ``Repo``), so a hand-built view
     carries the same validated identity the wire path does — a malformed head
     raises at construction. ``repo`` defaults to a placeholder identity because
-    the readiness engine never keys on it.
+    the readiness engine never keys on it. ``sightings`` threads a caller's
+    first-sight registry across several hand-built views (mirroring `gather`);
+    omitted, the view gets its own fresh one.
     """
     pr = PR(
         id=PrId(repo=repo or _HANDBUILT_REPO, number=number),
@@ -350,4 +366,5 @@ def readiness_view(
         now=now,
         roster=roster if roster is not None else Roster(),
         requested_at=requested_at if requested_at is not None else {},
+        sightings=sightings if sightings is not None else events.Sightings(),
     )

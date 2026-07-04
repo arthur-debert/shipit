@@ -46,8 +46,14 @@ def test_sprayed_modules_have_a_shipit_logger():
         ("shipit.review.service", "shipit.review"),
         ("shipit.review.post", "shipit.review"),
         # LOG02-WS04: the remaining print-only surfaces joined the spray.
-        ("shipit.verbs.install", "shipit.install"),
-        ("shipit.verbs.gh_setup", "shipit.ghsetup"),
+        # CLI02-WS01 promoted the install family into its domain package; the
+        # records live on the one shipit.install logger (the verb is glue +
+        # renderers).
+        ("shipit.install.reconcile", "shipit.install"),
+        ("shipit.install.apply", "shipit.install"),
+        # CLI02-WS04 promoted the gh-setup passes into their domain module;
+        # the sprayed records moved with them (the verb is print-free glue).
+        ("shipit.ghsetup", "shipit.ghsetup"),
         ("shipit.verbs.lint", "shipit.lint"),
         ("shipit.session.liveness", "shipit.session"),
         # LOG02-WS01..WS03: the tree / spawn / review+prstate sprays.
@@ -59,7 +65,10 @@ def test_sprayed_modules_have_a_shipit_logger():
         ("shipit.verbs.tree", "shipit.tree"),
         ("shipit.spawn.launch", "shipit.spawn"),
         ("shipit.spawn.dogfood", "shipit.spawn"),
-        ("shipit.verbs.spawn", "shipit.spawn"),
+        # CLI02-WS02 promoted the spawn pipeline out of the verb: the sprayed
+        # lifecycle records live on the domain module's logger (the verb is
+        # print-free glue + the SPAWNED renderer).
+        ("shipit.spawn.subagent", "shipit.spawn"),
         ("shipit.prstate.fetch", "shipit.prstate"),
         ("shipit.prstate.reviewers", "shipit.prstate"),
         ("shipit.gh", "shipit.gh"),
@@ -81,11 +90,12 @@ def test_sprayed_modules_have_a_shipit_logger():
 def test_verbs_keep_print_for_user_facing_output():
     """The spray is ADDITIVE: logging joined the verbs, but the user-facing CLI
     output still writes with ``print()`` — logging never replaced stdout. The
-    pr family is exempt since CLI01-WS03: its verbs render through the shared
-    ADR-0030 emit seam (:mod:`shipit.verbs._render`), which owns the print."""
-    from shipit.verbs import _render, gh_setup, install, lint
+    pr family is exempt since CLI01-WS03, install since CLI02-WS01, and
+    gh-setup since CLI02-WS04: those verbs render through the shared ADR-0030
+    emit seam (:mod:`shipit.verbs._render`), which owns the print."""
+    from shipit.verbs import _render, lint
 
-    for mod in (gh_setup, install, lint, _render):
+    for mod in (lint, _render):
         src = inspect.getsource(mod)
         assert "print(" in src, (
             f"{mod.__name__} should still use print() for CLI output"

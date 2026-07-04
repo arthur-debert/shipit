@@ -25,6 +25,7 @@ from dataclasses import dataclass
 
 import click
 
+from ... import events
 from ...gh import resolve_pr
 from ...identity import Repo
 from ...prstate.dispatch import NextActs, dispatch
@@ -109,12 +110,18 @@ def run(
     # rides the snapshot for BOTH evaluates below and feeds the request act's
     # selection / run-options — one value, never re-resolved.
     roster = load_roster()
-    status = evaluate(gather(target, roster))
-    action = dispatch(status, NextActs(target, roster))
+    # The ONE first-sight registry of this invocation (ADR-0032 / ADR-0021 rule
+    # 4): `pr next` gathers up to three snapshots (gather → the ready act's
+    # guarded re-gather → the report re-gather), so the observational dev-cycle
+    # events dedupe against this one value — each milestone tagged at most once
+    # per invocation, with no module global for a test suite to reset.
+    sightings = events.Sightings()
+    status = evaluate(gather(target, roster, sightings=sightings))
+    action = dispatch(status, NextActs(target, roster, sightings))
     # Re-read the status AFTER a mutating act so the reported snapshot reflects
     # what just happened (e.g. a freshly-requested reviewer now REQUESTED). A
     # second gather is cheap and keeps the report honest; on report-only acts it
     # is the same status. Skipped when there is no PR (handled above).
-    final = evaluate(gather(target, roster))
+    final = evaluate(gather(target, roster, sightings=sightings))
     emit(NextResult(action, final), format_next, as_json=as_json)
     return 0

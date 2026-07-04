@@ -34,7 +34,7 @@ def supported_backends() -> tuple[str, ...]:
 
     The adapter-driven ``SUPPORTED_BACKENDS`` (ADR-0020 §Decision 2): the order is the
     registration order, ``claude`` first. The verb gates ``--backend`` on this and
-    re-checks it in :func:`shipit.verbs.spawn.run_subagent`, so an unknown backend fails
+    re-checks it in :func:`shipit.spawn.subagent.spawn_subagent`, so an unknown backend fails
     loud at the verb boundary with no silent default to ``claude``.
     """
     return tuple(_ADAPTERS)

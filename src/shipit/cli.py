@@ -75,44 +75,10 @@ def root(ctx: click.Context, verbose: bool) -> None:
     configure_logging(verbose=verbose, repo=repo)
 
 
-@root.command(name="gh-setup")
-@click.argument("repo", required=False)
-@click.option(
-    "--config",
-    "config_path",
-    default=None,
-    help="Path to .shipit.toml (default: the repo root's).",
-)
-@click.option(
-    "--checks",
-    "checks",
-    default=None,
-    help="Comma-separated required checks (skip auto-discovery).",
-)
-@click.option(
-    "--dry-run", is_flag=True, help="Print what would change without sending it."
-)
-def gh_setup_cmd(
-    repo: str | None, config_path: str | None, checks: str | None, dry_run: bool
-) -> None:
-    """Make REPO conform to the portfolio standard (ruleset, labels, secrets).
-
-    REPO is owner/name; omitted, it defaults to the current checkout's repo.
-    Idempotent — safe to re-run for both install and update.
-    """
-    checks_override = (
-        [c.strip() for c in checks.split(",") if c.strip()]
-        if checks is not None
-        else None
-    )
-    rc = gh_setup.run(
-        repo,
-        config_path=config_path,
-        checks_override=checks_override,
-        dry_run=dry_run,
-        prompt=lambda name: click.prompt(f"secret {name}", hide_input=True),
-    )
-    raise SystemExit(rc)
+# `gh-setup` is ADR-0030 glue assembled in its own verb module (CLI02-WS04):
+# click command + pure renderer there, the three passes in the shipit.ghsetup
+# domain; attach the finished command like the nested groups below.
+root.add_command(gh_setup.cmd)
 
 
 @root.command(name="verify-apps")
@@ -141,49 +107,10 @@ def verify_apps_cmd(repo: str | None, agents: tuple[str, ...]) -> None:
     raise SystemExit(rc)
 
 
-@root.command(name="install")
-@click.argument("path", required=False)
-@click.option(
-    "--pr",
-    is_flag=True,
-    help="Stage the managed set on the `shipit/install` branch and open a DRAFT "
-    "PR (the standalone onboarding/reconcile flow).",
-)
-@click.option(
-    "--push",
-    is_flag=True,
-    help="Break-glass: commit and push straight to the branch (admin), no PR.",
-)
-@click.option(
-    "--local",
-    is_flag=True,
-    help="Local-only: commit the managed set on the current branch; no push, no PR "
-    "(used by `tree create` provisioning).",
-)
-@click.option(
-    "--dry-run", is_flag=True, help="Print the reconciliation plan; touch nothing."
-)
-def install_cmd(
-    path: str | None, pr: bool, push: bool, local: bool, dry_run: bool
-) -> None:
-    """Vendor + reconcile shipit's managed set into the consumer at PATH.
-
-    PATH defaults to the current directory. By default install refreshes the
-    managed set IN THE WORKING TREE and stops — no commit, no branch, no push,
-    no PR — so a mid-workstream refresh lands in the caller's own commit, never
-    in a stray parallel PR (#359). Re-running with no changes is a clean no-op.
-
-    ``--pr`` opts into the standalone reconcile flow: stage on the
-    `shipit/install` branch and open a DRAFT PR (pull, never push); a
-    consumer-edited unit is surfaced in the PR body rather than clobbered blind.
-
-    ``--local`` commits the managed set on the current branch and stops (no push,
-    no PR) — the mode Tree provisioning uses so creating a Tree never touches origin.
-    """
-    if sum((pr, push, local)) > 1:
-        raise click.UsageError("--pr, --push, and --local are mutually exclusive.")
-    rc = install.run(path, dry_run=dry_run, pr=pr, push=push, local=local)
-    raise SystemExit(rc)
+# The install family is promoted onto the ADR-0030 contract (CLI02-WS01): its
+# command lives with its renderers in verbs/install.py; the domain (plan/apply)
+# is the shipit.install package.
+root.add_command(install.cmd)
 
 
 @root.command(name="lint")
@@ -204,146 +131,10 @@ def lint_cmd(path: str | None, fix: bool) -> None:
     raise SystemExit(rc)
 
 
-@root.command(name="logs")
-@click.argument("repo", required=False)
-@click.option(
-    "--path",
-    "path_only",
-    is_flag=True,
-    help='Print the absolute log file path and exit (for `cat "$(shipit logs --path)"`).',
-)
-@click.option(
-    "-f",
-    "--follow",
-    is_flag=True,
-    help="Stream appended log lines live (tail -f); ends on Ctrl-C.",
-)
-@click.option(
-    "--raw",
-    is_flag=True,
-    help="Emit unmodified JSONL lines (no path header) for piping to jq.",
-)
-@click.option(
-    "-n",
-    "--lines",
-    "lines",
-    type=int,
-    default=logs.DEFAULT_TAIL,
-    show_default=True,
-    help="Trailing records to print in the default (no-flag) view.",
-)
-@click.option(
-    "--events",
-    "events_only",
-    is_flag=True,
-    help="Only dev-cycle event records (records carrying an `event` field).",
-)
-@click.option(
-    "--pr",
-    "pr",
-    type=int,
-    default=None,
-    metavar="N",
-    help="Only records whose bound `pr` domain key equals this PR number.",
-)
-@click.option(
-    "--session",
-    "session",
-    default=None,
-    metavar="ID|current",
-    help="Only this session's records; `current` resolves from the session "
-    "environment (or the ephemeral Tree cwd).",
-)
-@click.option(
-    "--epic",
-    "epic",
-    default=None,
-    metavar="CODE",
-    help="Only records whose bound `epic` domain key equals this code.",
-)
-@click.option(
-    "--ws",
-    "ws",
-    default=None,
-    metavar="N",
-    help="Only this Work Stream's records; accepts 1, 01, or WS01.",
-)
-@click.option(
-    "--agent",
-    "agent",
-    default=None,
-    metavar="ID",
-    help="Only records whose bound `agent` domain key equals this spawn id.",
-)
-@click.option(
-    "--role",
-    "role",
-    default=None,
-    metavar="NAME",
-    help="Only records whose bound `role` domain key equals this Role name.",
-)
-@click.option(
-    "--flow",
-    is_flag=True,
-    help="Render the filtered records as the session story (implies --events).",
-)
-@click.option(
-    "--agent-ids",
-    "show_agents",
-    is_flag=True,
-    help="Show agent ids on flow lines (always collected, displayed on request).",
-)
-def logs_cmd(
-    repo: str | None,
-    path_only: bool,
-    follow: bool,
-    raw: bool,
-    lines: int,
-    events_only: bool,
-    pr: int | None,
-    session: str | None,
-    epic: str | None,
-    ws: str | None,
-    agent: str | None,
-    role: str | None,
-    flow: bool,
-    show_agents: bool,
-) -> None:
-    """Locate and read shipit's durable per-repo JSONL log.
-
-    REPO is owner/name; omitted, it defaults to the current checkout's repo. The
-    path is resolved by the file sink (logsetup), the single source of truth — no
-    recomputed platform location. --path prints just that absolute path so an
-    agent can `cat`/`grep` it. -f/--follow streams new records; with no flag it
-    prints the path plus the last N records, rendered legibly (ts LEVEL logger:
-    msg, domain keys trailing); a malformed line is skipped with a stderr note.
-    --raw passes the stored lines through unmodified for jq — no parsing, no
-    skipping, malformed lines included — UNLESS a filter is active. --events and
-    the domain-key filters (--pr/--session/--epic/--ws/--agent/--role) compose
-    as AND, apply before the tail count, and work with every view; selecting on
-    a field requires parsing, so under an active filter even --raw parses and
-    drops a malformed line rather than passing it through. --flow renders the
-    session story (intent/theme header, relative times, EPIC-WSnn prefixes;
-    --agent-ids reveals agent ids) and implies --events. A log not written yet
-    is reported, not crashed.
-    """
-    rc = logs.run(
-        repo,
-        path_only=path_only,
-        follow=follow,
-        raw=raw,
-        tail=lines,
-        events_only=events_only,
-        pr=pr,
-        session=session,
-        epic=epic,
-        ws=ws,
-        agent=agent,
-        role=role,
-        flow=flow,
-        show_agents=show_agents,
-    )
-    raise SystemExit(rc)
+# The `logs` reader (LOG01/LOG04, promoted onto the ADR-0030 contract in
+# CLI02): the command, its query minting, and the renderers live in the verb
+# module; the read engine in the `logread` domain package.
+root.add_command(logs.logs_cmd)
 
 
 # The nested `pr` group (PR flow) is a click.Group assembled in its own package

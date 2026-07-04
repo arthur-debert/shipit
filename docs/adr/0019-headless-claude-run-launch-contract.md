@@ -161,5 +161,5 @@ and provisioning paths. `--clean-env` is **NOT** used.
   is belt-and-suspenders for activation (it still cleans the agent's own `pixi` calls).
 
 Implemented in `src/shipit/spawn/launch.py` (`pixi_wrap` / `scrub_tree_env`), wired at the
-`shipit.verbs.spawn` launch call sites. The full verified contract lives in
+`shipit.spawn.subagent` launch call sites (the domain pipeline; the verb is glue, CLI02-WS02). The full verified contract lives in
 `docs/dev/pixi.lex` §7/§8.

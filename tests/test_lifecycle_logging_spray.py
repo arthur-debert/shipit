@@ -16,12 +16,13 @@ from pathlib import Path
 
 import pytest
 
-from shipit import execrun, gh, git
+from shipit import execrun, gh, ghsetup, git
 from shipit.agent import backend as agent_backend
 from shipit.config import SecretSource
 from shipit.review import ghauth
 from shipit.session import liveness
-from shipit.verbs import gh_setup, install, lint, verify_apps
+from shipit.install import apply as install_apply
+from shipit.verbs import install, lint, verify_apps
 
 
 def _with_fields(records, level, *fields):
@@ -78,9 +79,9 @@ def rec(monkeypatch):
         monkeypatch.setattr(git, name, getattr(r, name))
     for name in ("pr_url_for_head", "pr_create"):
         monkeypatch.setattr(gh, name, getattr(r, name))
-    monkeypatch.setattr(install, "_shipit_version", lambda: "testhash")
+    monkeypatch.setattr(install_apply, "_shipit_version", lambda: "testhash")
     monkeypatch.setattr(
-        install,
+        install_apply,
         "_activate_hooks",
         lambda root: execrun.ExecResult(
             argv=("lefthook", "install"), rc=0, stdout="", stderr="", duration_ms=1
@@ -99,7 +100,7 @@ def test_install_logs_the_write_and_pr_milestones(tmp_path, rec, caplog):
     assert written and written[0].adds > 0
     # The PR milestone: the branch and its draft-PR URL, timed.
     pr = _with_fields(caplog.records, logging.INFO, "branch", "url", "duration_ms")
-    assert pr and pr[0].branch == install.INSTALL_BRANCH
+    assert pr and pr[0].branch == install_apply.INSTALL_BRANCH
 
 
 def test_noop_reinstall_emits_no_mutation_milestone(tmp_path, rec, caplog):
@@ -143,22 +144,22 @@ class _FakeGh:
 @pytest.fixture
 def fake_gh(monkeypatch):
     fake = _FakeGh()
-    monkeypatch.setattr(gh_setup.gh, "rest", fake.rest)
-    monkeypatch.setattr(gh_setup.gh, "label_create", fake.label_create)
-    monkeypatch.setattr(gh_setup.gh, "secret_set", fake.secret_set)
+    monkeypatch.setattr(ghsetup.gh, "rest", fake.rest)
+    monkeypatch.setattr(ghsetup.gh, "label_create", fake.label_create)
+    monkeypatch.setattr(ghsetup.gh, "secret_set", fake.secret_set)
     return fake
 
 
 def test_ruleset_mutation_is_logged_with_repo_bound(fake_gh, caplog):
     with caplog.at_level(logging.DEBUG, logger="shipit.ghsetup"):
-        gh_setup.apply_ruleset("o/r", ["c1"], dry_run=False)
+        ghsetup.apply_ruleset("o/r", ["c1"], dry_run=False)
     recs = _with_fields(caplog.records, logging.INFO, "repo", "ruleset", "checks")
     assert recs and recs[0].repo == "o/r" and recs[0].checks == 1
 
 
 def test_labels_pass_logs_its_milestone(fake_gh, caplog):
     with caplog.at_level(logging.DEBUG, logger="shipit.ghsetup"):
-        gh_setup.ensure_labels("o/r", gh_setup.load_labels(), dry_run=False)
+        ghsetup.ensure_labels("o/r", ghsetup.load_labels(), dry_run=False)
     recs = _with_fields(caplog.records, logging.INFO, "repo", "labels")
     assert recs and recs[0].labels > 0
 
@@ -169,7 +170,7 @@ def test_secret_set_is_logged_by_name_and_the_value_never_appears(
     secret_value = "shipit-test-secret-value-9f8e7d"
     monkeypatch.setenv("VAR_A", secret_value)
     with caplog.at_level(logging.DEBUG, logger="shipit.ghsetup"):
-        gh_setup.push_secrets(
+        ghsetup.push_secrets(
             "o/r", [SecretSource("A", "env", "VAR_A", False)], dry_run=False
         )
     recs = _with_fields(caplog.records, logging.INFO, "repo", "secret")
@@ -185,7 +186,7 @@ def test_unresolvable_secret_degrades_to_warning_with_the_exception(
 ):
     monkeypatch.delenv("VAR_MISSING", raising=False)
     with caplog.at_level(logging.DEBUG, logger="shipit.ghsetup"):
-        gh_setup.push_secrets(
+        ghsetup.push_secrets(
             "o/r", [SecretSource("X", "env", "VAR_MISSING", False)], dry_run=False
         )
     warnings = _with_fields(caplog.records, logging.WARNING, "repo", "secret")

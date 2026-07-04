@@ -13,6 +13,9 @@ The repeated CLI concepts are defined ONCE here:
   ambient repo from the :class:`~shipit.verbs._context.RootContext`.
 - :func:`path_argument` — an optional PATH with the ambient default (the
   checkout root, else the current directory).
+- :func:`shape_options` — the Tree-shape stack
+  (``--epic``/``--ws``/``--issue``/``--session``), one spelling for every
+  Tree-taking verb; which shape a combination selects stays a domain decision.
 - :data:`json_option` / :data:`dry_run_option` — the shared flags, one
   spelling, one help string.
 
@@ -27,6 +30,7 @@ from __future__ import annotations
 import click
 
 from ..identity import Repo, repo_from_slug
+from ..tree.cleanup import parse_duration
 from ._context import current_root_context
 
 
@@ -53,6 +57,33 @@ class RepoSlugParam(click.ParamType):
 
 #: The shared instance verbs reference (a ParamType is stateless).
 REPO_SLUG = RepoSlugParam()
+
+
+class DurationParam(click.ParamType):
+    """Mints seconds (``float``) from a human duration (``14d``/``36h``/``90m``)
+    at parse.
+
+    The canonical parser (:func:`shipit.tree.cleanup.parse_duration`) is the
+    ONE place a duration string becomes seconds, so a flag like ``tree gc
+    --threshold`` validates at argv parse: a malformed duration is a click
+    usage error — exit 2, never verb-body code (the CLI02-WS03 exit-contract
+    move). An already-converted ``float`` (a programmatic default) passes
+    through.
+    """
+
+    name = "duration"
+
+    def convert(self, value: object, param, ctx) -> float:
+        if isinstance(value, (int, float)):
+            return float(value)
+        try:
+            return parse_duration(str(value))
+        except ValueError as exc:
+            self.fail(str(exc), param, ctx)
+
+
+#: The shared instance verbs reference (a ParamType is stateless).
+DURATION = DurationParam()
 
 
 def _ambient_repo() -> Repo | None:
@@ -95,6 +126,64 @@ def pr_number_argument(fn):
     usage error.
     """
     return click.argument("pr", required=False, type=click.IntRange(min=1))(fn)
+
+
+def shape_options(fn):
+    """The shared Tree-shape option stack: ``--epic``/``--ws``/``--issue``/``--session``.
+
+    The one spelling of the shape vocabulary every Tree-taking verb speaks
+    (``spawn subagent``; ``tree create`` adds its own ``--branch``/``--slug`` on
+    top): the **epic shape** (``--epic E --ws N`` → branch ``E/WSnn``, base
+    ``origin/E/umbrella``) and the **issue shape** (``--issue N [--session S]``
+    → branch ``issues/<n>/<session>``, base ``origin/main``), per naming.lex §3.
+
+    Click validates only each option's primitive here. WHICH shape the
+    combination selects — the ``--epic``/``--ws`` pairing, positivity, whether
+    an issue is required at all — is deliberately the domain pipeline's own
+    shape stage (a runtime refusal through the error shell), because the valid
+    combinations are per-verb semantics: a reviewer spawn legitimately carries
+    no ``--issue``, so a parse-time requirement would reject it before the
+    domain could accept it (the ADR-0030 PR-target precedent: runtime outcome,
+    not usage error).
+    """
+    fn = click.option(
+        "--session",
+        default="work",
+        show_default=True,
+        help=(
+            "Issue shape: session name in the branch issues/<n>/<session>. The "
+            "suffix keeps issues/<n>/ a ref directory so a +1 session on the same "
+            "issue (e.g. --session onboard) coexists with the default `work` "
+            "(naming.lex §3). Ignored by the --epic/--ws shape."
+        ),
+    )(fn)
+    fn = click.option(
+        "--issue",
+        type=int,
+        default=None,
+        help=(
+            "Issue shape: issue number N (branch issues/<n>/<session>, cut from "
+            "origin/main). Omit --epic/--ws to select this shape."
+        ),
+    )(fn)
+    fn = click.option(
+        "--ws",
+        type=int,
+        default=None,
+        help=(
+            "Epic shape (with --epic): work stream number N — the WSnn half of "
+            "the branch E/WSnn."
+        ),
+    )(fn)
+    fn = click.option(
+        "--epic",
+        default=None,
+        help=(
+            "Epic shape (with --ws): epic code E, e.g. TRE03 — branch E/WSnn, cut "
+            "from origin/E/umbrella. Omit both for the standalone --issue shape."
+        ),
+    )(fn)
+    return fn
 
 
 #: ``--json`` defined once — every user-facing read verb grows this flag,
