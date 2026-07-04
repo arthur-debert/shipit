@@ -288,21 +288,25 @@ def run(
         return 0
 
     if query.flow:
-        # The story view: same selection (the engine's filtered read), the
-        # rendering delegated whole to the pure module. The filter is always
-        # active here (--flow implied --events at parse), so a malformed line
-        # was dropped silently by the engine. The header themes the WHOLE
-        # session (its intent/epics), so it reads the full matching set; only
-        # the body lines are tailed — deriving both from the tailed slice
-        # would drop the intent header whenever the `session.intent` event
-        # fell before the tail window.
+        # The story view: same selection (the one Filter predicate), the
+        # rendering delegated whole to the pure module. The read is UNfiltered
+        # and the filter applied to the parsed record, so each line is parsed
+        # exactly once — an engine-side filtered read would parse inside
+        # Filter.matches() and again here for rendering. Selection is
+        # unchanged: the filter is always active here (--flow implied
+        # --events at parse), so a malformed line (parse_record -> None)
+        # could never have matched and drops just the same. The header themes
+        # the WHOLE session (its intent/epics), so it reads the full matching
+        # set; only the body lines are tailed — deriving both from the tailed
+        # slice would drop the intent header whenever the `session.intent`
+        # event fell before the tail window.
         records = [
             record
             for record in (
                 logread.parse_record(ln)
-                for ln in logread.read_lines(path, record_filter)
+                for ln in logread.read_lines(path, logread.Filter())
             )
-            if record is not None
+            if record is not None and record_filter.matches_record(record)
         ]
         instant = (now or (lambda: datetime.now(timezone.utc)))()
         for rendered in flowview.render(
