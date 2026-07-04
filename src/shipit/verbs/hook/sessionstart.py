@@ -1,7 +1,9 @@
 """``shipit hook sessionstart`` — the coordinator-activation boundary (ADR-0027).
 
-THIN by design (mirrors ``hook pretooluse``); four independent, additive checks
-per session start — three writes and one advisory emit:
+THIN by design (mirrors ``hook pretooluse``); five independent, additive steps
+per session start — three writes, one advisory emit, and the ``session.started``
+dev-cycle event (ADR-0032, :func:`_emit_session_started` — the hook is the one
+verb that witnesses a session beginning):
 
 1. **Activation** — detect the toolchain governing the session's ``cwd`` → capture
    pixi's activation (``pixi shell-hook --json`` via
@@ -83,9 +85,10 @@ from typing import TextIO
 
 import click
 
-from ... import config, execrun, logcontext
+from ... import config, events, execrun, logcontext
 from ...harness import activation
 from ...pixienv import shell_hook
+from ...session import current as session_current
 from ...session import liveness
 from ...tree import layout
 
@@ -109,7 +112,7 @@ def cmd() -> None:
     """Write the repo's toolchain activation into ``CLAUDE_ENV_FILE`` + the pidfile.
 
     Reads the ``SessionStart`` payload as JSON on stdin. Always exits 0; each of
-    the four checks (activation, log-context export, liveness pidfile,
+    the steps (activation, log-context export, liveness pidfile, session event,
     source-clone warning) fails OPEN independently on any error, and a repo with
     no activatable toolchain / no claude ancestor / a cwd that is not a source
     clone or not an ephemeral Tree is a clean no-op for that check.
@@ -126,12 +129,13 @@ def run(
     self_pid: int | None = None,
 ) -> int:
     """Parse stdin → warn on a source-clone cwd → write activation → export the
-    log context → write the liveness pidfile. Returns 0 always.
+    log context → write the liveness pidfile → emit the ``session.started``
+    event. Returns 0 always.
 
     ``stdout``, ``environ``, ``runner``, ``probe``, and ``self_pid`` are the
     injectable boundaries (defaults: the real ``sys.stdout`` / ``os.environ`` /
     :func:`shipit.execrun.run` / :func:`shipit.session.liveness.os_probe` /
-    ``os.getpid()``) so tests assert all four checks without a live pixi or a
+    ``os.getpid()``) so tests assert every step without a live pixi or a
     real claude process tree. Each check is wrapped fail-open on its own, so a
     bad payload, a pixi failure, an unwritable env file, a probe error, or a
     detection error can never crash the session — and a failure in one check
@@ -150,6 +154,7 @@ def run(
     _write_activation(raw, env, runner)
     _write_log_context(raw, env)
     _write_liveness(raw, probe=probe, self_pid=self_pid)
+    _emit_session_started(raw)
     return 0
 
 
@@ -300,29 +305,15 @@ def _write_log_context(raw: str, env) -> None:
 def _ephemeral_tree(cwd: Path) -> Path | None:
     """The RESOLVED ephemeral session-Tree dir when ``cwd`` is one, else ``None``.
 
-    The path IS the signal (ADR-0018/0027): an ephemeral Tree lives at exactly
-    ``<root>/<org>/<repo>/ephemeral/<leaf>`` (the shape ``tree/create.py``
-    mints), and its leaf is the per-launch session id. Containment under
-    :func:`shipit.tree.layout.central_root` is checked FIRST so a random
-    directory that merely happens to sit in an ``ephemeral/`` folder never mints
-    a bogus session key; both sides are resolved so a symlinked root (macOS
-    ``/tmp`` → ``/private/tmp``) cannot split one dir into "inside" and
-    "outside" spellings — the same discipline as :func:`_is_source_clone`.
-    Depth below the root is then pinned to the minted shape's four segments:
-    :func:`shipit.tree.layout.tree_kind` alone reads only the leaf's parent
-    segment, so a nested ``…/ephemeral/<x>`` dir INSIDE the root (e.g. a
-    directory named ``ephemeral`` inside a Tree's clone) would otherwise pass
-    the kind check and bind misleading log context.
+    Delegates to :func:`shipit.session.current.ephemeral_session_tree` — the ONE
+    path-is-the-signal detection (ADR-0018/0027), shared with the resolvers that
+    read the id back (``shipit logs --session current``, LOG04) — so the
+    exporter and every reader agree on what an ephemeral session Tree looks
+    like by construction. Kept as a local seam so this hook's fail-open
+    calibration (detection errors skip at DEBUG, per #348) stays wrapped around
+    one call site.
     """
-    resolved = cwd.resolve()
-    root = layout.central_root().resolve()
-    if not resolved.is_relative_to(root):
-        return None
-    if len(resolved.relative_to(root).parts) != 4:
-        return None
-    if layout.tree_kind(resolved) != layout.EPHEMERAL_KIND:
-        return None
-    return resolved
+    return session_current.ephemeral_session_tree(cwd)
 
 
 def _log_context_exports(tree: Path) -> str:
@@ -339,6 +330,45 @@ def _log_context_exports(tree: Path) -> str:
         f"export {logcontext.ENV_PREFIX}SESSION={shlex.quote(tree.name)}\n"
         f"export {logcontext.ENV_PREFIX}TREE={shlex.quote(str(tree))}\n"
     )
+
+
+def _emit_session_started(raw: str) -> None:
+    """The ``session.started`` dev-cycle event (ADR-0032 / LOG04-WS02).
+
+    The SessionStart hook is the one verb that witnesses a session beginning,
+    so the milestone emits here — for EVERY session (coordinator or spawned
+    worker; a worker's ``epic``/``ws``/``agent``/``role`` ride in from the
+    spawn seam's ``SHIPIT_LOG_CTX_*`` exports, rebound at this process's own
+    logging setup). When the session's cwd is an ephemeral session Tree, the
+    per-launch ``session``/``tree`` identity (ADR-0027: the dir leaf IS the
+    session id) is bound SCOPED to this record — the same value
+    ``_write_log_context`` exports for the session's later commands. Fail-open
+    like every other step: the detection shares the #348/#349 DEBUG
+    calibration (nothing durable degrades — one record merely goes untagged /
+    less correlated), and the session never pays for a logging problem.
+    """
+    try:
+        cwd = _payload_cwd(raw)
+        tree = _ephemeral_tree(cwd)
+        session = tree.name if tree is not None else None
+        sid = _payload_session_id(raw)
+        with logcontext.scoped(
+            session=session, tree=str(tree) if tree is not None else None
+        ):
+            events.emit(
+                logger,
+                "session.started",
+                "session started in %s",
+                cwd,
+                # The Claude-internal id joins the record to the transcript
+                # (the liveness pidfile's companion); absent-not-null.
+                extra={"session_id": sid} if sid else None,
+            )
+    except Exception:  # noqa: BLE001 — fail-open, DEBUG by design: the emit is
+        # advisory correlation, nothing durable degrades when it breaks.
+        logger.debug(
+            "sessionstart: session.started emission failed open", exc_info=True
+        )
 
 
 def _write_liveness(

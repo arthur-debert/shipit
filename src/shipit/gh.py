@@ -477,6 +477,10 @@ def pr_meta(pr: PrId) -> dict:
         json_fields=[
             "number",
             "headRefOid",
+            # The head BRANCH name feeds the ADR-0032 epic/ws derivation at the
+            # fetch seam (shipit.branchid) — identity the slash-namespaced
+            # branch grammar (ADR-0016) already carries.
+            "headRefName",
             "baseRefName",
             "isDraft",
             "mergeable",

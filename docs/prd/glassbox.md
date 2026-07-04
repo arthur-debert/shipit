@@ -4,6 +4,12 @@ Authoritative spec. Decisions recorded in ADR-0028 (one Exec seam; Tool
 adapters) and ADR-0029 (agents-first JSONL logging); vocabulary in
 CONTEXT.md (**Exec**, **Tool adapter**, **Sha**).
 
+> **Since extended (LOG04, 2026-07):** the domain-key vocabulary grew from the
+> five listed here to nine (`epic`, `ws`, `agent`, `role`), and the `logs`
+> reader gained domain-key filters, `--events`, and a `--flow` dev-cycle view —
+> see `docs/prd/log04-dev-cycle-event-log.md` and ADR-0032. This spec's
+> five-key and reader passages are the historical baseline.
+
 ## Problem Statement
 
 shipit's entire job is orchestrating external processes — pixi, git, gh, and

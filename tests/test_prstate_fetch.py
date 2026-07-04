@@ -55,7 +55,12 @@ def _graphql_page(
     }
 
 
-def _wire(monkeypatch, review_requests: list[dict], timeline: list[dict] | None = None):
+def _wire(
+    monkeypatch,
+    review_requests: list[dict],
+    timeline: list[dict] | None = None,
+    head_ref: str = "issues/558/work",
+):
     # The former per-gather ambient `gh repo view` shellout is DELETED (WS02):
     # any call to it from the fetch path is a regression and fails the test.
     monkeypatch.setattr(
@@ -73,6 +78,7 @@ def _wire(monkeypatch, review_requests: list[dict], timeline: list[dict] | None 
             # no longer asks for the field gh renders wrong for Bots).
             "number": 558,
             "headRefOid": HEAD,
+            "headRefName": head_ref,
             "isDraft": True,
             "mergeable": "MERGEABLE",
             "mergeStateStatus": "BLOCKED",
@@ -186,15 +192,18 @@ def _reviews_page(
     head: str = HEAD,
     *,
     is_draft: bool = False,
+    head_ref: str = "issues/558/work",
 ) -> dict:
     # The light query now selects the full PR core (number/isDraft/baseRefName/
     # mergeStateStatus) alongside the head sha, so the core rides on the ONE call
-    # already in flight and `gather_reviews` no longer hardcodes `is_draft`.
+    # already in flight and `gather_reviews` no longer hardcodes `is_draft` —
+    # plus headRefName, feeding the ADR-0032 epic/ws derivation at the seam.
     return {
         "repository": {
             "pullRequest": {
                 "number": 558,
                 "headRefOid": head,
+                "headRefName": head_ref,
                 "baseRefName": "main",
                 "isDraft": is_draft,
                 "mergeStateStatus": "CLEAN",
@@ -286,6 +295,91 @@ def test_gather_reviews_threads_the_rerun_policy(monkeypatch):
     ctx = fetch.gather_reviews(TARGET, roster)
     assert ctx.roster.entry("copilot").rerun is True
     assert CopilotAdapter().detect(ctx) is ReviewLifecycle.REQUESTED
+
+
+# --- epic/ws binding at the fetch seam (LOG04-WS01 / ADR-0032) ---------------
+
+
+def test_gather_reviews_binds_epic_ws_from_a_namespaced_head_branch(monkeypatch):
+    # The PR verbs' per-operation binding: a slash-namespaced head (ADR-0016)
+    # derives epic + ws (int) and binds them at the SAME seam as pr/repo, so
+    # every subsequent record — the request service's review.requested event
+    # included — carries them.
+    from shipit import logcontext
+
+    monkeypatch.setattr(
+        fetch.gh,
+        "graphql",
+        lambda query, **vars: _reviews_page([], [], head_ref="RVW01/WS02"),
+    )
+    fetch.gather_reviews(TARGET, default_roster())
+    bound = logcontext.bound()
+    assert bound["pr"] == TARGET.number
+    assert bound["epic"] == "RVW01"
+    assert bound["ws"] == 2  # the int, never the WS02 display form
+
+
+def test_gather_reviews_binds_nothing_for_a_non_namespaced_head(monkeypatch):
+    # Absent keys stay absent (present-when-bound): a standalone-issue head
+    # carries no epic/ws identity, so none is bound — never a placeholder.
+    from shipit import logcontext
+
+    monkeypatch.setattr(
+        fetch.gh,
+        "graphql",
+        lambda query, **vars: _reviews_page([], [], head_ref="issues/375/work"),
+    )
+    fetch.gather_reviews(TARGET, default_roster())
+    bound = logcontext.bound()
+    assert "epic" not in bound
+    assert "ws" not in bound
+
+
+def test_gather_binds_epic_ws_from_the_meta_head_branch(monkeypatch):
+    # The full gather binds the same way, off the pr_meta node's headRefName.
+    from shipit import logcontext
+
+    _wire(monkeypatch, [], head_ref="LOG04/umbrella")
+    fetch.gather(TARGET, default_roster())
+    bound = logcontext.bound()
+    assert bound["epic"] == "LOG04"
+    assert "ws" not in bound  # the umbrella carries the epic only
+
+
+def test_fetch_seam_head_branch_is_authoritative_over_stale_identity(monkeypatch):
+    # The head branch OWNS epic/ws at the fetch seam: a prior operation's
+    # identity, still bound in this process, must not leak into a later PR's
+    # records. `logcontext.bind` drops None (it can never clear a key), so the
+    # seam unbinds first — an umbrella head drops the stale ws, a non-namespaced
+    # head drops both. Regression for the stale-context leak (codex/Copilot).
+    from shipit import logcontext
+
+    # A previous WS02 operation left epic/ws bound in this process.
+    logcontext.bind(epic="RVW01", ws=2)
+
+    # Now the engine fetches an umbrella PR: epic is replaced, the stale ws is
+    # gone (the umbrella carries no Work Stream).
+    monkeypatch.setattr(
+        fetch.gh,
+        "graphql",
+        lambda query, **vars: _reviews_page([], [], head_ref="LOG04/umbrella"),
+    )
+    fetch.gather_reviews(TARGET, default_roster())
+    bound = logcontext.bound()
+    assert bound["epic"] == "LOG04"
+    assert "ws" not in bound
+
+    # And a standalone-issue PR fetched next clears BOTH — no placeholder, the
+    # earlier epic does not survive either.
+    monkeypatch.setattr(
+        fetch.gh,
+        "graphql",
+        lambda query, **vars: _reviews_page([], [], head_ref="issues/375/work"),
+    )
+    fetch.gather_reviews(TARGET, default_roster())
+    bound = logcontext.bound()
+    assert "epic" not in bound
+    assert "ws" not in bound
 
 
 # --- identity/decision fields die loudly at the wire boundary (#330) --------
@@ -399,3 +493,75 @@ def test_commit_id_boundary_none_stays_none_and_present_is_validated():
     assert fetch._commit_id(HEAD) == Sha(HEAD)
     with pytest.raises(ValueError):
         fetch._commit_id("")
+
+
+# --- review.received: the gather is the first sight of a landed review ------
+# (LOG04-WS02 / ADR-0032). The engine never posts a remote reviewer's review,
+# so the FULL gather — the snapshot every `pr status` / `pr next` decision
+# reads — is the strongest witnessing seam there is. First sight is per
+# process (`events.emit_once`): one invocation gathers up to three times and
+# must tag each landed review exactly once; the record carries the review's
+# own identity flat, so a reader dedupes on data.
+
+
+def _wire_with_reviews(monkeypatch, reviews_json: list[dict]) -> None:
+    _wire(monkeypatch, [])
+    monkeypatch.setattr(
+        fetch.gh,
+        "rest",
+        lambda path, **kwargs: reviews_json if path.endswith("/reviews") else [],
+    )
+
+
+def _received_records(caplog):
+    import logging as _logging
+
+    from shipit import events
+
+    return [
+        r
+        for r in caplog.records
+        if getattr(r, events.EXTRA_KEY, None) == "review.received"
+        and r.levelno == _logging.INFO
+    ]
+
+
+def test_gather_tags_each_landed_review_once_per_process(monkeypatch, caplog):
+    import logging as _logging
+
+    _wire_with_reviews(
+        monkeypatch,
+        [
+            {"id": 11, "user": {"login": "Copilot"}, "state": "COMMENTED"},
+            {"id": 12, "user": {"login": "codex-bot"}, "state": "APPROVED"},
+        ],
+    )
+    with caplog.at_level(_logging.INFO, logger="shipit.prstate"):
+        fetch.gather(TARGET, default_roster())
+    tagged = _received_records(caplog)
+    assert {(r.reviewer, r.review_id, r.review_state) for r in tagged} == {
+        ("Copilot", 11, "COMMENTED"),
+        ("codex-bot", 12, "APPROVED"),
+    }
+    assert all(r.pr == TARGET.number for r in tagged)
+
+    # A re-gather in the same process (pr next gathers again for the guarded
+    # flip) re-reads the same reviews — NOT a new milestone, nothing re-tagged.
+    caplog.clear()
+    with caplog.at_level(_logging.INFO, logger="shipit.prstate"):
+        fetch.gather(TARGET, default_roster())
+    assert not _received_records(caplog)
+
+
+def test_gather_does_not_sight_a_pending_review(monkeypatch, caplog):
+    import logging as _logging
+
+    # A PENDING review is an unsubmitted draft — it has not LANDED, so the
+    # trail records nothing for it.
+    _wire_with_reviews(
+        monkeypatch,
+        [{"id": 13, "user": {"login": "human"}, "state": "PENDING"}],
+    )
+    with caplog.at_level(_logging.INFO, logger="shipit.prstate"):
+        fetch.gather(TARGET, default_roster())
+    assert not _received_records(caplog)

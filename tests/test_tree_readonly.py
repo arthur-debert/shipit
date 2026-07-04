@@ -442,3 +442,30 @@ def test_case_divergent_sources_share_one_review_tree(tmp_path):
     b = readonly_plan(repo=REPO, branch="feat/x", root=tmp_path)
     assert a.dir == b.dir
     assert a.dir.parent == tmp_path / "acme" / "widget" / "review"
+
+
+def test_create_readonly_fresh_clone_tags_tree_created_reuse_does_not(
+    tmp_path, monkeypatch, caplog
+):
+    """A FRESH shared read-only Tree is a Tree birth — the `tree.created`
+    dev-cycle event (LOG04-WS02 / ADR-0032); the second reviewer's REUSE
+    created nothing and tags nothing."""
+    import logging
+
+    from shipit import events
+
+    plan = readonly_plan(repo=REPO, branch="feat/x", root=tmp_path / "trees")
+    _mock_git_boundary(monkeypatch, files={"README.md": "hi\n"})
+
+    with caplog.at_level(logging.INFO, logger="shipit.tree"):
+        create_readonly(plan, source_repo="/ref", github_url="url")
+    assert [
+        getattr(r, events.EXTRA_KEY)
+        for r in caplog.records
+        if getattr(r, events.EXTRA_KEY, None)
+    ] == ["tree.created"]
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="shipit.tree"):
+        create_readonly(plan, source_repo="/ref", github_url="url")
+    assert not [r for r in caplog.records if getattr(r, events.EXTRA_KEY, None)]

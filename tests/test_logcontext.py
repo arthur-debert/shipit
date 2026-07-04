@@ -93,7 +93,7 @@ def test_unbound_keys_are_absent_not_null(tmp_path):
 
     (record,) = _records(tmp_path)
     assert record["pr"] == 7
-    for name in ("session", "tree", "run", "repo"):
+    for name in ("session", "tree", "run", "repo", "epic", "ws", "agent", "role"):
         assert name not in record
 
 
@@ -109,6 +109,56 @@ def test_unbind_removes_the_key_from_later_records(tmp_path):
     assert while_bound["pr"] == 7
     assert "pr" not in after  # absent again, not null
     assert after["repo"] == "acme/widget"  # the other key survives the unbind
+
+
+def test_cleared_suppresses_a_key_for_the_block_then_restores_it(tmp_path):
+    """The scoped inverse of ``scoped``: a key bound outside the block is absent
+    from records inside it, and its prior value is restored on exit."""
+    logsetup.configure_logging(env={}, repo=REPO, base_dir=tmp_path)
+    logcontext.bind(ws=3, epic="OLD01")
+
+    with logcontext.cleared("ws"):
+        _emit("inside")
+    _emit("after")
+
+    inside, after = _records(tmp_path)
+    assert "ws" not in inside  # absent for the block, not null
+    assert inside["epic"] == "OLD01"  # a key not named stays bound
+    assert after["ws"] == 3  # prior value restored on exit
+
+
+def test_cleared_of_an_unbound_key_is_a_noop_and_restores_nothing(tmp_path):
+    logsetup.configure_logging(env={}, repo=REPO, base_dir=tmp_path)
+    with logcontext.cleared("ws"):
+        pass
+    assert "ws" not in logcontext.bound()
+
+
+def test_cleared_restores_absence_when_the_block_binds_the_key(tmp_path):
+    """Regression (PR #391 review): ``cleared`` restores the ENTRY STATE, not
+    just entry values — a key unbound at entry that the block binds must come
+    back out unbound, exactly as ``scoped`` unwinds an in-block bind."""
+    logsetup.configure_logging(env={}, repo=REPO, base_dir=tmp_path)
+    with logcontext.cleared("ws"):
+        logcontext.bind(ws=9)
+        assert logcontext.bound()["ws"] == 9  # the in-block bind itself works
+    assert "ws" not in logcontext.bound()  # ...but does not leak past the block
+
+
+def test_cleared_in_block_rebind_still_restores_the_prior_value(tmp_path):
+    """The symmetric case: a key bound at entry, rebound inside the block, comes
+    back out with its ENTRY value — the in-block rebind does not survive."""
+    logsetup.configure_logging(env={}, repo=REPO, base_dir=tmp_path)
+    logcontext.bind(ws=3)
+    with logcontext.cleared("ws"):
+        logcontext.bind(ws=9)
+    assert logcontext.bound()["ws"] == 3
+
+
+def test_cleared_rejects_unknown_names():
+    with pytest.raises(ValueError, match="unknown domain key"):
+        with logcontext.cleared("wsss"):
+            pass
 
 
 def test_bind_drops_none_values():
@@ -201,9 +251,18 @@ def test_env_export_scrubs_inherited_ctx_vars_for_unbound_keys():
 
 def test_bind_from_env_round_trips_bound_keys_with_types():
     """The full seam: bind → export → (new process) rebind reproduces the SAME
-    context, ints included — the acceptance-criteria round-trip."""
+    context, ints included — the acceptance-criteria round-trip, extended to
+    the nine-key set (ADR-0032: epic/ws/agent/role join, ws int-typed)."""
     logcontext.bind(
-        session="work", tree="/trees/x", pr=231, run=555, repo="acme/widget"
+        session="work",
+        tree="/trees/x",
+        pr=231,
+        run=555,
+        repo="acme/widget",
+        epic="RVW01",
+        ws=1,
+        agent="a1b2c3",
+        role="implementer",
     )
     exported = logcontext.env_export({})
 
@@ -218,7 +277,26 @@ def test_bind_from_env_round_trips_bound_keys_with_types():
         "pr": 231,  # int again, not "231" — the jq contract survives the env
         "run": 555,
         "repo": "acme/widget",
+        "epic": "RVW01",
+        "ws": 1,  # int again: WS01 is rendering, the data is 1 (ADR-0032)
+        "agent": "a1b2c3",
+        "role": "implementer",
     }
+
+
+def test_ws_binds_and_records_as_int(tmp_path):
+    """`ws` joins the int-typed keys (ADR-0032): bound as an int, it lands on
+    the JSONL record as an int — `jq 'select(.ws==1)'` matches — and the
+    display form WS01 never appears as data."""
+    logsetup.configure_logging(env={}, repo=REPO, base_dir=tmp_path)
+    logcontext.bind(epic="LOG04", ws=1)
+
+    _emit("workstream record")
+
+    (record,) = _records(tmp_path)
+    assert record["epic"] == "LOG04"
+    assert record["ws"] == 1
+    assert logcontext.env_export({})["SHIPIT_LOG_CTX_WS"] == "1"
 
 
 def test_bind_from_env_ignores_absent_and_empty_vars():

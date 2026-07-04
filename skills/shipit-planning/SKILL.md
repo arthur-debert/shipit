@@ -34,6 +34,14 @@ Open discussion. Move from loose ideas to a structured, shared understanding of 
 
 Present a **high-level overview** of the feature — the shape of it, the major pieces, the approach. The user **oks it or requests changes**. Loop until they ok. Do not proceed to grilling until the overview is blessed.
 
+Once the overview is blessed, record the session's purpose in the dev-cycle log (best-effort — ADR-0032):
+
+```sh
+shipit log event session.intent --about "planning session: <feature name>"
+```
+
+If the command errors, continue — a skipped emission is a missing event, never a broken planning step. A later `session.intent` (e.g. restated when the grill starts) supersedes at read time.
+
 ### 3. Grill — `/shipit-grill-with-docs`
 
 Run `/shipit-grill-with-docs`: relentless one-question-at-a-time Q&A on the important decisions, challenged against `CONTEXT.md` and the existing domain model. It sharpens terminology and writes **ADRs** for the decisions that warrant them.

@@ -40,7 +40,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .. import config, execrun, git, logcontext, pixienv
+from .. import config, events, execrun, git, logcontext, pixienv
 from . import include, provision
 from .layout import TreeSpec, central_root, plan
 
@@ -168,7 +168,13 @@ def create(spec: TreeSpec, *, source_repo: str, github_url: str) -> Tree:
             raise
 
         duration_ms = _elapsed_ms(started)
-        logger.info(
+        # The birth milestone IS the `tree.created` dev-cycle event (ADR-0032,
+        # verb-witnessed): the same record as before, tagged — the scoped
+        # `tree`/`session` keys (and any spawn-seam epic/ws/agent/role bound by
+        # the caller) ride in via the pipeline's context-merge.
+        events.emit(
+            logger,
+            "tree.created",
             "tree created at %s (branch %s, base %s) in %dms",
             dest,
             tree_plan.branch,

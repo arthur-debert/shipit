@@ -9,8 +9,9 @@ through — and its refusal is the :class:`~shipit.prstate.flip.NotReady` domain
 exception, mapped to a clean ``error: …`` + exit 1 by the one
 :func:`~.._errors.cli_errors` shell. `--undo` reverts ready→draft and is ALWAYS
 allowed — sending a PR back to draft when a human asks for changes is never
-held; it goes straight to the gh adapter, whose boundary milestone is its
-durable record (ADR-0029).
+held; it goes through the engine's :func:`~shipit.prstate.flip.undo_flip`
+(LOG04-WS02), which performs the flag flip and emits the ``pr.unready``
+dev-cycle event with the head branch's ``epic``/``ws`` bound (ADR-0032).
 
 This module is ADR-0030 glue + renderers only: parse the shared PR-target
 primitive, resolve the typed target, call the domain flip, render the pure
@@ -21,12 +22,11 @@ from __future__ import annotations
 
 import click
 
-from ... import gh
 from ...gh import resolve_pr
 from ...identity import Repo
 from ...pr import PrId
 from ...prstate.errors import PrStateError
-from ...prstate.flip import NotReady, guarded_flip  # noqa: F401  (NotReady re-exported for callers/tests)
+from ...prstate.flip import NotReady, guarded_flip, undo_flip  # noqa: F401  (NotReady re-exported for callers/tests)
 from ...prstate.state import TaskStatus
 from .._context import ambient_identity
 from .._errors import cli_errors
@@ -70,9 +70,9 @@ def run(pr: int | None = None, *, undo: bool = False, repo: Repo | None = None) 
     if target is None:
         raise PrStateError("no PR for this branch — nothing to flip")
     if undo:
-        # Always allowed: revert ready→draft. No readiness hold; the adapter's
-        # boundary milestone is the durable record.
-        gh.pr_ready(target, undo=True)
+        # Always allowed: revert ready→draft — through the engine's undo seam,
+        # which flips the flag and emits the `pr.unready` event (ADR-0032).
+        undo_flip(target)
         emit(target, format_undone)
         return 0
     status = guarded_flip(target)

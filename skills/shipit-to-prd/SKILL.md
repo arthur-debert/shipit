@@ -24,6 +24,12 @@ Check with the user that these modules match their expectations. Check with the 
    - That is the whole output of this skill. Do NOT open an epic tracker issue here. The **epic GitHub issue is an execution tracker** — it summarizes the PRD and points to it plus the relevant ADRs — and it is created later, in `/shipit-to-issues` (the issue-planning leg), not by this skill.
    - The epic code (`THEME+NN`, e.g. `GPU02`) is assigned by the human, but it is used later in `/shipit-to-issues` when the epic issue is minted — not here.
 
+4. Once the PRD file is written, record the milestone in the dev-cycle log (best-effort — ADR-0032; if the command errors, continue — a skipped emission is a missing event, never a broken step):
+
+   ```sh
+   shipit log event planning.prd.written --about "PRD: docs/prd/<slug>.md"
+   ```
+
 <prd-template>
 
 ## Problem Statement

@@ -19,9 +19,9 @@ from __future__ import annotations
 
 import logging
 
-from .. import gh
+from .. import events, gh
 from ..pr import PrId
-from .fetch import gather
+from .fetch import bind_pr_identity, gather
 from .reviewers_config import load_roster
 from .roster import Roster
 from .state import TaskState, TaskStatus, evaluate
@@ -84,10 +84,41 @@ def guarded_flip(
         )
         raise NotReady(status)
     flip(pr)
-    logger.info(
+    # The performed flip IS the `pr.ready` dev-cycle event (ADR-0032,
+    # verb-witnessed): the guarded flip is the one place a draft→ready happens,
+    # so the milestone emits here — once per actual flip, never on a refusal.
+    # The epic/ws the head branch carries were bound at the re-gather's fetch
+    # seam and ride in via the pipeline.
+    events.emit(
+        logger,
+        "pr.ready",
         "pr#%s flipped draft→ready — %s",
         pr.number,
         status.next_action,
         extra={"pr": pr.number},
     )
     return status
+
+
+def undo_flip(pr: PrId, *, flip=gh.pr_ready, bind_identity=bind_pr_identity) -> None:
+    """Revert ready→draft — the flip's UNDO, always allowed, never guarded.
+
+    Sending a PR back to draft is a human pushing it back into the agent's
+    court, so no readiness hold applies. Promoted here (out of the `pr ready
+    --undo` verb glue) so the undo mirrors the flip: one engine seam performs
+    the act and leaves its durable twin — the ``pr.unready`` dev-cycle event
+    (ADR-0032), the guarded flip's ``pr.ready`` counterpart. The undo performs
+    no gather, so the per-operation ``epic``/``ws`` binding comes from
+    ``bind_identity`` (one light ``headRefName`` read through the one
+    branch-identity parser); ``flip`` / ``bind_identity`` are injected for
+    tests, defaulting to the real gh adapter + fetch seam.
+    """
+    bind_identity(pr)
+    flip(pr, undo=True)
+    events.emit(
+        logger,
+        "pr.unready",
+        "pr#%s reverted ready→draft — back in the agent's court",
+        pr.number,
+        extra={"pr": pr.number},
+    )

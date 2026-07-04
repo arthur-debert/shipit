@@ -81,7 +81,7 @@ from typing import Any
 import platformdirs
 import structlog
 
-from . import identity, logcontext, redact
+from . import events, identity, logcontext, redact
 from .identity import Repo
 
 #: The package logger every shipit module logs through (``logging.getLogger``
@@ -191,7 +191,11 @@ def _file_formatter() -> logging.Formatter:
     """The JSONL renderer for the file sink: one flat JSON object per record.
 
     ``event`` is renamed to ``msg`` (the contract's human-readable message
-    field), every value is forced to a JSON scalar
+    field) — and in the same step a dev-cycle event tag riding the record as
+    :data:`shipit.events.EXTRA_KEY` lands as the durable ``event`` field
+    (ADR-0032; ``EventRenamer``'s ``replace_by`` exists for exactly this
+    message-key/custom-``event`` swap, and handles the tag's absence — the
+    common case — gracefully). Every value is forced to a JSON scalar
     (:func:`_flatten_to_scalars` — flat fields, nothing nested, contract
     enforced rather than assumed), and unbound keys are simply absent.
     """
@@ -199,7 +203,7 @@ def _file_formatter() -> logging.Formatter:
         foreign_pre_chain=_PIPELINE,
         processors=[
             structlog.stdlib.ProcessorFormatter.remove_processors_meta,
-            structlog.processors.EventRenamer("msg"),
+            structlog.processors.EventRenamer("msg", replace_by=events.EXTRA_KEY),
             _flatten_to_scalars,
             structlog.processors.JSONRenderer(),
         ],
@@ -219,6 +223,11 @@ def _render_surface(
     level = str(event_dict.pop("level", "")).upper()
     name = event_dict.pop("logger", "")
     message = event_dict.pop("event", "")
+    # A dev-cycle event tag (ADR-0032) shows on the surfaces under its durable
+    # name too — the message key is free now, so the same swap the file sink's
+    # EventRenamer performs is one rename here.
+    if events.EXTRA_KEY in event_dict:
+        event_dict[events.RECORD_KEY] = event_dict.pop(events.EXTRA_KEY)
     event_dict.pop("ts", None)
     exception = event_dict.pop("exception", None)
     line = f"{level} {name}: {message}"
@@ -527,7 +536,22 @@ def configure_logging(
 
     # File sink — the durable per-repo record, attached when a target repo is
     # known (a param was injected, or the CLI resolved and passed one).
+    # Best-effort, like the step-summary sink above: an unopenable log path
+    # (read-only home, permissions) degrades to console-only rather than
+    # crashing the command — a logging glitch never blocks, and for the
+    # hook-witnessed tier (post-commit → `shipit log event`, LOG04/ADR-0032) a
+    # broken log path must never block git. The swallow is a
+    # degraded-but-continuing outcome → WARNING with the exception attached,
+    # per the fail-open canon.
     if repo is not None or base_dir is not None:
         if repo is None:
             repo = _current_repo()
-        logger.addHandler(build_file_handler(repo, base_dir=base_dir))
+        try:
+            logger.addHandler(build_file_handler(repo, base_dir=base_dir))
+        except OSError:
+            logger.warning(
+                "per-repo log file unavailable under %s; continuing without "
+                "the durable file sink",
+                resolve_log_dir(repo, base_dir=base_dir),
+                exc_info=True,
+            )

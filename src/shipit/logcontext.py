@@ -1,8 +1,9 @@
-"""Domain-key log context (ADR-0029) — bind correlation keys, carry them across processes.
+"""Domain-key log context (ADR-0029/0032) — bind correlation keys, carry them across processes.
 
 Correlation in shipit's durable JSONL record is **domain keys only** — the
 closed set :data:`DOMAIN_KEYS` (``session``, ``tree``, ``pr``, ``run``,
-``repo``) — never synthetic trace/span ids. A key binds via structlog's
+``repo``, plus the dev-cycle four ADR-0032 added: ``epic``, ``ws``, ``agent``,
+``role``) — never synthetic trace/span ids. A key binds via structlog's
 contextvars at the seam where its value becomes known — the CLI entry, a
 spawn/detach seam, or the moment a subsystem starts working on the noun (the
 PR-engine's fetch, the review service's detach; LOG02) — and from that point
@@ -36,9 +37,13 @@ from typing import Any
 
 import structlog
 
-#: The closed correlation-key set (ADR-0029). Agents slice the record by these
-#: nouns; anything else on a record is an event extra, not a correlation key.
-DOMAIN_KEYS = ("session", "tree", "pr", "run", "repo")
+#: The closed correlation-key set (ADR-0029, grown to nine by ADR-0032 / LOG04).
+#: Agents slice the record by these nouns; anything else on a record is an
+#: event extra, not a correlation key. The dev-cycle four: ``epic`` is the
+#: human-assigned code string (``RVW01``); ``ws`` is the Work Stream index as
+#: an **int** (``WS01`` is a display form, never data — it joins the int-typed
+#: set below); ``agent`` is the spawn id; ``role`` is the Role registry name.
+DOMAIN_KEYS = ("session", "tree", "pr", "run", "repo", "epic", "ws", "agent", "role")
 
 #: The env-var prefix a bound key exports under (``pr`` → ``SHIPIT_LOG_CTX_PR``),
 #: shared by the writer (:func:`env_export`) and the reader (:func:`bind_from_env`)
@@ -48,7 +53,9 @@ ENV_PREFIX = "SHIPIT_LOG_CTX_"
 #: The numeric domain keys. The environment carries only strings, so these are
 #: cast back to ``int`` on rebind — a record's ``pr`` must compare equal under
 #: ``jq 'select(.pr==231)'`` whether it was bound in-process or via a parent.
-_INT_KEYS = frozenset({"pr", "run"})
+#: ``ws`` joins them (ADR-0032): the Work Stream index is data as an int;
+#: ``WS01`` is rendering.
+_INT_KEYS = frozenset({"pr", "run", "ws"})
 
 
 def _check_names(names: Iterable[str]) -> None:
@@ -103,6 +110,35 @@ def unbind(*names: str) -> None:
     _check_names(names)
     if names:
         structlog.contextvars.unbind_contextvars(*names)
+
+
+@contextmanager
+def cleared(*names: str) -> Iterator[None]:
+    """Ensure domain keys are ABSENT for the duration of the block, then restore.
+
+    The scoped inverse of :func:`scoped`: where ``scoped`` binds a value local
+    to a block, this removes a key local to a block — every record emitted
+    inside carries it as absent (never ``None``), and the ENTRY STATE is
+    restored on exit: a key bound at entry gets its prior value back, and a key
+    unbound at entry comes back out unbound, even if the block bound it (the
+    same unwind contract as ``scoped`` — an in-block :func:`bind` of a named
+    key never leaks past the block). A seam needs this when the LOCAL truth is
+    that a key does not apply: an umbrella branch carries an epic but no Work
+    Stream, so it must suppress an env-propagated ``ws`` for its emission
+    rather than let a stale value fuse into a mixed identity. An unknown key
+    name raises :class:`ValueError`.
+    """
+    _check_names(names)
+    saved = {name: value for name, value in bound().items() if name in names}
+    unbind(*names)
+    try:
+        yield
+    finally:
+        # Restore ABSENCE too, not just values: unbind every named key again
+        # (dropping any in-block bind), then rebind only what entry saved.
+        unbind(*names)
+        if saved:
+            structlog.contextvars.bind_contextvars(**saved)
 
 
 def bound() -> dict[str, Any]:

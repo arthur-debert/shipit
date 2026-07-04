@@ -124,10 +124,17 @@ def test_sessionstart_malformed_payload_warns_with_exception_on_each_arm(
     monkeypatch, tmp_path, caplog
 ):
     # A malformed payload is swallowed INSIDE the checks, past the top-level
-    # stdin read: once per cwd fallback (the source-clone warning check and the
-    # liveness half each parse the payload independently) and once in the
-    # session-id fallback. The canon applies to every swallowing arm, so each
-    # of these inner swallows must be a WARNING with the exception attached too.
+    # stdin read. All 5 WARNINGs come from the shared PARSE-FALLBACK helpers
+    # (`_payload_cwd` / `_payload_session_id`), which log WARNING per the canon
+    # (a swallowed parse is a degraded-but-continuing outcome): three cwd
+    # fallbacks (the source-clone warning check, the liveness half, and the
+    # session.started event step — LOG04-WS02 — each parse the payload
+    # independently) plus two session-id fallbacks (the liveness half and the
+    # event step). The event step's OWN swallow arm is NOT among them: its
+    # emission failure is calibrated to DEBUG by design (advisory correlation,
+    # nothing durable degrades — pinned by
+    # test_session_started_emission_failure_is_fail_open) and does not fire
+    # here, since the emit itself succeeds on the fallback cwd.
     (tmp_path / ".git").mkdir()  # the cwd fallback must land in a clone shape
     monkeypatch.chdir(tmp_path)
     ancestry = {  # hook (300) → claude (100): the session-id arm is reached
@@ -145,6 +152,9 @@ def test_sessionstart_malformed_payload_warns_with_exception_on_each_arm(
         )
     assert rc == 0  # fail-open: the session start continues
     warnings = _records(caplog, logging.WARNING)
-    assert len(warnings) == 3, "every swallowed parse arm must produce a WARNING"
+    assert len(warnings) == 5, (
+        "exactly the five parse-fallback arms (3× cwd + 2× session-id) produce "
+        "a WARNING — the event step's own swallow is DEBUG by design"
+    )
     assert all(r.exc_info for r in warnings)
     assert not _records(caplog, logging.ERROR)

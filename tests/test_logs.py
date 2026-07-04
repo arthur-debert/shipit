@@ -75,6 +75,23 @@ def test_path_succeeds_even_when_log_absent(tmp_path, capsys):
     assert capsys.readouterr().out.strip().endswith("/o/r/shipit.log")
 
 
+def test_path_is_a_pure_locator_ignoring_reader_only_flags(tmp_path, capsys):
+    # --path prints the resolved path and exits before any reader-only
+    # validation, so combining it with a flag that would fail WHEN READING —
+    # `--session current` outside a session — still returns the path, not the
+    # usage error the reader would raise.
+    rc = logs.run(
+        "o/r",
+        path_only=True,
+        session="current",
+        base_dir=tmp_path,
+        current_repo=lambda: "x/y",
+        current_session=lambda: None,
+    )
+    assert rc == 0
+    assert capsys.readouterr().out.strip().endswith("/o/r/shipit.log")
+
+
 # --------------------------------------------------------------------------
 # Default view — path + the last N records, rendered for humans
 # --------------------------------------------------------------------------
@@ -278,6 +295,634 @@ def test_raw_follow_streams_pure_jsonl(tmp_path, capsys):
     # the stored JSONL verbatim.
     assert str(log) not in out
     assert [json.loads(line)["msg"] for line in out] == ["old", "streamed"]
+
+
+# --------------------------------------------------------------------------
+# --events / --pr — the LOG04 record filters (AND, before the tail count)
+# --------------------------------------------------------------------------
+
+
+def _fixture_log(tmp_path) -> "Path":
+    """A fixture JSONL log mixing plain records, event records, and PRs."""
+    log = tmp_path / "o" / "r" / "shipit.log"
+    log.parent.mkdir(parents=True)
+    log.write_text(
+        "\n".join(
+            [
+                _record("snapshot gathered", pr=231),
+                _record(
+                    "review request from copilot attached on pr#231 (verified)",
+                    pr=231,
+                    event="review.requested",
+                    reviewer="copilot",
+                ),
+                _record("tree created", tree="/trees/x"),
+                _record(
+                    "review in flight from codex on pr#7 (detached)",
+                    pr=7,
+                    event="review.requested",
+                    reviewer="codex",
+                ),
+                _record("plain mechanics", pr=7),
+            ]
+        )
+        + "\n"
+    )
+    return log
+
+
+def test_events_keeps_only_event_tagged_records(tmp_path, capsys):
+    _fixture_log(tmp_path)
+    rc = logs.run(
+        "o/r", events_only=True, base_dir=tmp_path, current_repo=lambda: "x/y"
+    )
+    assert rc == 0
+    out = capsys.readouterr().out.splitlines()
+    # Path header + exactly the two event records, in file order.
+    assert len(out) == 3
+    assert "review request from copilot" in out[1]
+    assert "review in flight from codex" in out[2]
+    assert "snapshot gathered" not in "\n".join(out)
+
+
+def test_pr_filter_keeps_only_that_prs_records(tmp_path, capsys):
+    _fixture_log(tmp_path)
+    rc = logs.run("o/r", pr=7, base_dir=tmp_path, current_repo=lambda: "x/y")
+    assert rc == 0
+    out = capsys.readouterr().out.splitlines()
+    assert len(out) == 3
+    assert "review in flight from codex" in out[1]
+    assert "plain mechanics" in out[2]
+    assert "231" not in "\n".join(out[1:])
+
+
+def test_events_and_pr_compose_as_and(tmp_path, capsys):
+    # The demo read: `shipit logs --events --pr 231` → that PR's milestones.
+    _fixture_log(tmp_path)
+    rc = logs.run(
+        "o/r", events_only=True, pr=231, base_dir=tmp_path, current_repo=lambda: "x/y"
+    )
+    assert rc == 0
+    out = capsys.readouterr().out.splitlines()
+    assert len(out) == 2
+    assert "review request from copilot" in out[1]
+    assert "[event=review.requested pr=231 reviewer=copilot]" in out[1]
+
+
+def test_filters_apply_before_the_tail_count(tmp_path, capsys):
+    # -n 1 --pr 231 means "the last record ABOUT pr 231", not "the last record,
+    # if it happens to match".
+    _fixture_log(tmp_path)
+    rc = logs.run("o/r", pr=231, tail=1, base_dir=tmp_path, current_repo=lambda: "x/y")
+    assert rc == 0
+    out = capsys.readouterr().out.splitlines()
+    assert len(out) == 2
+    assert "review request from copilot" in out[1]
+
+
+def test_filters_compose_with_raw(tmp_path, capsys):
+    # `shipit logs --events --raw | jq .` — stdout is exactly the matching
+    # stored lines, nothing else.
+    _fixture_log(tmp_path)
+    rc = logs.run(
+        "o/r", events_only=True, raw=True, base_dir=tmp_path, current_repo=lambda: "x/y"
+    )
+    assert rc == 0
+    out = capsys.readouterr().out.splitlines()
+    assert len(out) == 2
+    assert [json.loads(line)["event"] for line in out] == [
+        "review.requested",
+        "review.requested",
+    ]
+
+
+def test_filters_compose_with_follow(tmp_path, capsys):
+    # A followed stream applies the same filter to appended lines: only the
+    # matching record streams through, live.
+    log = _fixture_log(tmp_path)
+    appended = [
+        _record("noise while following", pr=231),
+        _record("pr#231 flipped ready", pr=231, event="pr.ready"),
+    ]
+
+    def fake_sleep(_interval: float) -> None:
+        if appended:
+            with log.open("a", encoding="utf-8") as fh:
+                fh.write(appended.pop(0) + "\n")
+        else:
+            raise KeyboardInterrupt
+
+    rc = logs.run(
+        "o/r",
+        follow=True,
+        events_only=True,
+        pr=231,
+        tail=-1,
+        base_dir=tmp_path,
+        current_repo=lambda: "o/r",
+        sleep=fake_sleep,
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "review request from copilot" in out  # the pre-follow matching tail
+    assert "flipped ready" in out  # the appended matching record
+    assert "noise while following" not in out
+    assert "codex" not in out  # pr 7's event fails the AND
+
+
+def test_follow_reassembles_a_torn_write_before_filtering(tmp_path, capsys):
+    # A concurrent write can be read mid-line, so readline() returns a fragment
+    # with no trailing newline. A field filter parses to select, so a naive read
+    # would drop the fragment AND its remainder (neither half is valid JSON) —
+    # losing the record permanently. The follow loop buffers until the newline
+    # lands, then judges the whole line. Regression for the torn-read drop (agy).
+    log = tmp_path / "o" / "r" / "shipit.log"
+    log.parent.mkdir(parents=True)
+    log.write_text(_record("pre", pr=231, event="pr.ready") + "\n")
+
+    whole = _record("torn but tagged", pr=231, event="pr.ready")
+    cut = len(whole) // 2
+    # Tick 1 writes the first half (no newline); tick 2 completes it.
+    fragments = [whole[:cut], whole[cut:] + "\n"]
+
+    def fake_sleep(_interval: float) -> None:
+        if fragments:
+            with log.open("a", encoding="utf-8") as fh:
+                fh.write(fragments.pop(0))
+        else:
+            raise KeyboardInterrupt
+
+    rc = logs.run(
+        "o/r",
+        follow=True,
+        events_only=True,
+        pr=231,
+        tail=-1,
+        base_dir=tmp_path,
+        current_repo=lambda: "o/r",
+        sleep=fake_sleep,
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    # The record survives being split across two reads under an active filter.
+    assert "torn but tagged" in out
+
+
+def test_follow_reassembles_a_torn_line_present_at_start(tmp_path, capsys):
+    # agy [ERROR]: the initial tail read must be buffer-aware too, not just the
+    # append loop. If the file ALREADY ends in a torn write (no newline) when
+    # follow opens, a naive `read().splitlines()` emits the head now, then the
+    # append loop reads the remainder and emits it — one record split into two.
+    # The initial read seeds the same `pending` buffer, so the halves reunite.
+    log = tmp_path / "o" / "r" / "shipit.log"
+    log.parent.mkdir(parents=True)
+    whole = _record("torn at start", pr=231, event="pr.ready")
+    cut = len(whole) // 2
+    # File opens with only the first half on disk (no trailing newline).
+    log.write_text(whole[:cut])
+    remainder = whole[cut:] + "\n"
+
+    def fake_sleep(_interval: float) -> None:
+        nonlocal remainder
+        if remainder:
+            with log.open("a", encoding="utf-8") as fh:
+                fh.write(remainder)
+            remainder = ""
+        else:
+            raise KeyboardInterrupt
+
+    rc = logs.run(
+        "o/r",
+        follow=True,
+        raw=True,
+        tail=-1,
+        base_dir=tmp_path,
+        current_repo=lambda: "o/r",
+        sleep=fake_sleep,
+    )
+    assert rc == 0
+    # Raw passthrough emits the record exactly once, whole — not head then tail.
+    assert capsys.readouterr().out.splitlines() == [whole]
+
+
+def test_active_filter_drops_malformed_lines_silently(tmp_path, capsys):
+    # A field filter cannot be evaluated on a torn line — under an active
+    # filter it is dropped in BOTH modes (no false positive, no stderr note),
+    # while the no-filter contracts (raw passthrough, rendered skip-note) are
+    # pinned by the earlier tests.
+    log = tmp_path / "o" / "r" / "shipit.log"
+    log.parent.mkdir(parents=True)
+    log.write_text("{ torn\n" + _record("tagged", event="pr.ready") + "\n")
+
+    rc = logs.run(
+        "o/r", events_only=True, raw=True, base_dir=tmp_path, current_repo=lambda: "x/y"
+    )
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert captured.out.splitlines() == [_record("tagged", event="pr.ready")]
+    assert captured.err == ""
+
+
+def test_cli_logs_help_shows_filter_flags(capsys):
+    rc = cli.main(["logs", "--help"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "--events" in out
+    assert "--pr" in out
+
+
+# --------------------------------------------------------------------------
+# Domain-key filters (LOG04-WS04) — session/epic/ws/agent/role, AND-composed
+# --------------------------------------------------------------------------
+
+
+def _domain_fixture_log(tmp_path) -> "Path":
+    """A fixture JSONL log spanning two sessions, two epics, three Work Streams."""
+    log = tmp_path / "o" / "r" / "shipit.log"
+    log.parent.mkdir(parents=True)
+    log.write_text(
+        "\n".join(
+            [
+                _record("session started", session="sess-1", event="session.started"),
+                _record(
+                    "implementer spawned",
+                    session="sess-1",
+                    epic="LOG04",
+                    ws=1,
+                    agent="run-a1",
+                    role="implementer",
+                    event="agent.spawned",
+                ),
+                _record("mechanics inside WS1", session="sess-1", epic="LOG04", ws=1),
+                _record(
+                    "review requested on pr#401",
+                    session="sess-1",
+                    epic="LOG04",
+                    ws=2,
+                    agent="run-b2",
+                    role="shepherd",
+                    pr=401,
+                    event="review.requested",
+                ),
+                _record(
+                    "other session's spawn",
+                    session="sess-2",
+                    epic="RVW01",
+                    ws=1,
+                    agent="run-c3",
+                    role="implementer",
+                    event="agent.spawned",
+                ),
+            ]
+        )
+        + "\n"
+    )
+    return log
+
+
+def test_epic_filter_keeps_only_that_epics_records(tmp_path, capsys):
+    _domain_fixture_log(tmp_path)
+    rc = logs.run("o/r", epic="LOG04", base_dir=tmp_path, current_repo=lambda: "x/y")
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "implementer spawned" in out
+    assert "mechanics inside WS1" in out
+    assert "review requested" in out
+    assert "other session's spawn" not in out
+    assert "session started" not in out  # no epic bound → cannot match
+
+
+def test_domain_filters_compose_as_and(tmp_path, capsys):
+    # The demo slice: `shipit logs --epic LOG04 --ws 1 --events` — one Work
+    # Stream's milestones, nothing else.
+    _domain_fixture_log(tmp_path)
+    rc = logs.run(
+        "o/r",
+        epic="LOG04",
+        ws=1,
+        events_only=True,
+        base_dir=tmp_path,
+        current_repo=lambda: "x/y",
+    )
+    assert rc == 0
+    out = capsys.readouterr().out.splitlines()
+    assert len(out) == 2  # path header + the one matching record
+    assert "implementer spawned" in out[1]
+
+
+def test_agent_and_role_filters_select_on_their_keys(tmp_path, capsys):
+    _domain_fixture_log(tmp_path)
+    rc = logs.run("o/r", agent="run-b2", base_dir=tmp_path, current_repo=lambda: "x/y")
+    assert rc == 0
+    assert "review requested" in capsys.readouterr().out
+
+    rc = logs.run(
+        "o/r", role="implementer", base_dir=tmp_path, current_repo=lambda: "x/y"
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "implementer spawned" in out
+    assert "other session's spawn" in out
+    assert "review requested" not in out
+
+
+def test_session_filter_slices_one_session(tmp_path, capsys):
+    _domain_fixture_log(tmp_path)
+    rc = logs.run(
+        "o/r", session="sess-2", base_dir=tmp_path, current_repo=lambda: "x/y"
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "other session's spawn" in out
+    assert "sess-1" not in out
+
+
+def test_ws_normalizes_from_all_three_input_forms(tmp_path, capsys):
+    # `1`, `01`, and `WS01` name the same Work Stream: the display form is
+    # never data (ADR-0032), so all three select the SAME int-typed records.
+    _domain_fixture_log(tmp_path)
+    outputs = []
+    for form in ("1", "01", "WS01"):
+        rc = logs.run(
+            "o/r", epic="LOG04", ws=form, base_dir=tmp_path, current_repo=lambda: "x/y"
+        )
+        assert rc == 0
+        outputs.append(capsys.readouterr().out)
+    assert outputs[0] == outputs[1] == outputs[2]
+    assert "mechanics inside WS1" in outputs[0]
+    assert "review requested" not in outputs[0]  # ws=2 fails the AND
+
+
+def test_bad_ws_form_is_a_usage_error(tmp_path, capsys):
+    for bad in ("WSx", "zero", "WS00", "0"):
+        rc = logs.run("o/r", ws=bad, base_dir=tmp_path, current_repo=lambda: "x/y")
+        assert rc == 2
+        assert "--ws" in capsys.readouterr().err
+
+
+def test_session_current_resolves_via_the_injected_boundary(tmp_path, capsys):
+    # `--session current` means "the session THIS process is in": the sentinel
+    # resolves through the one resolver (shipit.session.current — injected
+    # here) and then filters like any explicit id.
+    _domain_fixture_log(tmp_path)
+    rc = logs.run(
+        "o/r",
+        session="current",
+        base_dir=tmp_path,
+        current_repo=lambda: "x/y",
+        current_session=lambda: "sess-1",
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "session started" in out
+    assert "other session's spawn" not in out
+
+
+def test_session_current_outside_a_session_is_a_usage_error(tmp_path, capsys):
+    _domain_fixture_log(tmp_path)
+    rc = logs.run(
+        "o/r",
+        session="current",
+        base_dir=tmp_path,
+        current_repo=lambda: "x/y",
+        current_session=lambda: None,
+    )
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "--session current" in err
+    assert "SHIPIT_LOG_CTX_SESSION" in err
+
+
+def test_domain_filters_behave_identically_under_raw(tmp_path, capsys):
+    # Uniformity: --raw changes the output MODE, never the selection.
+    _domain_fixture_log(tmp_path)
+    rc = logs.run(
+        "o/r",
+        epic="LOG04",
+        ws="WS01",
+        raw=True,
+        base_dir=tmp_path,
+        current_repo=lambda: "x/y",
+    )
+    assert rc == 0
+    out = capsys.readouterr().out.splitlines()
+    assert [json.loads(line)["msg"] for line in out] == [
+        "implementer spawned",
+        "mechanics inside WS1",
+    ]
+
+
+def test_domain_filters_behave_identically_under_follow(tmp_path, capsys):
+    # A followed stream applies the same domain-key selection to appended lines.
+    log = _domain_fixture_log(tmp_path)
+    appended = [
+        _record("noise from another epic", session="sess-2", epic="RVW01", ws=1),
+        _record("late WS1 record", session="sess-1", epic="LOG04", ws=1),
+    ]
+
+    def fake_sleep(_interval: float) -> None:
+        if appended:
+            with log.open("a", encoding="utf-8") as fh:
+                fh.write(appended.pop(0) + "\n")
+        else:
+            raise KeyboardInterrupt
+
+    rc = logs.run(
+        "o/r",
+        follow=True,
+        epic="LOG04",
+        ws="01",
+        tail=-1,
+        base_dir=tmp_path,
+        current_repo=lambda: "o/r",
+        sleep=fake_sleep,
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "implementer spawned" in out  # the pre-follow matching tail
+    assert "late WS1 record" in out  # the appended matching record
+    assert "noise from another epic" not in out
+
+
+# --------------------------------------------------------------------------
+# --flow — the rendered session story (implies --events)
+# --------------------------------------------------------------------------
+
+
+def _flow_now():
+    from datetime import datetime, timezone
+
+    # 1h34m after the fixture records' shared ts (2026-07-02T12:00:00Z).
+    return datetime(2026, 7, 2, 13, 34, 0, tzinfo=timezone.utc)
+
+
+def test_flow_implies_events_and_renders_the_story(tmp_path, capsys):
+    _domain_fixture_log(tmp_path)
+    rc = logs.run(
+        "o/r",
+        flow=True,
+        session="sess-1",
+        base_dir=tmp_path,
+        current_repo=lambda: "x/y",
+        now=_flow_now,
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    # Event records only — --flow implied --events without it being asked for.
+    assert "mechanics inside WS1" not in out
+    # The story lines: EPIC-WSnn prefixes minted from the int domain keys,
+    # friendly relative times, no raw JSON and no path header.
+    assert "LOG04-WS01: implementer spawned" in out
+    assert "LOG04-WS02: review requested on pr#401" in out
+    assert "1h34m ago" in out
+    assert str(tmp_path) not in out
+    assert "{" not in out
+
+
+def test_flow_infers_the_theme_header_from_epics(tmp_path, capsys):
+    _domain_fixture_log(tmp_path)
+    rc = logs.run(
+        "o/r", flow=True, base_dir=tmp_path, current_repo=lambda: "x/y", now=_flow_now
+    )
+    assert rc == 0
+    out = capsys.readouterr().out.splitlines()
+    assert out[0] == "session on LOG04, RVW01"
+
+
+def test_flow_opens_with_the_session_intent_when_present(tmp_path, capsys):
+    log = tmp_path / "o" / "r" / "shipit.log"
+    log.parent.mkdir(parents=True)
+    log.write_text(
+        _record("tuning the review loop", session="s1", event="session.intent")
+        + "\n"
+        + _record("spawned", session="s1", epic="LOG04", ws=4, event="agent.spawned")
+        + "\n"
+    )
+    rc = logs.run(
+        "o/r", flow=True, base_dir=tmp_path, current_repo=lambda: "x/y", now=_flow_now
+    )
+    assert rc == 0
+    assert capsys.readouterr().out.splitlines()[0] == "tuning the review loop"
+
+
+def test_flow_hides_agent_ids_until_asked(tmp_path, capsys):
+    _domain_fixture_log(tmp_path)
+    rc = logs.run(
+        "o/r", flow=True, base_dir=tmp_path, current_repo=lambda: "x/y", now=_flow_now
+    )
+    assert rc == 0
+    assert "run-a1" not in capsys.readouterr().out
+
+    rc = logs.run(
+        "o/r",
+        flow=True,
+        show_agents=True,
+        base_dir=tmp_path,
+        current_repo=lambda: "x/y",
+        now=_flow_now,
+    )
+    assert rc == 0
+    assert "[agent=run-a1]" in capsys.readouterr().out
+
+
+def test_flow_skips_malformed_records_never_crashes(tmp_path, capsys):
+    # The reader resilience contract continues into the story view: a torn
+    # line has no fields to select on, so it drops silently (the flow filter
+    # is always active) and the view renders the survivors.
+    log = tmp_path / "o" / "r" / "shipit.log"
+    log.parent.mkdir(parents=True)
+    log.write_text(
+        "{ torn mid-write\n"
+        + '"a bare string"\n'
+        + _record("survivor", epic="LOG04", ws=4, event="pr.ready")
+        + "\n"
+    )
+    rc = logs.run(
+        "o/r", flow=True, base_dir=tmp_path, current_repo=lambda: "x/y", now=_flow_now
+    )
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "LOG04-WS04: survivor" in captured.out
+    assert "torn" not in captured.out
+    assert captured.err == ""
+
+
+def test_flow_applies_the_tail_count_to_the_filtered_records(tmp_path, capsys):
+    log = tmp_path / "o" / "r" / "shipit.log"
+    log.parent.mkdir(parents=True)
+    log.write_text(
+        "\n".join(
+            _record(f"milestone {i}", epic="LOG04", ws=4, event="pr.ready")
+            for i in range(5)
+        )
+        + "\n"
+    )
+    rc = logs.run(
+        "o/r",
+        flow=True,
+        tail=2,
+        base_dir=tmp_path,
+        current_repo=lambda: "x/y",
+        now=_flow_now,
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "milestone 4" in out
+    assert "milestone 3" in out
+    assert "milestone 2" not in out
+
+
+def test_flow_header_survives_a_tail_that_cuts_the_intent(tmp_path, capsys):
+    # The intent event is the OLDEST record; a tail that drops it from the body
+    # must still open the story on it — the header themes the whole session,
+    # only the body lines are tailed.
+    log = tmp_path / "o" / "r" / "shipit.log"
+    log.parent.mkdir(parents=True)
+    log.write_text(
+        _record("tuning the review loop", session="s1", event="session.intent")
+        + "\n"
+        + "\n".join(
+            _record(
+                f"milestone {i}", session="s1", epic="LOG04", ws=4, event="pr.ready"
+            )
+            for i in range(3)
+        )
+        + "\n"
+    )
+    rc = logs.run(
+        "o/r",
+        flow=True,
+        tail=2,
+        base_dir=tmp_path,
+        current_repo=lambda: "x/y",
+        now=_flow_now,
+    )
+    assert rc == 0
+    out = capsys.readouterr().out.splitlines()
+    assert out[0] == "tuning the review loop"  # header from the full session
+    body = "\n".join(out[1:])
+    assert "milestone 2" in body
+    assert "milestone 1" in body
+    assert "milestone 0" not in body  # tailed out of the body
+    assert "tuning the review loop" not in body  # intent lives only in the header
+
+
+def test_flow_refuses_raw_and_follow(tmp_path, capsys):
+    for kwargs in ({"raw": True}, {"follow": True}):
+        rc = logs.run(
+            "o/r", flow=True, base_dir=tmp_path, current_repo=lambda: "x/y", **kwargs
+        )
+        assert rc == 2
+        assert "--flow" in capsys.readouterr().err
+
+
+def test_cli_logs_help_shows_domain_key_and_flow_flags(capsys):
+    rc = cli.main(["logs", "--help"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    for flag in ("--session", "--epic", "--ws", "--agent", "--role", "--flow"):
+        assert flag in out
+    assert "--agent-ids" in out
 
 
 # --------------------------------------------------------------------------
