@@ -23,6 +23,15 @@ def test_template_is_cleaned():
     assert rule["parameters"]["required_status_checks"] == []
 
 
+def test_template_pins_automatic_copilot_review_off():
+    """RVW01 sole-requester drift protection (ADR-0031): the pull_request rule
+    explicitly pins automatic Copilot review off, so re-running gh-setup erases
+    any hand-enabled auto-review."""
+    tmpl = gh_setup.load_template()
+    rule = next(r for r in tmpl["rules"] if r["type"] == "pull_request")
+    assert rule["parameters"]["automatic_copilot_code_review_enabled"] is False
+
+
 def test_load_labels_full_set_with_colors():
     labels = gh_setup.load_labels()
     names = {label.name for label in labels}
@@ -55,6 +64,15 @@ def test_build_payload_injects_checks_only():
     # The template is not mutated (deepcopy).
     src_rule = next(r for r in tmpl["rules"] if r["type"] == "required_status_checks")
     assert src_rule["parameters"]["required_status_checks"] == []
+
+
+def test_build_payload_preserves_copilot_pin():
+    """Injecting required checks must not disturb the pull_request rule — the
+    automatic-Copilot-review pin survives into the built payload."""
+    tmpl = gh_setup.load_template()
+    body = gh_setup.build_payload(tmpl, ["app-ui / check"])
+    rule = next(r for r in body["rules"] if r["type"] == "pull_request")
+    assert rule["parameters"]["automatic_copilot_code_review_enabled"] is False
 
 
 def test_existing_ruleset_id():
