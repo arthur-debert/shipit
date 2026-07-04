@@ -34,6 +34,8 @@ from .readonly import remove_tree
 from .registry import TreeRecord
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from ..identity import Sha
 
 logger = logging.getLogger("shipit.tree")
@@ -117,7 +119,7 @@ def plan(
 
 
 def plan_fleet(
-    root: str, *, max_age_seconds: float = DEFAULT_MAX_AGE_SECONDS
+    root: str | Path, *, max_age_seconds: float = DEFAULT_MAX_AGE_SECONDS
 ) -> GcPlan:
     """Scan the central root and build the :class:`GcPlan` — the effectful gather.
 
