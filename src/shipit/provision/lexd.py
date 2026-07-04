@@ -174,8 +174,13 @@ def expected_sha(triple: str) -> str:
 #: ``lexd 0.18.2`` / ``lexd 0.18.2 (release)`` pass; a bare-substring near-miss
 #: (``lexd 0.18.25``, ``lexd 10.18.25``) does NOT. The trailing ``\b`` pins the
 #: token's right edge so a longer version that merely starts with the pin can't
-#: read as pinned; ``re.escape`` keeps the dotted pin from acting as a regex.
-_PINNED_RE = re.compile(rf"\blexd {re.escape(PIN)}\b")
+#: read as pinned; ``re.escape`` keeps the dotted pin from acting as a regex. The
+#: right edge is ``(?!\S)`` (whitespace or end-of-line) rather than ``\b``: a
+#: word boundary sits between ``2`` and a following ``-``/``+``, so ``\b`` would
+#: accept a pre-release/build-metadata build (``0.18.2-dev``, ``0.18.2+meta``) as
+#: the pinned release; requiring non-word-and-non-``-``/``+`` — i.e. whitespace or
+#: end — keeps the match to the exact release token.
+_PINNED_RE = re.compile(rf"\blexd {re.escape(PIN)}(?!\S)")
 
 
 def is_pinned(version_output: str | None) -> bool:

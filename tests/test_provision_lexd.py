@@ -97,6 +97,11 @@ def test_release_url_pins_tag_and_triple():
         # tightened token match rejects what a bare `PIN in output` accepted.
         (f"lexd {lexd.PIN}5", False),  # 0.18.25 starts with 0.18.2
         (f"lexd 1{lexd.PIN}5", False),  # 10.18.25 embeds 0.18.2
+        # A pre-release / build-metadata suffix is not the pinned release: the
+        # right-edge guard is whitespace-or-end, not a word boundary (which sits
+        # between the trailing digit and a `-`/`+`).
+        (f"lexd {lexd.PIN}-dev", False),
+        (f"lexd {lexd.PIN}+meta", False),
     ],
 )
 def test_is_pinned(output, pinned):
