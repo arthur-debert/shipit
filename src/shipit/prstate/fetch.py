@@ -35,6 +35,7 @@ from .model import (
     _HANDBUILT_REPO,
 )
 from .roster import Roster
+from .verdicts import load_verdicts
 
 #: The engine's logger — a child of the package ``shipit`` logger, shared with
 #: :mod:`shipit.prstate.state` so the fetch milestones and the evaluation
@@ -466,6 +467,13 @@ def gather(
         # threaded on so the engine ages the wait window off the snapshot, never
         # the clock (OBS04-WS03).
         requested_at=requested_at,
+        # The recorded finding verdicts (#423): read ONCE from the per-repo
+        # dev-cycle event log here at the build edge — the same place every
+        # other impurity (config, network, clock) lives — so the breaker and
+        # the classify gate consume verdicts off the snapshot, and EVERY
+        # evaluation path (`pr status`, `pr next`, the guarded flip's
+        # re-gather) sees the same record.
+        verdicts=load_verdicts(repo, pr.number),
         # Stamp "now" once, at fetch time. The engine NEVER calls a clock — it
         # reads this off the snapshot — so the wall-clock read lives here, at the
         # build edge, the same place every other impurity (config, network) does.
@@ -534,6 +542,7 @@ def context_from_raw(
     repo: Repo | None = None,
     roster: Roster | None = None,
     requested_at: dict[str, str] | None = None,
+    verdicts: dict[int, str] | None = None,
     now: datetime | None = None,
     sightings: events.Sightings | None = None,
 ) -> ReadinessView:
@@ -582,6 +591,10 @@ def context_from_raw(
         now=now,
         roster=roster if roster is not None else Roster(),
         requested_at=requested_at or {},
+        # The recorded finding verdicts (#423) — a fixture that omits them gets
+        # NO verdicts (every finding unclassified), the honest default: nothing
+        # auto-classifies.
+        verdicts=verdicts or {},
         sightings=sightings if sightings is not None else events.Sightings(),
     )
 

@@ -112,6 +112,7 @@ def test_the_starting_vocabulary_is_registered():
         "review.degraded",
         "round.detected",
         "breaker.fired",
+        "finding.classified",
         "pr.ready",
         "pr.unready",
         "planning.grill.started",

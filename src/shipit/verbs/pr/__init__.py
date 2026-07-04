@@ -43,3 +43,7 @@ from . import next_action, ready  # noqa: E402  (WS06)
 
 pr.add_command(next_action.cmd)
 pr.add_command(ready.cmd)
+from . import classify, push_gate  # noqa: E402  (#423)
+
+pr.add_command(classify.cmd)
+pr.add_command(push_gate.cmd)

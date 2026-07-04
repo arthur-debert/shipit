@@ -55,6 +55,13 @@ pre-push:
   commands:
     lint:
       run: pixi run -e lint lint
+    # The classification tripwire (#423): block the push while the branch's
+    # PR has unclassified findings in its latest review round — the same
+    # CLASSIFY message the `pr next`/`pr status` gate reports (that gate is
+    # the arbiter; this is the fail-fast act-time seam). The verb fails OPEN
+    # on any inability to read the PR state, so a gh outage never blocks git.
+    classify-gate:
+      run: pixi run -e lint shipit pr push-gate
 
 # Hook-witnessed dev-cycle tier (ADR-0032 / LOG04): POST-commit — the commit
 # exists and has a sha to record — emit `commit.created` into the durable
