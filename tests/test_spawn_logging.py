@@ -58,7 +58,7 @@ def _fake_create_readonly(monkeypatch, tree_dir: Path) -> None:
 
 
 def _launcher(*, returncode=0):
-    def runner(cmd, *, cwd, env):
+    def runner(cmd, *, cwd, env, timeout=None):
         return launch.LaunchResult(returncode=returncode, stdout="{}", stderr="boom")
 
     return runner
@@ -215,7 +215,7 @@ def test_tree_creation_failure_logs_error_with_the_exception(
 def test_launch_transport_failure_logs_error_with_the_exception(
     tmp_path, monkeypatch, caplog
 ):
-    def no_binary(cmd, *, cwd, env):
+    def no_binary(cmd, *, cwd, env, timeout=None):
         raise ExecError(["claude"], rc=None, stderr="not found", cause="missing-binary")
 
     with caplog.at_level(logging.DEBUG, logger="shipit.spawn"):
