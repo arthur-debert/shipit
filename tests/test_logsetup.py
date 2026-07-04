@@ -12,6 +12,7 @@ from __future__ import annotations
 import datetime
 import json
 import logging
+import os
 import tomllib
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -292,6 +293,28 @@ def test_configure_logging_attaches_one_file_handler(tmp_path):
     file_handlers = [h for h in logger.handlers if isinstance(h, RotatingFileHandler)]
     assert len(file_handlers) == 1
     assert logger.level == logging.DEBUG
+
+
+def test_configure_logging_survives_an_unopenable_file_sink(tmp_path):
+    """An unopenable per-repo log path degrades to console-only — never a
+    crash (LOG04/ADR-0032: a broken log path must never block a command, and
+    for the hook tier never block git). Same best-effort posture as the
+    step-summary sink."""
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        pytest.skip("permission bits do not bind as root")
+    read_only = tmp_path / "ro"
+    read_only.mkdir()
+    read_only.chmod(0o500)
+    try:
+        logsetup.configure_logging(
+            env={}, repo=repo_from_slug("o/r"), base_dir=read_only
+        )
+    finally:
+        read_only.chmod(0o700)
+    logger = logging.getLogger(logsetup.LOGGER_NAME)
+    assert not any(isinstance(h, RotatingFileHandler) for h in logger.handlers)
+    # The console surface is still wired — degraded, not dead.
+    assert any((h.name or "").startswith("shipit-") for h in logger.handlers)
 
 
 def test_configure_logging_is_idempotent(tmp_path):
