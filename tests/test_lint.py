@@ -86,6 +86,35 @@ def test_route_buckets_in_registry_order():
     assert py == ["a.py", "b.py"]
 
 
+def test_lex_projections_need_a_tracked_source():
+    """X.md is a projection ONLY when its X.lex sibling is tracked — an .md
+    with no source, or a .lex with no projection, changes nothing."""
+    assert lint.lex_projections(["a.md", "b.lex"]) == set()
+    assert lint.lex_projections(["a.md", "a.lex"]) == {"a.md"}
+    assert lint.lex_projections(["docs/dev/x.md", "docs/dev/x.lex", "docs/y.md"]) == {
+        "docs/dev/x.md"
+    }
+
+
+def test_route_skips_lex_projections():
+    """A tracked X.md with a tracked X.lex sibling is generated output, gated
+    at its source by the lexd leg — the markdown leg never lints it. This is
+    the consumer-generic rule that replaces per-projection repo-local
+    .markdownlintignore entries (ADP00-WS10, #436): the managed ignore file
+    stays managed-paths-only while any repo's projections are still skipped."""
+    files = [
+        "README.lex",
+        "README.md",
+        "docs/guide.lex",
+        "docs/guide.md",
+        "docs/manual.md",
+    ]
+    routed = dict((lang.name, paths) for lang, paths in lint.route(files))
+    assert routed["markdown"] == ["docs/manual.md"]
+    # The sources still route to the lexd leg — the projection is linted there.
+    assert routed["lex"] == ["README.lex", "docs/guide.lex"]
+
+
 # --------------------------------------------------------------------------
 # The registry / Tool.argv
 # --------------------------------------------------------------------------

@@ -239,13 +239,34 @@ def manifest_roots(paths: list[str], manifests: tuple[str, ...]) -> list[str]:
     return sorted(dirs)
 
 
+def lex_projections(paths: list[str]) -> set[str]:
+    """Tracked ``X.md`` files that are projections of a tracked ``X.lex`` source.
+
+    The ``.lex`` is the gated source (the lexd leg); the ``.md`` is generated
+    output carrying a "do not hand edit" preamble, so markdownlint's prose
+    rules over it are noise about the generator, not signal about a document
+    anyone edits. Pure (no I/O): "is a projection" is decided from the tracked
+    file list alone, so the rule is consumer-generic — no repo-local
+    ``.markdownlintignore`` entry per projection (ADP00-WS10, #436).
+    """
+    sources = {p for p in paths if p.endswith(".lex")}
+    return {p for p in paths if p.endswith(".md") and p[:-3] + ".lex" in sources}
+
+
 def route(
     paths: list[str], shebangs: dict[str, str | None] | None = None
 ) -> list[tuple[Lang, list[str]]]:
-    """Bucket paths by language, in registry order. Pure (no I/O)."""
+    """Bucket paths by language, in registry order. Pure (no I/O).
+
+    Generated lex projections never route to markdown: their ``.lex`` source
+    routes to the lexd leg instead (see :func:`lex_projections`).
+    """
     shebangs = shebangs or {}
+    projections = lex_projections(paths)
     buckets: dict[str, list[str]] = {}
     for path in paths:
+        if path in projections:
+            continue
         lang = lang_for(path, shebangs.get(path))
         if lang is not None:
             buckets.setdefault(lang.name, []).append(path)
