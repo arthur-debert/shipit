@@ -244,7 +244,7 @@ def test_packaged_lint_env_agrees_with_shipits_own_manifest():
     # Every packaged pin agrees with shipit's own default-env toolchain (where
     # shipit's hand-written lint environment gets its binaries, issue #210).
     for tool, pin in deps.items():
-        assert own["dependencies"][tool] == pin, (
+        assert own["dependencies"].get(tool) == pin, (
             f"{tool}: packaged pin {pin!r} != shipit's own {own['dependencies'].get(tool)!r}"
         )
     # ...and shipit's own lint feature carries the managed block verbatim.
