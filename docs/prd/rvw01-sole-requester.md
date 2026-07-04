@@ -24,10 +24,10 @@ the PR state engine through its reviewer adapter off the Roster (the **sole
 requester** rule, ADR-0031). Every GitHub-side auto-request for a required
 reviewer is switched off and kept off: the Copilot caller workflow is deleted
 and its removal carried across the portfolio by a new retired-files mechanism
-in `shipit install`; the managed branch-protection ruleset template explicitly
-pins automatic Copilot review off, so re-running `shipit gh-setup` erases any
-hand-enabled drift; the operator switches off the account-level auto-review
-setting once. Copilot then obeys the same Roster policy as everyone (`rerun`,
+in `shipit install`; the managed branch-protection ruleset template is amended
+to pin automatic Copilot review off (today it omits the parameter), so
+re-running `shipit gh-setup` erases any hand-enabled drift; the operator
+switches off the account-level auto-review setting once. Copilot then obeys the same Roster policy as everyone (`rerun`,
 wait window, rounds), and "request reviews" becomes one uniform loop with no
 per-reviewer folklore. The first request after PR-open moves to the
 implementer, who runs the engine's next-action verb once before handing back —
@@ -57,7 +57,7 @@ no latency, no new request path.
 7. As an operator, I want Copilot's re-review behavior to be a visible,
    per-repo Roster flag instead of invisible GitHub configuration, so that I
    can flip one config line to change it and read the config to know it.
-8. As an operator, I want this repo's Copilot set head-strict
+8. As an operator, I want this repo's Copilot to be set head-strict
    (`rerun = true`) for now, so that every push generates review traffic that
    exercises the round counter and the all-nitpick breaker while those rules
    are being tuned.

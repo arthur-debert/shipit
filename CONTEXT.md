@@ -114,8 +114,8 @@ off the **Roster**. No GitHub-side auto-request (an Actions workflow at
 required reviewer: a second requester produces review rounds the engine cannot
 count. An inherently auto-triggering reviewer (Gemini) may exist only as
 **best-effort** — outside the request system, its reviews never mint rounds.
-*Avoid*: requiring a reviewer the engine cannot request (that is the Copilot
-special case this rule kills).
+*Avoid*: a required reviewer with a second, GitHub-side requester (the Copilot
+special case this rule kills); requiring a reviewer the engine cannot request.
 
 **Required reviewer**:
 A reviewer in the **required set** — every one must be **settled** before a PR can be Ready.
