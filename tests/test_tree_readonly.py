@@ -416,7 +416,7 @@ def test_create_readonly_real_git_survives_a_commit_graph_bearing_reference(
     # objects and never reproduces the clone-time-checkout death.
     with caplog.at_level(logging.WARNING, logger="shipit.git"):
         tree = create_readonly(
-            plan, source_repo=str(reference), github_url=f"file://{remote}"
+            plan, source_repo=str(reference), github_url=remote.as_uri()
         )
     dest = Path(tree.path)
 

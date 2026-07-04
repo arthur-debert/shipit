@@ -268,7 +268,7 @@ def test_clone_dissociated_survives_a_commit_graph_bearing_reference(
     # path URL and dies with file:// on git 2.54).
     dest = tmp_path / "clone-under-test"
     with caplog.at_level(logging.WARNING, logger="shipit.git"):
-        git.clone_dissociated(f"file://{remote}", str(dest), reference=str(reference))
+        git.clone_dissociated(remote.as_uri(), str(dest), reference=str(reference))
 
     # A real, checked-out, independent clone came back...
     assert (dest / "README.md").read_text() == "hello tree\n"
