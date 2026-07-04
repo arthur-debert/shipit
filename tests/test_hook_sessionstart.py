@@ -553,6 +553,36 @@ def test_write_tree_cwd_exports_no_log_context(tmp_path, monkeypatch):
     assert not env_file.exists()
 
 
+def test_nested_ephemeral_dir_inside_a_tree_exports_no_log_context(
+    tmp_path, monkeypatch
+):
+    # Under the central root, parent segment IS "ephemeral", but the depth is
+    # wrong: a directory named ephemeral/ INSIDE a Tree's clone (a repo is free
+    # to contain one) must not mint a bogus session key — only the minted shape
+    # <root>/<org>/<repo>/ephemeral/<leaf> is a session Tree.
+    root = tmp_path / "trees"
+    nested = _ephemeral_tree(root) / "src" / "ephemeral" / "not-a-session"
+    nested.mkdir(parents=True)
+    monkeypatch.setenv(layout.CENTRAL_ROOT_ENV, str(root))
+    env_file = tmp_path / "claude-env"
+    code = _run_log_context(nested, env_file)
+    assert code == 0
+    assert not env_file.exists()
+
+
+def test_shallow_ephemeral_dir_exports_no_log_context(tmp_path, monkeypatch):
+    # Same discriminator, other direction: <root>/ephemeral/<x> is too shallow
+    # for the minted shape (no org/repo segments) — no session key.
+    root = tmp_path / "trees"
+    shallow = root / "ephemeral" / "not-a-session"
+    shallow.mkdir(parents=True)
+    monkeypatch.setenv(layout.CENTRAL_ROOT_ENV, str(root))
+    env_file = tmp_path / "claude-env"
+    code = _run_log_context(shallow, env_file)
+    assert code == 0
+    assert not env_file.exists()
+
+
 def test_log_context_lands_alongside_the_activation_exports(tmp_path, monkeypatch):
     # The issue's mechanism verbatim: the log-context lines ride the SAME env
     # file as the pixi activation, appended after it (run order), so one sourced

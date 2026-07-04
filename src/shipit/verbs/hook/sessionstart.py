@@ -300,17 +300,25 @@ def _write_log_context(raw: str, env) -> None:
 def _ephemeral_tree(cwd: Path) -> Path | None:
     """The RESOLVED ephemeral session-Tree dir when ``cwd`` is one, else ``None``.
 
-    The path IS the signal (ADR-0018/0027): an ephemeral Tree lives under the
-    central root with :data:`shipit.tree.layout.EPHEMERAL_KIND` as its leaf's
-    parent segment, and its leaf is the per-launch session id. Containment under
+    The path IS the signal (ADR-0018/0027): an ephemeral Tree lives at exactly
+    ``<root>/<org>/<repo>/ephemeral/<leaf>`` (the shape ``tree/create.py``
+    mints), and its leaf is the per-launch session id. Containment under
     :func:`shipit.tree.layout.central_root` is checked FIRST so a random
     directory that merely happens to sit in an ``ephemeral/`` folder never mints
     a bogus session key; both sides are resolved so a symlinked root (macOS
     ``/tmp`` → ``/private/tmp``) cannot split one dir into "inside" and
     "outside" spellings — the same discipline as :func:`_is_source_clone`.
+    Depth below the root is then pinned to the minted shape's four segments:
+    :func:`shipit.tree.layout.tree_kind` alone reads only the leaf's parent
+    segment, so a nested ``…/ephemeral/<x>`` dir INSIDE the root (e.g. a
+    directory named ``ephemeral`` inside a Tree's clone) would otherwise pass
+    the kind check and bind misleading log context.
     """
     resolved = cwd.resolve()
-    if not resolved.is_relative_to(layout.central_root().resolve()):
+    root = layout.central_root().resolve()
+    if not resolved.is_relative_to(root):
+        return None
+    if len(resolved.relative_to(root).parts) != 4:
         return None
     if layout.tree_kind(resolved) != layout.EPHEMERAL_KIND:
         return None
