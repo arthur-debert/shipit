@@ -501,8 +501,13 @@ agents-first). One processor pipeline in `logsetup` (context-merge → enrich �
 **redactor**) feeds every sink; only the final renderer differs — the file gets
 JSONL, the console/CI stderr surfaces stay human-formatted. `shipit logs` is its
 reader: the default view renders records legibly, `--raw` passes stored lines
-through for `jq`. The verb reads JSONL ONLY — hard cutover, no format sniffing;
-pre-cutover freeform files age out via rotation.
+through for `jq`, the **domain-key filters** (`--session <id|current>`,
+`--epic`, `--ws`, `--pr`, `--agent`, `--role`, plus `--events`) compose as AND
+and work uniformly with `--raw`/`--follow`/the tail count, and `--flow` renders
+the filtered **dev-cycle events** as the session story (`/shipit-session-status`
+wraps `--flow --session current` for the operator). The verb reads JSONL ONLY —
+hard cutover, no format sniffing; pre-cutover freeform files age out via
+rotation.
 *Avoid*: treating stderr as the record (it is the surface; the file is the
 record); nesting or an OTel log model (fields stay flat and top-level).
 

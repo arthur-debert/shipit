@@ -12,9 +12,9 @@ downstream (the reader selects on the ``event`` field's presence, never on a
 name list of its own).
 
 :func:`emit` is the one internal helper every witnessing verb calls
-(verb-witnessed tier; the hook- and skill-scripted tiers arrive via the
-``shipit log event`` verb in a later Work Stream — it will call this same
-helper). It logs at INFO on the CALLER's logger — the record stays attributed
+(verb-witnessed tier; the hook- and skill-scripted tiers enter through the
+constrained ``shipit log event`` verb — :mod:`shipit.verbs.logevent` — which
+calls this same helper). It logs at INFO on the CALLER's logger — the record stays attributed
 to the subsystem that witnessed the milestone — and the bound domain keys land
 on it through the one pipeline like any other record, so an event is exactly as
 correlated as the moment it was witnessed: present-when-bound, absent keys stay
@@ -40,12 +40,6 @@ from __future__ import annotations
 import logging
 from collections.abc import Hashable, Mapping
 
-#: The closed dev-cycle event vocabulary (ADR-0032; PRD
-#: ``docs/prd/log04-dev-cycle-event-log.md``). Dot-namespaced
-#: ``<noun>.<milestone>`` names; the verb-witnessed tier emits them all as of
-#: LOG04-WS02 (the hook- and skill-scripted names — ``commit.created``, the
-#: planning family, ``session.intent`` — arrive with their tiers) — the
-#: registry is additive, and registering is not emitting.
 #: The flat field a dev-cycle event's name lands under on the durable JSONL
 #: record — what the reader (``shipit logs --events``) selects on.
 RECORD_KEY = "event"
@@ -58,6 +52,13 @@ RECORD_KEY = "event"
 #: :data:`RECORD_KEY` — structlog's own ``EventRenamer(replace_by=…)`` pattern.
 EXTRA_KEY = "_event"
 
+#: The closed dev-cycle event vocabulary (ADR-0032; PRD
+#: ``docs/prd/log04-dev-cycle-event-log.md``). Dot-namespaced
+#: ``<noun>.<milestone>`` names, all live: the shipit verbs emit the
+#: verb-witnessed names, the managed post-commit hook emits ``commit.created``,
+#: and the planning skills script ``session.intent`` + the ``planning.*``
+#: family through ``shipit log event``. The registry is additive — adding a
+#: name here is the whole downstream cost of a new event type.
 EVENT_NAMES = frozenset(
     {
         # session lifecycle

@@ -204,6 +204,13 @@ the durable code is one slim versioned package; and configuration is explicit.
     checks. The lint/fmt rules are fully standardized (rust, python, shell,
     markdown, yaml, json, go, lex); only `test` is consumer-owned.
 
+    The managed lefthook config carries one non-check hook alongside the
+    checks: post-commit runs `shipit log event commit.created --from-hook`, the
+    hook-witnessed tier of the dev-cycle event log (ADR-0032 — local commits
+    become visible in the flow view before any push). It is the checks'
+    opposite in failure posture: fail-OPEN, exit 0 on any emission failure,
+    because logging must never block or slow a commit.
+
     Writing `lefthook.yml` is not enough — a config without `lefthook install`
     leaves the checks dormant (empty `.git/hooks`, commits sail past lint). So
     activation is part of setup, never a remembered manual step: `shipit

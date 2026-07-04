@@ -5,7 +5,10 @@
 >
 > **Since superseded in part (LOG01, 2026-07):** the file sink's record format is now
 > **JSONL** (flat `ts`/`level`/`logger`/`msg` + domain keys) with central redaction and
-> a `shipit logs` reader — see `docs/prd/glassbox.md` and ADR-0029. The sink/path/level
+> a `shipit logs` reader — see `docs/prd/glassbox.md` and ADR-0029. Further extended
+> (LOG04, 2026-07): domain keys grew to nine and the reader gained domain-key filters
+> plus a `--flow` dev-cycle view — see `docs/prd/log04-dev-cycle-event-log.md` and
+> ADR-0032. The sink/path/level
 > decisions below still hold; this PRD is the historical record of the foundation.
 
 ## Problem Statement

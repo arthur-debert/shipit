@@ -31,7 +31,7 @@ A small set of utilities and agent harnesses to standardize work across my portf
 3.  Copies the skills.
 4.  Copies the lefthook config.
 5.  Stores a .shipit.toml file recording the shipit version (commit hash) that installed it and the per-file pristine hashes used for reconciliation.
-6.  Sets up git commit hooks to run lefthook on pre-commit and pre-push.
+6.  Sets up git hooks via lefthook: pre-commit and pre-push run the checks; post-commit emits the `commit.created` dev-cycle event into the durable log (fail-open — logging can never block a commit).
 7.  Adds to AGENTS.md a section on how the development workflow works (AGENTS.lex) and a short pixi command reference for shipit commands.
 
 This is the same command for fresh installs and updates.
