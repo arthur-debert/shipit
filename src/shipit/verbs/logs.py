@@ -302,11 +302,20 @@ def _follow(
         print(str(path), flush=True)
     fh = path.open("r", encoding="utf-8", errors="replace")
     try:
-        matching = [ln for ln in fh.read().splitlines() if record_filter.matches(ln)]
+        initial = fh.read()
+        # A torn final line (content with no trailing newline) is NOT a record
+        # yet: seed it into the SAME `pending` buffer the append loop uses so its
+        # remainder — read next once the writer finishes the line — reunites here,
+        # instead of emitting the head now and the tail later as two split records.
+        # Symmetric with the readline path below.
+        pending = ""
+        tail_lines = initial.splitlines()
+        if initial and not initial.endswith("\n"):
+            pending = tail_lines.pop()
+        matching = [ln for ln in tail_lines if record_filter.matches(ln)]
         for line in _last_n(matching, tail):
             _emit(line, raw=raw)
         # fh is now positioned at EOF; subsequent appends are picked up by readline.
-        pending = ""
         while True:
             chunk = fh.readline()
             if chunk:
