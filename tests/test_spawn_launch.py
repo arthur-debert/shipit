@@ -37,10 +37,11 @@ def test_reviewer_task_reads_the_diff_with_gh_pr_diff_not_a_hardcoded_base():
 def test_launch_routes_through_the_injected_runner():
     seen: dict = {}
 
-    def fake_runner(cmd, *, cwd, env):
+    def fake_runner(cmd, *, cwd, env, timeout=None):
         seen["cmd"] = cmd
         seen["cwd"] = cwd
         seen["env"] = env
+        seen["timeout"] = timeout
         return launch.LaunchResult(returncode=0, stdout="{}", stderr="")
 
     result = launch.launch(
@@ -54,6 +55,23 @@ def test_launch_routes_through_the_injected_runner():
     assert seen["cmd"] == ["claude", "-p", "t"]
     assert seen["cwd"] == "/trees/x"  # rooting is the OS process cwd = the Tree
     assert seen["env"] == {"PATH": "/bin"}
+    # With no explicit timeout the seam is UNBOUNDED (LAUNCH_TIMEOUT) — the
+    # write/spawn-Run posture: no bound may kill a long implementer Run.
+    assert seen["timeout"] is launch.LAUNCH_TIMEOUT
+
+
+def test_launch_threads_an_explicit_timeout_to_the_runner():
+    # The review producer passes the reviewer's --timeout as a real process deadline
+    # (#404); the launcher must SEE it so the seam can kill a stalled backend.
+    seen: dict = {}
+
+    def fake_runner(cmd, *, cwd, env, timeout=None):
+        seen["timeout"] = timeout
+        return launch.LaunchResult(0, "{}", "")
+
+    launch.launch(["codex"], cwd="/trees/x", env={}, timeout=600.0, runner=fake_runner)
+
+    assert seen["timeout"] == 600.0
 
 
 def test_launch_stringifies_a_path_cwd():
@@ -61,7 +79,7 @@ def test_launch_stringifies_a_path_cwd():
 
     seen: dict = {}
 
-    def fake_runner(cmd, *, cwd, env):
+    def fake_runner(cmd, *, cwd, env, timeout=None):
         seen["cwd"] = cwd
         return launch.LaunchResult(0, "", "")
 
@@ -103,6 +121,24 @@ def test_exec_runner_is_a_consumer_view_over_the_exec_runner(monkeypatch):
     assert "timeout" in kwargs
     assert kwargs["timeout"] is None
     assert launch.LAUNCH_TIMEOUT is None
+
+
+def test_exec_runner_passes_an_explicit_deadline_to_the_exec_runner(monkeypatch):
+    # #404: the review producer's deadline must reach `execrun.run` as the Exec's
+    # timeout, so a stalled review backend is actually killed at the seam.
+    captured: dict = {}
+
+    def fake_exec_run(argv, **kwargs):
+        captured["kwargs"] = kwargs
+        return execrun.ExecResult(
+            argv=tuple(argv), rc=0, stdout="out", stderr="", duration_ms=1
+        )
+
+    monkeypatch.setattr(launch.execrun, "run", fake_exec_run)
+
+    launch._exec_runner(["codex"], cwd="/x", env={}, timeout=600.0)
+
+    assert captured["kwargs"]["timeout"] == 600.0
 
 
 def test_exec_runner_returns_nonzero_without_raising(monkeypatch):

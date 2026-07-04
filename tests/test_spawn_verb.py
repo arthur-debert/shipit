@@ -67,10 +67,11 @@ def _launcher(*, returncode=0):
     """A fake launcher recording its call (never touches the Tree — the Run is faked)."""
     calls: dict = {}
 
-    def runner(cmd, *, cwd, env):
+    def runner(cmd, *, cwd, env, timeout=None):
         calls["cmd"] = cmd
         calls["cwd"] = cwd
         calls["env"] = env
+        calls["timeout"] = timeout
         return launch.LaunchResult(returncode=returncode, stdout="{}", stderr="boom")
 
     return runner, calls
@@ -131,6 +132,11 @@ def test_run_subagent_happy_path(tmp_path, monkeypatch, capsys):
     assert calls["cwd"] == str(tree_dir)
     assert calls["cmd"][calls["cmd"].index("--agent") + 1] == "implementer"
     assert "ANTHROPIC_API_KEY" not in calls["env"]
+    # #404: an implementer WRITE Run is legitimately unbounded (ADR-0019 §6) — the
+    # review-path deadline must NOT leak onto the spawn seam. The launcher gets the
+    # UNBOUNDED default (LAUNCH_TIMEOUT is None), so no bound can kill a long Run.
+    assert calls["timeout"] is launch.LAUNCH_TIMEOUT
+    assert launch.LAUNCH_TIMEOUT is None
     # The SPAWN SEAM for the domain-key context (LOG01-WS03, ADR-0029): the Tree's
     # identity binds in the parent AND rides the Run's env, so every `shipit`
     # command the Run executes inside the Tree rebinds it at its logging setup.
@@ -250,7 +256,7 @@ def test_run_subagent_missing_epic_branch_fails_closed_no_main_fallback(
 
     launched: dict = {}
 
-    def runner(cmd, *, cwd, env):
+    def runner(cmd, *, cwd, env, timeout=None):
         launched["called"] = True
         return launch.LaunchResult(0, "", "")
 
@@ -289,7 +295,7 @@ def test_run_subagent_invalid_epic_is_clean_exit_1(
 
     launched: dict = {}
 
-    def runner(cmd, *, cwd, env):
+    def runner(cmd, *, cwd, env, timeout=None):
         launched["called"] = True
         return launch.LaunchResult(0, "", "")
 
@@ -326,7 +332,7 @@ def test_run_subagent_reviewer_invalid_epic_is_clean_exit_1(
 
     launched: dict = {}
 
-    def runner(cmd, *, cwd, env):
+    def runner(cmd, *, cwd, env, timeout=None):
         launched["called"] = True
         return launch.LaunchResult(0, "", "")
 
@@ -353,7 +359,7 @@ def test_run_subagent_tree_creation_failure_fails_closed(tmp_path, monkeypatch, 
 
     launched: dict = {}
 
-    def runner(cmd, *, cwd, env):
+    def runner(cmd, *, cwd, env, timeout=None):
         launched["called"] = True
         return launch.LaunchResult(0, "", "")
 
@@ -448,7 +454,7 @@ def test_run_subagent_epic_shape_negative_issue_creates_no_tree(monkeypatch, cap
 
     launched: dict = {}
 
-    def runner(cmd, *, cwd, env):
+    def runner(cmd, *, cwd, env, timeout=None):
         launched["called"] = True
         return launch.LaunchResult(0, "", "")
 
@@ -565,7 +571,7 @@ def test_run_subagent_launch_execerror_is_clean_exit_1(tmp_path, monkeypatch, ca
     _patch_identity(monkeypatch)
     _fake_create(monkeypatch, tree_dir)
 
-    def runner(cmd, *, cwd, env):
+    def runner(cmd, *, cwd, env, timeout=None):
         raise execrun.ExecError(["claude"], rc=None, cause=execrun.CAUSE_MISSING_BINARY)
 
     rc = spawn_verb.run_subagent(
@@ -1014,7 +1020,7 @@ def test_run_subagent_reviewer_readonly_tree_failure_is_clean_exit_1(
     monkeypatch.setattr(spawn_verb, "create_readonly", boom)
     launched: dict = {}
 
-    def runner(cmd, *, cwd, env):
+    def runner(cmd, *, cwd, env, timeout=None):
         launched["called"] = True
         return launch.LaunchResult(0, "", "")
 

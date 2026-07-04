@@ -13,11 +13,18 @@ module holds everything that does NOT vary:
   (:func:`shipit.execrun.run`, ADR-0028) with the launch contract's own semantics
   pinned on top: ``check=False`` (a nonzero agent child is a normal lifecycle
   outcome the verb reports — never an :class:`~shipit.execrun.ExecError`, ADR-0019
-  §6), ``replace_env=True`` (the adapter's scrubbed env IS the child env), and an
-  **explicit** :data:`LAUNCH_TIMEOUT` override of ``None`` (an agent Run
-  legitimately runs far past the runner's 5-minute default; the default must never
-  kill one). In exchange, every launch is an Exec like any other: one structured
-  record with argv, cwd, rc, and ``duration_ms``.
+  §6), ``replace_env=True`` (the adapter's scrubbed env IS the child env), and a
+  per-call ``timeout`` defaulting to :data:`LAUNCH_TIMEOUT` (``None`` — an agent
+  **write** Run legitimately runs far past the runner's 5-minute default, so no
+  bound may kill it). One caller overrides that default: the review producer
+  (:mod:`shipit.review.producer`) passes the reviewer's configured ``--timeout``
+  as a real process deadline, because a review is a bounded, non-blocking degrade
+  (ADR-0006) — a stalled review backend must be killed and settled ``timed_out``,
+  not waited on forever (#404). Expiry surfaces as an
+  :class:`~shipit.execrun.ExecError` (``cause=CAUSE_TIMEOUT``, partial streams
+  carried) that the producer maps to its ``timed_out`` outcome. In exchange, every
+  launch is an Exec like any other: one structured record with argv, cwd, rc, and
+  ``duration_ms``.
 - :func:`write_task` / :func:`reviewer_task` — the English PR-contract prompts a Run is
   handed. These are backend-agnostic: they convey *what work to do and how to report
   it* (the PR is the result channel, ADR-0019 §6), not how any particular CLI is shaped.
@@ -69,14 +76,19 @@ from .. import execrun, pixienv
 #: already emits (ADR-0028), so nothing is duplicated here.
 logger = logging.getLogger("shipit.spawn")
 
-#: The launch path's per-Exec timeout: **explicitly** ``None`` (ADR-0028 allows it
-#: as a deliberate per-call choice, never the default). An agent Run is the ONE
-#: legitimate arbitrarily-long child shipit launches — an implementer Run works an
-#: entire issue end-to-end — so no bound the Exec runner could enforce here is safe:
-#: the runner's 5-minute :data:`shipit.execrun.DEFAULT_TIMEOUT` (or any "generous"
-#: multiple of it) must never be what kills a Run mid-work. The Run's lifecycle end
-#: is its process exit (ADR-0019 §6); backends that want a bound carry their own
-#: (e.g. ``agy --print-timeout``).
+#: The launch path's DEFAULT per-Exec timeout: **explicitly** ``None`` (ADR-0028
+#: allows it as a deliberate per-call choice, never the default). A **write** Run is
+#: the legitimate arbitrarily-long child shipit launches — an implementer Run works
+#: an entire issue end-to-end — so no bound the Exec runner could enforce over it is
+#: safe: the runner's 5-minute :data:`shipit.execrun.DEFAULT_TIMEOUT` (or any
+#: "generous" multiple of it) must never be what kills a Run mid-work. The Run's
+#: lifecycle end is its process exit (ADR-0019 §6). This is only the DEFAULT, though:
+#: :func:`launch` takes a per-call ``timeout``, and the review producer overrides it
+#: with the reviewer's ``--timeout`` as a real deadline (#404) — a review is a
+#: bounded, non-blocking degrade (ADR-0006), not an unbounded write Run, so a stalled
+#: review backend MUST be killed rather than waited on forever. A backend with its
+#: own native bound (``agy --print-timeout``) keeps it; the seam deadline is the
+#: backstop underneath it.
 LAUNCH_TIMEOUT: float | None = None
 
 
@@ -94,10 +106,10 @@ class LaunchResult:
     stderr: str
 
 
-#: The injectable subprocess seam: given the resolved ``cmd``/``cwd``/``env`` it runs
-#: the child and returns its :class:`LaunchResult`. Tests pass a fake so the launch
-#: contract is asserted WITHOUT spawning a real ``claude``; production uses
-#: :func:`_exec_runner`.
+#: The injectable subprocess seam: given the resolved ``cmd``/``cwd``/``env`` and the
+#: per-call ``timeout`` (the process deadline, ``None`` = unbounded) it runs the child
+#: and returns its :class:`LaunchResult`. Tests pass a fake so the launch contract is
+#: asserted WITHOUT spawning a real ``claude``; production uses :func:`_exec_runner`.
 Runner = Callable[..., LaunchResult]
 
 
@@ -106,6 +118,7 @@ def launch(
     *,
     cwd: str | Path,
     env: Mapping[str, str],
+    timeout: float | None = LAUNCH_TIMEOUT,
     runner: Runner | None = None,
 ) -> LaunchResult:
     """Run the resolved backend child rooted in the Tree and return its result.
@@ -117,13 +130,25 @@ def launch(
     per call; the process itself being rooted does not). ``runner`` is injectable so the
     contract is unit-tested without spawning a real child; it defaults to
     :func:`_exec_runner`, whose Exec pins ``stdin`` to ``/dev/null``.
+
+    ``timeout`` is the child's process deadline, defaulting to :data:`LAUNCH_TIMEOUT`
+    (``None`` — unbounded, the write/spawn-Run posture). The review producer passes the
+    reviewer's ``--timeout`` here so a stalled review backend is KILLED at the deadline
+    (#404): expiry raises :class:`~shipit.execrun.ExecError` (``cause=CAUSE_TIMEOUT``,
+    partial streams carried), which the producer turns into its ``timed_out`` outcome.
     """
     if runner is None:
         runner = _exec_runner
-    return runner(cmd, cwd=str(cwd), env=dict(env))
+    return runner(cmd, cwd=str(cwd), env=dict(env), timeout=timeout)
 
 
-def _exec_runner(cmd: list[str], *, cwd: str, env: dict[str, str]) -> LaunchResult:
+def _exec_runner(
+    cmd: list[str],
+    *,
+    cwd: str,
+    env: dict[str, str],
+    timeout: float | None = LAUNCH_TIMEOUT,
+) -> LaunchResult:
     """The real seam: one Exec through the runner (ADR-0028), as a consumer view.
 
     The launch contract's semantics ride on the runner's parameters, each one
@@ -137,8 +162,13 @@ def _exec_runner(cmd: list[str], *, cwd: str, env: dict[str, str]) -> LaunchResu
       adapter's ``child_env`` has already scrubbed the backend's auth-shadowing
       vars) rather than merging over ``os.environ``; a scrubbed key must not creep
       back in.
-    - ``timeout=LAUNCH_TIMEOUT`` — the **explicit** ``None`` override: the
-      runner's 5-minute default must never kill a legitimately long agent Run.
+    - ``timeout`` — the child's process deadline, defaulting to
+      :data:`LAUNCH_TIMEOUT` (``None``: the runner's 5-minute default must never
+      kill a legitimately long WRITE Run). The review producer passes a real
+      deadline instead (#404) so a stalled review backend is killed and settled
+      ``timed_out``; expiry raises :class:`~shipit.execrun.ExecError`
+      (``cause=CAUSE_TIMEOUT``) with the partial streams, unlike the transport
+      failures below.
     - stdin: the runner pins a no-``input`` Exec's stdin to ``/dev/null``
       (ADR-0020) — a TTY-less child otherwise waits ~3 s for stdin and warns
       (ADR-0019 §1).
@@ -153,7 +183,7 @@ def _exec_runner(cmd: list[str], *, cwd: str, env: dict[str, str]) -> LaunchResu
         env=env,
         replace_env=True,
         check=False,
-        timeout=LAUNCH_TIMEOUT,
+        timeout=timeout,
     )
     return LaunchResult(
         returncode=result.rc,

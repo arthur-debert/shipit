@@ -24,8 +24,11 @@ What this module owns (and ONLY this):
     and, for codex, write the JSON schema temp file so codex enforces the output
     shape natively (``--output-schema`` — the robustness win ADR-0020 keeps);
   * launch the child rooted in the Tree (shared :func:`shipit.spawn.launch.launch`,
-    stdin ``/dev/null``, auth-env scrubbed), CAPTURE its stdout, and parse it into a
-    review dict (:func:`shipit.review.backends.parse_review_output`).
+    stdin ``/dev/null``, auth-env scrubbed) under the reviewer's ``--timeout`` as a
+    real process DEADLINE (#404) — a review is a bounded, non-blocking degrade
+    (ADR-0006), so a stalled backend is KILLED at the seam and settled ``timed_out``,
+    never waited on forever — then CAPTURE its stdout and parse it into a review dict
+    (:func:`shipit.review.backends.parse_review_output`).
 
 It does NOT post, does NOT touch the check-run, and does NOT decide outcomes — the
 service layer (:mod:`shipit.review.service`) owns posting + the funnel breadcrumb,
@@ -44,13 +47,14 @@ import shutil
 import tempfile
 from dataclasses import dataclass
 
-from .. import gh, git
+from .. import execrun, gh, git
 from ..agent.backend import ANTIGRAVITY, CODEX, Backend
 from ..identity import Repo, repo_from_slug
 from ..spawn import launch
 from ..spawn.backends.antigravity import AntigravityAdapter
 from ..spawn.backends.base import BackendAdapter
 from ..spawn.backends.codex import CodexAdapter
+from ..tree.cleanup import parse_duration
 from ..tree.readonly import create_readonly, readonly_plan
 from .backends import BackendError, BackendUnavailable, parse_review_output
 from .backends.base import _TIMEOUT_MARKER
@@ -79,16 +83,28 @@ class _BackendSpec:
     describes the schema in prose in the prompt for a backend with no native
     ``--output-schema`` (agy); ``native_schema`` backends (codex) get the schema as
     a temp file passed to ``build_command``.
+
+    ``native_timeout`` says whether the backend enforces the ``--timeout`` itself
+    (agy's ``--print-timeout``) or relies SOLELY on the launch-seam deadline (codex,
+    which has no per-run timeout flag). It steers :func:`_seam_deadline`: a
+    native-timeout backend gets seam HEADROOM over its own flag so its native
+    (salvageable-output) path wins the race and the seam is a pure backstop; a
+    backend without one is killed by the seam at exactly the configured deadline
+    (#404).
     """
 
     schema_inline: bool
     native_schema: bool
+    native_timeout: bool
     adapter_factory: object  # Callable[[str, str], BackendAdapter]
 
 
 def _codex_adapter(model: str, timeout: str) -> BackendAdapter:
-    # codex has no per-run timeout flag (parity-only in the funnel config), so timeout
-    # is not threaded into the adapter — only the model is.
+    # codex has no per-run timeout flag, so the deadline is NOT threaded into the
+    # adapter (only the model is) — it is enforced at the launch SEAM instead, where
+    # `run_tree_review` passes it to `launch.launch(timeout=...)` as a hard process
+    # deadline (#404). `native_timeout=False` in the spec records that the seam is
+    # codex's SOLE timeout enforcement.
     del timeout
     return CodexAdapter(model=model)
 
@@ -109,14 +125,44 @@ _SPECS: dict[Backend, _BackendSpec] = {
     CODEX: _BackendSpec(
         schema_inline=False,
         native_schema=True,
+        native_timeout=False,
         adapter_factory=_codex_adapter,
     ),
     ANTIGRAVITY: _BackendSpec(
         schema_inline=True,
         native_schema=False,
+        native_timeout=True,
         adapter_factory=_agy_adapter,
     ),
 }
+
+
+#: Headroom (seconds) the launch-seam deadline adds OVER a backend's OWN native
+#: timeout flag (agy's ``--print-timeout``). agy's native timeout produces a
+#: truncated-but-SALVAGEABLE review (a partial JSON body + the timeout marker in
+#: stdout, #76); the seam deadline is a SIGKILL that loses that output. So a
+#: native-timeout backend's seam deadline is set past its own flag by this margin —
+#: comfortably more than agy's sub-second teardown, negligible against a 600s base —
+#: so its native path always fires first and the seam only bites if agy hangs past
+#: its OWN deadline. A backend with no native flag (codex) gets NO headroom: the seam
+#: IS its enforcement, at exactly the configured ``--timeout``.
+_SEAM_HEADROOM_SECONDS = 60.0
+
+
+def _seam_deadline(timeout: str, spec: _BackendSpec) -> float:
+    """The launch-seam process deadline (seconds) for a reviewer launch (#404).
+
+    Parses the ``<N>s`` ``timeout`` string (the canonical roster shape) into seconds
+    and, for a backend that carries its OWN native timeout flag
+    (``spec.native_timeout``), adds :data:`_SEAM_HEADROOM_SECONDS` so the native
+    (salvageable-output) path wins the race and the seam is a pure backstop. A backend
+    without a native flag (codex) is killed by the seam at exactly the configured
+    deadline. A malformed ``timeout`` raises ``ValueError`` from
+    :func:`shipit.tree.cleanup.parse_duration` — a loud failure the service maps to a
+    ``failed`` outcome, never a silent unbounded run.
+    """
+    base = parse_duration(timeout)
+    return base + _SEAM_HEADROOM_SECONDS if spec.native_timeout else base
 
 
 def run_tree_review(
@@ -195,9 +241,34 @@ def run_tree_review(
             tree.path,
             extra={"pr": ctx.number, "tree": tree.path, "reviewer": agent},
         )
-        result = launch.launch(
-            cmd, cwd=tree.path, env=adapter.child_env(), runner=launcher
-        )
+        try:
+            result = launch.launch(
+                cmd,
+                cwd=tree.path,
+                env=adapter.child_env(),
+                timeout=_seam_deadline(timeout, spec),
+                runner=launcher,
+            )
+        except execrun.ExecError as exc:
+            if exc.cause != execrun.CAUSE_TIMEOUT:
+                # A non-timeout transport failure (missing binary, bad cwd): leave it
+                # for the service's generic mapping to `failed` (ADR-0028 normalizes
+                # every OS-level launch error into ExecError; a nonzero CHILD is a
+                # LaunchResult, never raised, so this is always transport).
+                raise
+            # The seam killed a STALLED backend at the deadline (#404). Turn it into
+            # the funnel's `timed_out` terminal outcome: BackendError(timed_out=True)
+            # so the service settles `timed_out` (degraded, non-blocking, ADR-0006),
+            # carrying the partial stdout+stderr as `raw` so the #76 salvage can still
+            # surface whatever the backend had written before it hung.
+            raise BackendError(
+                f"{agent} timed out before returning a review — the launch seam "
+                f"killed it at {_seam_deadline(timeout, spec):.0f}s "
+                f"(configured --timeout {timeout}); try a faster model or a smaller "
+                "diff",
+                raw=f"{exc.stdout}\n{exc.stderr}".strip(),
+                timed_out=True,
+            ) from exc
         return _capture(agent, result)
     finally:
         if schema_path and os.path.exists(schema_path):

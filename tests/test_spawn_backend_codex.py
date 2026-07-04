@@ -195,7 +195,7 @@ def test_launch_roots_codex_in_the_tree_with_scrubbed_env():
     # the Tree and the scrubbed env, via the injectable runner — no real codex spawned.
     captured: dict = {}
 
-    def fake_runner(cmd, *, cwd, env):
+    def fake_runner(cmd, *, cwd, env, timeout=None):
         captured["cmd"] = cmd
         captured["cwd"] = cwd
         captured["env"] = env
