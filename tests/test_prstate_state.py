@@ -364,6 +364,40 @@ def test_reviews_pending_already_requested_says_wait(context):
     assert "RE-REQUEST" not in status.next_action
 
 
+# --- RVW01-WS01 regression pin: the engine is the SOLE requester (ADR-0031) --
+#
+# The repo cutover deletes the Actions caller workflow, so Copilot's
+# `review_requested` edge exists ONLY if the engine's request path places it.
+# Pin the two invariants the whole epic leans on (tests only, no engine change):
+# a required, never-requested Copilot lands in the engine's `to_request` set
+# (the structured field `pr next` routes on — not the prose), and under this
+# repo's `rerun = true` (head-strict) policy a Copilot review left on a stale
+# head is advised RE-REQUEST, re-surfacing in `to_request` for the new head.
+
+
+def test_engine_requests_never_requested_required_copilot(context):
+    # No caller workflow anymore: the ONLY source of Copilot's initial request
+    # is the engine's to-request set. A required, never-requested Copilot must
+    # appear there — structurally, not merely in the next-action prose.
+    status = evaluate(context("copilot_never_requested"))
+    assert status.state is TaskState.REVIEWS_PENDING
+    assert status.to_request == ["copilot"]
+
+
+def test_engine_rerequests_stale_head_copilot_under_rerun(context):
+    # This repo's roster policy (`copilot = { rerun = true }`): a push re-stales
+    # Copilot's earlier-head review, so the engine must both ADVISE the
+    # re-request in the prose and ROUTE to it via `to_request` — this is what
+    # generates the per-push review rounds the round counter and the
+    # all-nitpick breaker are exercised by.
+    ctx = context("copilot_stale_needs_rerequest")
+    ctx.roster = Roster((RosterEntry(name="copilot", required=True, rerun=True),))
+    status = evaluate(ctx)
+    assert status.state is TaskState.REVIEWS_PENDING
+    assert status.to_request == ["copilot"]
+    assert "RE-REQUEST for the current head" in status.next_action
+
+
 # --- failing checks outrank review requests (#352) ---------------------------
 #
 # Every reviewer is token-billed and a CI fix always pushes a new head, so a

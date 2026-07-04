@@ -16,12 +16,12 @@
 # `shipit gh-setup` resolves each and pushes it; a changed secret is re-set to its
 # new value. The same table feeds the cross-org workflow caller's `secrets:` block.
 [secrets]
-# RELEASE_TOKEN backs the Copilot-review caller (and, later, cross-repo release
-# pushes). Sourced from the local gh CLI token env var, which carries repo +
-# workflow scope. Optional: GH_TOKEN is not always exported (gh often keeps the
-# token in the keychain), and the repo secret is already set — so an absent
-# GH_TOKEN skips the re-set rather than aborting gh-setup; when present it rotates
-# the value. More entries land as shipit's release workflows arrive (Steps 4–6).
+# RELEASE_TOKEN backs cross-repo release pushes. Sourced from the local gh CLI
+# token env var, which carries repo + workflow scope. Optional: GH_TOKEN is not
+# always exported (gh often keeps the token in the keychain), and the repo
+# secret is already set — so an absent GH_TOKEN skips the re-set rather than
+# aborting gh-setup; when present it rotates the value. More entries land as
+# shipit's release workflows arrive (Steps 4–6).
 RELEASE_TOKEN = { env = "GH_TOKEN", optional = true }
 
 # Local-agent review App credentials (PRF01-WS07). The codex/agy review backends
@@ -44,10 +44,13 @@ AGY_REVIEW_APP_ID            = { doppler = "AGY_REVIEW_APP_ID" }
 # dogfoods its own local-review backends: `codex` and `agy` post as their App
 # bots and block the flip-to-Ready alongside Copilot. Review-once (rerun defaults
 # OFF): a token-billed local agent re-runs only on explicit opt-in, never per push.
+# Copilot opts IN to rerun (head-strict) HERE — every push re-stales its review,
+# generating per-push review rounds that exercise the round counter and the
+# all-nitpick breaker (RVW01-WS01). The SHIPPED default stays rerun = false.
 # The table-level key `round_cap` is RESERVED (not a reviewer): it sets the
 # review-round cap the engine's stopping breaker uses (default 6 when unset).
 [reviewers]
-copilot = {}
+copilot = { rerun = true }
 codex = {}
 agy = {}
 
@@ -95,7 +98,7 @@ simple-gal = [
 standout = [{ repo = "arthur-debert/standout", path = "standout" }]
 
 [shipit]
-version = "6f0f6531ac94cd91c915d640bb8ab64bfb0be7dc"
+version = "aa54970a5a4be5afc351e7208c1583001b808bf3"
 
 [managed]
 "skills/lex-primer/SKILL.md" = "sha256:ff616c1c447661298fb8e06a8a8a6ce60400d838c7c881b9e8bd526128e32901"
@@ -111,7 +114,7 @@ claude-start = "sha256:8a658d5d88269a0444e9843d5cddbf133e4ac9fb2e6862701980991bb
 "lefthook.yml" = "sha256:d64af3253189084f33e8495cc25d860294eafab55acc61dfe1f84801d22cb079"
 "pixi.toml#shipit-tasks" = "sha256:21737ae76129ac0518e2c9e2a647e4ece71f946a43565ddb2cc263d9b32d5268"
 ".claude/agents/explorer.md" = "sha256:10a15ec8980182d48db2e87d9f870210828e161b20d27bbd284852cb72b70eac"
-".claude/agents/implementer.md" = "sha256:a0770980171a97dd7dce49e53d0b90c69b357225dd350fe86cadb9d999d5ac46"
+".claude/agents/implementer.md" = "sha256:90031b9a515a44ca0ab9866138c561681be1344e94a77ba53c625fb71314ac31"
 ".claude/agents/reviewer.md" = "sha256:2eab753f05aa0d2060d40d9b588fd802671c2b767cc2975bc96971027ab585e1"
 ".claude/agents/shepherd.md" = "sha256:e9570b7cbbfa018f401729321fba672e8e31b635364f0595e4335cc28774953a"
 ".claude/settings.json#shipit-pretooluse-hook" = "sha256:e9dad00143c17cddb9a8ceef485a043f6d3ac4c02d06e0c8e9bff4305b2de1f8"

@@ -45,9 +45,10 @@ a reviewer the engine cannot request is the anti-pattern this decision kills.
 
 ## Consequences
 
-- PR-open no longer requests anyone. The implementer runs `shipit pr next <N>`
-  once after opening the draft PR — the first request lands with zero
-  coordinator latency, and the engine still decides *what* to request.
+- PR-open no longer requests anyone. The implementer runs `shipit pr next`
+  once after opening the draft PR (the PR number resolves from the current
+  branch) — the first request lands with zero coordinator latency, and the
+  engine still decides *what* to request.
 - Copilot now obeys `rerun` like every reviewer (shipped default `false` =
   review-once). This repo opts into `copilot = { rerun = true }` in
   `.shipit.toml` to generate per-push review traffic that exercises the round

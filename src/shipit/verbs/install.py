@@ -33,8 +33,19 @@ OVERRIDE/UPDATE split is the human signal either way: an UPDATE is safe to take
 blind; an OVERRIDE would discard a consumer edit, so it is surfaced loudly (a
 stderr warning in the working tree, the diff in the PR body).
 
-The pure decision logic (:func:`decide` / :func:`plan`) is kept out of the
-filesystem + gh boundary so it is unit-testable, the same split checks.py uses.
+Install also runs a RETIRED-FILES pass (docs/prd/rvw01-sole-requester.md,
+ADR-0031): a packaged manifest (``retired-files.toml``) lists paths shipit used
+to distribute that must no longer exist, each with every known pristine
+content hash. Three outcomes, same safety philosophy as the pristine-hash
+reconcile above — never destroy a local edit:
+
+  - absent                              -> NOOP   (already gone)
+  - present, hash in known pristines    -> DELETE (safe: it is shipit's own content)
+  - present, hash matches NO known one  -> KEEP   (locally modified: warn, keep)
+
+The pure decision logic (:func:`decide` / :func:`plan`, and
+:func:`decide_retired` / :func:`plan_retired`) is kept out of the filesystem +
+gh boundary so it is unit-testable, the same split checks.py uses.
 """
 
 from __future__ import annotations
@@ -44,10 +55,11 @@ import json
 import logging
 import sys
 import time
+import tomllib
 from collections.abc import Callable
 from dataclasses import dataclass
 from importlib import resources
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from .. import __version__, config, execrun, gh, git
 
@@ -149,6 +161,14 @@ ADD = "add"
 NOOP = "noop"
 UPDATE = "update"
 OVERRIDE = "override"
+
+# Retired-files outcomes (docs/prd/rvw01-sole-requester.md). NOOP is shared:
+# an absent retired file is the same nothing-to-do as a current managed unit.
+DELETE = "delete"
+KEEP = "keep"
+
+#: The packaged retired-files manifest (data — retiring a file is an entry, not code).
+RETIRED_MANIFEST = "retired-files.toml"
 
 
 # --------------------------------------------------------------------------
@@ -616,6 +636,117 @@ def activates_hooks(decisions: list[Decision]) -> bool:
 
 
 # --------------------------------------------------------------------------
+# Retired files (docs/prd/rvw01-sole-requester.md, ADR-0031)
+# --------------------------------------------------------------------------
+#
+# Files shipit used to distribute (or release-sync-era debris) are removed
+# portfolio-wide by the same mechanism that installs files — onboarding a repo
+# IS the cleanup. The packaged manifest lists each retired path with the set of
+# known pristine content hashes; the pure core below maps (actual hash, known
+# hashes) to delete / warn-and-keep / no-op; the thin IO pass in :func:`run`
+# applies the decisions and reports them alongside the managed-file results.
+
+
+@dataclass(frozen=True)
+class RetiredFile:
+    """One retired path with every known pristine version's ``sha256:`` hash."""
+
+    path: str  # path relative to the consumer root
+    pristine_hashes: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class RetiredDecision:
+    retired: RetiredFile
+    action: str  # DELETE | KEEP | NOOP
+    actual_hash: str | None
+
+
+def _retired_path(raw: str) -> str:
+    """Validate one manifest path: plain relative, inside the consumer root.
+
+    The manifest is packaged data, but every entry names a file a later unlink
+    will destroy — so a bad entry (absolute path, drive letter, ``..``
+    traversal) fails the load closed rather than reaching the IO pass.
+    """
+    posix = PurePosixPath(raw)
+    win = PureWindowsPath(raw)
+    if (
+        not raw
+        or posix.is_absolute()
+        or ".." in posix.parts
+        # Windows forms: `drive` rejects both absolute (`C:\x`) and
+        # drive-relative (`C:x`) paths, `root` rejects rooted `\x`, and the
+        # parts check catches backslash-separated `..` traversal.
+        or win.drive
+        or win.root
+        or ".." in win.parts
+    ):
+        raise ValueError(f"retired-files manifest: unsafe path {raw!r}")
+    return raw
+
+
+def load_retired() -> list[RetiredFile]:
+    """The packaged retired-files manifest, in manifest order."""
+    data = tomllib.loads(_data_bytes(RETIRED_MANIFEST).decode("utf-8"))
+    return [
+        RetiredFile(
+            path=_retired_path(str(e["path"])),
+            pristine_hashes=tuple(e["pristine"]),
+        )
+        for e in data.get("retired", [])
+    ]
+
+
+def decide_retired(*, actual_hash: str | None, pristine_hashes: tuple[str, ...]) -> str:
+    """The retired-files outcome for one path — the whole algorithm, three cases.
+
+    ``actual_hash is None`` means the file is absent (the same encoding
+    :func:`decide` uses for ``consumer_hash``). A pristine match — ANY of the
+    known historical versions — is safe to delete; content differing from every
+    known version is a local edit we never destroy (KEEP, warned); absent is done.
+    """
+    if actual_hash is None:
+        return NOOP
+    if actual_hash in pristine_hashes:
+        return DELETE
+    return KEEP
+
+
+def plan_retired(
+    retired: list[RetiredFile], actual_hashes: dict[str, str | None]
+) -> list[RetiredDecision]:
+    """Decide every retired path against the consumer's actual content hashes."""
+    decisions: list[RetiredDecision] = []
+    for r in retired:
+        actual = actual_hashes.get(r.path)
+        decisions.append(
+            RetiredDecision(
+                retired=r,
+                action=decide_retired(
+                    actual_hash=actual, pristine_hashes=r.pristine_hashes
+                ),
+                actual_hash=actual,
+            )
+        )
+    return decisions
+
+
+def retired_actual_hash(root: Path, retired: RetiredFile) -> str | None:
+    """The hash of a retired path's current content, or ``None`` if absent."""
+    dest = root / retired.path
+    if dest.is_symlink():
+        # ``is_file()`` follows symlinks, so a link whose TARGET matches a
+        # pristine hash would otherwise decide DELETE. A symlink is never
+        # shipit's pristine output; any non-``sha256:`` value can never match
+        # a pristine hash, so the link is kept and warned as locally modified.
+        return "symlink"
+    if not dest.is_file():
+        return None
+    return config.content_hash(dest.read_bytes())
+
+
+# --------------------------------------------------------------------------
 # Consumer-state I/O
 # --------------------------------------------------------------------------
 
@@ -753,6 +884,7 @@ def _pr_body(
     override_before: dict[str, str],
     hooks_activated: bool | None,
     seeded: list[str] | None = None,
+    retired: list[RetiredDecision] | None = None,
 ) -> str:
     """The PR body: what was added/updated, and every override surfaced with its diff.
 
@@ -798,6 +930,26 @@ def _pr_body(
             lines.append("```")
             lines.append("</details>")
             lines.append("")
+    retire_deletes = [d for d in (retired or []) if d.action == DELETE]
+    retire_keeps = [d for d in (retired or []) if d.action == KEEP]
+    if retire_deletes:
+        lines.append("### Retired files removed")
+        lines.append(
+            "shipit no longer distributes these files; each matched a known "
+            "pristine version, so this PR deletes them:"
+        )
+        lines += [f"- `{d.retired.path}`" for d in retire_deletes]
+        lines.append("")
+    if retire_keeps:
+        lines.append("### Retired files kept — locally modified")
+        lines.append(
+            "shipit no longer distributes these files, but their content "
+            "differs from every known pristine version, so they were NOT "
+            "deleted. Remove them yourself once the local edits are no "
+            "longer needed:"
+        )
+        lines += [f"- `{d.retired.path}`" for d in retire_keeps]
+        lines.append("")
     if seeded:
         lines.append("### Policy seeded")
         lines.append(
@@ -911,6 +1063,17 @@ def run(
     # ADD/UPDATE/OVERRIDE all write onto the branch; only NOOP writes nothing.
     writes = [d for d in decisions if d.action in (ADD, UPDATE, OVERRIDE)]
     overrides = [d for d in decisions if d.action == OVERRIDE]
+
+    # The retired-files pass: paths shipit used to distribute that must no
+    # longer exist. Decided from the packaged manifest against the consumer's
+    # actual content, applied (deletes only) alongside the managed writes.
+    retired = load_retired()
+    retired_decisions = plan_retired(
+        retired, {r.path: retired_actual_hash(root, r) for r in retired}
+    )
+    retire_deletes = [d for d in retired_decisions if d.action == DELETE]
+    retire_keeps = [d for d in retired_decisions if d.action == KEEP]
+
     # The reconcile plan is mechanics: the decided counts, before any write.
     logger.debug(
         "reconcile plan decided",
@@ -921,6 +1084,8 @@ def run(
             "overrides": len(overrides),
             "noops": sum(1 for d in decisions if d.action == NOOP),
             "seeds": len(seed_plan),
+            "retire_deletes": len(retire_deletes),
+            "retire_keeps": len(retire_keeps),
             "dry_run": dry_run,
         },
     )
@@ -931,21 +1096,48 @@ def run(
             print(f"  {d.action:8} {d.unit.dest}")
     for item in seed_plan:
         print(f"  {'seed':8} {item}")
+    # Retired-file outcomes, alongside the managed results: a pristine copy is
+    # deleted, a locally modified copy is kept LOUDLY (never destroy local
+    # edits), an absent path stays silent like any managed NOOP.
+    for d in retire_deletes:
+        print(f"  {DELETE:8} {d.retired.path} (retired)")
+    for d in retire_keeps:
+        print(f"  {KEEP:8} {d.retired.path} (retired; locally modified)")
+        print(
+            f"install: retired file kept: {d.retired.path} differs from every "
+            f"known pristine version, so it was NOT deleted — shipit no longer "
+            f"distributes this file; remove it yourself once your local edits "
+            f"are no longer needed",
+            file=sys.stderr,
+        )
+        logger.warning(
+            "retired file kept — locally modified",
+            extra={"root": str(root), "path": d.retired.path},
+        )
     # A seed-only change (managed set current, policy missing) still counts as a
     # write, so a re-install picks up policy a consumer never had — but stays a
-    # no-op once the policy is in place.
-    if not writes and not seed_plan:
-        print("  nothing to do — managed set is current.")
+    # no-op once the policy is in place. A pending retired delete likewise keeps
+    # the run a write, so cleanup lands even when the managed set is current.
+    if not writes and not seed_plan and not retire_deletes:
+        # A kept retired file was just warned about; "managed set is current"
+        # right after that would read as a contradiction, so say what we mean:
+        # there is nothing shipit will change on its own.
+        print(
+            "  nothing to do — no automated changes to apply."
+            if retire_keeps
+            else "  nothing to do — managed set is current."
+        )
         logger.debug(
             "managed set is current — nothing to do", extra={"root": str(root)}
         )
         return 0
 
     if dry_run:
-        # Dry-run must have NO side effects: no writes, no git, no PR.
+        # Dry-run must have NO side effects: no writes, no deletes, no git, no PR.
         print(
             f"  ({len(writes)} to write, {len(overrides)} override(s), "
-            f"{len(seed_plan)} policy seed(s)) — dry-run, nothing written"
+            f"{len(seed_plan)} policy seed(s), {len(retire_deletes)} retired "
+            f"delete(s)) — dry-run, nothing written"
         )
         return 0
 
@@ -958,6 +1150,11 @@ def run(
     # version drops out of the manifest rather than lingering as a stale key.
     for d in writes:
         _write_unit(root, d.unit)
+    # Apply the retired deletes: each decided DELETE re-verified nothing — the
+    # decision already proved the content is a known pristine version, so the
+    # unlink is the whole IO. KEEPs touch nothing (warned above).
+    for d in retire_deletes:
+        (root / d.retired.path).unlink()
     # Seed the consumer-owned policy BEFORE the manifest write, which preserves
     # `[secrets]`/`[reviewers]` textually while it re-stamps `[shipit]`/`[managed]`.
     if seed_plan:
@@ -974,6 +1171,8 @@ def run(
             "updates": sum(1 for d in writes if d.action == UPDATE),
             "overrides": len(overrides),
             "seeds": len(seed_plan),
+            "retire_deletes": len(retire_deletes),
+            "retire_keeps": len(retire_keeps),
         },
     )
 
@@ -1027,7 +1226,13 @@ def run(
                 extra={"root": str(root)},
             )
 
-    changed_paths = sorted({d.unit.dest for d in writes} | {config.CONFIG_NAME})
+    # Deleted retired paths join the commit set: `git add` on a removed path
+    # stages the deletion, so every commit mode carries the cleanup.
+    changed_paths = sorted(
+        {d.unit.dest for d in writes}
+        | {config.CONFIG_NAME}
+        | {d.retired.path for d in retire_deletes}
+    )
     cwd = str(root)
 
     if not (local or push or pr):
@@ -1133,7 +1338,13 @@ def run(
         url = gh.pr_create(
             head=INSTALL_BRANCH,
             title="shipit: install/update the managed set",
-            body=_pr_body(decisions, override_before, hooks_activated, seed_plan),
+            body=_pr_body(
+                decisions,
+                override_before,
+                hooks_activated,
+                seed_plan,
+                retired_decisions,
+            ),
             draft=True,
             cwd=cwd,
         )
