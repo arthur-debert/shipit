@@ -253,7 +253,10 @@ def apply(
     for d in plan.writes:
         write_unit(root, d.unit)
     for d in plan.retire_deletes:
-        (root / d.retired.path).unlink()
+        # missing_ok: the decision proved a pristine copy existed at gather
+        # time; if it vanished in the gather→apply window the goal state
+        # ("file absent") already holds, so the unlink stays idempotent.
+        (root / d.retired.path).unlink(missing_ok=True)
     cfg_path = root / config.CONFIG_NAME
     # Seed the consumer-owned policy BEFORE the manifest write, which preserves
     # `[secrets]`/`[reviewers]` textually while it re-stamps `[shipit]`/`[managed]`.
