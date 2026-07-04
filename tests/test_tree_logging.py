@@ -26,6 +26,9 @@ import pytest
 from shipit import execrun, git, logsetup
 from shipit.identity import Sha, repo_from_slug
 from shipit.tree import cleanup, provision
+from shipit.tree import gc as gc_mod
+from shipit.tree import registry as registry_mod
+from shipit.tree import removal as removal_mod
 from shipit.tree.create import create
 from shipit.tree.layout import TreeSpec
 from shipit.tree.readonly import create_readonly, readonly_plan, remove_tree
@@ -309,12 +312,16 @@ def test_remove_tree_noop_on_a_missing_path_records_nothing(tmp_path, caplog):
 def test_gc_sweep_logs_milestone_and_incomplete_view_warning(tmp_path, caplog):
     leaf = tmp_path / "gone"
     (leaf / ".git").mkdir(parents=True)
-    decision = cleanup.Cleanup(
-        removable=[_tree_record(str(leaf), mtime=0.0)], stale=[], keep=[]
+    plan = gc_mod.GcPlan(
+        partition=cleanup.Cleanup(
+            removable=[_tree_record(str(leaf), mtime=0.0)], stale=[], keep=[]
+        ),
+        total=3,
+        unknown=1,
     )
 
     with caplog.at_level(logging.INFO, logger="shipit.tree"):
-        tree_verb._emit_gc(decision, total=3, unknown=1)
+        gc_mod.sweep(plan)
 
     # The sweep milestone at INFO (the summary record, distinct from the
     # per-Tree removal records which carry a `tree` field).
@@ -328,18 +335,20 @@ def test_gc_sweep_logs_milestone_and_incomplete_view_warning(tmp_path, caplog):
 
 
 def test_gc_sweep_failure_is_a_warning_with_the_exception_and_continues(
-    tmp_path, monkeypatch, caplog
+    tmp_path, caplog
 ):
     record = _tree_record(str(tmp_path / "stuck"), mtime=0.0)
-    decision = cleanup.Cleanup(removable=[record], stale=[], keep=[])
-    monkeypatch.setattr(
-        tree_verb,
-        "remove_tree",
-        lambda path: (_ for _ in ()).throw(OSError("locked")),
+    plan = gc_mod.GcPlan(
+        partition=cleanup.Cleanup(removable=[record], stale=[], keep=[]),
+        total=1,
+        unknown=0,
     )
 
+    def boom(path):
+        raise OSError("locked")
+
     with caplog.at_level(logging.DEBUG, logger="shipit.tree"):
-        tree_verb._emit_gc(decision, total=1, unknown=0)
+        gc_mod.sweep(plan, remove=boom)
 
     # Degraded-but-continuing: WARNING, exception attached, Tree identified.
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
@@ -353,12 +362,12 @@ def test_remove_verb_failure_is_an_error_with_the_exception(
     (leaf / ".git").mkdir(parents=True)
     monkeypatch.setenv("SHIPIT_TREES_ROOT", str(tmp_path / "trees"))
     monkeypatch.setattr(
-        tree_verb,
+        removal_mod,
         "remove_tree",
         lambda path: (_ for _ in ()).throw(OSError("locked")),
     )
     monkeypatch.setattr(
-        tree_verb.registry,
+        registry_mod,
         "scan",
         lambda root: [_tree_record(str(leaf), mtime=0.0)],
     )
