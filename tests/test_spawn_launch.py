@@ -299,3 +299,6 @@ def test_write_task_instructs_a_draft_pr_and_to_stop():
     # `shipit pr next` run — and must NOT forbid requesting reviews.
     assert "shipit pr next" in task
     assert "request reviews" not in task.lower()
+    # ... while the review ROUNDS stay out of the Run's slice: the prohibition on
+    # addressing them is load-bearing text, pinned so an edit can't drop it silently.
+    assert "address review rounds" in task
