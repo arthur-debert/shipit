@@ -246,9 +246,13 @@ def apply(
 
     # Snapshot each override's consumer content BEFORE writing, so the PR diff
     # shows the real divergence rather than an empty diff against what we wrote.
-    override_before = {
-        d.unit.key: consumer_snapshot(root, d.unit) for d in plan.overrides
-    }
+    # Only MODE_PR renders these snapshots (into the draft PR body), so the
+    # other modes skip the reads entirely.
+    override_before = (
+        {d.unit.key: consumer_snapshot(root, d.unit) for d in plan.overrides}
+        if mode == MODE_PR
+        else {}
+    )
 
     for d in plan.writes:
         write_unit(root, d.unit)

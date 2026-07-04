@@ -161,7 +161,7 @@ def format_plan(plan: Plan, *, dry_run: bool = False) -> str:
 
     Retired-file outcomes render alongside the managed results: a pristine copy
     is deleted, a locally modified copy is kept LOUDLY (the stderr warning is
-    :func:`format_plan_warnings`'), an absent path stays silent like any
+    :func:`format_plan_warnings`), an absent path stays silent like any
     managed NOOP. A nothing-to-do plan says so — with the wording shifted when
     a kept retired file was just warned about, where "managed set is current"
     would read as a contradiction.
