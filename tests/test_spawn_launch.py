@@ -286,11 +286,16 @@ def test_write_task_names_the_role_issue_and_branch():
 
 
 def test_write_task_instructs_a_draft_pr_and_to_stop():
-    # WS02 (acceptance #156): the Run reports back through a DRAFT PR and STOPS at
-    # PR-open — never flips ready or merges. Both are load-bearing in the prompt.
+    # WS02 (acceptance #156): the Run reports back through a DRAFT PR and stops after
+    # one `shipit pr next` run — never flips ready or merges. All are load-bearing.
     task = launch.write_task(
         "implementer", issue=42, branch="X/WS01", base_branch="main"
     )
     assert "draft" in task.lower()
     assert "for #42" in task
     assert "stop" in task.lower()
+    # RVW01 (#383): the role contract has the Run place the initial review requests
+    # via ONE engine run after PR-open, so the task must mandate that single
+    # `shipit pr next` run — and must NOT forbid requesting reviews.
+    assert "shipit pr next" in task
+    assert "request reviews" not in task.lower()
