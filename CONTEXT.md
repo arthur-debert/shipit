@@ -507,7 +507,10 @@ pre-cutover freeform files age out via rotation.
 record); nesting or an OTel log model (fields stay flat and top-level).
 
 **Domain keys**:
-The CLOSED correlation vocabulary — `session`, `tree`, `pr`, `run`, `repo` —
+The CLOSED correlation vocabulary — `session`, `tree`, `pr`, `run`, `repo`,
+plus the dev-cycle four: `epic` (the epic code string), `ws` (the Work Stream
+index as an int — `WS01` is a display form, not data), `agent` (the spawn's
+agent id), `role` (the Role name) —
 bound via context (`logcontext`) at the seam where the value becomes known: the
 CLI entry, the spawn/detach seams, or the moment a subsystem starts working on
 the noun (the PR-engine's fetch; a Tree creation binds `tree` for exactly that
@@ -520,6 +523,25 @@ trace/span ids (ADR-0029).
 *Avoid*: ad-hoc extras as correlation keys (extras describe the event; domain
 keys join records); binding a synthetic `session` (the key binds only when a
 seam knows the real identity).
+
+**Dev-cycle event**:
+An ordinary INFO **file log** record that additionally carries an `event`
+field — a dot-namespaced name (`agent.spawned`, `review.requested`,
+`commit.created`, `breaker.fired`, `pr.ready`, `session.intent`,
+`planning.prd.written`, …) from a CLOSED, additive vocabulary (unknown names
+raise, same discipline as **domain keys**). Three emission tiers, strongest
+preferred: **verb-witnessed** (the verb doing the milestone emits — cannot be
+forgotten), **hook-witnessed** (a shipit-managed git hook emits — automatic,
+skippable only by a hook bypass), **skill-scripted** (a skill's instructions
+include the emission step — best-effort; how the planning cycle enters the
+record). Freeform narration is impossible on every tier: the emit path
+accepts only registered names. The flow of a session/epic/PR is the
+`event`-carrying records filtered by domain keys; rendering (friendly times,
+`RVW01-WS01:` prefixes) is the reader's job.
+*Avoid*: a custom log type, level, or second file for events (an event IS a
+log record); an open-ended "log anything" write verb (registered names only);
+events for milestones nothing witnesses (a bare `gh pr create` today — it
+needs a witnessing seam first).
 
 **Redactor**:
 The central masking processor (`shipit.redact`, ADR-0028/0029) in the one log
