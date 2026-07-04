@@ -281,6 +281,203 @@ def test_raw_follow_streams_pure_jsonl(tmp_path, capsys):
 
 
 # --------------------------------------------------------------------------
+# --events / --pr — the LOG04 record filters (AND, before the tail count)
+# --------------------------------------------------------------------------
+
+
+def _fixture_log(tmp_path) -> "Path":
+    """A fixture JSONL log mixing plain records, event records, and PRs."""
+    log = tmp_path / "o" / "r" / "shipit.log"
+    log.parent.mkdir(parents=True)
+    log.write_text(
+        "\n".join(
+            [
+                _record("snapshot gathered", pr=231),
+                _record(
+                    "review request from copilot attached on pr#231 (verified)",
+                    pr=231,
+                    event="review.requested",
+                    reviewer="copilot",
+                ),
+                _record("tree created", tree="/trees/x"),
+                _record(
+                    "review in flight from codex on pr#7 (detached)",
+                    pr=7,
+                    event="review.requested",
+                    reviewer="codex",
+                ),
+                _record("plain mechanics", pr=7),
+            ]
+        )
+        + "\n"
+    )
+    return log
+
+
+def test_events_keeps_only_event_tagged_records(tmp_path, capsys):
+    _fixture_log(tmp_path)
+    rc = logs.run(
+        "o/r", events_only=True, base_dir=tmp_path, current_repo=lambda: "x/y"
+    )
+    assert rc == 0
+    out = capsys.readouterr().out.splitlines()
+    # Path header + exactly the two event records, in file order.
+    assert len(out) == 3
+    assert "review request from copilot" in out[1]
+    assert "review in flight from codex" in out[2]
+    assert "snapshot gathered" not in "\n".join(out)
+
+
+def test_pr_filter_keeps_only_that_prs_records(tmp_path, capsys):
+    _fixture_log(tmp_path)
+    rc = logs.run("o/r", pr=7, base_dir=tmp_path, current_repo=lambda: "x/y")
+    assert rc == 0
+    out = capsys.readouterr().out.splitlines()
+    assert len(out) == 3
+    assert "review in flight from codex" in out[1]
+    assert "plain mechanics" in out[2]
+    assert "231" not in "\n".join(out[1:])
+
+
+def test_events_and_pr_compose_as_and(tmp_path, capsys):
+    # The demo read: `shipit logs --events --pr 231` → that PR's milestones.
+    _fixture_log(tmp_path)
+    rc = logs.run(
+        "o/r", events_only=True, pr=231, base_dir=tmp_path, current_repo=lambda: "x/y"
+    )
+    assert rc == 0
+    out = capsys.readouterr().out.splitlines()
+    assert len(out) == 2
+    assert "review request from copilot" in out[1]
+    assert "[event=review.requested pr=231 reviewer=copilot]" in out[1]
+
+
+def test_filters_apply_before_the_tail_count(tmp_path, capsys):
+    # -n 1 --pr 231 means "the last record ABOUT pr 231", not "the last record,
+    # if it happens to match".
+    _fixture_log(tmp_path)
+    rc = logs.run("o/r", pr=231, tail=1, base_dir=tmp_path, current_repo=lambda: "x/y")
+    assert rc == 0
+    out = capsys.readouterr().out.splitlines()
+    assert len(out) == 2
+    assert "review request from copilot" in out[1]
+
+
+def test_filters_compose_with_raw(tmp_path, capsys):
+    # `shipit logs --events --raw | jq .` — stdout is exactly the matching
+    # stored lines, nothing else.
+    _fixture_log(tmp_path)
+    rc = logs.run(
+        "o/r", events_only=True, raw=True, base_dir=tmp_path, current_repo=lambda: "x/y"
+    )
+    assert rc == 0
+    out = capsys.readouterr().out.splitlines()
+    assert len(out) == 2
+    assert [json.loads(line)["event"] for line in out] == [
+        "review.requested",
+        "review.requested",
+    ]
+
+
+def test_filters_compose_with_follow(tmp_path, capsys):
+    # A followed stream applies the same filter to appended lines: only the
+    # matching record streams through, live.
+    log = _fixture_log(tmp_path)
+    appended = [
+        _record("noise while following", pr=231),
+        _record("pr#231 flipped ready", pr=231, event="pr.ready"),
+    ]
+
+    def fake_sleep(_interval: float) -> None:
+        if appended:
+            with log.open("a", encoding="utf-8") as fh:
+                fh.write(appended.pop(0) + "\n")
+        else:
+            raise KeyboardInterrupt
+
+    rc = logs.run(
+        "o/r",
+        follow=True,
+        events_only=True,
+        pr=231,
+        tail=-1,
+        base_dir=tmp_path,
+        current_repo=lambda: "o/r",
+        sleep=fake_sleep,
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "review request from copilot" in out  # the pre-follow matching tail
+    assert "flipped ready" in out  # the appended matching record
+    assert "noise while following" not in out
+    assert "codex" not in out  # pr 7's event fails the AND
+
+
+def test_follow_reassembles_a_torn_write_before_filtering(tmp_path, capsys):
+    # A concurrent write can be read mid-line, so readline() returns a fragment
+    # with no trailing newline. A field filter parses to select, so a naive read
+    # would drop the fragment AND its remainder (neither half is valid JSON) —
+    # losing the record permanently. The follow loop buffers until the newline
+    # lands, then judges the whole line. Regression for the torn-read drop (agy).
+    log = tmp_path / "o" / "r" / "shipit.log"
+    log.parent.mkdir(parents=True)
+    log.write_text(_record("pre", pr=231, event="pr.ready") + "\n")
+
+    whole = _record("torn but tagged", pr=231, event="pr.ready")
+    cut = len(whole) // 2
+    # Tick 1 writes the first half (no newline); tick 2 completes it.
+    fragments = [whole[:cut], whole[cut:] + "\n"]
+
+    def fake_sleep(_interval: float) -> None:
+        if fragments:
+            with log.open("a", encoding="utf-8") as fh:
+                fh.write(fragments.pop(0))
+        else:
+            raise KeyboardInterrupt
+
+    rc = logs.run(
+        "o/r",
+        follow=True,
+        events_only=True,
+        pr=231,
+        tail=-1,
+        base_dir=tmp_path,
+        current_repo=lambda: "o/r",
+        sleep=fake_sleep,
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    # The record survives being split across two reads under an active filter.
+    assert "torn but tagged" in out
+
+
+def test_active_filter_drops_malformed_lines_silently(tmp_path, capsys):
+    # A field filter cannot be evaluated on a torn line — under an active
+    # filter it is dropped in BOTH modes (no false positive, no stderr note),
+    # while the no-filter contracts (raw passthrough, rendered skip-note) are
+    # pinned by the earlier tests.
+    log = tmp_path / "o" / "r" / "shipit.log"
+    log.parent.mkdir(parents=True)
+    log.write_text("{ torn\n" + _record("tagged", event="pr.ready") + "\n")
+
+    rc = logs.run(
+        "o/r", events_only=True, raw=True, base_dir=tmp_path, current_repo=lambda: "x/y"
+    )
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert captured.out.splitlines() == [_record("tagged", event="pr.ready")]
+    assert captured.err == ""
+
+
+def test_cli_logs_help_shows_filter_flags(capsys):
+    rc = cli.main(["logs", "--help"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "--events" in out
+    assert "--pr" in out
+
+
+# --------------------------------------------------------------------------
 # -f/--follow — stream appended lines live
 # --------------------------------------------------------------------------
 

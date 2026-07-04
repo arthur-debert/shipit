@@ -47,6 +47,7 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
+from .. import events
 from ..pr import PrId
 from . import fetch as _fetch
 from .model import ReviewLifecycle
@@ -142,18 +143,32 @@ def _record(result: RequestResult, pr: PrId, name: str, status: str) -> None:
     a dropped request is a WARNING — degraded, surfaced to the caller via the
     result's ``ok=False`` rather than an exception. Every record carries the
     flat ``pr``/``reviewer`` keys so the story stays jq-sliceable.
+
+    The two placed-request milestones ARE the ``review.requested`` dev-cycle
+    event (ADR-0032, verb-witnessed tier): one tagged record per reviewer whose
+    request actually took effect (edge verified, or the local review detached
+    in-flight), emitted through :func:`shipit.events.emit` so an unregistered
+    name can never ship. A dropped request stays an untagged WARNING — the
+    request never took effect, so the trail records no milestone for it — and
+    the deliberate non-acts stay plain DEBUG mechanics. The bound domain keys
+    (``pr``/``repo`` from the fetch seam, ``epic``/``ws`` where the head branch
+    is slash-namespaced) ride in via the pipeline's context-merge.
     """
     result.outcomes.append(ReviewerOutcome(name, status))
     extra = {"pr": pr.number, "reviewer": name}
     if status == "verified":
-        logger.info(
+        events.emit(
+            logger,
+            "review.requested",
             "review request from %s attached on pr#%s (verified)",
             name,
             pr.number,
             extra=extra,
         )
     elif status == "in_flight":
-        logger.info(
+        events.emit(
+            logger,
+            "review.requested",
             "review in flight from %s on pr#%s (detached)",
             name,
             pr.number,
