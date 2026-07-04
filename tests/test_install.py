@@ -22,6 +22,7 @@ import tomllib
 from pathlib import Path
 
 import pytest
+import yaml
 
 from shipit import config, execrun, gh, git
 from shipit.execrun import ExecError
@@ -271,6 +272,103 @@ def test_shipits_own_pixi_manifest_reconciles_to_noop():
     for key in (iunits.PIXI_KEY, iunits.PIXI_LINT_DEPS_KEY, iunits.PIXI_ENVS_KEY):
         unit = units[key]
         assert irec.consumer_hash(root, unit) == unit.desired_hash(), key
+
+
+# --------------------------------------------------------------------------
+# The ADP00 consumer-generic lefthook caller (docs/prd/adoption.md, #419) —
+# the managed variant works on a stock consumer right after install; shipit's
+# own repo-local legs live in a committed lefthook-local.yml (lefthook's
+# native config layering), never in the managed file.
+# --------------------------------------------------------------------------
+
+
+def _managed_lefthook() -> dict:
+    return yaml.safe_load(iunits.data_bytes("lefthook.yml"))
+
+
+def test_managed_lefthook_is_consumer_generic():
+    """Every hook leg of the managed caller runs through the pinned lint env
+    and invokes only the managed `lint` task or the shipit binary itself — no
+    shipit-repo-local scripts or paths (the stock-consumer guarantee, #419)."""
+    cfg = _managed_lefthook()
+    assert set(cfg) == {"pre-commit", "pre-push", "post-commit"}
+    for hook in cfg.values():
+        for cmd in hook["commands"].values():
+            run = cmd["run"]
+            # Everything rides the pinned lint env (never bare `pixi run`)...
+            assert run.startswith("pixi run -e lint ")
+            # ...and invokes the managed `lint` task or shipit itself — never
+            # a shell indirection into a repo-local script.
+            assert run.removeprefix("pixi run -e lint ").split()[0] in (
+                "lint",
+                "shipit",
+            )
+            assert "tools/" not in run and ".lex" not in run
+
+    # The exact legs: pre-commit lint (piped, priority 2 — the slot a local
+    # leg like shipit's own lex-mirror runs ahead of), pre-push lint + the
+    # classification tripwire. (The post-commit dev-cycle leg is asserted in
+    # test_logevent.py's managed-hook-tier test.)
+    assert cfg["pre-commit"]["piped"] is True
+    lint = cfg["pre-commit"]["commands"]["lint"]
+    assert lint == {"priority": 2, "run": "pixi run -e lint lint"}
+    assert cfg["pre-push"]["commands"]["lint"]["run"] == "pixi run -e lint lint"
+    assert (
+        cfg["pre-push"]["commands"]["classify-gate"]["run"]
+        == "pixi run -e lint shipit pr push-gate"
+    )
+
+    # The invoked task and environment exist in the managed pixi blocks, so a
+    # stock consumer satisfies every reference with nothing pre-installed.
+    tasks = tomllib.loads(iunits.data_bytes("pixi-tasks-block.toml").decode("utf-8"))
+    assert "lint" in tasks
+    envs = tomllib.loads(iunits.data_bytes("pixi-lint-env-block.toml").decode("utf-8"))
+    assert "lint" in envs
+
+
+def test_shipits_own_lefthook_reconciles_to_noop():
+    """shipit self-installs at Tree provisioning (`shipit install --local`),
+    so its own lefthook.yml must stay BYTE-IDENTICAL to the managed unit —
+    otherwise every fresh Tree would clobber shipit's extra hook legs (UPDATE
+    or OVERRIDE both write). shipit's repo-local legs live in
+    lefthook-local.yml instead: lefthook's own layering carries the
+    divergence, the reconciler stays feature-poor (ADR-0003)."""
+    root = Path(__file__).resolve().parents[1]
+    unit = {u.key: u for u in iunits.load_units()}[iunits.LEFTHOOK_FILE]
+    assert irec.consumer_hash(root, unit) == unit.desired_hash()
+
+
+def test_shipits_own_local_config_carries_the_lex_mirror_leg():
+    """The .lex→.md mirror leg moved OUT of the managed caller into shipit's
+    committed lefthook-local.yml — still regenerating mirrors ahead of lint in
+    the piped pre-commit chain, so shipit's own hooks stay green (dogfood)."""
+    root = Path(__file__).resolve().parents[1]
+    local = yaml.safe_load((root / "lefthook-local.yml").read_text(encoding="utf-8"))
+    leg = local["pre-commit"]["commands"]["lex-mirror"]
+    assert "tools/lex-convert-doc.sh" in leg["run"]
+    assert (root / "tools" / "lex-convert-doc.sh").is_file()
+    # It slots BEFORE the managed lint command in the managed piped chain.
+    managed = _managed_lefthook()
+    assert managed["pre-commit"]["piped"] is True
+    assert leg["priority"] < managed["pre-commit"]["commands"]["lint"]["priority"]
+
+
+def test_lefthook_unit_reconciles_add_noop_override(tmp_path, rec):
+    """The consumer-generic caller rides the standard four-case reconcile:
+    fresh install ADDs it, an unchanged re-install NOOPs, a consumer edit
+    surfaces as OVERRIDE (never silently kept)."""
+
+    def decision():
+        return next(
+            d for d in _plan(tmp_path).decisions if d.unit.key == iunits.LEFTHOOK_FILE
+        )
+
+    assert decision().action == irec.ADD
+    _apply(tmp_path)
+    assert (tmp_path / "lefthook.yml").read_bytes() == iunits.data_bytes("lefthook.yml")
+    assert decision().action == irec.NOOP
+    (tmp_path / "lefthook.yml").write_text("pre-commit: {}\n")
+    assert decision().action == irec.OVERRIDE
 
 
 def test_load_units_has_skills_agents_and_bootstrap():
