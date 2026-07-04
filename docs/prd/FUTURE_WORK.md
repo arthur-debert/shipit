@@ -21,23 +21,22 @@ the roadmap:
 - OBS04 — readiness engine consumes the funnel → `docs/prd/obs04-readiness-engine.md`
 - FLU01 — PRF01 review follow-ups → `docs/prd/flu01-prf01-followups.md`
 
-## Active plan — rollout
+## Active plan — adoption
 
-The observability spine (OBS01 → OBS04) is shipped: logging, uniform funnel breadcrumbs,
-async local execution, and a readiness engine that reads the breadcrumbs + timestamps and
-holds Ready until "requested + outcome-recorded + threads-resolved", NOT until "the review succeeded"
-(degraded reviewers are visible-but-non-blocking; the dispatcher routes on structured
-`TaskStatus` data, not `next_action` prose). With the funnel observable, enabling the review holds by default
-is now safe to roll out — which is why rollout (INS01) sits at the end of the spine rather
-than the front.
+The rollout plan is `docs/prd/adoption.md`: fleet adoption in three strictly-ordered
+epics, local before CI, known-fixes before any consumer. It supersedes INS01 (its seed
+issues #25/#26 are closed; the unverified leftover — per-org reviewer-App liveness —
+folds into ADP00, and the rest of its payload rides the normal install set).
 
 | Epic | Delivers | Depends on |
 | --- | --- | --- |
-| INS01 | Install integration (#25): carry the `[reviewers]` policy + codex/agy App `[secrets]` mappings + pr-loop AGENTS/skills into consumers via the managed set. Plus local-reviewer rollout (#26): per-consumer App-liveness verification + enabling readiness holds. Safe only after OBS04. | OBS04 |
+| ADP00 | shipit-side pre-work: the managed set owns the consumer environment (install-managed pixi env/dep blocks, fleet-pinned versions); consumer-generic lefthook; lexd provision subcommand; rust lint Langs; lex-mirror AGENTS.md fix (#363); documented shipit-on-PATH story; App-liveness check; tracking issue + survival prompts; canary passes the full local checklist. | CLI02 |
+| ADP01 | Local adoption fleet-wide: per-repo nine-step checklist (install PR → gh-setup → `.treeinclude` → lint/test/build → Tree + session → agent smoke through the PR loop), evidence-verified via `shipit logs --flow` + eval. Sequencing: canary → lex → phos-core → phos-app → dodot → rest. | ADP00 |
+| ADP02 | CI adoption, build-then-adopt: actionlint Lang, act harness + howto, thin checks caller, pixi test/build/release encapsulation, release pipeline (absorbs Steps 5–6 / WF01 scope, verified against lex); then per-repo cutover — re-point callers one toolchain at a time, act-test, remote-verify (agent PR + rc cut), remove legacy release tooling, comb memory. | ADP01 |
 
-Dependency spine: OBS01 → OBS02 → OBS03 → OBS04 → INS01 (OBS01–OBS04 shipped); FLU01 (shipped) was independent.
+Dependency spine: OBS01 → … → OBS04 (shipped) → ADP00 → ADP01 → ADP02.
 
 ## Postponed
 
-- Step 5 — pixi test/build/run + changelog/release → `docs/prd/pixi-test-build-release.md`
-- Step 6 — reusable workflows + release-core cutover → `docs/prd/workflows-cutover.md`
+- Step 5 — pixi test/build/run + changelog/release → `docs/prd/pixi-test-build-release.md` (execution slot: ADP02's build half)
+- Step 6 — reusable workflows + release-core cutover → `docs/prd/workflows-cutover.md` (execution slot: ADP02; the one-real-release retirement gate stands)
