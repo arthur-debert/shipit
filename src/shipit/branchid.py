@@ -5,8 +5,10 @@ Shipit's branch grammar is slash-namespaced (ADR-0016 / naming.lex §3), and two
 of its forms carry dev-cycle identity: a work stream is ``EPIC/WSnn`` and the
 epic's integration branch is ``EPIC/umbrella``. This module is the ONE reader
 of that identity — shared by the PR verbs (which derive ``epic``/``ws`` from a
-target PR's head branch at the fetch seam), the constrained emit verb, and the
-hook tier (later Work Streams) — so the parse can never drift per call site,
+target PR's head branch at the fetch seam) and the constrained emit verb
+(:mod:`shipit.verbs.logevent`, which also serves the hook tier: the managed
+post-commit hook emits through it) — so the parse can never drift per call
+site,
 and it mirrors the ONE writer (:func:`shipit.tree.layout.work_stream_branch` /
 :func:`shipit.tree.layout.epic_umbrella_base`) by construction: whatever those
 build, this reads back.

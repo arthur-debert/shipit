@@ -20,6 +20,9 @@ shipit pr ready   # guarded flip draft→ready (refuses early); --undo reverts
 
 PR number is optional (resolves the current branch's PR). Also: `shipit pr review
 request`; setup/ops `shipit gh-setup` / `verify-apps` / `install` / `lint` / `logs`.
+To orient on what a session or epic already did, read the dev-cycle event log:
+`shipit logs --flow --session current` (this session's story) or
+`shipit logs --flow --epic <CODE>` — the same view `/shipit-session-status` wraps.
 
 ### The cycle: draft → address reviews → checks passing + mergeable → flip to ready
 
