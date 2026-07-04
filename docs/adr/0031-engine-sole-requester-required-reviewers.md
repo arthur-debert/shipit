@@ -7,10 +7,13 @@ Every **required reviewer** is requested by the PR state engine and nothing
 else — Copilot included, through its reviewer adapter off the Roster. We kill
 every GitHub-side auto-request for a required reviewer: the
 `copilot-review.yml` caller workflow is deleted (retired portfolio-wide via a
-`shipit install` retired-files mechanism), the managed ruleset template is
-amended to pin `automatic_copilot_code_review_enabled: false` — today it omits
-the parameter entirely — so `gh-setup`'s full-PUT wipes any hand-edit, and the
-account-level Copilot auto-review setting is switched off. No engine change is needed to take over: `CopilotAdapter.request()`
+`shipit install` retired-files mechanism), and the account-level Copilot
+auto-review setting is switched off. (An earlier draft also pinned
+`automatic_copilot_code_review_enabled: false` in the managed ruleset
+template, but the rulesets REST endpoint rejects that parameter outright —
+422 `Unexpected parameter`, #438 — so the template omits it; a guard against
+GitHub-side auto-review, if ever wanted, must be a verification read, not a
+write.) No engine change is needed to take over: `CopilotAdapter.request()`
 (`gh pr edit --add-reviewer @copilot`) already works and the request loop
 already treats every roster entry uniformly — the workflow was the *second*
 requester, not the only one.
@@ -36,8 +39,8 @@ a reviewer the engine cannot request is the anti-pattern this decision kills.
   uniformity, and leaves rounds mintable outside the engine.
 - **Ruleset-level automatic Copilot review** (`pull_request` rule parameter) —
   rejected for the same reason, with worse visibility: repo-UI config drift
-  instead of a versioned workflow file. This epic amends the template to pin
-  it false.
+  instead of a versioned workflow file. Pinning it false in the template is
+  not even possible: the rulesets REST endpoint rejects the parameter (#438).
 - **Portfolio-wide manual sweep** of the caller workflows — rejected:
   removal rides `shipit install` (retired-files, pristine-sha-guarded) so
   onboarding a repo IS the cleanup, and the mechanism serves the next piece of
