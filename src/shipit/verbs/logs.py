@@ -20,6 +20,12 @@ data, and one corrupt line (a torn write, a rotation seam) must not take down
 the reader. ``--raw`` does not parse at all — malformed lines pass through
 untouched, because judging them is the downstream tool's job.
 
+The reader grows FILTERS, not a sibling (LOG04 / ADR-0032): ``--events`` keeps
+only ``event``-tagged dev-cycle records and ``--pr <n>`` keeps records whose
+``pr`` domain key equals the number — AND-composed, applied client-side before
+the tail count (the file is bounded by rotation, so whole-file filtering is
+cheap), and uniform across the static, ``--raw``, and ``--follow`` views.
+
 The repo whose log we read defaults to the current checkout, resolved LOCALLY off
 the origin remote (:func:`shipit.identity.resolve_repo`) — the SAME resolver the
 sink namespaces the log by (:func:`shipit.logsetup._current_repo`), so a log
@@ -66,13 +72,47 @@ def _last_n(lines: list[str], n: int) -> list[str]:
     return lines[-n:] if n > 0 else []
 
 
-def _tail_lines(path: Path, n: int) -> list[str]:
-    """The last ``n`` lines of ``path`` (newlines stripped).
+class _Filter:
+    """The record filters (LOG04: ``--events``, ``--pr``) as ONE predicate.
 
-    The file is bounded (``RotatingFileHandler`` caps it at ~5 MB), so reading it
-    whole is cheap and keeps this simple — no seek-from-end arithmetic.
+    Filters compose as AND and are applied BEFORE the tail count and before
+    either output mode, so ``-n 5 --pr 231`` means "the last 5 records about
+    pr#231" and ``--raw`` pipes exactly the matching stored lines to jq.
+    Selection is on the record's flat fields: ``--events`` keeps only records
+    carrying an ``event`` field (a dev-cycle event, ADR-0032 — presence is the
+    test, never a name list of the reader's own), ``--pr`` keeps records whose
+    ``pr`` domain key equals the number (int-typed on the record, ADR-0029).
+
+    Filtering requires parsing, so with any filter ACTIVE a non-record line
+    (blank padding, a torn write) simply cannot match and is dropped silently —
+    in both modes: a malformed line's fields are unknowable, and surfacing it
+    under a field filter would be a false positive. With NO filter active the
+    predicate is vacuously true and both modes keep their unfiltered contracts
+    (raw passes malformed lines through; rendered notes them on stderr).
     """
-    return _last_n(path.read_text(encoding="utf-8", errors="replace").splitlines(), n)
+
+    def __init__(self, *, events_only: bool = False, pr: int | None = None) -> None:
+        self.events_only = events_only
+        self.pr = pr
+
+    @property
+    def active(self) -> bool:
+        return self.events_only or self.pr is not None
+
+    def matches(self, line: str) -> bool:
+        if not self.active:
+            return True
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            return False
+        if not isinstance(record, dict):
+            return False
+        if self.events_only and "event" not in record:
+            return False
+        if self.pr is not None and record.get("pr") != self.pr:
+            return False
+        return True
 
 
 #: Longest malformed-line snippet quoted in the skip note; enough to identify
@@ -156,25 +196,36 @@ def _emit(line: str, *, raw: bool) -> None:
     print(rendered, flush=True)
 
 
-def _follow(path: Path, *, tail: int, raw: bool, sleep: Callable[[float], None]) -> int:
+def _follow(
+    path: Path,
+    *,
+    tail: int,
+    raw: bool,
+    record_filter: _Filter,
+    sleep: Callable[[float], None],
+) -> int:
     """Stream the log live (``tail -f``): the last ``tail`` lines, then each
-    appended line as it lands — every line through :func:`_emit`, so follow and
-    the static view render (or pass through) identically. The path header prints
-    only in the human mode: raw stdout is reserved for JSONL. Ends cleanly on
-    Ctrl-C (exit 0), the way ``tail -f`` does. ``sleep`` is injected so a test
-    can drive the poll loop and stop it deterministically.
+    appended line as it lands — every line through the filter then :func:`_emit`,
+    so follow and the static view select and render (or pass through)
+    identically. The path header prints only in the human mode: raw stdout is
+    reserved for JSONL. Ends cleanly on Ctrl-C (exit 0), the way ``tail -f``
+    does. ``sleep`` is injected so a test can drive the poll loop and stop it
+    deterministically.
     """
     if not raw:
         print(str(path), flush=True)
     fh = path.open("r", encoding="utf-8", errors="replace")
     try:
-        for line in _last_n(fh.read().splitlines(), tail):
+        matching = [ln for ln in fh.read().splitlines() if record_filter.matches(ln)]
+        for line in _last_n(matching, tail):
             _emit(line, raw=raw)
         # fh is now positioned at EOF; subsequent appends are picked up by readline.
         while True:
             line = fh.readline()
             if line:
-                _emit(line.rstrip("\n"), raw=raw)
+                stripped = line.rstrip("\n")
+                if record_filter.matches(stripped):
+                    _emit(stripped, raw=raw)
                 continue
             # No new data. The writer is a RotatingFileHandler, so the active
             # shipit.log can be rolled over mid-follow — at which point our open
@@ -225,6 +276,8 @@ def run(
     follow: bool = False,
     raw: bool = False,
     tail: int = DEFAULT_TAIL,
+    events_only: bool = False,
+    pr: int | None = None,
     base_dir: str | Path | None = None,
     current_repo: Callable[[], str] | None = None,
     sleep: Callable[[float], None] | None = None,
@@ -240,9 +293,15 @@ def run(
     path header — stdout is pure JSONL for jq) and composes with both views. A
     missing log file is reported on stderr (no traceback) and exits non-zero.
 
+    ``events_only`` / ``pr`` are the LOG04 record filters (AND-composed, applied
+    before the tail count, uniform across the static/follow/raw views): only
+    ``event``-tagged dev-cycle records, only records whose ``pr`` domain key
+    equals the number.
+
     ``base_dir`` / ``current_repo`` / ``sleep`` are injected boundaries for tests.
     """
     current_repo = current_repo or _default_repo_slug
+    record_filter = _Filter(events_only=events_only, pr=pr)
     try:
         slug = repo if repo is not None else current_repo()
         # The ONE canonical slug parser (ADR-0024): lowercases owner/name, so an
@@ -277,10 +336,17 @@ def run(
         return _EXIT_NO_LOG
 
     if follow:
-        return _follow(path, tail=tail, raw=raw, sleep=sleep or time.sleep)
+        return _follow(
+            path,
+            tail=tail,
+            raw=raw,
+            record_filter=record_filter,
+            sleep=sleep or time.sleep,
+        )
 
     if not raw:
         print(str(path))
-    for line in _tail_lines(path, tail):
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    for line in _last_n([ln for ln in lines if record_filter.matches(ln)], tail):
         _emit(line, raw=raw)
     return 0

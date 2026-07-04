@@ -23,7 +23,7 @@ import logging
 import time
 from datetime import datetime, timezone
 
-from .. import gh, logcontext
+from .. import branchid, gh, logcontext
 from ..identity import Repo, Sha
 from ..pr import PrId, core_from_node
 from .model import (
@@ -262,6 +262,7 @@ query($owner: String!, $name: String!, $pr: Int!) {
     pullRequest(number: $pr) {
       number
       headRefOid
+      headRefName
       baseRefName
       isDraft
       mergeStateStatus
@@ -286,6 +287,20 @@ query($owner: String!, $name: String!, $pr: Int!) {
   }
 }
 """
+
+
+def _bind_branch_identity(head_ref: object) -> None:
+    """Bind the ``epic``/``ws`` a slash-namespaced head branch carries (ADR-0032).
+
+    The PR verbs' per-operation binding site: the fetch is the moment the engine
+    learns the PR's head branch, so the dev-cycle identity binds HERE — the same
+    seam that binds ``pr``/``repo`` — through the ONE branch-identity parser
+    (:func:`shipit.branchid.derive`). A non-namespaced head (a standalone-issue
+    or freeform branch) derives to nothing and binds nothing: absent keys stay
+    absent, never a placeholder (present-when-bound, ADR-0029).
+    """
+    identity = branchid.derive(head_ref)
+    logcontext.bind(epic=identity.epic, ws=identity.ws)
 
 
 def gather_reviews(pr: PrId, roster: Roster) -> ReadinessView:
@@ -321,6 +336,10 @@ def gather_reviews(pr: PrId, roster: Roster) -> ReadinessView:
         _REVIEWS_QUERY, owner=repo.owner.login, name=repo.name, pr=pr.number
     )
     pull = data["repository"]["pullRequest"]
+    # The PR-verb half of ADR-0032's per-operation binding: epic/ws derived from
+    # the slash-namespaced head branch (ADR-0016) the query already carries —
+    # nothing hard-coded, absent halves stay absent (None drops at bind).
+    _bind_branch_identity(pull.get("headRefName"))
     requested = _requested_logins(
         [
             rr["requestedReviewer"]
@@ -395,6 +414,9 @@ def gather(pr: PrId, roster: Roster) -> ReadinessView:
     logcontext.bind(pr=pr.number, repo=repo.slug)
     base = f"repos/{repo.slug}"
     meta = gh.pr_meta(pr)
+    # The PR-verb half of ADR-0032's per-operation binding: epic/ws derived from
+    # the slash-namespaced head branch (ADR-0016) the meta read already carries.
+    _bind_branch_identity(meta.get("headRefName"))
     thread_nodes, review_requests, requested_at = _threads_and_review_requests(pr)
     # Bot-typed requests only surface through GraphQL (see _THREADS_QUERY);
     # the node shape ({login} / {slug}) is what _requested_logins consumes.

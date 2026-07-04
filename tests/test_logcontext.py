@@ -93,7 +93,7 @@ def test_unbound_keys_are_absent_not_null(tmp_path):
 
     (record,) = _records(tmp_path)
     assert record["pr"] == 7
-    for name in ("session", "tree", "run", "repo"):
+    for name in ("session", "tree", "run", "repo", "epic", "ws", "agent", "role"):
         assert name not in record
 
 
@@ -201,9 +201,18 @@ def test_env_export_scrubs_inherited_ctx_vars_for_unbound_keys():
 
 def test_bind_from_env_round_trips_bound_keys_with_types():
     """The full seam: bind → export → (new process) rebind reproduces the SAME
-    context, ints included — the acceptance-criteria round-trip."""
+    context, ints included — the acceptance-criteria round-trip, extended to
+    the nine-key set (ADR-0032: epic/ws/agent/role join, ws int-typed)."""
     logcontext.bind(
-        session="work", tree="/trees/x", pr=231, run=555, repo="acme/widget"
+        session="work",
+        tree="/trees/x",
+        pr=231,
+        run=555,
+        repo="acme/widget",
+        epic="RVW01",
+        ws=1,
+        agent="a1b2c3",
+        role="implementer",
     )
     exported = logcontext.env_export({})
 
@@ -218,7 +227,26 @@ def test_bind_from_env_round_trips_bound_keys_with_types():
         "pr": 231,  # int again, not "231" — the jq contract survives the env
         "run": 555,
         "repo": "acme/widget",
+        "epic": "RVW01",
+        "ws": 1,  # int again: WS01 is rendering, the data is 1 (ADR-0032)
+        "agent": "a1b2c3",
+        "role": "implementer",
     }
+
+
+def test_ws_binds_and_records_as_int(tmp_path):
+    """`ws` joins the int-typed keys (ADR-0032): bound as an int, it lands on
+    the JSONL record as an int — `jq 'select(.ws==1)'` matches — and the
+    display form WS01 never appears as data."""
+    logsetup.configure_logging(env={}, repo=REPO, base_dir=tmp_path)
+    logcontext.bind(epic="LOG04", ws=1)
+
+    _emit("workstream record")
+
+    (record,) = _records(tmp_path)
+    assert record["epic"] == "LOG04"
+    assert record["ws"] == 1
+    assert logcontext.env_export({})["SHIPIT_LOG_CTX_WS"] == "1"
 
 
 def test_bind_from_env_ignores_absent_and_empty_vars():

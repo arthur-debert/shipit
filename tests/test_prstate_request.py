@@ -17,6 +17,7 @@ import logging
 
 import pytest
 
+from shipit import events
 from shipit.execrun import ExecError
 from shipit.identity import repo_from_slug
 from shipit.pr import PrId
@@ -334,3 +335,54 @@ def test_dropped_outcome_is_a_warning_record(caplog):
     assert len(warnings) == 1
     assert warnings[0].reviewer == "copilot"
     assert warnings[0].pr == 7
+
+
+# --- the review.requested dev-cycle event (LOG04-WS01 / ADR-0032) ---------------
+#
+# The placed-request milestones ARE the event: one `event="review.requested"`
+# record per reviewer whose request took effect (remote edge verified, or the
+# local review detached in-flight). A dropped request and the deliberate
+# non-acts stay untagged — the milestone trail records only requests that
+# actually happened. On the raw LogRecord the tag rides under
+# `events.EXTRA_KEY` (the render seam lands it as the durable `event` field —
+# pinned end-to-end by test_events).
+
+
+def _event_tag(record) -> str | None:
+    return getattr(record, events.EXTRA_KEY, None)
+
+
+def test_placed_requests_emit_the_review_requested_event(caplog):
+    """One review.requested record per reviewer requested — remote (verified)
+    and local (in-flight) alike, carrying the flat pr/reviewer keys."""
+    remote = _FakeAdapter("copilot")
+    local = _FakeAdapter("codex", has_edge=False)
+    with caplog.at_level(logging.DEBUG, logger="shipit.prstate"):
+        request_reviewers(
+            TARGET,
+            [remote, local],
+            EMPTY_ROSTER,
+            force=True,
+            boundary=_boundary(requested_logins=["Copilot"]),
+        )
+    tagged = [r for r in caplog.records if _event_tag(r)]
+    assert {_event_tag(r) for r in tagged} == {"review.requested"}
+    assert {r.reviewer for r in tagged} == {"copilot", "codex"}
+    assert all(r.pr == 7 and r.levelno == logging.INFO for r in tagged)
+
+
+def test_non_requests_carry_no_event_tag(caplog):
+    """A dropped attach, a review-once skip, and a no-mechanism no-op never
+    tag a review.requested event — no request took effect."""
+    dropped = _FakeAdapter("copilot")
+    with caplog.at_level(logging.DEBUG, logger="shipit.prstate"):
+        request_reviewers(
+            TARGET, [dropped], EMPTY_ROSTER, force=True, boundary=_boundary()
+        )
+    done = _FakeAdapter("coderabbit", lifecycle=ReviewLifecycle.DONE_CLEAN)
+    auto = _FakeAdapter("gemini", has_edge=False, request_returns=False)
+    with caplog.at_level(logging.DEBUG, logger="shipit.prstate"):
+        request_reviewers(
+            TARGET, [done, auto], EMPTY_ROSTER, force=False, boundary=_boundary()
+        )
+    assert not [r for r in caplog.records if _event_tag(r)]

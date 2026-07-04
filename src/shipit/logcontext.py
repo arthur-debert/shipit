@@ -1,8 +1,9 @@
-"""Domain-key log context (ADR-0029) — bind correlation keys, carry them across processes.
+"""Domain-key log context (ADR-0029/0032) — bind correlation keys, carry them across processes.
 
 Correlation in shipit's durable JSONL record is **domain keys only** — the
 closed set :data:`DOMAIN_KEYS` (``session``, ``tree``, ``pr``, ``run``,
-``repo``) — never synthetic trace/span ids. A key binds via structlog's
+``repo``, plus the dev-cycle four ADR-0032 added: ``epic``, ``ws``, ``agent``,
+``role``) — never synthetic trace/span ids. A key binds via structlog's
 contextvars at the seam where its value becomes known — the CLI entry, a
 spawn/detach seam, or the moment a subsystem starts working on the noun (the
 PR-engine's fetch, the review service's detach; LOG02) — and from that point
@@ -36,9 +37,13 @@ from typing import Any
 
 import structlog
 
-#: The closed correlation-key set (ADR-0029). Agents slice the record by these
-#: nouns; anything else on a record is an event extra, not a correlation key.
-DOMAIN_KEYS = ("session", "tree", "pr", "run", "repo")
+#: The closed correlation-key set (ADR-0029, grown to nine by ADR-0032 / LOG04).
+#: Agents slice the record by these nouns; anything else on a record is an
+#: event extra, not a correlation key. The dev-cycle four: ``epic`` is the
+#: human-assigned code string (``RVW01``); ``ws`` is the Work Stream index as
+#: an **int** (``WS01`` is a display form, never data — it joins the int-typed
+#: set below); ``agent`` is the spawn id; ``role`` is the Role registry name.
+DOMAIN_KEYS = ("session", "tree", "pr", "run", "repo", "epic", "ws", "agent", "role")
 
 #: The env-var prefix a bound key exports under (``pr`` → ``SHIPIT_LOG_CTX_PR``),
 #: shared by the writer (:func:`env_export`) and the reader (:func:`bind_from_env`)
@@ -48,7 +53,9 @@ ENV_PREFIX = "SHIPIT_LOG_CTX_"
 #: The numeric domain keys. The environment carries only strings, so these are
 #: cast back to ``int`` on rebind — a record's ``pr`` must compare equal under
 #: ``jq 'select(.pr==231)'`` whether it was bound in-process or via a parent.
-_INT_KEYS = frozenset({"pr", "run"})
+#: ``ws`` joins them (ADR-0032): the Work Stream index is data as an int;
+#: ``WS01`` is rendering.
+_INT_KEYS = frozenset({"pr", "run", "ws"})
 
 
 def _check_names(names: Iterable[str]) -> None:

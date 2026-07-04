@@ -55,7 +55,12 @@ def _graphql_page(
     }
 
 
-def _wire(monkeypatch, review_requests: list[dict], timeline: list[dict] | None = None):
+def _wire(
+    monkeypatch,
+    review_requests: list[dict],
+    timeline: list[dict] | None = None,
+    head_ref: str = "issues/558/work",
+):
     # The former per-gather ambient `gh repo view` shellout is DELETED (WS02):
     # any call to it from the fetch path is a regression and fails the test.
     monkeypatch.setattr(
@@ -73,6 +78,7 @@ def _wire(monkeypatch, review_requests: list[dict], timeline: list[dict] | None 
             # no longer asks for the field gh renders wrong for Bots).
             "number": 558,
             "headRefOid": HEAD,
+            "headRefName": head_ref,
             "isDraft": True,
             "mergeable": "MERGEABLE",
             "mergeStateStatus": "BLOCKED",
@@ -186,15 +192,18 @@ def _reviews_page(
     head: str = HEAD,
     *,
     is_draft: bool = False,
+    head_ref: str = "issues/558/work",
 ) -> dict:
     # The light query now selects the full PR core (number/isDraft/baseRefName/
     # mergeStateStatus) alongside the head sha, so the core rides on the ONE call
-    # already in flight and `gather_reviews` no longer hardcodes `is_draft`.
+    # already in flight and `gather_reviews` no longer hardcodes `is_draft` —
+    # plus headRefName, feeding the ADR-0032 epic/ws derivation at the seam.
     return {
         "repository": {
             "pullRequest": {
                 "number": 558,
                 "headRefOid": head,
+                "headRefName": head_ref,
                 "baseRefName": "main",
                 "isDraft": is_draft,
                 "mergeStateStatus": "CLEAN",
@@ -286,6 +295,55 @@ def test_gather_reviews_threads_the_rerun_policy(monkeypatch):
     ctx = fetch.gather_reviews(TARGET, roster)
     assert ctx.roster.entry("copilot").rerun is True
     assert CopilotAdapter().detect(ctx) is ReviewLifecycle.REQUESTED
+
+
+# --- epic/ws binding at the fetch seam (LOG04-WS01 / ADR-0032) ---------------
+
+
+def test_gather_reviews_binds_epic_ws_from_a_namespaced_head_branch(monkeypatch):
+    # The PR verbs' per-operation binding: a slash-namespaced head (ADR-0016)
+    # derives epic + ws (int) and binds them at the SAME seam as pr/repo, so
+    # every subsequent record — the request service's review.requested event
+    # included — carries them.
+    from shipit import logcontext
+
+    monkeypatch.setattr(
+        fetch.gh,
+        "graphql",
+        lambda query, **vars: _reviews_page([], [], head_ref="RVW01/WS02"),
+    )
+    fetch.gather_reviews(TARGET, default_roster())
+    bound = logcontext.bound()
+    assert bound["pr"] == TARGET.number
+    assert bound["epic"] == "RVW01"
+    assert bound["ws"] == 2  # the int, never the WS02 display form
+
+
+def test_gather_reviews_binds_nothing_for_a_non_namespaced_head(monkeypatch):
+    # Absent keys stay absent (present-when-bound): a standalone-issue head
+    # carries no epic/ws identity, so none is bound — never a placeholder.
+    from shipit import logcontext
+
+    monkeypatch.setattr(
+        fetch.gh,
+        "graphql",
+        lambda query, **vars: _reviews_page([], [], head_ref="issues/375/work"),
+    )
+    fetch.gather_reviews(TARGET, default_roster())
+    bound = logcontext.bound()
+    assert "epic" not in bound
+    assert "ws" not in bound
+
+
+def test_gather_binds_epic_ws_from_the_meta_head_branch(monkeypatch):
+    # The full gather binds the same way, off the pr_meta node's headRefName.
+    from shipit import logcontext
+
+    _wire(monkeypatch, [], head_ref="LOG04/umbrella")
+    fetch.gather(TARGET, default_roster())
+    bound = logcontext.bound()
+    assert bound["epic"] == "LOG04"
+    assert "ws" not in bound  # the umbrella carries the epic only
 
 
 # --- identity/decision fields die loudly at the wire boundary (#330) --------

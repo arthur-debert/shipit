@@ -231,8 +231,28 @@ def lint_cmd(path: str | None, fix: bool) -> None:
     show_default=True,
     help="Trailing records to print in the default (no-flag) view.",
 )
+@click.option(
+    "--events",
+    "events_only",
+    is_flag=True,
+    help="Only dev-cycle event records (records carrying an `event` field).",
+)
+@click.option(
+    "--pr",
+    "pr",
+    type=int,
+    default=None,
+    metavar="N",
+    help="Only records whose bound `pr` domain key equals this PR number.",
+)
 def logs_cmd(
-    repo: str | None, path_only: bool, follow: bool, raw: bool, lines: int
+    repo: str | None,
+    path_only: bool,
+    follow: bool,
+    raw: bool,
+    lines: int,
+    events_only: bool,
+    pr: int | None,
 ) -> None:
     """Locate and read shipit's durable per-repo JSONL log.
 
@@ -243,10 +263,19 @@ def logs_cmd(
     prints the path plus the last N records, rendered legibly (ts LEVEL logger:
     msg, domain keys trailing); a malformed line is skipped with a stderr note.
     --raw passes the stored lines through unmodified for jq — no parsing, no
-    skipping, malformed lines included. A log not written yet is reported, not
-    crashed.
+    skipping, malformed lines included. --events / --pr filter records (AND,
+    applied before the tail count) and compose with every view. A log not
+    written yet is reported, not crashed.
     """
-    rc = logs.run(repo, path_only=path_only, follow=follow, raw=raw, tail=lines)
+    rc = logs.run(
+        repo,
+        path_only=path_only,
+        follow=follow,
+        raw=raw,
+        tail=lines,
+        events_only=events_only,
+        pr=pr,
+    )
     raise SystemExit(rc)
 
 
