@@ -129,7 +129,8 @@ def run(
     self_pid: int | None = None,
 ) -> int:
     """Parse stdin → warn on a source-clone cwd → write activation → export the
-    log context → write the liveness pidfile. Returns 0 always.
+    log context → write the liveness pidfile → emit the ``session.started``
+    event. Returns 0 always.
 
     ``stdout``, ``environ``, ``runner``, ``probe``, and ``self_pid`` are the
     injectable boundaries (defaults: the real ``sys.stdout`` / ``os.environ`` /

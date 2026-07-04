@@ -134,6 +134,27 @@ def test_cleared_of_an_unbound_key_is_a_noop_and_restores_nothing(tmp_path):
     assert "ws" not in logcontext.bound()
 
 
+def test_cleared_restores_absence_when_the_block_binds_the_key(tmp_path):
+    """Regression (PR #391 review): ``cleared`` restores the ENTRY STATE, not
+    just entry values — a key unbound at entry that the block binds must come
+    back out unbound, exactly as ``scoped`` unwinds an in-block bind."""
+    logsetup.configure_logging(env={}, repo=REPO, base_dir=tmp_path)
+    with logcontext.cleared("ws"):
+        logcontext.bind(ws=9)
+        assert logcontext.bound()["ws"] == 9  # the in-block bind itself works
+    assert "ws" not in logcontext.bound()  # ...but does not leak past the block
+
+
+def test_cleared_in_block_rebind_still_restores_the_prior_value(tmp_path):
+    """The symmetric case: a key bound at entry, rebound inside the block, comes
+    back out with its ENTRY value — the in-block rebind does not survive."""
+    logsetup.configure_logging(env={}, repo=REPO, base_dir=tmp_path)
+    logcontext.bind(ws=3)
+    with logcontext.cleared("ws"):
+        logcontext.bind(ws=9)
+    assert logcontext.bound()["ws"] == 3
+
+
 def test_cleared_rejects_unknown_names():
     with pytest.raises(ValueError, match="unknown domain key"):
         with logcontext.cleared("wsss"):

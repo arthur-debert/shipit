@@ -118,12 +118,15 @@ def cleared(*names: str) -> Iterator[None]:
 
     The scoped inverse of :func:`scoped`: where ``scoped`` binds a value local
     to a block, this removes a key local to a block — every record emitted
-    inside carries it as absent (never ``None``), and the prior value, if any,
-    is restored on exit. A seam needs this when the LOCAL truth is that a key
-    does not apply: an umbrella branch carries an epic but no Work Stream, so it
-    must suppress an env-propagated ``ws`` for its emission rather than let a
-    stale value fuse into a mixed identity. An unknown key name raises
-    :class:`ValueError`.
+    inside carries it as absent (never ``None``), and the ENTRY STATE is
+    restored on exit: a key bound at entry gets its prior value back, and a key
+    unbound at entry comes back out unbound, even if the block bound it (the
+    same unwind contract as ``scoped`` — an in-block :func:`bind` of a named
+    key never leaks past the block). A seam needs this when the LOCAL truth is
+    that a key does not apply: an umbrella branch carries an epic but no Work
+    Stream, so it must suppress an env-propagated ``ws`` for its emission
+    rather than let a stale value fuse into a mixed identity. An unknown key
+    name raises :class:`ValueError`.
     """
     _check_names(names)
     saved = {name: value for name, value in bound().items() if name in names}
@@ -131,6 +134,9 @@ def cleared(*names: str) -> Iterator[None]:
     try:
         yield
     finally:
+        # Restore ABSENCE too, not just values: unbind every named key again
+        # (dropping any in-block bind), then rebind only what entry saved.
+        unbind(*names)
         if saved:
             structlog.contextvars.bind_contextvars(**saved)
 
