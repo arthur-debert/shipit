@@ -352,6 +352,36 @@ def test_follow_reopens_after_rename_rotation_even_when_new_file_is_larger(tmp_p
     assert msgs[-1] == "fresh-19-padding-so-the-new-file-is-bigger"
 
 
+def test_follow_drops_a_stale_torn_fragment_on_rotation(tmp_path):
+    # copilot/agy: a torn fragment buffered from the OLD file can never be
+    # completed by the new one after a rename rotation — its remainder, if it
+    # ever lands, lands in the renamed file. If `pending` survived the reopen,
+    # the new file's first line would be concatenated onto the stale bytes,
+    # corrupting it (and silently dropping it under an active filter).
+    log = tmp_path / "shipit.log"
+    log.write_text(_record("old-complete") + "\n")
+
+    def append_fragment() -> None:
+        with log.open("a", encoding="utf-8") as fh:
+            fh.write("{ torn-in-old-file")  # no newline: buffered as pending
+
+    def rotate() -> None:
+        log.rename(log.with_name("shipit.log.1"))
+        log.write_text(_record("first-in-new-file") + "\n")
+
+    steps = [append_fragment, rotate]
+
+    def fake_sleep(_interval: float) -> None:
+        if steps:
+            steps.pop(0)()
+        else:
+            raise KeyboardInterrupt
+
+    got = _drain(follow_lines(log, Filter(), tail=0, sleep=fake_sleep))
+    # The new file's first record comes through whole — no stale prefix.
+    assert got == [_record("first-in-new-file")]
+
+
 def test_follow_yields_stored_lines_verbatim_including_malformed(tmp_path):
     # The engine renders nothing: with no filter active, even a torn appended
     # line is yielded exactly as stored — noting or dropping it is the verb's

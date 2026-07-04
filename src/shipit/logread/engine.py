@@ -141,8 +141,23 @@ def follow_lines(
             except OSError:
                 rotated = False  # mid-rotation flicker; retry on the next tick
             if rotated:
+                # Rotation is a rename + fresh create, so the replacement can
+                # be missing for an instant even after stat() succeeded. Open
+                # the new handle FIRST and swap only on success — on a flicker
+                # keep the current handle and retry next tick, so a transient
+                # OSError never escapes as a traceback mid-follow.
+                try:
+                    replacement = path.open("r", encoding="utf-8", errors="replace")
+                except OSError:
+                    sleep(FOLLOW_INTERVAL)
+                    continue
                 fh.close()
-                fh = path.open("r", encoding="utf-8", errors="replace")
+                fh = replacement
+                # A torn fragment buffered from the old file can never be
+                # completed by the new one (its remainder, if it ever lands,
+                # lands in the renamed file) — drop it, or the new stream's
+                # first line would be concatenated onto stale bytes.
+                pending = ""
                 continue
             sleep(FOLLOW_INTERVAL)
     finally:

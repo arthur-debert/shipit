@@ -235,8 +235,9 @@ def run(
     caller); omitted, the ambient checkout's — the ONE root resolution, with
     the uniform outside-a-checkout refusal mapped by the error shell.
     ``path_only`` prints just the resolved absolute path and exits 0 —
-    locating the log never depends on it existing yet (or on ``query``), so
-    this always succeeds. Otherwise ``query`` (default: the plain read) says
+    locating the log never depends on the file existing yet (or on
+    ``query``), though it still needs a repo identity (explicit or ambient),
+    so outside a checkout it shares the uniform refusal. Otherwise ``query`` (default: the plain read) says
     what to read and how to view it; the engine (:mod:`shipit.logread`)
     yields the selected lines and this function renders them — the path
     header in the human modes, per-line emission via :func:`_emit_line`, the
