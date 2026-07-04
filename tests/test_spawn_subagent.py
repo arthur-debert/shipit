@@ -81,10 +81,11 @@ def bounds(
             path=str(review_dir), branch=plan.branch, base=f"origin/{plan.branch}"
         )
 
-    def runner(cmd, *, cwd, env):
+    def runner(cmd, *, cwd, env, timeout=None):
         calls["cmd"] = cmd
         calls["cwd"] = cwd
         calls["env"] = env
+        calls["timeout"] = timeout
         return launch.LaunchResult(returncode=returncode, stdout="{}", stderr="boom")
 
     def pr_for_head(branch, *, cwd=None):
@@ -134,6 +135,11 @@ def test_write_spawn_returns_the_typed_result(tmp_path, monkeypatch):
     assert calls["cwd"] == str(tmp_path / "tree")
     assert calls["cmd"][calls["cmd"].index("--agent") + 1] == "implementer"
     assert "ANTHROPIC_API_KEY" not in calls["env"]
+    # #404: an implementer WRITE Run is legitimately unbounded (ADR-0019 §6) — the
+    # review-path deadline must NOT leak onto the spawn seam. The launcher gets the
+    # UNBOUNDED default (LAUNCH_TIMEOUT is None), so no bound can kill a long Run.
+    assert calls["timeout"] is launch.LAUNCH_TIMEOUT
+    assert launch.LAUNCH_TIMEOUT is None
     # The task tells the Run which issue to implement and the branch to PR from.
     task = calls["cmd"][calls["cmd"].index("-p") + 1]
     assert "#156" in task and "TRE03/WS01" in task
@@ -362,7 +368,7 @@ def test_launch_transport_failure_is_a_clean_refusal(tmp_path):
     # ExecError (the Exec runner normalizes the raw FileNotFoundError, ADR-0028).
     b, _ = bounds(tmp_path)
 
-    def no_binary(cmd, *, cwd, env):
+    def no_binary(cmd, *, cwd, env, timeout=None):
         raise execrun.ExecError(["claude"], rc=None, cause=execrun.CAUSE_MISSING_BINARY)
 
     with pytest.raises(SpawnError, match="claude"):

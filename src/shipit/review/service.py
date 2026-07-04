@@ -75,8 +75,11 @@ def generate_review(
     run raises :class:`~shipit.review.backends.base.BackendError` — both propagate exactly
     as before so the service's outcome mapping is unchanged.
 
-    ``timeout`` is the per-run agent timeout (a ``<N>s`` duration string); it reaches
-    ``agy`` as ``--print-timeout`` (``codex`` has no per-run timeout flag — parity only).
+    ``timeout`` is the per-run agent timeout (a ``<N>s`` duration string). It reaches
+    ``agy`` as its native ``--print-timeout`` AND is enforced at the launch seam as a
+    process deadline for EVERY backend (#404) — so ``codex``, which has no per-run
+    timeout flag, is still killed at the deadline rather than stalling forever. A
+    seam-killed run settles ``timed_out`` exactly like agy's native timeout.
     ``dry_run`` prints the would-run Tree-launch argv and bills nothing.
     """
     agent = backend.funnel_agent

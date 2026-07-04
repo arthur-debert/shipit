@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import pytest
 
+from shipit import execrun
 from shipit.agent import backend as agent_backend
 from shipit.identity import repo_from_slug
 from shipit.review import producer
@@ -56,10 +57,11 @@ def _faked(monkeypatch):
     monkeypatch.setattr(producer.shutil, "which", lambda binary: f"/usr/bin/{binary}")
     captured: dict = {}
 
-    def launcher(cmd, *, cwd, env):
+    def launcher(cmd, *, cwd, env, timeout=None):
         captured["cmd"] = cmd
         captured["cwd"] = cwd
         captured["env"] = env
+        captured["timeout"] = timeout
         return LaunchResult(returncode=0, stdout=_VALID, stderr="")
 
     captured["launcher"] = launcher
@@ -84,6 +86,10 @@ def test_codex_launches_in_the_tree_and_captures_the_review(_faked):
     prompt = cmd[-1]
     assert "gh pr diff 42" in prompt
     assert "do not run" in prompt.lower()
+    # #404: codex has NO native timeout flag, so the launch seam carries the deadline —
+    # the default `600s` reaches the runner as a bare 600.0s process deadline (no
+    # headroom: the seam IS codex's sole enforcement).
+    assert _faked["timeout"] == 600.0
 
 
 def test_agy_maps_to_the_antigravity_adapter_with_prose_schema(_faked):
@@ -106,10 +112,15 @@ def test_agy_maps_to_the_antigravity_adapter_with_prose_schema(_faked):
     assert "JSON Schema:" in cmd[-1]
     # Reviewer posture: agy omits the write Run's --dangerously-skip-permissions.
     assert "--dangerously-skip-permissions" not in cmd
+    # #404: agy enforces `--print-timeout` ITSELF and its native timeout yields a
+    # SALVAGEABLE truncated review, so the launch-seam deadline is set with HEADROOM
+    # (900s + 60s) over the native flag — the native path wins the race and the seam
+    # is a pure backstop that only bites if agy hangs past its own deadline.
+    assert _faked["timeout"] == 900.0 + producer._SEAM_HEADROOM_SECONDS
 
 
 def test_nonzero_exit_is_a_hard_failure(_faked):
-    def launcher(cmd, *, cwd, env):
+    def launcher(cmd, *, cwd, env, timeout=None):
         return LaunchResult(returncode=1, stdout="", stderr="codex: auth error")
 
     with pytest.raises(RuntimeError) as exc:
@@ -120,7 +131,7 @@ def test_nonzero_exit_is_a_hard_failure(_faked):
 
 
 def test_agy_timeout_marker_settles_as_timeout_not_failure(_faked):
-    def launcher(cmd, *, cwd, env):
+    def launcher(cmd, *, cwd, env, timeout=None):
         # agy prints the marker (exit 0 in practice); a parse over it raises a
         # timeout-flavoured BackendError that the service maps to timed_out.
         return LaunchResult(
@@ -141,7 +152,7 @@ def test_nonzero_exit_with_timeout_marker_in_stderr_is_structurally_timed_out(_f
     # as `empty`. The producer must instead set the STRUCTURED `timed_out` flag so the
     # service settles `timed_out`. (Before the fix, `_capture` raised with the flag
     # auto-derived False -> the funnel closed `neutral` instead of `timed_out`.)
-    def launcher(cmd, *, cwd, env):
+    def launcher(cmd, *, cwd, env, timeout=None):
         return LaunchResult(
             returncode=1,
             stdout="",
@@ -157,10 +168,78 @@ def test_nonzero_exit_with_timeout_marker_in_stderr_is_structurally_timed_out(_f
     assert _TIMEOUT_MARKER not in str(exc.value).lower()
 
 
+def test_seam_timeout_becomes_a_timed_out_backend_error_with_raw_salvage(_faked):
+    # #404: codex has no native timeout flag, so the LAUNCH SEAM kills the stalled
+    # child at the deadline — `execrun.run` raises ExecError(cause=CAUSE_TIMEOUT)
+    # carrying the partial streams even under check=False. The producer must convert
+    # THAT into BackendError(timed_out=True) so the service settles `timed_out`
+    # (degraded, non-blocking, ADR-0006), NOT the generic `failed`.
+    def launcher(cmd, *, cwd, env, timeout=None):
+        raise execrun.ExecError(
+            cmd,
+            rc=None,
+            stdout="partial review body the child wrote before it hung",
+            stderr="killed at deadline",
+            cause=execrun.CAUSE_TIMEOUT,
+        )
+
+    with pytest.raises(BackendError) as exc:
+        producer.run_tree_review(agent_backend.CODEX, _ctx(), launcher=launcher)
+    assert exc.value.timed_out is True  # structured -> service maps to timed_out
+    assert "timed out" in str(exc.value).lower()
+    # The message reports the ACTUAL seam deadline the backstop fired at (codex has no
+    # native timeout, so no headroom: the default 600s IS the kill deadline).
+    assert "600s" in str(exc.value)
+    # The partial stdout+stderr rides `raw` so the #76 salvage can still surface it.
+    assert "partial review body" in exc.value.raw
+    assert "killed at deadline" in exc.value.raw
+
+
+def test_seam_timeout_message_reports_agys_headroom_deadline_not_the_bare_timeout(
+    _faked,
+):
+    # For a NATIVE-timeout backend (agy) the seam sits ABOVE the native flag by
+    # `_SEAM_HEADROOM_SECONDS`, so the backstop fires at `timeout + headroom`, NOT the
+    # bare configured `--timeout`. The message must name that actual kill deadline so a
+    # debugger isn't misled about when/why the seam backstop triggered.
+    def launcher(cmd, *, cwd, env, timeout=None):
+        raise execrun.ExecError(
+            cmd,
+            rc=None,
+            stdout="partial",
+            stderr="killed at deadline",
+            cause=execrun.CAUSE_TIMEOUT,
+        )
+
+    with pytest.raises(BackendError) as exc:
+        producer.run_tree_review(
+            agent_backend.ANTIGRAVITY, _ctx(), model="pro", launcher=launcher
+        )
+    # Default 600s + 60s headroom = 660s actual seam kill, while the configured
+    # `--timeout` string (600s) is still surfaced for context.
+    assert "660s" in str(exc.value)
+    assert "600s" in str(exc.value)
+
+
+def test_non_timeout_launch_execerror_propagates_as_a_plain_failure(_faked):
+    # A NON-timeout transport failure (a missing binary that slipped past preflight,
+    # a vanished cwd) must NOT be reclassed as a timeout — it propagates as the raw
+    # ExecError for the service's generic `failed` mapping, never a BackendError.
+    def launcher(cmd, *, cwd, env, timeout=None):
+        raise execrun.ExecError(
+            cmd, rc=None, stderr="No such file", cause=execrun.CAUSE_MISSING_BINARY
+        )
+
+    with pytest.raises(execrun.ExecError) as exc:
+        producer.run_tree_review(agent_backend.CODEX, _ctx(), launcher=launcher)
+    assert exc.value.cause == execrun.CAUSE_MISSING_BINARY
+    assert not isinstance(exc.value, BackendError)
+
+
 def test_unparseable_output_raises_backend_error_with_raw_for_salvage(_faked):
     raw = "here is some prose but no json at all"
 
-    def launcher(cmd, *, cwd, env):
+    def launcher(cmd, *, cwd, env, timeout=None):
         return LaunchResult(returncode=0, stdout=raw, stderr="")
 
     with pytest.raises(BackendError) as exc:
@@ -176,7 +255,7 @@ def test_dry_run_prints_argv_and_never_launches_or_clones(monkeypatch, capsys):
     monkeypatch.setattr(producer, "create_readonly", lambda *a, **k: cloned.append(1))
     launched: list = []
 
-    def launcher(cmd, *, cwd, env):
+    def launcher(cmd, *, cwd, env, timeout=None):
         launched.append(1)
         return LaunchResult(returncode=0, stdout=_VALID, stderr="")
 
