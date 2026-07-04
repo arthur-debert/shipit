@@ -119,6 +119,18 @@ def test_record_emits_the_registered_event_with_flat_identity(tmp_path, caplog):
     assert rec.reason == "wording only"
 
 
+def test_record_drops_a_whitespace_only_reason(tmp_path, caplog):
+    # A whitespace-only --reason is not a reason: it must be dropped, never
+    # crash the one write path (`"   ".strip().splitlines()` is empty, so the
+    # old `[0]` raised IndexError past the CLI error shell).
+    with caplog.at_level(logging.INFO, logger="shipit.prstate"):
+        record_verdict(REPO, 5, 123, NITPICK, reason="   ", base_dir=tmp_path)
+    (rec,) = [
+        r for r in caplog.records if getattr(r, events.EXTRA_KEY, None) == VERDICT_EVENT
+    ]
+    assert not hasattr(rec, "reason")
+
+
 def test_record_refuses_a_reclassification(tmp_path):
     # Write-once: the verdict is immutable — re-classifying an
     # already-classified comment is an error, in BOTH directions.

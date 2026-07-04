@@ -93,22 +93,23 @@ def load_verdicts(
     out: dict[int, str] = {}
     for path in _log_files(repo, base_dir):
         try:
-            text = path.read_text(encoding="utf-8", errors="replace")
+            handle = path.open(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        for line in text.splitlines():
-            record = parse_record(line)
-            if record is None:
-                continue
-            if record.get(events.RECORD_KEY) != VERDICT_EVENT:
-                continue
-            if record.get("pr") != pr:
-                continue
-            comment = record.get("comment")
-            verdict = record.get("verdict")
-            if type(comment) is not int or verdict not in VERDICTS:
-                continue  # a malformed record cannot mint a verdict
-            out.setdefault(comment, verdict)
+        with handle:
+            for line in handle:
+                record = parse_record(line)
+                if record is None:
+                    continue
+                if record.get(events.RECORD_KEY) != VERDICT_EVENT:
+                    continue
+                if record.get("pr") != pr:
+                    continue
+                comment = record.get("comment")
+                verdict = record.get("verdict")
+                if type(comment) is not int or verdict not in VERDICTS:
+                    continue  # a malformed record cannot mint a verdict
+                out.setdefault(comment, verdict)
     return out
 
 
@@ -144,8 +145,9 @@ def record_verdict(
             f"{existing[comment_id]!r} — verdicts are written once and immutable"
         )
     extra: dict[str, object] = {"pr": pr, "comment": comment_id, "verdict": verdict}
-    if reason:
-        extra["reason"] = reason.strip().splitlines()[0]
+    cleaned = reason.strip() if reason else ""
+    if cleaned:
+        extra["reason"] = cleaned.splitlines()[0]
     events.emit(
         logger,
         VERDICT_EVENT,
