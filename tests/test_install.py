@@ -1264,6 +1264,29 @@ def test_plan_retired_decides_every_manifest_entry():
     ]
 
 
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "/etc/passwd",
+        "C:\\Windows\\system32\\config",
+        "../outside.yml",
+        "nested/../../outside.yml",
+        "",
+    ],
+)
+def test_retired_path_rejects_unsafe_manifest_entries(bad):
+    # Every manifest entry names a file the IO pass will unlink, so a path
+    # that could escape the consumer root fails the load closed.
+    with pytest.raises(ValueError, match="unsafe path"):
+        install._retired_path(bad)
+
+
+def test_retired_path_accepts_a_plain_relative_path():
+    assert (
+        install._retired_path(".github/workflows/x.yml") == ".github/workflows/x.yml"
+    )
+
+
 def test_retired_manifest_carries_the_copilot_workflow_history():
     # The packaged manifest's first entry is the Copilot caller workflow, with
     # its known pristine hashes from this repo's git history — including the
@@ -1325,6 +1348,24 @@ def test_retired_delete_alone_is_still_a_write(tmp_path, rec, capsys):
     # And once gone, a further re-install is back to a clean no-op (absent -> no-op).
     assert install.run(str(tmp_path)) == 0
     assert "nothing to do" in capsys.readouterr().out
+
+
+def test_kept_retired_file_changes_the_nothing_to_do_wording(tmp_path, rec, capsys):
+    # Managed set current + a kept (locally modified) retired file: the loud
+    # keep warning must not be followed by "managed set is current", which
+    # would read as a contradiction.
+    assert install.run(str(tmp_path)) == 0
+    victim = tmp_path / RETIRED_WORKFLOW_PATH
+    victim.parent.mkdir(parents=True)
+    victim.write_text(PRISTINE_WORKFLOW.read_text() + "# local tweak\n")
+    capsys.readouterr()
+
+    rc = install.run(str(tmp_path))
+    assert rc == 0
+    assert victim.is_file()
+    out = capsys.readouterr().out
+    assert "nothing to do — no automated changes to apply." in out
+    assert "managed set is current" not in out
 
 
 def test_dry_run_reports_but_keeps_a_pristine_retired_file(tmp_path, rec, capsys):

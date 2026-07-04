@@ -59,7 +59,7 @@ import tomllib
 from collections.abc import Callable
 from dataclasses import dataclass
 from importlib import resources
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from .. import __version__, config, execrun, gh, git
 
@@ -662,11 +662,31 @@ class RetiredDecision:
     actual_hash: str | None
 
 
+def _retired_path(raw: str) -> str:
+    """Validate one manifest path: plain relative, inside the consumer root.
+
+    The manifest is packaged data, but every entry names a file a later unlink
+    will destroy — so a bad entry (absolute path, drive letter, ``..``
+    traversal) fails the load closed rather than reaching the IO pass.
+    """
+    if (
+        not raw
+        or PurePosixPath(raw).is_absolute()
+        or PureWindowsPath(raw).is_absolute()
+        or ".." in PurePosixPath(raw).parts
+    ):
+        raise ValueError(f"retired-files manifest: unsafe path {raw!r}")
+    return raw
+
+
 def load_retired() -> list[RetiredFile]:
     """The packaged retired-files manifest, in manifest order."""
     data = tomllib.loads(_data_bytes(RETIRED_MANIFEST).decode("utf-8"))
     return [
-        RetiredFile(path=str(e["path"]), pristine_hashes=tuple(e["pristine"]))
+        RetiredFile(
+            path=_retired_path(str(e["path"])),
+            pristine_hashes=tuple(e["pristine"]),
+        )
         for e in data.get("retired", [])
     ]
 
@@ -1086,7 +1106,14 @@ def run(
     # no-op once the policy is in place. A pending retired delete likewise keeps
     # the run a write, so cleanup lands even when the managed set is current.
     if not writes and not seed_plan and not retire_deletes:
-        print("  nothing to do — managed set is current.")
+        # A kept retired file was just warned about; "managed set is current"
+        # right after that would read as a contradiction, so say what we mean:
+        # there is nothing shipit will change on its own.
+        print(
+            "  nothing to do — no automated changes to apply."
+            if retire_keeps
+            else "  nothing to do — managed set is current."
+        )
         logger.debug(
             "managed set is current — nothing to do", extra={"root": str(root)}
         )
