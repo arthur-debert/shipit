@@ -18,6 +18,7 @@ from .verbs import gh_setup, install, lint, logs, verify_apps
 from .verbs._context import resolve_root_context
 from .verbs.eval import eval_group
 from .verbs.hook import hook as hook_group
+from .verbs.logevent import log as log_group
 from .verbs.pr import pr as pr_group
 from .verbs.spawn import spawn as spawn_group
 from .verbs.tree import tree as tree_group
@@ -357,6 +358,11 @@ root.add_command(hook_group)
 # The nested `eval` group (HAR02) — the READER side of the harness eval store the
 # `hook` events write; `shipit eval report` aggregates it. Attached like `pr`.
 root.add_command(eval_group)
+
+# The nested `log` group (LOG04) — the constrained dev-cycle WRITE path:
+# `shipit log event <name>` records a registered milestone (ADR-0032). The
+# reader stays the flat `logs` verb above; write and read are separate verbs.
+root.add_command(log_group)
 
 # The nested `tree` group (TRE01) — isolated Trees: independent dissociated
 # clones a write-session works in (ADR-0014). Attached like `pr`.

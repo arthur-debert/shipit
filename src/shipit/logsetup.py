@@ -536,7 +536,22 @@ def configure_logging(
 
     # File sink — the durable per-repo record, attached when a target repo is
     # known (a param was injected, or the CLI resolved and passed one).
+    # Best-effort, like the step-summary sink above: an unopenable log path
+    # (read-only home, permissions) degrades to console-only rather than
+    # crashing the command — a logging glitch never blocks, and for the
+    # hook-witnessed tier (post-commit → `shipit log event`, LOG04/ADR-0032) a
+    # broken log path must never block git. The swallow is a
+    # degraded-but-continuing outcome → WARNING with the exception attached,
+    # per the fail-open canon.
     if repo is not None or base_dir is not None:
         if repo is None:
             repo = _current_repo()
-        logger.addHandler(build_file_handler(repo, base_dir=base_dir))
+        try:
+            logger.addHandler(build_file_handler(repo, base_dir=base_dir))
+        except OSError:
+            logger.warning(
+                "per-repo log file unavailable under %s; continuing without "
+                "the durable file sink",
+                resolve_log_dir(repo, base_dir=base_dir),
+                exc_info=True,
+            )

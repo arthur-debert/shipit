@@ -72,6 +72,26 @@ EVENT_NAMES = frozenset(
     }
 )
 
+#: The skill-scripted tier's names (ADR-0032; PRD §Implementation Decisions) —
+#: the only events whose human ``msg`` may come from the caller (the emit
+#: verb's ``--about``), because a skill checkpoint is the one witness that
+#: knows the crystallized intent ("planning session: reviewer symmetry").
+#: Verb- and hook-witnessed events compose their own ``msg`` at the witnessing
+#: site, so the constrained verb ignores ``--about`` for every name outside
+#: this set — the freeform-prose slot stays exactly as wide as the tier that
+#: needs it. Registry data, not verb policy: the tier a name belongs to is
+#: decided here, where new names get debated.
+SKILL_SCRIPTED_NAMES = frozenset(
+    {
+        "session.intent",
+        "planning.grill.started",
+        "planning.adr.written",
+        "planning.prd.written",
+        "planning.epic.minted",
+        "planning.ws.minted",
+    }
+)
+
 
 def emit(
     log: logging.Logger,
