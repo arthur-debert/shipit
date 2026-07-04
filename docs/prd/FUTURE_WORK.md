@@ -31,12 +31,14 @@ folds into ADP00, and the rest of its payload rides the normal install set).
 | Epic | Delivers | Depends on |
 | --- | --- | --- |
 | ADP00 | shipit-side pre-work: the managed set owns the consumer environment (install-managed pixi env/dep blocks, fleet-pinned versions); consumer-generic lefthook; lexd provision subcommand; rust lint Langs; lex-mirror AGENTS.md fix (#363); documented shipit-on-PATH story; App-liveness check; tracking issue + survival prompts; canary passes the full local checklist. | CLI02 |
-| ADP01 | Local adoption fleet-wide: per-repo nine-step checklist (install PR → gh-setup → `.treeinclude` → lint/test/build → Tree + session → agent smoke through the PR loop), evidence-verified via `shipit logs --flow` + eval. Sequencing: canary → lex → phos-core → phos-app → dodot → rest. | ADP00 |
+| ADP01 | Local adoption fleet-wide: per-repo nine-step checklist (install PR → gh-setup → `.treeinclude` → lint/test/build → Tree + session → agent smoke through the PR loop), evidence-verified via `shipit logs --flow` + eval. Sequencing (canary completes inside ADP00): lex → phos-core → phos-app → dodot → rest. | ADP00 |
 | ADP02 | CI adoption, build-then-adopt: actionlint Lang, act harness + howto, thin checks caller, pixi test/build/release encapsulation, release pipeline (absorbs Steps 5–6 / WF01 scope, verified against lex); then per-repo cutover — re-point callers one toolchain at a time, act-test, remote-verify (agent PR + rc cut), remove legacy release tooling, comb memory. | ADP01 |
 
-Dependency spine: OBS01 → … → OBS04 (shipped) → ADP00 → ADP01 → ADP02.
+Dependency spine: OBS01 → … → OBS04 (shipped) + CLI02 → ADP00 → ADP01 → ADP02.
 
-## Postponed
+## Absorbed into the active plan
+
+Formerly postponed steps whose execution now rides ADP02; their PRDs remain the spec of record.
 
 - Step 5 — pixi test/build/run + changelog/release → `docs/prd/pixi-test-build-release.md` (execution slot: ADP02's build half)
 - Step 6 — reusable workflows + release-core cutover → `docs/prd/workflows-cutover.md` (execution slot: ADP02; the one-real-release retirement gate stands)

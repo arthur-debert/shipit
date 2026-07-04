@@ -5,7 +5,7 @@ remaining leftovers (reviewer-App liveness per org) fold into ADP00.
 
 ## Problem Statement
 
-shipit's core featureset for adoption is in place, but every consumer repo in the
+shipit's core feature set for adoption is in place, but every consumer repo in the
 portfolio still runs the legacy release tooling and none is onboarded. Rolling out
 means dozens of touchpoints per repo (install, gh-setup, Trees, session bootstrap,
 hooks, pixi tasks, lint, CI workflows, release), multiplied across the fleet —
@@ -45,8 +45,9 @@ consumer:
   (install PR merged → gh-setup → `.treeinclude` → lint / test / build → Tree +
   session verified → one real agent task through the PR loop), each step with an
   explicit verified-by. The order is rigid because Tree creation and session
-  launch fail closed on a non-onboarded repo. Sequencing: canary → lex →
-  phos-core → phos-app → dodot → rest of lex-fmt → others.
+  launch fail closed on a non-onboarded repo. Sequencing (the canary is
+  completed inside ADP00): lex → phos-core → phos-app → dodot → rest of
+  lex-fmt → others.
 - **ADP02 — CI adoption: build, then adopt.** First build the missing machinery
   in shipit, verified against the first real consumer (actionlint Lang, the act
   harness with an explicit known-unsupported surface, the thin checks caller,
@@ -88,8 +89,8 @@ every run; a goal reached while fighting the tooling is a failed adoption run.
 22. As the root coordinator, I want a stop-fix-restart rule with teeth, so that workarounds never substitute for fixes that would otherwise fire N more times across the fleet.
 23. As the root coordinator in shipit, I want a survival prompt for myself and one for the in-consumer coordinator, so that both layers use the tooling correctly and friction bubbles up verbatim instead of being laundered into "done".
 24. As the in-consumer coordinator, I want my role framed as an instrument (adoption is testing the tooling on me), so that I stop and report friction rather than improvising around managed files.
-25. As the portfolio owner, I want five status tables in one tracking issue (pixi tasks × stack, local adoption × repo, CI workflows × stack, remote CI × repo, birds-eye), so that fleet progress is legible at a glance and updated at every state change.
-26. As the portfolio owner, I want the birds-eye table to double as the fleet manifest, seeded by a one-time sweep of the three owners, so that "the fleet" is an enumerated list rather than memory.
+25. As the portfolio owner, I want five status tables in one tracking issue (pixi tasks × stack, local adoption × repo, CI workflows × stack, remote CI × repo, bird's-eye), so that fleet progress is legible at a glance and updated at every state change.
+26. As the portfolio owner, I want the bird's-eye table to double as the fleet manifest, seeded by a one-time sweep of the three owners, so that "the fleet" is an enumerated list rather than memory.
 27. As a workflow author, I want actionlint as a lint Lang, so that workflow YAML errors are caught locally in milliseconds before any act run or push.
 28. As a workflow author, I want an act harness that runs one workflow/job locally under containers with crafted event payloads, so that iterating on CI does not require pushing to find out.
 29. As a workflow author, I want the act howto to state explicitly what act cannot verify (macOS/Windows runners, cross-workflow cascade, partial workflow_call, dispatch UX), so that local green is trusted only where valid.
@@ -161,7 +162,7 @@ every run; a goal reached while fighting the tooling is a failed adoption run.
   only after one real release of one real consumer.
 - **Status lives in one GitHub tracking issue** (five tables: pixi tasks ×
   stack, local adoption × repo, CI workflows × stack, remote CI × repo,
-  birds-eye), updated at every state change, never checked in. The birds-eye
+  bird's-eye), updated at every state change, never checked in. The bird's-eye
   table is the fleet manifest, seeded from a one-time sweep of the three owners.
 - **Survival prompts are ADP00 artifacts**: a shipit-side coordinator prompt
   (indirection discipline, stop-fix-restart, evidence reading, table updates)
@@ -218,7 +219,7 @@ every run; a goal reached while fighting the tooling is a failed adoption run.
   sign/notarize leg can never go green locally, so its remote verification
   budget is structurally larger.
 - The fleet has no machine-readable manifest anywhere; after ADP00 the tracking
-  issue's birds-eye table is the authoritative enumeration until something
+  issue's bird's-eye table is the authoritative enumeration until something
   better is needed.
 - Death-by-a-thousand-cuts is the named failure mode; every process decision
   above (pre-fixed blockers, checklist with verified-by, stop-fix-restart,
