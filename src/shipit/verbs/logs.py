@@ -60,7 +60,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, TypeVar
 
 from .. import execrun, flowview, identity, logcontext, logsetup, redact
 from ..session import current as session_current
@@ -78,17 +78,21 @@ _EXIT_NO_LOG = 1
 #: Exit code for a bad ``owner/repo`` (usage error).
 _EXIT_BAD_REPO = 2
 
+_T = TypeVar("_T")
 
-def _last_n(lines: list[str], n: int) -> list[str]:
-    """The last ``n`` of ``lines``: all when ``n < 0``, none when ``n == 0``,
+
+def _last_n(items: list[_T], n: int) -> list[_T]:
+    """The last ``n`` of ``items``: all when ``n < 0``, none when ``n == 0``,
     else the final ``n``.
 
-    The explicit ``n == 0`` arm guards the ``lines[-0:]`` trap (``-0 == 0``, so a
-    naive slice would return EVERY line for ``-n 0`` instead of none).
+    Generic over the element type so the one tail helper serves both the raw
+    line lists and the parsed ``--flow`` record lists. The explicit ``n == 0``
+    arm guards the ``items[-0:]`` trap (``-0 == 0``, so a naive slice would
+    return EVERY item for ``-n 0`` instead of none).
     """
     if n < 0:
-        return lines
-    return lines[-n:] if n > 0 else []
+        return items
+    return items[-n:] if n > 0 else []
 
 
 def _parse_record(line: str) -> dict[str, Any] | None:
@@ -412,6 +416,37 @@ def run(
     are injected boundaries for tests.
     """
     current_repo = current_repo or _default_repo_slug
+    try:
+        slug = repo if repo is not None else current_repo()
+        # The ONE canonical slug parser (ADR-0024): lowercases owner/name, so an
+        # API-cased or hand-typed slug resolves the SAME log directory the writer
+        # (which namespaces by the canonical Repo identity) filled.
+        target = identity.repo_from_slug(slug)
+    except execrun.ExecError as exc:
+        # Resolving the cwd repo read the local origin remote and failed — not a
+        # checkout, or no 'origin'. Keep the verb's promise of a clean message.
+        print(
+            "logs: could not determine the current repo (not a git checkout, or "
+            f"no 'origin' remote); pass an explicit owner/repo. ({exc})",
+            file=sys.stderr,
+        )
+        return _EXIT_BAD_REPO
+    except ValueError as exc:
+        print(f"logs: {exc}", file=sys.stderr)
+        return _EXIT_BAD_REPO
+
+    path = logsetup.log_file_path(target, base_dir=base_dir)
+
+    if path_only:
+        # --path is a pure LOCATOR (the module contract): it prints the resolved
+        # path and exits, never depending on the file's contents or on filter
+        # state. So it returns HERE, before the reader-only validation below —
+        # `--path --session current` outside a session, a bad `--ws`, or
+        # `--flow --raw` still print the path instead of failing on a flag that
+        # only governs reading.
+        print(str(path))
+        return 0
+
     if flow and (raw or follow):
         print(
             "logs: --flow is a rendered story view; it does not compose with "
@@ -446,30 +481,6 @@ def run(
         agent=agent,
         role=role,
     )
-    try:
-        slug = repo if repo is not None else current_repo()
-        # The ONE canonical slug parser (ADR-0024): lowercases owner/name, so an
-        # API-cased or hand-typed slug resolves the SAME log directory the writer
-        # (which namespaces by the canonical Repo identity) filled.
-        target = identity.repo_from_slug(slug)
-    except execrun.ExecError as exc:
-        # Resolving the cwd repo read the local origin remote and failed — not a
-        # checkout, or no 'origin'. Keep the verb's promise of a clean message.
-        print(
-            "logs: could not determine the current repo (not a git checkout, or "
-            f"no 'origin' remote); pass an explicit owner/repo. ({exc})",
-            file=sys.stderr,
-        )
-        return _EXIT_BAD_REPO
-    except ValueError as exc:
-        print(f"logs: {exc}", file=sys.stderr)
-        return _EXIT_BAD_REPO
-
-    path = logsetup.log_file_path(target, base_dir=base_dir)
-
-    if path_only:
-        print(str(path))
-        return 0
 
     if not path.exists():
         print(
@@ -501,8 +512,15 @@ def run(
             if record is not None and record_filter.matches_record(record)
         ]
         instant = (now or (lambda: datetime.now(timezone.utc)))()
+        # The header themes the WHOLE session (its intent/epics), so it reads the
+        # full matching set; only the body lines are tailed. Deriving both from
+        # the tailed slice would drop the intent header whenever the
+        # `session.intent` event fell before the tail window.
         for rendered in flowview.render(
-            _last_n(records, tail), now=instant, show_agents=show_agents
+            _last_n(records, tail),
+            now=instant,
+            show_agents=show_agents,
+            header_from=records,
         ):
             print(rendered, flush=True)
         return 0

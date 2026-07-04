@@ -45,6 +45,7 @@ def render(
     *,
     now: datetime,
     show_agents: bool = False,
+    header_from: Iterable[Mapping[str, Any]] | None = None,
 ) -> list[str]:
     """The flow view of ``records``: a header line, then one story line each.
 
@@ -56,12 +57,24 @@ def render(
     appends ``[agent=<id>]`` to lines whose record carries the ``agent`` domain
     key — the id is on the record either way; the flag is display only.
 
+    ``header_from`` is the set the HEADER themes from (its intent/epics), for
+    when ``records`` is a tail of a longer session: the body lists the tail but
+    the header still opens on the whole session's intent, even when the
+    ``session.intent`` event fell before the tail window. It defaults to
+    ``records`` (header and body over the same set — the reader owns whether
+    they differ, keeping the tail a selection concern out here).
+
     Returns the rendered LINES (header first) rather than one string, so the
     caller owns line emission (flushing per line, the reader's piping
     contract).
     """
     story = [r for r in records if isinstance(r, Mapping)]
-    lines = [_header(story)]
+    header_records = (
+        story
+        if header_from is None
+        else [r for r in header_from if isinstance(r, Mapping)]
+    )
+    lines = [_header(header_records)]
     for record in story:
         when = _relative_time(record.get("ts"), now)
         prefix = _prefix(record)
@@ -120,11 +133,14 @@ def _prefix(record: Mapping[str, Any]) -> str:
 def _relative_time(ts: Any, now: datetime) -> str:
     """``ts`` as a friendly age relative to ``now`` (``1h34m ago``), or ``""``.
 
-    The two largest units render (``2d4h``, ``1h34m``), a zero minor unit drops
-    (``2h ago``, not ``2h0m ago``), and anything under a second — including a
-    clock-skewed FUTURE ``ts``, which must not render a negative age — is
-    ``just now``. A missing or unparseable ``ts`` renders as no time at all:
-    the record's story line survives on its other fields.
+    Coarse by design — the two coarsest units, and no finer. The day and hour
+    tiers pair their unit with the next one down (``2d4h``, ``1h34m``) and drop
+    a zero minor unit (``2h ago``, not ``2h0m ago``); under an hour it is a
+    single unit, minutes then seconds (``5m ago``, ``42s ago`` — seconds never
+    trail a minute). Anything under a second — including a clock-skewed FUTURE
+    ``ts``, which must not render a negative age — is ``just now``. A missing or
+    unparseable ``ts`` renders as no time at all: the record's story line
+    survives on its other fields.
     """
     if not isinstance(ts, str):
         return ""

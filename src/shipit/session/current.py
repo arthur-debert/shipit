@@ -41,11 +41,15 @@ def ephemeral_session_tree(cwd: Path) -> Path | None:
     directory that merely happens to sit in an ``ephemeral/`` folder never mints
     a bogus session key; both sides are resolved so a symlinked root (macOS
     ``/tmp`` → ``/private/tmp``) cannot split one dir into "inside" and
-    "outside" spellings. Depth below the root is then pinned to the minted
-    shape's four segments: :func:`shipit.tree.layout.tree_kind` alone reads only
-    the leaf's parent segment, so a nested ``…/ephemeral/<x>`` dir INSIDE the
-    root (e.g. a directory named ``ephemeral`` inside a Tree's clone) would
-    otherwise pass the kind check and bind misleading log context.
+    "outside" spellings. ``cwd`` may be the Tree root OR any directory WITHIN it
+    (a bare shell wanders into ``src/``): the Tree root is the first four
+    segments below the central root, so we truncate to those before the kind
+    check rather than demanding an exact depth. Pinning the kind test to that
+    reconstructed root — not to ``cwd`` at whatever depth — is what keeps a
+    nested ``…/ephemeral/<x>`` dir DEEPER inside a Tree (e.g. a directory named
+    ``ephemeral`` in a Tree's clone) from passing: its ``ephemeral`` segment
+    isn't at the root's kind position, so :func:`shipit.tree.layout.tree_kind`
+    reads a different parent and rejects it.
 
     Raises whatever the environment read raises (a relative
     ``SHIPIT_TREES_ROOT`` is a :class:`ValueError` from ``central_root``);
@@ -56,11 +60,13 @@ def ephemeral_session_tree(cwd: Path) -> Path | None:
     root = layout.central_root().resolve()
     if not resolved.is_relative_to(root):
         return None
-    if len(resolved.relative_to(root).parts) != 4:
+    parts = resolved.relative_to(root).parts
+    if len(parts) < 4:
         return None
-    if layout.tree_kind(resolved) != layout.EPHEMERAL_KIND:
+    tree = root.joinpath(*parts[:4])
+    if layout.tree_kind(tree) != layout.EPHEMERAL_KIND:
         return None
-    return resolved
+    return tree
 
 
 def current_session_id(

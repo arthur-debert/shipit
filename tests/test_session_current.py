@@ -57,6 +57,31 @@ def test_wrong_tree_kind_resolves_to_none(tmp_path, monkeypatch):
     assert current.current_session_id({}, cwd=tree) is None
 
 
+def test_subdirectory_within_the_tree_still_resolves(tmp_path, monkeypatch):
+    # cwd may be DEEPER than the Tree root — a bare shell cd'd into src/. The
+    # leaf is still the first four segments below the central root, so
+    # resolution truncates to it rather than demanding an exact depth.
+    root = tmp_path / "trees"
+    tree = _ephemeral_tree(root)
+    subdir = tree / "src" / "shipit"
+    subdir.mkdir(parents=True)
+    monkeypatch.setenv(layout.CENTRAL_ROOT_ENV, str(root))
+    assert current.current_session_id({}, cwd=subdir) == SESSION_LEAF
+
+
+def test_nested_ephemeral_segment_below_a_non_session_tree_is_none(
+    tmp_path, monkeypatch
+):
+    # A dir literally named `ephemeral` DEEPER inside a NON-session Tree (here an
+    # epics write Tree) is not a session: resolution truncates to the Tree root
+    # (`epics/LOG04`, a write kind), so the decoy `ephemeral` segment never wins.
+    root = tmp_path / "trees"
+    decoy = root / "org" / "repo" / "epics" / "LOG04" / "ephemeral" / "foo"
+    decoy.mkdir(parents=True)
+    monkeypatch.setenv(layout.CENTRAL_ROOT_ENV, str(root))
+    assert current.current_session_id({}, cwd=decoy) is None
+
+
 def test_broken_root_env_degrades_to_none_never_raises(tmp_path, monkeypatch):
     # central_root raises on a relative SHIPIT_TREES_ROOT; identification is
     # best-effort, so the resolver answers "no session", not a traceback.

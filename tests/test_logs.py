@@ -75,6 +75,23 @@ def test_path_succeeds_even_when_log_absent(tmp_path, capsys):
     assert capsys.readouterr().out.strip().endswith("/o/r/shipit.log")
 
 
+def test_path_is_a_pure_locator_ignoring_reader_only_flags(tmp_path, capsys):
+    # --path prints the resolved path and exits before any reader-only
+    # validation, so combining it with a flag that would fail WHEN READING —
+    # `--session current` outside a session — still returns the path, not the
+    # usage error the reader would raise.
+    rc = logs.run(
+        "o/r",
+        path_only=True,
+        session="current",
+        base_dir=tmp_path,
+        current_repo=lambda: "x/y",
+        current_session=lambda: None,
+    )
+    assert rc == 0
+    assert capsys.readouterr().out.strip().endswith("/o/r/shipit.log")
+
+
 # --------------------------------------------------------------------------
 # Default view — path + the last N records, rendered for humans
 # --------------------------------------------------------------------------
@@ -816,6 +833,41 @@ def test_flow_applies_the_tail_count_to_the_filtered_records(tmp_path, capsys):
     assert "milestone 4" in out
     assert "milestone 3" in out
     assert "milestone 2" not in out
+
+
+def test_flow_header_survives_a_tail_that_cuts_the_intent(tmp_path, capsys):
+    # The intent event is the OLDEST record; a tail that drops it from the body
+    # must still open the story on it — the header themes the whole session,
+    # only the body lines are tailed.
+    log = tmp_path / "o" / "r" / "shipit.log"
+    log.parent.mkdir(parents=True)
+    log.write_text(
+        _record("tuning the review loop", session="s1", event="session.intent")
+        + "\n"
+        + "\n".join(
+            _record(
+                f"milestone {i}", session="s1", epic="LOG04", ws=4, event="pr.ready"
+            )
+            for i in range(3)
+        )
+        + "\n"
+    )
+    rc = logs.run(
+        "o/r",
+        flow=True,
+        tail=2,
+        base_dir=tmp_path,
+        current_repo=lambda: "x/y",
+        now=_flow_now,
+    )
+    assert rc == 0
+    out = capsys.readouterr().out.splitlines()
+    assert out[0] == "tuning the review loop"  # header from the full session
+    body = "\n".join(out[1:])
+    assert "milestone 2" in body
+    assert "milestone 1" in body
+    assert "milestone 0" not in body  # tailed out of the body
+    assert "tuning the review loop" not in body  # intent lives only in the header
 
 
 def test_flow_refuses_raw_and_follow(tmp_path, capsys):
