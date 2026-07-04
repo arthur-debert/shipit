@@ -405,7 +405,13 @@ def run(
                     logger.error(
                         "lint tool could not run",
                         exc_info=True,
-                        extra={"lang": lang.name, "tool": tool.binary, "rc": rc},
+                        extra={
+                            "lang": lang.name,
+                            "tool": tool.binary,
+                            "rc": rc,
+                            "cwd": mdir,
+                            "batch": note,
+                        },
                     )
                 else:
                     rc, out = result.rc, result.stdout + result.stderr
@@ -417,6 +423,8 @@ def run(
                             "tool": tool.binary,
                             "rc": rc,
                             "files": len(paths),
+                            "cwd": mdir,
+                            "batch": note,
                             "duration_ms": result.duration_ms,
                         },
                     )
