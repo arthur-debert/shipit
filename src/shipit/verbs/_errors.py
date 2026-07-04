@@ -31,6 +31,8 @@ from ..prstate.errors import PrStateError
 from ..prstate.flip import NotReady
 from ..prstate.reviewers_config import RequiredReviewersConfigError
 from ..spawn.subagent import SpawnError
+from ..tree.layout import LayoutError
+from ..tree.removal import RemovalError
 from ._context import NoAmbientRepoError
 
 #: Preserves the wrapped ``run()``'s parameters through :func:`cli_errors`, so
@@ -40,9 +42,10 @@ P = ParamSpec("P")
 #: The KNOWN runtime exception set — a failed boundary exec, a PR-state
 #: violation, malformed/invalid config (both spellings), and the domain
 #: refusals: the outside-a-checkout refusal the seam itself raises, the
-#: engine's refused draft→ready flip (CLI01-WS03), and the spawn pipeline's
-#: refusal (CLI02-WS02). Extended deliberately, one entry per new domain
-#: refusal, as verbs adopt the shell.
+#: engine's refused draft→ready flip (CLI01-WS03), the spawn pipeline's
+#: refusal (CLI02-WS02), a misconfigured central Tree root, and a
+#: refused/failed Tree removal (CLI02-WS03). Extended deliberately, one entry
+#: per new domain refusal, as verbs adopt the shell.
 KNOWN_ERRORS: tuple[type[Exception], ...] = (
     execrun.ExecError,
     PrStateError,
@@ -51,6 +54,8 @@ KNOWN_ERRORS: tuple[type[Exception], ...] = (
     NoAmbientRepoError,
     NotReady,
     SpawnError,
+    LayoutError,
+    RemovalError,
 )
 
 

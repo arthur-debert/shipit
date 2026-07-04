@@ -30,6 +30,7 @@ from __future__ import annotations
 import click
 
 from ..identity import Repo, repo_from_slug
+from ..tree.cleanup import parse_duration
 from ._context import current_root_context
 
 
@@ -56,6 +57,33 @@ class RepoSlugParam(click.ParamType):
 
 #: The shared instance verbs reference (a ParamType is stateless).
 REPO_SLUG = RepoSlugParam()
+
+
+class DurationParam(click.ParamType):
+    """Mints seconds (``float``) from a human duration (``14d``/``36h``/``90m``)
+    at parse.
+
+    The canonical parser (:func:`shipit.tree.cleanup.parse_duration`) is the
+    ONE place a duration string becomes seconds, so a flag like ``tree gc
+    --threshold`` validates at argv parse: a malformed duration is a click
+    usage error — exit 2, never verb-body code (the CLI02-WS03 exit-contract
+    move). An already-converted ``float`` (a programmatic default) passes
+    through.
+    """
+
+    name = "duration"
+
+    def convert(self, value: object, param, ctx) -> float:
+        if isinstance(value, (int, float)):
+            return float(value)
+        try:
+            return parse_duration(str(value))
+        except ValueError as exc:
+            self.fail(str(exc), param, ctx)
+
+
+#: The shared instance verbs reference (a ParamType is stateless).
+DURATION = DurationParam()
 
 
 def _ambient_repo() -> Repo | None:
