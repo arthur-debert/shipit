@@ -423,8 +423,13 @@ def test_create_readonly_real_git_survives_a_commit_graph_bearing_reference(
     # The reviewer Tree is real, on the PR head, and fully independent.
     assert (dest / "feature.txt").read_text() == "under review\n"
     assert not (dest / ".git" / "objects" / "info" / "alternates").exists()
-    # First-attempt success: the #353 retry WARNING never fired.
-    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    # First-attempt success: the #353 retry WARNING never fired. Filter by
+    # logger so an unrelated warning elsewhere cannot flake this assertion.
+    assert not [
+        r
+        for r in caplog.records
+        if r.name == "shipit.git" and r.levelno >= logging.WARNING
+    ]
 
 
 def test_case_divergent_sources_share_one_review_tree(tmp_path):

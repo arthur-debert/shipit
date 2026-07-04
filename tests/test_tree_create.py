@@ -273,8 +273,13 @@ def test_clone_dissociated_survives_a_commit_graph_bearing_reference(
     # A real, checked-out, independent clone came back...
     assert (dest / "README.md").read_text() == "hello tree\n"
     assert not (dest / ".git" / "objects" / "info" / "alternates").exists()
-    # ...on the FIRST attempt: the #353 full-clone retry never fired.
-    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    # ...on the FIRST attempt: the #353 full-clone retry never fired. Filter by
+    # logger so an unrelated warning elsewhere cannot flake this assertion.
+    assert not [
+        r
+        for r in caplog.records
+        if r.name == "shipit.git" and r.levelno >= logging.WARNING
+    ]
     # And nothing about the -c fix leaked into the new clone's persistent config.
     assert (
         subprocess.run(
