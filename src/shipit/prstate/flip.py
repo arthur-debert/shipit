@@ -44,7 +44,12 @@ class NotReady(RuntimeError):
 
 
 def guarded_flip(
-    pr: PrId, roster: Roster | None = None, *, flip=gh.pr_ready, evaluate_status=None
+    pr: PrId,
+    roster: Roster | None = None,
+    *,
+    flip=gh.pr_ready,
+    evaluate_status=None,
+    sightings: events.Sightings | None = None,
 ) -> TaskStatus:
     """Re-evaluate the live PR and flip draft→ready ONLY if it is READY.
 
@@ -67,9 +72,21 @@ def guarded_flip(
     draft→ready boundary (default :func:`shipit.gh.pr_ready`); `evaluate_status`
     yields the fresh `TaskStatus` (default: `gather` + `evaluate` over the roster
     above). A test injects both to drive the guard without a network.
+
+    `sightings` is the caller's first-sight registry for the observational
+    dev-cycle events (ADR-0032): `pr next`'s ready act threads its
+    invocation-wide registry so the re-gather here re-tags nothing that gather
+    already witnessed; ``None`` (the standalone `pr ready` shape) lets the
+    re-gather mint its own — that gather is the invocation's only one.
     """
     if evaluate_status is None:
-        status = evaluate(gather(pr, roster if roster is not None else load_roster()))
+        status = evaluate(
+            gather(
+                pr,
+                roster if roster is not None else load_roster(),
+                sightings=sightings,
+            )
+        )
     else:
         status = evaluate_status(pr)
     if status.state is not TaskState.READY:

@@ -1,98 +1,40 @@
-"""``shipit spawn`` — shipit-owned subagent spawning (ADR-0017 / ADR-0019).
+"""``shipit spawn`` — shipit-owned subagent spawning, as ADR-0030 click glue.
 
 A NESTED click group mirroring ``shipit tree``: ``shipit spawn <verb>`` is the
-surface for launching backend-agent **Runs** that shipit owns end to end. The
-first verb, ``subagent``, creates a write **Tree** by REUSING the tree-creation
-path, then launches a headless ``claude`` child rooted in that Tree per the
-ADR-0019 launch contract. The Run does real work that **culminates in a draft PR**
-(TRE03-WS02): it implements its issue and opens a draft PR from the Tree's branch,
-and ``spawn`` surfaces the Run↔PR linkage so the coordinator drives that PR with
-the existing ``shipit pr status <N>`` engine — exactly as a hand-spawned
-implementer does.
+surface for launching backend-agent **Runs** that shipit owns end to end
+(ADR-0017 / ADR-0019). The whole pipeline — shape validation → identity →
+umbrella check → Tree → launch → post-condition audit — lives in the domain
+(:func:`shipit.spawn.subagent.spawn_subagent`, spec → typed result); this
+module is the three ADR-0030 pieces and nothing else:
 
-The verb is thin: resolve the ambient repo identity at the gh/git boundary, hand a
-typed :class:`TreeSpec` to the existing pure planner + effectful orchestrator
-(:func:`shipit.tree.create.create`) — Tree creation is never reimplemented — launch
-the child through the unit-testable :mod:`shipit.spawn.launch` seam, then resolve the
-PR the Run opened on the Tree's branch back through the same :mod:`shipit.gh`
-boundary the fleet scan uses (no side database — the PR on the branch IS the link).
-
-**Fail-closed** (ADR-0017/0019): a Tree-creation error fails the spawn loud —
-NEVER a silent fallback to a native ``git worktree``. The launcher is reached only
-after a Tree exists, so a failed ``create`` short-circuits to a clean exit-1 and
-nothing is ever launched against the parent checkout.
+- **params** — the shared Tree-shape option stack (:func:`.._params.shape_options`)
+  plus the verb's own ``--repo``/``--role``/``--backend``; click validates only
+  the explicit primitives — WHICH shape the combination selects (and the
+  role-dependent ``--issue`` requirement) is the pipeline's own shape stage, a
+  runtime refusal, so a valid reviewer spawn (no ``--issue``) is never rejected
+  at parse.
+- **domain call** — one :class:`~shipit.spawn.subagent.SubagentSpec` handed to
+  the pipeline, which returns the frozen
+  :class:`~shipit.spawn.subagent.SpawnResult` or raises the
+  :class:`~shipit.spawn.subagent.SpawnError` domain refusal.
+- **render** — the pure :func:`format_spawned` (the byte-stable, agent-parsed
+  ``SPAWNED`` block) through the shared :func:`~.._render.emit`; the exit code
+  derives from the result, with every refusal mapped by the one
+  :func:`~.._errors.cli_errors` shell (``error: …`` + exit 1) instead of the
+  old per-verb print+log+rc helper.
 """
 
 from __future__ import annotations
 
 import json
-import logging
-import sys
-import time
 
 import click
 
-from .. import events, execrun, gh, git, identity, logcontext
-from ..spawn import backends, launch
-from ..tree.create import Tree, create, new_agent_hash
-from ..tree.layout import (
-    TreeSpec,
-    epic_umbrella_base,
-    issue_branch,
-    work_stream_branch,
-)
-from ..tree.readonly import create_readonly, readonly_plan
-
-#: The spawn subsystem's logger — a child of the package ``shipit`` logger, so its
-#: records ride the LOG01 pipeline (JSONL file sink, bound domain keys, redaction)
-#: with zero wiring here. Lifecycle narration follows the spray conventions
-#: (glassbox PRD / ADR-0029): milestones at INFO with durations where meaningful,
-#: mechanics at DEBUG, propagating failures at ERROR with the exception attached.
-#: The user-facing surface (the stderr diagnostics, the SPAWNED stdout block) is
-#: unchanged — logging is additive plumbing under it, never a replacement.
-logger = logging.getLogger("shipit.spawn")
-
-#: The backends ``spawn subagent`` can launch today — **adapter-driven** (ADR-0020
-#: §Decision 2): derived from the :mod:`shipit.spawn.backends` registry, not a
-#: hand-maintained constant, so wiring a backend is one registry entry. ``claude``
-#: (ADR-0019), ``codex``, and ``antigravity`` (the ``agy`` CLI) are all registered —
-#: write Runs (WS02/WS03) and reviewer Runs (WS04a). A ``click.Choice`` over this gates
-#: the CLI, and :func:`run_subagent` re-checks it so the programmatic entry is guarded too.
-SUPPORTED_BACKENDS = backends.supported_backends()
-
-#: The role that gets a shared **read-only Tree** + a **Reviewer Run** (ADR-0018)
-#: instead of the per-Run write Tree every other role gets: a reviewer is read-only
-#: and branch-pinned, so :func:`run_subagent` dispatches on this exact value.
-REVIEWER_ROLE = "reviewer"
-
-
-def _elapsed_ms(start: float) -> int:
-    """Milliseconds elapsed since ``start`` (a ``time.monotonic`` stamp)."""
-    return int((time.monotonic() - start) * 1000)
-
-
-def _fail(message: str, *, exc: BaseException | None = None, **fields: object) -> int:
-    """Refuse the spawn: the user-facing stderr line PLUS the durable error record.
-
-    Every refusal in this verb propagates as the clean exit-1, so it is a
-    *propagating failure* under the spray conventions (ADR-0029): logged at ERROR,
-    with the causing exception attached via ``exc`` when one exists. The stderr
-    ``print`` stays byte-identical to what the verb always emitted — it is the
-    user-facing surface; the log record is the durable one (before this, the print
-    was the ONLY record of a failed spawn). ``fields`` land as flat event extras
-    (:class:`structlog.stdlib.ExtraAdder` adopts stdlib ``extra=``); ``None``
-    values are dropped so the absent-not-null record contract holds for extras
-    exactly as it does for domain keys.
-    """
-    print(f"spawn subagent: {message}", file=sys.stderr)
-    extras = {name: value for name, value in fields.items() if value is not None}
-    # One exc_info form across the spray (LOG02 convergence): `exc_info=True`
-    # reads the ACTIVE exception — with its real traceback — where passing the
-    # instance would attach only type+value when it was never raised here. Every
-    # caller that passes `exc` does so from inside its `except` block, so the
-    # active exception is exactly `exc`.
-    logger.error("spawn subagent: %s", message, exc_info=exc is not None, extra=extras)
-    return 1
+from ..spawn import subagent
+from ..spawn.subagent import SUPPORTED_BACKENDS
+from ._errors import cli_errors
+from ._params import shape_options
+from ._render import emit
 
 
 @click.group(
@@ -118,53 +60,7 @@ def spawn() -> None:
         "selection is a later WS."
     ),
 )
-@click.option(
-    "--epic",
-    required=False,
-    default=None,
-    help=(
-        "Epic code the Run belongs to, e.g. TRE03 (rides the Tree branch E/WSnn). The "
-        "EPIC shape: give it WITH --ws. Omit BOTH for a standalone --issue Tree "
-        "(branch issues/<id>/<session>, base origin/main)."
-    ),
-)
-@click.option(
-    "--ws",
-    type=int,
-    required=False,
-    default=None,
-    help=(
-        "Work stream number N (the WSnn half of the Tree branch E/WSnn). Give it WITH "
-        "--epic; omit both for a standalone --issue Tree."
-    ),
-)
-@click.option(
-    "--issue",
-    type=int,
-    required=False,
-    default=None,
-    help=(
-        "The issue the Run implements. It rides the task prompt (the Run reads it "
-        "with `gh issue view`) and the draft PR links it as `for #<issue>`, so the "
-        "spawned-Run PR flows through the normal engine like any hand-spawned one. "
-        "REQUIRED for a write role (validated in `run_subagent`); a `reviewer` Run "
-        "implements no issue, so it is OPTIONAL at the CLI to keep a valid reviewer "
-        "spawn (no `--issue`) from being rejected before `run_subagent` runs. Without "
-        "--epic/--ws it ALSO selects the standalone-issue shape (branch "
-        "issues/<id>/<session>)."
-    ),
-)
-@click.option(
-    "--session",
-    default="work",
-    show_default=True,
-    help=(
-        "Session name for a standalone-issue Tree's branch issues/<id>/<session>. The "
-        "suffix keeps issues/<id>/ a ref DIRECTORY so a +1 session on the same issue "
-        "(e.g. --session onboard) coexists with the default `work` (naming.lex §3). "
-        "Ignored by the --epic/--ws (work-stream) shape."
-    ),
-)
+@shape_options
 @click.option(
     "--role",
     required=True,
@@ -199,7 +95,7 @@ def subagent_cmd(
     """Create a write Tree and launch a backend-agent Run that reports via a draft PR.
 
     Resolve the ambient repo identity, create a write Tree by reusing
-    ``shipit tree create``, then launch a headless ``claude`` child whose ``cwd`` IS
+    ``shipit tree create``, then launch a headless backend child whose ``cwd`` IS
     that Tree (ADR-0019). Two write shapes, dispatched on whether ``--epic``/``--ws``
     are given:
 
@@ -211,9 +107,11 @@ def subagent_cmd(
       from ``origin/main`` on branch ``issues/<id>/<session>`` (session default
       ``work``), so the Run's draft PR targets ``main``.
 
-    Either way the Run implements ``--issue`` and opens a draft PR from the Tree's
-    branch; ``spawn`` resolves that PR back from the branch and reports the Run↔PR
-    linkage so the coordinator drives it with ``shipit pr status``.
+    Either way the Run implements ``--issue`` (REQUIRED for a write role — it rides
+    the task prompt and the draft PR links it as ``for #<issue>``; a `reviewer` Run
+    implements no issue) and opens a draft PR from the Tree's branch; ``spawn``
+    resolves that PR back from the branch and reports the Run↔PR linkage so the
+    coordinator drives it with ``shipit pr status``.
 
     Fail-closed: if the epic umbrella branch is absent on the remote, or a
     Tree-creation error occurs, the spawn exits 1 loudly — never a silent fallback
@@ -222,7 +120,7 @@ def subagent_cmd(
     which is not an OPEN, DRAFT PR targeting the intended base, is also a clean exit-1.
     """
     raise SystemExit(
-        run_subagent(
+        run(
             repo=repo,
             epic=epic,
             ws=ws,
@@ -234,7 +132,22 @@ def subagent_cmd(
     )
 
 
-def run_subagent(
+def format_spawned(result: subagent.SpawnResult) -> str:
+    """The pure renderer for the agent-parsed ``SPAWNED`` block — byte-stable.
+
+    A ``SPAWNED`` sentinel line plus the Run's coordinates as indented JSON
+    (the result's own ``to_dict()``, so the surface is exactly the typed
+    result's declared field set). A WRITE Run's payload carries the Run↔PR
+    linkage (``pr``/``pr_state``/``pr_is_draft``) the coordinator acts on; a
+    reviewer Run reports through the existing PR and opens none, so its block
+    renders WITHOUT the linkage keys (``to_dict`` drops them, absent-not-null).
+    Frozen agent-facing output (the PRD's sentinel contract) — do not restyle.
+    """
+    return "SPAWNED\n" + json.dumps(result.to_dict(), indent=2)
+
+
+@cli_errors
+def run(
     *,
     repo: str,
     role: str,
@@ -243,608 +156,27 @@ def run_subagent(
     issue: int | None = None,
     session: str = "work",
     backend: str = "claude",
-    launcher: launch.Runner | None = None,
+    bounds: subagent.Boundaries | None = None,
 ) -> int:
-    """Resolve identity → create the Tree → launch the Run → link its PR. Returns a code.
+    """Build the spec → run the pipeline → render SPAWNED. Returns an exit code.
 
-    Two axes decide the Tree. **Role** picks write vs read-only:
-
-    - every role but ``reviewer`` gets a per-Run **write** Tree: the child implements
-      ``--issue`` and opens a draft PR on the Tree's branch, and the proof is that
-      Run↔PR linkage — the SPAWNED summary reports it for ``shipit pr status``;
-    - ``reviewer`` (ADR-0018) gets a shared **read-only** Tree on the existing PR head
-      and posts its review THROUGH that PR, so it needs no ``--issue`` and leaves no
-      Run↔PR linkage to resolve — its proof is the child's clean exit.
-
-    **Shape** picks the branch/base, dispatched on whether ``--epic``/``--ws`` are given:
-
-    - **epic/work stream** (``--epic E --ws N``): branch ``E/WSnn`` cut from the
-      epic-grouped umbrella base (``origin/E/umbrella``, #176), so the draft PR targets
-      the epic branch ``E/umbrella``;
-    - **standalone issue** (``--issue N`` with NO ``--epic``/``--ws``): branch
-      ``issues/<id>/<session>`` (session default ``work``) cut from ``origin/main``, so
-      the draft PR targets ``main``. A reviewer follows the same two shapes to resolve
-      the head it reviews.
-
-    Returns 1 with a clean stderr message (never a traceback) when the backend is
-    unsupported, ``--epic``/``--ws`` are given only half (incomplete epic shape), ``--ws``
-    is not positive, ``--issue`` is missing/not positive for a WRITE Run, neither shape is
-    given for a reviewer, ``--session`` is empty for a standalone-issue Run (it is ignored
-    by the ``--epic``/``--ws`` shape), ``--repo`` disagrees with the ambient
-    checkout, the command is not run inside a GitHub checkout, a git/gh call fails,
-    **Tree creation fails** (fail-closed — no native-worktree fallback), or the child
-    exits nonzero. For a write Run it also fails when the child exits 0 without opening a
-    PR on the branch, that PR's state cannot be read, or the PR is not an OPEN, DRAFT PR
-    targeting the Tree's intended base (an invalid lifecycle state the coordinator must
-    not be handed).
-
-    ``launcher`` injects the subprocess seam so the launch contract is unit-tested
-    without spawning a real ``claude``; ``None`` uses the real
-    :func:`shipit.spawn.launch._exec_runner` (a consumer view over
-    :func:`shipit.execrun.run`).
+    ``bounds`` injects the pipeline's effectful edges
+    (:class:`~shipit.spawn.subagent.Boundaries`) for direct (test) callers;
+    ``None`` is production. Returns 0 on a completed spawn; every pipeline
+    refusal (:class:`~shipit.spawn.subagent.SpawnError` — bad shape, wrong
+    checkout, failed Tree fail-closed, failed launch, failed handshake audit)
+    propagates to the :func:`~shipit.verbs._errors.cli_errors` shell: one clean
+    ``error: …`` stderr line + exit 1, never a traceback, never a SPAWNED block.
     """
-    # A fresh spawn MINTS its own Tree; any `tree` already bound in the process
-    # log context is stale for THIS spawn's story — a nested spawn inherits the
-    # parent's `SHIPIT_LOG_CTX_TREE` (rebound at logging setup), and a prior spawn
-    # in the same process leaves its assignment bound. Drop it at the entry so the
-    # request milestone and any pre-Tree refusal record NO tree (absent-not-null),
-    # and the assignment below is the single seam that binds `tree` — it appears
-    # once, when assigned for this spawn (ADR-0029 record contract).
-    logcontext.unbind("tree")
-    # Lifecycle milestone (ADR-0029): the spawn REQUEST, narrated as received —
-    # before any gate — so even a refused spawn leaves a durable record of what
-    # was asked. The shape fields ride as flat extras (absent when not given);
-    # the domain keys (`repo` from the CLI entry, `tree` once assigned below)
-    # bind via logcontext and land on this and every later record.
-    logger.info(
-        "spawn subagent: %s run requested on backend %s",
-        role,
-        backend,
-        extra={
-            name: value
-            for name, value in {
-                "role": role,
-                "backend": backend,
-                "epic": epic,
-                "ws": ws,
-                "issue": issue,
-                "session": session if epic is None and ws is None else None,
-            }.items()
-            if value is not None
-        },
-    )
-    if backend not in SUPPORTED_BACKENDS:
-        supported = ", ".join(SUPPORTED_BACKENDS)
-        return _fail(
-            f"unsupported backend {backend!r} (supported: {supported}); wiring a "
-            "new backend is one entry in the adapter registry (ADR-0020).",
-            backend=backend,
-        )
-    # The explicit guard above fails an unknown backend LOUD at the verb boundary (no
-    # silent default to claude); only then do we resolve its adapter (ADR-0020). The
-    # adapter supplies the per-backend argv / auth-env / read-only posture; everything
-    # else below (Tree, prompts, launch, PR resolution) is backend-agnostic.
-    adapter = backends.resolve(backend)
-
-    # Shape gate (before any I/O). --epic and --ws are a PAIR (the epic/work-stream
-    # shape); one without the other is an incomplete shape and refused loud. Their
-    # ABSENCE selects the standalone-issue shape (branch issues/<id>/<session>).
-    has_epic = epic is not None or ws is not None
-    if has_epic and (epic is None or ws is None):
-        return _fail(
-            "the epic shape needs both --epic and --ws "
-            f"(got epic={epic!r}, ws={ws!r}); omit both for a standalone --issue Tree.",
-            epic=epic,
-            ws=ws,
-        )
-    if has_epic and ws < 1:
-        return _fail(f"--ws must be a positive integer (got {ws})", epic=epic, ws=ws)
-    if role != REVIEWER_ROLE and (issue is None or issue < 1):
-        # ``--issue`` rides the task prompt and the draft PR's ``for #<issue>`` link;
-        # a missing or zero/negative value (which click's int type still accepts) would
-        # forge a nonsensical issue reference. Refuse it before any Tree/child work,
-        # mirroring the ``--ws`` guard above. A reviewer Run implements no issue (it
-        # reviews an existing PR head), so the requirement does not apply to it. This
-        # holds for BOTH write shapes — the epic Run's PR links ``for #<issue>`` and the
-        # standalone Run's issue also names its branch.
-        return _fail(f"--issue must be a positive integer (got {issue})", role=role)
-    if not has_epic and issue is None:
-        # Reachable only for a reviewer (a write role already required --issue above):
-        # with neither an epic shape nor an issue there is no branch to resolve a head
-        # from. Refuse it loud with a clear, reviewer-specific message HERE — otherwise the
-        # reviewer dispatch below would take the issue path and call
-        # `issue_branch(None, session)`, which raises a generic ValueError ("issue number
-        # must be a positive integer", via its isinstance/`< 1` guard). A clean exit-1
-        # either way, but this message names the ACTUAL problem (no shape given), not a
-        # confusing complaint about the issue number.
-        return _fail(
-            "a reviewer needs a branch to review — give --epic E --ws N or --issue N.",
-            role=role,
-        )
-
-    # SPAWN-SEAM identity binding (ADR-0032 / LOG04-WS02): the spawn's own
-    # arguments ARE the worker's dev-cycle identity, so `epic`/`ws`/`role` bind
-    # here — the moment they are known and validated — and every subsequent
-    # record of this spawn carries them. `agent` (the spawn id) binds in the
-    # launch tails once minted. `env_export` at the launch then threads ALL
-    # bound keys into the Run's environment (`SHIPIT_LOG_CTX_*`), so every
-    # shipit command the worker runs correlates to its Work Stream with zero
-    # worker cooperation — retiring the never-set `SHIPIT_EPIC` marker as an
-    # identity channel. A standalone-issue spawn has no epic/ws; `bind` drops
-    # the `None` halves (present-when-bound, absent-not-null).
-    logcontext.bind(epic=epic, ws=ws, role=role)
-
-    root = git.repo_root()
-    if not root:
-        return _fail("not inside a git checkout")
-    try:
-        # Identity derives LOCALLY from the origin remote (ADR-0024): one canonical,
-        # case-normalized Repo value object — a malformed remote fails loud
-        # (ValueError) rather than feeding a bogus identity into the TreeSpec.
-        repo_identity = identity.resolve_repo(root)
-        url = git.remote_url(cwd=root)
-    except (execrun.ExecError, ValueError) as exc:
-        return _fail(str(exc), exc=exc)
-
-    # --repo is the wrong-checkout guard, not a repo SELECTOR yet: the skeleton
-    # resolves identity from the ambient checkout, so a --repo that names a
-    # different repo is refused rather than silently ignored. Compared through the
-    # canonical identity (lowercased — GitHub slugs are case-insensitive), so a
-    # mixed-case --repo never false-negatives against a case-varying origin.
-    # Multi-repo selection is a later WS.
-    if repo.strip().lower() not in (repo_identity.name, repo_identity.slug):
-        return _fail(
-            f"--repo {repo!r} but the ambient checkout is "
-            f"{repo_identity.slug!r}; the skeleton spawns from the target checkout "
-            "(multi-repo selection is a later WS)."
-        )
-
-    # Reviewer Run (ADR-0018): a shared READ-ONLY Tree on the existing PR head, not a
-    # per-Run write Tree. Its target branch follows the SHAPE — the epic work-stream head
-    # E/WSnn, or a standalone-issue head issues/<id>/<session> — built from the same
-    # grammar helpers the write planner uses so a reviewer pins exactly the branch a
-    # write Run pushed. Dispatched before the write path so the two never share provisioning.
-    if role == REVIEWER_ROLE:
-        try:
-            review_branch = (
-                work_stream_branch(epic, ws)
-                if has_epic
-                else issue_branch(issue, session)
-            )
-        except ValueError as exc:
-            # Fail loud, identically to the write path: work_stream_branch validates the
-            # epic code (an empty/invalid epic must NOT silently yield "/WS01") and
-            # issue_branch validates the session — both raise ValueError, surfaced here as
-            # the verb's clean exit-1, never a traceback.
-            return _fail(str(exc), exc=exc)
-        return _launch_reviewer(
-            repo=repo_identity,
-            branch=review_branch,
-            source_repo=root,
-            github_url=url,
-            adapter=adapter,
-            launcher=launcher,
-        )
-
-    # WRITE Run: build the shape's TreeSpec, then hand off to the shared launch tail.
-    if has_epic:
-        # Epic-base resolution (#176): a work stream rides the epic topology, so its Tree
-        # is cut from the epic-grouped umbrella base (origin/E/umbrella) and its draft PR
-        # targets the EPIC branch (E/umbrella), NOT main. The EPIC shape of the TreeSpec
-        # resolves both — branch E/WSnn, base origin/E/umbrella — through the same pure
-        # planner `shipit tree create` uses; the PR target falls out of `tree.base` in
-        # `_launch_write` (origin/E/umbrella -> E/umbrella), exactly as origin/main -> main.
-        try:
-            umbrella_base = epic_umbrella_base(epic)  # origin/E/umbrella
-        except ValueError as exc:
-            # An invalid/empty epic code (not a single alphanumeric token) would build a
-            # malformed or path-traversing umbrella ref, so the pure helper refuses it.
-            # Catch that here and emit the same clean exit-1-with-diagnostic the rest of
-            # the verb uses for fail-closed paths — never an escaping traceback.
-            return _fail(str(exc), exc=exc)
-        umbrella_branch = umbrella_base.split("/", 1)[-1]  # E/umbrella
-        # Fail-closed (ADR-0017/0019): the epic umbrella branch MUST exist on the remote
-        # before we cut a work stream from it. If it does not, refuse LOUD — never
-        # silently fall back to origin/main, which would land the WS PR on the wrong base
-        # and break the coordinator-driven epic topology. Checked against the remote here
-        # (pre-clone) so the diagnostic names the missing epic branch precisely, rather
-        # than surfacing as an opaque `git checkout` failure deep in tree creation.
-        try:
-            umbrella_exists = git.remote_branch_exists(umbrella_branch, cwd=root)
-        except execrun.ExecError as exc:
-            return _fail(str(exc), exc=exc)
-        if not umbrella_exists:
-            return _fail(
-                f"epic base branch {umbrella_branch!r} does not exist "
-                f"on origin; cannot cut work stream {epic}/WS{ws:02d} from it. Create "
-                "the epic umbrella branch first — refusing to fall back to origin/main, "
-                "which would target the WS PR at the wrong base (#176, fail-closed).",
-                epic=epic,
-                ws=ws,
-            )
-        spec = TreeSpec(
-            repo=repo_identity,
-            agent_hash=new_agent_hash(),
-            epic=epic,
-            ws=ws,
-        )
-    else:
-        # Standalone-issue shape (no epic): branch issues/<id>/<session>, base
-        # origin/main. Validate the branch grammar (positive issue, non-empty session)
-        # BEFORE any side effect, mirroring the epic umbrella pre-check — a bad --session
-        # must fail loud here, not deep in tree creation. `origin/main` always exists, so
-        # there is no umbrella-style remote pre-check to run.
-        try:
-            issue_branch(issue, session)  # validation only; the spec re-plans it
-        except ValueError as exc:
-            return _fail(str(exc), exc=exc)
-        spec = TreeSpec(
-            repo=repo_identity,
-            agent_hash=new_agent_hash(),
-            issue=issue,
-            session=session,
-        )
-
-    return _launch_write(
-        spec,
-        source_repo=root,
-        github_url=url,
+    spec = subagent.SubagentSpec(
+        repo=repo,
         role=role,
+        epic=epic,
+        ws=ws,
         issue=issue,
+        session=session,
         backend=backend,
-        adapter=adapter,
-        launcher=launcher,
     )
-
-
-def _launch_write(
-    spec: TreeSpec,
-    *,
-    source_repo: str,
-    github_url: str,
-    role: str,
-    issue: int | None,
-    backend: str,
-    adapter: backends.BackendAdapter,
-    launcher: launch.Runner | None,
-) -> int:
-    """Create the write Tree from ``spec``, launch the Run, resolve its PR. Returns a code.
-
-    The shared write tail for BOTH shapes (epic/work stream and standalone issue): the
-    caller builds the shape's :class:`TreeSpec` and does any shape-specific pre-checks
-    (the epic umbrella existence), then this seam materializes the Tree, launches the
-    backend child rooted in it, and resolves the Run↔PR linkage the coordinator drives —
-    identically whichever shape produced the spec, since ``tree.base``/``tree.branch``
-    already encode it.
-
-    Fail-closed (ADR-0017/0019): a Tree-creation error fails LOUD with no native-worktree
-    fallback (the launcher is unreachable unless a real Tree exists). After a clean child
-    exit it also fails when no PR was opened on the branch, the PR state is unreadable, or
-    the PR is not an OPEN, DRAFT PR targeting ``tree.base`` — each a clean exit-1, never a
-    SPAWNED line.
-    """
-    create_start = time.monotonic()
-    try:
-        tree = create(spec, source_repo=source_repo, github_url=github_url)
-    except (ValueError, execrun.ExecError, OSError) as exc:
-        # Fail-closed (ADR-0017/0019): a Tree-creation error fails the spawn LOUD.
-        # There is deliberately no native-worktree fallback — the launcher below is
-        # unreachable unless a real Tree exists, so a failed create can never end up
-        # launching a Run against the parent checkout.
-        return _fail(
-            f"tree creation failed: {exc}",
-            exc=exc,
-            duration_ms=_elapsed_ms(create_start),
-        )
-
-    # Launch the backend child rooted in the Tree through its adapter (ADR-0020): the
-    # cwd IS the Tree, the adapter's child_env scrubs the backend's auth-shadowing vars
-    # (for claude, ANTHROPIC_API_KEY), and build_command conveys the role (for claude,
-    # --agent <role>, so the guard allows the Run's own edits). The task tells the Run to
-    # implement the issue and open a draft PR from this branch (the result channel —
-    # ADR-0019 §6); base_branch drops the remote prefix off the Tree's base so the PR
-    # targets a branch name (origin/E/umbrella -> E/umbrella, origin/main -> main). The
-    # Tree path is passed as `cwd`: most backends root via the process cwd and ignore it,
-    # but `agy` ignores its process cwd and is rooted ONLY by `--add-dir <Tree>`.
-    # SPAWN SEAM for the domain-key context (ADR-0029/0032): the Tree's identity
-    # binds here — the coordinator's records from this point carry `tree` (its
-    # path, the same identity the SPAWNED payload reports) — alongside `agent`,
-    # the spawn id (the Tree dir's disambiguating hash doubles as the Run's
-    # identity, so `shipit logs --agent <id>` and the Tree leaf name agree).
-    # `env_export` below threads every bound key (tree/agent here; repo from the
-    # CLI entry; epic/ws/role from the spawn args) into the Run's environment,
-    # so each `shipit` command the Run executes inside the Tree rebinds them at
-    # its own logging setup and its records correlate back here.
-    logcontext.bind(tree=tree.path, agent=spec.agent_hash)
-    # Tree-assignment milestone (ADR-0029): the Run has a home. Tree birth is the
-    # slowest, most failure-prone leg of a spawn (clone + provision), so the
-    # duration is the meaningful one; the `tree` domain key bound above rides this
-    # and every later record.
-    create_ms = _elapsed_ms(create_start)
-    logger.info(
-        "spawn subagent: write tree assigned on %s (base %s) in %dms",
-        tree.branch,
-        tree.base,
-        create_ms,
-        extra={"branch": tree.branch, "base": tree.base, "duration_ms": create_ms},
-    )
-    base_branch = tree.base.split("/", 1)[-1] if "/" in tree.base else tree.base
-    task = launch.write_task(
-        role, issue=issue, branch=tree.branch, base_branch=base_branch
-    )
-    # Route the write Run THROUGH the Tree's pixi env (ADR-0019 amendment): a provisioned
-    # write Tree carries `.pixi/envs/default`, so `pixi_wrap` re-expresses the argv as
-    # `pixi run --manifest-path <tree>/pixi.toml -- <argv>` and the child's tools resolve
-    # to its OWN env (else they'd resolve the coordinator's env — docs/dev/pixi.lex §7).
-    # `scrub_tree_env` drops leaked PIXI_*/CONDA_* on top of the adapter's auth scrub.
-    cmd = launch.pixi_wrap(adapter.build_command(task, role, cwd=tree.path), tree.path)
-    # Launch milestone (ADR-0029) — and the `agent.spawned` dev-cycle event
-    # (ADR-0032, verb-witnessed): the spawn seam is the verb performing the
-    # milestone, and the bound keys (epic/ws/agent/role/tree/repo) ride in via
-    # the pipeline. Argv-level detail (the full command, cwd) is deliberately
-    # NOT duplicated here: the launch is one Exec through the runner, whose
-    # DEBUG record already carries the redacted argv, cwd, rc, and duration_ms
-    # (ADR-0028).
-    events.emit(
-        logger,
-        "agent.spawned",
-        "spawn subagent: launching %s child (role=%s) in the tree",
-        adapter.name,
-        role,
-        extra={"backend": adapter.name, "role": role, "cwd": tree.path},
-    )
-    launch_start = time.monotonic()
-    try:
-        result = launch.launch(
-            cmd,
-            cwd=tree.path,
-            env=launch.scrub_tree_env(logcontext.env_export(adapter.child_env())),
-            runner=launcher,
-        )
-    except execrun.ExecError as exc:
-        # The child never started: `claude` is missing/not on PATH, or the Tree path
-        # became unavailable. The Exec runner normalizes every launch-level OS failure
-        # into ExecError (ADR-0028) — a nonzero CHILD is a LaunchResult, never raised
-        # (check=False), so reaching here always means a transport failure. The Tree
-        # exists, so this is a launch failure, not the fail-closed create path — still
-        # a clean exit-1, never an escaping traceback.
-        return _fail(str(exc), exc=exc, backend=adapter.name)
-    child_ms = _elapsed_ms(launch_start)
-    if result.returncode != 0:
-        detail = result.stderr.strip()
-        return _fail(
-            f"{adapter.name} child exited {result.returncode}"
-            + (f"\n{detail}" if detail else ""),
-            backend=adapter.name,
-            rc=result.returncode,
-            duration_ms=child_ms,
-        )
-    # Child-outcome milestone (ADR-0019 §6) — the `agent.done` dev-cycle event:
-    # the process exit IS the Run's lifecycle end, so the rc and the Run's
-    # wall-clock are the record. A nonzero child stays an UNTAGGED failure
-    # (the `_fail` ERROR above): the milestone trail records lifecycle ends the
-    # cycle can build on, mirroring the dropped-request precedent (WS01).
-    events.emit(
-        logger,
-        "agent.done",
-        "spawn subagent: %s child exited 0 in %dms",
-        adapter.name,
-        child_ms,
-        extra={
-            "backend": adapter.name,
-            "rc": result.returncode,
-            "duration_ms": child_ms,
-        },
-    )
-
-    # The Run reports back through the PR (ADR-0019 §6): resolve the PR it opened on
-    # the Tree's branch through the SAME gh boundary the fleet scan uses — no side
-    # database, the PR on the branch IS the Run↔PR link. A branch with provably no PR
-    # means the Run did not report back; an undetermined state must not masquerade as
-    # success. Both are a clean exit-1.
-    pr = gh.pr_for_head(tree.branch, cwd=tree.path)
-    if pr is None:
-        return _fail(
-            f"child exited 0 but opened no PR on {tree.branch!r}; "
-            "the Run did not report back through a draft PR.",
-            branch=tree.branch,
-        )
-    if pr is gh.UNKNOWN:
-        return _fail(
-            f"child exited 0 but the PR state for {tree.branch!r} "
-            "could not be read (gh unreadable); not claiming success.",
-            branch=tree.branch,
-        )
-
-    # A PR existing on the branch is necessary but not sufficient: the contract is that
-    # the Run reported back through an OPEN, DRAFT PR targeting the Tree's intended base.
-    # A ready-for-review PR, a closed/merged one, or one opened against the wrong base is
-    # an INVALID lifecycle state the coordinator must not be handed as success — each is a
-    # clean exit-1, never a SPAWNED line.
-    if pr.state != "OPEN":
-        return _fail(
-            f"child exited 0 but the PR on {tree.branch!r} is "
-            f"{pr.state}, not OPEN; the Run did not report back through an open "
-            "draft PR.",
-            branch=tree.branch,
-            pr=pr.number,
-            pr_state=pr.state,
-        )
-    if not pr.is_draft:
-        return _fail(
-            f"child exited 0 but the PR on {tree.branch!r} is not a "
-            "draft; the Run must report back through a draft PR (the turn-signal the "
-            "coordinator drives).",
-            branch=tree.branch,
-            pr=pr.number,
-        )
-    if pr.base_ref != base_branch:
-        return _fail(
-            f"child exited 0 but the PR on {tree.branch!r} targets "
-            f"base {pr.base_ref!r}, not the intended {base_branch!r}; the "
-            "Run reported back against the wrong base.",
-            branch=tree.branch,
-            pr=pr.number,
-            pr_base=pr.base_ref,
-        )
-
-    _emit_spawned(tree, role=role, backend=backend, pr=pr)
+    result = subagent.spawn_subagent(spec, bounds)
+    emit(result, format_spawned)
     return 0
-
-
-def _launch_reviewer(
-    *,
-    repo: identity.Repo,
-    branch: str,
-    source_repo: str,
-    github_url: str,
-    adapter: backends.BackendAdapter,
-    launcher: launch.Runner | None,
-) -> int:
-    """Provision the shared read-only Tree, launch the Reviewer Run, observe. Returns a code.
-
-    The ADR-0018 reviewer path: resolve the shared per-``(repo, branch)`` read-only
-    Tree (a second reviewer on the same head REUSES the clone), then launch the backend
-    child rooted in it with the adapter's **read-only posture** (``read_only=True`` on
-    :meth:`~shipit.spawn.backends.base.BackendAdapter.build_command` — for ``claude`` the
-    read-only ``--tools`` allow-list; for ``codex`` / ``agy``, which have no allow-list,
-    the least-privilege posture that still lets the agent self-post via ``gh pr review``,
-    with read-only enforced by the chmod'd Tree, ADR-0020 §Decision 3) and the reviewer
-    task — which reads the diff and posts a review THROUGH the PR. Backend-agnostic: the
-    same call drives claude, codex, and antigravity. Unlike the write path there is no
-    Run↔PR linkage to resolve: the Run reports out-of-band (the review lands in the
-    existing PR), so success is the child's clean exit. Fail-closed mirrors the write
-    path — a read-only-Tree error exits 1 loud, never a fallback.
-    """
-    plan = readonly_plan(repo=repo, branch=branch)
-    create_start = time.monotonic()
-    try:
-        tree = create_readonly(plan, source_repo=source_repo, github_url=github_url)
-    except (ValueError, execrun.ExecError, OSError) as exc:
-        # Fail-closed (ADR-0017/0018): a read-only-Tree error fails the spawn LOUD;
-        # the launcher below is unreachable unless a real Tree exists.
-        return _fail(
-            f"read-only tree creation failed: {exc}",
-            exc=exc,
-            duration_ms=_elapsed_ms(create_start),
-        )
-
-    # SPAWN SEAM (ADR-0029/0032), mirroring the write path: the shared read-only
-    # Tree's identity binds here, plus a freshly-minted `agent` spawn id — the
-    # Tree is SHARED per (repo, branch) so it carries no per-Run hash of its
-    # own, but the Run still needs its own identity for `shipit logs --agent`.
-    # `env_export` at the launch threads the bound keys into the Reviewer Run's
-    # environment so its `shipit`/`gh` activity correlates.
-    logcontext.bind(tree=tree.path, agent=new_agent_hash())
-    create_ms = _elapsed_ms(create_start)
-    logger.info(
-        "spawn subagent: read-only review tree assigned on %s in %dms",
-        tree.branch,
-        create_ms,
-        extra={"branch": tree.branch, "base": tree.base, "duration_ms": create_ms},
-    )
-
-    # The reviewer posture (ADR-0020 §Decision 3): `read_only=True` builds the backend's
-    # reviewer argv (claude → read-only --tools; codex → workspace-write+network, NOT the
-    # write bypass; agy → drop --dangerously-skip-permissions). `cwd=tree.path` is
-    # required by the agy adapter (it ignores the process cwd and roots ONLY via
-    # `--add-dir <Tree>`) and ignored by the rest. The chmod'd read-only Tree is the
-    # load-bearing FS guard whatever the backend's native posture.
-    # `pixi_wrap` is a no-op here by design: a reviewer's read-only Tree is clone+checkout
-    # with NO provisioned `.pixi/envs/default`, so it stays BARE (routing a chmod'd tree
-    # through `pixi run` would force a solve / fail). The gate, not the call site, decides.
-    cmd = launch.pixi_wrap(
-        adapter.build_command(
-            launch.reviewer_task(branch),
-            REVIEWER_ROLE,
-            read_only=True,
-            cwd=tree.path,
-        ),
-        tree.path,
-    )
-    # Launch milestone — the `agent.spawned` event, mirroring the write path;
-    # argv detail rides the Exec runner's DEBUG record (ADR-0028), not a
-    # duplicate here.
-    events.emit(
-        logger,
-        "agent.spawned",
-        "spawn subagent: launching %s child (role=%s) in the tree",
-        adapter.name,
-        REVIEWER_ROLE,
-        extra={"backend": adapter.name, "role": REVIEWER_ROLE, "cwd": tree.path},
-    )
-    launch_start = time.monotonic()
-    try:
-        result = launch.launch(
-            cmd,
-            cwd=tree.path,
-            env=launch.scrub_tree_env(logcontext.env_export(adapter.child_env())),
-            runner=launcher,
-        )
-    except execrun.ExecError as exc:
-        # Transport failure only (ADR-0028): the runner raised because the child never
-        # started; a nonzero reviewer child is a LaunchResult handled below.
-        return _fail(str(exc), exc=exc, backend=adapter.name)
-    child_ms = _elapsed_ms(launch_start)
-    if result.returncode != 0:
-        detail = result.stderr.strip()
-        return _fail(
-            f"{adapter.name} child exited {result.returncode}"
-            + (f"\n{detail}" if detail else ""),
-            backend=adapter.name,
-            rc=result.returncode,
-            duration_ms=child_ms,
-        )
-    # Child-outcome milestone — the `agent.done` event: a reviewer reports
-    # out-of-band (the review lands in the existing PR), so its clean exit IS
-    # the success signal. A nonzero child stays an untagged `_fail` ERROR,
-    # exactly as on the write path.
-    events.emit(
-        logger,
-        "agent.done",
-        "spawn subagent: %s child exited 0 in %dms",
-        adapter.name,
-        child_ms,
-        extra={
-            "backend": adapter.name,
-            "rc": result.returncode,
-            "duration_ms": child_ms,
-        },
-    )
-
-    _emit_spawned(tree, role=REVIEWER_ROLE, backend=adapter.name)
-    return 0
-
-
-def _emit_spawned(
-    tree: Tree, *, role: str, backend: str, pr: gh.HeadPr | None = None
-) -> None:
-    """Print the SPAWNED summary: a ``SPAWNED`` line plus the Run's coordinates as JSON.
-
-    A WRITE Run passes ``pr``, the Run↔PR linkage the coordinator acts on: ``number``
-    feeds ``shipit pr status <N>`` to drive the spawned-Run PR through the normal engine
-    (reviews, ready, merge) exactly like a hand-spawned implementer's; ``state`` /
-    ``is_draft`` echo how the Run left it (a draft, per the role's PR protocol). A
-    reviewer Run reports through the existing PR and opens none, so it passes no ``pr``
-    and the block is omitted.
-    """
-    payload = {
-        "tree": tree.path,
-        "branch": tree.branch,
-        "base": tree.base,
-        "role": role,
-        "backend": backend,
-    }
-    if pr is not None:
-        payload["pr"] = pr.number
-        payload["pr_state"] = pr.state
-        payload["pr_is_draft"] = pr.is_draft
-    # The spawn-handshake milestone (ADR-0029): the same coordinates the stdout
-    # block hands the coordinator, on the durable record — for a write Run that
-    # includes the Run↔PR linkage (`pr` doubles as the domain key, so
-    # `jq 'select(.pr==N)'` finds the spawn that minted the PR).
-    logger.info(
-        "spawn subagent: SPAWNED %s run on %s", role, tree.branch, extra=dict(payload)
-    )
-    print("SPAWNED")
-    print(json.dumps(payload, indent=2))

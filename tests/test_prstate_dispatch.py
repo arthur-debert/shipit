@@ -424,7 +424,7 @@ def test_flip_act_goes_through_the_shared_guard(monkeypatch):
     the typed target travels into the guard."""
     flipped: list[PrId] = []
 
-    def fake_guard(target, roster):
+    def fake_guard(target, roster, **kw):
         flipped.append(target)
         return _status(TaskState.READY, "human validates + merges")
 

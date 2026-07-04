@@ -65,7 +65,10 @@ def test_sprayed_modules_have_a_shipit_logger():
         ("shipit.verbs.tree", "shipit.tree"),
         ("shipit.spawn.launch", "shipit.spawn"),
         ("shipit.spawn.dogfood", "shipit.spawn"),
-        ("shipit.verbs.spawn", "shipit.spawn"),
+        # CLI02-WS02 promoted the spawn pipeline out of the verb: the sprayed
+        # lifecycle records live on the domain module's logger (the verb is
+        # print-free glue + the SPAWNED renderer).
+        ("shipit.spawn.subagent", "shipit.spawn"),
         ("shipit.prstate.fetch", "shipit.prstate"),
         ("shipit.prstate.reviewers", "shipit.prstate"),
         ("shipit.gh", "shipit.gh"),

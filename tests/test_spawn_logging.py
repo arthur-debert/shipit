@@ -16,45 +16,17 @@ from __future__ import annotations
 
 import logging
 from dataclasses import replace
-from pathlib import Path
 
-from shipit import gh, git, pixienv
+from shipit import pixienv
 from shipit.execrun import ExecError
 from shipit.spawn import launch
-from shipit.tree import layout
-from shipit.tree.create import Tree
 from shipit.verbs import spawn as spawn_verb
 
-# ---------------------------------------------------------------------------
-# Fakes — mirroring test_spawn_verb's boundary spies, trimmed to what the
-# logging assertions need (no captured-arg plumbing).
-# ---------------------------------------------------------------------------
-
-
-def _patch_identity(monkeypatch, *, root="/repo", org_repo="acme/widget"):
-    monkeypatch.setattr(git, "repo_root", lambda: root)
-    monkeypatch.setattr(gh, "current_repo", lambda: org_repo)
-    monkeypatch.setattr(git, "remote_url", lambda *, cwd: "git@example:" + org_repo)
-    monkeypatch.setattr(git, "remote_branch_exists", lambda *a, **k: True)
-
-
-def _fake_create(monkeypatch, tree_dir: Path) -> None:
-    def fake_create(spec, *, source_repo, github_url):
-        tree_dir.mkdir(parents=True, exist_ok=True)
-        tp = layout.plan(spec)
-        return Tree(path=str(tree_dir), branch=tp.branch, base=tp.base)
-
-    monkeypatch.setattr(spawn_verb, "create", fake_create)
-
-
-def _fake_create_readonly(monkeypatch, tree_dir: Path) -> None:
-    def fake(plan, *, source_repo, github_url):
-        tree_dir.mkdir(parents=True, exist_ok=True)
-        return Tree(
-            path=str(tree_dir), branch=plan.branch, base=f"origin/{plan.branch}"
-        )
-
-    monkeypatch.setattr(spawn_verb, "create_readonly", fake)
+# The typed suite's injectable boundary fakes are reused wholesale (CLI02-WS02):
+# the promoted pipeline takes its effectful edges as a Boundaries VALUE, so
+# these logging tests drive the verb's run() with fakes injected — the records
+# under assertion are identical, the monkeypatch stack is gone.
+from test_spawn_subagent import _PR, bounds
 
 
 def _launcher(*, returncode=0):
@@ -64,13 +36,6 @@ def _launcher(*, returncode=0):
     return runner
 
 
-def _patch_pr(monkeypatch, pr):
-    monkeypatch.setattr(gh, "pr_for_head", lambda branch, *, cwd=None: pr)
-
-
-_PR = gh.HeadPr(number=321, state="OPEN", is_draft=True, base_ref="TRE03/umbrella")
-
-
 def _spawn_records(caplog, level=None):
     records = [r for r in caplog.records if r.name == "shipit.spawn"]
     if level is not None:
@@ -78,20 +43,18 @@ def _spawn_records(caplog, level=None):
     return records
 
 
-def _write_spawn(tmp_path, monkeypatch, *, launcher=None, pr=_PR) -> int:
-    """Drive a full write-shape spawn over faked boundaries; return its exit code."""
-    parent = tmp_path / "repo"
-    parent.mkdir(exist_ok=True)
-    _patch_identity(monkeypatch, root=str(parent))
-    _fake_create(monkeypatch, tmp_path / "tree")
-    _patch_pr(monkeypatch, pr)
-    return spawn_verb.run_subagent(
+def _write_spawn(tmp_path, *, launcher=None, pr=_PR) -> int:
+    """Drive a full write-shape spawn over injected boundaries; return its exit code."""
+    b, _calls = bounds(tmp_path, pr=pr)
+    if launcher is not None:
+        b = replace(b, runner=launcher)
+    return spawn_verb.run(
         repo="widget",
         epic="TRE03",
         ws=1,
         issue=156,
         role="implementer",
-        launcher=launcher or _launcher(),
+        bounds=b,
     )
 
 
@@ -100,9 +63,9 @@ def _write_spawn(tmp_path, monkeypatch, *, launcher=None, pr=_PR) -> int:
 # ---------------------------------------------------------------------------
 
 
-def test_write_spawn_narrates_the_lifecycle_at_info(tmp_path, monkeypatch, caplog):
+def test_write_spawn_narrates_the_lifecycle_at_info(tmp_path, caplog):
     with caplog.at_level(logging.DEBUG, logger="shipit.spawn"):
-        rc = _write_spawn(tmp_path, monkeypatch)
+        rc = _write_spawn(tmp_path)
     assert rc == 0
     infos = _spawn_records(caplog, logging.INFO)
 
@@ -147,15 +110,12 @@ def test_write_spawn_narrates_the_lifecycle_at_info(tmp_path, monkeypatch, caplo
     assert not _spawn_records(caplog, logging.WARNING)
 
 
-def test_reviewer_spawn_narrates_the_lifecycle_at_info(tmp_path, monkeypatch, caplog):
-    parent = tmp_path / "repo"
-    parent.mkdir()
-    _patch_identity(monkeypatch, root=str(parent))
-    _fake_create_readonly(monkeypatch, tmp_path / "review")
+def test_reviewer_spawn_narrates_the_lifecycle_at_info(tmp_path, caplog):
+    b, _calls = bounds(tmp_path)
 
     with caplog.at_level(logging.DEBUG, logger="shipit.spawn"):
-        rc = spawn_verb.run_subagent(
-            repo="widget", epic="TRE03", ws=3, role="reviewer", launcher=_launcher()
+        rc = spawn_verb.run(
+            repo="widget", epic="TRE03", ws=3, role="reviewer", bounds=b
         )
     assert rc == 0
     infos = _spawn_records(caplog, logging.INFO)
@@ -184,26 +144,20 @@ def test_reviewer_spawn_narrates_the_lifecycle_at_info(tmp_path, monkeypatch, ca
 # ---------------------------------------------------------------------------
 
 
-def test_tree_creation_failure_logs_error_with_the_exception(
-    tmp_path, monkeypatch, caplog
-):
-    parent = tmp_path / "repo"
-    parent.mkdir()
-    _patch_identity(monkeypatch, root=str(parent))
+def test_tree_creation_failure_logs_error_with_the_exception(tmp_path, caplog):
+    b, _calls = bounds(tmp_path)
 
     def boom(spec, *, source_repo, github_url):
         raise ExecError(["git", "clone"], rc=1, stderr="clone failed")
 
-    monkeypatch.setattr(spawn_verb, "create", boom)
-
     with caplog.at_level(logging.DEBUG, logger="shipit.spawn"):
-        rc = spawn_verb.run_subagent(
+        rc = spawn_verb.run(
             repo="widget",
             epic="TRE03",
             ws=1,
             issue=156,
             role="implementer",
-            launcher=_launcher(),
+            bounds=replace(b, create_tree=boom),
         )
     assert rc == 1
     errors = _spawn_records(caplog, logging.ERROR)
@@ -212,14 +166,12 @@ def test_tree_creation_failure_logs_error_with_the_exception(
     assert isinstance(errors[0].exc_info[1], ExecError)
 
 
-def test_launch_transport_failure_logs_error_with_the_exception(
-    tmp_path, monkeypatch, caplog
-):
+def test_launch_transport_failure_logs_error_with_the_exception(tmp_path, caplog):
     def no_binary(cmd, *, cwd, env):
         raise ExecError(["claude"], rc=None, stderr="not found", cause="missing-binary")
 
     with caplog.at_level(logging.DEBUG, logger="shipit.spawn"):
-        rc = _write_spawn(tmp_path, monkeypatch, launcher=no_binary)
+        rc = _write_spawn(tmp_path, launcher=no_binary)
     assert rc == 1
     errors = _spawn_records(caplog, logging.ERROR)
     assert len(errors) == 1
@@ -227,11 +179,9 @@ def test_launch_transport_failure_logs_error_with_the_exception(
     assert errors[0].backend == "claude"
 
 
-def test_nonzero_child_exit_logs_error_with_rc_and_duration(
-    tmp_path, monkeypatch, caplog
-):
+def test_nonzero_child_exit_logs_error_with_rc_and_duration(tmp_path, caplog):
     with caplog.at_level(logging.DEBUG, logger="shipit.spawn"):
-        rc = _write_spawn(tmp_path, monkeypatch, launcher=_launcher(returncode=2))
+        rc = _write_spawn(tmp_path, launcher=_launcher(returncode=2))
     assert rc == 1
     errors = _spawn_records(caplog, logging.ERROR)
     assert len(errors) == 1
@@ -241,31 +191,31 @@ def test_nonzero_child_exit_logs_error_with_rc_and_duration(
     assert not errors[0].exc_info
 
 
-def test_handshake_failure_no_pr_logs_error(tmp_path, monkeypatch, caplog):
+def test_handshake_failure_no_pr_logs_error(tmp_path, caplog):
     with caplog.at_level(logging.DEBUG, logger="shipit.spawn"):
-        rc = _write_spawn(tmp_path, monkeypatch, pr=None)
+        rc = _write_spawn(tmp_path, pr=None)
     assert rc == 1
     errors = _spawn_records(caplog, logging.ERROR)
     assert len(errors) == 1
     assert errors[0].branch == "TRE03/WS01"
 
 
-def test_handshake_failure_wrong_state_logs_error_with_the_pr(
-    tmp_path, monkeypatch, caplog
-):
+def test_handshake_failure_wrong_state_logs_error_with_the_pr(tmp_path, caplog):
     with caplog.at_level(logging.DEBUG, logger="shipit.spawn"):
-        rc = _write_spawn(tmp_path, monkeypatch, pr=replace(_PR, state="MERGED"))
+        rc = _write_spawn(tmp_path, pr=replace(_PR, state="MERGED"))
     assert rc == 1
     errors = _spawn_records(caplog, logging.ERROR)
     assert len(errors) == 1
     assert errors[0].pr == 321 and errors[0].pr_state == "MERGED"
 
 
-def test_validation_refusals_are_no_longer_print_only(monkeypatch, caplog):
+def test_validation_refusals_are_no_longer_print_only(caplog):
     """Every refusal used to leave ONLY a stderr print; each now also logs at
-    ERROR (the spray rule: anything whose only record was a print also logs)."""
+    ERROR at the domain raise site (the spray rule: anything whose only record
+    was a print also logs) — the terminal line is the shell's, the durable
+    record the pipeline's."""
     with caplog.at_level(logging.DEBUG, logger="shipit.spawn"):
-        rc = spawn_verb.run_subagent(
+        rc = spawn_verb.run(
             repo="widget", issue=1, role="implementer", backend="nonexistent"
         )
     assert rc == 1
@@ -274,28 +224,26 @@ def test_validation_refusals_are_no_longer_print_only(monkeypatch, caplog):
     assert errors[0].backend == "nonexistent"
 
 
-def test_refused_spawn_does_not_inherit_the_previous_spawns_tree(
-    tmp_path, monkeypatch, caplog
-):
+def test_refused_spawn_does_not_inherit_the_previous_spawns_tree(tmp_path, caplog):
     """ADR-0029 record contract: `tree` appears once ASSIGNED for THIS spawn.
 
     A prior spawn binds `tree` in the process-global log context (and a nested
     spawn inherits it from the parent's exported ``SHIPIT_LOG_CTX_TREE``); a
     fresh spawn refused BEFORE it mints its own Tree must not carry that stale
-    value on its request/refusal records. ``run_subagent`` drops any inherited
+    value on its request/refusal records. The pipeline drops any inherited
     tree at entry, so the refused spawn's context is tree-less.
     """
     from shipit import logcontext
 
     try:
         # A prior spawn succeeds and leaves its own tree bound in the context.
-        assert _write_spawn(tmp_path, monkeypatch) == 0
+        assert _write_spawn(tmp_path) == 0
         assert logcontext.bound().get("tree") == str(tmp_path / "tree")
 
         # A fresh spawn refused before Tree creation (unsupported backend) must
         # not carry the previous spawn's tree: entry drops it, nothing rebinds it.
         caplog.clear()
-        rc = spawn_verb.run_subagent(
+        rc = spawn_verb.run(
             repo="widget", issue=1, role="implementer", backend="nonexistent"
         )
         assert rc == 1
@@ -304,13 +252,11 @@ def test_refused_spawn_does_not_inherit_the_previous_spawns_tree(
         logcontext.unbind("tree")
 
 
-def test_the_request_is_recorded_even_when_refused(monkeypatch, caplog):
+def test_the_request_is_recorded_even_when_refused(caplog):
     """The spawn REQUEST milestone precedes the gates: a refused spawn still
     leaves a durable record of what was asked."""
     with caplog.at_level(logging.DEBUG, logger="shipit.spawn"):
-        rc = spawn_verb.run_subagent(
-            repo="widget", epic="TRE03", ws=0, issue=1, role="x"
-        )
+        rc = spawn_verb.run(repo="widget", epic="TRE03", ws=0, issue=1, role="x")
     assert rc == 1
     requested = [r for r in _spawn_records(caplog, logging.INFO) if hasattr(r, "role")]
     assert len(requested) == 1 and requested[0].ws == 0
@@ -381,35 +327,30 @@ def _event_tags(caplog):
     ]
 
 
-def test_write_spawn_tags_agent_spawned_and_agent_done(tmp_path, monkeypatch, caplog):
+def test_write_spawn_tags_agent_spawned_and_agent_done(tmp_path, caplog):
     """The launch milestone IS `agent.spawned`, the clean child exit IS
     `agent.done` — the same records as before, tagged (verb-witnessed tier)."""
     with caplog.at_level(logging.INFO, logger="shipit.spawn"):
-        rc = _write_spawn(tmp_path, monkeypatch)
+        rc = _write_spawn(tmp_path)
     assert rc == 0
     assert _event_tags(caplog) == ["agent.spawned", "agent.done"]
 
 
-def test_reviewer_spawn_tags_agent_spawned_and_agent_done(
-    tmp_path, monkeypatch, caplog
-):
-    parent = tmp_path / "repo"
-    parent.mkdir()
-    _patch_identity(monkeypatch, root=str(parent))
-    _fake_create_readonly(monkeypatch, tmp_path / "review")
+def test_reviewer_spawn_tags_agent_spawned_and_agent_done(tmp_path, caplog):
+    b, _calls = bounds(tmp_path)
     with caplog.at_level(logging.INFO, logger="shipit.spawn"):
-        rc = spawn_verb.run_subagent(
-            repo="widget", epic="TRE03", ws=3, role="reviewer", launcher=_launcher()
+        rc = spawn_verb.run(
+            repo="widget", epic="TRE03", ws=3, role="reviewer", bounds=b
         )
     assert rc == 0
     assert _event_tags(caplog) == ["agent.spawned", "agent.done"]
 
 
-def test_nonzero_child_exit_tags_no_agent_done(tmp_path, monkeypatch, caplog):
+def test_nonzero_child_exit_tags_no_agent_done(tmp_path, caplog):
     """A crashed Run is a failed spawn, not a lifecycle end the cycle builds on:
     the milestone trail records `agent.spawned` only — the exit stays the
     untagged `_fail` ERROR (the dropped-request precedent, WS01)."""
     with caplog.at_level(logging.INFO, logger="shipit.spawn"):
-        rc = _write_spawn(tmp_path, monkeypatch, launcher=_launcher(returncode=3))
+        rc = _write_spawn(tmp_path, launcher=_launcher(returncode=3))
     assert rc == 1
     assert _event_tags(caplog) == ["agent.spawned"]

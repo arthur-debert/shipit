@@ -234,7 +234,7 @@ behaves and how we ride it.
         hook line and the `./claude-start` launcher are managed units — so the
         capability is uniform, not shipit-only.
 
-    Agent launch — `src/shipit/spawn/launch.py` + `src/shipit/verbs/spawn.py`:
+    Agent launch — `src/shipit/spawn/launch.py` + `src/shipit/spawn/subagent.py`:
         The per-backend `BackendAdapter` (`spawn/backends/`) builds the argv
         (`claude -p ... --output-format json`, or the codex/antigravity
         equivalents). For a provisioned write Tree, `pixi_wrap()` re-expresses it

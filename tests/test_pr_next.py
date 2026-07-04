@@ -83,7 +83,7 @@ def patched_next(monkeypatch):
         "resolve_pr",
         lambda pr, repo, branch: PrId(repo=repo, number=pr if pr is not None else 42),
     )
-    monkeypatch.setattr(next_verb, "gather", lambda target, roster: target)
+    monkeypatch.setattr(next_verb, "gather", lambda target, roster, **kw: target)
     monkeypatch.setattr(next_verb, "load_roster", lambda: Roster())
 
 
@@ -132,7 +132,7 @@ def test_next_ready_flips(patched_next, monkeypatch, capsys):
     monkeypatch.setattr(
         dispatch_mod,
         "guarded_flip",
-        lambda target, roster: _status(TaskState.READY, target.number),
+        lambda target, roster, **kw: _status(TaskState.READY, target.number),
     )
     rc = cli.main(["pr", "next"])
     assert rc == 0
@@ -149,7 +149,7 @@ def test_next_ready_refusal_is_uniform_error_exit_1(patched_next, monkeypatch, c
         lambda ctx: _status(TaskState.READY, ctx.number),
     )
 
-    def refuse(target, roster):
+    def refuse(target, roster, **kw):
         raise NotReady(_status(TaskState.BLOCKED, target.number))
 
     monkeypatch.setattr(dispatch_mod, "guarded_flip", refuse)
