@@ -381,10 +381,14 @@ def test_clone_dissociated_retries_full_clone_on_poisoned_reference(
     with caplog.at_level(logging.WARNING, logger="shipit.git"):
         git.clone_dissociated("https://x/r.git", "/trees/leaf", reference="/ref")
 
-    # Exactly two clones: the referenced attempt, then the bare full clone —
-    # no --reference (the poison) and no --dissociate (meaningless without it).
+    # Exactly two clones: the referenced attempt (with commit-graph READING off
+    # for the clone process — the #372 fix, `-c` BEFORE the subcommand so nothing
+    # persists in the new repo), then the bare full clone — no --reference (the
+    # poison) and no --dissociate (meaningless without it).
     assert calls == [
         [
+            "-c",
+            "core.commitGraph=false",
             "clone",
             "--reference",
             "/ref",
