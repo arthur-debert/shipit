@@ -80,9 +80,16 @@ test = "python -m pytest -q"
 [dependencies.pytest]
 version = ">=8"
 
-# The `lint` FEATURE carries no deps of its own (issue #210, option (a)): the linter
-# toolchain moved to the DEFAULT env above, and the `lint` environment inherits it
-# through the default feature. It deliberately does NOT define its own `lint` task:
+# The `lint` FEATURE carries the MANAGED fleet-pinned dependency block below —
+# the exact block `shipit install` delivers to every consumer (ADP00,
+# docs/prd/adoption.md: the managed set owns the consumer environment). shipit
+# self-installs at Tree provisioning, so its own manifest must carry the block
+# verbatim for the reconcile to stay a NOOP; a drift test
+# (tests/test_install.py) asserts these pins agree with the hand-written
+# default-env toolchain above (the dogfood guarantee). For shipit itself the
+# block is redundant-but-harmless: the same specs already ride in the DEFAULT
+# env (issue #210, option (a)) and the `lint` environment inherits them through
+# the default feature. The feature deliberately does NOT define its own `lint` task:
 # `lint` lives in EXACTLY ONE place — the managed `[tasks] lint = "shipit lint"` in the
 # default env above — so a bare `pixi run lint` resolves UNAMBIGUOUSLY (a duplicate
 # `lint` in both the default feature and this one is what historically made bare
@@ -99,6 +106,21 @@ version = ">=8"
 # same way via an explicit step (.github/workflows/ci.yml). This keeps lexd off the
 # managed `lint`/`lefthook.yml` surface (so the reconcile stays a 0-change no-op) while
 # never leaving a fresh clone's lex leg un-provisioned.
+[feature.lint.dependencies]
+# >>> shipit-managed lint deps (do not edit; regenerate via `shipit install`) >>>
+# The fleet-pinned lint toolchain (docs/prd/adoption.md: the managed set owns
+# the consumer environment). Canonical versions live HERE — a bump is one data
+# edit, rolled fleet-wide on each consumer's next `shipit install` reconcile.
+ruff = "0.15.*"
+shellcheck = "0.11.*"
+# conda-forge name for the `shfmt` binary
+go-shfmt = "3.*"
+yamllint = "1.38.*"
+prettier = "3.8.*"
+markdownlint-cli = "0.49.*"
+lefthook = "2.1.*"
+# <<< shipit-managed lint deps <<<
+
 [feature.lint.tasks]
 # lexd is not on conda-forge; fetch the pinned prebuilt before every lint run
 # (idempotent). The lint checks depend on it, so CI and the hook provision identically.
@@ -172,6 +194,8 @@ shipit = { path = ".", editable = true }
 verify-spawn = "python -m shipit.spawn.dogfood"
 
 [environments]
+# >>> shipit-managed environments (do not edit; regenerate via `shipit install`) >>>
 lint = ["lint"]
+# <<< shipit-managed environments <<<
 review = ["review"]
 dogfood = ["dogfood"]

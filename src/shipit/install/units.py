@@ -24,11 +24,9 @@ BLOCK_CLOSE = "<!-- End shipit-managed block. -->"
 
 # The lint-check units Step 2 deferred to Step 3 (docs/prd/lint-checks.md). The consumer gets
 # the thin lefthook caller (whole file) and a `lint = "shipit lint"` task BLOCK
-# in its own pixi.toml — NEVER a linter-dependency block: the linters ride in as
-# shipit-the-package's own deps, so the consumer's manifest carries only the
-# stable task line (architecture.lex §5). The pixi block uses TOML-comment
-# markers (HTML comments are invalid TOML) and anchors under `[tasks]` so the
-# managed key lands in the right table on a first install.
+# in its own pixi.toml. The pixi blocks use TOML-comment markers (HTML comments
+# are invalid TOML) and anchor under a table header so the managed keys land in
+# the right table on a first install.
 LEFTHOOK_FILE = "lefthook.yml"
 PIXI_FILE = "pixi.toml"
 PIXI_KEY = "pixi.toml#shipit-tasks"
@@ -37,6 +35,31 @@ PIXI_OPEN = (
 )
 PIXI_CLOSE = "# <<< shipit-managed tasks <<<"
 PIXI_ANCHOR = "[tasks]"
+
+# The ADP00 managed consumer environment (docs/prd/adoption.md: THE MANAGED SET
+# OWNS THE CONSUMER ENVIRONMENT). Two sibling marker blocks join the tasks block
+# in the consumer's pixi.toml: the lint feature/dependency block carrying the
+# fleet-pinned toolchain, and the lint environment definition — so the managed
+# lefthook caller's `pixi run -e lint lint` works on a stock consumer with
+# nothing pre-installed. This AMENDS the lint PRD's "task line only, never a
+# dependency block" decision. Canonical versions live in the packaged
+# `pixi-lint-deps-block.toml` (a bump is one data edit, rolled out on each
+# consumer's next install reconcile); shipit's own pixi.toml carries the same
+# blocks verbatim — its Tree provisioning self-installs, so anything else would
+# splice duplicates into its hand-kept manifest — and a drift test asserts the
+# packaged block agrees with shipit's own lint environment (the dogfood
+# guarantee). The lexd leg is NOT part of the block: lexd delivery is the
+# provision-subcommand workstream.
+PIXI_LINT_DEPS_KEY = "pixi.toml#shipit-lint-deps"
+PIXI_LINT_DEPS_OPEN = (
+    "# >>> shipit-managed lint deps (do not edit; regenerate via `shipit install`) >>>"
+)
+PIXI_LINT_DEPS_CLOSE = "# <<< shipit-managed lint deps <<<"
+PIXI_LINT_DEPS_ANCHOR = "[feature.lint.dependencies]"
+PIXI_ENVS_KEY = "pixi.toml#shipit-environments"
+PIXI_ENVS_OPEN = "# >>> shipit-managed environments (do not edit; regenerate via `shipit install`) >>>"
+PIXI_ENVS_CLOSE = "# <<< shipit-managed environments <<<"
+PIXI_ENVS_ANCHOR = "[environments]"
 
 # The HAR01 agent harness (docs/prd/har01-coordinator-guard-and-role-prompts.md):
 # the three GENERATED subagent agent-defs and the committed `PreToolUse` hook line
@@ -252,6 +275,32 @@ def load_units() -> list[Unit]:
             open_marker=PIXI_OPEN,
             close_marker=PIXI_CLOSE,
             anchor=PIXI_ANCHOR,
+        )
+    )
+
+    # The ADP00 managed consumer environment (docs/prd/adoption.md): the lint
+    # feature/dependency block (fleet-pinned toolchain) and the lint environment
+    # definition, siblings of the tasks block in the same consumer pixi.toml.
+    units.append(
+        Unit(
+            key=PIXI_LINT_DEPS_KEY,
+            dest=PIXI_FILE,
+            kind="block",
+            content=data_bytes("pixi-lint-deps-block.toml"),
+            open_marker=PIXI_LINT_DEPS_OPEN,
+            close_marker=PIXI_LINT_DEPS_CLOSE,
+            anchor=PIXI_LINT_DEPS_ANCHOR,
+        )
+    )
+    units.append(
+        Unit(
+            key=PIXI_ENVS_KEY,
+            dest=PIXI_FILE,
+            kind="block",
+            content=data_bytes("pixi-lint-env-block.toml"),
+            open_marker=PIXI_ENVS_OPEN,
+            close_marker=PIXI_ENVS_CLOSE,
+            anchor=PIXI_ENVS_ANCHOR,
         )
     )
 

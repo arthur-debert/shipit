@@ -18,6 +18,7 @@ import os
 import shutil
 import stat
 import subprocess
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -127,8 +128,9 @@ def test_load_units_includes_lefthook_and_pixi_task_block():
     assert pixi.kind == "block"
     assert pixi.dest == "pixi.toml"
     assert pixi.anchor == "[tasks]"
-    # The managed pixi block is the thin task lines ONLY — never a linter-dep
-    # block (deps ride in as shipit's own package deps, architecture.lex §5).
+    # The tasks block stays the thin task lines ONLY; the linter deps ride in
+    # their own sibling block (ADP00, docs/prd/adoption.md — amending the lint
+    # PRD's task-line-only decision), tested below.
     assert pixi.desired_inner() == 'lint = "shipit lint"\nlogs = "shipit logs"'
 
 
@@ -184,6 +186,85 @@ def test_pixi_block_reinstall_replaces_in_place():
     # Idempotent: exactly one managed block after a second install.
     assert twice.count(iunits.PIXI_OPEN) == 1
     assert twice == once
+
+
+# --------------------------------------------------------------------------
+# The ADP00 managed consumer environment (docs/prd/adoption.md) — the lint
+# feature/dependency block + the lint environment definition, siblings of the
+# tasks block in the consumer's pixi.toml.
+# --------------------------------------------------------------------------
+
+#: The fleet-pinned lint toolchain the managed deps block must deliver.
+LINT_TOOLS = (
+    "ruff",
+    "shellcheck",
+    "go-shfmt",
+    "yamllint",
+    "prettier",
+    "markdownlint-cli",
+    "lefthook",
+)
+
+
+def test_load_units_includes_the_lint_env_blocks():
+    units = {u.key: u for u in iunits.load_units()}
+
+    deps = units[iunits.PIXI_LINT_DEPS_KEY]
+    assert deps.kind == "block"
+    assert deps.dest == "pixi.toml"
+    assert deps.anchor == "[feature.lint.dependencies]"
+    assert set(tomllib.loads(deps.desired_inner())) == set(LINT_TOOLS)
+
+    envs = units[iunits.PIXI_ENVS_KEY]
+    assert envs.kind == "block"
+    assert envs.dest == "pixi.toml"
+    assert envs.anchor == "[environments]"
+    assert tomllib.loads(envs.desired_inner()) == {"lint": ["lint"]}
+
+    # Three sibling blocks in ONE consumer file: their marker fences must be
+    # pairwise distinct or extract/splice would bleed across regions.
+    fences = {
+        units[k].open_marker
+        for k in (iunits.PIXI_KEY, iunits.PIXI_LINT_DEPS_KEY, iunits.PIXI_ENVS_KEY)
+    }
+    assert len(fences) == 3
+
+
+def test_packaged_lint_env_agrees_with_shipits_own_manifest():
+    """The dogfood drift check (docs/prd/adoption.md): shipit's own manifest and
+    the packaged consumer block pin IDENTICAL versions, so shipit dogfoods
+    exactly what the fleet receives and a version bump is one data-block edit
+    (mirrored into shipit's own hand-written toolchain, or this test fails)."""
+    own = tomllib.loads(
+        (Path(__file__).resolve().parents[1] / "pixi.toml").read_text(encoding="utf-8")
+    )
+    deps = tomllib.loads(iunits.data_bytes("pixi-lint-deps-block.toml").decode("utf-8"))
+
+    assert set(deps) == set(LINT_TOOLS)
+    # Every packaged pin agrees with shipit's own default-env toolchain (where
+    # shipit's hand-written lint environment gets its binaries, issue #210).
+    for tool, pin in deps.items():
+        assert own["dependencies"][tool] == pin, (
+            f"{tool}: packaged pin {pin!r} != shipit's own {own['dependencies'].get(tool)!r}"
+        )
+    # ...and shipit's own lint feature carries the managed block verbatim.
+    assert own["feature"]["lint"]["dependencies"] == deps
+
+    envs = tomllib.loads(iunits.data_bytes("pixi-lint-env-block.toml").decode("utf-8"))
+    assert envs == {"lint": ["lint"]}
+    assert own["environments"]["lint"] == envs["lint"]
+
+
+def test_shipits_own_pixi_manifest_reconciles_to_noop():
+    # shipit self-installs at Tree provisioning (`shipit install --local`), so
+    # its own pixi.toml must carry every managed pixi block byte-identically —
+    # otherwise every fresh Tree would splice a drift commit (or a duplicate
+    # `lint` key under [environments]) into shipit's own manifest.
+    root = Path(__file__).resolve().parents[1]
+    units = {u.key: u for u in iunits.load_units()}
+    for key in (iunits.PIXI_KEY, iunits.PIXI_LINT_DEPS_KEY, iunits.PIXI_ENVS_KEY):
+        unit = units[key]
+        assert irec.consumer_hash(root, unit) == unit.desired_hash(), key
 
 
 def test_load_units_has_skills_agents_and_bootstrap():
@@ -847,6 +928,70 @@ def test_consumer_edit_surfaces_as_override(tmp_path, rec):
     # (a non-empty diff), not an empty diff against what shipit just wrote.
     assert "CONSUMER EDIT" in rec.pr_body
     assert "```diff" in rec.pr_body
+
+
+def test_fresh_install_delivers_the_lint_environment(tmp_path, rec):
+    # ADP00 (docs/prd/adoption.md): a fresh install ADDs the lint env blocks —
+    # the consumer's pixi.toml ends up a complete, valid manifest whose lint
+    # environment carries the fleet-pinned toolchain, alongside the consumer's
+    # own untouched content.
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    (tmp_path / "pixi.toml").write_text(
+        '[workspace]\nname = "acme"\nchannels = ["conda-forge"]\n'
+        'platforms = ["osx-arm64"]\n\n[tasks]\ntest = "pytest"\n'
+    )
+    _apply(tmp_path)
+
+    manifest = tomllib.loads((tmp_path / "pixi.toml").read_text())  # valid TOML
+    # The consumer's own content is preserved.
+    assert manifest["workspace"]["name"] == "acme"
+    assert manifest["tasks"]["test"] == "pytest"
+    # The managed task, the pinned toolchain, and the environment definition —
+    # everything `pixi run -e lint lint` needs on a stock consumer.
+    assert manifest["tasks"]["lint"] == "shipit lint"
+    deps = manifest["feature"]["lint"]["dependencies"]
+    assert set(deps) == set(LINT_TOOLS)
+    assert manifest["environments"]["lint"] == ["lint"]
+
+    # Both blocks recorded a pristine hash in the manifest...
+    managed = config.load_managed(config.load(tmp_path / ".shipit.toml"))
+    assert iunits.PIXI_LINT_DEPS_KEY in managed
+    assert iunits.PIXI_ENVS_KEY in managed
+    # ...and an unchanged re-install is a clean NOOP.
+    assert _plan(tmp_path).nothing_to_do
+
+
+def test_lint_env_block_merges_into_an_existing_environments_table(tmp_path, rec):
+    # A consumer with their own [environments] keeps it: the managed `lint`
+    # entry lands INSIDE the existing table (never a duplicate header, which
+    # would be invalid TOML).
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    (tmp_path / "pixi.toml").write_text('[environments]\ndev = ["dev"]\n')
+    _apply(tmp_path)
+
+    manifest = tomllib.loads((tmp_path / "pixi.toml").read_text())
+    assert manifest["environments"] == {"dev": ["dev"], "lint": ["lint"]}
+
+
+def test_consumer_edit_to_lint_deps_block_surfaces_as_override(tmp_path, rec):
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    _apply(tmp_path)
+    rec.calls.clear()
+
+    # The consumer bumps a pinned tool inside the managed block.
+    pixi_path = tmp_path / "pixi.toml"
+    pixi_path.write_text(
+        pixi_path.read_text().replace('ruff = "0.15.*"', 'ruff = "0.99.*"')
+    )
+
+    # The edit is a typed OVERRIDE decision on the plan...
+    plan = _plan(tmp_path)
+    assert [d.unit.key for d in plan.overrides] == [iunits.PIXI_LINT_DEPS_KEY]
+    # ...surfaced in the PR body with the consumer's edit, never clobbered blind.
+    _apply(tmp_path, iapply.MODE_PR)
+    assert ("pr_create", True) in rec.calls
+    assert "### Overrides" in rec.pr_body
+    assert 'ruff = "0.99.*"' in rec.pr_body
 
 
 def test_open_install_pr_is_updated_not_recreated(tmp_path, rec, monkeypatch):
