@@ -553,21 +553,26 @@ def test_write_tree_cwd_exports_no_log_context(tmp_path, monkeypatch):
     assert not env_file.exists()
 
 
-def test_nested_ephemeral_dir_inside_a_tree_exports_no_log_context(
-    tmp_path, monkeypatch
-):
-    # Under the central root, parent segment IS "ephemeral", but the depth is
-    # wrong: a directory named ephemeral/ INSIDE a Tree's clone (a repo is free
-    # to contain one) must not mint a bogus session key — only the minted shape
-    # <root>/<org>/<repo>/ephemeral/<leaf> is a session Tree.
+def test_nested_dir_inside_a_tree_exports_the_containing_session(tmp_path, monkeypatch):
+    # A cwd DEEPER than the Tree root (a bare shell cd'd into src/, even one that
+    # itself contains a decoy `ephemeral/not-a-session` segment) is still IN the
+    # session: resolution truncates to the Tree root (the first four segments
+    # below the central root), so the export names the CONTAINING session —
+    # SESSION_LEAF — and the decoy leaf name never wins.
     root = tmp_path / "trees"
-    nested = _ephemeral_tree(root) / "src" / "ephemeral" / "not-a-session"
+    tree = _ephemeral_tree(root)
+    nested = tree / "src" / "ephemeral" / "not-a-session"
     nested.mkdir(parents=True)
     monkeypatch.setenv(layout.CENTRAL_ROOT_ENV, str(root))
     env_file = tmp_path / "claude-env"
     code = _run_log_context(nested, env_file)
     assert code == 0
-    assert not env_file.exists()
+    lines = env_file.read_text().splitlines()
+    assert f"export {logcontext.ENV_PREFIX}SESSION={SESSION_LEAF}" in lines
+    assert (
+        f"export {logcontext.ENV_PREFIX}TREE={shlex.quote(str(tree.resolve()))}"
+        in lines
+    )
 
 
 def test_shallow_ephemeral_dir_exports_no_log_context(tmp_path, monkeypatch):
