@@ -5,7 +5,7 @@ remaining leftovers (reviewer-App liveness per org) fold into ADP00.
 
 ## Problem Statement
 
-shipit's core feature set for adoption is in place, but every consumer repo in the
+The core feature set for adoption is in place, but every consumer repo in the
 portfolio still runs the legacy release tooling and none is onboarded. Rolling out
 means dozens of touchpoints per repo (install, gh-setup, Trees, session bootstrap,
 hooks, pixi tasks, lint, CI workflows, release), multiplied across the fleet —
