@@ -41,6 +41,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .. import config, events, execrun, git, logcontext, pixienv
+from ..install.apply import HOOK_ACTIVATE_ARGV, LEFTHOOK_BINARY
+from ..install.units import LEFTHOOK_FILE, LINT_ENV
 from . import include, provision
 from .layout import TreeSpec, central_root, plan
 
@@ -265,12 +267,14 @@ def _provision(dest: Path, *, trees_root: Path) -> None:
     Runs ``shipit install --local`` (only when the repo is ALREADY ONBOARDED), then
     the path's ``pixi install`` (through the pixi adapter,
     :func:`shipit.pixienv.install` — the pixi argv and its long-runner bound are
-    pixi knowledge, PROC02-WS02) / ``npm ci``, each gated on its manifest existing
-    and each run with the scrubbed provisioning env (:func:`provision_env` — parent
-    project pointers removed; the ADR-0015 build env is no longer injected here, it
-    comes from pixi ``[activation.env]`` on activation). Before ``pixi install`` it
-    checks (and only *warns* about — #119) the pixi-cache / Trees-root
-    same-filesystem invariant.
+    pixi knowledge, PROC02-WS02) — followed, when the clone carries a
+    ``lefthook.yml``, by hook activation (:func:`_activate_hooks`, #443: hooks
+    do not clone, so a Tree must arm its own) — / ``npm ci``, each gated on its
+    manifest existing and each run with the scrubbed provisioning env
+    (:func:`provision_env` — parent project pointers removed; the ADR-0015 build
+    env is no longer injected here, it comes from pixi ``[activation.env]`` on
+    activation). Before ``pixi install`` it checks (and only *warns* about —
+    #119) the pixi-cache / Trees-root same-filesystem invariant.
 
     The install runs in ``--local`` mode (#170): it commits the managed set on the
     Tree's already-checked-out planned branch with NO branch switch, NO push, and NO
@@ -314,8 +318,42 @@ def _provision(dest: Path, *, trees_root: Path) -> None:
     if (dest / pixienv.MANIFEST_NAME).is_file():
         _warn_if_cache_cross_filesystem(trees_root)
         _narrate_step(pixienv.install(dest, env=env))
+        if (dest / LEFTHOOK_FILE).is_file():
+            _activate_hooks(dest, env=env)
     if (dest / NPM_MANIFEST).is_file():
         run_provision(["npm", "ci"], cwd=dest, env=env)
+
+
+def _activate_hooks(dest: Path, *, env: dict[str, str]) -> None:
+    """Activate the Tree's git hooks — a fresh clone comes up ARMED (#443).
+
+    Git hooks do not clone: a dissociated Tree cut from a repo that already
+    carries the managed ``lefthook.yml`` has only ``*.sample`` hooks, the
+    managed-set reconcile above is a NOOP in steady state (so apply's own
+    opportunistic activation never fires), and nothing else ever ran
+    ``lefthook install`` in the Tree — every spawned agent would commit with no
+    lint gate and no dev-cycle commit events. So activation is a first-class
+    provisioning step: the SAME one activation definition apply uses
+    (:data:`~shipit.install.apply.LEFTHOOK_BINARY` +
+    :data:`~shipit.install.apply.HOOK_ACTIVATE_ARGV`), run through the Tree's
+    OWN pixi lint env (:data:`~shipit.install.units.LINT_ENV`, where the
+    managed blocks pin ``lefthook`` — nothing host-global is assumed), with the
+    scrubbed provisioning env. Gated on the manifest pair like every dep step:
+    inside the pixi branch (the lint env IS a pixi env) and on
+    ``lefthook.yml`` existing. Unlike apply's opportunistic activation this
+    step is CHECKED: a Tree that cannot arm its hooks is a failed
+    materialization (fail loud, ADR-0017), rolled back like any other
+    provisioning failure. Worst case is a first ``pixi run -e lint`` solving
+    the lint env — provisioning-shaped work the adapter's own long-runner
+    bound covers.
+    """
+    result = pixienv.run_in_env(
+        [LEFTHOOK_BINARY, *HOOK_ACTIVATE_ARGV],
+        dest,
+        environment=LINT_ENV,
+        env=env,
+    )
+    _narrate_step(result)
 
 
 def _record_install_commits(dest: Path, *, head_before: Sha | None) -> None:

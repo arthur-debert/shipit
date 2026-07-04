@@ -581,6 +581,24 @@ def test_run_argv_wraps_through_the_projects_manifest(tmp_path: Path):
     ]
 
 
+def test_run_argv_pins_a_non_default_environment(tmp_path: Path):
+    # `environment` selects a feature env (the same selector the read verbs take):
+    # a child that lives in e.g. the managed lint env — lefthook, #443 — cannot be
+    # reached through the default env.
+    wrapped = pixienv.run_argv(["lefthook", "install"], tmp_path, environment="lint")
+    assert wrapped == [
+        "pixi",
+        "run",
+        "--manifest-path",
+        str(tmp_path / "pixi.toml"),
+        "--environment",
+        "lint",
+        "--",
+        "lefthook",
+        "install",
+    ]
+
+
 def test_has_default_env_keys_on_the_provisioned_sentinel(tmp_path: Path):
     assert not pixienv.has_default_env(tmp_path)
     tmp_path.joinpath(*pixienv.DEFAULT_ENV_DIR).mkdir(parents=True)
@@ -640,6 +658,19 @@ def test_run_in_env_executes_the_wrapped_argv(tmp_path: Path):
     # default bound is pixi's long-runner timeout, not the runner's 5 minutes.
     assert seen["timeout"] == pixienv.INSTALL_TIMEOUT
     assert result.stdout == "ok\n"
+
+
+def test_run_in_env_pins_a_non_default_environment(tmp_path: Path):
+    seen: dict = {}
+    pixienv.run_in_env(
+        ["lefthook", "install"],
+        tmp_path,
+        environment="lint",
+        runner=_capture_runner(seen),
+    )
+    assert seen["cmd"] == pixienv.run_argv(
+        ["lefthook", "install"], tmp_path, environment="lint"
+    )
 
 
 def test_cache_dir_honors_overrides_else_platform_default(monkeypatch):

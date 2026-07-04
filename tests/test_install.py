@@ -592,7 +592,7 @@ def test_load_units_includes_the_eval_terminal_hooks():
 
 
 def test_hook_units_coexist_on_one_settings_file():
-    # Splicing all four event entries into one file leaves each in its own event
+    # Splicing all five event entries into one file leaves each in its own event
     # array, none clobbering another — the consumer keeps a single valid settings.json.
     units = {u.key: u for u in iunits.load_units()}
     text = ""
@@ -601,6 +601,7 @@ def test_hook_units_coexist_on_one_settings_file():
         iunits.SETTINGS_STOP_KEY,
         iunits.SETTINGS_SUBAGENTSTOP_KEY,
         iunits.SETTINGS_SESSIONSTART_KEY,
+        iunits.SETTINGS_WORKTREECREATE_KEY,
     ):
         u = units[key]
         text = splice.splice_settings_hook(text, u.desired_inner(), u.event, u.marker)
@@ -615,12 +616,17 @@ def test_hook_units_coexist_on_one_settings_file():
         iunits.SETTINGS_SESSIONSTART_MARKER
         in hooks["SessionStart"][0]["hooks"][0]["command"]
     )
-    # And each event unit reconciles to NOOP against the file carrying all four.
+    assert (
+        iunits.SETTINGS_WORKTREECREATE_MARKER
+        in hooks["WorktreeCreate"][0]["hooks"][0]["command"]
+    )
+    # And each event unit reconciles to NOOP against the file carrying all five.
     for key in (
         iunits.SETTINGS_KEY,
         iunits.SETTINGS_STOP_KEY,
         iunits.SETTINGS_SUBAGENTSTOP_KEY,
         iunits.SETTINGS_SESSIONSTART_KEY,
+        iunits.SETTINGS_WORKTREECREATE_KEY,
     ):
         u = units[key]
         got = splice.extract_settings_hook(text, u.event, u.marker)
@@ -644,6 +650,50 @@ def test_load_units_includes_the_claude_start_launcher():
     # The launcher's whole job: exec `claude --worktree "<minted-id>" "$@"`.
     assert "--worktree" in text
     assert 'exec claude --worktree "sess-' in text
+
+
+def test_managed_settings_hooks_agree_with_shipits_own_settings():
+    # The dogfood drift guard (the WS01 pattern), for the drift class behind #443
+    # Finding B: shipit's own .claude/settings.json wired WorktreeCreate while the
+    # managed variant never did. Every managed JSON-hook unit must appear — with
+    # the SAME canonical entry — in shipit's own settings, so the two wirings can
+    # never diverge again silently.
+    own = json.loads(
+        (Path(__file__).parent.parent / ".claude" / "settings.json").read_text()
+    )
+    units = {u.key: u for u in iunits.load_units()}
+    for key in (
+        iunits.SETTINGS_KEY,
+        iunits.SETTINGS_STOP_KEY,
+        iunits.SETTINGS_SUBAGENTSTOP_KEY,
+        iunits.SETTINGS_SESSIONSTART_KEY,
+        iunits.SETTINGS_WORKTREECREATE_KEY,
+    ):
+        u = units[key]
+        entries = own["hooks"].get(u.event, [])
+        matches = [e for e in entries if splice.is_shipit_hook(e, u.marker)]
+        assert matches, f"shipit's own settings.json wires no {u.event} entry ({key})"
+        assert iunits.canonical_hook_entry(matches[0]) == u.desired_inner()
+
+
+def test_load_units_includes_the_worktreecreate_adapter_hook():
+    # #443 Finding B: the managed `claude-start` bootstrap promises that
+    # `claude --worktree` provisions the session Tree via shipit's WorktreeCreate
+    # hook (ADR-0027) — the managed settings must wire it, or a stock consumer's
+    # `--worktree` falls through to Claude Code's native worktree.
+    units = {u.key: u for u in iunits.load_units()}
+    assert iunits.SETTINGS_WORKTREECREATE_KEY in units
+    unit = units[iunits.SETTINGS_WORKTREECREATE_KEY]
+    assert unit.kind == "block"
+    assert unit.fmt == iunits.FMT_JSON_HOOK
+    assert unit.dest == iunits.SETTINGS_FILE
+    assert unit.event == iunits.EVENT_WORKTREECREATE
+    assert unit.marker == iunits.SETTINGS_WORKTREECREATE_MARKER
+    entry = json.loads(unit.desired_inner())
+    # WorktreeCreate binds to no tool, so the entry carries no matcher — and the
+    # command is consumer-generic (same shape as shipit's own settings entry).
+    assert "matcher" not in entry
+    assert entry["hooks"][0]["command"] == "pixi run shipit hook worktreecreate"
 
 
 def test_load_units_includes_the_sessionstart_activation_hook():
