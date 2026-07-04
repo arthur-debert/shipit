@@ -38,6 +38,19 @@ from pathlib import Path
 
 from ..identity import Repo
 
+
+class LayoutError(ValueError):
+    """The central root is misconfigured — a typed domain refusal (ADR-0030).
+
+    Raised by :func:`central_root` for a relative ``SHIPIT_TREES_ROOT``: a
+    config problem, not a bug, so the error shell
+    (:func:`~shipit.verbs._errors.cli_errors`) renders it as a clean
+    ``error: …`` + exit 1 on every fleet verb. Subclasses :class:`ValueError`
+    so the create pipeline's existing exception mapping keeps catching it
+    unchanged.
+    """
+
+
 #: Env override for the central root all Trees live under. Unset → the default
 #: below. A module constant + env override is the whole config surface for WS01
 #: (the PRD's "keep it simple"); a richer config binding can supersede it later.
@@ -172,7 +185,7 @@ def central_root() -> Path:
     Expanded (``~`` and any ``$VARS``) and guaranteed absolute. Pure read of the
     environment — no directory is created here; the orchestrator makes the leaf.
 
-    A non-absolute ``SHIPIT_TREES_ROOT`` is rejected with :class:`ValueError`
+    A non-absolute ``SHIPIT_TREES_ROOT`` is rejected with :class:`LayoutError`
     rather than resolved against the cwd: a relative root would place Trees under
     wherever ``shipit`` happens to be invoked from — potentially inside the source
     checkout — which breaks the central-root/isolation invariant this whole
@@ -182,7 +195,7 @@ def central_root() -> Path:
     raw = os.environ.get(CENTRAL_ROOT_ENV) or DEFAULT_CENTRAL_ROOT
     root = Path(os.path.expandvars(raw)).expanduser()
     if not root.is_absolute():
-        raise ValueError(
+        raise LayoutError(
             f"{CENTRAL_ROOT_ENV} must be an absolute path so Trees live OUTSIDE "
             f"every repo (got {raw!r}); a relative root would place Trees under the "
             "current working directory and make cleanup cwd-dependent."

@@ -7,10 +7,15 @@ pure planner; ``list`` / ``remove`` / ``gc`` are sibling verbs, each its own
 ``@tree.command`` block in this module, so concurrent work streams touch disjoint
 lines.
 
-The verb is thin: resolve the ambient repo identity — the canonical
+The verb is thin (ADR-0030): resolve the ambient repo identity — the canonical
 :class:`shipit.identity.Repo`, derived locally from the origin remote (ADR-0024) —
 hand a typed :class:`TreeSpec` to the pure planner + effectful orchestrator, and
-print the READY summary. All the real logic lives in :mod:`shipit.tree`.
+print the READY summary. All the real logic lives in :mod:`shipit.tree`:
+the fleet listing as typed rows (:mod:`shipit.tree.fleet`), removal gating as a
+typed outcome (:mod:`shipit.tree.removal`), and gc as a plan + a sweep
+(:mod:`shipit.tree.gc`). This module holds only click glue, the pure
+``format_*`` renderers, and the exit codes the typed results derive — runtime
+failures map through the shared :func:`~._errors.cli_errors` shell.
 """
 
 from __future__ import annotations
@@ -21,27 +26,23 @@ import sys
 import time
 from collections.abc import Callable
 from dataclasses import fields
-from pathlib import Path
-from typing import TYPE_CHECKING
 
 import click
 
-from .. import execrun, gh, git, identity
-from ..session import liveness
-from ..tree import cleanup, layout, provision, registry
-from ..tree.cleanup import Cleanup
+from .. import execrun, git, identity
+from ..tree import cleanup, fleet, gc, layout, registry, removal
 from ..tree.create import Tree, create, new_agent_hash
 from ..tree.layout import TreeSpec
-from ..tree.readonly import remove_tree
-from ..tree.registry import TreeRecord
-
-if TYPE_CHECKING:
-    from ..identity import Sha
+from ..tree.removal import GateAction, RemovalError
+from ._errors import cli_errors
+from ._params import DURATION, json_option
+from ._render import emit
 
 #: The Tree axis logs on the shared ``shipit.tree`` logger (LOG02): the verb's
 #: user-facing ``print``/``echo`` output is unchanged, but the actions it is the
-#: only record of — the gc sweep, a removal, a failed create — now also land in
-#: the durable JSONL record (spray convention, ADR-0029).
+#: only record of — a failed create, a dry-run preview — also land in the
+#: durable JSONL record (spray convention, ADR-0029). The promoted domain
+#: modules carry their own twins.
 logger = logging.getLogger("shipit.tree")
 
 
@@ -244,92 +245,77 @@ def _emit_ready(result: Tree) -> None:
 
 
 @tree.command(name="list")
-def list_cmd() -> None:
+@json_option
+def list_cmd(as_json: bool) -> None:
     """List every Tree under the central root with its at-a-glance state.
 
     Renders the whole fleet — path, branch, base, age, dirty?, PR state — derived
     purely by SCANNING the central root (no manifest); the state is whatever the
     clones on disk say right now.
     """
-    raise SystemExit(run_list())
+    raise SystemExit(run_list(as_json=as_json))
 
 
-def run_list() -> int:
+@cli_errors
+def run_list(*, as_json: bool = False) -> int:
     """Scan the central root and render the Tree fleet. Returns an exit code.
 
-    Returns 0 in the normal case — an empty or missing root is a valid "no Trees
-    yet" state, not an error; returns 1 with a clean stderr message when the central
-    root is MISCONFIGURED (a relative ``SHIPIT_TREES_ROOT`` → ``ValueError``), so a
-    config error reads as a message, never a traceback. Repo identity is irrelevant
-    here — the central root spans every repo, so ``list`` shows the whole fleet (PRD
-    user story 14/22).
+    Scan → the pure :func:`shipit.tree.fleet.build` typed rows → the render
+    seam (:func:`format_fleet` text, or ``--json`` off the result's own field
+    set). Returns 0 in the normal case — an empty or missing root is a valid
+    "no Trees yet" state, not an error. A MISCONFIGURED central root (a
+    relative ``SHIPIT_TREES_ROOT`` → :class:`~shipit.tree.layout.LayoutError`)
+    maps to ``error: …`` + exit 1 through the shared shell, never a traceback.
+    Repo identity is irrelevant here — the central root spans every repo, so
+    ``list`` shows the whole fleet (PRD user story 14/22).
     """
-    try:
-        root = layout.central_root()
-    except ValueError as exc:
-        logger.error("tree list failed", exc_info=True)
-        print(f"tree list: {exc}", file=sys.stderr)
-        return 1
-    records = registry.scan(root)
-    _render_list(records, now=time.time())
+    records = registry.scan(layout.central_root())
+    emit(fleet.build(records, now=time.time()), format_fleet, as_json=as_json)
     return 0
 
 
-#: The fleet table's columns, in render order: each is ``(header, field-extractor)``.
+#: The fleet table's columns, in render order: each is ``(header, cell-renderer)``.
 #: A new column is one tuple here — the renderer widths every column to its content.
-_LIST_COLUMNS: tuple[tuple[str, str], ...] = (
-    ("PATH", "path"),
-    ("KIND", "kind"),
-    ("BRANCH", "branch"),
-    ("BASE", "base"),
-    ("AGE", "age"),
-    ("DIRTY", "dirty"),
-    ("PR", "pr"),
+_LIST_COLUMNS: tuple[tuple[str, Callable[[fleet.FleetTree], str]], ...] = (
+    ("PATH", lambda row: row.path),
+    # The Tree's reclaim family — write / review / ephemeral — is first-class
+    # fleet state (ADR-0018/0027): each kind takes a different gc ladder, so
+    # the listing says which one applies rather than leaving it implied by path.
+    ("KIND", lambda row: row.kind),
+    ("BRANCH", lambda row: row.branch or "(detached)"),
+    ("BASE", lambda row: _format_base(row)),
+    ("AGE", lambda row: _format_age(row.age_seconds)),
+    ("DIRTY", lambda row: "dirty" if row.dirty else "clean"),
+    ("PR", lambda row: row.pr or "-"),
 )
 
 
-def _render_list(records: list[TreeRecord], *, now: float) -> None:
-    """Print the fleet as a fixed-width table (one Tree per row), or a hint when empty."""
-    if not records:
-        print("No Trees under the central root.")
-        return
+def format_fleet(result: fleet.Fleet) -> str:
+    """The pure text renderer: the fleet as a fixed-width table, or a hint when empty.
+
+    A plain string function over the typed rows (ADR-0030 render seam) — no
+    printing; :func:`~._render.emit` owns the terminal write.
+    """
+    if not result.trees:
+        return "No Trees under the central root."
     headers = [header for header, _ in _LIST_COLUMNS]
-    rows = [_row_cells(record, now=now) for record in records]
+    rows = [[cell(row) for _, cell in _LIST_COLUMNS] for row in result.trees]
     # Width each column to its widest cell, header included. Pass a single generator
     # to max() (header counts as just another row) rather than star-unpacking one
     # positional arg per row — that materializes an arg list and can hit arg limits.
     all_rows = [headers, *rows]
     widths = [max(len(row[col]) for row in all_rows) for col in range(len(headers))]
-    print(_format_row(headers, widths))
-    for row in rows:
-        print(_format_row(row, widths))
+    return "\n".join(_format_row(row, widths) for row in all_rows)
 
 
-def _row_cells(record: TreeRecord, *, now: float) -> list[str]:
-    """The rendered string cells for one Tree row, in :data:`_LIST_COLUMNS` order."""
-    values = {
-        "path": record.path,
-        # The Tree's reclaim family — write / review / ephemeral — is first-class
-        # fleet state (ADR-0018/0027): each kind takes a different gc ladder, so
-        # the listing says which one applies rather than leaving it implied by path.
-        "kind": layout.tree_kind(record.path),
-        "branch": record.branch or "(detached)",
-        "base": _base_cell(record),
-        "age": _format_age(now - record.mtime),
-        "dirty": "dirty" if record.dirty else "clean",
-        "pr": record.pr or "-",
-    }
-    return [values[field] for _, field in _LIST_COLUMNS]
-
-
-def _base_cell(record: TreeRecord) -> str:
+def _format_base(row: fleet.FleetTree) -> str:
     """The BASE cell: the upstream ref, annotated with ahead/behind when diverged."""
-    base = record.base or "-"
+    base = row.base or "-"
     marks = []
-    if record.ahead:
-        marks.append(f"+{record.ahead}")
-    if record.behind:
-        marks.append(f"-{record.behind}")
+    if row.ahead:
+        marks.append(f"+{row.ahead}")
+    if row.behind:
+        marks.append(f"-{row.behind}")
     return f"{base} ({'/'.join(marks)})" if marks else base
 
 
@@ -391,6 +377,7 @@ def _stdin_is_tty() -> bool:
         return False
 
 
+@cli_errors
 def run_remove(
     target: str,
     *,
@@ -400,21 +387,18 @@ def run_remove(
 ) -> int:
     """Resolve TARGET to one Tree and delete its clone dir. Returns an exit code.
 
-    A Tree is a disposable clone, so removal is silent by default — EXCEPT when the
-    delete could lose work that lives only in that clone (uncommitted changes or
-    unpushed commits). That risky case is gated: with a TTY the user is prompted
-    (``confirm``); declining leaves the Tree untouched. ``assume_yes`` (the ``--yes``
-    flag) skips the gate unconditionally. Without a TTY and without ``assume_yes`` a
-    risky remove is REFUSED rather than silently destroying work or blocking on a
-    prompt — the safe non-interactive default. A clean, fully-pushed Tree is always
-    removed without a prompt.
+    Glue over the promoted domain (:mod:`shipit.tree.removal`): scan →
+    :func:`~shipit.tree.removal.resolve_target` → the pure typed gate → act on
+    its outcome. The one terminal concern — putting the CONFIRM prompt to the
+    user — stays here; declining raises the same typed refusal every other
+    no-go outcome does, so every failure maps to ``error: …`` + exit 1 through
+    the shared shell (misconfigured root, unknown/ambiguous target, declined
+    prompt, refused non-interactive risk, failed delete). A clean,
+    fully-pushed Tree is always removed without a prompt; ``assume_yes`` (the
+    ``--yes`` flag) skips the gate unconditionally.
 
-    Returns 0 after removing the one matching Tree; 1 with a stderr message when the
-    central root is misconfigured (a relative ``SHIPIT_TREES_ROOT`` → ``ValueError``,
-    surfaced as a message not a traceback), no Tree matches, more than one does (never
-    guess which to delete), the user declines, or a risky remove can't be confirmed
-    non-interactively. ``confirm``/``is_tty`` are injectable so the gating is unit-
-    testable without a real terminal; they default to ``click.confirm`` and
+    ``confirm``/``is_tty`` are injectable so the prompt wiring is testable
+    without a real terminal; they default to ``click.confirm`` and
     :func:`_stdin_is_tty` (a guard around ``sys.stdin.isatty`` that reads as
     not-a-TTY when stdin is missing or closed rather than crashing).
     """
@@ -422,106 +406,16 @@ def run_remove(
         confirm = click.confirm
     if is_tty is None:
         is_tty = _stdin_is_tty
-    try:
-        root = layout.central_root()
-    except ValueError as exc:
-        logger.error("tree remove failed", exc_info=True)
-        print(f"tree remove: {exc}", file=sys.stderr)
-        return 1
-    records = registry.scan(root)
-    matches = _match_trees(records, target)
-    if not matches:
-        print(f"tree remove: no Tree matching {target!r}", file=sys.stderr)
-        return 1
-    if len(matches) > 1:
-        paths = ", ".join(record.path for record in matches)
-        print(
-            f"tree remove: {target!r} is ambiguous — matches {paths}", file=sys.stderr
-        )
-        return 1
-    record = matches[0]
-    block = _gate_removal(record, assume_yes=assume_yes, is_tty=is_tty, confirm=confirm)
-    if block is not None:
-        print(f"tree remove: {block}", file=sys.stderr)
-        return 1
-    try:
-        remove_tree(record.path)
-    except OSError as exc:
-        # Propagating failure (exit-1): ERROR with the exception attached; the
-        # successful removal itself is recorded by `remove_tree` (the funnel).
-        logger.error(
-            "tree remove failed for %s",
-            record.path,
-            exc_info=True,
-            extra={"tree": record.path},
-        )
-        print(f"tree remove: could not remove {record.path}: {exc}", file=sys.stderr)
-        return 1
+    records = registry.scan(layout.central_root())
+    record = removal.resolve_target(records, target)
+    gate = removal.gate(record, assume_yes=assume_yes, interactive=is_tty())
+    if gate.action is GateAction.REFUSE:
+        raise RemovalError(gate.reason)
+    if gate.action is GateAction.CONFIRM and not confirm(gate.prompt or ""):
+        raise RemovalError(f"aborted — {record.path} left untouched")
+    removal.remove(record)
     print(f"REMOVED {record.path}")
     return 0
-
-
-def _removal_risk(record: TreeRecord) -> str | None:
-    """Why removing ``record`` could lose work, as a short phrase — or ``None`` if safe.
-
-    A Tree is a disposable clone, so removal is normally silent; it is only worth a
-    confirmation when the delete would discard work that exists ONLY in that clone:
-    uncommitted/untracked changes (``dirty``) or commits not yet pushed to the upstream
-    (``ahead > 0``). Everything reachable from the upstream survives the delete, so a
-    clean, fully-pushed Tree returns ``None``. This is the whole risk-detection seam —
-    it reuses the ``dirty``/``ahead`` the registry already derived through the ``gh``
-    boundary, so there is no second shell-out to git.
-    """
-    reasons: list[str] = []
-    if record.dirty:
-        reasons.append("uncommitted changes")
-    if record.ahead:
-        plural = "s" if record.ahead != 1 else ""
-        reasons.append(f"{record.ahead} unpushed commit{plural}")
-    if not reasons:
-        return None
-    return " and ".join(reasons)
-
-
-def _gate_removal(
-    record: TreeRecord,
-    *,
-    assume_yes: bool,
-    is_tty: Callable[[], bool],
-    confirm: Callable[[str], bool],
-) -> str | None:
-    """Decide whether removing ``record`` may proceed; pure gating, no side effects.
-
-    Returns ``None`` to proceed with the delete (the Tree is safe, ``--yes`` was given,
-    or the user confirmed), or a stderr-ready message when the removal must NOT happen:
-    the user declined the prompt, or a risky Tree cannot be confirmed because there is
-    no TTY and no ``--yes``. Keeping this separate from the ``rmtree`` keeps both the
-    risk-detection and the prompt-gating unit-testable with an injected ``confirm`` and
-    ``is_tty`` — no real terminal, no filesystem.
-    """
-    risk = _removal_risk(record)
-    if risk is None or assume_yes:
-        return None
-    if is_tty():
-        if confirm(f"Tree {record.path} has {risk}; remove anyway?"):
-            return None
-        return f"aborted — {record.path} left untouched"
-    return (
-        f"{record.path} has {risk}; refusing to remove non-interactively without --yes"
-    )
-
-
-def _match_trees(records: list[TreeRecord], target: str) -> list[TreeRecord]:
-    """Trees whose absolute path equals TARGET or whose dir name equals TARGET.
-
-    Matching on the basename lets a coordinator name a Tree by its short id
-    (``7-aaaa``) without typing the whole central-root path; matching the full path
-    stays exact. The path form takes precedence — an exact path match is unambiguous.
-    """
-    by_path = [record for record in records if record.path == target]
-    if by_path:
-        return by_path
-    return [record for record in records if Path(record.path).name == target]
 
 
 @tree.command(name="gc")
@@ -536,13 +430,14 @@ def _match_trees(records: list[TreeRecord], target: str) -> list[TreeRecord]:
 @click.option(
     "--threshold",
     default=None,
+    type=DURATION,
     metavar="DURATION",
     help=(
         "Age boundary a Tree must exceed to be reclaimable, as a human duration "
         "(e.g. 14d, 36h, 90m). Defaults to 14d when omitted."
     ),
 )
-def gc_cmd(dry_run: bool, threshold: str | None) -> None:
+def gc_cmd(dry_run: bool, threshold: float | None) -> None:
     """Sweep the central root: remove only provably-safe Trees, list ambiguous ones.
 
     Scans every Tree, classifies the fleet, then deletes ONLY the Trees whose PR is
@@ -554,214 +449,90 @@ def gc_cmd(dry_run: bool, threshold: str | None) -> None:
     nothing; ``--threshold DURATION`` (e.g. ``36h``) overrides the 14-day age boundary
     for this run.
     """
-    raise SystemExit(run_gc(dry_run=dry_run, threshold=threshold))
+    raise SystemExit(run_gc(dry_run=dry_run, max_age_seconds=threshold))
 
 
-def run_gc(*, dry_run: bool = False, threshold: str | None = None) -> int:
-    """Scan, classify, then either preview the partition or sweep the removable set.
+@cli_errors
+def run_gc(*, dry_run: bool = False, max_age_seconds: float | None = None) -> int:
+    """Build the gc plan, then either preview it or sweep it. Returns an exit code.
 
-    The scan→classify step is shared by both modes (:func:`_scan_and_classify`), so a
-    ``--dry-run`` preview can NEVER drift from the action: it renders the very
-    :class:`Cleanup` the real sweep would consume; only the "print vs delete" tail
-    differs. ``threshold`` (a human duration like ``36h``) overrides the default age
-    boundary for this run; ``None`` keeps the 14-day default.
+    Glue over the promoted domain (:mod:`shipit.tree.gc`): ONE
+    :func:`~shipit.tree.gc.plan_fleet` call builds the frozen plan BOTH modes
+    consume, so a ``--dry-run`` preview can NEVER drift from the action — it
+    renders the very plan the real :func:`~shipit.tree.gc.sweep` applies; only
+    the "render vs delete" tail differs. ``max_age_seconds`` overrides the
+    14-day age boundary (the ``--threshold`` flag, already parsed to seconds
+    at click per the two-tier exit contract: a malformed duration is a usage
+    error, exit 2).
 
-    Returns 0 in the normal case — an empty root or a fleet with nothing to reclaim
-    is a valid outcome, not an error; returns 1 with a clean stderr message when the
-    central root is misconfigured (a relative ``SHIPIT_TREES_ROOT`` → ``ValueError``)
-    or ``threshold`` is not a valid duration, so the gc contract stays "no tracebacks,
-    just messages + counts". Repo identity is irrelevant — ``gc`` spans the whole
-    central root, like ``list``.
+    Returns 0 in the normal case — an empty root or a fleet with nothing to
+    reclaim is a valid outcome, not an error; a misconfigured central root (a
+    relative ``SHIPIT_TREES_ROOT`` → :class:`~shipit.tree.layout.LayoutError`)
+    maps to ``error: …`` + exit 1 through the shared shell. Repo identity is
+    irrelevant — ``gc`` spans the whole central root, like ``list``.
     """
-    try:
-        root = layout.central_root()
-        max_age_seconds = (
+    plan = gc.plan_fleet(
+        layout.central_root(),
+        max_age_seconds=(
             cleanup.DEFAULT_MAX_AGE_SECONDS
-            if threshold is None
-            else cleanup.parse_duration(threshold)
-        )
-    except ValueError as exc:
-        logger.error("tree gc failed", exc_info=True)
-        print(f"tree gc: {exc}", file=sys.stderr)
-        return 1
-    decision, total, unknown = _scan_and_classify(root, max_age_seconds=max_age_seconds)
+            if max_age_seconds is None
+            else max_age_seconds
+        ),
+    )
     if dry_run:
-        _emit_gc_preview(decision, total=total, unknown=unknown)
-    else:
-        _emit_gc(decision, total=total, unknown=unknown)
+        _render_gc_preview(plan)
+        return 0
+    _render_gc_result(gc.sweep(plan))
     return 0
 
 
-def _scan_and_classify(
-    root: str, *, max_age_seconds: float
-) -> tuple[Cleanup, int, int]:
-    """Scan the central root and classify the fleet — the step shared by both gc modes.
+def _render_gc_result(result: gc.GcResult) -> None:
+    """Render the sweep's typed result: what was removed, failed, kept stale, or kept.
 
-    Factoring scan→PR-state→``classify`` here is what guarantees dry-run/real-sweep
-    parity: both the preview and the sweep call this one path, so the partition they
-    render and act on is the identical :class:`Cleanup`. Pure ``classify`` does the
-    deciding; this wrapper only supplies the effectful inputs (disk scan, ``now``, PR
-    states) it needs.
-
-    Returns the :class:`Cleanup` partition alongside ``total`` (Trees scanned) and
-    ``unknown`` (how many had an unreadable PR state). Both gc tails — the real sweep
-    and the ``--dry-run`` preview — need those counts to warn about an INCOMPLETE
-    view of the fleet, so they travel with the partition rather than being recomputed.
+    The terminal half of the plan+sweep split: every fact printed here came
+    back in the :class:`~shipit.tree.gc.GcResult` — the delete failures the
+    sweep continued past (stderr), the ``removed`` count that reflects what
+    actually came off disk, and the ``swept N of M`` warning that makes an
+    INCOMPLETE sweep visible (those Trees were classified conservatively, but
+    a transient ``gh`` failure could be hiding a reclaimable Tree).
     """
-    records = registry.scan(root)
-    pr_states = {record.path: _pr_state(record) for record in records}
-    decision = cleanup.classify(
-        records,
-        now=time.time(),
-        pr_states=pr_states,
-        max_age_seconds=max_age_seconds,
-        live_sessions=_live_sessions(records),
-        provision_shas=_provision_shas(records),
+    for path in result.removed:
+        print(f"REMOVED {path}")
+    for failure in result.failed:
+        print(f"FAILED  {failure.path}: {failure.error}", file=sys.stderr)
+    for path in result.stale:
+        print(f"STALE   {path} (ambiguous — left for review, not removed)")
+    print(
+        f"gc: removed {len(result.removed)}, stale {len(result.stale)}, "
+        f"kept {result.kept}"
     )
-    unknown = sum(1 for state in pr_states.values() if state == "UNKNOWN")
-    return decision, len(records), unknown
-
-
-def _live_sessions(records: list[TreeRecord]) -> dict[str, bool]:
-    """Per-ephemeral-Tree session liveness — the ``live_sessions`` input ``classify`` needs.
-
-    For each *ephemeral* Tree (the only kind whose ladder consults liveness), read
-    its pidfile and decide :func:`~shipit.session.liveness.is_live` against the
-    real OS probe. No pidfile / an unreadable one reads as NOT live — the safe
-    direction, because the pure ladder still protects such a Tree through its
-    liveness-independent rungs (the dirty/unpushed floor, the grace window). Other
-    kinds are simply absent from the map (``classify`` defaults them to not-live,
-    and their ladders never look).
-    """
-    live: dict[str, bool] = {}
-    for record in records:
-        if layout.tree_kind(record.path) != layout.EPHEMERAL_KIND:
-            continue
-        session = liveness.read_pidfile(record.path)
-        live[record.path] = session is not None and liveness.is_live(
-            session, liveness.os_probe
-        )
-    return live
-
-
-def _provision_shas(records: list[TreeRecord]) -> dict[str, frozenset[Sha]]:
-    """Per-ephemeral-Tree provisioning-commit SHAs — ``classify``'s exclusion input.
-
-    For each *ephemeral* Tree (the only ladder that consults the exclusion, #232),
-    read the ``.git/shipit-provision.json`` record its birth provisioning wrote.
-    A missing or unreadable record reads as the EMPTY set — nothing excluded, so
-    the pure ladder's unpushed floor keeps the Tree: the safe direction. Other
-    kinds are simply absent from the map (``classify`` defaults them to empty,
-    and their ladders never exclude).
-    """
-    return {
-        record.path: provision.read_provision_shas(record.path)
-        for record in records
-        if layout.tree_kind(record.path) == layout.EPHEMERAL_KIND
-    }
-
-
-def _pr_state(record: TreeRecord) -> str | None:
-    """The PR's remote state (``"MERGED"`` / ``"OPEN"`` / ``"CLOSED"`` / ``"UNKNOWN"`` …)
-    for one Tree.
-
-    Reads through the same ``gh`` boundary the registry uses, from inside the clone, so
-    ``gc`` sees the authoritative merge state rather than re-parsing the rendered label.
-    The vocabulary is the typed snapshot's own (:attr:`~shipit.gh.HeadPr.display_state`,
-    which normalizes a draft open PR to ``"DRAFT"``), so the fleet has ONE state
-    vocabulary and ``cleanup.classify``'s draft branch is reachable. An unreadable
-    state (``gh.pr_for_head`` returns :data:`~shipit.gh.UNKNOWN` — a gh failure or a
-    malformed payload the adapter's construction boundary rejected) maps to
-    ``"UNKNOWN"`` — distinct from ``None`` (no branch / no PR) — so ``gc`` can both
-    treat it conservatively and warn about it.
-    """
-    if not record.branch:
-        return None
-    pr = gh.pr_for_head(record.branch, cwd=record.path)
-    if pr is gh.UNKNOWN:
-        return "UNKNOWN"
-    if pr is None:
-        return None
-    return pr.display_state
-
-
-def _emit_gc(decision: Cleanup, *, total: int, unknown: int) -> None:
-    """Delete the removable Trees, then report what was removed, kept stale, or kept.
-
-    Deletion is best-effort per Tree: if one ``rmtree`` fails (a read-only file, a lock,
-    a vanished dir), the failure goes to stderr and the sweep CONTINUES to the next Tree
-    rather than aborting mid-fleet. The summary's ``removed`` count reflects what actually
-    came off disk, not what was merely planned.
-
-    ``total`` is the number of Trees swept and ``unknown`` how many had an unreadable PR
-    state. When any were unknown, a ``swept N of M; K skipped (state unknown)`` warning is
-    emitted to stderr so an INCOMPLETE sweep is visible — those Trees were classified
-    conservatively (never removed), but a transient ``gh`` failure could be hiding a
-    reclaimable Tree, and the operator should know the sweep did not see the whole fleet.
-    """
-    removed = 0
-    for record in decision.removable:
-        try:
-            deleted = remove_tree(record.path)
-        except OSError as exc:
-            # Degraded-but-continuing (spray convention): the sweep carries on
-            # past a failed rmtree, so it is a WARNING, exception attached.
-            logger.warning(
-                "tree gc could not remove %s",
-                record.path,
-                exc_info=True,
-                extra={"tree": record.path},
-            )
-            print(f"FAILED  {record.path}: {exc}", file=sys.stderr)
-            continue
-        if not deleted:
-            # The path was already gone (a concurrent sweep, a manual rm). Nothing came
-            # off disk, so it must not be counted or reported as REMOVED — the summary's
-            # `removed` reflects actual reclaim, per remove_tree's contract.
-            continue
-        removed += 1
-        print(f"REMOVED {record.path}")
-    for record in decision.stale:
-        print(f"STALE   {record.path} (ambiguous — left for review, not removed)")
-    stale = len(decision.stale)
-    kept = len(decision.keep)
-    # The sweep's lifecycle milestone: the print above is the user surface, this
-    # is its durable twin (per-Tree removals are recorded by `remove_tree`).
-    logger.info("tree gc removed %d, stale %d, kept %d", removed, stale, kept)
-    print(f"gc: removed {removed}, stale {stale}, kept {kept}")
-    if unknown:
-        swept = total - unknown
-        logger.warning(
-            "tree gc swept %d of %d; %d skipped (PR state unknown — incomplete view "
-            "of the fleet)",
-            swept,
-            total,
-            unknown,
-        )
+    if result.unknown:
         print(
-            f"swept {swept} of {total}; {unknown} skipped (state unknown)",
+            f"swept {result.swept} of {result.total}; {result.unknown} skipped "
+            "(state unknown)",
             file=sys.stderr,
         )
 
 
-def _emit_gc_preview(decision: Cleanup, *, total: int, unknown: int) -> None:
-    """Print the removable/stale/keep partition WITHOUT touching disk (``--dry-run``).
+def _render_gc_preview(plan: gc.GcPlan) -> None:
+    """Render the removable/stale/keep partition WITHOUT touching disk (``--dry-run``).
 
-    Renders the exact :class:`Cleanup` the real sweep would act on, so a preview can
-    never disagree with the sweep that follows it. The buckets are walked GENERICALLY
+    Renders the exact plan the real sweep would apply, so a preview can never
+    disagree with the sweep that follows it. The buckets are walked GENERICALLY
     (``dataclasses.fields``) and each is printed by its own field name — so if an
     upstream change adds a bucket, it surfaces here with no edit and no hard-coded
     state vocabulary to fall out of date. Deletes nothing: there is no ``rmtree`` on
     this path at all.
 
-    The same INCOMPLETE-view warning the real sweep emits is surfaced here too: when
-    any Tree had an unreadable PR state, a ``would sweep N of M; K skipped (state
-    unknown)`` line goes to stderr, so a dry-run preview tells the operator the fleet
-    was only partially seen — exactly as the real sweep would, never silently.
+    The same INCOMPLETE-view warning the real sweep surfaces is emitted here too:
+    when any Tree had an unreadable PR state, a ``would sweep N of M; K skipped
+    (state unknown)`` line goes to stderr, so a dry-run preview tells the operator
+    the fleet was only partially seen — exactly as the real sweep would, never
+    silently.
     """
     counts: list[str] = []
-    for field in fields(decision):
-        bucket: list[TreeRecord] = getattr(decision, field.name)
+    for field in fields(plan.partition):
+        bucket = getattr(plan.partition, field.name)
         for record in bucket:
             print(f"{field.name.upper():<9} {record.path}")
         counts.append(f"{field.name} {len(bucket)}")
@@ -769,16 +540,17 @@ def _emit_gc_preview(decision: Cleanup, *, total: int, unknown: int) -> None:
     # milestone — the per-Tree ladder decisions are already recorded by classify.
     logger.debug("gc --dry-run: %s", ", ".join(counts))
     print(f"gc --dry-run (no Trees deleted): {', '.join(counts)}")
-    if unknown:
-        swept = total - unknown
+    if plan.unknown:
+        swept = plan.total - plan.unknown
         logger.warning(
             "gc --dry-run: would sweep %d of %d; %d skipped (PR state unknown — "
             "incomplete view of the fleet)",
             swept,
-            total,
-            unknown,
+            plan.total,
+            plan.unknown,
         )
         print(
-            f"would sweep {swept} of {total}; {unknown} skipped (state unknown)",
+            f"would sweep {swept} of {plan.total}; {plan.unknown} skipped "
+            "(state unknown)",
             file=sys.stderr,
         )
