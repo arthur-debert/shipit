@@ -1,5 +1,7 @@
 """Unit tests for the gh-setup passes — ruleset payload, labels, secrets, idempotence."""
 
+from typing import Any
+
 import pytest
 
 from shipit.config import SecretSource
@@ -7,7 +9,7 @@ from shipit.identity import repo_from_slug
 from shipit.verbs import gh_setup
 
 
-def get_rule(ruleset, rule_type):
+def get_rule(ruleset: dict[str, Any], rule_type: str) -> dict[str, Any]:
     """Return the single rule of the given type from a ruleset dict."""
     return next(r for r in ruleset["rules"] if r["type"] == rule_type)
 

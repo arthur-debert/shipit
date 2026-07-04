@@ -1269,8 +1269,11 @@ def test_plan_retired_decides_every_manifest_entry():
     [
         "/etc/passwd",
         "C:\\Windows\\system32\\config",
+        "C:tmp\\x.yml",
+        "\\outside.yml",
         "../outside.yml",
         "nested/../../outside.yml",
+        "nested\\..\\..\\outside.yml",
         "",
     ],
 )
@@ -1325,6 +1328,25 @@ def test_install_keeps_a_modified_retired_file_with_warning(tmp_path, rec, capsy
         captured.out
     )
     assert f"retired file kept: {RETIRED_WORKFLOW_PATH}" in captured.err
+
+
+def test_install_keeps_a_symlink_at_a_retired_path(tmp_path, rec, capsys):
+    # `is_file()` follows symlinks: a link whose TARGET carries pristine
+    # content must not be deleted — the link is not shipit's output. It is
+    # kept and warned like any locally modified copy.
+    target = tmp_path / "elsewhere.yml"
+    target.write_bytes(PRISTINE_WORKFLOW.read_bytes())
+    victim = tmp_path / RETIRED_WORKFLOW_PATH
+    victim.parent.mkdir(parents=True)
+    victim.symlink_to(target)
+
+    rc = install.run(str(tmp_path))
+    assert rc == 0
+    assert victim.is_symlink()
+    captured = capsys.readouterr()
+    assert f"keep     {RETIRED_WORKFLOW_PATH} (retired; locally modified)" in (
+        captured.out
+    )
 
 
 def test_retired_delete_alone_is_still_a_write(tmp_path, rec, capsys):

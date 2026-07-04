@@ -669,11 +669,18 @@ def _retired_path(raw: str) -> str:
     will destroy — so a bad entry (absolute path, drive letter, ``..``
     traversal) fails the load closed rather than reaching the IO pass.
     """
+    posix = PurePosixPath(raw)
+    win = PureWindowsPath(raw)
     if (
         not raw
-        or PurePosixPath(raw).is_absolute()
-        or PureWindowsPath(raw).is_absolute()
-        or ".." in PurePosixPath(raw).parts
+        or posix.is_absolute()
+        or ".." in posix.parts
+        # Windows forms: `drive` rejects both absolute (`C:\x`) and
+        # drive-relative (`C:x`) paths, `root` rejects rooted `\x`, and the
+        # parts check catches backslash-separated `..` traversal.
+        or win.drive
+        or win.root
+        or ".." in win.parts
     ):
         raise ValueError(f"retired-files manifest: unsafe path {raw!r}")
     return raw
@@ -728,6 +735,12 @@ def plan_retired(
 def retired_actual_hash(root: Path, retired: RetiredFile) -> str | None:
     """The hash of a retired path's current content, or ``None`` if absent."""
     dest = root / retired.path
+    if dest.is_symlink():
+        # ``is_file()`` follows symlinks, so a link whose TARGET matches a
+        # pristine hash would otherwise decide DELETE. A symlink is never
+        # shipit's pristine output; any non-``sha256:`` value can never match
+        # a pristine hash, so the link is kept and warned as locally modified.
+        return "symlink"
     if not dest.is_file():
         return None
     return config.content_hash(dest.read_bytes())
