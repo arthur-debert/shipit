@@ -82,26 +82,32 @@ def test_every_referenced_shipit_invocation_exists():
     for invocation in invocations:
         tokens = invocation.split()[1:]  # drop the leading "shipit"
         cmd: click.Command = root
-        # Walk subcommand tokens until the first option; a bare word after an
-        # option is that option's value, never a subcommand.
+        # Walk subcommand tokens until the first option. A bare word after an
+        # option is that option's value, never a subcommand; a bare word after
+        # a leaf (non-group) command is a positional argument — stop the walk
+        # once we reach one rather than mistaking it for a subcommand.
+        #
+        # Two deliberate gaps, neither exercised by this runbook and both
+        # against shipit's verb-first convention: a global flag placed BEFORE a
+        # subcommand (`shipit --debug logs`) leaves the subcommand unwalked, and
+        # bundled short flags (`-rf`) are not split into their components.
         while tokens and not tokens[0].startswith("-"):
+            if not isinstance(cmd, click.Group):
+                break  # leaf reached — remaining bare words are positionals
             token = tokens.pop(0)
-            assert isinstance(cmd, click.Group), (
-                f"`{invocation}`: '{token}' follows a non-group command"
-            )
             assert token in cmd.commands, (
                 f"`{invocation}`: no such subcommand '{token}' — the runbook "
                 "references tooling that does not exist"
             )
             cmd = cmd.commands[token]
-        # Validate the option names against the resolved command.
+        # Validate the option names (long and short) against the resolved command.
         known_opts = {
             opt
             for param in cmd.get_params(click.Context(cmd))
             for opt in (*param.opts, *param.secondary_opts)
         }
         for token in tokens:
-            if token.startswith("--"):
+            if token.startswith("-"):
                 assert token in known_opts, (
                     f"`{invocation}`: '{cmd.name}' has no option '{token}' — "
                     "the runbook references tooling that does not exist"
