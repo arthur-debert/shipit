@@ -106,6 +106,17 @@ The only place that knows one reviewer's mechanics (how to detect its review,
 how to request it). Adding a reviewer is adding an adapter to the registry;
 nothing downstream changes.
 
+**Sole requester**:
+The rule that every **required reviewer** is requested by the **PR state
+engine** and nothing else — Copilot included, through its **reviewer adapter**
+off the **Roster**. No GitHub-side auto-request (an Actions workflow at
+`opened`, a ruleset parameter, an account setting) may coexist with it for a
+required reviewer: a second requester produces review rounds the engine cannot
+count. An inherently auto-triggering reviewer (Gemini) may exist only as
+**best-effort** — outside the request system, its reviews never mint rounds.
+*Avoid*: a required reviewer with a second, GitHub-side requester (the Copilot
+special case this rule kills); requiring a reviewer the engine cannot request.
+
 **Required reviewer**:
 A reviewer in the **required set** — every one must be **settled** before a PR can be Ready.
 The set is policy (config), not code.
