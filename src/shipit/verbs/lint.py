@@ -61,11 +61,17 @@ class Tool:
     form. The checks NEVER skip a tool — ``shipit lint --fix`` formats what it can
     AND still checks everything, so it can never pass while a non-fixable leg
     (shellcheck, yamllint, lexd) is failing.
+
+    ``per_manifest`` tools speak to a build unit, not a file list (cargo has no
+    file-batch form): they run once per tracked manifest directory of their Lang
+    (see :func:`manifest_roots`) with NO files appended, cwd'd into that
+    directory.
     """
 
     binary: str
     check: tuple[str, ...]
     fix: tuple[str, ...] | None = None
+    per_manifest: bool = False
 
     def argv(self, *, fix: bool) -> tuple[str, ...]:
         """The argv prefix for this run: the fix form in fix mode if the tool has
@@ -83,6 +89,7 @@ class Lang:
     extensions: tuple[str, ...]
     tools: tuple[Tool, ...]
     shebangs: tuple[str, ...] = ()  # interpreter basenames for extensionless files
+    manifests: tuple[str, ...] = ()  # manifest basenames rooting per_manifest runs
 
 
 PYTHON = Lang(
@@ -91,6 +98,45 @@ PYTHON = Lang(
     tools=(
         Tool("ruff", ("check",), fix=("check", "--fix")),
         Tool("ruff", ("format", "--check"), fix=("format",)),
+    ),
+)
+RUST = Lang(
+    name="rust",
+    extensions=(".rs",),
+    manifests=("Cargo.toml",),
+    # cargo speaks to a crate/workspace, not a file list, so both tools are
+    # per_manifest: one run per tracked Cargo.toml directory (see
+    # manifest_roots — every tracked manifest runs, never collapsed, so a
+    # nested crate that ISN'T a workspace member is never silently skipped).
+    # clippy and fmt both carry --all so a workspace root covers its declared
+    # members even when only the root manifest is tracked (release-core's
+    # battle-tested forms, docs/prd/lint-checks.md). clippy findings are hard
+    # errors (-D warnings) and clippy has no safe in-place fix here, so under
+    # --fix it still runs its check form; `cargo fmt --all` is the one rust
+    # --fix leg. A repo with .rs files but no tracked Cargo.toml runs at the
+    # root and fails on cargo's own error — hard, never a silent skip. The
+    # rust toolchain is assumed provisioned per the repo's toolchain
+    # declaration (ADR-0007); a missing cargo is the standard hard-fail 127.
+    tools=(
+        Tool(
+            "cargo",
+            (
+                "clippy",
+                "--all",
+                "--all-targets",
+                "--all-features",
+                "--",
+                "-D",
+                "warnings",
+            ),
+            per_manifest=True,
+        ),
+        Tool(
+            "cargo",
+            ("fmt", "--all", "--", "--check"),
+            fix=("fmt", "--all"),
+            per_manifest=True,
+        ),
     ),
 )
 SHELL = Lang(
@@ -125,7 +171,7 @@ LEX = Lang(
     tools=(Tool("lexd", ("check",)),),
 )
 
-LANGS: tuple[Lang, ...] = (PYTHON, SHELL, YAML, JSON, MARKDOWN, LEX)
+LANGS: tuple[Lang, ...] = (PYTHON, RUST, SHELL, YAML, JSON, MARKDOWN, LEX)
 
 
 # --------------------------------------------------------------------------
@@ -170,6 +216,27 @@ def _interp(shebang: str | None) -> str | None:
     if first == "env" and len(tokens) > 1:
         return tokens[1].rsplit("/", 1)[-1]
     return first
+
+
+def manifest_roots(paths: list[str], manifests: tuple[str, ...]) -> list[str]:
+    """Every directory (repo-relative, ``"."`` for the root) holding one of
+    ``manifests`` among the tracked paths, sorted. Pure (no I/O).
+
+    Every tracked manifest gets its own run — nested manifests are NOT
+    collapsed under an ancestor. Cargo does not make a nested manifest a
+    workspace member automatically (a repo can have an independent nested
+    crate, or a workspace that excludes one), so collapsing would silently
+    skip it; the ``--all`` on the tools makes a true workspace root cover its
+    declared members, and running every manifest guarantees the rest are
+    never skipped. Redundant re-checks of shared members are cargo-cache
+    cheap; a silent miss in a hard-fail lint is not.
+    """
+    dirs = {
+        path.rsplit("/", 1)[0] if "/" in path else "."
+        for path in paths
+        if _basename(path) in manifests
+    }
+    return sorted(dirs)
 
 
 def route(
@@ -302,49 +369,70 @@ def run(
 
     runs: list[ToolRun] = []
     for lang, paths in routed:
+        # per_manifest tools run once per tracked manifest directory. With no
+        # manifest tracked they run at the root, where the tool's own error is
+        # the (hard) verdict — never a silent skip.
+        mdirs = (
+            (manifest_roots(files, lang.manifests) or ["."])
+            if lang.manifests
+            else ["."]
+        )
         for tool in lang.tools:
             prefix = tool.argv(fix=fix)
             # Label from the actual argv that ran, so fix mode never claims it
             # ran the check form when it ran the fix form.
             label = f"{tool.binary} {' '.join(prefix)}".strip()
-            try:
-                result = run_tool(tool.binary, [*prefix, *paths], root)
-            except execrun.ExecError as exc:
-                # A binary missing from PATH (or any launch failure) is the
-                # HARD-fail signal: 127 + a clear note, never a silent skip.
-                # It propagates (the run's verdict fails), so ERROR + exception.
-                rc = 127
-                if exc.cause == execrun.CAUSE_MISSING_BINARY:
-                    out = (
-                        f"{tool.binary}: not found on PATH "
-                        "(the check is hard — provision it)"
+            if tool.per_manifest:
+                batches = [(list(prefix), mdir, f"crate {mdir}") for mdir in mdirs]
+            else:
+                count = f"{len(paths)} file{'s' if len(paths) != 1 else ''}"
+                batches = [([*prefix, *paths], ".", count)]
+            for args, mdir, note in batches:
+                try:
+                    result = run_tool(tool.binary, args, root / mdir)
+                except execrun.ExecError as exc:
+                    # A binary missing from PATH (or any launch failure) is the
+                    # HARD-fail signal: 127 + a clear note, never a silent skip.
+                    # It propagates (the run's verdict fails), so ERROR + exception.
+                    rc = 127
+                    if exc.cause == execrun.CAUSE_MISSING_BINARY:
+                        out = (
+                            f"{tool.binary}: not found on PATH "
+                            "(the check is hard — provision it)"
+                        )
+                    else:
+                        out = f"{tool.binary}: could not run: {exc}"
+                    logger.error(
+                        "lint tool could not run",
+                        exc_info=True,
+                        extra={
+                            "lang": lang.name,
+                            "tool": tool.binary,
+                            "rc": rc,
+                            "cwd": mdir,
+                            "batch": note,
+                        },
                     )
                 else:
-                    out = f"{tool.binary}: could not run: {exc}"
-                logger.error(
-                    "lint tool could not run",
-                    exc_info=True,
-                    extra={"lang": lang.name, "tool": tool.binary, "rc": rc},
-                )
-            else:
-                rc, out = result.rc, result.stdout + result.stderr
-                # Per-tool outcomes are mechanics; the run summary is the milestone.
-                logger.debug(
-                    "lint tool finished",
-                    extra={
-                        "lang": lang.name,
-                        "tool": tool.binary,
-                        "rc": rc,
-                        "files": len(paths),
-                        "duration_ms": result.duration_ms,
-                    },
-                )
-            runs.append(ToolRun(lang.name, tool.binary, label, rc, out))
-            mark = "ok  " if rc == 0 else "FAIL"
-            count = f"{len(paths)} file{'s' if len(paths) != 1 else ''}"
-            print(f"  {mark} {lang.name:9} {label} ({count})")
-            if rc != 0 and out.strip():
-                print(_indent(out.strip()))
+                    rc, out = result.rc, result.stdout + result.stderr
+                    # Per-tool outcomes are mechanics; the run summary is the milestone.
+                    logger.debug(
+                        "lint tool finished",
+                        extra={
+                            "lang": lang.name,
+                            "tool": tool.binary,
+                            "rc": rc,
+                            "files": len(paths),
+                            "cwd": mdir,
+                            "batch": note,
+                            "duration_ms": result.duration_ms,
+                        },
+                    )
+                runs.append(ToolRun(lang.name, tool.binary, label, rc, out))
+                mark = "ok  " if rc == 0 else "FAIL"
+                print(f"  {mark} {lang.name:9} {label} ({note})")
+                if rc != 0 and out.strip():
+                    print(_indent(out.strip()))
 
     rc = verdict(runs)
     failed = sorted({f"{r.lang}:{r.binary}" for r in runs if not r.ok})
