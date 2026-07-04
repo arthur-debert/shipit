@@ -22,6 +22,7 @@ from shipit.tree import layout, provision
 from shipit.tree.create import create, create_from_source
 from shipit.identity import repo_from_slug
 from shipit.tree.layout import TreeSpec
+from shipit.install.apply import COMMIT_MESSAGE as INSTALL_COMMIT_MESSAGE
 from shipit.verbs import install as install_mod
 from shipit.execrun import ExecError
 
@@ -371,7 +372,7 @@ def test_create_provisions_local_only_on_planned_branch_no_origin_side_effects(
     assert (dest / "bin" / "shipit").is_file()
     tracked = _git(["ls-files"], cwd=dest).splitlines()
     assert "bin/shipit" in tracked
-    assert _git(["log", "-1", "--format=%s"], cwd=dest) == install_mod.COMMIT_MESSAGE
+    assert _git(["log", "-1", "--format=%s"], cwd=dest) == INSTALL_COMMIT_MESSAGE
     # Nothing left uncommitted by provisioning.
     assert _git(["status", "--porcelain"], cwd=dest) == ""
 

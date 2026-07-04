@@ -28,6 +28,7 @@ from typing import Callable, ParamSpec
 from .. import execrun
 from ..config import ConfigError
 from ..events import EventNotRecordedError, UnknownEventError
+from ..install.errors import InstallError
 from ..prstate.errors import PrStateError
 from ..prstate.flip import NotReady
 from ..prstate.reviewers_config import RequiredReviewersConfigError
@@ -44,7 +45,8 @@ P = ParamSpec("P")
 #: violation, malformed/invalid config (both spellings), and the domain
 #: refusals: the outside-a-checkout refusal the seam itself raises, the
 #: engine's refused draft→ready flip (CLI01-WS03), the spawn pipeline's
-#: refusal (CLI02-WS02), a misconfigured central Tree root, a refused/failed
+#: refusal (CLI02-WS02), the install domain's refusals (CLI02-WS01), a
+#: misconfigured central Tree root, a refused/failed
 #: Tree removal (CLI02-WS03), and the constrained dev-cycle write path's two
 #: refusals (an out-of-vocabulary event name, an emission that failed past
 #: validation — CLI02-WS05). Extended deliberately, one entry per new domain
@@ -57,6 +59,7 @@ KNOWN_ERRORS: tuple[type[Exception], ...] = (
     NoAmbientRepoError,
     NotReady,
     SpawnError,
+    InstallError,
     LayoutError,
     RemovalError,
     UnknownEventError,

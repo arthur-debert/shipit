@@ -2,7 +2,8 @@
 emissions and the ``/shipit-session-status`` wrapper.
 
 Skills are DATA, so the tier is verified by inspection over the PACKAGED skill
-files — the same tree ``shipit install`` distributes (:func:`_skills_root`),
+files — the same tree ``shipit install`` distributes
+(:func:`shipit.install.units.skills_root`),
 never a hand-copied fixture: each planning skill carries its emission step
 with a registered event name, every ``shipit log event`` call any skill makes
 names a skill-scripted event (the constrained verb would honor nothing else's
@@ -23,7 +24,8 @@ import pytest
 
 from shipit import events, logread, logsetup
 from shipit.identity import repo_from_slug
-from shipit.verbs import install, logevent, logs
+from shipit.install import units as install_units
+from shipit.verbs import logevent, logs
 
 REPO = repo_from_slug("acme/widget")
 
@@ -50,7 +52,11 @@ _EMIT_CALL = re.compile(r"shipit log event\s+(\S+)")
 
 def _skill_text(name: str) -> str:
     """The packaged ``SKILL.md`` of skill ``name`` — the distributed surface."""
-    return install._skills_root().joinpath(name, "SKILL.md").read_text(encoding="utf-8")
+    return (
+        install_units.skills_root()
+        .joinpath(name, "SKILL.md")
+        .read_text(encoding="utf-8")
+    )
 
 
 # ==========================================================================
@@ -71,7 +77,7 @@ def test_every_skill_emit_call_names_a_registered_skill_scripted_event():
     vocabulary AND in the skill-scripted subset — the tier whose ``--about``
     the constrained verb honors."""
     called: set[str] = set()
-    root = install._skills_root()
+    root = install_units.skills_root()
     for skill_dir in root.iterdir():
         doc = skill_dir.joinpath("SKILL.md")
         if skill_dir.is_dir() and doc.is_file():
@@ -97,7 +103,7 @@ def test_session_status_skill_wraps_the_flow_view():
 
 
 def test_session_status_skill_is_in_the_managed_set():
-    keys = {u.key for u in install.load_units()}
+    keys = {u.key for u in install_units.load_units()}
     assert "skills/shipit-session-status/SKILL.md" in keys
 
 
