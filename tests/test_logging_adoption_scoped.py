@@ -51,7 +51,9 @@ def test_sprayed_modules_have_a_shipit_logger():
         # renderers).
         ("shipit.install.reconcile", "shipit.install"),
         ("shipit.install.apply", "shipit.install"),
-        ("shipit.verbs.gh_setup", "shipit.ghsetup"),
+        # CLI02-WS04 promoted the gh-setup passes into their domain module;
+        # the sprayed records moved with them (the verb is print-free glue).
+        ("shipit.ghsetup", "shipit.ghsetup"),
         ("shipit.verbs.lint", "shipit.lint"),
         ("shipit.session.liveness", "shipit.session"),
         # LOG02-WS01..WS03: the tree / spawn / review+prstate sprays.
@@ -85,12 +87,12 @@ def test_sprayed_modules_have_a_shipit_logger():
 def test_verbs_keep_print_for_user_facing_output():
     """The spray is ADDITIVE: logging joined the verbs, but the user-facing CLI
     output still writes with ``print()`` — logging never replaced stdout. The
-    pr family is exempt since CLI01-WS03 (and install since CLI02-WS01): those
-    verbs render through the shared ADR-0030 emit seam
-    (:mod:`shipit.verbs._render`), which owns the print."""
-    from shipit.verbs import _render, gh_setup, lint
+    pr family is exempt since CLI01-WS03, install since CLI02-WS01, and
+    gh-setup since CLI02-WS04: those verbs render through the shared ADR-0030
+    emit seam (:mod:`shipit.verbs._render`), which owns the print."""
+    from shipit.verbs import _render, lint
 
-    for mod in (gh_setup, lint, _render):
+    for mod in (lint, _render):
         src = inspect.getsource(mod)
         assert "print(" in src, (
             f"{mod.__name__} should still use print() for CLI output"

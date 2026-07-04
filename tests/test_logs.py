@@ -468,6 +468,43 @@ def test_follow_reassembles_a_torn_write_before_filtering(tmp_path, capsys):
     assert "torn but tagged" in out
 
 
+def test_follow_reassembles_a_torn_line_present_at_start(tmp_path, capsys):
+    # agy [ERROR]: the initial tail read must be buffer-aware too, not just the
+    # append loop. If the file ALREADY ends in a torn write (no newline) when
+    # follow opens, a naive `read().splitlines()` emits the head now, then the
+    # append loop reads the remainder and emits it — one record split into two.
+    # The initial read seeds the same `pending` buffer, so the halves reunite.
+    log = tmp_path / "o" / "r" / "shipit.log"
+    log.parent.mkdir(parents=True)
+    whole = _record("torn at start", pr=231, event="pr.ready")
+    cut = len(whole) // 2
+    # File opens with only the first half on disk (no trailing newline).
+    log.write_text(whole[:cut])
+    remainder = whole[cut:] + "\n"
+
+    def fake_sleep(_interval: float) -> None:
+        nonlocal remainder
+        if remainder:
+            with log.open("a", encoding="utf-8") as fh:
+                fh.write(remainder)
+            remainder = ""
+        else:
+            raise KeyboardInterrupt
+
+    rc = logs.run(
+        "o/r",
+        follow=True,
+        raw=True,
+        tail=-1,
+        base_dir=tmp_path,
+        current_repo=lambda: "o/r",
+        sleep=fake_sleep,
+    )
+    assert rc == 0
+    # Raw passthrough emits the record exactly once, whole — not head then tail.
+    assert capsys.readouterr().out.splitlines() == [whole]
+
+
 def test_active_filter_drops_malformed_lines_silently(tmp_path, capsys):
     # A field filter cannot be evaluated on a torn line — under an active
     # filter it is dropped in BOTH modes (no false positive, no stderr note),
