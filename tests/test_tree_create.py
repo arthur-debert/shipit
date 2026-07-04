@@ -214,31 +214,82 @@ def test_create_hardens_the_tree_as_a_reference_donor(
         assert _git(["config", "--local", "--get", key], cwd=dest) == value
 
 
+def _poison_split_chain(reference: Path) -> Path:
+    """Split commit-graph chain — the donor state #353 first met in the wild."""
+    _git(["commit-graph", "write", "--reachable", "--split"], cwd=reference)
+    return reference / ".git" / "objects" / "info" / "commit-graphs"
+
+
+def _poison_plain_commit_graph(reference: Path) -> Path:
+    """A plain, non-split ``objects/info/commit-graph`` file — #372 narrowed the
+    trigger to ANY commit-graph in the reference, not just the split chain."""
+    _git(["commit-graph", "write", "--reachable"], cwd=reference)
+    return reference / ".git" / "objects" / "info" / "commit-graph"
+
+
+def _poison_multi_pack_index(reference: Path) -> Path:
+    """A multi-pack-index (needs packs first). The #372 diagnosis found the MIDX
+    incidental — a MIDX-only donor must ALSO clone clean on the first attempt."""
+    _git(["repack", "-ad"], cwd=reference)
+    _git(["multi-pack-index", "write"], cwd=reference)
+    return reference / ".git" / "objects" / "pack" / "multi-pack-index"
+
+
+@pytest.mark.parametrize(
+    "poison",
+    [
+        pytest.param(_poison_split_chain, id="split-chain"),
+        pytest.param(_poison_plain_commit_graph, id="plain-commit-graph"),
+        pytest.param(_poison_multi_pack_index, id="multi-pack-index"),
+    ],
+)
 def test_clone_dissociated_survives_a_commit_graph_bearing_reference(
-    tmp_path: Path, remote: Path, reference: Path
+    tmp_path: Path, remote: Path, reference: Path, caplog, poison
 ):
-    """#353 belt, against REAL git: a reference repo carrying a split
-    commit-graph chain (the exact poison — ``.git/objects/info/commit-graphs/``)
-    must not be able to kill ``clone_dissociated``. On an affected git (2.54)
-    the referenced clone dies at clone-time checkout and the no-reference retry
-    saves it; on an unaffected git the first clone just succeeds — either way
-    the call's contract holds: a populated, independent clone."""
-    # Grow the reference a few commits, then write the split chain that poisons
-    # it as a donor on git 2.54.
+    """#353/#372 belt, against REAL git: a reference repo carrying commit-graph
+    or MIDX state must not be able to kill ``clone_dissociated`` — and since the
+    ``-c core.commitGraph=false`` fix (#372) the referenced clone must succeed
+    on the FIRST attempt (no degraded full-clone retry), keeping the
+    near-instant ``--reference`` borrow. On git 2.54 the stock command dies at
+    clone-time checkout for the commit-graph donors (stale in-process graph
+    state after ``--dissociate`` severs the alternate), so a regression here
+    fails loud via the no-WARNING assertion."""
+    # Grow the reference a few commits, then poison it as a donor.
     for i in range(3):
         (reference / f"file{i}.txt").write_text(f"{i}\n")
         _git(["add", "."], cwd=reference)
         _git(["commit", "-m", f"c{i}"], cwd=reference)
-    _git(["commit-graph", "write", "--reachable", "--split"], cwd=reference)
-    chain = reference / ".git" / "objects" / "info" / "commit-graphs"
-    assert chain.exists(), "fixture must model the poisoned donor"
+    artifact = poison(reference)
+    assert artifact.exists(), "fixture must model the poisoned donor"
 
+    # `file://` forces the real pack transport: a plain local-path clone
+    # hardlinks objects and never consults the reference's commit-graph, so it
+    # cannot reproduce the failure (verified: the stock command passes with a
+    # path URL and dies with file:// on git 2.54).
     dest = tmp_path / "clone-under-test"
-    git.clone_dissociated(str(remote), str(dest), reference=str(reference))
+    with caplog.at_level(logging.WARNING, logger="shipit.git"):
+        git.clone_dissociated(remote.as_uri(), str(dest), reference=str(reference))
 
-    # A real, checked-out, independent clone came back — whichever path ran.
+    # A real, checked-out, independent clone came back...
     assert (dest / "README.md").read_text() == "hello tree\n"
     assert not (dest / ".git" / "objects" / "info" / "alternates").exists()
+    # ...on the FIRST attempt: the #353 full-clone retry never fired. Filter by
+    # logger so an unrelated warning elsewhere cannot flake this assertion.
+    assert not [
+        r
+        for r in caplog.records
+        if r.name == "shipit.git" and r.levelno >= logging.WARNING
+    ]
+    # And nothing about the -c fix leaked into the new clone's persistent config.
+    assert (
+        subprocess.run(
+            ["git", "config", "--local", "--get", "core.commitGraph"],
+            cwd=dest,
+            capture_output=True,
+            text=True,
+        ).returncode
+        != 0
+    )
 
 
 def test_central_root_is_absolute_and_outside_any_claude_dir(monkeypatch):

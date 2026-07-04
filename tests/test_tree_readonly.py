@@ -15,6 +15,7 @@ real-git smoke proves the checkout + read-only chmod end to end.
 
 from __future__ import annotations
 
+import logging
 import os
 import stat
 import subprocess
@@ -381,6 +382,54 @@ def test_create_readonly_real_git_checks_out_existing_branch_read_only(tmp_path)
     assert not (dest / ".git" / "objects" / "info" / "alternates").exists()
     assert not (dest / "README.md").stat().st_mode & 0o222
     assert not (dest / "feature.txt").stat().st_mode & 0o222
+
+
+def test_create_readonly_real_git_survives_a_commit_graph_bearing_reference(
+    tmp_path, caplog
+):
+    # #372: EVERY detached local review from an ephemeral session Tree begins
+    # with this exact call shape — create_readonly cold-cloning with the session
+    # Tree as --reference. A commit-graph in that donor (auto-maintenance writes
+    # one) killed the clone on git 2.54; the review Tree must now come up on the
+    # FIRST attempt (no #353 degraded full-clone retry).
+    remote = tmp_path / "remote"
+    remote.mkdir()
+    _git(["init"], remote)
+    (remote / "README.md").write_text("hello\n")
+    _git(["add", "."], remote)
+    _git(["commit", "-m", "init"], remote)
+    _git(["branch", "-M", "main"], remote)
+    _git(["checkout", "-b", "feat/x"], remote)
+    (remote / "feature.txt").write_text("under review\n")
+    _git(["add", "."], remote)
+    _git(["commit", "-m", "feat"], remote)
+    _git(["checkout", "main"], remote)
+
+    # The donor: a session-Tree stand-in poisoned with a commit-graph.
+    reference = tmp_path / "ref"
+    _git(["clone", str(remote), str(reference)], tmp_path)
+    _git(["commit-graph", "write", "--reachable", "--split"], reference)
+    assert (reference / ".git" / "objects" / "info" / "commit-graphs").exists()
+
+    plan = readonly_plan(repo=REPO, branch="feat/x", root=tmp_path / "trees")
+    # file:// forces the real pack transport — a plain path URL hardlinks
+    # objects and never reproduces the clone-time-checkout death.
+    with caplog.at_level(logging.WARNING, logger="shipit.git"):
+        tree = create_readonly(
+            plan, source_repo=str(reference), github_url=remote.as_uri()
+        )
+    dest = Path(tree.path)
+
+    # The reviewer Tree is real, on the PR head, and fully independent.
+    assert (dest / "feature.txt").read_text() == "under review\n"
+    assert not (dest / ".git" / "objects" / "info" / "alternates").exists()
+    # First-attempt success: the #353 retry WARNING never fired. Filter by
+    # logger so an unrelated warning elsewhere cannot flake this assertion.
+    assert not [
+        r
+        for r in caplog.records
+        if r.name == "shipit.git" and r.levelno >= logging.WARNING
+    ]
 
 
 def test_case_divergent_sources_share_one_review_tree(tmp_path):
