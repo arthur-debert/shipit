@@ -100,7 +100,7 @@ simple-gal = [
 standout = [{ repo = "arthur-debert/standout", path = "standout" }]
 
 [shipit]
-version = "6f0f6531ac94cd91c915d640bb8ab64bfb0be7dc"
+version = "aa54970a5a4be5afc351e7208c1583001b808bf3"
 
 [managed]
 "skills/lex-primer/SKILL.md" = "sha256:ff616c1c447661298fb8e06a8a8a6ce60400d838c7c881b9e8bd526128e32901"

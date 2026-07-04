@@ -242,11 +242,12 @@ def write_task(role: str, *, issue: int, branch: str, base_branch: str) -> str:
     the deliverable channel (ADR-0019 §6) — the parent never scrapes the Tree; it
     learns the result by resolving the PR the Run opened on ``branch``.
 
-    The draft-PR-and-stop discipline (open one draft PR linking ``for #issue``, then
-    STOP at PR-open — never flip ready or merge) lives in the role's own system prompt,
-    which ``--agent <role>`` loads; this task only conveys *which* issue and restates
-    the PR contract so the launched Run can never miss the one observable shipit reads
-    back: a draft PR whose head is exactly ``branch``.
+    The draft-PR-and-stop discipline (open one draft PR linking ``for #issue``, run
+    ``shipit pr next`` once so the engine places the initial review requests, then
+    STOP — never flip ready, address review rounds, or merge) lives in the role's own
+    system prompt, which ``--agent <role>`` loads; this task only conveys *which*
+    issue and restates the PR contract so the launched Run can never miss the one
+    observable shipit reads back: a draft PR whose head is exactly ``branch``.
     """
     return (
         f"You are a spawned {role} Run launched by `shipit spawn subagent`, working in "
@@ -255,8 +256,9 @@ def write_task(role: str, *, issue: int, branch: str, base_branch: str) -> str:
         f"change with tests, and get the checks green. Then commit, push {branch!r}, and "
         f"open a DRAFT pull request from it against {base_branch!r} "
         f"(`gh pr create --draft --base {base_branch} --head {branch}`) whose body "
-        f"references `for #{issue}`. STOP once the draft PR is open — do not flip it "
-        f"ready, request reviews, or merge."
+        f"references `for #{issue}`. Once the draft PR is open, run `shipit pr next` "
+        f"ONCE from the PR branch (the engine places the initial review requests), "
+        f"then STOP — do not flip it ready, address review rounds, or merge."
     )
 
 
