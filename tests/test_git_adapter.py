@@ -438,6 +438,33 @@ def test_clone_dissociated_propagates_any_other_failure_without_retry(monkeypatc
     assert len(calls) == 1
 
 
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        # Checkout killed for a non-#353 reason (disk space, bad filename):
+        # git prints the epilogue without the parse error.
+        "warning: Clone succeeded, but checkout failed.",
+        # Genuine object corruption without the checkout epilogue.
+        "fatal: unable to parse commit " + "b" * 40,
+    ],
+)
+def test_clone_dissociated_requires_both_markers_no_single_marker_retry(
+    monkeypatch, stderr
+):
+    # The #353 signature is BOTH fragments together; either alone has innocent
+    # causes and must propagate untouched — no dest removal, no full re-clone.
+    calls: list[list[str]] = []
+
+    def fake(args, *, cwd=None, timeout=None):
+        calls.append(args)
+        raise ExecError(["git", *args], rc=128, stderr=stderr, cause=CAUSE_EXIT)
+
+    monkeypatch.setattr(git, "_git", fake)
+    with pytest.raises(ExecError):
+        git.clone_dissociated("https://x/r.git", "/trees/leaf", reference="/ref")
+    assert len(calls) == 1
+
+
 def test_clone_dissociated_never_retries_a_timeout(monkeypatch):
     # Even marker-looking partial output does not qualify when the child never
     # exited: retrying a full clone after a 10-minute hang would double the hang.

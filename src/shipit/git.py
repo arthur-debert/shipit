@@ -538,9 +538,11 @@ def push(branch: str, *, cwd: str, remote: str = "origin", force: bool = False) 
 #: fail DETERMINISTICALLY at the clone-time checkout: git prints ``fatal: unable
 #: to parse commit <sha>`` and ``Clone succeeded, but checkout failed.`` and
 #: exits 128 — even though the resulting clone is self-consistent after the fact
-#: (the object is present; a manual checkout succeeds). Matching is on these
-#: message fragments (lowercased, either stream) rather than the bare rc: 128 is
-#: git's generic fatal exit and alone would sweep in unrelated failures.
+#: (the object is present; a manual checkout succeeds). Matching requires BOTH
+#: message fragments (lowercased, across both streams) rather than the bare rc:
+#: 128 is git's generic fatal exit, and either fragment alone has innocent
+#: causes (real object corruption; a checkout killed by disk space or an
+#: unrepresentable filename) that must propagate, not trigger a full re-clone.
 _POISONED_REFERENCE_MARKERS: tuple[str, ...] = (
     "clone succeeded, but checkout failed",
     "unable to parse commit",
@@ -557,7 +559,7 @@ def _is_poisoned_reference_failure(err: ExecError) -> bool:
     if err.cause != execrun.CAUSE_EXIT:
         return False
     text = f"{err.stderr}\n{err.stdout}".lower()
-    return any(marker in text for marker in _POISONED_REFERENCE_MARKERS)
+    return all(marker in text for marker in _POISONED_REFERENCE_MARKERS)
 
 
 def clone_dissociated(url: str, dest: str, *, reference: str) -> None:
@@ -594,10 +596,10 @@ def clone_dissociated(url: str, dest: str, *, reference: str) -> None:
         logger.warning(
             "reference clone of %s failed at clone-time checkout (reference %s "
             "is a poisoned donor — commit-graph chain, #353); retrying once as "
-            "a full clone without --reference: %s",
+            "a full clone without --reference",
             url,
             reference,
-            err,
+            exc_info=True,
         )
         # git leaves the cloned-but-not-checked-out dest behind on this failure;
         # a retry into a non-empty dir would fail on the leftovers, not the bug.
