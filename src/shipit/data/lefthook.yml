@@ -1,52 +1,32 @@
-# Thin lefthook caller — ALL lint-check logic lives in the `shipit lint` binary,
-# invoked through `pixi run -e lint lint`. lefthook is intentionally dumb
-# (docs/prd/lint-checks.md, architecture.lex §7): one definition, run everywhere, so CI and the hooks
-# cannot drift into two transcriptions of the rules.
+# Thin lefthook caller, managed by shipit (regenerate via `shipit install`) —
+# ALL lint-check logic lives in the `shipit lint` binary, invoked through
+# `pixi run -e lint lint`. lefthook is intentionally dumb: one definition, run
+# everywhere, so CI and the hooks cannot drift into two transcriptions of the
+# rules. Every task and environment invoked here is satisfied by the
+# shipit-managed pixi.toml blocks (the `[tasks]` line, the lint
+# feature/dependency block, the `[environments]` definition), so the hooks are
+# green on a stock consumer right after `shipit install` — nothing repo-local
+# is referenced.
 #
-# The `-e lint` is pinned (not bare `pixi run lint`): when `shipit install` commits
-# inside a freshly cloned Tree, an inherited `PIXI_PROJECT_MANIFEST` made bare
-# `pixi run lint` ambiguous (default, lint, review) and the commit's pre-commit died.
-# Pinning the environment removes the ambiguity regardless of the inherited env
-# (the root cause — the PIXI_* env-leak — is also scrubbed in shipit.tree.create).
+# The `-e lint` is pinned (not bare `pixi run lint`): an inherited
+# `PIXI_PROJECT_MANIFEST` (a commit made from inside another pixi project's
+# activated environment) makes bare `pixi run lint` ambiguous across
+# environments and the hook dies. Pinning the environment removes the
+# ambiguity regardless of the inherited env.
 #
-# Whole-tree (not staged-only) for now: `pixi run -e lint lint` lints `git ls-files`,
-# so a green hook never lies about an unstaged edit. (`pixi run test` joins pre-push
-# when Step 5 supplies the test task.)
-# `piped: true` runs the commands in priority order and stops on the first
-# failure, so the mirror regen (priority 1) always lands BEFORE the lint check
-# (priority 2) reads the tree.
+# Whole-tree (not staged-only): `pixi run -e lint lint` lints `git ls-files`,
+# so a green hook never lies about an unstaged edit.
+#
+# Repo-specific hook legs do NOT belong in this file — a local edit surfaces
+# as an OVERRIDE at the next `shipit install` reconcile, forever. Put them in
+# a committed `lefthook-local.yml`, which lefthook merges over this config
+# natively (shipit's own repo does exactly that for its .lex→.md mirror leg).
+# `piped: true` plus `priority: 2` on the lint command keep the slot open: a
+# local pre-commit leg with a lower priority runs first, and the pipe stops on
+# its failure before lint reads the tree.
 pre-commit:
   piped: true
   commands:
-    # Auto-regenerate every committed .lex→.md mirror whose .lex is staged, then
-    # stage the regenerated .md into THIS commit — so a .lex edit and its .md
-    # projection ship together and the mirrors can never silently drift. Only
-    # mirrors that already exist are regenerated (source-only .lex stay un-mirrored).
-    # Runs through `pixi run -e lint` so lexd + the pinned prettier are on PATH.
-    #
-    # The staged set is read from `git diff --cached` (NOT lefthook's {staged_files}
-    # or a `glob:`) so that: every `.lex` ANYWHERE in the tree is covered, not just
-    # the repo root; paths with spaces survive (NUL-delimited); and a `.lex` staged
-    # for deletion/rename — absent from the working tree — is excluded
-    # (`--diff-filter=d`) so the converter never runs on a missing file.
-    lex-mirror:
-      priority: 1
-      run: |
-        pixi run -e lint bash -c '
-          set -euo pipefail
-          git diff --cached --name-only -z --diff-filter=d | while IFS= read -r -d "" f; do
-            case "$f" in
-              *.lex) ;;
-              *) continue ;;
-            esac
-            [ -f "$f" ] || continue
-            md="${f%.lex}.md"
-            if [ -f "$md" ]; then
-              bash tools/lex-convert-doc.sh "$f"
-              git add "$md"
-            fi
-          done
-        '
     lint:
       priority: 2
       run: pixi run -e lint lint
@@ -68,9 +48,10 @@ pre-push:
 # per-repo JSONL log via the constrained write verb. Registered names only;
 # domain keys (session from the env, epic/ws from the branch) are picked up by
 # the verb, not passed here. `--from-hook` makes the verb fail OPEN (exit 0,
-# WARNING) so a broken log path can never block git. Same pinned
-# `-e lint` env as the lint caller above: shipit is on that env's PATH and the
-# pin dodges the inherited-PIXI_PROJECT_MANIFEST ambiguity.
+# WARNING) so a broken log path can never block git. Same pinned `-e lint` env
+# as the lint caller above (`pixi run` passes the outer PATH through, so the
+# `shipit` on your PATH is reachable and the pin dodges the inherited
+# PIXI_PROJECT_MANIFEST ambiguity).
 post-commit:
   commands:
     dev-cycle-event:
