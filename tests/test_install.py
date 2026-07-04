@@ -1282,9 +1282,7 @@ def test_retired_path_rejects_unsafe_manifest_entries(bad):
 
 
 def test_retired_path_accepts_a_plain_relative_path():
-    assert (
-        install._retired_path(".github/workflows/x.yml") == ".github/workflows/x.yml"
-    )
+    assert install._retired_path(".github/workflows/x.yml") == ".github/workflows/x.yml"
 
 
 def test_retired_manifest_carries_the_copilot_workflow_history():
