@@ -86,6 +86,90 @@ def test_build_payload_injects_checks_only():
     assert src_rule["parameters"]["required_status_checks"] == []
 
 
+def test_build_payload_zero_checks_omits_the_rule():
+    """The live API rejects an empty required_status_checks array ("Expected
+    at least 1 elements" — #441), so zero checks must OMIT the rule entirely,
+    never send an empty set. The other rules stay untouched."""
+    tmpl = ghsetup.load_template()
+    body = ghsetup.build_payload(tmpl, [])
+    types = [r["type"] for r in body["rules"]]
+    assert "required_status_checks" not in types
+    assert types == [
+        "pull_request",
+        "required_linear_history",
+        "non_fast_forward",
+        "deletion",
+    ]
+    # The template is not mutated (deepcopy) — its rule survives for next time.
+    assert get_rule(tmpl, "required_status_checks")
+
+
+def test_build_payload_blank_only_checks_omit_the_rule():
+    """Blank names are dropped by checks_json; all-blank input is the
+    zero-checks case and must omit the rule, not emit an empty array."""
+    tmpl = ghsetup.load_template()
+    body = ghsetup.build_payload(tmpl, ["", ""])
+    assert "required_status_checks" not in [r["type"] for r in body["rules"]]
+
+
+#: Every rule type the template may carry → its documented parameter keys
+#: (https://docs.github.com/rest/repos/rules#create-a-repository-ruleset).
+#: This POST has 422'd twice on undocumented/invalid parameters (#438, #441);
+#: this pin makes a third layer fail in unit tests, not on the live canary.
+_DOCUMENTED_RULE_PARAMS = {
+    "pull_request": {
+        "allowed_merge_methods",
+        "dismiss_stale_reviews_on_push",
+        "require_code_owner_review",
+        "require_last_push_approval",
+        "required_approving_review_count",
+        "required_review_thread_resolution",
+        "required_reviewers",
+    },
+    "required_status_checks": {
+        "do_not_enforce_on_create",
+        "required_status_checks",
+        "strict_required_status_checks_policy",
+    },
+    # Parameterless rules: only a `type` key.
+    "required_linear_history": set(),
+    "non_fast_forward": set(),
+    "deletion": set(),
+}
+
+
+def test_template_rules_carry_only_documented_parameters():
+    """Whole-payload audit (#441): every rule in the shipped template is a
+    documented type and carries only documented parameter keys."""
+    tmpl = ghsetup.load_template()
+    for rule in tmpl["rules"]:
+        assert rule["type"] in _DOCUMENTED_RULE_PARAMS, rule["type"]
+        allowed = _DOCUMENTED_RULE_PARAMS[rule["type"]]
+        params = set(rule.get("parameters", {}))
+        assert params <= allowed, (
+            f"{rule['type']} carries undocumented parameters: {params - allowed}"
+        )
+        if not allowed:
+            assert set(rule) == {"type"}, f"{rule['type']} must be parameterless"
+
+
+def test_built_payload_carries_only_documented_top_level_keys():
+    """The POST body itself stays within the documented create-ruleset schema."""
+    body = ghsetup.build_payload(ghsetup.load_template(), ["c1"])
+    assert set(body) <= {
+        "name",
+        "target",
+        "enforcement",
+        "conditions",
+        "rules",
+        "bypass_actors",
+    }
+    for actor in body["bypass_actors"]:
+        assert set(actor) <= {"actor_id", "actor_type", "bypass_mode"}
+    assert set(body["conditions"]) == {"ref_name"}
+    assert set(body["conditions"]["ref_name"]) <= {"include", "exclude"}
+
+
 def test_build_payload_preserves_pull_request_rule():
     """Injecting required checks must not disturb the pull_request rule — it
     flows into the built payload strictly equal to the template's rule, and
