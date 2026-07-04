@@ -32,7 +32,6 @@ block git.
 from __future__ import annotations
 
 import logging
-import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
 
@@ -41,6 +40,7 @@ import click
 from .. import branchid, events, logcontext
 from ..identity import Sha
 from ._context import current_root_context
+from ._errors import cli_errors
 
 logger = logging.getLogger("shipit.logevent")
 
@@ -95,6 +95,7 @@ def _scoped_identity(identity: branchid.BranchIdentity) -> Iterator[None]:
         yield
 
 
+@cli_errors
 def run(
     name: str,
     *,
@@ -109,26 +110,28 @@ def run(
     root (ADR-0030) and threaded in by the click command — injectable so tests
     drive the full matrix without a git checkout.
 
-    Exit contract: an unregistered ``name`` is ALWAYS a clean one-line
-    ``error:`` + exit 1, hook context included — a typo in hook wiring is a
-    config bug to surface, and a post-commit hook cannot block the commit
-    anyway. Past that gate the emission is best-effort: any failure exits 0
-    under ``from_hook`` (fail-open, WARNING logged) and ``error:`` + 1
-    otherwise. Note the durable write itself is inherently fail-open — an
-    unopenable log file already degraded to console-only at logging setup
+    Exit contract, rendered by the shared error shell (ADR-0030, CLI02-WS05 —
+    this verb owns no stderr prints of its own): an unregistered ``name`` is
+    ALWAYS a clean one-line ``error:`` + exit 1
+    (:class:`shipit.events.UnknownEventError`), hook context included — a typo
+    in hook wiring is a config bug to surface, and a post-commit hook cannot
+    block the commit anyway. Past that gate the emission is best-effort: any
+    failure exits 0 under ``from_hook`` (fail-open, WARNING logged — the one
+    posture the shell never touches) and
+    :class:`shipit.events.EventNotRecordedError` → ``error:`` + 1 otherwise.
+    Note the durable write itself is inherently fail-open — an unopenable log
+    file already degraded to console-only at logging setup
     (:func:`shipit.logsetup.configure_logging`), and stdlib handlers swallow
     emit-time I/O errors — so this guard covers the residual seams (identity,
     binding) rather than re-implementing that posture.
     """
     if name not in events.EVENT_NAMES:
         known = ", ".join(sorted(events.EVENT_NAMES))
-        print(
-            f"error: unknown dev-cycle event {name!r} — the closed vocabulary "
+        raise events.UnknownEventError(
+            f"unknown dev-cycle event {name!r} — the closed vocabulary "
             f"is: {known} (ADR-0032; register new names in "
-            "shipit.events.EVENT_NAMES)",
-            file=sys.stderr,
+            "shipit.events.EVENT_NAMES)"
         )
-        return 1
     try:
         identity = branchid.derive(branch)
         msg, extra = _compose_msg(name, about, commit)
@@ -148,9 +151,7 @@ def run(
             )
             return 0
         logger.error("dev-cycle event %s not recorded", name, exc_info=True)
-        message = " ".join(str(exc).split())
-        print(f"error: {message}", file=sys.stderr)
-        return 1
+        raise events.EventNotRecordedError(str(exc)) from exc
 
 
 @click.group(

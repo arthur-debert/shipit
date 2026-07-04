@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from shipit import events, logsetup
+from shipit import events, logread, logsetup
 from shipit.identity import repo_from_slug
 from shipit.verbs import install, logevent, logs
 
@@ -126,11 +126,9 @@ def test_planning_leg_dry_run_renders_in_the_flow_view(tmp_path, capsys):
         assert logevent.run(name, about=about) == 0
 
     rc = logs.run(
-        "acme/widget",
-        flow=True,
-        session="sess-plan",
+        REPO,
+        query=logread.build_query(flow=True, session="sess-plan"),
         base_dir=tmp_path,
-        current_repo=lambda: "x/y",
         now=lambda: datetime.now(timezone.utc),
     )
     assert rc == 0

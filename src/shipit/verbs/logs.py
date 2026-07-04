@@ -1,208 +1,84 @@
 """logs — locate and read shipit's durable per-repo JSONL log (LOG01-WS04).
 
-The READER half of WS01's file sink: the writer (:mod:`shipit.logsetup`) drops a
-durable, per-repo, rotating **JSONL** log (ADR-0029 — one flat JSON object per
-record: ``ts``, ``level``, ``logger``, ``msg``, plus domain keys
-present-when-bound); this verb finds it and shows it. It NEVER recomputes the
-location — it consumes :func:`shipit.logsetup.log_file_path` (``resolve_log_dir``
-+ the handler's ``LOG_FILENAME``), the single source of truth, so reader and
-writer can never disagree about where the log lives. No platform ``if`` branch,
-no bespoke log-dir env var (the path library owns the location, per the glassbox
-PRD ``docs/prd/glassbox.md``).
+The READER half of WS01's file sink, on the ADR-0030 boundary contract
+(CLI02): this module is click glue plus renderers. The read ENGINE — file
+reading, tail, ``--follow`` rotation detection, torn-write buffering,
+malformed-line resilience — lives in the domain package
+(:mod:`shipit.logread`) and yields stored lines out of iterators; everything
+that touches the terminal happens HERE, over that output. The flag surface
+becomes ONE frozen :class:`~shipit.logread.LogQuery` at parse
+(:func:`build_query` — the parse-to-values move), so ``run()`` takes a repo,
+a query, and the injected test boundaries instead of a parameter per flag.
 
-The verb reads JSONL ONLY — a hard cutover, no dual-format sniffing (ADR-0029;
-pre-cutover freeform files age out via rotation). Two output modes: the default
-renders each record legibly for humans (``ts LEVEL logger: msg [key=value …]``);
-``--raw`` passes the stored lines through unmodified — and prints nothing else —
-so stdout pipes straight into jq. In the rendered view, a line that is not a
-JSON object is skipped with a stderr note, never a crash: the log is diagnosis
-data, and one corrupt line (a torn write, a rotation seam) must not take down
-the reader. With NO filter active, ``--raw`` does not parse at all — malformed
-lines pass through untouched, because judging them is the downstream tool's job.
+The verb NEVER recomputes the log's location — it consumes
+:func:`shipit.logsetup.log_file_path` (``resolve_log_dir`` + the handler's
+``LOG_FILENAME``), the single source of truth, so reader and writer can never
+disagree about where the log lives. No platform ``if`` branch, no bespoke
+log-dir env var (the path library owns the location, per the glassbox PRD
+``docs/prd/glassbox.md``).
 
-The reader grows FILTERS, not a sibling (LOG04 / ADR-0032): ``--events`` keeps
-only ``event``-tagged dev-cycle records, and one flag per domain key selects on
-the record's flat fields — ``--pr <n>``, ``--session <id|current>`` (``current``
-resolved via :mod:`shipit.session.current`: the session environment first, the
-ephemeral Tree leaf second, ADR-0027), ``--epic <code>``, ``--ws <n>``
-(accepting ``1``, ``01``, or ``WS01`` — the display form is never data, so all
-three normalize to the int the record carries), ``--agent <id>``, and
-``--role <name>``. All AND-composed, applied client-side before the tail count
-(the file is bounded by rotation, so whole-file filtering is cheap — no index
-until a real slicing gap shows, per the PRD), and uniform across the static,
-``--raw``, and ``--follow`` views. Selecting on a field means PARSING, so with
-ANY filter active even ``--raw`` parses each line and a malformed one (which
-has no fields to match) is dropped rather than passed through — the passthrough
-contract holds only when no filter is asked for.
+The verb reads JSONL ONLY — a hard cutover, no dual-format sniffing
+(ADR-0029; pre-cutover freeform files age out via rotation). Two output
+modes: the default renders each record legibly for humans (``ts LEVEL
+logger: msg [key=value …]``); ``--raw`` passes the stored lines through
+unmodified — and prints nothing else — so stdout pipes straight into jq. In
+the rendered view, a line that is not a JSON object is skipped with a stderr
+note, never a crash: the log is diagnosis data, and one corrupt line (a torn
+write, a rotation seam) must not take down the reader. With NO filter
+active, ``--raw`` does not parse at all — malformed lines pass through
+untouched, because judging them is the downstream tool's job.
+
+The reader grows FILTERS, not a sibling (LOG04 / ADR-0032): ``--events``
+keeps only ``event``-tagged dev-cycle records, and one flag per domain key
+selects on the record's flat fields — ``--pr <n>``, ``--session
+<id|current>`` (``current`` resolved via :mod:`shipit.session.current`: the
+session environment first, the ephemeral Tree leaf second, ADR-0027),
+``--epic <code>``, ``--ws <n>`` (accepting ``1``, ``01``, or ``WS01``), and
+``--agent <id>`` / ``--role <name>``. All AND-composed, applied client-side
+before the tail count, uniform across the static, ``--raw``, and
+``--follow`` views (:class:`shipit.logread.Filter` is the one predicate).
 
 ``--flow`` renders the filtered records as the session STORY instead of a
-record listing: selection stays here (``--flow`` implies ``--events``; the
-domain-key filters compose as usual), the LOOK is the pure renderer's
-(:mod:`shipit.flowview` — intent/theme header, relative times, ``EPIC-WSnn:``
-prefixes, agent ids behind ``--agent-ids``). A story is a bounded rendering of
-the static view, so ``--flow`` refuses ``--raw`` and ``--follow`` rather than
-guessing what a raw or followed story would mean.
+record listing: selection stays in the query (``--flow`` implies
+``--events``; the domain-key filters compose as usual), the LOOK is the pure
+renderer's (:mod:`shipit.flowview` — intent/theme header, relative times,
+``EPIC-WSnn:`` prefixes, agent ids behind ``--agent-ids``). A story is a
+bounded rendering of the static view, so ``--flow`` refuses ``--raw`` and
+``--follow`` at query construction rather than guessing what a raw or
+followed story would mean.
 
-The repo whose log we read defaults to the current checkout, resolved LOCALLY off
-the origin remote (:func:`shipit.identity.resolve_repo`) — the SAME resolver the
-sink namespaces the log by (:func:`shipit.logsetup._current_repo`), so a log
-written offline is readable offline (reader and writer never disagree on identity,
-and neither depends on ``gh``'s API shellout). An explicit ``owner/repo`` argument
-overrides it. The repo resolver, the resolution base, and the follow-loop
-``sleep`` are injected in tests so nothing touches a real ``$HOME``.
+The repo whose log we read defaults to the ambient checkout — the ONE root
+resolution (ADR-0030, offline off the origin remote), the SAME identity the
+sink namespaces the log by, so a log written offline is readable offline. An
+explicit ``owner/repo`` argument overrides it (minted to a
+:class:`~shipit.identity.Repo` at parse by the shared parameter library).
+Exit contract: usage errors (a bad slug, an out-of-grammar ``--ws``, the
+``--flow`` contradictions, an unresolvable ``--session current``) are click's
+at parse (exit 2); running outside a checkout without an explicit repo is
+the one uniform runtime refusal through the error shell (``error: …`` +
+exit 1); a log not written yet stays a clean stderr note + exit 1.
 """
 
 from __future__ import annotations
 
-import json
-import os
 import sys
-import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, TypeVar
+from typing import Callable
 
-from .. import execrun, flowview, identity, logcontext, logsetup, redact
+import click
+
+from .. import flowview, logcontext, logread, logsetup, redact
+from ..identity import Repo
+from ..logread import DEFAULT_TAIL, LogQuery
 from ..session import current as session_current
-
-#: Default number of trailing lines the no-flag invocation prints.
-DEFAULT_TAIL = 50
-
-#: Seconds between polls while following (``-f``); small enough to feel live.
-_FOLLOW_INTERVAL = 0.25
+from ._context import current_root_context
+from ._errors import cli_errors
+from ._params import repo_argument
 
 #: Exit code when the log file does not exist yet (a clean "nothing to read",
 #: not a crash — the path is valid, the run that writes it just hasn't happened).
 _EXIT_NO_LOG = 1
-
-#: Exit code for a bad ``owner/repo`` (usage error).
-_EXIT_BAD_REPO = 2
-
-_T = TypeVar("_T")
-
-
-def _last_n(items: list[_T], n: int) -> list[_T]:
-    """The last ``n`` of ``items``: all when ``n < 0``, none when ``n == 0``,
-    else the final ``n``.
-
-    Generic over the element type so the one tail helper serves both the raw
-    line lists and the parsed ``--flow`` record lists. The explicit ``n == 0``
-    arm guards the ``items[-0:]`` trap (``-0 == 0``, so a naive slice would
-    return EVERY item for ``-n 0`` instead of none).
-    """
-    if n < 0:
-        return items
-    return items[-n:] if n > 0 else []
-
-
-def _parse_record(line: str) -> dict[str, Any] | None:
-    """The line as ONE JSONL record (a JSON object), or ``None``.
-
-    The single parse every selecting/rendering path shares: only a JSON object
-    is a record — any other parse (a torn write, a bare JSON string) is the
-    caller's cue to apply its own resilience contract (skip with a note, drop
-    silently under a filter), never a crash.
-    """
-    try:
-        record = json.loads(line)
-    except json.JSONDecodeError:
-        return None
-    return record if isinstance(record, dict) else None
-
-
-def normalize_ws(value: int | str) -> int:
-    """The Work Stream index ``value`` names, as the INT the record carries.
-
-    The CLI never punishes the display form (PRD): ``1``, ``01``, and ``WS01``
-    (any case) all name Work Stream 1 — the ``WS`` prefix and zero-padding are
-    rendering, stripped here, because the durable record's ``ws`` domain key is
-    int-typed (ADR-0032) and selection compares against THAT. Anything else —
-    garbage text, or a non-positive index the branch grammar could never have
-    written (``shipit.branchid`` derives ``WS00`` to nothing for the same
-    reason) — raises :class:`ValueError` for the caller to report as a usage
-    error.
-    """
-    text = str(value).strip()
-    if text.upper().startswith("WS"):
-        text = text[2:]
-    if not text.isdigit():
-        raise ValueError(
-            f"--ws must be a Work Stream index (1, 01, or WS01); got {value!r}"
-        )
-    index = int(text)
-    if index < 1:
-        raise ValueError(
-            f"--ws must be a positive Work Stream index (the branch grammar "
-            f"starts at WS01); got {value!r}"
-        )
-    return index
-
-
-class _Filter:
-    """The record filters (LOG04) as ONE predicate.
-
-    Filters compose as AND and are applied BEFORE the tail count and before
-    either output mode, so ``-n 5 --pr 231`` means "the last 5 records about
-    pr#231" and ``--raw`` pipes exactly the matching stored lines to jq.
-    Selection is on the record's flat fields: ``--events`` keeps only records
-    carrying an ``event`` field (a dev-cycle event, ADR-0032 — presence is the
-    test, never a name list of the reader's own); each domain-key filter
-    (``pr``, ``session``, ``epic``, ``ws``, ``agent``, ``role``) keeps records
-    whose key EQUALS the value — typed as the record carries it (``pr``/``ws``
-    int, the rest strings, ADR-0029/0032), which is why the CLI boundary
-    normalizes ``WS01`` to ``1`` before it gets here. A record without the key
-    cannot match it: absent means unbound, not wildcard.
-
-    Filtering requires parsing, so with any filter ACTIVE a non-record line
-    (blank padding, a torn write) simply cannot match and is dropped silently —
-    in both modes: a malformed line's fields are unknowable, and surfacing it
-    under a field filter would be a false positive. With NO filter active the
-    predicate is vacuously true and both modes keep their unfiltered contracts
-    (raw passes malformed lines through; rendered notes them on stderr).
-    """
-
-    def __init__(
-        self,
-        *,
-        events_only: bool = False,
-        pr: int | None = None,
-        session: str | None = None,
-        epic: str | None = None,
-        ws: int | None = None,
-        agent: str | None = None,
-        role: str | None = None,
-    ) -> None:
-        self.events_only = events_only
-        self.fields = {
-            name: value
-            for name, value in {
-                "pr": pr,
-                "session": session,
-                "epic": epic,
-                "ws": ws,
-                "agent": agent,
-                "role": role,
-            }.items()
-            if value is not None
-        }
-
-    @property
-    def active(self) -> bool:
-        return self.events_only or bool(self.fields)
-
-    def matches_record(self, record: dict[str, Any]) -> bool:
-        if self.events_only and "event" not in record:
-            return False
-        return all(record.get(name) == value for name, value in self.fields.items())
-
-    def matches(self, line: str) -> bool:
-        if not self.active:
-            return True
-        record = _parse_record(line)
-        if record is None:
-            return False
-        return self.matches_record(record)
-
 
 #: Longest malformed-line snippet quoted in the skip note; enough to identify
 #: the line without spraying a whole corrupt record onto stderr.
@@ -213,20 +89,21 @@ _SNIPPET_LEN = 80
 _RENDERED_FIELDS = ("ts", "level", "logger", "msg", "exception")
 
 
-def _render_record(line: str) -> str | None:
+def render_record(line: str) -> str | None:
     """Render one JSONL record for humans, or ``None`` when the line is not one.
 
-    The legible shape mirrors the console surface (``LEVEL logger: msg``) with
-    the durable record's extra facts folded in: the ``ts`` up front (the file's
-    reason to exist is the timestamped history) and every remaining flat field —
-    the bound domain keys (``pr``, ``session``, …) and event extras — trailing
-    as sorted ``key=value`` pairs. An ``exception`` (WS01 flattens tracebacks to
-    a string) lands on the following lines, the way stdlib formatting would.
+    A PURE per-record formatter (the render seam): the legible shape mirrors
+    the console surface (``LEVEL logger: msg``) with the durable record's
+    extra facts folded in — the ``ts`` up front (the file's reason to exist is
+    the timestamped history) and every remaining flat field — the bound domain
+    keys (``pr``, ``session``, …) and event extras — trailing as sorted
+    ``key=value`` pairs. An ``exception`` (WS01 flattens tracebacks to a
+    string) lands on the following lines, the way stdlib formatting would.
 
     Only a JSON *object* is a record; any other parse (or a parse failure) is
     the caller's cue to skip the line with a note.
     """
-    record = _parse_record(line)
+    record = logread.parse_record(line)
     if record is None:
         return None
     ts = record.get("ts", "")
@@ -245,134 +122,49 @@ def _render_record(line: str) -> str | None:
     return rendered
 
 
-def _emit(line: str, *, raw: bool) -> None:
-    """Emit one log line in the chosen mode.
+def malformed_note(line: str) -> str:
+    """The stderr note for a line that is not a record — redacted, truncated.
 
-    ``raw`` is the jq passthrough: the line goes out exactly as stored, parsed by
-    nobody (a malformed line is the downstream tool's to judge). Otherwise the
-    line is rendered for humans; a blank line is dropped silently (file padding,
-    not a record) and a malformed one is skipped with a stderr note — stdout
-    carries only rendered records, and a corrupt line never crashes the reader.
-    The malformed-line snippet is the one path that echoes raw file content the
-    writer's pipeline never finished redacting (a torn write, a pre-cutover
-    freeform line), so it passes through :func:`shipit.redact.redact_text`
-    (token/PEM pattern masking) before reaching stderr.
+    Pure string-in, string-out (the render seam). The note is the one path
+    that echoes raw file content the writer's pipeline never finished
+    redacting (a torn write, a pre-cutover freeform line), so it passes
+    through :func:`shipit.redact.redact_text` (token/PEM pattern masking)
+    BEFORE truncating — a secret straddling the snippet cut is still seen
+    whole by the pattern matcher.
+    """
+    snippet = redact.redact_text(line)[:_SNIPPET_LEN]
+    return f"logs: skipped malformed line: {snippet!r}"
+
+
+def _emit_line(line: str, *, raw: bool) -> None:
+    """Emit one engine-yielded log line in the chosen mode.
+
+    ``raw`` is the jq passthrough: the line goes out exactly as stored, parsed
+    by nobody (a malformed line is the downstream tool's to judge). Otherwise
+    the line is rendered for humans; a blank line is dropped silently (file
+    padding, not a record) and a malformed one is skipped with the redacted
+    stderr note — stdout carries only rendered records, and a corrupt line
+    never crashes the reader.
 
     Every ``print`` flushes: ``-f`` output is piped as often as watched
     (``shipit logs -f --raw | jq .``), and Python block-buffers a
-    non-interactive stdout — without the flush, records would sit in the buffer
-    instead of streaming live.
+    non-interactive stdout — without the flush, records would sit in the
+    buffer instead of streaming live.
     """
     if raw:
         print(line, flush=True)
         return
     if not line.strip():
         return
-    rendered = _render_record(line)
+    rendered = render_record(line)
     if rendered is None:
-        # Redact BEFORE truncating, so a secret straddling the snippet cut is
-        # still seen whole by the pattern matcher.
-        snippet = redact.redact_text(line)[:_SNIPPET_LEN]
-        print(
-            f"logs: skipped malformed line: {snippet!r}",
-            file=sys.stderr,
-            flush=True,
-        )
+        print(malformed_note(line), file=sys.stderr, flush=True)
         return
     print(rendered, flush=True)
 
 
-def _follow(
-    path: Path,
+def build_query(
     *,
-    tail: int,
-    raw: bool,
-    record_filter: _Filter,
-    sleep: Callable[[float], None],
-) -> int:
-    """Stream the log live (``tail -f``): the last ``tail`` lines, then each
-    appended line as it lands — every line through the filter then :func:`_emit`,
-    so follow and the static view select and render (or pass through)
-    identically. The path header prints only in the human mode: raw stdout is
-    reserved for JSONL. Ends cleanly on Ctrl-C (exit 0), the way ``tail -f``
-    does. ``sleep`` is injected so a test can drive the poll loop and stop it
-    deterministically.
-    """
-    if not raw:
-        print(str(path), flush=True)
-    fh = path.open("r", encoding="utf-8", errors="replace")
-    try:
-        matching = [ln for ln in fh.read().splitlines() if record_filter.matches(ln)]
-        for line in _last_n(matching, tail):
-            _emit(line, raw=raw)
-        # fh is now positioned at EOF; subsequent appends are picked up by readline.
-        pending = ""
-        while True:
-            chunk = fh.readline()
-            if chunk:
-                # A concurrent write can be read mid-line, so readline() may
-                # return a fragment with no trailing newline. Buffer until the
-                # newline lands before judging the line: a torn read is not a
-                # malformed record, and under an active filter parsing a half
-                # line would drop it — permanently, since its remainder (read
-                # next) is not valid JSON on its own either.
-                pending += chunk
-                if not pending.endswith("\n"):
-                    continue
-                stripped = pending.rstrip("\n")
-                pending = ""
-                if record_filter.matches(stripped):
-                    _emit(stripped, raw=raw)
-                continue
-            # No new data. The writer is a RotatingFileHandler, so the active
-            # shipit.log can be rolled over mid-follow — at which point our open
-            # handle points at the stale renamed file and would go silent.
-            # Detect it by FILE IDENTITY: rollover is a rename + fresh create,
-            # so the path's inode no longer matches our handle's. (A size
-            # comparison alone is a race — a busy fresh file can outgrow our
-            # old read offset between polls and the shrink would never be
-            # seen.) The size check stays for the in-place truncation case,
-            # where the inode never changes.
-            try:
-                disk = path.stat()
-                rotated = (
-                    disk.st_ino != os.fstat(fh.fileno()).st_ino
-                    or disk.st_size < fh.tell()
-                )
-            except OSError:
-                rotated = False  # mid-rotation flicker; retry on the next tick
-            if rotated:
-                fh.close()
-                fh = path.open("r", encoding="utf-8", errors="replace")
-                continue
-            sleep(_FOLLOW_INTERVAL)
-    except KeyboardInterrupt:
-        return 0
-    finally:
-        fh.close()
-
-
-def _default_repo_slug() -> str:
-    """The cwd checkout's canonical slug — resolved LOCALLY off the origin remote.
-
-    Delegates to :func:`shipit.identity.resolve_repo`, the SAME resolver the log
-    WRITER namespaces by (:func:`shipit.logsetup._current_repo`), NOT the
-    ``gh.current_repo`` API shellout. Reader and writer must agree on the repo
-    identity, so a log written in a checkout where ``gh`` is unavailable is still
-    found by ``shipit logs`` without an explicit repo. Raises
-    :class:`shipit.execrun.ExecError` (no origin remote) or :class:`ValueError`
-    (unparseable origin URL), both handled by the caller.
-    """
-    return identity.resolve_repo().slug
-
-
-def run(
-    repo: str | None = None,
-    *,
-    path_only: bool = False,
-    follow: bool = False,
-    raw: bool = False,
-    tail: int = DEFAULT_TAIL,
     events_only: bool = False,
     pr: int | None = None,
     session: str | None = None,
@@ -380,107 +172,93 @@ def run(
     ws: int | str | None = None,
     agent: str | None = None,
     role: str | None = None,
+    tail: int = DEFAULT_TAIL,
+    follow: bool = False,
+    raw: bool = False,
     flow: bool = False,
     show_agents: bool = False,
-    base_dir: str | Path | None = None,
-    current_repo: Callable[[], str] | None = None,
     current_session: Callable[[], str | None] | None = None,
+) -> LogQuery:
+    """Mint the frozen :class:`~shipit.logread.LogQuery` at the CLI boundary.
+
+    The parse-to-values step (ADR-0030): flag primitives in, ONE value out,
+    with every flag-level failure a :class:`click.UsageError` (the usage tier,
+    exit 2) so it never reaches ``run()``. Two jobs live here rather than in
+    the domain factory: resolving the ``--session current`` sentinel (it reads
+    the process environment — ``current_session`` is the injected boundary,
+    defaulting to :func:`shipit.session.current.current_session_id`; an
+    unresolvable ``current`` is a usage error, since the caller asked for a
+    session this process is not in), and translating the domain factory's
+    :class:`ValueError` (out-of-grammar ``--ws``, the ``--flow`` ×
+    ``--raw``/``--follow`` contradiction) into click's vocabulary.
+    """
+    if session == "current":
+        session = (current_session or session_current.current_session_id)()
+        if session is None:
+            raise click.UsageError(
+                "--session current, but no session is resolvable — neither "
+                f"{logcontext.ENV_PREFIX}SESSION in the environment nor "
+                "an ephemeral session-Tree cwd (ADR-0027); pass the session id."
+            )
+    try:
+        return logread.build_query(
+            events_only=events_only,
+            pr=pr,
+            session=session,
+            epic=epic,
+            ws=ws,
+            agent=agent,
+            role=role,
+            tail=tail,
+            follow=follow,
+            raw=raw,
+            flow=flow,
+            show_agents=show_agents,
+        )
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from exc
+
+
+@cli_errors
+def run(
+    repo: Repo | None = None,
+    *,
+    path_only: bool = False,
+    query: LogQuery | None = None,
+    base_dir: str | Path | None = None,
     sleep: Callable[[float], None] | None = None,
     now: Callable[[], datetime] | None = None,
 ) -> int:
     """Locate (and read) the per-repo JSONL log. Returns an int exit code.
 
-    ``repo`` overrides the default (the cwd checkout, resolved via the injected
-    ``current_repo`` boundary). ``path_only`` prints just the resolved absolute
-    path and exits 0 — locating the log never depends on it existing yet, so this
-    always succeeds. Otherwise the file is read: ``follow`` streams appended lines
-    (``tail -f``); the default prints the path plus the last ``tail`` records.
-    ``raw`` swaps the human rendering for an unmodified-JSONL passthrough (no
-    path header — stdout is pure JSONL for jq) and composes with both views. A
-    missing log file is reported on stderr (no traceback) and exits non-zero.
+    ``repo`` is the typed identity (minted at parse, or injected by a direct
+    caller); omitted, the ambient checkout's — the ONE root resolution, with
+    the uniform outside-a-checkout refusal mapped by the error shell.
+    ``path_only`` prints just the resolved absolute path and exits 0 —
+    locating the log never depends on it existing yet (or on ``query``), so
+    this always succeeds. Otherwise ``query`` (default: the plain read) says
+    what to read and how to view it; the engine (:mod:`shipit.logread`)
+    yields the selected lines and this function renders them — the path
+    header in the human modes, per-line emission via :func:`_emit_line`, the
+    story view via :mod:`shipit.flowview`. A missing log file is reported on
+    stderr (no traceback) and exits 1.
 
-    ``events_only`` / ``pr`` / ``session`` / ``epic`` / ``ws`` / ``agent`` /
-    ``role`` are the LOG04 record filters (AND-composed, applied before the
-    tail count, uniform across the static/follow/raw views). ``session`` takes
-    the sentinel ``current``, resolved via the injected ``current_session``
-    boundary (default :func:`shipit.session.current.current_session_id`) —
-    unresolvable is a usage error, since the caller asked for a session this
-    process is not in. ``ws`` accepts the int or any display form
-    (:func:`normalize_ws`); a form that names no Work Stream is a usage error.
-
-    ``flow`` renders the filtered records as the session story instead of a
-    listing (:mod:`shipit.flowview`) — it implies ``events_only``, refuses
-    ``raw``/``follow``, and ``show_agents`` toggles the agent-id display.
-
-    ``base_dir`` / ``current_repo`` / ``current_session`` / ``sleep`` / ``now``
-    are injected boundaries for tests.
+    ``base_dir`` / ``sleep`` / ``now`` are injected boundaries for tests: the
+    log location's base directory, the follow-loop poll, and the flow view's
+    clock.
     """
-    current_repo = current_repo or _default_repo_slug
-    try:
-        slug = repo if repo is not None else current_repo()
-        # The ONE canonical slug parser (ADR-0024): lowercases owner/name, so an
-        # API-cased or hand-typed slug resolves the SAME log directory the writer
-        # (which namespaces by the canonical Repo identity) filled.
-        target = identity.repo_from_slug(slug)
-    except execrun.ExecError as exc:
-        # Resolving the cwd repo read the local origin remote and failed — not a
-        # checkout, or no 'origin'. Keep the verb's promise of a clean message.
-        print(
-            "logs: could not determine the current repo (not a git checkout, or "
-            f"no 'origin' remote); pass an explicit owner/repo. ({exc})",
-            file=sys.stderr,
-        )
-        return _EXIT_BAD_REPO
-    except ValueError as exc:
-        print(f"logs: {exc}", file=sys.stderr)
-        return _EXIT_BAD_REPO
-
+    target = repo if repo is not None else current_root_context().require_repo()
     path = logsetup.log_file_path(target, base_dir=base_dir)
 
     if path_only:
-        # --path is a pure LOCATOR (the module contract): it prints the resolved
-        # path and exits, never depending on the file's contents or on filter
-        # state. So it returns HERE, before the reader-only validation below —
-        # `--path --session current` outside a session, a bad `--ws`, or
-        # `--flow --raw` still print the path instead of failing on a flag that
-        # only governs reading.
+        # --path is a pure LOCATOR (the module contract): it prints the
+        # resolved path and exits, never depending on the file's contents or
+        # on the query — the CLI callback does not even build one, so
+        # `--path --session current` outside a session still prints the path.
         print(str(path))
         return 0
 
-    if flow and (raw or follow):
-        print(
-            "logs: --flow is a rendered story view; it does not compose with "
-            "--raw or --follow.",
-            file=sys.stderr,
-        )
-        return _EXIT_BAD_REPO
-    if flow:
-        events_only = True  # --flow implies --events (ADR-0032)
-    if ws is not None:
-        try:
-            ws = normalize_ws(ws)
-        except ValueError as exc:
-            print(f"logs: {exc}", file=sys.stderr)
-            return _EXIT_BAD_REPO
-    if session == "current":
-        session = (current_session or session_current.current_session_id)()
-        if session is None:
-            print(
-                "logs: --session current, but no session is resolvable — neither "
-                f"{logcontext.ENV_PREFIX}SESSION in the environment nor "
-                "an ephemeral session-Tree cwd (ADR-0027); pass the session id.",
-                file=sys.stderr,
-            )
-            return _EXIT_BAD_REPO
-    record_filter = _Filter(
-        events_only=events_only,
-        pr=pr,
-        session=session,
-        epic=epic,
-        ws=ws,
-        agent=agent,
-        role=role,
-    )
+    query = query if query is not None else LogQuery()
 
     if not path.exists():
         print(
@@ -490,43 +268,195 @@ def run(
         )
         return _EXIT_NO_LOG
 
-    if follow:
-        return _follow(
-            path,
-            tail=tail,
-            raw=raw,
-            record_filter=record_filter,
-            sleep=sleep or time.sleep,
-        )
+    record_filter = query.record_filter
 
-    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    if query.follow:
+        # The path header prints only in the human mode: raw stdout is
+        # reserved for JSONL. Ends cleanly on Ctrl-C (exit 0), the way
+        # `tail -f` does — the interrupt surfaces out of the engine's
+        # generator and is mapped to success HERE, at the terminal seam.
+        if not query.raw:
+            print(str(path), flush=True)
+        try:
+            for line in logread.follow_lines(
+                path, record_filter, tail=query.tail, sleep=sleep
+            ):
+                _emit_line(line, raw=query.raw)
+        except KeyboardInterrupt:
+            return 0
+        return 0
 
-    if flow:
-        # The story view: same selection (parse → filter → tail), rendering
-        # delegated whole to the pure module. A malformed line has no fields to
-        # match and is dropped silently — the filter is always active here
-        # (--flow implies --events), so the active-filter contract applies.
+    if query.flow:
+        # The story view: same selection (the engine's filtered read), the
+        # rendering delegated whole to the pure module. The filter is always
+        # active here (--flow implied --events at parse), so a malformed line
+        # was dropped silently by the engine. The header themes the WHOLE
+        # session (its intent/epics), so it reads the full matching set; only
+        # the body lines are tailed — deriving both from the tailed slice
+        # would drop the intent header whenever the `session.intent` event
+        # fell before the tail window.
         records = [
             record
-            for record in (_parse_record(ln) for ln in lines)
-            if record is not None and record_filter.matches_record(record)
+            for record in (
+                logread.parse_record(ln)
+                for ln in logread.read_lines(path, record_filter)
+            )
+            if record is not None
         ]
         instant = (now or (lambda: datetime.now(timezone.utc)))()
-        # The header themes the WHOLE session (its intent/epics), so it reads the
-        # full matching set; only the body lines are tailed. Deriving both from
-        # the tailed slice would drop the intent header whenever the
-        # `session.intent` event fell before the tail window.
         for rendered in flowview.render(
-            _last_n(records, tail),
+            logread.last_n(records, query.tail),
             now=instant,
-            show_agents=show_agents,
+            show_agents=query.show_agents,
             header_from=records,
         ):
             print(rendered, flush=True)
         return 0
 
-    if not raw:
+    if not query.raw:
         print(str(path))
-    for line in _last_n([ln for ln in lines if record_filter.matches(ln)], tail):
-        _emit(line, raw=raw)
+    for line in logread.read_lines(path, record_filter, query.tail):
+        _emit_line(line, raw=query.raw)
     return 0
+
+
+@click.command(name="logs")
+@repo_argument
+@click.option(
+    "--path",
+    "path_only",
+    is_flag=True,
+    help='Print the absolute log file path and exit (for `cat "$(shipit logs --path)"`).',
+)
+@click.option(
+    "-f",
+    "--follow",
+    is_flag=True,
+    help="Stream appended log lines live (tail -f); ends on Ctrl-C.",
+)
+@click.option(
+    "--raw",
+    is_flag=True,
+    help="Emit unmodified JSONL lines (no path header) for piping to jq.",
+)
+@click.option(
+    "-n",
+    "--lines",
+    "lines",
+    type=int,
+    default=DEFAULT_TAIL,
+    show_default=True,
+    help="Trailing records to print in the default (no-flag) view.",
+)
+@click.option(
+    "--events",
+    "events_only",
+    is_flag=True,
+    help="Only dev-cycle event records (records carrying an `event` field).",
+)
+@click.option(
+    "--pr",
+    "pr",
+    type=int,
+    default=None,
+    metavar="N",
+    help="Only records whose bound `pr` domain key equals this PR number.",
+)
+@click.option(
+    "--session",
+    "session",
+    default=None,
+    metavar="ID|current",
+    help="Only this session's records; `current` resolves from the session "
+    "environment (or the ephemeral Tree cwd).",
+)
+@click.option(
+    "--epic",
+    "epic",
+    default=None,
+    metavar="CODE",
+    help="Only records whose bound `epic` domain key equals this code.",
+)
+@click.option(
+    "--ws",
+    "ws",
+    default=None,
+    metavar="N",
+    help="Only this Work Stream's records; accepts 1, 01, or WS01.",
+)
+@click.option(
+    "--agent",
+    "agent",
+    default=None,
+    metavar="ID",
+    help="Only records whose bound `agent` domain key equals this spawn id.",
+)
+@click.option(
+    "--role",
+    "role",
+    default=None,
+    metavar="NAME",
+    help="Only records whose bound `role` domain key equals this Role name.",
+)
+@click.option(
+    "--flow",
+    is_flag=True,
+    help="Render the filtered records as the session story (implies --events).",
+)
+@click.option(
+    "--agent-ids",
+    "show_agents",
+    is_flag=True,
+    help="Show agent ids on flow lines (always collected, displayed on request).",
+)
+def logs_cmd(
+    repo: Repo | None,
+    path_only: bool,
+    follow: bool,
+    raw: bool,
+    lines: int,
+    events_only: bool,
+    pr: int | None,
+    session: str | None,
+    epic: str | None,
+    ws: str | None,
+    agent: str | None,
+    role: str | None,
+    flow: bool,
+    show_agents: bool,
+) -> None:
+    """Locate and read shipit's durable per-repo JSONL log.
+
+    REPO is owner/name; omitted, it defaults to the current checkout's repo. The
+    path is resolved by the file sink (logsetup), the single source of truth — no
+    recomputed platform location. --path prints just that absolute path so an
+    agent can `cat`/`grep` it. -f/--follow streams new records; with no flag it
+    prints the path plus the last N records, rendered legibly (ts LEVEL logger:
+    msg, domain keys trailing); a malformed line is skipped with a stderr note.
+    --raw passes the stored lines through unmodified for jq — no parsing, no
+    skipping, malformed lines included — UNLESS a filter is active. --events and
+    the domain-key filters (--pr/--session/--epic/--ws/--agent/--role) compose
+    as AND, apply before the tail count, and work with every view; selecting on
+    a field requires parsing, so under an active filter even --raw parses and
+    drops a malformed line rather than passing it through. --flow renders the
+    session story (intent/theme header, relative times, EPIC-WSnn prefixes;
+    --agent-ids reveals agent ids) and implies --events. A log not written yet
+    is reported, not crashed.
+    """
+    if path_only:
+        raise SystemExit(run(repo, path_only=True))
+    query = build_query(
+        events_only=events_only,
+        pr=pr,
+        session=session,
+        epic=epic,
+        ws=ws,
+        agent=agent,
+        role=role,
+        tail=lines,
+        follow=follow,
+        raw=raw,
+        flow=flow,
+        show_agents=show_agents,
+    )
+    raise SystemExit(run(repo, query=query))
