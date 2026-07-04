@@ -34,16 +34,17 @@ def test_lang_for_unmanaged_is_none():
     assert lint.lang_for("img.png") is None
 
 
-def test_manifest_roots_topmost_only():
-    # A root Cargo.toml is a workspace root: nested members are covered by
-    # its --all run, so only the topmost dir survives.
+def test_manifest_roots_every_tracked_manifest_runs():
+    # Every tracked Cargo.toml dir runs — a nested manifest is NOT collapsed
+    # under an ancestor (cargo does not make it a workspace member for us), so
+    # an independent/excluded nested crate is never silently skipped.
     paths = ["Cargo.toml", "crates/a/Cargo.toml", "crates/a/src/lib.rs"]
-    assert lint.manifest_roots(paths, ("Cargo.toml",)) == ["."]
+    assert lint.manifest_roots(paths, ("Cargo.toml",)) == [".", "crates/a"]
 
 
 def test_manifest_roots_nested_and_siblings():
     paths = ["a/Cargo.toml", "a/sub/Cargo.toml", "b/Cargo.toml", "ab/x.rs"]
-    assert lint.manifest_roots(paths, ("Cargo.toml",)) == ["a", "b"]
+    assert lint.manifest_roots(paths, ("Cargo.toml",)) == ["a", "a/sub", "b"]
 
 
 def test_manifest_roots_subdir_crate_only():
@@ -107,6 +108,7 @@ def test_rust_tools_argv_forms():
     # runs its check form (never skipped).
     assert clippy.argv(fix=False) == (
         "clippy",
+        "--all",
         "--all-targets",
         "--all-features",
         "--",
@@ -267,7 +269,7 @@ def test_fix_mode_fixes_what_it_can_and_still_checks_the_rest(tmp_path, capsys):
 
 
 def test_rust_runs_per_manifest_without_file_batches(tmp_path, capsys):
-    # .rs files trigger the rust leg; cargo runs once per topmost Cargo.toml
+    # .rs files trigger the rust leg; cargo runs once per tracked Cargo.toml
     # dir with NO files appended (cargo speaks to the crate, not a file list).
     rec = _Recorder()
     rc = lint.run(
@@ -276,7 +278,15 @@ def test_rust_runs_per_manifest_without_file_batches(tmp_path, capsys):
         run_tool=rec,
     )
     assert rc == 0
-    clippy = ("clippy", "--all-targets", "--all-features", "--", "-D", "warnings")
+    clippy = (
+        "clippy",
+        "--all",
+        "--all-targets",
+        "--all-features",
+        "--",
+        "-D",
+        "warnings",
+    )
     fmt_check = ("fmt", "--all", "--", "--check")
     assert rec.calls.count(("cargo", clippy)) == 1
     assert rec.calls.count(("cargo", fmt_check)) == 1
@@ -285,9 +295,10 @@ def test_rust_runs_per_manifest_without_file_batches(tmp_path, capsys):
     assert "rust" in capsys.readouterr().out
 
 
-def test_rust_workspace_members_covered_by_topmost_manifest(tmp_path):
-    # Nested member manifests under a workspace root do NOT get their own runs
-    # (the root's --all covers them); a disjoint crate dir gets its own, cwd'd in.
+def test_rust_every_tracked_manifest_gets_its_own_run(tmp_path):
+    # Every tracked Cargo.toml dir runs, cwd'd in — a nested manifest is not
+    # collapsed under the root, so an independent/excluded nested crate is
+    # never silently skipped (the tools' --all still covers true members).
     rec = _Recorder()
     rc = lint.run(
         str(tmp_path),
@@ -303,8 +314,9 @@ def test_rust_workspace_members_covered_by_topmost_manifest(tmp_path):
     )
     assert rc == 0
     cargo_cwds = [cwd for b, _, cwd in rec.cwds if b == "cargo"]
-    assert set(cargo_cwds) == {tmp_path}
-    assert len(cargo_cwds) == 2  # clippy + fmt, once each — members not re-run
+    # Both manifest dirs run, clippy + fmt once each: 4 cargo invocations.
+    assert set(cargo_cwds) == {tmp_path, tmp_path / "crates" / "a"}
+    assert len(cargo_cwds) == 4
 
 
 def test_rust_subdir_crate_runs_cwd_in_that_dir(tmp_path):
@@ -366,7 +378,7 @@ def test_fix_mode_applies_rustfmt_and_still_checks_clippy(tmp_path):
     assert ("cargo", ("fmt", "--all")) in rec.calls
     assert (
         "cargo",
-        ("clippy", "--all-targets", "--all-features", "--", "-D", "warnings"),
+        ("clippy", "--all", "--all-targets", "--all-features", "--", "-D", "warnings"),
     ) in rec.calls
 
 

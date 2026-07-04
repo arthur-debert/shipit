@@ -39,7 +39,7 @@ Take the per-language TOOL INVOCATIONS and version pins as the starting
 reference — they are battle-tested command lines, not orchestration:
 
 - python — `ruff check` + `ruff format --check`
-- rust — `cargo fmt --all -- --check` + `cargo clippy --all-targets --all-features -- -D warnings`
+- rust — `cargo fmt --all -- --check` + `cargo clippy --all --all-targets --all-features -- -D warnings`
 - shell — `shellcheck --severity=info` (+ `shfmt -d` for formatting)
 - yaml — `yamllint`
 - json — `prettier --check`

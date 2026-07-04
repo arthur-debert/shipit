@@ -63,7 +63,7 @@ class Tool:
     (shellcheck, yamllint, lexd) is failing.
 
     ``per_manifest`` tools speak to a build unit, not a file list (cargo has no
-    file-batch form): they run once per topmost manifest directory of their Lang
+    file-batch form): they run once per tracked manifest directory of their Lang
     (see :func:`manifest_roots`) with NO files appended, cwd'd into that
     directory.
     """
@@ -105,19 +105,30 @@ RUST = Lang(
     extensions=(".rs",),
     manifests=("Cargo.toml",),
     # cargo speaks to a crate/workspace, not a file list, so both tools are
-    # per_manifest: one run per topmost Cargo.toml directory (a workspace
-    # root's --all covers its members — release-core's battle-tested forms,
-    # docs/prd/lint-checks.md). clippy findings are hard errors (-D warnings)
-    # and clippy has no safe in-place fix here, so under --fix it still runs
-    # its check form; `cargo fmt --all` is the one rust --fix leg. A repo with
-    # .rs files but no tracked Cargo.toml runs at the root and fails on
-    # cargo's own error — hard, never a silent skip. The rust toolchain is
-    # assumed provisioned per the repo's toolchain declaration (ADR-0007);
-    # a missing cargo is the standard hard-fail 127.
+    # per_manifest: one run per tracked Cargo.toml directory (see
+    # manifest_roots — every tracked manifest runs, never collapsed, so a
+    # nested crate that ISN'T a workspace member is never silently skipped).
+    # clippy and fmt both carry --all so a workspace root covers its declared
+    # members even when only the root manifest is tracked (release-core's
+    # battle-tested forms, docs/prd/lint-checks.md). clippy findings are hard
+    # errors (-D warnings) and clippy has no safe in-place fix here, so under
+    # --fix it still runs its check form; `cargo fmt --all` is the one rust
+    # --fix leg. A repo with .rs files but no tracked Cargo.toml runs at the
+    # root and fails on cargo's own error — hard, never a silent skip. The
+    # rust toolchain is assumed provisioned per the repo's toolchain
+    # declaration (ADR-0007); a missing cargo is the standard hard-fail 127.
     tools=(
         Tool(
             "cargo",
-            ("clippy", "--all-targets", "--all-features", "--", "-D", "warnings"),
+            (
+                "clippy",
+                "--all",
+                "--all-targets",
+                "--all-features",
+                "--",
+                "-D",
+                "warnings",
+            ),
             per_manifest=True,
         ),
         Tool(
@@ -208,23 +219,24 @@ def _interp(shebang: str | None) -> str | None:
 
 
 def manifest_roots(paths: list[str], manifests: tuple[str, ...]) -> list[str]:
-    """Topmost directories (repo-relative, ``"."`` for the root) holding one of
-    ``manifests`` among the tracked paths. Pure (no I/O).
+    """Every directory (repo-relative, ``"."`` for the root) holding one of
+    ``manifests`` among the tracked paths, sorted. Pure (no I/O).
 
-    Nested manifests under a kept root are treated as workspace members: the
-    root's ``--all`` run covers them, so running each would double-check the
-    same units.
+    Every tracked manifest gets its own run — nested manifests are NOT
+    collapsed under an ancestor. Cargo does not make a nested manifest a
+    workspace member automatically (a repo can have an independent nested
+    crate, or a workspace that excludes one), so collapsing would silently
+    skip it; the ``--all`` on the tools makes a true workspace root cover its
+    declared members, and running every manifest guarantees the rest are
+    never skipped. Redundant re-checks of shared members are cargo-cache
+    cheap; a silent miss in a hard-fail lint is not.
     """
     dirs = {
         path.rsplit("/", 1)[0] if "/" in path else "."
         for path in paths
         if _basename(path) in manifests
     }
-    roots: list[str] = []
-    for d in sorted(dirs, key=lambda d: (0 if d == "." else d.count("/") + 1, d)):
-        if not any(r == "." or d == r or d.startswith(r + "/") for r in roots):
-            roots.append(d)
-    return roots
+    return sorted(dirs)
 
 
 def route(
@@ -357,7 +369,7 @@ def run(
 
     runs: list[ToolRun] = []
     for lang, paths in routed:
-        # per_manifest tools run once per topmost manifest directory. With no
+        # per_manifest tools run once per tracked manifest directory. With no
         # manifest tracked they run at the root, where the tool's own error is
         # the (hard) verdict — never a silent skip.
         mdirs = (
