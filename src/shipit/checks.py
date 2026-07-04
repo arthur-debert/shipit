@@ -14,7 +14,10 @@ tried in order:
 A workflow contributes a required check only when it triggers on ``pull_request``
 WITHOUT a ``paths:`` / ``paths-ignore:`` filter (a path-filtered job is
 conditional and would deadlock unrelated PRs — release#416) and is not
-``copilot-review`` (which only requests a review, not a check). The bare
+``copilot-review`` (the retired Copilot-request caller: it only requested a
+review, never a check. ADR-0031 made the engine the sole requester and deleted
+the workflow here; the filter stays because portfolio repos still carry the
+file until their own cutover). The bare
 caller-job name of a reusable call is never a reported context and would deadlock
 every PR — release#602.
 """

@@ -16,14 +16,12 @@
 # `shipit gh-setup` resolves each and pushes it; a changed secret is re-set to its
 # new value. The same table feeds the cross-org workflow caller's `secrets:` block.
 [secrets]
-# RELEASE_TOKEN backs cross-repo release pushes (the Copilot-review caller
-# workflow it originally served is retired in this repo — the PR state engine is
-# the sole requester of Copilot, ADR-0031). Sourced from the local gh CLI token
-# env var, which carries repo + workflow scope. Optional: GH_TOKEN is not always
-# exported (gh often keeps the token in the keychain), and the repo secret is
-# already set — so an absent GH_TOKEN skips the re-set rather than aborting
-# gh-setup; when present it rotates the value. More entries land as shipit's
-# release workflows arrive (Steps 4–6).
+# RELEASE_TOKEN backs cross-repo release pushes. Sourced from the local gh CLI
+# token env var, which carries repo + workflow scope. Optional: GH_TOKEN is not
+# always exported (gh often keeps the token in the keychain), and the repo
+# secret is already set — so an absent GH_TOKEN skips the re-set rather than
+# aborting gh-setup; when present it rotates the value. More entries land as
+# shipit's release workflows arrive (Steps 4–6).
 RELEASE_TOKEN = { env = "GH_TOKEN", optional = true }
 
 # Local-agent review App credentials (PRF01-WS07). The codex/agy review backends
