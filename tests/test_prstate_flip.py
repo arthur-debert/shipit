@@ -117,8 +117,9 @@ def test_refused_flip_is_a_warning_with_the_pr_key(caplog):
 
 def test_gh_adapter_flip_leaves_a_durable_milestone(monkeypatch, caplog):
     """The boundary that PERFORMS the flip records it (before #285 its only
-    record was the Exec runner's DEBUG line). This adapter milestone is also
-    the `--undo` path's durable record — the verb no longer logs."""
+    record was the Exec runner's DEBUG line). The `--undo` path's dev-cycle
+    twin (`pr.unready`) rides the engine's `undo_flip` seam; this adapter
+    milestone stays the boundary-level record under both directions."""
     from shipit import gh
 
     monkeypatch.setattr(gh, "_run", lambda args, **k: "")
@@ -131,3 +132,87 @@ def test_gh_adapter_flip_leaves_a_durable_milestone(monkeypatch, caplog):
     ]
     assert len(milestones) == 1
     assert milestones[0].repo == "owner/repo"
+
+
+# --- the pr.ready / pr.unready dev-cycle events (LOG04-WS02 / ADR-0032) --------
+
+
+def _event_tag(record):
+    from shipit import events
+
+    return getattr(record, events.EXTRA_KEY, None)
+
+
+def test_performed_flip_is_the_pr_ready_event(caplog):
+    """The flip milestone IS the tagged event — the guarded flip is the one
+    place a draft→ready happens, so it fires once per ACTUAL flip."""
+    with caplog.at_level(logging.INFO, logger="shipit.prstate"):
+        guarded_flip(
+            TARGET,
+            flip=lambda target: None,
+            evaluate_status=lambda target: _status(TaskState.READY, target.number),
+        )
+    (tagged,) = [r for r in caplog.records if _event_tag(r)]
+    assert _event_tag(tagged) == "pr.ready"
+    assert tagged.pr == 42 and tagged.levelno == logging.INFO
+
+
+def test_refused_flip_tags_no_event(caplog):
+    """A refusal flips nothing — the milestone trail records no pr.ready."""
+    with caplog.at_level(logging.INFO, logger="shipit.prstate"):
+        with pytest.raises(NotReady):
+            guarded_flip(
+                TARGET,
+                flip=lambda target: None,
+                evaluate_status=lambda target: _status(TaskState.VALIDATING),
+            )
+    assert not [r for r in caplog.records if _event_tag(r)]
+
+
+def test_undo_flip_reverts_and_emits_pr_unready(caplog):
+    """The flip's undo: always allowed (no guard consulted), performed through
+    the injected adapter with `undo=True`, tagged `pr.unready` — and the
+    per-operation epic/ws binding runs (the undo gathers nothing, so the seam
+    is the injected `bind_identity`)."""
+    from shipit.prstate.flip import undo_flip
+
+    undone: list[tuple[PrId, bool]] = []
+    bound: list[PrId] = []
+    with caplog.at_level(logging.INFO, logger="shipit.prstate"):
+        undo_flip(
+            TARGET,
+            flip=lambda target, *, undo=False: undone.append((target, undo)),
+            bind_identity=bound.append,
+        )
+    assert undone == [(TARGET, True)]
+    assert bound == [TARGET]  # epic/ws derived from the head branch (ADR-0032)
+    (tagged,) = [r for r in caplog.records if _event_tag(r)]
+    assert _event_tag(tagged) == "pr.unready"
+    assert tagged.pr == 42 and tagged.levelno == logging.INFO
+
+
+def test_bind_pr_identity_binds_epic_ws_from_the_head_branch(monkeypatch):
+    """The no-gather binding seam (the undo path): one light headRefName read
+    through the ONE branch-identity parser — a namespaced head binds epic/ws, a
+    plain head leaves them absent (never a placeholder)."""
+    from shipit import logcontext
+    from shipit.prstate import fetch
+
+    monkeypatch.setattr(
+        fetch.gh,
+        "pr_view",
+        lambda pr, *, repo, json_fields: {"headRefName": "LOG04/WS02"},
+    )
+    fetch.bind_pr_identity(TARGET)
+    bound = logcontext.bound()
+    assert bound["pr"] == 42 and bound["repo"] == "owner/repo"
+    assert bound["epic"] == "LOG04" and bound["ws"] == 2
+
+    monkeypatch.setattr(
+        fetch.gh,
+        "pr_view",
+        lambda pr, *, repo, json_fields: {"headRefName": "issues/375/work"},
+    )
+    fetch.bind_pr_identity(TARGET)
+    bound = logcontext.bound()
+    assert "epic" not in bound and "ws" not in bound

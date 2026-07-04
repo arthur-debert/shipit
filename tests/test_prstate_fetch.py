@@ -493,3 +493,75 @@ def test_commit_id_boundary_none_stays_none_and_present_is_validated():
     assert fetch._commit_id(HEAD) == Sha(HEAD)
     with pytest.raises(ValueError):
         fetch._commit_id("")
+
+
+# --- review.received: the gather is the first sight of a landed review ------
+# (LOG04-WS02 / ADR-0032). The engine never posts a remote reviewer's review,
+# so the FULL gather — the snapshot every `pr status` / `pr next` decision
+# reads — is the strongest witnessing seam there is. First sight is per
+# process (`events.emit_once`): one invocation gathers up to three times and
+# must tag each landed review exactly once; the record carries the review's
+# own identity flat, so a reader dedupes on data.
+
+
+def _wire_with_reviews(monkeypatch, reviews_json: list[dict]) -> None:
+    _wire(monkeypatch, [])
+    monkeypatch.setattr(
+        fetch.gh,
+        "rest",
+        lambda path, **kwargs: reviews_json if path.endswith("/reviews") else [],
+    )
+
+
+def _received_records(caplog):
+    import logging as _logging
+
+    from shipit import events
+
+    return [
+        r
+        for r in caplog.records
+        if getattr(r, events.EXTRA_KEY, None) == "review.received"
+        and r.levelno == _logging.INFO
+    ]
+
+
+def test_gather_tags_each_landed_review_once_per_process(monkeypatch, caplog):
+    import logging as _logging
+
+    _wire_with_reviews(
+        monkeypatch,
+        [
+            {"id": 11, "user": {"login": "Copilot"}, "state": "COMMENTED"},
+            {"id": 12, "user": {"login": "codex-bot"}, "state": "APPROVED"},
+        ],
+    )
+    with caplog.at_level(_logging.INFO, logger="shipit.prstate"):
+        fetch.gather(TARGET, default_roster())
+    tagged = _received_records(caplog)
+    assert {(r.reviewer, r.review_id, r.review_state) for r in tagged} == {
+        ("Copilot", 11, "COMMENTED"),
+        ("codex-bot", 12, "APPROVED"),
+    }
+    assert all(r.pr == TARGET.number for r in tagged)
+
+    # A re-gather in the same process (pr next gathers again for the guarded
+    # flip) re-reads the same reviews — NOT a new milestone, nothing re-tagged.
+    caplog.clear()
+    with caplog.at_level(_logging.INFO, logger="shipit.prstate"):
+        fetch.gather(TARGET, default_roster())
+    assert not _received_records(caplog)
+
+
+def test_gather_does_not_sight_a_pending_review(monkeypatch, caplog):
+    import logging as _logging
+
+    # A PENDING review is an unsubmitted draft — it has not LANDED, so the
+    # trail records nothing for it.
+    _wire_with_reviews(
+        monkeypatch,
+        [{"id": 13, "user": {"login": "human"}, "state": "PENDING"}],
+    )
+    with caplog.at_level(_logging.INFO, logger="shipit.prstate"):
+        fetch.gather(TARGET, default_roster())
+    assert not _received_records(caplog)

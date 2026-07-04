@@ -74,13 +74,15 @@ Constraints & trade-offs:
       cheap, ~1.5s; the reflink warm-template of ADR-0015 stays the deferred escape hatch).
     - **The ``chmod`` on a read-only Tree is a guardrail, not a security boundary** — it
       catches an accidental write and keeps a shared clone trustworthy for co-tenants.
-    - **KNOWN GAP — the ``SHIPIT_EPIC`` session marker.** The hook reads the epic namespace
-      from the session-stable ``SHIPIT_EPIC`` env var (``harness/worktree_adapter.py``),
-      the coordinator→hook handshake. But there is **no clean in-session mechanism for the
-      coordinator to set it**, so in practice in-CC hook spawns land on epic-LESS
-      ``agent-<id>`` holding branches and self-branch from there. Filed as #173 (a
-      follow-up off epic #154; needs a design decision; not a blocker — the spawn still
-      lands in a real Tree, just under a generic namespace).
+    - **The ``SHIPIT_EPIC`` marker is NOT an identity channel.** It survives only as the
+      WorktreeCreate hook's optional tree-NAMESPACE override for the rare cross-epic
+      in-CC spawn (``harness/worktree_adapter.py``; the hook normally infers the epic
+      from the coordinator's branch prefix). The never-set "session marker" gap it once
+      papered over is retired (ADR-0032 / LOG04-WS02): a worker's dev-cycle identity —
+      ``epic``/``ws``/``agent``/``role`` — binds at the ``shipit spawn subagent`` seam
+      from the spawn's own arguments and rides the Run's environment as
+      ``SHIPIT_LOG_CTX_*`` (``shipit.logcontext``), so every shipit command the worker
+      runs correlates to its Work Stream with zero worker cooperation.
 
 ADR map: 0014 (dissociated clones / central root, native worktree denied), 0015 (per-Tree
 ``target/`` + cross-Tree sccache; reflink template deferred), 0016 (slash-namespaced

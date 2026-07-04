@@ -32,7 +32,7 @@ import time
 
 import click
 
-from .. import execrun, gh, git, identity, logcontext
+from .. import events, execrun, gh, git, identity, logcontext
 from ..spawn import backends, launch
 from ..tree.create import Tree, create, new_agent_hash
 from ..tree.layout import (
@@ -362,6 +362,18 @@ def run_subagent(
             role=role,
         )
 
+    # SPAWN-SEAM identity binding (ADR-0032 / LOG04-WS02): the spawn's own
+    # arguments ARE the worker's dev-cycle identity, so `epic`/`ws`/`role` bind
+    # here — the moment they are known and validated — and every subsequent
+    # record of this spawn carries them. `agent` (the spawn id) binds in the
+    # launch tails once minted. `env_export` at the launch then threads ALL
+    # bound keys into the Run's environment (`SHIPIT_LOG_CTX_*`), so every
+    # shipit command the worker runs correlates to its Work Stream with zero
+    # worker cooperation — retiring the never-set `SHIPIT_EPIC` marker as an
+    # identity channel. A standalone-issue spawn has no epic/ws; `bind` drops
+    # the `None` halves (present-when-bound, absent-not-null).
+    logcontext.bind(epic=epic, ws=ws, role=role)
+
     root = git.repo_root()
     if not root:
         return _fail("not inside a git checkout")
@@ -534,13 +546,16 @@ def _launch_write(
     # targets a branch name (origin/E/umbrella -> E/umbrella, origin/main -> main). The
     # Tree path is passed as `cwd`: most backends root via the process cwd and ignore it,
     # but `agy` ignores its process cwd and is rooted ONLY by `--add-dir <Tree>`.
-    # SPAWN SEAM for the domain-key context (ADR-0029): the Tree's identity binds
-    # here — the coordinator's records from this point carry `tree` (its path, the
-    # same identity the SPAWNED payload reports) — and `env_export` below threads
-    # every bound key (tree, plus the repo bound at the CLI entry) into the Run's
-    # environment, so each `shipit` command the Run executes inside the Tree
-    # rebinds them at its own logging setup and its records correlate back here.
-    logcontext.bind(tree=tree.path)
+    # SPAWN SEAM for the domain-key context (ADR-0029/0032): the Tree's identity
+    # binds here — the coordinator's records from this point carry `tree` (its
+    # path, the same identity the SPAWNED payload reports) — alongside `agent`,
+    # the spawn id (the Tree dir's disambiguating hash doubles as the Run's
+    # identity, so `shipit logs --agent <id>` and the Tree leaf name agree).
+    # `env_export` below threads every bound key (tree/agent here; repo from the
+    # CLI entry; epic/ws/role from the spawn args) into the Run's environment,
+    # so each `shipit` command the Run executes inside the Tree rebinds them at
+    # its own logging setup and its records correlate back here.
+    logcontext.bind(tree=tree.path, agent=spec.agent_hash)
     # Tree-assignment milestone (ADR-0029): the Run has a home. Tree birth is the
     # slowest, most failure-prone leg of a spawn (clone + provision), so the
     # duration is the meaningful one; the `tree` domain key bound above rides this
@@ -563,11 +578,16 @@ def _launch_write(
     # to its OWN env (else they'd resolve the coordinator's env — docs/dev/pixi.lex §7).
     # `scrub_tree_env` drops leaked PIXI_*/CONDA_* on top of the adapter's auth scrub.
     cmd = launch.pixi_wrap(adapter.build_command(task, role, cwd=tree.path), tree.path)
-    # Launch milestone (ADR-0029). Argv-level detail (the full command, cwd) is
-    # deliberately NOT duplicated here: the launch is one Exec through the runner,
-    # whose DEBUG record already carries the redacted argv, cwd, rc, and
-    # duration_ms (ADR-0028).
-    logger.info(
+    # Launch milestone (ADR-0029) — and the `agent.spawned` dev-cycle event
+    # (ADR-0032, verb-witnessed): the spawn seam is the verb performing the
+    # milestone, and the bound keys (epic/ws/agent/role/tree/repo) ride in via
+    # the pipeline. Argv-level detail (the full command, cwd) is deliberately
+    # NOT duplicated here: the launch is one Exec through the runner, whose
+    # DEBUG record already carries the redacted argv, cwd, rc, and duration_ms
+    # (ADR-0028).
+    events.emit(
+        logger,
+        "agent.spawned",
         "spawn subagent: launching %s child (role=%s) in the tree",
         adapter.name,
         role,
@@ -599,9 +619,14 @@ def _launch_write(
             rc=result.returncode,
             duration_ms=child_ms,
         )
-    # Child-outcome milestone (ADR-0019 §6): the process exit IS the Run's
-    # lifecycle end, so the rc and the Run's wall-clock are the record.
-    logger.info(
+    # Child-outcome milestone (ADR-0019 §6) — the `agent.done` dev-cycle event:
+    # the process exit IS the Run's lifecycle end, so the rc and the Run's
+    # wall-clock are the record. A nonzero child stays an UNTAGGED failure
+    # (the `_fail` ERROR above): the milestone trail records lifecycle ends the
+    # cycle can build on, mirroring the dropped-request precedent (WS01).
+    events.emit(
+        logger,
+        "agent.done",
         "spawn subagent: %s child exited 0 in %dms",
         adapter.name,
         child_ms,
@@ -704,10 +729,13 @@ def _launch_reviewer(
             duration_ms=_elapsed_ms(create_start),
         )
 
-    # SPAWN SEAM (ADR-0029), mirroring the write path: the shared read-only Tree's
-    # identity binds here, and `env_export` at the launch threads the bound keys
-    # into the Reviewer Run's environment so its `shipit`/`gh` activity correlates.
-    logcontext.bind(tree=tree.path)
+    # SPAWN SEAM (ADR-0029/0032), mirroring the write path: the shared read-only
+    # Tree's identity binds here, plus a freshly-minted `agent` spawn id — the
+    # Tree is SHARED per (repo, branch) so it carries no per-Run hash of its
+    # own, but the Run still needs its own identity for `shipit logs --agent`.
+    # `env_export` at the launch threads the bound keys into the Reviewer Run's
+    # environment so its `shipit`/`gh` activity correlates.
+    logcontext.bind(tree=tree.path, agent=new_agent_hash())
     create_ms = _elapsed_ms(create_start)
     logger.info(
         "spawn subagent: read-only review tree assigned on %s in %dms",
@@ -734,9 +762,12 @@ def _launch_reviewer(
         ),
         tree.path,
     )
-    # Launch milestone, mirroring the write path; argv detail rides the Exec
-    # runner's DEBUG record (ADR-0028), not a duplicate here.
-    logger.info(
+    # Launch milestone — the `agent.spawned` event, mirroring the write path;
+    # argv detail rides the Exec runner's DEBUG record (ADR-0028), not a
+    # duplicate here.
+    events.emit(
+        logger,
+        "agent.spawned",
         "spawn subagent: launching %s child (role=%s) in the tree",
         adapter.name,
         REVIEWER_ROLE,
@@ -764,9 +795,13 @@ def _launch_reviewer(
             rc=result.returncode,
             duration_ms=child_ms,
         )
-    # Child-outcome milestone: a reviewer reports out-of-band (the review lands in
-    # the existing PR), so its clean exit IS the success signal.
-    logger.info(
+    # Child-outcome milestone — the `agent.done` event: a reviewer reports
+    # out-of-band (the review lands in the existing PR), so its clean exit IS
+    # the success signal. A nonzero child stays an untagged `_fail` ERROR,
+    # exactly as on the write path.
+    events.emit(
+        logger,
+        "agent.done",
         "spawn subagent: %s child exited 0 in %dms",
         adapter.name,
         child_ms,

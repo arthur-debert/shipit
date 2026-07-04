@@ -110,3 +110,52 @@ def test_evaluate_return_value_is_unchanged_by_logging(context):
 
     ctx = context("ready_checks_green")
     assert evaluate(ctx).to_dict() == _evaluate(ctx).to_dict()
+
+
+def test_degraded_reviewer_is_tagged_as_a_dev_cycle_event(caplog):
+    """The settled non-success IS the `review.degraded` event (LOG04-WS02 /
+    ADR-0032): one tagged INFO record per degraded reviewer, first sight per
+    process — the aggregate WARNING above stays loud on EVERY evaluation."""
+    from shipit import events
+
+    ctx = load_context("local_reviewer_otherwise_ready")
+    ctx.review_funnel = [
+        ReviewFunnelCheck(
+            reviewer="codex-local",
+            status="COMPLETED",
+            conclusion="FAILURE",
+            started_at="2026-01-01T00:25:00Z",
+        )
+    ]
+    required = [by_name("copilot"), by_name("codex")]
+    with caplog.at_level(logging.INFO, logger="shipit.prstate"):
+        status = evaluate(ctx, required=required)
+    tagged = [
+        r
+        for r in caplog.records
+        if getattr(r, events.EXTRA_KEY, None) == "review.degraded"
+    ]
+    assert {(r.reviewer, r.reason) for r in tagged} == set(status.degraded.items())
+    assert all(r.levelno == logging.INFO and r.pr == status.pr for r in tagged)
+
+    # A re-evaluation re-reads the same settled outcome: the WARNING repeats
+    # (loud on every status), the milestone does not.
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="shipit.prstate"):
+        evaluate(ctx, required=required)
+    assert not [
+        r
+        for r in caplog.records
+        if getattr(r, events.EXTRA_KEY, None) == "review.degraded"
+    ]
+    assert [r for r in caplog.records if r.levelno == logging.WARNING]
+
+
+def test_clean_snapshot_emits_no_observational_events(context, caplog):
+    """A clean, never-reviewed-head-free snapshot tags nothing: no round, no
+    breaker, no degradation — events fire on witnessed milestones only."""
+    from shipit import events
+
+    with caplog.at_level(logging.INFO, logger="shipit.prstate"):
+        evaluate(context("copilot_never_requested"))
+    assert not [r for r in caplog.records if getattr(r, events.EXTRA_KEY, None)]

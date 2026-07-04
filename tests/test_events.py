@@ -145,3 +145,57 @@ def test_the_event_field_is_reserved_for_the_registered_name(tmp_path):
 
     (record,) = _records(tmp_path)
     assert record["event"] == "review.requested"
+
+
+# --- emit_once: first sight per process (LOG04-WS02) ------------------------
+
+
+def test_emit_once_dedupes_on_the_identity_key(tmp_path):
+    """The first sighting of ``(name, *key)`` emits the ordinary tagged record;
+    a re-sighting in the same process leaves NO record at all — re-reading known
+    state is not a milestone. A DIFFERENT key is a different milestone."""
+    logsetup.configure_logging(env={}, repo=REPO, base_dir=tmp_path)
+    log = logging.getLogger("shipit.prstate")
+
+    assert events.emit_once(
+        log, "review.received", ("acme/widget", 368, 11), "review received"
+    )
+    assert not events.emit_once(
+        log, "review.received", ("acme/widget", 368, 11), "review received"
+    )
+    assert events.emit_once(
+        log, "review.received", ("acme/widget", 368, 12), "review received"
+    )
+
+    records = _records(tmp_path)
+    assert len(records) == 2
+    assert {r["event"] for r in records} == {"review.received"}
+
+
+def test_emit_once_keys_are_scoped_per_event_name(tmp_path):
+    """The registry keys on ``(name, *key)``: one identity tuple sighted under
+    two event names is two milestones, never a cross-name suppression."""
+    logsetup.configure_logging(env={}, repo=REPO, base_dir=tmp_path)
+    log = logging.getLogger("shipit.prstate")
+
+    assert events.emit_once(log, "round.detected", ("acme/widget", 368), "round")
+    assert events.emit_once(log, "breaker.fired", ("acme/widget", 368), "breaker")
+    assert [r["event"] for r in _records(tmp_path)] == [
+        "round.detected",
+        "breaker.fired",
+    ]
+
+
+def test_emit_once_unknown_name_raises_and_never_poisons_the_registry(tmp_path):
+    """The closed-vocabulary guard runs BEFORE the seen-set: a typo raises and
+    a later correct emission with the same key still fires."""
+    logsetup.configure_logging(env={}, repo=REPO, base_dir=tmp_path)
+    log = logging.getLogger("shipit.prstate")
+
+    with pytest.raises(ValueError, match="unknown dev-cycle event"):
+        events.emit_once(log, "review.recieved", ("acme/widget", 368, 11), "typo")
+    assert _records(tmp_path) == []
+    assert events.emit_once(
+        log, "review.received", ("acme/widget", 368, 11), "review received"
+    )
+    assert len(_records(tmp_path)) == 1

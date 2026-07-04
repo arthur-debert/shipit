@@ -19,18 +19,33 @@ to the subsystem that witnessed the milestone — and the bound domain keys land
 on it through the one pipeline like any other record, so an event is exactly as
 correlated as the moment it was witnessed: present-when-bound, absent keys stay
 absent.
+
+:func:`emit_once` is the FIRST-SIGHT variant for *observational* milestones —
+ones the engine can only witness by re-reading GitHub state it did not itself
+change (a landed review at gather, a reviewed head, a fired breaker). A verb
+like ``pr next`` evaluates the same snapshot shape several times in one
+invocation (gather → act → the guarded flip's re-gather), so a plain
+:func:`emit` at those seams would tag the same milestone two or three times per
+run. :func:`emit_once` dedupes on a caller-supplied identity key for the LIFE
+OF THE PROCESS — exactly the scope shipit state has (ADR-0029/0032 reject any
+side store or index): one CLI invocation witnesses each milestone at most once,
+while a later invocation legitimately re-witnesses what it re-reads. Every such
+event carries its identifying fields flat on the record (``review_id``, the
+round's head sha, the breaker name), so a reader that wants cross-invocation
+uniqueness can dedupe on data, not on record count.
 """
 
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Hashable, Mapping
 
 #: The closed dev-cycle event vocabulary (ADR-0032; PRD
 #: ``docs/prd/log04-dev-cycle-event-log.md``). Dot-namespaced
-#: ``<noun>.<milestone>`` names; the full starting set is registered up front
-#: even while only ``review.requested`` is emitted (LOG04-WS01) — the registry
-#: is additive, and registering is not emitting.
+#: ``<noun>.<milestone>`` names; the verb-witnessed tier emits them all as of
+#: LOG04-WS02 (the hook- and skill-scripted names — ``commit.created``, the
+#: planning family, ``session.intent`` — arrive with their tiers) — the
+#: registry is additive, and registering is not emitting.
 #: The flat field a dev-cycle event's name lands under on the durable JSONL
 #: record — what the reader (``shipit logs --events``) selects on.
 RECORD_KEY = "event"
@@ -126,3 +141,45 @@ def emit(
         k: v for k, v in dict(extra or {}).items() if k not in (RECORD_KEY, EXTRA_KEY)
     }
     log.info(msg, *args, extra={**fields, EXTRA_KEY: name})
+
+
+#: The process-lifetime first-sight registry behind :func:`emit_once`:
+#: ``(name, *key)`` tuples already emitted by THIS process. Never persisted —
+#: cross-process dedup would need the side store ADR-0029/0032 reject; a fresh
+#: invocation re-witnesses what it re-reads, carrying the identity fields that
+#: let a reader dedupe on data. Tests reset it via the conftest fixture.
+_seen: set[tuple[Hashable, ...]] = set()
+
+
+def emit_once(
+    log: logging.Logger,
+    name: str,
+    key: tuple[Hashable, ...],
+    msg: str,
+    *args: object,
+    extra: Mapping[str, object] | None = None,
+) -> bool:
+    """:func:`emit` the event only on FIRST SIGHT of ``(name, *key)`` this process.
+
+    ``key`` is the milestone's identity — the tuple that makes two sightings the
+    SAME milestone (``(slug, pr, review_id)`` for a landed review; ``(slug, pr,
+    head_sha)`` for a reviewed head). Include the repo slug where the other
+    halves are only repo-unique: one process can touch several repos. Returns
+    whether the event was emitted, so an emitting seam can assert/act on the
+    outcome; a suppressed re-sighting leaves NO record at all (not even DEBUG —
+    re-reading known state is not a milestone). Same closed-vocabulary guard as
+    :func:`emit` (an unregistered ``name`` raises before the registry is
+    touched, so a typo never poisons the seen-set either).
+    """
+    if name not in EVENT_NAMES:
+        raise ValueError(
+            f"unknown dev-cycle event {name!r}; the closed vocabulary is "
+            f"{sorted(EVENT_NAMES)} (ADR-0032) — register a new name in "
+            "shipit.events.EVENT_NAMES before emitting it"
+        )
+    marker = (name, *key)
+    if marker in _seen:
+        return False
+    _seen.add(marker)
+    emit(log, name, msg, *args, extra=extra)
+    return True
