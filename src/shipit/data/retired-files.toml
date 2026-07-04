@@ -1,0 +1,26 @@
+# Retired files — paths shipit used to distribute (or release-sync-era debris)
+# that must no longer exist in a consumer. `shipit install` runs a retired-files
+# pass over these entries (docs/prd/rvw01-sole-requester.md, ADR-0031): a file
+# whose content matches one of the known pristine hashes is deleted; a file whose
+# content differs from EVERY known version is kept with a warning (never destroy
+# local edits — the same safety philosophy as the [managed] pristine-hash
+# manifest); an absent file is a no-op.
+#
+# The manifest is data: retiring the next file is an entry here, not code.
+# Each `pristine` list carries every known historical version's sha256, so a
+# consumer stuck on an older copy still gets the clean delete.
+
+[[retired]]
+# The Copilot caller workflow. ADR-0031 (engine as sole requester) kills the
+# workflow trigger: the PR state engine requests Copilot through the roster,
+# so the `pull_request: opened` caller is a second requester and must go.
+# Hashes are every version from arthur-debert/shipit git history:
+#   1858052… — initial onboarding (#2)
+#   55845f1… — checks/enforcement vocabulary rework (#96)
+#   36624e3… — de-duplicated "not a required check" comment
+path = ".github/workflows/copilot-review.yml"
+pristine = [
+  "sha256:1858052684f3269940d5405dca04ba60656d6c5839b2bdd4b79a499376c25eda",
+  "sha256:55845f189c558f32aff8806fd046b77a39f0185b56c24b33a38284f142625558",
+  "sha256:36624e36336157699b9de75aa103c09600272a3653281fdf6f5b1550e114488d",
+]
