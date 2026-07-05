@@ -15,8 +15,11 @@ from pathlib import Path
 import pytest
 
 from shipit.harness.prompts import (
+    BRIEF_ROLES,
+    MANDATORY_BRIEF_SLOTS,
     SUBAGENT_ROLES,
     RoleDefs,
+    load_brief_template,
     load_coordinator_slice,
     load_role_defs,
     regenerate,
@@ -139,6 +142,53 @@ def test_no_shipped_surface_says_fresh_shepherd_per_round():
         lowered = text.lower()
         assert "fresh shepherd" not in lowered
         assert "one review round" not in lowered
+
+
+# --- brief templates (RVW02 WS04): the coordinator-filled task layer ---------
+
+
+@pytest.mark.parametrize("role", list(BRIEF_ROLES))
+def test_brief_template_carries_every_mandatory_slot(role):
+    """The four mandatory slots — issue ref, verify commands, governing docs,
+    decision boundaries — ship in EVERY brief template; an edit that drops one
+    fails here, so a coordinator can never be handed a slotless template."""
+    template = load_brief_template(role)
+    for slot in MANDATORY_BRIEF_SLOTS:
+        assert slot in template
+
+
+def test_shepherd_brief_also_names_its_pr_slot():
+    """A shepherd is briefed cold with the PR (ADR-0035), so its template carries
+    the PR slot on top of the four mandatory ones."""
+    assert "{{pr}}" in load_brief_template(Role.SHEPHERD)
+
+
+@pytest.mark.parametrize("role", [r for r in Role if r not in BRIEF_ROLES])
+def test_roles_without_a_brief_template_are_refused(role):
+    """BRIEF_ROLES is a closed set (like the role registry): asking for any other
+    role's template is a loud ValueError, not a FileNotFoundError surprise."""
+    with pytest.raises(ValueError, match="no brief template"):
+        load_brief_template(role)
+
+
+def test_brief_slots_never_leak_into_a_composed_prompt_surface():
+    """The template is the coordinator-FILLED half: an unfilled ``{{slot}}``
+    placeholder must never compose into a role prompt or the union — the guard
+    against wiring the brief fragments into the prompt generator by accident."""
+    rendered = render(load_role_defs())
+    for text in [*rendered.role_prompts.values(), rendered.agents_union]:
+        for slot in MANDATORY_BRIEF_SLOTS:
+            assert slot not in text
+
+
+def test_roles_reference_their_brief_template():
+    """The anti-forget clause (issue #457): the coordinator's prompt documents the
+    expansion verb, and each briefed role names its own template — so a brief
+    missing a slot is flagged by the briefed agent, never silently absorbed."""
+    rendered = render(load_role_defs())
+    assert "shipit spawn brief" in rendered.role_prompts[Role.COORDINATOR]
+    assert "shipit spawn brief implementer" in rendered.role_prompts[Role.IMPLEMENTER]
+    assert "shipit spawn brief shepherd" in rendered.role_prompts[Role.SHEPHERD]
 
 
 # --- the committed derived surfaces (no drift from the source) ---------------

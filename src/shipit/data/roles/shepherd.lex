@@ -7,6 +7,15 @@ coordinator resumes you with a one-line brief when the next round lands. Your
 other boundaries stand: you never wait, never flip to ready, and never
 coordinate.
 
+Your round-1 brief follows the shepherd BRIEF TEMPLATE
+(`shipit spawn brief shepherd`): it must name the PR (with its Context note),
+its issue ref, the exact verify commands for each round's fixes (test suite,
+lint gate, role-relevant gotchas), the epic's governing docs (ADR/PRD list) to
+self-check each round's diff against BEFORE pushing, and the decision
+boundaries a review thread cannot re-open (those findings get a rationale
+reply, not a fix). If a mandatory slot is missing from your cold brief, FLAG
+the gap to the coordinator instead of guessing what it would have said.
+
 Your slice, each round:
 
 - On a resume, work from the PR, not from memory: the brief restates the engine's verdict for the new round, and you re-read the round's findings from the PR itself. Held context is a head start, never a substitute for the current state.

@@ -53,6 +53,27 @@ SUBAGENT_ROLES: tuple[Role, ...] = (
     Role.REVIEWER,
 )
 
+#: The roles whose spawn/cold briefs have a bundled BRIEF TEMPLATE (RVW02): the
+#: task-specific half the coordinator fills at spawn/brief time — the general
+#: half is the role prompt composed below. Authored as `<role>-brief.lex` beside
+#: the role fragments (mirrored to `.md` by the same regen pipeline), read back
+#: via :func:`load_brief_template`, printed by `shipit spawn brief <role>`.
+BRIEF_ROLES: tuple[Role, ...] = (
+    Role.IMPLEMENTER,
+    Role.SHEPHERD,
+)
+
+#: The MANDATORY brief slots — literal `{{slot}}` placeholders the coordinator
+#: replaces (plain textual fill; the pipeline carries no template engine and
+#: does not need one). Every brief template ships all four; the test suite pins
+#: that, so a template edit cannot silently drop a slot.
+MANDATORY_BRIEF_SLOTS: tuple[str, ...] = (
+    "{{issue}}",
+    "{{verify-commands}}",
+    "{{governing-docs}}",
+    "{{decision-boundaries}}",
+)
+
 #: Section headings the generator injects so the composed markdown is well-formed
 #: regardless of the fragments (the fragments themselves are heading-free prose +
 #: lists). Kept as constants because the deny-reason / agent-def assertions key
@@ -221,6 +242,24 @@ def load_role_defs() -> RoleDefs:
         role_map=_read_fragment("_rolemap.md"),
         overlays={role: _read_fragment(f"{role.value}.md") for role in Role},
     )
+
+
+def load_brief_template(role: Role) -> str:
+    """Read the bundled BRIEF TEMPLATE for ``role``. BOUNDARY.
+
+    The task-specific half of a spawn/cold brief (RVW02): the coordinator prints
+    it (``shipit spawn brief <role>``), fills every ``{{slot}}``
+    (:data:`MANDATORY_BRIEF_SLOTS`), and hands the expanded skeleton to the Run.
+    Reads the fragment's rendered ``.md`` mirror like every other fragment, so
+    the template carries no lex markup. Only :data:`BRIEF_ROLES` have one —
+    any other role is a :class:`ValueError` (a closed set, like the registry).
+    """
+    if role not in BRIEF_ROLES:
+        raise ValueError(
+            f"no brief template for role {role.value!r} — "
+            f"briefed roles: {', '.join(r.value for r in BRIEF_ROLES)}"
+        )
+    return _read_fragment(f"{role.value}-brief.md")
 
 
 def _strip_generated_comment(markdown: str) -> str:

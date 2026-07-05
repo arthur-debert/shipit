@@ -1,0 +1,17 @@
+Implementer brief template
+
+The task-specific half of an implementer spawn brief (RVW02). The general half
+— the dev cycle and the role's slice — is the role prompt the agent-def already
+loads; this template carries ONLY what varies per task. The coordinator expands
+it at spawn/brief time: print it with `shipit spawn brief implementer`, replace
+every `{{slot}}` with the task's facts, and hand the expanded skeleton to the
+Run as its brief. Every slot is MANDATORY — never brief a Run with an unfilled
+or dropped slot; the implementer role prompt tells the Run to flag a missing
+slot rather than guess around it.
+
+Brief skeleton — fill the slots, hand over everything below:
+
+- Issue: {{issue}} — the ONE issue this Run implements; the draft PR body links it (`for #N` / `closes #N`).
+- Verify commands: {{verify-commands}} — the EXACT commands that prove the change good BEFORE the PR opens: the manual verify is the repo's test suite (in shipit: `pixi run test`), plus every role-relevant gotcha spelled out (in shipit: the lint gate — `pixi run -e lint lint`, the same command CI runs — is exercised by the commit/push git hooks, NOT run as a separate verify step; run `shipit lint --fix` manually only when you expect formatting damage, then let the hook be the check; a `.lex` edit under `src/shipit/data/roles/` regenerates its derived surfaces via `pixi run regen-roles`, and the mirrors commit WITH the source). Name them exactly — a Run must never have to guess how to verify.
+- Governing docs: {{governing-docs}} — the epic's governing ADR/PRD list this work answers to; the Run self-checks its diff against each named doc BEFORE opening the PR and cites that self-check in the PR's Context note.
+- Decision boundaries: {{decision-boundaries}} — what is already decided and must NOT be re-litigated in this Run (the ADR-fixed architecture, scope cuts, naming), and what is explicitly out of scope / not to "fix"; the PR's Context note restates these so reviewers do not re-open them.
