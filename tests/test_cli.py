@@ -85,3 +85,28 @@ def test_install_mode_flags_are_mutually_exclusive():
         result = CliRunner().invoke(cli.root, ["install", *pair, "."])
         assert result.exit_code == 2
         assert "mutually exclusive" in result.output
+
+
+def test_shipit_exec_override_emits_the_flow_event(monkeypatch):
+    # ADR-0033: an invocation running under the SHIPIT_EXEC override announces
+    # the pin bypass durably — the flow-log twin of the launcher's stderr line,
+    # emitted by the exec'd build itself at CLI entry.
+    calls: list[str] = []
+    monkeypatch.setattr(
+        cli.events, "emit", lambda log, name, msg, *a, **k: calls.append(name)
+    )
+    monkeypatch.setenv("SHIPIT_EXEC", "/builds/dev-shipit")
+    rc = cli.main(["log", "--help"])
+    assert rc == 0
+    assert calls == ["launcher.overridden"]
+
+
+def test_no_override_event_without_shipit_exec(monkeypatch):
+    calls: list[str] = []
+    monkeypatch.setattr(
+        cli.events, "emit", lambda log, name, msg, *a, **k: calls.append(name)
+    )
+    monkeypatch.delenv("SHIPIT_EXEC", raising=False)
+    rc = cli.main(["log", "--help"])
+    assert rc == 0
+    assert calls == []

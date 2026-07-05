@@ -70,6 +70,12 @@ EVENT_NAMES = frozenset(
         "tree.created",
         "agent.spawned",
         "agent.done",
+        # the pinned launcher's sanctioned dev override (ADR-0033): a shipit
+        # invocation running under SHIPIT_EXEC announces the bypass durably —
+        # the flow-log twin of the launcher's stderr line, emitted by the
+        # exec'd build itself at CLI entry (the bash launcher cannot write the
+        # JSONL record; the build it execs can).
+        "launcher.overridden",
         # local progress (hook-witnessed tier)
         "commit.created",
         # the review loop

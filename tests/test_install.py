@@ -26,6 +26,7 @@ import yaml
 
 from shipit import config, execrun, gh, git
 from shipit.execrun import ExecError
+from shipit.identity import Sha
 from shipit.install import apply as iapply
 from shipit.install import reconcile as irec
 from shipit.install import splice, units as iunits
@@ -467,74 +468,223 @@ def test_load_units_has_skills_agents_and_bootstrap():
     assert boot.executable is True
 
 
-def _write_launcher(dir_path: Path) -> Path:
-    """Write the MANAGED bin/shipit launcher (the shipped template) into dir_path/shipit."""
+# --------------------------------------------------------------------------
+# The pinned bin/shipit launcher (ADR-0033) — pin-resolve via uv, SHIPIT_EXEC
+# override, pinless refusal. The exec seam is FAKED: a shim `uv` (and shim
+# override targets) planted first on PATH record their argv instead of
+# resolving anything, so these run the REAL shipped bash against fakes.
+# --------------------------------------------------------------------------
+
+LAUNCHER_PIN = "c" * 40
+
+
+def _write_launcher_repo(tmp_path: Path, *, manifest: str | None) -> Path:
+    """A stand-in consumer repo: the MANAGED bin/shipit + an optional .shipit.toml.
+
+    Returns the launcher path (``<repo>/bin/shipit``). ``manifest=None`` writes
+    no ``.shipit.toml`` at all (the virgin-repo case).
+    """
+    repo = tmp_path / "consumer"
+    (repo / "bin").mkdir(parents=True)
     unit = next(u for u in iunits.load_units() if u.key == "bin/shipit")
-    binp = dir_path / "shipit"
-    binp.write_bytes(unit.content)
-    binp.chmod(binp.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
-    return binp
+    launcher = repo / "bin" / "shipit"
+    launcher.write_bytes(unit.content)
+    launcher.chmod(launcher.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+    if manifest is not None:
+        (repo / ".shipit.toml").write_text(manifest)
+    return launcher
 
 
-def _path_without_shipit() -> str:
-    """The real PATH minus any dir that already holds a `shipit` — so the launcher's
-    shebang tools (bash/env/realpath) are present but the ONLY `shipit` the test sees is
-    the one(s) it plants. Prevents the ambient pixi-env shipit from shadowing the guard."""
-    keep = [
-        d
-        for d in os.environ.get("PATH", "").split(os.pathsep)
-        if d and not (Path(d) / "shipit").exists()
-    ]
-    return os.pathsep.join(keep)
+def _shim(dir_path: Path, name: str, marker: str) -> Path:
+    """An executable shim that prints ``marker`` + its argv and exits 0."""
+    p = dir_path / name
+    p.write_text(f'#!/usr/bin/env bash\necho "{marker} $*"\n')
+    p.chmod(p.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+    return p
 
 
-def test_bootstrap_launcher_does_not_self_exec_when_its_dir_is_on_path(tmp_path: Path):
-    # Fork-bomb guard (codex/agy ERROR): with the launcher's OWN dir the only one on
-    # PATH, a bare `command -v shipit` resolves to the launcher itself — exec'ing it
-    # would loop forever. The launcher must detect the self-match, refuse to exec
-    # itself, and fail loud (exit 127). `os.defpath` supplies bash/env without a real
-    # `shipit`; the 10s timeout would trip (test failure) if it ever self-loops.
-    binhome = tmp_path / "bin"
-    binhome.mkdir()
-    launcher = _write_launcher(binhome)
-
-    proc = subprocess.run(
-        [str(launcher), "--version"],
-        env={"PATH": str(binhome) + os.pathsep + _path_without_shipit()},
-        capture_output=True,
-        text=True,
-        timeout=10,
+def _launcher_env(*prepend: Path) -> dict[str, str]:
+    """The launcher subprocess env: the given shim dirs first, the real PATH after
+    (bash/awk/dirname live there), and no ambient SHIPIT_EXEC leaking in."""
+    path = os.pathsep.join(
+        [str(d) for d in prepend] + [os.environ.get("PATH", os.defpath)]
     )
-    assert proc.returncode == 127
-    assert "only this in-repo launcher" in proc.stderr
+    return {"PATH": path}
 
 
-def test_bootstrap_launcher_execs_the_real_shipit_elsewhere_on_path(tmp_path: Path):
-    # Normal case preserved: with the launcher's dir first on PATH (a self-match it
-    # skips) and a REAL shipit later on PATH, the launcher execs the real one.
-    binhome = tmp_path / "bin"
-    binhome.mkdir()
-    _write_launcher(binhome)
-
-    realdir = tmp_path / "realbin"
-    realdir.mkdir()
-    real = realdir / "shipit"
-    real.write_text('#!/usr/bin/env bash\necho "REAL-SHIPIT-RAN $*"\n')
-    real.chmod(real.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+def test_launcher_execs_the_pin_via_uv_never_path(tmp_path: Path):
+    # The pin-resolve path (ADR-0033): the launcher reads [shipit].version and
+    # execs `uv tool run --from git+…@<pin> shipit <args>`. A `shipit` sitting
+    # FIRST on PATH must play no part — PATH is never consulted for the build.
+    launcher = _write_launcher_repo(
+        tmp_path, manifest=f'[shipit]\nversion = "{LAUNCHER_PIN}"\n\n[managed]\n'
+    )
+    shims = tmp_path / "shims"
+    shims.mkdir()
+    _shim(shims, "uv", "FAKE-UV-RAN")
+    _shim(shims, "shipit", "PATH-SHIPIT-RAN")  # must never run
 
     proc = subprocess.run(
-        [str(binhome / "shipit"), "arg1"],
-        env={
-            "PATH": os.pathsep.join(
-                [str(binhome), str(realdir), _path_without_shipit()]
-            )
-        },
+        [str(launcher), "pr", "status"],
+        env=_launcher_env(shims),
         capture_output=True,
         text=True,
         timeout=10,
     )
     assert proc.returncode == 0
-    assert "REAL-SHIPIT-RAN arg1" in proc.stdout
+    assert (
+        "FAKE-UV-RAN tool run --from "
+        f"git+https://github.com/arthur-debert/shipit@{LAUNCHER_PIN} "
+        "shipit pr status" in proc.stdout
+    )
+    assert "PATH-SHIPIT-RAN" not in proc.stdout
+
+
+def test_launcher_pinless_repo_fails_loud_toward_the_bootstrap(tmp_path: Path):
+    # No [shipit].version pin → exit 127 with the bootstrap instructions — and
+    # NEVER a PATH fallback, even with a `shipit` sitting right there (the old
+    # walk-PATH launcher's silent drift reintroduction, retired by ADR-0033).
+    launcher = _write_launcher_repo(
+        tmp_path, manifest='[secrets]\nGH_PAT = { env = "X" }\n'
+    )
+    shims = tmp_path / "shims"
+    shims.mkdir()
+    _shim(shims, "shipit", "PATH-SHIPIT-RAN")
+
+    proc = subprocess.run(
+        [str(launcher), "--version"],
+        env=_launcher_env(shims),
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert proc.returncode == 127
+    assert "no [shipit].version pin" in proc.stderr
+    assert "shipit install --pr" in proc.stderr
+    assert "PATH-SHIPIT-RAN" not in proc.stdout
+
+
+def test_launcher_missing_manifest_fails_loud_too(tmp_path: Path):
+    # The virgin-repo shape of pinless: no .shipit.toml at all — same loud 127.
+    launcher = _write_launcher_repo(tmp_path, manifest=None)
+    proc = subprocess.run(
+        [str(launcher), "--version"],
+        env=_launcher_env(),
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert proc.returncode == 127
+    assert "no [shipit].version pin" in proc.stderr
+
+
+def test_launcher_honors_and_announces_shipit_exec_override(tmp_path: Path):
+    # The one sanctioned override (ADR-0033): SHIPIT_EXEC=/path is exec'd instead
+    # of the pin — honored AND announced on stderr, never silent. uv must not run.
+    launcher = _write_launcher_repo(
+        tmp_path, manifest=f'[shipit]\nversion = "{LAUNCHER_PIN}"\n'
+    )
+    shims = tmp_path / "shims"
+    shims.mkdir()
+    _shim(shims, "uv", "FAKE-UV-RAN")  # must never run
+    dev_build = _shim(shims, "dev-shipit", "DEV-BUILD-RAN")
+
+    env = _launcher_env(shims)
+    env["SHIPIT_EXEC"] = str(dev_build)
+    proc = subprocess.run(
+        [str(launcher), "lint", "--fix"],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert proc.returncode == 0
+    assert "DEV-BUILD-RAN lint --fix" in proc.stdout
+    assert "FAKE-UV-RAN" not in proc.stdout
+    # The announcement: loud, on stderr, naming the override.
+    assert "SHIPIT_EXEC override" in proc.stderr
+    assert str(dev_build) in proc.stderr
+
+
+def test_launcher_refuses_a_self_pointing_shipit_exec(tmp_path: Path):
+    # The self-exec guard, preserved in the override: SHIPIT_EXEC pointing back
+    # at the launcher itself would exec(2)-loop forever — refused by inode
+    # comparison, loud, 127. The 10s timeout would trip if it ever looped.
+    launcher = _write_launcher_repo(
+        tmp_path, manifest=f'[shipit]\nversion = "{LAUNCHER_PIN}"\n'
+    )
+    env = _launcher_env()
+    env["SHIPIT_EXEC"] = str(launcher)
+    proc = subprocess.run(
+        [str(launcher), "--version"],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert proc.returncode == 127
+    assert "refusing the exec loop" in proc.stderr
+
+
+def test_launcher_missing_uv_fails_loud_with_instructions(tmp_path: Path):
+    # uv is a hard prerequisite wherever a pin resolves (ADR-0033): absent, the
+    # launcher exits 127 pointing at the uv install — never a PATH fallback.
+    launcher = _write_launcher_repo(
+        tmp_path, manifest=f'[shipit]\nversion = "{LAUNCHER_PIN}"\n'
+    )
+    # A PATH with the shell utilities but guaranteed no `uv`: copy the real PATH
+    # entries, skipping any dir that holds one.
+    keep = [
+        d
+        for d in os.environ.get("PATH", os.defpath).split(os.pathsep)
+        if d and not (Path(d) / "uv").exists()
+    ]
+    proc = subprocess.run(
+        [str(launcher), "--version"],
+        env={"PATH": os.pathsep.join(keep)},
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert proc.returncode == 127
+    assert "uv is not on PATH" in proc.stderr
+
+
+# --------------------------------------------------------------------------
+# The Shipit pin stamp (ADR-0033) — install stamps its OWN build's full sha
+# --------------------------------------------------------------------------
+
+
+def test_fresh_install_on_a_stock_consumer_stamps_a_full_sha_pin(tmp_path, monkeypatch):
+    # ADR-0033 acceptance: a fresh install on a synthetic STOCK consumer (an
+    # empty directory — no pixi.toml, no configs) stamps .shipit.toml
+    # [shipit].version with the FULL git sha of the running build (here the
+    # dev-checkout resolver), never the static package version that identifies
+    # nothing. And the re-install NOOPs — including the pin.
+    monkeypatch.setattr(iapply, "_activate_hooks", lambda root: _exec_result(0))
+    result = _apply(tmp_path)  # MODE_TREE: working-tree refresh, no git/gh
+    assert result.mode == iapply.MODE_TREE
+
+    pin = config.shipit_pin(tmp_path / ".shipit.toml")
+    assert pin is not None
+    Sha(pin)  # validates: a FULL sha, or this raises
+    assert pin != "0.0.1"
+
+    # Re-install NOOPs, pin included: the plan has nothing to do, so apply
+    # never runs and the stamped pin stays byte-identical.
+    assert _plan(tmp_path).nothing_to_do
+    assert config.shipit_pin(tmp_path / ".shipit.toml") == pin
+
+
+def test_install_fails_closed_when_the_build_identity_is_unresolvable(
+    tmp_path, monkeypatch
+):
+    # No direct_url record, no embed, no checkout → install REFUSES to stamp
+    # (InstallError), rather than minting a pin the launcher could never exec.
+    monkeypatch.setattr(iapply.buildid, "build_sha", lambda: None)
+    monkeypatch.setattr(iapply, "_activate_hooks", lambda root: _exec_result(0))
+    with pytest.raises(InstallError, match="own commit identity"):
+        _apply(tmp_path)
 
 
 # --------------------------------------------------------------------------
