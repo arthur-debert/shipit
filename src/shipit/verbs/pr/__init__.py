@@ -47,3 +47,6 @@ from . import classify, push_gate  # noqa: E402  (#423)
 
 pr.add_command(classify.cmd)
 pr.add_command(push_gate.cmd)
+from . import wait  # noqa: E402  (RVW02-WS01, ADR-0034)
+
+pr.add_command(wait.cmd)
