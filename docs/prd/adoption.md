@@ -90,7 +90,7 @@ every run; a goal reached while fighting the tooling is a failed adoption run.
 23. As the root coordinator in shipit, I want a survival prompt for myself and one for the in-consumer coordinator, so that both layers use the tooling correctly and friction bubbles up verbatim instead of being laundered into "done".
 24. As the in-consumer coordinator, I want my role framed as an instrument (adoption is testing the tooling on me), so that I stop and report friction rather than improvising around managed files.
 25. As the portfolio owner, I want five status tables in one tracking issue (pixi tasks × stack, local adoption × repo, CI workflows × stack, remote CI × repo, bird's-eye), so that fleet progress is legible at a glance and updated at every state change.
-26. As the portfolio owner, I want the bird's-eye table to double as the fleet manifest, seeded by a one-time sweep of the three owners, so that "the fleet" is an enumerated list rather than memory.
+26. As the portfolio owner, I want the fleet manifest to be `.shipit.toml`'s `[project.portfolio]` table (ADR-0033), seeded by a one-time sweep of the three owners, so that "the fleet" is an enumerated, version-controlled list rather than memory — the tracking issue's bird's-eye table is a human status view derived from it, never the authority.
 27. As a workflow author, I want actionlint as a lint Lang, so that workflow YAML errors are caught locally in milliseconds before any act run or push.
 28. As a workflow author, I want an act harness that runs one workflow/job locally under containers with crafted event payloads, so that iterating on CI does not require pushing to find out.
 29. As a workflow author, I want the act howto to state explicitly what act cannot verify (macOS/Windows runners, cross-workflow cascade, partial workflow_call, dispatch UX), so that local green is trusted only where valid.
@@ -132,10 +132,11 @@ every run; a goal reached while fighting the tooling is a failed adoption run.
   adding an entry, nothing downstream changes (ADR-0004/0007 shape). go and
   tauri-specific legs are deferred to the repos that force them (dodot,
   phos-app) during ADP01/ADP02.
-- **shipit-on-PATH is a documented story, not new machinery**: the pinned
-  auto-provision bootstrap stays out of scope (it belongs to the pixi
-  encapsulation step); ADP00 documents the one supported install path for
-  laptops and runners in the survival guide.
+- **The pinned `bin/shipit` launcher is a documented story, not new machinery**:
+  ADP00 documents the one supported install path for laptops and runners in the
+  survival guide — the managed launcher resolving `.shipit.toml`'s
+  `[shipit].version` pin via `uv tool run` (ADR-0033), NOT a pixi-dependency
+  bootstrap. The launcher mechanism itself lands in the pin-core work, not here.
 - **The local adoption bar is lint + test (+ build for compiled repos)**. No
   `run` task (not canon; per-repo optional), no local `release` task (arrives
   with ADP02's pixi encapsulation).
@@ -205,8 +206,9 @@ every run; a goal reached while fighting the tooling is a failed adoption run.
 
 ## Out of Scope
 
-- The pinned `bin/shipit` auto-provision bootstrap (stays with the pixi
-  encapsulation step; ADP00 only documents the supported PATH story).
+- Building the pinned `bin/shipit` launcher mechanism itself (the pin-core work
+  under ADR-0033, via `uv tool run` — not a pixi dependency); ADP00's docs pass
+  only documents the supported install path, it does not build the launcher.
 - Resolving self-install (`shipit install .`) — explicitly unresolved in
   ADR-0003 and unaffected here.
 - go and tauri-specific lint legs (deferred to the adopting repos that force

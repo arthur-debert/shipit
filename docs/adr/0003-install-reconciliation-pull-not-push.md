@@ -38,7 +38,7 @@ here.
   `[shipit].version` pin and execs that build via `uv tool run` (pin-wins). The
   pin also did NOT land as a pixi dependency; "Step 5" as a distinct step is
   retired. The exit-127 fail-loud-toward-bootstrap posture is the one part that
-  survives, now for a *pinless* repo.**]
+  survives, now for a *pinless* repo.]
 - **AGENTS.md block markers + block-hashing.** The managed region is fenced by
   `BLOCK_OPEN`/`BLOCK_CLOSE` (`install.py:46-47`:
   `<!-- Managed by shipit; do not edit. Regenerate via shipit install. -->` …

@@ -120,7 +120,7 @@ The questions this PRD originally left open are now resolved and captured in
   build via `uv tool run`, NOT as a pinned `pixi` dependency. The pixi-dependency
   plan was considered and rejected (it duplicates the pin into `pixi.toml` /
   `pixi.lock` — a second source that can disagree — and is unusable by pre-env
-  verbs like install/gh-setup); "Step 5" as a distinct step is retired.**]
+  verbs like install/gh-setup); "Step 5" as a distinct step is retired.]
 - **block marker + block-hashing** — `<!-- Managed by shipit; do not edit. … -->`
   / `<!-- End shipit-managed block. -->`, hashing the block inner content only.
 
