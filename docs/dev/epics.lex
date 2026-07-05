@@ -73,6 +73,15 @@ dependencies.
     into `main`. The user's approval gate is the umbrella PR (§6), not the
     individual workstreams.
 
+    A merge into the epic branch deterministically conflicts every remaining
+    open WS PR touching a shared additive seam (a registry map, an error
+    table) — that consequence needs no discovery. Immediately after each
+    intra-epic merge, the coordinator re-checks every still-open WS PR
+    (`shipit pr status`) and dispatches the re-merges in the same action,
+    rather than waiting to be woken; reviewer waits are never left unwatched —
+    `shipit pr wait` (ADR-0034) is the blocking watch (CLI02 retro: an 8-minute
+    dead gap between a merge and the resulting conflict being handled).
+
 4. Convergence — clearing the fallouts
 
     Once the initial workstreams are merged into the epic branch, the
@@ -86,6 +95,16 @@ dependencies.
     epic: something that surfaced as obviously part of the feature -> do it now,
     in the convergence workstream; a related-but-separate feature -> leave it as
     a filed issue.
+
+    Track defect CLASSES, not just defects. After roughly two same-class
+    fixes, the coordinator stops and proposes a first-principles regroup —
+    what the operation does, what it needs, what the consumer sees — instead
+    of the next point fix: one decomposition beats N reactive workstreams
+    (ADP00 retro; the regroup there became ADR-0033 and resolved the whole
+    defect family the point fixes were gating). Every convergence workstream
+    includes a root-cause second pass, and the coordinator volunteers
+    burn-down / are-we-converging assessments at milestones without being
+    asked.
 
 5. Documentation pass
 
@@ -109,3 +128,21 @@ dependencies.
     `cut` command yet — they arrive with the Workflows epic;
     see [./workflows.lex]. Until then there is no changelog-fragment step in
     a PR and no release phase here.
+
+7. Session memory dies with the Tree — promote learnings before wrapping up
+
+    A coordinator session runs in an ephemeral session Tree (§1), and session
+    auto-memory is keyed to the working-directory PATH
+    (`~/.claude/projects/<path-slug>/memory/`). When the ephemeral tree is
+    gc'd, memories written there are orphaned: a future session runs in a
+    different tree, gets a different path slug, and never loads them.
+    Confirmed live in the ADP00 retro — the epic's own feedback memory was
+    unreachable to every successor session.
+
+    Durable learnings must therefore be promoted INTO THE REPO before a
+    session ends. The coordinator role carries the end-of-epic /
+    end-of-session promotion clause: a process rule goes to the relevant role
+    .lex (then `pixi run regen-roles`) or docs/dev/; a decision to an ADR;
+    vocabulary to CONTEXT.md; an open investigation to a tracker issue.
+    Session memory is a scratchpad for the session that wrote it, never an
+    archive.
