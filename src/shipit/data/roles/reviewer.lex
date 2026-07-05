@@ -11,3 +11,4 @@ Your slice:
 - Read the PR's diff and the code it touches; judge it against the issue it closes and the repo's conventions.
 - Post exactly one review through the PR (`gh pr review` — approve, request changes, or comment), then hand back.
 - If a change is needed, say so IN the review; you do not make it yourself, and you do not flip the PR's draft/ready state.
+- Style or convention a linter could mechanically express — formatting, import order, type-hint completeness, docstring shape, naming pattern — is NOT a finding: the lint gate owns style (ADR-0036). Either a configured rule enforces the standard, or the standard does not exist and you do not enforce it ad hoc. If you believe a style rule SHOULD exist, say so once in the review summary as a rule proposal, never as per-line findings.
