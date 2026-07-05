@@ -114,7 +114,13 @@ The questions this PRD originally left open are now resolved and captured in
 `docs/adr/0003-install-reconciliation-pull-not-push.md`:
 
 - **bootstrap** = the `bin/shipit` minimal launcher, managed as a whole-file unit;
-  the pinned-version pixi auto-provision is deferred to Step 5.
+  the pinned-version pixi auto-provision is deferred to Step 5. **[Superseded by
+  ADR-0033 (ADP00):** the pin mechanism landed differently — `bin/shipit`
+  resolves `.shipit.toml`'s `[shipit].version` (a full git sha) and execs that
+  build via `uv tool run`, NOT as a pinned `pixi` dependency. The pixi-dependency
+  plan was considered and rejected (it duplicates the pin into `pixi.toml` /
+  `pixi.lock` — a second source that can disagree — and is unusable by pre-env
+  verbs like install/gh-setup); "Step 5" as a distinct step is retired.]
 - **block marker + block-hashing** — `<!-- Managed by shipit; do not edit. … -->`
   / `<!-- End shipit-managed block. -->`, hashing the block inner content only.
 
