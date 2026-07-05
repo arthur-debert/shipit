@@ -149,6 +149,35 @@ def test_manifest_check_solves_the_lint_env(staged):
     assert seen["argv"] == ["pixi", "install", "--environment", "lint"]
 
 
+def test_manifest_check_solves_under_a_scrubbed_env(staged, monkeypatch):
+    # A parent dev session's leaked project pointer must not reach the solve:
+    # self-cert hands pixi a scrubbed, complete child env (replace_env), so the
+    # lint-env solve targets the consumer checkout, never the parent project.
+    monkeypatch.setenv("PIXI_PROJECT_MANIFEST", "/parent/pixi.toml")
+    seen = {}
+
+    def runner(argv, **kw):
+        seen.update(kw)
+        return _exec_ok(argv)
+
+    selfcert._check_manifest(staged, runner)
+    assert seen["replace_env"] is True
+    assert "PIXI_PROJECT_MANIFEST" not in seen["env"]
+
+
+def test_delivered_lint_scrubs_the_child_env(staged, monkeypatch):
+    monkeypatch.setenv("PIXI_PROJECT_MANIFEST", "/parent/pixi.toml")
+    seen = {}
+
+    def runner(argv, **kw):
+        seen.update(kw)
+        return _exec_ok(argv)
+
+    selfcert._check_delivered_lint(staged, _plan_with_writes(staged), runner)
+    assert seen["replace_env"] is True
+    assert "PIXI_PROJECT_MANIFEST" not in seen["env"]
+
+
 def test_manifest_check_fails_on_a_broken_stamped_config(staged):
     (staged / config.CONFIG_NAME).write_text("not = valid = toml\n")
     check = selfcert._check_manifest(staged, lambda argv, **kw: _exec_ok(argv))

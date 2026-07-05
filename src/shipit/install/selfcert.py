@@ -117,12 +117,25 @@ def _lint_env_run_tool(root: Path, runner):
     """A ``shipit lint`` tool runner that executes each tool through the managed
     lint env (``pixi run --environment lint``) — the exact toolchain install
     just delivered and solved, never whatever happens to be on install's PATH.
+
+    The child runs under a SCRUBBED environment (:func:`pixienv.scrub_env` +
+    ``replace_env``): a parent dev session's leaked ``PIXI_*``/Conda activation
+    pointers must not bind these tool subprocesses to a different project than
+    the consumer checkout install is certifying — the same leak class every
+    Tree/provisioning scrub path closes. The timeout stays pixi's long-runner
+    bound (:data:`pixienv.INSTALL_TIMEOUT`): a ``pixi run``'s worst case is a
+    first activation re-solving the env (provisioning-shaped work), which is
+    exactly why the pixi-run seam takes that bound rather than the bare-tool
+    :data:`~shipit.verbs.lint.CHECK_TIMEOUT`.
     """
+    scrubbed = pixienv.scrub_env(os.environ)
 
     def run_tool(binary: str, args: list[str], cwd: Path) -> execrun.ExecResult:
         return runner(
             pixienv.run_argv([binary, *args], root, environment=LINT_ENV),
             cwd=str(cwd),
+            env=scrubbed,
+            replace_env=True,
             check=False,
             timeout=pixienv.INSTALL_TIMEOUT,
         )
@@ -155,7 +168,12 @@ def _check_manifest(root: Path, runner) -> CertCheck:
     if not (root / PIXI_FILE).is_file():
         return CertCheck(CHECK_MANIFEST, False, f"no {PIXI_FILE} after the writes")
     try:
-        pixienv.install(root, environment=LINT_ENV, runner=runner)
+        pixienv.install(
+            root,
+            environment=LINT_ENV,
+            env=pixienv.scrub_env(os.environ),
+            runner=runner,
+        )
     except execrun.ExecError as exc:
         return CertCheck(
             CHECK_MANIFEST,
