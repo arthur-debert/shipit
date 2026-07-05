@@ -11,9 +11,10 @@ import io
 import json
 
 import pytest
+
 from shipit import git
-from shipit.identity import Sha
 from shipit.harness.eval import store
+from shipit.identity import Sha
 from shipit.verbs.hook.eval import run
 
 

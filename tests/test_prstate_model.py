@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from shipit.identity import Sha
-from shipit.prstate.model import readiness_view, Review, ReviewComment, Thread
+from shipit.prstate.model import Review, ReviewComment, Thread, readiness_view
 
 HEAD = Sha("beef" * 10)
 STALE = Sha("dead" * 10)

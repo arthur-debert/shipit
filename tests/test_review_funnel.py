@@ -33,12 +33,12 @@ import logging
 import pytest
 
 from shipit.agent import backend as agent_backend
+from shipit.execrun import ExecError
 from shipit.identity import repo_from_slug
 from shipit.pr import PrId
 from shipit.review import service
 from shipit.review.backends.base import BackendError
 from shipit.review.diff import ReviewView, review_view
-from shipit.execrun import ExecError
 
 # The typed PR target (CLI01-WS02 / ADR-0030): the detach parent and child both
 # take a PrId — the repo rides on the identity, never resolved ambiently.

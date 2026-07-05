@@ -18,7 +18,7 @@ milestones render (prior art: ``test_logevent``'s pipeline tests,
 from __future__ import annotations
 
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -135,7 +135,7 @@ def test_planning_leg_dry_run_renders_in_the_flow_view(tmp_path, capsys):
         REPO,
         query=logread.build_query(flow=True, session="sess-plan"),
         base_dir=tmp_path,
-        now=lambda: datetime.now(timezone.utc),
+        now=lambda: datetime.now(UTC),
     )
     assert rc == 0
     out = capsys.readouterr().out.splitlines()

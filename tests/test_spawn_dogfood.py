@@ -28,7 +28,6 @@ from shipit.identity import repo_from_slug
 from shipit.spawn import dogfood
 from shipit.tree import readonly
 
-
 # --------------------------------------------------------------------------
 # Fixtures: plant a Tree-shaped directory on disk.
 # --------------------------------------------------------------------------

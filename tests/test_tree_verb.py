@@ -16,13 +16,13 @@ import json
 import pytest
 
 from shipit import cli, execrun, gh, git
+from shipit.execrun import ExecError
 from shipit.identity import repo_from_slug
 from shipit.tree import layout as layout_mod
 from shipit.tree import registry as registry_mod
 from shipit.tree.create import Tree
 from shipit.tree.registry import TreeRecord
 from shipit.verbs import tree as tree_verb
-from shipit.execrun import ExecError
 
 
 def test_run_create_happy_path(monkeypatch, capsys):

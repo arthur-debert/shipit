@@ -13,6 +13,7 @@ from __future__ import annotations
 import dataclasses
 
 import pytest
+
 from shipit.identity import Sha
 
 SHA1 = "0123456789abcdef0123456789abcdef01234567"  # 40 hex

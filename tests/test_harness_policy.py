@@ -9,6 +9,7 @@ internal call shapes.
 from __future__ import annotations
 
 import pytest
+
 from shipit.harness.policy import (
     COORDINATOR_DENY_REASON,
     WORKTREE_DENY_REASON,

@@ -17,16 +17,16 @@ from __future__ import annotations
 import logging
 from dataclasses import replace
 
-from shipit import pixienv
-from shipit.execrun import ExecError
-from shipit.spawn import launch
-from shipit.verbs import spawn as spawn_verb
-
 # The typed suite's injectable boundary fakes are reused wholesale (CLI02-WS02):
 # the promoted pipeline takes its effectful edges as a Boundaries VALUE, so
 # these logging tests drive the verb's run() with fakes injected — the records
 # under assertion are identical, the monkeypatch stack is gone.
 from test_spawn_subagent import _PR, bounds
+
+from shipit import pixienv
+from shipit.execrun import ExecError
+from shipit.spawn import launch
+from shipit.verbs import spawn as spawn_verb
 
 
 def _launcher(*, returncode=0):

@@ -20,7 +20,7 @@ from shipit import cli
 from shipit.execrun import ExecError
 from shipit.identity import Sha, repo_from_slug
 from shipit.pr import PrId
-from shipit.prstate.model import readiness_view, Review, ReviewComment, Thread
+from shipit.prstate.model import Review, ReviewComment, Thread, readiness_view
 from shipit.prstate.reviewers_config import default_roster
 from shipit.verbs.pr import push_gate as gate_verb
 

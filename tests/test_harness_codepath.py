@@ -8,6 +8,7 @@ coordinator can author + plan. Fail-open bias: when unsure, non-code.
 from __future__ import annotations
 
 import pytest
+
 from shipit.harness.codepath import is_code_path
 
 

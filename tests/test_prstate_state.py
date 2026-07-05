@@ -5,10 +5,11 @@ from __future__ import annotations
 import dataclasses
 
 import pytest
-from shipit.prstate.model import ReadinessView, readiness_view, Review
+
+from shipit.identity import Sha
+from shipit.prstate.model import ReadinessView, Review, readiness_view
 from shipit.prstate.reviewers import by_name
 from shipit.prstate.roster import Roster, RosterEntry
-from shipit.identity import Sha
 from shipit.prstate.state import (
     ChecksState,
     TaskState,

@@ -9,6 +9,8 @@ injectable so the module needs neither git nor `gh` to test.
 
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 
 from shipit import identity
@@ -132,7 +134,7 @@ def test_repo_slug_is_owner_slash_name():
 
 def test_value_objects_are_frozen():
     repo = Repo(owner=Owner("acme"), name="widget")
-    with pytest.raises(Exception):
+    with pytest.raises(dataclasses.FrozenInstanceError):
         repo.name = "other"  # type: ignore[misc]
 
 

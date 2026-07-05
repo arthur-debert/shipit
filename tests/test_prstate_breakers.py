@@ -27,7 +27,7 @@ from shipit.prstate.breakers import (
     is_all_nitpick_round,
     unclassified_findings,
 )
-from shipit.prstate.model import readiness_view, Review, ReviewComment, Thread
+from shipit.prstate.model import Review, ReviewComment, Thread, readiness_view
 from shipit.prstate.reviewers import by_name
 from shipit.prstate.reviewers_config import default_roster
 from shipit.prstate.roster import Roster, RosterEntry

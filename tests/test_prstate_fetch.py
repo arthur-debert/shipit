@@ -14,6 +14,7 @@ the network mocked at the gh-adapter boundary.
 from __future__ import annotations
 
 import pytest
+
 from shipit.identity import Sha, repo_from_slug
 from shipit.pr import PrId
 from shipit.prstate import fetch

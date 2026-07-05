@@ -13,6 +13,7 @@ import logging
 from pathlib import Path
 
 import pytest
+
 from shipit.harness.prompts import (
     SUBAGENT_ROLES,
     RoleDefs,

@@ -25,6 +25,7 @@ from __future__ import annotations
 import dataclasses
 
 import pytest
+
 from shipit.identity import Owner, Repo, Sha
 from shipit.pr import CORE_JSON_FIELDS, PR, PrId, core_from_node
 

@@ -11,7 +11,7 @@ shifts.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from .. import gh
 from ..agent import backend as _agent_backend
@@ -155,7 +155,7 @@ def _funnel_recency_key(check: ReviewFunnelCheck) -> datetime:
     always wins over it.
     """
     if not check.started_at:
-        return datetime.min.replace(tzinfo=timezone.utc)
+        return datetime.min.replace(tzinfo=UTC)
     return datetime.fromisoformat(check.started_at)
 
 

@@ -19,9 +19,9 @@ import pytest
 from shipit import execrun, gh, ghsetup, git
 from shipit.agent import backend as agent_backend
 from shipit.config import SecretSource
+from shipit.install import apply as install_apply
 from shipit.review import ghauth
 from shipit.session import liveness
-from shipit.install import apply as install_apply
 from shipit.verbs import install, lint, verify_apps
 
 

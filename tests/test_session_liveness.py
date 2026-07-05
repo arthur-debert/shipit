@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 
 import pytest
+
 from shipit import execrun
 from shipit.session import liveness
 from shipit.session.liveness import (

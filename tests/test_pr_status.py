@@ -17,8 +17,8 @@ from shipit import cli
 from shipit.execrun import ExecError
 from shipit.identity import repo_from_slug
 from shipit.pr import PrId
-from shipit.prstate.state import ChecksState, TaskState, TaskStatus
 from shipit.prstate.roster import Roster
+from shipit.prstate.state import ChecksState, TaskState, TaskStatus
 from shipit.verbs.pr import status as status_verb
 
 # The typed PR target (CLI01-WS02 / ADR-0030): gh.resolve_pr mints a PrId at

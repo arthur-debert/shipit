@@ -28,7 +28,7 @@ against a wait window is OBS04.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from urllib.parse import quote
 
 from .. import gh
@@ -81,7 +81,7 @@ def create(backend: Backend, repo: str, head_sha: str) -> int | None:
         "name": name,
         "head_sha": head_sha,
         "status": "in_progress",
-        "started_at": datetime.now(timezone.utc).isoformat(),
+        "started_at": datetime.now(UTC).isoformat(),
     }
     logger.debug(
         "check run %r opening on %s @ %s (as the %r app)",
@@ -133,7 +133,7 @@ def transition(
     body = {
         "status": "completed",
         "conclusion": conclusion,
-        "completed_at": datetime.now(timezone.utc).isoformat(),
+        "completed_at": datetime.now(UTC).isoformat(),
         "output": {"title": title, "summary": summary},
     }
     logger.debug(

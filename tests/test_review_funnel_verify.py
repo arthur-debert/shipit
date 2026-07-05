@@ -17,8 +17,8 @@ from __future__ import annotations
 import pytest
 
 from shipit.agent import backend as agent_backend
-from shipit.review import funnel_verify
 from shipit.execrun import ExecError
+from shipit.review import funnel_verify
 
 
 class _FakeGitHub:

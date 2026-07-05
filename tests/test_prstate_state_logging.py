@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 
 from conftest import load_context
+
 from shipit.prstate.model import ReviewFunnelCheck
 from shipit.prstate.reviewers import by_name
 from shipit.prstate.state import evaluate, no_pr
