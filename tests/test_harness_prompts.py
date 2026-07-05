@@ -102,7 +102,7 @@ def test_real_role_prompts_read_as_their_role():
     assert "You are a REVIEWER" in rendered.role_prompts[Role.REVIEWER]
 
 
-# --- shepherd-per-PR (ADR-0035): the fragments say the reversed design -------
+# --- shepherd-per-PR (ADR-0035): the fragments say the revised design --------
 
 
 def test_shepherd_prompt_scopes_to_one_pr_across_rounds():
@@ -121,11 +121,19 @@ def test_shepherd_prompt_carries_the_root_cause_sweep_clause():
     assert "sweep the whole PR diff" in prompt
 
 
-def test_no_rendered_surface_says_fresh_shepherd_per_round():
-    """The reversed design must not survive in ANY composed prompt or the union —
-    the issue's residual-phrasing acceptance, pinned at the render layer."""
+def test_no_shipped_surface_says_fresh_shepherd_per_round():
+    """The previous design must not survive in ANY composed prompt, the union, OR
+    the committed agent-def frontmatter — the issue's residual-phrasing
+    acceptance, pinned at every surface it could regress in. The frontmatter
+    `description` is added at the boundary (not by :func:`render`), so a render-
+    only guard would miss a stale phrase in `_AGENT_FRONTMATTER`; the committed
+    agent-defs (frontmatter included) are guarded here for that reason."""
     rendered = render(load_role_defs())
-    surfaces = [*rendered.role_prompts.values(), rendered.agents_union]
+    agent_defs = [
+        (_ROOT / ".claude" / "agents" / f"{role.value}.md").read_text(encoding="utf-8")
+        for role in SUBAGENT_ROLES
+    ]
+    surfaces = [*rendered.role_prompts.values(), rendered.agents_union, *agent_defs]
     for text in surfaces:
         lowered = text.lower()
         assert "fresh shepherd" not in lowered

@@ -11,8 +11,8 @@ branch*) and one umbrella PR; the execution is a series of single-task cycles
 (again [../../AGENTS.lex]) whose workstream PRs merge into the epic branch, and
 the umbrella PR finally merges the epic branch to `main`. Delegation, the
 implementer-stops-at-open rule, and the shepherd-per-PR round loop (ADR-0035)
-are NOT epic-specific — they are the PR-shepherding role split in
-[../../AGENTS.lex], applied here per workstream.
+are NOT epic-specific — they are the PR-shepherding role split
+in [../../AGENTS.lex], applied here per workstream.
 
 Before execution, a new feature is planned via `/shipit-planning` — the
 orchestrator that drives ideation, the overview gate, the ADRs

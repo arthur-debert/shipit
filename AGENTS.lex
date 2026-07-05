@@ -33,14 +33,14 @@ The PR lifecycle (draft -> ready -> stop):
 
     Every change ships as a PR the agent drives. Open it as a DRAFT — WIP the
     agent owns. Shepherd the whole loop while it stays draft: request + address
-    reviews, get CI green, make it mergeable. Flipping draft -> ready (`shipit pr
-    ready`) is the ONE signal that means "done iterating — a human can validate
+    reviews, get CI green, make it mergeable. Flipping draft -> ready
+    (`shipit pr ready`) is the ONE signal that means "done iterating — a human can validate
     and merge": it happens only when all three hold — reviews addressed, CI green,
     mergeable.
 
     Stop at that flip; do NOT merge. The HUMAN does the final read + merge, on
-    explicit authorization only. A "changes needed" flips back to draft (`shipit
-    pr ready --undo`); the loop repeats and re-flips when green.
+    explicit authorization only. A "changes needed" flips back to draft
+    (`shipit pr ready --undo`); the loop repeats and re-flips when green.
 
     FLOOR / CEILING:
     - FLOOR: committing, pushing, opening the draft PR are the agent's OWN job,
@@ -115,12 +115,13 @@ The PR lifecycle (draft -> ready -> stop):
             approach, what's out of scope, what NOT to "fix" — written for the
             stranger who addresses the rounds.
         - COORDINATOR: the PR engine is STATELESS ("now" is an input); the ONE
-            verb that blocks is `shipit pr wait` (ADR-0034). Drive with `shipit
-            pr next` / `shipit pr status`, own every wait behind `shipit pr wait
-            --until reviews-in|ready`, and flip with `shipit pr ready` once the
-            engine reports READY (the guard refuses an early flip).
-        - SHEPHERD: ONE per PR (ADR-0035), briefed cold with just the PR number
-            + Context note on round 1, then PARKED between rounds and resumed
+            verb that blocks is `shipit pr wait` (ADR-0034). Drive with
+            `shipit pr next` / `shipit pr status`, own every wait behind
+            `shipit pr wait --until reviews-in|ready`, and flip with
+            `shipit pr ready` once the engine reports READY (the guard refuses
+            an early flip).
+        - SHEPHERD: ONE per PR (ADR-0035), briefed cold with just the PR number +
+            Context note on round 1, then PARKED between rounds and resumed
             with a one-line brief per round — it re-reads each round's findings
             from the PR, not from memory. Each round it triages open threads —
             fix, or reply with a rationale, resolving each — sweeps the PR diff
@@ -176,8 +177,8 @@ The PR lifecycle (draft -> ready -> stop):
 
     Per-PR essentials:
     - Identifier (epic work): `REPO-EPIC-WSnn[-FXnn]` — e.g. `APP-GPU02-WS03`.
-    - PR title (epic work): `<identifier>: Epic: <Epic Name> - Workstream: <WS
-        Name>`; a standalone PR uses a plain summary.
+    - PR title (epic work): `<identifier>: Epic: <Epic Name> - Workstream: <WS Name>`;
+        a standalone PR uses a plain summary.
     - PR body: `closes #<id>` (auto-closes on merge to `main`) or `for #<id>`
         when it must not (e.g. a WS PR onto an epic branch).
     - Branch: `EPIC/WSnn` (slash-namespaced); the epic (umbrella) branch is
@@ -191,8 +192,8 @@ The PR lifecycle (draft -> ready -> stop):
 
     Each role's binding prompt is GENERATED from focused lex fragments under
     [./src/shipit/data/roles] — a shared dev-cycle base plus one overlay per role
-    — so the cycle is stated once and re-flows on a single edit (`pixi run
-    regen-roles`). Each agent receives ONLY its own role's slice, never the
+    — so the cycle is stated once and re-flows on a single edit
+    (`pixi run regen-roles`). Each agent receives ONLY its own role's slice, never the
     others', which is what stops mid-session role drift (ADR-0011).
 
     The roles (one line each; non-binding map — the binding surfaces are the
