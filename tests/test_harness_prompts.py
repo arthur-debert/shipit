@@ -155,9 +155,17 @@ def test_coordinator_prompt_carries_the_promotion_clause():
     prompt = render(load_role_defs()).role_prompts[Role.COORDINATOR]
     assert "Promoting durable learnings INTO THE REPO" in prompt
     assert "scratchpad, never an archive" in prompt
-    # the clause names the promotion targets, not just the sentiment
-    assert "ADR" in prompt
-    assert "CONTEXT.md" in prompt
+    # The clause must NAME each promotion target via its source -> destination
+    # mapping, not merely mention the words: bare "ADR"/"CONTEXT.md" also appear
+    # in the planning-docs bullet and the epic-topology text, so they'd pass even
+    # if the clause dropped its mappings. Pin the full mapping phrases (each is
+    # clause-unique); normalize the renderer's `\` escaping of `>` so the asserts
+    # read as authored.
+    clause = prompt.replace("\\", "")
+    assert "a process rule -> the relevant role .lex" in clause
+    assert "a decision -> an ADR" in clause
+    assert "vocabulary -> CONTEXT.md" in clause
+    assert "an open investigation -> a tracker issue" in clause
 
 
 def test_promotion_clause_is_coordinator_scoped():
