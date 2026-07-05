@@ -22,8 +22,9 @@ The dev cycle is ALWAYS delegated:
     - an IMPLEMENTER subagent implements (+ tests), runs the checks green, opens a
         DRAFT PR, then STOPS AT PR-OPEN — it never sees a review round;
     - the COORDINATOR owns every wait and the flip;
-    - a FRESH SHEPHERD handles each review-addressing round, one per round,
-        briefed cold.
+    - ONE SHEPHERD per PR owns the review-addressing rounds (ADR-0035):
+        briefed cold on round 1, PARKED between rounds, resumed with a
+        one-line brief when the next round lands.
 
     Canonical source: `arthur-debert/release` `docs/dev-cycle.lex`; on drift, it
     wins.
@@ -113,15 +114,20 @@ The PR lifecycle (draft -> ready -> stop):
             `closes #<id>`) and carries a `## Context` handoff note — why this
             approach, what's out of scope, what NOT to "fix" — written for the
             stranger who addresses the rounds.
-        - COORDINATOR: the PR engine is STATELESS ("now" is an input; there is no
-            `pr wait`). Drive with `shipit pr next` / `shipit pr status`, manage
-            the waiting cadence yourself, and flip with `shipit pr ready` once the
+        - COORDINATOR: the PR engine is STATELESS ("now" is an input); the ONE
+            verb that blocks is `shipit pr wait` (ADR-0034). Drive with `shipit
+            pr next` / `shipit pr status`, own every wait behind `shipit pr wait
+            --until reviews-in|ready`, and flip with `shipit pr ready` once the
             engine reports READY (the guard refuses an early flip).
-        - SHEPHERD: briefed with just the PR number + Context note. It triages
-            open threads — fix, or reply with a rationale, resolving each — pushes
-            the round's commits at once, re-requests review if needed, hands back.
-            The local agent has more context than the reviewer, so it has the
-            final word; every thread ends resolved (including deferred nitpicks).
+        - SHEPHERD: ONE per PR (ADR-0035), briefed cold with just the PR number
+            + Context note on round 1, then PARKED between rounds and resumed
+            with a one-line brief per round — it re-reads each round's findings
+            from the PR, not from memory. Each round it triages open threads —
+            fix, or reply with a rationale, resolving each — sweeps the PR diff
+            for other instances of each finding's class, pushes the round's
+            commits at once, hands back, and parks. The local agent has more
+            context than the reviewer, so it has the final word; every thread
+            ends resolved (including deferred nitpicks).
 
     1.4. Validation
 
@@ -194,5 +200,5 @@ The PR lifecycle (draft -> ready -> stop):
 
     - coordinator — the agent the human addresses; orchestrates and delegates, never implements. Its slice rides the PreToolUse deny reason plus injected context (it has no agent-def).
     - implementer — builds the change with tests and opens the draft PR, then stops; agent-def [./.claude/agents/implementer.md].
-    - shepherd — addresses one review round on an open PR, then hands back; agent-def [./.claude/agents/shepherd.md].
+    - shepherd — owns addressing for one PR across its review rounds, parked between rounds and resumed per round; agent-def [./.claude/agents/shepherd.md].
     - explorer — read-only investigator: searches and reports, changes nothing; agent-def [./.claude/agents/explorer.md].

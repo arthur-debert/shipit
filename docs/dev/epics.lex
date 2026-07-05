@@ -10,9 +10,9 @@ in branch/merge topology. There is one overarching feature branch (the *epic
 branch*) and one umbrella PR; the execution is a series of single-task cycles
 (again [../../AGENTS.lex]) whose workstream PRs merge into the epic branch, and
 the umbrella PR finally merges the epic branch to `main`. Delegation, the
-implementer-stops-at-open rule, and the fresh-shepherd-per-round are NOT
-epic-specific — they are the PR-shepherding role split in [../../AGENTS.lex],
-applied here per workstream.
+implementer-stops-at-open rule, and the shepherd-per-PR round loop (ADR-0035)
+are NOT epic-specific — they are the PR-shepherding role split in
+[../../AGENTS.lex], applied here per workstream.
 
 Before execution, a new feature is planned via `/shipit-planning` — the
 orchestrator that drives ideation, the overview gate, the ADRs
@@ -53,7 +53,8 @@ dependencies.
     branch `E/umbrella` (\#176, closed). It fail-closes if `origin/E/umbrella` is
     missing on the remote — a loud exit, never a silent fallback to `origin/main`. The
     coordinator owns the wait and the flip;
-    a fresh shepherd handles each addressing round. The round-cap / nitpick breaker
+    ONE shepherd per workstream PR handles its addressing rounds — parked between
+    rounds, resumed per round (ADR-0035). The round-cap / nitpick breaker
     (`round_cap` in `[reviewers]`, default 6) applies to every workstream PR.
 
     Parallel implementation, serialized integration. Subagents implement
@@ -100,8 +101,8 @@ dependencies.
     It double-checks which issues the PR actually closes, writes a high-level
     description of the whole epic pointing to the related issues, and drives the
     PR (epic branch -> `main`) through the SAME role split — the coordinator
-    waits and flips, a fresh shepherd handles each review round — then flips it
-    to READY and stops. The HUMAN merges the umbrella PR to `main`; the
+    waits and flips, one shepherd owns the umbrella PR's review rounds — then
+    flips it to READY and stops. The HUMAN merges the umbrella PR to `main`; the
     coordinator does not auto-merge it.
 
     Changelog and release come later: shipit has no `changelog` or `release` /
