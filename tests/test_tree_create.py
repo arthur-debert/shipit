@@ -16,15 +16,21 @@ from pathlib import Path
 import pytest
 
 from shipit import config, execrun, gh, git, pixienv
-from shipit.identity import Sha
 from shipit.tree import create as create_mod
 from shipit.tree import layout, provision
 from shipit.tree.create import create, create_from_source
 from shipit.identity import repo_from_slug
 from shipit.tree.layout import TreeSpec
+from shipit.install import units as iunits
 from shipit.install.apply import COMMIT_MESSAGE as INSTALL_COMMIT_MESSAGE
-from shipit.verbs import install as install_mod
 from shipit.execrun import ExecError
+
+# A valid FULL git sha (40 hex) standing in for a real Shipit pin. The pin gate
+# (config.shipit_pin) validates the value as a Sha, so a fixture pin must be a
+# real sha shape, not a sentinel like "seed" (ADR-0033). "5eed…" is a mnemonic
+# all-hex sha.
+_PIN = "5eed" * 10
+_PINNED_MANIFEST = f'[shipit]\nversion = "{_PIN}"\n\n[managed]\n'
 
 
 def _hooks_ok() -> execrun.ExecResult:
@@ -61,16 +67,17 @@ def _git(args: list[str], cwd: Path) -> str:
 def remote(tmp_path: Path) -> Path:
     """A real upstream repo (stands in for the GitHub URL) with one commit on main.
 
-    It carries an ONBOARDED ``.shipit.toml`` (a ``[shipit]``/``[managed]`` block) because
-    provisioning now FAILS CLOSED on a non-onboarded repo (#210): a repo shipit cuts Trees
-    from is onboarded by definition, so the shared fixture reflects that steady state. The
-    clone-mechanics tests stub the provisioning subprocess itself via :func:`_stub_provision`.
+    It carries a PINNED ``.shipit.toml`` (a ``[shipit].version`` pin) because
+    provisioning FAILS CLOSED on a pinless base (ADR-0033): a repo shipit cuts Trees
+    from is bootstrapped by definition, so the shared fixture reflects that steady
+    state. The clone-mechanics tests stub the provisioning subprocess itself via
+    :func:`_stub_provision`.
     """
     repo = tmp_path / "remote"
     repo.mkdir()
     _git(["init"], cwd=repo)
     (repo / "README.md").write_text("hello tree\n")
-    (repo / ".shipit.toml").write_text('[shipit]\nversion = "seed"\n\n[managed]\n')
+    (repo / ".shipit.toml").write_text(_PINNED_MANIFEST)
     _git(["add", "."], cwd=repo)
     _git(["commit", "-m", "init"], cwd=repo)
     _git(["branch", "-M", "main"], cwd=repo)
@@ -95,6 +102,9 @@ def _stub_provision(monkeypatch):
     """
     monkeypatch.setattr(create_mod, "run_provision", lambda *a, **k: None)
     monkeypatch.setattr(create_mod.pixienv, "install", lambda *a, **k: _pixi_result())
+    # The #443 hook-activation step runs through the SAME pixi adapter — stub it
+    # too so a Tree that carries lefthook.yml never spawns a real `pixi run`.
+    monkeypatch.setattr(create_mod.pixienv, "run_in_env", lambda *a, **k: _hooks_ok())
 
 
 @pytest.fixture
@@ -309,78 +319,47 @@ def test_central_root_is_absolute_and_outside_any_claude_dir(monkeypatch):
     assert ".claude" not in override_root.parts
 
 
-def test_create_provisions_local_only_on_planned_branch_no_origin_side_effects(
+def test_create_mutates_nothing_managed_zero_commits_on_a_pinned_base(
     tmp_path: Path, remote: Path, reference: Path, monkeypatch
 ):
-    # #170 end-to-end against REAL git: a Tree whose source carries `.shipit.toml`
-    # gets the managed set committed on its PLANNED branch by a LOCAL-ONLY install
-    # — and `tree create` makes NO push and opens NO PR. The provisioning install
-    # step is run in-process via `install.run(local=True)`; the pixi/npm steps are
-    # no-ops here (covered elsewhere).
-
-    # The Tree's clone carries `.shipit.toml`, so `_provision` runs the install step.
-    (remote / ".shipit.toml").write_text('[shipit]\nversion = "seed"\n')
-    _git(["add", "."], cwd=remote)
-    _git(["commit", "-m", "add manifest"], cwd=remote)
-
-    # A deterministic commit identity for the real local commit `install --local` makes.
-    for var, val in {
-        "GIT_AUTHOR_NAME": "Test",
-        "GIT_AUTHOR_EMAIL": "test@example.com",
-        "GIT_COMMITTER_NAME": "Test",
-        "GIT_COMMITTER_EMAIL": "test@example.com",
-    }.items():
-        monkeypatch.setenv(var, val)
-
-    # ANY push / PR / branch-switch during provisioning is the bug — make it fail loud.
+    # ADR-0033 end-to-end against REAL git: a Tree cut from a PINNED base carries
+    # ZERO `chore(shipit)` commits — provisioning performs NO managed-set mutation
+    # at all. HEAD stays exactly the base commit, the working tree stays clean,
+    # and nothing pushes / opens a PR / switches branches. (The TRE03-era
+    # `shipit install --local` step and its drift-window reconcile commit are
+    # deleted; the pin makes Tree and tool coherent by construction.)
     def no_push(*a, **k):
-        raise AssertionError("tree create provisioning must NOT push to origin (#170)")
+        raise AssertionError("tree create provisioning must NOT push to origin")
 
     def no_pr(*a, **k):
-        raise AssertionError("tree create provisioning must NOT open a PR (#170)")
+        raise AssertionError("tree create provisioning must NOT open a PR")
 
     def no_switch(*a, **k):
-        raise AssertionError("local-only install must NOT switch branches (#170)")
+        raise AssertionError("tree create provisioning must NOT switch branches")
 
     monkeypatch.setattr(git, "push", no_push)
     monkeypatch.setattr(gh, "pr_create", no_pr)
     monkeypatch.setattr(git, "switch_create", no_switch)
 
-    # Drive the real install through the provisioning boundary in local mode; skip
-    # the real pixi/npm spawns (the managed set writes a pixi.toml tasks block, so
-    # the adapter's install step must be stubbed too). The injected lefthook
-    # boundary keeps it hermetic.
-    def fake_provision(cmd, *, cwd, env):
-        if cmd[:2] == ["shipit", "install"]:
-            assert "--local" in cmd
-            rc = install_mod.run(
-                str(cwd), local=True, activate_hooks=lambda root: _hooks_ok()
-            )
-            assert rc == 0
+    # Any provisioning subprocess that is NOT a dep step is the bug: only the
+    # manifest-gated dep installs may run, never a `shipit install`.
+    def no_managed_mutation(cmd, **_k):
+        raise AssertionError(f"provisioning ran an unexpected step: {cmd}")
 
-    monkeypatch.setattr(create_mod, "run_provision", fake_provision)
+    monkeypatch.setattr(create_mod, "run_provision", no_managed_mutation)
     monkeypatch.setattr(create_mod.pixienv, "install", lambda *a, **k: _pixi_result())
+    monkeypatch.setattr(create_mod.pixienv, "run_in_env", lambda *a, **k: _hooks_ok())
 
+    base_sha = _git(["rev-parse", "main"], cwd=remote)
     tree = create(_spec(tmp_path), source_repo=str(reference), github_url=str(remote))
     dest = Path(tree.path)
 
-    # HEAD is on the PLANNED branch (never `shipit/install`).
+    # HEAD is on the PLANNED branch, at EXACTLY the base commit: zero commits made.
     assert _git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=dest) == "issues/123/work"
-    assert tree.branch == "issues/123/work"
-
-    # The managed set is present AND committed on the planned branch.
-    assert (dest / "bin" / "shipit").is_file()
-    tracked = _git(["ls-files"], cwd=dest).splitlines()
-    assert "bin/shipit" in tracked
-    assert _git(["log", "-1", "--format=%s"], cwd=dest) == INSTALL_COMMIT_MESSAGE
-    # Nothing left uncommitted by provisioning.
+    assert _git(["rev-parse", "HEAD"], cwd=dest) == base_sha
+    assert INSTALL_COMMIT_MESSAGE not in _git(["log", "--format=%s"], cwd=dest)
+    # Nothing left uncommitted by provisioning either.
     assert _git(["status", "--porcelain"], cwd=dest) == ""
-
-    # #232: the install commit's identity was recorded in .git/shipit-provision.json
-    # so the ephemeral gc floor (and the WorktreeRemove fast path) can exclude
-    # exactly it from the unpushed read.
-    install_sha = _git(["rev-parse", "HEAD"], cwd=dest)
-    assert provision.read_provision_shas(dest) == frozenset({Sha(install_sha)})
 
     # The 3 isolation invariants still hold (unchanged by this WS).
     assert (dest / ".git").is_dir()
@@ -388,13 +367,13 @@ def test_create_provisions_local_only_on_planned_branch_no_origin_side_effects(
     assert ".claude" not in dest.parts
 
 
-def test_create_writes_no_provision_record_when_install_is_a_noop(
+def test_create_writes_no_provision_record(
     tmp_path: Path, remote: Path, reference: Path, monkeypatch
 ):
-    # Steady state (#232): the managed-set reconcile makes NO commit, so no
-    # provision record is written — the absent record is the norm, and the gc
-    # exclusion set stays empty.
-    _stub_provision(monkeypatch)  # provisioning runs nothing, so HEAD never moves
+    # ADR-0033: provisioning never commits, so the #232 provision record's writer
+    # is retired — NO Tree born after the pin carries `.git/shipit-provision.json`,
+    # and the gc exclusion set reads empty.
+    _stub_provision(monkeypatch)
     tree = create(_spec(tmp_path), source_repo=str(reference), github_url=str(remote))
     dest = Path(tree.path)
     assert not provision.record_path(dest).exists()
@@ -428,31 +407,29 @@ def test_create_rolls_back_partial_tree_on_failure(
     assert not dest.exists()
 
 
-def test_create_fails_closed_and_rolls_back_on_a_non_onboarded_source(
+def test_create_fails_closed_and_rolls_back_on_a_pinless_source(
     tmp_path: Path, remote: Path, reference: Path, monkeypatch
 ):
-    # #210 end-to-end: cloning a Tree from a repo with NO managed block fails closed at
-    # provisioning — `create` raises the clean ValueError AND rolls back the half-built
-    # leaf, so a non-onboarded source never leaves a partial Tree on disk. (The `remote`
-    # fixture is onboarded by default; strip its marker to make it non-onboarded.)
+    # ADR-0033 end-to-end: cloning a Tree from a base with NO [shipit].version pin
+    # fails closed at provisioning — `create` raises the clean ValueError naming the
+    # bootstrap install AND rolls back the half-built leaf, so a pinless source never
+    # leaves a partial Tree on disk. (The `remote` fixture is pinned by default;
+    # strip its manifest to make it pinless.)
     (remote / ".shipit.toml").unlink()
-    _git(["commit", "-am", "de-onboard"], cwd=remote)
+    _git(["commit", "-am", "de-pin"], cwd=remote)
 
     # Fail LOUD if provisioning is even attempted: the fail-closed check must raise
-    # BEFORE any provisioning subprocess. Stubbing `run_provision` to blow up means a
+    # BEFORE any provisioning subprocess. Stubbing the boundaries to blow up means a
     # regressed impl (one that DIDN'T fail closed) surfaces here as "provisioning ran"
-    # instead of silently spawning a real `shipit install` / `pixi install` during the
-    # unit run.
+    # instead of silently spawning a real `pixi install` during the unit run.
     def _must_not_provision(*_a, **_k):
-        raise AssertionError(
-            "fail-closed breached: provisioning ran on a non-onboarded repo"
-        )
+        raise AssertionError("fail-closed breached: provisioning ran on a pinless base")
 
     monkeypatch.setattr(create_mod, "run_provision", _must_not_provision)
     monkeypatch.setattr(create_mod.pixienv, "install", _must_not_provision)
 
     spec = _spec(tmp_path)
-    with pytest.raises(ValueError, match="not onboarded — run `shipit install --pr`"):
+    with pytest.raises(ValueError, match="no \\[shipit\\].version pin"):
         create(spec, source_repo=str(reference), github_url=str(remote))
 
     dest = (
@@ -511,11 +488,13 @@ def _mock_git_boundary(monkeypatch, *, manifests: list[str]):
         d = Path(dest)
         d.mkdir(parents=True)
         for name in manifests:
-            # A stub `.shipit.toml` carries the ONBOARDED marker (a [shipit] block) so
-            # `_provision` runs the managed-set reconcile — that gate is
-            # `config.is_onboarded`, not mere file presence (#205).
+            # A stub `.shipit.toml` carries the Shipit pin ([shipit].version) so
+            # `_provision`'s fail-closed pin gate passes — that gate is
+            # `config.shipit_pin`, not mere file presence (ADR-0033).
             content = (
-                '[shipit]\nversion = "stub"\n' if name == ".shipit.toml" else "# stub\n"
+                f'[shipit]\nversion = "{_PIN}"\n'
+                if name == ".shipit.toml"
+                else "# stub\n"
             )
             (d / name).write_text(content)
 
@@ -569,12 +548,10 @@ def test_create_copies_treeinclude_and_provisions_deps(tmp_path: Path, monkeypat
     assert (dest / ".env").read_text() == "TOKEN=1"
     assert (dest / "models" / "saml.bin").read_text() == "BIN"
 
-    # Step 4: shipit install (LOCAL-ONLY, #170), then pixi install (through the
-    # pixi adapter), then npm ci — each in the Tree dir. The install MUST carry
-    # --local so Tree provisioning never switches branches, pushes, or opens a PR
-    # (no origin pollution).
+    # Step 4: pixi install (through the pixi adapter), then npm ci — each in the
+    # Tree dir. NO `shipit install` step: provisioning mutates nothing managed
+    # (ADR-0033 — the pin keeps Tree and tool coherent by construction).
     assert [c[0] for c in calls] == [
-        ["shipit", "install", ".", "--local"],
         ["pixi", "install"],
         ["npm", "ci"],
     ]
@@ -595,10 +572,10 @@ def test_create_copies_treeinclude_and_provisions_deps(tmp_path: Path, monkeypat
 def test_create_skips_provisioning_steps_whose_manifest_is_absent(
     tmp_path: Path, monkeypatch
 ):
-    # An onboarded repo with pixi.toml but NO package.json runs the managed-set reconcile
-    # + `pixi install`, and SKIPS `npm ci` — each dep step still gated on its manifest
-    # existing. (The install step no longer skips: an onboarded repo always reconciles;
-    # a non-onboarded one fails closed — see test_provision_fails_closed_*.)
+    # A pinned repo with pixi.toml but NO package.json runs `pixi install` and
+    # SKIPS `npm ci` — each dep step gated on its manifest existing. No install
+    # step runs at all (ADR-0033: provisioning mutates nothing managed; a
+    # pinless base fails closed — see test_provision_fails_closed_*).
     source = tmp_path / "source"
     source.mkdir()
     _mock_git_boundary(monkeypatch, manifests=[".shipit.toml", "pixi.toml"])
@@ -614,7 +591,7 @@ def test_create_skips_provisioning_steps_whose_manifest_is_absent(
     monkeypatch.setattr(create_mod, "_st_dev", lambda p: 1)
 
     create(_spec(tmp_path), source_repo=str(source), github_url="url")
-    assert calls == [["shipit", "install", ".", "--local"], ["pixi", "install"]]
+    assert calls == [["pixi", "install"]]
 
 
 def test_provision_env_scrubs_leaked_parent_build_env(monkeypatch):
@@ -633,11 +610,12 @@ def test_provision_env_scrubs_leaked_parent_build_env(monkeypatch):
     assert env["SCCACHE_GCS_KEY"] == "creds"
 
 
-def test_provision_fails_closed_when_repo_not_onboarded(tmp_path: Path, monkeypatch):
-    # #210 (revisiting #206): a `.shipit.toml` that carries only consumer policy (no
-    # [shipit]/[managed] block) is NOT onboarded. `_provision` now FAILS CLOSED — it
-    # raises a clean ValueError pointing at `shipit install`, rather than silently
-    # skipping the reconcile and running the other dep steps. Nothing is provisioned.
+def test_provision_fails_closed_when_base_is_pinless(tmp_path: Path, monkeypatch):
+    # ADR-0033's one surviving guard: a `.shipit.toml` that carries only consumer
+    # policy (no [shipit].version pin) is PINLESS — its bin/shipit has no build to
+    # exec. `_provision` FAILS CLOSED with a clean ValueError naming the bootstrap
+    # install, rather than provisioning a Tree every in-Tree verb would die in.
+    # Nothing is provisioned.
     dest = tmp_path / "tree"
     dest.mkdir()
     (dest / config.CONFIG_NAME).write_text('[secrets]\nGH_PAT = { env = "X" }\n')
@@ -652,29 +630,165 @@ def test_provision_fails_closed_when_repo_not_onboarded(tmp_path: Path, monkeypa
     )
     monkeypatch.setattr(create_mod, "_st_dev", lambda p: 1)
 
-    with pytest.raises(ValueError, match="not onboarded — run `shipit install --pr`"):
+    with pytest.raises(
+        ValueError, match="no \\[shipit\\].version pin — run the bootstrap"
+    ):
         create_mod._provision(dest, trees_root=tmp_path / "trees")
-    # Fail-closed: NOT even the manifest-gated `pixi install` runs on a non-onboarded repo.
+    # Fail-closed: NOT even the manifest-gated `pixi install` runs on a pinless base.
     assert calls == []
 
 
-def test_provision_is_clean_noop_reconcile_when_repo_onboarded(
+def test_provision_runs_no_step_at_all_on_a_pinned_manifestless_repo(
     tmp_path: Path, monkeypatch
 ):
-    # An ALREADY-ONBOARDED `.shipit.toml` (it carries the [shipit]/[managed] block)
-    # provisions cleanly: the managed-set reconcile runs (a no-op once the set is
-    # current) — reconciling an existing managed set is the legitimate #170 behavior,
-    # and the onboarded path is exactly the one fail-closed protects.
+    # A PINNED `.shipit.toml` with no pixi.toml / package.json provisions ZERO
+    # subprocesses: the managed-set install step is deleted outright (ADR-0033 —
+    # provisioning mutates nothing managed), and every dep step is gated on its
+    # manifest existing.
     dest = tmp_path / "tree"
     dest.mkdir()
-    (dest / config.CONFIG_NAME).write_text('[shipit]\nversion = "seed"\n\n[managed]\n')
+    (dest / config.CONFIG_NAME).write_text(_PINNED_MANIFEST)
 
     calls: list[list[str]] = []
     monkeypatch.setattr(create_mod, "run_provision", lambda cmd, **k: calls.append(cmd))
     monkeypatch.setattr(create_mod, "_st_dev", lambda p: 1)
 
     create_mod._provision(dest, trees_root=tmp_path / "trees")
-    assert calls == [["shipit", "install", ".", "--local"]]
+    assert calls == []
+
+
+# --------------------------------------------------------------------------
+# #443 Finding A — a provisioned Tree comes up ARMED: git hooks do not clone,
+# so when the clone carries the managed lefthook.yml, provisioning activates
+# them (`lefthook install` through the Tree's OWN pixi lint env).
+# --------------------------------------------------------------------------
+
+
+def _provision_stubs(monkeypatch) -> list[tuple[list[str], Path, object]]:
+    """Stub all three provisioning boundaries into ONE ordered call list."""
+    calls: list[tuple[list[str], Path, object]] = []
+    monkeypatch.setattr(
+        create_mod,
+        "run_provision",
+        lambda cmd, *, cwd, env: calls.append((cmd, Path(cwd), env)),
+    )
+
+    def fake_pixi_install(root, *, env=None, **_k):
+        calls.append((["pixi", "install"], Path(root), env))
+        return _pixi_result()
+
+    def fake_run_in_env(argv, root, *, environment=None, env=None, **_k):
+        calls.append((["pixi", "run", "-e", str(environment), *argv], Path(root), env))
+        return execrun.ExecResult(
+            argv=tuple(pixienv.run_argv(argv, root, environment=environment)),
+            rc=0,
+            stdout="",
+            stderr="",
+            duration_ms=1,
+        )
+
+    monkeypatch.setattr(create_mod.pixienv, "install", fake_pixi_install)
+    monkeypatch.setattr(create_mod.pixienv, "run_in_env", fake_run_in_env)
+    monkeypatch.setattr(create_mod, "_st_dev", lambda p: 1)
+    return calls
+
+
+def test_provision_activates_hooks_when_the_clone_carries_lefthook(
+    tmp_path: Path, monkeypatch
+):
+    # The steady-state spawn/tree-create case (#443): the clone already carries
+    # the managed set (lefthook.yml + the pixi blocks) and provisioning mutates
+    # nothing managed (ADR-0033) — so provisioning itself must run `lefthook
+    # install`, via the lint env where the managed blocks pin lefthook, right
+    # after the env provision and before the npm step.
+    dest = tmp_path / "tree"
+    dest.mkdir()
+    (dest / config.CONFIG_NAME).write_text(_PINNED_MANIFEST)
+    (dest / pixienv.MANIFEST_NAME).write_text("# stub\n")
+    (dest / iunits.LEFTHOOK_FILE).write_text("# stub\n")
+    (dest / "package.json").write_text("{}\n")
+
+    calls = _provision_stubs(monkeypatch)
+    create_mod._provision(dest, trees_root=tmp_path / "trees")
+
+    assert [c[0] for c in calls] == [
+        ["pixi", "install"],
+        ["pixi", "run", "-e", "lint", "lefthook", "install"],
+        ["npm", "ci"],
+    ]
+    # Every step — activation included — runs in the Tree with the SAME scrubbed
+    # provisioning env (never a merge back over os.environ).
+    assert all(cwd == dest for _, cwd, _ in calls)
+    envs = [env for _, _, env in calls]
+    assert all(env is envs[0] and env is not None for env in envs)
+
+
+def test_provision_skips_hook_activation_without_a_lefthook_config(
+    tmp_path: Path, monkeypatch
+):
+    # No lefthook.yml → nothing to activate: the step is gated on its manifest
+    # existing, like every other dep step.
+    dest = tmp_path / "tree"
+    dest.mkdir()
+    (dest / config.CONFIG_NAME).write_text(_PINNED_MANIFEST)
+    (dest / pixienv.MANIFEST_NAME).write_text("# stub\n")
+
+    calls = _provision_stubs(monkeypatch)
+    create_mod._provision(dest, trees_root=tmp_path / "trees")
+    assert [c[0] for c in calls] == [["pixi", "install"]]
+
+
+def test_provision_skips_hook_activation_without_a_pixi_manifest(
+    tmp_path: Path, monkeypatch
+):
+    # A lefthook.yml with NO pixi.toml has no lint env to activate through — the
+    # activation rides the pixi branch (the lint env IS a pixi env), so it is
+    # skipped with the rest of the pixi steps rather than spawning a doomed
+    # `pixi run` in a manifest-less checkout.
+    dest = tmp_path / "tree"
+    dest.mkdir()
+    (dest / config.CONFIG_NAME).write_text(_PINNED_MANIFEST)
+    (dest / iunits.LEFTHOOK_FILE).write_text("# stub\n")
+
+    calls = _provision_stubs(monkeypatch)
+    create_mod._provision(dest, trees_root=tmp_path / "trees")
+    assert [c[0] for c in calls] == []
+
+
+def test_provision_hook_activation_failure_fails_the_create(
+    tmp_path: Path, monkeypatch
+):
+    # Unlike apply's opportunistic activation, the Tree step is CHECKED: a Tree
+    # that cannot arm its hooks is a failed materialization (#443 — a disarmed
+    # Tree is exactly the bug), so the ExecError propagates like any other
+    # provisioning failure and `create` rolls the half-built leaf back.
+    source = tmp_path / "source"
+    source.mkdir()
+    _mock_git_boundary(
+        monkeypatch, manifests=[".shipit.toml", "pixi.toml", iunits.LEFTHOOK_FILE]
+    )
+    monkeypatch.setattr(create_mod, "run_provision", lambda *a, **k: None)
+    monkeypatch.setattr(create_mod.pixienv, "install", lambda *a, **k: _pixi_result())
+    monkeypatch.setattr(create_mod, "_st_dev", lambda p: 1)
+
+    def failing_activation(argv, root, **_k):
+        raise ExecError(tuple(argv), rc=1, stderr="lefthook: boom")
+
+    monkeypatch.setattr(create_mod.pixienv, "run_in_env", failing_activation)
+
+    with pytest.raises(ExecError):
+        create(_spec(tmp_path), source_repo=str(source), github_url="url")
+    # Atomicity: the half-built leaf was rolled back.
+    leaf = (
+        tmp_path
+        / "trees"
+        / "acme"
+        / "widget"
+        / "issues"
+        / "123"
+        / "work-smoke-abcd1234"
+    )
+    assert not leaf.exists()
 
 
 def test_provision_env_scrubs_leaked_parent_pixi_pointers(tmp_path: Path, monkeypatch):

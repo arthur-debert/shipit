@@ -49,6 +49,12 @@ dev = ["pytest>=8"]
 [tool.hatch.build.targets.wheel]
 packages = ["src/shipit"]
 
+# Embed the building checkout's git HEAD sha as shipit/data/build-sha
+# (hatch_build.py, ADR-0033): one of the three places shipit.buildid resolves
+# the build's own commit identity from when `shipit install` stamps the pin.
+[tool.hatch.build.targets.wheel.hooks.custom]
+path = "hatch_build.py"
+
 # Vendor the managed skills into the wheel as package data. skills/ lives at the
 # repo root (it is also shipit's own Claude skill set), so it is force-included
 # rather than re-homed under src/. It is OUTSIDE src/shipit, so this does not

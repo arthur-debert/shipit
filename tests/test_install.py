@@ -18,15 +18,18 @@ import os
 import shutil
 import stat
 import subprocess
+import tomllib
 from pathlib import Path
 
 import pytest
+import yaml
 
 from shipit import config, execrun, gh, git
 from shipit.execrun import ExecError
+from shipit.identity import Sha
 from shipit.install import apply as iapply
 from shipit.install import reconcile as irec
-from shipit.install import splice, units as iunits
+from shipit.install import selfcert, splice, units as iunits
 from shipit.install.errors import InstallError
 from shipit.verbs import install as verb
 
@@ -58,9 +61,17 @@ def _apply(root, mode: str = iapply.MODE_TREE, **kw) -> iapply.InstallResult:
     return iapply.apply(
         plan,
         mode,
-        pr_body=lambda before, hooks: verb.format_pr_body(plan, before, hooks),
+        pr_body=lambda before, hooks, pin, debt: verb.format_pr_body(
+            plan, before, hooks, stamped_version=pin, lint_debt=debt
+        ),
         **kw,
     )
+
+
+def _cert_ok(plan, root, **kw) -> selfcert.CertReport:
+    """A passing certification — the injected default for tests that are not
+    about self-certification (no pixi solve, no scoped lint, no launcher run)."""
+    return selfcert.CertReport(checks=(selfcert.CertCheck(name="stub", ok=True),))
 
 
 # --------------------------------------------------------------------------
@@ -127,9 +138,16 @@ def test_load_units_includes_lefthook_and_pixi_task_block():
     assert pixi.kind == "block"
     assert pixi.dest == "pixi.toml"
     assert pixi.anchor == "[tasks]"
-    # The managed pixi block is the thin task lines ONLY — never a linter-dep
-    # block (deps ride in as shipit's own package deps, architecture.lex §5).
-    assert pixi.desired_inner() == 'lint = "shipit lint"\nlogs = "shipit logs"'
+    # The managed pixi TASKS block stays the thin task lines ONLY; the linter
+    # deps ride in their own sibling `[feature.lint.dependencies]` block (ADP00,
+    # docs/prd/adoption.md — amending the lint PRD's task-line-only decision),
+    # tested below. `provision-lexd` invokes the binary's provision subcommand
+    # (ADP00-WS03), so no provisioning script is ever distributed.
+    assert pixi.desired_inner() == (
+        'lint = "shipit lint"\n'
+        'logs = "shipit logs"\n'
+        'provision-lexd = "shipit provision lexd"'
+    )
 
 
 def test_pixi_block_inserts_under_existing_tasks_table():
@@ -186,6 +204,266 @@ def test_pixi_block_reinstall_replaces_in_place():
     assert twice == once
 
 
+# --------------------------------------------------------------------------
+# The ADP00 managed consumer environment (docs/prd/adoption.md) — the lint
+# feature/dependency block + the lint environment definition, siblings of the
+# tasks block in the consumer's pixi.toml.
+# --------------------------------------------------------------------------
+
+#: The fleet-pinned lint toolchain the managed deps block must deliver.
+LINT_TOOLS = (
+    "ruff",
+    "shellcheck",
+    "go-shfmt",
+    "yamllint",
+    "prettier",
+    "markdownlint-cli",
+    "lefthook",
+)
+
+
+def test_load_units_includes_the_lint_env_blocks():
+    units = {u.key: u for u in iunits.load_units()}
+
+    deps = units[iunits.PIXI_LINT_DEPS_KEY]
+    assert deps.kind == "block"
+    assert deps.dest == "pixi.toml"
+    assert deps.anchor == "[feature.lint.dependencies]"
+    assert set(tomllib.loads(deps.desired_inner())) == set(LINT_TOOLS)
+
+    envs = units[iunits.PIXI_ENVS_KEY]
+    assert envs.kind == "block"
+    assert envs.dest == "pixi.toml"
+    assert envs.anchor == "[environments]"
+    assert tomllib.loads(envs.desired_inner()) == {"lint": ["lint"]}
+
+    # Three sibling blocks in ONE consumer file: their marker fences must be
+    # pairwise distinct or extract/splice would bleed across regions.
+    fences = {
+        units[k].open_marker
+        for k in (iunits.PIXI_KEY, iunits.PIXI_LINT_DEPS_KEY, iunits.PIXI_ENVS_KEY)
+    }
+    assert len(fences) == 3
+
+
+def test_packaged_lint_env_agrees_with_shipits_own_manifest():
+    """The dogfood drift check (docs/prd/adoption.md): shipit's own manifest and
+    the packaged consumer block pin IDENTICAL versions, so shipit dogfoods
+    exactly what the fleet receives and a version bump is one data-block edit
+    (mirrored into shipit's own hand-written toolchain, or this test fails)."""
+    own = tomllib.loads(
+        (Path(__file__).resolve().parents[1] / "pixi.toml").read_text(encoding="utf-8")
+    )
+    deps = tomllib.loads(iunits.data_bytes("pixi-lint-deps-block.toml").decode("utf-8"))
+
+    assert set(deps) == set(LINT_TOOLS)
+    # Every packaged pin agrees with shipit's own default-env toolchain (where
+    # shipit's hand-written lint environment gets its binaries, issue #210).
+    for tool, pin in deps.items():
+        assert own["dependencies"].get(tool) == pin, (
+            f"{tool}: packaged pin {pin!r} != shipit's own {own['dependencies'].get(tool)!r}"
+        )
+    # ...and shipit's own lint feature carries the managed block verbatim.
+    assert own["feature"]["lint"]["dependencies"] == deps
+
+    envs = tomllib.loads(iunits.data_bytes("pixi-lint-env-block.toml").decode("utf-8"))
+    assert envs == {"lint": ["lint"]}
+    assert own["environments"]["lint"] == envs["lint"]
+
+
+def test_shipits_own_pixi_manifest_reconciles_to_noop():
+    # shipit self-installs at Tree provisioning (`shipit install --local`), so
+    # its own pixi.toml must carry every managed pixi block byte-identically —
+    # otherwise every fresh Tree would splice a drift commit (or a duplicate
+    # `lint` key under [environments]) into shipit's own manifest.
+    root = Path(__file__).resolve().parents[1]
+    units = {u.key: u for u in iunits.load_units()}
+    for key in (iunits.PIXI_KEY, iunits.PIXI_LINT_DEPS_KEY, iunits.PIXI_ENVS_KEY):
+        unit = units[key]
+        assert irec.consumer_hash(root, unit) == unit.desired_hash(), key
+
+
+# --------------------------------------------------------------------------
+# The ADP00 consumer-generic lefthook caller (docs/prd/adoption.md, #419) —
+# the managed variant works on a stock consumer right after install; shipit's
+# own repo-local legs live in a committed lefthook-local.yml (lefthook's
+# native config layering), never in the managed file.
+# --------------------------------------------------------------------------
+
+
+def _managed_lefthook() -> dict:
+    return yaml.safe_load(iunits.data_bytes("lefthook.yml"))
+
+
+def test_managed_lefthook_is_consumer_generic():
+    """Every hook leg of the managed caller runs through the pinned lint env
+    and invokes only the managed `lint` task or the shipit binary itself — no
+    shipit-repo-local scripts or paths (the stock-consumer guarantee, #419)."""
+    cfg = _managed_lefthook()
+    assert set(cfg) == {"pre-commit", "pre-push", "post-commit"}
+    for hook in cfg.values():
+        for cmd in hook["commands"].values():
+            run = cmd["run"]
+            # Everything rides the pinned lint env (never bare `pixi run`)...
+            assert run.startswith("pixi run -e lint ")
+            # ...and invokes the managed `lint` task or shipit itself — never
+            # a shell indirection into a repo-local script.
+            assert run.removeprefix("pixi run -e lint ").split()[0] in (
+                "lint",
+                "shipit",
+            )
+            assert "tools/" not in run and ".lex" not in run
+
+    # The exact legs: pre-commit lint (piped, priority 2 — the slot a local
+    # leg like shipit's own lex-mirror runs ahead of), pre-push lint + the
+    # classification tripwire. (The post-commit dev-cycle leg is asserted in
+    # test_logevent.py's managed-hook-tier test.)
+    assert cfg["pre-commit"]["piped"] is True
+    lint = cfg["pre-commit"]["commands"]["lint"]
+    assert lint == {"priority": 2, "run": "pixi run -e lint lint"}
+    assert cfg["pre-push"]["commands"]["lint"]["run"] == "pixi run -e lint lint"
+    assert (
+        cfg["pre-push"]["commands"]["classify-gate"]["run"]
+        == "pixi run -e lint shipit pr push-gate"
+    )
+
+    # The invoked task and environment exist in the managed pixi blocks, so a
+    # stock consumer satisfies every reference with nothing pre-installed.
+    tasks = tomllib.loads(iunits.data_bytes("pixi-tasks-block.toml").decode("utf-8"))
+    assert "lint" in tasks
+    envs = tomllib.loads(iunits.data_bytes("pixi-lint-env-block.toml").decode("utf-8"))
+    assert "lint" in envs
+
+
+def test_shipits_own_lefthook_reconciles_to_noop():
+    """shipit self-installs at Tree provisioning (`shipit install --local`),
+    so its own lefthook.yml must stay BYTE-IDENTICAL to the managed unit —
+    otherwise every fresh Tree would clobber shipit's extra hook legs (UPDATE
+    or OVERRIDE both write). shipit's repo-local legs live in
+    lefthook-local.yml instead: lefthook's own layering carries the
+    divergence, the reconciler stays feature-poor (ADR-0003)."""
+    root = Path(__file__).resolve().parents[1]
+    unit = {u.key: u for u in iunits.load_units()}[iunits.LEFTHOOK_FILE]
+    assert irec.consumer_hash(root, unit) == unit.desired_hash()
+
+
+def test_shipits_own_local_config_carries_the_lex_mirror_leg():
+    """The .lex→.md mirror leg moved OUT of the managed caller into shipit's
+    committed lefthook-local.yml — still regenerating mirrors ahead of lint in
+    the piped pre-commit chain, so shipit's own hooks stay green (dogfood)."""
+    root = Path(__file__).resolve().parents[1]
+    local = yaml.safe_load((root / "lefthook-local.yml").read_text(encoding="utf-8"))
+    leg = local["pre-commit"]["commands"]["lex-mirror"]
+    assert "tools/lex-convert-doc.sh" in leg["run"]
+    assert (root / "tools" / "lex-convert-doc.sh").is_file()
+    # It slots BEFORE the managed lint command in the managed piped chain.
+    managed = _managed_lefthook()
+    assert managed["pre-commit"]["piped"] is True
+    assert leg["priority"] < managed["pre-commit"]["commands"]["lint"]["priority"]
+
+
+def test_lefthook_unit_reconciles_add_noop_override(tmp_path, rec):
+    """The consumer-generic caller rides the standard four-case reconcile:
+    fresh install ADDs it, an unchanged re-install NOOPs, a consumer edit
+    surfaces as OVERRIDE (never silently kept)."""
+
+    def decision():
+        return next(
+            d for d in _plan(tmp_path).decisions if d.unit.key == iunits.LEFTHOOK_FILE
+        )
+
+    assert decision().action == irec.ADD
+    _apply(tmp_path)
+    assert (tmp_path / "lefthook.yml").read_bytes() == iunits.data_bytes("lefthook.yml")
+    assert decision().action == irec.NOOP
+    (tmp_path / "lefthook.yml").write_text("pre-commit: {}\n")
+    assert decision().action == irec.OVERRIDE
+
+
+# --------------------------------------------------------------------------
+# The ADP00-WS10 lint tool configs (#436) — the managed set delivers the
+# configs its own gate needs (markdownlint/yamllint auto-discover them from
+# the repo root), so a stock consumer's whole-tree lint is green right after
+# install with the managed set present.
+# --------------------------------------------------------------------------
+
+
+def test_load_units_includes_the_lint_tool_configs():
+    units = {u.key: u for u in iunits.load_units()}
+    for dest, data_file in iunits.LINT_CONFIG_UNITS:
+        unit = units[dest]
+        assert unit.kind == "file"
+        assert unit.dest == dest
+        assert unit.content == iunits.data_bytes(data_file)
+
+
+def test_managed_markdownlint_config_relaxes_exactly_two_rules():
+    """MD013/MD041 off for the managed set's markdown genre; every other rule
+    stays at markdownlint's defaults so real structural issues still fail."""
+    cfg = yaml.safe_load(iunits.data_bytes("markdownlint.yaml"))
+    assert cfg == {"default": True, "MD013": False, "MD041": False}
+
+
+def test_managed_yamllint_config_extends_default_with_three_relaxations():
+    cfg = yaml.safe_load(iunits.data_bytes("yamllint.yaml"))
+    assert cfg == {
+        "extends": "default",
+        "rules": {
+            "document-start": "disable",
+            "truthy": {"check-keys": False},
+            "line-length": {"max": 120},
+        },
+    }
+
+
+def test_managed_markdownlintignore_covers_managed_paths_only():
+    """The ignore file excludes exactly the managed/vendored markdown — never
+    a consumer-authored file (a consumer's README.md is theirs; shipit's own
+    README is skipped only because it is a lex projection, which `shipit lint`
+    routes to the lexd leg with no ignore entry — tested in test_lint.py)."""
+    entries = [
+        line
+        for line in iunits.data_bytes("markdownlintignore").decode().splitlines()
+        if line and not line.startswith("#")
+    ]
+    assert entries == ["skills/", "AGENTS.md"]
+
+
+def test_shipits_own_lint_configs_reconcile_to_noop():
+    """The dogfood drift check, extended from the WS01 version pattern to
+    config: shipit self-installs at Tree provisioning, so its own
+    auto-discovered lint configs must stay BYTE-IDENTICAL to the managed
+    units — a consumer lints with exactly what shipit's own gate runs, and a
+    config edit is one data-file change mirrored here (or this test fails)."""
+    root = Path(__file__).resolve().parents[1]
+    units = {u.key: u for u in iunits.load_units()}
+    for dest, _ in iunits.LINT_CONFIG_UNITS:
+        unit = units[dest]
+        assert irec.consumer_hash(root, unit) == unit.desired_hash(), dest
+
+
+def test_lint_config_units_reconcile_add_noop_override(tmp_path, rec):
+    """Fresh consumer install ADDs the three config units, a re-install NOOPs,
+    and a consumer edit surfaces as OVERRIDE (never silently kept)."""
+    keys = {dest for dest, _ in iunits.LINT_CONFIG_UNITS}
+
+    def actions():
+        return {
+            d.unit.key: d.action
+            for d in _plan(tmp_path).decisions
+            if d.unit.key in keys
+        }
+
+    assert set(actions().values()) == {irec.ADD}
+    _apply(tmp_path)
+    for dest, data_file in iunits.LINT_CONFIG_UNITS:
+        assert (tmp_path / dest).read_bytes() == iunits.data_bytes(data_file)
+    assert set(actions().values()) == {irec.NOOP}
+    (tmp_path / iunits.YAMLLINT_FILE).write_text("extends: relaxed\n")
+    assert actions()[iunits.YAMLLINT_FILE] == irec.OVERRIDE
+    assert actions()[iunits.MARKDOWNLINT_FILE] == irec.NOOP
+
+
 def test_load_units_has_skills_agents_and_bootstrap():
     units = iunits.load_units()
     keys = {u.key for u in units}
@@ -198,74 +476,285 @@ def test_load_units_has_skills_agents_and_bootstrap():
     assert boot.executable is True
 
 
-def _write_launcher(dir_path: Path) -> Path:
-    """Write the MANAGED bin/shipit launcher (the shipped template) into dir_path/shipit."""
+# --------------------------------------------------------------------------
+# The pinned bin/shipit launcher (ADR-0033) — pin-resolve via uv, SHIPIT_EXEC
+# override, pinless refusal. The exec seam is FAKED: a shim `uv` (and shim
+# override targets) planted first on PATH record their argv instead of
+# resolving anything, so these run the REAL shipped bash against fakes.
+# --------------------------------------------------------------------------
+
+LAUNCHER_PIN = "c" * 40
+
+
+def _write_launcher_repo(tmp_path: Path, *, manifest: str | None) -> Path:
+    """A stand-in consumer repo: the MANAGED bin/shipit + an optional .shipit.toml.
+
+    Returns the launcher path (``<repo>/bin/shipit``). ``manifest=None`` writes
+    no ``.shipit.toml`` at all (the virgin-repo case).
+    """
+    repo = tmp_path / "consumer"
+    (repo / "bin").mkdir(parents=True)
     unit = next(u for u in iunits.load_units() if u.key == "bin/shipit")
-    binp = dir_path / "shipit"
-    binp.write_bytes(unit.content)
-    binp.chmod(binp.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
-    return binp
+    launcher = repo / "bin" / "shipit"
+    launcher.write_bytes(unit.content)
+    launcher.chmod(launcher.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+    if manifest is not None:
+        (repo / ".shipit.toml").write_text(manifest)
+    return launcher
 
 
-def _path_without_shipit() -> str:
-    """The real PATH minus any dir that already holds a `shipit` — so the launcher's
-    shebang tools (bash/env/realpath) are present but the ONLY `shipit` the test sees is
-    the one(s) it plants. Prevents the ambient pixi-env shipit from shadowing the guard."""
-    keep = [
-        d
-        for d in os.environ.get("PATH", "").split(os.pathsep)
-        if d and not (Path(d) / "shipit").exists()
-    ]
-    return os.pathsep.join(keep)
+def _shim(dir_path: Path, name: str, marker: str) -> Path:
+    """An executable shim that prints ``marker`` + its argv and exits 0."""
+    p = dir_path / name
+    p.write_text(f'#!/usr/bin/env bash\necho "{marker} $*"\n')
+    p.chmod(p.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+    return p
 
 
-def test_bootstrap_launcher_does_not_self_exec_when_its_dir_is_on_path(tmp_path: Path):
-    # Fork-bomb guard (codex/agy ERROR): with the launcher's OWN dir the only one on
-    # PATH, a bare `command -v shipit` resolves to the launcher itself — exec'ing it
-    # would loop forever. The launcher must detect the self-match, refuse to exec
-    # itself, and fail loud (exit 127). `os.defpath` supplies bash/env without a real
-    # `shipit`; the 10s timeout would trip (test failure) if it ever self-loops.
-    binhome = tmp_path / "bin"
-    binhome.mkdir()
-    launcher = _write_launcher(binhome)
-
-    proc = subprocess.run(
-        [str(launcher), "--version"],
-        env={"PATH": str(binhome) + os.pathsep + _path_without_shipit()},
-        capture_output=True,
-        text=True,
-        timeout=10,
+def _launcher_env(*prepend: Path) -> dict[str, str]:
+    """The launcher subprocess env: the given shim dirs first, the real PATH after
+    (bash/awk/dirname live there), and no ambient SHIPIT_EXEC leaking in."""
+    path = os.pathsep.join(
+        [str(d) for d in prepend] + [os.environ.get("PATH", os.defpath)]
     )
-    assert proc.returncode == 127
-    assert "only this in-repo launcher" in proc.stderr
+    return {"PATH": path}
 
 
-def test_bootstrap_launcher_execs_the_real_shipit_elsewhere_on_path(tmp_path: Path):
-    # Normal case preserved: with the launcher's dir first on PATH (a self-match it
-    # skips) and a REAL shipit later on PATH, the launcher execs the real one.
-    binhome = tmp_path / "bin"
-    binhome.mkdir()
-    _write_launcher(binhome)
-
-    realdir = tmp_path / "realbin"
-    realdir.mkdir()
-    real = realdir / "shipit"
-    real.write_text('#!/usr/bin/env bash\necho "REAL-SHIPIT-RAN $*"\n')
-    real.chmod(real.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+def test_launcher_execs_the_pin_via_uv_never_path(tmp_path: Path):
+    # The pin-resolve path (ADR-0033): the launcher reads [shipit].version and
+    # execs `uv tool run --from git+…@<pin> shipit <args>`. A `shipit` sitting
+    # FIRST on PATH must play no part — PATH is never consulted for the build.
+    launcher = _write_launcher_repo(
+        tmp_path, manifest=f'[shipit]\nversion = "{LAUNCHER_PIN}"\n\n[managed]\n'
+    )
+    shims = tmp_path / "shims"
+    shims.mkdir()
+    _shim(shims, "uv", "FAKE-UV-RAN")
+    _shim(shims, "shipit", "PATH-SHIPIT-RAN")  # must never run
 
     proc = subprocess.run(
-        [str(binhome / "shipit"), "arg1"],
-        env={
-            "PATH": os.pathsep.join(
-                [str(binhome), str(realdir), _path_without_shipit()]
-            )
-        },
+        [str(launcher), "pr", "status"],
+        env=_launcher_env(shims),
         capture_output=True,
         text=True,
         timeout=10,
     )
     assert proc.returncode == 0
-    assert "REAL-SHIPIT-RAN arg1" in proc.stdout
+    assert (
+        "FAKE-UV-RAN tool run --from "
+        f"git+https://github.com/arthur-debert/shipit@{LAUNCHER_PIN} "
+        "shipit pr status" in proc.stdout
+    )
+    assert "PATH-SHIPIT-RAN" not in proc.stdout
+
+
+def test_launcher_pinless_repo_fails_loud_toward_the_bootstrap(tmp_path: Path):
+    # No [shipit].version pin → exit 127 with the bootstrap instructions — and
+    # NEVER a PATH fallback, even with a `shipit` sitting right there (the old
+    # walk-PATH launcher's silent drift reintroduction, retired by ADR-0033).
+    launcher = _write_launcher_repo(
+        tmp_path, manifest='[secrets]\nGH_PAT = { env = "X" }\n'
+    )
+    shims = tmp_path / "shims"
+    shims.mkdir()
+    _shim(shims, "shipit", "PATH-SHIPIT-RAN")
+
+    proc = subprocess.run(
+        [str(launcher), "--version"],
+        env=_launcher_env(shims),
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert proc.returncode == 127
+    assert "no [shipit].version pin" in proc.stderr
+    assert "shipit install --pr" in proc.stderr
+    assert "PATH-SHIPIT-RAN" not in proc.stdout
+
+
+@pytest.mark.parametrize("bad_pin", ["0.0.1", "seed", "c" * 39, "z" * 40])
+def test_launcher_non_sha_pin_fails_loud_toward_the_bootstrap(
+    tmp_path: Path, bad_pin: str
+):
+    # A present-but-non-sha [shipit].version (the retired static `0.0.1`, a
+    # sentinel, an abbreviated/non-hex value) is NOT a resolvable
+    # build: the launcher refuses toward the bootstrap (exit 127) rather than
+    # hand uv a ref it would fail on with a murkier error — the same fail-closed
+    # posture as config.shipit_pin on the Python side (ADR-0033).
+    launcher = _write_launcher_repo(
+        tmp_path, manifest=f'[shipit]\nversion = "{bad_pin}"\n\n[managed]\n'
+    )
+    shims = tmp_path / "shims"
+    shims.mkdir()
+    _shim(shims, "uv", "FAKE-UV-RAN")  # must never run
+    _shim(shims, "shipit", "PATH-SHIPIT-RAN")  # must never run
+
+    proc = subprocess.run(
+        [str(launcher), "--version"],
+        env=_launcher_env(shims),
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert proc.returncode == 127
+    assert "not a full git sha" in proc.stderr
+    assert "shipit install --pr" in proc.stderr
+    assert "FAKE-UV-RAN" not in proc.stdout
+    assert "PATH-SHIPIT-RAN" not in proc.stdout
+
+
+def test_launcher_missing_manifest_fails_loud_too(tmp_path: Path):
+    # The virgin-repo shape of pinless: no .shipit.toml at all — same loud 127.
+    launcher = _write_launcher_repo(tmp_path, manifest=None)
+    proc = subprocess.run(
+        [str(launcher), "--version"],
+        env=_launcher_env(),
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert proc.returncode == 127
+    assert "no [shipit].version pin" in proc.stderr
+
+
+def test_launcher_honors_and_announces_shipit_exec_override(tmp_path: Path):
+    # The one sanctioned override (ADR-0033): SHIPIT_EXEC=/path is exec'd instead
+    # of the pin — honored AND announced on stderr, never silent. uv must not run.
+    launcher = _write_launcher_repo(
+        tmp_path, manifest=f'[shipit]\nversion = "{LAUNCHER_PIN}"\n'
+    )
+    shims = tmp_path / "shims"
+    shims.mkdir()
+    _shim(shims, "uv", "FAKE-UV-RAN")  # must never run
+    dev_build = _shim(shims, "dev-shipit", "DEV-BUILD-RAN")
+
+    env = _launcher_env(shims)
+    env["SHIPIT_EXEC"] = str(dev_build)
+    proc = subprocess.run(
+        [str(launcher), "lint", "--fix"],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert proc.returncode == 0
+    assert "DEV-BUILD-RAN lint --fix" in proc.stdout
+    assert "FAKE-UV-RAN" not in proc.stdout
+    # The announcement: loud, on stderr, naming the override.
+    assert "SHIPIT_EXEC override" in proc.stderr
+    assert str(dev_build) in proc.stderr
+
+
+def test_launcher_refuses_a_self_pointing_shipit_exec(tmp_path: Path):
+    # The self-exec guard, preserved in the override: SHIPIT_EXEC pointing back
+    # at the launcher itself would exec(2)-loop forever — refused by inode
+    # comparison, loud, 127. The 10s timeout would trip if it ever looped.
+    launcher = _write_launcher_repo(
+        tmp_path, manifest=f'[shipit]\nversion = "{LAUNCHER_PIN}"\n'
+    )
+    env = _launcher_env()
+    env["SHIPIT_EXEC"] = str(launcher)
+    proc = subprocess.run(
+        [str(launcher), "--version"],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert proc.returncode == 127
+    assert "refusing the exec loop" in proc.stderr
+
+
+def test_launcher_missing_uv_fails_loud_with_instructions(tmp_path: Path):
+    # uv is a hard prerequisite wherever a pin resolves (ADR-0033): absent, the
+    # launcher exits 127 pointing at the uv install — never a PATH fallback.
+    launcher = _write_launcher_repo(
+        tmp_path, manifest=f'[shipit]\nversion = "{LAUNCHER_PIN}"\n'
+    )
+    # A PATH with the shell utilities but guaranteed no `uv`: copy the real PATH
+    # entries, skipping any dir that holds one.
+    keep = [
+        d
+        for d in os.environ.get("PATH", os.defpath).split(os.pathsep)
+        if d and not (Path(d) / "uv").exists()
+    ]
+    proc = subprocess.run(
+        [str(launcher), "--version"],
+        env={"PATH": os.pathsep.join(keep)},
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert proc.returncode == 127
+    assert "uv is not on PATH" in proc.stderr
+
+
+# --------------------------------------------------------------------------
+# The Shipit pin stamp (ADR-0033) — install stamps its OWN build's full sha
+# --------------------------------------------------------------------------
+
+
+def test_fresh_install_on_a_stock_consumer_stamps_a_full_sha_pin(tmp_path, monkeypatch):
+    # ADR-0033 acceptance: a fresh install on a synthetic STOCK consumer (an
+    # empty directory — no pixi.toml, no configs) stamps .shipit.toml
+    # [shipit].version with the FULL git sha of the running build (here the
+    # dev-checkout resolver), never the static package version that identifies
+    # nothing. And the re-install NOOPs — including the pin.
+    monkeypatch.setattr(iapply, "_activate_hooks", lambda root: _exec_result(0))
+    result = _apply(tmp_path)  # MODE_TREE: working-tree refresh, no git/gh
+    assert result.mode == iapply.MODE_TREE
+
+    pin = config.shipit_pin(tmp_path / ".shipit.toml")
+    assert pin is not None
+    Sha(pin)  # validates: a FULL sha, or this raises
+    assert pin != "0.0.1"
+
+    # Re-install NOOPs, pin included: the plan has nothing to do, so apply
+    # never runs and the stamped pin stays byte-identical.
+    assert _plan(tmp_path).nothing_to_do
+    assert config.shipit_pin(tmp_path / ".shipit.toml") == pin
+
+
+def test_install_fails_closed_when_the_build_identity_is_unresolvable(
+    tmp_path, monkeypatch
+):
+    # No direct_url record, no embed, no checkout → install REFUSES to stamp
+    # (InstallError), rather than minting a pin the launcher could never exec.
+    monkeypatch.setattr(iapply.buildid, "build_sha", lambda: None)
+    monkeypatch.setattr(iapply, "_activate_hooks", lambda root: _exec_result(0))
+    with pytest.raises(InstallError, match="own commit identity"):
+        _apply(tmp_path)
+
+
+def test_a_code_only_shipit_change_rolls_the_pin_forward(tmp_path, monkeypatch):
+    # ADR-0033: the install reconcile PR is the ONLY pin-bump vehicle, so a
+    # code-only shipit build (new sha, every managed file byte-identical) must
+    # STILL be work to do — otherwise the no-op check strands the consumer on
+    # the old build forever. The pin travels IN the reconcile payload; a stale
+    # pin is a work axis of its own, on par with a pending write.
+    monkeypatch.setattr(iapply, "_activate_hooks", lambda root: _exec_result(0))
+    _apply(tmp_path)  # stamps the running (dev-checkout) build's sha
+    old_pin = config.shipit_pin(tmp_path / ".shipit.toml")
+    assert old_pin is not None
+
+    # Same build → the re-plan is a clean no-op (pin matches, nothing changed).
+    assert _plan(tmp_path).nothing_to_do
+
+    # A NEW build sha, the managed files untouched: pin-only work to do. The
+    # plan writes NOTHING but `.shipit.toml`, and the report names the bump.
+    new_sha = "abcdef0123456789abcdef0123456789abcdef01"
+    monkeypatch.setattr(iapply.buildid, "build_sha", lambda: Sha(new_sha))
+    plan = _plan(tmp_path)
+    assert not plan.nothing_to_do
+    assert plan.pin_stale
+    assert not plan.writes
+    assert plan.changed_paths == (config.CONFIG_NAME,)
+    assert f"-> {new_sha[:12]}" in verb.format_plan(plan)
+
+    # Applying it rolls the pin forward — the code-only fix reaches the repo.
+    _apply(tmp_path)
+    assert config.shipit_pin(tmp_path / ".shipit.toml") == new_sha
+    assert _plan(tmp_path).nothing_to_do  # and re-settles to a no-op
 
 
 # --------------------------------------------------------------------------
@@ -323,7 +812,7 @@ def test_load_units_includes_the_eval_terminal_hooks():
 
 
 def test_hook_units_coexist_on_one_settings_file():
-    # Splicing all four event entries into one file leaves each in its own event
+    # Splicing all five event entries into one file leaves each in its own event
     # array, none clobbering another — the consumer keeps a single valid settings.json.
     units = {u.key: u for u in iunits.load_units()}
     text = ""
@@ -332,6 +821,7 @@ def test_hook_units_coexist_on_one_settings_file():
         iunits.SETTINGS_STOP_KEY,
         iunits.SETTINGS_SUBAGENTSTOP_KEY,
         iunits.SETTINGS_SESSIONSTART_KEY,
+        iunits.SETTINGS_WORKTREECREATE_KEY,
     ):
         u = units[key]
         text = splice.splice_settings_hook(text, u.desired_inner(), u.event, u.marker)
@@ -346,12 +836,17 @@ def test_hook_units_coexist_on_one_settings_file():
         iunits.SETTINGS_SESSIONSTART_MARKER
         in hooks["SessionStart"][0]["hooks"][0]["command"]
     )
-    # And each event unit reconciles to NOOP against the file carrying all four.
+    assert (
+        iunits.SETTINGS_WORKTREECREATE_MARKER
+        in hooks["WorktreeCreate"][0]["hooks"][0]["command"]
+    )
+    # And each event unit reconciles to NOOP against the file carrying all five.
     for key in (
         iunits.SETTINGS_KEY,
         iunits.SETTINGS_STOP_KEY,
         iunits.SETTINGS_SUBAGENTSTOP_KEY,
         iunits.SETTINGS_SESSIONSTART_KEY,
+        iunits.SETTINGS_WORKTREECREATE_KEY,
     ):
         u = units[key]
         got = splice.extract_settings_hook(text, u.event, u.marker)
@@ -375,6 +870,50 @@ def test_load_units_includes_the_claude_start_launcher():
     # The launcher's whole job: exec `claude --worktree "<minted-id>" "$@"`.
     assert "--worktree" in text
     assert 'exec claude --worktree "sess-' in text
+
+
+def test_managed_settings_hooks_agree_with_shipits_own_settings():
+    # The dogfood drift guard (the WS01 pattern), for the drift class behind #443
+    # Finding B: shipit's own .claude/settings.json wired WorktreeCreate while the
+    # managed variant never did. Every managed JSON-hook unit must appear — with
+    # the SAME canonical entry — in shipit's own settings, so the two wirings can
+    # never diverge again silently.
+    own = json.loads(
+        (Path(__file__).parent.parent / ".claude" / "settings.json").read_text()
+    )
+    units = {u.key: u for u in iunits.load_units()}
+    for key in (
+        iunits.SETTINGS_KEY,
+        iunits.SETTINGS_STOP_KEY,
+        iunits.SETTINGS_SUBAGENTSTOP_KEY,
+        iunits.SETTINGS_SESSIONSTART_KEY,
+        iunits.SETTINGS_WORKTREECREATE_KEY,
+    ):
+        u = units[key]
+        entries = own["hooks"].get(u.event, [])
+        matches = [e for e in entries if splice.is_shipit_hook(e, u.marker)]
+        assert matches, f"shipit's own settings.json wires no {u.event} entry ({key})"
+        assert iunits.canonical_hook_entry(matches[0]) == u.desired_inner()
+
+
+def test_load_units_includes_the_worktreecreate_adapter_hook():
+    # #443 Finding B: the managed `claude-start` bootstrap promises that
+    # `claude --worktree` provisions the session Tree via shipit's WorktreeCreate
+    # hook (ADR-0027) — the managed settings must wire it, or a stock consumer's
+    # `--worktree` falls through to Claude Code's native worktree.
+    units = {u.key: u for u in iunits.load_units()}
+    assert iunits.SETTINGS_WORKTREECREATE_KEY in units
+    unit = units[iunits.SETTINGS_WORKTREECREATE_KEY]
+    assert unit.kind == "block"
+    assert unit.fmt == iunits.FMT_JSON_HOOK
+    assert unit.dest == iunits.SETTINGS_FILE
+    assert unit.event == iunits.EVENT_WORKTREECREATE
+    assert unit.marker == iunits.SETTINGS_WORKTREECREATE_MARKER
+    entry = json.loads(unit.desired_inner())
+    # WorktreeCreate binds to no tool, so the entry carries no matcher — and the
+    # command is consumer-generic (same shape as shipit's own settings entry).
+    assert "matcher" not in entry
+    assert entry["hooks"][0]["command"] == "pixi run shipit hook worktreecreate"
 
 
 def test_load_units_includes_the_sessionstart_activation_hook():
@@ -615,6 +1154,8 @@ class _GhRecorder:
         self.calls = []
         self.pr_body = None
         self.hook_activations = []
+        self.commit_paths = ()
+        self.commit_no_verify = None
 
     def activate_hooks(self, root):
         # Stand in for `lefthook install`: record the call, mutate nothing.
@@ -627,8 +1168,10 @@ class _GhRecorder:
     def add(self, paths, *, cwd):
         self.calls.append(("add", tuple(paths)))
 
-    def commit(self, message, paths, *, cwd):
+    def commit(self, message, paths, *, cwd, no_verify=False):
         self.calls.append(("commit", message))
+        self.commit_paths = tuple(paths)
+        self.commit_no_verify = no_verify
 
     def push(self, branch, *, cwd, remote="origin", force=False):
         self.calls.append(("push", branch))
@@ -666,6 +1209,12 @@ def rec(monkeypatch):
     # (mirrors how lint tests inject run_tool). Real activation is covered
     # directly against the Exec runner in test_activate_hooks_* below.
     monkeypatch.setattr(iapply, "_activate_hooks", r.activate_hooks)
+    # Stub the self-certification boundaries (ADR-0033) the same way: the
+    # committing modes certify by default, and these tests are not about the
+    # postconditions (no pixi solve / scoped lint / launcher probe spawns).
+    # The real checks are covered in tests/test_install_selfcert.py.
+    monkeypatch.setattr(selfcert, "certify", _cert_ok)
+    monkeypatch.setattr(selfcert, "consumer_debt", lambda root, **kw: None)
     return r
 
 
@@ -847,6 +1396,175 @@ def test_consumer_edit_surfaces_as_override(tmp_path, rec):
     # (a non-empty diff), not an empty diff against what shipit just wrote.
     assert "CONSUMER EDIT" in rec.pr_body
     assert "```diff" in rec.pr_body
+
+
+def test_fresh_install_delivers_the_lint_environment(tmp_path, rec):
+    # ADP00 (docs/prd/adoption.md): a fresh install ADDs the lint env blocks —
+    # the consumer's pixi.toml ends up a complete, valid manifest whose lint
+    # environment carries the fleet-pinned toolchain, alongside the consumer's
+    # own untouched content.
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    (tmp_path / "pixi.toml").write_text(
+        '[workspace]\nname = "acme"\nchannels = ["conda-forge"]\n'
+        'platforms = ["osx-arm64"]\n\n[tasks]\ntest = "pytest"\n'
+    )
+    _apply(tmp_path)
+
+    manifest = tomllib.loads((tmp_path / "pixi.toml").read_text())  # valid TOML
+    # The consumer's own content is preserved.
+    assert manifest["workspace"]["name"] == "acme"
+    assert manifest["tasks"]["test"] == "pytest"
+    # The managed task, the pinned toolchain, and the environment definition —
+    # everything `pixi run -e lint lint` needs on a stock consumer.
+    assert manifest["tasks"]["lint"] == "shipit lint"
+    deps = manifest["feature"]["lint"]["dependencies"]
+    assert set(deps) == set(LINT_TOOLS)
+    assert manifest["environments"]["lint"] == ["lint"]
+
+    # Both blocks recorded a pristine hash in the manifest...
+    managed = config.load_managed(config.load(tmp_path / ".shipit.toml"))
+    assert iunits.PIXI_LINT_DEPS_KEY in managed
+    assert iunits.PIXI_ENVS_KEY in managed
+    # ...and an unchanged re-install is a clean NOOP.
+    assert _plan(tmp_path).nothing_to_do
+
+
+def test_lint_env_block_merges_into_an_existing_environments_table(tmp_path, rec):
+    # A consumer with their own [environments] keeps it: the managed `lint`
+    # entry lands INSIDE the existing table (never a duplicate header, which
+    # would be invalid TOML).
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    (tmp_path / "pixi.toml").write_text('[environments]\ndev = ["dev"]\n')
+    _apply(tmp_path)
+
+    manifest = tomllib.loads((tmp_path / "pixi.toml").read_text())
+    assert manifest["environments"] == {"dev": ["dev"], "lint": ["lint"]}
+
+
+def test_consumer_edit_to_lint_deps_block_surfaces_as_override(tmp_path, rec):
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    _apply(tmp_path)
+    rec.calls.clear()
+
+    # The consumer bumps a pinned tool inside the managed block.
+    pixi_path = tmp_path / "pixi.toml"
+    pixi_path.write_text(
+        pixi_path.read_text().replace('ruff = "0.15.*"', 'ruff = "0.99.*"')
+    )
+
+    # The edit is a typed OVERRIDE decision on the plan...
+    plan = _plan(tmp_path)
+    assert [d.unit.key for d in plan.overrides] == [iunits.PIXI_LINT_DEPS_KEY]
+    # ...surfaced in the PR body with the consumer's edit, never clobbered blind.
+    _apply(tmp_path, iapply.MODE_PR)
+    assert ("pr_create", True) in rec.calls
+    assert "### Overrides" in rec.pr_body
+    assert 'ruff = "0.99.*"' in rec.pr_body
+
+
+# --------------------------------------------------------------------------
+# The pixi-manifest seed (ADP00-WS09, #432) — a stock consumer with NO
+# pixi.toml gets a minimal VALID [workspace] table around the managed blocks
+# --------------------------------------------------------------------------
+
+
+def test_pixi_manifest_seed_is_valid_toml_with_a_sanitized_name():
+    # The pure seed renderer: parseable TOML carrying the one table pixi
+    # requires, with the name slugged so an exotic directory name can neither
+    # break the TOML string nor produce a name pixi rejects.
+    seed = tomllib.loads(iunits.pixi_manifest_seed("shipit-canary"))
+    assert seed["workspace"]["name"] == "shipit-canary"
+    assert seed["workspace"]["channels"] == list(iunits.PIXI_SEED_CHANNELS)
+    assert seed["workspace"]["platforms"] == list(iunits.PIXI_SEED_PLATFORMS)
+
+    weird = tomllib.loads(iunits.pixi_manifest_seed('my repo "v2"!'))
+    assert weird["workspace"]["name"] == "my-repo-v2"
+    # Never empty, even from a name with no salvageable characters.
+    assert tomllib.loads(iunits.pixi_manifest_seed("«»"))["workspace"]["name"]
+
+
+def test_fresh_consumer_without_pixi_manifest_gets_a_valid_seed(tmp_path, rec):
+    # The #432 canary failure: no pixi.toml at all is the STOCK adoption case.
+    # Install must leave a manifest pixi parses — a [workspace] table plus the
+    # three managed blocks — from the very first commit.
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+
+    plan = _plan(tmp_path)
+    assert plan.seed_pixi_manifest is True
+    # The dry-run report announces the seed before anything is written.
+    assert "pixi.toml ([workspace] table" in verb.format_plan(plan, dry_run=True)
+
+    _apply(tmp_path, iapply.MODE_PR)
+
+    manifest = tomllib.loads((tmp_path / "pixi.toml").read_text())  # valid TOML
+    # The seeded required table, named from the consumer root.
+    assert manifest["workspace"]["name"] == iunits.workspace_name(tmp_path.name)
+    assert manifest["workspace"]["channels"] == list(iunits.PIXI_SEED_CHANNELS)
+    # ...and everything `pixi run -e lint lint` needs, spliced in beneath it.
+    assert manifest["tasks"]["lint"] == "shipit lint"
+    assert set(manifest["feature"]["lint"]["dependencies"]) == set(LINT_TOOLS)
+    assert manifest["environments"]["lint"] == ["lint"]
+
+    # The seed is scaffold, not a managed unit: only the three block units are
+    # recorded, so the [workspace] table is consumer-owned from here on.
+    managed = config.load_managed(config.load(tmp_path / ".shipit.toml"))
+    pixi_keys = {k for k in managed if k.startswith("pixi.toml")}
+    assert pixi_keys == {
+        iunits.PIXI_KEY,
+        iunits.PIXI_LINT_DEPS_KEY,
+        iunits.PIXI_ENVS_KEY,
+    }
+
+    # The PR body tells the merger the table was seeded and is theirs to edit.
+    assert "### Pixi manifest seeded" in rec.pr_body
+
+    # A re-install is a clean NOOP — the seed decision does not resurface.
+    replan = _plan(tmp_path)
+    assert replan.nothing_to_do and replan.seed_pixi_manifest is False
+
+
+def test_seeded_workspace_table_is_consumer_owned(tmp_path, rec):
+    # A consumer edit to the seeded [workspace] table is NOT drift: the table
+    # was never hashed into [managed], so a re-install stays a clean no-op.
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    _apply(tmp_path)
+
+    pixi_path = tmp_path / "pixi.toml"
+    pixi_path.write_text(
+        pixi_path.read_text().replace("platforms = [", 'license = "MIT"\nplatforms = [')
+    )
+    assert _plan(tmp_path).nothing_to_do
+
+
+def test_existing_pixi_manifest_is_never_seeded(tmp_path, rec):
+    # A consumer WITH a manifest keeps today's behavior: blocks reconciled into
+    # it, header untouched, no seed decided.
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    (tmp_path / "pixi.toml").write_text('[workspace]\nname = "acme"\n')
+
+    plan = _plan(tmp_path)
+    assert plan.seed_pixi_manifest is False
+
+    _apply(tmp_path)
+    manifest = tomllib.loads((tmp_path / "pixi.toml").read_text())
+    assert manifest["workspace"] == {"name": "acme"}  # untouched
+    assert manifest["tasks"]["lint"] == "shipit lint"
+
+
+def test_seed_never_clobbers_a_manifest_created_after_gather(tmp_path, rec):
+    # The gather→apply window: a pixi.toml that appeared after the plan was
+    # decided is a consumer file — the seed write is skipped, the blocks still
+    # splice into it.
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    plan = _plan(tmp_path)
+    assert plan.seed_pixi_manifest is True
+
+    (tmp_path / "pixi.toml").write_text('[workspace]\nname = "late"\n')
+    iapply.apply(plan)
+
+    manifest = tomllib.loads((tmp_path / "pixi.toml").read_text())
+    assert manifest["workspace"] == {"name": "late"}
+    assert manifest["tasks"]["lint"] == "shipit lint"
 
 
 def test_open_install_pr_is_updated_not_recreated(tmp_path, rec, monkeypatch):
@@ -1613,3 +2331,179 @@ def test_cmd_mode_flags_are_mutually_exclusive():
         result = CliRunner().invoke(verb.cmd, [*pair, "."])
         assert result.exit_code == 2
         assert "mutually exclusive" in result.output
+
+
+# --------------------------------------------------------------------------
+# Block identity + the pin line (#433) — the reconcile report names blocks,
+# and the pin stamp gets its own report/PR-body line.
+# --------------------------------------------------------------------------
+
+
+def test_format_plan_lines_carry_block_identity(tmp_path, rec):
+    # A fresh install writes three marker blocks into ONE pixi.toml and five
+    # hook entries into ONE settings.json: the report must distinguish them by
+    # unit KEY (the [managed] names), never repeat a bare filename (#433).
+    plan = _plan(tmp_path)
+    report = verb.format_plan(plan)
+    for key in (
+        iunits.PIXI_KEY,
+        iunits.PIXI_LINT_DEPS_KEY,
+        iunits.PIXI_ENVS_KEY,
+        iunits.SETTINGS_KEY,
+        iunits.SETTINGS_STOP_KEY,
+    ):
+        assert f"add      {key}" in report
+    # No line is a bare `add pixi.toml` with nothing after it.
+    assert not any(
+        line.strip() == "add      pixi.toml".strip()
+        or line.rstrip().endswith(" pixi.toml")
+        for line in report.splitlines()
+        if line.strip().startswith("add")
+    )
+
+
+def test_pr_body_lists_units_by_key(tmp_path, rec):
+    _apply(tmp_path, iapply.MODE_PR)
+    assert f"- `{iunits.PIXI_LINT_DEPS_KEY}`" in rec.pr_body
+    assert f"- `{iunits.SETTINGS_SESSIONSTART_KEY}`" in rec.pr_body
+
+
+def test_format_result_renders_the_pin_stamp_line(tmp_path, rec):
+    result = _apply(tmp_path, iapply.MODE_LOCAL)
+    assert result.stamped_version == "testhash"
+    assert "  pinned to testhash" in verb.format_result(result)
+
+
+def test_pr_body_carries_the_pin_stamp_line(tmp_path, rec):
+    _apply(tmp_path, iapply.MODE_PR)
+    assert "Pinned to `testhash`" in rec.pr_body
+
+
+def test_override_summary_uses_the_unit_key(tmp_path, rec):
+    _apply(tmp_path)
+    # Edit the managed tasks BLOCK -> next PR proposes an override, and the
+    # <summary> names the block, not the shared filename.
+    pixi = tmp_path / "pixi.toml"
+    pixi.write_text(pixi.read_text().replace('lint = "shipit lint"', 'lint = "true"'))
+    _apply(tmp_path, iapply.MODE_PR)
+    assert f"<code>{iunits.PIXI_KEY}</code>" in rec.pr_body
+
+
+# --------------------------------------------------------------------------
+# The truly stock consumer (#449 item 8) — empty repo, no manifest, no
+# configs, no hooks: the WS09/WS10 class dies here.
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def stock_consumer(tmp_path):
+    """A TRULY stock consumer: an empty directory. No AGENTS.md, no pixi.toml,
+    no .shipit.toml, no .claude/, no hooks — the headline adoption case."""
+    root = tmp_path / "stock"
+    root.mkdir()
+    return root
+
+
+def test_fresh_install_on_a_truly_stock_consumer(stock_consumer, rec):
+    result = _apply(stock_consumer, iapply.MODE_PR)
+
+    # Every managed unit decided ADD (nothing pre-existed to reconcile).
+    assert all(d.action == irec.ADD for d in result.plan.decisions)
+
+    # The whole set landed: the block hosts were CREATED around the blocks.
+    agents = (stock_consumer / "AGENTS.md").read_text()
+    assert iunits.BLOCK_OPEN in agents
+    manifest = tomllib.loads((stock_consumer / "pixi.toml").read_text())
+    assert manifest["workspace"]["name"] == "stock"  # the seeded table
+    assert "lint" in manifest["tasks"]
+    settings = json.loads((stock_consumer / ".claude" / "settings.json").read_text())
+    assert set(settings["hooks"]) == {
+        "PreToolUse",
+        "Stop",
+        "SubagentStop",
+        "SessionStart",
+        "WorktreeCreate",
+    }
+    assert (stock_consumer / "lefthook.yml").is_file()
+    assert (stock_consumer / "bin" / "shipit").is_file()
+    assert (stock_consumer / ".markdownlint.yaml").is_file()
+
+    # Policy seeded, manifest stamped, PR opened.
+    cfg = config.load(stock_consumer / config.CONFIG_NAME)
+    assert config.shipit_version(cfg) == "testhash"
+    assert "reviewers" in cfg
+    assert ("pr_create", True) in rec.calls
+
+
+def test_stock_consumer_reinstall_reconciles_to_noop(stock_consumer, rec):
+    _apply(stock_consumer)
+    again = _plan(stock_consumer)
+    assert again.nothing_to_do
+
+
+# --------------------------------------------------------------------------
+# Failure-path flow events (#434) — install.started/completed/failed
+# --------------------------------------------------------------------------
+
+
+def _events(caplog):
+    from shipit import events as ev
+
+    return [getattr(r, ev.EXTRA_KEY, None) for r in caplog.records]
+
+
+def test_install_run_emits_started_and_completed(tmp_path, rec, caplog):
+    import logging as _logging
+
+    with caplog.at_level(_logging.INFO, logger="shipit.install"):
+        rc = verb.run(str(tmp_path), dry_run=True)
+    assert rc == 0
+    names = _events(caplog)
+    assert "install.started" in names
+    assert "install.completed" in names
+    assert "install.failed" not in names
+
+
+def test_failed_install_emits_the_failed_event_with_the_step(
+    tmp_path, rec, monkeypatch, caplog
+):
+    import logging as _logging
+
+    def boom(*a, **k):
+        raise ExecError(["git", "push"], rc=1, stderr="denied")
+
+    monkeypatch.setattr(git, "push", boom)
+    with caplog.at_level(_logging.INFO, logger="shipit.install"):
+        rc = verb.run(str(tmp_path), pr=True)
+    assert rc == 1  # the cli_errors shell still renders error + exit 1
+    from shipit import events as ev
+
+    failed = [
+        r for r in caplog.records if getattr(r, ev.EXTRA_KEY, None) == "install.failed"
+    ]
+    assert len(failed) == 1
+    assert failed[0].step == "apply"
+
+
+def test_selfcert_failure_event_names_the_selfcert_step(
+    tmp_path, rec, monkeypatch, caplog
+):
+    import logging as _logging
+
+    from shipit.install import selfcert as sc
+
+    def failing_cert(plan, root, **kw):
+        return sc.CertReport(checks=(sc.CertCheck(name="planted", ok=False),))
+
+    monkeypatch.setattr(sc, "certify", failing_cert)
+    with caplog.at_level(_logging.INFO, logger="shipit.install"):
+        rc = verb.run(str(tmp_path), pr=True)
+    assert rc == 1
+    from shipit import events as ev
+
+    failed = [
+        r for r in caplog.records if getattr(r, ev.EXTRA_KEY, None) == "install.failed"
+    ]
+    assert len(failed) == 1
+    assert failed[0].step == "self-certification"
+    assert rec.names() == []  # fail closed: no branch, no commit, no PR

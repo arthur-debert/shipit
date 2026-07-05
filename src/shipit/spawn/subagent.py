@@ -20,7 +20,9 @@ The pipeline itself is unchanged in behavior (a mechanical ADR-0030 promotion):
   NEVER a silent fallback to a native ``git worktree``. The launcher is reached
   only after a Tree exists, so a failed create can never launch a Run against
   the parent checkout; a missing epic umbrella branch refuses rather than
-  falling back to ``origin/main``.
+  falling back to ``origin/main``; a write shape spawned onto a PINLESS base
+  (no ``.shipit.toml [shipit].version``) refuses through provisioning's pin
+  gate, naming the bootstrap install (ADR-0033).
 - Tree creation is REUSED wholesale (:func:`shipit.tree.create.create` /
   :func:`shipit.tree.readonly.create_readonly`) — never reimplemented.
 - The Run reports back **through the PR** (ADR-0019 §6): the write tail
@@ -209,7 +211,11 @@ def spawn_subagent(spec: SubagentSpec, bounds: Boundaries | None = None) -> Spaw
     issue, a reviewer without any shape, a ``--session`` that sanitizes to
     nothing), ``--repo`` disagrees with the ambient checkout, the command is not
     run inside a GitHub checkout, a git/gh call fails, **Tree creation fails**
-    (fail-closed — no native-worktree fallback), the child exits nonzero, or —
+    (fail-closed — no native-worktree fallback; this includes a write shape
+    spawned onto a PINLESS base, ADR-0033's surviving guard: provisioning's
+    pin gate raises and the refusal names the bootstrap install rather than
+    launching a Run whose ``bin/shipit`` could never exec), the child exits
+    nonzero, or —
     for a write Run — the post-condition audit fails (no PR on the branch, an
     unreadable PR state, or a PR that is not an OPEN, DRAFT PR targeting the
     Tree's intended base).

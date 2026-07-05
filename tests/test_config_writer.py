@@ -63,28 +63,63 @@ def test_write_manifest_replaces_prior_shipit_tables(tmp_path):
     assert p.read_text().count("[shipit]") == 1
 
 
-def test_is_onboarded_true_when_shipit_or_managed_block_present(tmp_path):
-    # The [shipit]/[managed] block `shipit install` writes IS the onboarded marker.
+def test_shipit_pin_reads_the_stamped_version(tmp_path):
+    # The [shipit].version pin `shipit install` stamps IS the bootstrapped marker
+    # (ADR-0033) — the pin gate Tree provisioning fails closed on reads it here.
     p = tmp_path / ".shipit.toml"
-    config.write_manifest(p, version="v1", managed={"bin/shipit": "sha256:x"})
-    assert config.is_onboarded(p) is True
-
-    # A bare [managed] table (no [shipit]) is also the marker.
-    q = tmp_path / "managed-only.toml"
-    q.write_text("[managed]\n")
-    assert config.is_onboarded(q) is True
+    config.write_manifest(p, version="a" * 40, managed={"bin/shipit": "sha256:x"})
+    assert config.shipit_pin(p) == "a" * 40
 
 
-def test_is_onboarded_false_for_policy_only_config(tmp_path):
-    # shipit-self's case: policy config ([secrets]/[reviewers]/[project]) but no
-    # managed block — NOT onboarded, so Tree provisioning must not reconcile/onboard.
+def test_shipit_pin_none_for_policy_only_config(tmp_path):
+    # Policy config ([secrets]/[reviewers]/[project]) but no pin — PINLESS, so
+    # Tree provisioning must refuse toward the bootstrap install.
     p = tmp_path / ".shipit.toml"
     p.write_text('[secrets]\nGH_PAT = { env = "X" }\n\n[reviewers]\ncopilot = {}\n')
-    assert config.is_onboarded(p) is False
+    assert config.shipit_pin(p) is None
+
+    # A bare [managed] table without a [shipit].version is pinless too: the
+    # launcher would have no build to exec.
+    q = tmp_path / "managed-only.toml"
+    q.write_text("[managed]\n")
+    assert config.shipit_pin(q) is None
 
 
-def test_is_onboarded_false_when_file_missing(tmp_path):
-    assert config.is_onboarded(tmp_path / "nope.toml") is False
+def test_shipit_pin_none_when_file_missing_or_malformed(tmp_path):
+    assert config.shipit_pin(tmp_path / "nope.toml") is None
+    p = tmp_path / "broken.toml"
+    p.write_text("[shipit\nversion=")
+    assert config.shipit_pin(p) is None
+    q = tmp_path / "mistyped.toml"
+    q.write_text('shipit = "not a table"\n')
+    assert config.shipit_pin(q) is None
+
+
+@pytest.mark.parametrize(
+    "version",
+    [
+        "0.0.1",  # the retired static package version — identifies nothing
+        "seed",  # a sentinel that is not a commit
+        "a" * 39,  # abbreviated / wrong-length hex
+        "a" * 41,
+        "z" * 40,  # right length, non-hex
+        "",
+    ],
+)
+def test_shipit_pin_none_for_non_sha_version(tmp_path, version):
+    # The pin gate must fail CLOSED on any [shipit].version that is not a full
+    # git sha (ADR-0033): a bogus pin left provisioning proceed and the launcher
+    # hand uv a non-commit ref instead of refusing toward the bootstrap.
+    p = tmp_path / ".shipit.toml"
+    p.write_text(f'[shipit]\nversion = "{version}"\n')
+    assert config.shipit_pin(p) is None
+
+
+def test_shipit_pin_accepts_full_sha256(tmp_path):
+    # A 64-hex SHA-256 object id is a valid full sha too.
+    p = tmp_path / ".shipit.toml"
+    p.write_text(f'[shipit]\nversion = "{"b" * 64}"\n')
+    assert config.shipit_pin(p) == "b" * 64
 
 
 # --------------------------------------------------------------------------

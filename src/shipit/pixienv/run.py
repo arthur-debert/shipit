@@ -67,33 +67,39 @@ def has_default_env(root: str | Path) -> bool:
     return Path(root).joinpath(*DEFAULT_ENV_DIR).is_dir()
 
 
-def run_argv(argv: list[str], root: str | Path) -> list[str]:
+def run_argv(
+    argv: list[str], root: str | Path, *, environment: str | None = None
+) -> list[str]:
     """``argv`` re-expressed to run THROUGH ``root``'s pixi env — the pure builder.
 
     ``pixi run --manifest-path <root>/pixi.toml -- <argv>``: the explicit
     ``--manifest-path`` overrides any leaked ``PIXI_PROJECT_MANIFEST`` so the child
     resolves ``root``'s OWN manifest, and the ``--`` separates pixi's args from the
-    child argv. Pure argv-in/argv-out, for callers that execute through their own
-    Exec seam (the backend launch contract, :mod:`shipit.spawn.launch`).
+    child argv. ``environment`` pins a non-default pixi environment
+    (``--environment <name>``) — the same selector the read verbs take — for a
+    child that lives in a feature env rather than the default (e.g. the managed
+    lint env's ``lefthook``). Pure argv-in/argv-out, for callers that execute
+    through their own Exec seam (the backend launch contract,
+    :mod:`shipit.spawn.launch`).
     """
-    return [
-        "pixi",
-        "run",
-        "--manifest-path",
-        str(Path(root) / MANIFEST_NAME),
-        "--",
-        *argv,
-    ]
+    cmd = ["pixi", "run", "--manifest-path", str(Path(root) / MANIFEST_NAME)]
+    if environment is not None:
+        cmd += ["--environment", environment]
+    return [*cmd, "--", *argv]
 
 
 def install(
     root: str | Path,
     *,
+    environment: str | None = None,
     env: Mapping[str, str] | None = None,
     runner=None,
 ) -> execrun.ExecResult:
     """Run ``pixi install`` in ``root`` and return the step's :class:`ExecResult`.
 
+    ``environment`` pins a non-default pixi environment (``--environment
+    <name>``) — the selector install self-certification uses to solve exactly
+    the managed lint env (ADR-0033) rather than the consumer's default.
     ``env``, when given, is the COMPLETE child environment (``replace_env=True``) —
     callers hand in a scrubbed snapshot (:func:`shipit.pixienv.scrub_env`) so a
     parent's leaked project pointers cannot creep back in via a merge over
@@ -105,8 +111,11 @@ def install(
     """
     if runner is None:
         runner = execrun.run
+    argv = ["pixi", "install"]
+    if environment is not None:
+        argv += ["--environment", environment]
     return runner(
-        ["pixi", "install"],
+        argv,
         cwd=str(root),
         env=None if env is None else dict(env),
         replace_env=env is not None,
@@ -118,6 +127,7 @@ def run_in_env(
     argv: list[str],
     root: str | Path,
     *,
+    environment: str | None = None,
     env: Mapping[str, str] | None = None,
     check: bool = True,
     timeout: float | None = INSTALL_TIMEOUT,
@@ -125,6 +135,7 @@ def run_in_env(
 ) -> execrun.ExecResult:
     """Execute ``argv`` through ``root``'s pixi env (:func:`run_argv`), one Exec.
 
+    ``environment`` pins a non-default pixi environment (see :func:`run_argv`);
     ``env`` follows :func:`install`'s contract (complete child env when given,
     inherit when ``None``); ``check=False`` makes a nonzero child a normal
     :class:`ExecResult` for probe-shaped callers. The default ``timeout`` is
@@ -135,7 +146,7 @@ def run_in_env(
     if runner is None:
         runner = execrun.run
     return runner(
-        run_argv(argv, root),
+        run_argv(argv, root, environment=environment),
         cwd=str(root),
         env=None if env is None else dict(env),
         replace_env=env is not None,

@@ -64,6 +64,23 @@ def context():
 
 
 @pytest.fixture(autouse=True)
+def _no_network_staleness_read(monkeypatch):
+    """Keep the ADR-0033 pin-staleness read off the network in every test.
+
+    The SessionStart hook's staleness advisory reads GitHub best-effort via
+    :func:`shipit.gh.commits_ahead`. Tests that drive the hook against a cwd
+    that happens to carry a valid pin (including ``Path.cwd()`` fallbacks into
+    this very checkout) must never turn that into a live ``gh api`` call; the
+    hook resolves the boundary at call time, so patching the module function
+    is enough. Staleness tests inject their own fake through the ``run()``
+    parameter, which takes precedence over this stub.
+    """
+    from shipit import gh
+
+    monkeypatch.setattr(gh, "commits_ahead", lambda repo, base, head: None)
+
+
+@pytest.fixture(autouse=True)
 def _clean_domain_key_context():
     """Isolate the ADR-0029 domain-key log context around every test.
 

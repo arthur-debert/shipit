@@ -17,11 +17,12 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from .. import __version__, config, execrun, gh, git
-from .errors import InstallError
+from .. import buildid, config, execrun, gh, git
+from . import selfcert
+from .errors import InstallError, SelfCertError
 from .reconcile import Plan, consumer_inner
 from .splice import SETTINGS_MALFORMED, splice_block, splice_settings_hook
-from .units import FMT_JSON_HOOK, Unit
+from .units import FMT_JSON_HOOK, PIXI_FILE, Unit, pixi_manifest_seed
 
 logger = logging.getLogger("shipit.install")
 
@@ -60,12 +61,22 @@ HOOK_ACTIVATE_ARGV = ["install"]
 #: which apply absorbs into the result's degraded activation outcome.
 HOOK_ACTIVATE_TIMEOUT: float = 60.0
 
+#: The consumer-generated lockfile (#439): the managed set's decision is the
+#: COMMITTED lockfile — pixi's own recommended practice, and what laptop/CI
+#: parity via ``setup-pixi --locked`` wants. The lockfile is generated per
+#: consumer (self-certification's lint-env solve materializes/refreshes it), so
+#: it can never be a pristine-hashed managed unit; instead every committing
+#: apply stages it alongside the managed set when present, and no consumer tree
+#: is left dirty with an untracked ``pixi.lock`` after an install lands.
+PIXI_LOCK = "pixi.lock"
+
 #: The PR-body renderer apply calls at the boundary moment (``MODE_PR`` only):
-#: ``(override_before, hooks_activated) -> body``. Injected by the verb so the
-#: body's sections stay a pure renderer concern (ADR-0030) while apply supplies
-#: the two inputs only it can know — the pre-write consumer snapshots and the
-#: real activation outcome.
-PrBody = Callable[[Mapping[str, str], "bool | None"], str]
+#: ``(override_before, hooks_activated, stamped_pin, lint_debt) -> body``.
+#: Injected by the verb so the body's sections stay a pure renderer concern
+#: (ADR-0030) while apply supplies the inputs only it can know — the pre-write
+#: consumer snapshots, the real activation outcome, the pin it stamped, and the
+#: best-effort whole-tree debt count (``None`` when unreadable).
+PrBody = Callable[[Mapping[str, str], "bool | None", str, "int | None"], str]
 
 
 @dataclass(frozen=True)
@@ -86,6 +97,8 @@ class InstallResult:
     branch: str | None = None  # the committed/pushed branch (local/push modes)
     pr_url: str | None = None  # the draft PR (pr mode)
     pr_updated: bool = False  # True when an existing install PR was refreshed
+    stamped_version: str | None = None  # the Shipit pin this apply stamped (#433)
+    lint_debt: int | None = None  # whole-tree failing checks (MODE_PR; None = unread)
 
 
 def write_unit(root: Path, unit: Unit) -> None:
@@ -162,14 +175,27 @@ def consumer_snapshot(root: Path, unit: Unit) -> str:
 
 
 def _shipit_version() -> str:
-    """The shipit commit that wrote the set (its repo HEAD), else the package version.
+    """The FULL git sha of the build performing this install — the Shipit pin.
 
-    The version string is a rendered artifact, so the typed :class:`Sha`
-    :func:`shipit.git.head_commit` returns stringifies here, at the seam.
+    ADR-0033: the stamp is the build's OWN commit identity
+    (:func:`shipit.buildid.build_sha` — install record, build-time embed, or
+    source-checkout HEAD), never an operator-supplied value and never the
+    static package version (which identifies nothing). Fails CLOSED with
+    :class:`InstallError` when no identity resolves: a pin the launcher cannot
+    exec is worse than no install at all. The version string is a rendered
+    artifact, so the typed :class:`~shipit.identity.Sha` stringifies here, at
+    the seam.
     """
-    pkg_dir = Path(__file__).resolve().parents[1]
-    head = git.head_commit(cwd=str(pkg_dir))
-    return str(head) if head is not None else __version__
+    sha = buildid.build_sha()
+    if sha is None:
+        raise InstallError(
+            "cannot resolve this shipit build's own commit identity (no "
+            "direct_url.json vcs record, no embedded build-sha, not a git "
+            "checkout) — refusing to stamp a pin that identifies nothing "
+            "(ADR-0033). Install shipit from git (uv records the commit) or "
+            "run it from a checkout."
+        )
+    return str(sha)
 
 
 def _activate(
@@ -213,6 +239,8 @@ def apply(
     *,
     activate_hooks: Callable[[Path], execrun.ExecResult] | None = None,
     pr_body: PrBody | None = None,
+    certify=None,
+    debt=None,
 ) -> InstallResult:
     """Execute ``plan`` against its consumer root — the only effectful path.
 
@@ -228,13 +256,26 @@ def apply(
     activation contract without mutating a real ``.git/hooks``; ``pr_body`` is
     the verb's pure PR-body renderer, required for :data:`MODE_PR` (the draft
     PR's body is rendered at the boundary moment, from the pre-write override
-    snapshots and the real activation outcome).
+    snapshots, the real activation outcome, the stamped pin, and the debt
+    count). ``certify``/``debt`` inject the self-certification boundaries
+    (defaults: :func:`shipit.install.selfcert.certify` /
+    :func:`~shipit.install.selfcert.consumer_debt`).
+
+    Every COMMITTING mode (``local``/``push``/``pr``) self-certifies after
+    staging and BEFORE any git side effect (ADR-0033): a missed postcondition
+    raises :class:`SelfCertError` — fail closed, no commit, no PR, the loud
+    diagnostic naming each miss. The default working-tree refresh does not
+    certify: nothing is being published, `git diff` is the caller's review
+    surface, and the caller's own commit rides the repo's hooks. The reconcile
+    commit itself bypasses the repo's hooks (``--no-verify``) — the whole-tree
+    gate is the REPO'S bar, and pre-existing consumer debt is reported in the
+    PR body, never a blocker.
 
     Raises :class:`InstallError` on a domain refusal (``local``/``push`` in
-    detached HEAD) and lets a git/gh boundary failure propagate as
-    :class:`~shipit.execrun.ExecError` — both members of the CLI error shell's
-    known set. Callers decide nothing here: a no-op plan should simply never
-    be applied (:attr:`Plan.nothing_to_do`).
+    detached HEAD, a failed self-certification) and lets a git/gh boundary
+    failure propagate as :class:`~shipit.execrun.ExecError` — both members of
+    the CLI error shell's known set. Callers decide nothing here: a no-op plan
+    should simply never be applied (:attr:`Plan.nothing_to_do`).
     """
     if mode not in MODES:
         raise ValueError(f"unknown install mode: {mode!r}")
@@ -254,6 +295,21 @@ def apply(
         else {}
     )
 
+    # Seed the minimal valid pixi manifest BEFORE the unit writes (#432): the
+    # pixi block splices below land inside a file pixi can parse, so the very
+    # first commit — which fires the freshly-synced pre-commit hook, which
+    # shells into pixi — sees a valid manifest. Guarded on the file still being
+    # absent so a pixi.toml that appeared in the gather→apply window is never
+    # clobbered (the same idempotence stance as the retired unlinks).
+    if plan.seed_pixi_manifest:
+        pixi_path = root / PIXI_FILE
+        if not pixi_path.is_file():
+            pixi_path.write_text(pixi_manifest_seed(root.name), encoding="utf-8")
+            logger.info(
+                "seeded pixi manifest",
+                extra={"root": str(root), "path": PIXI_FILE},
+            )
+
     for d in plan.writes:
         write_unit(root, d.unit)
     for d in plan.retire_deletes:
@@ -267,7 +323,8 @@ def apply(
     if plan.seeds:
         config.apply_policy_seed(cfg_path)
     new_managed = {d.unit.key: d.desired_hash for d in plan.decisions}
-    config.write_manifest(cfg_path, version=_shipit_version(), managed=new_managed)
+    stamped_version = _shipit_version()
+    config.write_manifest(cfg_path, version=stamped_version, managed=new_managed)
     # The reconcile milestone: the managed set (and manifest) is on disk.
     logger.info(
         "managed set written",
@@ -305,6 +362,7 @@ def apply(
         mode=mode,
         hooks_activated=hooks_activated,
         hooks_detail=hooks_detail,
+        stamped_version=stamped_version,
     )
     cwd = str(root)
 
@@ -328,14 +386,49 @@ def apply(
         )
         return result
 
+    # The committing modes self-certify BEFORE any git side effect (ADR-0033):
+    # any missed postcondition fails closed — no commit, no push, no PR — with
+    # the loud diagnostic naming every miss. Runs after the writes/stamp/
+    # activation above, so it asserts exactly the state a commit would publish.
+    certifier = certify or selfcert.certify
+    cert_report = certifier(
+        plan,
+        root,
+        hooks_activated=hooks_activated,
+        stamped_pin=stamped_version,
+    )
+    if not cert_report.ok:
+        message = selfcert.format_failure(cert_report)
+        logger.error(
+            "install self-certification failed — failing closed (no commit, no PR)",
+            extra={
+                "root": str(root),
+                "mode": mode,
+                "failed_checks": ", ".join(c.name for c in cert_report.failures),
+            },
+        )
+        raise SelfCertError(message)
+
+    # The consumer's whole-tree debt (#439's sibling scoping, ADR-0033):
+    # REPORTED in the reconcile PR body, never a blocker — read best-effort
+    # only where a PR body will carry it.
+    if mode == MODE_PR:
+        debt_reader = debt or selfcert.consumer_debt
+        result = replace(result, lint_debt=debt_reader(root))
+
     changed_paths = list(plan.changed_paths)
+    # The committed-lockfile decision (#439, see PIXI_LOCK): the lint-env solve
+    # above materializes/refreshes pixi.lock; stage it with the managed set so
+    # the install lands laptop/CI parity and never leaves the tree dirty.
+    if PIXI_LOCK not in changed_paths and (root / PIXI_LOCK).is_file():
+        changed_paths.append(PIXI_LOCK)
     try:
         if mode == MODE_LOCAL:
             branch = git.current_branch(cwd=cwd)
             if branch is None:
                 raise InstallError("--local needs a checked-out branch")
             git.add(changed_paths, cwd=cwd)
-            git.commit(COMMIT_MESSAGE, changed_paths, cwd=cwd)
+            git.commit(COMMIT_MESSAGE, changed_paths, cwd=cwd, no_verify=True)
             logger.info(
                 "install committed locally",
                 extra={
@@ -352,7 +445,7 @@ def apply(
             if branch is None:
                 raise InstallError("--push needs a checked-out branch")
             git.add(changed_paths, cwd=cwd)
-            git.commit(COMMIT_MESSAGE, changed_paths, cwd=cwd)
+            git.commit(COMMIT_MESSAGE, changed_paths, cwd=cwd, no_verify=True)
             git.push(branch, cwd=cwd)
             logger.info(
                 "install pushed break-glass",
@@ -369,7 +462,7 @@ def apply(
         # standalone consumer-onboarding/reconcile flow, explicit opt-in only.
         git.switch_create(INSTALL_BRANCH, cwd=cwd)
         git.add(changed_paths, cwd=cwd)
-        git.commit(COMMIT_MESSAGE, changed_paths, cwd=cwd)
+        git.commit(COMMIT_MESSAGE, changed_paths, cwd=cwd, no_verify=True)
         # The install branch is regenerated from HEAD each run; force so a re-run
         # with an open install PR updates it rather than failing non-fast-forward.
         git.push(INSTALL_BRANCH, cwd=cwd, force=True)
@@ -391,7 +484,9 @@ def apply(
         url = gh.pr_create(
             head=INSTALL_BRANCH,
             title="shipit: install/update the managed set",
-            body=pr_body(override_before, hooks_activated),
+            body=pr_body(
+                override_before, hooks_activated, stamped_version, result.lint_debt
+            ),
             draft=True,
             cwd=cwd,
         )

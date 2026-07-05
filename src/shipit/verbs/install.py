@@ -28,11 +28,13 @@ This module is ADR-0030 glue + renderers only:
 from __future__ import annotations
 
 import difflib
+import logging
 import sys
 from pathlib import Path
 
 import click
 
+from .. import events
 from ..install.apply import (
     MODE_LOCAL,
     MODE_PR,
@@ -57,6 +59,8 @@ from ..install.reconcile import (
 from ..install.units import Unit, load_units
 from ._errors import cli_errors
 from ._render import emit
+
+logger = logging.getLogger("shipit.install")
 
 
 @click.command(name="install")
@@ -122,32 +126,82 @@ def run(
     ``activate_hooks`` threads the injectable lefthook boundary through to
     :func:`shipit.install.apply.apply` (tests exercise the activation contract
     without mutating a real ``.git/hooks``).
+
+    The run's milestones are dev-cycle events (#434, ADR-0032): ``install.started``
+    at entry, ``install.completed`` on any clean exit (no-op and dry-run
+    included), and — the reason this exists — ``install.failed`` carrying the
+    failing step on the failure paths, so a failed run is legible in
+    ``shipit logs --flow`` instead of leaving only a session-end record.
     """
-    units = load_units()
-    retired = load_retired()
-    state = gather(Path(path or "."), units, retired)
-    plan = reconcile(units, retired, state)
-
-    emit(plan, lambda p: format_plan(p, dry_run=dry_run))
-    warnings = format_plan_warnings(plan)
-    if warnings:
-        print(warnings, file=sys.stderr)
-    if plan.nothing_to_do or dry_run:
-        # Dry-run has NO side effects (no writes, no deletes, no git, no PR);
-        # a nothing-to-do plan is a clean no-op either way.
-        return 0
-
     mode = MODE_LOCAL if local else MODE_PUSH if push else MODE_PR if pr else MODE_TREE
-    result = apply_plan(
-        plan,
+    root = str(Path(path or ".").resolve())
+    events.emit(
+        logger,
+        "install.started",
+        "install started in %s (mode=%s%s)",
+        root,
         mode,
-        activate_hooks=activate_hooks,
-        pr_body=lambda before, hooks: format_pr_body(plan, before, hooks),
+        ", dry-run" if dry_run else "",
+        extra={"mode": mode, "dry_run": dry_run or None},
     )
+    step = "gather/reconcile"
+    try:
+        units = load_units()
+        retired = load_retired()
+        state = gather(Path(path or "."), units, retired)
+        plan = reconcile(units, retired, state)
+
+        emit(plan, lambda p: format_plan(p, dry_run=dry_run))
+        warnings = format_plan_warnings(plan)
+        if warnings:
+            print(warnings, file=sys.stderr)
+        if plan.nothing_to_do or dry_run:
+            # Dry-run has NO side effects (no writes, no deletes, no git, no PR);
+            # a nothing-to-do plan is a clean no-op either way.
+            events.emit(
+                logger,
+                "install.completed",
+                "install completed in %s — nothing to do"
+                if plan.nothing_to_do
+                else "install completed in %s — dry-run",
+                root,
+                extra={"mode": mode},
+            )
+            return 0
+
+        step = "apply"
+        result = apply_plan(
+            plan,
+            mode,
+            activate_hooks=activate_hooks,
+            pr_body=lambda before, hooks, pin, debt: format_pr_body(
+                plan, before, hooks, stamped_version=pin, lint_debt=debt
+            ),
+        )
+    except Exception as exc:
+        # The failure still propagates to the CLI error shell / the caller;
+        # the event is the flow record's legibility, never a swallow (#434).
+        events.emit(
+            logger,
+            "install.failed",
+            "install failed at %s: %s",
+            getattr(exc, "step", step),
+            exc,
+            extra={"step": getattr(exc, "step", step), "mode": mode},
+        )
+        raise
     emit(result, format_result)
     warnings = format_result_warnings(result)
     if warnings:
         print(warnings, file=sys.stderr)
+    events.emit(
+        logger,
+        "install.completed",
+        "install completed in %s (mode=%s)",
+        root,
+        mode,
+        extra={"mode": mode},
+    )
     return 0
 
 
@@ -165,17 +219,33 @@ def format_plan(plan: Plan, *, dry_run: bool = False) -> str:
     managed NOOP. A nothing-to-do plan says so — with the wording shifted when
     a kept retired file was just warned about, where "managed set is current"
     would read as a contradiction.
+
+    Each line carries the unit's KEY, not its dest (#433): a file whose key is
+    its path renders unchanged, while the marker blocks sharing one dest render
+    with their block identity (``pixi.toml#shipit-lint-deps``) — the same names
+    the ``.shipit.toml [managed]`` table uses — so three ``add pixi.toml``
+    lines can never read as one repeated write.
     """
     lines = [f"install: {plan.root}{' (dry-run)' if dry_run else ''}"]
     for d in plan.decisions:
         if d.action != NOOP:
-            lines.append(f"  {d.action:8} {d.unit.dest}")
+            lines.append(f"  {d.action:8} {d.unit.key}")
+    if plan.seed_pixi_manifest:
+        lines.append(
+            f"  {'seed':8} pixi.toml ([workspace] table — consumer has no manifest)"
+        )
     for item in plan.seeds:
         lines.append(f"  {'seed':8} {item}")
     for d in plan.retire_deletes:
         lines.append(f"  {DELETE:8} {d.retired.path} (retired)")
     for d in plan.retire_keeps:
         lines.append(f"  {KEEP:8} {d.retired.path} (retired; locally modified)")
+    if plan.pin_stale:
+        # ADR-0033: a pin roll-forward is a reconcile outcome in its own right —
+        # it can be the ONLY change when a code-only shipit build ships (every
+        # managed file byte-identical), so it earns a plan line like any write.
+        before = plan.current_pin[:12] if plan.current_pin else "(pinless)"
+        lines.append(f"  {'pin':8} {before} -> {plan.target_pin[:12]}")
     if plan.nothing_to_do:
         lines.append(
             "  nothing to do — no automated changes to apply."
@@ -207,8 +277,12 @@ def format_plan_warnings(plan: Plan) -> str:
 
 
 def format_result(result: InstallResult) -> str:
-    """The apply outcome: the activation line (when live) and the mode's line."""
+    """The apply outcome: the pin stamp, the activation line (when live), and
+    the mode's line. The pin gets its OWN line (#433 round-7): the stamp is the
+    ADR-0033 lifecycle's payload, not a detail of the commit."""
     lines = []
+    if result.stamped_version:
+        lines.append(f"  pinned to {result.stamped_version}")
     if result.hooks_activated:
         lines.append("  activated git hooks (lefthook install) — the checks are live")
     if result.mode == MODE_TREE:
@@ -269,9 +343,14 @@ def format_pr_body(
     plan: Plan,
     override_before: dict[str, str] | None = None,
     hooks_activated: bool | None = None,
+    *,
+    stamped_version: str | None = None,
+    lint_debt: int | None = None,
 ) -> str:
-    """The draft PR body: what was added/updated, every override with its diff,
-    the retired delete/keep sections, the policy seed, the activation outcome.
+    """The draft PR body: the stamped pin, what was added/updated (by unit KEY,
+    #433 — block identity, never a bare repeated filename), every override with
+    its diff, the retired delete/keep sections, the policy seed, the activation
+    outcome, and the consumer's whole-tree lint debt (reported, never blocking).
 
     ``override_before`` holds each overridden unit's consumer content captured
     BEFORE the branch write (apply supplies it), so the diff shows the real
@@ -280,20 +359,30 @@ def format_pr_body(
     never claims a success that did not happen: ``None`` when the set has no
     checks to activate, ``True`` when ``lefthook install`` succeeded where
     install ran, ``False`` when it was skipped/failed (binary missing) and a
-    merger must activate the checks themselves.
+    merger must activate the checks themselves. ``stamped_version`` is the
+    Shipit pin this install stamped (ADR-0033); ``lint_debt`` is the
+    best-effort whole-tree failing-check count (``None`` = unreadable, ``0`` =
+    green — only red debt renders a section).
     """
     override_before = override_before or {}
     adds = [d for d in plan.decisions if d.action == ADD]
     updates = [d for d in plan.decisions if d.action == UPDATE]
 
     lines = ["`shipit install` reconciled the managed set.", ""]
+    if stamped_version:
+        lines.append(
+            f"Pinned to `{stamped_version}` — the build that wrote this managed "
+            f"set and passed its self-certification (ADR-0033); the managed "
+            f"`bin/shipit` launcher execs exactly this build."
+        )
+        lines.append("")
     if adds:
         lines.append("### Added")
-        lines += [f"- `{d.unit.dest}`" for d in adds]
+        lines += [f"- `{d.unit.key}`" for d in adds]
         lines.append("")
     if updates:
         lines.append("### Updated")
-        lines += [f"- `{d.unit.dest}`" for d in updates]
+        lines += [f"- `{d.unit.key}`" for d in updates]
         lines.append("")
     if plan.overrides:
         lines.append("### Overrides — consumer-edited, review before merging")
@@ -305,7 +394,7 @@ def format_pr_body(
         )
         lines.append("")
         for d in plan.overrides:
-            lines.append(f"<details><summary><code>{d.unit.dest}</code></summary>")
+            lines.append(f"<details><summary><code>{d.unit.key}</code></summary>")
             lines.append("")
             lines.append("```diff")
             lines.append(
@@ -332,6 +421,15 @@ def format_pr_body(
         )
         lines += [f"- `{d.retired.path}`" for d in plan.retire_keeps]
         lines.append("")
+    if plan.seed_pixi_manifest:
+        lines.append("### Pixi manifest seeded")
+        lines.append(
+            "The consumer had no `pixi.toml`, so this install seeded a minimal "
+            "valid `[workspace]` table around the managed blocks (pixi requires "
+            "one). The table is consumer-owned from here on — edit the name, "
+            "channels, or platforms freely; a re-install never rewrites it."
+        )
+        lines.append("")
     if plan.seeds:
         lines.append("### Policy seeded")
         lines.append(
@@ -357,6 +455,16 @@ def format_pr_body(
             "(lefthook missing or it errored). After merging, run `lefthook install` "
             "(shipit-self: `pixi run -e lint install-hooks`) to activate the checks. "
             "The config is correct; only local activation was deferred."
+        )
+        lines.append("")
+    if lint_debt:
+        lines.append("### Consumer lint debt — reported, not blocking")
+        lines.append(
+            f"whole-tree lint currently red: {lint_debt} failing check(s) — "
+            f"debt-clear pending. Install self-certified only the files it "
+            f"delivered (ADR-0033); the whole-tree gate is this repo's bar "
+            f"(the ADP01 checklist's lint step), cleared with the very env "
+            f"this PR delivers."
         )
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"

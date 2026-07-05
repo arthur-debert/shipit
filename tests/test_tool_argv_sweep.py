@@ -47,11 +47,14 @@ def _parsed(path: pathlib.Path) -> ast.Module:
 #:   literals (:mod:`shipit.pixienv.read`).
 #: - ``ps``   — the liveness probe's home (:mod:`shipit.session.liveness`,
 #:   ``os_probe``): the OS process table has exactly one reader.
+#: - ``curl`` — the lexd release fetch (:mod:`shipit.provision.lexd`): the one
+#:   external download shipit performs (ADP00-WS03).
 _ADAPTER_HOMES: dict[str, tuple[str, ...]] = {
     "gh": ("gh.py",),
     "git": ("git.py",),
     "pixi": ("pixienv/read.py", "pixienv/run.py"),
     "ps": ("session/liveness.py",),
+    "curl": ("provision/lexd.py",),
 }
 
 

@@ -14,11 +14,14 @@ summary (``{path, branch, base}``). The whole pipeline hides behind this one cal
 3. apply ``.treeinclude`` — copy the gitignored-but-needed files (``.env``,
    Doppler config, models) from the source checkout into the new Tree
    (:mod:`shipit.tree.include`).
-4. provision: ``shipit install`` then the path's ``pixi install`` / ``npm ci``,
-   run with the parent's project-pointer env scrubbed (:func:`provision_env`). The
-   ADR-0015 build env (per-Tree ``target/``, ``SCCACHE_BASEDIRS``, ``CARGO_INCREMENTAL=0``)
-   is no longer injected here — it lives in pixi ``[activation.env]`` (COR01 / ADR-0022),
-   so pixi sets it on every activation and it reaches the agent's own in-Tree ``cargo``.
+4. provision: the path's ``pixi install`` / ``npm ci`` + hook activation,
+   run with the parent's project-pointer env scrubbed (:func:`provision_env`) —
+   NO managed-set mutation (ADR-0033: the TRE03-era ``shipit install --local``
+   reconcile is deleted; the Shipit pin keeps Tree and tool coherent by
+   construction). The ADR-0015 build env (per-Tree ``target/``,
+   ``SCCACHE_BASEDIRS``, ``CARGO_INCREMENTAL=0``) is no longer injected here —
+   it lives in pixi ``[activation.env]`` (COR01 / ADR-0022), so pixi sets it on
+   every activation and it reaches the agent's own in-Tree ``cargo``.
 
 Materialization stays atomic from the caller's view: if any step fails, the
 half-built leaf is removed before the error propagates. Every git call goes
@@ -38,14 +41,12 @@ import shutil
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from .. import config, events, execrun, git, logcontext, pixienv
-from . import include, provision
+from ..install.apply import HOOK_ACTIVATE_ARGV, LEFTHOOK_BINARY
+from ..install.units import LEFTHOOK_FILE, LINT_ENV
+from . import include
 from .layout import TreeSpec, central_root, plan
-
-if TYPE_CHECKING:
-    from ..identity import Sha
 
 #: The Tree axis' shared logger (LOG02 spray, ADR-0029): the creation pipeline
 #: narrates its milestones at INFO with durations ("tree created …", per
@@ -54,10 +55,10 @@ if TYPE_CHECKING:
 #: so every record of one materialization correlates.
 logger = logging.getLogger("shipit.tree")
 
-#: Provisioning REQUIRES an ALREADY-ONBOARDED ``.shipit.toml`` (one with a
-#: ``[shipit]``/``[managed]`` block — :func:`shipit.config.is_onboarded`): a
-#: non-onboarded target fails closed (#210). Given an onboarded repo, the checkout's
-#: manifests drive the rest: the managed-set reconcile always runs, a ``pixi.toml``
+#: Provisioning REQUIRES a base carrying the Shipit pin (``.shipit.toml``
+#: ``[shipit].version`` — :func:`shipit.config.shipit_pin`): a pinless target
+#: fails closed (ADR-0033's one surviving guard). Given a pinned repo, the
+#: checkout's manifests drive the rest: a ``pixi.toml``
 #: (:data:`shipit.pixienv.MANIFEST_NAME`) gets ``pixi install`` through the pixi
 #: adapter, a ``package.json`` gets ``npm ci`` — each dep step gated on its file
 #: existing, so a repo that uses only one toolchain runs only that step.
@@ -262,94 +263,84 @@ def _narrate_step(result: execrun.ExecResult) -> None:
 def _provision(dest: Path, *, trees_root: Path) -> None:
     """Provision the freshly-checked-out Tree so a write-session starts ready.
 
-    Runs ``shipit install --local`` (only when the repo is ALREADY ONBOARDED), then
-    the path's ``pixi install`` (through the pixi adapter,
-    :func:`shipit.pixienv.install` — the pixi argv and its long-runner bound are
-    pixi knowledge, PROC02-WS02) / ``npm ci``, each gated on its manifest existing
-    and each run with the scrubbed provisioning env (:func:`provision_env` — parent
-    project pointers removed; the ADR-0015 build env is no longer injected here, it
-    comes from pixi ``[activation.env]`` on activation). Before ``pixi install`` it
-    checks (and only *warns* about — #119) the pixi-cache / Trees-root
+    Provisioning mutates NOTHING managed (ADR-0033): it is clone + branch +
+    env + hook activation. The TRE03-era ``shipit install
+    --local`` step — and the reconcile commit it fail-closed into on the
+    just-cut branch during every tool/managed-set drift window — is DELETED:
+    the Shipit pin makes Tree and tool coherent by construction (a Tree cut
+    from base X runs the shipit pinned at X, via the managed ``bin/shipit``
+    launcher), so the incoherence that step papered over no longer exists, and
+    its ``chore(shipit)`` commits no longer pollute feature PRs. A newer
+    shipit changes a consumer only via a reconcile PR.
+
+    What runs: the path's ``pixi install`` (through the pixi adapter,
+    :func:`shipit.pixienv.install` — the pixi argv and its long-runner bound
+    are pixi knowledge, PROC02-WS02) — followed, when the clone carries a
+    ``lefthook.yml``, by hook activation (:func:`_activate_hooks`, #443: hooks
+    do not clone, so a Tree must arm its own) — / ``npm ci``, each gated on
+    its manifest existing and each run with the scrubbed provisioning env
+    (:func:`provision_env` — parent project pointers removed; the ADR-0015
+    build env is no longer injected here, it comes from pixi
+    ``[activation.env]`` on activation). Before ``pixi install`` it checks
+    (and only *warns* about — #119) the pixi-cache / Trees-root
     same-filesystem invariant.
 
-    The install runs in ``--local`` mode (#170): it commits the managed set on the
-    Tree's already-checked-out planned branch with NO branch switch, NO push, and NO
-    PR. The default consumer-onboarding install would instead switch to
-    ``shipit/install``, force-push it, and open a draft PR — polluting origin on
-    every Tree creation and leaving HEAD on the wrong branch. Provisioning only
-    needs the managed files committed in the Tree, never any origin side effect.
-
-    When that install DOES commit (a managed-set drift window — the repo's committed
-    set lags the running shipit), the commit SHA(s) are recorded in
-    ``.git/shipit-provision.json`` (:mod:`shipit.tree.provision`) so the ephemeral
-    gc ladder can exclude exactly them from its unpushed floor instead of keeping
-    the Tree forever over a commit shipit itself made (#232). Recording is
-    best-effort/additive (like the liveness pidfile): an unreadable HEAD, an
-    unresolvable range, or a failed write degrades to *not recorded*, which the
-    ladder reads conservatively as KEEP — never a failed Tree creation.
-
-    Provisioning is gated on :func:`shipit.config.is_onboarded` and FAILS CLOSED: a
-    Tree cut from a repo with no ``[shipit]``/``[managed]`` block raises, rather than
-    silently skipping the reconcile (#210, revisiting #206). "Operate on a
-    non-onboarded repo" is meaningless in steady state — a repo shipit spawns Trees in
-    IS onboarded by definition — so a non-onboarded target is a real misconfiguration,
-    and shipit's ethos everywhere else is to fail loud (ADR-0017), never to tolerate a
-    degraded state silently. Onboarding a repo is a deliberate act (``shipit install``),
-    never a Tree-prep side effect: a repo that carries ``.shipit.toml`` for consumer
-    policy (``[secrets]`` / ``[reviewers]`` / ``[project]``) but no managed block would
-    otherwise be ONBOARDED fresh on every spawn, committing the onboarding artifacts
-    into the spawned branch and polluting every work-stream PR (#205). The loud
-    :class:`ValueError` is caught by the spawn/tree callers and rendered as a clean
-    exit-1 pointing at ``shipit install`` (never an escaping traceback).
+    Provisioning is gated on the base carrying a Shipit pin
+    (:func:`shipit.config.shipit_pin`) and FAILS CLOSED — ADR-0033's one
+    surviving guard: a Tree cut from a PINLESS base has no build for its
+    ``bin/shipit`` to exec, so every in-Tree verb (hooks, lint, ``pr next``)
+    would fail 127 after the expensive clone. Bootstrapping a repo is a
+    deliberate act (the bootstrap ``shipit install --pr``, which stamps the
+    pin), never a Tree-prep side effect (#205/#210 unchanged in spirit). The
+    loud :class:`ValueError` is caught by the spawn/tree callers and rendered
+    as a clean exit-1 pointing at the bootstrap (never an escaping traceback).
     """
-    if not config.is_onboarded(dest / config.CONFIG_NAME):
+    if config.shipit_pin(dest / config.CONFIG_NAME) is None:
         raise ValueError(
-            f"repo {dest} is not onboarded — run `shipit install --pr` first "
-            "(a Tree can only be provisioned from a repo shipit manages)"
+            f"repo {dest} has no [shipit].version pin — run the bootstrap "
+            "`shipit install --pr` first (ADR-0033: a Tree rides its base's "
+            "pinned shipit; a pinless base has nothing for bin/shipit to exec)"
         )
     env = provision_env()
-    head_before = git.head_commit(cwd=str(dest))
-    run_provision(["shipit", "install", ".", "--local"], cwd=dest, env=env)
-    _record_install_commits(dest, head_before=head_before)
     if (dest / pixienv.MANIFEST_NAME).is_file():
         _warn_if_cache_cross_filesystem(trees_root)
         _narrate_step(pixienv.install(dest, env=env))
+        if (dest / LEFTHOOK_FILE).is_file():
+            _activate_hooks(dest, env=env)
     if (dest / NPM_MANIFEST).is_file():
         run_provision(["npm", "ci"], cwd=dest, env=env)
 
 
-def _record_install_commits(dest: Path, *, head_before: Sha | None) -> None:
-    """Record what the managed-set install just committed, best-effort (#232).
+def _activate_hooks(dest: Path, *, env: dict[str, str]) -> None:
+    """Activate the Tree's git hooks — a fresh clone comes up ARMED (#443).
 
-    Compares ``HEAD`` before and after the ``shipit install --local`` step; when it
-    moved, the commits in between are the install's reconcile (the only step of the
-    provisioning pipeline that commits) and their SHAs go into the Tree's
-    ``.git/shipit-provision.json``. Every failure — an unreadable HEAD on either
-    side, an unresolvable range, a failed write — degrades to *no record* with a
-    WARNING: the gc ladder then simply keeps the Tree (the pre-#232 behavior), so
-    the record is purely additive and can never break Tree creation.
+    Git hooks do not clone: a dissociated Tree cut from a repo that already
+    carries the managed ``lefthook.yml`` has only ``*.sample`` hooks, the
+    managed-set reconcile above is a NOOP in steady state (so apply's own
+    opportunistic activation never fires), and nothing else ever ran
+    ``lefthook install`` in the Tree — every spawned agent would commit with no
+    lint gate and no dev-cycle commit events. So activation is a first-class
+    provisioning step: the SAME one activation definition apply uses
+    (:data:`~shipit.install.apply.LEFTHOOK_BINARY` +
+    :data:`~shipit.install.apply.HOOK_ACTIVATE_ARGV`), run through the Tree's
+    OWN pixi lint env (:data:`~shipit.install.units.LINT_ENV`, where the
+    managed blocks pin ``lefthook`` — nothing host-global is assumed), with the
+    scrubbed provisioning env. Gated on the manifest pair like every dep step:
+    inside the pixi branch (the lint env IS a pixi env) and on
+    ``lefthook.yml`` existing. Unlike apply's opportunistic activation this
+    step is CHECKED: a Tree that cannot arm its hooks is a failed
+    materialization (fail loud, ADR-0017), rolled back like any other
+    provisioning failure. Worst case is a first ``pixi run -e lint`` solving
+    the lint env — provisioning-shaped work the adapter's own long-runner
+    bound covers.
     """
-    cwd = str(dest)
-    head_after = git.head_commit(cwd=cwd)
-    if head_before is None or head_after is None or head_after == head_before:
-        return
-    shas = git.commits_between(head_before, head_after, cwd=cwd)
-    if not shas:
-        logger.warning(
-            "provisioning moved HEAD in %s but the commit range was unreadable; "
-            "not recording a provision commit (gc will keep the Tree, #232)",
-            dest,
-        )
-        return
-    try:
-        provision.write_record(dest, shas)
-    except OSError:
-        logger.warning(
-            "could not record the provisioning commit(s) for %s; gc will keep "
-            "the Tree (#232)",
-            dest,
-            exc_info=True,
-        )
+    result = pixienv.run_in_env(
+        [LEFTHOOK_BINARY, *HOOK_ACTIVATE_ARGV],
+        dest,
+        environment=LINT_ENV,
+        env=env,
+    )
+    _narrate_step(result)
 
 
 # --------------------------------------------------------------------------

@@ -1,0 +1,42 @@
+# shipit-REPO-LOCAL hook legs (#419). lefthook merges this file over the
+# managed `lefthook.yml` natively, so shipit's extra legs live HERE and the
+# managed caller stays byte-identical to the unit `shipit install` distributes
+# — the reconcile stays a NOOP on shipit's own repo (the dogfood guarantee)
+# and the reconciler grows no divergence feature (ADR-0003: feature-poor on
+# purpose). Consumers wanting repo-specific legs follow the same pattern:
+# commit their own `lefthook-local.yml`, never edit the managed caller.
+pre-commit:
+  commands:
+    # Auto-regenerate every committed .lex→.md mirror whose .lex is staged, then
+    # stage the regenerated .md into THIS commit — so a .lex edit and its .md
+    # projection ship together and the mirrors can never silently drift. Only
+    # mirrors that already exist are regenerated (source-only .lex stay
+    # un-mirrored). Runs through `pixi run -e lint` so lexd + the pinned
+    # prettier are on PATH. `priority: 1` slots it ahead of the managed lint
+    # command (`priority: 2`) in the managed `piped: true` pre-commit chain, so
+    # the regen always lands BEFORE the lint check reads the tree.
+    #
+    # The staged set is read from `git diff --cached` (NOT lefthook's
+    # {staged_files} or a `glob:`) so that: every `.lex` ANYWHERE in the tree is
+    # covered, not just the repo root; paths with spaces survive
+    # (NUL-delimited); and a `.lex` staged for deletion/rename — absent from the
+    # working tree — is excluded (`--diff-filter=d`) so the converter never runs
+    # on a missing file.
+    lex-mirror:
+      priority: 1
+      run: |
+        pixi run -e lint bash -c '
+          set -euo pipefail
+          git diff --cached --name-only -z --diff-filter=d | while IFS= read -r -d "" f; do
+            case "$f" in
+              *.lex) ;;
+              *) continue ;;
+            esac
+            [ -f "$f" ] || continue
+            md="${f%.lex}.md"
+            if [ -f "$md" ]; then
+              bash tools/lex-convert-doc.sh "$f"
+              git add "$md"
+            fi
+          done
+        '

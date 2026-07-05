@@ -8,11 +8,13 @@ console-script and ``python -m shipit`` both call.
 
 from __future__ import annotations
 
+import logging
+import os
 import sys
 
 import click
 
-from . import __version__, logcontext
+from . import __version__, events, logcontext
 from .logsetup import configure_logging, reset_logging
 from .verbs import gh_setup, install, lint, logs, verify_apps
 from .verbs._context import resolve_root_context
@@ -20,8 +22,13 @@ from .verbs.eval import eval_group
 from .verbs.hook import hook as hook_group
 from .verbs.logevent import log as log_group
 from .verbs.pr import pr as pr_group
+from .verbs.provision import provision as provision_group
 from .verbs.spawn import spawn as spawn_group
 from .verbs.tree import tree as tree_group
+
+#: The CLI entry's own logger — carries the SHIPIT_EXEC announcement's durable
+#: twin (ADR-0033) through the LOG01 pipeline like any subsystem logger.
+logger = logging.getLogger("shipit.cli")
 
 
 @click.group(
@@ -73,6 +80,20 @@ def root(ctx: click.Context, verbose: bool) -> None:
     if repo is not None:
         logcontext.bind(repo=repo.slug)
     configure_logging(verbose=verbose, repo=repo)
+    # The SHIPIT_EXEC announcement's durable half (ADR-0033): the managed
+    # launcher already said it on stderr; the exec'd build — this process —
+    # leaves the flow-log twin, so `shipit logs --flow` shows every run that
+    # bypassed the repo's pin. Env-keyed (not launcher-keyed) on purpose: any
+    # invocation running under the override is a pin bypass worth recording.
+    shipit_exec = os.environ.get("SHIPIT_EXEC")
+    if shipit_exec:
+        events.emit(
+            logger,
+            "launcher.overridden",
+            "running under SHIPIT_EXEC=%s — the repo's shipit pin is bypassed",
+            shipit_exec,
+            extra={"shipit_exec": shipit_exec},
+        )
 
 
 # `gh-setup` is ADR-0030 glue assembled in its own verb module (CLI02-WS04):
@@ -135,6 +156,12 @@ def lint_cmd(path: str | None, fix: bool) -> None:
 # CLI02): the command, its query minting, and the renderers live in the verb
 # module; the read engine in the `logread` domain package.
 root.add_command(logs.logs_cmd)
+
+
+# The nested `provision` group (ADP00-WS03) — pinned external tools delivered
+# by the binary (`shipit provision lexd`): the consumer's managed task line
+# invokes it, so no provisioning script is ever distributed or reconciled.
+root.add_command(provision_group)
 
 
 # The nested `pr` group (PR flow) is a click.Group assembled in its own package

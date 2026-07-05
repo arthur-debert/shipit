@@ -70,8 +70,25 @@ EVENT_NAMES = frozenset(
         "tree.created",
         "agent.spawned",
         "agent.done",
+        # the pinned launcher's sanctioned dev override (ADR-0033): a shipit
+        # invocation running under SHIPIT_EXEC announces the bypass durably —
+        # the flow-log twin of the launcher's stderr line, emitted by the
+        # exec'd build itself at CLI entry (the bash launcher cannot write the
+        # JSONL record; the build it execs can).
+        "launcher.overridden",
         # local progress (hook-witnessed tier)
         "commit.created",
+        # the onboarding verbs (#434): install and gh-setup narrate their run
+        # into the flow record — started at entry, completed on a clean exit,
+        # and (the reason these exist) failed with the failing step, so a run
+        # that died mid-apply is legible in `shipit logs --flow` instead of
+        # leaving only a session-end record behind.
+        "install.started",
+        "install.completed",
+        "install.failed",
+        "ghsetup.started",
+        "ghsetup.completed",
+        "ghsetup.failed",
         # the review loop
         "review.requested",
         "review.received",

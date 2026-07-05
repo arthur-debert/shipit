@@ -15,6 +15,7 @@ Typed tests for :mod:`shipit.tree.gc` — the promoted domain half of
 
 from __future__ import annotations
 
+import json
 import time as _time
 
 from shipit import gh
@@ -23,6 +24,14 @@ from shipit.session import liveness
 from shipit.tree import cleanup, gc, provision, registry
 from shipit.tree.cleanup import Cleanup
 from shipit.tree.registry import TreeRecord
+
+
+def _plant_legacy_record(tree, shas: list[Sha]) -> None:
+    """Plant the pre-ADR-0033 provision record a drift-window birth once wrote
+    (the writer is retired; Trees born before the pin still carry these)."""
+    provision.record_path(tree).write_text(
+        json.dumps({"commits": [str(sha) for sha in shas]}), encoding="utf-8"
+    )
 
 
 def _record(**over) -> TreeRecord:
@@ -317,7 +326,7 @@ def test_plan_fleet_excludes_the_recorded_provisioning_commit(tmp_path, monkeypa
     recorded_path = _ephemeral_clone(root, "sess-recorded")
     unrecorded_path = _ephemeral_clone(root, "sess-unrecorded")
     sha = Sha("a" * 40)
-    provision.write_record(recorded_path, [sha])
+    _plant_legacy_record(recorded_path, [sha])
 
     past_grace = _time.time() - (cleanup.EPHEMERAL_GRACE_SECONDS + 60)
     records = [

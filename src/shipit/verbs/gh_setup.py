@@ -19,11 +19,13 @@ and the renderer shows exactly what would change, payload included.
 from __future__ import annotations
 
 import json
+import logging
 import sys
 from pathlib import Path
 
 import click
 
+from .. import events
 from ..config import CONFIG_NAME
 from ..ghsetup import SetupReport, setup
 from ..identity import Repo
@@ -32,12 +34,15 @@ from ._errors import cli_errors
 from ._params import dry_run_option, json_option, repo_argument
 from ._render import emit
 
+logger = logging.getLogger("shipit.ghsetup")
+
 #: The out-of-band stderr warning for an empty required-checks set — kept on
 #: stderr (not part of the rendered report) so piped/--json consumers still
 #: see it without it polluting the result stream.
 _NO_CHECKS_WARNING = (
-    "  warning: no required checks discovered — applying ruleset with an "
-    "empty required-checks set. Pass --checks a,b to set them explicitly."
+    "  warning: no required checks found — the ruleset carries no "
+    "required-status-checks gate (the API rejects an empty set). "
+    "Pass --checks a,b to set them explicitly."
 )
 
 
@@ -116,17 +121,49 @@ def run(
     # target's local checkout. For a different remote target, pass --checks.
     local = wd.path if (wd is not None and target == wd.repo) else None
     cfg_path = config_path or str(Path(ctx.default_path()) / CONFIG_NAME)
-    report = setup(
-        target,
-        checks_override=checks_override,
-        local_checkout=local,
-        config_path=cfg_path,
-        dry_run=dry_run,
-        prompt=prompt,
+    # The run's milestones are dev-cycle events (#434, ADR-0032): a gh-setup
+    # that dies mid-pass leaves `ghsetup.failed` with the failing step in the
+    # flow record instead of nothing at all. A completed run with failed
+    # secrets is still `ghsetup.completed` — the report (and rc 1) carries
+    # that outcome; `failed` is reserved for a run that could not finish.
+    events.emit(
+        logger,
+        "ghsetup.started",
+        "gh-setup started for %s%s",
+        target.slug,
+        " (dry-run)" if dry_run else "",
+        extra={"dry_run": dry_run or None},
     )
+    try:
+        report = setup(
+            target,
+            checks_override=checks_override,
+            local_checkout=local,
+            config_path=cfg_path,
+            dry_run=dry_run,
+            prompt=prompt,
+        )
+    except Exception as exc:
+        events.emit(
+            logger,
+            "ghsetup.failed",
+            "gh-setup failed for %s: %s",
+            target.slug,
+            exc,
+            extra={"step": "setup (ruleset/labels/secrets)"},
+        )
+        raise
     if not report.ruleset.checks:
         print(_NO_CHECKS_WARNING, file=sys.stderr)
     emit(report, format_setup, as_json=as_json)
+    events.emit(
+        logger,
+        "ghsetup.completed",
+        "gh-setup completed for %s (%d secret failure(s))",
+        target.slug,
+        report.secrets_failed,
+        extra={"secrets_failed": report.secrets_failed or None},
+    )
     return 1 if report.secrets_failed else 0
 
 

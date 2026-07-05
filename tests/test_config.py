@@ -110,3 +110,61 @@ def test_custom_escape_hatch_alias_allowed(tmp_path):
     p.write_text('[custom.anything]\nmade_up = "fine"\n')
     cfg = config.load(p)
     assert cfg["custom"]["anything"]["made_up"] == "fine"
+
+
+# --------------------------------------------------------------------------
+# The fleet manifest (#449 item 3, ADR-0033): [project.portfolio] carries the
+# adoption targets of the ADP fleet sweep (#426) — including shipit-canary,
+# the standing test bed — and none of the sweep's non-targets.
+# --------------------------------------------------------------------------
+
+
+def _portfolio_repos() -> set[str]:
+    import tomllib
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    cfg = tomllib.loads((root / ".shipit.toml").read_text())
+    portfolio = cfg["project"]["portfolio"]
+    return {entry["repo"] for stack in portfolio.values() for entry in stack}
+
+
+def test_portfolio_contains_the_adoption_targets():
+    repos = _portfolio_repos()
+    # The ADP00 canary and the tool itself are fleet rows (#426).
+    assert "arthur-debert/shipit-canary" in repos
+    assert "arthur-debert/shipit" in repos
+    # The WS07 sweep's other previously-missing targets.
+    for slug in (
+        "arthur-debert/shellai",
+        "arthur-debert/nanodoc",
+        "arthur-debert/supage",
+        "arthur-debert/falala",
+        "arthur-debert/dotcat",
+        "arthur-debert/electron-splashguard",
+        "arthur-debert/visual-explore",
+        "arthur-debert/sprinkles",
+        "lex-fmt/mkdocs-lex",
+        "phos-editor/phos.photo",
+    ):
+        assert slug in repos, slug
+
+
+def test_portfolio_excludes_the_sweeps_non_targets():
+    repos = _portfolio_repos()
+    # n/a rows in the sweep: docs, editor config, grammar packaging.
+    for slug in ("lex-fmt/comms", "lex-fmt/nvim", "lex-fmt/zed-lex"):
+        assert slug not in repos, slug
+
+
+def test_portfolio_entries_carry_repo_and_path():
+    import tomllib
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    cfg = tomllib.loads((root / ".shipit.toml").read_text())
+    for stack, entries in cfg["project"]["portfolio"].items():
+        assert isinstance(entries, list) and entries, stack
+        for entry in entries:
+            assert "repo" in entry and "/" in entry["repo"], (stack, entry)
+            assert "path" in entry and entry["path"], (stack, entry)

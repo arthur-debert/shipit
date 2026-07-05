@@ -70,6 +70,30 @@ stringifies only at a serialization seam or the one mixed-refspec seam
 silently flips staleness); "commit" as the noun (a Sha *names* a commit; the
 commit is the git object).
 
+**Portfolio**:
+The machine-readable fleet manifest — `.shipit.toml`'s `[project.portfolio]`
+table: the version-controlled, stack-grouped list of repos shipit rolls out
+across. THE list a sweep iterates, pins are read from, and rollout is measured
+against; the tracking issue's bird's-eye table is a human status VIEW derived
+from it (plus swept-but-not-onboarding repos), never the authority.
+*Avoid*: "fleet manifest" for the bird's-eye table (WS07's framing, corrected —
+a hand-edited GitHub issue can't be the machine source of truth);
+reconstructing the repo list from `~/h` sibling dirs or agent memory (the
+recurring wrong-list bug the table exists to kill).
+
+**Shipit pin**:
+The shipit identity a consumer repo locks to — `.shipit.toml`'s
+`[shipit].version`, carrying a FULL git commit **Sha** of the shipit repo (the
+commit the installing build was made from), stamped by `shipit install` at every
+reconcile. The pin is what the in-repo launcher provisions, what the staleness
+check compares against, and what a reconcile PR bumps — tool version and managed
+set travel as ONE versioned unit in the repo. A named release/tag may later be
+accepted as input sugar, resolving to the canonical Sha.
+*Avoid*: the package version as the pin (`pyproject` carries a static `0.0.1`;
+it distinguishes nothing); a branch name (a moving pointer reintroduces the
+tool/managed-set lag window the pin exists to kill); "shipit version" for this
+noun (ambiguous with the package version — say "pin").
+
 **PR**:
 A GitHub pull request as a value object — identity `(repo, number)` plus cheap
 **core** state (`head_sha` (carried as a **Sha**, minted at the one wire read),

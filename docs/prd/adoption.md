@@ -90,7 +90,7 @@ every run; a goal reached while fighting the tooling is a failed adoption run.
 23. As the root coordinator in shipit, I want a survival prompt for myself and one for the in-consumer coordinator, so that both layers use the tooling correctly and friction bubbles up verbatim instead of being laundered into "done".
 24. As the in-consumer coordinator, I want my role framed as an instrument (adoption is testing the tooling on me), so that I stop and report friction rather than improvising around managed files.
 25. As the portfolio owner, I want five status tables in one tracking issue (pixi tasks × stack, local adoption × repo, CI workflows × stack, remote CI × repo, bird's-eye), so that fleet progress is legible at a glance and updated at every state change.
-26. As the portfolio owner, I want the bird's-eye table to double as the fleet manifest, seeded by a one-time sweep of the three owners, so that "the fleet" is an enumerated list rather than memory.
+26. As the portfolio owner, I want the fleet manifest to be `.shipit.toml`'s `[project.portfolio]` table (ADR-0033), seeded by a one-time sweep of the three owners, so that "the fleet" is an enumerated, version-controlled list rather than memory — the tracking issue's bird's-eye table is a human status view derived from it, never the authority.
 27. As a workflow author, I want actionlint as a lint Lang, so that workflow YAML errors are caught locally in milliseconds before any act run or push.
 28. As a workflow author, I want an act harness that runs one workflow/job locally under containers with crafted event payloads, so that iterating on CI does not require pushing to find out.
 29. As a workflow author, I want the act howto to state explicitly what act cannot verify (macOS/Windows runners, cross-workflow cascade, partial workflow_call, dispatch UX), so that local green is trusted only where valid.
@@ -132,13 +132,21 @@ every run; a goal reached while fighting the tooling is a failed adoption run.
   adding an entry, nothing downstream changes (ADR-0004/0007 shape). go and
   tauri-specific legs are deferred to the repos that force them (dodot,
   phos-app) during ADP01/ADP02.
-- **shipit-on-PATH is a documented story, not new machinery**: the pinned
-  auto-provision bootstrap stays out of scope (it belongs to the pixi
-  encapsulation step); ADP00 documents the one supported install path for
-  laptops and runners in the survival guide.
+- **The pinned `bin/shipit` launcher is a documented story, not new machinery**:
+  ADP00 documents the one supported install path for laptops and runners in the
+  survival guide — the managed launcher resolving `.shipit.toml`'s
+  `[shipit].version` pin via `uv tool run` (ADR-0033), NOT a pixi-dependency
+  bootstrap. The launcher mechanism itself lands in the pin-core work, not here.
 - **The local adoption bar is lint + test (+ build for compiled repos)**. No
   `run` task (not canon; per-repo optional), no local `release` task (arrives
   with ADP02's pixi encapsulation).
+- **"Repo defines a `test` task" is an explicit checklist prerequisite of the
+  test step (#444)**: the managed task block deliberately does not own `test`
+  (repo-specific), and on a manifest without one `pixi run test` falls through
+  to the POSIX `test` shell builtin — silent exit 1, zero output,
+  indistinguishable from a red suite. The step's verified-by starts with the
+  task existing (the session-start hook warns when it is missing); the managed
+  set never ships a fallback/no-op `test` task.
 - **Per-repo order is rigid**: install PR merged to main → gh-setup →
   `.treeinclude` → task verification → Tree/session verification → agent smoke.
   Motivated by fail-closed Tree provisioning on non-onboarded repos.
@@ -163,7 +171,9 @@ every run; a goal reached while fighting the tooling is a failed adoption run.
 - **Status lives in one GitHub tracking issue** (five tables: pixi tasks ×
   stack, local adoption × repo, CI workflows × stack, remote CI × repo,
   bird's-eye), updated at every state change, never checked in. The bird's-eye
-  table is the fleet manifest, seeded from a one-time sweep of the three owners.
+  table is a human status VIEW, seeded from a one-time sweep of the three owners;
+  the machine-readable fleet manifest is `.shipit.toml`'s `[project.portfolio]`
+  (ADR-0033; CONTEXT.md's Portfolio term), which the sweep reconciles against.
 - **Survival prompts are ADP00 artifacts**: a shipit-side coordinator prompt
   (indirection discipline, stop-fix-restart, evidence reading, table updates)
   and an in-consumer coordinator prompt (tooling contract, instrument framing,
@@ -196,8 +206,9 @@ every run; a goal reached while fighting the tooling is a failed adoption run.
 
 ## Out of Scope
 
-- The pinned `bin/shipit` auto-provision bootstrap (stays with the pixi
-  encapsulation step; ADP00 only documents the supported PATH story).
+- Building the pinned `bin/shipit` launcher mechanism itself (the pin-core work
+  under ADR-0033, via `uv tool run` — not a pixi dependency); ADP00's docs pass
+  only documents the supported install path, it does not build the launcher.
 - Resolving self-install (`shipit install .`) — explicitly unresolved in
   ADR-0003 and unaffected here.
 - go and tauri-specific lint legs (deferred to the adopting repos that force
@@ -218,9 +229,22 @@ every run; a goal reached while fighting the tooling is a failed adoption run.
 - The act howto's "what act cannot verify" section is load-bearing: phos-app's
   sign/notarize leg can never go green locally, so its remote verification
   budget is structurally larger.
-- The fleet has no machine-readable manifest anywhere; after ADP00 the tracking
-  issue's bird's-eye table is the authoritative enumeration until something
-  better is needed.
+- The machine-readable fleet manifest is `.shipit.toml`'s `[project.portfolio]`
+  table (ADR-0033; CONTEXT.md's Portfolio term) — the version-controlled,
+  stack-grouped list of repos a sweep iterates, reads pins from, and measures
+  rollout against. The tracking issue's bird's-eye table is a human status VIEW
+  derived from it (plus swept-but-not-onboarding repos), never the authority; a
+  hand-edited GitHub issue cannot be the machine source of truth (WS07's
+  "bird's-eye is the manifest" framing was corrected in ADP00-WS15).
+- **Execution record (ADP00)**: the canary dry-run (#420) surfaced the
+  tool/managed-set lag window live — a machine-global, auto-updating shipit left
+  committed managed files stale against the running tool and leaked reconcile
+  commits onto feature branches — and opened seven convergence workstreams
+  (WS09–WS15: seeded `pixi.toml` #432, managed lint configs #436, the gh-setup
+  ruleset 422s #438/#441, armed Trees #443, the ADR-0033 pin core #447,
+  convergence #449) plus ADR-0033 itself, whose repo-pinned `bin/shipit`
+  launcher removes the lag by construction. That lag window is the recorded
+  learning.
 - Death-by-a-thousand-cuts is the named failure mode; every process decision
   above (pre-fixed blockers, checklist with verified-by, stop-fix-restart,
   evidence reading, single tracking issue) exists to prevent it.

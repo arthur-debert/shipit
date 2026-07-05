@@ -24,8 +24,8 @@ from pathlib import Path
 import pytest
 
 from shipit import execrun, git, logsetup
-from shipit.identity import Sha, repo_from_slug
-from shipit.tree import cleanup, provision
+from shipit.identity import repo_from_slug
+from shipit.tree import cleanup
 from shipit.tree import gc as gc_mod
 from shipit.tree import registry as registry_mod
 from shipit.tree import removal as removal_mod
@@ -37,8 +37,10 @@ from shipit.verbs import tree as tree_verb
 
 _REPO = repo_from_slug("acme/widget")
 
-#: An onboarded .shipit.toml body — provisioning fails closed without one (#210).
-_ONBOARDED = '[shipit]\nversion = "seed"\n\n[managed]\n'
+#: A pinned .shipit.toml body — provisioning fails closed on a pinless base
+#: (ADR-0033). The pin must be a valid full sha (the gate validates it as a Sha),
+#: not a sentinel; "5eed…" is a mnemonic all-hex sha.
+_PINNED = f'[shipit]\nversion = "{"5eed" * 10}"\n\n[managed]\n'
 
 
 @pytest.fixture(autouse=True)
@@ -88,21 +90,23 @@ def jsonl_log(tmp_path):
 def _mock_write_boundary(monkeypatch):
     """Patch the git boundary so ``create`` runs its full pipeline with no real git.
 
-    The fake clone carries an ONBOARDED ``.shipit.toml`` (provisioning fails
-    closed otherwise) and no pixi/npm manifests, so exactly one provisioning
-    step (``shipit install . --local``) runs — through a canned Exec result.
+    The fake clone carries a PINNED ``.shipit.toml`` (provisioning fails closed
+    on a pinless base, ADR-0033) plus a ``pixi.toml``, so exactly one
+    provisioning step (the adapter's ``pixi install``) runs — through a canned
+    Exec result. The managed-set install step no longer exists (ADR-0033:
+    provisioning mutates nothing managed).
     """
 
     def fake_clone(url, dest, *, reference):
         d = Path(dest)
         d.mkdir(parents=True)
         (d / ".git").mkdir()
-        (d / ".shipit.toml").write_text(_ONBOARDED)
+        (d / ".shipit.toml").write_text(_PINNED)
+        (d / "pixi.toml").write_text("# stub\n")
 
     monkeypatch.setattr(git, "clone_dissociated", fake_clone)
     monkeypatch.setattr(git, "fetch", lambda **k: None)
     monkeypatch.setattr(git, "checkout_new_branch", lambda *a, **k: None)
-    monkeypatch.setattr(git, "head_commit", lambda **k: Sha("abc123" + "0" * 34))
     monkeypatch.setattr(
         execrun,
         "run",
@@ -215,22 +219,9 @@ def test_create_binding_does_not_leak_past_return(tmp_path, monkeypatch, jsonl_l
     assert all("tree" not in r and "session" not in r for r in later)
 
 
-# --------------------------------------------------------------------------
-# Record writes — the provisioning-commit record narrates its write
-# --------------------------------------------------------------------------
-
-
-def test_write_record_narrates_the_record_write(tmp_path, caplog):
-    tree = tmp_path / "t"
-    (tree / ".git").mkdir(parents=True)
-
-    with caplog.at_level(logging.INFO, logger="shipit.tree"):
-        provision.write_record(tree, [Sha("1" * 40), Sha("2" * 40)])
-
-    assert any(
-        r.levelno == logging.INFO and getattr(r, "tree", None) == str(tree)
-        for r in caplog.records
-    )
+# The provisioning-commit record's write narration is gone WITH the writer:
+# ADR-0033 retired the reconcile step, so nothing mints provision records —
+# only the conservative read side remains (tests/test_tree_provision.py).
 
 
 # --------------------------------------------------------------------------

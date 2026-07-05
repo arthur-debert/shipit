@@ -42,13 +42,14 @@ def test_template_is_cleaned():
     assert rule["parameters"]["required_status_checks"] == []
 
 
-def test_template_pins_automatic_copilot_review_off():
-    """RVW01 sole-requester drift protection (ADR-0031): the pull_request rule
-    explicitly pins automatic Copilot review off, so re-running gh-setup erases
-    any hand-enabled auto-review."""
+def test_template_omits_automatic_copilot_flag():
+    """The rulesets REST endpoint rejects `automatic_copilot_code_review_enabled`
+    (422 Unexpected parameter — #438), and ADR-0031/RVW01 makes the PR state
+    engine the sole review requester anyway: the payload must not carry the
+    GitHub-side auto-review flag at all."""
     tmpl = ghsetup.load_template()
     rule = get_rule(tmpl, "pull_request")
-    assert rule["parameters"]["automatic_copilot_code_review_enabled"] is False
+    assert "automatic_copilot_code_review_enabled" not in rule["parameters"]
 
 
 def test_load_labels_full_set_with_colors():
@@ -85,15 +86,98 @@ def test_build_payload_injects_checks_only():
     assert src_rule["parameters"]["required_status_checks"] == []
 
 
-def test_build_payload_preserves_copilot_pin():
+def test_build_payload_zero_checks_omits_the_rule():
+    """The live API rejects an empty required_status_checks array ("Expected
+    at least 1 elements" — #441), so zero checks must OMIT the rule entirely,
+    never send an empty set. The other rules stay untouched."""
+    tmpl = ghsetup.load_template()
+    body = ghsetup.build_payload(tmpl, [])
+    types = [r["type"] for r in body["rules"]]
+    assert "required_status_checks" not in types
+    # Every other rule flows through untouched — compare against the template
+    # itself so this stays green as the template's rule set evolves.
+    expected = [r for r in tmpl["rules"] if r.get("type") != "required_status_checks"]
+    assert body["rules"] == expected
+    # The template is not mutated (deepcopy) — its rule survives for next time.
+    assert get_rule(tmpl, "required_status_checks")
+
+
+def test_build_payload_blank_only_checks_omit_the_rule():
+    """Blank names are dropped by checks_json; all-blank input is the
+    zero-checks case and must omit the rule, not emit an empty array."""
+    tmpl = ghsetup.load_template()
+    body = ghsetup.build_payload(tmpl, ["", ""])
+    assert "required_status_checks" not in [r["type"] for r in body["rules"]]
+
+
+#: Every rule type the template may carry → its documented parameter keys
+#: (https://docs.github.com/rest/repos/rules#create-a-repository-ruleset).
+#: This POST has 422'd twice on undocumented/invalid parameters (#438, #441);
+#: this pin makes a third layer fail in unit tests, not on the live canary.
+_DOCUMENTED_RULE_PARAMS = {
+    "pull_request": {
+        "allowed_merge_methods",
+        "dismiss_stale_reviews_on_push",
+        "require_code_owner_review",
+        "require_last_push_approval",
+        "required_approving_review_count",
+        "required_review_thread_resolution",
+        "required_reviewers",
+    },
+    "required_status_checks": {
+        "do_not_enforce_on_create",
+        "required_status_checks",
+        "strict_required_status_checks_policy",
+    },
+    # Parameterless rules: only a `type` key.
+    "required_linear_history": set(),
+    "non_fast_forward": set(),
+    "deletion": set(),
+}
+
+
+def test_template_rules_carry_only_documented_parameters():
+    """Whole-payload audit (#441): every rule in the shipped template is a
+    documented type and carries only documented parameter keys."""
+    tmpl = ghsetup.load_template()
+    for rule in tmpl["rules"]:
+        assert rule["type"] in _DOCUMENTED_RULE_PARAMS, rule["type"]
+        allowed = _DOCUMENTED_RULE_PARAMS[rule["type"]]
+        params = set(rule.get("parameters", {}))
+        assert params <= allowed, (
+            f"{rule['type']} carries undocumented parameters: {params - allowed}"
+        )
+        if not allowed:
+            assert set(rule) == {"type"}, f"{rule['type']} must be parameterless"
+
+
+def test_built_payload_carries_only_documented_top_level_keys():
+    """The POST body itself stays within the documented create-ruleset schema."""
+    body = ghsetup.build_payload(ghsetup.load_template(), ["c1"])
+    assert set(body) <= {
+        "name",
+        "target",
+        "enforcement",
+        "conditions",
+        "rules",
+        "bypass_actors",
+    }
+    for actor in body.get("bypass_actors", []):
+        assert set(actor) <= {"actor_id", "actor_type", "bypass_mode"}
+    conditions = body.get("conditions", {})
+    assert set(conditions) <= {"ref_name"}
+    assert set(conditions.get("ref_name", {})) <= {"include", "exclude"}
+
+
+def test_build_payload_preserves_pull_request_rule():
     """Injecting required checks must not disturb the pull_request rule — it
-    flows into the built payload strictly equal to the template's rule,
-    Copilot pin included."""
+    flows into the built payload strictly equal to the template's rule, and
+    never grows the API-rejected copilot flag (#438)."""
     tmpl = ghsetup.load_template()
     body = ghsetup.build_payload(tmpl, ["app-ui / check"])
     rule = get_rule(body, "pull_request")
     assert rule == get_rule(tmpl, "pull_request")
-    assert rule["parameters"]["automatic_copilot_code_review_enabled"] is False
+    assert "automatic_copilot_code_review_enabled" not in rule["parameters"]
 
 
 def test_existing_ruleset_id():
@@ -573,8 +657,8 @@ def test_empty_checks_warning_goes_to_stderr(stub_setup, monkeypatch, capsys):
     )
     assert gh_setup_verb.run(None) == 0
     captured = capsys.readouterr()
-    assert "no required checks discovered" in captured.err
-    assert "no required checks discovered" not in captured.out
+    assert "no required checks found" in captured.err
+    assert "no required checks found" not in captured.out
 
 
 def test_cli_json_emits_the_report_dict(stub_setup, monkeypatch, capsys):
@@ -614,3 +698,106 @@ def test_cli_malformed_slug_is_usage_tier_exit_2(capsys):
     rc = cli.main(["gh-setup", "not-a-slug", "--dry-run"])
     assert rc == 2
     assert "Usage:" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------
+# Flow events (#434) — ghsetup.started/completed/failed
+# --------------------------------------------------------------------------
+
+
+def _event_names(caplog):
+    from shipit import events as ev
+
+    return [getattr(r, ev.EXTRA_KEY, None) for r in caplog.records]
+
+
+def test_run_emits_started_and_completed_events(
+    stub_setup, monkeypatch, capsys, caplog
+):
+    import logging as _logging
+
+    _ambient(monkeypatch)
+    with caplog.at_level(_logging.INFO, logger="shipit.ghsetup"):
+        rc = gh_setup_verb.run(None, dry_run=True)
+    assert rc == 0
+    names = _event_names(caplog)
+    assert "ghsetup.started" in names
+    assert "ghsetup.completed" in names
+    assert "ghsetup.failed" not in names
+
+
+def test_failed_run_emits_the_failed_event(monkeypatch, capsys, caplog):
+    import logging as _logging
+
+    from shipit.execrun import ExecError
+
+    _ambient(monkeypatch)
+
+    def boom(repo, **kw):
+        raise ExecError(["gh", "api"], rc=1, stderr="broken gh")
+
+    monkeypatch.setattr(gh_setup_verb, "setup", boom)
+    with caplog.at_level(_logging.INFO, logger="shipit.ghsetup"):
+        rc = gh_setup_verb.run(None)
+    assert rc == 1  # the error shell still renders `error: …` + exit 1
+    from shipit import events as ev
+
+    failed = [
+        r for r in caplog.records if getattr(r, ev.EXTRA_KEY, None) == "ghsetup.failed"
+    ]
+    assert len(failed) == 1
+    assert failed[0].step == "setup (ruleset/labels/secrets)"
+    names = _event_names(caplog)
+    assert "ghsetup.completed" not in names
+
+
+def test_secrets_failure_is_completed_not_failed(
+    stub_setup, monkeypatch, capsys, caplog
+):
+    # A run that FINISHED with failed secrets is a completed run (rc 1 via the
+    # report); `ghsetup.failed` is reserved for a run that could not finish.
+    import logging as _logging
+
+    _ambient(monkeypatch)
+    monkeypatch.setattr(
+        gh_setup_verb,
+        "setup",
+        lambda repo, **kw: _report(
+            secrets=(
+                ghsetup.SecretOutcome(
+                    name="X", source="env", action="failed", reason="no VAR"
+                ),
+            )
+        ),
+    )
+    with caplog.at_level(_logging.INFO, logger="shipit.ghsetup"):
+        rc = gh_setup_verb.run(None)
+    assert rc == 1
+    names = _event_names(caplog)
+    assert "ghsetup.completed" in names
+    assert "ghsetup.failed" not in names
+
+
+# --------------------------------------------------------------------------
+# The truly stock consumer (#449 item 8): no .shipit.toml at all — gh-setup
+# still runs its passes; the missing config is a report fact, never a crash.
+# --------------------------------------------------------------------------
+
+
+def test_setup_on_a_stock_checkout_without_config(fake_gh, tmp_path):
+    stock = tmp_path / "stock"
+    stock.mkdir()
+    report = ghsetup.setup(
+        repo_from_slug("acme/stock"),
+        checks_override=["c / check"],
+        local_checkout=str(stock),
+        config_path=str(stock / ".shipit.toml"),
+        dry_run=False,
+    )
+    # Ruleset + labels applied; secrets degraded to the report fact.
+    assert report.ruleset.action in ("created", "updated")
+    assert report.labels
+    assert report.secrets == ()
+    assert report.secrets_error is not None
+    assert ".shipit.toml" in report.secrets_error
+    assert report.secrets_failed == 0  # degraded config is not a failed secret
