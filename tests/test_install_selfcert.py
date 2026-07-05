@@ -55,6 +55,7 @@ class _GhRecorder:
         self.pr_body = None
         self.commit_paths = ()
         self.commit_no_verify = None
+        self.push_no_verify = None
 
     def activate_hooks(self, root):
         return execrun.ExecResult(
@@ -72,8 +73,9 @@ class _GhRecorder:
         self.commit_paths = tuple(paths)
         self.commit_no_verify = no_verify
 
-    def push(self, branch, *, cwd, remote="origin", force=False):
+    def push(self, branch, *, cwd, remote="origin", force=False, no_verify=False):
         self.calls.append(("push", branch))
+        self.push_no_verify = no_verify
 
     def current_branch(self, *, cwd):
         return "main"
@@ -532,6 +534,10 @@ def test_debt_laden_consumer_still_installs_with_debt_reported(tmp_path, rec):
     assert ("pr_create", True) in rec.calls
     assert "whole-tree lint currently red: 3 failing check(s)" in rec.pr_body
     assert "debt-clear pending" in rec.pr_body
+    # And install's own git ops carried the hook bypass (#477): the debt never
+    # gets a chance to block via the pre-push gate this run just armed.
+    assert rec.commit_no_verify is True
+    assert rec.push_no_verify is True
 
 
 def test_pixi_lock_rides_the_reconcile_commit_when_present(tmp_path, rec):

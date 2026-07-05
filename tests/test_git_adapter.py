@@ -81,6 +81,42 @@ def test_unpushed_shas_unreadable_is_none_not_empty(monkeypatch):
     assert git.unpushed_shas(cwd="/x") is None
 
 
+def test_push_no_verify_bypasses_the_pre_push_hook(monkeypatch):
+    # #477: install's own push must carry `--no-verify` — the freshly-armed
+    # pre-push hook runs the WHOLE-TREE lint gate, which a virgin consumer's
+    # pre-existing debt fails, killing the very push that delivers the env to
+    # clear it (the tripwire armed by the run that trips it). The flag sits
+    # before the remote/branch operands, where git parses options.
+    seen = {}
+
+    def fake(args, *, cwd, timeout=None):
+        seen["args"] = args
+        return ""
+
+    monkeypatch.setattr(git, "_git", fake)
+    git.push("shipit/install", cwd="/x", force=True, no_verify=True)
+    assert seen["args"] == [
+        "push",
+        "--force",
+        "--no-verify",
+        "origin",
+        "shipit/install",
+    ]
+
+
+def test_push_default_does_not_bypass_hooks(monkeypatch):
+    # The bypass is install's deliberate opt-in, never the adapter's default.
+    seen = {}
+
+    def fake(args, *, cwd, timeout=None):
+        seen["args"] = args
+        return ""
+
+    monkeypatch.setattr(git, "_git", fake)
+    git.push("main", cwd="/x")
+    assert seen["args"] == ["push", "origin", "main"]
+
+
 def test_commits_between_lists_the_range(monkeypatch):
     # `rev-list <base>..<head>`: exactly what provisioning committed (#232) — the
     # SHAs recorded into .git/shipit-provision.json at Tree birth. Typed at both

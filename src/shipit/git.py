@@ -526,7 +526,14 @@ def commit(
     _git([*args, "-m", message, "--", *paths], cwd=cwd)
 
 
-def push(branch: str, *, cwd: str, remote: str = "origin", force: bool = False) -> None:
+def push(
+    branch: str,
+    *,
+    cwd: str,
+    remote: str = "origin",
+    force: bool = False,
+    no_verify: bool = False,
+) -> None:
     """``git push <remote> <branch>``.
 
     ``force`` plain-force-pushes the shipit-owned install branch, which install
@@ -535,10 +542,20 @@ def push(branch: str, *, cwd: str, remote: str = "origin", force: bool = False) 
     not ``--force-with-lease``: a freshly recreated branch has no remote-tracking
     ref to lease against, and the branch is shipit-exclusive, so there is nothing
     to protect.) The break-glass push to a real branch (main) never forces.
+
+    ``no_verify`` bypasses the repo's pre-push hook (``--no-verify``): install's
+    own pushes use it deliberately (#477, ADR-0033) — the pre-push hook runs the
+    WHOLE-TREE lint gate, which install itself just armed during staging, so on
+    a virgin consumer carrying pre-existing lint debt the un-bypassed push dies
+    on debt the install PR exists to make clearable (the tripwire armed by the
+    very run that trips it). Like the commit-side bypass, this is install's
+    opt-in only, never the adapter's default.
     """
     args = ["push"]
     if force:
         args.append("--force")
+    if no_verify:
+        args.append("--no-verify")
     args += [remote, branch]
     _git(args, cwd=cwd, timeout=_NETWORK_TIMEOUT)
 

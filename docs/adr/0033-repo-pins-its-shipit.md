@@ -65,12 +65,14 @@ the manifest parses and the lint env solves, (2) the files it delivered pass the
 lint configs it delivered, (3) hooks are live, (4) the launcher resolves the
 freshly-stamped pin — failing closed (no PR) on any miss, which makes "the
 managed set never fails its own checks" executable (the WS09/WS10 canary class).
-Its reconcile commit bypasses the repo's hooks (`--no-verify`): the whole-tree
-check is the REPO'S bar — the ADP01 checklist's lint step, after the sanctioned
-debt-clear — not install's. This scoping breaks the observed deadlock where
-install's commit was blocked by pre-existing consumer lint debt that can only be
-cleared using the env install delivers; consumer debt is reported in the
-reconcile PR body, never a blocker.
+Install's own git operations — the reconcile commit AND its push — bypass the
+repo's hooks (`--no-verify`): the whole-tree check is the REPO'S bar — the ADP01
+checklist's lint step, after the sanctioned debt-clear — not install's. This
+scoping breaks the observed deadlock where install's commit (and, on a virgin
+repo, its push through the very pre-push gate that same run had just
+armed, #477) was blocked by pre-existing consumer lint debt that can only be cleared
+using the env install delivers; consumer debt is reported in the reconcile PR
+body, never a blocker.
 
 Considered and rejected: package-version or tag pins (no release machinery
 exists until ADP02; a static `0.0.1` distinguishes nothing — tags may later

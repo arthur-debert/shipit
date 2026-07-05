@@ -266,10 +266,12 @@ def apply(
     raises :class:`SelfCertError` — fail closed, no commit, no PR, the loud
     diagnostic naming each miss. The default working-tree refresh does not
     certify: nothing is being published, `git diff` is the caller's review
-    surface, and the caller's own commit rides the repo's hooks. The reconcile
-    commit itself bypasses the repo's hooks (``--no-verify``) — the whole-tree
-    gate is the REPO'S bar, and pre-existing consumer debt is reported in the
-    PR body, never a blocker.
+    surface, and the caller's own commit rides the repo's hooks. Install's OWN
+    git operations — the reconcile commit AND its push — bypass the repo's
+    hooks (``--no-verify``, #477): the whole-tree gate is the REPO'S bar, this
+    very run just armed it (pre-push lints the whole tree, not the staged
+    managed set), and pre-existing consumer debt is reported in the PR body,
+    never a blocker.
 
     Raises :class:`InstallError` on a domain refusal (``local``/``push`` in
     detached HEAD, a failed self-certification) and lets a git/gh boundary
@@ -446,7 +448,7 @@ def apply(
                 raise InstallError("--push needs a checked-out branch")
             git.add(changed_paths, cwd=cwd)
             git.commit(COMMIT_MESSAGE, changed_paths, cwd=cwd, no_verify=True)
-            git.push(branch, cwd=cwd)
+            git.push(branch, cwd=cwd, no_verify=True)
             logger.info(
                 "install pushed break-glass",
                 extra={
@@ -465,7 +467,7 @@ def apply(
         git.commit(COMMIT_MESSAGE, changed_paths, cwd=cwd, no_verify=True)
         # The install branch is regenerated from HEAD each run; force so a re-run
         # with an open install PR updates it rather than failing non-fast-forward.
-        git.push(INSTALL_BRANCH, cwd=cwd, force=True)
+        git.push(INSTALL_BRANCH, cwd=cwd, force=True, no_verify=True)
         existing = gh.pr_url_for_head(INSTALL_BRANCH, cwd=cwd)
         if existing:
             # The force-push already refreshed the open PR's diff.
