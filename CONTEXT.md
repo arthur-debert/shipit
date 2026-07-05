@@ -74,9 +74,9 @@ commit is the git object).
 The machine-readable fleet manifest — `.shipit.toml`'s `[project.portfolio]`
 table: the version-controlled, stack-grouped list of repos shipit rolls out
 across. THE list a sweep iterates, pins are read from, and rollout is measured
-against; the tracking issue's birds-eye table is a human status VIEW derived
+against; the tracking issue's bird's-eye table is a human status VIEW derived
 from it (plus swept-but-not-onboarding repos), never the authority.
-*Avoid*: "fleet manifest" for the birds-eye table (WS07's framing, corrected —
+*Avoid*: "fleet manifest" for the bird's-eye table (WS07's framing, corrected —
 a hand-edited GitHub issue can't be the machine source of truth);
 reconstructing the repo list from `~/h` sibling dirs or agent memory (the
 recurring wrong-list bug the table exists to kill).

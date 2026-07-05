@@ -28,7 +28,7 @@ bug this ADR retires). The install reconcile PR is the ONLY bump vehicle: one
 commit atomically carries pin bump + managed-file updates + pristine hashes
 (ADR-0003's seam, unchanged). Rollout is driven from shipit's side — the root
 coordinator sweeps the **Portfolio** (`[project.portfolio]`, the machine-readable
-fleet manifest; the tracking issue's birds-eye table is a derived human view,
+fleet manifest; the tracking issue's bird's-eye table is a derived human view,
 not an authority) with a chosen build, opening reconcile PRs that each repo
 merges on its own schedule: pull-not-push, with initiation and version choice
 centralized. Rollback is the same seam run with an older build — no `--pin`, no
@@ -43,7 +43,7 @@ first-shipit-on-PATH walk silently reintroduced drift). One sanctioned override
 exists for development — `SHIPIT_EXEC=/path/to/build` — honored and announced
 (stderr + flow log), formalizing what shipit's own repo does with its checkout
 build. A repo with no pin fails loudly toward the bootstrap: the external
-`uv tool` shipit's remaining roles are exactly (i) a virgin repo's first
+`uv tool`-installed shipit's remaining roles are exactly (i) a virgin repo's first
 install and (ii) operator convenience outside repos; its auto-update property
 is explicitly a non-feature inside repos.
 
