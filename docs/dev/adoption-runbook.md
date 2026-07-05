@@ -80,7 +80,10 @@ instrument, not just the operator. Survival rules:
    `pixi run build` where the repo builds) are THE verification
    commands; after a draft PR opens, run `shipit pr next` once;
    self-check what actually happened with
-   `shipit logs --flow --session current`.
+   `shipit logs --flow --session current`. Prerequisite: the repo
+   must DEFINE a `test` task in its pixi.toml — without one,
+   `pixi run test` silently runs the POSIX `test` builtin (exit 1,
+   no output; #444) and the verification command lies.
 2. At ANY error, confusion, or temptation to work around something:
    STOP. Report what you ran, what happened (verbatim output), and
    what you expected instead. Do not press on past friction.

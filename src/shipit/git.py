@@ -510,9 +510,20 @@ def add(paths: list[str], *, cwd: str) -> None:
     _git(["add", "-f", "--", *paths], cwd=cwd)
 
 
-def commit(message: str, paths: list[str], *, cwd: str) -> None:
-    """``git commit -m <message> -- <paths>`` — commit only the given pathspecs."""
-    _git(["commit", "-m", message, "--", *paths], cwd=cwd)
+def commit(
+    message: str, paths: list[str], *, cwd: str, no_verify: bool = False
+) -> None:
+    """``git commit -m <message> -- <paths>`` — commit only the given pathspecs.
+
+    ``no_verify`` bypasses the repo's commit hooks (``--no-verify``): install's
+    reconcile commit uses it deliberately (ADR-0033) — the whole-tree gate is
+    the REPO'S bar, not install's, and a consumer's pre-existing lint debt must
+    never deadlock the very install that delivers the env to clear it.
+    """
+    args = ["commit"]
+    if no_verify:
+        args.append("--no-verify")
+    _git([*args, "-m", message, "--", *paths], cwd=cwd)
 
 
 def push(branch: str, *, cwd: str, remote: str = "origin", force: bool = False) -> None:

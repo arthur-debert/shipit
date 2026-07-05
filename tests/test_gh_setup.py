@@ -698,3 +698,106 @@ def test_cli_malformed_slug_is_usage_tier_exit_2(capsys):
     rc = cli.main(["gh-setup", "not-a-slug", "--dry-run"])
     assert rc == 2
     assert "Usage:" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------
+# Flow events (#434) — ghsetup.started/completed/failed
+# --------------------------------------------------------------------------
+
+
+def _event_names(caplog):
+    from shipit import events as ev
+
+    return [getattr(r, ev.EXTRA_KEY, None) for r in caplog.records]
+
+
+def test_run_emits_started_and_completed_events(
+    stub_setup, monkeypatch, capsys, caplog
+):
+    import logging as _logging
+
+    _ambient(monkeypatch)
+    with caplog.at_level(_logging.INFO, logger="shipit.ghsetup"):
+        rc = gh_setup_verb.run(None, dry_run=True)
+    assert rc == 0
+    names = _event_names(caplog)
+    assert "ghsetup.started" in names
+    assert "ghsetup.completed" in names
+    assert "ghsetup.failed" not in names
+
+
+def test_failed_run_emits_the_failed_event(monkeypatch, capsys, caplog):
+    import logging as _logging
+
+    from shipit.execrun import ExecError
+
+    _ambient(monkeypatch)
+
+    def boom(repo, **kw):
+        raise ExecError(["gh", "api"], rc=1, stderr="broken gh")
+
+    monkeypatch.setattr(gh_setup_verb, "setup", boom)
+    with caplog.at_level(_logging.INFO, logger="shipit.ghsetup"):
+        rc = gh_setup_verb.run(None)
+    assert rc == 1  # the error shell still renders `error: …` + exit 1
+    from shipit import events as ev
+
+    failed = [
+        r for r in caplog.records if getattr(r, ev.EXTRA_KEY, None) == "ghsetup.failed"
+    ]
+    assert len(failed) == 1
+    assert failed[0].step == "setup (ruleset/labels/secrets)"
+    names = _event_names(caplog)
+    assert "ghsetup.completed" not in names
+
+
+def test_secrets_failure_is_completed_not_failed(
+    stub_setup, monkeypatch, capsys, caplog
+):
+    # A run that FINISHED with failed secrets is a completed run (rc 1 via the
+    # report); `ghsetup.failed` is reserved for a run that could not finish.
+    import logging as _logging
+
+    _ambient(monkeypatch)
+    monkeypatch.setattr(
+        gh_setup_verb,
+        "setup",
+        lambda repo, **kw: _report(
+            secrets=(
+                ghsetup.SecretOutcome(
+                    name="X", source="env", action="failed", reason="no VAR"
+                ),
+            )
+        ),
+    )
+    with caplog.at_level(_logging.INFO, logger="shipit.ghsetup"):
+        rc = gh_setup_verb.run(None)
+    assert rc == 1
+    names = _event_names(caplog)
+    assert "ghsetup.completed" in names
+    assert "ghsetup.failed" not in names
+
+
+# --------------------------------------------------------------------------
+# The truly stock consumer (#449 item 8): no .shipit.toml at all — gh-setup
+# still runs its passes; the missing config is a report fact, never a crash.
+# --------------------------------------------------------------------------
+
+
+def test_setup_on_a_stock_checkout_without_config(fake_gh, tmp_path):
+    stock = tmp_path / "stock"
+    stock.mkdir()
+    report = ghsetup.setup(
+        repo_from_slug("acme/stock"),
+        checks_override=["c / check"],
+        local_checkout=str(stock),
+        config_path=str(stock / ".shipit.toml"),
+        dry_run=False,
+    )
+    # Ruleset + labels applied; secrets degraded to the report fact.
+    assert report.ruleset.action in ("created", "updated")
+    assert report.labels
+    assert report.secrets == ()
+    assert report.secrets_error is not None
+    assert ".shipit.toml" in report.secrets_error
+    assert report.secrets_failed == 0  # degraded config is not a failed secret

@@ -139,6 +139,13 @@ every run; a goal reached while fighting the tooling is a failed adoption run.
 - **The local adoption bar is lint + test (+ build for compiled repos)**. No
   `run` task (not canon; per-repo optional), no local `release` task (arrives
   with ADP02's pixi encapsulation).
+- **"Repo defines a `test` task" is an explicit checklist prerequisite of the
+  test step (#444)**: the managed task block deliberately does not own `test`
+  (repo-specific), and on a manifest without one `pixi run test` falls through
+  to the POSIX `test` shell builtin — silent exit 1, zero output,
+  indistinguishable from a red suite. The step's verified-by starts with the
+  task existing (the session-start hook warns when it is missing); the managed
+  set never ships a fallback/no-op `test` task.
 - **Per-repo order is rigid**: install PR merged to main → gh-setup →
   `.treeinclude` → task verification → Tree/session verification → agent smoke.
   Motivated by fail-closed Tree provisioning on non-onboarded repos.

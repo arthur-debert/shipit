@@ -91,11 +91,15 @@ def run_argv(
 def install(
     root: str | Path,
     *,
+    environment: str | None = None,
     env: Mapping[str, str] | None = None,
     runner=None,
 ) -> execrun.ExecResult:
     """Run ``pixi install`` in ``root`` and return the step's :class:`ExecResult`.
 
+    ``environment`` pins a non-default pixi environment (``--environment
+    <name>``) — the selector install self-certification uses to solve exactly
+    the managed lint env (ADR-0033) rather than the consumer's default.
     ``env``, when given, is the COMPLETE child environment (``replace_env=True``) —
     callers hand in a scrubbed snapshot (:func:`shipit.pixienv.scrub_env`) so a
     parent's leaked project pointers cannot creep back in via a merge over
@@ -107,8 +111,11 @@ def install(
     """
     if runner is None:
         runner = execrun.run
+    argv = ["pixi", "install"]
+    if environment is not None:
+        argv += ["--environment", environment]
     return runner(
-        ["pixi", "install"],
+        argv,
         cwd=str(root),
         env=None if env is None else dict(env),
         replace_env=env is not None,

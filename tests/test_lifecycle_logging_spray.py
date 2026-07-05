@@ -50,7 +50,7 @@ class _GhRecorder:
     def add(self, paths, *, cwd):
         pass
 
-    def commit(self, message, paths, *, cwd):
+    def commit(self, message, paths, *, cwd, no_verify=False):
         pass
 
     def push(self, branch, *, cwd, remote="origin", force=False):
@@ -80,6 +80,18 @@ def rec(monkeypatch):
     for name in ("pr_url_for_head", "pr_create"):
         monkeypatch.setattr(gh, name, getattr(r, name))
     monkeypatch.setattr(install_apply, "_shipit_version", lambda: "testhash")
+    # Stub the ADR-0033 self-certification boundaries: these tests pin the
+    # LOGGING spray, not the postconditions (covered in test_install_selfcert).
+    from shipit.install import selfcert as _selfcert
+
+    monkeypatch.setattr(
+        _selfcert,
+        "certify",
+        lambda plan, root, **kw: _selfcert.CertReport(
+            checks=(_selfcert.CertCheck(name="stub", ok=True),)
+        ),
+    )
+    monkeypatch.setattr(_selfcert, "consumer_debt", lambda root, **kw: None)
     monkeypatch.setattr(
         install_apply,
         "_activate_hooks",
@@ -108,8 +120,16 @@ def test_noop_reinstall_emits_no_mutation_milestone(tmp_path, rec, caplog):
     caplog.clear()
     with caplog.at_level(logging.DEBUG, logger="shipit.install"):
         assert install.run(str(tmp_path)) == 0
-    # Nothing mutated, so nothing narrates at INFO — mechanics stay at DEBUG.
-    assert not [r for r in caplog.records if r.levelno >= logging.INFO]
+    # Nothing MUTATED, so no mutation milestone narrates at INFO — mechanics
+    # stay at DEBUG. The #434 dev-cycle events (install.started/completed) are
+    # the run's flow narration, not a mutation milestone, so they are excluded.
+    from shipit.events import EXTRA_KEY
+
+    assert not [
+        r
+        for r in caplog.records
+        if r.levelno >= logging.INFO and getattr(r, EXTRA_KEY, None) is None
+    ]
 
 
 def test_install_boundary_failure_is_an_error_with_the_exception(tmp_path, rec, caplog):

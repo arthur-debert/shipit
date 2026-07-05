@@ -521,6 +521,44 @@ def default_branch(repo: str) -> str:
     return str(info["default_branch"])
 
 
+#: The staleness read's stated timeout (ADR-0028): it runs at SESSION START as
+#: a purely advisory line, so it gets a tight network bound — a slow GitHub
+#: must cost the session a few seconds at most, never the runner's 5 minutes.
+_COMPARE_TIMEOUT: float = 20.0
+
+
+def commits_ahead(repo: str, base: str, head: str) -> int | None:
+    """How many commits ``head`` has over ``base`` in ``repo``, or ``None``.
+
+    ``gh api repos/<repo>/compare/<base>...<head>`` reading ``ahead_by`` — with
+    ``base`` a consumer's Shipit pin and ``head`` the tool repo's main, the
+    answer IS "how far behind main is this pin" (the ADR-0033 staleness
+    advisory). A PROBE end to end: any failure — no network, no gh auth, an
+    unknown sha, malformed output — is ``None``, never a raise, because the one
+    caller is a best-effort session-start advisory that must stay silent on
+    every error.
+    """
+    try:
+        result = _run_probe(
+            [
+                "gh",
+                "api",
+                f"repos/{repo}/compare/{base}...{head}",
+                "--jq",
+                ".ahead_by",
+            ],
+            timeout=_COMPARE_TIMEOUT,
+        )
+    except ExecError:
+        return None
+    if not result.ok:
+        return None
+    try:
+        return int(result.stdout.strip())
+    except ValueError:
+        return None
+
+
 # --------------------------------------------------------------------------
 # labels
 # --------------------------------------------------------------------------

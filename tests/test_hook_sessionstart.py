@@ -768,7 +768,9 @@ def test_warning_never_suppresses_the_writes(tmp_path, monkeypatch, pixi_repo):
         self_pid=1,
     )
     assert code == 0
-    assert out.getvalue() == sessionstart.SOURCE_CLONE_WARNING + "\n"
+    # The source-clone warning is present (the #444 test-task advisory may
+    # ride alongside it — this fixture's manifest defines no `test` task).
+    assert sessionstart.SOURCE_CLONE_WARNING + "\n" in out.getvalue()
     assert "export CONDA_DEFAULT_ENV=shipit" in env_file.read_text()
 
 
@@ -863,3 +865,128 @@ def test_session_started_emission_failure_is_fail_open(tmp_path, monkeypatch, ca
         code = _run_log_context(cwd, tmp_path / "claude-env")
     assert code == 0
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+# --------------------------------------------------------------------------
+# The ADR-0033 pin-staleness advisory (#449 item 2) — one best-effort line,
+# silent when current, silent on ANY error (faked gh boundary).
+# --------------------------------------------------------------------------
+
+GOOD_PIN = "c" * 40
+
+
+def _stale_run(cwd, commits_ahead, payload=None):
+    out = io.StringIO()
+    rc = sessionstart.run(
+        stdin=io.StringIO(json.dumps(payload or {"cwd": str(cwd)})),
+        stdout=out,
+        environ={},
+        commits_ahead=commits_ahead,
+    )
+    assert rc == 0
+    return out.getvalue()
+
+
+def _pinned_repo(tmp_path, pin=GOOD_PIN):
+    (tmp_path / ".shipit.toml").write_text(f'[shipit]\nversion = "{pin}"\n')
+    return tmp_path
+
+
+def test_stale_pin_emits_the_advisory_line(tmp_path):
+    seen = {}
+
+    def commits_ahead(repo, base, head):
+        seen["args"] = (repo, base, head)
+        return 7
+
+    out = _stale_run(_pinned_repo(tmp_path), commits_ahead)
+    assert f"pin {GOOD_PIN[:12]} is 7 commits behind shipit main" in out
+    # Measured pin -> shipit main, against the tool repo.
+    assert seen["args"] == (sessionstart.SHIPIT_REPO_SLUG, GOOD_PIN, "main")
+
+
+def test_current_pin_is_silent(tmp_path):
+    out = _stale_run(_pinned_repo(tmp_path), lambda *a: 0)
+    assert "behind shipit main" not in out
+
+
+def test_offline_read_is_silent(tmp_path):
+    # The gh boundary answers None on any failure (no network/auth/sha) —
+    # the advisory stays silent, never blocking, never warning.
+    out = _stale_run(_pinned_repo(tmp_path), lambda *a: None)
+    assert "behind" not in out
+
+
+def test_exploding_read_fails_open_silently(tmp_path):
+    def boom(*a):
+        raise RuntimeError("gh exploded")
+
+    out = _stale_run(_pinned_repo(tmp_path), boom)
+    assert "behind" not in out
+
+
+def test_pinless_repo_never_consults_the_network(tmp_path):
+    calls = []
+    out = _stale_run(tmp_path, lambda *a: calls.append(a) or 9)
+    assert calls == []
+    assert "behind" not in out
+
+
+def test_non_sha_pin_is_pinless_for_the_advisory(tmp_path):
+    calls = []
+    out = _stale_run(
+        _pinned_repo(tmp_path, pin="0.0.1"), lambda *a: calls.append(a) or 9
+    )
+    assert calls == []
+    assert "behind" not in out
+
+
+def test_one_commit_behind_singular_wording(tmp_path):
+    out = _stale_run(_pinned_repo(tmp_path), lambda *a: 1)
+    assert "is 1 commit behind" in out
+    assert "1 commits" not in out
+
+
+# --------------------------------------------------------------------------
+# The #444 missing-test-task advisory — pixi run test must never silently lie.
+# --------------------------------------------------------------------------
+
+
+def _task_run(cwd):
+    out = io.StringIO()
+    rc = sessionstart.run(
+        stdin=io.StringIO(json.dumps({"cwd": str(cwd)})),
+        stdout=out,
+        environ={},
+        commits_ahead=lambda *a: None,
+    )
+    assert rc == 0
+    return out.getvalue()
+
+
+def test_manifest_without_test_task_warns(tmp_path):
+    (tmp_path / "pixi.toml").write_text('[tasks]\nlint = "shipit lint"\n')
+    out = _task_run(tmp_path)
+    assert "defines no `test` task" in out
+    assert "POSIX `test` builtin" in out
+
+
+def test_manifest_with_root_test_task_is_silent(tmp_path):
+    (tmp_path / "pixi.toml").write_text('[tasks]\ntest = "pytest"\n')
+    assert "defines no `test` task" not in _task_run(tmp_path)
+
+
+def test_manifest_with_feature_test_task_is_silent(tmp_path):
+    (tmp_path / "pixi.toml").write_text(
+        '[tasks]\nlint = "x"\n\n[feature.dev.tasks]\ntest = "cargo test"\n'
+    )
+    assert "defines no `test` task" not in _task_run(tmp_path)
+
+
+def test_no_manifest_is_a_clean_noop_for_the_task_advisory(tmp_path):
+    assert "defines no `test` task" not in _task_run(tmp_path)
+
+
+def test_malformed_manifest_fails_open_silently(tmp_path):
+    (tmp_path / "pixi.toml").write_text("not = valid = toml\n")
+    assert "defines no `test` task" not in _task_run(tmp_path)

@@ -1,9 +1,10 @@
 """``shipit hook sessionstart`` — the coordinator-activation boundary (ADR-0027).
 
-THIN by design (mirrors ``hook pretooluse``); five independent, additive steps
-per session start — three writes, one advisory emit, and the ``session.started``
-dev-cycle event (ADR-0032, :func:`_emit_session_started` — the hook is the one
-verb that witnesses a session beginning):
+THIN by design (mirrors ``hook pretooluse``); independent, additive steps per
+session start — three writes, the advisory emits (the source-clone nudge, the
+ADR-0033 pin-staleness line, the #444 missing-``test``-task line), and the
+``session.started`` dev-cycle event (ADR-0032, :func:`_emit_session_started` —
+the hook is the one verb that witnesses a session beginning):
 
 1. **Activation** — detect the toolchain governing the session's ``cwd`` → capture
    pixi's activation (``pixi shell-hook --json`` via
@@ -80,12 +81,13 @@ import logging
 import os
 import shlex
 import sys
+import tomllib
 from pathlib import Path
 from typing import TextIO
 
 import click
 
-from ... import config, events, execrun, logcontext
+from ... import config, events, execrun, gh, logcontext
 from ...harness import activation
 from ...pixienv import shell_hook
 from ...session import current as session_current
@@ -105,6 +107,20 @@ SOURCE_CLONE_WARNING = (
     "shipit: you launched claude directly in the source clone — this session has "
     "no isolated Tree. Restart via ./claude-start (or claude -w <name>)."
 )
+
+#: The tool repo the ADR-0033 staleness advisory measures a consumer's pin
+#: against — the same home the managed launcher's ``SHIPIT_GIT_URL`` points at.
+SHIPIT_REPO_SLUG = "arthur-debert/shipit"
+
+#: The branch a pin's lag is measured against.
+SHIPIT_MAIN = "main"
+
+#: The pixi task name the tooling contract requires (#444). ``pixi run test``
+#: on a manifest WITHOUT it falls through to the POSIX ``test`` shell builtin —
+#: silent exit 1, zero output on both streams, indistinguishable from a red
+#: suite — so the absence is warned at session start rather than discovered as
+#: a lying verification command mid-run.
+CONTRACT_TEST_TASK = "test"
 
 
 @click.command(name="sessionstart")
@@ -127,16 +143,18 @@ def run(
     runner=execrun.run,
     probe: liveness.Probe | None = None,
     self_pid: int | None = None,
+    commits_ahead=None,
 ) -> int:
-    """Parse stdin → warn on a source-clone cwd → write activation → export the
-    log context → write the liveness pidfile → emit the ``session.started``
-    event. Returns 0 always.
+    """Parse stdin → the advisories (source-clone cwd, stale pin, missing
+    ``test`` task) → write activation → export the log context → write the
+    liveness pidfile → emit the ``session.started`` event. Returns 0 always.
 
-    ``stdout``, ``environ``, ``runner``, ``probe``, and ``self_pid`` are the
-    injectable boundaries (defaults: the real ``sys.stdout`` / ``os.environ`` /
-    :func:`shipit.execrun.run` / :func:`shipit.session.liveness.os_probe` /
-    ``os.getpid()``) so tests assert every step without a live pixi or a
-    real claude process tree. Each check is wrapped fail-open on its own, so a
+    ``stdout``, ``environ``, ``runner``, ``probe``, ``self_pid``, and
+    ``commits_ahead`` are the injectable boundaries (defaults: the real
+    ``sys.stdout`` / ``os.environ`` / :func:`shipit.execrun.run` /
+    :func:`shipit.session.liveness.os_probe` / ``os.getpid()`` /
+    :func:`shipit.gh.commits_ahead`) so tests assert every step without a live
+    pixi, a real claude process tree, or the network. Each check is wrapped fail-open on its own, so a
     bad payload, a pixi failure, an unwritable env file, a probe error, or a
     detection error can never crash the session — and a failure in one check
     never suppresses the others. The log-context export runs AFTER activation so
@@ -151,6 +169,10 @@ def run(
         logger.warning("sessionstart: could not read the payload", exc_info=True)
         return 0
     _warn_source_clone(raw, out)
+    # Resolved at CALL time (not a bound default) so a patched gh boundary is
+    # honored — the same late-binding stance as the pixienv runners.
+    _warn_stale_pin(raw, out, commits_ahead or gh.commits_ahead)
+    _warn_missing_test_task(raw, out)
     _write_activation(raw, env, runner)
     _write_log_context(raw, env)
     _write_liveness(raw, probe=probe, self_pid=self_pid)
@@ -212,6 +234,92 @@ def _is_source_clone(cwd: Path) -> bool:
     if not (cwd / ".git").exists():
         return False
     return not cwd.resolve().is_relative_to(layout.central_root().resolve())
+
+
+def _warn_stale_pin(raw: str, out: TextIO, commits_ahead) -> None:
+    """The ADR-0033 staleness advisory: one line when the repo's pin lags main.
+
+    Best-effort BY SPECIFICATION: staleness is surfaced, never enforced — with
+    pin-wins execution, lag is a scheduling fact, not a hazard. Silent when the
+    repo carries no valid pin (nothing to measure), silent when the pin is
+    current, and silent at DEBUG on ANY error — no network, no gh auth, an
+    unknown sha (the #348 advisory calibration: nothing durable degrades, and a
+    broken network must not WARN on every session start). ``commits_ahead`` is
+    the injected read boundary (:func:`shipit.gh.commits_ahead`), itself a
+    probe that answers ``None`` rather than raising.
+    """
+    try:
+        cwd = _payload_cwd(raw)
+        pin = config.shipit_pin(cwd / config.CONFIG_NAME)
+        if pin is None:
+            logger.debug("sessionstart: no shipit pin — no staleness advisory")
+            return
+        behind = commits_ahead(SHIPIT_REPO_SLUG, pin, SHIPIT_MAIN)
+        if behind is None:
+            logger.debug("sessionstart: pin staleness unreadable — no advisory emitted")
+            return
+        if behind < 1:
+            return
+        out.write(
+            f"shipit: pin {pin[:12]} is {behind} commit"
+            f"{'s' if behind != 1 else ''} behind shipit main — the next "
+            f"install reconcile PR catches this repo up (ADR-0033).\n"
+        )
+        logger.info(
+            "sessionstart: shipit pin is stale",
+            extra={"pin": pin, "behind": behind},
+        )
+    except Exception:  # noqa: BLE001 — fail-open, DEBUG by design: advisory-only,
+        # never blocking, and a broken environment must not warn every start.
+        logger.debug(
+            "sessionstart: staleness advisory failed open — nothing emitted",
+            exc_info=True,
+        )
+
+
+def _warn_missing_test_task(raw: str, out: TextIO) -> None:
+    """The #444 advisory: warn when the manifest lacks the contract ``test`` task.
+
+    The managed task block deliberately does NOT own ``test`` (repo-specific by
+    the adoption PRD), so a consumer that never defined one hits the POSIX
+    ``test``-builtin collision the moment anything runs the tooling contract's
+    ``pixi run test`` — a silent exit 1 that reads as a red suite. The check
+    looks in the root ``[tasks]`` table and every ``[feature.*.tasks]`` table;
+    a repo with no ``pixi.toml`` at all is a clean no-op (not yet a pixi
+    consumer — install seeds the manifest, not this advisory). Fail-open at
+    DEBUG on any error (advisory calibration, like the other detections).
+    """
+    try:
+        cwd = _payload_cwd(raw)
+        manifest = cwd / "pixi.toml"
+        if not manifest.is_file():
+            logger.debug("sessionstart: no pixi.toml — no test-task advisory")
+            return
+        data = tomllib.loads(manifest.read_text(encoding="utf-8"))
+        tasks = set(data.get("tasks", {}) or {})
+        features = data.get("feature", {})
+        if isinstance(features, dict):
+            for feature in features.values():
+                if isinstance(feature, dict):
+                    tasks |= set(feature.get("tasks", {}) or {})
+        if CONTRACT_TEST_TASK in tasks:
+            return
+        out.write(
+            "shipit: pixi.toml defines no `test` task — `pixi run test` "
+            "silently runs the POSIX `test` builtin (exit 1, no output; #444). "
+            "Define a repo-specific `test` task before trusting the tooling "
+            "contract's verification commands.\n"
+        )
+        logger.info(
+            "sessionstart: manifest lacks the contract test task",
+            extra={"manifest": str(manifest)},
+        )
+    except Exception:  # noqa: BLE001 — fail-open, DEBUG by design: an unreadable
+        # manifest is pixi's problem to report, not this advisory's.
+        logger.debug(
+            "sessionstart: test-task advisory failed open — nothing emitted",
+            exc_info=True,
+        )
 
 
 def _write_activation(raw: str, env, runner) -> None:

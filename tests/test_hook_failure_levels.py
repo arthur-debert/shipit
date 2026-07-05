@@ -124,10 +124,11 @@ def test_sessionstart_malformed_payload_warns_with_exception_on_each_arm(
     monkeypatch, tmp_path, caplog
 ):
     # A malformed payload is swallowed INSIDE the checks, past the top-level
-    # stdin read. All 5 WARNINGs come from the shared PARSE-FALLBACK helpers
+    # stdin read. All 7 WARNINGs come from the shared PARSE-FALLBACK helpers
     # (`_payload_cwd` / `_payload_session_id`), which log WARNING per the canon
-    # (a swallowed parse is a degraded-but-continuing outcome): three cwd
-    # fallbacks (the source-clone warning check, the liveness half, and the
+    # (a swallowed parse is a degraded-but-continuing outcome): five cwd
+    # fallbacks (the source-clone warning check, the ADR-0033 pin-staleness
+    # advisory, the #444 test-task advisory, the liveness half, and the
     # session.started event step — LOG04-WS02 — each parse the payload
     # independently) plus two session-id fallbacks (the liveness half and the
     # event step). The event step's OWN swallow arm is NOT among them: its
@@ -152,8 +153,8 @@ def test_sessionstart_malformed_payload_warns_with_exception_on_each_arm(
         )
     assert rc == 0  # fail-open: the session start continues
     warnings = _records(caplog, logging.WARNING)
-    assert len(warnings) == 5, (
-        "exactly the five parse-fallback arms (3× cwd + 2× session-id) produce "
+    assert len(warnings) == 7, (
+        "exactly the seven parse-fallback arms (5× cwd + 2× session-id) produce "
         "a WARNING — the event step's own swallow is DEBUG by design"
     )
     assert all(r.exc_info for r in warnings)
