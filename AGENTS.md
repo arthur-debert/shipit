@@ -15,16 +15,16 @@ Three roles, so no one context carries all of it:
 - an IMPLEMENTER subagent implements (+ tests), runs the checks green, opens a
   DRAFT PR, then STOPS AT PR-OPEN — it never sees a review round;
 - the COORDINATOR owns every wait and the flip;
-- a FRESH SHEPHERD handles each review-addressing round, one per round,
-  briefed cold.
+- ONE SHEPHERD per PR owns the review-addressing rounds (ADR-0035):
+  briefed cold on round 1, PARKED between rounds, resumed with a one-line brief when the next round lands.
 
 Canonical source: `arthur-debert/release` `docs/dev-cycle.lex`; on drift, it wins.
 
 ## The PR lifecycle (draft -\> ready -\> stop):
 
-Every change ships as a PR the agent drives. Open it as a DRAFT — WIP the agent owns. Shepherd the whole loop while it stays draft: request + address reviews, get CI green, make it mergeable. Flipping draft -\> ready (\`shipit pr ready\`) is the ONE signal that means "done iterating — a human can validate and merge": it happens only when all three hold — reviews addressed, CI green, mergeable.
+Every change ships as a PR the agent drives. Open it as a DRAFT — WIP the agent owns. Shepherd the whole loop while it stays draft: request + address reviews, get CI green, make it mergeable. Flipping draft -\> ready (`shipit pr ready`) is the ONE signal that means "done iterating — a human can validate and merge": it happens only when all three hold — reviews addressed, CI green, mergeable.
 
-Stop at that flip; do NOT merge. The HUMAN does the final read + merge, on explicit authorization only. A "changes needed" flips back to draft (\`shipit pr ready --undo\`); the loop repeats and re-flips when green.
+Stop at that flip; do NOT merge. The HUMAN does the final read + merge, on explicit authorization only. A "changes needed" flips back to draft (`shipit pr ready --undo`); the loop repeats and re-flips when green.
 
 FLOOR / CEILING:
 
@@ -35,7 +35,7 @@ FLOOR / CEILING:
 
 ## 1. The single-task cycle (one PR)
 
-The unit of work, identical whether it ships as one PR to `main` or as one workstream of an epic (\[\#2\]). The coordinator delegates it; it never runs the steps itself.
+The unit of work, identical whether it ships as one PR to `main` or as one workstream of an epic ([\#2](#2)). The coordinator delegates it; it never runs the steps itself.
 
 ### 1.1. Information gathering (the coordinator)
 
@@ -45,7 +45,7 @@ Align on what's to be done before any code is touched — and before delegating.
   maintainer-directed quick fix needs NO issue first — a direct instruction is its own authorization; ship the fix PR.
 - Contextualize: read the description + related code/resources.
 - Clarify: if information is missing or a real PRODUCT/SCOPE decision
-  exists, surface it — propose a preferred option, don't only ask. The dev cycle and the epic branch/merge topology (\[\#2\]) are FIXED policy, never a choice to put to the human — never offer a PR-strategy menu.
+  exists, surface it — propose a preferred option, don't only ask. The dev cycle and the epic branch/merge topology ([\#2](#2)) are FIXED policy, never a choice to put to the human — never offer a PR-strategy menu.
 
 The coordinator reads/researches to brief the work, then delegates. It does not implement.
 
@@ -63,10 +63,10 @@ Why split: an implementer that also shepherds drags its full implementation cont
 
 - IMPLEMENTER: the DRAFT it opens links the issue (`for #<id>` /
   `closes #<id>`) and carries a `## Context` handoff note — why this approach, what's out of scope, what NOT to "fix" — written for the stranger who addresses the rounds.
-- COORDINATOR: the PR engine is STATELESS ("now" is an input; there is no
-  `pr wait`). Drive with `shipit pr next` / `shipit pr status`, manage the waiting cadence yourself, and flip with `shipit pr ready` once the engine reports READY (the guard refuses an early flip).
-- SHEPHERD: briefed with just the PR number + Context note. It triages
-  open threads — fix, or reply with a rationale, resolving each — pushes the round's commits at once, re-requests review if needed, hands back. The local agent has more context than the reviewer, so it has the final word; every thread ends resolved (including deferred nitpicks).
+- COORDINATOR: the PR engine is STATELESS ("now" is an input); the ONE
+  verb that blocks is `shipit pr wait` (ADR-0034). Drive with `shipit pr next` / `shipit pr status`, own every wait behind `shipit pr wait --until reviews-in|ready`, and flip with `shipit pr ready` once the engine reports READY (the guard refuses an early flip).
+- SHEPHERD: ONE per PR (ADR-0035), briefed cold with just the PR number +
+  Context note on round 1, then PARKED between rounds and resumed with a one-line brief per round — it re-reads each round's findings from the PR, not from memory. Each round it triages open threads — fix, or reply with a rationale, resolving each — sweeps the PR diff for other instances of each finding's class, pushes the round's commits at once, hands back, and parks. The local agent has more context than the reviewer, so it has the final word; every thread ends resolved (including deferred nitpicks).
 
 ### 1.4. Validation
 
@@ -78,7 +78,7 @@ The single PR targets its base (`main`, or the epic branch for a workstream); th
 
 ## 2. Epics (multiple PRs)
 
-An epic — a feature of multiple PRs — is the SAME coordinator + role-split model [as](#1), differing ONLY in branch/merge topology: one **epic branch** + one umbrella PR; each workstream is a single-task cycle (\[\#1\]) whose PR targets the epic branch (not `main`). The coordinator merges each READY workstream PR INTO the epic branch on its own authority (parallel implement, serial integrate); the HUMAN's one checkpoint is the umbrella PR (epic branch -\> `main`). Convergence (clear epic-owned fallouts) and a docs pass precede the umbrella.
+An epic — a feature of multiple PRs — is the SAME coordinator + role-split model [as](#1), differing ONLY in branch/merge topology: one **epic branch** + one umbrella PR; each workstream is a single-task cycle ([\#1](#1)) whose PR targets the epic branch (not `main`). The coordinator merges each READY workstream PR INTO the epic branch on its own authority (parallel implement, serial integrate); the HUMAN's one checkpoint is the umbrella PR (epic branch -\> `main`). Convergence (clear epic-owned fallouts) and a docs pass precede the umbrella.
 
 This topology is FIXED policy, not a choice: the coordinator does NOT ask the human to pick a PR strategy (one big PR, one PR per workstream to `main`, an epic branch) — a multi-PR feature runs on the epic branch, full stop.
 
@@ -93,8 +93,8 @@ Codes are assigned by the HUMAN — repo codes once per project, epic codes at e
 Per-PR essentials:
 
 - Identifier (epic work): `REPO-EPIC-WSnn[-FXnn]` — e.g. `APP-GPU02-WS03`.
-- PR title (epic work): \`\<identifier\>: Epic: \<Epic Name\> - Workstream: \<WS
-  Name\>\`; a standalone PR uses a plain summary.
+- PR title (epic work): `<identifier>: Epic: <Epic Name> - Workstream: <WS Name>`;
+  a standalone PR uses a plain summary.
 - PR body: `closes #<id>` (auto-closes on merge to `main`) or `for #<id>`
   when it must not (e.g. a WS PR onto an epic branch).
 - Branch: `EPIC/WSnn` (slash-namespaced); the epic (umbrella) branch is
@@ -104,13 +104,13 @@ Full grammar + rationale — the THEME registry, multi-repo prefixes, FX rounds,
 
 ## 4. Role prompts (generated, role-scoped)
 
-Each role's binding prompt is GENERATED from focused lex fragments under \[./src/shipit/data/roles\] — a shared dev-cycle base plus one overlay per role — so the cycle is stated once and re-flows on a single edit (\`pixi run regen-roles\`). Each agent receives ONLY its own role's slice, never the others', which is what stops mid-session role drift (ADR-0011).
+Each role's binding prompt is GENERATED from focused lex fragments under [./src/shipit/data/roles](./src/shipit/data/roles) — a shared dev-cycle base plus one overlay per role — so the cycle is stated once and re-flows on a single edit (`pixi run regen-roles`). Each agent receives ONLY its own role's slice, never the others', which is what stops mid-session role drift (ADR-0011).
 
 The roles (one line each; non-binding map — the binding surfaces are the agent-defs and the coordinator deny reason):
 
 - coordinator — the agent the human addresses; orchestrates and delegates, never implements. Its slice rides the PreToolUse deny reason plus injected context (it has no agent-def).
 - implementer — builds the change with tests and opens the draft PR, then stops; [agent-def](./.claude/agents/implementer.md).
-- shepherd — addresses one review round on an open PR, then hands back; [agent-def](./.claude/agents/shepherd.md).
+- shepherd — owns addressing for one PR across its review rounds, parked between rounds and resumed per round; [agent-def](./.claude/agents/shepherd.md).
 - explorer — read-only investigator: searches and reports, changes nothing; [agent-def](./.claude/agents/explorer.md).
 
 <!-- Managed by shipit; do not edit. Regenerate via shipit install. -->
@@ -159,15 +159,16 @@ coordinator shepherds to READY, then stops for the human to merge.
 ### Roles — always delegated, split so no one context carries the whole cycle
 
 - **Coordinator** (the agent the human addresses): never implements. Delegates the work;
-  owns every wait and the flip; spawns a fresh shepherd per review round; in an epic, merges
-  READY workstream PRs into the epic branch.
+  owns every wait (`shipit pr wait`) and the flip; spawns ONE shepherd per PR and resumes
+  it per round; in an epic, merges READY workstream PRs into the epic branch.
 - **Implementer** (subagent): implements + tests, gets the tests green (`pixi run test`;
   the commit/push hooks run the lint suite), opens the DRAFT PR with a `## Context` handoff
   note (why this approach, what's out of scope), then **stops at PR-open** — never handles
   a review round.
-- **Shepherd** (fresh subagent, one per round): triages open threads — the local agent has
-  the final word, so fix-or-pushback and resolve each — pushes the round's commits at once,
-  hands back.
+- **Shepherd** (subagent, ONE per PR — parked between rounds, resumed with a one-line
+  brief per round): triages open threads — the local agent has the final word, so
+  fix-or-pushback and resolve each — sweeps the PR diff for other instances of each
+  finding's class, pushes the round's commits at once, hands back and parks.
 
 ### Naming & references
 

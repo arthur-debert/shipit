@@ -32,7 +32,7 @@ _FIXTURE = RoleDefs(
     overlays={
         Role.COORDINATOR: "COORD-OVERLAY: orchestrate and delegate; never implement.",
         Role.IMPLEMENTER: "IMPL-OVERLAY: implement with tests and open one draft PR.",
-        Role.SHEPHERD: "SHEP-OVERLAY: address exactly one review round, then hand back.",
+        Role.SHEPHERD: "SHEP-OVERLAY: own addressing for one PR; park between rounds.",
         Role.EXPLORER: "EXPL-OVERLAY: read-only and search-scoped; mutate nothing.",
         Role.REVIEWER: "REVW-OVERLAY: read a PR head and post one review; mutate nothing.",
     },
@@ -100,6 +100,44 @@ def test_real_role_prompts_read_as_their_role():
     assert "You are a SHEPHERD" in rendered.role_prompts[Role.SHEPHERD]
     assert "You are an EXPLORER" in rendered.role_prompts[Role.EXPLORER]
     assert "You are a REVIEWER" in rendered.role_prompts[Role.REVIEWER]
+
+
+# --- shepherd-per-PR (ADR-0035): the fragments say the revised design --------
+
+
+def test_shepherd_prompt_scopes_to_one_pr_across_rounds():
+    """ADR-0035: the shepherd owns ADDRESSING for one PR across its whole review
+    life — parked between rounds — not one round per agent."""
+    prompt = render(load_role_defs()).role_prompts[Role.SHEPHERD]
+    assert "ONE PR" in prompt
+    assert "PARKED" in prompt
+
+
+def test_shepherd_prompt_carries_the_root_cause_sweep_clause():
+    """ADR-0035's whack-a-mole lesson at PR scale: a valid finding is an instance
+    of a CLASS, and the shepherd sweeps the PR diff for the rest of the class."""
+    prompt = render(load_role_defs()).role_prompts[Role.SHEPHERD]
+    assert "INSTANCE OF A CLASS" in prompt
+    assert "sweep the whole PR diff" in prompt
+
+
+def test_no_shipped_surface_says_fresh_shepherd_per_round():
+    """The previous design must not survive in ANY composed prompt, the union, OR
+    the committed agent-def frontmatter — the issue's residual-phrasing
+    acceptance, pinned at every surface it could regress in. The frontmatter
+    `description` is added at the boundary (not by :func:`render`), so a render-
+    only guard would miss a stale phrase in `_AGENT_FRONTMATTER`; the committed
+    agent-defs (frontmatter included) are guarded here for that reason."""
+    rendered = render(load_role_defs())
+    agent_defs = [
+        (_ROOT / ".claude" / "agents" / f"{role.value}.md").read_text(encoding="utf-8")
+        for role in SUBAGENT_ROLES
+    ]
+    surfaces = [*rendered.role_prompts.values(), rendered.agents_union, *agent_defs]
+    for text in surfaces:
+        lowered = text.lower()
+        assert "fresh shepherd" not in lowered
+        assert "one review round" not in lowered
 
 
 # --- the committed derived surfaces (no drift from the source) ---------------

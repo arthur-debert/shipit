@@ -92,8 +92,9 @@ _AGENT_FRONTMATTER: dict[Role, dict[str, str]] = {
     },
     Role.SHEPHERD: {
         "description": (
-            "Addresses exactly one review round on an open PR, then hands back. "
-            "Use per review round; briefed cold with the PR number."
+            "Owns addressing for one PR across its review rounds; parked "
+            "between rounds. Use one per PR: briefed cold with the PR number on "
+            "round 1, resume the SAME agent for later rounds."
         ),
     },
     Role.EXPLORER: {

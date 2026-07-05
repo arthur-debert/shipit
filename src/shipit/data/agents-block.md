@@ -43,15 +43,16 @@ coordinator shepherds to READY, then stops for the human to merge.
 ### Roles — always delegated, split so no one context carries the whole cycle
 
 - **Coordinator** (the agent the human addresses): never implements. Delegates the work;
-  owns every wait and the flip; spawns a fresh shepherd per review round; in an epic, merges
-  READY workstream PRs into the epic branch.
+  owns every wait (`shipit pr wait`) and the flip; spawns ONE shepherd per PR and resumes
+  it per round; in an epic, merges READY workstream PRs into the epic branch.
 - **Implementer** (subagent): implements + tests, gets the tests green (`pixi run test`;
   the commit/push hooks run the lint suite), opens the DRAFT PR with a `## Context` handoff
   note (why this approach, what's out of scope), then **stops at PR-open** — never handles
   a review round.
-- **Shepherd** (fresh subagent, one per round): triages open threads — the local agent has
-  the final word, so fix-or-pushback and resolve each — pushes the round's commits at once,
-  hands back.
+- **Shepherd** (subagent, ONE per PR — parked between rounds, resumed with a one-line
+  brief per round): triages open threads — the local agent has the final word, so
+  fix-or-pushback and resolve each — sweeps the PR diff for other instances of each
+  finding's class, pushes the round's commits at once, hands back and parks.
 
 ### Naming & references
 
