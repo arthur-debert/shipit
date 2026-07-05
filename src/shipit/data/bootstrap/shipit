@@ -69,6 +69,15 @@ if ! printf '%s' "$pin" | grep -Eq '^[0-9a-f]{40}([0-9a-f]{24})?$'; then
 	exit 127
 fi
 
+# Self-certification probe (ADR-0033): `shipit install` asserts this launcher
+# resolves the pin it just stamped. With SHIPIT_PIN_CHECK set, print the
+# resolved pin and stop — the real parse over the real manifest, with no uv
+# requirement and no network resolve in the postcondition.
+if [ -n "${SHIPIT_PIN_CHECK:-}" ]; then
+	printf '%s\n' "$pin"
+	exit 0
+fi
+
 command -v uv >/dev/null 2>&1 || {
 	echo "shipit: uv is not on PATH — the pinned launcher provisions the repo's shipit via uv (ADR-0033)." >&2
 	echo "Install uv (https://docs.astral.sh/uv/), then re-run." >&2

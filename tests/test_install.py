@@ -29,7 +29,7 @@ from shipit.execrun import ExecError
 from shipit.identity import Sha
 from shipit.install import apply as iapply
 from shipit.install import reconcile as irec
-from shipit.install import splice, units as iunits
+from shipit.install import selfcert, splice, units as iunits
 from shipit.install.errors import InstallError
 from shipit.verbs import install as verb
 
@@ -61,9 +61,17 @@ def _apply(root, mode: str = iapply.MODE_TREE, **kw) -> iapply.InstallResult:
     return iapply.apply(
         plan,
         mode,
-        pr_body=lambda before, hooks: verb.format_pr_body(plan, before, hooks),
+        pr_body=lambda before, hooks, pin, debt: verb.format_pr_body(
+            plan, before, hooks, stamped_version=pin, lint_debt=debt
+        ),
         **kw,
     )
+
+
+def _cert_ok(plan, root, **kw) -> selfcert.CertReport:
+    """A passing certification — the injected default for tests that are not
+    about self-certification (no pixi solve, no scoped lint, no launcher run)."""
+    return selfcert.CertReport(checks=(selfcert.CertCheck(name="stub", ok=True),))
 
 
 # --------------------------------------------------------------------------
@@ -1115,6 +1123,8 @@ class _GhRecorder:
         self.calls = []
         self.pr_body = None
         self.hook_activations = []
+        self.commit_paths = ()
+        self.commit_no_verify = None
 
     def activate_hooks(self, root):
         # Stand in for `lefthook install`: record the call, mutate nothing.
@@ -1127,8 +1137,10 @@ class _GhRecorder:
     def add(self, paths, *, cwd):
         self.calls.append(("add", tuple(paths)))
 
-    def commit(self, message, paths, *, cwd):
+    def commit(self, message, paths, *, cwd, no_verify=False):
         self.calls.append(("commit", message))
+        self.commit_paths = tuple(paths)
+        self.commit_no_verify = no_verify
 
     def push(self, branch, *, cwd, remote="origin", force=False):
         self.calls.append(("push", branch))
@@ -1166,6 +1178,12 @@ def rec(monkeypatch):
     # (mirrors how lint tests inject run_tool). Real activation is covered
     # directly against the Exec runner in test_activate_hooks_* below.
     monkeypatch.setattr(iapply, "_activate_hooks", r.activate_hooks)
+    # Stub the self-certification boundaries (ADR-0033) the same way: the
+    # committing modes certify by default, and these tests are not about the
+    # postconditions (no pixi solve / scoped lint / launcher probe spawns).
+    # The real checks are covered in tests/test_install_selfcert.py.
+    monkeypatch.setattr(selfcert, "certify", _cert_ok)
+    monkeypatch.setattr(selfcert, "consumer_debt", lambda root, **kw: None)
     return r
 
 
@@ -2282,3 +2300,179 @@ def test_cmd_mode_flags_are_mutually_exclusive():
         result = CliRunner().invoke(verb.cmd, [*pair, "."])
         assert result.exit_code == 2
         assert "mutually exclusive" in result.output
+
+
+# --------------------------------------------------------------------------
+# Block identity + the pin line (#433) — the reconcile report names blocks,
+# and the pin stamp gets its own report/PR-body line.
+# --------------------------------------------------------------------------
+
+
+def test_format_plan_lines_carry_block_identity(tmp_path, rec):
+    # A fresh install writes three marker blocks into ONE pixi.toml and five
+    # hook entries into ONE settings.json: the report must distinguish them by
+    # unit KEY (the [managed] names), never repeat a bare filename (#433).
+    plan = _plan(tmp_path)
+    report = verb.format_plan(plan)
+    for key in (
+        iunits.PIXI_KEY,
+        iunits.PIXI_LINT_DEPS_KEY,
+        iunits.PIXI_ENVS_KEY,
+        iunits.SETTINGS_KEY,
+        iunits.SETTINGS_STOP_KEY,
+    ):
+        assert f"add      {key}" in report
+    # No line is a bare `add pixi.toml` with nothing after it.
+    assert not any(
+        line.strip() == "add      pixi.toml".strip()
+        or line.rstrip().endswith(" pixi.toml")
+        for line in report.splitlines()
+        if line.strip().startswith("add")
+    )
+
+
+def test_pr_body_lists_units_by_key(tmp_path, rec):
+    _apply(tmp_path, iapply.MODE_PR)
+    assert f"- `{iunits.PIXI_LINT_DEPS_KEY}`" in rec.pr_body
+    assert f"- `{iunits.SETTINGS_SESSIONSTART_KEY}`" in rec.pr_body
+
+
+def test_format_result_renders_the_pin_stamp_line(tmp_path, rec):
+    result = _apply(tmp_path, iapply.MODE_LOCAL)
+    assert result.stamped_version == "testhash"
+    assert "  pinned to testhash" in verb.format_result(result)
+
+
+def test_pr_body_carries_the_pin_stamp_line(tmp_path, rec):
+    _apply(tmp_path, iapply.MODE_PR)
+    assert "Pinned to `testhash`" in rec.pr_body
+
+
+def test_override_summary_uses_the_unit_key(tmp_path, rec):
+    _apply(tmp_path)
+    # Edit the managed tasks BLOCK -> next PR proposes an override, and the
+    # <summary> names the block, not the shared filename.
+    pixi = tmp_path / "pixi.toml"
+    pixi.write_text(pixi.read_text().replace('lint = "shipit lint"', 'lint = "true"'))
+    _apply(tmp_path, iapply.MODE_PR)
+    assert f"<code>{iunits.PIXI_KEY}</code>" in rec.pr_body
+
+
+# --------------------------------------------------------------------------
+# The truly stock consumer (#449 item 8) — empty repo, no manifest, no
+# configs, no hooks: the WS09/WS10 class dies here.
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def stock_consumer(tmp_path):
+    """A TRULY stock consumer: an empty directory. No AGENTS.md, no pixi.toml,
+    no .shipit.toml, no .claude/, no hooks — the headline adoption case."""
+    root = tmp_path / "stock"
+    root.mkdir()
+    return root
+
+
+def test_fresh_install_on_a_truly_stock_consumer(stock_consumer, rec):
+    result = _apply(stock_consumer, iapply.MODE_PR)
+
+    # Every managed unit decided ADD (nothing pre-existed to reconcile).
+    assert all(d.action == irec.ADD for d in result.plan.decisions)
+
+    # The whole set landed: the block hosts were CREATED around the blocks.
+    agents = (stock_consumer / "AGENTS.md").read_text()
+    assert iunits.BLOCK_OPEN in agents
+    manifest = tomllib.loads((stock_consumer / "pixi.toml").read_text())
+    assert manifest["workspace"]["name"] == "stock"  # the seeded table
+    assert "lint" in manifest["tasks"]
+    settings = json.loads((stock_consumer / ".claude" / "settings.json").read_text())
+    assert set(settings["hooks"]) == {
+        "PreToolUse",
+        "Stop",
+        "SubagentStop",
+        "SessionStart",
+        "WorktreeCreate",
+    }
+    assert (stock_consumer / "lefthook.yml").is_file()
+    assert (stock_consumer / "bin" / "shipit").is_file()
+    assert (stock_consumer / ".markdownlint.yaml").is_file()
+
+    # Policy seeded, manifest stamped, PR opened.
+    cfg = config.load(stock_consumer / config.CONFIG_NAME)
+    assert config.shipit_version(cfg) == "testhash"
+    assert "reviewers" in cfg
+    assert ("pr_create", True) in rec.calls
+
+
+def test_stock_consumer_reinstall_reconciles_to_noop(stock_consumer, rec):
+    _apply(stock_consumer)
+    again = _plan(stock_consumer)
+    assert again.nothing_to_do
+
+
+# --------------------------------------------------------------------------
+# Failure-path flow events (#434) — install.started/completed/failed
+# --------------------------------------------------------------------------
+
+
+def _events(caplog):
+    from shipit import events as ev
+
+    return [getattr(r, ev.EXTRA_KEY, None) for r in caplog.records]
+
+
+def test_install_run_emits_started_and_completed(tmp_path, rec, caplog):
+    import logging as _logging
+
+    with caplog.at_level(_logging.INFO, logger="shipit.install"):
+        rc = verb.run(str(tmp_path), dry_run=True)
+    assert rc == 0
+    names = _events(caplog)
+    assert "install.started" in names
+    assert "install.completed" in names
+    assert "install.failed" not in names
+
+
+def test_failed_install_emits_the_failed_event_with_the_step(
+    tmp_path, rec, monkeypatch, caplog
+):
+    import logging as _logging
+
+    def boom(*a, **k):
+        raise ExecError(["git", "push"], rc=1, stderr="denied")
+
+    monkeypatch.setattr(git, "push", boom)
+    with caplog.at_level(_logging.INFO, logger="shipit.install"):
+        rc = verb.run(str(tmp_path), pr=True)
+    assert rc == 1  # the cli_errors shell still renders error + exit 1
+    from shipit import events as ev
+
+    failed = [
+        r for r in caplog.records if getattr(r, ev.EXTRA_KEY, None) == "install.failed"
+    ]
+    assert len(failed) == 1
+    assert failed[0].step == "apply"
+
+
+def test_selfcert_failure_event_names_the_selfcert_step(
+    tmp_path, rec, monkeypatch, caplog
+):
+    import logging as _logging
+
+    from shipit.install import selfcert as sc
+
+    def failing_cert(plan, root, **kw):
+        return sc.CertReport(checks=(sc.CertCheck(name="planted", ok=False),))
+
+    monkeypatch.setattr(sc, "certify", failing_cert)
+    with caplog.at_level(_logging.INFO, logger="shipit.install"):
+        rc = verb.run(str(tmp_path), pr=True)
+    assert rc == 1
+    from shipit import events as ev
+
+    failed = [
+        r for r in caplog.records if getattr(r, ev.EXTRA_KEY, None) == "install.failed"
+    ]
+    assert len(failed) == 1
+    assert failed[0].step == "self-certification"
+    assert rec.names() == []  # fail closed: no branch, no commit, no PR

@@ -67,6 +67,14 @@ agy = {}
 # the now-stale release/managed-repos.yaml; THIS is the source of truth. A future
 # `shipit portfolio` verb can consume it.
 #
+# Reconciled against the ADP fleet sweep (#426, epic #413): every adoption
+# target of the swept fleet is listed — including shipit itself (dogfooding is
+# a row in the sweep) and shipit-canary (the standing ADP00 test bed) — and the
+# sweep's non-targets (lex-fmt/comms, lex-fmt/nvim, lex-fmt/zed-lex: docs /
+# editor-config / grammar-packaging repos) are OUT. The sweep's bird's-eye
+# table is the derived human view; THIS table is the machine-readable fleet
+# manifest (ADR-0033).
+#
 # Secondary stacks are deferred (out of scope for now): the brew-tap stack
 # (arthur-debert/homebrew-tools — formulas land via release-workflow pushes, not the PR
 # loop), the gh-action stack (arthur-debert/simple-gal-action, #108), and release/
@@ -76,26 +84,39 @@ agy = {}
 phos = [
   { repo = "phos-editor/app", path = "phos/phos-app", expect_verify_fail = "the parity verify needs the phos sibling checkouts, absent in the hermetic clone" },
   { repo = "phos-editor/core", path = "phos/phos-core" },
+  { repo = "phos-editor/phos.photo", path = "phos/phos.photo" },
 ]
 burgertocow = [{ repo = "arthur-debert/burgertocow", path = "burgertocow" }]
 clapfig = [{ repo = "arthur-debert/clapfig", path = "clapfig" }]
 dodot = [{ repo = "arthur-debert/dodot", path = "dodot" }]
+dotcat = [{ repo = "arthur-debert/dotcat", path = "dotcat" }]
+electron-splashguard = [
+  { repo = "arthur-debert/electron-splashguard", path = "electron-splashguard" },
+]
+falala = [{ repo = "arthur-debert/falala", path = "falala" }]
 lex = [
-  { repo = "lex-fmt/comms", path = "lex-fmt/comms" },
   { repo = "lex-fmt/lex", path = "lex-fmt/lex" },
   { repo = "lex-fmt/lexed", path = "lex-fmt/lexed" },
-  { repo = "lex-fmt/nvim", path = "lex-fmt/nvim" },
+  { repo = "lex-fmt/mkdocs-lex", path = "lex-fmt/mkdocs-lex" },
   { repo = "lex-fmt/tree-sitter-lex", path = "lex-fmt/tree-sitter-lex" },
   { repo = "lex-fmt/vscode", path = "lex-fmt/vscode" },
-  { repo = "lex-fmt/zed-lex", path = "lex-fmt/zed-lex" },
 ]
+nanodoc = [{ repo = "arthur-debert/nanodoc", path = "nanodoc" }]
 padz = [{ repo = "arthur-debert/padz", path = "padz" }]
 rustloc = [{ repo = "arthur-debert/rustloc", path = "rustloc" }]
+shellai = [{ repo = "arthur-debert/shellai", path = "shellai" }]
+shipit = [
+  { repo = "arthur-debert/shipit", path = "shipit" },
+  { repo = "arthur-debert/shipit-canary", path = "shipit-canary" },
+]
 simple-gal = [
   { repo = "arthur-debert/simple-gal", path = "simple-gal/simple-gal" },
   { repo = "arthur-debert/simple-gal-ui", path = "simple-gal/simple-gal-ui" },
 ]
+sprinkles = [{ repo = "arthur-debert/sprinkles", path = "sprinkles" }]
 standout = [{ repo = "arthur-debert/standout", path = "standout" }]
+supage = [{ repo = "arthur-debert/supage", path = "supage" }]
+visual-explore = [{ repo = "arthur-debert/visual-explore", path = "visual-explore" }]
 
 [shipit]
 version = "5b9d66480f1af55bbea3efe7c3b811a2d3f5e936"

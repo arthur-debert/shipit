@@ -355,8 +355,15 @@ def run(
     fix: bool = False,
     discover: Callable[[Path], list[str]] | None = None,
     run_tool: Callable[[str, list[str], Path], execrun.ExecResult] | None = None,
+    runs_out: list[ToolRun] | None = None,
 ) -> int:
-    """Run the checks over the tree at ``path`` (default ``.``). Returns 0/1."""
+    """Run the checks over the tree at ``path`` (default ``.``). Returns 0/1.
+
+    ``runs_out``, when given, receives every :class:`ToolRun` outcome — the
+    typed per-check verdicts behind the 0/1 exit code, for callers that need
+    counts rather than a verdict (install self-certification's consumer-debt
+    report, ADR-0033) without re-parsing the printed report.
+    """
     started = time.monotonic()
     root = Path(path or ".").resolve()
     if not root.is_dir():
@@ -388,7 +395,7 @@ def run(
         )
         return 0
 
-    runs: list[ToolRun] = []
+    runs: list[ToolRun] = runs_out if runs_out is not None else []
     for lang, paths in routed:
         # per_manifest tools run once per tracked manifest directory. With no
         # manifest tracked they run at the root, where the tool's own error is
