@@ -258,6 +258,25 @@ def test_hooks_check_is_vacuous_when_the_plan_activates_nothing(tmp_path, rec):
     assert selfcert._check_hooks(tmp_path, plan, hooks_activated=None).ok
 
 
+def test_hooks_check_is_vacuous_when_activation_was_not_attempted(tmp_path, rec):
+    # The seed-only / retire-delete-only committing install: the managed set
+    # (lefthook.yml included) is already current, so `activates_hooks` is True
+    # but there are no writes — apply skips activation and leaves the live hooks
+    # alone, so `hooks_activated` is None. The postcondition must mirror that
+    # predicate and stay vacuous, not fail the install closed.
+    lefthook = next(u for u in iunits.load_units() if u.key == iunits.LEFTHOOK_FILE)
+    noop = irec.Decision(
+        unit=lefthook,
+        action=irec.NOOP,
+        desired_hash="h",
+        consumer_hash="h",
+        pristine_hash="h",
+    )
+    plan = irec.Plan(root=str(tmp_path), decisions=(noop,), retired=(), seeds=())
+    assert plan.activates_hooks and not plan.writes
+    assert selfcert._check_hooks(tmp_path, plan, hooks_activated=None).ok
+
+
 # --------------------------------------------------------------------------
 # Postcondition 4 — the launcher resolves the freshly-stamped pin
 # (REAL bash, REAL delivered launcher, no uv, no network)

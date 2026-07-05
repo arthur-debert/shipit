@@ -183,8 +183,13 @@ def _check_delivered_lint(root: Path, plan: Plan, runner) -> CertCheck:
 
 def _check_hooks(root: Path, plan: Plan, hooks_activated: bool | None) -> CertCheck:
     """Postcondition 3: the checks install configured are LIVE where it ran."""
-    if not plan.activates_hooks and hooks_activated is None:
-        # Nothing to activate in this plan (no lefthook unit decided) — vacuous.
+    if not (plan.writes and plan.activates_hooks):
+        # Mirror apply's activation predicate exactly (apply.py): it only runs
+        # `lefthook install` on a WRITING install that manages the hooks. A plan
+        # with no lefthook unit, or one that writes nothing (a seed-only or
+        # retire-delete-only committing install with the managed set already
+        # current), never attempts activation — `hooks_activated` stays None and
+        # this postcondition makes no claim over hooks install did not touch.
         return CertCheck(CHECK_HOOKS, True)
     if hooks_activated is not True:
         return CertCheck(
