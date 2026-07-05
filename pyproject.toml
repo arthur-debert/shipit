@@ -69,6 +69,20 @@ path = "hatch_build.py"
 "skills" = "shipit/data/skills"
 ".claude/agents" = "shipit/data/agents"
 
+# The enforced style floor (ADR-0036, "the gate owns style"): a MINIMAL curated
+# selection of correctness-adjacent families on top of ruff's E/F defaults.
+# Style a linter could express belongs HERE or to nobody — reviewers never
+# enforce it ad hoc; raising the floor is a config change plus a debt-clear,
+# never a review finding. SIM (flake8-simplify) was considered and left out:
+# its debt-clear is dominated by manual multi-`with` rewrites in tests
+# (SIM117), beyond the chosen keep-the-clear-small bar.
+[tool.ruff.lint]
+extend-select = [
+    "B",  # flake8-bugbear: likely-bug patterns (mutable defaults, unbound loop vars, blind excepts)
+    "UP", # pyupgrade: keeps code on the requires-python floor's idioms (no stale typing/datetime forms)
+    "I",  # isort: deterministic import order, so import shape never reaches a review
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
