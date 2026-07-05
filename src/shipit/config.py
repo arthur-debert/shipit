@@ -25,6 +25,8 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
+from .identity import Sha
+
 CONFIG_NAME = ".shipit.toml"
 
 _BARE_KEY = re.compile(r"[A-Za-z0-9_-]+")
@@ -164,10 +166,17 @@ def shipit_pin(path: str | Path) -> str | None:
     ``.shipit.toml`` with only consumer policy (``[secrets]`` / ``[reviewers]``
     / ``[project]``) has no pin.
 
+    The value must VALIDATE as a full git object sha (:class:`~shipit.identity.Sha`):
+    this helper is the fail-closed gate, so a non-sha ``version`` — the retired
+    static ``0.0.1`` package version, a ``seed`` sentinel, an abbreviated sha —
+    is treated as PINLESS, not as a bootstrapped repo. Otherwise provisioning
+    would proceed on a bogus pin and the managed launcher would later hand
+    ``uv`` a non-commit ref instead of failing with the bootstrap diagnostic.
+
     Pure (reads, never writes). ``None`` when the file is absent, malformed,
-    or pinless: a config we cannot read a pin from is treated as pinless, so
-    the fail-closed callers (Tree provisioning's pin gate) refuse rather than
-    guess.
+    pinless, or carrying a non-sha version: a config we cannot read a valid pin
+    from is treated as pinless, so the fail-closed callers (Tree provisioning's
+    pin gate) refuse rather than guess.
     """
     p = Path(path)
     if not p.is_file():
@@ -178,8 +187,14 @@ def shipit_pin(path: str | Path) -> str | None:
     except tomllib.TOMLDecodeError:
         return None
     try:
-        return shipit_version(cfg)
+        raw = shipit_version(cfg)
     except ConfigError:
+        return None
+    if raw is None:
+        return None
+    try:
+        return str(Sha(raw))
+    except ValueError:
         return None
 
 

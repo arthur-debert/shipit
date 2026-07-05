@@ -57,6 +57,18 @@ if [ -z "$pin" ]; then
 	exit 127
 fi
 
+# The pin must be a FULL git object sha (40 hex for SHA-1, 64 for SHA-256) — the
+# same fail-closed check the Python side applies (config.shipit_pin / identity.Sha).
+# A non-sha value (the retired static `0.0.1`, a `seed` sentinel, an abbreviated
+# sha) is NOT a resolvable build: refuse toward the bootstrap rather than hand uv
+# a ref it would fail on with a murkier error.
+if ! printf '%s' "$pin" | grep -Eq '^[0-9a-f]{40}([0-9a-f]{24})?$'; then
+	echo "shipit: $manifest [shipit].version is not a full git sha (40 or 64 hex chars) — this repo is not bootstrapped (ADR-0033)." >&2
+	echo "Re-bootstrap it: install shipit once (uv tool install --from $SHIPIT_GIT_URL shipit)," >&2
+	echo "then run \`shipit install --pr\` in this repo — the install stamps a valid pin this launcher execs." >&2
+	exit 127
+fi
+
 command -v uv >/dev/null 2>&1 || {
 	echo "shipit: uv is not on PATH — the pinned launcher provisions the repo's shipit via uv (ADR-0033)." >&2
 	echo "Install uv (https://docs.astral.sh/uv/), then re-run." >&2

@@ -564,6 +564,37 @@ def test_launcher_pinless_repo_fails_loud_toward_the_bootstrap(tmp_path: Path):
     assert "PATH-SHIPIT-RAN" not in proc.stdout
 
 
+@pytest.mark.parametrize("bad_pin", ["0.0.1", "seed", "c" * 39, "z" * 40])
+def test_launcher_non_sha_pin_fails_loud_toward_the_bootstrap(
+    tmp_path: Path, bad_pin: str
+):
+    # A present-but-non-sha [shipit].version (the retired static `0.0.1`, a
+    # sentinel, an abbreviated/non-hex value) is NOT a resolvable
+    # build: the launcher refuses toward the bootstrap (exit 127) rather than
+    # hand uv a ref it would fail on with a murkier error — the same fail-closed
+    # posture as config.shipit_pin on the Python side (ADR-0033).
+    launcher = _write_launcher_repo(
+        tmp_path, manifest=f'[shipit]\nversion = "{bad_pin}"\n\n[managed]\n'
+    )
+    shims = tmp_path / "shims"
+    shims.mkdir()
+    _shim(shims, "uv", "FAKE-UV-RAN")  # must never run
+    _shim(shims, "shipit", "PATH-SHIPIT-RAN")  # must never run
+
+    proc = subprocess.run(
+        [str(launcher), "--version"],
+        env=_launcher_env(shims),
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert proc.returncode == 127
+    assert "not a full git sha" in proc.stderr
+    assert "shipit install --pr" in proc.stderr
+    assert "FAKE-UV-RAN" not in proc.stdout
+    assert "PATH-SHIPIT-RAN" not in proc.stdout
+
+
 def test_launcher_missing_manifest_fails_loud_too(tmp_path: Path):
     # The virgin-repo shape of pinless: no .shipit.toml at all — same loud 127.
     launcher = _write_launcher_repo(tmp_path, manifest=None)

@@ -25,6 +25,13 @@ from shipit.install import units as iunits
 from shipit.install.apply import COMMIT_MESSAGE as INSTALL_COMMIT_MESSAGE
 from shipit.execrun import ExecError
 
+# A valid FULL git sha (40 hex) standing in for a real Shipit pin. The pin gate
+# (config.shipit_pin) validates the value as a Sha, so a fixture pin must be a
+# real sha shape, not a sentinel like "seed" (ADR-0033). "5eed…" is a mnemonic
+# all-hex sha.
+_PIN = "5eed" * 10
+_PINNED_MANIFEST = f'[shipit]\nversion = "{_PIN}"\n\n[managed]\n'
+
 
 def _hooks_ok() -> execrun.ExecResult:
     """A canned successful lefthook-activation ExecResult for the injected boundary."""
@@ -70,7 +77,7 @@ def remote(tmp_path: Path) -> Path:
     repo.mkdir()
     _git(["init"], cwd=repo)
     (repo / "README.md").write_text("hello tree\n")
-    (repo / ".shipit.toml").write_text('[shipit]\nversion = "seed"\n\n[managed]\n')
+    (repo / ".shipit.toml").write_text(_PINNED_MANIFEST)
     _git(["add", "."], cwd=repo)
     _git(["commit", "-m", "init"], cwd=repo)
     _git(["branch", "-M", "main"], cwd=repo)
@@ -485,7 +492,9 @@ def _mock_git_boundary(monkeypatch, *, manifests: list[str]):
             # `_provision`'s fail-closed pin gate passes — that gate is
             # `config.shipit_pin`, not mere file presence (ADR-0033).
             content = (
-                '[shipit]\nversion = "stub"\n' if name == ".shipit.toml" else "# stub\n"
+                f'[shipit]\nversion = "{_PIN}"\n'
+                if name == ".shipit.toml"
+                else "# stub\n"
             )
             (d / name).write_text(content)
 
@@ -638,7 +647,7 @@ def test_provision_runs_no_step_at_all_on_a_pinned_manifestless_repo(
     # manifest existing.
     dest = tmp_path / "tree"
     dest.mkdir()
-    (dest / config.CONFIG_NAME).write_text('[shipit]\nversion = "seed"\n\n[managed]\n')
+    (dest / config.CONFIG_NAME).write_text(_PINNED_MANIFEST)
 
     calls: list[list[str]] = []
     monkeypatch.setattr(create_mod, "run_provision", lambda cmd, **k: calls.append(cmd))
@@ -694,7 +703,7 @@ def test_provision_activates_hooks_when_the_clone_carries_lefthook(
     # after the env provision and before the npm step.
     dest = tmp_path / "tree"
     dest.mkdir()
-    (dest / config.CONFIG_NAME).write_text('[shipit]\nversion = "seed"\n\n[managed]\n')
+    (dest / config.CONFIG_NAME).write_text(_PINNED_MANIFEST)
     (dest / pixienv.MANIFEST_NAME).write_text("# stub\n")
     (dest / iunits.LEFTHOOK_FILE).write_text("# stub\n")
     (dest / "package.json").write_text("{}\n")
@@ -721,7 +730,7 @@ def test_provision_skips_hook_activation_without_a_lefthook_config(
     # existing, like every other dep step.
     dest = tmp_path / "tree"
     dest.mkdir()
-    (dest / config.CONFIG_NAME).write_text('[shipit]\nversion = "seed"\n\n[managed]\n')
+    (dest / config.CONFIG_NAME).write_text(_PINNED_MANIFEST)
     (dest / pixienv.MANIFEST_NAME).write_text("# stub\n")
 
     calls = _provision_stubs(monkeypatch)
@@ -738,7 +747,7 @@ def test_provision_skips_hook_activation_without_a_pixi_manifest(
     # `pixi run` in a manifest-less checkout.
     dest = tmp_path / "tree"
     dest.mkdir()
-    (dest / config.CONFIG_NAME).write_text('[shipit]\nversion = "seed"\n\n[managed]\n')
+    (dest / config.CONFIG_NAME).write_text(_PINNED_MANIFEST)
     (dest / iunits.LEFTHOOK_FILE).write_text("# stub\n")
 
     calls = _provision_stubs(monkeypatch)

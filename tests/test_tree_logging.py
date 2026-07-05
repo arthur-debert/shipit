@@ -38,8 +38,9 @@ from shipit.verbs import tree as tree_verb
 _REPO = repo_from_slug("acme/widget")
 
 #: A pinned .shipit.toml body — provisioning fails closed on a pinless base
-#: (ADR-0033).
-_PINNED = '[shipit]\nversion = "seed"\n\n[managed]\n'
+#: (ADR-0033). The pin must be a valid full sha (the gate validates it as a Sha),
+#: not a sentinel; "5eed…" is a mnemonic all-hex sha.
+_PINNED = f'[shipit]\nversion = "{"5eed" * 10}"\n\n[managed]\n'
 
 
 @pytest.fixture(autouse=True)

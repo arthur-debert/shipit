@@ -95,6 +95,33 @@ def test_shipit_pin_none_when_file_missing_or_malformed(tmp_path):
     assert config.shipit_pin(q) is None
 
 
+@pytest.mark.parametrize(
+    "version",
+    [
+        "0.0.1",  # the retired static package version — identifies nothing
+        "seed",  # a sentinel that is not a commit
+        "a" * 39,  # abbreviated / wrong-length hex
+        "a" * 41,
+        "z" * 40,  # right length, non-hex
+        "",
+    ],
+)
+def test_shipit_pin_none_for_non_sha_version(tmp_path, version):
+    # The pin gate must fail CLOSED on any [shipit].version that is not a full
+    # git sha (ADR-0033): a bogus pin left provisioning proceed and the launcher
+    # hand uv a non-commit ref instead of refusing toward the bootstrap.
+    p = tmp_path / ".shipit.toml"
+    p.write_text(f'[shipit]\nversion = "{version}"\n')
+    assert config.shipit_pin(p) is None
+
+
+def test_shipit_pin_accepts_full_sha256(tmp_path):
+    # A 64-hex SHA-256 object id is a valid full sha too.
+    p = tmp_path / ".shipit.toml"
+    p.write_text(f'[shipit]\nversion = "{"b" * 64}"\n')
+    assert config.shipit_pin(p) == "b" * 64
+
+
 # --------------------------------------------------------------------------
 # Seed-if-absent consumer policy ([secrets] App mappings + [reviewers] set)
 # --------------------------------------------------------------------------

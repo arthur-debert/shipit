@@ -15,6 +15,8 @@ the file materializes in a build-scoped temp dir and rides ``force_include``.
 
 from __future__ import annotations
 
+import atexit
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -44,6 +46,11 @@ class BuildShaHook(BuildHookInterface):
         sha = proc.stdout.strip()
         if not sha:
             return
-        tmp = Path(tempfile.mkdtemp(prefix="shipit-build-sha-")) / "build-sha"
+        # The file must outlive this method — hatch reads it while assembling the
+        # wheel, after initialize() returns — but must not survive the build, so
+        # clean the dir up at process exit rather than leak one per wheel build.
+        tmpdir = tempfile.mkdtemp(prefix="shipit-build-sha-")
+        atexit.register(shutil.rmtree, tmpdir, ignore_errors=True)
+        tmp = Path(tmpdir) / "build-sha"
         tmp.write_text(sha + "\n", encoding="utf-8")
         build_data.setdefault("force_include", {})[str(tmp)] = "shipit/data/build-sha"
