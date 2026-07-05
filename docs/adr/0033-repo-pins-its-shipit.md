@@ -7,7 +7,7 @@
 > reaffirms ADR-0003's pull-not-push.
 
 A consumer repo pins the exact shipit it runs: `.shipit.toml`'s
-`[shipit].version` carries a FULL git commit SHA of the shipit repo (the **Shipit
+`[shipit].version` carries a FULL git commit **Sha** of the shipit repo (the **Shipit
 pin** — see CONTEXT.md), and the managed `bin/shipit` launcher provisions and
 execs that pinned build via `uv` (cached after first resolve), reading the pin
 directly from `.shipit.toml`. Tool version and managed set thereby travel as ONE
@@ -22,7 +22,7 @@ feature branches (PR pollution, observed on canary PR #10).
 
 The lifecycle in one paragraph. `shipit install` STAMPS the pin with its own
 build identity — never an operator-supplied value, so the pinned build is
-provably the build that wrote the managed files and ran the gates (today's code
+provably the build that wrote the managed files and ran the checks (today's code
 stamps the static package version `0.0.1`, which identifies nothing; that is a
 bug this ADR retires). The install reconcile PR is the ONLY bump vehicle: one
 commit atomically carries pin bump + managed-file updates + pristine hashes
@@ -64,9 +64,9 @@ Install self-certifies, scoped to what it owns: after staging, it asserts (1)
 the manifest parses and the lint env solves, (2) the files it delivered pass the
 lint configs it delivered, (3) hooks are live, (4) the launcher resolves the
 freshly-stamped pin — failing closed (no PR) on any miss, which makes "the
-managed set never fails its own gates" executable (the WS09/WS10 canary class).
+managed set never fails its own checks" executable (the WS09/WS10 canary class).
 Its reconcile commit bypasses the repo's hooks (`--no-verify`): the whole-tree
-gate is the REPO'S bar — the ADP01 checklist's lint step, after the sanctioned
+check is the REPO'S bar — the ADP01 checklist's lint step, after the sanctioned
 debt-clear — not install's. This scoping breaks the observed deadlock where
 install's commit was blocked by pre-existing consumer lint debt that can only be
 cleared using the env install delivers; consumer debt is reported in the
@@ -74,12 +74,12 @@ reconcile PR body, never a blocker.
 
 Considered and rejected: package-version or tag pins (no release machinery
 exists until ADP02; a static `0.0.1` distinguishes nothing — tags may later
-join as input sugar resolving to the canonical SHA); the deferred Step-5 plan of
+join as input sugar resolving to the canonical Sha); the deferred Step-5 plan of
 shipit as a pinned pixi dependency (duplicates the pin into `pixi.toml` +
 `pixi.lock` — a second source that can disagree, plus lockfile churn in every
 bump PR ×41 repos, and unusable by pre-env verbs like install/gh-setup);
 PATH-fallback launchers (drift through the back door); refuse-on-stale-base for
-write Runs (the pre-regroup candidate — gates the symptom where the pin removes
+write Runs (the pre-regroup candidate — blocks the symptom where the pin removes
 the cause; survives only as the pinless-base refusal); status-quo-documented
 (institutionalizes infra-in-feature-diffs and parallel-Run refresh collisions).
 
