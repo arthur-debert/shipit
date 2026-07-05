@@ -162,7 +162,7 @@ def test_coordinator_prompt_carries_the_promotion_clause():
 
 def test_promotion_clause_is_coordinator_scoped():
     """The clause is the coordinator's job (it owns the session wrap-up); no
-    subagent prompt carries it — a subagent's Tree dies at PR-open by design."""
+    subagent prompt carries it — a subagent never owns end-of-session wrap-up."""
     rendered = render(load_role_defs())
     for role in SUBAGENT_ROLES:
         assert "Promoting durable learnings" not in rendered.role_prompts[role]
@@ -173,8 +173,10 @@ def test_docs_state_the_memory_orphaning_constraint_once():
     the mechanism — path-keyed session auto-memory orphaned when the ephemeral
     tree is gc'd — so a human knows why the promotion rule exists."""
     epics = (_ROOT / "docs" / "dev" / "epics.lex").read_text(encoding="utf-8")
-    assert "Session memory dies with the Tree" in epics
-    assert "~/.claude/projects/<path-slug>/memory/" in epics  # the mechanism
+    # "once", not merely "present": a duplicated subsection or mechanism string
+    # is the regression this guards, so assert the count, not membership.
+    assert epics.count("Session memory dies with the Tree") == 1
+    assert epics.count("~/.claude/projects/<path-slug>/memory/") == 1  # the mechanism
 
 
 # --- brief templates (RVW02 WS04): the coordinator-filled task layer ---------
