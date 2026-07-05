@@ -17,7 +17,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from .. import __version__, config, execrun, gh, git
+from .. import buildid, config, execrun, gh, git
 from .errors import InstallError
 from .reconcile import Plan, consumer_inner
 from .splice import SETTINGS_MALFORMED, splice_block, splice_settings_hook
@@ -162,14 +162,27 @@ def consumer_snapshot(root: Path, unit: Unit) -> str:
 
 
 def _shipit_version() -> str:
-    """The shipit commit that wrote the set (its repo HEAD), else the package version.
+    """The FULL git sha of the build performing this install — the Shipit pin.
 
-    The version string is a rendered artifact, so the typed :class:`Sha`
-    :func:`shipit.git.head_commit` returns stringifies here, at the seam.
+    ADR-0033: the stamp is the build's OWN commit identity
+    (:func:`shipit.buildid.build_sha` — install record, build-time embed, or
+    source-checkout HEAD), never an operator-supplied value and never the
+    static package version (which identifies nothing). Fails CLOSED with
+    :class:`InstallError` when no identity resolves: a pin the launcher cannot
+    exec is worse than no install at all. The version string is a rendered
+    artifact, so the typed :class:`~shipit.identity.Sha` stringifies here, at
+    the seam.
     """
-    pkg_dir = Path(__file__).resolve().parents[1]
-    head = git.head_commit(cwd=str(pkg_dir))
-    return str(head) if head is not None else __version__
+    sha = buildid.build_sha()
+    if sha is None:
+        raise InstallError(
+            "cannot resolve this shipit build's own commit identity (no "
+            "direct_url.json vcs record, no embedded build-sha, not a git "
+            "checkout) — refusing to stamp a pin that identifies nothing "
+            "(ADR-0033). Install shipit from git (uv records the commit) or "
+            "run it from a checkout."
+        )
+    return str(sha)
 
 
 def _activate(

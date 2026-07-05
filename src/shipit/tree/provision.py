@@ -1,28 +1,26 @@
-"""``tree/provision`` — which commits did *provisioning itself* make in this Tree?
+"""``tree/provision`` — the READ side of the retired provisioning-commit record.
 
-The gc-stranding fix for drift-window provisioning commits (#232, ADR-0027). Tree
-provisioning runs ``shipit install --local`` in the fresh clone; whenever the
-repo's committed managed set lags the running shipit version (an upgrade drift
-window), that install FAILS CLOSED into a reconcile commit
-(``chore(shipit): install/update the managed set``) on the Tree's just-cut branch.
-That commit exists on no remote, so the ephemeral gc ladder's rung-1 floor
-("dirty ∨ unpushed → KEEP", :func:`shipit.tree.cleanup.classify`) — correctly
-absolute for *work* — would hold an abandoned drift-window session Tree FOREVER:
-even the 4-day hard cap requires "pushed".
+Tree provisioning no longer commits ANYTHING (ADR-0033): the TRE03-era
+``shipit install --local`` step — which fail-closed into a
+``chore(shipit): install/update the managed set`` reconcile commit on the
+just-cut branch during every tool/managed-set drift window — is deleted, because
+the Shipit pin (``.shipit.toml [shipit].version`` + the pinned ``bin/shipit``
+launcher) makes Tree and tool coherent by construction. With the producer gone,
+the record's WRITER is gone too: no new ``.git/shipit-provision.json`` is ever
+written.
 
-The fix records the provisioning commit's IDENTITY at Tree birth so the ladder can
-exclude **exactly it** — and nothing else — from the unpushed floor:
-
-- :func:`write_record` stores the SHA(s) the install step produced in
-  ``<tree>/.git/shipit-provision.json``, beside the ``session/liveness`` pidfile
-  precedent and for the same reason: inside ``.git`` the record can never dirty
-  the working tree (a tracked/untracked file would trip the very floor this
-  exists to refine), and it dies with the Tree by construction.
-- :func:`read_provision_shas` returns the recorded SHAs as the EXCLUSION SET the
-  ladder subtracts, degrading every failure — no record, unreadable file,
-  malformed JSON, mis-typed fields — to the EMPTY set: nothing excluded, so the
-  floor keeps the Tree. Conservative by construction: this module can only ever
-  *narrow* what counts as work, never widen what gc may delete.
+What remains is the reader, :func:`read_provision_shas`, and only because
+Trees born BEFORE the pin still carry records on disk: the ephemeral gc
+ladder's unpushed floor (#232, ADR-0027) subtracts exactly the recorded
+commit SHA(s) — shipit's own reconcile, not the session's work — so those
+drift-window Trees stay reclaimable instead of being held forever by a commit
+shipit itself made. Every degenerate case — no record (now the universal
+steady state), an unreadable file, malformed JSON, mis-typed fields — reads as
+the EMPTY set: nothing excluded, the floor keeps the Tree. Conservative by
+construction: this module can only ever *narrow* what counts as work, never
+widen what gc may delete. Once the pre-pin Tree population ages out, this
+whole module — and the ``provision_shas`` exclusion input it feeds
+(:mod:`shipit.tree.cleanup` / :mod:`shipit.tree.gc`) — retires with it.
 
 Identity is the commit SHA, deliberately NOT the commit message: a message
 heuristic would also match a rebased/amended descendant carrying real changes,
@@ -34,15 +32,14 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Sequence
 from pathlib import Path
 
 from ..identity import Sha
 
 logger = logging.getLogger("shipit.tree")
 
-#: The record's name inside the clone's ``.git`` directory (see module docstring
-#: for why it must NOT live in the working tree).
+#: The record's name inside the clone's ``.git`` directory (inside ``.git`` so
+#: it could never dirty the working tree and trip the very floor it refines).
 PROVISION_RECORD_NAME = "shipit-provision.json"
 
 #: The record's one JSON field: the full SHAs of the commits provisioning made.
@@ -54,49 +51,18 @@ def record_path(tree: str | Path) -> Path:
     return Path(tree) / ".git" / PROVISION_RECORD_NAME
 
 
-def write_record(tree: str | Path, shas: Sequence[Sha]) -> None:
-    """Record ``shas`` as the commits provisioning made in ``tree``.
-
-    ``shas`` are :class:`~shipit.identity.Sha` value objects — the typed range
-    :func:`shipit.git.commits_between` returned (PROC03) — stringified HERE, at
-    the JSON serialization seam, and nowhere upstream. Called at Tree birth, only when the managed-set install actually committed
-    (steady-state provisioning is a no-op and writes nothing — an absent record
-    is the norm, not an error). Raises :class:`OSError` when the Tree has no
-    ``.git`` directory to hold it or the write fails; the caller
-    (:func:`shipit.tree.create._provision`) treats the record as additive and
-    degrades to not-recorded — which the reader resolves to KEEP.
-    """
-    path = record_path(tree)
-    if not path.parent.is_dir():
-        raise FileNotFoundError(
-            f"{path.parent} is not a directory — {tree} is not a git clone, "
-            "so there is nowhere safe to record the provisioning commit"
-        )
-    payload = {_COMMITS_KEY: [str(sha) for sha in shas]}
-    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-    # A lifecycle milestone (spray convention): the record is what later lets a
-    # gc sweep reclaim this Tree past the unpushed floor, so its write — today
-    # otherwise invisible — is narrated with the Tree it protects.
-    logger.info(
-        "provision recorded %d commit(s) in %s",
-        len(shas),
-        tree,
-        extra={"tree": str(tree)},
-    )
-
-
 def read_provision_shas(tree: str | Path) -> frozenset[Sha]:
-    """The SHAs provisioning committed in ``tree`` — the gc floor's exclusion set.
+    """The SHAs pre-pin provisioning committed in ``tree`` — gc's exclusion set.
 
     Returned as :class:`~shipit.identity.Sha` value objects (PROC03), parsed —
     and therefore VALIDATED — at this read boundary, so the exclusion set
     compares against :func:`shipit.git.unpushed_shas`'s typed list through the
     type, never via raw-string equality. EMPTY on every degenerate case — no
-    record (the steady-state norm), an unreadable file, malformed JSON, a
-    mis-typed entry, or an entry that is not a full sha — because an empty
-    exclusion set means the unpushed floor keeps the Tree, exactly the
-    conservative direction (#232): a corrupt record must never widen what a
-    fleet-wide sweep may delete, and must never crash it.
+    record (the universal steady state since ADR-0033 retired the writer), an
+    unreadable file, malformed JSON, a mis-typed entry, or an entry that is not
+    a full sha — because an empty exclusion set means the unpushed floor keeps
+    the Tree, exactly the conservative direction (#232): a corrupt record must
+    never widen what a fleet-wide sweep may delete, and must never crash it.
     """
     try:
         raw = record_path(tree).read_text(encoding="utf-8")

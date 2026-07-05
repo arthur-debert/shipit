@@ -25,6 +25,8 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
+from .identity import Sha
+
 CONFIG_NAME = ".shipit.toml"
 
 _BARE_KEY = re.compile(r"[A-Za-z0-9_-]+")
@@ -155,29 +157,45 @@ def shipit_version(cfg: dict) -> str | None:
     return str(value) if value is not None else None
 
 
-def is_onboarded(path: str | Path) -> bool:
-    """Whether the ``.shipit.toml`` at ``path`` carries the ONBOARDED marker.
+def shipit_pin(path: str | Path) -> str | None:
+    """The ``.shipit.toml`` Shipit pin at ``path`` — ``[shipit].version`` — or ``None``.
 
-    ``shipit install`` writes a ``[shipit]`` version pin plus a ``[managed]``
-    pristine-hash map (:func:`write_manifest`); the presence of either table is what
-    marks a repo as ONBOARDED — i.e. as having a managed set shipit reconciles. A
-    ``.shipit.toml`` that carries ONLY consumer policy (``[secrets]`` /
-    ``[reviewers]`` / ``[project]``) is NOT onboarded — shipit-self is exactly this
-    case: it ships policy config but has no managed block on ``main``.
+    The pin is the full shipit commit sha ``shipit install`` stamped from its
+    own build identity (ADR-0033); its presence is what marks a repo as
+    BOOTSTRAPPED — carrying a managed set and the exact build that wrote it. A
+    ``.shipit.toml`` with only consumer policy (``[secrets]`` / ``[reviewers]``
+    / ``[project]``) has no pin.
 
-    Pure (reads, never writes). Returns ``False`` when the file is absent or
-    malformed: a config we cannot read as onboarded is treated as not onboarded, so
-    a caller (Tree provisioning) never onboards a repo as a side effect.
+    The value must VALIDATE as a full git object sha (:class:`~shipit.identity.Sha`):
+    this helper is the fail-closed gate, so a non-sha ``version`` — the retired
+    static ``0.0.1`` package version, a ``seed`` sentinel, an abbreviated sha —
+    is treated as PINLESS, not as a bootstrapped repo. Otherwise provisioning
+    would proceed on a bogus pin and the managed launcher would later hand
+    ``uv`` a non-commit ref instead of failing with the bootstrap diagnostic.
+
+    Pure (reads, never writes). ``None`` when the file is absent, malformed,
+    pinless, or carrying a non-sha version: a config we cannot read a valid pin
+    from is treated as pinless, so the fail-closed callers (Tree provisioning's
+    pin gate) refuse rather than guess.
     """
     p = Path(path)
     if not p.is_file():
-        return False
+        return None
     try:
         with p.open("rb") as fh:
             cfg = tomllib.load(fh)
     except tomllib.TOMLDecodeError:
-        return False
-    return isinstance(cfg.get("shipit"), dict) or isinstance(cfg.get("managed"), dict)
+        return None
+    try:
+        raw = shipit_version(cfg)
+    except ConfigError:
+        return None
+    if raw is None:
+        return None
+    try:
+        return str(Sha(raw))
+    except ValueError:
+        return None
 
 
 def _toml_key(key: str) -> str:

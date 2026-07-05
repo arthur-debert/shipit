@@ -106,6 +106,7 @@ def test_the_starting_vocabulary_is_registered():
         "tree.created",
         "agent.spawned",
         "agent.done",
+        "launcher.overridden",
         "commit.created",
         "review.requested",
         "review.received",

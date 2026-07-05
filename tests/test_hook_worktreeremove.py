@@ -29,6 +29,18 @@ SESSION_RECORD = liveness.LivenessRecord(
 )
 
 
+def _plant_legacy_record(tree, shas: list[Sha]) -> None:
+    """Plant the pre-ADR-0033 provision record a drift-window birth once wrote.
+
+    The writer is retired (provisioning no longer commits); Trees born before
+    the pin still carry these on disk, which is exactly what the carve-out
+    tests below exercise.
+    """
+    provision.record_path(tree).write_text(
+        json.dumps({"commits": [str(sha) for sha in shas]}), encoding="utf-8"
+    )
+
+
 @pytest.fixture
 def root(tmp_path, monkeypatch):
     """A central root the hook's under-the-root gate resolves against."""
@@ -98,7 +110,7 @@ def test_unreadable_unpushed_list_blocks_removal(ephemeral_tree, monkeypatch):
     # exclusion cannot rescue an unreadable local-only list.
     monkeypatch.setattr(git, "status_porcelain", lambda *, cwd: [])
     monkeypatch.setattr(git, "unpushed_shas", lambda *, cwd: None)
-    provision.write_record(ephemeral_tree, [Sha("a" * 40)])
+    _plant_legacy_record(ephemeral_tree, [Sha("a" * 40)])
     assert _run({"cwd": str(ephemeral_tree)}) == 0
     assert ephemeral_tree.exists()
 
@@ -113,7 +125,7 @@ def test_recorded_provisioning_commit_does_not_block_removal(
     monkeypatch.setattr(git, "status_porcelain", lambda *, cwd: [])
     monkeypatch.setattr(git, "unpushed_shas", lambda *, cwd: (sha,))
     monkeypatch.setattr(git, "ahead_behind", lambda *, cwd: (0, 0))
-    provision.write_record(ephemeral_tree, [sha])
+    _plant_legacy_record(ephemeral_tree, [sha])
     assert _run({"cwd": str(ephemeral_tree)}) == 0
     assert not ephemeral_tree.exists()
 
@@ -139,7 +151,7 @@ def test_ahead_fully_explained_by_provisioning_commit_removes(
     monkeypatch.setattr(git, "status_porcelain", lambda *, cwd: [])
     monkeypatch.setattr(git, "unpushed_shas", lambda *, cwd: (sha,))
     monkeypatch.setattr(git, "ahead_behind", lambda *, cwd: (1, 0))
-    provision.write_record(ephemeral_tree, [sha])
+    _plant_legacy_record(ephemeral_tree, [sha])
     assert _run({"cwd": str(ephemeral_tree)}) == 0
     assert not ephemeral_tree.exists()
 
@@ -151,7 +163,7 @@ def test_provisioning_plus_real_commit_still_blocks(ephemeral_tree, monkeypatch)
     monkeypatch.setattr(
         git, "unpushed_shas", lambda *, cwd: (Sha("a" * 40), Sha("b" * 40))
     )
-    provision.write_record(ephemeral_tree, [Sha("a" * 40)])
+    _plant_legacy_record(ephemeral_tree, [Sha("a" * 40)])
     assert _run({"cwd": str(ephemeral_tree)}) == 0
     assert ephemeral_tree.exists()
 
@@ -161,7 +173,7 @@ def test_mismatched_provision_record_still_blocks(ephemeral_tree, monkeypatch):
     # the mismatch conservatively refuses (falls back to the gc ladder).
     monkeypatch.setattr(git, "status_porcelain", lambda *, cwd: [])
     monkeypatch.setattr(git, "unpushed_shas", lambda *, cwd: (Sha("b" * 40),))
-    provision.write_record(ephemeral_tree, [Sha("a" * 40)])
+    _plant_legacy_record(ephemeral_tree, [Sha("a" * 40)])
     assert _run({"cwd": str(ephemeral_tree)}) == 0
     assert ephemeral_tree.exists()
 

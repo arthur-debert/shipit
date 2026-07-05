@@ -251,6 +251,30 @@ def test_tree_creation_failure_fails_closed(tmp_path, exc):
     assert "cmd" not in calls  # no fallback launch
 
 
+def test_write_shape_refuses_a_pinless_base(tmp_path):
+    # ADR-0033's surviving guard, through the spawn write shape: a base with no
+    # .shipit.toml [shipit].version pin fails Tree provisioning closed (the pin
+    # gate's ValueError), and the spawn refuses LOUD — the refusal carries the
+    # bootstrap diagnostic, and no Run is ever launched against the parent
+    # checkout or a half-provisioned Tree.
+    b, calls = bounds(tmp_path)
+
+    def pinless(tree_spec, *, source_repo, github_url):
+        # Exactly what shipit.tree.create._provision raises on a pinless base.
+        raise ValueError(
+            "repo /trees/leaf has no [shipit].version pin — run the bootstrap "
+            "`shipit install --pr` first (ADR-0033: a Tree rides its base's "
+            "pinned shipit; a pinless base has nothing for bin/shipit to exec)"
+        )
+
+    with pytest.raises(
+        SpawnError, match="no \\[shipit\\].version pin — run the bootstrap"
+    ):
+        spawn_subagent(spec(), replace(b, create_tree=pinless))
+
+    assert "cmd" not in calls  # fail-closed: nothing launched
+
+
 # --- the shape gate (stage 1) --------------------------------------------------
 
 
