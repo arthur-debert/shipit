@@ -14,10 +14,10 @@ from __future__ import annotations
 import dataclasses
 
 import pytest
+
 from shipit.prstate.errors import PrStateError
 from shipit.prstate.reviewers import required_adapters
 from shipit.prstate.roster import Roster, RosterEntry
-
 
 # --- RosterEntry: construction is validation ---------------------------------
 

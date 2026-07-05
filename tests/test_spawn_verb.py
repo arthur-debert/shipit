@@ -16,12 +16,12 @@ from dataclasses import replace
 
 from click.testing import CliRunner
 
-from shipit import gh
-from shipit.verbs import spawn as spawn_verb
-
 # The typed suite's boundary fakes are reused wholesale: the smoke layer needs
 # the same fake edges, not a second copy of them.
 from test_spawn_subagent import _PR, bounds
+
+from shipit import gh
+from shipit.verbs import spawn as spawn_verb
 
 
 def test_spawn_subagent_help_documents_the_verb():

@@ -147,7 +147,9 @@ def test_pr_for_head_unknown_when_isdraft_or_base_malformed(monkeypatch):
         {"number": 7, "state": "OPEN", "isDraft": True},
     ):
         monkeypatch.setattr(
-            gh, "_run_probe", lambda args, *, cwd=None: _ok(json.dumps(payload))
+            gh,
+            "_run_probe",
+            lambda args, *, cwd=None, payload=payload: _ok(json.dumps(payload)),
         )
         assert gh.pr_for_head("issues/12/work", cwd="/x") is gh.UNKNOWN
 

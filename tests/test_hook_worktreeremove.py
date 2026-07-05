@@ -17,12 +17,13 @@ import json
 from pathlib import Path
 
 import pytest
+
 from shipit import git
+from shipit.execrun import ExecError
 from shipit.identity import Sha
 from shipit.session import liveness
 from shipit.tree import layout, provision
 from shipit.verbs.hook import worktreeremove
-from shipit.execrun import ExecError
 
 SESSION_RECORD = liveness.LivenessRecord(
     pid=100, session_id="sess-abc", create_time=1_750_000_000.0

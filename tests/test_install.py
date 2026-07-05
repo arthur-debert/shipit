@@ -29,7 +29,8 @@ from shipit.execrun import ExecError
 from shipit.identity import Sha
 from shipit.install import apply as iapply
 from shipit.install import reconcile as irec
-from shipit.install import selfcert, splice, units as iunits
+from shipit.install import selfcert, splice
+from shipit.install import units as iunits
 from shipit.install.errors import InstallError
 from shipit.verbs import install as verb
 

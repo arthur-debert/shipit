@@ -22,6 +22,7 @@ from pathlib import Path
 
 import click
 import pytest
+
 from shipit.cli import root
 
 REPO_ROOT = Path(__file__).parent.parent

@@ -24,14 +24,14 @@ import json
 import logging
 
 import pytest
-from shipit import logcontext
-from shipit import gh
+
+from shipit import gh, logcontext
 from shipit.identity import repo_from_slug
 from shipit.pr import PrId
 from shipit.prstate import fetch
-from shipit.prstate.roster import Roster
 from shipit.prstate.errors import PrStateError
 from shipit.prstate.reviewers import CodexAdapter, CopilotAdapter, GeminiAdapter
+from shipit.prstate.roster import Roster
 
 # The typed PR targets (CLI01-WS02): every pr-family service takes a PrId; the
 # lifecycle records carry its NUMBER.

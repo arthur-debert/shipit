@@ -29,7 +29,7 @@ renders with no time — a corrupt record degrades its own line, never the view.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 #: The event whose ``msg`` becomes the header verbatim (ADR-0032: emitted when
@@ -149,7 +149,7 @@ def _relative_time(ts: Any, now: datetime) -> str:
     except ValueError:
         return ""
     if then.tzinfo is None:
-        then = then.replace(tzinfo=timezone.utc)
+        then = then.replace(tzinfo=UTC)
     seconds = int((now - then).total_seconds())
     if seconds < 1:
         return "just now"

@@ -17,9 +17,10 @@ import logging
 
 import pytest
 import structlog
+
 from shipit import execrun, logsetup, redact, secretsrc
-from shipit.identity import repo_from_slug
 from shipit.config import SecretSource
+from shipit.identity import repo_from_slug
 
 SECRET = "s3cr3t-hunter2-value"
 

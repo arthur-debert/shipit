@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import functools
 import sys
-from typing import Callable, ParamSpec
+from collections.abc import Callable
 
 from .. import execrun
 from ..config import ConfigError
@@ -37,10 +37,6 @@ from ..spawn.subagent import SpawnError
 from ..tree.layout import LayoutError
 from ..tree.removal import RemovalError
 from ._context import NoAmbientRepoError
-
-#: Preserves the wrapped ``run()``'s parameters through :func:`cli_errors`, so
-#: mypy sees the original signature rather than an erased ``Callable[..., int]``.
-P = ParamSpec("P")
 
 #: The KNOWN runtime exception set — a failed boundary exec, a PR-state
 #: violation, malformed/invalid config (both spellings), and the domain
@@ -70,7 +66,7 @@ KNOWN_ERRORS: tuple[type[Exception], ...] = (
 )
 
 
-def cli_errors(run: Callable[P, int]) -> Callable[P, int]:
+def cli_errors[**P](run: Callable[P, int]) -> Callable[P, int]:
     """Wrap a verb's ``run()`` in the uniform runtime-failure mapping.
 
     On a :data:`KNOWN_ERRORS` exception: one ``error: {exc}`` line to stderr,

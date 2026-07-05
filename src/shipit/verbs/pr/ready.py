@@ -26,7 +26,11 @@ from ...gh import resolve_pr
 from ...identity import Repo
 from ...pr import PrId
 from ...prstate.errors import PrStateError
-from ...prstate.flip import NotReady, guarded_flip, undo_flip  # noqa: F401  (NotReady re-exported for callers/tests)
+from ...prstate.flip import (  # noqa: F401  (NotReady re-exported for callers/tests)
+    NotReady,
+    guarded_flip,
+    undo_flip,
+)
 from ...prstate.state import TaskStatus
 from .._context import ambient_identity
 from .._errors import cli_errors

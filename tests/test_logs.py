@@ -13,7 +13,7 @@ via ``current_session`` — nothing reads a real ``$HOME`` or a live session.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import click
@@ -457,7 +457,7 @@ def _domain_fixture_log(tmp_path) -> Path:
 
 def _flow_now():
     # 1h34m after the fixture records' shared ts (2026-07-02T12:00:00Z).
-    return datetime(2026, 7, 2, 13, 34, 0, tzinfo=timezone.utc)
+    return datetime(2026, 7, 2, 13, 34, 0, tzinfo=UTC)
 
 
 def test_flow_implies_events_and_renders_the_story(tmp_path, capsys):

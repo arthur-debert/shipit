@@ -17,13 +17,13 @@ timeout (WS03), and the dispatcher rewrite (WS04) are out of scope here.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from conftest import DEFAULT_NOW, load_context
+
 from shipit.prstate.model import FunnelState, ReviewFunnelCheck
 from shipit.prstate.reviewers import by_name
 from shipit.prstate.state import ChecksState, ReviewLifecycle, evaluate
-
 
 # --- "now" is injected, not read from a clock ------------------------------
 
@@ -31,7 +31,7 @@ from shipit.prstate.state import ChecksState, ReviewLifecycle, evaluate
 def test_snapshot_carries_injected_now(context):
     """The fixture's `now` rides onto the snapshot verbatim (tz-aware UTC)."""
     ctx = context("local_funnel_failed_ci_green")
-    assert ctx.now == datetime(2026, 1, 1, 0, 30, tzinfo=timezone.utc)
+    assert ctx.now == datetime(2026, 1, 1, 0, 30, tzinfo=UTC)
     assert ctx.now.tzinfo is not None
 
 
@@ -61,7 +61,7 @@ def test_now_ages_an_inflight_reviewer_past_its_window(context):
     past = evaluate(
         load_context(
             "local_funnel_failed_ci_green",
-            now=datetime(2030, 1, 1, tzinfo=timezone.utc),
+            now=datetime(2030, 1, 1, tzinfo=UTC),
         )
     )
     assert within.reviewer_funnel["agy"].state is FunnelState.IN_FLIGHT

@@ -16,6 +16,7 @@ import json
 import re
 
 import pytest
+
 from shipit.harness import worktree_adapter
 from shipit.identity import repo_from_slug
 from shipit.tree.create import Tree

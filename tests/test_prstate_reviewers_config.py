@@ -22,6 +22,7 @@ import tomllib
 from pathlib import Path
 
 import pytest
+
 from shipit.prstate import reviewers_config
 from shipit.prstate.reviewers import required_adapters
 from shipit.prstate.reviewers_config import (

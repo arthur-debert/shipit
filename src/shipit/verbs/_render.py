@@ -18,7 +18,8 @@ verb's ``run()``, with runtime failures mapped by :mod:`._errors`.
 from __future__ import annotations
 
 import json
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 
 def emit(

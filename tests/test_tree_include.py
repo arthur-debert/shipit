@@ -14,7 +14,6 @@ from pathlib import Path
 from shipit.tree import include
 from shipit.tree.include import parse
 
-
 # --------------------------------------------------------------------------
 # parse().match — the pure pattern semantics
 # --------------------------------------------------------------------------

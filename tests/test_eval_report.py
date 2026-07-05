@@ -10,12 +10,12 @@ from __future__ import annotations
 
 import io
 
+from shipit.execrun import ExecError
 from shipit.harness.eval import store
 from shipit.harness.eval.record import build
 from shipit.harness.eval.variant import Variant
 from shipit.identity import Owner, Repo
 from shipit.verbs.eval import report
-from shipit.execrun import ExecError
 
 #: The identity every seeded run keys under — the store is keyed by `Repo` identity
 #: (origin owner/name), not a filesystem path (ADR-0024).
