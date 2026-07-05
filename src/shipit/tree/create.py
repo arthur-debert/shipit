@@ -264,7 +264,7 @@ def _provision(dest: Path, *, trees_root: Path) -> None:
     """Provision the freshly-checked-out Tree so a write-session starts ready.
 
     Provisioning mutates NOTHING managed (ADR-0033): it is clone + branch +
-    env + hook activation + provenance record. The TRE03-era ``shipit install
+    env + hook activation. The TRE03-era ``shipit install
     --local`` step — and the reconcile commit it fail-closed into on the
     just-cut branch during every tool/managed-set drift window — is DELETED:
     the Shipit pin makes Tree and tool coherent by construction (a Tree cut
