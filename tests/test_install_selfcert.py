@@ -258,6 +258,19 @@ def test_delivered_lint_is_vacuous_with_no_whole_file_writes(tmp_path, rec):
     assert check.ok
 
 
+def test_delivered_lint_fails_closed_when_a_planned_file_is_missing(staged):
+    # A whole-file unit the plan writes but that is absent on disk is a delivery
+    # failure (install did not write a file it intended to), not "nothing to
+    # lint": self-cert must fail CLOSED and name the missing path (ADR-0033).
+    plan = _plan_with_writes(staged)
+    (staged / "bin" / "shipit").unlink()
+    check = selfcert._check_delivered_lint(
+        staged, plan, lambda argv, **kw: _exec_ok(argv)
+    )
+    assert not check.ok
+    assert "bin/shipit" in check.detail
+
+
 # --------------------------------------------------------------------------
 # Postcondition 3 — hooks live
 # --------------------------------------------------------------------------

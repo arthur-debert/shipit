@@ -185,7 +185,19 @@ def _check_manifest(root: Path, runner) -> CertCheck:
 
 def _check_delivered_lint(root: Path, plan: Plan, runner) -> CertCheck:
     """Postcondition 2: the delivered files pass the delivered lint configs."""
-    paths = [p for p in delivered_lint_paths(plan) if (root / p).is_file()]
+    paths = delivered_lint_paths(plan)
+    # Self-cert runs AFTER staging: every whole-file unit in the plan's write set
+    # is a file install just delivered. One missing on disk is not "nothing to
+    # lint" — it is install failing to write a file it intended to (fail CLOSED,
+    # ADR-0033), so name the missing paths rather than silently skipping them.
+    missing = [p for p in paths if not (root / p).is_file()]
+    if missing:
+        return CertCheck(
+            CHECK_DELIVERED_LINT,
+            False,
+            "install did not deliver whole-file units it planned to write:\n"
+            + "\n".join(f"  {p}" for p in missing),
+        )
     if not paths:
         return CertCheck(CHECK_DELIVERED_LINT, True)
     try:
