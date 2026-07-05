@@ -245,6 +245,18 @@ every run; a goal reached while fighting the tooling is a failed adoption run.
   convergence #449) plus ADR-0033 itself, whose repo-pinned `bin/shipit`
   launcher removes the lag by construction. That lag window is the recorded
   learning.
+- **Canary blind spot (ADP01-WS01, #477)**: the first real consumer
+  (`lex-fmt/lex`) deadlocked `install --pr` — the run arms the managed pre-push
+  hook during staging, then pushed its own `shipit/install` branch without a
+  hook bypass, and the freshly-armed whole-tree lint gate died on the
+  consumer's pre-existing debt. The canary dry-run could never see it:
+  shipit-canary carried ZERO lint debt, so the armed tripwire never fired.
+  Recorded learning for the canary checklist (the ADP00 dry-run of the
+  per-repo nine-step checklist embedded in the ADP01 epic issues): the canary
+  must carry deliberate pre-existing lint debt, or the first debt-bearing
+  consumer becomes the place hook-vs-install ordering defects surface. The fix
+  (install's own commit AND push bypass repo hooks; debt reported in the PR
+  body) is ADR-0033's scoping, sharpened by #477.
 - Death-by-a-thousand-cuts is the named failure mode; every process decision
   above (pre-fixed blockers, checklist with verified-by, stop-fix-restart,
   evidence reading, single tracking issue) exists to prevent it.

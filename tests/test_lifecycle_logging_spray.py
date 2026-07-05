@@ -53,7 +53,7 @@ class _GhRecorder:
     def commit(self, message, paths, *, cwd, no_verify=False):
         pass
 
-    def push(self, branch, *, cwd, remote="origin", force=False):
+    def push(self, branch, *, cwd, remote="origin", force=False, no_verify=False):
         pass
 
     def current_branch(self, *, cwd):

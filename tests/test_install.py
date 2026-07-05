@@ -1157,6 +1157,7 @@ class _GhRecorder:
         self.hook_activations = []
         self.commit_paths = ()
         self.commit_no_verify = None
+        self.push_no_verify = None
 
     def activate_hooks(self, root):
         # Stand in for `lefthook install`: record the call, mutate nothing.
@@ -1174,8 +1175,9 @@ class _GhRecorder:
         self.commit_paths = tuple(paths)
         self.commit_no_verify = no_verify
 
-    def push(self, branch, *, cwd, remote="origin", force=False):
+    def push(self, branch, *, cwd, remote="origin", force=False, no_verify=False):
         self.calls.append(("push", branch))
+        self.push_no_verify = no_verify
 
     def current_branch(self, *, cwd):
         return "main"
@@ -1633,6 +1635,49 @@ def test_push_flag_pushes_to_branch_without_pr(tmp_path, rec):
     assert result.branch == "main"
     assert ("push", "main") in rec.calls
     assert "pr_create" not in rec.names()
+
+
+def test_pr_mode_on_virgin_repo_with_lint_debt_reaches_the_pr_leg(tmp_path, rec):
+    # #477 acceptance: `install --pr` on a virgin repo installs + ACTIVATES the
+    # managed pre-push hook during staging, then pushes its own branch. On a
+    # consumer with PRE-EXISTING whole-tree lint debt the freshly-armed pre-push
+    # gate would kill that very push — the tripwire armed by the run that trips
+    # it — so install's OWN git operations (commit AND push) carry the hook
+    # bypass (ADR-0003 / ADR-0033); the debt is REPORTED in the PR body, never
+    # a blocker.
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    # Deliberate pre-existing lint debt, untouched by install (the lint gate is
+    # faked with the rest of the exec seam; the file stands in for a whole-tree
+    # violation like the markdownlint/lexd failures observed on lex-fmt/lex).
+    (tmp_path / "DEBT.md").write_text("#bad-heading\nline with trailing spaces  \n")
+    debt_calls = []
+
+    def debt_reader(root):
+        debt_calls.append(root)
+        return 5
+
+    result = _apply(tmp_path, iapply.MODE_PR, debt=debt_reader)
+
+    # The hooks were armed by this very run…
+    assert rec.hook_activations == [tmp_path]
+    # …and the push/PR leg still ran, both git write ops bypassing the hooks.
+    assert rec.names() == ["switch", "add", "commit", "push", "pr_create"]
+    assert rec.commit_no_verify is True
+    assert rec.push_no_verify is True
+    assert result.pr_url == "https://github.com/acme/repo/pull/1"
+    # The observed debt is a REPORT in the PR body, not a failure.
+    assert debt_calls == [tmp_path]
+    assert result.lint_debt == 5
+    assert "5 failing check(s)" in rec.pr_body
+
+
+def test_break_glass_push_bypasses_the_repo_hooks(tmp_path, rec):
+    # MODE_PUSH is still install's OWN push (#477): same bypass as the PR-mode
+    # push — the whole-tree gate is the repo's bar, never install's.
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    _apply(tmp_path, iapply.MODE_PUSH)
+    assert rec.commit_no_verify is True
+    assert rec.push_no_verify is True
 
 
 def test_local_flag_commits_on_current_branch_without_push_or_pr(tmp_path, rec):
