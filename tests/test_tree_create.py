@@ -16,14 +16,14 @@ from pathlib import Path
 import pytest
 
 from shipit import config, execrun, gh, git, pixienv
+from shipit.execrun import ExecError
+from shipit.identity import repo_from_slug
+from shipit.install import units as iunits
+from shipit.install.apply import COMMIT_MESSAGE as INSTALL_COMMIT_MESSAGE
 from shipit.tree import create as create_mod
 from shipit.tree import layout, provision
 from shipit.tree.create import create, create_from_source
-from shipit.identity import repo_from_slug
 from shipit.tree.layout import TreeSpec
-from shipit.install import units as iunits
-from shipit.install.apply import COMMIT_MESSAGE as INSTALL_COMMIT_MESSAGE
-from shipit.execrun import ExecError
 
 # A valid FULL git sha (40 hex) standing in for a real Shipit pin. The pin gate
 # (config.shipit_pin) validates the value as a Sha, so a fixture pin must be a

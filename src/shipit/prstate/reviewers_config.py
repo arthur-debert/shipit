@@ -42,12 +42,20 @@ options:
   * `model` / `instructions` — free-form strings consumed by the local-agent
     review RUN path; they do not affect the engine verdict.
 
-One table-level key is RESERVED (policy riding the same table, NOT a reviewer
-entry): `round_cap` — the review-round budget the stopping rule enforces (how
-many review rounds may happen before the engine stops opening another round).
-Unset means the shipped default (`breakers.ROUND_CAP`, 6); a non-int or < 1
-value fails loud at parse. It lands on `Roster.round_cap`, so it travels with
-the reviewer configuration as part of the ONE boundary value.
+Two table-level keys are RESERVED (policy riding the same table, NOT reviewer
+entries):
+
+  * `round_cap` — the review-round budget the stopping rule enforces (how
+    many review rounds may happen before the engine stops opening another
+    round). Unset means the shipped default (`breakers.ROUND_CAP`, 6); a
+    non-int or < 1 value fails loud at parse. It lands on `Roster.round_cap`,
+    so it travels with the reviewer configuration as part of the ONE boundary
+    value.
+  * `poll_interval` — the fixed cadence `shipit pr wait` re-polls the
+    evaluator at (ADR-0034): a duration (`90s`) or a positive integer of
+    seconds. Tool-owned config, deliberately NOT a per-call flag. Unset means
+    the shipped default (`wait.POLL_INTERVAL_SECONDS`, 60s). It lands on
+    `Roster.poll_interval`.
 
 The `[reviewers]` value is TABLE-ONLY: a list/array form (`reviewers =
 ["copilot", "codex"]`) is REJECTED loud, not silently accepted. The required
@@ -110,7 +118,8 @@ OVERRIDE_KEY = "reviewers"
 # Reserved TABLE-LEVEL keys in `[reviewers]`: policy values riding the table,
 # not reviewer entries. The entry parser skips them; each has its own parser.
 ROUND_CAP_KEY = "round_cap"
-_RESERVED_KEYS = (ROUND_CAP_KEY,)
+POLL_INTERVAL_KEY = "poll_interval"
+_RESERVED_KEYS = (ROUND_CAP_KEY, POLL_INTERVAL_KEY)
 
 # The per-reviewer options that are accepted (see the module docstring for what
 # each means). An option not listed here fails loud.
@@ -176,16 +185,19 @@ def load_roster(root: str | None = None) -> Roster:
         return default_roster()
     entries = _parse_table(value, config_dir=config.parent)
     # `_parse_table` has already established `value` is a table; the reserved
-    # table-level policy key rides that same table (it is NOT a reviewer entry).
+    # table-level policy keys ride that same table (they are NOT reviewer entries).
     round_cap = _parse_round_cap(value)
+    poll_interval = _parse_poll_interval(value)
     if not entries:
-        # No reviewer entries → the shipped default required set. A table-level
-        # `round_cap` still applies: policy can be set without opting out of the
+        # No reviewer entries → the shipped default required set. The table-level
+        # policy keys still apply: policy can be set without opting out of the
         # default reviewers.
-        return Roster(default_roster().entries, round_cap=round_cap)
+        return Roster(
+            default_roster().entries, round_cap=round_cap, poll_interval=poll_interval
+        )
     _validate(tuple(e.name for e in entries))
     try:
-        return Roster(tuple(entries), round_cap=round_cap)
+        return Roster(tuple(entries), round_cap=round_cap, poll_interval=poll_interval)
     except ValueError as exc:
         # Belt-and-suspenders: `_validate` already rejects duplicate names, but
         # any Roster invariant that still trips must fail loud AS a config error
@@ -271,6 +283,23 @@ def _parse_round_cap(table: dict[str, object]) -> int | None:
             f"integer of review rounds (e.g. `round_cap = 6`), got {value!r}"
         )
     return value
+
+
+def _parse_poll_interval(table: dict[str, object]) -> int | None:
+    """Parse the reserved table-level `poll_interval` key — `pr wait`'s cadence
+    (ADR-0034).
+
+    Absent → ``None`` (the waiter's shipped default,
+    ``wait.POLL_INTERVAL_SECONDS``). Accepts the same duration shape as the
+    per-reviewer `window`/`timeout` options (`90s` or a positive integer of
+    seconds); anything else fails LOUD at parse — a bad cadence is a config
+    error, never a silent default. Exact-key lookup on purpose, same reasoning
+    as `_parse_round_cap` (a case-variant spelling has already been rejected
+    loud by `_parse_table`)."""
+    value = table.get(POLL_INTERVAL_KEY)
+    if value is None:
+        return None
+    return _duration_value(f"{OVERRIDE_KEY}.{POLL_INTERVAL_KEY}", value)
 
 
 def _parse_entry(name: str, key: str, opts: object, *, config_dir: Path) -> RosterEntry:
@@ -430,17 +459,26 @@ def _reject_duplicate_names(names: list[str]) -> None:
 
 
 def _duration_seconds(name: str, field: str, value: object) -> int:
-    """Validate a per-reviewer duration option (`timeout` / `window`) → whole seconds.
+    """Validate a per-reviewer duration option (`timeout` / `window`) → whole
+    seconds, via the shared duration core with the `reviewers.<name>.<field>`
+    label naming the offending option."""
+    return _duration_value(f"{OVERRIDE_KEY}.{name}.{field}", value)
+
+
+def _duration_value(label: str, value: object) -> int:
+    """The ONE duration-validation core for the `[reviewers]` config surface →
+    whole seconds.
 
     Accepts a positive integer (seconds) or a string of digits optionally suffixed
     with `s` (e.g. `600` or `600s`). A bool, a non-positive value, or any other
     shape fails LOUD — a bad duration is a config error, never a silent default.
     `bool` is an `int` subclass, so it is rejected explicitly (a `window = true` is
-    never "1 second"). `field` names the offending option in the error so the same
-    core serves both `timeout` and `window`."""
+    never "1 second"). `label` names the offending key in the error so the same
+    core serves the per-reviewer options (`timeout` / `window`) and the
+    table-level `poll_interval`."""
     if isinstance(value, bool):
         raise RequiredReviewersConfigError(
-            f"{OVERRIDE_FILE} `{OVERRIDE_KEY}.{name}.{field}` must be a duration "
+            f"{OVERRIDE_FILE} `{label}` must be a duration "
             f"like `600s` or a positive integer of seconds, not a boolean"
         )
     if isinstance(value, int):
@@ -450,19 +488,18 @@ def _duration_seconds(name: str, field: str, value: object) -> int:
         core = text[:-1] if text.endswith("s") else text
         if not core.isdigit():
             raise RequiredReviewersConfigError(
-                f"{OVERRIDE_FILE} `{OVERRIDE_KEY}.{name}.{field}` must be a duration "
+                f"{OVERRIDE_FILE} `{label}` must be a duration "
                 f"like `600s` or a positive integer of seconds, got {value!r}"
             )
         seconds = int(core)
     else:
         raise RequiredReviewersConfigError(
-            f"{OVERRIDE_FILE} `{OVERRIDE_KEY}.{name}.{field}` must be a duration "
+            f"{OVERRIDE_FILE} `{label}` must be a duration "
             f"like `600s` or a positive integer of seconds, got {value!r}"
         )
     if seconds <= 0:
         raise RequiredReviewersConfigError(
-            f"{OVERRIDE_FILE} `{OVERRIDE_KEY}.{name}.{field}` must be positive, "
-            f"got {value!r}"
+            f"{OVERRIDE_FILE} `{label}` must be positive, got {value!r}"
         )
     return seconds
 

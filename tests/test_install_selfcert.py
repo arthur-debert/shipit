@@ -17,7 +17,8 @@ import pytest
 from shipit import config, execrun, gh, git
 from shipit.install import apply as iapply
 from shipit.install import reconcile as irec
-from shipit.install import selfcert, units as iunits
+from shipit.install import selfcert
+from shipit.install import units as iunits
 from shipit.install.errors import InstallError, SelfCertError
 from shipit.verbs import install as verb
 from shipit.verbs import lint

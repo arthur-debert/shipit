@@ -21,18 +21,18 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from .. import branchid, events, gh, logcontext
 from ..identity import Repo, Sha
 from ..pr import PrId, core_from_node
 from .model import (
+    _HANDBUILT_REPO,
     ReadinessView,
     Review,
     ReviewComment,
     ReviewFunnelCheck,
     Thread,
-    _HANDBUILT_REPO,
 )
 from .roster import Roster
 from .verdicts import load_verdicts
@@ -477,7 +477,7 @@ def gather(
         # Stamp "now" once, at fetch time. The engine NEVER calls a clock — it
         # reads this off the snapshot — so the wall-clock read lives here, at the
         # build edge, the same place every other impurity (config, network) does.
-        now=datetime.now(timezone.utc),
+        now=datetime.now(UTC),
         # The invocation's first-sight registry rides the snapshot from here, so
         # `evaluate`'s observational events dedupe against the SAME registry the
         # gather-side sightings below use.

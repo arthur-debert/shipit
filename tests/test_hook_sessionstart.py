@@ -20,6 +20,7 @@ from pathlib import Path
 
 import pytest
 import structlog
+
 from shipit import logcontext
 from shipit.harness import activation
 from shipit.pixienv import Activation, parse_activation

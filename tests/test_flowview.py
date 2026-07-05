@@ -9,11 +9,11 @@ relative-time formatting, and the never-crash posture on degraded records.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from shipit import flowview
 
-NOW = datetime(2026, 7, 2, 12, 0, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 7, 2, 12, 0, 0, tzinfo=UTC)
 
 
 def _ts(ago: timedelta) -> str:

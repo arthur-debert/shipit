@@ -13,9 +13,13 @@ import logging
 from pathlib import Path
 
 import pytest
+
 from shipit.harness.prompts import (
+    BRIEF_ROLES,
+    MANDATORY_BRIEF_SLOTS,
     SUBAGENT_ROLES,
     RoleDefs,
+    load_brief_template,
     load_coordinator_slice,
     load_role_defs,
     regenerate,
@@ -32,7 +36,7 @@ _FIXTURE = RoleDefs(
     overlays={
         Role.COORDINATOR: "COORD-OVERLAY: orchestrate and delegate; never implement.",
         Role.IMPLEMENTER: "IMPL-OVERLAY: implement with tests and open one draft PR.",
-        Role.SHEPHERD: "SHEP-OVERLAY: address exactly one review round, then hand back.",
+        Role.SHEPHERD: "SHEP-OVERLAY: own addressing for one PR; park between rounds.",
         Role.EXPLORER: "EXPL-OVERLAY: read-only and search-scoped; mutate nothing.",
         Role.REVIEWER: "REVW-OVERLAY: read a PR head and post one review; mutate nothing.",
     },
@@ -100,6 +104,134 @@ def test_real_role_prompts_read_as_their_role():
     assert "You are a SHEPHERD" in rendered.role_prompts[Role.SHEPHERD]
     assert "You are an EXPLORER" in rendered.role_prompts[Role.EXPLORER]
     assert "You are a REVIEWER" in rendered.role_prompts[Role.REVIEWER]
+
+
+# --- shepherd-per-PR (ADR-0035): the fragments say the revised design --------
+
+
+def test_shepherd_prompt_scopes_to_one_pr_across_rounds():
+    """ADR-0035: the shepherd owns ADDRESSING for one PR across its whole review
+    life — parked between rounds — not one round per agent."""
+    prompt = render(load_role_defs()).role_prompts[Role.SHEPHERD]
+    assert "ONE PR" in prompt
+    assert "PARKED" in prompt
+
+
+def test_shepherd_prompt_carries_the_root_cause_sweep_clause():
+    """ADR-0035's whack-a-mole lesson at PR scale: a valid finding is an instance
+    of a CLASS, and the shepherd sweeps the PR diff for the rest of the class."""
+    prompt = render(load_role_defs()).role_prompts[Role.SHEPHERD]
+    assert "INSTANCE OF A CLASS" in prompt
+    assert "sweep the whole PR diff" in prompt
+
+
+def test_no_shipped_surface_says_fresh_shepherd_per_round():
+    """The previous design must not survive in ANY composed prompt, the union, OR
+    the committed agent-def frontmatter — the issue's residual-phrasing
+    acceptance, pinned at every surface it could regress in. The frontmatter
+    `description` is added at the boundary (not by :func:`render`), so a render-
+    only guard would miss a stale phrase in `_AGENT_FRONTMATTER`; the committed
+    agent-defs (frontmatter included) are guarded here for that reason."""
+    rendered = render(load_role_defs())
+    agent_defs = [
+        (_ROOT / ".claude" / "agents" / f"{role.value}.md").read_text(encoding="utf-8")
+        for role in SUBAGENT_ROLES
+    ]
+    surfaces = [*rendered.role_prompts.values(), rendered.agents_union, *agent_defs]
+    for text in surfaces:
+        lowered = text.lower()
+        assert "fresh shepherd" not in lowered
+        assert "one review round" not in lowered
+
+
+# --- session-learning persistence (RVW02 WS05, issue #458) -------------------
+
+
+def test_coordinator_prompt_carries_the_promotion_clause():
+    """Issue #458: session auto-memory is keyed to the ephemeral Tree's PATH, so
+    it dies with the tree. The coordinator's prompt must carry the end-of-epic /
+    end-of-session promotion clause — durable learnings land in the repo before
+    the session ends, never only in session memory."""
+    prompt = render(load_role_defs()).role_prompts[Role.COORDINATOR]
+    assert "Promoting durable learnings INTO THE REPO" in prompt
+    assert "scratchpad, never an archive" in prompt
+    # The clause must NAME each promotion target via its source -> destination
+    # mapping, not merely mention the words: bare "ADR"/"CONTEXT.md" also appear
+    # in the planning-docs bullet and the epic-topology text, so they'd pass even
+    # if the clause dropped its mappings. Pin the full mapping phrases (each is
+    # clause-unique); normalize the renderer's `\` escaping of `>` so the asserts
+    # read as authored.
+    clause = prompt.replace("\\", "")
+    assert "a process rule -> the relevant role .lex" in clause
+    assert "a decision -> an ADR" in clause
+    assert "vocabulary -> CONTEXT.md" in clause
+    assert "an open investigation -> a tracker issue" in clause
+
+
+def test_promotion_clause_is_coordinator_scoped():
+    """The clause is the coordinator's job (it owns the session wrap-up); no
+    subagent prompt carries it — a subagent never owns end-of-session wrap-up."""
+    rendered = render(load_role_defs())
+    for role in SUBAGENT_ROLES:
+        assert "Promoting durable learnings" not in rendered.role_prompts[role]
+
+
+def test_docs_state_the_memory_orphaning_constraint_once():
+    """The WHY lives in docs/dev (issue #458 acceptance): one subsection naming
+    the mechanism — path-keyed session auto-memory orphaned when the ephemeral
+    tree is gc'd — so a human knows why the promotion rule exists."""
+    epics = (_ROOT / "docs" / "dev" / "epics.lex").read_text(encoding="utf-8")
+    # "once", not merely "present": a duplicated subsection or mechanism string
+    # is the regression this guards, so assert the count, not membership.
+    assert epics.count("Session memory dies with the Tree") == 1
+    assert epics.count("~/.claude/projects/<path-slug>/memory/") == 1  # the mechanism
+
+
+# --- brief templates (RVW02 WS04): the coordinator-filled task layer ---------
+
+
+@pytest.mark.parametrize("role", list(BRIEF_ROLES))
+def test_brief_template_carries_every_mandatory_slot(role):
+    """The four mandatory slots — issue ref, verify commands, governing docs,
+    decision boundaries — ship in EVERY brief template; an edit that drops one
+    fails here, so a coordinator can never be handed a slotless template."""
+    template = load_brief_template(role)
+    for slot in MANDATORY_BRIEF_SLOTS:
+        assert slot in template
+
+
+def test_shepherd_brief_also_names_its_pr_slot():
+    """A shepherd is briefed cold with the PR (ADR-0035), so its template carries
+    the PR slot on top of the four mandatory ones."""
+    assert "{{pr}}" in load_brief_template(Role.SHEPHERD)
+
+
+@pytest.mark.parametrize("role", [r for r in Role if r not in BRIEF_ROLES])
+def test_roles_without_a_brief_template_are_refused(role):
+    """BRIEF_ROLES is a closed set (like the role registry): asking for any other
+    role's template is a loud ValueError, not a FileNotFoundError surprise."""
+    with pytest.raises(ValueError, match="no brief template"):
+        load_brief_template(role)
+
+
+def test_brief_slots_never_leak_into_a_composed_prompt_surface():
+    """The template is the coordinator-FILLED half: an unfilled ``{{slot}}``
+    placeholder must never compose into a role prompt or the union — the guard
+    against wiring the brief fragments into the prompt generator by accident."""
+    rendered = render(load_role_defs())
+    for text in [*rendered.role_prompts.values(), rendered.agents_union]:
+        for slot in MANDATORY_BRIEF_SLOTS:
+            assert slot not in text
+
+
+def test_roles_reference_their_brief_template():
+    """The anti-forget clause (issue #457): the coordinator's prompt documents the
+    expansion verb, and each briefed role names its own template — so a brief
+    missing a slot is flagged by the briefed agent, never silently absorbed."""
+    rendered = render(load_role_defs())
+    assert "shipit spawn brief" in rendered.role_prompts[Role.COORDINATOR]
+    assert "shipit spawn brief implementer" in rendered.role_prompts[Role.IMPLEMENTER]
+    assert "shipit spawn brief shepherd" in rendered.role_prompts[Role.SHEPHERD]
 
 
 # --- the committed derived surfaces (no drift from the source) ---------------

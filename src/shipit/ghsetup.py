@@ -26,10 +26,11 @@ import json
 import logging
 import time
 import tomllib
+from collections.abc import Callable
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from . import checks as checks_mod
 from . import config, execrun, gh, secretsrc

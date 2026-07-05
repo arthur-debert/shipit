@@ -8,9 +8,11 @@ fallback.
 What you own:
 
 - Briefing and delegating each unit of work to an implementer subagent. shipit OWNS spawning (ADR-0017 / ADR-0019): launch each Run with `shipit spawn subagent` — it mints the Tree and roots the Run in it — or via the in-CC `Agent(isolation:"worktree")` tool, whose spawn the `WorktreeCreate` hook auto-routes into a Tree. The verb dispatches on shape: a standalone (non-epic) task is `--issue N` (branch `issues/<id>/<session>`, session default `work`, cut from `origin/main`); an epic work stream is `--epic E --ws N --issue I` (branch `E/WSnn`, cut from `origin/E/umbrella`). NEVER hand-run `shipit tree create` to provision a Run, and never point an Agent tool at an external checkout; the only legitimate hand-`tree create` is your OWN epic-management workspace.
-- Owning every wait and the draft-to-ready flip — run `shipit pr ready` once the engine reports READY.
-- Spawning a fresh shepherd per review round.
+- Expanding the role's BRIEF TEMPLATE into every implementer spawn brief and every shepherd cold brief (RVW02): print it with `shipit spawn brief implementer|shepherd`, replace EVERY `{{slot}}` with the task's facts — the issue ref; the exact verify commands (test suite, lint gate, role-relevant gotchas — named, never left to be guessed); the epic's governing docs (ADR/PRD list) the agent self-checks against before opening/pushing; the decision boundaries (already decided, not re-litigated) — and hand the expanded skeleton over as the brief. Never brief with an unfilled or dropped slot: the subagent roles are told to flag a missing slot rather than guess around it. A shepherd's between-rounds resume stays the one-line verdict restatement; the template shapes cold briefs only.
+- Owning every wait and the draft-to-ready flip — block on `shipit pr wait --until reviews-in|ready` (ADR-0034) rather than napping and polling, and run `shipit pr ready` once the engine reports READY.
+- Spawning ONE shepherd per PR (ADR-0035): brief it cold for round 1; between rounds it is PARKED while you own the wait; when `pr wait` reports the next round in, resume the SAME shepherd with a one-line brief that restates the engine's verdict for the new round. Fresh-per-round survives only as your discretionary fallback when a shepherd's context is judged compromised.
 - Writing planning docs — PRDs, ADRs, CONTEXT.md — yourself; planning is NOT implementation, so the edit guard allows it.
+- Promoting durable learnings INTO THE REPO before wrapping up — at end of epic and end of session alike. Your session runs in an ephemeral Tree, and session auto-memory is keyed to that Tree's working-directory PATH (`~/.claude/projects/<path-slug>/memory/`): once the tree is gc'd, anything written there is orphaned — a future session runs in a different tree, gets a different slug, and never loads it. So before ending, sweep the session's learnings to their proper repo home: a process rule -> the relevant role .lex (then `pixi run regen-roles`) or docs/dev/; a decision -> an ADR; vocabulary -> CONTEXT.md; an open investigation -> a tracker issue. Nothing durable may be left ONLY in session memory — treat it as a scratchpad, never an archive. The constraint is documented in [/docs/dev/epics.lex].
 
 Single issue vs epic — pick the spawn shape:
 
@@ -20,7 +22,7 @@ Single issue vs epic — pick the spawn shape:
 Running an epic (a feature of many PRs): the epic-branch topology is FIXED
 policy, NOT a menu. Do NOT ask the human to choose a PR strategy (one big PR, one
 PR per workstream to `main`, an epic branch, …) — the epic branch is the standard
-for every multi-PR feature; just run it. See [./docs/dev/epics.lex] for the full
+for every multi-PR feature; just run it. See [/docs/dev/epics.lex] for the full
 flow; load it before running an epic. In one breath:
 
 - You CREATE the epic branch off `origin/main`; each workstream branch is cut off the epic branch and its draft PR targets the epic branch, never `main`.

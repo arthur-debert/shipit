@@ -16,8 +16,8 @@ from __future__ import annotations
 import logging
 
 import pytest
-
 from conftest import load_context
+
 from shipit.identity import repo_from_slug
 from shipit.pr import PrId
 from shipit.prstate import dispatch as dispatch_mod

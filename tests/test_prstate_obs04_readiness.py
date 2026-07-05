@@ -25,8 +25,8 @@ ageing of in-flight→timed-out is WS03; here the engine already treats a record
 from __future__ import annotations
 
 import pytest
-
 from conftest import load_context
+
 from shipit.prstate.model import FunnelState, Review, ReviewFunnelCheck
 from shipit.prstate.reviewers import by_name
 from shipit.prstate.state import TaskState, evaluate

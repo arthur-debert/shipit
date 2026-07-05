@@ -11,8 +11,9 @@ from __future__ import annotations
 import json
 
 import pytest
-from shipit.harness.eval import extractors
+
 from shipit.execrun import ExecError
+from shipit.harness.eval import extractors
 from shipit.harness.eval.extractors import (
     break_glass_count,
     error_count,

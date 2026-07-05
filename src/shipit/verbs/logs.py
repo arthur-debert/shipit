@@ -62,9 +62,9 @@ exit 1); a log not written yet stays a clean stderr note + exit 1.
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timezone
+from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Callable
 
 import click
 
@@ -308,7 +308,7 @@ def run(
             )
             if record is not None and record_filter.matches_record(record)
         ]
-        instant = (now or (lambda: datetime.now(timezone.utc)))()
+        instant = (now or (lambda: datetime.now(UTC)))()
         for rendered in flowview.render(
             logread.last_n(records, query.tail),
             now=instant,

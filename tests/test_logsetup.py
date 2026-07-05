@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 import structlog
+
 from shipit import cli, logsetup
 from shipit.identity import repo_from_slug
 

@@ -7,6 +7,7 @@ human-facing session is always governed); a named subagent resolves to its role.
 from __future__ import annotations
 
 import pytest
+
 from shipit.harness.role import Role, resolve_role
 
 

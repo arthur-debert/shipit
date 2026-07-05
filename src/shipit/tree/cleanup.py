@@ -59,7 +59,6 @@ from __future__ import annotations
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
-
 from typing import TYPE_CHECKING
 
 from .layout import EPHEMERAL_KIND, REVIEW_KIND, tree_kind

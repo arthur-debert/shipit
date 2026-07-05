@@ -14,10 +14,10 @@ from __future__ import annotations
 import dataclasses
 
 import pytest
+
 from shipit.prstate.errors import PrStateError
 from shipit.prstate.reviewers import required_adapters
 from shipit.prstate.roster import Roster, RosterEntry
-
 
 # --- RosterEntry: construction is validation ---------------------------------
 
@@ -131,6 +131,20 @@ def test_roster_round_cap_must_be_a_positive_int():
     for bad in (0, -1, True, "3"):
         with pytest.raises(ValueError, match="round_cap"):
             Roster(round_cap=bad)  # type: ignore[arg-type]
+
+
+def test_roster_poll_interval_defaults_to_none_meaning_shipped_default():
+    # None → the waiter's shipped default (wait.POLL_INTERVAL_SECONDS, 60s);
+    # the roster only carries an override (ADR-0034), same convention as
+    # round_cap.
+    assert Roster().poll_interval is None
+    assert Roster(poll_interval=30).poll_interval == 30
+
+
+def test_roster_poll_interval_must_be_a_positive_int():
+    for bad in (0, -1, True, "60s"):
+        with pytest.raises(ValueError, match="poll_interval"):
+            Roster(poll_interval=bad)  # type: ignore[arg-type]
 
 
 # --- required_adapters: the roster→registry mapping --------------------------

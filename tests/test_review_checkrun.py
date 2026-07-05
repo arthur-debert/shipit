@@ -18,8 +18,8 @@ import logging
 import pytest
 
 from shipit.agent import backend as agent_backend
-from shipit.review import checkrun
 from shipit.execrun import ExecError
+from shipit.review import checkrun
 
 
 def _fake_token(monkeypatch, sink: dict, value: str = "ghs_tok") -> None:

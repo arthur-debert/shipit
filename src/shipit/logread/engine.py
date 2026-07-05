@@ -30,19 +30,16 @@ from __future__ import annotations
 
 import os
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Callable, TypeVar
 
 from .records import Filter
 
 #: Seconds between polls while following; small enough to feel live.
 FOLLOW_INTERVAL = 0.25
 
-_T = TypeVar("_T")
 
-
-def last_n(items: list[_T], n: int) -> list[_T]:
+def last_n[T](items: list[T], n: int) -> list[T]:
     """The last ``n`` of ``items``: all when ``n < 0``, none when ``n == 0``,
     else the final ``n``.
 

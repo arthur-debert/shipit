@@ -22,11 +22,11 @@ the degraded set) from a recorded snapshot + an injected "now" — never a clock
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
-
 from conftest import load_context
+
 from shipit.prstate.model import FunnelState, ReviewFunnelCheck
 from shipit.prstate.reviewers import DEFAULT_WAIT_WINDOW, by_name
 from shipit.prstate.roster import Roster, RosterEntry
@@ -34,7 +34,7 @@ from shipit.prstate.state import TaskState, evaluate
 
 # The base fixture's injected "now". Every request timestamp below is expressed as
 # an offset from it, so a case is "X minutes into the wait" regardless of wall time.
-NOW = datetime(2026, 1, 1, 0, 30, tzinfo=timezone.utc)
+NOW = datetime(2026, 1, 1, 0, 30, tzinfo=UTC)
 
 
 def test_default_window_is_twenty_minutes():
@@ -144,7 +144,7 @@ def test_app_reviewer_without_a_request_time_never_ages():
     ctx.reviews = [r for r in ctx.reviews if "copilot" not in r.author.lower()]
     ctx.requested_logins = ["Copilot"]
     ctx.requested_at = {}  # no timeline edge time recorded
-    ctx.now = datetime(2030, 1, 1, tzinfo=timezone.utc)  # decades later
+    ctx.now = datetime(2030, 1, 1, tzinfo=UTC)  # decades later
     status = evaluate(ctx, required=[by_name("copilot")])
     assert status.reviewer_funnel["copilot"].state is FunnelState.REQUESTED
     assert status.state is TaskState.REVIEWS_PENDING

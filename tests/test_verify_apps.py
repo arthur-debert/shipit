@@ -14,10 +14,10 @@ from __future__ import annotations
 
 from shipit import cli
 from shipit.agent import backend as agent_backend
-from shipit.review import ghauth
-from shipit.identity import repo_from_slug
-from shipit.verbs import verify_apps
 from shipit.execrun import ExecError
+from shipit.identity import repo_from_slug
+from shipit.review import ghauth
+from shipit.verbs import verify_apps
 
 
 def _granted(checks: str | None) -> dict:

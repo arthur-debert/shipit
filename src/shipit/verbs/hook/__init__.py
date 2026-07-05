@@ -48,10 +48,12 @@ def hook() -> None:
 
 # --- event registration (append-only; one import + one add_command per event) ---
 from . import eval as _eval  # noqa: E402  (HAR02-WS01)
-from . import pretooluse  # noqa: E402  (HAR01-WS01)
-from . import sessionstart  # noqa: E402  (SES01-WS01)
-from . import worktreecreate  # noqa: E402  (TRE03-WS04)
-from . import worktreeremove  # noqa: E402  (SES02-WS02)
+from . import (  # noqa: E402
+    pretooluse,  # (HAR01-WS01)
+    sessionstart,  # (SES01-WS01)
+    worktreecreate,  # (TRE03-WS04)
+    worktreeremove,  # (SES02-WS02)
+)
 
 hook.add_command(pretooluse.cmd)
 hook.add_command(_eval.stop_cmd)

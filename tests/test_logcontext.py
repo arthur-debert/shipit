@@ -24,6 +24,7 @@ import logging
 from pathlib import Path
 
 import pytest
+
 from shipit import logcontext, logsetup
 from shipit.identity import repo_from_slug
 
@@ -358,7 +359,6 @@ def test_cli_entry_binds_nothing_outside_a_checkout(monkeypatch):
     """Outside a repo the resolution is None: no `repo` key binds — absent, not
     a null-ish placeholder — mirroring the skipped file sink."""
     from shipit import cli
-
     from shipit.verbs._context import RootContext
 
     monkeypatch.setattr(

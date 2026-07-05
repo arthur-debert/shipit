@@ -11,11 +11,12 @@ from __future__ import annotations
 import json
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 import structlog
+
 from shipit.prstate.fetch import context_from_raw
 from shipit.prstate.model import ReadinessView
 from shipit.prstate.reviewers_config import default_roster
@@ -28,7 +29,7 @@ FIXTURES = Path(__file__).parent / "prstate_fixtures"
 #: makes every fixture deterministic. A fixture can override it with a top-level
 #: `now` (ISO-8601) field, and a test can pass `load_context(name, now=...)` to
 #: pin a wait-window relative to the funnel breadcrumb's `started_at`.
-DEFAULT_NOW = datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+DEFAULT_NOW = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
 
 
 def load_context(

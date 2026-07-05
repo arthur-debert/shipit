@@ -30,6 +30,8 @@ import json
 
 import click
 
+from ..harness import prompts
+from ..harness.role import Role
 from ..spawn import subagent
 from ..spawn.subagent import SUPPORTED_BACKENDS
 from ._errors import cli_errors
@@ -43,7 +45,9 @@ from ._render import emit
         "Spawn backend-agent Runs shipit owns end to end.\n\n"
         "`subagent` creates a write Tree and launches a headless claude child "
         "rooted in it (ADR-0019), so the Run's work happens in the Tree, never the "
-        "parent checkout. `--help` is the map."
+        "parent checkout. `brief` prints a role's brief template — the "
+        "task-specific slots the coordinator fills before spawning (RVW02). "
+        "`--help` is the map."
     ),
 )
 def spawn() -> None:
@@ -130,6 +134,25 @@ def subagent_cmd(
             backend=backend,
         )
     )
+
+
+@spawn.command(name="brief")
+@click.argument(
+    "role",
+    type=click.Choice([role.value for role in prompts.BRIEF_ROLES]),
+)
+def brief_cmd(role: str) -> None:
+    """Print ROLE's brief template — the task-specific half the coordinator fills.
+
+    The bundled BRIEF TEMPLATE (RVW02) for a spawn/cold brief: the general half
+    of an agent's prompt is its role prompt (the generated agent-def); this is
+    the layer that varies per task. Expand it before every implementer spawn and
+    every shepherd cold brief: replace EVERY ``{{slot}}`` — the issue ref, the
+    exact verify commands, the epic's governing docs, the decision boundaries —
+    and hand the expanded skeleton over as the brief. The slots are mandatory;
+    the roles flag a missing slot rather than guess around it.
+    """
+    click.echo(prompts.load_brief_template(Role(role)))
 
 
 def format_spawned(result: subagent.SpawnResult) -> str:

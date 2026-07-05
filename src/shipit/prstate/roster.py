@@ -103,10 +103,18 @@ class Roster:
     (the default) means the shipped default (``breakers.ROUND_CAP``) — the same
     None-means-shipped-default convention as ``RosterEntry.window_seconds``, so
     the breaker rule keeps owning its own constant.
+
+    ``poll_interval`` is the second table-level policy value (ADR-0034): the
+    fixed cadence, in whole seconds, at which `pr wait` — the ONE verb that
+    blocks — re-polls the evaluator. Tool-owned, never a per-call flag. ``None``
+    (the default) means the shipped default (``wait.POLL_INTERVAL_SECONDS``,
+    60s) — the waiter keeps owning its own constant, same convention as
+    ``round_cap``.
     """
 
     entries: tuple[RosterEntry, ...] = ()
     round_cap: int | None = None
+    poll_interval: int | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.entries, tuple) or any(
@@ -121,6 +129,15 @@ class Roster:
             raise ValueError(
                 f"Roster.round_cap must be a positive int of review rounds, "
                 f"got {self.round_cap!r}"
+            )
+        if self.poll_interval is not None and (
+            isinstance(self.poll_interval, bool)
+            or not isinstance(self.poll_interval, int)
+            or self.poll_interval < 1
+        ):
+            raise ValueError(
+                f"Roster.poll_interval must be a positive int of seconds, "
+                f"got {self.poll_interval!r}"
             )
         names = [e.name for e in self.entries]
         duplicates = sorted({n for n in names if names.count(n) > 1})
