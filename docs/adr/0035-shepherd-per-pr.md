@@ -2,7 +2,7 @@
 
 > **Status: Accepted.** Epic RVW02 (#453); decided in the ADP00 retrospective.
 > Reverses the fresh-shepherd-per-round design encoded in the shepherd and
-> coordinator roles and `docs/dev/epics.md` since RVW (#424). The engine's
+> coordinator roles and `docs/dev/epics.lex` since RVW (#424). The engine's
 > authority (ADR-0031) and the classification seam (#423) are unchanged.
 
 One shepherd owns ADDRESSING for a PR across its whole review life. It is
@@ -48,8 +48,8 @@ cheaply); pooling one shepherd across PRs (crosses the one-writer-per-Tree
 boundary and mixes PR contexts — the bleed risk fresh-per-round existed to
 kill, with none of its guarantees).
 
-Consequences: shepherd and coordinator `.lex` sources plus `docs/dev/epics.md`
-are rewritten (RVW02-WS02); a multi-round PR costs one warm-up total instead
+Consequences: shepherd and coordinator `.lex` sources plus
+`docs/dev/epics.lex` are rewritten (RVW02-WS02); a multi-round PR costs one warm-up total instead
 of one per round; the coordinator's dispatch loop becomes wait → resume → wait;
 and round-2+ economics become observable in the flow log (same agent id across
 rounds) instead of vanishing into per-spawn accounting.

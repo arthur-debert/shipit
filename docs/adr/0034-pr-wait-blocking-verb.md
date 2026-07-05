@@ -5,10 +5,11 @@
 > ("there is NO polling loop here"); `pr status` and `pr next` themselves stay
 > pure single-shot reads.
 
-shipit gains exactly one verb that blocks: `shipit pr wait [PR]
---until reviews-in|ready --timeout <duration>`. It polls the same evaluator
-`pr status` reads, at a FIXED tool-owned interval (default 60s, overridable in
-config, never per-call), and exits the moment the awaited state arrives:
+shipit gains exactly one verb that blocks:
+`shipit pr wait [PR] --until reviews-in|ready --timeout <duration>`.
+It polls the same evaluator `pr status` reads, at a FIXED tool-owned interval
+(default 60s, overridable in config, never per-call), and exits the moment
+the awaited state arrives:
 `reviews-in` fires when the latest round's reviews have all landed (the moment
 an addressing agent becomes dispatchable), `ready` when the engine reports
 READY. On each tick where observed state changed it emits one line and a

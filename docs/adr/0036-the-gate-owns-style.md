@@ -28,8 +28,9 @@ mechanical judgment leaked back in.
 
 The enforced floor is deliberately MINIMAL (maintainer decision, RVW02
 planning): a small curated ruff selection of correctness-adjacent families
-(the exact set is WS03's to propose — bugbear/pyupgrade/isort-class, sized so
-the one-time debt-clear stays small), not strict annotation or docstring
+(the exact set is WS03's to propose — bugbear, pyupgrade, and isort, ruff's
+B/UP/I families, sized so the one-time debt-clear stays small), not strict
+annotation or docstring
 enforcement. Everything above the floor is explicitly OUT of review scope.
 The floor can rise later, rule by rule, through the same seam: adopt the rule,
 clear the debt, and the standard is real from that day — never through a
