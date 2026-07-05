@@ -144,6 +144,39 @@ def test_no_shipped_surface_says_fresh_shepherd_per_round():
         assert "one review round" not in lowered
 
 
+# --- session-learning persistence (RVW02 WS05, issue #458) -------------------
+
+
+def test_coordinator_prompt_carries_the_promotion_clause():
+    """Issue #458: session auto-memory is keyed to the ephemeral Tree's PATH, so
+    it dies with the tree. The coordinator's prompt must carry the end-of-epic /
+    end-of-session promotion clause — durable learnings land in the repo before
+    the session ends, never only in session memory."""
+    prompt = render(load_role_defs()).role_prompts[Role.COORDINATOR]
+    assert "Promoting durable learnings INTO THE REPO" in prompt
+    assert "scratchpad, never an archive" in prompt
+    # the clause names the promotion targets, not just the sentiment
+    assert "ADR" in prompt
+    assert "CONTEXT.md" in prompt
+
+
+def test_promotion_clause_is_coordinator_scoped():
+    """The clause is the coordinator's job (it owns the session wrap-up); no
+    subagent prompt carries it — a subagent's Tree dies at PR-open by design."""
+    rendered = render(load_role_defs())
+    for role in SUBAGENT_ROLES:
+        assert "Promoting durable learnings" not in rendered.role_prompts[role]
+
+
+def test_docs_state_the_memory_orphaning_constraint_once():
+    """The WHY lives in docs/dev (issue #458 acceptance): one subsection naming
+    the mechanism — path-keyed session auto-memory orphaned when the ephemeral
+    tree is gc'd — so a human knows why the promotion rule exists."""
+    epics = (_ROOT / "docs" / "dev" / "epics.lex").read_text(encoding="utf-8")
+    assert "Session memory dies with the Tree" in epics
+    assert "~/.claude/projects/<path-slug>/memory/" in epics  # the mechanism
+
+
 # --- brief templates (RVW02 WS04): the coordinator-filled task layer ---------
 
 
