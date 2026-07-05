@@ -240,6 +240,12 @@ def format_plan(plan: Plan, *, dry_run: bool = False) -> str:
         lines.append(f"  {DELETE:8} {d.retired.path} (retired)")
     for d in plan.retire_keeps:
         lines.append(f"  {KEEP:8} {d.retired.path} (retired; locally modified)")
+    if plan.pin_stale:
+        # ADR-0033: a pin roll-forward is a reconcile outcome in its own right —
+        # it can be the ONLY change when a code-only shipit build ships (every
+        # managed file byte-identical), so it earns a plan line like any write.
+        before = plan.current_pin[:12] if plan.current_pin else "(pinless)"
+        lines.append(f"  {'pin':8} {before} -> {plan.target_pin[:12]}")
     if plan.nothing_to_do:
         lines.append(
             "  nothing to do — no automated changes to apply."

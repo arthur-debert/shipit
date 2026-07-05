@@ -280,6 +280,18 @@ class ConsumerState:
     pristine: Mapping[str, str]  # unit key -> stored pristine hash
     retired_hashes: Mapping[str, str | None]  # retired path -> current hash
     seeds: tuple[str, ...]  # policy entries the seed pass would add
+    # The consumer's current Shipit pin (`.shipit.toml [shipit].version`, RAW —
+    # whatever is stored, sha or not) and the pin an applying install WOULD
+    # stamp (ADR-0033: its own build sha, resolved through the SAME seam apply
+    # stamps with so the two can never disagree). Their mismatch is a plan-level
+    # work axis: a code-only shipit change bumps the build sha without touching a
+    # managed file, and the reconcile must still roll that pin forward — see
+    # :attr:`Plan.pin_stale`. Compared raw (not sha-validated): a non-sha or
+    # absent stored pin simply differs from the target and gets re-stamped.
+    # ``target_pin`` is None when no build identity resolves (apply fails closed
+    # there anyway, so forcing a bump would only raise).
+    current_pin: str | None = None
+    target_pin: str | None = None
     # No pixi.toml at all (#432) — distinct from "present without the managed
     # blocks", which the per-unit hashes already encode as ADDs: pixi requires a
     # [workspace]/[project]/[package] table, so an applying install must seed a
@@ -307,10 +319,13 @@ def gather(
     cfg_path = root / config.CONFIG_NAME
     pristine: dict[str, str] = {}
     seeds: list[str] = []
+    current_pin: str | None = None
     manifest_error: str | None = None
     try:
         if cfg_path.is_file():
-            pristine = config.load_managed(config.load(cfg_path))
+            cfg = config.load(cfg_path)
+            pristine = config.load_managed(cfg)
+            current_pin = config.shipit_version(cfg)  # RAW — compared, not validated
         seeds = config.plan_policy_seed(cfg_path)
     except config.ConfigError as exc:
         # Degraded-but-continuing: the reconcile proceeds against an empty
@@ -328,9 +343,30 @@ def gather(
         pristine=pristine,
         retired_hashes={r.path: retired_actual_hash(root, r) for r in retired},
         seeds=tuple(seeds),
+        current_pin=current_pin,
+        target_pin=_target_pin(),
         pixi_manifest_missing=not (root / PIXI_FILE).is_file(),
         manifest_error=manifest_error,
     )
+
+
+def _target_pin() -> str | None:
+    """The pin an applying install WOULD stamp — ``None`` if none resolves.
+
+    Resolved through the very seam :func:`shipit.install.apply.apply` stamps
+    with (its ``_shipit_version``), so the plan's ``target_pin`` and the pin
+    apply writes can never disagree — a code-only build's sha, the same value
+    on both sides. Imported at call time to avoid the ``apply -> reconcile``
+    module cycle (apply imports the :class:`Plan`). Apply's fail-closed refusal
+    (no build identity) becomes ``None`` here: a plan cannot force a bump it
+    could not stamp anyway.
+    """
+    from .apply import _shipit_version
+
+    try:
+        return _shipit_version()
+    except InstallError:
+        return None
 
 
 # --------------------------------------------------------------------------
@@ -357,6 +393,15 @@ class Plan:
     # never hashed into [managed], consumer-owned after the seed.
     seed_pixi_manifest: bool = False
     manifest_error: str | None = None
+    # ADR-0033: the Shipit pin travels IN the reconcile payload. The consumer's
+    # current pin and the running build's sha ride the plan so a code-only
+    # shipit change — new build sha, every managed file byte-identical — is
+    # still work to do (:attr:`pin_stale`), rolling the pin forward via the same
+    # `.shipit.toml` write apply already performs. Without this the no-op check
+    # would strand consumers on a stale build forever (the install reconcile PR
+    # is the ONLY bump vehicle; nothing else stamps the pin).
+    current_pin: str | None = None
+    target_pin: str | None = None
 
     @property
     def writes(self) -> tuple[Decision, ...]:
@@ -376,17 +421,38 @@ class Plan:
         return tuple(d for d in self.retired if d.action == KEEP)
 
     @property
+    def pin_stale(self) -> bool:
+        """The consumer's pin differs from the running build's sha — a pin bump.
+
+        The pin-only work axis (ADR-0033): a code-only shipit change leaves
+        every managed file byte-identical yet advances the build sha, and the
+        reconcile must still stamp the new pin so the fix reaches the repo.
+        Only when ``target_pin`` resolved (else apply cannot stamp anyway and
+        would fail closed) and it differs from what the consumer carries — a
+        pinless consumer (``current_pin is None``) with a resolved build sha is
+        stale too, so a first stamp is never skipped.
+        """
+        return self.target_pin is not None and self.current_pin != self.target_pin
+
+    @property
     def nothing_to_do(self) -> bool:
-        """No writes, no seeds, no pending retired delete — a clean no-op re-run.
+        """No writes, no seeds, no retired delete, no pin bump — a clean no-op.
 
         A seed-only change (managed set current, policy missing) still counts
         as a write, so a re-install picks up policy a consumer never had — but
         stays a no-op once the policy is in place. A pending retired delete
         likewise keeps the run a write, so cleanup lands even when the managed
-        set is current. A KEPT retired file does not: there is nothing shipit
-        will change on its own.
+        set is current. A stale pin (:attr:`pin_stale`) is a work axis of its
+        own: a code-only shipit change touches no managed file yet must roll the
+        pin forward. A KEPT retired file does not: there is nothing shipit will
+        change on its own.
         """
-        return not self.writes and not self.seeds and not self.retire_deletes
+        return (
+            not self.writes
+            and not self.seeds
+            and not self.retire_deletes
+            and not self.pin_stale
+        )
 
     @property
     def activates_hooks(self) -> bool:
@@ -437,6 +503,8 @@ def reconcile(
             d.unit.dest == PIXI_FILE for d in decisions if d.action in (ADD, UPDATE)
         ),
         manifest_error=state.manifest_error,
+        current_pin=state.current_pin,
+        target_pin=state.target_pin,
     )
     logger.debug(
         "reconcile plan decided",
@@ -450,6 +518,7 @@ def reconcile(
             "pixi_seed": result.seed_pixi_manifest,
             "retire_deletes": len(result.retire_deletes),
             "retire_keeps": len(result.retire_keeps),
+            "pin_stale": result.pin_stale,
         },
     )
     for d in result.retire_keeps:

@@ -39,6 +39,7 @@ import re
 import tarfile
 import tempfile
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -272,7 +273,7 @@ def provision(
     return LexdReport(pin=PIN, action=ACTION_INSTALLED, dest=str(dest), triple=triple)
 
 
-def _probe_version(dest: Path, runner) -> str | None:
+def _probe_version(dest: Path, runner: Callable[..., execrun.ExecResult]) -> str | None:
     """``lexd --version`` output from the installed binary, or ``None``.
 
     An absent ``dest`` answers without an Exec at all — "not yet installed" is

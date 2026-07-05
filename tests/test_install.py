@@ -726,6 +726,37 @@ def test_install_fails_closed_when_the_build_identity_is_unresolvable(
         _apply(tmp_path)
 
 
+def test_a_code_only_shipit_change_rolls_the_pin_forward(tmp_path, monkeypatch):
+    # ADR-0033: the install reconcile PR is the ONLY pin-bump vehicle, so a
+    # code-only shipit build (new sha, every managed file byte-identical) must
+    # STILL be work to do — otherwise the no-op check strands the consumer on
+    # the old build forever. The pin travels IN the reconcile payload; a stale
+    # pin is a work axis of its own, on par with a pending write.
+    monkeypatch.setattr(iapply, "_activate_hooks", lambda root: _exec_result(0))
+    _apply(tmp_path)  # stamps the running (dev-checkout) build's sha
+    old_pin = config.shipit_pin(tmp_path / ".shipit.toml")
+    assert old_pin is not None
+
+    # Same build → the re-plan is a clean no-op (pin matches, nothing changed).
+    assert _plan(tmp_path).nothing_to_do
+
+    # A NEW build sha, the managed files untouched: pin-only work to do. The
+    # plan writes NOTHING but `.shipit.toml`, and the report names the bump.
+    new_sha = "abcdef0123456789abcdef0123456789abcdef01"
+    monkeypatch.setattr(iapply.buildid, "build_sha", lambda: Sha(new_sha))
+    plan = _plan(tmp_path)
+    assert not plan.nothing_to_do
+    assert plan.pin_stale
+    assert not plan.writes
+    assert plan.changed_paths == (config.CONFIG_NAME,)
+    assert f"-> {new_sha[:12]}" in verb.format_plan(plan)
+
+    # Applying it rolls the pin forward — the code-only fix reaches the repo.
+    _apply(tmp_path)
+    assert config.shipit_pin(tmp_path / ".shipit.toml") == new_sha
+    assert _plan(tmp_path).nothing_to_do  # and re-settles to a no-op
+
+
 # --------------------------------------------------------------------------
 # The HAR01 harness units — generated agent-defs + the settings.json hook line
 # (docs/prd/har01-coordinator-guard-and-role-prompts.md, user stories 17 & 21)

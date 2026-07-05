@@ -36,6 +36,7 @@ from __future__ import annotations
 import io
 import logging
 import os
+from collections.abc import Callable
 from contextlib import redirect_stdout
 from dataclasses import dataclass
 from pathlib import Path
@@ -113,7 +114,9 @@ def delivered_lint_paths(plan: Plan) -> list[str]:
     return sorted({d.unit.dest for d in plan.writes if d.unit.kind == "file"})
 
 
-def _lint_env_run_tool(root: Path, runner):
+def _lint_env_run_tool(
+    root: Path, runner: Callable[..., execrun.ExecResult]
+) -> Callable[[str, list[str], Path], execrun.ExecResult]:
     """A ``shipit lint`` tool runner that executes each tool through the managed
     lint env (``pixi run --environment lint``) — the exact toolchain install
     just delivered and solved, never whatever happens to be on install's PATH.
