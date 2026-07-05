@@ -264,4 +264,9 @@ def test_gh_failure_mid_wait_is_uniform_error_exit_1(patched_wait, monkeypatch, 
     rc = cli.main(["pr", "wait", "--until", "ready"])
     assert rc == 1
     err = capsys.readouterr().err
-    assert err.startswith("error: ")
+    # The error contract is ONE `error: …` LINE on stderr — which the wait
+    # verb deliberately shares with its progress lines (and, depending on the
+    # sink config, log records: the `wait.started` event lands there in CI),
+    # so assert on the line, not on the stream's first bytes.
+    assert any(line.startswith("error: ") for line in err.splitlines())
+    assert "gh pr view failed" in err
