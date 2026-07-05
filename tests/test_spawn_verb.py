@@ -44,8 +44,9 @@ def test_spawn_subagent_help_documents_the_verb():
 
 def test_spawn_brief_prints_the_template_with_every_mandatory_slot():
     """`shipit spawn brief <role>` is the coordinator's expansion surface (RVW02):
-    it prints the bundled template verbatim, unfilled slots and all — filling is
-    the coordinator's job, so the output must still carry every `{{slot}}`."""
+    it prints the bundled template BODY (the autogen banner and `# Title` H1
+    stripped by `_fragment_body()`), unfilled slots and all — filling is the
+    coordinator's job, so the output must still carry every `{{slot}}`."""
     for role in prompts.BRIEF_ROLES:
         result = CliRunner().invoke(spawn_verb.spawn, ["brief", role.value])
 
