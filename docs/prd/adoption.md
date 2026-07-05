@@ -170,7 +170,9 @@ every run; a goal reached while fighting the tooling is a failed adoption run.
 - **Status lives in one GitHub tracking issue** (five tables: pixi tasks ×
   stack, local adoption × repo, CI workflows × stack, remote CI × repo,
   bird's-eye), updated at every state change, never checked in. The bird's-eye
-  table is the fleet manifest, seeded from a one-time sweep of the three owners.
+  table is a human status VIEW, seeded from a one-time sweep of the three owners;
+  the machine-readable fleet manifest is `.shipit.toml`'s `[project.portfolio]`
+  (ADR-0033; CONTEXT.md's Portfolio term), which the sweep reconciles against.
 - **Survival prompts are ADP00 artifacts**: a shipit-side coordinator prompt
   (indirection discipline, stop-fix-restart, evidence reading, table updates)
   and an in-consumer coordinator prompt (tooling contract, instrument framing,
@@ -225,9 +227,22 @@ every run; a goal reached while fighting the tooling is a failed adoption run.
 - The act howto's "what act cannot verify" section is load-bearing: phos-app's
   sign/notarize leg can never go green locally, so its remote verification
   budget is structurally larger.
-- The fleet has no machine-readable manifest anywhere; after ADP00 the tracking
-  issue's bird's-eye table is the authoritative enumeration until something
-  better is needed.
+- The machine-readable fleet manifest is `.shipit.toml`'s `[project.portfolio]`
+  table (ADR-0033; CONTEXT.md's Portfolio term) — the version-controlled,
+  stack-grouped list of repos a sweep iterates, reads pins from, and measures
+  rollout against. The tracking issue's bird's-eye table is a human status VIEW
+  derived from it (plus swept-but-not-onboarding repos), never the authority; a
+  hand-edited GitHub issue cannot be the machine source of truth (WS07's
+  "bird's-eye is the manifest" framing was corrected in ADP00-WS15).
+- **Execution record (ADP00)**: the canary dry-run (#420) surfaced the
+  tool/managed-set lag window live — a machine-global, auto-updating shipit left
+  committed managed files stale against the running tool and leaked reconcile
+  commits onto feature branches — and opened seven convergence workstreams
+  (WS09–WS15: seeded `pixi.toml` #432, managed lint configs #436, the gh-setup
+  ruleset 422s #438/#441, armed Trees #443, the ADR-0033 pin core #447,
+  convergence #449) plus ADR-0033 itself, whose repo-pinned `bin/shipit`
+  launcher removes the lag by construction. That lag window is the recorded
+  learning.
 - Death-by-a-thousand-cuts is the named failure mode; every process decision
   above (pre-fixed blockers, checklist with verified-by, stop-fix-restart,
   evidence reading, single tracking issue) exists to prevent it.

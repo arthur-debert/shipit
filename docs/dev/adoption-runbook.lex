@@ -1,63 +1,89 @@
-Adoption runbook — shipit on PATH + the coordinator survival prompts
+Adoption runbook — running shipit in a repo + the coordinator survival prompts
 
 The written discipline both coordinator layers run on during fleet adoption
-(ADP00 WS06; spec: [../prd/adoption.md]). Three artifacts: the one supported
-way to get `shipit` on PATH, the survival prompt for the root coordinator
-driving adoption from shipit's side, and the survival prompt for the
-coordinator inside the consumer repo being adopted. The two prompts are
-verbatim blocks: the ADP01 flow embeds or links them into each spawned
-coordinator's brief — paste them as-is, never paraphrase.
+(ADP00 WS06, revised in WS14/WS15 onto ADR-0033; spec: [../prd/adoption.md]).
+Three artifacts: how a repo runs its pinned shipit (the managed `bin/shipit`
+launcher), the survival prompt for the root coordinator driving adoption from
+shipit's side, and the survival prompt for the coordinator inside the consumer
+repo being adopted. The two prompts are verbatim blocks: the ADP01 flow embeds
+or links them into each spawned coordinator's brief — paste them as-is, never
+paraphrase.
 
-1. shipit on PATH — the one supported story
+1. Running shipit in a repo — the pinned launcher
 
-    `shipit` rides the agent / PR-loop surface ([./architecture.lex] §2) —
-    installed OUTSIDE any locked pixi env, so a fix is live fleet-wide with
-    zero consumer file churn and no lockfile bump. The one supported install
-    path, laptops and runners alike, is a `uv tool` install straight from
-    the git repo.
+    A consumer repo pins the exact shipit it runs — the decision record is
+    ADR-0033 [../adr/0033-repo-pins-its-shipit.md]. `.shipit.toml`'s
+    `[shipit].version` carries a FULL git commit sha of the shipit build that
+    wrote the repo's managed set — the _Shipit pin_ (CONTEXT.md) — and the
+    managed `bin/shipit` launcher execs exactly that build via `uv`
+    (`uv tool run --from git+URL@PIN`, cached after the first resolve), reading
+    the pin straight from `.shipit.toml`. Tool version and managed set thereby travel as ONE versioned
+    unit in the repo's history. Resolution is pin-wins, loudly: PATH is NEVER
+    consulted in a pinned repo — the old first-`shipit`-on-PATH walk silently
+    reintroduced the tool/managed-set drift the pin exists to kill.
 
-    Install:
+    Inside versus outside is the boundary. Everything INSIDE a Tree rides
+    `bin/shipit`, hence the repo's pin: hooks, lint, `pr next`, a Run's verbs. A
+    coordinator orchestrating from OUTSIDE — `tree create`, launch, PR reads —
+    runs its own (possibly newer) build; a newer shipit reaches a consumer only
+    through a reconcile PR that bumps the pin, never in place. A repo with no pin
+    fails LOUD toward the bootstrap (`bin/shipit` exits 127); that pinless
+    refusal is the only surviving provisioning guard (Tree provisioning mutates
+    nothing managed under ADR-0033).
+
+    Bootstrap — the ONE `uv tool` install with an in-repo role:
 
         uv tool install --from git+https://github.com/arthur-debert/shipit shipit
 
     :: sh ::
 
-    Update (re-resolves the default branch's HEAD):
+    Run that once against a virgin (pinless) repo, then `shipit install --pr` in
+    the repo: the install STAMPS the pin — from its own build identity, never an
+    operator-supplied value — and from that commit on `bin/shipit` is how the
+    repo runs shipit. Bootstrap is a one-time, first-install act.
 
-        uv tool upgrade shipit
+    The `uv tool`-installed shipit's roles, and no others:
+
+        - bootstrap of a virgin repo (above), its single in-repo role — once; and
+        - operator convenience OUTSIDE any repo (ad-hoc `shipit` from `~`).
+
+    Its auto-update property (`uv tool upgrade` re-resolving the default
+    branch's HEAD) is explicitly a NON-FEATURE inside a repo: that moving
+    pointer is exactly the tool/managed-set lag window the pin replaces. Never
+    run a repo's checks off a machine-global shipit — the launcher, not PATH,
+    chooses the build.
+
+    The review extra (local-agent review execution) rides the same bootstrap install:
+
+        uv tool install 'shipit[review] @ git+https://github.com/arthur-debert/shipit'
 
     :: sh ::
 
-    Prerequisites, in both environments:
+    Prerequisites, wherever a pin first resolves — launcher and bootstrap alike:
 
         - `uv` on the machine (`brew install uv` on laptops;
-          `astral-sh/setup-uv` on runners).
+          `astral-sh/setup-uv` on runners). `bin/shipit` fails loud (exit 127)
+          when `uv` is absent.
         - git credentials for the private repo — uv shells out to git, so
           whatever lets `git clone https://github.com/arthur-debert/shipit`
           work is enough (`gh auth login` + `gh auth setup-git` on laptops;
           on runners a token-bearing credential, wired when ADP02 builds the
           CI leg).
 
-    Variants:
+    The development override is `SHIPIT_EXEC`. Setting
+    `SHIPIT_EXEC=/path/to/build` makes `bin/shipit` exec THAT build instead of
+    resolving the pin — the one sanctioned override (ADR-0033), honored and
+    ANNOUNCED (launcher stderr plus a durable flow-log twin), never silent. It
+    refuses to point back at the launcher itself (the exec-loop guard). It
+    formalizes what shipit's own checkout does with its working-tree build; a
+    consumer session never sets it.
 
-        - Local-agent review execution needs the review extra:
-          `uv tool install 'shipit[review] @ git+https://github.com/arthur-debert/shipit'`.
-        - Pinning to a rev (normally unwanted — this surface is MEANT to
-          auto-update): append `@<rev>` to the git URL.
-
-    What this is NOT — the pinned `bin/shipit` auto-provision bootstrap stays
-    out of scope; it belongs to ADP02's pixi encapsulation step
-    ([../prd/adoption.md]). This section documents the working answer that
-    exists today, not new machinery. Do not substitute ad-hoc alternatives
-    (a `pip install` into some env, a checkout's `.pixi/envs/*/bin` on PATH,
-    a shell alias) — one story, so a broken install is diagnosable
-    fleet-wide.
-
-    Verified 2026-07-04 on a clean Tree (`ADP00/WS06`, macOS arm64,
-    uv 0.11.23) — the install command resolved the private repo through the
-    gh credential helper, `shipit --help` ran from the installed executable,
-    `uv tool upgrade shipit` re-resolved HEAD, and the review-extra variant
-    installed clean.
+    Verified 2026-07-05 against the managed launcher (`src/shipit/data/bootstrap/shipit`,
+    macOS arm64): a pinless manifest exits 127 toward the bootstrap; a full-sha
+    `[shipit].version` resolves (the `SHIPIT_PIN_CHECK` probe echoes it, no uv,
+    no network); a non-sha pin (the retired static `0.0.1`) is refused toward
+    re-bootstrap; and `SHIPIT_EXEC` execs the named build after the announced
+    stderr line.
 
 2. Survival prompt A — root coordinator in shipit
 
