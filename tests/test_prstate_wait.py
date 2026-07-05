@@ -212,7 +212,7 @@ def test_timeout_returns_the_distinct_outcome_with_the_last_status():
     )
     result, clock = _run([pending] * 10, Until.REVIEWS_IN, timeout=150.0, poll=60.0)
     assert result.outcome is Outcome.TIMED_OUT
-    # The state report rides the result: the caller renders "still waiting on".
+    # The state report rides the result: the caller renders the next-action line.
     assert "copilot" in result.status.next_action
     # The final nap is CLAMPED to the remaining deadline (60, 60, then 30) so
     # expiry is prompt — never up to a full interval late.
@@ -285,7 +285,10 @@ def test_flow_log_events_started_changed_fired(caplog):
 
 
 def test_flow_log_timeout_event(caplog):
-    pending = _status(funnel={"copilot": FunnelState.REQUESTED})
+    pending = _status(
+        next_action="waiting on required review(s): copilot",
+        funnel={"copilot": FunnelState.REQUESTED},
+    )
     with caplog.at_level(logging.INFO, logger="shipit.prstate"):
         result, _ = _run([pending] * 5, Until.READY, timeout=100.0, poll=60.0)
     assert result.outcome is Outcome.TIMED_OUT
@@ -297,7 +300,11 @@ def test_flow_log_timeout_event(caplog):
         for r in caplog.records
         if getattr(r, events.EXTRA_KEY, None) == "wait.timed_out"
     ]
-    assert "still waiting on" in timed_out[0].getMessage()
+    # The event message carries the next-action state report, with no
+    # "still waiting on:" prefix duplicating its own "waiting on …" lead.
+    message = timed_out[0].getMessage()
+    assert message.endswith("— waiting on required review(s): copilot")
+    assert "waiting on required review(s): waiting on" not in message
 
 
 def test_wait_event_names_are_registered():

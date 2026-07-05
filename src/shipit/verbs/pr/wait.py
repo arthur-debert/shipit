@@ -13,8 +13,9 @@ The cadence is config, never a flag: the shipped default is
 `[reviewers]` table-level ``poll_interval`` key in `.shipit.toml`. `--timeout`
 is the HARD deadline (required semantics — it always has a value; default 30m):
 on expiry the verb exits promptly with the DISTINCT code :data:`EXIT_TIMEOUT`
-(3) and a state report ("still waiting on: …") — an advisory outcome for the
-supervisor, not a failure of the PR, and distinct from exit 1 (a real gh/auth/
+(3) and a state report (the engine's next-action line, naming what is still
+outstanding) — an advisory outcome for the supervisor, not a failure of the PR,
+and distinct from exit 1 (a real gh/auth/
 config failure through the error shell) and exit 2 (usage).
 
 On every poll tick where the observed state CHANGED, one progress line goes to
@@ -68,8 +69,8 @@ def format_wait(result: WaitResult) -> str:
 
     Reuses :func:`~._format.format_status` (the render-seam helper the whole
     `pr` family shares) so the final observed status renders identically to
-    `pr status`. The timeout line carries the "still waiting on: …" state
-    report ADR-0034 requires.
+    `pr status`. The timeout line carries the engine's next-action line — the
+    state report naming what is still outstanding, as ADR-0034 requires.
     """
     if result.outcome is Outcome.FIRED:
         head = (
@@ -79,8 +80,7 @@ def format_wait(result: WaitResult) -> str:
     else:
         head = (
             f"wait: timed out after {result.ticks} poll(s) "
-            f"({result.waited_seconds:.0f}s) — still waiting on: "
-            f"{result.status.next_action}"
+            f"({result.waited_seconds:.0f}s) — {result.status.next_action}"
         )
     return f"{head}\n{format_status(result.status)}"
 

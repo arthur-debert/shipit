@@ -24,7 +24,8 @@ The escape hatch is a HARD deadline: ``timeout_seconds`` is required semantics
 (the verb always passes one — a waiter that can hang forever merely relocates
 the hang it was built to remove). On expiry :func:`wait_for` returns promptly
 with the TIMED_OUT outcome carrying the last observed status, so the caller can
-report "still waiting on: …" and exit with the distinct code.
+report the engine's next-action line — what is still outstanding — and exit with
+the distinct code.
 
 Observability (ADR-0032): the loop emits ``wait.started`` at entry, one
 ``wait.state_changed`` per poll tick where the observed state moved (plus the
@@ -216,7 +217,7 @@ def wait_for(
             events.emit(
                 logger,
                 "wait.timed_out",
-                "pr#%s wait timed out after %d poll(s) (%.0fs) — still waiting on: %s",
+                "pr#%s wait timed out after %d poll(s) (%.0fs) — %s",
                 pr,
                 ticks,
                 waited,

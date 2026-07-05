@@ -171,7 +171,11 @@ def test_timeout_is_the_distinct_exit_code_with_a_state_report(
     assert rc == wait_verb.EXIT_TIMEOUT == 3
     out = capsys.readouterr().out
     assert "timed out" in out
-    assert "still waiting on: waiting on: copilot re-review" in out
+    # The headline carries the engine's next-action line verbatim as the state
+    # report — no "still waiting on:" prefix duplicating next_action's own
+    # "waiting on …" lead.
+    assert "— waiting on: copilot re-review" in out
+    assert "waiting on: waiting on:" not in out
 
 
 def test_progress_lines_go_to_stderr_on_state_change(patched_wait, monkeypatch, capsys):
