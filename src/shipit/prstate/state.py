@@ -70,6 +70,7 @@ the gate yields to the mechanical stop.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -603,8 +604,8 @@ def _evaluate(
     #              UNSTABLE is a transient ready_for_review re-queue lag and goes
     #              READY, deferring to the authoritative rollup (release#715).
     # An UNKNOWN / null merge state means GitHub is still computing — re-poll
-    # (that loop is `release-core pr wait`'s job: gather()+evaluate() until a
-    # terminal state), never flip on it. We do NOT special-case approval-pending
+    # (that loop is `shipit pr wait`'s job, ADR-0034: gather()+evaluate() until
+    # a terminal state), never flip on it. We do NOT special-case approval-pending
     # because this fleet requires 0 approving reviews — a reviewed + green PR
     # reaches CLEAN without a human, so a non-CLEAN computed state is always a
     # genuine block, not a waiting-on-the-human handoff point.
@@ -718,6 +719,33 @@ def _evaluate(
         "check or branch-protection rule is unsatisfied; resolve before this can be Ready"
     )
     return status
+
+
+def reviews_in(status: TaskStatus, required_names: Sequence[str]) -> bool:
+    """True iff the latest round's reviews have all LANDED — no required
+    reviewer still holds the PR.
+
+    The pure predicate behind `pr wait --until reviews-in` (ADR-0034): the
+    moment an addressing agent becomes dispatchable. It reads the SAME holding
+    vocabulary the engine evaluates with (`_HOLDS` over the normalized funnel
+    states, ADR-0006), so the waiter and the state machine can never disagree
+    on what "still waiting on a reviewer" means: a required reviewer holds
+    while never-requested / requested / in-flight; any recorded terminal
+    outcome — posted OR degraded (failed / empty / timed-out) — settles it.
+
+    Deliberately NOT a `TaskState` check: a red-checks PR with its reviews
+    landed ranks BLOCKED (#352), and a landed round with unclassified findings
+    ranks ADDRESSING behind the CLASSIFY gate (#423) — both are reviews-in.
+    Conversely BLOCKED-on-CI with review requests deferred is NOT. Only the
+    per-reviewer funnel answers this. A required name MISSING from
+    `reviewer_funnel` (a snapshot that never evaluated it) counts as holding —
+    absence of evidence is not a landed review.
+    """
+    return all(
+        name in status.reviewer_funnel
+        and status.reviewer_funnel[name].state not in _HOLDS
+        for name in required_names
+    )
 
 
 def classify_action(pr: int | None, unclassified: int, open_threads: int) -> str:

@@ -176,6 +176,57 @@ def test_round_cap_rejects_non_int_and_non_positive_values(tmp_path):
             load_roster(_write(tmp_path, f"[reviewers]\nround_cap = {bad}\n"))
 
 
+# --- the reserved table-level `poll_interval` policy key (ADR-0034) ----------
+
+
+def test_poll_interval_defaults_to_unset(tmp_path):
+    # Absent → None on the Roster: `pr wait` falls back to its shipped
+    # `wait.POLL_INTERVAL_SECONDS` default (60s).
+    roster = load_roster(_write(tmp_path, "[reviewers]\ncopilot = {}\n"))
+    assert roster.poll_interval is None
+    assert default_roster().poll_interval is None
+
+
+def test_poll_interval_is_table_level_policy_not_a_reviewer_entry(tmp_path):
+    # `poll_interval` rides the `[reviewers]` table but is NOT a reviewer
+    # entry: it lands on Roster.poll_interval and never reaches the
+    # unknown-reviewer validation (which would otherwise reject it loud).
+    root = _write(tmp_path, "[reviewers]\npoll_interval = 30\ncopilot = {}\n")
+    roster = load_roster(root)
+    assert roster.poll_interval == 30
+    assert roster.required_names == ("copilot",)
+
+
+def test_poll_interval_accepts_the_duration_shape(tmp_path):
+    # Same duration vocabulary as the per-reviewer window/timeout options:
+    # `90s` normalizes to whole seconds on the Roster.
+    roster = load_roster(_write(tmp_path, '[reviewers]\npoll_interval = "90s"\n'))
+    assert roster.poll_interval == 90
+
+
+def test_poll_interval_applies_even_with_no_reviewer_entries(tmp_path):
+    # Policy without touching the reviewer set: the shipped default required
+    # set still applies, WITH the configured cadence.
+    roster = load_roster(_write(tmp_path, "[reviewers]\npoll_interval = 15\n"))
+    assert roster.required_names == default_roster().required_names
+    assert roster.poll_interval == 15
+
+
+def test_poll_interval_case_variant_key_fails_loud(tmp_path):
+    # Reserved policy keys are exact-lowercase; a case variant is never a
+    # reviewer name — rejected with the right diagnosis, never silently missed.
+    with pytest.raises(RequiredReviewersConfigError, match="poll_interval"):
+        load_roster(_write(tmp_path, "[reviewers]\nPoll_Interval = 30\n"))
+
+
+def test_poll_interval_rejects_bad_values_loud(tmp_path):
+    # A bad cadence is a loud config error, never a silent default — including
+    # `true` (bool is an int subclass) and a malformed duration string.
+    for bad in ("0", "-5", "true", '"soon"', "2.5"):
+        with pytest.raises(RequiredReviewersConfigError, match="poll_interval"):
+            load_roster(_write(tmp_path, f"[reviewers]\npoll_interval = {bad}\n"))
+
+
 # --- run options (model / instructions / timeout) ride the entry ------------
 
 

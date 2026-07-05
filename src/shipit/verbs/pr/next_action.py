@@ -3,10 +3,11 @@
 The act counterpart to the read-only `pr status`: resolve the PR → gather a
 snapshot → evaluate it → route the lifecycle state through the engine's
 next-action dispatcher (:mod:`shipit.prstate.dispatch`) to the single act,
-perform it, and report what happened plus the resulting status. It is the
-SINGLE-SHOT form of release's looping `wait` — there is NO polling loop here:
-`pr next` takes one safe step and returns; the driver (a human or an outer
-loop) calls it again.
+perform it, and report what happened plus the resulting status. There is NO
+polling loop here: `pr next` takes one safe step and returns. Blocking until
+the next state change is `shipit pr wait`'s job (ADR-0034) — the ONE verb that
+blocks — so the driver parks behind `pr wait`, then calls `pr next` again;
+`pr next` itself stays a pure single-shot read-then-act.
 
 Everything that DECIDES or DOES lives in the engine (CLI01-WS03): the
 dispatcher is a pure decision (state → act); the doing is the engine's
@@ -73,7 +74,8 @@ def cmd(pr: int | None, as_json: bool) -> None:
 
     PR is the number; omitted, it resolves the current branch's PR. Performs at
     most ONE step (request a review / flip draft→ready / report waiting/blocked)
-    — the single-shot form of a wait loop, never a polling loop.
+    and returns — never a polling loop; blocking on the next state change is
+    `shipit pr wait`'s job (ADR-0034).
     """
     raise SystemExit(run(pr, as_json=as_json))
 
