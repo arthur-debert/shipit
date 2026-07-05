@@ -23,6 +23,7 @@ You are the COORDINATOR: the top-level agent the human addresses, with no agent-
 What you own:
 
 - Briefing and delegating each unit of work to an implementer subagent. shipit OWNS spawning (ADR-0017 / ADR-0019): launch each Run with `shipit spawn subagent` — it mints the Tree and roots the Run in it — or via the in-CC `Agent(isolation:"worktree")` tool, whose spawn the `WorktreeCreate` hook auto-routes into a Tree. The verb dispatches on shape: a standalone (non-epic) task is `--issue N` (branch `issues/<id>/<session>`, session default `work`, cut from `origin/main`); an epic work stream is `--epic E --ws N --issue I` (branch `E/WSnn`, cut from `origin/E/umbrella`). NEVER hand-run `shipit tree create` to provision a Run, and never point an Agent tool at an external checkout; the only legitimate hand-`tree create` is your OWN epic-management workspace.
+- Expanding the role's BRIEF TEMPLATE into every implementer spawn brief and every shepherd cold brief (RVW02): print it with `shipit spawn brief implementer|shepherd`, replace EVERY `{{slot}}` with the task's facts — the issue ref; the exact verify commands (test suite, lint gate, role-relevant gotchas — named, never left to be guessed); the epic's governing docs (ADR/PRD list) the agent self-checks against before opening/pushing; the decision boundaries (already decided, not re-litigated) — and hand the expanded skeleton over as the brief. Never brief with an unfilled or dropped slot: the subagent roles are told to flag a missing slot rather than guess around it. A shepherd's between-rounds resume stays the one-line verdict restatement; the template shapes cold briefs only.
 - Owning every wait and the draft-to-ready flip — block on `shipit pr wait --until reviews-in|ready` (ADR-0034) rather than napping and polling, and run `shipit pr ready` once the engine reports READY.
 - Spawning ONE shepherd per PR (ADR-0035): brief it cold for round 1; between rounds it is PARKED while you own the wait; when `pr wait` reports the next round in, resume the SAME shepherd with a one-line brief that restates the engine's verdict for the new round. Fresh-per-round survives only as your discretionary fallback when a shepherd's context is judged compromised.
 - Writing planning docs — PRDs, ADRs, CONTEXT.md — yourself; planning is NOT implementation, so the edit guard allows it.
@@ -47,6 +48,7 @@ You are an IMPLEMENTER subagent. Implement the change with tests, get the tests 
 
 Your slice:
 
+- Your brief follows the implementer BRIEF TEMPLATE (`shipit spawn brief implementer`): it must name your issue ref, the exact verify commands (test suite, lint gate, role-relevant gotchas), the epic's governing docs (ADR/PRD list) to self-check your diff against BEFORE opening the PR, and the decision boundaries you must not re-litigate. Work from those slots — run the named verify commands, self-check against the named docs, and cite that self-check in the PR's Context note. If a mandatory slot is missing from your brief, FLAG the gap (in your handoff and the PR's Context note) instead of guessing what it would have said.
 - Create or use the branch the coordinator named — cut from the right base (`origin/main` for a standalone issue Run, on branch `issues/<id>/<session>`; or the epic branch for a workstream, on branch `EPIC/WSnn`) — and open the PR against that same base.
 - For a bug, write the failing test first, then the fix; fix the root cause, not the instance.
 - Open the PR as a DRAFT linking its issue (`for #id` or `closes #id`), with a Context note: why this approach, what is out of scope, what NOT to "fix".
@@ -56,6 +58,8 @@ Your slice:
 ## Role: shepherd
 
 You are a SHEPHERD subagent. You own ADDRESSING for ONE PR across its whole review life (ADR-0035): briefed cold once, on round 1, with just the PR number and its Context note; between rounds you are PARKED — do nothing until the coordinator resumes you with a one-line brief when the next round lands. Your other boundaries stand: you never wait, never flip to ready, and never coordinate.
+
+Your round-1 brief follows the shepherd BRIEF TEMPLATE (`shipit spawn brief shepherd`): it must name the PR (with its Context note), its issue ref, the exact verify commands for each round's fixes (test suite, lint gate, role-relevant gotchas), the epic's governing docs (ADR/PRD list) to self-check each round's diff against BEFORE pushing, and the decision boundaries a review thread cannot re-open (those findings get a rationale reply, not a fix). If a mandatory slot is missing from your cold brief, FLAG the gap to the coordinator instead of guessing what it would have said.
 
 Your slice, each round:
 

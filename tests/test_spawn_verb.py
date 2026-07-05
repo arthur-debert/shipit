@@ -21,6 +21,7 @@ from click.testing import CliRunner
 from test_spawn_subagent import _PR, bounds
 
 from shipit import gh
+from shipit.harness import prompts
 from shipit.verbs import spawn as spawn_verb
 
 
@@ -39,6 +40,26 @@ def test_spawn_subagent_help_documents_the_verb():
     ):
         assert token in result.output
     assert "Tree" in result.output
+
+
+def test_spawn_brief_prints_the_template_with_every_mandatory_slot():
+    """`shipit spawn brief <role>` is the coordinator's expansion surface (RVW02):
+    it prints the bundled template verbatim, unfilled slots and all — filling is
+    the coordinator's job, so the output must still carry every `{{slot}}`."""
+    for role in prompts.BRIEF_ROLES:
+        result = CliRunner().invoke(spawn_verb.spawn, ["brief", role.value])
+
+        assert result.exit_code == 0
+        for slot in prompts.MANDATORY_BRIEF_SLOTS:
+            assert slot in result.output
+
+
+def test_spawn_brief_refuses_a_role_without_a_template():
+    """The ROLE argument is a click.Choice over BRIEF_ROLES — a role with no
+    template (reviewer, explorer, coordinator) is a usage error, exit 2."""
+    result = CliRunner().invoke(spawn_verb.spawn, ["brief", "explorer"])
+
+    assert result.exit_code == 2
 
 
 def test_run_renders_the_byte_stable_spawned_block(tmp_path, capsys):
