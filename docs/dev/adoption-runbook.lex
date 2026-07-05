@@ -31,7 +31,7 @@ paraphrase.
     refusal is the only surviving provisioning guard (Tree provisioning mutates
     nothing managed under ADR-0033).
 
-    Bootstrap — the ONE `uv tool` install with an in-repo role:
+    Bootstrap — the ONE uv-tool install with an in-repo role:
 
         uv tool install --from git+https://github.com/arthur-debert/shipit shipit
 

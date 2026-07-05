@@ -10,7 +10,7 @@ A consumer repo pins the exact shipit it runs — the decision record is [ADR-00
 
 Inside versus outside is the boundary. Everything INSIDE a Tree rides `bin/shipit`, hence the repo's pin: hooks, lint, `pr next`, a Run's verbs. A coordinator orchestrating from OUTSIDE — `tree create`, launch, PR reads — runs its own (possibly newer) build; a newer shipit reaches a consumer only through a reconcile PR that bumps the pin, never in place. A repo with no pin fails LOUD toward the bootstrap (`bin/shipit` exits 127); that pinless refusal is the only surviving provisioning guard (Tree provisioning mutates nothing managed under ADR-0033).
 
-**Bootstrap — the ONE \`uv tool\` install with an in-repo role**
+**Bootstrap — the ONE uv-tool install with an in-repo role**
 
 ```sh
 
