@@ -214,26 +214,31 @@ def _activate(
     """Run the activation boundary, absorbing failure into a ``(ok, detail)`` outcome.
 
     A transport failure from the runner branches on the cause so a timeout or
-    other OS error is not mislabelled as "install lefthook". Activation now runs
+    other OS error is not mislabelled as a missing binary. Activation now runs
     THROUGH the consumer's pixi lint env (#478, :func:`_activate_hooks`), so the
-    missing-binary case is ``pixi`` absent (a nonzero rc from a broken lint env
-    is a normal ``check=False`` result, not this transport error). ``lefthook
-    install`` is the canonical activation in BOTH repos, so that is the recovery
-    the operator ends at once the runtime is present.
+    missing-binary case is ``pixi`` absent (``pixi`` is ``argv[0]`` — a nonzero
+    rc from a broken lint env is a normal ``check=False`` result, not this
+    transport error). The recovery the operator ends at is therefore the SAME
+    pixi-routed command activation itself runs —
+    ``pixi run -e lint lefthook install`` — never a bare ``lefthook install``,
+    which would fail where only pixi is installed or recreate the
+    installer-baked shim path #478 removes.
     """
     try:
         activation = activate_hooks(root)
     except execrun.ExecError as exc:
         if exc.cause == execrun.CAUSE_MISSING_BINARY:
             detail = (
-                f"activation runtime not found on PATH — ensure pixi (and the "
-                f"managed lint env's {LEFTHOOK_BINARY}) is available, then "
-                f"`lefthook install` to activate the checks"
+                f"pixi not found on PATH — activation runs {LEFTHOOK_BINARY} "
+                f"through the managed lint env, so pixi must be installed; "
+                f"then `pixi run -e lint {LEFTHOOK_BINARY} install` to "
+                f"activate the checks"
             )
         else:
             detail = (
-                f"{LEFTHOOK_BINARY}: could not run ({exc}) — resolve the "
-                f"failure above, then `lefthook install` to activate the checks"
+                f"activation could not run ({exc}) — resolve the failure "
+                f"above, then `pixi run -e lint {LEFTHOOK_BINARY} install` to "
+                f"activate the checks"
             )
         return False, detail
     if activation.ok:

@@ -2041,17 +2041,21 @@ def test_install_degrades_but_succeeds_when_lefthook_missing(tmp_path, rec):
     assert result.hooks_activated is False
     assert "### Checks activated locally" not in rec.pr_body
     assert "local activation skipped" in rec.pr_body
-    # Points at the canonical recovery, which works in a consumer repo too.
+    # Names the actually-missing binary (pixi, since activation runs argv[0]=pixi)
+    # and points at the SAME pixi-routed recovery activation itself runs — never a
+    # bare `lefthook install` (#478: it would fail with no global lefthook, or
+    # recreate the installer-baked shim path this PR removes).
     warning = verb.format_result_warnings(result)
     assert "could not activate git hooks" in warning
-    assert "not found on PATH" in warning
-    assert "lefthook install` to activate the checks" in warning
+    assert "pixi not found on PATH" in warning
+    assert "pixi run -e lint lefthook install` to activate the checks" in warning
 
 
 def test_install_activation_timeout_does_not_claim_missing_binary(tmp_path, rec):
     # A NON-missing-binary transport failure (e.g. a timeout) must not be
-    # mislabelled "not found on PATH": the detail branches on exc.cause and
-    # points at resolving the failure, still ending in the canonical recovery.
+    # mislabelled "not found on PATH" NOR pinned on lefthook (the failing runtime
+    # is pixi): the detail branches on exc.cause, stays binary-neutral, and still
+    # ends in the pixi-routed recovery activation itself runs.
     def boom(root):
         raise execrun.ExecError(
             ["lefthook", "install"], rc=None, cause=execrun.CAUSE_TIMEOUT
@@ -2064,7 +2068,7 @@ def test_install_activation_timeout_does_not_claim_missing_binary(tmp_path, rec)
     assert "could not activate git hooks" in warning
     assert "not found on PATH" not in warning
     assert "could not run" in warning
-    assert "lefthook install` to activate the checks" in warning
+    assert "pixi run -e lint lefthook install` to activate the checks" in warning
 
 
 def test_activate_hooks_boundary_runs_lefthook_through_consumer_lint_env(
