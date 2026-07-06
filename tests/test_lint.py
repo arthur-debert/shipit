@@ -1052,3 +1052,129 @@ def test_malformed_shipit_toml_fails_clean_not_traceback(tmp_path, capsys):
     err = capsys.readouterr().err
     assert err.startswith("error:")
     assert "list of glob strings" in err
+
+
+# --------------------------------------------------------------------------
+# prettier plugin-load fail-open (#498)
+# --------------------------------------------------------------------------
+
+
+def _prettier_output(rc, output):
+    """A run_tool that returns ``rc`` + ``output`` (on stderr) for prettier and a
+    clean 0 for everything else — to drive the orchestrator's fail-open branch
+    without a real prettier."""
+
+    def run_tool(binary, args, cwd):
+        if binary == "prettier":
+            return execrun.ExecResult(
+                argv=(binary, *args), rc=rc, stdout="", stderr=output, duration_ms=1
+            )
+        return execrun.ExecResult(
+            argv=(binary, *args), rc=0, stdout="", stderr="", duration_ms=1
+        )
+
+    return run_tool
+
+
+def test_is_prettier_plugin_load_failure_matches_the_resolver_class():
+    # The Node ESM/CJS resolver abort a .prettierrc plugin absent from
+    # node_modules produces — package OR module phrasing, paired with the
+    # `imported from` discriminator (real prettier 3.x output, #498).
+    pkg = (
+        "[error] Cannot find package 'prettier-plugin-svelte' imported from /x/noop.js"
+    )
+    mod = "[error] Cannot find module 'prettier-plugin-tailwindcss' imported from /x/noop.js"
+    assert lint.is_prettier_plugin_load_failure("prettier", 1, pkg)
+    assert lint.is_prettier_plugin_load_failure("prettier", 1, mod)
+
+
+def test_is_prettier_plugin_load_failure_never_swallows_a_real_failure():
+    # The critical #498 guardrail: prettier's OWN formatting verdict carries no
+    # `imported from`, so a genuinely dirty JSON must NOT match (else it would
+    # fail open and a broken file would pass).
+    dirty = "[warn] data.json\n[warn] Code style issues found in the above file."
+    assert not lint.is_prettier_plugin_load_failure("prettier", 1, dirty)
+    # A clean run (rc 0) is never a plugin-load failure.
+    assert not lint.is_prettier_plugin_load_failure("prettier", 0, "")
+    # The carve-out is prettier-only — the same phrase from another tool hard-fails.
+    other = "Cannot find package 'x' imported from y"
+    assert not lint.is_prettier_plugin_load_failure("markdownlint", 1, other)
+    # A resolver phrase WITHOUT `imported from` (a bare require stack) does not
+    # match either — the pairing keeps the match tight.
+    assert not lint.is_prettier_plugin_load_failure(
+        "prettier", 1, "Cannot find module 'x'\nRequire stack: ..."
+    )
+
+
+def test_prettier_plugin_load_leg_fails_open(tmp_path, capsys):
+    # Orchestrator wiring: prettier exits nonzero with the resolver abort → the
+    # JSON leg passes (fail open) and the reason is printed under the `ok` mark.
+    err = (
+        "[error] Cannot find package 'prettier-plugin-svelte' imported from /x/noop.js"
+    )
+    rc = lint.run(
+        str(tmp_path),
+        discover=_fake_discover(["data.json"]),
+        run_tool=_prettier_output(1, err),
+        tracks_root_editorconfig=lambda root: True,
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "LINT: OK" in out
+    assert "json:prettier" not in out  # never listed among the failures
+    assert "not installed" in out  # the skip reason IS surfaced, not silent
+    assert "ok   json" in out
+
+
+def test_prettier_dirty_json_still_fails_in_orchestrator(tmp_path, capsys):
+    # The fail-open carve-out must NOT broaden: prettier's own dirty-file warning
+    # (no `imported from`) still reddens the leg.
+    dirty = "[warn] data.json\n[warn] Code style issues found in the above file."
+    rc = lint.run(
+        str(tmp_path),
+        discover=_fake_discover(["data.json"]),
+        run_tool=_prettier_output(1, dirty),
+        tracks_root_editorconfig=lambda root: True,
+    )
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "LINT: FAILED" in out
+    assert "json:prettier" in out
+
+
+@pytest.mark.skipif(shutil.which("prettier") is None, reason="prettier not on PATH")
+def test_prettier_missing_plugin_fixture_fails_open_real(tmp_path):
+    """Acceptance (#498), leg (a): a fixture whose `.prettierrc` names an ABSENT
+    plugin — the svelte/tailwind shape — linted WITHOUT node_modules aborts real
+    prettier on LOAD. The JSON leg FAILS OPEN (verdict 0) instead of the false
+    failure the raw nonzero exit would produce.
+
+    Runs the REAL prettier (pixi-provisioned), mirroring the real-shfmt pin test.
+    The plugin is named to be definitely absent, so the abort is deterministic and
+    does not depend on any real plugin being un-installed.
+    """
+    (tmp_path / ".prettierrc").write_text(
+        '{\n  "plugins": ["prettier-plugin-absent-498"]\n}\n'
+    )
+    (tmp_path / "data.json").write_text('{ "a": 1 }\n')
+    rc = lint.run(
+        str(tmp_path),
+        discover=_fake_discover(["data.json"]),
+        tracks_root_editorconfig=lambda root: True,
+    )
+    assert rc == 0
+
+
+@pytest.mark.skipif(shutil.which("prettier") is None, reason="prettier not on PATH")
+def test_prettier_dirty_json_still_fails_real(tmp_path):
+    """Acceptance (#498), leg (b): with prettier able to run (no missing plugin),
+    a genuinely dirty JSON still FAILS — the carve-out is scoped to the
+    plugin-load abort, never a real format verdict. Real prettier, no node_modules.
+    """
+    (tmp_path / "data.json").write_text('{"a":      1}\n')  # bad spacing → dirty
+    rc = lint.run(
+        str(tmp_path),
+        discover=_fake_discover(["data.json"]),
+        tracks_root_editorconfig=lambda root: True,
+    )
+    assert rc == 1
