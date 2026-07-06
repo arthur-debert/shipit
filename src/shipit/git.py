@@ -687,7 +687,7 @@ def clone_dissociated(url: str, dest: str, *, reference: str) -> None:
     retried ONCE without ``--reference`` (and therefore without
     ``--dissociate`` — a full clone is already independent). The retry trades
     the near-instant borrow for a full transfer, so the degradation is
-    narrated at WARNING with the reference path; any other failure — and a
+    narrated at WARNING with the donor path; any other failure — and a
     failure of the retry itself — propagates untouched. This one seam keeps
     BOTH consumers (write-Tree ``tree.create`` and read-only ``tree.readonly``)
     working without having to suppress every commit-graph writer in every
@@ -712,8 +712,8 @@ def clone_dissociated(url: str, dest: str, *, reference: str) -> None:
         if not _is_poisoned_reference_failure(err):
             raise
         logger.warning(
-            "reference clone of %s failed at clone-time checkout (reference %s "
-            "is a poisoned donor — commit-graph chain, #353); retrying once as "
+            "reference clone of %s failed at clone-time checkout (donor %s "
+            "is poisoned — commit-graph chain, #353); retrying once as "
             "a full clone without --reference",
             url,
             donor,
