@@ -597,7 +597,9 @@ def test_local_request_surfaces_reviewauth_hint_without_traceback_spray(
     msg = str(excinfo.value)
     assert "pixi run -e review" in msg
     assert "review` extra" in msg
-    assert isinstance(excinfo.value.__cause__, ReviewAuthError)
+    # `from None` severs the chain: the hint already rode into the message above,
+    # so there is no `__cause__` left to spray a traceback for on this EXPECTED path.
+    assert excinfo.value.__cause__ is None
     # No ERROR-level record carrying a traceback (`exc_info`) escaped for this
     # KNOWN case — the glassbox spray is reserved for genuinely-unexpected crashes.
     assert not [

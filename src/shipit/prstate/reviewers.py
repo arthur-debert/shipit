@@ -624,9 +624,13 @@ class _LocalReviewAdapter(ReviewerAdapter):
                 pr.number,
                 extra={"reviewer": self.display_name, "pr": pr.number},
             )
+            # `from None` (not `from exc`): the install hint already rides into the
+            # message via `{exc}`, so severing the chain loses nothing the operator
+            # needs while making the no-traceback contract airtight — an uncaught or
+            # downstream-logged raise can never spray the `ModuleNotFoundError` cause.
             raise PrStateError(
                 f"{self.funnel_reviewer_name()} review failed on #{pr.number}: {exc}"
-            ) from exc
+            ) from None
         except Exception as exc:
             # A propagating failure (glassbox spray): the request act died before
             # the review could even detach — record it at ERROR with the exception
