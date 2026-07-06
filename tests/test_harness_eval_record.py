@@ -133,6 +133,88 @@ def test_unknown_subagent_role_attributes_to_worker_not_coordinator():
     assert record["gen_ai.agent.name"] == "implementer"
 
 
+def test_spawned_role_overrides_the_would_be_coordinator_label():
+    # #490: a headless `shipit spawn subagent --role implementer` Run is its own
+    # top-level session (is_coordinator=True), but it is really the implementer — the
+    # launch-context role must override the coordinator label.
+    record = build(
+        metrics={},
+        meta=None,
+        variant=None,
+        commit="c",
+        timestamp="t",
+        is_coordinator=True,
+        spawned_role="implementer",
+    )
+    assert record["gen_ai.agent.name"] == "implementer"
+    shepherd = build(
+        metrics={},
+        meta=None,
+        variant=None,
+        commit="c",
+        timestamp="t",
+        is_coordinator=True,
+        spawned_role="shepherd",
+    )
+    assert shepherd["gen_ai.agent.name"] == "shepherd"
+
+
+def test_absent_spawned_role_leaves_the_coordinator_label_unchanged():
+    # The genuine interactive coordinator carries no SHIPIT_LOG_CTX_ROLE — a
+    # None/blank spawned_role must leave the coordinator label exactly as before.
+    for spawned in (None, "", "   "):
+        record = build(
+            metrics={},
+            meta=None,
+            variant=None,
+            commit="c",
+            timestamp="t",
+            is_coordinator=True,
+            spawned_role=spawned,
+        )
+        assert record["gen_ai.agent.name"] == "coordinator"
+
+
+def test_spawned_role_is_normalized_and_unknown_falls_back_to_worker():
+    # Case/whitespace normalize like role_of_meta, and an unknown non-blank role
+    # attributes to the generic worker (implementer), not the coordinator.
+    padded = build(
+        metrics={},
+        meta=None,
+        variant=None,
+        commit="c",
+        timestamp="t",
+        is_coordinator=True,
+        spawned_role="  Implementer  ",
+    )
+    assert padded["gen_ai.agent.name"] == "implementer"
+    unknown = build(
+        metrics={},
+        meta=None,
+        variant=None,
+        commit="c",
+        timestamp="t",
+        is_coordinator=True,
+        spawned_role="some-future-role",
+    )
+    assert unknown["gen_ai.agent.name"] == "implementer"
+
+
+def test_spawned_role_never_touches_a_subagent_record():
+    # A subagent (is_coordinator=False) resolves from its own meta agentType; a stray
+    # spawned_role (an inherited ambient SHIPIT_LOG_CTX_ROLE) must NOT override it.
+    record = build(
+        metrics={},
+        meta={"agentType": "reviewer"},
+        variant=None,
+        commit="c",
+        timestamp="t",
+        is_coordinator=False,
+        spawned_role="implementer",
+    )
+    assert record["gen_ai.agent.name"] == "reviewer"
+
+
 def test_variant_is_stamped_verbatim():
     # WS01 passes None; WS03's resolver fills it — build() stamps whatever it is given.
     placeholder = build(
