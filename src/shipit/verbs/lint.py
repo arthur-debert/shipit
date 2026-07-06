@@ -353,7 +353,13 @@ SHELL = Lang(
         # own 4-space `[*.sh]` house style (and every fleet repo's) to tabs — a
         # shell-style normalization owned by WS06 (#519), not config definition. See
         # the paired prettier `--no-editorconfig` note above; the gate stays hermetic
-        # meanwhile (env scrub + `root = true` close the ancestor leak).
+        # meanwhile — the env scrub kills `~/.editorconfig`, and when the pin is gated
+        # off (the repo tracks its own root `.editorconfig`, `tracks_editorconfig`)
+        # that tracked config normally carries `root = true` and stops the walk. KNOWN
+        # GAP: `tracks_editorconfig` keys on the root file's PRESENCE, not its
+        # `root = true` content, so a tracked non-`root = true` `.editorconfig` can
+        # still let shfmt walk up into an ancestor — tightening the pin-disable to
+        # require `root = true` is a fast-follow under epic #513.
         Tool("shfmt", ("-d",), fix=("-w",), editorconfig_pin=("-i", "0")),
     ),
 )
@@ -383,8 +389,12 @@ JSON = Lang(
     # flipping the pin on unconditionally forces reformatting shipit's shell + every
     # fleet repo's editorconfig, which is fleet debt-clear work owned by WS06 (#519),
     # not config-definition work. The gate stays hermetic meanwhile: the env scrub
-    # kills `~/.editorconfig`, and a tracked `root = true` .editorconfig stops the
-    # ancestor walk — so there is no open leak, only a deferred style unification.
+    # kills `~/.editorconfig`, and when the pin is gated off (the repo tracks its own
+    # root `.editorconfig`, `tracks_editorconfig`) that tracked config normally
+    # carries `root = true` and stops the ancestor walk. KNOWN GAP: the pin-disable
+    # keys on the root file's PRESENCE, not its `root = true` content, so a tracked
+    # non-`root = true` `.editorconfig` can still permit an ancestor walk — tightening
+    # `tracks_editorconfig` to require `root = true` is a fast-follow under epic #513.
     tools=(
         Tool(
             "prettier",
