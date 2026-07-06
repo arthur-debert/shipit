@@ -71,6 +71,36 @@ PIXI_ABSENCE_GUARD = (
 )
 
 
+def managed_cc_hook_command(phase: str) -> str:
+    """The exact managed ``.claude/settings.json`` hook command for ``phase`` (#491).
+
+    SINGLE source of the expected string — the install and hook tests assert the
+    packaged data files and shipit's own dogfood settings carry it, so a drift in
+    the product's hook command shows up in exactly one place here.
+
+    Two properties this string encodes (#491):
+
+    - **No ``pixi run`` wrap.** ``./bin/shipit`` is the pinned, pixi-independent
+      launcher (ADR-0033), so the ``hook`` subcommands ride the pin directly — the
+      old ``pixi run`` prefix added a hard pixi dependency and startup cost for
+      nothing (contrast the lefthook ``lint`` legs, which need ``-e lint`` for the
+      TOOLCHAIN).
+    - **A launcher-presence fail-open guard**, symmetric with the #482 lefthook
+      guard: after ``cd``-ing to the project dir, the hook skips (note + ``exit
+      0``) when the managed ``./bin/shipit`` launcher is not present/executable —
+      so a Claude session in a checkout without a provisioned launcher is not
+      disrupted. Where the launcher IS present it runs, and its real ``hook``
+      exit code propagates unchanged: fail-open is for a runtime that is genuinely
+      absent, never for a hook that ran and errored.
+    """
+    return (
+        'cd "$CLAUDE_PROJECT_DIR" || exit 0; test -x ./bin/shipit || { echo '
+        '"shipit: bin/shipit launcher not present or executable here — skipping '
+        "this managed hook (run 'shipit install' to (re)provision it).\"; exit 0; "
+        f"}}; ./bin/shipit hook {phase}"
+    )
+
+
 @pytest.fixture
 def context():
     """Return the loader so a test can pick its scenario: `context('name')`."""

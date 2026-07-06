@@ -17,6 +17,7 @@ import json
 from pathlib import Path
 
 import pytest
+from conftest import managed_cc_hook_command
 
 from shipit import git
 from shipit.execrun import ExecError
@@ -250,11 +251,10 @@ def test_repo_settings_wire_the_hook():
     )
     events = settings["hooks"]["WorktreeRemove"]
     commands = [h["command"] for entry in events for h in entry["hooks"]]
-    # Rides the PINNED launcher `./bin/shipit` resolved via the harness project
-    # dir (#481, ADR-0033), not a bare PATH `shipit`. The command `cd`s into
-    # `$CLAUDE_PROJECT_DIR` first so both the relative launcher and pixi's manifest
-    # resolution are anchored to the project even when the hook runs from a foreign CWD.
-    assert (
-        'cd "$CLAUDE_PROJECT_DIR" && pixi run ./bin/shipit hook worktreeremove'
-        in commands
-    )
+    # Rides the PINNED launcher `./bin/shipit` DIRECTLY (#481/#491, ADR-0033), not
+    # a bare PATH `shipit` and no `pixi run` wrap (the launcher is pixi-independent).
+    # The command `cd`s into `$CLAUDE_PROJECT_DIR` first so the relative launcher
+    # resolves even when the hook runs from a foreign CWD, then a launcher-presence
+    # guard fails open when the launcher is absent (#491).
+    assert managed_cc_hook_command("worktreeremove") in commands
+    assert all("pixi run" not in c for c in commands)
