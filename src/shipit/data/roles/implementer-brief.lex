@@ -9,6 +9,16 @@ Run as its brief. Every slot is MANDATORY — never brief a Run with an unfilled
 or dropped slot; the implementer role prompt tells the Run to flag a missing
 slot rather than guess around it.
 
+Scope — a coordinator affordance, not a headless requirement. The headless
+issue-spawn path (`shipit spawn subagent --issue N`, no coordinator in the loop)
+deliberately does NOT inject this template: it builds the Run's task from the
+issue number and relies on the role prompt + the issue body
+(`gh issue view N`) + this template's own DEFAULT verify commands. The
+evidence (RVW02-WS05, PR 466[https://github.com/arthur-debert/shipit/pull/466]) shows these already support a write Run
+with zero verify-command guessing. The slot-fill flow below is the coordinator-driven
+`spawn brief` path only; injecting a blank template into a headless child that
+has no coordinator to fill it would be ceremony without signal.
+
 Brief skeleton — fill the slots, hand over everything below:
 
 - Issue: {{issue}} — the ONE issue this Run implements; the draft PR body links it (`for #N` / `closes #N`).
