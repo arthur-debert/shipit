@@ -115,6 +115,41 @@ def test_route_skips_lex_projections():
 
 
 # --------------------------------------------------------------------------
+# The consumer-owned lint-ignore seam (#484) — pure filtering
+# --------------------------------------------------------------------------
+
+
+def test_path_ignored_gitignore_style_globs():
+    # ** matches any run of segments; * does NOT cross /.
+    assert lint.path_ignored("tests/fixtures/a.md", ["tests/fixtures/**"])
+    assert lint.path_ignored("tests/fixtures/sub/b.md", ["tests/fixtures/**"])
+    assert lint.path_ignored("CHANGELOG.md", ["CHANGELOG.md"])
+    assert lint.path_ignored("docs/CHANGELOG.md", ["**/CHANGELOG.md"])
+    assert not lint.path_ignored("tests/fixtures/sub/b.md", ["tests/fixtures/*"])
+    assert not lint.path_ignored("docs/CHANGELOG.md", ["CHANGELOG.md"])
+    assert not lint.path_ignored("src/x.py", ["tests/fixtures/**"])
+
+
+def test_path_ignored_empty_patterns_never_match():
+    assert not lint.path_ignored("anything.md", [])
+
+
+def test_path_ignored_bad_glob_is_a_no_match_not_a_crash():
+    # A malformed pattern narrows nothing rather than swallowing the gate.
+    assert not lint.path_ignored("a.md", ["["])
+
+
+def test_drop_ignored_removes_matches_order_preserved():
+    files = ["src/x.py", "tests/fixtures/a.md", "README.md", "tests/fixtures/b.txt"]
+    assert lint.drop_ignored(files, ["tests/fixtures/**"]) == ["src/x.py", "README.md"]
+
+
+def test_drop_ignored_no_patterns_is_identity():
+    files = ["a.py", "b.md"]
+    assert lint.drop_ignored(files, []) is files
+
+
+# --------------------------------------------------------------------------
 # The registry / Tool.argv
 # --------------------------------------------------------------------------
 
@@ -419,3 +454,86 @@ def test_shell_routed_by_shebang_runs_shellcheck(tmp_path, capsys):
     assert rc == 0
     assert any(binary == "shellcheck" for binary, _ in rec.calls)
     assert any(binary == "shfmt" for binary, _ in rec.calls)
+
+
+# --------------------------------------------------------------------------
+# The consumer-owned lint-ignore seam (#484) — end-to-end through run()
+# --------------------------------------------------------------------------
+
+
+def _fail_when_file_present(dirty_binary, dirty_file):
+    """A run_tool that fails ``dirty_binary`` iff ``dirty_file`` reaches its argv,
+    and records every call — the deterministic stand-in for a lint-dirty file."""
+    calls = []
+
+    def run_tool(binary, args, cwd):
+        calls.append((binary, tuple(args)))
+        rc = 1 if binary == dirty_binary and dirty_file in args else 0
+        return execrun.ExecResult(
+            argv=(binary, *args), rc=rc, stdout="", stderr="dirty", duration_ms=1
+        )
+
+    run_tool.calls = calls
+    return run_tool
+
+
+def test_lint_ignore_excludes_dirty_fixture_gate_green(tmp_path, capsys):
+    # A deliberately-lint-dirty fixture the consumer OWNS is listed in
+    # `.shipit.toml [lint].ignore`, so it never reaches markdownlint and the gate
+    # is GREEN — the sanctioned reconcile-safe seam (#484), no managed-file edit.
+    (tmp_path / ".shipit.toml").write_text('[lint]\nignore = ["tests/fixtures/**"]\n')
+    run_tool = _fail_when_file_present("markdownlint", "tests/fixtures/ref.md")
+    rc = lint.run(
+        str(tmp_path),
+        discover=_fake_discover(["README.md", "tests/fixtures/ref.md"]),
+        run_tool=run_tool,
+    )
+    assert rc == 0
+    assert "LINT: OK" in capsys.readouterr().out
+    # markdownlint ran on the un-ignored file only; the fixture never reached it.
+    md_batches = [args for binary, args in run_tool.calls if binary == "markdownlint"]
+    assert md_batches == [("README.md",)]
+
+
+def test_same_fixture_un_ignored_gate_red(tmp_path, capsys):
+    # The control: WITHOUT the ignore entry, the same dirty fixture reaches
+    # markdownlint and reddens the gate — proving the seam is what turned it green,
+    # and that the gate is NOT weakened for non-ignored paths.
+    (tmp_path / ".shipit.toml").write_text('[lint]\nignore = ["other/**"]\n')
+    run_tool = _fail_when_file_present("markdownlint", "tests/fixtures/ref.md")
+    rc = lint.run(
+        str(tmp_path),
+        discover=_fake_discover(["README.md", "tests/fixtures/ref.md"]),
+        run_tool=run_tool,
+    )
+    assert rc == 1
+    assert "LINT: FAILED" in capsys.readouterr().out
+
+
+def test_lint_ignore_is_lang_agnostic(tmp_path, capsys):
+    # One glob drops the path from EVERY leg, not just markdownlint (the
+    # release-core-managed-script / generated-file cases in the #484 thread): an
+    # ignored .py never reaches ruff either.
+    (tmp_path / ".shipit.toml").write_text('[lint]\nignore = ["vendor/**"]\n')
+    rec = _Recorder()
+    rc = lint.run(
+        str(tmp_path),
+        discover=_fake_discover(["src/app.py", "vendor/synced.py"]),
+        run_tool=rec,
+    )
+    assert rc == 0
+    ruff_batches = [args for binary, args in rec.calls if binary == "ruff"]
+    assert ruff_batches and all("vendor/synced.py" not in args for args in ruff_batches)
+    assert all("src/app.py" in args for args in ruff_batches)
+
+
+def test_no_shipit_toml_means_no_ignore(tmp_path, capsys):
+    # A repo without .shipit.toml lints everything — the seam defaults to empty,
+    # never accidentally suppressing a leg.
+    run_tool = _fail_when_file_present("markdownlint", "tests/fixtures/ref.md")
+    rc = lint.run(
+        str(tmp_path),
+        discover=_fake_discover(["tests/fixtures/ref.md"]),
+        run_tool=run_tool,
+    )
+    assert rc == 1

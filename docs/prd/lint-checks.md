@@ -151,10 +151,44 @@ The questions this PRD originally left open are now resolved and captured in
 - **whole-tree vs staged** — staged-only was deliberately NOT implemented; both
   hooks call `pixi run lint`, which lints the whole tracked tree via
   `git ls-files` (a conscious simplification, not a gap).
-- **path → toolchain map** — built-in by extension (the `LANGS` registry); the
-  optional `[lint]` override was not implemented, so routing is fully zero-config.
+- **path → toolchain map** — built-in by extension (the `LANGS` registry);
+  routing is zero-config. The `[lint]` table now carries ONE thing — the
+  consumer ignore seam below — not a routing override.
 - **consumer pixi.toml integration** — a marker-delimited managed BLOCK carrying
   only the `lint = "shipit lint"` task line (no linter-dependency block).
+
+### The consumer-owned ignore seam (#484)
+
+A shipit-onboarded consumer OWNS some non-prose paths a managed prose linter has
+no business touching: byte-exact test fixtures consumed verbatim by tests
+(markdownlint `--fix` would corrupt them), generated aggregates like a built
+`CHANGELOG.md` (an inline `<!-- markdownlint-disable -->` is clobbered on the
+next regeneration), and vendored / upstream-synced files. markdownlint's only
+path-exclusion seam, `.markdownlintignore`, is a WHOLE-FILE managed unit — a
+consumer path added there is drift the next `shipit install` reconcile reverts.
+
+The sanctioned, reconcile-safe seam is a consumer-owned `[lint].ignore` glob list
+in `.shipit.toml` (the consumer-policy home, alongside `[secrets]` /
+`[reviewers]`):
+
+```toml
+[lint]
+ignore = ["crates/lex-babel/tests/fixtures/**", "CHANGELOG.md"]
+```
+
+`shipit lint` reads it and drops matching paths from the discovered file list
+BEFORE routing, so one glob excludes a path from EVERY leg (markdownlint, shfmt,
+ruff, …) — Lang-agnostic, not per-linter `--ignore` plumbing. Patterns are
+gitignore-style (`pathlib.PurePosixPath.full_match`: `*` does not cross `/`, `**`
+matches any run of segments). The seam is reconcile-safe because `.shipit.toml`
+is consumer policy: `write_manifest` strips only `[shipit]`/`[managed]` and the
+seed-if-absent policy pass only appends its own tables, so a `shipit install`
+NEVER clobbers `[lint]`. The MANAGED `.markdownlintignore` is unchanged and still
+managed (it covers shipit-managed paths); this ADDS a consumer layer beside it,
+it does not edit it. This is distinct from the zero-config lex-projection rule
+(`lex_projections`, #436), which routes a generated `X.md` out automatically when
+its `X.lex` source is tracked — the ignore seam is the explicit escape hatch for
+everything that rule can't infer.
 
 ### Verified by
 

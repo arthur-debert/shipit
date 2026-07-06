@@ -35,9 +35,9 @@ import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
-from .. import execrun, git
+from .. import config, execrun, git
 
 logger = logging.getLogger("shipit.lint")
 
@@ -253,6 +253,36 @@ def lex_projections(paths: list[str]) -> set[str]:
     return {p for p in paths if p.endswith(".md") and p[:-3] + ".lex" in sources}
 
 
+def path_ignored(path: str, patterns: list[str]) -> bool:
+    """Whether ``path`` matches any consumer ``[lint].ignore`` glob. Pure.
+
+    Gitignore-style matching via :meth:`pathlib.PurePosixPath.full_match`: ``*``
+    does not cross ``/``, ``**`` matches any run of segments. A malformed pattern
+    is a no-match, never a crash — a bad glob narrows nothing rather than
+    silently swallowing the gate.
+    """
+    p = PurePosixPath(path)
+    for pattern in patterns:
+        try:
+            if p.full_match(pattern):
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def drop_ignored(paths: list[str], patterns: list[str]) -> list[str]:
+    """``paths`` with every consumer-ignored entry removed, order preserved. Pure.
+
+    Applied to the WHOLE discovered file list before routing (#484), so a single
+    ``[lint].ignore`` glob drops a path from every Lang leg — the seam is
+    Lang-agnostic (markdownlint, shfmt, ruff, …), not per-linter plumbing.
+    """
+    if not patterns:
+        return paths
+    return [p for p in paths if not path_ignored(p, patterns)]
+
+
 def route(
     paths: list[str], shebangs: dict[str, str | None] | None = None
 ) -> list[tuple[Lang, list[str]]]:
@@ -305,6 +335,19 @@ def verdict(runs: list[ToolRun]) -> int:
 
 def _discover(root: Path) -> list[str]:
     return git.ls_files(cwd=str(root))
+
+
+def _ignore_globs(root: Path) -> list[str]:
+    """The consumer ``[lint].ignore`` globs from ``root``'s ``.shipit.toml`` (#484).
+
+    No config, no ``[lint]`` table, or an empty list → ``[]`` (the gate covers
+    everything). This is the ONLY I/O read of the seam; the filtering itself
+    (:func:`drop_ignored`) is pure and unit-tested off this.
+    """
+    cfg_path = root / config.CONFIG_NAME
+    if not cfg_path.is_file():
+        return []
+    return config.load_lint_ignore(config.load(cfg_path))
 
 
 def _shebang(path: Path) -> str | None:
@@ -374,7 +417,11 @@ def run(
     discover = discover or _discover
     run_tool = run_tool or _run_tool
 
-    files = discover(root)
+    # Drop the consumer's own non-prose paths (`.shipit.toml [lint].ignore`,
+    # #484) from the WHOLE file list before routing, so a single glob excludes a
+    # path from every leg. `files` also roots the per-manifest runs below, so
+    # filtering here keeps an ignored manifest out of those too.
+    files = drop_ignored(discover(root), _ignore_globs(root))
     shebangs = {p: _shebang(root / p) for p in files if "." not in _basename(p)}
     routed = route(files, shebangs)
 
