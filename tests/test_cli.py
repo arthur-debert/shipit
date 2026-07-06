@@ -37,6 +37,33 @@ def test_version():
     assert rc == 0
 
 
+def test_version_shows_the_build_sha(capsys, monkeypatch):
+    # ADR-0033: --version must surface the running build's commit so an operator
+    # can tell WHICH build this is — not just the static package version.
+    from shipit import buildid
+    from shipit.identity import Sha
+
+    sha = Sha("a" * 40)
+    monkeypatch.setattr(buildid, "build_sha", lambda: sha)
+    rc = cli.main(["--version"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert sha.value in out
+    assert "0.0.1" in out
+
+
+def test_version_handles_unresolved_build(capsys, monkeypatch):
+    # No install record, no embed, no checkout: say so plainly rather than
+    # crash or print a bare version that "identifies nothing".
+    from shipit import buildid
+
+    monkeypatch.setattr(buildid, "build_sha", lambda: None)
+    rc = cli.main(["--version"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "unknown" in out.lower()
+
+
 def test_help_lists_provision(capsys):
     rc = cli.main(["--help"])
     assert rc == 0

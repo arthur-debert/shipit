@@ -14,7 +14,7 @@ import sys
 
 import click
 
-from . import __version__, events, logcontext
+from . import __version__, buildid, events, logcontext
 from .logsetup import configure_logging, reset_logging
 from .verbs import gh_setup, install, lint, logs, verify_apps
 from .verbs._context import resolve_root_context
@@ -30,6 +30,40 @@ from .verbs.tree import tree as tree_group
 #: twin (ADR-0033) through the LOG01 pipeline like any subsystem logger.
 logger = logging.getLogger("shipit.cli")
 
+#: Shown for the build sha when :func:`shipit.buildid.build_sha` resolves
+#: nothing — no install record, no build-time embed, no source checkout. The
+#: static package version alone "identifies nothing" (ADR-0033), so say so
+#: plainly rather than printing a bare version that pretends to.
+_UNKNOWN_BUILD = "unknown (not a tracked build)"
+
+
+def version_string() -> str:
+    """The ``shipit --version`` line, carrying the running build's commit.
+
+    ``shipit`` releases as a single ``0.0.1`` package version; the load-bearing
+    identity is the git commit of the build actually running (ADR-0033), which
+    :func:`shipit.buildid.build_sha` resolves. Surfacing it here lets an
+    operator answer "WHICH build is this?" — the introspection gap that made
+    ADP01-WS01's stamped-pin investigation guesswork. Degrades to
+    :data:`_UNKNOWN_BUILD` (never raises) when no identity resolves.
+    """
+    sha = buildid.build_sha()
+    build = sha.value if sha is not None else _UNKNOWN_BUILD
+    return f"shipit {__version__} (build {build})"
+
+
+def _print_version(ctx: click.Context, param: click.Parameter, value: bool) -> None:
+    """Eager ``--version`` callback: print :func:`version_string` and exit.
+
+    Hand-rolled instead of ``click.version_option`` so the build sha is resolved
+    ONLY when ``--version`` is passed — never as import-time work on every
+    ordinary invocation.
+    """
+    if not value or ctx.resilient_parsing:
+        return
+    click.echo(version_string())
+    ctx.exit()
+
 
 @click.group(
     help=(
@@ -39,7 +73,14 @@ logger = logging.getLogger("shipit.cli")
     ),
     context_settings={"help_option_names": ["-h", "--help"]},
 )
-@click.version_option(version=__version__, prog_name="shipit")
+@click.option(
+    "--version",
+    is_flag=True,
+    is_eager=True,
+    expose_value=False,
+    callback=_print_version,
+    help="Show the version and running build's commit sha, then exit.",
+)
 @click.option(
     "-v",
     "--verbose",

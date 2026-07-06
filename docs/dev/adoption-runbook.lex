@@ -53,6 +53,24 @@ paraphrase.
     run a repo's checks off a machine-global shipit — the launcher, not PATH,
     chooses the build.
 
+    `uv tool install` records the SOURCE ref (branch or default HEAD) it
+    resolved from and `uv tool upgrade` re-resolves THAT ref forever — so a
+    machine that bootstrapped off an epic branch (e.g. during ADP00 canary
+    work) keeps tracking that branch across every upgrade, and a later install
+    then stamps a pin off stale branch HEAD. Re-pointing the tool needs an
+    explicit `--force` reinstall; a plain `upgrade` will not switch refs.
+
+    Retrack the bootstrap tool onto the default branch before a fleet sweep:
+
+        uv tool install --force --from git+https://github.com/arthur-debert/shipit shipit
+
+    :: sh ::
+
+    Append `@<branch>` to the `git+...` URL to deliberately track a branch
+    (canary work) instead of the default. Since the stamped pin is the build's
+    OWN commit (ADR-0033), `shipit --version` reports the running build's sha —
+    check it after retracking to confirm the tool resolved the ref you intended.
+
     The review extra (local-agent review execution) rides the same bootstrap install:
 
         uv tool install 'shipit[review] @ git+https://github.com/arthur-debert/shipit'
