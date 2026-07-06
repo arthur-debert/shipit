@@ -120,14 +120,32 @@ def test_route_skips_lex_projections():
 
 
 def test_path_ignored_gitignore_style_globs():
-    # ** matches any run of segments; * does NOT cross /.
+    # GENUINE .gitignore semantics (shipit's .treeinclude engine), not the old
+    # anchored full-path glob: ** matches any run of segments, * never crosses /.
     assert lint.path_ignored("tests/fixtures/a.md", ["tests/fixtures/**"])
     assert lint.path_ignored("tests/fixtures/sub/b.md", ["tests/fixtures/**"])
-    assert lint.path_ignored("CHANGELOG.md", ["CHANGELOG.md"])
-    assert lint.path_ignored("docs/CHANGELOG.md", ["**/CHANGELOG.md"])
-    assert not lint.path_ignored("tests/fixtures/sub/b.md", ["tests/fixtures/*"])
-    assert not lint.path_ignored("docs/CHANGELOG.md", ["CHANGELOG.md"])
+    assert lint.path_ignored("tests/a.md", ["tests/*.md"])
+    assert not lint.path_ignored("tests/a/b.md", ["tests/*.md"])  # * stops at /
     assert not lint.path_ignored("src/x.py", ["tests/fixtures/**"])
+
+
+def test_path_ignored_directory_prefix_drops_whole_subtree():
+    # The lex case the old full_match could NOT express: a trailing-slash
+    # DIRECTORY pattern matches everything under it (a built CHANGELOG/ tree).
+    assert lint.path_ignored("CHANGELOG/0.15.0.md", ["CHANGELOG/"])
+    assert lint.path_ignored("CHANGELOG/nested/x.md", ["CHANGELOG/"])
+    assert not lint.path_ignored(
+        "CHANGELOG.md", ["CHANGELOG/"]
+    )  # the dir, not the file
+
+
+def test_path_ignored_floating_vs_anchored():
+    # An unanchored name floats to any depth (real gitignore); a leading / anchors
+    # it to the repo root.
+    assert lint.path_ignored("CHANGELOG.md", ["CHANGELOG.md"])
+    assert lint.path_ignored("docs/CHANGELOG.md", ["CHANGELOG.md"])
+    assert lint.path_ignored("CHANGELOG.md", ["/CHANGELOG.md"])
+    assert not lint.path_ignored("docs/CHANGELOG.md", ["/CHANGELOG.md"])
 
 
 def test_path_ignored_empty_patterns_never_match():
@@ -135,8 +153,11 @@ def test_path_ignored_empty_patterns_never_match():
 
 
 def test_path_ignored_bad_glob_is_a_no_match_not_a_crash():
-    # A malformed pattern narrows nothing rather than swallowing the gate.
+    # A malformed pattern narrows nothing rather than crashing the gate OR
+    # disabling a valid sibling entry.
     assert not lint.path_ignored("a.md", ["["])
+    assert not lint.path_ignored("a.md", ["[z-a]"])  # invalid regex char range
+    assert lint.path_ignored("keep.md", ["[z-a]", "keep.md"])
 
 
 def test_drop_ignored_removes_matches_order_preserved():
@@ -537,3 +558,37 @@ def test_no_shipit_toml_means_no_ignore(tmp_path, capsys):
         run_tool=run_tool,
     )
     assert rc == 1
+
+
+def test_lint_ignore_directory_prefix_drops_generated_subtree(tmp_path, capsys):
+    # The motivating lex case the old full_match could NOT express (#484): a
+    # trailing-slash DIRECTORY pattern excludes a whole built `CHANGELOG/` tree of
+    # generated .md, so a dirty generated file never reddens the gate — and it
+    # takes real gitignore semantics to match `CHANGELOG/` against `CHANGELOG/x.md`.
+    (tmp_path / ".shipit.toml").write_text('[lint]\nignore = ["CHANGELOG/"]\n')
+    run_tool = _fail_when_file_present("markdownlint", "CHANGELOG/0.15.0.md")
+    rc = lint.run(
+        str(tmp_path),
+        discover=_fake_discover(["README.md", "CHANGELOG/0.15.0.md"]),
+        run_tool=run_tool,
+    )
+    assert rc == 0
+    assert "LINT: OK" in capsys.readouterr().out
+    md_batches = [args for binary, args in run_tool.calls if binary == "markdownlint"]
+    assert md_batches == [("README.md",)]
+
+
+def test_malformed_shipit_toml_fails_clean_not_traceback(tmp_path, capsys):
+    # A malformed `[lint].ignore` surfaces as the CLI's uniform `error: …` line +
+    # exit 1 (the cli_errors shell, ADR-0030), NOT a raw ConfigError traceback
+    # escaping mid-gate — the same clean failure every config-reading verb gives.
+    (tmp_path / ".shipit.toml").write_text("[lint]\nignore = 42\n")
+    rc = lint.run(
+        str(tmp_path),
+        discover=_fake_discover(["README.md"]),
+        run_tool=_Recorder(),
+    )
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert err.startswith("error:")
+    assert "list of glob strings" in err

@@ -163,13 +163,17 @@ def load_lint_ignore(cfg: dict) -> list[str]:
 
     The globs are Lang-agnostic: they filter the discovered file list BEFORE
     routing, so one ``ignore`` entry drops a path from every leg (markdownlint,
-    shfmt, ruff, …). Patterns are gitignore-style, matched against the
-    repo-relative path via :meth:`pathlib.PurePosixPath.full_match` — ``*`` does
-    not cross ``/``, ``**`` matches any number of segments (e.g.
-    ``tests/fixtures/**``, ``CHANGELOG.md``, ``**/CHANGELOG.md``).
+    shfmt, ruff, …). Patterns are gitignore-style — the SAME syntax as the
+    ``.markdownlintignore`` this seam replaces, matched by shipit's own
+    ``.treeinclude`` engine (:func:`shipit.verbs.lint.path_ignored`): ``*`` does
+    not cross ``/``, ``**`` matches any run of segments, a trailing-slash pattern
+    matches a directory's whole subtree (``CHANGELOG/`` → every built
+    ``CHANGELOG/*.md``), an unanchored name floats to any depth (``CHANGELOG.md``
+    matches ``docs/CHANGELOG.md`` too) and a leading ``/`` anchors it to the repo
+    root.
 
         [lint]
-        ignore = ["crates/lex-babel/tests/fixtures/**", "CHANGELOG.md"]
+        ignore = ["crates/lex-babel/tests/fixtures/**", "CHANGELOG/", "/CHANGELOG.md"]
     """
     section = cfg.get("lint", {})
     if not isinstance(section, dict):

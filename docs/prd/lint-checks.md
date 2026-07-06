@@ -173,14 +173,19 @@ in `.shipit.toml` (the consumer-policy home, alongside `[secrets]` /
 
 ```toml
 [lint]
-ignore = ["crates/lex-babel/tests/fixtures/**", "CHANGELOG.md"]
+ignore = ["crates/lex-babel/tests/fixtures/**", "CHANGELOG/"]
 ```
 
 `shipit lint` reads it and drops matching paths from the discovered file list
 BEFORE routing, so one glob excludes a path from EVERY leg (markdownlint, shfmt,
 ruff, …) — Lang-agnostic, not per-linter `--ignore` plumbing. Patterns are
-gitignore-style (`pathlib.PurePosixPath.full_match`: `*` does not cross `/`, `**`
-matches any run of segments). The seam is reconcile-safe because `.shipit.toml`
+gitignore-style — the SAME syntax as the `.markdownlintignore` this seam
+replaces, matched by shipit's own `.treeinclude` engine (`tree/include.py`), NOT
+a full-path glob: `*` does not cross `/`, `**` matches any run of segments, a
+trailing-slash pattern drops a directory's whole subtree (`CHANGELOG/` → every
+built `CHANGELOG/*.md`, which lex needs and full-path matching could not express),
+an unanchored name floats to any depth, and a leading `/` anchors to the repo
+root. The seam is reconcile-safe because `.shipit.toml`
 is consumer policy: `write_manifest` strips only `[shipit]`/`[managed]` and the
 seed-if-absent policy pass only appends its own tables, so a `shipit install`
 NEVER clobbers `[lint]`. The MANAGED `.markdownlintignore` is unchanged and still
