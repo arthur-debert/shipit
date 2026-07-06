@@ -373,6 +373,45 @@ def reviewers_scaffold() -> str:
     return f"{_REVIEWERS_SCAFFOLD_HEADER}\n{reviewers_config.default_reviewers_scaffold_body()}"
 
 
+# The default consumer-owned ``[lint].ignore`` globs ``shipit install`` seeds when
+# a repo tracks no ``[lint]`` table (#484). Common generated/assembled paths that
+# are not hand-written prose, so the managed lint gate must not lint them — a
+# freshly-onboarded repo otherwise takes a latent gate failure on its built
+# CHANGELOG or a package lockfile. Gitignore-style globs (the same syntax
+# :func:`load_lint_ignore` documents), matched by shipit's own ``.treeinclude``
+# engine. The consumer OWNS this list and may extend it; it lives in the
+# consumer-policy home, so ``install`` never clobbers it (reconcile-safe #484).
+_LINT_SEED_IGNORE: tuple[str, ...] = (
+    "CHANGELOG.md",
+    "CHANGELOG/**",
+    "package-lock.json",
+    "pnpm-lock.yaml",
+)
+
+# The explanatory comment heading the seeded ``[lint]`` table. Mirrors the other
+# managed comments: it states these are generated/assembled files the gate must
+# not lint AND that the consumer owns the list (install never clobbers [lint]).
+_LINT_SCAFFOLD_HEADER = """\
+# [lint].ignore — paths the managed lint gate must SKIP. Seeded with common
+# generated/assembled files (a built CHANGELOG, package lockfiles) that are not
+# hand-written prose, so a freshly-onboarded repo does not take a latent gate
+# failure on them. Gitignore-style globs. You OWN this list and may extend it —
+# it is reconcile-safe: `shipit install` seeds [lint] only when absent and never
+# clobbers a table you have edited."""
+
+
+def lint_scaffold() -> str:
+    """The ``[lint]`` block ``shipit install`` seeds when a consumer has none.
+
+    The comment header plus the ``ignore`` array of the default generated-path
+    globs (:data:`_LINT_SEED_IGNORE`). Seeds the SAME table the gate already
+    reads (:func:`load_lint_ignore`, #484) — no new schema — so a freshly-onboarded
+    repo excludes its generated files without a hand-edit.
+    """
+    entries = ",\n".join(f'  "{g}"' for g in _LINT_SEED_IGNORE)
+    return f"{_LINT_SCAFFOLD_HEADER}\n[lint]\nignore = [\n{entries},\n]"
+
+
 def _seeded_secret_line(name: str) -> str:
     """One ``[secrets]`` entry mapping ``name`` to its like-named Doppler key."""
     return f'{name} = {{ doppler = "{name}" }}'
@@ -420,6 +459,7 @@ def _plan_seed(text: str, path: str | Path) -> tuple[list[str], str]:
     cfg = _parse_text(text, path)
     secrets = _require_table(cfg, "secrets", path)
     _require_table(cfg, "reviewers", path)  # validate shape; preserved if present
+    _require_table(cfg, "lint", path)  # validate shape; preserved if present
 
     missing = [n for n in seeded_app_secrets() if n not in (secrets or {})]
     seeded: list[str] = []
@@ -435,12 +475,20 @@ def _plan_seed(text: str, path: str | Path) -> tuple[list[str], str]:
     if "reviewers" not in cfg:
         text = _append_lines(text, reviewers_scaffold().splitlines())
         seeded.append("[reviewers]")
+
+    # Seeded ONLY when no [lint] table is tracked — a re-install NOOPs it and a
+    # consumer-edited [lint] is never clobbered (append-only, reconcile-safe #484).
+    if "lint" not in cfg:
+        text = _append_lines(text, lint_scaffold().splitlines())
+        seeded.append("[lint].ignore")
     return seeded, text
 
 
 def plan_policy_seed(path: str | Path) -> list[str]:
     """What seed-if-absent policy ``shipit install`` WOULD add to ``path`` — the
-    missing App-secret mappings and, when its table is absent, ``[reviewers]``.
+    missing App-secret mappings, ``[reviewers]`` when its table is absent, and
+    ``[lint].ignore`` (the default generated-path globs) when no ``[lint]`` table
+    is tracked.
 
     Pure: reads, never writes. An empty list means the policy is already in place,
     so a re-install stays a no-op. Raises :class:`ConfigError` on any shape we
@@ -456,8 +504,9 @@ def apply_policy_seed(path: str | Path) -> list[str]:
 
     Merge-preserving: a present ``[secrets]`` table keeps all its entries and only
     the missing App mappings are inserted under its header; an absent table gets
-    the full :func:`secrets_scaffold`. ``[reviewers]`` is written only when its
-    table is entirely absent — a consumer's own ``[reviewers]`` is never touched.
+    the full :func:`secrets_scaffold`. ``[reviewers]`` and ``[lint]`` are each
+    written only when their table is entirely absent — a consumer's own
+    ``[reviewers]`` or ``[lint]`` is never touched.
     Writes the file only when something is seeded, so an already-seeded config is
     left byte-identical (a clean no-op). Raises identically to
     :func:`plan_policy_seed`, so an install that planned a seed never reaches an
