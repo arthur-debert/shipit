@@ -53,9 +53,12 @@ identical on any machine and in any repo. Two mechanisms, both here, enforce it:
   omitted and the verdict is unchanged (see :meth:`Tool.argv`).
 * **Env scrub** — :func:`_run_tool`, the single exec choke point, runs every
   linter under a :func:`_scrubbed_env` (``os.environ`` minus ``$HOME``, ``XDG_*``,
-  ``*_CONFIG*``, ``SHELLCHECK_OPTS``, ``YAMLLINT_CONFIG_FILE``) passed with
-  ``replace_env=True``, so no user-global config file or tool env var is ever
-  consulted. No new plumbing in :mod:`shipit.execrun` — it already forwards
+  and an explicit allowlist of per-tool config vars — ``SHELLCHECK_OPTS``,
+  ``RUFF_CONFIG``, ``CARGO_HOME``, ``CLIPPY_CONF_DIR``, ``YAMLLINT_CONFIG_FILE``)
+  passed with ``replace_env=True``, so no user-global config file or tool env var
+  is ever consulted. The allowlist is deliberate, not a ``*_CONFIG*`` substring:
+  that would strip ``PKG_CONFIG_PATH`` / ``FONTCONFIG_PATH`` and break cargo/C
+  builds. No new plumbing in :mod:`shipit.execrun` — it already forwards
   ``env`` / ``replace_env`` (the Tree provisioner's mechanism).
 """
 
@@ -184,7 +187,13 @@ class Tool:
         base = self.fix if (fix and self.fix is not None) else self.check
         injected: tuple[str, ...] = ()
         if self.config_inject:
-            if CONFIG_PLACEHOLDER in self.config_inject:
+            # A placeholder can live as its OWN token (`("--config", "{config}")`)
+            # OR as a substring of one (`("--config={config}",)`), so match
+            # per-token, not exact-element (`in` on the tuple) — the exact form
+            # would miss the substring shape and inject the literal `{config}`
+            # (round 1, agy). This only widens support: the exact-token form WS03
+            # uses still matches, and `tok.replace` below rewrites either shape.
+            if any(CONFIG_PLACEHOLDER in tok for tok in self.config_inject):
                 if config_path is not None:
                     injected = tuple(
                         tok.replace(CONFIG_PLACEHOLDER, config_path)
@@ -289,7 +298,7 @@ SHELL = Lang(
     tools=(
         # shellcheck's canonical config is INLINE flags (it has no `--config
         # <file>`; `.shellcheckrc` is ambient discovery the env scrub blocks via
-        # `$HOME`). `--severity=info` is the seed; WS03 (#514/#516) extends this
+        # `$HOME`). `--severity=info` is the seed; WS03 (#516) extends this
         # tuple with the canonical set, so `config_inject` stays empty.
         Tool("shellcheck", ("--severity=info",)),
         # `-i 0` is shfmt's tab default, but PASSING any formatting flag makes
@@ -766,27 +775,53 @@ def _restore(root: Path, snapshot: dict[str, bytes]) -> list[str]:
     return restored
 
 
+#: The tool-specific config env vars the scrub drops, enumerated DELIBERATELY
+#: (round 1, agy): a blanket ``"_CONFIG" in key`` substring was too broad — it
+#: also stripped ``PKG_CONFIG_PATH`` / ``FONTCONFIG_PATH`` (standard build vars),
+#: which can break the cargo/C builds clippy drives. So the config-file/override
+#: vars are listed one by one instead, each a config source for a LANGS tool:
+#:
+#: * ``SHELLCHECK_OPTS``      — shellcheck: injects arbitrary flags
+#: * ``YAMLLINT_CONFIG_FILE`` — yamllint: points at a config file
+#: * ``RUFF_CONFIG``          — ruff: points at a config file
+#: * ``CARGO_HOME``           — cargo/clippy: roots ambient ``config.toml`` discovery
+#: * ``CLIPPY_CONF_DIR``      — clippy: roots ``clippy.toml`` discovery
+#:
+#: ``CARGO_HOME`` / ``CLIPPY_CONF_DIR`` close the Rust leak (round 1, codex):
+#: without them ``cargo clippy`` reads a machine-local ``config.toml`` /
+#: ``clippy.toml`` outside the repo. WS03 (#516) may EXTEND this set as it wires
+#: more canonical configs (a per-tool config env var for a newly-pinned tool).
+_TOOL_CONFIG_ENV_VARS: frozenset[str] = frozenset(
+    {
+        "SHELLCHECK_OPTS",
+        "YAMLLINT_CONFIG_FILE",
+        "RUFF_CONFIG",
+        "CARGO_HOME",
+        "CLIPPY_CONF_DIR",
+    }
+)
+
+
 #: Environment variables scrubbed before every linter subprocess (ADR-0037,
 #: #514): the ambient sources through which a user-global config file or a
 #: tool-specific override would otherwise leak into the verdict. ``$HOME`` roots
 #: ``~/.editorconfig`` / ``~/.shellcheckrc`` / ``~/.config`` discovery; ``XDG_*``
-#: relocates that config dir; any ``*_CONFIG*`` var (``YAMLLINT_CONFIG_FILE``,
-#: ``RUFF_CONFIG``, …) points a tool straight at a file; ``SHELLCHECK_OPTS``
-#: injects flags. Dropped so the verdict is a pure function of the tracked files
-#: under the canonical config, never the machine it runs on.
+#: relocates that config dir; the explicit :data:`_TOOL_CONFIG_ENV_VARS`
+#: allowlist names each per-tool config file / override var. Dropped so the
+#: verdict is a pure function of the tracked files under the canonical config,
+#: never the machine it runs on.
 def _is_ambient_config_var(key: str) -> bool:
     """Whether env var ``key`` is an ambient-config source the scrub drops.
 
-    Pure. ``$HOME`` and ``SHELLCHECK_OPTS`` are exact; ``XDG_*`` is a prefix;
-    ``*_CONFIG*`` is any name containing ``_CONFIG`` (catches ``YAMLLINT_CONFIG_FILE``,
-    ``RUFF_CONFIG``, ``XDG_CONFIG_HOME`` — the last already caught by the prefix).
+    Pure. Three narrow shapes — deliberately NOT a blanket ``"_CONFIG" in key``
+    substring, which also stripped ``PKG_CONFIG_PATH`` / ``FONTCONFIG_PATH`` and
+    broke cargo/C builds (round 1, agy): ``HOME`` (exact) roots ``~/.config``
+    discovery; ``XDG_*`` (prefix) relocates it; and the explicit
+    :data:`_TOOL_CONFIG_ENV_VARS` allowlist names each per-tool config var
+    (``SHELLCHECK_OPTS``, ``RUFF_CONFIG``, ``CARGO_HOME``, ``CLIPPY_CONF_DIR``,
+    ``YAMLLINT_CONFIG_FILE``) that points a specific linter at out-of-repo config.
     """
-    return (
-        key == "HOME"
-        or key == "SHELLCHECK_OPTS"
-        or key.startswith("XDG_")
-        or "_CONFIG" in key
-    )
+    return key == "HOME" or key.startswith("XDG_") or key in _TOOL_CONFIG_ENV_VARS
 
 
 def _scrubbed_env() -> dict[str, str]:
