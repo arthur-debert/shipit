@@ -312,6 +312,20 @@ def test_bind_from_env_degrades_malformed_numeric_to_string():
     assert logcontext.bound() == {"pr": "not-a-number"}
 
 
+def test_role_from_env_reads_the_exported_role_directly():
+    """The single-key reader the eval seam uses (#490): a spawned Run's exported
+    role is returned straight from the env, blank/absent → None, without touching
+    the log context or depending on bind_from_env ordering."""
+    exported = logcontext.env_export({}, role="implementer")
+    assert logcontext.role_from_env(exported) == "implementer"
+    # A padded value is stripped; blank/absent is None (absent-not-null crosses).
+    assert (
+        logcontext.role_from_env({"SHIPIT_LOG_CTX_ROLE": "  shepherd  "}) == "shepherd"
+    )
+    assert logcontext.role_from_env({"SHIPIT_LOG_CTX_ROLE": "   "}) is None
+    assert logcontext.role_from_env({}) is None
+
+
 def test_configure_logging_rebinds_parent_exported_keys(tmp_path):
     """The child half lives at logging setup: a child configured with a parent's
     exported environment carries the parent's keys on its records — the detached

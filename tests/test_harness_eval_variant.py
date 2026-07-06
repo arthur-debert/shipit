@@ -13,6 +13,7 @@ from shipit.harness.eval.variant import (
     Variant,
     resolve_variant,
     role_of_meta,
+    role_of_name,
     variant_of,
 )
 from shipit.harness.role import Role
@@ -71,6 +72,22 @@ def test_role_of_meta_attributes_drifted_agent_type_to_a_worker_not_coordinator(
     # fallback so the two resolvers agree.
     assert role_of_meta({"agentType": "nonesuch"}) is Role.IMPLEMENTER
     assert role_of_meta({"agentType": "Implementer"}) is Role.IMPLEMENTER
+
+
+def test_role_of_name_shares_the_meta_resolution_rules():
+    # role_of_meta delegates to role_of_name, so a raw name and a meta carrying it
+    # resolve identically — the shared rule set the record's launch-context override
+    # reuses (#490).
+    assert role_of_name("implementer") is Role.IMPLEMENTER
+    assert role_of_name("  Shepherd  ") is Role.SHEPHERD
+    assert role_of_name(None) is Role.COORDINATOR
+    assert role_of_name("") is Role.COORDINATOR
+    assert role_of_name("   ") is Role.COORDINATOR
+    # Unknown non-blank → generic worker, never the coordinator.
+    assert role_of_name("some-future-role") is Role.IMPLEMENTER
+    # Agrees with role_of_meta for every name.
+    for name in ("implementer", "shepherd", "reviewer", "", None, "nonesuch"):
+        assert role_of_name(name) is role_of_meta({"agentType": name})
 
 
 def test_resolve_variant_hashes_the_real_role_prompt_and_is_stable():

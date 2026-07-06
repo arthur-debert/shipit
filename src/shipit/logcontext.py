@@ -197,6 +197,26 @@ def env_export(env: Mapping[str, str] | None = None, **extra: Any) -> dict[str, 
     return merged
 
 
+def role_from_env(env: Mapping[str, str] | None = None) -> str | None:
+    """The spawned ``role`` a parent exported, read straight from the environment.
+
+    A single-key convenience for the ONE consumer that needs the launch-context
+    role WITHOUT touching the log context: the eval terminal hook, which stamps a
+    spawned top-level Run's true role onto its record. A headless ``shipit spawn
+    subagent --role R`` Run is its own top-level session (no ``agent-`` transcript,
+    no ``.meta.json``), so the locator classifies it a coordinator; the intended
+    role survives only in :func:`env_export`'s ``SHIPIT_LOG_CTX_ROLE``, so the eval
+    seam reads it here and passes it IN to the pure record builder. The genuine
+    interactive coordinator was not spawned via ``env_export`` and carries no such
+    var, so it returns ``None`` — the clean discriminator. Reads the raw env var
+    directly (default ``os.environ``), independent of :func:`bind_from_env` /
+    logging-setup ordering; a blank value is ``None`` (absent-not-null crosses the
+    seam intact).
+    """
+    env = os.environ if env is None else env
+    return (env.get(ENV_PREFIX + "ROLE") or "").strip() or None
+
+
 def bind_from_env(env: Mapping[str, str] | None = None) -> None:
     """Rebind the domain keys a parent exported — the child half of the seam.
 

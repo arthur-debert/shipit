@@ -15,9 +15,12 @@ Pure core / thin boundary (the eval-wire shape):
     ``shipit install`` pristine-hashes the managed set with), so there is one
     hashing scheme, not a parallel one. Stability/poolability is unit-testable on
     plain strings, no I/O.
-  - :func:`role_of_meta` is pure too — map a run's ``.meta.json`` to the **role**
-    whose prompt ran (an absent/unknown ``agentType`` ⇒ the ``coordinator``, the
-    same default :mod:`shipit.harness.eval.record` uses).
+  - :func:`role_of_name` is pure too — normalize a raw role NAME (a meta's
+    ``agentType``, or a launch-context ``SHIPIT_LOG_CTX_ROLE``) to a **role**; an
+    absent/blank name ⇒ the ``coordinator``, an unknown non-blank one ⇒ the generic
+    worker (``implementer``). :func:`role_of_meta` delegates to it (a meta's
+    ``agentType`` is just one such name) so every seam that resolves a role name —
+    the record's meta path and its launch-context override — shares ONE rule set.
   - :func:`role_prompt_text` / :func:`resolve_variant` are the BOUNDARY — read the
     bundled role-prompt fragments (:mod:`shipit.harness.prompts`) and the
     environment, then call the pure core.
@@ -72,29 +75,41 @@ def variant_of(prompt_text: str, *, label: str | None = None) -> Variant:
     )
 
 
-def role_of_meta(meta: Mapping[str, Any] | None) -> Role:
-    """The **role** whose prompt ran, from a run's ``.meta.json``. PURE.
+def role_of_name(name: str | None) -> Role:
+    """The **role** a raw role NAME resolves to. PURE.
 
-    Mirrors the hook-role resolver (:func:`shipit.harness.role.resolve_role`) so
-    the two agree: only an **absent/blank** ``agentType`` is the ``coordinator``
-    (the coordinator run has no meta and no agent-def prompt of its own kind — the
-    same default :mod:`shipit.harness.eval.record` stamps for an absent meta). A
-    subagent meta whose ``agentType`` *drifted* (a new/renamed role, corruption,
-    casing) is still a worker, NOT the coordinator, so it resolves to the generic
-    worker role (``implementer``) rather than pooling under the coordinator's
-    prompt hash; the mismatch is logged.
+    The shared normalization behind every role-name seam — a run's ``.meta.json``
+    ``agentType`` (:func:`role_of_meta`) and a spawned Run's launch-context
+    ``SHIPIT_LOG_CTX_ROLE`` (the record builder's coordinator override). Mirrors
+    the hook-role resolver (:func:`shipit.harness.role.resolve_role`) so all three
+    agree: an **absent/blank** name is the ``coordinator`` (the coordinator run has
+    no meta and no agent-def prompt of its own kind — the same default
+    :mod:`shipit.harness.eval.record` stamps for an absent meta). A name that
+    *drifted* (a new/renamed role, corruption, casing) is still a worker, NOT the
+    coordinator, so it resolves to the generic worker role (``implementer``) rather
+    than pooling under the coordinator's prompt hash; the mismatch is logged.
     """
-    agent_type = str((meta or {}).get("agentType") or "").strip().lower()
+    agent_type = str(name or "").strip().lower()
     if not agent_type:
         return Role.COORDINATOR
     for role in Role:
         if role.value == agent_type:
             return role
     logger.debug(
-        "unrecognized agentType %r — attributing to a non-coordinator worker",
+        "unrecognized role name %r — attributing to a non-coordinator worker",
         agent_type,
     )
     return Role.IMPLEMENTER
+
+
+def role_of_meta(meta: Mapping[str, Any] | None) -> Role:
+    """The **role** whose prompt ran, from a run's ``.meta.json``. PURE.
+
+    Delegates to :func:`role_of_name` on the meta's ``agentType`` (a meta is just
+    one carrier of a role name), so the meta path and the launch-context override
+    share ONE resolution rule set — the same casing/blank/unknown handling.
+    """
+    return role_of_name((meta or {}).get("agentType"))
 
 
 def role_prompt_text(role: Role) -> str:

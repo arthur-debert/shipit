@@ -14,6 +14,15 @@ The split is read off the transcript filename (`agent-` prefix ⇒ subagent), so
 locator is a pure function of the payload + existence probes. `None` means the
 payload named no transcript, or named one that does not exist — the caller fails
 open (no record, no crash).
+
+Run KIND is not the same as ROLE. A top-level session ⇒ the coordinator RUN KIND,
+but a headless `shipit spawn subagent --role R` Run is its OWN top-level session
+(no `agent-` prefix, no `.meta.json`) — a coordinator-KIND run that is really the
+role it was spawned as. The locator does not see that; the role override lives at
+the record seam, which reads the spawned role from the launch context
+(`SHIPIT_LOG_CTX_ROLE`) and stamps it in place of the coordinator label
+(:func:`shipit.harness.eval.record.build`). Run KIND (and the coordinator-only
+exit-hygiene check gated on it) is unchanged.
 """
 
 from __future__ import annotations

@@ -27,7 +27,7 @@ from typing import TextIO
 
 import click
 
-from ... import identity
+from ... import identity, logcontext
 from ...harness.eval.extractors import exit_hygiene, extract
 from ...harness.eval.locate import locate_run
 from ...harness.eval.record import build
@@ -83,6 +83,13 @@ def run(stdin: TextIO | None = None) -> int:
             commit=None if wd.revision.commit is None else str(wd.revision.commit),
             timestamp=_now_iso(),
             is_coordinator=run_files.is_coordinator,
+            # A spawned top-level write-Run (`shipit spawn subagent --role R`) is its
+            # own top-level session, so the locator classifies it a coordinator; the
+            # role it was spawned as survives only in the launch-context env var the
+            # spawn threaded in (`SHIPIT_LOG_CTX_ROLE`). Read it HERE at the I/O seam
+            # and pass it IN so the pure builder can override the would-be
+            # `coordinator` label (the genuine interactive coordinator carries none).
+            spawned_role=logcontext.role_from_env(),
         )
         append_record(record, wd.repo)
     except Exception:  # noqa: BLE001 — fail-open is the whole point.

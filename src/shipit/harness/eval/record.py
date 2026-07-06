@@ -19,8 +19,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from ...agent import invocation as agent_invocation
-from ..role import Role
-from .variant import role_of_meta
+from .variant import role_of_meta, role_of_name
 
 #: Bump when the record's field set changes, so an aggregator can read mixed stores.
 #: v2 adds the full WS02 objective metric set (tool-call vector, turn count,
@@ -46,6 +45,7 @@ def build(
     commit: str | None,
     timestamp: str,
     is_coordinator: bool,
+    spawned_role: str | None = None,
 ) -> dict[str, Any]:
     """Assemble the eval record for one run.
 
@@ -54,9 +54,11 @@ def build(
     sidecar was missing/unreadable. ``is_coordinator`` is the locator's run-kind
     classification (off the transcript filename, NOT off whether ``meta`` parsed), so
     a subagent with an unreadable meta is never mistaken for the coordinator.
-    ``variant`` is stamped verbatim (WS01 passes ``None``; WS03 fills it). ``commit``
-    is the stamping `git.commit` (``None`` when it could not be resolved — the record
-    is still valid).
+    ``spawned_role`` is the role from a spawned top-level Run's launch context (the
+    eval seam reads ``SHIPIT_LOG_CTX_ROLE``); it overrides ONLY the would-be
+    ``coordinator`` label (see :func:`_role_name`). ``variant`` is stamped verbatim
+    (WS01 passes ``None``; WS03 fills it). ``commit`` is the stamping `git.commit`
+    (``None`` when it could not be resolved — the record is still valid).
 
     The objective metrics fold in from :func:`shipit.harness.eval.extractors.extract`
     under stable OTel ``gen_ai.usage.*`` names for the standard token fields and
@@ -71,7 +73,7 @@ def build(
     return {
         "eval.schema_version": SCHEMA_VERSION,
         "eval.timestamp": timestamp,
-        "gen_ai.agent.name": _role_name(meta, is_coordinator),
+        "gen_ai.agent.name": _role_name(meta, is_coordinator, spawned_role),
         "gen_ai.request.model": meta.get("model"),
         "eval.permission_mode": meta.get("spawnMode"),
         # Tool usage.
@@ -120,11 +122,26 @@ def _invocation_record(meta: Mapping[str, Any] | None) -> dict[str, Any]:
     }
 
 
-def _role_name(meta: Mapping[str, Any], is_coordinator: bool) -> str:
+def _role_name(
+    meta: Mapping[str, Any], is_coordinator: bool, spawned_role: str | None
+) -> str:
     """The ``gen_ai.agent.name`` stamped for a run — the SAME role resolution the
     variant uses, plus the run-kind distinction the locator already drew.
 
-    - The coordinator run (``is_coordinator``) is the ``coordinator``.
+    - The coordinator run (``is_coordinator``) is the ``coordinator`` — UNLESS it is
+      a spawned top-level Run. A headless ``shipit spawn subagent --role R`` Run is
+      its own top-level session (no ``agent-`` transcript, no ``.meta.json``), so the
+      locator classifies it a coordinator, yet it is really the role it was spawned
+      as. The spawn threaded that role into the child's environment
+      (``SHIPIT_LOG_CTX_ROLE``), read at the eval seam and passed IN as
+      ``spawned_role``: a non-blank value resolves through
+      :func:`shipit.harness.eval.variant.role_of_name` (the SAME rules the meta path
+      uses) and OVERRIDES the coordinator label. The genuine interactive coordinator
+      was not spawned via that channel, so ``spawned_role`` is blank/``None`` and it
+      stays ``coordinator``. The override applies to the coordinator branch ONLY —
+      never to a subagent, whose own ``agentType`` is authoritative (a nested
+      subagent inherits the parent Run's ambient ``SHIPIT_LOG_CTX_ROLE``, so
+      consulting it there would mislabel).
     - A subagent with a readable ``agentType`` resolves through
       :func:`shipit.harness.eval.variant.role_of_meta` — the SAME resolver the
       variant attribution uses — so the record's role field and the variant's
@@ -136,7 +153,11 @@ def _role_name(meta: Mapping[str, Any], is_coordinator: bool) -> str:
       neither the coordinator nor a guessed worker.
     """
     if is_coordinator:
-        return Role.COORDINATOR.value
+        # A spawned top-level Run's role rides in as ``spawned_role``; a
+        # blank/``None`` (the genuine interactive coordinator) resolves to
+        # ``coordinator``, so the one call covers both the spawned-role override
+        # and the coordinator default.
+        return role_of_name(spawned_role).value
     if not str(meta.get("agentType") or "").strip():
         return _UNKNOWN_SUBAGENT_ROLE
     return role_of_meta(meta).value

@@ -125,6 +125,38 @@ def test_stop_writes_a_coordinator_record(state_dir, tmp_path):
     assert records[0]["eval.variant"]["content_hash"].startswith("sha256:")
 
 
+def test_stop_stamps_the_spawned_role_from_the_launch_context(
+    state_dir, tmp_path, monkeypatch
+):
+    # #490: a headless `shipit spawn subagent --role implementer` Run is its OWN
+    # top-level session (a `<session>.jsonl`, no `.meta.json`), so the locator
+    # classifies it a coordinator. The spawn threaded the intended role into the
+    # child's env (`SHIPIT_LOG_CTX_ROLE`); the eval seam reads it and stamps the
+    # true role instead of `coordinator`.
+    monkeypatch.setenv("SHIPIT_LOG_CTX_ROLE", "implementer")
+    transcript = tmp_path / "57d92339.jsonl"
+    _write_transcript(transcript, "Edit")
+    payload = {"transcript_path": str(transcript), "cwd": str(tmp_path)}
+
+    assert run(stdin=io.StringIO(json.dumps(payload))) == 0
+
+    rec = _records(state_dir)[0]
+    assert rec["gen_ai.agent.name"] == "implementer"
+
+
+def test_stop_without_launch_role_stays_coordinator(state_dir, tmp_path, monkeypatch):
+    # The genuine interactive coordinator carries no `SHIPIT_LOG_CTX_ROLE` — its
+    # top-level session must still stamp `coordinator`.
+    monkeypatch.delenv("SHIPIT_LOG_CTX_ROLE", raising=False)
+    transcript = tmp_path / "57d92339.jsonl"
+    _write_transcript(transcript, "Read")
+    payload = {"transcript_path": str(transcript), "cwd": str(tmp_path)}
+
+    assert run(stdin=io.StringIO(json.dumps(payload))) == 0
+
+    assert _records(state_dir)[0]["gen_ai.agent.name"] == "coordinator"
+
+
 def test_stop_record_carries_coordinator_exit_hygiene(state_dir, tmp_path, monkeypatch):
     # The coordinator run runs the one live check; a clean porcelain → worktree_clean.
     monkeypatch.setattr(git, "status_porcelain", lambda *, cwd: [])
