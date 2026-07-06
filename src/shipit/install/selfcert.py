@@ -42,7 +42,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .. import config, execrun, pixienv
-from ..verbs import lint
 from .reconcile import Plan
 from .units import LINT_ENV, PIXI_FILE
 
@@ -152,6 +151,12 @@ def _scoped_lint(root: Path, paths: list[str], runner) -> tuple[int, str]:
     Returns ``(rc, report_text)`` — the report surfaces only on failure (the
     loud diagnostic); a green scoped run stays quiet on install's terminal.
     """
+    # Imported at call time, not module top: `lint` now wears the `_errors`
+    # CLI shell, whose imports lead back through `spawn`/`tree` into
+    # `install.apply` — the very module that pulls in this one. A function-local
+    # import keeps that edge lazy so the install package still imports cleanly.
+    from ..verbs import lint
+
     buffer = io.StringIO()
     with redirect_stdout(buffer):
         rc = lint.run(
@@ -323,6 +328,8 @@ def consumer_debt(root: Path, *, runner=execrun.run) -> int | None:
     ``None`` when the whole-tree run could not complete at all (no verdict is
     not zero debt); an int is the number of failing checks.
     """
+    from ..verbs import lint  # lazy — see `_scoped_lint` (breaks an import cycle)
+
     runs: list[lint.ToolRun] = []
     try:
         with redirect_stdout(io.StringIO()):

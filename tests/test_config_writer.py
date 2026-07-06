@@ -50,6 +50,29 @@ def test_write_manifest_preserves_existing_secrets(tmp_path):
     assert config.load_managed(cfg) == {"bin/shipit": "sha256:x"}
 
 
+def test_write_manifest_preserves_consumer_lint_section(tmp_path):
+    # Reconcile-safety crux (#484): the consumer-owned [lint].ignore seam lives
+    # in .shipit.toml, so a `shipit install` manifest rewrite must NEVER clobber
+    # it — write_manifest strips only [shipit]/[managed] and leaves [lint] verbatim.
+    p = tmp_path / ".shipit.toml"
+    p.write_text(
+        "[lint]\n"
+        'ignore = ["crates/lex-babel/tests/fixtures/**", "CHANGELOG.md"]\n'
+        '\n[shipit]\nversion = "old"\n'
+        '\n[managed]\n"bin/shipit" = "sha256:old"\n'
+    )
+    # Simulate a reconcile round-trip: rewrite the managed tables.
+    config.write_manifest(p, version="new", managed={"bin/shipit": "sha256:new"})
+
+    cfg = config.load(p)
+    assert config.load_lint_ignore(cfg) == [
+        "crates/lex-babel/tests/fixtures/**",
+        "CHANGELOG.md",
+    ]
+    assert config.shipit_version(cfg) == "new"
+    assert config.load_managed(cfg) == {"bin/shipit": "sha256:new"}
+
+
 def test_write_manifest_replaces_prior_shipit_tables(tmp_path):
     p = tmp_path / ".shipit.toml"
     config.write_manifest(p, version="v1", managed={"a": "sha256:1", "b": "sha256:2"})
@@ -218,6 +241,16 @@ def test_apply_policy_seed_preserves_existing_reviewers(tmp_path):
     # [reviewers] present → not reseeded; only the missing secrets are added.
     assert "[reviewers]" not in seeded
     assert config.load(p)["reviewers"] == {"codex": {}}
+
+
+def test_apply_policy_seed_preserves_consumer_lint_section(tmp_path):
+    # The other .shipit.toml writer install runs on a reconcile (seed-if-absent
+    # policy) must also leave the consumer [lint] seam untouched (#484): it only
+    # appends/merges its own tables, never rewrites the consumer's.
+    p = tmp_path / ".shipit.toml"
+    p.write_text('[lint]\nignore = ["tests/fixtures/**"]\n')
+    config.apply_policy_seed(p)
+    assert config.load_lint_ignore(config.load(p)) == ["tests/fixtures/**"]
 
 
 def test_seeded_reviewers_resolve_to_required_set(tmp_path):

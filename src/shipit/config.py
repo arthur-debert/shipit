@@ -42,7 +42,7 @@ class ConfigError(RuntimeError):
 # being silently ignored. ``project`` (alias: ``custom``) is the consumer-owned
 # escape hatch — known so validation accepts it, but its SUBTREE is never descended or
 # policed.
-_KNOWN_TABLES = {"secrets", "reviewers", "managed", "shipit", "project"}
+_KNOWN_TABLES = {"secrets", "reviewers", "managed", "shipit", "project", "lint"}
 _ESCAPE_HATCH_TABLES = {"project", "custom"}
 
 
@@ -146,6 +146,42 @@ def load_managed(cfg: dict) -> dict[str, str]:
     if not isinstance(managed, dict):
         raise ConfigError("[managed] must be a table")
     return {str(k): str(v) for k, v in managed.items()}
+
+
+def load_lint_ignore(cfg: dict) -> list[str]:
+    """The consumer-owned ``[lint].ignore`` glob list — paths this repo excludes
+    from the managed lint gate — or ``[]`` when absent.
+
+    This is the sanctioned, reconcile-safe seam (#484) for a consumer to keep ITS
+    OWN non-prose paths — byte-exact test fixtures, generated aggregates like a
+    built ``CHANGELOG.md``, vendored/upstream-synced files — out of the gate
+    WITHOUT editing a shipit-managed file (the managed ``.markdownlintignore`` /
+    ``.markdownlint.yaml`` are whole-file managed units; a consumer path added to
+    them is drift that ``shipit install`` reverts). It lives in ``.shipit.toml``,
+    the consumer-policy home, so ``install`` never clobbers it (``write_manifest``
+    strips only ``[shipit]``/``[managed]``; every other table survives verbatim).
+
+    The globs are Lang-agnostic: they filter the discovered file list BEFORE
+    routing, so one ``ignore`` entry drops a path from every leg (markdownlint,
+    shfmt, ruff, …). Patterns are gitignore-style — the SAME syntax as the
+    ``.markdownlintignore`` this seam replaces, matched by shipit's own
+    ``.treeinclude`` engine (:func:`shipit.verbs.lint.path_ignored`): ``*`` does
+    not cross ``/``, ``**`` matches any run of segments, a trailing-slash pattern
+    matches a directory's whole subtree (``CHANGELOG/`` → every built
+    ``CHANGELOG/*.md``), an unanchored name floats to any depth (``CHANGELOG.md``
+    matches ``docs/CHANGELOG.md`` too) and a leading ``/`` anchors it to the repo
+    root.
+
+        [lint]
+        ignore = ["crates/lex-babel/tests/fixtures/**", "CHANGELOG/", "/CHANGELOG.md"]
+    """
+    section = cfg.get("lint", {})
+    if not isinstance(section, dict):
+        raise ConfigError("[lint] must be a table")
+    ignore = section.get("ignore", [])
+    if not isinstance(ignore, list) or not all(isinstance(p, str) for p in ignore):
+        raise ConfigError("[lint].ignore must be a list of glob strings")
+    return list(ignore)
 
 
 def shipit_version(cfg: dict) -> str | None:

@@ -113,6 +113,41 @@ def test_custom_escape_hatch_alias_allowed(tmp_path):
 
 
 # --------------------------------------------------------------------------
+# [lint] — the consumer-owned lint-ignore seam (#484)
+# --------------------------------------------------------------------------
+
+
+def test_lint_table_is_a_known_table(tmp_path):
+    # [lint] is a first-class consumer table: it loads without tripping the
+    # closed-registry validation.
+    p = tmp_path / ".shipit.toml"
+    p.write_text('[lint]\nignore = ["tests/fixtures/**"]\n')
+    assert config.load_lint_ignore(config.load(p)) == ["tests/fixtures/**"]
+
+
+def test_lint_ignore_absent_is_empty():
+    assert config.load_lint_ignore({}) == []
+    assert config.load_lint_ignore({"lint": {}}) == []
+
+
+def test_lint_ignore_preserves_order():
+    cfg = {"lint": {"ignore": ["b/**", "a.md", "CHANGELOG.md"]}}
+    assert config.load_lint_ignore(cfg) == ["b/**", "a.md", "CHANGELOG.md"]
+
+
+def test_lint_must_be_a_table():
+    with pytest.raises(config.ConfigError, match=r"\[lint\] must be a table"):
+        config.load_lint_ignore({"lint": "off"})
+
+
+def test_lint_ignore_must_be_a_string_list():
+    with pytest.raises(config.ConfigError, match="list of glob strings"):
+        config.load_lint_ignore({"lint": {"ignore": "tests/**"}})
+    with pytest.raises(config.ConfigError, match="list of glob strings"):
+        config.load_lint_ignore({"lint": {"ignore": ["ok", 42]}})
+
+
+# --------------------------------------------------------------------------
 # The fleet manifest (#449 item 3, ADR-0033): [project.portfolio] carries the
 # adoption targets of the ADP fleet sweep (#426) — including shipit-canary,
 # the standing test bed — and none of the sweep's non-targets.

@@ -115,6 +115,62 @@ def test_route_skips_lex_projections():
 
 
 # --------------------------------------------------------------------------
+# The consumer-owned lint-ignore seam (#484) — pure filtering
+# --------------------------------------------------------------------------
+
+
+def test_path_ignored_gitignore_style_globs():
+    # GENUINE .gitignore semantics (shipit's .treeinclude engine), not the old
+    # anchored full-path glob: ** matches any run of segments, * never crosses /.
+    assert lint.path_ignored("tests/fixtures/a.md", ["tests/fixtures/**"])
+    assert lint.path_ignored("tests/fixtures/sub/b.md", ["tests/fixtures/**"])
+    assert lint.path_ignored("tests/a.md", ["tests/*.md"])
+    assert not lint.path_ignored("tests/a/b.md", ["tests/*.md"])  # * stops at /
+    assert not lint.path_ignored("src/x.py", ["tests/fixtures/**"])
+
+
+def test_path_ignored_directory_prefix_drops_whole_subtree():
+    # The lex case the old full_match could NOT express: a trailing-slash
+    # DIRECTORY pattern matches everything under it (a built CHANGELOG/ tree).
+    assert lint.path_ignored("CHANGELOG/0.15.0.md", ["CHANGELOG/"])
+    assert lint.path_ignored("CHANGELOG/nested/x.md", ["CHANGELOG/"])
+    assert not lint.path_ignored(
+        "CHANGELOG.md", ["CHANGELOG/"]
+    )  # the dir, not the file
+
+
+def test_path_ignored_floating_vs_anchored():
+    # An unanchored name floats to any depth (real gitignore); a leading / anchors
+    # it to the repo root.
+    assert lint.path_ignored("CHANGELOG.md", ["CHANGELOG.md"])
+    assert lint.path_ignored("docs/CHANGELOG.md", ["CHANGELOG.md"])
+    assert lint.path_ignored("CHANGELOG.md", ["/CHANGELOG.md"])
+    assert not lint.path_ignored("docs/CHANGELOG.md", ["/CHANGELOG.md"])
+
+
+def test_path_ignored_empty_patterns_never_match():
+    assert not lint.path_ignored("anything.md", [])
+
+
+def test_path_ignored_bad_glob_is_a_no_match_not_a_crash():
+    # A malformed pattern narrows nothing rather than crashing the gate OR
+    # disabling a valid sibling entry.
+    assert not lint.path_ignored("a.md", ["["])
+    assert not lint.path_ignored("a.md", ["[z-a]"])  # invalid regex char range
+    assert lint.path_ignored("keep.md", ["[z-a]", "keep.md"])
+
+
+def test_drop_ignored_removes_matches_order_preserved():
+    files = ["src/x.py", "tests/fixtures/a.md", "README.md", "tests/fixtures/b.txt"]
+    assert lint.drop_ignored(files, ["tests/fixtures/**"]) == ["src/x.py", "README.md"]
+
+
+def test_drop_ignored_no_patterns_is_identity():
+    files = ["a.py", "b.md"]
+    assert lint.drop_ignored(files, []) is files
+
+
+# --------------------------------------------------------------------------
 # The registry / Tool.argv
 # --------------------------------------------------------------------------
 
@@ -419,3 +475,120 @@ def test_shell_routed_by_shebang_runs_shellcheck(tmp_path, capsys):
     assert rc == 0
     assert any(binary == "shellcheck" for binary, _ in rec.calls)
     assert any(binary == "shfmt" for binary, _ in rec.calls)
+
+
+# --------------------------------------------------------------------------
+# The consumer-owned lint-ignore seam (#484) — end-to-end through run()
+# --------------------------------------------------------------------------
+
+
+def _fail_when_file_present(dirty_binary, dirty_file):
+    """A run_tool that fails ``dirty_binary`` iff ``dirty_file`` reaches its argv,
+    and records every call — the deterministic stand-in for a lint-dirty file."""
+    calls = []
+
+    def run_tool(binary, args, cwd):
+        calls.append((binary, tuple(args)))
+        rc = 1 if binary == dirty_binary and dirty_file in args else 0
+        return execrun.ExecResult(
+            argv=(binary, *args), rc=rc, stdout="", stderr="dirty", duration_ms=1
+        )
+
+    run_tool.calls = calls
+    return run_tool
+
+
+def test_lint_ignore_excludes_dirty_fixture_gate_green(tmp_path, capsys):
+    # A deliberately-lint-dirty fixture the consumer OWNS is listed in
+    # `.shipit.toml [lint].ignore`, so it never reaches markdownlint and the gate
+    # is GREEN — the sanctioned reconcile-safe seam (#484), no managed-file edit.
+    (tmp_path / ".shipit.toml").write_text('[lint]\nignore = ["tests/fixtures/**"]\n')
+    run_tool = _fail_when_file_present("markdownlint", "tests/fixtures/ref.md")
+    rc = lint.run(
+        str(tmp_path),
+        discover=_fake_discover(["README.md", "tests/fixtures/ref.md"]),
+        run_tool=run_tool,
+    )
+    assert rc == 0
+    assert "LINT: OK" in capsys.readouterr().out
+    # markdownlint ran on the un-ignored file only; the fixture never reached it.
+    md_batches = [args for binary, args in run_tool.calls if binary == "markdownlint"]
+    assert md_batches == [("README.md",)]
+
+
+def test_same_fixture_un_ignored_gate_red(tmp_path, capsys):
+    # The control: WITHOUT the ignore entry, the same dirty fixture reaches
+    # markdownlint and reddens the gate — proving the seam is what turned it green,
+    # and that the gate is NOT weakened for non-ignored paths.
+    (tmp_path / ".shipit.toml").write_text('[lint]\nignore = ["other/**"]\n')
+    run_tool = _fail_when_file_present("markdownlint", "tests/fixtures/ref.md")
+    rc = lint.run(
+        str(tmp_path),
+        discover=_fake_discover(["README.md", "tests/fixtures/ref.md"]),
+        run_tool=run_tool,
+    )
+    assert rc == 1
+    assert "LINT: FAILED" in capsys.readouterr().out
+
+
+def test_lint_ignore_is_lang_agnostic(tmp_path, capsys):
+    # One glob drops the path from EVERY leg, not just markdownlint (the
+    # release-core-managed-script / generated-file cases in the #484 thread): an
+    # ignored .py never reaches ruff either.
+    (tmp_path / ".shipit.toml").write_text('[lint]\nignore = ["vendor/**"]\n')
+    rec = _Recorder()
+    rc = lint.run(
+        str(tmp_path),
+        discover=_fake_discover(["src/app.py", "vendor/synced.py"]),
+        run_tool=rec,
+    )
+    assert rc == 0
+    ruff_batches = [args for binary, args in rec.calls if binary == "ruff"]
+    assert ruff_batches and all("vendor/synced.py" not in args for args in ruff_batches)
+    assert all("src/app.py" in args for args in ruff_batches)
+
+
+def test_no_shipit_toml_means_no_ignore(tmp_path, capsys):
+    # A repo without .shipit.toml lints everything — the seam defaults to empty,
+    # never accidentally suppressing a leg.
+    run_tool = _fail_when_file_present("markdownlint", "tests/fixtures/ref.md")
+    rc = lint.run(
+        str(tmp_path),
+        discover=_fake_discover(["tests/fixtures/ref.md"]),
+        run_tool=run_tool,
+    )
+    assert rc == 1
+
+
+def test_lint_ignore_directory_prefix_drops_generated_subtree(tmp_path, capsys):
+    # The motivating lex case the old full_match could NOT express (#484): a
+    # trailing-slash DIRECTORY pattern excludes a whole built `CHANGELOG/` tree of
+    # generated .md, so a dirty generated file never reddens the gate — and it
+    # takes real gitignore semantics to match `CHANGELOG/` against `CHANGELOG/x.md`.
+    (tmp_path / ".shipit.toml").write_text('[lint]\nignore = ["CHANGELOG/"]\n')
+    run_tool = _fail_when_file_present("markdownlint", "CHANGELOG/0.15.0.md")
+    rc = lint.run(
+        str(tmp_path),
+        discover=_fake_discover(["README.md", "CHANGELOG/0.15.0.md"]),
+        run_tool=run_tool,
+    )
+    assert rc == 0
+    assert "LINT: OK" in capsys.readouterr().out
+    md_batches = [args for binary, args in run_tool.calls if binary == "markdownlint"]
+    assert md_batches == [("README.md",)]
+
+
+def test_malformed_shipit_toml_fails_clean_not_traceback(tmp_path, capsys):
+    # A malformed `[lint].ignore` surfaces as the CLI's uniform `error: …` line +
+    # exit 1 (the cli_errors shell, ADR-0030), NOT a raw ConfigError traceback
+    # escaping mid-gate — the same clean failure every config-reading verb gives.
+    (tmp_path / ".shipit.toml").write_text("[lint]\nignore = 42\n")
+    rc = lint.run(
+        str(tmp_path),
+        discover=_fake_discover(["README.md"]),
+        run_tool=_Recorder(),
+    )
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert err.startswith("error:")
+    assert "list of glob strings" in err
