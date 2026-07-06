@@ -5,8 +5,10 @@
 # two transcriptions of the rules. Every task and environment invoked here is
 # satisfied by the shipit-managed pixi.toml blocks (the `[tasks]` line, the lint
 # feature/dependency block, the `[environments]` definition), so the hooks are
-# green on a stock consumer right after `shipit install` — nothing repo-local
-# is referenced.
+# green on a stock consumer right after `shipit install`. The only repo-local
+# path referenced is the shipit-managed launcher `./bin/shipit` (covered next) —
+# itself part of the managed set, so a stock consumer has it too; no UNMANAGED
+# repo-local script or path is referenced.
 #
 # The pin, not PATH (ADR-0033): every shipit invocation below runs the repo's
 # pinned launcher `./bin/shipit`, NEVER a bare `shipit` resolved off PATH. A
