@@ -185,6 +185,24 @@ def test_portfolio_excludes_the_sweeps_non_targets():
         assert slug not in repos, slug
 
 
+def test_portfolio_excludes_the_dropped_non_targets():
+    # Deliberately dropped from the rollout manifest as non-adoption targets
+    # (fix(portfolio): drop 7 non-target repos). This guard is the regression
+    # cover codex asked for: it documents the intentional removal AND fails loud
+    # if any of these silently reappears in the portfolio.
+    repos = _portfolio_repos()
+    for slug in (
+        "arthur-debert/dotcat",
+        "arthur-debert/falala",
+        "arthur-debert/electron-splashguard",
+        "arthur-debert/nanodoc",
+        "arthur-debert/shellai",
+        "arthur-debert/sprinkles",
+        "arthur-debert/visual-explore",
+    ):
+        assert slug not in repos, slug
+
+
 def test_portfolio_entries_carry_repo_and_path():
     import tomllib
     from pathlib import Path
