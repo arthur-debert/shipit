@@ -12,6 +12,18 @@ is structural, not two transcriptions of the rules drifting apart.
 The lint checks are HARD-FAIL (architecture.lex §7): a missing tool exits
 non-zero, it never skips. A clean run is ``0``; any failure is ``1``.
 
+The ONE deliberate, narrowly-scoped exception is prettier's plugin-load abort
+(issue #498, :func:`is_prettier_plugin_load_failure`): when a repo's
+``.prettierrc`` names a plugin absent from ``node_modules`` (a ``--depth 1``
+clone with no ``npm install``), prettier aborts on load with a Node
+module-resolution error rather than reporting a formatting verdict. Those
+plugins never affect JSON output, so this is environment-not-provisioned (same
+spirit as the pixi ``command -v`` guard, #482), and the JSON leg FAILS OPEN with
+a note. The match is tight — it requires the Node resolver phrasing and never
+fires on prettier's own "code style issues" warning — so a genuinely dirty JSON
+file still hard-fails. This is not a hole in the hard-fail contract; it is a
+documented, single-class carve-out.
+
 The checks are CHECK-ONLY by default (release's scar: ``prettier --write`` under
 --all-files silently rewrites untouched files, so they must never mutate).
 ``--fix`` is the opt-in formatter pass — and only tools with a safe in-place fix
@@ -488,6 +500,42 @@ def verdict(runs: list[ToolRun]) -> int:
     return 0 if all(run.ok for run in runs) else 1
 
 
+def is_prettier_plugin_load_failure(binary: str, rc: int, output: str) -> bool:
+    """Whether a prettier run failed because a configured plugin could not be
+    RESOLVED (a Node module-resolution / plugin-load abort), not because a file
+    is misformatted. Pure — the detection is out of the Exec boundary so it is
+    unit-testable (ADR-0028).
+
+    The narrow, documented fail-open exception to the hard-fail contract
+    (module docstring; issue #498). A repo whose ``.prettierrc`` names a plugin
+    (``prettier-plugin-svelte``, tailwind, …) that is absent from
+    ``node_modules`` — a ``--depth 1`` clone with no ``npm install`` — makes
+    prettier abort ON LOAD with a Node resolver error::
+
+        Cannot find package 'prettier-plugin-svelte' imported from …/noop.js
+
+    That nonzero exit is environment-not-provisioned, NOT a lint verdict: those
+    plugins format ``.svelte`` / CSS, never JSON, so the JSON leg's output is
+    identical with or without them. Surfacing it as a failure produces false
+    failures whenever the gate runs before deps are installed (Tree/CI legs,
+    fleet measurement).
+
+    The match is DELIBERATELY tight so it can never swallow a real formatting
+    failure: prettier's own "code style issues" warning never carries
+    ``imported from`` (the Node ESM-resolver phrase), so the pairing of a
+    "cannot find package/module" phrase WITH ``imported from`` isolates the
+    plugin-load class alone. Only ``prettier`` and only a nonzero rc qualify;
+    a clean run (``rc == 0``) is never a plugin-load failure.
+    """
+    if binary != "prettier" or rc == 0:
+        return False
+    lowered = output.lower()
+    has_resolver_phrase = (
+        "cannot find package" in lowered or "cannot find module" in lowered
+    )
+    return has_resolver_phrase and "imported from" in lowered
+
+
 # --------------------------------------------------------------------------
 # The Exec + git boundary (patched in tests)
 # --------------------------------------------------------------------------
@@ -731,6 +779,12 @@ def run(
                     batches = [([*prefix, *batch_paths], ".", count, len(batch_paths))]
             try:
                 for args, mdir, note, nfiles in batches:
+                    # #498: a prettier plugin-load abort (a configured plugin
+                    # absent from node_modules) is environment-not-provisioned,
+                    # not a formatting verdict — it fails open with a note (set
+                    # below). None for every other outcome, so the normal report
+                    # path is untouched.
+                    fail_open_note: str | None = None
                     try:
                         result = run_tool(tool.binary, args, root / mdir)
                     except execrun.ExecError as exc:
@@ -758,6 +812,33 @@ def run(
                         )
                     else:
                         rc, out = result.rc, result.stdout + result.stderr
+                        if is_prettier_plugin_load_failure(tool.binary, rc, out):
+                            # #498: fail OPEN, but only for this one narrowly-matched
+                            # module-resolution class (see
+                            # is_prettier_plugin_load_failure) — a genuine dirty-JSON
+                            # failure has no `imported from` phrase and still FAILS.
+                            # Same spirit as the pixi `command -v` guard (#482):
+                            # environment-not-provisioned is not a lint verdict. Zero
+                            # the rc so the leg passes, and keep the note (plus the
+                            # resolver error) so an operator sees WHY it was skipped.
+                            fail_open_note = (
+                                "prettier: skipped — a plugin named in .prettierrc is "
+                                "not installed (module-resolution failure). JSON "
+                                "formatting is plugin-independent, so this is "
+                                "environment-not-provisioned, not a lint failure; "
+                                "provision node_modules to enable this leg.\n"
+                                + out.strip()
+                            )
+                            logger.warning(
+                                "lint prettier plugin-load failure — fail open (#498)",
+                                extra={
+                                    "lang": lang.name,
+                                    "tool": tool.binary,
+                                    "cwd": mdir,
+                                    "batch": note,
+                                },
+                            )
+                            rc, out = 0, ""
                         # Per-tool outcomes are mechanics; the run summary is the milestone.
                         logger.debug(
                             "lint tool finished",
@@ -778,7 +859,11 @@ def run(
                     runs.append(ToolRun(lang.name, tool.binary, label, rc, out))
                     mark = "ok  " if rc == 0 else "FAIL"
                     print(f"  {mark} {lang.name:9} {label} ({note})")
-                    if rc != 0 and out.strip():
+                    if fail_open_note:
+                        # A passing (rc==0) leg that was nonetheless skipped — print
+                        # the reason so the ok mark is never silently misleading (#498).
+                        print(_indent(fail_open_note))
+                    elif rc != 0 and out.strip():
                         print(_indent(out.strip()))
             finally:
                 # #500/#502: undo any protected `.rs` the per-manifest fixer
