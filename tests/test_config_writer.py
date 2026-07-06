@@ -249,8 +249,49 @@ def test_apply_policy_seed_preserves_consumer_lint_section(tmp_path):
     # appends/merges its own tables, never rewrites the consumer's.
     p = tmp_path / ".shipit.toml"
     p.write_text('[lint]\nignore = ["tests/fixtures/**"]\n')
-    config.apply_policy_seed(p)
+    seeded = config.apply_policy_seed(p)
+    # A tracked [lint] table is never re-seeded and never clobbered.
+    assert "[lint].ignore" not in seeded
     assert config.load_lint_ignore(config.load(p)) == ["tests/fixtures/**"]
+
+
+def test_plan_policy_seed_fresh_seeds_lint_ignore(tmp_path):
+    # A virgin repo's plan seeds [lint].ignore alongside the other policy — the
+    # onboarding-snag fix (#484): a freshly-onboarded repo would otherwise take a
+    # latent lint-gate failure on its generated CHANGELOG / lockfiles.
+    p = tmp_path / ".shipit.toml"  # absent
+    seeded = config.plan_policy_seed(p)
+    assert "[lint].ignore" in seeded
+    # Pure: planning twice is stable and writes nothing.
+    assert config.plan_policy_seed(p) == seeded
+    assert not p.exists()
+
+
+def test_apply_policy_seed_seeds_exact_lint_globs(tmp_path):
+    # Applying the seed on a virgin repo lands EXACTLY the four generated-path
+    # globs, and the seeded table parses back through the gate's own reader (#484).
+    p = tmp_path / ".shipit.toml"  # absent
+    seeded = config.apply_policy_seed(p)
+    assert "[lint].ignore" in seeded
+    assert config.load_lint_ignore(config.load(p)) == [
+        "CHANGELOG.md",
+        "CHANGELOG/**",
+        "package-lock.json",
+        "pnpm-lock.yaml",
+    ]
+
+
+def test_apply_policy_seed_lint_is_idempotent(tmp_path):
+    # A re-install NOOPs the [lint] seed: no clobber, no duplicate — the table is
+    # tracked after the first apply, so the second seeds nothing for it.
+    p = tmp_path / ".shipit.toml"  # absent
+    config.apply_policy_seed(p)
+    before = p.read_text(encoding="utf-8")
+    again = config.apply_policy_seed(p)
+    assert "[lint].ignore" not in again
+    assert p.read_text(encoding="utf-8") == before  # byte-identical re-run
+    # Exactly one [lint] table survives — no duplicate appended.
+    assert before.count("\n[lint]\n") == 1
 
 
 def test_seeded_reviewers_resolve_to_required_set(tmp_path):
