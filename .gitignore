@@ -24,6 +24,11 @@ __pycache__/
 .pytest_cache/
 .pixi/
 
+# Rust build output — the lint gate's cargo leg (LNT01, ADR-0037) generates a
+# large `target/` at the repo root of any Rust crate it checks; keep those build
+# artifacts out of the index so a `git add -A` never sweeps them in.
+target/
+
 # Local padz note store (out of source control)
 .padz/
 
