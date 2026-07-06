@@ -173,14 +173,14 @@ def expected_sha(triple: str) -> str:
 
 #: Matches a ``lexd --version`` line whose version token is EXACTLY the pin —
 #: ``lexd 0.19.1`` / ``lexd 0.19.1 (release)`` pass; a bare-substring near-miss
-#: (``lexd 0.19.15``, ``lexd 10.19.15``) does NOT. The trailing ``\b`` pins the
-#: token's right edge so a longer version that merely starts with the pin can't
-#: read as pinned; ``re.escape`` keeps the dotted pin from acting as a regex. The
-#: right edge is ``(?!\S)`` (whitespace or end-of-line) rather than ``\b``: a
-#: word boundary sits between ``2`` and a following ``-``/``+``, so ``\b`` would
-#: accept a pre-release/build-metadata build (``0.19.1-dev``, ``0.19.1+meta``) as
-#: the pinned release; requiring non-word-and-non-``-``/``+`` — i.e. whitespace or
-#: end — keeps the match to the exact release token.
+#: (``lexd 0.19.15``, ``lexd 10.19.15``) does NOT. The leading ``\b`` anchors the
+#: token's left edge and ``re.escape`` keeps the dotted pin from acting as a
+#: regex; the right edge — which rejects a longer version that merely starts with
+#: the pin — is ``(?!\S)`` (whitespace or end-of-line) rather than ``\b``: a word
+#: boundary sits between the pin's trailing digit and a following ``-``/``+``, so
+#: ``\b`` would accept a pre-release/build-metadata build (``0.19.1-dev``,
+#: ``0.19.1+meta``) as the pinned release; requiring whitespace or end keeps the
+#: match to the exact release token.
 _PINNED_RE = re.compile(rf"\blexd {re.escape(PIN)}(?!\S)")
 
 
