@@ -3,7 +3,7 @@
 A Tree comes in two modes. The write Tree (:mod:`shipit.tree.create`) is one per
 write-Run: ``clone --reference --dissociate`` + ``.treeinclude`` + pixi/sccache,
 read-write. A **read-only Tree** is the cheap reviewer variant: **clone +
-``git checkout`` + ``git submodule update --init --recursive`` only** — NO
+``git checkout`` + ``git submodule sync/update --init --recursive`` only** — NO
 ``.treeinclude``, NO pixi/provisioning — then the working tree is ``chmod``'d
 read-only. Submodules ARE populated here too (#485): a dissociated clone leaves them
 as empty gitlinks, and a reviewer reading a PR that touches submodule-backed content
@@ -129,8 +129,9 @@ def create_readonly(plan: ReadOnlyPlan, *, source_repo: str, github_url: str) ->
     advanced since the first reviewer cloned and a co-tenant must never review an old
     commit. Otherwise the leaf is provisioned the read-only way: clone
     ``--reference --dissociate`` (ADR-0014), ``git fetch``, ``git checkout`` the
-    EXISTING branch (no ``-b``, no base), ``git submodule update --init --recursive``
-    (#485 — a reviewer over submodule-backed content must see the real files), then
+    EXISTING branch (no ``-b``, no base), ``git submodule sync + update --init
+    --recursive`` (:func:`shipit.git.submodule_update_init`, #485/#486 — a reviewer over
+    submodule-backed content must see the real files), then
     ``chmod`` the working tree read-only.
     The two write-only steps — ``.treeinclude`` copy and pixi/sccache provisioning —
     are deliberately skipped: a reviewer reads, it never builds.

@@ -322,7 +322,13 @@ def test_create_readonly_reuse_re_guards_even_when_refresh_fails(tmp_path, monke
     monkeypatch.setattr(
         git,
         "submodule_update_init",
-        lambda **k: (_ for _ in ()).throw(ExecError(["gh"], rc=1, stderr="submodule")),
+        lambda **k: (_ for _ in ()).throw(
+            ExecError(
+                ["git", "submodule", "update", "--init", "--recursive"],
+                rc=1,
+                stderr="fatal: clone of submodule failed",
+            )
+        ),
     )
 
     with pytest.raises(ExecError):
