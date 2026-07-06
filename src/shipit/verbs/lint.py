@@ -69,19 +69,38 @@ class Tool:
     file-batch form): they run once per tracked manifest directory of their Lang
     (see :func:`manifest_roots`) with NO files appended, cwd'd into that
     directory.
+
+    ``editorconfig_pin`` is the flag prefix that pins an ``.editorconfig``-aware
+    tool to IGNORE any ambient/injected/ancestor ``.editorconfig`` — applied ONLY
+    when the repo tracks no root ``.editorconfig`` of its own (see
+    :func:`tracks_editorconfig` / issue #493). Empty for tools that do not consult
+    ``.editorconfig``. It is a hermeticity pin, not a style choice: shfmt and
+    prettier both honor an ``.editorconfig`` — including an untracked one written
+    into the working tree by co-resident tooling, or an ancestor above the git
+    root — which makes the lint verdict depend on the checkout location rather
+    than the commit. Pinning restores "same commit → same verdict everywhere".
     """
 
     binary: str
     check: tuple[str, ...]
     fix: tuple[str, ...] | None = None
     per_manifest: bool = False
+    editorconfig_pin: tuple[str, ...] = ()
 
-    def argv(self, *, fix: bool) -> tuple[str, ...]:
+    def argv(self, *, fix: bool, pin_editorconfig: bool = False) -> tuple[str, ...]:
         """The argv prefix for this run: the fix form in fix mode if the tool has
-        one, else the check form (never ``None`` — the checks never skip)."""
-        if fix and self.fix is not None:
-            return self.fix
-        return self.check
+        one, else the check form (never ``None`` — the checks never skip).
+
+        When ``pin_editorconfig`` is set AND the tool has an
+        :attr:`editorconfig_pin`, that pin is prepended so the tool ignores any
+        ambient ``.editorconfig`` (issue #493). Callers pass it when the repo
+        tracks no ``.editorconfig`` of its own; a repo that DOES track one travels
+        with that config in every checkout, so it is honored (pin off).
+        """
+        base = self.fix if (fix and self.fix is not None) else self.check
+        if pin_editorconfig and self.editorconfig_pin:
+            return (*self.editorconfig_pin, *base)
+        return base
 
 
 @dataclass(frozen=True)
@@ -148,7 +167,11 @@ SHELL = Lang(
     shebangs=("sh", "bash"),
     tools=(
         Tool("shellcheck", ("--severity=info",)),
-        Tool("shfmt", ("-d",), fix=("-w",)),
+        # `-i 0` is shfmt's tab default, but PASSING any formatting flag makes
+        # shfmt skip `.editorconfig` entirely — so the pin both defaults to tabs
+        # and neutralizes an ambient/injected/ancestor `.editorconfig` when the
+        # repo tracks none of its own (issue #493).
+        Tool("shfmt", ("-d",), fix=("-w",), editorconfig_pin=("-i", "0")),
     ),
 )
 YAML = Lang(
@@ -159,7 +182,16 @@ YAML = Lang(
 JSON = Lang(
     name="json",
     extensions=(".json",),
-    tools=(Tool("prettier", ("--check", "--log-level", "warn"), fix=("--write",)),),
+    # `--no-editorconfig` pins prettier to ignore an ambient/injected/ancestor
+    # `.editorconfig` when the repo tracks none of its own (issue #493).
+    tools=(
+        Tool(
+            "prettier",
+            ("--check", "--log-level", "warn"),
+            fix=("--write",),
+            editorconfig_pin=("--no-editorconfig",),
+        ),
+    ),
 )
 MARKDOWN = Lang(
     name="markdown",
@@ -254,6 +286,34 @@ def lex_projections(paths: list[str]) -> set[str]:
     """
     sources = {p for p in paths if p.endswith(".lex")}
     return {p for p in paths if p.endswith(".md") and p[:-3] + ".lex" in sources}
+
+
+def tracks_editorconfig(paths: list[str]) -> bool:
+    """Whether the repo tracks a ROOT ``.editorconfig`` (exact path ``.editorconfig``). Pure.
+
+    The signal that decides the editorconfig hermeticity pin (issue #493). A repo
+    that commits a root ``.editorconfig`` OWNS its formatting config: the file
+    travels with every checkout, so its verdict is already commit-determined and
+    shfmt / prettier are left to honor it (shipit's own tab-vs-space shell house
+    style depends on this). A repo that tracks none gets the pin — the
+    editorconfig-aware tools are told to ignore any ambient/injected/ancestor
+    ``.editorconfig`` a co-resident tool or a checkout location may have introduced,
+    so the verdict cannot flip on where or beside what the tree is checked out.
+
+    Keyed on the ROOT ``.editorconfig`` ONLY, never a nested one (round 1, codex):
+    the pin is a single tree-wide flag (shfmt/prettier run once at the root), so
+    honoring a nested tracked config would need splitting their batches by
+    editorconfig scope — deliberately NOT done. Keying on any nested config would
+    open a hermeticity HOLE instead: a repo tracking only a nested ``.editorconfig``
+    would disable the pin repo-wide, yet files OUTSIDE that nested scope would still
+    walk up and consume an untracked root/ancestor config, making the verdict depend
+    on checkout location again. Root-only keeps the guarantee absolute — identical
+    verdict everywhere, no exceptions. ``paths`` MUST be the repo's canonical
+    top-level tracked list, repo-root-relative (see :func:`_tracks_root_editorconfig`),
+    so ``.editorconfig`` is the root file and ``sub/.editorconfig`` a nested one; the
+    exact match also rejects a lookalike (``my.editorconfig.bak``).
+    """
+    return ".editorconfig" in paths
 
 
 def _ignore_matchers(patterns: list[str]) -> list[include.PatternSet]:
@@ -364,6 +424,29 @@ def _discover(root: Path) -> list[str]:
     return git.ls_files(cwd=str(root))
 
 
+def _tracks_root_editorconfig(root: Path) -> bool:
+    """Whether the git repo containing ``root`` tracks a ROOT ``.editorconfig``.
+
+    The editorconfig pin decision (issue #493) is a repo-wide git FACT, so it is
+    read from the repo's canonical tracked-file list at its TOP LEVEL — resolved
+    via :func:`shipit.git.repo_root` — deliberately NOT from the routed ``files``:
+
+    * ``files`` is filtered by ``[lint].ignore`` (:func:`drop_ignored`), but an
+      ignored path must not flip hermeticity — the pin is a git-tracking fact, not
+      a routing decision (round 1, copilot / agy).
+    * ``files`` is scoped to the ``path`` a run targets, so ``shipit lint src/``
+      would miss a root-tracked ``.editorconfig`` and wrongly pin a repo that owns
+      one; reading the top level sees it regardless of the target (round 1, agy).
+
+    A ``root`` outside any checkout has no tracked config → not tracked → pinned,
+    consistent with the honor-tracked / neutralize-ambient rule.
+    """
+    repo_root = git.repo_root(cwd=str(root))
+    if repo_root is None:
+        return False
+    return tracks_editorconfig(git.ls_files(cwd=repo_root))
+
+
 def _ignore_globs(root: Path) -> list[str]:
     """The consumer ``[lint].ignore`` globs from ``root``'s ``.shipit.toml`` (#484).
 
@@ -426,6 +509,7 @@ def run(
     fix: bool = False,
     discover: Callable[[Path], list[str]] | None = None,
     run_tool: Callable[[str, list[str], Path], execrun.ExecResult] | None = None,
+    tracks_root_editorconfig: Callable[[Path], bool] | None = None,
     runs_out: list[ToolRun] | None = None,
 ) -> int:
     """Run the checks over the tree at ``path`` (default ``.``). Returns 0/1.
@@ -450,6 +534,7 @@ def run(
 
     discover = discover or _discover
     run_tool = run_tool or _run_tool
+    tracks_root_ec = tracks_root_editorconfig or _tracks_root_editorconfig
 
     # Drop the consumer's own non-prose paths (`.shipit.toml [lint].ignore`,
     # #484) from the WHOLE file list before routing, so a single glob excludes a
@@ -458,6 +543,15 @@ def run(
     files = drop_ignored(discover(root), _ignore_globs(root))
     shebangs = {p: _shebang(root / p) for p in files if "." not in _basename(p)}
     routed = route(files, shebangs)
+    # Pin the editorconfig-aware tools (shfmt, prettier) to ignore any ambient
+    # `.editorconfig` UNLESS the repo tracks its OWN root `.editorconfig` (issue
+    # #493) — so the lint verdict is fixed by the commit, not by the checkout path
+    # or co-resident tooling that may have written an untracked `.editorconfig` into
+    # the tree. The decision reads the repo's TOP-LEVEL tracked list (see
+    # `_tracks_root_editorconfig`), NOT the routed `files` (which are
+    # `[lint].ignore`-filtered and `path`-scoped), so it can be flipped by neither
+    # an ignore glob nor a subdirectory-scoped run.
+    pin_editorconfig = not tracks_root_ec(root)
 
     mode = "fix" if fix else "check"
     print(f"lint: {root} ({mode})")
@@ -487,7 +581,7 @@ def run(
             else ["."]
         )
         for tool in lang.tools:
-            prefix = tool.argv(fix=fix)
+            prefix = tool.argv(fix=fix, pin_editorconfig=pin_editorconfig)
             # Label from the actual argv that ran, so fix mode never claims it
             # ran the check form when it ran the fix form.
             label = f"{tool.binary} {' '.join(prefix)}".strip()

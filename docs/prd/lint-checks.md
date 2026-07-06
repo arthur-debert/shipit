@@ -195,6 +195,44 @@ it does not edit it. This is distinct from the zero-config lex-projection rule
 its `X.lex` source is tracked — the ignore seam is the explicit escape hatch for
 everything that rule can't infer.
 
+### Editorconfig hermeticity (#493)
+
+Pinned tool binaries make the gate reproducible only if the CONFIG context is
+pinned too. `shfmt` and `prettier` both honor an `.editorconfig` — and both walk
+up past the git root, so a dev's `~/.editorconfig`, an ancestor directory, or an
+untracked file another tool symlinked into the working tree can flip the verdict:
+the SAME commit that passes in a bare clone can demand a 200-line reformat in a
+co-resident checkout (the phos-core step-9 smoke, #472). A hermetic gate must
+give the same verdict regardless of checkout path or co-resident tooling.
+
+So `shipit lint` pins the editorconfig-aware tools to the repo's TRACKED config
+only. If the repo tracks NO root `.editorconfig` of its own, it runs `shfmt` with
+an explicit `-i 0` (any formatting flag makes shfmt ignore `.editorconfig`
+entirely; `0` is its tab default) and `prettier` with `--no-editorconfig` — so an
+ambient/injected/ancestor `.editorconfig` is never consumed. If the repo DOES
+track a ROOT `.editorconfig`, it OWNS its formatting config — the file travels
+with every checkout, so the verdict is already commit-determined — and the tools
+are left to honor it (shipit's own 4-space, indented-case shell house style
+depends on shfmt reading the tracked `.editorconfig`).
+
+The pin keys on the ROOT `.editorconfig` ONLY, never a nested one. The pin is a
+single tree-wide flag (shfmt/prettier run once at the root), so honoring a nested
+tracked config would require splitting their batches by editorconfig scope —
+deliberately out of scope. Keying on ANY nested config instead would open a
+hermeticity HOLE (codex, #493 review): a repo tracking only a nested
+`.editorconfig` would disable the pin repo-wide, yet files OUTSIDE that nested
+scope would still walk up and consume an untracked root/ancestor config — the very
+checkout-dependence the pin exists to kill. Root-only keeps the guarantee absolute
+(identical verdict everywhere, no exceptions), at the cost of the rare
+nested-only-tracked-config nicety.
+
+The pin decision is a repo-wide git FACT, read from the repo's canonical
+TOP-LEVEL tracked list (resolved via `git rev-parse --show-toplevel`) — NOT from
+the routed file list. It is therefore independent of both `[lint].ignore` (an
+ignored path must not flip hermeticity) and the target path (`shipit lint src/`
+still honors a root-tracked config), closing the ordering and subdirectory holes
+the #493 review surfaced.
+
 ### Verified by
 
 On shipit itself, `pixi run lint` and the lefthook pre-commit hook run the
