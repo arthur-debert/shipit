@@ -1,0 +1,25 @@
+# The canonical prettier config for the json/ts/svelte leg of `shipit lint`
+# (ADR-0037, the gate owns the config; LNT01-WS03 #516). shipit ships this ONE
+# body and injects it (`prettier --config <this>`) into every invocation, so no
+# ancestor/user `.prettierrc` is ever consulted. It resolves the fleet's only
+# genuine rule conflict — four TypeScript repos disagreed on `semi` /
+# `trailingComma` — to one set; WS04 (#517) unifies + reformats those repos to
+# it. YAML (not JSON) is the carrier so this documentation can live inline.
+singleQuote: true
+printWidth: 100
+tabWidth: 2
+semi: false
+trailingComma: none
+
+# The svelte + tailwindcss plugins are a CAPABILITY, not a rule:
+# prettier-plugin-svelte lets prettier parse `.svelte`; prettier-plugin-tailwindcss
+# sorts class attributes. They are inert on non-svelte content (JSON/TS formatting
+# is plugin-independent), so a repo with no `.svelte` gets the identical verdict.
+# When a repo has NOT provisioned them into node_modules (a --depth-1 clone,
+# shipit's own conda-forge lint env), prettier aborts on plugin load and
+# `shipit lint` FAILS OPEN for the leg (is_prettier_plugin_load_failure, #498) —
+# environment-not-provisioned, not a lint failure. Provisioning the plugins into
+# the managed lint env is a WS04/toolchain follow-up (flagged).
+plugins:
+  - prettier-plugin-svelte
+  - prettier-plugin-tailwindcss

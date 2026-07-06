@@ -13,6 +13,15 @@ import pytest
 from shipit import execrun
 from shipit.verbs import lint
 
+# The packaged canonical-config paths the gate injects by DEFAULT (WS03 #516),
+# so argv assertions can name what `_canonical_config` resolves without hardcoding
+# a machine-specific path. A tool with no shipped file-config (shellcheck, shfmt,
+# cargo, lexd) injects nothing.
+_RUFF_CFG = lint._data_path("ruff.toml")
+_PRETTIER_CFG = lint._data_path("prettierrc.yaml")
+_MD_CFG = lint._data_path("markdownlint.yaml")
+_YAML_CFG = lint._data_path("yamllint.yaml")
+
 # --------------------------------------------------------------------------
 # Pure routing
 # --------------------------------------------------------------------------
@@ -270,9 +279,19 @@ def test_rust_tools_argv_forms():
         "warnings",
     )
     assert clippy.argv(fix=True) == clippy.argv(fix=False)
-    # rustfmt is the one rust --fix leg: cargo fmt in place.
-    assert fmt.argv(fix=False) == ("fmt", "--all", "--", "--check")
-    assert fmt.argv(fix=True) == ("fmt", "--all")
+    # rustfmt is the one rust --fix leg: cargo fmt in place. Both legs carry the
+    # canonical rustfmt.toml inline via `--config-path` (WS03 #516) — it rides the
+    # tuple, not `config_inject`, because it must follow cargo's `--` separator.
+    cfg = lint._RUSTFMT_CONFIG_PATH
+    assert fmt.argv(fix=False) == (
+        "fmt",
+        "--all",
+        "--",
+        "--check",
+        "--config-path",
+        cfg,
+    )
+    assert fmt.argv(fix=True) == ("fmt", "--all", "--", "--config-path", cfg)
     assert clippy.per_manifest and fmt.per_manifest
 
 
@@ -416,10 +435,11 @@ def test_clean_tree_passes(tmp_path, capsys):
     assert rc == 0
     out = capsys.readouterr().out
     assert "LINT: OK" in out
-    # ruff (check + format), markdownlint all ran, files appended.
-    assert ("ruff", ("check", "a.py")) in rec.calls
-    assert ("ruff", ("format", "--check", "a.py")) in rec.calls
-    assert ("markdownlint", ("b.md",)) in rec.calls
+    # ruff (check + format), markdownlint all ran, files appended — each with its
+    # canonical config injected by default (WS03 #516).
+    assert ("ruff", ("--config", _RUFF_CFG, "check", "a.py")) in rec.calls
+    assert ("ruff", ("--config", _RUFF_CFG, "format", "--check", "a.py")) in rec.calls
+    assert ("markdownlint", ("--config", _MD_CFG, "b.md")) in rec.calls
 
 
 def test_no_recognized_files_is_clean(tmp_path, capsys):
@@ -513,9 +533,9 @@ def test_fix_mode_fixes_what_it_can_and_still_checks_the_rest(tmp_path, capsys):
         run_tool=rec,
     )
     assert rc == 0
-    # ruff runs its fix forms.
-    assert ("ruff", ("check", "--fix", "a.py")) in rec.calls
-    assert ("ruff", ("format", "a.py")) in rec.calls
+    # ruff runs its fix forms (canonical config injected, WS03 #516).
+    assert ("ruff", ("--config", _RUFF_CFG, "check", "--fix", "a.py")) in rec.calls
+    assert ("ruff", ("--config", _RUFF_CFG, "format", "a.py")) in rec.calls
     # lexd has no fixer -> it still runs its CHECK form (the checks never skip a
     # leg in fix mode, so --fix can't pass while lex is broken).
     assert ("lexd", ("check", "d.lex")) in rec.calls
@@ -533,7 +553,7 @@ def test_fix_mode_never_rewrites_a_protected_fixture(tmp_path, capsys):
         run_tool=rec,
     )
     assert rc == 0
-    assert ("markdownlint", ("--fix", "README.md")) in rec.calls
+    assert ("markdownlint", ("--config", _MD_CFG, "--fix", "README.md")) in rec.calls
     # The fixture is NOT in any invocation's argv — never handed to the fixer.
     assert not any("tests/fixtures/broken.md" in args for _, args in rec.calls)
 
@@ -553,8 +573,10 @@ def test_fix_mode_reports_the_post_drop_count_in_note_and_log(tmp_path, capsys, 
             run_tool=rec,
         )
     assert rc == 0
-    # Printed note: post-drop count (singular).
-    assert "markdownlint --fix (1 file)" in capsys.readouterr().out
+    # Printed note: post-drop count (singular). The label carries the injected
+    # `--config <canonical>` too (WS03 #516), so assert on the fix-form + count tail.
+    assert "markdownlint --config" in (out := capsys.readouterr().out)
+    assert "--fix (1 file)" in out
     # Debug log: the `files` field matches the argv (1), not the routed 2.
     finished = [
         r
@@ -580,7 +602,10 @@ def test_check_mode_still_passes_protected_fixtures_to_the_checkers(tmp_path, ca
         run_tool=rec,
     )
     assert rc == 0
-    assert ("markdownlint", ("tests/fixtures/broken.md",)) in rec.calls
+    assert (
+        "markdownlint",
+        ("--config", _MD_CFG, "tests/fixtures/broken.md"),
+    ) in rec.calls
 
 
 def test_fix_mode_check_form_tool_still_sees_a_protected_fixture(tmp_path, capsys):
@@ -633,7 +658,12 @@ def test_rust_runs_per_manifest_without_file_batches(tmp_path, capsys):
         run_tool=rec,
     )
     assert rc == 0
-    clippy = (
+    # clippy carries its inline lint floor; fmt carries the injected rustfmt.toml
+    # via `--config-path` (WS03 #516). Read both from the registry so the exact
+    # tuples (incl. the machine-specific config path) stay in one place.
+    clippy = lint.RUST.tools[0].check
+    fmt_check = lint.RUST.tools[1].check
+    assert clippy == (
         "clippy",
         "--all",
         "--all-targets",
@@ -642,7 +672,6 @@ def test_rust_runs_per_manifest_without_file_batches(tmp_path, capsys):
         "-D",
         "warnings",
     )
-    fmt_check = ("fmt", "--all", "--", "--check")
     assert rec.calls.count(("cargo", clippy)) == 1
     assert rec.calls.count(("cargo", fmt_check)) == 1
     # A root manifest runs at the lint root itself.
@@ -729,8 +758,9 @@ def test_fix_mode_applies_rustfmt_and_still_checks_clippy(tmp_path):
         run_tool=rec,
     )
     assert rc == 0
-    # fmt runs its in-place fix form; clippy still runs its check form.
-    assert ("cargo", ("fmt", "--all")) in rec.calls
+    # fmt runs its in-place fix form (with the injected rustfmt config-path, WS03
+    # #516); clippy still runs its check form.
+    assert ("cargo", lint.RUST.tools[1].fix) in rec.calls
     assert (
         "cargo",
         ("clippy", "--all", "--all-targets", "--all-features", "--", "-D", "warnings"),
@@ -873,9 +903,10 @@ def test_lint_ignore_excludes_dirty_fixture_gate_green(tmp_path, capsys):
     )
     assert rc == 0
     assert "LINT: OK" in capsys.readouterr().out
-    # markdownlint ran on the un-ignored file only; the fixture never reached it.
+    # markdownlint ran on the un-ignored file only; the fixture never reached it
+    # (canonical config injected ahead of the file, WS03 #516).
     md_batches = [args for binary, args in run_tool.calls if binary == "markdownlint"]
-    assert md_batches == [("README.md",)]
+    assert md_batches == [("--config", _MD_CFG, "README.md")]
 
 
 def test_same_fixture_un_ignored_gate_red(tmp_path, capsys):
@@ -937,7 +968,7 @@ def test_lint_ignore_directory_prefix_drops_generated_subtree(tmp_path, capsys):
     assert rc == 0
     assert "LINT: OK" in capsys.readouterr().out
     md_batches = [args for binary, args in run_tool.calls if binary == "markdownlint"]
-    assert md_batches == [("README.md",)]
+    assert md_batches == [("--config", _MD_CFG, "README.md")]
 
 
 # --------------------------------------------------------------------------
@@ -957,9 +988,19 @@ def test_run_pins_shfmt_and_prettier_when_no_editorconfig_tracked(tmp_path):
     )
     assert rc == 0
     assert ("shfmt", ("-i", "0", "-d", "run.sh")) in rec.calls
+    # prettier: injected `--config` (WS03 #516) precedes the #493 `--no-editorconfig`
+    # pin (config_inject, then editorconfig_pin, then the base args — see Tool.argv).
     assert (
         "prettier",
-        ("--no-editorconfig", "--check", "--log-level", "warn", "data.json"),
+        (
+            "--config",
+            _PRETTIER_CFG,
+            "--no-editorconfig",
+            "--check",
+            "--log-level",
+            "warn",
+            "data.json",
+        ),
     ) in rec.calls
 
 
@@ -975,9 +1016,10 @@ def test_run_does_not_pin_when_repo_tracks_editorconfig(tmp_path):
     )
     assert rc == 0
     assert ("shfmt", ("-d", "run.sh")) in rec.calls
+    # Pin OFF, but the canonical `--config` is still injected (unconditional, WS03).
     assert (
         "prettier",
-        ("--check", "--log-level", "warn", "data.json"),
+        ("--config", _PRETTIER_CFG, "--check", "--log-level", "warn", "data.json"),
     ) in rec.calls
 
 
@@ -1000,10 +1042,11 @@ def test_run_pin_decision_independent_of_lint_ignore(tmp_path, monkeypatch):
     )
     assert rc == 0
     # Pin OFF despite the ignore: shfmt/prettier honor the tracked root config.
+    # (The canonical `--config` is injected regardless — unconditional, WS03 #516.)
     assert ("shfmt", ("-d", "run.sh")) in rec.calls
     assert (
         "prettier",
-        ("--check", "--log-level", "warn", "data.json"),
+        ("--config", _PRETTIER_CFG, "--check", "--log-level", "warn", "data.json"),
     ) in rec.calls
 
 
@@ -1170,12 +1213,19 @@ def test_prettier_dirty_json_still_fails_real(tmp_path):
     """Acceptance (#498), leg (b): with prettier able to run (no missing plugin),
     a genuinely dirty JSON still FAILS — the carve-out is scoped to the
     plugin-load abort, never a real format verdict. Real prettier, no node_modules.
+
+    Injects NO config (`canonical_config` → None) so real prettier runs on its
+    defaults rather than the shipped canonical body — which names the svelte/tailwind
+    plugins and would itself fail OPEN in this plugin-less env, masking the very
+    dirty-file verdict this leg asserts. The plugin-load path is leg (a) above; this
+    leg isolates a genuine format failure with prettier able to run.
     """
     (tmp_path / "data.json").write_text('{"a":      1}\n')  # bad spacing → dirty
     rc = lint.run(
         str(tmp_path),
         discover=_fake_discover(["data.json"]),
         tracks_root_editorconfig=lambda root: True,
+        canonical_config=lambda tool, root: None,
     )
     assert rc == 1
 
@@ -1185,10 +1235,11 @@ def test_prettier_dirty_json_still_fails_real(tmp_path):
 # --------------------------------------------------------------------------
 
 
-def test_config_inject_omitted_until_a_path_is_resolved():
-    # A placeholder `config_inject` fragment is INERT with no canonical config
-    # path (pre-WS03): argv is unchanged, so today's verdict cannot move (#514
-    # scope boundary — bodies + resolver land in WS03 #516).
+def test_config_inject_omitted_when_no_path_is_resolved():
+    # A placeholder `config_inject` fragment is OMITTED when the resolver yields no
+    # path (config_path=None): argv falls back to the unpinned form rather than
+    # emitting a dangling `--config {config}` — the safety valve for an inline-config
+    # or not-yet-shipped tool (WS03 #516).
     ruff_check = lint.PYTHON.tools[0]
     assert ruff_check.config_inject == ("--config", lint.CONFIG_PLACEHOLDER)
     assert ruff_check.argv(fix=False) == ("check",)
@@ -1238,7 +1289,7 @@ def test_config_inject_substring_placeholder_form():
 
 
 def test_config_inject_coexists_with_the_editorconfig_pin():
-    # prettier carries BOTH: the canonical-config placeholder (inert until WS03)
+    # prettier carries BOTH: the canonical-config placeholder (resolved in WS03)
     # and the #493 editorconfig pin (still gated). With a path AND the pin on, both
     # prepend — injection first, then the pin, then the base.
     prettier = lint.JSON.tools[0]
@@ -1258,9 +1309,9 @@ def test_config_inject_coexists_with_the_editorconfig_pin():
 
 def test_every_file_config_tool_declares_its_injection_point():
     # The path-config tools (--config/-c <file>) each carry a placeholder
-    # `config_inject`, so WS03 (#516) need only supply the paths. The inline/suffix
-    # tools (shellcheck, shfmt, cargo, lexd) inject via their check/fix args
-    # instead and are intentionally exempt from the placeholder form.
+    # `config_inject` that WS03's `_canonical_config` fills. The inline/suffix tools
+    # (shellcheck, shfmt, cargo, lexd) inject via their check/fix args instead and
+    # are intentionally exempt from the placeholder form.
     file_config_binaries = {"ruff", "prettier", "markdownlint", "yamllint"}
     for lang in lint.LANGS:
         for tool in lang.tools:
@@ -1291,13 +1342,57 @@ def test_run_injects_the_resolved_canonical_config_path(tmp_path):
     ) in rec.calls
 
 
-def test_run_default_resolver_injects_nothing(tmp_path):
-    # With no resolver supplied, the default (_canonical_config → None everywhere)
-    # keeps every argv at its pre-WS03 shape — the verdict is unchanged.
+def test_run_default_resolver_injects_the_canonical_configs(tmp_path):
+    # With no resolver supplied, the DEFAULT `_canonical_config` (WS03 #516) injects
+    # each file-config tool's shipped `shipit/data` body — this is the production
+    # path, not a stub. A tool with no shipped file-config (lexd) is untouched.
     rec = _Recorder()
-    lint.run(str(tmp_path), discover=_fake_discover(["a.py"]), run_tool=rec)
-    assert ("ruff", ("check", "a.py")) in rec.calls
-    assert ("ruff", ("format", "--check", "a.py")) in rec.calls
+    lint.run(str(tmp_path), discover=_fake_discover(["a.py", "d.lex"]), run_tool=rec)
+    assert ("ruff", ("--config", _RUFF_CFG, "check", "a.py")) in rec.calls
+    assert ("ruff", ("--config", _RUFF_CFG, "format", "--check", "a.py")) in rec.calls
+    assert ("lexd", ("check", "d.lex")) in rec.calls  # no file-config → unpinned
+
+
+def test_canonical_config_maps_file_config_tools_and_only_those(tmp_path):
+    # The resolver returns an EXISTING shipped body for each file-config tool and
+    # None for every inline-config tool (shellcheck/shfmt/cargo) and lexd. The path
+    # is the packaged data file, independent of `root` (so injection fires in any
+    # tree — the ancestor-config block the env scrub cannot give).
+    resolved = {}
+    for lang in lint.LANGS:
+        for tool in lang.tools:
+            resolved[tool.binary] = lint._canonical_config(tool, tmp_path)
+    for binary in ("ruff", "prettier", "markdownlint", "yamllint"):
+        path = resolved[binary]
+        assert path is not None and Path(path).is_file(), binary
+    for binary in ("shellcheck", "shfmt", "cargo", "lexd"):
+        assert resolved[binary] is None, binary
+
+
+def test_rust_fmt_injects_the_shipped_rustfmt_config():
+    # rustfmt's canonical config rides the cargo fmt tuples inline via `--config-path`
+    # (it must follow cargo's `--`, so it is NOT a config_inject placeholder). The
+    # path is the shipped body, present on disk.
+    fmt = lint.RUST.tools[1]
+    assert "--config-path" in fmt.check and "--config-path" in fmt.fix
+    assert fmt.check[fmt.check.index("--config-path") + 1] == lint._RUSTFMT_CONFIG_PATH
+    assert Path(lint._RUSTFMT_CONFIG_PATH).is_file()
+
+
+def test_shipped_ruff_toml_matches_the_repo_root_carve_out():
+    # The carve-out (#516) lives in TWO byte-identical places: shipit's repo-root
+    # `ruff.toml` (what a direct `ruff` / editor reads; the acceptance "shipit's ruff
+    # config lives in ruff.toml, not pyproject") and the packaged `shipit/data/ruff.toml`
+    # (what the gate injects fleet-wide). A drift between them would make the gate and
+    # a bare `ruff` disagree, so pin them equal. `pyproject.toml` must carry NO ruff
+    # config anymore.
+    data = Path(lint._data_path("ruff.toml")).read_bytes()
+    repo_root = Path(__file__).resolve().parent.parent
+    assert (repo_root / "ruff.toml").read_bytes() == data
+    # No `[tool.ruff…]` TABLE header survives in pyproject (a prose mention in a
+    # `#` comment is fine — match a real header line only).
+    pyproject_lines = (repo_root / "pyproject.toml").read_text().splitlines()
+    assert not any(line.lstrip().startswith("[tool.ruff") for line in pyproject_lines)
 
 
 # --------------------------------------------------------------------------
