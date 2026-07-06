@@ -171,14 +171,7 @@ def test_portfolio_contains_the_adoption_targets():
     assert "arthur-debert/shipit" in repos
     # The WS07 sweep's other previously-missing targets.
     for slug in (
-        "arthur-debert/shellai",
-        "arthur-debert/nanodoc",
         "arthur-debert/supage",
-        "arthur-debert/falala",
-        "arthur-debert/dotcat",
-        "arthur-debert/electron-splashguard",
-        "arthur-debert/visual-explore",
-        "arthur-debert/sprinkles",
         "lex-fmt/mkdocs-lex",
         "phos-editor/phos.photo",
     ):
@@ -189,6 +182,24 @@ def test_portfolio_excludes_the_sweeps_non_targets():
     repos = _portfolio_repos()
     # n/a rows in the sweep: docs, editor config, grammar packaging.
     for slug in ("lex-fmt/comms", "lex-fmt/nvim", "lex-fmt/zed-lex"):
+        assert slug not in repos, slug
+
+
+def test_portfolio_excludes_the_dropped_non_targets():
+    # Deliberately dropped from the rollout manifest as non-adoption targets
+    # (fix(portfolio): drop 7 non-target repos). This guard is the regression
+    # cover codex asked for: it documents the intentional removal AND fails loud
+    # if any of these silently reappears in the portfolio.
+    repos = _portfolio_repos()
+    for slug in (
+        "arthur-debert/dotcat",
+        "arthur-debert/falala",
+        "arthur-debert/electron-splashguard",
+        "arthur-debert/nanodoc",
+        "arthur-debert/shellai",
+        "arthur-debert/sprinkles",
+        "arthur-debert/visual-explore",
+    ):
         assert slug not in repos, slug
 
 
