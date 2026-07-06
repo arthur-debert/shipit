@@ -31,6 +31,7 @@ Two call styles, matching the two kinds of git asks:
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 from typing import TYPE_CHECKING
 
@@ -596,6 +597,62 @@ def _is_poisoned_reference_failure(err: ExecError) -> bool:
     return all(marker in text for marker in _POISONED_REFERENCE_MARKERS)
 
 
+def _resolve_reference_donor(reference: str) -> str:
+    """Resolve a ``--reference`` donor path, dereferencing a linked worktree (#509).
+
+    ``git clone --reference`` refuses a git LINKED worktree as its source (git
+    2.54: ``fatal: reference repository '<path>' as a linked checkout is not
+    supported yet``). The review funnel hands :func:`clone_dissociated` the PR's
+    source workdir as the donor, and when an implementer ran under
+    ``Agent(isolation: worktree)`` that workdir IS a linked worktree — so the
+    read-only review clone died at launch and the local (codex/agy) review was
+    silently lost for every worktree-sourced PR.
+
+    A linked worktree SHARES its object store with the repo's COMMON gitdir, and
+    a normal gitdir is a valid ``--reference`` source — so dereferencing the
+    worktree to that common gitdir preserves the near-instant borrow (ADR-0014)
+    without ever falling back to a slower full clone. The normal (non-worktree)
+    donor path is deliberately left untouched.
+
+    Probe the reference for its two git dirs (``_probe``, so a not-a-repo path is
+    a normal nonzero answer, not a raise):
+
+    - ``rev-parse --absolute-git-dir`` — the per-worktree gitdir (for a linked
+      worktree, ``.../.git/worktrees/<name>``);
+    - ``rev-parse --git-common-dir`` — the SHARED common dir (for a linked
+      worktree, ``.../.git``). git returns it RELATIVE to the queried checkout,
+      NOT the process cwd, so it is resolved to an absolute path against
+      ``reference`` (an already-absolute answer is kept as-is by ``os.path.join``).
+
+    Returns ``reference`` UNCHANGED when the probe fails (not a git repo) or the
+    two resolve equal — a NORMAL checkout, whose per-worktree gitdir IS the
+    common dir — so the common path is never perturbed. When they DIFFER (a
+    linked worktree) the resolved absolute common dir is returned and the deref
+    is narrated at INFO with both the original and resolved paths.
+    """
+    absolute = _probe(["rev-parse", "--absolute-git-dir"], cwd=reference)
+    common = _probe(["rev-parse", "--git-common-dir"], cwd=reference)
+    if not absolute.ok or not common.ok:
+        return reference
+    absolute_gitdir = absolute.stdout.strip()
+    common_out = common.stdout.strip()
+    if not absolute_gitdir or not common_out:
+        return reference
+    # --git-common-dir is relative to the queried checkout (an absolute answer is
+    # kept verbatim by os.path.join); realpath both ends so the equality is
+    # symlink-robust (e.g. macOS /tmp -> /private/tmp).
+    common_gitdir = os.path.realpath(os.path.join(reference, common_out))
+    if common_gitdir == os.path.realpath(absolute_gitdir):
+        return reference  # normal checkout: the per-worktree gitdir IS the common dir.
+    logger.info(
+        "reference %s is a linked worktree; dereferencing to its shared common "
+        "gitdir %s for the --reference borrow (#509)",
+        reference,
+        common_gitdir,
+    )
+    return common_gitdir
+
+
 def clone_dissociated(url: str, dest: str, *, reference: str) -> None:
     """Clone ``url`` into ``dest`` as an INDEPENDENT, dissociated checkout.
 
@@ -605,6 +662,12 @@ def clone_dissociated(url: str, dest: str, *, reference: str) -> None:
     result shares NOTHING with the reference (no ``.git/objects/info/alternates``)
     and is safe to ``rm -rf`` (ADR-0014). ``origin`` is set to ``url`` — the GitHub
     URL — so ``gh``/``git`` work inside the Tree unchanged.
+
+    A LINKED-worktree ``reference`` is first dereferenced to its shared common
+    gitdir via :func:`_resolve_reference_donor` (#509): git refuses a linked
+    worktree as a ``--reference`` source, so the donor actually borrowed from is
+    the resolved common gitdir — a valid source that shares the same object
+    store. A normal checkout reference passes through untouched.
 
     ``-c core.commitGraph=false`` disables commit-graph READING for the clone
     process only (#372): on git 2.54 a reference carrying ANY commit-graph
@@ -630,6 +693,7 @@ def clone_dissociated(url: str, dest: str, *, reference: str) -> None:
     working without having to suppress every commit-graph writer in every
     possible donor.
     """
+    donor = _resolve_reference_donor(reference)
     try:
         _git(
             [
@@ -637,7 +701,7 @@ def clone_dissociated(url: str, dest: str, *, reference: str) -> None:
                 "core.commitGraph=false",
                 "clone",
                 "--reference",
-                reference,
+                donor,
                 "--dissociate",
                 url,
                 dest,
@@ -652,7 +716,7 @@ def clone_dissociated(url: str, dest: str, *, reference: str) -> None:
             "is a poisoned donor — commit-graph chain, #353); retrying once as "
             "a full clone without --reference",
             url,
-            reference,
+            donor,
             exc_info=True,
         )
         # git leaves the cloned-but-not-checked-out dest behind on this failure;
