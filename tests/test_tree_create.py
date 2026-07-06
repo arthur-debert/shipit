@@ -502,6 +502,7 @@ def _mock_git_boundary(monkeypatch, *, manifests: list[str]):
     monkeypatch.setattr(git, "configure_safe_reference_donor", lambda **k: None)
     monkeypatch.setattr(git, "fetch", lambda **k: None)
     monkeypatch.setattr(git, "checkout_new_branch", lambda *a, **k: None)
+    monkeypatch.setattr(git, "submodule_update_init", lambda **k: None)
 
 
 def test_create_copies_treeinclude_and_provisions_deps(tmp_path: Path, monkeypatch):
@@ -567,6 +568,76 @@ def test_create_copies_treeinclude_and_provisions_deps(tmp_path: Path, monkeypat
         assert "CARGO_TARGET_DIR" not in env
         assert "SCCACHE_BASEDIRS" not in env
         assert "CARGO_INCREMENTAL" not in env
+
+
+def test_create_initializes_submodules_after_checkout_before_provision(
+    tmp_path: Path, monkeypatch
+):
+    # #485: a dissociated clone leaves submodules as empty gitlinks, so the write path
+    # MUST run `git submodule update --init --recursive` — after the branch is cut and
+    # before provisioning, matching CI's `submodules: recursive`. Assert the seam is
+    # issued (fake the git boundary; no live network) and that it runs before any
+    # provisioning step.
+    source = tmp_path / "source"
+    source.mkdir()
+    order: list[str] = []
+
+    def fake_clone(url: str, dest: str, *, reference: str) -> None:
+        d = Path(dest)
+        d.mkdir(parents=True)
+        (d / ".shipit.toml").write_text(f'[shipit]\nversion = "{_PIN}"\n')
+        (d / "pixi.toml").write_text("# stub\n")
+
+    monkeypatch.setattr(git, "clone_dissociated", fake_clone)
+    monkeypatch.setattr(git, "configure_safe_reference_donor", lambda **k: None)
+    monkeypatch.setattr(git, "fetch", lambda **k: None)
+    monkeypatch.setattr(
+        git, "checkout_new_branch", lambda *a, **k: order.append("checkout")
+    )
+    monkeypatch.setattr(
+        git, "submodule_update_init", lambda **k: order.append("submodule")
+    )
+
+    def fake_pixi_install(root, **_k):
+        order.append("provision")
+        return _pixi_result()
+
+    monkeypatch.setattr(create_mod.pixienv, "install", fake_pixi_install)
+    monkeypatch.setattr(create_mod, "run_provision", lambda *a, **k: None)
+    monkeypatch.setattr(create_mod, "_st_dev", lambda p: 1)
+
+    create(_spec(tmp_path), source_repo=str(source), github_url="url")
+
+    # Submodule init happened, and strictly between checkout and provisioning.
+    assert order == ["checkout", "submodule", "provision"]
+
+
+def test_create_rolls_back_when_submodule_init_fails(
+    tmp_path: Path, remote: Path, reference: Path, monkeypatch
+):
+    # #485 fail-loud: a submodule fetch that fails (auth/network) must abort
+    # materialization and roll the half-built leaf back — never leave a Tree with a
+    # silently empty submodule dir the suite would fail on later.
+    _stub_provision(monkeypatch)
+
+    def boom(**_k):
+        raise ExecError(["git", "submodule"], rc=1, stderr="auth failed")
+
+    monkeypatch.setattr(git, "submodule_update_init", boom)
+
+    with pytest.raises(ExecError):
+        create(_spec(tmp_path), source_repo=str(reference), github_url=str(remote))
+
+    dest = (
+        tmp_path
+        / "trees"
+        / "acme"
+        / "widget"
+        / "issues"
+        / "123"
+        / "work-smoke-abcd1234"
+    )
+    assert not dest.exists()
 
 
 def test_create_skips_provisioning_steps_whose_manifest_is_absent(

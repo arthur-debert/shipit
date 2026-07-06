@@ -107,6 +107,7 @@ def _mock_write_boundary(monkeypatch):
     monkeypatch.setattr(git, "clone_dissociated", fake_clone)
     monkeypatch.setattr(git, "fetch", lambda **k: None)
     monkeypatch.setattr(git, "checkout_new_branch", lambda *a, **k: None)
+    monkeypatch.setattr(git, "submodule_update_init", lambda **k: None)
     monkeypatch.setattr(
         execrun,
         "run",
@@ -411,6 +412,7 @@ def _mock_readonly_boundary(monkeypatch):
     monkeypatch.setattr(git, "fetch", lambda **k: None)
     monkeypatch.setattr(git, "checkout", lambda *a, **k: None)
     monkeypatch.setattr(git, "reset_hard", lambda *a, **k: None)
+    monkeypatch.setattr(git, "submodule_update_init", lambda **k: None)
 
 
 def test_readonly_create_and_reuse_are_info_milestones_with_the_tree(

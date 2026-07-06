@@ -722,3 +722,27 @@ def reset_hard(ref: str, *, cwd: str) -> None:
     reviewer never reads the stale commit the first clone happened to land on.
     """
     _git(["reset", "--hard", ref], cwd=cwd)
+
+
+def submodule_update_init(*, cwd: str) -> None:
+    """``git submodule update --init --recursive`` — populate the checkout's submodules.
+
+    A dissociated clone (:func:`clone_dissociated`) leaves every registered submodule
+    as an EMPTY gitlink directory: ``git clone`` does not recurse submodules and neither
+    the fetch nor the checkout populates them (#485). A consumer whose suite reads
+    submodule-backed fixtures (e.g. lex's ``comms/specs`` spec root) then fails in a Tree
+    even though it is green in a normal checkout. This recursive init makes a Tree match
+    what CI does (``actions/checkout`` with ``submodules: recursive``).
+
+    A repo with NO submodules is a clean no-op (exit 0), so this is unconditional across
+    Tree provisioning — no manifest gate is needed. It FAILS LOUD (``check=True`` →
+    :class:`ExecError`): a submodule that cannot be fetched (auth/network) aborts Tree
+    materialization and rolls the half-built leaf back, rather than leaving a silently
+    empty submodule dir the suite would fail on much later. Submodule fetches hit the
+    network, so it carries the remote-facing timeout, not the local-plumbing bound.
+    """
+    _git(
+        ["submodule", "update", "--init", "--recursive"],
+        cwd=cwd,
+        timeout=_NETWORK_TIMEOUT,
+    )

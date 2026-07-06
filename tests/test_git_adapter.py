@@ -117,6 +117,26 @@ def test_push_default_does_not_bypass_hooks(monkeypatch):
     assert seen["args"] == ["push", "origin", "main"]
 
 
+def test_submodule_update_init_issues_recursive_init_on_the_network_bound(monkeypatch):
+    # #485: the Tree-provisioning seam that populates a dissociated clone's empty
+    # submodule gitlinks. The argv is the recursive init CI does (`submodules:
+    # recursive`), and it carries the remote-facing timeout (submodule fetches hit
+    # the network), not the local-plumbing bound.
+    seen = {}
+
+    def fake(args, *, cwd, timeout=None):
+        seen["args"] = args
+        seen["cwd"] = cwd
+        seen["timeout"] = timeout
+        return ""
+
+    monkeypatch.setattr(git, "_git", fake)
+    git.submodule_update_init(cwd="/tree")
+    assert seen["args"] == ["submodule", "update", "--init", "--recursive"]
+    assert seen["cwd"] == "/tree"
+    assert seen["timeout"] == git._NETWORK_TIMEOUT
+
+
 def test_commits_between_lists_the_range(monkeypatch):
     # `rev-list <base>..<head>`: exactly what provisioning committed (#232) — the
     # SHAs recorded into .git/shipit-provision.json at Tree birth. Typed at both
