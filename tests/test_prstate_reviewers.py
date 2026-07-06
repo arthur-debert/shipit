@@ -596,7 +596,7 @@ def test_local_request_surfaces_reviewauth_hint_without_traceback_spray(
     # PrStateError message the CLI renders + exit 1.
     msg = str(excinfo.value)
     assert "pixi run -e review" in msg
-    assert "review` extra" in msg
+    assert "`review` extra" in msg
     # `from None` severs the chain: the hint already rode into the message above,
     # so there is no `__cause__` left to spray a traceback for on this EXPECTED path.
     assert excinfo.value.__cause__ is None

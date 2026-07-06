@@ -614,9 +614,11 @@ class _LocalReviewAdapter(ReviewerAdapter):
             # extra / pyjwt is absent) — it already carries a clean install hint.
             # Surface that hint as the CLI-clean PrStateError; NO traceback spray,
             # so the operator reads the fix, not a raw `ModuleNotFoundError` dump.
-            # No traceback and no exc interpolation: this is the EXPECTED path, and
-            # the actionable message rides into the raised PrStateError below — a
-            # DEBUG breadcrumb of the mechanic is all that belongs on the record.
+            # The LOG RECORD carries no exc_info and no exception detail — just a
+            # DEBUG breadcrumb of the mechanic; this is the EXPECTED path, so the
+            # record stays quiet. The RAISED PrStateError below deliberately
+            # interpolates `{exc}` — the exc's actionable install hint belongs in
+            # the message the operator reads, just not on the log record.
             logger.debug(
                 "reviewer %s: local review auth failed on pr#%s (expected, "
                 "surfaced as a clean error)",
