@@ -303,6 +303,34 @@ def test_create_readonly_reuse_refreshes_to_current_head_and_re_guards(
     assert not (work.stat().st_mode & 0o222)  # read-only guard re-applied
 
 
+def test_create_readonly_reuse_re_guards_even_when_refresh_fails(tmp_path, monkeypatch):
+    # #486: the reuse-refresh makes the shared clone WRITABLE to re-pin it, then a
+    # submodule fetch can fail loud (auth/network). The read-only guard must be restored
+    # anyway (try/finally) — otherwise the shared slot is left writable for every
+    # co-tenant reviewer, breaking the ADR-0018 FS guarantee — and the error must still
+    # propagate so the caller rolls back.
+    plan = readonly_plan(repo=REPO, branch="feat/x", root=tmp_path / "trees")
+    _mock_git_boundary(monkeypatch, files={"README.md": "hi\n"})
+
+    create_readonly(
+        plan, source_repo="/ref", github_url="url"
+    )  # first reviewer, guarded
+    work = plan.dir / "README.md"
+    assert not (work.stat().st_mode & 0o222)  # guarded after the fresh create
+
+    # The reuse-refresh's submodule step fails loud (e.g. a submodule fetch wall).
+    monkeypatch.setattr(
+        git,
+        "submodule_update_init",
+        lambda **k: (_ for _ in ()).throw(ExecError(["gh"], rc=1, stderr="submodule")),
+    )
+
+    with pytest.raises(ExecError):
+        create_readonly(plan, source_repo="/ref", github_url="url")  # second reviewer
+    # The guard was restored despite the failure — the slot is NOT left writable.
+    assert not (work.stat().st_mode & 0o222)
+
+
 def test_create_readonly_rolls_back_partial_tree_on_failure(tmp_path, monkeypatch):
     # If a post-clone step fails, the half-built leaf must not survive — otherwise the
     # next reviewer would "reuse" a broken clone.

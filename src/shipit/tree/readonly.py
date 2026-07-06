@@ -241,16 +241,25 @@ def _refresh_readonly(dest: Path, branch: str) -> None:
     --init --recursive`` re-pins its submodules to that head (#485), and the read-only
     guard is re-applied so a head that advanced under the first reviewer never leaves a
     co-tenant on a stale commit OR with stale (writable) permissions.
+
+    The re-guard runs in a ``finally`` (#486): the mutable refresh can FAIL LOUD — a
+    ``reset`` conflict or a submodule fetch that hits an auth/network wall — and a bare
+    sequence would then propagate the error with the shared clone left WRITABLE, breaking
+    the ADR-0018 guarantee for every co-tenant reviewer reusing the slot. Restoring the
+    read-only guard before the error re-raises keeps the FS guard load-bearing even on the
+    failure path (the caller still sees the original exception and rolls the leaf back).
     """
     chmod_writable(dest)
-    git.fetch(cwd=str(dest))
-    git.checkout(branch, cwd=str(dest))
-    git.reset_hard(f"origin/{branch}", cwd=str(dest))
-    # Re-pin submodules to the head the reset landed on (#485): the advanced head may
-    # move a gitlink, so a reused reviewer clone must refresh its submodules too, or a
-    # co-tenant reads stale submodule content. Before the re-guard, while it is writable.
-    git.submodule_update_init(cwd=str(dest))
-    chmod_readonly(dest)
+    try:
+        git.fetch(cwd=str(dest))
+        git.checkout(branch, cwd=str(dest))
+        git.reset_hard(f"origin/{branch}", cwd=str(dest))
+        # Re-pin submodules to the head the reset landed on (#485): the advanced head may
+        # move a gitlink, so a reused reviewer clone must refresh its submodules too, or a
+        # co-tenant reads stale submodule content. Before the re-guard, while it is writable.
+        git.submodule_update_init(cwd=str(dest))
+    finally:
+        chmod_readonly(dest)
 
 
 def _summary(dest: Path, branch: str) -> Tree:

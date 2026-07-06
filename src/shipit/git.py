@@ -725,7 +725,7 @@ def reset_hard(ref: str, *, cwd: str) -> None:
 
 
 def submodule_update_init(*, cwd: str) -> None:
-    """``git submodule update --init --recursive`` — populate the checkout's submodules.
+    """``git submodule sync --recursive`` + ``update --init --recursive`` — populate submodules.
 
     A dissociated clone (:func:`clone_dissociated`) leaves every registered submodule
     as an EMPTY gitlink directory: ``git clone`` does not recurse submodules and neither
@@ -734,13 +734,26 @@ def submodule_update_init(*, cwd: str) -> None:
     even though it is green in a normal checkout. This recursive init makes a Tree match
     what CI does (``actions/checkout`` with ``submodules: recursive``).
 
-    A repo with NO submodules is a clean no-op (exit 0), so this is unconditional across
-    Tree provisioning — no manifest gate is needed. It FAILS LOUD (``check=True`` →
-    :class:`ExecError`): a submodule that cannot be fetched (auth/network) aborts Tree
-    materialization and rolls the half-built leaf back, rather than leaving a silently
-    empty submodule dir the suite would fail on much later. Submodule fetches hit the
-    network, so it carries the remote-facing timeout, not the local-plumbing bound.
+    The ``sync --recursive`` FIRST is load-bearing on the reuse-refresh path (#486): when
+    a shared reviewer clone is re-pinned to an advanced PR head, that head may have moved
+    a submodule's URL in ``.gitmodules``. ``update --init`` only reads ``.git/config`` for
+    an already-initialized submodule and would keep fetching the STALE URL (and fail);
+    ``sync`` first copies the checked-out ``.gitmodules`` URLs into ``.git/config`` so the
+    update fetches the right remote. On a fresh clone (or a URL that did not move) it is a
+    harmless no-op.
+
+    A repo with NO submodules is a clean no-op (exit 0) for both commands, so this is
+    unconditional across Tree provisioning — no manifest gate is needed. It FAILS LOUD
+    (``check=True`` → :class:`ExecError`): a submodule that cannot be fetched (auth/network)
+    aborts Tree materialization and rolls the half-built leaf back, rather than leaving a
+    silently empty submodule dir the suite would fail on much later. Submodule work hits
+    the network, so both carry the remote-facing timeout, not the local-plumbing bound.
     """
+    _git(
+        ["submodule", "sync", "--recursive"],
+        cwd=cwd,
+        timeout=_NETWORK_TIMEOUT,
+    )
     _git(
         ["submodule", "update", "--init", "--recursive"],
         cwd=cwd,

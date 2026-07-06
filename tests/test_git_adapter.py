@@ -117,24 +117,28 @@ def test_push_default_does_not_bypass_hooks(monkeypatch):
     assert seen["args"] == ["push", "origin", "main"]
 
 
-def test_submodule_update_init_issues_recursive_init_on_the_network_bound(monkeypatch):
-    # #485: the Tree-provisioning seam that populates a dissociated clone's empty
-    # submodule gitlinks. The argv is the recursive init CI does (`submodules:
-    # recursive`), and it carries the remote-facing timeout (submodule fetches hit
-    # the network), not the local-plumbing bound.
-    seen = {}
+def test_submodule_update_init_syncs_then_recursively_inits_on_the_network_bound(
+    monkeypatch,
+):
+    # #485/#486: the Tree-provisioning seam that populates a dissociated clone's empty
+    # submodule gitlinks. It `sync --recursive` FIRST (so a reuse-refresh onto an
+    # advanced head picks up a moved submodule URL from .gitmodules — #486), THEN the
+    # recursive init CI does (`submodules: recursive`). Both carry the remote-facing
+    # timeout (submodule work hits the network), not the local-plumbing bound.
+    calls = []
 
     def fake(args, *, cwd, timeout=None):
-        seen["args"] = args
-        seen["cwd"] = cwd
-        seen["timeout"] = timeout
+        calls.append({"args": args, "cwd": cwd, "timeout": timeout})
         return ""
 
     monkeypatch.setattr(git, "_git", fake)
     git.submodule_update_init(cwd="/tree")
-    assert seen["args"] == ["submodule", "update", "--init", "--recursive"]
-    assert seen["cwd"] == "/tree"
-    assert seen["timeout"] == git._NETWORK_TIMEOUT
+    assert [c["args"] for c in calls] == [
+        ["submodule", "sync", "--recursive"],
+        ["submodule", "update", "--init", "--recursive"],
+    ]
+    assert all(c["cwd"] == "/tree" for c in calls)
+    assert all(c["timeout"] == git._NETWORK_TIMEOUT for c in calls)
 
 
 def test_commits_between_lists_the_range(monkeypatch):
