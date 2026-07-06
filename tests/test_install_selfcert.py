@@ -613,3 +613,27 @@ def test_pin_check_probe_needs_no_uv_and_prints_the_pin(staged, monkeypatch):
     )
     assert result.returncode == 0
     assert result.stdout.strip() == GOOD_SHA
+
+
+def test_pin_check_probe_reads_a_crlf_manifest(staged):
+    # A Windows checkout / core.autocrlf=true rewrites .shipit.toml with CRLF
+    # line endings, so the `[shipit]` header arrives as `[shipit]\r`. The awk
+    # `$0 == "[shipit]"` match never fires on that, leaving an empty pin and a
+    # launcher exit 127. The launcher strips CR on the way in, so the probe
+    # resolves the real pin regardless of line endings (#501).
+    import subprocess
+
+    cfg = staged / config.CONFIG_NAME
+    crlf = cfg.read_text().replace("\n", "\r\n")
+    cfg.write_bytes(crlf.encode())
+
+    result = subprocess.run(
+        ["bash", str(staged / "bin" / "shipit")],
+        env={"PATH": "/usr/bin:/bin", "SHIPIT_PIN_CHECK": "1"},
+        capture_output=True,
+        text=True,
+        cwd=staged,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == GOOD_SHA

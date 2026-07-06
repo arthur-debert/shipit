@@ -41,13 +41,15 @@ fi
 # Resolve the pin: the `version` key of .shipit.toml's [shipit] table (a full
 # git sha, stamped by `shipit install` from its own build identity). The file
 # is shipit-written flat TOML, so a table-scoped awk read is exact enough here;
-# the real parser lives on the Python side.
+# the real parser lives on the Python side. CR is stripped on the way in so a
+# CRLF checkout (core.autocrlf=true / Windows) does not defeat the `[shipit]`
+# header match with a trailing `\r`.
 pin=""
 if [ -f "$manifest" ]; then
-	pin="$(awk -F'"' '
+	pin="$(tr -d '\r' <"$manifest" | awk -F'"' '
 		/^\[/ { in_shipit = ($0 == "[shipit]") ? 1 : 0; next }
 		in_shipit && $1 ~ /^[[:space:]]*version[[:space:]]*=[[:space:]]*$/ { print $2; exit }
-	' "$manifest")"
+	')"
 fi
 
 if [ -z "$pin" ]; then
