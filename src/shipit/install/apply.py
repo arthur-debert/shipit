@@ -17,12 +17,19 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from .. import buildid, config, execrun, gh, git
+from .. import buildid, config, execrun, gh, git, pixienv
 from . import selfcert
 from .errors import InstallError, SelfCertError
 from .reconcile import Plan, consumer_inner
 from .splice import SETTINGS_MALFORMED, splice_block, splice_settings_hook
-from .units import FMT_JSON_HOOK, PIXI_FILE, Unit, pixi_manifest_seed
+from .units import (
+    FMT_JSON_HOOK,
+    HOOK_RECOVERY_CMD,
+    LINT_ENV,
+    PIXI_FILE,
+    Unit,
+    pixi_manifest_seed,
+)
 
 logger = logging.getLogger("shipit.install")
 
@@ -52,14 +59,6 @@ COMMIT_MESSAGE = "chore(shipit): install/update the managed set"
 
 LEFTHOOK_BINARY = "lefthook"
 HOOK_ACTIVATE_ARGV = ["install"]
-
-#: The activation Exec's stated timeout, in seconds (ADR-0028: every Exec
-#: states its bound deliberately — never the runner's implicit default).
-#: ``lefthook install`` writes a handful of ``.git/hooks`` files locally —
-#: git's local tier, not the runner's 5-minute default; a wedged activation
-#: dies at this bound as a timeout-cause :class:`~shipit.execrun.ExecError`,
-#: which apply absorbs into the result's degraded activation outcome.
-HOOK_ACTIVATE_TIMEOUT: float = 60.0
 
 #: The consumer-generated lockfile (#439): the managed set's decision is the
 #: COMMITTED lockfile — pixi's own recommended practice, and what laptop/CI
@@ -130,20 +129,38 @@ def _activate_hooks(root: Path) -> execrun.ExecResult:
     """Run ``lefthook install`` in ``root`` — the bounded side effect that turns
     the ``lefthook.yml`` config into live ``.git/hooks``.
 
-    This is the same invocation the ``install-hooks`` pixi task wraps, so the
-    checks have one activation definition. It goes through the one Exec runner
-    (ADR-0028): ``check=False`` because a nonzero rc is an outcome apply
-    *degrades* on (activation is opportunistic setup, never a hard-fail check);
-    a launch failure — ``lefthook`` missing from PATH or not executable, or a
-    hang killed at the stated :data:`HOOK_ACTIVATE_TIMEOUT` — surfaces as the
-    runner's :class:`~shipit.execrun.ExecError`, which apply likewise absorbs
-    into the result's activation outcome and moves on.
+    Runs THROUGH the consumer's OWN managed pixi lint env
+    (:func:`shipit.pixienv.run_in_env`, ``environment=LINT_ENV`` — the same seam
+    :func:`shipit.tree.create._activate_hooks` uses). This is the #478 fix: the
+    ``.git/hooks/pre-push`` shim lefthook generates bakes ``os.Executable()`` (the
+    absolute path of the lefthook that ran ``install``) into its ``call_lefthook``
+    resolution chain as a fallback. Run bare off the install process's PATH, that
+    executable is the INSTALLER's env — and when the installer is an ephemeral
+    shipit Tree, a cross-tree absolute path that dies when the Tree is gc'd and
+    exists on no other machine. Routing through the consumer's own lint env
+    (where the managed blocks pin ``lefthook``) makes the baked fallback
+    consumer-local and stable instead, and ``--manifest-path`` (built by
+    :func:`shipit.pixienv.run_argv`) pins resolution to the consumer's manifest
+    regardless of any inherited ``PIXI_PROJECT_MANIFEST``. The shim's *first-hit*
+    resolution is still ``lefthook`` on PATH, which resolves consumer-locally
+    inside any activated pixi env (how a pixi consumer runs hooks); the baked
+    path is only its non-activated fallback.
+
+    ``check=False`` because a nonzero rc is an outcome apply *degrades* on
+    (activation is opportunistic setup, never a hard-fail check); a launch
+    failure — ``pixi`` absent, or a hang killed at the adapter's long-runner
+    bound — surfaces as the runner's :class:`~shipit.execrun.ExecError`, which
+    apply likewise absorbs into the result's activation outcome and moves on
+    (fail-open where the runtime is genuinely absent, #491's sibling theme). The
+    adapter's long-runner bound covers the worst case: a first ``pixi run -e
+    lint`` solving the lint env — provisioning-shaped work, the same reason
+    :func:`shipit.tree.create._activate_hooks` uses it.
     """
-    return execrun.run(
+    return pixienv.run_in_env(
         [LEFTHOOK_BINARY, *HOOK_ACTIVATE_ARGV],
-        cwd=str(root),
+        root,
+        environment=LINT_ENV,
         check=False,
-        timeout=HOOK_ACTIVATE_TIMEOUT,
     )
 
 
@@ -204,24 +221,29 @@ def _activate(
     """Run the activation boundary, absorbing failure into a ``(ok, detail)`` outcome.
 
     A transport failure from the runner branches on the cause so a timeout or
-    other OS error is not mislabelled as "install lefthook". ``lefthook
-    install`` is the canonical activation in BOTH repos (a consumer's pixi.toml
-    has no install-hooks task), so that is the recovery the missing-binary case
-    points at.
+    other OS error is not mislabelled as a missing binary. Activation now runs
+    THROUGH the consumer's pixi lint env (#478, :func:`_activate_hooks`), so the
+    missing-binary case is ``pixi`` absent (``pixi`` is ``argv[0]`` — a nonzero
+    rc from a broken lint env is a normal ``check=False`` result, not this
+    transport error). Either way the recovery the operator runs is the ONE
+    shipit-level command (:data:`~shipit.install.units.HOOK_RECOVERY_CMD`):
+    re-run ``shipit install``, which re-activates the hooks idempotently. The
+    message never leaks the internal ``lefthook``/``pixi`` command under it —
+    that is the layer the operator drives shipit over, not a command they run.
     """
     try:
         activation = activate_hooks(root)
     except execrun.ExecError as exc:
         if exc.cause == execrun.CAUSE_MISSING_BINARY:
             detail = (
-                f"{LEFTHOOK_BINARY}: not found on PATH — ensure lefthook is "
-                f"installed and on PATH, then `lefthook install` to activate "
-                f"the checks"
+                f"pixi not found on PATH — activation runs the checks through "
+                f"the managed lint env, so pixi must be installed; then "
+                f"`{HOOK_RECOVERY_CMD}` to activate the checks"
             )
         else:
             detail = (
-                f"{LEFTHOOK_BINARY}: could not run ({exc}) — resolve the "
-                f"failure above, then `lefthook install` to activate the checks"
+                f"activation could not run ({exc}) — resolve the failure "
+                f"above, then `{HOOK_RECOVERY_CMD}` to activate the checks"
             )
         return False, detail
     if activation.ok:

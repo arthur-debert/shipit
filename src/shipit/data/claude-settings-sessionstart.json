@@ -1,7 +1,7 @@
 {
   "hooks": [
     {
-      "command": "cd \"$CLAUDE_PROJECT_DIR\" && pixi run ./bin/shipit hook sessionstart",
+      "command": "cd \"$CLAUDE_PROJECT_DIR\" || exit 0; test -x ./bin/shipit || { echo \"shipit: bin/shipit launcher not present or executable here — skipping this managed hook (run 'shipit install' to (re)provision it).\"; exit 0; }; ./bin/shipit hook sessionstart",
       "type": "command"
     }
   ]

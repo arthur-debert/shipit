@@ -23,9 +23,9 @@ from pathlib import Path
 
 import pytest
 import yaml
-from conftest import PIXI_ABSENCE_GUARD
+from conftest import PIXI_ABSENCE_GUARD, managed_cc_hook_command
 
-from shipit import config, execrun, gh, git
+from shipit import config, execrun, gh, git, pixienv
 from shipit.execrun import ExecError
 from shipit.identity import Sha
 from shipit.install import apply as iapply
@@ -938,20 +938,18 @@ def test_load_units_includes_the_worktreecreate_adapter_hook():
     entry = json.loads(unit.desired_inner())
     # WorktreeCreate binds to no tool, so the entry carries no matcher — and the
     # command is consumer-generic (same shape as shipit's own settings entry).
-    # It invokes the PINNED launcher `./bin/shipit` (#481, ADR-0033) resolved via
-    # the harness-provided project dir. These hooks may run from a CWD that is not
-    # the repo root (unlike lefthook, which runs at the root), so the command first
-    # `cd`s into `$CLAUDE_PROJECT_DIR` — anchoring BOTH the relative launcher path
-    # AND pixi's manifest resolution to the project (a bare `pixi run` from a
-    # foreign CWD could otherwise pick up an inherited/parent pixi project).
+    # It invokes the PINNED launcher `./bin/shipit` (#481, ADR-0033) DIRECTLY —
+    # #491 dropped the redundant `pixi run` wrap (the launcher is pixi-independent)
+    # and added a launcher-presence fail-open guard. These hooks may run from a CWD
+    # that is not the repo root (unlike lefthook, which runs at the root), so the
+    # command first `cd`s into `$CLAUDE_PROJECT_DIR` to anchor the relative launcher.
     assert "matcher" not in entry
-    assert (
-        entry["hooks"][0]["command"]
-        == 'cd "$CLAUDE_PROJECT_DIR" && pixi run ./bin/shipit hook worktreecreate'
-    )
+    assert entry["hooks"][0]["command"] == managed_cc_hook_command("worktreecreate")
+    # No pixi dependency on the shipit `hook` subcommands (#491).
+    assert "pixi run" not in entry["hooks"][0]["command"]
     # The `shipit hook worktreecreate` marker still appears verbatim in the
     # command (the launcher path ends in `bin/shipit`), so reconcile keeps
-    # recognising the managed entry after the pin change.
+    # recognising the managed entry across the command change.
     assert iunits.SETTINGS_WORKTREECREATE_MARKER in entry["hooks"][0]["command"]
 
 
@@ -968,6 +966,41 @@ def test_load_units_includes_the_sessionstart_activation_hook():
     # SessionStart binds to no tool, so the entry carries no matcher.
     assert "matcher" not in entry
     assert iunits.SETTINGS_SESSIONSTART_MARKER in entry["hooks"][0]["command"]
+
+
+def test_managed_settings_hooks_drop_pixi_run_and_fail_open(tmp_path, rec):
+    # #491: EVERY managed .claude/settings.json hook invokes `./bin/shipit hook
+    # <phase>` DIRECTLY — no `pixi run` wrap (the pinned launcher is
+    # pixi-independent, ADR-0033) — behind a launcher-presence fail-open guard
+    # symmetric with the #482 lefthook guard. The `hook` subcommands need no lint
+    # toolchain, so wrapping them in `pixi run` only added startup cost and a hard
+    # pixi dependency at the highest-frequency surface (every session/edit/stop).
+    hook_units = [
+        u
+        for u in iunits.load_units()
+        if u.fmt == iunits.FMT_JSON_HOOK and u.dest == iunits.SETTINGS_FILE
+    ]
+    # All five managed settings-hook events are present.
+    assert {u.event for u in hook_units} == {
+        iunits.EVENT_PRETOOLUSE,
+        iunits.EVENT_STOP,
+        iunits.EVENT_SUBAGENTSTOP,
+        iunits.EVENT_SESSIONSTART,
+        iunits.EVENT_WORKTREECREATE,
+    }
+    for u in hook_units:
+        command = json.loads(u.desired_inner())["hooks"][0]["command"]
+        # The phase is the marker tail (`shipit hook <phase>`), and the whole
+        # command is the single-source managed form for that phase.
+        phase = u.marker.removeprefix("shipit hook ")
+        assert command == managed_cc_hook_command(phase)
+        # No pixi dependency, and the fail-open guard is present.
+        assert "pixi run" not in command
+        assert "test -x ./bin/shipit || {" in command
+        assert "exit 0" in command
+        # The reconcile marker survives verbatim so the managed entry is still
+        # recognised after the command change.
+        assert u.marker in command
 
 
 def test_fresh_install_lays_down_the_session_bootstrap_set_idempotently(tmp_path, rec):
@@ -1945,9 +1978,13 @@ def test_fresh_install_activates_the_check_hooks(tmp_path, rec):
     assert result.hooks_activated is True
     assert len(rec.hook_activations) == 1
     assert rec.hook_activations[0] == tmp_path.resolve()
-    # The PR body announces the checks are live.
+    # The PR body announces the checks are live (a descriptive mention that
+    # `lefthook install` ran is fine)...
     assert "### Checks activated" in rec.pr_body
     assert "lefthook install" in rec.pr_body
+    # ...but the reviewers/mergers recovery INSTRUCTION speaks shipit, not the
+    # internal lefthook/pixi layer.
+    assert "run `./bin/shipit install` on your own checkout" in rec.pr_body
 
 
 def test_break_glass_push_also_activates_hooks(tmp_path, rec):
@@ -1989,13 +2026,17 @@ def test_install_degrades_but_succeeds_when_activation_fails(tmp_path, rec):
     # local activation was deferred so a merger knows to act.
     assert "### Checks activated locally" not in rec.pr_body
     assert "local activation skipped" in rec.pr_body
+    # Descriptive "`lefthook install` did not run here" is fine; the post-merge
+    # recovery INSTRUCTION is the shipit-level command.
     assert "lefthook install" in rec.pr_body
+    assert "run `./bin/shipit install`" in rec.pr_body
 
 
 def test_install_degrades_but_succeeds_when_lefthook_missing(tmp_path, rec):
-    # A missing/unlaunchable lefthook surfaces as the runner's ExecError
+    # A missing activation runtime (now `pixi`, since activation routes through
+    # the consumer lint env — #478) surfaces as the runner's ExecError
     # (ADR-0028); apply must degrade — pointing at the canonical recovery — and
-    # still finish its PR rather than aborting.
+    # still finish its PR rather than aborting (fail-open, #491's sibling theme).
     def boom(root):
         raise execrun.ExecError(
             ["lefthook", "install"], rc=None, cause=execrun.CAUSE_MISSING_BINARY
@@ -2007,17 +2048,21 @@ def test_install_degrades_but_succeeds_when_lefthook_missing(tmp_path, rec):
     assert result.hooks_activated is False
     assert "### Checks activated locally" not in rec.pr_body
     assert "local activation skipped" in rec.pr_body
-    # Points at the canonical recovery, which works in a consumer repo too.
+    # Names the actually-failing runtime (pixi, since activation runs argv[0]=pixi)
+    # but the RECOVERY the operator runs is the ONE shipit-level command — never a
+    # leaked lefthook/pixi command (activation is a side effect of `shipit install`;
+    # there is no standalone hook-activation verb).
     warning = verb.format_result_warnings(result)
     assert "could not activate git hooks" in warning
-    assert "not found on PATH" in warning
-    assert "lefthook install` to activate the checks" in warning
+    assert "pixi not found on PATH" in warning
+    assert "`./bin/shipit install` to activate the checks" in warning
+    assert "lefthook install" not in warning
 
 
 def test_install_activation_timeout_does_not_claim_missing_binary(tmp_path, rec):
     # A NON-missing-binary transport failure (e.g. a timeout) must not be
-    # mislabelled "not found on PATH": the detail branches on exc.cause and
-    # points at resolving the failure, still ending in the canonical recovery.
+    # mislabelled "not found on PATH": the detail branches on exc.cause, stays
+    # binary-neutral, and still ends in the ONE shipit-level recovery command.
     def boom(root):
         raise execrun.ExecError(
             ["lefthook", "install"], rc=None, cause=execrun.CAUSE_TIMEOUT
@@ -2029,14 +2074,23 @@ def test_install_activation_timeout_does_not_claim_missing_binary(tmp_path, rec)
     warning = verb.format_result_warnings(result)
     assert "could not activate git hooks" in warning
     assert "not found on PATH" not in warning
-    assert "could not run" in warning
-    assert "lefthook install` to activate the checks" in warning
+    # Binary-neutral label (not "lefthook: could not run" — the failing runtime
+    # is pixi); the echoed exc diagnostic may name the failed argv, but the
+    # RECOVERY the operator runs is the shipit-level command.
+    assert "activation could not run" in warning
+    assert "`./bin/shipit install` to activate the checks" in warning
 
 
-def test_activate_hooks_boundary_runs_lefthook_install(tmp_path, monkeypatch):
-    # The real boundary hands `lefthook install` to the one Exec runner (the
-    # install-hooks task invocation), in the consumer root, check=False — never
-    # a re-implemented hook writer, never a raised ExecError on a nonzero rc.
+def test_activate_hooks_boundary_runs_lefthook_through_consumer_lint_env(
+    tmp_path, monkeypatch
+):
+    # #478: the real boundary hands `lefthook install` to the one Exec runner
+    # THROUGH the consumer's OWN pixi lint env — `pixi run --manifest-path
+    # <root>/pixi.toml --environment lint -- lefthook install` — so the lefthook
+    # that runs `install` (and whose absolute path lefthook bakes into the
+    # generated .git/hooks shim) is the consumer's own env's, never the
+    # installer's (possibly an ephemeral shipit Tree's). check=False — a nonzero
+    # rc degrades, never a raised ExecError; never a re-implemented hook writer.
     captured = {}
 
     def fake_run(argv, *, cwd=None, check=True, **kw):
@@ -2055,21 +2109,30 @@ def test_activate_hooks_boundary_runs_lefthook_install(tmp_path, monkeypatch):
     monkeypatch.setattr(iapply.execrun, "run", fake_run)
     result = iapply._activate_hooks(tmp_path)
     assert result.ok
-    assert captured["argv"] == ["lefthook", "install"]
+    # Routed through the consumer's own lint env, with `--manifest-path` pinning
+    # resolution to the consumer's manifest (never a leaked PIXI_PROJECT_MANIFEST).
+    assert captured["argv"] == pixienv.run_argv(
+        ["lefthook", "install"], tmp_path, environment=iunits.LINT_ENV
+    )
     assert captured["cwd"] == str(tmp_path)
     assert captured["check"] is False
-    # The stated local bound rides the wire (ADR-0028): lefthook writes a few
-    # .git/hooks files locally — git's local tier, never the runner's implicit
-    # 5-minute default.
-    assert captured["timeout"] == iapply.HOOK_ACTIVATE_TIMEOUT
-    assert iapply.HOOK_ACTIVATE_TIMEOUT < execrun.DEFAULT_TIMEOUT
+    # The adapter's long-runner bound rides the wire (ADR-0028): the worst case
+    # is a first `pixi run -e lint` solving the lint env — provisioning-shaped
+    # work, not the runner's implicit 5-minute default.
+    assert captured["timeout"] == pixienv.INSTALL_TIMEOUT
     assert "pre-commit" in iapply._activation_output(result)
 
 
 def test_activate_hooks_boundary_missing_binary_is_exec_error(tmp_path, monkeypatch):
-    # A binary absent from PATH surfaces as the runner's single transport error,
-    # tagged missing-binary — never a raw FileNotFoundError or a silent skip.
-    monkeypatch.setattr(iapply, "LEFTHOOK_BINARY", "shipit-no-such-lefthook-xyz")
+    # A missing runtime (now `pixi`, since activation routes through the consumer
+    # lint env — #478) surfaces as the runner's single transport error, tagged
+    # missing-binary — never a raw FileNotFoundError, never swallowed. check=False
+    # suppresses only a nonzero rc, never a launch failure; `_activate` upstream
+    # is what absorbs this into a degraded (fail-open) outcome.
+    def boom(argv, **kw):
+        raise execrun.ExecError(argv, rc=None, cause=execrun.CAUSE_MISSING_BINARY)
+
+    monkeypatch.setattr(iapply.execrun, "run", boom)
     with pytest.raises(execrun.ExecError) as exc_info:
         iapply._activate_hooks(tmp_path)
     assert exc_info.value.cause == execrun.CAUSE_MISSING_BINARY

@@ -283,7 +283,10 @@ def test_hooks_check_requires_a_successful_activation(staged):
     plan = _plan_with_writes(staged)
     check = selfcert._check_hooks(staged, plan, hooks_activated=False)
     assert not check.ok
-    assert "lefthook install" in check.detail
+    # Operator-facing recovery speaks shipit, never the internal lefthook layer.
+    assert "hook activation did not succeed" in check.detail
+    assert "./bin/shipit install" in check.detail
+    assert "lefthook install" not in check.detail
 
 
 def test_hooks_check_requires_the_hook_files_on_disk(staged):
