@@ -95,8 +95,8 @@ def test_release_url_pins_tag_and_triple():
         (f"lexd {lexd.PIN} (release)", True),
         # A longer version that merely EMBEDS the pin is not the pin — the
         # tightened token match rejects what a bare `PIN in output` accepted.
-        (f"lexd {lexd.PIN}5", False),  # 0.18.25 starts with 0.18.2
-        (f"lexd 1{lexd.PIN}5", False),  # 10.18.25 embeds 0.18.2
+        (f"lexd {lexd.PIN}5", False),  # 0.19.15 starts with 0.19.1
+        (f"lexd 1{lexd.PIN}5", False),  # 10.19.15 embeds 0.19.1
         # A pre-release / build-metadata suffix is not the pinned release: the
         # right-edge guard is whitespace-or-end, not a word boundary (which sits
         # between the trailing digit and a `-`/`+`).
