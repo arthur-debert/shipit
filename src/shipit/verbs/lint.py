@@ -30,6 +30,7 @@ hard-fail ``127``.
 
 from __future__ import annotations
 
+import functools
 import logging
 import re
 import sys
@@ -377,10 +378,20 @@ def drop_ignored(paths: list[str], patterns: list[str]) -> list[str]:
 #: Gitignore-style directory patterns (the same ``.treeinclude`` engine the
 #: consumer ``[lint].ignore`` seam uses): each floats to any depth and drops the
 #: whole subtree. Unlike ``[lint].ignore`` (opt-in, applies in BOTH modes), this
-#: guard is ALWAYS ON and MUTATION-ONLY — it is applied only to the batch of a
-#: tool running its in-place fix form (see :func:`run`), so check mode — the CI
-#: gate — still lints these files and a genuinely-broken fixture is still
-#: reported; only the destructive auto-rewrite is refused.
+#: guard is ALWAYS ON and MUTATION-ONLY. It is enforced two ways, both in
+#: :func:`run`: a batch fixer (markdownlint, prettier, shfmt, ruff) has these
+#: paths dropped from its file batch (:func:`drop_protected_testdata`); the
+#: per-manifest Rust formatter (``cargo fmt``) takes no file batch and rewrites a
+#: whole crate — reaching a protected ``.rs`` via a ``mod`` decl or a fixture
+#: that is itself a crate — so it is snapshotted and any protected ``.rs`` it
+#: rewrites is restored byte-for-byte (:func:`protected_testdata`, #502).
+#:
+#: CHECK mode still runs every tool over these files, so a genuinely-broken
+#: fixture is still reported; only the destructive auto-rewrite is refused. The
+#: ONE exception is markdown, spared in check mode too — but by a SEPARATE
+#: mechanism, not this guard: the managed ``.markdownlintignore`` lists these
+#: same dirs so ``markdownlint`` skips them regardless of argv (malformed
+#: markdown is a common fixture genre; see docs/prd/lint-checks.md).
 PROTECTED_TESTDATA_GLOBS: tuple[str, ...] = (
     "fixtures/",
     "__fixtures__/",
@@ -392,18 +403,44 @@ PROTECTED_TESTDATA_GLOBS: tuple[str, ...] = (
 )
 
 
+@functools.cache
+def _protected_matchers() -> tuple[include.PatternSet, ...]:
+    """The compiled :data:`PROTECTED_TESTDATA_GLOBS` matchers, built ONCE.
+
+    The glob list is a module constant, so the matchers never vary — caching
+    them at module level makes the ``run`` loop's repeated guard calls (once per
+    mutating tool, NOT per file) genuinely compile-once, and lets the guard
+    functions below say "compiled ONCE" truthfully.
+    """
+    return tuple(_ignore_matchers(list(PROTECTED_TESTDATA_GLOBS)))
+
+
 def drop_protected_testdata(paths: list[str]) -> list[str]:
     """``paths`` with every built-in protected test-data path removed, order preserved.
 
-    Pure. The MUTATION guard behind #500: applied to the batch handed to a tool
-    running its in-place fix form, so a fixture under a
-    :data:`PROTECTED_TESTDATA_GLOBS` directory is never auto-rewritten. Reuses
-    the same gitignore matcher as :func:`drop_ignored` (compiled ONCE here), so
-    the two seams share one matching semantics; a consumer needing MORE
+    Pure. The MUTATION guard behind #500: applied to the batch handed to a
+    batch-fixer running its in-place fix form, so a fixture under a
+    :data:`PROTECTED_TESTDATA_GLOBS` directory is never auto-rewritten. Shares
+    the module-cached matchers (:func:`_protected_matchers`, compiled ONCE) with
+    :func:`protected_testdata`, its exact complement; a consumer needing MORE
     exclusions still has the ``[lint].ignore`` seam.
     """
-    matchers = _ignore_matchers(list(PROTECTED_TESTDATA_GLOBS))
+    matchers = _protected_matchers()
     return [p for p in paths if not any(m.match(p) for m in matchers)]
+
+
+def protected_testdata(paths: list[str]) -> list[str]:
+    """The protected subset of ``paths`` — what :func:`drop_protected_testdata`
+    removes — order preserved. Pure.
+
+    The snapshot set for the per-manifest ``cargo fmt`` guard (#502): cargo
+    formats a whole crate and takes no file batch, so a protected ``.rs``
+    reachable via a ``mod`` decl (or a fixture that is itself a crate) can't be
+    kept off an argv the way a batch fixer's is. :func:`run` snapshots these
+    paths' bytes before the fix-form run and restores any the fixer rewrote.
+    """
+    matchers = _protected_matchers()
+    return [p for p in paths if any(m.match(p) for m in matchers)]
 
 
 def route(
@@ -514,6 +551,42 @@ def _shebang(path: Path) -> str | None:
 CHECK_TIMEOUT: float = execrun.DEFAULT_TIMEOUT
 
 
+def _snapshot(root: Path, rel_paths: list[str]) -> dict[str, bytes]:
+    """The pre-image bytes of each ``rel_paths`` file under ``root`` that exists.
+
+    The per-manifest fix guard's pre-image (#500/#502): ``cargo fmt`` rewrites a
+    whole crate and takes no file batch, so a protected ``.rs`` reachable via a
+    ``mod`` decl can't be kept off its argv the way a batch fixer's is. Instead
+    the verb snapshots the protected files, lets the fixer run, then restores any
+    it rewrote (see :func:`_restore`). A missing/unreadable path is simply not
+    snapshotted — there is then nothing to restore.
+    """
+    snapshot: dict[str, bytes] = {}
+    for rel in rel_paths:
+        try:
+            snapshot[rel] = (root / rel).read_bytes()
+        except OSError:
+            continue
+    return snapshot
+
+
+def _restore(root: Path, snapshot: dict[str, bytes]) -> list[str]:
+    """Rewrite each snapshot file a fixer changed back to its pre-image bytes;
+    return the restored paths. Only CHANGED files are written, so an untouched
+    fixture incurs no write. An unreadable/unwritable path is skipped.
+    """
+    restored: list[str] = []
+    for rel, original in snapshot.items():
+        path = root / rel
+        try:
+            if path.read_bytes() != original:
+                path.write_bytes(original)
+                restored.append(rel)
+        except OSError:
+            continue
+    return restored
+
+
 def _run_tool(binary: str, args: list[str], cwd: Path) -> execrun.ExecResult:
     """Run ``binary args`` in ``cwd`` through the one Exec runner.
 
@@ -621,17 +694,26 @@ def run(
             # Label from the actual argv that ran, so fix mode never claims it
             # ran the check form when it ran the fix form.
             label = f"{tool.binary} {' '.join(prefix)}".strip()
+            mutating = fix and tool.fix is not None
+            # #500 guard, per-manifest arm: a batch fixer can have protected
+            # paths dropped from its argv (the `else` below), but `cargo fmt`
+            # takes no file batch — it rewrites a whole crate, reaching a
+            # protected `.rs` via a `mod` decl (or a fixture that is itself a
+            # crate). So the fixer runs and any protected `.rs` it rewrites is
+            # restored byte-for-byte afterward (#502). Snapshot the pre-image
+            # here; the restore runs in the `finally` around the batch loop.
+            guard_snapshot: dict[str, bytes] | None = None
             if tool.per_manifest:
+                if mutating:
+                    guard_snapshot = _snapshot(root, protected_testdata(paths))
                 batches = [(list(prefix), mdir, f"crate {mdir}") for mdir in mdirs]
             else:
-                # A tool running its in-place fix form must NEVER rewrite a
-                # protected test-data fixture (#500): drop those paths from THIS
+                # A batch fixer running its in-place fix form must NEVER rewrite
+                # a protected test-data fixture (#500): drop those paths from THIS
                 # batch only. The guard is mutation-scoped — a tool running its
                 # check form (in either mode) still covers them, so the CI gate
                 # reports a genuinely-broken fixture; only the destructive
-                # auto-rewrite is refused. per_manifest tools (cargo) take no file
-                # batch, so they cannot rewrite an individual fixture file here.
-                mutating = fix and tool.fix is not None
+                # auto-rewrite is refused.
                 batch_paths = drop_protected_testdata(paths) if mutating else paths
                 if mutating and not batch_paths:
                     # Every file this fixer would touch is protected test-data —
@@ -644,52 +726,69 @@ def run(
                         f"{len(batch_paths)} file{'s' if len(batch_paths) != 1 else ''}"
                     )
                     batches = [([*prefix, *batch_paths], ".", count)]
-            for args, mdir, note in batches:
-                try:
-                    result = run_tool(tool.binary, args, root / mdir)
-                except execrun.ExecError as exc:
-                    # A binary missing from PATH (or any launch failure) is the
-                    # HARD-fail signal: 127 + a clear note, never a silent skip.
-                    # It propagates (the run's verdict fails), so ERROR + exception.
-                    rc = 127
-                    if exc.cause == execrun.CAUSE_MISSING_BINARY:
-                        out = (
-                            f"{tool.binary}: not found on PATH "
-                            "(the check is hard — provision it)"
+            try:
+                for args, mdir, note in batches:
+                    try:
+                        result = run_tool(tool.binary, args, root / mdir)
+                    except execrun.ExecError as exc:
+                        # A binary missing from PATH (or any launch failure) is the
+                        # HARD-fail signal: 127 + a clear note, never a silent skip.
+                        # It propagates (the run's verdict fails), so ERROR + exception.
+                        rc = 127
+                        if exc.cause == execrun.CAUSE_MISSING_BINARY:
+                            out = (
+                                f"{tool.binary}: not found on PATH "
+                                "(the check is hard — provision it)"
+                            )
+                        else:
+                            out = f"{tool.binary}: could not run: {exc}"
+                        logger.error(
+                            "lint tool could not run",
+                            exc_info=True,
+                            extra={
+                                "lang": lang.name,
+                                "tool": tool.binary,
+                                "rc": rc,
+                                "cwd": mdir,
+                                "batch": note,
+                            },
                         )
                     else:
-                        out = f"{tool.binary}: could not run: {exc}"
-                    logger.error(
-                        "lint tool could not run",
-                        exc_info=True,
-                        extra={
-                            "lang": lang.name,
-                            "tool": tool.binary,
-                            "rc": rc,
-                            "cwd": mdir,
-                            "batch": note,
-                        },
-                    )
-                else:
-                    rc, out = result.rc, result.stdout + result.stderr
-                    # Per-tool outcomes are mechanics; the run summary is the milestone.
-                    logger.debug(
-                        "lint tool finished",
-                        extra={
-                            "lang": lang.name,
-                            "tool": tool.binary,
-                            "rc": rc,
-                            "files": len(paths),
-                            "cwd": mdir,
-                            "batch": note,
-                            "duration_ms": result.duration_ms,
-                        },
-                    )
-                runs.append(ToolRun(lang.name, tool.binary, label, rc, out))
-                mark = "ok  " if rc == 0 else "FAIL"
-                print(f"  {mark} {lang.name:9} {label} ({note})")
-                if rc != 0 and out.strip():
-                    print(_indent(out.strip()))
+                        rc, out = result.rc, result.stdout + result.stderr
+                        # Per-tool outcomes are mechanics; the run summary is the milestone.
+                        logger.debug(
+                            "lint tool finished",
+                            extra={
+                                "lang": lang.name,
+                                "tool": tool.binary,
+                                "rc": rc,
+                                "files": len(paths),
+                                "cwd": mdir,
+                                "batch": note,
+                                "duration_ms": result.duration_ms,
+                            },
+                        )
+                    runs.append(ToolRun(lang.name, tool.binary, label, rc, out))
+                    mark = "ok  " if rc == 0 else "FAIL"
+                    print(f"  {mark} {lang.name:9} {label} ({note})")
+                    if rc != 0 and out.strip():
+                        print(_indent(out.strip()))
+            finally:
+                # #500/#502: undo any protected `.rs` the per-manifest fixer
+                # rewrote. In a `finally` so a fixer that half-rewrites before an
+                # error still leaves the fixtures byte-identical. No-op unless a
+                # snapshot was taken (mutating per-manifest run) and a file changed.
+                if guard_snapshot:
+                    restored = _restore(root, guard_snapshot)
+                    if restored:
+                        logger.debug(
+                            "lint restored protected fixtures after fix",
+                            extra={
+                                "lang": lang.name,
+                                "tool": tool.binary,
+                                "restored": len(restored),
+                            },
+                        )
 
     rc = verdict(runs)
     failed = sorted({f"{r.lang}:{r.binary}" for r in runs if not r.ok})

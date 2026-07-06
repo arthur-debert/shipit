@@ -213,6 +213,33 @@ def test_drop_protected_testdata_empty_is_identity():
     assert lint.drop_protected_testdata([]) == []
 
 
+def test_protected_testdata_is_the_exact_complement_of_drop():
+    # `protected_testdata` returns what `drop_protected_testdata` removes — the
+    # two partition the input, order preserved. It is the snapshot set for the
+    # per-manifest cargo-fmt guard (#502).
+    files = [
+        "src/lib.rs",
+        "tests/fixtures/bad.rs",
+        "README.md",
+        "a/testdata/x.json",
+    ]
+    assert lint.protected_testdata(files) == [
+        "tests/fixtures/bad.rs",
+        "a/testdata/x.json",
+    ]
+    assert lint.drop_protected_testdata(files) + lint.protected_testdata(files) == [
+        "src/lib.rs",
+        "README.md",
+        "tests/fixtures/bad.rs",
+        "a/testdata/x.json",
+    ]
+    # complement, no overlap
+    kept = set(lint.drop_protected_testdata(files))
+    dropped = set(lint.protected_testdata(files))
+    assert kept.isdisjoint(dropped)
+    assert kept | dropped == set(files)
+
+
 # --------------------------------------------------------------------------
 # The registry / Tool.argv
 # --------------------------------------------------------------------------
@@ -511,11 +538,13 @@ def test_fix_mode_never_rewrites_a_protected_fixture(tmp_path, capsys):
     assert not any("tests/fixtures/broken.md" in args for _, args in rec.calls)
 
 
-def test_check_mode_still_lints_protected_fixtures(tmp_path, capsys):
-    # The guard is MUTATION-only: in check mode the fixture IS linted, so the
-    # CI gate still reports a genuinely-broken fixture (markdownlint's own
-    # ignore file handles deliberately-malformed markdown separately, in the
-    # consumer's tree — the verb does not second-guess check-mode coverage).
+def test_check_mode_still_passes_protected_fixtures_to_the_checkers(tmp_path, capsys):
+    # The guard is MUTATION-only: in check mode the verb still hands the fixture
+    # to the tool's argv, so the CI gate reports a genuinely-broken fixture.
+    # (For MARKDOWN specifically, markdownlint then skips it via the managed
+    # `.markdownlintignore` — a separate mechanism in the consumer's tree that
+    # this verb does not model; here we assert only the verb-level behavior:
+    # check mode does not drop the path.)
     rec = _Recorder()
     rc = lint.run(
         str(tmp_path),
@@ -678,6 +707,97 @@ def test_fix_mode_applies_rustfmt_and_still_checks_clippy(tmp_path):
         "cargo",
         ("clippy", "--all", "--all-targets", "--all-features", "--", "-D", "warnings"),
     ) in rec.calls
+
+
+class _FakeCargoFmt:
+    """A run_tool that simulates `cargo fmt --all` rewriting EVERY tracked .rs
+    under its cwd (as real rustfmt would, following mod decls) — the fixture the
+    #502 snapshot/restore guard must protect. clippy / fmt --check don't mutate."""
+
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, binary, args, cwd):
+        self.calls.append((binary, tuple(args)))
+        mutating_fmt = binary == "cargo" and "fmt" in args and "--check" not in args
+        if mutating_fmt:
+            for rs in Path(cwd).rglob("*.rs"):
+                rs.write_text("// reformatted by the fixer\n")
+        return execrun.ExecResult(
+            argv=(binary, *args), rc=0, stdout="", stderr="", duration_ms=1
+        )
+
+
+def test_fix_mode_restores_a_mod_included_rust_fixture_cargo_fmt_rewrote(tmp_path):
+    # #502: `cargo fmt --all` takes no file batch and formats a whole crate, so a
+    # protected `.rs` reachable via a `mod` decl CANNOT be kept off its argv (and
+    # rustfmt's own `ignore` is nightly-only). The verb snapshots protected `.rs`
+    # and restores any the formatter rewrote: the fixture is byte-identical after
+    # --fix, while real crate source stays reformatted.
+    (tmp_path / "src").mkdir()
+    (tmp_path / "tests" / "fixtures").mkdir(parents=True)
+    real = tmp_path / "src" / "lib.rs"
+    fixture = tmp_path / "tests" / "fixtures" / "bad.rs"
+    real.write_text("pub fn a()->i32{1}\n")
+    original = "pub fn v()->i32{      1    }\n"  # deliberately malformed fixture
+    fixture.write_text(original)
+
+    fake = _FakeCargoFmt()
+    rc = lint.run(
+        str(tmp_path),
+        fix=True,
+        discover=_fake_discover(["Cargo.toml", "src/lib.rs", "tests/fixtures/bad.rs"]),
+        run_tool=fake,
+    )
+    assert rc == 0
+    # The protected fixture is restored byte-for-byte …
+    assert fixture.read_bytes() == original.encode()
+    # … while the real crate source is left reformatted.
+    assert real.read_text() == "// reformatted by the fixer\n"
+
+
+def test_fix_mode_restores_a_fixture_that_is_itself_a_crate(tmp_path):
+    # #502 (agy): a fixture that IS a tracked crate (its own Cargo.toml under a
+    # protected dir) becomes its own manifest root, so `cargo fmt` runs INSIDE
+    # it. Its `.rs` is still protected — snapshotted and restored.
+    (tmp_path / "tests" / "fixtures" / "bad-crate" / "src").mkdir(parents=True)
+    fixture = tmp_path / "tests" / "fixtures" / "bad-crate" / "src" / "lib.rs"
+    original = "pub fn v()->i32{      1    }\n"
+    fixture.write_text(original)
+
+    fake = _FakeCargoFmt()
+    rc = lint.run(
+        str(tmp_path),
+        fix=True,
+        discover=_fake_discover(
+            [
+                "tests/fixtures/bad-crate/Cargo.toml",
+                "tests/fixtures/bad-crate/src/lib.rs",
+            ]
+        ),
+        run_tool=fake,
+    )
+    assert rc == 0
+    assert fixture.read_bytes() == original.encode()
+
+
+def test_check_mode_does_not_snapshot_or_touch_rust_fixtures(tmp_path):
+    # The guard is mutation-only: check mode runs `cargo fmt --all -- --check`
+    # (non-mutating) and clippy, so a fixture .rs is neither rewritten nor
+    # restored — it is simply left as-is and reported on by the check.
+    (tmp_path / "tests" / "fixtures").mkdir(parents=True)
+    fixture = tmp_path / "tests" / "fixtures" / "bad.rs"
+    original = "pub fn v()->i32{      1    }\n"
+    fixture.write_text(original)
+
+    fake = _FakeCargoFmt()  # only rewrites the MUTATING fmt form, not --check
+    rc = lint.run(
+        str(tmp_path),
+        discover=_fake_discover(["Cargo.toml", "tests/fixtures/bad.rs"]),
+        run_tool=fake,
+    )
+    assert rc == 0
+    assert fixture.read_bytes() == original.encode()
 
 
 def test_shell_routed_by_shebang_runs_shellcheck(tmp_path, capsys):

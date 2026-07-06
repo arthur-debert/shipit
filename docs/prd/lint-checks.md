@@ -208,19 +208,31 @@ hand a deliberately-malformed or byte-exact test fixture to an in-place fixer
 (`markdownlint --fix`, `prettier --write`, `shfmt -w`, `ruff --fix`, `cargo fmt`),
 silently corrupting the very tests the fixture backs.
 
-The durable fix is a built-in, always-on guard: `--fix` drops any path under a
+The durable fix is a built-in, always-on guard over any path under a
 conventional test-data directory — `fixtures/`, `__fixtures__/`, `testdata/`,
 `golden/`, `goldens/`, `snapshots/`, `__snapshots__/` (`lint.PROTECTED_TESTDATA_GLOBS`,
-gitignore-style, matched by the same `.treeinclude` engine as the consumer seam) —
-from the batch of any tool running its in-place fix form. Two deliberate scoping
-choices:
+gitignore-style, matched by the same `.treeinclude` engine as the consumer seam).
+It is enforced two ways, because the fixers come in two shapes:
 
-- **Mutation-only.** The guard is applied ONLY to a mutating fix-form batch, so
-  CHECK mode — the CI gate — still lints these files and a genuinely-broken
-  fixture is still reported; only the destructive auto-rewrite is refused. A
-  tool with no fixer (shellcheck, yamllint, lexd) still covers a fixture even
+- A **batch fixer** (`markdownlint --fix`, `prettier --write`, `shfmt -w`,
+  `ruff --fix`) takes a file list, so the protected paths are simply dropped
+  from its batch — the fixer never sees them (`drop_protected_testdata`).
+- The **per-manifest Rust formatter** (`cargo fmt`) takes NO file list: it
+  rewrites a whole crate, reaching a protected `.rs` via a `mod` decl (or a
+  fixture that is itself a crate), and `rustfmt`'s own `ignore` config is
+  nightly-only (#502). So the verb snapshots the protected `.rs` bytes before
+  the fix-form run and restores any the formatter rewrote (`protected_testdata`
+  + `_snapshot`/`_restore`) — the net effect is the same: the fixture is
+  byte-identical after `--fix`, while real crate files stay formatted.
+
+Two deliberate scoping choices:
+
+- **Mutation-only.** The guard touches ONLY a mutating fix-form run, so CHECK
+  mode — the CI gate — still lints these files and a genuinely-broken fixture is
+  still reported; only the destructive auto-rewrite is refused. A tool with no
+  fixer (shellcheck, yamllint, lexd, `cargo clippy`) still covers a fixture even
   during a `--fix` run.
-- **Verb-level, tool-agnostic.** The drop happens in the verb, not per-linter, so
+- **Verb-level, tool-agnostic.** The guard lives in the verb, not per-linter, so
   it holds for the fixers that have NO ignore-file of their own (shfmt, ruff,
   cargo fmt) as well as the ones that do — a per-tool ignore would be a partial
   guarantee.
