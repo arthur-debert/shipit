@@ -573,9 +573,13 @@ class _LocalReviewAdapter(ReviewerAdapter):
         Any failure in the SYNCHRONOUS part — a `gh`/auth failure resolving the PR,
         a spawn failure — is normalized to `PrStateError`, the one error type the
         `pr review request` CLI renders as a clean message + exit 1, so a request
-        never crashes with a raw traceback. (A failure INSIDE the detached child
-        resolves to a visible failed/timed-out check run on the PR, not to this
-        return — that is the whole point of detaching.)
+        never crashes with a raw traceback. An EXPECTED, operator-actionable auth
+        failure (`ReviewAuthError` — e.g. the optional `review` extra / pyjwt is
+        absent) already carries its own install hint, so it is surfaced as that
+        clean message WITHOUT the ERROR-level traceback spray reserved for a
+        genuinely-unexpected crash. (A failure INSIDE the detached child resolves
+        to a visible failed/timed-out check run on the PR, not to this return —
+        that is the whole point of detaching.)
         """
         # Lazy: keep the optional `review`/pyjwt import off the detection path
         # and out of every non-local reviewer. `review` never imports `prstate`,
@@ -598,8 +602,28 @@ class _LocalReviewAdapter(ReviewerAdapter):
         if entry.timeout is not None:
             run_kwargs["timeout"] = entry.timeout
 
+        # Lazy, same reason as `service` above: `ReviewAuthError` lives in the
+        # optional `review` package, so name it only here — where that package has
+        # just imported cleanly — not at module top on the always-loaded path.
+        from ..review.ghauth import ReviewAuthError
+
         try:
             started = service.start_detached_review(self.backend, pr, **run_kwargs)
+        except ReviewAuthError as exc:
+            # An EXPECTED, operator-actionable auth failure (e.g. the `review`
+            # extra / pyjwt is absent) — it already carries a clean install hint.
+            # Surface that hint as the CLI-clean PrStateError; NO traceback spray,
+            # so the operator reads the fix, not a raw `ModuleNotFoundError` dump.
+            logger.debug(
+                "reviewer %s: local review auth failed on pr#%s: %s",
+                self.display_name,
+                pr.number,
+                exc,
+                extra={"reviewer": self.display_name, "pr": pr.number},
+            )
+            raise PrStateError(
+                f"{self.funnel_reviewer_name()} review failed on #{pr.number}: {exc}"
+            ) from exc
         except Exception as exc:
             # A propagating failure (glassbox spray): the request act died before
             # the review could even detach — record it at ERROR with the exception

@@ -564,6 +564,49 @@ def test_local_request_normalizes_failure_to_prstateerror(monkeypatch, tmp_path)
     assert "backend CLI exploded" in str(excinfo.value.__cause__)
 
 
+def test_local_request_surfaces_reviewauth_hint_without_traceback_spray(
+    monkeypatch, tmp_path, caplog
+):
+    # #522: an EXPECTED auth failure — the `review` extra / pyjwt is absent when the
+    # coordinator drives `shipit pr next` in the default env — must surface the
+    # ReviewAuthError's already-actionable install hint as a clean PrStateError,
+    # NOT a raw `ModuleNotFoundError` traceback sprayed at ERROR.
+    import logging
+
+    from shipit.review import service
+    from shipit.review.ghauth import ReviewAuthError
+
+    hint = (
+        "Posting a review as a GitHub App needs PyJWT ... re-run the same command "
+        "there, e.g. `pixi run -e review shipit pr next`. Or install it directly: "
+        "shipit with the `review` extra."
+    )
+
+    def boom(agent, pr, **kwargs):
+        raise ReviewAuthError(hint)
+
+    monkeypatch.setattr(service, "start_detached_review", boom)
+    monkeypatch.chdir(tmp_path)
+
+    with caplog.at_level(logging.DEBUG):
+        with pytest.raises(PrStateError) as excinfo:
+            CODEX.request(_target(7))
+
+    # The actionable hint (naming the `review` env / extra) rode into the clean
+    # PrStateError message the CLI renders + exit 1.
+    msg = str(excinfo.value)
+    assert "pixi run -e review" in msg
+    assert "review` extra" in msg
+    assert isinstance(excinfo.value.__cause__, ReviewAuthError)
+    # No ERROR-level record carrying a traceback (`exc_info`) escaped for this
+    # KNOWN case — the glassbox spray is reserved for genuinely-unexpected crashes.
+    assert not [
+        r
+        for r in caplog.records
+        if r.levelno >= logging.ERROR and r.exc_info is not None
+    ]
+
+
 def test_local_cancel_is_a_noop():
     # A posted review can't be withdrawn — cancel returns False, like a
     # no-mechanism backend.
