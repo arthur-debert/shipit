@@ -538,6 +538,34 @@ def test_fix_mode_never_rewrites_a_protected_fixture(tmp_path, capsys):
     assert not any("tests/fixtures/broken.md" in args for _, args in rec.calls)
 
 
+def test_fix_mode_reports_the_post_drop_count_in_note_and_log(tmp_path, capsys, caplog):
+    # Round-2 review (copilot): both the printed `(N files)` note and the
+    # `files:` debug-log field must reflect the POST-drop batch actually handed
+    # to the fixer, not the pre-drop routed count — else troubleshooting sees a
+    # count inconsistent with the argv. Two markdown files route, one is a
+    # fixture that gets dropped, so the fixer runs over exactly ONE file.
+    rec = _Recorder()
+    with caplog.at_level("DEBUG", logger="shipit.lint"):
+        rc = lint.run(
+            str(tmp_path),
+            fix=True,
+            discover=_fake_discover(["README.md", "tests/fixtures/broken.md"]),
+            run_tool=rec,
+        )
+    assert rc == 0
+    # Printed note: post-drop count (singular).
+    assert "markdownlint --fix (1 file)" in capsys.readouterr().out
+    # Debug log: the `files` field matches the argv (1), not the routed 2.
+    finished = [
+        r
+        for r in caplog.records
+        if r.getMessage() == "lint tool finished"
+        and getattr(r, "tool", None) == "markdownlint"
+    ]
+    assert finished, "expected a 'lint tool finished' record for markdownlint"
+    assert all(r.files == 1 for r in finished)
+
+
 def test_check_mode_still_passes_protected_fixtures_to_the_checkers(tmp_path, capsys):
     # The guard is MUTATION-only: in check mode the verb still hands the fixture
     # to the tool's argv, so the CI gate reports a genuinely-broken fixture.

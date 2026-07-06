@@ -706,7 +706,10 @@ def run(
             if tool.per_manifest:
                 if mutating:
                     guard_snapshot = _snapshot(root, protected_testdata(paths))
-                batches = [(list(prefix), mdir, f"crate {mdir}") for mdir in mdirs]
+                # cargo takes NO file batch — 0 files on the argv (it speaks to
+                # the crate, not a file list), so the reported count matches what
+                # actually ran.
+                batches = [(list(prefix), mdir, f"crate {mdir}", 0) for mdir in mdirs]
             else:
                 # A batch fixer running its in-place fix form must NEVER rewrite
                 # a protected test-data fixture (#500): drop those paths from THIS
@@ -725,9 +728,9 @@ def run(
                     count = (
                         f"{len(batch_paths)} file{'s' if len(batch_paths) != 1 else ''}"
                     )
-                    batches = [([*prefix, *batch_paths], ".", count)]
+                    batches = [([*prefix, *batch_paths], ".", count, len(batch_paths))]
             try:
-                for args, mdir, note in batches:
+                for args, mdir, note, nfiles in batches:
                     try:
                         result = run_tool(tool.binary, args, root / mdir)
                     except execrun.ExecError as exc:
@@ -762,7 +765,11 @@ def run(
                                 "lang": lang.name,
                                 "tool": tool.binary,
                                 "rc": rc,
-                                "files": len(paths),
+                                # The count actually handed to the tool on THIS
+                                # batch's argv — post-#500-drop for a batch fixer,
+                                # 0 for a per-manifest tool (cargo takes none) —
+                                # so the log matches the argv and the printed note.
+                                "files": nfiles,
                                 "cwd": mdir,
                                 "batch": note,
                                 "duration_ms": result.duration_ms,
