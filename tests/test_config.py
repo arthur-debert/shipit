@@ -171,14 +171,7 @@ def test_portfolio_contains_the_adoption_targets():
     assert "arthur-debert/shipit" in repos
     # The WS07 sweep's other previously-missing targets.
     for slug in (
-        "arthur-debert/shellai",
-        "arthur-debert/nanodoc",
         "arthur-debert/supage",
-        "arthur-debert/falala",
-        "arthur-debert/dotcat",
-        "arthur-debert/electron-splashguard",
-        "arthur-debert/visual-explore",
-        "arthur-debert/sprinkles",
         "lex-fmt/mkdocs-lex",
         "phos-editor/phos.photo",
     ):

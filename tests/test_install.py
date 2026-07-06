@@ -411,11 +411,18 @@ def test_load_units_includes_the_lint_tool_configs():
         assert unit.content == iunits.data_bytes(data_file)
 
 
-def test_managed_markdownlint_config_relaxes_exactly_two_rules():
-    """MD013/MD041 off for the managed set's markdown genre; every other rule
-    stays at markdownlint's defaults so real structural issues still fail."""
+def test_managed_markdownlint_config_relaxes_the_changelog_genre_rules():
+    """MD013/MD041 off + MD024->siblings_only + MD033 off for the managed set's
+    markdown/changelog genre; every other rule stays at markdownlint's defaults
+    so real structural issues still fail."""
     cfg = yaml.safe_load(iunits.data_bytes("markdownlint.yaml"))
-    assert cfg == {"default": True, "MD013": False, "MD041": False}
+    assert cfg == {
+        "default": True,
+        "MD013": False,
+        "MD041": False,
+        "MD024": {"siblings_only": True},
+        "MD033": False,
+    }
 
 
 def test_managed_yamllint_config_extends_default_with_three_relaxations():
