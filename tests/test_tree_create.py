@@ -303,6 +303,68 @@ def test_clone_dissociated_survives_a_commit_graph_bearing_reference(
     )
 
 
+def test_clone_dissociated_dereferences_a_linked_worktree_reference(
+    tmp_path: Path, remote: Path, reference: Path, caplog
+):
+    """#509, against REAL git: when the ``--reference`` donor is a git LINKED
+    worktree (the shape ``Agent(isolation: worktree)`` hands the review funnel as
+    a PR's source workdir), the stock ``clone --reference`` refuses it — ``fatal:
+    reference repository '<path>' as a linked checkout is not supported yet`` —
+    and the read-only review clone died at launch, silently losing the local
+    (codex/agy) review. ``clone_dissociated`` must dereference the worktree to its
+    shared common gitdir (a normal, valid ``--reference`` source) so the borrow
+    still works and the clone comes back independent (ADR-0014: no alternates)."""
+    # A real linked worktree off the reference checkout, on its own branch.
+    linked = tmp_path / "linked-wt"
+    _git(["worktree", "add", "-b", "wt-branch", str(linked)], cwd=reference)
+    # Sanity: it is a LINKED worktree (its `.git` is a pointer FILE, not a dir),
+    # so this fixture really models the shape git 2.54 refuses as a reference.
+    assert (linked / ".git").is_file()
+
+    dest = tmp_path / "clone-under-test"
+    with caplog.at_level(logging.INFO, logger="shipit.git"):
+        # file:// forces the real pack transport, matching the funnel's clone.
+        git.clone_dissociated(remote.as_uri(), str(dest), reference=str(linked))
+
+    # A real, checked-out, INDEPENDENT clone came back (no "linked checkout is
+    # not supported" ExecError), carrying the upstream content...
+    assert (dest / "README.md").read_text() == "hello tree\n"
+    # ...and --dissociate held: no alternates link back to the deref'd donor.
+    assert not (dest / ".git" / "objects" / "info" / "alternates").exists()
+    # The deref was narrated so the trail shows the worktree was dereferenced.
+    assert any(
+        r.name == "shipit.git"
+        and r.levelno == logging.INFO
+        and str(linked) in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def test_resolve_reference_donor_derefs_worktree_but_passes_normal_through(
+    tmp_path: Path, reference: Path
+):
+    """The #509 helper in isolation, against REAL git dirs:
+
+    - a NORMAL checkout is returned VERBATIM (its per-worktree gitdir IS the
+      common dir), so the fast common path is never perturbed; and
+    - a LINKED worktree is dereferenced to its shared common gitdir — the
+      repo's ``.git`` — which is what ``--reference`` can actually borrow from.
+    """
+    # Normal checkout → unchanged.
+    assert git._resolve_reference_donor(str(reference)) == str(reference)
+
+    # A non-git path → unchanged (the probe fails; the normal path is untouched).
+    plain = tmp_path / "not-a-repo"
+    plain.mkdir()
+    assert git._resolve_reference_donor(str(plain)) == str(plain)
+
+    # Linked worktree → the shared common gitdir (the reference's `.git`).
+    linked = tmp_path / "linked-wt2"
+    _git(["worktree", "add", "-b", "wt2", str(linked)], cwd=reference)
+    resolved = git._resolve_reference_donor(str(linked))
+    assert Path(resolved) == (reference / ".git").resolve()
+
+
 def test_central_root_is_absolute_and_outside_any_claude_dir(monkeypatch):
     """The central root every Tree hangs off is absolute and `.claude`-free, so a Tree
     provisioned WITHOUT an explicit root (the WorktreeCreate hook path, which calls
