@@ -19,7 +19,6 @@ from collections.abc import Mapping
 from typing import Any
 
 from ...agent import invocation as agent_invocation
-from ..role import Role
 from .variant import role_of_meta, role_of_name
 
 #: Bump when the record's field set changes, so an aggregator can read mixed stores.
@@ -154,9 +153,11 @@ def _role_name(
       neither the coordinator nor a guessed worker.
     """
     if is_coordinator:
-        if str(spawned_role or "").strip():
-            return role_of_name(spawned_role).value
-        return Role.COORDINATOR.value
+        # A spawned top-level Run's role rides in as ``spawned_role``; a
+        # blank/``None`` (the genuine interactive coordinator) resolves to
+        # ``coordinator``, so the one call covers both the spawned-role override
+        # and the coordinator default.
+        return role_of_name(spawned_role).value
     if not str(meta.get("agentType") or "").strip():
         return _UNKNOWN_SUBAGENT_ROLE
     return role_of_meta(meta).value
