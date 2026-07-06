@@ -23,6 +23,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from conftest import PIXI_ABSENCE_GUARD
 
 from shipit import config, execrun, gh, git
 from shipit.execrun import ExecError
@@ -298,18 +299,6 @@ def _managed_lefthook() -> dict:
     return yaml.safe_load(iunits.data_bytes("lefthook.yml"))
 
 
-# The pixi-absence fail-open guard (#482) every managed hook leg is prefixed
-# with: a `command -v pixi` probe that skips (note + `exit 0`) when pixi is not
-# on PATH, so a pixi-less environment (a consumer's legacy CI spine) is not
-# regressed to red. Where pixi IS present the guard falls through and the full
-# gate runs. Kept as one shared constant so a drift shows up in one place.
-_PIXI_GUARD = (
-    'command -v pixi >/dev/null 2>&1 || { echo "shipit: pixi not on PATH — '
-    "skipping this managed hook (pixi-less environment; the full gate runs "
-    'wherever pixi is provisioned)."; exit 0; }; '
-)
-
-
 def test_managed_lefthook_is_consumer_generic():
     """Every hook leg of the managed caller fails open when pixi is absent
     (#482), then runs through the pinned lint env and invokes only the managed
@@ -322,9 +311,9 @@ def test_managed_lefthook_is_consumer_generic():
         for cmd in hook["commands"].values():
             run = cmd["run"]
             # Fail-open on pixi absence guards every leg (#482)...
-            assert run.startswith(_PIXI_GUARD)
+            assert run.startswith(PIXI_ABSENCE_GUARD)
             assert "exit 0" in run
-            pixi_part = run[len(_PIXI_GUARD) :]
+            pixi_part = run[len(PIXI_ABSENCE_GUARD) :]
             # ...then everything rides the pinned lint env (never bare
             # `pixi run`)...
             assert pixi_part.startswith("pixi run -e lint ")
@@ -342,14 +331,14 @@ def test_managed_lefthook_is_consumer_generic():
     # test_logevent.py's managed-hook-tier test.)
     assert cfg["pre-commit"]["piped"] is True
     lint = cfg["pre-commit"]["commands"]["lint"]
-    assert lint == {"priority": 2, "run": _PIXI_GUARD + "pixi run -e lint lint"}
+    assert lint == {"priority": 2, "run": PIXI_ABSENCE_GUARD + "pixi run -e lint lint"}
     assert (
         cfg["pre-push"]["commands"]["lint"]["run"]
-        == _PIXI_GUARD + "pixi run -e lint lint"
+        == PIXI_ABSENCE_GUARD + "pixi run -e lint lint"
     )
     assert (
         cfg["pre-push"]["commands"]["classify-gate"]["run"]
-        == _PIXI_GUARD + "pixi run -e lint ./bin/shipit pr push-gate"
+        == PIXI_ABSENCE_GUARD + "pixi run -e lint ./bin/shipit pr push-gate"
     )
 
     # The invoked task and environment exist in the managed pixi blocks, so a
@@ -938,12 +927,15 @@ def test_load_units_includes_the_worktreecreate_adapter_hook():
     # WorktreeCreate binds to no tool, so the entry carries no matcher — and the
     # command is consumer-generic (same shape as shipit's own settings entry).
     # It invokes the PINNED launcher `./bin/shipit` (#481, ADR-0033) resolved via
-    # the harness-provided project dir (these hooks may run from a CWD that is
-    # not the repo root, unlike lefthook which runs at the root).
+    # the harness-provided project dir. These hooks may run from a CWD that is not
+    # the repo root (unlike lefthook, which runs at the root), so the command first
+    # `cd`s into `$CLAUDE_PROJECT_DIR` — anchoring BOTH the relative launcher path
+    # AND pixi's manifest resolution to the project (a bare `pixi run` from a
+    # foreign CWD could otherwise pick up an inherited/parent pixi project).
     assert "matcher" not in entry
     assert (
         entry["hooks"][0]["command"]
-        == 'pixi run "$CLAUDE_PROJECT_DIR"/bin/shipit hook worktreecreate'
+        == 'cd "$CLAUDE_PROJECT_DIR" && pixi run ./bin/shipit hook worktreecreate'
     )
     # The `shipit hook worktreecreate` marker still appears verbatim in the
     # command (the launcher path ends in `bin/shipit`), so reconcile keeps

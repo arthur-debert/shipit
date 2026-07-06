@@ -1,7 +1,7 @@
 {
   "hooks": [
     {
-      "command": "pixi run \"$CLAUDE_PROJECT_DIR\"/bin/shipit hook sessionstart",
+      "command": "cd \"$CLAUDE_PROJECT_DIR\" && pixi run ./bin/shipit hook sessionstart",
       "type": "command"
     }
   ]

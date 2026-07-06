@@ -251,5 +251,10 @@ def test_repo_settings_wire_the_hook():
     events = settings["hooks"]["WorktreeRemove"]
     commands = [h["command"] for entry in events for h in entry["hooks"]]
     # Rides the PINNED launcher `./bin/shipit` resolved via the harness project
-    # dir (#481, ADR-0033), not a bare PATH `shipit`.
-    assert 'pixi run "$CLAUDE_PROJECT_DIR"/bin/shipit hook worktreeremove' in commands
+    # dir (#481, ADR-0033), not a bare PATH `shipit`. The command `cd`s into
+    # `$CLAUDE_PROJECT_DIR` first so both the relative launcher and pixi's manifest
+    # resolution are anchored to the project even when the hook runs from a foreign CWD.
+    assert (
+        'cd "$CLAUDE_PROJECT_DIR" && pixi run ./bin/shipit hook worktreeremove'
+        in commands
+    )

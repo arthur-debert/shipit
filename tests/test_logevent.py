@@ -26,6 +26,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from conftest import PIXI_ABSENCE_GUARD
 
 from shipit import events, logcontext, logsetup
 from shipit.identity import Sha, repo_from_slug
@@ -295,13 +296,9 @@ def test_managed_lefthook_config_wires_the_post_commit_emission():
     raw = resources.files("shipit.data").joinpath("lefthook.yml").read_bytes()
     config = yaml.safe_load(raw)
     entry = config["post-commit"]["commands"]["dev-cycle-event"]
-    guard = (
-        'command -v pixi >/dev/null 2>&1 || { echo "shipit: pixi not on PATH — '
-        "skipping this managed hook (pixi-less environment; the full gate runs "
-        'wherever pixi is provisioned)."; exit 0; }; '
-    )
     assert entry["run"] == (
-        guard + "pixi run -e lint ./bin/shipit log event commit.created --from-hook"
+        PIXI_ABSENCE_GUARD
+        + "pixi run -e lint ./bin/shipit log event commit.created --from-hook"
     )
 
 

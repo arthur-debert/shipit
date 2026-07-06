@@ -58,6 +58,19 @@ def load_context(
     )
 
 
+#: The pixi-absence fail-open guard (#482) every managed lefthook leg is prefixed
+#: with: a `command -v pixi` probe that skips (note + `exit 0`) when pixi is not on
+#: PATH, so a pixi-less environment (a consumer's legacy CI spine) is not regressed
+#: to red. This is the SINGLE source of the expected string — both the install and
+#: logevent managed-hook tests assert the packaged legs carry it, so a drift in the
+#: product's guard text shows up in exactly one place here.
+PIXI_ABSENCE_GUARD = (
+    'command -v pixi >/dev/null 2>&1 || { echo "shipit: pixi not on PATH — '
+    "skipping this managed hook (pixi-less environment; the full gate runs "
+    'wherever pixi is provisioned)."; exit 0; }; '
+)
+
+
 @pytest.fixture
 def context():
     """Return the loader so a test can pick its scenario: `context('name')`."""
