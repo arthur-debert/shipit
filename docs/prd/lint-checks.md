@@ -195,6 +195,29 @@ it does not edit it. This is distinct from the zero-config lex-projection rule
 its `X.lex` source is tracked — the ignore seam is the explicit escape hatch for
 everything that rule can't infer.
 
+### Editorconfig hermeticity (#493)
+
+Pinned tool binaries make the gate reproducible only if the CONFIG context is
+pinned too. `shfmt` and `prettier` both honor an `.editorconfig` — and both walk
+up past the git root, so a dev's `~/.editorconfig`, an ancestor directory, or an
+untracked file another tool symlinked into the working tree can flip the verdict:
+the SAME commit that passes in a bare clone can demand a 200-line reformat in a
+co-resident checkout (the phos-core step-9 smoke, #472). A hermetic gate must
+give the same verdict regardless of checkout path or co-resident tooling.
+
+So `shipit lint` pins the editorconfig-aware tools to the repo's TRACKED config
+only. If the repo tracks NO `.editorconfig` of its own, it runs `shfmt` with an
+explicit `-i 0` (any formatting flag makes shfmt ignore `.editorconfig` entirely;
+`0` is its tab default) and `prettier` with `--no-editorconfig` — so an
+ambient/injected/ancestor `.editorconfig` is never consumed. If the repo DOES
+track an `.editorconfig` (root or nested), it OWNS its formatting config — the
+file travels with every checkout, so the verdict is already commit-determined —
+and the tools are left to honor it (shipit's own 4-space, indented-case shell
+house style depends on shfmt reading the tracked `.editorconfig`). The pin is
+tree-wide (shfmt/prettier run once at the root), so keying it on tracking ANY
+`.editorconfig` is deliberate: a repo with a legitimately nested tracked config
+must not be pinned, which would override its committed intent.
+
 ### Verified by
 
 On shipit itself, `pixi run lint` and the lefthook pre-commit hook run the

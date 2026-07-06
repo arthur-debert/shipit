@@ -5,6 +5,8 @@ speaking the runner's ExecResult/ExecError contract), so the orchestration is
 exercised with no real linters present.
 """
 
+import shutil
+
 import pytest
 
 from shipit import execrun
@@ -209,6 +211,61 @@ def test_rust_tools_argv_forms():
 def test_every_lang_has_at_least_one_tool():
     for lang in lint.LANGS:
         assert lang.tools, f"{lang.name} has no tools"
+
+
+# --------------------------------------------------------------------------
+# Editorconfig hermeticity pin (#493) — pure signal + argv gating
+# --------------------------------------------------------------------------
+
+
+def test_tracks_editorconfig_root_and_nested():
+    # A repo that commits an .editorconfig (root OR nested) owns its config.
+    assert lint.tracks_editorconfig([".editorconfig", "a.sh"])
+    assert lint.tracks_editorconfig(["sub/dir/.editorconfig", "sub/dir/a.sh"])
+    # A repo that tracks none is the pinned shape (phos-core).
+    assert not lint.tracks_editorconfig(["a.sh", "b.json", "README.md"])
+    # A file merely NAMED like it, but not exactly .editorconfig, does not count.
+    assert not lint.tracks_editorconfig(["my.editorconfig.bak", "x.editorconfig.md"])
+
+
+def test_shfmt_pin_gated_on_tracked_editorconfig():
+    shfmt = lint.SHELL.tools[1]
+    assert shfmt.binary == "shfmt"
+    # Pinned (no tracked .editorconfig): `-i 0` is prepended so shfmt ignores any
+    # ambient .editorconfig and defaults to tabs.
+    assert shfmt.argv(fix=False, pin_editorconfig=True) == ("-i", "0", "-d")
+    assert shfmt.argv(fix=True, pin_editorconfig=True) == ("-i", "0", "-w")
+    # Unpinned (repo tracks its own): shfmt reads the tracked config, no pin.
+    assert shfmt.argv(fix=False, pin_editorconfig=False) == ("-d",)
+    assert shfmt.argv(fix=True, pin_editorconfig=False) == ("-w",)
+
+
+def test_prettier_pin_gated_on_tracked_editorconfig():
+    prettier = lint.JSON.tools[0]
+    assert prettier.binary == "prettier"
+    assert prettier.argv(fix=False, pin_editorconfig=True) == (
+        "--no-editorconfig",
+        "--check",
+        "--log-level",
+        "warn",
+    )
+    assert prettier.argv(fix=True, pin_editorconfig=True) == (
+        "--no-editorconfig",
+        "--write",
+    )
+    assert prettier.argv(fix=False, pin_editorconfig=False) == (
+        "--check",
+        "--log-level",
+        "warn",
+    )
+
+
+def test_non_editorconfig_tool_ignores_the_pin():
+    # A tool with no editorconfig_pin is unaffected by pin_editorconfig — the
+    # gate only ever prepends flags to shfmt/prettier.
+    ruff_check = lint.PYTHON.tools[0]
+    assert ruff_check.editorconfig_pin == ()
+    assert ruff_check.argv(fix=False, pin_editorconfig=True) == ("check",)
 
 
 # --------------------------------------------------------------------------
@@ -576,6 +633,73 @@ def test_lint_ignore_directory_prefix_drops_generated_subtree(tmp_path, capsys):
     assert "LINT: OK" in capsys.readouterr().out
     md_batches = [args for binary, args in run_tool.calls if binary == "markdownlint"]
     assert md_batches == [("README.md",)]
+
+
+# --------------------------------------------------------------------------
+# Editorconfig hermeticity pin (#493) — end-to-end through run()
+# --------------------------------------------------------------------------
+
+
+def test_run_pins_shfmt_and_prettier_when_no_editorconfig_tracked(tmp_path):
+    # A repo tracking NO .editorconfig: shfmt/prettier are pinned to ignore any
+    # ambient .editorconfig, so the argv carries the pin flags ahead of the files.
+    rec = _Recorder()
+    rc = lint.run(
+        str(tmp_path),
+        discover=_fake_discover(["run.sh", "data.json"]),
+        run_tool=rec,
+    )
+    assert rc == 0
+    assert ("shfmt", ("-i", "0", "-d", "run.sh")) in rec.calls
+    assert (
+        "prettier",
+        ("--no-editorconfig", "--check", "--log-level", "warn", "data.json"),
+    ) in rec.calls
+
+
+def test_run_does_not_pin_when_repo_tracks_editorconfig(tmp_path):
+    # A repo that commits its own .editorconfig owns its formatting config: the
+    # pin is OFF so shfmt/prettier honor the tracked file (shipit's own shape).
+    rec = _Recorder()
+    rc = lint.run(
+        str(tmp_path),
+        discover=_fake_discover([".editorconfig", "run.sh", "data.json"]),
+        run_tool=rec,
+    )
+    assert rc == 0
+    assert ("shfmt", ("-d", "run.sh")) in rec.calls
+    assert (
+        "prettier",
+        ("--check", "--log-level", "warn", "data.json"),
+    ) in rec.calls
+
+
+@pytest.mark.skipif(
+    shutil.which("shfmt") is None or shutil.which("shellcheck") is None,
+    reason="shell linters (shfmt/shellcheck) not on PATH in this env",
+)
+def test_shfmt_verdict_is_hermetic_across_ambient_editorconfig(tmp_path):
+    """The guarantee (#493): a tab-indented shell script yields the SAME lint
+    verdict whether or not an ambient space/2 `.editorconfig` sits in the tree.
+
+    Runs the REAL shfmt (via lint.run's default _run_tool) over a repo that
+    tracks no `.editorconfig`, once clean and once with an injected untracked
+    `.editorconfig` — the exact phos-core shape (#472). Without the pin the second
+    run reddens (shfmt wants to reflow tabs → 2-space); with it, both pass.
+    """
+    (tmp_path / "script.sh").write_text("#!/bin/bash\nif true; then\n\techo hi\nfi\n")
+    discover = _fake_discover(["script.sh"])
+
+    # Clean tree: tab-indented script is shfmt-clean (tabs are shfmt's default).
+    assert lint.run(str(tmp_path), discover=discover) == 0
+
+    # Inject the untracked ambient `.editorconfig` (NOT in the tracked file list)
+    # that co-resident tooling would symlink in — space/2, root=true.
+    (tmp_path / ".editorconfig").write_text(
+        "root = true\n[*]\nindent_style = space\nindent_size = 2\n"
+    )
+    # Identical verdict: the pin makes shfmt ignore the injected config.
+    assert lint.run(str(tmp_path), discover=discover) == 0
 
 
 def test_malformed_shipit_toml_fails_clean_not_traceback(tmp_path, capsys):
