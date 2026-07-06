@@ -182,7 +182,7 @@ def _mock_git_boundary(monkeypatch, *, files):
     Returns the call-count dict so a test can assert the clone ran exactly once
     (and is REUSED, not repeated, on a second create).
     """
-    counts = {"clone": 0, "fetch": 0, "checkout": 0, "reset": 0}
+    counts = {"clone": 0, "fetch": 0, "checkout": 0, "reset": 0, "submodule": 0}
 
     def fake_clone(url, dest, *, reference):
         counts["clone"] += 1
@@ -205,6 +205,11 @@ def _mock_git_boundary(monkeypatch, *, files):
         git,
         "reset_hard",
         lambda *a, **k: counts.__setitem__("reset", counts["reset"] + 1),
+    )
+    monkeypatch.setattr(
+        git,
+        "submodule_update_init",
+        lambda **k: counts.__setitem__("submodule", counts["submodule"] + 1),
     )
     return counts
 
@@ -230,9 +235,16 @@ def test_create_readonly_clones_checks_out_and_chmods_no_provisioning(
     assert Path(tree.path) == plan.dir
     assert tree.branch == "feat/x"
     assert tree.base == "origin/feat/x"
-    # clone + fetch + plain checkout of the EXISTING branch, each exactly once; a FRESH
-    # create does no reset (that is the reuse-refresh path only).
-    assert counts == {"clone": 1, "fetch": 1, "checkout": 1, "reset": 0}
+    # clone + fetch + plain checkout of the EXISTING branch, then submodule init, each
+    # exactly once (#485); a FRESH create does no reset (that is the reuse-refresh path
+    # only).
+    assert counts == {
+        "clone": 1,
+        "fetch": 1,
+        "checkout": 1,
+        "reset": 0,
+        "submodule": 1,
+    }
     # The working file is left read-only (the ADR-0018 guardrail).
     assert not ((plan.dir / "README.md").stat().st_mode & 0o222)
     # The temp clone path was renamed into the shared leaf — no leftover sibling.
@@ -285,7 +297,44 @@ def test_create_readonly_reuse_refreshes_to_current_head_and_re_guards(
 
     assert counts["clone"] == 1  # still the one shared clone
     assert counts["reset"] == 1  # ...but reset --hard to the current head on reuse
+    # Submodules re-pinned on BOTH the fresh create and the reuse-refresh (#485), so a
+    # co-tenant never reads stale submodule content after the head advanced.
+    assert counts["submodule"] == 2
     assert not (work.stat().st_mode & 0o222)  # read-only guard re-applied
+
+
+def test_create_readonly_reuse_re_guards_even_when_refresh_fails(tmp_path, monkeypatch):
+    # #486: the reuse-refresh makes the shared clone WRITABLE to re-pin it, then a
+    # submodule fetch can fail loud (auth/network). The read-only guard must be restored
+    # anyway (try/finally) — otherwise the shared slot is left writable for every
+    # co-tenant reviewer, breaking the ADR-0018 FS guarantee — and the error must still
+    # propagate so the caller rolls back.
+    plan = readonly_plan(repo=REPO, branch="feat/x", root=tmp_path / "trees")
+    _mock_git_boundary(monkeypatch, files={"README.md": "hi\n"})
+
+    create_readonly(
+        plan, source_repo="/ref", github_url="url"
+    )  # first reviewer, guarded
+    work = plan.dir / "README.md"
+    assert not (work.stat().st_mode & 0o222)  # guarded after the fresh create
+
+    # The reuse-refresh's submodule step fails loud (e.g. a submodule fetch wall).
+    monkeypatch.setattr(
+        git,
+        "submodule_update_init",
+        lambda **k: (_ for _ in ()).throw(
+            ExecError(
+                ["git", "submodule", "update", "--init", "--recursive"],
+                rc=1,
+                stderr="fatal: clone of submodule failed",
+            )
+        ),
+    )
+
+    with pytest.raises(ExecError):
+        create_readonly(plan, source_repo="/ref", github_url="url")  # second reviewer
+    # The guard was restored despite the failure — the slot is NOT left writable.
+    assert not (work.stat().st_mode & 0o222)
 
 
 def test_create_readonly_rolls_back_partial_tree_on_failure(tmp_path, monkeypatch):

@@ -3,8 +3,12 @@
 A Tree comes in two modes. The write Tree (:mod:`shipit.tree.create`) is one per
 write-Run: ``clone --reference --dissociate`` + ``.treeinclude`` + pixi/sccache,
 read-write. A **read-only Tree** is the cheap reviewer variant: **clone +
-``git checkout`` only** — NO ``.treeinclude``, NO pixi/provisioning — then the
-working tree is ``chmod``'d read-only. It is **shared per ``(repo, branch)``**:
+``git checkout`` + ``git submodule sync/update --init --recursive`` only** — NO
+``.treeinclude``, NO pixi/provisioning — then the working tree is ``chmod``'d
+read-only. Submodules ARE populated here too (#485): a dissociated clone leaves them
+as empty gitlinks, and a reviewer reading a PR that touches submodule-backed content
+(lex's ``comms/specs``) must see it — the reviewer reads the same complete checkout
+CI builds (``submodules: recursive``). It is **shared per ``(repo, branch)``**:
 N reviewers on one PR head share ONE clone (safe precisely because none mutate it),
 so the dir leaf is deterministic — ``<root>/<org>/<repo>/review/<branch-slug>-<hash>``,
 with NO agent hash (the ``<hash>`` is a stable digest of the branch name that keeps
@@ -125,7 +129,10 @@ def create_readonly(plan: ReadOnlyPlan, *, source_repo: str, github_url: str) ->
     advanced since the first reviewer cloned and a co-tenant must never review an old
     commit. Otherwise the leaf is provisioned the read-only way: clone
     ``--reference --dissociate`` (ADR-0014), ``git fetch``, ``git checkout`` the
-    EXISTING branch (no ``-b``, no base), then ``chmod`` the working tree read-only.
+    EXISTING branch (no ``-b``, no base), ``git submodule sync + update --init
+    --recursive`` (:func:`shipit.git.submodule_update_init`, #485/#486 — a reviewer over
+    submodule-backed content must see the real files), then
+    ``chmod`` the working tree read-only.
     The two write-only steps — ``.treeinclude`` copy and pixi/sccache provisioning —
     are deliberately skipped: a reviewer reads, it never builds.
 
@@ -152,6 +159,10 @@ def create_readonly(plan: ReadOnlyPlan, *, source_repo: str, github_url: str) ->
         git.clone_dissociated(github_url, str(tmp), reference=source_repo)
         git.fetch(cwd=str(tmp))
         git.checkout(plan.branch, cwd=str(tmp))
+        # Populate submodules before the read-only chmod (#485): a reviewer reading a PR
+        # over submodule-backed content must see the real files, not an empty gitlink.
+        # Run BEFORE chmod_readonly so git can still write the submodule working trees.
+        git.submodule_update_init(cwd=str(tmp))
         chmod_readonly(tmp)
     except BaseException:
         # Propagating failure at ERROR with the exception attached (spray
@@ -227,15 +238,29 @@ def _refresh_readonly(dest: Path, branch: str) -> None:
 
     The clone's working tree is ``chmod``'d read-only, so it must first be made writable
     (:func:`chmod_writable`) before git can rewrite it; then ``fetch`` + ``checkout`` +
-    ``reset --hard origin/<branch>`` move it to the CURRENT PR head, and the read-only
+    ``reset --hard origin/<branch>`` move it to the CURRENT PR head, ``submodule update
+    --init --recursive`` re-pins its submodules to that head (#485), and the read-only
     guard is re-applied so a head that advanced under the first reviewer never leaves a
     co-tenant on a stale commit OR with stale (writable) permissions.
+
+    The re-guard runs in a ``finally`` (#486): the mutable refresh can FAIL LOUD — a
+    ``reset`` conflict or a submodule fetch that hits an auth/network wall — and a bare
+    sequence would then propagate the error with the shared clone left WRITABLE, breaking
+    the ADR-0018 guarantee for every co-tenant reviewer reusing the slot. Restoring the
+    read-only guard before the error re-raises keeps the FS guard load-bearing even on the
+    failure path (the caller still sees the original exception and rolls the leaf back).
     """
     chmod_writable(dest)
-    git.fetch(cwd=str(dest))
-    git.checkout(branch, cwd=str(dest))
-    git.reset_hard(f"origin/{branch}", cwd=str(dest))
-    chmod_readonly(dest)
+    try:
+        git.fetch(cwd=str(dest))
+        git.checkout(branch, cwd=str(dest))
+        git.reset_hard(f"origin/{branch}", cwd=str(dest))
+        # Re-pin submodules to the head the reset landed on (#485): the advanced head may
+        # move a gitlink, so a reused reviewer clone must refresh its submodules too, or a
+        # co-tenant reads stale submodule content. Before the re-guard, while it is writable.
+        git.submodule_update_init(cwd=str(dest))
+    finally:
+        chmod_readonly(dest)
 
 
 def _summary(dest: Path, branch: str) -> Tree:
