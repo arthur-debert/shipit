@@ -89,11 +89,6 @@ phos = [
 burgertocow = [{ repo = "arthur-debert/burgertocow", path = "burgertocow" }]
 clapfig = [{ repo = "arthur-debert/clapfig", path = "clapfig" }]
 dodot = [{ repo = "arthur-debert/dodot", path = "dodot" }]
-dotcat = [{ repo = "arthur-debert/dotcat", path = "dotcat" }]
-electron-splashguard = [
-  { repo = "arthur-debert/electron-splashguard", path = "electron-splashguard" },
-]
-falala = [{ repo = "arthur-debert/falala", path = "falala" }]
 lex = [
   { repo = "lex-fmt/lex", path = "lex-fmt/lex" },
   { repo = "lex-fmt/lexed", path = "lex-fmt/lexed" },
@@ -101,10 +96,8 @@ lex = [
   { repo = "lex-fmt/tree-sitter-lex", path = "lex-fmt/tree-sitter-lex" },
   { repo = "lex-fmt/vscode", path = "lex-fmt/vscode" },
 ]
-nanodoc = [{ repo = "arthur-debert/nanodoc", path = "nanodoc" }]
 padz = [{ repo = "arthur-debert/padz", path = "padz" }]
 rustloc = [{ repo = "arthur-debert/rustloc", path = "rustloc" }]
-shellai = [{ repo = "arthur-debert/shellai", path = "shellai" }]
 shipit = [
   { repo = "arthur-debert/shipit", path = "shipit" },
   { repo = "arthur-debert/shipit-canary", path = "shipit-canary" },
@@ -113,10 +106,8 @@ simple-gal = [
   { repo = "arthur-debert/simple-gal", path = "simple-gal/simple-gal" },
   { repo = "arthur-debert/simple-gal-ui", path = "simple-gal/simple-gal-ui" },
 ]
-sprinkles = [{ repo = "arthur-debert/sprinkles", path = "sprinkles" }]
 standout = [{ repo = "arthur-debert/standout", path = "standout" }]
 supage = [{ repo = "arthur-debert/supage", path = "supage" }]
-visual-explore = [{ repo = "arthur-debert/visual-explore", path = "visual-explore" }]
 
 [shipit]
 version = "5b9d66480f1af55bbea3efe7c3b811a2d3f5e936"
