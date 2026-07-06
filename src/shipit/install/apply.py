@@ -22,7 +22,14 @@ from . import selfcert
 from .errors import InstallError, SelfCertError
 from .reconcile import Plan, consumer_inner
 from .splice import SETTINGS_MALFORMED, splice_block, splice_settings_hook
-from .units import FMT_JSON_HOOK, LINT_ENV, PIXI_FILE, Unit, pixi_manifest_seed
+from .units import (
+    FMT_JSON_HOOK,
+    HOOK_RECOVERY_CMD,
+    LINT_ENV,
+    PIXI_FILE,
+    Unit,
+    pixi_manifest_seed,
+)
 
 logger = logging.getLogger("shipit.install")
 
@@ -218,27 +225,25 @@ def _activate(
     THROUGH the consumer's pixi lint env (#478, :func:`_activate_hooks`), so the
     missing-binary case is ``pixi`` absent (``pixi`` is ``argv[0]`` — a nonzero
     rc from a broken lint env is a normal ``check=False`` result, not this
-    transport error). The recovery the operator ends at is therefore the SAME
-    pixi-routed command activation itself runs —
-    ``pixi run -e lint lefthook install`` — never a bare ``lefthook install``,
-    which would fail where only pixi is installed or recreate the
-    installer-baked shim path #478 removes.
+    transport error). Either way the recovery the operator runs is the ONE
+    shipit-level command (:data:`~shipit.install.units.HOOK_RECOVERY_CMD`):
+    re-run ``shipit install``, which re-activates the hooks idempotently. The
+    message never leaks the internal ``lefthook``/``pixi`` command under it —
+    that is the layer the operator drives shipit over, not a command they run.
     """
     try:
         activation = activate_hooks(root)
     except execrun.ExecError as exc:
         if exc.cause == execrun.CAUSE_MISSING_BINARY:
             detail = (
-                f"pixi not found on PATH — activation runs {LEFTHOOK_BINARY} "
-                f"through the managed lint env, so pixi must be installed; "
-                f"then `pixi run -e lint {LEFTHOOK_BINARY} install` to "
-                f"activate the checks"
+                f"pixi not found on PATH — activation runs the checks through "
+                f"the managed lint env, so pixi must be installed; then "
+                f"`{HOOK_RECOVERY_CMD}` to activate the checks"
             )
         else:
             detail = (
                 f"activation could not run ({exc}) — resolve the failure "
-                f"above, then `pixi run -e lint {LEFTHOOK_BINARY} install` to "
-                f"activate the checks"
+                f"above, then `{HOOK_RECOVERY_CMD}` to activate the checks"
             )
         return False, detail
     if activation.ok:

@@ -1978,9 +1978,13 @@ def test_fresh_install_activates_the_check_hooks(tmp_path, rec):
     assert result.hooks_activated is True
     assert len(rec.hook_activations) == 1
     assert rec.hook_activations[0] == tmp_path.resolve()
-    # The PR body announces the checks are live.
+    # The PR body announces the checks are live (a descriptive mention that
+    # `lefthook install` ran is fine)...
     assert "### Checks activated" in rec.pr_body
     assert "lefthook install" in rec.pr_body
+    # ...but the reviewers/mergers recovery INSTRUCTION speaks shipit, not the
+    # internal lefthook/pixi layer.
+    assert "run `./bin/shipit install` on your own checkout" in rec.pr_body
 
 
 def test_break_glass_push_also_activates_hooks(tmp_path, rec):
@@ -2022,7 +2026,10 @@ def test_install_degrades_but_succeeds_when_activation_fails(tmp_path, rec):
     # local activation was deferred so a merger knows to act.
     assert "### Checks activated locally" not in rec.pr_body
     assert "local activation skipped" in rec.pr_body
+    # Descriptive "`lefthook install` did not run here" is fine; the post-merge
+    # recovery INSTRUCTION is the shipit-level command.
     assert "lefthook install" in rec.pr_body
+    assert "run `./bin/shipit install`" in rec.pr_body
 
 
 def test_install_degrades_but_succeeds_when_lefthook_missing(tmp_path, rec):
@@ -2041,21 +2048,21 @@ def test_install_degrades_but_succeeds_when_lefthook_missing(tmp_path, rec):
     assert result.hooks_activated is False
     assert "### Checks activated locally" not in rec.pr_body
     assert "local activation skipped" in rec.pr_body
-    # Names the actually-missing binary (pixi, since activation runs argv[0]=pixi)
-    # and points at the SAME pixi-routed recovery activation itself runs — never a
-    # bare `lefthook install` (#478: it would fail with no global lefthook, or
-    # recreate the installer-baked shim path this PR removes).
+    # Names the actually-failing runtime (pixi, since activation runs argv[0]=pixi)
+    # but the RECOVERY the operator runs is the ONE shipit-level command — never a
+    # leaked lefthook/pixi command (activation is a side effect of `shipit install`;
+    # there is no standalone hook-activation verb).
     warning = verb.format_result_warnings(result)
     assert "could not activate git hooks" in warning
     assert "pixi not found on PATH" in warning
-    assert "pixi run -e lint lefthook install` to activate the checks" in warning
+    assert "`./bin/shipit install` to activate the checks" in warning
+    assert "lefthook install" not in warning
 
 
 def test_install_activation_timeout_does_not_claim_missing_binary(tmp_path, rec):
     # A NON-missing-binary transport failure (e.g. a timeout) must not be
-    # mislabelled "not found on PATH" NOR pinned on lefthook (the failing runtime
-    # is pixi): the detail branches on exc.cause, stays binary-neutral, and still
-    # ends in the pixi-routed recovery activation itself runs.
+    # mislabelled "not found on PATH": the detail branches on exc.cause, stays
+    # binary-neutral, and still ends in the ONE shipit-level recovery command.
     def boom(root):
         raise execrun.ExecError(
             ["lefthook", "install"], rc=None, cause=execrun.CAUSE_TIMEOUT
@@ -2067,8 +2074,11 @@ def test_install_activation_timeout_does_not_claim_missing_binary(tmp_path, rec)
     warning = verb.format_result_warnings(result)
     assert "could not activate git hooks" in warning
     assert "not found on PATH" not in warning
-    assert "could not run" in warning
-    assert "pixi run -e lint lefthook install` to activate the checks" in warning
+    # Binary-neutral label (not "lefthook: could not run" — the failing runtime
+    # is pixi); the echoed exc diagnostic may name the failed argv, but the
+    # RECOVERY the operator runs is the shipit-level command.
+    assert "activation could not run" in warning
+    assert "`./bin/shipit install` to activate the checks" in warning
 
 
 def test_activate_hooks_boundary_runs_lefthook_through_consumer_lint_env(

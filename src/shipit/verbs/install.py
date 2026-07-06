@@ -56,7 +56,7 @@ from ..install.reconcile import (
     load_retired,
     reconcile,
 )
-from ..install.units import Unit, load_units
+from ..install.units import HOOK_RECOVERY_CMD, Unit, load_units
 from ._errors import cli_errors
 from ._render import emit
 
@@ -443,7 +443,7 @@ def format_pr_body(
         lines.append(
             "`lefthook install` ran where this install was invoked, so its "
             "`.git/hooks/{pre-commit,pre-push}` fire `pixi run lint` there now. "
-            "Reviewers/mergers: run `lefthook install` on your own checkout "
+            f"Reviewers/mergers: run `{HOOK_RECOVERY_CMD}` on your own checkout "
             "(shipit-self: `pixi run -e lint install-hooks`) to make the checks live "
             "for you too. Activation is idempotent and leaves unrelated hooks intact."
         )
@@ -452,7 +452,7 @@ def format_pr_body(
         lines.append("### Checks configured — local activation skipped")
         lines.append(
             "`lefthook.yml` is in this PR, but `lefthook install` did not run here "
-            "(lefthook missing or it errored). After merging, run `lefthook install` "
+            f"(lefthook missing or it errored). After merging, run `{HOOK_RECOVERY_CMD}` "
             "(shipit-self: `pixi run -e lint install-hooks`) to activate the checks. "
             "The config is correct; only local activation was deferred."
         )

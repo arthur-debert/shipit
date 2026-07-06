@@ -43,7 +43,7 @@ from pathlib import Path
 
 from .. import config, execrun, pixienv
 from .reconcile import Plan
-from .units import LINT_ENV, PIXI_FILE
+from .units import HOOK_RECOVERY_CMD, LINT_ENV, PIXI_FILE
 
 logger = logging.getLogger("shipit.install")
 
@@ -233,8 +233,9 @@ def _check_hooks(root: Path, plan: Plan, hooks_activated: bool | None) -> CertCh
         return CertCheck(
             CHECK_HOOKS,
             False,
-            "hook activation did not succeed (`lefthook install`) — a "
-            "committing install ships its checks LIVE, never dormant",
+            "hook activation did not succeed — a committing install ships "
+            f"its checks LIVE, never dormant; re-run `{HOOK_RECOVERY_CMD}` "
+            "to activate them",
         )
     hooks_dir = root / ".git" / "hooks"
     missing = [h for h in ("pre-commit", "pre-push") if not (hooks_dir / h).is_file()]

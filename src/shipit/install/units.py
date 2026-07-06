@@ -87,6 +87,17 @@ PIXI_ENVS_ANCHOR = "[environments]"
 #: environment rather than guessing at PATH.
 LINT_ENV = "lint"
 
+#: The ONE operator-facing recovery command for "(re)activate the checks".
+#: Hook activation is a side effect of ``shipit install`` — there is NO
+#: standalone hook-activation verb — so every operator-facing recovery
+#: instruction speaks *shipit* and re-runs install (idempotent), never the
+#: internal ``lefthook``/``pixi`` layer under it. The pinned launcher form
+#: (``./bin/shipit install``) is what a consumer has on PATH; prose may say
+#: ``shipit install``. Referenced everywhere an operator is told how to fix a
+#: missing/failed activation, so the guidance can never drift or leak the
+#: internal layer (reviewers re-flag a leaked ``lefthook install`` every round).
+HOOK_RECOVERY_CMD = "./bin/shipit install"
+
 # The pixi-manifest seed (ADP00-WS09, #432). A stock consumer with NO pixi.toml
 # is the headline adoption case, but the three managed blocks above are tables
 # and keys only — pixi refuses a manifest with no `[workspace]`/`[project]`/
