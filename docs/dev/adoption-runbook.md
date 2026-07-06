@@ -26,6 +26,17 @@ Run that once against a virgin (pinless) repo, then `shipit install --pr` in the
 
 Its auto-update property (`uv tool upgrade` re-resolving the default branch's HEAD) is explicitly a NON-FEATURE inside a repo: that moving pointer is exactly the tool/managed-set lag window the pin replaces. Never run a repo's checks off a machine-global shipit — the launcher, not PATH, chooses the build.
 
+`uv tool install` records the SOURCE ref (branch or default HEAD) it resolved from and `uv tool upgrade` re-resolves THAT ref forever — so a machine that bootstrapped off an epic branch (e.g. during ADP00 canary work) keeps tracking that branch across every upgrade, and a later install then stamps a pin off stale branch HEAD. Re-pointing the tool needs an explicit `--force` reinstall; a plain `upgrade` will not switch refs.
+
+**Retrack the bootstrap tool onto the default branch before a fleet sweep**
+
+```sh
+
+uv tool install --force --from git+https://github.com/arthur-debert/shipit shipit
+```
+
+Append `@<branch>` to the `git+...` URL to deliberately track a branch (canary work) instead of the default. Since the stamped pin is the build's OWN commit (ADR-0033), `shipit --version` reports the running build's sha — check it after retracking to confirm the tool resolved the ref you intended.
+
 **The review extra (local-agent review execution) rides the same bootstrap install**
 
 ```sh
