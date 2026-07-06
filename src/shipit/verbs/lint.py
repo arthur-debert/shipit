@@ -370,6 +370,42 @@ def drop_ignored(paths: list[str], patterns: list[str]) -> list[str]:
     return [p for p in paths if not any(m.match(p) for m in matchers)]
 
 
+#: Built-in test-data directory conventions whose files ``--fix`` must NEVER
+#: rewrite in place (issue #500). A deliberately-malformed or byte-exact fixture
+#: silently corrupted by ``markdownlint --fix`` / ``prettier --write`` /
+#: ``shfmt -w`` / ``ruff --fix`` / ``cargo fmt`` breaks the very tests it backs.
+#: Gitignore-style directory patterns (the same ``.treeinclude`` engine the
+#: consumer ``[lint].ignore`` seam uses): each floats to any depth and drops the
+#: whole subtree. Unlike ``[lint].ignore`` (opt-in, applies in BOTH modes), this
+#: guard is ALWAYS ON and MUTATION-ONLY — it is applied only to the batch of a
+#: tool running its in-place fix form (see :func:`run`), so check mode — the CI
+#: gate — still lints these files and a genuinely-broken fixture is still
+#: reported; only the destructive auto-rewrite is refused.
+PROTECTED_TESTDATA_GLOBS: tuple[str, ...] = (
+    "fixtures/",
+    "__fixtures__/",
+    "testdata/",
+    "golden/",
+    "goldens/",
+    "snapshots/",
+    "__snapshots__/",
+)
+
+
+def drop_protected_testdata(paths: list[str]) -> list[str]:
+    """``paths`` with every built-in protected test-data path removed, order preserved.
+
+    Pure. The MUTATION guard behind #500: applied to the batch handed to a tool
+    running its in-place fix form, so a fixture under a
+    :data:`PROTECTED_TESTDATA_GLOBS` directory is never auto-rewritten. Reuses
+    the same gitignore matcher as :func:`drop_ignored` (compiled ONCE here), so
+    the two seams share one matching semantics; a consumer needing MORE
+    exclusions still has the ``[lint].ignore`` seam.
+    """
+    matchers = _ignore_matchers(list(PROTECTED_TESTDATA_GLOBS))
+    return [p for p in paths if not any(m.match(p) for m in matchers)]
+
+
 def route(
     paths: list[str], shebangs: dict[str, str | None] | None = None
 ) -> list[tuple[Lang, list[str]]]:
@@ -588,8 +624,26 @@ def run(
             if tool.per_manifest:
                 batches = [(list(prefix), mdir, f"crate {mdir}") for mdir in mdirs]
             else:
-                count = f"{len(paths)} file{'s' if len(paths) != 1 else ''}"
-                batches = [([*prefix, *paths], ".", count)]
+                # A tool running its in-place fix form must NEVER rewrite a
+                # protected test-data fixture (#500): drop those paths from THIS
+                # batch only. The guard is mutation-scoped — a tool running its
+                # check form (in either mode) still covers them, so the CI gate
+                # reports a genuinely-broken fixture; only the destructive
+                # auto-rewrite is refused. per_manifest tools (cargo) take no file
+                # batch, so they cannot rewrite an individual fixture file here.
+                mutating = fix and tool.fix is not None
+                batch_paths = drop_protected_testdata(paths) if mutating else paths
+                if mutating and not batch_paths:
+                    # Every file this fixer would touch is protected test-data —
+                    # nothing to rewrite, so skip the fix run rather than hand a
+                    # fixer an empty batch (some fixers treat "no files" as an
+                    # error). Check mode still lints these files.
+                    batches = []
+                else:
+                    count = (
+                        f"{len(batch_paths)} file{'s' if len(batch_paths) != 1 else ''}"
+                    )
+                    batches = [([*prefix, *batch_paths], ".", count)]
             for args, mdir, note in batches:
                 try:
                     result = run_tool(tool.binary, args, root / mdir)

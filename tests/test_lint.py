@@ -174,6 +174,46 @@ def test_drop_ignored_no_patterns_is_identity():
 
 
 # --------------------------------------------------------------------------
+# The built-in --fix mutation guard for test-data dirs (#500)
+# --------------------------------------------------------------------------
+
+
+def test_drop_protected_testdata_drops_every_convention_at_any_depth():
+    # Each convention floats to any depth and drops its whole subtree, so a
+    # fixer never rewrites a deliberately-malformed / byte-exact fixture (#500).
+    files = [
+        "tests/fixtures/broken.md",
+        "a/b/testdata/sample.json",
+        "pkg/__fixtures__/x.md",
+        "internal/golden/out.txt",
+        "internal/goldens/out.txt",
+        "ui/__snapshots__/Comp.snap",
+        "render/snapshots/frame.txt",
+    ]
+    assert lint.drop_protected_testdata(files) == []
+
+
+def test_drop_protected_testdata_keeps_ordinary_source_order_preserved():
+    files = [
+        "src/x.py",
+        "tests/fixtures/a.md",
+        "README.md",
+        "docs/fixtures-guide.md",  # a file NAMED like the dir is not a dir match
+        "tests/testdata/b.json",
+    ]
+    # Real source is kept, in order; only files UNDER a protected dir are dropped.
+    assert lint.drop_protected_testdata(files) == [
+        "src/x.py",
+        "README.md",
+        "docs/fixtures-guide.md",
+    ]
+
+
+def test_drop_protected_testdata_empty_is_identity():
+    assert lint.drop_protected_testdata([]) == []
+
+
+# --------------------------------------------------------------------------
 # The registry / Tool.argv
 # --------------------------------------------------------------------------
 
@@ -452,6 +492,78 @@ def test_fix_mode_fixes_what_it_can_and_still_checks_the_rest(tmp_path, capsys):
     # lexd has no fixer -> it still runs its CHECK form (the checks never skip a
     # leg in fix mode, so --fix can't pass while lex is broken).
     assert ("lexd", ("check", "d.lex")) in rec.calls
+
+
+def test_fix_mode_never_rewrites_a_protected_fixture(tmp_path, capsys):
+    # #500: `--fix` must not hand a deliberately-malformed / byte-exact fixture
+    # to an in-place fixer. The fixture under fixtures/ is dropped from the
+    # markdownlint --fix batch; the ordinary README.md is still fixed.
+    rec = _Recorder()
+    rc = lint.run(
+        str(tmp_path),
+        fix=True,
+        discover=_fake_discover(["README.md", "tests/fixtures/broken.md"]),
+        run_tool=rec,
+    )
+    assert rc == 0
+    assert ("markdownlint", ("--fix", "README.md")) in rec.calls
+    # The fixture is NOT in any invocation's argv — never handed to the fixer.
+    assert not any("tests/fixtures/broken.md" in args for _, args in rec.calls)
+
+
+def test_check_mode_still_lints_protected_fixtures(tmp_path, capsys):
+    # The guard is MUTATION-only: in check mode the fixture IS linted, so the
+    # CI gate still reports a genuinely-broken fixture (markdownlint's own
+    # ignore file handles deliberately-malformed markdown separately, in the
+    # consumer's tree — the verb does not second-guess check-mode coverage).
+    rec = _Recorder()
+    rc = lint.run(
+        str(tmp_path),
+        discover=_fake_discover(["tests/fixtures/broken.md"]),
+        run_tool=rec,
+    )
+    assert rc == 0
+    assert ("markdownlint", ("tests/fixtures/broken.md",)) in rec.calls
+
+
+def test_fix_mode_check_form_tool_still_sees_a_protected_fixture(tmp_path, capsys):
+    # The guard drops fixtures only from a MUTATING batch. shellcheck has no fix
+    # form, so even during --fix it runs its check form over the fixture; shfmt
+    # (the fixer) must NOT receive it.
+    rec = _Recorder()
+    rc = lint.run(
+        str(tmp_path),
+        fix=True,
+        discover=_fake_discover(["src/ok.sh", "tests/fixtures/bad.sh"]),
+        run_tool=rec,
+    )
+    assert rc == 0
+    # shellcheck (check-only) covers both files, fixture included.
+    assert (
+        "shellcheck",
+        ("--severity=info", "src/ok.sh", "tests/fixtures/bad.sh"),
+    ) in rec.calls
+    # shfmt -w (the mutating fixer) ran over the real source but NEVER the
+    # fixture (its argv carries an editorconfig pin, so match on membership).
+    shfmt_calls = [args for binary, args in rec.calls if binary == "shfmt"]
+    assert shfmt_calls, "shfmt should have run its fix form"
+    assert all("src/ok.sh" in args for args in shfmt_calls)
+    assert all("tests/fixtures/bad.sh" not in args for args in shfmt_calls)
+
+
+def test_fix_mode_skips_fixer_when_every_file_is_a_protected_fixture(tmp_path, capsys):
+    # When a fixer's whole batch is protected test-data, the fix run is skipped
+    # rather than invoking the fixer with an empty batch (which some fixers treat
+    # as an error). markdownlint is not invoked at all.
+    rec = _Recorder()
+    rc = lint.run(
+        str(tmp_path),
+        fix=True,
+        discover=_fake_discover(["tests/fixtures/a.md", "tests/fixtures/b.md"]),
+        run_tool=rec,
+    )
+    assert rc == 0
+    assert not any(binary == "markdownlint" for binary, _ in rec.calls)
 
 
 def test_rust_runs_per_manifest_without_file_batches(tmp_path, capsys):

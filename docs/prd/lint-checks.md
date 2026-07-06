@@ -147,7 +147,9 @@ The questions this PRD originally left open are now resolved and captured in
   deps (no npm path needed); lexd is fetched at a pin by `tools/provision-lexd.sh`,
   which the `lint`/`fmt` tasks depend on.
 - **check vs fix** — check-only by default; `--fix` (= `pixi run fmt`) is the
-  opt-in formatter pass.
+  opt-in formatter pass. `--fix` NEVER rewrites files under a test-data
+  directory (the built-in mutation guard below, #500) — a fixer corrupting a
+  deliberately-malformed / byte-exact fixture is silent test breakage.
 - **whole-tree vs staged** — staged-only was deliberately NOT implemented; both
   hooks call `pixi run lint`, which lints the whole tracked tree via
   `git ls-files` (a conscious simplification, not a gap).
@@ -188,12 +190,47 @@ an unanchored name floats to any depth, and a leading `/` anchors to the repo
 root. The seam is reconcile-safe because `.shipit.toml`
 is consumer policy: `write_manifest` strips only `[shipit]`/`[managed]` and the
 seed-if-absent policy pass only appends its own tables, so a `shipit install`
-NEVER clobbers `[lint]`. The MANAGED `.markdownlintignore` is unchanged and still
-managed (it covers shipit-managed paths); this ADDS a consumer layer beside it,
-it does not edit it. This is distinct from the zero-config lex-projection rule
+NEVER clobbers `[lint]`. The MANAGED `.markdownlintignore` still covers the
+shipit-managed paths (`skills/`, `AGENTS.md`) plus the test-data conventions of
+the built-in guard below (#500); this consumer seam ADDS a layer beside it, it
+does not edit it. This is distinct from the zero-config lex-projection rule
 (`lex_projections`, #436), which routes a generated `X.md` out automatically when
 its `X.lex` source is tracked — the ignore seam is the explicit escape hatch for
 everything that rule can't infer.
+
+### The built-in test-data mutation guard (#500)
+
+The consumer ignore seam above is OPT-IN — a repo that never sets `[lint].ignore`
+gets no protection, and when `shipit install` writes the managed
+`.markdownlintignore` it replaces any legacy per-repo ignore that used to protect
+fixtures. So `shipit lint --fix` — run in a hook, in CI, or by hand — was free to
+hand a deliberately-malformed or byte-exact test fixture to an in-place fixer
+(`markdownlint --fix`, `prettier --write`, `shfmt -w`, `ruff --fix`, `cargo fmt`),
+silently corrupting the very tests the fixture backs.
+
+The durable fix is a built-in, always-on guard: `--fix` drops any path under a
+conventional test-data directory — `fixtures/`, `__fixtures__/`, `testdata/`,
+`golden/`, `goldens/`, `snapshots/`, `__snapshots__/` (`lint.PROTECTED_TESTDATA_GLOBS`,
+gitignore-style, matched by the same `.treeinclude` engine as the consumer seam) —
+from the batch of any tool running its in-place fix form. Two deliberate scoping
+choices:
+
+- **Mutation-only.** The guard is applied ONLY to a mutating fix-form batch, so
+  CHECK mode — the CI gate — still lints these files and a genuinely-broken
+  fixture is still reported; only the destructive auto-rewrite is refused. A
+  tool with no fixer (shellcheck, yamllint, lexd) still covers a fixture even
+  during a `--fix` run.
+- **Verb-level, tool-agnostic.** The drop happens in the verb, not per-linter, so
+  it holds for the fixers that have NO ignore-file of their own (shfmt, ruff,
+  cargo fmt) as well as the ones that do — a per-tool ignore would be a partial
+  guarantee.
+
+The managed `.markdownlintignore` carries the SAME conventions (both the packaged
+data file and shipit's own root copy, kept byte-identical for the dogfood
+reconcile-to-noop check), so deliberately-malformed MARKDOWN fixtures are spared
+in check mode too — malformed markdown is a common fixture genre and flagging it
+is noise about a test, not signal about a document. A consumer needing to protect
+MORE paths (or a non-conventional layout) still uses the `[lint].ignore` seam.
 
 ### Editorconfig hermeticity (#493)
 
