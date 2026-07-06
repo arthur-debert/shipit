@@ -13,9 +13,9 @@ Scope — a coordinator affordance, not a headless requirement. The headless
 issue-spawn path (`shipit spawn subagent --issue N`, no coordinator in the loop)
 deliberately does NOT inject this template: it builds the Run's task from the
 issue number and relies on the role prompt + the issue body
-(`gh issue view N`) + this template's own DEFAULT verify commands — which the
-evidence (RVW02-WS05, PR 466[https://github.com/arthur-debert/shipit/pull/466]) shows already carry a write Run with zero
-verify-command guessing. The slot-fill flow below is the coordinator-driven
+(`gh issue view N`) + this template's own DEFAULT verify commands. The
+evidence (RVW02-WS05, PR 466[https://github.com/arthur-debert/shipit/pull/466]) shows these already support a write Run
+with zero verify-command guessing. The slot-fill flow below is the coordinator-driven
 `spawn brief` path only; injecting a blank template into a headless child that
 has no coordinator to fill it would be ceremony without signal.
 
