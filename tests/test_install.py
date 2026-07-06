@@ -143,11 +143,13 @@ def test_load_units_includes_lefthook_and_pixi_task_block():
     # deps ride in their own sibling `[feature.lint.dependencies]` block (ADP00,
     # docs/prd/adoption.md — amending the lint PRD's task-line-only decision),
     # tested below. `provision-lexd` invokes the binary's provision subcommand
-    # (ADP00-WS03), so no provisioning script is ever distributed.
+    # (ADP00-WS03), so no provisioning script is ever distributed. Each task
+    # invokes the PINNED launcher `./bin/shipit`, never a bare PATH `shipit`
+    # (#481, ADR-0033: hooks/tasks ride the repo's pin, PATH is never consulted).
     assert pixi.desired_inner() == (
-        'lint = "shipit lint"\n'
-        'logs = "shipit logs"\n'
-        'provision-lexd = "shipit provision lexd"'
+        'lint = "./bin/shipit lint"\n'
+        'logs = "./bin/shipit logs"\n'
+        'provision-lexd = "./bin/shipit provision lexd"'
     )
 
 
@@ -296,23 +298,42 @@ def _managed_lefthook() -> dict:
     return yaml.safe_load(iunits.data_bytes("lefthook.yml"))
 
 
+# The pixi-absence fail-open guard (#482) every managed hook leg is prefixed
+# with: a `command -v pixi` probe that skips (note + `exit 0`) when pixi is not
+# on PATH, so a pixi-less environment (a consumer's legacy CI spine) is not
+# regressed to red. Where pixi IS present the guard falls through and the full
+# gate runs. Kept as one shared constant so a drift shows up in one place.
+_PIXI_GUARD = (
+    'command -v pixi >/dev/null 2>&1 || { echo "shipit: pixi not on PATH — '
+    "skipping this managed hook (pixi-less environment; the full gate runs "
+    'wherever pixi is provisioned)."; exit 0; }; '
+)
+
+
 def test_managed_lefthook_is_consumer_generic():
-    """Every hook leg of the managed caller runs through the pinned lint env
-    and invokes only the managed `lint` task or the shipit binary itself — no
-    shipit-repo-local scripts or paths (the stock-consumer guarantee, #419)."""
+    """Every hook leg of the managed caller fails open when pixi is absent
+    (#482), then runs through the pinned lint env and invokes only the managed
+    `lint` task or the PINNED launcher `./bin/shipit` — never a bare PATH
+    `shipit` (#481, ADR-0033) and no shipit-repo-local scripts or paths (the
+    stock-consumer guarantee, #419)."""
     cfg = _managed_lefthook()
     assert set(cfg) == {"pre-commit", "pre-push", "post-commit"}
     for hook in cfg.values():
         for cmd in hook["commands"].values():
             run = cmd["run"]
-            # Everything rides the pinned lint env (never bare `pixi run`)...
-            assert run.startswith("pixi run -e lint ")
-            # ...and invokes the managed `lint` task or shipit itself — never
-            # a shell indirection into a repo-local script.
-            assert run.removeprefix("pixi run -e lint ").split()[0] in (
-                "lint",
-                "shipit",
-            )
+            # Fail-open on pixi absence guards every leg (#482)...
+            assert run.startswith(_PIXI_GUARD)
+            assert "exit 0" in run
+            pixi_part = run[len(_PIXI_GUARD) :]
+            # ...then everything rides the pinned lint env (never bare
+            # `pixi run`)...
+            assert pixi_part.startswith("pixi run -e lint ")
+            # ...and invokes the managed `lint` task or the PINNED launcher
+            # `./bin/shipit` — never a bare PATH `shipit` (#481) and never a
+            # shell indirection into a repo-local script.
+            invoked = pixi_part.removeprefix("pixi run -e lint ").split()[0]
+            assert invoked in ("lint", "./bin/shipit")
+            assert invoked != "shipit"
             assert "tools/" not in run and ".lex" not in run
 
     # The exact legs: pre-commit lint (piped, priority 2 — the slot a local
@@ -321,11 +342,14 @@ def test_managed_lefthook_is_consumer_generic():
     # test_logevent.py's managed-hook-tier test.)
     assert cfg["pre-commit"]["piped"] is True
     lint = cfg["pre-commit"]["commands"]["lint"]
-    assert lint == {"priority": 2, "run": "pixi run -e lint lint"}
-    assert cfg["pre-push"]["commands"]["lint"]["run"] == "pixi run -e lint lint"
+    assert lint == {"priority": 2, "run": _PIXI_GUARD + "pixi run -e lint lint"}
+    assert (
+        cfg["pre-push"]["commands"]["lint"]["run"]
+        == _PIXI_GUARD + "pixi run -e lint lint"
+    )
     assert (
         cfg["pre-push"]["commands"]["classify-gate"]["run"]
-        == "pixi run -e lint shipit pr push-gate"
+        == _PIXI_GUARD + "pixi run -e lint ./bin/shipit pr push-gate"
     )
 
     # The invoked task and environment exist in the managed pixi blocks, so a
@@ -913,8 +937,18 @@ def test_load_units_includes_the_worktreecreate_adapter_hook():
     entry = json.loads(unit.desired_inner())
     # WorktreeCreate binds to no tool, so the entry carries no matcher — and the
     # command is consumer-generic (same shape as shipit's own settings entry).
+    # It invokes the PINNED launcher `./bin/shipit` (#481, ADR-0033) resolved via
+    # the harness-provided project dir (these hooks may run from a CWD that is
+    # not the repo root, unlike lefthook which runs at the root).
     assert "matcher" not in entry
-    assert entry["hooks"][0]["command"] == "pixi run shipit hook worktreecreate"
+    assert (
+        entry["hooks"][0]["command"]
+        == 'pixi run "$CLAUDE_PROJECT_DIR"/bin/shipit hook worktreecreate'
+    )
+    # The `shipit hook worktreecreate` marker still appears verbatim in the
+    # command (the launcher path ends in `bin/shipit`), so reconcile keeps
+    # recognising the managed entry after the pin change.
+    assert iunits.SETTINGS_WORKTREECREATE_MARKER in entry["hooks"][0]["command"]
 
 
 def test_load_units_includes_the_sessionstart_activation_hook():
@@ -1419,7 +1453,7 @@ def test_fresh_install_delivers_the_lint_environment(tmp_path, rec):
     assert manifest["tasks"]["test"] == "pytest"
     # The managed task, the pinned toolchain, and the environment definition —
     # everything `pixi run -e lint lint` needs on a stock consumer.
-    assert manifest["tasks"]["lint"] == "shipit lint"
+    assert manifest["tasks"]["lint"] == "./bin/shipit lint"
     deps = manifest["feature"]["lint"]["dependencies"]
     assert set(deps) == set(LINT_TOOLS)
     assert manifest["environments"]["lint"] == ["lint"]
@@ -1504,7 +1538,7 @@ def test_fresh_consumer_without_pixi_manifest_gets_a_valid_seed(tmp_path, rec):
     assert manifest["workspace"]["name"] == iunits.workspace_name(tmp_path.name)
     assert manifest["workspace"]["channels"] == list(iunits.PIXI_SEED_CHANNELS)
     # ...and everything `pixi run -e lint lint` needs, spliced in beneath it.
-    assert manifest["tasks"]["lint"] == "shipit lint"
+    assert manifest["tasks"]["lint"] == "./bin/shipit lint"
     assert set(manifest["feature"]["lint"]["dependencies"]) == set(LINT_TOOLS)
     assert manifest["environments"]["lint"] == ["lint"]
 
@@ -1551,7 +1585,7 @@ def test_existing_pixi_manifest_is_never_seeded(tmp_path, rec):
     _apply(tmp_path)
     manifest = tomllib.loads((tmp_path / "pixi.toml").read_text())
     assert manifest["workspace"] == {"name": "acme"}  # untouched
-    assert manifest["tasks"]["lint"] == "shipit lint"
+    assert manifest["tasks"]["lint"] == "./bin/shipit lint"
 
 
 def test_seed_never_clobbers_a_manifest_created_after_gather(tmp_path, rec):
@@ -1567,7 +1601,7 @@ def test_seed_never_clobbers_a_manifest_created_after_gather(tmp_path, rec):
 
     manifest = tomllib.loads((tmp_path / "pixi.toml").read_text())
     assert manifest["workspace"] == {"name": "late"}
-    assert manifest["tasks"]["lint"] == "shipit lint"
+    assert manifest["tasks"]["lint"] == "./bin/shipit lint"
 
 
 def test_open_install_pr_is_updated_not_recreated(tmp_path, rec, monkeypatch):
@@ -2430,7 +2464,9 @@ def test_override_summary_uses_the_unit_key(tmp_path, rec):
     # Edit the managed tasks BLOCK -> next PR proposes an override, and the
     # <summary> names the block, not the shared filename.
     pixi = tmp_path / "pixi.toml"
-    pixi.write_text(pixi.read_text().replace('lint = "shipit lint"', 'lint = "true"'))
+    pixi.write_text(
+        pixi.read_text().replace('lint = "./bin/shipit lint"', 'lint = "true"')
+    )
     _apply(tmp_path, iapply.MODE_PR)
     assert f"<code>{iunits.PIXI_KEY}</code>" in rec.pr_body
 

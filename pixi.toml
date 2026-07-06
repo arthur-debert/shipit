@@ -19,8 +19,10 @@ platforms = ["linux-64", "osx-arm64", "osx-64", "linux-aarch64"]
 python = "3.13.*"
 
 # The lint toolchain rides in the DEFAULT env (issue #210, option (a)): `shipit
-# install` writes a managed `[tasks] lint = "shipit lint"` into the default env,
-# and `shipit lint` (verbs/lint.py) SHELLS OUT to these binaries — so they must be
+# install` writes a managed `[tasks] lint = "./bin/shipit lint"` into the default
+# env (the task rides the repo's pinned launcher, not a PATH `shipit` — #481,
+# ADR-0033), and `shipit lint` (verbs/lint.py) SHELLS OUT to these binaries — so
+# they must be
 # on PATH in the default env for the managed task to work as installed. This aligns
 # shipit-self with the standard consumer layout (architecture.lex §5/§7: one lint
 # definition, thin managed tasks) rather than pinning an env-specific override the
@@ -70,9 +72,9 @@ CARGO_INCREMENTAL = "0"
 
 [tasks]
 # >>> shipit-managed tasks (do not edit; regenerate via `shipit install`) >>>
-lint = "shipit lint"
-logs = "shipit logs"
-provision-lexd = "shipit provision lexd"
+lint = "./bin/shipit lint"
+logs = "./bin/shipit logs"
+provision-lexd = "./bin/shipit provision lexd"
 # <<< shipit-managed tasks <<<
 # Provisional test task (the full pixi-test encapsulation is Step 5); shipit
 # supplies its own `test` so CI's required `check` keeps running the suite.
@@ -93,7 +95,7 @@ version = ">=8"
 # block is redundant-but-harmless: the same specs already ride in the DEFAULT
 # env (issue #210, option (a)) and the `lint` environment inherits them through
 # the default feature. The feature deliberately does NOT define its own `lint` task:
-# `lint` lives in EXACTLY ONE place — the managed `[tasks] lint = "shipit lint"` in the
+# `lint` lives in EXACTLY ONE place — the managed `[tasks] lint = "./bin/shipit lint"` in the
 # default env above — so a bare `pixi run lint` resolves UNAMBIGUOUSLY (a duplicate
 # `lint` in both the default feature and this one is what historically made bare
 # `pixi run lint` ambiguous across default/lint/review; the lefthook `-e lint` pin was

@@ -289,12 +289,19 @@ def test_unwritable_log_plus_hook_context_exits_zero(read_only_dir):
 def test_managed_lefthook_config_wires_the_post_commit_emission():
     """The packaged lefthook caller carries the hook tier: a post-commit
     entry invoking the constrained verb with the fail-open flag, through the
-    same pinned `-e lint` env as the lint caller."""
+    same pinned `-e lint` env as the lint caller. It rides the PINNED launcher
+    `./bin/shipit` (#481, ADR-0033), and is fail-open-guarded against a
+    pixi-less environment (#482)."""
     raw = resources.files("shipit.data").joinpath("lefthook.yml").read_bytes()
     config = yaml.safe_load(raw)
     entry = config["post-commit"]["commands"]["dev-cycle-event"]
+    guard = (
+        'command -v pixi >/dev/null 2>&1 || { echo "shipit: pixi not on PATH — '
+        "skipping this managed hook (pixi-less environment; the full gate runs "
+        'wherever pixi is provisioned)."; exit 0; }; '
+    )
     assert entry["run"] == (
-        "pixi run -e lint shipit log event commit.created --from-hook"
+        guard + "pixi run -e lint ./bin/shipit log event commit.created --from-hook"
     )
 
 

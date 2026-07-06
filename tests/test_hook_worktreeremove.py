@@ -250,4 +250,6 @@ def test_repo_settings_wire_the_hook():
     )
     events = settings["hooks"]["WorktreeRemove"]
     commands = [h["command"] for entry in events for h in entry["hooks"]]
-    assert "pixi run shipit hook worktreeremove" in commands
+    # Rides the PINNED launcher `./bin/shipit` resolved via the harness project
+    # dir (#481, ADR-0033), not a bare PATH `shipit`.
+    assert 'pixi run "$CLAUDE_PROJECT_DIR"/bin/shipit hook worktreeremove' in commands

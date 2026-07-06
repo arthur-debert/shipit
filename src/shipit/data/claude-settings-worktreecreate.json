@@ -1,7 +1,7 @@
 {
   "hooks": [
     {
-      "command": "pixi run shipit hook worktreecreate",
+      "command": "pixi run \"$CLAUDE_PROJECT_DIR\"/bin/shipit hook worktreecreate",
       "type": "command"
     }
   ]

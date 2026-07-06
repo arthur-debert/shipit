@@ -13,7 +13,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "pixi run shipit hook sessionstart"
+            "command": "pixi run \"$CLAUDE_PROJECT_DIR\"/bin/shipit hook sessionstart"
           }
         ]
       }
@@ -24,7 +24,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "pixi run shipit hook pretooluse"
+            "command": "pixi run \"$CLAUDE_PROJECT_DIR\"/bin/shipit hook pretooluse"
           }
         ]
       }
@@ -34,7 +34,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "pixi run shipit hook stop"
+            "command": "pixi run \"$CLAUDE_PROJECT_DIR\"/bin/shipit hook stop"
           }
         ]
       }
@@ -44,7 +44,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "pixi run shipit hook subagent-stop"
+            "command": "pixi run \"$CLAUDE_PROJECT_DIR\"/bin/shipit hook subagent-stop"
           }
         ]
       }
@@ -54,7 +54,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "pixi run shipit hook worktreecreate"
+            "command": "pixi run \"$CLAUDE_PROJECT_DIR\"/bin/shipit hook worktreecreate"
           }
         ]
       }
@@ -64,7 +64,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "pixi run shipit hook worktreeremove"
+            "command": "pixi run \"$CLAUDE_PROJECT_DIR\"/bin/shipit hook worktreeremove"
           }
         ]
       }
