@@ -14,7 +14,7 @@ already-installed probe runs BEFORE platform resolution, so a platform with no
 pinned asset (Intel mac) that provisioned lexd another way (the cargo-install
 instruction in the refusal) still no-ops instead of failing loud.
 
-Platform note: the pinned v0.19.1 release ships linux (x86_64 / aarch64 gnu)
+Platform note: the pinned v0.19.3 release ships linux (x86_64 / aarch64 gnu)
 AND an arm64 macOS asset (aarch64-apple-darwin). There is NO x86_64 (Intel)
 macOS asset at this pin, so Intel-mac FAILS LOUD immediately: there is nothing
 to provision, so :func:`resolve_triple` raises with an instruction to
@@ -49,7 +49,7 @@ logger = logging.getLogger("shipit.provision")
 
 #: The fleet-wide lexd pin. A pin bump is THIS edit plus re-pinning
 #: :data:`SHAS` (download the release tarballs and sha256 them).
-PIN = "0.19.1"
+PIN = "0.19.3"
 
 #: The GitHub repo lexd releases are published at.
 REPO = "lex-fmt/lex"
@@ -61,13 +61,13 @@ REPO = "lex-fmt/lex"
 #: platforms the pin supports — :func:`resolve_triple` refuses anything else.
 SHAS: dict[str, str] = {
     "x86_64-unknown-linux-gnu": (
-        "a8d623b7439a984ce5963ea039d3c52daa5d601447bbc3012f3adab592f33e9a"
+        "ed3adbd89105c49ebec0d89c67db44ce2924600c14fcbf6f1976f9ed858da623"
     ),
     "aarch64-unknown-linux-gnu": (
-        "456f2f645ba5f5a215eb7b865c23d31230255675b17cc961862cd3b176a2c358"
+        "de2cc2009ea9c310494d19c4ceb8943178bc4e4bb0f77f90b542d6f5584a13dc"
     ),
     "aarch64-apple-darwin": (
-        "1fe356fb27bb49b610cb7ca2592d15fdcbae3cef451460e0a1763d59cadd04b9"
+        "64ad3ba7f778415d4210cd380ee3706a2f97765041ed5689afa817141cf36ddc"
     ),
 }
 
@@ -172,14 +172,14 @@ def expected_sha(triple: str) -> str:
 
 
 #: Matches a ``lexd --version`` line whose version token is EXACTLY the pin —
-#: ``lexd 0.19.1`` / ``lexd 0.19.1 (release)`` pass; a bare-substring near-miss
-#: (``lexd 0.19.15``, ``lexd 10.19.15``) does NOT. The leading ``\b`` anchors the
+#: ``lexd 0.19.3`` / ``lexd 0.19.3 (release)`` pass; a bare-substring near-miss
+#: (``lexd 0.19.35``, ``lexd 10.19.35``) does NOT. The leading ``\b`` anchors the
 #: token's left edge and ``re.escape`` keeps the dotted pin from acting as a
 #: regex; the right edge — which rejects a longer version that merely starts with
 #: the pin — is ``(?!\S)`` (whitespace or end-of-line) rather than ``\b``: a word
 #: boundary sits between the pin's trailing digit and a following ``-``/``+``, so
-#: ``\b`` would accept a pre-release/build-metadata build (``0.19.1-dev``,
-#: ``0.19.1+meta``) as the pinned release; requiring whitespace or end keeps the
+#: ``\b`` would accept a pre-release/build-metadata build (``0.19.3-dev``,
+#: ``0.19.3+meta``) as the pinned release; requiring whitespace or end keeps the
 #: match to the exact release token.
 _PINNED_RE = re.compile(rf"\blexd {re.escape(PIN)}(?!\S)")
 
