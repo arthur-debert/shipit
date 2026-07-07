@@ -101,8 +101,16 @@ def test_wrapper_passes_a_real_decided_guard_through_unchanged():
     # chain (this checkout), a coordinator code edit still gets denied with the
     # normal decision JSON on stdout and exit 0 — "ran and decided" is NOT the
     # same as "could not run", and the fix must not conflate the two.
+    #
+    # `pixi run` against an UN-provisioned default env would trigger a first-time
+    # solve (network, slow, can time out), breaking suite hermeticity off a fresh
+    # checkout (copilot). Mirror the provisioned-env skip guard the pixienv smoke
+    # test uses (tests/test_pixienv.py): only run when pixi AND a provisioned
+    # default env are already present, skip rather than provision otherwise.
     if shutil.which("pixi") is None:
         pytest.skip("pixi not on PATH in this environment")
+    if not (REPO_ROOT / ".pixi" / "envs" / "default").exists():
+        pytest.skip("no provisioned default env — refusing to trigger a solve")
     env = dict(os.environ)
     env["CLAUDE_PROJECT_DIR"] = str(REPO_ROOT)
     result = _run_wrapper(REPO_ROOT, env)
