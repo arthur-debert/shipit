@@ -38,12 +38,36 @@ its gh calls. Tool execution goes through the one Exec runner
 tool's verdict, not a transport failure) and lets a launch failure surface as
 :class:`~shipit.execrun.ExecError`, which the orchestrator renders as the
 hard-fail ``127``.
+
+HERMETICITY — the gate owns the config (ADR-0037, epic LNT01 #513, WS01 #514).
+The verdict must be a pure function of the tracked files under ONE fixed config,
+identical on any machine and in any repo. Two mechanisms, both here, enforce it:
+
+* **Config injection** — each :class:`Tool` carries a :attr:`Tool.config_inject`
+  fragment pinning it to shipit's canonical config; :meth:`Tool.argv` prepends it
+  UNCONDITIONALLY (never gated on repo state, unlike the :attr:`Tool.editorconfig_pin`
+  beachhead #493 it generalizes). A ``{config}`` placeholder in the fragment
+  receives the canonical config PATH at argv-build time. The canonical config
+  *bodies* and the resolver that maps a tool to its path ship in WS03 (#516); this
+  WS wires the MECHANISM, so until a path is resolved the placeholder fragment is
+  omitted and the verdict is unchanged (see :meth:`Tool.argv`).
+* **Env scrub** — :func:`_run_tool`, the single exec choke point, runs every
+  linter under a :func:`_scrubbed_env` (``os.environ`` minus ``$HOME``, ``XDG_*``,
+  and an explicit denylist of per-tool config vars — ``SHELLCHECK_OPTS``,
+  ``RUFF_CONFIG``, ``CARGO_HOME``, ``CLIPPY_CONF_DIR``, ``YAMLLINT_CONFIG_FILE``)
+  passed with ``replace_env=True``, so no user-global config file or tool env var
+  is ever consulted. That denylist is deliberately enumerated, NOT a ``*_CONFIG*``
+  substring: the substring would also drop ``PKG_CONFIG_PATH`` /
+  ``FONTCONFIG_PATH`` and break cargo/C builds — those standard build vars are
+  PRESERVED. No new plumbing in :mod:`shipit.execrun` — it already forwards
+  ``env`` / ``replace_env`` (the Tree provisioner's mechanism).
 """
 
 from __future__ import annotations
 
 import functools
 import logging
+import os
 import re
 import sys
 import time
@@ -68,6 +92,15 @@ logger = logging.getLogger("shipit.lint")
 # only encodes WHICH tool runs and HOW it is invoked.
 
 
+#: The literal token a :attr:`Tool.config_inject` fragment carries where the
+#: canonical config file PATH belongs; :meth:`Tool.argv` substitutes it with the
+#: resolved path. A fragment that still carries the placeholder because no path
+#: was resolved (the canonical config bodies + resolver ship in WS03 #516) is
+#: OMITTED, so the injection mechanism is inert — and the verdict unchanged —
+#: until WS03 supplies the paths (ADR-0037, #514).
+CONFIG_PLACEHOLDER = "{config}"
+
+
 @dataclass(frozen=True)
 class Tool:
     """One linter invocation: the binary plus its check args (files appended).
@@ -83,6 +116,22 @@ class Tool:
     (see :func:`manifest_roots`) with NO files appended, cwd'd into that
     directory.
 
+    ``config_inject`` pins this tool to shipit's ONE canonical config (ADR-0037,
+    #514) — the generalization of :attr:`editorconfig_pin` from the #493 beachhead
+    to EVERY config source. Unlike ``editorconfig_pin`` (gated on whether the repo
+    tracks its own ``.editorconfig``), it is applied UNCONDITIONALLY: the canonical
+    config is the only config, never the repo's or the ambient one. It is the flag
+    fragment that names the config — ``("--config", "{config}")`` for a tool that
+    takes a config FILE (ruff, prettier, markdownlint, yamllint), where the
+    :data:`CONFIG_PLACEHOLDER` receives the canonical path; or a self-contained
+    inline fragment for a tool whose config IS command-line flags (no external
+    file). The canonical config BODIES and the resolver mapping a tool to its path
+    are WS03 (#516) — this WS wires the field + argv plumbing so WS03 need only
+    supply the paths (see :meth:`argv`). A tool whose canonical config lives inline
+    in its ``check`` / ``fix`` args instead (shellcheck's severity, clippy's lints
+    on the command line, rustfmt's ``--config-path`` after ``--``) leaves this
+    empty; WS03 extends those tuples directly.
+
     ``editorconfig_pin`` is the flag prefix that pins an ``.editorconfig``-aware
     tool to IGNORE any ambient/injected/ancestor ``.editorconfig`` — applied ONLY
     when the repo tracks no root ``.editorconfig`` of its own (see
@@ -92,28 +141,75 @@ class Tool:
     into the working tree by co-resident tooling, or an ancestor above the git
     root — which makes the lint verdict depend on the checkout location rather
     than the commit. Pinning restores "same commit → same verdict everywhere".
+    This is the ONE injection the canonical config does not yet subsume: its
+    replacement (a canonical shfmt/prettier config that fixes tabs-vs-spaces
+    fleet-wide) is a WS03 body decision, so until then the beachhead's
+    honor-tracked / neutralize-ambient gate stays — that is exactly the
+    "existing lint behavior preserved for tracked-config-honoring cases"
+    acceptance boundary of #514, and shipit's own ``[*.sh]`` house style depends
+    on it.
     """
 
     binary: str
     check: tuple[str, ...]
     fix: tuple[str, ...] | None = None
     per_manifest: bool = False
+    config_inject: tuple[str, ...] = ()
     editorconfig_pin: tuple[str, ...] = ()
 
-    def argv(self, *, fix: bool, pin_editorconfig: bool = False) -> tuple[str, ...]:
+    def argv(
+        self,
+        *,
+        fix: bool,
+        pin_editorconfig: bool = False,
+        config_path: str | None = None,
+    ) -> tuple[str, ...]:
         """The argv prefix for this run: the fix form in fix mode if the tool has
         one, else the check form (never ``None`` — the checks never skip).
 
+        The canonical-config injection (:attr:`config_inject`, ADR-0037 / #514) is
+        prepended UNCONDITIONALLY — it is not gated on repo state:
+
+        * A fragment carrying the :data:`CONFIG_PLACEHOLDER` names a config FILE.
+          When ``config_path`` is supplied the placeholder is substituted and the
+          fragment prepended; when it is ``None`` the fragment is OMITTED, because
+          the canonical config bodies + the resolver that yields the path are WS03
+          (#516). So this WS wires the mechanism while leaving the verdict
+          unchanged — WS03 flips it on by supplying paths, nothing here.
+        * A fragment with no placeholder is an inline config (command-line flags,
+          no external file) and is always prepended.
+
         When ``pin_editorconfig`` is set AND the tool has an
-        :attr:`editorconfig_pin`, that pin is prepended so the tool ignores any
+        :attr:`editorconfig_pin`, that pin is prepended too so the tool ignores any
         ambient ``.editorconfig`` (issue #493). Callers pass it when the repo
         tracks no ``.editorconfig`` of its own; a repo that DOES track one travels
         with that config in every checkout, so it is honored (pin off).
         """
         base = self.fix if (fix and self.fix is not None) else self.check
-        if pin_editorconfig and self.editorconfig_pin:
-            return (*self.editorconfig_pin, *base)
-        return base
+        injected: tuple[str, ...] = ()
+        if self.config_inject:
+            # A placeholder can live as its OWN token (`("--config", "{config}")`)
+            # OR as a substring of one (`("--config={config}",)`), so match
+            # per-token, not exact-element (`in` on the tuple) — the exact form
+            # would miss the substring shape and inject the literal `{config}`
+            # (round 1, agy). This only widens support: the exact-token form WS03
+            # uses still matches, and `tok.replace` below rewrites either shape.
+            if any(CONFIG_PLACEHOLDER in tok for tok in self.config_inject):
+                if config_path is not None:
+                    injected = tuple(
+                        tok.replace(CONFIG_PLACEHOLDER, config_path)
+                        for tok in self.config_inject
+                    )
+                # else: no canonical config resolved yet (pre-WS03) — omit, so the
+                # gate's verdict is unchanged (#514 scope boundary).
+            else:
+                injected = self.config_inject
+        pin = (
+            self.editorconfig_pin
+            if (pin_editorconfig and self.editorconfig_pin)
+            else ()
+        )
+        return (*injected, *pin, *base)
 
 
 @dataclass(frozen=True)
@@ -130,9 +226,23 @@ class Lang:
 PYTHON = Lang(
     name="python",
     extensions=(".py",),
+    # ruff takes its config as a FILE via `--config <path>`; both legs pin to the
+    # canonical `ruff.toml` (ADR-0037). The path is WS03 (#516) — carved out of
+    # shipit's own pyproject.toml and seeded fleet-wide — so the placeholder
+    # fragment is inert here (no path resolved) and today's verdict is unchanged.
     tools=(
-        Tool("ruff", ("check",), fix=("check", "--fix")),
-        Tool("ruff", ("format", "--check"), fix=("format",)),
+        Tool(
+            "ruff",
+            ("check",),
+            fix=("check", "--fix"),
+            config_inject=("--config", CONFIG_PLACEHOLDER),
+        ),
+        Tool(
+            "ruff",
+            ("format", "--check"),
+            fix=("format",),
+            config_inject=("--config", CONFIG_PLACEHOLDER),
+        ),
     ),
 )
 RUST = Lang(
@@ -152,6 +262,14 @@ RUST = Lang(
     # root and fails on cargo's own error — hard, never a silent skip. The
     # rust toolchain is assumed provisioned per the repo's toolchain
     # declaration (ADR-0007); a missing cargo is the standard hard-fail 127.
+    #
+    # Canonical-config injection (ADR-0037, #514) for cargo is INLINE, not a
+    # `config_inject` prefix: cargo's config tokens must follow the `--`
+    # separator (clippy lints on the command line — `-D warnings` is the seed;
+    # `cargo fmt -- --config-path <canonical rustfmt.toml>`), which a prepend
+    # cannot express. WS03 (#516) extends the `check` / `fix` tuples below with
+    # the canonical clippy lint set and rustfmt config-path directly; the env
+    # scrub (`_run_tool`) already blocks ambient `~/.config/rustfmt` etc.
     tools=(
         Tool(
             "cargo",
@@ -179,29 +297,43 @@ SHELL = Lang(
     extensions=(".sh", ".bash"),
     shebangs=("sh", "bash"),
     tools=(
+        # shellcheck's canonical config is INLINE flags (it has no `--config
+        # <file>`; `.shellcheckrc` is ambient discovery the env scrub blocks via
+        # `$HOME`). `--severity=info` is the seed; WS03 (#516) extends this
+        # tuple with the canonical set, so `config_inject` stays empty.
         Tool("shellcheck", ("--severity=info",)),
         # `-i 0` is shfmt's tab default, but PASSING any formatting flag makes
         # shfmt skip `.editorconfig` entirely — so the pin both defaults to tabs
         # and neutralizes an ambient/injected/ancestor `.editorconfig` when the
-        # repo tracks none of its own (issue #493).
+        # repo tracks none of its own (issue #493). This is the one injection the
+        # canonical config does not yet subsume: its unconditional replacement is
+        # a WS03 (#516) shfmt-config body decision (shipit's `[*.sh]` is 4-space,
+        # so an unconditional `-i 0` here would break its own lint) — until then
+        # the #493 gate stays, the preserved tracked-config-honoring case (#514).
         Tool("shfmt", ("-d",), fix=("-w",), editorconfig_pin=("-i", "0")),
     ),
 )
 YAML = Lang(
     name="yaml",
     extensions=(".yml", ".yaml"),
-    tools=(Tool("yamllint", ("--strict",)),),
+    # yamllint takes its config as a FILE via `-c <path>`; pin to the canonical
+    # one (ADR-0037). Path is WS03 (#516) — inert placeholder until then.
+    tools=(Tool("yamllint", ("--strict",), config_inject=("-c", CONFIG_PLACEHOLDER)),),
 )
 JSON = Lang(
     name="json",
     extensions=(".json",),
-    # `--no-editorconfig` pins prettier to ignore an ambient/injected/ancestor
-    # `.editorconfig` when the repo tracks none of its own (issue #493).
+    # prettier takes its config as a FILE via `--config <path>`; pin to the
+    # canonical `.prettierrc` (ADR-0037, WS03 #516 — inert placeholder until the
+    # path is resolved). `--no-editorconfig` stays the #493 editorconfig pin,
+    # gated on the repo tracking its own `.editorconfig`, until WS03's canonical
+    # prettier config subsumes it (preserved tracked-config-honoring case, #514).
     tools=(
         Tool(
             "prettier",
             ("--check", "--log-level", "warn"),
             fix=("--write",),
+            config_inject=("--config", CONFIG_PLACEHOLDER),
             editorconfig_pin=("--no-editorconfig",),
         ),
     ),
@@ -209,7 +341,16 @@ JSON = Lang(
 MARKDOWN = Lang(
     name="markdown",
     extensions=(".md",),
-    tools=(Tool("markdownlint", (), fix=("--fix",)),),
+    # markdownlint takes its config as a FILE via `--config <path>`; pin to the
+    # canonical one (ADR-0037). Path is WS03 (#516) — inert placeholder until then.
+    tools=(
+        Tool(
+            "markdownlint",
+            (),
+            fix=("--fix",),
+            config_inject=("--config", CONFIG_PLACEHOLDER),
+        ),
+    ),
 )
 LEX = Lang(
     name="lex",
@@ -635,6 +776,84 @@ def _restore(root: Path, snapshot: dict[str, bytes]) -> list[str]:
     return restored
 
 
+#: The tool-specific config env vars the scrub drops, enumerated DELIBERATELY
+#: (round 1, agy): a blanket ``"_CONFIG" in key`` substring was too broad — it
+#: also stripped ``PKG_CONFIG_PATH`` / ``FONTCONFIG_PATH`` (standard build vars),
+#: which can break the cargo/C builds clippy drives. So the config-file/override
+#: vars are listed one by one instead, each a config source for a LANGS tool:
+#:
+#: * ``SHELLCHECK_OPTS``      — shellcheck: injects arbitrary flags
+#: * ``YAMLLINT_CONFIG_FILE`` — yamllint: points at a config file
+#: * ``RUFF_CONFIG``          — ruff: points at a config file
+#: * ``CARGO_HOME``           — cargo/clippy: roots ambient ``config.toml`` discovery
+#: * ``CLIPPY_CONF_DIR``      — clippy: roots ``clippy.toml`` discovery
+#:
+#: ``CARGO_HOME`` / ``CLIPPY_CONF_DIR`` close the Rust leak (round 1, codex):
+#: without them ``cargo clippy`` reads a machine-local ``config.toml`` /
+#: ``clippy.toml`` outside the repo. WS03 (#516) may EXTEND this set as it wires
+#: more canonical configs (a per-tool config env var for a newly-pinned tool).
+_TOOL_CONFIG_ENV_VARS: frozenset[str] = frozenset(
+    {
+        "SHELLCHECK_OPTS",
+        "YAMLLINT_CONFIG_FILE",
+        "RUFF_CONFIG",
+        "CARGO_HOME",
+        "CLIPPY_CONF_DIR",
+    }
+)
+
+
+#: Environment variables scrubbed before every linter subprocess (ADR-0037,
+#: #514): the ambient sources through which a user-global config file or a
+#: tool-specific override would otherwise leak into the verdict. ``$HOME`` roots
+#: ``~/.editorconfig`` / ``~/.shellcheckrc`` / ``~/.config`` discovery; ``XDG_*``
+#: relocates that config dir; and the explicit :data:`_TOOL_CONFIG_ENV_VARS`
+#: denylist names each per-tool config file / override var to DROP. Removed so the
+#: verdict is a pure function of the tracked files under the canonical config,
+#: never the machine it runs on.
+def _is_ambient_config_var(key: str) -> bool:
+    """Whether env var ``key`` is an ambient-config source the scrub drops.
+
+    Pure. Three narrow shapes — deliberately NOT a blanket ``"_CONFIG" in key``
+    substring, which also stripped ``PKG_CONFIG_PATH`` / ``FONTCONFIG_PATH`` and
+    broke cargo/C builds (round 1, agy): ``HOME`` (exact) roots ``~/.config``
+    discovery; ``XDG_*`` (prefix) relocates it; and membership in the explicit
+    :data:`_TOOL_CONFIG_ENV_VARS` drop-set — the per-tool config vars
+    (``SHELLCHECK_OPTS``, ``RUFF_CONFIG``, ``CARGO_HOME``, ``CLIPPY_CONF_DIR``,
+    ``YAMLLINT_CONFIG_FILE``), each pointing a specific linter at out-of-repo
+    config. It is a denylist (these vars are dropped, everything else kept), NOT
+    an allowlist.
+    """
+    return key == "HOME" or key.startswith("XDG_") or key in _TOOL_CONFIG_ENV_VARS
+
+
+def _scrubbed_env() -> dict[str, str]:
+    """A COMPLETE child environment: ``os.environ`` minus the ambient-config vars
+    (:func:`_is_ambient_config_var`). Everything else — ``PATH`` above all — is
+    preserved, so the linters still launch; only the config-leaking keys are gone.
+
+    Passed with ``replace_env=True`` (:func:`_run_tool`), which makes this the
+    child's WHOLE environment — hence starting from a COPY of ``os.environ`` and
+    removing keys, never a bare dict that would strip ``PATH`` and break every
+    launch (ADR-0037, #514).
+    """
+    return {k: v for k, v in os.environ.items() if not _is_ambient_config_var(k)}
+
+
+def _canonical_config(tool: Tool, root: Path) -> str | None:
+    """The path to shipit's canonical config file for ``tool``, or ``None``.
+
+    The WS03 (#516) seam. WS01 (#514) wires the injection MECHANISM
+    (:attr:`Tool.config_inject` + :meth:`Tool.argv`); the canonical config BODIES
+    and the real tool→path mapping land in WS03. Until then every tool resolves to
+    ``None``, so a placeholder ``config_inject`` fragment is omitted and the gate's
+    verdict is unchanged — WS03 turns injection on by returning real paths here,
+    with no orchestration change. Injected in :func:`run` (like
+    :func:`_tracks_root_editorconfig`) so a test can supply a stub resolver.
+    """
+    return None
+
+
 def _run_tool(binary: str, args: list[str], cwd: Path) -> execrun.ExecResult:
     """Run ``binary args`` in ``cwd`` through the one Exec runner.
 
@@ -644,9 +863,24 @@ def _run_tool(binary: str, args: list[str], cwd: Path) -> execrun.ExecResult:
     the orchestrator renders as the hard-fail ``127`` (never a silent skip).
     Each Exec states :data:`CHECK_TIMEOUT`; a wedged linter dies at that bound
     as a timeout-cause :class:`~shipit.execrun.ExecError` — the same hard-fail.
+
+    Every linter runs under a :func:`_scrubbed_env` passed ``replace_env=True``
+    (ADR-0037, #514): this single exec choke point is where the ambient-config
+    scrub is applied, so no tool consults ``$HOME``, ``XDG_*``, or the
+    explicitly-denylisted per-tool config vars (:func:`_is_ambient_config_var` /
+    :data:`_TOOL_CONFIG_ENV_VARS` — ``SHELLCHECK_OPTS``, ``RUFF_CONFIG``,
+    ``CARGO_HOME``, ``CLIPPY_CONF_DIR``, ``YAMLLINT_CONFIG_FILE``). It is NOT a
+    ``*_CONFIG*`` catch-all — standard build vars like ``PKG_CONFIG_PATH`` are
+    preserved. Reuses execrun's existing ``env`` / ``replace_env`` — no new
+    plumbing there.
     """
     return execrun.run(
-        [binary, *args], cwd=str(cwd), check=False, timeout=CHECK_TIMEOUT
+        [binary, *args],
+        cwd=str(cwd),
+        env=_scrubbed_env(),
+        replace_env=True,
+        check=False,
+        timeout=CHECK_TIMEOUT,
     )
 
 
@@ -667,6 +901,7 @@ def run(
     discover: Callable[[Path], list[str]] | None = None,
     run_tool: Callable[[str, list[str], Path], execrun.ExecResult] | None = None,
     tracks_root_editorconfig: Callable[[Path], bool] | None = None,
+    canonical_config: Callable[[Tool, Path], str | None] | None = None,
     runs_out: list[ToolRun] | None = None,
 ) -> int:
     """Run the checks over the tree at ``path`` (default ``.``). Returns 0/1.
@@ -692,6 +927,7 @@ def run(
     discover = discover or _discover
     run_tool = run_tool or _run_tool
     tracks_root_ec = tracks_root_editorconfig or _tracks_root_editorconfig
+    canonical_config = canonical_config or _canonical_config
 
     # Drop the consumer's own non-prose paths (`.shipit.toml [lint].ignore`,
     # #484) from the WHOLE file list before routing, so a single glob excludes a
@@ -738,7 +974,14 @@ def run(
             else ["."]
         )
         for tool in lang.tools:
-            prefix = tool.argv(fix=fix, pin_editorconfig=pin_editorconfig)
+            # The canonical-config path (ADR-0037, #514) is resolved per tool and
+            # injected UNCONDITIONALLY by argv. `_canonical_config` returns None for
+            # every tool until WS03 (#516) supplies the bodies + resolver, so the
+            # placeholder fragment is inert and the verdict is unchanged today.
+            config_path = canonical_config(tool, root)
+            prefix = tool.argv(
+                fix=fix, pin_editorconfig=pin_editorconfig, config_path=config_path
+            )
             # Label from the actual argv that ran, so fix mode never claims it
             # ran the check form when it ran the fix form.
             label = f"{tool.binary} {' '.join(prefix)}".strip()

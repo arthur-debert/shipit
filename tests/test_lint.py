@@ -1178,3 +1178,207 @@ def test_prettier_dirty_json_still_fails_real(tmp_path):
         tracks_root_editorconfig=lambda root: True,
     )
     assert rc == 1
+
+
+# --------------------------------------------------------------------------
+# Canonical-config injection (ADR-0037, WS01 #514) — the WS03 seam mechanism
+# --------------------------------------------------------------------------
+
+
+def test_config_inject_omitted_until_a_path_is_resolved():
+    # A placeholder `config_inject` fragment is INERT with no canonical config
+    # path (pre-WS03): argv is unchanged, so today's verdict cannot move (#514
+    # scope boundary — bodies + resolver land in WS03 #516).
+    ruff_check = lint.PYTHON.tools[0]
+    assert ruff_check.config_inject == ("--config", lint.CONFIG_PLACEHOLDER)
+    assert ruff_check.argv(fix=False) == ("check",)
+    assert ruff_check.argv(fix=False, config_path=None) == ("check",)
+
+
+def test_config_inject_substitutes_and_prepends_the_path_unconditionally():
+    # Given a canonical config path (what WS03's resolver will yield), the fragment
+    # is substituted and PREPENDED — regardless of repo state (unconditional,
+    # unlike the editorconfig pin).
+    ruff_check = lint.PYTHON.tools[0]
+    assert ruff_check.argv(fix=False, config_path="/canon/ruff.toml") == (
+        "--config",
+        "/canon/ruff.toml",
+        "check",
+    )
+    # Fix form takes the injection just the same.
+    assert ruff_check.argv(fix=True, config_path="/canon/ruff.toml") == (
+        "--config",
+        "/canon/ruff.toml",
+        "check",
+        "--fix",
+    )
+
+
+def test_config_inject_inline_fragment_is_always_applied():
+    # A fragment with NO placeholder is an inline config (command-line flags, no
+    # file) and is prepended unconditionally, path or not.
+    tool = lint.Tool("demo", ("--check",), config_inject=("--std",))
+    assert tool.argv(fix=False) == ("--std", "--check")
+    assert tool.argv(fix=False, config_path="/ignored") == ("--std", "--check")
+
+
+def test_config_inject_substring_placeholder_form():
+    # The placeholder may be a SUBSTRING of a token (`--config={config}`), not
+    # only its own token — argv must match per-token, else the exact-element `in`
+    # check misses it and injects the literal `{config}` (round 1, agy).
+    tool = lint.Tool("demo", ("--check",), config_inject=("--config={config}",))
+    # With a path: the substring is substituted in place and the token prepended.
+    assert tool.argv(fix=False, config_path="/canon/demo.toml") == (
+        "--config=/canon/demo.toml",
+        "--check",
+    )
+    # Without a path (pre-WS03): OMITTED, never the literal `{config}` leaking through.
+    assert tool.argv(fix=False) == ("--check",)
+    assert tool.argv(fix=False, config_path=None) == ("--check",)
+
+
+def test_config_inject_coexists_with_the_editorconfig_pin():
+    # prettier carries BOTH: the canonical-config placeholder (inert until WS03)
+    # and the #493 editorconfig pin (still gated). With a path AND the pin on, both
+    # prepend — injection first, then the pin, then the base.
+    prettier = lint.JSON.tools[0]
+    assert prettier.config_inject == ("--config", lint.CONFIG_PLACEHOLDER)
+    assert prettier.editorconfig_pin == ("--no-editorconfig",)
+    assert prettier.argv(
+        fix=False, pin_editorconfig=True, config_path="/canon/.prettierrc"
+    ) == (
+        "--config",
+        "/canon/.prettierrc",
+        "--no-editorconfig",
+        "--check",
+        "--log-level",
+        "warn",
+    )
+
+
+def test_every_file_config_tool_declares_its_injection_point():
+    # The path-config tools (--config/-c <file>) each carry a placeholder
+    # `config_inject`, so WS03 (#516) need only supply the paths. The inline/suffix
+    # tools (shellcheck, shfmt, cargo, lexd) inject via their check/fix args
+    # instead and are intentionally exempt from the placeholder form.
+    file_config_binaries = {"ruff", "prettier", "markdownlint", "yamllint"}
+    for lang in lint.LANGS:
+        for tool in lang.tools:
+            if tool.binary in file_config_binaries:
+                # Mirror argv's per-token substring match (round 1, agy): the
+                # placeholder may be its own token OR a substring of one, so the
+                # assertion cannot be exact-element (`in` on the tuple).
+                assert any(
+                    lint.CONFIG_PLACEHOLDER in tok for tok in tool.config_inject
+                ), tool.binary
+
+
+def test_run_injects_the_resolved_canonical_config_path(tmp_path):
+    # End-to-end: a stub resolver (standing in for WS03's real one) makes run()
+    # prepend the canonical config path to every tool that declares a placeholder.
+    rec = _Recorder()
+    rc = lint.run(
+        str(tmp_path),
+        discover=_fake_discover(["a.py"]),
+        run_tool=rec,
+        canonical_config=lambda tool, root: "/canon/ruff.toml",
+    )
+    assert rc == 0
+    assert ("ruff", ("--config", "/canon/ruff.toml", "check", "a.py")) in rec.calls
+    assert (
+        "ruff",
+        ("--config", "/canon/ruff.toml", "format", "--check", "a.py"),
+    ) in rec.calls
+
+
+def test_run_default_resolver_injects_nothing(tmp_path):
+    # With no resolver supplied, the default (_canonical_config → None everywhere)
+    # keeps every argv at its pre-WS03 shape — the verdict is unchanged.
+    rec = _Recorder()
+    lint.run(str(tmp_path), discover=_fake_discover(["a.py"]), run_tool=rec)
+    assert ("ruff", ("check", "a.py")) in rec.calls
+    assert ("ruff", ("format", "--check", "a.py")) in rec.calls
+
+
+# --------------------------------------------------------------------------
+# Ambient-config env scrub (ADR-0037, WS01 #514)
+# --------------------------------------------------------------------------
+
+
+def test_is_ambient_config_var_matches_the_leaky_keys():
+    for leaky in (
+        "HOME",
+        "SHELLCHECK_OPTS",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "YAMLLINT_CONFIG_FILE",
+        "RUFF_CONFIG",
+        # The Rust config-override vars (round 1, codex): without these
+        # `cargo clippy` reads a machine-local config.toml / clippy.toml.
+        "CARGO_HOME",
+        "CLIPPY_CONF_DIR",
+    ):
+        assert lint._is_ambient_config_var(leaky), leaky
+    # PATH and the tool runtime must survive — scrubbing them would break launch.
+    # PKG_CONFIG_PATH / FONTCONFIG_PATH are standard build vars, NOT tool config:
+    # the old `"_CONFIG" in key` substring wrongly stripped them and broke
+    # cargo/C builds (round 1, agy) — they are absent from the explicit
+    # denylist (`_TOOL_CONFIG_ENV_VARS`), so the scrub PRESERVES them.
+    for kept in (
+        "PATH",
+        "LANG",
+        "TERM",
+        "PIXI_PROJECT_ROOT",
+        "PKG_CONFIG_PATH",
+        "FONTCONFIG_PATH",
+    ):
+        assert not lint._is_ambient_config_var(kept), kept
+
+
+def test_scrubbed_env_drops_ambient_config_keeps_path(monkeypatch):
+    monkeypatch.setenv("HOME", "/home/someone")
+    monkeypatch.setenv("XDG_CONFIG_HOME", "/home/someone/.config")
+    monkeypatch.setenv("YAMLLINT_CONFIG_FILE", "/home/someone/hostile.yml")
+    monkeypatch.setenv("SHELLCHECK_OPTS", "--enable=all")
+    monkeypatch.setenv("CARGO_HOME", "/home/someone/.cargo")
+    monkeypatch.setenv("CLIPPY_CONF_DIR", "/home/someone/clippy")
+    monkeypatch.setenv("RUFF_CONFIG", "/home/someone/hostile-ruff.toml")
+    monkeypatch.setenv("PATH", "/usr/bin")
+    # Standard build vars that MUST survive — the old `_CONFIG` substring stripped
+    # them and broke cargo/C builds (round 1, agy).
+    monkeypatch.setenv("PKG_CONFIG_PATH", "/usr/lib/pkgconfig")
+    monkeypatch.setenv("FONTCONFIG_PATH", "/etc/fonts")
+    scrubbed = lint._scrubbed_env()
+    assert "HOME" not in scrubbed
+    assert "XDG_CONFIG_HOME" not in scrubbed
+    assert "YAMLLINT_CONFIG_FILE" not in scrubbed
+    assert "SHELLCHECK_OPTS" not in scrubbed
+    assert "CARGO_HOME" not in scrubbed
+    assert "CLIPPY_CONF_DIR" not in scrubbed
+    assert "RUFF_CONFIG" not in scrubbed
+    # A COMPLETE env (replace_env=True), so PATH must be preserved or nothing launches.
+    assert scrubbed["PATH"] == "/usr/bin"
+    # Build vars preserved — not tool config.
+    assert scrubbed["PKG_CONFIG_PATH"] == "/usr/lib/pkgconfig"
+    assert scrubbed["FONTCONFIG_PATH"] == "/etc/fonts"
+
+
+def test_run_tool_passes_scrubbed_env_with_replace_env(tmp_path, monkeypatch):
+    # The single exec choke point applies the scrub: execrun.run gets the scrubbed
+    # env AND replace_env=True (so it is the child's WHOLE environment, the only
+    # way to REMOVE an inherited var). No new execrun plumbing — reuses env/replace_env.
+    monkeypatch.setenv("HOME", "/home/someone")
+    monkeypatch.setenv("PATH", "/usr/bin")
+    captured = {}
+
+    def fake_run(argv, **kw):
+        captured.update(kw)
+        return execrun.ExecResult(
+            argv=tuple(argv), rc=0, stdout="", stderr="", duration_ms=1
+        )
+
+    monkeypatch.setattr(lint.execrun, "run", fake_run)
+    lint._run_tool("ruff", ["check", "a.py"], tmp_path)
+    assert captured["replace_env"] is True
+    assert "HOME" not in captured["env"]
+    assert captured["env"]["PATH"] == "/usr/bin"
