@@ -101,19 +101,22 @@ version = ">=8"
 rust = "1.96.*"
 
 [feature.test.tasks]
-# The full-gate suite. Rust rides the env; lexd is fetched onto the run's PATH by the
-# `provision-lexd` depends-on (idempotent — a no-op when the pin is already
-# installed), so this ONE command provisions lexd + runs the suite, exactly mirroring
-# CI's steps (.github/workflows/ci.yml). `test` is NOT a managed task, so — unlike the
-# fixed-string `lint` — it CAN carry the depends-on, the same idiom fmt / regen-roles
-# / install-hooks use. (provision-lexd is a default-feature task, so the depends-on
-# runs it in the default env and lexd lands in `.pixi/envs/default/bin`; every
-# composed env — the test env included — has that default bin layered on PATH, so
-# `shutil.which("lexd")` finds it when the suite runs in the test env.) Without
-# rust+lexd the rust/lex cases `skipif` their absent binaries and the `xfail(strict)`
-# "leak closed → reminder" signal for clippy/lexd (#526) would fire local-only; this
-# env is what makes them run everywhere.
-test = { cmd = "python -m pytest -q", depends-on = ["provision-lexd"] }
+# The full-gate suite. Rust rides the env (conda dep); lexd (not on conda-forge) is
+# provisioned INLINE — the cmd runs `shipit provision lexd` (idempotent — a no-op when
+# the pin is already installed) before pytest, IN this task's own env. Inline, NOT a
+# `provision-lexd` depends-on: a bare `pixi run test` auto-selects this env for the
+# `test` task, but pixi runs a depends-on in the depended task's HOME env, and the
+# managed `provision-lexd` is a DEFAULT-feature task — so a depends-on would provision
+# lexd into `.pixi/envs/default/bin`, NOT this env, and the composed test env does NOT
+# layer the default env's bin onto PATH. So `shutil.which("lexd")` would miss it and
+# the lex cases would silently `skipif`-skip on a clean `pixi run test` (the default
+# bin only leaks in when a shell has the default env separately activated). Running the
+# provision inline keeps it in THIS env's `CONDA_PREFIX`, so bare `pixi run test` and
+# CI's `pixi run -e test test` are byte-identical and both land lexd in the test env.
+# Without rust+lexd the rust/lex cases `skipif` their absent binaries and the
+# `xfail(strict)` "leak closed → reminder" signal for clippy/lexd (#526) would fire
+# local-only; this env is what makes them run everywhere.
+test = { cmd = "./bin/shipit provision lexd && python -m pytest -q" }
 
 # The `lint` FEATURE carries the MANAGED fleet-pinned dependency block below —
 # the exact block `shipit install` delivers to every consumer (ADP00,
