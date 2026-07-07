@@ -121,9 +121,14 @@ def managed_pretooluse_hook_command() -> str:
     (ALLOW, no decision) when resolution fails. On a bare PreToolUse process (no
     `CLAUDE_ENV_FILE` sourcing, ergo no pixi activation) that made guard liveness
     depend on ambient PATH resolution — and when it failed, the coordinator ran
-    fully unguarded with zero signal (#529). Restores `pixi run` (so the guard
-    resolves reliably in the canonical pixi/dogfood repo, `pixi` supplying the
-    activated env and `./bin/shipit` the pin per ADR-0033) and replaces the
+    fully unguarded with zero signal (#529). Restores `pixi run` in the
+    adapter-equivalent form `pixi run --manifest-path "$CLAUDE_PROJECT_DIR"/pixi.toml
+    -- ./bin/shipit …` (mirroring `shipit.pixienv.run.run_argv`): the explicit
+    `--manifest-path` overrides any leaked `PIXI_PROJECT_MANIFEST` so the guard
+    resolves THIS project's env rather than a parent's (the same ambiguity dodge the
+    pixi adapter uses), and `--` fences pixi's flags from the child argv, so the
+    guard resolves reliably in the canonical pixi/dogfood repo, `pixi` supplying the
+    activated env and `./bin/shipit` the pin per ADR-0033. Replaces the
     fail-open probe with a fail-CLOSED tail: capture the resolution+run chain's own
     exit code, and if it is anything but 0 (the launcher missing, the pin/uv/pixi
     chain unresolvable, `cd` itself failing), print an actionable message to
@@ -146,11 +151,13 @@ def managed_pretooluse_hook_command() -> str:
     consumer gets a working guard at all) are left for a follow-up.
     """
     return (
-        'cd "$CLAUDE_PROJECT_DIR" && pixi run ./bin/shipit hook pretooluse; '
+        'cd "$CLAUDE_PROJECT_DIR" && pixi run --manifest-path '
+        '"$CLAUDE_PROJECT_DIR"/pixi.toml -- ./bin/shipit hook pretooluse; '
         "rc=$?; "
         'if [ "$rc" -ne 0 ]; then echo "shipit: PreToolUse guard could not run '
         "(rc=$rc) — refusing edit. This can mean pixi is missing, the shipit pin "
-        "failed to resolve, or 'pixi run ./bin/shipit hook pretooluse' itself "
+        "failed to resolve, or 'pixi run --manifest-path "
+        "$CLAUDE_PROJECT_DIR/pixi.toml -- ./bin/shipit hook pretooluse' itself "
         "errored; install pixi (https://pixi.sh) if missing, otherwise run that "
         'command directly to see why, then retry." >&2; exit 2; fi'
     )

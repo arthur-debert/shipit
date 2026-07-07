@@ -1033,6 +1033,10 @@ def test_managed_pretooluse_hook_restores_pixi_run_and_fails_closed(tmp_path, re
     command = json.loads(unit.desired_inner())["hooks"][0]["command"]
     assert command == managed_pretooluse_hook_command()
     assert "pixi run" in command
+    # The manifest is PINNED (adapter-equivalent `pixi run --manifest-path
+    # "$CLAUDE_PROJECT_DIR"/pixi.toml -- …`), so a leaked PIXI_PROJECT_MANIFEST can't
+    # make the guard resolve a parent project and fail for the wrong reason (#531).
+    assert '--manifest-path "$CLAUDE_PROJECT_DIR"/pixi.toml -- ' in command
     assert "exit 0" not in command  # the never-silent-allow invariant, by construction
     assert "exit 2" in command  # the fail-closed block on resolution failure
     assert iunits.SETTINGS_HOOK_MARKER in command

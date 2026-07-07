@@ -164,7 +164,9 @@ def pixi_manifest_seed(name: str) -> str:
 #
 # This entry's COMMAND carries a stricter contract than the other four managed
 # settings-hook units below: it is the ADR-0012 coordinator-edit guard, so its
-# command (`pixi run ./bin/shipit hook pretooluse`, ADR-0038) fails CLOSED — a
+# command (`pixi run --manifest-path "$CLAUDE_PROJECT_DIR"/pixi.toml -- ./bin/shipit
+# hook pretooluse`, ADR-0038 — the manifest pin mirrors the pixienv adapter so a
+# leaked PIXI_PROJECT_MANIFEST can't resolve the wrong project) fails CLOSED — a
 # non-zero exit from the resolution chain blocks the tool call (`exit 2`) —
 # where the other four legitimately fail open on a missing launcher (#491). See
 # `tests.conftest.managed_pretooluse_hook_command` (the single source of this
