@@ -55,9 +55,16 @@ in any repo. Two mechanisms, both here, enforce it:
   fires in ANY tree, including one that has not yet adopted the config: that is
   what blocks an ANCESTOR-directory config file (which the env scrub below does
   NOT cover — ancestor discovery walks the filesystem, not the environment). Tools
-  whose config is inline flags rather than a file (shellcheck's ``--severity``,
-  cargo's clippy lints and ``cargo fmt … --config-path <shipped rustfmt.toml>``)
-  carry it directly in their ``check`` / ``fix`` tuples instead (see :data:`RUST`).
+  whose config is inline flags rather than a file (shellcheck's ``--norc`` +
+  ``--severity``, cargo's clippy lints and ``cargo fmt … --config-path <shipped
+  rustfmt.toml>``) carry it directly in their ``check`` / ``fix`` tuples instead
+  (see :data:`RUST`). Where such a tool ALSO discovers config by walking ancestor
+  directories, a discovery-suppressing flag is what closes that walk: shellcheck's
+  ``--norc`` (blocks the ``.shellcheckrc`` walk the scrub cannot reach) and shfmt's
+  ``-i 0`` (blocks the ``.editorconfig`` walk). The WS02 invariance gate (#515)
+  proves each such closure and pins the two that remain OPEN — clippy's
+  ``clippy.toml`` and lexd's ``.lex.toml`` ancestor walks, for which no such flag
+  exists yet (tracked in #526).
 * **Env scrub** — :func:`_run_tool`, the single exec choke point, runs every
   linter under a :func:`_scrubbed_env` (``os.environ`` minus ``$HOME``, ``XDG_*``,
   and an explicit denylist of per-tool config vars — ``SHELLCHECK_OPTS``,
@@ -353,11 +360,27 @@ SHELL = Lang(
     shebangs=("sh", "bash"),
     tools=(
         # shellcheck's canonical config is INLINE flags (it has no `--config
-        # <file>`; `.shellcheckrc` is ambient discovery the env scrub blocks via
-        # `$HOME`). WS03 (#516) BLESSES `--severity=info` as the canonical set:
-        # shipit's own shell lints clean at it and there is no fleet driver to raise
-        # the floor here, so nothing new is invented — `config_inject` stays empty.
-        Tool("shellcheck", ("--severity=info",)),
+        # <file>`). Two flags, both part of the canonical config the gate OWNS
+        # (ADR-0037); `config_inject` stays empty because neither is a placeholder
+        # file-config fragment — they ride the check tuple like every other inline
+        # tool's config:
+        #   * `--norc` — HERMETICITY. shellcheck discovers `.shellcheckrc` by walking
+        #     the filesystem UPWARD from the script's directory, and also reads
+        #     `$HOME/.shellcheckrc`. The `_run_tool` env scrub drops `$HOME` and
+        #     `SHELLCHECK_OPTS`, but it CANNOT stop the ancestor-directory walk — an
+        #     untracked `.shellcheckrc` in a PARENT of the checkout is still consulted
+        #     even with `$HOME` unset, so the verdict would move with WHERE the tree
+        #     is checked out. The WS02 invariance gate (#515) proved this with a real
+        #     grandparent `.shellcheckrc`. `--norc` suppresses ALL `.shellcheckrc`
+        #     discovery, closing the ancestor leak the scrub cannot reach — the
+        #     shellcheck analogue of prettier's `--no-editorconfig` / shfmt's `-i 0`,
+        #     but UNCONDITIONAL: the gate owns shellcheck's config outright, with no
+        #     "honor the repo's own `.shellcheckrc`" carve-out (unlike the
+        #     editorconfig pin, which defers to a repo that tracks its own).
+        #   * `--severity=info` — the canonical rule floor WS03 (#516) blessed:
+        #     shipit's own shell lints clean at it and there is no fleet driver to
+        #     raise it, so nothing new is invented here.
+        Tool("shellcheck", ("--norc", "--severity=info")),
         # `-i 0` is shfmt's tab default, but PASSING any formatting flag makes
         # shfmt skip `.editorconfig` entirely — so the pin both defaults to tabs
         # and neutralizes an ambient/injected/ancestor `.editorconfig` when the

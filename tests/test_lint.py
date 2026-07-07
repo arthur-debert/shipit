@@ -1,11 +1,25 @@
 """Unit tests for lint — routing, the registry, and the hard-fail check verb.
 
-The Exec + git boundary is injected (``run`` takes ``discover`` / ``run_tool``,
-speaking the runner's ExecResult/ExecError contract), so the orchestration is
-exercised with no real linters present.
+Two layers:
+
+* ORCHESTRATION — routing, the registry, and the check verb. The Exec + git
+  boundary is injected (``run`` takes ``discover`` / ``run_tool``, speaking the
+  runner's ExecResult/ExecError contract), so these run with NO real linters
+  present — the tool commands are stubbed.
+
+* HERMETICITY GATE (ADR-0037, LNT01-WS02 #515) — the invariance property tests
+  below run the REAL registered binaries (default ``run_tool``, real subprocess)
+  to prove each tool's verdict is ambient-config-blind. These need the tools ON
+  PATH: a case ``skipif``s an absent optional toolchain (rust, lex), and
+  ``test_core_lint_tools_present_...`` FLOORS the core set, failing loudly if a
+  core linter is missing (e.g. when run outside shipit's pixi env) rather than
+  skipping into a false green.
 """
 
+import os
 import shutil
+import subprocess
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
@@ -620,10 +634,12 @@ def test_fix_mode_check_form_tool_still_sees_a_protected_fixture(tmp_path, capsy
         run_tool=rec,
     )
     assert rc == 0
-    # shellcheck (check-only) covers both files, fixture included.
+    # shellcheck (check-only) covers both files, fixture included. Its argv carries
+    # the unconditional `--norc` hermeticity flag ahead of the canonical severity
+    # floor (ADR-0037 / #515 — closes the ancestor `.shellcheckrc` walk).
     assert (
         "shellcheck",
-        ("--severity=info", "src/ok.sh", "tests/fixtures/bad.sh"),
+        ("--norc", "--severity=info", "src/ok.sh", "tests/fixtures/bad.sh"),
     ) in rec.calls
     # shfmt -w (the mutating fixer) ran over the real source but NEVER the
     # fixture (its argv carries an editorconfig pin, so match on membership).
@@ -1509,3 +1525,855 @@ def test_run_tool_passes_scrubbed_env_with_replace_env(tmp_path, monkeypatch):
     assert captured["replace_env"] is True
     assert "HOME" not in captured["env"]
     assert captured["env"]["PATH"] == "/usr/bin"
+
+
+# --------------------------------------------------------------------------
+# The invariance property gate (ADR-0037, LNT01-WS02 #515)
+#
+# THE acceptance gate for the whole LNT01 epic. Parametrized over every
+# registered TOOL (each `Lang.tools` entry, not just each Lang — round 2, codex):
+# for every tool, lint a fixture TWICE — once clean, once with a HOSTILE config
+# planted in an ambient source (a directory ABOVE the repo root, `$HOME`, or the
+# tool's config ENV VAR) — and assert THAT TOOL'S OWN verdict (its `ToolRun` out of
+# `runs_out`, not the language's aggregate 0/1) does not move. The gate blocks
+# ambient config two ways, one per source class:
+#
+#   * ENV / $HOME — the `_run_tool` scrub drops the tool's config env var and
+#     `$HOME`/`XDG_*`, so the child never sees them (WS01 #514).
+#   * ANCESTOR DIRECTORY — a config file in a PARENT of the checkout is a
+#     filesystem walk the env scrub CANNOT reach; it is blocked only by the
+#     injected argv (a file-config tool's `--config`, cargo fmt's `--config-path`,
+#     shfmt's `-i 0`, shellcheck's `--norc`). A tool with no such injection
+#     consults the ancestor file and leaks — the gate catches exactly that.
+#
+# PER TOOL, not per Lang (round 2, codex): a per-Lang aggregate verdict lets one
+# tool MASK another — the SC2086-dirty shell fixture makes shellcheck dominate the
+# 0/1, so removing shfmt's `-i 0` would not move it and an shfmt leak would be
+# invisible. Reading each tool's OWN `ToolRun` (`_target_run`) closes that;
+# `test_per_tool_assertion_catches_the_shfmt_leak_...` is the direct regression
+# proof (aggregate masked, per-tool caught).
+#
+# Because the cases are BUILT from `LANGS.tools`, a newly-registered tool is
+# subject to the invariant on day one: it needs a `_ToolSpec` or the coverage guard
+# (`test_every_registered_tool_has_a_hermeticity_spec`) fails, and once specced, a
+# tool whose ambient config leaks fails its own case. Two ancestor sub-cases leak
+# TODAY (clippy, lexd — walk-based discovery the scrub can't block and no injection
+# closes yet); they are `xfail(strict)` against the tracked follow-up #526, so the
+# gate is green now and reddens the instant the leak is closed (unexpected pass) OR
+# a NEW leak appears (unexpected fail elsewhere).
+#
+# NO VACUOUS GREEN — three independent guards, because a hermeticity gate that
+# cannot FAIL is worse than none:
+#   * SILENT-SKIP FLOOR — every case is `skipif(binary missing)`, so a missing
+#     tool skips = green. `test_core_lint_tools_present_...` turns that into a
+#     LOUD failure for the CORE set, so a dropped binary can never be a false
+#     green on CI. (Optional toolchains — rust, lex — legitimately skip; see the
+#     CI-coverage caveat below.)
+#   * BASELINE PIN — each spec pins `expected_ok`; the property asserts the clean
+#     run's own `ToolRun.ok` equals it BEFORE `clean.ok == hostile.ok`, so a
+#     drifted fixture cannot collapse the invariant to a hollow `True == True`.
+#   * TEETH — the tests below prove that removing a tool's injection MOVES that
+#     tool's own run (pinned to exact endpoints, not a bare `!=`).
+#
+# CI-COVERAGE CAVEAT (#532): CI's default pixi env provisions only the CORE tools
+# (CORE_LINT_TOOLS) — NOT the Rust (cargo/clippy/rustfmt) or lex (lexd) toolchains.
+# So on CI the rust/lex cases SKIP, and the `xfail(strict)` "leak closed → reminder"
+# signal for clippy/lexd (#526) fires LOCAL-ONLY, on a machine that has those
+# toolchains. This is a known, documented partial-coverage gap, tracked in #532 —
+# NOT a silent one: the core floor still guarantees the CI-gated tools cannot
+# false-green, and the gap is bounded to the two optional toolchains.
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _Vector:
+    """One ambient-config injection vector a spec is exercised on.
+
+    ``name`` is ``"env"`` / ``"home"`` / ``"ancestor"`` / ``"cwd"``. ``xfail`` is a
+    reason string when this vector LEAKS on the current mechanism (the ancestor
+    walk for clippy/lexd, tracked in #526) — the case is then ``xfail(strict)`` so
+    an unexpected pass (leak closed) reddens the gate as a reminder to drop it.
+    """
+
+    name: str
+    xfail: str | None = None
+
+
+@dataclass(frozen=True)
+class _ToolSpec:
+    """How to exercise ONE registered tool (a single ``Lang.tools`` entry) for
+    hermeticity. The gate asserts PER TOOL, not per language (round 2, codex).
+
+    WHY per tool: a per-``Lang`` aggregate 0/1 verdict lets one tool MASK another.
+    The shell fixture is SC2086-dirty, so shellcheck dominates the aggregate — and
+    removing shfmt's ``-i 0`` would not move it, hiding an shfmt leak. Same for
+    rust (``cargo fmt`` behind clippy) and python (``ruff format`` behind
+    ``ruff check``). So each tool gets its OWN fixture + hostile targeting THAT
+    tool's ambient config source, and the assertion reads the tool's own
+    :class:`~shipit.verbs.lint.ToolRun` out of ``runs_out`` (:func:`_target_run`),
+    so one tool's baseline can never mask another tool's leak.
+
+    ``target_check`` is the tool's :attr:`Tool.check` tuple — the identity that
+    selects both the ``Tool`` in ``Lang.tools`` (:func:`_tool_for`) and its
+    ``ToolRun`` (the run whose label ends with that tuple; :func:`_target_run`).
+    ``tag`` names the case in test ids.
+
+    ``binaries`` lists EVERY executable the run needs on PATH — not just the
+    top-level command. For cargo that includes the ``cargo-clippy`` / ``cargo-fmt``
+    subcommand shims AND the ``clippy-driver`` / ``rustfmt`` drivers (round 2,
+    copilot): ``cargo`` can be present without them, and a case that ran anyway
+    would have BOTH its clean and hostile runs fail identically on the missing
+    component, so the tool's verdict would not move and an ``xfail(strict)`` leak
+    case would spuriously XPASS (a false green the floor forbids).
+
+    ``expected_ok`` PINS the tool's clean-run outcome (True = clean under
+    canonical, False = deliberately dirty). The property asserts the clean run's
+    own ``ToolRun.ok`` equals it, so the invariance can never be VACUOUS: if a
+    fixture drifts, ``clean.ok == hostile.ok`` could hold for the wrong reason —
+    the pin catches that.
+
+    ``env_var`` / ``env_kind`` (a config FILE path, a DIR to search, or inline
+    FLAGS), ``home_rel`` (the ``$HOME``-relative user-config path, or
+    ``home_via_lexd`` when lexd's own ``config set --scope user`` must place it
+    OS-correctly), and ``pluginless_prettier`` (sidestep the #498 fail-open) feed
+    the individual vectors — see :func:`_ambient_runs`.
+    """
+
+    lang: str
+    tag: str  # readable tool id for the case (e.g. "ruff-format", "shfmt")
+    target_check: tuple[str, ...]  # the Tool.check tuple identifying this tool
+    binaries: tuple[str, ...]
+    fixture: tuple[tuple[str, str], ...]  # (repo-relative path, content)
+    hostile_name: str  # the config filename the tool DISCOVERS (ancestor/cwd/home)
+    hostile_body: str  # config that flips the tool's verdict when honored
+    vectors: tuple[_Vector, ...]
+    expected_ok: bool  # clean-run baseline: True clean-under-canonical, False dirty
+    env_var: str | None = None
+    env_kind: str = "file"  # "file" | "dir" | "flags"
+    env_flags: str | None = None  # the value for env_kind == "flags"
+    home_rel: str | None = None  # $HOME-relative user-config path
+    home_via_lexd: bool = False  # lexd persists user scope via `lexd config set`
+    pluginless_prettier: bool = False  # sidestep the #498 fail-open (see below)
+
+
+# The registry-parametrized spec table — one _ToolSpec PER registered tool
+# (round 2, codex). Fixtures are CLEAN under the canonical config and the hostile
+# TIGHTENS (True→False), except shellcheck + lexd whose fixtures are deliberately
+# DIRTY under canonical so a DISABLING/DOWNGRADING hostile has teeth (False→True) —
+# a clean fixture cannot be flipped by a config that only relaxes rules.
+_RUST_CARGO_TOML = '[package]\nname = "hermtest"\nversion = "0.0.0"\nedition = "2021"\n'
+_RUST_LIB = "pub fn f(a: i32, b: i32, c: i32) -> i32 {\n    a + b + c\n}\n"
+_RUST_FIXTURE = (("Cargo.toml", _RUST_CARGO_TOML), ("src/lib.rs", _RUST_LIB))
+# The Rust toolchain — cargo AND the subcommand shims (`cargo-clippy`/`cargo-fmt`,
+# which `cargo clippy`/`cargo fmt` actually exec) AND the drivers
+# (`clippy-driver`/`rustfmt`). A partial install missing any of these must SKIP,
+# not drift red (round 2, copilot).
+_RUST_BINS = ("cargo", "cargo-clippy", "cargo-fmt", "clippy-driver", "rustfmt")
+# A shfmt fixture that is TAB-indented (clean under canonical `-i 0`) but that a
+# hostile 2-space `.editorconfig` would reflow — so shfmt's `-i 0` pin is what
+# keeps it clean, independently of shellcheck (which co-runs on the same file).
+_SHFMT_FIXTURE = (("t.sh", "#!/bin/bash\nif true; then\n\techo hi\nfi\n"),)
+_HOSTILE_EDITORCONFIG = "root = true\n[*.sh]\nindent_style = space\nindent_size = 2\n"
+# A bogus `lex.*` canonical directive trips two DENY-level rules
+# (unknown_lex_canonical + schema.unknown_label), so `lexd check` fails — the
+# dirty baseline the hostile downgrade below flips.
+_LEX_DOC = ":: lex.totallybogusdirective ::\n\nBody.\n"
+# lexd honors `"allow"` (not `"warn"`) to actually SUPPRESS these two findings;
+# both must be downgraded or the survivor keeps `lexd check` red.
+_LEX_HOSTILE = (
+    '[diagnostics.rules]\nunknown_lex_canonical = "allow"\n\n'
+    '[diagnostics.rules.schema]\nunknown_label = "allow"\n'
+)
+
+_HERM_SPECS: tuple[_ToolSpec, ...] = (
+    # ruff CHECK — file-config (`--config`). Clean `x = 1`; hostile selects E501 at
+    # line-length 1 so any content overflows. env var + user config + ancestor
+    # walk all overridden by the injected `--config`, env/home also scrubbed.
+    _ToolSpec(
+        lang="python",
+        tag="ruff-check",
+        target_check=("check",),
+        binaries=("ruff",),
+        fixture=(("m.py", "x = 1\n"),),
+        hostile_name="ruff.toml",
+        hostile_body='line-length = 1\n[lint]\nselect = ["E501"]\n',
+        vectors=(_Vector("env"), _Vector("home"), _Vector("ancestor")),
+        expected_ok=True,  # `x = 1` is clean under canonical ruff
+        env_var="RUFF_CONFIG",
+        env_kind="file",
+        home_rel=".config/ruff/ruff.toml",
+    ),
+    # ruff FORMAT — the SECOND python tool, asserted independently so `ruff check`
+    # cannot mask it (round 2, codex). Clean `x = "hi"` (canonical double-quote);
+    # hostile `[format] quote-style = single` would reflow it. The ancestor vector
+    # exercises ruff-format's OWN `--config` injection; the env/home (scrub-blocked,
+    # environment-level not tool-argv) sources are already proven by ruff-check.
+    _ToolSpec(
+        lang="python",
+        tag="ruff-format",
+        target_check=("format", "--check"),
+        binaries=("ruff",),
+        fixture=(("m.py", 'x = "hi"\n'),),
+        hostile_name="ruff.toml",
+        hostile_body='[format]\nquote-style = "single"\n',
+        vectors=(_Vector("ancestor"),),
+        expected_ok=True,  # double-quote `x = "hi"` is clean under canonical ruff
+    ),
+    # cargo CLIPPY — inline `-D warnings`, NO config injection. Clean 3-arg fn;
+    # hostile clippy.toml drops too-many-arguments-threshold to 2 so it fires.
+    # CLIPPY_CONF_DIR is scrubbed (hermetic); the ancestor clippy.toml walk has no
+    # injection to block it and LEAKS — xfail(strict) → #526.
+    _ToolSpec(
+        lang="rust",
+        tag="cargo-clippy",
+        target_check=(
+            "clippy",
+            "--all",
+            "--all-targets",
+            "--all-features",
+            "--",
+            "-D",
+            "warnings",
+        ),
+        binaries=_RUST_BINS,
+        fixture=_RUST_FIXTURE,
+        hostile_name="clippy.toml",
+        hostile_body="too-many-arguments-threshold = 2\n",
+        vectors=(
+            _Vector("env"),
+            _Vector(
+                "ancestor",
+                xfail="#526: clippy walks ancestors for clippy.toml; env-scrub insufficient",
+            ),
+        ),
+        expected_ok=True,  # canonical-clean 3-arg fn under clippy
+        env_var="CLIPPY_CONF_DIR",
+        env_kind="dir",
+    ),
+    # cargo FMT — the SECOND rust tool, asserted independently so clippy cannot mask
+    # it (round 2, codex). Inline `--config-path <shipped rustfmt.toml>` injection.
+    # Clean 4-space fn; a hostile ancestor `rustfmt.toml` (tab_spaces = 2) would
+    # reflow it, but `--config-path` overrides the ancestor walk → hermetic. rustfmt
+    # reads NO config env var, so the ancestor walk is its only ambient source.
+    _ToolSpec(
+        lang="rust",
+        tag="cargo-fmt",
+        target_check=(
+            "fmt",
+            "--all",
+            "--",
+            "--check",
+            "--config-path",
+            lint._RUSTFMT_CONFIG_PATH,
+        ),
+        binaries=_RUST_BINS,
+        fixture=_RUST_FIXTURE,
+        hostile_name="rustfmt.toml",
+        hostile_body="tab_spaces = 2\n",
+        vectors=(_Vector("ancestor"),),
+        expected_ok=True,  # canonical-clean 4-space fn under the shipped rustfmt.toml
+    ),
+    # shellcheck — inline flags incl. the `--norc` this WS adds. Fixture is
+    # SC2086-dirty (`echo $1`); hostile `.shellcheckrc` (or SHELLCHECK_OPTS) would
+    # disable SC2086. --norc blocks the .shellcheckrc walk + $HOME copy; the scrub
+    # blocks SHELLCHECK_OPTS + $HOME.
+    _ToolSpec(
+        lang="shell",
+        tag="shellcheck",
+        target_check=("--norc", "--severity=info"),
+        binaries=("shellcheck",),
+        fixture=(("s.sh", "#!/bin/bash\necho $1\n"),),
+        hostile_name=".shellcheckrc",
+        hostile_body="disable=SC2086\n",
+        vectors=(_Vector("env"), _Vector("home"), _Vector("ancestor")),
+        expected_ok=False,  # `echo $1` is SC2086-dirty under canonical
+        env_var="SHELLCHECK_OPTS",
+        env_kind="flags",
+        env_flags="--exclude=SC2086",
+        home_rel=".shellcheckrc",
+    ),
+    # shfmt — the SECOND shell tool, asserted independently so shellcheck cannot
+    # mask it (round 2, codex — this is the exact masking codex flagged). Clean
+    # TAB-indented fixture; hostile ancestor `.editorconfig` (2-space) would reflow
+    # it, but shfmt's `-i 0` pin makes it skip `.editorconfig` → hermetic.
+    _ToolSpec(
+        lang="shell",
+        tag="shfmt",
+        target_check=("-d",),
+        binaries=("shfmt",),
+        fixture=_SHFMT_FIXTURE,
+        hostile_name=".editorconfig",
+        hostile_body=_HOSTILE_EDITORCONFIG,
+        vectors=(_Vector("ancestor"),),
+        expected_ok=True,  # tab-indented fixture is clean under canonical `-i 0`
+    ),
+    # yamllint — file-config (`-c`). Clean out-of-order mapping; hostile enables
+    # key-ordering so it fires. `-c` overrides env + user config + ancestor walk.
+    _ToolSpec(
+        lang="yaml",
+        tag="yamllint",
+        target_check=("--strict",),
+        binaries=("yamllint",),
+        fixture=(("d.yml", "b: 2\na: 1\n"),),
+        hostile_name=".yamllint",
+        hostile_body="extends: default\nrules:\n  key-ordering: enable\n",
+        vectors=(_Vector("env"), _Vector("home"), _Vector("ancestor")),
+        expected_ok=True,  # clean under canonical yamllint (key-ordering off)
+        env_var="YAMLLINT_CONFIG_FILE",
+        env_kind="file",
+        home_rel=".config/yamllint/config",
+    ),
+    # prettier — file-config (`--config`). Only ambient source is the ancestor
+    # `.prettierrc` walk (prettier reads no config env var and no plain $HOME
+    # file). Clean 2-space JSON; hostile sets tabWidth 8 so it reflows.
+    #
+    # pluginless_prettier: the SHIPPED canonical prettierrc names svelte/tailwind
+    # plugins absent from shipit's lint env, so prettier aborts on plugin load and
+    # the JSON leg FAILS OPEN (#498) — ok for ANY input, which would make this
+    # invariant pass VACUOUSLY. We inject a plugin-less canonical body so prettier
+    # genuinely enforces JSON formatting, exercising the SAME `--config` injection
+    # seam on a real rule (the teeth test proves removing it reddens).
+    _ToolSpec(
+        lang="json",
+        tag="prettier",
+        target_check=("--check", "--log-level", "warn"),
+        binaries=("prettier",),
+        fixture=(("data.json", '{\n  "a": {\n    "b": 1\n  }\n}\n'),),
+        hostile_name=".prettierrc",
+        hostile_body='{"tabWidth": 8}\n',
+        vectors=(_Vector("ancestor"),),
+        expected_ok=True,  # 2-space JSON is clean under the plugin-less canonical
+        pluginless_prettier=True,
+    ),
+    # markdownlint — file-config (`--config`). It reads config ONLY from the
+    # working directory (no ancestor walk, no $HOME, no env var), so the sole
+    # ambient-ish source is a repo-local `.markdownlint.json`; the injected
+    # `--config` makes even THAT ignored — the gate owns the config outright.
+    # Clean short prose; hostile sets MD013 line_length 3 so it fires.
+    _ToolSpec(
+        lang="markdown",
+        tag="markdownlint",
+        target_check=(),
+        binaries=("markdownlint",),
+        fixture=(("r.md", "# Title\n\nHello world, this is a line of prose.\n"),),
+        hostile_name=".markdownlint.json",
+        hostile_body='{"default": false, "MD013": {"line_length": 3}}\n',
+        vectors=(_Vector("cwd"),),
+        expected_ok=True,  # short prose is clean under canonical markdownlint
+    ),
+    # lexd — reads `.lex.toml` (`[diagnostics.rules]` severity), NO config
+    # injection. Fixture trips two deny-level rules (dirty); hostile downgrades
+    # them to allow so `lexd check` passes. The user-scope config is $HOME-rooted
+    # (scrubbed, hermetic); the ancestor `.lex.toml` walk has no injection and
+    # LEAKS — xfail(strict) → #526.
+    _ToolSpec(
+        lang="lex",
+        tag="lexd",
+        target_check=("check",),
+        binaries=("lexd",),
+        fixture=(("doc.lex", _LEX_DOC),),
+        hostile_name=".lex.toml",
+        hostile_body=_LEX_HOSTILE,
+        vectors=(
+            _Vector("home"),
+            _Vector(
+                "ancestor",
+                xfail="#526: lexd walks ancestors for .lex.toml; env-scrub insufficient",
+            ),
+        ),
+        expected_ok=False,  # bogus lex.* directive trips two deny rules (dirty)
+        home_via_lexd=True,
+    ),
+)
+
+
+def _spec(tag: str) -> _ToolSpec:
+    return next(s for s in _HERM_SPECS if s.tag == tag)
+
+
+def _tool_for(spec: _ToolSpec) -> lint.Tool:
+    """The registered ``Tool`` a spec targets — matched by its ``check`` tuple in
+    the (possibly monkeypatched) ``lint.LANGS``, so a teeth test that swaps a tool
+    resolves the swapped one."""
+    lang = next(lang for lang in lint.LANGS if lang.name == spec.lang)
+    return next(t for t in lang.tools if t.check == spec.target_check)
+
+
+def _target_run(runs: list[lint.ToolRun], tool: lint.Tool) -> lint.ToolRun:
+    """The single ``ToolRun`` produced by ``tool`` — matched by binary AND the
+    tool's ``check`` tuple appearing as the label's token SUFFIX (``run`` builds
+    the label as ``binary`` + argv, argv ends with the check/base tuple). This
+    disambiguates two tools that share a binary (ruff check/format, cargo
+    clippy/fmt) without relying on run ORDER, so one tool's outcome is read in
+    isolation — the crux of the per-tool (non-masking) assertion."""
+    n = len(tool.check)
+    matches = [
+        r
+        for r in runs
+        if r.binary == tool.binary
+        and (n == 0 or tuple(r.label.split())[-n:] == tuple(tool.check))
+    ]
+    assert len(matches) == 1, (
+        f"expected exactly one run for {tool.binary} {tool.check}, got "
+        f"{len(matches)} — labels seen: {[r.label for r in runs]}"
+    )
+    return matches[0]
+
+
+def _none_resolver(tool: lint.Tool, root: Path) -> str | None:
+    """A ``canonical_config`` that injects nothing — the teeth tests use it to
+    STRIP a tool's config injection and prove the injection is load-bearing."""
+    return None
+
+
+def _pluginless_resolver(pluginless_path: Path):
+    """A `canonical_config` that swaps prettier's body for a plugin-less one (so it
+    does not fail open, #498) while every other tool keeps its real shipped config."""
+
+    def resolve(tool: lint.Tool, root: Path) -> str | None:
+        if tool.binary == "prettier":
+            return str(pluginless_path)
+        return lint._canonical_config(tool, root)
+
+    return resolve
+
+
+def _ambient_runs(base, spec, vector, *, planted, monkeypatch, canonical):
+    """Lint ``spec``'s fixture in a FRESH tree under ``base``, optionally with the
+    hostile config PLANTED in ``vector``, and return every :class:`ToolRun` — the
+    PER-TOOL outcomes, so the caller asserts on the TARGET tool's run alone
+    (:func:`_target_run`) rather than the masked aggregate verdict (round 2, codex).
+
+    Each call builds its own ``base/repo`` (whose parent ``base`` is the ancestor
+    directory) so the clean and planted runs never share on-disk state or a tool
+    cache — the only difference between them is the planted hostile. The gate's
+    real exec path runs: default ``_run_tool`` (real subprocess + env scrub), the
+    editorconfig pin forced ON (``tracks_root_editorconfig`` → False), and the
+    given ``canonical`` resolver for the injected ``--config``.
+    """
+    base = Path(base)
+    repo = base / "repo"
+    repo.mkdir(parents=True)
+    for rel, content in spec.fixture:
+        f = repo / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(content)
+
+    # Neutralize any inherited value of the tool's config env var, so the clean
+    # run is genuinely clean and the ONLY difference is what this call plants.
+    if spec.env_var:
+        monkeypatch.delenv(spec.env_var, raising=False)
+
+    if vector == "ancestor":
+        if planted:
+            (base / spec.hostile_name).write_text(spec.hostile_body)
+    elif vector == "cwd":
+        if planted:
+            (repo / spec.hostile_name).write_text(spec.hostile_body)
+    elif vector == "env":
+        if planted:
+            if spec.env_kind == "flags":
+                monkeypatch.setenv(spec.env_var, spec.env_flags)
+            elif spec.env_kind == "dir":
+                d = base / "envdir"
+                d.mkdir()
+                (d / spec.hostile_name).write_text(spec.hostile_body)
+                monkeypatch.setenv(spec.env_var, str(d))
+            else:  # a config FILE the env var points at
+                cfg = base / spec.hostile_name
+                cfg.write_text(spec.hostile_body)
+                monkeypatch.setenv(spec.env_var, str(cfg))
+    elif vector == "home":
+        # Point $HOME at a controlled dir (empty when clean, hostile when planted)
+        # and drop XDG_CONFIG_HOME so the tool resolves ~/.config beneath it. The
+        # scrub removes both, so the child sees neither — hermetic either way.
+        home = base / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+        if planted:
+            if spec.home_via_lexd:
+                # lexd persists user scope OS-correctly under $HOME; suppress the
+                # two deny rules the fixture trips so honoring the user config would
+                # flip the verdict (the scrub blocks $HOME, so it must not).
+                for rule in (
+                    "diagnostics.rules.unknown_lex_canonical",
+                    "diagnostics.rules.schema.unknown_label",
+                ):
+                    subprocess.run(
+                        ["lexd", "config", "set", "--scope", "user", rule, "allow"],
+                        env={**os.environ, "HOME": str(home)},
+                        check=True,
+                        capture_output=True,
+                    )
+            else:
+                hp = home / spec.home_rel
+                hp.parent.mkdir(parents=True, exist_ok=True)
+                hp.write_text(spec.hostile_body)
+    else:  # pragma: no cover - guarded by the param builder
+        raise AssertionError(f"unknown vector {vector!r}")
+
+    runs: list[lint.ToolRun] = []
+    lint.run(
+        str(repo),
+        discover=_fake_discover([rel for rel, _ in spec.fixture]),
+        tracks_root_editorconfig=lambda root: False,
+        canonical_config=canonical,
+        runs_out=runs,
+    )
+    return runs
+
+
+def _tool_id(lang: lint.Lang, tool: lint.Tool) -> str:
+    """A UNIQUE, readable case-id stem for one registered tool. Includes the
+    ``check`` tuple, not just the binary: ruff (check+format) and cargo
+    (clippy+fmt) register two tools sharing ONE binary, so a binary-only id would
+    COLLIDE if both were ever missing a spec — and pytest would raise a
+    duplicate-id error instead of reaching the intended clean NO-SPEC failure
+    (round 4, copilot). ``check`` is the tool's registry identity (the coverage
+    guard keys on it), so it is guaranteed unique per lang."""
+    disc = "-".join(tool.check) if tool.check else "noargs"
+    return f"{lang.name}-{tool.binary}-{disc}"
+
+
+def _hermeticity_cases():
+    """Build the parametrized cases by ITERATING every registered TOOL — each
+    `Lang.tools` entry, not just each Lang (round 2, codex): per-tool so one tool's
+    baseline can't mask another's leak. A registered tool with no `_ToolSpec` yields
+    a NO-SPEC case that fails; each spec's vectors become `lang-tag-vector` cases,
+    skipped when a binary is absent and `xfail(strict)` on the vectors that leak
+    today (#526). Case ids are unique per TOOL (`_tool_id` / `spec.tag`), never just
+    per binary, so two same-binary tools can't collide (round 4, copilot)."""
+    specs = {(s.lang, s.target_check): s for s in _HERM_SPECS}
+    cases = []
+    for lang in lint.LANGS:
+        for tool in lang.tools:
+            spec = specs.get((lang.name, tool.check))
+            if spec is None:
+                cases.append(
+                    pytest.param(None, "", id=f"{_tool_id(lang, tool)}-NO-SPEC")
+                )
+                continue
+            missing = [b for b in spec.binaries if shutil.which(b) is None]
+            skip = pytest.mark.skipif(
+                bool(missing), reason=f"{spec.tag}: {missing} not on PATH"
+            )
+            for vec in spec.vectors:
+                marks = [skip]
+                if vec.xfail:
+                    marks.append(pytest.mark.xfail(strict=True, reason=vec.xfail))
+                cases.append(
+                    pytest.param(
+                        spec,
+                        vec.name,
+                        id=f"{spec.lang}-{spec.tag}-{vec.name}",
+                        marks=marks,
+                    )
+                )
+    return cases
+
+
+# The lint tools shipped in shipit's DEFAULT pixi env (pixi.toml) — the set CI
+# provisions and gates on. Every hermeticity case is `skipif(binary missing)`, so
+# a tool absent from PATH makes its cases SILENTLY SKIP = green. That is the
+# intended behavior for OPTIONAL toolchains (rust, lex — see CI-coverage note in
+# the section header), but a false green for the core set: were a provisioning
+# regression to drop one on CI, its hermeticity cases would all skip and the gate
+# would pass while proving nothing. This floor is the guard against exactly that.
+CORE_LINT_TOOLS = (
+    "ruff",
+    "shellcheck",
+    "shfmt",
+    "yamllint",
+    "prettier",
+    "markdownlint",
+)
+
+
+def test_core_lint_tools_present_so_hermeticity_cases_cannot_silently_skip():
+    """Every CORE lint tool MUST be on PATH — a missing one FAILS here rather than
+    silently skipping its hermeticity cases into a false green (#515). The suite is
+    meant to run in shipit's pixi env (`pixi run test`), where pixi.toml provisions
+    all of these; a failure means the env is broken, not that the test is wrong."""
+    missing = [t for t in CORE_LINT_TOOLS if shutil.which(t) is None]
+    assert not missing, (
+        f"core lint tool(s) missing from PATH: {missing}. The hermeticity gate "
+        f"`skipif`s an absent tool, so a missing CORE binary makes its cases skip "
+        f"and the gate pass for the WRONG reason. Run in shipit's pixi env "
+        f"(`pixi run test`), where pixi.toml provisions these."
+    )
+
+
+def test_every_registered_tool_has_a_hermeticity_spec():
+    """The registry gate (#515), now PER TOOL (round 2, codex): every
+    ``(lang, tool)`` in `LANGS` MUST have a `_ToolSpec`, so a newly-registered tool
+    is subject to the invariant automatically — it cannot be added without either a
+    spec proving it is ambient-blind or an xfail pinning its leak. A per-LANG guard
+    would let a second tool added to an existing lang (e.g. another `cargo` leg)
+    slip in unproven; keying on `tool.check` closes that."""
+    registered = {(lang.name, tool.check) for lang in lint.LANGS for tool in lang.tools}
+    specced = {(s.lang, s.target_check) for s in _HERM_SPECS}
+    assert registered <= specced, (
+        f"registered tool(s) with no _ToolSpec (add one — each tool must prove "
+        f"hermeticity or xfail its leak): "
+        f"{sorted((lang, ' '.join(chk)) for lang, chk in registered - specced)}"
+    )
+
+
+@pytest.mark.parametrize("spec,vector", _hermeticity_cases())
+def test_lint_tool_is_ambient_config_blind(spec, vector, tmp_path, monkeypatch):
+    """For each registered TOOL × ambient vector: the TOOL'S OWN verdict (its
+    :class:`ToolRun`, read from `runs_out` — NOT the language's aggregate 0/1) is
+    identical with and without a hostile config planted in that source (ADR-0037,
+    #515). Per-tool so one tool's baseline cannot mask another's leak (round 2,
+    codex): the shell fixture failing on shellcheck no longer hides an shfmt leak.
+
+    A ``NO-SPEC`` case (a registered tool missing from `_HERM_SPECS`) fails loudly.
+    The ancestor sub-cases for clippy/lexd are `xfail(strict)` (#526): they leak
+    today, so that tool's own run MOVES and the assertion fails as expected.
+
+    The clean run's ``ToolRun.ok`` is PINNED to ``spec.expected_ok`` before the
+    invariance check, so the property can never pass vacuously: if a fixture drifts
+    and both runs collapse to the same non-baseline outcome, ``clean.ok ==
+    hostile.ok`` would be hollow — the pin fails first and names the drift. (The pin
+    holds even for the leak cases: "clean" plants no hostile, so it is the canonical
+    baseline regardless of whether the hostile run leaks.)
+    """
+    if spec is None:
+        pytest.fail(
+            "registered tool has no _ToolSpec — add one so it is subject to the "
+            "hermeticity invariant (see test_every_registered_tool_...)"
+        )
+    tool = _tool_for(spec)
+    canonical = lint._canonical_config
+    if spec.pluginless_prettier:
+        pluginless = tmp_path / "pluginless-prettierrc.yaml"
+        pluginless.write_text("singleQuote: true\ntabWidth: 2\nsemi: false\n")
+        canonical = _pluginless_resolver(pluginless)
+
+    clean = _target_run(
+        _ambient_runs(
+            tmp_path / "clean",
+            spec,
+            vector,
+            planted=False,
+            monkeypatch=monkeypatch,
+            canonical=canonical,
+        ),
+        tool,
+    )
+    assert clean.ok == spec.expected_ok, (
+        f"{spec.tag} clean baseline ok={clean.ok}, expected {spec.expected_ok} — "
+        f"the fixture drifted; the per-tool invariance would be VACUOUS. Fix the "
+        f"fixture or expected_ok, don't let a hollow pass hide a broken gate"
+    )
+    hostile = _target_run(
+        _ambient_runs(
+            tmp_path / "hostile",
+            spec,
+            vector,
+            planted=True,
+            monkeypatch=monkeypatch,
+            canonical=canonical,
+        ),
+        tool,
+    )
+    assert clean.ok == hostile.ok, (
+        f"{spec.tag} verdict moved under a hostile {vector} config "
+        f"(clean.ok={clean.ok}, hostile.ok={hostile.ok}) — the gate leaks that source"
+    )
+
+
+# --- Teeth: prove the invariant is NOT vacuously green -----------------------
+
+
+def _teeth_target_oks(tmp_path, spec, tool, monkeypatch, canonical):
+    """Run ``spec``'s ancestor case clean + hostile under ``canonical`` and return
+    ``(clean.ok, hostile.ok)`` for the TARGET ``tool``'s own run — the shape every
+    teeth test asserts on."""
+    clean = _target_run(
+        _ambient_runs(
+            tmp_path / "c",
+            spec,
+            "ancestor",
+            planted=False,
+            monkeypatch=monkeypatch,
+            canonical=canonical,
+        ),
+        tool,
+    )
+    hostile = _target_run(
+        _ambient_runs(
+            tmp_path / "h",
+            spec,
+            "ancestor",
+            planted=True,
+            monkeypatch=monkeypatch,
+            canonical=canonical,
+        ),
+        tool,
+    )
+    return clean.ok, hostile.ok
+
+
+@pytest.mark.skipif(shutil.which("ruff") is None, reason="ruff not on PATH")
+def test_gate_has_teeth_removing_ruff_check_config_reddens(tmp_path, monkeypatch):
+    """Removing ruff-CHECK's `--config` injection turns its ancestor case RED —
+    proof the injection is load-bearing, not a vacuous pass (#515). With the
+    resolver returning None, ruff falls back to discovery and honors the hostile
+    ancestor `ruff.toml`, so ruff-check's OWN run MOVES (ok True → False)."""
+    spec = _spec("ruff-check")
+    oks = _teeth_target_oks(
+        tmp_path, spec, _tool_for(spec), monkeypatch, _none_resolver
+    )
+    assert oks == (True, False)
+
+
+@pytest.mark.skipif(shutil.which("ruff") is None, reason="ruff not on PATH")
+def test_gate_has_teeth_removing_ruff_format_config_reddens(tmp_path, monkeypatch):
+    """The SECOND python tool, proven independently (round 2, codex): removing
+    ruff-FORMAT's `--config` lets the hostile ancestor `ruff.toml`
+    (`quote-style = single`) reflow `x = "hi"`, so ruff-format's OWN run MOVES
+    (ok True → False). The old per-Lang aggregate — dominated by ruff-check — could
+    have masked this; the per-tool run cannot."""
+    spec = _spec("ruff-format")
+    oks = _teeth_target_oks(
+        tmp_path, spec, _tool_for(spec), monkeypatch, _none_resolver
+    )
+    assert oks == (True, False)
+
+
+@pytest.mark.skipif(shutil.which("prettier") is None, reason="prettier not on PATH")
+def test_prettier_gate_is_not_vacuous_behind_the_fail_open(tmp_path, monkeypatch):
+    """The prettier leg has REAL teeth despite the #498 plugin-load fail-open: with
+    prettier's own defaults (no plugins to load, so no #498 fail-open) genuinely
+    format, so dropping `--config` lets the hostile ancestor `.prettierrc`
+    (tabWidth 8) reflow the JSON and prettier's OWN run MOVES (ok True → False). If
+    prettier were silently failing open, both runs would be ok and this would not
+    move — the assertion catches that."""
+    spec = _spec("prettier")
+    oks = _teeth_target_oks(
+        tmp_path, spec, _tool_for(spec), monkeypatch, _none_resolver
+    )
+    assert oks == (True, False)
+
+
+@pytest.mark.skipif(
+    any(shutil.which(b) is None for b in _RUST_BINS),
+    reason="rust toolchain not on PATH",
+)
+def test_gate_has_teeth_removing_cargo_fmt_config_path_reddens(tmp_path, monkeypatch):
+    """The SECOND rust tool, proven independently (round 2, codex): cargo-fmt's
+    canonical config is the INLINE `--config-path <shipped rustfmt.toml>` (not the
+    resolver), so strip it from the registry. Then the hostile ancestor
+    `rustfmt.toml` (tab_spaces = 2) is honored via rustfmt's own ancestor walk and
+    cargo-fmt's OWN run MOVES (ok True → False) — a leak clippy could have masked."""
+    no_path_fmt = lint.Tool(
+        "cargo", ("fmt", "--all", "--", "--check"), per_manifest=True
+    )
+    rust = replace(
+        lint.RUST,
+        tools=tuple(
+            no_path_fmt if t.check[:1] == ("fmt",) else t for t in lint.RUST.tools
+        ),
+    )
+    monkeypatch.setattr(
+        lint,
+        "LANGS",
+        tuple(rust if lang.name == "rust" else lang for lang in lint.LANGS),
+    )
+    oks = _teeth_target_oks(
+        tmp_path, _spec("cargo-fmt"), no_path_fmt, monkeypatch, lint._canonical_config
+    )
+    assert oks == (True, False)
+
+
+@pytest.mark.skipif(
+    shutil.which("shellcheck") is None or shutil.which("shfmt") is None,
+    reason="shell linters not on PATH",
+)
+def test_gate_has_teeth_removing_shellcheck_norc_reddens(tmp_path, monkeypatch):
+    """Removing shellcheck's `--norc` turns its ancestor case RED — proof `--norc`
+    is load-bearing (#515). Swap the registry entry for the pre-#515 form (by BINARY
+    NAME, not index — round 2, agy) and the hostile ancestor `.shellcheckrc`
+    (disable=SC2086) is honored, so shellcheck's OWN run MOVES (ok False → True).
+    This is the exact ancestor leak the env scrub could not close."""
+    pre_norc = lint.Tool("shellcheck", ("--severity=info",))
+    shell = replace(
+        lint.SHELL,
+        tools=tuple(
+            pre_norc if t.binary == "shellcheck" else t for t in lint.SHELL.tools
+        ),
+    )
+    monkeypatch.setattr(
+        lint,
+        "LANGS",
+        tuple(shell if lang.name == "shell" else lang for lang in lint.LANGS),
+    )
+    # `pre_norc` has a different `check`, so target it directly rather than via the
+    # spec's `target_check`.
+    oks = _teeth_target_oks(
+        tmp_path, _spec("shellcheck"), pre_norc, monkeypatch, lint._canonical_config
+    )
+    # SC2086-dirty fixture: without `--norc`, the hostile `.shellcheckrc` disables
+    # SC2086 and the run goes clean — ok False → True.
+    assert oks == (False, True)
+
+
+@pytest.mark.skipif(
+    shutil.which("shellcheck") is None or shutil.which("shfmt") is None,
+    reason="shell linters not on PATH",
+)
+def test_per_tool_assertion_catches_the_shfmt_leak_a_lang_aggregate_masks(
+    tmp_path, monkeypatch
+):
+    """THE round-2 regression proof (codex): a per-Lang aggregate verdict MASKS a
+    second tool's leak; asserting PER TOOL does not.
+
+    The fixture is BOTH SC2086-dirty (shellcheck fails, so the aggregate 0/1 is 1 in
+    EVERY run) AND tab-indented (shfmt territory). De-pin shfmt (drop `-i 0`) and
+    plant a hostile ancestor `.editorconfig` (2-space): the AGGREGATE verdict stays
+    1 clean and hostile — shellcheck masks the movement, so a per-Lang gate sees
+    NOTHING — but shfmt's OWN `ToolRun` moves (ok True → False). The per-tool
+    assertion catches exactly the leak the aggregate hides."""
+    # De-pin shfmt by BINARY NAME, not index (round 2, agy): robust to tool order.
+    depinned = replace(_tool_for(_spec("shfmt")), editorconfig_pin=())
+    shell = replace(
+        lint.SHELL,
+        tools=tuple(depinned if t.binary == "shfmt" else t for t in lint.SHELL.tools),
+    )
+    monkeypatch.setattr(
+        lint,
+        "LANGS",
+        tuple(shell if lang.name == "shell" else lang for lang in lint.LANGS),
+    )
+    # SC2086-dirty AND tab-indented: shellcheck fails (dominating the aggregate),
+    # shfmt is the tool under test.
+    spec = replace(
+        _spec("shfmt"),
+        fixture=(("m.sh", "#!/bin/bash\nif true; then\n\techo $1\nfi\n"),),
+    )
+    tool = _tool_for(spec)  # the de-pinned shfmt (check unchanged)
+    clean_runs = _ambient_runs(
+        tmp_path / "c",
+        spec,
+        "ancestor",
+        planted=False,
+        monkeypatch=monkeypatch,
+        canonical=lint._canonical_config,
+    )
+    hostile_runs = _ambient_runs(
+        tmp_path / "h",
+        spec,
+        "ancestor",
+        planted=True,
+        monkeypatch=monkeypatch,
+        canonical=lint._canonical_config,
+    )
+    # AGGREGATE is MASKED — shellcheck's SC2086 pins the whole-lang verdict at 1 in
+    # both runs, so a per-Lang gate would see no movement.
+    assert lint.verdict(clean_runs) == 1
+    assert lint.verdict(hostile_runs) == 1
+    # PER-TOOL is NOT masked — shfmt's own run moves clean → hostile.
+    assert _target_run(clean_runs, tool).ok is True
+    assert _target_run(hostile_runs, tool).ok is False
