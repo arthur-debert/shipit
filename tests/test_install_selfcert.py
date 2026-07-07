@@ -640,3 +640,38 @@ def test_pin_check_probe_reads_a_crlf_manifest(staged):
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == GOOD_SHA
+
+
+def test_pin_check_probe_never_sigpipes_under_pipefail(staged):
+    # Regression guard for #533: the pin parse must not `… | awk '…exit'`. Under
+    # `set -euo pipefail` awk's early `exit` on the matched pin closes the pipe
+    # while the upstream CR-strip is still writing; the upstream takes SIGPIPE,
+    # the pipeline returns 141 (128 + SIGPIPE(13)), and `set -e` aborts the
+    # launcher — an intermittent, timing-dependent flake. awk reading the file
+    # directly leaves no second process to SIGPIPE.
+    #
+    # A multi-megabyte trailing blob AFTER the [shipit].version match guarantees
+    # the upstream is still writing (its output far exceeds the OS pipe buffer)
+    # when awk exits on the early match — so a piped implementation SIGPIPEs
+    # deterministically, not just occasionally. The loop is belt-and-suspenders.
+    import subprocess
+
+    cfg = staged / config.CONFIG_NAME
+    padded = (
+        cfg.read_text()
+        + "\n"
+        + "# padding line to widen the SIGPIPE window\n" * 150_000
+    )
+    cfg.write_text(padded)
+
+    for _ in range(10):
+        result = subprocess.run(
+            ["bash", str(staged / "bin" / "shipit")],
+            env={"PATH": "/usr/bin:/bin", "SHIPIT_PIN_CHECK": "1"},
+            capture_output=True,
+            text=True,
+            cwd=staged,
+            timeout=30,
+        )
+        assert result.returncode == 0, (result.returncode, result.stderr)
+        assert result.stdout.strip() == GOOD_SHA
