@@ -124,18 +124,22 @@ def _data_path(name: str) -> str:
     The gate injects the PACKAGED config, never a repo-tracked copy — that is what
     makes injection fire in ANY tree (a repo that has not adopted the config, a
     bare fixture) and so blocks an ancestor-directory config file the env scrub
-    cannot reach (ADR-0037). ``resources.files`` returns a real ``Path`` for
-    shipit's normal (unzipped) install; shipit is never zip-imported (it ships
-    data trees), but ``importlib.resources`` does not GUARANTEE that in general
-    (a namespace or zip-style resource has no on-disk path). Rather than trust
-    that and hand a linter an unusable ``--config`` value on a confusing detour,
-    ``os.fspath`` fails fast (``TypeError``) if the Traversable has no real
-    filesystem path, and the existence check fails fast (``FileNotFoundError``)
-    if the named body is missing from the package — both are packaging bugs,
-    never a user-facing outcome, so they are left to propagate rather than
-    mapped through :mod:`._errors`.
+    cannot reach (ADR-0037). ``shipit.data`` is a namespace package (no
+    ``__init__.py``), so ``resources.files("shipit.data")`` is a ``MultiplexedPath``
+    that is NOT ``os.PathLike`` — only its ``joinpath`` result is a real ``Path``.
+    We stringify that result with ``str`` (which works for a real ``Path`` AND any
+    other ``Traversable``) rather than ``os.fspath`` (which would raise ``TypeError``
+    on a non-``PathLike`` Traversable). The fail-fast we want is the existence check
+    below, NOT a type error on a detour: shipit ships unzipped data trees, so a
+    shipped body always resolves to a real on-disk file; if it does not — a
+    zip-style resource with no filesystem path, or a body missing from the package,
+    both packaging bugs and never a user-facing outcome — ``os.path.isfile`` is
+    False and we raise a clear ``FileNotFoundError`` rather than handing a linter an
+    unusable ``--config`` value. (``as_file`` is deliberately NOT used: its context
+    manager can hand back a temp path cleaned up before the linter subprocess reads
+    it.)
     """
-    path = os.fspath(resources.files("shipit.data").joinpath(name))
+    path = str(resources.files("shipit.data").joinpath(name))
     if not os.path.isfile(path):
         raise FileNotFoundError(
             f"shipit.data is missing canonical config {name!r} (resolved to "

@@ -1427,6 +1427,19 @@ def test_rust_fmt_injects_the_shipped_rustfmt_config():
     assert Path(lint._RUSTFMT_CONFIG_PATH).is_file()
 
 
+def test_data_path_resolves_a_real_file_and_fails_fast_when_missing():
+    # `_data_path` must hand a linter subprocess a real on-disk `--config` path, so
+    # `shipit lint` never breaks at canonical-config injection (ADR-0037). shipit.data
+    # is a NAMESPACE package, so `resources.files` yields a MultiplexedPath (not
+    # os.PathLike) — `str(...joinpath(name))` resolves the shipped body regardless,
+    # and the existence check (NOT os.fspath) is the fail-fast: a missing body raises
+    # a clear FileNotFoundError rather than a confusing TypeError or a bogus path.
+    path = lint._data_path("ruff.toml")
+    assert Path(path).is_file()
+    with pytest.raises(FileNotFoundError):
+        lint._data_path("no-such-canonical-config.toml")
+
+
 def test_shipped_ruff_toml_matches_the_repo_root_carve_out():
     # The carve-out (#516) lives in TWO byte-identical places: shipit's repo-root
     # `ruff.toml` (what a direct `ruff` / editor reads; the acceptance "shipit's ruff
@@ -1906,12 +1919,19 @@ def _target_run(runs: list[lint.ToolRun], tool: lint.Tool) -> lint.ToolRun:
     disambiguates two tools that share a binary (ruff check/format, cargo
     clippy/fmt) without relying on run ORDER, so one tool's outcome is read in
     isolation — the crux of the per-tool (non-masking) assertion."""
+    # Match the check tuple as a STRING suffix of the label, not a token-split
+    # suffix: `argv` puts `base` (the check tuple) last, so `label` ends with
+    # `" ".join(tool.check)`. A `.split()` suffix fractures when a check token is
+    # an absolute path containing spaces (e.g. rustfmt's embedded
+    # `_RUSTFMT_CONFIG_PATH` under a checkout dir with spaces), so match the raw
+    # string instead — the path stays contiguous in both label and expected (agy).
     n = len(tool.check)
+    expected = " ".join(tool.check)
     matches = [
         r
         for r in runs
         if r.binary == tool.binary
-        and (n == 0 or tuple(r.label.split())[-n:] == tuple(tool.check))
+        and (n == 0 or r.label.endswith(f" {expected}") or r.label == expected)
     ]
     assert len(matches) == 1, (
         f"expected exactly one run for {tool.binary} {tool.check}, got "
