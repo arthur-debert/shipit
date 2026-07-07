@@ -558,7 +558,14 @@ def editorconfig_declares_root(content: str) -> bool:
     from walking UP into an ancestor ``.editorconfig``; ``root`` set to anything
     else, or appearing inside a section, does not — so neither counts here.
     Comment lines (``#`` / ``;``) and blanks are skipped (issue #528).
+
+    LAST-WINS: a duplicated ``root`` in the preamble resolves to the LAST
+    assignment, matching editorconfig semantics — and the safe (over-pin on
+    ambiguity) direction. Returning on the FIRST match would read
+    ``root = true\nroot = false`` as rooted while a real tool treats it as non-root
+    and walks up — the one direction that could leak.
     """
+    result = False
     for raw in content.splitlines():
         line = raw.strip()
         if not line or line[0] in ";#":
@@ -567,8 +574,8 @@ def editorconfig_declares_root(content: str) -> bool:
             break  # first section header — the preamble is over
         key, sep, value = line.partition("=")
         if sep and key.strip().lower() == "root":
-            return value.strip().lower() == "true"
-    return False
+            result = value.strip().lower() == "true"
+    return result
 
 
 def tracks_editorconfig(paths: list[str], read_root: Callable[[], str | None]) -> bool:
@@ -836,9 +843,13 @@ def _discover(root: Path) -> list[str]:
 
 def _read_editorconfig(path: Path) -> str | None:
     """The body of the root ``.editorconfig`` at ``path``, or ``None`` if it cannot
-    be read. A separate seam so a test can stub the content read (issue #528)."""
+    be read. A separate seam so a test can stub the content read (issue #528).
+
+    Read with ``utf-8-sig`` so a leading UTF-8 BOM is stripped: otherwise the BOM
+    rides line 1 and ``﻿root = true`` fails to parse (currently a safe
+    over-pin, but wrong — such a file genuinely declares ``root = true``)."""
     try:
-        return path.read_text(encoding="utf-8", errors="replace")
+        return path.read_text(encoding="utf-8-sig", errors="replace")
     except OSError:
         return None
 

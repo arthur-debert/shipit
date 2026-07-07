@@ -370,6 +370,21 @@ def test_editorconfig_declares_root():
     assert not lint.editorconfig_declares_root("[*]\nindent_style = space\n")
     # `root` INSIDE a section (after the first header) is not the preamble root.
     assert not lint.editorconfig_declares_root("[*]\nroot = true\n")
+    # LAST-WINS on a duplicated preamble `root` (editorconfig semantics; the safe
+    # over-pin direction): the FINAL assignment governs, not the first.
+    assert not lint.editorconfig_declares_root("root = true\nroot = false\n")
+    assert lint.editorconfig_declares_root("root = false\nroot = true\n")
+
+
+def test_read_editorconfig_strips_utf8_bom(tmp_path):
+    # #528: a UTF-8 BOM-prefixed `.editorconfig` must still parse as `root = true`.
+    # The strip happens in `_read_editorconfig` (utf-8-sig), so exercise the read
+    # seam — a literal BOM fed to the pure parser would (correctly) stay non-root.
+    cfg = tmp_path / ".editorconfig"
+    cfg.write_bytes(b"\xef\xbb\xbfroot = true\n")
+    body = lint._read_editorconfig(cfg)
+    assert body is not None
+    assert lint.editorconfig_declares_root(body)
 
 
 def test_tracks_root_editorconfig_reads_repo_root_not_target(monkeypatch):
@@ -1181,8 +1196,14 @@ def test_tracked_non_root_editorconfig_keeps_pin_on_hostile_ancestor(
     # ancestor .editorconfig would reflow it.
     (repo / "t.sh").write_text("#!/bin/bash\nif true; then\n\techo hi\nfi\n")
     # Tracked-but-NON-root .editorconfig at the repo root (NO `root = true`).
+    # INNOCUOUS on purpose — it touches `[*.md]`, NOT the `.sh` fixture — so the
+    # repo-local config alone cannot reflow `t.sh`. That isolates the planted
+    # ANCESTOR as the SOLE hostile influence: under a presence-only revert the pin
+    # would disable and shfmt would walk up into `base/.editorconfig` (root=true,
+    # `[*.sh]` space/2) and reflow the tab fixture; requiring `root = true` keeps
+    # the pin ON so it does not.
     (repo / ".editorconfig").write_text(
-        "[*.sh]\nindent_style = space\nindent_size = 2\n"
+        "[*.md]\nindent_style = space\nindent_size = 2\n"
     )
     # Hostile ancestor .editorconfig ABOVE the repo (root = true, space/2) — what a
     # presence-only check would let shfmt walk up into.
