@@ -53,12 +53,13 @@ identical on any machine and in any repo. Two mechanisms, both here, enforce it:
   omitted and the verdict is unchanged (see :meth:`Tool.argv`).
 * **Env scrub** — :func:`_run_tool`, the single exec choke point, runs every
   linter under a :func:`_scrubbed_env` (``os.environ`` minus ``$HOME``, ``XDG_*``,
-  and an explicit allowlist of per-tool config vars — ``SHELLCHECK_OPTS``,
+  and an explicit denylist of per-tool config vars — ``SHELLCHECK_OPTS``,
   ``RUFF_CONFIG``, ``CARGO_HOME``, ``CLIPPY_CONF_DIR``, ``YAMLLINT_CONFIG_FILE``)
   passed with ``replace_env=True``, so no user-global config file or tool env var
-  is ever consulted. The allowlist is deliberate, not a ``*_CONFIG*`` substring:
-  that would strip ``PKG_CONFIG_PATH`` / ``FONTCONFIG_PATH`` and break cargo/C
-  builds. No new plumbing in :mod:`shipit.execrun` — it already forwards
+  is ever consulted. That denylist is deliberately enumerated, NOT a ``*_CONFIG*``
+  substring: the substring would also drop ``PKG_CONFIG_PATH`` /
+  ``FONTCONFIG_PATH`` and break cargo/C builds — those standard build vars are
+  PRESERVED. No new plumbing in :mod:`shipit.execrun` — it already forwards
   ``env`` / ``replace_env`` (the Tree provisioner's mechanism).
 """
 
@@ -806,8 +807,8 @@ _TOOL_CONFIG_ENV_VARS: frozenset[str] = frozenset(
 #: #514): the ambient sources through which a user-global config file or a
 #: tool-specific override would otherwise leak into the verdict. ``$HOME`` roots
 #: ``~/.editorconfig`` / ``~/.shellcheckrc`` / ``~/.config`` discovery; ``XDG_*``
-#: relocates that config dir; the explicit :data:`_TOOL_CONFIG_ENV_VARS`
-#: allowlist names each per-tool config file / override var. Dropped so the
+#: relocates that config dir; and the explicit :data:`_TOOL_CONFIG_ENV_VARS`
+#: denylist names each per-tool config file / override var to DROP. Removed so the
 #: verdict is a pure function of the tracked files under the canonical config,
 #: never the machine it runs on.
 def _is_ambient_config_var(key: str) -> bool:
@@ -816,10 +817,12 @@ def _is_ambient_config_var(key: str) -> bool:
     Pure. Three narrow shapes — deliberately NOT a blanket ``"_CONFIG" in key``
     substring, which also stripped ``PKG_CONFIG_PATH`` / ``FONTCONFIG_PATH`` and
     broke cargo/C builds (round 1, agy): ``HOME`` (exact) roots ``~/.config``
-    discovery; ``XDG_*`` (prefix) relocates it; and the explicit
-    :data:`_TOOL_CONFIG_ENV_VARS` allowlist names each per-tool config var
+    discovery; ``XDG_*`` (prefix) relocates it; and membership in the explicit
+    :data:`_TOOL_CONFIG_ENV_VARS` drop-set — the per-tool config vars
     (``SHELLCHECK_OPTS``, ``RUFF_CONFIG``, ``CARGO_HOME``, ``CLIPPY_CONF_DIR``,
-    ``YAMLLINT_CONFIG_FILE``) that points a specific linter at out-of-repo config.
+    ``YAMLLINT_CONFIG_FILE``), each pointing a specific linter at out-of-repo
+    config. It is a denylist (these vars are dropped, everything else kept), NOT
+    an allowlist.
     """
     return key == "HOME" or key.startswith("XDG_") or key in _TOOL_CONFIG_ENV_VARS
 
@@ -863,9 +866,13 @@ def _run_tool(binary: str, args: list[str], cwd: Path) -> execrun.ExecResult:
 
     Every linter runs under a :func:`_scrubbed_env` passed ``replace_env=True``
     (ADR-0037, #514): this single exec choke point is where the ambient-config
-    scrub is applied, so no tool consults ``$HOME`` / ``XDG_*`` / ``*_CONFIG*`` /
-    ``SHELLCHECK_OPTS``. Reuses execrun's existing ``env`` / ``replace_env`` — no
-    new plumbing there.
+    scrub is applied, so no tool consults ``$HOME``, ``XDG_*``, or the
+    explicitly-denylisted per-tool config vars (:func:`_is_ambient_config_var` /
+    :data:`_TOOL_CONFIG_ENV_VARS` — ``SHELLCHECK_OPTS``, ``RUFF_CONFIG``,
+    ``CARGO_HOME``, ``CLIPPY_CONF_DIR``, ``YAMLLINT_CONFIG_FILE``). It is NOT a
+    ``*_CONFIG*`` catch-all — standard build vars like ``PKG_CONFIG_PATH`` are
+    preserved. Reuses execrun's existing ``env`` / ``replace_env`` — no new
+    plumbing there.
     """
     return execrun.run(
         [binary, *args],

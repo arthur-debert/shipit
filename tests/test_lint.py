@@ -1322,7 +1322,8 @@ def test_is_ambient_config_var_matches_the_leaky_keys():
     # PATH and the tool runtime must survive — scrubbing them would break launch.
     # PKG_CONFIG_PATH / FONTCONFIG_PATH are standard build vars, NOT tool config:
     # the old `"_CONFIG" in key` substring wrongly stripped them and broke
-    # cargo/C builds (round 1, agy) — the explicit allowlist must PRESERVE them.
+    # cargo/C builds (round 1, agy) — they are absent from the explicit
+    # denylist (`_TOOL_CONFIG_ENV_VARS`), so the scrub PRESERVES them.
     for kept in (
         "PATH",
         "LANG",
