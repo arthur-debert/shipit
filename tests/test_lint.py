@@ -1699,11 +1699,12 @@ def test_run_tool_passes_scrubbed_env_with_replace_env(tmp_path, monkeypatch):
 # Because the cases are BUILT from `LANGS.tools`, a newly-registered tool is
 # subject to the invariant on day one: it needs a `_ToolSpec` or the coverage guard
 # (`test_every_registered_tool_has_a_hermeticity_spec`) fails, and once specced, a
-# tool whose ambient config leaks fails its own case. Two ancestor sub-cases leak
-# TODAY (clippy, lexd — walk-based discovery the scrub can't block and no injection
-# closes yet); they are `xfail(strict)` against the tracked follow-up #526, so the
-# gate is green now and reddens the instant the leak is closed (unexpected pass) OR
-# a NEW leak appears (unexpected fail elsewhere).
+# tool whose ambient config leaks fails its own case. THREE ancestor sub-cases leak
+# TODAY (clippy's clippy.toml, cargo's `.cargo/config.toml`, lexd's `.lex.toml` —
+# walk-based discovery the scrub can't block and no injection closes yet); they are
+# `xfail(strict)` against the tracked follow-up #526, so the gate is green now and
+# reddens the instant a leak is closed (unexpected pass) OR a NEW leak appears
+# (unexpected fail elsewhere).
 #
 # NO VACUOUS GREEN — three independent guards, because a hermeticity gate that
 # cannot FAIL is worse than none:
@@ -1725,8 +1726,8 @@ def test_run_tool_passes_scrubbed_env_with_replace_env(tmp_path, monkeypatch):
 # runs `shipit provision lexd` before pytest, IN this env, so lexd lands in the test
 # env's own bin — not a depends-on, which pixi would run in its home/default env). So
 # the rust/lex hermeticity cases — and the
-# `xfail(strict)` "leak closed → reminder" signal for clippy/lexd (#526) — run BOTH
-# locally and on CI: closing #526 reddens the gate everywhere, with no local/CI split
+# `xfail(strict)` "leak closed → reminder" signal for clippy/cargo/lexd (#526) — run
+# BOTH locally and on CI: closing #526 reddens the gate everywhere, with no local/CI split
 # in either direction. The `skipif(binary missing)` guards remain only the last-ditch
 # fallback for a genuinely toolchain-less machine (it still runs the core cases and
 # skips these); the canonical gate no longer relies on them for the optional
@@ -1738,14 +1739,39 @@ def test_run_tool_passes_scrubbed_env_with_replace_env(tmp_path, monkeypatch):
 class _Vector:
     """One ambient-config injection vector a spec is exercised on.
 
-    ``name`` is ``"env"`` / ``"home"`` / ``"ancestor"`` / ``"cwd"``. ``xfail`` is a
-    reason string when this vector LEAKS on the current mechanism (the ancestor
-    walk for clippy/lexd, tracked in #526) — the case is then ``xfail(strict)`` so
+    ``name`` is the vector's UNIQUE id suffix within its spec — usually the
+    injection mechanism itself (``"env"`` / ``"home"`` / ``"ancestor"`` / ``"cwd"``),
+    but a spec that exercises the SAME mechanism twice through DIFFERENT config
+    files disambiguates them by name (e.g. cargo's ``"ancestor"`` clippy.toml walk
+    vs its ``"ancestor-cargo-config"`` ``.cargo/config.toml`` walk — two distinct
+    ancestor leaks on the one clippy tool). ``kind`` is the mechanism that actually
+    drives the plant (``_ambient_runs`` branches on it); it defaults to ``name``, so
+    the common name==mechanism vectors need not set it.
+
+    ``hostile_name`` / ``hostile_body`` OVERRIDE the spec's defaults for THIS vector,
+    and ``home_rel`` overrides the spec's ``$HOME``-relative path for a ``home``-kind
+    vector (else the spec's are used) — needed when one tool leaks through more than
+    one ambient config file, so each vector plants its own. Overrides resolve with
+    ``is not None``, so an intentionally falsy value (e.g. an empty body) still wins.
+
+    ``xfail`` is a reason string when this vector LEAKS on the current mechanism (the
+    ancestor walk for clippy's clippy.toml, cargo's ``.cargo/config.toml``, and
+    lexd's ``.lex.toml`` — tracked in #526) — the case is then ``xfail(strict)`` so
     an unexpected pass (leak closed) reddens the gate as a reminder to drop it.
     """
 
     name: str
     xfail: str | None = None
+    kind: str | None = None  # injection mechanism; defaults to ``name``
+    hostile_name: str | None = None  # override spec.hostile_name for THIS vector
+    hostile_body: str | None = None  # override spec.hostile_body for THIS vector
+    home_rel: str | None = None  # override spec.home_rel for a "home"-kind vector
+
+    @property
+    def source(self) -> str:
+        """The injection mechanism ``_ambient_runs`` branches on — ``kind`` when a
+        vector's name differs from its mechanism, else the ``name`` itself."""
+        return self.kind or self.name
 
 
 @dataclass(frozen=True)
@@ -1868,10 +1894,16 @@ _HERM_SPECS: tuple[_ToolSpec, ...] = (
         vectors=(_Vector("ancestor"),),
         expected_ok=True,  # double-quote `x = "hi"` is clean under canonical ruff
     ),
-    # cargo CLIPPY — inline `-D warnings`, NO config injection. Clean 3-arg fn;
-    # hostile clippy.toml drops too-many-arguments-threshold to 2 so it fires.
-    # CLIPPY_CONF_DIR is scrubbed (hermetic); the ancestor clippy.toml walk has no
-    # injection to block it and LEAKS — xfail(strict) → #526.
+    # cargo CLIPPY — inline `-D warnings`, NO config injection. Clean 3-arg fn.
+    # TWO independent ancestor leaks ride this one tool, each `xfail(strict)` → #526:
+    #   * clippy.toml (item 2): hostile drops too-many-arguments-threshold to 2 so it
+    #     fires. CLIPPY_CONF_DIR is scrubbed (hermetic); the ancestor clippy.toml walk
+    #     has no injection to block it and LEAKS.
+    #   * .cargo/config.toml (item 3): hostile `[build] rustflags` denies the
+    #     restriction lint `clippy::arithmetic_side_effects`, which the fixture's
+    #     `a + b + c` then trips. cargo (the driver) merges `.cargo/config.toml` from
+    #     every ANCESTOR dir of the checkout, and no injection overrides that walk —
+    #     a SECOND ancestor source the env scrub cannot reach.
     _ToolSpec(
         lang="rust",
         tag="cargo-clippy",
@@ -1892,7 +1924,16 @@ _HERM_SPECS: tuple[_ToolSpec, ...] = (
             _Vector("env"),
             _Vector(
                 "ancestor",
-                xfail="#526: clippy walks ancestors for clippy.toml; env-scrub insufficient",
+                xfail="#526 (item 2): clippy walks ancestors for clippy.toml; env-scrub insufficient",
+            ),
+            # #526 item 3: cargo's OWN `.cargo/config.toml` ancestor walk — a second
+            # ancestor mechanism on the clippy tool, plants a different file/body.
+            _Vector(
+                "ancestor-cargo-config",
+                kind="ancestor",
+                xfail="#526 (item 3): cargo walks ancestors for .cargo/config.toml; env-scrub insufficient",
+                hostile_name=".cargo/config.toml",
+                hostile_body='[build]\nrustflags = ["-Dclippy::arithmetic_side_effects"]\n',
             ),
         ),
         expected_ok=True,  # canonical-clean 3-arg fn under clippy
@@ -2100,6 +2141,12 @@ def _ambient_runs(base, spec, vector, *, planted, monkeypatch, canonical):
     PER-TOOL outcomes, so the caller asserts on the TARGET tool's run alone
     (:func:`_target_run`) rather than the masked aggregate verdict (round 2, codex).
 
+    ``vector`` is a :class:`_Vector`: its ``source`` picks the injection mechanism
+    (``ancestor`` / ``cwd`` / ``env`` / ``home``) and its ``hostile_name`` /
+    ``hostile_body`` override the spec's defaults, so one tool can be exercised on
+    two DIFFERENT ancestor files (clippy's clippy.toml AND cargo's
+    ``.cargo/config.toml``, #526 items 2 and 3).
+
     Each call builds its own ``base/repo`` (whose parent ``base`` is the ancestor
     directory) so the clean and planted runs never share on-disk state or a tool
     cache — the only difference between them is the planted hostile. The gate's
@@ -2115,31 +2162,48 @@ def _ambient_runs(base, spec, vector, *, planted, monkeypatch, canonical):
         f.parent.mkdir(parents=True, exist_ok=True)
         f.write_text(content)
 
+    # Per-vector hostile OVERRIDE (else the spec's default) — a tool that leaks
+    # through more than one ambient file plants a different one per vector.
+    # ``is not None`` (not ``or``): an override must win even when falsy, e.g. an
+    # intentionally EMPTY body that neutralizes rather than tightens.
+    hostile_name = (
+        vector.hostile_name if vector.hostile_name is not None else spec.hostile_name
+    )
+    hostile_body = (
+        vector.hostile_body if vector.hostile_body is not None else spec.hostile_body
+    )
+
+    def _plant(dest: Path) -> None:
+        # hostile_name may be NESTED (e.g. `.cargo/config.toml`), so ensure its
+        # parent dirs exist before writing.
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(hostile_body)
+
     # Neutralize any inherited value of the tool's config env var, so the clean
     # run is genuinely clean and the ONLY difference is what this call plants.
     if spec.env_var:
         monkeypatch.delenv(spec.env_var, raising=False)
 
-    if vector == "ancestor":
+    if vector.source == "ancestor":
         if planted:
-            (base / spec.hostile_name).write_text(spec.hostile_body)
-    elif vector == "cwd":
+            _plant(base / hostile_name)
+    elif vector.source == "cwd":
         if planted:
-            (repo / spec.hostile_name).write_text(spec.hostile_body)
-    elif vector == "env":
+            _plant(repo / hostile_name)
+    elif vector.source == "env":
         if planted:
             if spec.env_kind == "flags":
                 monkeypatch.setenv(spec.env_var, spec.env_flags)
             elif spec.env_kind == "dir":
                 d = base / "envdir"
                 d.mkdir()
-                (d / spec.hostile_name).write_text(spec.hostile_body)
+                _plant(d / hostile_name)
                 monkeypatch.setenv(spec.env_var, str(d))
             else:  # a config FILE the env var points at
-                cfg = base / spec.hostile_name
-                cfg.write_text(spec.hostile_body)
+                cfg = base / hostile_name
+                _plant(cfg)
                 monkeypatch.setenv(spec.env_var, str(cfg))
-    elif vector == "home":
+    elif vector.source == "home":
         # Point $HOME at a controlled dir (empty when clean, hostile when planted)
         # and drop XDG_CONFIG_HOME so the tool resolves ~/.config beneath it. The
         # scrub removes both, so the child sees neither — hermetic either way.
@@ -2163,11 +2227,14 @@ def _ambient_runs(base, spec, vector, *, planted, monkeypatch, canonical):
                         capture_output=True,
                     )
             else:
-                hp = home / spec.home_rel
-                hp.parent.mkdir(parents=True, exist_ok=True)
-                hp.write_text(spec.hostile_body)
+                # Honor a per-vector home_rel override consistently with the other
+                # kinds (else the spec's), then plant via the shared _plant helper.
+                home_rel = (
+                    vector.home_rel if vector.home_rel is not None else spec.home_rel
+                )
+                _plant(home / home_rel)
     else:  # pragma: no cover - guarded by the param builder
-        raise AssertionError(f"unknown vector {vector!r}")
+        raise AssertionError(f"unknown vector {vector.source!r}")
 
     runs: list[lint.ToolRun] = []
     lint.run(
@@ -2207,7 +2274,7 @@ def _hermeticity_cases():
             spec = specs.get((lang.name, tool.check))
             if spec is None:
                 cases.append(
-                    pytest.param(None, "", id=f"{_tool_id(lang, tool)}-NO-SPEC")
+                    pytest.param(None, None, id=f"{_tool_id(lang, tool)}-NO-SPEC")
                 )
                 continue
             missing = [b for b in spec.binaries if shutil.which(b) is None]
@@ -2221,7 +2288,7 @@ def _hermeticity_cases():
                 cases.append(
                     pytest.param(
                         spec,
-                        vec.name,
+                        vec,
                         id=f"{spec.lang}-{spec.tag}-{vec.name}",
                         marks=marks,
                     )
@@ -2285,8 +2352,9 @@ def test_lint_tool_is_ambient_config_blind(spec, vector, tmp_path, monkeypatch):
     codex): the shell fixture failing on shellcheck no longer hides an shfmt leak.
 
     A ``NO-SPEC`` case (a registered tool missing from `_HERM_SPECS`) fails loudly.
-    The ancestor sub-cases for clippy/lexd are `xfail(strict)` (#526): they leak
-    today, so that tool's own run MOVES and the assertion fails as expected.
+    The THREE walk-based ancestor sub-cases — clippy's clippy.toml, cargo's
+    `.cargo/config.toml`, and lexd's `.lex.toml` — are `xfail(strict)` (#526): they
+    leak today, so that tool's own run MOVES and the assertion fails as expected.
 
     The clean run's ``ToolRun.ok`` is PINNED to ``spec.expected_ok`` before the
     invariance check, so the property can never pass vacuously: if a fixture drifts
@@ -2335,7 +2403,7 @@ def test_lint_tool_is_ambient_config_blind(spec, vector, tmp_path, monkeypatch):
         tool,
     )
     assert clean.ok == hostile.ok, (
-        f"{spec.tag} verdict moved under a hostile {vector} config "
+        f"{spec.tag} verdict moved under a hostile {vector.name} config "
         f"(clean.ok={clean.ok}, hostile.ok={hostile.ok}) — the gate leaks that source"
     )
 
@@ -2351,7 +2419,7 @@ def _teeth_target_oks(tmp_path, spec, tool, monkeypatch, canonical):
         _ambient_runs(
             tmp_path / "c",
             spec,
-            "ancestor",
+            _Vector("ancestor"),
             planted=False,
             monkeypatch=monkeypatch,
             canonical=canonical,
@@ -2362,7 +2430,7 @@ def _teeth_target_oks(tmp_path, spec, tool, monkeypatch, canonical):
         _ambient_runs(
             tmp_path / "h",
             spec,
-            "ancestor",
+            _Vector("ancestor"),
             planted=True,
             monkeypatch=monkeypatch,
             canonical=canonical,
@@ -2513,7 +2581,7 @@ def test_per_tool_assertion_catches_the_shfmt_leak_a_lang_aggregate_masks(
     clean_runs = _ambient_runs(
         tmp_path / "c",
         spec,
-        "ancestor",
+        _Vector("ancestor"),
         planted=False,
         monkeypatch=monkeypatch,
         canonical=lint._canonical_config,
@@ -2521,7 +2589,7 @@ def test_per_tool_assertion_catches_the_shfmt_leak_a_lang_aggregate_masks(
     hostile_runs = _ambient_runs(
         tmp_path / "h",
         spec,
-        "ancestor",
+        _Vector("ancestor"),
         planted=True,
         monkeypatch=monkeypatch,
         canonical=lint._canonical_config,
