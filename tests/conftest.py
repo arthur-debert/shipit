@@ -149,9 +149,10 @@ def managed_pretooluse_hook_command() -> str:
         'cd "$CLAUDE_PROJECT_DIR" && pixi run ./bin/shipit hook pretooluse; '
         "rc=$?; "
         'if [ "$rc" -ne 0 ]; then echo "shipit: PreToolUse guard could not run '
-        "(rc=$rc) — refusing edit. The guard requires pixi to resolve shipit; "
-        "install pixi (https://pixi.sh) or otherwise ensure 'pixi run ./bin/shipit "
-        "hook pretooluse' succeeds, then retry.\" >&2; exit 2; fi"
+        "(rc=$rc) — refusing edit. This can mean pixi is missing, the shipit pin "
+        "failed to resolve, or 'pixi run ./bin/shipit hook pretooluse' itself "
+        "errored; install pixi (https://pixi.sh) if missing, otherwise run that "
+        'command directly to see why, then retry." >&2; exit 2; fi'
     )
 
 
