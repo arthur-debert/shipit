@@ -74,9 +74,14 @@ PIXI_ABSENCE_GUARD = (
 def managed_cc_hook_command(phase: str) -> str:
     """The exact managed ``.claude/settings.json`` hook command for ``phase`` (#491).
 
-    SINGLE source of the expected string — the install and hook tests assert the
-    packaged data files and shipit's own dogfood settings carry it, so a drift in
-    the product's hook command shows up in exactly one place here.
+    Covers the four ADDITIVE hooks only — ``sessionstart``, ``stop``,
+    ``subagent-stop``, ``worktreecreate`` — never ``pretooluse``: that one is the
+    ADR-0012 coordinator-edit GUARD, and #529 gave it its own fail-closed command
+    (:func:`managed_pretooluse_hook_command`) after a fail-open regression on this
+    shared shape disabled it silently. SINGLE source of the expected string for the
+    four it does cover — the install and hook tests assert the packaged data files
+    and shipit's own dogfood settings carry it, so a drift in the product's hook
+    command shows up in exactly one place here.
 
     Two properties this string encodes (#491):
 
@@ -91,13 +96,62 @@ def managed_cc_hook_command(phase: str) -> str:
       so a Claude session in a checkout without a provisioned launcher is not
       disrupted. Where the launcher IS present it runs, and its real ``hook``
       exit code propagates unchanged: fail-open is for a runtime that is genuinely
-      absent, never for a hook that ran and errored.
+      absent, never for a hook that ran and errored. Legitimate for these four —
+      they are additive (advisory/bookkeeping), never the security guard.
     """
     return (
         'cd "$CLAUDE_PROJECT_DIR" || exit 0; test -x ./bin/shipit || { echo '
         '"shipit: bin/shipit launcher not present or executable here — skipping '
         "this managed hook (run 'shipit install' to (re)provision it).\"; exit 0; "
         f"}}; ./bin/shipit hook {phase}"
+    )
+
+
+def managed_pretooluse_hook_command() -> str:
+    """The exact managed ``PreToolUse`` (coordinator-guard) hook command (#529).
+
+    SINGLE source of the expected string — the install and hook tests assert the
+    packaged data file and shipit's own dogfood settings carry it byte-identically,
+    so a drift in the guard's command shows up in exactly one place here.
+
+    This is the ONE managed hook command that must never fail open (ADR-0012: it
+    is the sole enforcer of "the coordinator never implements"). #505/#491 moved
+    every managed hook — guard included — onto the shared `managed_cc_hook_command`
+    shape: no `pixi run`, and a launcher-presence probe that silently `exit 0`s
+    (ALLOW, no decision) when resolution fails. On a bare PreToolUse process (no
+    `CLAUDE_ENV_FILE` sourcing, ergo no pixi activation) that made guard liveness
+    depend on ambient PATH resolution — and when it failed, the coordinator ran
+    fully unguarded with zero signal (#529). Restores `pixi run` (so the guard
+    resolves reliably in the canonical pixi/dogfood repo, `pixi` supplying the
+    activated env and `./bin/shipit` the pin per ADR-0033) and replaces the
+    fail-open probe with a fail-CLOSED tail: capture the resolution+run chain's own
+    exit code, and if it is anything but 0 (the launcher missing, the pin/uv/pixi
+    chain unresolvable, `cd` itself failing), print an actionable message to
+    stderr and `exit 2` — Claude Code's documented blocking-error exit code — so
+    the tool call is refused rather than silently allowed. When the chain DOES run
+    (rc 0), the real `shipit hook pretooluse` process already wrote its own
+    decision (a `deny` JSON payload, or nothing for an allow) straight through to
+    stdout, and its own exit code is always 0 by contract (see
+    `shipit.verbs.hook.pretooluse` — fail-open is that inner boundary's contract
+    for MALFORMED PAYLOADS it received, an orthogonal concern to this outer
+    wrapper's "could the guard run AT ALL" contract). Note there is no bare
+    `exit 0` anywhere in this string — the invariant this hook enforces (never
+    silently allow an edit it did not check) is true by construction, not by
+    convention.
+
+    Open design point (flagged, not resolved here): a genuinely pixi-less
+    consumer now gets every coordinator code-edit BLOCKED (rc 127 from `pixi run`
+    unresolved) rather than the pre-#529 unguarded allow — the correct direction
+    per the never-silent-allow invariant, but the pixi-less mechanics (how such a
+    consumer gets a working guard at all) are left for a follow-up.
+    """
+    return (
+        'cd "$CLAUDE_PROJECT_DIR" && pixi run ./bin/shipit hook pretooluse; '
+        "rc=$?; "
+        'if [ "$rc" -ne 0 ]; then echo "shipit: PreToolUse guard could not run '
+        "(rc=$rc) — refusing edit. The guard requires pixi to resolve shipit; "
+        "install pixi (https://pixi.sh) or otherwise ensure 'pixi run ./bin/shipit "
+        "hook pretooluse' succeeds, then retry.\" >&2; exit 2; fi"
     )
 
 

@@ -23,7 +23,11 @@ from pathlib import Path
 
 import pytest
 import yaml
-from conftest import PIXI_ABSENCE_GUARD, managed_cc_hook_command
+from conftest import (
+    PIXI_ABSENCE_GUARD,
+    managed_cc_hook_command,
+    managed_pretooluse_hook_command,
+)
 
 from shipit import config, execrun, gh, git, pixienv
 from shipit.execrun import ExecError
@@ -969,12 +973,18 @@ def test_load_units_includes_the_sessionstart_activation_hook():
 
 
 def test_managed_settings_hooks_drop_pixi_run_and_fail_open(tmp_path, rec):
-    # #491: EVERY managed .claude/settings.json hook invokes `./bin/shipit hook
-    # <phase>` DIRECTLY — no `pixi run` wrap (the pinned launcher is
-    # pixi-independent, ADR-0033) — behind a launcher-presence fail-open guard
-    # symmetric with the #482 lefthook guard. The `hook` subcommands need no lint
-    # toolchain, so wrapping them in `pixi run` only added startup cost and a hard
-    # pixi dependency at the highest-frequency surface (every session/edit/stop).
+    # #491: the four ADDITIVE managed .claude/settings.json hooks (sessionstart,
+    # stop, subagent-stop, worktreecreate) invoke `./bin/shipit hook <phase>`
+    # DIRECTLY — no `pixi run` wrap (the pinned launcher is pixi-independent,
+    # ADR-0033) — behind a launcher-presence fail-open guard symmetric with the
+    # #482 lefthook guard. The `hook` subcommands need no lint toolchain, so
+    # wrapping them in `pixi run` only added startup cost and a hard pixi
+    # dependency at these high-frequency, non-security surfaces.
+    #
+    # PreToolUse is EXCLUDED here: it is the ADR-0012 coordinator-edit guard, and
+    # #529 gave it its own fail-CLOSED command (test below) after this shared
+    # fail-open shape regressed it into running unguarded, silently, whenever
+    # resolution failed.
     hook_units = [
         u
         for u in iunits.load_units()
@@ -988,7 +998,14 @@ def test_managed_settings_hooks_drop_pixi_run_and_fail_open(tmp_path, rec):
         iunits.EVENT_SESSIONSTART,
         iunits.EVENT_WORKTREECREATE,
     }
-    for u in hook_units:
+    additive_units = [u for u in hook_units if u.event != iunits.EVENT_PRETOOLUSE]
+    assert {u.event for u in additive_units} == {
+        iunits.EVENT_STOP,
+        iunits.EVENT_SUBAGENTSTOP,
+        iunits.EVENT_SESSIONSTART,
+        iunits.EVENT_WORKTREECREATE,
+    }
+    for u in additive_units:
         command = json.loads(u.desired_inner())["hooks"][0]["command"]
         # The phase is the marker tail (`shipit hook <phase>`), and the whole
         # command is the single-source managed form for that phase.
@@ -1001,6 +1018,24 @@ def test_managed_settings_hooks_drop_pixi_run_and_fail_open(tmp_path, rec):
         # The reconcile marker survives verbatim so the managed entry is still
         # recognised after the command change.
         assert u.marker in command
+
+
+def test_managed_pretooluse_hook_restores_pixi_run_and_fails_closed(tmp_path, rec):
+    # #529 (regression from #505/#491): the coordinator-edit GUARD must never
+    # silently allow an edit it did not actually check. Unlike the four additive
+    # hooks above, its managed command restores `pixi run` (so it resolves
+    # reliably in the canonical pixi/dogfood repo) and carries NO fail-open
+    # `exit 0` anywhere — a resolution failure blocks (`exit 2` after an
+    # actionable stderr message) rather than allowing.
+    units = {u.key: u for u in iunits.load_units()}
+    unit = units[iunits.SETTINGS_KEY]
+    assert unit.event == iunits.EVENT_PRETOOLUSE
+    command = json.loads(unit.desired_inner())["hooks"][0]["command"]
+    assert command == managed_pretooluse_hook_command()
+    assert "pixi run" in command
+    assert "exit 0" not in command  # the never-silent-allow invariant, by construction
+    assert "exit 2" in command  # the fail-closed block on resolution failure
+    assert iunits.SETTINGS_HOOK_MARKER in command
 
 
 def test_fresh_install_lays_down_the_session_bootstrap_set_idempotently(tmp_path, rec):

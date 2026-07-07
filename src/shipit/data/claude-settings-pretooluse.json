@@ -1,7 +1,7 @@
 {
   "hooks": [
     {
-      "command": "cd \"$CLAUDE_PROJECT_DIR\" || exit 0; test -x ./bin/shipit || { echo \"shipit: bin/shipit launcher not present or executable here — skipping this managed hook (run 'shipit install' to (re)provision it).\"; exit 0; }; ./bin/shipit hook pretooluse",
+      "command": "cd \"$CLAUDE_PROJECT_DIR\" && pixi run ./bin/shipit hook pretooluse; rc=$?; if [ \"$rc\" -ne 0 ]; then echo \"shipit: PreToolUse guard could not run (rc=$rc) — refusing edit. The guard requires pixi to resolve shipit; install pixi (https://pixi.sh) or otherwise ensure 'pixi run ./bin/shipit hook pretooluse' succeeds, then retry.\" >&2; exit 2; fi",
       "type": "command"
     }
   ],

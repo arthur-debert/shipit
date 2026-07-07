@@ -161,6 +161,14 @@ def pixi_manifest_seed(name: str) -> str:
 # marker. Reconciliation is the standard four-case `decide()` on that entry's hash —
 # the consumer's other settings are merged through untouched, never clobbered, and a
 # consumer edit to shipit's own entry surfaces as an OVERRIDE like any other unit.
+#
+# This entry's COMMAND carries a stricter contract than the other four managed
+# settings-hook units below: it is the ADR-0012 coordinator-edit guard, so its
+# command (`pixi run ./bin/shipit hook pretooluse`, ADR-0038) fails CLOSED — a
+# non-zero exit from the resolution chain blocks the tool call (`exit 2`) —
+# where the other four legitimately fail open on a missing launcher (#491). See
+# `tests.conftest.managed_pretooluse_hook_command` (the single source of this
+# exact string) vs `managed_cc_hook_command` (the other four).
 AGENTS_DEF_DIR = ".claude/agents"
 SETTINGS_FILE = ".claude/settings.json"
 SETTINGS_KEY = ".claude/settings.json#shipit-pretooluse-hook"

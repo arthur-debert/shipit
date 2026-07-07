@@ -44,5 +44,11 @@ it should delegate) AND no **break-glass** marker is present.
   would need its own thin wiring; the binary logic ports, the hook config does not (the
   research's "script logic ports, wiring does not" finding). Pin/track the hook contract
   against the CLI version it was verified on (2.1.195).
+- The committed hook LINE (the managed `.claude/settings.json` command) is part of the
+  enforcement, not just plumbing: a hook that cannot actually run must never be
+  indistinguishable from one that ran and allowed. ADR-0038 amends the `PreToolUse` entry's
+  outer shell wrapper to fail CLOSED on a resolution failure (`pixi`/`./bin/shipit`
+  unresolvable) after a #505 regression made it fail open and silent (#529); the pure Python
+  guard logic this ADR describes is unaffected.
 - HAR01 adds essentially no `.shipit.toml` schema; per-consumer *role additions* (a custom
   role) are a deliberately deferred, separate concern — the closed registry ships fixed.
