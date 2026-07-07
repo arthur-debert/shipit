@@ -38,14 +38,11 @@ jobs:
         run: pixi run -e lint provision-lexd
       - name: Lint
         run: pixi run -e lint lint
-      # Provision lexd into the TEST env too, so the hermeticity invariance gate's
-      # lex case runs instead of skipping. The Rust toolchain rides pixi.lock (the
-      # `test` feature adds cargo/clippy/rustfmt), so it is already on PATH here;
-      # lexd is the one lex tool off conda-forge, fetched at its pin the same way (#532).
-      - name: Provision lexd (test env)
-        run: pixi run -e test provision-lexd
-      # Run the suite in the `test` env — default feature (core linters + pytest)
+      # Run the FULL gate in the `test` env — default feature (core linters + pytest)
       # plus the Rust toolchain — so the rust/lex hermeticity cases (and their #526
-      # xfail leak-signal) run on CI rather than local-only (#532).
+      # xfail leak-signal) run on CI rather than local-only (#532). The `test` task's
+      # own `provision-lexd` depends-on fetches lexd onto the run's PATH first, so this
+      # one command runs exactly what a developer's `pixi run test` does locally — no
+      # separate provision step to keep in sync (unlike the fixed-string `lint` above).
       - name: Test
         run: pixi run -e test test
