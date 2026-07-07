@@ -320,17 +320,71 @@ def test_every_lang_has_at_least_one_tool():
 
 
 def test_tracks_editorconfig_root_only():
+    # `tracks_editorconfig` now takes a lazy reader for the root .editorconfig body,
+    # consulted ONLY when the exact path is tracked (issue #528).
+    def root_true():
+        return "root = true\n"
+
+    def not_root():
+        return "[*]\nindent_style = space\n"
+
+    def root_false():
+        return "root = false\n"
+
+    def must_not_read():
+        raise AssertionError("reader must not run when .editorconfig is untracked")
+
     # Only a ROOT .editorconfig owns the tree's config (the pin runs once at the
-    # root). A repo that commits a root .editorconfig is honored (pin OFF).
-    assert lint.tracks_editorconfig([".editorconfig", "a.sh"])
+    # root), and ONLY when it declares `root = true` — a repo that commits such a
+    # root .editorconfig is honored (pin OFF).
+    assert lint.tracks_editorconfig([".editorconfig", "a.sh"], root_true)
+    # #528: a tracked root .editorconfig WITHOUT `root = true` keeps the pin ON —
+    # presence is necessary but not sufficient (the tool would still walk up).
+    assert not lint.tracks_editorconfig([".editorconfig", "a.sh"], not_root)
+    # `root = false` is explicit non-root → pin STAYS ON.
+    assert not lint.tracks_editorconfig([".editorconfig", "a.sh"], root_false)
     # A NESTED tracked .editorconfig does NOT disable the pin: honoring it would
     # need per-scope batch-splitting (deliberately not done), and keying on it
-    # would open a hermeticity hole for files outside its scope (#493, codex).
-    assert not lint.tracks_editorconfig(["sub/dir/.editorconfig", "sub/dir/a.sh"])
-    # A repo that tracks none is the pinned shape (phos-core).
-    assert not lint.tracks_editorconfig(["a.sh", "b.json", "README.md"])
+    # would open a hermeticity hole for files outside its scope (#493, codex). The
+    # reader is never consulted (proven by the raising stub).
+    assert not lint.tracks_editorconfig(
+        ["sub/dir/.editorconfig", "sub/dir/a.sh"], must_not_read
+    )
+    # A repo that tracks none is the pinned shape (phos-core) — reader untouched.
+    assert not lint.tracks_editorconfig(["a.sh", "b.json", "README.md"], must_not_read)
     # A file merely NAMED like it, but not exactly .editorconfig, does not count.
-    assert not lint.tracks_editorconfig(["my.editorconfig.bak", "x.editorconfig.md"])
+    assert not lint.tracks_editorconfig(
+        ["my.editorconfig.bak", "x.editorconfig.md"], must_not_read
+    )
+
+
+def test_editorconfig_declares_root():
+    # Pure preamble parse (#528): only `root = true` (case-insensitive) in the
+    # PREAMBLE — before the first [section] — counts.
+    assert lint.editorconfig_declares_root("root = true\n")
+    assert lint.editorconfig_declares_root("Root = True\n")
+    assert lint.editorconfig_declares_root("# comment\n; also\n\nroot=true\n[*]\n")
+    # `root` set to anything but true does not count.
+    assert not lint.editorconfig_declares_root("root = false\n")
+    assert not lint.editorconfig_declares_root("")
+    assert not lint.editorconfig_declares_root("[*]\nindent_style = space\n")
+    # `root` INSIDE a section (after the first header) is not the preamble root.
+    assert not lint.editorconfig_declares_root("[*]\nroot = true\n")
+    # LAST-WINS on a duplicated preamble `root` (editorconfig semantics; the safe
+    # over-pin direction): the FINAL assignment governs, not the first.
+    assert not lint.editorconfig_declares_root("root = true\nroot = false\n")
+    assert lint.editorconfig_declares_root("root = false\nroot = true\n")
+
+
+def test_read_editorconfig_strips_utf8_bom(tmp_path):
+    # #528: a UTF-8 BOM-prefixed `.editorconfig` must still parse as `root = true`.
+    # The strip happens in `_read_editorconfig` (utf-8-sig), so exercise the read
+    # seam — a literal BOM fed to the pure parser would (correctly) stay non-root.
+    cfg = tmp_path / ".editorconfig"
+    cfg.write_bytes(b"\xef\xbb\xbfroot = true\n")
+    body = lint._read_editorconfig(cfg)
+    assert body is not None
+    assert lint.editorconfig_declares_root(body)
 
 
 def test_tracks_root_editorconfig_reads_repo_root_not_target(monkeypatch):
@@ -346,9 +400,29 @@ def test_tracks_root_editorconfig_reads_repo_root_not_target(monkeypatch):
         return [".editorconfig", "src/app.py"]
 
     monkeypatch.setattr(lint.git, "ls_files", fake_ls)
+    # The real code now also reads /repo/.editorconfig's body to confirm
+    # `root = true` (#528); /repo doesn't exist on disk, so stub the reader.
+    monkeypatch.setattr(lint, "_read_editorconfig", lambda path: "root = true\n")
     assert lint._tracks_root_editorconfig(Path("/repo/src")) is True
     # Queried at the TOP-LEVEL, not the `src` target.
     assert seen["cwd"] == "/repo"
+
+
+def test_tracks_root_editorconfig_requires_root_true_content(monkeypatch):
+    # #528: presence of a tracked root .editorconfig is necessary but NOT
+    # sufficient — the pin disables ONLY when the file declares `root = true`. A
+    # linter-free unit test over the git seam + reader, so the core guarantee is
+    # validated even where shfmt is absent.
+    monkeypatch.setattr(lint.git, "repo_root", lambda *, cwd: "/repo")
+    monkeypatch.setattr(lint.git, "ls_files", lambda *, cwd: [".editorconfig", "a.sh"])
+    # A tracked non-`root = true` root config → NOT tracked-for-pin → pin STAYS ON.
+    monkeypatch.setattr(
+        lint, "_read_editorconfig", lambda path: "[*]\nindent_style = space\n"
+    )
+    assert lint._tracks_root_editorconfig(Path("/repo")) is False
+    # The same tracked file declaring `root = true` → tracked-for-pin → pin OFF.
+    monkeypatch.setattr(lint, "_read_editorconfig", lambda path: "root = true\n")
+    assert lint._tracks_root_editorconfig(Path("/repo")) is True
 
 
 def test_tracks_root_editorconfig_nested_only_is_pinned(monkeypatch):
@@ -1046,6 +1120,9 @@ def test_run_pin_decision_independent_of_lint_ignore(tmp_path, monkeypatch):
     # `_tracks_root_editorconfig` over a monkeypatched git seam: the repo tracks a
     # root .editorconfig AND `.shipit.toml` ignores it — the pin still reads OFF.
     (tmp_path / ".shipit.toml").write_text('[lint]\nignore = [".editorconfig"]\n')
+    # The tracked root config must declare `root = true` for the pin to disable
+    # (#528); write a real one so the real `_read_editorconfig` sees it.
+    (tmp_path / ".editorconfig").write_text("root = true\n")
     monkeypatch.setattr(lint.git, "repo_root", lambda *, cwd: str(tmp_path))
     monkeypatch.setattr(
         lint.git, "ls_files", lambda *, cwd: [".editorconfig", "run.sh"]
@@ -1095,6 +1172,59 @@ def test_shfmt_verdict_is_hermetic_across_ambient_editorconfig(tmp_path):
     )
     # Identical verdict: the pin makes shfmt ignore the injected config.
     assert lint.run(str(tmp_path), discover=discover, **pinned) == 0
+
+
+@pytest.mark.skipif(
+    shutil.which("shfmt") is None or shutil.which("shellcheck") is None,
+    reason="shell linters (shfmt/shellcheck) not on PATH in this env",
+)
+def test_tracked_non_root_editorconfig_keeps_pin_on_hostile_ancestor(
+    tmp_path, monkeypatch
+):
+    """#528: a repo tracking a NON-`root = true` `.editorconfig` at its root, with a
+    HOSTILE ancestor `.editorconfig` planted ABOVE it, yields the SAME shfmt verdict.
+
+    A presence-only `tracks_editorconfig` would DISABLE the pin here (the root file
+    IS tracked) and let shfmt walk UP into the hostile ancestor, reflowing the
+    tab-indented fixture. Requiring `root = true` keeps the pin ON via the REAL
+    decision path, so the verdict does not move.
+    """
+    base = tmp_path / "base"
+    repo = base / "repo"
+    repo.mkdir(parents=True)
+    # TAB-indented shell fixture: clean under canonical `-i 0`, but a 2-space
+    # ancestor .editorconfig would reflow it.
+    (repo / "t.sh").write_text("#!/bin/bash\nif true; then\n\techo hi\nfi\n")
+    # Tracked-but-NON-root .editorconfig at the repo root (NO `root = true`).
+    # INNOCUOUS on purpose — it touches `[*.md]`, NOT the `.sh` fixture — so the
+    # repo-local config alone cannot reflow `t.sh`. That isolates the planted
+    # ANCESTOR as the SOLE hostile influence: under a presence-only revert the pin
+    # would disable and shfmt would walk up into `base/.editorconfig` (root=true,
+    # `[*.sh]` space/2) and reflow the tab fixture; requiring `root = true` keeps
+    # the pin ON so it does not.
+    (repo / ".editorconfig").write_text(
+        "[*.md]\nindent_style = space\nindent_size = 2\n"
+    )
+    # Hostile ancestor .editorconfig ABOVE the repo (root = true, space/2) — what a
+    # presence-only check would let shfmt walk up into.
+    (base / ".editorconfig").write_text(_HOSTILE_EDITORCONFIG)
+
+    # Drive the REAL pin decision: real `_tracks_root_editorconfig` over the git
+    # seam (tracked non-root config) reading `repo/.editorconfig` → False → pin ON.
+    monkeypatch.setattr(lint.git, "repo_root", lambda *, cwd: str(repo))
+    monkeypatch.setattr(lint.git, "ls_files", lambda *, cwd: [".editorconfig", "t.sh"])
+
+    # (1) The crisp core guarantee — pin ON for the tracked non-root config,
+    # independent of any linter.
+    assert lint._tracks_root_editorconfig(repo) is False
+
+    # (2) End-to-end with the REAL shfmt subprocess (default `_run_tool`): the
+    # hostile ancestor does NOT reflow the verdict because the pin stays ON.
+    runs: list[lint.ToolRun] = []
+    rc = lint.run(str(repo), discover=_fake_discover(["t.sh"]), runs_out=runs)
+    shfmt_run = next(r for r in runs if r.binary == "shfmt")
+    assert shfmt_run.ok is True
+    assert rc == 0
 
 
 def test_malformed_shipit_toml_fails_clean_not_traceback(tmp_path, capsys):

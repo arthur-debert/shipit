@@ -395,12 +395,10 @@ SHELL = Lang(
         # shell-style normalization owned by WS06 (#519), not config definition. See
         # the paired prettier `--no-editorconfig` note above; the gate stays hermetic
         # meanwhile — the env scrub kills `~/.editorconfig`, and when the pin is gated
-        # off (the repo tracks its own root `.editorconfig`, `tracks_editorconfig`)
-        # that tracked config normally carries `root = true` and stops the walk. KNOWN
-        # GAP: `tracks_editorconfig` keys on the root file's PRESENCE, not its
-        # `root = true` content, so a tracked non-`root = true` `.editorconfig` can
-        # still let shfmt walk up into an ancestor — tightening the pin-disable to
-        # require `root = true` is a fast-follow under epic #513.
+        # off (the repo tracks its own root `.editorconfig`) that config must declare
+        # `root = true` (`tracks_editorconfig` / `editorconfig_declares_root`, #528),
+        # which is exactly what stops the ancestor walk — a tracked non-`root = true`
+        # file keeps the pin ON.
         Tool("shfmt", ("-d",), fix=("-w",), editorconfig_pin=("-i", "0")),
     ),
 )
@@ -431,11 +429,9 @@ JSON = Lang(
     # fleet repo's editorconfig, which is fleet debt-clear work owned by WS06 (#519),
     # not config-definition work. The gate stays hermetic meanwhile: the env scrub
     # kills `~/.editorconfig`, and when the pin is gated off (the repo tracks its own
-    # root `.editorconfig`, `tracks_editorconfig`) that tracked config normally
-    # carries `root = true` and stops the ancestor walk. KNOWN GAP: the pin-disable
-    # keys on the root file's PRESENCE, not its `root = true` content, so a tracked
-    # non-`root = true` `.editorconfig` can still permit an ancestor walk — tightening
-    # `tracks_editorconfig` to require `root = true` is a fast-follow under epic #513.
+    # root `.editorconfig`) that config must declare `root = true`
+    # (`tracks_editorconfig` / `editorconfig_declares_root`, #528), which is exactly
+    # what stops the ancestor walk — a tracked non-`root = true` file keeps the pin ON.
     tools=(
         Tool(
             "prettier",
@@ -553,17 +549,57 @@ def lex_projections(paths: list[str]) -> set[str]:
     return {p for p in paths if p.endswith(".md") and p[:-3] + ".lex" in sources}
 
 
-def tracks_editorconfig(paths: list[str]) -> bool:
-    """Whether the repo tracks a ROOT ``.editorconfig`` (exact path ``.editorconfig``). Pure.
+def editorconfig_declares_root(content: str) -> bool:
+    """Whether an ``.editorconfig`` body declares ``root = true`` in its preamble. Pure.
+
+    editorconfig is INI-like: ``root`` is only meaningful in the PREAMBLE — the
+    lines BEFORE the first ``[section]`` header. Only ``root = true`` (compared
+    case-insensitively, e.g. ``Root = True``) stops an editorconfig-aware tool
+    from walking UP into an ancestor ``.editorconfig``; ``root`` set to anything
+    else, or appearing inside a section, does not — so neither counts here.
+    Comment lines (``#`` / ``;``) and blanks are skipped (issue #528).
+
+    LAST-WINS: a duplicated ``root`` in the preamble resolves to the LAST
+    assignment, matching editorconfig semantics — and the safe (over-pin on
+    ambiguity) direction. Returning on the FIRST match would read
+    ``root = true\nroot = false`` as rooted while a real tool treats it as non-root
+    and walks up — the one direction that could leak.
+    """
+    result = False
+    for raw in content.splitlines():
+        line = raw.strip()
+        if not line or line[0] in ";#":
+            continue
+        if line.startswith("["):
+            break  # first section header — the preamble is over
+        key, sep, value = line.partition("=")
+        if sep and key.strip().lower() == "root":
+            result = value.strip().lower() == "true"
+    return result
+
+
+def tracks_editorconfig(paths: list[str], read_root: Callable[[], str | None]) -> bool:
+    """Whether the repo tracks a ROOT ``.editorconfig`` that declares ``root = true``. Pure.
 
     The signal that decides the editorconfig hermeticity pin (issue #493). A repo
-    that commits a root ``.editorconfig`` OWNS its formatting config: the file
-    travels with every checkout, so its verdict is already commit-determined and
-    shfmt / prettier are left to honor it (shipit's own tab-vs-space shell house
-    style depends on this). A repo that tracks none gets the pin — the
-    editorconfig-aware tools are told to ignore any ambient/injected/ancestor
-    ``.editorconfig`` a co-resident tool or a checkout location may have introduced,
-    so the verdict cannot flip on where or beside what the tree is checked out.
+    that commits a root ``.editorconfig`` declaring ``root = true`` OWNS its
+    formatting config: the file travels with every checkout, so its verdict is
+    already commit-determined and shfmt / prettier are left to honor it (shipit's
+    own tab-vs-space shell house style depends on this). A repo that tracks none
+    gets the pin — the editorconfig-aware tools are told to ignore any
+    ambient/injected/ancestor ``.editorconfig`` a co-resident tool or a checkout
+    location may have introduced, so the verdict cannot flip on where or beside
+    what the tree is checked out.
+
+    Presence is NECESSARY but NOT SUFFICIENT (issue #528). A tracked root
+    ``.editorconfig`` disables the pin ONLY when it declares ``root = true`` — that
+    declaration is precisely what stops an editorconfig-aware tool from walking UP
+    into an ancestor ``.editorconfig``. A tracked non-``root = true`` file leaves
+    the pin ON: without ``root = true`` the tool would otherwise still walk up into
+    an ancestor config, so honoring it would make the verdict depend on the
+    checkout location again (the very leak the pin exists to close). So a tracked
+    root file gates the pin off ONLY with ``root = true`` — presence alone no
+    longer suffices.
 
     Keyed on the ROOT ``.editorconfig`` ONLY, never a nested one (round 1, codex):
     the pin is a single tree-wide flag (shfmt/prettier run once at the root), so
@@ -577,8 +613,16 @@ def tracks_editorconfig(paths: list[str]) -> bool:
     top-level tracked list, repo-root-relative (see :func:`_tracks_root_editorconfig`),
     so ``.editorconfig`` is the root file and ``sub/.editorconfig`` a nested one; the
     exact match also rejects a lookalike (``my.editorconfig.bak``).
+
+    ``read_root`` lazily returns the root ``.editorconfig`` body (or ``None`` if it
+    cannot be read). It is consulted ONLY when the exact path is tracked, so the
+    presence gate stays a pure list check and the content read is deferred to the
+    one case that needs it.
     """
-    return ".editorconfig" in paths
+    if ".editorconfig" not in paths:
+        return False
+    content = read_root()
+    return content is not None and editorconfig_declares_root(content)
 
 
 def _ignore_matchers(patterns: list[str]) -> list[include.PatternSet]:
@@ -797,8 +841,23 @@ def _discover(root: Path) -> list[str]:
     return git.ls_files(cwd=str(root))
 
 
+def _read_editorconfig(path: Path) -> str | None:
+    """The body of the root ``.editorconfig`` at ``path``, or ``None`` if it cannot
+    be read. A separate seam so a test can stub the content read (issue #528).
+
+    Read with ``utf-8-sig`` so a leading UTF-8 BOM is stripped: otherwise the BOM
+    rides line 1 and ``﻿root = true`` fails to parse (currently a safe
+    over-pin, but wrong — such a file genuinely declares ``root = true``)."""
+    try:
+        return path.read_text(encoding="utf-8-sig", errors="replace")
+    except OSError:
+        return None
+
+
 def _tracks_root_editorconfig(root: Path) -> bool:
-    """Whether the git repo containing ``root`` tracks a ROOT ``.editorconfig``.
+    """Whether the git repo containing ``root`` tracks a ROOT ``.editorconfig`` that
+    declares ``root = true`` — reading the root file's content, not just its
+    presence, to confirm it (issue #528).
 
     The editorconfig pin decision (issue #493) is a repo-wide git FACT, so it is
     read from the repo's canonical tracked-file list at its TOP LEVEL — resolved
@@ -817,7 +876,10 @@ def _tracks_root_editorconfig(root: Path) -> bool:
     repo_root = git.repo_root(cwd=str(root))
     if repo_root is None:
         return False
-    return tracks_editorconfig(git.ls_files(cwd=repo_root))
+    return tracks_editorconfig(
+        git.ls_files(cwd=repo_root),
+        lambda: _read_editorconfig(Path(repo_root) / ".editorconfig"),
+    )
 
 
 def _ignore_globs(root: Path) -> list[str]:
