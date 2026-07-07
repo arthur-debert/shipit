@@ -1588,13 +1588,14 @@ def test_run_tool_passes_scrubbed_env_with_replace_env(tmp_path, monkeypatch):
 #   * TEETH — the tests below prove that removing a tool's injection MOVES that
 #     tool's own run (pinned to exact endpoints, not a bare `!=`).
 #
-# CI-COVERAGE CAVEAT (#532): CI's default pixi env provisions only the CORE tools
-# (CORE_LINT_TOOLS) — NOT the Rust (cargo/clippy/rustfmt) or lex (lexd) toolchains.
-# So on CI the rust/lex cases SKIP, and the `xfail(strict)` "leak closed → reminder"
-# signal for clippy/lexd (#526) fires LOCAL-ONLY, on a machine that has those
-# toolchains. This is a known, documented partial-coverage gap, tracked in #532 —
-# NOT a silent one: the core floor still guarantees the CI-gated tools cannot
-# false-green, and the gap is bounded to the two optional toolchains.
+# CI COVERAGE (#532 — closed): CI now runs the suite in the pixi `test` env, which
+# carries the Rust toolchain (cargo/clippy/rustfmt, conda-forge-pinned in pixi.lock)
+# AND provisions lexd at its pin (the `provision-lexd` GH-release fetch) before the
+# suite. So the rust/lex hermeticity cases — and the `xfail(strict)` "leak closed →
+# reminder" signal for clippy/lexd (#526) — run on CI, not local-only: closing #526
+# reddens the gate everywhere. The `skipif(binary missing)` guards remain the
+# local-dev fallback (a machine without cargo/lexd still runs the core cases and
+# skips these), but the CI gate no longer relies on them for the optional toolchains.
 # --------------------------------------------------------------------------
 
 

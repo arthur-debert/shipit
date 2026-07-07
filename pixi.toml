@@ -85,6 +85,22 @@ test = "python -m pytest -q"
 [dependencies.pytest]
 version = ">=8"
 
+# The `test` FEATURE adds the OPTIONAL toolchains the hermeticity invariance gate
+# (tests/test_lint.py, LNT01-WS02 #515) needs to run its Rust and lex cases — the
+# `test` environment below composes it with the default feature (core linters +
+# pytest + shipit editable), so `pixi run -e test test` runs the FULL gate. Without
+# these the rust/lex cases `skipif` their absent binaries, and the `xfail(strict)`
+# "leak closed → reminder" signal for clippy/lexd (#526) fires local-only (#532).
+# The Rust toolchain (cargo + clippy-driver/cargo-clippy + rustfmt/cargo-fmt) is a
+# conda-forge package PINNED in pixi.lock — the invariance gate exercises the real
+# binaries, so like the required-check linters it must move only via an auto-PR bump.
+# lexd, the one lex tool not on conda-forge, is fetched at its pin into this env by
+# `shipit provision lexd` (the managed `provision-lexd` task), the same GH-release
+# path the lint env uses — CI runs it as an explicit step before the test suite
+# (.github/workflows/ci.yml).
+[feature.test.dependencies]
+rust = "1.96.*"
+
 # The `lint` FEATURE carries the MANAGED fleet-pinned dependency block below —
 # the exact block `shipit install` delivers to every consumer (ADP00,
 # docs/prd/adoption.md: the managed set owns the consumer environment). shipit
@@ -188,5 +204,10 @@ verify-spawn = "python -m shipit.spawn.dogfood"
 # >>> shipit-managed environments (do not edit; regenerate via `shipit install`) >>>
 lint = ["lint"]
 # <<< shipit-managed environments <<<
+# The full-gate test env: default feature (core linters + pytest + shipit editable)
+# plus the `test` feature's Rust toolchain, so the hermeticity invariance gate runs
+# its rust/lex cases on CI instead of skipping them (#532). lexd is provisioned into
+# it at its pin by the `provision-lexd` task.
+test = ["test"]
 review = ["review"]
 dogfood = ["dogfood"]

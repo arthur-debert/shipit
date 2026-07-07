@@ -27,15 +27,25 @@ jobs:
           environments: >-
             default
             lint
+            test
       # Fetch the pinned lexd into the lint env before linting. The managed
       # `lint = "shipit lint"` task is a fixed plain string (no `provision-lexd`
       # depends-on), so the lex leg's tool is provisioned here explicitly (idempotent;
       # a no-op when the pin is already present) — issue #210, option (a). The task
       # is the managed `provision-lexd = "shipit provision lexd"` line: pin, platform
       # resolution, and checksum verification live in the binary (ADP00-WS03).
-      - name: Provision lexd
+      - name: Provision lexd (lint env)
         run: pixi run -e lint provision-lexd
       - name: Lint
         run: pixi run -e lint lint
+      # Provision lexd into the TEST env too, so the hermeticity invariance gate's
+      # lex case runs instead of skipping. The Rust toolchain rides pixi.lock (the
+      # `test` feature adds cargo/clippy/rustfmt), so it is already on PATH here;
+      # lexd is the one lex tool off conda-forge, fetched at its pin the same way (#532).
+      - name: Provision lexd (test env)
+        run: pixi run -e test provision-lexd
+      # Run the suite in the `test` env — default feature (core linters + pytest)
+      # plus the Rust toolchain — so the rust/lex hermeticity cases (and their #526
+      # xfail leak-signal) run on CI rather than local-only (#532).
       - name: Test
-        run: pixi run test
+        run: pixi run -e test test
