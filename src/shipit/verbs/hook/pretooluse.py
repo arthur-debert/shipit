@@ -18,6 +18,19 @@ An ALLOW emits NOTHING (empty stdout): the hook declines to decide, so Claude
 Code's normal permission flow proceeds unchanged. The guard never auto-approves
 a tool — it only ever *blocks* the coordinator's code edits — which is what
 keeps it safe to run on every call.
+
+**This module's fail-open is scoped to a payload this process actually
+received** (bad JSON, a missing field) — it presumes `run()` got to execute at
+all. It is a DIFFERENT contract from the managed `.claude/settings.json`
+command's OUTER shell wrapper, which invokes this module via `pixi run
+--manifest-path "$CLAUDE_PROJECT_DIR"/pixi.toml -- ./bin/shipit hook pretooluse`
+and must fail CLOSED when the wrapper cannot even resolve/launch this process
+(`pixi`/the launcher unresolvable) — see ADR-0038
+(#529: a #505 regression conflated the two and made the whole guard fail open
+and silent when resolution failed). "This process ran and decided" (this
+module, always exit 0, decision on stdout or nothing) and "the wrapper could
+not get this process to run at all" (the command line, `exit 2` on failure)
+are two different failure surfaces on purpose — never merge them.
 """
 
 from __future__ import annotations
