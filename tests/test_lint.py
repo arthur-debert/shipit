@@ -1748,9 +1748,11 @@ class _Vector:
     drives the plant (``_ambient_runs`` branches on it); it defaults to ``name``, so
     the common name==mechanism vectors need not set it.
 
-    ``hostile_name`` / ``hostile_body`` OVERRIDE the spec's defaults for THIS vector
-    (else the spec's are used) — needed when one tool leaks through more than one
-    ambient config file, so each vector plants its own.
+    ``hostile_name`` / ``hostile_body`` OVERRIDE the spec's defaults for THIS vector,
+    and ``home_rel`` overrides the spec's ``$HOME``-relative path for a ``home``-kind
+    vector (else the spec's are used) — needed when one tool leaks through more than
+    one ambient config file, so each vector plants its own. Overrides resolve with
+    ``is not None``, so an intentionally falsy value (e.g. an empty body) still wins.
 
     ``xfail`` is a reason string when this vector LEAKS on the current mechanism (the
     ancestor walk for clippy's clippy.toml, cargo's ``.cargo/config.toml``, and
@@ -1763,6 +1765,7 @@ class _Vector:
     kind: str | None = None  # injection mechanism; defaults to ``name``
     hostile_name: str | None = None  # override spec.hostile_name for THIS vector
     hostile_body: str | None = None  # override spec.hostile_body for THIS vector
+    home_rel: str | None = None  # override spec.home_rel for a "home"-kind vector
 
     @property
     def source(self) -> str:
@@ -2161,8 +2164,14 @@ def _ambient_runs(base, spec, vector, *, planted, monkeypatch, canonical):
 
     # Per-vector hostile OVERRIDE (else the spec's default) — a tool that leaks
     # through more than one ambient file plants a different one per vector.
-    hostile_name = vector.hostile_name or spec.hostile_name
-    hostile_body = vector.hostile_body or spec.hostile_body
+    # ``is not None`` (not ``or``): an override must win even when falsy, e.g. an
+    # intentionally EMPTY body that neutralizes rather than tightens.
+    hostile_name = (
+        vector.hostile_name if vector.hostile_name is not None else spec.hostile_name
+    )
+    hostile_body = (
+        vector.hostile_body if vector.hostile_body is not None else spec.hostile_body
+    )
 
     def _plant(dest: Path) -> None:
         # hostile_name may be NESTED (e.g. `.cargo/config.toml`), so ensure its
@@ -2218,9 +2227,12 @@ def _ambient_runs(base, spec, vector, *, planted, monkeypatch, canonical):
                         capture_output=True,
                     )
             else:
-                hp = home / spec.home_rel
-                hp.parent.mkdir(parents=True, exist_ok=True)
-                hp.write_text(hostile_body)
+                # Honor a per-vector home_rel override consistently with the other
+                # kinds (else the spec's), then plant via the shared _plant helper.
+                home_rel = (
+                    vector.home_rel if vector.home_rel is not None else spec.home_rel
+                )
+                _plant(home / home_rel)
     else:  # pragma: no cover - guarded by the param builder
         raise AssertionError(f"unknown vector {vector.source!r}")
 
