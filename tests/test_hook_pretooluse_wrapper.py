@@ -72,7 +72,8 @@ def test_wrapper_blocks_when_pixi_is_entirely_absent(tmp_path):
 def test_wrapper_blocks_on_any_nonzero_resolution_chain_exit(tmp_path):
     # Generic coverage of the OTHER named failure modes (launcher missing/not
     # executable, pin/uv unresolvable): whatever the underlying cause, the
-    # `pixi run ./bin/shipit hook pretooluse` chain surfaces it as a non-zero
+    # `pixi run --manifest-path "$CLAUDE_PROJECT_DIR"/pixi.toml -- ./bin/shipit
+    # hook pretooluse` chain surfaces it as a non-zero
     # exit, and the wrapper must block on ANY such exit — deterministic here via
     # a stub `pixi` that fails the way a broken resolution would, without
     # depending on real network/solve behavior.

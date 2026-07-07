@@ -23,8 +23,9 @@ keeps it safe to run on every call.
 received** (bad JSON, a missing field) — it presumes `run()` got to execute at
 all. It is a DIFFERENT contract from the managed `.claude/settings.json`
 command's OUTER shell wrapper, which invokes this module via `pixi run
-./bin/shipit hook pretooluse` and must fail CLOSED when the wrapper cannot even
-resolve/launch this process (`pixi`/the launcher unresolvable) — see ADR-0038
+--manifest-path "$CLAUDE_PROJECT_DIR"/pixi.toml -- ./bin/shipit hook pretooluse`
+and must fail CLOSED when the wrapper cannot even resolve/launch this process
+(`pixi`/the launcher unresolvable) — see ADR-0038
 (#529: a #505 regression conflated the two and made the whole guard fail open
 and silent when resolution failed). "This process ran and decided" (this
 module, always exit 0, decision on stdout or nothing) and "the wrapper could

@@ -1,7 +1,7 @@
 {
   "hooks": [
     {
-      "command": "cd \"$CLAUDE_PROJECT_DIR\" && pixi run --manifest-path \"$CLAUDE_PROJECT_DIR\"/pixi.toml -- ./bin/shipit hook pretooluse; rc=$?; if [ \"$rc\" -ne 0 ]; then echo \"shipit: PreToolUse guard could not run (rc=$rc) — refusing edit. This can mean pixi is missing, the shipit pin failed to resolve, or 'pixi run --manifest-path $CLAUDE_PROJECT_DIR/pixi.toml -- ./bin/shipit hook pretooluse' itself errored; install pixi (https://pixi.sh) if missing, otherwise run that command directly to see why, then retry.\" >&2; exit 2; fi",
+      "command": "cd \"$CLAUDE_PROJECT_DIR\" && pixi run --manifest-path \"$CLAUDE_PROJECT_DIR\"/pixi.toml -- ./bin/shipit hook pretooluse; rc=$?; if [ \"$rc\" -ne 0 ]; then echo \"shipit: PreToolUse guard could not run (rc=$rc) — refusing edit rather than allowing an unchecked coordinator edit. Likely causes: CLAUDE_PROJECT_DIR is unset or not a shipit checkout (the cd failed), pixi is not installed, or the pinned shipit environment could not be resolved. Install pixi (https://pixi.sh) if it is missing, then run this command from the project to see the underlying error: pixi run --manifest-path \\\"\\$CLAUDE_PROJECT_DIR\\\"/pixi.toml -- ./bin/shipit hook pretooluse\" >&2; exit 2; fi",
       "type": "command"
     }
   ],
