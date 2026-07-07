@@ -76,14 +76,49 @@ lint = "./bin/shipit lint"
 logs = "./bin/shipit logs"
 provision-lexd = "./bin/shipit provision lexd"
 # <<< shipit-managed tasks <<<
-# Provisional test task (the full pixi-test encapsulation is Step 5); shipit
-# supplies its own `test` so CI's required `check` keeps running the suite.
-test = "python -m pytest -q"
 
-# pytest lives here (not a linter) so `pixi run test` has it without pulling it
-# into the lint environment's required-check surface.
+# pytest lives here (not a linter) so the `test` task — defined in the `test`
+# FEATURE below, alongside the Rust toolchain — has it, without pulling it into the
+# lint environment's required-check surface.
 [dependencies.pytest]
 version = ">=8"
+
+# The `test` FEATURE owns the whole test surface: the Rust toolchain the hermeticity
+# invariance gate (tests/test_lint.py, LNT01-WS02 #515) needs for its rust cases, AND
+# the `test` task itself (below). The `test` environment further down composes this
+# feature with the default feature (core linters + pytest + shipit editable). Because
+# the task lives in EXACTLY ONE feature, it exists in EXACTLY ONE environment (`test`)
+# — so bare `pixi run test` resolves UNAMBIGUOUSLY to that env, and the documented
+# developer command runs the SAME full gate CI runs (`pixi run -e test test`). That
+# closes the local/CI coverage split (#532) in the other direction: a contributor's
+# `pixi run test` can no longer go green by skipping the rust/lex cases CI executes.
+# The Rust toolchain (cargo + clippy-driver/cargo-clippy + rustfmt/cargo-fmt) is a
+# conda-forge package PINNED in pixi.lock — the invariance gate exercises the real
+# binaries, so like the required-check linters it must move only via an auto-PR bump.
+# lexd, the one lex tool not on conda-forge, is fetched at its pin INLINE by the
+# `test` task cmd (`shipit provision lexd` before pytest, IN this env) — NOT a
+# `provision-lexd` depends-on, which pixi would run in the default env; see the task
+# comment below for why.
+[feature.test.dependencies]
+rust = "1.96.*"
+
+[feature.test.tasks]
+# The full-gate suite. Rust rides the env (conda dep); lexd (not on conda-forge) is
+# provisioned INLINE — the cmd runs `shipit provision lexd` (idempotent — a no-op when
+# the pin is already installed) before pytest, IN this task's own env. Inline, NOT a
+# `provision-lexd` depends-on: a bare `pixi run test` auto-selects this env for the
+# `test` task, but pixi runs a depends-on in the depended task's HOME env, and the
+# managed `provision-lexd` is a DEFAULT-feature task — so a depends-on would provision
+# lexd into `.pixi/envs/default/bin`, NOT this env, and the composed test env does NOT
+# layer the default env's bin onto PATH. So `shutil.which("lexd")` would miss it and
+# the lex cases would silently `skipif`-skip on a clean `pixi run test` (the default
+# bin only leaks in when a shell has the default env separately activated). Running the
+# provision inline keeps it in THIS env's `CONDA_PREFIX`, so bare `pixi run test` and
+# CI's `pixi run -e test test` are byte-identical and both land lexd in the test env.
+# Without rust+lexd the rust/lex cases `skipif` their absent binaries and the
+# `xfail(strict)` "leak closed → reminder" signal for clippy/lexd (#526) would fire
+# local-only; this env is what makes them run everywhere.
+test = { cmd = "./bin/shipit provision lexd && python -m pytest -q" }
 
 # The `lint` FEATURE carries the MANAGED fleet-pinned dependency block below —
 # the exact block `shipit install` delivers to every consumer (ADP00,
@@ -188,5 +223,15 @@ verify-spawn = "python -m shipit.spawn.dogfood"
 # >>> shipit-managed environments (do not edit; regenerate via `shipit install`) >>>
 lint = ["lint"]
 # <<< shipit-managed environments <<<
+# The full-gate test env: default feature (core linters + pytest + shipit editable)
+# plus the `test` feature's Rust toolchain AND its `test` task, so the hermeticity
+# invariance gate runs its rust/lex cases instead of skipping them (#532). It is the
+# ONLY env carrying the `test` task, so bare `pixi run test` auto-selects it — the
+# developer command and the CI command (`pixi run -e test test`) run the same gate.
+# lexd is provisioned onto the run's PATH at its pin INLINE by the `test` task cmd
+# (`shipit provision lexd` before pytest, landing in THIS env's own bin). NOT a
+# `provision-lexd` depends-on: pixi would run it in the default env, whose bin this
+# env does not layer onto PATH — see the task comment above.
+test = ["test"]
 review = ["review"]
 dogfood = ["dogfood"]
