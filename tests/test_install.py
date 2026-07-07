@@ -473,8 +473,8 @@ def test_shipits_own_lint_configs_reconcile_to_noop():
 
 
 def test_lint_config_units_reconcile_add_noop_override(tmp_path, rec):
-    """Fresh consumer install ADDs the three config units, a re-install NOOPs,
-    and a consumer edit surfaces as OVERRIDE (never silently kept)."""
+    """Fresh consumer install ADDs the managed lint config units, a re-install
+    NOOPs, and a consumer edit surfaces as OVERRIDE (never silently kept)."""
     keys = {dest for dest, _ in iunits.LINT_CONFIG_UNITS}
 
     def actions():

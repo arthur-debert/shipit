@@ -23,8 +23,16 @@ IFS=':' read -ra _path_dirs <<<"$PATH"
 for _dir in "${_path_dirs[@]}"; do
 	[ -n "$_dir" ] || continue
 	_cand="$_dir/shipit"
-	[ -f "$_cand" ] && [ -x "$_cand" ] || continue
+	# Two `|| continue` guards, not the compact `A && B || C`: shellcheck 0.10
+	# flags that form as SC2015 (0.11 does not) — the split is equivalent and
+	# version-agnostic. (Gate pinned to 0.10 for the 0.11.0 SC2218 regression.)
+	[ -f "$_cand" ] || continue
+	[ -x "$_cand" ] || continue
 	[ "$_cand" -ef "$self" ] && continue
+	# `exec` REPLACES this launcher with the resolved shipit, so the loop is meant
+	# to stop here — SC2093's "script should continue" note is a false positive
+	# (emitted by shellcheck 0.10, not 0.11).
+	# shellcheck disable=SC2093
 	exec "$_cand" "$@"
 done
 
