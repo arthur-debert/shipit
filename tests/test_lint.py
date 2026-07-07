@@ -1300,15 +1300,34 @@ def test_is_prettier_plugin_load_failure_never_swallows_a_real_failure():
     )
 
 
-def test_prettier_plugin_load_leg_fails_open(tmp_path, capsys):
-    # Orchestrator wiring: prettier exits nonzero with the resolver abort → the
-    # JSON leg passes (fail open) and the reason is printed under the `ok` mark.
+def test_partition_plugin_scoped_splits_by_extension():
+    # The `.svelte` (plugin-scoped) files peel off into their own batch, order
+    # preserved; the plugin-free `.json`/`.ts`/`.tsx` stay together (#520).
+    paths = ["a.json", "src/W.svelte", "b.ts", "c.tsx", "d/E.svelte"]
+    free, scoped = lint.partition_plugin_scoped(paths, (".svelte",))
+    assert free == ["a.json", "b.ts", "c.tsx"]
+    assert scoped == ["src/W.svelte", "d/E.svelte"]
+
+
+def test_partition_plugin_scoped_no_declared_extensions_is_all_free():
+    # Every non-web leg declares no plugin-scoped extensions → one plugin-free
+    # batch, exactly the single-batch behaviour it has always had.
+    paths = ["a.py", "b.rs"]
+    free, scoped = lint.partition_plugin_scoped(paths, ())
+    assert free == paths
+    assert scoped == []
+
+
+def test_prettier_svelte_leg_fails_open(tmp_path, capsys):
+    # Orchestrator wiring: the plugin-scoped `.svelte` leg is the ONE that may
+    # fail open — prettier aborts on the missing prettier-plugin-svelte, so that
+    # leg passes and the reason is printed under the `ok` mark (#498/#520).
     err = (
         "[error] Cannot find package 'prettier-plugin-svelte' imported from /x/noop.js"
     )
     rc = lint.run(
         str(tmp_path),
-        discover=_fake_discover(["data.json"]),
+        discover=_fake_discover(["Widget.svelte"]),
         run_tool=_prettier_output(1, err),
         tracks_root_editorconfig=lambda root: True,
     )
@@ -1318,6 +1337,66 @@ def test_prettier_plugin_load_leg_fails_open(tmp_path, capsys):
     assert "web:prettier" not in out  # never listed among the failures
     assert "not installed" in out  # the skip reason IS surfaced, not silent
     assert "ok   web" in out
+
+
+def test_prettier_json_leg_never_fails_open(tmp_path, capsys):
+    # The flip side of the split (#520): the plugin-FREE `.json`/`.ts` leg is
+    # `fail_open_ok=False`, so even a (structurally impossible under the scoped
+    # canonical config) plugin-load abort on it hard-fails rather than masking a
+    # potentially dirty file. The JSON verdict can NEVER be zeroed by #498.
+    err = (
+        "[error] Cannot find package 'prettier-plugin-svelte' imported from /x/noop.js"
+    )
+    rc = lint.run(
+        str(tmp_path),
+        discover=_fake_discover(["data.json"]),
+        run_tool=_prettier_output(1, err),
+        tracks_root_editorconfig=lambda root: True,
+    )
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "LINT: FAILED" in out
+    assert "web:prettier" in out
+
+
+def test_prettier_svelte_abort_does_not_mask_dirty_json(tmp_path, capsys):
+    # THE regression the split exists for (#520, codex/copilot review of #542):
+    # a repo with a `.svelte` file (its plugin absent → prettier aborts on load)
+    # AND a dirty `.json` must still RED on the JSON. Before the split both rode
+    # one prettier invocation, so the svelte plugin abort zeroed the whole batch
+    # and the dirty JSON passed. Split apart, the `.svelte` leg fails open while
+    # the `.json` leg keeps its real (failing) verdict.
+    dirty = "[warn] data.json\n[warn] Code style issues found in the above file."
+    plugin_abort = (
+        "[error] Cannot find package 'prettier-plugin-svelte' imported from /x/noop.js"
+    )
+
+    def run_tool(binary, args, cwd):
+        if binary == "prettier":
+            svelte = any(a.endswith(".svelte") for a in args)
+            return execrun.ExecResult(
+                argv=(binary, *args),
+                rc=1,
+                stdout="",
+                stderr=plugin_abort if svelte else dirty,
+                duration_ms=1,
+            )
+        return execrun.ExecResult(
+            argv=(binary, *args), rc=0, stdout="", stderr="", duration_ms=1
+        )
+
+    rc = lint.run(
+        str(tmp_path),
+        discover=_fake_discover(["data.json", "Widget.svelte"]),
+        run_tool=run_tool,
+        tracks_root_editorconfig=lambda root: True,
+    )
+    assert rc == 1  # the dirty JSON is NOT masked by the svelte plugin abort
+    out = capsys.readouterr().out
+    assert "LINT: FAILED" in out
+    assert "web:prettier" in out
+    # The svelte leg still fails open — its skip reason is surfaced alongside.
+    assert "not installed" in out
 
 
 def test_prettier_dirty_json_still_fails_in_orchestrator(tmp_path, capsys):

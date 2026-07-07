@@ -18,11 +18,15 @@ The ONE deliberate, narrowly-scoped exception is prettier's plugin-load abort
 clone with no ``npm install``), prettier aborts on load with a Node
 module-resolution error rather than reporting a formatting verdict. Those
 plugins format ``.svelte`` only (never ``.json``/``.ts``), so this is
-environment-not-provisioned (same spirit as the pixi ``command -v`` guard, #482),
-and the JSON/TS leg FAILS OPEN with a note. The match is tight — it requires the
-Node resolver phrasing and never fires on prettier's own "code style issues"
-warning — so a genuinely dirty JSON/TS file still hard-fails. This is not a hole
-in the hard-fail contract; it is a documented, single-class carve-out.
+environment-not-provisioned (same spirit as the pixi ``command -v`` guard, #482).
+The web leg batches ``.svelte`` APART from the plugin-free ``.json``/``.ts``/
+``.tsx`` (:func:`partition_plugin_scoped`, LNT01-WS07 #520), and only the
+``.svelte`` batch fails open with a note — the JSON/TS batch never resolves the
+plugin and keeps a real verdict even in an unprovisioned env. The match is also
+tight — it requires the Node resolver phrasing and never fires on prettier's own
+"code style issues" warning — so a genuinely dirty ``.svelte`` file still
+hard-fails. This is not a hole in the hard-fail contract; it is a documented,
+single-class, single-leg carve-out.
 
 The checks are CHECK-ONLY by default (release's scar: ``prettier --write`` under
 --all-files silently rewrites untouched files, so they must never mutate).
@@ -278,6 +282,13 @@ class Lang:
     tools: tuple[Tool, ...]
     shebangs: tuple[str, ...] = ()  # interpreter basenames for extensionless files
     manifests: tuple[str, ...] = ()  # manifest basenames rooting per_manifest runs
+    # Extensions whose formatting needs a `.prettierrc`-named plugin resolved from
+    # `node_modules` (`.svelte` → prettier-plugin-svelte). They are batched into
+    # their OWN tool invocation, apart from the plugin-free extensions, so the
+    # #498 plugin-load fail-open can touch ONLY this leg — a missing plugin here is
+    # environment-not-provisioned, never a reason to zero a `.json`/`.ts` verdict
+    # (LNT01-WS07 #520). A subset of `extensions`; empty for every non-web leg.
+    plugin_scoped_extensions: tuple[str, ...] = ()
 
 
 PYTHON = Lang(
@@ -421,6 +432,14 @@ WEB = Lang(
     # eslint registration stays OUT of scope — this is prettier's reach, not a new
     # linter (WS07 decision).
     extensions=(".json", ".ts", ".tsx", ".svelte"),
+    # `.svelte` is the plugin-scoped subset: it rides its OWN prettier invocation,
+    # apart from the plugin-free `.json`/`.ts`/`.tsx` batch, so a missing
+    # prettier-plugin-svelte fails ONLY the svelte leg open (#498) and can never
+    # zero a JSON/TS verdict. Config scoping alone leaves the plugin unresolved for
+    # a JSON/TS-only invocation, but a single mixed batch would still resolve it for
+    # the `.svelte` member and drag JSON/TS into the fail-open — the split is what
+    # closes that (LNT01-WS07 #520).
+    plugin_scoped_extensions=(".svelte",),
     # prettier takes its config as a FILE via `--config <path>`; pin to the
     # canonical `shipit/data/prettierrc.yaml` (ADR-0037, WS03 #516), resolved by
     # `_canonical_config`. The canonical body sets the fleet's one rule set
@@ -540,6 +559,37 @@ def manifest_roots(paths: list[str], manifests: tuple[str, ...]) -> list[str]:
         if _basename(path) in manifests
     }
     return sorted(dirs)
+
+
+def _ext(path: str) -> str:
+    """The lowercase extension (with dot) of ``path``, or ``""`` if it has none."""
+    name = _basename(path)
+    return "." + name.rsplit(".", 1)[-1] if "." in name else ""
+
+
+def partition_plugin_scoped(
+    paths: list[str], plugin_scoped: tuple[str, ...]
+) -> tuple[list[str], list[str]]:
+    """Split ``paths`` into ``(plugin_free, plugin_scoped)`` by extension, order
+    preserved. Pure.
+
+    The plugin-scoped leg (``.svelte``) is the ONLY one whose prettier invocation
+    resolves a ``.prettierrc``-named plugin and can therefore fail OPEN on a
+    missing ``node_modules`` (#498/#520); the plugin-free leg (``.json``/``.ts``/
+    ``.tsx``) must fail CLOSED so a genuinely dirty file is never masked by that
+    carve-out. Batching the two apart — rather than one mixed prettier call — is
+    what keeps the verdicts independent: a mixed call resolves the plugin for its
+    ``.svelte`` member and drags the JSON/TS members into the same abort. With no
+    plugin-scoped extensions declared, every path is plugin-free (the general
+    single-batch case for every non-web leg).
+    """
+    if not plugin_scoped:
+        return paths, []
+    free: list[str] = []
+    scoped: list[str] = []
+    for path in paths:
+        (scoped if _ext(path) in plugin_scoped else free).append(path)
+    return free, scoped
 
 
 def lex_projections(paths: list[str]) -> set[str]:
@@ -818,11 +868,15 @@ def is_prettier_plugin_load_failure(binary: str, rc: int, output: str) -> bool:
         Cannot find package 'prettier-plugin-svelte' imported from …/noop.js
 
     That nonzero exit is environment-not-provisioned, NOT a lint verdict: those
-    plugins format ``.svelte`` / CSS, never ``.json``/``.ts``, so the JSON/TS
-    leg's output is identical with or without them. Surfacing it as a failure
-    produces false
-    failures whenever the gate runs before deps are installed (Tree/CI legs,
-    fleet measurement).
+    plugins format ``.svelte`` / CSS, never ``.json``/``.ts``. Surfacing it as a
+    failure produces false failures whenever the gate runs before deps are
+    installed (Tree/CI legs, fleet measurement).
+
+    This detects the class; the CALLER decides where it may fire. The web leg
+    batches ``.svelte`` apart from the plugin-free ``.json``/``.ts``/``.tsx``
+    (``partition_plugin_scoped``) and applies this fail-open ONLY to the
+    plugin-scoped batch, so a missing plugin never zeros a JSON/TS verdict — the
+    batch split, not this predicate, is what keeps the two legs independent.
 
     The match is DELIBERATELY tight so it can never swallow a real formatting
     failure: prettier's own "code style issues" warning never carries
@@ -1206,8 +1260,11 @@ def run(
                     guard_snapshot = _snapshot(root, protected_testdata(paths))
                 # cargo takes NO file batch — 0 files on the argv (it speaks to
                 # the crate, not a file list), so the reported count matches what
-                # actually ran.
-                batches = [(list(prefix), mdir, f"crate {mdir}", 0) for mdir in mdirs]
+                # actually ran. `fail_open_ok=False`: cargo is never prettier, so
+                # the #498 plugin-load carve-out never applies to it.
+                batches = [
+                    (list(prefix), mdir, f"crate {mdir}", 0, False) for mdir in mdirs
+                ]
             else:
                 # A batch fixer running its in-place fix form must NEVER rewrite
                 # a protected test-data fixture (#500): drop those paths from THIS
@@ -1223,12 +1280,40 @@ def run(
                     # error). Check mode still lints these files.
                     batches = []
                 else:
-                    count = (
-                        f"{len(batch_paths)} file{'s' if len(batch_paths) != 1 else ''}"
+                    # Split the plugin-scoped extensions (`.svelte`) into their OWN
+                    # invocation so the #498 plugin-load fail-open can zero ONLY that
+                    # leg — the plugin-free `.json`/`.ts`/`.tsx` batch fails closed and
+                    # keeps a real verdict even in an unprovisioned env (#520). For
+                    # every non-web leg `plugin_scoped_extensions` is empty, so this is
+                    # the single plugin-free batch it has always been.
+                    free_paths, scoped_paths = partition_plugin_scoped(
+                        batch_paths, lang.plugin_scoped_extensions
                     )
-                    batches = [([*prefix, *batch_paths], ".", count, len(batch_paths))]
+                    batches = []
+                    if free_paths:
+                        count = (
+                            f"{len(free_paths)} file"
+                            f"{'s' if len(free_paths) != 1 else ''}"
+                        )
+                        batches.append(
+                            ([*prefix, *free_paths], ".", count, len(free_paths), False)
+                        )
+                    if scoped_paths:
+                        count = (
+                            f"{len(scoped_paths)} file"
+                            f"{'s' if len(scoped_paths) != 1 else ''}"
+                        )
+                        batches.append(
+                            (
+                                [*prefix, *scoped_paths],
+                                ".",
+                                count,
+                                len(scoped_paths),
+                                True,
+                            )
+                        )
             try:
-                for args, mdir, note, nfiles in batches:
+                for args, mdir, note, nfiles, fail_open_ok in batches:
                     # #498: a prettier plugin-load abort (a configured plugin
                     # absent from node_modules) is environment-not-provisioned,
                     # not a formatting verdict — it fails open with a note (set
@@ -1262,21 +1347,29 @@ def run(
                         )
                     else:
                         rc, out = result.rc, result.stdout + result.stderr
-                        if is_prettier_plugin_load_failure(tool.binary, rc, out):
+                        if fail_open_ok and is_prettier_plugin_load_failure(
+                            tool.binary, rc, out
+                        ):
                             # #498: fail OPEN, but only for this one narrowly-matched
                             # module-resolution class (see
                             # is_prettier_plugin_load_failure) — a genuine dirty
-                            # JSON/TS failure has no `imported from` phrase and still FAILS.
-                            # Same spirit as the pixi `command -v` guard (#482):
-                            # environment-not-provisioned is not a lint verdict. Zero
-                            # the rc so the leg passes, and keep the note (plus the
-                            # resolver error) so an operator sees WHY it was skipped.
+                            # `.svelte` failure has no `imported from` phrase and still
+                            # FAILS. `fail_open_ok` scopes it further to the
+                            # plugin-SCOPED batch alone (the `.svelte` leg, #520): the
+                            # plugin-free `.json`/`.ts` batch never gets here, so its
+                            # verdict is never zeroed even if a future prettier eagerly
+                            # resolved an override's plugin. Same spirit as the pixi
+                            # `command -v` guard (#482): environment-not-provisioned is
+                            # not a lint verdict. Zero the rc so the leg passes, and keep
+                            # the note (plus the resolver error) so an operator sees WHY
+                            # it was skipped.
                             fail_open_note = (
                                 "prettier: skipped — a plugin named in .prettierrc is "
-                                "not installed (module-resolution failure). JSON/TS "
-                                "formatting is plugin-independent, so this is "
+                                "not installed (module-resolution failure). This "
+                                "`.svelte` leg needs prettier-plugin-svelte, so it is "
                                 "environment-not-provisioned, not a lint failure; "
-                                "provision node_modules to enable this leg.\n"
+                                "provision node_modules to enable it. The plugin-free "
+                                "JSON/TS leg still ran and kept its verdict.\n"
                                 + out.strip()
                             )
                             logger.warning(
