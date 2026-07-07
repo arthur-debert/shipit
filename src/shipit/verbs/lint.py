@@ -118,10 +118,24 @@ def _data_path(name: str) -> str:
     makes injection fire in ANY tree (a repo that has not adopted the config, a
     bare fixture) and so blocks an ancestor-directory config file the env scrub
     cannot reach (ADR-0037). ``resources.files`` returns a real ``Path`` for
-    shipit's normal (unzipped) install, so ``str`` of it is a launchable
-    ``--config`` argument; shipit is never zip-imported (it ships data trees).
+    shipit's normal (unzipped) install; shipit is never zip-imported (it ships
+    data trees), but ``importlib.resources`` does not GUARANTEE that in general
+    (a namespace or zip-style resource has no on-disk path). Rather than trust
+    that and hand a linter an unusable ``--config`` value on a confusing detour,
+    ``os.fspath`` fails fast (``TypeError``) if the Traversable has no real
+    filesystem path, and the existence check fails fast (``FileNotFoundError``)
+    if the named body is missing from the package — both are packaging bugs,
+    never a user-facing outcome, so they are left to propagate rather than
+    mapped through :mod:`._errors`.
     """
-    return str(resources.files("shipit.data").joinpath(name))
+    path = os.fspath(resources.files("shipit.data").joinpath(name))
+    if not os.path.isfile(path):
+        raise FileNotFoundError(
+            f"shipit.data is missing canonical config {name!r} (resolved to "
+            f"{path!r}); this file ships with the package — reinstall shipit "
+            "or file a bug"
+        )
+    return path
 
 
 #: The packaged canonical ``rustfmt.toml`` path, resolved once at import so the

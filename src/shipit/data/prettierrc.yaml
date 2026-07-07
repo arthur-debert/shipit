@@ -11,15 +11,24 @@ tabWidth: 2
 semi: false
 trailingComma: none
 
-# The svelte + tailwindcss plugins are a CAPABILITY, not a rule:
-# prettier-plugin-svelte lets prettier parse `.svelte`; prettier-plugin-tailwindcss
-# sorts class attributes. They are inert on non-svelte content (JSON/TS formatting
-# is plugin-independent), so a repo with no `.svelte` gets the identical verdict.
-# When a repo has NOT provisioned them into node_modules (a --depth-1 clone,
-# shipit's own conda-forge lint env), prettier aborts on plugin load and
-# `shipit lint` FAILS OPEN for the leg (is_prettier_plugin_load_failure, #498) —
-# environment-not-provisioned, not a lint failure. Provisioning the plugins into
-# the managed lint env is a WS04/toolchain follow-up (flagged).
-plugins:
-  - prettier-plugin-svelte
-  - prettier-plugin-tailwindcss
+# The svelte + tailwindcss plugins are a CAPABILITY, not a rule, and are SCOPED to
+# `.svelte` via this `overrides` block rather than declared as a top-level
+# `plugins:` list. A top-level list is unconditional: prettier resolves every
+# plugin on load for EVERY invocation of this config, including the plain
+# json/TS leg, so on a tree that has not provisioned the plugins into
+# `node_modules` (a --depth-1 clone, shipit's own conda-forge lint env) prettier
+# would abort on load before ever parsing the JSON/TS file — which
+# `is_prettier_plugin_load_failure` (#498) then reads as an environment gap and
+# fails the leg OPEN (rc 0), silently passing a genuinely dirty JSON/TS file.
+# Scoping the plugins to an override keyed on `*.svelte` means prettier only
+# resolves them when it is actually asked to format a `.svelte` file — the
+# json/TS leg never touches them and cannot be masked by their absence
+# (verified: prettier 3.8.5 leaves an override's `plugins` unresolved for
+# non-matching files). Provisioning the plugins into the managed lint env for
+# the svelte leg itself is a WS04/toolchain follow-up (flagged).
+overrides:
+  - files: "*.svelte"
+    options:
+      plugins:
+        - prettier-plugin-svelte
+        - prettier-plugin-tailwindcss

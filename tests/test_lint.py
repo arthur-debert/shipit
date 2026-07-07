@@ -1215,10 +1215,15 @@ def test_prettier_dirty_json_still_fails_real(tmp_path):
     plugin-load abort, never a real format verdict. Real prettier, no node_modules.
 
     Injects NO config (`canonical_config` → None) so real prettier runs on its
-    defaults rather than the shipped canonical body — which names the svelte/tailwind
-    plugins and would itself fail OPEN in this plugin-less env, masking the very
-    dirty-file verdict this leg asserts. The plugin-load path is leg (a) above; this
-    leg isolates a genuine format failure with prettier able to run.
+    own bare defaults, isolating the plugin-load carve-out (leg (a) above) from
+    a genuine format failure with no canonical config in the picture at all.
+    This does NOT exercise the shipped canonical body — see
+    `test_prettier_dirty_json_still_fails_under_real_canonical_config` below for
+    the regression proof that the PRODUCTION default resolver (the packaged
+    `prettierrc.yaml`, its svelte/tailwind plugins scoped to `.svelte` via
+    `overrides` rather than declared globally) still fails a dirty JSON in a
+    plugin-less env, which a global `plugins:` list previously masked (#525
+    review).
     """
     (tmp_path / "data.json").write_text('{"a":      1}\n')  # bad spacing → dirty
     rc = lint.run(
@@ -1226,6 +1231,33 @@ def test_prettier_dirty_json_still_fails_real(tmp_path):
         discover=_fake_discover(["data.json"]),
         tracks_root_editorconfig=lambda root: True,
         canonical_config=lambda tool, root: None,
+    )
+    assert rc == 1
+
+
+@pytest.mark.skipif(shutil.which("prettier") is None, reason="prettier not on PATH")
+def test_prettier_dirty_json_still_fails_under_real_canonical_config(tmp_path):
+    """Regression (#525 review): a dirty JSON must still hard-fail under the
+    PACKAGED canonical config (WS03 #516), via the PRODUCTION default resolver
+    — no ``canonical_config`` override, unlike ``test_prettier_dirty_json_still_fails_real``
+    above, which deliberately routes around the shipped config to isolate the
+    plugin-load leg.
+
+    This is the proof the split-config fix (shipped ``prettierrc.yaml``'s
+    svelte/tailwind plugins now live under an ``overrides: [files: "*.svelte"]``
+    block, never the top-level ``plugins:`` list) actually closes the hole: with
+    the plugins global, injecting the real canonical config in a tree with no
+    ``node_modules`` made prettier abort on plugin load, which
+    ``is_prettier_plugin_load_failure`` (#498) read as environment-not-provisioned
+    and failed the leg OPEN — silently passing this same dirty file. Scoping the
+    plugins to `.svelte` means the JSON leg never touches them, so the genuine
+    dirty-file verdict surfaces instead of being masked.
+    """
+    (tmp_path / "data.json").write_text('{"a":      1}\n')  # bad spacing → dirty
+    rc = lint.run(
+        str(tmp_path),
+        discover=_fake_discover(["data.json"]),
+        tracks_root_editorconfig=lambda root: True,
     )
     assert rc == 1
 
