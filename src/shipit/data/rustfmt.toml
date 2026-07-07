@@ -1,0 +1,18 @@
+# The canonical rustfmt config for the rust leg of `shipit lint` (ADR-0037, the
+# gate owns the config; LNT01-WS03 #516). Rust is GREENFIELD across the fleet —
+# the 2026-07-06 survey found NO repo committing a rustfmt/clippy config — so
+# there was nothing to promote; this is a defined-from-scratch baseline. shipit
+# ships this ONE body and injects it (`cargo fmt --all -- --config-path <this>`),
+# so no ancestor/user rustfmt config is ever consulted.
+#
+# `edition` is DELIBERATELY not set here: `cargo fmt` passes each crate's edition
+# (from its `Cargo.toml`) through to rustfmt, so pinning an edition in this shared
+# body would mis-parse a crate on a different edition. This file carries only the
+# genuinely-canonical, edition-independent choices.
+#
+# Kept intentionally MINIMAL: shipit has no Rust of its own to lint this against,
+# and WS05 (#518, rust layout normalization) is the pass that exercises it on real
+# crates. Tightening the baseline (rich rustfmt options, a stricter clippy set) is
+# left to that pass rather than guessed here — see the FLAG in the WS03 handoff.
+max_width = 100
+newline_style = "Unix"

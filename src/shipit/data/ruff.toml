@@ -1,0 +1,28 @@
+# The canonical ruff config for the python leg of `shipit lint` (ADR-0037, the
+# gate owns the config; LNT01-WS03 #516). shipit's OWN ruff config was carved out
+# of `pyproject.toml`'s `[tool.ruff.lint]` into this standalone `ruff.toml` so the
+# ONE canonical body ships as shipit data and is injected (`ruff --config <this>`)
+# into every invocation — no ancestor/user/pyproject config is ever consulted.
+# This same file is seeded fleet-wide in WS06 (#519).
+#
+# `target-version` is pinned EXPLICITLY rather than inferred from a sibling
+# `pyproject.toml`'s `requires-python`: injection passes `--config <this>`, which
+# makes ruff read THIS file and nothing else, so the version-gated `UP` idioms
+# must be stated here to stay hermetic (and identical to the pre-carve verdict —
+# proven: the B/UP/I diagnostics on a probe file are byte-identical before/after).
+# It mirrors shipit's `requires-python = ">=3.13"`.
+target-version = "py313"
+
+# The enforced style floor (ADR-0036, "the gate owns style"): a MINIMAL curated
+# selection of correctness-adjacent families on top of ruff's E/F defaults.
+# Style a linter could express belongs HERE or to nobody — reviewers never
+# enforce it ad hoc; raising the floor is a config change plus a debt-clear,
+# never a review finding. SIM (flake8-simplify) was considered and left out:
+# its debt-clear is dominated by manual multi-`with` rewrites in tests
+# (SIM117), beyond the chosen keep-the-clear-small bar.
+[lint]
+extend-select = [
+    "B",  # flake8-bugbear: likely-bug patterns (mutable defaults, unbound loop vars, blind excepts)
+    "UP", # pyupgrade: keeps code on the requires-python floor's idioms (no stale typing/datetime forms)
+    "I",  # isort: deterministic import order, so import shape never reaches a review
+]

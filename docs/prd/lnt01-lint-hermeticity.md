@@ -91,9 +91,12 @@ config bodies ship as shipit data and are materialized/pointed-at at lint time.
 `_run_tool` is the single choke point through which every linter subprocess
 runs (`lint.py:638`, sole caller of `execrun.run` in the gate). It gains a
 scrubbed environment — built once, passed via `execrun.run(env=..., replace_env=True)`
-(the mechanism the Tree provisioner already uses) — dropping `$HOME`, `XDG_*`,
-`*_CONFIG*`, `SHELLCHECK_OPTS`, `YAMLLINT_CONFIG_FILE`. No new plumbing in
-`execrun` (it already forwards `env`/`replace_env`).
+(the mechanism the Tree provisioner already uses) — dropping `$HOME` (exact),
+`XDG_*` (prefix), and an explicit, ENUMERATED denylist of per-tool config vars
+(`SHELLCHECK_OPTS`, `RUFF_CONFIG`, `CARGO_HOME`, `CLIPPY_CONF_DIR`,
+`YAMLLINT_CONFIG_FILE`) — deliberately not a `*_CONFIG*` substring match, which
+would also drop `PKG_CONFIG_PATH` / `FONTCONFIG_PATH` and break cargo/C
+builds. No new plumbing in `execrun` (it already forwards `env`/`replace_env`).
 
 ### The invariance property test (mechanism 3 — the acceptance gate)
 
@@ -113,9 +116,16 @@ the whole epic.
   inject everywhere (no repo commits one today).
 - **Go** — promote `supage`'s `.golangci.yml` (its lone holder) to canonical.
 - **prettier** — one canonical `.prettierrc`: `singleQuote: true`,
-  `printWidth: 100`, `tabWidth: 2`, `semi: false`, `trailingComma: none`, with
-  the svelte + tailwindcss plugins (a *capability* to parse `.svelte`, verified
-  inert where there is no `.svelte`), applied to all four TS repos.
+  `printWidth: 100`, `tabWidth: 2`, `semi: false`, `trailingComma: none`,
+  applied to all four TS repos. The svelte + tailwindcss plugins (a
+  *capability* to parse `.svelte`) are scoped to an `overrides: [files:
+  "*.svelte"]` block, never a top-level `plugins:` list: a top-level
+  declaration is unconditional, so prettier resolves the plugins on EVERY
+  invocation, including plain JSON/TS — on a tree that has not provisioned
+  them into `node_modules`, that aborts prettier on load, which the #498
+  plugin-load carve-out then reads as environment-not-provisioned and fails
+  the leg open, silently passing a genuinely dirty JSON/TS file. Scoping to
+  `.svelte` keeps the plugins inert (never resolved) outside `.svelte`.
 - **universals** (markdown/json/yaml/gh-actions/shell/lexd) — confirm the
   already-managed configs are the canonical set; add markdownlint + yamllint to
   `lex-fmt/lex` (the only repo missing them).
