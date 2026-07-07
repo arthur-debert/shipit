@@ -11,10 +11,13 @@
 The lint gate SUPPLIES each tool its configuration and blocks every other
 source. shipit ships ONE canonical config per tool; the gate injects it into
 every invocation (a pinned `--config` / format flag) and scrubs the ambient
-environment (`$HOME`, `XDG_*`, `*_CONFIG*`, `SHELLCHECK_OPTS`,
-`YAMLLINT_CONFIG_FILE`) at the single `_run_tool` exec seam — so no
-ancestor-directory config file, user-global config, or environment variable is
-ever consulted. The verdict is therefore a pure function of the tracked files
+environment at the single `_run_tool` exec seam: `$HOME` (exact) and `XDG_*`
+(prefix), plus an explicit, ENUMERATED denylist of per-tool config vars
+(`SHELLCHECK_OPTS`, `RUFF_CONFIG`, `CARGO_HOME`, `CLIPPY_CONF_DIR`,
+`YAMLLINT_CONFIG_FILE`) — deliberately not a `*_CONFIG*` substring match, which
+would also drop `PKG_CONFIG_PATH` / `FONTCONFIG_PATH` and break cargo/C
+builds. So no ancestor-directory config file, user-global config, or
+environment variable is ever consulted. The verdict is therefore a pure function of the tracked files
 under one fixed config: identical on any machine, in any repo, in CI or on a
 laptop. This is the same discipline pixi already applies to the tool
 *binaries* (one pinned version everywhere), extended to the tool *config* —

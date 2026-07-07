@@ -1,0 +1,23 @@
+# The canonical golangci-lint config for Go (ADR-0037, the gate owns the config;
+# LNT01-WS03 #516). The 2026-07-06 fleet survey found ONE Go config holder
+# (supage's `.golangci.yml`); the plan is to PROMOTE it verbatim as the fleet
+# canonical.
+#
+# FLAGGED SCOPE GAP (see the WS03 handoff): (1) Go is NOT in shipit's `LANGS`
+# lint registry (src/shipit/verbs/lint.py) — there is no go/golangci Tool — so this
+# body is shipped for FLEET use (WS06) but is NOT wired into `_canonical_config`;
+# a registry entry was deliberately NOT invented (per the WS03 brief). (2) supage
+# lives in a different repo not reachable from this worktree, so this body could
+# not be copied byte-for-byte from it; the conservative baseline below MUST be
+# reconciled against supage's actual `.golangci.yml` in WS06 before it is treated
+# as the promoted canonical.
+run:
+  timeout: 5m
+
+linters:
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused

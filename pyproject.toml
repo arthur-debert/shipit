@@ -69,19 +69,13 @@ path = "hatch_build.py"
 "skills" = "shipit/data/skills"
 ".claude/agents" = "shipit/data/agents"
 
-# The enforced style floor (ADR-0036, "the gate owns style"): a MINIMAL curated
-# selection of correctness-adjacent families on top of ruff's E/F defaults.
-# Style a linter could express belongs HERE or to nobody — reviewers never
-# enforce it ad hoc; raising the floor is a config change plus a debt-clear,
-# never a review finding. SIM (flake8-simplify) was considered and left out:
-# its debt-clear is dominated by manual multi-`with` rewrites in tests
-# (SIM117), beyond the chosen keep-the-clear-small bar.
-[tool.ruff.lint]
-extend-select = [
-    "B",  # flake8-bugbear: likely-bug patterns (mutable defaults, unbound loop vars, blind excepts)
-    "UP", # pyupgrade: keeps code on the requires-python floor's idioms (no stale typing/datetime forms)
-    "I",  # isort: deterministic import order, so import shape never reaches a review
-]
+# shipit's ruff config was CARVED OUT of this file into a standalone `ruff.toml`
+# (LNT01-WS03 #516, ADR-0037 "the gate owns the config"): the ONE canonical body
+# ships as shipit data (`src/shipit/data/ruff.toml`, byte-identical to the repo
+# root `ruff.toml` — a drift test guards it) and the lint gate INJECTS it
+# (`ruff --config <that>`) so the verdict never depends on an ancestor/user config.
+# There is deliberately no `[tool.ruff]` table here anymore; `ruff.toml` is the
+# single source, seeded fleet-wide in WS06 (#519).
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

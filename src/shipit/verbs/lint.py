@@ -39,18 +39,32 @@ tool's verdict, not a transport failure) and lets a launch failure surface as
 :class:`~shipit.execrun.ExecError`, which the orchestrator renders as the
 hard-fail ``127``.
 
-HERMETICITY — the gate owns the config (ADR-0037, epic LNT01 #513, WS01 #514).
-The verdict must be a pure function of the tracked files under ONE fixed config,
-identical on any machine and in any repo. Two mechanisms, both here, enforce it:
+HERMETICITY — the gate owns the config (ADR-0037, epic LNT01 #513; WS01 #514 wired
+the mechanism, WS03 #516 shipped the config set). The verdict must be a pure
+function of the tracked files under ONE fixed config, identical on any machine and
+in any repo. Two mechanisms, both here, enforce it:
 
 * **Config injection** — each :class:`Tool` carries a :attr:`Tool.config_inject`
   fragment pinning it to shipit's canonical config; :meth:`Tool.argv` prepends it
   UNCONDITIONALLY (never gated on repo state, unlike the :attr:`Tool.editorconfig_pin`
   beachhead #493 it generalizes). A ``{config}`` placeholder in the fragment
-  receives the canonical config PATH at argv-build time. The canonical config
-  *bodies* and the resolver that maps a tool to its path ship in WS03 (#516); this
-  WS wires the MECHANISM, so until a path is resolved the placeholder fragment is
-  omitted and the verdict is unchanged (see :meth:`Tool.argv`).
+  receives the canonical config PATH at argv-build time, resolved by
+  :func:`_canonical_config` (WS03 #516) to the SHIPPED body under ``shipit/data``
+  (``ruff.toml``, ``prettierrc.yaml``, ``markdownlint.yaml``, ``yamllint.yaml``).
+  The path is the packaged data file — NOT a repo-tracked copy — so injection
+  fires in ANY tree, including one that has not yet adopted the config: that is
+  what blocks an ANCESTOR-directory config file (which the env scrub below does
+  NOT cover — ancestor discovery walks the filesystem, not the environment). Tools
+  whose config is inline flags rather than a file (shellcheck's ``--norc`` +
+  ``--severity``, cargo's clippy lints and ``cargo fmt … --config-path <shipped
+  rustfmt.toml>``) carry it directly in their ``check`` / ``fix`` tuples instead
+  (see :data:`RUST`). Where such a tool ALSO discovers config by walking ancestor
+  directories, a discovery-suppressing flag is what closes that walk: shellcheck's
+  ``--norc`` (blocks the ``.shellcheckrc`` walk the scrub cannot reach) and shfmt's
+  ``-i 0`` (blocks the ``.editorconfig`` walk). The WS02 invariance gate (#515)
+  proves each such closure and pins the two that remain OPEN — clippy's
+  ``clippy.toml`` and lexd's ``.lex.toml`` ancestor walks, for which no such flag
+  exists yet (tracked in #526).
 * **Env scrub** — :func:`_run_tool`, the single exec choke point, runs every
   linter under a :func:`_scrubbed_env` (``os.environ`` minus ``$HOME``, ``XDG_*``,
   and an explicit denylist of per-tool config vars — ``SHELLCHECK_OPTS``,
@@ -73,6 +87,7 @@ import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from importlib import resources
 from pathlib import Path
 
 from .. import config, execrun, git
@@ -94,11 +109,53 @@ logger = logging.getLogger("shipit.lint")
 
 #: The literal token a :attr:`Tool.config_inject` fragment carries where the
 #: canonical config file PATH belongs; :meth:`Tool.argv` substitutes it with the
-#: resolved path. A fragment that still carries the placeholder because no path
-#: was resolved (the canonical config bodies + resolver ship in WS03 #516) is
-#: OMITTED, so the injection mechanism is inert — and the verdict unchanged —
-#: until WS03 supplies the paths (ADR-0037, #514).
+#: path :func:`_canonical_config` resolves (WS03 #516). A fragment whose tool has
+#: no resolved path — the resolver returns ``None`` — is OMITTED rather than
+#: emitted with a dangling placeholder, so a tool without a shipped file-config
+#: (or a future tool wired before its body exists) simply runs unpinned rather
+#: than crashing on a bogus ``--config {config}`` (ADR-0037, #514).
 CONFIG_PLACEHOLDER = "{config}"
+
+
+def _data_path(name: str) -> str:
+    """The absolute filesystem path to a canonical-config body shipped under
+    ``shipit/data`` (WS03 #516).
+
+    The gate injects the PACKAGED config, never a repo-tracked copy — that is what
+    makes injection fire in ANY tree (a repo that has not adopted the config, a
+    bare fixture) and so blocks an ancestor-directory config file the env scrub
+    cannot reach (ADR-0037). ``shipit.data`` is a namespace package (no
+    ``__init__.py``), so ``resources.files("shipit.data")`` is a ``MultiplexedPath``
+    that is NOT ``os.PathLike`` — only its ``joinpath`` result is a real ``Path``.
+    We stringify that result with ``str`` (which works for a real ``Path`` AND any
+    other ``Traversable``) rather than ``os.fspath`` (which would raise ``TypeError``
+    on a non-``PathLike`` Traversable). The fail-fast we want is the existence check
+    below, NOT a type error on a detour: shipit ships unzipped data trees, so a
+    shipped body always resolves to a real on-disk file; if it does not — a
+    zip-style resource with no filesystem path, or a body missing from the package,
+    both packaging bugs and never a user-facing outcome — ``os.path.isfile`` is
+    False and we raise a clear ``FileNotFoundError`` rather than handing a linter an
+    unusable ``--config`` value. (``as_file`` is deliberately NOT used: its context
+    manager can hand back a temp path cleaned up before the linter subprocess reads
+    it.)
+    """
+    path = str(resources.files("shipit.data").joinpath(name))
+    if not os.path.isfile(path):
+        raise FileNotFoundError(
+            f"shipit.data is missing canonical config {name!r} (resolved to "
+            f"{path!r}); this file ships with the package — reinstall shipit "
+            "or file a bug"
+        )
+    return path
+
+
+#: The packaged canonical ``rustfmt.toml`` path, resolved once at import so the
+#: :data:`RUST` ``cargo fmt`` tuples can carry it inline (WS03 #516). rustfmt takes
+#: its config as a file the gate passes AFTER cargo's ``--`` separator
+#: (``cargo fmt --all -- --config-path <this>``), which a :attr:`Tool.config_inject`
+#: prepend cannot express — so it lives in the ``check`` / ``fix`` tuples directly
+#: rather than going through :func:`_canonical_config`.
+_RUSTFMT_CONFIG_PATH = _data_path("rustfmt.toml")
 
 
 @dataclass(frozen=True)
@@ -125,12 +182,12 @@ class Tool:
     takes a config FILE (ruff, prettier, markdownlint, yamllint), where the
     :data:`CONFIG_PLACEHOLDER` receives the canonical path; or a self-contained
     inline fragment for a tool whose config IS command-line flags (no external
-    file). The canonical config BODIES and the resolver mapping a tool to its path
-    are WS03 (#516) — this WS wires the field + argv plumbing so WS03 need only
-    supply the paths (see :meth:`argv`). A tool whose canonical config lives inline
-    in its ``check`` / ``fix`` args instead (shellcheck's severity, clippy's lints
-    on the command line, rustfmt's ``--config-path`` after ``--``) leaves this
-    empty; WS03 extends those tuples directly.
+    file). The canonical config BODIES ship under ``shipit/data`` and
+    :func:`_canonical_config` (WS03 #516) maps each file-config tool to its packaged
+    path (see :meth:`argv`). A tool whose canonical config lives inline in its
+    ``check`` / ``fix`` args instead (shellcheck's severity, clippy's lints on the
+    command line, rustfmt's ``--config-path`` after ``--``) leaves this empty and
+    carries the config in those tuples directly (see :data:`RUST`).
 
     ``editorconfig_pin`` is the flag prefix that pins an ``.editorconfig``-aware
     tool to IGNORE any ambient/injected/ancestor ``.editorconfig`` — applied ONLY
@@ -171,11 +228,10 @@ class Tool:
         prepended UNCONDITIONALLY — it is not gated on repo state:
 
         * A fragment carrying the :data:`CONFIG_PLACEHOLDER` names a config FILE.
-          When ``config_path`` is supplied the placeholder is substituted and the
-          fragment prepended; when it is ``None`` the fragment is OMITTED, because
-          the canonical config bodies + the resolver that yields the path are WS03
-          (#516). So this WS wires the mechanism while leaving the verdict
-          unchanged — WS03 flips it on by supplying paths, nothing here.
+          When ``config_path`` is supplied (:func:`_canonical_config`'s packaged
+          path, WS03 #516) the placeholder is substituted and the fragment
+          prepended; when it is ``None`` the fragment is OMITTED, so a tool with no
+          shipped file-config runs unpinned rather than with a dangling placeholder.
         * A fragment with no placeholder is an inline config (command-line flags,
           no external file) and is always prepended.
 
@@ -200,8 +256,9 @@ class Tool:
                         tok.replace(CONFIG_PLACEHOLDER, config_path)
                         for tok in self.config_inject
                     )
-                # else: no canonical config resolved yet (pre-WS03) — omit, so the
-                # gate's verdict is unchanged (#514 scope boundary).
+                # else: the resolver yielded no path for this tool (an inline-config
+                # or not-yet-shipped tool) — omit the fragment so it runs unpinned
+                # rather than with a dangling `--config {config}` (WS03 #516).
             else:
                 injected = self.config_inject
         pin = (
@@ -227,9 +284,9 @@ PYTHON = Lang(
     name="python",
     extensions=(".py",),
     # ruff takes its config as a FILE via `--config <path>`; both legs pin to the
-    # canonical `ruff.toml` (ADR-0037). The path is WS03 (#516) — carved out of
-    # shipit's own pyproject.toml and seeded fleet-wide — so the placeholder
-    # fragment is inert here (no path resolved) and today's verdict is unchanged.
+    # canonical `ruff.toml` (ADR-0037), carved out of shipit's own pyproject.toml
+    # in WS03 (#516) and shipped as `shipit/data/ruff.toml`. `_canonical_config`
+    # resolves the placeholder to that packaged path.
     tools=(
         Tool(
             "ruff",
@@ -263,13 +320,22 @@ RUST = Lang(
     # rust toolchain is assumed provisioned per the repo's toolchain
     # declaration (ADR-0007); a missing cargo is the standard hard-fail 127.
     #
-    # Canonical-config injection (ADR-0037, #514) for cargo is INLINE, not a
+    # Canonical-config injection (ADR-0037, #514/#516) for cargo is INLINE, not a
     # `config_inject` prefix: cargo's config tokens must follow the `--`
-    # separator (clippy lints on the command line — `-D warnings` is the seed;
-    # `cargo fmt -- --config-path <canonical rustfmt.toml>`), which a prepend
-    # cannot express. WS03 (#516) extends the `check` / `fix` tuples below with
-    # the canonical clippy lint set and rustfmt config-path directly; the env
-    # scrub (`_run_tool`) already blocks ambient `~/.config/rustfmt` etc.
+    # separator, which a prepend cannot express. So the config lives in the tuples:
+    #
+    # * clippy — the canonical clippy floor is `-D warnings`, which denies EVERY
+    #   lint clippy warns by default (the `clippy::all` group and rustc's own), i.e.
+    #   "clippy must be clean." WS03 (#516) BLESSES that seed as the canonical set
+    #   rather than layering `pedantic`/`nursery` on top: Rust is greenfield fleet-
+    #   wide (no repo commits a clippy config to promote) and shipit has no Rust to
+    #   validate a richer set against, so tightening is deferred to WS05 (#518),
+    #   which exercises the gate on real crates. Left EXACT so nothing new is
+    #   invented here.
+    # * fmt — pinned to the shipped canonical `rustfmt.toml` via `--config-path`
+    #   (`_RUSTFMT_CONFIG_PATH`), on BOTH the `--check` and the in-place fix leg, so
+    #   the format verdict is a pure function of that one body. The env scrub
+    #   (`_run_tool`) already blocks ambient `~/.config/rustfmt` etc.
     tools=(
         Tool(
             "cargo",
@@ -286,8 +352,8 @@ RUST = Lang(
         ),
         Tool(
             "cargo",
-            ("fmt", "--all", "--", "--check"),
-            fix=("fmt", "--all"),
+            ("fmt", "--all", "--", "--check", "--config-path", _RUSTFMT_CONFIG_PATH),
+            fix=("fmt", "--all", "--", "--config-path", _RUSTFMT_CONFIG_PATH),
             per_manifest=True,
         ),
     ),
@@ -298,18 +364,43 @@ SHELL = Lang(
     shebangs=("sh", "bash"),
     tools=(
         # shellcheck's canonical config is INLINE flags (it has no `--config
-        # <file>`; `.shellcheckrc` is ambient discovery the env scrub blocks via
-        # `$HOME`). `--severity=info` is the seed; WS03 (#516) extends this
-        # tuple with the canonical set, so `config_inject` stays empty.
-        Tool("shellcheck", ("--severity=info",)),
+        # <file>`). Two flags, both part of the canonical config the gate OWNS
+        # (ADR-0037); `config_inject` stays empty because neither is a placeholder
+        # file-config fragment — they ride the check tuple like every other inline
+        # tool's config:
+        #   * `--norc` — HERMETICITY. shellcheck discovers `.shellcheckrc` by walking
+        #     the filesystem UPWARD from the script's directory, and also reads
+        #     `$HOME/.shellcheckrc`. The `_run_tool` env scrub drops `$HOME` and
+        #     `SHELLCHECK_OPTS`, but it CANNOT stop the ancestor-directory walk — an
+        #     untracked `.shellcheckrc` in a PARENT of the checkout is still consulted
+        #     even with `$HOME` unset, so the verdict would move with WHERE the tree
+        #     is checked out. The WS02 invariance gate (#515) proved this with a real
+        #     grandparent `.shellcheckrc`. `--norc` suppresses ALL `.shellcheckrc`
+        #     discovery, closing the ancestor leak the scrub cannot reach — the
+        #     shellcheck analogue of prettier's `--no-editorconfig` / shfmt's `-i 0`,
+        #     but UNCONDITIONAL: the gate owns shellcheck's config outright, with no
+        #     "honor the repo's own `.shellcheckrc`" carve-out (unlike the
+        #     editorconfig pin, which defers to a repo that tracks its own).
+        #   * `--severity=info` — the canonical rule floor WS03 (#516) blessed:
+        #     shipit's own shell lints clean at it and there is no fleet driver to
+        #     raise it, so nothing new is invented here.
+        Tool("shellcheck", ("--norc", "--severity=info")),
         # `-i 0` is shfmt's tab default, but PASSING any formatting flag makes
         # shfmt skip `.editorconfig` entirely — so the pin both defaults to tabs
         # and neutralizes an ambient/injected/ancestor `.editorconfig` when the
-        # repo tracks none of its own (issue #493). This is the one injection the
-        # canonical config does not yet subsume: its unconditional replacement is
-        # a WS03 (#516) shfmt-config body decision (shipit's `[*.sh]` is 4-space,
-        # so an unconditional `-i 0` here would break its own lint) — until then
-        # the #493 gate stays, the preserved tracked-config-honoring case (#514).
+        # repo tracks none of its own (issue #493). WS03's deliberate call: KEEP
+        # this pin gated, do NOT make `-i 0` unconditional. shfmt's canonical config
+        # IS these inline flags, but an unconditional `-i 0` would reformat shipit's
+        # own 4-space `[*.sh]` house style (and every fleet repo's) to tabs — a
+        # shell-style normalization owned by WS06 (#519), not config definition. See
+        # the paired prettier `--no-editorconfig` note above; the gate stays hermetic
+        # meanwhile — the env scrub kills `~/.editorconfig`, and when the pin is gated
+        # off (the repo tracks its own root `.editorconfig`, `tracks_editorconfig`)
+        # that tracked config normally carries `root = true` and stops the walk. KNOWN
+        # GAP: `tracks_editorconfig` keys on the root file's PRESENCE, not its
+        # `root = true` content, so a tracked non-`root = true` `.editorconfig` can
+        # still let shfmt walk up into an ancestor — tightening the pin-disable to
+        # require `root = true` is a fast-follow under epic #513.
         Tool("shfmt", ("-d",), fix=("-w",), editorconfig_pin=("-i", "0")),
     ),
 )
@@ -317,17 +408,34 @@ YAML = Lang(
     name="yaml",
     extensions=(".yml", ".yaml"),
     # yamllint takes its config as a FILE via `-c <path>`; pin to the canonical
-    # one (ADR-0037). Path is WS03 (#516) — inert placeholder until then.
+    # one (ADR-0037) — the already-managed `shipit/data/yamllint.yaml`, confirmed
+    # as canonical in WS03 (#516) and now resolved by `_canonical_config`. This is
+    # also the gate for GitHub Actions workflows (`.yml`).
     tools=(Tool("yamllint", ("--strict",), config_inject=("-c", CONFIG_PLACEHOLDER)),),
 )
 JSON = Lang(
     name="json",
     extensions=(".json",),
     # prettier takes its config as a FILE via `--config <path>`; pin to the
-    # canonical `.prettierrc` (ADR-0037, WS03 #516 — inert placeholder until the
-    # path is resolved). `--no-editorconfig` stays the #493 editorconfig pin,
-    # gated on the repo tracking its own `.editorconfig`, until WS03's canonical
-    # prettier config subsumes it (preserved tracked-config-honoring case, #514).
+    # canonical `shipit/data/prettierrc.yaml` (ADR-0037, WS03 #516), resolved by
+    # `_canonical_config`. The canonical body sets the fleet's one rule set
+    # (singleQuote / printWidth 100 / tabWidth 2 / semi false / trailingComma none)
+    # + the svelte/tailwind plugin capability.
+    #
+    # `--no-editorconfig` STAYS the #493 editorconfig pin, gated on the repo
+    # tracking its own `.editorconfig`. WS03's deliberate call (the pin's
+    # unconditional replacement was left to this WS): do NOT make it unconditional
+    # yet. Doing so is paired with shfmt's `-i 0` as a single shell/format-style
+    # normalization — shipit's own `.editorconfig [*.sh]` is 4-space by design, so
+    # flipping the pin on unconditionally forces reformatting shipit's shell + every
+    # fleet repo's editorconfig, which is fleet debt-clear work owned by WS06 (#519),
+    # not config-definition work. The gate stays hermetic meanwhile: the env scrub
+    # kills `~/.editorconfig`, and when the pin is gated off (the repo tracks its own
+    # root `.editorconfig`, `tracks_editorconfig`) that tracked config normally
+    # carries `root = true` and stops the ancestor walk. KNOWN GAP: the pin-disable
+    # keys on the root file's PRESENCE, not its `root = true` content, so a tracked
+    # non-`root = true` `.editorconfig` can still permit an ancestor walk — tightening
+    # `tracks_editorconfig` to require `root = true` is a fast-follow under epic #513.
     tools=(
         Tool(
             "prettier",
@@ -342,7 +450,10 @@ MARKDOWN = Lang(
     name="markdown",
     extensions=(".md",),
     # markdownlint takes its config as a FILE via `--config <path>`; pin to the
-    # canonical one (ADR-0037). Path is WS03 (#516) — inert placeholder until then.
+    # already-managed `shipit/data/markdownlint.yaml` (ADR-0037), confirmed as
+    # canonical in WS03 (#516) and resolved by `_canonical_config`. (The separate
+    # `.markdownlintignore` is auto-discovered from cwd, not a `--config`, so it is
+    # unaffected by injection.)
     tools=(
         Tool(
             "markdownlint",
@@ -840,18 +951,43 @@ def _scrubbed_env() -> dict[str, str]:
     return {k: v for k, v in os.environ.items() if not _is_ambient_config_var(k)}
 
 
-def _canonical_config(tool: Tool, root: Path) -> str | None:
-    """The path to shipit's canonical config file for ``tool``, or ``None``.
+#: The file-config tools mapped to the ``shipit/data`` body each pins to (WS03
+#: #516). Keyed by :attr:`Tool.binary`: every binary here carries a
+#: :data:`CONFIG_PLACEHOLDER` ``config_inject`` fragment that :func:`_canonical_config`
+#: fills with the packaged path. `ruff.toml` is the carve-out of shipit's own
+#: `[tool.ruff.lint]`; `prettierrc.yaml` is the fleet-unified rule set; the two
+#: `*lint.yaml` are the already-managed universals confirmed canonical. The
+#: inline-config tools (shellcheck, shfmt, cargo, lexd) are ABSENT by design —
+#: their config rides their `check`/`fix` tuples, not a `--config` file.
+_CANONICAL_CONFIG_FILES: dict[str, str] = {
+    "ruff": "ruff.toml",
+    "prettier": "prettierrc.yaml",
+    "markdownlint": "markdownlint.yaml",
+    "yamllint": "yamllint.yaml",
+}
 
-    The WS03 (#516) seam. WS01 (#514) wires the injection MECHANISM
-    (:attr:`Tool.config_inject` + :meth:`Tool.argv`); the canonical config BODIES
-    and the real tool→path mapping land in WS03. Until then every tool resolves to
-    ``None``, so a placeholder ``config_inject`` fragment is omitted and the gate's
-    verdict is unchanged — WS03 turns injection on by returning real paths here,
-    with no orchestration change. Injected in :func:`run` (like
-    :func:`_tracks_root_editorconfig`) so a test can supply a stub resolver.
+
+def _canonical_config(tool: Tool, root: Path) -> str | None:
+    """The absolute path to shipit's canonical config file for ``tool``, or ``None``.
+
+    The WS03 (#516) resolver behind the WS01 (#514) injection mechanism
+    (:attr:`Tool.config_inject` + :meth:`Tool.argv`): a file-config tool
+    (:data:`_CANONICAL_CONFIG_FILES`) resolves to the SHIPPED body under
+    ``shipit/data`` (:func:`_data_path`); any other tool resolves to ``None``, so
+    its placeholder fragment is omitted (an inline-config or unconfigured tool runs
+    unpinned rather than with a dangling ``--config``).
+
+    The returned path is the PACKAGED data file, independent of ``root`` — so
+    injection fires in ANY tree (a not-yet-adopted repo, a bare invariance-test
+    fixture) and thereby blocks an ancestor-directory config file, which the env
+    scrub cannot reach (ancestor discovery walks the filesystem, not the
+    environment; ADR-0037). ``root`` is kept in the signature for parity with the
+    other run-injected boundary seams and so a future per-repo override could hook
+    here. Injected in :func:`run` (like :func:`_tracks_root_editorconfig`) so a test
+    can supply a stub resolver.
     """
-    return None
+    name = _CANONICAL_CONFIG_FILES.get(tool.binary)
+    return _data_path(name) if name is not None else None
 
 
 def _run_tool(binary: str, args: list[str], cwd: Path) -> execrun.ExecResult:
@@ -974,10 +1110,11 @@ def run(
             else ["."]
         )
         for tool in lang.tools:
-            # The canonical-config path (ADR-0037, #514) is resolved per tool and
-            # injected UNCONDITIONALLY by argv. `_canonical_config` returns None for
-            # every tool until WS03 (#516) supplies the bodies + resolver, so the
-            # placeholder fragment is inert and the verdict is unchanged today.
+            # The canonical-config path (ADR-0037, #514/#516) is resolved per tool
+            # and injected UNCONDITIONALLY by argv. `_canonical_config` returns the
+            # shipped `shipit/data` body for each file-config tool (ruff, prettier,
+            # markdownlint, yamllint) and None for the inline-config tools, whose
+            # placeholder is then omitted.
             config_path = canonical_config(tool, root)
             prefix = tool.argv(
                 fix=fix, pin_editorconfig=pin_editorconfig, config_path=config_path
