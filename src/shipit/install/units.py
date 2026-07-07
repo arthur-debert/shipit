@@ -31,20 +31,31 @@ BLOCK_CLOSE = "<!-- End shipit-managed block. -->"
 LEFTHOOK_FILE = "lefthook.yml"
 
 # The lint tool configs the managed gate needs (ADP00-WS10, #436). The managed
-# lefthook caller runs the whole-tree lint, and markdownlint/yamllint
+# lefthook caller runs the whole-tree lint, and markdownlint/yamllint/prettier
 # auto-discover their config from the repo root — so the exact configs
 # shipit's own gate relies on are managed whole-file units, and a stock
 # consumer lints with what shipit dogfoods (drift is caught by the
 # reconcile-to-noop tests over shipit's own copies, the WS01 pattern).
 # Packaged names drop the leading dot so the data files stay visible to
 # directory listings and packaging globs; ``dest`` restores it.
+#
+# prettier joins the set (LNT01-WS06 #519): prettier is the ONE managed config
+# with a second authority — the TS/Svelte repos run their own prettier via npm
+# scripts/editors, which read a committed `.prettierrc` — so shipping it as a
+# managed unit resolves that two-authority drift (the injected `--config` already
+# governs the shipit gate; the committed file governs the repo's own prettier).
+# ruff/rustfmt/golangci stay injection-only: no repo runs them a second way, so
+# a committed copy would be dead weight. prettier accepts a YAML body in
+# `.prettierrc`, so the canonical `prettierrc.yaml` ships byte-identical.
 MARKDOWNLINT_FILE = ".markdownlint.yaml"
 MARKDOWNLINTIGNORE_FILE = ".markdownlintignore"
 YAMLLINT_FILE = ".yamllint.yaml"
+PRETTIERRC_FILE = ".prettierrc"
 LINT_CONFIG_UNITS = (
     (MARKDOWNLINT_FILE, "markdownlint.yaml"),
     (MARKDOWNLINTIGNORE_FILE, "markdownlintignore"),
     (YAMLLINT_FILE, "yamllint.yaml"),
+    (PRETTIERRC_FILE, "prettierrc.yaml"),
 )
 
 PIXI_FILE = "pixi.toml"

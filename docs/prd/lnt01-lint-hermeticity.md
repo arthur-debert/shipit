@@ -126,6 +126,14 @@ the whole epic.
   plugin-load carve-out then reads as environment-not-provisioned and fails
   the leg open, silently passing a genuinely dirty JSON/TS file. Scoping to
   `.svelte` keeps the plugins inert (never resolved) outside `.svelte`.
+  **Plugin provisioning (WS07, 2026-07-07):** `prettier-plugin-svelte` /
+  `prettier-plugin-tailwindcss` are npm packages, NOT on conda-forge, so they do
+  NOT join the pixi lint-deps block the way `prettier` itself does. They ride the
+  Svelte-bearing repo's OWN `package.json` devDependencies + `npm ci` (which Tree
+  provisioning already runs), so prettier resolves them from that repo's
+  `./node_modules` when it formats a `.svelte` file. shipit itself has no `.svelte`
+  files, so its conda-forge lint env needs no plugin install — and `.prettierrc`
+  now ships as a managed unit (WS06) so a stock consumer carries the canonical body.
 - **universals** (markdown/json/yaml/gh-actions/shell/lexd) — confirm the
   already-managed configs are the canonical set; add markdownlint + yamllint to
   `lex-fmt/lex` (the only repo missing them).
@@ -145,8 +153,13 @@ the whole epic.
   targets that subtree for Rust and root `src/` for TS/Svelte.
 - **lex-fmt/lexed (TS monorepo)** — tsc/eslint fan out over the packages'
   manifests, not a single root tsconfig.
-- **lex-fmt/tree-sitter-lex** — generated `parser.c` goes to `[lint].ignore`;
-  decide C scope (add clang-format, or universal-linters-only).
+- **lex-fmt/tree-sitter-lex** — generated `parser.c` (plus `src/tree_sitter/`,
+  `grammar.json`, `node-types.json`) goes to `[lint].ignore`. **C scope: descoped
+  — universal-linters-only** (WS07 decision, 2026-07-07). No `.c` language is
+  registered: it matches the current de-facto behaviour (`.c` routes to no `Lang`)
+  and this epic's no-new-languages stance, and tree-sitter-lex ships only generated
+  C, so a canonical clang-format would gate machine output. The generated files are
+  covered defensively by the repo's own `[lint].ignore` rather than by a gate leg.
 
 ### Legacy `release`-driven CI
 
@@ -196,7 +209,13 @@ Phase-1 foundation (shipit code + data), then fleet normalization, then residue.
   makes it uniform + proven; ADP02 rolls it out as the gate).
 - Turning off the `release` project's canary requirements (separate follow-up).
 - New linters/languages beyond the current registry (the mechanism covers
-  whatever is registered; adding tools is later work).
+  whatever is registered; adding tools is later work). **Clarification (WS07,
+  2026-07-07):** extending the EXISTING prettier tool's extensions to route
+  `.ts`/`.tsx`/`.svelte` (the `web` `Lang`, formerly `json`) is IN scope — it is
+  prettier's own reach, not a new linter, and prettier parses TS natively while
+  `.svelte` uses the override-scoped plugins. Registering **tsc / eslint** as gate
+  tools stays OUT of scope (the `lexed` tsc/eslint fan-out is descoped); the
+  per-manifest fan-out mechanism already exists if a TS type-check leg is ever added.
 - Raising the lint *floor* (new rule families) — that is ADR-0036's rule-adoption
   seam, independent of hermeticity.
 

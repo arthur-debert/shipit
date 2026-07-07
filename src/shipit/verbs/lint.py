@@ -17,12 +17,12 @@ The ONE deliberate, narrowly-scoped exception is prettier's plugin-load abort
 ``.prettierrc`` names a plugin absent from ``node_modules`` (a ``--depth 1``
 clone with no ``npm install``), prettier aborts on load with a Node
 module-resolution error rather than reporting a formatting verdict. Those
-plugins never affect JSON output, so this is environment-not-provisioned (same
-spirit as the pixi ``command -v`` guard, #482), and the JSON leg FAILS OPEN with
-a note. The match is tight — it requires the Node resolver phrasing and never
-fires on prettier's own "code style issues" warning — so a genuinely dirty JSON
-file still hard-fails. This is not a hole in the hard-fail contract; it is a
-documented, single-class carve-out.
+plugins format ``.svelte`` only (never ``.json``/``.ts``), so this is
+environment-not-provisioned (same spirit as the pixi ``command -v`` guard, #482),
+and the JSON/TS leg FAILS OPEN with a note. The match is tight — it requires the
+Node resolver phrasing and never fires on prettier's own "code style issues"
+warning — so a genuinely dirty JSON/TS file still hard-fails. This is not a hole
+in the hard-fail contract; it is a documented, single-class carve-out.
 
 The checks are CHECK-ONLY by default (release's scar: ``prettier --write`` under
 --all-files silently rewrites untouched files, so they must never mutate).
@@ -411,9 +411,16 @@ YAML = Lang(
     # also the gate for GitHub Actions workflows (`.yml`).
     tools=(Tool("yamllint", ("--strict",), config_inject=("-c", CONFIG_PLACEHOLDER)),),
 )
-JSON = Lang(
-    name="json",
-    extensions=(".json",),
+WEB = Lang(
+    name="web",
+    # prettier is ONE tool over the whole web-format family: JSON plus the
+    # TypeScript/Svelte legs (LNT01-WS07 #520). prettier parses `.ts`/`.tsx`
+    # natively (no plugin); `.svelte` needs prettier-plugin-svelte, which the
+    # canonical config scopes to a `*.svelte` override so the JSON/TS legs never
+    # depend on it (see the plugin-load carve-out below and prettierrc.yaml). tsc /
+    # eslint registration stays OUT of scope — this is prettier's reach, not a new
+    # linter (WS07 decision).
+    extensions=(".json", ".ts", ".tsx", ".svelte"),
     # prettier takes its config as a FILE via `--config <path>`; pin to the
     # canonical `shipit/data/prettierrc.yaml` (ADR-0037, WS03 #516), resolved by
     # `_canonical_config`. The canonical body sets the fleet's one rule set
@@ -467,7 +474,7 @@ LEX = Lang(
     tools=(Tool("lexd", ("check",)),),
 )
 
-LANGS: tuple[Lang, ...] = (PYTHON, RUST, SHELL, YAML, JSON, MARKDOWN, LEX)
+LANGS: tuple[Lang, ...] = (PYTHON, RUST, SHELL, YAML, WEB, MARKDOWN, LEX)
 
 
 # --------------------------------------------------------------------------
@@ -811,8 +818,9 @@ def is_prettier_plugin_load_failure(binary: str, rc: int, output: str) -> bool:
         Cannot find package 'prettier-plugin-svelte' imported from …/noop.js
 
     That nonzero exit is environment-not-provisioned, NOT a lint verdict: those
-    plugins format ``.svelte`` / CSS, never JSON, so the JSON leg's output is
-    identical with or without them. Surfacing it as a failure produces false
+    plugins format ``.svelte`` / CSS, never ``.json``/``.ts``, so the JSON/TS
+    leg's output is identical with or without them. Surfacing it as a failure
+    produces false
     failures whenever the gate runs before deps are installed (Tree/CI legs,
     fleet measurement).
 
@@ -1257,15 +1265,15 @@ def run(
                         if is_prettier_plugin_load_failure(tool.binary, rc, out):
                             # #498: fail OPEN, but only for this one narrowly-matched
                             # module-resolution class (see
-                            # is_prettier_plugin_load_failure) — a genuine dirty-JSON
-                            # failure has no `imported from` phrase and still FAILS.
+                            # is_prettier_plugin_load_failure) — a genuine dirty
+                            # JSON/TS failure has no `imported from` phrase and still FAILS.
                             # Same spirit as the pixi `command -v` guard (#482):
                             # environment-not-provisioned is not a lint verdict. Zero
                             # the rc so the leg passes, and keep the note (plus the
                             # resolver error) so an operator sees WHY it was skipped.
                             fail_open_note = (
                                 "prettier: skipped — a plugin named in .prettierrc is "
-                                "not installed (module-resolution failure). JSON "
+                                "not installed (module-resolution failure). JSON/TS "
                                 "formatting is plugin-independent, so this is "
                                 "environment-not-provisioned, not a lint failure; "
                                 "provision node_modules to enable this leg.\n"

@@ -45,7 +45,12 @@ def test_lang_for_routes_by_extension():
     assert lint.lang_for("src/x.py").name == "python"
     assert lint.lang_for("a/b.yml").name == "yaml"
     assert lint.lang_for("a/b.yaml").name == "yaml"
-    assert lint.lang_for("data.json").name == "json"
+    # prettier's web-format family (LNT01-WS07 #520): JSON plus the TS/Svelte
+    # legs all route to the single `web` lang / prettier tool.
+    assert lint.lang_for("data.json").name == "web"
+    assert lint.lang_for("src/app.ts").name == "web"
+    assert lint.lang_for("src/App.tsx").name == "web"
+    assert lint.lang_for("src/Widget.svelte").name == "web"
     assert lint.lang_for("README.md").name == "markdown"
     assert lint.lang_for("docs/x.lex").name == "lex"
     assert lint.lang_for("run.sh").name == "shell"
@@ -460,7 +465,7 @@ def test_shfmt_pin_gated_on_tracked_editorconfig():
 
 
 def test_prettier_pin_gated_on_tracked_editorconfig():
-    prettier = lint.JSON.tools[0]
+    prettier = lint.WEB.tools[0]
     assert prettier.binary == "prettier"
     assert prettier.argv(fix=False, pin_editorconfig=True) == (
         "--no-editorconfig",
@@ -1310,9 +1315,9 @@ def test_prettier_plugin_load_leg_fails_open(tmp_path, capsys):
     assert rc == 0
     out = capsys.readouterr().out
     assert "LINT: OK" in out
-    assert "json:prettier" not in out  # never listed among the failures
+    assert "web:prettier" not in out  # never listed among the failures
     assert "not installed" in out  # the skip reason IS surfaced, not silent
-    assert "ok   json" in out
+    assert "ok   web" in out
 
 
 def test_prettier_dirty_json_still_fails_in_orchestrator(tmp_path, capsys):
@@ -1328,7 +1333,7 @@ def test_prettier_dirty_json_still_fails_in_orchestrator(tmp_path, capsys):
     assert rc == 1
     out = capsys.readouterr().out
     assert "LINT: FAILED" in out
-    assert "json:prettier" in out
+    assert "web:prettier" in out
 
 
 @pytest.mark.skipif(shutil.which("prettier") is None, reason="prettier not on PATH")
@@ -1470,7 +1475,7 @@ def test_config_inject_coexists_with_the_editorconfig_pin():
     # prettier carries BOTH: the canonical-config placeholder (resolved in WS03)
     # and the #493 editorconfig pin (still gated). With a path AND the pin on, both
     # prepend — injection first, then the pin, then the base.
-    prettier = lint.JSON.tools[0]
+    prettier = lint.WEB.tools[0]
     assert prettier.config_inject == ("--config", lint.CONFIG_PLACEHOLDER)
     assert prettier.editorconfig_pin == ("--no-editorconfig",)
     assert prettier.argv(
@@ -2015,16 +2020,27 @@ _HERM_SPECS: tuple[_ToolSpec, ...] = (
     ),
     # prettier — file-config (`--config`). Only ambient source is the ancestor
     # `.prettierrc` walk (prettier reads no config env var and no plain $HOME
-    # file). Clean 2-space JSON; hostile sets tabWidth 8 so it reflows.
+    # file). Clean 2-space JSON; hostile sets tabWidth 8 so it reflows. JSON is the
+    # fixture here because it is neutral to prettier's semi / quote / trailingComma
+    # defaults — so it stays clean under BOTH the injected canonical (this spec's
+    # hermeticity run) AND prettier's pure defaults (the teeth run's `_none_resolver`
+    # baseline). A `.ts` fixture cannot be clean under both (canonical sets
+    # semi=false/trailingComma=none, defaults set semi=true/trailingComma=all), so
+    # the TS leg gets its OWN dedicated test that only exercises the injected path
+    # (test_prettier_ts_leg_is_ambient_config_blind_and_config_governed). `.svelte`
+    # is not hermeticity-tested at all: its plugins are absent from shipit's
+    # conda-forge lint env by design (they ride the consumer repo's own npm
+    # devDependencies, see prettierrc.yaml), so a `.svelte` fixture would FAIL OPEN
+    # (#498) and prove nothing — `.svelte` routing is covered by test_lang_for.
     #
     # pluginless_prettier: the SHIPPED canonical prettierrc names svelte/tailwind
     # plugins absent from shipit's lint env, so prettier aborts on plugin load and
-    # the JSON leg FAILS OPEN (#498) — ok for ANY input, which would make this
+    # the JSON/TS leg FAILS OPEN (#498) — ok for ANY input, which would make this
     # invariant pass VACUOUSLY. We inject a plugin-less canonical body so prettier
-    # genuinely enforces JSON formatting, exercising the SAME `--config` injection
-    # seam on a real rule (the teeth test proves removing it reddens).
+    # genuinely enforces JSON/TS formatting, exercising the SAME `--config`
+    # injection seam on a real rule (the teeth test proves removing it reddens).
     _ToolSpec(
-        lang="json",
+        lang="web",
         tag="prettier",
         target_check=("--check", "--log-level", "warn"),
         binaries=("prettier",),
@@ -2372,7 +2388,9 @@ def test_lint_tool_is_ambient_config_blind(spec, vector, tmp_path, monkeypatch):
     canonical = lint._canonical_config
     if spec.pluginless_prettier:
         pluginless = tmp_path / "pluginless-prettierrc.yaml"
-        pluginless.write_text("singleQuote: true\ntabWidth: 2\nsemi: false\n")
+        pluginless.write_text(
+            "singleQuote: true\ntabWidth: 2\nsemi: false\ntrailingComma: none\n"
+        )
         canonical = _pluginless_resolver(pluginless)
 
     clean = _target_run(
@@ -2482,6 +2500,69 @@ def test_prettier_gate_is_not_vacuous_behind_the_fail_open(tmp_path, monkeypatch
     assert oks == (True, False)
 
 
+@pytest.mark.skipif(shutil.which("prettier") is None, reason="prettier not on PATH")
+def test_prettier_ts_leg_is_ambient_config_blind_and_config_governed(
+    tmp_path, monkeypatch
+):
+    """The TypeScript leg (LNT01-WS07 #520): a `.ts` file routes to the `web`
+    prettier tool and the injected `--config` GOVERNS its formatting — blind to an
+    ambient ancestor `.prettierrc`, and load-bearing (a DIFFERENT injected config
+    moves the verdict). prettier parses TS natively (no plugin), so there is no
+    #498 fail-open to mask the check; the clean-baseline pin keeps it non-vacuous.
+
+    The shared `_HERM_SPECS` prettier case stays JSON (neutral to prettier's
+    semi/quote/trailingComma defaults, so it is clean under both the injected
+    canonical AND the teeth run's pure defaults); `.ts` cannot satisfy both, so it
+    gets this dedicated test on the injected path alone.
+    """
+    # A `.ts` fixture that is clean under a plugin-less canonical body
+    # (singleQuote / tabWidth 2 / semi false / trailingComma none) and reflows only
+    # on indentation width — so a tabWidth change is what moves its verdict.
+    ts_spec = _ToolSpec(
+        lang="web",
+        tag="prettier-ts",
+        target_check=("--check", "--log-level", "warn"),
+        binaries=("prettier",),
+        fixture=(("app.ts", "const x = {\n  a: { b: 1 }\n}\n"),),
+        hostile_name=".prettierrc",
+        hostile_body='{"tabWidth": 8}\n',
+        vectors=(_Vector("ancestor"),),
+        expected_ok=True,
+        pluginless_prettier=True,
+    )
+    tool = _tool_for(ts_spec)
+    vec = _Vector("ancestor")
+
+    def _run_ts(sub: str, body: str, *, planted: bool) -> lint.ToolRun:
+        cfg = tmp_path / f"{sub}.yaml"
+        cfg.write_text(body)
+        return _target_run(
+            _ambient_runs(
+                tmp_path / sub,
+                ts_spec,
+                vec,
+                planted=planted,
+                monkeypatch=monkeypatch,
+                canonical=_pluginless_resolver(cfg),
+            ),
+            tool,
+        )
+
+    canon = "singleQuote: true\ntabWidth: 2\nsemi: false\ntrailingComma: none\n"
+    # Ambient-blind: the 2-space fixture is clean under the injected canonical, and
+    # a hostile ancestor `.prettierrc` (tabWidth 8) does NOT move it — `--config` wins.
+    clean = _run_ts("clean", canon, planted=False)
+    assert clean.ok is True, "TS clean baseline must genuinely pass (no fail-open)"
+    hostile = _run_ts("hostile", canon, planted=True)
+    assert clean.ok == hostile.ok, "ambient ancestor .prettierrc leaked into the TS leg"
+    # Config-governed (load-bearing): swap the INJECTED canonical to tabWidth 8 and
+    # the 2-space `.ts` fixture reflows — proof the injected `--config` really drives
+    # the TS verdict, so the blindness above is not vacuous.
+    wide = "singleQuote: true\ntabWidth: 8\nsemi: false\ntrailingComma: none\n"
+    governed = _run_ts("governed", wide, planted=False)
+    assert governed.ok is False, "injected --config does not govern the TS leg"
+
+
 @pytest.mark.skipif(
     any(shutil.which(b) is None for b in _RUST_BINS),
     reason="rust toolchain not on PATH",
@@ -2510,6 +2591,65 @@ def test_gate_has_teeth_removing_cargo_fmt_config_path_reddens(tmp_path, monkeyp
         tmp_path, _spec("cargo-fmt"), no_path_fmt, monkeypatch, lint._canonical_config
     )
     assert oks == (True, False)
+
+
+@pytest.mark.skipif(
+    any(shutil.which(b) is None for b in _RUST_BINS),
+    reason="rust toolchain not on PATH",
+)
+def test_cargo_subtree_crate_run_is_ambient_config_blind(tmp_path):
+    """WS07 acceptance 4 (#520): hermeticity holds for a per-manifest cargo run
+    TARGETED at a SUBDIR crate (the tauri `src-tauri/` shape), not just a root
+    crate. The existing rust `_HERM_SPECS` case fixtures the crate AT the repo root;
+    this proves the invariance survives per-manifest TARGETING into a subdirectory.
+
+    The crate lives at `src-tauri/`; `manifest_roots` targets `src-tauri` alone (as
+    `test_manifest_roots_subdir_crate_only` asserts on the pure function). A hostile
+    `rustfmt.toml` (tab_spaces = 2) planted at the REPO ROOT is an ancestor rustfmt
+    would walk into from the subdir crate — but cargo-fmt's inline `--config-path
+    <shipped rustfmt.toml>` overrides that walk, so the subdir crate's fmt verdict is
+    identical with and without the ancestor config. (Non-vacuous: the sibling teeth
+    test proves that WITHOUT `--config-path` the same ancestor MOVES the verdict.)"""
+    fixture = (
+        ("src-tauri/Cargo.toml", _RUST_CARGO_TOML),
+        # a clean 4-space fn — clean under the shipped rustfmt.toml, reflowed by a
+        # honored tab_spaces = 2, so the ancestor config has teeth if it leaks.
+        ("src-tauri/src/lib.rs", _RUST_LIB),
+    )
+    # The per-manifest targeting is the subdir crate, never the repo root.
+    assert lint.manifest_roots([rel for rel, _ in fixture], ("Cargo.toml",)) == [
+        "src-tauri"
+    ]
+
+    def _fmt_run(sub: str, *, planted: bool) -> lint.ToolRun:
+        repo = tmp_path / sub
+        repo.mkdir(parents=True)
+        for rel, content in fixture:
+            f = repo / rel
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text(content)
+        if planted:
+            # the hostile ancestor sits at the REPO ROOT, ABOVE the src-tauri crate
+            (repo / "rustfmt.toml").write_text("tab_spaces = 2\n")
+        runs: list[lint.ToolRun] = []
+        lint.run(
+            str(repo),
+            discover=_fake_discover([rel for rel, _ in fixture]),
+            tracks_root_editorconfig=lambda root: False,
+            canonical_config=lint._canonical_config,
+            runs_out=runs,
+        )
+        return _target_run(runs, _tool_for(_spec("cargo-fmt")))
+
+    clean = _fmt_run("clean", planted=False)
+    assert clean.ok is True, (
+        "the 4-space subdir crate must be clean under the shipped rustfmt.toml — "
+        "else the invariance below would be vacuous"
+    )
+    hostile = _fmt_run("hostile", planted=True)
+    assert clean.ok == hostile.ok, (
+        "a repo-root rustfmt.toml leaked into the subdir crate's per-manifest fmt run"
+    )
 
 
 @pytest.mark.skipif(
