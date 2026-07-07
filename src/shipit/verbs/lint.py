@@ -562,9 +562,13 @@ def manifest_roots(paths: list[str], manifests: tuple[str, ...]) -> list[str]:
 
 
 def _ext(path: str) -> str:
-    """The lowercase extension (with dot) of ``path``, or ``""`` if it has none."""
+    """The lowercase extension (with dot) of ``path``, or ``""`` if it has none.
+
+    Lowercased so a `Widget.SVELTE` is classed with `.svelte`: the plugin-scoped
+    partition (and thus whether the #498 fail-open may apply) must not hinge on
+    filename case."""
     name = _basename(path)
-    return "." + name.rsplit(".", 1)[-1] if "." in name else ""
+    return "." + name.rsplit(".", 1)[-1].lower() if "." in name else ""
 
 
 def partition_plugin_scoped(
@@ -1368,9 +1372,9 @@ def run(
                                 "not installed (module-resolution failure). This "
                                 "`.svelte` leg needs prettier-plugin-svelte, so it is "
                                 "environment-not-provisioned, not a lint failure; "
-                                "provision node_modules to enable it. The plugin-free "
-                                "JSON/TS leg still ran and kept its verdict.\n"
-                                + out.strip()
+                                "provision node_modules to enable it. Any `.json`/"
+                                "`.ts`/`.tsx` are checked in a separate leg that this "
+                                "does not affect.\n" + out.strip()
                             )
                             logger.warning(
                                 "lint prettier plugin-load failure — fail open (#498)",

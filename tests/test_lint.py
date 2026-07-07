@@ -2112,12 +2112,14 @@ _HERM_SPECS: tuple[_ToolSpec, ...] = (
     # devDependencies, see prettierrc.yaml), so a `.svelte` fixture would FAIL OPEN
     # (#498) and prove nothing — `.svelte` routing is covered by test_lang_for.
     #
-    # pluginless_prettier: the SHIPPED canonical prettierrc names svelte/tailwind
-    # plugins absent from shipit's lint env, so prettier aborts on plugin load and
-    # the JSON/TS leg FAILS OPEN (#498) — ok for ANY input, which would make this
-    # invariant pass VACUOUSLY. We inject a plugin-less canonical body so prettier
-    # genuinely enforces JSON/TS formatting, exercising the SAME `--config`
-    # injection seam on a real rule (the teeth test proves removing it reddens).
+    # The REAL shipped canonical body is injected here (no plugin-less swap): its
+    # svelte/tailwind plugins are scoped to a `*.svelte` override, so a `.json`
+    # fixture never resolves them — prettier genuinely enforces the JSON rules
+    # rather than aborting on plugin load and failing open (#498). That the real
+    # config REDDENS a dirty JSON (not fails it open) is proven by
+    # test_prettier_dirty_json_still_fails_under_real_canonical_config; keeping the
+    # real config here exercises the SAME `--config` injection seam on a real rule
+    # (the teeth test proves removing the injection reddens).
     _ToolSpec(
         lang="web",
         tag="prettier",
@@ -2127,8 +2129,7 @@ _HERM_SPECS: tuple[_ToolSpec, ...] = (
         hostile_name=".prettierrc",
         hostile_body='{"tabWidth": 8}\n',
         vectors=(_Vector("ancestor"),),
-        expected_ok=True,  # 2-space JSON is clean under the plugin-less canonical
-        pluginless_prettier=True,
+        expected_ok=True,  # 2-space JSON is clean under the canonical config
     ),
     # markdownlint — file-config (`--config`). It reads config ONLY from the
     # working directory (no ancestor walk, no $HOME, no env var), so the sole
