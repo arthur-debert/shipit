@@ -110,7 +110,7 @@ HOOK_RECOVERY_CMD = "./bin/shipit install"
 # freely editable) from its first commit — a consumer WITH a manifest never
 # sees it, and a re-install never rewrites it.
 PIXI_SEED_CHANNELS = ("conda-forge",)
-PIXI_SEED_PLATFORMS = ("linux-64", "linux-aarch64", "osx-64", "osx-arm64")
+PIXI_SEED_PLATFORMS = ("linux-64", "linux-aarch64", "osx-arm64")
 
 
 def workspace_name(raw: str) -> str:
