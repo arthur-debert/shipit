@@ -95,8 +95,10 @@ version = ">=8"
 # The Rust toolchain (cargo + clippy-driver/cargo-clippy + rustfmt/cargo-fmt) is a
 # conda-forge package PINNED in pixi.lock — the invariance gate exercises the real
 # binaries, so like the required-check linters it must move only via an auto-PR bump.
-# lexd, the one lex tool not on conda-forge, is fetched at its pin by the task's
-# `provision-lexd` depends-on (below).
+# lexd, the one lex tool not on conda-forge, is fetched at its pin INLINE by the
+# `test` task cmd (`shipit provision lexd` before pytest, IN this env) — NOT a
+# `provision-lexd` depends-on, which pixi would run in the default env; see the task
+# comment below for why.
 [feature.test.dependencies]
 rust = "1.96.*"
 
@@ -226,8 +228,10 @@ lint = ["lint"]
 # invariance gate runs its rust/lex cases instead of skipping them (#532). It is the
 # ONLY env carrying the `test` task, so bare `pixi run test` auto-selects it — the
 # developer command and the CI command (`pixi run -e test test`) run the same gate.
-# lexd is provisioned onto the run's PATH at its pin by the task's `provision-lexd`
-# depends-on (it lands in the layered default-env bin — see the task comment above).
+# lexd is provisioned onto the run's PATH at its pin INLINE by the `test` task cmd
+# (`shipit provision lexd` before pytest, landing in THIS env's own bin). NOT a
+# `provision-lexd` depends-on: pixi would run it in the default env, whose bin this
+# env does not layer onto PATH — see the task comment above.
 test = ["test"]
 review = ["review"]
 dogfood = ["dogfood"]

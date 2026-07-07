@@ -45,6 +45,6 @@ jobs:
       # `.pixi/envs/test/bin` (the env the suite runs in) — this one command runs
       # exactly what a developer's bare `pixi run test` does locally, byte-identical,
       # with no separate provision step to keep in sync (unlike the fixed-string
-      # `lint` above, which cannot carry a command). See pixi.toml [feature.test.tasks].
+      # `lint` above, which cannot carry a depends-on). See pixi.toml [feature.test.tasks].
       - name: Test
         run: pixi run -e test test
