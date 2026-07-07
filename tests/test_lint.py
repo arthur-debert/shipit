@@ -1721,8 +1721,10 @@ def test_run_tool_passes_scrubbed_env_with_replace_env(tmp_path, monkeypatch):
 # CI COVERAGE (#532 — closed): the `test` task lives in the pixi `test` FEATURE, so
 # the canonical `pixi run test` and CI's `pixi run -e test test` are the SAME command
 # in the SAME env — one that carries the Rust toolchain (cargo/clippy/rustfmt,
-# conda-forge-pinned in pixi.lock) AND provisions lexd at its pin (via the task's
-# `provision-lexd` depends-on). So the rust/lex hermeticity cases — and the
+# conda-forge-pinned in pixi.lock) AND provisions lexd at its pin INLINE (the task cmd
+# runs `shipit provision lexd` before pytest, IN this env, so lexd lands in the test
+# env's own bin — not a depends-on, which pixi would run in its home/default env). So
+# the rust/lex hermeticity cases — and the
 # `xfail(strict)` "leak closed → reminder" signal for clippy/lexd (#526) — run BOTH
 # locally and on CI: closing #526 reddens the gate everywhere, with no local/CI split
 # in either direction. The `skipif(binary missing)` guards remain only the last-ditch
