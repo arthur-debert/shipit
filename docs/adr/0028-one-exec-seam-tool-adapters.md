@@ -52,7 +52,8 @@ in the adapter.
   meaning (e.g. missing binary).
 - **No timeout default (explicit at every call site)** — rejected for a 5m
   default: the win is that nothing can hang silently; the cost is that known
-  long-runners (backend launches, cold `pixi install` / `npm ci`) must carry
+  long-runners (backend launches, cold `pixi install` / frozen node installs —
+  `npm ci` and its pnpm/yarn equivalents, #543) must carry
   explicit overrides, set once at their adapter/call site.
 - **git/GitHub client libraries** (GitPython, pygit2, PyGithub, githubkit) —
   rejected: the git surface is mutation-dominated with tiny disciplined

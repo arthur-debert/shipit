@@ -193,10 +193,15 @@ behaves and how we ride it.
     Provisioning — `src/shipit/tree/create.py`:
         `_provision()` runs, each gated on a manifest existing: `shipit install .
         --local` (if `.shipit.toml`), `pixi install` (if `pixi.toml`, default
-        env), `npm ci` (if `package.json`). The `shipit install` and `npm ci`
+        env), the package-manager-aware frozen node install (if `package.json` —
+        `node_install_argv()`, \#543: the `packageManager` pin first, the
+        lockfile second, loud failure when neither decides — `npm ci` / `pnpm
+        install --frozen-lockfile` / `yarn install --immutable`). The `shipit
+        install` and node-install
         steps funnel through the `run_provision()` seam, an Exec through the one
         runner (`shipit.execrun.run`, ADR-0028) with the generous explicit
-        `PROVISION_TIMEOUT` (cold `npm ci` legitimately outlives the 5-minute
+        `PROVISION_TIMEOUT` (a cold frozen node install legitimately outlives the
+        5-minute
         default). The pixi step instead runs through the pixi adapter,
         `shipit.pixienv.install()`, which carries pixi's own long-runner bound
         (`INSTALL_TIMEOUT`, 30 min — a cold solve+download outlives the default)

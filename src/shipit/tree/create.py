@@ -19,7 +19,8 @@ summary (``{path, branch, base}``). The whole pipeline hides behind this one cal
 3. apply ``.treeinclude`` — copy the gitignored-but-needed files (``.env``,
    Doppler config, models) from the source checkout into the new Tree
    (:mod:`shipit.tree.include`).
-4. provision: the path's ``pixi install`` / ``npm ci`` + hook activation,
+4. provision: the path's ``pixi install`` / the package-manager-aware frozen
+   node install (:func:`node_install_argv`, #543) + hook activation,
    run with the parent's project-pointer env scrubbed (:func:`provision_env`) —
    NO managed-set mutation (ADR-0033: the TRE03-era ``shipit install --local``
    reconcile is deleted; the Shipit pin keeps Tree and tool coherent by
@@ -38,6 +39,7 @@ in ``layout`` / ``include``.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import secrets
@@ -65,12 +67,32 @@ logger = logging.getLogger("shipit.tree")
 #: fails closed (ADR-0033's one surviving guard). Given a pinned repo, the
 #: checkout's manifests drive the rest: a ``pixi.toml``
 #: (:data:`shipit.pixienv.MANIFEST_NAME`) gets ``pixi install`` through the pixi
-#: adapter, a ``package.json`` gets ``npm ci`` — each dep step gated on its file
+#: adapter, a ``package.json`` gets its package manager's frozen install
+#: (:func:`node_install_argv`, #543) — each dep step gated on its file
 #: existing, so a repo that uses only one toolchain runs only that step.
-NPM_MANIFEST = "package.json"
+NODE_MANIFEST = "package.json"
+
+#: Package manager → its FROZEN install argv: install exactly what the lockfile
+#: pins and rewrite nothing, matching what CI runs. Frozen is non-negotiable —
+#: a plain ``install`` could mutate the lockfile on the just-cut branch, and
+#: provisioning mutates nothing (ADR-0033 in spirit).
+NODE_INSTALL_ARGV: dict[str, tuple[str, ...]] = {
+    "npm": ("npm", "ci"),
+    "pnpm": ("pnpm", "install", "--frozen-lockfile"),
+    "yarn": ("yarn", "install", "--immutable"),
+}
+
+#: Lockfile → the package manager that owns it — the fallback detection signal
+#: when ``package.json`` carries no ``packageManager`` pin (#543).
+NODE_LOCKFILES: dict[str, str] = {
+    "package-lock.json": "npm",
+    "pnpm-lock.yaml": "pnpm",
+    "yarn.lock": "yarn",
+}
 
 #: The per-step provisioning timeout, in seconds: 30 minutes. Provisioning is the
-#: known long-runner family (ADR-0028 names cold ``npm ci`` alongside the pixi
+#: known long-runner family (ADR-0028 names the cold frozen node install —
+#: ``npm ci`` and its pnpm/yarn equivalents — alongside the pixi
 #: install the pixi adapter now bounds itself — :data:`shipit.pixienv.INSTALL_TIMEOUT`),
 #: so the runner's 5-minute default would kill legitimate cold installs — but
 #: ``None`` (the pre-WS03 stopgap) let a hung step hang Tree creation forever.
@@ -242,7 +264,8 @@ def run_provision(cmd: list[str], *, cwd: Path, env: dict[str, str]) -> None:
     scrubbed ``PIXI_*`` vars cannot creep back in via a merge over ``os.environ``.
 
     Every step carries the explicit generous :data:`PROVISION_TIMEOUT` (ADR-0028
-    names cold ``npm ci`` as a legitimate long-runner the 5-minute default must
+    names the cold frozen node install — ``npm ci`` and its pnpm/yarn
+    equivalents — as a legitimate long-runner the 5-minute default must
     not kill; the bound replaces WS01's ``timeout=None`` stopgap so a wedged step
     still dies at a known point — the pixi step carries the pixi adapter's own
     bound instead). The runner gives every step a durable record — timing on
@@ -273,6 +296,60 @@ def _narrate_step(result: execrun.ExecResult) -> None:
     )
 
 
+def node_install_argv(dest: Path) -> list[str]:
+    """The frozen node-deps install argv for the checkout at ``dest`` (#543).
+
+    Tree provisioning used to hard-code ``npm ci``, which HARD-FAILS on a
+    pnpm/yarn repo (no ``package-lock.json``) — and because the svelte prettier
+    leg fails open when its plugins are unresolvable (#498/#542), the miss was
+    SILENT: dirty ``.svelte`` files passed without a verdict. So the manager is
+    detected, and an undecidable manifest fails LOUD:
+
+    1. the ``packageManager`` field in ``package.json`` (the corepack pin,
+       ``<name>@<version>``) is AUTHORITATIVE when present — it is the repo's
+       own declaration, the one corepack and CI already honour — and it wins
+       over any lockfile on disk;
+    2. otherwise the lockfile decides: exactly one of the
+       :data:`NODE_LOCKFILES` names its manager;
+    3. anything else — an unrecognized ``packageManager``, an unparseable
+       ``package.json``, no recognized lockfile, or several — raises
+       :class:`ValueError`, failing the materialization (rolled back like any
+       provisioning failure). A repo that declares node deps but whose manager
+       cannot be determined must never be half-provisioned: the cost downstream
+       is not an error but a silent fail-open.
+    """
+    manifest = dest / NODE_MANIFEST
+    try:
+        data = json.loads(manifest.read_text())
+    except ValueError as exc:  # json.JSONDecodeError is a ValueError
+        raise ValueError(
+            f"unparseable {NODE_MANIFEST} in {dest}: {exc} — cannot determine "
+            "the package manager for the node-deps provisioning step (#543)"
+        ) from exc
+    pin = data.get("packageManager") if isinstance(data, dict) else None
+    if pin is not None:
+        name = str(pin).split("@", 1)[0]
+        if name not in NODE_INSTALL_ARGV:
+            raise ValueError(
+                f"unsupported packageManager {pin!r} in {manifest}: known "
+                f"managers are {sorted(NODE_INSTALL_ARGV)} (#543)"
+            )
+        return list(NODE_INSTALL_ARGV[name])
+    found = [lock for lock in NODE_LOCKFILES if (dest / lock).is_file()]
+    if len(found) == 1:
+        return list(NODE_INSTALL_ARGV[NODE_LOCKFILES[found[0]]])
+    detail = (
+        f"multiple lockfiles ({', '.join(found)})"
+        if found
+        else f"no recognized lockfile ({', '.join(NODE_LOCKFILES)})"
+    )
+    raise ValueError(
+        f"{dest} has a {NODE_MANIFEST} but no packageManager field and {detail}; "
+        "refusing to guess a frozen install — a wrong one hard-fails here or "
+        "leaves deps unprovisioned that downstream lint legs fail open on (#543)"
+    )
+
+
 def _provision(dest: Path, *, trees_root: Path) -> None:
     """Provision the freshly-checked-out Tree so a write-session starts ready.
 
@@ -290,7 +367,10 @@ def _provision(dest: Path, *, trees_root: Path) -> None:
     :func:`shipit.pixienv.install` — the pixi argv and its long-runner bound
     are pixi knowledge, PROC02-WS02) — followed, when the clone carries a
     ``lefthook.yml``, by hook activation (:func:`_activate_hooks`, #443: hooks
-    do not clone, so a Tree must arm its own) — / ``npm ci``, each gated on
+    do not clone, so a Tree must arm its own) — / the package-manager-aware
+    frozen node install (:func:`node_install_argv`, #543: ``npm ci`` on a pnpm
+    or yarn repo hard-fails, and the svelte prettier leg then fails open
+    silently), each gated on
     its manifest existing and each run with the scrubbed provisioning env
     (:func:`provision_env` — parent project pointers removed; the ADR-0015
     build env is no longer injected here, it comes from pixi
@@ -320,8 +400,8 @@ def _provision(dest: Path, *, trees_root: Path) -> None:
         _narrate_step(pixienv.install(dest, env=env))
         if (dest / LEFTHOOK_FILE).is_file():
             _activate_hooks(dest, env=env)
-    if (dest / NPM_MANIFEST).is_file():
-        run_provision(["npm", "ci"], cwd=dest, env=env)
+    if (dest / NODE_MANIFEST).is_file():
+        run_provision(node_install_argv(dest), cwd=dest, env=env)
 
 
 def _activate_hooks(dest: Path, *, env: dict[str, str]) -> None:
