@@ -75,12 +75,27 @@ NODE_MANIFEST = "package.json"
 #: Package manager → its FROZEN install argv: install exactly what the lockfile
 #: pins and rewrite nothing, matching what CI runs. Frozen is non-negotiable —
 #: a plain ``install`` could mutate the lockfile on the just-cut branch, and
-#: provisioning mutates nothing (ADR-0033 in spirit).
+#: provisioning mutates nothing (ADR-0033 in spirit). ``npm ci`` and pnpm's
+#: ``--frozen-lockfile`` spell "frozen" identically across their whole version
+#: range; yarn does NOT — it renamed the flag across the v1→v2 line — so yarn is
+#: resolved by version (:func:`_yarn_install_argv`), not this table (#545).
 NODE_INSTALL_ARGV: dict[str, tuple[str, ...]] = {
     "npm": ("npm", "ci"),
     "pnpm": ("pnpm", "install", "--frozen-lockfile"),
-    "yarn": ("yarn", "install", "--immutable"),
 }
+
+#: The recognized node package managers: the version-stable table above plus yarn
+#: (whose frozen argv is version-dependent, so it carries no fixed entry). This is
+#: the membership a ``packageManager`` pin is validated against.
+NODE_MANAGERS: frozenset[str] = frozenset(NODE_INSTALL_ARGV) | {"yarn"}
+
+#: Yarn v1 ("classic") stamps a ``# yarn lockfile v1`` banner near the top of every
+#: ``yarn.lock``; Berry (v2+) writes a YAML ``__metadata:`` map with no such banner.
+#: The banner is the stable, documented way to tell a classic lockfile from a Berry
+#: one WITHOUT a ``packageManager`` pin — yarn renamed its frozen-install flag across
+#: that boundary (``--frozen-lockfile`` → ``--immutable``), so the leg must know which
+#: line it faces to pick the flag that will not hard-fail (#545).
+_YARN_V1_BANNER = "# yarn lockfile v1"
 
 #: Lockfile → the package manager that owns it — the fallback detection signal
 #: when ``package.json`` carries no ``packageManager`` pin (#543).
@@ -296,6 +311,52 @@ def _narrate_step(result: execrun.ExecResult) -> None:
     )
 
 
+def _yarn_install_argv(*, classic: bool) -> list[str]:
+    """Yarn's frozen install argv for the classic (v1) vs Berry (v2+) line (#545).
+
+    Yarn renamed the frozen-install flag across the v1→v2 boundary — classic
+    honours ``--frozen-lockfile``, Berry only ``--immutable`` — for the SAME
+    "install exactly the lockfile, rewrite nothing" intent. The two flags are not
+    interchangeable: passing Berry's ``--immutable`` to a v1 yarn (or vice versa)
+    HARD-FAILS on an unknown flag, so the leg selects on the detected major version
+    rather than assuming one line.
+    """
+    flag = "--frozen-lockfile" if classic else "--immutable"
+    return ["yarn", "install", flag]
+
+
+def _yarn_pin_is_classic(pin: str, manifest: Path) -> bool:
+    """Whether a ``yarn@<version>`` corepack pin names the classic (v1) line (#545).
+
+    ``packageManager`` is an exact ``<name>@<version>`` (corepack rejects a range),
+    so the major version is the leading integer of ``<version>`` and ``major <= 1``
+    is classic. A yarn pin whose version has no numeric major is malformed for
+    corepack — raise rather than guess a frozen flag.
+    """
+    _, _, version = pin.partition("@")
+    major = version.split(".", 1)[0]
+    try:
+        return int(major) <= 1
+    except ValueError as exc:
+        raise ValueError(
+            f"unparseable yarn version in packageManager {pin!r} in {manifest}: "
+            "corepack pins an exact <name>@<version>, so yarn's frozen-install flag "
+            "(--frozen-lockfile for v1, --immutable for v2+) cannot be chosen (#545)"
+        ) from exc
+
+
+def _yarn_lockfile_is_classic(lockfile: Path) -> bool:
+    """Whether a lone ``yarn.lock`` (no packageManager pin) is a v1 "classic" file.
+
+    Reads only the head — the :data:`_YARN_V1_BANNER` sits in the first two lines —
+    and looks for the banner. Its absence means a Berry (v2+) lockfile, whose frozen
+    flag is ``--immutable`` (#545).
+    """
+    with lockfile.open("r", encoding="utf-8", errors="replace") as fh:
+        head = fh.read(len(_YARN_V1_BANNER) + 256)
+    return _YARN_V1_BANNER in head
+
+
 def node_install_argv(dest: Path) -> list[str]:
     """The frozen node-deps install argv for the checkout at ``dest`` (#543).
 
@@ -317,27 +378,47 @@ def node_install_argv(dest: Path) -> list[str]:
        provisioning failure). A repo that declares node deps but whose manager
        cannot be determined must never be half-provisioned: the cost downstream
        is not an error but a silent fail-open.
+
+    Yarn is the one manager whose frozen argv is not fixed by name: v1 "classic"
+    and v2+ "Berry" spell the frozen flag differently (``--frozen-lockfile`` vs
+    ``--immutable``, #545), so the yarn major version — from the pin's
+    ``<version>``, or from the ``yarn.lock`` banner on the lockfile-only path —
+    picks the flag; a yarn pin with no numeric major raises like any other
+    undecidable signal.
     """
     manifest = dest / NODE_MANIFEST
     try:
-        data = json.loads(manifest.read_text())
+        data = json.loads(manifest.read_text(encoding="utf-8"))
     except ValueError as exc:  # json.JSONDecodeError is a ValueError
         raise ValueError(
             f"unparseable {NODE_MANIFEST} in {dest}: {exc} — cannot determine "
             "the package manager for the node-deps provisioning step (#543)"
         ) from exc
-    pin = data.get("packageManager") if isinstance(data, dict) else None
+    if not isinstance(data, dict):
+        raise ValueError(
+            f"{NODE_MANIFEST} in {dest} is JSON but not an object "
+            f"({type(data).__name__}); a package.json is always an object, so no "
+            "package manager can be read — failing loud like an unparseable one (#543)"
+        )
+    pin = data.get("packageManager")
     if pin is not None:
         name = str(pin).split("@", 1)[0]
+        if name == "yarn":
+            return _yarn_install_argv(classic=_yarn_pin_is_classic(str(pin), manifest))
         if name not in NODE_INSTALL_ARGV:
             raise ValueError(
                 f"unsupported packageManager {pin!r} in {manifest}: known "
-                f"managers are {sorted(NODE_INSTALL_ARGV)} (#543)"
+                f"managers are {sorted(NODE_MANAGERS)} (#543)"
             )
         return list(NODE_INSTALL_ARGV[name])
     found = [lock for lock in NODE_LOCKFILES if (dest / lock).is_file()]
     if len(found) == 1:
-        return list(NODE_INSTALL_ARGV[NODE_LOCKFILES[found[0]]])
+        manager = NODE_LOCKFILES[found[0]]
+        if manager == "yarn":
+            return _yarn_install_argv(
+                classic=_yarn_lockfile_is_classic(dest / found[0])
+            )
+        return list(NODE_INSTALL_ARGV[manager])
     detail = (
         f"multiple lockfiles ({', '.join(found)})"
         if found

@@ -196,7 +196,9 @@ behaves and how we ride it.
         env), the package-manager-aware frozen node install (if `package.json` —
         `node_install_argv()`, \#543: the `packageManager` pin first, the
         lockfile second, loud failure when neither decides — `npm ci` / `pnpm
-        install --frozen-lockfile` / `yarn install --immutable`). The `shipit
+        install --frozen-lockfile` / `yarn install --immutable` for Berry v2+ or
+        `--frozen-lockfile` for classic v1, picked by the yarn major version,
+        \#545). The `shipit
         install` and node-install
         steps funnel through the `run_provision()` seam, an Exec through the one
         runner (`shipit.execrun.run`, ADR-0028) with the generous explicit
