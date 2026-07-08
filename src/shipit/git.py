@@ -188,6 +188,21 @@ def ls_files(*, cwd: str) -> list[str]:
     return [line for line in out.splitlines() if line.strip()]
 
 
+def ls_files_matching(pathspecs: list[str], *, cwd: str) -> list[str] | None:
+    """Tracked files matching ``pathspecs``, or ``None`` when ``cwd`` is no git repo.
+
+    The pathspec-scoped sibling of :func:`ls_files` (#547: install's toolchain
+    signal detection reads the tracked manifest names through it). A probe read:
+    not-a-repo is a NORMAL answer (``None`` — the caller falls back to its
+    non-git heuristic), never an exception; NUL-delimited (``-z``) so paths with
+    spaces/newlines survive, tracked-only for the same reason as :func:`ls_files`.
+    """
+    res = _probe(["ls-files", "-z", "--", *pathspecs], cwd=cwd)
+    if not res.ok:
+        return None
+    return [p for p in res.stdout.split("\0") if p.strip()]
+
+
 def epic_umbrella_exists(epic: str, *, cwd: str) -> bool:
     """Whether ``<epic>/umbrella`` exists as a branch in the checkout at ``cwd``.
 

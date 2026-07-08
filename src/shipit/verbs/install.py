@@ -53,6 +53,7 @@ from ..install.reconcile import (
     NOOP,
     UPDATE,
     Plan,
+    detect_toolchains,
     format_lefthook_conflict,
     gather,
     load_retired,
@@ -148,7 +149,10 @@ def run(
     )
     step = "gather/reconcile"
     try:
-        units = load_units()
+        # The catalog is signal-conditional (#547 Layer 1): a consumer whose
+        # tracked manifests declare a toolchain (Cargo.toml/go.mod/package.json)
+        # gets the matching pinned pixi dep block alongside the unconditional set.
+        units = load_units(toolchains=detect_toolchains(Path(path or ".")))
         retired = load_retired()
         state = gather(Path(path or "."), units, retired)
         plan = reconcile(units, retired, state)

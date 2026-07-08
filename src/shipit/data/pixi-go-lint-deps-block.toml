@@ -1,0 +1,9 @@
+# The fleet-pinned go lint toolchain (#547 Layer 1) — delivered because this
+# repo tracks a go.mod, which is what makes the go leg of `shipit lint` run.
+# golangci-lint needs a matching go on PATH, so the pair travels together and
+# the leg stops hard-failing (127) on hosts and CI runners without go. If this
+# repo no longer ships go (the last go.mod is gone), delete this block and its
+# `pixi.toml#shipit-go-lint-toolchain` entry in .shipit.toml's [managed] table
+# — a reconcile only ADDS toolchain blocks, it never retires one.
+go = "1.26.*"
+golangci-lint = "2.*"

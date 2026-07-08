@@ -33,12 +33,14 @@ Plan carries the conflicts: the working-tree mode warns loudly, the committing
 modes fail closed (:mod:`shipit.install.apply`) — a managed-config change must
 never silently brick a consumer's commits.
 
-The seam (ADR-0030): :func:`gather` is the ONE read boundary (consumer hashes,
-the stored pristine map, the policy-seed plan — a frozen
-:class:`ConsumerState`); :func:`reconcile` is pure over those values and
-aggregates every managed and retired decision into the frozen :class:`Plan`,
-inspectable before any file is written. All writes live in
-:mod:`shipit.install.apply`.
+The seam (ADR-0030): :func:`gather` is the ONE filesystem read boundary
+(consumer hashes, the stored pristine map, the policy-seed plan — a frozen
+:class:`ConsumerState`); :func:`detect_toolchains` is its small signal-scoped
+sibling (#547: one tracked-manifest read through the git adapter, deciding
+WHICH catalog :func:`~shipit.install.units.load_units` returns, before gather
+hashes it); :func:`reconcile` is pure over those values and aggregates every
+managed and retired decision into the frozen :class:`Plan`, inspectable before
+any file is written. All writes live in :mod:`shipit.install.apply`.
 """
 
 from __future__ import annotations
@@ -51,10 +53,19 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import yaml
 
-from .. import config
+from .. import config, git
 from .errors import InstallError
 from .splice import extract_block, extract_settings_hook
-from .units import FMT_JSON_HOOK, LEFTHOOK_FILE, PIXI_FILE, Unit, data_bytes
+from .units import (
+    FMT_JSON_HOOK,
+    LEFTHOOK_FILE,
+    PIXI_FILE,
+    TOOLCHAIN_GO,
+    TOOLCHAIN_NODE,
+    TOOLCHAIN_RUST,
+    Unit,
+    data_bytes,
+)
 
 logger = logging.getLogger("shipit.install")
 
@@ -408,6 +419,47 @@ def _plan_lefthook_conflicts(
 # --------------------------------------------------------------------------
 # The read boundary — the consumer's current state, as one frozen value
 # --------------------------------------------------------------------------
+
+#: manifest basename -> toolchain signal (#547 Layer 1). A tracked manifest
+#: ANYWHERE in the tree is the signal, matching `verbs/lint.py`'s per-manifest
+#: leg discovery: a tracked ``Cargo.toml`` is exactly what makes the rust lint
+#: leg run (which hard-fails 127 without cargo — the gap the rust dep block
+#: closes, #526); ``go.mod`` and ``package.json`` are the go/node analogues.
+TOOLCHAIN_MANIFESTS = (
+    ("Cargo.toml", TOOLCHAIN_RUST),
+    ("go.mod", TOOLCHAIN_GO),
+    ("package.json", TOOLCHAIN_NODE),
+)
+
+
+def detect_toolchains(root: Path) -> frozenset[str]:
+    """The consumer's toolchain signals, off its tracked manifests (#547 Layer 1).
+
+    A small read boundary of its own, SEPARATE from :func:`gather` (which stays
+    filesystem-only): one ``git ls-files`` over the toolchain manifest names
+    through the git adapter (ADR-0028) — tracked-only, like the lint scope, so a
+    vendored/ignored ``package.json`` deep in ``node_modules`` can never summon
+    a toolchain. On a non-git root the read degrades to root-level manifest
+    existence checks. The result feeds
+    :func:`shipit.install.units.load_units`'s ``toolchains`` parameter.
+    """
+    pathspecs = [
+        spec
+        for name, _ in TOOLCHAIN_MANIFESTS
+        for spec in (name, f"*/{name}")  # the root manifest and any nested one
+    ]
+    tracked = git.ls_files_matching(pathspecs, cwd=str(root))
+    if tracked is not None:
+        names = {PurePosixPath(p).name for p in tracked}
+    else:
+        names = {name for name, _ in TOOLCHAIN_MANIFESTS if (root / name).is_file()}
+    detected = frozenset(tc for name, tc in TOOLCHAIN_MANIFESTS if name in names)
+    if detected:
+        logger.debug(
+            "toolchain signals detected",
+            extra={"root": str(root), "toolchains": ", ".join(sorted(detected))},
+        )
+    return detected
 
 
 def consumer_inner(root: Path, unit: Unit) -> str | None:

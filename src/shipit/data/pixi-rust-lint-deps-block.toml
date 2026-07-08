@@ -1,0 +1,10 @@
+# The fleet-pinned rust lint toolchain (#547 Layer 1) — delivered because this
+# repo tracks a Cargo.toml, which is exactly what makes the rust leg of `shipit
+# lint` run (cargo clippy / cargo fmt per tracked manifest). conda-forge's
+# `rust` is the official toolchain (cargo + clippy + rustfmt included), so the
+# leg stops hard-failing (127) on hosts and CI runners without cargo (#526).
+# Same pin as shipit's own [feature.test.dependencies] rust. If this repo no
+# longer ships rust (the last Cargo.toml is gone), delete this block and its
+# `pixi.toml#shipit-rust-lint-toolchain` entry in .shipit.toml's [managed]
+# table — a reconcile only ADDS toolchain blocks, it never retires one.
+rust = "1.96.*"
