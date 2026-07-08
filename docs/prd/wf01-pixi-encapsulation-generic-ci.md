@@ -17,11 +17,13 @@
 >
 > **Reconciliation (TOL01, 2026-07):** the generic-CI half now executes under
 > `docs/prd/tol01-ci-tools.md`, with one supersession: "the consumer supplies
-> uniform-named pixi tasks" is replaced by tools-as-verbs (ADR-0039) — `test`,
-> `build`, `e2e` are shipit verbs walking the path→toolchain map; the pixi task
-> of the same name is a thin `= "shipit <tool>"` caller. Lanes, the lane
-> planner, actionlint, the act harness, and required-check-name stability carry
-> over unchanged.
+> uniform-named pixi tasks" is replaced by tools-as-verbs (ADR-0039) — `test`
+> and `build` are shipit verbs walking the path→toolchain map, `e2e` the
+> artifact-consuming verb; the pixi task of the same name is a thin
+> `= "shipit <tool>"` caller. Lanes, the lane planner, actionlint, the act
+> harness, and required-check-name stability carry over unchanged. The body
+> below predates TOL01 and is kept as the origin trail — read its
+> "consumer-supplied pixi task" phrasing through the tools-as-verbs model.
 
 ## Problem Statement
 

@@ -2,11 +2,13 @@
 
 The CI building blocks — `test`, `build`, `e2e`, and the `release` stages — follow
 the `shipit lint` model (ADR-0004) rather than WF01's "consumer supplies a `test`
-task" line: each is a shipit verb that walks the path→toolchain map (ADR-0007) and
-dispatches every entry to a producing command; the pixi task of the same name is a
-thin one-line caller (`test = "shipit test"`). Dispatch is a registry default per
-toolchain (rust → cargo-nextest, go → go test, python → pytest, …) with a per-path
-override in `.shipit.toml`. We chose the verb because it gives one implementation
+task" line: each is a shipit verb; the pixi task of the same name is a thin
+one-line caller (`test = "shipit test"`). The tree-input tools (`test`, `build`)
+walk the path→toolchain map (ADR-0007) and dispatch every entry to a producing
+command — a registry default per toolchain (rust → cargo-nextest, go → go test,
+python → pytest, …) with a per-path override in `.shipit.toml`. `e2e` and the
+release stages share the verb shape but take the artifact side as their axis:
+`e2e` consumes a built artifact, the release stages walk the artifact map. We chose the verb because it gives one implementation
 across laptop / hook / CI, multi-toolchain fan-out for free (a Tauri repo's
 `shipit test` runs the rust and npm legs — a bare task would make the consumer
 hand-chain them), uniform exit/reporting semantics, and it kills the silent
