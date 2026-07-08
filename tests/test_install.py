@@ -467,15 +467,27 @@ def test_detect_lefthook_conflicts_local_value_wins_in_the_merge():
 
 
 def test_detect_lefthook_conflicts_is_scoped_to_what_install_can_cause():
-    # A lefthook-local.yml arguing with ITSELF (both options true, managed
-    # side contributing neither) is the consumer's own file, outside the
-    # managed set's blast radius — lefthook reports it on their next hook run.
-    managed = "pre-commit:\n  commands:\n    lint:\n      run: x\n"
-    local = (
+    # A lefthook-local.yml arguing with ITSELF (both options true) is the
+    # consumer's own file, outside the managed set's blast radius — lefthook
+    # reports it on their next hook run. This holds regardless of what the
+    # managed side sets: a both-true local self-conflict is refused whatever
+    # the managed config does, so install neither causes it nor can fix it
+    # (#546 review). Managed-sets-neither AND managed-sets-one must both stay
+    # clean.
+    local_self_conflict = (
         "pre-commit:\n  piped: true\n  parallel: true\n"
         "  commands:\n    leg:\n      run: y\n"
     )
-    assert irec.detect_lefthook_conflicts(managed, local, "lefthook-local.yml") == ()
+    for managed in (
+        "pre-commit:\n  commands:\n    lint:\n      run: x\n",  # sets neither
+        OLD_PIPED_MANAGED,  # sets one (piped) — the managed contribution is moot
+    ):
+        assert (
+            irec.detect_lefthook_conflicts(
+                managed, local_self_conflict, "lefthook-local.yml"
+            )
+            == ()
+        )
 
 
 def test_detect_lefthook_conflicts_tolerates_unreadable_local_config():

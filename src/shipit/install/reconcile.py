@@ -336,11 +336,13 @@ def detect_lefthook_conflicts(
     Pure over the two texts: parse both YAML, and per managed hook compute the
     merged exclusive options the way lefthook layers them (the local value wins
     when set — so a local ``piped: false`` DEFUSES a managed ``piped: true``).
-    A hook conflicts when both exclusive options are true in the merge and the
-    managed side contributes at least one of them (see the section comment for
-    the scoping rationale). An unparseable or non-mapping YAML yields no
-    conflicts: that is a different failure class the consumer owns and lefthook
-    itself reports; this tripwire never turns it into an install refusal.
+    A hook conflicts when both exclusive options are true in the merge, the
+    managed side contributes at least one of them, and the local side is NOT
+    already a both-true self-conflict (which install neither causes nor can fix
+    — see the section comment for the scoping rationale). An unparseable or
+    non-mapping YAML yields no conflicts: that is a different failure class the
+    consumer owns and lefthook itself reports; this tripwire never turns it into
+    an install refusal.
     """
     try:
         managed = yaml.safe_load(managed_text)
@@ -353,6 +355,17 @@ def detect_lefthook_conflicts(
     for hook, managed_hook in managed.items():
         local_hook = local.get(hook)
         if not isinstance(managed_hook, dict) or not isinstance(local_hook, dict):
+            continue
+        local_set = tuple(
+            o for o in EXCLUSIVE_HOOK_OPTIONS if local_hook.get(o) is True
+        )
+        if len(local_set) == len(EXCLUSIVE_HOOK_OPTIONS):
+            # The consumer's own lefthook-local.yml already sets BOTH exclusive
+            # options true: the merged hook is refused whatever the managed side
+            # sets, so install neither causes it nor can fix it (removing a
+            # managed option leaves the local self-conflict intact). Outside the
+            # managed blast radius — lefthook reports it on the consumer's next
+            # hook run; the tripwire stays scoped to conflicts install creates.
             continue
         managed_set = tuple(
             o for o in EXCLUSIVE_HOOK_OPTIONS if managed_hook.get(o) is True
@@ -368,9 +381,7 @@ def detect_lefthook_conflicts(
                     hook=str(hook),
                     local_path=local_path,
                     managed_options=managed_set,
-                    local_options=tuple(
-                        o for o in EXCLUSIVE_HOOK_OPTIONS if local_hook.get(o) is True
-                    ),
+                    local_options=local_set,
                 )
             )
     return tuple(conflicts)
