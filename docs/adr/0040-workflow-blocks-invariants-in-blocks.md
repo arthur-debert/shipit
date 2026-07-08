@@ -9,7 +9,7 @@ so a standard consumer's caller is a single `uses:` line while odd repos compose
 stages directly, sanctioned. The decisive rule: the scar invariants live inside
 the blocks they protect, never in the chain. `wf-publish` takes upstream stage
 results as explicit inputs and enforces partial-release prevention (ADR-0009:
-publish only if build+package succeeded and sign succeeded-or-was-skipped);
+publish only if build+bundle succeeded and sign succeeded-or-was-skipped);
 `assert-bundle` (the right-binary integrity guard) runs at `wf-sign-mac`'s entry
 and on `wf-publish`'s unsigned path. We rejected leaving the `needs:` wiring to
 consumers — that puts copy-pasted, drift-prone logic in 19 repos, the exact thing

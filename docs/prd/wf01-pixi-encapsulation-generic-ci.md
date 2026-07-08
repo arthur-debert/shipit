@@ -12,7 +12,8 @@
 > env-scrub rules, the cache-dir knowledge, and the structured `list`/`info` reads
 > now live in `shipit.pixienv` — the one adapter in pixi's domain home. The
 > *generic-CI* half below (toolchain map, lanes, generic reusable workflow,
-> actionlint/act harness) is untouched and remains this epic's scope.
+> actionlint/act harness) was untouched by glassbox; see the next note for
+> where it executes now.
 >
 > **Reconciliation (TOL01, 2026-07):** the generic-CI half now executes under
 > `docs/prd/tol01-ci-tools.md`, with one supersession: "the consumer supplies
