@@ -266,9 +266,13 @@ def reject_lefthook_conflicts(plan: Plan, mode: str) -> None:
     commit in the consumer. Every committing mode refuses; ``MODE_TREE`` stays a
     warning (the plan's stderr lines) — a working-tree refresh publishes
     nothing, and the caller reviews ``git diff`` with the warning in hand. The
-    fix lives in the CONSUMER's local config, so this is a plain
-    :class:`InstallError`, never a :class:`SelfCertError` (whose diagnostic
-    points at shipit's managed set)."""
+    refusal can originate on EITHER side (see :func:`format_lefthook_conflict`):
+    usually the consumer's local config sets the option to drop, but when the
+    managed side alone sets both the remedy is regenerating the managed
+    ``lefthook.yml``. Either way the fix is a config edit the operator makes, so
+    this is a plain :class:`InstallError`, never a :class:`SelfCertError` (which
+    signals a self-certification postcondition failure of shipit's own staged
+    managed content)."""
     if plan.lefthook_conflicts and mode != MODE_TREE:
         raise InstallError(
             "lefthook config conflict — refusing to publish a managed config "
