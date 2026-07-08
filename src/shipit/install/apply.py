@@ -20,7 +20,7 @@ from pathlib import Path
 from .. import buildid, config, execrun, gh, git, pixienv
 from . import selfcert
 from .errors import InstallError, SelfCertError
-from .reconcile import Plan, consumer_inner
+from .reconcile import Plan, consumer_inner, format_lefthook_conflict
 from .splice import SETTINGS_MALFORMED, splice_block, splice_settings_hook
 from .units import (
     FMT_JSON_HOOK,
@@ -255,6 +255,34 @@ def _activate(
     return False, _activation_output(activation)
 
 
+def reject_lefthook_conflicts(plan: Plan, mode: str) -> None:
+    """Fail closed on a #544 lefthook merge conflict BEFORE any write or git
+    side effect — the single guard shared by :func:`apply` and the verb's
+    no-op shortcut (:mod:`shipit.verbs.install`), so a conflict-bearing but
+    otherwise-empty plan cannot slip past a committing mode's no-op return.
+
+    The managed ``lefthook.yml`` and the consumer's ``lefthook-local.yml`` merge
+    into a config lefthook refuses to run, so publishing it would brick every
+    commit in the consumer. Every committing mode refuses; ``MODE_TREE`` stays a
+    warning (the plan's stderr lines) — a working-tree refresh publishes
+    nothing, and the caller reviews ``git diff`` with the warning in hand. The
+    refusal can originate on EITHER side (see :func:`format_lefthook_conflict`):
+    usually the consumer's local config sets the option to drop, but when the
+    managed side alone sets both the remedy is regenerating the managed
+    ``lefthook.yml``. Either way the fix is a config edit the operator makes, so
+    this is a plain :class:`InstallError`, never a :class:`SelfCertError` (which
+    signals a self-certification postcondition failure of shipit's own staged
+    managed content)."""
+    if plan.lefthook_conflicts and mode != MODE_TREE:
+        raise InstallError(
+            "lefthook config conflict — refusing to publish a managed config "
+            "that cannot run:\n"
+            + "\n".join(
+                f"  {format_lefthook_conflict(c)}" for c in plan.lefthook_conflicts
+            )
+        )
+
+
 def apply(
     plan: Plan,
     mode: str = MODE_TREE,
@@ -296,7 +324,9 @@ def apply(
     never a blocker.
 
     Raises :class:`InstallError` on a domain refusal (``local``/``push`` in
-    detached HEAD, a failed self-certification) and lets a git/gh boundary
+    detached HEAD, a failed self-certification, a lefthook merge conflict with
+    the consumer's local config in any committing mode — #544) and lets a
+    git/gh boundary
     failure propagate as :class:`~shipit.execrun.ExecError` — both members of
     the CLI error shell's known set. Callers decide nothing here: a no-op plan
     should simply never be applied (:attr:`Plan.nothing_to_do`).
@@ -305,6 +335,7 @@ def apply(
         raise ValueError(f"unknown install mode: {mode!r}")
     if mode == MODE_PR and pr_body is None:
         raise ValueError("MODE_PR needs the pr_body renderer")
+    reject_lefthook_conflicts(plan, mode)
     activate = activate_hooks or _activate_hooks
     started = time.monotonic()
     root = Path(plan.root)

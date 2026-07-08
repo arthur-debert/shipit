@@ -41,6 +41,7 @@ from ..install.apply import (
     MODE_PUSH,
     MODE_TREE,
     InstallResult,
+    reject_lefthook_conflicts,
 )
 from ..install.apply import (
     apply as apply_plan,
@@ -52,6 +53,7 @@ from ..install.reconcile import (
     NOOP,
     UPDATE,
     Plan,
+    format_lefthook_conflict,
     gather,
     load_retired,
     reconcile,
@@ -155,6 +157,16 @@ def run(
         warnings = format_plan_warnings(plan)
         if warnings:
             print(warnings, file=sys.stderr)
+        if not dry_run:
+            # Fail closed on a #544 lefthook conflict BEFORE the no-op shortcut
+            # can swallow it: a committing-mode run whose ONLY finding is the
+            # conflict (managed set already current — the future-regression
+            # shape) has an empty write set, so `nothing_to_do` would otherwise
+            # exit 0 and never reach apply()'s guard. MODE_TREE is a no-op here
+            # (warn-only, like below); dry-run previews without side effects, so
+            # it stays on the early-return path and never refuses.
+            step = "apply"
+            reject_lefthook_conflicts(plan, mode)
         if plan.nothing_to_do or dry_run:
             # Dry-run has NO side effects (no writes, no deletes, no git, no PR);
             # a nothing-to-do plan is a clean no-op either way.
@@ -262,7 +274,10 @@ def format_plan(plan: Plan, *, dry_run: bool = False) -> str:
 
 
 def format_plan_warnings(plan: Plan) -> str:
-    """The Plan's stderr lines: the unreadable manifest, each kept retired file."""
+    """The Plan's stderr lines: the unreadable manifest, each kept retired
+    file, and each lefthook merge conflict (#544 — the committing modes also
+    fail closed on these in apply; the warning is the working-tree/dry-run
+    surface, worded off the same formatter so the two can never drift)."""
     lines = []
     if plan.manifest_error is not None:
         lines.append(f"install: ignoring unreadable manifest: {plan.manifest_error}")
@@ -272,6 +287,10 @@ def format_plan_warnings(plan: Plan) -> str:
             f"known pristine version, so it was NOT deleted — shipit no longer "
             f"distributes this file; remove it yourself once your local edits "
             f"are no longer needed"
+        )
+    for c in plan.lefthook_conflicts:
+        lines.append(
+            f"install: lefthook config conflict: {format_lefthook_conflict(c)}"
         )
     return "\n".join(lines)
 

@@ -13,8 +13,10 @@ pre-commit:
     # mirrors that already exist are regenerated (source-only .lex stay
     # un-mirrored). Runs through `pixi run -e lint` so lexd + the pinned
     # prettier are on PATH. `priority: 1` slots it ahead of the managed lint
-    # command (`priority: 2`) in the managed `piped: true` pre-commit chain, so
-    # the regen always lands BEFORE the lint check reads the tree.
+    # command (`priority: 2`) in lefthook's default sequential pre-commit run
+    # (priority-ordered; the managed caller sets no hook-level `piped`/
+    # `parallel` — #544), so the regen always lands BEFORE the lint check
+    # reads the tree.
     #
     # The staged set is read from `git diff --cached` (NOT lefthook's
     # {staged_files} or a `glob:`) so that: every `.lex` ANYWHERE in the tree is
