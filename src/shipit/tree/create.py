@@ -369,11 +369,14 @@ def node_install_argv(dest: Path) -> list[str]:
     1. the ``packageManager`` field in ``package.json`` (the corepack pin,
        ``<name>@<version>``) is AUTHORITATIVE when present — it is the repo's
        own declaration, the one corepack and CI already honour — and it wins
-       over any lockfile on disk;
+       over any lockfile on disk. The exact ``<name>@<version>`` shape is
+       enforced: a bare name with no pinned version is malformed for corepack
+       and raises rather than being read as a usable signal;
     2. otherwise the lockfile decides: exactly one of the
        :data:`NODE_LOCKFILES` names its manager;
-    3. anything else — an unrecognized ``packageManager``, an unparseable
-       ``package.json``, no recognized lockfile, or several — raises
+    3. anything else — an unrecognized or shapeless ``packageManager``, an
+       unparseable or non-object ``package.json``, no recognized lockfile, or
+       several — raises
        :class:`ValueError`, failing the materialization (rolled back like any
        provisioning failure). A repo that declares node deps but whose manager
        cannot be determined must never be half-provisioned: the cost downstream
@@ -402,7 +405,14 @@ def node_install_argv(dest: Path) -> list[str]:
         )
     pin = data.get("packageManager")
     if pin is not None:
-        name = str(pin).split("@", 1)[0]
+        name, sep, version = str(pin).partition("@")
+        if not sep or not version:
+            raise ValueError(
+                f"malformed packageManager {pin!r} in {manifest}: corepack pins an "
+                "exact <name>@<version>, so a bare name (no pinned version) is not a "
+                "usable signal — failing loud rather than guessing a frozen install "
+                "(#543)"
+            )
         if name == "yarn":
             return _yarn_install_argv(classic=_yarn_pin_is_classic(str(pin), manifest))
         if name not in NODE_INSTALL_ARGV:

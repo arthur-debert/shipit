@@ -836,6 +836,17 @@ def test_node_install_argv_fails_loud_on_ambiguous_lockfiles(tmp_path: Path):
         create_mod.node_install_argv(tmp_path)
 
 
+@pytest.mark.parametrize("pin", ["npm", "pnpm", "yarn", "npm@"])
+def test_node_install_argv_fails_loud_on_a_versionless_pin(tmp_path: Path, pin: str):
+    # A packageManager without an exact `<name>@<version>` is malformed for
+    # corepack: fail loud rather than read a bare name as a usable signal — the
+    # same fail-loud contract #543 applies to every undecidable input (#545).
+    (tmp_path / "package.json").write_text(f'{{"packageManager": "{pin}"}}\n')
+    (tmp_path / "package-lock.json").write_text("{}\n")
+    with pytest.raises(ValueError, match="malformed packageManager"):
+        create_mod.node_install_argv(tmp_path)
+
+
 def test_node_install_argv_fails_loud_on_an_unknown_manager(tmp_path: Path):
     # An unrecognized packageManager (e.g. bun) fails loud rather than falling
     # back to a lockfile that contradicts the repo's own declaration.
