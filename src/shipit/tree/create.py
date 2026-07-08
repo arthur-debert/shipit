@@ -19,7 +19,8 @@ summary (``{path, branch, base}``). The whole pipeline hides behind this one cal
 3. apply ``.treeinclude`` — copy the gitignored-but-needed files (``.env``,
    Doppler config, models) from the source checkout into the new Tree
    (:mod:`shipit.tree.include`).
-4. provision: the path's ``pixi install`` / ``npm ci`` + hook activation,
+4. provision: the path's ``pixi install`` / the package-manager-aware frozen
+   node install (:func:`node_install_argv`, #543) + hook activation,
    run with the parent's project-pointer env scrubbed (:func:`provision_env`) —
    NO managed-set mutation (ADR-0033: the TRE03-era ``shipit install --local``
    reconcile is deleted; the Shipit pin keeps Tree and tool coherent by
@@ -38,6 +39,7 @@ in ``layout`` / ``include``.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import secrets
@@ -65,12 +67,47 @@ logger = logging.getLogger("shipit.tree")
 #: fails closed (ADR-0033's one surviving guard). Given a pinned repo, the
 #: checkout's manifests drive the rest: a ``pixi.toml``
 #: (:data:`shipit.pixienv.MANIFEST_NAME`) gets ``pixi install`` through the pixi
-#: adapter, a ``package.json`` gets ``npm ci`` — each dep step gated on its file
+#: adapter, a ``package.json`` gets its package manager's frozen install
+#: (:func:`node_install_argv`, #543) — each dep step gated on its file
 #: existing, so a repo that uses only one toolchain runs only that step.
-NPM_MANIFEST = "package.json"
+NODE_MANIFEST = "package.json"
+
+#: Package manager → its FROZEN install argv: install exactly what the lockfile
+#: pins and rewrite nothing, matching what CI runs. Frozen is non-negotiable —
+#: a plain ``install`` could mutate the lockfile on the just-cut branch, and
+#: provisioning mutates nothing (ADR-0033 in spirit). ``npm ci`` and pnpm's
+#: ``--frozen-lockfile`` spell "frozen" identically across their whole version
+#: range; yarn does NOT — it renamed the flag across the v1→v2 line — so yarn is
+#: resolved by version (:func:`_yarn_install_argv`), not this table (#545).
+NODE_INSTALL_ARGV: dict[str, tuple[str, ...]] = {
+    "npm": ("npm", "ci"),
+    "pnpm": ("pnpm", "install", "--frozen-lockfile"),
+}
+
+#: The recognized node package managers: the version-stable table above plus yarn
+#: (whose frozen argv is version-dependent, so it carries no fixed entry). This is
+#: the membership a ``packageManager`` pin is validated against.
+NODE_MANAGERS: frozenset[str] = frozenset(NODE_INSTALL_ARGV) | {"yarn"}
+
+#: Yarn v1 ("classic") stamps a ``# yarn lockfile v1`` banner near the top of every
+#: ``yarn.lock``; Berry (v2+) writes a YAML ``__metadata:`` map with no such banner.
+#: The banner is the stable, documented way to tell a classic lockfile from a Berry
+#: one WITHOUT a ``packageManager`` pin — yarn renamed its frozen-install flag across
+#: that boundary (``--frozen-lockfile`` → ``--immutable``), so the leg must know which
+#: line it faces to pick the flag that will not hard-fail (#545).
+_YARN_V1_BANNER = "# yarn lockfile v1"
+
+#: Lockfile → the package manager that owns it — the fallback detection signal
+#: when ``package.json`` carries no ``packageManager`` pin (#543).
+NODE_LOCKFILES: dict[str, str] = {
+    "package-lock.json": "npm",
+    "pnpm-lock.yaml": "pnpm",
+    "yarn.lock": "yarn",
+}
 
 #: The per-step provisioning timeout, in seconds: 30 minutes. Provisioning is the
-#: known long-runner family (ADR-0028 names cold ``npm ci`` alongside the pixi
+#: known long-runner family (ADR-0028 names the cold frozen node install —
+#: ``npm ci`` and its pnpm/yarn equivalents — alongside the pixi
 #: install the pixi adapter now bounds itself — :data:`shipit.pixienv.INSTALL_TIMEOUT`),
 #: so the runner's 5-minute default would kill legitimate cold installs — but
 #: ``None`` (the pre-WS03 stopgap) let a hung step hang Tree creation forever.
@@ -242,7 +279,8 @@ def run_provision(cmd: list[str], *, cwd: Path, env: dict[str, str]) -> None:
     scrubbed ``PIXI_*`` vars cannot creep back in via a merge over ``os.environ``.
 
     Every step carries the explicit generous :data:`PROVISION_TIMEOUT` (ADR-0028
-    names cold ``npm ci`` as a legitimate long-runner the 5-minute default must
+    names the cold frozen node install — ``npm ci`` and its pnpm/yarn
+    equivalents — as a legitimate long-runner the 5-minute default must
     not kill; the bound replaces WS01's ``timeout=None`` stopgap so a wedged step
     still dies at a known point — the pixi step carries the pixi adapter's own
     bound instead). The runner gives every step a durable record — timing on
@@ -273,6 +311,136 @@ def _narrate_step(result: execrun.ExecResult) -> None:
     )
 
 
+def _yarn_install_argv(*, classic: bool) -> list[str]:
+    """Yarn's frozen install argv for the classic (v1) vs Berry (v2+) line (#545).
+
+    Yarn renamed the frozen-install flag across the v1→v2 boundary — classic
+    honours ``--frozen-lockfile``, Berry only ``--immutable`` — for the SAME
+    "install exactly the lockfile, rewrite nothing" intent. The two flags are not
+    interchangeable: passing Berry's ``--immutable`` to a v1 yarn (or vice versa)
+    HARD-FAILS on an unknown flag, so the leg selects on the detected major version
+    rather than assuming one line.
+    """
+    flag = "--frozen-lockfile" if classic else "--immutable"
+    return ["yarn", "install", flag]
+
+
+def _yarn_pin_is_classic(pin: str, manifest: Path) -> bool:
+    """Whether a ``yarn@<version>`` corepack pin names the classic (v1) line (#545).
+
+    ``packageManager`` is an exact ``<name>@<version>`` (corepack rejects a range),
+    so the major version is the leading integer of ``<version>`` and ``major <= 1``
+    is classic. A yarn pin whose version has no numeric major is malformed for
+    corepack — raise rather than guess a frozen flag.
+    """
+    _, _, version = pin.partition("@")
+    major = version.split(".", 1)[0]
+    try:
+        return int(major) <= 1
+    except ValueError as exc:
+        raise ValueError(
+            f"unparseable yarn version in packageManager {pin!r} in {manifest}: "
+            "corepack pins an exact <name>@<version>, so yarn's frozen-install flag "
+            "(--frozen-lockfile for v1, --immutable for v2+) cannot be chosen (#545)"
+        ) from exc
+
+
+def _yarn_lockfile_is_classic(lockfile: Path) -> bool:
+    """Whether a lone ``yarn.lock`` (no packageManager pin) is a v1 "classic" file.
+
+    Reads only the head — the :data:`_YARN_V1_BANNER` sits in the first two lines —
+    and looks for the banner. Its absence means a Berry (v2+) lockfile, whose frozen
+    flag is ``--immutable`` (#545).
+    """
+    with lockfile.open("r", encoding="utf-8", errors="replace") as fh:
+        head = fh.read(len(_YARN_V1_BANNER) + 256)
+    return _YARN_V1_BANNER in head
+
+
+def node_install_argv(dest: Path) -> list[str]:
+    """The frozen node-deps install argv for the checkout at ``dest`` (#543).
+
+    Tree provisioning used to hard-code ``npm ci``, which HARD-FAILS on a
+    pnpm/yarn repo (no ``package-lock.json``) — and because the svelte prettier
+    leg fails open when its plugins are unresolvable (#498/#542), the miss was
+    SILENT: dirty ``.svelte`` files passed without a verdict. So the manager is
+    detected, and an undecidable manifest fails LOUD:
+
+    1. the ``packageManager`` field in ``package.json`` (the corepack pin,
+       ``<name>@<version>``) is AUTHORITATIVE when present — it is the repo's
+       own declaration, the one corepack and CI already honour — and it wins
+       over any lockfile on disk. The exact ``<name>@<version>`` shape is
+       enforced: a bare name with no pinned version is malformed for corepack
+       and raises rather than being read as a usable signal;
+    2. otherwise the lockfile decides: exactly one of the
+       :data:`NODE_LOCKFILES` names its manager;
+    3. anything else — an unrecognized or shapeless ``packageManager``, an
+       unparseable or non-object ``package.json``, no recognized lockfile, or
+       several — raises
+       :class:`ValueError`, failing the materialization (rolled back like any
+       provisioning failure). A repo that declares node deps but whose manager
+       cannot be determined must never be half-provisioned: the cost downstream
+       is not an error but a silent fail-open.
+
+    Yarn is the one manager whose frozen argv is not fixed by name: v1 "classic"
+    and v2+ "Berry" spell the frozen flag differently (``--frozen-lockfile`` vs
+    ``--immutable``, #545), so the yarn major version — from the pin's
+    ``<version>``, or from the ``yarn.lock`` banner on the lockfile-only path —
+    picks the flag; a yarn pin with no numeric major raises like any other
+    undecidable signal.
+    """
+    manifest = dest / NODE_MANIFEST
+    try:
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+    except ValueError as exc:  # json.JSONDecodeError is a ValueError
+        raise ValueError(
+            f"unparseable {NODE_MANIFEST} in {dest}: {exc} — cannot determine "
+            "the package manager for the node-deps provisioning step (#543)"
+        ) from exc
+    if not isinstance(data, dict):
+        raise ValueError(
+            f"{NODE_MANIFEST} in {dest} is JSON but not an object "
+            f"({type(data).__name__}); a package.json is always an object, so no "
+            "package manager can be read — failing loud like an unparseable one (#543)"
+        )
+    pin = data.get("packageManager")
+    if pin is not None:
+        name, sep, version = str(pin).partition("@")
+        if not sep or not version:
+            raise ValueError(
+                f"malformed packageManager {pin!r} in {manifest}: corepack pins an "
+                "exact <name>@<version>, so a bare name (no pinned version) is not a "
+                "usable signal — failing loud rather than guessing a frozen install "
+                "(#543)"
+            )
+        if name == "yarn":
+            return _yarn_install_argv(classic=_yarn_pin_is_classic(str(pin), manifest))
+        if name not in NODE_INSTALL_ARGV:
+            raise ValueError(
+                f"unsupported packageManager {pin!r} in {manifest}: known "
+                f"managers are {sorted(NODE_MANAGERS)} (#543)"
+            )
+        return list(NODE_INSTALL_ARGV[name])
+    found = [lock for lock in NODE_LOCKFILES if (dest / lock).is_file()]
+    if len(found) == 1:
+        manager = NODE_LOCKFILES[found[0]]
+        if manager == "yarn":
+            return _yarn_install_argv(
+                classic=_yarn_lockfile_is_classic(dest / found[0])
+            )
+        return list(NODE_INSTALL_ARGV[manager])
+    detail = (
+        f"multiple lockfiles ({', '.join(found)})"
+        if found
+        else f"no recognized lockfile ({', '.join(NODE_LOCKFILES)})"
+    )
+    raise ValueError(
+        f"{dest} has a {NODE_MANIFEST} but no packageManager field and {detail}; "
+        "refusing to guess a frozen install — a wrong one hard-fails here or "
+        "leaves deps unprovisioned that downstream lint legs fail open on (#543)"
+    )
+
+
 def _provision(dest: Path, *, trees_root: Path) -> None:
     """Provision the freshly-checked-out Tree so a write-session starts ready.
 
@@ -290,7 +458,10 @@ def _provision(dest: Path, *, trees_root: Path) -> None:
     :func:`shipit.pixienv.install` — the pixi argv and its long-runner bound
     are pixi knowledge, PROC02-WS02) — followed, when the clone carries a
     ``lefthook.yml``, by hook activation (:func:`_activate_hooks`, #443: hooks
-    do not clone, so a Tree must arm its own) — / ``npm ci``, each gated on
+    do not clone, so a Tree must arm its own) — / the package-manager-aware
+    frozen node install (:func:`node_install_argv`, #543: ``npm ci`` on a pnpm
+    or yarn repo hard-fails, and the svelte prettier leg then fails open
+    silently), each gated on
     its manifest existing and each run with the scrubbed provisioning env
     (:func:`provision_env` — parent project pointers removed; the ADR-0015
     build env is no longer injected here, it comes from pixi
@@ -320,8 +491,8 @@ def _provision(dest: Path, *, trees_root: Path) -> None:
         _narrate_step(pixienv.install(dest, env=env))
         if (dest / LEFTHOOK_FILE).is_file():
             _activate_hooks(dest, env=env)
-    if (dest / NPM_MANIFEST).is_file():
-        run_provision(["npm", "ci"], cwd=dest, env=env)
+    if (dest / NODE_MANIFEST).is_file():
+        run_provision(node_install_argv(dest), cwd=dest, env=env)
 
 
 def _activate_hooks(dest: Path, *, env: dict[str, str]) -> None:

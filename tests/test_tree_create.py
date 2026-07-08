@@ -94,7 +94,7 @@ def _pixi_result() -> execrun.ExecResult:
 def _stub_provision(monkeypatch):
     """No-op the provisioning subprocess boundary.
 
-    ``create`` runs ``shipit install`` / ``npm ci`` through :func:`run_provision`
+    ``create`` runs the frozen node install (#543) through :func:`run_provision`
     and ``pixi install`` through the pixi adapter (:func:`shipit.pixienv.install`);
     clone-mechanics tests exercise the REAL git clone (from the onboarded ``remote``
     fixture, so provisioning is not fail-closed) but must never spawn those real
@@ -552,12 +552,15 @@ def _mock_git_boundary(monkeypatch, *, manifests: list[str]):
         for name in manifests:
             # A stub `.shipit.toml` carries the Shipit pin ([shipit].version) so
             # `_provision`'s fail-closed pin gate passes — that gate is
-            # `config.shipit_pin`, not mere file presence (ADR-0033).
-            content = (
-                f'[shipit]\nversion = "{_PIN}"\n'
-                if name == ".shipit.toml"
-                else "# stub\n"
-            )
+            # `config.shipit_pin`, not mere file presence (ADR-0033). JSON
+            # manifests must PARSE: the node-deps step reads package.json for
+            # the packageManager pin (#543).
+            if name == ".shipit.toml":
+                content = f'[shipit]\nversion = "{_PIN}"\n'
+            elif name.endswith(".json"):
+                content = "{}\n"
+            else:
+                content = "# stub\n"
             (d / name).write_text(content)
 
     monkeypatch.setattr(git, "clone_dissociated", fake_clone)
@@ -577,7 +580,11 @@ def test_create_copies_treeinclude_and_provisions_deps(tmp_path: Path, monkeypat
     (source / "models" / "saml.bin").write_text("BIN")
 
     _mock_git_boundary(
-        monkeypatch, manifests=[".shipit.toml", "pixi.toml", "package.json"]
+        monkeypatch,
+        # package-lock.json is the npm detection signal for the node-deps step
+        # (#543): a bare package.json with no packageManager pin and no
+        # recognized lockfile now fails loud instead of running `npm ci` blind.
+        manifests=[".shipit.toml", "pixi.toml", "package.json", "package-lock.json"],
     )
 
     calls: list[tuple[list[str], Path, dict[str, str]]] = []
@@ -727,6 +734,189 @@ def test_create_skips_provisioning_steps_whose_manifest_is_absent(
     assert calls == [["pixi", "install"]]
 
 
+# --------------------------------------------------------------------------
+# #543 — the node-deps step is package-manager-aware: `npm ci` hard-fails on a
+# pnpm/yarn repo, and the svelte prettier leg then fails open SILENTLY (#498/
+# #542 plugin-load carve-out), so detection must pick the matching frozen
+# install and fail LOUD when it cannot decide.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("pin", "argv"),
+    [
+        ("npm@11.4.2", ["npm", "ci"]),
+        ("pnpm@10.29.3", ["pnpm", "install", "--frozen-lockfile"]),
+        # Yarn's frozen flag is version-dependent (#545): Berry (v2+) takes
+        # `--immutable`, classic (v1) only `--frozen-lockfile` — a `yarn@1.x`
+        # corepack pin is a valid, common project and must not hard-fail.
+        ("yarn@4.9.1", ["yarn", "install", "--immutable"]),
+        ("yarn@1.22.22", ["yarn", "install", "--frozen-lockfile"]),
+    ],
+)
+def test_node_install_argv_honours_the_packagemanager_pin(
+    tmp_path: Path, pin: str, argv: list[str]
+):
+    # The corepack `packageManager` pin is the repo's own declaration — the
+    # AUTHORITATIVE signal, honoured for each supported manager.
+    (tmp_path / "package.json").write_text(f'{{"packageManager": "{pin}"}}\n')
+    assert create_mod.node_install_argv(tmp_path) == argv
+
+
+def test_node_install_argv_rejects_a_yarn_pin_with_no_numeric_major(tmp_path: Path):
+    # A yarn packageManager pin whose version has no numeric major is malformed
+    # for corepack: fail loud rather than guess a frozen flag (#545).
+    (tmp_path / "package.json").write_text('{"packageManager": "yarn@stable"}\n')
+    with pytest.raises(ValueError, match="unparseable yarn version"):
+        create_mod.node_install_argv(tmp_path)
+
+
+def test_node_install_argv_pin_wins_over_a_conflicting_lockfile(tmp_path: Path):
+    # Precedence: the packageManager pin beats whatever lockfile happens to be
+    # on disk — a stray package-lock.json in a pnpm repo must not resurrect the
+    # very `npm ci` that #543 exists to kill.
+    (tmp_path / "package.json").write_text('{"packageManager": "pnpm@10.29.3"}\n')
+    (tmp_path / "package-lock.json").write_text("{}\n")
+    assert create_mod.node_install_argv(tmp_path) == [
+        "pnpm",
+        "install",
+        "--frozen-lockfile",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("lockfile", "argv"),
+    [
+        ("package-lock.json", ["npm", "ci"]),
+        ("pnpm-lock.yaml", ["pnpm", "install", "--frozen-lockfile"]),
+        ("yarn.lock", ["yarn", "install", "--immutable"]),
+    ],
+)
+def test_node_install_argv_falls_back_to_the_lockfile(
+    tmp_path: Path, lockfile: str, argv: list[str]
+):
+    # No packageManager pin → the (single) lockfile names its manager. The
+    # bannerless yarn.lock stub reads as Berry (v2+) → `--immutable` (#545).
+    (tmp_path / "package.json").write_text("{}\n")
+    (tmp_path / lockfile).write_text("stub\n")
+    assert create_mod.node_install_argv(tmp_path) == argv
+
+
+def test_node_install_argv_reads_the_yarn_v1_banner_without_a_pin(tmp_path: Path):
+    # Lockfile-only yarn (no packageManager pin): the `# yarn lockfile v1` banner
+    # is what tells a classic lockfile (`--frozen-lockfile`) from a Berry one
+    # (`--immutable`) — a v1 repo without a pin is common and must not hard-fail
+    # by getting Berry's flag (#545).
+    (tmp_path / "package.json").write_text("{}\n")
+    (tmp_path / "yarn.lock").write_text(
+        "# THIS IS AN AUTOGENERATED FILE. DO NOT EDIT THIS FILE DIRECTLY.\n"
+        "# yarn lockfile v1\n\n"
+    )
+    assert create_mod.node_install_argv(tmp_path) == [
+        "yarn",
+        "install",
+        "--frozen-lockfile",
+    ]
+
+
+def test_node_install_argv_fails_loud_with_no_signal(tmp_path: Path):
+    # package.json with NO pin and NO recognized lockfile: refusing to guess is
+    # the point of #543 — a wrong install fails open downstream, silently.
+    (tmp_path / "package.json").write_text("{}\n")
+    with pytest.raises(ValueError, match="no recognized lockfile"):
+        create_mod.node_install_argv(tmp_path)
+
+
+def test_node_install_argv_fails_loud_on_ambiguous_lockfiles(tmp_path: Path):
+    # Two lockfiles and no pin is a misconfigured repo, not a coin toss.
+    (tmp_path / "package.json").write_text("{}\n")
+    (tmp_path / "package-lock.json").write_text("{}\n")
+    (tmp_path / "yarn.lock").write_text("stub\n")
+    with pytest.raises(ValueError, match="multiple lockfiles"):
+        create_mod.node_install_argv(tmp_path)
+
+
+@pytest.mark.parametrize("pin", ["npm", "pnpm", "yarn", "npm@"])
+def test_node_install_argv_fails_loud_on_a_versionless_pin(tmp_path: Path, pin: str):
+    # A packageManager without an exact `<name>@<version>` is malformed for
+    # corepack: fail loud rather than read a bare name as a usable signal — the
+    # same fail-loud contract #543 applies to every undecidable input (#545).
+    (tmp_path / "package.json").write_text(f'{{"packageManager": "{pin}"}}\n')
+    (tmp_path / "package-lock.json").write_text("{}\n")
+    with pytest.raises(ValueError, match="malformed packageManager"):
+        create_mod.node_install_argv(tmp_path)
+
+
+def test_node_install_argv_fails_loud_on_an_unknown_manager(tmp_path: Path):
+    # An unrecognized packageManager (e.g. bun) fails loud rather than falling
+    # back to a lockfile that contradicts the repo's own declaration.
+    (tmp_path / "package.json").write_text('{"packageManager": "bun@1.2.3"}\n')
+    with pytest.raises(ValueError, match="unsupported packageManager"):
+        create_mod.node_install_argv(tmp_path)
+
+
+def test_node_install_argv_fails_loud_on_unparseable_manifest(tmp_path: Path):
+    # A package.json that does not parse cannot name a manager: fail loud, do
+    # not skip the node-deps step (the silent-skip is the #543 fail-open).
+    (tmp_path / "package.json").write_text("# not json\n")
+    with pytest.raises(ValueError, match="unparseable package.json"):
+        create_mod.node_install_argv(tmp_path)
+
+
+def test_node_install_argv_fails_loud_on_a_non_object_manifest(tmp_path: Path):
+    # A package.json that parses but is not a JSON object is malformed — do not
+    # silently drop to the lockfile heuristic; fail loud like an unparseable one.
+    (tmp_path / "package.json").write_text("[1, 2, 3]\n")
+    (tmp_path / "package-lock.json").write_text("{}\n")
+    with pytest.raises(ValueError, match="not an object"):
+        create_mod.node_install_argv(tmp_path)
+
+
+def test_provision_runs_the_pnpm_frozen_install_on_a_pnpm_repo(
+    tmp_path: Path, monkeypatch
+):
+    # End to end through `_provision` (#543, the simple-gal-ui shape): a pinned
+    # pnpm repo (packageManager pin + pnpm-lock.yaml, no package-lock.json)
+    # provisions with `pnpm install --frozen-lockfile`, never `npm ci`.
+    dest = tmp_path / "tree"
+    dest.mkdir()
+    (dest / config.CONFIG_NAME).write_text(_PINNED_MANIFEST)
+    (dest / "package.json").write_text('{"packageManager": "pnpm@10.29.3"}\n')
+    (dest / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n")
+
+    calls: list[list[str]] = []
+    monkeypatch.setattr(create_mod, "run_provision", lambda cmd, **k: calls.append(cmd))
+    monkeypatch.setattr(create_mod, "_st_dev", lambda p: 1)
+
+    create_mod._provision(dest, trees_root=tmp_path / "trees")
+    assert calls == [["pnpm", "install", "--frozen-lockfile"]]
+
+
+def test_create_rolls_back_when_the_node_manager_is_undecidable(
+    tmp_path: Path, monkeypatch
+):
+    # The loud failure rides the atomicity contract: an undecidable node
+    # manifest aborts the materialization and the half-built leaf is removed —
+    # never a Tree whose node deps were silently skipped (#543).
+    source = tmp_path / "source"
+    source.mkdir()
+    _mock_git_boundary(monkeypatch, manifests=[".shipit.toml", "package.json"])
+    monkeypatch.setattr(create_mod, "_st_dev", lambda p: 1)
+
+    with pytest.raises(ValueError, match="no recognized lockfile"):
+        create(_spec(tmp_path), source_repo=str(source), github_url="url")
+    leaf = (
+        tmp_path
+        / "trees"
+        / "acme"
+        / "widget"
+        / "issues"
+        / "123"
+        / "work-smoke-abcd1234"
+    )
+    assert not leaf.exists()
+
+
 def test_provision_env_scrubs_leaked_parent_build_env(monkeypatch):
     # COR01: the ADR-0015 build env moved to pixi `[activation.env]`; shipit no longer
     # builds it in Python AND a leaked parent value is scrubbed so it cannot shadow the
@@ -840,6 +1030,7 @@ def test_provision_activates_hooks_when_the_clone_carries_lefthook(
     (dest / pixienv.MANIFEST_NAME).write_text("# stub\n")
     (dest / iunits.LEFTHOOK_FILE).write_text("# stub\n")
     (dest / "package.json").write_text("{}\n")
+    (dest / "package-lock.json").write_text("{}\n")  # the npm signal (#543)
 
     calls = _provision_stubs(monkeypatch)
     create_mod._provision(dest, trees_root=tmp_path / "trees")
