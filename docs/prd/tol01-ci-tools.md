@@ -83,7 +83,7 @@ applies to, and one rc has traversed the full pipeline on lex.
 36. As a maintainer of a multi-crate workspace, I want crates published in dependency order with already-published treated as success, so that resumption mid-workspace works.
 
 37. As a maintainer, I want my repo's CI to be a thin caller of shipit-published reusable workflows, so that upgrading CI is bumping one version.
-38. As a maintainer with a standard shape, I want one composed `wf-release` caller line; as one with an odd shape, I want to compose stage workflows directly — both sanctioned, so that composition is a spectrum, not a fork.
+38. As a maintainer with a standard shape, I want one composed `wf-release.yml` caller line; as one with an odd shape, I want to compose stage workflows directly — both sanctioned, so that composition is a spectrum, not a fork.
 39. As a shipit developer, I want the scar invariants inside the blocks they protect, so that no consumer wiring mistake can bypass them.
 40. As a maintainer, I want `shipit wf test` to run one workflow/job under act in a container with a crafted event payload, so that workflow changes are validated before any push.
 41. As a maintainer, I want the act harness to print exactly what act cannot verify (macOS/Windows runners, GPU, cross-workflow cascade, partial workflow_call, dispatch UX), so that local green is trusted only where valid.
