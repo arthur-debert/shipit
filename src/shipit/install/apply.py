@@ -255,6 +255,30 @@ def _activate(
     return False, _activation_output(activation)
 
 
+def reject_lefthook_conflicts(plan: Plan, mode: str) -> None:
+    """Fail closed on a #544 lefthook merge conflict BEFORE any write or git
+    side effect — the single guard shared by :func:`apply` and the verb's
+    no-op shortcut (:mod:`shipit.verbs.install`), so a conflict-bearing but
+    otherwise-empty plan cannot slip past a committing mode's no-op return.
+
+    The managed ``lefthook.yml`` and the consumer's ``lefthook-local.yml`` merge
+    into a config lefthook refuses to run, so publishing it would brick every
+    commit in the consumer. Every committing mode refuses; ``MODE_TREE`` stays a
+    warning (the plan's stderr lines) — a working-tree refresh publishes
+    nothing, and the caller reviews ``git diff`` with the warning in hand. The
+    fix lives in the CONSUMER's local config, so this is a plain
+    :class:`InstallError`, never a :class:`SelfCertError` (whose diagnostic
+    points at shipit's managed set)."""
+    if plan.lefthook_conflicts and mode != MODE_TREE:
+        raise InstallError(
+            "lefthook config conflict — refusing to publish a managed config "
+            "that cannot run:\n"
+            + "\n".join(
+                f"  {format_lefthook_conflict(c)}" for c in plan.lefthook_conflicts
+            )
+        )
+
+
 def apply(
     plan: Plan,
     mode: str = MODE_TREE,
@@ -307,22 +331,7 @@ def apply(
         raise ValueError(f"unknown install mode: {mode!r}")
     if mode == MODE_PR and pr_body is None:
         raise ValueError("MODE_PR needs the pr_body renderer")
-    if plan.lefthook_conflicts and mode != MODE_TREE:
-        # The #544 tripwire, fail-closed BEFORE any write or git side effect:
-        # the managed lefthook.yml and the consumer's lefthook-local.yml merge
-        # into a config lefthook refuses to run, so publishing it would brick
-        # every commit in the consumer. MODE_TREE stays a warning (the plan's
-        # stderr lines): a working-tree refresh publishes nothing, and the
-        # caller reviews `git diff` with the warning in hand. The fix lives in
-        # the CONSUMER's local config, so this is a plain InstallError, never a
-        # SelfCertError (whose diagnostic points at shipit's managed set).
-        raise InstallError(
-            "lefthook config conflict — refusing to publish a managed config "
-            "that cannot run:\n"
-            + "\n".join(
-                f"  {format_lefthook_conflict(c)}" for c in plan.lefthook_conflicts
-            )
-        )
+    reject_lefthook_conflicts(plan, mode)
     activate = activate_hooks or _activate_hooks
     started = time.monotonic()
     root = Path(plan.root)

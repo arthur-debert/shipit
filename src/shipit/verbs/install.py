@@ -41,6 +41,7 @@ from ..install.apply import (
     MODE_PUSH,
     MODE_TREE,
     InstallResult,
+    reject_lefthook_conflicts,
 )
 from ..install.apply import (
     apply as apply_plan,
@@ -156,6 +157,16 @@ def run(
         warnings = format_plan_warnings(plan)
         if warnings:
             print(warnings, file=sys.stderr)
+        if not dry_run:
+            # Fail closed on a #544 lefthook conflict BEFORE the no-op shortcut
+            # can swallow it: a committing-mode run whose ONLY finding is the
+            # conflict (managed set already current — the future-regression
+            # shape) has an empty write set, so `nothing_to_do` would otherwise
+            # exit 0 and never reach apply()'s guard. MODE_TREE is a no-op here
+            # (warn-only, like below); dry-run previews without side effects, so
+            # it stays on the early-return path and never refuses.
+            step = "apply"
+            reject_lefthook_conflicts(plan, mode)
         if plan.nothing_to_do or dry_run:
             # Dry-run has NO side effects (no writes, no deletes, no git, no PR);
             # a nothing-to-do plan is a clean no-op either way.

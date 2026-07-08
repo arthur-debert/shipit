@@ -583,6 +583,41 @@ def test_lefthook_conflict_warns_in_tree_mode_and_fails_committing_modes_closed(
     assert (tmp_path / "lefthook.yml").is_file()
 
 
+def test_conflict_bearing_noop_plan_still_fails_committing_modes(tmp_path, monkeypatch):
+    # codex #546-review regression: a committing-mode run whose ONLY finding is
+    # a lefthook conflict (managed set already current — nothing to write) must
+    # not slip past on the no-op shortcut. `nothing_to_do` returns before
+    # apply(), so without the verb's pre-shortcut guard the run would print the
+    # warning and exit 0, bypassing the fail-closed refusal. Craft exactly that
+    # plan (empty work axes + a conflict) and drive the verb end to end.
+    conflict = irec.detect_lefthook_conflicts(
+        OLD_PIPED_MANAGED, PARALLEL_LOCAL, "lefthook-local.yml"
+    )[0]
+    noop_conflict = dc_replace(
+        _plan(tmp_path),
+        decisions=(),
+        retired=(),
+        seeds=(),
+        current_pin=None,
+        target_pin=None,
+        lefthook_conflicts=(conflict,),
+    )
+    assert noop_conflict.nothing_to_do  # the exact bypass shape
+    monkeypatch.setattr(verb, "reconcile", lambda *a, **k: noop_conflict)
+
+    # Every committing mode refuses (cli_errors maps InstallError -> exit 1);
+    # nothing is published despite the plan being otherwise a no-op.
+    assert verb.run(str(tmp_path), local=True) == 1
+    assert verb.run(str(tmp_path), push=True) == 1
+    assert verb.run(str(tmp_path), pr=True) == 1
+    assert not (tmp_path / "lefthook.yml").exists()
+    assert not (tmp_path / ".shipit.toml").exists()
+
+    # Dry-run and the working-tree refresh stay warn-only no-ops (exit 0).
+    assert verb.run(str(tmp_path), local=True, dry_run=True) == 0
+    assert verb.run(str(tmp_path)) == 0
+
+
 # --------------------------------------------------------------------------
 # The ADP00-WS10 lint tool configs (#436) — the managed set delivers the
 # configs its own gate needs (markdownlint/yamllint auto-discover them from
