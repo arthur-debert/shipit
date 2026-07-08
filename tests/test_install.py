@@ -488,6 +488,48 @@ def test_detect_lefthook_conflicts_tolerates_unreadable_local_config():
         )
 
 
+def test_format_lefthook_conflict_when_managed_side_sets_both(tmp_path):
+    # The agy #544-review edge case: a FUTURE managed edit sets BOTH exclusive
+    # options and the consumer's local config merely DEFINES the hook (setting
+    # neither), so `local_options` is empty — the conflict is entirely
+    # managed-side. The message must not tell the consumer to remove an option
+    # they never set; it points at regenerating the managed config instead.
+    managed_both = (
+        "pre-commit:\n  piped: true\n  parallel: true\n"
+        "  commands:\n    lint:\n      run: x\n"
+    )
+    local_defines_hook = "pre-commit:\n  commands:\n    leg:\n      run: y\n"
+    conflicts = irec.detect_lefthook_conflicts(
+        managed_both, local_defines_hook, "lefthook-local.yml"
+    )
+    assert len(conflicts) == 1 and conflicts[0].local_options == ()
+    message = irec.format_lefthook_conflict(conflicts[0])
+    assert "'piped: true'" in message and "'parallel: true'" in message
+    assert "managed-config defect" in message and "shipit install" in message
+    # Never advise removing an option the consumer's file does not set.
+    assert "Remove the option from" not in message
+
+
+def test_read_lefthook_local_fails_open_on_oserror(tmp_path, monkeypatch):
+    # A permission denial / mid-read unlink on the consumer-owned config must
+    # degrade to None/None (the best-effort tripwire), never crash install —
+    # matching the unreadable-manifest path (#544 review). gather() must return
+    # a clean state, and the working-tree refresh downstream must not abort.
+    (tmp_path / "lefthook-local.yml").write_text(PARALLEL_LOCAL)
+    real_read_text = Path.read_text
+
+    def boom(self, *args, **kwargs):
+        if self.name in irec.LEFTHOOK_LOCAL_FILES:
+            raise PermissionError("permission denied")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", boom)
+    assert irec._read_lefthook_local(tmp_path) == (None, None)
+    state = irec.gather(tmp_path, iunits.load_units(), [])  # must not raise
+    assert state.lefthook_local is None and state.lefthook_local_path is None
+    assert _plan(tmp_path).lefthook_conflicts == ()  # whole pipeline stays clean
+
+
 def test_gather_reads_the_consumer_lefthook_local_config(tmp_path):
     units = iunits.load_units()
     state = irec.gather(tmp_path, units, [])
