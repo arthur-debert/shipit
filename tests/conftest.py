@@ -98,9 +98,24 @@ def managed_cc_hook_command(phase: str) -> str:
       exit code propagates unchanged: fail-open is for a runtime that is genuinely
       absent, never for a hook that ran and errored. Legitimate for these four —
       they are additive (advisory/bookkeeping), never the security guard.
+
+    The ``sessionstart`` variant alone carries a THIRD property (#547 Layer 0):
+    before the launcher guard it runs the managed ``./bin/setup-dev-env.sh``
+    (guarded on existence+executability, ``|| warn`` — the script itself is
+    fail-open too), so the base system (pixi + uv at their pins, the pixi env
+    solves) is provisioned before anything in the session needs it. The
+    ``shipit hook sessionstart`` marker substring is unchanged, so the JSON-hook
+    reconcile identity keeps recognising the managed entry across the change.
     """
+    setup_leg = ""
+    if phase == "sessionstart":
+        setup_leg = (
+            "if [ -x ./bin/setup-dev-env.sh ]; then ./bin/setup-dev-env.sh || echo "
+            '"shipit: setup-dev-env.sh reported a problem — continuing '
+            '(base-system provisioning is best-effort)." >&2; fi; '
+        )
     return (
-        'cd "$CLAUDE_PROJECT_DIR" || exit 0; test -x ./bin/shipit || { echo '
+        f'cd "$CLAUDE_PROJECT_DIR" || exit 0; {setup_leg}test -x ./bin/shipit || {{ echo '
         '"shipit: bin/shipit launcher not present or executable here — skipping '
         "this managed hook (run 'shipit install' to (re)provision it).\"; exit 0; "
         f"}}; ./bin/shipit hook {phase}"

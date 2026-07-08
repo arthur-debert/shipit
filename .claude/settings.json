@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "pixi run -e lint install-hooks"
+            "command": "cd \"$CLAUDE_PROJECT_DIR\" || exit 0; if [ -x ./bin/setup-dev-env.sh ]; then ./bin/setup-dev-env.sh || echo \"shipit: setup-dev-env.sh reported a problem — continuing (base-system provisioning is best-effort).\" >&2; fi; test -x ./bin/shipit || { echo \"shipit: bin/shipit launcher not present or executable here — skipping this managed hook (run 'shipit install' to (re)provision it).\"; exit 0; }; ./bin/shipit hook sessionstart"
           }
         ]
       },
@@ -13,7 +13,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cd \"$CLAUDE_PROJECT_DIR\" || exit 0; test -x ./bin/shipit || { echo \"shipit: bin/shipit launcher not present or executable here — skipping this managed hook (run 'shipit install' to (re)provision it).\"; exit 0; }; ./bin/shipit hook sessionstart"
+            "command": "cd \"$CLAUDE_PROJECT_DIR\" || exit 0; command -v pixi >/dev/null 2>&1 || { echo \"shipit: pixi not on PATH — skipping install-hooks (repo-local best-effort; the Layer 0 bootstrap normally provisions pixi first).\"; exit 0; }; pixi run -e lint install-hooks"
           }
         ]
       }

@@ -1,0 +1,10 @@
+# The fleet-pinned node runtime (#547 Layer 1) — delivered because this repo
+# tracks a package.json. Unlike the rust/go blocks this is NOT a linter
+# toolchain: it provisions the repo's OWN node/pnpm runtime (npm rides the
+# nodejs package), which is why it lives in the DEFAULT env's [dependencies]
+# rather than the lint feature. If this repo no longer ships node (the last
+# package.json is gone), delete this block and its `pixi.toml#shipit-node-deps`
+# entry in .shipit.toml's [managed] table — a reconcile only ADDS toolchain
+# blocks, it never retires one.
+nodejs = "26.*"
+pnpm = "11.*"

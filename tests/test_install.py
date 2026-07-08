@@ -1274,6 +1274,344 @@ def test_managed_pretooluse_hook_restores_pixi_run_and_fails_closed(tmp_path, re
     assert iunits.SETTINGS_HOOK_MARKER in command
 
 
+# --------------------------------------------------------------------------
+# The #547 self-provisioning set — Layer 0 (bin/setup-dev-env.sh + the
+# SessionStart wire-in) and Layer 1 (conditional per-toolchain dep blocks)
+# --------------------------------------------------------------------------
+
+
+def test_load_units_includes_the_setup_dev_env_bootstrap():
+    units = {u.key: u for u in iunits.load_units()}
+    assert iunits.SETUP_DEV_ENV_FILE in units
+    unit = units[iunits.SETUP_DEV_ENV_FILE]
+    assert unit.kind == "file"
+    assert unit.dest == "bin/setup-dev-env.sh"
+    assert unit.executable is True
+    text = unit.content.decode("utf-8")
+    # Reconcile-to-pin from GitHub release assets — the one fetch path on the
+    # cloud sandbox's default egress allowlist — never a `curl | sh` vendor
+    # installer (the decision boundary #547 settles).
+    assert 'PIXI_PIN="' in text and 'UV_PIN="' in text
+    assert "github.com/prefix-dev/pixi/releases/download" in text
+    assert "github.com/astral-sh/uv/releases/download" in text
+    assert "pixi.sh/install" not in text
+    assert "astral.sh/uv/install" not in text
+    # Provisioning never mutates pixi.lock: the env solve is `--locked` only.
+    assert "pixi install --locked" in text
+
+
+def test_setup_dev_env_matches_shipits_own_copy():
+    # The bootstrap dogfood guarantee (the bin/shipit pattern): shipit-self
+    # commits a byte-identical copy at the managed path, so its own Tree
+    # provisioning reconciles the unit to NOOP instead of splicing drift.
+    unit = next(u for u in iunits.load_units() if u.key == iunits.SETUP_DEV_ENV_FILE)
+    own = Path(__file__).resolve().parents[1] / "bin" / "setup-dev-env.sh"
+    assert own.read_bytes() == unit.content
+    assert os.access(own, os.X_OK)
+
+
+def test_setup_dev_env_pixi_pin_agrees_with_ci():
+    # PIXI_PIN and CI's setup-pixi `pixi-version` must move in lockstep — the
+    # bootstrap and CI provisioning the same pixi is the point of the pin.
+    script = iunits.data_bytes("bootstrap", "setup-dev-env.sh").decode("utf-8")
+    pin = next(
+        line.split('"')[1]
+        for line in script.splitlines()
+        if line.startswith("PIXI_PIN=")
+    )
+    ci = (
+        Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml"
+    ).read_text(encoding="utf-8")
+    ci_pin = next(
+        line.split(":", 1)[1].strip().removeprefix("v")
+        for line in ci.splitlines()
+        if line.strip().startswith("pixi-version:")
+    )
+    assert pin == ci_pin
+
+
+def test_managed_sessionstart_hook_runs_setup_dev_env_first():
+    # #547 Layer 0 wire-in: the managed SessionStart command runs the guarded
+    # setup-dev-env leg BEFORE the launcher guard + `shipit hook sessionstart`,
+    # and keeps the marker substring so the JSON-hook reconcile identity is
+    # unchanged (the equality-with-fixture check rides the loop test above).
+    units = {u.key: u for u in iunits.load_units()}
+    command = json.loads(units[iunits.SETTINGS_SESSIONSTART_KEY].desired_inner())[
+        "hooks"
+    ][0]["command"]
+    assert "./bin/setup-dev-env.sh" in command
+    assert command.index("./bin/setup-dev-env.sh") < command.index(
+        "test -x ./bin/shipit"
+    )
+    # Guarded on existence+executability and fail-open (`|| echo … >&2`), so a
+    # consumer without the script (or a failing bootstrap) never loses the hook.
+    assert "if [ -x ./bin/setup-dev-env.sh ]; then" in command
+    assert iunits.SETTINGS_SESSIONSTART_MARKER in command
+
+
+def test_load_units_toolchain_blocks_are_conditional():
+    # The zero-arg catalog is byte-identical to the pre-#547 one: no toolchain
+    # key sneaks in without its signal, and each signal adds EXACTLY its block.
+    toolchain_keys = {key for key, *_ in iunits.TOOLCHAIN_UNITS}
+    base = {u.key for u in iunits.load_units()}
+    assert not (base & toolchain_keys)
+
+    for key, signal, *_ in iunits.TOOLCHAIN_UNITS:
+        keys = {u.key for u in iunits.load_units(toolchains=frozenset({signal}))}
+        assert keys - base == {key}, signal
+
+    all_keys = {
+        u.key
+        for u in iunits.load_units(
+            toolchains=frozenset(
+                {iunits.TOOLCHAIN_RUST, iunits.TOOLCHAIN_GO, iunits.TOOLCHAIN_NODE}
+            )
+        )
+    }
+    assert all_keys - base == toolchain_keys
+
+
+def test_toolchain_block_units_have_the_right_shape():
+    units = {
+        u.key: u
+        for u in iunits.load_units(
+            toolchains=frozenset(
+                {iunits.TOOLCHAIN_RUST, iunits.TOOLCHAIN_GO, iunits.TOOLCHAIN_NODE}
+            )
+        )
+    }
+
+    rust = units[iunits.PIXI_RUST_DEPS_KEY]
+    assert rust.dest == "pixi.toml"
+    # rust/go provision LINT toolchains, so they anchor in the lint feature —
+    # sibling blocks of the managed lint-deps block under ONE table header.
+    assert rust.anchor == iunits.PIXI_LINT_DEPS_ANCHOR
+    assert tomllib.loads(rust.desired_inner()) == {"rust": "1.96.*"}
+
+    go = units[iunits.PIXI_GO_DEPS_KEY]
+    assert go.anchor == iunits.PIXI_LINT_DEPS_ANCHOR
+    assert tomllib.loads(go.desired_inner()) == {"go": "1.26.*", "golangci-lint": "2.*"}
+
+    # node provisions the repo's OWN runtime, not a linter → the default env.
+    node = units[iunits.PIXI_NODE_DEPS_KEY]
+    assert node.anchor == "[dependencies]"
+    assert tomllib.loads(node.desired_inner()) == {"nodejs": "26.*", "pnpm": "11.*"}
+
+    # Sibling blocks in one consumer file: fences pairwise distinct, or
+    # extract/splice would bleed across regions (the lint-env blocks' rule).
+    fences = {
+        units[k].open_marker
+        for k in (
+            iunits.PIXI_LINT_DEPS_KEY,
+            iunits.PIXI_RUST_DEPS_KEY,
+            iunits.PIXI_GO_DEPS_KEY,
+            iunits.PIXI_NODE_DEPS_KEY,
+        )
+    }
+    assert len(fences) == 4
+
+
+def test_packaged_rust_pin_agrees_with_shipits_own_test_toolchain():
+    # The dogfood-adjacent drift check: the rust the fleet's lint legs get is
+    # the rust shipit's own invariance gate runs (pixi.toml [feature.test]).
+    own = tomllib.loads(
+        (Path(__file__).resolve().parents[1] / "pixi.toml").read_text(encoding="utf-8")
+    )
+    block = tomllib.loads(
+        iunits.data_bytes("pixi-rust-lint-deps-block.toml").decode("utf-8")
+    )
+    assert block["rust"] == own["feature"]["test"]["dependencies"]["rust"]
+
+
+def test_rust_block_coexists_with_lint_deps_block_under_one_anchor():
+    # Round-trip: both blocks spliced under the SAME [feature.lint.dependencies]
+    # header must extract back byte-identically — sibling regions, no bleed.
+    units = {
+        u.key: u
+        for u in iunits.load_units(toolchains=frozenset({iunits.TOOLCHAIN_RUST}))
+    }
+    deps = units[iunits.PIXI_LINT_DEPS_KEY]
+    rust = units[iunits.PIXI_RUST_DEPS_KEY]
+
+    text = '[workspace]\nname = "acme"\n'
+    text = splice.splice_block(
+        text, deps.desired_inner(), deps.open_marker, deps.close_marker, deps.anchor
+    )
+    text = splice.splice_block(
+        text, rust.desired_inner(), rust.open_marker, rust.close_marker, rust.anchor
+    )
+
+    assert (
+        splice.extract_block(text, deps.open_marker, deps.close_marker)
+        == deps.desired_inner()
+    )
+    assert (
+        splice.extract_block(text, rust.open_marker, rust.close_marker)
+        == rust.desired_inner()
+    )
+    # One header, both blocks inside its table, and the merged table parses to
+    # the union of the two dependency sets.
+    assert text.count("[feature.lint.dependencies]") == 1
+    parsed = tomllib.loads(text)
+    merged = parsed["feature"]["lint"]["dependencies"]
+    assert merged["rust"] == "1.96.*"
+    assert merged["ruff"] == tomllib.loads(deps.desired_inner())["ruff"]
+
+
+def _git_repo(tmp_path: Path) -> Path:
+    root = tmp_path / "repo"
+    root.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    return root
+
+
+def test_detect_toolchains_reads_tracked_manifests(tmp_path):
+    # Depth-agnostic: git's default pathspec `*` crosses `/` (fnmatch without
+    # FNM_PATHNAME; only `:(glob)` magic changes that), so `*/Cargo.toml`
+    # matches a manifest at ANY depth — the workspace-member layout included.
+    root = _git_repo(tmp_path)
+    (root / "crates" / "core" / "deep").mkdir(parents=True)
+    (root / "crates" / "core" / "deep" / "Cargo.toml").write_text("[package]\n")
+    (root / "web").mkdir()
+    (root / "web" / "package.json").write_text("{}\n")
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+    assert irec.detect_toolchains(root) == frozenset(
+        {iunits.TOOLCHAIN_RUST, iunits.TOOLCHAIN_NODE}
+    )
+
+
+def test_detect_toolchains_ignores_untracked_manifests(tmp_path):
+    # Tracked-only, like the lint scope: an untracked (vendored/ignored)
+    # manifest can never summon a toolchain block.
+    root = _git_repo(tmp_path)
+    (root / "go.mod").write_text("module acme\n")
+    assert irec.detect_toolchains(root) == frozenset()
+
+
+def test_detect_toolchains_falls_back_to_root_manifests_off_git(tmp_path):
+    # A non-git root degrades to root-LEVEL existence checks (no walk).
+    (tmp_path / "package.json").write_text("{}\n")
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "Cargo.toml").write_text("[package]\n")
+    assert irec.detect_toolchains(tmp_path) == frozenset({iunits.TOOLCHAIN_NODE})
+
+
+def test_detect_toolchains_clean_root_is_empty(tmp_path):
+    assert irec.detect_toolchains(tmp_path) == frozenset()
+
+
+def _plan_with_toolchains(root, toolchains: frozenset) -> irec.Plan:
+    """gather → reconcile over the toolchain-conditional catalog (#547)."""
+    units = iunits.load_units(toolchains=toolchains)
+    retired = irec.load_retired()
+    state = irec.gather(Path(root), units, retired)
+    return irec.reconcile(units, retired, state)
+
+
+_CONSUMER_PIXI_WITH_NODE = """\
+[workspace]
+channels = ["conda-forge"]
+name = "acme"
+platforms = ["linux-64"]
+
+[dependencies]
+nodejs = "22.*"
+"""
+
+
+def test_node_block_is_skipped_when_the_consumer_already_pins_its_keys(tmp_path):
+    # The duplicate-key guard (#547 round 1): a consumer whose [dependencies]
+    # already pins nodejs must NOT get the node block spliced in — a duplicate
+    # TOML key would make pixi.toml unparseable, blocking installs and every
+    # hooked commit. The consumer's own pin stays authoritative.
+    (tmp_path / "pixi.toml").write_text(_CONSUMER_PIXI_WITH_NODE)
+    plan = _plan_with_toolchains(tmp_path, frozenset({iunits.TOOLCHAIN_NODE}))
+
+    assert plan.pixi_key_conflicts == (
+        irec.PixiKeyConflict(
+            unit_key=iunits.PIXI_NODE_DEPS_KEY,
+            anchor=iunits.PIXI_NODE_DEPS_ANCHOR,
+            keys=("nodejs",),
+        ),
+    )
+    # The conflicted block never reaches the plan; the rest of the set does.
+    keys = {d.unit.key for d in plan.decisions}
+    assert iunits.PIXI_NODE_DEPS_KEY not in keys
+    assert iunits.PIXI_LINT_DEPS_KEY in keys
+    # Warn-only, and worded off the one formatter (never a broken write).
+    warnings = verb.format_plan_warnings(plan)
+    assert "pixi block skipped" in warnings
+    assert "nodejs" in warnings
+
+
+def test_skipping_a_key_conflicted_block_keeps_pixi_toml_parseable(tmp_path, rec):
+    # End to end: apply on a conflicted consumer leaves a pixi.toml pixi can
+    # still parse, the consumer's pin intact, and no [managed] entry for the
+    # skipped block (nothing was delivered, so nothing is tracked).
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    (tmp_path / "pixi.toml").write_text(_CONSUMER_PIXI_WITH_NODE)
+    plan = _plan_with_toolchains(tmp_path, frozenset({iunits.TOOLCHAIN_NODE}))
+    iapply.apply(plan, iapply.MODE_TREE)
+
+    manifest = tomllib.loads((tmp_path / "pixi.toml").read_text(encoding="utf-8"))
+    assert manifest["dependencies"]["nodejs"] == "22.*"
+    assert iunits.PIXI_NODE_DEPS_OPEN not in (tmp_path / "pixi.toml").read_text()
+    managed = config.load_managed(config.load(tmp_path / ".shipit.toml"))
+    assert iunits.PIXI_NODE_DEPS_KEY not in managed
+    assert iunits.PIXI_LINT_DEPS_KEY in managed
+
+
+def test_node_block_delivers_when_the_consumer_has_no_clashing_key(tmp_path):
+    # Contrast: a [dependencies] table WITHOUT the block's keys is no conflict.
+    (tmp_path / "pixi.toml").write_text(
+        _CONSUMER_PIXI_WITH_NODE.replace("nodejs", "cmake")
+    )
+    plan = _plan_with_toolchains(tmp_path, frozenset({iunits.TOOLCHAIN_NODE}))
+    assert plan.pixi_key_conflicts == ()
+    node = next(d for d in plan.decisions if d.unit.key == iunits.PIXI_NODE_DEPS_KEY)
+    assert node.action == irec.ADD
+
+
+def test_a_spliced_block_is_not_a_key_conflict(tmp_path, rec):
+    # Once the block's markers are in, its own keys live in the anchor table —
+    # a re-reconcile must read that as NOOP, never as a conflict with itself.
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    toolchains = frozenset({iunits.TOOLCHAIN_NODE})
+    plan = _plan_with_toolchains(tmp_path, toolchains)
+    iapply.apply(plan, iapply.MODE_TREE)
+
+    again = _plan_with_toolchains(tmp_path, toolchains)
+    assert again.pixi_key_conflicts == ()
+    node = next(d for d in again.decisions if d.unit.key == iunits.PIXI_NODE_DEPS_KEY)
+    assert node.action == irec.NOOP
+
+
+def test_key_conflict_guard_fails_open_on_an_unparseable_pixi_toml(tmp_path):
+    # Best-effort, like the lefthook-local read: a consumer who already broke
+    # their own TOML hears it from pixi, not from a guard that only inspects.
+    (tmp_path / "pixi.toml").write_text("[[[ not toml\n")
+    units = iunits.load_units(toolchains=frozenset({iunits.TOOLCHAIN_NODE}))
+    state = irec.gather(Path(tmp_path), units, irec.load_retired())
+    assert state.pixi_key_conflicts == ()
+
+
+def test_key_conflict_guard_covers_the_nested_lint_feature_anchor(tmp_path):
+    # The guard is generic over anchors: a consumer pinning `rust` in the
+    # nested [feature.lint.dependencies] table conflicts with the rust block.
+    (tmp_path / "pixi.toml").write_text(
+        '[workspace]\nchannels = ["conda-forge"]\nname = "acme"\n'
+        'platforms = ["linux-64"]\n\n[feature.lint.dependencies]\nrust = "1.90.*"\n'
+    )
+    plan = _plan_with_toolchains(tmp_path, frozenset({iunits.TOOLCHAIN_RUST}))
+    assert plan.pixi_key_conflicts == (
+        irec.PixiKeyConflict(
+            unit_key=iunits.PIXI_RUST_DEPS_KEY,
+            anchor=iunits.PIXI_LINT_DEPS_ANCHOR,
+            keys=("rust",),
+        ),
+    )
+
+
 def test_fresh_install_lays_down_the_session_bootstrap_set_idempotently(tmp_path, rec):
     (tmp_path / "AGENTS.md").write_text("# Acme\n")
     result = _apply(tmp_path)

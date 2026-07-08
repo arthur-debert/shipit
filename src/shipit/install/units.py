@@ -91,6 +91,68 @@ PIXI_ENVS_OPEN = "# >>> shipit-managed environments (do not edit; regenerate via
 PIXI_ENVS_CLOSE = "# <<< shipit-managed environments <<<"
 PIXI_ENVS_ANCHOR = "[environments]"
 
+# The CONDITIONAL per-toolchain dep blocks (#547 Layer 1): a consumer whose
+# tracked manifests signal a toolchain (a `Cargo.toml` anywhere → rust, `go.mod`
+# → go, `package.json` → node — the same per-manifest discovery that makes the
+# corresponding `shipit lint` leg run, see verbs/lint.py) gets that toolchain
+# pinned through pixi/conda-forge, so the lint legs stop hard-failing (127)
+# wherever the host happens to lack cargo/go/node — the #526 "clippy is
+# local-only" CI gap. rust and go anchor under the lint feature (they provision
+# LINTER toolchains, siblings of the managed lint-deps block above); node
+# anchors under `[dependencies]` — it provisions the repo's OWN node/pnpm
+# runtime, not a linter. Delivered only when :func:`load_units` is passed the
+# toolchain signal (`toolchains=`), so the zero-arg catalog is byte-identical
+# to the pre-#547 one. A consumer who ALREADY pins one of a block's keys in its
+# anchor table keeps their pin: the first splice would duplicate the TOML key
+# and break pixi.toml, so the reconcile skips delivering that block with a loud
+# warning instead (:class:`shipit.install.reconcile.PixiKeyConflict`). Accepted
+# residue: a consumer that later DELETES its last signal manifest keeps the
+# spliced block + `[managed]` hash until manually removed (block-retirement
+# machinery is out of scope; the block's own comment says how).
+TOOLCHAIN_RUST = "rust"
+TOOLCHAIN_GO = "go"
+TOOLCHAIN_NODE = "node"
+PIXI_RUST_DEPS_KEY = "pixi.toml#shipit-rust-lint-toolchain"
+PIXI_RUST_DEPS_OPEN = "# >>> shipit-managed rust lint toolchain (do not edit; regenerate via `shipit install`) >>>"
+PIXI_RUST_DEPS_CLOSE = "# <<< shipit-managed rust lint toolchain <<<"
+PIXI_GO_DEPS_KEY = "pixi.toml#shipit-go-lint-toolchain"
+PIXI_GO_DEPS_OPEN = "# >>> shipit-managed go lint toolchain (do not edit; regenerate via `shipit install`) >>>"
+PIXI_GO_DEPS_CLOSE = "# <<< shipit-managed go lint toolchain <<<"
+PIXI_NODE_DEPS_KEY = "pixi.toml#shipit-node-deps"
+PIXI_NODE_DEPS_OPEN = (
+    "# >>> shipit-managed node deps (do not edit; regenerate via `shipit install`) >>>"
+)
+PIXI_NODE_DEPS_CLOSE = "# <<< shipit-managed node deps <<<"
+PIXI_NODE_DEPS_ANCHOR = "[dependencies]"
+# (unit key, toolchain signal, open, close, anchor, packaged data file) — the
+# catalog rows :func:`load_units` appends per requested toolchain, in this order.
+TOOLCHAIN_UNITS = (
+    (
+        PIXI_RUST_DEPS_KEY,
+        TOOLCHAIN_RUST,
+        PIXI_RUST_DEPS_OPEN,
+        PIXI_RUST_DEPS_CLOSE,
+        PIXI_LINT_DEPS_ANCHOR,
+        "pixi-rust-lint-deps-block.toml",
+    ),
+    (
+        PIXI_GO_DEPS_KEY,
+        TOOLCHAIN_GO,
+        PIXI_GO_DEPS_OPEN,
+        PIXI_GO_DEPS_CLOSE,
+        PIXI_LINT_DEPS_ANCHOR,
+        "pixi-go-lint-deps-block.toml",
+    ),
+    (
+        PIXI_NODE_DEPS_KEY,
+        TOOLCHAIN_NODE,
+        PIXI_NODE_DEPS_OPEN,
+        PIXI_NODE_DEPS_CLOSE,
+        PIXI_NODE_DEPS_ANCHOR,
+        "pixi-node-deps-block.toml",
+    ),
+)
+
 #: The name of the managed lint environment the env block above defines
 #: (``pixi-lint-env-block.toml``: ``lint = ["lint"]``) — where the fleet-pinned
 #: toolchain (including ``lefthook``) lives on every consumer. Callers that must
@@ -198,6 +260,14 @@ SETTINGS_STOP_KEY = ".claude/settings.json#shipit-stop-hook"
 SETTINGS_STOP_MARKER = "shipit hook stop"
 SETTINGS_SUBAGENTSTOP_KEY = ".claude/settings.json#shipit-subagentstop-hook"
 SETTINGS_SUBAGENTSTOP_MARKER = "shipit hook subagent-stop"
+
+# The Layer 0 bootstrap script (#547): provisions the base system (pixi + uv
+# at their pins, then the pixi env solves) that everything above — the managed
+# lint env, the pinned launcher's uv resolve — rides on. Shipped like
+# `bin/shipit` (an executable whole-file bootstrap unit); shipit-self commits
+# a byte-identical copy at the same path (the reconcile-to-noop dogfood
+# guarantee).
+SETUP_DEV_ENV_FILE = "bin/setup-dev-env.sh"
 
 # The SES01 session-bootstrap set (docs/prd/session-bootstrap.md, ADR-0027): the
 # `./claude-start` launcher (Layer D — mint a session id and exec
@@ -326,8 +396,15 @@ def walk_files(node, prefix: str = ""):
             yield rel, child.read_bytes()
 
 
-def load_units() -> list[Unit]:
-    """The managed set, in a stable order (skills, then the AGENTS block, then bootstrap)."""
+def load_units(*, toolchains: frozenset[str] = frozenset()) -> list[Unit]:
+    """The managed set, in a stable order (skills, then the AGENTS block, then bootstrap).
+
+    ``toolchains`` (#547 Layer 1) names the conditional per-toolchain pixi dep
+    blocks to include — any of :data:`TOOLCHAIN_RUST` / :data:`TOOLCHAIN_GO` /
+    :data:`TOOLCHAIN_NODE`, as detected from the consumer's tracked manifests
+    (:func:`shipit.install.reconcile.detect_toolchains`). The zero-arg call
+    returns the unconditional catalog, byte-identical to the pre-#547 one.
+    """
     units: list[Unit] = []
 
     for rel, content in walk_files(skills_root()):
@@ -355,6 +432,25 @@ def load_units() -> list[Unit]:
             dest="bin/shipit",
             kind="file",
             content=data_bytes("bootstrap", "shipit"),
+            executable=True,
+        )
+    )
+
+    # The Layer 0 base-system bootstrap (#547): reconcile pixi + uv to their
+    # pins from sha256-verified GitHub release tarballs, then pre-solve the
+    # pixi envs — what makes a fresh clone / cloud session / stock Ubuntu box
+    # survive its first `pixi run` (and gives the ADR-0033 `bin/shipit`
+    # launcher the uv it rides). Runs from the managed SessionStart hook,
+    # ahead of `shipit hook sessionstart`; fail-open, loud, idempotent. On
+    # repos still carrying the retired release-sync script this managed unit
+    # takes over the SAME path (their old copy surfaces as an OVERRIDE at the
+    # reconcile — the human decides at merge).
+    units.append(
+        Unit(
+            key=SETUP_DEV_ENV_FILE,
+            dest=SETUP_DEV_ENV_FILE,
+            kind="file",
+            content=data_bytes("bootstrap", "setup-dev-env.sh"),
             executable=True,
         )
     )
@@ -426,6 +522,26 @@ def load_units() -> list[Unit]:
             anchor=PIXI_ENVS_ANCHOR,
         )
     )
+
+    # The conditional per-toolchain dep blocks (#547 Layer 1): appended only
+    # when the caller detected the signal, so a signal-less consumer's catalog
+    # (and every existing zero-arg call) is unchanged. rust/go splice under the
+    # same `[feature.lint.dependencies]` anchor as the managed lint-deps block
+    # — sibling marker blocks in one table (splice_block places each right
+    # after the anchor header; coexistence is fine).
+    for key, signal, open_marker, close_marker, anchor, data_file in TOOLCHAIN_UNITS:
+        if signal in toolchains:
+            units.append(
+                Unit(
+                    key=key,
+                    dest=PIXI_FILE,
+                    kind="block",
+                    content=data_bytes(data_file),
+                    open_marker=open_marker,
+                    close_marker=close_marker,
+                    anchor=anchor,
+                )
+            )
 
     # The HAR01 harness (docs/prd/har01-coordinator-guard-and-role-prompts.md): the
     # generated subagent agent-defs (whole files) and the committed PreToolUse hook

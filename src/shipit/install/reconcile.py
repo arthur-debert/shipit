@@ -33,12 +33,24 @@ Plan carries the conflicts: the working-tree mode warns loudly, the committing
 modes fail closed (:mod:`shipit.install.apply`) — a managed-config change must
 never silently brick a consumer's commits.
 
-The seam (ADR-0030): :func:`gather` is the ONE read boundary (consumer hashes,
-the stored pristine map, the policy-seed plan — a frozen
-:class:`ConsumerState`); :func:`reconcile` is pure over those values and
-aggregates every managed and retired decision into the frozen :class:`Plan`,
-inspectable before any file is written. All writes live in
-:mod:`shipit.install.apply`.
+Install also runs a PIXI KEY-CONFLICT guard on first block splices (#547
+round 1): a pixi block unit is exact bytes anchored under a TOML table the
+consumer owns (the node deps block lands in ``[dependencies]``), so a consumer
+who already pins one of the block's keys there (their own ``nodejs``, say)
+would get a DUPLICATE TOML KEY on the ADD splice — an unparseable pixi.toml
+that blocks installs and every hooked commit. Gather detects the clash against
+the parsed consumer manifest, and the reconcile SKIPS delivering that block
+(the consumer's own pin stays authoritative; the Plan carries the conflict and
+every surface warns) — never a broken write, in any mode.
+
+The seam (ADR-0030): :func:`gather` is the ONE filesystem read boundary
+(consumer hashes, the stored pristine map, the policy-seed plan — a frozen
+:class:`ConsumerState`); :func:`detect_toolchains` is its small signal-scoped
+sibling (#547: one tracked-manifest read through the git adapter, deciding
+WHICH catalog :func:`~shipit.install.units.load_units` returns, before gather
+hashes it); :func:`reconcile` is pure over those values and aggregates every
+managed and retired decision into the frozen :class:`Plan`, inspectable before
+any file is written. All writes live in :mod:`shipit.install.apply`.
 """
 
 from __future__ import annotations
@@ -51,10 +63,19 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import yaml
 
-from .. import config
+from .. import config, git
 from .errors import InstallError
 from .splice import extract_block, extract_settings_hook
-from .units import FMT_JSON_HOOK, LEFTHOOK_FILE, PIXI_FILE, Unit, data_bytes
+from .units import (
+    FMT_JSON_HOOK,
+    LEFTHOOK_FILE,
+    PIXI_FILE,
+    TOOLCHAIN_GO,
+    TOOLCHAIN_NODE,
+    TOOLCHAIN_RUST,
+    Unit,
+    data_bytes,
+)
 
 logger = logging.getLogger("shipit.install")
 
@@ -409,6 +430,117 @@ def _plan_lefthook_conflicts(
 # The read boundary — the consumer's current state, as one frozen value
 # --------------------------------------------------------------------------
 
+#: manifest basename -> toolchain signal (#547 Layer 1). A tracked manifest
+#: ANYWHERE in the tree is the signal, matching `verbs/lint.py`'s per-manifest
+#: leg discovery: a tracked ``Cargo.toml`` is exactly what makes the rust lint
+#: leg run (which hard-fails 127 without cargo — the gap the rust dep block
+#: closes, #526); ``go.mod`` and ``package.json`` are the go/node analogues.
+TOOLCHAIN_MANIFESTS = (
+    ("Cargo.toml", TOOLCHAIN_RUST),
+    ("go.mod", TOOLCHAIN_GO),
+    ("package.json", TOOLCHAIN_NODE),
+)
+
+
+def detect_toolchains(root: Path) -> frozenset[str]:
+    """The consumer's toolchain signals, off its tracked manifests (#547 Layer 1).
+
+    A small read boundary of its own, SEPARATE from :func:`gather` (which stays
+    filesystem-only): one ``git ls-files`` over the toolchain manifest names
+    through the git adapter (ADR-0028) — tracked-only, like the lint scope, so a
+    vendored/ignored ``package.json`` deep in ``node_modules`` can never summon
+    a toolchain. On a non-git root the read degrades to root-level manifest
+    existence checks. The result feeds
+    :func:`shipit.install.units.load_units`'s ``toolchains`` parameter.
+    """
+    pathspecs = [
+        spec
+        for name, _ in TOOLCHAIN_MANIFESTS
+        for spec in (name, f"*/{name}")  # the root manifest and any nested one
+    ]
+    tracked = git.ls_files_matching(pathspecs, cwd=str(root))
+    if tracked is not None:
+        names = {PurePosixPath(p).name for p in tracked}
+    else:
+        names = {name for name, _ in TOOLCHAIN_MANIFESTS if (root / name).is_file()}
+    detected = frozenset(tc for name, tc in TOOLCHAIN_MANIFESTS if name in names)
+    if detected:
+        logger.debug(
+            "toolchain signals detected",
+            extra={"root": str(root), "toolchains": ", ".join(sorted(detected))},
+        )
+    return detected
+
+
+@dataclass(frozen=True)
+class PixiKeyConflict:
+    """One pixi block unit whose FIRST splice would duplicate consumer-owned keys.
+
+    Detected only when the block's markers are absent (an ADD): once the block
+    is spliced, its own keys legitimately live in the anchor table. The remedy
+    is the consumer's call — keep their pin (the block stays undelivered) or
+    delete it and re-run install to adopt the managed one.
+    """
+
+    unit_key: str  # the [managed] table key, e.g. "pixi.toml#shipit-node-deps"
+    anchor: str  # the TOML table header the block anchors under
+    keys: tuple[str, ...]  # the block keys the consumer already declares there
+
+
+def format_pixi_key_conflict(conflict: PixiKeyConflict) -> str:
+    """The one actionable message for a key conflict — used verbatim by the
+    stderr warning and the durable log line, so the two surfaces never drift."""
+    keys = " and ".join(f"'{k}'" for k in conflict.keys)
+    return (
+        f"this repo's pixi.toml already declares {keys} in {conflict.anchor}, "
+        f"which the managed block '{conflict.unit_key}' also pins — splicing it "
+        f"would duplicate the key(s) and make pixi.toml unparseable, so the "
+        f"block was NOT delivered and this repo's own pin stays authoritative. "
+        f"To adopt the managed pin instead, delete this repo's own entry and "
+        f"re-run `shipit install`."
+    )
+
+
+def _pixi_key_conflicts(
+    root: Path, units: Sequence[Unit], consumer_hashes: Mapping[str, str | None]
+) -> tuple[PixiKeyConflict, ...]:
+    """Gather's key-conflict read: first-splice duplicates in the pixi manifest.
+
+    Best-effort and fail-open, like the lefthook-local read: no manifest or an
+    unparseable one detects nothing (a consumer who already broke their own
+    TOML hears it from pixi, not from a guard that only inspects). Only
+    marker-absent (ADD-bound) pixi block units are checked — see
+    :class:`PixiKeyConflict`.
+    """
+    path = root / PIXI_FILE
+    if not path.is_file():
+        return ()
+    try:
+        manifest = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (tomllib.TOMLDecodeError, OSError, UnicodeDecodeError):
+        return ()
+    conflicts: list[PixiKeyConflict] = []
+    for unit in units:
+        if unit.kind != "block" or unit.dest != PIXI_FILE or unit.anchor is None:
+            continue
+        if consumer_hashes.get(unit.key) is not None:
+            continue  # markers present: the table's keys include the block's own
+        try:
+            block_keys = tomllib.loads(unit.desired_inner())
+        except tomllib.TOMLDecodeError:  # pragma: no cover — packaged data
+            continue
+        table: object = manifest
+        for part in unit.anchor.strip().strip("[]").split("."):
+            table = table.get(part) if isinstance(table, dict) else None
+        if not isinstance(table, dict):
+            continue  # the anchor table does not exist yet — nothing to clash
+        clashes = tuple(sorted(k for k in block_keys if k in table))
+        if clashes:
+            conflicts.append(
+                PixiKeyConflict(unit_key=unit.key, anchor=unit.anchor, keys=clashes)
+            )
+    return tuple(conflicts)
+
 
 def consumer_inner(root: Path, unit: Unit) -> str | None:
     """A block unit's current inner text in the consumer, or ``None``."""
@@ -470,6 +602,10 @@ class ConsumerState:
     # tripwire stays pure over this state.
     lefthook_local_path: str | None = None
     lefthook_local: str | None = None
+    # First-splice duplicate-key clashes in the consumer's pixi.toml (#547
+    # round 1) — read here (the ONE read boundary) so the reconcile's skip
+    # decision stays pure over this state.
+    pixi_key_conflicts: tuple[PixiKeyConflict, ...] = ()
 
 
 def gather(
@@ -482,8 +618,9 @@ def gather(
     (consumer-owned policy — the App ``[secrets]`` mappings + the ``[reviewers]``
     set — is planned alongside the manifest but never under the pristine-hash
     reconciliation; architecture.lex §6, issue #25), each retired path's
-    actual hash, and the consumer's committed lefthook-local config (#544, the
-    merge-conflict tripwire's input).
+    actual hash, the consumer's committed lefthook-local config (#544, the
+    merge-conflict tripwire's input), and the pixi manifest's first-splice
+    key clashes (:func:`_pixi_key_conflicts`).
     """
     root = root.resolve()
     if not root.is_dir():
@@ -511,9 +648,10 @@ def gather(
         )
 
     lefthook_local_path, lefthook_local = _read_lefthook_local(root)
+    consumer_hashes = {u.key: consumer_hash(root, u) for u in units}
     return ConsumerState(
         root=str(root),
-        consumer_hashes={u.key: consumer_hash(root, u) for u in units},
+        consumer_hashes=consumer_hashes,
         pristine=pristine,
         retired_hashes={r.path: retired_actual_hash(root, r) for r in retired},
         seeds=tuple(seeds),
@@ -523,6 +661,7 @@ def gather(
         manifest_error=manifest_error,
         lefthook_local_path=lefthook_local_path,
         lefthook_local=lefthook_local,
+        pixi_key_conflicts=_pixi_key_conflicts(root, units, consumer_hashes),
     )
 
 
@@ -612,6 +751,11 @@ class Plan:
     # commit in the consumer would be blocked before any check runs). The
     # working-tree mode warns loudly; the committing modes fail closed in apply.
     lefthook_conflicts: tuple[LefthookConflict, ...] = ()
+    # Pixi blocks this plan SKIPPED (#547 round 1): a first splice would have
+    # duplicated a consumer-owned key in the anchor table, breaking pixi.toml —
+    # so their decisions are excluded outright (never a broken write, in any
+    # mode) and every surface warns off this record.
+    pixi_key_conflicts: tuple[PixiKeyConflict, ...] = ()
 
     @property
     def writes(self) -> tuple[Decision, ...]:
@@ -698,7 +842,14 @@ def reconcile(
     (a locally modified copy shipit refuses to destroy, WARNING) — the durable
     twin (ADR-0029); the terminal report is the renderer's.
     """
-    decisions = tuple(plan(units, state.consumer_hashes, state.pristine))
+    # A key-conflicted block never reaches the write set: its ADD would splice
+    # a duplicate TOML key into the consumer's pixi.toml (see PixiKeyConflict).
+    conflicted = {c.unit_key for c in state.pixi_key_conflicts}
+    decisions = tuple(
+        d
+        for d in plan(units, state.consumer_hashes, state.pristine)
+        if d.unit.key not in conflicted
+    )
     result = Plan(
         root=state.root,
         decisions=decisions,
@@ -716,6 +867,7 @@ def reconcile(
         current_pin=state.current_pin,
         target_pin=state.target_pin,
         lefthook_conflicts=_plan_lefthook_conflicts(units, state),
+        pixi_key_conflicts=state.pixi_key_conflicts,
     )
     logger.debug(
         "reconcile plan decided",
@@ -742,6 +894,12 @@ def reconcile(
             "lefthook merge conflict: %s",
             format_lefthook_conflict(c),
             extra={"root": state.root, "hook": c.hook, "local": c.local_path},
+        )
+    for kc in result.pixi_key_conflicts:
+        logger.warning(
+            "pixi key conflict: %s",
+            format_pixi_key_conflict(kc),
+            extra={"root": state.root, "unit": kc.unit_key, "anchor": kc.anchor},
         )
     if result.nothing_to_do:
         logger.debug(

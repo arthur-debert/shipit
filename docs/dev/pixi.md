@@ -18,10 +18,17 @@ pixi is used for four things at once: provisioning native tooling, running tasks
 
 ### What pixi is the parent of:
 
-- Provisioning — `pixi install` materialises a Tree's environment.
-- Hook invocations — every Claude Code hook fires as \`pixi run shipit
+Provisioning
 
-  hook \<name\>\` (a transient `pixi run` per firing). - The write-Run agent session — as of PR \#197, \`shipit spawn\` re-expresses the backend argv as `pixi run --manifest-path <tree>/pixi.toml -- <argv>` for a provisioned write Tree, so the agent runs INSIDE its Tree's env (see [\#6](#6), [\#7](#7)).
+: `pixi install` materialises a Tree's environment.
+
+The PreToolUse hook guard
+
+: The one Claude Code hook still fired as a manifest-pinned `pixi run` (\#529). The other managed hooks ride the pinned launcher, `./bin/shipit hook <name>` (\#491) — pixi provisions the env they resolve against but is not their parent process; see [\#6](#6).
+
+The write-Run agent session
+
+: As of PR \#197, \`shipit spawn\` re-expresses the backend argv as `pixi run --manifest-path <tree>/pixi.toml -- <argv>` for a provisioned write Tree, so the agent runs INSIDE its Tree's env (see [\#6](#6), [\#7](#7)).
 
 ### What pixi is NOT the parent of:
 
@@ -85,13 +92,17 @@ External `pixi-<name>` subcommands
 
 ## 6. The shipit ↔ pixi contract today
 
+Layer 0 — `bin/setup-dev-env.sh` (managed unit, \#547)
+
+: pixi itself (and uv, which the ADR-0033 pinned `bin/shipit` launcher rides) arrives via the managed bootstrap `bin/setup-dev-env.sh`: reconcile-to-pin from sha256-verified GitHub release tarballs into `~/.local/bin` (the pin kept in lockstep with CI's `pixi-version`), then a best-effort `pixi install --locked` pre-solve. It runs from the managed SessionStart hook ahead of `shipit hook sessionstart` — fail-open, loud, idempotent. Everything else in this document assumes pixi exists; this unit is what makes that true on a fresh clone, a cloud session, or a stock Ubuntu box (proven from zero by `docker/verify-self-provision.sh` — see docs/dev/containers.md).
+
 Provisioning — `src/shipit/tree/create.py`
 
 : `_provision()` runs, each gated on a manifest existing: \`shipit install . --local\` (if `.shipit.toml`), `pixi install` (if `pixi.toml`, default env), the package-manager-aware frozen node install (if `package.json` — `node_install_argv()`, \#543: the `packageManager` pin first, the lockfile second, loud failure when neither decides — `npm ci` / \`pnpm install --frozen-lockfile\` / `yarn install --immutable` for Berry v2+ or `--frozen-lockfile` for classic v1, picked by the yarn major version, \#545). The \`shipit install\` and node-install steps funnel through the `run_provision()` seam, an Exec through the one runner (`shipit.execrun.run`, ADR-0028) with the generous explicit `PROVISION_TIMEOUT` (a cold frozen node install legitimately outlives the 5-minute default). The pixi step instead runs through the pixi adapter, `shipit.pixienv.install()`, which carries pixi's own long-runner bound (`INSTALL_TIMEOUT`, 30 min — a cold solve+download outlives the default) — the pixi argv and its timeout live in the adapter, not the Tree code. Both paths share one narration (`_narrate_step`) and a durable record per step — timing on success, both stream tails on failure. A failed step raises the runner's single transport error, `ExecError`.
 
 Hooks — `.claude/settings.json`
 
-: Every hook is `pixi run shipit hook <name>` (plus two `SessionStart` entries: `pixi run -e lint install-hooks` and the ADR-0027 activation, `pixi run shipit hook sessionstart`). `shipit` is on PATH because the package is installed editable into each env, not because it is a pixi task. pixi is a transient wrapper per hook firing.
+: The managed hook entries ride the pinned launcher \`./bin/shipit hook \<name\>\` (\#491 dropped the \`pixi run\` wrap on the four additive hooks; the PreToolUse guard alone keeps a manifest-pinned `pixi run`, \#529). shipit's own settings add a repo-local `SessionStart` entry, \`pixi run -e lint install-hooks\`; the managed `SessionStart` entry runs the Layer 0 bootstrap `./bin/setup-dev-env.sh` first (\#547) and then the ADR-0027 activation, `./bin/shipit hook sessionstart`.
 
 Coordinator activation — `shipit hook sessionstart` (ADR-0027, Layer A)
 
