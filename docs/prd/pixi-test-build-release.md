@@ -1,6 +1,9 @@
 # pixi test / build / run + changelog / release
 
-> Status: **postponed** — not yet started. Planned successor work; see `docs/prd/FUTURE_WORK.md`.
+> Status: **superseded by `docs/prd/tol01-ci-tools.md`** (TOL01, 2026-07).
+> The scope below is absorbed there with one change of shape: `test`/`build`
+> are shipit verbs (ADR-0039), not consumer-supplied task bodies; pixi tasks
+> become thin callers. Kept for the origin trail.
 > Origin: scope sketched in the retired roadmap §5, summarized below.
 
 ## Intended scope

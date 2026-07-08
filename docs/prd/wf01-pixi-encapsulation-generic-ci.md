@@ -12,7 +12,18 @@
 > env-scrub rules, the cache-dir knowledge, and the structured `list`/`info` reads
 > now live in `shipit.pixienv` — the one adapter in pixi's domain home. The
 > *generic-CI* half below (toolchain map, lanes, generic reusable workflow,
-> actionlint/act harness) is untouched and remains this epic's scope.
+> actionlint/act harness) was untouched by glassbox; see the next note for
+> where it executes now.
+>
+> **Reconciliation (TOL01, 2026-07):** the generic-CI half now executes under
+> `docs/prd/tol01-ci-tools.md`, with one supersession: "the consumer supplies
+> uniform-named pixi tasks" is replaced by tools-as-verbs (ADR-0039) — `test`
+> and `build` are shipit verbs walking the path→toolchain map, `e2e` the
+> artifact-consuming verb; the pixi task of the same name is a thin
+> `= "shipit <tool>"` caller. Lanes, the lane planner, actionlint, the act
+> harness, and required-check-name stability carry over unchanged. The body
+> below predates TOL01 and is kept as the origin trail — read its
+> "consumer-supplied pixi task" phrasing through the tools-as-verbs model.
 
 ## Problem Statement
 

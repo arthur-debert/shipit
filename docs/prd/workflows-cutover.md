@@ -1,6 +1,12 @@
 # workflows + cutover
 
-> Status: **postponed** — not yet started. Planned successor work; see `docs/prd/FUTURE_WORK.md`.
+> Status: **superseded in part by `docs/prd/tol01-ci-tools.md`** (TOL01,
+> 2026-07): the workflow building blocks — stage reusable workflows + one
+> composed chain, scar invariants inside the blocks (ADR-0040) — are TOL01
+> scope. The *cutover* half (re-pointing consumers, the real-release gate on
+> release-core retirement) stays with ADP02 (#422). The body below predates
+> TOL01 and keeps the legacy "package" stage name — TOL01 retires "package";
+> the stage is `bundle`.
 > Origin: scope sketched in the retired roadmap §6, summarized below.
 
 ## Intended scope

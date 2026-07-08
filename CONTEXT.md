@@ -700,6 +700,36 @@ The `.shipit.toml` declaration mapping each build-bearing path to its
 provisioning / build / test / lint by walking the map. One repo routinely carries
 several (a Tauri app = a rust path + an npm path + maybe an mkdocs path).
 
+**Tool**:
+A uniform shipit verb — `shipit lint`, `shipit test`, `shipit build`, … — that
+walks the **path→toolchain map** and dispatches each entry to its producing
+command. The verb is the single implementation everywhere: laptop, hook, and CI
+all invoke it, the same way `shipit lint` already works (ADR-0004 generalized).
+The pixi task of the same name is a thin one-line caller (`test = "shipit test"`),
+never the home of logic; underlying-command flags stay reachable via passthrough
+args, so uniformity never walls off the stack's own surface.
+*Avoid*: "task" for the verb itself (the task is the thin pixi caller); a
+consumer-supplied raw command squatting under a uniform name (the POSIX-`test`
+footgun — dispatch belongs to the verb).
+
+**e2e**:
+The artifact-consuming **tool**: where `test` takes the tree as input, `e2e`
+takes a built **artifact** — shipit resolves the binary (local build, CI
+artifact download, later a **content-key** hit — three sources behind one seam)
+and injects it into the consumer-declared harness as `<NAME>_BIN`. A repo with
+no e2e declaration has no e2e **lane**. *Avoid*: modeling e2e as a `test` leg
+(wrong input contract); "integration test" for environment-heavy test legs
+(supage's emulator job is a bespoke **lane**, not e2e).
+
+**Leg**:
+One **tool** applied to one **path→toolchain map** entry — `test rust`,
+`build npm`. A bare tool invocation fans out over all its legs (CI's and the
+hooks' form); a selected leg is the unit of passthrough (`shipit test rust --
+<args>`, forwarded verbatim — passthrough with several legs and no selector is a
+hard error, never a broadcast) and the unit a **lane**'s `run` may name, giving
+the lane planner per-toolchain jobs with no extra concept. Single-leg repos may
+omit the selector. *Avoid*: "target" (overloaded: cargo target, build target).
+
 **Artifact**:
 A produced, content-addressed, distributable unit. Produced by one or more
 **toolchain** build targets plus an optional **bundle** step — many-to-many with
@@ -711,9 +741,10 @@ thing, not raw output.
 
 **Bundle**:
 The optional composition step that combines toolchain outputs into one
-**artifact** (`tauri bundle`, `electron-builder`). *Avoid*: "package" as the
-*producing verb* — "package" is the pipeline stage that runs the bundle
-(workflows.lex), not the producing task.
+**artifact** (`tauri bundle`, `electron-builder`); also the release-pipeline
+stage that runs it (`shipit release bundle`). *Avoid*: "package" in any role —
+the word carries neither the stage (now `bundle`) nor the producing verb, and
+collides with OS/registry packages.
 
 **Distribution endpoint**:
 A place an **artifact** is published — crates.io, npm, brew, VS Marketplace,
