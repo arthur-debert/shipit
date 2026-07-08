@@ -20,7 +20,7 @@ from pathlib import Path
 from .. import buildid, config, execrun, gh, git, pixienv
 from . import selfcert
 from .errors import InstallError, SelfCertError
-from .reconcile import Plan, consumer_inner
+from .reconcile import Plan, consumer_inner, format_lefthook_conflict
 from .splice import SETTINGS_MALFORMED, splice_block, splice_settings_hook
 from .units import (
     FMT_JSON_HOOK,
@@ -296,7 +296,9 @@ def apply(
     never a blocker.
 
     Raises :class:`InstallError` on a domain refusal (``local``/``push`` in
-    detached HEAD, a failed self-certification) and lets a git/gh boundary
+    detached HEAD, a failed self-certification, a lefthook merge conflict with
+    the consumer's local config in any committing mode — #544) and lets a
+    git/gh boundary
     failure propagate as :class:`~shipit.execrun.ExecError` — both members of
     the CLI error shell's known set. Callers decide nothing here: a no-op plan
     should simply never be applied (:attr:`Plan.nothing_to_do`).
@@ -305,6 +307,22 @@ def apply(
         raise ValueError(f"unknown install mode: {mode!r}")
     if mode == MODE_PR and pr_body is None:
         raise ValueError("MODE_PR needs the pr_body renderer")
+    if plan.lefthook_conflicts and mode != MODE_TREE:
+        # The #544 tripwire, fail-closed BEFORE any write or git side effect:
+        # the managed lefthook.yml and the consumer's lefthook-local.yml merge
+        # into a config lefthook refuses to run, so publishing it would brick
+        # every commit in the consumer. MODE_TREE stays a warning (the plan's
+        # stderr lines): a working-tree refresh publishes nothing, and the
+        # caller reviews `git diff` with the warning in hand. The fix lives in
+        # the CONSUMER's local config, so this is a plain InstallError, never a
+        # SelfCertError (whose diagnostic points at shipit's managed set).
+        raise InstallError(
+            "lefthook config conflict — refusing to publish a managed config "
+            "that cannot run:\n"
+            + "\n".join(
+                f"  {format_lefthook_conflict(c)}" for c in plan.lefthook_conflicts
+            )
+        )
     activate = activate_hooks or _activate_hooks
     started = time.monotonic()
     root = Path(plan.root)

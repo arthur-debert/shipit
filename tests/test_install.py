@@ -19,6 +19,7 @@ import shutil
 import stat
 import subprocess
 import tomllib
+from dataclasses import replace as dc_replace
 from pathlib import Path
 
 import pytest
@@ -329,11 +330,11 @@ def test_managed_lefthook_is_consumer_generic():
             assert invoked != "shipit"
             assert "tools/" not in run and ".lex" not in run
 
-    # The exact legs: pre-commit lint (piped, priority 2 — the slot a local
-    # leg like shipit's own lex-mirror runs ahead of), pre-push lint + the
-    # classification tripwire. (The post-commit dev-cycle leg is asserted in
-    # test_logevent.py's managed-hook-tier test.)
-    assert cfg["pre-commit"]["piped"] is True
+    # The exact legs: pre-commit lint (priority 2 — the slot a local leg like
+    # shipit's own lex-mirror runs ahead of in lefthook's priority-ordered
+    # sequential run), pre-push lint + the classification tripwire. (The
+    # post-commit dev-cycle leg is asserted in test_logevent.py's
+    # managed-hook-tier test.)
     lint = cfg["pre-commit"]["commands"]["lint"]
     assert lint == {"priority": 2, "run": PIXI_ABSENCE_GUARD + "pixi run -e lint lint"}
     assert (
@@ -367,16 +368,16 @@ def test_shipits_own_lefthook_reconciles_to_noop():
 
 def test_shipits_own_local_config_carries_the_lex_mirror_leg():
     """The .lex→.md mirror leg moved OUT of the managed caller into shipit's
-    committed lefthook-local.yml — still regenerating mirrors ahead of lint in
-    the piped pre-commit chain, so shipit's own hooks stay green (dogfood)."""
+    committed lefthook-local.yml — still regenerating mirrors ahead of lint
+    (lefthook's default sequential run orders commands by priority, 0/unset
+    last), so shipit's own hooks stay green (dogfood)."""
     root = Path(__file__).resolve().parents[1]
     local = yaml.safe_load((root / "lefthook-local.yml").read_text(encoding="utf-8"))
     leg = local["pre-commit"]["commands"]["lex-mirror"]
     assert "tools/lex-convert-doc.sh" in leg["run"]
     assert (root / "tools" / "lex-convert-doc.sh").is_file()
-    # It slots BEFORE the managed lint command in the managed piped chain.
+    # It slots BEFORE the managed lint command in the priority-ordered run.
     managed = _managed_lefthook()
-    assert managed["pre-commit"]["piped"] is True
     assert leg["priority"] < managed["pre-commit"]["commands"]["lint"]["priority"]
 
 
@@ -396,6 +397,148 @@ def test_lefthook_unit_reconciles_add_noop_override(tmp_path, rec):
     assert decision().action == irec.NOOP
     (tmp_path / "lefthook.yml").write_text("pre-commit: {}\n")
     assert decision().action == irec.OVERRIDE
+
+
+# --------------------------------------------------------------------------
+# The lefthook merge-conflict tripwire (#544) — lefthook refuses a merged hook
+# where both `piped` and `parallel` are true, crashing BEFORE any check runs,
+# so a hook-level option in the managed caller colliding with a consumer's
+# committed lefthook-local.yml bricks every commit in that repo (the
+# phos-editor incident). Two defenses: the managed caller sets NO hook-level
+# execution-order option, and the reconcile detects the class anyway (warn in
+# the working-tree mode, fail closed in every committing mode).
+# --------------------------------------------------------------------------
+
+# The managed caller's OLD pre-commit shape (hook-level `piped: true`) — the
+# content that collided with phos-editor/app's `parallel: true` local config.
+OLD_PIPED_MANAGED = "pre-commit:\n  piped: true\n  commands:\n    lint:\n      run: x\n"
+PARALLEL_LOCAL = "pre-commit:\n  parallel: true\n  commands:\n    leg:\n      run: y\n"
+
+
+def test_managed_lefthook_sets_no_hook_level_execution_options():
+    """The #544 guarantee: no hook in the managed caller sets an exclusive
+    execution-order option, so it can NEVER collide with a consumer's
+    `piped`/`parallel` in lefthook-local.yml. Ordering still holds without
+    one: lefthook's default sequential run orders commands by priority
+    (0/unset last), so the lint leg keeps `priority: 2` and a local leg with
+    `priority: 1` still runs first — only the old pipe's stop-on-failure is
+    traded away (lint runs redundantly after a failing local leg; the hook
+    still fails). Reintroducing such an option is a design change: re-read
+    the lefthook.yml comment block and #544 first."""
+    cfg = _managed_lefthook()
+    for hook, body in cfg.items():
+        for option in irec.EXCLUSIVE_HOOK_OPTIONS:
+            assert option not in body, f"{hook} sets hook-level {option!r} (#544)"
+    assert cfg["pre-commit"]["commands"]["lint"]["priority"] == 2
+
+
+def test_detect_lefthook_conflicts_flags_piped_vs_parallel():
+    # The phos-editor shape: old managed `piped: true` + local `parallel: true`.
+    conflicts = irec.detect_lefthook_conflicts(
+        OLD_PIPED_MANAGED, PARALLEL_LOCAL, "lefthook-local.yml"
+    )
+    assert [(c.hook, c.managed_options, c.local_options) for c in conflicts] == [
+        ("pre-commit", ("piped",), ("parallel",))
+    ]
+    message = irec.format_lefthook_conflict(conflicts[0])
+    # Actionable: names both files, both options, the blast radius, the fix.
+    assert "'piped: true'" in message and "'parallel: true'" in message
+    assert "lefthook-local.yml" in message and iunits.LEFTHOOK_FILE in message
+    assert "shipit install" in message
+
+
+def test_detect_lefthook_conflicts_local_value_wins_in_the_merge():
+    # lefthook layers the local scalar over the managed one, so a local
+    # `piped: false` DEFUSES the managed `piped: true` — no conflict.
+    defused = (
+        "pre-commit:\n  piped: false\n  parallel: true\n"
+        "  commands:\n    leg:\n      run: y\n"
+    )
+    assert (
+        irec.detect_lefthook_conflicts(OLD_PIPED_MANAGED, defused, "lefthook-local.yml")
+        == ()
+    )
+    # A local config touching neither exclusive option never conflicts.
+    plain = "pre-commit:\n  commands:\n    leg:\n      run: y\n"
+    assert (
+        irec.detect_lefthook_conflicts(OLD_PIPED_MANAGED, plain, "lefthook-local.yml")
+        == ()
+    )
+
+
+def test_detect_lefthook_conflicts_is_scoped_to_what_install_can_cause():
+    # A lefthook-local.yml arguing with ITSELF (both options true, managed
+    # side contributing neither) is the consumer's own file, outside the
+    # managed set's blast radius — lefthook reports it on their next hook run.
+    managed = "pre-commit:\n  commands:\n    lint:\n      run: x\n"
+    local = (
+        "pre-commit:\n  piped: true\n  parallel: true\n"
+        "  commands:\n    leg:\n      run: y\n"
+    )
+    assert irec.detect_lefthook_conflicts(managed, local, "lefthook-local.yml") == ()
+
+
+def test_detect_lefthook_conflicts_tolerates_unreadable_local_config():
+    # An unparseable or non-mapping local config is a different failure class
+    # the consumer owns; the tripwire never turns it into an install refusal.
+    for bad in ("{unclosed", "- a\n- b\n", "just a scalar\n", ""):
+        assert (
+            irec.detect_lefthook_conflicts(OLD_PIPED_MANAGED, bad, "lefthook-local.yml")
+            == ()
+        )
+
+
+def test_gather_reads_the_consumer_lefthook_local_config(tmp_path):
+    units = iunits.load_units()
+    state = irec.gather(tmp_path, units, [])
+    assert state.lefthook_local is None and state.lefthook_local_path is None
+    (tmp_path / "lefthook-local.yml").write_text(PARALLEL_LOCAL)
+    state = irec.gather(tmp_path, units, [])
+    assert state.lefthook_local_path == "lefthook-local.yml"
+    assert state.lefthook_local == PARALLEL_LOCAL
+
+
+def test_parallel_local_config_reconciles_clean_against_current_managed_caller(
+    tmp_path,
+):
+    # The regression proof for the incident repo's shape: a consumer whose
+    # committed lefthook-local.yml sets `parallel: true` reconciles with NO
+    # conflict against the current managed caller (which sets no hook-level
+    # execution-order option) — the very install that rolls the managed set
+    # forward UN-bricks such a repo instead of refusing.
+    (tmp_path / "lefthook-local.yml").write_text(PARALLEL_LOCAL)
+    plan = _plan(tmp_path)
+    assert plan.lefthook_conflicts == ()
+    assert verb.format_plan_warnings(plan) == ""
+
+
+def test_lefthook_conflict_warns_in_tree_mode_and_fails_committing_modes_closed(
+    tmp_path, rec
+):
+    # Simulate a future managed edit reintroducing the class: inject the
+    # detected conflict into an otherwise-real plan (the shipped caller can no
+    # longer produce one — see the no-hook-level-options tripwire above).
+    conflict = irec.detect_lefthook_conflicts(
+        OLD_PIPED_MANAGED, PARALLEL_LOCAL, "lefthook-local.yml"
+    )[0]
+    plan = dc_replace(_plan(tmp_path), lefthook_conflicts=(conflict,))
+
+    # The plan's stderr surface carries the same actionable message.
+    assert irec.format_lefthook_conflict(conflict) in verb.format_plan_warnings(plan)
+
+    # Every committing mode fails CLOSED before any write or git side effect.
+    for mode in (iapply.MODE_LOCAL, iapply.MODE_PUSH, iapply.MODE_PR):
+        with pytest.raises(InstallError, match="lefthook config conflict"):
+            iapply.apply(plan, mode, pr_body=lambda *a: "")
+    assert rec.calls == [] and rec.hook_activations == []
+    assert not (tmp_path / ".shipit.toml").exists()
+    assert not (tmp_path / "lefthook.yml").exists()
+
+    # The working-tree refresh proceeds (nothing is published; the warning
+    # above is the caller's review surface alongside `git diff`).
+    result = iapply.apply(plan, iapply.MODE_TREE)
+    assert result.mode == iapply.MODE_TREE
+    assert (tmp_path / "lefthook.yml").is_file()
 
 
 # --------------------------------------------------------------------------
