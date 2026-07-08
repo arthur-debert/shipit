@@ -55,6 +55,7 @@ from ..install.reconcile import (
     Plan,
     detect_toolchains,
     format_lefthook_conflict,
+    format_pixi_key_conflict,
     gather,
     load_retired,
     reconcile,
@@ -279,9 +280,11 @@ def format_plan(plan: Plan, *, dry_run: bool = False) -> str:
 
 def format_plan_warnings(plan: Plan) -> str:
     """The Plan's stderr lines: the unreadable manifest, each kept retired
-    file, and each lefthook merge conflict (#544 — the committing modes also
+    file, each lefthook merge conflict (#544 — the committing modes also
     fail closed on these in apply; the warning is the working-tree/dry-run
-    surface, worded off the same formatter so the two can never drift)."""
+    surface, worded off the same formatter so the two can never drift), and
+    each pixi block skipped over a consumer-owned duplicate key (#547 —
+    warn-only in every mode: the skip already keeps the write set safe)."""
     lines = []
     if plan.manifest_error is not None:
         lines.append(f"install: ignoring unreadable manifest: {plan.manifest_error}")
@@ -296,6 +299,8 @@ def format_plan_warnings(plan: Plan) -> str:
         lines.append(
             f"install: lefthook config conflict: {format_lefthook_conflict(c)}"
         )
+    for kc in plan.pixi_key_conflicts:
+        lines.append(f"install: pixi block skipped: {format_pixi_key_conflict(kc)}")
     return "\n".join(lines)
 
 

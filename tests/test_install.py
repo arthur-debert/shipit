@@ -1466,9 +1466,12 @@ def _git_repo(tmp_path: Path) -> Path:
 
 
 def test_detect_toolchains_reads_tracked_manifests(tmp_path):
+    # Depth-agnostic: git's default pathspec `*` crosses `/` (fnmatch without
+    # FNM_PATHNAME; only `:(glob)` magic changes that), so `*/Cargo.toml`
+    # matches a manifest at ANY depth — the workspace-member layout included.
     root = _git_repo(tmp_path)
-    (root / "crates" / "core").mkdir(parents=True)
-    (root / "crates" / "core" / "Cargo.toml").write_text("[package]\n")
+    (root / "crates" / "core" / "deep").mkdir(parents=True)
+    (root / "crates" / "core" / "deep" / "Cargo.toml").write_text("[package]\n")
     (root / "web").mkdir()
     (root / "web" / "package.json").write_text("{}\n")
     subprocess.run(["git", "add", "."], cwd=root, check=True)
@@ -1495,6 +1498,118 @@ def test_detect_toolchains_falls_back_to_root_manifests_off_git(tmp_path):
 
 def test_detect_toolchains_clean_root_is_empty(tmp_path):
     assert irec.detect_toolchains(tmp_path) == frozenset()
+
+
+def _plan_with_toolchains(root, toolchains: frozenset) -> irec.Plan:
+    """gather → reconcile over the toolchain-conditional catalog (#547)."""
+    units = iunits.load_units(toolchains=toolchains)
+    retired = irec.load_retired()
+    state = irec.gather(Path(root), units, retired)
+    return irec.reconcile(units, retired, state)
+
+
+_CONSUMER_PIXI_WITH_NODE = """\
+[workspace]
+channels = ["conda-forge"]
+name = "acme"
+platforms = ["linux-64"]
+
+[dependencies]
+nodejs = "22.*"
+"""
+
+
+def test_node_block_is_skipped_when_the_consumer_already_pins_its_keys(tmp_path):
+    # The duplicate-key guard (#547 round 1): a consumer whose [dependencies]
+    # already pins nodejs must NOT get the node block spliced in — a duplicate
+    # TOML key would make pixi.toml unparseable, blocking installs and every
+    # hooked commit. The consumer's own pin stays authoritative.
+    (tmp_path / "pixi.toml").write_text(_CONSUMER_PIXI_WITH_NODE)
+    plan = _plan_with_toolchains(tmp_path, frozenset({iunits.TOOLCHAIN_NODE}))
+
+    assert plan.pixi_key_conflicts == (
+        irec.PixiKeyConflict(
+            unit_key=iunits.PIXI_NODE_DEPS_KEY,
+            anchor=iunits.PIXI_NODE_DEPS_ANCHOR,
+            keys=("nodejs",),
+        ),
+    )
+    # The conflicted block never reaches the plan; the rest of the set does.
+    keys = {d.unit.key for d in plan.decisions}
+    assert iunits.PIXI_NODE_DEPS_KEY not in keys
+    assert iunits.PIXI_LINT_DEPS_KEY in keys
+    # Warn-only, and worded off the one formatter (never a broken write).
+    warnings = verb.format_plan_warnings(plan)
+    assert "pixi block skipped" in warnings
+    assert "nodejs" in warnings
+
+
+def test_skipping_a_key_conflicted_block_keeps_pixi_toml_parseable(tmp_path, rec):
+    # End to end: apply on a conflicted consumer leaves a pixi.toml pixi can
+    # still parse, the consumer's pin intact, and no [managed] entry for the
+    # skipped block (nothing was delivered, so nothing is tracked).
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    (tmp_path / "pixi.toml").write_text(_CONSUMER_PIXI_WITH_NODE)
+    plan = _plan_with_toolchains(tmp_path, frozenset({iunits.TOOLCHAIN_NODE}))
+    iapply.apply(plan, iapply.MODE_TREE)
+
+    manifest = tomllib.loads((tmp_path / "pixi.toml").read_text(encoding="utf-8"))
+    assert manifest["dependencies"]["nodejs"] == "22.*"
+    assert iunits.PIXI_NODE_DEPS_OPEN not in (tmp_path / "pixi.toml").read_text()
+    managed = config.load_managed(config.load(tmp_path / ".shipit.toml"))
+    assert iunits.PIXI_NODE_DEPS_KEY not in managed
+    assert iunits.PIXI_LINT_DEPS_KEY in managed
+
+
+def test_node_block_delivers_when_the_consumer_has_no_clashing_key(tmp_path):
+    # Contrast: a [dependencies] table WITHOUT the block's keys is no conflict.
+    (tmp_path / "pixi.toml").write_text(
+        _CONSUMER_PIXI_WITH_NODE.replace("nodejs", "cmake")
+    )
+    plan = _plan_with_toolchains(tmp_path, frozenset({iunits.TOOLCHAIN_NODE}))
+    assert plan.pixi_key_conflicts == ()
+    node = next(d for d in plan.decisions if d.unit.key == iunits.PIXI_NODE_DEPS_KEY)
+    assert node.action == irec.ADD
+
+
+def test_a_spliced_block_is_not_a_key_conflict(tmp_path, rec):
+    # Once the block's markers are in, its own keys live in the anchor table —
+    # a re-reconcile must read that as NOOP, never as a conflict with itself.
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    toolchains = frozenset({iunits.TOOLCHAIN_NODE})
+    plan = _plan_with_toolchains(tmp_path, toolchains)
+    iapply.apply(plan, iapply.MODE_TREE)
+
+    again = _plan_with_toolchains(tmp_path, toolchains)
+    assert again.pixi_key_conflicts == ()
+    node = next(d for d in again.decisions if d.unit.key == iunits.PIXI_NODE_DEPS_KEY)
+    assert node.action == irec.NOOP
+
+
+def test_key_conflict_guard_fails_open_on_an_unparseable_pixi_toml(tmp_path):
+    # Best-effort, like the lefthook-local read: a consumer who already broke
+    # their own TOML hears it from pixi, not from a guard that only inspects.
+    (tmp_path / "pixi.toml").write_text("[[[ not toml\n")
+    units = iunits.load_units(toolchains=frozenset({iunits.TOOLCHAIN_NODE}))
+    state = irec.gather(Path(tmp_path), units, irec.load_retired())
+    assert state.pixi_key_conflicts == ()
+
+
+def test_key_conflict_guard_covers_the_nested_lint_feature_anchor(tmp_path):
+    # The guard is generic over anchors: a consumer pinning `rust` in the
+    # nested [feature.lint.dependencies] table conflicts with the rust block.
+    (tmp_path / "pixi.toml").write_text(
+        '[workspace]\nchannels = ["conda-forge"]\nname = "acme"\n'
+        'platforms = ["linux-64"]\n\n[feature.lint.dependencies]\nrust = "1.90.*"\n'
+    )
+    plan = _plan_with_toolchains(tmp_path, frozenset({iunits.TOOLCHAIN_RUST}))
+    assert plan.pixi_key_conflicts == (
+        irec.PixiKeyConflict(
+            unit_key=iunits.PIXI_RUST_DEPS_KEY,
+            anchor=iunits.PIXI_LINT_DEPS_ANCHOR,
+            keys=("rust",),
+        ),
+    )
 
 
 def test_fresh_install_lays_down_the_session_bootstrap_set_idempotently(tmp_path, rec):

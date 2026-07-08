@@ -18,10 +18,17 @@ pixi is used for four things at once: provisioning native tooling, running tasks
 
 ### What pixi is the parent of:
 
-- Provisioning — `pixi install` materialises a Tree's environment.
-- Hook invocations — every Claude Code hook fires as \`pixi run shipit
+Provisioning
 
-  hook \<name\>\` (a transient `pixi run` per firing). - The write-Run agent session — as of PR \#197, \`shipit spawn\` re-expresses the backend argv as `pixi run --manifest-path <tree>/pixi.toml -- <argv>` for a provisioned write Tree, so the agent runs INSIDE its Tree's env (see [\#6](#6), [\#7](#7)).
+: `pixi install` materialises a Tree's environment.
+
+The PreToolUse hook guard
+
+: The one Claude Code hook still fired as a manifest-pinned `pixi run` (\#529). The other managed hooks ride the pinned launcher, `./bin/shipit hook <name>` (\#491) — pixi provisions the env they resolve against but is not their parent process; see [\#6](#6).
+
+The write-Run agent session
+
+: As of PR \#197, \`shipit spawn\` re-expresses the backend argv as `pixi run --manifest-path <tree>/pixi.toml -- <argv>` for a provisioned write Tree, so the agent runs INSIDE its Tree's env (see [\#6](#6), [\#7](#7)).
 
 ### What pixi is NOT the parent of:
 

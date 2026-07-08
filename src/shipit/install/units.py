@@ -102,10 +102,13 @@ PIXI_ENVS_ANCHOR = "[environments]"
 # anchors under `[dependencies]` — it provisions the repo's OWN node/pnpm
 # runtime, not a linter. Delivered only when :func:`load_units` is passed the
 # toolchain signal (`toolchains=`), so the zero-arg catalog is byte-identical
-# to the pre-#547 one. Accepted residue: a consumer that later DELETES its last
-# signal manifest keeps the spliced block + `[managed]` hash until manually
-# removed (block-retirement machinery is out of scope; the block's own comment
-# says how).
+# to the pre-#547 one. A consumer who ALREADY pins one of a block's keys in its
+# anchor table keeps their pin: the first splice would duplicate the TOML key
+# and break pixi.toml, so the reconcile skips delivering that block with a loud
+# warning instead (:class:`shipit.install.reconcile.PixiKeyConflict`). Accepted
+# residue: a consumer that later DELETES its last signal manifest keeps the
+# spliced block + `[managed]` hash until manually removed (block-retirement
+# machinery is out of scope; the block's own comment says how).
 TOOLCHAIN_RUST = "rust"
 TOOLCHAIN_GO = "go"
 TOOLCHAIN_NODE = "node"

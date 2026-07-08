@@ -13,7 +13,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "pixi run -e lint install-hooks"
+            "command": "cd \"$CLAUDE_PROJECT_DIR\" || exit 0; command -v pixi >/dev/null 2>&1 || { echo \"shipit: pixi not on PATH — skipping install-hooks (repo-local best-effort; the Layer 0 bootstrap normally provisions pixi first).\"; exit 0; }; pixi run -e lint install-hooks"
           }
         ]
       }
