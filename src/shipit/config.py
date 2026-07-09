@@ -279,7 +279,7 @@ def _parse_lane(name: str, spec: object) -> Lane:
     if not isinstance(required, bool) or not isinstance(local, bool):
         raise ConfigError(f"[lanes].{name}: `required`/`local` must be booleans")
     trigger = spec.get("trigger", "pr")
-    if trigger not in LANE_TRIGGERS:
+    if not isinstance(trigger, str) or trigger not in LANE_TRIGGERS:
         allowed = ", ".join(sorted(LANE_TRIGGERS))
         raise ConfigError(
             f"[lanes].{name}: `trigger` must be one of {allowed}; got {trigger!r}"

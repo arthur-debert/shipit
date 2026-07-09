@@ -271,6 +271,10 @@ def run_coalesce(
     moves to stderr, so stdout is exactly the one text either way it is asked
     for. A prerelease extracts (nothing written, fragments kept); a resume of
     an already-cut version re-emits the identical notes (ADR-0009).
+
+    An unusable ``--notes-out`` (unwritable parent, a directory) is rejected as
+    a :class:`ChangelogError` BEFORE the tree is mutated, so a bad destination
+    never leaves a cut tree with no notes artifact written.
     """
     read_tree = read_tree or _read_tree
     root = _resolve_root(
@@ -287,6 +291,20 @@ def run_coalesce(
 
     report = sys.stdout if notes_out else sys.stderr
     changelog_dir = root / core.CHANGELOG_DIR
+
+    # Fail BEFORE mutating the tree when the notes destination is unusable:
+    # coalesce's contract is that the cut and its one notes artifact land
+    # together (story 26), so a bad ``--notes-out`` must not leave a cut tree
+    # (section written, fragments gone, CHANGELOG.md re-rendered) with no notes.
+    notes_path = Path(notes_out) if notes_out else None
+    if notes_path is not None:
+        try:
+            notes_path.parent.mkdir(parents=True, exist_ok=True)
+            if notes_path.is_dir():
+                raise OSError(f"{notes_out} is a directory")
+        except OSError as exc:
+            raise ChangelogError(f"cannot write notes to {notes_out}: {exc}") from exc
+
     if plan.section is not None:
         section_path = changelog_dir / f"{plan.version}{core.FRAGMENT_SUFFIX}"
         section_path.write_text(plan.section, encoding="utf-8")
@@ -319,8 +337,11 @@ def run_coalesce(
             file=report,
         )
 
-    if notes_out:
-        Path(notes_out).write_text(plan.notes, encoding="utf-8")
+    if notes_path is not None:
+        try:
+            notes_path.write_text(plan.notes, encoding="utf-8")
+        except OSError as exc:
+            raise ChangelogError(f"cannot write notes to {notes_out}: {exc}") from exc
         print(f"changelog: notes -> {notes_out}", file=report)
     else:
         sys.stdout.write(plan.notes)

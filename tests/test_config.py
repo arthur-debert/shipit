@@ -221,6 +221,13 @@ def test_lanes_trigger_vocabulary_is_closed():
         config.load_lanes({"lanes": {"x": {"run": "lint", "trigger": "PR"}}})
 
 
+def test_lanes_trigger_non_string_is_a_configerror_not_a_typeerror():
+    # TOML parses `trigger = ["pr"]` into a list; the unhashable value must be
+    # rejected as ConfigError (not crash the membership test with a TypeError).
+    with pytest.raises(config.ConfigError, match="`trigger` must be one of"):
+        config.load_lanes({"lanes": {"x": {"run": "lint", "trigger": ["pr"]}}})
+
+
 def test_lanes_entry_must_be_a_table():
     with pytest.raises(config.ConfigError, match=r"\[lanes\].x must be a table"):
         config.load_lanes({"lanes": {"x": "changelog check"}})

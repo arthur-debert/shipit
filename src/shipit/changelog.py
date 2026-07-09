@@ -261,8 +261,8 @@ def render(
 ) -> str:
     """The full ``CHANGELOG.md`` text: preamble, ``# Changelog``, the
     ``## Unreleased`` fragments in order, every version section newest-first
-    (semver §11 via :func:`sort_versions_desc`), then any ``legacy.md`` tail
-    verbatim. Pure.
+    (semver §11 via :func:`sort_versions_desc`), then any ``legacy.md`` tail,
+    the whole normalized to exactly one trailing newline. Pure.
 
     ``sections`` maps each version stem to its ``CHANGELOG/<version>.md``
     content (the section carries its own ``## <version> - <date>`` heading).
@@ -280,7 +280,11 @@ def render(
         parts.append("\n")
     if legacy is not None:
         parts.append(legacy)
-    return "".join(parts)
+    # Exactly one trailing newline: the loop's unconditional "\n" separator would
+    # otherwise leave a blank-line tail (two newlines) when no legacy follows,
+    # tripping markdown linters (MD012) and diverging from what a formatter would
+    # commit — a spurious sync-check (:func:`sync_diff`) failure.
+    return "".join(parts).rstrip() + "\n"
 
 
 def sync_diff(rendered: str, committed: str | None) -> str | None:
