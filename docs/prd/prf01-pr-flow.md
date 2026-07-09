@@ -212,6 +212,8 @@ codex-local = { rerun = false, model = "pro", instructions = "docs/review.md" }
   options: `rerun` (bool, default false = review-once) consumed now by the engine; `model`
   and `instructions` parsed and validated now but **reserved** for the deferred local-agent
   step. Unknown options, unknown/non-requestable reviewer names, and duplicates fail loud.
+  *(Superseded by ADR-0043 / RVW02: the `rerun` default flips to true — head-strict — when
+  the RVW02 incremental-round work lands.)*
 - The backend of a local-agent reviewer is **derived from its name** (`codex-local` → codex,
   `agy-local` → agy); there is no separate backend field.
 - An absent or empty `[reviewers]` table falls back to the shipped default

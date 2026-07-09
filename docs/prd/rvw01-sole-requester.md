@@ -120,6 +120,9 @@ no latency, no new request path.
   stays `rerun = false` (review-once). This repo's config opts Copilot into
   `rerun = true` (head-strict) to generate per-push rounds for tuning the
   breaker rules; dialing it back later is a one-line config change.
+  *(Superseded by ADR-0043 / RVW02: the default flips to `rerun = true` when
+  the RVW02 incremental-round work lands; review-once becomes the explicit
+  opt-out.)*
 - **First request moves to the implementer.** The implementer role's final
   step after opening the draft PR is to run the engine's next-action verb
   once, then stop. The engine still decides what to request; the implementer

@@ -179,10 +179,15 @@ outcome is read LATER from the PR, never from the request. Contrast **App
 reviewer**.
 
 **rerun**:
-A per-reviewer policy flag. `rerun=false` (the default for everyone:
-review-once) — a review on any commit counts as done and is never stale after a
-push. `rerun=true` (head-strict) — the review must be on the current head, so a
-push re-stales it and the reviewer is re-requested.
+A per-reviewer policy flag. `rerun=true` (head-strict) — the review must be on
+the current head, so a push re-stales it and the reviewer is re-requested (on
+the fix range only, after round 1). `rerun=false` (review-once) — a review on
+any commit counts as done and is never stale after a push. Head-strict becomes
+the default for everyone when the RVW02 incremental-round work lands
+(ADR-0043); the shipped default stays review-once until that flip, and
+review-once then survives only as an explicit per-reviewer cost opt-out.
+*Avoid*: review-once as the philosophy (it was a workaround for uncoordinated
+review floods, retired with ADR-0031's sole-requester rule).
 
 **Review round**:
 One iteration of the review loop, keyed by head SHA — all required reviewers'
@@ -233,11 +238,73 @@ state to consult.
 The rule that ends the review loop instead of iterating forever: stop when the
 configured round cap is reached (`round_cap`, a reserved table-level key in
 `[reviewers]` of `.shipit.toml`, landing on `Roster.round_cap`; default 6), or
-when the latest round is all nitpicks.
+when the latest round contains no major-or-worse **Finding** — only critical and
+major findings mint further rounds.
+
+**Finding**:
+One reviewer-reported issue on a PR — a located claim (file, line) carrying a
+**Severity**, a category, and a confidence, arriving PRE-classified from the
+reviewer: schema-emitted by a **local-agent reviewer**, mapped from the
+reviewer's native format by its **Reviewer adapter** for an **App reviewer**. A
+finding whose severity cannot be parsed defaults to `major` — fail-safe: it
+forces a round rather than slipping past the **Breaker**.
+*Avoid*: "comment" as the domain noun (the GitHub comment is the carrier; the
+finding is the classified claim); "issue" (collides with GitHub issues);
+treating category or confidence as routing keys (informational only — the
+engine routes on **Severity** alone).
+
+**Severity**:
+The 4-tier ladder every **Finding** carries — `critical | major | minor | nit`
+— one ladder across all reviewer kinds, read directly by the engine. The
+major/minor boundary is the merge-block test: major-or-worse means a competent
+reviewer would hold the merge for it. Only major+ findings mint further **review
+rounds**; minor and nit findings still require thread resolution before
+**Ready** but never re-open the loop. `critical` = merge would be actively
+harmful (security, data loss, crash, broken build); `major` = concrete
+correctness/behavioral defect worth blocking on; `minor` = worth doing, not
+worth holding the merge; `nit` = the **Nitpick** tier.
+*Avoid*: ERROR/WARNING/INFO (the retired presentational triple); "priority"
+(severity states impact, not work ordering).
+
+**Severity override**:
+The write-once correction that beats a **Finding**'s reviewer-emitted
+**Severity** — the exception path, not a stage: no classification pass exists
+(findings arrive classified), and an override is recorded only when an emitted
+severity is judged wrong.
+*Avoid*: "classification" as a required review-loop step (retired).
 
 **Nitpick**:
-A comment about wording, naming, or style with no correctness, behavioral, or
-security impact. A round that is all nitpicks trips a **breaker**.
+The `nit` tier of **Severity** — wording, naming, or style with no correctness,
+behavioral, or security impact.
+
+**Dimension pass**:
+One scoped finder inside a **local-agent reviewer**'s review run — a single
+pass whose prompt is narrowed to one dimension (correctness, cross-file
+invariants, security/robustness, test quality), run on that reviewer's
+**Backend** against the shared **Read-only Tree**. Passes run in parallel;
+their union feeds the **Calibrator**. The dimension set is a per-reviewer
+**Roster** option.
+*Avoid*: severity-scoped passes (a "highs-only finder" is the decomposition
+the evidence rejects — **Severity** is assigned at calibration; dimensions
+scope the *search*); "sub-reviewer" (a pass has no identity, funnel, or posted
+review — the reviewer does).
+
+**Calibrator**:
+The one fixed judge between dimension passes and the posted review: dedups the
+union, adversarially verifies each **Finding** with tier-appropriate evidence
+(quoted evidence always; a concrete failure scenario for major-or-worse, a
+clear rationale for minor/nit — or the finding is dropped), normalizes
+**Severity** onto the shared ladder, and emits the final severity-ordered
+result. The same
+agent/model for every reviewer — a table-level setting, like `round_cap` — so
+severities are calibrated on one ruler. The calibrator NEVER originates
+findings: a judge, not a finder. Every judged finding gets a disposition —
+posted, or routed out (unverified, nit-suppressed, out-of-scope — pre-existing
+issues being the archetypal out-of-scope routing); routed-out findings are
+retained, not erased — the future **Opportunity** harvest reads them, the
+review never posts them.
+*Avoid*: per-reviewer calibrator models (the common ruler is the point); the
+calibrator posting (the reviewer's own bot identity posts).
 
 **Reviewed**:
 Every required reviewer **settled** — its **review funnel** reached a recorded
@@ -442,6 +509,22 @@ commits when the input is unchanged; a changed prompt hashes differently, so run
 within one commit. `shipit eval report` groups by variant, which is what makes a prompt A/B
 separable by data rather than intuition. *Avoid*: conflating it with a `test` **variant**
 (`lint`/`test`/`build` axis) — same word, unrelated axis.
+
+**Review-round record**:
+The persisted product of one reviewer's review of one **Review round** — the
+judged **Findings** with their severities and dispositions, the coverage
+attestation, and the range reviewed — written verb-witnessed at generate time
+to the same harness-owned, repo-keyed, never-committed JSONL convention as the
+**eval record**, carrying the run ids and **Variant** hashes of every
+contributing **Dimension pass** and the **Calibrator**. The boundary, stated
+once: an **eval record** says how a run *behaved*; a review-round record says
+what the review *concluded*; `shipit eval report` joins them by run id — which
+is what makes a review-prompt A/B answerable by data (recall/FP per variant at
+a cost) rather than intuition.
+*Avoid*: stuffing findings into eval records (a finding is the run's product,
+not its telemetry — the same boundary that keeps **Opportunities** out of eval
+records); treating GitHub threads as the eval source (threads are the
+*engine's* store; the record is the *harness's*).
 
 **Break-glass**:
 A visible, logged escape hatch that lets an actor perform an **operation** its
