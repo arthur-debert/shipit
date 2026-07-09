@@ -1,0 +1,38 @@
+{
+  "meta": {
+    "number": 621,
+    "headRefOid": "c0ffee0000000000000000000000000000000000",
+    "isDraft": true,
+    "mergeable": "MERGEABLE",
+    "mergeStateStatus": "BLOCKED",
+    "reviewRequests": [],
+    "statusCheckRollup": [
+      {
+        "__typename": "CheckRun",
+        "name": "checks / plan",
+        "status": "COMPLETED",
+        "conclusion": "CANCELLED"
+      },
+      {
+        "__typename": "CheckRun",
+        "name": "py-lint",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      }
+    ]
+  },
+  "reviews": [
+    {
+      "id": 6211,
+      "user": {
+        "login": "Copilot"
+      },
+      "state": "APPROVED",
+      "commit_id": "c0ffee0000000000000000000000000000000000",
+      "body": ""
+    }
+  ],
+  "threads": [],
+  "reactions": [],
+  "issue_comments": []
+}

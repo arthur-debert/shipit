@@ -130,6 +130,24 @@ def test_format_status_annotates_degraded_on_the_state_line():
     assert "degraded:   codex-local failed" in out
 
 
+def test_format_status_renders_a_cancelled_checks_verdict():
+    """The `pr status` surface of #621: a dead-run PR renders `checks: cancelled`
+    (its own verdict — never `failing`) and the next line carries the RERUN
+    advice. Asserted on the PURE renderer's return value (ADR-0030)."""
+    status = TaskStatus(
+        state=TaskState.BLOCKED,
+        next_action="CI run cancelled/superseded — rerun (`gh run rerun ...`)",
+        pr=42,
+        reviewers={"copilot": "done_clean"},
+        checks=ChecksState.CANCELLED,
+        mergeable="MERGEABLE",
+    )
+    out = status_verb.format_status(status)
+    assert "checks:     cancelled" in out
+    assert "gh run rerun" in out
+    assert "failing" not in out
+
+
 def test_format_status_renders_no_pr_as_the_short_two_line_form():
     """The pure renderer's no_pr shape: state + next action, nothing else."""
     from shipit.prstate.state import no_pr

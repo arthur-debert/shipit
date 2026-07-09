@@ -22,8 +22,8 @@ Two definitions anchor it (ADR-0006 redefines the first):
              `mergeable` verdict (it reads MERGEABLE optimistically before a
              recompute lands). Check order once
              Reviewed: a conflict (DIRTY) or a BEHIND base surfaces first (a
-             moved base re-stales CI); then failing/pending CI (BLOCKED /
-             VALIDATING); then CLEAN -> READY; an UNSTABLE that survives the CI
+             moved base re-stales CI); then failing/cancelled/pending CI
+             (BLOCKED-fix / BLOCKED-rerun / VALIDATING); then CLEAN -> READY; an UNSTABLE that survives the CI
              checks is a transient ready_for_review re-queue lag (the rollup is
              green) and also goes READY (release#715); an uncomputed (UNKNOWN)
              merge state re-polls; any remaining computed non-CLEAN state
@@ -34,6 +34,16 @@ and a CI fix always pushes a new head, so a red-checks PR never advises (or
 routes to) a review request — it ranks BLOCKED/fix-CI with `to_request`
 suppressed, naming the deferred reviewers in the prose. PENDING (still-running)
 checks do not defer: reviewing in parallel with a green-bound run wastes nothing.
+
+A CANCELLED run is NEITHER of those (#621): a killed run (superseded, manual
+cancel, concurrency-group cancel) never judged the code, so it is not a failure
+("fix and push" is the wrong cure — a rerun of the SAME head is), and it will
+never complete on its own, so it must not read as pending (a waiter would poll
+a corpse forever). `classify_checks` gives it its own verdict — surfaced only
+when nothing is still running (a cancelled entry next to a live one is the
+superseded shape: PENDING wins) — and the engine ranks it BLOCKED with a RERUN
+next-action (`gh run rerun`), deferring review requests one evaluation until
+the rerun is live.
 
 Best-effort reviewers (Gemini) never hold: an absent or in-progress best-effort
 reviewer does not hold the PR in REVIEWS_PENDING. The *skip-after-timeout*
@@ -113,13 +123,19 @@ _HOLDS = {
 _DEGRADED = {FunnelState.FAILED, FunnelState.EMPTY, FunnelState.TIMED_OUT}
 
 # CheckRun conclusions / StatusContext states that count as failures.
+# CANCELLED is deliberately NOT here (#621): a cancelled job means the run was
+# killed (superseded by a newer run, manual cancel, concurrency-group cancel) —
+# the code was never judged, so reading it as FAILING advised "fix and push"
+# for a failure that does not exist. It gets its own classification below.
 _FAIL_CONCLUSIONS = {
     "FAILURE",
     "TIMED_OUT",
-    "CANCELLED",
     "ACTION_REQUIRED",
     "STARTUP_FAILURE",
 }
+# CheckRun conclusions that mean the run was killed, not judged (#621). Only
+# CheckRuns can carry it — legacy StatusContext states have no cancelled value.
+_CANCELLED_CONCLUSIONS = {"CANCELLED"}
 _FAIL_STATES = {"FAILURE", "ERROR"}
 _PENDING_STATUSES = {
     "QUEUED",
@@ -146,6 +162,13 @@ class ChecksState(StrEnum):
     GREEN = "green"
     PENDING = "pending"
     FAILING = "failing"
+    # A run on this head was killed (superseded / manually cancelled / timed out
+    # by a concurrency group) and nothing is still running — the code was never
+    # judged (#621). Distinct from FAILING because the cure is a RERUN of the
+    # same head (`gh run rerun`), never a code fix, and distinct from PENDING
+    # because nothing will ever complete on its own — treating a dead run as
+    # pending would poll it forever.
+    CANCELLED = "cancelled"
 
 
 @dataclass(frozen=True)
@@ -556,6 +579,22 @@ def _evaluate(
                 request_names + rerequest_names, waiting_names
             )
             return status
+        # A dead (cancelled, nothing running) run also outranks review requests
+        # (#621) — but for a different reason than FAILING. The head is NOT
+        # about to change (a rerun re-judges the SAME commit), so a review here
+        # would not be wasted; what forces the ranking is that `pr next`
+        # performs ONE act, and if it spent this invocation placing requests
+        # the rerun advice would stay invisible until the round settled —
+        # leaving the head's CI dead for the whole round. Advising the RERUN
+        # first costs one evaluation, not a round: the moment the rerun is live
+        # the checks read PENDING, which does NOT defer, and the very next
+        # evaluation places the requests in parallel with the running CI.
+        if checks == ChecksState.CANCELLED:
+            status.state = TaskState.BLOCKED
+            status.next_action = _checks_cancelled_deferral_action(
+                request_names + rerequest_names, waiting_names
+            )
+            return status
         status.state = TaskState.REVIEWS_PENDING
         # request ∪ re-request both route to the single `request_review` act; only
         # the wait set (`waiting_names`) leaves `to_request` empty → the dispatcher
@@ -638,6 +677,17 @@ def _evaluate(
         status.next_action = (
             "CI check(s) failing — fix and push before this can be Ready"
         )
+        return status
+
+    # A dead run (#621): cancelled (superseded / manual / concurrency-killed)
+    # with nothing still running. The code was never judged, so the advice is a
+    # RERUN of the same head — never "fix and push". Ranked BLOCKED, not
+    # VALIDATING: nothing will complete on its own, so a waiter treating this
+    # as pending would poll a corpse until its deadline (the #621 hang guard —
+    # `pr wait` sees a terminal, actionable state instead).
+    if checks == ChecksState.CANCELLED:
+        status.state = TaskState.BLOCKED
+        status.next_action = _checks_cancelled_action()
         return status
 
     if checks == ChecksState.PENDING:
@@ -861,6 +911,40 @@ def _checks_failing_deferral_action(
     return action
 
 
+def _checks_cancelled_action() -> str:
+    """Render the RERUN next-action for a dead-run head (#621). PURE
+    human-facing prose, deliberately carrying the literal rerun command AND the
+    negative instruction: the whole point of the CANCELLED classification is
+    that "fix and push" is the WRONG cure for a run that never judged the code
+    (three PRs sat blocked on exactly that advice in the TOL01-FUPS sweep)."""
+    return (
+        "CI run cancelled/superseded, nothing still running — no code failure "
+        "to fix: rerun the workflow on this head (`gh run rerun <run-id> "
+        "--failed`; `gh run list` to find the run), do NOT fix-and-push"
+    )
+
+
+def _checks_cancelled_deferral_action(
+    deferred_names: list[str], waiting_names: list[str]
+) -> str:
+    """Render the rerun-first next-action for a dead-run PR with reviewers
+    still holding (#621) — the CANCELLED sibling of
+    :func:`_checks_failing_deferral_action`. PURE human-facing prose (the
+    dispatcher routes on the suppressed `to_request`, never this text). It
+    names the deferred reviewers so the hold reads intentional, not forgotten —
+    they place on the next evaluation once the rerun is live (PENDING does not
+    defer)."""
+    action = _checks_cancelled_action()
+    if deferred_names:
+        action += (
+            f"; review requests deferred until the rerun is live "
+            f"({', '.join(deferred_names)} pending)"
+        )
+    if waiting_names:
+        action += f"; already requested / in flight: {', '.join(waiting_names)}"
+    return action
+
+
 def _has_stale_review(ctx: ReadinessView, adapter: ReviewerAdapter) -> bool:
     """True iff this reviewer should be RE-REQUESTED because a push staled its
     review — i.e. it has a review on some commit OTHER than the current head.
@@ -892,21 +976,39 @@ def classify_checks(rollup: list[dict]) -> ChecksState:
     """Reduce a gh `statusCheckRollup` to one state.
 
     Handles both CheckRun entries (status/conclusion) and legacy StatusContext
-    entries (state). Failing dominates pending dominates green.
+    entries (state). Failing dominates pending dominates cancelled dominates
+    green:
+
+    - FAILING first: a genuine failure needs a code fix regardless of what else
+      is on the head.
+    - PENDING beats CANCELLED (#621): a cancelled entry next to a still-running
+      one is the SUPERSEDED shape — a newer run (a rerun, or the sibling
+      push/pull_request event's run) is already re-judging the head, so the
+      right verdict is "wait for it", not "rerun".
+    - CANCELLED surfaces only when a run was killed and NOTHING is still
+      running — a genuinely dead head that will never complete on its own. It
+      is deliberately not folded into FAILING (the old #621 bug: "fix and push"
+      advice for code that was never judged) nor into PENDING (a dead run polled
+      forever). The cure is a rerun of the same head.
     """
     if not rollup:
         return ChecksState.NONE
     saw_pending = False
+    saw_cancelled = False
     saw_green = False
     for entry in rollup:
         if _is_failing(entry):
             return ChecksState.FAILING
         if _is_pending(entry):
             saw_pending = True
+        elif _is_cancelled(entry):
+            saw_cancelled = True
         else:
             saw_green = True
     if saw_pending:
         return ChecksState.PENDING
+    if saw_cancelled:
+        return ChecksState.CANCELLED
     return ChecksState.GREEN if saw_green else ChecksState.NONE
 
 
@@ -914,6 +1016,12 @@ def _is_failing(entry: dict) -> bool:
     if entry.get("conclusion") in _FAIL_CONCLUSIONS:
         return True
     return entry.get("state") in _FAIL_STATES
+
+
+def _is_cancelled(entry: dict) -> bool:
+    # CheckRun only: a killed run's conclusion. Legacy StatusContext states have
+    # no cancelled value, so `state` is never consulted here.
+    return entry.get("conclusion") in _CANCELLED_CONCLUSIONS
 
 
 def _is_pending(entry: dict) -> bool:
