@@ -16,6 +16,21 @@ on:
     branches: ['**']
   pull_request:
 
+# Superseded-run hygiene (#645): a branch with an open PR gets BOTH a push run
+# and a pull_request run per push, and without a concurrency group those
+# collisions left cancelled runs whose aggregate `check` read as a FAILED
+# required check on the head. The group is scoped per EVENT and per ref/PR:
+# `github.event_name` keeps the push run and the PR run of the same head in
+# separate groups (they never cancel each other — both verdicts are legit),
+# while within one event a new push cancels the now-superseded in-flight run
+# for the same branch (push: github.ref) or the same PR (pull_request:
+# PR number). A cancelled-because-superseded run belongs to an old head, and
+# the `check` job below turns cancellation into a SKIP, so it is never the
+# surviving verdict on the current head.
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -26,11 +41,16 @@ jobs:
   # ADR-0010 laddered-cutover rule): branch protection requires `check`, and a
   # called workflow's jobs report as "checks / <lane>" — so this job keeps the
   # exact `check` name alive, succeeding iff the block succeeded. Result
-  # propagation only (`if: always()` because a skipped required check would
-  # count as satisfied — the verdict must be explicit).
+  # propagation with one deliberate hole (#645): a CANCELLED block means the
+  # run was superseded (the concurrency group above cancelled it for a newer
+  # head), and the new head's run carries the verdict — so cancellation SKIPS
+  # this job (a skipped required check counts as satisfied, i.e. neutral)
+  # instead of failing it. Every completed result stays explicit via
+  # `if: always()`: success passes, anything else — including a skipped
+  # block — fails.
   check:
     needs: checks
-    if: always()
+    if: always() && needs.checks.result != 'cancelled'
     runs-on: ubuntu-latest
     steps:
       - name: Verdict
