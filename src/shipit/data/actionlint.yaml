@@ -6,11 +6,14 @@
 # repo's own copy is ambient config.
 #
 # Deliberately minimal — actionlint's defaults ARE the canonical rule set:
-#   - self-hosted-runner.labels is EMPTY: the fleet runs on GitHub-hosted
-#     runners, so every custom `runs-on:` label is a finding, never silently
-#     allowed. A repo that genuinely adds a self-hosted runner is a canonical
-#     config change here, rolled fleet-wide — not a per-repo carve-out.
+#   - self-hosted-runner.labels lists the ORG'S OWN runner labels, and nothing
+#     else: a runner label is a fleet-level fact (the org registers the runner;
+#     every repo may target it), so declaring one is a canonical config change
+#     here, rolled fleet-wide — never a per-repo carve-out. Any label outside
+#     this list stays a finding, never silently allowed.
+#       - gpu_t4: the org's NVIDIA T4 GPU larger runner (phos-editor/core's
+#         gpu-painting-test.yml documents the assignment).
 #   - config-variables stays UNSET (null): `vars.*` usage is not checked
 #     against an allowlist, so a repo's Actions variables never red the gate.
 self-hosted-runner:
-  labels: []
+  labels: [gpu_t4]

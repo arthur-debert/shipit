@@ -33,9 +33,10 @@ fixture-testable):
   ``cargo nextest``, …) resolve the Tree's provisioning, hermetic to the
   Tree — not the coordinator env the sweep was launched from.
 - **Applicability derives from the repo's OWN declarations**
-  (:func:`derive_plans`): lint + test everywhere; build where the
-  path→toolchain map declares a buildable leg (ADR-0007 — every map entry
-  is one); e2e where an ``[artifacts]`` entry declares an ``e2e`` table (no
+  (:func:`derive_plans`): lint everywhere; test + build where the
+  path→toolchain map declares a leg (ADR-0007 — every map entry is both;
+  a repo with no ``[toolchains]`` map, a no-code repo, gets n/a cells rather
+  than the verbs' missing-map error); e2e where an ``[artifacts]`` entry declares an ``e2e`` table (no
   declaration = no e2e lane, by design); the changelog check where the
   ``CHANGELOG/`` fragment convention exists. A non-applicable cell is
   RECORDED as such, never silently skipped; an unreadable Tree config proves
@@ -251,10 +252,12 @@ def derive_plans(
 ) -> tuple[ToolPlan, ...]:
     """The pure applicability rules over a repo's parsed declarations.
 
-    lint + test apply EVERYWHERE (every portfolio repo carries a
-    path→toolchain map; its absence is a red cell the tool itself reports —
-    a missing declaration, never a skip). build applies where the map
-    declares a buildable leg (every ``[toolchains]`` entry is one, ADR-0007).
+    lint applies EVERYWHERE (every repo has lintable files). test + build
+    BOTH derive from the path→toolchain map: every ``[toolchains]`` entry is
+    a testable and a buildable leg (ADR-0007), and a repo declaring NO map —
+    a no-code repo, nothing for install to seed — has no test or build lane
+    BY DESIGN: a not-applicable cell, never the verbs' missing-map error (that
+    refusal is right on a code repo, noise on a repo with nothing to declare).
     e2e applies where an ``[artifacts]`` entry declares an ``e2e`` table —
     no declaration means no e2e lane BY DESIGN (PRD story 11), a
     not-applicable cell rather than a failure. The changelog check applies
@@ -266,10 +269,8 @@ def derive_plans(
 
     return (
         ToolPlan("lint", True),
-        ToolPlan("test", True),
-        plan(
-            "build", legs_declared, "no buildable leg declared (empty [toolchains] map)"
-        ),
+        plan("test", legs_declared, "no testable leg declared (no [toolchains] map)"),
+        plan("build", legs_declared, "no buildable leg declared (no [toolchains] map)"),
         plan("e2e", e2e_declared, "no e2e harness declared (no [artifacts] e2e table)"),
         plan("changelog", changelog_dir, f"no {CHANGELOG_DIR}/ fragment convention"),
     )
@@ -280,8 +281,8 @@ def plan_tools(repo_root: Path) -> tuple[ToolPlan, ...]:
 
     Applicability may only prove ABSENCE from a readable declaration: when
     the repo's ``.shipit.toml`` is missing or malformed, the CONFIG-borne
-    facts are unprovable, so build + e2e default to applicable — each runs and
-    fails with its own diagnosis, an honest red cell rather than a silent skip
+    facts are unprovable, so test + build + e2e default to applicable — each
+    runs and fails with its own diagnosis, an honest red cell rather than a silent skip
     (the fix-discipline surface, story 49). "Malformed" spans every way the
     config resists parsing: a :class:`~shipit.config.ConfigError` (bad TOML or
     schema), an ``OSError`` (a permission denial, a mid-read unlink), AND a

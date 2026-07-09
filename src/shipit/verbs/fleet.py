@@ -114,7 +114,7 @@ def sweep_cmd(
 
     For each `[project.portfolio]` repo this cuts a hermetic Tree (the existing
     dissociated-clone machinery), derives tool applicability from the repo's OWN
-    declarations (lint + test everywhere; build where the path->toolchain map
+    declarations (lint everywhere; test + build where the path->toolchain map
     declares a leg; e2e where an artifact declares a harness; the changelog
     check where CHANGELOG/ exists), and runs each applicable tool through the
     Tree's managed launcher under the candidate build (SHIPIT_EXEC, announced)

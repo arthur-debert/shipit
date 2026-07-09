@@ -23,6 +23,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
+import yaml
 
 from shipit import execrun
 from shipit.verbs import lint
@@ -1701,6 +1702,20 @@ def test_canonical_config_maps_file_config_tools_and_only_those(tmp_path):
         assert resolved[binary] is None, binary
 
 
+def test_shipped_actionlint_config_declares_the_org_runner_labels():
+    # #608 (phos-editor/core's red lint cell): an org-registered self-hosted
+    # runner label is a FLEET-level fact, declared once in the canonical
+    # actionlint.yaml the gate pins via -config-file (ADR-0037) — never a
+    # per-repo carve-out (the gate ignores repo-local actionlint.yaml). gpu_t4
+    # is the org's NVIDIA T4 GPU larger runner (phos-core's gpu-painting lane).
+    # Parse the config and assert gpu_t4 under self-hosted-runner.labels
+    # specifically — a raw substring match would also see the explanatory
+    # comment above the mapping, staying green if the real label were deleted.
+    body = Path(lint._data_path("actionlint.yaml")).read_text(encoding="utf-8")
+    config = yaml.safe_load(body)
+    assert "gpu_t4" in config["self-hosted-runner"]["labels"]
+
+
 def test_rust_fmt_injects_the_shipped_rustfmt_config():
     # rustfmt's canonical config rides the cargo fmt tuples inline via `--config-path`
     # (it must follow cargo's `--`, so it is NOT a config_inject placeholder). The
@@ -2173,8 +2188,9 @@ _HERM_SPECS: tuple[_ToolSpec, ...] = (
     # root found by walking UP from the workflow file to a `.git` entry — the
     # fixture plants `.git/HEAD` so the tmp repo IS a project (no `.git`, no
     # discovery, and the case would be vacuously green). The fixture is DIRTY
-    # under canonical (an unknown self-hosted runner label against the shipped
-    # `labels: []`); a hostile repo config DECLARING the label flips it green
+    # under canonical (`my-gpu-box` is not among the shipped labels — those
+    # list only the ORG'S registered runners, e.g. `gpu_t4`, #608); a hostile
+    # repo config DECLARING the label flips it green
     # when honored — the injected `-config-file` is what blocks it (for
     # actionlint even the repo's OWN tracked config is ambient; the gate owns
     # the config outright). No config env var, no $HOME config, and the walk
@@ -2201,7 +2217,7 @@ _HERM_SPECS: tuple[_ToolSpec, ...] = (
         hostile_name=".github/actionlint.yaml",
         hostile_body="self-hosted-runner:\n  labels: [my-gpu-box]\n",
         vectors=(_Vector("cwd"),),
-        expected_ok=False,  # unknown runner label is dirty under canonical labels: []
+        expected_ok=False,  # unknown runner label is dirty under canonical labels
     ),
     # prettier — file-config (`--config`). Only ambient source is the ancestor
     # `.prettierrc` walk (prettier reads no config env var and no plain $HOME
