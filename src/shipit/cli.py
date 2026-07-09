@@ -20,6 +20,7 @@ from .verbs import build as build_verb
 from .verbs import gh_setup, install, lint, logs, verify_apps
 from .verbs import test as test_verb
 from .verbs._context import resolve_root_context
+from .verbs.changelog import changelog as changelog_group
 from .verbs.eval import eval_group
 from .verbs.hook import hook as hook_group
 from .verbs.logevent import log as log_group
@@ -27,6 +28,7 @@ from .verbs.pr import pr as pr_group
 from .verbs.provision import provision as provision_group
 from .verbs.spawn import spawn as spawn_group
 from .verbs.tree import tree as tree_group
+from .verbs.wf import wf as wf_group
 
 #: The CLI entry's own logger — carries the SHIPIT_EXEC announcement's durable
 #: twin (ADR-0033) through the LOG01 pipeline like any subsystem logger.
@@ -239,6 +241,12 @@ def build_cmd(version: str | None, args: tuple[str, ...]) -> None:
     raise SystemExit(build_verb.run(list(args), version=version))
 
 
+# The nested `changelog` group (TOL01-WS06) — the language-agnostic
+# release-notes tool over CHANGELOG/ fragments: the PR-time fragment-sync
+# `check` (the changelog-sync lane's run) and the cut-time `coalesce`.
+root.add_command(changelog_group)
+
+
 # The `logs` reader (LOG01/LOG04, promoted onto the ADR-0030 contract in
 # CLI02): the command, its query minting, and the renderers live in the verb
 # module; the read engine in the `logread` domain package.
@@ -276,6 +284,11 @@ root.add_command(tree_group)
 # The nested `spawn` group (TRE03) — shipit-owned subagent spawning: create a
 # write Tree and launch a backend-agent Run rooted in it (ADR-0017/0019).
 root.add_command(spawn_group)
+
+# The nested `wf` group (TOL01-WS04) — workflow tools: `shipit wf test` runs
+# one workflow/job under act in a container against a crafted event, so a
+# workflow edit is validated locally before any push (PRD stories 40/41).
+root.add_command(wf_group)
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -43,6 +43,11 @@ go-shfmt = "3.*"               # conda-forge name for the `shfmt` binary
 yamllint = "1.38.*"
 prettier = "3.8.*"
 markdownlint-cli = "0.49.*"
+# GitHub Actions workflow gate — the actions Lang of `shipit lint` (TOL01-WS04):
+# workflow YAML under `.github/workflows/` routes to actionlint IN ADDITION to
+# yamllint. Kept in lockstep with the managed lint-deps block below (dogfood
+# drift test).
+actionlint = "1.7.*"
 lefthook = "2.1.*"
 # curl performs `shipit provision lexd`'s pinned-release fetch (through the one
 # exec seam, ADR-0028); pinning it here keeps the lint checks from depending on
@@ -75,6 +80,7 @@ CARGO_INCREMENTAL = "0"
 
 [tasks]
 # >>> shipit-managed tasks (do not edit; regenerate via `shipit install`) >>>
+changelog = "./bin/shipit changelog"
 lint = "./bin/shipit lint"
 logs = "./bin/shipit logs"
 provision-lexd = "./bin/shipit provision lexd"
@@ -104,6 +110,12 @@ version = ">=8"
 # comment below for why.
 [feature.test.dependencies]
 rust = "1.96.*"
+# The act harness behind `shipit wf test` (TOL01-WS04): the real-act smoke in
+# tests/test_wf.py runs a fixture workflow under act in the stock-Ubuntu
+# container. Pinned here (conda-forge, pixi.lock) so the smoke runs wherever
+# the full gate runs; docker itself is host-provided (GH runners and dev
+# machines carry it) — the smoke skips, loudly, when the daemon is absent.
+act = "0.2.*"
 
 [feature.test.tasks]
 # The full-gate suite, THROUGH the test verb (TOL01-WS01, ADR-0039): the task is a
@@ -178,6 +190,8 @@ go-shfmt = "3.*"
 yamllint = "1.38.*"
 prettier = "3.8.*"
 markdownlint-cli = "0.49.*"
+# GitHub Actions workflow gate — the actions Lang of `shipit lint` (TOL01-WS04)
+actionlint = "1.7.*"
 lefthook = "2.1.*"
 # <<< shipit-managed lint deps <<<
 
