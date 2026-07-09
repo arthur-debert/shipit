@@ -144,6 +144,16 @@ def test_render_includes_versions_and_legacy_tail(tmp_path):
     assert text.endswith("# Ancient history\n")
 
 
+def test_render_unwritable_target_is_a_clean_error(tmp_path, capsys):
+    # A write failure (here: CHANGELOG.md is a directory) maps to the uniform
+    # `error: …` surface / exit 1, not a raw OSError traceback (ADR-0030).
+    root = _tree(tmp_path, {"unreleased-a.md": "- a\n"})
+    (root / "CHANGELOG.md").mkdir()
+    assert verb.run_render(str(root), repo_root=_no_git) == 1
+    err = capsys.readouterr().err
+    assert err.startswith("error: cannot write CHANGELOG.md")
+
+
 # --------------------------------------------------------------------------
 # coalesce — the cut-time face
 # --------------------------------------------------------------------------
@@ -151,6 +161,17 @@ def test_render_includes_versions_and_legacy_tail(tmp_path):
 
 def _today() -> str:
     return "2026-07-08"
+
+
+def test_coalesce_mutation_oserror_is_a_clean_error(tmp_path, capsys):
+    # An OSError inside the cut's mutation block (here: the re-render target
+    # CHANGELOG.md is a directory) maps to `error: …` / exit 1, not a traceback.
+    root = _tree(tmp_path, {"unreleased-a.md": "- a\n"})
+    (root / "CHANGELOG.md").mkdir()
+    capsys.readouterr()
+    assert verb.run_coalesce("1.2.3", str(root), repo_root=_no_git, today=_today) == 1
+    err = capsys.readouterr().err
+    assert err.startswith("error: cannot cut 1.2.3")
 
 
 def test_coalesce_final_rolls_consumes_and_rerenders(tmp_path, capsys):

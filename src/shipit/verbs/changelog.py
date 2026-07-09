@@ -36,7 +36,8 @@ from __future__ import annotations
 
 import logging
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -49,6 +50,19 @@ from ..changelog import ChangelogError
 from ._errors import cli_errors
 
 logger = logging.getLogger("shipit.changelog")
+
+
+@contextmanager
+def _fs_mutation(action: str) -> Iterator[None]:
+    """Map a filesystem ``OSError`` to the uniform :class:`ChangelogError`
+    surface (ADR-0030): a write/unlink against a read-only tree or file exits 1
+    with one ``error: …`` line, never a raw traceback (``OSError`` is NOT in
+    ``KNOWN_ERRORS``). ``action`` names the failed operation for the message.
+    """
+    try:
+        yield
+    except OSError as exc:
+        raise ChangelogError(f"{action}: {exc}") from exc
 
 
 # --------------------------------------------------------------------------
@@ -233,7 +247,8 @@ def run_render(
     tree = read_tree(root)
     _require_model(tree)
     rendered = core.render(tree.fragments, tree.sections, legacy=tree.legacy)
-    (root / core.CHANGELOG_FILE).write_text(rendered, encoding="utf-8")
+    with _fs_mutation(f"cannot write {core.CHANGELOG_FILE}"):
+        (root / core.CHANGELOG_FILE).write_text(rendered, encoding="utf-8")
     print(
         f"changelog: rendered {core.CHANGELOG_FILE} "
         f"({len(tree.fragments)} unreleased fragment"
@@ -314,17 +329,21 @@ def run_coalesce(
             raise ChangelogError(f"cannot write notes to {notes_out}: {exc}") from exc
 
     if plan.section is not None:
-        section_path = changelog_dir / f"{plan.version}{core.FRAGMENT_SUFFIX}"
-        section_path.write_text(plan.section, encoding="utf-8")
-        for name in plan.consumed:
-            (changelog_dir / name).unlink()
-        # Re-render the projection from the POST-cut tree so the committed
-        # CHANGELOG.md and the fragment dir move in one step (the sync check
-        # stays green on the cut commit).
-        after = read_tree(root)
-        _require_model(after)
-        rendered = core.render(after.fragments, after.sections, legacy=after.legacy)
-        (root / core.CHANGELOG_FILE).write_text(rendered, encoding="utf-8")
+        # Wrap the cut's filesystem mutations so an OSError (read-only checkout,
+        # transient IO) exits 1 with an ``error: …`` line instead of a traceback
+        # (ADR-0030). _require_model raises ChangelogError, which passes through.
+        with _fs_mutation(f"cannot cut {plan.version}"):
+            section_path = changelog_dir / f"{plan.version}{core.FRAGMENT_SUFFIX}"
+            section_path.write_text(plan.section, encoding="utf-8")
+            for name in plan.consumed:
+                (changelog_dir / name).unlink()
+            # Re-render the projection from the POST-cut tree so the committed
+            # CHANGELOG.md and the fragment dir move in one step (the sync check
+            # stays green on the cut commit).
+            after = read_tree(root)
+            _require_model(after)
+            rendered = core.render(after.fragments, after.sections, legacy=after.legacy)
+            (root / core.CHANGELOG_FILE).write_text(rendered, encoding="utf-8")
         print(
             f"changelog: coalesced {len(plan.consumed)} fragment"
             f"{'s' if len(plan.consumed) != 1 else ''} into "
