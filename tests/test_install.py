@@ -1292,9 +1292,9 @@ def test_codex_hook_commands_adapt_env_and_keep_the_fail_postures():
     assert "CLAUDE_PROJECT_DIR" not in guard_cmd
     # Fail CLOSED (ADR-0038): the pixi-pinned launcher chain, cwd-relative
     # manifest pin, and the exit-2 refusal tail — never a bare `exit 0`.
-    assert "pixi run --manifest-path ./pixi.toml -- ./bin/shipit hook pretooluse" in (
-        guard_cmd
-    )
+    assert "git rev-parse --show-toplevel" in guard_cmd
+    assert 'pixi run --manifest-path "$repo/pixi.toml" -- ' in guard_cmd
+    assert '"$repo/bin/shipit" hook pretooluse' in guard_cmd
     assert "exit 2" in guard_cmd
     assert "exit 0" not in guard_cmd
     # No matcher: Codex tool names are not Claude's, so the entry binds to
@@ -1306,14 +1306,13 @@ def test_codex_hook_commands_adapt_env_and_keep_the_fail_postures():
     session_cmd = session["hooks"][0]["command"]
     assert "CLAUDE_PROJECT_DIR" not in session_cmd
     # Fail OPEN (additive): setup-dev-env best-effort first, the launcher
-    # probe skips cleanly, and the verb's `{"cwd": ...}` payload is
-    # synthesized from $PWD (codex supplies no Claude-shaped stdin payload;
-    # the verb's own cwd fallback covers even a mangled synthesis).
+    # probe skips cleanly, and the verb's `{"cwd": ...}` payload is JSON-encoded
+    # from the session cwd (codex supplies no Claude-shaped stdin payload).
     assert "setup-dev-env.sh" in session_cmd
     assert "exit 0" in session_cmd
-    assert 'printf \'{"cwd":"%s"}\' "$PWD" | ./bin/shipit hook sessionstart' in (
-        session_cmd
-    )
+    assert "git rev-parse --show-toplevel" in session_cmd
+    assert "json.dumps" in session_cmd
+    assert '"$repo/bin/shipit" hook sessionstart' in session_cmd
 
 
 def test_codex_hook_units_coexist_on_one_hooks_file():

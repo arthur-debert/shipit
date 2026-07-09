@@ -315,8 +315,9 @@ SETTINGS_WORKTREECREATE_MARKER = "shipit hook worktreecreate"
 # `.codex/config.toml` and `.codex/hooks.json`, and its hook commands run with
 # the SESSION CWD — so the managed hook entries route straight to the shared
 # `./bin/shipit hook ...` verbs with only that env adaptation (no
-# `$CLAUDE_PROJECT_DIR` cd; the manifest pin is the cwd-relative
-# `./pixi.toml`), never a Codex fork of the lifecycle logic.
+# `$CLAUDE_PROJECT_DIR` cd; the commands resolve the git root from the session
+# cwd before calling the root-pinned launcher/manifest), never a Codex fork of
+# the lifecycle logic.
 #
 # config.toml is a WHOLE-FILE unit: repo-local `.codex/config.toml` is new
 # surface (no repo carries one; shipit's own repo carried only a hand-written
@@ -331,8 +332,7 @@ SETTINGS_WORKTREECREATE_MARKER = "shipit hook worktreecreate"
 # the one file, each owning shipit's single entry in its event array — the
 # SessionStart activation/advisory hook (fail-open, additive; the entry
 # synthesizes the verb's `{"cwd": ...}` payload from `$PWD` because codex
-# supplies no Claude-shaped payload on stdin, and the verb's own cwd fallback
-# covers even a mangled synthesis) and the PreToolUse coordinator tool-guard
+# supplies no Claude-shaped payload on stdin) and the PreToolUse coordinator tool-guard
 # (fail-CLOSED, the ADR-0038 posture: a resolution failure blocks the tool
 # call with exit 2 rather than silently allowing an unchecked edit). The
 # guard entry carries NO matcher: Codex tool names are not Claude's, so the

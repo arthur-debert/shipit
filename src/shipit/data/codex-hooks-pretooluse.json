@@ -1,7 +1,7 @@
 {
   "hooks": [
     {
-      "command": "pixi run --manifest-path ./pixi.toml -- ./bin/shipit hook pretooluse; rc=$?; if [ \"$rc\" -ne 0 ]; then echo \"shipit: tool guard could not run (rc=$rc) — refusing the tool call rather than allowing an unchecked coordinator edit. Likely causes: the session cwd is not a shipit checkout, pixi is not installed, or the pinned shipit environment could not be resolved. Install pixi (https://pixi.sh) if it is missing, then run this command from the project to see the underlying error: pixi run --manifest-path ./pixi.toml -- ./bin/shipit hook pretooluse\" >&2; exit 2; fi",
+      "command": "repo=$(git rev-parse --show-toplevel 2>/dev/null) || { echo \"shipit: tool guard could not locate the git checkout root — refusing the tool call rather than allowing an unchecked coordinator edit.\" >&2; exit 2; }; pixi run --manifest-path \"$repo/pixi.toml\" -- \"$repo/bin/shipit\" hook pretooluse; rc=$?; if [ \"$rc\" -ne 0 ]; then echo \"shipit: tool guard could not run (rc=$rc) — refusing the tool call rather than allowing an unchecked coordinator edit. Likely causes: the session cwd is not inside a shipit checkout, pixi is not installed, or the pinned shipit environment could not be resolved. Install pixi (https://pixi.sh) if it is missing, then run this command from the project to see the underlying error: pixi run --manifest-path \\\"$repo/pixi.toml\\\" -- \\\"$repo/bin/shipit\\\" hook pretooluse\" >&2; exit 2; fi; : \"shipit hook pretooluse\"",
       "type": "command"
     }
   ]

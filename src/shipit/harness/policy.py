@@ -47,9 +47,19 @@ from .role import Role
 COORDINATOR_DENY_REASON = load_coordinator_slice()
 
 #: Tool names that count as a file-mutating `edit` **operation**. Claude Code
-#: spells the write tools `Edit` / `Write` / `MultiEdit` / `NotebookEdit`;
-#: matched case-insensitively so a casing drift can't silently disarm the guard.
-_EDIT_TOOLS = frozenset({"edit", "write", "multiedit", "notebookedit"})
+#: spells the write tools `Edit` / `Write` / `MultiEdit` / `NotebookEdit`; Codex
+#: routes file edits through the `apply_patch` tool. Matched case-insensitively
+#: so a casing drift can't silently disarm the guard.
+_EDIT_TOOLS = frozenset(
+    {
+        "apply_patch",
+        "edit",
+        "functions.apply_patch",
+        "multiedit",
+        "notebookedit",
+        "write",
+    }
+)
 
 
 class Permission(StrEnum):
