@@ -568,3 +568,30 @@ def test_configure_safe_reference_donor_writes_the_four_writer_knobs(monkeypatch
         (["config", "--local", "gc.auto", "0"], "/trees/leaf"),
         (["config", "--local", "maintenance.auto", "false"], "/trees/leaf"),
     ]
+
+
+def test_changed_paths_since_probes_the_three_dot_merge_base_diff(monkeypatch):
+    # The lane planner's path-diff (TOL01-WS05): a REF-named three-dot diff —
+    # the merge-base file set GitHub's "Files changed" shows for a PR.
+    seen = {}
+
+    def fake(args, *, cwd):
+        seen["args"], seen["cwd"] = args, cwd
+        return _ok("src/a.py\n\ncrates/wasm/src/lib.rs\n")
+
+    monkeypatch.setattr(git, "_probe", fake)
+    paths = git.changed_paths_since("origin/main", cwd="/tree")
+    assert seen["args"] == ["diff", "--name-only", "origin/main...HEAD"]
+    assert seen["cwd"] == "/tree"
+    assert paths == ["src/a.py", "crates/wasm/src/lib.rs"]
+
+
+def test_changed_paths_since_answers_none_when_git_cannot(monkeypatch):
+    # A probe: unknown ref / shallow clone / not a checkout is None — the
+    # caller's fail-safe (full scope) decision, never an exception.
+    monkeypatch.setattr(
+        git,
+        "_probe",
+        lambda args, *, cwd: _fail("fatal: bad revision 'origin/gone...HEAD'", rc=128),
+    )
+    assert git.changed_paths_since("origin/gone", cwd="/tree") is None

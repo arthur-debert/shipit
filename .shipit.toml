@@ -64,6 +64,32 @@ agy = {}
 [toolchains]
 "." = "python"
 
+# [lanes] — the declared CI test units (docs/prd/tol01-ci-tools.md story 14):
+# `{ run, required, local, trigger, runner, scope }`, keyed by lane name. The
+# lane planner (`shipit ci plan`, TOL01-WS05) maps these + the CI event + a
+# path-diff to the job matrix the wf-checks workflow block runs (`pixi run
+# <run>` per job); the commit/push checks are DERIVED as the required∩local
+# set — on these declarations exactly `lint` + the fast `test` set, pinned by
+# tests/test_tools_lanes.py, so lefthook and CI enforce one definition.
+# `trigger` defaults to "pr" — the most frequent rung of the planner's trigger
+# ladder, so both lanes run on every PR update, push, nightly and dispatch.
+#
+# `run` names the pixi task the CI job invokes — a thin caller of the shipit
+# verb (ADR-0039), so the job runs the identical implementation a laptop does.
+# The lint lane runs `lint-full` (NOT the managed bare `lint` task): the
+# managed task is a fixed plain string that cannot provision the lex leg's
+# lexd, and shadowing its name would re-create the bare-`pixi run lint`
+# ambiguity — see the task's definition in pixi.toml [feature.lint.tasks].
+[lanes.lint]
+run = "lint-full"
+required = true
+local = true
+
+[lanes.test]
+run = "test"
+required = true
+local = true
+
 # [project] — the CONSUMER-OWNED, un-validated namespace. shipit validates that
 # top-level tables are KNOWN (so a typo dies fast), but `[project]` (alias:
 # `[custom]`) is the well-known escape hatch whose SUBTREE shipit reads but does NOT

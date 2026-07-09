@@ -25,9 +25,11 @@
 # Do not edit — `shipit install` overwrites this file.
 set -euo pipefail
 
-# Keep PIXI_PIN in lockstep with `pixi-version` in .github/workflows/ci.yml
-# (setup-pixi): CI and this bootstrap must provision the same pixi. A drift
-# test (tests/test_install.py) pins the two together.
+# Keep PIXI_PIN in lockstep with `pixi-version` in the wf-checks workflow
+# block (.github/workflows/wf-checks.yml, setup-pixi in both its jobs — since
+# the TOL01-WS05 cutover ci.yml is a thin caller carrying no pin of its own):
+# CI and this bootstrap must provision the same pixi. A drift test
+# (tests/test_install.py) pins the two together.
 PIXI_PIN="0.71.0"
 # uv powers the managed `bin/shipit` launcher's pin resolve (ADR-0033) —
 # without it the pinned launcher cannot exec the repo's stamped build.

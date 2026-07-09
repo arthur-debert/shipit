@@ -180,7 +180,7 @@ def test_lanes_full_field_set_and_order():
                 "local": True,
                 "trigger": "push",
                 "runner": "ubuntu-latest",
-                "scope": "full",
+                "scope": "packages/npm",
             },
             "nightly-e2e": {"run": "e2e", "trigger": "nightly"},
         }
@@ -195,7 +195,7 @@ def test_lanes_full_field_set_and_order():
         local=True,
         trigger="push",
         runner="ubuntu-latest",
-        scope="full",
+        scope="packages/npm",
     )
     # Defaults: advisory, not local, planner-default routing (trigger given).
     assert lanes[1] == config.Lane(name="nightly-e2e", run="e2e", trigger="nightly")
@@ -209,6 +209,20 @@ def test_lanes_run_is_required():
         config.load_lanes({"lanes": {"x": {"required": True}}})
     with pytest.raises(config.ConfigError, match=r"\[lanes\].x: `run` must be"):
         config.load_lanes({"lanes": {"x": {"run": "  "}}})
+
+
+@pytest.mark.parametrize("key", ["runner", "scope"])
+def test_lanes_blank_runner_or_scope_dies_at_parse(key):
+    # A present-but-blank routing hint is a footgun, not a default: a blank
+    # runner is an invalid `runs-on`, a blank scope drops the lane every PR.
+    with pytest.raises(config.ConfigError, match=rf"`{key}` must be a non-empty"):
+        config.load_lanes({"lanes": {"x": {"run": "test", key: "   "}}})
+    # Absent stays the planner default (None), never rejected.
+    lane = config.load_lanes({"lanes": {"x": {"run": "test"}}})[0]
+    assert getattr(lane, key) is None
+    # A real value is stripped, mirroring `run`.
+    stripped = config.load_lanes({"lanes": {"x": {"run": "test", key: " a "}}})[0]
+    assert getattr(stripped, key) == "a"
 
 
 def test_lanes_unknown_key_dies_fast():
@@ -238,7 +252,7 @@ def test_lanes_entry_must_be_a_table():
 def test_lanes_bool_and_string_field_types():
     with pytest.raises(config.ConfigError, match="must be booleans"):
         config.load_lanes({"lanes": {"x": {"run": "lint", "required": "yes"}}})
-    with pytest.raises(config.ConfigError, match="`runner` must be a string"):
+    with pytest.raises(config.ConfigError, match="`runner` must be a non-empty string"):
         config.load_lanes({"lanes": {"x": {"run": "lint", "runner": 3}}})
 
 

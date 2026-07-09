@@ -643,19 +643,28 @@ def _parse_lane(name: str, spec: object) -> Lane:
         raise ConfigError(
             f"[lanes].{name}: `trigger` must be one of {allowed}; got {trigger!r}"
         )
-    runner = spec.get("runner")
-    scope = spec.get("scope")
-    for key, value in (("runner", runner), ("scope", scope)):
-        if value is not None and not isinstance(value, str):
-            raise ConfigError(f"[lanes].{name}: `{key}` must be a string")
+    # `runner`/`scope` are optional (absent = planner default), but a present
+    # value that is blank or whitespace-only is a footgun, not a default: a
+    # blank runner yields an invalid `runs-on` label at workflow runtime, and a
+    # blank scope drops the lane on every PR with a known diff (it can never
+    # match `_in_scope`). Strip and reject empty, exactly as `run` is handled,
+    # so the typo dies at parse instead of misbehaving silently in CI.
+    cleaned: dict[str, str | None] = {}
+    for key, value in (("runner", spec.get("runner")), ("scope", spec.get("scope"))):
+        if value is None:
+            cleaned[key] = None
+        elif not isinstance(value, str) or not value.strip():
+            raise ConfigError(f"[lanes].{name}: `{key}` must be a non-empty string")
+        else:
+            cleaned[key] = value.strip()
     return Lane(
         name=name,
         run=run.strip(),
         required=required,
         local=local,
         trigger=trigger,
-        runner=runner,
-        scope=scope,
+        runner=cleaned["runner"],
+        scope=cleaned["scope"],
     )
 
 
@@ -666,8 +675,8 @@ def load_lanes(cfg: dict) -> list[Lane]:
     Declaration order is preserved (TOML table order), so the planner's job
     emission is deterministic from the file. Raises :class:`ConfigError` on any
     malformed entry — an unknown key, a missing/empty ``run``, an
-    out-of-vocabulary ``trigger`` — so a typo'd lane dies at parse, never as a
-    silently-unrouted CI job.
+    out-of-vocabulary ``trigger``, a blank ``runner``/``scope`` — so a typo'd
+    lane dies at parse, never as a silently-unrouted CI job.
     """
     lanes = cfg.get("lanes", {})
     if not isinstance(lanes, dict):
