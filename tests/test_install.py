@@ -40,6 +40,8 @@ from shipit.install import units as iunits
 from shipit.install.errors import InstallError
 from shipit.verbs import install as verb
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
 
 def _exec_result(rc: int, stdout: str = "", stderr: str = "") -> execrun.ExecResult:
     """A canned ExecResult for the injected lefthook-activation boundary."""
@@ -2074,7 +2076,7 @@ def test_fresh_install_writes_set_and_opens_draft_pr(tmp_path, rec):
     assert result.pr_updated is False
 
     # Managed files landed.
-    assert (tmp_path / "skills" / "shipit-to-prd" / "SKILL.md").is_file()
+    assert (tmp_path / "skills" / "to-prd" / "SKILL.md").is_file()
     assert (tmp_path / "bin" / "shipit").is_file()
     # The AGENTS block was spliced in without losing the consumer's text.
     agents = (tmp_path / "AGENTS.md").read_text()
@@ -2220,13 +2222,13 @@ def test_consumer_edit_surfaces_as_override(tmp_path, rec):
     rec.calls.clear()
 
     # The consumer edits a managed skill file.
-    skill = tmp_path / "skills" / "shipit-to-prd" / "SKILL.md"
+    skill = tmp_path / "skills" / "to-prd" / "SKILL.md"
     skill.write_text("CONSUMER EDIT\n")
 
     _apply(tmp_path, iapply.MODE_PR)
     assert ("pr_create", True) in rec.calls
     assert "### Overrides" in rec.pr_body
-    assert "skills/shipit-to-prd/SKILL.md" in rec.pr_body
+    assert "skills/to-prd/SKILL.md" in rec.pr_body
     # The diff is captured BEFORE the overwrite, so it shows the consumer's edit
     # (a non-empty diff), not an empty diff against what shipit just wrote.
     assert "CONSUMER EDIT" in rec.pr_body
@@ -2449,7 +2451,7 @@ def test_default_install_mid_drift_never_branches_or_opens_pr(tmp_path, rec):
     _apply(tmp_path)
     rec.calls.clear()
 
-    skill = tmp_path / "skills" / "shipit-to-prd" / "SKILL.md"
+    skill = tmp_path / "skills" / "to-prd" / "SKILL.md"
     skill.write_text("CONSUMER EDIT\n")
     result = _apply(tmp_path)
     # The drifted unit was refreshed to shipit's content, in the working tree.
@@ -2460,7 +2462,7 @@ def test_default_install_mid_drift_never_branches_or_opens_pr(tmp_path, rec):
     # the renderer's stderr warning derives from the typed result.
     warning = verb.format_result_warnings(result)
     assert "consumer-edited" in warning
-    assert "skills/shipit-to-prd/SKILL.md" in warning
+    assert "skills/to-prd/SKILL.md" in warning
 
 
 def test_push_flag_pushes_to_branch_without_pr(tmp_path, rec):
@@ -2919,6 +2921,28 @@ def test_activation_output_joins_streams_with_newline(tmp_path):
 # consumer, and its hash pins the packaged manifest to real historical content.
 PRISTINE_WORKFLOW = Path(__file__).parent / "data" / "copilot-review-pristine.yml"
 RETIRED_WORKFLOW_PATH = ".github/workflows/copilot-review.yml"
+RETIRED_SKILL_HASHES = {
+    "skills/shipit-planning/SKILL.md": (
+        "sha256:a16ac4744238b3a5b59da8a887bb6268742fd01a8a285797e0198aba49e44336",
+    ),
+    "skills/shipit-grill-with-docs/SKILL.md": (
+        "sha256:47c25fe56510de6a63da1de9121ef9b6704808f3631d43c7f9ee745f2c32ff62",
+    ),
+    "skills/shipit-grill-with-docs/ADR-FORMAT.md": (
+        "sha256:f1f36cd3f8d3b6474ddd5855da4e233bfc4ae1a1c5024909ccf11871819a41b2",
+    ),
+    "skills/shipit-grill-with-docs/CONTEXT-FORMAT.md": (
+        "sha256:886ce0e96fd0f76f4c72c337c049cf4655227c599862ce920a62297e0929beae",
+    ),
+    "skills/shipit-to-prd/SKILL.md": (
+        "sha256:0f13f20cad06161baff87628ea6b1cf5bac0cc7919beb6176535f9cdf9ae42d8",
+        "sha256:4bdf82e153221545c8340744a5def096316c0cf88f0db9548a373bce6f91d0c1",
+    ),
+    "skills/shipit-to-issues/SKILL.md": (
+        "sha256:4df3706b12c89fb7d844521800addea1c9ab9f448cd7f926b993a5d92f46869b",
+        "sha256:e623a477ad4d81c042b5bbc20fead9cd208b1c73cb35d2954b1fdcd7303d9474",
+    ),
+}
 
 
 def test_decide_retired_covers_the_matrix():
@@ -2990,6 +3014,13 @@ def test_retired_manifest_carries_the_copilot_workflow_history():
     assert fixture_hash in entry.pristine_hashes
 
 
+def test_retired_manifest_carries_the_renamed_skill_history():
+    retired = {r.path: r for r in irec.load_retired()}
+
+    for path, expected_hashes in RETIRED_SKILL_HASHES.items():
+        assert retired[path].pristine_hashes == expected_hashes
+
+
 def test_install_deletes_a_pristine_retired_file(tmp_path, rec):
     # End-to-end: a checkout that still has a pristine copy of the retired
     # workflow sheds it on install, and the Plan/report both carry the outcome.
@@ -3002,6 +3033,25 @@ def test_install_deletes_a_pristine_retired_file(tmp_path, rec):
     assert f"delete   {RETIRED_WORKFLOW_PATH} (retired)" in verb.format_plan(plan)
     _apply(tmp_path)
     assert not victim.exists()
+
+
+def test_install_deletes_a_pristine_retired_skill_file(tmp_path, rec):
+    # A consumer upgrading across the skill rename sheds the old path when its
+    # content is a known pristine copy, while the new skill path is installed.
+    retired_path = "skills/shipit-grill-with-docs/ADR-FORMAT.md"
+    source = REPO_ROOT / "skills/grill-me-with-docs/ADR-FORMAT.md"
+    assert (
+        config.content_hash(source.read_bytes()) in RETIRED_SKILL_HASHES[retired_path]
+    )
+    victim = tmp_path / retired_path
+    victim.parent.mkdir(parents=True)
+    victim.write_bytes(source.read_bytes())
+
+    plan = _plan(tmp_path)
+    assert retired_path in [d.retired.path for d in plan.retire_deletes]
+    _apply(tmp_path)
+    assert not victim.exists()
+    assert (tmp_path / "skills/grill-me-with-docs/ADR-FORMAT.md").is_file()
 
 
 def test_install_keeps_a_modified_retired_file_with_warning(tmp_path, rec):

@@ -35,14 +35,14 @@ REPO = repo_from_slug("acme/widget")
 #: intent supersedes at read time) and records grill start + each ADR; the PRD
 #: and issue skills record their own artifacts.
 PLANNING_EMISSIONS = {
-    "shipit-planning": {"session.intent"},
-    "shipit-grill-with-docs": {
+    "planning": {"session.intent"},
+    "grill-me-with-docs": {
         "session.intent",
         "planning.grill.started",
         "planning.adr.written",
     },
-    "shipit-to-prd": {"planning.prd.written"},
-    "shipit-to-issues": {"planning.epic.minted", "planning.ws.minted"},
+    "to-prd": {"planning.prd.written"},
+    "to-tickets": {"planning.epic.minted", "planning.ws.minted"},
 }
 
 #: An emit-verb call as skill prose spells it — the name is the first token
