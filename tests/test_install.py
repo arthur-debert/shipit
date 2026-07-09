@@ -1165,6 +1165,19 @@ def test_load_units_includes_the_claude_start_launcher():
     assert 'exec claude --worktree "sess-' in text
 
 
+def test_load_units_includes_the_codex_start_launcher():
+    units = {u.key: u for u in iunits.load_units()}
+    assert iunits.CODEX_LAUNCHER_FILE in units
+    unit = units[iunits.CODEX_LAUNCHER_FILE]
+    assert unit.kind == "file"
+    assert unit.dest == "codex-start"
+    assert unit.executable is True
+    text = unit.content.decode("utf-8")
+    assert "command -v codex" in text
+    assert 'exec "$repo/bin/shipit" session codex "$@"' in text
+    assert "exec codex" not in text
+
+
 def test_managed_settings_hooks_agree_with_shipits_own_settings():
     # The dogfood drift guard (the WS01 pattern), for the drift class behind #443
     # Finding B: shipit's own .claude/settings.json wired WorktreeCreate while the
@@ -2008,6 +2021,11 @@ def test_fresh_install_lays_down_the_session_bootstrap_set_idempotently(tmp_path
     assert os.access(launcher, os.X_OK)
     assert "--worktree" in launcher.read_text()
 
+    codex_launcher = tmp_path / "codex-start"
+    assert codex_launcher.is_file()
+    assert os.access(codex_launcher, os.X_OK)
+    assert "session codex" in codex_launcher.read_text()
+
     # The SessionStart activation hook landed in .claude/settings.json.
     settings = json.loads((tmp_path / ".claude" / "settings.json").read_text())
     entries = settings["hooks"]["SessionStart"]
@@ -2018,17 +2036,20 @@ def test_fresh_install_lays_down_the_session_bootstrap_set_idempotently(tmp_path
     # Both recorded a pristine hash in the manifest.
     managed = config.load_managed(config.load(tmp_path / ".shipit.toml"))
     assert iunits.LAUNCHER_FILE in managed
+    assert iunits.CODEX_LAUNCHER_FILE in managed
     assert iunits.SETTINGS_SESSIONSTART_KEY in managed
 
     # Idempotent: a second reconcile decides NOOP for everything — nothing to
     # apply, no git, no PR, artifacts byte-identical.
     rec.calls.clear()
     launcher_before = launcher.read_bytes()
+    codex_launcher_before = codex_launcher.read_bytes()
     settings_before = (tmp_path / ".claude" / "settings.json").read_bytes()
     again = _plan(tmp_path)
     assert again.nothing_to_do
     assert rec.calls == []
     assert launcher.read_bytes() == launcher_before
+    assert codex_launcher.read_bytes() == codex_launcher_before
     assert (tmp_path / ".claude" / "settings.json").read_bytes() == settings_before
 
 

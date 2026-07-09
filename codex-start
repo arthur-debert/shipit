@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# codex-start — launch an isolated Codex coordinator session. Installed and
+# managed by `shipit install`.
+#
+# THIN by design (the `claude-start` sibling, CDX01 #604): all the launch logic
+# lives in `shipit session codex` — mint a `codex-<utc>-<pid>` session id,
+# provision the central-root ephemeral session Tree for it (ADR-0027, the same
+# Tree machinery every shape uses), then exec interactive codex rooted in that
+# Tree (`--cd` + process cwd). Codex has no Claude-style WorktreeCreate seam, so
+# unlike `claude-start` this cannot ride a `--worktree` flag: the pinned
+# `./bin/shipit` launcher (ADR-0033) does the provisioning explicitly and codex
+# starts second.
+#
+# Convenience only, never a requirement: `./bin/shipit session codex [ARGS...]`
+# works identically without this file. Args are forwarded to codex verbatim.
+#
+# Do not edit — `shipit install` overwrites this file.
+set -euo pipefail
+
+if ! command -v codex >/dev/null 2>&1; then
+	echo "codex-start: the codex CLI is not on PATH — install Codex first." >&2
+	exit 127
+fi
+
+repo="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ ! -x "$repo/bin/shipit" ]; then
+	echo "codex-start: $repo/bin/shipit is missing or not executable — run 'shipit install' to (re)provision the pinned launcher." >&2
+	exit 127
+fi
+
+exec "$repo/bin/shipit" session codex "$@"

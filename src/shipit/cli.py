@@ -29,6 +29,7 @@ from .verbs.hook import hook as hook_group
 from .verbs.logevent import log as log_group
 from .verbs.pr import pr as pr_group
 from .verbs.provision import provision as provision_group
+from .verbs.session import session as session_group
 from .verbs.spawn import spawn as spawn_group
 from .verbs.tree import tree as tree_group
 from .verbs.wf import wf as wf_group
@@ -313,6 +314,11 @@ root.add_command(tree_group)
 # The nested `spawn` group (TRE03) — shipit-owned subagent spawning: create a
 # write Tree and launch a backend-agent Run rooted in it (ADR-0017/0019).
 root.add_command(spawn_group)
+
+# The nested `session` group (CDX01 #604) — coordinator-session bootstrap for
+# backends with no pre-launch cwd seam: `session codex` provisions the
+# ephemeral session Tree (ADR-0027) and execs interactive codex rooted in it.
+root.add_command(session_group)
 
 # The nested `fleet` group (TOL01-WS07) — fleet-wide verification over the
 # declared [project.portfolio]: `shipit fleet sweep` runs every applicable

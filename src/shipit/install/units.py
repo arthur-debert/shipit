@@ -347,6 +347,15 @@ CODEX_HOOKS_FILE = ".codex/hooks.json"
 CODEX_SESSIONSTART_KEY = ".codex/hooks.json#shipit-sessionstart-hook"
 CODEX_PRETOOLUSE_KEY = ".codex/hooks.json#shipit-pretooluse-hook"
 
+# The CDX01 `./codex-start` launcher (#604): the `claude-start` sibling for a
+# Codex coordinator session. Codex has no Claude-style WorktreeCreate seam, so
+# the launcher cannot ride a `--worktree` flag — it execs the pinned
+# `./bin/shipit session codex`, which provisions the ephemeral session Tree
+# explicitly (ADR-0027, the same Tree machinery) and then execs interactive
+# codex rooted in it. Ships like `claude-start` (an executable whole-file
+# bootstrap unit at the repo root).
+CODEX_LAUNCHER_FILE = "codex-start"
+
 # The settings.json hooks-event arrays each JSON-hook unit owns one entry of.
 EVENT_PRETOOLUSE = "PreToolUse"
 EVENT_STOP = "Stop"
@@ -678,6 +687,20 @@ def load_units(*, toolchains: frozenset[str] = frozenset()) -> list[Unit]:
                 marker=marker,
             )
         )
+
+    # The CDX01 `./codex-start` launcher (#604): the Codex sibling of the
+    # `claude-start` unit above — same executable whole-file bootstrap shape,
+    # but it execs `./bin/shipit session codex` (explicit Tree provisioning
+    # then codex) instead of riding a pre-launch harness flag.
+    units.append(
+        Unit(
+            key=CODEX_LAUNCHER_FILE,
+            dest=CODEX_LAUNCHER_FILE,
+            kind="file",
+            content=data_bytes("bootstrap", "codex-start"),
+            executable=True,
+        )
+    )
 
     # The CDX01 Codex project layer (#603): the thin whole-file config and the
     # two `.codex/hooks.json` JSON-hook units — the SessionStart hook and the

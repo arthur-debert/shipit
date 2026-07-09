@@ -14,9 +14,10 @@ the hook is the one verb that witnesses a session beginning):
    Bash tool call. Result: the coordinator's environment is active for every Bash
    call with no wrapper — ``shipit``/``python`` resolve without a ``pixi run``
    prefix.
-2. **Liveness** (SES02) — record which Claude session owns this Tree: walk the
-   hook's own ancestry to the ``claude`` process (the hook runs as its
-   great-grandchild: claude → shell → ``pixi run`` → ``shipit``) and write the
+2. **Liveness** (SES02) — record which session owns this Tree: walk the
+   hook's own ancestry to the session-host process — ``claude`` or ``codex``,
+   whichever backend's SessionStart entry fired this verb (the hook runs as its
+   great-grandchild: claude/codex → shell → ``pixi run`` → ``shipit``) — and write the
    :mod:`shipit.session.liveness` pidfile — PID, payload ``session_id``, and the
    PID's OS create-time, read NOW, at write time — into the Tree's ``.git`` dir.
    This is the signal the ephemeral-Tree gc ladder consults so an idle-but-live
@@ -52,7 +53,7 @@ the gc ladder's liveness-independent rungs (the dirty/unpushed floor, the grace
 window, the hard cap) carry teardown safety even with no pidfile, and a record
 missing its ``session`` key is merely less sliceable, never lost. ANY failure in
 any step (no ``CLAUDE_ENV_FILE``, bad payload, no toolchain, a pixi error, an
-unwritable file, no claude ancestor, a cwd that is no ephemeral Tree) must
+unwritable file, no session-host ancestor, a cwd that is no ephemeral Tree) must
 therefore cost the session NOTHING: skip that write and exit 0 — and the steps
 fail open INDEPENDENTLY, so a broken activation never costs the session its
 liveness record or its log context, or vice versa. The source-clone warning is
@@ -66,7 +67,7 @@ calibration (#349: is this cwd an ephemeral Tree? — same path arithmetic, same
 *write* half keeps the canon's WARNING like the other writes. Levels
 follow the fail-open canon in :mod:`shipit.verbs.hook`: a swallowed exception is
 a degraded-but-continuing outcome and logs at WARNING; a clean no-op (no
-``CLAUDE_ENV_FILE``, no toolchain, no claude ancestor, not a clone, not an
+``CLAUDE_ENV_FILE``, no toolchain, no session-host ancestor, not a clone, not an
 ephemeral Tree) is mechanics and stays at DEBUG.
 
 The env file is opened in APPEND mode: ``CLAUDE_ENV_FILE`` is a shared seam other
@@ -130,7 +131,7 @@ def cmd() -> None:
     Reads the ``SessionStart`` payload as JSON on stdin. Always exits 0; each of
     the steps (activation, log-context export, liveness pidfile, session event,
     source-clone warning) fails OPEN independently on any error, and a repo with
-    no activatable toolchain / no claude ancestor / a cwd that is not a source
+    no activatable toolchain / no session-host ancestor / a cwd that is not a source
     clone or not an ephemeral Tree is a clean no-op for that check.
     """
     raise SystemExit(run())
@@ -154,7 +155,7 @@ def run(
     ``sys.stdout`` / ``os.environ`` / :func:`shipit.execrun.run` /
     :func:`shipit.session.liveness.os_probe` / ``os.getpid()`` /
     :func:`shipit.gh.commits_ahead`) so tests assert every step without a live
-    pixi, a real claude process tree, or the network. Each check is wrapped fail-open on its own, so a
+    pixi, a real session-host process tree, or the network. Each check is wrapped fail-open on its own, so a
     bad payload, a pixi failure, an unwritable env file, a probe error, or a
     detection error can never crash the session — and a failure in one check
     never suppresses the others. The log-context export runs AFTER activation so
@@ -482,31 +483,33 @@ def _emit_session_started(raw: str) -> None:
 def _write_liveness(
     raw: str, *, probe: liveness.Probe | None, self_pid: int | None
 ) -> None:
-    """The liveness half: find the claude ancestor, write the pidfile into the Tree.
+    """The liveness half: find the session-host ancestor, write the pidfile into the Tree.
 
     The recorded PID is NOT this hook's own — the hook runs as a great-grandchild
-    of the session (claude → shell → ``pixi run`` → ``shipit``) — but the nearest
-    ancestor whose command line looks like Claude Code
-    (:func:`~shipit.session.liveness.find_claude_process`); its create-time is
+    of the session (claude/codex → shell → ``pixi run`` → ``shipit``) — but the
+    nearest ancestor whose command line looks like a session host (Claude Code or
+    Codex, :func:`~shipit.session.liveness.find_session_process` — both backends'
+    SessionStart entries route here); its create-time is
     read from the OS here, at write time, exactly as ADR-0027 specifies. Skipped
     cleanly (DEBUG log, no pidfile) when the session's cwd is not a git clone
-    (nowhere durable to record), no claude ancestor is found (launched outside a
-    session), or the ancestor's create-time is unreadable (a record ``is_live``
-    could never verify would only ever read as dead). Fail-open in isolation.
+    (nowhere durable to record), no session-host ancestor is found (launched
+    outside a session), or the ancestor's create-time is unreadable (a record
+    ``is_live`` could never verify would only ever read as dead). Fail-open in
+    isolation.
     """
     try:
         tree = _payload_cwd(raw)
         if not (tree / ".git").is_dir():
             logger.debug("sessionstart: %s is not a clone — no pidfile written", tree)
             return
-        info = liveness.find_claude_process(
+        info = liveness.find_session_process(
             self_pid if self_pid is not None else os.getpid(),
             probe if probe is not None else liveness.os_probe,
         )
         if info is None or info.create_time is None:
             logger.debug(
-                "sessionstart: no claude ancestor with a readable create-time — "
-                "no pidfile written"
+                "sessionstart: no session-host ancestor with a readable create-time "
+                "— no pidfile written"
             )
             return
         record = liveness.LivenessRecord(

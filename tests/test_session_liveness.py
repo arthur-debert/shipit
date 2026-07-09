@@ -20,9 +20,9 @@ from shipit.session.liveness import (
     CREATE_TIME_TOLERANCE_SECONDS,
     LivenessRecord,
     ProcessInfo,
-    find_claude_process,
+    find_session_process,
     is_live,
-    looks_like_claude,
+    looks_like_session_host,
     pidfile_path,
     read_pidfile,
     remove_pidfile,
@@ -103,7 +103,7 @@ def test_tolerance_boundary_is_inclusive():
 
 
 # --------------------------------------------------------------------------
-# find_claude_process — the hook's ancestor walk
+# find_session_process — the hook's ancestor walk
 # --------------------------------------------------------------------------
 
 
@@ -114,7 +114,7 @@ def test_finds_claude_ancestor_through_the_hook_chain():
         90: _info(pid=90, ppid=80, argv="pixi run shipit hook sessionstart"),
         80: _info(pid=80, ppid=1, argv=NODE_ARGV),
     }
-    found = find_claude_process(100, table.get)
+    found = find_session_process(100, table.get)
     assert found is not None
     assert found.pid == 80
     assert found.create_time == CREATED
@@ -127,22 +127,22 @@ def test_walk_without_claude_ancestor_finds_nothing():
         100: _info(pid=100, ppid=90, argv="python -m shipit hook sessionstart"),
         90: _info(pid=90, ppid=1, argv="/bin/zsh -l"),
     }
-    assert find_claude_process(100, table.get) is None
+    assert find_session_process(100, table.get) is None
 
 
 def test_walk_stops_on_a_dead_link():
     table = {100: _info(pid=100, ppid=90, argv="python whatever")}
-    assert find_claude_process(100, table.get) is None
+    assert find_session_process(100, table.get) is None
 
 
 def test_walk_survives_a_self_parenting_probe():
     # A degenerate probe (pid == ppid) must terminate, not loop forever.
     table = {100: _info(pid=100, ppid=100, argv="python whatever")}
-    assert find_claude_process(100, table.get) is None
+    assert find_session_process(100, table.get) is None
 
 
 # --------------------------------------------------------------------------
-# looks_like_claude — the argv matcher (token-shaped, never whole-argv substring)
+# looks_like_session_host — the argv matcher (token-shaped, never whole-argv substring)
 # --------------------------------------------------------------------------
 
 
@@ -159,7 +159,7 @@ def test_walk_survives_a_self_parenting_probe():
     ],
 )
 def test_real_session_argvs_look_like_claude(argv):
-    assert looks_like_claude(argv) is True
+    assert looks_like_session_host(argv) is True
 
 
 @pytest.mark.parametrize(
@@ -180,7 +180,50 @@ def test_real_session_argvs_look_like_claude(argv):
     ],
 )
 def test_incidental_claude_mentions_do_not_look_like_claude(argv):
-    assert looks_like_claude(argv) is False
+    assert looks_like_session_host(argv) is False
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        # A Codex coordinator session is a session host too (CDX01 #604): its
+        # .codex/hooks.json SessionStart entry fires the same hook verb, so the
+        # walk must recognize the codex ancestor or every codex session Tree
+        # reads not-live (and gc reclaims it out from under a live session).
+        "codex --cd /trees/o/r/ephemeral/codex-20260709-1 "
+        "--dangerously-bypass-approvals-and-sandbox",
+        "/Users/x/.local/bin/codex --cd /tmp/tree",
+    ],
+)
+def test_codex_session_argvs_look_like_a_session_host(argv):
+    assert looks_like_session_host(argv) is True
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        # Incidental `.codex/…` path segments and near-miss names are strangers,
+        # exactly like the `.claude/…` intermediates above.
+        "vi /repo/.codex/config.toml",
+        "/usr/local/bin/codexctl --serve",
+        "mycodex --help",
+    ],
+)
+def test_incidental_codex_mentions_do_not_look_like_a_session_host(argv):
+    assert looks_like_session_host(argv) is False
+
+
+def test_finds_codex_ancestor_through_the_hook_chain():
+    # The codex chain the SessionStart hook sees (CDX01 #604): shipit ← the
+    # .codex/hooks.json shell command ← codex.
+    table = {
+        100: _info(pid=100, ppid=90, argv="python -m shipit hook sessionstart"),
+        90: _info(pid=90, ppid=80, argv="bash -c ./bin/shipit hook sessionstart"),
+        80: _info(pid=80, ppid=1, argv="codex --cd /trees/o/r/ephemeral/codex-1"),
+    }
+    found = find_session_process(100, table.get)
+    assert found is not None
+    assert found.pid == 80
 
 
 def test_walk_passes_through_a_dot_claude_shell_wrapper():
@@ -193,7 +236,7 @@ def test_walk_passes_through_a_dot_claude_shell_wrapper():
         90: _info(pid=90, ppid=80, argv=wrapper),
         80: _info(pid=80, ppid=1, argv="claude --dangerously-skip-permissions"),
     }
-    found = find_claude_process(100, table.get)
+    found = find_session_process(100, table.get)
     assert found is not None
     assert found.pid == 80
 
