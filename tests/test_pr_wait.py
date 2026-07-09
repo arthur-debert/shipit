@@ -3,7 +3,8 @@
 Proves the verb registers on the `pr` group and that its run shell — resolve →
 loop(gather → evaluate) → render — wires the engine's `wait_for` with the
 config-owned poll interval, the stderr progress line, and the exit-code
-contract (0 fired / 1 error / 2 usage / 3 timeout). The loop's own semantics
+contract (0 fired / 1 error / 2 usage / 3 timeout / 4 caller-actionable stop,
+#583). The loop's own semantics
 (conditions, clamped deadline, event emission) are the engine's and are
 unit-tested in test_prstate_wait.py; here the boundary (resolver / gather /
 evaluate / load_roster) is monkeypatched — no network, no real time.
@@ -176,6 +177,47 @@ def test_timeout_is_the_distinct_exit_code_with_a_state_report(
     # "waiting on …" lead.
     assert "— waiting on: copilot re-review" in out
     assert "waiting on: waiting on:" not in out
+
+
+def test_addressing_stops_a_ready_wait_with_the_distinct_exit_code(
+    patched_wait, monkeypatch, capsys
+):
+    # The #583 deadlock guard: `--until ready` observing `addressing` — a state
+    # only the waiting caller can clear — exits promptly with the DISTINCT code
+    # 4 and the engine's next-action line, instead of polling to the deadline.
+    monkeypatch.setattr(
+        wait_verb,
+        "evaluate",
+        lambda ctx: _status(TaskState.ADDRESSING, ctx.number, "classify 1 finding(s)"),
+    )
+    clock = Clock()
+    rc = wait_verb.run(
+        42,
+        until=Until.READY,
+        timeout_seconds=1800.0,
+        repo=REPO,
+        sleep=clock.sleep,
+        monotonic=clock.monotonic,
+    )
+    assert rc == wait_verb.EXIT_ACTIONABLE == 4
+    assert clock.naps == []  # the first observation already stops the wait
+    out = capsys.readouterr().out
+    assert "addressing" in out
+    assert "classify 1 finding(s)" in out
+
+
+def test_actionable_json_carries_the_distinct_outcome(
+    patched_wait, monkeypatch, capsys
+):
+    monkeypatch.setattr(
+        wait_verb, "evaluate", lambda ctx: _status(TaskState.ADDRESSING, ctx.number)
+    )
+    rc = cli.main(["pr", "wait", "--until", "ready", "--json"])
+    assert rc == 4
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["outcome"] == "actionable"
+    assert payload["until"] == "ready"
+    assert payload["status"]["state"] == "addressing"
 
 
 def test_progress_lines_go_to_stderr_on_state_change(patched_wait, monkeypatch, capsys):
