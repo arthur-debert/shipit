@@ -42,7 +42,6 @@ import logging
 import shlex
 import sys
 import time
-from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -85,57 +84,6 @@ def verdict(runs: Sequence[StepRun]) -> int:
     contract's non-usage half (ADR-0030; usage errors exit 2 before any step
     runs)."""
     return 0 if all(run.ok for run in runs) else 1
-
-
-def _check_targets_mapped(
-    artifacts: Sequence[config.Artifact], entries: Sequence[config.ToolchainEntry]
-) -> None:
-    """An artifact build target whose toolchain has NO ``[toolchains]`` leg
-    would silently never build — a config inconsistency, refused loudly
-    (checked against the WHOLE map, before any leg selection, so a selector
-    never masks or fakes the error)."""
-    mapped = {entry.toolchain for entry in entries}
-    orphaned = sorted(
-        {
-            f"{artifact.name} -> {target.toolchain}"
-            for artifact in artifacts
-            for target in artifact.build
-            if target.toolchain not in mapped
-        }
-    )
-    if orphaned:
-        raise config.ConfigError(
-            "[artifacts] build targets name toolchains with no [toolchains] "
-            f"leg: {'; '.join(orphaned)}"
-        )
-
-
-def _check_targets_unambiguous(
-    artifacts: Sequence[config.Artifact], planned: Sequence[legs_mod.Leg]
-) -> None:
-    """A build target names a toolchain, not a path (ADR-0007). When the
-    SELECTED legs carry more than one leg of a toolchain some artifact targets,
-    the producing path is ambiguous — the join would build that target in every
-    such leg's cwd (the wrong one for all but one, e.g. ``cargo build -p pkg``
-    in a workspace without ``pkg``). Refuse loudly rather than run wrong-cwd
-    builds; declaring one build-bearing path per toolchain (or selecting a
-    single leg) resolves it. Checked on the PLANNED legs, so a path selector
-    that narrows to one leg is a clean, unambiguous build."""
-    targeted = {target.toolchain for artifact in artifacts for target in artifact.build}
-    counts = Counter(leg.toolchain for leg in planned)
-    ambiguous = sorted(
-        f"{toolchain} ({counts[toolchain]} paths)"
-        for toolchain in targeted
-        if counts[toolchain] > 1
-    )
-    if ambiguous:
-        raise config.ConfigError(
-            "[artifacts] build targets name a toolchain mapped to multiple "
-            f"selected [toolchains] paths, so the producing path is ambiguous: "
-            f"{'; '.join(ambiguous)}. A target names a toolchain, not a path "
-            "(ADR-0007) — declare one build-bearing path per toolchain, or "
-            "select a single leg (e.g. `shipit build <path>`)."
-        )
 
 
 def _run_step(
@@ -200,7 +148,7 @@ def run(
     entries = require_entries(cfg, root, TOOL)
     selector, passthrough = split_args(tuple(args), entries)
     artifacts = config.load_artifacts(cfg)
-    _check_targets_mapped(artifacts, entries)
+    build_mod.check_targets_mapped(artifacts, entries)
 
     try:
         planned = legs_mod.plan_legs(
@@ -213,7 +161,7 @@ def run(
         logger.error("build invocation rejected", extra={"root": str(root)})
         return 2
 
-    _check_targets_unambiguous(artifacts, planned)
+    build_mod.check_targets_unambiguous(artifacts, planned)
     steps = build_mod.plan_build(planned, artifacts, version=version)
     run_step = run_step or _run_step
     # Accumulate into a fresh list so the verdict is this invocation's alone; a

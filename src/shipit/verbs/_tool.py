@@ -1,11 +1,13 @@
-"""Shared shell pieces of the tree-input Tool verbs (``test``, ``build``).
+"""Shared shell pieces of the Tool verbs (``test``, ``build``, ``e2e``).
 
 Every tree-input Tool verb (ADR-0039) has the same rim: split the raw CLI
 args into (selector, passthrough), read the ``.shipit.toml`` map, and turn a
 missing map into the pointed per-verb error. Extracted here (TOL01-WS02) so
 ``shipit build`` reuses the exact boundary ``shipit test`` shipped rather
-than re-implementing it; the verbs keep their own run loops, timeouts, and
-reporting — this module is the rim, not the wheel.
+than re-implementing it; the artifact-input ``shipit e2e`` (TOL01-WS03)
+reuses the first two pieces (:func:`split_args`, :func:`load_config`) with
+its selector naming an ARTIFACT rather than a leg. The verbs keep their own
+run loops, timeouts, and reporting — this module is the rim, not the wheel.
 """
 
 from __future__ import annotations
