@@ -128,3 +128,14 @@ def test_output_schema_path_is_accepted_and_ignored():
     )
     assert "--output-schema" not in cmd
     assert "/tmp/s.json" not in cmd
+
+
+def test_build_command_pins_a_model_when_the_instance_carries_one():
+    # RVW02-WS04: the review Calibrator's table-level config can pin claude's
+    # model; a per-run adapter instance carries it as `--model <id>` — the
+    # default (registry) instance still omits the flag entirely.
+    cmd = claude_backend.ClaudeAdapter(model="opus-x").build_command("task", "reviewer")
+    assert cmd[cmd.index("--model") + 1] == "opus-x"
+    assert "--model" not in claude_backend.ClaudeAdapter().build_command(
+        "task", "reviewer"
+    )

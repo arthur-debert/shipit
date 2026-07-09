@@ -614,3 +614,55 @@ def test_local_cancel_is_a_noop():
     # no-mechanism backend.
     assert CODEX.cancel(_target(7)) is False
     assert AGY.cancel(_target(9)) is False
+
+
+def test_local_request_threads_dimensions_and_table_policy(monkeypatch, tmp_path):
+    # RVW02-WS04: the per-reviewer `dimensions` ride the entry (same seam as
+    # model/instructions); the table-level calibrator + nit cap ride the
+    # ReviewPolicy — all threaded to the detached child as VALUES, never a
+    # config re-read inside the run path.
+    from shipit.prstate.reviewers_config import load_roster
+    from shipit.review import service
+
+    (tmp_path / ".shipit.toml").write_text(
+        "[reviewers]\n"
+        "nit_cap = 2\n"
+        'calibrator = { backend = "claude", reasoning = "medium" }\n'
+        "copilot = {}\n"
+        'codex = { dimensions = ["correctness", "security-robustness"] }\n',
+        encoding="utf-8",
+    )
+
+    captured: dict = {}
+
+    def fake_start_detached(agent, pr, **kwargs):
+        captured.update(kwargs)
+        return True
+
+    monkeypatch.setattr(service, "start_detached_review", fake_start_detached)
+    roster = load_roster(str(tmp_path))
+    assert CODEX.request(_target(3), roster.entry("codex"), policy=roster.policy)
+    assert captured["dimensions"] == ("correctness", "security-robustness")
+    assert captured["nit_cap"] == 2
+    assert captured["calibrator"].backend == "claude"
+    assert captured["calibrator"].reasoning == "medium"
+
+
+def test_local_request_omits_unset_fanout_config(monkeypatch, tmp_path):
+    # Unset values stay OMITTED so the run path's shipped defaults remain the
+    # single source of the default (no None-vs-default ambiguity in kwargs).
+    from shipit.prstate.roster import ReviewPolicy
+    from shipit.review import service
+
+    captured: dict = {}
+
+    def fake_start_detached(agent, pr, **kwargs):
+        captured.update(kwargs)
+        return True
+
+    monkeypatch.setattr(service, "start_detached_review", fake_start_detached)
+    monkeypatch.chdir(tmp_path)
+    assert CODEX.request(_target(3), policy=ReviewPolicy()) is True
+    assert "dimensions" not in captured
+    assert "calibrator" not in captured
+    assert "nit_cap" not in captured

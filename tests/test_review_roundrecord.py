@@ -14,7 +14,7 @@ import json
 import logging
 from types import SimpleNamespace
 
-from shipit.finding import Disposition, Finding, Severity
+from shipit.finding import Disposition, Finding, JudgedFinding, Severity
 from shipit.harness.eval import store
 from shipit.identity import repo_from_slug
 from shipit.review import roundrecord
@@ -102,8 +102,8 @@ def test_routed_out_findings_are_recorded_with_their_disposition():
     posted = Finding(severity=Severity.MAJOR, text="real", file="src/a.py", line=3)
     record = _build(
         findings=[
-            (posted, Disposition.POST),
-            (dropped, Disposition.OUT_OF_SCOPE),
+            JudgedFinding(posted, Disposition.POST),
+            JudgedFinding(dropped, Disposition.OUT_OF_SCOPE),
         ]
     )
     dispositions = {f["text"]: f["disposition"] for f in record["round.findings"]}
@@ -129,9 +129,10 @@ def test_dispositioned_maps_every_comment_to_post_via_the_trust_boundary():
             "not-a-dict",
         ]
     }
-    [(finding, disposition)] = roundrecord.dispositioned(review)
-    assert disposition is Disposition.POST
-    assert finding.severity is Severity.MAJOR
+    [judged] = roundrecord.dispositioned(review)
+    assert judged.disposition is Disposition.POST
+    assert judged.duplicate_of is None
+    assert judged.finding.severity is Severity.MAJOR
 
 
 def test_malformed_summary_never_crashes_the_build():
@@ -227,7 +228,11 @@ def test_generate_review_tees_a_round_record(monkeypatch, tmp_path):
 
     review = {"summary": {"status": "COMMENT", "overall_feedback": ""}, "comments": []}
     monkeypatch.setattr(
-        service.producer, "run_tree_review", lambda backend, ctx, **kw: dict(review)
+        service.fanout,
+        "run_fanout_review",
+        lambda backend, ctx, **kw: service.fanout.FanoutOutcome(
+            review=dict(review), findings=(), runs=()
+        ),
     )
     written = []
     monkeypatch.setattr(
@@ -253,7 +258,11 @@ def test_tee_failure_is_fail_open_and_never_degrades_the_review(monkeypatch, cap
 
     review = {"summary": {"status": "COMMENT", "overall_feedback": ""}, "comments": []}
     monkeypatch.setattr(
-        service.producer, "run_tree_review", lambda backend, ctx, **kw: dict(review)
+        service.fanout,
+        "run_fanout_review",
+        lambda backend, ctx, **kw: service.fanout.FanoutOutcome(
+            review=dict(review), findings=(), runs=()
+        ),
     )
 
     def _boom(*a, **k):
@@ -272,7 +281,11 @@ def test_tee_skips_cleanly_when_ctx_has_no_repo_identity(monkeypatch, caplog):
 
     review = {"summary": {"status": "COMMENT", "overall_feedback": ""}, "comments": []}
     monkeypatch.setattr(
-        service.producer, "run_tree_review", lambda backend, ctx, **kw: dict(review)
+        service.fanout,
+        "run_fanout_review",
+        lambda backend, ctx, **kw: service.fanout.FanoutOutcome(
+            review=dict(review), findings=(), runs=()
+        ),
     )
     called = []
     monkeypatch.setattr(
@@ -281,3 +294,102 @@ def test_tee_skips_cleanly_when_ctx_has_no_repo_identity(monkeypatch, caplog):
     with caplog.at_level(logging.WARNING, logger="shipit.review"):
         service.generate_review(agent_backend.CODEX, _tee_ctx(repo=None))
     assert called == []  # no record — and no crash — for a repo-less ctx
+
+
+def test_record_round_persists_calibrator_findings_and_runs(tmp_path):
+    # RVW02-WS04: the PR path passes the Calibrator's REAL routing plus the
+    # contributing runs (every dimension pass + the calibrator, run ids +
+    # variant hashes) — the record retains routed-out findings, never just the
+    # posted subset, and `round.runs` is the eval-report join surface.
+    findings = [
+        JudgedFinding(
+            Finding(severity=Severity.MAJOR, text="bug", file="a.py"), Disposition.POST
+        ),
+        JudgedFinding(
+            Finding(severity=Severity.NIT, text="style", file="b.py"),
+            Disposition.NIT_SUPPRESSED,
+        ),
+        # A merged-away duplicate: it carries its twin's `post` disposition but
+        # its `duplicate_of` edge must persist so the report never counts it as
+        # posted (RVW02-WS04 dedup edge).
+        JudgedFinding(
+            Finding(severity=Severity.MAJOR, text="bug-dup", file="c.py"),
+            Disposition.POST,
+            duplicate_of=0,
+        ),
+    ]
+    runs = [
+        {
+            "run_id": "pass-1",
+            "kind": "dimension-pass",
+            "dimension": "correctness",
+            "variant": {"content_hash": "sha256:p1", "label": None},
+            "outcome": "success",
+        },
+        {
+            "run_id": "cal-1",
+            "kind": "calibrator",
+            "backend": "claude",
+            "reasoning": "high",
+            "variant": {"content_hash": "sha256:c1", "label": None},
+            "outcome": "success",
+        },
+    ]
+    path = roundrecord.record_round(
+        _REVIEW,
+        repo_slug="acme/widget",
+        pr=7,
+        base_sha="a" * 40,
+        head_sha="b" * 40,
+        reviewer="codex",
+        model="pro",
+        timeout="600s",
+        instructions_path=None,
+        findings=findings,
+        runs=runs,
+        base_dir=tmp_path / "state",
+    )
+    [line] = path.read_text(encoding="utf-8").splitlines()
+    record = json.loads(line)
+    assert [
+        (f["text"], f["disposition"], f["duplicate_of"])
+        for f in record["round.findings"]
+    ] == [
+        ("bug", "post", None),
+        ("style", "nit-suppressed", None),
+        ("bug-dup", "post", 0),
+    ]
+    assert [r["run_id"] for r in record["round.runs"]] == ["pass-1", "cal-1"]
+    assert record["round.runs"][1]["kind"] == "calibrator"
+
+
+def test_tee_forwards_the_fanout_findings_and_runs(monkeypatch, tmp_path):
+    # The service tee hands the fan-out's routed findings + run trail through
+    # to the record boundary verbatim — the record can never disagree with the
+    # calibration that produced the posted review.
+    from shipit.agent import backend as agent_backend
+    from shipit.review import service
+
+    review = {"summary": {"status": "COMMENT", "overall_feedback": ""}, "comments": []}
+    findings = (
+        JudgedFinding(
+            Finding(severity=Severity.MINOR, text="m"), Disposition.OUT_OF_SCOPE
+        ),
+    )
+    runs = ({"run_id": "r1", "kind": "dimension-pass"},)
+    monkeypatch.setattr(
+        service.fanout,
+        "run_fanout_review",
+        lambda backend, ctx, **kw: service.fanout.FanoutOutcome(
+            review=dict(review), findings=findings, runs=runs
+        ),
+    )
+    captured: dict = {}
+    monkeypatch.setattr(
+        service.roundrecord,
+        "record_round",
+        lambda r, **kw: captured.update(kw) or tmp_path / "store.jsonl",
+    )
+    service.generate_review(agent_backend.CODEX, _tee_ctx())
+    assert captured["findings"] == findings
+    assert captured["runs"] == runs

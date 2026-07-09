@@ -13,16 +13,18 @@ The boundary, stated once: an **eval record** says how a run *behaved*; a
 review-round record says what the review *concluded*. They meet in
 ``shipit eval report``, which joins round records to eval records by run id —
 each record carries the run ids + **Variant** hashes of its contributing runs
-(``round.runs``; today's single-pass producer contributes none — the WS04
-dimension fan-out and Calibrator fill the list) and its own review-instructions
-**Variant** (``round.variant``), the experiment-arm handle a review-prompt A/B
-groups by.
+(``round.runs``: the WS04 dimension fan-out fills it with one entry per
+**Dimension pass** plus the **Calibrator** run; the single-pass offline replay
+contributes none) and its own review-instructions **Variant**
+(``round.variant``), the experiment-arm handle a review-prompt A/B groups by.
 
 Dispositions are the Opportunity-harvest seam: the record ALWAYS carries every
 judged finding WITH its disposition — routed-out (dropped) findings included,
-never just the posted subset. Today's pipeline has no calibrator, so
-:func:`dispositioned` maps every finding to ``post``; WS04's calibrator supplies
-the real routing through the same shape.
+never just the posted subset. The PR path passes the Calibrator's real routing
+in (``record_round(findings=…)``, RVW02-WS04); a caller with no calibrator
+(the single-pass offline replay) falls back to :func:`dispositioned`, which
+maps every finding to ``post`` — the honest default for a pipeline where the
+whole output reaches the record's ``review``.
 
 Pure core / thin boundary: :func:`build` (and :func:`dispositioned`) are pure —
 a record is a function of its arguments, unit-testable from fixtures;
@@ -40,7 +42,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from ..finding import Disposition, Finding
+from ..finding import Disposition, JudgedFinding
 from ..harness.eval.store import REVIEW_ROUNDS_KIND, append_record
 from ..harness.eval.variant import label_from_env, variant_of
 from ..identity import repo_from_slug
@@ -49,24 +51,26 @@ from .schema import finding_from_dict
 
 #: Bump when the record's field set changes, so an aggregator can read mixed stores
 #: (the same convention as :data:`shipit.harness.eval.record.SCHEMA_VERSION`).
-SCHEMA_VERSION = 1
+#: 2 added ``round.findings[].duplicate_of`` (the fan-out dedup edge, RVW02-WS04).
+SCHEMA_VERSION = 2
 
 
-def dispositioned(review: Mapping[str, Any]) -> list[tuple[Finding, Disposition]]:
+def dispositioned(review: Mapping[str, Any]) -> list[JudgedFinding]:
     """Every finding of a review dict, paired with its disposition. PURE.
 
     Maps each ``comments[]`` entry through the ONE trust boundary
     (:func:`shipit.review.schema.finding_from_dict`) — the SAME coercion the
     posting path applies, so the record can never disagree with what was posted.
-    Today's pre-calibrator pipeline routes nothing out: the whole judged output
-    reaches the PR (inline or folded into the body), so every finding is
-    ``post``. WS04's Calibrator replaces this default with real routing
-    (``drop-unverified`` / ``nit-suppressed`` / ``out-of-scope``) through the
-    same ``(Finding, Disposition)`` shape :func:`build` records.
+    This is the SINGLE-PASS default (the offline replay): with no calibrator
+    routing anything out, the whole output reaches the PR/record, so every
+    finding is ``post`` and canonical (no dedup, no ``duplicate_of``). The PR
+    path's fan-out (RVW02-WS04) supplies the Calibrator's real routing
+    (``drop-unverified`` / ``nit-suppressed`` / ``out-of-scope``, plus the dedup
+    edge) as :class:`JudgedFinding`\\ s via ``record_round(findings=…)`` instead.
     """
     comments = review.get("comments") or []
     return [
-        (finding_from_dict(raw), Disposition.POST)
+        JudgedFinding(finding_from_dict(raw), Disposition.POST)
         for raw in comments
         if isinstance(raw, Mapping)
     ]
@@ -75,7 +79,7 @@ def dispositioned(review: Mapping[str, Any]) -> list[tuple[Finding, Disposition]
 def build(
     *,
     review: Mapping[str, Any],
-    findings: Sequence[tuple[Finding, Disposition]],
+    findings: Sequence[JudgedFinding],
     repo: str,
     pr: int | None,
     base_sha: str,
@@ -118,9 +122,7 @@ def build(
         "round.reviewer": reviewer,
         "round.status": summary.get("status"),
         "round.coverage": coverage if isinstance(coverage, Mapping) else None,
-        "round.findings": [
-            _finding_record(finding, disposition) for finding, disposition in findings
-        ],
+        "round.findings": [_finding_record(judged) for judged in findings],
         "round.invocation": {
             "model": model,
             "timeout": timeout,
@@ -132,13 +134,17 @@ def build(
     }
 
 
-def _finding_record(finding: Finding, disposition: Disposition) -> dict[str, Any]:
-    """One judged finding as record data: the domain fields + its disposition.
+def _finding_record(judged: JudgedFinding) -> dict[str, Any]:
+    """One judged finding as record data: the domain fields + its routing.
 
     The severity/disposition enums serialize as their wire values (the SAME
     tokens the machine marker and the domain vocabulary use), so the store is
     greppable and the report can filter dispositions without an enum table.
-    """
+    ``duplicate_of`` is the fan-out dedup edge (``None`` for a canonical): a
+    merged-away duplicate carries its twin's ``post`` disposition but never
+    reached the PR, so the report reads ``disposition == post AND duplicate_of is
+    None`` as "posted" — never the raw disposition alone (RVW02-WS04)."""
+    finding = judged.finding
     return {
         "file": finding.file,
         "line": finding.line,
@@ -148,7 +154,8 @@ def _finding_record(finding: Finding, disposition: Disposition) -> dict[str, Any
         "text": finding.text,
         "evidence": finding.evidence,
         "fix": finding.fix,
-        "disposition": disposition.value,
+        "disposition": judged.disposition.value,
+        "duplicate_of": judged.duplicate_of,
     }
 
 
@@ -163,6 +170,8 @@ def record_round(
     model: str,
     timeout: str,
     instructions_path: str | None,
+    findings: Sequence[JudgedFinding] | None = None,
+    runs: Sequence[Mapping[str, Any]] = (),
     duration_ms: int | None = None,
     base_dir: Path | None = None,
     env: Mapping[str, str] | None = None,
@@ -179,6 +188,13 @@ def record_round(
     prompt separates arms) with any :data:`~shipit.harness.eval.variant.VARIANT_LABEL_ENV`
     label. Returns the store path the record landed in.
 
+    ``findings`` is the FULL judged set with the Calibrator's real dispositions
+    (the RVW02-WS04 fan-out passes it; routed-out findings included, never
+    erased); ``None`` — the single-pass replay — falls back to
+    :func:`dispositioned` (everything ``post``). ``runs`` carries the
+    contributing runs' entries (run ids + per-run variant hashes: every
+    dimension pass + the calibrator) onto ``round.runs``.
+
     RAISES on failure (a malformed slug, an unreadable instructions file, an
     unwritable store): the caller owns the failure posture — the review-path tee
     wraps this fail-open, the offline replay propagates (the record is its
@@ -191,7 +207,7 @@ def record_round(
     )
     record = build(
         review=review,
-        findings=dispositioned(review),
+        findings=findings if findings is not None else dispositioned(review),
         repo=repo.slug,
         pr=pr,
         base_sha=base_sha,
@@ -201,6 +217,7 @@ def record_round(
         timeout=timeout,
         instructions_path=instructions_path,
         variant=variant.as_record(),
+        runs=runs,
         duration_ms=duration_ms,
         timestamp=_now_iso(),
     )

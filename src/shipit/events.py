@@ -95,6 +95,14 @@ EVENT_NAMES = frozenset(
         "review.degraded",
         "round.detected",
         "breaker.fired",
+        # the round-1 dimension fan-out (RVW02-WS04 / ADR-0045), emitted
+        # verb-witnessed by the detached review child: calibration completed
+        # (the union was judged onto the one severity ruler) and each judged
+        # finding the calibrator routed OUT of the posted review (its
+        # disposition rides the record — the Opportunity-harvest seam's
+        # flow-log twin).
+        "review.calibrated",
+        "finding.dispositioned",
         # the blocking waiter (`shipit pr wait`, ADR-0034): the wait's own
         # lifecycle — started at entry, one state_changed per poll tick where
         # the observed state moved (the tail-able progress trail), and exactly

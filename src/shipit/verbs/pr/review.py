@@ -217,6 +217,12 @@ def run_replay(
 @click.option("--model", "model", default="pro")
 @click.option("--timeout", "timeout", default="600s")
 @click.option("--instructions", "instructions", default=None)
+@click.option("--dimensions", "dimensions", default=None)
+@click.option("--nit-cap", "nit_cap", default=None, type=int)
+@click.option("--calibrator-backend", "calibrator_backend", default=None)
+@click.option("--calibrator-model", "calibrator_model", default=None)
+@click.option("--calibrator-reasoning", "calibrator_reasoning", default=None)
+@click.option("--calibrator-timeout", "calibrator_timeout", default=None)
 @click.option("--as-app/--no-as-app", "as_app", default=True)
 def run_internal_cmd(
     agent: str,
@@ -226,6 +232,12 @@ def run_internal_cmd(
     model: str,
     timeout: str,
     instructions: str | None,
+    dimensions: str | None,
+    nit_cap: int | None,
+    calibrator_backend: str | None,
+    calibrator_model: str | None,
+    calibrator_reasoning: str | None,
+    calibrator_timeout: str | None,
     as_app: bool,
 ) -> None:
     """INTERNAL — the detached local-review child entrypoint (hidden, not a verb).
@@ -249,6 +261,7 @@ def run_internal_cmd(
     from ...identity import repo_from_slug
     from ...logsetup import configure_logging_for_slug
     from ...review import service
+    from ...review.calibrator import CalibratorConfig
 
     configure_logging_for_slug(repo)
 
@@ -278,6 +291,49 @@ def run_internal_cmd(
             f"error: invalid --repo/--pr for the review child: {exc}", file=sys.stderr
         )
         raise SystemExit(1) from None
+
+    # The RVW02-WS04 config surface arrives as explicit arguments, mirroring
+    # `_child_argv` (the child never re-reads config): `--dimensions` is the
+    # comma-joined per-reviewer pass set; the four `--calibrator-*` fields
+    # reconstruct the table-level CalibratorConfig — any of them present mints
+    # one (absent fields keep the shipped defaults); all absent means the
+    # shipped default calibrator. A malformed field dies here as one clean
+    # line, at the process boundary, before any model run bills.
+    dimension_names = (
+        tuple(name.strip() for name in dimensions.split(",") if name.strip())
+        if dimensions
+        else None
+    )
+    # `--nit-cap` is a non-negative budget (0 = floor at minor), validated at the
+    # config boundary (`_parse_nit_cap`); the child entrypoint enforces the same
+    # floor so a hand-built child argv dies here as one clean line — CLI parity
+    # with the malformed-`--calibrator-*` guard below — before any model run bills.
+    if nit_cap is not None and nit_cap < 0:
+        print(
+            f"error: invalid --nit-cap for the review child: must be a "
+            f"non-negative integer of round-1 nits (0 = floor at minor), "
+            f"got {nit_cap}",
+            file=sys.stderr,
+        )
+        raise SystemExit(1) from None
+    calibrator = None
+    calibrator_fields = {
+        "backend": calibrator_backend,
+        "model": calibrator_model,
+        "reasoning": calibrator_reasoning,
+        "timeout": calibrator_timeout,
+    }
+    if any(value is not None for value in calibrator_fields.values()):
+        try:
+            calibrator = CalibratorConfig(
+                **{k: v for k, v in calibrator_fields.items() if v is not None}
+            )
+        except ValueError as exc:
+            print(
+                f"error: invalid --calibrator-* options for the review child: {exc}",
+                file=sys.stderr,
+            )
+            raise SystemExit(1) from None
     service.run_detached_review(
         backend,
         target,
@@ -285,6 +341,9 @@ def run_internal_cmd(
         model=model,
         timeout=timeout,
         instructions_path=instructions,
+        dimensions=dimension_names,
+        calibrator=calibrator,
+        nit_cap=nit_cap,
         as_app=as_app,
     )
 

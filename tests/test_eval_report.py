@@ -400,17 +400,20 @@ def _round(
     duration_ms=1000,
 ):
     """One review-round record in the REAL persisted shape (roundrecord.build)."""
-    from shipit.finding import Disposition, Finding, Severity
+    from shipit.finding import Disposition, Finding, JudgedFinding, Severity
     from shipit.review import roundrecord
 
     return roundrecord.build(
         review={"summary": {"status": "COMMENT"}, "comments": []},
         findings=[
-            (
+            JudgedFinding(
                 Finding(severity=Severity(sev), text=text, file="f.py"),
                 Disposition(disposition),
+                duplicate_of,
             )
-            for text, sev, disposition in findings
+            # A finding row is (text, severity, disposition[, duplicate_of]).
+            for text, sev, disposition, *rest in findings
+            for duplicate_of in (rest[0] if rest else None,)
         ],
         repo=_REPO.slug,
         pr=7,
@@ -444,7 +447,14 @@ def _seed_rounds(tmp_path):
     for round_record in (
         _round(
             variant=_variant(_V1),
-            findings=[("real", "major", "post"), ("stale", "minor", "out-of-scope")],
+            # "dup" is a merged-away duplicate: it carries its canonical twin's
+            # `post` disposition but never reached the PR (duplicate_of set), so
+            # it must count as dropped, never posted (RVW02-WS04 dedup edge).
+            findings=[
+                ("real", "major", "post"),
+                ("stale", "minor", "out-of-scope"),
+                ("dup", "major", "post", 0),
+            ],
             runs=[{"run_id": "agent-joinme", "variant": _variant(_V1)}],
             duration_ms=2000,
         ),
@@ -473,9 +483,10 @@ def test_review_axis_groups_rounds_by_variant_and_splits_dispositions(tmp_path):
         (f"{_V2} [arm-b]", 1),
     ]
     v1 = rows[0]
-    # Dropped findings (routed-out dispositions) are counted, never erased:
-    # 3 findings, 1 posted, 2 routed out across the two V1 rounds.
-    assert (v1.findings, v1.posted, v1.dropped) == (3, 1, 2)
+    # Dropped findings (routed-out dispositions + merged-away duplicates) are
+    # counted, never erased: 4 findings across the two V1 rounds, 1 posted (the
+    # `post` duplicate does NOT count — it never reached the PR), 3 dropped.
+    assert (v1.findings, v1.posted, v1.dropped) == (4, 1, 3)
     assert v1.avg_duration_ms == 1500.0
 
 

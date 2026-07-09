@@ -123,8 +123,10 @@ class ReviewRoundRow:
     handle), its round/finding volumes split by disposition, its own recorded
     cost, and the run-id-joined eval-record cost of its contributing runs.
 
-    ``posted`` vs ``dropped`` is the disposition split (``post`` vs every
-    routed-out disposition) — the recall/FP raw material. ``joined_runs`` /
+    ``posted`` vs ``dropped`` is the disposition split (``post`` AND canonical
+    — a merged-away duplicate shares its twin's ``post`` but never reached the
+    PR — vs every routed-out finding + duplicate) — the recall/FP raw material.
+    ``joined_runs`` /
     ``avg_run_tokens`` come from the eval store via the ``round.runs[].run_id``
     ↔ ``eval.run_id`` join (zero/None when no contributing run has an eval
     record — today's CLI backends contribute none; WS04's fan-out will).
@@ -263,8 +265,9 @@ def review_axis(
     Plain Python over the two JSONL stores — the rounds store is one line per
     review round (small by construction), and the nested findings/dispositions
     lists stay out of DuckDB's struct inference. Per variant bucket: rounds,
-    findings split ``posted`` (disposition ``post``) vs ``dropped`` (every
-    routed-out disposition — the recall/FP raw material), the round's own mean
+    findings split ``posted`` (disposition ``post`` AND canonical — a merged-away
+    duplicate shares its twin's ``post`` but never reached the PR) vs ``dropped``
+    (every routed-out finding + duplicate — the recall/FP raw material), the round's own mean
     duration, and the joined eval-record cost — each ``round.runs[].run_id``
     resolved against ``eval.run_id``, averaging the joined runs' total tokens.
     A missing store, a malformed line, or a round with no joinable run degrades
@@ -301,7 +304,15 @@ def review_axis(
             if not isinstance(finding, Mapping):
                 continue
             bucket["findings"] += 1
-            if finding.get("disposition") == "post":
+            # "posted" is disposition==post AND canonical: a merged-away
+            # duplicate carries its twin's post disposition but never reached the
+            # PR, so counting it would double the posted-vs-dropped split
+            # (RVW02-WS04 fan-out dedup edge; duplicate_of absent on pre-WS04
+            # single-pass records → all such findings are canonical).
+            if (
+                finding.get("disposition") == "post"
+                and finding.get("duplicate_of") is None
+            ):
                 bucket["posted"] += 1
         usage = round_record.get("round.usage")
         duration = usage.get("duration_ms") if isinstance(usage, Mapping) else None

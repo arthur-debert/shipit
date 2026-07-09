@@ -7,13 +7,18 @@ returns in-flight.
 
 Layered functions:
 
-  * :func:`generate_review` — delegate to the Tree-fetch producer
-    (:func:`shipit.review.producer.run_tree_review`): provision a shared read-only
-    Tree (ADR-0018) on the PR head, launch the agent through its spawn read-only
-    posture with a task that fetches the diff itself via ``gh pr diff``, and CAPTURE
-    its structured stdout → the parsed review dict. No GitHub posting. The
-    generated review is TEED to the local review-round record store here
-    (RVW02-WS03, fail-open) — verb-witnessed at generate time, before any post.
+  * :func:`generate_review` — delegate to the dimension FAN-OUT
+    (:func:`shipit.review.fanout.run_fanout_review`, RVW02-WS04 / ADR-0045):
+    provision ONE shared read-only Tree (ADR-0018) on the PR head, launch the
+    reviewer's configured **Dimension passes** in parallel through its spawn
+    read-only posture (each fetching the diff itself via ``gh pr diff``), union
+    the results, and hand them to the table-level **Calibrator**, whose
+    validated, routed output is the review dict. No GitHub posting — the
+    fan-out is invisible below this seam (one review per reviewer per head,
+    exactly as before). The generated review is TEED to the local review-round
+    record store here (RVW02-WS03, fail-open) — verb-witnessed at generate
+    time, before any post, now carrying the calibrator's REAL dispositions and
+    every contributing run (passes + calibrator) with run ids + variant hashes.
   * :func:`start_detached_review` — the OBS03 PARENT entry the reviewer adapter
     calls: do the cheap synchronous work (resolve ``(repo, head_sha)``, reconcile
     against any in-flight run, open the ``in_progress`` breadcrumb), spawn a
@@ -40,8 +45,9 @@ from collections.abc import Callable, Mapping, Sequence
 from .. import execrun, gh, logcontext
 from ..agent.backend import Backend
 from ..pr import PrId
-from . import checkrun, ghauth, post, producer, roundrecord
+from . import checkrun, fanout, ghauth, post, roundrecord
 from .backends.base import BackendError
+from .calibrator import CalibratorConfig
 from .diff import ReviewError, resolve_pr
 
 #: The review path's logger — a child of the package ``shipit`` logger. A local
@@ -58,56 +64,69 @@ def generate_review(
     instructions_path: str | None = None,
     model: str = "pro",
     timeout: str = "600s",
+    dimensions: Sequence[str] | None = None,
+    calibrator: CalibratorConfig | None = None,
+    nit_cap: int | None = None,
     dry_run: bool = False,
 ) -> dict:
-    """Run ``backend`` as a reviewer in a read-only Tree and return the parsed
+    """Run ``backend``'s dimension fan-out over ``ctx`` and return the calibrated
     review.
 
-    The Tree-fetch producer (ADR-0020 §Reviewer-path reconciliation — REPLACE): instead
-    of front-loading ``ctx.diff`` into the prompt and running the CLI in the consumer's
-    checkout, this provisions a shared read-only Tree (ADR-0018) on the PR head, launches
-    the agent through its spawn read-only posture with a task that fetches the scoped diff
-    itself via ``gh pr diff`` (never assuming the base is ``main``) and emits structured
-    JSON, then CAPTURES that stdout into the review dict. Posting + the funnel check-run
-    are the caller's job, unchanged — this only PRODUCES the review.
+    The RVW02-WS04 round-1 pipeline (ADR-0045): one shared read-only Tree
+    (ADR-0018) on the PR head, the reviewer's configured **Dimension passes**
+    in parallel through its spawn read-only posture (each fetching the scoped
+    diff itself via ``gh pr diff`` — never assuming the base is ``main``), the
+    union judged by the table-level **Calibrator**, and the routed result
+    returned as the same REVIEW_SCHEMA-shaped dict the monolithic producer
+    yielded — posting + the funnel check-run are the caller's job, unchanged;
+    below this seam the fan-out is invisible.
 
-    Delegates to :func:`shipit.review.producer.run_tree_review`, which owns the Tree, the
-    spawn-adapter launch, and the parse. A missing CLI raises
-    :class:`~shipit.review.backends.base.BackendUnavailable` and an unparseable / timed-out
-    run raises :class:`~shipit.review.backends.base.BackendError` — both propagate exactly
-    as before so the service's outcome mapping is unchanged.
+    Delegates to :func:`shipit.review.fanout.run_fanout_review`, which owns the
+    Tree, the pass fan-out, the calibration, and the routing. A missing CLI
+    raises :class:`~shipit.review.backends.base.BackendUnavailable`; a review
+    that produced nothing usable (every pass failed, a calibrator
+    timeout/unparseable output/contract violation) raises
+    :class:`~shipit.review.backends.base.BackendError` /
+    ``RuntimeError`` — the same error set as before, so the service's outcome
+    mapping is unchanged.
 
-    ``timeout`` is the per-run agent timeout (a ``<N>s`` duration string). It reaches
-    ``agy`` as its native ``--print-timeout`` AND is enforced at the launch seam as a
-    process deadline for EVERY backend (#404) — so ``codex``, which has no per-run
-    timeout flag, is still killed at the deadline rather than stalling forever. A
-    seam-killed run settles ``timed_out`` exactly like agy's native timeout.
-    ``dry_run`` prints the would-run Tree-launch argv and bills nothing.
+    ``dimensions`` / ``calibrator`` / ``nit_cap`` are the RVW02 config surface
+    (per-reviewer Roster option; table-level judge + nit budget) — ``None``
+    means the shipped defaults. ``timeout`` is the PER-PASS agent timeout (a
+    ``<N>s`` duration string), enforced at the launch seam as a process
+    deadline for every backend (#404). ``dry_run`` prints each pass's would-run
+    Tree-launch argv and bills nothing.
 
     Every successfully generated review is ALSO teed to the local
     **review-round record** store at this seam (RVW02-WS03) — verb-witnessed at
     generate time, BEFORE any posting, so the record exists whether or not the
-    post succeeds and the posting path is untouched. The tee is fail-open
+    post succeeds and the posting path is untouched. The tee carries the
+    calibrator's REAL dispositions (routed-out findings retained) and every
+    contributing run's id + variant hash. It is fail-open
     (:func:`_tee_round_record`): a record miss is logged and swallowed, never a
     degraded review.
     """
     agent = backend.funnel_agent
     logger.info(
-        "review run: agent=%s model=%s timeout=%s starting (read-only Tree producer)",
+        "review run: agent=%s model=%s timeout=%s starting (dimension fan-out)",
         agent,
         model,
         timeout,
         extra={"reviewer": agent, "pr": ctx.number},
     )
     start = time.monotonic()
-    review = producer.run_tree_review(
+    outcome = fanout.run_fanout_review(
         backend,
         ctx,
         model=model,
         timeout=timeout,
         instructions_path=instructions_path,
+        dimensions=dimensions,
+        calibrator=calibrator,
+        nit_cap=nit_cap,
         dry_run=dry_run,
     )
+    review = outcome.review
     duration_ms = int((time.monotonic() - start) * 1000)
     summary = (review.get("summary") or {}) if isinstance(review, dict) else {}
     logger.info(
@@ -126,6 +145,8 @@ def generate_review(
             model=model,
             timeout=timeout,
             instructions_path=instructions_path,
+            findings=outcome.findings,
+            runs=outcome.runs,
             duration_ms=duration_ms,
         )
     return review
@@ -139,17 +160,21 @@ def _tee_round_record(
     model: str,
     timeout: str,
     instructions_path: str | None,
+    findings=None,
+    runs=(),
     duration_ms: int | None,
 ) -> None:
     """Tee the generated review into the local review-round record store — FAIL-OPEN.
 
     Verb-witnessed at generate time (RVW02-WS03): the review's product (all
-    findings with dispositions, the coverage attestation, the range reviewed)
-    lands in the harness-owned store the moment it exists, independent of the
-    posting path — a tee, not a pipeline change. Any failure (a hand-built ctx
-    with no repo, an unwritable store, an unreadable instructions file) is
-    logged at WARNING and swallowed: process telemetry must never degrade the
-    review it observes (the same posture as the eval hook's fail-open contract).
+    findings with the Calibrator's dispositions — ``findings``, routed-out
+    entries retained — plus every contributing run's id + variant hash —
+    ``runs`` — the coverage attestation, and the range reviewed) lands in the
+    harness-owned store the moment it exists, independent of the posting path —
+    a tee, not a pipeline change. Any failure (a hand-built ctx with no repo,
+    an unwritable store, an unreadable instructions file) is logged at WARNING
+    and swallowed: process telemetry must never degrade the review it observes
+    (the same posture as the eval hook's fail-open contract).
     """
     # A hand-built ctx (tests, ad-hoc callers) may carry no repo identity at all;
     # the tee reads it defensively — fail-open means "no record", never a crash.
@@ -172,6 +197,8 @@ def _tee_round_record(
             model=model,
             timeout=timeout,
             instructions_path=instructions_path,
+            findings=findings,
+            runs=runs,
             duration_ms=duration_ms,
         )
     except Exception:  # noqa: BLE001 - the tee is telemetry; never degrade the review
@@ -199,6 +226,9 @@ def _generate_post_and_close(
     model: str = "pro",
     timeout: str = "600s",
     instructions_path: str | None = None,
+    dimensions: Sequence[str] | None = None,
+    calibrator: CalibratorConfig | None = None,
+    nit_cap: int | None = None,
     event: str | None = None,
     as_app: bool = True,
     dry_run: bool = False,
@@ -219,6 +249,9 @@ def _generate_post_and_close(
             instructions_path=instructions_path,
             model=model,
             timeout=timeout,
+            dimensions=dimensions,
+            calibrator=calibrator,
+            nit_cap=nit_cap,
             dry_run=dry_run,
         )
         result = post.post_review(
@@ -367,6 +400,9 @@ def start_detached_review(
     model: str = "pro",
     timeout: str = "600s",
     instructions_path: str | None = None,
+    dimensions: Sequence[str] | None = None,
+    calibrator: CalibratorConfig | None = None,
+    nit_cap: int | None = None,
     as_app: bool = True,
     spawn: Callable[[Sequence[str], Mapping[str, str]], None] | None = None,
     find: Callable[[Backend, str, str], int | None] | None = None,
@@ -462,6 +498,9 @@ def start_detached_review(
         model=model,
         timeout=timeout,
         instructions_path=instructions_path,
+        dimensions=dimensions,
+        calibrator=calibrator,
+        nit_cap=nit_cap,
         as_app=as_app,
     )
     try:
@@ -497,6 +536,9 @@ def run_detached_review(
     model: str = "pro",
     timeout: str = "600s",
     instructions_path: str | None = None,
+    dimensions: Sequence[str] | None = None,
+    calibrator: CalibratorConfig | None = None,
+    nit_cap: int | None = None,
     as_app: bool = True,
 ) -> dict:
     """The detached CHILD body: resolve fully, generate, post, close ``run_id``.
@@ -608,6 +650,9 @@ def run_detached_review(
             model=model,
             timeout=timeout,
             instructions_path=instructions_path,
+            dimensions=dimensions,
+            calibrator=calibrator,
+            nit_cap=nit_cap,
             as_app=as_app,
         )
     except Exception:
@@ -678,6 +723,9 @@ def _child_argv(
     model: str,
     timeout: str,
     instructions_path: str | None,
+    dimensions: Sequence[str] | None = None,
+    calibrator: CalibratorConfig | None = None,
+    nit_cap: int | None = None,
     as_app: bool,
 ) -> list[str]:
     """The argv for the detached child — a ``shipit pr review _run`` subinvocation.
@@ -688,6 +736,12 @@ def _child_argv(
     on the ``shipit`` console-script being on the child's PATH. ``--agent`` carries
     the backend's funnel-agent alias; the child resolves it back to the SAME
     registry identity (:func:`shipit.agent.backend.by_funnel_agent`).
+
+    The RVW02-WS04 config surface rides the same explicit-argument convention
+    (never a config re-read in the child): ``--dimensions`` as a comma-joined
+    list, ``--nit-cap`` as an int, and the table-level calibrator as its four
+    ``--calibrator-*`` fields — each flag omitted when the value is the shipped
+    default, so a hand-run child stays as short as before.
     """
     argv = [
         sys.executable,
@@ -712,6 +766,16 @@ def _child_argv(
         argv += ["--run-id", str(run_id)]
     if instructions_path is not None:
         argv += ["--instructions", instructions_path]
+    if dimensions:
+        argv += ["--dimensions", ",".join(dimensions)]
+    if nit_cap is not None:
+        argv += ["--nit-cap", str(nit_cap)]
+    if calibrator is not None:
+        argv += ["--calibrator-backend", calibrator.backend]
+        if calibrator.model is not None:
+            argv += ["--calibrator-model", calibrator.model]
+        argv += ["--calibrator-reasoning", calibrator.reasoning]
+        argv += ["--calibrator-timeout", calibrator.timeout]
     return argv
 
 

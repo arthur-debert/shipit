@@ -140,10 +140,14 @@ def test_parse_success_logs_full_raw_at_debug(caplog):
 
 
 def test_generate_review_logs_start_and_outcome(monkeypatch, caplog):
-    """`generate_review` delegates to the Tree-fetch producer and records start +
-    outcome; the producer launch itself is faked so no Tree is cloned / model run."""
+    """`generate_review` delegates to the dimension fan-out and records start +
+    outcome; the fan-out itself is faked so no Tree is cloned / model run."""
     monkeypatch.setattr(
-        service.producer, "run_tree_review", lambda backend, ctx, **kw: dict(_REVIEW)
+        service.fanout,
+        "run_fanout_review",
+        lambda backend, ctx, **kw: service.fanout.FanoutOutcome(
+            review=dict(_REVIEW), findings=(), runs=()
+        ),
     )
     ctx = SimpleNamespace(diff=_DIFF, workdir="/tmp/wd", number=5, head_ref="b")
     with caplog.at_level(logging.DEBUG, logger="shipit.review"):
@@ -171,7 +175,11 @@ def test_generate_review_outcome_carries_duration_fields(monkeypatch, caplog):
     """The model run is the review's expensive span — its completion record
     carries reviewer/pr/duration_ms as flat fields."""
     monkeypatch.setattr(
-        service.producer, "run_tree_review", lambda backend, ctx, **kw: dict(_REVIEW)
+        service.fanout,
+        "run_fanout_review",
+        lambda backend, ctx, **kw: service.fanout.FanoutOutcome(
+            review=dict(_REVIEW), findings=(), runs=()
+        ),
     )
     ctx = SimpleNamespace(diff=_DIFF, workdir="/tmp/wd", number=5, head_ref="b")
     with caplog.at_level(logging.INFO, logger="shipit.review"):
