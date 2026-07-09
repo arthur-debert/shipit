@@ -1173,6 +1173,10 @@ def test_load_units_includes_the_agent_start_launcher():
     assert "exec codex" not in text
     # The dispatch is a strategy table over both hosts.
     assert "claude)" in text and "codex)" in text
+    # The launch-seam role scrub (#631): the common path unsets an inherited
+    # worker-role export before dispatch, so a coordinator launched from a
+    # spawned Run's shell cannot silently disarm the edit guard.
+    assert "unset SHIPIT_LOG_CTX_ROLE" in text
 
 
 def test_load_units_includes_the_claude_start_launcher():
@@ -2187,6 +2191,51 @@ def test_agent_start_codex_execs_the_pinned_launcher(tmp_path: Path):
     assert proc.stdout.splitlines() == ["session", "codex", "--model", "foo"]
 
 
+def test_agent_start_scrubs_the_inherited_worker_agent_identity_exports(
+    tmp_path: Path,
+):
+    # The launch-seam agent-identity scrub (#631), behaviorally: a coordinator
+    # launched via agent-start from inside a spawned worker Run's shell must NOT
+    # hand the worker's agent-identity exports to the new session — ROLE (the
+    # pretooluse edit guard's fallback would resolve the coordinator to that
+    # role and silently disarm) nor the paired AGENT/RUN spawn ids (which would
+    # mis-tag the new coordinator's log records with the worker's identity). A
+    # task-correlation key like PR still rides — it describes the work, not who
+    # is doing it. The scrub lives in the common path, so one fake CLI (claude)
+    # covers every host row.
+    launchers = _lay_down_launchers(tmp_path)
+    env = _fake_cli(tmp_path, "claude")
+    fake = tmp_path / "fakepath" / "claude"
+    fake.write_text(
+        "#!/usr/bin/env bash\n"
+        'echo "role=${SHIPIT_LOG_CTX_ROLE-ABSENT}"\n'
+        'echo "agent=${SHIPIT_LOG_CTX_AGENT-ABSENT}"\n'
+        'echo "run=${SHIPIT_LOG_CTX_RUN-ABSENT}"\n'
+        'echo "pr=${SHIPIT_LOG_CTX_PR-ABSENT}"\n'
+    )
+
+    proc = subprocess.run(
+        [str(launchers[iunits.AGENT_LAUNCHER_FILE]), "claude"],
+        env={
+            **env,
+            "SHIPIT_LOG_CTX_ROLE": "implementer",
+            "SHIPIT_LOG_CTX_AGENT": "deadbeef",
+            "SHIPIT_LOG_CTX_RUN": "77",
+            "SHIPIT_LOG_CTX_PR": "632",
+        },
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.splitlines() == [
+        "role=ABSENT",
+        "agent=ABSENT",
+        "run=ABSENT",
+        "pr=632",
+    ]
+
+
 def test_agent_start_rejects_an_unknown_or_missing_agent(tmp_path: Path):
     launchers = _lay_down_launchers(tmp_path)
     agent_start = launchers[iunits.AGENT_LAUNCHER_FILE]
@@ -2240,14 +2289,19 @@ def test_start_shims_delegate_to_agent_start(tmp_path: Path):
 def test_agent_start_fails_loud_when_the_cli_is_not_on_path(tmp_path: Path):
     launchers = _lay_down_launchers(tmp_path)
 
-    # A minimal PATH with exactly one entry: `bash` (the shebang's interpreter)
-    # and nothing else — deterministically no `claude`, regardless of where the
-    # developer machine keeps its binaries.
+    # A minimal PATH carrying `bash` (the shebang's interpreter) and `dirname`
+    # (the launcher's own repo-root probe needs it; without it, bash ≥5.2 turns
+    # the probe's `cd ""` into a hard "null directory" error and the script
+    # dies at 1 before ever reaching the CLI check — older bash silently
+    # no-op'd, which is how this test used to pass by accident) — and
+    # deterministically NO `claude`, regardless of where the developer machine
+    # keeps its binaries.
     bindir = tmp_path / "onlybash"
     bindir.mkdir()
-    bash = shutil.which("bash")
-    assert bash is not None
-    (bindir / "bash").symlink_to(bash)
+    for tool in ("bash", "dirname"):
+        binary = shutil.which(tool)
+        assert binary is not None
+        (bindir / tool).symlink_to(binary)
     proc = subprocess.run(
         [str(launchers[iunits.AGENT_LAUNCHER_FILE]), "claude"],
         env={"PATH": str(bindir)},
@@ -2256,7 +2310,11 @@ def test_agent_start_fails_loud_when_the_cli_is_not_on_path(tmp_path: Path):
         timeout=10,
     )
     assert proc.returncode == 127
+    # The hint names the PRODUCT to install (restored in #631) — "claude" the
+    # binary is Claude Code the product; a generic "install it first" made the
+    # user go look the mapping up.
     assert "claude CLI is not on PATH" in proc.stderr
+    assert "install Claude Code first" in proc.stderr
 
 
 def test_settings_hook_splice_preserves_other_settings():

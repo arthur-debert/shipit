@@ -1,8 +1,11 @@
-from dataclasses import dataclass
+import io
+import json
+from dataclasses import dataclass, replace
 
 from shipit.identity import Repo
 from shipit.tree.create import Tree
 from shipit.verbs import session
+from shipit.verbs.hook import worktreecreate
 
 
 @dataclass
@@ -87,6 +90,67 @@ def test_run_codex_creates_ephemeral_tree_and_execs_codex(
     assert capture.env["SHIPIT_LOG_CTX_SESSION"] == session_id
     assert capture.env["SHIPIT_LOG_CTX_TREE"] == str(tree_path)
     assert f"codex session {session_id}" in capsys.readouterr().out
+
+
+def test_run_codex_spec_matches_the_coordinator_worktreecreate_spec(
+    monkeypatch, tmp_path
+):
+    # The parity pin (#631): `run_codex` and the Claude coordinator fork of the
+    # WorktreeCreate hook (`worktreecreate._create_tree(ephemeral=...)`) build
+    # the SAME ephemeral TreeSpec shape today by shared construction only — no
+    # type or helper links the two call sites. Drive both paths with identical
+    # identity/hash seams and assert the specs agree field-for-field (each
+    # mints its own session id), so a future one-sided field change — a slug,
+    # a session, a root added to one path — fails here instead of silently
+    # forking the session-Tree shape per host.
+    specs: dict[str, object] = {}
+    source = tmp_path / "source"
+    repo = Repo("arthur-debert", "shipit")
+
+    def creator(key):
+        def create(spec, *, source_repo):
+            specs[key] = spec
+            return Tree(
+                path=str(tmp_path / key),
+                branch=f"ephemeral/{spec.ephemeral}",
+                base="origin/main",
+            )
+
+        return create
+
+    monkeypatch.setattr(session.git, "repo_root", lambda: str(source))
+    monkeypatch.setattr(session.identity, "resolve_repo", lambda root: repo)
+    monkeypatch.setattr(session, "new_agent_hash", lambda: "deadbeef")
+    monkeypatch.setattr(session.time, "time", lambda: 1783585261)
+    monkeypatch.setattr(session.os, "getpid", lambda: 4242)
+    rc = session.run_codex(
+        [],
+        creator=creator("codex"),
+        chdir=lambda path: None,
+        execute=lambda file, argv, env: None,
+        which=lambda binary: "/usr/local/bin/codex",
+        environ={"PATH": "/bin"},
+    )
+    assert rc == 0
+
+    monkeypatch.setattr(worktreecreate.git, "repo_root", lambda: str(source))
+    monkeypatch.setattr(
+        worktreecreate.identity, "resolve_repo", lambda cwd=".", **kw: repo
+    )
+    monkeypatch.setattr(worktreecreate, "new_agent_hash", lambda: "deadbeef")
+    monkeypatch.setattr(worktreecreate, "create_from_source", creator("claude"))
+    # The spike-verified coordinator launch payload: no `prompt_id` — the
+    # ephemeral fork (ADR-0027), exactly what `agent-start claude` produces.
+    payload = json.dumps({"name": "sess-20260709-082101-4242", "cwd": str(source)})
+    out = io.StringIO()
+    assert worktreecreate.run(stdin=io.StringIO(payload), stdout=out) == 0
+
+    codex_spec, claude_spec = specs["codex"], specs["claude"]
+    # Both are the ephemeral shape, each carrying its own minted session id...
+    assert codex_spec.ephemeral == "codex-20260709-082101-4242"
+    assert claude_spec.ephemeral == "sess-20260709-082101-4242"
+    # ...and EVERY other field is identical across the two hosts' paths.
+    assert replace(codex_spec, ephemeral=claude_spec.ephemeral) == claude_spec
 
 
 def test_run_codex_refuses_outside_git_checkout(monkeypatch, capsys):

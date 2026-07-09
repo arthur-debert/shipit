@@ -18,6 +18,21 @@ from shipit.harness.policy import COORDINATOR_DENY_REASON, WORKTREE_DENY_REASON
 from shipit.verbs.hook.pretooluse import run
 
 
+@pytest.fixture(autouse=True)
+def _scrub_ambient_role_env(monkeypatch):
+    """No test here may depend on the ambient launch-context env (#631).
+
+    The hook's coordinator fallback reads ``SHIPIT_LOG_CTX_ROLE``/``_AGENT``
+    from the process env — and this suite RUNS inside shipit-spawned Runs that
+    export exactly those vars, so a coordinator-deny test would silently pass
+    or fail with the wrong verdict depending on who ran pytest. Every test
+    starts from a scrubbed env; the fallback-specific tests set the vars they
+    mean explicitly.
+    """
+    monkeypatch.delenv("SHIPIT_LOG_CTX_ROLE", raising=False)
+    monkeypatch.delenv("SHIPIT_LOG_CTX_AGENT", raising=False)
+
+
 def _run(payload_text: str) -> tuple[int, str]:
     out = io.StringIO()
     code = run(stdin=io.StringIO(payload_text), stdout=out)
