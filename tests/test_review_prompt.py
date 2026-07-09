@@ -26,6 +26,22 @@ def test_task_tells_agent_to_fetch_the_diff_itself_and_not_post():
     assert _INSTRUCTIONS in task
 
 
+def test_task_instructs_the_severity_ladder_and_merge_block_boundary():
+    """Every reviewer task (both backends) carries the 4-tier ladder, the
+    merge-block test as the major/minor boundary, severity-first ordering, the
+    informational-only status of category/confidence, and the coverage
+    attestation. The retired ERROR/WARNING/INFO triple is gone."""
+    for schema_inline in (False, True):
+        task = build_reviewer_task(_INSTRUCTIONS, 42, schema_inline=schema_inline)
+        assert "critical, major, minor, or nit" in task
+        assert "MERGE-BLOCK TEST" in task
+        assert "would a competent reviewer hold the merge" in task
+        assert "highest severity first" in task
+        assert "informational only" in task
+        assert "attest your coverage" in task
+        assert "ERROR" not in task and "WARNING" not in task
+
+
 def test_agy_task_includes_schema_and_json_validity_instruction():
     """The agy path (`schema_inline=True`) embeds the in-prose schema AND the #76
     JSON-validity hardening telling the agent its ENTIRE response must be valid JSON."""
@@ -33,6 +49,12 @@ def test_agy_task_includes_schema_and_json_validity_instruction():
     assert "JSON Schema:" in task  # the in-prose schema
     assert "ENTIRE response must be a single, complete, valid JSON object" in task
     assert "valid JSON that a strict parser accepts on the first try" in task
+    # The prose schema mirrors REVIEW_SCHEMA's new shape: the 4-tier severity
+    # enum, informational category/confidence, evidence/fix, coverage attestation.
+    assert '"critical" | "major" | "minor" | "nit"' in task
+    assert '"category"' in task and '"confidence"' in task
+    assert '"evidence"' in task and '"fix"' in task
+    assert '"coverage"' in task
 
 
 def test_codex_task_omits_schema_and_validity_instruction():

@@ -23,6 +23,13 @@ Two GitHub constraints shape the mapping:
   of the PR diff makes GitHub 422 the WHOLE review. We parse the diff once
   (:func:`commentable_lines`) and fold any unanchored finding into the review
   body instead of emitting it as an inline comment.
+
+Each inline comment body is the :mod:`shipit.finding` two-layer rendering — the
+invisible machine marker carrying the exact severity/category/confidence tuple
+plus the Conventional Comments human layer — so the PR state engine can recover
+each finding's severity from the comment body alone (ADR-0044). The retired
+``Agent: <name> [SEVERITY]`` prefix is gone; findings are ordered highest
+severity first.
 """
 
 from __future__ import annotations
@@ -32,6 +39,14 @@ import logging
 
 from .. import execrun, gh
 from ..agent.backend import Backend
+from ..finding import (
+    CONVENTIONAL_PREFIXES,
+    Finding,
+    order_findings,
+    parse_severity,
+    render_comment,
+    resolve_severity,
+)
 from . import ghauth
 from .diff import ReviewView
 
@@ -111,15 +126,44 @@ def _parse_hunk_new_start(header: str) -> int:
     return 1
 
 
-def _comment_body(
-    agent_name: str, severity: str, text: str, code_snippet: str | None
-) -> str:
-    """The inline-comment body: an ``Agent: <name> [SEV]`` prefix, the text, and
-    an optional fenced code snippet."""
-    body = f"Agent: {agent_name} [{severity}]\n{text}"
-    if code_snippet:
-        body += f"\n\n```\n{code_snippet}\n```"
-    return body
+def _finding_from_dict(raw: dict) -> Finding:
+    """Map one ``REVIEW_SCHEMA`` comment dict to a domain :class:`Finding`.
+
+    Severity follows the fail-safe chain (:func:`shipit.finding.resolve_severity`):
+    an absent or unparseable severity lands on ``major`` — it forces a round
+    rather than slipping past the Breaker.
+    """
+    line = raw.get("line")
+    confidence = raw.get("confidence")
+    return Finding(
+        severity=resolve_severity(parse_severity(raw.get("severity"))),
+        text=raw.get("text", ""),
+        file=raw.get("file", ""),
+        line=line if isinstance(line, int) else None,
+        category=raw.get("category", "") or "",
+        confidence=confidence if isinstance(confidence, (int, float)) else None,
+        evidence=raw.get("evidence") or "",
+        fix=raw.get("fix") or "",
+    )
+
+
+def _coverage_section(coverage: dict) -> str:
+    """Render the summary's coverage attestation as a human-facing body section:
+    what was reviewed, what was skipped and why — so silence means "clean," not
+    "skipped". Empty when the attestation carries nothing (the salvage and
+    dry-run paths build summaries without one)."""
+    reviewed = [str(entry) for entry in coverage.get("reviewed") or []]
+    skipped = list(coverage.get("skipped") or [])
+    if not reviewed and not skipped:
+        return ""
+    lines = ["### Coverage"]
+    if reviewed:
+        lines.append("Reviewed: " + ", ".join(f"`{entry}`" for entry in reviewed))
+    for entry in skipped:
+        file = entry.get("file", "?")
+        reason = entry.get("reason", "")
+        lines.append(f"Skipped: `{file}` — {reason}")
+    return "\n".join(lines)
 
 
 def build_review_payload(
@@ -138,12 +182,15 @@ def build_review_payload(
     * ``event`` is derived from ``review["summary"]["status"]`` UNLESS ``event``
       is passed explicitly, in which case the override wins.
     * ``body`` is a ``Agent: <name>`` header line followed by the summary's
-      ``overall_feedback``. Any finding NOT anchored to a changed diff line is
-      appended here under a "Findings not anchored to changed lines" section
-      rather than emitted as an inline comment (an unanchored inline comment would
-      422 the entire review).
+      ``overall_feedback`` and its coverage attestation (when carried). Any
+      finding NOT anchored to a changed diff line is appended here under a
+      "Findings not anchored to changed lines" section rather than emitted as an
+      inline comment (an unanchored inline comment would 422 the entire review).
     * ``comments[]`` holds one ``{path, line, side: "RIGHT", body}`` entry per
       finding whose ``(file, line)`` IS a commentable RIGHT-side diff position.
+      Each body is the :mod:`shipit.finding` two-layer rendering (machine marker
+      + Conventional Comments layer); findings are ordered highest severity
+      first in both the inline list and the unanchored fold.
     """
     summary = review.get("summary") or {}
     status = summary.get("status", "COMMENT")
@@ -155,30 +202,36 @@ def build_review_payload(
 
     anchorable = commentable_lines(ctx.diff)
 
+    findings = order_findings(
+        _finding_from_dict(raw) for raw in review.get("comments") or []
+    )
+
     comments: list[dict] = []
     unanchored: list[str] = []
-    for finding in review.get("comments") or []:
-        file = finding.get("file", "")
-        line = finding.get("line")
-        text = finding.get("text", "")
-        severity = finding.get("severity", "INFO")
-        code_snippet = finding.get("code_snippet") or ""
-
-        is_anchored = isinstance(line, int) and line in anchorable.get(file, set())
+    for finding in findings:
+        is_anchored = finding.line is not None and finding.line in anchorable.get(
+            finding.file, set()
+        )
         if is_anchored:
             comments.append(
                 {
-                    "path": file,
-                    "line": line,
+                    "path": finding.file,
+                    "line": finding.line,
                     "side": "RIGHT",
-                    "body": _comment_body(agent_name, severity, text, code_snippet),
+                    "body": render_comment(finding),
                 }
             )
         else:
-            snippet = f"\n\n```\n{code_snippet}\n```" if code_snippet else ""
-            unanchored.append(f"- `{file}:{line}` [{severity}] {text}{snippet}")
+            snippet = f"\n\n```\n{finding.evidence}\n```" if finding.evidence else ""
+            prefix = CONVENTIONAL_PREFIXES[finding.severity]
+            unanchored.append(
+                f"- `{finding.file}:{finding.line}` {prefix} {finding.text}{snippet}"
+            )
 
     body = f"Agent: {agent_name}\n\n{overall_feedback}".rstrip()
+    coverage = _coverage_section(summary.get("coverage") or {})
+    if coverage:
+        body += f"\n\n{coverage}"
     if unanchored:
         body += "\n\n### Findings not anchored to changed lines:\n" + "\n".join(
             unanchored

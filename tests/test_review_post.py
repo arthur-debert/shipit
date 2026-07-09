@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import pytest
 
+from shipit import finding
 from shipit.agent import backend as agent_backend
 from shipit.identity import repo_from_slug
 from shipit.review import post
@@ -52,15 +53,21 @@ def test_payload_anchors_in_diff_and_folds_unanchored():
                 "file": "foo.py",
                 "line": 2,
                 "text": "bad",
-                "severity": "ERROR",
-                "code_snippet": "x=1",
+                "severity": "major",
+                "category": "correctness",
+                "confidence": 0.9,
+                "evidence": "x=1",
+                "fix": "",
             },
             {
                 "file": "foo.py",
                 "line": 99,
                 "text": "offdiff",
-                "severity": "INFO",
-                "code_snippet": "",
+                "severity": "minor",
+                "category": "tests",
+                "confidence": 0.5,
+                "evidence": "",
+                "fix": "",
             },
         ],
     }
@@ -70,9 +77,121 @@ def test_payload_anchors_in_diff_and_folds_unanchored():
     assert len(payload["comments"]) == 1
     assert payload["comments"][0]["line"] == 2
     assert payload["comments"][0]["side"] == "RIGHT"
-    # The off-diff finding is folded into the body, not emitted inline.
+    # The off-diff finding is folded into the body, not emitted inline — with the
+    # Conventional Comments label, never the retired [SEVERITY] bracket.
     assert "Findings not anchored" in payload["body"]
-    assert "foo.py:99" in payload["body"]
+    assert "`foo.py:99` suggestion (non-blocking): offdiff" in payload["body"]
+    assert "[minor]" not in payload["body"] and "[INFO]" not in payload["body"]
+
+
+def test_inline_comment_body_is_the_two_layer_rendering():
+    """The inline body carries the machine marker (exact tuple recoverable) plus
+    the Conventional Comments layer; the `Agent: <name> [SEVERITY]` prefix is
+    retired."""
+    review = {
+        "summary": {"status": "COMMENT", "overall_feedback": "ok"},
+        "comments": [
+            {
+                "file": "foo.py",
+                "line": 2,
+                "text": "boom",
+                "severity": "critical",
+                "category": "security",
+                "confidence": 0.8,
+                "evidence": "x = 1",
+                "fix": "drop it",
+            }
+        ],
+    }
+    payload = post.build_review_payload(review, _ctx(), agent_name="codex")
+    body = payload["comments"][0]["body"]
+    assert "Agent:" not in body  # the retired prefix
+    assert "issue (critical, blocking): boom" in body
+    recovered = finding.parse_comment(body, file="foo.py", line=2)
+    assert recovered.severity is finding.Severity.CRITICAL
+    assert recovered.category == "security"
+    assert recovered.confidence == 0.8
+    assert recovered.evidence == "x = 1"
+    assert recovered.fix == "drop it"
+
+
+def test_findings_are_ordered_highest_severity_first():
+    def _comment(severity: str, line: int) -> dict:
+        return {
+            "file": "foo.py",
+            "line": line,
+            "text": severity,
+            "severity": severity,
+            "category": "",
+            "confidence": 1.0,
+            "evidence": "",
+            "fix": "",
+        }
+
+    review = {
+        "summary": {"status": "COMMENT", "overall_feedback": "ok"},
+        # emitted out of order: nit, critical, minor — all anchorable lines
+        "comments": [
+            _comment("nit", 1),
+            _comment("critical", 2),
+            _comment("minor", 3),
+        ],
+    }
+    payload = post.build_review_payload(review, _ctx(), agent_name="codex")
+    assert [c["line"] for c in payload["comments"]] == [2, 3, 1]
+
+
+def test_unparseable_severity_fails_safe_to_major():
+    """The fail-safe: a finding whose severity can't be parsed (incl. the retired
+    ERROR/WARNING/INFO triple) posts as `major`."""
+    review = {
+        "summary": {"status": "COMMENT", "overall_feedback": "ok"},
+        "comments": [
+            {
+                "file": "foo.py",
+                "line": 2,
+                "text": "legacy",
+                "severity": "ERROR",
+                "category": "",
+                "confidence": 1.0,
+                "evidence": "",
+                "fix": "",
+            }
+        ],
+    }
+    payload = post.build_review_payload(review, _ctx(), agent_name="codex")
+    body = payload["comments"][0]["body"]
+    assert "issue (blocking): legacy" in body
+    assert finding.parse_comment(body).severity is finding.Severity.MAJOR
+
+
+def test_coverage_attestation_renders_in_the_review_body():
+    review = {
+        "summary": {
+            "status": "COMMENT",
+            "overall_feedback": "ok",
+            "coverage": {
+                "reviewed": ["foo.py", "bar.py:1-40"],
+                "skipped": [{"file": "big.lock", "reason": "generated"}],
+            },
+        },
+        "comments": [],
+    }
+    payload = post.build_review_payload(review, _ctx(), agent_name="codex")
+    assert "### Coverage" in payload["body"]
+    assert "`foo.py`" in payload["body"] and "`bar.py:1-40`" in payload["body"]
+    assert "Skipped: `big.lock` — generated" in payload["body"]
+
+
+def test_summary_without_coverage_renders_no_coverage_section():
+    """The salvage / dry-run paths build summaries with no attestation — the body
+    must not grow an empty Coverage header."""
+    review = {
+        "summary": {"status": "COMMENT", "overall_feedback": "ok"},
+        "comments": [],
+    }
+    payload = post.build_review_payload(review, _ctx(), agent_name="codex")
+    assert "### Coverage" not in payload["body"]
 
 
 def test_event_override_wins():

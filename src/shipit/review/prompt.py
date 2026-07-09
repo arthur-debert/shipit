@@ -30,15 +30,22 @@ JSON Schema:
 {
   "summary": {
     "status": "APPROVED" | "REQUEST_CHANGES" | "COMMENT",
-    "overall_feedback": "Overall summary of findings and recommendations."
+    "overall_feedback": "Overall summary of findings and recommendations.",
+    "coverage": {
+      "reviewed": ["files or file:hunk ranges you actually reviewed"],
+      "skipped": [{"file": "path", "reason": "why it was skipped"}]
+    }
   },
   "comments": [
     {
       "file": "path/relative/to/repo/root",
       "line": 42,
       "text": "Review comment text",
-      "severity": "ERROR" | "WARNING" | "INFO",
-      "code_snippet": "..."
+      "severity": "critical" | "major" | "minor" | "nit",
+      "category": "e.g. correctness, cross-file invariants, security, tests",
+      "confidence": 0.9,
+      "evidence": "the quoted code the finding rests on",
+      "fix": "the suggested remedy (may be empty)"
     }
   ]
 }"""
@@ -95,9 +102,24 @@ Identify bugs, code quality issues, style violations, potential crashes, logic \
 errors, or missing tests. For each finding, determine:
 1. The file path (relative to the repository root)
 2. The specific line number (if applicable)
-3. The severity (ERROR, WARNING, or INFO)
-4. A descriptive comment explaining the issue and recommending a fix
-5. A snippet of the relevant code
+3. The severity, on the 4-tier ladder: critical, major, minor, or nit. The \
+major/minor boundary is the MERGE-BLOCK TEST: would a competent reviewer hold the \
+merge for this? critical = merging would be actively harmful (security hole, data \
+loss, crash, broken build); major = a concrete correctness or behavioral defect \
+worth blocking the merge on; minor = worth doing, not worth holding the merge; \
+nit = wording, naming, or style with no correctness, behavioral, or security impact.
+4. The category that best describes it (e.g. correctness, cross-file invariants, \
+security, tests) and your confidence in the finding from 0.0 to 1.0 — both are \
+informational only; nothing routes on them.
+5. A descriptive comment explaining the issue and recommending a fix
+6. The quoted code the finding rests on (evidence), and the suggested fix
+
+Order the comments array highest severity first: every critical, then every major, \
+then minor, then nit.
+
+In the summary, attest your coverage: list what you actually reviewed (files, or \
+file:hunk ranges) and anything you skipped with the reason — so silence means \
+"clean", not "skipped".
 
 You must output your complete review strictly as a single JSON object on stdout. Do \
 NOT wrap the JSON in markdown blocks (e.g. do not use ```json) and do NOT write any \
