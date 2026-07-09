@@ -24,7 +24,13 @@ underneath it and how a repo gets onto shipit. Domain vocabulary:
         — `claude --worktree`, usually via `./claude-start` — born on an
         `ephemeral/<id>` branch cut from `origin/main` by the WorktreeCreate
         hook (ADR-0027). The SessionStart hook activates the repo toolchain
-        and surfaces shipit-pin staleness as advisory context (ADR-0033). To
+        and surfaces shipit-pin staleness as advisory context (ADR-0033). A
+        Codex coordinator gets the same isolated shape through
+        `shipit session codex`, usually via `./codex-start`: shipit
+        provisions the ephemeral Tree explicitly, then execs `codex` rooted
+        in it, on the ChatGPT sign-in — never mandatory API-key billing
+        (CDX01; the dogfood runbook is
+        [./docs/dev/codex-coordinator-dogfood.md]). To
         orient on what has already happened,
         `shipit logs --flow --session current` renders the session's story
         from the dev-cycle event log; `--epic CODE` renders an epic's.
