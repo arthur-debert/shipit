@@ -705,7 +705,8 @@ A uniform shipit verb — `shipit lint`, `shipit test`, `shipit build`, … — 
 walks the **path→toolchain map** and dispatches each entry to its producing
 command. The verb is the single implementation everywhere: laptop, hook, and CI
 all invoke it, the same way `shipit lint` already works (ADR-0004 generalized).
-The pixi task of the same name is a thin one-line caller (`test = "shipit test"`),
+The pixi task of the same name is a thin one-line caller
+(`test = "./bin/shipit test"` — the ADR-0033 pinned launcher),
 never the home of logic; underlying-command flags stay reachable via passthrough
 args, so uniformity never walls off the stack's own surface.
 *Avoid*: "task" for the verb itself (the task is the thin pixi caller); a
@@ -767,10 +768,12 @@ under-declaration costs a rebuild, never a stale ship. *Avoid*: "cache key" — 
 content-key is the artifact's identity, not merely a cache bucket.
 
 **Lane**:
-A declared CI test unit — `{ name, consumes an artifact, run = a pixi task,
-required, local, trigger (pr / push / nightly / dispatch), runner, scope }`. The
+A declared CI test unit — `{ name, consumes an artifact, run = a **tool** or
+**leg**, required, local, trigger (pr / push / nightly / dispatch), runner,
+scope }` (the pixi task is only the thin caller of that tool). The
 generic CI workflow fans the lanes into jobs; each resolves-or-builds its
-**artifact** by **content-key**, runs its harness, and posts results. The
+**artifact** by **content-key** (WF02 — until then, the artifact seam's
+local-build / CI-artifact sources), runs its harness, and posts results. The
 **required** lanes feed the CI-green **Ready** pillar; the non-required ones
 surface as signals (like **degraded**) but never **hold**. *Avoid*: "suite", "job"
 — a lane may map to a GitHub check, but the lane is the *declaration*.
@@ -793,7 +796,8 @@ without dropping coverage on the changes that matter.
 **Release**:
 A repo-level versioned event that publishes the repo's declared **artifact** set to
 their **distribution endpoints**. `shipit changelog` coalesces unreleased fragments
-→ bump + tag → for each artifact: resolve-or-build by **content-key**, **bundle**,
+→ bump + tag → for each artifact: resolve-or-build by **content-key** (WF02;
+until the store exists, build via the artifact seam), **bundle**,
 sign, publish; the coalesced notes feed both the tag annotation and the GH release.
 The build/sign half is an all-or-nothing barrier (publish nothing if any artifact
 fails); the publish half is ordered + idempotent-resumable, because external
