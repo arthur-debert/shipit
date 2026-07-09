@@ -17,9 +17,10 @@ the hook is the one verb that witnesses a session beginning):
 2. **Liveness** (SES02) — record which session owns this Tree: walk the
    hook's own ancestry to the session-host process — ``claude`` or ``codex``,
    whichever backend's SessionStart entry fired this verb (the hook runs as its
-   great-grandchild: claude/codex → shell → ``pixi run`` → ``shipit``) — and write the
-   :mod:`shipit.session.liveness` pidfile — PID, payload ``session_id``, and the
-   PID's OS create-time, read NOW, at write time — into the Tree's ``.git`` dir.
+   descendant through the backend's managed hook command and any shell wrappers)
+   — and write the :mod:`shipit.session.liveness` pidfile — PID, payload
+   ``session_id``, and the PID's OS create-time, read NOW, at write time — into
+   the Tree's ``.git`` dir.
    This is the signal the ephemeral-Tree gc ladder consults so an idle-but-live
    session's Tree is never reclaimed out from under it.
 3. **Log-context export** (REL01 #349, ADR-0029) — when the session's ``cwd`` is
@@ -48,7 +49,7 @@ the hook is the one verb that witnesses a session beginning):
 
 **Fail-open is the contract** — the same posture as ``hook pretooluse``, the
 OPPOSITE of ``hook worktreecreate``. All three writes are ADDITIVE, never
-load-bearing: the committed ``pixi run shipit hook …`` lines keep their prefix,
+load-bearing: the managed hook commands keep running even without activation,
 the gc ladder's liveness-independent rungs (the dirty/unpushed floor, the grace
 window, the hard cap) carry teardown safety even with no pidfile, and a record
 missing its ``session`` key is merely less sliceable, never lost. ANY failure in
@@ -486,12 +487,12 @@ def _write_liveness(
 ) -> None:
     """The liveness half: find the session-host ancestor, write the pidfile into the Tree.
 
-    The recorded PID is NOT this hook's own — the hook runs as a great-grandchild
-    of the session (claude/codex → shell → ``pixi run`` → ``shipit``) — but the
-    nearest ancestor whose command line looks like a session host (Claude Code or
-    Codex, :func:`~shipit.session.liveness.find_session_process` — both backends'
-    SessionStart entries route here); its create-time is
-    read from the OS here, at write time, exactly as ADR-0027 specifies. Skipped
+    The recorded PID is NOT this hook's own — the hook runs below the session
+    host through the backend's managed hook command and any shell wrappers — but
+    the nearest ancestor whose command line looks like a session host (Claude
+    Code or Codex, :func:`~shipit.session.liveness.find_session_process` — both
+    backends' SessionStart entries route here); its create-time is read from the
+    OS here, at write time, exactly as ADR-0027 specifies. Skipped
     cleanly (DEBUG log, no pidfile) when the session's cwd is not a git clone
     (nowhere durable to record), no session-host ancestor is found (launched
     outside a session), or the ancestor's create-time is unreadable (a record

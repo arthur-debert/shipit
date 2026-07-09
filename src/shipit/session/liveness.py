@@ -206,22 +206,22 @@ def is_live(
 
 
 #: Upper bound on :func:`find_session_process`'s parent walk. Any real chain is
-#: a handful of hops (claude → shell → pixi → python …); the cap only guards
-#: against a cyclic/ill-behaved probe fake.
+#: a handful of hops through the managed hook command and any shell wrappers;
+#: the cap only guards against a cyclic/ill-behaved probe fake.
 _MAX_ANCESTOR_HOPS = 32
 
 
 def find_session_process(start_pid: int, probe: Probe) -> ProcessInfo | None:
     """The nearest ancestor of ``start_pid`` (inclusive) that IS a session host.
 
-    The ``SessionStart`` hook runs as a great-grandchild of the session (claude/
-    codex → shell → ``pixi run`` → ``shipit``), so its own PID is not the one to
-    record; this walks the ``ppid`` chain from ``start_pid`` upward and returns
-    the first process whose command line looks like a session host (Claude Code
-    or Codex) — the session process the pidfile should name. ``None`` when the
-    walk exhausts (reached init, a dead link, or the hop cap) without a match,
-    so a caller launched OUTSIDE any session records nothing rather than
-    something wrong.
+    The ``SessionStart`` hook runs below the session through the backend's
+    managed hook command and any shell wrappers, so its own PID is not the one
+    to record; this walks the ``ppid`` chain from ``start_pid`` upward and
+    returns the first process whose command line looks like a session host
+    (Claude Code or Codex) — the session process the pidfile should name.
+    ``None`` when the walk exhausts (reached init, a dead link, or the hop cap)
+    without a match, so a caller launched OUTSIDE any session records nothing
+    rather than something wrong.
     """
     pid = start_pid
     for _ in range(_MAX_ANCESTOR_HOPS):

@@ -108,7 +108,8 @@ def test_tolerance_boundary_is_inclusive():
 
 
 def test_finds_claude_ancestor_through_the_hook_chain():
-    # The realistic chain the SessionStart hook sees: shipit ← pixi ← claude.
+    # The realistic chain the SessionStart hook sees: shipit below wrappers
+    # below the session host.
     table = {
         100: _info(pid=100, ppid=90, argv="python -m shipit hook sessionstart"),
         90: _info(pid=90, ppid=80, argv="pixi run shipit hook sessionstart"),
