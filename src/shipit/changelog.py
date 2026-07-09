@@ -212,16 +212,84 @@ def _terminated(text: str) -> str:
     return text
 
 
+#: A fragment's section heading — the Keep-a-Changelog ``### Added`` /
+#: ``### Changed`` level. Exactly three ``#`` (``####`` is nested content);
+#: surrounding whitespace normalizes away for grouping.
+_SECTION_RE = re.compile(r"^### +(?P<name>\S.*?) *$")
+
+#: A code-fence delimiter line — a fenced block may quote ``### …`` lines
+#: that must not be mistaken for section headings.
+_FENCE_RE = re.compile(r"^(?:```|~~~)")
+
+
+def _split_sections(body: str) -> list[tuple[str | None, str]]:
+    """Split one fragment body into ``(section name, chunk)`` blocks. Pure.
+
+    Content before the first ``### <name>`` heading gets section ``None``;
+    each heading starts a new block carrying the lines under it (the heading
+    line itself is NOT in the chunk — the merger re-emits it canonically).
+    ``### …`` lines inside fenced code blocks are content, not headings.
+    """
+    blocks: list[tuple[str | None, list[str]]] = []
+    name: str | None = None
+    lines: list[str] = []
+    in_fence = False
+    for line in body.splitlines(keepends=True):
+        if _FENCE_RE.match(line):
+            in_fence = not in_fence
+        match = None if in_fence else _SECTION_RE.match(line)
+        if match:
+            if name is not None or lines:
+                blocks.append((name, lines))
+            name = match.group("name")
+            lines = []
+        else:
+            lines.append(line)
+    if name is not None or lines:
+        blocks.append((name, lines))
+    return [(block_name, "".join(block_lines)) for block_name, block_lines in blocks]
+
+
+def _entry(chunk: str) -> str:
+    """A section chunk normalized for merging: edge blank lines stripped
+    (only newlines — a trailing hard-break space survives), re-terminated."""
+    return _terminated(chunk.strip("\n"))
+
+
 def notes_text(fragments: Sequence[Fragment]) -> str:
-    """The coalesced notes body: every fragment's text in order, each
-    newline-terminated. Pure.
+    """The coalesced notes body, same-name sections merged. Pure.
+
+    Each fragment carries its own ``### Added`` / ``### Changed`` (etc.)
+    headings, so verbatim concatenation would repeat a heading once per
+    fragment (#599). Instead, entries group by section name — each heading
+    emitted ONCE, sections in first-seen order, entries in fragment order
+    within a section, one blank line between sections. Content that carries no
+    section heading keeps fragment order ahead of the grouped sections; when
+    NO fragment has a section heading the result is the plain concatenation of
+    the bodies, each newline-terminated.
 
     This is THE one text (story 26): the same string feeds the git tag
     annotation and the GitHub release notes, and it is byte-identical to the
     body of the version section a final cut writes (:func:`coalesce_section`
     is header + this), so no consumer ever re-derives notes from a render.
     """
-    return "".join(_terminated(f.body) for f in fragments)
+    unheaded: list[str] = []
+    groups: dict[str, list[str]] = {}  # insertion-ordered: first-seen section order
+    for fragment in fragments:
+        for name, chunk in _split_sections(_terminated(fragment.body)):
+            if name is None:
+                unheaded.append(chunk)
+            else:
+                groups.setdefault(name, []).append(chunk)
+    if not groups:
+        return "".join(unheaded)
+    sections = []
+    for name, chunks in groups.items():
+        entries = "".join(_entry(chunk) for chunk in chunks)
+        sections.append(f"### {name}\n\n{entries}" if entries else f"### {name}\n")
+    lead = "".join(unheaded).strip("\n")
+    prefix = _terminated(lead) + "\n" if lead else ""
+    return prefix + "\n".join(sections)
 
 
 def coalesce_section(version: str, fragments: Sequence[Fragment], *, date: str) -> str:
@@ -260,7 +328,8 @@ def render(
     legacy: str | None = None,
 ) -> str:
     """The full ``CHANGELOG.md`` text: preamble, ``# Changelog``, the
-    ``## Unreleased`` fragments in order, every version section newest-first
+    ``## Unreleased`` fragments coalesced (same-name ``###`` sections merged,
+    :func:`notes_text`), every version section newest-first
     (semver §11 via :func:`sort_versions_desc`), then any ``legacy.md`` tail,
     the whole normalized to exactly one trailing newline. Pure.
 

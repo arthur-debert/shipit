@@ -113,6 +113,67 @@ def test_notes_text_concatenates_newline_terminated():
     assert core.notes_text(frags) == "- fix the thing\n- add the other\n"
 
 
+def test_notes_text_merges_same_name_sections_across_fragments():
+    # #599: each fragment carries its own `### Changed` (etc.) heading; the
+    # coalesced text emits each section heading ONCE, entries in fragment order.
+    frags = _frags("### Changed\n\n- a\n", "### Changed\n\n- b\n")
+    assert core.notes_text(frags) == "### Changed\n\n- a\n- b\n"
+
+
+def test_notes_text_groups_sections_in_first_seen_order():
+    frags = _frags(
+        "### Changed\n\n- a\n",
+        "### Fixed\n\n- f\n",
+        "### Changed\n\n- b\n",
+    )
+    assert core.notes_text(frags) == ("### Changed\n\n- a\n- b\n\n### Fixed\n\n- f\n")
+
+
+def test_notes_text_unheaded_content_precedes_sections():
+    # Entries without a section heading keep fragment order, ahead of the
+    # grouped sections (they have no name to group under).
+    frags = _frags("- bare\n", "### Fixed\n\n- f\n")
+    assert core.notes_text(frags) == "- bare\n\n### Fixed\n\n- f\n"
+
+
+def test_notes_text_grouping_normalizes_heading_whitespace():
+    # `###  Changed ` and `### Changed` are the same section; the emitted
+    # heading is canonical.
+    frags = _frags("###  Changed \n\n- a\n", "### Changed\n\n- b\n")
+    assert core.notes_text(frags) == "### Changed\n\n- a\n- b\n"
+
+
+def test_notes_text_ignores_headings_inside_code_fences():
+    frags = _frags(
+        "### Notes\n\n```\n### Changed\n```\n",
+        "### Notes\n\n- more\n",
+    )
+    assert core.notes_text(frags) == ("### Notes\n\n```\n### Changed\n```\n- more\n")
+
+
+def test_notes_text_deeper_headings_stay_within_their_section():
+    # #### is nested content, not a section boundary.
+    frags = _frags("### Changed\n\n#### details\n\n- a\n", "### Changed\n\n- b\n")
+    assert core.notes_text(frags) == "### Changed\n\n#### details\n\n- a\n- b\n"
+
+
+def test_plan_coalesce_section_merges_same_name_sections():
+    # The cut section and the notes carry the merged sections too — the ONE
+    # text invariant (story 26) holds through the grouping.
+    frags = _frags("### Changed\n\n- a\n", "### Changed\n\n- b\n")
+    plan = core.plan_coalesce("1.2.3", frags, date="2026-07-08")
+    assert plan.notes == "### Changed\n\n- a\n- b\n"
+    assert plan.section == "## 1.2.3 - 2026-07-08\n\n### Changed\n\n- a\n- b\n"
+    assert plan.section.endswith(plan.notes)
+
+
+def test_render_unreleased_merges_same_name_sections():
+    frags = _frags("### Changed\n\n- a\n", "### Changed\n\n- b\n")
+    text = core.render(frags, {})
+    assert text.count("### Changed") == 1
+    assert "## Unreleased\n\n### Changed\n\n- a\n- b\n" in text
+
+
 def test_coalesce_section_is_header_plus_notes():
     frags = _frags("- a\n", "- b\n")
     section = core.coalesce_section("1.2.3", frags, date="2026-07-08")
