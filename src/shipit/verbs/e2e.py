@@ -32,9 +32,12 @@ module is the effectful shell, sharing its rim with ``test``/``build``
 - the uniform exit contract (ADR-0030), shared with ``test``/``build``:
   0 = every harness passed, 1 = any harness failed or its artifact could
   not be produced, 2 = usage. Config inconsistencies (a malformed map, an
-  e2e artifact with no binary-producing build target) raise
-  :class:`~shipit.config.ConfigError`, mapped by the shared
-  :func:`~._errors.cli_errors` shell to ``error: …`` + exit 1.
+  e2e artifact with no binary-producing build target, an orphaned or
+  ambiguous build target) raise :class:`~shipit.config.ConfigError`, mapped
+  by the shared :func:`~._errors.cli_errors` shell to ``error: …`` + exit 1
+  — validated UP FRONT over every job (fail-fast, parity with ``shipit
+  build``), so a broken declaration is refused before any build runs, never
+  after the healthy jobs ahead of it have already built.
 
 Like ``test`` and ``build``, output prints VERBATIM even on green: the
 suite's report is the point of running it.
@@ -58,7 +61,9 @@ from pathlib import Path
 
 from .. import config, execrun
 from ..tools import artifact_source
+from ..tools import build as build_mod
 from ..tools import e2e as e2e_mod
+from ..tools import legs as legs_mod
 from . import build as build_verb
 from ._errors import cli_errors
 from ._tool import load_config
@@ -214,13 +219,33 @@ def run(
         _check_harness_script(root, job.harness)
 
     if source is None:
+        # Default local-build source: validate every job's build declaration UP
+        # FRONT — fail-fast, parity with `shipit build` — so an inconsistent
+        # artifact is refused BEFORE any (hours-long) build runs, never after
+        # the healthy jobs ahead of it have already built. These are the SAME
+        # pure gates `shipit build` runs: the orphan-target gate, the
+        # ambiguous-producing-path gate, and each artifact's binary location
+        # (the local source re-checks them as its own precondition; here they
+        # run over the whole job set at once, which the per-job resolve cannot).
+        entries = config.load_toolchains(cfg)
+        job_artifacts = [job.artifact for job in jobs]
+        build_mod.check_targets_mapped(job_artifacts, entries)
+        build_mod.check_targets_unambiguous(
+            job_artifacts, legs_mod.plan_legs(entries, tool="build")
+        )
+        for job in jobs:
+            e2e_mod.binary_location(job.artifact, entries)
         source = artifact_source.LocalBuildSource(
             root=root,
-            entries=config.load_toolchains(cfg),
+            entries=entries,
             run_step=build_verb._run_step,
         )
     run_harness = run_harness or _run_harness
-    runs: list[HarnessRun] = runs_out if runs_out is not None else []
+    # Accumulate into a fresh list so the verdict is this invocation's alone; a
+    # caller-supplied `runs_out` is an OUTPUT sink, extended at the end (never
+    # aliased, so a non-empty one it passes can never leak stale runs into the
+    # verdict or the reported job count).
+    runs: list[HarnessRun] = []
     for job in jobs:
         command = shlex.join(job.harness)
         try:
@@ -272,6 +297,8 @@ def run(
             print(out.rstrip())
         print(f"  {'ok  ' if rc == 0 else 'FAIL'} {job.label} ({command})")
 
+    if runs_out is not None:
+        runs_out.extend(runs)
     rc = verdict(runs)
     failed = [r.job.label for r in runs if not r.ok]
     if rc == 0:

@@ -33,6 +33,7 @@ planner. The effectful shell that runs the planned steps is
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -156,6 +157,42 @@ def check_targets_mapped(
         )
 
 
+def check_targets_unambiguous(
+    artifacts: Sequence[config.Artifact], planned: Sequence[legs_mod.Leg]
+) -> None:
+    """Refuse a build target whose toolchain resolves to MORE THAN ONE of the
+    ``planned`` legs — the producing path would be ambiguous.
+
+    A build target names a toolchain, not a path (ADR-0007). When the planned
+    legs carry more than one leg of a toolchain some artifact targets, the
+    join would build that target in every such leg's cwd (the wrong one for
+    all but one, e.g. ``cargo build -p pkg`` in a workspace without ``pkg``).
+    Refuse loudly rather than run wrong-cwd builds; declaring one build-bearing
+    path per toolchain (or selecting a single leg) resolves it. Checked on the
+    PLANNED legs, so a path selector that narrows to one leg is a clean,
+    unambiguous build. The single guard every path that plans a build shares —
+    the ``shipit build`` verb and the e2e local-build source alike — so
+    :func:`plan_build` is only ever reached once its stated precondition (each
+    artifact-targeted toolchain resolves to a single leg) holds. Pure — a
+    :class:`~shipit.config.ConfigError` on ambiguity, nothing otherwise.
+    """
+    targeted = {target.toolchain for artifact in artifacts for target in artifact.build}
+    counts = Counter(leg.toolchain for leg in planned)
+    ambiguous = sorted(
+        f"{toolchain} ({counts[toolchain]} paths)"
+        for toolchain in targeted
+        if counts[toolchain] > 1
+    )
+    if ambiguous:
+        raise config.ConfigError(
+            "[artifacts] build targets name a toolchain mapped to multiple "
+            f"selected [toolchains] paths, so the producing path is ambiguous: "
+            f"{'; '.join(ambiguous)}. A target names a toolchain, not a path "
+            "(ADR-0007) — declare one build-bearing path per toolchain, or "
+            "select a single leg (e.g. `shipit build <path>`)."
+        )
+
+
 def plan_build(
     legs: Sequence[legs_mod.Leg],
     artifacts: Sequence[config.Artifact],
@@ -177,11 +214,10 @@ def plan_build(
     The join keys on ``toolchain`` alone — a target names a toolchain, not a
     path (ADR-0007). Two selected legs sharing a toolchain would make the
     producing path of that toolchain's targets ambiguous (each target would
-    build in every such leg's cwd — the wrong one for all but one), so the
-    build verb REFUSES that combination up front
-    (:func:`shipit.verbs.build._check_targets_unambiguous`); this planner is
-    reached only once every artifact-targeted toolchain resolves to a single
-    selected leg. Binding a target to a specific path is a future
+    build in every such leg's cwd — the wrong one for all but one), so every
+    caller REFUSES that combination up front
+    (:func:`check_targets_unambiguous`); this planner is reached only once
+    every artifact-targeted toolchain resolves to a single selected leg. Binding a target to a specific path is a future
     artifact-model extension if a repo ever needs same-toolchain multi-path
     builds; here one build-bearing path per toolchain is assumed (the shape of
     every real consumer: lex is one rust path, a Tauri app is one rust + one

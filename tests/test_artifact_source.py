@@ -180,6 +180,23 @@ def test_orphaned_build_target_toolchain_is_refused_before_any_build(tmp_path):
     assert rec.calls == []
 
 
+def test_ambiguous_producing_path_is_refused_before_any_build(tmp_path):
+    # The artifact targets `rust`, but the map carries TWO rust legs: the join
+    # keys on toolchain (ADR-0007), so the build would run in BOTH paths' cwd
+    # while `binary_location` verifies only the first — the wrong-cwd build the
+    # `shipit build` verb also refuses. The source applies the SAME guard
+    # before planning, so e2e's build really is the join `shipit build` runs;
+    # no builder is invoked.
+    _place_binary(tmp_path, "target/release/app")
+    rec = _Recorder()
+    source, _ = _source(
+        tmp_path, (_entry("svc-a", "rust"), _entry("svc-b", "rust")), rec
+    )
+    with pytest.raises(config.ConfigError, match=r"ambiguous.*rust \(2 paths\)"):
+        source.resolve(_rust_artifact())
+    assert rec.calls == []
+
+
 def test_declaration_inconsistencies_surface_as_config_errors(tmp_path):
     # ConfigError from the pure rules surfaces through the seam untouched.
     # An e2e artifact with no binary-producing target (npm mapped, so the

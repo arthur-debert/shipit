@@ -321,7 +321,8 @@ def test_missing_harness_binary_is_hard_127_never_a_skip(tmp_path, monkeypatch, 
 def test_config_inconsistency_is_one_clean_error_line(tmp_path, monkeypatch, capsys):
     # An e2e artifact with no binary-producing target: ConfigError through
     # the cli_errors shell — `error: …` + rc 1 (with the real source; the
-    # pure rule lives in tools/e2e and fires inside resolve()).
+    # pure rule lives in tools/e2e and fires in the verb's UP-FRONT validation,
+    # before any build).
     _repo(
         tmp_path,
         monkeypatch,
@@ -333,6 +334,80 @@ def test_config_inconsistency_is_one_clean_error_line(tmp_path, monkeypatch, cap
     err = capsys.readouterr().err
     assert err.startswith("error: ")
     assert "no binary-producing" in err
+
+
+def test_config_validation_is_fail_fast_before_any_healthy_job_runs(
+    tmp_path, monkeypatch, capsys
+):
+    # A HEALTHY job (padz) is declared ahead of a BROKEN one (site targets npm,
+    # which no [toolchains] leg maps). With the default local source the verb
+    # validates every job's declaration UP FRONT, so the orphaned target is
+    # refused before padz — the job ahead of it — builds or runs anything.
+    _repo(
+        tmp_path,
+        monkeypatch,
+        "[toolchains]\n"
+        '"." = "go"\n'
+        "[artifacts.padz]\n"
+        'build = [{ toolchain = "go", package = "./cmd/padz" }]\ne2e = {}\n'
+        "[artifacts.site]\n"
+        'build = [{ toolchain = "npm" }]\ne2e = {}\n',
+    )
+    rec = _HarnessRecorder()
+    rc = e2e_verb.run((), run_harness=rec)
+    assert rc == 1
+    assert rec.calls == []  # nothing ran — fail-fast, padz never reached
+    err = capsys.readouterr().err
+    assert err.startswith("error: ")
+    assert "no [toolchains] leg" in err and "site -> npm" in err
+
+
+def test_ambiguous_producing_path_is_refused_up_front(tmp_path, monkeypatch, capsys):
+    # Two go legs and one go-targeting e2e artifact: the producing path is
+    # ambiguous (ADR-0007 — a target names a toolchain, not a path), the same
+    # combination `shipit build` refuses. The verb refuses it up front, before
+    # any build, with the default local source.
+    _repo(
+        tmp_path,
+        monkeypatch,
+        "[toolchains]\n"
+        '"svc-a" = "go"\n'
+        '"svc-b" = "go"\n'
+        "[artifacts.x]\n"
+        'build = [{ toolchain = "go", package = "./cmd/x" }]\ne2e = {}\n',
+    )
+    rec = _HarnessRecorder()
+    rc = e2e_verb.run((), run_harness=rec)
+    assert rc == 1
+    assert rec.calls == []
+    err = capsys.readouterr().err
+    assert "ambiguous" in err and "go (2 paths)" in err
+
+
+def test_runs_out_is_an_output_sink_never_aliased(tmp_path, monkeypatch, capsys):
+    # A caller-supplied `runs_out` that already carries a prior (failing) run
+    # must not leak into THIS invocation's verdict or job count: the verb
+    # accumulates into a fresh list and EXTENDS the sink at the end.
+    from shipit import config
+    from shipit.tools import e2e as e2e_mod
+
+    root = _repo(tmp_path, monkeypatch, PADZ_TOML)
+    stale = e2e_verb.HarnessRun(
+        e2e_mod.E2eJob(config.Artifact(name="old"), harness=("x",), env_var="OLD_BIN"),
+        returncode=1,
+        output="stale failure",
+    )
+    runs_out = [stale]
+    rc = e2e_verb.run(
+        (),
+        source=_FakeSource({"padz": root / "padz"}),
+        run_harness=_HarnessRecorder(),
+        runs_out=runs_out,
+    )
+    assert rc == 0  # this run's verdict alone — the stale failure did not leak
+    assert runs_out[0] is stale  # the caller's prior entry is preserved
+    assert len(runs_out) == 2  # extended by this run's single job, not aliased
+    assert "E2E: OK (1 harness)" in capsys.readouterr().out  # count is this run's
 
 
 # --------------------------------------------------------------------------

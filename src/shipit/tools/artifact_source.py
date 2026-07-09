@@ -106,12 +106,18 @@ class LocalBuildSource:
         # the "same join `shipit build` runs" contract this source promises.
         build_mod.check_targets_mapped([artifact], self.entries)
         location = e2e_mod.binary_location(artifact, self.entries)
+        # The SAME ambiguity guard `shipit build` runs before `plan_build`: a
+        # toolchain this artifact targets that maps to MORE THAN ONE build leg
+        # has no single producing path, so the join would build in every such
+        # leg's cwd while `binary_location` verifies only the first — a
+        # wrong-cwd build reporting a binary from a different leg. Refuse it
+        # here (on the whole planned build map, before narrowing) so e2e's
+        # build really is the join `shipit build` runs, `plan_build`'s stated
+        # precondition and all.
+        build_legs = legs_mod.plan_legs(self.entries, tool="build")
+        build_mod.check_targets_unambiguous([artifact], build_legs)
         wanted = {target.toolchain for target in artifact.build}
-        legs = [
-            leg
-            for leg in legs_mod.plan_legs(self.entries, tool="build")
-            if leg.toolchain in wanted
-        ]
+        legs = [leg for leg in build_legs if leg.toolchain in wanted]
         steps = build_mod.plan_build(legs, [artifact])
         for step in steps:
             command = shlex.join(step.argv)
