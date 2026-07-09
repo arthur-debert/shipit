@@ -95,9 +95,9 @@ underneath it and how a repo gets onto shipit. Domain vocabulary:
         review-request edges, local-agent reviewers (agy-local, codex-local)
         through detached runs whose funnel is a check run on the PR
         (ADR-0005) — the PR itself is the whole store. Re-review is
-        per-reviewer policy, default review-once; a round cap / all-nitpicks
-        breaker ends the loop rather than iterating forever. PR-flow
-        vocabulary: `CONTEXT.md`.
+        per-reviewer policy, default review-once; a round cap /
+        no-major-finding breaker ends the loop rather than iterating
+        forever. PR-flow vocabulary: `CONTEXT.md`.
 
         Addressing is its own role: ONE SHEPHERD per PR (ADR-0035), briefed
         cold on round 1, parked between rounds, resumed per round. Each round

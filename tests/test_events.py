@@ -124,7 +124,7 @@ def test_the_starting_vocabulary_is_registered():
         "wait.fired",
         "wait.actionable",
         "wait.timed_out",
-        "finding.classified",
+        "finding.severity_overridden",
         "pr.ready",
         "pr.unready",
         "sweep.started",

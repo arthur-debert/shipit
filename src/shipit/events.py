@@ -108,11 +108,12 @@ EVENT_NAMES = frozenset(
         "wait.fired",
         "wait.actionable",
         "wait.timed_out",
-        # a review finding's recorded verdict (#423): the agent addressing the
-        # round classifies each finding (nitpick | substantive) as a byproduct
-        # of triaging its thread; the record — keyed by the finding comment's
-        # id, written once — is what the all-nitpick breaker consumes.
-        "finding.classified",
+        # a finding's write-once Severity override (RVW02 / ADR-0044): the
+        # dormant correction path for a wrong reviewer-emitted severity —
+        # keyed by the finding comment's id, written once via `shipit pr
+        # classify`; it beats every other rung of the severity precedence
+        # chain the engine resolves findings through.
+        "finding.severity_overridden",
         # the ready flip and its undo
         "pr.ready",
         "pr.unready",
