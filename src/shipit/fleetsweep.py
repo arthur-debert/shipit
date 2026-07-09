@@ -27,7 +27,11 @@ fixture-testable):
   THROUGH the Tree's managed launcher with the sanctioned ``SHIPIT_EXEC``
   override pointing at the candidate build under test — announced on stderr
   by the launcher and durably by the exec'd build's ``launcher.overridden``
-  event.
+  event. The candidate build, never the candidate ENVIRONMENT: a provisioned
+  Tree's invocation is routed through the Tree's own pixi env (see
+  :func:`_run_cell`) so the tools the candidate dispatches (``pytest``,
+  ``cargo nextest``, …) resolve the Tree's provisioning, hermetic to the
+  Tree — not the coordinator env the sweep was launched from.
 - **Applicability derives from the repo's OWN declarations**
   (:func:`derive_plans`): lint + test everywhere; build where the
   path→toolchain map declares a buildable leg (ADR-0007 — every map entry
@@ -517,7 +521,11 @@ def _run_tool(
     creep back in via a merge over ``os.environ`` and bind the swept tool to the
     coordinator checkout instead of its freshly provisioned Tree. ``scrub_env``
     keeps ``PATH`` and every non-leak var, so the Tree's toolchains still
-    resolve — the hermeticity fix drops only the parent-project pointers."""
+    resolve — the scrub drops only the parent-project pointers. The kept PATH
+    can still FRONT the coordinator env's bin dir (an activation edits PATH;
+    a scrub cannot un-edit it) — resolution-ORDER hermeticity is
+    :func:`_run_cell`'s job, which routes a provisioned Tree's invocation
+    through the Tree's own pixi env so its bin dir wins."""
     child_env = pixienv.scrub_env(os.environ)
     child_env.update(env)
     return execrun.run(
@@ -566,9 +574,32 @@ def _run_cell(
     run_tool: RunTool,
 ) -> Cell:
     """Execute one applicable cell: the Tree's managed launcher + the tool's
-    subcommand, under the ``SHIPIT_EXEC`` override (ADR-0033)."""
+    subcommand, under the ``SHIPIT_EXEC`` override (ADR-0033).
+
+    A provisioned Tree's invocation is routed THROUGH its own pixi env
+    (``pixi run --manifest-path <tree>/pixi.toml -- bin/shipit …`` — the
+    :func:`shipit.pixienv.run_argv` form, the same launch-path fix as
+    :func:`shipit.spawn.launch.pixi_wrap`, ``docs/dev/pixi.lex`` §7), gated on
+    :func:`shipit.pixienv.has_default_env` like every routing site. The leak
+    this closes (the round-0 shipit self-row red): the swept tool's dispatched
+    runners (``pytest``, ``cargo nextest``, …) resolve off PATH, and the
+    sweep's inherited PATH still FRONTS the coordinator checkout's own pixi
+    env — the scrub drops the parent's project *pointers* but cannot un-edit
+    PATH — so a bare launcher invocation let a swept shipit Tree's pytest run
+    import the CANDIDATE build's package instead of the Tree's own source.
+    The wrap puts the Tree's env bin first, so every dispatched child resolves
+    the Tree's OWN provisioning, while ``SHIPIT_EXEC`` (passed through the
+    activation untouched) still picks the candidate BUILD — ADR-0033's
+    boundary: the override selects the build, never the environment. A Tree
+    with no provisioned env (a non-pixi repo) keeps the bare launcher argv;
+    its toolchains never resolved through pixi to begin with. The RECORDED
+    argv is the wrapped form — the hermetic invocation a fix agent must
+    reproduce with.
+    """
     launcher = tree_root / "bin" / "shipit"
-    argv = (str(launcher), *TOOL_ARGS[tool])
+    argv: tuple[str, ...] = (str(launcher), *TOOL_ARGS[tool])
+    if pixienv.has_default_env(tree_root):
+        argv = tuple(pixienv.run_argv(list(argv), tree_root))
     if not launcher.is_file():
         status, reason = cell_status(1, entry.expect_verify_fail)
         return Cell(
