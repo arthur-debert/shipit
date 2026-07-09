@@ -33,10 +33,12 @@ Tree on disk or a real ``codex``:
   ``CODEX_ACCESS_TOKEN`` passing through — ADR-0020 §codex Auth, defined ONCE on the
   adapter), the launch-path project-pointer scrub (a parent ``PIXI_*``/Conda
   activation must not bind the session's own tool calls to the source checkout),
-  the launch-seam role scrub (an inherited ``SHIPIT_LOG_CTX_ROLE`` from a spawned
-  worker Run's shell must not disarm the new coordinator's edit guard — the same
-  scrub the managed ``agent-start`` launcher performs, repeated here so a direct
-  ``shipit session codex`` is covered too),
+  the launch-seam agent-identity scrub (the inherited agent-identity keys
+  ``SHIPIT_LOG_CTX_ROLE``/``_AGENT``/``_RUN`` from a spawned worker Run's shell
+  must not disarm the new coordinator's edit guard nor mis-tag its log records
+  with the worker's identity — the same scrub the managed ``agent-start``
+  launcher performs, repeated here so a direct ``shipit session codex`` is
+  covered too),
   plus the ``SHIPIT_LOG_CTX_SESSION``/``_TREE`` exports. Those exports are the codex
   counterpart of the SessionStart hook's ``CLAUDE_ENV_FILE`` log-context write
   (which codex has no equivalent of): every process the session runs inherits them,
@@ -122,12 +124,16 @@ def codex_env(
        (:func:`shipit.spawn.launch.scrub_tree_env` — leaked ``PIXI_*``/Conda
        activation vars out, so the session's own ``pixi``/``shipit`` calls resolve
        the Tree, not the parent checkout);
-    3. the launch-seam role scrub: an inherited ``SHIPIT_LOG_CTX_ROLE`` (a
-       coordinator started from inside a spawned worker Run's shell) is dropped —
-       the session being launched IS a coordinator, and the pretooluse edit
-       guard's fallback would otherwise silently resolve it to the worker's role
-       and disarm. The managed ``agent-start`` launcher scrubs the same var; this
-       covers a direct ``shipit session codex``;
+    3. the launch-seam agent-identity scrub: the inherited agent-identity keys
+       ``SHIPIT_LOG_CTX_ROLE``/``_AGENT``/``_RUN`` (a coordinator started from
+       inside a spawned worker Run's shell) are dropped — the session being
+       launched IS a coordinator, a fresh agent. The pretooluse edit guard's
+       ROLE fallback would otherwise silently resolve it to the worker's role
+       and disarm; the worker's AGENT/RUN spawn ids would mis-tag the new
+       coordinator's own log records with the worker's identity. Task-correlation
+       keys (``PR``/``EPIC``/…) may still inherit — they describe the work, not
+       who is doing it. The managed ``agent-start`` launcher scrubs the same
+       keys; this covers a direct ``shipit session codex``;
     4. the ``SHIPIT_LOG_CTX_SESSION``/``_TREE`` exports (names from
        :data:`shipit.logcontext.ENV_PREFIX`, values matching what the SessionStart
        hook would export for this Tree — the leaf IS the session id, ADR-0027),
@@ -137,7 +143,8 @@ def codex_env(
     Returns a fresh dict, never the caller's mapping.
     """
     env = scrub_tree_env(CodexAdapter().child_env(parent_env))
-    env.pop(logcontext.ENV_PREFIX + "ROLE", None)
+    for key in ("ROLE", "AGENT", "RUN"):
+        env.pop(logcontext.ENV_PREFIX + key, None)
     env[logcontext.ENV_PREFIX + "SESSION"] = session_id
     env[logcontext.ENV_PREFIX + "TREE"] = str(tree)
     return env

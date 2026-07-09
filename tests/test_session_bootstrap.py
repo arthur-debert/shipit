@@ -49,21 +49,29 @@ def test_codex_env_scrubs_billing_and_project_pointers_keeps_access_token():
     assert env[logcontext.ENV_PREFIX + "TREE"] == tree
 
 
-def test_codex_env_drops_an_inherited_worker_role_export():
-    # The launch-seam role scrub (#631): a coordinator launched from inside a
-    # spawned worker Run's shell inherits the worker's SHIPIT_LOG_CTX_ROLE
-    # export; riding into the new session it would make the pretooluse edit
-    # guard's fallback resolve the coordinator to the worker's role and
-    # silently disarm. The env builder drops it actively.
+def test_codex_env_drops_the_inherited_worker_agent_identity_exports():
+    # The launch-seam agent-identity scrub (#631): a coordinator launched from
+    # inside a spawned worker Run's shell inherits the worker's agent-identity
+    # log-context exports — ROLE (riding in it would make the pretooluse edit
+    # guard's fallback resolve the coordinator to the worker's role and silently
+    # disarm) plus the paired AGENT/RUN spawn ids (which would mis-tag the new
+    # coordinator's own log records with the worker's identity). The env builder
+    # drops all three actively; a task-correlation key like PR still rides.
     parent = {
         "PATH": "/bin",
         logcontext.ENV_PREFIX + "ROLE": "implementer",
         logcontext.ENV_PREFIX + "AGENT": "deadbeef",
+        logcontext.ENV_PREFIX + "RUN": "77",
+        logcontext.ENV_PREFIX + "PR": "632",
     }
 
     env = bootstrap.codex_env(parent, session_id="codex-1", tree="/trees/codex-1")
 
     assert logcontext.ENV_PREFIX + "ROLE" not in env
+    assert logcontext.ENV_PREFIX + "AGENT" not in env
+    assert logcontext.ENV_PREFIX + "RUN" not in env
+    # Task-correlation keys describe the work, not who does it — they inherit.
+    assert env[logcontext.ENV_PREFIX + "PR"] == "632"
 
 
 def test_format_launch_names_session_tree_and_exact_argv():

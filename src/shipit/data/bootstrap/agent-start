@@ -22,22 +22,27 @@
 # `./claude-start` / `./codex-start` siblings are compatibility shims that
 # delegate here. Extra args are forwarded to the agent CLI verbatim.
 #
-# The common path scrubs SHIPIT_LOG_CTX_ROLE before dispatch: a coordinator
-# launched from inside a spawned worker Run's shell would otherwise inherit
-# the worker's role export and silently disarm the coordinator edit guard
-# (the pretooluse fallback consults that var exactly when the payload names
-# no agent). Known accepted boundary: a bare `claude -w` run manually from
-# inside a worker shell bypasses this launcher and still inherits the var.
+# The common path scrubs the worker's agent-identity log-context keys before
+# dispatch — SHIPIT_LOG_CTX_ROLE, plus the paired AGENT and RUN spawn ids: a
+# coordinator launched from inside a spawned worker Run's shell would otherwise
+# inherit ROLE and silently disarm the coordinator edit guard (the pretooluse
+# fallback consults that var exactly when the payload names no agent), and
+# inherit AGENT/RUN and mis-tag its own log records with the worker's identity.
+# Task-correlation keys (PR, EPIC, …) may still inherit — they describe the
+# work, not who is doing it. Known accepted boundary: a bare `claude -w` run
+# manually from inside a worker shell bypasses this launcher and still inherits
+# these vars.
 #
 # Do not edit — `shipit install` overwrites this file.
 set -euo pipefail
 
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Launch-seam role scrub (see header): the session being started is a
+# Launch-seam agent-identity scrub (see header): the session being started is a
 # coordinator, whatever shell it was started from — a worker Run's exported
-# role must not ride into it. Common path, so no host can forget it.
-unset SHIPIT_LOG_CTX_ROLE
+# agent-identity keys (role, plus the paired agent/run spawn ids) must not ride
+# into it. Common path, so no host can forget it.
+unset SHIPIT_LOG_CTX_ROLE SHIPIT_LOG_CTX_AGENT SHIPIT_LOG_CTX_RUN
 
 usage() {
 	echo "usage: agent-start <agent> [args...]   (agents: claude, codex)" >&2
