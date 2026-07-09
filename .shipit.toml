@@ -145,28 +145,47 @@ simple-gal = [
 standout = [{ repo = "arthur-debert/standout", path = "standout" }]
 supage = [{ repo = "arthur-debert/supage", path = "supage" }]
 
+[lint]
+ignore = [
+  "CHANGELOG.md",
+  "CHANGELOG/**",
+  "package-lock.json",
+  "pnpm-lock.yaml",
+]
+
 [shipit]
-version = "5b9d66480f1af55bbea3efe7c3b811a2d3f5e936"
+version = "0898a6f9847e80d30f709ef4d9b539cbd68b253a"
 
 [managed]
+"skills/coordinating/SKILL.md" = "sha256:d39855cd948076fd3d25b10ba345efd4e0f6f8eea26fcc546723cc063c4511bc"
+"skills/grill-me-with-docs/ADR-FORMAT.md" = "sha256:f1f36cd3f8d3b6474ddd5855da4e233bfc4ae1a1c5024909ccf11871819a41b2"
+"skills/grill-me-with-docs/CONTEXT-FORMAT.md" = "sha256:886ce0e96fd0f76f4c72c337c049cf4655227c599862ce920a62297e0929beae"
+"skills/grill-me-with-docs/SKILL.md" = "sha256:af2e662a3df35c2f6183a10c24a13e9ff876b1914c710ec7b09310b968dd376a"
+"skills/implementing/SKILL.md" = "sha256:02040db0bd1aedce096473bdbc9d65ec741a81c989f97121fedc242e172a4932"
 "skills/lex-primer/SKILL.md" = "sha256:ff616c1c447661298fb8e06a8a8a6ce60400d838c7c881b9e8bd526128e32901"
-"skills/shipit-grill-with-docs/ADR-FORMAT.md" = "sha256:f1f36cd3f8d3b6474ddd5855da4e233bfc4ae1a1c5024909ccf11871819a41b2"
-"skills/shipit-grill-with-docs/CONTEXT-FORMAT.md" = "sha256:886ce0e96fd0f76f4c72c337c049cf4655227c599862ce920a62297e0929beae"
-"skills/shipit-grill-with-docs/SKILL.md" = "sha256:47c25fe56510de6a63da1de9121ef9b6704808f3631d43c7f9ee745f2c32ff62"
-"skills/shipit-planning/SKILL.md" = "sha256:a16ac4744238b3a5b59da8a887bb6268742fd01a8a285797e0198aba49e44336"
+"skills/planning/SKILL.md" = "sha256:172678dc99e45431970d2cdd31c6c910622590e7e6893b26026a282fcdc49919"
+"skills/shepherding-prs/SKILL.md" = "sha256:b7250030fa91282fa6d7d5a65073363edbc4522e31984dd8983994dcf9a5aa85"
 "skills/shipit-session-status/SKILL.md" = "sha256:4720ad9b381d57c32dfd2aca6cb2a4b338dfa69cac90eedd85a71f7f2f8db962"
-"skills/shipit-to-issues/SKILL.md" = "sha256:4df3706b12c89fb7d844521800addea1c9ab9f448cd7f926b993a5d92f46869b"
-"skills/shipit-to-prd/SKILL.md" = "sha256:0f13f20cad06161baff87628ea6b1cf5bac0cc7919beb6176535f9cdf9ae42d8"
-"AGENTS.md#shipit-block" = "sha256:fc2a3c40751a94e16b1cb577c32ddea74c0af28d679bba1f64bbdb4b51d9ae5e"
-"bin/shipit" = "sha256:b305b90ca3f746acbee0f457d26f5c213d63d0c2cfa31b6baf1b5903f83816bd"
+"skills/to-prd/SKILL.md" = "sha256:3b1fc2aa002d78a63f9bd858144be177a1b2f69a2ca97e2ca165bc86f6ca5a2e"
+"skills/to-tickets/SKILL.md" = "sha256:271ffbaaa98315c752ddf9c2d01e504b041140bdc9c5a21fc7ac152891931b16"
+"AGENTS.md#shipit-block" = "sha256:0998a8cfb1b8da9f25cbc43c068023c9c00744482c1e3178af3f560cdf7e1d0f"
+"bin/shipit" = "sha256:b9878e0eccc8bf11f99399c469b3f2c2cea572e330bf054426c60a05ce5d2d96"
+"bin/setup-dev-env.sh" = "sha256:d9d29a099a8e3333c9808ccefc4b338f18fdca9ddc3fa0e281ea54697f7cdeee"
 claude-start = "sha256:8a658d5d88269a0444e9843d5cddbf133e4ac9fb2e6862701980991bbd4d379c"
-"lefthook.yml" = "sha256:063e877c8ae591d485c18b20542b36fb67fa835f89229ccf46d68cc60d44e57b"
-"pixi.toml#shipit-tasks" = "sha256:60403d02330a69d3328161d32f10d1196b605ff6bc3127dcf4645b3cfe3b4f90"
-".claude/agents/explorer.md" = "sha256:db4cc109e24df71c9062f31e55a92d1f0a9fdd25118649c729853195e6623657"
-".claude/agents/implementer.md" = "sha256:2ba631fb2f1c939a70adef06a53312d56f95b28fb7229b87293aa42bfb79c9c5"
-".claude/agents/reviewer.md" = "sha256:d4bd8bee97471c6539c19f0858b8fc7c5e449273c39482a20b5dd729a2b4e647"
-".claude/agents/shepherd.md" = "sha256:5ccffca46b80dcccf426fcf77af808d23b6fec58836599a9e767be23a5035ba8"
+"lefthook.yml" = "sha256:af9c6102b1dd44ddbd33e37641f383fc589b4403ea6394e274aa627af2dc6e8b"
+".markdownlint.yaml" = "sha256:b0834c9c810555866987cfec39862265322ef5048e92dac536563f6e21213553"
+".markdownlintignore" = "sha256:13ae27a0fb58ba24bf170c5b1bbd26953215115aa1b77b9ae53bb13edd7ee938"
+".yamllint.yaml" = "sha256:d5c3b7b69d0bdd0ce25335e0db50cea2355b3c8ff62f4edbbf2a7d7909a2fd54"
+".prettierrc" = "sha256:9d40f301aa8fdd684ebde7c1d7a7493d764e46b6f45585dbb5b99c821123a947"
+"pixi.toml#shipit-tasks" = "sha256:d02ea7ec3c772affa6d9510007e434115e1d75b5f7231567c38fb96c05d1a02b"
+"pixi.toml#shipit-lint-deps" = "sha256:2cb6e4ec4d7ea2453a3367c9fa293122ac9cee96daa75a1b0f2ef43d5450e5d2"
+"pixi.toml#shipit-environments" = "sha256:c54b53e3bb55cd59aaabf9daea85c81cffe3cbae8978e41cbef5db0f16b3838b"
+".claude/agents/explorer.md" = "sha256:9b32730d6a744d7ff2b5201b7a9f09ea9081f98d315e5534d975e9178e6afc08"
+".claude/agents/implementer.md" = "sha256:18b16a9383e160ffdcdb62e798292605738f6366691bc8e59e77645ed605bb19"
+".claude/agents/reviewer.md" = "sha256:9b5d9e3739583dcd55c2218984f6f37f47f8ae5ec0663d0e1bafd635ccb9b859"
+".claude/agents/shepherd.md" = "sha256:78cf79e86e974a7e663f6ed6318995d964759ed824b8edc6170f74bfb735a211"
 ".claude/settings.json#shipit-pretooluse-hook" = "sha256:5ecfbfac5a759a18e4b35a8e17a193c82610030972aeaf6c3cfc54b657872c4f"
-".claude/settings.json#shipit-stop-hook" = "sha256:0b936c78ec1a099d43ace303a7497f15a7ece6bb5bb6c9a0e9cffc103c348d82"
-".claude/settings.json#shipit-subagentstop-hook" = "sha256:0fbeea302c1aa9fe040ba6f84032f14a3805e09ed3aead663be187673d1554b0"
-".claude/settings.json#shipit-sessionstart-hook" = "sha256:38d3907265b0b17fcd8f5242d3e604eb40efbbd7893039633c8c47bc4e79240b"
+".claude/settings.json#shipit-stop-hook" = "sha256:f01a445a58731cca9cfa67032780749aed3ece69afa0cec813c1a522cf25ce8f"
+".claude/settings.json#shipit-subagentstop-hook" = "sha256:48cf4d9e66102fe17d1f5cdd93b0fccef89547e32eb737ad519d809f5cf2b644"
+".claude/settings.json#shipit-sessionstart-hook" = "sha256:47c3682b8f3a1c3fa80f0770d5978d15e015b397ab1cb957db567aef3f2b7e96"
+".claude/settings.json#shipit-worktreecreate-hook" = "sha256:b1b95571d5f17dc5f00c74c307107c8c5733754d153afe1556f0080a72160413"
