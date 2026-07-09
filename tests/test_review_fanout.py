@@ -298,7 +298,12 @@ def test_empty_union_skips_the_calibrator_and_posts_the_attested_clean_review(
     review = outcome.review
     assert review["comments"] == []
     assert review["summary"]["status"] == "APPROVED"
-    assert "0 candidate finding(s)" in review["summary"]["overall_feedback"]
+    # The empty union skipped the calibrator, so the attestation says so instead
+    # of claiming a routing "after calibration" that never ran.
+    assert (
+        "no candidate findings (calibration skipped)"
+        in review["summary"]["overall_feedback"]
+    )
     assert review["summary"]["coverage"]["reviewed"] == ["a.py", "t.py"]
     assert outcome.findings == ()
     assert [r["kind"] for r in outcome.runs] == ["dimension-pass", "dimension-pass"]

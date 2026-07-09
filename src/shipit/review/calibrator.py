@@ -409,8 +409,11 @@ def parse_calibration(
     # judged entry of its own (the canonical twin's severity/disposition, its
     # OWN location/text from the union) so the round record retains every
     # union finding with an honest routing — merged-away entries never post.
+    # Index the canonicals by id once (every canonical is already appended; the
+    # duplicates this loop appends are never merge targets) so the lookup is O(1).
+    canonical_by_id = {e.id: e for e in entries}
     for merged_id, canonical_id in duplicate_of.items():
-        canonical = next(e for e in entries if e.id == canonical_id)
+        canonical = canonical_by_id[canonical_id]
         candidate = union[merged_id]
         line = candidate.get("line")
         confidence = candidate.get("confidence")

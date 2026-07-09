@@ -460,30 +460,37 @@ def _attestation(
 
     The routed-out counts plus ``posted`` plus the merged-away ``duplicate``
     count sum to ``union_size``: every candidate is accounted for, so the
-    arithmetic a human checks always balances (deduped candidates included).
+    arithmetic a human checks always balances (deduped candidates included). An
+    EMPTY union skipped the calibrator (:func:`run_fanout_review`), so its line
+    never claims a calibration that never ran.
     """
     names = ", ".join(d.name for d in dims)
-    routed_out = {
-        disposition: sum(
-            1
-            for judged in entries
-            if judged.disposition is disposition and judged.duplicate_of is None
-        )
-        for disposition in (
-            Disposition.DROP_UNVERIFIED,
-            Disposition.NIT_SUPPRESSED,
-            Disposition.OUT_OF_SCOPE,
-        )
-    }
-    duplicates = sum(1 for judged in entries if judged.duplicate_of is not None)
-    lines = [
-        f"Review fan-out: {len(dims)} dimension pass(es) ({names}) -> "
-        f"{union_size} candidate finding(s) -> {posted} posted after "
-        f"calibration ({routed_out[Disposition.DROP_UNVERIFIED]} "
-        f"dropped-unverified, {routed_out[Disposition.OUT_OF_SCOPE]} "
-        f"out-of-scope, {routed_out[Disposition.NIT_SUPPRESSED]} "
-        f"nit-suppressed, {duplicates} duplicate)."
-    ]
+    prelude = f"Review fan-out: {len(dims)} dimension pass(es) ({names}) -> "
+    if union_size == 0:
+        # The calibrator was skipped — a judge over nothing does nothing — so
+        # attest the clean pass without a misleading "after calibration" routing.
+        lines = [f"{prelude}no candidate findings (calibration skipped)."]
+    else:
+        routed_out = {
+            disposition: sum(
+                1
+                for judged in entries
+                if judged.disposition is disposition and judged.duplicate_of is None
+            )
+            for disposition in (
+                Disposition.DROP_UNVERIFIED,
+                Disposition.NIT_SUPPRESSED,
+                Disposition.OUT_OF_SCOPE,
+            )
+        }
+        duplicates = sum(1 for judged in entries if judged.duplicate_of is not None)
+        lines = [
+            f"{prelude}{union_size} candidate finding(s) -> {posted} posted after "
+            f"calibration ({routed_out[Disposition.DROP_UNVERIFIED]} "
+            f"dropped-unverified, {routed_out[Disposition.OUT_OF_SCOPE]} "
+            f"out-of-scope, {routed_out[Disposition.NIT_SUPPRESSED]} "
+            f"nit-suppressed, {duplicates} duplicate)."
+        ]
     if failed:
         failures = ", ".join(
             f"{r.dimension.name} ({r.run.get('outcome', 'failed')})" for r in failed
