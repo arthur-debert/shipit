@@ -61,12 +61,31 @@ from ..tools import artifact_source
 from ..tools import e2e as e2e_mod
 from . import build as build_verb
 from ._errors import cli_errors
-from ._tool import load_config, split_args
+from ._tool import load_config
 
 logger = logging.getLogger("shipit.e2e")
 
 #: The tool's name in every user-facing message.
 TOOL = "e2e"
+
+
+def _split_args(args: Sequence[str]) -> tuple[str | None, tuple[str, ...]]:
+    """``(selector, passthrough)`` for the ARTIFACT axis — e2e's own split,
+    deliberately NOT :func:`._tool.split_args` (the leg axis).
+
+    The rule is the simple one: a leading ``-`` token means no selector (all
+    passthrough — click has already stripped the first ``--``); otherwise the
+    first token is the artifact selector and the rest is passthrough. Unlike
+    the leg axis, e2e has NO single-unit sugar that forwards an unrecognised
+    first token as passthrough: an artifact name that names no e2e-declaring
+    artifact is a usage error (:func:`shipit.tools.e2e.plan_e2e` raises), never
+    a silent hand-off to the harness — so validation stays wholly in the pure
+    planner and the split needs no artifact map here.
+    """
+    if not args or args[0].startswith("-"):
+        return None, tuple(args)
+    return args[0], tuple(args[1:])
+
 
 #: The harness Exec's stated timeout, in seconds (ADR-0028: every Exec
 #: states its bound deliberately). One hour, matching
@@ -159,7 +178,8 @@ def run(
     artifact selector that names no e2e-declaring artifact is usage, exit 2).
 
     ``args`` is the raw post-``--``-stripped argument tuple (see
-    :func:`~._tool.split_args`). ``source`` injects the artifact-source
+    :func:`_split_args` — the artifact axis, not the leg axis). ``source``
+    injects the artifact-source
     seam (default: the local-build source over the repo's ``[toolchains]``
     legs); ``run_harness`` injects the harness Exec boundary for tests;
     ``runs_out``, when given, receives every :class:`HarnessRun` outcome —
@@ -167,7 +187,7 @@ def run(
     """
     started = time.monotonic()
     root = Path(".").resolve()
-    selector, passthrough = split_args(tuple(args))
+    selector, passthrough = _split_args(tuple(args))
     cfg = load_config(root)
     artifacts = config.load_artifacts(cfg)
 

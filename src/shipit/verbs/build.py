@@ -42,6 +42,7 @@ import logging
 import shlex
 import sys
 import time
+from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -84,6 +85,34 @@ def verdict(runs: Sequence[StepRun]) -> int:
     contract's non-usage half (ADR-0030; usage errors exit 2 before any step
     runs)."""
     return 0 if all(run.ok for run in runs) else 1
+
+
+def _check_targets_unambiguous(
+    artifacts: Sequence[config.Artifact], planned: Sequence[legs_mod.Leg]
+) -> None:
+    """A build target names a toolchain, not a path (ADR-0007). When the
+    SELECTED legs carry more than one leg of a toolchain some artifact targets,
+    the producing path is ambiguous — the join would build that target in every
+    such leg's cwd (the wrong one for all but one, e.g. ``cargo build -p pkg``
+    in a workspace without ``pkg``). Refuse loudly rather than run wrong-cwd
+    builds; declaring one build-bearing path per toolchain (or selecting a
+    single leg) resolves it. Checked on the PLANNED legs, so a path selector
+    that narrows to one leg is a clean, unambiguous build."""
+    targeted = {target.toolchain for artifact in artifacts for target in artifact.build}
+    counts = Counter(leg.toolchain for leg in planned)
+    ambiguous = sorted(
+        f"{toolchain} ({counts[toolchain]} paths)"
+        for toolchain in targeted
+        if counts[toolchain] > 1
+    )
+    if ambiguous:
+        raise config.ConfigError(
+            "[artifacts] build targets name a toolchain mapped to multiple "
+            f"selected [toolchains] paths, so the producing path is ambiguous: "
+            f"{'; '.join(ambiguous)}. A target names a toolchain, not a path "
+            "(ADR-0007) — declare one build-bearing path per toolchain, or "
+            "select a single leg (e.g. `shipit build <path>`)."
+        )
 
 
 def _run_step(
@@ -129,9 +158,9 @@ def run(
     """
     started = time.monotonic()
     root = Path(".").resolve()
-    selector, passthrough = split_args(tuple(args))
     cfg = load_config(root)
     entries = require_entries(cfg, root, TOOL)
+    selector, passthrough = split_args(tuple(args), entries)
     artifacts = config.load_artifacts(cfg)
     build_mod.check_targets_mapped(artifacts, entries)
 
@@ -146,9 +175,14 @@ def run(
         logger.error("build invocation rejected", extra={"root": str(root)})
         return 2
 
+    _check_targets_unambiguous(artifacts, planned)
     steps = build_mod.plan_build(planned, artifacts, version=version)
     run_step = run_step or _run_step
-    runs: list[StepRun] = runs_out if runs_out is not None else []
+    # Accumulate into a fresh list so the verdict is this invocation's alone; a
+    # caller-supplied `runs_out` is an OUTPUT sink, extended at the end (never
+    # aliased, so a non-empty one it passes can never leak stale steps into the
+    # verdict).
+    runs: list[StepRun] = []
     for step in steps:
         command = shlex.join(step.argv)
         print(f"build: {step.label}: {command}")
@@ -188,10 +222,17 @@ def run(
                 },
             )
         runs.append(StepRun(step, rc, out))
-        if out.strip():
-            print(out.rstrip())
+        if out:
+            # The builder's report prints VERBATIM (unlike lint, which swallows
+            # a green run): emit exactly what the step produced, normalizing
+            # only the trailing newline — add one when it's missing so the
+            # ok/FAIL line starts on its own line, keep the builder's own when
+            # present so it is never doubled.
+            print(out, end="" if out.endswith("\n") else "\n")
         print(f"  {'ok  ' if rc == 0 else 'FAIL'} {step.label} ({command})")
 
+    if runs_out is not None:
+        runs_out.extend(runs)
     rc = verdict(runs)
     failed = [r.step.label for r in runs if not r.ok]
     if rc == 0:

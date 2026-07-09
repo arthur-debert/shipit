@@ -31,19 +31,34 @@ _SIGNAL_MANIFESTS: tuple[tuple[str, str], ...] = (
 )
 
 
-def split_args(args: Sequence[str]) -> tuple[str | None, tuple[str, ...]]:
-    """``(selector, passthrough)`` from a Tool verb's raw argument tuple. Pure.
+def split_args(
+    args: Sequence[str], entries: Sequence[config.ToolchainEntry]
+) -> tuple[str | None, tuple[str, ...]]:
+    """``(selector, passthrough)`` from a Tool verb's raw args, resolved against
+    the repo's legs. Pure.
 
-    click consumes the ``--`` separator before the verb sees the args, so the
-    boundary is positional: the FIRST token, when it does not start with
-    ``-``, is the leg selector; every remaining token is passthrough. A
-    leading ``-`` token means no selector was given (``shipit test --
-    -k foo``) and everything is passthrough. A selector that names no leg
-    still errors loudly in the planner (naming the known legs), so a
-    passthrough value accidentally read as a selector is never silently run.
+    click consumes the first ``--`` before the verb sees the args, so
+    ``shipit test tests/foo.py`` and ``shipit test -- tests/foo.py`` arrive
+    identically — the selector/passthrough boundary cannot be read from the
+    tokens alone, so it is read from ``entries`` (the repo's legs):
+
+    - a leading ``-`` token → no selector; everything is passthrough
+      (``shipit test -- -k foo``);
+    - a first token that NAMES a leg (its toolchain or map path) → the
+      selector; the rest is passthrough;
+    - a first token that names no leg on a SINGLE-leg repo → the no-selector
+      sugar: the one leg is unambiguous, so the whole tuple is passthrough
+      (``shipit test tests/foo.py`` forwards the path to pytest);
+    - a first token that names no leg on a MULTI-leg repo → still taken as the
+      selector, so the planner rejects it loudly naming the known legs
+      (passthrough on a multi-leg repo needs an explicit selector regardless).
     """
-    if args and not args[0].startswith("-"):
-        return args[0], tuple(args[1:])
+    if not args or args[0].startswith("-"):
+        return None, tuple(args)
+    first = args[0]
+    names = {e.toolchain for e in entries} | {e.path for e in entries}
+    if first in names or len(entries) > 1:
+        return first, tuple(args[1:])
     return None, tuple(args)
 
 
@@ -61,7 +76,7 @@ def missing_map_message(root: Path, tool: str) -> str:
     return (
         f"no [toolchains] path->toolchain map in {config.CONFIG_NAME} — "
         f"`shipit {tool}` dispatches on that declaration (ADR-0007/0039)."
-        f'{hint} Declare e.g.: [toolchains] "." = "{example}"'
+        f'{hint} Declare it under a [toolchains] table, e.g. "." = "{example}".'
     )
 
 

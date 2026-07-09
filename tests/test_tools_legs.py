@@ -101,3 +101,17 @@ def test_passthrough_appends_after_an_override_too():
     entries = (_entry(".", "python", {"test": ("python", "-m", "pytest", "-q")}),)
     planned = legs.plan_legs(entries, tool="test", passthrough=("-x",))
     assert planned[0].argv == ("python", "-m", "pytest", "-q", "-x")
+
+
+def test_empty_map_is_the_empty_fan_out_not_an_index_error():
+    # A public pure function: an empty map fans out to nothing rather than
+    # raising (the verb rejects an empty map earlier, but the planner is
+    # called directly in tests and by future callers).
+    assert legs.plan_legs((), tool="test") == ()
+
+
+def test_empty_map_with_passthrough_is_a_clean_usage_error():
+    # The passthrough-needs-a-leg rule, at the empty edge: no leg to append to
+    # is a LegPlanError, never an IndexError on selected[0].
+    with pytest.raises(legs.LegPlanError, match="no test legs declared"):
+        legs.plan_legs((), tool="test", passthrough=("-k", "foo"))

@@ -15,9 +15,10 @@ shared :mod:`._tool`, reused verbatim by ``shipit build``):
 
 - argument shaping (:func:`~._tool.split_args`): ``shipit test [LEG]
   [-- ARGS…]``. click consumes the first ``--`` separator, so the split is
-  positional — the first token not starting with ``-`` is the leg selector;
-  everything else is passthrough, forwarded VERBATIM to the selected leg's
-  command (ADR-0039).
+  read against the repo's legs — a first token that names a leg is the
+  selector; otherwise (a leading ``-``, or any positional token on a
+  single-leg repo) everything is passthrough, forwarded VERBATIM to the
+  selected leg's command (ADR-0039).
 - execution through the one Exec runner (:mod:`shipit.execrun`, ADR-0028):
   each leg runs with cwd at its map path, ``check=False`` (a nonzero rc is
   the suite's verdict, not a transport failure) and a stated
@@ -112,8 +113,8 @@ def run(
     """
     started = time.monotonic()
     root = Path(".").resolve()
-    selector, passthrough = split_args(tuple(args))
     entries = require_entries(load_config(root), root, TOOL)
+    selector, passthrough = split_args(tuple(args), entries)
 
     try:
         planned = legs_mod.plan_legs(
@@ -127,7 +128,11 @@ def run(
         return 2
 
     run_leg = run_leg or _run_leg
-    runs: list[LegRun] = runs_out if runs_out is not None else []
+    # Accumulate into a fresh list so the verdict is this invocation's alone; a
+    # caller-supplied `runs_out` is an OUTPUT sink, extended at the end (never
+    # aliased, so a non-empty one it passes can never leak stale legs into the
+    # verdict).
+    runs: list[LegRun] = []
     for leg in planned:
         command = shlex.join(leg.argv)
         print(f"test: {leg.label}: {command}")
@@ -167,10 +172,17 @@ def run(
                 },
             )
         runs.append(LegRun(leg, rc, out))
-        if out.strip():
-            print(out.rstrip())
+        if out:
+            # The runner's report prints VERBATIM (unlike lint, which swallows a
+            # green run): emit exactly what the leg produced, normalizing only
+            # the trailing newline — add one when it's missing so the ok/FAIL
+            # line starts on its own line, keep the runner's own when present so
+            # it is never doubled.
+            print(out, end="" if out.endswith("\n") else "\n")
         print(f"  {'ok  ' if rc == 0 else 'FAIL'} {leg.label} ({command})")
 
+    if runs_out is not None:
+        runs_out.extend(runs)
     rc = verdict(runs)
     failed = [r.leg.label for r in runs if not r.ok]
     if rc == 0:

@@ -127,7 +127,9 @@ def test_unknown_build_toolchain_names_the_registry():
 
 
 def test_build_must_be_a_list():
-    with pytest.raises(config.ConfigError, match="build must be a list"):
+    # The offending key rides the `where` prefix (ADR-0030), like the nested
+    # `.build[i]` / `.bundle.command` messages do.
+    with pytest.raises(config.ConfigError, match=r"\.build: must be a list"):
         _load('[artifacts.x]\nbuild = "rust"\n')
 
 
@@ -172,7 +174,7 @@ def test_e2e_harness_must_be_an_argv_list():
 
 
 def test_sign_must_be_a_boolean():
-    with pytest.raises(config.ConfigError, match="sign must be a boolean"):
+    with pytest.raises(config.ConfigError, match=r"\.sign: must be a boolean"):
         _load('[artifacts.x]\nsign = "yes"\n')
 
 
