@@ -241,6 +241,52 @@ def test_orphaned_build_target_toolchain_is_refused_loudly(
     assert "no [toolchains] leg" in err and "cli -> rust" in err
 
 
+def _two_go_paths_one_target(tmp_path):
+    # Two go legs (two paths) and an artifact target naming `go` with a package:
+    # the join keys on toolchain only, so `go build ./cmd/x` would run in BOTH
+    # paths' cwd (wrong for at least one) — the ambiguity the verb refuses.
+    (tmp_path / ".shipit.toml").write_text(
+        "[toolchains]\n"
+        '"svc-a" = "go"\n'
+        '"svc-b" = "go"\n'
+        "[artifacts.x]\n"
+        'build = [{ toolchain = "go", package = "./cmd/x" }]\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "svc-a").mkdir()
+    (tmp_path / "svc-b").mkdir()
+
+
+def test_target_toolchain_on_multiple_selected_paths_is_refused(
+    tmp_path, monkeypatch, capsys
+):
+    _two_go_paths_one_target(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    rec = _Recorder()
+    # Bare fan-out selects both go legs -> the producing path is ambiguous, so
+    # the verb refuses BEFORE running any wrong-cwd build.
+    assert build_verb.run((), run_step=rec) == 1
+    assert rec.calls == []
+    err = capsys.readouterr().err
+    assert "ambiguous" in err and "go (2 paths)" in err
+
+
+def test_a_path_selector_resolves_the_ambiguity_to_one_leg(tmp_path, monkeypatch):
+    _two_go_paths_one_target(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    rec = _Recorder()
+    # Selecting a single path narrows to one go leg — no ambiguity, a clean
+    # build in that path's cwd.
+    assert build_verb.run(("svc-a",), run_step=rec) == 0
+    assert rec.calls == [
+        (
+            ("go", "build", "-trimpath", "-ldflags", "-s -w", "./cmd/x"),
+            tmp_path / "svc-a",
+            {"CGO_ENABLED": "0"},
+        )
+    ]
+
+
 def test_malformed_artifact_map_is_one_clean_error_line(tmp_path, monkeypatch, capsys):
     (tmp_path / ".shipit.toml").write_text(
         '[toolchains]\n"." = "python"\n[artifacts.x]\nendpoints = ["snapstore"]\n',

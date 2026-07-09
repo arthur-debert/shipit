@@ -143,12 +143,17 @@ def plan_build(
     artifact never suppresses the other legs' whole-leg builds.
 
     The join keys on ``toolchain`` alone — a target names a toolchain, not a
-    path (ADR-0007) — so a repo is assumed to declare at most one build-bearing
-    path per toolchain (the shape of every real consumer: lex is one rust
-    path, a Tauri app is one rust + one npm + one mkdocs path). Two legs
-    sharing a toolchain would each run every target of that toolchain; binding
-    a target to a specific path is a future artifact-model extension if a repo
-    ever needs it, not a WS02 concern.
+    path (ADR-0007). Two selected legs sharing a toolchain would make the
+    producing path of that toolchain's targets ambiguous (each target would
+    build in every such leg's cwd — the wrong one for all but one), so the
+    build verb REFUSES that combination up front
+    (:func:`shipit.verbs.build._check_targets_unambiguous`); this planner is
+    reached only once every artifact-targeted toolchain resolves to a single
+    selected leg. Binding a target to a specific path is a future
+    artifact-model extension if a repo ever needs same-toolchain multi-path
+    builds; here one build-bearing path per toolchain is assumed (the shape of
+    every real consumer: lex is one rust path, a Tauri app is one rust + one
+    npm + one mkdocs path).
     """
     steps: list[BuildStep] = []
     for leg in legs:

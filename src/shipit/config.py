@@ -460,7 +460,7 @@ def _parse_endpoints(where: str, value: object) -> tuple[str, ...]:
     """The ``endpoints`` list, validated against the closed :data:`ENDPOINTS`
     registry — a declaration the release stages consume later."""
     if not isinstance(value, list) or not all(isinstance(e, str) for e in value):
-        raise ConfigError(f"{where}: endpoints must be a list of endpoint names")
+        raise ConfigError(f"{where}: must be a list of endpoint names")
     for endpoint in value:
         if endpoint not in ENDPOINTS:
             known = ", ".join(ENDPOINTS)
@@ -473,7 +473,7 @@ def _parse_endpoints(where: str, value: object) -> tuple[str, ...]:
 def _parse_bundle(where: str, spec: object) -> BundleSpec:
     if not isinstance(spec, dict):
         raise ConfigError(
-            f"{where}: bundle must be a table, e.g. "
+            f"{where}.bundle: must be a table, e.g. "
             f'{{ command = ["tauri", "bundle"] }}; got {spec!r}'
         )
     _reject_unknown_keys(f"{where}.bundle", spec, ("command",))
@@ -485,7 +485,7 @@ def _parse_bundle(where: str, spec: object) -> BundleSpec:
 def _parse_e2e(where: str, spec: object) -> E2eSpec:
     if not isinstance(spec, dict):
         raise ConfigError(
-            f"{where}: e2e must be a table (empty for the default harness), "
+            f"{where}.e2e: must be a table (empty for the default harness), "
             f'e.g. {{}} or {{ harness = ["bats", "tests/e2e.bats"] }}; got {spec!r}'
         )
     _reject_unknown_keys(f"{where}.e2e", spec, ("harness",))
@@ -502,19 +502,19 @@ def _parse_artifact(name: str, spec: object) -> Artifact:
     _reject_unknown_keys(where, spec, ("build", "bundle", "endpoints", "e2e", "sign"))
     build_spec = spec.get("build", [])
     if not isinstance(build_spec, list):
-        raise ConfigError(f"{where}: build must be a list of build targets")
+        raise ConfigError(f"{where}.build: must be a list of build targets")
     build = tuple(
         _parse_build_target(f"{where}.build[{i}]", entry)
         for i, entry in enumerate(build_spec)
     )
     sign = spec.get("sign", False)
     if not isinstance(sign, bool):
-        raise ConfigError(f"{where}: sign must be a boolean; got {sign!r}")
+        raise ConfigError(f"{where}.sign: must be a boolean; got {sign!r}")
     return Artifact(
         name=name,
         build=build,
         bundle=_parse_bundle(where, spec["bundle"]) if "bundle" in spec else None,
-        endpoints=_parse_endpoints(where, spec.get("endpoints", [])),
+        endpoints=_parse_endpoints(f"{where}.endpoints", spec.get("endpoints", [])),
         e2e=_parse_e2e(where, spec["e2e"]) if "e2e" in spec else None,
         sign=sign,
     )
