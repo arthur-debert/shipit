@@ -22,8 +22,10 @@ from __future__ import annotations
 import hashlib
 import re
 import tomllib
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 
 from .identity import Sha
 
@@ -206,7 +208,16 @@ class ToolchainEntry:
 
     path: str
     toolchain: str
-    commands: dict[str, tuple[str, ...]]
+    commands: Mapping[str, tuple[str, ...]]
+
+    def __post_init__(self) -> None:
+        # `frozen=True` freezes the attribute bindings, not the dict they point
+        # at; wrap `commands` read-only so the "typed frozen values" contract
+        # (ADR-0030) can't be violated by mutating the map after parsing. The
+        # argv values are already tuples, so this makes the whole entry deep-
+        # immutable.
+        if not isinstance(self.commands, MappingProxyType):
+            object.__setattr__(self, "commands", MappingProxyType(dict(self.commands)))
 
 
 def _parse_argv(where: str, value: object) -> tuple[str, ...]:

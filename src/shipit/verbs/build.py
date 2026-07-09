@@ -152,9 +152,9 @@ def run(
     """
     started = time.monotonic()
     root = Path(".").resolve()
-    selector, passthrough = split_args(tuple(args))
     cfg = load_config(root)
     entries = require_entries(cfg, root, TOOL)
+    selector, passthrough = split_args(tuple(args), entries)
     artifacts = config.load_artifacts(cfg)
     _check_targets_mapped(artifacts, entries)
 
@@ -171,7 +171,11 @@ def run(
 
     steps = build_mod.plan_build(planned, artifacts, version=version)
     run_step = run_step or _run_step
-    runs: list[StepRun] = runs_out if runs_out is not None else []
+    # Accumulate into a fresh list so the verdict is this invocation's alone; a
+    # caller-supplied `runs_out` is an OUTPUT sink, extended at the end (never
+    # aliased, so a non-empty one it passes can never leak stale steps into the
+    # verdict).
+    runs: list[StepRun] = []
     for step in steps:
         command = shlex.join(step.argv)
         print(f"build: {step.label}: {command}")
@@ -211,10 +215,17 @@ def run(
                 },
             )
         runs.append(StepRun(step, rc, out))
-        if out.strip():
-            print(out.rstrip())
+        if out:
+            # The builder's report prints VERBATIM (unlike lint, which swallows
+            # a green run): emit exactly what the step produced, normalizing
+            # only the trailing newline — add one when it's missing so the
+            # ok/FAIL line starts on its own line, keep the builder's own when
+            # present so it is never doubled.
+            print(out, end="" if out.endswith("\n") else "\n")
         print(f"  {'ok  ' if rc == 0 else 'FAIL'} {step.label} ({command})")
 
+    if runs_out is not None:
+        runs_out.extend(runs)
     rc = verdict(runs)
     failed = [r.step.label for r in runs if not r.ok]
     if rc == 0:

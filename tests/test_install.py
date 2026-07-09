@@ -1685,6 +1685,29 @@ def test_test_task_block_delivers_when_no_feature_defines_it(tmp_path):
     assert decision.action == irec.ADD
 
 
+def test_test_task_block_delivers_when_the_feature_is_not_env_enabled(tmp_path):
+    # A `test` task under [feature.test.tasks] that NO [environments] entry
+    # enables never reaches an env, so `pixi run test` is unambiguous — the
+    # guard must not over-detect and skip the managed block. (Here the only
+    # environment enables a different feature.)
+    (tmp_path / "pixi.toml").write_text(
+        "[workspace]\n"
+        'channels = ["conda-forge"]\n'
+        'name = "acme"\n'
+        'platforms = ["linux-64"]\n\n'
+        "[feature.test.tasks]\n"
+        'test = "cargo nextest run"\n\n'
+        "[environments]\n"
+        'dev = ["lint"]\n'
+    )
+    plan = _plan(tmp_path)
+    assert plan.pixi_task_conflicts == ()
+    decision = next(
+        d for d in plan.decisions if d.unit.key == iunits.PIXI_TEST_TASK_KEY
+    )
+    assert decision.action == irec.ADD
+
+
 def test_a_spliced_test_task_block_is_not_a_task_conflict(tmp_path, rec):
     # Once the managed block is in, a later reconcile must read NOOP — the
     # guard is ADD-bound only, like the key-conflict guard.
