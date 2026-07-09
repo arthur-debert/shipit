@@ -1,0 +1,8 @@
+{
+  "hooks": [
+    {
+      "command": "if [ -x ./bin/setup-dev-env.sh ]; then ./bin/setup-dev-env.sh || echo \"shipit: setup-dev-env.sh reported a problem — continuing (base-system provisioning is best-effort).\" >&2; fi; test -x ./bin/shipit || { echo \"shipit: bin/shipit launcher not present or executable here — skipping this managed hook (run 'shipit install' to (re)provision it).\"; exit 0; }; printf '{\"cwd\":\"%s\"}' \"$PWD\" | ./bin/shipit hook sessionstart",
+      "type": "command"
+    }
+  ]
+}

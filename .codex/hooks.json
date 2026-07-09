@@ -2,11 +2,10 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Edit|Write|MultiEdit|NotebookEdit",
         "hooks": [
           {
-            "type": "command",
-            "command": "pixi run shipit hook pretooluse"
+            "command": "pixi run --manifest-path ./pixi.toml -- ./bin/shipit hook pretooluse; rc=$?; if [ \"$rc\" -ne 0 ]; then echo \"shipit: tool guard could not run (rc=$rc) \u2014 refusing the tool call rather than allowing an unchecked coordinator edit. Likely causes: the session cwd is not a shipit checkout, pixi is not installed, or the pinned shipit environment could not be resolved. Install pixi (https://pixi.sh) if it is missing, then run this command from the project to see the underlying error: pixi run --manifest-path ./pixi.toml -- ./bin/shipit hook pretooluse\" >&2; exit 2; fi",
+            "type": "command"
           }
         ]
       }
@@ -23,8 +22,8 @@
       {
         "hooks": [
           {
-            "type": "command",
-            "command": "pixi run shipit hook sessionstart"
+            "command": "if [ -x ./bin/setup-dev-env.sh ]; then ./bin/setup-dev-env.sh || echo \"shipit: setup-dev-env.sh reported a problem \u2014 continuing (base-system provisioning is best-effort).\" >&2; fi; test -x ./bin/shipit || { echo \"shipit: bin/shipit launcher not present or executable here \u2014 skipping this managed hook (run 'shipit install' to (re)provision it).\"; exit 0; }; printf '{\"cwd\":\"%s\"}' \"$PWD\" | ./bin/shipit hook sessionstart",
+            "type": "command"
           }
         ]
       }

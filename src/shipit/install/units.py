@@ -3,9 +3,9 @@
 A Unit is one managed thing: a whole file or a marker-delimited block inside a
 consumer-owned file. ``load_units()`` is the catalog — the skills tree, the
 AGENTS.md block, the bootstrap launchers, the lint-check units, the HAR01
-agent-defs, and the settings.json JSON-hook entries — each carrying its desired
-bytes, so "what does shipit distribute" is a value, not a directory walk at the
-call site.
+agent-defs, the settings.json JSON-hook entries, and the CDX01 Codex project
+layer (``.codex/``) — each carrying its desired bytes, so "what does shipit
+distribute" is a value, not a directory walk at the call site.
 """
 
 from __future__ import annotations
@@ -310,6 +310,42 @@ SETTINGS_SESSIONSTART_MARKER = "shipit hook sessionstart"
 # same settings.json, owning its event, reconciled like the other four.
 SETTINGS_WORKTREECREATE_KEY = ".claude/settings.json#shipit-worktreecreate-hook"
 SETTINGS_WORKTREECREATE_MARKER = "shipit hook worktreecreate"
+
+# The CDX01 Codex project layer (#603): codex 0.139+ loads trusted repo-local
+# `.codex/config.toml` and `.codex/hooks.json`, and its hook commands run with
+# the SESSION CWD — so the managed hook entries route straight to the shared
+# `./bin/shipit hook ...` verbs with only that env adaptation (no
+# `$CLAUDE_PROJECT_DIR` cd; the manifest pin is the cwd-relative
+# `./pixi.toml`), never a Codex fork of the lifecycle logic.
+#
+# config.toml is a WHOLE-FILE unit: repo-local `.codex/config.toml` is new
+# surface (no repo carries one; shipit's own repo carried only a hand-written
+# hooks.json, now spliced into line), the layer is deliberately thin, and
+# personal Codex config belongs in `~/.codex/config.toml` ($CODEX_HOME), which
+# codex layers over this file anyway — so shipit owns the repo-local file
+# outright and a consumer edit surfaces as an OVERRIDE like any other
+# whole-file unit.
+#
+# hooks.json REUSES the settings.json JSON-hook splice unchanged (the splicer
+# is already dest/event/marker-generic): two `FMT_JSON_HOOK` block units over
+# the one file, each owning shipit's single entry in its event array — the
+# SessionStart activation/advisory hook (fail-open, additive; the entry
+# synthesizes the verb's `{"cwd": ...}` payload from `$PWD` because codex
+# supplies no Claude-shaped payload on stdin, and the verb's own cwd fallback
+# covers even a mangled synthesis) and the PreToolUse coordinator tool-guard
+# (fail-CLOSED, the ADR-0038 posture: a resolution failure blocks the tool
+# call with exit 2 rather than silently allowing an unchecked edit). The
+# guard entry carries NO matcher: Codex tool names are not Claude's, so the
+# entry binds to every tool event and the shared verb's own `is_edit_tool`
+# gate scopes the verdict (a non-edit payload is allowed through silently).
+# The consumer's other hooks — and their other keys — merge through untouched,
+# exactly as on `.claude/settings.json`. The event names and command markers
+# are shared with the Claude units on purpose: the verbs (and their marker
+# substrings) are the SAME lifecycle logic, only the host file differs.
+CODEX_CONFIG_FILE = ".codex/config.toml"
+CODEX_HOOKS_FILE = ".codex/hooks.json"
+CODEX_SESSIONSTART_KEY = ".codex/hooks.json#shipit-sessionstart-hook"
+CODEX_PRETOOLUSE_KEY = ".codex/hooks.json#shipit-pretooluse-hook"
 
 # The settings.json hooks-event arrays each JSON-hook unit owns one entry of.
 EVENT_PRETOOLUSE = "PreToolUse"
@@ -635,6 +671,46 @@ def load_units(*, toolchains: frozenset[str] = frozenset()) -> list[Unit]:
             Unit(
                 key=key,
                 dest=SETTINGS_FILE,
+                kind="block",
+                content=canonical_hook_entry(hook_entry).encode("utf-8"),
+                fmt=FMT_JSON_HOOK,
+                event=event,
+                marker=marker,
+            )
+        )
+
+    # The CDX01 Codex project layer (#603): the thin whole-file config and the
+    # two `.codex/hooks.json` JSON-hook units — the SessionStart hook and the
+    # PreToolUse tool guard — routing to the same shared `shipit hook` verbs as
+    # the Claude units above (see the CODEX_* constants' comment for the whole
+    # design: whole-file vs splice, the cwd/env adaptation, the fail postures).
+    units.append(
+        Unit(
+            key=CODEX_CONFIG_FILE,
+            dest=CODEX_CONFIG_FILE,
+            kind="file",
+            content=data_bytes("codex-config.toml"),
+        )
+    )
+    for key, marker, event, data_file in (
+        (
+            CODEX_PRETOOLUSE_KEY,
+            SETTINGS_HOOK_MARKER,
+            EVENT_PRETOOLUSE,
+            "codex-hooks-pretooluse.json",
+        ),
+        (
+            CODEX_SESSIONSTART_KEY,
+            SETTINGS_SESSIONSTART_MARKER,
+            EVENT_SESSIONSTART,
+            "codex-hooks-sessionstart.json",
+        ),
+    ):
+        hook_entry = json.loads(data_bytes(data_file))
+        units.append(
+            Unit(
+                key=key,
+                dest=CODEX_HOOKS_FILE,
                 kind="block",
                 content=canonical_hook_entry(hook_entry).encode("utf-8"),
                 fmt=FMT_JSON_HOOK,

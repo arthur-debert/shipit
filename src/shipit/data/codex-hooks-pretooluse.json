@@ -1,0 +1,8 @@
+{
+  "hooks": [
+    {
+      "command": "pixi run --manifest-path ./pixi.toml -- ./bin/shipit hook pretooluse; rc=$?; if [ \"$rc\" -ne 0 ]; then echo \"shipit: tool guard could not run (rc=$rc) — refusing the tool call rather than allowing an unchecked coordinator edit. Likely causes: the session cwd is not a shipit checkout, pixi is not installed, or the pinned shipit environment could not be resolved. Install pixi (https://pixi.sh) if it is missing, then run this command from the project to see the underlying error: pixi run --manifest-path ./pixi.toml -- ./bin/shipit hook pretooluse\" >&2; exit 2; fi",
+      "type": "command"
+    }
+  ]
+}
