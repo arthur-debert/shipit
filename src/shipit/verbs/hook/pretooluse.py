@@ -129,6 +129,11 @@ def run(stdin: TextIO | None = None, stdout: TextIO | None = None) -> int:
 _PATCH_FILE_RE = re.compile(r"^\*\*\* (?:Add|Update|Delete) File: (.+)$", re.MULTILINE)
 
 
+def _clean_paths(paths: tuple[str, ...]) -> tuple[str, ...]:
+    """Normalize extracted paths before code-path classification."""
+    return tuple(p for raw in paths if (p := raw.strip()))
+
+
 def _extract_paths(tool_input: object) -> tuple[str, ...]:
     """Pull edited paths off a `tool_input` payload, or ``()`` if absent.
 
@@ -138,16 +143,16 @@ def _extract_paths(tool_input: object) -> tuple[str, ...]:
     headers and deny when ANY patched path is code.
     """
     if isinstance(tool_input, str):
-        return tuple(_PATCH_FILE_RE.findall(tool_input))
+        return _clean_paths(tuple(_PATCH_FILE_RE.findall(tool_input)))
     if not isinstance(tool_input, dict):
         return ()
     path = tool_input.get("file_path") or tool_input.get("notebook_path")
     if path:
-        return (str(path),)
+        return _clean_paths((str(path),))
     for key in ("patch", "input", "text"):
         value = tool_input.get(key)
         if isinstance(value, str):
-            paths = tuple(_PATCH_FILE_RE.findall(value))
+            paths = _clean_paths(tuple(_PATCH_FILE_RE.findall(value)))
             if paths:
                 return paths
     return ()

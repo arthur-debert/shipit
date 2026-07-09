@@ -1311,7 +1311,10 @@ def test_codex_hook_commands_adapt_env_and_keep_the_fail_postures():
     assert "setup-dev-env.sh" in session_cmd
     assert "exit 0" in session_cmd
     assert "git rev-parse --show-toplevel" in session_cmd
+    assert "command -v python3" in session_cmd
+    assert "command -v python" in session_cmd
     assert "json.dumps" in session_cmd
+    assert 'if [ -n "$py" ]' in session_cmd
     assert '"$repo/bin/shipit" hook sessionstart' in session_cmd
 
 

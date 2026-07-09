@@ -57,6 +57,26 @@ def test_codex_apply_patch_code_edit_is_denied():
     assert decision["permissionDecisionReason"] == COORDINATOR_DENY_REASON
 
 
+def test_codex_apply_patch_strips_patch_header_paths_before_classifying():
+    payload = json.dumps(
+        {
+            "tool_name": "apply_patch",
+            "tool_input": (
+                "*** Begin Patch\r\n"
+                "*** Update File: src/shipit/cli.py  \r\n"
+                "@@\r\n"
+                "-old\r\n"
+                "+new\r\n"
+                "*** End Patch\r\n"
+            ),
+        }
+    )
+    code, out = _run(payload)
+    assert code == 0
+    decision = json.loads(out)["hookSpecificOutput"]
+    assert decision["permissionDecision"] == "deny"
+
+
 def test_codex_apply_patch_denies_if_any_patched_file_is_code():
     payload = json.dumps(
         {
