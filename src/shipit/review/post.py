@@ -41,6 +41,7 @@ from .. import execrun, gh
 from ..agent.backend import Backend
 from ..finding import (
     CONVENTIONAL_PREFIXES,
+    FIX_LABEL,
     Finding,
     order_findings,
     parse_severity,
@@ -141,7 +142,9 @@ def _finding_from_dict(raw: dict) -> Finding:
         file=raw.get("file", ""),
         line=line if isinstance(line, int) else None,
         category=raw.get("category", "") or "",
-        confidence=confidence if isinstance(confidence, (int, float)) else None,
+        # JSON Schema `type: number` admits an int (`1`); coerce so a Finding's
+        # confidence is honestly a float and never a bare int downstream.
+        confidence=float(confidence) if isinstance(confidence, (int, float)) else None,
         evidence=raw.get("evidence") or "",
         fix=raw.get("fix") or "",
     )
@@ -223,10 +226,14 @@ def build_review_payload(
             )
         else:
             snippet = f"\n\n```\n{finding.evidence}\n```" if finding.evidence else ""
-            prefix = CONVENTIONAL_PREFIXES[finding.severity]
-            unanchored.append(
-                f"- `{finding.file}:{finding.line}` {prefix} {finding.text}{snippet}"
+            fix = f"\n\n{FIX_LABEL} {finding.fix}" if finding.fix else ""
+            location = (
+                f"{finding.file}:{finding.line}"
+                if finding.line is not None
+                else finding.file
             )
+            prefix = CONVENTIONAL_PREFIXES[finding.severity]
+            unanchored.append(f"- `{location}` {prefix} {finding.text}{snippet}{fix}")
 
     body = f"Agent: {agent_name}\n\n{overall_feedback}".rstrip()
     coverage = _coverage_section(summary.get("coverage") or {})

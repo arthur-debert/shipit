@@ -42,6 +42,7 @@ from enum import Enum
 __all__ = [
     "CONVENTIONAL_PREFIXES",
     "DEFAULT_SEVERITY",
+    "FIX_LABEL",
     "Disposition",
     "Finding",
     "Marker",
@@ -186,8 +187,10 @@ CONVENTIONAL_PREFIXES: dict[Severity, str] = {
     Severity.NIT: "nitpick:",
 }
 
-#: The paragraph label that opens the optional fix-suggestion section.
-_FIX_LABEL = "Suggested fix:"
+#: The paragraph label that opens the optional fix-suggestion section. Public so
+#: the review body's unanchored fold renders the same label without duplicating
+#: the literal — this module OWNS the wire vocabulary.
+FIX_LABEL = "Suggested fix:"
 
 
 # --- Wire rendering 2: the invisible machine marker ---------------------------
@@ -280,7 +283,7 @@ def render_comment(finding: Finding) -> str:
     if finding.evidence:
         body += f"\n\n```\n{finding.evidence}\n```"
     if finding.fix:
-        body += f"\n\n{_FIX_LABEL} {finding.fix}"
+        body += f"\n\n{FIX_LABEL} {finding.fix}"
     return body
 
 
@@ -312,9 +315,9 @@ def parse_comment(body: str, *, file: str = "", line: int | None = None) -> Find
             break
 
     fix = ""
-    fix_at = text.find(f"\n\n{_FIX_LABEL} ")
+    fix_at = text.find(f"\n\n{FIX_LABEL} ")
     if fix_at != -1:
-        fix = text[fix_at + len(_FIX_LABEL) + 3 :].strip()
+        fix = text[fix_at + len(FIX_LABEL) + 3 :].strip()
         text = text[:fix_at]
 
     evidence = ""

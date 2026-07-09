@@ -84,6 +84,50 @@ def test_payload_anchors_in_diff_and_folds_unanchored():
     assert "[minor]" not in payload["body"] and "[INFO]" not in payload["body"]
 
 
+def test_unanchored_fold_carries_the_suggested_fix():
+    """An off-diff finding's suggested fix reaches the review body — the folded
+    rendering must not silently drop `finding.fix` the way the inline path keeps
+    it via `render_comment`."""
+    review = {
+        "summary": {"status": "COMMENT", "overall_feedback": ""},
+        "comments": [
+            {
+                "file": "foo.py",
+                "line": 99,
+                "text": "offdiff",
+                "severity": "major",
+                "evidence": "",
+                "fix": "rename it",
+            }
+        ],
+    }
+    payload = post.build_review_payload(review, _ctx(), agent_name="codex")
+    assert f"{finding.FIX_LABEL} rename it" in payload["body"]
+
+
+def test_unanchored_fold_omits_the_line_when_absent():
+    """A file-level finding (no `line`) renders `foo.py`, never `foo.py:None`."""
+    review = {
+        "summary": {"status": "COMMENT", "overall_feedback": ""},
+        "comments": [
+            {"file": "foo.py", "text": "file-level", "severity": "minor"},
+        ],
+    }
+    payload = post.build_review_payload(review, _ctx(), agent_name="codex")
+    assert "`foo.py:None`" not in payload["body"]
+    assert "`foo.py` suggestion (non-blocking): file-level" in payload["body"]
+
+
+def test_int_confidence_coerces_to_float():
+    """JSON Schema `type: number` admits an int; `_finding_from_dict` coerces it
+    so a Finding's confidence is honestly a float downstream."""
+    result = post._finding_from_dict(
+        {"file": "foo.py", "text": "t", "severity": "minor", "confidence": 1}
+    )
+    assert result.confidence == 1.0
+    assert isinstance(result.confidence, float)
+
+
 def test_inline_comment_body_is_the_two_layer_rendering():
     """The inline body carries the machine marker (exact tuple recoverable) plus
     the Conventional Comments layer; the `Agent: <name> [SEVERITY]` prefix is
