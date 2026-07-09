@@ -1017,9 +1017,11 @@ def _plan_seed(
     manifest-derived entries in (the callers derive them via
     :func:`derive_toolchains`, keeping this function read-free). Raises
     :class:`ConfigError` for any shape install cannot seed safely — malformed
-    TOML, a scalar ``secrets``/``reviewers``, or an existing ``[secrets]`` table
-    that has no literal header to merge under (an inline table or dotted keys) —
-    so the caller skips seeding rather than write a broken config.
+    TOML, a scalar where a seedable table is expected (every one it touches or
+    preserves is shape-checked via :func:`_require_table`: ``secrets``,
+    ``reviewers``, ``lint``, and ``toolchains``), or an existing ``[secrets]``
+    table that has no literal header to merge under (an inline table or dotted
+    keys) — so the caller skips seeding rather than write a broken config.
     """
     cfg = _parse_text(text, path)
     secrets = _require_table(cfg, "secrets", path)

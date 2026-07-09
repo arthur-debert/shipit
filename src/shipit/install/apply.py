@@ -72,12 +72,14 @@ HOOK_ACTIVATE_ARGV = ["install"]
 PIXI_LOCK = "pixi.lock"
 
 #: The PR-body renderer apply calls at the boundary moment (``MODE_PR`` only):
-#: ``(override_before, hooks_activated, stamped_pin, lint_debt) -> body``.
-#: Injected by the verb so the body's sections stay a pure renderer concern
-#: (ADR-0030) while apply supplies the inputs only it can know — the pre-write
-#: consumer snapshots, the real activation outcome, the pin it stamped, and the
-#: best-effort whole-tree debt count (``None`` when unreadable).
-PrBody = Callable[[Mapping[str, str], "bool | None", str, "int | None"], str]
+#: ``(override_before, hooks_activated, rerendered, stamped_pin, lint_debt) ->
+#: body``. Injected by the verb so the body's sections stay a pure renderer
+#: concern (ADR-0030) while apply supplies the inputs only it can know — the
+#: pre-write consumer snapshots, the real activation outcome, whether the
+#: changelog re-render ACTUALLY ran (never just what the plan decided — the
+#: gather→apply window can skip it), the pin it stamped, and the best-effort
+#: whole-tree debt count (``None`` when unreadable).
+PrBody = Callable[[Mapping[str, str], "bool | None", bool, str, "int | None"], str]
 
 
 @dataclass(frozen=True)
@@ -588,7 +590,11 @@ def apply(
             head=INSTALL_BRANCH,
             title="shipit: install/update the managed set",
             body=pr_body(
-                override_before, hooks_activated, stamped_version, result.lint_debt
+                override_before,
+                hooks_activated,
+                rerendered,
+                stamped_version,
+                result.lint_debt,
             ),
             draft=True,
             cwd=cwd,

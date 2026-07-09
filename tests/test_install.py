@@ -70,8 +70,13 @@ def _apply(root, mode: str = iapply.MODE_TREE, **kw) -> iapply.InstallResult:
     return iapply.apply(
         plan,
         mode,
-        pr_body=lambda before, hooks, pin, debt: verb.format_pr_body(
-            plan, before, hooks, stamped_version=pin, lint_debt=debt
+        pr_body=lambda before, hooks, rerendered, pin, debt: verb.format_pr_body(
+            plan,
+            before,
+            hooks,
+            rerendered=rerendered,
+            stamped_version=pin,
+            lint_debt=debt,
         ),
         **kw,
     )
@@ -3618,3 +3623,35 @@ def test_rerender_skipped_in_the_window_drops_the_phantom_changelog_path(tmp_pat
     assert chlog.CHANGELOG_FILE not in rec.commit_paths
     add_paths = next(paths for name, paths in rec.calls if name == "add")
     assert chlog.CHANGELOG_FILE not in add_paths
+
+
+def test_rerender_skipped_in_the_window_omits_the_pr_body_section(tmp_path, rec):
+    # The MODE_PR twin of the drop: when the re-render is skipped in the window,
+    # the PR body must NOT claim "Changelog re-rendered" — the body reflects
+    # what apply ACTUALLY did (the hooks_activated discipline), never the plan's
+    # decision, so it can never claim a re-render whose file was never committed
+    # (#578 review).
+    from shipit import changelog as chlog
+
+    _changelog_consumer(tmp_path)
+    plan = _plan(tmp_path)
+    assert plan.rerender_changelog
+
+    (tmp_path / "CHANGELOG" / "unreleased-first.md").unlink()
+    (tmp_path / "CHANGELOG").rmdir()
+
+    iapply.apply(
+        plan,
+        iapply.MODE_PR,
+        pr_body=lambda before, hooks, rerendered, pin, debt: verb.format_pr_body(
+            plan,
+            before,
+            hooks,
+            rerendered=rerendered,
+            stamped_version=pin,
+            lint_debt=debt,
+        ),
+    )
+
+    assert "Changelog re-rendered" not in rec.pr_body
+    assert chlog.CHANGELOG_FILE not in rec.commit_paths

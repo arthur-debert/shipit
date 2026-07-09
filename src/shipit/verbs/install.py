@@ -192,8 +192,13 @@ def run(
             plan,
             mode,
             activate_hooks=activate_hooks,
-            pr_body=lambda before, hooks, pin, debt: format_pr_body(
-                plan, before, hooks, stamped_version=pin, lint_debt=debt
+            pr_body=lambda before, hooks, rerendered, pin, debt: format_pr_body(
+                plan,
+                before,
+                hooks,
+                rerendered=rerendered,
+                stamped_version=pin,
+                lint_debt=debt,
             ),
         )
     except Exception as exc:
@@ -383,6 +388,7 @@ def format_pr_body(
     override_before: dict[str, str] | None = None,
     hooks_activated: bool | None = None,
     *,
+    rerendered: bool = False,
     stamped_version: str | None = None,
     lint_debt: int | None = None,
 ) -> str:
@@ -399,10 +405,15 @@ def format_pr_body(
     never claims a success that did not happen: ``None`` when the set has no
     checks to activate, ``True`` when ``lefthook install`` succeeded where
     install ran, ``False`` when it was skipped/failed (binary missing) and a
-    merger must activate the checks themselves. ``stamped_version`` is the
-    Shipit pin this install stamped (ADR-0033); ``lint_debt`` is the
-    best-effort whole-tree failing-check count (``None`` = unreadable, ``0`` =
-    green — only red debt renders a section).
+    merger must activate the checks themselves. ``rerendered`` is the same
+    claim-nothing-that-did-not-happen discipline for the changelog axis: the
+    body renders the re-render section only when apply ACTUALLY regenerated
+    ``CHANGELOG.md``, never merely because the plan decided it — the
+    gather→apply window can skip the write (``CHANGELOG/`` gone), in which case
+    the file is dropped from the commit set and the section must not claim it.
+    ``stamped_version`` is the Shipit pin this install stamped (ADR-0033);
+    ``lint_debt`` is the best-effort whole-tree failing-check count (``None`` =
+    unreadable, ``0`` = green — only red debt renders a section).
     """
     override_before = override_before or {}
     adds = [d for d in plan.decisions if d.action == ADD]
@@ -478,7 +489,7 @@ def format_pr_body(
         )
         lines += [f"- `{s}`" for s in plan.seeds]
         lines.append("")
-    if plan.rerender_changelog:
+    if rerendered:
         lines.append("### Changelog re-rendered")
         lines.append(
             "The committed `CHANGELOG.md` no longer matched a re-render of "
