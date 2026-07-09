@@ -12,10 +12,15 @@ legitimately has. **No pixi, no uv, no node/cargo/go.** That emptiness is the
 point: anything the harness finds working afterwards was provisioned by the
 code under test, not inherited from the image.
 
-The image is intended for reuse. Future container needs — an `act` harness for
-workflow testing, WF01 lanes, any "does this work on a machine that isn't a
-laptop?" question — should start from this Dockerfile rather than grow a
-second base image.
+The image is intended for reuse. Future container needs — WF01 lanes, any
+"does this work on a machine that isn't a laptop?" question — should start
+from this Dockerfile rather than grow a second base image.
+
+The first reuse is the act harness (TOL01-WS04): `shipit wf test` builds its
+job-container image (`shipit-wf-ubuntu:24.04`) from this Dockerfile's packaged
+copy, `src/shipit/data/ubuntu.Dockerfile` — shipped with the wheel so a
+consumer repo needs no checkout of shipit's `docker/`. The two bodies are
+byte-identical; a drift test (`tests/test_wf.py`) pins the pair.
 
 ## The harness (`docker/verify-self-provision.sh`)
 

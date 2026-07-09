@@ -1,0 +1,16 @@
+# The ONE canonical actionlint config for the actions Lang of `shipit lint`
+# (ADR-0037 "the gate owns the config", TOL01-WS04 #553). The gate injects this
+# file via `actionlint -config-file <this>` UNCONDITIONALLY, so a repo-tracked
+# `.github/actionlint.yaml` (actionlint's auto-discovery source, rooted at the
+# `.git` project root) can never move the verdict — for actionlint even the
+# repo's own copy is ambient config.
+#
+# Deliberately minimal — actionlint's defaults ARE the canonical rule set:
+#   - self-hosted-runner.labels is EMPTY: the fleet runs on GitHub-hosted
+#     runners, so every custom `runs-on:` label is a finding, never silently
+#     allowed. A repo that genuinely adds a self-hosted runner is a canonical
+#     config change here, rolled fleet-wide — not a per-repo carve-out.
+#   - config-variables stays UNSET (null): `vars.*` usage is not checked
+#     against an allowlist, so a repo's Actions variables never red the gate.
+self-hosted-runner:
+  labels: []
