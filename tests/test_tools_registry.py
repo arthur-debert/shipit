@@ -1,0 +1,41 @@
+"""The closed toolchain registry (TOL01-WS01) — dispatch defaults per tool slot.
+
+Prior art: the lint ``LANGS`` registry tests. The registry is a pure value —
+fixture-driven assertions over its entries and lookups, no I/O.
+"""
+
+import pytest
+
+from shipit.tools import registry
+
+
+def test_registry_is_the_closed_prd_set_in_stable_order():
+    # PRD story 3 + ADR-0039: rust / go / python / npm, an entry each.
+    assert registry.names() == ("rust", "go", "python", "npm")
+
+
+def test_default_test_commands_are_the_blessed_runners():
+    # rust -> cargo-nextest, go -> go test ./..., python -> pytest (PRD story
+    # 3); npm -> the package's own test script (ADR-0039's registry sketch —
+    # the PRD pins no npm default, the entry's docstring records the choice).
+    by_name = {tc.name: tc for tc in registry.TOOLCHAINS}
+    assert by_name["rust"].test == ("cargo", "nextest", "run")
+    assert by_name["go"].test == ("go", "test", "./...")
+    assert by_name["python"].test == ("pytest",)
+    assert by_name["npm"].test == ("npm", "test")
+
+
+def test_lookup_by_name_and_unregistered_is_none():
+    assert registry.toolchain("rust") is registry.RUST
+    assert registry.toolchain("tauri") is None  # never a Kind/dispatch label
+
+
+def test_command_accessor_serves_the_tool_slot():
+    assert registry.RUST.command(registry.TOOL_TEST) == ("cargo", "nextest", "run")
+
+
+def test_command_accessor_rejects_an_unknown_tool_slot():
+    # The tool-slot vocabulary is CLOSED (WS02 adds `build` as an entry); a
+    # slot outside it is a caller bug, named loudly.
+    with pytest.raises(registry.UnknownToolError, match="known: test"):
+        registry.RUST.command("build")

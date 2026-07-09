@@ -56,6 +56,7 @@ from ..install.reconcile import (
     detect_toolchains,
     format_lefthook_conflict,
     format_pixi_key_conflict,
+    format_pixi_task_conflict,
     gather,
     load_retired,
     reconcile,
@@ -283,7 +284,8 @@ def format_plan_warnings(plan: Plan) -> str:
     file, each lefthook merge conflict (#544 — the committing modes also
     fail closed on these in apply; the warning is the working-tree/dry-run
     surface, worded off the same formatter so the two can never drift), and
-    each pixi block skipped over a consumer-owned duplicate key (#547 —
+    each pixi block skipped over a consumer-owned duplicate key (#547) or a
+    consumer-owned same-named task (TOL01-WS01 — a pixi-task ambiguity; both
     warn-only in every mode: the skip already keeps the write set safe)."""
     lines = []
     if plan.manifest_error is not None:
@@ -301,6 +303,8 @@ def format_plan_warnings(plan: Plan) -> str:
         )
     for kc in plan.pixi_key_conflicts:
         lines.append(f"install: pixi block skipped: {format_pixi_key_conflict(kc)}")
+    for tc in plan.pixi_task_conflicts:
+        lines.append(f"install: pixi block skipped: {format_pixi_task_conflict(tc)}")
     return "\n".join(lines)
 
 

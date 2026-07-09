@@ -66,6 +66,25 @@ PIXI_OPEN = (
 PIXI_CLOSE = "# <<< shipit-managed tasks <<<"
 PIXI_ANCHOR = "[tasks]"
 
+# The thin `test` caller (TOL01-WS01, ADR-0039): `test = "./bin/shipit test"`
+# in the consumer's default [tasks] — the pinned-launcher form, like the
+# managed `lint` task — so laptop, hook, and CI run the identical verb. Its
+# OWN block (not a line in the tasks block above) so it can be skipped
+# INDEPENDENTLY: pixi refuses a bare `pixi run test` when a task named `test`
+# exists in several environments, so a consumer whose own manifest already
+# defines a `test` task in a feature (shipit's own repo does — the full-gate
+# task in [feature.test.tasks] needs its rust toolchain env and inline lexd
+# provisioning) keeps that task authoritative and this block is NOT delivered
+# (the reconcile's task-ambiguity guard, `PixiTaskConflict` — the #547
+# key-conflict guard's pixi-run-level sibling), while the lint/logs/
+# provision-lexd tasks block still lands. A `test` key in [tasks] itself is
+# caught by the existing duplicate-key guard.
+PIXI_TEST_TASK_KEY = "pixi.toml#shipit-test-task"
+PIXI_TEST_TASK_OPEN = (
+    "# >>> shipit-managed test task (do not edit; regenerate via `shipit install`) >>>"
+)
+PIXI_TEST_TASK_CLOSE = "# <<< shipit-managed test task <<<"
+
 # The ADP00 managed consumer environment (docs/prd/adoption.md: THE MANAGED SET
 # OWNS THE CONSUMER ENVIRONMENT). Two sibling marker blocks join the tasks block
 # in the consumer's pixi.toml: the lint feature/dependency block carrying the
@@ -493,6 +512,21 @@ def load_units(*, toolchains: frozenset[str] = frozenset()) -> list[Unit]:
             content=data_bytes("pixi-tasks-block.toml"),
             open_marker=PIXI_OPEN,
             close_marker=PIXI_CLOSE,
+            anchor=PIXI_ANCHOR,
+        )
+    )
+    # The thin `test` caller (TOL01-WS01, ADR-0039) — its own sibling block in
+    # the same [tasks] table, so the reconcile's task-ambiguity guard can skip
+    # it alone for a consumer whose own manifest already defines a `test` task
+    # (see the PIXI_TEST_TASK_KEY comment above).
+    units.append(
+        Unit(
+            key=PIXI_TEST_TASK_KEY,
+            dest=PIXI_FILE,
+            kind="block",
+            content=data_bytes("pixi-test-task-block.toml"),
+            open_marker=PIXI_TEST_TASK_OPEN,
+            close_marker=PIXI_TEST_TASK_CLOSE,
             anchor=PIXI_ANCHOR,
         )
     )

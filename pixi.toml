@@ -106,13 +106,21 @@ version = ">=8"
 rust = "1.96.*"
 
 [feature.test.tasks]
-# The full-gate suite. Rust rides the env (conda dep); lexd (not on conda-forge) is
-# provisioned INLINE — the cmd runs `shipit provision lexd` (idempotent — a no-op when
-# the pin is already installed) before pytest, IN this task's own env. Inline, NOT a
-# `provision-lexd` depends-on: a bare `pixi run test` auto-selects this env for the
-# `test` task, but pixi runs a depends-on in the depended task's HOME env, and the
-# managed `provision-lexd` is a DEFAULT-feature task — so a depends-on would provision
-# lexd into `.pixi/envs/default/bin`, NOT this env, and the composed test env does NOT
+# The full-gate suite, THROUGH the test verb (TOL01-WS01, ADR-0039): the task is a
+# thin caller of `shipit test`, which walks `.shipit.toml [toolchains]` and
+# dispatches shipit's one python leg to its registry default (pytest) — the same
+# implementation a hook or CI job runs. It rides `./bin/shipit`, which on
+# shipit-self resolves to the editable install in this env (the code under test).
+# This task stays in the `test` FEATURE (not the managed default-[tasks] test
+# caller, which the install reconcile deliberately skips here — see the
+# PixiTaskConflict guard): the suite needs this env's Rust toolchain, and lexd
+# (not on conda-forge) is provisioned INLINE — the cmd runs `shipit provision
+# lexd` (idempotent — a no-op when the pin is already installed) before the verb,
+# IN this task's own env. Inline, NOT a `provision-lexd` depends-on: a bare
+# `pixi run test` auto-selects this env for the `test` task, but pixi runs a
+# depends-on in the depended task's HOME env, and the managed `provision-lexd` is
+# a DEFAULT-feature task — so a depends-on would provision lexd into
+# `.pixi/envs/default/bin`, NOT this env, and the composed test env does NOT
 # layer the default env's bin onto PATH. So `shutil.which("lexd")` would miss it and
 # the lex cases would silently `skipif`-skip on a clean `pixi run test` (the default
 # bin only leaks in when a shell has the default env separately activated). Running the
@@ -121,7 +129,7 @@ rust = "1.96.*"
 # Without rust+lexd the rust/lex cases `skipif` their absent binaries and the
 # `xfail(strict)` "leak closed → reminder" signal for clippy/lexd (#526) would fire
 # local-only; this env is what makes them run everywhere.
-test = { cmd = "./bin/shipit provision lexd && python -m pytest -q" }
+test = { cmd = "./bin/shipit provision lexd && ./bin/shipit test" }
 
 # The `lint` FEATURE carries the MANAGED fleet-pinned dependency block below —
 # the exact block `shipit install` delivers to every consumer (ADP00,
@@ -238,7 +246,7 @@ lint = ["lint"]
 # ONLY env carrying the `test` task, so bare `pixi run test` auto-selects it — the
 # developer command and the CI command (`pixi run -e test test`) run the same gate.
 # lexd is provisioned onto the run's PATH at its pin INLINE by the `test` task cmd
-# (`shipit provision lexd` before pytest, landing in THIS env's own bin). NOT a
+# (`shipit provision lexd` before the test verb, landing in THIS env's own bin). NOT a
 # `provision-lexd` depends-on: pixi would run it in the default env, whose bin this
 # env does not layer onto PATH — see the task comment above.
 test = ["test"]

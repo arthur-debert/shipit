@@ -17,6 +17,7 @@ import click
 from . import __version__, buildid, events, logcontext
 from .logsetup import configure_logging, reset_logging
 from .verbs import gh_setup, install, lint, logs, verify_apps
+from .verbs import test as test_verb
 from .verbs._context import resolve_root_context
 from .verbs.eval import eval_group
 from .verbs.hook import hook as hook_group
@@ -191,6 +192,23 @@ def lint_cmd(path: str | None, fix: bool) -> None:
     """
     rc = lint.run(path, fix=fix)
     raise SystemExit(rc)
+
+
+@root.command(name="test", context_settings={"ignore_unknown_options": True})
+@click.argument("args", nargs=-1, type=click.UNPROCESSED)
+def test_cmd(args: tuple[str, ...]) -> None:
+    """Run this repo's test legs: `shipit test [LEG] [-- ARGS...]`.
+
+    Walks the `.shipit.toml [toolchains]` path->toolchain map and dispatches
+    each leg to its test-producing command (registry default per toolchain, or
+    the entry's per-path override). Bare `shipit test` runs EVERY leg — the
+    hooks' and CI's form. LEG selects one (a toolchain name, or a map path
+    when one toolchain has several); args after `--` are forwarded verbatim to
+    that leg's command (`shipit test rust -- --no-capture`) and require
+    exactly one selected leg. Exit: 0 all legs pass, 1 any leg fails (a
+    missing tool binary hard-fails, never skips), 2 usage.
+    """
+    raise SystemExit(test_verb.run(list(args)))
 
 
 # The `logs` reader (LOG01/LOG04, promoted onto the ADR-0030 contract in

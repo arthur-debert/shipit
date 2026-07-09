@@ -54,6 +54,16 @@ copilot = { rerun = true }
 codex = {}
 agy = {}
 
+# [toolchains] — the path→toolchain map (ADR-0007/0039): each build-bearing path
+# declares its toolchain, and the tree-input Tool verbs (`shipit test`, later
+# `build`) walk this map and dispatch each entry — a Leg — to its producing
+# command: the registry default per toolchain, or a per-path override, e.g.
+# `"crates/cli" = { toolchain = "rust", test = ["cargo", "test"] }`. shipit is a
+# single python path; the registry default runs pytest with the committed
+# pytest config (pyproject.toml).
+[toolchains]
+"." = "python"
+
 # [project] — the CONSUMER-OWNED, un-validated namespace. shipit validates that
 # top-level tables are KNOWN (so a typo dies fast), but `[project]` (alias:
 # `[custom]`) is the well-known escape hatch whose SUBTREE shipit reads but does NOT

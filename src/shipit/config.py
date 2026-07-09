@@ -42,7 +42,15 @@ class ConfigError(RuntimeError):
 # being silently ignored. ``project`` (alias: ``custom``) is the consumer-owned
 # escape hatch — known so validation accepts it, but its SUBTREE is never descended or
 # policed.
-_KNOWN_TABLES = {"secrets", "reviewers", "managed", "shipit", "project", "lint"}
+_KNOWN_TABLES = {
+    "secrets",
+    "reviewers",
+    "managed",
+    "shipit",
+    "project",
+    "lint",
+    "toolchains",
+}
 _ESCAPE_HATCH_TABLES = {"project", "custom"}
 
 
@@ -182,6 +190,109 @@ def load_lint_ignore(cfg: dict) -> list[str]:
     if not isinstance(ignore, list) or not all(isinstance(p, str) for p in ignore):
         raise ConfigError("[lint].ignore must be a list of glob strings")
     return list(ignore)
+
+
+@dataclass(frozen=True)
+class ToolchainEntry:
+    """One ``[toolchains]`` map entry: a build-bearing ``path`` (repo-relative,
+    ``"."`` for the root), its declared ``toolchain`` (a name from the closed
+    registry, :mod:`shipit.tools.registry`), and the per-path producing-command
+    ``commands`` overrides — tool slot → argv — with which a nonstandard repo
+    opts one leg out of a registry default without forking the tool
+    (docs/prd/tol01-ci-tools.md story 4). Empty ``commands`` means every tool
+    runs its registry default on this leg.
+    """
+
+    path: str
+    toolchain: str
+    commands: dict[str, tuple[str, ...]]
+
+
+def _parse_override(path: str, tool: str, value: object) -> tuple[str, ...]:
+    """One per-path producing-command override: a non-empty list of non-empty
+    strings — an argv, executed through the one exec seam, NEVER a shell
+    string (ADR-0028: no shell=True anywhere)."""
+    if (
+        not isinstance(value, list)
+        or not value
+        or not all(isinstance(a, str) and a for a in value)
+    ):
+        raise ConfigError(
+            f"[toolchains].{path}.{tool} must be a non-empty argv list of "
+            f'strings, e.g. ["cargo", "test"]; got {value!r}'
+        )
+    return tuple(value)
+
+
+def _parse_toolchain_entry(path: str, spec: object) -> ToolchainEntry:
+    """One ``[toolchains]`` entry: a bare toolchain-name string, or a table
+    carrying ``toolchain`` plus per-tool argv overrides (see the loader)."""
+    from .tools import registry  # lazy — config stays import-light at module load
+
+    if not path or path.startswith("/"):
+        raise ConfigError(
+            f"[toolchains] paths are repo-relative ({'empty' if not path else path!r}"
+            f" is not); use '.' for the repo root"
+        )
+    if isinstance(spec, str):
+        name, overrides = spec, {}
+    elif isinstance(spec, dict):
+        name = spec.get("toolchain")
+        if not isinstance(name, str) or not name:
+            raise ConfigError(
+                f"[toolchains].{path} must name its toolchain, e.g. "
+                f'{{ toolchain = "rust", test = ["cargo", "test"] }}'
+            )
+        overrides = {}
+        for tool, value in spec.items():
+            if tool == "toolchain":
+                continue
+            if tool not in registry.TOOLS:
+                known = ", ".join(registry.TOOLS)
+                raise ConfigError(
+                    f"[toolchains].{path}: unknown tool slot `{tool}`; "
+                    f"known tools: {known}"
+                )
+            overrides[tool] = _parse_override(path, tool, value)
+    else:
+        raise ConfigError(
+            f"[toolchains].{path} must be a toolchain name or an inline table, "
+            f'e.g. "rust" or {{ toolchain = "rust", test = ["cargo", "test"] }}; '
+            f"got {spec!r}"
+        )
+    if registry.toolchain(name) is None:
+        known = ", ".join(registry.names())
+        raise ConfigError(
+            f"[toolchains].{path}: unknown toolchain `{name}`; "
+            f"known toolchains: {known}"
+        )
+    return ToolchainEntry(path=path, toolchain=name, commands=overrides)
+
+
+def load_toolchains(cfg: dict) -> tuple[ToolchainEntry, ...]:
+    """Parse the ``[toolchains]`` path→toolchain map (already loaded) into typed
+    entries, in DECLARATION order — the Tool verbs' fan-out order (ADR-0039).
+
+    The map is the repo's structural self-description (ADR-0007: the repo IS
+    the set of these entries): each build-bearing path declares its toolchain,
+    and the tree-input Tool verbs (``shipit test``, WS02's ``build``) walk it
+    and dispatch each entry to a producing command. An entry is either a bare
+    registry name or a table with per-tool overrides::
+
+        [toolchains]
+        "."          = "python"
+        "crates/cli" = { toolchain = "rust", test = ["cargo", "test"] }
+
+    ``()`` when the table is absent — the verbs turn that into their pointed
+    missing-map error (which is a per-verb message, not a parse failure).
+    Malformed shapes raise :class:`ConfigError` naming the offending entry.
+    """
+    section = cfg.get("toolchains", {})
+    if not isinstance(section, dict):
+        raise ConfigError("[toolchains] must be a table mapping path -> toolchain")
+    return tuple(
+        _parse_toolchain_entry(str(path), spec) for path, spec in section.items()
+    )
 
 
 def shipit_version(cfg: dict) -> str | None:

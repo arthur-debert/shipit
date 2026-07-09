@@ -214,3 +214,84 @@ def test_portfolio_entries_carry_repo_and_path():
         for entry in entries:
             assert "repo" in entry and "/" in entry["repo"], (stack, entry)
             assert "path" in entry and entry["path"], (stack, entry)
+
+
+# --------------------------------------------------------------------------
+# [toolchains] — the path→toolchain map (TOL01-WS01, ADR-0007/0039)
+# --------------------------------------------------------------------------
+
+
+def _toolchains(toml: str) -> tuple[config.ToolchainEntry, ...]:
+    return config.load_toolchains(tomllib.loads(toml))
+
+
+def test_load_toolchains_bare_names_in_declaration_order():
+    entries = _toolchains(
+        """
+        [toolchains]
+        "web" = "npm"
+        "."   = "rust"
+        """
+    )
+    # Declaration order IS the fan-out order (ADR-0039) — never re-sorted.
+    assert [(e.path, e.toolchain) for e in entries] == [("web", "npm"), (".", "rust")]
+    assert all(e.commands == {} for e in entries)
+
+
+def test_load_toolchains_table_entry_with_per_path_test_override():
+    entries = _toolchains(
+        """
+        [toolchains]
+        "crates/cli" = { toolchain = "rust", test = ["cargo", "test", "--workspace"] }
+        """
+    )
+    assert entries[0].toolchain == "rust"
+    assert entries[0].commands == {"test": ("cargo", "test", "--workspace")}
+
+
+def test_load_toolchains_absent_table_is_empty():
+    assert config.load_toolchains({}) == ()
+
+
+def test_load_toolchains_unknown_toolchain_names_the_registry():
+    with pytest.raises(config.ConfigError, match="known toolchains: rust, go"):
+        _toolchains('[toolchains]\n"." = "tauri"\n')
+
+
+def test_load_toolchains_unknown_tool_slot_rejected():
+    # The override keys are the CLOSED tool-slot vocabulary (test; WS02 adds
+    # build) — a typo dies fast, mirroring the known-tables validation.
+    with pytest.raises(config.ConfigError, match="unknown tool slot `tets`"):
+        _toolchains(
+            '[toolchains]\n"." = { toolchain = "rust", tets = ["cargo", "test"] }\n'
+        )
+
+
+def test_load_toolchains_override_must_be_a_non_empty_argv_list():
+    # An argv list, never a shell string (ADR-0028: no shell=True anywhere).
+    with pytest.raises(config.ConfigError, match="argv list"):
+        _toolchains('[toolchains]\n"." = { toolchain = "rust", test = "cargo test" }\n')
+    with pytest.raises(config.ConfigError, match="argv list"):
+        _toolchains('[toolchains]\n"." = { toolchain = "rust", test = [] }\n')
+
+
+def test_load_toolchains_entry_must_name_its_toolchain():
+    with pytest.raises(config.ConfigError, match="must name its toolchain"):
+        _toolchains('[toolchains]\n"." = { test = ["cargo", "test"] }\n')
+
+
+def test_load_toolchains_rejects_absolute_paths():
+    with pytest.raises(config.ConfigError, match="repo-relative"):
+        _toolchains('[toolchains]\n"/abs" = "rust"\n')
+
+
+def test_load_toolchains_non_table_section_rejected():
+    with pytest.raises(config.ConfigError, match=r"\[toolchains\] must be a table"):
+        config.load_toolchains({"toolchains": "rust"})
+
+
+def test_toolchains_is_a_known_top_level_table():
+    # `load` validates top-level tables against the closed registry; the map
+    # must parse, not die as a typo.
+    cfg = tomllib.loads('[toolchains]\n"." = "python"\n')
+    config._validate_known_tables(cfg)  # does not raise
