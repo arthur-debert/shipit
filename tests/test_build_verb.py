@@ -241,6 +241,16 @@ def test_orphaned_build_target_toolchain_is_refused_loudly(
     assert "no [toolchains] leg" in err and "cli -> rust" in err
 
 
+def test_whitespace_version_is_usage_rc2_before_any_build(go_repo, capsys):
+    # The version rides go's -ldflags value as one token the go tool re-splits
+    # on whitespace, so a whitespace version would fragment into stray tokens
+    # (or injected linker flags) — refused as a usage error before any build.
+    rec = _Recorder()
+    assert build_verb.run((), version="1.2.3 -X evil=pwned", run_step=rec) == 2
+    assert rec.calls == []
+    assert "contains whitespace" in capsys.readouterr().err
+
+
 def _two_go_paths_one_target(tmp_path):
     # Two go legs (two paths) and an artifact target naming `go` with a package:
     # the join keys on toolchain only, so `go build ./cmd/x` would run in BOTH
