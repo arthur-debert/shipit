@@ -509,8 +509,10 @@ def format_pr_body(
         lines.append(
             "shipit no longer prescribes these consumer-local hook entries "
             "(each identified by the command it runs; shipit's own managed "
-            "entries are never touched), so this PR removes them from their "
-            "hooks file:"
+            "entries are never touched), so this install removes them from their "
+            "hooks file — unless that file can't be safely read or written, in "
+            "which case it is left untouched with a warning logged and the entry "
+            "may remain:"
         )
         lines += [f"- `{d.retired.key}`" for d in plan.retire_hook_deletes]
         lines.append("")
