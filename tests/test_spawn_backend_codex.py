@@ -180,21 +180,21 @@ def test_child_env_passes_the_access_token_through():
         "PATH": "/bin",
         "OPENAI_API_KEY": "stale",
         "CODEX_API_KEY": "also-stale",
-        "CODEX_ACCESS_TOKEN": "subscription-jwt",
+        codex_backend.ACCESS_TOKEN_VAR: "subscription-jwt",
     }
 
     env = CODEX.child_env(parent)
 
-    assert env == {"PATH": "/bin", "CODEX_ACCESS_TOKEN": "subscription-jwt"}
+    assert env == {"PATH": "/bin", codex_backend.ACCESS_TOKEN_VAR: "subscription-jwt"}
 
 
 def test_child_env_from_os_environ_keeps_the_access_token(monkeypatch):
-    monkeypatch.setenv("CODEX_ACCESS_TOKEN", "subscription-jwt")
+    monkeypatch.setenv(codex_backend.ACCESS_TOKEN_VAR, "subscription-jwt")
     monkeypatch.setenv("CODEX_API_KEY", "stale")
 
     env = CODEX.child_env()
 
-    assert env.get("CODEX_ACCESS_TOKEN") == "subscription-jwt"
+    assert env.get(codex_backend.ACCESS_TOKEN_VAR) == "subscription-jwt"
     assert "CODEX_API_KEY" not in env
 
 

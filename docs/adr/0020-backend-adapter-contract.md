@@ -132,13 +132,17 @@ explains the funnel's intermittent agy failure — see §Open decisions.**
   `git add` and `git commit` landed a real commit. Result mode: foreground, final message on stdout; optional
   `--json` (JSONL events), `--output-schema <f>` (native JSON shape), `-o/--output-last-message
   <f>` (capture final message to a file). The parent reads only start + exit (PR is the channel).
-- **Invocation — reviewer Run (read-only).** `codex exec --skip-git-repo-check --ephemeral
-  --sandbox read-only --model <id> "<reviewer task>"`, `cwd` = the shared read-only Tree, stdin
-  `/dev/null`. Probe-confirmed against the 2804-line diff: codex **lazily walked the code** (ran
-  `git diff` / grep itself) and returned rich, code-located findings (absolute path + line range)
-  for **both** planted bugs in ~26 s. (This is the existing review backend's invocation minus the
-  `--output-schema` temp file; `src/shipit/review/backends/codex.py` already runs exactly this
-  for the funnel.)
+- **Invocation — reviewer Run (network-capable sandbox on a read-only Tree).** `codex exec
+  --skip-git-repo-check --ephemeral --sandbox workspace-write -c
+  sandbox_workspace_write.network_access=true --model <id> "<reviewer task>"`, `cwd` = the
+  shared read-only Tree, stdin `/dev/null`. The ADR's earlier `--sandbox read-only` reviewer
+  guess was falsified by WS04a: it blocked the network a self-posting reviewer needs, so the
+  chmod'd Tree (ADR-0018) is the load-bearing filesystem read-only guard and codex's sandbox is
+  the least-privilege posture that still allows network. Probe-confirmed against the 2804-line
+  diff: codex **lazily walked the code** (ran `git diff` / grep itself) and returned rich,
+  code-located findings (absolute path + line range) for **both** planted bugs in ~26 s. (The
+  capture path also adds `--output-schema` before `--model`; keep that native structured-output
+  behavior.)
 - **Role / instruction conveyance.** **No** native `--system-prompt`/`--agent` flag exists. The
   role's system prompt is conveyed by **prepending it to the task prompt** (the shared
   `write_task()` / `reviewer_task()` text). codex *also* honours an `AGENTS.md` project-memory
@@ -149,8 +153,10 @@ explains the funnel's intermittent agy failure — see §Open decisions.**
   via `CODEX_HOME`), inherited by the child. Probe: a **bogus `OPENAI_API_KEY` in the env did
   NOT break** `codex exec` on this box — codex 0.139 preferred the stored ChatGPT tokens. Still,
   the safe generalization of ADR-0019 §3 holds: the adapter **scrubs `OPENAI_API_KEY` (and
-  `CODEX_API_KEY`)** from the child env so the login wins, unless a known-valid key is passed
-  deliberately. **Never** write the key/token into the Tree; auth stays in `CODEX_HOME`.
+  `CODEX_API_KEY`)** from the child env so the login wins. There is no adapter-level override
+  that preserves these API-billing keys; operators who deliberately want API-key auth must choose
+  a separate, explicit launch path rather than inheriting it accidentally through `child_env`.
+  **Never** write the key/token into the Tree; auth stays in `CODEX_HOME`.
 
   > **As probed (CDX01-WS03, `codex-cli` 0.139.0).** The invocation audit passed unchanged —
   > every flag the adapter emits (`exec`, `--skip-git-repo-check`,
@@ -166,9 +172,12 @@ explains the funnel's intermittent agy failure — see §Open decisions.**
   > deliberately **passes `CODEX_ACCESS_TOKEN` through** so headless automation with no
   > persisted `CODEX_HOME` login can still reach codex on subscription billing. The token
   > rides the child env only — never persisted, never written into managed files.
-- **Read-only posture.** codex **has a real native sandbox**: `--sandbox read-only` is a genuine
-  reviewer constraint (no writes, no network) and is **defense-in-depth on top of** the chmod'd
-  Tree (ADR-0018), which remains the load-bearing guard.
+- **Read-only posture.** codex **has a real native sandbox**, but for reviewers its
+  `--sandbox read-only` mode is historical/falsified because it also blocks network. The current
+  reviewer contract is `--sandbox workspace-write -c
+  sandbox_workspace_write.network_access=true` on the shared chmod'd read-only Tree (ADR-0018).
+  The Tree remains the load-bearing write guard; codex's sandbox is defense-in-depth and bounds
+  any escape to codex's workspace-write writable roots while preserving reviewer self-posting.
 - **Lifecycle quirks.** Foreground/blocking; exit 0 on success. `--ephemeral` skips session
   persistence; `-C/--cd` sets a working root but OS-process `cwd` is the rooting mechanism
   (ADR-0019). **stdin `/dev/null`** mandatory (see universal finding). No background mode adopted.
