@@ -64,6 +64,23 @@ def test_load_missing_file(tmp_path):
         config.load(tmp_path / "nope.toml")
 
 
+def test_load_malformed_toml_raises_config_error(tmp_path):
+    p = tmp_path / ".shipit.toml"
+    p.write_text("not = valid = toml\n")
+    with pytest.raises(config.ConfigError, match="malformed"):
+        config.load(p)
+
+
+def test_load_non_utf8_raises_config_error(tmp_path):
+    # tomllib decodes the file as UTF-8 before parsing, so a non-UTF-8 file
+    # used to leak UnicodeDecodeError (a ValueError) past the documented
+    # ConfigError contract — crashing callers that guard on ConfigError (#585).
+    p = tmp_path / ".shipit.toml"
+    p.write_bytes(b"\xff\xfe[secrets]\n")
+    with pytest.raises(config.ConfigError, match="malformed"):
+        config.load(p)
+
+
 def test_load_roundtrip(tmp_path):
     p = tmp_path / ".shipit.toml"
     p.write_text('[secrets]\nA = { env = "X" }\n')

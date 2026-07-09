@@ -28,6 +28,7 @@ from shipit.prstate.wait import (
     POLL_INTERVAL_SECONDS,
     Outcome,
     Until,
+    actionable,
     satisfied,
     wait_for,
 )
@@ -179,6 +180,89 @@ def test_dead_run_times_out_actionable_with_the_rerun_advice():
     result, _ = _run([dead] * 10, Until.READY, timeout=120.0, poll=60.0)
     assert result.outcome is Outcome.TIMED_OUT
     assert "gh run rerun" in result.status.next_action
+# --- actionable: the deadlock guard (#583) --------------------------------------
+
+
+def test_actionable_fires_only_for_ready_on_addressing():
+    # `addressing` is the ONE state the waiting caller must clear itself: a
+    # `--until ready` wait observing it can never fire (#583).
+    addressing = _status(
+        state=TaskState.ADDRESSING, funnel={"copilot": FunnelState.POSTED}
+    )
+    assert actionable(Until.READY, addressing)
+    # reviews-in has no deadlock: an addressing snapshot SATISFIES it (the
+    # round landed), so the wait fires normally instead of stopping early.
+    assert not actionable(Until.REVIEWS_IN, addressing)
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        TaskState.REVIEWS_PENDING,
+        TaskState.REVIEWED,
+        TaskState.VALIDATING,
+        TaskState.BLOCKED,
+        TaskState.READY,
+    ],
+)
+def test_actionable_is_false_for_pass_through_states(state):
+    # Every other state either progresses without the caller (reviews landing,
+    # CI finishing) or is the timeout's job (a wedged BLOCKED) — only
+    # `addressing` is guaranteed un-clearable by anyone but the waiter.
+    status = _status(state=state, funnel={"copilot": FunnelState.POSTED})
+    assert not actionable(Until.READY, status)
+
+
+def test_ready_wait_stops_early_on_addressing():
+    # The #583 trap: reviews re-land with findings while the caller is parked
+    # behind `--until ready`. The wait must return promptly with the DISTINCT
+    # outcome instead of polling a state only its caller can clear.
+    pending = _status(funnel={"copilot": FunnelState.REQUESTED})
+    addressing = _status(
+        state=TaskState.ADDRESSING,
+        next_action="classify 1 finding(s)",
+        funnel={"copilot": FunnelState.POSTED},
+    )
+    result, clock = _run([pending, addressing], Until.READY, timeout=1800.0, poll=60.0)
+    assert result.outcome is Outcome.ACTIONABLE
+    assert result.ticks == 2
+    # It stopped on the tick that observed addressing — no further naps.
+    assert clock.naps == [60.0]
+    assert result.status.state is TaskState.ADDRESSING
+    assert result.status.next_action == "classify 1 finding(s)"
+
+
+def test_reviews_in_wait_fires_on_an_addressing_snapshot():
+    # The guard never intercepts a reviews-in wait: addressing IS reviews-in
+    # (the round landed), so the wait fires as satisfied, not actionable.
+    addressing = _status(
+        state=TaskState.ADDRESSING, funnel={"copilot": FunnelState.POSTED}
+    )
+    result, _ = _run([addressing], Until.REVIEWS_IN)
+    assert result.outcome is Outcome.FIRED
+
+
+def test_flow_log_actionable_event(caplog):
+    pending = _status(funnel={"copilot": FunnelState.REQUESTED})
+    addressing = _status(
+        state=TaskState.ADDRESSING,
+        next_action="classify 1 finding(s)",
+        funnel={"copilot": FunnelState.POSTED},
+    )
+    with caplog.at_level(logging.INFO, logger="shipit.prstate"):
+        result, _ = _run([pending, addressing], Until.READY)
+    assert result.outcome is Outcome.ACTIONABLE
+    names = _events(caplog)
+    assert names[-1] == "wait.actionable"
+    assert "wait.fired" not in names
+    assert "wait.timed_out" not in names
+    record = [
+        r
+        for r in caplog.records
+        if getattr(r, events.EXTRA_KEY, None) == "wait.actionable"
+    ][0]
+    assert record.pr == 7
+    assert record.state == "addressing"
 
 
 # --- wait_for: the loop --------------------------------------------------------
@@ -329,7 +413,13 @@ def test_flow_log_timeout_event(caplog):
 def test_wait_event_names_are_registered():
     # The closed vocabulary (ADR-0032) carries the waiter's four names — a
     # typo'd emit would raise, so pin the registration.
-    for name in ("wait.started", "wait.state_changed", "wait.fired", "wait.timed_out"):
+    for name in (
+        "wait.started",
+        "wait.state_changed",
+        "wait.fired",
+        "wait.timed_out",
+        "wait.actionable",
+    ):
         assert name in events.EVENT_NAMES
 
 

@@ -122,6 +122,7 @@ def test_the_starting_vocabulary_is_registered():
         "wait.started",
         "wait.state_changed",
         "wait.fired",
+        "wait.actionable",
         "wait.timed_out",
         "finding.classified",
         "pr.ready",

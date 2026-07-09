@@ -98,12 +98,15 @@ EVENT_NAMES = frozenset(
         # the blocking waiter (`shipit pr wait`, ADR-0034): the wait's own
         # lifecycle — started at entry, one state_changed per poll tick where
         # the observed state moved (the tail-able progress trail), and exactly
-        # one terminal record: fired (the awaited condition arrived) or
+        # one terminal record: fired (the awaited condition arrived),
+        # actionable (the wait stopped on a state only its caller can clear —
+        # a `ready` wait observing `addressing`, the #583 deadlock guard), or
         # timed_out (the hard deadline expired — an advisory state for the
         # supervisor, not a failure of the PR).
         "wait.started",
         "wait.state_changed",
         "wait.fired",
+        "wait.actionable",
         "wait.timed_out",
         # a review finding's recorded verdict (#423): the agent addressing the
         # round classifies each finding (nitpick | substantive) as a byproduct
