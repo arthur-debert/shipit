@@ -338,3 +338,23 @@ def test_write_task_instructs_a_draft_pr_and_to_stop():
     # ... while the review ROUNDS stay out of the Run's slice: the prohibition on
     # addressing them is load-bearing text, pinned so an edit can't drop it silently.
     assert "address review rounds" in task
+
+
+def test_write_task_carries_the_bank_state_protocol():
+    # #587: a Run that nears its wall-clock/budget before the draft PR is open must
+    # BANK its state — commit whatever exists with a `WIP:`-marked message and push
+    # the branch — so the failed spawn is a resumable handoff, not a silent loss of
+    # the Run's work. All three halves are load-bearing: the marker (the coordinator
+    # greps for it), the exact branch, and the PUSH (an unpushed commit dies with
+    # the Tree just like uncommitted work).
+    task = launch.write_task(
+        "implementer", issue=587, branch="issues/587/work", base_branch="main"
+    )
+    assert "`WIP:`" in task
+    assert "bank your state" in task.lower()
+    assert "push the branch" in task
+    assert "'issues/587/work'" in task  # the WIP lands on the Run's OWN branch
+    # The push MUST be spelled upstream-safe: at bank time the branch is fresh (no
+    # draft PR ⇒ no upstream), so a bare `git push` would reject the WIP commit and
+    # lose exactly the work the protocol salvages. Pin the `-u origin <branch>` form.
+    assert "git push -u origin issues/587/work" in task

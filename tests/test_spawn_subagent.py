@@ -49,6 +49,7 @@ def bounds(
     returncode: int = 0,
     umbrella: bool = True,
     org_repo: str = "acme/widget",
+    status_lines: list[str] | None = None,
 ) -> tuple[Boundaries, dict]:
     """Fake every effectful edge as a recording callable; return (bounds, calls).
 
@@ -57,6 +58,8 @@ def bounds(
     (:func:`shipit.tree.layout.plan`), so the epic-grouped base the pipeline
     audits against is the true one, never a hardcoded string. The runner
     records the launch contract (cmd/cwd/env) and never spawns anything.
+    ``status_lines`` is what the salvage probe's porcelain read reports (#587)
+    — the default ``None`` means a clean tree.
     """
     calls: dict = {}
     parent = tmp_path / "repo"
@@ -98,6 +101,10 @@ def bounds(
         calls["umbrella_cwd"] = cwd
         return umbrella
 
+    def status_porcelain(*, cwd):
+        calls["status_cwd"] = cwd
+        return list(status_lines or [])
+
     return (
         Boundaries(
             repo_root=lambda: str(parent),
@@ -107,6 +114,7 @@ def bounds(
             create_tree=create_tree,
             create_readonly_tree=create_readonly_tree,
             pr_for_head=pr_for_head,
+            status_porcelain=status_porcelain,
             runner=runner,
         ),
         calls,
@@ -457,6 +465,104 @@ def test_invalid_handshake_states_refuse_through_the_pipeline(tmp_path, bad_pr, 
     b, _ = bounds(tmp_path, pr=bad_pr)
     with pytest.raises(SpawnError, match=detail.replace("'", "'")):
         spawn_subagent(spec(), b)
+
+
+# --- the salvage signal (#587) ------------------------------------------------------
+# A write Run killed mid-work (wall-clock hit while verifying) can strand its whole
+# diagnosis UNCOMMITTED in the dead Tree; the write tail's post-launch refusals must
+# carry the uncommitted-work count so the coordinator inspects the Tree instead of
+# discarding a resumable handoff as a total loss.
+
+
+def test_no_pr_refusal_reports_uncommitted_work(tmp_path):
+    # The observed #587 shape: the child exits 0 without committing or opening a PR.
+    # The refusal keeps its original diagnosis AND appends the salvage line — the
+    # porcelain count, read from inside the dead Tree.
+    b, calls = bounds(
+        tmp_path, pr=None, status_lines=[" M src/fix.py", "?? tests/t.py"]
+    )
+
+    with pytest.raises(SpawnError) as exc:
+        spawn_subagent(spec(), b)
+
+    assert "opened no PR" in str(exc.value)  # the original refusal survives intact
+    assert "2 uncommitted change(s)" in str(exc.value)
+    assert "salvageable" in str(exc.value)
+    assert str(tmp_path / "tree") in str(exc.value)  # the note names the Tree to read
+    assert calls["status_cwd"] == str(tmp_path / "tree")  # probed IN the dead Tree
+
+
+def test_nonzero_child_refusal_reports_uncommitted_work(tmp_path):
+    # The other post-launch failure class: a child killed nonzero mid-work also
+    # leaves a Tree worth inspecting, so the same salvage line rides that refusal.
+    b, _ = bounds(tmp_path, returncode=2, status_lines=[" M src/fix.py"])
+
+    with pytest.raises(SpawnError) as exc:
+        spawn_subagent(spec(), b)
+
+    assert "claude child exited 2" in str(exc.value)
+    assert "1 uncommitted change(s)" in str(exc.value)
+
+
+def test_clean_tree_refusal_carries_no_salvage_line(tmp_path):
+    # Nothing to salvage → nothing appended: the refusal is byte-identical to the
+    # bare audit refusal, so a clean failure never nags the coordinator to dig.
+    b, calls = bounds(tmp_path, pr=None)
+
+    with pytest.raises(SpawnError) as exc:
+        spawn_subagent(spec(), b)
+
+    assert "opened no PR" in str(exc.value)
+    assert "salvageable" not in str(exc.value)
+    assert "uncommitted" not in str(exc.value)
+    assert calls["status_cwd"] == str(tmp_path / "tree")  # probed, found clean
+
+
+def test_salvage_probe_failure_never_masks_the_refusal(tmp_path):
+    # The probe runs UNDER an already-failing spawn: an unreadable Tree (ExecError)
+    # must surface the ORIGINAL refusal untouched — best-effort, never fatal.
+    b, _ = bounds(tmp_path, pr=None)
+
+    def unreadable(*, cwd):
+        raise ExecError(["git", "status"], rc=128, stderr="not a git repository")
+
+    with pytest.raises(SpawnError) as exc:
+        spawn_subagent(spec(), replace(b, status_porcelain=unreadable))
+
+    assert "opened no PR" in str(exc.value)
+    assert "not a git repository" not in str(exc.value)
+
+
+def test_tree_creation_failure_does_not_probe_salvage(tmp_path):
+    # Fail-closed BEFORE the child ran: there is no Run work to salvage (the Tree
+    # may not even exist), so the pre-launch refusals never touch the probe.
+    b, calls = bounds(tmp_path)
+
+    def no_probe(*, cwd):
+        raise AssertionError("a pre-launch refusal must not run the salvage probe")
+
+    def boom(tree_spec, *, source_repo, github_url):
+        raise OSError("disk full")
+
+    with pytest.raises(SpawnError, match="tree creation failed"):
+        spawn_subagent(spec(), replace(b, create_tree=boom, status_porcelain=no_probe))
+    assert "cmd" not in calls
+
+
+def test_reviewer_failure_does_not_probe_salvage(tmp_path):
+    # A reviewer Run writes nothing (chmod'd read-only Tree) — its failures carry
+    # no salvage note and never probe the shared Tree's status.
+    b, _ = bounds(tmp_path, returncode=3)
+
+    def no_probe(*, cwd):
+        raise AssertionError("the reviewer tail must not run the salvage probe")
+
+    with pytest.raises(SpawnError, match="claude child exited 3") as exc:
+        spawn_subagent(
+            spec(role="reviewer", ws=3, issue=None),
+            replace(b, status_porcelain=no_probe),
+        )
+    assert "salvageable" not in str(exc.value)
 
 
 # --- the standalone-issue shape (ADR-0026) -----------------------------------------
