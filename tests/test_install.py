@@ -1361,7 +1361,9 @@ def test_sha256_of_stays_fail_open_when_the_hash_tool_errors(tmp_path, tool):
     # the no-hash-tool-at-all branch already does.
     stub_bin = tmp_path / "bin"
     stub_bin.mkdir()
-    os.symlink(shutil.which("awk"), stub_bin / "awk")
+    awk = shutil.which("awk")
+    assert awk is not None
+    os.symlink(awk, stub_bin / "awk")
     stub = stub_bin / tool
     stub.write_text("#!/bin/sh\necho 'hash tool: boom' >&2\nexit 1\n")
     stub.chmod(0o755)
@@ -1378,8 +1380,10 @@ def test_sha256_of_stays_fail_open_when_the_hash_tool_errors(tmp_path, tool):
     )
     # Hermetic PATH (the stub dir only): with tool=shasum, sha256sum is absent
     # and the elif branch is the one under test.
+    bash = shutil.which("bash")
+    assert bash is not None
     proc = subprocess.run(
-        [shutil.which("bash"), "-c", driver],
+        [bash, "-c", driver],
         env={"PATH": str(stub_bin)},
         capture_output=True,
         text=True,
