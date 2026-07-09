@@ -86,6 +86,95 @@ def test_write_manifest_replaces_prior_shipit_tables(tmp_path):
     assert p.read_text().count("[shipit]") == 1
 
 
+# --------------------------------------------------------------------------
+# The [managed.decline] policy sub-table (#600) — consumer-owned, re-stamp-safe
+# --------------------------------------------------------------------------
+
+
+def test_load_declines_parses_the_keep_list(tmp_path):
+    p = tmp_path / ".shipit.toml"
+    p.write_text('[managed.decline]\nkeep = ["bin/shipit", "lefthook.yml"]\n')
+    cfg = config.load(p)
+    assert config.load_declines(cfg, p.read_text()) == ("bin/shipit", "lefthook.yml")
+    # The policy sub-table is NOT a pristine entry.
+    assert config.load_managed(cfg) == {}
+
+
+def test_load_declines_defaults_empty():
+    assert config.load_declines({}, "") == ()
+    assert config.load_declines({"managed": {"bin/shipit": "sha256:x"}}, "") == ()
+
+
+def test_load_declines_accepts_a_header_with_a_trailing_comment(tmp_path):
+    # A trailing `# comment` is valid after a TOML header; the header-form check
+    # must strip it, not read the commented line as a missing header and reject.
+    p = tmp_path / ".shipit.toml"
+    p.write_text(
+        '[managed.decline]  # keep our own bin/shipit\nkeep = ["bin/shipit"]\n'
+    )
+    assert config.load_declines(config.load(p), p.read_text()) == ("bin/shipit",)
+
+
+def test_load_declines_rejects_the_dotted_form(tmp_path):
+    # A dotted `decline.keep` under [managed] parses to the same dict as the
+    # header form, but the [managed] re-stamp would strip it — so install would
+    # silently un-decline on the next run. Refuse it at parse rather than accept
+    # a policy that evaporates (#600).
+    p = tmp_path / ".shipit.toml"
+    p.write_text('[managed]\ndecline.keep = ["bin/shipit"]\n')
+    with pytest.raises(config.ConfigError, match="own header"):
+        config.load_declines(config.load(p), p.read_text())
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "[managed]\ndecline = 42\n",  # scalar where the table is expected
+        '[managed.decline]\nkeep = "bin/shipit"\n',  # scalar keep
+        "[managed.decline]\nkeep = [1]\n",  # non-string entry
+        '[managed.decline]\nkeep = [""]\n',  # empty key
+        '[managed.decline]\nkept = ["bin/shipit"]\n',  # typo'd key dies at parse
+    ],
+)
+def test_load_declines_rejects_malformed_shapes(tmp_path, body):
+    p = tmp_path / ".shipit.toml"
+    p.write_text(body)
+    with pytest.raises(config.ConfigError):
+        config.load_declines(config.load(p), p.read_text())
+
+
+def test_write_manifest_preserves_managed_decline(tmp_path):
+    # The decline is consumer-owned policy riding inside [managed]'s namespace:
+    # the [shipit]/[managed] re-stamp strips only those two headers' bodies, so
+    # the [managed.decline] header (and its keep list) must survive verbatim —
+    # the whole point of the durable decline (#600) is outliving every reconcile.
+    p = tmp_path / ".shipit.toml"
+    p.write_text(
+        '[managed.decline]\nkeep = ["bin/shipit"]\n'
+        '\n[shipit]\nversion = "old"\n'
+        '\n[managed]\n"bin/shipit" = "sha256:old"\n'
+    )
+    config.write_manifest(p, version="new", managed={"lefthook.yml": "sha256:new"})
+    cfg = config.load(p)
+    assert config.load_declines(cfg, p.read_text()) == ("bin/shipit",)
+    assert config.shipit_version(cfg) == "new"
+    # The declined unit's stale pristine entry was dropped with the re-stamp.
+    assert config.load_managed(cfg) == {"lefthook.yml": "sha256:new"}
+
+
+def test_write_manifest_preserves_a_trailing_managed_decline(tmp_path):
+    # A consumer appends [managed.decline] at the very end (after the machine
+    # tables install wrote) — the strip keeps it and the re-appended [managed]
+    # after it is still valid TOML.
+    p = tmp_path / ".shipit.toml"
+    config.write_manifest(p, version="v1", managed={"bin/shipit": "sha256:x"})
+    p.write_text(p.read_text() + '\n[managed.decline]\nkeep = ["bin/shipit"]\n')
+    config.write_manifest(p, version="v2", managed={})
+    cfg = config.load(p)
+    assert config.load_declines(cfg, p.read_text()) == ("bin/shipit",)
+    assert config.load_managed(cfg) == {}
+
+
 def test_shipit_pin_reads_the_stamped_version(tmp_path):
     # The [shipit].version pin `shipit install` stamps IS the bootstrapped marker
     # (ADR-0033) — the pin gate Tree provisioning fails closed on reads it here.

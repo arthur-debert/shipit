@@ -280,6 +280,13 @@ SETTINGS_STOP_MARKER = "shipit hook stop"
 SETTINGS_SUBAGENTSTOP_KEY = ".claude/settings.json#shipit-subagentstop-hook"
 SETTINGS_SUBAGENTSTOP_MARKER = "shipit hook subagent-stop"
 
+#: The pinned ``bin/shipit`` launcher's unit key AND dest (ADR-0033) — the
+#: whole-file bootstrap unit that execs the repo's pinned build via uv. Named
+#: so its consumers (the catalog below, selfcert's launcher probe, a
+#: ``[managed.decline]`` entry, #600) spell one identifier, never a scattered
+#: literal.
+SHIPIT_LAUNCHER_FILE = "bin/shipit"
+
 # The Layer 0 bootstrap script (#547): provisions the base system (pixi + uv
 # at their pins, then the pixi env solves) that everything above — the managed
 # lint env, the pinned launcher's uv resolve — rides on. Shipped like
@@ -447,8 +454,8 @@ def load_units(*, toolchains: frozenset[str] = frozenset()) -> list[Unit]:
 
     units.append(
         Unit(
-            key="bin/shipit",
-            dest="bin/shipit",
+            key=SHIPIT_LAUNCHER_FILE,
+            dest=SHIPIT_LAUNCHER_FILE,
             kind="file",
             content=data_bytes("bootstrap", "shipit"),
             executable=True,

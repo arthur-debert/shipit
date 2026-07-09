@@ -239,9 +239,11 @@ def format_plan(plan: Plan, *, dry_run: bool = False) -> str:
     Retired-file outcomes render alongside the managed results: a pristine copy
     is deleted, a locally modified copy is kept LOUDLY (the stderr warning is
     :func:`format_plan_warnings`), an absent path stays silent like any
-    managed NOOP. A nothing-to-do plan says so — with the wording shifted when
-    a kept retired file was just warned about, where "managed set is current"
-    would read as a contradiction.
+    managed NOOP. A DECLINED unit (#600) renders its standing ``decline`` line
+    on every run — the decision must stay visible in-repo, never silently
+    absorbed like a NOOP. A nothing-to-do plan says so — with the wording
+    shifted when a kept retired file or a declined unit was just listed, where
+    "managed set is current" would read as a contradiction.
 
     Each line carries the unit's KEY, not its dest (#433): a file whose key is
     its path renders unchanged, while the marker blocks sharing one dest render
@@ -253,6 +255,13 @@ def format_plan(plan: Plan, *, dry_run: bool = False) -> str:
     for d in plan.decisions:
         if d.action != NOOP:
             lines.append(f"  {d.action:8} {d.unit.key}")
+    for key in plan.declined:
+        # #600: the standing consumer decision, rendered every run so it stays
+        # visible in-repo — the unit is skipped, never written or re-proposed.
+        lines.append(
+            f"  {'decline':8} {key} (kept as this repo's own — "
+            f".shipit.toml [managed.decline])"
+        )
     if plan.seed_pixi_manifest:
         lines.append(
             f"  {'seed':8} pixi.toml ([workspace] table — consumer has no manifest)"
@@ -279,7 +288,7 @@ def format_plan(plan: Plan, *, dry_run: bool = False) -> str:
     if plan.nothing_to_do:
         lines.append(
             "  nothing to do — no automated changes to apply."
-            if plan.retire_keeps
+            if plan.retire_keeps or plan.declined
             else "  nothing to do — managed set is current."
         )
     elif dry_run:
@@ -298,7 +307,9 @@ def format_plan_warnings(plan: Plan) -> str:
     surface, worded off the same formatter so the two can never drift), and
     each pixi block skipped over a consumer-owned duplicate key (#547) or a
     consumer-owned same-named task (TOL01-WS01 — a pixi-task ambiguity; both
-    warn-only in every mode: the skip already keeps the write set safe)."""
+    warn-only in every mode: the skip already keeps the write set safe), and
+    each declined key that names no unit in this catalog (#600 — a typo must
+    not silently decline nothing)."""
     lines = []
     if plan.manifest_error is not None:
         lines.append(f"install: ignoring unreadable manifest: {plan.manifest_error}")
@@ -317,6 +328,14 @@ def format_plan_warnings(plan: Plan) -> str:
         lines.append(f"install: pixi block skipped: {format_pixi_key_conflict(kc)}")
     for tc in plan.pixi_task_conflicts:
         lines.append(f"install: pixi block skipped: {format_pixi_task_conflict(tc)}")
+    for key in plan.decline_unmatched:
+        lines.append(
+            f"install: declined key {key!r} names no managed unit in this "
+            f"catalog — check .shipit.toml [managed.decline].keep for a typo "
+            f"(unit keys are the [managed] table's names; toolchain-conditional "
+            f"pixi blocks only join the catalog when their signal manifest is "
+            f"tracked)"
+        )
     return "\n".join(lines)
 
 
@@ -394,8 +413,9 @@ def format_pr_body(
 ) -> str:
     """The draft PR body: the stamped pin, what was added/updated (by unit KEY,
     #433 — block identity, never a bare repeated filename), every override with
-    its diff, the retired delete/keep sections, the policy seed, the changelog
-    re-render (#578), the activation
+    its diff, the declined units (#600 — kept as the repo's own, the standing
+    `.shipit.toml [managed.decline]` decision), the retired delete/keep
+    sections, the policy seed, the changelog re-render (#578), the activation
     outcome, and the consumer's whole-tree lint debt (reported, never blocking).
 
     ``override_before`` holds each overridden unit's consumer content captured
@@ -454,6 +474,17 @@ def format_pr_body(
             lines.append("```")
             lines.append("</details>")
             lines.append("")
+    if plan.declined:
+        lines.append("### Declined units — kept as this repo's own")
+        lines.append(
+            "This repo's `.shipit.toml` `[managed.decline].keep` declines these "
+            "managed units (#600), so this install did not deliver them and no "
+            "override is proposed — the committed copies stay authoritative. To "
+            "adopt shipit's content again, remove the entry and re-run "
+            "`shipit install`."
+        )
+        lines += [f"- `{key}`" for key in plan.declined]
+        lines.append("")
     if plan.retire_deletes:
         lines.append("### Retired files removed")
         lines.append(
