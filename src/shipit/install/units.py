@@ -343,10 +343,12 @@ SETTINGS_WORKTREECREATE_MARKER = "shipit hook worktreecreate"
 # is already dest/event/marker-generic): two `FMT_JSON_HOOK` block units over
 # the one file, each owning shipit's single entry in its event array — the
 # SessionStart activation/advisory hook (fail-open, additive; the entry
-# synthesizes the verb's `{"cwd": ...}` payload from `$PWD` because codex
-# supplies no Claude-shaped payload on stdin) and the PreToolUse coordinator tool-guard
-# (fail-CLOSED, the ADR-0038 posture: a resolution failure blocks the tool
-# call with exit 2 rather than silently allowing an unchecked edit). The
+# synthesizes the verb's `{"cwd": ...}` payload via python `os.getcwd()` because
+# codex supplies no Claude-shaped payload on stdin) and the PreToolUse
+# coordinator tool-guard (fail-CLOSED, the ADR-0038 posture: a resolution
+# failure blocks the tool call with exit 2 rather than silently allowing an
+# unchecked edit; this entry synthesizes NO payload — it resolves the git root
+# via `git rev-parse --show-toplevel` and passes codex's native stdin through). The
 # guard entry carries NO matcher: Codex tool names are not Claude's, so the
 # entry binds to every tool event and the shared verb's own `is_edit_tool`
 # gate scopes the verdict (a non-edit payload is allowed through silently).

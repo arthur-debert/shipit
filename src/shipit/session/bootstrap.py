@@ -33,6 +33,10 @@ Tree on disk or a real ``codex``:
   ``CODEX_ACCESS_TOKEN`` passing through — ADR-0020 §codex Auth, defined ONCE on the
   adapter), the launch-path project-pointer scrub (a parent ``PIXI_*``/Conda
   activation must not bind the session's own tool calls to the source checkout),
+  the launch-seam role scrub (an inherited ``SHIPIT_LOG_CTX_ROLE`` from a spawned
+  worker Run's shell must not disarm the new coordinator's edit guard — the same
+  scrub the managed ``agent-start`` launcher performs, repeated here so a direct
+  ``shipit session codex`` is covered too),
   plus the ``SHIPIT_LOG_CTX_SESSION``/``_TREE`` exports. Those exports are the codex
   counterpart of the SessionStart hook's ``CLAUDE_ENV_FILE`` log-context write
   (which codex has no equivalent of): every process the session runs inherits them,
@@ -109,7 +113,7 @@ def codex_env(
 ) -> dict[str, str]:
     """The Codex session's COMPLETE child environment (for ``execvpe``).
 
-    Three layers over ``parent_env``, each reusing the seam that already owns it
+    Four layers over ``parent_env``, each reusing the seam that already owns it
     so none can drift (module docstring):
 
     1. the codex adapter's auth scrub (:meth:`CodexAdapter.child_env` — the
@@ -118,7 +122,13 @@ def codex_env(
        (:func:`shipit.spawn.launch.scrub_tree_env` — leaked ``PIXI_*``/Conda
        activation vars out, so the session's own ``pixi``/``shipit`` calls resolve
        the Tree, not the parent checkout);
-    3. the ``SHIPIT_LOG_CTX_SESSION``/``_TREE`` exports (names from
+    3. the launch-seam role scrub: an inherited ``SHIPIT_LOG_CTX_ROLE`` (a
+       coordinator started from inside a spawned worker Run's shell) is dropped —
+       the session being launched IS a coordinator, and the pretooluse edit
+       guard's fallback would otherwise silently resolve it to the worker's role
+       and disarm. The managed ``agent-start`` launcher scrubs the same var; this
+       covers a direct ``shipit session codex``;
+    4. the ``SHIPIT_LOG_CTX_SESSION``/``_TREE`` exports (names from
        :data:`shipit.logcontext.ENV_PREFIX`, values matching what the SessionStart
        hook would export for this Tree — the leaf IS the session id, ADR-0027),
        so every in-session shipit process rebinds the session identity at
@@ -127,6 +137,7 @@ def codex_env(
     Returns a fresh dict, never the caller's mapping.
     """
     env = scrub_tree_env(CodexAdapter().child_env(parent_env))
+    env.pop(logcontext.ENV_PREFIX + "ROLE", None)
     env[logcontext.ENV_PREFIX + "SESSION"] = session_id
     env[logcontext.ENV_PREFIX + "TREE"] = str(tree)
     return env

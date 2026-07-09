@@ -49,6 +49,23 @@ def test_codex_env_scrubs_billing_and_project_pointers_keeps_access_token():
     assert env[logcontext.ENV_PREFIX + "TREE"] == tree
 
 
+def test_codex_env_drops_an_inherited_worker_role_export():
+    # The launch-seam role scrub (#631): a coordinator launched from inside a
+    # spawned worker Run's shell inherits the worker's SHIPIT_LOG_CTX_ROLE
+    # export; riding into the new session it would make the pretooluse edit
+    # guard's fallback resolve the coordinator to the worker's role and
+    # silently disarm. The env builder drops it actively.
+    parent = {
+        "PATH": "/bin",
+        logcontext.ENV_PREFIX + "ROLE": "implementer",
+        logcontext.ENV_PREFIX + "AGENT": "deadbeef",
+    }
+
+    env = bootstrap.codex_env(parent, session_id="codex-1", tree="/trees/codex-1")
+
+    assert logcontext.ENV_PREFIX + "ROLE" not in env
+
+
 def test_format_launch_names_session_tree_and_exact_argv():
     assert bootstrap.format_launch(
         "codex-1",

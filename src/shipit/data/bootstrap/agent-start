@@ -22,10 +22,22 @@
 # `./claude-start` / `./codex-start` siblings are compatibility shims that
 # delegate here. Extra args are forwarded to the agent CLI verbatim.
 #
+# The common path scrubs SHIPIT_LOG_CTX_ROLE before dispatch: a coordinator
+# launched from inside a spawned worker Run's shell would otherwise inherit
+# the worker's role export and silently disarm the coordinator edit guard
+# (the pretooluse fallback consults that var exactly when the payload names
+# no agent). Known accepted boundary: a bare `claude -w` run manually from
+# inside a worker shell bypasses this launcher and still inherits the var.
+#
 # Do not edit — `shipit install` overwrites this file.
 set -euo pipefail
 
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Launch-seam role scrub (see header): the session being started is a
+# coordinator, whatever shell it was started from — a worker Run's exported
+# role must not ride into it. Common path, so no host can forget it.
+unset SHIPIT_LOG_CTX_ROLE
 
 usage() {
 	echo "usage: agent-start <agent> [args...]   (agents: claude, codex)" >&2
@@ -53,12 +65,13 @@ launch_codex() {
 agent="$1"
 shift
 
-# The host strategy table: agent name -> (CLI binary to require, launch
-# function). Adding a host is one row here plus its narrow launch function
-# above — never a conditional scattered through the common path.
+# The host strategy table: agent name -> (CLI binary to require, product name
+# for the missing-CLI hint, launch function). Adding a host is one row here
+# plus its narrow launch function above — never a conditional scattered
+# through the common path.
 case "$agent" in
-claude) cli="claude" launch="launch_claude" ;;
-codex) cli="codex" launch="launch_codex" ;;
+claude) cli="claude" product="Claude Code" launch="launch_claude" ;;
+codex) cli="codex" product="Codex" launch="launch_codex" ;;
 *)
 	echo "agent-start: unknown agent '$agent' (supported: claude, codex)" >&2
 	exit 64
@@ -66,7 +79,7 @@ codex) cli="codex" launch="launch_codex" ;;
 esac
 
 if ! command -v "$cli" >/dev/null 2>&1; then
-	echo "agent-start: the $cli CLI is not on PATH — install it first." >&2
+	echo "agent-start: the $cli CLI is not on PATH — install $product first." >&2
 	exit 127
 fi
 
