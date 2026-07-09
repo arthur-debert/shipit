@@ -17,12 +17,14 @@ import click
 from . import __version__, buildid, events, logcontext
 from .logsetup import configure_logging, reset_logging
 from .verbs import build as build_verb
+from .verbs import e2e as e2e_verb
 from .verbs import gh_setup, install, lint, logs, verify_apps
 from .verbs import test as test_verb
 from .verbs._context import resolve_root_context
 from .verbs.changelog import changelog as changelog_group
 from .verbs.ci import ci as ci_group
 from .verbs.eval import eval_group
+from .verbs.fleet import fleet as fleet_group
 from .verbs.hook import hook as hook_group
 from .verbs.logevent import log as log_group
 from .verbs.pr import pr as pr_group
@@ -243,6 +245,25 @@ def build_cmd(version: str | None, args: tuple[str, ...]) -> None:
     raise SystemExit(build_verb.run(list(args), version=version))
 
 
+@root.command(name="e2e", context_settings={"ignore_unknown_options": True})
+@click.argument("args", nargs=-1, type=click.UNPROCESSED)
+def e2e_cmd(args: tuple[str, ...]) -> None:
+    """Run this repo's declared e2e harnesses: `shipit e2e [ARTIFACT] [-- ARGS...]`.
+
+    The artifact-consuming tool: for every `[artifacts.<name>]` declaring an
+    `e2e` table, resolves the artifact's binary (locally built via the repo's
+    build legs — the artifact-source seam's one source today), injects its
+    absolute path into the declared harness (default: the repo's
+    bin/check-e2e bats runner) as `<NAME>_BIN`, and runs the harness from the
+    repo root. No e2e declaration means no e2e lane: reports and exits 0.
+    ARTIFACT selects one declared artifact; args after `--` are forwarded
+    verbatim to that harness and require exactly one selected artifact.
+    Exit: 0 all harnesses pass, 1 any fails or its artifact can't be built,
+    2 usage.
+    """
+    raise SystemExit(e2e_verb.run(list(args)))
+
+
 # The nested `changelog` group (TOL01-WS06) — the language-agnostic
 # release-notes tool over CHANGELOG/ fragments: the PR-time fragment-sync
 # `check` (the changelog-sync lane's run) and the cut-time `coalesce`.
@@ -292,6 +313,13 @@ root.add_command(tree_group)
 # The nested `spawn` group (TRE03) — shipit-owned subagent spawning: create a
 # write Tree and launch a backend-agent Run rooted in it (ADR-0017/0019).
 root.add_command(spawn_group)
+
+# The nested `fleet` group (TOL01-WS07) — fleet-wide verification over the
+# declared [project.portfolio]: `shipit fleet sweep` runs every applicable
+# tool verb in a fresh Tree per portfolio repo under the candidate build
+# (SHIPIT_EXEC, ADR-0033) and emits the per-tool × per-repo matrix report —
+# the TOL01 exit gate and ADP02's adoption-readiness seed.
+root.add_command(fleet_group)
 
 # The nested `wf` group (TOL01-WS04) — workflow tools: `shipit wf test` runs
 # one workflow/job under act in a container against a crafted event, so a

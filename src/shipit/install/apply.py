@@ -1,7 +1,8 @@
 """apply — the install domain's ONE effectful path: execute a :class:`Plan`.
 
 Everything that touches the world lives here: unit writes and block splices,
-retired-file unlinks, the policy seed, the manifest re-stamp, the bounded
+the changelog re-render (#578), retired-file unlinks, the policy seed, the
+manifest re-stamp, the bounded
 ``lefthook install`` activation, and the four write modes' git/gh side effects
 (#359: the branch/PR side effect is explicit opt-in — the default mode
 refreshes the working tree and stops). Returns a typed :class:`InstallResult`;
@@ -18,6 +19,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from .. import buildid, config, execrun, gh, git, pixienv
+from ..changelog import CHANGELOG_FILE
 from . import selfcert
 from .errors import InstallError, SelfCertError
 from .reconcile import Plan, consumer_inner, format_lefthook_conflict
@@ -70,12 +72,14 @@ HOOK_ACTIVATE_ARGV = ["install"]
 PIXI_LOCK = "pixi.lock"
 
 #: The PR-body renderer apply calls at the boundary moment (``MODE_PR`` only):
-#: ``(override_before, hooks_activated, stamped_pin, lint_debt) -> body``.
-#: Injected by the verb so the body's sections stay a pure renderer concern
-#: (ADR-0030) while apply supplies the inputs only it can know — the pre-write
-#: consumer snapshots, the real activation outcome, the pin it stamped, and the
-#: best-effort whole-tree debt count (``None`` when unreadable).
-PrBody = Callable[[Mapping[str, str], "bool | None", str, "int | None"], str]
+#: ``(override_before, hooks_activated, rerendered, stamped_pin, lint_debt) ->
+#: body``. Injected by the verb so the body's sections stay a pure renderer
+#: concern (ADR-0030) while apply supplies the inputs only it can know — the
+#: pre-write consumer snapshots, the real activation outcome, whether the
+#: changelog re-render ACTUALLY ran (never just what the plan decided — the
+#: gather→apply window can skip it), the pin it stamped, and the best-effort
+#: whole-tree debt count (``None`` when unreadable).
+PrBody = Callable[[Mapping[str, str], "bool | None", bool, str, "int | None"], str]
 
 
 @dataclass(frozen=True)
@@ -123,6 +127,36 @@ def write_unit(root: Path, unit: Unit) -> None:
     dest.write_bytes(unit.content)
     if unit.executable:
         dest.chmod(0o755)
+
+
+def _rerender_changelog(root: Path) -> bool:
+    """Regenerate ``CHANGELOG.md`` from ``CHANGELOG/`` with the CURRENT renderer
+    — the write half of the plan's re-render decision (TOL01-WS08 #578).
+
+    Recomputed at the write, like the policy seed re-reads the config text: the
+    render over what NOW holds is always the current one, so a fragment that
+    changed in the gather→apply window still lands rendered, never half-stale.
+    Skipped (idempotence, the retired-unlink stance) when the fragment tree
+    vanished in that window — :func:`shipit.verbs.changelog.render_current`
+    returns ``None`` and the goal state "nothing to render" already holds.
+    Imported at call time for the same ``_errors``-shell cycle the selfcert
+    lint import breaks lazily.
+
+    Returns ``True`` when it wrote the file, ``False`` when it skipped — the
+    caller drops the now-phantom ``CHANGELOG.md`` from the commit set on a skip
+    so a committing mode's ``git add`` never chokes on it.
+    """
+    from ..verbs.changelog import render_current
+
+    rendered = render_current(root)
+    if rendered is None:
+        return False
+    (root / CHANGELOG_FILE).write_text(rendered, encoding="utf-8")
+    logger.info(
+        "changelog re-rendered with the current renderer",
+        extra={"root": str(root), "path": CHANGELOG_FILE},
+    )
+    return True
 
 
 def _activate_hooks(root: Path) -> execrun.ExecResult:
@@ -294,8 +328,11 @@ def apply(
 ) -> InstallResult:
     """Execute ``plan`` against its consumer root — the only effectful path.
 
-    Writes every decided unit, unlinks every decided retired DELETE (the
-    decision already proved the content is a known pristine version, so the
+    Writes every decided unit, regenerates a stale ``CHANGELOG.md`` from
+    ``CHANGELOG/`` with the current renderer when the plan decided the
+    re-render (#578, :func:`_rerender_changelog`), unlinks every decided
+    retired DELETE (the decision already proved the content is a known
+    pristine version, so the
     unlink is the whole IO; KEEPs touch nothing), seeds the consumer-owned
     policy, re-stamps the manifest from the CURRENT decisions only (so a unit
     retired in a later shipit version drops out rather than lingering as a
@@ -367,6 +404,7 @@ def apply(
 
     for d in plan.writes:
         write_unit(root, d.unit)
+    rerendered = plan.rerender_changelog and _rerender_changelog(root)
     for d in plan.retire_deletes:
         # missing_ok: the decision proved a pristine copy existed at gather
         # time; if it vanished in the gather→apply window the goal state
@@ -376,7 +414,11 @@ def apply(
     # Seed the consumer-owned policy BEFORE the manifest write, which preserves
     # `[secrets]`/`[reviewers]` textually while it re-stamps `[shipit]`/`[managed]`.
     if plan.seeds:
-        config.apply_policy_seed(cfg_path)
+        # Re-derive the [toolchains] entries at the write (#578) — the same
+        # derivation gather planned with, recomputed the way the whole seed
+        # pass re-reads the config text (idempotent either way: an entry that
+        # appeared in the gather→apply window just seeds what NOW holds).
+        config.apply_policy_seed(cfg_path, toolchains=config.derive_toolchains(root))
     new_managed = {d.unit.key: d.desired_hash for d in plan.decisions}
     stamped_version = _shipit_version()
     config.write_manifest(cfg_path, version=stamped_version, managed=new_managed)
@@ -472,6 +514,14 @@ def apply(
         result = replace(result, lint_debt=debt_reader(root))
 
     changed_paths = list(plan.changed_paths)
+    # The re-render can be skipped in the gather→apply window (CHANGELOG/ gone
+    # or turned unrenderable → render_current is None, the retired-unlink
+    # idempotence stance, #578). Complete the skip: drop the now-phantom
+    # CHANGELOG.md from the commit set so a committing mode's `git add -f` never
+    # crashes with an opaque pathspec error on a file that was never (re)written
+    # and is absent+untracked (#578 review).
+    if plan.rerender_changelog and not rerendered:
+        changed_paths = [p for p in changed_paths if p != CHANGELOG_FILE]
     # The committed-lockfile decision (#439, see PIXI_LOCK): the lint-env solve
     # above materializes/refreshes pixi.lock; stage it with the managed set so
     # the install lands laptop/CI parity and never leaves the tree dirty.
@@ -540,7 +590,11 @@ def apply(
             head=INSTALL_BRANCH,
             title="shipit: install/update the managed set",
             body=pr_body(
-                override_before, hooks_activated, stamped_version, result.lint_debt
+                override_before,
+                hooks_activated,
+                rerendered,
+                stamped_version,
+                result.lint_debt,
             ),
             draft=True,
             cwd=cwd,

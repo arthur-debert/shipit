@@ -34,7 +34,9 @@ PIXI_CACHE_VARS = frozenset({"PIXI_CACHE_DIR", "RATTLER_CACHE_DIR"})
 #: entry. They MUST be scrubbed for the same reason as the ``PIXI_*`` pointers: a leaked
 #: ``CONDA_PREFIX`` / ``CONDA_DEFAULT_ENV`` keeps a child bound to the PARENT env's
 #: activation, so ``python`` / tooling resolve there instead of the child's own Tree. The
-#: stacked ``CONDA_PREFIX_<n>`` an activation *stack* leaves behind is caught by prefix in
+#: stacked ``CONDA_PREFIX_<n>`` an activation *stack* leaves behind — and pixi's
+#: per-level restore keys ``CONDA_ENV_SHLVL_<n>_<VAR>`` (the previous value of every
+#: var an activation set, kept for deactivate) — are caught by prefix in
 #: :func:`is_leaked_env_var`. **Installation-level** vars (``CONDA_EXE``,
 #: ``CONDA_PYTHON_EXE``, ``CONDA_ROOT``, ``_CE_*``) are user-/install-level, NOT project
 #: pointers, so they are KEPT — dropping them wholesale could change subprocess behavior
@@ -71,10 +73,12 @@ def is_leaked_env_var(key: str) -> bool:
 
     - ``PIXI_*`` project pointers (all ``PIXI_*`` except the user-level cache vars in
       :data:`PIXI_CACHE_VARS`).
-    - Conda **activation** vars (:data:`CONDA_ACTIVATION_VARS` and the stacked
-      ``CONDA_PREFIX_<n>``) — SCOPED to activation-binding vars only; installation-level
-      ``CONDA_*`` (``CONDA_EXE`` / ``CONDA_PYTHON_EXE`` / ``CONDA_ROOT`` / ``_CE_*``) is
-      KEPT, since scrubbing all ``CONDA_*`` could break ``pixi run`` in a Conda shell.
+    - Conda **activation** vars (:data:`CONDA_ACTIVATION_VARS`, the stacked
+      ``CONDA_PREFIX_<n>``, and pixi's activation-stack restore keys
+      ``CONDA_ENV_SHLVL_<n>_<VAR>``) — SCOPED to activation-binding vars only;
+      installation-level ``CONDA_*`` (``CONDA_EXE`` / ``CONDA_PYTHON_EXE`` /
+      ``CONDA_ROOT`` / ``_CE_*``) is KEPT, since scrubbing all ``CONDA_*`` could
+      break ``pixi run`` in a Conda shell.
     - ADR-0015 **build-env** vars (:data:`BUILD_ENV_VARS`) that pixi ``[activation.env]``
       re-sets PER-TREE — SCOPED to the three per-Tree-path keys; install-/backend-level
       ``RUSTC_WRAPPER`` and ``SCCACHE_*`` cache/credential vars are KEPT (dropping them
@@ -87,6 +91,21 @@ def is_leaked_env_var(key: str) -> bool:
     if key.startswith("PIXI_"):
         return key not in PIXI_CACHE_VARS
     if key in CONDA_ACTIVATION_VARS or key.startswith("CONDA_PREFIX_"):
+        return True
+    if key.startswith("CONDA_ENV_SHLVL_"):
+        # pixi's activation-stack RESTORE keys (``CONDA_ENV_SHLVL_<n>_<VAR>``):
+        # each nested activation backs the previous value of every var it sets
+        # under one of these, to restore on deactivate. They encode the PARENT's
+        # activation stack — the same leak class as the stacked
+        # ``CONDA_PREFIX_<n>`` above — and leaking them is WORSE than leaking the
+        # live pointers: with ``CONDA_SHLVL`` scrubbed but the level-<n> backups
+        # kept, a child inherits a half-scrubbed stack, and pixi's own nested
+        # activation (``pixi shell-hook`` inside a ``pixi run``) mis-diffs
+        # against it and OMITS ``[activation.env]`` vars it should set (found by
+        # the fleet sweep's shipit self-row: the swept Tree's shell-hook smoke
+        # test lost ``CARGO_TARGET_DIR``). Scrub the whole family so the child's
+        # activation state is consistent: either a clean slate or a coherent
+        # stack, never backups without their counter.
         return True
     if key in BUILD_ENV_VARS:
         return True

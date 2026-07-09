@@ -504,8 +504,13 @@ def test_healthy_install_certifies_then_opens_the_pr(tmp_path, rec):
     result = iapply.apply(
         _plan(tmp_path),
         iapply.MODE_PR,
-        pr_body=lambda before, hooks, pin, debt: verb.format_pr_body(
-            _plan(tmp_path), before, hooks, stamped_version=pin, lint_debt=debt
+        pr_body=lambda before, hooks, rerendered, pin, debt: verb.format_pr_body(
+            _plan(tmp_path),
+            before,
+            hooks,
+            rerendered=rerendered,
+            stamped_version=pin,
+            lint_debt=debt,
         ),
         certify=ok_cert,
         debt=lambda root, **kw: 0,
@@ -524,8 +529,13 @@ def test_debt_laden_consumer_still_installs_with_debt_reported(tmp_path, rec):
     result = iapply.apply(
         _plan(tmp_path),
         iapply.MODE_PR,
-        pr_body=lambda before, hooks, pin, debt: verb.format_pr_body(
-            _plan(tmp_path), before, hooks, stamped_version=pin, lint_debt=debt
+        pr_body=lambda before, hooks, rerendered, pin, debt: verb.format_pr_body(
+            _plan(tmp_path),
+            before,
+            hooks,
+            rerendered=rerendered,
+            stamped_version=pin,
+            lint_debt=debt,
         ),
         certify=lambda *a, **kw: selfcert.CertReport(
             checks=(selfcert.CertCheck("stub", True),)

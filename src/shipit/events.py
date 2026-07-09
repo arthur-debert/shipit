@@ -113,6 +113,14 @@ EVENT_NAMES = frozenset(
         # the ready flip and its undo
         "pr.ready",
         "pr.unready",
+        # the fleet verification sweep (TOL01-WS07): one run's lifecycle —
+        # started at entry, one repo.done per portfolio repo (its red-cell
+        # count and adoption-ready verdict ride the record), completed with
+        # the fleet totals — the durable flow-log trail behind the committed
+        # matrix report artifact.
+        "sweep.started",
+        "sweep.repo.done",
+        "sweep.completed",
         # the planning cycle (skill-scripted tier)
         "planning.grill.started",
         "planning.adr.written",

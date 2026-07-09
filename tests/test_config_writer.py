@@ -360,3 +360,102 @@ def test_seed_refuses_secrets_without_literal_header(tmp_path, body):
     with pytest.raises(config.ConfigError):
         config.plan_policy_seed(p)
     assert p.read_text() == body  # untouched
+
+
+# --------------------------------------------------------------------------
+# The [toolchains] seed (TOL01-WS08 #578) — manifest-derived, seed-when-absent
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("manifest", "toolchain"),
+    [
+        ("Cargo.toml", "rust"),
+        ("go.mod", "go"),
+        ("pyproject.toml", "python"),
+        ("package.json", "npm"),
+    ],
+)
+def test_derive_toolchains_maps_each_root_manifest(tmp_path, manifest, toolchain):
+    (tmp_path / manifest).write_text("x = 1\n")
+    assert config.derive_toolchains(tmp_path) == ((".", toolchain),)
+
+
+def test_derive_toolchains_empty_when_no_manifest_signals(tmp_path):
+    # No recognized root manifest → nothing to seed; the Tool verbs keep their
+    # pointed missing-map refusal (ADR-0007 — never a dispatch fallback).
+    assert config.derive_toolchains(tmp_path) == ()
+
+
+def test_derive_toolchains_first_signal_wins_for_the_root(tmp_path):
+    # "." maps to ONE toolchain, so precedence is SIGNAL_MANIFESTS order —
+    # the same order the verbs' missing-map error picks its example from.
+    (tmp_path / "Cargo.toml").write_text("[package]\n")
+    (tmp_path / "package.json").write_text("{}\n")
+    assert config.derive_toolchains(tmp_path) == ((".", "rust"),)
+
+
+def test_signal_toolchains_are_registry_names():
+    # Every toolchain SIGNAL_MANIFESTS can seed must be a name the closed
+    # registry knows — a seeded map must parse through load_toolchains, never
+    # plant a config the Tool verbs immediately refuse.
+    from shipit.tools import registry
+
+    assert {tc for _, tc in config.SIGNAL_MANIFESTS} <= set(registry.names())
+
+
+def test_plan_policy_seed_with_toolchains_lists_the_map(tmp_path):
+    p = tmp_path / ".shipit.toml"
+    seeded = config.plan_policy_seed(p, toolchains=((".", "python"),))
+    assert "[toolchains]" in seeded
+    assert not p.exists()  # plan is pure
+
+
+def test_apply_policy_seed_seeds_a_parseable_toolchains_map(tmp_path):
+    p = tmp_path / ".shipit.toml"
+    seeded = config.apply_policy_seed(p, toolchains=((".", "python"),))
+    assert "[toolchains]" in seeded
+    entries = config.load_toolchains(config.load(p))
+    assert [(e.path, e.toolchain) for e in entries] == [(".", "python")]
+    # Idempotent: the map is in place, so a re-run seeds nothing more.
+    assert config.plan_policy_seed(p, toolchains=((".", "python"),)) == []
+
+
+def test_seed_without_toolchain_entries_seeds_no_map(tmp_path):
+    # The default (no derived entries) — the pre-#578 behavior, byte-for-byte:
+    # no [toolchains] table appears.
+    p = tmp_path / ".shipit.toml"
+    config.apply_policy_seed(p)
+    assert "toolchains" not in tomllib.loads(p.read_text())
+
+
+def test_apply_policy_seed_never_clobbers_a_consumer_toolchains_map(tmp_path):
+    # Seed-when-absent (the [lint] precedent): a consumer-edited map — even one
+    # disagreeing with what the manifests would derive — is never overwritten.
+    p = tmp_path / ".shipit.toml"
+    p.write_text('[toolchains]\n"." = "go"\n')
+    seeded = config.apply_policy_seed(p, toolchains=((".", "rust"),))
+    assert "[toolchains]" not in seeded
+    entries = config.load_toolchains(config.load(p))
+    assert [(e.path, e.toolchain) for e in entries] == [(".", "go")]
+
+
+def test_apply_policy_seed_respects_an_empty_toolchains_table(tmp_path):
+    # An EMPTY [toolchains] table is still a consumer edit (an explicit
+    # declaration), not an absence — nothing is merged into it.
+    p = tmp_path / ".shipit.toml"
+    p.write_text("[toolchains]\n")
+    config.apply_policy_seed(p, toolchains=((".", "rust"),))
+    assert tomllib.loads(p.read_text())["toolchains"] == {}
+
+
+def test_seed_refuses_scalar_toolchains(tmp_path):
+    # A scalar `toolchains` can't be re-headed without redefining the key into
+    # invalid TOML — refuse, don't corrupt (the secrets/reviewers stance).
+    p = tmp_path / ".shipit.toml"
+    p.write_text('toolchains = "rust"\n')
+    with pytest.raises(config.ConfigError):
+        config.plan_policy_seed(p, toolchains=((".", "rust"),))
+    with pytest.raises(config.ConfigError):
+        config.apply_policy_seed(p, toolchains=((".", "rust"),))
+    assert p.read_text() == 'toolchains = "rust"\n'  # untouched

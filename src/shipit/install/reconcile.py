@@ -48,6 +48,16 @@ ambiguity: a managed default-env task (``test``) also defined by a consumer
 so the block is skipped and the consumer's own task stays authoritative
 (:class:`PixiTaskConflict`).
 
+Install also decides a CHANGELOG RE-RENDER (TOL01-WS08 #578): where the
+consumer has adopted the fragment convention (``CHANGELOG/``), a renderer
+change in shipit (a new generated-file header, section fixes) leaves the
+committed ``CHANGELOG.md`` stale against ``shipit changelog check`` fleet-wide,
+and the reconcile PR is the sanctioned channel that refreshes it (ADR-0033) —
+gather compares the CURRENT renderer's output against the committed file and
+the Plan carries the re-render decision (:attr:`Plan.rerender_changelog`);
+:mod:`shipit.install.apply` writes the refreshed render. A repo without the
+convention has nothing to re-render and is never refused.
+
 The seam (ADR-0030): :func:`gather` is the ONE filesystem read boundary
 (consumer hashes, the stored pristine map, the policy-seed plan — a frozen
 :class:`ConsumerState`); :func:`detect_toolchains` is its small signal-scoped
@@ -69,6 +79,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 import yaml
 
 from .. import config, git
+from ..changelog import CHANGELOG_FILE, sync_diff
 from .errors import InstallError
 from .splice import extract_block, extract_settings_hook
 from .units import (
@@ -667,6 +678,54 @@ def _pixi_task_conflicts(
     return tuple(conflicts)
 
 
+def _changelog_stale(root: Path) -> bool:
+    """Whether the consumer's committed ``CHANGELOG.md`` no longer matches the
+    CURRENT renderer's output over ``CHANGELOG/`` — gather's changelog read
+    (TOL01-WS08 #578).
+
+    A renderer change (WS06's generated-file header, the duplicate-section
+    fixes) strands every consumer's committed projection: ``shipit changelog
+    check`` fails fleet-wide, and hand-patching per repo is exactly what the
+    reconcile channel exists to replace (ADR-0033). ``True`` only where the
+    fragment convention EXISTS and the render differs — a repo without
+    ``CHANGELOG/`` (or with unrenderable version filenames) is not stale, it
+    just has nothing to re-render (:func:`shipit.verbs.changelog.render_current`
+    returns ``None`` there). Imported at call time: the verb module wears the
+    ``_errors`` CLI shell, whose import chain leads back into this package (the
+    same cycle the selfcert lint import breaks lazily).
+
+    Fails OPEN on an unreadable projection, like :func:`_read_lefthook_local`
+    and the manifest reads: :func:`gather` runs this advisory read
+    unconditionally, so an ``OSError`` (a permission denial, a mid-read unlink)
+    or a non-UTF-8 file anywhere in the changelog inspection — the committed
+    ``CHANGELOG.md`` OR a ``CHANGELOG/`` fragment ``render_current`` reads —
+    degrades to "not stale" with a logged warning rather than crashing ``shipit
+    install`` on files it only inspects. The catch lives at THIS advisory
+    boundary, not in ``render_current``, so the ``changelog`` verb (for which
+    the render is the primary operation, not an aside) still fails loud.
+    """
+    from ..verbs.changelog import render_current
+
+    try:
+        rendered = render_current(root)
+        if rendered is None:
+            return False
+        committed_path = root / CHANGELOG_FILE
+        committed = (
+            committed_path.read_text(encoding="utf-8")
+            if committed_path.is_file()
+            else None
+        )
+    except (OSError, UnicodeDecodeError):
+        logger.warning(
+            "ignoring unreadable CHANGELOG projection — treating as not stale",
+            exc_info=True,
+            extra={"root": str(root)},
+        )
+        return False
+    return sync_diff(rendered, committed) is not None
+
+
 def consumer_inner(root: Path, unit: Unit) -> str | None:
     """A block unit's current inner text in the consumer, or ``None``."""
     dest = root / unit.dest
@@ -735,6 +794,11 @@ class ConsumerState:
     # block task also defined by a consumer [feature.*.tasks] table — read
     # here for the same purity reason.
     pixi_task_conflicts: tuple[PixiTaskConflict, ...] = ()
+    # The committed CHANGELOG.md no longer matches the CURRENT renderer's
+    # output over CHANGELOG/ (#578) — read here (the ONE read boundary) so the
+    # reconcile's re-render decision stays pure over this state. Always False
+    # where the fragment convention is absent or unrenderable.
+    changelog_stale: bool = False
 
 
 def gather(
@@ -744,13 +808,15 @@ def gather(
 
     Filesystem reads only, no git/gh: per-unit content hashes, the stored
     pristine map and the seed-if-absent policy plan from ``.shipit.toml``
-    (consumer-owned policy — the App ``[secrets]`` mappings + the ``[reviewers]``
-    set — is planned alongside the manifest but never under the pristine-hash
-    reconciliation; architecture.lex §6, issue #25), each retired path's
+    (consumer-owned policy — the App ``[secrets]`` mappings, the ``[reviewers]``
+    set, the ``[lint]`` ignore globs, and the manifest-derived ``[toolchains]``
+    map (#578) — is planned alongside the manifest but never under the
+    pristine-hash reconciliation; architecture.lex §6, issue #25), each retired path's
     actual hash, the consumer's committed lefthook-local config (#544, the
-    merge-conflict tripwire's input), and the pixi manifest's first-splice
+    merge-conflict tripwire's input), the pixi manifest's first-splice
     key clashes (:func:`_pixi_key_conflicts`) and task-ambiguity clashes
-    (:func:`_pixi_task_conflicts`).
+    (:func:`_pixi_task_conflicts`), and whether the committed ``CHANGELOG.md``
+    is stale against the current renderer (:func:`_changelog_stale`, #578).
     """
     root = root.resolve()
     if not root.is_dir():
@@ -766,7 +832,13 @@ def gather(
             cfg = config.load(cfg_path)
             pristine = config.load_managed(cfg)
             current_pin = config.shipit_version(cfg)  # RAW — compared, not validated
-        seeds = config.plan_policy_seed(cfg_path)
+        # The [toolchains] seed entries derive from the consumer's root
+        # manifests (#578) — the same signal table the Tool verbs' missing-map
+        # error suggests (`config.SIGNAL_MANIFESTS`), so seed and suggestion
+        # can never disagree. Seed-when-absent like every policy table.
+        seeds = config.plan_policy_seed(
+            cfg_path, toolchains=config.derive_toolchains(root)
+        )
     except config.ConfigError as exc:
         # Degraded-but-continuing: the reconcile proceeds against an empty
         # pristine map, so consumer edits will surface as OVERRIDEs.
@@ -793,6 +865,7 @@ def gather(
         lefthook_local=lefthook_local,
         pixi_key_conflicts=_pixi_key_conflicts(root, units, consumer_hashes),
         pixi_task_conflicts=_pixi_task_conflicts(root, units, consumer_hashes),
+        changelog_stale=_changelog_stale(root),
     )
 
 
@@ -892,6 +965,13 @@ class Plan:
     # `pixi run <task>` refuse the name — excluded the same way, every surface
     # warns off this record.
     pixi_task_conflicts: tuple[PixiTaskConflict, ...] = ()
+    # This plan regenerates CHANGELOG.md from CHANGELOG/ with the CURRENT
+    # renderer (#578): the committed projection went stale against a renderer
+    # change, and the reconcile PR is the sanctioned channel that refreshes it
+    # (ADR-0033). A work axis of its own, like the pin bump — it can be the
+    # ONLY change and must still make the plan actionable. The fragments stay
+    # authoritative; the rendered file is a projection, never a managed unit.
+    rerender_changelog: bool = False
 
     @property
     def writes(self) -> tuple[Decision, ...]:
@@ -926,7 +1006,8 @@ class Plan:
 
     @property
     def nothing_to_do(self) -> bool:
-        """No writes, no seeds, no retired delete, no pin bump — a clean no-op.
+        """No writes, no seeds, no retired delete, no pin bump, no changelog
+        re-render — a clean no-op.
 
         A seed-only change (managed set current, policy missing) still counts
         as a write, so a re-install picks up policy a consumer never had — but
@@ -934,14 +1015,17 @@ class Plan:
         likewise keeps the run a write, so cleanup lands even when the managed
         set is current. A stale pin (:attr:`pin_stale`) is a work axis of its
         own: a code-only shipit change touches no managed file yet must roll the
-        pin forward. A KEPT retired file does not: there is nothing shipit will
-        change on its own.
+        pin forward. So is a stale changelog projection
+        (:attr:`rerender_changelog`, #578): a renderer change touches no managed
+        file yet must refresh the consumer's committed render. A KEPT retired
+        file does not: there is nothing shipit will change on its own.
         """
         return (
             not self.writes
             and not self.seeds
             and not self.retire_deletes
             and not self.pin_stale
+            and not self.rerender_changelog
         )
 
     @property
@@ -954,13 +1038,16 @@ class Plan:
         """Every path a writing apply touches — the commit set, manifest included.
 
         Deleted retired paths join it: ``git add`` on a removed path stages the
-        deletion, so every commit mode carries the cleanup.
+        deletion, so every commit mode carries the cleanup. So does the
+        re-rendered ``CHANGELOG.md`` (#578), so the reconcile PR carries the
+        refreshed render.
         """
         return tuple(
             sorted(
                 {d.unit.dest for d in self.writes}
                 | {config.CONFIG_NAME}
                 | {d.retired.path for d in self.retire_deletes}
+                | ({CHANGELOG_FILE} if self.rerender_changelog else set())
             )
         )
 
@@ -1009,6 +1096,7 @@ def reconcile(
         lefthook_conflicts=_plan_lefthook_conflicts(units, state),
         pixi_key_conflicts=state.pixi_key_conflicts,
         pixi_task_conflicts=state.pixi_task_conflicts,
+        rerender_changelog=state.changelog_stale,
     )
     logger.debug(
         "reconcile plan decided",
@@ -1023,6 +1111,7 @@ def reconcile(
             "retire_deletes": len(result.retire_deletes),
             "retire_keeps": len(result.retire_keeps),
             "pin_stale": result.pin_stale,
+            "rerender_changelog": result.rerender_changelog,
         },
     )
     for d in result.retire_keeps:

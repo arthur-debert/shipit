@@ -29,6 +29,7 @@ from .. import execrun
 from ..changelog import ChangelogError
 from ..config import ConfigError
 from ..events import EventNotRecordedError, UnknownEventError
+from ..fleetsweep import SweepError
 from ..install.errors import InstallError
 from ..provision.lexd import ProvisionError
 from ..prstate.errors import PrStateError
@@ -50,7 +51,9 @@ from ._context import NoAmbientRepoError
 #: validation — CLI02-WS05), the tool-provisioning refusal (unsupported
 #: platform, checksum mismatch, malformed release — ADP00-WS03), and the
 #: changelog refusals (empty release, invalid version, unsyncable tree —
-#: TOL01-WS06). Extended
+#: TOL01-WS06), and the fleet sweep's refusals (a missing source checkout, an
+#: unresolvable candidate build, a selector outside the declared portfolio —
+#: TOL01-WS07). Extended
 #: deliberately, one entry per new domain refusal, as verbs adopt the shell.
 KNOWN_ERRORS: tuple[type[Exception], ...] = (
     execrun.ExecError,
@@ -67,6 +70,7 @@ KNOWN_ERRORS: tuple[type[Exception], ...] = (
     UnknownEventError,
     EventNotRecordedError,
     ProvisionError,
+    SweepError,
 )
 
 

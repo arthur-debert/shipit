@@ -14,6 +14,7 @@ The layout mirrors the promoted seam (ADR-0030):
 """
 
 import json
+import logging
 import os
 import shutil
 import stat
@@ -70,8 +71,13 @@ def _apply(root, mode: str = iapply.MODE_TREE, **kw) -> iapply.InstallResult:
     return iapply.apply(
         plan,
         mode,
-        pr_body=lambda before, hooks, pin, debt: verb.format_pr_body(
-            plan, before, hooks, stamped_version=pin, lint_debt=debt
+        pr_body=lambda before, hooks, rerendered, pin, debt: verb.format_pr_body(
+            plan,
+            before,
+            hooks,
+            rerendered=rerendered,
+            stamped_version=pin,
+            lint_debt=debt,
         ),
         **kw,
     )
@@ -3469,3 +3475,199 @@ def test_selfcert_failure_event_names_the_selfcert_step(
     assert len(failed) == 1
     assert failed[0].step == "self-certification"
     assert rec.names() == []  # fail closed: no branch, no commit, no PR
+
+
+# --------------------------------------------------------------------------
+# TOL01-WS08 (#578): the [toolchains] seed + the changelog re-render — the two
+# reconcile-channel fixes for the round-0 fleet sweep's red cells (ADR-0033:
+# consumer drift is fixed through `shipit install`, never hand-patched).
+# --------------------------------------------------------------------------
+
+
+def test_install_seeds_toolchains_from_the_root_manifest(tmp_path, monkeypatch):
+    # Class A: `shipit test`/`build` refuse without the [toolchains] map
+    # (ADR-0007/0039) and install never seeded it. A consumer whose root
+    # manifest signals a toolchain now gets the derived map seeded — and the
+    # seeded config parses straight through the verbs' own loader.
+    monkeypatch.setattr(iapply, "_activate_hooks", lambda root: _exec_result(0))
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "acme"\n')
+    plan = _plan(tmp_path)
+    assert "[toolchains]" in plan.seeds
+    _apply(tmp_path)  # MODE_TREE: working-tree refresh
+    entries = config.load_toolchains(config.load(tmp_path / ".shipit.toml"))
+    assert [(e.path, e.toolchain) for e in entries] == [(".", "python")]
+    # And it settles: the map is in place, so the re-plan is a clean no-op.
+    assert _plan(tmp_path).nothing_to_do
+
+
+def test_install_never_clobbers_a_consumer_toolchains_map(tmp_path, monkeypatch):
+    # Seed-when-absent (the [lint] precedent): a consumer-edited map wins over
+    # the manifest derivation, forever.
+    monkeypatch.setattr(iapply, "_activate_hooks", lambda root: _exec_result(0))
+    (tmp_path / "Cargo.toml").write_text("[package]\n")
+    (tmp_path / ".shipit.toml").write_text('[toolchains]\n"." = "go"\n')
+    plan = _plan(tmp_path)
+    assert "[toolchains]" not in plan.seeds
+    _apply(tmp_path)
+    entries = config.load_toolchains(config.load(tmp_path / ".shipit.toml"))
+    assert [(e.path, e.toolchain) for e in entries] == [(".", "go")]
+
+
+def test_install_seeds_no_toolchains_without_a_manifest_signal(tmp_path):
+    # No recognized root manifest → no seed; the Tool verbs keep their pointed
+    # missing-map refusal (never a silent dispatch fallback, ADR-0007).
+    plan = _plan(tmp_path)
+    assert "[toolchains]" not in plan.seeds
+
+
+def _changelog_consumer(root: Path) -> None:
+    """A consumer that adopted the fragment convention (one fragment)."""
+    (root / "CHANGELOG").mkdir()
+    (root / "CHANGELOG" / "unreleased-first.md").write_text("- Added the thing\n")
+
+
+def test_stale_changelog_projection_is_reconcile_work(tmp_path, monkeypatch):
+    # Class B: a renderer change strands every consumer's committed render
+    # (`shipit changelog check` fails fleet-wide). The reconcile detects the
+    # stale projection, treats it as a work axis of its own, and the apply
+    # regenerates CHANGELOG.md with the CURRENT renderer.
+    from shipit import changelog as chlog
+    from shipit.verbs.changelog import render_current
+
+    monkeypatch.setattr(iapply, "_activate_hooks", lambda root: _exec_result(0))
+    _changelog_consumer(tmp_path)
+    (tmp_path / "CHANGELOG.md").write_text("# an old renderer's output\n")
+    plan = _plan(tmp_path)
+    assert plan.rerender_changelog
+    assert not plan.nothing_to_do
+    assert chlog.CHANGELOG_FILE in plan.changed_paths
+    assert "render" in verb.format_plan(plan)
+
+    _apply(tmp_path)  # MODE_TREE
+    committed = (tmp_path / chlog.CHANGELOG_FILE).read_text()
+    assert committed.startswith(chlog.RENDER_PREAMBLE)
+    # The check's own verdict: the projection now matches a re-render.
+    assert chlog.sync_diff(render_current(tmp_path), committed) is None
+    # And it settles: nothing left to re-render, the re-plan is a no-op.
+    replan = _plan(tmp_path)
+    assert not replan.rerender_changelog
+    assert replan.nothing_to_do
+
+
+def test_missing_projection_with_fragments_is_also_stale(tmp_path):
+    # The convention exists but CHANGELOG.md was never rendered/committed:
+    # the reconcile carries the first render too (same axis, same fix).
+    _changelog_consumer(tmp_path)
+    assert _plan(tmp_path).rerender_changelog
+
+
+def test_matching_changelog_projection_is_not_work(tmp_path):
+    # A projection that already matches the current renderer plans no render.
+    from shipit.verbs.changelog import render_current
+
+    _changelog_consumer(tmp_path)
+    (tmp_path / "CHANGELOG.md").write_text(render_current(tmp_path))
+    assert not _plan(tmp_path).rerender_changelog
+
+
+def test_unreadable_changelog_projection_fails_open_not_stale(tmp_path, caplog):
+    # gather() runs this advisory read unconditionally, so an unreadable
+    # committed CHANGELOG.md (here a non-UTF-8 file → UnicodeDecodeError, which
+    # crashes inside render_current's own read; an OSError degrades the same
+    # way) must fail OPEN to "not stale" with a warning, never crash `shipit
+    # install` on a file it only inspects.
+    _changelog_consumer(tmp_path)
+    (tmp_path / "CHANGELOG.md").write_bytes(b"\xff\xfe not valid utf-8\n")
+    with caplog.at_level(logging.WARNING):
+        assert irec._changelog_stale(tmp_path) is False
+        # And the whole gather → reconcile pipeline stays upright, not stale.
+        assert not _plan(tmp_path).rerender_changelog
+    assert any("unreadable CHANGELOG projection" in r.message for r in caplog.records)
+
+
+def test_repo_without_the_fragment_convention_never_rerenders(tmp_path):
+    # No CHANGELOG/ directory: nothing to re-render, never a refusal — the
+    # `check` verb's hard error must not leak into the reconcile path.
+    plan = _plan(tmp_path)
+    assert not plan.rerender_changelog
+    assert "CHANGELOG.md" not in plan.changed_paths
+
+
+def test_unrenderable_changelog_dir_plans_no_render(tmp_path):
+    # Unparseable version filenames: a render would silently drop the
+    # mis-named section, so the reconcile declines (fail-open, #578) — the
+    # consumer hears about the bad name from `shipit changelog check`.
+    _changelog_consumer(tmp_path)
+    (tmp_path / "CHANGELOG" / "not-semver.md").write_text("bad\n")
+    (tmp_path / "CHANGELOG.md").write_text("stale\n")
+    assert not _plan(tmp_path).rerender_changelog
+
+
+def test_pr_body_carries_the_changelog_rerender_section(tmp_path, rec):
+    # The reconcile PR explains the refreshed render (and the commit set
+    # carries the file), so the merger knows why CHANGELOG.md changed.
+    _changelog_consumer(tmp_path)
+    (tmp_path / "CHANGELOG.md").write_text("# an old renderer's output\n")
+    result = _apply(tmp_path, iapply.MODE_PR)
+    assert "Changelog re-rendered" in rec.pr_body
+    assert "CHANGELOG.md" in result.plan.changed_paths
+
+
+def test_rerender_skipped_in_the_window_drops_the_phantom_changelog_path(tmp_path, rec):
+    # The gather→apply race: the plan decides a re-render (fragments present, no
+    # committed CHANGELOG.md), but CHANGELOG/ vanishes before apply runs, so
+    # render_current → None and _rerender_changelog skips the write (the
+    # retired-unlink idempotence stance). The now-phantom CHANGELOG.md must NOT
+    # reach `git add` — otherwise a committing mode crashes with an opaque
+    # pathspec error on a file that is absent AND untracked (#578 review).
+    from shipit import changelog as chlog
+
+    _changelog_consumer(tmp_path)
+    plan = _plan(tmp_path)  # planned while the fragment tree still exists
+    assert plan.rerender_changelog
+    assert chlog.CHANGELOG_FILE in plan.changed_paths
+
+    # The window: the fragment tree disappears between gather and apply.
+    (tmp_path / "CHANGELOG" / "unreleased-first.md").unlink()
+    (tmp_path / "CHANGELOG").rmdir()
+
+    iapply.apply(plan, iapply.MODE_LOCAL)  # no pathspec crash
+
+    # The skip landed no file, and the phantom path was dropped from the commit
+    # set — the idempotent skip is complete, not half-done.
+    assert not (tmp_path / chlog.CHANGELOG_FILE).exists()
+    assert chlog.CHANGELOG_FILE not in rec.commit_paths
+    add_paths = next(paths for name, paths in rec.calls if name == "add")
+    assert chlog.CHANGELOG_FILE not in add_paths
+
+
+def test_rerender_skipped_in_the_window_omits_the_pr_body_section(tmp_path, rec):
+    # The MODE_PR twin of the drop: when the re-render is skipped in the window,
+    # the PR body must NOT claim "Changelog re-rendered" — the body reflects
+    # what apply ACTUALLY did (the hooks_activated discipline), never the plan's
+    # decision, so it can never claim a re-render whose file was never committed
+    # (#578 review).
+    from shipit import changelog as chlog
+
+    _changelog_consumer(tmp_path)
+    plan = _plan(tmp_path)
+    assert plan.rerender_changelog
+
+    (tmp_path / "CHANGELOG" / "unreleased-first.md").unlink()
+    (tmp_path / "CHANGELOG").rmdir()
+
+    iapply.apply(
+        plan,
+        iapply.MODE_PR,
+        pr_body=lambda before, hooks, rerendered, pin, debt: verb.format_pr_body(
+            plan,
+            before,
+            hooks,
+            rerendered=rerendered,
+            stamped_version=pin,
+            lint_debt=debt,
+        ),
+    )
+
+    assert "Changelog re-rendered" not in rec.pr_body
+    assert chlog.CHANGELOG_FILE not in rec.commit_paths

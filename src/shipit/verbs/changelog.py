@@ -155,6 +155,27 @@ def _read_tree(root: Path) -> ChangelogTree:
     )
 
 
+def render_current(root: Path) -> str | None:
+    """The CURRENT renderer's ``CHANGELOG.md`` text for ``root``, or ``None``
+    when it cannot answer — no ``CHANGELOG/`` directory (the fragment model is
+    not adopted) or unparseable version filenames (a render would silently drop
+    the mis-named section).
+
+    The install reconcile's changelog seam (TOL01-WS08 #578): a renderer change
+    (a new generated-file header, a section fix) makes every consumer's
+    committed projection stale against ``shipit changelog check``, and the
+    reconcile PR is the sanctioned channel that refreshes it (ADR-0033) —
+    :func:`shipit.install.reconcile.gather` compares this text against the
+    committed file and :func:`shipit.install.apply.apply` writes it. ``None``
+    means "nothing to say", never a refusal: install must not turn a repo
+    without the fragment convention into an error the way ``check`` does.
+    """
+    tree = _read_tree(root)
+    if not tree.has_dir or tree.invalid:
+        return None
+    return core.render(tree.fragments, tree.sections, legacy=tree.legacy)
+
+
 def _require_model(tree: ChangelogTree) -> None:
     """Refuse a tree the model cannot answer for: no ``CHANGELOG/`` directory
     (fragments are the declared model — set it up rather than skip), or
