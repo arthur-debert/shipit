@@ -243,7 +243,7 @@ tests follow the same injected-boundary + fixture shape.
 - **Design already committed** on branch `docs/core-model-planning` (commit `6a64c82`):
   the `CONTEXT.md` glossary + ADRs 0021–0025. This PRD is the spec that ties them
   together; the epic tracker issue + WS sub-issues are created later via
-  `/shipit-to-issues`.
+  `/to-tickets`.
 - **Known WS risks (to record, not blockers):** (1) whether pixi `[activation.env]`
   template vars can express a **per-Tree absolute path** for `SCCACHE_BASEDIRS` — verify
   before committing the sccache migration; (2) the `inputs`/`outputs` cache must be scoped

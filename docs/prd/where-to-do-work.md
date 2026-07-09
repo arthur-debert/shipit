@@ -181,7 +181,7 @@ hook contract; denial uses only the stable PreToolUse surface shipit already own
 > importantly the enforcement story moved on: this deny-only stance is now paired with a
 > **positive** path — the coordinator provisions and launches every Run through
 > `shipit spawn subagent`, which mints the Tree and roots the child agent in it (the native
-> worktree path stays denied). The full successor PRD comes later via `/shipit-to-prd`; see
+> worktree path stays denied). The full successor PRD comes later via `/to-prd`; see
 > ADR-0017 (spawning), ADR-0018 (write vs read-only Trees), and ADR-0019 (the
 > headless-`claude` launch contract that settles the launch mechanism ADR-0017 left open).
 
@@ -243,6 +243,6 @@ Tested modules:
   deferred template). The current shared checkout measured **14 GB** working tree against a
   **22 MB** `.git`, which is the core argument for clones-over-worktrees (ADR-0014).
 - This PRD is the spec; the epic issue + Work Stream sub-issues are produced later by
-  `/shipit-to-issues`. The epic code (`THEME+NN`) is assigned by the human at that step.
+  `/to-tickets`. The epic code (`THEME+NN`) is assigned by the human at that step.
 - Relevant ADRs: **0014** (Trees are dissociated clones in a central root, not worktrees),
   **0015** (per-Tree `target/` + sccache cross-Tree cache; template deferred).

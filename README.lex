@@ -9,7 +9,7 @@ Scope
       1.1 Ensure that os level dependencies are installed in a pinned version.
     1. Development Workflow: 
         1.1 The how to full for development workflow.
-        1.1 The skills for development (shipit-planning, shipit-grill-with-docs, shipit-to-prd, shipit-to-issues)
+        1.1 The skills for development (planning, grill-me-with-docs, to-prd, to-tickets)
       2.  Standarized Linting and Formatting via LeftHook
         2.1 Multi language / file types supported (rust, python, shell, markdown, yaml, json, go, lex)
       3. Github Repo Setup: 

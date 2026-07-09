@@ -14,10 +14,10 @@ implementer-stops-at-open rule, and the shepherd-per-PR round loop (ADR-0035)
 are NOT epic-specific — they are the PR-shepherding role split
 in [../../AGENTS.lex], applied here per workstream.
 
-Before execution, a new feature is planned via `/shipit-planning` — the
+Before execution, a new feature is planned via `/planning` — the
 orchestrator that drives ideation, the overview gate, the ADRs
-(`/shipit-grill-with-docs`), the PRD under `docs/prd/` (`/shipit-to-prd`), the
-docs PR, then epic/WS decomposition into issues (`/shipit-to-issues`). Each Work
+(`/grill-me-with-docs`), the PRD under `docs/prd/` (`/to-prd`), the
+docs PR, then epic/WS decomposition into issues (`/to-tickets`). Each Work
 Stream is a vertical slice — a sub-issue of the epic, with blocked-by
 dependencies.
 
