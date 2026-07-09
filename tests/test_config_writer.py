@@ -86,6 +86,22 @@ def test_write_manifest_replaces_prior_shipit_tables(tmp_path):
     assert p.read_text().count("[shipit]") == 1
 
 
+def test_write_manifest_strips_a_commented_managed_header(tmp_path):
+    # A hand-edited `[managed]  # note` is still THE [managed] header (a
+    # trailing comment is valid TOML after a header) — the re-stamp must strip
+    # it, not leave a duplicate [managed] table behind (#617).
+    p = tmp_path / ".shipit.toml"
+    p.write_text(
+        '[shipit]  # stamped by install\nversion = "old"\n'
+        '\n[managed]  # pristine map\n"bin/shipit" = "sha256:old"\n'
+    )
+    config.write_manifest(p, version="new", managed={"bin/shipit": "sha256:new"})
+    cfg = config.load(p)  # a duplicated table would fail to parse here
+    assert config.shipit_version(cfg) == "new"
+    assert config.load_managed(cfg) == {"bin/shipit": "sha256:new"}
+    assert p.read_text().count("[managed]") == 1
+
+
 # --------------------------------------------------------------------------
 # The [managed.decline] policy sub-table (#600) — consumer-owned, re-stamp-safe
 # --------------------------------------------------------------------------
@@ -173,6 +189,24 @@ def test_write_manifest_preserves_a_trailing_managed_decline(tmp_path):
     cfg = config.load(p)
     assert config.load_declines(cfg, p.read_text()) == ("bin/shipit",)
     assert config.load_managed(cfg) == {}
+
+
+def test_write_manifest_preserves_a_commented_managed_decline(tmp_path):
+    # The sibling #617 failure mode: a `[managed.decline]  # comment` header
+    # went unrecognized by the strip's line scan, so it failed to terminate the
+    # [managed] body skip and the consumer's decline policy was silently
+    # dropped by the re-stamp.
+    p = tmp_path / ".shipit.toml"
+    p.write_text(
+        '[managed]\n"bin/shipit" = "sha256:old"\n'
+        '\n[managed.decline]  # keep our own bin/shipit\nkeep = ["bin/shipit"]\n'
+    )
+    config.write_manifest(p, version="new", managed={"lefthook.yml": "sha256:new"})
+    cfg = config.load(p)
+    assert config.load_declines(cfg, p.read_text()) == ("bin/shipit",)
+    assert config.load_managed(cfg) == {"lefthook.yml": "sha256:new"}
+    # The header's own trailing comment survives verbatim.
+    assert "# keep our own bin/shipit" in p.read_text()
 
 
 def test_shipit_pin_reads_the_stamped_version(tmp_path):

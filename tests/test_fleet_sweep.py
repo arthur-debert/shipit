@@ -197,8 +197,8 @@ def test_plan_tools_unreadable_config_runs_config_tools_changelog_follows_fs(tmp
     # cell, never a silent skip. But CHANGELOG/ presence is a FILESYSTEM fact,
     # provable regardless of the config: changelog stays not-applicable when the
     # dir is absent even in the error fallback, and applies once it exists.
-    # "Malformed" spans bad TOML (ConfigError) AND non-UTF-8 bytes, which
-    # config.load surfaces as a UnicodeDecodeError that must NOT crash the sweep.
+    # "Malformed" spans bad TOML AND non-UTF-8 bytes — config.load wraps both
+    # in ConfigError (#585) — and neither may crash the sweep.
     for label, setup in (
         ("missing config", lambda: None),
         (

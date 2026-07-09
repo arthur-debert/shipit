@@ -122,14 +122,20 @@ def load_secrets(spec: dict) -> list[SecretSource]:
 
 
 def load(path: str | Path) -> dict:
-    """Parse a ``.shipit.toml`` file into a dict, or raise :class:`ConfigError`."""
+    """Parse a ``.shipit.toml`` file into a dict, or raise :class:`ConfigError`.
+
+    "Malformed" spans every way the bytes resist parsing: bad TOML syntax AND
+    non-UTF-8 content — :mod:`tomllib` decodes the file as UTF-8, and the
+    resulting ``UnicodeDecodeError`` is wrapped in :class:`ConfigError` too, so
+    callers guard on the one documented class (#585).
+    """
     p = Path(path)
     if not p.is_file():
         raise ConfigError(f"no {CONFIG_NAME} at {p}")
     try:
         with p.open("rb") as fh:
             cfg = tomllib.load(fh)
-    except tomllib.TOMLDecodeError as exc:
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
         raise ConfigError(f"malformed {p}: {exc}") from None
     _validate_known_tables(cfg)
     return cfg
@@ -828,11 +834,19 @@ def _toml_key(key: str) -> str:
 
 
 def _strip_tables(text: str, tables: set[str]) -> str:
-    """Drop the given top-level tables (header + body) from TOML ``text``."""
+    """Drop the given top-level tables (header + body) from TOML ``text``.
+
+    Header detection tolerates a trailing ``# comment`` (valid TOML after a
+    header), like :func:`_has_table_header` (#617): a commented ``[managed]``
+    still strips, and a commented ``[managed.decline]`` still terminates the
+    ``[managed]`` skip so the consumer's decline table survives the re-stamp.
+    """
     out: list[str] = []
     skipping = False
     for line in text.splitlines():
-        stripped = line.strip()
+        # Drop any trailing `# comment` before matching, as _has_table_header
+        # does; the kept output still carries the original line verbatim.
+        stripped = line.split("#", 1)[0].strip()
         if stripped.startswith("[") and stripped.endswith("]"):
             name = stripped.strip("[]").strip()
             skipping = name in tables
