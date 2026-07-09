@@ -289,15 +289,18 @@ review — the reviewer does).
 
 **Calibrator**:
 The one fixed judge between dimension passes and the posted review: dedups the
-union, adversarially verifies each **Finding** (quoted evidence plus a concrete
-failure scenario, or the finding is dropped), normalizes **Severity** onto the
-shared ladder, and emits the final severity-ordered result. The same
+union, adversarially verifies each **Finding** with tier-appropriate evidence
+(quoted evidence always; a concrete failure scenario for major-or-worse, a
+clear rationale for minor/nit — or the finding is dropped), normalizes
+**Severity** onto the shared ladder, and emits the final severity-ordered
+result. The same
 agent/model for every reviewer — a table-level setting, like `round_cap` — so
 severities are calibrated on one ruler. The calibrator NEVER originates
 findings: a judge, not a finder. Every judged finding gets a disposition —
-posted, or routed out (unverified, nit-suppressed, out-of-scope/pre-existing);
-routed-out findings are retained, not erased — the future **Opportunity**
-harvest reads them, the review never posts them.
+posted, or routed out (unverified, nit-suppressed, out-of-scope — pre-existing
+issues being the archetypal out-of-scope routing); routed-out findings are
+retained, not erased — the future **Opportunity** harvest reads them, the
+review never posts them.
 *Avoid*: per-reviewer calibrator models (the common ruler is the point); the
 calibrator posting (the reviewer's own bot identity posts).
 

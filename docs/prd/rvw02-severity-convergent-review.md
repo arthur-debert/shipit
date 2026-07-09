@@ -85,8 +85,9 @@ predictable cost:
    findings, so that severities are calibrated on a common ruler across
    backends.
 10. As a maintainer, I want every posted finding to have survived adversarial
-    verification with quoted evidence and a concrete failure scenario, so that
-    false positives don't erode trust in the review.
+    verification with quoted evidence and a tier-appropriate justification (a
+    concrete failure scenario for major-or-worse, a clear rationale for
+    minor/nit), so that false positives don't erode trust in the review.
 11. As a maintainer, I want the calibrator forbidden from originating
     findings, so that the judge stage doesn't regress into another monolithic
     reviewer.
@@ -148,9 +149,11 @@ predictable cost:
 - **Finding domain module** (new, deep, pure): owns the **Severity** ladder,
   the **Finding** value object (severity, category, confidence, location,
   evidence, fix suggestion), the disposition vocabulary
-  (`post | drop-unverified | nit-suppressed | out-of-scope`), severity
-  ordering, and both wire renderings — the Conventional Comments human layer
-  (`critical|major` → `issue (blocking):`, `minor` →
+  (`post | drop-unverified | nit-suppressed | out-of-scope`, where
+  `out-of-scope` covers findings beyond the PR's diff — pre-existing issues
+  being the archetype), severity ordering, and both wire renderings — the
+  Conventional Comments human layer (`critical` →
+  `issue (critical, blocking):`, `major` → `issue (blocking):`, `minor` →
   `suggestion (non-blocking):`, `nit` → `nitpick:`) and the machine marker
   (an HTML comment carrying the exact severity/category/confidence tuple).
   Review pipeline and PR state engine both consume this one module; no I/O.
@@ -171,8 +174,9 @@ predictable cost:
   them out is the calibrator's job, not prompt-mandated silence.
 - **Calibrator** (ADR-0045): one fixed table-level agent/model (default:
   claude backend at high ReasoningLevel) shared by all reviewers — dedups,
-  adversarially verifies (quoted evidence + concrete failure scenario or the
-  finding is dropped; unverified low-confidence findings are dropped, never
+  adversarially verifies with tier-appropriate evidence (quoted evidence
+  always; a concrete failure scenario for major-or-worse, a clear rationale
+  for minor/nit; any finding that fails verification is dropped, never
   downgraded), normalizes severity, orders the result, assigns dispositions.
   It never originates findings. The reviewer's own bot posts the calibrated
   result; funnel/reconcile semantics are unchanged.
