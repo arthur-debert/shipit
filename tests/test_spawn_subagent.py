@@ -151,6 +151,9 @@ def test_write_spawn_returns_the_typed_result(tmp_path, monkeypatch):
     # The task tells the Run which issue to implement and the branch to PR from.
     task = calls["cmd"][calls["cmd"].index("-p") + 1]
     assert "#156" in task and "TRE03/WS01" in task
+    # Epic WS shape ⇒ the non-closing `for #N` link (#649): the WS issue stays
+    # open until the umbrella PR closes the epic's issues.
+    assert "for #156" in task and "closes #156" not in task
     # The typed result IS the SPAWNED payload — coordinates + Run↔PR linkage.
     assert result.to_dict() == {
         "tree": str(tmp_path / "tree"),
@@ -306,7 +309,8 @@ def test_non_positive_ws_is_refused(tmp_path):
 
 @pytest.mark.parametrize("bad_issue", [0, -1, None])
 def test_write_run_requires_a_positive_issue(tmp_path, bad_issue):
-    # --issue feeds the task prompt and the PR's `for #<issue>` link; a
+    # --issue feeds the task prompt and the PR's issue link (`closes #<issue>`
+    # standalone / `for #<issue>` epic WS, #649); a
     # zero/negative value — OR a MISSING one for a write role — refuses before any
     # Tree/child work. The CLI keeps --issue optional (a reviewer spawn carries
     # none), so this write-run requirement lives here, not at the click boundary.
@@ -583,6 +587,9 @@ def test_issue_only_builds_the_issue_shape_spec(tmp_path):
     # The task names the issue and the standalone-issue branch to PR from.
     task = calls["cmd"][calls["cmd"].index("-p") + 1]
     assert "#210" in task and "issues/210/work" in task
+    # Standalone shape ⇒ the CLOSING `closes #N` link (#649), so the merged PR
+    # auto-closes its issue (`for #N` is not a GitHub closing keyword).
+    assert "closes #210" in task and "for #210" not in task
     assert result.branch == "issues/210/work"
     assert result.base == "origin/main"
     assert result.pr == 77

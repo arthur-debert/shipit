@@ -242,7 +242,9 @@ def test_launch_roots_codex_in_the_tree_with_scrubbed_env():
 
         return LaunchResult(returncode=0, stdout="", stderr="")
 
-    task = write_task("implementer", issue=42, branch="TRE05/WS02", base_branch="main")
+    task = write_task(
+        "implementer", issue=42, branch="TRE05/WS02", base_branch="main", closes=False
+    )
     cmd = CODEX.build_command(task, "implementer")
     env = CODEX.child_env({"PATH": "/bin", "OPENAI_API_KEY": "stale"})
 

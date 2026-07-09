@@ -263,7 +263,9 @@ def scrub_tree_env(env: Mapping[str, str]) -> dict[str, str]:
     return scrubbed
 
 
-def write_task(role: str, *, issue: int, branch: str, base_branch: str) -> str:
+def write_task(
+    role: str, *, issue: int, branch: str, base_branch: str, closes: bool
+) -> str:
     """The task a spawned WRITE Run performs: do the issue's work, report via a draft PR.
 
     WS02 replaces the WS01 sentinel skeleton with real, PR-reported work (acceptance
@@ -272,7 +274,16 @@ def write_task(role: str, *, issue: int, branch: str, base_branch: str) -> str:
     the deliverable channel (ADR-0019 §6) — the parent never scrapes the Tree; it
     learns the result by resolving the PR the Run opened on ``branch``.
 
-    The draft-PR-and-stop discipline (open one draft PR linking ``for #issue``, run
+    ``closes`` selects the issue-link keyword by write shape (#649): ``closes=True``
+    for a **standalone-issue** Run, whose PR body links ``closes #issue`` so the
+    merge auto-closes the issue; ``closes=False`` for an **epic work-stream** Run,
+    whose PR body links ``for #issue`` — deliberately NON-closing, because a WS
+    issue must stay open until the umbrella PR integrates and closes the epic's
+    issues. GitHub treats only ``closes`` (and its siblings) as a closing keyword,
+    so the wrong keyword here either strands a merged standalone issue open or
+    prematurely closes a WS issue at WS-merge time.
+
+    The draft-PR-and-stop discipline (open one draft PR linking the issue, run
     ``shipit pr next`` once so the engine places the initial review requests, then
     STOP — never flip ready, address review rounds, or merge) lives in the role's own
     system prompt, which ``--agent <role>`` loads; this task only conveys *which*
@@ -290,6 +301,7 @@ def write_task(role: str, *, issue: int, branch: str, base_branch: str) -> str:
     fresh (no draft PR yet ⇒ no upstream set), so a bare ``git push`` would reject
     the WIP commit and lose exactly the work the protocol exists to salvage.
     """
+    link = f"closes #{issue}" if closes else f"for #{issue}"
     return (
         f"You are a spawned {role} Run launched by `shipit spawn subagent`, working in "
         f"an isolated Tree checkout on branch {branch!r} (cut from {base_branch!r}). "
@@ -298,7 +310,7 @@ def write_task(role: str, *, issue: int, branch: str, base_branch: str) -> str:
         f"(`git push -u origin {branch}` — the branch is fresh, so set its upstream), "
         f"and open a DRAFT pull request from it against {base_branch!r} "
         f"(`gh pr create --draft --base {base_branch} --head {branch}`) whose body "
-        f"references `for #{issue}`. Once the draft PR is open, run `shipit pr next` "
+        f"references `{link}`. Once the draft PR is open, run `shipit pr next` "
         f"ONCE from the PR branch (the engine places the initial review requests), "
         f"then STOP — do not flip it ready, address review rounds, or merge. "
         f"If you are about to run out of time or budget BEFORE the draft PR is open, "
