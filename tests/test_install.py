@@ -4107,6 +4107,40 @@ def test_gather_counts_retired_hooks_fail_open_on_oserror(tmp_path, monkeypatch)
     assert irec.retired_hook_count(tmp_path, hook) == 0
 
 
+def test_apply_fails_open_when_the_retired_hook_rewrite_cannot_be_written(
+    tmp_path, rec, monkeypatch
+):
+    # The apply-side mirror of the gather fail-open (retired_hook_count): a
+    # consumer hooks file that turns unwritable in the gather→apply window makes
+    # install degrade to a logged warning instead of crashing. Install first so
+    # the managed set is current — then the retire-hook pass is the SOLE writer
+    # of settings.json (cf. test_retired_hook_delete_alone_is_still_a_write), so
+    # a write failure isolates the guard rather than tripping write_unit.
+    _apply(tmp_path)
+    settings = tmp_path / ".claude" / "settings.json"
+    data = json.loads(settings.read_text(encoding="utf-8"))
+    data["hooks"]["SessionStart"].insert(0, LEGACY_RELEASE_CORE_ENTRY)
+    settings.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+    plan = _plan(tmp_path)
+    assert not plan.writes and plan.retire_hook_deletes
+
+    real_write = Path.write_text
+
+    def boom(self, *a, **kw):
+        if self.name == "settings.json":
+            raise OSError("permission denied")
+        return real_write(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "write_text", boom)
+
+    # apply() must not raise: the unguarded rewrite would have crashed install.
+    _apply(tmp_path)
+
+    # Degrade, not clobber: the legacy entry the rewrite could not remove survives.
+    assert "install-release-core" in settings.read_text(encoding="utf-8")
+
+
 def test_pr_body_lists_a_kept_retired_file(tmp_path, rec):
     victim = tmp_path / RETIRED_WORKFLOW_PATH
     victim.parent.mkdir(parents=True)

@@ -427,14 +427,26 @@ def apply(
         # window means the goal state already holds, and a file turned
         # malformed in that window is preserved verbatim by
         # remove_retired_hooks (never a clobber).
+        #
+        # Fails OPEN in lockstep with the gather side (reconcile.retired_hook_count,
+        # #619): a consumer-owned hooks file that turns unreadable/non-UTF-8 — or
+        # an unwritable dest — in the gather→apply window degrades to "nothing to
+        # remove" with a logged warning rather than crashing the whole install.
         dest = root / d.retired.file
         if not dest.is_file():
             continue
-        text = dest.read_text(encoding="utf-8")
-        dest.write_text(
-            remove_retired_hooks(text, d.retired.event, d.retired.marker),
-            encoding="utf-8",
-        )
+        try:
+            text = dest.read_text(encoding="utf-8")
+            dest.write_text(
+                remove_retired_hooks(text, d.retired.event, d.retired.marker),
+                encoding="utf-8",
+            )
+        except (OSError, UnicodeDecodeError):
+            logger.warning(
+                "skipping unreadable/unwritable hooks file in the retired-hooks pass",
+                exc_info=True,
+                extra={"root": str(root), "file": d.retired.file},
+            )
     cfg_path = root / config.CONFIG_NAME
     # Seed the consumer-owned policy BEFORE the manifest write, which preserves
     # `[secrets]`/`[reviewers]` textually while it re-stamps `[shipit]`/`[managed]`.
