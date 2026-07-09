@@ -2241,6 +2241,120 @@ def test_consumer_edit_surfaces_as_override(tmp_path, rec):
     assert "```diff" in rec.pr_body
 
 
+# --------------------------------------------------------------------------
+# Declined units (#600) — `.shipit.toml [managed.decline].keep`, the durable
+# form of hand-declining the same OVERRIDE in every reconcile PR
+# --------------------------------------------------------------------------
+
+
+def _decline(root, *keys):
+    """Append a ``[managed.decline]`` table to the consumer's ``.shipit.toml``."""
+    cfg = root / config.CONFIG_NAME
+    existing = cfg.read_text() if cfg.is_file() else ""
+    keep = ", ".join(f'"{k}"' for k in keys)
+    cfg.write_text(f"{existing}\n[managed.decline]\nkeep = [{keep}]\n")
+
+
+def test_declined_unit_makes_a_would_be_override_a_clean_noop(tmp_path, rec):
+    # The #597 shape: the consumer keeps its own bin/shipit (the dogfood repo's
+    # source-deferring bootstrap). Without the decline, every reconcile would
+    # re-propose the same OVERRIDE and need the same hand-decline at merge.
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    _apply(tmp_path)
+    rec.calls.clear()
+    (tmp_path / "bin" / "shipit").write_text("#!/bin/sh\n# MY OWN LAUNCHER\n")
+    _decline(tmp_path, "bin/shipit")
+
+    plan = _plan(tmp_path)
+    assert plan.declined == (iunits.SHIPIT_LAUNCHER_FILE,)
+    assert plan.overrides == ()  # the edit is never re-proposed
+    assert all(d.unit.key != iunits.SHIPIT_LAUNCHER_FILE for d in plan.decisions)
+    assert plan.nothing_to_do  # the recurring hand-decline is gone
+    rc = verb.run(str(tmp_path))
+    assert rc == 0
+    assert rec.calls == []  # no branch, no commit, no PR
+    # The consumer's own launcher was never touched.
+    assert "MY OWN LAUNCHER" in (tmp_path / "bin" / "shipit").read_text()
+
+
+def test_declined_unit_is_never_written_and_drops_from_the_manifest(tmp_path, rec):
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    _apply(tmp_path)
+    rec.calls.clear()
+    (tmp_path / "bin" / "shipit").write_text("#!/bin/sh\n# MY OWN LAUNCHER\n")
+    _decline(tmp_path, "bin/shipit")
+    # Another unit changes, so the plan still has work — an applying install runs.
+    (tmp_path / "skills" / "to-prd" / "SKILL.md").unlink()
+
+    result = _apply(tmp_path, iapply.MODE_PR)
+    assert result.pr_url is not None
+    # The declined unit: untouched on disk, dropped from the re-stamped map (so
+    # no stale pristine entry lingers to re-propose the override).
+    assert "MY OWN LAUNCHER" in (tmp_path / "bin" / "shipit").read_text()
+    cfg = config.load(tmp_path / config.CONFIG_NAME)
+    managed = config.load_managed(cfg)
+    assert iunits.SHIPIT_LAUNCHER_FILE not in managed
+    assert "skills/to-prd/SKILL.md" in managed
+    # The decline itself survives the manifest re-stamp (the durable half)...
+    assert config.load_declines(cfg) == (iunits.SHIPIT_LAUNCHER_FILE,)
+    # ...and the PR body carries the standing decision.
+    assert "### Declined units" in rec.pr_body
+    assert "`bin/shipit`" in rec.pr_body
+
+
+def test_fresh_install_skips_a_pre_declined_unit(tmp_path, rec):
+    # Declining BEFORE the first install: the unit is never delivered at all
+    # (no ADD), not delivered-then-hand-reverted.
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    _decline(tmp_path, "bin/shipit")
+    _apply(tmp_path, iapply.MODE_PR)
+    assert not (tmp_path / "bin" / "shipit").exists()
+    assert "### Declined units" in rec.pr_body
+
+
+def test_unmatched_decline_key_warns_never_silently_ignores(tmp_path, rec):
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    _apply(tmp_path)
+    _decline(tmp_path, "no/such-unit")
+    plan = _plan(tmp_path)
+    assert plan.decline_unmatched == ("no/such-unit",)
+    assert plan.declined == ()
+    warnings = verb.format_plan_warnings(plan)
+    assert "no/such-unit" in warnings
+    assert "names no managed unit" in warnings
+
+
+def test_format_plan_renders_the_standing_decline_line():
+    plan = irec.Plan(
+        root="/consumer",
+        decisions=(),
+        retired=(),
+        seeds=(),
+        declined=(iunits.SHIPIT_LAUNCHER_FILE,),
+    )
+    text = verb.format_plan(plan)
+    assert "decline" in text
+    assert iunits.SHIPIT_LAUNCHER_FILE in text
+    # With a declined unit listed, "managed set is current" would read as a
+    # contradiction — the wording shifts like the kept-retired case.
+    assert "nothing to do — no automated changes to apply." in text
+
+
+def test_shipits_own_manifest_declines_the_launcher():
+    # The dogfood resolution of #600: shipit's own bin/shipit is the
+    # source-deferring bootstrap (CI and dev flows exec shipit FROM SOURCE via
+    # the pixi env), which necessarily differs from the packaged pinned uv
+    # launcher — so the repo carries the durable decline instead of hand-
+    # reverting the same override in every reconcile PR (#597).
+    cfg = config.load(REPO_ROOT / config.CONFIG_NAME)
+    assert iunits.SHIPIT_LAUNCHER_FILE in config.load_declines(cfg)
+    packaged = iunits.data_bytes("bootstrap", "shipit")
+    committed = (REPO_ROOT / "bin" / "shipit").read_bytes()
+    # The standing reason for the decline: if these ever converge, the decline
+    # (and this pin) should be revisited.
+    assert committed != packaged
+
+
 def test_fresh_install_delivers_the_lint_environment(tmp_path, rec):
     # ADP00 (docs/prd/adoption.md): a fresh install ADDs the lint env blocks —
     # the consumer's pixi.toml ends up a complete, valid manifest whose lint
