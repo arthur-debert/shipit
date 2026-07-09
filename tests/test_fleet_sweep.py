@@ -452,6 +452,10 @@ def test_sweep_provisioned_tree_routes_through_its_own_pixi_env(tmp_path):
         (root / ".shipit.toml").write_text(
             '[toolchains]\n"." = "python"\n', encoding="utf-8"
         )
+        # A real provisioned Tree necessarily carries the manifest the wrap
+        # points `--manifest-path` at; the fixture writes it too so the setup
+        # matches a genuine pixi Tree (has_default_env + a manifest to route).
+        (root / "pixi.toml").write_text("[workspace]\n", encoding="utf-8")
         (root / ".pixi" / "envs" / "default").mkdir(parents=True)
         return Tree(path=str(root), branch="fleet-sweep-x", base="origin/main")
 
