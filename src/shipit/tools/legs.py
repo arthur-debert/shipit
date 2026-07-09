@@ -116,6 +116,13 @@ def plan_legs(
         )
 
     if passthrough:
+        if not selected:
+            # No leg to append to — an empty map reached the planner (the verb
+            # rejects that earlier, but plan_legs is a public pure function and
+            # must not IndexError on empty input).
+            raise LegPlanError(
+                f"no {tool} legs declared — nothing to forward passthrough args to"
+            )
         leg = selected[0]
         selected = [
             Leg(

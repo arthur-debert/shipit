@@ -243,6 +243,8 @@ LINT_TOOLS = (
     "yamllint",
     "prettier",
     "markdownlint-cli",
+    # The GitHub Actions workflow gate — the actions Lang (TOL01-WS04 #553).
+    "actionlint",
     "lefthook",
 )
 
@@ -1683,6 +1685,29 @@ def test_test_task_block_is_skipped_when_a_feature_defines_the_task(tmp_path):
 def test_test_task_block_delivers_when_no_feature_defines_it(tmp_path):
     (tmp_path / "pixi.toml").write_text(
         _CONSUMER_PIXI_WITH_FEATURE_TEST_TASK.replace("test =", "e2e =", 1)
+    )
+    plan = _plan(tmp_path)
+    assert plan.pixi_task_conflicts == ()
+    decision = next(
+        d for d in plan.decisions if d.unit.key == iunits.PIXI_TEST_TASK_KEY
+    )
+    assert decision.action == irec.ADD
+
+
+def test_test_task_block_delivers_when_the_feature_is_not_env_enabled(tmp_path):
+    # A `test` task under [feature.test.tasks] that NO [environments] entry
+    # enables never reaches an env, so `pixi run test` is unambiguous — the
+    # guard must not over-detect and skip the managed block. (Here the only
+    # environment enables a different feature.)
+    (tmp_path / "pixi.toml").write_text(
+        "[workspace]\n"
+        'channels = ["conda-forge"]\n'
+        'name = "acme"\n'
+        'platforms = ["linux-64"]\n\n'
+        "[feature.test.tasks]\n"
+        'test = "cargo nextest run"\n\n'
+        "[environments]\n"
+        'dev = ["lint"]\n'
     )
     plan = _plan(tmp_path)
     assert plan.pixi_task_conflicts == ()

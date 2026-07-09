@@ -12,8 +12,9 @@ The pure planning — which legs run, in what order, with what argv — lives in
 :func:`shipit.tools.legs.plan_legs`; this module is the effectful shell:
 
 - argument shaping (:func:`split_args`): ``shipit test [LEG] [-- ARGS…]``.
-  click consumes the first ``--`` separator, so the split is positional — the
-  first token not starting with ``-`` is the leg selector; everything else is
+  click consumes the first ``--`` separator, so the split is read against the
+  repo's legs — a first token that names a leg is the selector; otherwise (a
+  leading ``-``, or any positional token on a single-leg repo) everything is
   passthrough, forwarded VERBATIM to the selected leg's command (ADR-0039).
 - execution through the one Exec runner (:mod:`shipit.execrun`, ADR-0028):
   each leg runs with cwd at its map path, ``check=False`` (a nonzero rc is
@@ -73,19 +74,34 @@ _SIGNAL_MANIFESTS: tuple[tuple[str, str], ...] = (
 )
 
 
-def split_args(args: Sequence[str]) -> tuple[str | None, tuple[str, ...]]:
-    """``(selector, passthrough)`` from the verb's raw argument tuple. Pure.
+def split_args(
+    args: Sequence[str], entries: Sequence[config.ToolchainEntry]
+) -> tuple[str | None, tuple[str, ...]]:
+    """``(selector, passthrough)`` from the raw args, resolved against the repo's
+    legs. Pure.
 
-    click consumes the ``--`` separator before the verb sees the args, so the
-    boundary is positional: the FIRST token, when it does not start with
-    ``-``, is the leg selector; every remaining token is passthrough. A
-    leading ``-`` token means no selector was given (``shipit test --
-    -k foo``) and everything is passthrough. A selector that names no leg
-    still errors loudly in the planner (naming the known legs), so a
-    passthrough value accidentally read as a selector is never silently run.
+    click consumes the first ``--`` before the verb sees the args, so
+    ``shipit test tests/foo.py`` and ``shipit test -- tests/foo.py`` arrive
+    identically — the selector/passthrough boundary cannot be read from the
+    tokens alone, so it is read from ``entries`` (the repo's legs):
+
+    - a leading ``-`` token → no selector; everything is passthrough
+      (``shipit test -- -k foo``);
+    - a first token that NAMES a leg (its toolchain or map path) → the
+      selector; the rest is passthrough;
+    - a first token that names no leg on a SINGLE-leg repo → the no-selector
+      sugar: the one leg is unambiguous, so the whole tuple is passthrough
+      (``shipit test tests/foo.py`` forwards the path to pytest);
+    - a first token that names no leg on a MULTI-leg repo → still taken as the
+      selector, so the planner rejects it loudly naming the known legs
+      (passthrough on a multi-leg repo needs an explicit selector regardless).
     """
-    if args and not args[0].startswith("-"):
-        return args[0], tuple(args[1:])
+    if not args or args[0].startswith("-"):
+        return None, tuple(args)
+    first = args[0]
+    names = {e.toolchain for e in entries} | {e.path for e in entries}
+    if first in names or len(entries) > 1:
+        return first, tuple(args[1:])
     return None, tuple(args)
 
 
@@ -103,7 +119,7 @@ def missing_map_message(root: Path) -> str:
     return (
         f"no [toolchains] path->toolchain map in {config.CONFIG_NAME} — "
         f"`shipit {TOOL}` dispatches on that declaration (ADR-0007/0039)."
-        f'{hint} Declare e.g.: [toolchains] "." = "{example}"'
+        f'{hint} Declare it under a [toolchains] table, e.g. "." = "{example}".'
     )
 
 
@@ -172,8 +188,8 @@ def run(
     """
     started = time.monotonic()
     root = Path(".").resolve()
-    selector, passthrough = split_args(tuple(args))
     entries = _load_entries(root)
+    selector, passthrough = split_args(tuple(args), entries)
 
     try:
         planned = legs_mod.plan_legs(
@@ -187,7 +203,11 @@ def run(
         return 2
 
     run_leg = run_leg or _run_leg
-    runs: list[LegRun] = runs_out if runs_out is not None else []
+    # Accumulate into a fresh list so the verdict is this invocation's alone; a
+    # caller-supplied `runs_out` is an OUTPUT sink, extended at the end (never
+    # aliased, so a non-empty one it passes can never leak stale legs into the
+    # verdict).
+    runs: list[LegRun] = []
     for leg in planned:
         command = shlex.join(leg.argv)
         print(f"test: {leg.label}: {command}")
@@ -227,10 +247,17 @@ def run(
                 },
             )
         runs.append(LegRun(leg, rc, out))
-        if out.strip():
-            print(out.rstrip())
+        if out:
+            # The runner's report prints VERBATIM (unlike lint, which swallows a
+            # green run): emit exactly what the leg produced, normalizing only
+            # the trailing newline — add one when it's missing so the ok/FAIL
+            # line starts on its own line, keep the runner's own when present so
+            # it is never doubled.
+            print(out, end="" if out.endswith("\n") else "\n")
         print(f"  {'ok  ' if rc == 0 else 'FAIL'} {leg.label} ({command})")
 
+    if runs_out is not None:
+        runs_out.extend(runs)
     rc = verdict(runs)
     failed = [r.leg.label for r in runs if not r.ok]
     if rc == 0:

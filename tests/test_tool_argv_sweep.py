@@ -66,6 +66,10 @@ _ADAPTER_HOMES: dict[str, tuple[str, ...]] = {
     "go": ("tools/registry.py",),
     "pytest": ("tools/registry.py",),
     "npm": ("tools/registry.py", "tree/create.py"),
+    # The act harness (TOL01-WS04): `shipit wf test` is the one place that
+    # drives act, and its docker probes/builds live beside it.
+    "act": ("verbs/wf.py",),
+    "docker": ("verbs/wf.py",),
 }
 
 

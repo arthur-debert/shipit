@@ -35,8 +35,10 @@ shell, or the check report + diff), 2 usage (click's).
 from __future__ import annotations
 
 import logging
+import os
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -49,6 +51,19 @@ from ..changelog import ChangelogError
 from ._errors import cli_errors
 
 logger = logging.getLogger("shipit.changelog")
+
+
+@contextmanager
+def _fs_mutation(action: str) -> Iterator[None]:
+    """Map a filesystem ``OSError`` to the uniform :class:`ChangelogError`
+    surface (ADR-0030): a write/unlink against a read-only tree or file exits 1
+    with one ``error: …`` line, never a raw traceback (``OSError`` is NOT in
+    ``KNOWN_ERRORS``). ``action`` names the failed operation for the message.
+    """
+    try:
+        yield
+    except OSError as exc:
+        raise ChangelogError(f"{action}: {exc}") from exc
 
 
 # --------------------------------------------------------------------------
@@ -233,7 +248,8 @@ def run_render(
     tree = read_tree(root)
     _require_model(tree)
     rendered = core.render(tree.fragments, tree.sections, legacy=tree.legacy)
-    (root / core.CHANGELOG_FILE).write_text(rendered, encoding="utf-8")
+    with _fs_mutation(f"cannot write {core.CHANGELOG_FILE}"):
+        (root / core.CHANGELOG_FILE).write_text(rendered, encoding="utf-8")
     print(
         f"changelog: rendered {core.CHANGELOG_FILE} "
         f"({len(tree.fragments)} unreleased fragment"
@@ -271,6 +287,13 @@ def run_coalesce(
     moves to stderr, so stdout is exactly the one text either way it is asked
     for. A prerelease extracts (nothing written, fragments kept); a resume of
     an already-cut version re-emits the identical notes (ADR-0009).
+
+    An unusable ``--notes-out`` — unwritable parent, a directory, or a
+    read-only target — is rejected as a :class:`ChangelogError` BEFORE the tree
+    is mutated: its writability is probed up front. Any residual write failure
+    (e.g. the disk filling between the probe and the write) still surfaces as a
+    :class:`ChangelogError`, never a raw traceback — so a bad destination never
+    leaves a cut tree with no notes artifact.
     """
     read_tree = read_tree or _read_tree
     root = _resolve_root(
@@ -287,18 +310,49 @@ def run_coalesce(
 
     report = sys.stdout if notes_out else sys.stderr
     changelog_dir = root / core.CHANGELOG_DIR
+
+    # Fail BEFORE mutating the tree when the notes destination is unusable:
+    # coalesce's contract is that the cut and its one notes artifact land
+    # together (story 26), so a bad ``--notes-out`` must not leave a cut tree
+    # (section written, fragments gone, CHANGELOG.md re-rendered) with no notes.
+    # Create the parent and reject a directory / unwritable target — but probe
+    # write access WITHOUT creating the target file, so a cut that fails after
+    # this leaves no stray empty notes file behind. Probe an existing target for
+    # write; a to-be-created target needs write AND execute (search) on the
+    # parent directory (POSIX). Any stat/permission failure here (e.g. a
+    # non-traversable parent) is itself a pre-mutation refusal. The final write
+    # happens only on success.
+    notes_path = Path(notes_out) if notes_out else None
+    if notes_path is not None:
+        try:
+            notes_path.parent.mkdir(parents=True, exist_ok=True)
+            if notes_path.is_dir():
+                raise OSError(f"{notes_out} is a directory")
+            if notes_path.exists():
+                writable = os.access(notes_path, os.W_OK)
+            else:
+                writable = os.access(notes_path.parent, os.W_OK | os.X_OK)
+            if not writable:
+                raise OSError(f"{notes_out} is not writable")
+        except OSError as exc:
+            raise ChangelogError(f"cannot write notes to {notes_out}: {exc}") from exc
+
     if plan.section is not None:
-        section_path = changelog_dir / f"{plan.version}{core.FRAGMENT_SUFFIX}"
-        section_path.write_text(plan.section, encoding="utf-8")
-        for name in plan.consumed:
-            (changelog_dir / name).unlink()
-        # Re-render the projection from the POST-cut tree so the committed
-        # CHANGELOG.md and the fragment dir move in one step (the sync check
-        # stays green on the cut commit).
-        after = read_tree(root)
-        _require_model(after)
-        rendered = core.render(after.fragments, after.sections, legacy=after.legacy)
-        (root / core.CHANGELOG_FILE).write_text(rendered, encoding="utf-8")
+        # Wrap the cut's filesystem mutations so an OSError (read-only checkout,
+        # transient IO) exits 1 with an ``error: …`` line instead of a traceback
+        # (ADR-0030). _require_model raises ChangelogError, which passes through.
+        with _fs_mutation(f"cannot cut {plan.version}"):
+            section_path = changelog_dir / f"{plan.version}{core.FRAGMENT_SUFFIX}"
+            section_path.write_text(plan.section, encoding="utf-8")
+            for name in plan.consumed:
+                (changelog_dir / name).unlink()
+            # Re-render the projection from the POST-cut tree so the committed
+            # CHANGELOG.md and the fragment dir move in one step (the sync check
+            # stays green on the cut commit).
+            after = read_tree(root)
+            _require_model(after)
+            rendered = core.render(after.fragments, after.sections, legacy=after.legacy)
+            (root / core.CHANGELOG_FILE).write_text(rendered, encoding="utf-8")
         print(
             f"changelog: coalesced {len(plan.consumed)} fragment"
             f"{'s' if len(plan.consumed) != 1 else ''} into "
@@ -319,8 +373,11 @@ def run_coalesce(
             file=report,
         )
 
-    if notes_out:
-        Path(notes_out).write_text(plan.notes, encoding="utf-8")
+    if notes_path is not None:
+        try:
+            notes_path.write_text(plan.notes, encoding="utf-8")
+        except OSError as exc:
+            raise ChangelogError(f"cannot write notes to {notes_out}: {exc}") from exc
         print(f"changelog: notes -> {notes_out}", file=report)
     else:
         sys.stdout.write(plan.notes)

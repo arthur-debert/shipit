@@ -22,8 +22,10 @@ from __future__ import annotations
 import hashlib
 import re
 import tomllib
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 
 from .identity import Sha
 
@@ -206,7 +208,16 @@ class ToolchainEntry:
 
     path: str
     toolchain: str
-    commands: dict[str, tuple[str, ...]]
+    commands: Mapping[str, tuple[str, ...]]
+
+    def __post_init__(self) -> None:
+        # `frozen=True` freezes the attribute bindings, not the dict they point
+        # at; wrap `commands` read-only so the "typed frozen values" contract
+        # (ADR-0030) can't be violated by mutating the map after parsing. The
+        # argv values are already tuples, so this makes the whole entry deep-
+        # immutable.
+        if not isinstance(self.commands, MappingProxyType):
+            object.__setattr__(self, "commands", MappingProxyType(dict(self.commands)))
 
 
 def _parse_override(path: str, tool: str, value: object) -> tuple[str, ...]:
@@ -348,8 +359,9 @@ class Lane:
 #: re-rendered changelog — fails before merge. PR-triggered, cheap, required at
 #: merge but NOT local (a fragment usually lands with the PR's last commit, so
 #: blocking every mid-work commit would only teach `--no-verify`). The `run` is
-#: the ordinary `shipit changelog check` invocation, so the lane's CI job and a
-#: laptop run are the same command. A repo adopting the changelog model declares
+#: the ordinary `changelog check` invocation (a shipit tool/leg string, no
+#: `shipit` prefix — see `run` above), so the lane's CI job and a laptop run are
+#: the same command. A repo adopting the changelog model declares
 #: exactly this entry in its `[lanes]` table.
 CHANGELOG_SYNC_LANE = Lane(
     name="changelog-sync",
@@ -383,7 +395,7 @@ def _parse_lane(name: str, spec: object) -> Lane:
     if not isinstance(required, bool) or not isinstance(local, bool):
         raise ConfigError(f"[lanes].{name}: `required`/`local` must be booleans")
     trigger = spec.get("trigger", "pr")
-    if trigger not in LANE_TRIGGERS:
+    if not isinstance(trigger, str) or trigger not in LANE_TRIGGERS:
         allowed = ", ".join(sorted(LANE_TRIGGERS))
         raise ConfigError(
             f"[lanes].{name}: `trigger` must be one of {allowed}; got {trigger!r}"

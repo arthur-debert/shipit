@@ -28,6 +28,7 @@ from .verbs.pr import pr as pr_group
 from .verbs.provision import provision as provision_group
 from .verbs.spawn import spawn as spawn_group
 from .verbs.tree import tree as tree_group
+from .verbs.wf import wf as wf_group
 
 #: The CLI entry's own logger — carries the SHIPIT_EXEC announcement's durable
 #: twin (ADR-0033) through the LOG01 pipeline like any subsystem logger.
@@ -262,6 +263,11 @@ root.add_command(tree_group)
 # The nested `spawn` group (TRE03) — shipit-owned subagent spawning: create a
 # write Tree and launch a backend-agent Run rooted in it (ADR-0017/0019).
 root.add_command(spawn_group)
+
+# The nested `wf` group (TOL01-WS04) — workflow tools: `shipit wf test` runs
+# one workflow/job under act in a container against a crafted event, so a
+# workflow edit is validated locally before any push (PRD stories 40/41).
+root.add_command(wf_group)
 
 
 def main(argv: list[str] | None = None) -> int:

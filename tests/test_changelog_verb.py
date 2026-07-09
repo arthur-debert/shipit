@@ -7,7 +7,10 @@ the projection/section/notes writes, and the uniform exit/reporting contract
 check report + diff).
 """
 
+import os
 from pathlib import Path
+
+import pytest
 
 from shipit import changelog as core
 from shipit import cli, config
@@ -144,6 +147,16 @@ def test_render_includes_versions_and_legacy_tail(tmp_path):
     assert text.endswith("# Ancient history\n")
 
 
+def test_render_unwritable_target_is_a_clean_error(tmp_path, capsys):
+    # A write failure (here: CHANGELOG.md is a directory) maps to the uniform
+    # `error: …` surface / exit 1, not a raw OSError traceback (ADR-0030).
+    root = _tree(tmp_path, {"unreleased-a.md": "- a\n"})
+    (root / "CHANGELOG.md").mkdir()
+    assert verb.run_render(str(root), repo_root=_no_git) == 1
+    err = capsys.readouterr().err
+    assert err.startswith("error: cannot write CHANGELOG.md")
+
+
 # --------------------------------------------------------------------------
 # coalesce — the cut-time face
 # --------------------------------------------------------------------------
@@ -151,6 +164,72 @@ def test_render_includes_versions_and_legacy_tail(tmp_path):
 
 def _today() -> str:
     return "2026-07-08"
+
+
+def test_coalesce_mutation_oserror_is_a_clean_error(tmp_path, capsys):
+    # An OSError inside the cut's mutation block (here: the re-render target
+    # CHANGELOG.md is a directory) maps to `error: …` / exit 1, not a traceback.
+    root = _tree(tmp_path, {"unreleased-a.md": "- a\n"})
+    (root / "CHANGELOG.md").mkdir()
+    capsys.readouterr()
+    assert verb.run_coalesce("1.2.3", str(root), repo_root=_no_git, today=_today) == 1
+    err = capsys.readouterr().err
+    assert err.startswith("error: cannot cut 1.2.3")
+
+
+def test_coalesce_notes_out_parent_needs_execute_permission(tmp_path, capsys):
+    # Creating a file in a directory needs write AND execute (search) on the
+    # dir; a parent with write but no execute is refused BEFORE mutation, not
+    # after a later write failure once the cut has landed.
+    if os.name != "posix":
+        pytest.skip("directory permission bits are POSIX-only")
+    if os.geteuid() == 0:
+        pytest.skip("root bypasses directory permission bits")
+    root = _tree(tmp_path, {"unreleased-a.md": "- a\n"})
+    _render_into(root)
+    before = (root / "CHANGELOG.md").read_text()
+    nox = tmp_path / "nox"
+    nox.mkdir()
+    os.chmod(nox, 0o600)  # rw-, no execute → cannot create files inside
+    capsys.readouterr()
+    try:
+        assert (
+            verb.run_coalesce(
+                "1.2.3",
+                str(root),
+                notes_out=str(nox / "notes.md"),
+                repo_root=_no_git,
+                today=_today,
+            )
+            == 1
+        )
+        assert "error" in capsys.readouterr().err.lower()
+        # Untouched: the refusal came before the cut.
+        assert (root / "CHANGELOG" / "unreleased-a.md").exists()
+        assert (root / "CHANGELOG.md").read_text() == before
+    finally:
+        os.chmod(nox, 0o700)  # restore so pytest can clean up the tmp tree
+
+
+def test_coalesce_failed_cut_leaves_no_stray_notes_file(tmp_path, capsys):
+    # The writability preflight must NOT pre-create --notes-out: a cut that
+    # fails after it leaves no empty notes artifact (automation keys off the
+    # file's existence). Here the re-render write fails (CHANGELOG.md is a dir).
+    root = _tree(tmp_path, {"unreleased-a.md": "- a\n"})
+    (root / "CHANGELOG.md").mkdir()
+    notes_file = tmp_path / "notes.md"
+    capsys.readouterr()
+    assert (
+        verb.run_coalesce(
+            "1.2.3",
+            str(root),
+            notes_out=str(notes_file),
+            repo_root=_no_git,
+            today=_today,
+        )
+        == 1
+    )
+    assert not notes_file.exists()
 
 
 def test_coalesce_final_rolls_consumes_and_rerenders(tmp_path, capsys):
@@ -178,6 +257,76 @@ def test_coalesce_final_rolls_consumes_and_rerenders(tmp_path, capsys):
     # …and the projection moved in the same step: the sync check stays green.
     capsys.readouterr()
     assert verb.run_check(str(root), repo_root=_no_git) == 0
+
+
+def test_coalesce_bad_notes_out_refuses_without_mutating(tmp_path, capsys):
+    # A --notes-out that cannot be written (here: a directory) is a refusal
+    # BEFORE the tree is touched — the cut must never land with no notes.
+    root = _tree(tmp_path, {"unreleased-a.md": "- a\n"})
+    _render_into(root)
+    before = (root / "CHANGELOG.md").read_text()
+    capsys.readouterr()
+    notes_dir = tmp_path / "notes-as-dir"
+    notes_dir.mkdir()
+    assert (
+        verb.run_coalesce(
+            "1.2.3",
+            str(root),
+            notes_out=str(notes_dir),
+            repo_root=_no_git,
+            today=_today,
+        )
+        == 1
+    )
+    assert "error" in capsys.readouterr().err.lower()
+    # Nothing mutated: fragment kept, no section written, projection untouched.
+    assert (root / "CHANGELOG" / "unreleased-a.md").exists()
+    assert not (root / "CHANGELOG" / "1.2.3.md").exists()
+    assert (root / "CHANGELOG.md").read_text() == before
+
+
+def test_coalesce_notes_out_creates_missing_parent_dirs(tmp_path, capsys):
+    # A --notes-out under a not-yet-existing directory is created, not a failure.
+    root = _tree(tmp_path, {"unreleased-a.md": "- a\n"})
+    _render_into(root)
+    capsys.readouterr()
+    notes_file = tmp_path / "nested" / "dir" / "notes.md"
+    assert (
+        verb.run_coalesce(
+            "1.2.3",
+            str(root),
+            notes_out=str(notes_file),
+            repo_root=_no_git,
+            today=_today,
+        )
+        == 0
+    )
+    assert notes_file.read_text() == "- a\n"
+
+
+def test_coalesce_unwritable_notes_parent_refuses_without_mutating(tmp_path, capsys):
+    # The writability preflight also catches an unusable parent (here: a file
+    # where a directory is needed) BEFORE the cut lands — no partial mutation.
+    root = _tree(tmp_path, {"unreleased-a.md": "- a\n"})
+    _render_into(root)
+    before = (root / "CHANGELOG.md").read_text()
+    (tmp_path / "afile").write_text("not a dir\n")
+    capsys.readouterr()
+    notes_out = tmp_path / "afile" / "notes.md"
+    assert (
+        verb.run_coalesce(
+            "1.2.3",
+            str(root),
+            notes_out=str(notes_out),
+            repo_root=_no_git,
+            today=_today,
+        )
+        == 1
+    )
+    assert "error" in capsys.readouterr().err.lower()
+    assert (root / "CHANGELOG" / "unreleased-a.md").exists()
+    assert not (root / "CHANGELOG" / "1.2.3.md").exists()
+    assert (root / "CHANGELOG.md").read_text() == before
 
 
 def test_coalesce_prerelease_extracts_and_keeps_fragments(tmp_path, capsys):

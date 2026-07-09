@@ -35,6 +35,7 @@ _RUFF_CFG = lint._data_path("ruff.toml")
 _PRETTIER_CFG = lint._data_path("prettierrc.yaml")
 _MD_CFG = lint._data_path("markdownlint.yaml")
 _YAML_CFG = lint._data_path("yamllint.yaml")
+_ACTIONLINT_CFG = lint._data_path("actionlint.yaml")
 
 # --------------------------------------------------------------------------
 # Pure routing
@@ -143,6 +144,54 @@ def test_route_skips_lex_projections():
     assert routed["markdown"] == ["docs/manual.md"]
     # The sources still route to the lexd leg — the projection is linted there.
     assert routed["lex"] == ["README.lex", "docs/guide.lex"]
+
+
+# --------------------------------------------------------------------------
+# The path-claiming route (TOL01-WS04 #553): .github/workflows/ → actions,
+# ADDITIVE to the yaml extension route.
+# --------------------------------------------------------------------------
+
+
+def test_lang_for_never_returns_a_path_claiming_lang():
+    # The EXTENSION route is untouched by the actions Lang: `.yml` anywhere —
+    # including inside the claimed directory — resolves to the yaml Lang; the
+    # actions claim is additive (route), never an extension hand-off.
+    assert lint.lang_for(".github/workflows/ci.yml").name == "yaml"
+    assert lint.lang_for("a/b.yml").name == "yaml"
+
+
+def test_path_claimed_langs_claims_workflow_yaml():
+    claims = lint.path_claimed_langs(".github/workflows/ci.yml")
+    assert [lang.name for lang in claims] == ["actions"]
+    claims = lint.path_claimed_langs(".github/workflows/release.yaml")
+    assert [lang.name for lang in claims] == ["actions"]
+
+
+def test_path_claimed_langs_scopes_by_prefix_and_extension():
+    # The claim covers only workflow YAML directly IN the prefix directory: a
+    # non-YAML stray in the directory, a sibling `.github` file, a repo-wide
+    # `.yml`, and a lookalike directory all claim nothing.
+    assert lint.path_claimed_langs(".github/workflows/README.md") == []
+    assert lint.path_claimed_langs(".github/dependabot.yml") == []
+    assert lint.path_claimed_langs("config.yml") == []
+    assert lint.path_claimed_langs(".github/workflows-old/ci.yml") == []
+
+
+def test_path_claimed_langs_is_non_recursive():
+    # GitHub reads workflows only from the IMMEDIATE `.github/workflows/`
+    # directory; an archived/generated file in a nested subdirectory is one
+    # GitHub never runs, so actionlint must not claim it (#553).
+    assert lint.path_claimed_langs(".github/workflows/archive/ci.yml") == []
+    assert lint.path_claimed_langs(".github/workflows/old/nested/ci.yaml") == []
+
+
+def test_route_workflow_files_bucket_into_yaml_and_actions():
+    """The one legitimate dual route: a workflow file keeps its yamllint
+    coverage AND gains actionlint's — additive, never a hand-off (#553)."""
+    files = [".github/workflows/ci.yml", "config.yml", "a.py"]
+    routed = dict((lang.name, paths) for lang, paths in lint.route(files))
+    assert routed["yaml"] == [".github/workflows/ci.yml", "config.yml"]
+    assert routed["actions"] == [".github/workflows/ci.yml"]
 
 
 # --------------------------------------------------------------------------
@@ -533,6 +582,27 @@ def test_clean_tree_passes(tmp_path, capsys):
     assert ("ruff", ("--config", _RUFF_CFG, "check", "a.py")) in rec.calls
     assert ("ruff", ("--config", _RUFF_CFG, "format", "--check", "a.py")) in rec.calls
     assert ("markdownlint", ("--config", _MD_CFG, "b.md")) in rec.calls
+
+
+def test_workflow_file_runs_yamllint_and_actionlint(tmp_path):
+    """A workflow file's dual route reaches BOTH tools (TOL01-WS04 #553), each
+    under its injected canonical config: yamllint keeps its coverage, actionlint
+    rides `-config-file <shipped actionlint.yaml>` with the files appended."""
+    rec = _Recorder()
+    rc = lint.run(
+        str(tmp_path),
+        discover=_fake_discover([".github/workflows/ci.yml"]),
+        run_tool=rec,
+    )
+    assert rc == 0
+    assert (
+        "yamllint",
+        ("-c", _YAML_CFG, "--strict", ".github/workflows/ci.yml"),
+    ) in rec.calls
+    assert (
+        "actionlint",
+        ("-config-file", _ACTIONLINT_CFG, ".github/workflows/ci.yml"),
+    ) in rec.calls
 
 
 def test_no_recognized_files_is_clean(tmp_path, capsys):
@@ -2097,6 +2167,42 @@ _HERM_SPECS: tuple[_ToolSpec, ...] = (
         env_kind="file",
         home_rel=".config/yamllint/config",
     ),
+    # actionlint — file-config (`-config-file`), the first PATH-CLAIMED Lang
+    # (TOL01-WS04 #553). Its one ambient source is the project config it
+    # auto-discovers at `<project root>/.github/actionlint.yaml`, the project
+    # root found by walking UP from the workflow file to a `.git` entry — the
+    # fixture plants `.git/HEAD` so the tmp repo IS a project (no `.git`, no
+    # discovery, and the case would be vacuously green). The fixture is DIRTY
+    # under canonical (an unknown self-hosted runner label against the shipped
+    # `labels: []`); a hostile repo config DECLARING the label flips it green
+    # when honored — the injected `-config-file` is what blocks it (for
+    # actionlint even the repo's OWN tracked config is ambient; the gate owns
+    # the config outright). No config env var, no $HOME config, and the walk
+    # stops at the project root — so `cwd` (the markdownlint pattern) is the
+    # one vector. The embedded `run:` script keeps clear of shellcheck
+    # findings so the actionlint verdict is the runner-label rule alone.
+    _ToolSpec(
+        lang="actions",
+        tag="actionlint",
+        target_check=(),
+        binaries=("actionlint",),
+        fixture=(
+            (".git/HEAD", "ref: refs/heads/main\n"),
+            (
+                ".github/workflows/ci.yml",
+                "on: push\n"
+                "jobs:\n"
+                "  j:\n"
+                "    runs-on: my-gpu-box\n"
+                "    steps:\n"
+                "      - run: echo ok\n",
+            ),
+        ),
+        hostile_name=".github/actionlint.yaml",
+        hostile_body="self-hosted-runner:\n  labels: [my-gpu-box]\n",
+        vectors=(_Vector("cwd"),),
+        expected_ok=False,  # unknown runner label is dirty under canonical labels: []
+    ),
     # prettier — file-config (`--config`). Only ambient source is the ancestor
     # `.prettierrc` walk (prettier reads no config env var and no plain $HOME
     # file). Clean 2-space JSON; hostile sets tabWidth 8 so it reflows. JSON is the
@@ -2404,6 +2510,7 @@ CORE_LINT_TOOLS = (
     "shellcheck",
     "shfmt",
     "yamllint",
+    "actionlint",
     "prettier",
     "markdownlint",
 )
@@ -2563,6 +2670,41 @@ def test_gate_has_teeth_removing_ruff_format_config_reddens(tmp_path, monkeypatc
         tmp_path, spec, _tool_for(spec), monkeypatch, _none_resolver
     )
     assert oks == (True, False)
+
+
+@pytest.mark.skipif(shutil.which("actionlint") is None, reason="actionlint not on PATH")
+def test_gate_has_teeth_removing_actionlint_config_file_greens(tmp_path, monkeypatch):
+    """Removing actionlint's `-config-file` injection lets it auto-discover the
+    hostile repo `.github/actionlint.yaml` (which declares the fixture's unknown
+    runner label), so its OWN run MOVES (ok False → True) — proof the injection
+    is load-bearing and the `cwd` invariance case is not vacuous (TOL01-WS04
+    #553). Inlined rather than `_teeth_target_oks` because actionlint's vector
+    is `cwd` (project-root discovery), not the helper's hardcoded ancestor."""
+    spec = _spec("actionlint")
+    tool = _tool_for(spec)
+    clean = _target_run(
+        _ambient_runs(
+            tmp_path / "c",
+            spec,
+            _Vector("cwd"),
+            planted=False,
+            monkeypatch=monkeypatch,
+            canonical=_none_resolver,
+        ),
+        tool,
+    )
+    hostile = _target_run(
+        _ambient_runs(
+            tmp_path / "h",
+            spec,
+            _Vector("cwd"),
+            planted=True,
+            monkeypatch=monkeypatch,
+            canonical=_none_resolver,
+        ),
+        tool,
+    )
+    assert (clean.ok, hostile.ok) == (False, True)
 
 
 @pytest.mark.skipif(shutil.which("prettier") is None, reason="prettier not on PATH")

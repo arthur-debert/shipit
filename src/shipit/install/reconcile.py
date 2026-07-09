@@ -587,6 +587,27 @@ def format_pixi_task_conflict(conflict: PixiTaskConflict) -> str:
     )
 
 
+def _enabled_features(manifest: Mapping[str, object]) -> frozenset[str]:
+    """The feature names referenced by any ``[environments]`` entry.
+
+    pixi's ``[environments]`` maps an env name to its features — either a bare
+    list (``test = ["test"]``) or a table (``test = { features = ["test"] }``).
+    A feature listed by no environment materializes in none, so its tasks
+    cannot collide with a default-env managed task (:func:`_pixi_task_conflicts`
+    uses this to avoid over-detecting). The always-present ``default`` feature
+    is not enumerated here — it is not a consumer ``[feature.*]`` name.
+    """
+    environments = manifest.get("environments")
+    if not isinstance(environments, dict):
+        return frozenset()
+    enabled: set[str] = set()
+    for spec in environments.values():
+        feats = spec.get("features") if isinstance(spec, dict) else spec
+        if isinstance(feats, list):
+            enabled.update(str(f) for f in feats)
+    return frozenset(enabled)
+
+
 def _pixi_task_conflicts(
     root: Path, units: Sequence[Unit], consumer_hashes: Mapping[str, str | None]
 ) -> tuple[PixiTaskConflict, ...]:
@@ -596,8 +617,12 @@ def _pixi_task_conflicts(
     ADD-bound-only rule it shares): no manifest or an unparseable one detects
     nothing. Only ``[tasks]``-anchored pixi block units are checked — a task
     the block would define in the default env clashes with a same-named task
-    any ``[feature.*.tasks]`` table defines (they land in different
-    environments, which is exactly what makes ``pixi run`` refuse the name).
+    a consumer ``[feature.*.tasks]`` table defines, but ONLY when that feature
+    is ENABLED by some ``[environments]`` entry: a feature no environment
+    includes never materializes its tasks in any env, so it cannot make
+    ``pixi run <task>`` ambiguous — counting it would over-detect and skip the
+    managed block needlessly. Ambiguity is exactly the task landing in the
+    default env (the managed block) AND another env (the enabled feature).
     """
     path = root / PIXI_FILE
     if not path.is_file():
@@ -609,8 +634,11 @@ def _pixi_task_conflicts(
     features = manifest.get("feature")
     if not isinstance(features, dict):
         return ()
+    enabled = _enabled_features(manifest)
     feature_tasks: dict[str, list[str]] = {}
     for feature, body in features.items():
+        if str(feature) not in enabled:
+            continue  # unreferenced feature: its tasks reach no environment
         tasks = body.get("tasks") if isinstance(body, dict) else None
         if isinstance(tasks, dict):
             for task in tasks:

@@ -235,6 +235,13 @@ def test_lanes_trigger_vocabulary_is_closed():
         config.load_lanes({"lanes": {"x": {"run": "lint", "trigger": "PR"}}})
 
 
+def test_lanes_trigger_non_string_is_a_configerror_not_a_typeerror():
+    # TOML parses `trigger = ["pr"]` into a list; the unhashable value must be
+    # rejected as ConfigError (not crash the membership test with a TypeError).
+    with pytest.raises(config.ConfigError, match="`trigger` must be one of"):
+        config.load_lanes({"lanes": {"x": {"run": "lint", "trigger": ["pr"]}}})
+
+
 def test_lanes_entry_must_be_a_table():
     with pytest.raises(config.ConfigError, match=r"\[lanes\].x must be a table"):
         config.load_lanes({"lanes": {"x": "changelog check"}})
@@ -349,6 +356,15 @@ def test_load_toolchains_table_entry_with_per_path_test_override():
     )
     assert entries[0].toolchain == "rust"
     assert entries[0].commands == {"test": ("cargo", "test", "--workspace")}
+
+
+def test_toolchain_entry_commands_are_read_only():
+    # The "typed frozen values" contract (ADR-0030): a parsed entry's override
+    # map cannot be mutated after the fact — frozen=True freezes the binding,
+    # and the map itself is wrapped read-only.
+    entry = config.ToolchainEntry(path=".", toolchain="python", commands={})
+    with pytest.raises(TypeError):
+        entry.commands["test"] = ("pytest",)  # type: ignore[index]
 
 
 def test_load_toolchains_absent_table_is_empty():

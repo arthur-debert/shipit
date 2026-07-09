@@ -229,7 +229,16 @@ def test_render_shape_preamble_unreleased_versions_desc_legacy():
 def test_render_no_fragments_no_legacy():
     text = core.render((), {"0.1.0": "## 0.1.0 - 2026-01-01\n\n- x\n"})
     assert "## Unreleased\n\n## 0.1.0" in text
-    assert text.endswith("- x\n\n")
+    # Exactly one trailing newline (no MD012 blank-line tail) when no legacy.
+    assert text.endswith("- x\n")
+    assert not text.endswith("- x\n\n")
+
+
+def test_render_preserves_significant_trailing_whitespace():
+    # The single-trailing-newline normalization strips only newlines, not a
+    # meaningful trailing space (a markdown hard line break at end-of-file).
+    text = core.render((), {"0.1.0": "## 0.1.0 - 2026-01-01\n\n- x  \n"}, legacy=None)
+    assert text.endswith("- x  \n")
 
 
 def test_render_is_deterministic():
