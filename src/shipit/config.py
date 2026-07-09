@@ -52,6 +52,7 @@ _KNOWN_TABLES = {
     "project",
     "lint",
     "toolchains",
+    "artifacts",
     "lanes",
 }
 _ESCAPE_HATCH_TABLES = {"project", "custom"}
@@ -220,17 +221,19 @@ class ToolchainEntry:
             object.__setattr__(self, "commands", MappingProxyType(dict(self.commands)))
 
 
-def _parse_override(path: str, tool: str, value: object) -> tuple[str, ...]:
-    """One per-path producing-command override: a non-empty list of non-empty
-    strings — an argv, executed through the one exec seam, NEVER a shell
-    string (ADR-0028: no shell=True anywhere)."""
+def _parse_argv(where: str, value: object) -> tuple[str, ...]:
+    """One declared producing command — ``where`` names the config key for the
+    error: a non-empty list of non-empty strings — an argv, executed through
+    the one exec seam, NEVER a shell string (ADR-0028: no shell=True
+    anywhere). Shared by the per-path tool overrides and the artifact map's
+    bundle/harness commands."""
     if (
         not isinstance(value, list)
         or not value
         or not all(isinstance(a, str) and a for a in value)
     ):
         raise ConfigError(
-            f"[toolchains].{path}.{tool} must be a non-empty argv list of "
+            f"{where} must be a non-empty argv list of "
             f'strings, e.g. ["cargo", "test"]; got {value!r}'
         )
     return tuple(value)
@@ -265,7 +268,7 @@ def _parse_toolchain_entry(path: str, spec: object) -> ToolchainEntry:
                     f"[toolchains].{path}: unknown tool slot `{tool}`; "
                     f"known tools: {known}"
                 )
-            overrides[tool] = _parse_override(path, tool, value)
+            overrides[tool] = _parse_argv(f"[toolchains].{path}.{tool}", value)
     else:
         raise ConfigError(
             f"[toolchains].{path} must be a toolchain name or an inline table, "
@@ -287,7 +290,7 @@ def load_toolchains(cfg: dict) -> tuple[ToolchainEntry, ...]:
 
     The map is the repo's structural self-description (ADR-0007: the repo IS
     the set of these entries): each build-bearing path declares its toolchain,
-    and the tree-input Tool verbs (``shipit test``, WS02's ``build``) walk it
+    and the tree-input Tool verbs (``shipit test``, ``shipit build``) walk it
     and dispatch each entry to a producing command. An entry is either a bare
     registry name or a table with per-tool overrides::
 
@@ -305,6 +308,246 @@ def load_toolchains(cfg: dict) -> tuple[ToolchainEntry, ...]:
     return tuple(
         _parse_toolchain_entry(str(path), spec) for path, spec in section.items()
     )
+
+
+# --------------------------------------------------------------------------
+# The [artifacts] map — the repo's declared Artifact set (TOL01-WS02)
+# --------------------------------------------------------------------------
+#
+# An **Artifact** is a produced, distributable unit (CONTEXT.md), declared
+# separately from the path→toolchain map and many-to-many with it (ADR-0007:
+# one rust workspace → several artifacts; several toolchains → one Tauri app).
+# Everything artifact-shaped downstream consumes this parse: `shipit build`
+# consumes the build targets NOW; the bundle stage, the release stages'
+# endpoint walk, the sign stage, and `shipit e2e` (TOL01-WS03) consume their
+# fields LATER — parsed here so the whole map is validated at the boundary
+# (ADR-0030: parse to typed frozen values; construction is validation), with
+# loud errors naming the offending key.
+#
+#     [artifacts.lex-cli]
+#     build     = [{ toolchain = "rust", package = "lex-cli" }]
+#     bundle    = { command = ["tauri", "bundle"] }          # optional
+#     endpoints = ["gh-release", "crates"]                   # closed set
+#     e2e       = { harness = ["bats", "tests/e2e.bats"] }   # optional
+#     sign      = true                                       # default false
+#
+# A build entry may be the bare toolchain name ("python") when the leg's
+# default build produces the artifact whole. An artifact may declare ZERO
+# build targets (nvim's "the tag is the release": no build, no bundle, one
+# endpoint — PRD further notes).
+
+
+#: The CLOSED distribution-endpoint registry names an ``endpoints`` list may
+#: use (PRD: one adapter per endpoint; gh-release, crates, pypi, npm, brew).
+#: Adding an endpoint is an adapter plus an entry here; consumed by the
+#: release stages later — WS02 only validates the declaration.
+ENDPOINTS: tuple[str, ...] = ("gh-release", "crates", "pypi", "npm", "brew")
+
+
+@dataclass(frozen=True)
+class BuildTarget:
+    """One producing toolchain build target of an :class:`Artifact`.
+
+    ``toolchain`` names the closed-registry toolchain whose build leg produces
+    this artifact. ``package`` narrows the leg's base build command to this
+    artifact's unit — the cargo workspace package (``-p``), the go package
+    path, the npm workspace — ``None`` when the leg's default build produces
+    it whole. ``version_var`` (go only) is the fully qualified variable the
+    supplied version is injected into at build via ``-ldflags -X`` (ADR-0041);
+    ``None`` keeps the binary's embedded default — the legacy empty
+    version-package contract.
+    """
+
+    toolchain: str
+    package: str | None = None
+    version_var: str | None = None
+
+
+@dataclass(frozen=True)
+class BundleSpec:
+    """An artifact's declared bundle step — the optional composition that
+    combines toolchain outputs into the artifact (``tauri bundle``,
+    ``electron-builder``). ``command`` is the argv, through the one exec seam
+    like every producing command (ADR-0028). Parsed now; RUN by the release
+    ``bundle`` stage later ("package" is retired — the stage word is bundle).
+    """
+
+    command: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class E2eSpec:
+    """An artifact's declared e2e harness (consumed by ``shipit e2e``,
+    TOL01-WS03). ``harness`` is the declared harness argv; ``None`` (a bare
+    ``e2e = {}``) means the registry default (bats-run check-e2e, PRD).
+    DECLARING the table at all is what opts an artifact into e2e — a repo
+    with no ``e2e`` key has no e2e lane (PRD story 11)."""
+
+    harness: tuple[str, ...] | None = None
+
+
+@dataclass(frozen=True)
+class Artifact:
+    """One ``[artifacts]`` entry, fully typed (ADR-0030).
+
+    ``build`` targets are consumed by ``shipit build`` now; ``bundle`` by the
+    bundle stage, ``endpoints`` by the release stages, ``e2e`` by WS03, and
+    ``sign`` by the sign stage / preflight secrets validation — all later.
+    """
+
+    name: str
+    build: tuple[BuildTarget, ...] = ()
+    bundle: BundleSpec | None = None
+    endpoints: tuple[str, ...] = ()
+    e2e: E2eSpec | None = None
+    sign: bool = False
+
+
+def _reject_unknown_keys(where: str, spec: dict, known: tuple[str, ...]) -> None:
+    """Loud ADR-0030 boundary check: an unrecognized key in ``spec`` names
+    itself and the known set, so a typo (``endpoint``) dies at parse."""
+    for key in spec:
+        if key not in known:
+            raise ConfigError(
+                f"{where}: unknown key `{key}`; known keys: {', '.join(known)}"
+            )
+
+
+def _parse_build_target(where: str, spec: object) -> BuildTarget:
+    """One ``build`` list entry: a bare toolchain name, or a table with
+    ``toolchain`` plus the optional ``package`` / ``version-var`` narrowing."""
+    from .tools import registry  # lazy — config stays import-light at module load
+
+    if isinstance(spec, str):
+        if not spec:
+            raise ConfigError(
+                f"{where}: build target must be a non-empty toolchain name"
+            )
+        name, package, version_var = spec, None, None
+    elif isinstance(spec, dict):
+        _reject_unknown_keys(where, spec, ("toolchain", "package", "version-var"))
+        name = spec.get("toolchain")
+        if not isinstance(name, str) or not name:
+            raise ConfigError(
+                f"{where} must name its toolchain, e.g. "
+                f'{{ toolchain = "rust", package = "my-cli" }}'
+            )
+        package = spec.get("package")
+        if package is not None and (not isinstance(package, str) or not package):
+            raise ConfigError(f"{where}: package must be a non-empty string")
+        version_var = spec.get("version-var")
+        if version_var is not None and (
+            not isinstance(version_var, str) or not version_var
+        ):
+            raise ConfigError(f"{where}: version-var must be a non-empty string")
+        if isinstance(version_var, str) and any(ch.isspace() for ch in version_var):
+            # version-var rides go's -ldflags -X value (a single token the go
+            # tool re-splits on whitespace), so whitespace would fragment it
+            # into stray tokens/flags — refused at parse (ADR-0041), the same
+            # class as a whitespace `--version`.
+            raise ConfigError(
+                f"{where}: version-var must not contain whitespace "
+                "(it rides go's -ldflags -X value, ADR-0041)"
+            )
+    else:
+        raise ConfigError(
+            f"{where} must be a toolchain name or an inline table, e.g. "
+            f'"python" or {{ toolchain = "rust", package = "my-cli" }}; '
+            f"got {spec!r}"
+        )
+    if registry.toolchain(name) is None:
+        known = ", ".join(registry.names())
+        raise ConfigError(
+            f"{where}: unknown toolchain `{name}`; known toolchains: {known}"
+        )
+    if version_var is not None and name != "go":
+        # ADR-0041: only go injects the version at build (-ldflags -X); every
+        # other toolchain's version is a manifest projection bumped at prepare.
+        raise ConfigError(
+            f"{where}: version-var applies only to the go toolchain "
+            f"(ADR-0041: other toolchains carry the version in their manifest)"
+        )
+    return BuildTarget(toolchain=name, package=package, version_var=version_var)
+
+
+def _parse_endpoints(where: str, value: object) -> tuple[str, ...]:
+    """The ``endpoints`` list, validated against the closed :data:`ENDPOINTS`
+    registry — a declaration the release stages consume later."""
+    if not isinstance(value, list) or not all(isinstance(e, str) for e in value):
+        raise ConfigError(f"{where}: must be a list of endpoint names")
+    for endpoint in value:
+        if endpoint not in ENDPOINTS:
+            known = ", ".join(ENDPOINTS)
+            raise ConfigError(
+                f"{where}: unknown endpoint `{endpoint}`; known endpoints: {known}"
+            )
+    return tuple(value)
+
+
+def _parse_bundle(where: str, spec: object) -> BundleSpec:
+    if not isinstance(spec, dict):
+        raise ConfigError(
+            f"{where}.bundle: must be a table, e.g. "
+            f'{{ command = ["tauri", "bundle"] }}; got {spec!r}'
+        )
+    _reject_unknown_keys(f"{where}.bundle", spec, ("command",))
+    if "command" not in spec:
+        raise ConfigError(f"{where}.bundle must declare its command argv")
+    return BundleSpec(command=_parse_argv(f"{where}.bundle.command", spec["command"]))
+
+
+def _parse_e2e(where: str, spec: object) -> E2eSpec:
+    if not isinstance(spec, dict):
+        raise ConfigError(
+            f"{where}.e2e: must be a table (empty for the default harness), "
+            f'e.g. {{}} or {{ harness = ["bats", "tests/e2e.bats"] }}; got {spec!r}'
+        )
+    _reject_unknown_keys(f"{where}.e2e", spec, ("harness",))
+    if "harness" not in spec:
+        return E2eSpec(harness=None)
+    return E2eSpec(harness=_parse_argv(f"{where}.e2e.harness", spec["harness"]))
+
+
+def _parse_artifact(name: str, spec: object) -> Artifact:
+    """One ``[artifacts.<name>]`` table into a typed :class:`Artifact`."""
+    where = f"[artifacts].{name}"
+    if not isinstance(spec, dict):
+        raise ConfigError(f"{where} must be a table; got {spec!r}")
+    _reject_unknown_keys(where, spec, ("build", "bundle", "endpoints", "e2e", "sign"))
+    build_spec = spec.get("build", [])
+    if not isinstance(build_spec, list):
+        raise ConfigError(f"{where}.build: must be a list of build targets")
+    build = tuple(
+        _parse_build_target(f"{where}.build[{i}]", entry)
+        for i, entry in enumerate(build_spec)
+    )
+    sign = spec.get("sign", False)
+    if not isinstance(sign, bool):
+        raise ConfigError(f"{where}.sign: must be a boolean; got {sign!r}")
+    return Artifact(
+        name=name,
+        build=build,
+        bundle=_parse_bundle(where, spec["bundle"]) if "bundle" in spec else None,
+        endpoints=_parse_endpoints(f"{where}.endpoints", spec.get("endpoints", [])),
+        e2e=_parse_e2e(where, spec["e2e"]) if "e2e" in spec else None,
+        sign=sign,
+    )
+
+
+def load_artifacts(cfg: dict) -> tuple[Artifact, ...]:
+    """Parse the ``[artifacts]`` map (already loaded) into typed
+    :class:`Artifact` values, in DECLARATION order.
+
+    ``()`` when the table is absent — a repo with no artifact map still
+    builds (``shipit build`` runs each leg's base build command); declaring
+    artifacts is what narrows legs to per-artifact targets and, later, feeds
+    the bundle/endpoint/sign/e2e machinery. Malformed shapes raise
+    :class:`ConfigError` naming the offending key (ADR-0030).
+    """
+    section = cfg.get("artifacts", {})
+    if not isinstance(section, dict):
+        raise ConfigError("[artifacts] must be a table of artifact declarations")
+    return tuple(_parse_artifact(str(name), spec) for name, spec in section.items())
 
 
 # --------------------------------------------------------------------------

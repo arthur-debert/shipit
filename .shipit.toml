@@ -55,8 +55,8 @@ codex = {}
 agy = {}
 
 # [toolchains] — the path→toolchain map (ADR-0007/0039): each build-bearing path
-# declares its toolchain, and the tree-input Tool verbs (`shipit test`, later
-# `build`) walk this map and dispatch each entry — a Leg — to its producing
+# declares its toolchain, and the tree-input Tool verbs (`shipit test`,
+# `shipit build`) walk this map and dispatch each entry — a Leg — to its producing
 # command: the registry default per toolchain, or a per-path override, e.g.
 # `"crates/cli" = { toolchain = "rust", test = ["cargo", "test"] }`. shipit is a
 # single python path; the registry default runs pytest with the committed

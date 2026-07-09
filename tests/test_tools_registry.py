@@ -30,12 +30,25 @@ def test_lookup_by_name_and_unregistered_is_none():
     assert registry.toolchain("tauri") is None  # never a Kind/dispatch label
 
 
-def test_command_accessor_serves_the_tool_slot():
+def test_default_build_commands_are_the_legacy_single_target_builds():
+    # Issue #555's legacy digest: rust -> the build-binaries job's release
+    # build, go -> go-cli's static stripped form (env/version shaping lives
+    # in tools.build, not here), python -> uv build, npm -> the package's own
+    # build script (same deference as the test slot).
+    by_name = {tc.name: tc for tc in registry.TOOLCHAINS}
+    assert by_name["rust"].build == ("cargo", "build", "--release")
+    assert by_name["go"].build == ("go", "build", "-trimpath", "-ldflags", "-s -w")
+    assert by_name["python"].build == ("uv", "build")
+    assert by_name["npm"].build == ("npm", "run", "build")
+
+
+def test_command_accessor_serves_each_tool_slot():
     assert registry.RUST.command(registry.TOOL_TEST) == ("cargo", "nextest", "run")
+    assert registry.RUST.command(registry.TOOL_BUILD) == ("cargo", "build", "--release")
 
 
 def test_command_accessor_rejects_an_unknown_tool_slot():
-    # The tool-slot vocabulary is CLOSED (WS02 adds `build` as an entry); a
-    # slot outside it is a caller bug, named loudly.
-    with pytest.raises(registry.UnknownToolError, match="known: test"):
-        registry.RUST.command("build")
+    # The tool-slot vocabulary is CLOSED (test + build); a slot outside it is
+    # a caller bug, named loudly.
+    with pytest.raises(registry.UnknownToolError, match="known: test, build"):
+        registry.RUST.command("bundle")

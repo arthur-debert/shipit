@@ -16,6 +16,7 @@ import click
 
 from . import __version__, buildid, events, logcontext
 from .logsetup import configure_logging, reset_logging
+from .verbs import build as build_verb
 from .verbs import gh_setup, install, lint, logs, verify_apps
 from .verbs import test as test_verb
 from .verbs._context import resolve_root_context
@@ -211,6 +212,34 @@ def test_cmd(args: tuple[str, ...]) -> None:
     missing tool binary hard-fails, never skips), 2 usage.
     """
     raise SystemExit(test_verb.run(list(args)))
+
+
+@root.command(name="build", context_settings={"ignore_unknown_options": True})
+@click.option(
+    "--version",
+    "version",
+    default=None,
+    help="The release version to inject where a build target declares it "
+    "(go's -ldflags -X, ADR-0041). Supplied, never computed; absent keeps "
+    "the embedded default.",
+)
+@click.argument("args", nargs=-1, type=click.UNPROCESSED)
+def build_cmd(version: str | None, args: tuple[str, ...]) -> None:
+    """Run this repo's build legs: `shipit build [--version VERSION] [LEG] [-- ARGS...]`.
+
+    Walks the `.shipit.toml [toolchains]` path->toolchain map and dispatches
+    each build leg to its REAL builder (cargo / go build / uv build / the npm
+    build script — pixi provisions, never builds): the registry default per
+    toolchain, or the entry's per-path override, narrowed to the
+    `[artifacts]` map's declared build targets when the repo declares any.
+    Bare `shipit build` runs EVERY leg. LEG selects one (a toolchain name, or
+    a map path); args after `--` are forwarded verbatim to that leg's builder
+    (`shipit build npm -- --workspace web`) and require exactly one selected
+    leg. `--version` supplies the release version injected where a go target
+    declares its var (ADR-0041). Exit: 0 all steps build, 1 any step fails (a
+    missing builder hard-fails, never skips), 2 usage.
+    """
+    raise SystemExit(build_verb.run(list(args), version=version))
 
 
 # The nested `changelog` group (TOL01-WS06) — the language-agnostic

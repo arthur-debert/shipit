@@ -2,7 +2,7 @@
 
 A **Toolchain** names the build/test ecosystem of one path in a repo (rust,
 go, python, npm) and carries the DEFAULT producing command per **tool slot**
-(this WS fills ``test``; WS02 fills ``build``). The registry is CLOSED, the
+(``test`` from WS01, ``build`` from WS02). The registry is CLOSED, the
 lint ``Lang`` set's mirror: adding a toolchain is adding an entry here,
 nothing downstream changes — and a toolchain is never a project-Kind switch
 ("a tauri Kind" is a composition of map entries, not a dispatch label).
@@ -14,12 +14,25 @@ test runner used by bin/check-tests across the fleet"), go → ``go test
 lists only rust/go/python); ADR-0039's registry sketch names ``npm test``
 — the package's own test script — and that is the default chosen here.
 
+The default build commands are the legacy CI matrix jobs' single-target
+builds (issue #555's legacy digest): rust → ``cargo build --release``
+(``rust-ci``'s build-binaries job, minus the CI-routed ``--target`` matrix),
+go → ``go build -trimpath -ldflags "-s -w"`` (``go-cli``'s static build; the
+``CGO_ENABLED=0`` env and the ADR-0041 ``-X`` version injection are shaped
+per invocation by :mod:`shipit.tools.build`, since env and a supplied
+version are not argv defaults), python → ``uv build`` (sdist + wheel in uv's
+isolated build env), npm → the package's own build script (``npm run
+build`` — same deference as the test slot; ``build-frontend`` is not a tool,
+it IS this leg). Pixi is NEVER the build backend: these argv invoke the real
+builder directly (PRD story 9) — provisioning stays in ``pixi.toml``.
+
 These argv literals are the producing commands' ONE assembly point: per
 ADR-0028, tool argv built outside its adapter is a defect, and the mechanized
 sweep (``tests/test_tool_argv_sweep.py``) pins this module as the home for
-the ``cargo`` / ``go`` / ``pytest`` / ``npm`` heads. A per-path override
-(``.shipit.toml``, :func:`shipit.config.load_toolchains`) substitutes a
-consumer-declared argv for one leg — data, not a second assembly point.
+the ``cargo`` / ``go`` / ``pytest`` / ``npm`` / ``uv`` heads. A per-path
+override (``.shipit.toml``, :func:`shipit.config.load_toolchains`)
+substitutes a consumer-declared argv for one leg — data, not a second
+assembly point.
 """
 
 from __future__ import annotations
@@ -27,10 +40,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 #: The tool slots a :class:`Toolchain` entry carries — the CLOSED vocabulary of
-#: tree-input Tool verbs. WS01 ships ``test``; WS02 adds ``build`` (a new slot
-#: is a new field on :class:`Toolchain` plus a name here).
+#: tree-input Tool verbs: ``test`` (WS01) and ``build`` (WS02). A new slot is
+#: a new field on :class:`Toolchain` plus a name here.
 TOOL_TEST = "test"
-TOOLS: tuple[str, ...] = (TOOL_TEST,)
+TOOL_BUILD = "build"
+TOOLS: tuple[str, ...] = (TOOL_TEST, TOOL_BUILD)
 
 
 class UnknownToolError(ValueError):
@@ -41,14 +55,18 @@ class UnknownToolError(ValueError):
 class Toolchain:
     """One registry entry: a toolchain and its default producing command per tool.
 
-    ``test`` is the default test-producing argv, run with cwd at the leg's map
-    path. A per-path ``.shipit.toml`` override replaces it for that leg only
-    (:func:`shipit.config.load_toolchains`); the registry never changes per
-    repo.
+    ``test`` / ``build`` are the default producing argvs per tool slot, run
+    with cwd at the leg's map path. A per-path ``.shipit.toml`` override
+    replaces one for that leg only (:func:`shipit.config.load_toolchains`);
+    the registry never changes per repo. The ``build`` argv is the BASE
+    command: per-invocation shaping — the artifact's build target args, go's
+    env and version injection — belongs to :mod:`shipit.tools.build`, never
+    here.
     """
 
     name: str
     test: tuple[str, ...]
+    build: tuple[str, ...]
 
     def command(self, tool: str) -> tuple[str, ...]:
         """The default producing argv for ``tool`` (a :data:`TOOLS` slot).
@@ -63,21 +81,36 @@ class Toolchain:
         return getattr(self, tool)
 
 
-#: cargo-nextest: the fleet's standard rust test runner (the legacy rust-ci
+#: rust: cargo-nextest is the fleet's standard test runner (the legacy rust-ci
 #: workflow installed it explicitly for bin/check-tests; the PRD keeps it).
-RUST = Toolchain("rust", test=("cargo", "nextest", "run"))
-#: go's own runner over every package — the legacy go-ci check job's form.
-GO = Toolchain("go", test=("go", "test", "./..."))
-#: pytest, bare: options belong to the repo's committed pytest config
-#: (pyproject/pytest.ini), not the dispatch registry.
-PYTHON = Toolchain("python", test=("pytest",))
-#: The package's own test script (``npm test``) — the PRD does not pin an npm
-#: default (story 3 lists only rust/go/python); ADR-0039's registry sketch
-#: names ``npm test``, and delegating to the package script is the choice
-#: recorded here: node repos already declare their runner (vitest, jest, …)
-#: in ``package.json``, so the registry defers to that declaration rather
-#: than picking a runner for the fleet.
-NPM = Toolchain("npm", test=("npm", "test"))
+#: The build is the legacy build-binaries job's release build; the artifact's
+#: cargo workspace package (``-p``) is target shaping, not a default.
+RUST = Toolchain(
+    "rust",
+    test=("cargo", "nextest", "run"),
+    build=("cargo", "build", "--release"),
+)
+#: go: its own runner over every package — the legacy go-ci check job's form.
+#: The build is go-cli's static form (``-trimpath``, stripped via ``-s -w``);
+#: ``CGO_ENABLED=0`` and the supplied-version ``-X`` injection (ADR-0041) are
+#: per-invocation shaping in :mod:`shipit.tools.build`.
+GO = Toolchain(
+    "go",
+    test=("go", "test", "./..."),
+    build=("go", "build", "-trimpath", "-ldflags", "-s -w"),
+)
+#: python: pytest, bare — options belong to the repo's committed pytest config
+#: (pyproject/pytest.ini), not the dispatch registry. The build is ``uv
+#: build`` (sdist + wheel), python-pkg's build job minus the CI routing.
+PYTHON = Toolchain("python", test=("pytest",), build=("uv", "build"))
+#: npm: the package's own scripts for BOTH slots (``npm test`` / ``npm run
+#: build``) — the PRD does not pin npm defaults (story 3 lists only
+#: rust/go/python); ADR-0039's registry sketch names ``npm test``, and
+#: delegating to the package script is the choice recorded here: node repos
+#: already declare their runner and bundler (vitest, vite, …) in
+#: ``package.json``, so the registry defers to that declaration rather than
+#: picking one for the fleet.
+NPM = Toolchain("npm", test=("npm", "test"), build=("npm", "run", "build"))
 
 #: The closed registry, in a stable order. Adding a toolchain is adding an
 #: entry here (mirror of the lint ``LANGS`` tuple).
