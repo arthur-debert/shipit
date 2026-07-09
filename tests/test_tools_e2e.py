@@ -126,6 +126,16 @@ def test_passthrough_over_several_jobs_is_a_hard_error_never_a_broadcast():
     assert job.harness[-1] == "--tap"
 
 
+def test_passthrough_over_a_repo_with_no_e2e_is_a_usage_error_not_a_no_op():
+    # Passthrough is a usage claim that exactly one artifact receives it. Over a
+    # repo where NO artifact declares e2e (zero jobs), `shipit e2e -- --tap`
+    # must fail as usage, NOT take the bare clean-no-op path — otherwise a
+    # misconfigured CI lane hides as a green exit 0.
+    artifacts = (_artifact("cli", build=(config.BuildTarget("rust"),)),)
+    with pytest.raises(e2e_mod.E2ePlanError, match=r"exactly one.*declares no e2e"):
+        e2e_mod.plan_e2e(artifacts, passthrough=("--tap",))
+
+
 # --------------------------------------------------------------------------
 # binary_location — declaration-derived, filesystem-free
 # --------------------------------------------------------------------------

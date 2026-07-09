@@ -99,6 +99,28 @@ def test_load_portfolio_tolerates_unknown_keys():
     assert fleetsweep.load_portfolio(cfg)[0].repo == "a/b"
 
 
+@pytest.mark.parametrize("dup", ["a/b", "A/B"])
+def test_load_portfolio_rejects_duplicate_repo_naming_both_sites(dup):
+    # The --repo filter keys entries by canonical (lowercased) slug, so a
+    # duplicate — even a case-only one (`A/B` vs `a/b`) — would silently
+    # collapse under filtering while the full sweep runs both. Rejected loud at
+    # load, naming BOTH declaration sites so the misconfigured manifest is found.
+    cfg = {
+        "project": {
+            "portfolio": {
+                "s": [{"repo": "a/b", "path": "one"}],
+                "t": [{"repo": dup, "path": "two"}],
+            }
+        }
+    }
+    with pytest.raises(config.ConfigError) as exc:
+        fleetsweep.load_portfolio(cfg)
+    msg = str(exc.value)
+    assert "duplicate portfolio repo" in msg
+    assert "[project.portfolio].s[0]" in msg
+    assert "[project.portfolio].t[0]" in msg
+
+
 # --------------------------------------------------------------------------
 # Applicability — derived from the repo's own declarations
 # --------------------------------------------------------------------------

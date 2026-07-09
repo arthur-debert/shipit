@@ -182,6 +182,13 @@ def load_portfolio(cfg: dict) -> tuple[PortfolioEntry, ...]:
     never descends — the sweep is the consumer, so the shape it needs is
     validated at ITS boundary. A missing or malformed table raises
     :class:`~shipit.config.ConfigError` naming the offending entry.
+
+    Duplicate repos are REJECTED here, naming both declaration sites: the
+    ``--repo`` filter (:mod:`shipit.verbs.fleet`) keys entries by canonical
+    (lowercased) slug, so two entries for one repo — including case-only
+    differences — would silently collapse under filtering while the full sweep
+    runs both. Failing loud at load keeps the filtered run consistent with the
+    full sweep and surfaces the misconfigured manifest.
     """
     section: object = None
     where = "[project.portfolio]"
@@ -199,11 +206,28 @@ def load_portfolio(cfg: dict) -> tuple[PortfolioEntry, ...]:
     if not isinstance(section, dict):
         raise config.ConfigError(f"{where} must be a table of stack -> entry list")
     entries: list[PortfolioEntry] = []
+    seen: dict[str, str] = {}
     for stack, specs in section.items():
         if not isinstance(specs, list):
             raise config.ConfigError(f"{where}.{stack} must be a list of repo entries")
         for i, spec in enumerate(specs):
-            entries.append(_parse_entry(f"{where}.{stack}[{i}]", str(stack), spec))
+            site = f"{where}.{stack}[{i}]"
+            entry = _parse_entry(site, str(stack), spec)
+            # Key by the canonical (lowercased) slug — the SAME normalization the
+            # --repo filter uses (identity.repo_from_slug) — so a case-only dup is
+            # caught, not just a byte-identical one. _parse_entry already validated
+            # the slug parses, so this never raises ValueError.
+            slug = identity.repo_from_slug(entry.repo).slug
+            if slug in seen:
+                raise config.ConfigError(
+                    f"{site}: duplicate portfolio repo {slug!r} — also declared at "
+                    f"{seen[slug]}. The sweep keys repos by canonical (lowercased) "
+                    f"slug, so a duplicate (including a case-only difference) would "
+                    f"silently collapse under `--repo` filtering while the full "
+                    f"sweep runs both; declare each repo once."
+                )
+            seen[slug] = site
+            entries.append(entry)
     return tuple(entries)
 
 

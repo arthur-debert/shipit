@@ -147,8 +147,10 @@ def plan_e2e(
     non-declaring (or unknown) artifact is a usage error, never that clean
     no-op: it raises :class:`E2ePlanError` whether other artifacts declare
     e2e or none does. ``passthrough`` is appended verbatim to the (single)
-    selected job's harness argv; passthrough selecting several jobs also
-    raises :class:`E2ePlanError`.
+    selected job's harness argv; it is a usage claim that EXACTLY ONE artifact
+    receives it, so passthrough selecting several jobs raises
+    :class:`E2ePlanError` — and so does passthrough over a repo that declares
+    no e2e at all (zero jobs), which is a usage error, never the clean no-op.
     """
     jobs = [
         E2eJob(
@@ -165,8 +167,19 @@ def plan_e2e(
     ]
     if selector is None:
         # The bare invocation over a repo with no e2e lane is the ONLY clean
-        # empty exit ("no e2e declared", exit 0) — never an error.
+        # empty exit ("no e2e declared", exit 0) — never an error. That no-op
+        # is BARE only: passthrough args are a usage claim that exactly one
+        # artifact receives them, so passthrough over a repo that declares no
+        # e2e is exit-2 usage, never a green no-op (same doctrine as the
+        # passthrough-over-several guard below) — otherwise a misconfigured CI
+        # lane hides as a green no-op.
         if not jobs:
+            if passthrough:
+                raise E2ePlanError(
+                    f"passthrough args need exactly one e2e artifact, but this "
+                    f"repo declares no e2e — no artifact to receive "
+                    f"{list(passthrough)}"
+                )
             return ()
         selected = jobs
     else:
