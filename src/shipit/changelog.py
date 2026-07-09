@@ -217,9 +217,12 @@ def _terminated(text: str) -> str:
 #: surrounding whitespace normalizes away for grouping.
 _SECTION_RE = re.compile(r"^### +(?P<name>\S.*?) *$")
 
-#: A code-fence delimiter line — a fenced block may quote ``### …`` lines
-#: that must not be mistaken for section headings.
-_FENCE_RE = re.compile(r"^(?:```|~~~)")
+#: A code-fence delimiter line (CommonMark §4.5): 0-3 leading spaces then a run
+#: of three-or-more backticks or tildes. A fenced block may quote ``### …``
+#: lines that must not be mistaken for section headings, so the parser opens on
+#: the first such marker and closes only on a MATCHING one — same character, at
+#: least as long — leaving the other marker as content in between.
+_FENCE_RE = re.compile(r"^ {0,3}(?P<marker>`{3,}|~{3,})")
 
 
 def _split_sections(body: str) -> list[tuple[str | None, str]]:
@@ -228,16 +231,25 @@ def _split_sections(body: str) -> list[tuple[str | None, str]]:
     Content before the first ``### <name>`` heading gets section ``None``;
     each heading starts a new block carrying the lines under it (the heading
     line itself is NOT in the chunk — the merger re-emits it canonically).
-    ``### …`` lines inside fenced code blocks are content, not headings.
+    ``### …`` lines inside fenced code blocks are content, not headings — a
+    fence may be indented up to three spaces and only closes on a matching
+    marker (:data:`_FENCE_RE`). ``body`` arrives LF-normalized: fragment bodies
+    are decoded with universal newlines, so CRLF and CR endings collapse to LF
+    before parsing.
     """
     blocks: list[tuple[str | None, list[str]]] = []
     name: str | None = None
     lines: list[str] = []
-    in_fence = False
+    fence: str | None = None  # open fence marker, or None outside any fence
     for line in body.splitlines(keepends=True):
-        if _FENCE_RE.match(line):
-            in_fence = not in_fence
-        match = None if in_fence else _SECTION_RE.match(line)
+        marker = _FENCE_RE.match(line)
+        if marker:
+            token = marker.group("marker")
+            if fence is None:
+                fence = token
+            elif token[0] == fence[0] and len(token) >= len(fence):
+                fence = None
+        match = None if fence is not None else _SECTION_RE.match(line)
         if match:
             if name is not None or lines:
                 blocks.append((name, lines))

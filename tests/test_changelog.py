@@ -151,6 +151,30 @@ def test_notes_text_ignores_headings_inside_code_fences():
     assert core.notes_text(frags) == ("### Notes\n\n```\n### Changed\n```\n- more\n")
 
 
+def test_notes_text_indented_code_fence_hides_headings():
+    # A fence indented up to three spaces still opens a code block, so a
+    # column-0 ### inside it is content, not a new section.
+    frags = _frags(
+        "### Notes\n\n   ```\n### Changed\n   ```\n",
+        "### Notes\n\n- more\n",
+    )
+    assert core.notes_text(frags) == (
+        "### Notes\n\n   ```\n### Changed\n   ```\n- more\n"
+    )
+
+
+def test_notes_text_mismatched_fence_marker_stays_in_fence():
+    # A backtick fence is not closed by a tilde line; the ### between them is
+    # fenced content, so the whole block stays under the outer section.
+    frags = _frags(
+        "### Notes\n\n```\n~~~\n### Changed\n```\n",
+        "### Notes\n\n- more\n",
+    )
+    assert core.notes_text(frags) == (
+        "### Notes\n\n```\n~~~\n### Changed\n```\n- more\n"
+    )
+
+
 def test_notes_text_deeper_headings_stay_within_their_section():
     # #### is nested content, not a section boundary.
     frags = _frags("### Changed\n\n#### details\n\n- a\n", "### Changed\n\n- b\n")
