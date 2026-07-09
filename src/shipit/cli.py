@@ -225,7 +225,7 @@ def test_cmd(args: tuple[str, ...]) -> None:
 )
 @click.argument("args", nargs=-1, type=click.UNPROCESSED)
 def build_cmd(version: str | None, args: tuple[str, ...]) -> None:
-    """Run this repo's build legs: `shipit build [LEG] [-- ARGS...]`.
+    """Run this repo's build legs: `shipit build [--version VERSION] [LEG] [-- ARGS...]`.
 
     Walks the `.shipit.toml [toolchains]` path->toolchain map and dispatches
     each build leg to its REAL builder (cargo / go build / uv build / the npm
@@ -235,8 +235,9 @@ def build_cmd(version: str | None, args: tuple[str, ...]) -> None:
     Bare `shipit build` runs EVERY leg. LEG selects one (a toolchain name, or
     a map path); args after `--` are forwarded verbatim to that leg's builder
     (`shipit build npm -- --workspace web`) and require exactly one selected
-    leg. Exit: 0 all steps build, 1 any step fails (a missing builder
-    hard-fails, never skips), 2 usage.
+    leg. `--version` supplies the release version injected where a go target
+    declares its var (ADR-0041). Exit: 0 all steps build, 1 any step fails (a
+    missing builder hard-fails, never skips), 2 usage.
     """
     raise SystemExit(build_verb.run(list(args), version=version))
 
