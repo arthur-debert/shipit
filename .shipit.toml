@@ -133,7 +133,7 @@ lex = [
   { repo = "lex-fmt/lexed", path = "lex-fmt/lexed" },
   { repo = "lex-fmt/mkdocs-lex", path = "lex-fmt/mkdocs-lex" },
   { repo = "lex-fmt/tree-sitter-lex", path = "lex-fmt/tree-sitter-lex" },
-  { repo = "lex-fmt/vscode", path = "lex-fmt/vscode", expect_verify_fail = "VS Code integration suite binds an AF_UNIX socket under the sweep Tree; the Tree path exceeds macOS's 103-char socket limit (EINVAL, shipit#622) — suite is green on CI and short-path clones" },
+  { repo = "lex-fmt/vscode", path = "lex-fmt/vscode", expect_verify_fail = "AF_UNIX socket path under the sweep Tree exceeds macOS's 103-char limit (EINVAL, shipit#622); green on CI and short-path clones" },
 ]
 padz = [{ repo = "arthur-debert/padz", path = "padz" }]
 rustloc = [{ repo = "arthur-debert/rustloc", path = "rustloc" }]
