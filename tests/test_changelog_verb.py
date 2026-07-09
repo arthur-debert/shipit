@@ -428,3 +428,33 @@ def test_cli_check_end_to_end(tmp_path, capsys, monkeypatch):
     capsys.readouterr()
     assert cli.main(["changelog", "check"]) == 0
     assert "changelog: OK" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------
+# render_current — the install reconcile's changelog seam (TOL01-WS08 #578)
+# --------------------------------------------------------------------------
+
+
+def test_render_current_is_none_without_the_fragment_model(tmp_path):
+    # No CHANGELOG/ directory: install has nothing to say — None, never the
+    # hard refusal `check` raises (a consumer without the convention must
+    # reconcile cleanly).
+    assert verb.render_current(tmp_path) is None
+
+
+def test_render_current_is_none_on_unparseable_version_names(tmp_path):
+    # A mis-named section would silently vanish from a render, so the seam
+    # declines to answer rather than hand install a lossy projection.
+    root = _tree(tmp_path, {"unreleased-x.md": "- x\n"})
+    (root / "CHANGELOG" / "not-semver.md").write_text("bad\n", encoding="utf-8")
+    assert verb.render_current(root) is None
+
+
+def test_render_current_matches_the_verb_render(tmp_path):
+    # The seam returns exactly what `shipit changelog render` would write —
+    # one renderer, so the reconcile's refresh and the check's verdict agree.
+    root = _tree(tmp_path, {"unreleased-x.md": "- Added the thing\n"})
+    rendered = verb.render_current(root)
+    _render_into(root)
+    assert rendered == (root / core.CHANGELOG_FILE).read_text(encoding="utf-8")
+    assert core.sync_diff(rendered, rendered) is None
