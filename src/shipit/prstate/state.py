@@ -22,8 +22,8 @@ Two definitions anchor it (ADR-0006 redefines the first):
              `mergeable` verdict (it reads MERGEABLE optimistically before a
              recompute lands). Check order once
              Reviewed: a conflict (DIRTY) or a BEHIND base surfaces first (a
-             moved base re-stales CI); then failing/cancelled/pending CI
-             (BLOCKED-fix / BLOCKED-rerun / VALIDATING); then CLEAN -> READY; an UNSTABLE that survives the CI
+             moved base re-stales CI); then failing/pending/cancelled CI
+             (BLOCKED-fix / VALIDATING / BLOCKED-rerun); then CLEAN -> READY; an UNSTABLE that survives the CI
              checks is a transient ready_for_review re-queue lag (the rollup is
              green) and also goes READY (release#715); an uncomputed (UNKNOWN)
              merge state re-polls; any remaining computed non-CLEAN state

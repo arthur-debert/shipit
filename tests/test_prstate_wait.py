@@ -163,7 +163,7 @@ def test_ready_mode_does_not_fire_on_reviews_in():
     assert not satisfied(Until.READY, status, ("copilot",))
 
 
-def test_dead_run_times_out_actionable_with_the_rerun_advice():
+def test_dead_run_times_out_with_the_rerun_advice():
     # The #621 hang guard, wait-surface half: the engine ranks a cancelled
     # (dead) run BLOCKED with RERUN advice — NOT VALIDATING — so a
     # `--until ready` wait on it never idles as "CI running"; it expires on
