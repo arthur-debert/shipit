@@ -44,6 +44,7 @@ from typing import TextIO
 
 import click
 
+from ... import logcontext
 from ...harness import breakglass
 from ...harness.codepath import is_code_path
 from ...harness.policy import (
@@ -92,10 +93,10 @@ def run(stdin: TextIO | None = None, stdout: TextIO | None = None) -> int:
             return 0
         if not is_edit_tool(tool_name):
             return 0  # not an edit operation — allow silently, never block.
-        role = resolve_role(payload)
+        role = resolve_role(payload, fallback_role=logcontext.role_from_env(os.environ))
         paths = _extract_paths(payload.get("tool_input"))
         code_paths = tuple(p for p in paths if is_code_path(p))
-        path = code_paths[0] if code_paths else (paths[0] if paths else "")
+        path = _display_path(paths, code_paths)
         is_code = bool(code_paths)
         break_glass = _break_glass_armed()
         # Log every break-glass use that would otherwise have been a deny — its
@@ -127,12 +128,21 @@ def run(stdin: TextIO | None = None, stdout: TextIO | None = None) -> int:
     return 0
 
 
-_PATCH_FILE_RE = re.compile(r"^\*\*\* (?:Add|Update|Delete) File: (.+)$", re.MULTILINE)
+_PATCH_FILE_RE = re.compile(
+    r"^\*\*\* (?:(?:Add|Update|Delete|Rename) File:|Move to:) (.+)$",
+    re.MULTILINE,
+)
 
 
 def _clean_paths(paths: tuple[str, ...]) -> tuple[str, ...]:
     """Normalize extracted paths before code-path classification."""
     return tuple(p for raw in paths if (p := raw.strip()))
+
+
+def _display_path(paths: tuple[str, ...], code_paths: tuple[str, ...]) -> str:
+    """Render all relevant paths for logs and agent feedback."""
+    selected = code_paths if code_paths else paths
+    return ", ".join(selected)
 
 
 def _extract_paths(tool_input: object) -> tuple[str, ...]:

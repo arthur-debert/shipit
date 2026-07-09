@@ -103,6 +103,66 @@ def test_codex_apply_patch_denies_if_any_patched_file_is_code():
     assert decision["permissionDecision"] == "deny"
 
 
+def test_codex_apply_patch_code_edit_with_spawned_env_role_is_allowed(monkeypatch):
+    monkeypatch.setenv("SHIPIT_LOG_CTX_ROLE", "implementer")
+    payload = json.dumps(
+        {
+            "tool_name": "apply_patch",
+            "tool_input": (
+                "*** Begin Patch\n"
+                "*** Update File: src/shipit/cli.py\n"
+                "@@\n"
+                "-old\n"
+                "+new\n"
+                "*** End Patch\n"
+            ),
+        }
+    )
+    code, out = _run(payload)
+    assert code == 0
+    assert out == ""
+
+
+def test_codex_apply_patch_code_edit_without_spawned_env_role_is_denied(monkeypatch):
+    monkeypatch.delenv("SHIPIT_LOG_CTX_ROLE", raising=False)
+    payload = json.dumps(
+        {
+            "tool_name": "apply_patch",
+            "tool_input": (
+                "*** Begin Patch\n"
+                "*** Update File: src/shipit/cli.py\n"
+                "@@\n"
+                "-old\n"
+                "+new\n"
+                "*** End Patch\n"
+            ),
+        }
+    )
+    code, out = _run(payload)
+    assert code == 0
+    decision = json.loads(out)["hookSpecificOutput"]
+    assert decision["permissionDecision"] == "deny"
+
+
+def test_codex_apply_patch_extracts_rename_and_move_paths():
+    payload = json.dumps(
+        {
+            "tool_name": "apply_patch",
+            "tool_input": (
+                "*** Begin Patch\n"
+                "*** Rename File: docs/old.md\n"
+                "*** Update File: README.md\n"
+                "*** Move to: src/shipit/cli.py\n"
+                "*** End Patch\n"
+            ),
+        }
+    )
+    code, out = _run(payload)
+    assert code == 0
+    decision = json.loads(out)["hookSpecificOutput"]
+    assert decision["permissionDecision"] == "deny"
+
+
 def test_break_glass_logs_the_code_path_from_a_multi_file_codex_patch(
     monkeypatch, caplog
 ):
@@ -134,6 +194,38 @@ def test_break_glass_logs_the_code_path_from_a_multi_file_codex_patch(
     )
     assert not any(
         "break-glass" in r.message and "README.md" in r.message for r in caplog.records
+    )
+
+
+def test_break_glass_logs_all_code_paths_from_a_multi_file_codex_patch(
+    monkeypatch, caplog
+):
+    monkeypatch.setenv(breakglass.ENV, "1")
+    payload = json.dumps(
+        {
+            "tool_name": "apply_patch",
+            "tool_input": (
+                "*** Begin Patch\n"
+                "*** Update File: src/shipit/cli.py\n"
+                "@@\n"
+                "-old\n"
+                "+new\n"
+                "*** Update File: src/shipit/session/bootstrap.py\n"
+                "@@\n"
+                "-old\n"
+                "+new\n"
+                "*** End Patch\n"
+            ),
+        }
+    )
+    with caplog.at_level(logging.WARNING, logger="shipit.hook"):
+        code, out = _run(payload)
+    assert code == 0
+    assert out == ""
+    assert any(
+        "break-glass" in r.message
+        and "src/shipit/cli.py, src/shipit/session/bootstrap.py" in r.message
+        for r in caplog.records
     )
 
 
