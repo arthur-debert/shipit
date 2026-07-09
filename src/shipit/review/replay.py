@@ -63,8 +63,12 @@ def parse_range(spec: str) -> tuple[str, str, bool]:
     ``A..B`` → ``(A, B, False)`` (review exactly ``A``→``B``); ``A...B`` →
     ``(A, B, True)`` (review from the merge base of ``A`` and ``B`` — the
     round-1 replay spelling). Raises :class:`~shipit.review.diff.ReviewError`
-    on anything else — no separator, an empty endpoint — with the accepted
-    grammar in the message, so a typo dies at parse, before any git work.
+    on anything else — no separator, an empty endpoint, or a dot-run longer
+    than the separator (e.g. ``a....b``, whose extra dot would otherwise leak
+    into an endpoint) — with the accepted grammar in the message, so a typo
+    dies at parse, before any git work. A revision can carry an internal dot
+    (a tag like ``v1.2.3``) but never a leading/trailing one, so a boundary
+    dot is always a malformed separator.
     """
     spec = spec.strip()
     if "..." in spec:
@@ -74,7 +78,14 @@ def parse_range(spec: str) -> tuple[str, str, bool]:
         base, _, head = spec.partition("..")
         merge_base_wanted = False
     base, head = base.strip(), head.strip()
-    if not base or not head or ".." in base or ".." in head:
+    if (
+        not base
+        or not head
+        or ".." in base
+        or ".." in head
+        or base.endswith(".")
+        or head.startswith(".")
+    ):
         raise ReviewError(
             f"unusable commit range {spec!r} — pass `<base>..<head>` (exactly that "
             "diff) or `<base>...<head>` (from their merge base, the historical "

@@ -143,14 +143,16 @@ def run_replay(
     :func:`~.._errors.cli_errors` shell (exit 1, one ``error: …`` line): a bad
     range spec / unknown revision / repo-less checkout
     (:class:`~shipit.review.diff.ReviewError` out of the replay resolver), an
-    unknown ``--agent`` (normalized here), an unreadable ``--instructions``
-    file (preflighted here, before any model run bills), and a backend that is
-    missing/failed/timed out (normalized here from the producer's error set).
+    unknown ``--agent`` (normalized here), a malformed ``--timeout`` and an
+    unreadable ``--instructions`` file (both preflighted here, before any model
+    run bills), and a backend that is missing/failed/timed out (normalized here
+    from the producer's error set).
     """
     from ...review import replay as replay_mod
     from ...review.backends import BackendError, BackendUnavailable
     from ...review.diff import ReviewError
     from ...review.instructions import load_instructions
+    from ...tree.cleanup import parse_duration
 
     try:
         backend = _agent_backend.by_funnel_agent(agent)
@@ -159,6 +161,16 @@ def run_replay(
             b.funnel_agent or "" for b in _agent_backend.funnel_backends()
         )
         raise ReviewError(f"unknown review agent {agent!r} (known: {known})") from None
+
+    # Preflight the timeout BEFORE launching: a malformed `--timeout` raises a
+    # raw ValueError deep in the producer's `_seam_deadline`, which is NOT in the
+    # normalized error set below — validate it here (user input on a new CLI
+    # path) so a typo dies as one clean `error: …` line, never a traceback, and
+    # never after a model run already billed.
+    try:
+        parse_duration(timeout)
+    except ValueError as exc:
+        raise ReviewError(f"invalid --timeout {timeout!r}: {exc}") from exc
 
     # Preflight the instructions BEFORE resolving or launching anything: a
     # missing/unreadable file must die as one clean line, not as a traceback

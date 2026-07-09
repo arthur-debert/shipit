@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Mapping
 
 from .. import execrun, gh
 from ..agent.backend import Backend
@@ -196,7 +197,9 @@ def build_review_payload(
     anchorable = commentable_lines(ctx.diff)
 
     findings = order_findings(
-        finding_from_dict(raw) for raw in review.get("comments") or []
+        finding_from_dict(raw)
+        for raw in review.get("comments") or []
+        if isinstance(raw, Mapping)
     )
 
     comments: list[dict] = []

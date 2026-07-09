@@ -157,6 +157,33 @@ def test_nonstring_comment_fields_never_abort_the_post():
     assert result.evidence == "" and result.fix == ""
 
 
+def test_non_dict_comment_entry_is_skipped_not_crashed():
+    """A `comments[]` that mixes a non-dict entry (a stray string from an
+    unschema'd agy path) among real findings must SKIP the non-mapping, exactly
+    as the round-record path does — one malformed entry can't 422/crash the whole
+    review."""
+    review = {
+        "summary": {"status": "COMMENT", "overall_feedback": "ok"},
+        "comments": [
+            "a stray string, not a finding dict",
+            {
+                "file": "foo.py",
+                "line": 2,
+                "text": "real finding",
+                "severity": "major",
+                "category": "correctness",
+                "confidence": 0.9,
+                "evidence": "x=1",
+                "fix": "",
+            },
+        ],
+    }
+    # Must not raise; the real finding still anchors, the stray entry vanishes.
+    payload = post.build_review_payload(review, _ctx(), agent_name="agy")
+    assert len(payload["comments"]) == 1
+    assert payload["comments"][0]["line"] == 2
+
+
 def test_inline_comment_body_is_the_two_layer_rendering():
     """The inline body carries the machine marker (exact tuple recoverable) plus
     the Conventional Comments layer; the `Agent: <name> [SEVERITY]` prefix is

@@ -63,10 +63,21 @@ def test_parse_range_two_dot_and_three_dot():
     assert replay.parse_range("main...feature") == ("main", "feature", True)
 
 
-@pytest.mark.parametrize("spec", ["", "main", "..head", "base..", "a..b..c"])
+# `a....b` is the dot-run case: the extra dot leaks past the `...` partition into
+# an endpoint (`.b`), which must be rejected AT PARSE with the grammar message,
+# not degraded into a later "unknown revision '.b'".
+@pytest.mark.parametrize(
+    "spec", ["", "main", "..head", "base..", "a..b..c", "a....b", "a.....b"]
+)
 def test_parse_range_rejects_unusable_specs_with_the_grammar(spec):
     with pytest.raises(ReviewError, match="<base>..<head>"):
         replay.parse_range(spec)
+
+
+def test_parse_range_keeps_dotted_tag_endpoints():
+    # A revision may carry an INTERNAL dot (a tag like v1.2.3); only a boundary
+    # dot is a malformed separator, so dotted tags must still parse.
+    assert replay.parse_range("v1.2.3..v1.3.0") == ("v1.2.3", "v1.3.0", False)
 
 
 # --- the offline resolve -------------------------------------------------------
@@ -218,3 +229,16 @@ def test_replay_verb_unreadable_instructions_die_before_any_run(capsys, tmp_path
     )
     assert rc == 1
     assert "error: cannot read review instructions" in capsys.readouterr().err
+
+
+def test_replay_verb_bad_timeout_is_one_clean_error_line_before_any_run(capsys):
+    # A malformed --timeout is user input on a new CLI path: it must die as one
+    # `error: …` line at preflight (before resolve_range or any model run bills),
+    # not as a raw ValueError traceback from the producer's _seam_deadline.
+    from shipit.verbs.pr import review as review_verb
+
+    rc = review_verb.run_replay(
+        "a..b", agent="codex", model="pro", timeout="bad", instructions=None
+    )
+    assert rc == 1
+    assert "error: invalid --timeout 'bad'" in capsys.readouterr().err
