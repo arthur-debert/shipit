@@ -180,6 +180,8 @@ def test_dead_run_times_out_actionable_with_the_rerun_advice():
     result, _ = _run([dead] * 10, Until.READY, timeout=120.0, poll=60.0)
     assert result.outcome is Outcome.TIMED_OUT
     assert "gh run rerun" in result.status.next_action
+
+
 # --- actionable: the deadlock guard (#583) --------------------------------------
 
 
