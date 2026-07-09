@@ -116,6 +116,9 @@ local = true
 # loop), the gh-action stack (arthur-debert/simple-gal-action, #108), and release/
 # itself (the source-of-truth repo, which needs its own check set). Add them when those
 # workstreams pick up.
+#
+# `expect_verify_fail` marks environmentally-red cells the sweep renders as xfail
+# (story 49 / ADR-0033); the lex-fmt/vscode socket-path limit is tracked in #622.
 [project.portfolio]
 phos = [
   { repo = "phos-editor/app", path = "phos/phos-app", expect_verify_fail = "the parity verify needs the phos sibling checkouts, absent in the hermetic clone" },
@@ -130,7 +133,7 @@ lex = [
   { repo = "lex-fmt/lexed", path = "lex-fmt/lexed" },
   { repo = "lex-fmt/mkdocs-lex", path = "lex-fmt/mkdocs-lex" },
   { repo = "lex-fmt/tree-sitter-lex", path = "lex-fmt/tree-sitter-lex" },
-  { repo = "lex-fmt/vscode", path = "lex-fmt/vscode" },
+  { repo = "lex-fmt/vscode", path = "lex-fmt/vscode", expect_verify_fail = "VS Code integration suite binds an AF_UNIX socket under the sweep Tree; the Tree path exceeds macOS's 103-char socket limit (EINVAL, shipit#622) — suite is green on CI and short-path clones" },
 ]
 padz = [{ repo = "arthur-debert/padz", path = "padz" }]
 rustloc = [{ repo = "arthur-debert/rustloc", path = "rustloc" }]
