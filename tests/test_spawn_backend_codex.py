@@ -2,8 +2,9 @@
 
 The per-backend WRITE launch contract probed by the WS00 spike — the exact ``codex exec
 --dangerously-bypass-approvals-and-sandbox`` argv, the role-prepend conveyance (codex has
-no ``--agent``), the ``OPENAI_API_KEY`` / ``CODEX_API_KEY`` scrub, and the ``None``
-reviewer posture — asserted exhaustively at the seam inputs (ADR-0020 §De-risking (a):
+no ``--agent``), the ``OPENAI_API_KEY`` / ``CODEX_API_KEY`` API-billing scrub with the
+``CODEX_ACCESS_TOKEN`` automation passthrough (CDX01-WS03), and the reviewer
+posture — asserted exhaustively at the seam inputs (ADR-0020 §De-risking (a):
 ``build_command`` + ``child_env`` are the cheap, high-value things to pin). No real codex
 is spawned. Mirrors ``tests/test_spawn_backend_claude.py``.
 """
@@ -157,6 +158,44 @@ def test_child_env_scrubs_codex_auth_vars():
     assert "OPENAI_API_KEY" not in env
     assert "CODEX_API_KEY" not in env
     assert env == {"PATH": "/bin", "CODEX_HOME": "/home/a/.codex", "HOME": "/home/a"}
+
+
+def test_auth_scrub_list_is_exactly_the_api_billing_keys():
+    # CDX01-WS03: the scrub is scoped to the two API-billing keys — CODEX_API_KEY (the
+    # documented opt-in for API-billed `codex exec`) and OPENAI_API_KEY (the shared
+    # OpenAI-SDK var other tools export) — so a stale key can never silently flip a Run
+    # off the ChatGPT subscription. Pinned exactly: adding CODEX_ACCESS_TOKEN here
+    # would break headless access-token automation (see the passthrough tests below).
+    assert codex_backend.AUTH_ENV_VARS == ("OPENAI_API_KEY", "CODEX_API_KEY")
+    assert codex_backend.ACCESS_TOKEN_VAR not in codex_backend.AUTH_ENV_VARS
+
+
+def test_child_env_passes_the_access_token_through():
+    # CDX01-WS03 probe (codex 0.139): CODEX_ACCESS_TOKEN is the subscription-token
+    # trusted-automation conduit codex consumes natively from the env (it takes
+    # precedence over the stored $CODEX_HOME login; a bogus one fails LOUD with
+    # "invalid agent identity JWT format"). It must survive child_env — scrubbing it
+    # would strand headless automation that has no persisted login.
+    parent = {
+        "PATH": "/bin",
+        "OPENAI_API_KEY": "stale",
+        "CODEX_API_KEY": "also-stale",
+        codex_backend.ACCESS_TOKEN_VAR: "subscription-jwt",
+    }
+
+    env = CODEX.child_env(parent)
+
+    assert env == {"PATH": "/bin", codex_backend.ACCESS_TOKEN_VAR: "subscription-jwt"}
+
+
+def test_child_env_from_os_environ_keeps_the_access_token(monkeypatch):
+    monkeypatch.setenv(codex_backend.ACCESS_TOKEN_VAR, "subscription-jwt")
+    monkeypatch.setenv("CODEX_API_KEY", "stale")
+
+    env = CODEX.child_env()
+
+    assert env.get(codex_backend.ACCESS_TOKEN_VAR) == "subscription-jwt"
+    assert "CODEX_API_KEY" not in env
 
 
 def test_child_env_without_keys_is_a_plain_copy():

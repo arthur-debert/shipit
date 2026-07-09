@@ -22,8 +22,12 @@ NOT from guessed flags. Three facts are load-bearing and non-obvious:
 - **codex auth is ChatGPT OAuth** (tokens in ``~/.codex/auth.json`` / ``$CODEX_HOME``),
   inherited by the child. The spike found a bogus ``OPENAI_API_KEY`` did *not* break
   codex 0.139 on the probe box (it preferred the stored tokens), but the safe
-  generalization of ADR-0019 §3 still holds: :meth:`child_env` scrubs ``OPENAI_API_KEY``
-  and ``CODEX_API_KEY`` so a stale key can never shadow the login, and **no** secret is
+  generalization of ADR-0019 §3 still holds: :meth:`child_env` scrubs the **API-billing**
+  keys ``OPENAI_API_KEY`` and ``CODEX_API_KEY`` so a stale key can never shadow the
+  login or silently flip a Run onto API billing — the ChatGPT subscription stays the
+  first-class auth. ``CODEX_ACCESS_TOKEN`` (:data:`ACCESS_TOKEN_VAR`) is different in
+  kind — the *subscription-token* trusted-automation conduit codex consumes natively
+  from the env — and deliberately PASSES THROUGH (CDX01-WS03 probe). **No** secret is
   ever written into the Tree.
 
 **Reviewer (read-only) posture — WS04a, probed, NOT the ADR's first guess.** The ADR
@@ -54,10 +58,26 @@ from ...agent.backend import CODEX as _IDENTITY
 from .base import BackendAdapter
 
 #: The codex auth-env vars :meth:`CodexAdapter.child_env` scrubs (ADR-0020 §codex
-#: Auth, generalizing ADR-0019 §3): codex authenticates via ChatGPT OAuth, and a stale
-#: ``OPENAI_API_KEY`` / ``CODEX_API_KEY`` left in the env can shadow that login. Scrub
-#: them so the OAuth session wins; everything else inherits.
+#: Auth, generalizing ADR-0019 §3): the two **API-billing** keys. codex 0.139 documents
+#: ``CODEX_API_KEY`` as the opt-in for *API-billed* ``codex exec``, and
+#: ``OPENAI_API_KEY`` is the shared OpenAI-SDK var that lingers in dotfiles for other
+#: tools — so a stale key left in the env could shadow the ChatGPT login or silently
+#: flip a Run off the subscription onto API billing. Scrub both so the OAuth session
+#: wins; everything else inherits.
 AUTH_ENV_VARS = ("OPENAI_API_KEY", "CODEX_API_KEY")
+
+#: The ONE codex auth var that deliberately PASSES THROUGH ``child_env`` (CDX01-WS03,
+#: probed on codex 0.139): ``CODEX_ACCESS_TOKEN`` is codex's trusted-automation conduit
+#: — a ChatGPT **subscription** token consumed natively from the env, taking precedence
+#: over the stored ``$CODEX_HOME`` login (probe: a bogus value fails LOUD with
+#: ``invalid agent identity JWT format``, never silently), and the var ``codex login
+#: --with-access-token`` documents by name. It is NOT scrubbed because it cannot flip
+#: billing (still subscription-billed), it only exists when an operator exports it
+#: deliberately *for codex automation* (unlike ``OPENAI_API_KEY``, which other tools
+#: set), and headless automation with no persisted login NEEDS it to reach codex at
+#: all. It rides the child env only — never persisted, never written into the Tree or
+#: any managed file.
+ACCESS_TOKEN_VAR = "CODEX_ACCESS_TOKEN"
 
 #: Legacy review aliases → Codex model ids — sourced from the ONE agent-backend
 #: identity registry (:data:`shipit.agent.backend.CODEX`), NOT a duplicate table here
@@ -187,13 +207,16 @@ class CodexAdapter(BackendAdapter):
         ]
 
     def child_env(self, parent_env: Mapping[str, str] | None = None) -> dict[str, str]:
-        """The child's environment: the parent's, with codex auth-env vars REMOVED.
+        """The child's environment: the parent's, with the API-billing keys REMOVED.
 
         ADR-0020 §codex Auth (generalizing ADR-0019 §3): codex authenticates via ChatGPT
         OAuth (tokens in ``$CODEX_HOME``), so a stale ``OPENAI_API_KEY`` / ``CODEX_API_KEY``
-        in the env could shadow that login. Scrubbing both (:data:`AUTH_ENV_VARS`) makes
-        the OAuth session win; everything else inherits and no secret is written to the
-        Tree. ``parent_env`` defaults to the live :data:`os.environ` and is injectable
+        in the env could shadow that login or silently flip the Run onto API billing.
+        Scrubbing both (:data:`AUTH_ENV_VARS`) keeps the subscription first-class;
+        everything else inherits — including ``CODEX_ACCESS_TOKEN``
+        (:data:`ACCESS_TOKEN_VAR`), the subscription-token automation conduit that
+        deliberately passes through — and no secret is written to the Tree.
+        ``parent_env`` defaults to the live :data:`os.environ` and is injectable
         for tests; the returned dict is always a fresh copy, never the caller's.
         """
         source = os.environ if parent_env is None else parent_env
