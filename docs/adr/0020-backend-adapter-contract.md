@@ -151,6 +151,21 @@ explains the funnel's intermittent agy failure — see §Open decisions.**
   the safe generalization of ADR-0019 §3 holds: the adapter **scrubs `OPENAI_API_KEY` (and
   `CODEX_API_KEY`)** from the child env so the login wins, unless a known-valid key is passed
   deliberately. **Never** write the key/token into the Tree; auth stays in `CODEX_HOME`.
+
+  > **As probed (CDX01-WS03, `codex-cli` 0.139.0).** The invocation audit passed unchanged —
+  > every flag the adapter emits (`exec`, `--skip-git-repo-check`,
+  > `--dangerously-bypass-approvals-and-sandbox`, `--ephemeral`, `--sandbox workspace-write`,
+  > `-c sandbox_workspace_write.network_access=true`, `--output-schema`, `--model`) is still
+  > present in the live `codex exec --help`. The auth surface got a probed refinement:
+  > `CODEX_API_KEY` is codex's documented opt-in for **API-billed** `codex exec`, and
+  > `CODEX_ACCESS_TOKEN` is the **trusted-automation conduit** — a ChatGPT *subscription*
+  > token, named by `codex login --with-access-token`, that codex consumes **natively from
+  > the env with precedence over the stored login** (a bogus value fails loud: `invalid agent
+  > identity JWT format` even on `codex login status`). The adapter therefore scrubs the two
+  > API-billing keys (subscription login stays first-class, per the bullet above) and
+  > deliberately **passes `CODEX_ACCESS_TOKEN` through** so headless automation with no
+  > persisted `CODEX_HOME` login can still reach codex on subscription billing. The token
+  > rides the child env only — never persisted, never written into managed files.
 - **Read-only posture.** codex **has a real native sandbox**: `--sandbox read-only` is a genuine
   reviewer constraint (no writes, no network) and is **defense-in-depth on top of** the chmod'd
   Tree (ADR-0018), which remains the load-bearing guard.
