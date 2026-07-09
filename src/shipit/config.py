@@ -22,7 +22,7 @@ from __future__ import annotations
 import hashlib
 import re
 import tomllib
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
@@ -783,15 +783,16 @@ def write_manifest(path: str | Path, *, version: str, managed: dict[str, str]) -
 # Seed-if-absent consumer policy — the pr-flow plumbing ``shipit install`` carries
 # --------------------------------------------------------------------------
 #
-# Unlike ``[managed]`` (the hash-reconciled slow set), ``[secrets]`` and
-# ``[reviewers]`` are CONSUMER-OWNED POLICY (docs/dev/architecture.lex §6). They
-# are NOT under the pristine-hash reconciliation: ``shipit install`` SEEDS them
-# when absent and NEVER clobbers a consumer's edits. The App-secret mappings are
-# MERGED into an existing ``[secrets]`` table (only the missing names are added,
-# preserving every entry a consumer already wrote); the ``[reviewers]`` scaffold
-# is written ONLY when the whole table is missing. A re-install on a fully-seeded
-# config is a no-op. This keeps the seam inside the existing model — no new drift
-# engine (issue #25 / INS01).
+# Unlike ``[managed]`` (the hash-reconciled slow set), ``[secrets]``,
+# ``[reviewers]``, ``[lint]``, and ``[toolchains]`` are CONSUMER-OWNED POLICY
+# (docs/dev/architecture.lex §6). They are NOT under the pristine-hash
+# reconciliation: ``shipit install`` SEEDS them when absent and NEVER clobbers a
+# consumer's edits. The App-secret mappings are MERGED into an existing
+# ``[secrets]`` table (only the missing names are added, preserving every entry
+# a consumer already wrote); the ``[reviewers]``/``[lint]``/``[toolchains]``
+# scaffolds are written ONLY when their whole table is missing. A re-install on
+# a fully-seeded config is a no-op. This keeps the seam inside the existing
+# model — no new drift engine (issue #25 / INS01).
 
 # The local-reviewer GitHub App credential mappings install seeds into a
 # consumer's ``[secrets]``. Each GitHub secret NAME is sourced from the Doppler
@@ -915,6 +916,63 @@ def lint_scaffold() -> str:
     return f"{_LINT_SCAFFOLD_HEADER}\n[lint]\nignore = [\n{entries},\n]"
 
 
+# Root-level manifest basename → the toolchain it signals. THE one
+# manifest-signal table (TOL01-WS08 #578): the Tool verbs' missing-map error
+# names these signals as the copy-paste fix (:mod:`shipit.verbs._tool`), and
+# `shipit install` derives the SAME signals into the seeded ``[toolchains]``
+# map (:func:`derive_toolchains`) — the error's suggestion and the seed can
+# never disagree. Order is precedence: the first manifest present at the
+# consumer root decides what ``"."`` seeds (and which example the error shows).
+SIGNAL_MANIFESTS: tuple[tuple[str, str], ...] = (
+    ("Cargo.toml", "rust"),
+    ("go.mod", "go"),
+    ("pyproject.toml", "python"),
+    ("package.json", "npm"),
+)
+
+
+def derive_toolchains(root: Path) -> tuple[tuple[str, str], ...]:
+    """The ``[toolchains]`` entries ``shipit install`` seeds for a consumer that
+    declares none — derived from the ROOT manifests (TOL01-WS08 #578).
+
+    ``shipit test``/``build`` dispatch on the declared path→toolchain map
+    (ADR-0007/0039) and refuse without it, so install seeds a starting map off
+    :data:`SIGNAL_MANIFESTS` — the same detection the verbs' missing-map error
+    already suggests. Root-level only, first signal wins (``"."`` maps to ONE
+    toolchain): the seed is a consumer-owned starting point, extended by hand
+    for nested paths or multi-toolchain repos, never a dispatch fallback (the
+    verbs keep refusing an undeclared repo, ADR-0007). ``()`` when no root
+    manifest signals a toolchain — nothing is seeded then.
+    """
+    for name, toolchain in SIGNAL_MANIFESTS:
+        if (Path(root) / name).is_file():
+            return ((".", toolchain),)
+    return ()
+
+
+# The explanatory comment heading the seeded ``[toolchains]`` table. Mirrors the
+# other policy-seed headers: it states where the map came from AND that the
+# consumer owns it (install seeds [toolchains] only when absent, #578).
+_TOOLCHAINS_SCAFFOLD_HEADER = """\
+# [toolchains] — the path->toolchain map `shipit test`/`shipit build` dispatch
+# on (ADR-0007/0039): each build-bearing path declares its toolchain. Seeded
+# from this repo's root manifests. You OWN this map and may extend it — nested
+# paths, or per-tool argv overrides, e.g.
+#   "crates/cli" = { toolchain = "rust", test = ["cargo", "test"] }
+# It is reconcile-safe: `shipit install` seeds [toolchains] only when absent
+# and never clobbers a map you have edited.
+[toolchains]"""
+
+
+def toolchains_scaffold(entries: Sequence[tuple[str, str]]) -> str:
+    """The ``[toolchains]`` block ``shipit install`` seeds when a consumer has
+    none — the comment header plus one ``"path" = "toolchain"`` line per derived
+    entry (:func:`derive_toolchains`). Rendered, never hand-written, so the seed
+    and the derivation can never disagree."""
+    lines = [f'"{path}" = "{toolchain}"' for path, toolchain in entries]
+    return "\n".join([_TOOLCHAINS_SCAFFOLD_HEADER, *lines])
+
+
 def _seeded_secret_line(name: str) -> str:
     """One ``[secrets]`` entry mapping ``name`` to its like-named Doppler key."""
     return f'{name} = {{ doppler = "{name}" }}'
@@ -950,19 +1008,24 @@ def _require_table(cfg: dict, name: str, path: str | Path) -> dict | None:
     )
 
 
-def _plan_seed(text: str, path: str | Path) -> tuple[list[str], str]:
+def _plan_seed(
+    text: str, path: str | Path, toolchains: Sequence[tuple[str, str]] = ()
+) -> tuple[list[str], str]:
     """The seed-if-absent items missing from ``text`` and the resulting file text.
 
-    Pure: parses and computes, never writes. Raises :class:`ConfigError` for any
-    shape install cannot seed safely — malformed TOML, a scalar ``secrets``/
-    ``reviewers``, or an existing ``[secrets]`` table that has no literal header to
-    merge under (an inline table or dotted keys) — so the caller skips seeding
-    rather than write a broken config.
+    Pure: parses and computes, never writes — ``toolchains`` carries the
+    manifest-derived entries in (the callers derive them via
+    :func:`derive_toolchains`, keeping this function read-free). Raises
+    :class:`ConfigError` for any shape install cannot seed safely — malformed
+    TOML, a scalar ``secrets``/``reviewers``, or an existing ``[secrets]`` table
+    that has no literal header to merge under (an inline table or dotted keys) —
+    so the caller skips seeding rather than write a broken config.
     """
     cfg = _parse_text(text, path)
     secrets = _require_table(cfg, "secrets", path)
     _require_table(cfg, "reviewers", path)  # validate shape; preserved if present
     _require_table(cfg, "lint", path)  # validate shape; preserved if present
+    _require_table(cfg, "toolchains", path)  # validate shape; preserved if present
 
     missing = [n for n in seeded_app_secrets() if n not in (secrets or {})]
     seeded: list[str] = []
@@ -984,38 +1047,54 @@ def _plan_seed(text: str, path: str | Path) -> tuple[list[str], str]:
     if "lint" not in cfg:
         text = _append_lines(text, lint_scaffold().splitlines())
         seeded.append("[lint].ignore")
+
+    # Seeded ONLY when the repo's manifests signal a toolchain AND no
+    # [toolchains] table is tracked (#578) — the same discipline: an existing
+    # consumer-edited map (even an empty table) is never overwritten.
+    if toolchains and "toolchains" not in cfg:
+        text = _append_lines(text, toolchains_scaffold(toolchains).splitlines())
+        seeded.append("[toolchains]")
     return seeded, text
 
 
-def plan_policy_seed(path: str | Path) -> list[str]:
+def plan_policy_seed(
+    path: str | Path, *, toolchains: Sequence[tuple[str, str]] = ()
+) -> list[str]:
     """What seed-if-absent policy ``shipit install`` WOULD add to ``path`` — the
-    missing App-secret mappings, ``[reviewers]`` when its table is absent, and
+    missing App-secret mappings, ``[reviewers]`` when its table is absent,
     ``[lint].ignore`` (the default generated-path globs) when no ``[lint]`` table
-    is tracked.
+    is tracked, and ``[toolchains]`` (the supplied manifest-derived entries,
+    :func:`derive_toolchains`) when the map is absent and ``toolchains`` is
+    non-empty (#578).
 
-    Pure: reads, never writes. An empty list means the policy is already in place,
-    so a re-install stays a no-op. Raises :class:`ConfigError` on any shape we
-    cannot seed safely (see :func:`_plan_seed`), letting the caller skip seeding
-    rather than corrupt the file.
+    Pure over ``path``'s text and ``toolchains``: reads, never writes. An empty
+    list means the policy is already in place, so a re-install stays a no-op.
+    Raises :class:`ConfigError` on any shape we cannot seed safely (see
+    :func:`_plan_seed`), letting the caller skip seeding rather than corrupt the
+    file.
     """
-    return _plan_seed(_config_text(path), path)[0]
+    return _plan_seed(_config_text(path), path, toolchains)[0]
 
 
-def apply_policy_seed(path: str | Path) -> list[str]:
+def apply_policy_seed(
+    path: str | Path, *, toolchains: Sequence[tuple[str, str]] = ()
+) -> list[str]:
     """Seed-if-absent the consumer policy into ``path``, preserving every existing
-    entry, and return what was seeded (same items :func:`plan_policy_seed` lists).
+    entry, and return what was seeded (same items :func:`plan_policy_seed` lists,
+    given the same ``toolchains``).
 
     Merge-preserving: a present ``[secrets]`` table keeps all its entries and only
     the missing App mappings are inserted under its header; an absent table gets
-    the full :func:`secrets_scaffold`. ``[reviewers]`` and ``[lint]`` are each
-    written only when their table is entirely absent — a consumer's own
-    ``[reviewers]`` or ``[lint]`` is never touched.
+    the full :func:`secrets_scaffold`. ``[reviewers]``, ``[lint]``, and
+    ``[toolchains]`` are each written only when their table is entirely absent —
+    a consumer's own ``[reviewers]``, ``[lint]``, or ``[toolchains]`` is never
+    touched.
     Writes the file only when something is seeded, so an already-seeded config is
     left byte-identical (a clean no-op). Raises identically to
     :func:`plan_policy_seed`, so an install that planned a seed never reaches an
     unsafe apply.
     """
-    seeded, text = _plan_seed(_config_text(path), path)
+    seeded, text = _plan_seed(_config_text(path), path, toolchains)
     if seeded:
         Path(path).write_text(text, encoding="utf-8")
     return seeded

@@ -18,17 +18,15 @@ from pathlib import Path
 from .. import config
 
 #: Root-level manifest basenames → the toolchain they signal, for the pointed
-#: missing-map error only. This is DIAGNOSIS-side detection (what would this
-#: repo probably declare?), deliberately distinct from the declared map the
-#: verbs dispatch on — mirrors the install catalog's provisioning-side
-#: signals (:data:`shipit.install.reconcile.TOOLCHAIN_MANIFESTS`) without
-#: conflating the two.
-_SIGNAL_MANIFESTS: tuple[tuple[str, str], ...] = (
-    ("Cargo.toml", "rust"),
-    ("go.mod", "go"),
-    ("pyproject.toml", "python"),
-    ("package.json", "npm"),
-)
+#: missing-map error. This is DIAGNOSIS-side detection (what would this repo
+#: probably declare?), deliberately distinct from the declared map the verbs
+#: dispatch on — and since TOL01-WS08 (#578) it is the SHARED signal table
+#: (:data:`shipit.config.SIGNAL_MANIFESTS`): `shipit install` derives the seeded
+#: ``[toolchains]`` map from the same signals, so the error's suggestion and the
+#: seed can never disagree. The install catalog's provisioning-side signals
+#: (:data:`shipit.install.reconcile.TOOLCHAIN_MANIFESTS`) stay a separate axis
+#: (pixi dep blocks, tracked-manifest scope).
+_SIGNAL_MANIFESTS: tuple[tuple[str, str], ...] = config.SIGNAL_MANIFESTS
 
 
 def split_args(

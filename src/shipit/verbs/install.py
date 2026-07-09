@@ -254,6 +254,13 @@ def format_plan(plan: Plan, *, dry_run: bool = False) -> str:
         )
     for item in plan.seeds:
         lines.append(f"  {'seed':8} {item}")
+    if plan.rerender_changelog:
+        # #578: the committed projection went stale against a renderer change;
+        # this install regenerates it — a plan line like any other write.
+        lines.append(
+            f"  {'render':8} CHANGELOG.md (stale against the current renderer "
+            f"— regenerated from CHANGELOG/)"
+        )
     for d in plan.retire_deletes:
         lines.append(f"  {DELETE:8} {d.retired.path} (retired)")
     for d in plan.retire_keeps:
@@ -381,7 +388,8 @@ def format_pr_body(
 ) -> str:
     """The draft PR body: the stamped pin, what was added/updated (by unit KEY,
     #433 — block identity, never a bare repeated filename), every override with
-    its diff, the retired delete/keep sections, the policy seed, the activation
+    its diff, the retired delete/keep sections, the policy seed, the changelog
+    re-render (#578), the activation
     outcome, and the consumer's whole-tree lint debt (reported, never blocking).
 
     ``override_before`` holds each overridden unit's consumer content captured
@@ -469,6 +477,16 @@ def format_pr_body(
             "existing entries are never clobbered, only absent ones are added):"
         )
         lines += [f"- `{s}`" for s in plan.seeds]
+        lines.append("")
+    if plan.rerender_changelog:
+        lines.append("### Changelog re-rendered")
+        lines.append(
+            "The committed `CHANGELOG.md` no longer matched a re-render of "
+            "`CHANGELOG/` with the current renderer (`shipit changelog check` "
+            "was failing), so this install regenerated it. The fragments stay "
+            "authoritative — nothing was added or removed, only the rendered "
+            "projection refreshed."
+        )
         lines.append("")
     if hooks_activated is True:
         lines.append("### Checks activated locally")

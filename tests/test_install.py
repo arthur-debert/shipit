@@ -3469,3 +3469,124 @@ def test_selfcert_failure_event_names_the_selfcert_step(
     assert len(failed) == 1
     assert failed[0].step == "self-certification"
     assert rec.names() == []  # fail closed: no branch, no commit, no PR
+
+
+# --------------------------------------------------------------------------
+# TOL01-WS08 (#578): the [toolchains] seed + the changelog re-render — the two
+# reconcile-channel fixes for the round-0 fleet sweep's red cells (ADR-0033:
+# consumer drift is fixed through `shipit install`, never hand-patched).
+# --------------------------------------------------------------------------
+
+
+def test_install_seeds_toolchains_from_the_root_manifest(tmp_path, monkeypatch):
+    # Class A: `shipit test`/`build` refuse without the [toolchains] map
+    # (ADR-0007/0039) and install never seeded it. A consumer whose root
+    # manifest signals a toolchain now gets the derived map seeded — and the
+    # seeded config parses straight through the verbs' own loader.
+    monkeypatch.setattr(iapply, "_activate_hooks", lambda root: _exec_result(0))
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "acme"\n')
+    plan = _plan(tmp_path)
+    assert "[toolchains]" in plan.seeds
+    _apply(tmp_path)  # MODE_TREE: working-tree refresh
+    entries = config.load_toolchains(config.load(tmp_path / ".shipit.toml"))
+    assert [(e.path, e.toolchain) for e in entries] == [(".", "python")]
+    # And it settles: the map is in place, so the re-plan is a clean no-op.
+    assert _plan(tmp_path).nothing_to_do
+
+
+def test_install_never_clobbers_a_consumer_toolchains_map(tmp_path, monkeypatch):
+    # Seed-when-absent (the [lint] precedent): a consumer-edited map wins over
+    # the manifest derivation, forever.
+    monkeypatch.setattr(iapply, "_activate_hooks", lambda root: _exec_result(0))
+    (tmp_path / "Cargo.toml").write_text("[package]\n")
+    (tmp_path / ".shipit.toml").write_text('[toolchains]\n"." = "go"\n')
+    plan = _plan(tmp_path)
+    assert "[toolchains]" not in plan.seeds
+    _apply(tmp_path)
+    entries = config.load_toolchains(config.load(tmp_path / ".shipit.toml"))
+    assert [(e.path, e.toolchain) for e in entries] == [(".", "go")]
+
+
+def test_install_seeds_no_toolchains_without_a_manifest_signal(tmp_path):
+    # No recognized root manifest → no seed; the Tool verbs keep their pointed
+    # missing-map refusal (never a silent dispatch fallback, ADR-0007).
+    plan = _plan(tmp_path)
+    assert "[toolchains]" not in plan.seeds
+
+
+def _changelog_consumer(root: Path) -> None:
+    """A consumer that adopted the fragment convention (one fragment)."""
+    (root / "CHANGELOG").mkdir()
+    (root / "CHANGELOG" / "unreleased-first.md").write_text("- Added the thing\n")
+
+
+def test_stale_changelog_projection_is_reconcile_work(tmp_path, monkeypatch):
+    # Class B: a renderer change strands every consumer's committed render
+    # (`shipit changelog check` fails fleet-wide). The reconcile detects the
+    # stale projection, treats it as a work axis of its own, and the apply
+    # regenerates CHANGELOG.md with the CURRENT renderer.
+    from shipit import changelog as chlog
+    from shipit.verbs.changelog import render_current
+
+    monkeypatch.setattr(iapply, "_activate_hooks", lambda root: _exec_result(0))
+    _changelog_consumer(tmp_path)
+    (tmp_path / "CHANGELOG.md").write_text("# an old renderer's output\n")
+    plan = _plan(tmp_path)
+    assert plan.rerender_changelog
+    assert not plan.nothing_to_do
+    assert chlog.CHANGELOG_FILE in plan.changed_paths
+    assert "render" in verb.format_plan(plan)
+
+    _apply(tmp_path)  # MODE_TREE
+    committed = (tmp_path / chlog.CHANGELOG_FILE).read_text()
+    assert committed.startswith(chlog.RENDER_PREAMBLE)
+    # The check's own verdict: the projection now matches a re-render.
+    assert chlog.sync_diff(render_current(tmp_path), committed) is None
+    # And it settles: nothing left to re-render, the re-plan is a no-op.
+    replan = _plan(tmp_path)
+    assert not replan.rerender_changelog
+    assert replan.nothing_to_do
+
+
+def test_missing_projection_with_fragments_is_also_stale(tmp_path):
+    # The convention exists but CHANGELOG.md was never rendered/committed:
+    # the reconcile carries the first render too (same axis, same fix).
+    _changelog_consumer(tmp_path)
+    assert _plan(tmp_path).rerender_changelog
+
+
+def test_matching_changelog_projection_is_not_work(tmp_path):
+    # A projection that already matches the current renderer plans no render.
+    from shipit.verbs.changelog import render_current
+
+    _changelog_consumer(tmp_path)
+    (tmp_path / "CHANGELOG.md").write_text(render_current(tmp_path))
+    assert not _plan(tmp_path).rerender_changelog
+
+
+def test_repo_without_the_fragment_convention_never_rerenders(tmp_path):
+    # No CHANGELOG/ directory: nothing to re-render, never a refusal — the
+    # `check` verb's hard error must not leak into the reconcile path.
+    plan = _plan(tmp_path)
+    assert not plan.rerender_changelog
+    assert "CHANGELOG.md" not in plan.changed_paths
+
+
+def test_unrenderable_changelog_dir_plans_no_render(tmp_path):
+    # Unparseable version filenames: a render would silently drop the
+    # mis-named section, so the reconcile declines (fail-open, #578) — the
+    # consumer hears about the bad name from `shipit changelog check`.
+    _changelog_consumer(tmp_path)
+    (tmp_path / "CHANGELOG" / "not-semver.md").write_text("bad\n")
+    (tmp_path / "CHANGELOG.md").write_text("stale\n")
+    assert not _plan(tmp_path).rerender_changelog
+
+
+def test_pr_body_carries_the_changelog_rerender_section(tmp_path, rec):
+    # The reconcile PR explains the refreshed render (and the commit set
+    # carries the file), so the merger knows why CHANGELOG.md changed.
+    _changelog_consumer(tmp_path)
+    (tmp_path / "CHANGELOG.md").write_text("# an old renderer's output\n")
+    result = _apply(tmp_path, iapply.MODE_PR)
+    assert "Changelog re-rendered" in rec.pr_body
+    assert "CHANGELOG.md" in result.plan.changed_paths
