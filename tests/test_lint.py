@@ -168,13 +168,21 @@ def test_path_claimed_langs_claims_workflow_yaml():
 
 
 def test_path_claimed_langs_scopes_by_prefix_and_extension():
-    # The claim covers only workflow YAML UNDER the prefix: a non-YAML stray in
-    # the directory, a sibling `.github` file, a repo-wide `.yml`, and a
-    # lookalike directory all claim nothing.
+    # The claim covers only workflow YAML directly IN the prefix directory: a
+    # non-YAML stray in the directory, a sibling `.github` file, a repo-wide
+    # `.yml`, and a lookalike directory all claim nothing.
     assert lint.path_claimed_langs(".github/workflows/README.md") == []
     assert lint.path_claimed_langs(".github/dependabot.yml") == []
     assert lint.path_claimed_langs("config.yml") == []
     assert lint.path_claimed_langs(".github/workflows-old/ci.yml") == []
+
+
+def test_path_claimed_langs_is_non_recursive():
+    # GitHub reads workflows only from the IMMEDIATE `.github/workflows/`
+    # directory; an archived/generated file in a nested subdirectory is one
+    # GitHub never runs, so actionlint must not claim it (#553).
+    assert lint.path_claimed_langs(".github/workflows/archive/ci.yml") == []
+    assert lint.path_claimed_langs(".github/workflows/old/nested/ci.yaml") == []
 
 
 def test_route_workflow_files_bucket_into_yaml_and_actions():

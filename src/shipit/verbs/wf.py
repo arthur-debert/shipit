@@ -318,9 +318,17 @@ def ensure_image(run_cmd: RunCmd) -> bool:
 
 
 def _fail(message: str) -> int:
-    """One refusal line on stderr + the runtime-failure exit, lint-style."""
-    print(f"wf test: {message}", file=sys.stderr)
-    logger.error("wf test refused", extra={"reason": message})
+    """One refusal line on stderr + the runtime-failure exit, lint-style.
+
+    ``message`` is collapsed to a single line before printing: some refusals
+    carry embedded newlines — a YAML parse error surfaced by
+    :func:`workflow_jobs` tails multi-line parser context — and the
+    ``wf test: …`` contract is ONE stderr line, matching
+    :func:`~._errors.cli_errors`.
+    """
+    line = " ".join(message.split())
+    print(f"wf test: {line}", file=sys.stderr)
+    logger.error("wf test refused", extra={"reason": line})
     return 1
 
 

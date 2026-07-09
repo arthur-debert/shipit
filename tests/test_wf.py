@@ -312,6 +312,23 @@ def test_jobless_workflow_refuses(tmp_path, capsys):
     assert "declares no jobs" in capsys.readouterr().err
 
 
+def test_unparseable_workflow_refuses_on_a_single_stderr_line(tmp_path, capsys):
+    """A YAML parse error tails multi-line parser context, but the refusal must
+    still be ONE stderr line — the `wf test: …` contract, matching cli_errors."""
+    path = tmp_path / "bad.yml"
+    # An unterminated flow sequence: PyYAML reports it across several lines.
+    path.write_text("on: push\njobs: [build, test\n", encoding="utf-8")
+    # Guard: the raw parser message really is multi-line, so this has teeth.
+    with pytest.raises(ValueError) as excinfo:
+        wf.workflow_jobs(path.read_text(encoding="utf-8"))
+    assert "\n" in str(excinfo.value)
+
+    assert wf.run(str(path), run_cmd=_Recorder()) == 1
+    err = capsys.readouterr().err
+    assert "not parseable as workflow YAML" in err
+    assert err.strip().count("\n") == 0
+
+
 # --------------------------------------------------------------------------
 # The packaged Dockerfile is the containers-doc image, never a fork
 # --------------------------------------------------------------------------

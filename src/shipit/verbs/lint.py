@@ -281,9 +281,11 @@ class Lang:
     Two routing forms (TOL01-WS04 #553). An ORDINARY Lang (``path_prefixes``
     empty) claims files repo-wide by extension (else shebang) — the exclusive
     route :func:`lang_for` resolves, one Lang per file. A PATH-CLAIMING Lang
-    (``path_prefixes`` set) instead claims files under its declared repo-relative
-    directory prefixes, IN ADDITION to whatever ordinary Lang the extension
-    route gives them (:func:`path_claimed_langs` / :func:`route`): a workflow
+    (``path_prefixes`` set) instead claims files DIRECTLY in its declared
+    repo-relative directory prefixes — immediate children only, never a nested
+    subdirectory, because GitHub reads workflows non-recursively — IN ADDITION
+    to whatever ordinary Lang the extension route gives them
+    (:func:`path_claimed_langs` / :func:`route`): a workflow
     file under ``.github/workflows/`` routes to BOTH the yaml Lang (yamllint)
     and the actions Lang (actionlint) — the path claim is additive, never a
     hand-off. For a path-claiming Lang, ``extensions`` SCOPES the claim (which
@@ -576,24 +578,37 @@ def lang_for(path: str, shebang: str | None = None) -> Lang | None:
     return None
 
 
+def _in_dir(path: str, prefix: str) -> bool:
+    """``path`` sits DIRECTLY in directory ``prefix`` (a trailing-slash,
+    repo-relative dir) — an immediate child, not a nested subdirectory. The
+    claim is non-recursive to mirror GitHub, which runs workflows only from the
+    immediate ``.github/workflows/`` directory (TOL01-WS04 #553)."""
+    if not path.startswith(prefix):
+        return False
+    return "/" not in path[len(prefix) :]
+
+
 def path_claimed_langs(path: str) -> list[Lang]:
     """Every path-claiming Lang that claims ``path`` — the ADDITIVE route
     (TOL01-WS04 #553), in registry order. Pure (no I/O).
 
-    A Lang claims a path when the path starts with one of its declared
-    repo-relative directory ``path_prefixes`` AND — when the Lang declares
-    ``extensions`` — the file's extension is among them (the extensions SCOPE
-    the claim; see :class:`Lang`). Additive: the caller (:func:`route`) buckets
-    a claimed path here IN ADDITION to its :func:`lang_for` route, so a workflow
+    A Lang claims a path when the path sits DIRECTLY in one of its declared
+    repo-relative directory ``path_prefixes`` — an immediate child, never a
+    nested subdirectory — AND, when the Lang declares ``extensions``, the
+    file's extension is among them (the extensions SCOPE the claim; see
+    :class:`Lang`). The match is non-recursive because GitHub reads workflows
+    only from the immediate ``.github/workflows/`` directory: an archived
+    ``.github/workflows/old/ci.yml`` is a file GitHub never runs, so actionlint
+    must not claim it either. Additive: the caller (:func:`route`) buckets a
+    claimed path here IN ADDITION to its :func:`lang_for` route, so a workflow
     file keeps its yamllint coverage while gaining actionlint's. ``paths`` are
-    the repo-relative POSIX paths ``git ls-files`` yields, so a bare
-    ``startswith`` prefix match is exact directory containment.
+    the repo-relative POSIX paths ``git ls-files`` yields.
     """
     claimed: list[Lang] = []
     for lang in LANGS:
         if not lang.path_prefixes:
             continue
-        if not any(path.startswith(prefix) for prefix in lang.path_prefixes):
+        if not any(_in_dir(path, prefix) for prefix in lang.path_prefixes):
             continue
         if lang.extensions and _ext(path) not in lang.extensions:
             continue
