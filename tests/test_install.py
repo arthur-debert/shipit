@@ -1341,6 +1341,58 @@ def test_setup_dev_env_matches_shipits_own_copy():
     assert os.access(own, os.X_OK)
 
 
+def _bootstrap_function(name: str) -> str:
+    """Extract one top-level ``name() { … }`` block from the bootstrap script."""
+    lines = (
+        iunits.data_bytes("bootstrap", "setup-dev-env.sh").decode("utf-8").splitlines()
+    )
+    start = lines.index(f"{name}() {{")
+    end = start + lines[start:].index("}")
+    return "\n".join(lines[start : end + 1])
+
+
+@pytest.mark.parametrize("tool", ["sha256sum", "shasum"])
+def test_sha256_of_stays_fail_open_when_the_hash_tool_errors(tmp_path, tool):
+    # #598: the script declares LOUD-and-fail-open, but under its
+    # `set -euo pipefail` an unguarded `<hash tool> | awk` pipeline aborts the
+    # whole script when the tool exists but errors on the file. sha256_of must
+    # instead yield "" (returning 0) so a hashing failure flows into
+    # fetch_verified's existing `[ -z "$got" ]` fail-open path — exactly like
+    # the no-hash-tool-at-all branch already does.
+    stub_bin = tmp_path / "bin"
+    stub_bin.mkdir()
+    awk = shutil.which("awk")
+    assert awk is not None
+    os.symlink(awk, stub_bin / "awk")
+    stub = stub_bin / tool
+    stub.write_text("#!/bin/sh\necho 'hash tool: boom' >&2\nexit 1\n")
+    stub.chmod(0o755)
+    target = tmp_path / "asset.tar.gz"
+    target.write_bytes(b"payload")
+    driver = "\n".join(
+        [
+            "set -euo pipefail",
+            _bootstrap_function("sha256_of"),
+            f'got="$(sha256_of "{target}")"',
+            'printf "got=[%s]\\n" "$got"',
+            "echo survived",
+        ]
+    )
+    # Hermetic PATH (the stub dir only): with tool=shasum, sha256sum is absent
+    # and the elif branch is the one under test.
+    bash = shutil.which("bash")
+    assert bash is not None
+    proc = subprocess.run(
+        [bash, "-c", driver],
+        env={"PATH": str(stub_bin)},
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "got=[]" in proc.stdout
+    assert "survived" in proc.stdout
+
+
 def test_setup_dev_env_pixi_pin_agrees_with_ci():
     # PIXI_PIN and CI's setup-pixi `pixi-version` must move in lockstep — the
     # bootstrap and CI provisioning the same pixi is the point of the pin.
