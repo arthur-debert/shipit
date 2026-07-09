@@ -150,6 +150,15 @@ def _parse_entry(where: str, stack: str, spec: object) -> PortfolioEntry:
         raise config.ConfigError(
             f"{where} must declare `path` (the source-checkout layout path)"
         )
+    if Path(path).is_absolute() or ".." in Path(path).parts:
+        # The path indexes INTO --source-root (``_create_tree`` builds
+        # ``source_root / path``); an absolute path silently wins over the join
+        # and a ``..`` component escapes the layout, either of which would sweep
+        # the wrong checkout. Repo-relative only, same doctrine as [toolchains].
+        raise config.ConfigError(
+            f"{where}: path must be a repo-relative layout path under "
+            f"--source-root — no absolute path, no `..` escape; got {path!r}"
+        )
     expect = spec.get("expect_verify_fail")
     if expect is not None and (not isinstance(expect, str) or not expect):
         raise config.ConfigError(

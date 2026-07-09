@@ -82,6 +82,16 @@ def test_load_portfolio_malformed_entry_names_itself(entry):
         fleetsweep.load_portfolio(cfg)
 
 
+@pytest.mark.parametrize("bad", ["/abs/checkout", "../escape", "a/../../escape"])
+def test_load_portfolio_path_must_stay_under_source_root(bad):
+    # path indexes INTO --source-root (source_root / path), so an absolute path
+    # would silently win over the join and a `..` component would escape the
+    # layout — either sweeps the wrong checkout. Rejected loud at load.
+    cfg = {"project": {"portfolio": {"s": [{"repo": "a/b", "path": bad}]}}}
+    with pytest.raises(config.ConfigError, match="repo-relative"):
+        fleetsweep.load_portfolio(cfg)
+
+
 def test_load_portfolio_tolerates_unknown_keys():
     # [project] is the un-policed consumer namespace: only the fields the
     # sweep consumes are validated, extra keys pass through untouched.
