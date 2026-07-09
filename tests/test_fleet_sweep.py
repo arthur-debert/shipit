@@ -149,12 +149,27 @@ def test_plan_tools_absent_declarations_are_not_applicable(tmp_path):
     assert not plans["changelog"].applicable
 
 
-def test_plan_tools_unreadable_config_runs_every_tool(tmp_path):
-    # Applicability can only prove absence from a READABLE declaration: a
-    # missing/malformed .shipit.toml runs every tool so each fails with its
-    # own diagnosis — a red cell, never a silent skip.
-    assert all(p.applicable for p in fleetsweep.plan_tools(tmp_path))
-    (tmp_path / ".shipit.toml").write_text("not = valid = toml", encoding="utf-8")
+def test_plan_tools_unreadable_config_runs_config_tools_changelog_follows_fs(tmp_path):
+    # A missing/malformed .shipit.toml makes the CONFIG-borne facts unprovable,
+    # so lint/test/build/e2e all run and fail with their own diagnosis — a red
+    # cell, never a silent skip. But CHANGELOG/ presence is a FILESYSTEM fact,
+    # provable regardless of the config: changelog stays not-applicable when the
+    # dir is absent even in the error fallback, and applies once it exists.
+    for label, setup in (
+        ("missing config", lambda: None),
+        (
+            "malformed config",
+            lambda: (tmp_path / ".shipit.toml").write_text(
+                "not = valid = toml", encoding="utf-8"
+            ),
+        ),
+    ):
+        setup()
+        plans = _plan_map(fleetsweep.plan_tools(tmp_path))
+        assert all(plans[t].applicable for t in ("lint", "test", "build", "e2e")), label
+        assert not plans["changelog"].applicable, label
+    # The convention on disk flips changelog applicable even with unreadable config.
+    (tmp_path / "CHANGELOG").mkdir()
     assert all(p.applicable for p in fleetsweep.plan_tools(tmp_path))
 
 

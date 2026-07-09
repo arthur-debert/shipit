@@ -242,21 +242,27 @@ def plan_tools(repo_root: Path) -> tuple[ToolPlan, ...]:
     """Derive the per-tool plans from the declarations at ``repo_root``.
 
     Applicability may only prove ABSENCE from a readable declaration: when
-    the repo's ``.shipit.toml`` is missing or malformed, nothing is provably
-    undeclared, so every tool runs and fails with its own diagnosis — an
-    honest red cell, never a silent skip (the fix-discipline surface, story
-    49).
+    the repo's ``.shipit.toml`` is missing or malformed, the CONFIG-borne
+    facts are unprovable, so build + e2e default to applicable — each runs and
+    fails with its own diagnosis, an honest red cell rather than a silent skip
+    (the fix-discipline surface, story 49). The ``CHANGELOG/`` convention is a
+    FILESYSTEM fact, provable regardless of the config, so changelog stays tied
+    to the directory check on BOTH paths — an unreadable config never conjures
+    changelog failure noise on a repo that has no fragment convention.
     """
+    changelog_dir = (repo_root / CHANGELOG_DIR).is_dir()
     try:
         cfg = config.load(repo_root / config.CONFIG_NAME)
         legs = config.load_toolchains(cfg)
         artifacts = config.load_artifacts(cfg)
     except (config.ConfigError, OSError):
-        return tuple(ToolPlan(tool, True) for tool in SWEEP_TOOLS)
+        return derive_plans(
+            legs_declared=True, e2e_declared=True, changelog_dir=changelog_dir
+        )
     return derive_plans(
         legs_declared=bool(legs),
         e2e_declared=any(artifact.e2e is not None for artifact in artifacts),
-        changelog_dir=(repo_root / CHANGELOG_DIR).is_dir(),
+        changelog_dir=changelog_dir,
     )
 
 
