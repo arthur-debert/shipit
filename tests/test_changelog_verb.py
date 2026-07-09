@@ -174,6 +174,27 @@ def test_coalesce_mutation_oserror_is_a_clean_error(tmp_path, capsys):
     assert err.startswith("error: cannot cut 1.2.3")
 
 
+def test_coalesce_failed_cut_leaves_no_stray_notes_file(tmp_path, capsys):
+    # The writability preflight must NOT pre-create --notes-out: a cut that
+    # fails after it leaves no empty notes artifact (automation keys off the
+    # file's existence). Here the re-render write fails (CHANGELOG.md is a dir).
+    root = _tree(tmp_path, {"unreleased-a.md": "- a\n"})
+    (root / "CHANGELOG.md").mkdir()
+    notes_file = tmp_path / "notes.md"
+    capsys.readouterr()
+    assert (
+        verb.run_coalesce(
+            "1.2.3",
+            str(root),
+            notes_out=str(notes_file),
+            repo_root=_no_git,
+            today=_today,
+        )
+        == 1
+    )
+    assert not notes_file.exists()
+
+
 def test_coalesce_final_rolls_consumes_and_rerenders(tmp_path, capsys):
     root = _tree(tmp_path, {"unreleased-a.md": "- a\n", "unreleased-b.md": "- b\n"})
     _render_into(root)

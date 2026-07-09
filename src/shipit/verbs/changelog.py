@@ -35,6 +35,7 @@ shell, or the check report + diff), 2 usage (click's).
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -314,19 +315,25 @@ def run_coalesce(
     # coalesce's contract is that the cut and its one notes artifact land
     # together (story 26), so a bad ``--notes-out`` must not leave a cut tree
     # (section written, fragments gone, CHANGELOG.md re-rendered) with no notes.
-    # Create the parent, reject a directory target, and probe write access
-    # (open for append — creates if absent, requires write permission if the
-    # target already exists) so an unwritable destination is caught up front.
+    # Create the parent and reject a directory / unwritable target — but probe
+    # write access WITHOUT creating the target file (``os.access`` on the
+    # existing target, else its parent), so a cut that fails after this leaves
+    # no stray empty notes file behind. The final write happens only on success.
     notes_path = Path(notes_out) if notes_out else None
     if notes_path is not None:
         try:
             notes_path.parent.mkdir(parents=True, exist_ok=True)
-            if notes_path.is_dir():
-                raise OSError(f"{notes_out} is a directory")
-            with open(notes_path, "a", encoding="utf-8"):
-                pass
         except OSError as exc:
             raise ChangelogError(f"cannot write notes to {notes_out}: {exc}") from exc
+        if notes_path.is_dir():
+            raise ChangelogError(
+                f"cannot write notes to {notes_out}: it is a directory"
+            )
+        probe = notes_path if notes_path.exists() else notes_path.parent
+        if not os.access(probe, os.W_OK):
+            raise ChangelogError(
+                f"cannot write notes to {notes_out}: {probe} is not writable"
+            )
 
     if plan.section is not None:
         # Wrap the cut's filesystem mutations so an OSError (read-only checkout,
