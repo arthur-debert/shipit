@@ -534,6 +534,22 @@ def test_is_leaked_env_var_scrubs_conda_activation_keeps_installation():
         assert not pixienv.is_leaked_env_var(key)
 
 
+def test_is_leaked_env_var_scrubs_the_activation_stack_restore_keys():
+    # pixi's per-level restore keys (CONDA_ENV_SHLVL_<n>_<VAR>) encode the
+    # PARENT's activation stack. Leaking them past a scrub that drops
+    # CONDA_SHLVL hands the child a HALF-scrubbed stack: pixi's own nested
+    # activation (`pixi shell-hook` under `pixi run`) mis-diffs against the
+    # stale backups and omits [activation.env] vars it should set — found by
+    # the fleet sweep's shipit self-row, where the swept Tree's shell-hook
+    # smoke test lost CARGO_TARGET_DIR. The whole family is a leak.
+    for key in (
+        "CONDA_ENV_SHLVL_2_PIXI_PROJECT_MANIFEST",
+        "CONDA_ENV_SHLVL_2_CARGO_TARGET_DIR",
+        "CONDA_ENV_SHLVL_10_CONDA_PREFIX",
+    ):
+        assert pixienv.is_leaked_env_var(key)
+
+
 def test_is_leaked_env_var_scrubs_build_env_but_keeps_sccache_backend_vars():
     # agy ERROR: the ADR-0015 build vars that pixi `[activation.env]` re-sets PER-TREE
     # must be scrubbed so a leaked parent value cannot shadow the Tree's own value.

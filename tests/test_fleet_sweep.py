@@ -434,6 +434,61 @@ def test_run_tool_scrubs_leaked_pixi_env_but_keeps_path(monkeypatch, tmp_path):
     assert env["SHIPIT_EXEC"] == "/cand/shipit"
 
 
+def test_sweep_provisioned_tree_routes_through_its_own_pixi_env(tmp_path):
+    # The self-row leak regression (round-0 `arthur-debert/shipit` × test red
+    # cell): the swept tool's dispatched runners (pytest, cargo nextest, …)
+    # resolve off PATH, and the sweep's inherited PATH still FRONTS the
+    # coordinator checkout's pixi env — scrub_env drops the parent's project
+    # pointers but cannot un-edit PATH — so a bare launcher invocation let a
+    # swept shipit Tree's pytest import the CANDIDATE build's package. A
+    # provisioned Tree (.pixi/envs/default present) must therefore run
+    # through ITS OWN env: pixi run --manifest-path <tree>/pixi.toml -- …,
+    # with SHIPIT_EXEC riding through so the candidate BUILD still runs
+    # (ADR-0033: the override selects the build, never the environment).
+    def provisioned(entry):
+        root = tmp_path / "trees" / "prov"
+        (root / "bin").mkdir(parents=True)
+        (root / "bin" / "shipit").write_text("#!/bin/sh\n", encoding="utf-8")
+        (root / ".shipit.toml").write_text(
+            '[toolchains]\n"." = "python"\n', encoding="utf-8"
+        )
+        # A real provisioned Tree necessarily carries the manifest the wrap
+        # points `--manifest-path` at; the fixture writes it too so the setup
+        # matches a genuine pixi Tree (has_default_env + a manifest to route).
+        (root / "pixi.toml").write_text("[workspace]\n", encoding="utf-8")
+        (root / ".pixi" / "envs" / "default").mkdir(parents=True)
+        return Tree(path=str(root), branch="fleet-sweep-x", base="origin/main")
+
+    report, exec_fake, _ = _sweep(
+        [_ENTRY], tmp_path, create_tree=provisioned, tools=("test",)
+    )
+    ((argv, _, env),) = exec_fake.calls
+    root = tmp_path / "trees" / "prov"
+    assert argv == (
+        "pixi",
+        "run",
+        "--manifest-path",
+        str(root / "pixi.toml"),
+        "--",
+        str(root / "bin" / "shipit"),
+        "test",
+    )
+    assert env["SHIPIT_EXEC"] == "/cand/shipit"
+    # The RECORDED argv is the wrapped form — the hermetic invocation a fix
+    # agent reproduces with.
+    cell = {c.tool: c for c in report.repos[0].cells}["test"]
+    assert cell.argv == argv
+
+
+def test_sweep_unprovisioned_tree_keeps_the_bare_launcher_argv(tmp_path):
+    # A Tree with no provisioned pixi env (a non-pixi repo) is NOT wrapped:
+    # its toolchains never resolved through pixi, and routing it through
+    # `pixi run` would fail outright — same gate as spawn's pixi_wrap.
+    _, exec_fake, _ = _sweep([_ENTRY], tmp_path, tools=("test",))
+    ((argv, cwd, _),) = exec_fake.calls
+    assert argv == (str(cwd / "bin" / "shipit"), "test")
+
+
 def test_sweep_red_cell_carries_command_and_output(tmp_path):
     exec_fake = _FakeExec(rcs={"test": 1})
     report, _, _ = _sweep([_ENTRY], tmp_path, exec_fake=exec_fake)

@@ -117,7 +117,9 @@ def sweep_cmd(
     declarations (lint + test everywhere; build where the path->toolchain map
     declares a leg; e2e where an artifact declares a harness; the changelog
     check where CHANGELOG/ exists), and runs each applicable tool through the
-    Tree's managed launcher under the candidate build (SHIPIT_EXEC, announced).
+    Tree's managed launcher under the candidate build (SHIPIT_EXEC, announced)
+    — routed through the Tree's OWN pixi env when it carries one, so the
+    dispatched runners resolve the Tree's provisioning, never the sweep's.
 
     The deliverable is the per-tool x per-repo matrix report: pass / fail /
     not-applicable / expected-fail, with the exact command and raw output on
