@@ -9,12 +9,15 @@ and the CI job are all thin callers of it — the ADR-0004 lint inversion
 generalized.
 
 The pure planning — which legs run, in what order, with what argv — lives in
-:func:`shipit.tools.legs.plan_legs`; this module is the effectful shell:
+:func:`shipit.tools.legs.plan_legs`; this module is the effectful shell (its
+rim — arg splitting, the map read, the pointed missing-map error — is the
+shared :mod:`._tool`, reused verbatim by ``shipit build``):
 
-- argument shaping (:func:`split_args`): ``shipit test [LEG] [-- ARGS…]``.
-  click consumes the first ``--`` separator, so the split is positional — the
-  first token not starting with ``-`` is the leg selector; everything else is
-  passthrough, forwarded VERBATIM to the selected leg's command (ADR-0039).
+- argument shaping (:func:`~._tool.split_args`): ``shipit test [LEG]
+  [-- ARGS…]``. click consumes the first ``--`` separator, so the split is
+  positional — the first token not starting with ``-`` is the leg selector;
+  everything else is passthrough, forwarded VERBATIM to the selected leg's
+  command (ADR-0039).
 - execution through the one Exec runner (:mod:`shipit.execrun`, ADR-0028):
   each leg runs with cwd at its map path, ``check=False`` (a nonzero rc is
   the suite's verdict, not a transport failure) and a stated
@@ -43,9 +46,10 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from .. import config, execrun
+from .. import execrun
 from ..tools import legs as legs_mod
 from ._errors import cli_errors
+from ._tool import load_config, require_entries, split_args
 
 logger = logging.getLogger("shipit.test")
 
@@ -58,53 +62,6 @@ TOOL = "test"
 #: leg legitimately compiles first (cargo-nextest on a cold target dir) and
 #: then runs a whole suite, so the lint checks' bound would kill healthy runs.
 TEST_TIMEOUT: float = 3600.0
-
-#: Root-level manifest basenames → the toolchain they signal, for the pointed
-#: missing-map error only. This is DIAGNOSIS-side detection (what would this
-#: repo probably declare?), deliberately distinct from the declared map the
-#: verb dispatches on — mirrors the install catalog's provisioning-side
-#: signals (:data:`shipit.install.reconcile.TOOLCHAIN_MANIFESTS`) without
-#: conflating the two.
-_SIGNAL_MANIFESTS: tuple[tuple[str, str], ...] = (
-    ("Cargo.toml", "rust"),
-    ("go.mod", "go"),
-    ("pyproject.toml", "python"),
-    ("package.json", "npm"),
-)
-
-
-def split_args(args: Sequence[str]) -> tuple[str | None, tuple[str, ...]]:
-    """``(selector, passthrough)`` from the verb's raw argument tuple. Pure.
-
-    click consumes the ``--`` separator before the verb sees the args, so the
-    boundary is positional: the FIRST token, when it does not start with
-    ``-``, is the leg selector; every remaining token is passthrough. A
-    leading ``-`` token means no selector was given (``shipit test --
-    -k foo``) and everything is passthrough. A selector that names no leg
-    still errors loudly in the planner (naming the known legs), so a
-    passthrough value accidentally read as a selector is never silently run.
-    """
-    if args and not args[0].startswith("-"):
-        return args[0], tuple(args[1:])
-    return None, tuple(args)
-
-
-def missing_map_message(root: Path) -> str:
-    """The pointed error for a repo with no ``[toolchains]`` map, naming the
-    toolchains its root manifests signal (so the fix is a copy-paste away).
-    """
-    signals = [
-        f'"{name}" -> {tc}' for name, tc in _SIGNAL_MANIFESTS if (root / name).is_file()
-    ]
-    hint = f" This repo's manifests suggest: {'; '.join(signals)}." if signals else ""
-    example = next(
-        (tc for name, tc in _SIGNAL_MANIFESTS if (root / name).is_file()), "rust"
-    )
-    return (
-        f"no [toolchains] path->toolchain map in {config.CONFIG_NAME} — "
-        f"`shipit {TOOL}` dispatches on that declaration (ADR-0007/0039)."
-        f'{hint} Declare e.g.: [toolchains] "." = "{example}"'
-    )
 
 
 @dataclass(frozen=True)
@@ -124,23 +81,6 @@ def verdict(runs: Sequence[LegRun]) -> int:
     """``0`` when every leg passed, ``1`` otherwise — the whole exit contract's
     non-usage half (ADR-0030; usage errors exit 2 before any leg runs)."""
     return 0 if all(run.ok for run in runs) else 1
-
-
-def _load_entries(root: Path) -> tuple[config.ToolchainEntry, ...]:
-    """The typed ``[toolchains]`` map at ``root`` — the verb's one config read.
-
-    Raises :class:`~shipit.config.ConfigError` when ``.shipit.toml`` is
-    missing/malformed OR carries no map (the pointed
-    :func:`missing_map_message`) — all rendered by the shared
-    :func:`~._errors.cli_errors` shell as ``error: …`` + exit 1.
-    """
-    cfg_path = root / config.CONFIG_NAME
-    entries = (
-        config.load_toolchains(config.load(cfg_path)) if cfg_path.is_file() else ()
-    )
-    if not entries:
-        raise config.ConfigError(missing_map_message(root))
-    return entries
 
 
 def _run_leg(argv: Sequence[str], cwd: Path) -> execrun.ExecResult:
@@ -173,7 +113,7 @@ def run(
     started = time.monotonic()
     root = Path(".").resolve()
     selector, passthrough = split_args(tuple(args))
-    entries = _load_entries(root)
+    entries = require_entries(load_config(root), root, TOOL)
 
     try:
         planned = legs_mod.plan_legs(

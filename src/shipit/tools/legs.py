@@ -18,8 +18,9 @@ rules in one place:
 - a single-leg repo may omit the selector (the no-selector sugar).
 
 Pure (no I/O, no Exec): fully fixture-testable, the same split the lint
-verb's ``route``/``verdict`` pair uses. The effectful shell that runs the
-planned legs is :mod:`shipit.verbs.test`.
+verb's ``route``/``verdict`` pair uses. The effectful shells that run the
+planned legs are :mod:`shipit.verbs.test` and :mod:`shipit.verbs.build` (the
+latter via the build-step join, :mod:`shipit.tools.build`).
 """
 
 from __future__ import annotations
