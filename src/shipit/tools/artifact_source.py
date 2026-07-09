@@ -138,8 +138,13 @@ class LocalBuildSource:
                     f"{step.label} ({command}): {detail}"
                 ) from exc
             output = result.stdout + result.stderr
-            if output.strip():
-                self.echo(output.rstrip())
+            if output:
+                # The builder's output is echoed VERBATIM (the build sibling's
+                # contract): `echo` is line-oriented (the verb's `print` adds a
+                # newline), so drop only a single trailing newline the builder
+                # emitted — never any other content — so `echo` neither doubles
+                # a present final newline nor swallows the builder's own text.
+                self.echo(output[:-1] if output.endswith("\n") else output)
             if result.rc != 0:
                 raise ArtifactSourceError(
                     f"local build of artifact {artifact.name} failed: "

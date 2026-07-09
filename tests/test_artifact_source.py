@@ -124,6 +124,17 @@ def test_resolve_never_wraps_the_builder_in_pixi_and_supplies_no_version(tmp_pat
     assert env == {"CGO_ENABLED": "0"}
 
 
+def test_builder_output_is_echoed_verbatim(tmp_path):
+    # Verbatim: the builder's output reaches `echo` with its content intact —
+    # trailing whitespace kept, only a single trailing newline dropped so the
+    # line-oriented echo (the verb's `print`) never doubles it.
+    _place_binary(tmp_path, "target/release/app")
+    rec = _Recorder(outcomes={"cargo": (0, "warning: unused  \n")})
+    source, lines = _source(tmp_path, (_entry(".", "rust"),), rec)
+    source.resolve(_rust_artifact())
+    assert "warning: unused  " in lines  # trailing spaces survive, newline dropped
+
+
 def test_failed_build_step_raises_naming_the_step_and_rc(tmp_path):
     rec = _Recorder(outcomes={"cargo": (101, "compile error")})
     source, lines = _source(tmp_path, (_entry(".", "rust"),), rec)

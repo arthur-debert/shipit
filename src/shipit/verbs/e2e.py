@@ -293,8 +293,13 @@ def run(
                 },
             )
         runs.append(HarnessRun(job, rc, out))
-        if out.strip():
-            print(out.rstrip())
+        if out:
+            # The harness report prints VERBATIM (the suite's report is the
+            # point of running e2e), exactly as the build sibling prints a
+            # builder's: normalize only the trailing newline — add one when it
+            # is missing so the ok/FAIL line starts on its own line, keep the
+            # harness's own when present so it is never doubled.
+            print(out, end="" if out.endswith("\n") else "\n")
         print(f"  {'ok  ' if rc == 0 else 'FAIL'} {job.label} ({command})")
 
     if runs_out is not None:

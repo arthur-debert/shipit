@@ -177,12 +177,16 @@ def test_declared_harness_replaces_the_default_and_gets_passthrough(
 
 def test_harness_output_prints_verbatim_even_when_green(tmp_path, monkeypatch, capsys):
     root = _repo(tmp_path, monkeypatch, PADZ_TOML)
-    rec = _HarnessRecorder(outcomes={"bin/check-e2e": (0, "1..3\nok 1\nok 2\nok 3")})
+    # Verbatim: an internal blank line and trailing whitespace survive
+    # unstripped (the build sibling's contract) — only the trailing newline is
+    # normalized, never the harness's own content.
+    rec = _HarnessRecorder(outcomes={"bin/check-e2e": (0, "1..2\n\nok 1\nok 2 # ")})
     assert (
         e2e_verb.run((), source=_FakeSource({"padz": root / "padz"}), run_harness=rec)
         == 0
     )
-    assert "ok 3" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "1..2\n\nok 1\nok 2 # \n" in out
 
 
 # --------------------------------------------------------------------------
