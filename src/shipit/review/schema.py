@@ -14,6 +14,12 @@ is human-facing, not engine data.
 `extract_json` is the three-fallback parse: direct, fenced (```json …```), then a
 greedy `{...}` regex — agents wrap their JSON output inconsistently, so the parser
 is deliberately forgiving.
+
+`finding_from_dict` is the ONE trust boundary from an unvalidated
+``REVIEW_SCHEMA`` comment dict to a typed :class:`~shipit.finding.Finding` —
+shared by the posting path (:mod:`shipit.review.post`) and the review-round
+record (:mod:`shipit.review.roundrecord`), so both consumers coerce agent JSON
+the same way and the record can never disagree with what was posted.
 """
 
 from __future__ import annotations
@@ -21,7 +27,7 @@ from __future__ import annotations
 import json
 import re
 
-from ..finding import Severity
+from ..finding import Finding, Severity, parse_severity, resolve_severity
 
 REVIEW_SCHEMA: dict = {
     "type": "object",
@@ -103,6 +109,53 @@ REVIEW_SCHEMA: dict = {
     "required": ["summary", "comments"],
     "additionalProperties": False,
 }
+
+
+def _str_field(value: object) -> str:
+    """Coerce an untrusted JSON field to a ``str``, else ``""``.
+
+    The agy path has no native schema enforcement, so a comment field the schema
+    types as a string may arrive as any JSON shape. A non-string here must not
+    ride into a domain :class:`Finding` where it would crash a consumer —
+    a dict ``category`` breaks :func:`~shipit.finding.render_marker`'s ``_escape``
+    (no ``.replace``), an unhashable ``file`` breaks the posting path's
+    ``anchorable`` lookup. This is the trust boundary: every string field of the
+    Finding it returns is honestly a string.
+    """
+    return value if isinstance(value, str) else ""
+
+
+def finding_from_dict(raw: dict) -> Finding:
+    """Map one ``REVIEW_SCHEMA`` comment dict to a domain :class:`Finding`.
+
+    The **trust boundary** from unvalidated agent JSON to a typed Finding: every
+    field is coerced to the domain type or a fail-safe, so a malformed comment
+    (the schema-unenforced agy path) can NEVER crash a downstream consumer — the
+    posting path and the review-round record both route through here, ONE rule
+    set. Severity follows the fail-safe chain
+    (:func:`shipit.finding.resolve_severity`): an absent or unparseable severity
+    lands on ``major`` — it forces a round rather than slipping past the Breaker.
+    String fields fall back to ``""``, a non-int ``line`` to ``None``, a
+    non-number ``confidence`` to ``None``.
+    """
+    line = raw.get("line")
+    confidence = raw.get("confidence")
+    return Finding(
+        # The agent's structured `severity` is adapter-layer input (a reviewer
+        # stating severity in its output), NOT a machine marker recovered from a
+        # posted body — pass the `adapter=` slot so the precedence chain reads it
+        # in the right place (ADR-0044: marker → adapter → major default).
+        severity=resolve_severity(adapter=parse_severity(raw.get("severity"))),
+        text=_str_field(raw.get("text")),
+        file=_str_field(raw.get("file")),
+        line=line if isinstance(line, int) else None,
+        category=_str_field(raw.get("category")),
+        # JSON Schema `type: number` admits an int (`1`); coerce so a Finding's
+        # confidence is honestly a float and never a bare int downstream.
+        confidence=float(confidence) if isinstance(confidence, (int, float)) else None,
+        evidence=_str_field(raw.get("evidence")),
+        fix=_str_field(raw.get("fix")),
+    )
 
 
 def extract_json(text: str) -> dict:

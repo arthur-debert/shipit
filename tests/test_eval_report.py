@@ -387,3 +387,140 @@ def test_run_on_a_non_checkout_reports_no_records(tmp_path, monkeypatch):
     rc = report.run("/not/a/repo", base_dir=tmp_path / "state", out=buf)
     assert rc == 0
     assert "empty" in buf.getvalue().lower()
+
+
+# --- the review axis (RVW02-WS03): round records joined to eval records ---------
+
+
+def _round(
+    *,
+    variant,
+    findings=(),
+    runs=(),
+    duration_ms=1000,
+):
+    """One review-round record in the REAL persisted shape (roundrecord.build)."""
+    from shipit.finding import Disposition, Finding, Severity
+    from shipit.review import roundrecord
+
+    return roundrecord.build(
+        review={"summary": {"status": "COMMENT"}, "comments": []},
+        findings=[
+            (
+                Finding(severity=Severity(sev), text=text, file="f.py"),
+                Disposition(disposition),
+            )
+            for text, sev, disposition in findings
+        ],
+        repo=_REPO.slug,
+        pr=7,
+        base_sha="a" * 40,
+        head_sha="b" * 40,
+        reviewer="codex",
+        model="pro",
+        timeout="600s",
+        instructions_path=None,
+        variant=variant,
+        runs=list(runs),
+        duration_ms=duration_ms,
+        timestamp="2026-07-09T00:00:00+00:00",
+    )
+
+
+def _seed_rounds(tmp_path):
+    """Two rounds of variant V1 (one with a joinable run), one of V2."""
+    base = tmp_path / "state"
+    # An eval record whose run id one V1 round's contributing run carries.
+    record = build(
+        metrics={"tool_call_count": 3, "token_usage": {"total_tokens": 500}},
+        meta={"agentType": "reviewer"},
+        variant=_variant(_V1),
+        commit="abc123",
+        timestamp="2026-07-09T00:00:00+00:00",
+        is_coordinator=False,
+        run_id="agent-joinme",
+    )
+    store.append_record(record, _REPO, base_dir=base)
+    for round_record in (
+        _round(
+            variant=_variant(_V1),
+            findings=[("real", "major", "post"), ("stale", "minor", "out-of-scope")],
+            runs=[{"run_id": "agent-joinme", "variant": _variant(_V1)}],
+            duration_ms=2000,
+        ),
+        _round(
+            variant=_variant(_V1),
+            findings=[("tiny", "nit", "nit-suppressed")],
+            duration_ms=1000,
+        ),
+        _round(variant=_variant(_V2, label="arm-b"), duration_ms=500),
+    ):
+        store.append_record(
+            round_record, _REPO, base_dir=base, kind=store.REVIEW_ROUNDS_KIND
+        )
+    return (
+        base,
+        store.store_path(_REPO, base_dir=base),
+        store.store_path(_REPO, base_dir=base, kind=store.REVIEW_ROUNDS_KIND),
+    )
+
+
+def test_review_axis_groups_rounds_by_variant_and_splits_dispositions(tmp_path):
+    _, eval_path, rounds_path = _seed_rounds(tmp_path)
+    rows = report.review_axis(rounds_path, eval_path)
+    assert [(r.key, r.rounds) for r in rows] == [
+        (_V1, 2),
+        (f"{_V2} [arm-b]", 1),
+    ]
+    v1 = rows[0]
+    # Dropped findings (routed-out dispositions) are counted, never erased:
+    # 3 findings, 1 posted, 2 routed out across the two V1 rounds.
+    assert (v1.findings, v1.posted, v1.dropped) == (3, 1, 2)
+    assert v1.avg_duration_ms == 1500.0
+
+
+def test_review_axis_joins_eval_records_by_run_id(tmp_path):
+    _, eval_path, rounds_path = _seed_rounds(tmp_path)
+    v1, v2 = report.review_axis(rounds_path, eval_path)
+    # The V1 round's contributing run resolved to its eval record → its cost
+    # (total tokens) rides the review axis; V2 contributed no joinable run.
+    assert v1.joined_runs == 1
+    assert v1.avg_run_tokens == 500.0
+    assert v2.joined_runs == 0
+    assert v2.avg_run_tokens is None
+
+
+def test_review_axis_reports_rounds_even_with_no_eval_store(tmp_path):
+    # A replay against a CLI backend writes rounds but no eval records — the
+    # review axis (and the rendered report) must still show them.
+    base = tmp_path / "state"
+    store.append_record(
+        _round(variant=_variant(_V1)),
+        _REPO,
+        base_dir=base,
+        kind=store.REVIEW_ROUNDS_KIND,
+    )
+    eval_path = store.store_path(_REPO, base_dir=base)  # never written
+    rounds_path = store.store_path(_REPO, base_dir=base, kind=store.REVIEW_ROUNDS_KIND)
+    result = report.aggregate(eval_path, rounds_path)
+    assert result.total_runs == 0
+    assert [r.rounds for r in result.review] == [1]
+    text = report.format_report(result)
+    assert "Review rounds (by variant):" in text
+    assert _V1 in text
+
+
+def test_aggregate_without_rounds_path_has_an_empty_review_axis(tmp_path):
+    _, _, eval_path = _seed(tmp_path)
+    assert report.aggregate(eval_path).review == []
+
+
+def test_run_renders_the_review_axis_from_the_same_family_root(tmp_path, monkeypatch):
+    base, _, _ = _seed_rounds(tmp_path)
+    monkeypatch.setattr(report, "_resolve_repo", lambda start: _REPO)
+    buf = io.StringIO()
+    rc = report.run("/some/checkout", base_dir=base, out=buf)
+    text = buf.getvalue()
+    assert rc == 0
+    assert "Review rounds (by variant):" in text
+    assert f"{_V2} [arm-b]" in text

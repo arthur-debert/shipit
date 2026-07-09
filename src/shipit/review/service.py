@@ -11,7 +11,9 @@ Layered functions:
     (:func:`shipit.review.producer.run_tree_review`): provision a shared read-only
     Tree (ADR-0018) on the PR head, launch the agent through its spawn read-only
     posture with a task that fetches the diff itself via ``gh pr diff``, and CAPTURE
-    its structured stdout → the parsed review dict. No GitHub posting.
+    its structured stdout → the parsed review dict. No GitHub posting. The
+    generated review is TEED to the local review-round record store here
+    (RVW02-WS03, fail-open) — verb-witnessed at generate time, before any post.
   * :func:`start_detached_review` — the OBS03 PARENT entry the reviewer adapter
     calls: do the cheap synchronous work (resolve ``(repo, head_sha)``, reconcile
     against any in-flight run, open the ``in_progress`` breadcrumb), spawn a
@@ -38,7 +40,7 @@ from collections.abc import Callable, Mapping, Sequence
 from .. import execrun, gh, logcontext
 from ..agent.backend import Backend
 from ..pr import PrId
-from . import checkrun, ghauth, post, producer
+from . import checkrun, ghauth, post, producer, roundrecord
 from .backends.base import BackendError
 from .diff import ReviewError, resolve_pr
 
@@ -81,6 +83,13 @@ def generate_review(
     timeout flag, is still killed at the deadline rather than stalling forever. A
     seam-killed run settles ``timed_out`` exactly like agy's native timeout.
     ``dry_run`` prints the would-run Tree-launch argv and bills nothing.
+
+    Every successfully generated review is ALSO teed to the local
+    **review-round record** store at this seam (RVW02-WS03) — verb-witnessed at
+    generate time, BEFORE any posting, so the record exists whether or not the
+    post succeeds and the posting path is untouched. The tee is fail-open
+    (:func:`_tee_round_record`): a record miss is logged and swallowed, never a
+    degraded review.
     """
     agent = backend.funnel_agent
     logger.info(
@@ -109,7 +118,76 @@ def generate_review(
         len((review.get("comments") or []) if isinstance(review, dict) else []),
         extra={"reviewer": agent, "pr": ctx.number, "duration_ms": duration_ms},
     )
+    if not dry_run:
+        _tee_round_record(
+            backend,
+            ctx,
+            review,
+            model=model,
+            timeout=timeout,
+            instructions_path=instructions_path,
+            duration_ms=duration_ms,
+        )
     return review
+
+
+def _tee_round_record(
+    backend: Backend,
+    ctx,
+    review: dict,
+    *,
+    model: str,
+    timeout: str,
+    instructions_path: str | None,
+    duration_ms: int | None,
+) -> None:
+    """Tee the generated review into the local review-round record store — FAIL-OPEN.
+
+    Verb-witnessed at generate time (RVW02-WS03): the review's product (all
+    findings with dispositions, the coverage attestation, the range reviewed)
+    lands in the harness-owned store the moment it exists, independent of the
+    posting path — a tee, not a pipeline change. Any failure (a hand-built ctx
+    with no repo, an unwritable store, an unreadable instructions file) is
+    logged at WARNING and swallowed: process telemetry must never degrade the
+    review it observes (the same posture as the eval hook's fail-open contract).
+    """
+    # A hand-built ctx (tests, ad-hoc callers) may carry no repo identity at all;
+    # the tee reads it defensively — fail-open means "no record", never a crash.
+    repo = getattr(ctx, "repo", None)
+    if not repo:
+        logger.warning(
+            "review-round record skipped for pr#%s: ctx carries no repo identity",
+            ctx.number,
+            extra={"pr": ctx.number},
+        )
+        return
+    try:
+        path = roundrecord.record_round(
+            review,
+            repo_slug=repo,
+            pr=ctx.number,
+            base_sha=str(ctx.base_sha),
+            head_sha=str(ctx.head_sha),
+            reviewer=backend.funnel_agent or backend.name,
+            model=model,
+            timeout=timeout,
+            instructions_path=instructions_path,
+            duration_ms=duration_ms,
+        )
+    except Exception:  # noqa: BLE001 - the tee is telemetry; never degrade the review
+        logger.warning(
+            "review-round record write failed for pr#%s (the review is unaffected)",
+            ctx.number,
+            exc_info=True,
+            extra={"pr": ctx.number},
+        )
+        return
+    logger.info(
+        "review-round record written for pr#%s -> %s",
+        ctx.number,
+        path,
+        extra={"pr": ctx.number, "repo": repo},
+    )
 
 
 def _generate_post_and_close(

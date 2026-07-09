@@ -1,6 +1,9 @@
-"""prompt — the single shared review-task body for the Tree-fetch funnel producer.
+"""prompt — the shared review-task bodies the review producers launch with.
 
-`build_reviewer_task` is the one place the review task is composed. Since
+`build_reviewer_task` composes the PR (Tree-fetch) task; `build_range_reviewer_task`
+composes its offline commit-range sibling (RVW02-WS03 replay: the diff comes from
+`git diff <base>..<head>`, no PR, nothing posted). This module is the ONE place a
+review task is composed. Since
 TRE05-WS04b the producer no longer **front-loads** the diff into the prompt
 (ADR-0020 §Reviewer-path reconciliation — "REPLACE"): the agent runs in a shared
 read-only Tree (ADR-0018) at the PR's true head and **fetches the scoped diff
@@ -129,6 +132,67 @@ NOT wrap the JSON in markdown blocks (e.g. do not use ```json) and do NOT write 
 text before or after the JSON. Do NOT post the review yourself — do not run \
 `gh pr review` or otherwise comment on the PR; just emit the JSON and stop. shipit \
 captures your output and posts the review."""
+
+    if schema_inline:
+        body = f"{body}\n\n{_SCHEMA_PROSE}\n\n{_JSON_VALIDITY_INSTRUCTION}"
+
+    return body
+
+
+def build_range_reviewer_task(
+    instructions: str, base_sha: str, head_sha: str, *, schema_inline: bool
+) -> str:
+    """Compose the COMMIT-RANGE reviewer task — the offline-replay sibling of
+    :func:`build_reviewer_task` (RVW02-WS03).
+
+    Same review contract, different scope source: there is NO pull request, so the
+    agent gets the diff from git itself — ``git diff <base>..<head>`` over two
+    pre-resolved commit shas (the replay boundary resolved and validated them, so
+    the task never carries a user-typed rev that could miss) — and is told it is
+    OFFLINE: no ``gh`` calls, nothing posted, output captured from stdout exactly
+    like the PR path. The checkout it runs in provides the surrounding-code
+    context. ``schema_inline`` follows the same backend split as the PR task.
+    """
+    body = f"""\
+You are an expert AI code reviewer. You are running in a checkout of a repository. \
+Your task is to perform a detailed, rigorous OFFLINE code review of one commit \
+range of this repository — there is NO pull request involved.
+
+FIRST, get the changes: run `git diff {base_sha}..{head_sha}` to read the range's \
+unified diff. Read the surrounding code in this checkout for any context you need. \
+Do NOT call `gh` — this review is offline and touches nothing on GitHub.
+
+Here are the custom review instructions you must follow:
+{instructions}
+
+Identify bugs, code quality issues, style violations, potential crashes, logic \
+errors, or missing tests. For each finding, determine:
+1. The file path (relative to the repository root)
+2. The specific line number (if applicable)
+3. The severity, on the 4-tier ladder: critical, major, minor, or nit. The \
+major/minor boundary is the MERGE-BLOCK TEST: would a competent reviewer hold the \
+merge for this? critical = merging would be actively harmful (security hole, data \
+loss, crash, broken build); major = a concrete correctness or behavioral defect \
+worth blocking the merge on; minor = worth doing, not worth holding the merge; \
+nit = wording, naming, or style with no correctness, behavioral, or security impact.
+4. The category that best describes it (e.g. correctness, cross-file invariants, \
+security, tests) and your confidence in the finding from 0.0 to 1.0 — both are \
+informational only; nothing routes on them.
+5. A descriptive comment explaining the issue and recommending a fix
+6. The quoted code the finding rests on (evidence), and the suggested fix
+
+Order the comments array highest severity first: every critical, then every major, \
+then minor, then nit.
+
+In the summary, attest your coverage: list what you actually reviewed (files, or \
+file:hunk ranges) and anything you skipped with the reason — so silence means \
+"clean", not "skipped".
+
+You must output your complete review strictly as a single JSON object on stdout. Do \
+NOT wrap the JSON in markdown blocks (e.g. do not use ```json) and do NOT write any \
+text before or after the JSON. Do NOT post the review anywhere — do not run `gh` or \
+otherwise publish it; just emit the JSON and stop. shipit captures your output and \
+records it locally."""
 
     if schema_inline:
         body = f"{body}\n\n{_SCHEMA_PROSE}\n\n{_JSON_VALIDITY_INSTRUCTION}"

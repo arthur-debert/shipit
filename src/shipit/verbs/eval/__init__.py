@@ -20,8 +20,9 @@ import click
     help=(
         "Run evaluation — aggregate the local objective-eval store.\n\n"
         "`report` runs DuckDB/SQL over the JSONL records the harness writes at "
-        "each run's terminal hook, summarising by role, by variant, and over "
-        "time. `--help` is the map."
+        "each run's terminal hook, summarising by role, by variant, over "
+        "time — and by review-round variant (the review axis). `--help` is "
+        "the map."
     ),
 )
 def eval_group() -> None:

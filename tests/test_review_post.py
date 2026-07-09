@@ -12,7 +12,7 @@ import pytest
 from shipit import finding
 from shipit.agent import backend as agent_backend
 from shipit.identity import repo_from_slug
-from shipit.review import post
+from shipit.review import post, schema
 from shipit.review.diff import ReviewView, review_view
 
 _DIFF = """\
@@ -119,9 +119,9 @@ def test_unanchored_fold_omits_the_line_when_absent():
 
 
 def test_int_confidence_coerces_to_float():
-    """JSON Schema `type: number` admits an int; `_finding_from_dict` coerces it
+    """JSON Schema `type: number` admits an int; `finding_from_dict` coerces it
     so a Finding's confidence is honestly a float downstream."""
-    result = post._finding_from_dict(
+    result = schema.finding_from_dict(
         {"file": "foo.py", "text": "t", "severity": "minor", "confidence": 1}
     )
     assert result.confidence == 1.0
@@ -130,7 +130,7 @@ def test_int_confidence_coerces_to_float():
 
 def test_nonstring_comment_fields_never_abort_the_post():
     """The agy path has no schema enforcement, so a comment field the schema types
-    as a string can arrive as any shape. `_finding_from_dict` coerces each to "" so
+    as a string can arrive as any shape. `finding_from_dict` coerces each to "" so
     the malformed finding cannot crash the posting path — a dict `category` would
     otherwise break render_marker's `_escape`, an unhashable `file` the anchoring
     lookup."""
@@ -152,7 +152,7 @@ def test_nonstring_comment_fields_never_abort_the_post():
     # Must not raise; the malformed finding folds into the body harmlessly.
     payload = post.build_review_payload(review, _ctx(), agent_name="agy")
     assert isinstance(payload["body"], str)
-    result = post._finding_from_dict(review["comments"][0])
+    result = schema.finding_from_dict(review["comments"][0])
     assert result.file == "" and result.category == "" and result.text == ""
     assert result.evidence == "" and result.fix == ""
 

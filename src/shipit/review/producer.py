@@ -30,6 +30,11 @@ What this module owns (and ONLY this):
     never waited on forever — then CAPTURE its stdout and parse it into a review dict
     (:func:`shipit.review.backends.parse_review_output`).
 
+A second producer shares the same launch core (RVW02-WS03):
+:func:`run_range_review`, the OFFLINE commit-range sibling — no Tree, no ``gh``,
+the diff read via ``git diff <base>..<head>`` in the caller's checkout — which
+feeds the no-post replay path (:mod:`shipit.review.replay`) instead of the funnel.
+
 It does NOT post, does NOT touch the check-run, and does NOT decide outcomes — the
 service layer (:mod:`shipit.review.service`) owns posting + the funnel breadcrumb,
 exactly as before. The producer raises :class:`BackendUnavailable` (missing CLI),
@@ -59,7 +64,7 @@ from ..tree.readonly import create_readonly, readonly_plan
 from .backends import BackendError, BackendUnavailable, parse_review_output
 from .backends.base import _TIMEOUT_MARKER
 from .instructions import load_instructions
-from .prompt import build_reviewer_task
+from .prompt import build_range_reviewer_task, build_reviewer_task
 from .schema import REVIEW_SCHEMA
 
 logger = logging.getLogger("shipit.review")
@@ -227,13 +232,6 @@ def run_tree_review(
             source_repo=ctx.workdir,
             github_url=_github_url(ctx),
         )
-        cmd = adapter.build_command(
-            task,
-            _REVIEWER_ROLE,
-            read_only=True,
-            cwd=tree.path,
-            output_schema_path=schema_path,
-        )
         logger.info(
             "review launching for pr#%s (agent=%s) in read-only Tree %s",
             ctx.number,
@@ -241,38 +239,145 @@ def run_tree_review(
             tree.path,
             extra={"pr": ctx.number, "tree": tree.path, "reviewer": agent},
         )
-        try:
-            result = launch.launch(
-                cmd,
-                cwd=tree.path,
-                env=adapter.child_env(),
-                timeout=_seam_deadline(timeout, spec),
-                runner=launcher,
-            )
-        except execrun.ExecError as exc:
-            if exc.cause != execrun.CAUSE_TIMEOUT:
-                # A non-timeout transport failure (missing binary, bad cwd): leave it
-                # for the service's generic mapping to `failed` (ADR-0028 normalizes
-                # every OS-level launch error into ExecError; a nonzero CHILD is a
-                # LaunchResult, never raised, so this is always transport).
-                raise
-            # The seam killed a STALLED backend at the deadline (#404). Turn it into
-            # the funnel's `timed_out` terminal outcome: BackendError(timed_out=True)
-            # so the service settles `timed_out` (degraded, non-blocking, ADR-0006),
-            # carrying the partial stdout+stderr as `raw` so the #76 salvage can still
-            # surface whatever the backend had written before it hung.
-            raise BackendError(
-                f"{agent} timed out before returning a review — the launch seam "
-                f"killed it at {_seam_deadline(timeout, spec):.0f}s "
-                f"(configured --timeout {timeout}); try a faster model or a smaller "
-                "diff",
-                raw=f"{exc.stdout}\n{exc.stderr}".strip(),
-                timed_out=True,
-            ) from exc
-        return _capture(agent, result)
+        return _launch_and_capture(
+            agent,
+            spec,
+            adapter,
+            task,
+            cwd=tree.path,
+            timeout=timeout,
+            schema_path=schema_path,
+            launcher=launcher,
+        )
     finally:
         if schema_path and os.path.exists(schema_path):
             os.remove(schema_path)
+
+
+def run_range_review(
+    backend: Backend,
+    view,
+    *,
+    model: str = "pro",
+    timeout: str = "600s",
+    instructions_path: str | None = None,
+    launcher: launch.Runner | None = None,
+) -> dict:
+    """Launch ``backend`` as an OFFLINE commit-range reviewer and CAPTURE its
+    review dict (RVW02-WS03 replay).
+
+    The range sibling of :func:`run_tree_review` — the SAME backend specs,
+    preflight, adapters, schema handling, launch seam, deadline mapping, and
+    capture (:func:`_launch_and_capture`), with two deliberate differences:
+
+      * NO Tree and NO ``gh``: the review runs in ``view.workdir`` (the checkout
+        whose range is being replayed) with a task that reads the diff itself via
+        ``git diff <base>..<head>`` (:func:`~shipit.review.prompt.build_range_reviewer_task`)
+        — the replay boundary already resolved + validated both endpoints;
+      * nothing downstream posts: the caller (:mod:`shipit.review.replay`) writes
+        the review-round record and stops — no PR is touched.
+
+    Raises exactly the :func:`run_tree_review` error set (missing CLI →
+    :class:`BackendUnavailable`; unparseable / timed-out output →
+    :class:`BackendError`; a nonzero child → ``RuntimeError``).
+    """
+    agent = backend.funnel_agent or backend.name
+    spec = _SPECS.get(backend)
+    if spec is None:
+        raise ValueError(
+            f"unknown funnel review backend {backend.name!r} "
+            f"(known: {', '.join(b.name for b in _SPECS)})"
+        )
+    _preflight(backend, dry_run=False)
+
+    instructions = load_instructions(instructions_path)
+    task = build_range_reviewer_task(
+        instructions,
+        str(view.base_sha),
+        str(view.head_sha),
+        schema_inline=spec.schema_inline,
+    )
+    adapter = spec.adapter_factory(model, timeout)  # type: ignore[operator]
+
+    schema_path: str | None = None
+    try:
+        if spec.native_schema:
+            schema_path = _write_schema_tempfile()
+        logger.info(
+            "range review launching (agent=%s) in %s over %s..%s",
+            agent,
+            view.workdir,
+            view.base_sha,
+            view.head_sha,
+            extra={"reviewer": agent},
+        )
+        return _launch_and_capture(
+            agent,
+            spec,
+            adapter,
+            task,
+            cwd=str(view.workdir),
+            timeout=timeout,
+            schema_path=schema_path,
+            launcher=launcher,
+        )
+    finally:
+        if schema_path and os.path.exists(schema_path):
+            os.remove(schema_path)
+
+
+def _launch_and_capture(
+    agent: str,
+    spec: _BackendSpec,
+    adapter: BackendAdapter,
+    task: str,
+    *,
+    cwd: str,
+    timeout: str,
+    schema_path: str | None,
+    launcher: launch.Runner | None,
+) -> dict:
+    """Launch one reviewer child in ``cwd`` under the seam deadline and parse its
+    stdout — the launch core :func:`run_tree_review` (PR/Tree) and
+    :func:`run_range_review` (offline range) share, so the deadline mapping and
+    the timeout→``BackendError`` normalization exist exactly once.
+    """
+    cmd = adapter.build_command(
+        task,
+        _REVIEWER_ROLE,
+        read_only=True,
+        cwd=cwd,
+        output_schema_path=schema_path,
+    )
+    try:
+        result = launch.launch(
+            cmd,
+            cwd=cwd,
+            env=adapter.child_env(),
+            timeout=_seam_deadline(timeout, spec),
+            runner=launcher,
+        )
+    except execrun.ExecError as exc:
+        if exc.cause != execrun.CAUSE_TIMEOUT:
+            # A non-timeout transport failure (missing binary, bad cwd): leave it
+            # for the service's generic mapping to `failed` (ADR-0028 normalizes
+            # every OS-level launch error into ExecError; a nonzero CHILD is a
+            # LaunchResult, never raised, so this is always transport).
+            raise
+        # The seam killed a STALLED backend at the deadline (#404). Turn it into
+        # the funnel's `timed_out` terminal outcome: BackendError(timed_out=True)
+        # so the service settles `timed_out` (degraded, non-blocking, ADR-0006),
+        # carrying the partial stdout+stderr as `raw` so the #76 salvage can still
+        # surface whatever the backend had written before it hung.
+        raise BackendError(
+            f"{agent} timed out before returning a review — the launch seam "
+            f"killed it at {_seam_deadline(timeout, spec):.0f}s "
+            f"(configured --timeout {timeout}); try a faster model or a smaller "
+            "diff",
+            raw=f"{exc.stdout}\n{exc.stderr}".strip(),
+            timed_out=True,
+        ) from exc
+    return _capture(agent, result)
 
 
 def _capture(agent: str, result: launch.LaunchResult) -> dict:
