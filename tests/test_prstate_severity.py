@@ -145,6 +145,20 @@ def test_gemini_unmappable_is_none():
     assert adapter.native_severity("![unknown](https://x/unknown.svg)") is None
 
 
+def test_gemini_badge_requires_geminis_own_asset_url():
+    # An unrelated image (or a quoted example) whose alt text merely happens to
+    # be a level token is NOT a Gemini badge — only the `codereviewagent/` asset
+    # is, so it must not skew severity resolution.
+    adapter = by_name("gemini")
+    assert (
+        adapter.native_severity("![critical](https://example.com/critical.svg)") is None
+    )
+    assert adapter.native_severity("![high](https://cdn.example.com/high.png)") is None
+    # ...but the real badge URL shape (`<level>-priority.svg`) still maps.
+    live = "![high](https://www.gstatic.com/codereviewagent/high-priority.svg)"
+    assert adapter.native_severity(live) is Severity.MAJOR
+
+
 @pytest.mark.parametrize(
     "token, expected",
     [

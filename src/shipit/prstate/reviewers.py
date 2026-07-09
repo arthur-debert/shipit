@@ -508,11 +508,16 @@ class GeminiAdapter(ReviewerAdapter):
         "low": Severity.NIT,
     }
     # The level rides the comment as a severity badge image whose alt text IS
-    # the native token: `![critical](https://…/critical.svg)`. Built from the
-    # table so the two can never disagree; anything outside it is unmappable →
-    # the chain's `major` fail-safe.
+    # the native token AND whose URL is Gemini's own badge asset, e.g.
+    # `![critical](https://www.gstatic.com/codereviewagent/critical-priority.svg)`.
+    # Anchoring on the `codereviewagent/` path segment (the exact filename varies
+    # — `high-priority.svg` and friends) keeps an unrelated image or a quoted
+    # example that merely shares a matching alt text from reading as a badge and
+    # skewing severity resolution. Built from the table so alt token and map can
+    # never disagree; anything outside it is unmappable → the `major` fail-safe.
     _BADGE_RE = re.compile(
-        r"!\[(" + "|".join(map(re.escape, _SEVERITY_MAP)) + r")\]\(",
+        r"!\[(" + "|".join(map(re.escape, _SEVERITY_MAP)) + r")\]"
+        r"\([^)]*codereviewagent/[^)]*\)",
         re.IGNORECASE,
     )
 
