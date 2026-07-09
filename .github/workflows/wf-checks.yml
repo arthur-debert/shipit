@@ -92,8 +92,10 @@ jobs:
           LANE_RUN: ${{ matrix.run }}
         # Force bash: `matrix.runner` is consumer-chosen, and on a Windows-runner
         # lane the default `run:` shell is PowerShell, where the split below is
-        # invalid. `shell: bash` selects the bash every GitHub runner ships
-        # (Git bash on Windows), so the step behaves identically on any runner.
+        # invalid. `shell: bash` pins bash on every GitHub-HOSTED runner (Git bash
+        # on Windows), so the step behaves identically across them. Requirement
+        # for consumers: a lane pointed at a self-hosted runner must have bash on
+        # PATH — the split below (`read -ra`, `<<<`, arrays) is bash-only.
         shell: bash
         # A lane's run is a task plus optional args ("test", "changelog check")
         # that must WORD-SPLIT into pixi's argv. Split on whitespace into an
