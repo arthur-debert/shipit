@@ -67,7 +67,11 @@ REVIEW_SCHEMA: dict = {
                 "type": "object",
                 "properties": {
                     "file": {"type": "string"},
-                    "line": {"type": "integer"},
+                    # Nullable: a file-level finding has no specific line, and the
+                    # posting path folds a null-line finding in unanchored. `line`
+                    # STAYS in `required` — codex's strict `--output-schema` needs
+                    # every property required; optionality rides the null type.
+                    "line": {"type": ["integer", "null"]},
                     "text": {"type": "string"},
                     "severity": {
                         "type": "string",

@@ -48,7 +48,10 @@ JSON Schema:
       "fix": "the suggested remedy (may be empty)"
     }
   ]
-}"""
+}
+
+"line" may be null for a file-level finding not tied to a specific line — use \
+null rather than inventing a line number to fill the field."""
 
 # Appended ONLY for backends without native schema enforcement (agy): an emphatic
 # restatement that the ENTIRE response must be one complete, valid JSON object and

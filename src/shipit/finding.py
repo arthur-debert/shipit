@@ -302,29 +302,35 @@ def parse_comment(body: str, *, file: str = "", line: int | None = None) -> Find
     properties GitHub holds, so the caller passes them in. Severity follows the
     fail-safe chain: the marker's value, else :data:`DEFAULT_SEVERITY` (an
     unparseable finding forces a round). A body :func:`render_comment` produced
-    round-trips losslessly, provided the claim text does not itself contain the
-    layout delimiters (a blank-line-fenced code block or a ``Suggested fix:``
-    paragraph).
+    round-trips losslessly. The evidence and fix are peeled off the TAIL (last
+    occurrence) — the exact order :func:`render_comment` appends them — so a claim
+    text that itself contains a fenced code block or a ``Suggested fix:``
+    paragraph is not mis-split.
     """
     marker = parse_marker(body)
-    text = _MARKER_RE.sub("", body).strip()
+    # Strip only the FIRST marker — the authoritative one :func:`parse_marker`
+    # read; a marker-like string inside the human text stays as content.
+    text = _MARKER_RE.sub("", body, count=1).strip()
 
     for prefix in _PREFIXES_BY_LENGTH:
         if text.startswith(prefix):
             text = text[len(prefix) :].lstrip()
             break
 
+    # render_comment appends evidence then fix at the END; peel from the tail so
+    # the same delimiters appearing earlier (inside the claim) are left alone.
     fix = ""
-    fix_at = text.find(f"\n\n{FIX_LABEL} ")
+    fix_at = text.rfind(f"\n\n{FIX_LABEL} ")
     if fix_at != -1:
         fix = text[fix_at + len(FIX_LABEL) + 3 :].strip()
         text = text[:fix_at]
 
     evidence = ""
-    evidence_match = _EVIDENCE_RE.search(text)
-    if evidence_match:
-        evidence = evidence_match.group(1)
-        text = text[: evidence_match.start()] + text[evidence_match.end() :]
+    evidence_matches = list(_EVIDENCE_RE.finditer(text))
+    if evidence_matches:
+        last = evidence_matches[-1]
+        evidence = last.group(1)
+        text = text[: last.start()] + text[last.end() :]
 
     finding = Finding(
         severity=resolve_severity(marker.severity if marker else None),

@@ -284,6 +284,23 @@ def test_render_parse_round_trip_is_lossless(original):
     assert recovered == original
 
 
+def test_round_trip_survives_delimiters_inside_the_claim_text():
+    """A claim that itself quotes a fenced block or the `Suggested fix:` label does
+    not derail parsing: evidence/fix are peeled off the TAIL, where render_comment
+    emits them, so the earlier look-alikes stay part of the claim text."""
+    original = Finding(
+        Severity.MAJOR,
+        "the call site does\n\n```\nx = 1\n```\nand mislabels it Suggested fix: nope",
+        file="a.py",
+        line=5,
+        evidence="real_evidence()",
+        fix="the real remedy",
+    )
+    body = render_comment(original)
+    recovered = parse_comment(body, file="a.py", line=5)
+    assert recovered == original
+
+
 def test_parse_comment_recovers_exact_severity_from_body_alone():
     """The acceptance criterion: severity survives GitHub via the body alone."""
     for severity in Severity:

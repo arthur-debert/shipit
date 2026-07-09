@@ -11,8 +11,25 @@ JSON-validity instruction.
 from __future__ import annotations
 
 from shipit.review.prompt import build_reviewer_task
+from shipit.review.schema import REVIEW_SCHEMA
 
 _INSTRUCTIONS = "Be thorough."
+
+
+def test_schema_line_is_nullable_but_stays_required():
+    """A file-level finding has no line, so `line` accepts null — but it STAYS in
+    `required` because codex's strict `--output-schema` needs every property
+    required (optionality rides the null type, not omission)."""
+    item = REVIEW_SCHEMA["properties"]["comments"]["items"]
+    assert item["properties"]["line"]["type"] == ["integer", "null"]
+    assert "line" in item["required"]
+
+
+def test_agy_prose_notes_line_may_be_null():
+    """The in-prose schema (agy's only guide) tells the agent a file-level finding
+    uses null rather than a fabricated line number."""
+    task = build_reviewer_task(_INSTRUCTIONS, 7, schema_inline=True)
+    assert "null for a file-level finding" in task
 
 
 def test_task_tells_agent_to_fetch_the_diff_itself_and_not_post():
