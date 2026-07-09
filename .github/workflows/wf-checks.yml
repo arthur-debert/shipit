@@ -90,9 +90,20 @@ jobs:
       - name: Run lane
         env:
           LANE_RUN: ${{ matrix.run }}
-        # Deliberately UNQUOTED: a lane's run is a task plus optional args
-        # ("test", "changelog check") that must word-split. The value comes
-        # from the repo's own committed .shipit.toml, planner-typed at parse.
+        # Force bash: `matrix.runner` is consumer-chosen, and on a Windows-runner
+        # lane the default `run:` shell is PowerShell, where the split below is
+        # invalid. `shell: bash` pins bash on every GitHub-HOSTED runner (Git bash
+        # on Windows), so the step behaves identically across them. Requirement
+        # for consumers: a lane pointed at a self-hosted runner must have bash on
+        # PATH — the split below (`read -ra`, `<<<`, arrays) is bash-only.
+        shell: bash
+        # A lane's run is a task plus optional args ("test", "changelog check")
+        # that must WORD-SPLIT into pixi's argv. Split on whitespace into an
+        # array (`read -ra`) rather than an unquoted expansion, so a shell
+        # metacharacter in a consumer's `.shipit.toml` lane.run (`;`, `&&`, `|`)
+        # is passed to pixi as a LITERAL argument — which pixi rejects as an
+        # unknown task/arg — instead of being interpreted by this runner shell.
+        # Same split result for every legitimate lane, no shell-injection seam.
         run: |
-          # shellcheck disable=SC2086
-          pixi run --locked $LANE_RUN
+          read -ra lane_argv <<<"$LANE_RUN"
+          pixi run --locked "${lane_argv[@]}"
