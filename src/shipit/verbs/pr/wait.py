@@ -8,6 +8,13 @@ becomes dispatchable); `--until ready` when the engine reports READY. `pr
 status` / `pr next` stay pure single-shot reads; a driver parks behind this
 verb instead of re-deriving a poll cadence per session.
 
+A `ready` wait stops EARLY — distinct exit code :data:`EXIT_ACTIONABLE` (4) —
+the moment it observes `addressing` (#583): that state is caller-actionable
+(the parked process is the one actor whose action unblocks READY), so polling
+through it is a guaranteed dead wait to the deadline. The verb reports the
+state it stopped on plus the engine's next-action line; the caller addresses
+the round (dispatch the shepherd) and re-waits.
+
 The cadence is config, never a flag: the shipped default is
 :data:`~shipit.prstate.wait.POLL_INTERVAL_SECONDS` (60s), overridable via the
 `[reviewers]` table-level ``poll_interval`` key in `.shipit.toml`. `--timeout`
@@ -63,19 +70,34 @@ from ._format import format_status
 #: parsing output.
 EXIT_TIMEOUT = 3
 
+#: The deadlock-guard exit code (#583): the wait stopped EARLY on a
+#: caller-actionable state (a `ready` wait observing `addressing` — the
+#: awaited state cannot arrive until the waiting caller itself acts). Distinct
+#: from 0 (fired) and 3 (deadline expired, state may still arrive) so a
+#: supervising script can branch straight to dispatching the round's
+#: addressing without parsing output.
+EXIT_ACTIONABLE = 4
+
 
 def format_wait(result: WaitResult) -> str:
     """The pure text renderer: one wait-outcome line, then the shared status block.
 
     Reuses :func:`~._format.format_status` (the render-seam helper the whole
     `pr` family shares) so the final observed status renders identically to
-    `pr status`. The timeout line carries the engine's next-action line — the
-    state report naming what is still outstanding, as ADR-0034 requires.
+    `pr status`. The timeout and actionable lines both carry the engine's
+    next-action line — the state report naming what is still outstanding
+    (ADR-0034) or what the caller must now do (#583).
     """
     if result.outcome is Outcome.FIRED:
         head = (
             f"wait: {result.until.value} fired after {result.ticks} poll(s) "
             f"({result.waited_seconds:.0f}s)"
+        )
+    elif result.outcome is Outcome.ACTIONABLE:
+        head = (
+            f"wait: stopped on {result.status.state.value} after {result.ticks} "
+            f"poll(s) ({result.waited_seconds:.0f}s) — {result.until.value} cannot "
+            f"arrive until this caller acts — {result.status.next_action}"
         )
     else:
         head = (
@@ -95,7 +117,8 @@ def format_wait(result: WaitResult) -> str:
     help=(
         "The awaited state: `reviews-in` — the latest round's reviews have all "
         "landed (an addressing agent is dispatchable); `ready` — the engine "
-        "reports READY."
+        f"reports READY (stops early, exit {EXIT_ACTIONABLE}, on `addressing` — "
+        "a state only the waiting caller can clear)."
     ),
 )
 @click.option(
@@ -117,7 +140,9 @@ def cmd(pr: int | None, until: str, timeout_seconds: float, as_json: bool) -> No
     verb that blocks (ADR-0034): polls the same evaluator `pr status` reads at
     the fixed config-owned interval (default 60s; `[reviewers].poll_interval`
     in .shipit.toml), printing one stderr line per observed state change. Exits
-    0 when the state arrives, 3 on the --timeout hard deadline.
+    0 when the state arrives, 4 when a `ready` wait observes `addressing` (a
+    state only the waiting caller can clear — act, then re-wait), 3 on the
+    --timeout hard deadline.
     """
     raise SystemExit(
         run(pr, until=Until(until), timeout_seconds=timeout_seconds, as_json=as_json)
@@ -142,8 +167,10 @@ def run(
     direct caller (a test) injects it as a value, and ``sleep`` / ``monotonic``
     are the same test seam for the clock.
 
-    Returns 0 when the awaited state arrived, :data:`EXIT_TIMEOUT` (3) when the
-    hard deadline expired first. A branch with NO PR is a refusal (there is
+    Returns 0 when the awaited state arrived, :data:`EXIT_ACTIONABLE` (4) when
+    the wait stopped early on a caller-actionable state (#583 — address the
+    round, then re-wait), :data:`EXIT_TIMEOUT` (3) when the hard deadline
+    expired first. A branch with NO PR is a refusal (there is
     nothing to wait on — open the draft PR first), and a real gh/auth/config
     failure — at resolution or on any poll tick — propagates to the
     :func:`~shipit.verbs._errors.cli_errors` shell (clean ``error: …`` stderr +
@@ -194,4 +221,8 @@ def run(
         monotonic=monotonic,
     )
     emit(result, format_wait, as_json=as_json)
-    return 0 if result.outcome is Outcome.FIRED else EXIT_TIMEOUT
+    if result.outcome is Outcome.FIRED:
+        return 0
+    if result.outcome is Outcome.ACTIONABLE:
+        return EXIT_ACTIONABLE
+    return EXIT_TIMEOUT
