@@ -127,7 +127,7 @@ def write_unit(root: Path, unit: Unit) -> None:
         dest.chmod(0o755)
 
 
-def _rerender_changelog(root: Path) -> None:
+def _rerender_changelog(root: Path) -> bool:
     """Regenerate ``CHANGELOG.md`` from ``CHANGELOG/`` with the CURRENT renderer
     — the write half of the plan's re-render decision (TOL01-WS08 #578).
 
@@ -139,17 +139,22 @@ def _rerender_changelog(root: Path) -> None:
     returns ``None`` and the goal state "nothing to render" already holds.
     Imported at call time for the same ``_errors``-shell cycle the selfcert
     lint import breaks lazily.
+
+    Returns ``True`` when it wrote the file, ``False`` when it skipped — the
+    caller drops the now-phantom ``CHANGELOG.md`` from the commit set on a skip
+    so a committing mode's ``git add`` never chokes on it.
     """
     from ..verbs.changelog import render_current
 
     rendered = render_current(root)
     if rendered is None:
-        return
+        return False
     (root / CHANGELOG_FILE).write_text(rendered, encoding="utf-8")
     logger.info(
         "changelog re-rendered with the current renderer",
         extra={"root": str(root), "path": CHANGELOG_FILE},
     )
+    return True
 
 
 def _activate_hooks(root: Path) -> execrun.ExecResult:
@@ -397,8 +402,7 @@ def apply(
 
     for d in plan.writes:
         write_unit(root, d.unit)
-    if plan.rerender_changelog:
-        _rerender_changelog(root)
+    rerendered = plan.rerender_changelog and _rerender_changelog(root)
     for d in plan.retire_deletes:
         # missing_ok: the decision proved a pristine copy existed at gather
         # time; if it vanished in the gather→apply window the goal state
@@ -508,6 +512,14 @@ def apply(
         result = replace(result, lint_debt=debt_reader(root))
 
     changed_paths = list(plan.changed_paths)
+    # The re-render can be skipped in the gather→apply window (CHANGELOG/ gone
+    # or turned unrenderable → render_current is None, the retired-unlink
+    # idempotence stance, #578). Complete the skip: drop the now-phantom
+    # CHANGELOG.md from the commit set so a committing mode's `git add -f` never
+    # crashes with an opaque pathspec error on a file that was never (re)written
+    # and is absent+untracked (#578 review).
+    if plan.rerender_changelog and not rerendered:
+        changed_paths = [p for p in changed_paths if p != CHANGELOG_FILE]
     # The committed-lockfile decision (#439, see PIXI_LOCK): the lint-env solve
     # above materializes/refreshes pixi.lock; stage it with the managed set so
     # the install lands laptop/CI parity and never leaves the tree dirty.

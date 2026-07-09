@@ -3590,3 +3590,31 @@ def test_pr_body_carries_the_changelog_rerender_section(tmp_path, rec):
     result = _apply(tmp_path, iapply.MODE_PR)
     assert "Changelog re-rendered" in rec.pr_body
     assert "CHANGELOG.md" in result.plan.changed_paths
+
+
+def test_rerender_skipped_in_the_window_drops_the_phantom_changelog_path(tmp_path, rec):
+    # The gather→apply race: the plan decides a re-render (fragments present, no
+    # committed CHANGELOG.md), but CHANGELOG/ vanishes before apply runs, so
+    # render_current → None and _rerender_changelog skips the write (the
+    # retired-unlink idempotence stance). The now-phantom CHANGELOG.md must NOT
+    # reach `git add` — otherwise a committing mode crashes with an opaque
+    # pathspec error on a file that is absent AND untracked (#578 review).
+    from shipit import changelog as chlog
+
+    _changelog_consumer(tmp_path)
+    plan = _plan(tmp_path)  # planned while the fragment tree still exists
+    assert plan.rerender_changelog
+    assert chlog.CHANGELOG_FILE in plan.changed_paths
+
+    # The window: the fragment tree disappears between gather and apply.
+    (tmp_path / "CHANGELOG" / "unreleased-first.md").unlink()
+    (tmp_path / "CHANGELOG").rmdir()
+
+    iapply.apply(plan, iapply.MODE_LOCAL)  # no pathspec crash
+
+    # The skip landed no file, and the phantom path was dropped from the commit
+    # set — the idempotent skip is complete, not half-done.
+    assert not (tmp_path / chlog.CHANGELOG_FILE).exists()
+    assert chlog.CHANGELOG_FILE not in rec.commit_paths
+    add_paths = next(paths for name, paths in rec.calls if name == "add")
+    assert chlog.CHANGELOG_FILE not in add_paths
