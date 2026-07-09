@@ -249,6 +249,15 @@ def test_load_toolchains_table_entry_with_per_path_test_override():
     assert entries[0].commands == {"test": ("cargo", "test", "--workspace")}
 
 
+def test_toolchain_entry_commands_are_read_only():
+    # The "typed frozen values" contract (ADR-0030): a parsed entry's override
+    # map cannot be mutated after the fact — frozen=True freezes the binding,
+    # and the map itself is wrapped read-only.
+    entry = config.ToolchainEntry(path=".", toolchain="python", commands={})
+    with pytest.raises(TypeError):
+        entry.commands["test"] = ("pytest",)  # type: ignore[index]
+
+
 def test_load_toolchains_absent_table_is_empty():
     assert config.load_toolchains({}) == ()
 

@@ -11,8 +11,12 @@ from pathlib import Path
 
 import pytest
 
-from shipit import execrun
+from shipit import config, execrun
 from shipit.verbs import test as test_verb
+
+_RUST = config.ToolchainEntry(path=".", toolchain="rust", commands={})
+_WEB_NPM = config.ToolchainEntry(path="web", toolchain="npm", commands={})
+_PY = config.ToolchainEntry(path=".", toolchain="python", commands={})
 
 
 class _Recorder:
@@ -63,19 +67,39 @@ def python_repo(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------
 
 
-def test_split_args_first_bare_token_is_the_selector():
-    assert test_verb.split_args(("rust", "--no-capture")) == (
+def test_split_args_first_bare_token_naming_a_leg_is_the_selector():
+    assert test_verb.split_args(("rust", "--no-capture"), (_RUST, _WEB_NPM)) == (
         "rust",
         ("--no-capture",),
     )
 
 
 def test_split_args_leading_dash_means_no_selector():
-    assert test_verb.split_args(("-k", "foo")) == (None, ("-k", "foo"))
+    assert test_verb.split_args(("-k", "foo"), (_PY,)) == (None, ("-k", "foo"))
 
 
 def test_split_args_empty_is_the_bare_fan_out():
-    assert test_verb.split_args(()) == (None, ())
+    assert test_verb.split_args((), (_PY,)) == (None, ())
+
+
+def test_split_args_positional_on_single_leg_repo_is_passthrough():
+    # click ate the `--`, so `shipit test -- tests/foo.py` and
+    # `shipit test tests/foo.py` both arrive as a bare positional; on a
+    # single-leg repo the one leg is unambiguous, so it forwards to pytest
+    # (the no-selector sugar) rather than being read as an unknown selector.
+    assert test_verb.split_args(("tests/foo.py",), (_PY,)) == (
+        None,
+        ("tests/foo.py",),
+    )
+
+
+def test_split_args_unknown_first_token_on_multi_leg_repo_stays_a_selector():
+    # Multi-leg: passthrough needs an explicit selector, so a non-matching
+    # first token is kept as the selector for the planner to reject loudly.
+    assert test_verb.split_args(("tests/foo.py",), (_RUST, _WEB_NPM)) == (
+        "tests/foo.py",
+        (),
+    )
 
 
 # --------------------------------------------------------------------------
@@ -130,6 +154,15 @@ def test_single_leg_repo_takes_passthrough_without_a_selector(python_repo):
     rec = _Recorder()
     assert test_verb.run(("-k", "foo"), run_leg=rec) == 0
     assert rec.calls == [(("pytest", "-k", "foo"), python_repo)]
+
+
+def test_single_leg_repo_forwards_a_positional_path_to_the_runner(python_repo):
+    # `shipit test -- tests/test_foo.py` (click strips the `--`): the path is a
+    # bare positional, and on a single-leg repo it forwards to pytest rather
+    # than being misread as an unknown leg selector.
+    rec = _Recorder()
+    assert test_verb.run(("tests/test_foo.py",), run_leg=rec) == 0
+    assert rec.calls == [(("pytest", "tests/test_foo.py"), python_repo)]
 
 
 # --------------------------------------------------------------------------
