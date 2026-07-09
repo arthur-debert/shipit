@@ -10,6 +10,7 @@ seams (prior art: the tool-verb recorder tests, ADR-0028).
 """
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -575,6 +576,26 @@ def test_run_sweep_unknown_repo_selector_is_a_clean_refusal(portfolio_repo, caps
     assert "error:" in err and "nope/nope" in err
 
 
+def test_run_sweep_repo_selector_matches_case_insensitively(portfolio_repo):
+    # Selectors and portfolio slugs are normalized through the canonical parser,
+    # so a differently-cased selector still finds its repo (not "unknown").
+    out = portfolio_repo / "partial.json"
+    rc = fleet_verb.run_sweep(repos=("A/B",), out=out, sweep_fn=_fake_sweep)
+    assert rc == 0
+    assert json.loads(out.read_text(encoding="utf-8"))["repos"][0]["repo"] == "a/b"
+
+
+def test_run_sweep_malformed_repo_selector_is_rejected_as_invalid(
+    portfolio_repo, capsys
+):
+    # A malformed selector is an INVALID slug, distinct from a well-formed slug
+    # that is merely absent from the portfolio.
+    rc = fleet_verb.run_sweep(repos=("notaslug",), sweep_fn=_fake_sweep)
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "error:" in err and "invalid --repo selector" in err
+
+
 def test_resolve_candidate_explicit_must_be_executable(tmp_path):
     exe = tmp_path / "shipit"
     exe.write_text("#!/bin/sh\n", encoding="utf-8")
@@ -584,6 +605,21 @@ def test_resolve_candidate_explicit_must_be_executable(tmp_path):
     assert fleetsweep.resolve_candidate(exe) == exe.resolve()
     with pytest.raises(fleetsweep.SweepError):
         fleetsweep.resolve_candidate(tmp_path / "absent")
+
+
+def test_resolve_candidate_implicit_resolves_bare_argv0_via_path(tmp_path, monkeypatch):
+    # The default candidate is the running build's entrypoint. Launched off PATH,
+    # sys.argv[0] is a bare name ("shipit"), not a cwd file — resolve_candidate
+    # must find it on PATH rather than refusing the executable running build.
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    exe = bindir / "shipit"
+    exe.write_text("#!/bin/sh\n", encoding="utf-8")
+    exe.chmod(0o755)
+    monkeypatch.setattr(sys, "argv", ["shipit", "fleet", "sweep"])
+    monkeypatch.setenv("PATH", str(bindir))
+    monkeypatch.chdir(tmp_path)  # cwd has no bare "shipit" file at its root
+    assert fleetsweep.resolve_candidate() == exe.resolve()
 
 
 def test_fleet_group_is_attached_to_the_cli():

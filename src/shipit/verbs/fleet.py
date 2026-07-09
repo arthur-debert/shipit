@@ -21,7 +21,7 @@ from pathlib import Path
 
 import click
 
-from .. import buildid, config, fleetsweep
+from .. import buildid, config, fleetsweep, identity
 from ..fleetsweep import SweepError
 from ._errors import cli_errors
 from ._params import json_option
@@ -160,14 +160,23 @@ def run_sweep(
     cfg = config.load(Path(config.CONFIG_NAME))
     entries = fleetsweep.load_portfolio(cfg)
     if repos:
-        known = {entry.repo for entry in entries}
-        unknown = [slug for slug in repos if slug not in known]
+        # Match selectors and portfolio slugs through the ONE canonical parser
+        # (identity.repo_from_slug — the same normalization the rest of the CLI
+        # uses): case-insensitive so `Owner/Name` finds `owner/name`, and a
+        # MALFORMED selector is rejected as invalid rather than mislabeled "not
+        # in portfolio".
+        try:
+            wanted = {identity.repo_from_slug(slug).slug for slug in repos}
+        except ValueError as exc:
+            raise SweepError(f"invalid --repo selector: {exc}") from exc
+        by_slug = {identity.repo_from_slug(entry.repo).slug: entry for entry in entries}
+        unknown = sorted(wanted - by_slug.keys())
         if unknown:
             raise SweepError(
                 f"not in [project.portfolio]: {', '.join(unknown)} — the sweep "
                 "iterates exactly the declared portfolio (ADR-0033)"
             )
-        entries = tuple(entry for entry in entries if entry.repo in repos)
+        entries = tuple(entry for slug, entry in by_slug.items() if slug in wanted)
     candidate = fleetsweep.resolve_candidate(shipit_exec)
     sha = buildid.build_sha()
     sweep_fn = sweep_fn or fleetsweep.sweep

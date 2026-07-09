@@ -441,13 +441,20 @@ def resolve_candidate(explicit: str | Path | None = None) -> Path:
     ``SHIPIT_EXEC`` (ADR-0033's sanctioned override — the build under test,
     never the consumer's pin).
 
-    ``explicit`` is the ``--shipit-exec`` flag; absent, the RUNNING build's
-    own entrypoint (``sys.argv[0]``) is the candidate — the sweep verifies
-    the build that launched it. Refuses (:class:`SweepError`) when neither
-    resolves to an executable file.
+    ``explicit`` is the ``--shipit-exec`` flag: a deliberate executable PATH,
+    taken literally (never a ``PATH`` lookup — that would reintroduce the
+    ambient/consumer-build ambiguity the override exists to bypass). Absent, the
+    candidate is the RUNNING build's own entrypoint — the sweep verifies the
+    build that launched it — resolved from ``sys.argv[0]`` through ``PATH``:
+    a console-script launch off ``PATH`` leaves ``argv[0]`` a bare name
+    (``"shipit"``), not a cwd file, yet the running build is executable.
+    Refuses (:class:`SweepError`) when neither resolves to an executable file.
     """
-    path = Path(explicit) if explicit is not None else Path(sys.argv[0])
-    resolved = path.expanduser()
+    if explicit is not None:
+        resolved = Path(explicit).expanduser()
+    else:
+        argv0 = sys.argv[0]
+        resolved = Path(shutil.which(argv0) or argv0).expanduser()
     if resolved.is_file() and os.access(resolved, os.X_OK):
         return resolved.resolve()
     hint = (
