@@ -171,3 +171,80 @@ Spike residue, all deleted at close: canary scaffolding (workflows, fixture
 crate, docker/, uv dep + rust-spike feature in the manifest), the
 `spike/ci-cache-v2` branch, the `SHIPIT_READ_TOKEN` secret (operator token —
 rotated out), and the spike cache entries (evicted naturally).
+
+## Appendix — the base provisioning block (TOL01/TOL02 starting point)
+
+The distilled, copy-from base for the `run`-job provisioning in a wf-* block
+(ADR-0040), folding every settled decision above into the *current*
+`wf-checks.yml` shape. This is the recommendation, not the probe ladder: it
+carries only what earned its place (setup-pixi env-set caching, rust-cache,
+env-carried uv) and drops what did not (sccache, the docker gha step, the
+standalone uv cache). The planner (`shipit ci plan`, decision 5) supplies the
+per-lane `envs`, `envset`, and `caches.*` fields; the block stays routing-only
+and gates static steps on them. Delete-with-the-spike does not apply here —
+this block is the surviving prescription the epic implements and tests.
+
+```yaml
+# wf-checks.yml, run job — provisioning + gated cache steps.
+# Every `matrix.*` value is planner-emitted (decision 5); this block adds NO
+# logic, only static steps gated on descriptors the fixture-tested planner
+# already computed from `.shipit.toml`.
+steps:
+  - uses: actions/checkout@v4
+
+  # Provision + cache in ONE step: setup-pixi couples its cache to its own
+  # install (`cache: true` + `run-install: false` is a hard error, spike
+  # decision 1), so it installs the lane's env-set and caches it together.
+  - uses: prefix-dev/setup-pixi@v0.9.6
+    with:
+      # Lockstep with the Layer 0 bootstrap's PIXI_PIN (drift-tested).
+      pixi-version: v0.71.0
+      locked: true
+      # Install exactly the lane's env-set — nothing more to cache, nothing
+      # missing at run time.
+      environments: ${{ matrix.envs }}
+      cache: true
+      # Warm PR branches from their second push. ~10 GB repo quota, LRU
+      # eviction; sustainable for fleet-sized envs (spike: ~150–500 MB/env).
+      cache-write: true
+      # Key on the ENV-SET, not the lane (decision 1): lanes sharing an
+      # env-set share one entry; distinct env-sets stop racing the immutable
+      # single-key default and stop writing duplicate multi-hundred-MB entries.
+      cache-key: pixi-${{ matrix.envset }}-
+
+  # --- gated static cache steps: present in the block, active only when the
+  # planner's descriptor says the lane needs them (exactly how required/runner
+  # already flow) ---
+
+  # rust-cache reads `rustc` off the RUNNER PATH, where pixi never puts it;
+  # export the env's bin dir first (decision 2). The repo-root CARGO_TARGET_DIR
+  # (ADR-0015) is covered by rust-cache's workspace mapping below.
+  - name: Expose pixi rust on the runner PATH
+    if: matrix.caches.rust
+    run: echo "$PWD/.pixi/envs/${{ matrix.envset }}/bin" >> "$GITHUB_PATH"
+
+  # The whole warm win (clean build 24s → 1s on the fixture). No sccache: it
+  # made cold builds 58% slower and added nothing warm (decision 2).
+  - name: rust-cache
+    if: matrix.caches.rust
+    uses: Swatinem/rust-cache@v2
+    with:
+      workspaces: ${{ matrix.rust_workspaces }}
+
+  # NOTE — env-carried uv (decision 4) needs NO step here. `uv = "0.11.*"` is a
+  # managed dep in the consumer's default pixi feature, so it rides the
+  # env-set cache above and is on PATH inside every `pixi run`. The two open
+  # items are epic work, not block steps: (a) a cross-repo READ token for the
+  # private shipit pin, delivered via gh-setup `[secrets]` (a consumer's
+  # GITHUB_TOKEN cannot read shipit); (b) a UV_PIN lockstep drift test mirroring
+  # PIXI_PIN's. The standalone `actions/cache` over ~/.cache/uv is dropped — it
+  # moved pin-resolve 5s → 3s, not worth the block surface.
+
+  - name: Run lane
+    env:
+      LANE_RUN: ${{ matrix.run }}
+    shell: bash
+    run: |
+      read -ra lane_argv <<<"$LANE_RUN"
+      pixi run --locked "${lane_argv[@]}"
+```
