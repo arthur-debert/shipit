@@ -28,10 +28,12 @@ The pipeline itself is unchanged in behavior (a mechanical ADR-0030 promotion):
 - The Run reports back **through the PR** (ADR-0019 §6): the write tail
   resolves the PR the Run opened on the Tree's branch and audits it (OPEN,
   DRAFT, targeting the Tree's base) before claiming success.
-- A write-tail failure AFTER the child ran carries the **salvage signal**
+- Any write-tail failure after Tree creation carries the **salvage signal**
   (#587): the refusal appends the Tree's uncommitted-change count when the
   dead Tree still holds work worth inspecting, so a Run killed mid-work is a
-  resumable handoff for the coordinator, never a silent loss.
+  resumable handoff for the coordinator, never a silent loss. A launch
+  transport failure (child never started) is covered too — its fresh Tree is
+  clean, so the probe finds nothing and the bare refusal passes untouched.
 """
 
 from __future__ import annotations
@@ -223,11 +225,14 @@ def spawn_subagent(spec: SubagentSpec, bounds: Boundaries | None = None) -> Spaw
     nonzero, or —
     for a write Run — the post-condition audit fails (no PR on the branch, an
     unreadable PR state, or a PR that is not an OPEN, DRAFT PR targeting the
-    Tree's intended base). A write-tail refusal raised AFTER the child ran
-    (nonzero child, failed audit) appends the salvage signal (#587) when the
-    dead Tree still holds uncommitted work: the one-line
-    ``git status --porcelain`` count, so the coordinator knows the Tree is
-    worth inspecting before discarding it.
+    Tree's intended base). Any write-tail refusal raised after Tree creation —
+    a launch transport failure (child never started), a nonzero child, or a
+    failed audit — appends the salvage signal (#587) when the dead Tree still
+    holds uncommitted work: the one-line ``git status --porcelain`` count, so
+    the coordinator knows the Tree is worth inspecting before discarding it. (A
+    transport failure leaves the fresh Tree clean, so the probe finds nothing
+    and the bare refusal passes through untouched — a note appears only once a
+    Run has run and left work behind.)
 
     ``bounds`` injects the effectful edges (:class:`Boundaries`) so every stage
     is testable without git, gh, a clone, or a real backend child; ``None`` is
@@ -729,11 +734,14 @@ def _launch_write(
             base_branch=base_branch,
         )
     except SpawnError as exc:
-        # The salvage signal (#587): the Tree exists and the child RAN, so a failure
-        # here — a nonzero child, or an exited-0 Run that never reported back — can
-        # strand real work uncommitted in the dead Tree. Append the one-line
-        # uncommitted-work count to the refusal the coordinator reads, so a killed
-        # Run is a resumable handoff, not a silent loss. The original refusal has
+        # The salvage signal (#587): the Tree exists, so a failure here — a launch
+        # transport failure (child never started), a nonzero child, or an exited-0 Run
+        # that never reported back — can strand real work uncommitted in the dead Tree.
+        # `salvage_note` probes the Tree and returns None when it is clean (the
+        # transport-failure case: a fresh Tree has nothing to salvage), so the bare
+        # refusal re-raises untouched; only a dirty Tree appends the one-line
+        # uncommitted-work count to the refusal the coordinator reads, turning a killed
+        # Run into a resumable handoff instead of a silent loss. The original refusal
         # already logged its ERROR at the raise site; the salvage half logs its own
         # WARNING inside `salvage_note`, so the re-minted exception is deliberately
         # NOT routed through `_refusal` again (no duplicate ERROR record).
