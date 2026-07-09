@@ -24,6 +24,7 @@ from .verbs._context import resolve_root_context
 from .verbs.changelog import changelog as changelog_group
 from .verbs.ci import ci as ci_group
 from .verbs.eval import eval_group
+from .verbs.fleet import fleet as fleet_group
 from .verbs.hook import hook as hook_group
 from .verbs.logevent import log as log_group
 from .verbs.pr import pr as pr_group
@@ -312,6 +313,13 @@ root.add_command(tree_group)
 # The nested `spawn` group (TRE03) — shipit-owned subagent spawning: create a
 # write Tree and launch a backend-agent Run rooted in it (ADR-0017/0019).
 root.add_command(spawn_group)
+
+# The nested `fleet` group (TOL01-WS07) — fleet-wide verification over the
+# declared [project.portfolio]: `shipit fleet sweep` runs every applicable
+# tool verb in a fresh Tree per portfolio repo under the candidate build
+# (SHIPIT_EXEC, ADR-0033) and emits the per-tool × per-repo matrix report —
+# the TOL01 exit gate and ADP02's adoption-readiness seed.
+root.add_command(fleet_group)
 
 # The nested `wf` group (TOL01-WS04) — workflow tools: `shipit wf test` runs
 # one workflow/job under act in a container against a crafted event, so a
