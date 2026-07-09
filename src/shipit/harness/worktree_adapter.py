@@ -6,7 +6,7 @@ tree create`` and returns a **dissociated Tree clone** as the cwd — closing th
 #139 enforcement gap *by construction* (neither path can reach a native worktree):
 
 - the **coordinator's own launch** (``claude --worktree <id>``, usually via
-  ``claude-start``): the one pre-launch seam that can set the immutable root
+  ``agent-start claude``): the one pre-launch seam that can set the immutable root
   session cwd, so the hook mints the coordinator's **ephemeral session Tree**
   (branch ``ephemeral/<id>`` off ``origin/main`` — ADR-0027; no longer a
   "throwaway" path but the coordinator's primary workspace); and
@@ -99,7 +99,7 @@ def is_coordinator_launch(payload: dict[str, object]) -> bool:
     ``prompt_id`` UUID (the user turn that triggered the Agent call). The spike
     also confirmed the corroborating name convention — helper spawns are always
     ``name: agent-<agentId>``, a coordinator's ``name`` is the ``--worktree`` value
-    verbatim (``sess-…`` via ``claude-start``) — but the payload field is the
+    verbatim (``sess-…`` via ``agent-start claude``) — but the payload field is the
     primary signal; the prefix is evidence, not the mechanism (a user may pass any
     ``-w`` name, including one starting with ``agent-``).
 

@@ -688,8 +688,8 @@ def test_source_clone_cwd_warns_on_stdout(tmp_path, monkeypatch, caplog):
         code, out = _run_warning_check(clone)
     assert code == 0
     assert out == sessionstart.SOURCE_CLONE_WARNING + "\n"
-    assert "./claude-start" in out
-    assert "./codex-start" in out
+    assert "./agent-start claude" in out
+    assert "./agent-start codex" in out
     assert any(
         r.levelno == logging.WARNING and r.name == HOOK_LOGGER for r in caplog.records
     )

@@ -28,7 +28,7 @@ dependencies.
     with the maintainer. It does the general reading/research and CREATES the epic
     branch (`EPIC/umbrella` — see [./naming.lex]). Its workspace needs no manual
     step: a coordinator session already runs inside its own ephemeral
-    *session Tree* from launch (`claude --worktree`, usually via `claude-start` —
+    *session Tree* from launch (`claude --worktree`, usually via `agent-start claude` —
     ADR-0027), born on `ephemeral/<id>` off `origin/main`, so it creates and manages the epic
     branch by switching branches INSIDE that same Tree (ephemeral-by-path,
     work-by-branch: the dir stays, the branch becomes the work). The old

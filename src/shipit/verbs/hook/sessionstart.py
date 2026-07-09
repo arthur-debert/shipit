@@ -40,7 +40,7 @@ the hook is the one verb that witnesses a session beginning):
    on stdout. A SessionStart hook's stdout is added to the session's context, so
    the coordinator sees it and can relay it; a WARNING log record rides along as
    the durable trail. The direct launch stays fully supported (``claude -w
-   <name>`` without the launcher is an explicit path, per the ``claude-start``
+   <name>`` without the launcher is an explicit path, per the ``agent-start``
    header) — this is a nudge, never a block. The discriminator is the PATH, not
    the branch: session Trees are *ephemeral-by-path, work-by-branch* (ADR-0027),
    so their branch moves off ``ephemeral/*`` mid-session and would false-positive,
@@ -107,8 +107,8 @@ ENV_FILE_VAR = "CLAUDE_ENV_FILE"
 #: fires the same WorktreeCreate isolation path).
 SOURCE_CLONE_WARNING = (
     "shipit: you launched a coordinator directly in the source clone — this "
-    "session has no isolated Tree. Restart via ./claude-start for Claude Code "
-    "or ./codex-start for Codex."
+    "session has no isolated Tree. Restart via ./agent-start claude for "
+    "Claude Code or ./agent-start codex for Codex."
 )
 
 #: The tool repo the ADR-0033 staleness advisory measures a consumer's pin

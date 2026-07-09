@@ -288,14 +288,26 @@ SETTINGS_SUBAGENTSTOP_MARKER = "shipit hook subagent-stop"
 # guarantee).
 SETUP_DEV_ENV_FILE = "bin/setup-dev-env.sh"
 
+# The CDX01 generic `./agent-start` launcher (#627): ONE managed entry point
+# (`./agent-start <agent> [args...]`) whose common start path — usage, host
+# dispatch, CLI presence check, arg forwarding — is written once, dispatching
+# through a small host strategy table to narrow per-host launch functions
+# (docs/dev/agent-host-seams.md): `claude` mints a `sess-<utc>-<pid>` id and
+# execs `claude --worktree <id>` (the WorktreeCreate pre-launch seam, SES01
+# Layer D / ADR-0027); `codex` execs the pinned `./bin/shipit session codex`
+# (no pre-launch seam — explicit Tree provisioning, then codex). Ships like
+# `bin/shipit` (an executable whole-file bootstrap unit at the repo root).
+AGENT_LAUNCHER_FILE = "agent-start"
+
 # The SES01 session-bootstrap set (docs/prd/session-bootstrap.md, ADR-0027): the
-# `./claude-start` launcher (Layer D — mint a session id and exec
-# `claude --worktree <id>`; convenience only, `claude -w <name>` works without it)
-# and the SessionStart activation hook line (Layer A — `shipit hook sessionstart`
-# writes the repo's toolchain activation into CLAUDE_ENV_FILE). Both join the
-# managed set so adopting a repo turns the capability on with no manual wiring.
-# The launcher ships like `bin/shipit` (a whole-file bootstrap unit); the hook
-# line is one more JSON-hook unit over the same settings.json, owning its event.
+# `./claude-start` launcher (Layer D; since #627 a compatibility shim that
+# delegates to `./agent-start claude` — convenience only, `claude -w <name>`
+# works without it) and the SessionStart activation hook line (Layer A —
+# `shipit hook sessionstart` writes the repo's toolchain activation into
+# CLAUDE_ENV_FILE). Both join the managed set so adopting a repo turns the
+# capability on with no manual wiring. The launcher ships like `bin/shipit`
+# (a whole-file bootstrap unit); the hook line is one more JSON-hook unit over
+# the same settings.json, owning its event.
 LAUNCHER_FILE = "claude-start"
 SETTINGS_SESSIONSTART_KEY = ".claude/settings.json#shipit-sessionstart-hook"
 SETTINGS_SESSIONSTART_MARKER = "shipit hook sessionstart"
@@ -348,12 +360,12 @@ CODEX_SESSIONSTART_KEY = ".codex/hooks.json#shipit-sessionstart-hook"
 CODEX_PRETOOLUSE_KEY = ".codex/hooks.json#shipit-pretooluse-hook"
 
 # The CDX01 `./codex-start` launcher (#604): the `claude-start` sibling for a
-# Codex coordinator session. Codex has no Claude-style WorktreeCreate seam, so
-# the launcher cannot ride a `--worktree` flag — it execs the pinned
-# `./bin/shipit session codex`, which provisions the ephemeral session Tree
-# explicitly (ADR-0027, the same Tree machinery) and then execs interactive
-# codex rooted in it. Ships like `claude-start` (an executable whole-file
-# bootstrap unit at the repo root).
+# Codex coordinator session. Since #627 a compatibility shim that delegates to
+# `./agent-start codex`; the Codex launch mechanics (no Claude-style
+# WorktreeCreate seam — the pinned `./bin/shipit session codex` provisions the
+# ephemeral session Tree explicitly, ADR-0027, then execs interactive codex
+# rooted in it) live behind the `agent-start` strategy table. Ships like
+# `claude-start` (an executable whole-file bootstrap unit at the repo root).
 CODEX_LAUNCHER_FILE = "codex-start"
 
 # The settings.json hooks-event arrays each JSON-hook unit owns one entry of.
@@ -519,9 +531,22 @@ def load_units(*, toolchains: frozenset[str] = frozenset()) -> list[Unit]:
         )
     )
 
+    # The CDX01 generic `./agent-start` launcher (#627): the one repo-root
+    # entry point (`./agent-start <agent> [args...]`) dispatching through the
+    # host strategy table — see the AGENT_LAUNCHER_FILE constant's comment.
+    units.append(
+        Unit(
+            key=AGENT_LAUNCHER_FILE,
+            dest=AGENT_LAUNCHER_FILE,
+            kind="file",
+            content=data_bytes("bootstrap", "agent-start"),
+            executable=True,
+        )
+    )
+
     # The SES01 `./claude-start` launcher (session-bootstrap Layer D): a repo-root
-    # alias that mints a session id and execs `claude --worktree <id>`, shipped the
-    # same way the bin/shipit bootstrap is.
+    # alias, since #627 a compatibility shim that delegates to
+    # `./agent-start claude`, shipped the same way the bin/shipit bootstrap is.
     units.append(
         Unit(
             key=LAUNCHER_FILE,
@@ -690,8 +715,9 @@ def load_units(*, toolchains: frozenset[str] = frozenset()) -> list[Unit]:
 
     # The CDX01 `./codex-start` launcher (#604): the Codex sibling of the
     # `claude-start` unit above — same executable whole-file bootstrap shape,
-    # but it execs `./bin/shipit session codex` (explicit Tree provisioning
-    # then codex) instead of riding a pre-launch harness flag.
+    # since #627 a compatibility shim that delegates to `./agent-start codex`
+    # (explicit Tree provisioning then codex, behind the strategy table)
+    # instead of riding a pre-launch harness flag.
     units.append(
         Unit(
             key=CODEX_LAUNCHER_FILE,
