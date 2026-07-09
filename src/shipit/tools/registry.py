@@ -17,10 +17,14 @@ lists only rust/go/python); ADR-0039's registry sketch names ``npm test``
 The default build commands are the legacy CI matrix jobs' single-target
 builds (issue #555's legacy digest): rust → ``cargo build --release``
 (``rust-ci``'s build-binaries job, minus the CI-routed ``--target`` matrix),
-go → ``go build -trimpath -ldflags "-s -w"`` (``go-cli``'s static build; the
-``CGO_ENABLED=0`` env and the ADR-0041 ``-X`` version injection are shaped
-per invocation by :mod:`shipit.tools.build`, since env and a supplied
-version are not argv defaults), python → ``uv build`` (sdist + wheel in uv's
+go → ``go build -trimpath -ldflags "-s -w" ./...`` (``go-cli``'s static
+build over every package — the test slot's ``./...`` form; a bare ``go
+build`` compiles only the root package and fails any repo whose packages
+live under subdirs. The ``CGO_ENABLED=0`` env and the ADR-0041 ``-X``
+version injection are shaped per invocation by :mod:`shipit.tools.build`,
+since env and a supplied version are not argv defaults; an artifact-narrowed
+build swaps ``./...`` for the artifact's one package there too), python →
+``uv build`` (sdist + wheel in uv's
 isolated build env), npm → the package's own build script (``npm run
 build`` — same deference as the test slot; ``build-frontend`` is not a tool,
 it IS this leg). Pixi is NEVER the build backend: these argv invoke the real
@@ -91,13 +95,17 @@ RUST = Toolchain(
     build=("cargo", "build", "--release"),
 )
 #: go: its own runner over every package — the legacy go-ci check job's form.
-#: The build is go-cli's static form (``-trimpath``, stripped via ``-s -w``);
-#: ``CGO_ENABLED=0`` and the supplied-version ``-X`` injection (ADR-0041) are
-#: per-invocation shaping in :mod:`shipit.tools.build`.
+#: The build is go-cli's static form (``-trimpath``, stripped via ``-s -w``)
+#: over every package (``./...``, mirroring the test slot: a bare ``go build``
+#: compiles only the root package, so a repo whose packages all live under
+#: ``cmd/…`` would red with "no Go files in ."); ``CGO_ENABLED=0`` and the
+#: supplied-version ``-X`` injection (ADR-0041) are per-invocation shaping in
+#: :mod:`shipit.tools.build`, which also swaps ``./...`` for the artifact's
+#: one package (declared, or the module root) when a target narrows the build.
 GO = Toolchain(
     "go",
     test=("go", "test", "./..."),
-    build=("go", "build", "-trimpath", "-ldflags", "-s -w"),
+    build=("go", "build", "-trimpath", "-ldflags", "-s -w", "./..."),
 )
 #: python: pytest, bare — options belong to the repo's committed pytest config
 #: (pyproject/pytest.ini), not the dispatch registry. The build is ``uv

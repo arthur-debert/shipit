@@ -32,12 +32,21 @@ def test_lookup_by_name_and_unregistered_is_none():
 
 def test_default_build_commands_are_the_legacy_single_target_builds():
     # Issue #555's legacy digest: rust -> the build-binaries job's release
-    # build, go -> go-cli's static stripped form (env/version shaping lives
-    # in tools.build, not here), python -> uv build, npm -> the package's own
-    # build script (same deference as the test slot).
+    # build, go -> go-cli's static stripped form over EVERY package (the test
+    # slot's ./... form, #608: a bare `go build` compiles only the root
+    # package and reds any repo whose packages live under subdirs; env/version
+    # shaping lives in tools.build, not here), python -> uv build, npm -> the
+    # package's own build script (same deference as the test slot).
     by_name = {tc.name: tc for tc in registry.TOOLCHAINS}
     assert by_name["rust"].build == ("cargo", "build", "--release")
-    assert by_name["go"].build == ("go", "build", "-trimpath", "-ldflags", "-s -w")
+    assert by_name["go"].build == (
+        "go",
+        "build",
+        "-trimpath",
+        "-ldflags",
+        "-s -w",
+        "./...",
+    )
     assert by_name["python"].build == ("uv", "build")
     assert by_name["npm"].build == ("npm", "run", "build")
 

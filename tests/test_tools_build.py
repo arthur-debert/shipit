@@ -45,6 +45,14 @@ def test_leg_without_artifacts_runs_its_base_command_once():
     assert step.label == "python (.)"
 
 
+def test_go_leg_without_artifacts_builds_every_package():
+    # #608 (supage's red build cell): a bare `go build` compiles only the root
+    # package — "no Go files in ." on a repo whose packages live under cmd/…
+    # — so the whole-leg default targets ./... like the test slot does.
+    (step,) = build_mod.plan_build([_leg("go")], [])
+    assert step.argv == ("go", "build", "-trimpath", "-ldflags", "-s -w", "./...")
+
+
 def test_leg_order_is_the_map_order_and_legs_without_targets_still_build():
     steps = build_mod.plan_build(
         [_leg("rust"), _leg("npm", path="web")],
@@ -80,7 +88,9 @@ def test_two_artifacts_from_one_rust_workspace_are_two_steps():
     assert [s.artifact for s in steps] == ["cli", "lsp"]
 
 
-def test_go_target_package_path_lands_last():
+def test_go_target_package_path_lands_last_replacing_the_whole_tree_target():
+    # The artifact's package SUPERSEDES the default ./... target — a narrowed
+    # step builds exactly that unit, never the union of tree and package.
     (step,) = build_mod.plan_build(
         [_leg("go")],
         [_artifact("mycli", config.BuildTarget(toolchain="go", package="./cmd/mycli"))],
@@ -93,6 +103,18 @@ def test_go_target_package_path_lands_last():
         "-s -w",
         "./cmd/mycli",
     )
+
+
+def test_go_target_without_a_package_builds_the_module_root():
+    # The dodot shape: a go artifact with no declared package is the module
+    # root's binary. The whole-tree ./... default must still be dropped — go
+    # discards binaries when several packages compile at once, so leaving it
+    # would build green yet write no binary for the e2e local-build source.
+    (step,) = build_mod.plan_build(
+        [_leg("go")], [_artifact("dodot", config.BuildTarget(toolchain="go"))]
+    )
+    assert step.argv == ("go", "build", "-trimpath", "-ldflags", "-s -w")
+    assert step.artifact == "dodot"
 
 
 def test_npm_target_package_is_the_workspace():
@@ -226,12 +248,15 @@ def test_injection_extends_the_last_ldflags_when_several_are_present():
 
 def test_passthrough_args_stay_ahead_of_the_go_package_path():
     # plan_legs appends passthrough to the leg argv; go's package path must
-    # still land last (flags precede the package on the go command line).
+    # still land last (flags precede the package on the go command line), and
+    # the default ./... target is dropped from WHEREVER passthrough left it —
+    # never carried alongside the narrowing package.
     leg = _leg("go", argv=(*registry.GO.command("build"), "-v"))
     (step,) = build_mod.plan_build(
         [leg], [_artifact("x", config.BuildTarget(toolchain="go", package="./cmd/x"))]
     )
     assert step.argv[-2:] == ("-v", "./cmd/x")
+    assert "./..." not in step.argv
 
 
 # --------------------------------------------------------------------------

@@ -130,13 +130,17 @@ def _plan_map(plans):
     return {p.tool: p for p in plans}
 
 
-def test_derive_plans_lint_and_test_apply_everywhere():
+def test_derive_plans_only_lint_applies_everywhere():
+    # #608 (phos.photo / shipit-canary red test cells): test derives from the
+    # [toolchains] map exactly like build — a no-code repo with no map has no
+    # test lane BY DESIGN (n/a), never the verb's missing-map error.
     plans = _plan_map(
         fleetsweep.derive_plans(
             legs_declared=False, e2e_declared=False, changelog_dir=False
         )
     )
-    assert plans["lint"].applicable and plans["test"].applicable
+    assert plans["lint"].applicable
+    assert not plans["test"].applicable
 
 
 def test_derive_plans_not_applicable_cells_carry_reasons():
@@ -145,6 +149,8 @@ def test_derive_plans_not_applicable_cells_carry_reasons():
             legs_declared=False, e2e_declared=False, changelog_dir=False
         )
     )
+    assert not plans["test"].applicable
+    assert "[toolchains]" in plans["test"].reason
     assert not plans["build"].applicable
     assert "[toolchains]" in plans["build"].reason
     assert not plans["e2e"].applicable
@@ -174,9 +180,12 @@ def test_plan_tools_reads_the_tree_declarations(tmp_path):
 
 
 def test_plan_tools_absent_declarations_are_not_applicable(tmp_path):
+    # A READABLE config with no [toolchains] map — the no-code-repo shape
+    # (#608: a firebase site, the ADP00 testbed) — proves test + build absent.
     (tmp_path / ".shipit.toml").write_text("[secrets]\n", encoding="utf-8")
     plans = _plan_map(fleetsweep.plan_tools(tmp_path))
-    assert plans["lint"].applicable and plans["test"].applicable
+    assert plans["lint"].applicable
+    assert not plans["test"].applicable
     assert not plans["build"].applicable
     assert not plans["e2e"].applicable
     assert not plans["changelog"].applicable
