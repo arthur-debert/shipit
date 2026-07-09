@@ -1510,7 +1510,7 @@ def run(
     rust_pin: str | None = None
     if any(lang.name == RUST.name for lang, _ in routed):
         rust_pin = pinned_rust_spec(root)
-    rust_skew_by_dir: dict[Path, str | None] = {}
+    rust_skew_by_dir: dict[str, str | None] = {}
 
     mode = "fix" if fix else "check"
     print(f"lint: {root} ({mode})")
