@@ -1048,12 +1048,14 @@ def rust_pin_satisfied(version: str, spec: str) -> bool:
     lite): ``*`` (anything), ``==X.Y.Z`` (exact), ``X.Y.*`` / ``=X.Y`` / bare
     ``X.Y`` (a dot-bounded prefix match — conda's fuzzy form, so ``1.9.*`` never
     swallows ``1.96.0``). Any OTHER shape — ranges (``>=1.90``), compounds
-    (``,``/``|``), ``~=``, a cargo-style caret (``^1.96``), or a path/URL spec
-    (``@ file://…``) — is deliberately NOT modelled and returns ``True``: a wrong
-    skew claim would downgrade a real failure to a warning (#602), so ambiguity
-    always resolves toward the HARD gate, never toward the carve-out. The
-    unmodelled-shape sentinels stay a superset of the operators the managed
-    blocks could ever emit, so a stray non-conda spec never trips a false skew.
+    (``,``/``|``), ``~=``, a cargo-style caret (``^1.96``), a path/URL spec
+    (``@ file://…``), or a non-numeric / unparseable spec (``nightly``, a bare
+    word) — is deliberately NOT modelled and returns ``True``: a wrong skew claim
+    would downgrade a real failure to a warning (#602), so ambiguity always
+    resolves toward the HARD gate, never toward the carve-out. The unmodelled
+    sentinels stay a superset of the operators the managed blocks could ever
+    emit, and the final numeric-shape check catches everything else, so a stray
+    non-conda spec never trips a false skew.
     """
     spec = spec.strip()
     if not spec or spec == "*":
@@ -1065,6 +1067,8 @@ def rust_pin_satisfied(version: str, spec: str) -> bool:
     base = spec.lstrip("=").strip()
     if base.endswith(".*"):
         base = base[:-2]
+    if not re.fullmatch(r"\d+(?:\.\d+)*", base):
+        return True  # non-numeric / unparseable pin — unmodelled, keep gate hard
     return version == base or version.startswith(base + ".")
 
 

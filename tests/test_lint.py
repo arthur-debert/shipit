@@ -944,6 +944,13 @@ def test_rust_pin_satisfied_unmodelled_shapes_never_claim_skew():
     # a path/URL spec — are unmodelled too, so they never trip a false skew.
     assert lint.rust_pin_satisfied("1.80.0", "^1.96")
     assert lint.rust_pin_satisfied("1.80.0", "@ file:///opt/rust")
+    # A non-numeric / unparseable pin (a bare word, an empty base, a partial
+    # version tail) carries no sentinel operator but is still unmodelled: it must
+    # resolve to SATISFIED, never fall through to prefix-match and claim skew.
+    assert lint.rust_pin_satisfied("1.96.0", "nightly")
+    assert lint.rust_pin_satisfied("1.96.0", "stable")
+    assert lint.rust_pin_satisfied("1.96.0", "1.96.0-nightly")
+    assert lint.rust_pin_satisfied("1.96.0", "=")
 
 
 def test_rust_pin_from_manifest_lint_feature_wins():
