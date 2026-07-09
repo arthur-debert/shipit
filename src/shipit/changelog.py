@@ -214,14 +214,17 @@ def _terminated(text: str) -> str:
 
 #: A fragment's section heading — the Keep-a-Changelog ``### Added`` /
 #: ``### Changed`` level. Exactly three ``#`` (``####`` is nested content);
-#: surrounding whitespace normalizes away for grouping.
-_SECTION_RE = re.compile(r"^### +(?P<name>\S.*?) *$")
+#: leading and trailing spaces or tabs around the name normalize away for
+#: grouping.
+_SECTION_RE = re.compile(r"^###[ \t]+(?P<name>\S.*?)[ \t]*$")
 
 #: A code-fence delimiter line (CommonMark §4.5): 0-3 leading spaces then a run
 #: of three-or-more backticks or tildes. A fenced block may quote ``### …``
 #: lines that must not be mistaken for section headings, so the parser opens on
 #: the first such marker and closes only on a MATCHING one — same character, at
-#: least as long — leaving the other marker as content in between.
+#: least as long, with nothing but trailing whitespace after it (an info-string
+#: line such as ``` ```python ``` is content, not a close) — leaving the other
+#: marker as content in between.
 _FENCE_RE = re.compile(r"^ {0,3}(?P<marker>`{3,}|~{3,})")
 
 
@@ -247,7 +250,11 @@ def _split_sections(body: str) -> list[tuple[str | None, str]]:
             token = marker.group("marker")
             if fence is None:
                 fence = token
-            elif token[0] == fence[0] and len(token) >= len(fence):
+            elif (
+                token[0] == fence[0]
+                and len(token) >= len(fence)
+                and not line[marker.end() :].strip()
+            ):
                 fence = None
         match = None if fence is not None else _SECTION_RE.match(line)
         if match:

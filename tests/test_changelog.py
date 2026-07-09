@@ -175,6 +175,25 @@ def test_notes_text_mismatched_fence_marker_stays_in_fence():
     )
 
 
+def test_notes_text_info_string_line_does_not_close_fence():
+    # A close fence must be a bare marker: an info-string line like ```python
+    # inside a ``` block is content, so the ### below it stays fenced.
+    frags = _frags(
+        "### Notes\n\n```\n```python\n### Changed\n```\n",
+        "### Notes\n\n- more\n",
+    )
+    assert core.notes_text(frags) == (
+        "### Notes\n\n```\n```python\n### Changed\n```\n- more\n"
+    )
+
+
+def test_notes_text_grouping_normalizes_tab_after_hashes():
+    # A tab is a valid heading separator; `###\tChanged` is the `Changed`
+    # section, same as `### Changed`.
+    frags = _frags("###\tChanged\n\n- a\n", "### Changed\n\n- b\n")
+    assert core.notes_text(frags) == "### Changed\n\n- a\n- b\n"
+
+
 def test_notes_text_deeper_headings_stay_within_their_section():
     # #### is nested content, not a section boundary.
     frags = _frags("### Changed\n\n#### details\n\n- a\n", "### Changed\n\n- b\n")
