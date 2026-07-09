@@ -158,7 +158,7 @@ def test_walk_survives_a_self_parenting_probe():
         "node /Users/x/.nvm/versions/node/v22.1.0/lib/node_modules/@anthropic-ai/claude-code/cli.js",
     ],
 )
-def test_real_session_argvs_look_like_claude(argv):
+def test_real_claude_session_argvs_look_like_a_session_host(argv):
     assert looks_like_session_host(argv) is True
 
 
@@ -179,7 +179,7 @@ def test_real_session_argvs_look_like_claude(argv):
         "/usr/sbin/cupsd -l",
     ],
 )
-def test_incidental_claude_mentions_do_not_look_like_claude(argv):
+def test_incidental_claude_mentions_do_not_look_like_a_session_host(argv):
     assert looks_like_session_host(argv) is False
 
 

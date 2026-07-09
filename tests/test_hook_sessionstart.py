@@ -678,9 +678,9 @@ def _run_warning_check(cwd: Path) -> tuple[int, str]:
 
 
 def test_source_clone_cwd_warns_on_stdout(tmp_path, monkeypatch, caplog):
-    # The launch the check exists for: claude started directly in the source
-    # clone (has .shipit.toml, is a git repo, NOT under the central root). The
-    # warning lands on stdout (→ session context) and a WARNING record rides
+    # The launch the check exists for: a coordinator started directly in the
+    # source clone (has .shipit.toml, is a git repo, NOT under the central root).
+    # The warning lands on stdout (→ session context) and a WARNING record rides
     # along as the durable trail.
     clone = _clone_shape(tmp_path / "src-clone")
     monkeypatch.setenv(layout.CENTRAL_ROOT_ENV, str(tmp_path / "trees"))
@@ -688,6 +688,8 @@ def test_source_clone_cwd_warns_on_stdout(tmp_path, monkeypatch, caplog):
         code, out = _run_warning_check(clone)
     assert code == 0
     assert out == sessionstart.SOURCE_CLONE_WARNING + "\n"
+    assert "./claude-start" in out
+    assert "./codex-start" in out
     assert any(
         r.levelno == logging.WARNING and r.name == HOOK_LOGGER for r in caplog.records
     )

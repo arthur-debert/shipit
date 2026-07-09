@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -85,13 +86,15 @@ def run_codex(
     creator: Callable[..., Tree] = create_from_source,
     chdir: Callable[[str], None] = os.chdir,
     execute: Callable[[str, list[str], dict[str, str]], None] = os.execvpe,
+    which: Callable[[str], str | None] = shutil.which,
     environ: Mapping[str, str] | None = None,
 ) -> int:
     """Mint id → create the ephemeral Tree → chdir → exec codex. Returns only on failure.
 
-    ``creator``/``chdir``/``execute``/``environ`` are the injectable effect seams
-    (defaults: the real Tree orchestrator, ``os.chdir``, ``os.execvpe``,
-    ``os.environ``) so tests assert the whole launch contract — the
+    ``creator``/``chdir``/``execute``/``which``/``environ`` are the injectable
+    effect seams (defaults: the real Tree orchestrator, ``os.chdir``,
+    ``os.execvpe``, ``shutil.which``, ``os.environ``) so tests assert the whole
+    launch contract — the
     :class:`TreeSpec` the Tree is minted from, the cwd handoff, the argv and env
     the exec receives — without cloning a repo or spawning codex. With the real
     seams a successful call never returns (``execvpe`` replaces the process);
@@ -99,14 +102,21 @@ def run_codex(
 
     Failure mapping (mirrors ``tree create``'s run): not-a-checkout, a rejected
     spec (``ValueError``), a git/provisioning Exec failure, a filesystem error,
-    and a failed exec (missing ``codex`` binary → ``OSError``) each print one
-    clean ``session codex: …`` line to stderr and return 1 — plus the durable
-    ERROR record. No traceback for a known refusal.
+    a missing ``codex`` binary (preflighted before provisioning, exit 127), and a
+    failed exec each print one clean ``session codex: …`` line to stderr — plus
+    the durable ERROR record for post-provisioning failures. No traceback for a
+    known refusal.
     """
     root = git.repo_root()
     if not root:
         print("session codex: not inside a git checkout", file=sys.stderr)
         return 1
+    if which(bootstrap.CODEX.binary) is None:
+        print(
+            "session codex: the codex CLI is not on PATH — install Codex first.",
+            file=sys.stderr,
+        )
+        return 127
     session_id = bootstrap.mint_session_id(now=time.time(), pid=os.getpid())
     try:
         spec = TreeSpec(
@@ -126,7 +136,7 @@ def run_codex(
         session_id=session_id,
         tree=tree.path,
     )
-    print(bootstrap.format_launch(session_id, tree.path, argv))
+    print(bootstrap.format_launch(session_id, tree.path, argv), flush=True)
     # The launch milestone, written BEFORE the exec replaces this process: the
     # last record this pid can leave, and the one that joins the session id/Tree
     # pair to the codex launch in the flow log. (The Tree's own birth already
@@ -138,10 +148,18 @@ def run_codex(
             tree.path,
             extra={"argv": argv},
         )
+    # chdir FIRST: codex hook commands and child shells inherit the process cwd,
+    # so it must agree with --cd's agent root — both point at the Tree.
     try:
-        # chdir FIRST: codex hook commands and child shells inherit the process
-        # cwd, so it must agree with --cd's agent root — both point at the Tree.
         chdir(tree.path)
+    except OSError as exc:
+        logger.error("session codex: could not enter Tree", exc_info=True)
+        print(
+            f"session codex: could not enter Tree {tree.path!r}: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+    try:
         execute(argv[0], argv, env)
     except OSError as exc:
         logger.error("session codex: exec failed", exc_info=True)

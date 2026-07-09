@@ -105,8 +105,9 @@ ENV_FILE_VAR = "CLAUDE_ENV_FILE"
 #: a relaunch through the launcher (or the equivalent bare ``claude -w``, which
 #: fires the same WorktreeCreate isolation path).
 SOURCE_CLONE_WARNING = (
-    "shipit: you launched claude directly in the source clone — this session has "
-    "no isolated Tree. Restart via ./claude-start (or claude -w <name>)."
+    "shipit: you launched a coordinator directly in the source clone — this "
+    "session has no isolated Tree. Restart via ./claude-start for Claude Code "
+    "or ./codex-start for Codex."
 )
 
 #: The tool repo the ADR-0033 staleness advisory measures a consumer's pin
@@ -200,7 +201,7 @@ def _warn_source_clone(raw: str, out: TextIO) -> None:
         out.write(SOURCE_CLONE_WARNING + "\n")
         logger.warning(
             "sessionstart: session launched directly in the source clone %s — "
-            "no isolated Tree (restart via claude-start)",
+            "no isolated Tree (restart via managed coordinator launcher)",
             cwd,
         )
     except Exception:  # noqa: BLE001 — fail-open, DEBUG by design: advisory-only,

@@ -55,6 +55,7 @@ def test_run_codex_creates_ephemeral_tree_and_execs_codex(
         creator=fake_creator,
         chdir=fake_chdir,
         execute=fake_execute,
+        which=lambda binary: "/usr/local/bin/codex",
         environ={
             "PATH": "/bin",
             "OPENAI_API_KEY": "api-billed",
@@ -95,3 +96,98 @@ def test_run_codex_refuses_outside_git_checkout(monkeypatch, capsys):
 
     assert rc == 1
     assert "session codex: not inside a git checkout" in capsys.readouterr().err
+
+
+def test_run_codex_refuses_missing_codex_before_creating_tree(
+    monkeypatch, tmp_path, capsys
+):
+    source = tmp_path / "source"
+    monkeypatch.setattr(session.git, "repo_root", lambda: str(source))
+
+    def creator_should_not_run(*args, **kwargs):
+        raise AssertionError("tree creation should not run when codex is missing")
+
+    rc = session.run_codex(
+        [], creator=creator_should_not_run, which=lambda binary: None
+    )
+
+    assert rc == 127
+    assert "session codex: the codex CLI is not on PATH" in capsys.readouterr().err
+
+
+def test_run_codex_reports_chdir_failure_separately(monkeypatch, tmp_path, capsys):
+    source = tmp_path / "source"
+    tree_path = tmp_path / "tree"
+
+    monkeypatch.setattr(session.git, "repo_root", lambda: str(source))
+    monkeypatch.setattr(
+        session.identity,
+        "resolve_repo",
+        lambda root: Repo("arthur-debert", "shipit"),
+    )
+    monkeypatch.setattr(session, "new_agent_hash", lambda: "deadbeef")
+    monkeypatch.setattr(session.time, "time", lambda: 1783585261)
+    monkeypatch.setattr(session.os, "getpid", lambda: 4242)
+
+    def fake_creator(spec, *, source_repo):
+        return Tree(path=str(tree_path), branch="ephemeral/codex-1", base="origin/main")
+
+    def broken_chdir(path: str) -> None:
+        raise OSError("missing tree")
+
+    def execute_should_not_run(file: str, argv: list[str], env: dict[str, str]) -> None:
+        raise AssertionError("exec should not run after chdir failure")
+
+    rc = session.run_codex(
+        [],
+        creator=fake_creator,
+        chdir=broken_chdir,
+        execute=execute_should_not_run,
+        which=lambda binary: "/usr/local/bin/codex",
+    )
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "session codex: could not enter Tree" in err
+    assert "could not exec" not in err
+
+
+def test_run_codex_reports_exec_failure_after_successful_chdir(
+    monkeypatch, tmp_path, capsys
+):
+    capture = LaunchCapture()
+    source = tmp_path / "source"
+    tree_path = tmp_path / "tree"
+
+    monkeypatch.setattr(session.git, "repo_root", lambda: str(source))
+    monkeypatch.setattr(
+        session.identity,
+        "resolve_repo",
+        lambda root: Repo("arthur-debert", "shipit"),
+    )
+    monkeypatch.setattr(session, "new_agent_hash", lambda: "deadbeef")
+    monkeypatch.setattr(session.time, "time", lambda: 1783585261)
+    monkeypatch.setattr(session.os, "getpid", lambda: 4242)
+
+    def fake_creator(spec, *, source_repo):
+        return Tree(path=str(tree_path), branch="ephemeral/codex-1", base="origin/main")
+
+    def fake_chdir(path: str) -> None:
+        capture.chdir = path
+
+    def broken_execute(file: str, argv: list[str], env: dict[str, str]) -> None:
+        raise OSError("codex missing")
+
+    rc = session.run_codex(
+        [],
+        creator=fake_creator,
+        chdir=fake_chdir,
+        execute=broken_execute,
+        which=lambda binary: "/usr/local/bin/codex",
+    )
+
+    assert rc == 1
+    assert capture.chdir == str(tree_path)
+    err = capsys.readouterr().err
+    assert "session codex: could not exec 'codex'" in err
+    assert "could not enter Tree" not in err
