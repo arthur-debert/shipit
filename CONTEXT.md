@@ -293,6 +293,26 @@ progress (sub-issues). It tracks *how the work lands*, not *what to build*. One
 feature may have several epic issues; produced by `/to-tickets`.
 *Avoid*: embedding the full PRD in the issue — it links to the PRD, never replaces it.
 
+**Opportunity**:
+An actionable, evidenced improvement observation captured while a **Run** is doing
+some other authorized work, but deliberately kept OUT of that work's scope. An
+Opportunity names the affected **Repo**, records where the observation came from,
+and explains the concrete improvement well enough to be triaged later. It is not
+an **issue** yet: only promotion turns it into an execution tracker the normal
+shipit PR lifecycle can pick up.
+*Avoid*: using Opportunities as a scratchpad for vague thoughts; treating an
+Opportunity as authorization to side-quest during the active Run; putting
+speculative improvement noise directly into GitHub Issues.
+
+**Opportunity store**:
+The GitHub-backed store of **Opportunities**. It is separate from product repos so
+agent-generated improvement observations do not dirty product history or flood the
+human issue tracker before triage. The store is the backlog's evidence layer; the
+GitHub issue tracker remains the execution layer after an Opportunity is promoted.
+*Avoid*: committing process observations into the product repo; using GitHub Issues
+as the raw inbox; confusing the Opportunity store with the local **eval record**
+store, which measures Runs rather than preserving future work candidates.
+
 ### Checks & enforcement
 
 There is no "gate". A **check** has no inherent power to stop anything; *blocking* is a
