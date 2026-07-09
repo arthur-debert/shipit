@@ -75,8 +75,9 @@ def codex_cmd(codex_args: tuple[str, ...]) -> None:
     codex verbatim (``shipit session codex --model foo``).
 
     On success this command never returns — codex takes the terminal over.
-    Exits 1 (clean stderr message) when run outside a git checkout, when Tree
-    creation fails, or when the codex binary cannot be exec'd.
+    Exits 127 when the codex binary is missing from PATH; exits 1 (clean stderr
+    message) when run outside a git checkout, when Tree creation fails, or when
+    the codex binary cannot be exec'd.
     """
     raise SystemExit(run_codex(list(codex_args)))
 

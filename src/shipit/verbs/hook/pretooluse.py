@@ -40,6 +40,7 @@ import logging
 import os
 import re
 import sys
+from collections.abc import Mapping
 from typing import TextIO
 
 import click
@@ -93,7 +94,7 @@ def run(stdin: TextIO | None = None, stdout: TextIO | None = None) -> int:
             return 0
         if not is_edit_tool(tool_name):
             return 0  # not an edit operation — allow silently, never block.
-        role = resolve_role(payload, fallback_role=logcontext.role_from_env(os.environ))
+        role = resolve_role(payload, fallback_role=_spawned_role_from_env(os.environ))
         paths = _extract_paths(payload.get("tool_input"))
         code_paths = tuple(p for p in paths if is_code_path(p))
         path = _display_path(paths, code_paths)
@@ -143,6 +144,13 @@ def _display_path(paths: tuple[str, ...], code_paths: tuple[str, ...]) -> str:
     """Render all relevant paths for logs and agent feedback."""
     selected = code_paths if code_paths else paths
     return ", ".join(selected)
+
+
+def _spawned_role_from_env(env: Mapping[str, str]) -> str | None:
+    """Return the spawned role only when the env carries a spawned Run marker."""
+    if not (env.get(logcontext.ENV_PREFIX + "AGENT") or "").strip():
+        return None
+    return logcontext.role_from_env(env)
 
 
 def _extract_paths(tool_input: object) -> tuple[str, ...]:

@@ -104,6 +104,7 @@ def test_codex_apply_patch_denies_if_any_patched_file_is_code():
 
 
 def test_codex_apply_patch_code_edit_with_spawned_env_role_is_allowed(monkeypatch):
+    monkeypatch.setenv("SHIPIT_LOG_CTX_AGENT", "deadbeef")
     monkeypatch.setenv("SHIPIT_LOG_CTX_ROLE", "implementer")
     payload = json.dumps(
         {
@@ -123,7 +124,31 @@ def test_codex_apply_patch_code_edit_with_spawned_env_role_is_allowed(monkeypatc
     assert out == ""
 
 
+def test_codex_apply_patch_code_edit_with_ambient_env_role_is_denied(monkeypatch):
+    monkeypatch.delenv("SHIPIT_LOG_CTX_AGENT", raising=False)
+    monkeypatch.setenv("SHIPIT_LOG_CTX_ROLE", "implementer")
+    payload = json.dumps(
+        {
+            "tool_name": "apply_patch",
+            "tool_input": (
+                "*** Begin Patch\n"
+                "*** Update File: src/shipit/cli.py\n"
+                "@@\n"
+                "-old\n"
+                "+new\n"
+                "*** End Patch\n"
+            ),
+        }
+    )
+    code, out = _run(payload)
+    assert code == 0
+    decision = json.loads(out)["hookSpecificOutput"]
+    assert decision["permissionDecision"] == "deny"
+    assert decision["permissionDecisionReason"] == COORDINATOR_DENY_REASON
+
+
 def test_codex_apply_patch_code_edit_without_spawned_env_role_is_denied(monkeypatch):
+    monkeypatch.delenv("SHIPIT_LOG_CTX_AGENT", raising=False)
     monkeypatch.delenv("SHIPIT_LOG_CTX_ROLE", raising=False)
     payload = json.dumps(
         {
