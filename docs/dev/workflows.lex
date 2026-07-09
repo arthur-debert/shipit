@@ -4,7 +4,19 @@ The composable CI design, in its final state. The worked example is the
 tauri/phos-app stack — the most complex Kind in the portfolio — because if the
 shape holds there it holds for the simpler Kinds (rust-cli, python-pkg,
 vscode-ext). The architectural boundary this design rests on (producing logic
-is a pixi task; routing logic is thin YAML) is stated in [./architecture.lex#3].
+is locally runnable — a shipit verb behind a thin pixi task caller; routing
+logic is thin YAML) is stated in [./architecture.lex#3].
+
+:: note ::
+    Reconciliation (TOL01, 2026-07). The PRD `docs/prd/tol01-ci-tools.md` and
+    ADR-0039/0040/0041 supersede parts of this doc's vocabulary: producing
+    steps are shipit verbs now (pixi tasks are thin callers); the "package"
+    stage is renamed `bundle` and the terminal stage `publish` ("release"
+    names the whole repo-level event); `stage-assets` is routing, not a
+    producing task; `build-frontend` is the `build` verb's npm leg. The
+    pipeline shape, the three scars ([#3]), and the changelog model ([#4])
+    stand unchanged.
+::
 
 1. The decomposed pipeline
 
