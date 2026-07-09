@@ -166,8 +166,9 @@ test = { cmd = "./bin/shipit provision lexd && ./bin/shipit test" }
 # depends on `provision-lexd` (the MANAGED task above: `shipit provision lexd`,
 # idempotent — a no-op when the pin is already installed), so lexd is fetched into
 # `.pixi/envs/lint/bin/` at hook-setup time and PERSISTS there for every subsequent
-# `-e lint lint` the pre-commit / pre-push hooks run. CI provisions it the same way
-# via an explicit step (.github/workflows/ci.yml). This keeps lexd off the
+# `-e lint lint` the pre-commit / pre-push hooks run. CI's lint lane provisions it
+# the same way, inline in the `lint-full` task below (the wf-checks matrix job's
+# `run`, TOL01-WS05 — the retired explicit ci.yml step). This keeps lexd off the
 # `lint`/`lefthook.yml` surface while never leaving a fresh clone's lex leg
 # un-provisioned. The pin, platform resolution, and checksum verification live in
 # the binary (src/shipit/provision/lexd.py, ADP00-WS03) — there is no repo-local
@@ -197,6 +198,19 @@ lefthook = "2.1.*"
 
 [feature.lint.tasks]
 fmt = { cmd = "shipit lint --fix", depends-on = ["provision-lexd"] }
+# The lint LANE's run (TOL01-WS05; .shipit.toml [lanes].lint): the same managed
+# `./bin/shipit lint` the hooks ride, with the lex leg's lexd provisioned INLINE
+# first — the `test` task's exact pattern, for the same reason (a depends-on
+# would provision lexd into the DEFAULT env's bin, which this env does not layer
+# onto PATH; inline lands it in THIS env's prefix, idempotent). It cannot be
+# named `lint`: that name is the managed fixed-string task in the default
+# [tasks] block, and a second `lint` here would re-create the historical
+# bare-`pixi run lint` ambiguity across environments (see the feature comment
+# above). Defined ONLY in this feature, so it exists in EXACTLY ONE env (lint)
+# and bare `pixi run lint-full` resolves unambiguously — the wf-checks matrix
+# job's `pixi run --locked lint-full` and a laptop run are byte-identical
+# (checkout-provision-lint, exactly what CI's explicit steps did pre-cutover).
+lint-full = { cmd = "./bin/shipit provision lexd && ./bin/shipit lint" }
 # One command from a fresh clone to working lint checks (the `--install-hook` equiv):
 # activates the git hooks AND (via `provision-lexd`) fetches the pinned lexd into the
 # lint env, so the pre-commit / pre-push `pixi run -e lint lint` the hooks fire find

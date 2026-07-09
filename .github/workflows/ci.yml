@@ -1,11 +1,15 @@
 name: CI
 
-# shipit's own commit/push checks — now dogfooding `pixi run lint` (docs/prd/lint-checks.md). This is
-# the migration the prior self-contained python job anticipated: CI flips to
-# setup-pixi + pixi tasks, and the linters run --locked against pixi.lock so a
-# bump arrives as an auto-PR, never silently (architecture.lex §2). The required
-# check name (`check`) is unchanged, so the branch ruleset's required-status
-# contract holds across the move.
+# shipit's own CI — the FIRST thin caller of the wf-checks block (TOL01-WS05,
+# ADR-0010/0040: consumer CI is routing-only YAML over shipit-published
+# reusable workflows). The pre-cutover explicit steps — setup-pixi --locked,
+# provision-lexd, `pixi run lint`, `pixi run test` — now live behind the
+# block: the lane planner (`shipit ci plan`) reads .shipit.toml [lanes] and
+# emits the lint + test matrix, and each job's `pixi run <run>` (lint-full /
+# test, both provisioning lexd inline in their own env) preserves the exact
+# pre-cutover behavior. shipit calls the block by LOCAL PATH so a PR editing
+# the block is checked by the edited block; consumers pin
+# `arthur-debert/shipit/.github/workflows/wf-checks.yml@v1` (ADR-0010).
 
 on:
   push:
@@ -16,39 +20,22 @@ permissions:
   contents: read
 
 jobs:
+  checks:
+    uses: ./.github/workflows/wf-checks.yml
+  # The required-check NAME held stable across the cutover (PRD story 42, the
+  # ADR-0010 laddered-cutover rule): branch protection requires `check`, and a
+  # called workflow's jobs report as "checks / <lane>" — so this job keeps the
+  # exact `check` name alive, succeeding iff the block succeeded. Result
+  # propagation only (`if: always()` because a skipped required check would
+  # count as satisfied — the verdict must be explicit).
   check:
+    needs: checks
+    if: always()
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: prefix-dev/setup-pixi@v0.9.6
-        with:
-          # Keep in lockstep with PIXI_PIN in the managed Layer 0 bootstrap
-          # (src/shipit/data/bootstrap/setup-dev-env.sh, #547): CI and the
-          # bootstrap must provision the same pixi. A drift test
-          # (tests/test_install.py) pins the two together.
-          pixi-version: v0.71.0
-          locked: true
-          environments: >-
-            default
-            lint
-            test
-      # Fetch the pinned lexd into the lint env before linting. The managed
-      # `lint = "shipit lint"` task is a fixed plain string (no `provision-lexd`
-      # depends-on), so the lex leg's tool is provisioned here explicitly (idempotent;
-      # a no-op when the pin is already present) — issue #210, option (a). The task
-      # is the managed `provision-lexd = "shipit provision lexd"` line: pin, platform
-      # resolution, and checksum verification live in the binary (ADP00-WS03).
-      - name: Provision lexd (lint env)
-        run: pixi run -e lint provision-lexd
-      - name: Lint
-        run: pixi run -e lint lint
-      # Run the FULL gate in the `test` env — default feature (core linters + pytest)
-      # plus the Rust toolchain — so the rust/lex hermeticity cases (and their #526
-      # xfail leak-signal) run on CI rather than local-only (#532). The `test` task
-      # provisions lexd INLINE (in its own env) before pytest, so it lands in
-      # `.pixi/envs/test/bin` (the env the suite runs in) — this one command runs
-      # exactly what a developer's bare `pixi run test` does locally, byte-identical,
-      # with no separate provision step to keep in sync (unlike the fixed-string
-      # `lint` above, which cannot carry a depends-on). See pixi.toml [feature.test.tasks].
-      - name: Test
-        run: pixi run -e test test
+      - name: Verdict
+        env:
+          RESULT: ${{ needs.checks.result }}
+        run: |
+          echo "wf-checks: $RESULT"
+          test "$RESULT" = "success"

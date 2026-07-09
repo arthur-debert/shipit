@@ -500,6 +500,25 @@ def diff_name_only(base: Sha, head: Sha, *, cwd: str) -> list[str]:
     return [line for line in out.splitlines() if line.strip()]
 
 
+def changed_paths_since(base_ref: str, *, cwd: str) -> list[str] | None:
+    """The paths changed since diverging from ``base_ref`` — the three-dot
+    ``git diff --name-only <base_ref>...HEAD`` (the merge-base diff, the same
+    file set GitHub's "Files changed" shows for a PR).
+
+    Unlike :func:`diff_name_only` the endpoint is a REF NAME (``origin/main``),
+    not a proven :class:`~shipit.identity.Sha` — the lane planner's shell
+    (:mod:`shipit.verbs.ci`) passes the PR base ref straight from the CI event.
+    A probe: ``None`` when git cannot answer (unknown ref, a shallow clone
+    missing the merge-base, not a checkout) — the caller treats an unknown
+    diff as FULL scope, so a diff failure only ever runs more checks, never
+    fewer.
+    """
+    res = _probe(["diff", "--name-only", f"{base_ref}...HEAD"], cwd=cwd)
+    if res.rc != 0:
+        return None
+    return [line for line in res.stdout.splitlines() if line.strip()]
+
+
 # --------------------------------------------------------------------------
 # mutations — thin typed functions (install / Tree creation / review reuse)
 # --------------------------------------------------------------------------

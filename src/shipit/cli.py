@@ -22,6 +22,7 @@ from .verbs import gh_setup, install, lint, logs, verify_apps
 from .verbs import test as test_verb
 from .verbs._context import resolve_root_context
 from .verbs.changelog import changelog as changelog_group
+from .verbs.ci import ci as ci_group
 from .verbs.eval import eval_group
 from .verbs.hook import hook as hook_group
 from .verbs.logevent import log as log_group
@@ -266,6 +267,12 @@ def e2e_cmd(args: tuple[str, ...]) -> None:
 # release-notes tool over CHANGELOG/ fragments: the PR-time fragment-sync
 # `check` (the changelog-sync lane's run) and the cut-time `coalesce`.
 root.add_command(changelog_group)
+
+
+# The nested `ci` group (TOL01-WS05) — the PR-time routing surface: `ci plan`
+# is the one lane-planner invocation whose JSON matrix the wf-checks workflow
+# block fans into `pixi run <run>` jobs (ADR-0040: zero logic in the block).
+root.add_command(ci_group)
 
 
 # The `logs` reader (LOG01/LOG04, promoted onto the ADR-0030 contract in
