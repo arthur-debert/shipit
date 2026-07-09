@@ -270,6 +270,15 @@ SETTINGS_KEY = ".claude/settings.json#shipit-pretooluse-hook"
 # settings.json, independent of the runner prefix (`pixi run`, a bare path, etc.).
 SETTINGS_HOOK_MARKER = "shipit hook pretooluse"
 
+#: The substring EVERY shipit-managed hook entry's command carries — the
+#: markers here are all ``shipit hook <verb>`` forms. The retired-hooks pass
+#: (#619) uses it as its protection predicate: a consumer-local entry matching
+#: a retirement marker is removed only when it is NOT shipit's own managed
+#: entry. Needed because the managed SessionStart command itself runs
+#: ``./bin/setup-dev-env.sh`` inline, which the setup-dev-env retirement
+#: marker would otherwise match (see :func:`shipit.install.splice.is_retired_hook`).
+MANAGED_HOOK_COMMAND_MARKER = "shipit hook"
+
 # The HAR02 eval wire (docs/prd/har02-run-eval.md) adds two more committed
 # settings.json hook lines — the terminal-hook eval boundary — each its own
 # event array + command marker, reconciled by the SAME event-keyed JSON-hook

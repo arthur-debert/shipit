@@ -59,8 +59,9 @@ def _plan(root) -> irec.Plan:
     """gather → reconcile: the typed pipeline up to (and excluding) any write."""
     units = iunits.load_units()
     retired = irec.load_retired()
-    state = irec.gather(Path(root), units, retired)
-    return irec.reconcile(units, retired, state)
+    retired_hooks = irec.load_retired_hooks()
+    state = irec.gather(Path(root), units, retired, retired_hooks)
+    return irec.reconcile(units, retired, state, retired_hooks)
 
 
 def _apply(root, mode: str = iapply.MODE_TREE, **kw) -> iapply.InstallResult:
@@ -3845,6 +3846,299 @@ def test_pr_install_commits_the_retired_deletion_and_reports_it(tmp_path, rec):
     assert RETIRED_WORKFLOW_PATH in added
     assert "### Retired files removed" in rec.pr_body
     assert RETIRED_WORKFLOW_PATH in rec.pr_body
+
+
+# --------------------------------------------------------------------------
+# Retired hook entries (#619)
+# --------------------------------------------------------------------------
+
+# The two legacy consumer-local SessionStart entries the manifest retires, as
+# they actually appear in the fleet (the ADR-0003 release-core boot resolver;
+# the pre-managed setup-dev-env duplicate the TOL01 sweep missed in
+# simple-gal-ui).
+LEGACY_RELEASE_CORE_ENTRY = {
+    "matcher": "startup|resume",
+    "hooks": [
+        {
+            "type": "command",
+            "command": '"$CLAUDE_PROJECT_DIR"/bin/install-release-core',
+        }
+    ],
+}
+LEGACY_SETUP_DEV_ENV_ENTRY = {
+    "matcher": "startup|resume",
+    "hooks": [
+        {
+            "type": "command",
+            "command": '"$CLAUDE_PROJECT_DIR"/bin/setup-dev-env.sh',
+        }
+    ],
+}
+RETIRED_RELEASE_CORE_KEY = (
+    ".claude/settings.json#SessionStart[bin/install-release-core]"
+)
+
+
+def _managed_sessionstart_entry() -> dict:
+    """The packaged managed SessionStart entry — the one the pass must protect."""
+    return json.loads(iunits.data_bytes("claude-settings-sessionstart.json"))
+
+
+def test_is_retired_hook_matches_marker_but_protects_managed_entries():
+    assert splice.is_retired_hook(LEGACY_RELEASE_CORE_ENTRY, "bin/install-release-core")
+    assert splice.is_retired_hook(LEGACY_SETUP_DEV_ENV_ENTRY, "bin/setup-dev-env.sh")
+    # The managed SessionStart command itself runs ./bin/setup-dev-env.sh
+    # inline — the protection predicate (its `shipit hook` marker) must keep
+    # the retirement marker from matching shipit's own entry.
+    managed = _managed_sessionstart_entry()
+    assert splice.is_shipit_hook(managed, "bin/setup-dev-env.sh")
+    assert not splice.is_retired_hook(managed, "bin/setup-dev-env.sh")
+    # Garbage entries answer False, never raise (the is_shipit_hook walk).
+    assert not splice.is_retired_hook(None, "bin/install-release-core")
+    assert not splice.is_retired_hook({"hooks": None}, "bin/install-release-core")
+
+
+def test_decide_retired_hook_covers_both_cases():
+    assert irec.decide_retired_hook(count=0) == irec.NOOP
+    assert irec.decide_retired_hook(count=1) == irec.DELETE
+    assert irec.decide_retired_hook(count=3) == irec.DELETE
+
+
+def _settings_with_legacy_and_managed() -> str:
+    return json.dumps(
+        {
+            "permissions": {"allow": ["Bash(ls:*)"]},
+            "hooks": {
+                "SessionStart": [
+                    LEGACY_RELEASE_CORE_ENTRY,
+                    _managed_sessionstart_entry(),
+                ],
+                "Stop": [{"hooks": [{"type": "command", "command": "echo hi"}]}],
+            },
+        },
+        indent=2,
+    )
+
+
+def test_count_and_remove_retired_hooks_own_only_the_matched_entries():
+    text = _settings_with_legacy_and_managed()
+    assert (
+        splice.count_retired_hooks(text, "SessionStart", "bin/install-release-core")
+        == 1
+    )
+    out = splice.remove_retired_hooks(text, "SessionStart", "bin/install-release-core")
+    data = json.loads(out)
+    # The legacy entry is gone; the managed entry and every other consumer key
+    # (permissions, the Stop hook) merge through untouched.
+    commands = [h["command"] for e in data["hooks"]["SessionStart"] for h in e["hooks"]]
+    assert commands == [_managed_sessionstart_entry()["hooks"][0]["command"]]
+    assert data["permissions"] == {"allow": ["Bash(ls:*)"]}
+    assert data["hooks"]["Stop"] == [
+        {"hooks": [{"type": "command", "command": "echo hi"}]}
+    ]
+
+
+def test_remove_retired_hooks_drops_an_emptied_event_array():
+    text = json.dumps(
+        {"hooks": {"SessionStart": [LEGACY_RELEASE_CORE_ENTRY]}, "other": True}
+    )
+    out = splice.remove_retired_hooks(text, "SessionStart", "bin/install-release-core")
+    data = json.loads(out)
+    # No empty-array litter: the emptied event key (and the emptied hooks
+    # object with it) is dropped; the consumer's other keys survive.
+    assert "hooks" not in data
+    assert data["other"] is True
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "{not json",  # malformed
+        '["a", "b"]',  # valid JSON, not an object
+        json.dumps({"hooks": {"SessionStart": "not-a-list"}}),  # foreign shape
+        json.dumps({"hooks": {"Stop": [LEGACY_RELEASE_CORE_ENTRY]}}),  # other event
+        "",  # empty
+    ],
+)
+def test_remove_retired_hooks_returns_untouchable_files_verbatim(text):
+    # Fail-safe in lockstep with the count: whatever the write would preserve
+    # verbatim, the read counts 0 for — the pass never decides work the write
+    # cannot safely do, and a file with nothing to remove is never reformatted.
+    assert (
+        splice.count_retired_hooks(text, "SessionStart", "bin/install-release-core")
+        == 0
+    )
+    assert (
+        splice.remove_retired_hooks(text, "SessionStart", "bin/install-release-core")
+        == text
+    )
+
+
+def test_retired_hooks_manifest_carries_the_legacy_sessionstart_entries():
+    hooks = irec.load_retired_hooks()
+    assert [(h.file, h.event, h.marker) for h in hooks] == [
+        (".claude/settings.json", "SessionStart", "bin/install-release-core"),
+        (".claude/settings.json", "SessionStart", "bin/setup-dev-env.sh"),
+    ]
+
+
+def test_retired_manifest_carries_the_install_release_core_history():
+    # The legacy release-core boot resolver script (ADR-0003) is a retired
+    # FILE: every distinct historical version across the six carrying repos
+    # rides the manifest, so any repo's copy gets the clean delete.
+    retired = {r.path: r for r in irec.load_retired()}
+    entry = retired["bin/install-release-core"]
+    assert len(entry.pristine_hashes) == 8
+    assert all(h.startswith("sha256:") for h in entry.pristine_hashes)
+
+
+def test_install_removes_a_legacy_sessionstart_hook_entry(tmp_path, rec):
+    # End-to-end: a consumer still carrying the legacy release-core resolver
+    # hook sheds exactly that entry on install, while shipit's own managed
+    # SessionStart entry (spliced by the same run) survives.
+    settings = tmp_path / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text(_settings_with_legacy_and_managed(), encoding="utf-8")
+
+    plan = _plan(tmp_path)
+    assert [d.retired.key for d in plan.retire_hook_deletes] == [
+        RETIRED_RELEASE_CORE_KEY
+    ]
+    assert f"delete   {RETIRED_RELEASE_CORE_KEY} (retired hook entry)" in (
+        verb.format_plan(plan)
+    )
+    _apply(tmp_path)
+    data = json.loads(settings.read_text(encoding="utf-8"))
+    commands = [h["command"] for e in data["hooks"]["SessionStart"] for h in e["hooks"]]
+    assert not any("install-release-core" in c for c in commands)
+    assert any("shipit hook sessionstart" in c for c in commands)
+    # The consumer's unrelated settings survive the rewrite.
+    assert data["permissions"] == {"allow": ["Bash(ls:*)"]}
+
+
+def test_install_removes_the_duplicate_setup_dev_env_entry_only(tmp_path, rec):
+    # The simple-gal-ui case: the consumer-local duplicate of the managed
+    # hook's inline setup-dev-env run goes; the managed entry — whose command
+    # ALSO carries bin/setup-dev-env.sh — is protected by its own marker.
+    settings = tmp_path / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text(
+        json.dumps({"hooks": {"SessionStart": [LEGACY_SETUP_DEV_ENV_ENTRY]}}),
+        encoding="utf-8",
+    )
+
+    plan = _plan(tmp_path)
+    assert [d.retired.marker for d in plan.retire_hook_deletes] == [
+        "bin/setup-dev-env.sh"
+    ]
+    _apply(tmp_path)
+    data = json.loads(settings.read_text(encoding="utf-8"))
+    commands = [h["command"] for e in data["hooks"]["SessionStart"] for h in e["hooks"]]
+    # Exactly the managed entry remains: the inline setup-dev-env run it
+    # carries is shipit's own, not the retired duplicate.
+    assert len(commands) == 1
+    assert "shipit hook sessionstart" in commands[0]
+
+    # And a re-install is back to a clean no-op — the managed entry's
+    # setup-dev-env substring never re-triggers the retirement.
+    again = _plan(tmp_path)
+    assert not again.retire_hook_deletes
+    assert again.nothing_to_do
+
+
+def test_retired_hook_delete_alone_is_still_a_write(tmp_path, rec):
+    # A consumer whose managed set is fully current still sheds the legacy
+    # entry on re-install — cleanup is not gated on managed drift.
+    _apply(tmp_path)
+    settings = tmp_path / ".claude" / "settings.json"
+    data = json.loads(settings.read_text(encoding="utf-8"))
+    data["hooks"]["SessionStart"].insert(0, LEGACY_RELEASE_CORE_ENTRY)
+    settings.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+    plan = _plan(tmp_path)
+    assert not plan.writes and plan.retire_hook_deletes
+    assert not plan.nothing_to_do
+    _apply(tmp_path)
+    assert "install-release-core" not in settings.read_text(encoding="utf-8")
+
+    again = _plan(tmp_path)
+    assert again.nothing_to_do
+
+
+def test_pr_install_commits_the_retired_hook_removal_and_reports_it(tmp_path, rec):
+    settings = tmp_path / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text(
+        json.dumps({"hooks": {"SessionStart": [LEGACY_RELEASE_CORE_ENTRY]}}),
+        encoding="utf-8",
+    )
+
+    plan = _plan(tmp_path)
+    # The rewritten hooks file joins the typed commit set (it is also a block
+    # unit dest, so the write set already carries it — the union is stable).
+    assert ".claude/settings.json" in plan.changed_paths
+    _apply(tmp_path, iapply.MODE_PR)
+    added = next(paths for name, paths in rec.calls if name == "add")
+    assert ".claude/settings.json" in added
+    assert "### Retired hook entries removed" in rec.pr_body
+    assert RETIRED_RELEASE_CORE_KEY in rec.pr_body
+
+
+def test_gather_counts_retired_hooks_fail_open_on_oserror(tmp_path, monkeypatch):
+    # An unreadable hooks file degrades to "nothing to remove" with a warning,
+    # never a crash — gather only inspects it.
+    settings = tmp_path / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text(
+        json.dumps({"hooks": {"SessionStart": [LEGACY_RELEASE_CORE_ENTRY]}}),
+        encoding="utf-8",
+    )
+    hook = irec.load_retired_hooks()[0]
+    assert irec.retired_hook_count(tmp_path, hook) == 1
+
+    real_read = Path.read_text
+
+    def boom(self, *a, **kw):
+        if self.name == "settings.json":
+            raise OSError("permission denied")
+        return real_read(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "read_text", boom)
+    assert irec.retired_hook_count(tmp_path, hook) == 0
+
+
+def test_apply_fails_open_when_the_retired_hook_rewrite_cannot_be_written(
+    tmp_path, rec, monkeypatch
+):
+    # The apply-side mirror of the gather fail-open (retired_hook_count): a
+    # consumer hooks file that turns unwritable in the gather→apply window makes
+    # install degrade to a logged warning instead of crashing. Install first so
+    # the managed set is current — then the retire-hook pass is the SOLE writer
+    # of settings.json (cf. test_retired_hook_delete_alone_is_still_a_write), so
+    # a write failure isolates the guard rather than tripping write_unit.
+    _apply(tmp_path)
+    settings = tmp_path / ".claude" / "settings.json"
+    data = json.loads(settings.read_text(encoding="utf-8"))
+    data["hooks"]["SessionStart"].insert(0, LEGACY_RELEASE_CORE_ENTRY)
+    settings.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+    plan = _plan(tmp_path)
+    assert not plan.writes and plan.retire_hook_deletes
+
+    real_write = Path.write_text
+
+    def boom(self, *a, **kw):
+        if self.name == "settings.json":
+            raise OSError("permission denied")
+        return real_write(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "write_text", boom)
+
+    # apply() must not raise: the unguarded rewrite would have crashed install.
+    _apply(tmp_path)
+
+    # Degrade, not clobber: the legacy entry the rewrite could not remove survives.
+    assert "install-release-core" in settings.read_text(encoding="utf-8")
 
 
 def test_pr_body_lists_a_kept_retired_file(tmp_path, rec):

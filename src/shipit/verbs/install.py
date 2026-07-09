@@ -5,7 +5,8 @@ onto the ADR-0030 contract): :func:`~shipit.install.reconcile.gather` reads the
 consumer, the pure :func:`~shipit.install.reconcile.reconcile` decides one
 frozen :class:`~shipit.install.reconcile.Plan`, and
 :func:`~shipit.install.apply.apply` is the only effectful path (writes,
-retired-file unlinks, hook activation, git staging, PR creation), returning a
+retired-file unlinks, retired-hook-entry removals, hook activation, git
+staging, PR creation), returning a
 typed :class:`~shipit.install.apply.InstallResult`.
 
 This module is ADR-0030 glue + renderers only:
@@ -59,6 +60,7 @@ from ..install.reconcile import (
     format_pixi_task_conflict,
     gather,
     load_retired,
+    load_retired_hooks,
     reconcile,
 )
 from ..install.units import HOOK_RECOVERY_CMD, Unit, load_units
@@ -156,8 +158,9 @@ def run(
         # gets the matching pinned pixi dep block alongside the unconditional set.
         units = load_units(toolchains=detect_toolchains(Path(path or ".")))
         retired = load_retired()
-        state = gather(Path(path or "."), units, retired)
-        plan = reconcile(units, retired, state)
+        retired_hooks = load_retired_hooks()
+        state = gather(Path(path or "."), units, retired, retired_hooks)
+        plan = reconcile(units, retired, state, retired_hooks)
 
         emit(plan, lambda p: format_plan(p, dry_run=dry_run))
         warnings = format_plan_warnings(plan)
@@ -239,7 +242,9 @@ def format_plan(plan: Plan, *, dry_run: bool = False) -> str:
     Retired-file outcomes render alongside the managed results: a pristine copy
     is deleted, a locally modified copy is kept LOUDLY (the stderr warning is
     :func:`format_plan_warnings`), an absent path stays silent like any
-    managed NOOP. A DECLINED unit (#600) renders its standing ``decline`` line
+    managed NOOP. A retired hook ENTRY (#619) renders its delete line the same
+    way (there is no keep case — the match itself protects shipit's own
+    managed entries). A DECLINED unit (#600) renders its standing ``decline`` line
     on every run — the decision must stay visible in-repo, never silently
     absorbed like a NOOP. A nothing-to-do plan says so — with the wording
     shifted when a kept retired file or a declined unit was just listed, where
@@ -279,6 +284,10 @@ def format_plan(plan: Plan, *, dry_run: bool = False) -> str:
         lines.append(f"  {DELETE:8} {d.retired.path} (retired)")
     for d in plan.retire_keeps:
         lines.append(f"  {KEEP:8} {d.retired.path} (retired; locally modified)")
+    for d in plan.retire_hook_deletes:
+        # #619: a consumer-local hook entry shipit used to prescribe — removed
+        # from its event array; shipit's own managed entries are never touched.
+        lines.append(f"  {DELETE:8} {d.retired.key} (retired hook entry)")
     if plan.pin_stale:
         # ADR-0033: a pin roll-forward is a reconcile outcome in its own right —
         # it can be the ONLY change when a code-only shipit build ships (every
@@ -294,7 +303,8 @@ def format_plan(plan: Plan, *, dry_run: bool = False) -> str:
     elif dry_run:
         lines.append(
             f"  ({len(plan.writes)} to write, {len(plan.overrides)} override(s), "
-            f"{len(plan.seeds)} policy seed(s), {len(plan.retire_deletes)} retired "
+            f"{len(plan.seeds)} policy seed(s), "
+            f"{len(plan.retire_deletes) + len(plan.retire_hook_deletes)} retired "
             f"delete(s)) — dry-run, nothing written"
         )
     return "\n".join(lines)
@@ -415,7 +425,8 @@ def format_pr_body(
     #433 — block identity, never a bare repeated filename), every override with
     its diff, the declined units (#600 — kept as the repo's own, the standing
     `.shipit.toml [managed.decline]` decision), the retired delete/keep
-    sections, the policy seed, the changelog re-render (#578), the activation
+    sections (files AND hook entries, #619), the policy seed, the changelog
+    re-render (#578), the activation
     outcome, and the consumer's whole-tree lint debt (reported, never blocking).
 
     ``override_before`` holds each overridden unit's consumer content captured
@@ -492,6 +503,18 @@ def format_pr_body(
             "pristine version, so this PR deletes them:"
         )
         lines += [f"- `{d.retired.path}`" for d in plan.retire_deletes]
+        lines.append("")
+    if plan.retire_hook_deletes:
+        lines.append("### Retired hook entries removed")
+        lines.append(
+            "shipit no longer prescribes these consumer-local hook entries "
+            "(each identified by the command it runs; shipit's own managed "
+            "entries are never touched), so this install removes them from their "
+            "hooks file — unless that file can't be safely read or written, in "
+            "which case it is left untouched with a warning logged and the entry "
+            "may remain:"
+        )
+        lines += [f"- `{d.retired.key}`" for d in plan.retire_hook_deletes]
         lines.append("")
     if plan.retire_keeps:
         lines.append("### Retired files kept — locally modified")

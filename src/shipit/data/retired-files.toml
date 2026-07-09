@@ -68,3 +68,51 @@ pristine = [
   "sha256:4df3706b12c89fb7d844521800addea1c9ab9f448cd7f926b993a5d92f46869b",
   "sha256:e623a477ad4d81c042b5bbc20fead9cd208b1c73cb35d2954b1fdcd7303d9474",
 ]
+
+[[retired]]
+# The legacy release-core boot resolver script (ADR-0003), superseded by the
+# shipit-managed bootstrap (`bin/setup-dev-env.sh` + the `bin/shipit`
+# launcher). No CI surface calls it (verified across the six carrying repos'
+# own workflows and their pinned reusable release workflows, #619); its only
+# live caller was the consumer-local SessionStart hook retired below.
+# Hashes are every distinct historical version across the carrying repos
+# (dodot, rustloc, lex-fmt/lex, lex-fmt/lexed, phos-editor/app,
+# phos-editor/core), so a repo stuck on any older copy still gets the clean
+# delete; a locally modified copy is surfaced and kept, never destroyed.
+path = "bin/install-release-core"
+pristine = [
+  "sha256:2fb351510727f002443add93ba0263207b1b0b9588bbd5beb0ba969ce9a9765e",
+  "sha256:5279ff81461de3e418e6c4b36461c679a9ad3f1839e371b71e6961fa6c7fc0ba",
+  "sha256:690e1323817f3d7a272ac703031db1d32b247e7934df05bce286ff8fdf0ed025",
+  "sha256:a4e9e7801f4ec85ccacbb0158c4090547d6ecc3af27fc3d70b750e391e0dee62",
+  "sha256:c33d52cba0c3437b6052703f100936055e9c150b90be06aa86891eadd05c24a0",
+  "sha256:d9d481f794846375134eb8b16462418d0644d8f09fc00d737038c44a720ae896",
+  "sha256:ee6cd6ea1cfd3fb430aee9eac43c3b968f602ae333de5e457ef33c9c1f07f2e2",
+  "sha256:f05abecbc2534600fa58c453f73d819e45213f8eab1ccdf624558a67d4062590",
+]
+
+# Retired HOOK ENTRIES (#619) — consumer-local entries in a hooks-event array
+# that `shipit install` removes fleet-wide (the retired-files idea, extended to
+# entries inside a file shipit does not own outright). An entry is identified
+# by the command substring `marker` inside the `event` array of `file`; an
+# entry whose command also carries the managed `shipit hook` marker is
+# shipit's OWN and is NEVER touched (the managed SessionStart command itself
+# runs ./bin/setup-dev-env.sh inline, which the marker below would otherwise
+# match). Retiring the next entry is data here, not code.
+
+[[retired_hooks]]
+# The legacy release-core boot resolver hook (ADR-0003): ran
+# `bin/install-release-core` on every session start. Superseded by the
+# shipit-managed SessionStart hook; the script itself is retired above.
+file = ".claude/settings.json"
+event = "SessionStart"
+marker = "bin/install-release-core"
+
+[[retired_hooks]]
+# The consumer-local duplicate of the managed SessionStart hook's inline
+# `setup-dev-env.sh` run (double pixi pre-solve per session start) — the
+# TOL01 sweep removed this by hand in most repos (padz#174 precedent);
+# this entry retires the stragglers (simple-gal-ui, #619).
+file = ".claude/settings.json"
+event = "SessionStart"
+marker = "bin/setup-dev-env.sh"

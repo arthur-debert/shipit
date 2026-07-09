@@ -34,6 +34,18 @@ edit:
   - present, hash in known pristines    -> DELETE (safe: it is shipit's own content)
   - present, hash matches NO known one  -> KEEP   (locally modified: warn, keep)
 
+Install also decides a RETIRED-HOOKS pass (#619) — the retired-files idea
+extended to consumer-local hook ENTRIES inside a hooks file shipit does not
+own outright: the same packaged manifest lists ``(file, event, marker)``
+triples naming legacy entries (the ADR-0003 ``bin/install-release-core``
+resolver hook, the pre-managed ``setup-dev-env.sh`` duplicate), and every
+matching entry in that event array is removed. Two outcomes — a matching
+entry exists -> DELETE, none -> NOOP; there is deliberately no KEEP case: a
+hook entry's whole content is the command it runs, so "invokes the retired
+script" IS its identity, and shipit's own managed entries are protected by
+their ``shipit hook`` command marker inside the match itself
+(:func:`shipit.install.splice.is_retired_hook`).
+
 Install also runs a LEFTHOOK MERGE-CONFLICT tripwire (#544): lefthook merges a
 consumer's committed ``lefthook-local.yml`` over the managed ``lefthook.yml``
 and refuses a merged hook where both ``piped`` and ``parallel`` are true —
@@ -85,7 +97,7 @@ from __future__ import annotations
 import logging
 import tomllib
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import yaml
@@ -93,7 +105,7 @@ import yaml
 from .. import config, git
 from ..changelog import CHANGELOG_FILE, sync_diff
 from .errors import InstallError
-from .splice import extract_block, extract_settings_hook
+from .splice import count_retired_hooks, extract_block, extract_settings_hook
 from .units import (
     FMT_JSON_HOOK,
     LEFTHOOK_FILE,
@@ -299,6 +311,111 @@ def retired_actual_hash(root: Path, retired: RetiredFile) -> str | None:
     if not dest.is_file():
         return None
     return config.content_hash(dest.read_bytes())
+
+
+# --------------------------------------------------------------------------
+# Retired hook entries (#619)
+# --------------------------------------------------------------------------
+#
+# The retired-files idea extended to consumer-local hook ENTRIES: legacy
+# entries in a hooks-event array (the ADR-0003 `bin/install-release-core`
+# resolver hook, the pre-managed `setup-dev-env.sh` duplicate) are removed
+# fleet-wide by the same reconcile that installs the managed set. An entry is
+# identified by the command it runs (`marker`), and shipit's own managed
+# entries are protected inside the match itself (splice.is_retired_hook), so
+# the pass can never touch the entries install manages.
+
+
+@dataclass(frozen=True)
+class RetiredHook:
+    """One retired consumer-local hook entry: every entry in ``file``'s
+    ``event`` hooks-array whose command carries ``marker`` must go."""
+
+    file: str  # the hooks file, relative to the consumer root
+    event: str  # the hooks-event array the entry lives in
+    marker: str  # the command substring identifying the retired entry
+
+    @property
+    def key(self) -> str:
+        """The entry's unique manifest identity — the gather counts' mapping
+        key and every surface's display name."""
+        return f"{self.file}#{self.event}[{self.marker}]"
+
+
+@dataclass(frozen=True)
+class RetiredHookDecision:
+    retired: RetiredHook
+    action: str  # DELETE | NOOP
+    count: int  # matching consumer-local entries at gather time
+
+
+def load_retired_hooks() -> list[RetiredHook]:
+    """The packaged retired-hooks manifest entries, in manifest order (#619).
+
+    Same manifest file as the retired FILES (:data:`RETIRED_MANIFEST` —
+    retiring the next entry is data, not code), same path validation: every
+    ``file`` names a consumer file the IO pass will rewrite.
+    """
+    data = tomllib.loads(data_bytes(RETIRED_MANIFEST).decode("utf-8"))
+    return [
+        RetiredHook(
+            file=_retired_path(str(e["file"])),
+            event=str(e["event"]),
+            marker=str(e["marker"]),
+        )
+        for e in data.get("retired_hooks", [])
+    ]
+
+
+def decide_retired_hook(*, count: int) -> str:
+    """The retired-hooks outcome for one entry — the whole algorithm, two cases.
+
+    Deliberately NO KEEP case (unlike :func:`decide_retired`): a hook entry's
+    whole content is the command it runs, so "invokes the retired script" IS
+    its identity — there is no local-edit body to preserve the way a retired
+    FILE can carry one — and shipit's own managed entries are already excluded
+    by the match (:func:`shipit.install.splice.is_retired_hook`).
+    """
+    return DELETE if count else NOOP
+
+
+def plan_retired_hooks(
+    retired_hooks: Sequence[RetiredHook], counts: Mapping[str, int]
+) -> list[RetiredHookDecision]:
+    """Decide every retired hook entry against the consumer's gathered counts."""
+    return [
+        RetiredHookDecision(
+            retired=rh,
+            action=decide_retired_hook(count=counts.get(rh.key, 0)),
+            count=counts.get(rh.key, 0),
+        )
+        for rh in retired_hooks
+    ]
+
+
+def retired_hook_count(root: Path, hook: RetiredHook) -> int:
+    """How many consumer-local entries ``hook`` currently matches — 0 when the
+    file is absent, unreadable, or malformed.
+
+    Fails OPEN like :func:`_read_lefthook_local`: an ``OSError`` or non-UTF-8
+    read degrades to "nothing to remove" with a logged warning, and a malformed
+    file counts 0 in lockstep with the write path
+    (:func:`shipit.install.splice.remove_retired_hooks` preserves it verbatim)
+    — the decision never claims work the write cannot safely do.
+    """
+    dest = root / hook.file
+    if not dest.is_file():
+        return 0
+    try:
+        text = dest.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        logger.warning(
+            "ignoring unreadable hooks file in the retired-hooks pass",
+            exc_info=True,
+            extra={"root": str(root), "file": hook.file},
+        )
+        return 0
+    return count_retired_hooks(text, hook.event, hook.marker)
 
 
 # --------------------------------------------------------------------------
@@ -774,6 +891,10 @@ class ConsumerState:
     pristine: Mapping[str, str]  # unit key -> stored pristine hash
     retired_hashes: Mapping[str, str | None]  # retired path -> current hash
     seeds: tuple[str, ...]  # policy entries the seed pass would add
+    # Retired hook entries (#619): RetiredHook.key -> how many consumer-local
+    # entries currently match — read here (the ONE read boundary) so the
+    # reconcile's two-case decision stays pure over this state.
+    retired_hook_counts: Mapping[str, int] = field(default_factory=dict)
     # The consumer's current Shipit pin (`.shipit.toml [shipit].version`, RAW —
     # whatever is stored, sha or not) and the pin an applying install WOULD
     # stamp (ADR-0033: its own build sha, resolved through the SAME seam apply
@@ -820,7 +941,10 @@ class ConsumerState:
 
 
 def gather(
-    root: Path, units: Sequence[Unit], retired: Sequence[RetiredFile]
+    root: Path,
+    units: Sequence[Unit],
+    retired: Sequence[RetiredFile],
+    retired_hooks: Sequence[RetiredHook] = (),
 ) -> ConsumerState:
     """Read the consumer's current state — the install domain's ONE read boundary.
 
@@ -830,7 +954,9 @@ def gather(
     set, the ``[lint]`` ignore globs, and the manifest-derived ``[toolchains]``
     map (#578) — is planned alongside the manifest but never under the
     pristine-hash reconciliation; architecture.lex §6, issue #25), each retired path's
-    actual hash, the consumer's committed lefthook-local config (#544, the
+    actual hash, each retired hook entry's current match count
+    (:func:`retired_hook_count`, #619), the consumer's committed
+    lefthook-local config (#544, the
     merge-conflict tripwire's input), the pixi manifest's first-splice
     key clashes (:func:`_pixi_key_conflicts`) and task-ambiguity clashes
     (:func:`_pixi_task_conflicts`), whether the committed ``CHANGELOG.md``
@@ -882,6 +1008,7 @@ def gather(
         pristine=pristine,
         retired_hashes={r.path: retired_actual_hash(root, r) for r in retired},
         seeds=tuple(seeds),
+        retired_hook_counts={h.key: retired_hook_count(root, h) for h in retired_hooks},
         current_pin=current_pin,
         target_pin=_target_pin(),
         pixi_manifest_missing=not (root / PIXI_FILE).is_file(),
@@ -960,6 +1087,11 @@ class Plan:
     decisions: tuple[Decision, ...]
     retired: tuple[RetiredDecision, ...]
     seeds: tuple[str, ...]
+    # Retired hook entries (#619): the two-case decisions over the packaged
+    # (file, event, marker) triples — a DELETE removes every matching
+    # consumer-local entry from its event array (shipit's own managed entries
+    # are protected inside the match; splice.is_retired_hook).
+    retired_hooks: tuple[RetiredHookDecision, ...] = ()
     # The consumer has no pixi.toml, and this plan writes pixi block units into
     # one (#432): apply seeds the minimal valid [workspace] manifest first, so
     # pixi parses the file from the very first commit. One-time scaffold —
@@ -1030,6 +1162,10 @@ class Plan:
         return tuple(d for d in self.retired if d.action == KEEP)
 
     @property
+    def retire_hook_deletes(self) -> tuple[RetiredHookDecision, ...]:
+        return tuple(d for d in self.retired_hooks if d.action == DELETE)
+
+    @property
     def pin_stale(self) -> bool:
         """The consumer's pin differs from the running build's sha — a pin bump.
 
@@ -1050,8 +1186,9 @@ class Plan:
 
         A seed-only change (managed set current, policy missing) still counts
         as a write, so a re-install picks up policy a consumer never had — but
-        stays a no-op once the policy is in place. A pending retired delete
-        likewise keeps the run a write, so cleanup lands even when the managed
+        stays a no-op once the policy is in place. A pending retired delete —
+        file or hook entry (#619) — likewise keeps the run a write, so cleanup
+        lands even when the managed
         set is current. A stale pin (:attr:`pin_stale`) is a work axis of its
         own: a code-only shipit change touches no managed file yet must roll the
         pin forward. So is a stale changelog projection
@@ -1063,6 +1200,7 @@ class Plan:
             not self.writes
             and not self.seeds
             and not self.retire_deletes
+            and not self.retire_hook_deletes
             and not self.pin_stale
             and not self.rerender_changelog
         )
@@ -1077,7 +1215,8 @@ class Plan:
         """Every path a writing apply touches — the commit set, manifest included.
 
         Deleted retired paths join it: ``git add`` on a removed path stages the
-        deletion, so every commit mode carries the cleanup. So does the
+        deletion, so every commit mode carries the cleanup. So do the hooks
+        files a retired-entry removal rewrites (#619), and the
         re-rendered ``CHANGELOG.md`` (#578), so the reconcile PR carries the
         refreshed render.
         """
@@ -1086,6 +1225,7 @@ class Plan:
                 {d.unit.dest for d in self.writes}
                 | {config.CONFIG_NAME}
                 | {d.retired.path for d in self.retire_deletes}
+                | {d.retired.file for d in self.retire_hook_deletes}
                 | ({CHANGELOG_FILE} if self.rerender_changelog else set())
             )
         )
@@ -1095,11 +1235,13 @@ def reconcile(
     units: Sequence[Unit],
     retired: Sequence[RetiredFile],
     state: ConsumerState,
+    retired_hooks: Sequence[RetiredHook] = (),
 ) -> Plan:
     """Decide the whole install — pure over the gathered :class:`ConsumerState`.
 
     Aggregates the four-case managed decisions, the three-case retired-file
-    decisions, and the policy seeds into one frozen :class:`Plan`. Logs the
+    decisions, the two-case retired-hook decisions (#619), and the policy
+    seeds into one frozen :class:`Plan`. Logs the
     decided counts (the plan is mechanics, DEBUG) and each kept retired file
     (a locally modified copy shipit refuses to destroy, WARNING) — the durable
     twin (ADR-0029); the terminal report is the renderer's.
@@ -1132,6 +1274,9 @@ def reconcile(
         decisions=decisions,
         retired=tuple(plan_retired(retired, state.retired_hashes)),
         seeds=state.seeds,
+        retired_hooks=tuple(
+            plan_retired_hooks(retired_hooks, state.retired_hook_counts)
+        ),
         # Seed only when a write will actually create pixi.toml: no manifest on
         # the consumer AND a pixi block unit in this plan's write set (with the
         # file absent every pixi unit decides ADD, so this is one condition,
@@ -1162,6 +1307,7 @@ def reconcile(
             "pixi_seed": result.seed_pixi_manifest,
             "retire_deletes": len(result.retire_deletes),
             "retire_keeps": len(result.retire_keeps),
+            "retire_hook_deletes": len(result.retire_hook_deletes),
             "pin_stale": result.pin_stale,
             "rerender_changelog": result.rerender_changelog,
             "declined": len(result.declined),
