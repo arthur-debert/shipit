@@ -318,9 +318,10 @@ def load_toolchains(cfg: dict) -> tuple[ToolchainEntry, ...]:
 # separately from the path→toolchain map and many-to-many with it (ADR-0007:
 # one rust workspace → several artifacts; several toolchains → one Tauri app).
 # Everything artifact-shaped downstream consumes this parse: `shipit build`
-# consumes the build targets NOW; the bundle stage, the release stages'
-# endpoint walk, the sign stage, and `shipit e2e` (TOL01-WS03) consume their
-# fields LATER — parsed here so the whole map is validated at the boundary
+# consumes the build targets and `shipit e2e` the e2e harness declaration
+# NOW; the bundle stage, the release stages' endpoint walk, and the sign
+# stage consume their fields LATER — parsed here so the whole map is
+# validated at the boundary
 # (ADR-0030: parse to typed frozen values; construction is validation), with
 # loud errors naming the offending key.
 #
@@ -390,9 +391,11 @@ class E2eSpec:
 class Artifact:
     """One ``[artifacts]`` entry, fully typed (ADR-0030).
 
-    ``build`` targets are consumed by ``shipit build`` now; ``bundle`` by the
-    bundle stage, ``endpoints`` by the release stages, ``e2e`` by WS03, and
-    ``sign`` by the sign stage / preflight secrets validation — all later.
+    ``build`` targets are consumed by ``shipit build`` and ``e2e`` by
+    ``shipit e2e`` (the harness declaration plus the ``<NAME>_BIN``
+    injection) now; ``bundle`` by the bundle stage, ``endpoints`` by the
+    release stages, and ``sign`` by the sign stage / preflight secrets
+    validation — those later.
     """
 
     name: str

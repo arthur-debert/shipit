@@ -87,29 +87,6 @@ def verdict(runs: Sequence[StepRun]) -> int:
     return 0 if all(run.ok for run in runs) else 1
 
 
-def _check_targets_mapped(
-    artifacts: Sequence[config.Artifact], entries: Sequence[config.ToolchainEntry]
-) -> None:
-    """An artifact build target whose toolchain has NO ``[toolchains]`` leg
-    would silently never build — a config inconsistency, refused loudly
-    (checked against the WHOLE map, before any leg selection, so a selector
-    never masks or fakes the error)."""
-    mapped = {entry.toolchain for entry in entries}
-    orphaned = sorted(
-        {
-            f"{artifact.name} -> {target.toolchain}"
-            for artifact in artifacts
-            for target in artifact.build
-            if target.toolchain not in mapped
-        }
-    )
-    if orphaned:
-        raise config.ConfigError(
-            "[artifacts] build targets name toolchains with no [toolchains] "
-            f"leg: {'; '.join(orphaned)}"
-        )
-
-
 def _check_targets_unambiguous(
     artifacts: Sequence[config.Artifact], planned: Sequence[legs_mod.Leg]
 ) -> None:
@@ -200,7 +177,7 @@ def run(
     entries = require_entries(cfg, root, TOOL)
     selector, passthrough = split_args(tuple(args), entries)
     artifacts = config.load_artifacts(cfg)
-    _check_targets_mapped(artifacts, entries)
+    build_mod.check_targets_mapped(artifacts, entries)
 
     try:
         planned = legs_mod.plan_legs(
