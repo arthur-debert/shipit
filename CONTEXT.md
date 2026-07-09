@@ -179,11 +179,13 @@ outcome is read LATER from the PR, never from the request. Contrast **App
 reviewer**.
 
 **rerun**:
-A per-reviewer policy flag. `rerun=true` (the default for everyone:
-head-strict, ADR-0043) — the review must be on the current head, so a push
-re-stales it and the reviewer is re-requested (on the fix range only, after
-round 1). `rerun=false` (review-once) — an explicit cost opt-out: a review on
-any commit counts as done and is never stale after a push.
+A per-reviewer policy flag. `rerun=true` (head-strict) — the review must be on
+the current head, so a push re-stales it and the reviewer is re-requested (on
+the fix range only, after round 1). `rerun=false` (review-once) — a review on
+any commit counts as done and is never stale after a push. Head-strict becomes
+the default for everyone when the RVW02 incremental-round work lands
+(ADR-0043); the shipped default stays review-once until that flip, and
+review-once then survives only as an explicit per-reviewer cost opt-out.
 *Avoid*: review-once as the philosophy (it was a workaround for uncoordinated
 review floods, retired with ADR-0031's sole-requester rule).
 

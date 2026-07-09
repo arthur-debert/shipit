@@ -192,7 +192,8 @@ predictable cost:
   but never mint rounds. A fired breaker still suppresses all re-requests.
 - **CLASSIFY retirement** (ADR-0044): the state is structurally unreachable
   and removed; the classify verb survives as the severity-override writer,
-  deliberately undocumented in role prompts and docs.
+  deliberately absent from role prompts and operator-facing guidance
+  (decision records — ADR-0044 and this PRD — still describe it).
 - **rerun flip** (ADR-0043): `rerun=true` (head-strict) becomes the code
   default; review-once is an explicit per-reviewer opt-out. The dev-cycle
   canon (release repo's dev-cycle doc, global CLAUDE.md, role docs) flips in

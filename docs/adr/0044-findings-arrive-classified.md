@@ -14,10 +14,11 @@ Comments rendering as the human layer; precedence is marker → adapter mapping
 
 Consequences: the CLASSIFY state is structurally unreachable (nothing can be
 unclassified) and is removed; `shipit pr classify` survives as the
-severity-override verb but is deliberately UNDOCUMENTED in role prompts and
-docs — a dormant correction path kept warm so we can cheaply re-document it if
-reviewer-emitted severities prove unreliable, not a step any agent is told to
-take. The binary vocabulary could not express the new stopping rule (a round
+severity-override verb but is deliberately ABSENT from role prompts and
+operator-facing guidance (decision records — this ADR and the RVW02 PRD —
+still describe it) — a dormant correction path kept warm so we can cheaply
+re-surface it if reviewer-emitted severities prove unreliable, not a step any
+agent is told to take. The binary vocabulary could not express the new stopping rule (a round
 with no major+ finding stops the loop, while `minor` findings still require
 thread resolution but never mint rounds), so extending it was the same rewrite
 in a compatibility costume — rejected per the no-backwards-compat principle.
