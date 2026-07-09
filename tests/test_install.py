@@ -162,6 +162,19 @@ def test_load_units_includes_lefthook_and_pixi_task_block():
     )
 
 
+def test_load_units_includes_the_thin_test_task_block():
+    # The thin `test` caller (TOL01-WS01, ADR-0039): its OWN sibling block in
+    # the same [tasks] table — pinned-launcher form like the managed `lint` —
+    # so the task-ambiguity guard can skip it alone for a consumer whose own
+    # manifest already defines a `test` task (shipit's own repo does).
+    units = {u.key: u for u in iunits.load_units()}
+    test_task = units[iunits.PIXI_TEST_TASK_KEY]
+    assert test_task.kind == "block"
+    assert test_task.dest == "pixi.toml"
+    assert test_task.anchor == "[tasks]"
+    assert test_task.desired_inner() == 'test = "./bin/shipit test"'
+
+
 def test_pixi_block_inserts_under_existing_tasks_table():
     consumer = '[project]\nname = "acme"\n\n[tasks]\ntest = "pytest"\n'
     out = splice.splice_block(
@@ -251,13 +264,18 @@ def test_load_units_includes_the_lint_env_blocks():
     assert envs.anchor == "[environments]"
     assert tomllib.loads(envs.desired_inner()) == {"lint": ["lint"]}
 
-    # Three sibling blocks in ONE consumer file: their marker fences must be
+    # Four sibling blocks in ONE consumer file: their marker fences must be
     # pairwise distinct or extract/splice would bleed across regions.
     fences = {
         units[k].open_marker
-        for k in (iunits.PIXI_KEY, iunits.PIXI_LINT_DEPS_KEY, iunits.PIXI_ENVS_KEY)
+        for k in (
+            iunits.PIXI_KEY,
+            iunits.PIXI_TEST_TASK_KEY,
+            iunits.PIXI_LINT_DEPS_KEY,
+            iunits.PIXI_ENVS_KEY,
+        )
     }
-    assert len(fences) == 3
+    assert len(fences) == 4
 
 
 def test_packaged_lint_env_agrees_with_shipits_own_manifest():
@@ -1617,6 +1635,131 @@ def test_key_conflict_guard_covers_the_nested_lint_feature_anchor(tmp_path):
     )
 
 
+# --------------------------------------------------------------------------
+# The pixi task-ambiguity guard (TOL01-WS01) — the key-conflict guard's
+# pixi-run-level sibling: a managed default-env task a consumer feature also
+# defines would make `pixi run <task>` refuse the name, so the block is
+# skipped and the consumer's own task stays authoritative.
+# --------------------------------------------------------------------------
+
+_CONSUMER_PIXI_WITH_FEATURE_TEST_TASK = """\
+[workspace]
+channels = ["conda-forge"]
+name = "acme"
+platforms = ["linux-64"]
+
+[feature.test.tasks]
+test = "cargo nextest run"
+
+[environments]
+test = ["test"]
+"""
+
+
+def test_test_task_block_is_skipped_when_a_feature_defines_the_task(tmp_path):
+    (tmp_path / "pixi.toml").write_text(_CONSUMER_PIXI_WITH_FEATURE_TEST_TASK)
+    plan = _plan(tmp_path)
+
+    assert plan.pixi_task_conflicts == (
+        irec.PixiTaskConflict(
+            unit_key=iunits.PIXI_TEST_TASK_KEY,
+            task="test",
+            features=("test",),
+        ),
+    )
+    # The conflicted block never reaches the plan; its [tasks] siblings do.
+    keys = {d.unit.key for d in plan.decisions}
+    assert iunits.PIXI_TEST_TASK_KEY not in keys
+    assert iunits.PIXI_KEY in keys
+    # Warn-only, worded off the one formatter, and ACTIONABLE both ways.
+    warnings = verb.format_plan_warnings(plan)
+    assert "pixi block skipped" in warnings
+    assert "[feature.test.tasks]" in warnings
+    assert "ambiguous" in warnings
+
+
+def test_test_task_block_delivers_when_no_feature_defines_it(tmp_path):
+    (tmp_path / "pixi.toml").write_text(
+        _CONSUMER_PIXI_WITH_FEATURE_TEST_TASK.replace("test =", "e2e =", 1)
+    )
+    plan = _plan(tmp_path)
+    assert plan.pixi_task_conflicts == ()
+    decision = next(
+        d for d in plan.decisions if d.unit.key == iunits.PIXI_TEST_TASK_KEY
+    )
+    assert decision.action == irec.ADD
+
+
+def test_test_task_block_delivers_when_the_feature_is_not_env_enabled(tmp_path):
+    # A `test` task under [feature.test.tasks] that NO [environments] entry
+    # enables never reaches an env, so `pixi run test` is unambiguous — the
+    # guard must not over-detect and skip the managed block. (Here the only
+    # environment enables a different feature.)
+    (tmp_path / "pixi.toml").write_text(
+        "[workspace]\n"
+        'channels = ["conda-forge"]\n'
+        'name = "acme"\n'
+        'platforms = ["linux-64"]\n\n'
+        "[feature.test.tasks]\n"
+        'test = "cargo nextest run"\n\n'
+        "[environments]\n"
+        'dev = ["lint"]\n'
+    )
+    plan = _plan(tmp_path)
+    assert plan.pixi_task_conflicts == ()
+    decision = next(
+        d for d in plan.decisions if d.unit.key == iunits.PIXI_TEST_TASK_KEY
+    )
+    assert decision.action == irec.ADD
+
+
+def test_a_spliced_test_task_block_is_not_a_task_conflict(tmp_path, rec):
+    # Once the managed block is in, a later reconcile must read NOOP — the
+    # guard is ADD-bound only, like the key-conflict guard.
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    plan = _plan(tmp_path)
+    iapply.apply(plan, iapply.MODE_TREE)
+
+    again = _plan(tmp_path)
+    assert again.pixi_task_conflicts == ()
+    decision = next(
+        d for d in again.decisions if d.unit.key == iunits.PIXI_TEST_TASK_KEY
+    )
+    assert decision.action == irec.NOOP
+
+
+def test_a_consumer_test_task_in_the_tasks_table_is_the_key_conflict_guards_case(
+    tmp_path,
+):
+    # A same-named key in the [tasks] anchor itself is a DUPLICATE-KEY splice
+    # (the #547 guard), not a task-ambiguity one — the block is still skipped.
+    (tmp_path / "pixi.toml").write_text(
+        '[workspace]\nchannels = ["conda-forge"]\nname = "acme"\n'
+        'platforms = ["linux-64"]\n\n[tasks]\ntest = "pytest"\n'
+    )
+    plan = _plan(tmp_path)
+    assert plan.pixi_task_conflicts == ()
+    assert any(
+        c.unit_key == iunits.PIXI_TEST_TASK_KEY and c.keys == ("test",)
+        for c in plan.pixi_key_conflicts
+    )
+    assert iunits.PIXI_TEST_TASK_KEY not in {d.unit.key for d in plan.decisions}
+
+
+def test_shipits_own_repo_keeps_its_feature_test_task_authoritative():
+    # The dogfood pin: shipit's own full-gate `test` task lives in
+    # [feature.test.tasks] (rust toolchain env + inline lexd provisioning), so
+    # the reconcile must SKIP the managed caller here — otherwise every fresh
+    # Tree's self-install would make bare `pixi run test` ambiguous.
+    root = Path(__file__).resolve().parents[1]
+    units = iunits.load_units()
+    consumer_hashes = {u.key: irec.consumer_hash(root, u) for u in units}
+    conflicts = irec._pixi_task_conflicts(root, units, consumer_hashes)
+    assert any(
+        c.unit_key == iunits.PIXI_TEST_TASK_KEY and c.task == "test" for c in conflicts
+    )
+
+
 def test_fresh_install_lays_down_the_session_bootstrap_set_idempotently(tmp_path, rec):
     (tmp_path / "AGENTS.md").write_text("# Acme\n")
     result = _apply(tmp_path)
@@ -2190,15 +2333,17 @@ def test_fresh_consumer_without_pixi_manifest_gets_a_valid_seed(tmp_path, rec):
     assert manifest["workspace"]["channels"] == list(iunits.PIXI_SEED_CHANNELS)
     # ...and everything `pixi run -e lint lint` needs, spliced in beneath it.
     assert manifest["tasks"]["lint"] == "./bin/shipit lint"
+    assert manifest["tasks"]["test"] == "./bin/shipit test"
     assert set(manifest["feature"]["lint"]["dependencies"]) == set(LINT_TOOLS)
     assert manifest["environments"]["lint"] == ["lint"]
 
-    # The seed is scaffold, not a managed unit: only the three block units are
+    # The seed is scaffold, not a managed unit: only the four block units are
     # recorded, so the [workspace] table is consumer-owned from here on.
     managed = config.load_managed(config.load(tmp_path / ".shipit.toml"))
     pixi_keys = {k for k in managed if k.startswith("pixi.toml")}
     assert pixi_keys == {
         iunits.PIXI_KEY,
+        iunits.PIXI_TEST_TASK_KEY,
         iunits.PIXI_LINT_DEPS_KEY,
         iunits.PIXI_ENVS_KEY,
     }

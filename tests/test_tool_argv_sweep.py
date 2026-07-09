@@ -49,12 +49,23 @@ def _parsed(path: pathlib.Path) -> ast.Module:
 #:   ``os_probe``): the OS process table has exactly one reader.
 #: - ``curl`` — the lexd release fetch (:mod:`shipit.provision.lexd`): the one
 #:   external download shipit performs (ADP00-WS03).
+#: - ``cargo`` / ``go`` / ``pytest`` / ``npm`` — the Tool verbs' default
+#:   producing commands (TOL01-WS01): assembled ONLY in the closed toolchain
+#:   registry (:mod:`shipit.tools.registry`); a per-path ``.shipit.toml``
+#:   override is consumer DATA, never a second assembly point. ``npm`` has a
+#:   second sanctioned home: the Tree provisioner's frozen node install
+#:   (``npm ci``, :mod:`shipit.tree.create` #543) — provisioning-side, a
+#:   different concern from the test-producing dispatch.
 _ADAPTER_HOMES: dict[str, tuple[str, ...]] = {
     "gh": ("gh.py",),
     "git": ("git.py",),
     "pixi": ("pixienv/read.py", "pixienv/run.py"),
     "ps": ("session/liveness.py",),
     "curl": ("provision/lexd.py",),
+    "cargo": ("tools/registry.py",),
+    "go": ("tools/registry.py",),
+    "pytest": ("tools/registry.py",),
+    "npm": ("tools/registry.py", "tree/create.py"),
     # The act harness (TOL01-WS04): `shipit wf test` is the one place that
     # drives act, and its docker probes/builds live beside it.
     "act": ("verbs/wf.py",),

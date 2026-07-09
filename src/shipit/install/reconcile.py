@@ -41,7 +41,12 @@ would get a DUPLICATE TOML KEY on the ADD splice — an unparseable pixi.toml
 that blocks installs and every hooked commit. Gather detects the clash against
 the parsed consumer manifest, and the reconcile SKIPS delivering that block
 (the consumer's own pin stays authoritative; the Plan carries the conflict and
-every surface warns) — never a broken write, in any mode.
+every surface warns) — never a broken write, in any mode. Its pixi-run-level
+sibling (TOL01-WS01) guards ``[tasks]`` blocks the same way against TASK-NAME
+ambiguity: a managed default-env task (``test``) also defined by a consumer
+``[feature.*.tasks]`` table would make ``pixi run <task>`` refuse the name,
+so the block is skipped and the consumer's own task stays authoritative
+(:class:`PixiTaskConflict`).
 
 The seam (ADR-0030): :func:`gather` is the ONE filesystem read boundary
 (consumer hashes, the stored pristine map, the policy-seed plan — a frozen
@@ -542,6 +547,126 @@ def _pixi_key_conflicts(
     return tuple(conflicts)
 
 
+@dataclass(frozen=True)
+class PixiTaskConflict:
+    """One pixi ``[tasks]`` block unit whose FIRST splice would make a pixi
+    task AMBIGUOUS — the key-conflict guard's pixi-run-level sibling
+    (TOL01-WS01).
+
+    pixi refuses a bare ``pixi run <task>`` when a task of that name is
+    defined in several environments, so splicing a managed default-env task
+    (``test = "./bin/shipit test"``) into a manifest whose own
+    ``[feature.*.tasks]`` already defines the name would break the consumer's
+    working command — shipit's own repo is the standing case (its full-gate
+    ``test`` task lives in the ``test`` feature for the rust toolchain env and
+    inline lexd provisioning). Detected only when the block's markers are
+    absent (an ADD), like :class:`PixiKeyConflict`; the remedy is the
+    consumer's call — keep their task (the block stays undelivered) or delete
+    it and re-run install to adopt the managed caller. A same-named key in the
+    ``[tasks]`` anchor table itself is the OTHER guard's case (a duplicate
+    TOML key, :class:`PixiKeyConflict`).
+    """
+
+    unit_key: str  # the [managed] table key, e.g. "pixi.toml#shipit-test-task"
+    task: str  # the ambiguous task name
+    features: tuple[str, ...]  # the features whose tasks tables define it
+
+
+def format_pixi_task_conflict(conflict: PixiTaskConflict) -> str:
+    """The one actionable message for a task-ambiguity conflict — used verbatim
+    by the stderr warning and the durable log line, so the two never drift."""
+    tables = " and ".join(f"[feature.{f}.tasks]" for f in conflict.features)
+    return (
+        f"this repo's pixi.toml already defines a '{conflict.task}' task in "
+        f"{tables}, which the managed block '{conflict.unit_key}' also defines "
+        f"in [tasks] — splicing it would make `pixi run {conflict.task}` "
+        f"ambiguous (pixi refuses a task defined in several environments), so "
+        f"the block was NOT delivered and this repo's own task stays "
+        f"authoritative. To adopt the managed caller instead, delete this "
+        f"repo's own task and re-run `shipit install`."
+    )
+
+
+def _enabled_features(manifest: Mapping[str, object]) -> frozenset[str]:
+    """The feature names referenced by any ``[environments]`` entry.
+
+    pixi's ``[environments]`` maps an env name to its features — either a bare
+    list (``test = ["test"]``) or a table (``test = { features = ["test"] }``).
+    A feature listed by no environment materializes in none, so its tasks
+    cannot collide with a default-env managed task (:func:`_pixi_task_conflicts`
+    uses this to avoid over-detecting). The always-present ``default`` feature
+    is not enumerated here — it is not a consumer ``[feature.*]`` name.
+    """
+    environments = manifest.get("environments")
+    if not isinstance(environments, dict):
+        return frozenset()
+    enabled: set[str] = set()
+    for spec in environments.values():
+        feats = spec.get("features") if isinstance(spec, dict) else spec
+        if isinstance(feats, list):
+            enabled.update(str(f) for f in feats)
+    return frozenset(enabled)
+
+
+def _pixi_task_conflicts(
+    root: Path, units: Sequence[Unit], consumer_hashes: Mapping[str, str | None]
+) -> tuple[PixiTaskConflict, ...]:
+    """Gather's task-ambiguity read: first-splice pixi-task name clashes.
+
+    Best-effort and fail-open like :func:`_pixi_key_conflicts` (whose
+    ADD-bound-only rule it shares): no manifest or an unparseable one detects
+    nothing. Only ``[tasks]``-anchored pixi block units are checked — a task
+    the block would define in the default env clashes with a same-named task
+    a consumer ``[feature.*.tasks]`` table defines, but ONLY when that feature
+    is ENABLED by some ``[environments]`` entry: a feature no environment
+    includes never materializes its tasks in any env, so it cannot make
+    ``pixi run <task>`` ambiguous — counting it would over-detect and skip the
+    managed block needlessly. Ambiguity is exactly the task landing in the
+    default env (the managed block) AND another env (the enabled feature).
+    """
+    path = root / PIXI_FILE
+    if not path.is_file():
+        return ()
+    try:
+        manifest = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (tomllib.TOMLDecodeError, OSError, UnicodeDecodeError):
+        return ()
+    features = manifest.get("feature")
+    if not isinstance(features, dict):
+        return ()
+    enabled = _enabled_features(manifest)
+    feature_tasks: dict[str, list[str]] = {}
+    for feature, body in features.items():
+        if str(feature) not in enabled:
+            continue  # unreferenced feature: its tasks reach no environment
+        tasks = body.get("tasks") if isinstance(body, dict) else None
+        if isinstance(tasks, dict):
+            for task in tasks:
+                feature_tasks.setdefault(str(task), []).append(str(feature))
+    if not feature_tasks:
+        return ()
+    conflicts: list[PixiTaskConflict] = []
+    for unit in units:
+        if unit.kind != "block" or unit.dest != PIXI_FILE or unit.anchor != "[tasks]":
+            continue
+        if consumer_hashes.get(unit.key) is not None:
+            continue  # markers present: the task is already the managed one
+        try:
+            block_tasks = tomllib.loads(unit.desired_inner())
+        except tomllib.TOMLDecodeError:  # pragma: no cover — packaged data
+            continue
+        for task in block_tasks:
+            if task in feature_tasks:
+                conflicts.append(
+                    PixiTaskConflict(
+                        unit_key=unit.key,
+                        task=str(task),
+                        features=tuple(sorted(feature_tasks[task])),
+                    )
+                )
+    return tuple(conflicts)
+
+
 def consumer_inner(root: Path, unit: Unit) -> str | None:
     """A block unit's current inner text in the consumer, or ``None``."""
     dest = root / unit.dest
@@ -606,6 +731,10 @@ class ConsumerState:
     # round 1) — read here (the ONE read boundary) so the reconcile's skip
     # decision stays pure over this state.
     pixi_key_conflicts: tuple[PixiKeyConflict, ...] = ()
+    # First-splice pixi-task AMBIGUITY clashes (TOL01-WS01): a managed [tasks]
+    # block task also defined by a consumer [feature.*.tasks] table — read
+    # here for the same purity reason.
+    pixi_task_conflicts: tuple[PixiTaskConflict, ...] = ()
 
 
 def gather(
@@ -620,7 +749,8 @@ def gather(
     reconciliation; architecture.lex §6, issue #25), each retired path's
     actual hash, the consumer's committed lefthook-local config (#544, the
     merge-conflict tripwire's input), and the pixi manifest's first-splice
-    key clashes (:func:`_pixi_key_conflicts`).
+    key clashes (:func:`_pixi_key_conflicts`) and task-ambiguity clashes
+    (:func:`_pixi_task_conflicts`).
     """
     root = root.resolve()
     if not root.is_dir():
@@ -662,6 +792,7 @@ def gather(
         lefthook_local_path=lefthook_local_path,
         lefthook_local=lefthook_local,
         pixi_key_conflicts=_pixi_key_conflicts(root, units, consumer_hashes),
+        pixi_task_conflicts=_pixi_task_conflicts(root, units, consumer_hashes),
     )
 
 
@@ -756,6 +887,11 @@ class Plan:
     # so their decisions are excluded outright (never a broken write, in any
     # mode) and every surface warns off this record.
     pixi_key_conflicts: tuple[PixiKeyConflict, ...] = ()
+    # Pixi blocks SKIPPED over a task-name AMBIGUITY (TOL01-WS01): the splice
+    # would define a default-env task a consumer feature also defines, making
+    # `pixi run <task>` refuse the name — excluded the same way, every surface
+    # warns off this record.
+    pixi_task_conflicts: tuple[PixiTaskConflict, ...] = ()
 
     @property
     def writes(self) -> tuple[Decision, ...]:
@@ -842,9 +978,13 @@ def reconcile(
     (a locally modified copy shipit refuses to destroy, WARNING) — the durable
     twin (ADR-0029); the terminal report is the renderer's.
     """
-    # A key-conflicted block never reaches the write set: its ADD would splice
-    # a duplicate TOML key into the consumer's pixi.toml (see PixiKeyConflict).
-    conflicted = {c.unit_key for c in state.pixi_key_conflicts}
+    # A conflicted block never reaches the write set: a key conflict's ADD
+    # would splice a duplicate TOML key into the consumer's pixi.toml
+    # (PixiKeyConflict); a task conflict's would make a pixi task ambiguous
+    # (PixiTaskConflict).
+    conflicted = {c.unit_key for c in state.pixi_key_conflicts} | {
+        c.unit_key for c in state.pixi_task_conflicts
+    }
     decisions = tuple(
         d
         for d in plan(units, state.consumer_hashes, state.pristine)
@@ -868,6 +1008,7 @@ def reconcile(
         target_pin=state.target_pin,
         lefthook_conflicts=_plan_lefthook_conflicts(units, state),
         pixi_key_conflicts=state.pixi_key_conflicts,
+        pixi_task_conflicts=state.pixi_task_conflicts,
     )
     logger.debug(
         "reconcile plan decided",
@@ -900,6 +1041,12 @@ def reconcile(
             "pixi key conflict: %s",
             format_pixi_key_conflict(kc),
             extra={"root": state.root, "unit": kc.unit_key, "anchor": kc.anchor},
+        )
+    for tc in result.pixi_task_conflicts:
+        logger.warning(
+            "pixi task conflict: %s",
+            format_pixi_task_conflict(tc),
+            extra={"root": state.root, "unit": tc.unit_key, "task": tc.task},
         )
     if result.nothing_to_do:
         logger.debug(
