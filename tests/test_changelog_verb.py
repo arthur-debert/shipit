@@ -181,6 +181,8 @@ def test_coalesce_notes_out_parent_needs_execute_permission(tmp_path, capsys):
     # Creating a file in a directory needs write AND execute (search) on the
     # dir; a parent with write but no execute is refused BEFORE mutation, not
     # after a later write failure once the cut has landed.
+    if os.name != "posix":
+        pytest.skip("directory permission bits are POSIX-only")
     if os.geteuid() == 0:
         pytest.skip("root bypasses directory permission bits")
     root = _tree(tmp_path, {"unreleased-a.md": "- a\n"})
