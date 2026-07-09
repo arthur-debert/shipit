@@ -364,19 +364,17 @@ def test_managed_lefthook_is_consumer_generic():
 
     # The exact legs: pre-commit lint (priority 2 — the slot a local leg like
     # shipit's own lex-mirror runs ahead of in lefthook's priority-ordered
-    # sequential run), pre-push lint + the classification tripwire. (The
-    # post-commit dev-cycle leg is asserted in test_logevent.py's
-    # managed-hook-tier test.)
+    # sequential run) + pre-push lint. The retired classification tripwire
+    # (`classify-gate`, ADR-0044: findings arrive pre-classified, so there is
+    # nothing to gate) must NOT reappear. (The post-commit dev-cycle leg is
+    # asserted in test_logevent.py's managed-hook-tier test.)
     lint = cfg["pre-commit"]["commands"]["lint"]
     assert lint == {"priority": 2, "run": PIXI_ABSENCE_GUARD + "pixi run -e lint lint"}
     assert (
         cfg["pre-push"]["commands"]["lint"]["run"]
         == PIXI_ABSENCE_GUARD + "pixi run -e lint lint"
     )
-    assert (
-        cfg["pre-push"]["commands"]["classify-gate"]["run"]
-        == PIXI_ABSENCE_GUARD + "pixi run -e lint ./bin/shipit pr push-gate"
-    )
+    assert "classify-gate" not in cfg["pre-push"]["commands"]
 
     # The invoked task and environment exist in the managed pixi blocks, so a
     # stock consumer satisfies every reference with nothing pre-installed.

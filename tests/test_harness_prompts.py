@@ -125,6 +125,32 @@ def test_shepherd_prompt_carries_the_root_cause_sweep_clause():
     assert "sweep the whole PR diff" in prompt
 
 
+def test_shepherd_prompt_orders_addressing_by_severity_and_never_classifies():
+    """ADR-0044: findings arrive pre-classified, so the shepherd's
+    classification step is GONE from the generated prompt — no `pr classify`
+    command, no nitpick|substantive vocabulary — replaced by
+    address-in-severity-order guidance that still resolves every thread."""
+    prompt = render(load_role_defs()).role_prompts[Role.SHEPHERD]
+    assert "severity order" in prompt
+    assert "critical, then major, then minor, then nit" in prompt
+    assert "pre-classified" in prompt
+    # severity orders the round's work; it never waives the minor/nit threads
+    assert "still end resolved" in prompt
+    assert "shipit pr classify" not in prompt
+    assert "nitpick|substantive" not in prompt
+
+
+def test_no_shipped_surface_instructs_classification():
+    """The classify verb is the DORMANT correction path (ADR-0044): absent from
+    every composed role prompt, the union, and the committed agent defs — the
+    decision records alone still describe it."""
+    rendered = render(load_role_defs())
+    surfaces = [*rendered.role_prompts.values(), rendered.agents_union]
+    for surface in surfaces:
+        assert "shipit pr classify" not in surface
+        assert "nitpick|substantive" not in surface
+
+
 def test_no_shipped_surface_says_fresh_shepherd_per_round():
     """The previous design must not survive in ANY composed prompt, the union, OR
     the committed agent-def frontmatter — the issue's residual-phrasing

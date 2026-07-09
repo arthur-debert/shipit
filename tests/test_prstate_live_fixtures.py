@@ -38,25 +38,13 @@ def test_live_addressing_real_payload(context):
 
 
 def test_live_ready_real_payload(context):
-    # Same PR after replying + resolving both threads — drives to READY once
-    # the round's findings carry recorded verdicts (#423: the shepherd's
-    # classification, folded onto the snapshot at the gather seam).
+    # Same PR after replying + resolving both threads — drives straight to
+    # READY: findings arrive pre-classified (ADR-0044), so resolved threads +
+    # green checks + a clean merge state ARE the done-signal; no recorded
+    # verdict exists or is needed.
     ctx = context("live_ready_pr342")
-    ctx.verdicts = {
-        c.comment_id: "substantive" for t in ctx.threads for c in t.comments
-    }
     status = evaluate(ctx, required=_COPILOT_ONLY)
     assert status.state is TaskState.READY
     assert status.open_threads == 0
     assert status.checks.value == "green"
     assert status.mergeable == "MERGEABLE"
-
-
-def test_live_ready_payload_without_verdicts_gates_on_classify(context):
-    # The SAME real payload with NO recorded verdicts cannot reach READY: the
-    # classify gate (#423) holds the loop and reports the literal command —
-    # resolved threads alone are no longer the whole done-signal.
-    status = evaluate(context("live_ready_pr342"), required=_COPILOT_ONLY)
-    assert status.state is TaskState.ADDRESSING
-    assert "shipit pr classify" in status.next_action
-    assert status.to_request == []

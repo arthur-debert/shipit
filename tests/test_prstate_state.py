@@ -393,7 +393,7 @@ def test_engine_rerequests_stale_head_copilot_under_rerun(context):
     # Copilot's earlier-head review, so the engine must both ADVISE the
     # re-request in the prose and ROUTE to it via `to_request` — this is what
     # generates the per-push review rounds the round counter and the
-    # all-nitpick breaker are exercised by.
+    # no-major+ breaker are exercised by.
     ctx = context("copilot_stale_needs_rerequest")
     ctx.roster = Roster((RosterEntry(name="copilot", required=True, rerun=True),))
     status = evaluate(ctx)

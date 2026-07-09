@@ -11,10 +11,12 @@ shifts.
 from __future__ import annotations
 
 import logging
+import re
 from datetime import UTC, datetime, timedelta
 
 from .. import gh
 from ..agent import backend as _agent_backend
+from ..finding import Severity
 from ..pr import PrId
 from .errors import PrStateError
 from .model import (
@@ -186,6 +188,22 @@ class ReviewerAdapter:
     def matches(self, login: str) -> bool:
         raise NotImplementedError
 
+    def native_severity(self, body: str) -> Severity | None:
+        """Map this reviewer's NATIVE severity format in a posted comment body
+        to the shared 4-tier :class:`~shipit.finding.Severity` ladder, else None.
+
+        The adapter rung of the severity precedence chain (ADR-0044): each app
+        reviewer's adapter owns its native-format mapping (Gemini's
+        Critical/High/Medium/Low badge, CodeRabbit's severity/kind markers), so
+        the engine reads one ladder across reviewer kinds without ever
+        branching on a name. Base: None — a reviewer with no native severity
+        vocabulary (Copilot) contributes nothing here, and a LOCAL-agent
+        reviewer's findings carry the machine marker (the chain's stronger
+        rung) instead. None falls through to the chain's ``major`` fail-safe:
+        an unmappable finding forces a round rather than slipping the Breaker.
+        """
+        return None
+
     def _rerun(self, ctx: ReadinessView) -> bool:
         """This reviewer's rerun policy for `ctx` (default False = review-once).
 
@@ -351,6 +369,11 @@ class CopilotAdapter(ReviewerAdapter):
     as done is the per-reviewer rerun policy (see base `detect`): review-once
     (default) counts any-head; rerun=True is head-strict (an earlier-head review
     is stale and the reviewer reads back REQUESTED for the new head).
+
+    Copilot emits NO native severity vocabulary, so `native_severity` stays the
+    base None (deliberate, ADR-0044): its findings resolve through the chain's
+    ``major`` fail-safe — forcing a round rather than slipping the Breaker —
+    correctable per finding via the write-once Severity override.
     """
 
     name = "copilot"
@@ -410,8 +433,33 @@ class CodeRabbitAdapter(ReviewerAdapter):
     # `coderabbitai[bot]`; `matches` keys off the stable `coderabbit` substring.
     _REVIEWER_HANDLE = "coderabbitai[bot]"
 
+    # CodeRabbit's native severity format → the shared ladder (ADR-0044): a
+    # finding comment opens with either an explicit severity pill (`🔴 Critical`
+    # / `🟠 Major` / `🟡 Minor`) or a kind marker (`_⚠️ Potential issue_` /
+    # `_🛠️ Refactor suggestion_` / a `Nitpick` fold). Declaration ORDER is
+    # precedence: an explicit pill beats the kind marker riding the same
+    # comment. Matched case-insensitively as literal substrings; anything
+    # outside this table is unmappable → the chain's `major` fail-safe.
+    _SEVERITY_TOKENS: tuple[tuple[str, Severity], ...] = (
+        ("🔴 critical", Severity.CRITICAL),
+        ("🟠 major", Severity.MAJOR),
+        ("🟡 minor", Severity.MINOR),
+        ("potential issue", Severity.MAJOR),
+        ("refactor suggestion", Severity.MINOR),
+        ("nitpick", Severity.NIT),
+    )
+
     def matches(self, login: str) -> bool:
         return "coderabbit" in login.lower()
+
+    def native_severity(self, body: str) -> Severity | None:
+        """CodeRabbit's native format mapped to the ladder — first token of
+        `_SEVERITY_TOKENS` (precedence order) present in the body wins."""
+        low = body.lower()
+        for token, severity in self._SEVERITY_TOKENS:
+            if token in low:
+                return severity
+        return None
 
     def request(self, pr: PrId, entry: RosterEntry | None = None) -> bool:
         # Same GraphQL add-reviewer path Copilot uses: it resolves the App's
@@ -451,8 +499,36 @@ class GeminiAdapter(ReviewerAdapter):
     # as a required reviewer.
     instruction_files = (".gemini/styleguide.md",)
 
+    # Gemini Code Assist's native 4-level priority → the shared ladder
+    # (ADR-0044): Critical/High/Medium/Low, one level per finding comment.
+    _SEVERITY_MAP: dict[str, Severity] = {
+        "critical": Severity.CRITICAL,
+        "high": Severity.MAJOR,
+        "medium": Severity.MINOR,
+        "low": Severity.NIT,
+    }
+    # The level rides the comment as a severity badge image whose alt text IS
+    # the native token AND whose URL is Gemini's own badge asset, e.g.
+    # `![critical](https://www.gstatic.com/codereviewagent/critical-priority.svg)`.
+    # Anchoring on the `codereviewagent/` path segment (the exact filename varies
+    # — `high-priority.svg` and friends) keeps an unrelated image or a quoted
+    # example that merely shares a matching alt text from reading as a badge and
+    # skewing severity resolution. Built from the table so alt token and map can
+    # never disagree; anything outside it is unmappable → the `major` fail-safe.
+    _BADGE_RE = re.compile(
+        r"!\[(" + "|".join(map(re.escape, _SEVERITY_MAP)) + r")\]"
+        r"\([^)]*codereviewagent/[^)]*\)",
+        re.IGNORECASE,
+    )
+
     def matches(self, login: str) -> bool:
         return "gemini" in login.lower()
+
+    def native_severity(self, body: str) -> Severity | None:
+        """Gemini's Critical/High/Medium/Low badge mapped to the ladder — the
+        FIRST severity badge in the body decides."""
+        match = self._BADGE_RE.search(body)
+        return self._SEVERITY_MAP[match.group(1).lower()] if match else None
 
     def request(self, pr: PrId, entry: RosterEntry | None = None) -> bool:
         # The Gemini app auto-triggers on PR open; there is no request
