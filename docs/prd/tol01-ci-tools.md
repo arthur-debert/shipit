@@ -146,6 +146,18 @@ applies to, and one rc has traversed the full pipeline on lex.
   hand-off between jobs (upload/download, keychain import, secret injection)
   is routing and stays YAML; `stage-assets` and `build-frontend` are not tools
   (the latter is just `build npm` — a leg).
+- **Runner provisioning + caching inside the blocks is settled** by the
+  CI-cache spike (`docs/dev/ci-cache-spike.md`, shipit#582), whose Appendix is
+  the copy-from base for the `run`-job provisioning: setup-pixi caches keyed on
+  the planner's per-lane *env-set* (`cache-key: pixi-<envset>-`, not the
+  single-key default that races and duplicates entries); `cache-write: true`
+  everywhere; rust lanes get a PATH-export step + `Swatinem/rust-cache` gated on
+  a planner `caches.rust` descriptor (no sccache — it paid nothing warm and cost
+  58% cold); env-carried uv (`uv = "0.11.*"` managed dep) rides the env-set
+  cache, needing no block step but pulling in a cross-repo read-token via
+  gh-setup `[secrets]` and a UV_PIN drift test. The `caches.*` descriptors join
+  `runner`/`required` as planner-emitted matrix fields (ADR-0040 intact); docker
+  layer caching and ccache stay deferred with their triggers recorded.
 - **Secrets: requirements + sources.** Registry entries declare required
   secret names; `[secrets]` keeps per-repo sources (doppler pipeline
   unchanged). The required set is derived by traversing the repo's
