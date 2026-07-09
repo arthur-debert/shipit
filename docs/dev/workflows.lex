@@ -4,7 +4,8 @@ The composable CI design, in its final state. The worked example is the
 tauri/phos-app stack — the most complex Kind in the portfolio — because if the
 shape holds there it holds for the simpler Kinds (rust-cli, python-pkg,
 vscode-ext). The architectural boundary this design rests on (producing logic
-is a pixi task; routing logic is thin YAML) is stated in [./architecture.lex#3].
+is locally runnable — a shipit verb behind a thin pixi task caller; routing
+logic is thin YAML) is stated in [./architecture.lex#3].
 
 :: note ::
     Reconciliation (TOL01, 2026-07). The PRD `docs/prd/tol01-ci-tools.md` and

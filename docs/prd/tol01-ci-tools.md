@@ -44,7 +44,7 @@ applies to, and one rc has traversed the full pipeline on lex.
 ## User Stories
 
 1. As a maintainer, I want `shipit test` to run every test leg of my repo with one command, so that a multi-toolchain repo needs no hand-chained scripts.
-2. As a maintainer, I want `pixi run test` to be a thin caller of `shipit test`, so that laptop, hook, and CI run the identical implementation.
+2. As a maintainer, I want `pixi run test` to be a thin caller of `./bin/shipit test` (the ADR-0033 pinned launcher), so that laptop, hook, and CI run the identical implementation.
 3. As a maintainer, I want registry defaults per toolchain (rust → cargo-nextest, go → go test, python → pytest, npm → npm test), so that a standard repo declares nothing to get working tools.
 4. As a maintainer, I want a per-path override for any tool's producing command, so that a nonstandard repo opts out per leg without forking the tool.
 5. As a maintainer, I want passthrough args forwarded verbatim to the underlying command (`shipit test rust -- --no-capture`), so that uniformity never walls off the stack's own surface.
