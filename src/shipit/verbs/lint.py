@@ -12,7 +12,11 @@ is structural, not two transcriptions of the rules drifting apart.
 The lint checks are HARD-FAIL (architecture.lex §7): a missing tool exits
 non-zero, it never skips. A clean run is ``0``; any failure is ``1``.
 
-The ONE deliberate, narrowly-scoped exception is prettier's plugin-load abort
+TWO deliberate, narrowly-scoped exceptions temper the hard-fail contract; each
+is a documented, single-class carve-out for a failure that is about the
+ENVIRONMENT, never about the tracked files.
+
+The first is prettier's plugin-load abort
 (issue #498, :func:`is_prettier_plugin_load_failure`): when a repo's
 ``.prettierrc`` names a plugin absent from ``node_modules`` (a ``--depth 1``
 clone with no ``npm install``), prettier aborts on load with a Node
@@ -27,6 +31,23 @@ tight — it requires the Node resolver phrasing and never fires on prettier's o
 "code style issues" warning — so a genuinely dirty ``.svelte`` file still
 hard-fails. This is not a hole in the hard-fail contract; it is a documented,
 single-class, single-leg carve-out.
+
+The second is the rust TOOLCHAIN-SKEW guard (issue #602,
+:func:`detect_rust_skew`): when the repo PINS its rust toolchain in
+``pixi.toml`` (the #547 managed rust lint block under
+``[feature.lint.dependencies]``, or a default ``[dependencies]`` pin) but the
+``cargo`` this run resolves does NOT satisfy that pin — a hook env fallen back
+to a machine-global rustup, a clone that never ran ``pixi install`` — a FAILING
+cargo leg (clippy/fmt) warns instead of blocking. Its verdict comes from a
+toolchain the repo never pinned: newer clippy lints red pre-existing code
+fleet-wide, training agents and humans to reach for ``--no-verify``, which
+erodes the hook gate entirely. The downgrade is failure-only and LOUD (the skew
+note plus the tool's own output print under the ok mark), fires only when a pin
+exists AND the resolved ``cargo --version`` escapes it (an unparseable spec or
+banner never claims skew — ambiguity keeps the gate hard), and CI — which runs
+the pinned env — remains the enforcing verdict. A cargo matching the pin, or a
+repo with no pin at all (ADR-0007: the toolchain the repo declares is
+canonical), keeps the full hard-fail.
 
 The checks are CHECK-ONLY by default (release's scar: ``prettier --write`` under
 --all-files silently rewrites untouched files, so they must never mutate).
@@ -90,6 +111,7 @@ import os
 import re
 import sys
 import time
+import tomllib
 from collections.abc import Callable
 from dataclasses import dataclass
 from importlib import resources
@@ -349,6 +371,11 @@ RUST = Lang(
     # root and fails on cargo's own error — hard, never a silent skip. The
     # rust toolchain is assumed provisioned per the repo's toolchain
     # declaration (ADR-0007); a missing cargo is the standard hard-fail 127.
+    # But when the repo PINS its rust toolchain in pixi.toml (the #547 managed
+    # rust lint block) and the cargo this run resolves escapes that pin, a
+    # failing cargo leg warns instead of blocking — the #602 toolchain-skew
+    # guard (see detect_rust_skew and the module docstring): the verdict of an
+    # unpinned toolchain must not train operators onto --no-verify.
     #
     # Canonical-config injection (ADR-0037, #514/#516) for cargo is INLINE, not a
     # `config_inject` prefix: cargo's config tokens must follow the `--`
@@ -995,6 +1022,111 @@ def is_prettier_plugin_load_failure(binary: str, rc: int, output: str) -> bool:
     return has_resolver_phrase and "imported from" in lowered
 
 
+#: Matches cargo's version banner (``cargo 1.96.0 (d1b87f7 2026-01-05)``) at the
+#: start of any output line, capturing the numeric core — a nightly's
+#: ``1.98.0-nightly`` yields ``1.98.0``, which is exactly what the pixi pin
+#: compares against. Multi-line so a preamble line (a rustup warning) is skipped.
+_CARGO_VERSION_RE = re.compile(r"^cargo\s+(\d+(?:\.\d+)+)", re.MULTILINE)
+
+
+def parse_cargo_version(output: str) -> str | None:
+    """The numeric cargo version in a ``cargo --version`` banner, or ``None``.
+
+    Pure — the parse is out of the Exec boundary (ADR-0028) so the #602 skew
+    detection is unit-testable. ``None`` (no recognizable banner) means the probe
+    learned nothing; the caller (:func:`detect_rust_skew`) then never claims skew,
+    keeping the gate hard on ambiguity.
+    """
+    match = _CARGO_VERSION_RE.search(output)
+    return match.group(1) if match else None
+
+
+def rust_pin_satisfied(version: str, spec: str) -> bool:
+    """Whether cargo ``version`` satisfies the pixi ``rust`` pin ``spec``. Pure.
+
+    Models the spec shapes the managed blocks actually use (conda match-spec
+    lite): ``*`` (anything), ``==X.Y.Z`` (exact), ``X.Y.*`` / ``=X.Y`` / bare
+    ``X.Y`` (a dot-bounded prefix match — conda's fuzzy form, so ``1.9.*`` never
+    swallows ``1.96.0``). Any OTHER shape — ranges (``>=1.90``), compounds
+    (``,``/``|``), ``~=`` — is deliberately NOT modelled and returns ``True``:
+    a wrong skew claim would downgrade a real failure to a warning (#602), so
+    ambiguity always resolves toward the HARD gate, never toward the carve-out.
+    """
+    spec = spec.strip()
+    if not spec or spec == "*":
+        return True
+    if spec.startswith("=="):
+        return version == spec[2:].strip()
+    if any(ch in spec for ch in "><~!,|"):
+        return True  # unmodelled range/compound spec — never claim skew
+    base = spec.lstrip("=").strip()
+    if base.endswith(".*"):
+        base = base[:-2]
+    return version == base or version.startswith(base + ".")
+
+
+def rust_pin_from_manifest(data: object) -> str | None:
+    """The repo's pinned ``rust`` spec from a parsed ``pixi.toml``, or ``None``. Pure.
+
+    The pin the #602 skew guard compares the resolved cargo against. Read from
+    the two tables that feed the canonical lint env (lint feature + default
+    feature — ``pixi run -e lint lint``, the hook/CI path): the #547 managed rust
+    lint block under ``[feature.lint.dependencies]`` first (the canonical
+    location the reconcile delivers), then a default ``[dependencies]`` pin. A
+    pin elsewhere (e.g. shipit-self's ``[feature.test.dependencies]``) is NOT the
+    lint env's toolchain, so it is deliberately not consulted. Handles the inline
+    dict form (``rust = { version = "1.96.*", … }``); anything malformed is
+    simply no pin — no pin, no skew claim, gate stays hard.
+    """
+    if not isinstance(data, dict):
+        return None
+    feature = data.get("feature")
+    lint_feature = feature.get("lint") if isinstance(feature, dict) else None
+    tables = (
+        lint_feature.get("dependencies") if isinstance(lint_feature, dict) else None,
+        data.get("dependencies"),
+    )
+    for table in tables:
+        if not isinstance(table, dict):
+            continue
+        spec = table.get("rust")
+        if isinstance(spec, dict):
+            spec = spec.get("version")
+        if isinstance(spec, str) and spec.strip():
+            return spec.strip()
+    return None
+
+
+def detect_rust_skew(pin: str | None, version_output: str | None) -> str | None:
+    """The #602 toolchain-skew note when the resolved cargo escapes the repo's
+    pixi rust pin — else ``None``. Pure.
+
+    ``pin`` is the repo's pinned spec (:func:`rust_pin_from_manifest`, via the
+    ``_pinned_rust_spec`` seam); ``version_output`` is the resolved toolchain's
+    ``cargo --version`` banner (the ``_probe_cargo_version`` seam). ``None``
+    on EITHER side — no pin (ADR-0007: the repo's declared toolchain is
+    canonical), an unreadable/failed probe, an unparseable banner or spec —
+    means no skew is claimed and the hard-fail contract stands untouched.
+
+    A non-``None`` return is the LOUD note the orchestrator attaches when it
+    downgrades a failing cargo leg to a warning (failure-only: a passing run on
+    a skewed toolchain stands, and CI's pinned env re-checks it canonically).
+    """
+    if pin is None or version_output is None:
+        return None
+    version = parse_cargo_version(version_output)
+    if version is None or rust_pin_satisfied(version, pin):
+        return None
+    return (
+        f"cargo: TOOLCHAIN SKEW — this run resolved cargo {version}, but the "
+        f"repo pins rust {pin!r} in pixi.toml, so this rust verdict is not the "
+        "canonical one and it WARNS instead of blocking (#602). The pinned-env "
+        "gate is authoritative: run `pixi install`, then `pixi run -e lint lint` "
+        "(the same env CI enforces). Fix the env skew rather than bypassing the "
+        "hook with --no-verify."
+    )
+
+
 # --------------------------------------------------------------------------
 # The Exec + git boundary (patched in tests)
 # --------------------------------------------------------------------------
@@ -1223,6 +1355,43 @@ def _canonical_config(tool: Tool, root: Path) -> str | None:
     return _data_path(name) if name is not None else None
 
 
+def _pinned_rust_spec(root: Path) -> str | None:
+    """The repo's pixi-pinned ``rust`` spec read from ``root``'s ``pixi.toml``,
+    or ``None`` (#602).
+
+    The I/O half of the skew-guard pin read; the table walk itself is the pure
+    :func:`rust_pin_from_manifest`. A missing or malformed manifest is simply
+    no pin — no pin, no skew claim, so the gate stays hard. Injected in
+    :func:`run` (like ``_tracks_root_editorconfig``) so a test can stub it.
+    """
+    try:
+        with (root / "pixi.toml").open("rb") as fh:
+            data = tomllib.load(fh)
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+    return rust_pin_from_manifest(data)
+
+
+def _probe_cargo_version(
+    run_tool: Callable[[str, list[str], Path], execrun.ExecResult], root: Path
+) -> str | None:
+    """The resolved toolchain's ``cargo --version`` banner, or ``None`` (#602).
+
+    Rides the SAME ``run_tool`` seam (and thus the same scrubbed env and PATH)
+    as the real cargo legs, so the probed version is exactly the cargo those
+    legs will run. A launch failure or nonzero rc yields ``None`` — the probe
+    learned nothing, no skew is claimed, and a genuinely missing cargo still
+    surfaces as the leg's own hard-fail 127.
+    """
+    try:
+        result = run_tool("cargo", ["--version"], root)
+    except execrun.ExecError:
+        return None
+    if result.rc != 0:
+        return None
+    return result.stdout + result.stderr
+
+
 def _run_tool(binary: str, args: list[str], cwd: Path) -> execrun.ExecResult:
     """Run ``binary args`` in ``cwd`` through the one Exec runner.
 
@@ -1271,6 +1440,7 @@ def run(
     run_tool: Callable[[str, list[str], Path], execrun.ExecResult] | None = None,
     tracks_root_editorconfig: Callable[[Path], bool] | None = None,
     canonical_config: Callable[[Tool, Path], str | None] | None = None,
+    pinned_rust_spec: Callable[[Path], str | None] | None = None,
     runs_out: list[ToolRun] | None = None,
 ) -> int:
     """Run the checks over the tree at ``path`` (default ``.``). Returns 0/1.
@@ -1279,6 +1449,12 @@ def run(
     typed per-check verdicts behind the 0/1 exit code, for callers that need
     counts rather than a verdict (install self-certification's consumer-debt
     report, ADR-0033) without re-parsing the printed report.
+
+    ``pinned_rust_spec`` is the #602 skew-guard pin seam (default
+    :func:`_pinned_rust_spec`): the repo's pixi-pinned rust, compared against
+    the resolved ``cargo --version`` when a rust leg routes, so a failing
+    cargo verdict from an off-pin toolchain warns instead of blocking (see
+    :func:`detect_rust_skew` and the module docstring).
 
     A malformed ``.shipit.toml`` read for the ``[lint].ignore`` seam raises
     :class:`~shipit.config.ConfigError`, which the shared
@@ -1297,6 +1473,7 @@ def run(
     run_tool = run_tool or _run_tool
     tracks_root_ec = tracks_root_editorconfig or _tracks_root_editorconfig
     canonical_config = canonical_config or _canonical_config
+    pinned_rust_spec = pinned_rust_spec or _pinned_rust_spec
 
     # Drop the consumer's own non-prose paths (`.shipit.toml [lint].ignore`,
     # #484) from the WHOLE file list before routing, so a single glob excludes a
@@ -1314,6 +1491,20 @@ def run(
     # `[lint].ignore`-filtered and `path`-scoped), so it can be flipped by neither
     # an ignore glob nor a subdirectory-scoped run.
     pin_editorconfig = not tracks_root_ec(root)
+
+    # The #602 toolchain-skew guard, decided ONCE per run: when a rust leg
+    # routes AND the repo pins its rust toolchain in pixi.toml, probe the cargo
+    # this run resolves (through the same run_tool seam the legs use) and hold
+    # the skew note when the version escapes the pin. Failure-only downgrade:
+    # the note is attached ONLY where a cargo leg fails (below); it never
+    # touches a passing run or any non-cargo leg. No pin, no probe — a repo
+    # with no pixi rust pin declares its toolchain per ADR-0007 and keeps the
+    # full hard-fail.
+    rust_skew: str | None = None
+    if any(lang.name == RUST.name for lang, _ in routed):
+        rust_pin = pinned_rust_spec(root)
+        if rust_pin is not None:
+            rust_skew = detect_rust_skew(rust_pin, _probe_cargo_version(run_tool, root))
 
     mode = "fix" if fix else "check"
     print(f"lint: {root} ({mode})")
@@ -1423,11 +1614,12 @@ def run(
                         )
             try:
                 for args, mdir, note, nfiles, fail_open_ok in batches:
-                    # #498: a prettier plugin-load abort (a configured plugin
-                    # absent from node_modules) is environment-not-provisioned,
-                    # not a formatting verdict — it fails open with a note (set
-                    # below). None for every other outcome, so the normal report
-                    # path is untouched.
+                    # The loud fail-open note: #498 (a prettier plugin-load
+                    # abort — environment-not-provisioned, not a formatting
+                    # verdict) or #602 (a failing cargo leg on a toolchain that
+                    # escapes the repo's pixi rust pin — the off-pin env's
+                    # verdict, not the canonical one). Set below; None for every
+                    # other outcome, so the normal report path is untouched.
                     fail_open_note: str | None = None
                     try:
                         result = run_tool(tool.binary, args, root / mdir)
@@ -1491,6 +1683,30 @@ def run(
                                 },
                             )
                             rc, out = 0, ""
+                        elif rc != 0 and tool.binary == "cargo" and rust_skew:
+                            # #602: the resolved cargo escapes the repo's pixi
+                            # rust pin, so this clippy/fmt failure is the OFF-PIN
+                            # toolchain's verdict, not the canonical one — it
+                            # WARNS instead of blocking (loudly: the skew note +
+                            # the tool's own output print under the ok mark).
+                            # Blocking here fails commits on untouched code
+                            # whenever the ambient toolchain drifts newer than
+                            # the pin, training operators onto --no-verify — the
+                            # erosion the gate must never cause. CI's pinned env
+                            # remains the enforcing verdict.
+                            fail_open_note = rust_skew + (
+                                "\n" + out.strip() if out.strip() else ""
+                            )
+                            logger.warning(
+                                "lint rust toolchain skew — warn, not block (#602)",
+                                extra={
+                                    "lang": lang.name,
+                                    "tool": tool.binary,
+                                    "cwd": mdir,
+                                    "batch": note,
+                                },
+                            )
+                            rc, out = 0, ""
                         # Per-tool outcomes are mechanics; the run summary is the milestone.
                         logger.debug(
                             "lint tool finished",
@@ -1512,8 +1728,9 @@ def run(
                     mark = "ok  " if rc == 0 else "FAIL"
                     print(f"  {mark} {lang.name:9} {label} ({note})")
                     if fail_open_note:
-                        # A passing (rc==0) leg that was nonetheless skipped — print
-                        # the reason so the ok mark is never silently misleading (#498).
+                        # A passing (rc==0) leg that was nonetheless skipped or
+                        # downgraded — print the reason so the ok mark is never
+                        # silently misleading (#498/#602).
                         print(_indent(fail_open_note))
                     elif rc != 0 and out.strip():
                         print(_indent(out.strip()))

@@ -903,6 +903,209 @@ def test_no_rust_paths_run_no_cargo(tmp_path):
     assert all(binary != "cargo" for binary, _ in rec.calls)
 
 
+# --------------------------------------------------------------------------
+# Rust toolchain-skew guard (#602)
+# --------------------------------------------------------------------------
+
+
+def test_parse_cargo_version():
+    assert lint.parse_cargo_version("cargo 1.96.0 (d1b87f7c9 2026-01-05)") == "1.96.0"
+    # A nightly banner still yields the numeric core the pin compares against.
+    assert (
+        lint.parse_cargo_version("cargo 1.98.0-nightly (abc123 2026-06-01)") == "1.98.0"
+    )
+    # A preamble line (e.g. a rustup warning) before the banner is skipped.
+    assert lint.parse_cargo_version("warning: x\ncargo 1.90.2\n") == "1.90.2"
+    assert lint.parse_cargo_version("rustc 1.96.0") is None
+    assert lint.parse_cargo_version("") is None
+
+
+def test_rust_pin_satisfied_common_shapes():
+    assert lint.rust_pin_satisfied("1.96.0", "1.96.*")
+    assert lint.rust_pin_satisfied("1.96.3", "1.96.*")
+    assert not lint.rust_pin_satisfied("1.97.0", "1.96.*")
+    # The prefix match is dot-bounded: 1.9.* must not swallow 1.96.0.
+    assert not lint.rust_pin_satisfied("1.96.0", "1.9.*")
+    assert lint.rust_pin_satisfied("1.96.0", "==1.96.0")
+    assert not lint.rust_pin_satisfied("1.96.1", "==1.96.0")
+    # A bare/fuzzy conda spec is a prefix match.
+    assert lint.rust_pin_satisfied("1.96.0", "1.96")
+    assert lint.rust_pin_satisfied("1.96.0", "=1.96")
+    assert lint.rust_pin_satisfied("2.0.0", "*")
+
+
+def test_rust_pin_satisfied_unmodelled_shapes_never_claim_skew():
+    # Range/compound specs are not modelled; ambiguity resolves to SATISFIED so
+    # the gate stays hard — a wrong skew claim would downgrade a real failure.
+    assert lint.rust_pin_satisfied("1.80.0", ">=1.90")
+    assert lint.rust_pin_satisfied("1.80.0", ">=1.90,<2")
+    assert lint.rust_pin_satisfied("1.80.0", "~=1.96")
+
+
+def test_rust_pin_from_manifest_lint_feature_wins():
+    # The managed rust lint block ([feature.lint.dependencies], #547) is the
+    # canonical pin — it names the toolchain of the very env the hooks run.
+    data = {
+        "feature": {"lint": {"dependencies": {"rust": "1.96.*"}}},
+        "dependencies": {"rust": "1.90.*"},
+    }
+    assert lint.rust_pin_from_manifest(data) == "1.96.*"
+
+
+def test_rust_pin_from_manifest_default_deps_and_dict_form():
+    assert lint.rust_pin_from_manifest({"dependencies": {"rust": "1.90.*"}}) == "1.90.*"
+    assert (
+        lint.rust_pin_from_manifest(
+            {"dependencies": {"rust": {"version": "1.90.*", "channel": "conda-forge"}}}
+        )
+        == "1.90.*"
+    )
+    assert lint.rust_pin_from_manifest({"dependencies": {}}) is None
+    assert lint.rust_pin_from_manifest({}) is None
+    assert lint.rust_pin_from_manifest("not a table") is None
+
+
+def test_pinned_rust_spec_reads_pixi_toml(tmp_path):
+    (tmp_path / "pixi.toml").write_text(
+        '[feature.lint.dependencies]\nrust = "1.96.*"\n', encoding="utf-8"
+    )
+    assert lint._pinned_rust_spec(tmp_path) == "1.96.*"
+
+
+def test_pinned_rust_spec_missing_or_malformed_manifest_is_none(tmp_path):
+    assert lint._pinned_rust_spec(tmp_path) is None
+    (tmp_path / "pixi.toml").write_text("not = [toml", encoding="utf-8")
+    assert lint._pinned_rust_spec(tmp_path) is None
+
+
+def test_detect_rust_skew():
+    probe = "cargo 1.97.0 (abc123 2026-05-01)"
+    note = lint.detect_rust_skew("1.96.*", probe)
+    assert note is not None
+    assert "1.97.0" in note and "1.96.*" in note
+    assert lint.detect_rust_skew("1.97.*", probe) is None  # pin satisfied
+    assert lint.detect_rust_skew(None, probe) is None  # no pin, no claim
+    assert lint.detect_rust_skew("1.96.*", None) is None  # no probe, no claim
+    assert lint.detect_rust_skew("1.96.*", "garbled") is None  # unparseable probe
+
+
+class _SkewRecorder(_Recorder):
+    """A _Recorder whose cargo also answers ``--version`` with a scripted banner
+    (rc 0), so the #602 skew probe sees a resolvable toolchain while the real
+    cargo legs keep their scripted verdicts."""
+
+    def __init__(self, codes=None, cargo_version="cargo 1.97.0 (abc123 2026-05-01)"):
+        super().__init__(codes)
+        self.cargo_version = cargo_version
+
+    def __call__(self, binary, args, cwd):
+        if binary == "cargo" and list(args) == ["--version"]:
+            self.calls.append((binary, tuple(args)))
+            self.cwds.append((binary, tuple(args), cwd))
+            return execrun.ExecResult(
+                argv=(binary, *args),
+                rc=0,
+                stdout=self.cargo_version,
+                stderr="",
+                duration_ms=1,
+            )
+        return super().__call__(binary, args, cwd)
+
+
+def _write_rust_pin(tmp_path, spec="1.96.*"):
+    (tmp_path / "pixi.toml").write_text(
+        f'[feature.lint.dependencies]\nrust = "{spec}"\n', encoding="utf-8"
+    )
+
+
+def test_rust_skew_downgrades_cargo_failure_to_warning(tmp_path, capsys):
+    # The #602 hazard: the resolved cargo (1.97.0) escapes the repo's pin
+    # (1.96.*), so a clippy/fmt failure is the toolchain's verdict, not the
+    # canonical one — warn-not-block, loudly, instead of training --no-verify.
+    _write_rust_pin(tmp_path)
+    rec = _SkewRecorder(codes={"cargo": 101})
+    rc = lint.run(
+        str(tmp_path),
+        discover=_fake_discover(["Cargo.toml", "src/main.rs"]),
+        run_tool=rec,
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "TOOLCHAIN SKEW" in out
+    assert "1.97.0" in out and "1.96.*" in out
+    assert "LINT: OK" in out
+
+
+def test_rust_skew_never_masks_a_non_cargo_failure(tmp_path, capsys):
+    # The downgrade is scoped to the cargo legs alone: a genuinely failing
+    # non-rust leg still fails the run under skew.
+    _write_rust_pin(tmp_path)
+    rec = _SkewRecorder(codes={"cargo": 101, "ruff": 1})
+    rc = lint.run(
+        str(tmp_path),
+        discover=_fake_discover(["Cargo.toml", "src/main.rs", "a.py"]),
+        run_tool=rec,
+    )
+    assert rc == 1
+    assert "python:ruff" in capsys.readouterr().out
+
+
+def test_rust_matching_pin_keeps_the_hard_fail(tmp_path, capsys):
+    # The resolved cargo satisfies the pin: the verdict IS canonical, so a
+    # failing cargo leg blocks exactly as before — no new hole in the gate.
+    _write_rust_pin(tmp_path, "1.97.*")
+    rec = _SkewRecorder(codes={"cargo": 101})
+    rc = lint.run(
+        str(tmp_path),
+        discover=_fake_discover(["Cargo.toml", "src/main.rs"]),
+        run_tool=rec,
+    )
+    assert rc == 1
+    assert "rust:cargo" in capsys.readouterr().out
+
+
+def test_rust_no_pin_keeps_the_hard_fail_and_skips_the_probe(tmp_path):
+    # No pixi-pinned rust: whatever toolchain the repo declares is canonical
+    # (ADR-0007), so there is no skew to detect — and no probe exec is spent.
+    rec = _Recorder(codes={"cargo": 101})
+    rc = lint.run(
+        str(tmp_path),
+        discover=_fake_discover(["Cargo.toml", "src/main.rs"]),
+        run_tool=rec,
+    )
+    assert rc == 1
+    assert ("cargo", ("--version",)) not in rec.calls
+
+
+def test_rust_skew_passing_cargo_run_prints_no_note(tmp_path, capsys):
+    # The guard is failure-only: a PASSING run on a skewed toolchain stands
+    # (CI re-checks canonically), with no skew noise on a green report.
+    _write_rust_pin(tmp_path)
+    rec = _SkewRecorder()
+    rc = lint.run(
+        str(tmp_path),
+        discover=_fake_discover(["Cargo.toml", "src/main.rs"]),
+        run_tool=rec,
+    )
+    assert rc == 0
+    assert "TOOLCHAIN SKEW" not in capsys.readouterr().out
+
+
+def test_rust_probe_failure_never_claims_skew(tmp_path, capsys):
+    # cargo missing entirely: the probe yields nothing (no skew claim) and the
+    # leg's own launch failure stays the standard hard 127.
+    _write_rust_pin(tmp_path)
+    boom = execrun.ExecError(["cargo"], rc=None, cause=execrun.CAUSE_MISSING_BINARY)
+    rec = _Recorder(codes={"cargo": boom})
+    rc = lint.run(
+        str(tmp_path),
+        discover=_fake_discover(["Cargo.toml", "src/main.rs"]),
+        run_tool=rec,
+    )
+    assert rc == 1
+    assert "not found on PATH" in capsys.readouterr().out
+
+
 def test_rust_findings_hard_fail(tmp_path, capsys):
     rec = _Recorder(codes={"cargo": 1})
     rc = lint.run(
