@@ -75,6 +75,7 @@ CARGO_INCREMENTAL = "0"
 
 [tasks]
 # >>> shipit-managed tasks (do not edit; regenerate via `shipit install`) >>>
+changelog = "./bin/shipit changelog"
 lint = "./bin/shipit lint"
 logs = "./bin/shipit logs"
 provision-lexd = "./bin/shipit provision lexd"

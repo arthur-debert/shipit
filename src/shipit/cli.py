@@ -19,6 +19,7 @@ from .logsetup import configure_logging, reset_logging
 from .verbs import gh_setup, install, lint, logs, verify_apps
 from .verbs import test as test_verb
 from .verbs._context import resolve_root_context
+from .verbs.changelog import changelog as changelog_group
 from .verbs.eval import eval_group
 from .verbs.hook import hook as hook_group
 from .verbs.logevent import log as log_group
@@ -209,6 +210,12 @@ def test_cmd(args: tuple[str, ...]) -> None:
     missing tool binary hard-fails, never skips), 2 usage.
     """
     raise SystemExit(test_verb.run(list(args)))
+
+
+# The nested `changelog` group (TOL01-WS06) — the language-agnostic
+# release-notes tool over CHANGELOG/ fragments: the PR-time fragment-sync
+# `check` (the changelog-sync lane's run) and the cut-time `coalesce`.
+root.add_command(changelog_group)
 
 
 # The `logs` reader (LOG01/LOG04, promoted onto the ADR-0030 contract in
