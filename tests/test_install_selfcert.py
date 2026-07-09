@@ -331,13 +331,25 @@ def test_hooks_check_is_vacuous_when_activation_was_not_attempted(tmp_path, rec)
 # --------------------------------------------------------------------------
 
 
+def _launcher_plan(root, declined: tuple[str, ...] = ()) -> irec.Plan:
+    """A minimal plan for the launcher postcondition — only its ``declined``
+    record matters to the probe (#600)."""
+    return irec.Plan(
+        root=str(root), decisions=(), retired=(), seeds=(), declined=declined
+    )
+
+
 def test_launcher_check_resolves_the_stamped_pin_for_real(staged):
-    check = selfcert._check_launcher(staged, GOOD_SHA, execrun.run)
+    check = selfcert._check_launcher(
+        staged, _launcher_plan(staged), GOOD_SHA, execrun.run
+    )
     assert check.ok, check.detail
 
 
 def test_launcher_check_fails_on_a_pin_mismatch(staged):
-    check = selfcert._check_launcher(staged, "b" * 40, execrun.run)
+    check = selfcert._check_launcher(
+        staged, _launcher_plan(staged), "b" * 40, execrun.run
+    )
     assert not check.ok
     assert GOOD_SHA[:8] in check.detail or "resolved" in check.detail
 
@@ -345,13 +357,17 @@ def test_launcher_check_fails_on_a_pin_mismatch(staged):
 def test_launcher_check_fails_when_the_stamp_is_not_a_sha(staged):
     cfg = staged / config.CONFIG_NAME
     cfg.write_text(cfg.read_text().replace(GOOD_SHA, "testhash"))
-    check = selfcert._check_launcher(staged, "testhash", execrun.run)
+    check = selfcert._check_launcher(
+        staged, _launcher_plan(staged), "testhash", execrun.run
+    )
     assert not check.ok
 
 
 def test_launcher_check_fails_when_the_launcher_is_missing(staged):
     (staged / "bin" / "shipit").unlink()
-    check = selfcert._check_launcher(staged, GOOD_SHA, execrun.run)
+    check = selfcert._check_launcher(
+        staged, _launcher_plan(staged), GOOD_SHA, execrun.run
+    )
     assert not check.ok
     assert "bin/shipit" in check.detail
 
@@ -360,7 +376,21 @@ def test_launcher_probe_ignores_an_ambient_shipit_exec(staged, monkeypatch):
     # A dev session's SHIPIT_EXEC override precedes the pin parse in the
     # launcher; the probe must strip it or it would exec a build mid-install.
     monkeypatch.setenv("SHIPIT_EXEC", "/bin/echo")
-    check = selfcert._check_launcher(staged, GOOD_SHA, execrun.run)
+    check = selfcert._check_launcher(
+        staged, _launcher_plan(staged), GOOD_SHA, execrun.run
+    )
+    assert check.ok, check.detail
+
+
+def test_launcher_check_makes_no_claim_over_a_declined_launcher(staged):
+    # #600: a consumer that DECLINED bin/shipit keeps its own launcher — the
+    # dogfood repo's source-deferring bootstrap has no SHIPIT_PIN_CHECK probe,
+    # so running it would fail a postcondition over a file install does not
+    # own. The check must skip: install delivered nothing to probe.
+    launcher = staged / "bin" / "shipit"
+    launcher.write_text("#!/usr/bin/env bash\nexit 99\n")  # would fail the probe
+    plan = _launcher_plan(staged, declined=(iunits.SHIPIT_LAUNCHER_FILE,))
+    check = selfcert._check_launcher(staged, plan, GOOD_SHA, execrun.run)
     assert check.ok, check.detail
 
 

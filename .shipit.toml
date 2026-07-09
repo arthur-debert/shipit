@@ -153,6 +153,19 @@ ignore = [
   "pnpm-lock.yaml",
 ]
 
+# [managed.decline] — managed units this repo KEEPS as its own (#600): install
+# skips delivering each listed unit key (no write, no override re-proposal in
+# every reconcile PR) and notes the standing decision in the plan and PR body.
+# Consumer-owned policy: the [shipit]/[managed] re-stamp preserves this table.
+#
+# bin/shipit: the dogfood repo's launcher is the SOURCE-DEFERRING bootstrap —
+# CI and dev flows must exec shipit FROM SOURCE via the pixi env, never the
+# pinned uv launcher the managed unit ships (#597: merging that override broke
+# every wf-checks lane and would make shipit's own CI exercise the pin instead
+# of PR source).
+[managed.decline]
+keep = ["bin/shipit"]
+
 [shipit]
 version = "0898a6f9847e80d30f709ef4d9b539cbd68b253a"
 

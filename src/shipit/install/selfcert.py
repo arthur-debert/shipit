@@ -23,7 +23,9 @@ apply seam):
 4. **launcher** — the delivered ``bin/shipit`` launcher, run under its
    :data:`PIN_CHECK_ENV` probe, resolves the freshly-stamped pin to exactly
    the sha install stamped — the launcher's own parse over the real file, with
-   no uv resolve (the postcondition must not need the network).
+   no uv resolve (the postcondition must not need the network). Skipped when
+   the consumer DECLINED the launcher unit (#600): install delivered nothing
+   to probe, and the consumer's own launcher is outside what install owns.
 
 The whole-tree check is the REPO'S bar (the ADP01 checklist's lint step), not
 install's: :func:`consumer_debt` counts the whole-tree failures best-effort so
@@ -43,7 +45,7 @@ from pathlib import Path
 
 from .. import config, execrun, pixienv
 from .reconcile import Plan
-from .units import HOOK_RECOVERY_CMD, LINT_ENV, PIXI_FILE
+from .units import HOOK_RECOVERY_CMD, LINT_ENV, PIXI_FILE, SHIPIT_LAUNCHER_FILE
 
 logger = logging.getLogger("shipit.install")
 
@@ -249,11 +251,23 @@ def _check_hooks(root: Path, plan: Plan, hooks_activated: bool | None) -> CertCh
     return CertCheck(CHECK_HOOKS, True)
 
 
-def _check_launcher(root: Path, stamped_pin: str, runner) -> CertCheck:
-    """Postcondition 4: the delivered launcher resolves the freshly-stamped pin."""
-    launcher = root / "bin" / "shipit"
+def _check_launcher(root: Path, plan: Plan, stamped_pin: str, runner) -> CertCheck:
+    """Postcondition 4: the delivered launcher resolves the freshly-stamped pin.
+
+    Scoped to what install owns (the module contract): a consumer that DECLINED
+    the launcher unit (``[managed.decline].keep`` carrying ``bin/shipit``, #600
+    — the dogfood repo's source-deferring bootstrap is the standing case) keeps
+    its OWN launcher, which install neither delivered nor may make claims over
+    — so the probe is skipped, a no-claim pass like :func:`_check_hooks` on an
+    activation install never attempted.
+    """
+    if SHIPIT_LAUNCHER_FILE in plan.declined:
+        return CertCheck(CHECK_LAUNCHER, True)
+    launcher = root / SHIPIT_LAUNCHER_FILE
     if not launcher.is_file():
-        return CertCheck(CHECK_LAUNCHER, False, "bin/shipit was not delivered")
+        return CertCheck(
+            CHECK_LAUNCHER, False, f"{SHIPIT_LAUNCHER_FILE} was not delivered"
+        )
     # The probe env: the launcher honors SHIPIT_EXEC BEFORE the pin parse, so a
     # dev session's override must be stripped or the probe would exec a build
     # instead of answering; the probe var itself turns the run into a pin print.
@@ -306,7 +320,7 @@ def certify(
             _check_manifest(root, runner),
             _check_delivered_lint(root, plan, runner),
             _check_hooks(root, plan, hooks_activated),
-            _check_launcher(root, stamped_pin, runner),
+            _check_launcher(root, plan, stamped_pin, runner),
         )
     )
     logger.info(

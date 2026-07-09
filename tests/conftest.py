@@ -106,6 +106,16 @@ def managed_cc_hook_command(phase: str) -> str:
     solves) is provisioned before anything in the session needs it. The
     ``shipit hook sessionstart`` marker substring is unchanged, so the JSON-hook
     reconcile identity keeps recognising the managed entry across the change.
+
+    And a FOURTH (#601): between the setup-dev-env leg and the launcher guard it
+    idempotently prepends ``~/.local/bin`` to PATH (the same case-guard idiom
+    setup-dev-env.sh appends to ``CLAUDE_ENV_FILE``). The bootstrap runs as a
+    SUBPROCESS, so its own PATH export cannot reach the hook shell, and the
+    ``CLAUDE_ENV_FILE`` line only affects later Bash calls — without this leg,
+    the first session start in an environment where ``~/.local/bin`` is not
+    already on PATH installed uv and then immediately failed the
+    ``./bin/shipit hook sessionstart`` on the same command line with "uv is not
+    on PATH" (exit 127; the ADR-0033 launcher hard-requires uv).
     """
     setup_leg = ""
     if phase == "sessionstart":
@@ -113,6 +123,8 @@ def managed_cc_hook_command(phase: str) -> str:
             "if [ -x ./bin/setup-dev-env.sh ]; then ./bin/setup-dev-env.sh || echo "
             '"shipit: setup-dev-env.sh reported a problem — continuing '
             '(base-system provisioning is best-effort)." >&2; fi; '
+            'case ":$PATH:" in *":$HOME/.local/bin:"*) ;; '
+            '*) export PATH="$HOME/.local/bin:$PATH" ;; esac; '
         )
     return (
         f'cd "$CLAUDE_PROJECT_DIR" || exit 0; {setup_leg}test -x ./bin/shipit || {{ echo '

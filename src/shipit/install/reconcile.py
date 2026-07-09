@@ -12,6 +12,18 @@ drift engine this design exists to delete (docs/dev/lessons-learned.lex §4):
                                                     branch, but FLAG it with a diff
                                                     so the human decides at merge)
 
+A unit the consumer has DECLINED (#600) never enters the four cases at all:
+``.shipit.toml [managed.decline].keep`` lists managed-unit keys the repo keeps
+as its own — the durable form of hand-declining the same OVERRIDE in every
+reconcile PR (the dogfood repo's ``bin/shipit`` source-deferring bootstrap is
+the standing case). A declined unit is excluded from the decisions outright
+(never written, never re-proposed; its stale ``[managed]`` pristine entry ages
+out on the next applying install's re-stamp), recorded on
+:attr:`Plan.declined` so every surface — the plan report, the PR body — keeps
+the decision visible. A declined key naming NO unit in this catalog rides
+:attr:`Plan.decline_unmatched` and warns (a typo must not silently decline
+nothing).
+
 Install also decides a RETIRED-FILES pass (docs/prd/rvw01-sole-requester.md,
 ADR-0031): a packaged manifest (``retired-files.toml``) lists paths shipit used
 to distribute that must no longer exist, each with every known pristine
@@ -799,6 +811,12 @@ class ConsumerState:
     # reconcile's re-render decision stays pure over this state. Always False
     # where the fragment convention is absent or unrenderable.
     changelog_stale: bool = False
+    # The consumer's declined managed-unit keys (#600) — `.shipit.toml
+    # [managed.decline].keep`, read here (the ONE read boundary) so the
+    # reconcile's skip decision stays pure over this state. Empties with the
+    # pristine map on an unreadable manifest (the degraded-but-continuing
+    # path): no readable policy means no decline.
+    declines: tuple[str, ...] = ()
 
 
 def gather(
@@ -815,8 +833,10 @@ def gather(
     actual hash, the consumer's committed lefthook-local config (#544, the
     merge-conflict tripwire's input), the pixi manifest's first-splice
     key clashes (:func:`_pixi_key_conflicts`) and task-ambiguity clashes
-    (:func:`_pixi_task_conflicts`), and whether the committed ``CHANGELOG.md``
-    is stale against the current renderer (:func:`_changelog_stale`, #578).
+    (:func:`_pixi_task_conflicts`), whether the committed ``CHANGELOG.md``
+    is stale against the current renderer (:func:`_changelog_stale`, #578),
+    and the declined managed-unit keys (``[managed.decline].keep``, #600 —
+    consumer-owned policy, read alongside the pristine map).
     """
     root = root.resolve()
     if not root.is_dir():
@@ -826,12 +846,17 @@ def gather(
     pristine: dict[str, str] = {}
     seeds: list[str] = []
     current_pin: str | None = None
+    declines: tuple[str, ...] = ()
     manifest_error: str | None = None
     try:
         if cfg_path.is_file():
+            raw = cfg_path.read_text(encoding="utf-8")
             cfg = config.load(cfg_path)
             pristine = config.load_managed(cfg)
             current_pin = config.shipit_version(cfg)  # RAW — compared, not validated
+            # `raw` lets load_declines reject a dotted `decline.keep` that the
+            # re-stamp would silently strip (#600); the header form is required.
+            declines = config.load_declines(cfg, raw)  # [managed.decline].keep
         # The [toolchains] seed entries derive from the consumer's root
         # manifests (#578) — the same signal table the Tool verbs' missing-map
         # error suggests (`config.SIGNAL_MANIFESTS`), so seed and suggestion
@@ -866,6 +891,7 @@ def gather(
         pixi_key_conflicts=_pixi_key_conflicts(root, units, consumer_hashes),
         pixi_task_conflicts=_pixi_task_conflicts(root, units, consumer_hashes),
         changelog_stale=_changelog_stale(root),
+        declines=declines,
     )
 
 
@@ -972,6 +998,19 @@ class Plan:
     # ONLY change and must still make the plan actionable. The fragments stay
     # authoritative; the rendered file is a projection, never a managed unit.
     rerender_changelog: bool = False
+    # Units this plan DECLINED (#600): catalog units the consumer's
+    # `.shipit.toml [managed.decline].keep` keeps as its own. Excluded from the
+    # decisions outright — never written, never re-proposed as an OVERRIDE, and
+    # dropped from the manifest re-stamp (apply stamps `[managed]` from the
+    # decisions, so a declined unit's stale pristine entry ages out on the next
+    # applying install). Not work: a decline contributes nothing to
+    # :attr:`nothing_to_do`. Every surface renders the standing decision off
+    # this record.
+    declined: tuple[str, ...] = ()
+    # Declined keys naming NO unit in this catalog (#600): warned, never
+    # silently ignored — usually a typo, occasionally a toolchain-conditional
+    # unit whose signal manifest this repo does not track.
+    decline_unmatched: tuple[str, ...] = ()
 
     @property
     def writes(self) -> tuple[Decision, ...]:
@@ -1068,14 +1107,25 @@ def reconcile(
     # A conflicted block never reaches the write set: a key conflict's ADD
     # would splice a duplicate TOML key into the consumer's pixi.toml
     # (PixiKeyConflict); a task conflict's would make a pixi task ambiguous
-    # (PixiTaskConflict).
+    # (PixiTaskConflict). Neither does a DECLINED unit (#600): the consumer's
+    # `[managed.decline].keep` keeps it as the repo's own, so it is excluded
+    # before the four-case decide ever runs.
     conflicted = {c.unit_key for c in state.pixi_key_conflicts} | {
         c.unit_key for c in state.pixi_task_conflicts
     }
+    decline_set = set(state.declines)
+    unit_keys = {u.key for u in units}
+    # Both surfaces keep the consumer's DECLARATION order (config.load_declines'
+    # promise), de-duped — not the catalog's `units` order, which would make the
+    # plan report and PR body reorder unpredictably as the shipped catalog grows.
+    declined = tuple(dict.fromkeys(k for k in state.declines if k in unit_keys))
+    decline_unmatched = tuple(
+        dict.fromkeys(k for k in state.declines if k not in unit_keys)
+    )
     decisions = tuple(
         d
         for d in plan(units, state.consumer_hashes, state.pristine)
-        if d.unit.key not in conflicted
+        if d.unit.key not in conflicted and d.unit.key not in decline_set
     )
     result = Plan(
         root=state.root,
@@ -1097,6 +1147,8 @@ def reconcile(
         pixi_key_conflicts=state.pixi_key_conflicts,
         pixi_task_conflicts=state.pixi_task_conflicts,
         rerender_changelog=state.changelog_stale,
+        declined=declined,
+        decline_unmatched=decline_unmatched,
     )
     logger.debug(
         "reconcile plan decided",
@@ -1112,8 +1164,20 @@ def reconcile(
             "retire_keeps": len(result.retire_keeps),
             "pin_stale": result.pin_stale,
             "rerender_changelog": result.rerender_changelog,
+            "declined": len(result.declined),
         },
     )
+    for key in result.declined:
+        logger.info(
+            "managed unit declined — kept as the consumer's own "
+            "([managed.decline].keep)",
+            extra={"root": state.root, "unit": key},
+        )
+    for key in result.decline_unmatched:
+        logger.warning(
+            "declined key names no managed unit in this catalog",
+            extra={"root": state.root, "unit": key},
+        )
     for d in result.retire_keeps:
         logger.warning(
             "retired file kept — locally modified",

@@ -419,6 +419,10 @@ def apply(
         # pass re-reads the config text (idempotent either way: an entry that
         # appeared in the gather→apply window just seeds what NOW holds).
         config.apply_policy_seed(cfg_path, toolchains=config.derive_toolchains(root))
+    # Stamped from the CURRENT decisions only: a unit retired in a later shipit
+    # version — or DECLINED by the consumer (#600, excluded from the decisions
+    # at reconcile) — drops out of [managed] here rather than lingering as a
+    # stale key that re-proposes the same override every reconcile.
     new_managed = {d.unit.key: d.desired_hash for d in plan.decisions}
     stamped_version = _shipit_version()
     config.write_manifest(cfg_path, version=stamped_version, managed=new_managed)

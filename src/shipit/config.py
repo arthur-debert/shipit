@@ -152,12 +152,95 @@ def content_hash(data: bytes) -> str:
     return "sha256:" + hashlib.sha256(data).hexdigest()
 
 
+#: The consumer-owned decline sub-table riding inside ``[managed]``'s namespace
+#: (#600): ``[managed.decline]`` is POLICY (which units this repo refuses), not
+#: a pristine entry, so :func:`load_managed` skips it and :func:`write_manifest`
+#: preserves it (its header is not the ``[managed]`` header the re-stamp strips).
+DECLINE_KEY = "decline"
+
+
 def load_managed(cfg: dict) -> dict[str, str]:
-    """The ``[managed]`` pristine map (path → ``sha256:...``); ``{}`` when absent."""
+    """The ``[managed]`` pristine map (path → ``sha256:...``); ``{}`` when absent.
+
+    The ``[managed.decline]`` policy sub-table (:data:`DECLINE_KEY`, parsed by
+    :func:`load_declines`) is not a pristine entry and is skipped.
+    """
     managed = cfg.get("managed", {})
     if not isinstance(managed, dict):
         raise ConfigError("[managed] must be a table")
-    return {str(k): str(v) for k, v in managed.items()}
+    return {str(k): str(v) for k, v in managed.items() if k != DECLINE_KEY}
+
+
+def _has_table_header(text: str, dotted: str) -> bool:
+    """True if TOML ``text`` has an explicit ``[dotted]`` table header line.
+
+    Distinguishes a real sub-table header from the same key reached by a dotted
+    path — after :mod:`tomllib` parses, ``[a.b]`` and ``a.b = {...}`` under
+    ``[a]`` are indistinguishable in the dict, but only the header form is a
+    top-level table the textual re-stamp preserves.
+    """
+    want = [p.strip() for p in dotted.split(".")]
+    for line in text.splitlines():
+        # Drop any trailing `# comment` (valid after a header) before matching,
+        # so `[managed.decline]  # keep bin/shipit` still reads as the header.
+        s = line.split("#", 1)[0].strip()
+        if s.startswith("[") and not s.startswith("[[") and s.endswith("]"):
+            if [p.strip() for p in s[1:-1].split(".")] == want:
+                return True
+    return False
+
+
+def load_declines(cfg: dict, raw: str) -> tuple[str, ...]:
+    """The consumer's declined managed-unit keys — ``[managed.decline].keep`` —
+    in declaration order; ``()`` when absent (#600).
+
+    A DECLINE is a durable, in-repo "this unit stays the consumer's own":
+    ``shipit install`` skips delivering each listed unit entirely (no write, no
+    OVERRIDE re-proposal in every reconcile PR) and notes the decision in the
+    plan and the PR body. Entries name unit KEYS — the same names the
+    ``[managed]`` table uses (``bin/shipit``, ``pixi.toml#shipit-tasks``) ::
+
+        [managed.decline]
+        keep = ["bin/shipit"]
+
+    The table MUST be spelled with its own ``[managed.decline]`` header (as
+    above): it is consumer-owned policy that must survive the ``[shipit]``/
+    ``[managed]`` re-stamp, and :func:`write_manifest` preserves exactly that
+    header form. This is why ``raw`` (the manifest's un-parsed text) is
+    required: ``tomllib`` flattens a header sub-table and a ``decline.keep``
+    dotted key inside the ``[managed]`` body to the same dict, but only the
+    header survives the re-stamp — the dotted form would be stripped with the
+    body it rides in, silently un-declining on the next install. So a decline
+    reached WITHOUT the header raises :class:`ConfigError`, refusing a policy
+    that would evaporate rather than accepting it for one run. Malformed shapes
+    raise too, so a typo dies at parse instead of silently declining nothing.
+    """
+    managed = cfg.get("managed", {})
+    if not isinstance(managed, dict):
+        raise ConfigError("[managed] must be a table")
+    decline = managed.get(DECLINE_KEY, {})
+    if not isinstance(decline, dict):
+        raise ConfigError("[managed.decline] must be a table")
+    unknown = sorted(set(decline) - {"keep"})
+    if unknown:
+        raise ConfigError(
+            f"[managed.decline]: unknown key(s) {', '.join(unknown)}; known keys: keep"
+        )
+    keep = decline.get("keep", [])
+    if not isinstance(keep, list) or not all(isinstance(k, str) and k for k in keep):
+        raise ConfigError(
+            "[managed.decline].keep must be a list of managed-unit keys, "
+            'e.g. ["bin/shipit"]'
+        )
+    if decline and not _has_table_header(raw, "managed.decline"):
+        raise ConfigError(
+            "[managed.decline] must be spelled with its own header, not a "
+            "dotted key under [managed] — install re-stamps the [managed] body "
+            "and would silently drop it. Write:\n"
+            "    [managed.decline]\n"
+            '    keep = ["bin/shipit"]'
+        )
+    return tuple(keep)
 
 
 def load_lint_ignore(cfg: dict) -> list[str]:
@@ -770,7 +853,14 @@ def dump_manifest(version: str, managed: dict[str, str]) -> str:
 
 
 def write_manifest(path: str | Path, *, version: str, managed: dict[str, str]) -> None:
-    """Write the ``[shipit]``/``[managed]`` tables, preserving the rest of the file."""
+    """Write the ``[shipit]``/``[managed]`` tables, preserving the rest of the file.
+
+    Preservation is textual and header-scoped: only the ``[shipit]`` and
+    ``[managed]`` headers (and their bodies) are stripped and re-serialized, so
+    every consumer-owned table survives verbatim — including the
+    ``[managed.decline]`` policy sub-table (#600), whose own header stops the
+    ``[managed]`` body strip.
+    """
     p = Path(path)
     existing = p.read_text(encoding="utf-8") if p.is_file() else ""
     kept = _strip_tables(existing, {"shipit", "managed"})
