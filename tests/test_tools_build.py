@@ -181,6 +181,19 @@ def test_injection_into_an_override_without_ldflags_appends_the_flag():
     assert step.argv == ("go", "build", "-ldflags", "-X p.V=2.0.0")
 
 
+def test_injection_extends_a_joined_form_ldflags_value():
+    # A per-path override may use go's joined -ldflags=<value> single-token
+    # spelling (here also LAST in the argv). The -X must ride that value too,
+    # never append a second -ldflags that go would let win — dropping -s -w.
+    leg = _leg("go", argv=("go", "build", "-ldflags=-s -w"))
+    (step,) = build_mod.plan_build(
+        [leg],
+        [_artifact("x", config.BuildTarget(toolchain="go", version_var="p.V"))],
+        version="3.1.0",
+    )
+    assert step.argv == ("go", "build", "-ldflags=-s -w -X p.V=3.1.0")
+
+
 # --------------------------------------------------------------------------
 # Passthrough interplay: the planner narrows AFTER plan_legs appended args
 # --------------------------------------------------------------------------

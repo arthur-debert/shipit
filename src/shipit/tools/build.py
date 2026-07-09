@@ -80,14 +80,22 @@ def _inject_version(argv: tuple[str, ...], var: str, version: str) -> tuple[str,
 
     Extends the existing ``-ldflags`` value (the registry default's
     ``-s -w``, or an override's) because go takes the LAST ``-ldflags`` — a
-    second flag would silently drop the strip flags. Appends a fresh
-    ``-ldflags`` only when the (overridden) command carries none.
+    second flag would silently drop the strip flags. BOTH go spellings are
+    handled: the split ``-ldflags <value>`` two-token form (the registry
+    default) and the joined ``-ldflags=<value>`` single-token form (a common
+    per-path override) — the joined form may sit last, so the whole argv is
+    scanned. Appends a fresh ``-ldflags`` only when the (overridden) command
+    carries none.
     """
     injection = f"-X {var}={version}"
+    joined = f"{_LDFLAGS}="
     out = list(argv)
-    for i, arg in enumerate(out[:-1]):
-        if arg == _LDFLAGS:
+    for i, arg in enumerate(out):
+        if arg == _LDFLAGS and i + 1 < len(out):  # split form: -ldflags <value>
             out[i + 1] = f"{out[i + 1]} {injection}"
+            return tuple(out)
+        if arg.startswith(joined):  # joined form: -ldflags=<value>
+            out[i] = f"{arg} {injection}"
             return tuple(out)
     return (*out, _LDFLAGS, injection)
 
@@ -129,7 +137,18 @@ def plan_build(
     Leg order is the outer order (map declaration order); within a leg, steps
     follow artifact declaration order. ``version`` is the caller-SUPPLIED
     release version (ADR-0041), consumed only by go version injection. A leg
-    whose toolchain no artifact targets runs once, un-narrowed.
+    no artifact target names runs once, un-narrowed — including when an
+    artifact map IS present but declares nothing for this leg's toolchain: the
+    leg axis is orthogonal to the artifact axis (ADR-0007), so declaring one
+    artifact never suppresses the other legs' whole-leg builds.
+
+    The join keys on ``toolchain`` alone — a target names a toolchain, not a
+    path (ADR-0007) — so a repo is assumed to declare at most one build-bearing
+    path per toolchain (the shape of every real consumer: lex is one rust
+    path, a Tauri app is one rust + one npm + one mkdocs path). Two legs
+    sharing a toolchain would each run every target of that toolchain; binding
+    a target to a specific path is a future artifact-model extension if a repo
+    ever needs it, not a WS02 concern.
     """
     steps: list[BuildStep] = []
     for leg in legs:
