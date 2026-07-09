@@ -238,6 +238,32 @@ def test_summary_without_coverage_renders_no_coverage_section():
     assert "### Coverage" not in payload["body"]
 
 
+@pytest.mark.parametrize(
+    "coverage",
+    [
+        [],  # coverage is a list, not a dict
+        [{"file": "x"}],  # a non-empty non-dict coverage
+        "everything",  # coverage is a string
+        {"skipped": ["foo", 3]},  # skipped holds non-dict entries
+        {"reviewed": 5, "skipped": "nope"},  # reviewed/skipped non-list scalars
+    ],
+)
+def test_malformed_coverage_never_aborts_the_post(coverage):
+    """The agy path has no schema enforcement, so a malformed `coverage` (any of:
+    non-dict coverage, non-list reviewed/skipped, non-dict skipped entries) must
+    NOT raise and abort the whole review post — the attestation is just dropped."""
+    review = {
+        "summary": {
+            "status": "COMMENT",
+            "overall_feedback": "ok",
+            "coverage": coverage,
+        },
+        "comments": [],
+    }
+    payload = post.build_review_payload(review, _ctx(), agent_name="agy")
+    assert "### Coverage" not in payload["body"]
+
+
 def test_event_override_wins():
     review = {
         "summary": {"status": "APPROVED", "overall_feedback": "ok"},

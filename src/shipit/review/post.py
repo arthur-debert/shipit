@@ -150,13 +150,28 @@ def _finding_from_dict(raw: dict) -> Finding:
     )
 
 
-def _coverage_section(coverage: dict) -> str:
+def _coverage_section(coverage: object) -> str:
     """Render the summary's coverage attestation as a human-facing body section:
     what was reviewed, what was skipped and why — so silence means "clean," not
     "skipped". Empty when the attestation carries nothing (the salvage and
-    dry-run paths build summaries without one)."""
-    reviewed = [str(entry) for entry in coverage.get("reviewed") or []]
-    skipped = list(coverage.get("skipped") or [])
+    dry-run paths build summaries without one).
+
+    TOTAL over malformed input: the agy path has no native schema enforcement and
+    ``extract_json`` does no validation, so an agent may emit any shape here. A
+    non-dict ``coverage``, a non-list ``reviewed``/``skipped``, or a non-dict
+    ``skipped`` entry is ignored rather than crashing the whole review post."""
+    if not isinstance(coverage, dict):
+        return ""
+    raw_reviewed = coverage.get("reviewed")
+    reviewed = (
+        [str(entry) for entry in raw_reviewed] if isinstance(raw_reviewed, list) else []
+    )
+    raw_skipped = coverage.get("skipped")
+    skipped = (
+        [entry for entry in raw_skipped if isinstance(entry, dict)]
+        if isinstance(raw_skipped, list)
+        else []
+    )
     if not reviewed and not skipped:
         return ""
     lines = ["### Coverage"]
@@ -236,7 +251,7 @@ def build_review_payload(
             unanchored.append(f"- `{location}` {prefix} {finding.text}{snippet}{fix}")
 
     body = f"Agent: {agent_name}\n\n{overall_feedback}".rstrip()
-    coverage = _coverage_section(summary.get("coverage") or {})
+    coverage = _coverage_section(summary.get("coverage"))
     if coverage:
         body += f"\n\n{coverage}"
     if unanchored:
