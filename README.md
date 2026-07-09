@@ -6,19 +6,19 @@ An agentic development framework. Agents do the development work — planning, i
 
 The model in one line: a human-facing COORDINATOR session never implements — it briefs and spawns role-scoped subagent Runs, each rooted in its own isolated Tree; every change ships as a draft PR a stateless state engine drives through review to ready; the human's one job is the final merge.
 
-This README walks that lifecycle end to end ([\#1](#1)), then maps the machinery underneath it ([\#2](#2)) and how a repo gets onto shipit ([\#3](#3)). The domain vocabulary is fixed [in](./CONTEXT.md); the binding agent policy is [./AGENTS.lex](./AGENTS.lex).
+This README first walks that lifecycle end to end, then maps the machinery underneath it and how a repo gets onto shipit. Domain vocabulary: `CONTEXT.md`. Binding agent policy: `AGENTS.lex`.
 
 ## 1. The lifecycle, from session start to an epic finishing
 
 ### 1.1. Session start
 
-A coordinator session launches inside its own ephemeral \*session Tree\* — `claude --worktree`, usually via `claude-start` — born on an `ephemeral/<id>` branch cut from `origin/main` (ADR-0027). The SessionStart hook verifies provisioning and the repo's shipit pin (ADR-0033). To orient on what has already happened, `shipit logs --flow --session current` renders the session's story from the dev-cycle event log; `--epic CODE` renders an epic's.
+A coordinator session launches inside its own ephemeral `session Tree` — `claude --worktree`, usually via `claude-start` — born on an `ephemeral/<id>` branch cut from `origin/main` (ADR-0027). The SessionStart hook verifies provisioning and the repo's shipit pin (ADR-0033). To orient on what has already happened, `shipit logs --flow --session current` renders the session's story from the dev-cycle event log; `--epic CODE` renders an epic's.
 
 The coordinator's role is fixed by policy, not convention: it orchestrates and delegates, never implements. Role-scoped prompts (ADR-0011) and fail-closed hooks (ADR-0038) enforce the split.
 
 ### 1.2. Plan the work
 
-A task arrives as a GitHub issue, a maintainer message, or a feature idea. A single fix needs no ceremony — brief an implementer and go ([\#1.3](#1.3)). A feature runs through `/planning` first: ideation, ADRs [under](./docs/adr), a PRD [under](./docs/prd), a docs PR, then decomposition into an epic tracker issue with Work Stream sub-issues. The PRD is the spec; the epic issue tracks how the work lands.
+A task arrives as a GitHub issue, a maintainer message, or a feature idea. A single fix needs no ceremony — brief an implementer and go. A feature runs through `/planning` first: ideation, ADRs (`docs/adr/`), a PRD (`docs/prd/`), a docs PR, then decomposition into an epic tracker issue with Work Stream sub-issues. The PRD is the spec; the epic issue tracks how the work lands.
 
 ### 1.3. Delegate
 
@@ -46,7 +46,7 @@ The PR state engine drives the loop and is the SOLE requester of required review
 - `shipit pr wait` — the ONE blocking verb (ADR-0034): the
   coordinator parks behind `--until reviews-in|ready` instead of polling.
 
-Reviewers ride adapters: app reviewers (Copilot) through native review-request edges, local-agent reviewers (agy-local, codex-local) through detached runs whose funnel is a check run on the PR (ADR-0005) — the PR itself is the whole store. Re-review is per-reviewer policy, default review-once; a round cap / all-nitpicks breaker ends the loop rather than iterating forever (the full PR-flow vocabulary lives [in](./CONTEXT.md)).
+Reviewers ride adapters: app reviewers (Copilot) through native review-request edges, local-agent reviewers (agy-local, codex-local) through detached runs whose funnel is a check run on the PR (ADR-0005) — the PR itself is the whole store. Re-review is per-reviewer policy, default review-once; a round cap / all-nitpicks breaker ends the loop rather than iterating forever. PR-flow vocabulary: `CONTEXT.md`.
 
 Addressing is its own role: ONE SHEPHERD per PR (ADR-0035), briefed cold on round 1, parked between rounds, resumed per round. Each round it triages the open threads — fix, or reply with a rationale — resolves every thread, pushes the round's commits at once, and parks again.
 
@@ -56,11 +56,11 @@ Addressing is its own role: ONE SHEPHERD per PR (ADR-0035), briefed cold on roun
 
 ### 1.7. An epic, finishing
 
-An epic is the same cycle applied per workstream, differing only in branch/merge topology: workstream PRs target the epic branch (`E/umbrella`), and the coordinator merges each READY workstream PR into it on its own authority — parallel implementation, serialized integration. When the initial workstreams are in, a convergence workstream clears the epic's accumulated fallouts, a docs pass updates what the feature changed, and the coordinator opens the umbrella PR (epic branch → `main`), drives it through the same review loop, flips it ready, and stops. The human merges the umbrella; that merge is the epic finishing. Full topology — integration ordering, convergence, the docs pass — [in](./docs/dev/epics.lex).
+An epic is the same cycle applied per workstream, differing only in branch/merge topology: workstream PRs target the epic branch (`E/umbrella`), and the coordinator merges each READY workstream PR into it on its own authority — parallel implementation, serialized integration. When the initial workstreams are in, a convergence workstream clears the epic's accumulated fallouts, a docs pass updates what the feature changed, and the coordinator opens the umbrella PR (epic branch → `main`), drives it through the same review loop, flips it ready, and stops. The human merges the umbrella; that merge is the epic finishing. See `docs/dev/epics.lex` for the full topology: integration ordering, convergence, and the docs pass.
 
 Afterwards the Trees are disposable: `shipit tree gc` sweeps the merged, clean, aged-out ones. Durable learnings are promoted into the repo (docs, ADRs, role definitions) before the session ends — session memory dies with the ephemeral Tree.
 
-Throughout, every milestone — spawn, commit, review requested, breaker fired, ready — lands as a dev-cycle event in the per-repo JSONL log (ADR-0029 / ADR-0032), so the whole story above is reconstructable after the fact: `shipit logs --flow`.
+Throughout, every milestone — spawn, commit, review requested, breaker fired, ready — lands as a dev-cycle event in the per-repo JSONL log (ADR-0029 / ADR-0032), so the whole story above is reconstructible after the fact: `shipit logs --flow`.
 
 ## 2. The machinery
 
@@ -68,11 +68,11 @@ Each surface below is a summary; the pointer is the real document.
 
 Tool verbs
 
-: `shipit lint`, `test`, `build`, `e2e`, `ci` — uniform verbs that walk the repo's path→toolchain map ([./.shipit.toml](./.shipit.toml)) and dispatch each entry to its producing command (ADR-0039). One definition runs everywhere — laptop, git hook, CI are the same invocation (ADR-0004); the pixi task of the same name is a thin one-line caller, never the home of logic. Underlying-tool flags stay reachable via passthrough (`shipit test rust -- <args>`). [See](./docs/prd/tol01-ci-tools.md) [and](./docs/dev/architecture.lex) §7.
+: `shipit lint` is the shipped example of the pattern: one binary-owned checkset, called by a thin pixi task, lefthook, and CI (ADR-0004). TOL01 extends the same tools-as-verbs model (ADR-0039) to `shipit test`, `shipit build`, `shipit e2e`, and `shipit ci`: uniform verbs that walk the repo's path→toolchain map ([./.shipit.toml](./.shipit.toml)) and dispatch each entry to its producing command, with underlying-tool flags still reachable via passthrough (`shipit test rust -- <args>`). See `docs/prd/tol01-ci-tools.md` and `docs/dev/architecture.lex` §7.
 
 Trees
 
-: Isolated, fully-independent clones under a central root (`~/workspace/trees/<org>/<repo>/…`) — one write Tree per Run, shared read-only Trees for reviewers, an ephemeral session Tree for the coordinator. Real clones, deliberately NOT `git worktree` (that path is denied — ADR-0014), so concurrent agents never collide. Managed by `shipit tree create | list | remove | gc`. See [./docs/prd/where-to-do-work.md](./docs/prd/where-to-do-work.md), ADR-0018 and ADR-0027.
+: Isolated, fully-independent clones under a central root (`~/workspace/trees/<org>/<repo>/…`) — one write Tree per Run, shared read-only Trees for reviewers, an ephemeral session Tree for the coordinator. Real clones, deliberately NOT `git worktree` (that path is denied — ADR-0014), so concurrent agents never collide. Managed by `shipit tree create | list | remove | gc`. See `docs/prd/where-to-do-work.md`, ADR-0018 and ADR-0027.
 
 Spawning
 
@@ -80,15 +80,15 @@ Spawning
 
 The PR engine
 
-: A pure function from a PR snapshot to the single next action, at `src/shipit/prstate/`. Readiness is three pillars — reviewed, CI green, mergeable — and reviewer mechanics live in per-reviewer adapters, so adding a reviewer is adding a registry entry. The vocabulary is [in](./CONTEXT.md). The flow design is in [./docs/prd/prf01-pr-flow.md](./docs/prd/prf01-pr-flow.md); the readiness design is in [./docs/prd/obs04-readiness-engine.md](./docs/prd/obs04-readiness-engine.md). The rules are ADR-0006 / ADR-0031 / ADR-0034 / ADR-0035.
+: A pure function from a PR snapshot to the single next action, at `src/shipit/prstate/`. Readiness is three pillars — reviewed, CI green, mergeable — and reviewer mechanics live in per-reviewer adapters, so adding a reviewer is adding a registry entry. Vocabulary: `CONTEXT.md`. Flow design: `docs/prd/prf01-pr-flow.md`; readiness design: `docs/prd/obs04-readiness-engine.md`. The rules are ADR-0006 / ADR-0031 / ADR-0034 / ADR-0035.
 
 The log
 
-: Every shipit process writes a durable per-repo JSONL record — flat objects, closed domain-key vocabulary (`session`, `epic`, `ws`, `pr`, `agent`, `role`, …), dev-cycle events as tagged records (ADR-0029 / ADR-0032). `shipit logs` is the reader; `--flow` renders the filtered events as a story. `shipit eval` aggregates per-Run objective records from the same substrate. [See](./docs/prd/obs01-logging.md) and [./docs/prd/log04-dev-cycle-event-log.md](./docs/prd/log04-dev-cycle-event-log.md).
+: Every shipit process writes a durable per-repo JSONL record — flat objects, closed domain-key vocabulary (`session`, `epic`, `ws`, `pr`, `agent`, `role`, …), dev-cycle events as tagged records (ADR-0029 / ADR-0032). `shipit logs` is the reader; `--flow` renders the filtered events as a story. `shipit eval` aggregates per-Run objective records from the same substrate. See `docs/prd/obs01-logging.md` and `docs/prd/log04-dev-cycle-event-log.md`.
 
 pixi, the substrate
 
-: Provisioning, tasks, per-purpose environments, and CI integration all ride pixi; shipit is a thin layer on top, and Runs execute inside their Tree's pixi env. The working knowledge — what pixi persists, its identifiers, its gotchas — lives [in](./docs/dev/pixi.lex); the rationale for choosing it is [in](./docs/dev/architecture.lex) §1.
+: Provisioning, tasks, per-purpose environments, and CI integration all ride pixi; shipit is a thin layer on top, and Runs execute inside their Tree's pixi env. Pixi working knowledge: `docs/dev/pixi.lex`. Architecture rationale: `docs/dev/architecture.lex` §1.
 
 ## 3. Getting a repo onto shipit
 
@@ -98,19 +98,19 @@ pixi, the substrate
 $ shipit install <path>
 ```
 
-It provisions the pinned toolchain via pixi, sets up the GitHub repo (labels, ruleset, secrets from doppler), copies the skills and the lefthook config, installs the git hooks, splices the dev-workflow section into AGENTS.md, and stamps `.shipit.toml` with the shipit pin (the full commit Sha the repo locks to — ADR-0033) plus per-file pristine hashes.
+It provisions the pinned toolchain via pixi, sets up the GitHub repo (labels, ruleset, secrets from doppler), copies the skills and the lefthook config, installs the git hooks, splices the dev-workflow section into AGENTS.md, and stamps `.shipit.toml` with the shipit pin (the full commit SHA the repo locks to — ADR-0033) plus per-file pristine hashes.
 
 Install does NOT touch the consumer's main branch: it stages the changes on a branch and opens a PR for a human to merge — shipit eats its own dog food. Reconciliation is pull-not-push (ADR-0003): on re-install, each managed file is hash-compared against its pristine hash; unchanged files are overwritten silently, consumer-edited ones are surfaced in the PR, never clobbered. Fast-moving code ships through the pinned `shipit` package instead, so it lands without per-repo file churn — the slow/fast split; [see](./docs/dev/architecture.lex) §2. The `--push` flag is the logged break-glass exception, reserved for bootstrapping a repo that cannot yet run the PR loop.
 
 ## See Also
 
 - [./AGENTS.lex](./AGENTS.lex) — the binding dev-cycle and PR-review policy agents
-  follow; the always-on core [of](#1).
+  follow; the always-on core of the lifecycle described above.
 - [./CONTEXT.md](./CONTEXT.md) — the domain glossary: core identities, PR flow, checks
   and policies, the agent harness, Trees, build and release.
 - [./docs/dev/architecture.lex](./docs/dev/architecture.lex) — the load-bearing design decisions and
   their rationale (pixi as substrate, the slow/fast split, the pixi-task / workflow-YAML boundary, `.shipit.toml`).
-- [./docs/dev/epics.lex](./docs/dev/epics.lex) — the full epic topology [behind](#1.7).
+- [./docs/dev/epics.lex](./docs/dev/epics.lex) — the full epic topology.
 - [./docs/dev/pixi.lex](./docs/dev/pixi.lex) — the verified working knowledge of pixi.
 - [./docs/dev/workflows.lex](./docs/dev/workflows.lex) — the composable CI design (build → bundle →
   sign → release) and its invariants.
