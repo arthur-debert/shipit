@@ -112,7 +112,23 @@ def test_matrix_preserves_declaration_order_and_fills_the_default_runner():
         "name": "lint",
         "run": "lint",
         "runner": "ubuntu-latest",
+        "required": True,
     }
+
+
+def test_matrix_carries_the_required_flag_so_advisory_lanes_never_block_merge():
+    # The merge-blocking verdict travels with the job: the block spares an
+    # advisory lane's failure from the `check` verdict by reading `required`,
+    # so dropping it here would make every advisory lane merge-blocking.
+    planned = lanes.plan(LADDERED, event="dispatch")
+    required = {job.name: job.required for job in planned}
+    assert required == {
+        "lint": True,  # required = true
+        "deploy-preview": False,  # required defaults to false → advisory
+        "gpu-e2e": False,
+        "fleet-sweep": False,
+    }
+    assert planned[1].as_matrix_entry()["required"] is False
 
 
 # ---------------------------------------------------------------------------

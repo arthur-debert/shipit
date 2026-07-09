@@ -73,6 +73,13 @@ jobs:
         include: ${{ fromJson(needs.plan.outputs.matrix) }}
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
+    # The merge-blocking verdict is the lane's, decided by the planner and
+    # carried in `matrix.required` — an advisory lane (`required = false`) runs
+    # for signal but its failure must NOT fail this reusable workflow, so it
+    # never feeds the caller's stable `check` verdict. Only required-lane
+    # failures propagate. This reads the planner's flag; it re-derives nothing
+    # (ADR-0040: zero logic in the block).
+    continue-on-error: ${{ !matrix.required }}
     steps:
       - uses: actions/checkout@v4
       - uses: prefix-dev/setup-pixi@v0.9.6

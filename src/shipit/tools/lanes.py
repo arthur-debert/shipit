@@ -30,10 +30,14 @@ The three rules, in the order they apply:
   lanes always run.
 - **Routing fields** — each emitted :class:`Job` carries the lane's ``run``
   string (the pixi task invocation the block executes: ``pixi run <run>``,
-  landing in the same shipit verb a laptop runs, ADR-0039) and its ``runner``
-  (:data:`DEFAULT_RUNNER` when undeclared). Declaration order is preserved —
-  ``.shipit.toml`` order is the matrix order, no re-sorting (the leg planner's
-  contract, :mod:`shipit.tools.legs`).
+  landing in the same shipit verb a laptop runs, ADR-0039), its ``runner``
+  (:data:`DEFAULT_RUNNER` when undeclared), and its ``required`` flag — the
+  merge-blocking verdict travels with the job so the ``wf-checks`` block can
+  run an advisory (``required = false``) lane WITHOUT feeding its failure to
+  the stable ``check`` verdict (the block reads the flag; the decision was
+  made here). Declaration order is preserved — ``.shipit.toml`` order is the
+  matrix order, no re-sorting (the leg planner's contract,
+  :mod:`shipit.tools.legs`).
 
 ``run`` is treated OPAQUELY here: it names a shipit tool or Leg invocation
 (``"test"``, ``"test rust"``, ``"changelog check"``) whose tool may land in a
@@ -99,17 +103,26 @@ class Job:
     ``name`` is the lane name (the job's display name and check name);
     ``run`` the pixi task invocation the block executes (``pixi run <run>``);
     ``runner`` the resolved ``runs-on`` label (never ``None`` — the planner
-    fills :data:`DEFAULT_RUNNER`).
+    fills :data:`DEFAULT_RUNNER`); ``required`` the merge-blocking flag carried
+    from the lane so the block can spare an advisory lane's failure from the
+    ``check`` verdict (via ``continue-on-error``).
     """
 
     name: str
     run: str
     runner: str
+    required: bool
 
-    def as_matrix_entry(self) -> dict[str, str]:
+    def as_matrix_entry(self) -> dict[str, str | bool]:
         """The GitHub ``matrix.include`` entry — the JSON hand-off shape the
-        ``wf-checks`` plan job surfaces as its output."""
-        return {"name": self.name, "run": self.run, "runner": self.runner}
+        ``wf-checks`` plan job surfaces as its output. ``required`` rides along
+        as a JSON boolean so the block's ``continue-on-error`` can read it."""
+        return {
+            "name": self.name,
+            "run": self.run,
+            "runner": self.runner,
+            "required": self.required,
+        }
 
 
 def normalize_event(raw: str) -> str:
@@ -178,7 +191,12 @@ def plan(
         ):
             continue  # thin: the diff never enters this lane's subtree
         jobs.append(
-            Job(name=lane.name, run=lane.run, runner=lane.runner or DEFAULT_RUNNER)
+            Job(
+                name=lane.name,
+                run=lane.run,
+                runner=lane.runner or DEFAULT_RUNNER,
+                required=lane.required,
+            )
         )
     return tuple(jobs)
 
