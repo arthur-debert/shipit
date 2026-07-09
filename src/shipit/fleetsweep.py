@@ -282,17 +282,23 @@ def plan_tools(repo_root: Path) -> tuple[ToolPlan, ...]:
     the repo's ``.shipit.toml`` is missing or malformed, the CONFIG-borne
     facts are unprovable, so build + e2e default to applicable — each runs and
     fails with its own diagnosis, an honest red cell rather than a silent skip
-    (the fix-discipline surface, story 49). The ``CHANGELOG/`` convention is a
-    FILESYSTEM fact, provable regardless of the config, so changelog stays tied
-    to the directory check on BOTH paths — an unreadable config never conjures
-    changelog failure noise on a repo that has no fragment convention.
+    (the fix-discipline surface, story 49). "Malformed" spans every way the
+    config resists parsing: a :class:`~shipit.config.ConfigError` (bad TOML or
+    schema), an ``OSError`` (a permission denial, a mid-read unlink), AND a
+    ``UnicodeDecodeError`` — ``config.load`` reads the file as UTF-8 bytes, so
+    non-UTF-8 content raises the latter straight through, and it too is
+    unprovable-config, never an uncaught crash of the whole sweep. The
+    ``CHANGELOG/`` convention is a FILESYSTEM fact, provable regardless of the
+    config, so changelog stays tied to the directory check on BOTH paths — an
+    unreadable config never conjures changelog failure noise on a repo that has
+    no fragment convention.
     """
     changelog_dir = (repo_root / CHANGELOG_DIR).is_dir()
     try:
         cfg = config.load(repo_root / config.CONFIG_NAME)
         legs = config.load_toolchains(cfg)
         artifacts = config.load_artifacts(cfg)
-    except (config.ConfigError, OSError):
+    except (config.ConfigError, OSError, UnicodeDecodeError):
         return derive_plans(
             legs_declared=True, e2e_declared=True, changelog_dir=changelog_dir
         )

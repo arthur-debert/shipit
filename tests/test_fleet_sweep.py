@@ -188,6 +188,8 @@ def test_plan_tools_unreadable_config_runs_config_tools_changelog_follows_fs(tmp
     # cell, never a silent skip. But CHANGELOG/ presence is a FILESYSTEM fact,
     # provable regardless of the config: changelog stays not-applicable when the
     # dir is absent even in the error fallback, and applies once it exists.
+    # "Malformed" spans bad TOML (ConfigError) AND non-UTF-8 bytes, which
+    # config.load surfaces as a UnicodeDecodeError that must NOT crash the sweep.
     for label, setup in (
         ("missing config", lambda: None),
         (
@@ -195,6 +197,10 @@ def test_plan_tools_unreadable_config_runs_config_tools_changelog_follows_fs(tmp
             lambda: (tmp_path / ".shipit.toml").write_text(
                 "not = valid = toml", encoding="utf-8"
             ),
+        ),
+        (
+            "non-utf-8 config",
+            lambda: (tmp_path / ".shipit.toml").write_bytes(b"\xff\xfe [toolchains]\n"),
         ),
     ):
         setup()
