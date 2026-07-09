@@ -940,6 +940,10 @@ def test_rust_pin_satisfied_unmodelled_shapes_never_claim_skew():
     assert lint.rust_pin_satisfied("1.80.0", ">=1.90")
     assert lint.rust_pin_satisfied("1.80.0", ">=1.90,<2")
     assert lint.rust_pin_satisfied("1.80.0", "~=1.96")
+    # Non-conda operators a stray manifest could carry — a cargo-style caret and
+    # a path/URL spec — are unmodelled too, so they never trip a false skew.
+    assert lint.rust_pin_satisfied("1.80.0", "^1.96")
+    assert lint.rust_pin_satisfied("1.80.0", "@ file:///opt/rust")
 
 
 def test_rust_pin_from_manifest_lint_feature_wins():
@@ -1033,6 +1037,43 @@ def test_rust_skew_downgrades_cargo_failure_to_warning(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "TOOLCHAIN SKEW" in out
     assert "1.97.0" in out and "1.96.*" in out
+    assert "LINT: OK" in out
+
+
+class _NoisySkewRecorder(_SkewRecorder):
+    """A _SkewRecorder whose failing cargo legs (clippy/fmt) also emit real
+    output on stdout, so a test can assert the tool's own diagnostics ride the
+    #602 skew note instead of being swallowed by the warn-not-block downgrade."""
+
+    def __call__(self, binary, args, cwd):
+        if binary == "cargo" and list(args) != ["--version"]:
+            self.calls.append((binary, tuple(args)))
+            self.cwds.append((binary, tuple(args), cwd))
+            return execrun.ExecResult(
+                argv=(binary, *args),
+                rc=self.codes.get("cargo", 0),
+                stdout="error[E0308]: mismatched types\n --> src/main.rs:3:5",
+                stderr="",
+                duration_ms=1,
+            )
+        return super().__call__(binary, args, cwd)
+
+
+def test_rust_skew_note_carries_the_failing_cargo_output(tmp_path, capsys):
+    # The downgrade must stay LOUD: the failing cargo leg's own diagnostics are
+    # appended under the skew note and printed beneath the ok mark, so an
+    # off-pin failure is never silently swallowed (#602).
+    _write_rust_pin(tmp_path)
+    rec = _NoisySkewRecorder(codes={"cargo": 101})
+    rc = lint.run(
+        str(tmp_path),
+        discover=_fake_discover(["Cargo.toml", "src/main.rs"]),
+        run_tool=rec,
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "TOOLCHAIN SKEW" in out
+    assert "error[E0308]: mismatched types" in out
     assert "LINT: OK" in out
 
 

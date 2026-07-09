@@ -1048,17 +1048,20 @@ def rust_pin_satisfied(version: str, spec: str) -> bool:
     lite): ``*`` (anything), ``==X.Y.Z`` (exact), ``X.Y.*`` / ``=X.Y`` / bare
     ``X.Y`` (a dot-bounded prefix match — conda's fuzzy form, so ``1.9.*`` never
     swallows ``1.96.0``). Any OTHER shape — ranges (``>=1.90``), compounds
-    (``,``/``|``), ``~=`` — is deliberately NOT modelled and returns ``True``:
-    a wrong skew claim would downgrade a real failure to a warning (#602), so
-    ambiguity always resolves toward the HARD gate, never toward the carve-out.
+    (``,``/``|``), ``~=``, a cargo-style caret (``^1.96``), or a path/URL spec
+    (``@ file://…``) — is deliberately NOT modelled and returns ``True``: a wrong
+    skew claim would downgrade a real failure to a warning (#602), so ambiguity
+    always resolves toward the HARD gate, never toward the carve-out. The
+    unmodelled-shape sentinels stay a superset of the operators the managed
+    blocks could ever emit, so a stray non-conda spec never trips a false skew.
     """
     spec = spec.strip()
     if not spec or spec == "*":
         return True
     if spec.startswith("=="):
         return version == spec[2:].strip()
-    if any(ch in spec for ch in "><~!,|"):
-        return True  # unmodelled range/compound spec — never claim skew
+    if any(ch in spec for ch in "><~!,|^@/"):
+        return True  # unmodelled range/compound/path spec — never claim skew
     base = spec.lstrip("=").strip()
     if base.endswith(".*"):
         base = base[:-2]
