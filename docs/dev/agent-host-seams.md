@@ -46,14 +46,10 @@ Launcher common path
 
 What a host is ALLOWED to own. Each adapter is small, lives in one place, and is delivered/reconciled by the shared install machinery.
 
-<!-- lex:lex.tabular.table align=lll header=1 -->
-
-<!-- /lex:lex.tabular.table -->
-
 **Adapter matrix**
 
 | Seam                            | Claude Code                                                                                                                                   | Codex                                                                                                                                                                                                           |
-| :------------------------------ | :-------------------------------------------------------------------------------------------------------------------------------------------- | :-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Managed host config             | `.claude/settings.json` (five JSON-hook units) + `.claude/agents/` defs                                                                       | `.codex/config.toml` (whole file) + `.codex/hooks.json` (two JSON-hook units)                                                                                                                                   |
 | Launch strategy                 | `agent-start claude`: mint `sess-<utc>-<pid>`, exec `claude --worktree <id>` — the WorktreeCreate pre-launch seam provisions the session Tree | `agent-start codex`: exec the pinned `./bin/shipit session codex` — explicit Tree provisioning, then exec codex rooted in it                                                                                    |
 | Hook payload/env adaptation     | Claude supplies the JSON payload on stdin, `$CLAUDE_PROJECT_DIR`, `CLAUDE_ENV_FILE`                                                           | entries synthesize `{"cwd": "$PWD"}`, resolve the git root from the session cwd; session identity rides `SHIPIT_LOG_CTX_*` exports                                                                              |

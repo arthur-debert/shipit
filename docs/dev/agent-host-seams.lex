@@ -81,8 +81,6 @@ launch mechanics, its payload/env shape, its CLI argv and auth posture).
         | Hook payload/env adaptation | Claude supplies the JSON payload on stdin, `$CLAUDE_PROJECT_DIR`, `CLAUDE_ENV_FILE` | entries synthesize `{"cwd": "$PWD"}`, resolve the git root from the session cwd; session identity rides `SHIPIT_LOG_CTX_*` exports |
         | Backend CLI argv / auth posture | `spawn/backends/claude.py` (ADR-0020 adapter #0) | `spawn/backends/codex.py` + `session/bootstrap.py`: sandbox-bypass posture (the Tree IS the isolation), API-billing keys scrubbed so the ChatGPT sign-in stays first-class, `CODEX_ACCESS_TOKEN` passes through |
 
-        :: table align=lll header=1 ::
-
     Launch strategy:
         The host axis of "how does a coordinator session start". Claude Code
         fixes its cwd before any shipit code runs, so its ONE pre-launch seam
