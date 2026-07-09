@@ -65,7 +65,7 @@ class _FakeAdapter(ReviewerAdapter):
     def detect(self, ctx) -> ReviewLifecycle:  # noqa: ANN001
         return self._lifecycle
 
-    def request(self, pr: PrId, entry=None) -> bool:
+    def request(self, pr: PrId, entry=None, policy=None) -> bool:
         self.requested_with.append(pr)
         return self._request_returns
 
@@ -228,7 +228,7 @@ def test_local_request_failure_propagates_and_records_no_in_flight(caplog):
     from shipit.prstate.errors import PrStateError
 
     class _BoomLocal(_FakeAdapter):
-        def request(self, pr: PrId, entry=None) -> bool:
+        def request(self, pr: PrId, entry=None, policy=None) -> bool:
             raise PrStateError("codex-local review failed on #7: auth unavailable")
 
     adapter = _BoomLocal("codex", has_edge=False)

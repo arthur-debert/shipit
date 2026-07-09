@@ -51,8 +51,14 @@ AGY_REVIEW_APP_ID            = { doppler = "AGY_REVIEW_APP_ID" }
 # review-round cap the engine's stopping breaker uses (default 6 when unset).
 [reviewers]
 copilot = { rerun = true }
-codex = {}
-agy = {}
+# The local reviewers' readiness wait window is BUMPED over the shipped 20m
+# default (RVW02-WS04): a round-1 review now fans out into parallel dimension
+# passes plus a calibration run, so a large PR's review legitimately takes
+# longer to ARRIVE — 45 minutes covers the fan-out without letting a vanished
+# run park the PR forever (the window is the arrival deadline, not the per-run
+# agent timeout).
+codex = { window = 2700 }
+agy = { window = 2700 }
 
 # [toolchains] — the path→toolchain map (ADR-0007/0039): each build-bearing path
 # declares its toolchain, and the tree-input Tool verbs (`shipit test`,

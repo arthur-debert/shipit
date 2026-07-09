@@ -80,3 +80,35 @@ def test_codex_task_omits_schema_and_validity_instruction():
     task = build_reviewer_task(_INSTRUCTIONS, 7, schema_inline=False)
     assert "JSON Schema:" not in task
     assert "ENTIRE response must be a single, complete, valid JSON object" not in task
+
+
+def test_dimension_scoped_task_carries_the_focus_section():
+    # RVW02-WS04: a Dimension pass's task is the SAME reviewer contract plus a
+    # focus section that scopes the SEARCH — severity stays on the shared
+    # ladder (final severity is the Calibrator's), pre-existing findings are
+    # explicitly allowed (routing them out is the calibrator's job).
+    from shipit.review.dimensions import by_name
+
+    task = build_reviewer_task(
+        "INSTR", 7, schema_inline=False, dimension=by_name("correctness")
+    )
+    assert "DIMENSION FOCUS — Correctness" in task
+    assert "logic errors" in task
+    assert "pre-existing" in task
+    # The base contract is untouched: fetch the diff, emit JSON, never post.
+    assert "gh pr diff 7" in task
+    assert "Do NOT post the review yourself" in task
+
+
+def test_dimension_section_precedes_the_inline_schema_for_agy():
+    from shipit.review.dimensions import by_name
+
+    task = build_reviewer_task(
+        "INSTR", 7, schema_inline=True, dimension=by_name("test-quality")
+    )
+    assert task.index("DIMENSION FOCUS") < task.index("JSON Schema:")
+
+
+def test_monolithic_task_carries_no_dimension_section():
+    task = build_reviewer_task("INSTR", 7, schema_inline=False)
+    assert "DIMENSION FOCUS" not in task

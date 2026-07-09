@@ -477,3 +477,120 @@ def test_required_adapters_maps_the_roster_in_config_order(tmp_path):
     root = _write(tmp_path, "[reviewers]\ncoderabbit = {}\ncopilot = {}\n")
     adapters = required_adapters(load_roster(root))
     assert [a.name for a in adapters] == ["coderabbit", "copilot"]
+
+
+# --- RVW02-WS04: per-reviewer `dimensions`, table-level `nit_cap`/`calibrator` --
+
+
+def test_dimensions_option_lands_on_the_entry(tmp_path):
+    root = _write(
+        tmp_path,
+        '[reviewers]\ncodex = { dimensions = ["correctness", "test-quality"] }\n',
+    )
+    entry = load_roster(root).entry("codex")
+    assert entry.dimensions == ("correctness", "test-quality")
+
+
+def test_dimensions_default_is_unset(tmp_path):
+    root = _write(tmp_path, "[reviewers]\ncodex = {}\n")
+    assert load_roster(root).entry("codex").dimensions is None
+
+
+def test_unknown_dimension_fails_loud_with_the_known_set(tmp_path):
+    root = _write(tmp_path, '[reviewers]\ncodex = { dimensions = ["highs-only"] }\n')
+    with pytest.raises(RequiredReviewersConfigError, match="known dimensions"):
+        load_roster(root)
+
+
+def test_dimensions_wrong_shape_and_duplicates_fail_loud(tmp_path):
+    for bad in (
+        'codex = { dimensions = "correctness" }\n',
+        "codex = { dimensions = [] }\n",
+        "codex = { dimensions = [1] }\n",
+        'codex = { dimensions = ["correctness", "correctness"] }\n',
+    ):
+        root = _write(tmp_path, f"[reviewers]\n{bad}")
+        with pytest.raises(RequiredReviewersConfigError, match="dimensions"):
+            load_roster(root)
+
+
+def test_nit_cap_lands_on_the_roster_and_zero_is_legal(tmp_path):
+    root = _write(tmp_path, "[reviewers]\nnit_cap = 0\ncodex = {}\n")
+    assert load_roster(root).nit_cap == 0
+    root = _write(tmp_path, "[reviewers]\nnit_cap = 3\ncodex = {}\n")
+    assert load_roster(root).nit_cap == 3
+
+
+def test_nit_cap_default_is_uncapped(tmp_path):
+    root = _write(tmp_path, "[reviewers]\ncodex = {}\n")
+    assert load_roster(root).nit_cap is None
+
+
+def test_nit_cap_rejects_negative_bool_and_non_int(tmp_path):
+    for bad in ("nit_cap = -1", "nit_cap = true", 'nit_cap = "3"'):
+        root = _write(tmp_path, f"[reviewers]\n{bad}\ncodex = {{}}\n")
+        with pytest.raises(RequiredReviewersConfigError, match="nit_cap"):
+            load_roster(root)
+
+
+def test_calibrator_table_builds_a_validated_config(tmp_path):
+    root = _write(
+        tmp_path,
+        "[reviewers]\n"
+        'calibrator = { backend = "codex", model = "gpt-5.5", '
+        'reasoning = "medium", timeout = 300 }\n'
+        "codex = {}\n",
+    )
+    calibrator = load_roster(root).calibrator
+    assert calibrator.backend == "codex"
+    assert calibrator.model == "gpt-5.5"
+    assert calibrator.reasoning == "medium"
+    assert calibrator.timeout == "300s"  # normalized to the canonical shape
+
+
+def test_calibrator_default_is_unset_meaning_shipped_default(tmp_path):
+    root = _write(tmp_path, "[reviewers]\ncodex = {}\n")
+    assert load_roster(root).calibrator is None
+
+
+def test_calibrator_unknown_key_fails_loud(tmp_path):
+    root = _write(
+        tmp_path, '[reviewers]\ncalibrator = { agent = "claude" }\ncodex = {}\n'
+    )
+    with pytest.raises(RequiredReviewersConfigError, match="unknown option"):
+        load_roster(root)
+
+
+def test_calibrator_invalid_values_fail_loud_at_load(tmp_path):
+    # Membership/validity is CalibratorConfig's construction-is-validation,
+    # surfaced as a config error naming the file — never a raw ValueError.
+    for bad in (
+        'calibrator = { backend = "gpt-cli" }',
+        'calibrator = { reasoning = "ultra" }',
+        "calibrator = { timeout = -5 }",
+        "calibrator = [1]",
+    ):
+        root = _write(tmp_path, f"[reviewers]\n{bad}\ncodex = {{}}\n")
+        with pytest.raises(RequiredReviewersConfigError, match="calibrator"):
+            load_roster(root)
+
+
+def test_table_level_policy_applies_with_default_reviewer_entries(tmp_path):
+    # nit_cap/calibrator ride the table even when no reviewer entry is set —
+    # policy without opting out of the default required set.
+    root = _write(
+        tmp_path, '[reviewers]\nnit_cap = 2\ncalibrator = { backend = "claude" }\n'
+    )
+    roster = load_roster(root)
+    assert roster.required_names == tuple(reviewers_config.DEFAULT_REVIEWERS)
+    assert roster.nit_cap == 2
+    assert roster.calibrator.backend == "claude"
+
+
+def test_roster_policy_bundles_the_table_level_values(tmp_path):
+    root = _write(
+        tmp_path, '[reviewers]\nnit_cap = 1\ncalibrator = { backend = "claude" }\n'
+    )
+    policy = load_roster(root).policy
+    assert policy.nit_cap == 1
+    assert policy.calibrator.backend == "claude"

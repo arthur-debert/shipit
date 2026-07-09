@@ -213,9 +213,10 @@ def request_reviewers(
     `roster` is the reviewer configuration as ONE value (CLI01-WS04), loaded
     once at the calling verb's boundary: the skip decision reads the rerun flag
     off it (via the light snapshot it is threaded onto), and each adapter's
-    `request` receives ITS entry so a local reviewer's run options (`model` /
-    `instructions` / `timeout`) arrive as values — settings are never
-    re-resolved from config inside this path.
+    `request` receives ITS entry plus the table-level review-run `policy`
+    (RVW02-WS04) so a local reviewer's run options (`model` / `instructions` /
+    `timeout` / `dimensions`, the shared calibrator + nit cap) arrive as
+    values — settings are never re-resolved from config inside this path.
 
     `force=False` (the bare/default scope): reviewers already DONE on the current
     head are SKIPPED (review-once — don't re-poke a finished reviewer); a
@@ -253,7 +254,7 @@ def request_reviewers(
 
     remote_placed: list[ReviewerAdapter] = []
     for adapter in targets:
-        if adapter.request(pr, roster.entry(adapter.name)):
+        if adapter.request(pr, roster.entry(adapter.name), policy=roster.policy):
             if adapter.has_requested_edge:
                 remote_placed.append(adapter)
             else:

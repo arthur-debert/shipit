@@ -45,9 +45,20 @@ REVIEWER_TOOLS = ("Read", "Grep", "Glob", "Bash")
 
 
 class ClaudeAdapter(BackendAdapter):
-    """The headless-``claude`` backend (ADR-0019), adapter #0 of the ADR-0020 seam."""
+    """The headless-``claude`` backend (ADR-0019), adapter #0 of the ADR-0020 seam.
+
+    ``model`` optionally pins the child's model (``--model <id>``); ``None`` —
+    the default, and the registry's shared instance — lets ``claude`` pick its
+    own default exactly as before (the identity carries no alias table). A
+    caller that must vary it (the review Calibrator's table-level config,
+    RVW02-WS04) constructs a per-run instance, the same convention as the
+    per-run ``codex`` / ``agy`` adapters.
+    """
 
     name = _IDENTITY.name
+
+    def __init__(self, model: str | None = None) -> None:
+        self.model = model
 
     def build_command(
         self,
@@ -61,7 +72,9 @@ class ClaudeAdapter(BackendAdapter):
         """The exact ``claude`` print-mode argv ADR-0019 §1 specifies.
 
         ``claude -p "<task>" --agent <role> --permission-mode bypassPermissions
-        [--tools "<allowlist>"] --output-format json``. Two args are load-bearing:
+        [--model <id>] [--tools "<allowlist>"] --output-format json`` (the
+        ``--model`` flag appears only when this instance pins one). Two args are
+        load-bearing:
         ``--agent <role>`` populates the hook payload's ``agent_type`` so the
         coordinator-guard allows the Run's own edits (§2), and ``--permission-mode
         bypassPermissions`` is the write-Run mode (§4) — still bounded by the guard,
@@ -98,6 +111,8 @@ class ClaudeAdapter(BackendAdapter):
             "--permission-mode",
             "bypassPermissions",
         ]
+        if self.model is not None:
+            cmd += ["--model", self.model]
         if read_only:
             cmd += ["--tools", ",".join(REVIEWER_TOOLS)]
         cmd += ["--output-format", "json"]

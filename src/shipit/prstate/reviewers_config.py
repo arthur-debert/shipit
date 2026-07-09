@@ -41,8 +41,14 @@ options:
     local-agent review path, not the engine.
   * `model` / `instructions` — free-form strings consumed by the local-agent
     review RUN path; they do not affect the engine verdict.
+  * `dimensions` (array of dimension names, RVW02-WS04) — the local-agent
+    reviewer's **Dimension pass** set, riding the same seam as
+    `model`/`instructions`. Unset means the shipped default set; names
+    validate against the closed registry
+    (:func:`shipit.review.dimensions.known_dimension_names`) — an unknown
+    dimension fails LOUD with the known set, roster prior art.
 
-Two table-level keys are RESERVED (policy riding the same table, NOT reviewer
+Four table-level keys are RESERVED (policy riding the same table, NOT reviewer
 entries):
 
   * `round_cap` — the review-round budget the stopping rule enforces (how
@@ -56,6 +62,17 @@ entries):
     seconds. Tool-owned config, deliberately NOT a per-call flag. Unset means
     the shipped default (`wait.POLL_INTERVAL_SECONDS`, 60s). It lands on
     `Roster.poll_interval`.
+  * `nit_cap` (RVW02-WS04) — the round-1 nit budget the fan-out routing
+    enforces on the POSTED review: a non-negative int (`0` = floor at minor —
+    no nit posts). Unset means uncapped. Lands on `Roster.nit_cap`.
+  * `calibrator` (RVW02-WS04) — the ONE fixed judge config every local
+    reviewer's fan-out shares (ADR-0045: table-level on purpose — a
+    per-reviewer calibrator would fork the common severity ruler): an
+    inline-table of `backend` / `model` / `reasoning` / `timeout`, e.g.
+    `calibrator = { backend = "claude", reasoning = "high" }`. Unset means the
+    shipped default (`claude` at high ReasoningLevel). Unknown keys and
+    invalid values fail LOUD. Lands on `Roster.calibrator` as a validated
+    :class:`~shipit.review.calibrator.CalibratorConfig`.
 
 The `[reviewers]` value is TABLE-ONLY: a list/array form (`reviewers =
 ["copilot", "codex"]`) is REJECTED loud, not silently accepted. The required
@@ -73,6 +90,8 @@ from __future__ import annotations
 import tomllib
 from pathlib import Path
 
+from ..review.calibrator import CalibratorConfig
+from ..review.dimensions import known_dimension_names
 from .errors import PrStateError
 from .reviewers import REGISTRY, by_name
 from .roster import Roster, RosterEntry
@@ -119,12 +138,18 @@ OVERRIDE_KEY = "reviewers"
 # not reviewer entries. The entry parser skips them; each has its own parser.
 ROUND_CAP_KEY = "round_cap"
 POLL_INTERVAL_KEY = "poll_interval"
-_RESERVED_KEYS = (ROUND_CAP_KEY, POLL_INTERVAL_KEY)
+NIT_CAP_KEY = "nit_cap"
+CALIBRATOR_KEY = "calibrator"
+_RESERVED_KEYS = (ROUND_CAP_KEY, POLL_INTERVAL_KEY, NIT_CAP_KEY, CALIBRATOR_KEY)
+
+# The `calibrator` inline-table's accepted keys — the CalibratorConfig fields
+# (RVW02-WS04). An unknown key fails loud, exactly like a per-reviewer option.
+_CALIBRATOR_OPTIONS = ("backend", "model", "reasoning", "timeout")
 
 # The per-reviewer options that are accepted (see the module docstring for what
 # each means). An option not listed here fails loud.
 _RUN_STRING_OPTIONS = ("model", "instructions")
-_KNOWN_OPTIONS = ("rerun", "timeout", "window", *_RUN_STRING_OPTIONS)
+_KNOWN_OPTIONS = ("rerun", "timeout", "window", "dimensions", *_RUN_STRING_OPTIONS)
 
 
 class RequiredReviewersConfigError(PrStateError):
@@ -188,16 +213,28 @@ def load_roster(root: str | None = None) -> Roster:
     # table-level policy keys ride that same table (they are NOT reviewer entries).
     round_cap = _parse_round_cap(value)
     poll_interval = _parse_poll_interval(value)
+    nit_cap = _parse_nit_cap(value)
+    calibrator = _parse_calibrator(value)
     if not entries:
         # No reviewer entries → the shipped default required set. The table-level
         # policy keys still apply: policy can be set without opting out of the
         # default reviewers.
         return Roster(
-            default_roster().entries, round_cap=round_cap, poll_interval=poll_interval
+            default_roster().entries,
+            round_cap=round_cap,
+            poll_interval=poll_interval,
+            nit_cap=nit_cap,
+            calibrator=calibrator,
         )
     _validate(tuple(e.name for e in entries))
     try:
-        return Roster(tuple(entries), round_cap=round_cap, poll_interval=poll_interval)
+        return Roster(
+            tuple(entries),
+            round_cap=round_cap,
+            poll_interval=poll_interval,
+            nit_cap=nit_cap,
+            calibrator=calibrator,
+        )
     except ValueError as exc:
         # Belt-and-suspenders: `_validate` already rejects duplicate names, but
         # any Roster invariant that still trips must fail loud AS a config error
@@ -285,6 +322,79 @@ def _parse_round_cap(table: dict[str, object]) -> int | None:
     return value
 
 
+def _parse_nit_cap(table: dict[str, object]) -> int | None:
+    """Parse the reserved table-level `nit_cap` key — the round-1 nit budget
+    (RVW02-WS04).
+
+    Absent → ``None`` (uncapped, the shipped default). ``0`` is LEGAL and
+    meaningful (floor the posted review at minor — no nit posts); a bool, a
+    non-int, or a negative value fails LOUD at parse. Exact-key lookup on
+    purpose, same reasoning as `_parse_round_cap` (a case-variant spelling has
+    already been rejected loud by `_parse_table`)."""
+    value = table.get(NIT_CAP_KEY)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise RequiredReviewersConfigError(
+            f"{OVERRIDE_FILE} `{OVERRIDE_KEY}.{NIT_CAP_KEY}` must be a "
+            f"non-negative integer of round-1 nits (0 = floor at minor), "
+            f"got {value!r}"
+        )
+    return value
+
+
+def _parse_calibrator(table: dict[str, object]) -> CalibratorConfig | None:
+    """Parse the reserved table-level `calibrator` key — the ONE fixed judge
+    config (RVW02-WS04, ADR-0045).
+
+    Absent → ``None`` (the run path's shipped default: `claude` at high
+    ReasoningLevel). Present, it must be an inline-table whose keys are a
+    subset of `_CALIBRATOR_OPTIONS`, each a non-empty string (`timeout` also
+    accepts a bare positive integer of seconds, normalized to the canonical
+    `<N>s` like the per-reviewer durations). Unknown keys and any value
+    :class:`~shipit.review.calibrator.CalibratorConfig` rejects
+    (an unregistered backend, a bad reasoning level) fail LOUD as config
+    errors — the whole surface is rejected at LOAD, so a Roster in hand always
+    carries a valid calibrator."""
+    value = table.get(CALIBRATOR_KEY)
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise RequiredReviewersConfigError(
+            f"{OVERRIDE_FILE} `{OVERRIDE_KEY}.{CALIBRATOR_KEY}` must be an "
+            'options table (e.g. {backend = "claude", reasoning = "high"}), '
+            f"got {value!r}"
+        )
+    unknown = sorted(k for k in value if k not in _CALIBRATOR_OPTIONS)
+    if unknown:
+        raise RequiredReviewersConfigError(
+            f"{OVERRIDE_FILE} `{OVERRIDE_KEY}.{CALIBRATOR_KEY}` has unknown "
+            f"option(s) {unknown} — supported options are "
+            f"{sorted(_CALIBRATOR_OPTIONS)}"
+        )
+    kwargs: dict[str, str] = {}
+    for field in ("backend", "model", "reasoning"):
+        if field in value:
+            raw = value[field]
+            if not isinstance(raw, str) or not raw.strip():
+                raise RequiredReviewersConfigError(
+                    f"{OVERRIDE_FILE} `{OVERRIDE_KEY}.{CALIBRATOR_KEY}.{field}` "
+                    "must be a non-empty string"
+                )
+            kwargs[field] = raw.strip()
+    if "timeout" in value:
+        seconds = _duration_value(
+            f"{OVERRIDE_KEY}.{CALIBRATOR_KEY}.timeout", value["timeout"]
+        )
+        kwargs["timeout"] = f"{seconds}s"
+    try:
+        return CalibratorConfig(**kwargs)
+    except ValueError as exc:
+        raise RequiredReviewersConfigError(
+            f"{OVERRIDE_FILE} `{OVERRIDE_KEY}.{CALIBRATOR_KEY}`: {exc}"
+        ) from exc
+
+
 def _parse_poll_interval(table: dict[str, object]) -> int | None:
     """Parse the reserved table-level `poll_interval` key — `pr wait`'s cadence
     (ADR-0034).
@@ -330,7 +440,8 @@ def _parse_entry(name: str, key: str, opts: object, *, config_dir: Path) -> Rost
             f"{OVERRIDE_FILE} `{OVERRIDE_KEY}.{name}` has unknown option(s) "
             f"{unknown} — supported options are {sorted(_KNOWN_OPTIONS)} "
             "(`rerun` controls re-review; `window` is the readiness wait window; "
-            "`model`/`instructions`/`timeout` are read by the local-agent run path)"
+            "`model`/`instructions`/`timeout`/`dimensions` are read by the "
+            "local-agent run path)"
         )
     for field in _RUN_STRING_OPTIONS:
         if field in opts and (
@@ -351,6 +462,7 @@ def _parse_entry(name: str, key: str, opts: object, *, config_dir: Path) -> Rost
         raise RequiredReviewersConfigError(
             f"{OVERRIDE_FILE} `{OVERRIDE_KEY}.{name}.rerun` must be a boolean"
         )
+    dimensions = _parse_dimensions(name, opts.get("dimensions"))
     instructions = opts.get("instructions")
     if instructions is not None:
         # Anchor a relative instructions path to the config's own directory (and
@@ -376,7 +488,46 @@ def _parse_entry(name: str, key: str, opts: object, *, config_dir: Path) -> Rost
             if "timeout" in opts
             else None
         ),
+        dimensions=dimensions,
     )
+
+
+def _parse_dimensions(name: str, value: object) -> tuple[str, ...] | None:
+    """Validate one reviewer's `dimensions` option (RVW02-WS04) → the canonical
+    tuple, or ``None`` when unset (the shipped default set).
+
+    An array of dimension names from the CLOSED registry
+    (:func:`shipit.review.dimensions.known_dimension_names`); an unknown name,
+    a non-array shape, an empty array, a non-string element, or a duplicate
+    fails LOUD with the known set — the same posture as an unknown reviewer
+    name (roster prior art)."""
+    if value is None:
+        return None
+    known = known_dimension_names()
+    if (
+        not isinstance(value, list)
+        or not value
+        or any(not isinstance(d, str) or not d.strip() for d in value)
+    ):
+        raise RequiredReviewersConfigError(
+            f"{OVERRIDE_FILE} `{OVERRIDE_KEY}.{name}.dimensions` must be a "
+            f"non-empty array of dimension names (known: {sorted(known)}), "
+            f"got {value!r}"
+        )
+    names = tuple(d.strip() for d in value)
+    unknown = sorted(d for d in names if d not in known)
+    if unknown:
+        raise RequiredReviewersConfigError(
+            f"{OVERRIDE_FILE} `{OVERRIDE_KEY}.{name}.dimensions` has unknown "
+            f"dimension(s) {unknown} — known dimensions: {sorted(known)}"
+        )
+    duplicates = sorted({d for d in names if names.count(d) > 1})
+    if duplicates:
+        raise RequiredReviewersConfigError(
+            f"{OVERRIDE_FILE} `{OVERRIDE_KEY}.{name}.dimensions` lists "
+            f"{duplicates} more than once — list each dimension once"
+        )
+    return names
 
 
 def _build_entry(config_name: str, **kwargs: object) -> RosterEntry:

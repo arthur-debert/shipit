@@ -13,16 +13,18 @@ The boundary, stated once: an **eval record** says how a run *behaved*; a
 review-round record says what the review *concluded*. They meet in
 ``shipit eval report``, which joins round records to eval records by run id —
 each record carries the run ids + **Variant** hashes of its contributing runs
-(``round.runs``; today's single-pass producer contributes none — the WS04
-dimension fan-out and Calibrator fill the list) and its own review-instructions
-**Variant** (``round.variant``), the experiment-arm handle a review-prompt A/B
-groups by.
+(``round.runs``: the WS04 dimension fan-out fills it with one entry per
+**Dimension pass** plus the **Calibrator** run; the single-pass offline replay
+contributes none) and its own review-instructions **Variant**
+(``round.variant``), the experiment-arm handle a review-prompt A/B groups by.
 
 Dispositions are the Opportunity-harvest seam: the record ALWAYS carries every
 judged finding WITH its disposition — routed-out (dropped) findings included,
-never just the posted subset. Today's pipeline has no calibrator, so
-:func:`dispositioned` maps every finding to ``post``; WS04's calibrator supplies
-the real routing through the same shape.
+never just the posted subset. The PR path passes the Calibrator's real routing
+in (``record_round(findings=…)``, RVW02-WS04); a caller with no calibrator
+(the single-pass offline replay) falls back to :func:`dispositioned`, which
+maps every finding to ``post`` — the honest default for a pipeline where the
+whole output reaches the record's ``review``.
 
 Pure core / thin boundary: :func:`build` (and :func:`dispositioned`) are pure —
 a record is a function of its arguments, unit-testable from fixtures;
@@ -58,11 +60,12 @@ def dispositioned(review: Mapping[str, Any]) -> list[tuple[Finding, Disposition]
     Maps each ``comments[]`` entry through the ONE trust boundary
     (:func:`shipit.review.schema.finding_from_dict`) — the SAME coercion the
     posting path applies, so the record can never disagree with what was posted.
-    Today's pre-calibrator pipeline routes nothing out: the whole judged output
-    reaches the PR (inline or folded into the body), so every finding is
-    ``post``. WS04's Calibrator replaces this default with real routing
-    (``drop-unverified`` / ``nit-suppressed`` / ``out-of-scope``) through the
-    same ``(Finding, Disposition)`` shape :func:`build` records.
+    This is the SINGLE-PASS default (the offline replay): with no calibrator
+    routing anything out, the whole output reaches the PR/record, so every
+    finding is ``post``. The PR path's fan-out (RVW02-WS04) supplies the
+    Calibrator's real routing (``drop-unverified`` / ``nit-suppressed`` /
+    ``out-of-scope``) through the same ``(Finding, Disposition)`` shape via
+    ``record_round(findings=…)`` instead.
     """
     comments = review.get("comments") or []
     return [
@@ -163,6 +166,8 @@ def record_round(
     model: str,
     timeout: str,
     instructions_path: str | None,
+    findings: Sequence[tuple[Finding, Disposition]] | None = None,
+    runs: Sequence[Mapping[str, Any]] = (),
     duration_ms: int | None = None,
     base_dir: Path | None = None,
     env: Mapping[str, str] | None = None,
@@ -179,6 +184,13 @@ def record_round(
     prompt separates arms) with any :data:`~shipit.harness.eval.variant.VARIANT_LABEL_ENV`
     label. Returns the store path the record landed in.
 
+    ``findings`` is the FULL judged set with the Calibrator's real dispositions
+    (the RVW02-WS04 fan-out passes it; routed-out findings included, never
+    erased); ``None`` — the single-pass replay — falls back to
+    :func:`dispositioned` (everything ``post``). ``runs`` carries the
+    contributing runs' entries (run ids + per-run variant hashes: every
+    dimension pass + the calibrator) onto ``round.runs``.
+
     RAISES on failure (a malformed slug, an unreadable instructions file, an
     unwritable store): the caller owns the failure posture — the review-path tee
     wraps this fail-open, the offline replay propagates (the record is its
@@ -191,7 +203,7 @@ def record_round(
     )
     record = build(
         review=review,
-        findings=dispositioned(review),
+        findings=findings if findings is not None else dispositioned(review),
         repo=repo.slug,
         pr=pr,
         base_sha=base_sha,
@@ -201,6 +213,7 @@ def record_round(
         timeout=timeout,
         instructions_path=instructions_path,
         variant=variant.as_record(),
+        runs=runs,
         duration_ms=duration_ms,
         timestamp=_now_iso(),
     )

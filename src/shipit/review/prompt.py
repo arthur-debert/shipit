@@ -1,9 +1,13 @@
 """prompt — the shared review-task bodies the review producers launch with.
 
-`build_reviewer_task` composes the PR (Tree-fetch) task; `build_range_reviewer_task`
+`build_reviewer_task` composes the PR (Tree-fetch) task — full-scope, or narrowed
+to ONE **Dimension pass** via ``dimension=`` (RVW02-WS04: the fan-out launches it
+once per configured dimension; the focus section scopes the SEARCH, never the
+severity ladder); `build_range_reviewer_task`
 composes its offline commit-range sibling (RVW02-WS03 replay: the diff comes from
 `git diff <base>..<head>`, no PR, nothing posted). This module is the ONE place a
-review task is composed. Since
+review (finder) task is composed — the Calibrator's JUDGE task is a different
+contract and lives with its boundary (:mod:`shipit.review.calibrator`). Since
 TRE05-WS04b the producer no longer **front-loads** the diff into the prompt
 (ADR-0020 §Reviewer-path reconciliation — "REPLACE"): the agent runs in a shared
 read-only Tree (ADR-0018) at the PR's true head and **fetches the scoped diff
@@ -25,6 +29,8 @@ The only backend-conditional part is the schema presentation:
 """
 
 from __future__ import annotations
+
+from .dimensions import Dimension
 
 # Human-readable description of the expected JSON, embedded for backends without
 # native schema enforcement (agy). Kept in sync with schema.REVIEW_SCHEMA.
@@ -72,7 +78,11 @@ incomplete object."""
 
 
 def build_reviewer_task(
-    instructions: str, pr_number: int, *, schema_inline: bool
+    instructions: str,
+    pr_number: int,
+    *,
+    schema_inline: bool,
+    dimension: Dimension | None = None,
 ) -> str:
     """Compose the Tree-fetch reviewer task from ``instructions`` and ``pr_number``.
 
@@ -86,6 +96,14 @@ def build_reviewer_task(
     2. review it against ``instructions`` and the repo's conventions; and
     3. emit the review as a SINGLE JSON object on stdout and **NOT** post it — shipit
        captures stdout and posts it as the bot through the funnel's check-run gate.
+
+    ``dimension`` narrows the task to ONE **Dimension pass** (RVW02-WS04,
+    ADR-0045): a focus section scopes the SEARCH to that dimension — severity is
+    still stated per the shared ladder, but final severity is assigned at
+    calibration, and the pass is told overlap/pre-existing findings are fine
+    (the Calibrator dedups and routes; prompt-mandated silence would hide the
+    routing decision from the record). ``None`` keeps the monolithic full-scope
+    task.
 
     When ``schema_inline`` is True the expected JSON shape is appended in prose (for
     a backend without native schema enforcement — agy); otherwise it is omitted (codex
@@ -133,10 +151,33 @@ text before or after the JSON. Do NOT post the review yourself — do not run \
 `gh pr review` or otherwise comment on the PR; just emit the JSON and stop. shipit \
 captures your output and posts the review."""
 
+    if dimension is not None:
+        body = f"{body}\n\n{_dimension_section(dimension)}"
     if schema_inline:
         body = f"{body}\n\n{_SCHEMA_PROSE}\n\n{_JSON_VALIDITY_INSTRUCTION}"
 
     return body
+
+
+def _dimension_section(dimension: Dimension) -> str:
+    """The focus section that narrows a reviewer task to ONE dimension pass.
+
+    Scopes the SEARCH, not the severity: the pass still states severity on the
+    shared ladder (a useful prior), but the Calibrator assigns the final one
+    (ADR-0045 — dimensions scope the search; severity is assigned at
+    calibration). The pass is explicitly released from budgeting across other
+    concerns (that anchoring is what the fan-out removes) and from suppressing
+    pre-existing issues (routing them out is the Calibrator's job, recorded —
+    not prompt-mandated silence).
+    """
+    return f"""\
+DIMENSION FOCUS — {dimension.title}: this review is ONE scoped pass of a \
+parallel fan-out; other passes cover the other dimensions, and a calibration \
+stage dedups the union, verifies each finding, and assigns final severity. \
+Hunt EXHAUSTIVELY and ONLY for: {dimension.focus}
+Report a finding even if it looks pre-existing (it may predate this PR) — a \
+later stage routes out-of-scope findings explicitly; do not silently drop \
+them. Do not pad with findings outside this dimension's focus."""
 
 
 def build_range_reviewer_task(

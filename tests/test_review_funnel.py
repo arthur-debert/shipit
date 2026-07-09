@@ -1086,3 +1086,43 @@ def test_unknown_outcome_falls_back_to_failed_without_crashing(monkeypatch, capl
     assert patches[0]["body"]["conclusion"] == "failure"  # the `failed` mapping
     text = "\n".join(r.getMessage() for r in caplog.records)
     assert "unknown funnel outcome" in text.lower()
+
+
+def test_child_argv_carries_the_fanout_config_when_set(monkeypatch):
+    """RVW02-WS04: the detached child reconstructs the fan-out config from its
+    argv — dimensions comma-joined, the nit cap, and the calibrator's four
+    fields — each flag omitted when the value is the shipped default."""
+    from shipit.review.calibrator import CalibratorConfig
+
+    _fake_checkrun_boundary(monkeypatch)
+    monkeypatch.setattr(service, "_resolve_head_sha", lambda pr: "deadbeef")
+    spawned: list = []
+    service.start_detached_review(
+        agent_backend.CODEX,
+        TARGET,
+        dimensions=("correctness", "test-quality"),
+        calibrator=CalibratorConfig(
+            backend="claude", model="opus-x", reasoning="medium", timeout="120s"
+        ),
+        nit_cap=0,
+        spawn=lambda argv, env: spawned.append(list(argv)),
+    )
+    argv = spawned[0]
+    assert argv[argv.index("--dimensions") + 1] == "correctness,test-quality"
+    assert argv[argv.index("--nit-cap") + 1] == "0"
+    assert argv[argv.index("--calibrator-backend") + 1] == "claude"
+    assert argv[argv.index("--calibrator-model") + 1] == "opus-x"
+    assert argv[argv.index("--calibrator-reasoning") + 1] == "medium"
+    assert argv[argv.index("--calibrator-timeout") + 1] == "120s"
+
+
+def test_child_argv_omits_fanout_flags_at_the_shipped_defaults(monkeypatch):
+    _fake_checkrun_boundary(monkeypatch)
+    monkeypatch.setattr(service, "_resolve_head_sha", lambda pr: "deadbeef")
+    spawned: list = []
+    service.start_detached_review(
+        agent_backend.CODEX, TARGET, spawn=lambda argv, env: spawned.append(list(argv))
+    )
+    argv = spawned[0]
+    for flag in ("--dimensions", "--nit-cap", "--calibrator-backend"):
+        assert flag not in argv

@@ -26,7 +26,7 @@ from .model import (
     ReviewLifecycle,
     Thread,
 )
-from .roster import Roster, RosterEntry
+from .roster import ReviewPolicy, Roster, RosterEntry
 
 #: The engine's logger (shared name with :mod:`shipit.prstate.state`): reviewer
 #: request/cancel transitions are lifecycle milestones (glassbox spray, LOG02) —
@@ -264,7 +264,12 @@ class ReviewerAdapter:
             return ReviewLifecycle.REQUESTED
         return ReviewLifecycle.NOT_REQUESTED
 
-    def request(self, pr: PrId, entry: RosterEntry | None = None) -> bool:
+    def request(
+        self,
+        pr: PrId,
+        entry: RosterEntry | None = None,
+        policy: ReviewPolicy | None = None,
+    ) -> bool:
         """Request — or re-request, same call — this reviewer on `pr`.
 
         Returns True when a request was actually placed, False when the
@@ -277,9 +282,12 @@ class ReviewerAdapter:
         `entry` is this reviewer's Roster entry (CLI01-WS04) — the request
         path passes it so per-reviewer settings arrive as a VALUE, never
         re-resolved from config here. Only the LOCAL-agent adapters read it
-        (their `model` / `instructions` / `timeout` run options); the App
-        adapters place a plain request edge and ignore it. `None` means
-        all-defaults (an unconfigured reviewer).
+        (their `model` / `instructions` / `timeout` / `dimensions` run
+        options); the App adapters place a plain request edge and ignore it.
+        `None` means all-defaults (an unconfigured reviewer). `policy` is the
+        TABLE-LEVEL review-run policy (RVW02-WS04: the shared calibrator
+        config + the round-1 nit cap), threaded the same way — read only by
+        the local-agent adapters; `None` means the shipped defaults.
 
         Placement only: True means the call was accepted, not that the
         `review_requested` edge exists — GitHub can silently drop the attach
@@ -383,7 +391,12 @@ class CopilotAdapter(ReviewerAdapter):
     def matches(self, login: str) -> bool:
         return "copilot" in login.lower()
 
-    def request(self, pr: PrId, entry: RosterEntry | None = None) -> bool:
+    def request(
+        self,
+        pr: PrId,
+        entry: RosterEntry | None = None,
+        policy: ReviewPolicy | None = None,
+    ) -> bool:
         # `gh pr edit --add-reviewer @copilot` — GraphQL with the bot's real
         # node_id (via gh.pr_edit_reviewer; the REST requested_reviewers
         # POST silently no-ops for Copilot). Re-request is the same call.
@@ -461,7 +474,12 @@ class CodeRabbitAdapter(ReviewerAdapter):
                 return severity
         return None
 
-    def request(self, pr: PrId, entry: RosterEntry | None = None) -> bool:
+    def request(
+        self,
+        pr: PrId,
+        entry: RosterEntry | None = None,
+        policy: ReviewPolicy | None = None,
+    ) -> bool:
         # Same GraphQL add-reviewer path Copilot uses: it resolves the App's
         # real node id and creates a real review_requested edge (the REST
         # requested_reviewers POST silently no-ops for App reviewers).
@@ -530,7 +548,12 @@ class GeminiAdapter(ReviewerAdapter):
         match = self._BADGE_RE.search(body)
         return self._SEVERITY_MAP[match.group(1).lower()] if match else None
 
-    def request(self, pr: PrId, entry: RosterEntry | None = None) -> bool:
+    def request(
+        self,
+        pr: PrId,
+        entry: RosterEntry | None = None,
+        policy: ReviewPolicy | None = None,
+    ) -> bool:
         # The Gemini app auto-triggers on PR open; there is no request
         # mechanism, and it is best-effort anyway — a no-op, not an error.
         # A mechanic, not a milestone: no edge changed, so it records at DEBUG.
@@ -625,7 +648,12 @@ class _LocalReviewAdapter(ReviewerAdapter):
         low = login.lower()
         return low.endswith("[bot]") and self.bot_slug_fragment in low
 
-    def request(self, pr: PrId, entry: RosterEntry | None = None) -> bool:
+    def request(
+        self,
+        pr: PrId,
+        entry: RosterEntry | None = None,
+        policy: ReviewPolicy | None = None,
+    ) -> bool:
         """DETACH a local-agent review and return IN-FLIGHT (OBS03).
 
         Fire-and-forget: this does the cheap, synchronous work — resolve the PR's
@@ -642,9 +670,11 @@ class _LocalReviewAdapter(ReviewerAdapter):
         extra (pyjwt) is only pulled in when a local review is actually requested —
         the detection path and every non-local reviewer stay free of that
         dependency. The agent's per-reviewer `model` / `instructions` / `timeout`
-        (the `[reviewers]` options) are read OFF this reviewer's Roster `entry`
-        (CLI01-WS04) — a value the caller loaded once at the verb boundary,
-        never a config re-read here — and threaded to the detached child.
+        / `dimensions` (the `[reviewers]` options) are read OFF this reviewer's
+        Roster `entry` (CLI01-WS04), and the table-level calibrator + nit cap
+        OFF `policy` (RVW02-WS04) — values the caller loaded once at the verb
+        boundary, never a config re-read here — and threaded to the detached
+        child.
 
         Any failure in the SYNCHRONOUS part — a `gh`/auth failure resolving the PR,
         a spawn failure — is normalized to `PrStateError`, the one error type the
@@ -677,6 +707,17 @@ class _LocalReviewAdapter(ReviewerAdapter):
             run_kwargs["instructions_path"] = entry.instructions
         if entry.timeout is not None:
             run_kwargs["timeout"] = entry.timeout
+        # The RVW02-WS04 fan-out config: the per-reviewer dimension set rides
+        # the entry (same seam as model/instructions); the shared calibrator +
+        # nit cap ride the table-level policy. Unset values are omitted so the
+        # run path's shipped defaults stay the single source of the default.
+        if entry.dimensions is not None:
+            run_kwargs["dimensions"] = entry.dimensions
+        if policy is not None:
+            if policy.calibrator is not None:
+                run_kwargs["calibrator"] = policy.calibrator
+            if policy.nit_cap is not None:
+                run_kwargs["nit_cap"] = policy.nit_cap
 
         # Lazy, same reason as `service` above: `ReviewAuthError` lives in the
         # optional `review` package, so name it only here — where that package has
