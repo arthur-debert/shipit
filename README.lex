@@ -21,7 +21,7 @@ underneath it and how a repo gets onto shipit. Domain vocabulary:
     1.1. Session start
 
         A coordinator session launches inside its own ephemeral `session Tree`
-        — `claude --worktree`, usually via `claude-start` — born on an
+        — `claude --worktree`, usually via `./claude-start` — born on an
         `ephemeral/<id>` branch cut from `origin/main` by the WorktreeCreate
         hook (ADR-0027). The SessionStart hook activates the repo toolchain
         and surfaces shipit-pin staleness as advisory context (ADR-0033). To
@@ -39,7 +39,7 @@ underneath it and how a repo gets onto shipit. Domain vocabulary:
         idea. A single fix needs no ceremony — brief an implementer and go.
         A feature runs through `/planning` first: ideation, ADRs
         (`docs/adr/`), a PRD (`docs/prd/`), a docs PR, then
-        decomposition into an epic tracker issue with Work Stream sub-issues.
+        decomposition into an epic tracker issue with workstream sub-issues.
         The PRD is the spec; the epic issue tracks how the work lands.
 
     1.3. Delegate
