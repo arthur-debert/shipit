@@ -71,11 +71,12 @@ predictable cost:
 4. As a shepherd agent, I want to stop classifying findings entirely, so that
    each round costs one less agent step.
 5. As a maintainer, I want a dormant severity-override verb kept working but
-   undocumented, so that a wrong reviewer-emitted severity can be corrected
-   without reintroducing a classification stage.
+   absent from role prompts and operator-facing guidance, so that a wrong
+   reviewer-emitted severity can be corrected without reintroducing a
+   classification stage.
 6. As a maintainer, I want an unparseable finding to default to `major`, so
-   that classification failures force an extra round rather than slip a real
-   issue past the Breaker.
+   that severity-parsing failures force an extra round rather than slip a
+   real issue past the Breaker.
 7. As a maintainer, I want round 1 to exhaust critical and major findings, so
    that later rounds can safely review only the new commits.
 8. As a local-agent reviewer, I want my review split into parallel
