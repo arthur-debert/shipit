@@ -113,6 +113,10 @@ def test_matrix_preserves_declaration_order_and_fills_the_default_runner():
         "run": "lint",
         "runner": "ubuntu-latest",
         "required": True,
+        "envs": "default",
+        "envset": "default",
+        "caches": {"rust": False, "sccache": False, "uv": False},
+        "rust_workspaces": "",
     }
 
 
@@ -129,6 +133,65 @@ def test_matrix_carries_the_required_flag_so_advisory_lanes_never_block_merge():
         "fleet-sweep": False,
     }
     assert planned[1].as_matrix_entry()["required"] is False
+
+
+def test_pixi_task_env_sets_resolve_feature_tasks_to_their_environments():
+    pixi = {
+        "tasks": {"changelog": "./bin/shipit changelog"},
+        "feature": {
+            "lint": {"tasks": {"lint-full": "./bin/shipit lint"}},
+            "test": {"tasks": {"test": "./bin/shipit test"}},
+            "shared": {"tasks": {"verify": "verify"}},
+        },
+        "environments": {
+            "lint": ["lint"],
+            "test": ["test"],
+            "dogfood": {"features": ["shared"]},
+        },
+    }
+    assert lanes.task_env_sets(pixi) == {
+        "changelog": ("default",),
+        "lint-full": ("lint",),
+        "test": ("test",),
+        "verify": ("dogfood",),
+    }
+
+
+def test_matrix_carries_env_set_and_cache_descriptors_from_the_planner():
+    declared = (
+        _lane("lint", run="lint-full", required=True),
+        _lane("test", run="test rust", required=True),
+    )
+    toolchains = (
+        config.ToolchainEntry(path="crates/a", toolchain="rust", commands={}),
+        config.ToolchainEntry(path="web", toolchain="npm", commands={}),
+    )
+    planned = lanes.plan(
+        declared,
+        event="pr",
+        task_envs={"lint-full": ("lint",), "test": ("test",)},
+        toolchains=toolchains,
+    )
+    assert planned[0].as_matrix_entry() == {
+        "name": "lint",
+        "run": "lint-full",
+        "runner": "ubuntu-latest",
+        "required": True,
+        "envs": "lint",
+        "envset": "lint",
+        "caches": {"rust": False, "sccache": False, "uv": False},
+        "rust_workspaces": "",
+    }
+    assert planned[1].as_matrix_entry() == {
+        "name": "test",
+        "run": "test rust",
+        "runner": "ubuntu-latest",
+        "required": True,
+        "envs": "test",
+        "envset": "test",
+        "caches": {"rust": True, "sccache": False, "uv": False},
+        "rust_workspaces": "crates/a -> ../../target",
+    }
 
 
 # ---------------------------------------------------------------------------

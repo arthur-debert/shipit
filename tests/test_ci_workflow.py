@@ -65,3 +65,28 @@ def test_wf_checks_block_is_call_only_so_concurrency_stays_caller_side():
     # the concurrency story must be revisited.
     doc = _load("wf-checks.yml")
     assert checks.workflow_triggers(doc) == ["workflow_call"]
+
+
+def test_wf_checks_run_job_uses_planner_emitted_provisioning_fields():
+    doc = _load("wf-checks.yml")
+    steps = doc["jobs"]["run"]["steps"]
+    setup = next(
+        step for step in steps if step.get("uses") == "prefix-dev/setup-pixi@v0.9.6"
+    )
+    assert setup["with"]["environments"] == "${{ matrix.envs }}"
+    assert setup["with"]["cache"] is True
+    assert setup["with"]["cache-write"] is True
+    assert setup["with"]["cache-key"] == "pixi-${{ matrix.envset }}-"
+
+    rust_path = next(
+        step
+        for step in steps
+        if step.get("name") == "Expose pixi rust on the runner PATH"
+    )
+    assert rust_path["if"] == "matrix.caches.rust"
+    assert ".pixi/envs/${{ matrix.envset }}/bin" in rust_path["run"]
+
+    rust_cache = next(step for step in steps if step.get("name") == "rust-cache")
+    assert rust_cache["if"] == "matrix.caches.rust"
+    assert rust_cache["uses"] == "Swatinem/rust-cache@v2"
+    assert rust_cache["with"]["workspaces"] == "${{ matrix.rust_workspaces }}"

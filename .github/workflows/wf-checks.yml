@@ -3,7 +3,8 @@ name: wf-checks
 # The PR-time reusable workflow BLOCK (ADR-0010/0040, TOL01-WS05; the first
 # published block of the wf-* family). Routing ONLY, zero logic: every decision
 # the job matrix encodes — which declared lane runs on this event, thin vs full
-# scope from the PR's path-diff, the runner per lane — comes out of ONE
+# scope from the PR's path-diff, the runner and provisioning/cache descriptors
+# per lane — comes out of ONE
 # invocation of the fixture-tested lane planner (`shipit ci plan`, over the
 # consumer's `.shipit.toml [lanes]`), never re-derived in YAML. Each matrix job
 # is `pixi run <lane.run>` — the thin pixi caller of the shipit verb
@@ -87,6 +88,22 @@ jobs:
           # Lockstep with the Layer 0 bootstrap's PIXI_PIN — see the plan job.
           pixi-version: v0.71.0
           locked: true
+          # Install exactly this lane's planner-emitted env-set and key the
+          # setup-pixi cache on that env-set. setup-pixi couples cache restore
+          # to its own install, so this remains one step: no restore/install
+          # split and no YAML-side decisions.
+          environments: ${{ matrix.envs }}
+          cache: true
+          cache-write: true
+          cache-key: pixi-${{ matrix.envset }}-
+      - name: Expose pixi rust on the runner PATH
+        if: matrix.caches.rust
+        run: echo "$PWD/.pixi/envs/${{ matrix.envset }}/bin" >> "$GITHUB_PATH"
+      - name: rust-cache
+        if: matrix.caches.rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ matrix.rust_workspaces }}
       - name: Run lane
         env:
           LANE_RUN: ${{ matrix.run }}

@@ -19,8 +19,12 @@ import pytest
 from shipit.verbs import ci as ci_verb
 
 LANES_TOML = """
+[toolchains]
+"." = "python"
+"crates/wasm" = "rust"
+
 [lanes.lint]
-run = "lint"
+run = "lint-full"
 required = true
 local = true
 
@@ -29,10 +33,23 @@ run = "build crates/wasm"
 scope = "crates/wasm"
 """
 
+PIXI_TOML = """
+[feature.lint.tasks]
+lint-full = "./bin/shipit lint"
+
+[feature.test.tasks]
+build = "./bin/shipit build"
+
+[environments]
+lint = ["lint"]
+test = ["test"]
+"""
+
 
 @pytest.fixture
 def laned_repo(tmp_path, monkeypatch):
     (tmp_path / ".shipit.toml").write_text(LANES_TOML, encoding="utf-8")
+    (tmp_path / "pixi.toml").write_text(PIXI_TOML, encoding="utf-8")
     monkeypatch.chdir(tmp_path)
     return tmp_path
 
@@ -50,12 +67,25 @@ def test_plan_emits_the_matrix_as_single_line_json_on_stdout(laned_repo, capsys)
     # $GITHUB_OUTPUT); everything human goes to stderr.
     assert out == json.dumps(json.loads(out)) + "\n"
     assert json.loads(out) == [
-        {"name": "lint", "run": "lint", "runner": "ubuntu-latest", "required": True},
+        {
+            "name": "lint",
+            "run": "lint-full",
+            "runner": "ubuntu-latest",
+            "required": True,
+            "envs": "lint",
+            "envset": "lint",
+            "caches": {"rust": False, "sccache": False, "uv": False},
+            "rust_workspaces": "",
+        },
         {
             "name": "wasm",
             "run": "build crates/wasm",
             "runner": "ubuntu-latest",
             "required": False,
+            "envs": "test",
+            "envset": "test",
+            "caches": {"rust": True, "sccache": False, "uv": False},
+            "rust_workspaces": "crates/wasm -> ../../target",
         },
     ]
     assert "2 of 2 lanes: lint, wasm" in err
