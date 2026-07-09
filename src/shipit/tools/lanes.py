@@ -1,0 +1,197 @@
+"""The lane planner — pure: (declared lanes, event, path-diff) → job matrix.
+
+A **Lane** is the declaration of one CI test unit (CONTEXT.md Build & release;
+``.shipit.toml [lanes]``, parsed to :class:`shipit.config.Lane` at the boundary
+per ADR-0030). :func:`plan` is where the enforcement vocabulary becomes
+executable (docs/prd/tol01-ci-tools.md stories 13–16): it maps the typed
+declarations, the CI event, and a path-diff to the ORDERED job matrix the
+``wf-checks`` workflow block fans into jobs — the lane-side twin of the release
+planner (preflight), same pure-core shape, PR-time axis. Every decision the
+matrix encodes is made HERE, fixture-tested; the block carries zero logic
+beyond routing (ADR-0040).
+
+The three rules, in the order they apply:
+
+- **Trigger ladder** — a lane's ``trigger`` names the MOST FREQUENT event that
+  runs it; every rarer event also runs it (``pr`` < ``push`` < ``nightly`` <
+  ``dispatch``, :data:`EVENTS` order). So ``trigger = "pr"`` lanes — the
+  ordinary checks — run on every PR update, every push, the nightly schedule,
+  and a manual dispatch; ``trigger = "nightly"`` reserves an expensive lane
+  for the coverage events (nightly + dispatch); ``trigger = "dispatch"`` is
+  manual-only. This is what makes nightly/dispatch comprehensive: they sit at
+  the rare end of the ladder, so everything scheduled-worthy runs there.
+- **Scope thin/full** — ``scope`` names a lane's related subtree (a
+  repo-relative path prefix; ``"."`` = the whole tree). On a ``pr`` event with
+  a KNOWN path-diff, a scoped lane is dropped when the diff never enters its
+  subtree — the *thin* plan for an unrelated PR (glossary **Scope**: "thin
+  runs the minimal set"). Full is FORCED on every non-PR event and whenever
+  the diff is unknown (``changed_paths=None``): uncertainty runs MORE, never
+  less, so coverage survives without taxing every PR (story 16). Unscoped
+  lanes always run.
+- **Routing fields** — each emitted :class:`Job` carries the lane's ``run``
+  string (the pixi task invocation the block executes: ``pixi run <run>``,
+  landing in the same shipit verb a laptop runs, ADR-0039) and its ``runner``
+  (:data:`DEFAULT_RUNNER` when undeclared). Declaration order is preserved —
+  ``.shipit.toml`` order is the matrix order, no re-sorting (the leg planner's
+  contract, :mod:`shipit.tools.legs`).
+
+``run`` is treated OPAQUELY here: it names a shipit tool or Leg invocation
+(``"test"``, ``"test rust"``, ``"changelog check"``) whose tool may land in a
+later work stream (build — WS02, e2e — WS03), so the planner never validates
+it against today's registry; a bad ``run`` fails loudly in the emitted job,
+never silently unrouted.
+
+:func:`commit_push_checks` derives the OTHER face of the same declarations:
+the commit/push checks are exactly the required∩local lanes (story 13, the
+glossary's **Commit/push checks**) — one definition for lefthook and CI, so
+the hooks and the matrix can never drift into two transcriptions of policy.
+
+Pure (no I/O, no Exec): fully fixture-testable, the same split the lint
+verb's ``route``/``verdict`` pair and the leg planner use. The effectful
+shell — config read, git path-diff, JSON emission — is :mod:`shipit.verbs.ci`.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from dataclasses import dataclass
+
+from .. import config
+
+#: The event vocabulary, in LADDER ORDER — most to least frequent. The same
+#: closed set as the lane ``trigger`` field (:data:`shipit.config.LANE_TRIGGERS`);
+#: an event runs every lane whose trigger sits at or before it on this ladder.
+EVENT_PR = "pr"
+EVENT_PUSH = "push"
+EVENT_NIGHTLY = "nightly"
+EVENT_DISPATCH = "dispatch"
+EVENTS: tuple[str, ...] = (EVENT_PR, EVENT_PUSH, EVENT_NIGHTLY, EVENT_DISPATCH)
+
+#: GitHub Actions event names → the planner vocabulary, so the ``wf-checks``
+#: block passes ``${{ github.event_name }}`` VERBATIM and the mapping lives
+#: here (fixture-tested), never re-derived in YAML (ADR-0040: zero logic in
+#: the block).
+GITHUB_EVENTS: dict[str, str] = {
+    "pull_request": EVENT_PR,
+    "push": EVENT_PUSH,
+    "schedule": EVENT_NIGHTLY,
+    "workflow_dispatch": EVENT_DISPATCH,
+}
+
+#: The runner a lane gets when it declares none — the fleet's ordinary linux
+#: runner (the legacy workflows' default; a mac/GPU lane declares its own).
+DEFAULT_RUNNER = "ubuntu-latest"
+
+
+class LanePlanError(Exception):
+    """The invocation cannot be planned — a USAGE error (exit 2, ADR-0030).
+
+    Raised for an event outside the closed vocabulary (neither a planner
+    event nor a GitHub event name). The message is the whole user-facing
+    diagnosis, so the verb prints it verbatim.
+    """
+
+
+@dataclass(frozen=True)
+class Job:
+    """One emitted matrix entry: a lane routed to a CI job.
+
+    ``name`` is the lane name (the job's display name and check name);
+    ``run`` the pixi task invocation the block executes (``pixi run <run>``);
+    ``runner`` the resolved ``runs-on`` label (never ``None`` — the planner
+    fills :data:`DEFAULT_RUNNER`).
+    """
+
+    name: str
+    run: str
+    runner: str
+
+    def as_matrix_entry(self) -> dict[str, str]:
+        """The GitHub ``matrix.include`` entry — the JSON hand-off shape the
+        ``wf-checks`` plan job surfaces as its output."""
+        return {"name": self.name, "run": self.run, "runner": self.runner}
+
+
+def normalize_event(raw: str) -> str:
+    """The planner event for ``raw`` — either vocabulary, one normalization.
+
+    Accepts the planner names (:data:`EVENTS`) and the GitHub Actions event
+    names (:data:`GITHUB_EVENTS`), so the block passes
+    ``${{ github.event_name }}`` untranslated. Anything else raises
+    :class:`LanePlanError` naming both vocabularies — a typo dies at the
+    boundary, never as a silently-empty matrix.
+    """
+    event = raw.strip()
+    if event in EVENTS:
+        return event
+    if event in GITHUB_EVENTS:
+        return GITHUB_EVENTS[event]
+    github_only = (name for name in GITHUB_EVENTS if name not in EVENTS)
+    known = ", ".join([*EVENTS, *github_only])
+    raise LanePlanError(f"unknown event {raw!r}; known events: {known}")
+
+
+def _triggered(lane: config.Lane, event: str) -> bool:
+    """The trigger ladder: the lane runs when ``event`` is at or past its
+    trigger in :data:`EVENTS` order (rarer events run everything before them)."""
+    return EVENTS.index(event) >= EVENTS.index(lane.trigger)
+
+
+def _in_scope(path: str, scope: str) -> bool:
+    """Whether a changed ``path`` falls inside a lane's ``scope`` subtree.
+
+    Segment-wise prefix match (``crates/wasm`` matches ``crates/wasm/src/x.rs``
+    but not ``crates/wasm2/…``); ``"."`` names the whole tree.
+    """
+    prefix = scope.rstrip("/")
+    if prefix in ("", "."):
+        return True
+    return path == prefix or path.startswith(prefix + "/")
+
+
+def plan(
+    lanes: Sequence[config.Lane],
+    *,
+    event: str,
+    changed_paths: Sequence[str] | None = None,
+) -> tuple[Job, ...]:
+    """The ordered job matrix for ``event`` over the declared ``lanes``.
+
+    ``event`` must be a planner event (:data:`EVENTS` — callers normalize via
+    :func:`normalize_event`; an out-of-vocabulary event here is a caller bug,
+    ``ValueError``). ``changed_paths`` is the PR's path-diff, ``None`` when
+    unknown — and it only ever THINS a ``pr`` event's plan (module docstring:
+    full scope is forced on non-PR events and on an unknown diff). An empty
+    matrix is a legitimate plan: a thin PR may drop every scoped lane.
+    """
+    if event not in EVENTS:
+        raise ValueError(f"unnormalized event {event!r} reached the planner")
+    jobs: list[Job] = []
+    for lane in lanes:
+        if not _triggered(lane, event):
+            continue
+        if (
+            event == EVENT_PR
+            and lane.scope is not None
+            and changed_paths is not None
+            and not any(_in_scope(p, lane.scope) for p in changed_paths)
+        ):
+            continue  # thin: the diff never enters this lane's subtree
+        jobs.append(
+            Job(name=lane.name, run=lane.run, runner=lane.runner or DEFAULT_RUNNER)
+        )
+    return tuple(jobs)
+
+
+def commit_push_checks(lanes: Sequence[config.Lane]) -> tuple[config.Lane, ...]:
+    """The commit/push checks: the lanes both ``required`` and ``local``, in
+    declaration order (story 13; the glossary set formerly called "the gate").
+
+    This derivation is the ONE definition of what blocks at the *commit* and
+    *push* operations — lefthook enforces exactly this set, CI enforces the
+    broader all-lanes policy over the same declarations (commit/push checks ⊆
+    lanes), so the two can never drift into separate transcriptions. On
+    shipit's own declarations this equals ``lint`` + the fast ``test`` set,
+    pinned by test (``tests/test_tools_lanes.py``), not by convention.
+    """
+    return tuple(lane for lane in lanes if lane.required and lane.local)

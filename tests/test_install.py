@@ -1334,21 +1334,25 @@ def test_setup_dev_env_matches_shipits_own_copy():
 def test_setup_dev_env_pixi_pin_agrees_with_ci():
     # PIXI_PIN and CI's setup-pixi `pixi-version` must move in lockstep — the
     # bootstrap and CI provisioning the same pixi is the point of the pin.
+    # Since the TOL01-WS05 cutover, CI's setup-pixi lives in the wf-checks
+    # BLOCK (ci.yml is a thin caller carrying no setup of its own), and the
+    # block runs setup-pixi in BOTH its jobs — every occurrence must agree.
     script = iunits.data_bytes("bootstrap", "setup-dev-env.sh").decode("utf-8")
     pin = next(
         line.split('"')[1]
         for line in script.splitlines()
         if line.startswith("PIXI_PIN=")
     )
-    ci = (
-        Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml"
+    wf = (
+        Path(__file__).resolve().parents[1] / ".github" / "workflows" / "wf-checks.yml"
     ).read_text(encoding="utf-8")
-    ci_pin = next(
+    wf_pins = [
         line.split(":", 1)[1].strip().removeprefix("v")
-        for line in ci.splitlines()
+        for line in wf.splitlines()
         if line.strip().startswith("pixi-version:")
-    )
-    assert pin == ci_pin
+    ]
+    assert wf_pins, "wf-checks.yml carries no setup-pixi pixi-version pin"
+    assert all(wf_pin == pin for wf_pin in wf_pins)
 
 
 def test_managed_sessionstart_hook_runs_setup_dev_env_first():

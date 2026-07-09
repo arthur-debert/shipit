@@ -1,0 +1,91 @@
+name: wf-checks
+
+# The PR-time reusable workflow BLOCK (ADR-0010/0040, TOL01-WS05; the first
+# published block of the wf-* family). Routing ONLY, zero logic: every decision
+# the job matrix encodes — which declared lane runs on this event, thin vs full
+# scope from the PR's path-diff, the runner per lane — comes out of ONE
+# invocation of the fixture-tested lane planner (`shipit ci plan`, over the
+# consumer's `.shipit.toml [lanes]`), never re-derived in YAML. Each matrix job
+# is `pixi run <lane.run>` — the thin pixi caller of the shipit verb
+# (ADR-0039), so a CI job, a lefthook hook, and a laptop run land in the same
+# implementation.
+#
+# Publishing (the @vN convention ADR-0010 promises): consumers call this block
+# by tag —
+#   uses: arthur-debert/shipit/.github/workflows/wf-checks.yml@v1
+# where `v1` is a MOVING MAJOR TAG (the actions convention) shipit advances on
+# each compatible release; upgrading consumer CI is bumping that one version.
+# shipit's own caller (.github/workflows/ci.yml) uses the LOCAL PATH instead,
+# so a PR that edits this block is checked by the edited block itself.
+#
+# Contract with the planner (all fixture-tested in shipit, none of it here):
+#   - `--event` takes `github.event_name` VERBATIM; the planner owns the
+#     GitHub-name -> pr/push/nightly/dispatch mapping and the trigger ladder.
+#   - `--base-ref` takes `github.base_ref` VERBATIM (empty on non-PR events);
+#     the planner diffs against origin/<base-ref> for the thin/full decision
+#     and FAILS SAFE to full scope when the diff cannot be answered.
+#   - an empty matrix (`[]`) is a legitimate thin plan: the run job is skipped
+#     and the workflow concludes green.
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history: the thin/full scope decision diffs the PR against
+          # origin/<base-ref>; a shallow clone would leave the diff
+          # unanswerable and force full scope on every PR.
+          fetch-depth: 0
+      - uses: prefix-dev/setup-pixi@v0.9.6
+        with:
+          # Keep in lockstep with PIXI_PIN in the managed Layer 0 bootstrap
+          # (src/shipit/data/bootstrap/setup-dev-env.sh, #547): CI and the
+          # bootstrap must provision the same pixi. A drift test
+          # (tests/test_install.py) pins the two together.
+          pixi-version: v0.71.0
+          locked: true
+      - name: Plan lanes
+        id: plan
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+        # One planner invocation; its single-line JSON matrix (stdout — the
+        # human summary goes to stderr) becomes this job's output. Runs the
+        # repo's PINNED launcher (ADR-0033), never a PATH `shipit`.
+        run: |
+          matrix="$(pixi run --locked ./bin/shipit ci plan --event "$EVENT_NAME" --base-ref "$BASE_REF")"
+          printf 'matrix=%s\n' "$matrix" >> "$GITHUB_OUTPUT"
+  run:
+    needs: plan
+    if: needs.plan.outputs.matrix != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.plan.outputs.matrix) }}
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: prefix-dev/setup-pixi@v0.9.6
+        with:
+          # Lockstep with the Layer 0 bootstrap's PIXI_PIN — see the plan job.
+          pixi-version: v0.71.0
+          locked: true
+      - name: Run lane
+        env:
+          LANE_RUN: ${{ matrix.run }}
+        # Deliberately UNQUOTED: a lane's run is a task plus optional args
+        # ("test", "changelog check") that must word-split. The value comes
+        # from the repo's own committed .shipit.toml, planner-typed at parse.
+        run: |
+          # shellcheck disable=SC2086
+          pixi run --locked $LANE_RUN
