@@ -30,6 +30,23 @@ def test_subagent_record_carries_role_and_metrics_from_meta():
     assert record["eval.timestamp"] == "2026-06-29T00:00:00+00:00"
 
 
+def test_run_id_is_stamped_verbatim_and_defaults_to_none():
+    # `eval.run_id` (v4) is the transcript-stem identity the hook passes in — the
+    # join key `shipit eval report`'s review axis resolves a review-round
+    # record's contributing runs by. Absent (an unlocatable identity), the record
+    # is still valid; it just cannot be joined.
+    kwargs = dict(
+        metrics={},
+        meta=None,
+        variant=None,
+        commit=None,
+        timestamp="2026-07-09T00:00:00+00:00",
+        is_coordinator=False,
+    )
+    assert build(run_id="agent-a7c77e10", **kwargs)["eval.run_id"] == "agent-a7c77e10"
+    assert build(**kwargs)["eval.run_id"] is None
+
+
 def test_record_carries_observed_and_intended_invocation():
     # ADR-0025 / COR01-WS02: the record threads the Backend × Model × ReasoningLevel
     # launch config — observed from the meta, intended a seam (None until stamped).

@@ -36,20 +36,19 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Mapping
 
 from .. import execrun, gh
 from ..agent.backend import Backend
 from ..finding import (
     CONVENTIONAL_PREFIXES,
     FIX_LABEL,
-    Finding,
     order_findings,
-    parse_severity,
     render_comment,
-    resolve_severity,
 )
 from . import ghauth
 from .diff import ReviewView
+from .schema import finding_from_dict
 
 #: The review-post logger — a child of the package ``shipit`` logger. The post
 #: (target, identity, outcome) is recorded at DEBUG/INFO; the minted installation
@@ -127,51 +126,6 @@ def _parse_hunk_new_start(header: str) -> int:
     return 1
 
 
-def _str_field(value: object) -> str:
-    """Coerce an untrusted JSON field to a ``str``, else ``""``.
-
-    The agy path has no native schema enforcement, so a comment field the schema
-    types as a string may arrive as any JSON shape. A non-string here must not
-    ride into a domain :class:`Finding` where it would crash the posting path —
-    a dict ``category`` breaks :func:`~shipit.finding.render_marker`'s ``_escape``
-    (no ``.replace``), an unhashable ``file`` breaks the ``anchorable`` lookup.
-    This is the trust boundary: every string field of the Finding it returns is
-    honestly a string.
-    """
-    return value if isinstance(value, str) else ""
-
-
-def _finding_from_dict(raw: dict) -> Finding:
-    """Map one ``REVIEW_SCHEMA`` comment dict to a domain :class:`Finding`.
-
-    The **trust boundary** from unvalidated agent JSON to a typed Finding: every
-    field is coerced to the domain type or a fail-safe, so a malformed comment
-    (the schema-unenforced agy path) can NEVER crash the downstream posting path.
-    Severity follows the fail-safe chain (:func:`shipit.finding.resolve_severity`):
-    an absent or unparseable severity lands on ``major`` — it forces a round
-    rather than slipping past the Breaker. String fields fall back to ``""``, a
-    non-int ``line`` to ``None``, a non-number ``confidence`` to ``None``.
-    """
-    line = raw.get("line")
-    confidence = raw.get("confidence")
-    return Finding(
-        # The agent's structured `severity` is adapter-layer input (a reviewer
-        # stating severity in its output), NOT a machine marker recovered from a
-        # posted body — pass the `adapter=` slot so the precedence chain reads it
-        # in the right place (ADR-0044: marker → adapter → major default).
-        severity=resolve_severity(adapter=parse_severity(raw.get("severity"))),
-        text=_str_field(raw.get("text")),
-        file=_str_field(raw.get("file")),
-        line=line if isinstance(line, int) else None,
-        category=_str_field(raw.get("category")),
-        # JSON Schema `type: number` admits an int (`1`); coerce so a Finding's
-        # confidence is honestly a float and never a bare int downstream.
-        confidence=float(confidence) if isinstance(confidence, (int, float)) else None,
-        evidence=_str_field(raw.get("evidence")),
-        fix=_str_field(raw.get("fix")),
-    )
-
-
 def _coverage_section(coverage: object) -> str:
     """Render the summary's coverage attestation as a human-facing body section:
     what was reviewed, what was skipped and why — so silence means "clean," not
@@ -243,7 +197,9 @@ def build_review_payload(
     anchorable = commentable_lines(ctx.diff)
 
     findings = order_findings(
-        _finding_from_dict(raw) for raw in review.get("comments") or []
+        finding_from_dict(raw)
+        for raw in review.get("comments") or []
+        if isinstance(raw, Mapping)
     )
 
     comments: list[dict] = []

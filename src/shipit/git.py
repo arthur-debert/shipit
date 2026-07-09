@@ -408,6 +408,34 @@ def _validated_shas(out: str) -> list[Sha] | None:
 # --------------------------------------------------------------------------
 
 
+def resolve_commit(rev: str, *, cwd: str) -> Sha | None:
+    """Resolve a revision NAME (branch, tag, sha prefix, ``HEAD~2``, …) to the
+    commit :class:`~shipit.identity.Sha` it names in ``cwd``, or ``None``.
+
+    ``git rev-parse --verify --quiet <rev>^{commit}`` as a probe: the
+    commit-range review path (RVW02-WS03 replay) takes ARBITRARY user-supplied
+    endpoints, so — unlike the PR path, whose endpoints arrive as validated
+    ``gh``-supplied oids — the raw name is resolved to a typed commit identity
+    HERE, at the one git boundary. ``None`` means "not a commit in this
+    checkout" (unknown ref, ambiguous name, a non-commit object) so the caller
+    can fail loud with its own actionable message; a launch-level failure
+    (missing git, timeout) raises :class:`ExecError` rather than collapsing
+    into that same ``None``. Output that does not validate as a full sha
+    returns ``None`` too — the adapter's conservative parse contract: nothing
+    rather than something wrong.
+    """
+    from .identity import Sha  # lazy: see module-top TYPE_CHECKING note.
+
+    result = _probe(["rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}"], cwd=cwd)
+    if not result.ok:
+        return None
+    raw = result.stdout.strip()
+    try:
+        return Sha(raw)
+    except ValueError:
+        return None
+
+
 def commit_present(sha: Sha, *, cwd: str) -> bool:
     """True if ``sha`` is a commit object reachable in ``cwd`` (no fetch).
 

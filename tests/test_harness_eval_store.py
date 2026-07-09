@@ -43,6 +43,38 @@ def test_default_store_dir_is_under_platformdirs_state(monkeypatch, tmp_path):
     assert store.store_dir() == tmp_path / "ps" / "eval"
 
 
+def test_kinds_are_sibling_subdirs_of_one_family_root(monkeypatch, tmp_path):
+    # ONE store family (RVW02-WS03): each record kind is a subdirectory of the
+    # same root, so the eval store's default location is unchanged and the
+    # review-rounds store sits beside it — never inside it.
+    monkeypatch.setattr(
+        store.platformdirs, "user_state_dir", lambda *a, **k: str(tmp_path / "ps")
+    )
+    assert store.store_dir(kind=store.EVAL_KIND) == tmp_path / "ps" / "eval"
+    assert (
+        store.store_dir(kind=store.REVIEW_ROUNDS_KIND)
+        == tmp_path / "ps" / "review-rounds"
+    )
+
+
+def test_kinds_never_share_a_store_file(tmp_path):
+    # An eval record and a review-round record of the SAME repo land in distinct
+    # files (the kind is a directory level), while one injected family root
+    # covers both — what lets the report's review-axis join resolve both stores
+    # from a single override.
+    base = tmp_path / "state"
+    repo = _repo()
+    eval_path = store.append_record({"kind": "eval"}, repo, base_dir=base)
+    round_path = store.append_record(
+        {"kind": "round"}, repo, base_dir=base, kind=store.REVIEW_ROUNDS_KIND
+    )
+    assert eval_path != round_path
+    assert base in eval_path.parents
+    assert base in round_path.parents
+    assert json.loads(eval_path.read_text()) == {"kind": "eval"}
+    assert json.loads(round_path.read_text()) == {"kind": "round"}
+
+
 def test_distinct_repos_get_distinct_store_files(tmp_path):
     base = tmp_path / "state"
     a = store.store_path(_repo(name="repo-a"), base_dir=base)
