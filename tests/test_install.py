@@ -1235,6 +1235,231 @@ def test_load_units_includes_the_sessionstart_activation_hook():
     assert iunits.SETTINGS_SESSIONSTART_MARKER in entry["hooks"][0]["command"]
 
 
+# --------------------------------------------------------------------------
+# The CDX01 Codex project layer (#603) — the thin .codex/config.toml whole-file
+# unit and the two .codex/hooks.json JSON-hook units (SessionStart + the
+# PreToolUse tool guard), riding the SAME shared `shipit hook` verbs and the
+# SAME reconcile machinery as the Claude units.
+# --------------------------------------------------------------------------
+
+#: The two Codex JSON-hook units, in catalog order (guard first).
+CODEX_HOOK_KEYS = (iunits.CODEX_PRETOOLUSE_KEY, iunits.CODEX_SESSIONSTART_KEY)
+
+
+def test_load_units_includes_the_codex_project_layer():
+    units = {u.key: u for u in iunits.load_units()}
+    # The thin config: a whole-file unit under .codex/ (repo-local; personal
+    # config layers over it from ~/.codex/config.toml, so shipit owns the file).
+    assert iunits.CODEX_CONFIG_FILE in units
+    cfg = units[iunits.CODEX_CONFIG_FILE]
+    assert cfg.kind == "file"
+    assert cfg.dest == ".codex/config.toml"
+    # The layer stays THIN: valid TOML that raises the project-doc budget so
+    # the AGENTS.md policy block is read whole — no duplicated policy prose.
+    parsed = tomllib.loads(cfg.content.decode("utf-8"))
+    assert parsed == {"project_doc_max_bytes": 65536}
+    # The two hook units: same JSON-hook splice, same events/markers as the
+    # Claude units — only the host file differs.
+    for key, event, marker in (
+        (
+            iunits.CODEX_PRETOOLUSE_KEY,
+            iunits.EVENT_PRETOOLUSE,
+            iunits.SETTINGS_HOOK_MARKER,
+        ),
+        (
+            iunits.CODEX_SESSIONSTART_KEY,
+            iunits.EVENT_SESSIONSTART,
+            iunits.SETTINGS_SESSIONSTART_MARKER,
+        ),
+    ):
+        unit = units[key]
+        assert unit.kind == "block"
+        assert unit.fmt == iunits.FMT_JSON_HOOK
+        assert unit.dest == iunits.CODEX_HOOKS_FILE
+        assert unit.event == event
+        assert unit.marker == marker
+        assert marker in json.loads(unit.desired_inner())["hooks"][0]["command"]
+
+
+def test_codex_hook_commands_adapt_env_and_keep_the_fail_postures():
+    # The ONLY Codex-specific delta is the payload/env adaptation: codex hook
+    # commands run with the session cwd, so neither entry consults
+    # $CLAUDE_PROJECT_DIR — and each keeps its Claude twin's fail posture.
+    units = {u.key: u for u in iunits.load_units()}
+
+    guard = json.loads(units[iunits.CODEX_PRETOOLUSE_KEY].desired_inner())
+    guard_cmd = guard["hooks"][0]["command"]
+    assert "CLAUDE_PROJECT_DIR" not in guard_cmd
+    # Fail CLOSED (ADR-0038): the pixi-pinned launcher chain, cwd-relative
+    # manifest pin, and the exit-2 refusal tail — never a bare `exit 0`.
+    assert "git rev-parse --show-toplevel" in guard_cmd
+    assert 'pixi run --manifest-path "$repo/pixi.toml" -- ' in guard_cmd
+    assert '"$repo/bin/shipit" hook pretooluse' in guard_cmd
+    assert "exit 2" in guard_cmd
+    assert "exit 0" not in guard_cmd
+    # No matcher: Codex tool names are not Claude's, so the entry binds to
+    # every tool event and the shared verb's is_edit_tool gate scopes the
+    # verdict (a non-edit payload is allowed through silently).
+    assert "matcher" not in guard
+
+    session = json.loads(units[iunits.CODEX_SESSIONSTART_KEY].desired_inner())
+    session_cmd = session["hooks"][0]["command"]
+    assert "CLAUDE_PROJECT_DIR" not in session_cmd
+    # Fail OPEN (additive): setup-dev-env best-effort first, the launcher
+    # probe skips cleanly, and the verb's `{"cwd": ...}` payload is JSON-encoded
+    # from the session cwd (codex supplies no Claude-shaped stdin payload).
+    assert "setup-dev-env.sh" in session_cmd
+    assert "exit 0" in session_cmd
+    assert "git rev-parse --show-toplevel" in session_cmd
+    assert "command -v python3" in session_cmd
+    assert "command -v python" in session_cmd
+    assert "json.dumps" in session_cmd
+    assert 'if [ -n "$py" ]' in session_cmd
+    assert '"$repo/bin/shipit" hook sessionstart' in session_cmd
+
+
+def test_codex_hook_units_coexist_on_one_hooks_file():
+    # Splicing both event entries into one .codex/hooks.json leaves each in its
+    # own event array — and each extracts back to its canonical entry (NOOP).
+    units = {u.key: u for u in iunits.load_units()}
+    text = ""
+    for key in CODEX_HOOK_KEYS:
+        u = units[key]
+        text = splice.splice_settings_hook(text, u.desired_inner(), u.event, u.marker)
+    hooks = json.loads(text)["hooks"]
+    assert iunits.SETTINGS_HOOK_MARKER in hooks["PreToolUse"][0]["hooks"][0]["command"]
+    assert (
+        iunits.SETTINGS_SESSIONSTART_MARKER
+        in hooks["SessionStart"][0]["hooks"][0]["command"]
+    )
+    for key in CODEX_HOOK_KEYS:
+        u = units[key]
+        got = splice.extract_settings_hook(text, u.event, u.marker)
+        assert got == iunits.canonical_hook_entry(json.loads(u.desired_inner()))
+
+
+def test_codex_config_unit_reconciles_add_noop_override(tmp_path, rec):
+    """The whole-file config rides the standard four-case reconcile: fresh
+    install ADDs it, an unchanged re-install NOOPs, a consumer edit surfaces
+    as OVERRIDE (never silently kept)."""
+
+    def decision():
+        return next(
+            d
+            for d in _plan(tmp_path).decisions
+            if d.unit.key == iunits.CODEX_CONFIG_FILE
+        )
+
+    assert decision().action == irec.ADD
+    _apply(tmp_path)
+    assert (tmp_path / ".codex" / "config.toml").read_bytes() == iunits.data_bytes(
+        "codex-config.toml"
+    )
+    assert decision().action == irec.NOOP
+    (tmp_path / ".codex" / "config.toml").write_text("project_doc_max_bytes = 1\n")
+    assert decision().action == irec.OVERRIDE
+
+
+def test_codex_hook_units_reconcile_add_noop_override(tmp_path, rec):
+    """Both hooks.json units ride the same four cases — and the OVERRIDE is
+    scoped to shipit's OWN entry: a consumer hook added beside it is not an
+    override, an edit to shipit's entry is."""
+
+    def decisions():
+        plan = _plan(tmp_path)
+        return {d.unit.key: d for d in plan.decisions if d.unit.key in CODEX_HOOK_KEYS}
+
+    assert {d.action for d in decisions().values()} == {irec.ADD}
+    _apply(tmp_path)
+    assert {d.action for d in decisions().values()} == {irec.NOOP}
+
+    hooks_path = tmp_path / ".codex" / "hooks.json"
+    data = json.loads(hooks_path.read_text())
+    # A consumer's own SessionStart hook beside shipit's: still NOOP for both.
+    data["hooks"]["SessionStart"].append(
+        {"hooks": [{"type": "command", "command": "echo consumer-own-hook"}]}
+    )
+    hooks_path.write_text(json.dumps(data, indent=2) + "\n")
+    assert {d.action for d in decisions().values()} == {irec.NOOP}
+
+    # An edit to shipit's guard entry surfaces as OVERRIDE — the sessionstart
+    # unit (its entry untouched) stays NOOP.
+    data["hooks"]["PreToolUse"][0]["hooks"][0]["command"] = (
+        "./bin/shipit hook pretooluse # defused"
+    )
+    hooks_path.write_text(json.dumps(data, indent=2) + "\n")
+    got = decisions()
+    assert got[iunits.CODEX_PRETOOLUSE_KEY].action == irec.OVERRIDE
+    assert got[iunits.CODEX_SESSIONSTART_KEY].action == irec.NOOP
+
+    # And the override write repairs shipit's entry while the consumer's own
+    # hook merges through untouched.
+    _apply(tmp_path)
+    repaired = json.loads(hooks_path.read_text())
+    assert any(
+        "echo consumer-own-hook" in h["command"]
+        for e in repaired["hooks"]["SessionStart"]
+        for h in e["hooks"]
+    )
+    assert {d.action for d in decisions().values()} == {irec.NOOP}
+
+
+def test_codex_unit_update_advances_silently_on_a_pristine_consumer(
+    tmp_path, rec, monkeypatch
+):
+    """The UPDATE case: shipit ships NEW desired content while the consumer's
+    copy still matches the stored pristine hash — the reconcile overwrites
+    silently and advances the pristine, for the config file and the hook
+    entries alike."""
+    _apply(tmp_path)
+
+    real = iunits.data_bytes
+    new_config = b"project_doc_max_bytes = 131072\n"
+    new_entry = json.dumps(
+        {"hooks": [{"type": "command", "command": "./bin/shipit hook sessionstart"}]}
+    ).encode()
+
+    def fake(*parts):
+        if parts == ("codex-config.toml",):
+            return new_config
+        if parts == ("codex-hooks-sessionstart.json",):
+            return new_entry
+        return real(*parts)
+
+    monkeypatch.setattr(iunits, "data_bytes", fake)
+    plan = _plan(tmp_path)
+    actions = {
+        d.unit.key: d.action
+        for d in plan.decisions
+        if d.unit.key in (iunits.CODEX_CONFIG_FILE, iunits.CODEX_SESSIONSTART_KEY)
+    }
+    assert actions == {
+        iunits.CODEX_CONFIG_FILE: irec.UPDATE,
+        iunits.CODEX_SESSIONSTART_KEY: irec.UPDATE,
+    }
+    _apply(tmp_path)
+    assert (tmp_path / ".codex" / "config.toml").read_bytes() == new_config
+    assert _plan(tmp_path).nothing_to_do  # pristine advanced — re-settles clean
+
+
+def test_managed_codex_layer_agrees_with_shipits_own_copies():
+    # The dogfood drift guard (the WS01 pattern): shipit's own committed
+    # .codex/ layer must match the packaged units — config byte-identical,
+    # each hooks.json entry canonical-identical — so the fleet's Codex wiring
+    # and shipit's own can never diverge silently.
+    assert (REPO_ROOT / ".codex" / "config.toml").read_bytes() == iunits.data_bytes(
+        "codex-config.toml"
+    )
+    own = (REPO_ROOT / ".codex" / "hooks.json").read_text()
+    units = {u.key: u for u in iunits.load_units()}
+    for key in CODEX_HOOK_KEYS:
+        u = units[key]
+        got = splice.extract_settings_hook(own, u.event, u.marker)
+        assert got == iunits.canonical_hook_entry(json.loads(u.desired_inner())), (
+            f"shipit's own .codex/hooks.json disagrees with the managed {key}"
+        )
+
+
 def test_managed_settings_hooks_drop_pixi_run_and_fail_open(tmp_path, rec):
     # #491: the four ADDITIVE managed .claude/settings.json hooks (sessionstart,
     # stop, subagent-stop, worktreecreate) invoke `./bin/shipit hook <phase>`

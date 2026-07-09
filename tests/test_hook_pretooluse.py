@@ -36,6 +36,107 @@ def test_coordinator_code_edit_is_denied():
     assert decision["permissionDecisionReason"] == COORDINATOR_DENY_REASON
 
 
+def test_codex_apply_patch_code_edit_is_denied():
+    payload = json.dumps(
+        {
+            "tool_name": "apply_patch",
+            "tool_input": (
+                "*** Begin Patch\n"
+                "*** Update File: src/shipit/cli.py\n"
+                "@@\n"
+                "-old\n"
+                "+new\n"
+                "*** End Patch\n"
+            ),
+        }
+    )
+    code, out = _run(payload)
+    assert code == 0
+    decision = json.loads(out)["hookSpecificOutput"]
+    assert decision["permissionDecision"] == "deny"
+    assert decision["permissionDecisionReason"] == COORDINATOR_DENY_REASON
+
+
+def test_codex_apply_patch_strips_patch_header_paths_before_classifying():
+    payload = json.dumps(
+        {
+            "tool_name": "apply_patch",
+            "tool_input": (
+                "*** Begin Patch\r\n"
+                "*** Update File: src/shipit/cli.py  \r\n"
+                "@@\r\n"
+                "-old\r\n"
+                "+new\r\n"
+                "*** End Patch\r\n"
+            ),
+        }
+    )
+    code, out = _run(payload)
+    assert code == 0
+    decision = json.loads(out)["hookSpecificOutput"]
+    assert decision["permissionDecision"] == "deny"
+
+
+def test_codex_apply_patch_denies_if_any_patched_file_is_code():
+    payload = json.dumps(
+        {
+            "tool_name": "functions.apply_patch",
+            "tool_input": {
+                "patch": (
+                    "*** Begin Patch\n"
+                    "*** Update File: README.md\n"
+                    "@@\n"
+                    "-docs\n"
+                    "+docs\n"
+                    "*** Update File: src/shipit/cli.py\n"
+                    "@@\n"
+                    "-old\n"
+                    "+new\n"
+                    "*** End Patch\n"
+                )
+            },
+        }
+    )
+    code, out = _run(payload)
+    assert code == 0
+    decision = json.loads(out)["hookSpecificOutput"]
+    assert decision["permissionDecision"] == "deny"
+
+
+def test_break_glass_logs_the_code_path_from_a_multi_file_codex_patch(
+    monkeypatch, caplog
+):
+    monkeypatch.setenv(breakglass.ENV, "1")
+    payload = json.dumps(
+        {
+            "tool_name": "apply_patch",
+            "tool_input": (
+                "*** Begin Patch\n"
+                "*** Update File: README.md\n"
+                "@@\n"
+                "-docs\n"
+                "+docs\n"
+                "*** Update File: src/shipit/cli.py\n"
+                "@@\n"
+                "-old\n"
+                "+new\n"
+                "*** End Patch\n"
+            ),
+        }
+    )
+    with caplog.at_level(logging.WARNING, logger="shipit.hook"):
+        code, out = _run(payload)
+    assert code == 0
+    assert out == ""
+    assert any(
+        "break-glass" in r.message and "src/shipit/cli.py" in r.message
+        for r in caplog.records
+    )
+    assert not any(
+        "break-glass" in r.message and "README.md" in r.message for r in caplog.records
+    )
+
+
 def test_subagent_code_edit_is_allowed_silently():
     payload = json.dumps(
         {

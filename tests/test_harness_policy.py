@@ -78,6 +78,8 @@ def test_allow_carries_no_reason():
         ("Write", True),
         ("MultiEdit", True),
         ("NotebookEdit", True),
+        ("apply_patch", True),
+        ("functions.apply_patch", True),
         ("edit", True),  # case-insensitive — a casing drift can't disarm the guard.
         ("  Write  ", True),  # surrounding whitespace tolerated.
         ("Read", False),
