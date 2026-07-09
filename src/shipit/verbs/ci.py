@@ -3,8 +3,9 @@
 ``shipit ci plan`` is the ONE planner invocation behind the block's job matrix
 (docs/prd/tol01-ci-tools.md story 15; ADR-0040: every decision the matrix
 encodes comes out of the fixture-tested planner, the block routes and nothing
-else). The pure planning — trigger ladder, thin/full scope, runner defaults —
-lives in :mod:`shipit.tools.lanes`; this module is the effectful shell:
+else). The pure planning — trigger ladder, thin/full scope, runner defaults,
+setup-pixi env-set identity, cache descriptors — lives in
+:mod:`shipit.tools.lanes`; this module is the effectful shell:
 
 - the one config read: ``.shipit.toml [lanes]`` parsed to typed
   :class:`~shipit.config.Lane` values at the boundary (ADR-0030). NO lanes
@@ -32,6 +33,7 @@ from __future__ import annotations
 import json
 import logging
 import sys
+import tomllib
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
@@ -42,6 +44,8 @@ from ..tools import lanes as lanes_mod
 from ._errors import cli_errors
 
 logger = logging.getLogger("shipit.ci")
+
+PixiTaskData = tuple[dict[str, tuple[str, ...]], dict[str, str]]
 
 
 def missing_lanes_message() -> str:
@@ -56,15 +60,17 @@ def missing_lanes_message() -> str:
     )
 
 
-def _load_lanes(root: Path) -> list[config.Lane]:
-    """The typed ``[lanes]`` declarations at ``root`` — the verb's one config
-    read. Raises :class:`~shipit.config.ConfigError` when ``.shipit.toml`` is
-    missing/malformed OR declares no lanes (:func:`missing_lanes_message`)."""
-    cfg_path = root / config.CONFIG_NAME
-    lanes = config.load_lanes(config.load(cfg_path)) if cfg_path.is_file() else []
-    if not lanes:
-        raise config.ConfigError(missing_lanes_message())
-    return lanes
+def _load_pixi_task_data(root: Path) -> PixiTaskData:
+    """Pixi task provisioning + commands from ``pixi.toml``; absent = defaults."""
+    pixi_path = root / "pixi.toml"
+    if not pixi_path.is_file():
+        return {}, {}
+    try:
+        with pixi_path.open("rb") as fh:
+            pixi = tomllib.load(fh)
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
+        raise config.ConfigError(f"malformed {pixi_path}: {exc}") from None
+    return lanes_mod.task_env_sets(pixi), lanes_mod.task_commands(pixi)
 
 
 @click.group(name="ci")
@@ -124,7 +130,13 @@ def run(
         logger.error("ci plan invocation rejected", extra={"ci_event": event})
         return 2
 
-    lanes = _load_lanes(root)
+    cfg_path = root / config.CONFIG_NAME
+    cfg = config.load(cfg_path) if cfg_path.is_file() else {}
+    lanes = config.load_lanes(cfg)
+    if not lanes:
+        raise config.ConfigError(missing_lanes_message())
+    toolchains = config.load_toolchains(cfg)
+    task_envs, task_cmds = _load_pixi_task_data(root)
 
     changed: Sequence[str] | None = None
     if normalized == lanes_mod.EVENT_PR and base_ref.strip():
@@ -144,7 +156,14 @@ def run(
                 extra={"base_ref": base_ref.strip()},
             )
 
-    jobs = lanes_mod.plan(lanes, event=normalized, changed_paths=changed)
+    jobs = lanes_mod.plan(
+        lanes,
+        event=normalized,
+        changed_paths=changed,
+        task_envs=task_envs,
+        task_cmds=task_cmds,
+        toolchains=toolchains,
+    )
     print(json.dumps([job.as_matrix_entry() for job in jobs]))
     dropped = len(lanes) - len(jobs)
     names = ", ".join(job.name for job in jobs) if jobs else "none"

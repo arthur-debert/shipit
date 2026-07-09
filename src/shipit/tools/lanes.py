@@ -28,16 +28,18 @@ The three rules, in the order they apply:
   the diff is unknown (``changed_paths=None``): uncertainty runs MORE, never
   less, so coverage survives without taxing every PR (story 16). Unscoped
   lanes always run.
-- **Routing fields** — each emitted :class:`Job` carries the lane's ``run``
+- **Routing/provisioning fields** — each emitted :class:`Job` carries the lane's ``run``
   string (the pixi task invocation the block executes: ``pixi run <run>``,
   landing in the same shipit verb a laptop runs, ADR-0039), its ``runner``
   (:data:`DEFAULT_RUNNER` when undeclared), and its ``required`` flag — the
   merge-blocking verdict travels with the job so the ``wf-checks`` block can
   run an advisory (``required = false``) lane WITHOUT feeding its failure to
   the stable ``check`` verdict (the block reads the flag; the decision was
-  made here). Declaration order is preserved — ``.shipit.toml`` order is the
-  matrix order, no re-sorting (the leg planner's contract,
-  :mod:`shipit.tools.legs`).
+  made here). It also carries the setup-pixi env-set identity and static cache
+  descriptors (CI-cache spike #582): YAML installs ``matrix.envs`` and gates
+  static cache steps on ``matrix.caches.*``; it never infers toolchain policy.
+  Declaration order is preserved — ``.shipit.toml`` order is the matrix order,
+  no re-sorting (the leg planner's contract, :mod:`shipit.tools.legs`).
 
 ``run`` is treated OPAQUELY here: it names a shipit tool or Leg invocation
 (``"test"``, ``"test rust"``, ``"changelog check"``) whose tool may land in a
@@ -57,10 +59,13 @@ shell — config read, git path-diff, JSON emission — is :mod:`shipit.verbs.ci
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import posixpath
+import shlex
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from .. import config
+from . import legs, registry
 
 #: The event vocabulary, in LADDER ORDER — most to least frequent. The same
 #: closed set as the lane ``trigger`` field (:data:`shipit.config.LANE_TRIGGERS`);
@@ -97,6 +102,23 @@ class LanePlanError(Exception):
 
 
 @dataclass(frozen=True)
+class CacheDescriptor:
+    """Cache switches the workflow block gates as static steps.
+
+    The planner owns these booleans (CI-cache spike #582; ADR-0040): YAML reads
+    ``matrix.caches.*`` and routes, but never infers whether a lane is Rust, uv,
+    or sccache-shaped.
+    """
+
+    rust: bool = False
+    sccache: bool = False
+    uv: bool = False
+
+    def as_matrix_entry(self) -> dict[str, bool]:
+        return {"rust": self.rust, "sccache": self.sccache, "uv": self.uv}
+
+
+@dataclass(frozen=True)
 class Job:
     """One emitted matrix entry: a lane routed to a CI job.
 
@@ -106,14 +128,27 @@ class Job:
     fills :data:`DEFAULT_RUNNER`); ``required`` the merge-blocking flag carried
     from the lane so the block can spare an advisory lane's failure from the
     ``check`` verdict (via ``continue-on-error``).
+
+    ``envs`` / ``envset`` are the setup-pixi provisioning identity for this
+    lane's task. ``caches`` and ``rust_workspaces`` are planner-emitted cache
+    descriptors consumed by static gated workflow steps; sccache and uv are
+    deliberately explicit false until their separate delivery stories land.
     """
 
     name: str
     run: str
     runner: str
     required: bool
+    envs: tuple[str, ...] = ("default",)
+    caches: CacheDescriptor = CacheDescriptor()
+    rust_workspaces: str = ""
 
-    def as_matrix_entry(self) -> dict[str, str | bool]:
+    @property
+    def envset(self) -> str:
+        """Stable env-set identity for cache keys and single-env PATH exports."""
+        return "+".join(self.envs)
+
+    def as_matrix_entry(self) -> dict[str, str | bool | dict[str, bool]]:
         """The GitHub ``matrix.include`` entry — the JSON hand-off shape the
         ``wf-checks`` plan job surfaces as its output. ``required`` rides along
         as a JSON boolean so the block's ``continue-on-error`` can read it."""
@@ -122,6 +157,10 @@ class Job:
             "run": self.run,
             "runner": self.runner,
             "required": self.required,
+            "envs": ",".join(self.envs),
+            "envset": self.envset,
+            "caches": self.caches.as_matrix_entry(),
+            "rust_workspaces": self.rust_workspaces,
         }
 
 
@@ -162,11 +201,172 @@ def _in_scope(path: str, scope: str) -> bool:
     return path == prefix or path.startswith(prefix + "/")
 
 
+def task_env_sets(pixi: Mapping[str, object]) -> dict[str, tuple[str, ...]]:
+    """Map pixi task name → environment set, from a parsed ``pixi.toml``.
+
+    setup-pixi installs environments, not tasks. Pixi's manifest tells us which
+    feature owns a task and which environment includes that feature; this parser
+    keeps that provisioning fact in the fixture-tested planner instead of
+    encoding it in workflow YAML. Unknown tasks default later to ``default`` so
+    a consumer with only default tasks still works.
+    """
+    task_features: dict[str, set[str]] = {}
+
+    def add_task_names(tasks: object, feature: str) -> None:
+        if not isinstance(tasks, Mapping):
+            return
+        for name in tasks:
+            task_features.setdefault(str(name), set()).add(feature)
+
+    add_task_names(pixi.get("tasks"), "default")
+    features = pixi.get("feature")
+    if isinstance(features, Mapping):
+        for feature_name, feature_spec in features.items():
+            if isinstance(feature_spec, Mapping):
+                add_task_names(feature_spec.get("tasks"), str(feature_name))
+
+    envs_by_feature: dict[str, set[str]] = {"default": {"default"}}
+    environments = pixi.get("environments")
+    if isinstance(environments, Mapping):
+        for env_name, env_spec in environments.items():
+            features_in_env: object
+            if isinstance(env_spec, Mapping):
+                features_in_env = env_spec.get("features", [])
+            else:
+                features_in_env = env_spec
+            if not isinstance(features_in_env, list):
+                continue
+            for feature in features_in_env:
+                if isinstance(feature, str):
+                    envs_by_feature.setdefault(feature, set()).add(str(env_name))
+
+    resolved: dict[str, tuple[str, ...]] = {}
+    for task, owners in task_features.items():
+        envs: set[str] = set()
+        for owner in owners:
+            envs.update(envs_by_feature.get(owner, {owner}))
+        resolved[task] = tuple(sorted(envs))
+    return resolved
+
+
+def task_commands(pixi: Mapping[str, object]) -> dict[str, str]:
+    """Map pixi task name -> command string, for best-effort Tool inference."""
+    commands: dict[str, str] = {}
+
+    def add_task_commands(tasks: object) -> None:
+        if not isinstance(tasks, Mapping):
+            return
+        for name, spec in tasks.items():
+            command = spec
+            if isinstance(spec, Mapping):
+                command = spec.get("cmd")
+            if isinstance(command, str):
+                commands[str(name)] = command
+
+    add_task_commands(pixi.get("tasks"))
+    features = pixi.get("feature")
+    if isinstance(features, Mapping):
+        for feature_spec in features.values():
+            if isinstance(feature_spec, Mapping):
+                add_task_commands(feature_spec.get("tasks"))
+    return commands
+
+
+def _lane_task(run: str) -> str:
+    """The task/tool token a lane asks pixi to run."""
+    parts = run.split()
+    return parts[0] if parts else ""
+
+
+def _shipit_invocation(
+    run: str, task_cmds: Mapping[str, str] | None = None
+) -> tuple[str, ...]:
+    """Best-effort ``shipit`` argv behind a lane's pixi run string.
+
+    Lane execution treats ``run`` as pixi-owned and opaque. Cache descriptors
+    are advisory, so they may infer a known Tool verb from either a direct run
+    (``test rust``) or a pixi task alias that wraps ``./bin/shipit``. If the
+    shape is not recognizable, return no invocation and leave caches disabled.
+    """
+    try:
+        parts = shlex.split(run)
+    except ValueError:
+        return ()
+    if not parts:
+        return ()
+    if parts[0] in registry.TOOLS:
+        return tuple(parts)
+    command = (task_cmds or {}).get(parts[0])
+    if command is None:
+        return ()
+    try:
+        command_parts = shlex.split(command)
+    except ValueError:
+        return ()
+    shipit_at: int | None = None
+    for idx, token in enumerate(command_parts):
+        if posixpath.basename(token) == "shipit":
+            shipit_at = idx
+    if shipit_at is None:
+        return ()
+    return (*command_parts[shipit_at + 1 :], *parts[1:])
+
+
+def _leg_selector(invocation: Sequence[str]) -> str | None:
+    """First non-option token after the Tool verb, ignoring passthrough args."""
+    for token in invocation[1:]:
+        if token == "--":
+            return None
+        if token.startswith("-"):
+            continue
+        return token
+    return None
+
+
+def _rust_workspaces(rust_legs: Sequence[legs.Leg]) -> str:
+    """Swatinem/rust-cache workspace mapping for rust legs using root target/."""
+    entries: list[str] = []
+    for leg in rust_legs:
+        target = "target" if leg.path == "." else posixpath.relpath("target", leg.path)
+        entries.append(f"{leg.path} -> {target}")
+    return "\n".join(entries)
+
+
+def _cache_descriptor(
+    lane: config.Lane,
+    toolchains: Sequence[config.ToolchainEntry],
+    task_cmds: Mapping[str, str] | None = None,
+) -> tuple[CacheDescriptor, str]:
+    """The planner-owned cache descriptor for one lane.
+
+    Rust is true only for Tool-verb lanes whose selected legs include a rust
+    toolchain. uv is env-carried and sccache is deferred per the cache spike, so
+    both are emitted explicitly false.
+    """
+    parts = _shipit_invocation(lane.run, task_cmds)
+    tool = parts[0] if parts else ""
+    if tool not in registry.TOOLS:
+        return CacheDescriptor(), ""
+    selector = _leg_selector(parts)
+    try:
+        planned = legs.plan_legs(toolchains, tool=tool, selector=selector)
+    except legs.LegPlanError:
+        # The lane's eventual job will fail loudly on a bad selector. The cache
+        # descriptor should not make `ci plan` stricter than the existing run
+        # contract for opaque lane strings.
+        return CacheDescriptor(), ""
+    rust_legs = [leg for leg in planned if leg.toolchain == "rust"]
+    return CacheDescriptor(rust=bool(rust_legs)), _rust_workspaces(rust_legs)
+
+
 def plan(
     lanes: Sequence[config.Lane],
     *,
     event: str,
     changed_paths: Sequence[str] | None = None,
+    task_envs: Mapping[str, Sequence[str]] | None = None,
+    task_cmds: Mapping[str, str] | None = None,
+    toolchains: Sequence[config.ToolchainEntry] = (),
 ) -> tuple[Job, ...]:
     """The ordered job matrix for ``event`` over the declared ``lanes``.
 
@@ -190,12 +390,18 @@ def plan(
             and not any(_in_scope(p, lane.scope) for p in changed_paths)
         ):
             continue  # thin: the diff never enters this lane's subtree
+        task = _lane_task(lane.run)
+        envs = tuple((task_envs or {}).get(task, ("default",)))
+        caches, rust_workspaces = _cache_descriptor(lane, toolchains, task_cmds)
         jobs.append(
             Job(
                 name=lane.name,
                 run=lane.run,
                 runner=lane.runner or DEFAULT_RUNNER,
                 required=lane.required,
+                envs=envs,
+                caches=caches,
+                rust_workspaces=rust_workspaces,
             )
         )
     return tuple(jobs)
