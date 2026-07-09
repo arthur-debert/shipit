@@ -269,12 +269,8 @@ def derive_plans(
 
     return (
         ToolPlan("lint", True),
-        plan(
-            "test", legs_declared, "no testable leg declared (empty [toolchains] map)"
-        ),
-        plan(
-            "build", legs_declared, "no buildable leg declared (empty [toolchains] map)"
-        ),
+        plan("test", legs_declared, "no testable leg declared (no [toolchains] map)"),
+        plan("build", legs_declared, "no buildable leg declared (no [toolchains] map)"),
         plan("e2e", e2e_declared, "no e2e harness declared (no [artifacts] e2e table)"),
         plan("changelog", changelog_dir, f"no {CHANGELOG_DIR}/ fragment convention"),
     )
