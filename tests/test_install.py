@@ -14,6 +14,7 @@ The layout mirrors the promoted seam (ADR-0030):
 """
 
 import json
+import logging
 import os
 import shutil
 import stat
@@ -3567,6 +3568,21 @@ def test_matching_changelog_projection_is_not_work(tmp_path):
     _changelog_consumer(tmp_path)
     (tmp_path / "CHANGELOG.md").write_text(render_current(tmp_path))
     assert not _plan(tmp_path).rerender_changelog
+
+
+def test_unreadable_changelog_projection_fails_open_not_stale(tmp_path, caplog):
+    # gather() runs this advisory read unconditionally, so an unreadable
+    # committed CHANGELOG.md (here a non-UTF-8 file → UnicodeDecodeError, which
+    # crashes inside render_current's own read; an OSError degrades the same
+    # way) must fail OPEN to "not stale" with a warning, never crash `shipit
+    # install` on a file it only inspects.
+    _changelog_consumer(tmp_path)
+    (tmp_path / "CHANGELOG.md").write_bytes(b"\xff\xfe not valid utf-8\n")
+    with caplog.at_level(logging.WARNING):
+        assert irec._changelog_stale(tmp_path) is False
+        # And the whole gather → reconcile pipeline stays upright, not stale.
+        assert not _plan(tmp_path).rerender_changelog
+    assert any("unreadable CHANGELOG projection" in r.message for r in caplog.records)
 
 
 def test_repo_without_the_fragment_convention_never_rerenders(tmp_path):

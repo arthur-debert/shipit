@@ -693,16 +693,36 @@ def _changelog_stale(root: Path) -> bool:
     returns ``None`` there). Imported at call time: the verb module wears the
     ``_errors`` CLI shell, whose import chain leads back into this package (the
     same cycle the selfcert lint import breaks lazily).
+
+    Fails OPEN on an unreadable projection, like :func:`_read_lefthook_local`
+    and the manifest reads: :func:`gather` runs this advisory read
+    unconditionally, so an ``OSError`` (a permission denial, a mid-read unlink)
+    or a non-UTF-8 file anywhere in the changelog inspection — the committed
+    ``CHANGELOG.md`` OR a ``CHANGELOG/`` fragment ``render_current`` reads —
+    degrades to "not stale" with a logged warning rather than crashing ``shipit
+    install`` on files it only inspects. The catch lives at THIS advisory
+    boundary, not in ``render_current``, so the ``changelog`` verb (for which
+    the render is the primary operation, not an aside) still fails loud.
     """
     from ..verbs.changelog import render_current
 
-    rendered = render_current(root)
-    if rendered is None:
+    try:
+        rendered = render_current(root)
+        if rendered is None:
+            return False
+        committed_path = root / CHANGELOG_FILE
+        committed = (
+            committed_path.read_text(encoding="utf-8")
+            if committed_path.is_file()
+            else None
+        )
+    except (OSError, UnicodeDecodeError):
+        logger.warning(
+            "ignoring unreadable CHANGELOG projection — treating as not stale",
+            exc_info=True,
+            extra={"root": str(root)},
+        )
         return False
-    committed_path = root / CHANGELOG_FILE
-    committed = (
-        committed_path.read_text(encoding="utf-8") if committed_path.is_file() else None
-    )
     return sync_diff(rendered, committed) is not None
 
 
