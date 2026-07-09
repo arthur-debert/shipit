@@ -227,6 +227,8 @@ LINT_TOOLS = (
     "yamllint",
     "prettier",
     "markdownlint-cli",
+    # The GitHub Actions workflow gate — the actions Lang (TOL01-WS04 #553).
+    "actionlint",
     "lefthook",
 )
 
