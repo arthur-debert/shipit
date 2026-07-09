@@ -155,7 +155,11 @@ def _finding_from_dict(raw: dict) -> Finding:
     line = raw.get("line")
     confidence = raw.get("confidence")
     return Finding(
-        severity=resolve_severity(parse_severity(raw.get("severity"))),
+        # The agent's structured `severity` is adapter-layer input (a reviewer
+        # stating severity in its output), NOT a machine marker recovered from a
+        # posted body — pass the `adapter=` slot so the precedence chain reads it
+        # in the right place (ADR-0044: marker → adapter → major default).
+        severity=resolve_severity(adapter=parse_severity(raw.get("severity"))),
         text=_str_field(raw.get("text")),
         file=_str_field(raw.get("file")),
         line=line if isinstance(line, int) else None,
