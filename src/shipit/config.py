@@ -419,6 +419,10 @@ def _parse_build_target(where: str, spec: object) -> BuildTarget:
     from .tools import registry  # lazy — config stays import-light at module load
 
     if isinstance(spec, str):
+        if not spec:
+            raise ConfigError(
+                f"{where}: build target must be a non-empty toolchain name"
+            )
         name, package, version_var = spec, None, None
     elif isinstance(spec, dict):
         _reject_unknown_keys(where, spec, ("toolchain", "package", "version-var"))
@@ -436,6 +440,15 @@ def _parse_build_target(where: str, spec: object) -> BuildTarget:
             not isinstance(version_var, str) or not version_var
         ):
             raise ConfigError(f"{where}: version-var must be a non-empty string")
+        if isinstance(version_var, str) and any(ch.isspace() for ch in version_var):
+            # version-var rides go's -ldflags -X value (a single token the go
+            # tool re-splits on whitespace), so whitespace would fragment it
+            # into stray tokens/flags — refused at parse (ADR-0041), the same
+            # class as a whitespace `--version`.
+            raise ConfigError(
+                f"{where}: version-var must not contain whitespace "
+                "(it rides go's -ldflags -X value, ADR-0041)"
+            )
     else:
         raise ConfigError(
             f"{where} must be a toolchain name or an inline table, e.g. "

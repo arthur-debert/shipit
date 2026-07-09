@@ -194,6 +194,25 @@ def test_injection_extends_a_joined_form_ldflags_value():
     assert step.argv == ("go", "build", "-ldflags=-s -w -X p.V=3.1.0")
 
 
+def test_injection_extends_the_last_ldflags_when_several_are_present():
+    # go takes the LAST -ldflags, so when an override/passthrough adds a second
+    # one the injection must ride THAT one — extending an earlier flag would let
+    # go's own last-wins rule silently discard the injected -X.
+    leg = _leg("go", argv=("go", "build", "-ldflags", "-s -w", "-ldflags=-w"))
+    (step,) = build_mod.plan_build(
+        [leg],
+        [_artifact("x", config.BuildTarget(toolchain="go", version_var="p.V"))],
+        version="9.9.9",
+    )
+    assert step.argv == (
+        "go",
+        "build",
+        "-ldflags",
+        "-s -w",
+        "-ldflags=-w -X p.V=9.9.9",
+    )
+
+
 # --------------------------------------------------------------------------
 # Passthrough interplay: the planner narrows AFTER plan_legs appended args
 # --------------------------------------------------------------------------
