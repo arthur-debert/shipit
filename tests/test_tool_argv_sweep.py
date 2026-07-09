@@ -56,6 +56,10 @@ def _parsed(path: pathlib.Path) -> ast.Module:
 #:   point. ``npm`` has a second sanctioned home: the Tree provisioner's
 #:   frozen node install (``npm ci``, :mod:`shipit.tree.create` #543) —
 #:   provisioning-side, a different concern from the producing dispatch.
+#: - ``bin/check-e2e`` — the e2e harness registry's bats default
+#:   (TOL01-WS03): the script head is assembled ONLY in the closed harness
+#:   registry (:mod:`shipit.tools.e2e`); a declared ``e2e.harness`` argv is
+#:   consumer DATA, never a second assembly point.
 _ADAPTER_HOMES: dict[str, tuple[str, ...]] = {
     "gh": ("gh.py",),
     "git": ("git.py",),
@@ -67,6 +71,7 @@ _ADAPTER_HOMES: dict[str, tuple[str, ...]] = {
     "pytest": ("tools/registry.py",),
     "npm": ("tools/registry.py", "tree/create.py"),
     "uv": ("tools/registry.py",),
+    "bin/check-e2e": ("tools/e2e.py",),
 }
 
 

@@ -17,6 +17,7 @@ import click
 from . import __version__, buildid, events, logcontext
 from .logsetup import configure_logging, reset_logging
 from .verbs import build as build_verb
+from .verbs import e2e as e2e_verb
 from .verbs import gh_setup, install, lint, logs, verify_apps
 from .verbs import test as test_verb
 from .verbs._context import resolve_root_context
@@ -237,6 +238,25 @@ def build_cmd(version: str | None, args: tuple[str, ...]) -> None:
     hard-fails, never skips), 2 usage.
     """
     raise SystemExit(build_verb.run(list(args), version=version))
+
+
+@root.command(name="e2e", context_settings={"ignore_unknown_options": True})
+@click.argument("args", nargs=-1, type=click.UNPROCESSED)
+def e2e_cmd(args: tuple[str, ...]) -> None:
+    """Run this repo's declared e2e harnesses: `shipit e2e [ARTIFACT] [-- ARGS...]`.
+
+    The artifact-consuming tool: for every `[artifacts.<name>]` declaring an
+    `e2e` table, resolves the artifact's binary (locally built via the repo's
+    build legs — the artifact-source seam's one source today), injects its
+    absolute path into the declared harness (default: the repo's
+    bin/check-e2e bats runner) as `<NAME>_BIN`, and runs the harness from the
+    repo root. No e2e declaration means no e2e lane: reports and exits 0.
+    ARTIFACT selects one declared artifact; args after `--` are forwarded
+    verbatim to that harness and require exactly one selected artifact.
+    Exit: 0 all harnesses pass, 1 any fails or its artifact can't be built,
+    2 usage.
+    """
+    raise SystemExit(e2e_verb.run(list(args)))
 
 
 # The `logs` reader (LOG01/LOG04, promoted onto the ADR-0030 contract in
