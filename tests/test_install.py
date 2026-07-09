@@ -2765,6 +2765,26 @@ def test_activation_output_joins_streams_with_newline(tmp_path):
 # consumer, and its hash pins the packaged manifest to real historical content.
 PRISTINE_WORKFLOW = Path(__file__).parent / "data" / "copilot-review-pristine.yml"
 RETIRED_WORKFLOW_PATH = ".github/workflows/copilot-review.yml"
+RETIRED_SKILL_HASHES = {
+    "skills/shipit-planning/SKILL.md": (
+        "sha256:a16ac4744238b3a5b59da8a887bb6268742fd01a8a285797e0198aba49e44336"
+    ),
+    "skills/shipit-grill-with-docs/SKILL.md": (
+        "sha256:47c25fe56510de6a63da1de9121ef9b6704808f3631d43c7f9ee745f2c32ff62"
+    ),
+    "skills/shipit-grill-with-docs/ADR-FORMAT.md": (
+        "sha256:f1f36cd3f8d3b6474ddd5855da4e233bfc4ae1a1c5024909ccf11871819a41b2"
+    ),
+    "skills/shipit-grill-with-docs/CONTEXT-FORMAT.md": (
+        "sha256:886ce0e96fd0f76f4c72c337c049cf4655227c599862ce920a62297e0929beae"
+    ),
+    "skills/shipit-to-prd/SKILL.md": (
+        "sha256:4bdf82e153221545c8340744a5def096316c0cf88f0db9548a373bce6f91d0c1"
+    ),
+    "skills/shipit-to-issues/SKILL.md": (
+        "sha256:e623a477ad4d81c042b5bbc20fead9cd208b1c73cb35d2954b1fdcd7303d9474"
+    ),
+}
 
 
 def test_decide_retired_covers_the_matrix():
@@ -2836,6 +2856,13 @@ def test_retired_manifest_carries_the_copilot_workflow_history():
     assert fixture_hash in entry.pristine_hashes
 
 
+def test_retired_manifest_carries_the_renamed_skill_history():
+    retired = {r.path: r for r in irec.load_retired()}
+
+    for path, expected_hash in RETIRED_SKILL_HASHES.items():
+        assert retired[path].pristine_hashes == (expected_hash,)
+
+
 def test_install_deletes_a_pristine_retired_file(tmp_path, rec):
     # End-to-end: a checkout that still has a pristine copy of the retired
     # workflow sheds it on install, and the Plan/report both carry the outcome.
@@ -2848,6 +2875,25 @@ def test_install_deletes_a_pristine_retired_file(tmp_path, rec):
     assert f"delete   {RETIRED_WORKFLOW_PATH} (retired)" in verb.format_plan(plan)
     _apply(tmp_path)
     assert not victim.exists()
+
+
+def test_install_deletes_a_pristine_retired_skill_file(tmp_path, rec):
+    # A consumer upgrading across the skill rename sheds the old path when its
+    # content is a known pristine copy, while the new skill path is installed.
+    retired_path = "skills/shipit-grill-with-docs/ADR-FORMAT.md"
+    source = Path("skills/grill-me-with-docs/ADR-FORMAT.md")
+    assert (
+        config.content_hash(source.read_bytes()) == RETIRED_SKILL_HASHES[retired_path]
+    )
+    victim = tmp_path / retired_path
+    victim.parent.mkdir(parents=True)
+    victim.write_bytes(source.read_bytes())
+
+    plan = _plan(tmp_path)
+    assert retired_path in [d.retired.path for d in plan.retire_deletes]
+    _apply(tmp_path)
+    assert not victim.exists()
+    assert (tmp_path / "skills/grill-me-with-docs/ADR-FORMAT.md").is_file()
 
 
 def test_install_keeps_a_modified_retired_file_with_warning(tmp_path, rec):

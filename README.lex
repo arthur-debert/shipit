@@ -30,7 +30,7 @@ Scope
       1.2 Copies the skills.
       1.3. Copies the lefthook config.
       1.4. Stores a .shipit.toml file recording the shipit version (commit hash) that installed it and the per-file pristine hashes used for reconciliation.
-      1.5 Sets up git commit hooks to run lefthook on pre-commit and pre-push.
+      1.5 Sets up git hooks to run lefthook on pre-commit, post-commit, and pre-push.
       1.6 Adds to AGENTS.md a section on how the development workflow works (AGENTS.lex) and a short pixi command reference for shipit commands.
 
       This is the same command for fresh installs and updates.
@@ -44,16 +44,8 @@ Scope
 
         shipit splits what it manages by how often it changes.
 
-        - Slow + file-structure-dependent (the bootstrap, the lefthook
-          caller, the skills, the AGENTS.md block) is committed into the
-          consumer. On re-install, shipit hash-compares each managed file
-          against the pristine hash stored in .shipit.toml at the last
-          install. Unchanged files are overwritten silently; a
-          consumer-edited file is surfaced in the PR (showing the override),
-          never clobbered and never admin-pushed.
-        - Fast-changing code (PR-review adapters, bug fixes) ships through
-          the pixi-installed `shipit` package, so it lands without per-repo
-          file churn.
+        - Slow + file-structure-dependent (the bootstrap, the lefthook caller, the skills, the AGENTS.md block) is committed into the consumer. On re-install, shipit hash-compares each managed file against the pristine hash stored in .shipit.toml at the last install. Unchanged files are overwritten silently; a consumer-edited file is surfaced in the PR (showing the override), never clobbered and never admin-pushed.
+        - Fast-changing code (PR-review adapters, bug fixes) ships through the pixi-installed `shipit` package, so it lands without per-repo file churn.
 
         See [./docs/dev/architecture.lex] for why this split holds and how
         it interacts with pixi.lock pinning.
@@ -97,39 +89,12 @@ Scope
 
         The surface is four verbs:
 
-        - `shipit tree create` provisions a ready Tree — its own clone, on a
-          fresh branch, deps installed, gitignored-but-needed files copied in —
-          then prints a READY summary. It takes exactly one of three shapes:
-          `--issue N [--session S]` (branch `issues/<n>/<session>`, session
-          default `work`, cut from `origin/main`), `--epic E --ws N` (branch
-          `E/WSnn`, cut from `origin/E/umbrella`), or `--branch NAME` (verbatim,
-          cut from `origin/main`).
-        - `shipit tree list` renders the whole fleet — path, branch, base, age,
-          dirty?, PR state — derived purely by scanning the central root (no
-          manifest). A Tree whose PR state cannot be read shows `UNKNOWN`,
-          distinct from a Tree with no PR.
-        - `shipit tree remove <target>` deletes one Tree by path or directory
-          name. A clean, fully-pushed Tree is a disposable clone, so it is
-          removed without a prompt; but when the delete would discard work
-          living ONLY in that clone — uncommitted changes or unpushed commits —
-          it is gated behind a confirmation. `--yes`/`-y` skips that prompt;
-          without a TTY and without `--yes` a risky remove is refused rather
-          than silently destroying work — so a non-interactive caller must
-          pass `--yes` explicitly to remove such a Tree.
-        - `shipit tree gc` sweeps the fleet conservatively — it removes only
-          Trees whose PR is merged, working tree clean, nothing unpushed, and
-          aged past a threshold; ambiguous ones are listed as stale, never
-          auto-removed. `--dry-run` previews the exact removable/stale/keep
-          partition the real sweep would act on and deletes nothing;
-          `--threshold <duration>` (e.g. `14d`, `36h`) overrides the default
-          14-day age boundary. A Tree whose PR state is `UNKNOWN` is treated as
-          stale (never auto-removed), and the sweep reports
-          `swept N of M; K skipped (state unknown)` whenever any was seen.
+        - `shipit tree create` provisions a ready Tree — its own clone, on a fresh branch, deps installed, gitignored-but-needed files copied in — then prints a READY summary. It takes exactly one of three shapes: `--issue N [--session S]` (branch `issues/<n>/<session>`, session default `work`, cut from `origin/main`), `--epic E --ws N` (branch `E/WSnn`, cut from `origin/E/umbrella`), or `--branch NAME` (verbatim, cut from `origin/main`).
+        - `shipit tree list` renders the whole fleet — path, branch, base, age, dirty?, PR state — derived purely by scanning the central root (no manifest). A Tree whose PR state cannot be read shows `UNKNOWN`, distinct from a Tree with no PR.
+        - `shipit tree remove <target>` deletes one Tree by path or directory name. A clean, fully-pushed Tree is a disposable clone, so it is removed without a prompt; but when the delete would discard work living ONLY in that clone — uncommitted changes or unpushed commits — it is gated behind a confirmation. `--yes`/`-y` skips that prompt; without a TTY and without `--yes` a risky remove is refused rather than silently destroying work — so a non-interactive caller must pass `--yes` explicitly to remove such a Tree.
+        - `shipit tree gc` sweeps the fleet conservatively — it removes only Trees whose PR is merged, working tree clean, nothing unpushed, and aged past a threshold; ambiguous ones are listed as stale, never auto-removed. `--dry-run` previews the exact removable/stale/keep partition the real sweep would act on and deletes nothing; `--threshold <duration>` (e.g. `14d`, `36h`) overrides the default 14-day age boundary. A Tree whose PR state is `UNKNOWN` is treated as stale (never auto-removed), and the sweep reports `swept N of M; K skipped (state unknown)` whenever any was seen.
 
-        See [./docs/prd/where-to-do-work.md] for the full design, and
-        [./docs/adr/0014-trees-dissociated-clones-central-root.md] +
-        [./docs/adr/0015-tree-artifacts-per-tree-target-sccache.md] for the
-        clone-over-worktree and per-Tree-cache rationale.
+        For the full design, see [./docs/prd/where-to-do-work.md]. For clone-over-worktree rationale, see [./docs/adr/0014-trees-dissociated-clones-central-root.md]. For per-Tree-cache rationale, see [./docs/adr/0015-tree-artifacts-per-tree-target-sccache.md].
 
   2. PR Reviews
 
@@ -166,14 +131,9 @@ Scope
 
   See Also
 
-    - [./docs/dev/architecture.lex] — the load-bearing design decisions and
-      their rationale (pixi as substrate, the slow/fast split, the
-      pixi-task / workflow-YAML boundary, the .shipit.toml config).
-    - [./docs/dev/workflows.lex] — the composable CI design (the decomposed
-      build → package → sign → release pipeline and its invariants).
-    - [./docs/prd/FUTURE_WORK.md] — the high-level map of shipped + planned
-      work (the retired roadmap's successor).
+    - [./docs/dev/architecture.lex] — the load-bearing design decisions and their rationale (pixi as substrate, the slow/fast split, the pixi-task / workflow-YAML boundary, the .shipit.toml config).
+    - [./docs/dev/workflows.lex] — the composable CI design (the decomposed build → package → sign → release pipeline and its invariants).
+    - [./docs/prd/FUTURE_WORK.md] — the high-level map of shipped + planned work (the retired roadmap's successor).
     - [./AGENTS.lex] — the dev-cycle and PR-review policy agents follow.
-
 
 
