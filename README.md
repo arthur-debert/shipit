@@ -12,7 +12,7 @@ This README first walks that lifecycle end to end, then maps the machinery under
 
 ### 1.1. Session start
 
-A coordinator session launches inside its own ephemeral `session Tree` — `claude --worktree`, usually via `claude-start` — born on an `ephemeral/<id>` branch cut from `origin/main` (ADR-0027). The SessionStart hook verifies provisioning and the repo's shipit pin (ADR-0033). To orient on what has already happened, `shipit logs --flow --session current` renders the session's story from the dev-cycle event log; `--epic CODE` renders an epic's.
+A coordinator session launches inside its own ephemeral `session Tree` — `claude --worktree`, usually via `claude-start` — born on an `ephemeral/<id>` branch cut from `origin/main` by the WorktreeCreate hook (ADR-0027). The SessionStart hook activates the repo toolchain and surfaces shipit-pin staleness as advisory context (ADR-0033). To orient on what has already happened, `shipit logs --flow --session current` renders the session's story from the dev-cycle event log; `--epic CODE` renders an epic's.
 
 The coordinator's role is fixed by policy, not convention: it orchestrates and delegates, never implements. Role-scoped prompts (ADR-0011) and fail-closed hooks (ADR-0038) enforce the split.
 

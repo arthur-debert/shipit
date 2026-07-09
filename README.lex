@@ -22,9 +22,10 @@ underneath it and how a repo gets onto shipit. Domain vocabulary:
 
         A coordinator session launches inside its own ephemeral `session Tree`
         — `claude --worktree`, usually via `claude-start` — born on an
-        `ephemeral/<id>` branch cut from `origin/main` (ADR-0027). The
-        SessionStart hook verifies provisioning and the repo's shipit pin
-        (ADR-0033). To orient on what has already happened,
+        `ephemeral/<id>` branch cut from `origin/main` by the WorktreeCreate
+        hook (ADR-0027). The SessionStart hook activates the repo toolchain
+        and surfaces shipit-pin staleness as advisory context (ADR-0033). To
+        orient on what has already happened,
         `shipit logs --flow --session current` renders the session's story
         from the dev-cycle event log; `--epic CODE` renders an epic's.
 
