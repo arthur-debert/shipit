@@ -243,7 +243,6 @@ def build_cmd(version: str | None, args: tuple[str, ...]) -> None:
     raise SystemExit(build_verb.run(list(args), version=version))
 
 
-<<<<<<< HEAD
 @root.command(name="e2e", context_settings={"ignore_unknown_options": True})
 @click.argument("args", nargs=-1, type=click.UNPROCESSED)
 def e2e_cmd(args: tuple[str, ...]) -> None:
@@ -261,12 +260,12 @@ def e2e_cmd(args: tuple[str, ...]) -> None:
     2 usage.
     """
     raise SystemExit(e2e_verb.run(list(args)))
-=======
+
+
 # The nested `changelog` group (TOL01-WS06) — the language-agnostic
 # release-notes tool over CHANGELOG/ fragments: the PR-time fragment-sync
 # `check` (the changelog-sync lane's run) and the cut-time `coalesce`.
 root.add_command(changelog_group)
->>>>>>> refs/remotes/origin/TOL01_WS02
 
 
 # The `logs` reader (LOG01/LOG04, promoted onto the ADR-0030 contract in
