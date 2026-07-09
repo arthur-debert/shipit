@@ -247,8 +247,13 @@ def run(
                 },
             )
         runs.append(LegRun(leg, rc, out))
-        if out.strip():
-            print(out.rstrip())
+        if out:
+            # The runner's report prints VERBATIM (unlike lint, which swallows a
+            # green run): emit exactly what the leg produced, normalizing only
+            # the trailing newline — add one when it's missing so the ok/FAIL
+            # line starts on its own line, keep the runner's own when present so
+            # it is never doubled.
+            print(out, end="" if out.endswith("\n") else "\n")
         print(f"  {'ok  ' if rc == 0 else 'FAIL'} {leg.label} ({command})")
 
     if runs_out is not None:

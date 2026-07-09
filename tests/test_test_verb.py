@@ -129,6 +129,17 @@ def test_leg_output_prints_verbatim_even_when_green(tauri_repo, capsys):
     assert "12 tests run: 12 passed" in capsys.readouterr().out
 
 
+def test_leg_output_is_verbatim_and_the_trailing_newline_is_not_doubled(
+    python_repo, capsys
+):
+    # Multi-line report preserved intact; the runner's own trailing newline is
+    # kept (not doubled) and the ok line follows on its own line.
+    rec = _Recorder(outcomes={"pytest": (0, "line one\nline two\n")})
+    assert test_verb.run((), run_leg=rec) == 0
+    out = capsys.readouterr().out
+    assert "line one\nline two\n  ok   python (.)" in out
+
+
 def test_selector_with_passthrough_places_args_verbatim_at_the_end(tauri_repo, capsys):
     rec = _Recorder()
     rc = test_verb.run(("rust", "--no-capture", "-E", "test(x)"), run_leg=rec)
