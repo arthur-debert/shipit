@@ -54,7 +54,8 @@ in any repo. Two mechanisms, both here, enforce it:
   beachhead #493 it generalizes). A ``{config}`` placeholder in the fragment
   receives the canonical config PATH at argv-build time, resolved by
   :func:`_canonical_config` (WS03 #516) to the SHIPPED body under ``shipit/data``
-  (``ruff.toml``, ``prettierrc.yaml``, ``markdownlint.yaml``, ``yamllint.yaml``).
+  (``ruff.toml``, ``prettierrc.yaml``, ``markdownlint.yaml``, ``yamllint.yaml``,
+  ``actionlint.yaml``).
   The path is the packaged data file — NOT a repo-tracked copy — so injection
   fires in ANY tree, including one that has not yet adopted the config: that is
   what blocks an ANCESTOR-directory config file (which the env scrub below does
@@ -275,13 +276,31 @@ class Tool:
 
 @dataclass(frozen=True)
 class Lang:
-    """A language leg: how files map to it, and the tools that check it."""
+    """A language leg: how files map to it, and the tools that check it.
+
+    Two routing forms (TOL01-WS04 #553). An ORDINARY Lang (``path_prefixes``
+    empty) claims files repo-wide by extension (else shebang) — the exclusive
+    route :func:`lang_for` resolves, one Lang per file. A PATH-CLAIMING Lang
+    (``path_prefixes`` set) instead claims files DIRECTLY in its declared
+    repo-relative directory prefixes — immediate children only, never a nested
+    subdirectory, because GitHub reads workflows non-recursively — IN ADDITION
+    to whatever ordinary Lang the extension route gives them
+    (:func:`path_claimed_langs` / :func:`route`): a workflow
+    file under ``.github/workflows/`` routes to BOTH the yaml Lang (yamllint)
+    and the actions Lang (actionlint) — the path claim is additive, never a
+    hand-off. For a path-claiming Lang, ``extensions`` SCOPES the claim (which
+    files under the claimed prefix belong to it) rather than claiming the
+    extension repo-wide — :func:`lang_for` skips path-claiming Langs entirely.
+    """
 
     name: str
     extensions: tuple[str, ...]
     tools: tuple[Tool, ...]
     shebangs: tuple[str, ...] = ()  # interpreter basenames for extensionless files
     manifests: tuple[str, ...] = ()  # manifest basenames rooting per_manifest runs
+    # Repo-relative directory prefixes this Lang claims by PATH, additive to the
+    # extension route (see class docstring). Empty for every ordinary Lang.
+    path_prefixes: tuple[str, ...] = ()
     # Extensions whose formatting needs a `.prettierrc`-named plugin resolved from
     # `node_modules` (`.svelte` → prettier-plugin-svelte). They are batched into
     # their OWN tool invocation, apart from the plugin-free extensions, so the
@@ -419,8 +438,34 @@ YAML = Lang(
     # yamllint takes its config as a FILE via `-c <path>`; pin to the canonical
     # one (ADR-0037) — the already-managed `shipit/data/yamllint.yaml`, confirmed
     # as canonical in WS03 (#516) and now resolved by `_canonical_config`. This is
-    # also the gate for GitHub Actions workflows (`.yml`).
+    # also the gate for GitHub Actions workflows (`.yml`) — the ACTIONS Lang below
+    # is ADDITIVE (actionlint on top of yamllint), never a hand-off.
     tools=(Tool("yamllint", ("--strict",), config_inject=("-c", CONFIG_PLACEHOLDER)),),
+)
+ACTIONS = Lang(
+    name="actions",
+    # The first PATH-CLAIMING Lang (TOL01-WS04 #553, PRD story 17): workflow
+    # YAML is identified by WHERE it lives, not by a dedicated extension, so the
+    # claim is the GitHub Actions workflow directory. `extensions` here SCOPES
+    # the claim to the workflow files themselves (GitHub only reads `.yml`/
+    # `.yaml` in that directory) — a stray `README.md` under `.github/workflows/`
+    # is never handed to actionlint — and claims NOTHING repo-wide (`lang_for`
+    # skips path-claiming Langs; repo-wide `.yml` stays the yaml Lang's). A
+    # claimed file routes to BOTH Langs: yamllint keeps its coverage, actionlint
+    # adds the workflow semantics (unknown runner labels, expression typos,
+    # shellcheck over embedded `run:` scripts — that hand-off rides the same
+    # scrubbed env as every tool, so `SHELLCHECK_OPTS` is already blocked).
+    extensions=(".yml", ".yaml"),
+    path_prefixes=(".github/workflows/",),
+    # actionlint takes its config as a FILE via `-config-file <path>` (Go-style
+    # single-dash flag); pin to the canonical `shipit/data/actionlint.yaml`
+    # (ADR-0037), resolved by `_canonical_config`. Injection is what blocks a
+    # repo-tracked `.github/actionlint.yaml` (actionlint's auto-discovery, rooted
+    # at the `.git` project root) from moving the verdict — the gate owns the
+    # config, and for actionlint even the REPO'S OWN copy is ambient (unlike the
+    # editorconfig pin's honor-tracked carve-out). No safe in-place fix exists,
+    # so it is check-only in both modes.
+    tools=(Tool("actionlint", (), config_inject=("-config-file", CONFIG_PLACEHOLDER)),),
 )
 WEB = Lang(
     name="web",
@@ -493,7 +538,7 @@ LEX = Lang(
     tools=(Tool("lexd", ("check",)),),
 )
 
-LANGS: tuple[Lang, ...] = (PYTHON, RUST, SHELL, YAML, WEB, MARKDOWN, LEX)
+LANGS: tuple[Lang, ...] = (PYTHON, RUST, SHELL, YAML, ACTIONS, WEB, MARKDOWN, LEX)
 
 
 # --------------------------------------------------------------------------
@@ -506,16 +551,23 @@ def _basename(path: str) -> str:
 
 
 def lang_for(path: str, shebang: str | None = None) -> Lang | None:
-    """The language a file routes to — by extension, else by shebang interpreter.
+    """The ORDINARY language a file routes to — by extension, else by shebang
+    interpreter.
 
     Extensionless scripts route by their shebang's interpreter basename (release
     routes shell this way; mirror it). A file matching nothing is unmanaged.
+
+    Path-claiming Langs (``Lang.path_prefixes``, TOL01-WS04 #553) are SKIPPED
+    here: their ``extensions`` scope the path claim, they never claim an
+    extension repo-wide — a `.yml` outside `.github/workflows/` must stay the
+    yaml Lang's alone. The additive path route is :func:`path_claimed_langs`;
+    :func:`route` composes both.
     """
     name = _basename(path)
     if "." in name:
         ext = "." + name.rsplit(".", 1)[-1]
         for lang in LANGS:
-            if ext in lang.extensions:
+            if not lang.path_prefixes and ext in lang.extensions:
                 return lang
         return None
     interp = _interp(shebang)
@@ -524,6 +576,44 @@ def lang_for(path: str, shebang: str | None = None) -> Lang | None:
             if interp in lang.shebangs:
                 return lang
     return None
+
+
+def _in_dir(path: str, prefix: str) -> bool:
+    """``path`` sits DIRECTLY in directory ``prefix`` (a trailing-slash,
+    repo-relative dir) — an immediate child, not a nested subdirectory. The
+    claim is non-recursive to mirror GitHub, which runs workflows only from the
+    immediate ``.github/workflows/`` directory (TOL01-WS04 #553)."""
+    if not path.startswith(prefix):
+        return False
+    return "/" not in path[len(prefix) :]
+
+
+def path_claimed_langs(path: str) -> list[Lang]:
+    """Every path-claiming Lang that claims ``path`` — the ADDITIVE route
+    (TOL01-WS04 #553), in registry order. Pure (no I/O).
+
+    A Lang claims a path when the path sits DIRECTLY in one of its declared
+    repo-relative directory ``path_prefixes`` — an immediate child, never a
+    nested subdirectory — AND, when the Lang declares ``extensions``, the
+    file's extension is among them (the extensions SCOPE the claim; see
+    :class:`Lang`). The match is non-recursive because GitHub reads workflows
+    only from the immediate ``.github/workflows/`` directory: an archived
+    ``.github/workflows/old/ci.yml`` is a file GitHub never runs, so actionlint
+    must not claim it either. Additive: the caller (:func:`route`) buckets a
+    claimed path here IN ADDITION to its :func:`lang_for` route, so a workflow
+    file keeps its yamllint coverage while gaining actionlint's. ``paths`` are
+    the repo-relative POSIX paths ``git ls-files`` yields.
+    """
+    claimed: list[Lang] = []
+    for lang in LANGS:
+        if not lang.path_prefixes:
+            continue
+        if not any(_in_dir(path, prefix) for prefix in lang.path_prefixes):
+            continue
+        if lang.extensions and _ext(path) not in lang.extensions:
+            continue
+        claimed.append(lang)
+    return claimed
 
 
 def _interp(shebang: str | None) -> str | None:
@@ -819,6 +909,11 @@ def route(
 
     Generated lex projections never route to markdown: their ``.lex`` source
     routes to the lexd leg instead (see :func:`lex_projections`).
+
+    A path buckets into its ordinary :func:`lang_for` Lang AND every
+    path-claiming Lang whose prefix covers it (:func:`path_claimed_langs`,
+    TOL01-WS04 #553) — the one place a file legitimately routes to more than
+    one Lang (`.github/workflows/*.yml` → yaml + actions).
     """
     shebangs = shebangs or {}
     projections = lex_projections(paths)
@@ -829,6 +924,8 @@ def route(
         lang = lang_for(path, shebangs.get(path))
         if lang is not None:
             buckets.setdefault(lang.name, []).append(path)
+        for claimed in path_claimed_langs(path):
+            buckets.setdefault(claimed.name, []).append(path)
     return [(lang, buckets[lang.name]) for lang in LANGS if lang.name in buckets]
 
 
@@ -1031,6 +1128,10 @@ def _restore(root: Path, snapshot: dict[str, bytes]) -> list[str]:
 #: without them ``cargo clippy`` reads a machine-local ``config.toml`` /
 #: ``clippy.toml`` outside the repo. WS03 (#516) may EXTEND this set as it wires
 #: more canonical configs (a per-tool config env var for a newly-pinned tool).
+#:
+#: actionlint (TOL01-WS04 #553) needs NO entry of its own: it reads no config
+#: env var, and its shellcheck hand-off (embedded ``run:`` scripts) is a child
+#: of the scrubbed exec, so the ``SHELLCHECK_OPTS`` drop above already covers it.
 _TOOL_CONFIG_ENV_VARS: frozenset[str] = frozenset(
     {
         "SHELLCHECK_OPTS",
@@ -1092,6 +1193,10 @@ _CANONICAL_CONFIG_FILES: dict[str, str] = {
     "prettier": "prettierrc.yaml",
     "markdownlint": "markdownlint.yaml",
     "yamllint": "yamllint.yaml",
+    # actionlint's `-config-file` (TOL01-WS04 #553): the shipped canonical body,
+    # injected unconditionally so a repo-tracked `.github/actionlint.yaml` (its
+    # auto-discovery source) can never move the verdict.
+    "actionlint": "actionlint.yaml",
 }
 
 
