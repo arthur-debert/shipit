@@ -430,6 +430,16 @@ def test_sweep_declared_expectation_renders_expected_fail(tmp_path):
     assert not report.repos[0].adoption_ready
 
 
+def test_sweep_empty_tool_selection_refuses_loud(tmp_path):
+    # An empty selection — an empty tools tuple or only names outside
+    # SWEEP_TOOLS — would run nothing yet report 0 red cells (a false green
+    # exit gate). The domain function must refuse, not return a trivial pass.
+    with pytest.raises(fleetsweep.SweepError, match="no swept tools selected"):
+        _sweep([_ENTRY], tmp_path, tools=())
+    with pytest.raises(fleetsweep.SweepError, match="no swept tools selected"):
+        _sweep([_ENTRY], tmp_path, tools=("bogus",))
+
+
 def test_sweep_tool_filter_narrows_the_run(tmp_path):
     report, exec_fake, _ = _sweep([_ENTRY], tmp_path, tools=("test",))
     assert [argv[1:] for argv, _, _ in exec_fake.calls] == [("test",)]

@@ -658,6 +658,10 @@ def sweep(
     footprint bounded and the flow-log trail linear. ``create_tree`` /
     ``run_tool`` / ``remove_tree`` inject the effectful boundaries for tests;
     the defaults are the real Tree machinery and the one Exec runner.
+
+    Refuses (:class:`SweepError`) when ``tools`` selects nothing from
+    :data:`SWEEP_TOOLS` — an empty selection would run nothing yet report a
+    trivially green matrix, a false exit-gate pass.
     """
     if create_tree is None:
 
@@ -667,6 +671,16 @@ def sweep(
     run_tool = run_tool or _run_tool
     remove_tree = remove_tree or _remove_tree
     selected = tuple(tool for tool in SWEEP_TOOLS if tool in tools)
+    if not selected:
+        # A domain refusal (ADR-0030): an empty selection — an empty ``tools``
+        # or only names outside SWEEP_TOOLS — would run nothing yet report 0 red
+        # cells, a FALSE green exit gate. The verb defaults empty→all and
+        # click.Choice rejects unknowns, so this guards the direct API caller.
+        raise SweepError(
+            f"no swept tools selected from {tuple(tools)!r} — the sweep runs a "
+            f"nonempty subset of {SWEEP_TOOLS}; an empty selection would emit a "
+            "trivially green report (0 red cells) without running anything"
+        )
     events.emit(
         logger,
         "sweep.started",
