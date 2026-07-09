@@ -2291,12 +2291,15 @@ def test_declined_unit_is_never_written_and_drops_from_the_manifest(tmp_path, re
     # The declined unit: untouched on disk, dropped from the re-stamped map (so
     # no stale pristine entry lingers to re-propose the override).
     assert "MY OWN LAUNCHER" in (tmp_path / "bin" / "shipit").read_text()
-    cfg = config.load(tmp_path / config.CONFIG_NAME)
+    cfg_path = tmp_path / config.CONFIG_NAME
+    cfg = config.load(cfg_path)
     managed = config.load_managed(cfg)
     assert iunits.SHIPIT_LAUNCHER_FILE not in managed
     assert "skills/to-prd/SKILL.md" in managed
     # The decline itself survives the manifest re-stamp (the durable half)...
-    assert config.load_declines(cfg) == (iunits.SHIPIT_LAUNCHER_FILE,)
+    assert config.load_declines(cfg, cfg_path.read_text()) == (
+        iunits.SHIPIT_LAUNCHER_FILE,
+    )
     # ...and the PR body carries the standing decision.
     assert "### Declined units" in rec.pr_body
     assert "`bin/shipit`" in rec.pr_body
@@ -2346,8 +2349,11 @@ def test_shipits_own_manifest_declines_the_launcher():
     # the pixi env), which necessarily differs from the packaged pinned uv
     # launcher — so the repo carries the durable decline instead of hand-
     # reverting the same override in every reconcile PR (#597).
-    cfg = config.load(REPO_ROOT / config.CONFIG_NAME)
-    assert iunits.SHIPIT_LAUNCHER_FILE in config.load_declines(cfg)
+    cfg_path = REPO_ROOT / config.CONFIG_NAME
+    cfg = config.load(cfg_path)
+    assert iunits.SHIPIT_LAUNCHER_FILE in config.load_declines(
+        cfg, cfg_path.read_text()
+    )
     packaged = iunits.data_bytes("bootstrap", "shipit")
     committed = (REPO_ROOT / "bin" / "shipit").read_bytes()
     # The standing reason for the decline: if these ever converge, the decline

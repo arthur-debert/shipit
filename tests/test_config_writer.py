@@ -95,14 +95,25 @@ def test_load_declines_parses_the_keep_list(tmp_path):
     p = tmp_path / ".shipit.toml"
     p.write_text('[managed.decline]\nkeep = ["bin/shipit", "lefthook.yml"]\n')
     cfg = config.load(p)
-    assert config.load_declines(cfg) == ("bin/shipit", "lefthook.yml")
+    assert config.load_declines(cfg, p.read_text()) == ("bin/shipit", "lefthook.yml")
     # The policy sub-table is NOT a pristine entry.
     assert config.load_managed(cfg) == {}
 
 
 def test_load_declines_defaults_empty():
-    assert config.load_declines({}) == ()
-    assert config.load_declines({"managed": {"bin/shipit": "sha256:x"}}) == ()
+    assert config.load_declines({}, "") == ()
+    assert config.load_declines({"managed": {"bin/shipit": "sha256:x"}}, "") == ()
+
+
+def test_load_declines_rejects_the_dotted_form(tmp_path):
+    # A dotted `decline.keep` under [managed] parses to the same dict as the
+    # header form, but the [managed] re-stamp would strip it — so install would
+    # silently un-decline on the next run. Refuse it at parse rather than accept
+    # a policy that evaporates (#600).
+    p = tmp_path / ".shipit.toml"
+    p.write_text('[managed]\ndecline.keep = ["bin/shipit"]\n')
+    with pytest.raises(config.ConfigError, match="own header"):
+        config.load_declines(config.load(p), p.read_text())
 
 
 @pytest.mark.parametrize(
@@ -119,7 +130,7 @@ def test_load_declines_rejects_malformed_shapes(tmp_path, body):
     p = tmp_path / ".shipit.toml"
     p.write_text(body)
     with pytest.raises(config.ConfigError):
-        config.load_declines(config.load(p))
+        config.load_declines(config.load(p), p.read_text())
 
 
 def test_write_manifest_preserves_managed_decline(tmp_path):
@@ -135,7 +146,7 @@ def test_write_manifest_preserves_managed_decline(tmp_path):
     )
     config.write_manifest(p, version="new", managed={"lefthook.yml": "sha256:new"})
     cfg = config.load(p)
-    assert config.load_declines(cfg) == ("bin/shipit",)
+    assert config.load_declines(cfg, p.read_text()) == ("bin/shipit",)
     assert config.shipit_version(cfg) == "new"
     # The declined unit's stale pristine entry was dropped with the re-stamp.
     assert config.load_managed(cfg) == {"lefthook.yml": "sha256:new"}
@@ -150,7 +161,7 @@ def test_write_manifest_preserves_a_trailing_managed_decline(tmp_path):
     p.write_text(p.read_text() + '\n[managed.decline]\nkeep = ["bin/shipit"]\n')
     config.write_manifest(p, version="v2", managed={})
     cfg = config.load(p)
-    assert config.load_declines(cfg) == ("bin/shipit",)
+    assert config.load_declines(cfg, p.read_text()) == ("bin/shipit",)
     assert config.load_managed(cfg) == {}
 
 

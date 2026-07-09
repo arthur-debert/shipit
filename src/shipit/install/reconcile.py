@@ -850,10 +850,13 @@ def gather(
     manifest_error: str | None = None
     try:
         if cfg_path.is_file():
+            raw = cfg_path.read_text(encoding="utf-8")
             cfg = config.load(cfg_path)
             pristine = config.load_managed(cfg)
             current_pin = config.shipit_version(cfg)  # RAW — compared, not validated
-            declines = config.load_declines(cfg)  # [managed.decline].keep (#600)
+            # `raw` lets load_declines reject a dotted `decline.keep` that the
+            # re-stamp would silently strip (#600); the header form is required.
+            declines = config.load_declines(cfg, raw)  # [managed.decline].keep
         # The [toolchains] seed entries derive from the consumer's root
         # manifests (#578) — the same signal table the Tool verbs' missing-map
         # error suggests (`config.SIGNAL_MANIFESTS`), so seed and suggestion
@@ -1111,8 +1114,11 @@ def reconcile(
         c.unit_key for c in state.pixi_task_conflicts
     }
     decline_set = set(state.declines)
-    declined = tuple(u.key for u in units if u.key in decline_set)
     unit_keys = {u.key for u in units}
+    # Both surfaces keep the consumer's DECLARATION order (config.load_declines'
+    # promise), de-duped — not the catalog's `units` order, which would make the
+    # plan report and PR body reorder unpredictably as the shipped catalog grows.
+    declined = tuple(dict.fromkeys(k for k in state.declines if k in unit_keys))
     decline_unmatched = tuple(k for k in state.declines if k not in unit_keys)
     decisions = tuple(
         d

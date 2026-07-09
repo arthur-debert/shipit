@@ -171,7 +171,24 @@ def load_managed(cfg: dict) -> dict[str, str]:
     return {str(k): str(v) for k, v in managed.items() if k != DECLINE_KEY}
 
 
-def load_declines(cfg: dict) -> tuple[str, ...]:
+def _has_table_header(text: str, dotted: str) -> bool:
+    """True if TOML ``text`` has an explicit ``[dotted]`` table header line.
+
+    Distinguishes a real sub-table header from the same key reached by a dotted
+    path — after :mod:`tomllib` parses, ``[a.b]`` and ``a.b = {...}`` under
+    ``[a]`` are indistinguishable in the dict, but only the header form is a
+    top-level table the textual re-stamp preserves.
+    """
+    want = [p.strip() for p in dotted.split(".")]
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith("[") and not s.startswith("[[") and s.endswith("]"):
+            if [p.strip() for p in s[1:-1].split(".")] == want:
+                return True
+    return False
+
+
+def load_declines(cfg: dict, raw: str) -> tuple[str, ...]:
     """The consumer's declined managed-unit keys — ``[managed.decline].keep`` —
     in declaration order; ``()`` when absent (#600).
 
@@ -184,13 +201,17 @@ def load_declines(cfg: dict) -> tuple[str, ...]:
         [managed.decline]
         keep = ["bin/shipit"]
 
-    The table must be spelled with its own ``[managed.decline]`` header (as
+    The table MUST be spelled with its own ``[managed.decline]`` header (as
     above): it is consumer-owned policy that must survive the ``[shipit]``/
     ``[managed]`` re-stamp, and :func:`write_manifest` preserves exactly that
-    header form (a ``decline.keep`` dotted key inside the ``[managed]`` body
-    would be stripped with the body it rides in). Raises :class:`ConfigError`
-    on a malformed shape, so a typo dies at parse instead of silently
-    declining nothing.
+    header form. This is why ``raw`` (the manifest's un-parsed text) is
+    required: ``tomllib`` flattens a header sub-table and a ``decline.keep``
+    dotted key inside the ``[managed]`` body to the same dict, but only the
+    header survives the re-stamp — the dotted form would be stripped with the
+    body it rides in, silently un-declining on the next install. So a decline
+    reached WITHOUT the header raises :class:`ConfigError`, refusing a policy
+    that would evaporate rather than accepting it for one run. Malformed shapes
+    raise too, so a typo dies at parse instead of silently declining nothing.
     """
     managed = cfg.get("managed", {})
     if not isinstance(managed, dict):
@@ -208,6 +229,14 @@ def load_declines(cfg: dict) -> tuple[str, ...]:
         raise ConfigError(
             "[managed.decline].keep must be a list of managed-unit keys, "
             'e.g. ["bin/shipit"]'
+        )
+    if decline and not _has_table_header(raw, "managed.decline"):
+        raise ConfigError(
+            "[managed.decline] must be spelled with its own header, not a "
+            "dotted key under [managed] — install re-stamps the [managed] body "
+            "and would silently drop it. Write:\n"
+            "    [managed.decline]\n"
+            '    keep = ["bin/shipit"]'
         )
     return tuple(keep)
 
