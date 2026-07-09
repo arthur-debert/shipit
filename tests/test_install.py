@@ -2767,22 +2767,24 @@ PRISTINE_WORKFLOW = Path(__file__).parent / "data" / "copilot-review-pristine.ym
 RETIRED_WORKFLOW_PATH = ".github/workflows/copilot-review.yml"
 RETIRED_SKILL_HASHES = {
     "skills/shipit-planning/SKILL.md": (
-        "sha256:a16ac4744238b3a5b59da8a887bb6268742fd01a8a285797e0198aba49e44336"
+        "sha256:a16ac4744238b3a5b59da8a887bb6268742fd01a8a285797e0198aba49e44336",
     ),
     "skills/shipit-grill-with-docs/SKILL.md": (
-        "sha256:47c25fe56510de6a63da1de9121ef9b6704808f3631d43c7f9ee745f2c32ff62"
+        "sha256:47c25fe56510de6a63da1de9121ef9b6704808f3631d43c7f9ee745f2c32ff62",
     ),
     "skills/shipit-grill-with-docs/ADR-FORMAT.md": (
-        "sha256:f1f36cd3f8d3b6474ddd5855da4e233bfc4ae1a1c5024909ccf11871819a41b2"
+        "sha256:f1f36cd3f8d3b6474ddd5855da4e233bfc4ae1a1c5024909ccf11871819a41b2",
     ),
     "skills/shipit-grill-with-docs/CONTEXT-FORMAT.md": (
-        "sha256:886ce0e96fd0f76f4c72c337c049cf4655227c599862ce920a62297e0929beae"
+        "sha256:886ce0e96fd0f76f4c72c337c049cf4655227c599862ce920a62297e0929beae",
     ),
     "skills/shipit-to-prd/SKILL.md": (
-        "sha256:4bdf82e153221545c8340744a5def096316c0cf88f0db9548a373bce6f91d0c1"
+        "sha256:0f13f20cad06161baff87628ea6b1cf5bac0cc7919beb6176535f9cdf9ae42d8",
+        "sha256:4bdf82e153221545c8340744a5def096316c0cf88f0db9548a373bce6f91d0c1",
     ),
     "skills/shipit-to-issues/SKILL.md": (
-        "sha256:e623a477ad4d81c042b5bbc20fead9cd208b1c73cb35d2954b1fdcd7303d9474"
+        "sha256:4df3706b12c89fb7d844521800addea1c9ab9f448cd7f926b993a5d92f46869b",
+        "sha256:e623a477ad4d81c042b5bbc20fead9cd208b1c73cb35d2954b1fdcd7303d9474",
     ),
 }
 
@@ -2859,8 +2861,8 @@ def test_retired_manifest_carries_the_copilot_workflow_history():
 def test_retired_manifest_carries_the_renamed_skill_history():
     retired = {r.path: r for r in irec.load_retired()}
 
-    for path, expected_hash in RETIRED_SKILL_HASHES.items():
-        assert retired[path].pristine_hashes == (expected_hash,)
+    for path, expected_hashes in RETIRED_SKILL_HASHES.items():
+        assert retired[path].pristine_hashes == expected_hashes
 
 
 def test_install_deletes_a_pristine_retired_file(tmp_path, rec):
@@ -2883,7 +2885,7 @@ def test_install_deletes_a_pristine_retired_skill_file(tmp_path, rec):
     retired_path = "skills/shipit-grill-with-docs/ADR-FORMAT.md"
     source = Path("skills/grill-me-with-docs/ADR-FORMAT.md")
     assert (
-        config.content_hash(source.read_bytes()) == RETIRED_SKILL_HASHES[retired_path]
+        config.content_hash(source.read_bytes()) in RETIRED_SKILL_HASHES[retired_path]
     )
     victim = tmp_path / retired_path
     victim.parent.mkdir(parents=True)

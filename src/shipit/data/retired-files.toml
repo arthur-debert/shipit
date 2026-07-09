@@ -57,6 +57,7 @@ pristine = [
 # Renamed to `skills/to-prd/SKILL.md`.
 path = "skills/shipit-to-prd/SKILL.md"
 pristine = [
+  "sha256:0f13f20cad06161baff87628ea6b1cf5bac0cc7919beb6176535f9cdf9ae42d8",
   "sha256:4bdf82e153221545c8340744a5def096316c0cf88f0db9548a373bce6f91d0c1",
 ]
 
@@ -64,5 +65,6 @@ pristine = [
 # Renamed to `skills/to-tickets/SKILL.md`.
 path = "skills/shipit-to-issues/SKILL.md"
 pristine = [
+  "sha256:4df3706b12c89fb7d844521800addea1c9ab9f448cd7f926b993a5d92f46869b",
   "sha256:e623a477ad4d81c042b5bbc20fead9cd208b1c73cb35d2954b1fdcd7303d9474",
 ]

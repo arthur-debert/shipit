@@ -38,7 +38,7 @@ For every open thread:
 Classify with:
 
 ```sh
-shipit pr classify <pr> --comment <id> nitpick|substantive --reason "<reason>"
+shipit pr classify <pr> --comment <id> nitpick|substantive [--reason "<reason>"]
 ```
 
 List unclassified findings with:

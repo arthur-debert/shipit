@@ -7,8 +7,8 @@ convergence, the docs pass, and the umbrella PR.
 An epic — a feature comprising multiple PRs — is the SAME coordinator +
 role-split model as the single-task cycle in [../../AGENTS.lex], differing only
 in branch/merge topology. There is one overarching feature branch (the
-*epic branch*) and one umbrella PR; the execution is a series of single-task cycles
-(again [../../AGENTS.lex]) whose workstream PRs merge into the epic branch, and
+*epic branch*) and one umbrella PR; the execution is a series of those same
+single-task cycles, whose workstream PRs merge into the epic branch, and
 the umbrella PR finally merges the epic branch to `main`. Delegation, the
 implementer-stops-at-open rule, and the shepherd-per-PR round loop (ADR-0035)
 are NOT epic-specific — they are the PR-shepherding role split
