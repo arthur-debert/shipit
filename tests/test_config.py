@@ -148,6 +148,101 @@ def test_lint_ignore_must_be_a_string_list():
 
 
 # --------------------------------------------------------------------------
+# [lanes] — declared CI test units (TOL01, PRD story 14; WS06 declares the
+# fragment-sync check as the first one)
+# --------------------------------------------------------------------------
+
+
+def test_lanes_table_is_a_known_table(tmp_path):
+    p = tmp_path / ".shipit.toml"
+    p.write_text(
+        "[lanes.changelog-sync]\n"
+        'run = "changelog check"\n'
+        "required = true\n"
+        'trigger = "pr"\n'
+    )
+    lanes = config.load_lanes(config.load(p))
+    # The declared fragment-sync lane parses to the SAME typed Lane as the
+    # shipped scaffold constant: one definition, laptop and CI identical.
+    assert lanes == [config.CHANGELOG_SYNC_LANE]
+
+
+def test_lanes_absent_is_empty():
+    assert config.load_lanes({}) == []
+
+
+def test_lanes_full_field_set_and_order():
+    cfg = {
+        "lanes": {
+            "tests-npm": {
+                "run": "test npm",
+                "required": True,
+                "local": True,
+                "trigger": "push",
+                "runner": "ubuntu-latest",
+                "scope": "full",
+            },
+            "nightly-e2e": {"run": "e2e", "trigger": "nightly"},
+        }
+    }
+    lanes = config.load_lanes(cfg)
+    assert [lane.name for lane in lanes] == ["tests-npm", "nightly-e2e"]
+    first = lanes[0]
+    assert first == config.Lane(
+        name="tests-npm",
+        run="test npm",
+        required=True,
+        local=True,
+        trigger="push",
+        runner="ubuntu-latest",
+        scope="full",
+    )
+    # Defaults: advisory, not local, planner-default routing (trigger given).
+    assert lanes[1] == config.Lane(name="nightly-e2e", run="e2e", trigger="nightly")
+    assert lanes[1].required is False and lanes[1].local is False
+    # And an entry with only `run` is PR-triggered by default.
+    assert config.load_lanes({"lanes": {"y": {"run": "lint"}}})[0].trigger == "pr"
+
+
+def test_lanes_run_is_required():
+    with pytest.raises(config.ConfigError, match=r"\[lanes\].x: `run` must be"):
+        config.load_lanes({"lanes": {"x": {"required": True}}})
+    with pytest.raises(config.ConfigError, match=r"\[lanes\].x: `run` must be"):
+        config.load_lanes({"lanes": {"x": {"run": "  "}}})
+
+
+def test_lanes_unknown_key_dies_fast():
+    with pytest.raises(config.ConfigError, match=r"unknown key\(s\) runs_on"):
+        config.load_lanes({"lanes": {"x": {"run": "lint", "runs_on": "mac"}}})
+
+
+def test_lanes_trigger_vocabulary_is_closed():
+    with pytest.raises(config.ConfigError, match="`trigger` must be one of"):
+        config.load_lanes({"lanes": {"x": {"run": "lint", "trigger": "PR"}}})
+
+
+def test_lanes_trigger_non_string_is_a_configerror_not_a_typeerror():
+    # TOML parses `trigger = ["pr"]` into a list; the unhashable value must be
+    # rejected as ConfigError (not crash the membership test with a TypeError).
+    with pytest.raises(config.ConfigError, match="`trigger` must be one of"):
+        config.load_lanes({"lanes": {"x": {"run": "lint", "trigger": ["pr"]}}})
+
+
+def test_lanes_entry_must_be_a_table():
+    with pytest.raises(config.ConfigError, match=r"\[lanes\].x must be a table"):
+        config.load_lanes({"lanes": {"x": "changelog check"}})
+    with pytest.raises(config.ConfigError, match=r"\[lanes\] must be a table"):
+        config.load_lanes({"lanes": "off"})
+
+
+def test_lanes_bool_and_string_field_types():
+    with pytest.raises(config.ConfigError, match="must be booleans"):
+        config.load_lanes({"lanes": {"x": {"run": "lint", "required": "yes"}}})
+    with pytest.raises(config.ConfigError, match="`runner` must be a string"):
+        config.load_lanes({"lanes": {"x": {"run": "lint", "runner": 3}}})
+
+
+# --------------------------------------------------------------------------
 # The fleet manifest (#449 item 3, ADR-0033): [project.portfolio] carries the
 # adoption targets of the ADP fleet sweep (#426) — including shipit-canary,
 # the standing test bed — and none of the sweep's non-targets.

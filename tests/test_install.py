@@ -149,10 +149,13 @@ def test_load_units_includes_lefthook_and_pixi_task_block():
     # deps ride in their own sibling `[feature.lint.dependencies]` block (ADP00,
     # docs/prd/adoption.md — amending the lint PRD's task-line-only decision),
     # tested below. `provision-lexd` invokes the binary's provision subcommand
-    # (ADP00-WS03), so no provisioning script is ever distributed. Each task
+    # (ADP00-WS03), so no provisioning script is ever distributed. `changelog`
+    # is the release-notes tool's thin caller (TOL01-WS06, ADR-0039: pixi tasks
+    # are one-line callers of the verb). Each task
     # invokes the PINNED launcher `./bin/shipit`, never a bare PATH `shipit`
     # (#481, ADR-0033: hooks/tasks ride the repo's pin, PATH is never consulted).
     assert pixi.desired_inner() == (
+        'changelog = "./bin/shipit changelog"\n'
         'lint = "./bin/shipit lint"\n'
         'logs = "./bin/shipit logs"\n'
         'provision-lexd = "./bin/shipit provision lexd"'
