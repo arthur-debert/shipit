@@ -311,7 +311,7 @@ def test_scrub_tree_env_returns_a_fresh_dict():
 
 def test_write_task_names_the_role_issue_and_branch():
     task = launch.write_task(
-        "implementer", issue=156, branch="TRE03/WS02", base_branch="main"
+        "implementer", issue=156, branch="TRE03/WS02", base_branch="main", closes=False
     )
     # The Run learns its role, which issue to implement, and the exact branch its
     # draft PR must come from (the head shipit later resolves the PR↔Run link by).
@@ -325,7 +325,7 @@ def test_write_task_instructs_a_draft_pr_and_to_stop():
     # WS02 (acceptance #156): the Run reports back through a DRAFT PR and stops after
     # one `shipit pr next` run — never flips ready or merges. All are load-bearing.
     task = launch.write_task(
-        "implementer", issue=42, branch="X/WS01", base_branch="main"
+        "implementer", issue=42, branch="X/WS01", base_branch="main", closes=False
     )
     assert "draft" in task.lower()
     assert "for #42" in task
@@ -340,6 +340,33 @@ def test_write_task_instructs_a_draft_pr_and_to_stop():
     assert "address review rounds" in task
 
 
+def test_write_task_links_closes_for_the_standalone_issue_shape():
+    # #649: a standalone-issue Run's merged PR must AUTO-CLOSE its issue, so the
+    # task mandates the GitHub closing keyword `closes #N` — and never the
+    # non-closing `for #N`, which GitHub ignores and which stranded merged
+    # standalone issues open.
+    task = launch.write_task(
+        "implementer",
+        issue=649,
+        branch="issues/649/work",
+        base_branch="main",
+        closes=True,
+    )
+    assert "closes #649" in task
+    assert "for #649" not in task
+
+
+def test_write_task_links_for_on_the_epic_work_stream_shape():
+    # #649 counterpart: an epic work-stream Run's PR link is DELIBERATELY
+    # non-closing (`for #N`) — the WS issue must stay open until the umbrella PR
+    # integrates and closes the epic's issues — so `closes #N` must never appear.
+    task = launch.write_task(
+        "implementer", issue=42, branch="X/WS01", base_branch="main", closes=False
+    )
+    assert "for #42" in task
+    assert "closes #42" not in task
+
+
 def test_write_task_carries_the_bank_state_protocol():
     # #587: a Run that nears its wall-clock/budget before the draft PR is open must
     # BANK its state — commit whatever exists with a `WIP:`-marked message and push
@@ -348,7 +375,11 @@ def test_write_task_carries_the_bank_state_protocol():
     # greps for it), the exact branch, and the PUSH (an unpushed commit dies with
     # the Tree just like uncommitted work).
     task = launch.write_task(
-        "implementer", issue=587, branch="issues/587/work", base_branch="main"
+        "implementer",
+        issue=587,
+        branch="issues/587/work",
+        base_branch="main",
+        closes=True,
     )
     assert "`WIP:`" in task
     assert "bank your state" in task.lower()

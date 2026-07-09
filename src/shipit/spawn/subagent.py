@@ -366,12 +366,14 @@ def validate(spec: SubagentSpec) -> backends.BackendAdapter:
             ws=spec.ws,
         )
     if spec.role != REVIEWER_ROLE and (spec.issue is None or spec.issue < 1):
-        # ``--issue`` rides the task prompt and the draft PR's ``for #<issue>`` link;
-        # a missing or zero/negative value (which click's int type still accepts) would
-        # forge a nonsensical issue reference. Refuse it before any Tree/child work,
-        # mirroring the ``--ws`` guard above. A reviewer Run implements no issue (it
-        # reviews an existing PR head), so the requirement does not apply to it. This
-        # holds for BOTH write shapes — the epic Run's PR links ``for #<issue>`` and the
+        # ``--issue`` rides the task prompt and the draft PR's issue link (#649:
+        # ``closes #<issue>`` for the standalone shape, so the merge auto-closes it;
+        # ``for #<issue>`` for the epic shape, non-closing — the umbrella PR closes
+        # the epic's issues). A missing or zero/negative value (which click's int
+        # type still accepts) would forge a nonsensical issue reference. Refuse it
+        # before any Tree/child work, mirroring the ``--ws`` guard above. A reviewer
+        # Run implements no issue (it reviews an existing PR head), so the
+        # requirement does not apply to it. This holds for BOTH write shapes — the
         # standalone Run's issue also names its branch.
         raise _refusal(
             f"--issue must be a positive integer (got {spec.issue})", role=spec.role
@@ -708,8 +710,16 @@ def _launch_write(
         extra={"branch": tree.branch, "base": tree.base, "duration_ms": create_ms},
     )
     base_branch = tree.base.split("/", 1)[-1] if "/" in tree.base else tree.base
+    # The link keyword follows the write shape (#649): a standalone-issue Run
+    # (no epic) links `closes #<issue>` so the merge auto-closes it; an epic
+    # work-stream Run links `for #<issue>` (non-closing — the umbrella PR closes
+    # the epic's issues at integration).
     task = launch.write_task(
-        role, issue=issue, branch=tree.branch, base_branch=base_branch
+        role,
+        issue=issue,
+        branch=tree.branch,
+        base_branch=base_branch,
+        closes=spec.epic is None,
     )
     # Launch the backend child rooted in the Tree through its adapter (ADR-0020): the
     # cwd IS the Tree, the adapter's child_env scrubs the backend's auth-shadowing vars

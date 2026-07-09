@@ -112,8 +112,11 @@ def subagent_cmd(
       ``work``), so the Run's draft PR targets ``main``.
 
     Either way the Run implements ``--issue`` (REQUIRED for a write role — it rides
-    the task prompt and the draft PR links it as ``for #<issue>``; a `reviewer` Run
-    implements no issue) and opens a draft PR from the Tree's branch; ``spawn``
+    the task prompt and the draft PR links it: ``closes #<issue>`` on the standalone
+    shape so the merge auto-closes the issue, ``for #<issue>`` on the epic shape,
+    non-closing because the umbrella PR closes the epic's issues (#649); a
+    `reviewer` Run implements no issue) and opens a draft PR from the Tree's branch;
+    ``spawn``
     resolves that PR back from the branch and reports the Run↔PR linkage so the
     coordinator drives it with ``shipit pr status``.
 
