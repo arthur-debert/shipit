@@ -94,8 +94,9 @@ def run(stdin: TextIO | None = None, stdout: TextIO | None = None) -> int:
             return 0  # not an edit operation — allow silently, never block.
         role = resolve_role(payload)
         paths = _extract_paths(payload.get("tool_input"))
-        path = paths[0] if paths else ""
-        is_code = any(is_code_path(p) for p in paths)
+        code_paths = tuple(p for p in paths if is_code_path(p))
+        path = code_paths[0] if code_paths else (paths[0] if paths else "")
+        is_code = bool(code_paths)
         break_glass = _break_glass_armed()
         # Log every break-glass use that would otherwise have been a deny — its
         # frequency is the HAR02 signal for whether to tighten the policy. The
