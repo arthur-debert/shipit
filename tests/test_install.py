@@ -1384,6 +1384,42 @@ def test_managed_sessionstart_hook_runs_setup_dev_env_first():
     assert iunits.SETTINGS_SESSIONSTART_MARKER in command
 
 
+def test_managed_sessionstart_hook_exports_local_bin_before_the_launcher():
+    # #601: setup-dev-env.sh provisions pinned pixi/uv into ~/.local/bin, but it
+    # runs as a SUBPROCESS of the hook — its own `export PATH` never reaches the
+    # hook shell, and the guarded line it appends to CLAUDE_ENV_FILE only affects
+    # LATER Bash calls. So on the first session start in an environment where
+    # ~/.local/bin is not already on PATH, the `./bin/shipit hook sessionstart`
+    # on the SAME command line still failed with "uv is not on PATH" (exit 127,
+    # the ADR-0033 launcher hard-requires uv). The hook command itself must
+    # prepend ~/.local/bin (idempotently, mirroring the CLAUDE_ENV_FILE line's
+    # case-guard) AFTER the setup-dev-env leg and BEFORE the launcher guard.
+    units = {u.key: u for u in iunits.load_units()}
+    command = json.loads(units[iunits.SETTINGS_SESSIONSTART_KEY].desired_inner())[
+        "hooks"
+    ][0]["command"]
+    path_leg = (
+        'case ":$PATH:" in *":$HOME/.local/bin:"*) ;; '
+        '*) export PATH="$HOME/.local/bin:$PATH" ;; esac; '
+    )
+    assert path_leg in command
+    assert command.index("./bin/setup-dev-env.sh") < command.index(path_leg)
+    assert command.index(path_leg) < command.index("test -x ./bin/shipit")
+    # The PATH leg guard mirrors what setup-dev-env.sh appends to
+    # CLAUDE_ENV_FILE (minus its grep marker comment) — one idempotence idiom.
+    script = iunits.data_bytes("bootstrap", "setup-dev-env.sh").decode("utf-8")
+    assert path_leg.removesuffix("; ") in script.replace("\\", "")
+    # The other three additive hooks are untouched: only sessionstart runs the
+    # bootstrap, so only sessionstart needs the same-command-line PATH fix.
+    for key in (
+        iunits.SETTINGS_STOP_KEY,
+        iunits.SETTINGS_SUBAGENTSTOP_KEY,
+        iunits.SETTINGS_WORKTREECREATE_KEY,
+    ):
+        other = json.loads(units[key].desired_inner())["hooks"][0]["command"]
+        assert path_leg not in other
+
+
 def test_load_units_toolchain_blocks_are_conditional():
     # The zero-arg catalog is byte-identical to the pre-#547 one: no toolchain
     # key sneaks in without its signal, and each signal adds EXACTLY its block.
