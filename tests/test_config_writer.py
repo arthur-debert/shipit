@@ -105,6 +105,16 @@ def test_load_declines_defaults_empty():
     assert config.load_declines({"managed": {"bin/shipit": "sha256:x"}}, "") == ()
 
 
+def test_load_declines_accepts_a_header_with_a_trailing_comment(tmp_path):
+    # A trailing `# comment` is valid after a TOML header; the header-form check
+    # must strip it, not read the commented line as a missing header and reject.
+    p = tmp_path / ".shipit.toml"
+    p.write_text(
+        '[managed.decline]  # keep our own bin/shipit\nkeep = ["bin/shipit"]\n'
+    )
+    assert config.load_declines(config.load(p), p.read_text()) == ("bin/shipit",)
+
+
 def test_load_declines_rejects_the_dotted_form(tmp_path):
     # A dotted `decline.keep` under [managed] parses to the same dict as the
     # header form, but the [managed] re-stamp would strip it — so install would

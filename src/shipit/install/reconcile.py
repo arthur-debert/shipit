@@ -1119,7 +1119,9 @@ def reconcile(
     # promise), de-duped — not the catalog's `units` order, which would make the
     # plan report and PR body reorder unpredictably as the shipped catalog grows.
     declined = tuple(dict.fromkeys(k for k in state.declines if k in unit_keys))
-    decline_unmatched = tuple(k for k in state.declines if k not in unit_keys)
+    decline_unmatched = tuple(
+        dict.fromkeys(k for k in state.declines if k not in unit_keys)
+    )
     decisions = tuple(
         d
         for d in plan(units, state.consumer_hashes, state.pristine)

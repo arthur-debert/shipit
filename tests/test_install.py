@@ -2327,6 +2327,18 @@ def test_unmatched_decline_key_warns_never_silently_ignores(tmp_path, rec):
     assert "names no managed unit" in warnings
 
 
+def test_duplicate_decline_key_is_de_duped_on_both_surfaces(tmp_path, rec):
+    # A key listed twice in [managed.decline].keep must surface once, not twice —
+    # both `declined` and `decline_unmatched` de-dupe, so the plan/PR/warning
+    # output stays stable instead of emitting the same line per repeat.
+    (tmp_path / "AGENTS.md").write_text("# Acme\n")
+    _apply(tmp_path)
+    _decline(tmp_path, "bin/shipit", "bin/shipit", "no/such-unit", "no/such-unit")
+    plan = _plan(tmp_path)
+    assert plan.declined == ("bin/shipit",)
+    assert plan.decline_unmatched == ("no/such-unit",)
+
+
 def test_format_plan_renders_the_standing_decline_line():
     plan = irec.Plan(
         root="/consumer",

@@ -181,7 +181,9 @@ def _has_table_header(text: str, dotted: str) -> bool:
     """
     want = [p.strip() for p in dotted.split(".")]
     for line in text.splitlines():
-        s = line.strip()
+        # Drop any trailing `# comment` (valid after a header) before matching,
+        # so `[managed.decline]  # keep bin/shipit` still reads as the header.
+        s = line.split("#", 1)[0].strip()
         if s.startswith("[") and not s.startswith("[[") and s.endswith("]"):
             if [p.strip() for p in s[1:-1].split(".")] == want:
                 return True
