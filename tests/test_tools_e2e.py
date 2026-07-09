@@ -46,11 +46,21 @@ def test_bin_env_var_matches_the_legacy_tr_derivation(name, var):
 # --------------------------------------------------------------------------
 
 
-def test_no_e2e_declaration_plans_no_jobs():
-    # An artifact map without any `e2e` table has NO e2e lane: an empty
-    # plan (the verb's clean "nothing to run"), never an error.
+def test_bare_invocation_with_no_e2e_declaration_plans_no_jobs():
+    # A BARE invocation over an artifact map without any `e2e` table has NO
+    # e2e lane: an empty plan (the verb's clean "nothing to run"), never an
+    # error. This clean empty exit is EXCLUSIVE to the bare invocation.
     artifacts = (_artifact("cli", build=(config.BuildTarget("rust"),)),)
     assert e2e_mod.plan_e2e(artifacts) == ()
+
+
+def test_explicit_selector_on_a_repo_with_no_e2e_is_a_usage_error():
+    # An EXPLICIT selector is a usage claim, never the clean no-op: asking
+    # for `padz` when NO artifact declares e2e (padz forgot its `e2e` table)
+    # must fail as usage, not exit 0 green — otherwise CI silently no-ops.
+    artifacts = (_artifact("padz", build=(config.BuildTarget("rust"),)),)
+    with pytest.raises(e2e_mod.E2ePlanError, match=r"'padz'.*no artifact.*e2e table"):
+        e2e_mod.plan_e2e(artifacts, selector="padz")
 
 
 def test_bare_e2e_table_opts_in_with_the_registry_default_harness():
@@ -150,6 +160,16 @@ def test_go_binary_is_the_built_package_basename_in_the_leg_path():
 def test_go_binary_without_a_package_is_named_by_the_artifact():
     artifact = _artifact("dodot", build=(config.BuildTarget("go"),))
     assert e2e_mod.binary_location(artifact, (_entry(".", "go"),)).relpath == "dodot"
+
+
+@pytest.mark.parametrize("package", [".", "./", "/"])
+def test_ambiguous_go_package_is_refused_with_a_real_diagnosis(package):
+    # `.` / `./` / `/` have no basename to name the binary: fail fast with a
+    # clear ConfigError, never a downstream "built green but no binary at
+    # <dir>" (drop `package` to build the module root as the artifact name).
+    artifact = _artifact("padz", build=(config.BuildTarget("go", package=package),))
+    with pytest.raises(config.ConfigError, match=r"has no binary name.*\./cmd/padz"):
+        e2e_mod.binary_location(artifact, (_entry(".", "go"),))
 
 
 def test_the_first_binary_producing_target_wins_over_non_binary_ones():

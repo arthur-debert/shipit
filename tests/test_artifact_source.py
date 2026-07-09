@@ -161,17 +161,38 @@ def test_non_executable_binary_is_refused(tmp_path):
         source.resolve(_rust_artifact())
 
 
+def test_orphaned_build_target_toolchain_is_refused_before_any_build(tmp_path):
+    # A Tauri-shaped artifact declares rust + npm, but only rust is mapped:
+    # the npm target would be SILENTLY dropped by the leg narrowing and the
+    # harness would still run against a partial build. The source refuses it
+    # loudly — the same orphan-target gate `shipit build` runs — and no
+    # builder is invoked (checked against the WHOLE map, before planning).
+    _place_binary(tmp_path, "target/release/app")
+    artifact = config.Artifact(
+        name="app",
+        build=(config.BuildTarget("rust", package="app"), config.BuildTarget("npm")),
+        e2e=config.E2eSpec(),
+    )
+    rec = _Recorder()
+    source, _ = _source(tmp_path, (_entry(".", "rust"),), rec)
+    with pytest.raises(config.ConfigError, match=r"no \[toolchains\] leg.*app -> npm"):
+        source.resolve(artifact)
+    assert rec.calls == []
+
+
 def test_declaration_inconsistencies_surface_as_config_errors(tmp_path):
-    # The pure location rules (tools/e2e) raise ConfigError through the
-    # seam untouched: e2e with no binary-producing target, and a target
-    # whose toolchain has no map leg.
+    # ConfigError from the pure rules surfaces through the seam untouched.
+    # An e2e artifact with no binary-producing target (npm mapped, so the
+    # orphan gate passes and binary_location does the refusing):
     source, _ = _source(tmp_path, (_entry(".", "npm"),), _Recorder())
     no_binary = config.Artifact(
         name="site", build=(config.BuildTarget("npm"),), e2e=config.E2eSpec()
     )
     with pytest.raises(config.ConfigError, match="no binary-producing"):
         source.resolve(no_binary)
-    with pytest.raises(config.ConfigError, match=r"\[toolchains\] rust leg"):
+    # A target whose toolchain has no map leg: the shared orphan gate catches
+    # it first (before binary_location), naming `<artifact> -> <toolchain>`.
+    with pytest.raises(config.ConfigError, match=r"no \[toolchains\] leg.*app -> rust"):
         source.resolve(_rust_artifact())
 
 

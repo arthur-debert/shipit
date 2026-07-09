@@ -141,11 +141,14 @@ def plan_e2e(
 
     ``artifacts`` is the typed artifact map in DECLARATION order
     (:func:`shipit.config.load_artifacts`); only e2e-DECLARING artifacts
-    (``artifact.e2e is not None``) yield a job — ``()`` when none declares,
-    the verb's "no e2e declared" outcome, NOT an error. ``selector`` names
-    one artifact; ``passthrough`` is appended verbatim to the (single)
-    selected job's harness argv. Raises :class:`E2ePlanError` on an unknown
-    selector or passthrough selecting several jobs.
+    (``artifact.e2e is not None``) yield a job. A BARE invocation over a repo
+    where none declares e2e returns ``()`` — the verb's "no e2e declared",
+    exit-0 outcome, NOT an error. An EXPLICIT ``selector`` naming a
+    non-declaring (or unknown) artifact is a usage error, never that clean
+    no-op: it raises :class:`E2ePlanError` whether other artifacts declare
+    e2e or none does. ``passthrough`` is appended verbatim to the (single)
+    selected job's harness argv; passthrough selecting several jobs also
+    raises :class:`E2ePlanError`.
     """
     jobs = [
         E2eJob(
@@ -160,17 +163,25 @@ def plan_e2e(
         for artifact in artifacts
         if artifact.e2e is not None
     ]
-    if not jobs:
-        return ()
-
-    selected = jobs
-    if selector is not None:
+    if selector is None:
+        # The bare invocation over a repo with no e2e lane is the ONLY clean
+        # empty exit ("no e2e declared", exit 0) — never an error.
+        if not jobs:
+            return ()
+        selected = jobs
+    else:
+        # An EXPLICIT selector is a usage claim: the named artifact must be an
+        # e2e-declaring one. A miss is exit-2 usage, never a green no-op —
+        # whether other artifacts declare e2e (unknown selector) or none does
+        # (the named artifact simply forgot its `e2e` table).
         selected = [job for job in jobs if job.artifact.name == selector]
         if not selected:
-            raise E2ePlanError(
-                f"unknown e2e artifact {selector!r} — this repo's declared "
-                f"e2e artifacts: {_jobs_list(jobs)}"
+            available = (
+                f"this repo's declared e2e artifacts: {_jobs_list(jobs)}"
+                if jobs
+                else "no artifact in this repo declares an e2e table"
             )
+            raise E2ePlanError(f"unknown e2e artifact {selector!r} — {available}")
 
     if passthrough and len(selected) > 1:
         # Never a broadcast: args meant for one harness would break another.
@@ -209,8 +220,9 @@ def binary_location(
     ``<basename(package)>`` (``go build ./cmd/padz`` writes ``padz`` in its
     cwd), or the artifact name when the target declares no package. Raises
     :class:`~shipit.config.ConfigError` when the artifact declares e2e but
-    no binary-producing target, or when the target's toolchain has no map
-    leg to build on — config inconsistencies, refused loudly.
+    no binary-producing target, when the target's toolchain has no map leg
+    to build on, or when a go target's package is ambiguous (``.``, ``/`` —
+    no basename to name the binary) — config inconsistencies, refused loudly.
     """
     target = next((t for t in artifact.build if t.toolchain in BINARY_TOOLCHAINS), None)
     if target is None:
@@ -231,8 +243,18 @@ def binary_location(
         )
     if target.toolchain == "rust":
         relpath = f"target/release/{target.package or artifact.name}"
-    else:  # go
-        relpath = (
-            PurePosixPath(target.package).name if target.package else artifact.name
-        )
+    elif target.package is None:  # go, module root -> named by the artifact
+        relpath = artifact.name
+    else:  # go, an explicit package: the built binary is its basename
+        relpath = PurePosixPath(target.package).name
+        if not relpath:
+            # An ambiguous package (`.`, `./`, `/`) has no basename to name
+            # the binary — refuse it here with the real diagnosis, never let
+            # it become a downstream "built green but no binary at <dir>".
+            raise config.ConfigError(
+                f"[artifacts].{artifact.name} go build target package "
+                f"{target.package!r} has no binary name — declare a real "
+                f"package path like './cmd/{artifact.name}', or drop "
+                f"`package` to build the module root as {artifact.name}"
+            )
     return BinaryLocation(leg_path=leg_path, relpath=relpath)

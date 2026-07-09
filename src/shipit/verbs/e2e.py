@@ -154,8 +154,9 @@ def run(
     runs_out: list[HarnessRun] | None = None,
 ) -> int:
     """Run the repo's declared e2e jobs from the current directory. Returns
-    0/1/2 (0 also when NO artifact declares e2e — nothing to run is a clean
-    outcome, not a failure).
+    0/1/2 (0 also for a BARE invocation when no artifact declares e2e —
+    nothing to run is a clean outcome, not a failure; but an explicit
+    artifact selector that names no e2e-declaring artifact is usage, exit 2).
 
     ``args`` is the raw post-``--``-stripped argument tuple (see
     :func:`~._tool.split_args`). ``source`` injects the artifact-source

@@ -98,6 +98,28 @@ def test_repo_without_any_e2e_declaration_reports_and_exits_0(
     assert "e2e: no e2e declared" in capsys.readouterr().out
 
 
+def test_explicit_selector_on_a_repo_with_no_e2e_is_usage_rc2(
+    tmp_path, monkeypatch, capsys
+):
+    # Naming an artifact when NONE declares e2e is a usage error, NOT the
+    # clean no-op: `shipit e2e cli` must not exit 0 green (a silent CI no-op
+    # because `cli` forgot its e2e table) — it is rc 2, nothing resolved.
+    _repo(
+        tmp_path,
+        monkeypatch,
+        '[toolchains]\n"." = "rust"\n'
+        "[artifacts.cli]\n"
+        'build = [{ toolchain = "rust" }]\n',
+    )
+    source = _FakeSource({})
+    rc = e2e_verb.run(("cli",), source=source, run_harness=_HarnessRecorder())
+    assert rc == 2
+    assert source.resolved == []
+    err = capsys.readouterr().err
+    assert "unknown e2e artifact 'cli'" in err
+    assert "no artifact" in err
+
+
 def test_repo_without_any_config_at_all_reports_and_exits_0(
     tmp_path, monkeypatch, capsys
 ):

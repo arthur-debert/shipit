@@ -99,6 +99,12 @@ class LocalBuildSource:
 
     def resolve(self, artifact: config.Artifact) -> Path:
         """See :class:`ArtifactSource`; the docstring above is the contract."""
+        # The SAME orphan-target gate `shipit build` runs, BEFORE narrowing:
+        # a declared target whose toolchain has no [toolchains] leg must fail
+        # loudly, never be quietly dropped by the `wanted` filter below — that
+        # would build a partial artifact and still run the harness, breaking
+        # the "same join `shipit build` runs" contract this source promises.
+        build_mod.check_targets_mapped([artifact], self.entries)
         location = e2e_mod.binary_location(artifact, self.entries)
         wanted = {target.toolchain for target in artifact.build}
         legs = [

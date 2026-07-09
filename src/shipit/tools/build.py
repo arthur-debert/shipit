@@ -116,6 +116,37 @@ def _env(leg: legs_mod.Leg) -> tuple[tuple[str, str], ...]:
     return GO_BUILD_ENV if leg.toolchain == "go" else ()
 
 
+def check_targets_mapped(
+    artifacts: Sequence[config.Artifact],
+    entries: Sequence[config.ToolchainEntry],
+) -> None:
+    """Refuse an ``[artifacts]`` build target whose toolchain has NO
+    ``[toolchains]`` leg — it would silently never build.
+
+    Checked against the WHOLE toolchain map (never a selector-narrowed
+    subset), BEFORE any leg selection or step planning, so a selector can
+    neither mask nor fake the inconsistency. The single gate every path that
+    plans a build shares: the ``shipit build`` verb and the e2e local-build
+    source alike (so one artifact's e2e build is the SAME join its
+    ``shipit build`` runs — orphaned targets and all). Pure — a
+    :class:`~shipit.config.ConfigError` on inconsistency, nothing otherwise.
+    """
+    mapped = {entry.toolchain for entry in entries}
+    orphaned = sorted(
+        {
+            f"{artifact.name} -> {target.toolchain}"
+            for artifact in artifacts
+            for target in artifact.build
+            if target.toolchain not in mapped
+        }
+    )
+    if orphaned:
+        raise config.ConfigError(
+            "[artifacts] build targets name toolchains with no [toolchains] "
+            f"leg: {'; '.join(orphaned)}"
+        )
+
+
 def plan_build(
     legs: Sequence[legs_mod.Leg],
     artifacts: Sequence[config.Artifact],

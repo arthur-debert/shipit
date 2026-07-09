@@ -7,10 +7,16 @@ appears ONLY when a version is supplied AND the target declares its var).
 Prior art: the leg planner tests — no I/O, values in, values out.
 """
 
+import pytest
+
 from shipit import config
 from shipit.tools import build as build_mod
 from shipit.tools import legs as legs_mod
 from shipit.tools import registry
+
+
+def _entry(toolchain: str, path: str = ".") -> config.ToolchainEntry:
+    return config.ToolchainEntry(path=path, toolchain=toolchain, commands={})
 
 
 def _leg(toolchain: str, path: str = ".", argv: tuple[str, ...] = ()) -> legs_mod.Leg:
@@ -194,3 +200,26 @@ def test_passthrough_args_stay_ahead_of_the_go_package_path():
         [leg], [_artifact("x", config.BuildTarget(toolchain="go", package="./cmd/x"))]
     )
     assert step.argv[-2:] == ("-v", "./cmd/x")
+
+
+# --------------------------------------------------------------------------
+# check_targets_mapped: the shared orphan-target gate (verb + e2e source)
+# --------------------------------------------------------------------------
+
+
+def test_check_targets_mapped_passes_when_every_target_has_a_leg():
+    # All targets mapped -> silent (returns None); the whole map is consulted.
+    build_mod.check_targets_mapped(
+        [_artifact("app", config.BuildTarget("rust"), config.BuildTarget("npm"))],
+        [_entry("rust"), _entry("npm", path="web")],
+    )
+
+
+def test_check_targets_mapped_refuses_an_orphaned_target_naming_it():
+    # A target whose toolchain has no [toolchains] leg would silently never
+    # build: refused loudly, naming `<artifact> -> <toolchain>`.
+    with pytest.raises(config.ConfigError, match=r"no \[toolchains\] leg.*app -> npm"):
+        build_mod.check_targets_mapped(
+            [_artifact("app", config.BuildTarget("rust"), config.BuildTarget("npm"))],
+            [_entry("rust")],
+        )
