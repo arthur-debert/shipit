@@ -1408,7 +1408,12 @@ def test_managed_sessionstart_hook_exports_local_bin_before_the_launcher():
     # The PATH leg guard mirrors what setup-dev-env.sh appends to
     # CLAUDE_ENV_FILE (minus its grep marker comment) — one idempotence idiom.
     script = iunits.data_bytes("bootstrap", "setup-dev-env.sh").decode("utf-8")
-    assert path_leg.removesuffix("; ") in script.replace("\\", "")
+    # setup-dev-env.sh emits the guard through a double-quoted `printf`, so its
+    # `"` and `$` are backslash-escaped on disk. Escape the expected leg to the
+    # file's literal form instead of stripping every backslash from the whole
+    # script (which would also mangle `printf '%s\n'` and mask quoting drift).
+    expected_leg = path_leg.removesuffix("; ").replace('"', '\\"').replace("$", "\\$")
+    assert expected_leg in script
     # The other three additive hooks are untouched: only sessionstart runs the
     # bootstrap, so only sessionstart needs the same-command-line PATH fix.
     for key in (
