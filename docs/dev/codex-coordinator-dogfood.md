@@ -4,7 +4,7 @@ CDX01 makes Codex a first-class **coordinator** surface: `shipit session codex`
 (usually via the managed `./codex-start`) launches an interactive Codex session
 in its own ephemeral session Tree, the exact isolated shape `./claude-start`
 gets from the `--worktree` hook seam ([ADR-0027](../adr/0027-coordinator-session-tree-ephemeral.md),
-`docs/prd/session-bootstrap.md`). Codex has no pre-launch hook seam, so the
+[docs/prd/session-bootstrap.md](../prd/session-bootstrap.md)). Codex has no pre-launch hook seam, so the
 launcher inverts the order: mint a `codex-<utc>-<pid>` session id, provision the
 central-root ephemeral Tree for it (branch `ephemeral/<id>`, base
 `origin/main` — the same Tree machinery every shape uses), then exec
@@ -117,7 +117,7 @@ An abandoned ephemeral Tree is reclaimed by the gc ladder eventually
 time cap as backstop). To reclaim a smoke Tree immediately:
 
 ```sh
-shipit tree remove <tree-path>
+shipit tree remove <tree-path-or-name>
 ```
 
 ## Recorded PASS — 2026-07-09 (CDX01-WS04, issue #606)
