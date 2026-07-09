@@ -92,18 +92,25 @@ jobs:
           # setup-pixi cache on that env-set. setup-pixi couples cache restore
           # to its own install, so this remains one step: no restore/install
           # split and no YAML-side decisions.
-          environments: ${{ matrix.envs }}
+          environments: ${{ matrix.envs || 'default' }}
           cache: true
           cache-write: true
-          cache-key: pixi-${{ matrix.envset }}-
+          cache-key: pixi-${{ matrix.envset || 'default' }}-
       - name: Expose pixi rust on the runner PATH
         if: matrix.caches.rust
-        run: echo "$PWD/.pixi/envs/${{ matrix.envset }}/bin" >> "$GITHUB_PATH"
+        env:
+          PIXI_ENVS: ${{ matrix.envs || 'default' }}
+        shell: bash
+        run: |
+          IFS=',' read -ra envs <<<"$PIXI_ENVS"
+          for env_name in "${envs[@]}"; do
+            echo "$PWD/.pixi/envs/$env_name/bin" >> "$GITHUB_PATH"
+          done
       - name: rust-cache
         if: matrix.caches.rust
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: ${{ matrix.rust_workspaces }}
+          workspaces: ${{ matrix.rust_workspaces || '' }}
       - name: Run lane
         env:
           LANE_RUN: ${{ matrix.run }}

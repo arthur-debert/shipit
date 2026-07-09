@@ -126,6 +126,18 @@ def test_missing_config_file_is_the_same_refusal(tmp_path, monkeypatch, capsys):
     assert "no [lanes] declared" in capsys.readouterr().err
 
 
+def test_non_utf8_pixi_toml_is_a_config_error(tmp_path, monkeypatch, capsys):
+    (tmp_path / ".shipit.toml").write_text(LANES_TOML, encoding="utf-8")
+    (tmp_path / "pixi.toml").write_bytes(b"\xff")
+    monkeypatch.chdir(tmp_path)
+
+    assert ci_verb.run(event="pr") == 1
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert "malformed" in err
+    assert "pixi.toml" in err
+
+
 def test_pr_with_base_ref_thins_through_the_diff_seam(laned_repo, capsys):
     seen = {}
 

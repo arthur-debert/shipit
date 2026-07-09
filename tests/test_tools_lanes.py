@@ -157,6 +157,21 @@ def test_pixi_task_env_sets_resolve_feature_tasks_to_their_environments():
     }
 
 
+def test_pixi_task_commands_resolve_string_and_cmd_table_tasks():
+    pixi = {
+        "tasks": {"changelog": "./bin/shipit changelog"},
+        "feature": {
+            "lint": {"tasks": {"lint-full": {"cmd": "./bin/shipit lint"}}},
+            "test": {"tasks": {"test": "./bin/shipit test"}},
+        },
+    }
+    assert lanes.task_commands(pixi) == {
+        "changelog": "./bin/shipit changelog",
+        "lint-full": "./bin/shipit lint",
+        "test": "./bin/shipit test",
+    }
+
+
 def test_matrix_carries_env_set_and_cache_descriptors_from_the_planner():
     declared = (
         _lane("lint", run="lint-full", required=True),
@@ -191,6 +206,55 @@ def test_matrix_carries_env_set_and_cache_descriptors_from_the_planner():
         "envset": "test",
         "caches": {"rust": True, "sccache": False, "uv": False},
         "rust_workspaces": "crates/a -> ../../target",
+    }
+
+
+def test_matrix_infers_rust_cache_from_pixi_task_aliases():
+    declared = (_lane("wasm", run="build crates/wasm", required=True),)
+    toolchains = (
+        config.ToolchainEntry(path="crates/wasm", toolchain="rust", commands={}),
+        config.ToolchainEntry(path="web", toolchain="npm", commands={}),
+    )
+    planned = lanes.plan(
+        declared,
+        event="pr",
+        task_cmds={"build": "./bin/shipit build"},
+        toolchains=toolchains,
+    )
+    assert planned[0].as_matrix_entry()["caches"] == {
+        "rust": True,
+        "sccache": False,
+        "uv": False,
+    }
+    assert planned[0].as_matrix_entry()["rust_workspaces"] == (
+        "crates/wasm -> ../../target"
+    )
+
+
+def test_matrix_cache_selector_skips_options_before_the_leg_selector():
+    declared = (_lane("test", run="test --fail-fast crates/a", required=True),)
+    toolchains = (
+        config.ToolchainEntry(path="crates/a", toolchain="rust", commands={}),
+        config.ToolchainEntry(path="web", toolchain="npm", commands={}),
+    )
+    planned = lanes.plan(declared, event="pr", toolchains=toolchains)
+    assert planned[0].as_matrix_entry()["caches"]["rust"] is True
+    assert planned[0].as_matrix_entry()["rust_workspaces"] == (
+        "crates/a -> ../../target"
+    )
+
+
+def test_blank_lane_run_keeps_default_provisioning_and_no_cache():
+    planned = lanes.plan((_lane("blank", run="   "),), event="pr")
+    assert planned[0].as_matrix_entry() == {
+        "name": "blank",
+        "run": "   ",
+        "runner": "ubuntu-latest",
+        "required": False,
+        "envs": "default",
+        "envset": "default",
+        "caches": {"rust": False, "sccache": False, "uv": False},
+        "rust_workspaces": "",
     }
 
 

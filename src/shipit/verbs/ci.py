@@ -45,6 +45,8 @@ from ._errors import cli_errors
 
 logger = logging.getLogger("shipit.ci")
 
+PixiTaskData = tuple[dict[str, tuple[str, ...]], dict[str, str]]
+
 
 def missing_lanes_message() -> str:
     """The pointed error for a repo with no ``[lanes]`` declarations — the fix
@@ -58,27 +60,17 @@ def missing_lanes_message() -> str:
     )
 
 
-def _load_lanes(root: Path) -> list[config.Lane]:
-    """The typed ``[lanes]`` declarations at ``root`` — the verb's one config
-    read. Raises :class:`~shipit.config.ConfigError` when ``.shipit.toml`` is
-    missing/malformed OR declares no lanes (:func:`missing_lanes_message`)."""
-    cfg_path = root / config.CONFIG_NAME
-    lanes = config.load_lanes(config.load(cfg_path)) if cfg_path.is_file() else []
-    if not lanes:
-        raise config.ConfigError(missing_lanes_message())
-    return lanes
-
-
-def _load_pixi_task_envs(root: Path) -> dict[str, tuple[str, ...]]:
-    """Task → env-set provisioning map from ``pixi.toml``; absent = defaults."""
+def _load_pixi_task_data(root: Path) -> PixiTaskData:
+    """Pixi task provisioning + commands from ``pixi.toml``; absent = defaults."""
     pixi_path = root / "pixi.toml"
     if not pixi_path.is_file():
-        return {}
+        return {}, {}
     try:
         with pixi_path.open("rb") as fh:
-            return lanes_mod.task_env_sets(tomllib.load(fh))
-    except tomllib.TOMLDecodeError as exc:
+            pixi = tomllib.load(fh)
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
         raise config.ConfigError(f"malformed {pixi_path}: {exc}") from None
+    return lanes_mod.task_env_sets(pixi), lanes_mod.task_commands(pixi)
 
 
 @click.group(name="ci")
@@ -144,7 +136,7 @@ def run(
     if not lanes:
         raise config.ConfigError(missing_lanes_message())
     toolchains = config.load_toolchains(cfg)
-    task_envs = _load_pixi_task_envs(root)
+    task_envs, task_cmds = _load_pixi_task_data(root)
 
     changed: Sequence[str] | None = None
     if normalized == lanes_mod.EVENT_PR and base_ref.strip():
@@ -169,6 +161,7 @@ def run(
         event=normalized,
         changed_paths=changed,
         task_envs=task_envs,
+        task_cmds=task_cmds,
         toolchains=toolchains,
     )
     print(json.dumps([job.as_matrix_entry() for job in jobs]))

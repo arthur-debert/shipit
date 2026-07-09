@@ -60,6 +60,7 @@ shell — config read, git path-diff, JSON emission — is :mod:`shipit.verbs.ci
 from __future__ import annotations
 
 import posixpath
+import shlex
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
@@ -248,9 +249,78 @@ def task_env_sets(pixi: Mapping[str, object]) -> dict[str, tuple[str, ...]]:
     return resolved
 
 
+def task_commands(pixi: Mapping[str, object]) -> dict[str, str]:
+    """Map pixi task name -> command string, for best-effort Tool inference."""
+    commands: dict[str, str] = {}
+
+    def add_task_commands(tasks: object) -> None:
+        if not isinstance(tasks, Mapping):
+            return
+        for name, spec in tasks.items():
+            command = spec
+            if isinstance(spec, Mapping):
+                command = spec.get("cmd")
+            if isinstance(command, str):
+                commands[str(name)] = command
+
+    add_task_commands(pixi.get("tasks"))
+    features = pixi.get("feature")
+    if isinstance(features, Mapping):
+        for feature_spec in features.values():
+            if isinstance(feature_spec, Mapping):
+                add_task_commands(feature_spec.get("tasks"))
+    return commands
+
+
 def _lane_task(run: str) -> str:
     """The task/tool token a lane asks pixi to run."""
-    return run.split()[0]
+    parts = run.split()
+    return parts[0] if parts else ""
+
+
+def _shipit_invocation(
+    run: str, task_cmds: Mapping[str, str] | None = None
+) -> tuple[str, ...]:
+    """Best-effort ``shipit`` argv behind a lane's pixi run string.
+
+    Lane execution treats ``run`` as pixi-owned and opaque. Cache descriptors
+    are advisory, so they may infer a known Tool verb from either a direct run
+    (``test rust``) or a pixi task alias that wraps ``./bin/shipit``. If the
+    shape is not recognizable, return no invocation and leave caches disabled.
+    """
+    try:
+        parts = shlex.split(run)
+    except ValueError:
+        return ()
+    if not parts:
+        return ()
+    if parts[0] in registry.TOOLS:
+        return tuple(parts)
+    command = (task_cmds or {}).get(parts[0])
+    if command is None:
+        return ()
+    try:
+        command_parts = shlex.split(command)
+    except ValueError:
+        return ()
+    shipit_at: int | None = None
+    for idx, token in enumerate(command_parts):
+        if posixpath.basename(token) == "shipit":
+            shipit_at = idx
+    if shipit_at is None:
+        return ()
+    return (*command_parts[shipit_at + 1 :], *parts[1:])
+
+
+def _leg_selector(invocation: Sequence[str]) -> str | None:
+    """First non-option token after the Tool verb, ignoring passthrough args."""
+    for token in invocation[1:]:
+        if token == "--":
+            return None
+        if token.startswith("-"):
+            continue
+        return token
+    return None
 
 
 def _rust_workspaces(rust_legs: Sequence[legs.Leg]) -> str:
@@ -263,7 +333,9 @@ def _rust_workspaces(rust_legs: Sequence[legs.Leg]) -> str:
 
 
 def _cache_descriptor(
-    lane: config.Lane, toolchains: Sequence[config.ToolchainEntry]
+    lane: config.Lane,
+    toolchains: Sequence[config.ToolchainEntry],
+    task_cmds: Mapping[str, str] | None = None,
 ) -> tuple[CacheDescriptor, str]:
     """The planner-owned cache descriptor for one lane.
 
@@ -271,11 +343,11 @@ def _cache_descriptor(
     toolchain. uv is env-carried and sccache is deferred per the cache spike, so
     both are emitted explicitly false.
     """
-    parts = lane.run.split()
+    parts = _shipit_invocation(lane.run, task_cmds)
     tool = parts[0] if parts else ""
     if tool not in registry.TOOLS:
         return CacheDescriptor(), ""
-    selector = parts[1] if len(parts) > 1 else None
+    selector = _leg_selector(parts)
     try:
         planned = legs.plan_legs(toolchains, tool=tool, selector=selector)
     except legs.LegPlanError:
@@ -293,6 +365,7 @@ def plan(
     event: str,
     changed_paths: Sequence[str] | None = None,
     task_envs: Mapping[str, Sequence[str]] | None = None,
+    task_cmds: Mapping[str, str] | None = None,
     toolchains: Sequence[config.ToolchainEntry] = (),
 ) -> tuple[Job, ...]:
     """The ordered job matrix for ``event`` over the declared ``lanes``.
@@ -319,7 +392,7 @@ def plan(
             continue  # thin: the diff never enters this lane's subtree
         task = _lane_task(lane.run)
         envs = tuple((task_envs or {}).get(task, ("default",)))
-        caches, rust_workspaces = _cache_descriptor(lane, toolchains)
+        caches, rust_workspaces = _cache_descriptor(lane, toolchains, task_cmds)
         jobs.append(
             Job(
                 name=lane.name,
