@@ -1147,9 +1147,36 @@ def test_hook_units_coexist_on_one_settings_file():
 
 
 # --------------------------------------------------------------------------
-# The SES01 session-bootstrap units — ./claude-start launcher + SessionStart
-# activation hook (docs/prd/session-bootstrap.md Layers A & D, issue #218)
+# The session-bootstrap launcher units — the generic ./agent-start launcher
+# (CDX01 #627), its ./claude-start / ./codex-start compatibility shims, and
+# the SessionStart activation hook (docs/prd/session-bootstrap.md Layers A &
+# D, issue #218)
 # --------------------------------------------------------------------------
+
+
+def test_load_units_includes_the_agent_start_launcher():
+    # The CDX01 generic launcher (#627): ONE entry point whose host strategy
+    # table dispatches to narrow per-host launch functions — claude rides the
+    # WorktreeCreate pre-launch seam, codex execs the pinned
+    # `./bin/shipit session codex`.
+    units = {u.key: u for u in iunits.load_units()}
+    assert iunits.AGENT_LAUNCHER_FILE in units
+    unit = units[iunits.AGENT_LAUNCHER_FILE]
+    assert unit.kind == "file"
+    assert unit.dest == "agent-start"  # repo root, memorable entry point
+    assert unit.executable is True
+    text = unit.content.decode("utf-8")
+    # The claude row: exec `claude --worktree "<minted-id>" "$@"`.
+    assert 'exec claude --worktree "sess-' in text
+    # The codex row: exec the pinned launcher, never codex directly.
+    assert 'exec "$repo/bin/shipit" session codex "$@"' in text
+    assert "exec codex" not in text
+    # The dispatch is a strategy table over both hosts.
+    assert "claude)" in text and "codex)" in text
+    # The launch-seam role scrub (#631): the common path unsets an inherited
+    # worker-role export before dispatch, so a coordinator launched from a
+    # spawned Run's shell cannot silently disarm the edit guard.
+    assert "unset SHIPIT_LOG_CTX_ROLE" in text
 
 
 def test_load_units_includes_the_claude_start_launcher():
@@ -1160,9 +1187,41 @@ def test_load_units_includes_the_claude_start_launcher():
     assert unit.dest == "claude-start"  # repo root, memorable entry point
     assert unit.executable is True
     text = unit.content.decode("utf-8")
-    # The launcher's whole job: exec `claude --worktree "<minted-id>" "$@"`.
-    assert "--worktree" in text
-    assert 'exec claude --worktree "sess-' in text
+    # Since #627 a compatibility shim: it delegates to `agent-start claude`
+    # and carries no launch logic of its own.
+    assert 'exec "$repo/agent-start" claude "$@"' in text
+    assert "--worktree" not in text
+
+
+def test_load_units_includes_the_codex_start_launcher():
+    units = {u.key: u for u in iunits.load_units()}
+    assert iunits.CODEX_LAUNCHER_FILE in units
+    unit = units[iunits.CODEX_LAUNCHER_FILE]
+    assert unit.kind == "file"
+    assert unit.dest == "codex-start"
+    assert unit.executable is True
+    text = unit.content.decode("utf-8")
+    # Since #627 a compatibility shim: it delegates to `agent-start codex`
+    # and carries no launch logic of its own.
+    assert 'exec "$repo/agent-start" codex "$@"' in text
+    assert "session codex" not in text
+
+
+def test_launchers_match_shipits_own_copies():
+    # The bootstrap dogfood guarantee (the bin/shipit pattern): shipit-self
+    # commits byte-identical, executable copies of all three launcher units at
+    # the managed paths, so its own Tree provisioning reconciles them to NOOP
+    # instead of splicing drift.
+    units = {u.key: u for u in iunits.load_units()}
+    root = Path(__file__).resolve().parents[1]
+    for key in (
+        iunits.AGENT_LAUNCHER_FILE,
+        iunits.LAUNCHER_FILE,
+        iunits.CODEX_LAUNCHER_FILE,
+    ):
+        own = root / units[key].dest
+        assert own.read_bytes() == units[key].content, key
+        assert os.access(own, os.X_OK), key
 
 
 def test_managed_settings_hooks_agree_with_shipits_own_settings():
@@ -1233,6 +1292,231 @@ def test_load_units_includes_the_sessionstart_activation_hook():
     # SessionStart binds to no tool, so the entry carries no matcher.
     assert "matcher" not in entry
     assert iunits.SETTINGS_SESSIONSTART_MARKER in entry["hooks"][0]["command"]
+
+
+# --------------------------------------------------------------------------
+# The CDX01 Codex project layer (#603) — the thin .codex/config.toml whole-file
+# unit and the two .codex/hooks.json JSON-hook units (SessionStart + the
+# PreToolUse tool guard), riding the SAME shared `shipit hook` verbs and the
+# SAME reconcile machinery as the Claude units.
+# --------------------------------------------------------------------------
+
+#: The two Codex JSON-hook units, in catalog order (guard first).
+CODEX_HOOK_KEYS = (iunits.CODEX_PRETOOLUSE_KEY, iunits.CODEX_SESSIONSTART_KEY)
+
+
+def test_load_units_includes_the_codex_project_layer():
+    units = {u.key: u for u in iunits.load_units()}
+    # The thin config: a whole-file unit under .codex/ (repo-local; personal
+    # config layers over it from ~/.codex/config.toml, so shipit owns the file).
+    assert iunits.CODEX_CONFIG_FILE in units
+    cfg = units[iunits.CODEX_CONFIG_FILE]
+    assert cfg.kind == "file"
+    assert cfg.dest == ".codex/config.toml"
+    # The layer stays THIN: valid TOML that raises the project-doc budget so
+    # the AGENTS.md policy block is read whole — no duplicated policy prose.
+    parsed = tomllib.loads(cfg.content.decode("utf-8"))
+    assert parsed == {"project_doc_max_bytes": 65536}
+    # The two hook units: same JSON-hook splice, same events/markers as the
+    # Claude units — only the host file differs.
+    for key, event, marker in (
+        (
+            iunits.CODEX_PRETOOLUSE_KEY,
+            iunits.EVENT_PRETOOLUSE,
+            iunits.SETTINGS_HOOK_MARKER,
+        ),
+        (
+            iunits.CODEX_SESSIONSTART_KEY,
+            iunits.EVENT_SESSIONSTART,
+            iunits.SETTINGS_SESSIONSTART_MARKER,
+        ),
+    ):
+        unit = units[key]
+        assert unit.kind == "block"
+        assert unit.fmt == iunits.FMT_JSON_HOOK
+        assert unit.dest == iunits.CODEX_HOOKS_FILE
+        assert unit.event == event
+        assert unit.marker == marker
+        assert marker in json.loads(unit.desired_inner())["hooks"][0]["command"]
+
+
+def test_codex_hook_commands_adapt_env_and_keep_the_fail_postures():
+    # The ONLY Codex-specific delta is the payload/env adaptation: codex hook
+    # commands run with the session cwd, so neither entry consults
+    # $CLAUDE_PROJECT_DIR — and each keeps its Claude twin's fail posture.
+    units = {u.key: u for u in iunits.load_units()}
+
+    guard = json.loads(units[iunits.CODEX_PRETOOLUSE_KEY].desired_inner())
+    guard_cmd = guard["hooks"][0]["command"]
+    assert "CLAUDE_PROJECT_DIR" not in guard_cmd
+    # Fail CLOSED (ADR-0038): the pixi-pinned launcher chain, cwd-relative
+    # manifest pin, and the exit-2 refusal tail — never a bare `exit 0`.
+    assert "git rev-parse --show-toplevel" in guard_cmd
+    assert 'pixi run --manifest-path "$repo/pixi.toml" -- ' in guard_cmd
+    assert '"$repo/bin/shipit" hook pretooluse' in guard_cmd
+    assert "exit 2" in guard_cmd
+    assert "exit 0" not in guard_cmd
+    # No matcher: Codex tool names are not Claude's, so the entry binds to
+    # every tool event and the shared verb's is_edit_tool gate scopes the
+    # verdict (a non-edit payload is allowed through silently).
+    assert "matcher" not in guard
+
+    session = json.loads(units[iunits.CODEX_SESSIONSTART_KEY].desired_inner())
+    session_cmd = session["hooks"][0]["command"]
+    assert "CLAUDE_PROJECT_DIR" not in session_cmd
+    # Fail OPEN (additive): setup-dev-env best-effort first, the launcher
+    # probe skips cleanly, and the verb's `{"cwd": ...}` payload is JSON-encoded
+    # from the session cwd (codex supplies no Claude-shaped stdin payload).
+    assert "setup-dev-env.sh" in session_cmd
+    assert "exit 0" in session_cmd
+    assert "git rev-parse --show-toplevel" in session_cmd
+    assert "command -v python3" in session_cmd
+    assert "command -v python" in session_cmd
+    assert "json.dumps" in session_cmd
+    assert 'if [ -n "$py" ]' in session_cmd
+    assert '"$repo/bin/shipit" hook sessionstart' in session_cmd
+
+
+def test_codex_hook_units_coexist_on_one_hooks_file():
+    # Splicing both event entries into one .codex/hooks.json leaves each in its
+    # own event array — and each extracts back to its canonical entry (NOOP).
+    units = {u.key: u for u in iunits.load_units()}
+    text = ""
+    for key in CODEX_HOOK_KEYS:
+        u = units[key]
+        text = splice.splice_settings_hook(text, u.desired_inner(), u.event, u.marker)
+    hooks = json.loads(text)["hooks"]
+    assert iunits.SETTINGS_HOOK_MARKER in hooks["PreToolUse"][0]["hooks"][0]["command"]
+    assert (
+        iunits.SETTINGS_SESSIONSTART_MARKER
+        in hooks["SessionStart"][0]["hooks"][0]["command"]
+    )
+    for key in CODEX_HOOK_KEYS:
+        u = units[key]
+        got = splice.extract_settings_hook(text, u.event, u.marker)
+        assert got == iunits.canonical_hook_entry(json.loads(u.desired_inner()))
+
+
+def test_codex_config_unit_reconciles_add_noop_override(tmp_path, rec):
+    """The whole-file config rides the standard four-case reconcile: fresh
+    install ADDs it, an unchanged re-install NOOPs, a consumer edit surfaces
+    as OVERRIDE (never silently kept)."""
+
+    def decision():
+        return next(
+            d
+            for d in _plan(tmp_path).decisions
+            if d.unit.key == iunits.CODEX_CONFIG_FILE
+        )
+
+    assert decision().action == irec.ADD
+    _apply(tmp_path)
+    assert (tmp_path / ".codex" / "config.toml").read_bytes() == iunits.data_bytes(
+        "codex-config.toml"
+    )
+    assert decision().action == irec.NOOP
+    (tmp_path / ".codex" / "config.toml").write_text("project_doc_max_bytes = 1\n")
+    assert decision().action == irec.OVERRIDE
+
+
+def test_codex_hook_units_reconcile_add_noop_override(tmp_path, rec):
+    """Both hooks.json units ride the same four cases — and the OVERRIDE is
+    scoped to shipit's OWN entry: a consumer hook added beside it is not an
+    override, an edit to shipit's entry is."""
+
+    def decisions():
+        plan = _plan(tmp_path)
+        return {d.unit.key: d for d in plan.decisions if d.unit.key in CODEX_HOOK_KEYS}
+
+    assert {d.action for d in decisions().values()} == {irec.ADD}
+    _apply(tmp_path)
+    assert {d.action for d in decisions().values()} == {irec.NOOP}
+
+    hooks_path = tmp_path / ".codex" / "hooks.json"
+    data = json.loads(hooks_path.read_text())
+    # A consumer's own SessionStart hook beside shipit's: still NOOP for both.
+    data["hooks"]["SessionStart"].append(
+        {"hooks": [{"type": "command", "command": "echo consumer-own-hook"}]}
+    )
+    hooks_path.write_text(json.dumps(data, indent=2) + "\n")
+    assert {d.action for d in decisions().values()} == {irec.NOOP}
+
+    # An edit to shipit's guard entry surfaces as OVERRIDE — the sessionstart
+    # unit (its entry untouched) stays NOOP.
+    data["hooks"]["PreToolUse"][0]["hooks"][0]["command"] = (
+        "./bin/shipit hook pretooluse # defused"
+    )
+    hooks_path.write_text(json.dumps(data, indent=2) + "\n")
+    got = decisions()
+    assert got[iunits.CODEX_PRETOOLUSE_KEY].action == irec.OVERRIDE
+    assert got[iunits.CODEX_SESSIONSTART_KEY].action == irec.NOOP
+
+    # And the override write repairs shipit's entry while the consumer's own
+    # hook merges through untouched.
+    _apply(tmp_path)
+    repaired = json.loads(hooks_path.read_text())
+    assert any(
+        "echo consumer-own-hook" in h["command"]
+        for e in repaired["hooks"]["SessionStart"]
+        for h in e["hooks"]
+    )
+    assert {d.action for d in decisions().values()} == {irec.NOOP}
+
+
+def test_codex_unit_update_advances_silently_on_a_pristine_consumer(
+    tmp_path, rec, monkeypatch
+):
+    """The UPDATE case: shipit ships NEW desired content while the consumer's
+    copy still matches the stored pristine hash — the reconcile overwrites
+    silently and advances the pristine, for the config file and the hook
+    entries alike."""
+    _apply(tmp_path)
+
+    real = iunits.data_bytes
+    new_config = b"project_doc_max_bytes = 131072\n"
+    new_entry = json.dumps(
+        {"hooks": [{"type": "command", "command": "./bin/shipit hook sessionstart"}]}
+    ).encode()
+
+    def fake(*parts):
+        if parts == ("codex-config.toml",):
+            return new_config
+        if parts == ("codex-hooks-sessionstart.json",):
+            return new_entry
+        return real(*parts)
+
+    monkeypatch.setattr(iunits, "data_bytes", fake)
+    plan = _plan(tmp_path)
+    actions = {
+        d.unit.key: d.action
+        for d in plan.decisions
+        if d.unit.key in (iunits.CODEX_CONFIG_FILE, iunits.CODEX_SESSIONSTART_KEY)
+    }
+    assert actions == {
+        iunits.CODEX_CONFIG_FILE: irec.UPDATE,
+        iunits.CODEX_SESSIONSTART_KEY: irec.UPDATE,
+    }
+    _apply(tmp_path)
+    assert (tmp_path / ".codex" / "config.toml").read_bytes() == new_config
+    assert _plan(tmp_path).nothing_to_do  # pristine advanced — re-settles clean
+
+
+def test_managed_codex_layer_agrees_with_shipits_own_copies():
+    # The dogfood drift guard (the WS01 pattern): shipit's own committed
+    # .codex/ layer must match the packaged units — config byte-identical,
+    # each hooks.json entry canonical-identical — so the fleet's Codex wiring
+    # and shipit's own can never diverge silently.
+    assert (REPO_ROOT / ".codex" / "config.toml").read_bytes() == iunits.data_bytes(
+        "codex-config.toml"
+    )
+    own = (REPO_ROOT / ".codex" / "hooks.json").read_text()
+    units = {u.key: u for u in iunits.load_units()}
+    for key in CODEX_HOOK_KEYS:
+        u = units[key]
+        got = splice.extract_settings_hook(own, u.event, u.marker)
+        assert got == iunits.canonical_hook_entry(json.loads(u.desired_inner())), (
+            f"shipit's own .codex/hooks.json disagrees with the managed {key}"
+        )
 
 
 def test_managed_settings_hooks_drop_pixi_run_and_fail_open(tmp_path, rec):
@@ -1870,11 +2154,24 @@ def test_fresh_install_lays_down_the_session_bootstrap_set_idempotently(tmp_path
     result = _apply(tmp_path)
     assert result.mode == iapply.MODE_TREE
 
-    # The launcher landed at the repo root, executable.
+    # The generic launcher landed at the repo root, executable, carrying the
+    # host strategy table (#627).
+    agent_launcher = tmp_path / "agent-start"
+    assert agent_launcher.is_file()
+    assert os.access(agent_launcher, os.X_OK)
+    assert "--worktree" in agent_launcher.read_text()
+    assert "session codex" in agent_launcher.read_text()
+
+    # The compatibility shims landed beside it, executable, delegating.
     launcher = tmp_path / "claude-start"
     assert launcher.is_file()
     assert os.access(launcher, os.X_OK)
-    assert "--worktree" in launcher.read_text()
+    assert "agent-start" in launcher.read_text()
+
+    codex_launcher = tmp_path / "codex-start"
+    assert codex_launcher.is_file()
+    assert os.access(codex_launcher, os.X_OK)
+    assert "agent-start" in codex_launcher.read_text()
 
     # The SessionStart activation hook landed in .claude/settings.json.
     settings = json.loads((tmp_path / ".claude" / "settings.json").read_text())
@@ -1883,42 +2180,74 @@ def test_fresh_install_lays_down_the_session_bootstrap_set_idempotently(tmp_path
         splice.is_shipit_hook(e, iunits.SETTINGS_SESSIONSTART_MARKER) for e in entries
     )
 
-    # Both recorded a pristine hash in the manifest.
+    # All three recorded a pristine hash in the manifest.
     managed = config.load_managed(config.load(tmp_path / ".shipit.toml"))
+    assert iunits.AGENT_LAUNCHER_FILE in managed
     assert iunits.LAUNCHER_FILE in managed
+    assert iunits.CODEX_LAUNCHER_FILE in managed
     assert iunits.SETTINGS_SESSIONSTART_KEY in managed
 
     # Idempotent: a second reconcile decides NOOP for everything — nothing to
     # apply, no git, no PR, artifacts byte-identical.
     rec.calls.clear()
+    agent_launcher_before = agent_launcher.read_bytes()
     launcher_before = launcher.read_bytes()
+    codex_launcher_before = codex_launcher.read_bytes()
     settings_before = (tmp_path / ".claude" / "settings.json").read_bytes()
     again = _plan(tmp_path)
     assert again.nothing_to_do
     assert rec.calls == []
+    assert agent_launcher.read_bytes() == agent_launcher_before
     assert launcher.read_bytes() == launcher_before
+    assert codex_launcher.read_bytes() == codex_launcher_before
     assert (tmp_path / ".claude" / "settings.json").read_bytes() == settings_before
 
 
-def test_claude_start_execs_claude_with_a_minted_session_id(tmp_path: Path):
-    # Behavior of the shipped launcher: it execs `claude --worktree <minted-id>`
-    # forwarding its own args, with a fresh `sess-`-prefixed id per launch.
-    unit = next(u for u in iunits.load_units() if u.key == iunits.LAUNCHER_FILE)
-    launcher = tmp_path / "claude-start"
-    launcher.write_bytes(unit.content)
-    launcher.chmod(0o755)
+def _lay_down_launchers(tmp_path: Path) -> dict[str, Path]:
+    """Write the three shipped launcher units into ``tmp_path``, executable.
 
-    # A fake `claude` first on PATH (shadowing any real one) that prints its argv.
-    fakedir = tmp_path / "bin"
-    fakedir.mkdir()
-    fake = fakedir / "claude"
+    The shims delegate to the sibling ``agent-start`` at their own dirname, so
+    behavior tests need the whole set on disk — exactly what a real install
+    lays down.
+    """
+    units = {u.key: u for u in iunits.load_units()}
+    laid: dict[str, Path] = {}
+    for key in (
+        iunits.AGENT_LAUNCHER_FILE,
+        iunits.LAUNCHER_FILE,
+        iunits.CODEX_LAUNCHER_FILE,
+    ):
+        path = tmp_path / units[key].dest
+        path.write_bytes(units[key].content)
+        path.chmod(0o755)
+        laid[key] = path
+    return laid
+
+
+def _fake_cli(tmp_path: Path, name: str) -> dict[str, str]:
+    """A fake ``name`` binary first on PATH (shadowing any real one) that
+    prints its argv, one arg per line."""
+    fakedir = tmp_path / "fakepath"
+    fakedir.mkdir(exist_ok=True)
+    fake = fakedir / name
     fake.write_text('#!/usr/bin/env bash\nprintf "%s\\n" "$@"\n')
     fake.chmod(0o755)
-    env = {"PATH": str(fakedir) + os.pathsep + os.environ.get("PATH", "")}
+    return {"PATH": str(fakedir) + os.pathsep + os.environ.get("PATH", "")}
+
+
+def test_agent_start_claude_execs_claude_with_a_minted_session_id(tmp_path: Path):
+    # The claude row of the strategy table: exec `claude --worktree <minted-id>`
+    # forwarding the remaining args, with a fresh `sess-`-prefixed id per launch.
+    launchers = _lay_down_launchers(tmp_path)
+    env = _fake_cli(tmp_path, "claude")
 
     def launch(*args: str) -> list[str]:
         proc = subprocess.run(
-            [str(launcher), *args], env=env, capture_output=True, text=True, timeout=10
+            [str(launchers[iunits.AGENT_LAUNCHER_FILE]), "claude", *args],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         assert proc.returncode == 0, proc.stderr
         return proc.stdout.splitlines()
@@ -1932,29 +2261,153 @@ def test_claude_start_execs_claude_with_a_minted_session_id(tmp_path: Path):
     assert launch()[1] != argv[1]
 
 
-def test_claude_start_fails_loud_when_claude_is_not_on_path(tmp_path: Path):
-    unit = next(u for u in iunits.load_units() if u.key == iunits.LAUNCHER_FILE)
-    launcher = tmp_path / "claude-start"
-    launcher.write_bytes(unit.content)
-    launcher.chmod(0o755)
-
-    # A minimal PATH with exactly one entry: `bash` (the shebang's interpreter)
-    # and nothing else — deterministically no `claude`, regardless of where the
-    # developer machine keeps its binaries.
+def test_agent_start_codex_execs_the_pinned_launcher(tmp_path: Path):
+    # The codex row of the strategy table: exec `./bin/shipit session codex`,
+    # forwarding the remaining args — never codex directly (codex has no
+    # WorktreeCreate-style pre-launch seam; the pinned launcher provisions).
+    launchers = _lay_down_launchers(tmp_path)
+    env = _fake_cli(tmp_path, "codex")
     bindir = tmp_path / "bin"
     bindir.mkdir()
-    bash = shutil.which("bash")
-    assert bash is not None
-    (bindir / "bash").symlink_to(bash)
+    fake_shipit = bindir / "shipit"
+    fake_shipit.write_text('#!/usr/bin/env bash\nprintf "%s\\n" "$@"\n')
+    fake_shipit.chmod(0o755)
+
     proc = subprocess.run(
-        [str(launcher)],
+        [str(launchers[iunits.AGENT_LAUNCHER_FILE]), "codex", "--model", "foo"],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.splitlines() == ["session", "codex", "--model", "foo"]
+
+
+def test_agent_start_scrubs_the_inherited_worker_agent_identity_exports(
+    tmp_path: Path,
+):
+    # The launch-seam agent-identity scrub (#631), behaviorally: a coordinator
+    # launched via agent-start from inside a spawned worker Run's shell must NOT
+    # hand the worker's agent-identity exports to the new session — ROLE (the
+    # pretooluse edit guard's fallback would resolve the coordinator to that
+    # role and silently disarm) nor the paired AGENT/RUN spawn ids (which would
+    # mis-tag the new coordinator's log records with the worker's identity). A
+    # task-correlation key like PR still rides — it describes the work, not who
+    # is doing it. The scrub lives in the common path, so one fake CLI (claude)
+    # covers every host row.
+    launchers = _lay_down_launchers(tmp_path)
+    env = _fake_cli(tmp_path, "claude")
+    fake = tmp_path / "fakepath" / "claude"
+    fake.write_text(
+        "#!/usr/bin/env bash\n"
+        'echo "role=${SHIPIT_LOG_CTX_ROLE-ABSENT}"\n'
+        'echo "agent=${SHIPIT_LOG_CTX_AGENT-ABSENT}"\n'
+        'echo "run=${SHIPIT_LOG_CTX_RUN-ABSENT}"\n'
+        'echo "pr=${SHIPIT_LOG_CTX_PR-ABSENT}"\n'
+    )
+
+    proc = subprocess.run(
+        [str(launchers[iunits.AGENT_LAUNCHER_FILE]), "claude"],
+        env={
+            **env,
+            "SHIPIT_LOG_CTX_ROLE": "implementer",
+            "SHIPIT_LOG_CTX_AGENT": "deadbeef",
+            "SHIPIT_LOG_CTX_RUN": "77",
+            "SHIPIT_LOG_CTX_PR": "632",
+        },
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.splitlines() == [
+        "role=ABSENT",
+        "agent=ABSENT",
+        "run=ABSENT",
+        "pr=632",
+    ]
+
+
+def test_agent_start_rejects_an_unknown_or_missing_agent(tmp_path: Path):
+    launchers = _lay_down_launchers(tmp_path)
+    agent_start = launchers[iunits.AGENT_LAUNCHER_FILE]
+
+    proc = subprocess.run(
+        [str(agent_start), "goose"], capture_output=True, text=True, timeout=10
+    )
+    assert proc.returncode == 64
+    assert "unknown agent 'goose'" in proc.stderr
+
+    proc = subprocess.run(
+        [str(agent_start)], capture_output=True, text=True, timeout=10
+    )
+    assert proc.returncode == 64
+    assert "usage:" in proc.stderr
+
+
+def test_start_shims_delegate_to_agent_start(tmp_path: Path):
+    # The #627 compatibility contract: `./claude-start [args]` behaves exactly
+    # like `./agent-start claude [args]` (and codex likewise) — the shims carry
+    # no launch logic, so the common start path cannot drift per entry point.
+    launchers = _lay_down_launchers(tmp_path)
+    env = _fake_cli(tmp_path, "claude")
+
+    proc = subprocess.run(
+        [str(launchers[iunits.LAUNCHER_FILE]), "extra"],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert proc.returncode == 0, proc.stderr
+    argv = proc.stdout.splitlines()
+    assert argv[0] == "--worktree"
+    assert argv[1].startswith("sess-")
+    assert argv[2:] == ["extra"]
+
+    # A shim with no sibling agent-start fails loud toward the reconcile.
+    launchers[iunits.AGENT_LAUNCHER_FILE].unlink()
+    proc = subprocess.run(
+        [str(launchers[iunits.CODEX_LAUNCHER_FILE])],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert proc.returncode == 127
+    assert "agent-start is missing" in proc.stderr
+    assert "shipit install" in proc.stderr
+
+
+def test_agent_start_fails_loud_when_the_cli_is_not_on_path(tmp_path: Path):
+    launchers = _lay_down_launchers(tmp_path)
+
+    # A minimal PATH carrying `bash` (the shebang's interpreter) and `dirname`
+    # (the launcher's own repo-root probe needs it; without it, bash ≥5.2 turns
+    # the probe's `cd ""` into a hard "null directory" error and the script
+    # dies at 1 before ever reaching the CLI check — older bash silently
+    # no-op'd, which is how this test used to pass by accident) — and
+    # deterministically NO `claude`, regardless of where the developer machine
+    # keeps its binaries.
+    bindir = tmp_path / "onlybash"
+    bindir.mkdir()
+    for tool in ("bash", "dirname"):
+        binary = shutil.which(tool)
+        assert binary is not None
+        (bindir / tool).symlink_to(binary)
+    proc = subprocess.run(
+        [str(launchers[iunits.AGENT_LAUNCHER_FILE]), "claude"],
         env={"PATH": str(bindir)},
         capture_output=True,
         text=True,
         timeout=10,
     )
     assert proc.returncode == 127
+    # The hint names the PRODUCT to install (restored in #631) — "claude" the
+    # binary is Claude Code the product; a generic "install it first" made the
+    # user go look the mapping up.
     assert "claude CLI is not on PATH" in proc.stderr
+    assert "install Claude Code first" in proc.stderr
 
 
 def test_settings_hook_splice_preserves_other_settings():

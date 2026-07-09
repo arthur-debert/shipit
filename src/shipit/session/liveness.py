@@ -1,25 +1,30 @@
-"""``session/liveness`` — is the Claude Code session that owns a Tree still alive?
+"""``session/liveness`` — is the coordinator session that owns a Tree still alive?
 
 The liveness seam the ephemeral-Tree gc ladder reads (ADR-0027 Consequences). An
 ephemeral session Tree has no PR, so the merged-PR ladder alone strands it; and it
 is often *clean* (a planning session that never committed), so "clean + aged"
 alone would delete a Tree out from under a live idle session. The tiebreaker is a
-**pidfile** the ``SessionStart`` hook writes into the Tree recording the ``claude``
-session's PID, its ``session_id``, and the PID's **OS process create-time** (read
+**pidfile** the ``SessionStart`` hook writes into the Tree recording the session
+host's PID, its ``session_id``, and the PID's **OS process create-time** (read
 from the OS at write time, not wall-clock "now" — the hook fires slightly after
-the process starts, so the two are close but not equal).
+the process starts, so the two are close but not equal). A **session host** is
+whichever coordinator CLI owns the Tree: Claude Code (launched via
+``claude --worktree`` / ``agent-start claude``) or Codex (launched via
+``shipit session codex`` / ``agent-start codex`` — CDX01 #604; both backends' session
+Trees ride the same ephemeral gc ladder, so both must read as live).
 
 The module mirrors the codebase's functional-core idiom (ADR-0021): the DECISION —
 :func:`is_live` — is pure over an injectable **process probe**
 (``probe(pid) -> ProcessInfo | None``), so the whole truth table (PID dead, PID
 reused by a stranger, create-time drift, a ``node``-named live session) is
 unit-tested with a faked probe; only :func:`os_probe` touches the OS. A Tree is
-live when the PID is alive **and** the process's command line looks like Claude
-Code **and** its create-time matches the recorded one within a small tolerance.
+live when the PID is alive **and** the process's command line looks like a
+session host **and** its create-time matches the recorded one within a small
+tolerance.
 
 Two deliberate asymmetries, both from the ADR:
 
-- **"Looks like Claude Code" matches the command line, never the process name.**
+- **"Looks like a session host" matches the command line, never the process name.**
   Claude Code is a Node.js app, so the OS comm is usually ``node`` (or a
   versioned node path); asserting ``name == "claude"`` would misread every live
   session as dead. Argv is corroboration; the create-time — already a strong
@@ -78,14 +83,17 @@ _CLAUDE_ENTRYPOINT_MARKER = "@anthropic-ai/claude-code"
 #: does not read as the session.
 _CLAUDE_ENTRYPOINT_SUFFIX = "claude-code/cli.js"
 
-#: Executable basenames that ARE Claude Code: the ``claude`` shim/binary on PATH
-#: (however deep its install prefix) and the ``claude-code`` alias some installs
-#: use. Matched against a token's BASENAME exactly — never as a substring of the
-#: whole command line, which would also match incidental ``.claude/…`` path
-#: segments (hook scripts, ``.claude/shell-snapshots/…`` shell wrappers) and make
-#: :func:`find_claude_process` record a short-lived intermediate instead of the
-#: session (codex review).
-_CLAUDE_EXECUTABLES = frozenset({"claude", "claude-code"})
+#: Executable basenames that ARE a session host: the ``claude`` shim/binary on
+#: PATH (however deep its install prefix), the ``claude-code`` alias some
+#: installs use, and the ``codex`` binary (a Codex coordinator session, CDX01
+#: #604 — its ``.codex/hooks.json`` SessionStart entry routes to the same hook
+#: verb, so its Tree's pidfile must recognize the codex ancestor). Matched
+#: against a token's BASENAME exactly — never as a substring of the whole
+#: command line, which would also match incidental ``.claude/…`` path segments
+#: (hook scripts, ``.claude/shell-snapshots/…`` shell wrappers) and make
+#: :func:`find_session_process` record a short-lived intermediate instead of
+#: the session (codex review).
+_HOST_EXECUTABLES = frozenset({"claude", "claude-code", "codex"})
 
 
 @dataclass(frozen=True)
@@ -94,7 +102,7 @@ class ProcessInfo:
 
     ``create_time`` is the process's start time in epoch seconds (``None`` when
     the probe could not read it); ``argv`` is the full command line as one
-    string. ``ppid`` exists for :func:`find_claude_process`'s ancestor walk.
+    string. ``ppid`` exists for :func:`find_session_process`'s ancestor walk.
     """
 
     pid: int
@@ -126,18 +134,19 @@ class LivenessRecord:
     create_time: float
 
 
-def looks_like_claude(argv: str) -> bool:
-    """Whether ``argv`` reads as a Claude Code session's command line.
+def looks_like_session_host(argv: str) -> bool:
+    """Whether ``argv`` reads as a coordinator session host's command line.
 
-    Matches the command line, NEVER the OS process name — which for the
-    Node.js-based Claude Code is usually ``node`` (ADR-0027). A token is a match
-    when its basename is a Claude executable (:data:`_CLAUDE_EXECUTABLES` — the
-    ``claude`` shim, wherever installed) or it carries the npm entrypoint path
-    (:data:`_CLAUDE_ENTRYPOINT_MARKER`). Deliberately NOT a whole-argv substring
-    test: ``claude`` appears incidentally in NON-session command lines — a hook
-    script under ``.claude/hooks/…``, the ``zsh -c 'source
-    ~/.claude/shell-snapshots/…'`` wrapper Claude Code runs commands through —
-    and :func:`find_claude_process` must walk PAST those short-lived
+    A session host is Claude Code OR Codex (module docstring). Matches the
+    command line, NEVER the OS process name — which for the Node.js-based
+    Claude Code is usually ``node`` (ADR-0027). A token is a match when its
+    basename is a host executable (:data:`_HOST_EXECUTABLES` — the ``claude``
+    shim or the ``codex`` binary, wherever installed) or it carries the Claude
+    npm entrypoint path (:data:`_CLAUDE_ENTRYPOINT_MARKER`). Deliberately NOT a
+    whole-argv substring test: ``claude`` appears incidentally in NON-session
+    command lines — a hook script under ``.claude/hooks/…``, the ``zsh -c
+    'source ~/.claude/shell-snapshots/…'`` wrapper Claude Code runs commands
+    through — and :func:`find_session_process` must walk PAST those short-lived
     intermediates, not record them (a recorded hook/shell PID dies immediately
     and gc would misread the live session as dead).
     """
@@ -146,7 +155,7 @@ def looks_like_claude(argv: str) -> bool:
             return True
         if token.endswith(_CLAUDE_ENTRYPOINT_SUFFIX):
             return True
-        if token.rstrip("/").rsplit("/", 1)[-1] in _CLAUDE_EXECUTABLES:
+        if token.rstrip("/").rsplit("/", 1)[-1] in _HOST_EXECUTABLES:
             return True
     return False
 
@@ -160,8 +169,8 @@ def is_live(
     """Whether the session ``record`` describes is still alive — pure over ``probe``.
 
     Live means ALL of: the PID is alive (``probe`` found it), its command line
-    looks like Claude Code (:func:`looks_like_claude` — argv, never the ``node``
-    process name), and its create-time matches the recorded one within
+    looks like a session host (:func:`looks_like_session_host` — argv, never the
+    ``node`` process name), and its create-time matches the recorded one within
     ``tolerance`` seconds (the primary per-PID identity). A dead PID, a PID
     reused by some other process (argv or create-time mismatch), or an unreadable
     create-time all read as NOT live — the safe direction: ``gc`` deletes
@@ -175,8 +184,8 @@ def is_live(
     info = probe(record.pid)
     if info is None:
         live, reason = False, "pid not alive"
-    elif not looks_like_claude(info.argv):
-        live, reason = False, "argv does not look like claude"
+    elif not looks_like_session_host(info.argv):
+        live, reason = False, "argv does not look like a session host"
     elif info.create_time is None:
         live, reason = False, "create-time unreadable"
     elif abs(info.create_time - record.create_time) <= tolerance:
@@ -196,22 +205,23 @@ def is_live(
     return live
 
 
-#: Upper bound on :func:`find_claude_process`'s parent walk. Any real chain is a
-#: handful of hops (claude → shell → pixi → python …); the cap only guards
-#: against a cyclic/ill-behaved probe fake.
+#: Upper bound on :func:`find_session_process`'s parent walk. Any real chain is
+#: a handful of hops through the managed hook command and any shell wrappers;
+#: the cap only guards against a cyclic/ill-behaved probe fake.
 _MAX_ANCESTOR_HOPS = 32
 
 
-def find_claude_process(start_pid: int, probe: Probe) -> ProcessInfo | None:
-    """The nearest ancestor of ``start_pid`` (inclusive) that IS Claude Code.
+def find_session_process(start_pid: int, probe: Probe) -> ProcessInfo | None:
+    """The nearest ancestor of ``start_pid`` (inclusive) that IS a session host.
 
-    The ``SessionStart`` hook runs as a great-grandchild of the session (claude →
-    shell → ``pixi run`` → ``shipit``), so its own PID is not the one to record;
-    this walks the ``ppid`` chain from ``start_pid`` upward and returns the first
-    process whose command line looks like Claude Code — the session process the
-    pidfile should name. ``None`` when the walk exhausts (reached init, a dead
-    link, or the hop cap) without a match, so a caller launched OUTSIDE any
-    Claude session records nothing rather than something wrong.
+    The ``SessionStart`` hook runs below the session through the backend's
+    managed hook command and any shell wrappers, so its own PID is not the one
+    to record; this walks the ``ppid`` chain from ``start_pid`` upward and
+    returns the first process whose command line looks like a session host
+    (Claude Code or Codex) — the session process the pidfile should name.
+    ``None`` when the walk exhausts (reached init, a dead link, or the hop cap)
+    without a match, so a caller launched OUTSIDE any session records nothing
+    rather than something wrong.
     """
     pid = start_pid
     for _ in range(_MAX_ANCESTOR_HOPS):
@@ -220,7 +230,7 @@ def find_claude_process(start_pid: int, probe: Probe) -> ProcessInfo | None:
         info = probe(pid)
         if info is None:
             return None
-        if looks_like_claude(info.argv):
+        if looks_like_session_host(info.argv):
             return info
         if info.ppid == pid:  # a probe fake or a pid-1-like self-parent: stop.
             return None

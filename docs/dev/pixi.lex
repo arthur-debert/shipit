@@ -260,7 +260,7 @@ behaves and how we ride it.
         prefix regardless, a repo with no activatable toolchain is a graceful
         no-op, and any failure fails OPEN (nothing written, exit 0, DEBUG log).
         Delivered to every managed repo by `shipit install` — the SessionStart
-        hook line and the `./claude-start` launcher are managed units — so the
+        hook line and the `./agent-start` launcher are managed units — so the
         capability is uniform, not shipit-only.
 
     Agent launch — `src/shipit/spawn/launch.py` + `src/shipit/spawn/subagent.py`:

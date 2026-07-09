@@ -38,11 +38,14 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sys
+from collections.abc import Mapping
 from typing import TextIO
 
 import click
 
+from ... import logcontext
 from ...harness import breakglass
 from ...harness.codepath import is_code_path
 from ...harness.policy import (
@@ -91,9 +94,11 @@ def run(stdin: TextIO | None = None, stdout: TextIO | None = None) -> int:
             return 0
         if not is_edit_tool(tool_name):
             return 0  # not an edit operation — allow silently, never block.
-        role = resolve_role(payload)
-        path = _extract_path(payload.get("tool_input"))
-        is_code = is_code_path(path)
+        role = resolve_role(payload, fallback_role=_spawned_role_from_env(os.environ))
+        paths = _extract_paths(payload.get("tool_input"))
+        code_paths = tuple(p for p in paths if is_code_path(p))
+        path = _display_path(paths, code_paths)
+        is_code = bool(code_paths)
         break_glass = _break_glass_armed()
         # Log every break-glass use that would otherwise have been a deny — its
         # frequency is the HAR02 signal for whether to tighten the policy. The
@@ -124,16 +129,52 @@ def run(stdin: TextIO | None = None, stdout: TextIO | None = None) -> int:
     return 0
 
 
-def _extract_path(tool_input: object) -> str:
-    """Pull the edited path off a `tool_input` payload, or `""` if absent.
+_PATCH_FILE_RE = re.compile(
+    r"^\*\*\* (?:(?:Add|Update|Delete|Rename) File:|Move to:) (.+)$",
+    re.MULTILINE,
+)
 
-    Edit/Write/MultiEdit carry `file_path`; NotebookEdit carries `notebook_path`.
-    A non-dict input (malformed, or a tool with no path) yields `""`, which the
-    classifier treats as non-code — fail-open.
+
+def _clean_paths(paths: tuple[str, ...]) -> tuple[str, ...]:
+    """Normalize extracted paths before code-path classification."""
+    return tuple(p for raw in paths if (p := raw.strip()))
+
+
+def _display_path(paths: tuple[str, ...], code_paths: tuple[str, ...]) -> str:
+    """Render all relevant paths for logs and agent feedback."""
+    selected = code_paths if code_paths else paths
+    return ", ".join(selected)
+
+
+def _spawned_role_from_env(env: Mapping[str, str]) -> str | None:
+    """Return the spawned role only when the env carries a spawned Run marker."""
+    if not (env.get(logcontext.ENV_PREFIX + "AGENT") or "").strip():
+        return None
+    return logcontext.role_from_env(env)
+
+
+def _extract_paths(tool_input: object) -> tuple[str, ...]:
+    """Pull edited paths off a `tool_input` payload, or ``()`` if absent.
+
+    Claude Edit/Write/MultiEdit carry `file_path`; NotebookEdit carries
+    `notebook_path`. Codex `apply_patch` carries a raw patch-shaped string (or,
+    depending on the host surface, a dict string field), so parse its file
+    headers and deny when ANY patched path is code.
     """
+    if isinstance(tool_input, str):
+        return _clean_paths(tuple(_PATCH_FILE_RE.findall(tool_input)))
     if not isinstance(tool_input, dict):
-        return ""
-    return str(tool_input.get("file_path") or tool_input.get("notebook_path") or "")
+        return ()
+    path = tool_input.get("file_path") or tool_input.get("notebook_path")
+    if path:
+        return _clean_paths((str(path),))
+    for key in ("patch", "input", "text"):
+        value = tool_input.get(key)
+        if isinstance(value, str):
+            paths = _clean_paths(tuple(_PATCH_FILE_RE.findall(value)))
+            if paths:
+                return paths
+    return ()
 
 
 def _extract_command(tool_input: object) -> str:

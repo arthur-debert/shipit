@@ -34,6 +34,18 @@ def test_resolve_role(payload, expected):
     assert resolve_role(payload) is expected
 
 
+def test_resolve_role_uses_fallback_role_only_when_agent_type_is_absent():
+    assert (
+        resolve_role({"agent_type": ""}, fallback_role="implementer")
+        is Role.IMPLEMENTER
+    )
+    assert (
+        resolve_role({"agent_type": "reviewer"}, fallback_role="implementer")
+        is Role.REVIEWER
+    )
+    assert resolve_role({"agent_type": ""}, fallback_role=None) is Role.COORDINATOR
+
+
 def test_unrecognized_is_never_coordinator():
     """The fail-open property: only an empty agent_type yields coordinator."""
     assert resolve_role({"agent_type": "something-new"}) is not Role.COORDINATOR

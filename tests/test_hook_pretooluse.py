@@ -18,6 +18,21 @@ from shipit.harness.policy import COORDINATOR_DENY_REASON, WORKTREE_DENY_REASON
 from shipit.verbs.hook.pretooluse import run
 
 
+@pytest.fixture(autouse=True)
+def _scrub_ambient_role_env(monkeypatch):
+    """No test here may depend on the ambient launch-context env (#631).
+
+    The hook's coordinator fallback reads ``SHIPIT_LOG_CTX_ROLE``/``_AGENT``
+    from the process env — and this suite RUNS inside shipit-spawned Runs that
+    export exactly those vars, so a coordinator-deny test would silently pass
+    or fail with the wrong verdict depending on who ran pytest. Every test
+    starts from a scrubbed env; the fallback-specific tests set the vars they
+    mean explicitly.
+    """
+    monkeypatch.delenv("SHIPIT_LOG_CTX_ROLE", raising=False)
+    monkeypatch.delenv("SHIPIT_LOG_CTX_AGENT", raising=False)
+
+
 def _run(payload_text: str) -> tuple[int, str]:
     out = io.StringIO()
     code = run(stdin=io.StringIO(payload_text), stdout=out)
@@ -34,6 +49,224 @@ def test_coordinator_code_edit_is_denied():
     assert decision["hookEventName"] == "PreToolUse"
     assert decision["permissionDecision"] == "deny"
     assert decision["permissionDecisionReason"] == COORDINATOR_DENY_REASON
+
+
+def test_codex_apply_patch_code_edit_is_denied():
+    payload = json.dumps(
+        {
+            "tool_name": "apply_patch",
+            "tool_input": (
+                "*** Begin Patch\n"
+                "*** Update File: src/shipit/cli.py\n"
+                "@@\n"
+                "-old\n"
+                "+new\n"
+                "*** End Patch\n"
+            ),
+        }
+    )
+    code, out = _run(payload)
+    assert code == 0
+    decision = json.loads(out)["hookSpecificOutput"]
+    assert decision["permissionDecision"] == "deny"
+    assert decision["permissionDecisionReason"] == COORDINATOR_DENY_REASON
+
+
+def test_codex_apply_patch_strips_patch_header_paths_before_classifying():
+    payload = json.dumps(
+        {
+            "tool_name": "apply_patch",
+            "tool_input": (
+                "*** Begin Patch\r\n"
+                "*** Update File: src/shipit/cli.py  \r\n"
+                "@@\r\n"
+                "-old\r\n"
+                "+new\r\n"
+                "*** End Patch\r\n"
+            ),
+        }
+    )
+    code, out = _run(payload)
+    assert code == 0
+    decision = json.loads(out)["hookSpecificOutput"]
+    assert decision["permissionDecision"] == "deny"
+
+
+def test_codex_apply_patch_denies_if_any_patched_file_is_code():
+    payload = json.dumps(
+        {
+            "tool_name": "functions.apply_patch",
+            "tool_input": {
+                "patch": (
+                    "*** Begin Patch\n"
+                    "*** Update File: README.md\n"
+                    "@@\n"
+                    "-docs\n"
+                    "+docs\n"
+                    "*** Update File: src/shipit/cli.py\n"
+                    "@@\n"
+                    "-old\n"
+                    "+new\n"
+                    "*** End Patch\n"
+                )
+            },
+        }
+    )
+    code, out = _run(payload)
+    assert code == 0
+    decision = json.loads(out)["hookSpecificOutput"]
+    assert decision["permissionDecision"] == "deny"
+
+
+def test_codex_apply_patch_code_edit_with_spawned_env_role_is_allowed(monkeypatch):
+    monkeypatch.setenv("SHIPIT_LOG_CTX_AGENT", "deadbeef")
+    monkeypatch.setenv("SHIPIT_LOG_CTX_ROLE", "implementer")
+    payload = json.dumps(
+        {
+            "tool_name": "apply_patch",
+            "tool_input": (
+                "*** Begin Patch\n"
+                "*** Update File: src/shipit/cli.py\n"
+                "@@\n"
+                "-old\n"
+                "+new\n"
+                "*** End Patch\n"
+            ),
+        }
+    )
+    code, out = _run(payload)
+    assert code == 0
+    assert out == ""
+
+
+def test_codex_apply_patch_code_edit_with_ambient_env_role_is_denied(monkeypatch):
+    monkeypatch.delenv("SHIPIT_LOG_CTX_AGENT", raising=False)
+    monkeypatch.setenv("SHIPIT_LOG_CTX_ROLE", "implementer")
+    payload = json.dumps(
+        {
+            "tool_name": "apply_patch",
+            "tool_input": (
+                "*** Begin Patch\n"
+                "*** Update File: src/shipit/cli.py\n"
+                "@@\n"
+                "-old\n"
+                "+new\n"
+                "*** End Patch\n"
+            ),
+        }
+    )
+    code, out = _run(payload)
+    assert code == 0
+    decision = json.loads(out)["hookSpecificOutput"]
+    assert decision["permissionDecision"] == "deny"
+    assert decision["permissionDecisionReason"] == COORDINATOR_DENY_REASON
+
+
+def test_codex_apply_patch_code_edit_without_spawned_env_role_is_denied(monkeypatch):
+    monkeypatch.delenv("SHIPIT_LOG_CTX_AGENT", raising=False)
+    monkeypatch.delenv("SHIPIT_LOG_CTX_ROLE", raising=False)
+    payload = json.dumps(
+        {
+            "tool_name": "apply_patch",
+            "tool_input": (
+                "*** Begin Patch\n"
+                "*** Update File: src/shipit/cli.py\n"
+                "@@\n"
+                "-old\n"
+                "+new\n"
+                "*** End Patch\n"
+            ),
+        }
+    )
+    code, out = _run(payload)
+    assert code == 0
+    decision = json.loads(out)["hookSpecificOutput"]
+    assert decision["permissionDecision"] == "deny"
+
+
+def test_codex_apply_patch_extracts_rename_and_move_paths():
+    payload = json.dumps(
+        {
+            "tool_name": "apply_patch",
+            "tool_input": (
+                "*** Begin Patch\n"
+                "*** Rename File: docs/old.md\n"
+                "*** Update File: README.md\n"
+                "*** Move to: src/shipit/cli.py\n"
+                "*** End Patch\n"
+            ),
+        }
+    )
+    code, out = _run(payload)
+    assert code == 0
+    decision = json.loads(out)["hookSpecificOutput"]
+    assert decision["permissionDecision"] == "deny"
+
+
+def test_break_glass_logs_the_code_path_from_a_multi_file_codex_patch(
+    monkeypatch, caplog
+):
+    monkeypatch.setenv(breakglass.ENV, "1")
+    payload = json.dumps(
+        {
+            "tool_name": "apply_patch",
+            "tool_input": (
+                "*** Begin Patch\n"
+                "*** Update File: README.md\n"
+                "@@\n"
+                "-docs\n"
+                "+docs\n"
+                "*** Update File: src/shipit/cli.py\n"
+                "@@\n"
+                "-old\n"
+                "+new\n"
+                "*** End Patch\n"
+            ),
+        }
+    )
+    with caplog.at_level(logging.WARNING, logger="shipit.hook"):
+        code, out = _run(payload)
+    assert code == 0
+    assert out == ""
+    assert any(
+        "break-glass" in r.message and "src/shipit/cli.py" in r.message
+        for r in caplog.records
+    )
+    assert not any(
+        "break-glass" in r.message and "README.md" in r.message for r in caplog.records
+    )
+
+
+def test_break_glass_logs_all_code_paths_from_a_multi_file_codex_patch(
+    monkeypatch, caplog
+):
+    monkeypatch.setenv(breakglass.ENV, "1")
+    payload = json.dumps(
+        {
+            "tool_name": "apply_patch",
+            "tool_input": (
+                "*** Begin Patch\n"
+                "*** Update File: src/shipit/cli.py\n"
+                "@@\n"
+                "-old\n"
+                "+new\n"
+                "*** Update File: src/shipit/session/bootstrap.py\n"
+                "@@\n"
+                "-old\n"
+                "+new\n"
+                "*** End Patch\n"
+            ),
+        }
+    )
+    with caplog.at_level(logging.WARNING, logger="shipit.hook"):
+        code, out = _run(payload)
+    assert code == 0
+    assert out == ""
+    assert any(
+        "break-glass" in r.message
+        and "src/shipit/cli.py, src/shipit/session/bootstrap.py" in r.message
+        for r in caplog.records
+    )
 
 
 def test_subagent_code_edit_is_allowed_silently():

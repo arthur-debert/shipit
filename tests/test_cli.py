@@ -103,6 +103,18 @@ def test_tree_create_help(capsys):
     assert "--issue" in out
 
 
+def test_help_lists_session(capsys):
+    rc = cli.main(["--help"])
+    assert rc == 0
+    assert "session" in capsys.readouterr().out
+
+
+def test_session_help_lists_codex(capsys):
+    rc = cli.main(["session", "--help"])
+    assert rc == 0
+    assert "codex" in capsys.readouterr().out
+
+
 def test_install_mode_flags_are_mutually_exclusive():
     # --pr, --push, and --local are mutually exclusive modes; passing any two
     # is a usage error (click exits 2), not a silently-resolved precedence.
