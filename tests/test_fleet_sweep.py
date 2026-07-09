@@ -379,6 +379,35 @@ def test_sweep_sets_the_sanctioned_shipit_exec_override(tmp_path):
     assert all(env["SHIPIT_EXEC"] == "/cand/shipit" for _, _, env in exec_fake.calls)
 
 
+def test_run_tool_scrubs_leaked_pixi_env_but_keeps_path(monkeypatch, tmp_path):
+    # The swept child must be hermetic: a leaked parent PIXI_* project pointer
+    # (present when the sweep runs from shipit's own pixi env) would bind the
+    # tool to the COORDINATOR checkout, not its freshly provisioned Tree. The
+    # scrub drops it while keeping PATH and the SHIPIT_EXEC override, and the
+    # env is passed as the COMPLETE child env (replace_env=True) so no dropped
+    # pointer can creep back in via a merge over os.environ.
+    monkeypatch.setenv("PIXI_PROJECT_MANIFEST", "/coordinator/pixi.toml")
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    captured: dict = {}
+
+    def fake_run(argv, **kwargs):
+        captured["argv"] = argv
+        captured.update(kwargs)
+        return execrun.ExecResult(
+            argv=tuple(argv), rc=0, stdout="", stderr="", duration_ms=1
+        )
+
+    monkeypatch.setattr(fleetsweep.execrun, "run", fake_run)
+    fleetsweep._run_tool(
+        ["/t/bin/shipit", "lint"], tmp_path, {"SHIPIT_EXEC": "/cand/shipit"}
+    )
+    assert captured["replace_env"] is True
+    env = captured["env"]
+    assert "PIXI_PROJECT_MANIFEST" not in env
+    assert env["PATH"] == "/usr/bin:/bin"
+    assert env["SHIPIT_EXEC"] == "/cand/shipit"
+
+
 def test_sweep_red_cell_carries_command_and_output(tmp_path):
     exec_fake = _FakeExec(rcs={"test": 1})
     report, _, _ = _sweep([_ENTRY], tmp_path, exec_fake=exec_fake)
@@ -487,6 +516,18 @@ def test_run_sweep_writes_the_report_artifact(portfolio_repo, capsys):
     assert data["kind"] == "fleet-sweep-report"
     assert [r["repo"] for r in data["repos"]] == ["a/b", "c/d"]
     assert str(fleetsweep.REPORT_PATH) in capsys.readouterr().out
+
+
+def test_run_sweep_json_stdout_is_a_single_json_document(portfolio_repo, capsys):
+    # Under --json, stdout is the machine surface: the "report written" courtesy
+    # note must be suppressed so stdout stays ONE valid JSON document (emit()
+    # already wrote it) — a full sweep with --json still persists the artifact.
+    rc = fleet_verb.run_sweep(shipit_exec=None, as_json=True, sweep_fn=_fake_sweep)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "report written" not in out
+    data = json.loads(out)  # parses clean → not corrupted by a trailing line
+    assert data["kind"] == "fleet-sweep-report"
 
 
 def test_run_sweep_filtered_run_never_clobbers_the_evidence(portfolio_repo):

@@ -190,7 +190,11 @@ def run_sweep(
         target.write_text(
             json.dumps(report.to_dict(), indent=2) + "\n", encoding="utf-8"
         )
-        print(f"report written to {target}")
+        # Human courtesy note only — suppressed under --json so stdout stays a
+        # single valid JSON document (emit() already wrote it); the path is on
+        # the structured record below for machine consumers either way.
+        if not as_json:
+            print(f"report written to {target}")
         logger.info(
             "fleet sweep report written",
             extra={"report_path": str(target), "red_cells": report.red_cells},

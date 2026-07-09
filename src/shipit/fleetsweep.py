@@ -57,7 +57,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import config, events, execrun, identity
+from . import config, events, execrun, identity, pixienv
 from .changelog import CHANGELOG_DIR
 from .tree.create import Tree, create_from_source, new_agent_hash
 from .tree.layout import TreeSpec
@@ -484,12 +484,25 @@ def _run_tool(
 ) -> execrun.ExecResult:
     """One cell's Exec through the one runner (ADR-0028): ``check=False`` — a
     nonzero rc is the cell's verdict, not a transport failure — at the stated
-    :data:`SWEEP_TIMEOUT`; ``env`` (the ``SHIPIT_EXEC`` override) merges over
-    the parent environment."""
+    :data:`SWEEP_TIMEOUT`.
+
+    The child runs under a SCRUBBED, replacement environment: the sweep's own
+    ``PIXI_*`` / Conda-activation project pointers (leaked when the sweep is
+    launched from shipit's pixi env) are dropped via the one shared scrubber
+    (:func:`shipit.pixienv.scrub_env`, the same policy Tree provisioning and
+    spawn launch rely on), then ``env`` — the ``SHIPIT_EXEC`` override — is
+    layered on top and passed with ``replace_env=True`` so no leaked pointer can
+    creep back in via a merge over ``os.environ`` and bind the swept tool to the
+    coordinator checkout instead of its freshly provisioned Tree. ``scrub_env``
+    keeps ``PATH`` and every non-leak var, so the Tree's toolchains still
+    resolve — the hermeticity fix drops only the parent-project pointers."""
+    child_env = pixienv.scrub_env(os.environ)
+    child_env.update(env)
     return execrun.run(
         list(argv),
         cwd=str(cwd),
-        env=dict(env),
+        env=child_env,
+        replace_env=True,
         check=False,
         timeout=SWEEP_TIMEOUT,
     )
