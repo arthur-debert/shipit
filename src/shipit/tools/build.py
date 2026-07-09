@@ -10,8 +10,9 @@ executes: the join between the path→toolchain map (the leg axis) and the
   the whole-leg build (a repo needs no artifact map to ``shipit build``);
 - a leg WITH matching targets runs once per target, the base command
   narrowed to that artifact's unit: rust appends ``-p <package>``, go builds
-  ONE package — the declared package path (last, after every flag) or the
-  module root when none is declared — always dropping the registry default's
+  ONE package — the declared package path (last, after every flag) or, when
+  none is declared, no package arg at all (the leg's cwd, its module root under
+  the go ``[toolchains]`` convention) — always dropping the registry default's
   whole-tree ``./...`` target it supersedes (go discards binaries when
   several packages compile at once, so ``./...`` in a binary-producing step
   would build green yet write nothing), npm appends ``--workspace
@@ -121,10 +122,11 @@ def _narrow(
     already in ``leg.argv`` — for go the package path must be last anyway,
     and cargo/npm accept their flag anywhere. A go target always DROPS the
     whole-tree ``./...`` target (the registry default's, wherever passthrough
-    left it in the argv): the artifact's one package — the declared path, or
-    the module root when ``package`` is absent (the cwd build, which is what
-    writes the module-root binary :func:`~shipit.tools.e2e.binary_location`
-    expects) — supersedes it."""
+    left it in the argv): the artifact's one package — the declared path, or,
+    when ``package`` is absent, NO package arg (the leg's cwd build, its module
+    root under the go ``[toolchains]`` convention, which is what writes the
+    module-root binary :func:`~shipit.tools.e2e.binary_location` expects) —
+    supersedes it."""
     argv = leg.argv
     if leg.toolchain == "go":
         if version is not None and target.version_var is not None:
@@ -137,6 +139,25 @@ def _narrow(
     elif leg.toolchain == "npm" and target.package is not None:
         argv = (*argv, "--workspace", target.package)
     return argv
+
+
+def _whole_leg_argv(leg: legs_mod.Leg) -> tuple[str, ...]:
+    """The un-narrowed argv for a leg no artifact target matches — the
+    whole-leg build, run verbatim for every toolchain but go.
+
+    For go it forces the registry default's whole-tree ``./...`` to stay LAST:
+    :func:`~shipit.tools.legs.plan_legs` appends passthrough VERBATIM after the
+    leg argv, so a flag forwarded to a whole-leg go build (``shipit build go --
+    -v``) would otherwise land AFTER ``./...`` — where ``go build`` reads it as
+    another package and errors (packages must trail the flags). Every other
+    toolchain accepts its flags in any position, so their argv passes through
+    untouched. The artifact-narrowed path enforces the same package-last
+    invariant in :func:`_narrow`.
+    """
+    if leg.toolchain != "go" or _GO_ALL_PACKAGES not in leg.argv:
+        return leg.argv
+    rest = tuple(arg for arg in leg.argv if arg != _GO_ALL_PACKAGES)
+    return (*rest, _GO_ALL_PACKAGES)
 
 
 def _env(leg: legs_mod.Leg) -> tuple[tuple[str, str], ...]:
@@ -249,7 +270,7 @@ def plan_build(
             if target.toolchain == leg.toolchain
         ]
         if not matched:
-            steps.append(BuildStep(leg=leg, argv=leg.argv, env=_env(leg)))
+            steps.append(BuildStep(leg=leg, argv=_whole_leg_argv(leg), env=_env(leg)))
             continue
         for name, target in matched:
             steps.append(

@@ -23,6 +23,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
+import yaml
 
 from shipit import execrun
 from shipit.verbs import lint
@@ -1707,8 +1708,12 @@ def test_shipped_actionlint_config_declares_the_org_runner_labels():
     # actionlint.yaml the gate pins via -config-file (ADR-0037) — never a
     # per-repo carve-out (the gate ignores repo-local actionlint.yaml). gpu_t4
     # is the org's NVIDIA T4 GPU larger runner (phos-core's gpu-painting lane).
+    # Parse the config and assert gpu_t4 under self-hosted-runner.labels
+    # specifically — a raw substring match would also see the explanatory
+    # comment above the mapping, staying green if the real label were deleted.
     body = Path(lint._data_path("actionlint.yaml")).read_text(encoding="utf-8")
-    assert "gpu_t4" in body
+    config = yaml.safe_load(body)
+    assert "gpu_t4" in config["self-hosted-runner"]["labels"]
 
 
 def test_rust_fmt_injects_the_shipped_rustfmt_config():

@@ -53,6 +53,18 @@ def test_go_leg_without_artifacts_builds_every_package():
     assert step.argv == ("go", "build", "-trimpath", "-ldflags", "-s -w", "./...")
 
 
+def test_go_whole_leg_build_keeps_all_packages_last_after_passthrough():
+    # #608 review: plan_legs appends passthrough VERBATIM after the leg argv, so
+    # a flag forwarded to a whole-leg go build lands after the registry
+    # default's ./... — where `go build` reads it as another package and errors.
+    # The build planner must keep the whole-tree pattern LAST.
+    (leg,) = legs_mod.plan_legs(
+        [_entry("go")], tool="build", selector=None, passthrough=("-v",)
+    )
+    (step,) = build_mod.plan_build([leg], [])
+    assert step.argv == ("go", "build", "-trimpath", "-ldflags", "-s -w", "-v", "./...")
+
+
 def test_leg_order_is_the_map_order_and_legs_without_targets_still_build():
     steps = build_mod.plan_build(
         [_leg("rust"), _leg("npm", path="web")],
