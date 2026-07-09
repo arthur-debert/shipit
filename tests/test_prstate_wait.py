@@ -163,6 +163,25 @@ def test_ready_mode_does_not_fire_on_reviews_in():
     assert not satisfied(Until.READY, status, ("copilot",))
 
 
+def test_dead_run_times_out_with_the_rerun_advice():
+    # The #621 hang guard, wait-surface half: the engine ranks a cancelled
+    # (dead) run BLOCKED with RERUN advice — NOT VALIDATING — so a
+    # `--until ready` wait on it never idles as "CI running"; it expires on
+    # the hard deadline carrying the actionable rerun line for the supervisor.
+    dead = _status(
+        state=TaskState.BLOCKED,
+        next_action=(
+            "CI run cancelled/superseded, nothing still running — rerun the "
+            "workflow on this head (`gh run rerun <run-id> --failed`)"
+        ),
+        funnel={"copilot": FunnelState.POSTED},
+    )
+    assert not satisfied(Until.READY, dead, ("copilot",))
+    result, _ = _run([dead] * 10, Until.READY, timeout=120.0, poll=60.0)
+    assert result.outcome is Outcome.TIMED_OUT
+    assert "gh run rerun" in result.status.next_action
+
+
 # --- actionable: the deadlock guard (#583) --------------------------------------
 
 

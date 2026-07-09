@@ -211,6 +211,26 @@ def test_e2e_failing_checks_route_to_report_not_request():
     assert acts.called == "report"
 
 
+def test_e2e_cancelled_run_routes_to_report_with_rerun_advice():
+    """A dead run outranks review requests too (#621): the SAME never-requested
+    snapshot with a cancelled (nothing-running) rollup → engine suppresses
+    `to_request` and ranks BLOCKED with the RERUN advice → dispatch reports it
+    (`pr next` surfaces the rerun; the rerun itself stays the caller's act) —
+    never `request_review`, and never the old "fix and push" cure."""
+    ctx = load_context("copilot_never_requested")
+    ctx.checks = [
+        {"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "CANCELLED"}
+    ]
+    status = evaluate(ctx)
+    assert status.state is TaskState.BLOCKED
+    assert status.to_request == []
+    assert "gh run rerun" in status.next_action
+    assert "fix and push" not in status.next_action
+    acts = RecordingActs()
+    dispatch(status, acts)
+    assert acts.called == "report"
+
+
 def test_e2e_stale_after_push_routes_to_request():
     """A rerun=True reviewer with a review staled by a push → re-request: same
     `to_request` set, same request act (request and re-request are one act)."""

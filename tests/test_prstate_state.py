@@ -60,6 +60,9 @@ def test_no_pr():
         ("copilot_clean_gemini_clean", TaskState.READY),
         ("copilot_done_all_resolved", TaskState.READY),
         ("blocked_checks_failing", TaskState.BLOCKED),
+        # A dead run (#621): cancelled jobs, nothing still running — BLOCKED
+        # with RERUN advice, never VALIDATING (a waiter must not poll a corpse).
+        ("blocked_checks_cancelled", TaskState.BLOCKED),
         ("blocked_merge_conflict", TaskState.BLOCKED),
     ],
 )
@@ -457,6 +460,73 @@ def test_failing_checks_with_only_in_flight_reviewers_says_fix_ci(context):
     assert status.to_request == []
     assert "fix CI first" in status.next_action
     assert "review requests deferred" not in status.next_action
+
+
+# --- cancelled runs advise RERUN, never fix-and-push (#621) -------------------
+#
+# A killed run (superseded / manual cancel / concurrency-group cancel) never
+# judged the code: folding it into FAILING advised "fix and push" for a failure
+# that did not exist (three PRs sat blocked on exactly that in the TOL01-FUPS
+# sweep, hand-cleared with `gh run rerun`). The engine now classifies it
+# CANCELLED — surfaced only when NOTHING is still running — ranks it BLOCKED
+# (terminal + actionable: a waiter must never poll a dead run as pending), and
+# advises the rerun of the SAME head.
+
+
+def _cancelled_rollup() -> list[dict]:
+    return [
+        {"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "CANCELLED"}
+    ]
+
+
+def test_cancelled_run_is_blocked_with_rerun_advice(context):
+    # The recorded TOL01-FUPS shape: a CANCELLED `checks / plan` beside green
+    # siblings, reviews done. The verdict is CANCELLED (not failing), the state
+    # BLOCKED, and the ONE next action is the rerun — with the anti-instruction
+    # spelled out, since "fix and push" was the exact wrong cure shipped before.
+    status = evaluate(context("blocked_checks_cancelled"))
+    assert status.state is TaskState.BLOCKED
+    assert status.checks is ChecksState.CANCELLED
+    assert "gh run rerun" in status.next_action
+    assert "fix and push" not in status.next_action
+    assert "failing" not in status.next_action
+
+
+def test_cancelled_run_never_reads_as_pending(context):
+    # The #621 hang guard: a dead run must exit the poll loop as actionable
+    # state, never idle as VALIDATING/pending-forever. (PENDING only ever comes
+    # from entries that are genuinely still running.)
+    status = evaluate(context("blocked_checks_cancelled"))
+    assert status.state is not TaskState.VALIDATING
+    assert status.checks is not ChecksState.PENDING
+    assert status.to_dict()["checks"] == "cancelled"
+
+
+def test_cancelled_outranks_review_requests(context):
+    # Never-requested required reviewer + a dead run → the rerun is the ONE
+    # next action; `to_request` is suppressed for one evaluation (once the
+    # rerun is live the checks read PENDING, which does not defer) and the
+    # deferral is named so the hold reads intentional.
+    ctx = _replace(context("copilot_never_requested"), checks=_cancelled_rollup())
+    status = evaluate(ctx)
+    assert status.state is TaskState.BLOCKED
+    assert status.to_request == []
+    assert "gh run rerun" in status.next_action
+    assert "review requests deferred" in status.next_action
+    assert "copilot" in status.next_action
+
+
+def test_cancelled_with_only_in_flight_reviewers_still_says_rerun(context):
+    # Copilot already requested (nothing to defer) + a dead run: still ranks
+    # the rerun — "wait for the review" alone would leave the head's CI dead
+    # for the whole round. The in-flight reviewer stays named.
+    ctx = _replace(context("gemini_eyes_copilot_requested"), checks=_cancelled_rollup())
+    status = evaluate(ctx)
+    assert status.state is TaskState.BLOCKED
+    assert status.to_request == []
+    assert "gh run rerun" in status.next_action
+    assert "review requests deferred" not in status.next_action
+    assert "already requested / in flight" in status.next_action
     assert "copilot" in status.next_action
 
 
@@ -659,3 +729,38 @@ def test_classify_neutral_and_skipped_are_green():
         {"status": "COMPLETED", "conclusion": "SKIPPED"},
     ]
     assert classify_checks(rollup) is ChecksState.GREEN
+
+
+def test_classify_cancelled_is_its_own_verdict_not_failing():
+    # #621: a killed run never judged the code — it must not read FAILING.
+    rollup = [{"status": "COMPLETED", "conclusion": "CANCELLED"}]
+    assert classify_checks(rollup) is ChecksState.CANCELLED
+
+
+def test_classify_cancelled_beside_green_is_cancelled():
+    # Green siblings do not launder a dead job: the head was never fully judged.
+    rollup = [
+        {"status": "COMPLETED", "conclusion": "SUCCESS"},
+        {"status": "COMPLETED", "conclusion": "CANCELLED"},
+    ]
+    assert classify_checks(rollup) is ChecksState.CANCELLED
+
+
+def test_classify_failure_beats_cancelled():
+    # A genuine failure needs a code fix regardless of the cancelled sibling.
+    rollup = [
+        {"status": "COMPLETED", "conclusion": "CANCELLED"},
+        {"status": "COMPLETED", "conclusion": "FAILURE"},
+    ]
+    assert classify_checks(rollup) is ChecksState.FAILING
+
+
+def test_classify_pending_beats_cancelled():
+    # The SUPERSEDED shape (#621): a cancelled entry beside a still-running one
+    # means a newer run is already re-judging the head — wait for it; advising
+    # a rerun here would double-run CI for nothing.
+    rollup = [
+        {"status": "COMPLETED", "conclusion": "CANCELLED"},
+        {"status": "IN_PROGRESS", "conclusion": None},
+    ]
+    assert classify_checks(rollup) is ChecksState.PENDING
