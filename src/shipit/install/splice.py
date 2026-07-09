@@ -10,6 +10,13 @@ Two variants, both string-in/string-out with no filesystem:
   its command marker; every other key the consumer set merges through
   untouched, and a malformed file is preserved verbatim (a conflict to surface,
   never a clobber or a crash).
+
+The RETIRED-hooks pair (:func:`count_retired_hooks` / :func:`remove_retired_hooks`,
+#619) rides the same JSON walk in the opposite direction: consumer-local hook
+entries shipit used to prescribe (the legacy ``bin/install-release-core``
+resolver, the pre-managed ``setup-dev-env.sh`` duplicate) are dropped from
+their event array, with shipit's OWN managed entries protected by their
+``shipit hook`` command marker.
 """
 
 from __future__ import annotations
@@ -20,6 +27,7 @@ from .units import (
     BLOCK_CLOSE,
     BLOCK_OPEN,
     EVENT_PRETOOLUSE,
+    MANAGED_HOOK_COMMAND_MARKER,
     SETTINGS_HOOK_MARKER,
     canonical_hook_entry,
 )
@@ -186,4 +194,88 @@ def splice_settings_hook(
     if not isinstance(current, list):
         current = []
     hooks[event] = [e for e in current if not is_shipit_hook(e, marker)] + [entry]
+    return json.dumps(data, indent=2) + "\n"
+
+
+# --------------------------------------------------------------------------
+# Retired hook entries (#619) — consumer-local entries shipit removes
+# --------------------------------------------------------------------------
+
+
+def is_retired_hook(entry: object, marker: str) -> bool:
+    """Whether a hooks-array entry is a RETIRED consumer-local one (#619).
+
+    Matched like :func:`is_shipit_hook` — some hook's command carries ``marker``
+    — with one protection: an entry that is shipit's OWN managed one (its
+    command carries :data:`~shipit.install.units.MANAGED_HOOK_COMMAND_MARKER`,
+    the ``shipit hook <verb>`` form every managed entry runs) is NEVER retired.
+    The managed SessionStart command itself runs ``./bin/setup-dev-env.sh``
+    inline, so without the protection the setup-dev-env retirement marker would
+    delete the very entry shipit manages.
+    """
+    return is_shipit_hook(entry, marker) and not is_shipit_hook(
+        entry, MANAGED_HOOK_COMMAND_MARKER
+    )
+
+
+def count_retired_hooks(text: str, event: str, marker: str) -> int:
+    """How many retired consumer-local entries ``text``'s ``event`` array carries.
+
+    The read half of the retired-hooks pass (#619) — what gather feeds the
+    two-case decision. A missing/empty/malformed/non-object file, or an event
+    array that is not a list, counts 0: fail open, in lockstep with
+    :func:`remove_retired_hooks` (which preserves such a file verbatim), so the
+    pass never decides work the write cannot safely do.
+    """
+    text = text.strip()
+    if not text:
+        return 0
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return 0
+    if not isinstance(data, dict):
+        return 0
+    hooks = data.get("hooks")
+    entries = hooks.get(event, []) if isinstance(hooks, dict) else []
+    if not isinstance(entries, list):
+        return 0
+    return sum(1 for e in entries if is_retired_hook(e, marker))
+
+
+def remove_retired_hooks(text: str, event: str, marker: str) -> str:
+    """Drop every retired consumer-local entry from the ``event`` array (#619).
+
+    The write half of the retired-hooks pass. Owns ONLY the matched entries:
+    every other key and hook the consumer set — shipit's own managed entries
+    included (protected in :func:`is_retired_hook`) — merges through untouched.
+    An emptied ``event`` array (and an emptied ``hooks`` object) is dropped
+    rather than left as litter. Fail-safe like :func:`splice_settings_hook`: a
+    malformed or non-object file — and a file with nothing to remove — is
+    returned verbatim, never clobbered or reformatted.
+    """
+    stripped = text.strip()
+    if not stripped:
+        return text
+    try:
+        data = json.loads(stripped)
+    except json.JSONDecodeError:
+        return text
+    if not isinstance(data, dict):
+        return text
+    hooks = data.get("hooks")
+    if not isinstance(hooks, dict):
+        return text
+    entries = hooks.get(event)
+    if not isinstance(entries, list):
+        return text
+    kept = [e for e in entries if not is_retired_hook(e, marker)]
+    if len(kept) == len(entries):
+        return text
+    if kept:
+        hooks[event] = kept
+    else:
+        del hooks[event]
+        if not hooks:
+            del data["hooks"]
     return json.dumps(data, indent=2) + "\n"

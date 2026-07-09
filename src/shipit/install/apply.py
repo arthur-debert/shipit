@@ -1,7 +1,8 @@
 """apply — the install domain's ONE effectful path: execute a :class:`Plan`.
 
 Everything that touches the world lives here: unit writes and block splices,
-the changelog re-render (#578), retired-file unlinks, the policy seed, the
+the changelog re-render (#578), retired-file unlinks, retired-hook-entry
+removals (#619), the policy seed, the
 manifest re-stamp, the bounded
 ``lefthook install`` activation, and the four write modes' git/gh side effects
 (#359: the branch/PR side effect is explicit opt-in — the default mode
@@ -23,7 +24,12 @@ from ..changelog import CHANGELOG_FILE
 from . import selfcert
 from .errors import InstallError, SelfCertError
 from .reconcile import Plan, consumer_inner, format_lefthook_conflict
-from .splice import SETTINGS_MALFORMED, splice_block, splice_settings_hook
+from .splice import (
+    SETTINGS_MALFORMED,
+    remove_retired_hooks,
+    splice_block,
+    splice_settings_hook,
+)
 from .units import (
     FMT_JSON_HOOK,
     HOOK_RECOVERY_CMD,
@@ -333,7 +339,9 @@ def apply(
     re-render (#578, :func:`_rerender_changelog`), unlinks every decided
     retired DELETE (the decision already proved the content is a known
     pristine version, so the
-    unlink is the whole IO; KEEPs touch nothing), seeds the consumer-owned
+    unlink is the whole IO; KEEPs touch nothing), removes every decided
+    retired hook ENTRY from its hooks file (#619 — shipit's own managed
+    entries are protected inside the match), seeds the consumer-owned
     policy, re-stamps the manifest from the CURRENT decisions only (so a unit
     retired in a later shipit version drops out rather than lingering as a
     stale key), opportunistically activates the git hooks, and performs the
@@ -410,6 +418,23 @@ def apply(
         # time; if it vanished in the gather→apply window the goal state
         # ("file absent") already holds, so the unlink stays idempotent.
         (root / d.retired.path).unlink(missing_ok=True)
+    for d in plan.retire_hook_deletes:
+        # Retired hook entries (#619): rewrite the hooks file without the
+        # matched consumer-local entries. Runs AFTER the unit writes above, so
+        # shipit's own freshly-spliced entries are already in place (and
+        # protected inside the match — splice.is_retired_hook). Same
+        # idempotence stance as the unlinks: a file gone in the gather→apply
+        # window means the goal state already holds, and a file turned
+        # malformed in that window is preserved verbatim by
+        # remove_retired_hooks (never a clobber).
+        dest = root / d.retired.file
+        if not dest.is_file():
+            continue
+        text = dest.read_text(encoding="utf-8")
+        dest.write_text(
+            remove_retired_hooks(text, d.retired.event, d.retired.marker),
+            encoding="utf-8",
+        )
     cfg_path = root / config.CONFIG_NAME
     # Seed the consumer-owned policy BEFORE the manifest write, which preserves
     # `[secrets]`/`[reviewers]` textually while it re-stamps `[shipit]`/`[managed]`.
@@ -437,6 +462,7 @@ def apply(
             "seeds": len(plan.seeds),
             "retire_deletes": len(plan.retire_deletes),
             "retire_keeps": len(plan.retire_keeps),
+            "retire_hook_deletes": len(plan.retire_hook_deletes),
         },
     )
 
