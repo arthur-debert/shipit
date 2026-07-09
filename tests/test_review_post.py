@@ -128,6 +128,35 @@ def test_int_confidence_coerces_to_float():
     assert isinstance(result.confidence, float)
 
 
+def test_nonstring_comment_fields_never_abort_the_post():
+    """The agy path has no schema enforcement, so a comment field the schema types
+    as a string can arrive as any shape. `_finding_from_dict` coerces each to "" so
+    the malformed finding cannot crash the posting path — a dict `category` would
+    otherwise break render_marker's `_escape`, an unhashable `file` the anchoring
+    lookup."""
+    review = {
+        "summary": {"status": "COMMENT", "overall_feedback": "ok"},
+        "comments": [
+            {
+                "file": ["foo.py"],  # unhashable — would break the anchorable lookup
+                "line": 2,
+                "text": {"nested": "obj"},
+                "severity": "major",
+                "category": {"a": 1},  # dict — would break render_marker._escape
+                "confidence": 0.9,
+                "evidence": [1, 2],
+                "fix": {},
+            }
+        ],
+    }
+    # Must not raise; the malformed finding folds into the body harmlessly.
+    payload = post.build_review_payload(review, _ctx(), agent_name="agy")
+    assert isinstance(payload["body"], str)
+    result = post._finding_from_dict(review["comments"][0])
+    assert result.file == "" and result.category == "" and result.text == ""
+    assert result.evidence == "" and result.fix == ""
+
+
 def test_inline_comment_body_is_the_two_layer_rendering():
     """The inline body carries the machine marker (exact tuple recoverable) plus
     the Conventional Comments layer; the `Agent: <name> [SEVERITY]` prefix is
