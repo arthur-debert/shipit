@@ -7,7 +7,10 @@ the projection/section/notes writes, and the uniform exit/reporting contract
 check report + diff).
 """
 
+import os
 from pathlib import Path
+
+import pytest
 
 from shipit import changelog as core
 from shipit import cli, config
@@ -172,6 +175,38 @@ def test_coalesce_mutation_oserror_is_a_clean_error(tmp_path, capsys):
     assert verb.run_coalesce("1.2.3", str(root), repo_root=_no_git, today=_today) == 1
     err = capsys.readouterr().err
     assert err.startswith("error: cannot cut 1.2.3")
+
+
+def test_coalesce_notes_out_parent_needs_execute_permission(tmp_path, capsys):
+    # Creating a file in a directory needs write AND execute (search) on the
+    # dir; a parent with write but no execute is refused BEFORE mutation, not
+    # after a later write failure once the cut has landed.
+    if os.geteuid() == 0:
+        pytest.skip("root bypasses directory permission bits")
+    root = _tree(tmp_path, {"unreleased-a.md": "- a\n"})
+    _render_into(root)
+    before = (root / "CHANGELOG.md").read_text()
+    nox = tmp_path / "nox"
+    nox.mkdir()
+    os.chmod(nox, 0o600)  # rw-, no execute → cannot create files inside
+    capsys.readouterr()
+    try:
+        assert (
+            verb.run_coalesce(
+                "1.2.3",
+                str(root),
+                notes_out=str(nox / "notes.md"),
+                repo_root=_no_git,
+                today=_today,
+            )
+            == 1
+        )
+        assert "error" in capsys.readouterr().err.lower()
+        # Untouched: the refusal came before the cut.
+        assert (root / "CHANGELOG" / "unreleased-a.md").exists()
+        assert (root / "CHANGELOG.md").read_text() == before
+    finally:
+        os.chmod(nox, 0o700)  # restore so pytest can clean up the tmp tree
 
 
 def test_coalesce_failed_cut_leaves_no_stray_notes_file(tmp_path, capsys):

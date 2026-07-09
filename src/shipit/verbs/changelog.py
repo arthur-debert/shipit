@@ -316,24 +316,26 @@ def run_coalesce(
     # together (story 26), so a bad ``--notes-out`` must not leave a cut tree
     # (section written, fragments gone, CHANGELOG.md re-rendered) with no notes.
     # Create the parent and reject a directory / unwritable target — but probe
-    # write access WITHOUT creating the target file (``os.access`` on the
-    # existing target, else its parent), so a cut that fails after this leaves
-    # no stray empty notes file behind. The final write happens only on success.
+    # write access WITHOUT creating the target file, so a cut that fails after
+    # this leaves no stray empty notes file behind. Probe an existing target for
+    # write; a to-be-created target needs write AND execute (search) on the
+    # parent directory (POSIX). Any stat/permission failure here (e.g. a
+    # non-traversable parent) is itself a pre-mutation refusal. The final write
+    # happens only on success.
     notes_path = Path(notes_out) if notes_out else None
     if notes_path is not None:
         try:
             notes_path.parent.mkdir(parents=True, exist_ok=True)
+            if notes_path.is_dir():
+                raise OSError(f"{notes_out} is a directory")
+            if notes_path.exists():
+                writable = os.access(notes_path, os.W_OK)
+            else:
+                writable = os.access(notes_path.parent, os.W_OK | os.X_OK)
+            if not writable:
+                raise OSError(f"{notes_out} is not writable")
         except OSError as exc:
             raise ChangelogError(f"cannot write notes to {notes_out}: {exc}") from exc
-        if notes_path.is_dir():
-            raise ChangelogError(
-                f"cannot write notes to {notes_out}: it is a directory"
-            )
-        probe = notes_path if notes_path.exists() else notes_path.parent
-        if not os.access(probe, os.W_OK):
-            raise ChangelogError(
-                f"cannot write notes to {notes_out}: {probe} is not writable"
-            )
 
     if plan.section is not None:
         # Wrap the cut's filesystem mutations so an OSError (read-only checkout,
