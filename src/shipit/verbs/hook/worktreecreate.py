@@ -11,7 +11,7 @@ no longer reach a native worktree). The fork, decided by
 absent ⇒ coordinator — see the spike evidence pinned below):
 
 - **the coordinator's own launch** (top-level `claude --worktree <id>`, usually
-  minted by `claude-start`): the session cwd is immutable after launch, so
+  minted by `agent-start claude`): the session cwd is immutable after launch, so
   `--worktree` is the ONE pre-launch seam that can root the coordinator in its own
   isolated workspace — the **ephemeral session Tree** (ADR-0027): dir
   `<root>/<org>/<repo>/ephemeral/<id>`, branch `ephemeral/<id>`, base
@@ -134,7 +134,7 @@ def _session_id(payload: dict[str, object]) -> str:
     """The session id a coordinator launch's ephemeral Tree is named after.
 
     The payload's `name` is the `--worktree` value verbatim (`sess-<utc>-<pid>`
-    when minted by `claude-start`, anything when hand-passed). The pure planner
+    when minted by `agent-start claude`, anything when hand-passed). The pure planner
     (:func:`~shipit.tree.layout.ephemeral_branch`) normalizes AND validates it, so
     the raw value is passed through untouched — except when it would not survive
     normalization (missing, empty, or all ref-forbidden characters), where a random

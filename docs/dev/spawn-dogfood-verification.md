@@ -119,7 +119,7 @@ the Trees (`shipit tree` cleanup). The forced-fail-closed scenario sets a relati
 ## Non-Claude backend reviewers (codex / antigravity)
 
 (This section covers codex as a **spawned Run** backend. The codex
-**coordinator session** surface — `shipit session codex` / `./codex-start`,
+**coordinator session** surface — `shipit session codex` / `./agent-start codex`,
 CDX01 — has its own live runbook:
 [codex-coordinator-dogfood.md](./codex-coordinator-dogfood.md).)
 

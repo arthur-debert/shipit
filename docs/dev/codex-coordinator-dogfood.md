@@ -1,8 +1,8 @@
 # Codex coordinator dogfood — the live verification for `shipit session codex`
 
 CDX01 makes Codex a first-class **coordinator** surface: `shipit session codex`
-(usually via the managed `./codex-start`) launches an interactive Codex session
-in its own ephemeral session Tree, the exact isolated shape `./claude-start`
+(usually via the managed `./agent-start codex`) launches an interactive Codex session
+in its own ephemeral session Tree, the exact isolated shape `./agent-start claude`
 gets from the `--worktree` hook seam ([ADR-0027](../adr/0027-coordinator-session-tree-ephemeral.md),
 [docs/prd/session-bootstrap.md](../prd/session-bootstrap.md)). Codex has no pre-launch hook seam, so the
 launcher inverts the order: mint a `codex-<utc>-<pid>` session id, provision the
@@ -67,12 +67,12 @@ Prerequisites: the `codex` CLI on PATH (0.139+), a ChatGPT sign-in
 ### Interactive (the normal coordinator path)
 
 ```sh
-./codex-start            # or: shipit session codex
+./agent-start codex      # or: shipit session codex
 ```
 
 The launch prints the session id, the Tree path, and the exec argv, then codex
 takes the terminal. Extra args forward to codex verbatim
-(`./codex-start --model <id>`). Inside the session, verify rooting and
+(`./agent-start codex --model <id>`). Inside the session, verify rooting and
 identity:
 
 ```sh

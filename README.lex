@@ -21,12 +21,12 @@ underneath it and how a repo gets onto shipit. Domain vocabulary:
     1.1. Session start
 
         A coordinator session launches inside its own ephemeral `session Tree`
-        — `claude --worktree`, usually via `./claude-start` — born on an
+        — `claude --worktree`, usually via `./agent-start claude` — born on an
         `ephemeral/<id>` branch cut from `origin/main` by the WorktreeCreate
         hook (ADR-0027). The SessionStart hook activates the repo toolchain
         and surfaces shipit-pin staleness as advisory context (ADR-0033). A
         Codex coordinator gets the same isolated shape through
-        `shipit session codex`, usually via `./codex-start`: shipit
+        `shipit session codex`, usually via `./agent-start codex`: shipit
         provisions the ephemeral Tree explicitly, then execs `codex` rooted
         in it, on the ChatGPT sign-in — never mandatory API-key billing
         (CDX01; the dogfood runbook is

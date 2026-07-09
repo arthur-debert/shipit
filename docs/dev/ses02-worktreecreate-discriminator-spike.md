@@ -61,8 +61,8 @@ This matches the earlier probes on both sides: the 2.1.196 in-CC contract pinned
   in-CC spawn is always triggered by a turn, so it always carries one. The
   distinction is inherent to *when* the hook fires, not a formatting convention.
 - **The name convention corroborates but cannot be trusted.** Helper spawns are
-  always `name: agent-<agentId>` (CC's own throwaway id) and `claude-start` mints
-  `sess-…` ids — but `name` for the coordinator is whatever the user passed to
+  always `name: agent-<agentId>` (CC's own throwaway id) and `agent-start claude`
+  mints `sess-…` ids — but `name` for the coordinator is whatever the user passed to
   `-w`, including, pathologically, something starting with `agent-`. The
   `sess-` prefix stays a *recognizability* convention (and the documented fallback
   discriminator if a future CC version ever adds `prompt_id` to the launch

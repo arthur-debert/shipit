@@ -88,8 +88,9 @@ real branch; nothing is lost but the cosmetic dir↔branch symmetry.
 - **Rename the Tree path once the work is known.** Rejected: fragile (cwd inode / `$PWD`),
   and pointless for a disposable Tree. Branch-switch within the fixed path is the mechanism.
 - **A wrapper script that sets cwd + env, then `exec claude`.** Not needed for isolation:
-  CC's own `--worktree` flag + the existing hook already do it. A thin `./claude-start`
-  alias may still ship as ergonomics, but it wraps the flag, not bespoke worktree/env logic.
+  CC's own `--worktree` flag + the existing hook already do it. A thin
+  `./agent-start claude` launcher ships as ergonomics, with `./claude-start` retained only
+  as a compatibility shim; it wraps the flag, not bespoke worktree/env logic.
 
 ## Consequences
 
@@ -164,7 +165,8 @@ real branch; nothing is lost but the cosmetic dir↔branch symmetry.
   that would error on a non-pixi consumer.
 
 All four layers implemented. Layers A + D in SES01 (WS01 `harness/activation.py` +
-`verbs/hook/sessionstart.py`; WS02 `data/bootstrap/claude-start` + `shipit install` wiring).
+`verbs/hook/sessionstart.py`; WS02 `data/bootstrap/claude-start` + `shipit install` wiring,
+now compatibility-shimmed behind the managed `agent-start` launcher).
 Layer B (ephemeral Tree) in SES02-WS01: `tree/layout.py` ephemeral shape;
 `verbs/hook/worktreecreate.py` forks on `harness/worktree_adapter.is_coordinator_launch`
 (`prompt_id` absent ⇒ coordinator). Layer C (liveness/gc) in SES02-WS02:

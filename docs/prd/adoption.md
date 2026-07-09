@@ -83,7 +83,7 @@ every run; a goal reached while fighting the tooling is a failed adoption run.
 16. As a consumer repo maintainer, I want my repo's gitignored-but-needed files declared in `.treeinclude`, so that fresh Trees are complete and sessions don't fail on missing secrets.
 17. As the portfolio owner, I want each repo's lint debt cleared in one dedicated commit by a dedicated agent before lint goes blocking, so that adoption and feature agents never inherit unrelated lint noise.
 18. As the root coordinator, I want `pixi run test` (with its per-repo variants) and `pixi run build` recorded and green per repo, so that the local bar covers the tasks agents actually run.
-19. As a session agent in a consumer repo, I want `claude-start` to produce a working session Tree (correct branch, injected files, active pixi env, live hooks emitting events), so that consumer sessions match the shipit-repo experience.
+19. As a session agent in a consumer repo, I want `agent-start claude` to produce a working session Tree (correct branch, injected files, active pixi env, live hooks emitting events), so that consumer sessions match the shipit-repo experience.
 20. As the root coordinator, I want one small real task driven through the full PR loop as the final local step, so that adoption is verified by the workflow it exists to serve.
 21. As the root coordinator, I want to read `shipit logs --flow` and the eval record after every verification run, so that tooling fights are detected even when the goal was reached.
 22. As the root coordinator, I want a stop-fix-restart rule with teeth, so that workarounds never substitute for fixes that would otherwise fire N more times across the fleet.

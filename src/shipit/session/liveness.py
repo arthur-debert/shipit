@@ -9,8 +9,8 @@ host's PID, its ``session_id``, and the PID's **OS process create-time** (read
 from the OS at write time, not wall-clock "now" — the hook fires slightly after
 the process starts, so the two are close but not equal). A **session host** is
 whichever coordinator CLI owns the Tree: Claude Code (launched via
-``claude --worktree`` / ``claude-start``) or Codex (launched via
-``shipit session codex`` / ``codex-start`` — CDX01 #604; both backends' session
+``claude --worktree`` / ``agent-start claude``) or Codex (launched via
+``shipit session codex`` / ``agent-start codex`` — CDX01 #604; both backends' session
 Trees ride the same ephemeral gc ladder, so both must read as live).
 
 The module mirrors the codebase's functional-core idiom (ADR-0021): the DECISION —

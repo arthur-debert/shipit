@@ -73,7 +73,7 @@ ephemeral Tree has no PR to key reclaim off and is often clean. A `gc` rule for 
 `ephemeral` kind keeps live sessions, protects any uncommitted/unpushed work absolutely,
 and still guarantees eventual reclaim of abandoned Trees.
 
-The result: launch `claude` (or the shipped `./claude-start` alias), land in a ready,
+The result: launch `claude` (usually via `./agent-start claude`), land in a ready,
 isolated, activated clone of the repo, do the work, and let it be reclaimed automatically —
 in any managed repo, with no per-command `pixi run` and no cross-session collisions.
 
@@ -90,7 +90,7 @@ in any managed repo, with no per-command `pixi run` and no cross-session collisi
 9. As a user working in a consumer repo (`lex`, `dodot`, …), I want the exact same isolated + activated root session, so that the capability is uniform across every managed repo, not shipit-only.
 10. As a user in a non-pixi consumer repo, I want session activation to degrade gracefully to a no-op, so that the SessionStart hook never errors where there's no `pixi.toml`.
 11. As a maintainer, I want the Session Tree + activation delivered by `shipit install` as managed hooks, so that adopting a repo turns the capability on with no manual wiring.
-12. As a user, I want a `./claude-start` alias in the repo root, so that I can launch an isolated session by habit without remembering the `--worktree` flag.
+12. As a user, I want a `./agent-start claude` launcher in the repo root, so that I can launch an isolated session by habit without remembering the `--worktree` flag.
 13. As a user who prefers the raw flag, I want `claude -w <name>` to work identically, so that the alias is convenience, not a requirement.
 14. As a coordinator, I want my ephemeral Tree provisioned (deps installed) like any Tree, so that the session starts ready.
 15. As a coordinator, I want a Tree I abandon (closed terminal, crashed, rebooted) to be reclaimed automatically, so that ephemeral Trees don't accumulate and fill my disk.
@@ -193,16 +193,17 @@ in any managed repo, with no per-command `pixi run` and no cross-session collisi
 - pixi provides **no** liveness / env-GC / session state (verified KB — only static state,
   keyed on nothing joinable), so the pidfile fills a real gap rather than reinventing pixi.
 
-### Layer D — ergonomics (`./claude-start`)
+### Layer D — ergonomics (`./agent-start claude`)
 
-- A thin `./claude-start` in the repo root: `exec claude --worktree "<minted-id>" "$@"`.
+- A thin `./agent-start claude` in the repo root: `exec claude --worktree "<minted-id>" "$@"`.
+  The legacy `./claude-start` compatibility shim delegates to it.
   Shipped into managed repos by `shipit install` (the `data/bootstrap/shipit` bootstrap-file
   pattern). Optional sugar — `claude -w <name>` works identically without it.
 
 ### Delivery — not shipit-specific
 
 - All of the above (the SessionStart / WorktreeCreate / WorktreeRemove hook wiring and the
-  `./claude-start` file) is part of the **managed hook set `shipit install` lays into every
+  `./agent-start` file plus compatibility shims) is part of the **managed hook set `shipit install` lays into every
   managed repo**. shipit-self is the first install (its committed `.claude/settings.json`),
   but the capability is general.
 
@@ -246,7 +247,7 @@ the prior art to mirror.
   helper payload (per the chosen discriminator), the resolved branch is `ephemeral/<id>` vs
   `<epic>/agent-<id>` respectively, reusing the existing worktreecreate test harness.
 - **`shipit install`** — extend existing install tests to assert the new managed hooks and
-  the `./claude-start` file are laid down (and idempotently).
+  the `./agent-start` launcher plus compatibility shims are laid down (and idempotently).
 - **Live integration (opt-in, like the existing spawn/dogfood harness):** a real
   `claude --worktree` launch lands the root session in the ephemeral Tree with the env
   activated — the end-to-end proof, kept off CI (token/real-process spend) like the
@@ -261,8 +262,8 @@ the prior art to mirror.
   (immutable cwd) and pointless for a disposable Tree; branch-switch within the fixed path
   is the mechanism.
 - **A bespoke launcher script** that sets cwd + env then `exec claude` — unnecessary, since
-  `--worktree` + the existing hook + `CLAUDE_ENV_FILE` do the job; `./claude-start` is a
-  thin alias only.
+  `--worktree` + the existing hook + `CLAUDE_ENV_FILE` do the job; `./agent-start claude`
+  is a thin managed launcher and `./claude-start` is only a compatibility shim.
 - **Changes to `shipit spawn subagent`** or to Run (implementer/shepherd/reviewer)
   isolation — untouched.
 - **Non-pixi toolchain activation beyond a no-op** (npm/cargo/etc. activation specifics) —

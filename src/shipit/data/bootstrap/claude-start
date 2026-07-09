@@ -1,27 +1,19 @@
 #!/usr/bin/env bash
-# claude-start — launch an isolated coordinator session. Installed and managed by
-# `shipit install`.
+# claude-start — compatibility shim over the generic `./agent-start` launcher
+# (CDX01 #627). Installed and managed by `shipit install`.
 #
-# THIN by design (docs/prd/session-bootstrap.md, Layer D): mint a per-launch
-# session id and `exec claude --worktree "<minted-id>" "$@"`. The `--worktree`
-# flag fires shipit's WorktreeCreate hook (the isolated-Tree path), with the
-# SessionStart activation (CLAUDE_ENV_FILE) live in the session.
-#
-# Convenience only, never a requirement: `claude -w <name>` works identically
-# without this file. The minted id carries the `sess-` prefix so a claude-start
-# session is recognizable on disk; the hook discriminates the coordinator launch
-# from an in-CC helper spawn on the payload's `prompt_id` (absent => coordinator,
-# ADR-0027), not on this prefix — the id becomes the ephemeral session Tree's
-# dir leaf and birth branch (`ephemeral/<id>`).
+# All launch logic lives in `agent-start` (the host strategy table +
+# per-host launch functions; docs/dev/agent-host-seams.md) — this file only
+# delegates, so existing muscle memory and docs keep working. Prefer
+# `./agent-start claude [args...]`.
 #
 # Do not edit — `shipit install` overwrites this file.
 set -euo pipefail
 
-if ! command -v claude >/dev/null 2>&1; then
-	echo "claude-start: the claude CLI is not on PATH — install Claude Code first." >&2
+repo="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ ! -x "$repo/agent-start" ]; then
+	echo "claude-start: $repo/agent-start is missing or not executable — run 'shipit install' to (re)provision the managed launchers." >&2
 	exit 127
 fi
 
-# Session id: sortable UTC launch stamp + this launcher's PID — unique across
-# concurrent launches on one host, no extra tooling needed.
-exec claude --worktree "sess-$(date -u +%Y%m%d-%H%M%S)-$$" "$@"
+exec "$repo/agent-start" claude "$@"

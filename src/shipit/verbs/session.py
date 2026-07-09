@@ -4,8 +4,8 @@ The command group for launching the coordinator's OWN isolated session — the o
 Tree ``shipit spawn subagent`` structurally cannot mint (it provisions Trees for
 Runs the coordinator launches, not for the session itself). Claude Code needs no
 verb here: its cwd is fixed before any shipit code runs, so its session Tree rides
-the ``--worktree`` pre-launch seam (the ``WorktreeCreate`` hook + ``claude-start``,
-ADR-0027). Codex has no such seam — but shipit launches the codex process itself,
+the ``--worktree`` pre-launch seam (the ``WorktreeCreate`` hook +
+``agent-start claude``, ADR-0027). Codex has no such seam — but shipit launches the codex process itself,
 so ``shipit session codex`` CAN provision first and exec second, which is exactly
 what it does (issue #604):
 
@@ -18,8 +18,9 @@ posture, with the session-identity env exports riding along.
 The verb is thin (ADR-0030): the launch contract — id grammar, argv posture, env
 scrubs/exports — is the pure core in :mod:`shipit.session.bootstrap`; this module
 holds click glue, the effectful seams (Tree creation, ``chdir``/``exec``), and the
-exit mapping. The managed ``./codex-start`` bootstrap (the ``claude-start``
-sibling, laid down by ``shipit install``) is a thin alias onto this verb.
+exit mapping. The managed ``./agent-start codex`` launcher (and its
+``./codex-start`` compatibility shim, both laid down by ``shipit install``)
+is a thin alias onto this verb.
 """
 
 from __future__ import annotations
@@ -48,8 +49,8 @@ logger = logging.getLogger("shipit.session")
     name="session",
     help=(
         "Coordinator session bootstrap — launch an isolated, Tree-rooted "
-        "top-level session.\n\nClaude sessions ride `./claude-start` (the "
-        "--worktree hook seam); `session codex` is the Codex counterpart: it "
+        "top-level session.\n\nClaude sessions ride `./agent-start claude` "
+        "(the --worktree hook seam); `session codex` is the Codex counterpart: it "
         "provisions the ephemeral session Tree explicitly, then execs codex "
         "rooted in it. `--help` is the map."
     ),

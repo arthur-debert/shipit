@@ -1,6 +1,7 @@
 """``session/bootstrap`` — the Codex coordinator launch, as pure decisions (CDX01 #604).
 
-``./claude-start`` gets its isolated session Tree for free: ``claude --worktree``
+A Claude launch (``./agent-start claude``) gets its isolated session Tree for
+free: ``claude --worktree``
 fires shipit's ``WorktreeCreate`` hook, which provisions the ephemeral Tree and
 hands the path back for Claude Code to adopt as the session cwd (ADR-0027). Codex
 has NO such pre-launch seam — no ``WorktreeCreate`` contract, no hook that can
@@ -15,7 +16,7 @@ grammar, the argv posture, the env scrubs and exports — is unit-tested without
 Tree on disk or a real ``codex``:
 
 - :func:`mint_session_id` — the per-launch session id, ``codex-<utc-stamp>-<pid>``.
-  The same sortable stamp+pid grammar ``claude-start`` mints (unique across
+  The same sortable stamp+pid grammar ``agent-start claude`` mints (unique across
   concurrent launches on one host), but prefixed ``codex-`` instead of ``sess-`` so
   the backend is legible everywhere the id lands: the Tree's dir leaf, the
   ``ephemeral/<id>`` birth branch, ``shipit tree list``, and every log/event record
@@ -52,14 +53,14 @@ from ..agent.backend import CODEX
 from ..spawn.backends.codex import CodexAdapter
 from ..spawn.launch import scrub_tree_env
 
-#: The minted id's prefix — what makes a ``codex-start`` session recognizable on
-#: disk and in the logs (vs ``claude-start``'s ``sess-``): the prefix becomes the
+#: The minted id's prefix — what makes a Codex coordinator session recognizable on
+#: disk and in the logs (vs the ``sess-`` a Claude launch mints): the prefix becomes the
 #: ephemeral Tree's dir leaf and birth branch (``ephemeral/codex-…``, ADR-0027),
 #: so ``shipit tree list`` and every session-keyed record say which backend owns it.
 SESSION_ID_PREFIX = "codex"
 
 #: The launch stamp's shape: a sortable UTC timestamp, the same grammar the managed
-#: ``claude-start`` launcher mints (``%Y%m%d-%H%M%S``).
+#: ``agent-start`` launcher mints for a Claude launch (``%Y%m%d-%H%M%S``).
 _STAMP_FORMAT = "%Y%m%d-%H%M%S"
 
 #: The low-friction coordinator posture (ADR-0020 §codex, probed on 0.139): codex's
@@ -77,7 +78,7 @@ def mint_session_id(*, now: float, pid: int) -> str:
     Pure over an injected clock and pid (ADR-0021 — the verb passes ``time.time()``
     and ``os.getpid()``), so the grammar is asserted without freezing the real
     clock. Stamp+pid is unique across concurrent launches on one host (two launches
-    in the same second are different processes), matching ``claude-start``'s minted
+    in the same second are different processes), matching the Claude launch's minted
     ``sess-<utc>-<pid>``; the ``codex-`` prefix marks the backend (see
     :data:`SESSION_ID_PREFIX`). The result is already a pure ``[a-z0-9-]`` token,
     so it survives :func:`shipit.tree.layout.ephemeral_branch`'s normalization
@@ -95,7 +96,7 @@ def codex_argv(tree: str | Path, extra: Sequence[str] = ()) -> list[str]:
     commands and child shells inherit — agrees; belt and suspenders, both pointing
     at the Tree). The posture is :data:`BYPASS_FLAG` (see the module docstring for
     the probed rationale). ``extra`` is the operator's own pass-through args
-    (``./codex-start --model foo``), appended LAST so they land after the managed
+    (``./agent-start codex --model foo``), appended LAST so they land after the managed
     flags — an operator flag can therefore always extend or (where codex is
     last-wins) refine the posture. The binary name comes from the ONE backend
     identity registry (:data:`shipit.agent.backend.CODEX`, ADR-0025).

@@ -56,7 +56,7 @@ mid-stream. Agents derive WS codes and all names from them.
     A coordinator session Tree is born on `ephemeral/<id>` — e.g.
     `ephemeral/sess-20260702-121314-4242` — cut from `origin/main`, where `<id>`
     is the per-launch session id (the `claude --worktree <id>` value, minted by
-    `claude-start`). The slash groups every session branch under the `ephemeral/`
+    `agent-start claude`). The slash groups every session branch under the `ephemeral/`
     ref directory, mirroring the Tree dir `<root>/<org>/<repo>/ephemeral/<id>`.
     Unlike every other form, this branch is NOT the work's name: a session Tree
     is ephemeral-by-path, work-by-branch (ADR-0027). The dir leaf is the SESSION
