@@ -354,3 +354,7 @@ def test_write_task_carries_the_bank_state_protocol():
     assert "bank your state" in task.lower()
     assert "push the branch" in task
     assert "'issues/587/work'" in task  # the WIP lands on the Run's OWN branch
+    # The push MUST be spelled upstream-safe: at bank time the branch is fresh (no
+    # draft PR ⇒ no upstream), so a bare `git push` would reject the WIP commit and
+    # lose exactly the work the protocol salvages. Pin the `-u origin <branch>` form.
+    assert "git push -u origin issues/587/work" in task

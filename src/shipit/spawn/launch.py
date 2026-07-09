@@ -285,14 +285,18 @@ def write_task(role: str, *, issue: int, branch: str, base_branch: str) -> str:
     with loose work. The spawn still fails its exit contract (no open draft PR),
     but the pushed WIP commit turns that failure into a resumable handoff the
     coordinator can re-brief from — twice a killed Run's whole diagnosis was
-    stranded uncommitted in its dead Tree, recoverable only by luck.
+    stranded uncommitted in its dead Tree, recoverable only by luck. The push is
+    spelled ``git push -u origin {branch}`` because at bank time the branch is
+    fresh (no draft PR yet ⇒ no upstream set), so a bare ``git push`` would reject
+    the WIP commit and lose exactly the work the protocol exists to salvage.
     """
     return (
         f"You are a spawned {role} Run launched by `shipit spawn subagent`, working in "
         f"an isolated Tree checkout on branch {branch!r} (cut from {base_branch!r}). "
         f"Implement issue #{issue}: read it with `gh issue view {issue}`, make the "
-        f"change with tests, and get the checks green. Then commit, push {branch!r}, and "
-        f"open a DRAFT pull request from it against {base_branch!r} "
+        f"change with tests, and get the checks green. Then commit, push the branch "
+        f"(`git push -u origin {branch}` — the branch is fresh, so set its upstream), "
+        f"and open a DRAFT pull request from it against {base_branch!r} "
         f"(`gh pr create --draft --base {base_branch} --head {branch}`) whose body "
         f"references `for #{issue}`. Once the draft PR is open, run `shipit pr next` "
         f"ONCE from the PR branch (the engine places the initial review requests), "
@@ -300,7 +304,9 @@ def write_task(role: str, *, issue: int, branch: str, base_branch: str) -> str:
         f"If you are about to run out of time or budget BEFORE the draft PR is open, "
         f"bank your state instead of exiting with loose work: commit whatever exists "
         f"(even partial) to {branch!r} with a commit message starting `WIP:` that says "
-        f"what is done and what remains, and push the branch — a pushed WIP commit "
+        f"what is done and what remains, and push the branch with "
+        f"`git push -u origin {branch}` (a fresh branch has no upstream yet, so a bare "
+        f"`git push` would reject the commit and lose it) — a pushed WIP commit "
         f"turns the failed spawn into a resumable handoff instead of a silent loss."
     )
 
