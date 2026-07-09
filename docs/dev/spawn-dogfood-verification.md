@@ -118,6 +118,11 @@ the Trees (`shipit tree` cleanup). The forced-fail-closed scenario sets a relati
 
 ## Non-Claude backend reviewers (codex / antigravity)
 
+(This section covers codex as a **spawned Run** backend. The codex
+**coordinator session** surface — `shipit session codex` / `./codex-start`,
+CDX01 — has its own live runbook:
+[codex-coordinator-dogfood.md](./codex-coordinator-dogfood.md).)
+
 The reviewer Run is **backend-parametrized**: `shipit spawn subagent --role reviewer
 --backend codex|antigravity` launches the non-Claude agent through the SAME shared
 read-only Tree (ADR-0018) and the SAME ADR-0020 `BackendAdapter` read-only posture
