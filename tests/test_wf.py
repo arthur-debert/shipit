@@ -349,10 +349,23 @@ def test_packaged_dockerfile_matches_the_containers_doc_image():
 # --------------------------------------------------------------------------
 
 
+# `docker info` can hang when the daemon is wedged, and this probe runs at
+# COLLECTION time (the skipif below), so an unbounded call would stall the whole
+# suite. Bound it and treat a timeout (or a vanished CLI) as "daemon unavailable".
+_DOCKER_PROBE_TIMEOUT = 10
+
+
 def _docker_daemon_up() -> bool:
     if shutil.which("docker") is None:
         return False
-    probe = subprocess.run(["docker", "info"], capture_output=True)
+    try:
+        probe = subprocess.run(
+            ["docker", "info"],
+            capture_output=True,
+            timeout=_DOCKER_PROBE_TIMEOUT,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return False
     return probe.returncode == 0
 
 
