@@ -272,9 +272,12 @@ def run_coalesce(
     for. A prerelease extracts (nothing written, fragments kept); a resume of
     an already-cut version re-emits the identical notes (ADR-0009).
 
-    An unusable ``--notes-out`` (unwritable parent, a directory) is rejected as
-    a :class:`ChangelogError` BEFORE the tree is mutated, so a bad destination
-    never leaves a cut tree with no notes artifact written.
+    An unusable ``--notes-out`` — unwritable parent, a directory, or a
+    read-only target — is rejected as a :class:`ChangelogError` BEFORE the tree
+    is mutated: its writability is probed up front. Any residual write failure
+    (e.g. the disk filling between the probe and the write) still surfaces as a
+    :class:`ChangelogError`, never a raw traceback — so a bad destination never
+    leaves a cut tree with no notes artifact.
     """
     read_tree = read_tree or _read_tree
     root = _resolve_root(
@@ -296,12 +299,17 @@ def run_coalesce(
     # coalesce's contract is that the cut and its one notes artifact land
     # together (story 26), so a bad ``--notes-out`` must not leave a cut tree
     # (section written, fragments gone, CHANGELOG.md re-rendered) with no notes.
+    # Create the parent, reject a directory target, and probe write access
+    # (open for append — creates if absent, requires write permission if the
+    # target already exists) so an unwritable destination is caught up front.
     notes_path = Path(notes_out) if notes_out else None
     if notes_path is not None:
         try:
             notes_path.parent.mkdir(parents=True, exist_ok=True)
             if notes_path.is_dir():
                 raise OSError(f"{notes_out} is a directory")
+            with open(notes_path, "a", encoding="utf-8"):
+                pass
         except OSError as exc:
             raise ChangelogError(f"cannot write notes to {notes_out}: {exc}") from exc
 

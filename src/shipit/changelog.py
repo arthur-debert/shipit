@@ -283,8 +283,10 @@ def render(
     # Exactly one trailing newline: the loop's unconditional "\n" separator would
     # otherwise leave a blank-line tail (two newlines) when no legacy follows,
     # tripping markdown linters (MD012) and diverging from what a formatter would
-    # commit — a spurious sync-check (:func:`sync_diff`) failure.
-    return "".join(parts).rstrip() + "\n"
+    # commit — a spurious sync-check (:func:`sync_diff`) failure. Strip only
+    # newlines, not all whitespace, so a significant trailing space (a markdown
+    # hard line break at end-of-file, from a section or ``legacy.md``) survives.
+    return "".join(parts).rstrip("\n") + "\n"
 
 
 def sync_diff(rendered: str, committed: str | None) -> str | None:

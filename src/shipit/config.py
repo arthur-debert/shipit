@@ -244,8 +244,9 @@ class Lane:
 #: re-rendered changelog — fails before merge. PR-triggered, cheap, required at
 #: merge but NOT local (a fragment usually lands with the PR's last commit, so
 #: blocking every mid-work commit would only teach `--no-verify`). The `run` is
-#: the ordinary `shipit changelog check` invocation, so the lane's CI job and a
-#: laptop run are the same command. A repo adopting the changelog model declares
+#: the ordinary `changelog check` invocation (a shipit tool/leg string, no
+#: `shipit` prefix — see `run` above), so the lane's CI job and a laptop run are
+#: the same command. A repo adopting the changelog model declares
 #: exactly this entry in its `[lanes]` table.
 CHANGELOG_SYNC_LANE = Lane(
     name="changelog-sync",

@@ -225,6 +225,31 @@ def test_coalesce_notes_out_creates_missing_parent_dirs(tmp_path, capsys):
     assert notes_file.read_text() == "- a\n"
 
 
+def test_coalesce_unwritable_notes_parent_refuses_without_mutating(tmp_path, capsys):
+    # The writability preflight also catches an unusable parent (here: a file
+    # where a directory is needed) BEFORE the cut lands — no partial mutation.
+    root = _tree(tmp_path, {"unreleased-a.md": "- a\n"})
+    _render_into(root)
+    before = (root / "CHANGELOG.md").read_text()
+    (tmp_path / "afile").write_text("not a dir\n")
+    capsys.readouterr()
+    notes_out = tmp_path / "afile" / "notes.md"
+    assert (
+        verb.run_coalesce(
+            "1.2.3",
+            str(root),
+            notes_out=str(notes_out),
+            repo_root=_no_git,
+            today=_today,
+        )
+        == 1
+    )
+    assert "error" in capsys.readouterr().err.lower()
+    assert (root / "CHANGELOG" / "unreleased-a.md").exists()
+    assert not (root / "CHANGELOG" / "1.2.3.md").exists()
+    assert (root / "CHANGELOG.md").read_text() == before
+
+
 def test_coalesce_prerelease_extracts_and_keeps_fragments(tmp_path, capsys):
     root = _tree(tmp_path, {"unreleased-a.md": "- a\n"})
     _render_into(root)

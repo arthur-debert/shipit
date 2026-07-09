@@ -234,6 +234,13 @@ def test_render_no_fragments_no_legacy():
     assert not text.endswith("- x\n\n")
 
 
+def test_render_preserves_significant_trailing_whitespace():
+    # The single-trailing-newline normalization strips only newlines, not a
+    # meaningful trailing space (a markdown hard line break at end-of-file).
+    text = core.render((), {"0.1.0": "## 0.1.0 - 2026-01-01\n\n- x  \n"}, legacy=None)
+    assert text.endswith("- x  \n")
+
+
 def test_render_is_deterministic():
     frags = _frags("- a\n")
     sections = {"1.0.0": "## 1.0.0 - 2026-01-01\n\n- first\n"}
