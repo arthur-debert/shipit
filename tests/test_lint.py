@@ -1038,6 +1038,31 @@ def test_rust_skew_downgrades_cargo_failure_to_warning(tmp_path, capsys):
     assert "TOOLCHAIN SKEW" in out
     assert "1.97.0" in out and "1.96.*" in out
     assert "LINT: OK" in out
+    # clippy and fmt both fail under one skew, but the per-dir probe is cached:
+    # exactly one `cargo --version` for the single manifest dir.
+    probes = [a for b, a in rec.calls if b == "cargo" and a == ("--version",)]
+    assert len(probes) == 1
+
+
+def test_rust_skew_probes_cargo_in_the_manifest_dir_not_root(tmp_path, capsys):
+    # A nested manifest (src-tauri/) can carry a directory-scoped rustup
+    # override, so the #602 probe must run `cargo --version` in the SAME dir as
+    # the failing leg — probing from root could read a different toolchain and
+    # claim skew off the wrong cargo. The probe cwd must track the manifest dir.
+    _write_rust_pin(tmp_path)
+    rec = _SkewRecorder(codes={"cargo": 101})
+    rc = lint.run(
+        str(tmp_path),
+        discover=_fake_discover(["src-tauri/Cargo.toml", "src-tauri/src/main.rs"]),
+        run_tool=rec,
+    )
+    assert rc == 0  # skew claimed → warn-not-block
+    assert "TOOLCHAIN SKEW" in capsys.readouterr().out
+    # The --version probe ran in src-tauri/, the failing leg's own dir.
+    probe_cwds = [
+        cwd for b, args, cwd in rec.cwds if b == "cargo" and args == ("--version",)
+    ]
+    assert probe_cwds == [tmp_path / "src-tauri"]
 
 
 class _NoisySkewRecorder(_SkewRecorder):

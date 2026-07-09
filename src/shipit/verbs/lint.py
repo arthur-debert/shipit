@@ -1376,18 +1376,20 @@ def _pinned_rust_spec(root: Path) -> str | None:
 
 
 def _probe_cargo_version(
-    run_tool: Callable[[str, list[str], Path], execrun.ExecResult], root: Path
+    run_tool: Callable[[str, list[str], Path], execrun.ExecResult], cwd: Path
 ) -> str | None:
-    """The resolved toolchain's ``cargo --version`` banner, or ``None`` (#602).
+    """The resolved toolchain's ``cargo --version`` banner in ``cwd``, or ``None`` (#602).
 
-    Rides the SAME ``run_tool`` seam (and thus the same scrubbed env and PATH)
-    as the real cargo legs, so the probed version is exactly the cargo those
-    legs will run. A launch failure or nonzero rc yields ``None`` — the probe
-    learned nothing, no skew is claimed, and a genuinely missing cargo still
-    surfaces as the leg's own hard-fail 127.
+    Rides the SAME ``run_tool`` seam (same scrubbed env and PATH) AND the same
+    ``cwd`` as the failing cargo leg, so a directory-scoped rustup override
+    (``rust-toolchain.toml``) resolves the very toolchain that leg runs — the
+    caller probes once per manifest dir, not once at the repo root. A launch
+    failure or nonzero rc yields ``None`` — the probe learned nothing, no skew is
+    claimed, and a genuinely missing cargo still surfaces as the leg's own
+    hard-fail 127.
     """
     try:
-        result = run_tool("cargo", ["--version"], root)
+        result = run_tool("cargo", ["--version"], cwd)
     except execrun.ExecError:
         return None
     if result.rc != 0:
@@ -1495,19 +1497,20 @@ def run(
     # an ignore glob nor a subdirectory-scoped run.
     pin_editorconfig = not tracks_root_ec(root)
 
-    # The #602 toolchain-skew guard, decided ONCE per run: when a rust leg
-    # routes AND the repo pins its rust toolchain in pixi.toml, probe the cargo
-    # this run resolves (through the same run_tool seam the legs use) and hold
-    # the skew note when the version escapes the pin. Failure-only downgrade:
-    # the note is attached ONLY where a cargo leg fails (below); it never
-    # touches a passing run or any non-cargo leg. No pin, no probe — a repo
-    # with no pixi rust pin declares its toolchain per ADR-0007 and keeps the
-    # full hard-fail.
-    rust_skew: str | None = None
+    # The #602 toolchain-skew guard. The repo's pixi rust pin is root-scoped
+    # (one pixi.toml), read ONCE here when a rust leg routes. The RESOLVED cargo,
+    # though, is probed PER MANIFEST DIR, lazily, in the cargo-failure branch
+    # below — a directory-scoped rustup override (``rust-toolchain.toml``) can
+    # make a nested manifest resolve a different toolchain than the root, so the
+    # probe must run in the SAME cwd as the failing leg or it could claim skew
+    # off the wrong toolchain. Failure-only downgrade: the note is attached ONLY
+    # where a cargo leg fails; it never touches a passing run or any non-cargo
+    # leg. No pin, no probe — a repo with no pixi rust pin declares its toolchain
+    # per ADR-0007 and keeps the full hard-fail.
+    rust_pin: str | None = None
     if any(lang.name == RUST.name for lang, _ in routed):
         rust_pin = pinned_rust_spec(root)
-        if rust_pin is not None:
-            rust_skew = detect_rust_skew(rust_pin, _probe_cargo_version(run_tool, root))
+    rust_skew_by_dir: dict[Path, str | None] = {}
 
     mode = "fix" if fix else "check"
     print(f"lint: {root} ({mode})")
@@ -1686,30 +1689,41 @@ def run(
                                 },
                             )
                             rc, out = 0, ""
-                        elif rc != 0 and tool.binary == "cargo" and rust_skew:
-                            # #602: the resolved cargo escapes the repo's pixi
-                            # rust pin, so this clippy/fmt failure is the OFF-PIN
-                            # toolchain's verdict, not the canonical one — it
-                            # WARNS instead of blocking (loudly: the skew note +
-                            # the tool's own output print under the ok mark).
-                            # Blocking here fails commits on untouched code
-                            # whenever the ambient toolchain drifts newer than
-                            # the pin, training operators onto --no-verify — the
-                            # erosion the gate must never cause. CI's pinned env
-                            # remains the enforcing verdict.
-                            fail_open_note = rust_skew + (
-                                "\n" + out.strip() if out.strip() else ""
-                            )
-                            logger.warning(
-                                "lint rust toolchain skew — warn, not block (#602)",
-                                extra={
-                                    "lang": lang.name,
-                                    "tool": tool.binary,
-                                    "cwd": mdir,
-                                    "batch": note,
-                                },
-                            )
-                            rc, out = 0, ""
+                        elif rc != 0 and tool.binary == "cargo" and rust_pin:
+                            # #602: probe the cargo THIS manifest dir resolves
+                            # (cached per dir — clippy and fmt both fail under a
+                            # skew, so the two legs share one probe) and, if it
+                            # escapes the repo's pixi rust pin, treat this
+                            # clippy/fmt failure as the OFF-PIN toolchain's
+                            # verdict, not the canonical one — WARN instead of
+                            # block (loudly: the skew note + the tool's own output
+                            # under the ok mark). Blocking here fails commits on
+                            # untouched code whenever the ambient toolchain drifts
+                            # newer than the pin, training operators onto
+                            # --no-verify — the erosion the gate must never cause.
+                            # CI's pinned env remains the enforcing verdict. A pin
+                            # that IS satisfied here yields no note, so the leg
+                            # falls through and FAILS exactly as before.
+                            if mdir not in rust_skew_by_dir:
+                                rust_skew_by_dir[mdir] = detect_rust_skew(
+                                    rust_pin,
+                                    _probe_cargo_version(run_tool, root / mdir),
+                                )
+                            rust_skew = rust_skew_by_dir[mdir]
+                            if rust_skew:
+                                fail_open_note = rust_skew + (
+                                    "\n" + out.strip() if out.strip() else ""
+                                )
+                                logger.warning(
+                                    "lint rust toolchain skew — warn, not block (#602)",
+                                    extra={
+                                        "lang": lang.name,
+                                        "tool": tool.binary,
+                                        "cwd": mdir,
+                                        "batch": note,
+                                    },
+                                )
+                                rc, out = 0, ""
                         # Per-tool outcomes are mechanics; the run summary is the milestone.
                         logger.debug(
                             "lint tool finished",
