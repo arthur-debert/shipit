@@ -21,6 +21,7 @@ from .verbs import e2e as e2e_verb
 from .verbs import gh_setup, install, lint, logs, verify_apps
 from .verbs import test as test_verb
 from .verbs._context import resolve_root_context
+from .verbs.changelog import changelog as changelog_group
 from .verbs.eval import eval_group
 from .verbs.hook import hook as hook_group
 from .verbs.logevent import log as log_group
@@ -28,6 +29,7 @@ from .verbs.pr import pr as pr_group
 from .verbs.provision import provision as provision_group
 from .verbs.spawn import spawn as spawn_group
 from .verbs.tree import tree as tree_group
+from .verbs.wf import wf as wf_group
 
 #: The CLI entry's own logger — carries the SHIPIT_EXEC announcement's durable
 #: twin (ADR-0033) through the LOG01 pipeline like any subsystem logger.
@@ -224,7 +226,7 @@ def test_cmd(args: tuple[str, ...]) -> None:
 )
 @click.argument("args", nargs=-1, type=click.UNPROCESSED)
 def build_cmd(version: str | None, args: tuple[str, ...]) -> None:
-    """Run this repo's build legs: `shipit build [LEG] [-- ARGS...]`.
+    """Run this repo's build legs: `shipit build [--version VERSION] [LEG] [-- ARGS...]`.
 
     Walks the `.shipit.toml [toolchains]` path->toolchain map and dispatches
     each build leg to its REAL builder (cargo / go build / uv build / the npm
@@ -234,12 +236,14 @@ def build_cmd(version: str | None, args: tuple[str, ...]) -> None:
     Bare `shipit build` runs EVERY leg. LEG selects one (a toolchain name, or
     a map path); args after `--` are forwarded verbatim to that leg's builder
     (`shipit build npm -- --workspace web`) and require exactly one selected
-    leg. Exit: 0 all steps build, 1 any step fails (a missing builder
-    hard-fails, never skips), 2 usage.
+    leg. `--version` supplies the release version injected where a go target
+    declares its var (ADR-0041). Exit: 0 all steps build, 1 any step fails (a
+    missing builder hard-fails, never skips), 2 usage.
     """
     raise SystemExit(build_verb.run(list(args), version=version))
 
 
+<<<<<<< HEAD
 @root.command(name="e2e", context_settings={"ignore_unknown_options": True})
 @click.argument("args", nargs=-1, type=click.UNPROCESSED)
 def e2e_cmd(args: tuple[str, ...]) -> None:
@@ -257,6 +261,12 @@ def e2e_cmd(args: tuple[str, ...]) -> None:
     2 usage.
     """
     raise SystemExit(e2e_verb.run(list(args)))
+=======
+# The nested `changelog` group (TOL01-WS06) — the language-agnostic
+# release-notes tool over CHANGELOG/ fragments: the PR-time fragment-sync
+# `check` (the changelog-sync lane's run) and the cut-time `coalesce`.
+root.add_command(changelog_group)
+>>>>>>> refs/remotes/origin/TOL01_WS02
 
 
 # The `logs` reader (LOG01/LOG04, promoted onto the ADR-0030 contract in
@@ -296,6 +306,11 @@ root.add_command(tree_group)
 # The nested `spawn` group (TRE03) — shipit-owned subagent spawning: create a
 # write Tree and launch a backend-agent Run rooted in it (ADR-0017/0019).
 root.add_command(spawn_group)
+
+# The nested `wf` group (TOL01-WS04) — workflow tools: `shipit wf test` runs
+# one workflow/job under act in a container against a crafted event, so a
+# workflow edit is validated locally before any push (PRD stories 40/41).
+root.add_command(wf_group)
 
 
 def main(argv: list[str] | None = None) -> int:

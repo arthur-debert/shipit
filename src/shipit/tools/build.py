@@ -78,24 +78,25 @@ class BuildStep:
 def _inject_version(argv: tuple[str, ...], var: str, version: str) -> tuple[str, ...]:
     """``argv`` with ``-X <var>=<version>`` riding the ``-ldflags`` value.
 
-    Extends the existing ``-ldflags`` value (the registry default's
-    ``-s -w``, or an override's) because go takes the LAST ``-ldflags`` — a
-    second flag would silently drop the strip flags. BOTH go spellings are
-    handled: the split ``-ldflags <value>`` two-token form (the registry
-    default) and the joined ``-ldflags=<value>`` single-token form (a common
-    per-path override) — the joined form may sit last, so the whole argv is
-    scanned. Appends a fresh ``-ldflags`` only when the (overridden) command
-    carries none.
+    Extends the value of the LAST ``-ldflags`` because go takes the last one —
+    extending an earlier flag (or appending a second) would let go's own
+    last-wins rule silently drop the injected ``-X`` (and the registry
+    default's ``-s -w``). So the argv is scanned from the END: whichever
+    spelling appears last wins — the split ``-ldflags <value>`` two-token form
+    (the registry default) or the joined ``-ldflags=<value>`` single-token
+    form (a common per-path override or passthrough). Appends a fresh
+    ``-ldflags`` only when the (overridden) command carries none.
     """
     injection = f"-X {var}={version}"
     joined = f"{_LDFLAGS}="
     out = list(argv)
-    for i, arg in enumerate(out):
-        if arg == _LDFLAGS and i + 1 < len(out):  # split form: -ldflags <value>
-            out[i + 1] = f"{out[i + 1]} {injection}"
-            return tuple(out)
+    for i in range(len(out) - 1, -1, -1):
+        arg = out[i]
         if arg.startswith(joined):  # joined form: -ldflags=<value>
             out[i] = f"{arg} {injection}"
+            return tuple(out)
+        if arg == _LDFLAGS and i + 1 < len(out):  # split form: -ldflags <value>
+            out[i + 1] = f"{out[i + 1]} {injection}"
             return tuple(out)
     return (*out, _LDFLAGS, injection)
 

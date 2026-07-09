@@ -151,13 +151,28 @@ def run(
 
     ``args`` is the raw post-``--``-stripped argument tuple (see
     :func:`~._tool.split_args`); ``version`` is the caller-supplied release
-    version (ADR-0041 — never computed here). ``run_step`` injects the Exec
+    version (ADR-0041 — never computed here), which must be whitespace-free (it
+    rides go's ``-ldflags`` value, a single token the go tool re-splits on
+    whitespace — a rc-2 usage error otherwise). ``run_step`` injects the Exec
     boundary for tests; ``runs_out``, when given, receives every
     :class:`StepRun` outcome — the typed per-step verdicts behind the exit
     code.
     """
     started = time.monotonic()
     root = Path(".").resolve()
+    if version is not None and any(ch.isspace() for ch in version):
+        # Usage tier (ADR-0030, rc 2): the version rides go's -ldflags value as
+        # one token that the go tool re-splits on whitespace, so a whitespace
+        # version would fragment into stray tokens (or injected linker flags).
+        # Refuse the invocation up front rather than emit a broken build.
+        print(
+            f"error: --version {version!r} contains whitespace; a release "
+            "version must be a single token (it rides go's -ldflags -X value, "
+            "ADR-0041)",
+            file=sys.stderr,
+        )
+        logger.error("build invocation rejected", extra={"root": str(root)})
+        return 2
     cfg = load_config(root)
     entries = require_entries(cfg, root, TOOL)
     selector, passthrough = split_args(tuple(args), entries)

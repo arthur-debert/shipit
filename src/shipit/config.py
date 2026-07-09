@@ -1,9 +1,9 @@
 """Reading ``.shipit.toml`` — shipit's policy config.
 
 ``.shipit.toml`` owns policy (the secret map, reviewers, the path→toolchain map,
-the pristine hashes); ``pixi.toml`` owns provisioning. They describe different
-layers, so there is no split-brain (docs/dev/architecture.lex §6). Step 1 needs
-only the ``[secrets]`` table.
+the declared ``[lanes]``, the pristine hashes); ``pixi.toml`` owns provisioning.
+They describe different layers, so there is no split-brain
+(docs/dev/architecture.lex §6). Step 1 needs only the ``[secrets]`` table.
 
 The ``[secrets]`` table maps a GitHub secret NAME (the table key) to exactly one
 source:
@@ -53,6 +53,7 @@ _KNOWN_TABLES = {
     "lint",
     "toolchains",
     "artifacts",
+    "lanes",
 }
 _ESCAPE_HATCH_TABLES = {"project", "custom"}
 
@@ -421,6 +422,10 @@ def _parse_build_target(where: str, spec: object) -> BuildTarget:
     from .tools import registry  # lazy — config stays import-light at module load
 
     if isinstance(spec, str):
+        if not spec:
+            raise ConfigError(
+                f"{where}: build target must be a non-empty toolchain name"
+            )
         name, package, version_var = spec, None, None
     elif isinstance(spec, dict):
         _reject_unknown_keys(where, spec, ("toolchain", "package", "version-var"))
@@ -438,6 +443,15 @@ def _parse_build_target(where: str, spec: object) -> BuildTarget:
             not isinstance(version_var, str) or not version_var
         ):
             raise ConfigError(f"{where}: version-var must be a non-empty string")
+        if isinstance(version_var, str) and any(ch.isspace() for ch in version_var):
+            # version-var rides go's -ldflags -X value (a single token the go
+            # tool re-splits on whitespace), so whitespace would fragment it
+            # into stray tokens/flags — refused at parse (ADR-0041), the same
+            # class as a whitespace `--version`.
+            raise ConfigError(
+                f"{where}: version-var must not contain whitespace "
+                "(it rides go's -ldflags -X value, ADR-0041)"
+            )
     else:
         raise ConfigError(
             f"{where} must be a toolchain name or an inline table, e.g. "
@@ -537,6 +551,131 @@ def load_artifacts(cfg: dict) -> tuple[Artifact, ...]:
     if not isinstance(section, dict):
         raise ConfigError("[artifacts] must be a table of artifact declarations")
     return tuple(_parse_artifact(str(name), spec) for name, spec in section.items())
+
+
+# --------------------------------------------------------------------------
+# The [lanes] table — declared CI test units (TOL01, PRD story 14)
+# --------------------------------------------------------------------------
+#
+# A Lane is the DECLARATION of one CI test unit (CONTEXT.md Build & release):
+# `{ run, required, local, trigger, runner, scope }`, keyed by lane name. The
+# lane planner (TOL01-WS05) maps (lanes, event, path-diff) → job matrix; the
+# `run` string is a shipit tool or leg invocation, so the same command a CI job
+# runs is what a laptop or hook invokes — one definition, enforced everywhere.
+#
+#     [lanes.changelog-sync]
+#     run = "changelog check"
+#     required = true
+#     trigger = "pr"
+#
+# `required` = blocking at merge; `local` = also enforced at commit/push (the
+# required∩local set IS the commit/push checks); `trigger` = which event runs
+# it at all; `runner`/`scope` are routing hints the planner consumes.
+
+#: The lane triggers the planner routes (glossary: pr / push / nightly /
+#: dispatch). A closed set so a typo (`trigger = "PR"`) dies at parse.
+LANE_TRIGGERS = frozenset({"pr", "push", "nightly", "dispatch"})
+
+#: The per-lane keys `load_lanes` accepts; anything else is a typo that must
+#: die fast (the same closed-registry philosophy as `_KNOWN_TABLES`).
+_LANE_KEYS = frozenset({"run", "required", "local", "trigger", "runner", "scope"})
+
+
+@dataclass(frozen=True)
+class Lane:
+    """One declared CI test unit (the glossary's **Lane**), typed (ADR-0030).
+
+    ``run`` is the shipit tool/leg invocation (``"changelog check"``,
+    ``"test rust"``); ``required`` blocks at merge; ``local`` also enforces at
+    commit/push; ``trigger`` names the event that runs it; ``runner`` and
+    ``scope`` are planner routing hints (``None`` = planner default).
+    """
+
+    name: str
+    run: str
+    required: bool = False
+    local: bool = False
+    trigger: str = "pr"
+    runner: str | None = None
+    scope: str | None = None
+
+
+#: The fragment-sync check declared as a Lane (TOL01-WS06, PRD story 18): a PR
+#: that edits the changelog without a fragment — or adds a fragment without the
+#: re-rendered changelog — fails before merge. PR-triggered, cheap, required at
+#: merge but NOT local (a fragment usually lands with the PR's last commit, so
+#: blocking every mid-work commit would only teach `--no-verify`). The `run` is
+#: the ordinary `changelog check` invocation (a shipit tool/leg string, no
+#: `shipit` prefix — see `run` above), so the lane's CI job and a laptop run are
+#: the same command. A repo adopting the changelog model declares
+#: exactly this entry in its `[lanes]` table.
+CHANGELOG_SYNC_LANE = Lane(
+    name="changelog-sync",
+    run="changelog check",
+    required=True,
+    local=False,
+    trigger="pr",
+)
+
+
+def _parse_lane(name: str, spec: object) -> Lane:
+    if not isinstance(spec, dict):
+        raise ConfigError(
+            f"[lanes].{name} must be a table, e.g. "
+            f'{{ run = "changelog check", required = true }}; got {spec!r}'
+        )
+    unknown = sorted(set(spec) - _LANE_KEYS)
+    if unknown:
+        known = ", ".join(sorted(_LANE_KEYS))
+        raise ConfigError(
+            f"[lanes].{name}: unknown key(s) {', '.join(unknown)}; known keys: {known}"
+        )
+    run = spec.get("run")
+    if not isinstance(run, str) or not run.strip():
+        raise ConfigError(
+            f"[lanes].{name}: `run` must be a non-empty string naming a shipit "
+            "tool or leg invocation"
+        )
+    required = spec.get("required", False)
+    local = spec.get("local", False)
+    if not isinstance(required, bool) or not isinstance(local, bool):
+        raise ConfigError(f"[lanes].{name}: `required`/`local` must be booleans")
+    trigger = spec.get("trigger", "pr")
+    if not isinstance(trigger, str) or trigger not in LANE_TRIGGERS:
+        allowed = ", ".join(sorted(LANE_TRIGGERS))
+        raise ConfigError(
+            f"[lanes].{name}: `trigger` must be one of {allowed}; got {trigger!r}"
+        )
+    runner = spec.get("runner")
+    scope = spec.get("scope")
+    for key, value in (("runner", runner), ("scope", scope)):
+        if value is not None and not isinstance(value, str):
+            raise ConfigError(f"[lanes].{name}: `{key}` must be a string")
+    return Lane(
+        name=name,
+        run=run.strip(),
+        required=required,
+        local=local,
+        trigger=trigger,
+        runner=runner,
+        scope=scope,
+    )
+
+
+def load_lanes(cfg: dict) -> list[Lane]:
+    """Parse the ``[lanes]`` table (already loaded) into ordered, typed
+    :class:`Lane` declarations; ``[]`` when absent.
+
+    Declaration order is preserved (TOML table order), so the planner's job
+    emission is deterministic from the file. Raises :class:`ConfigError` on any
+    malformed entry — an unknown key, a missing/empty ``run``, an
+    out-of-vocabulary ``trigger`` — so a typo'd lane dies at parse, never as a
+    silently-unrouted CI job.
+    """
+    lanes = cfg.get("lanes", {})
+    if not isinstance(lanes, dict):
+        raise ConfigError("[lanes] must be a table of lane tables")
+    return [_parse_lane(name, spec) for name, spec in lanes.items()]
 
 
 def shipit_version(cfg: dict) -> str | None:

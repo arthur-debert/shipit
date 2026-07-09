@@ -143,6 +143,25 @@ def test_unknown_build_target_key_is_refused():
         _load('[artifacts.x]\nbuild = [{ toolchain = "rust", pacakge = "cli" }]\n')
 
 
+def test_empty_shorthand_toolchain_string_names_the_offending_value():
+    # `build = [""]` is caught as an empty target, not misreported as an
+    # "unknown toolchain ``" — the shorthand form validates non-empty like the
+    # table form does.
+    with pytest.raises(config.ConfigError, match="must be a non-empty toolchain name"):
+        _load('[artifacts.x]\nbuild = [""]\n')
+
+
+def test_whitespace_version_var_is_refused_at_parse():
+    # version-var rides go's -ldflags -X value, which the go tool re-splits on
+    # whitespace — so whitespace in it is refused at parse (ADR-0041), the same
+    # class as a whitespace `--version`.
+    with pytest.raises(config.ConfigError, match="must not contain whitespace"):
+        _load(
+            "[artifacts.x]\n"
+            'build = [{ toolchain = "go", version-var = "pkg.Version evil" }]\n'
+        )
+
+
 def test_version_var_is_go_only():
     # ADR-0041: only go injects the version at build; everyone else's version
     # is a manifest projection bumped at prepare.
