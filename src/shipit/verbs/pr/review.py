@@ -304,6 +304,18 @@ def run_internal_cmd(
         if dimensions
         else None
     )
+    # `--nit-cap` is a non-negative budget (0 = floor at minor), validated at the
+    # config boundary (`_parse_nit_cap`); the child entrypoint enforces the same
+    # floor so a hand-built child argv dies here as one clean line — CLI parity
+    # with the malformed-`--calibrator-*` guard below — before any model run bills.
+    if nit_cap is not None and nit_cap < 0:
+        print(
+            f"error: invalid --nit-cap for the review child: must be a "
+            f"non-negative integer of round-1 nits (0 = floor at minor), "
+            f"got {nit_cap}",
+            file=sys.stderr,
+        )
+        raise SystemExit(1) from None
     calibrator = None
     calibrator_fields = {
         "backend": calibrator_backend,

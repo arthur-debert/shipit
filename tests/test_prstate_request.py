@@ -29,7 +29,8 @@ from shipit.prstate.request import (
     request_reviewers,
 )
 from shipit.prstate.reviewers import ReviewerAdapter
-from shipit.prstate.roster import Roster
+from shipit.prstate.roster import Roster, RosterEntry
+from shipit.review.calibrator import CalibratorConfig
 
 # The typed PR target (CLI01-WS02 / ADR-0030): the service threads a PrId —
 # repo + number as ONE value — never a bare int.
@@ -58,6 +59,11 @@ class _FakeAdapter(ReviewerAdapter):
         self._request_returns = request_returns
         self._lifecycle = lifecycle
         self.requested_with: list[PrId] = []
+        # The full request call surface — (pr, entry, policy) — so a test can
+        # assert the per-reviewer entry and table-level policy actually thread
+        # through (RVW02-WS04: they carry the configured dimensions/nit_cap/
+        # calibrator into the detached run).
+        self.request_calls: list[tuple] = []
 
     def matches(self, login: str) -> bool:
         return self.name in login.lower()
@@ -67,6 +73,7 @@ class _FakeAdapter(ReviewerAdapter):
 
     def request(self, pr: PrId, entry=None, policy=None) -> bool:
         self.requested_with.append(pr)
+        self.request_calls.append((pr, entry, policy))
         return self._request_returns
 
 
@@ -105,6 +112,33 @@ def test_verifies_when_edge_attaches():
     assert result.ok
     assert result.verified == ["copilot"]
     assert result.dropped == []
+
+
+def test_request_threads_the_reviewer_entry_and_table_policy():
+    """The request path threads the per-reviewer entry AND the table-level policy
+    (calibrator + nit cap) into each adapter — the ONE link that carries the
+    configured dimensions/nit_cap/calibrator into a local reviewer's detached
+    run. A silent revert to `adapter.request(pr, roster.entry(name))` (dropping
+    the policy) or the wrong entry would otherwise leave the whole suite green."""
+    adapter = _FakeAdapter("copilot")
+    roster = Roster(
+        entries=(
+            RosterEntry(name="copilot", dimensions=("correctness", "test-quality")),
+        ),
+        nit_cap=2,
+        calibrator=CalibratorConfig(backend="claude"),
+    )
+    request_reviewers(
+        TARGET,
+        [adapter],
+        roster,
+        force=True,
+        boundary=_boundary(requested_logins=["Copilot"]),
+    )
+    [(pr, entry, policy)] = adapter.request_calls
+    assert pr == TARGET
+    assert entry == roster.entry("copilot")  # the configured entry, not a default
+    assert policy == roster.policy  # calibrator + nit cap bundled through
 
 
 def test_verifies_via_fresh_review_when_bot_consumed_request():

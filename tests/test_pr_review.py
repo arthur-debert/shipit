@@ -325,3 +325,31 @@ def test_pr_review_run_rejects_a_bad_calibrator_cleanly(monkeypatch, capsys):
     assert rc == 1
     assert "calibrator" in capsys.readouterr().err
     assert ran == []
+
+
+def test_pr_review_run_rejects_a_negative_nit_cap_cleanly(monkeypatch, capsys):
+    """`--nit-cap` is a non-negative budget (0 = floor at minor), validated at the
+    config boundary; the child entry enforces the same floor so a negative value
+    dies here as one clean line — CLI parity — before any model run bills."""
+    from shipit.review import service
+
+    ran: list = []
+    monkeypatch.setattr(service, "run_detached_review", lambda *a, **k: ran.append(1))
+    rc = cli.main(
+        [
+            "pr",
+            "review",
+            "_run",
+            "--agent",
+            "codex",
+            "--pr",
+            "5",
+            "--repo",
+            "o/r",
+            "--nit-cap",
+            "-1",
+        ]
+    )
+    assert rc == 1
+    assert "nit-cap" in capsys.readouterr().err
+    assert ran == []

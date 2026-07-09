@@ -47,7 +47,7 @@ from typing import Any
 
 from .. import events
 from ..agent.backend import Backend
-from ..finding import Disposition, Finding, Severity
+from ..finding import Disposition, Finding, JudgedFinding, Severity
 from ..harness.eval.variant import label_from_env, variant_of
 from ..spawn import launch
 from . import producer
@@ -69,14 +69,15 @@ class FanoutOutcome:
 
     ``review`` is the calibrated REVIEW_SCHEMA-shaped dict the posting path
     consumes unchanged (the fan-out's invisibility below the reviewer
-    boundary); ``findings`` is the FULL judged set with dispositions —
-    routed-out findings included, never erased (the round record's
-    Opportunity-harvest seam); ``runs`` the contributing-run entries (every
-    pass + the calibrator, run ids + variant hashes) for ``round.runs``.
+    boundary); ``findings`` is the FULL judged set as :class:`JudgedFinding`\\ s
+    — routed-out findings AND merged-away duplicates included, never erased (the
+    round record's Opportunity-harvest seam); ``runs`` the contributing-run
+    entries (every pass + the calibrator, run ids + variant hashes) for
+    ``round.runs``.
     """
 
     review: dict
-    findings: tuple[tuple[Finding, Disposition], ...]
+    findings: tuple[JudgedFinding, ...]
     runs: tuple[dict[str, Any], ...]
 
 
@@ -268,16 +269,14 @@ def run_fanout_review(
     runs.append(calibrator_run)
 
     routed = route_calibrated(result.entries, nit_cap=nit_cap)
-    findings = tuple((entry.finding, d) for entry, d in routed)
-    posted_entries = [
-        entry
-        for entry, d in routed
-        if d is Disposition.POST and entry.duplicate_of is None
-    ]
-    comments = [_comment_dict(entry.finding) for entry in posted_entries]
+    findings = tuple(
+        JudgedFinding(entry.finding, d, entry.duplicate_of) for entry, d in routed
+    )
+    posted_entries = [judged for judged in findings if judged.posted]
+    comments = [_comment_dict(judged.finding) for judged in posted_entries]
     posted = len(comments)
     status = _derive_status(
-        (entry.finding for entry in posted_entries), degraded=bool(failed)
+        (judged.finding for judged in posted_entries), degraded=bool(failed)
     )
     feedback = result.overall_feedback.strip()
     attestation = _attestation(
@@ -309,9 +308,10 @@ def run_fanout_review(
             "posted": posted,
         },
     )
-    for finding, disposition in findings:
-        if disposition is Disposition.POST:
+    for judged in findings:
+        if judged.posted:
             continue
+        finding = judged.finding
         events.emit(
             logger,
             "finding.dispositioned",
@@ -319,12 +319,12 @@ def run_fanout_review(
             ctx.number,
             finding.file or "(no file)",
             finding.severity.value,
-            disposition.value,
+            judged.disposition.value,
             extra={
                 "pr": ctx.number,
                 "reviewer": agent,
                 "severity": finding.severity.value,
-                "disposition": disposition.value,
+                "disposition": judged.disposition.value,
             },
         )
 
@@ -340,9 +340,10 @@ def route_calibrated(
     they are testable and prompt-drift-proof):
 
       * DUPLICATES NEVER POST — an entry merged into a canonical twin
-        (``duplicate_of`` set) shares the twin's judged disposition (it IS the
-        same underlying finding, and its substance reaches the PR through the
-        twin) but is never emitted as a second posted comment; and
+        (``duplicate_of`` set) shares the twin's FINAL disposition (including a
+        nit-cap flip applied to the twin — it IS the same underlying finding, and
+        its substance reaches the PR through the twin) but is never emitted as a
+        second posted comment; and
       * the ROUND-1 NIT CAP — among post-disposition canonical findings, nits
         beyond ``nit_cap`` flip to ``nit-suppressed`` (recorded, not posted;
         severity order keeps the first-``nit_cap`` strongest-ordered nits).
@@ -357,11 +358,18 @@ def route_calibrated(
     ordered = sorted(entries, key=lambda e: e.finding.severity.rank)
     nits_posted = 0
     routed: list[tuple[CalibratedFinding, Disposition]] = []
+    final_disposition_for: dict[int, Disposition] = {}
     for entry in ordered:
         disposition = entry.disposition
-        if (
+        if entry.duplicate_of is not None:
+            # A merged-away duplicate shares its canonical twin's FINAL
+            # disposition — including a nit-cap flip applied to the twin below.
+            # Canonical-before-duplicate ordering is guaranteed: parse_calibration
+            # appends duplicates after all canonicals carrying the canonical's
+            # severity, and the severity sort is stable, so the twin is seen first.
+            disposition = final_disposition_for[entry.duplicate_of]
+        elif (
             disposition is Disposition.POST
-            and entry.duplicate_of is None
             and entry.finding.severity is Severity.NIT
             and nit_cap is not None
         ):
@@ -369,6 +377,8 @@ def route_calibrated(
                 disposition = Disposition.NIT_SUPPRESSED
             else:
                 nits_posted += 1
+        if entry.duplicate_of is None:
+            final_disposition_for[entry.id] = disposition
         routed.append((entry, disposition))
     return tuple(routed)
 
@@ -441,28 +451,38 @@ def _attestation(
     failed: Sequence[_PassResult],
     *,
     union_size: int,
-    entries: Sequence[tuple[Finding, Disposition]],
+    entries: Sequence[JudgedFinding],
     posted: int,
 ) -> str:
     """The fan-out attestation paragraph for the posted summary: what ran, what
     it found, and how calibration routed it — so a human reading the PR sees
-    the coverage claim (and any degradation) without opening the record."""
+    the coverage claim (and any degradation) without opening the record.
+
+    The routed-out counts plus ``posted`` plus the merged-away ``duplicate``
+    count sum to ``union_size``: every candidate is accounted for, so the
+    arithmetic a human checks always balances (deduped candidates included).
+    """
     names = ", ".join(d.name for d in dims)
     routed_out = {
-        disposition: sum(1 for _, d in entries if d is disposition)
+        disposition: sum(
+            1
+            for judged in entries
+            if judged.disposition is disposition and judged.duplicate_of is None
+        )
         for disposition in (
             Disposition.DROP_UNVERIFIED,
             Disposition.NIT_SUPPRESSED,
             Disposition.OUT_OF_SCOPE,
         )
     }
+    duplicates = sum(1 for judged in entries if judged.duplicate_of is not None)
     lines = [
         f"Review fan-out: {len(dims)} dimension pass(es) ({names}) -> "
         f"{union_size} candidate finding(s) -> {posted} posted after "
         f"calibration ({routed_out[Disposition.DROP_UNVERIFIED]} "
         f"dropped-unverified, {routed_out[Disposition.OUT_OF_SCOPE]} "
         f"out-of-scope, {routed_out[Disposition.NIT_SUPPRESSED]} "
-        "nit-suppressed)."
+        f"nit-suppressed, {duplicates} duplicate)."
     ]
     if failed:
         failures = ", ".join(

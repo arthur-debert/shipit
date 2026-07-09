@@ -18,7 +18,11 @@ import pytest
 
 from shipit.finding import Disposition, Finding, Severity
 from shipit.review import fanout
-from shipit.review.calibrator import CalibratedFinding, CalibrationResult
+from shipit.review.calibrator import (
+    CalibratedFinding,
+    CalibrationContractError,
+    CalibrationResult,
+)
 from shipit.review.dimensions import by_name
 
 
@@ -150,7 +154,7 @@ def test_fanout_unions_passes_calibrates_and_posts(monkeypatch, _seams):
     assert review["summary"]["coverage"]["reviewed"] == ["a.py", "t.py"]
 
     # The FULL judged set persists — the routed-out finding included.
-    assert dict((f.text, d) for f, d in outcome.findings) == {
+    assert dict((j.finding.text, j.disposition) for j in outcome.findings) == {
         "bug": Disposition.POST,
         "missing test": Disposition.OUT_OF_SCOPE,
     }
@@ -166,6 +170,48 @@ def test_fanout_unions_passes_calibrates_and_posts(monkeypatch, _seams):
     assert outcome.runs[0]["dimension"] == "correctness"
     assert outcome.runs[2]["run_id"] == "cal-run-id"
     assert outcome.runs[2]["reasoning"] == "high"
+
+
+def test_merged_away_duplicate_rides_the_record_without_double_posting(_seams):
+    """A deduped duplicate (the expected overlap dedup exists for) must reach the
+    record with its `duplicate_of` edge intact, count once in the attestation as
+    a duplicate, and NEVER emit a second posted comment — so the persisted
+    disposition==post set can never disagree with what actually posted."""
+    from shipit.agent import backend as agent_backend
+
+    _seams["reviews"] = {
+        "correctness": _pass_review([_comment("same bug", severity="major")]),
+        "test-quality": _pass_review(
+            [_comment("same bug", severity="major", file="t.py")], reviewed=("t.py",)
+        ),
+    }
+    # The calibrator merges candidate 1 INTO canonical 0 (both `post`); parse
+    # materializes the duplicate carrying the canonical's disposition.
+    _seams["result"] = CalibrationResult(
+        overall_feedback="one real bug, deduped",
+        entries=(
+            _calibrated(0, _finding(Severity.MAJOR, "same bug"), merged=(1,)),
+            _calibrated(
+                1, _finding(Severity.MAJOR, "same bug", file="t.py"), duplicate_of=0
+            ),
+        ),
+    )
+    outcome = fanout.run_fanout_review(
+        agent_backend.CODEX,
+        _ctx(),
+        dimensions=["correctness", "test-quality"],
+    )
+    review = outcome.review
+    # ONE posted comment though the union carried two candidates.
+    assert [c["text"] for c in review["comments"]] == ["same bug"]
+    # The attestation arithmetic balances: 2 candidates -> 1 posted + 1 duplicate.
+    assert "2 candidate finding(s) -> 1 posted" in review["summary"]["overall_feedback"]
+    assert "1 duplicate)" in review["summary"]["overall_feedback"]
+    # The FULL judged set persists both entries — the duplicate keeps its edge,
+    # so it is NOT counted as posted downstream (eval report reads duplicate_of).
+    judged = {j.finding.file: j for j in outcome.findings}
+    assert judged["a.py"].duplicate_of is None and judged["a.py"].posted
+    assert judged["t.py"].duplicate_of == 0 and not judged["t.py"].posted
 
 
 def test_single_pass_failure_degrades_but_the_round_continues(_seams):
@@ -202,6 +248,31 @@ def test_all_passes_failing_fails_the_round(_seams):
         "test-quality": RuntimeError("boom b"),
     }
     with pytest.raises(RuntimeError, match="all 2 dimension passes failed"):
+        fanout.run_fanout_review(
+            agent_backend.CODEX,
+            _ctx(),
+            dimensions=["correctness", "test-quality"],
+        )
+
+
+def test_calibrator_failure_propagates_and_no_union_is_posted(monkeypatch, _seams):
+    """The fan-out's central safety invariant (ADR-0045): a calibrator failure —
+    unavailable / timed out / unparseable / contract-violating — PROPAGATES; an
+    uncalibrated union is NEVER posted (severities off the common ruler,
+    unverified). A non-empty union reaches the calibrator, the calibrator raises,
+    and `run_fanout_review` raises rather than degrading to the raw union."""
+    from shipit.agent import backend as agent_backend
+
+    _seams["reviews"] = {
+        "correctness": _pass_review([_comment("bug", severity="major")]),
+        "test-quality": _pass_review([]),
+    }
+
+    def boom(config, union, *, pr_number, cwd, launcher=None):
+        raise CalibrationContractError("calibrator output missing candidate id 0")
+
+    monkeypatch.setattr(fanout, "run_calibrator", boom)
+    with pytest.raises(CalibrationContractError):
         fanout.run_fanout_review(
             agent_backend.CODEX,
             _ctx(),
@@ -314,6 +385,22 @@ def test_nit_cap_never_resurrects_a_routed_out_nit():
     by_text = {e.finding.text: d for e, d in routed}
     assert by_text["dropped"] is Disposition.DROP_UNVERIFIED
     assert by_text["kept"] is Disposition.POST
+
+
+def test_nit_cap_suppression_propagates_to_merged_away_duplicates():
+    """A duplicate shares its canonical twin's FINAL disposition — when the cap
+    flips the canonical nit to nit-suppressed, its duplicate must flip too, never
+    sail through as a stale POST (else the record persists a POST that never
+    posted and the flow log misses a routed-out finding)."""
+    entries = (
+        _calibrated(0, _finding(Severity.NIT, "nit")),
+        _calibrated(1, _finding(Severity.NIT, "nit-dup"), duplicate_of=0),
+    )
+    routed = fanout.route_calibrated(entries, nit_cap=0)
+    by_text = {e.finding.text: d for e, d in routed}
+    # nit_cap=0 floors the canonical at suppressed; the duplicate follows.
+    assert by_text["nit"] is Disposition.NIT_SUPPRESSED
+    assert by_text["nit-dup"] is Disposition.NIT_SUPPRESSED
 
 
 def test_dry_run_prints_per_pass_argv_and_bills_nothing(monkeypatch, capsys):

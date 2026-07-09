@@ -14,7 +14,7 @@ import json
 import logging
 from types import SimpleNamespace
 
-from shipit.finding import Disposition, Finding, Severity
+from shipit.finding import Disposition, Finding, JudgedFinding, Severity
 from shipit.harness.eval import store
 from shipit.identity import repo_from_slug
 from shipit.review import roundrecord
@@ -102,8 +102,8 @@ def test_routed_out_findings_are_recorded_with_their_disposition():
     posted = Finding(severity=Severity.MAJOR, text="real", file="src/a.py", line=3)
     record = _build(
         findings=[
-            (posted, Disposition.POST),
-            (dropped, Disposition.OUT_OF_SCOPE),
+            JudgedFinding(posted, Disposition.POST),
+            JudgedFinding(dropped, Disposition.OUT_OF_SCOPE),
         ]
     )
     dispositions = {f["text"]: f["disposition"] for f in record["round.findings"]}
@@ -129,9 +129,10 @@ def test_dispositioned_maps_every_comment_to_post_via_the_trust_boundary():
             "not-a-dict",
         ]
     }
-    [(finding, disposition)] = roundrecord.dispositioned(review)
-    assert disposition is Disposition.POST
-    assert finding.severity is Severity.MAJOR
+    [judged] = roundrecord.dispositioned(review)
+    assert judged.disposition is Disposition.POST
+    assert judged.duplicate_of is None
+    assert judged.finding.severity is Severity.MAJOR
 
 
 def test_malformed_summary_never_crashes_the_build():
@@ -301,10 +302,20 @@ def test_record_round_persists_calibrator_findings_and_runs(tmp_path):
     # variant hashes) — the record retains routed-out findings, never just the
     # posted subset, and `round.runs` is the eval-report join surface.
     findings = [
-        (Finding(severity=Severity.MAJOR, text="bug", file="a.py"), Disposition.POST),
-        (
+        JudgedFinding(
+            Finding(severity=Severity.MAJOR, text="bug", file="a.py"), Disposition.POST
+        ),
+        JudgedFinding(
             Finding(severity=Severity.NIT, text="style", file="b.py"),
             Disposition.NIT_SUPPRESSED,
+        ),
+        # A merged-away duplicate: it carries its twin's `post` disposition but
+        # its `duplicate_of` edge must persist so the report never counts it as
+        # posted (RVW02-WS04 dedup edge).
+        JudgedFinding(
+            Finding(severity=Severity.MAJOR, text="bug-dup", file="c.py"),
+            Disposition.POST,
+            duplicate_of=0,
         ),
     ]
     runs = [
@@ -340,9 +351,13 @@ def test_record_round_persists_calibrator_findings_and_runs(tmp_path):
     )
     [line] = path.read_text(encoding="utf-8").splitlines()
     record = json.loads(line)
-    assert [(f["text"], f["disposition"]) for f in record["round.findings"]] == [
-        ("bug", "post"),
-        ("style", "nit-suppressed"),
+    assert [
+        (f["text"], f["disposition"], f["duplicate_of"])
+        for f in record["round.findings"]
+    ] == [
+        ("bug", "post", None),
+        ("style", "nit-suppressed", None),
+        ("bug-dup", "post", 0),
     ]
     assert [r["run_id"] for r in record["round.runs"]] == ["pass-1", "cal-1"]
     assert record["round.runs"][1]["kind"] == "calibrator"
@@ -356,7 +371,11 @@ def test_tee_forwards_the_fanout_findings_and_runs(monkeypatch, tmp_path):
     from shipit.review import service
 
     review = {"summary": {"status": "COMMENT", "overall_feedback": ""}, "comments": []}
-    findings = ((Finding(severity=Severity.MINOR, text="m"), Disposition.OUT_OF_SCOPE),)
+    findings = (
+        JudgedFinding(
+            Finding(severity=Severity.MINOR, text="m"), Disposition.OUT_OF_SCOPE
+        ),
+    )
     runs = ({"run_id": "r1", "kind": "dimension-pass"},)
     monkeypatch.setattr(
         service.fanout,

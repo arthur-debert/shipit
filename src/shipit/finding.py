@@ -127,6 +127,27 @@ class Finding:
 
 
 @dataclass(frozen=True)
+class JudgedFinding:
+    """A Finding paired with the calibrator's routing — the round-record unit.
+
+    ``disposition`` is its FINAL routing; ``duplicate_of`` is the union id of the
+    canonical twin this entry was merged into (``None`` for a canonical finding).
+    A finding reaches the PR — ``posted`` — iff its disposition is ``post`` AND it
+    is canonical: a merged-away duplicate carries its twin's disposition (its
+    substance posts through the twin) but is itself never a second posted comment,
+    so it must never count as posted in the record's posted-vs-dropped split.
+    """
+
+    finding: Finding
+    disposition: Disposition
+    duplicate_of: int | None = None
+
+    @property
+    def posted(self) -> bool:
+        return self.disposition is Disposition.POST and self.duplicate_of is None
+
+
+@dataclass(frozen=True)
 class Marker:
     """The tuple recovered from a machine marker. ``severity`` is None when the
     marker carried no parseable severity (the caller falls through the
