@@ -56,8 +56,8 @@ caller, the skills, the AGENTS.md block" — but stage it to what exists now:
   to-tickets, grill-me-with-docs, coordinating, implementing, shepherding-prs,
   lex-primer — confirm the exact managed subset when defining the set). They must
   be bundled as PACKAGE DATA so the pip-installed `shipit` can vendor them — the
-  same `importlib.resources` mechanism Step 1 used for `data/issue-labels.toml`.
-  They are NOT packaged yet; add them.
+  same `importlib.resources` mechanism Step 1 used for `data/issue-labels.toml`;
+  the root `skills/` tree is now force-included in the wheel.
 - the AGENTS.md block — a shipit-managed SECTION injected into the consumer's OWN
   AGENTS.md, delimited by markers. Adopt release's convention (`sync.py`): an
   opening `<!-- Managed by shipit; do not edit. Regenerate via shipit install. -->`

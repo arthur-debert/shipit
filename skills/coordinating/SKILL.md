@@ -1,7 +1,7 @@
 ---
 name: coordinating
 description: |
-  Coordinate shipit's delegated dev cycle. Use when Codex is the top-level agent
+  Coordinate shipit's delegated dev cycle. Use when the top-level agent is
   orchestrating a standalone issue, epic, workstream set, or PR lifecycle:
   gather context, brief implementers and shepherds, drive the PR engine, wait,
   flip ready, and stop at the human merge gate.

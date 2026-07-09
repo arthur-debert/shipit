@@ -1,7 +1,7 @@
 ---
 name: implementing
 description: |
-  Implement one shipit task as a role-scoped implementer. Use when Codex is
+  Implement one shipit task as a role-scoped implementer. Use when an agent is
   spawned to build a standalone issue or epic workstream: make the code/test
   change in its Tree, verify it, open a draft PR with context, run the PR engine
   once, then stop before review rounds.

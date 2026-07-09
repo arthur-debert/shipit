@@ -1,8 +1,8 @@
 ---
 name: shepherding-prs
 description: |
-  Shepherd one shipit draft PR through review-addressing rounds. Use when Codex
-  is assigned to a PR after it is open: read current review threads, classify
+  Shepherd one shipit draft PR through review-addressing rounds. Use when an
+  agent is assigned to a PR after it is open: read current review threads, classify
   findings, fix or reply, resolve threads, verify, push the round, and park
   without waiting or flipping ready.
 ---

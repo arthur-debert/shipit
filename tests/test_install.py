@@ -40,6 +40,8 @@ from shipit.install import units as iunits
 from shipit.install.errors import InstallError
 from shipit.verbs import install as verb
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
 
 def _exec_result(rc: int, stdout: str = "", stderr: str = "") -> execrun.ExecResult:
     """A canned ExecResult for the injected lefthook-activation boundary."""
@@ -2883,7 +2885,7 @@ def test_install_deletes_a_pristine_retired_skill_file(tmp_path, rec):
     # A consumer upgrading across the skill rename sheds the old path when its
     # content is a known pristine copy, while the new skill path is installed.
     retired_path = "skills/shipit-grill-with-docs/ADR-FORMAT.md"
-    source = Path("skills/grill-me-with-docs/ADR-FORMAT.md")
+    source = REPO_ROOT / "skills/grill-me-with-docs/ADR-FORMAT.md"
     assert (
         config.content_hash(source.read_bytes()) in RETIRED_SKILL_HASHES[retired_path]
     )
