@@ -28,6 +28,10 @@ The pipeline itself is unchanged in behavior (a mechanical ADR-0030 promotion):
 - The Run reports back **through the PR** (ADR-0019 §6): the write tail
   resolves the PR the Run opened on the Tree's branch and audits it (OPEN,
   DRAFT, targeting the Tree's base) before claiming success.
+- A write-tail failure AFTER the child ran carries the **salvage signal**
+  (#587): the refusal appends the Tree's uncommitted-change count when the
+  dead Tree still holds work worth inspecting, so a Run killed mid-work is a
+  resumable handoff for the coordinator, never a silent loss.
 """
 
 from __future__ import annotations
@@ -165,6 +169,7 @@ class Boundaries:
     create_tree: Callable[..., Tree] = create
     create_readonly_tree: Callable[..., Tree] = create_readonly
     pr_for_head: Callable[..., gh.HeadPr | gh.UnknownPr | None] = gh.pr_for_head
+    status_porcelain: Callable[..., list[str]] = git.status_porcelain
     runner: launch.Runner | None = None
 
 
@@ -218,7 +223,11 @@ def spawn_subagent(spec: SubagentSpec, bounds: Boundaries | None = None) -> Spaw
     nonzero, or —
     for a write Run — the post-condition audit fails (no PR on the branch, an
     unreadable PR state, or a PR that is not an OPEN, DRAFT PR targeting the
-    Tree's intended base).
+    Tree's intended base). A write-tail refusal raised AFTER the child ran
+    (nonzero child, failed audit) appends the salvage signal (#587) when the
+    dead Tree still holds uncommitted work: the one-line
+    ``git status --porcelain`` count, so the coordinator knows the Tree is
+    worth inspecting before discarding it.
 
     ``bounds`` injects the effectful edges (:class:`Boundaries`) so every stage
     is testable without git, gh, a clone, or a real backend child; ``None`` is
@@ -470,6 +479,44 @@ def plan_write_spec(
     )
 
 
+def salvage_note(tree_path: str, bounds: Boundaries) -> str | None:
+    """The salvage signal behind a failed write Run (#587) — best-effort, never fatal.
+
+    A Run that dies mid-work (wall-clock hit while verifying is the observed
+    case) can leave its whole diagnosis UNCOMMITTED in the Tree; the bare
+    refusal ("child exited 0 but opened no PR") reads as a total loss, so the
+    coordinator has no cue to inspect the Tree before discarding it. This
+    probes the Tree's working-tree status and returns the one-line salvage
+    note the refusal appends — the uncommitted-change count — or ``None`` when
+    there is nothing to say (a clean tree, or an unreadable one: the probe
+    runs UNDER an already-failing spawn, so a probe error must never mask the
+    real refusal — it logs at DEBUG and stays silent). A dirty tree also
+    leaves its own WARNING record, the durable twin of the appended line.
+    """
+    try:
+        dirty = bounds.status_porcelain(cwd=tree_path)
+    except (execrun.ExecError, OSError):
+        logger.debug(
+            "salvage probe failed on %s (never masks the refusal)",
+            tree_path,
+            exc_info=True,
+        )
+        return None
+    if not dirty:
+        return None
+    count = len(dirty)
+    logger.warning(
+        "spawn subagent: the failed run left %d uncommitted change(s) in the tree",
+        count,
+        extra={"uncommitted": count},
+    )
+    return (
+        f"the tree at {tree_path} holds {count} uncommitted change(s) "
+        "(git status --porcelain) — the Run's work may be salvageable; inspect "
+        "the tree before discarding it."
+    )
+
+
 def audit_handshake(
     pr: gh.HeadPr | gh.UnknownPr | None, *, branch: str, base_branch: str
 ) -> gh.HeadPr:
@@ -670,16 +717,30 @@ def _launch_write(
     # and the child's tools resolve to its OWN env (docs/dev/pixi.lex §7);
     # `scrub_tree_env` drops leaked PIXI_*/CONDA_* on top of the adapter's auth scrub.
     cmd = launch.pixi_wrap(adapter.build_command(task, role, cwd=tree.path), tree.path)
-    _run_child(cmd, tree=tree, adapter=adapter, bounds=bounds, role=role)
+    try:
+        _run_child(cmd, tree=tree, adapter=adapter, bounds=bounds, role=role)
 
-    # The Run reports back through the PR (ADR-0019 §6): resolve the PR it opened on
-    # the Tree's branch through the SAME gh boundary the fleet scan uses — no side
-    # database, the PR on the branch IS the Run↔PR link — then audit it.
-    pr = audit_handshake(
-        bounds.pr_for_head(tree.branch, cwd=tree.path),
-        branch=tree.branch,
-        base_branch=base_branch,
-    )
+        # The Run reports back through the PR (ADR-0019 §6): resolve the PR it opened
+        # on the Tree's branch through the SAME gh boundary the fleet scan uses — no
+        # side database, the PR on the branch IS the Run↔PR link — then audit it.
+        pr = audit_handshake(
+            bounds.pr_for_head(tree.branch, cwd=tree.path),
+            branch=tree.branch,
+            base_branch=base_branch,
+        )
+    except SpawnError as exc:
+        # The salvage signal (#587): the Tree exists and the child RAN, so a failure
+        # here — a nonzero child, or an exited-0 Run that never reported back — can
+        # strand real work uncommitted in the dead Tree. Append the one-line
+        # uncommitted-work count to the refusal the coordinator reads, so a killed
+        # Run is a resumable handoff, not a silent loss. The original refusal has
+        # already logged its ERROR at the raise site; the salvage half logs its own
+        # WARNING inside `salvage_note`, so the re-minted exception is deliberately
+        # NOT routed through `_refusal` again (no duplicate ERROR record).
+        note = salvage_note(tree.path, bounds)
+        if note is None:
+            raise
+        raise SpawnError(f"{exc}\n{note}") from exc
     result = SpawnResult(
         tree=tree.path,
         branch=tree.branch,

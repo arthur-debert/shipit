@@ -278,6 +278,14 @@ def write_task(role: str, *, issue: int, branch: str, base_branch: str) -> str:
     system prompt, which ``--agent <role>`` loads; this task only conveys *which*
     issue and restates the PR contract so the launched Run can never miss the one
     observable shipit reads back: a draft PR whose head is exactly ``branch``.
+
+    The task also carries the **bank-state protocol** (#587): a Run that nears its
+    wall-clock/budget before the draft PR is open must commit whatever exists to
+    ``branch`` with a ``WIP:``-prefixed message and PUSH it, rather than exiting
+    with loose work. The spawn still fails its exit contract (no open draft PR),
+    but the pushed WIP commit turns that failure into a resumable handoff the
+    coordinator can re-brief from — twice a killed Run's whole diagnosis was
+    stranded uncommitted in its dead Tree, recoverable only by luck.
     """
     return (
         f"You are a spawned {role} Run launched by `shipit spawn subagent`, working in "
@@ -288,7 +296,12 @@ def write_task(role: str, *, issue: int, branch: str, base_branch: str) -> str:
         f"(`gh pr create --draft --base {base_branch} --head {branch}`) whose body "
         f"references `for #{issue}`. Once the draft PR is open, run `shipit pr next` "
         f"ONCE from the PR branch (the engine places the initial review requests), "
-        f"then STOP — do not flip it ready, address review rounds, or merge."
+        f"then STOP — do not flip it ready, address review rounds, or merge. "
+        f"If you are about to run out of time or budget BEFORE the draft PR is open, "
+        f"bank your state instead of exiting with loose work: commit whatever exists "
+        f"(even partial) to {branch!r} with a commit message starting `WIP:` that says "
+        f"what is done and what remains, and push the branch — a pushed WIP commit "
+        f"turns the failed spawn into a resumable handoff instead of a silent loss."
     )
 
 
