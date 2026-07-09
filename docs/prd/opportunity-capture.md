@@ -25,7 +25,7 @@ Add **Opportunity Capture**: a `shipit opportunities` command group and narrow r
 guidance that let agents and humans record actionable, evidenced, out-of-scope
 improvement observations into a separate GitHub-backed **Opportunity store**.
 
-V1 keeps the loop intentionally small. A producing Run captures an Opportunity with a
+The v1 loop stays intentionally small. A producing Run captures an Opportunity with a
 small required front matter header and markdown body. The store organizes Opportunities
 through a simple lifecycle: `inbox`, `triaged`, `ready`, `opened`, and `archive`.
 Maintainers can list, triage, mark ready, and promote a ready Opportunity into a normal
@@ -83,8 +83,8 @@ Only the promoted issue enters the normal delegated PR lifecycle.
   as operational data and writes direct commits with pull/rebase/push retry. Product repos
   receive no raw Opportunity files.
 - **Lifecycle**: v1 exposes `inbox`, `triaged`, `ready`, `opened`, and `archive` directories.
-  The directory is the coarse lifecycle state; front matter carries the same state so tools
-  can validate moves.
+  The directory is the lifecycle authority; front matter mirrors that state so tools can
+  validate moves, and mismatches are validation errors rather than silently reconciled.
 - **Capture schema**: capture requires a small front matter header: schema version, Repo,
   source, tags, lifecycle status, and creation timestamp. The body carries the observation,
   evidence, and suggested next step. Value, complexity, and confidence are triage outputs,
@@ -102,7 +102,7 @@ Only the promoted issue enters the normal delegated PR lifecycle.
   role prompt system.
 - **Adapter posture**: Git and GitHub interactions route through shipit's existing Tool
   adapters. Command modules do not build raw `git` or `gh` argv directly.
-- **V1 is manual after capture**: no scheduled curation, no background implementation, and
+- **v1 is manual after capture**: no scheduled curation, no background implementation, and
   no agent-generated grouping in the first release.
 
 ## Testing Decisions
