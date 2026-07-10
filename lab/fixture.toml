@@ -4,7 +4,7 @@
 # hand comments do not survive a save.
 
 schema = 1
-version = 35
+version = 36
 
 [[prs]]
 id = "core-440"
@@ -171,11 +171,12 @@ ref = "b5b88aef"
 id = "lex-G1"
 pr = "lex-820"
 file = "crates/lex-babel/src/formats/lex/separation.rs"
-lines = [40, 80]
+lines = [40, 160]
 severity = "minor"
 verdict = "real"
 confirmed = true
 claim = "the separation.rs module docs claim all Definition merges are intended, contradicting lex#819"
+aliases = ["This separation comment says Definition-to-Table merges are intended group semantics while the matrix test in the same range documents Definition-to-Table as the known lex#819 content-loss bug — cross-file drift in the separation table's source explanation."]
 [labels.provenance]
 kind = "fix-commit"
 ref = "ca022ae2"
@@ -199,7 +200,7 @@ file = "src/lib/editor/pipeline-worker.ts"
 lines = [130, 140]
 severity = "major"
 verdict = "real"
-confirmed = false
+confirmed = true
 claim = "maybePresentGpu() returns true immediately after display.present() even when GpuDisplay is Acquiring or the present internally no-ops/fails, so the worker reports presented:true and the host skips the rgba8 fallback, leaving the canvas blank."
 [labels.provenance]
 kind = "fix-commit"
@@ -212,7 +213,7 @@ file = "src/lib/editor/Editor.svelte"
 lines = [1497, 1508]
 severity = "major"
 verdict = "real"
-confirmed = false
+confirmed = true
 claim = "displayReady()'s result is ignored, so a ready:false (GPU acquisition failure after the irreversible OffscreenCanvas transfer) leaves the editor with no presenter and no recovery path."
 [labels.provenance]
 kind = "fix-commit"
@@ -222,10 +223,10 @@ ref = "8a6683aa0441e1f909e37a2f34d820e4847e3b08"
 id = "app-351-L3"
 pr = "app-351"
 file = "src/lib/editor/gpu-display.ts"
-lines = [310, 321]
+lines = [305, 311]
 severity = "major"
 verdict = "real"
-confirmed = false
+confirmed = true
 claim = "A synchronous throw in enterReady() (shader/pipeline/buffer creation) rejects ready and clears display but never destroys the acquired GPUDevice, leaking a live device."
 [labels.provenance]
 kind = "fix-commit"
@@ -235,10 +236,10 @@ ref = "8a6683aa0441e1f909e37a2f34d820e4847e3b08"
 id = "app-351-L4"
 pr = "app-351"
 file = "src/lib/editor/gpu-display.ts"
-lines = [678, 693]
+lines = [667, 678]
 severity = "minor"
 verdict = "real"
-confirmed = false
+confirmed = true
 claim = "On a program-present failure outputTex is created but not tracked or destroyed in the catch block, so a later throw in the try block leaks the GPU texture."
 [labels.provenance]
 kind = "fix-commit"
@@ -251,7 +252,7 @@ file = "src/lib/editor/pipeline-scheduler.ts"
 lines = [578, 590]
 severity = "major"
 verdict = "real"
-confirmed = false
+confirmed = true
 claim = "Streamed tiles from in-flight region requests are written back into ViewportTileCache unconditionally, so tiles from a stream started before invalidate() repopulate the invalidated cache and later renders reuse stale content."
 [labels.provenance]
 kind = "fix-commit"
@@ -261,10 +262,10 @@ ref = "17f134fd08f75b1ddc8a8089f43ee3b3db9c916a"
 id = "app-376-L2"
 pr = "app-376"
 file = "src/lib/editor/pipeline-driver-tauri.ts"
-lines = [982, 1000]
+lines = [977, 981]
 severity = "major"
 verdict = "real"
-confirmed = false
+confirmed = true
 claim = "The native Tauri driver writes every blitted tile back to cacheCtx.store even if invalidate() ran mid-stream, letting stale tiles survive a content invalidation in the cache."
 [labels.provenance]
 kind = "fix-commit"
@@ -274,10 +275,10 @@ ref = "17f134fd08f75b1ddc8a8089f43ee3b3db9c916a"
 id = "app-376-L3"
 pr = "app-376"
 file = "src/lib/editor/Editor.svelte"
-lines = [1913, 1967]
+lines = [1908, 1966]
 severity = "major"
 verdict = "real"
-confirmed = false
+confirmed = true
 claim = "The cache-reuse E2E probes derive firstFetched/secondFetched/aFetched/panFetched from a planRegion() recompute inside the probe rather than tiles the transport actually streamed, so the reuse gate can pass even if the transport stops consulting the cache entirely."
 [labels.provenance]
 kind = "fix-commit"
@@ -287,11 +288,11 @@ ref = "17f134fd08f75b1ddc8a8089f43ee3b3db9c916a"
 id = "core-403-L1"
 pr = "core-403"
 file = "phos-editor/src/dag/colour_lowering.rs"
-lines = [150, 190]
+lines = [95, 129]
 severity = "major"
 verdict = "real"
-confirmed = false
-claim = "Generated WGSL names LUT textures by original op index (lut3d_{i}) while the bind group layout packs entries densely by LUT count, so any chain whose LUT is not at op index 0/1 (or mixed Lut3D+Lut1D chains) references a nonexistent binding and fails shader/bind validation."
+confirmed = true
+claim = "Generated WGSL declares LUT textures grouped 3D-first-then-1D by op index while extract_lut_infos/upload feed textures in appearance order, so any mixed Lut3D+Lut1D chain binds a 1D texture view into a 3D-typed slot — wgpu bind-group validation failure or the wrong LUT sampled."
 [labels.provenance]
 kind = "confirmed-thread"
 ref = "https://github.com/phos-editor/core/pull/403#discussion_r3455356569"
@@ -300,10 +301,10 @@ ref = "https://github.com/phos-editor/core/pull/403#discussion_r3455356569"
 id = "core-403-L2"
 pr = "core-403"
 file = "phos-editor/src/dag/colour_lowering.rs"
-lines = [300, 340]
+lines = [106, 113]
 severity = "major"
 verdict = "real"
-confirmed = false
+confirmed = true
 claim = "Lut1D lowering declares texture_1d<f32> with TextureDimension::D1 uploads, which wgpu/WGSL does not support as declared, so any Camera LUT containing a 1D LUT fails shader validation or binding creation instead of running on GPU."
 [labels.provenance]
 kind = "confirmed-thread"
@@ -313,10 +314,10 @@ ref = "https://github.com/phos-editor/core/pull/403#discussion_r3455356576"
 id = "core-403-L3"
 pr = "core-403"
 file = "phos-editor/src/dag/colour_lowering.rs"
-lines = [585, 600]
+lines = [369, 396]
 severity = "major"
 verdict = "real"
-confirmed = false
+confirmed = true
 claim = "run_colour_gpu_fill unconditionally calls bake_formation_tail even for Camera LUT processors, replacing the actual CLF Matrix/Range/Exponent/Log/CDL/Lut chain with a sampled log/Lut3D approximation, producing colours that diverge from the CPU path."
 [labels.provenance]
 kind = "confirmed-thread"
@@ -326,10 +327,10 @@ ref = "https://github.com/phos-editor/core/pull/403#discussion_r3455356580"
 id = "core-403-L4"
 pr = "core-403"
 file = "phos-editor/src/dag/nodes/camera_lut.rs"
-lines = [110, 146]
+lines = [122, 149]
 severity = "major"
 verdict = "real"
-confirmed = false
+confirmed = true
 claim = "The GPU path (including the cpu_fallback Ok result) assigns full input-sized buffers directly to output.color.backing, bypassing write_region and ignoring roi, so partial-tile fills write wrong output and corrupt cached pixels outside the ROI."
 [labels.provenance]
 kind = "confirmed-thread"
@@ -339,10 +340,10 @@ ref = "https://github.com/phos-editor/core/pull/403#discussion_r3455356586"
 id = "core-403-L5"
 pr = "core-403"
 file = "phos-editor/src/dag/nodes/view_transform.rs"
-lines = [120, 150]
+lines = [127, 152]
 severity = "major"
 verdict = "real"
-confirmed = false
+confirmed = true
 claim = "ViewTransform's GPU path has the same ROI contract violation: it replaces the whole output backing instead of write_region, so partial-region evaluation overwrites pixels outside the requested ROI."
 [labels.provenance]
 kind = "confirmed-thread"
@@ -352,10 +353,10 @@ ref = "https://github.com/phos-editor/core/pull/403#discussion_r3455356590"
 id = "core-403-L6"
 pr = "core-403"
 file = "phos-editor/src/dag/colour_lowering.rs"
-lines = [790, 830]
+lines = [259, 290]
 severity = "major"
 verdict = "real"
-confirmed = false
+confirmed = true
 claim = "Lut1D and Lut3D WGSL sampling passes raw [0,1] coordinates without the half-texel scale/offset (coord*(n-1)/n + 0.5/n), producing a half-texel shift versus the CPU tetrahedral interpolation across the whole image."
 [labels.provenance]
 kind = "confirmed-thread"
@@ -368,7 +369,7 @@ file = "phos-editor/src/dag/colour_lowering.rs"
 lines = [648, 700]
 severity = "major"
 verdict = "real"
-confirmed = false
+confirmed = true
 claim = "build_colour_pipeline hardcodes filterable:true / SamplerBindingType::Filtering for float32 LUT textures regardless of whether FLOAT32_FILTERABLE was enabled at device creation, causing a wgpu bind-group validation panic on adapters lacking the feature."
 [labels.provenance]
 kind = "fix-commit"
@@ -379,9 +380,9 @@ id = "core-427-L1"
 pr = "core-427"
 file = "phos-editor/src/dag/mip.rs"
 lines = [95, 110]
-severity = "major"
+severity = "minor"
 verdict = "real"
-confirmed = false
+confirmed = true
 claim = "max_useful_level only treats an extent as empty when both axes are degenerate, so a 0x100 or 100x0 extent returns MipLevel(7) instead of 0, letting select_level name a coarse level for an empty target in violation of the empty-extent contract."
 [labels.provenance]
 kind = "confirmed-thread"
@@ -394,7 +395,7 @@ file = "phos-editor/src/graph_session.rs"
 lines = [2160, 2200]
 severity = "major"
 verdict = "real"
-confirmed = false
+confirmed = true
 claim = "render_region_for_scale requires the caller to pass region in the dynamically selected mip level's coordinates, but the max_useful_level cap makes that level unpredictable to callers, so a caller predicting level 3 when the backend caps at 2 gets its coordinates misinterpreted and renders the wrong tiles."
 [labels.provenance]
 kind = "confirmed-thread"
@@ -407,7 +408,7 @@ file = "phos-editor/src/graph_session.rs"
 lines = [2025, 2045]
 severity = "major"
 verdict = "real"
-confirmed = false
+confirmed = true
 claim = "display_input_source selects the first edge whose to_node is the Display sink while ignoring the destination port, so upstream resolution is edge-iteration-order-sensitive and a metadata/control edge inserted before the image edge resolves the wrong parent node for the GPU bridge."
 [labels.provenance]
 kind = "confirmed-thread"
@@ -417,10 +418,10 @@ ref = "https://github.com/phos-editor/core/pull/407#discussion_r3456203899"
 id = "core-407-L2"
 pr = "core-407"
 file = "phos-editor/src/dag/colour_lowering.rs"
-lines = [280, 330]
+lines = [253, 278]
 severity = "minor"
 verdict = "real"
-confirmed = false
+confirmed = true
 claim = "lut_payloads never validates table lengths: the 3D path silently drops a trailing partial chunk while still reporting the original grid_size (JS uploads a wrong-shaped texture), and the 1D path indexes table[0] (panics on an empty channel array) and zip-truncates unequal channel lengths."
 [labels.provenance]
 kind = "confirmed-thread"
@@ -430,10 +431,10 @@ ref = "https://github.com/phos-editor/core/pull/407#discussion_r3456203902"
 id = "core-407-L3"
 pr = "core-407"
 file = "phos-editor/src/graph_session.rs"
-lines = [2010, 2022]
+lines = [2004, 2006]
 severity = "minor"
 verdict = "real"
-confirmed = false
+confirmed = true
 claim = "display_gpu_program returns Ok(None) when the Display sink's image input is unwired, masking a broken/disconnected graph as the normal GPU-ineligible CPU-fallback signal instead of surfacing EvalError::MissingInput like the CPU render path."
 [labels.provenance]
 kind = "fix-commit"
@@ -443,10 +444,10 @@ ref = "03a489cc8e65b1dc962cc09ebe9e7a83be52b17b"
 id = "lex-787-L1"
 pr = "lex-787"
 file = "crates/lex-babel/src/formats/lex/serializer.rs"
-lines = [460, 490]
-severity = "major"
+lines = [460, 467]
+severity = "minor"
 verdict = "real"
-confirmed = false
+confirmed = true
 claim = "visit_table does not open an interior sibling scope, so the footnote-list/cell/closer walks driven by Table::accept run in the outer scope and overwrite the recorded Table kind (e.g. with List), corrupting blank-line separation decisions for the table's next sibling."
 [labels.provenance]
 kind = "fix-commit"
@@ -456,10 +457,10 @@ ref = "4e47021828c0ced56b061843edf23b1671e5536e"
 id = "lex-787-L2"
 pr = "lex-787"
 file = "crates/lex-babel/src/formats/lex/serializer.rs"
-lines = [256, 280]
-severity = "major"
+lines = [256, 257]
+severity = "minor"
 verdict = "real"
-confirmed = false
+confirmed = true
 claim = "visit_list calls separate_before(BlockKind::List) before entering suppress_output for a table's already-emitted footnote list, so the muted second walk still mutates sibling_levels and can emit stray structural blank lines."
 [labels.provenance]
 kind = "fix-commit"
@@ -472,7 +473,7 @@ file = "crates/lex-babel/src/formats/lex/serializer.rs"
 lines = [175, 178]
 severity = "minor"
 verdict = "real"
-confirmed = false
+confirmed = true
 claim = "leave_sibling_scope silently ignores a pop on an empty sibling_levels stack, hiding mismatched enter/leave scope bugs that would skew later separation state."
 [labels.provenance]
 kind = "fix-commit"
@@ -485,7 +486,7 @@ file = "crates/lex-babel/tests/markdown/export.rs"
 lines = [780, 787]
 severity = "minor"
 verdict = "real"
-confirmed = false
+confirmed = true
 claim = "The doc.untitled regression test asserts only result.is_err(), so it keeps passing if the fixture fails for an unrelated reason instead of the reserved doc.* prefix rejection it is meant to guard."
 [labels.provenance]
 kind = "fix-commit"
@@ -498,7 +499,7 @@ file = "src/shipit/review/post.py"
 lines = [224, 229]
 severity = "major"
 verdict = "real"
-confirmed = false
+confirmed = true
 claim = "The unanchored-finding fold in build_review_payload omits finding.fix, so an off-diff finding's suggested remedy is silently dropped from the posted review body."
 [labels.provenance]
 kind = "confirmed-thread"
@@ -511,7 +512,7 @@ file = "src/shipit/review/post.py"
 lines = [150, 167]
 severity = "major"
 verdict = "real"
-confirmed = false
+confirmed = true
 claim = "_coverage_section assumes coverage is a dict of dicts, so malformed schema-unenforced (agy) output like skipped:[\"foo\"] raises AttributeError and aborts posting the entire review."
 [labels.provenance]
 kind = "fix-commit"
@@ -524,7 +525,7 @@ file = "src/shipit/review/post.py"
 lines = [129, 147]
 severity = "major"
 verdict = "real"
-confirmed = false
+confirmed = true
 claim = "_finding_from_dict passes non-string category/file/text values from unvalidated agent JSON straight into Finding, so a non-empty dict category crashes render_marker._escape (.replace on dict) and aborts the post."
 [labels.provenance]
 kind = "fix-commit"
@@ -537,7 +538,7 @@ file = "src/shipit/finding.py"
 lines = [294, 335]
 severity = "major"
 verdict = "real"
-confirmed = false
+confirmed = true
 claim = "parse_comment strips ALL shipit:finding markers and splits evidence/fix on the first fenced block or 'Suggested fix:' label anywhere in the text, so a claim containing those delimiters is mis-parsed and the render/parse round trip is lossy."
 [labels.provenance]
 kind = "fix-commit"
@@ -547,10 +548,10 @@ ref = "1559d837ee0bed2973ae558a91e485c64117d5fe"
 id = "shipit-651-L5"
 pr = "shipit-651"
 file = "src/shipit/review/schema.py"
-lines = [70, 87]
+lines = [85, 94]
 severity = "major"
 verdict = "real"
-confirmed = false
+confirmed = true
 claim = "REVIEW_SCHEMA declares line as a required non-nullable integer while the prompt and posting path treat it as optional, so a schema-enforced backend cannot emit a file-level finding without inventing a bogus line number."
 [labels.provenance]
 kind = "fix-commit"
@@ -563,7 +564,7 @@ file = "src/shipit/review/fanout.py"
 lines = [270, 276]
 severity = "major"
 verdict = "real"
-confirmed = false
+confirmed = true
 claim = "run_fanout_review flattens routed entries to (Finding, Disposition) tuples before record_round, discarding duplicate_of, so merged-away duplicates are persisted and reported as posted findings that never actually posted."
 [labels.provenance]
 kind = "confirmed-thread"
@@ -576,7 +577,7 @@ file = "src/shipit/review/fanout.py"
 lines = [362, 370]
 severity = "major"
 verdict = "real"
-confirmed = false
+confirmed = true
 claim = "route_calibrated's nit-cap guard requires duplicate_of is None, so when a POST-judged nit canonical flips to NIT_SUPPRESSED its merged-away duplicates keep the stale POST disposition and the record/attestation disagree."
 [labels.provenance]
 kind = "confirmed-thread"
@@ -589,7 +590,7 @@ file = "src/shipit/verbs/pr/review.py"
 lines = [221, 236]
 severity = "minor"
 verdict = "real"
-confirmed = false
+confirmed = true
 claim = "The child _run entrypoint accepts a negative --nit-cap via the CLI and forwards it into the run path instead of failing cleanly at the process boundary like the --calibrator-* guards, breaking parity with config validation."
 [labels.provenance]
 kind = "fix-commit"
@@ -602,7 +603,7 @@ file = "crates/dodot-lib/src/commands/up.rs"
 lines = [204, 207]
 severity = "major"
 verdict = "real"
-confirmed = false
+confirmed = true
 claim = "The stale-state sweep runs over the pack_filter-narrowed ignored set (ignored.dir_names) while the init script is regenerated from the whole datastore, so a filtered `dodot up <other-pack>` leaves a now-ignored pack's state in place and the regenerated init script keeps sourcing it."
 [labels.provenance]
 kind = "confirmed-thread"
@@ -612,10 +613,10 @@ ref = "291210986c84fd9789bcdf3d50e770207983ea73"
 id = "dodot-224-L2"
 pr = "dodot-224"
 file = "crates/dodot-lib/src/commands/down.rs"
-lines = [81, 88]
+lines = [87, 87]
 severity = "major"
 verdict = "real"
-confirmed = false
+confirmed = true
 claim = "`down` sweeps only the filter-narrowed ignored set while regenerating the global init script from the full datastore, so a filtered `dodot down` leaves stale state for now-ignored packs outside the filter that the init script keeps sourcing."
 [labels.provenance]
 kind = "confirmed-thread"
@@ -625,10 +626,10 @@ ref = "291210986c84fd9789bcdf3d50e770207983ea73"
 id = "dodot-224-L3"
 pr = "dodot-224"
 file = "crates/dodot-lib/src/commands/down.rs"
-lines = [81, 88]
-severity = "major"
+lines = [81, 85]
+severity = "minor"
 verdict = "real"
-confirmed = false
+confirmed = true
 claim = "The any_removed stale-state count is computed inside the `if !ctx.dry_run` block, so `down --dry-run` reports 'Nothing to deactivate.' while a real run would sweep the now-ignored pack and report 'Packs deactivated.' — dry-run and real output diverge."
 [labels.provenance]
 kind = "confirmed-thread"
@@ -656,6 +657,7 @@ severity = "major"
 verdict = "real"
 confirmed = true
 claim = "GpuContext::readback maps device-loss/map failure to a zero-filled buffer that transfer/eval then cache as a successful render, so a device loss yields a silently memoized black frame"
+aliases = ["GpuContext::readback can still fail after a successful GPU fill — the padded staging buffer can exceed max_buffer_size making create_buffer a wgpu validation failure, and map failures become an all-zero CPU buffer that is then cached and presented."]
 [labels.provenance]
 kind = "adjudication"
 ref = "rvw03-first-cells-2026-07-10"
@@ -696,6 +698,7 @@ severity = "minor"
 verdict = "real"
 confirmed = true
 claim = "the region/viewport streaming path now receives env.gpu and reads back per fill but no test exercises it with a live device, leaving the region GPU path uncovered"
+aliases = ["The tiled/region evaluator passes the live GPU context and immediately reads back GPU-resident region outputs, but added coverage only goes through render_display/whole-frame eval_target — no GPU-eligible node is exercised via render_region, next_tile, or banded export."]
 [labels.provenance]
 kind = "adjudication"
 ref = "rvw03-first-cells-2026-07-10"
@@ -709,6 +712,7 @@ severity = "nit"
 verdict = "real"
 confirmed = true
 claim = "gpu_compare duplicates the private SESSION_VRAM_BUDGET_BYTES as a local constant instead of sharing it, so the bench silently diverges if the session budget changes"
+aliases = ["The benchmark hard-codes the session VRAM budget while claiming it matches graph_session::SESSION_VRAM_BUDGET_BYTES, a private constant hard-coded separately, so tuning the live session budget silently makes the go/no-go benchmark measure a different fallback envelope than production."]
 [labels.provenance]
 kind = "adjudication"
 ref = "rvw03-first-cells-2026-07-10"
@@ -717,11 +721,12 @@ ref = "rvw03-first-cells-2026-07-10"
 id = "core-G13"
 pr = "core-440"
 file = "phos-editor/src/dag/node.rs"
-lines = [151, 158]
+lines = [149, 158]
 severity = "nit"
 verdict = "real"
 confirmed = true
 claim = "EvalContext::gpu and OracleCtx::gpu docs still say the field is None everywhere and no device exists, but the session now builds a live device and nodes have GPU fills"
+aliases = ["The public EvalContext::gpu documentation still says None is used everywhere and that no node has a GPU fill, misleading future node implementations about when GPU execution is live.", "Cross-module contract docs describe the pre-activation world: EvalContext::gpu and OracleCtx::gpu say no device is created yet, even though GraphSession constructs a live device and camera_lut plus the ODT have live GPU fills."]
 [labels.provenance]
 kind = "adjudication"
 ref = "rvw03-first-cells-2026-07-10"
@@ -784,12 +789,12 @@ ref = "rvw03-first-cells-2026-07-10"
 id = "app-G5"
 pr = "app-391"
 file = "tests/e2e/viewer-pan-cache.spec.ts"
-lines = [85, 101]
+lines = [28, 103]
 severity = "minor"
 verdict = "real"
 confirmed = true
 claim = "the 64x64 coarse fixture yields a single level-1 cell so level0Region delta mapping is never exercised and tests assert only streamed counts, letting an unmapped fetch regress green"
-aliases = ["the wasm coarse-level coverage only repeats a whole-source render until every cell is resident so the pure-cache-hit early return never exercises the partial-delta path where seed.plan.fetch is mapped back through level0Region", "the new wasm coverage still uses the 64x64 fixture so the coarse-level case is a single-cell whole-region repeat and the scheduler level-0 to level-space delta mapping for a pan with newly exposed cells is never exercised"]
+aliases = ["the wasm coarse-level coverage only repeats a whole-source render until every cell is resident so the pure-cache-hit early return never exercises the partial-delta path where seed.plan.fetch is mapped back through level0Region", "the new wasm coverage still uses the 64x64 fixture so the coarse-level case is a single-cell whole-region repeat and the scheduler level-0 to level-space delta mapping for a pan with newly exposed cells is never exercised", "The wasm coarse-level test repeats the exact same region so the second render is an all-resident hit and the scheduler path that maps a non-resident delta back to level 0 never runs.", "The wasm e2e exercises the coarse level only through the all-resident repeat path driving seed.plan.fetch === null, while the narrowed-delta coarse pan via level0Region is covered only on the native lane.", "The wasm coarse test uses the 64x64 fixture and repeats the whole-source region, which at scale 0.5 is a single level-1 cell, so the changed PipelineScheduler partial coarse-delta request mapping is never exercised."]
 [labels.provenance]
 kind = "adjudication"
 ref = "rvw03-first-cells-2026-07-10"
@@ -830,7 +835,7 @@ severity = "major"
 verdict = "real"
 confirmed = true
 claim = "the new first-line-SubjectLine guard checks no indentation and any colon-terminated line classifies as SubjectLine, so fullwidth verbatim whose first body line ends in a colon mis-parses as paragraphs"
-aliases = ["The new guard rejects every verbatim/table candidate whose next nonblank token is another subject line without checking indentation; a valid first content line at the fullwidth column can itself end in a colon and be classified as SubjectLine so valid verbatim blocks fall back to paragraph parsing", "fullwidth verbatim content is intentionally arbitrary flat lines that can themselves end in a colon; match_verbatim_block returns None at the first subject so the parser treats the subject as a paragraph and re-anchors an empty verbatim, changing document shape and content ownership", "the early-return treats any subject-shaped line after the verbatim subject as proof the first line was a colon-terminated paragraph, breaking the builder contract of collecting arbitrary flat content lines until the closing marker"]
+aliases = ["The new guard rejects every verbatim/table candidate whose next nonblank token is another subject line without checking indentation; a valid first content line at the fullwidth column can itself end in a colon and be classified as SubjectLine so valid verbatim blocks fall back to paragraph parsing", "fullwidth verbatim content is intentionally arbitrary flat lines that can themselves end in a colon; match_verbatim_block returns None at the first subject so the parser treats the subject as a paragraph and re-anchors an empty verbatim, changing document shape and content ownership", "the early-return treats any subject-shaped line after the verbatim subject as proof the first line was a colon-terminated paragraph, breaking the builder contract of collecting arbitrary flat content lines until the closing marker", "A valid grouped verbatim whose first group is empty (subject line followed by another subject line before the shared closer) no longer matches as one verbatim block because the guard treats the next subject line after the first subject as proof of a colon-terminated paragraph."]
 [labels.provenance]
 kind = "adjudication"
 ref = "rvw03-first-cells-2026-07-10"
@@ -870,7 +875,7 @@ severity = "minor"
 verdict = "real"
 confirmed = true
 claim = "the lex#814 regressions drive only the private matcher with synthetic tokens and no end-to-end test asserts a colon-terminated paragraph survives lex-parse-format"
-aliases = ["the regression for lex#814 is only exercised by calling the private matcher with hand-built LineType tokens, proving one synthetic shape returns None but not protecting the user-visible parser and formatter scenario of a colon-terminated paragraph before a verbatim or table block"]
+aliases = ["the regression for lex#814 is only exercised by calling the private matcher with hand-built LineType tokens, proving one synthetic shape returns None but not protecting the user-visible parser and formatter scenario of a colon-terminated paragraph before a verbatim or table block", "The new verbatim_anchor_tests exercise only GrammarMatcher::match_verbatim_block on hand-built LineContainers, do not prove the full parser materializes the first subject as a paragraph preserving its text, and omit the table half of the lex#814 fix."]
 [labels.provenance]
 kind = "adjudication"
 ref = "rvw03-first-cells-2026-07-10"
@@ -897,6 +902,245 @@ severity = "minor"
 verdict = "real"
 confirmed = true
 claim = "the native coarse pan assertions count streamed tiles only and never check which cell the streamed tile landed in, so an unmapped level-space fetch region can repaint the wrong coarse cell and still pass"
+aliases = ["The native coarse pan asserts panFetched/panStreamed in an open interval and panReused > 0 but never asserts the fetch is the correct newly-exposed column, so a mapping bug that fetched one wrong cell would still satisfy the range checks."]
 [labels.provenance]
 kind = "adjudication"
 ref = "rvw03-first-cells-2026-07-10"
+
+[[labels]]
+id = "core-G15"
+pr = "core-440"
+file = "phos-editor/src/graph_session.rs"
+lines = [2908, 2928]
+severity = "major"
+verdict = "real"
+confirmed = true
+claim = "upload_lut_texture creates wgpu textures directly from user CLF LUT dimensions with no nonzero/limit/byte validation, so a malformed or adversarial grid_size causes a wgpu validation panic or device loss instead of the graceful GpuOom-to-CPU fallback."
+[labels.provenance]
+kind = "adjudication"
+ref = "v35-run triage 2026-07-10 (VERDICT-SHEET-review-lab)"
+
+[[labels]]
+id = "core-G16"
+pr = "core-440"
+file = "phos-editor/src/graph_session.rs"
+lines = [3429, 3434]
+severity = "major"
+verdict = "real"
+confirmed = true
+claim = "The only end-to-end session test for phos.camera.lut pins session.gpu = None, so the asset-backed camera-LUT GPU path — session device construction, loaded-asset lookup, evaluator readback, cache interaction — is never exercised through GraphSession."
+aliases = ["A session-level GPU test for source -> phos.camera.lut with a loaded CLF is missing: the per-node GPU test bypasses asset pre-dispatch, content caching, session-owned GPU plumbing, and the evaluator readback boundary that users actually hit."]
+[labels.provenance]
+kind = "adjudication"
+ref = "v35-run triage 2026-07-10 (VERDICT-SHEET-review-lab)"
+
+[[labels]]
+id = "core-G17"
+pr = "core-440"
+file = "phos-editor/src/graph_session.rs"
+lines = [847, 886]
+severity = "minor"
+verdict = "real"
+confirmed = true
+claim = "The documented frame-too-large GpuOom-to-CPU session fallback is never exercised end-to-end: the only session GPU test renders 96x64, and pool-level OOM tests do not cover the GraphSession -> EvalEnv -> node -> readback wiring of the fallback."
+[labels.provenance]
+kind = "adjudication"
+ref = "v35-run triage 2026-07-10 (VERDICT-SHEET-review-lab)"
+
+[[labels]]
+id = "core-G18"
+pr = "core-440"
+file = "phos-editor/src/dag/eval.rs"
+lines = [1284, 1288]
+severity = "minor"
+verdict = "real"
+confirmed = true
+claim = "TexturePool::alloc guards max texture dimension and byte overflow but not zero dimensions, so a zero-area stream reaching a GPU-eligible fill calls create_texture with width or height 0 — a wgpu validation panic instead of the documented graceful CPU fallback."
+[labels.provenance]
+kind = "adjudication"
+ref = "v35-run triage 2026-07-10 (VERDICT-SHEET-review-lab)"
+
+[[labels]]
+id = "core-G19"
+pr = "core-440"
+file = "phos-editor/src/dag/transfer.rs"
+lines = [5, 8]
+severity = "nit"
+verdict = "real"
+confirmed = true
+claim = "The transfer module doc still promises GPU-to-GPU edges keep tiles resident with no readback, but the WS01a evaluator reads back to CPU after every fill, so the doc lacks the serial-readback interim note and misleads readers about the live contract."
+[labels.provenance]
+kind = "adjudication"
+ref = "v35-run triage 2026-07-10 (VERDICT-SHEET-review-lab)"
+
+[[labels]]
+id = "core-G20"
+pr = "core-440"
+file = "phos-editor/src/dag/test_support.rs"
+lines = [132, 134]
+severity = "nit"
+verdict = "real"
+confirmed = true
+claim = "test_env's doc still says it replaces a 9-field EvalEnv literal, but the diff added the gpu field making EvalEnv a 10-field struct — a stale count that misleads future test authors."
+[labels.provenance]
+kind = "adjudication"
+ref = "v35-run triage 2026-07-10 (VERDICT-SHEET-review-lab)"
+
+[[labels]]
+id = "core-X3"
+pr = "core-440"
+file = "phos-editor/src/dag/eval.rs"
+lines = [725, 819]
+severity = "minor"
+verdict = "not-real"
+confirmed = true
+claim = "Claim that the working memo and content-cache keys must include the GPU/CPU execution mode: debunked — every GPU fill is read back to CPU before caching and no caller mixes backends across one evaluator's caches (GraphSession fixes gpu at construction; the bench uses a fresh Evaluator per sample)."
+aliases = ["A reused Evaluator can render a GPU-eligible node with gpu Some, store the read-back result under the normal content key, and a later CPU-only EvalEnv hits the same memo or content entry and returns the GPU approximation instead of running the CPU path."]
+[labels.provenance]
+kind = "adjudication"
+ref = "v35-run triage 2026-07-10 (VERDICT-SHEET-review-lab)"
+
+[[labels]]
+id = "app-G9"
+pr = "app-391"
+file = "src/lib/editor/Editor.svelte"
+lines = [2308, 2315]
+severity = "major"
+verdict = "real"
+confirmed = true
+claim = "Cache residency is keyed only by level/col/row while streamed tiles are clipped to the requested region, so reusing a resident edge cell under a shifted non-cell-aligned viewport pushes a stale-rect tile — TileAssembler.push throws escapes-the-frame-box or newly visible pixels stay unfilled."
+[labels.provenance]
+kind = "adjudication"
+ref = "v35-run triage 2026-07-10 (VERDICT-SHEET-review-lab)"
+
+[[labels]]
+id = "app-G10"
+pr = "app-391"
+file = "src/lib/editor/tile-cache.ts"
+lines = [48, 89]
+severity = "major"
+verdict = "real"
+confirmed = true
+claim = "ViewportTileCache retains every streamed tile in a plain Map with no LRU, byte budget, or viewport eviction — only content invalidation clears it — and the PR enables it for coarse levels, so panning across a large image accumulates unbounded RGBA tiles until the next edit."
+[labels.provenance]
+kind = "adjudication"
+ref = "v35-run triage 2026-07-10 (VERDICT-SHEET-review-lab)"
+
+[[labels]]
+id = "app-G11"
+pr = "app-391"
+file = "src/lib/editor/pipeline-driver-tauri.ts"
+lines = [940, 946]
+severity = "minor"
+verdict = "real"
+confirmed = true
+claim = "The all-resident/empty seed short-circuit returns assembler.frame() without re-running the stale-session guard after the awaited dynamic Tauri import, so a session replacement during the import lets a warm render settle against the replaced session — the normal path checks after await done."
+[labels.provenance]
+kind = "adjudication"
+ref = "v35-run triage 2026-07-10 (VERDICT-SHEET-review-lab)"
+
+[[labels]]
+id = "app-G12"
+pr = "app-391"
+file = "tests/e2e/viewer-pan-cache.spec.ts"
+lines = [105, 111]
+severity = "nit"
+verdict = "real"
+confirmed = true
+claim = "The off-screen specs assert fetched === 0 and streamed === 0 but never assert the exposed offscreen.dims resolves 0x0, leaving the empty-frame half of the new short-circuit contract unasserted in both the wasm and native specs."
+aliases = ["The off-screen probes return dims but the e2e assertions never check that the resolved frame is actually empty — assert width === 0 and height === 0 in both WASM and native off-screen checks."]
+[labels.provenance]
+kind = "adjudication"
+ref = "v35-run triage 2026-07-10 (VERDICT-SHEET-review-lab)"
+
+[[labels]]
+id = "lex-G8"
+pr = "lex-820"
+file = "crates/lex-core/src/lex/assembling/stages/attach_annotations.rs"
+lines = [18, 20]
+severity = "nit"
+verdict = "real"
+confirmed = true
+claim = "The module-doc attachment rules still say document-level attachment of leading annotations requires a following blank line, but decide_attachment's new next_is_session branch attaches them to the document without one — a stale entry-point contract for the stage."
+[labels.provenance]
+kind = "adjudication"
+ref = "v35-run triage 2026-07-10 (VERDICT-SHEET-review-lab)"
+
+[[labels]]
+id = "lex-G9"
+pr = "lex-820"
+file = "crates/lex-core/src/lex/assembling/stages/attach_annotations.rs"
+lines = [728, 758]
+severity = "minor"
+verdict = "real"
+confirmed = true
+claim = "test_leading_annotation_above_session_attaches_to_root asserts only annotation counts and an empty session, never the authored labels, values, or order, so a regression that duplicates, drops, or strips annotation content still passes."
+aliases = ["The leading-annotation test validates the new next_is_session branch only at the attachment stage, asserting count and empty session, without checking the exact labels and inline values survive or that format-then-reparse converges."]
+[labels.provenance]
+kind = "adjudication"
+ref = "v35-run triage 2026-07-10 (VERDICT-SHEET-review-lab)"
+
+[[labels]]
+id = "lex-G10"
+pr = "lex-820"
+file = "crates/lex-babel/tests/round_trip_proptest/mod.rs"
+lines = [862, 882]
+severity = "nit"
+verdict = "real"
+confirmed = true
+claim = "The proptest exclusion comment still describes all Definition-before-closer cases as a content-loss hijack, but the updated matrix distinguishes intended Definition-to-Verbatim/Annotation merges from the lex#819 Definition-to-Table bug — stale mirrored wording as the matrix invariant's maintenance guide."
+[labels.provenance]
+kind = "adjudication"
+ref = "v35-run triage 2026-07-10 (VERDICT-SHEET-review-lab)"
+
+[[labels]]
+id = "lex-G11"
+pr = "lex-820"
+file = "crates/lex-babel/tests/markdown/faithfulness_fixtures.rs"
+lines = [139, 141]
+severity = "nit"
+verdict = "real"
+confirmed = true
+claim = "The known-failure comment cross-references the separation.rs Closer re-anchoring section, which this range renamed to multi-group verbatim absorption, so the pointer is dead and keeps the old hijack terminology alive in the failure ledger."
+[labels.provenance]
+kind = "adjudication"
+ref = "v35-run triage 2026-07-10 (VERDICT-SHEET-review-lab)"
+
+[[labels]]
+id = "lex-G12"
+pr = "lex-820"
+file = "crates/lex-core/src/lex/parsing/parser.rs"
+lines = [936, 1000]
+severity = "minor"
+verdict = "real"
+confirmed = true
+claim = "The verbatim-anchor guard matches both SubjectLine and SubjectOrListItemLine, but verbatim_anchor_tests construct only SubjectLine tokens, leaving the list-item-shaped colon-subject branch of the guard untested."
+[labels.provenance]
+kind = "adjudication"
+ref = "v35-run triage 2026-07-10 (VERDICT-SHEET-review-lab)"
+
+[[labels]]
+id = "lex-G13"
+pr = "lex-820"
+file = "crates/lex-core/src/lex/parsing/parser.rs"
+lines = [521, 527]
+severity = "major"
+verdict = "real"
+confirmed = true
+claim = "When a colon-ended paragraph precedes a fullwidth verbatim, the absorption guard bails expecting re-anchoring, but match_paragraph then consumes the following verbatim subject line (no container follows it), so the re-anchor never happens and a legitimate fullwidth verbatim is flattened into the paragraph."
+[labels.provenance]
+kind = "adjudication"
+ref = "v35-run triage 2026-07-10 (VERDICT-SHEET-review-lab)"
+
+[[labels]]
+id = "lex-X1"
+pr = "lex-820"
+file = "crates/lex-babel/tests/lex_separation/matrix.rs"
+lines = [590, 598]
+severity = "major"
+verdict = "not-real"
+confirmed = true
+claim = "Claim that the Definition-to-Table matrix assertion checks only body_kinds and not the table rows or definition body: debunked — assert_definition_hijack_shape's Table arm asserts body_kinds, table.subject, and empty header/body rows, pinning exactly the lex#819 loss shape."
+[labels.provenance]
+kind = "adjudication"
+ref = "v35-run triage 2026-07-10 (VERDICT-SHEET-review-lab)"
