@@ -89,8 +89,9 @@ def launcher(monkeypatch):
 
 def _fixture_for(view):
     """A one-pin fixture over the test checkout's real range, with one
-    confirmed real major label the fake review's finding matches and one
-    banked not-real label nothing matches (a measurable-FP slot)."""
+    confirmed real major label the fake review's finding matches (the runner
+    tests exercise execution/idempotency, not FP scoring — see `_curve_fixture`
+    for the real + not-real pair the curve tests score)."""
     return parse_fixture(
         {
             "schema": 1,

@@ -295,6 +295,17 @@ def test_instructions_field_errors_point_at_the_instructions_table():
         parse_cell(_cell_data(instructions={"path": "  "}))
 
 
+@pytest.mark.parametrize("bad", ["../evil", "sub/x", "a\\b", ".", ".."])
+def test_id_and_baseline_must_be_bare_cell_names(bad):
+    """`id`/`baseline` each name a file under the cells directory; a
+    path-separator or traversal value would escape it when the pair loads, so
+    it is refused at parse."""
+    with pytest.raises(CellError, match="bare cell name"):
+        parse_cell(_cell_data(id=bad))
+    with pytest.raises(CellError, match="bare cell name"):
+        parse_cell(_treatment_data(baseline=bad))
+
+
 # --- the file boundary ---------------------------------------------------------------
 
 

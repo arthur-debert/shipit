@@ -158,6 +158,22 @@ def _require_str(raw: Mapping[str, Any], key: str, where: str) -> str:
     return value.strip()
 
 
+def _require_cell_name(raw: Mapping[str, Any], key: str, where: str) -> str:
+    """A required non-empty string that is ALSO a bare cell name — no path
+    separators or ``.``/``..``. ``id`` and ``baseline`` both name a file under
+    the cells directory (``<cells>/<name>.toml``), so a value like ``../x`` would
+    let baseline lookup traverse OUT of that directory when ``lab run``/``report``
+    load the pair; a bare name keeps the lookup inside the cells dir."""
+    value = _require_str(raw, key, where)
+    if "/" in value or "\\" in value or value in (".", ".."):
+        raise CellError(
+            f"{where}: {key!r} {value!r} must be a bare cell name (no path "
+            "separators) — it names a file under the cells directory, and a "
+            "traversal path would escape it"
+        )
+    return value
+
+
 def _optional_str(raw: Mapping[str, Any], key: str, where: str) -> str | None:
     value = raw.get(key)
     if value is None:
@@ -327,8 +343,8 @@ def parse_cell(data: Mapping[str, Any], *, where: str = "cell") -> Cell:
             f"{where}: cell schema {schema!r} != supported {CELL_SCHEMA_VERSION} — "
             "this shipit is too old or the file too new"
         )
-    cell_id = _require_str(data, "id", where)
-    baseline = _require_str(data, "baseline", where)
+    cell_id = _require_cell_name(data, "id", where)
+    baseline = _require_cell_name(data, "baseline", where)
     axis = _require_str(data, "axis", where)
     if baseline == cell_id and axis != CONTROL_AXIS:
         raise CellError(

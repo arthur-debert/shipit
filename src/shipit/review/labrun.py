@@ -246,9 +246,13 @@ def _prior_findings(
     priors: list[Mapping[str, Any]] = []
     for sweep in range(1, point.sweep):
         prior_key = {**point.key, "sweep": sweep}
-        matching = [r for r in records if record_matches_key(r, prior_key)]
-        if matching:
-            priors.extend(_posted_findings(matching[-1]))
+        # Newest match wins: scan from the end and stop at the first hit rather
+        # than materializing every match just to keep the last.
+        newest = next(
+            (r for r in reversed(records) if record_matches_key(r, prior_key)), None
+        )
+        if newest is not None:
+            priors.extend(_posted_findings(newest))
     return priors
 
 
@@ -453,7 +457,6 @@ def _run_point(
     window a swapped symlink could open between the up-front preflight and here.
     """
     composed_path: str | None = None
-    instructions_path = safe_instructions_path(cell.instructions_path)
     if cell.sweep_mode == "informed" and point.sweep > 1:
         priors = _prior_findings(records, point)
         composed = compose_informed_instructions(base_text, priors)
@@ -470,6 +473,12 @@ def _run_point(
             len(priors),
             extra={"cell": cell.id, "sweep": point.sweep},
         )
+    else:
+        # Only the blind / sweep-1 path passes the cell's OWN instructions file
+        # to the driver, so the symlink re-check belongs here — an informed
+        # sweep ≥2 launches the composed temp above and must not fail because
+        # the (unused) original path moved between sweeps.
+        instructions_path = safe_instructions_path(cell.instructions_path)
     try:
         if cell.shape == "fanout":
             return replay_mod.run_fanout_replay(
