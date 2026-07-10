@@ -3,7 +3,7 @@
 A THIN wrapper over DuckDB/SQL (PRD har02 module #6): the harness terminal-hooks
 append one **eval record** per run to a never-committed JSONL store keyed by repo
 (:mod:`shipit.harness.eval.store`); this verb reads that store *directly* with
-DuckDB's ``read_json_auto`` and rolls it up four ways —
+DuckDB's ``read_json_auto`` and rolls it up five ways —
 
 - **by role** (``gen_ai.agent.name``): how implementer runs are doing vs shepherd
   vs coordinator (PRD user story 6);
@@ -12,12 +12,20 @@ DuckDB's ``read_json_auto`` and rolls it up four ways —
 - **by invocation** (``eval.invocation``): which Backend × Model × ReasoningLevel
   launch config produced which results, so configurations are comparable (ADR-0025);
 - **trend over time** (the ``eval.timestamp`` day): metrics run-over-run, so the
-  harness's improvement (or regression) is a query, not a guess (user story 11).
+  harness's improvement (or regression) is a query, not a guess (user story 11);
+- **the review axis** (RVW02-WS03): **review-round records** grouped by their
+  review-instructions **Variant** — rounds / findings / posted vs routed-out
+  dispositions / cost — JOINED to eval records by run id (``round.runs[].run_id``
+  ↔ ``eval.run_id``), so "which prompt variant produced what recall at what
+  cost" is one report, not intuition (PRD rvw02, user story 24).
 
-The aggregation is a pure function of a store *path* (:func:`aggregate`), with the
-click command (:func:`cmd`) / :func:`run` as the thin boundary that resolves the
-store path and renders the result (ADR-0012 pure-core / thin-boundary). DuckDB is
-imported lazily so the rest of the CLI never pays its import cost.
+The aggregation is a pure function of the store *paths* (:func:`aggregate`), with
+the click command (:func:`cmd`) / :func:`run` as the thin boundary that resolves
+both kind stores from the ONE family root and renders the result (ADR-0012
+pure-core / thin-boundary). DuckDB is imported lazily so the rest of the CLI
+never pays its import cost; the review axis — a small join over the (one line
+per round) rounds store — is plain Python over the same JSONL, so nested
+finding/disposition lists never depend on DuckDB's struct inference.
 
 No platform, no infra: the query engine reads the on-disk JSONL and exits — the
 substrate stays a local file (ADR-0013).
@@ -25,8 +33,10 @@ substrate stays a local file (ADR-0013).
 
 from __future__ import annotations
 
+import json
 import sys
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TextIO
 
@@ -108,15 +118,41 @@ class GroupRow:
 
 
 @dataclass(frozen=True)
+class ReviewRoundRow:
+    """One review-axis bucket: a round-record **Variant** (the experiment-arm
+    handle), its round/finding volumes split by disposition, its own recorded
+    cost, and the run-id-joined eval-record cost of its contributing runs.
+
+    ``posted`` vs ``dropped`` is the disposition split (``post`` AND canonical
+    — a merged-away duplicate shares its twin's ``post`` but never reached the
+    PR — vs every routed-out finding + duplicate) — the recall/FP raw material.
+    ``joined_runs`` /
+    ``avg_run_tokens`` come from the eval store via the ``round.runs[].run_id``
+    ↔ ``eval.run_id`` join (zero/None when no contributing run has an eval
+    record — today's CLI backends contribute none; WS04's fan-out will).
+    """
+
+    key: str
+    rounds: int
+    findings: int
+    posted: int
+    dropped: int
+    avg_duration_ms: float
+    joined_runs: int
+    avg_run_tokens: float | None
+
+
+@dataclass(frozen=True)
 class EvalReport:
     """The full aggregation: the total run count plus the roll-ups (role, variant,
-    invocation, day)."""
+    invocation, day) and the review axis (round records by variant, RVW02-WS03)."""
 
     total_runs: int
     by_role: list[GroupRow]
     by_variant: list[GroupRow]
     by_invocation: list[GroupRow]
     by_day: list[GroupRow]
+    review: list[ReviewRoundRow] = field(default_factory=list)
 
 
 #: The "no runs recorded" report — returned for an empty/missing store AND when the
@@ -153,17 +189,32 @@ def _group_query(key_expr: str, order_by: str) -> str:
     """
 
 
-def aggregate(store_path: str | Path) -> EvalReport:
-    """Roll the JSONL eval store at ``store_path`` up by role, variant, and day.
+def aggregate(
+    store_path: str | Path, rounds_path: str | Path | None = None
+) -> EvalReport:
+    """Roll the JSONL eval store at ``store_path`` up by role, variant, and day —
+    plus, when ``rounds_path`` names the repo's review-rounds store, the review
+    axis (:func:`review_axis`: round records by variant, run-id-joined to the
+    eval records).
 
-    Pure of any global state: it opens an in-memory DuckDB, reads the file, and
+    Pure of any global state: it opens an in-memory DuckDB, reads the files, and
     returns the structured result. A store that does not exist yet (or is empty)
-    yields an empty report rather than an error — "no runs recorded" is a valid,
-    common state, not a failure.
+    yields an empty roll-up rather than an error — "no runs recorded" is a valid,
+    common state, not a failure — and the two stores are independent: review
+    rounds report even when no eval record exists yet (replay against CLI
+    backends writes rounds but no eval records).
     """
+    review = review_axis(rounds_path, store_path) if rounds_path is not None else []
     path = Path(store_path)
     if not path.exists() or path.stat().st_size == 0:
-        return _EMPTY_REPORT
+        return EvalReport(
+            total_runs=0,
+            by_role=[],
+            by_variant=[],
+            by_invocation=[],
+            by_day=[],
+            review=review,
+        )
 
     import duckdb  # lazy: only the eval verb needs the query engine.
 
@@ -199,9 +250,144 @@ def aggregate(store_path: str | Path) -> EvalReport:
             by_variant=by_variant,
             by_invocation=by_invocation,
             by_day=by_day,
+            review=review,
         )
     finally:
         con.close()
+
+
+def review_axis(
+    rounds_path: str | Path | None, eval_path: str | Path
+) -> list[ReviewRoundRow]:
+    """The review axis: round records grouped by **Variant**, run-id-joined to
+    eval records (RVW02-WS03; PRD rvw02 user story 24).
+
+    Plain Python over the two JSONL stores — the rounds store is one line per
+    review round (small by construction), and the nested findings/dispositions
+    lists stay out of DuckDB's struct inference. Per variant bucket: rounds,
+    findings split ``posted`` (disposition ``post`` AND canonical — a merged-away
+    duplicate shares its twin's ``post`` but never reached the PR) vs ``dropped``
+    (every routed-out finding + duplicate — the recall/FP raw material), the round's own mean
+    duration, and the joined eval-record cost — each ``round.runs[].run_id``
+    resolved against ``eval.run_id``, averaging the joined runs' total tokens.
+    A missing store, a malformed line, or a round with no joinable run degrades
+    per-item (skip / None), never errors: the report reads whatever history the
+    stores hold. Buckets order most-rounds first, then key — the same "top
+    buckets" ordering as the DuckDB roll-ups.
+    """
+    rounds = _read_jsonl(rounds_path)
+    if not rounds:
+        return []
+    tokens_by_run: dict[str, object] = {}
+    for record in _read_jsonl(eval_path):
+        run_id = record.get("eval.run_id")
+        if run_id:
+            tokens_by_run[str(run_id)] = record.get("eval.usage.total_tokens")
+
+    buckets: dict[str, dict] = {}
+    for round_record in rounds:
+        key = _variant_bucket(round_record.get("round.variant"))
+        bucket = buckets.setdefault(
+            key,
+            {
+                "rounds": 0,
+                "findings": 0,
+                "posted": 0,
+                "durations": [],
+                "joined": 0,
+                "tokens": [],
+            },
+        )
+        bucket["rounds"] += 1
+        findings = round_record.get("round.findings")
+        for finding in findings if isinstance(findings, list) else []:
+            if not isinstance(finding, Mapping):
+                continue
+            bucket["findings"] += 1
+            # "posted" is disposition==post AND canonical: a merged-away
+            # duplicate carries its twin's post disposition but never reached the
+            # PR, so counting it would double the posted-vs-dropped split
+            # (RVW02-WS04 fan-out dedup edge; duplicate_of absent on pre-WS04
+            # single-pass records → all such findings are canonical).
+            if (
+                finding.get("disposition") == "post"
+                and finding.get("duplicate_of") is None
+            ):
+                bucket["posted"] += 1
+        usage = round_record.get("round.usage")
+        duration = usage.get("duration_ms") if isinstance(usage, Mapping) else None
+        if isinstance(duration, (int, float)):
+            bucket["durations"].append(float(duration))
+        runs = round_record.get("round.runs")
+        for run in runs if isinstance(runs, list) else []:
+            if not isinstance(run, Mapping):
+                continue
+            run_id = str(run.get("run_id") or "")
+            if run_id and run_id in tokens_by_run:
+                bucket["joined"] += 1
+                tokens = tokens_by_run[run_id]
+                if isinstance(tokens, (int, float)):
+                    bucket["tokens"].append(float(tokens))
+
+    rows = [
+        ReviewRoundRow(
+            key=key,
+            rounds=bucket["rounds"],
+            findings=bucket["findings"],
+            posted=bucket["posted"],
+            dropped=bucket["findings"] - bucket["posted"],
+            avg_duration_ms=_mean(bucket["durations"]) or 0.0,
+            joined_runs=bucket["joined"],
+            avg_run_tokens=_mean(bucket["tokens"]),
+        )
+        for key, bucket in buckets.items()
+    ]
+    rows.sort(key=lambda row: (-row.rounds, row.key))
+    return rows
+
+
+def _mean(values: list[float]) -> float | None:
+    """The arithmetic mean of ``values``, or ``None`` for an empty list."""
+    return sum(values) / len(values) if values else None
+
+
+def _variant_bucket(variant: object) -> str:
+    """A round-record variant → its report bucket key — the SAME rendering the
+    DuckDB eval roll-up's variant key produces (``hash``, ``hash [label]``, or
+    :data:`_NO_VARIANT`), so the two variant axes read alike."""
+    if not isinstance(variant, Mapping) or not variant.get("content_hash"):
+        return _NO_VARIANT
+    content_hash = str(variant["content_hash"])
+    label = variant.get("label")
+    return f"{content_hash} [{label}]" if label is not None else content_hash
+
+
+def _read_jsonl(path: str | Path | None) -> list[dict]:
+    """Every parseable JSON OBJECT line of ``path`` — missing/empty store → ``[]``.
+
+    Tolerant by design (the stores are local, append-only telemetry): a
+    malformed or non-object line is skipped, never an error, so one bad write
+    cannot take the whole report down. The file is STREAMED line-by-line (not
+    ``read_text().splitlines()``) so an unbounded append-only store does not
+    allocate the whole file plus a split-line list at once.
+    """
+    if path is None:
+        return []
+    target = Path(path)
+    if not target.exists():
+        return []
+    records: list[dict] = []
+    with target.open(encoding="utf-8") as fh:
+        for line in fh:
+            if not line.strip():
+                continue
+            try:
+                parsed = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict):
+                records.append(parsed)
+    return records
 
 
 def _column(field: str) -> str:
@@ -247,13 +433,41 @@ def _render_section(title: str, key_header: str, rows: list[GroupRow]) -> list[s
     return lines
 
 
+def _render_review_section(rows: list[ReviewRoundRow]) -> list[str]:
+    """Render the review axis as an aligned text table (a list of lines).
+
+    The disposition split (posted vs dropped) and the joined eval-run cost are
+    the load-bearing columns — what a review-prompt A/B actually compares. A
+    variant with no joinable runs prints ``-`` for tokens rather than a fake 0.
+    """
+    lines = ["Review rounds (by variant):"]
+    if not rows:
+        lines.append("  (no review rounds)")
+        return lines
+    key_width = max(len("variant"), *(len(r.key) for r in rows))
+    lines.append(
+        f"  {'variant':<{key_width}}  {'rounds':>6}  {'findings':>8}  "
+        f"{'posted':>6}  {'dropped':>7}  {'avg ms':>8}  {'runs':>4}  {'tokens':>8}"
+    )
+    for r in rows:
+        tokens = f"{r.avg_run_tokens:.0f}" if r.avg_run_tokens is not None else "-"
+        lines.append(
+            f"  {r.key:<{key_width}}  {r.rounds:>6}  {r.findings:>8}  "
+            f"{r.posted:>6}  {r.dropped:>7}  {r.avg_duration_ms:>8.0f}  "
+            f"{r.joined_runs:>4}  {tokens:>8}"
+        )
+    return lines
+
+
 def format_report(report: EvalReport) -> str:
     """Render ``report`` as readable, plain-text sections.
 
     Kept separate from :func:`aggregate` so the structured result is what tests
     assert on (external behaviour), and the formatting stays trivially eyeballable.
+    The empty-store message fires only when BOTH stores are empty: review rounds
+    exist without eval records (a replay against a CLI backend), and must render.
     """
-    if report.total_runs == 0:
+    if report.total_runs == 0 and not report.review:
         return "No eval records yet — the store is empty."
     sections = [
         f"Eval report — {report.total_runs} run(s)",
@@ -265,6 +479,8 @@ def format_report(report: EvalReport) -> str:
         *_render_section("By invocation:", "invocation", report.by_invocation),
         "",
         *_render_section("Trend (by day):", "day", report.by_day),
+        "",
+        *_render_review_section(report.review),
     ]
     return "\n".join(sections)
 
@@ -295,14 +511,16 @@ def run(
 ) -> int:
     """Aggregate the local eval store for a repo and print the report. Returns 0.
 
-    ``repo_root`` is a path inside the repo whose store to read; it defaults to the
-    current checkout, resolved to its origin ``owner/name`` identity (the store
-    key, ADR-0024). ``base_dir`` overrides the store root (injected by tests,
-    mirroring :func:`shipit.harness.eval.store.store_path`). The store path is
-    computed by the store module — the single source of truth — so reader and
-    writer can never disagree about where records live. A path that is not a
-    checkout (or has no origin) has no per-repo store, so it prints the empty
-    report rather than erroring.
+    ``repo_root`` is a path inside the repo whose stores to read; it defaults to
+    the current checkout, resolved to its origin ``owner/name`` identity (the
+    store key, ADR-0024). ``base_dir`` overrides the store FAMILY root (injected
+    by tests, mirroring :func:`shipit.harness.eval.store.store_path`) — one root
+    resolves BOTH kind stores (eval + review-rounds), which is what makes the
+    review-axis join a same-override read. The store paths are computed by the
+    store module — the single source of truth — so reader and writer can never
+    disagree about where records live. A path that is not a checkout (or has no
+    origin) has no per-repo store, so it prints the empty report rather than
+    erroring.
     """
     out = out or sys.stdout
     try:
@@ -310,8 +528,10 @@ def run(
     except (execrun.ExecError, ValueError):
         print(format_report(_EMPTY_REPORT), file=out)
         return 0
-    path = store.store_path(repo, base_dir if base_dir is None else Path(base_dir))
-    report = aggregate(path)
+    root = base_dir if base_dir is None else Path(base_dir)
+    path = store.store_path(repo, root)
+    rounds_path = store.store_path(repo, root, kind=store.REVIEW_ROUNDS_KIND)
+    report = aggregate(path, rounds_path)
     print(format_report(report), file=out)
     return 0
 

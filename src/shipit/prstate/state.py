@@ -51,30 +51,27 @@ decision is the polling caller's, not the snapshot's — the snapshot is
 stateless and has no clock.
 
 Review rounds repeat until done, governed by the per-reviewer rerun policy: for a
-rerun=True (head-strict) reviewer a review counts only against the current head,
-so any push stales the prior review and the snapshot advises RE-REQUEST; for a
-rerun=False reviewer (review-once — the DEFAULT for everyone) a review on ANY
-head still counts as done and a push never re-stales it. Either way the engine
+rerun=True (head-strict — the DEFAULT for everyone) reviewer a review counts only
+against the current head, so any push stales the prior review and the snapshot
+advises RE-REQUEST; for a rerun=False reviewer (review-once — the opt-out) a
+review on ANY head still counts as done and a push never re-stales it. Either way the engine
 is the arbiter — no minor-round exception, #565.
 
 The stopping rule (breakers.py) caps that repetition: address every comment
-each round EXCEPT stop when 6 rounds have happened, or when the latest round's
-RECORDED verdicts are all nitpick (#423 — the agent addressing the round
-classifies every finding via `shipit pr classify`; the engine consumes the
-record, never a body regex). A stop on an otherwise-ready PR (CI green, merge
-state CLEAN) routes straight to READY — the open nitpick threads no longer hold
-it; an all-nitpick stop additionally suppresses every RE-REQUEST, so the
-nit-fix push cannot open a new round (not even for a rerun=True reviewer whose
-review the push staled). When the PR is not otherwise ready, the real reason
-(failing CI / conflict) blocks it.
+each round EXCEPT stop when the round cap is reached, or when the latest round
+has findings but NONE major-or-worse (ADR-0044 — findings arrive PRE-classified
+on the 4-tier Severity ladder; the engine resolves each finding's severity
+through the precedence chain: machine marker → reviewer-adapter mapping →
+`major` fail-safe, beaten only by a write-once Severity override). A fired
+breaker means no further round is minted: it suppresses every RE-REQUEST, so
+the fix push cannot re-open the loop (not even for a rerun=True reviewer whose
+review the push staled). The round's leftover minor/nit threads still require
+RESOLUTION before Ready — the PR holds at ADDRESSING while any thread is open —
+they just never buy the reviewers another round. When the PR is not otherwise
+ready, the real reason (failing CI / conflict) blocks it.
 
-The CLASSIFY gate (#423) is the authoritative seam in front of all of that:
-while the LATEST round has findings with no recorded verdict, the engine
-reports CLASSIFY (with the literal command) and refuses to advance — no
-RE-REQUEST is advised or performed and READY is unreachable — so the loop
-cannot move past an unclassified round. The round-cap stop is the one
-exception: at the cap there is no further round for a verdict to decide, so
-the gate yields to the mechanical stop.
+There is no classification step and no CLASSIFY state (ADR-0044): nothing can
+be unclassified, so the old verdict gate is structurally unreachable and gone.
 """
 
 from __future__ import annotations
@@ -85,7 +82,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 
 from .. import events
-from .breakers import build_rounds, evaluate_breakers, unclassified_findings
+from .breakers import build_rounds, evaluate_breakers
 from .model import FunnelState, ReadinessView, ReviewLifecycle
 from .reviewers import REGISTRY, ReviewerAdapter, required_adapters
 
@@ -303,7 +300,7 @@ def evaluate(
     - ``round.detected`` — a head SHA the required reviewers reviewed (one per
       round the stopping rule counts);
     - ``breaker.fired`` — the stopping rule stopped the loop (round-cap /
-      all-nitpick);
+      no-major-finding);
     - ``review.degraded`` — a required reviewer settled at a non-success
       terminal outcome (failed / empty / timed-out), one per reviewer.
     """
@@ -442,16 +439,16 @@ def _evaluate(
     reviewer.
 
     The stopping rule (breakers.py) decides when the review loop has run its
-    course: 6 rounds reached, or the latest round's recorded verdicts are all
-    nitpick (#423). When it fires on an otherwise-ready PR (0 substantive
-    blockers + CI green + a CLEAN merge, or a transient UNSTABLE while the
-    rollup is green) the engine routes to READY — the leftover nitpick threads
-    no longer hold it, and an all-nitpick stop suppresses every RE-REQUEST so
-    the nit-fix push cannot re-open the loop. When the PR is not otherwise
-    ready (failing CI / conflict), the real reason blocks it; the stopping rule
-    never invents a block of its own. In FRONT of all of that sits the CLASSIFY
-    gate (#423): a latest round with any unclassified finding reports CLASSIFY
-    and refuses to advance (round-cap excepted).
+    course: the round cap reached, or the latest round has findings but none
+    major-or-worse (ADR-0044 — each finding's severity resolved through the
+    precedence chain against the snapshot's `ctx.overrides`). A fired breaker
+    suppresses every RE-REQUEST, so the fix push cannot re-open the loop; the
+    round's leftover minor/nit threads still hold the PR at ADDRESSING until
+    resolved (fix-or-reply + resolve), and only then does an otherwise-ready PR
+    (CI green + a CLEAN merge, or a transient UNSTABLE while the rollup is
+    green) route to READY with the breaker recorded. When the PR is not
+    otherwise ready (failing CI / conflict), the real reason blocks it; the
+    stopping rule never invents a block of its own.
     """
     registry = registry if registry is not None else REGISTRY
     required = required if required is not None else required_adapters(ctx.roster)
@@ -481,18 +478,12 @@ def _evaluate(
     checks = classify_checks(ctx.checks)
     # The stopping rule counts rounds against the SAME required set the engine
     # evaluates — passed through so an override repo's round math matches its
-    # reviewers. When it has fired, the loop must NOT open another round: an
-    # otherwise-ready PR flips to READY (the leftover threads are stale or
-    # nitpicks), not back to ADDRESSING.
+    # reviewers. When it has fired, the loop must NOT open another round: the
+    # leftover minor/nit threads still resolve (ADDRESSING below), but the fix
+    # push re-requests no one, and a threads-resolved, otherwise-ready PR flips
+    # to READY with the breaker recorded.
     breaker = evaluate_breakers(ctx, required=required)
     breaker_stops = breaker.stop
-    # The CLASSIFY gate's structured input (#423): the LATEST round's findings
-    # with no recorded verdict (`ctx.verdicts` — the dev-cycle log read, folded
-    # onto the snapshot at the gather seam). Same round vocabulary as the
-    # stopping rule, so the gate and the breaker can never disagree on what
-    # the latest round was.
-    rounds = build_rounds(ctx, required=required)
-    unclassified = unclassified_findings(rounds[-1], ctx.verdicts) if rounds else ()
 
     # The degraded set (ADR-0006): required reviewers SETTLED at a non-success
     # terminal outcome (failed / empty / timed-out). They settle non-blocking, so
@@ -518,23 +509,6 @@ def _evaluate(
         degraded=degraded,
     )
 
-    # 0. The CLASSIFY gate (#423) — the authoritative seam. While the latest
-    #    round has findings with no recorded verdict, the ONE next action is to
-    #    classify them: the state is ADDRESSING (classification is the agent's
-    #    act, part of triaging the round), `to_request` stays EMPTY (so `pr
-    #    next` can only report — a RE-REQUEST is structurally refused, and the
-    #    dispatcher cannot request on prose), and READY is unreachable. It
-    #    cannot be bypassed: every evaluation path (`pr status`, `pr next`, the
-    #    guarded flip's re-gather) runs through here. The round-cap stop is the
-    #    one exception — at the cap there is no further round for a verdict to
-    #    decide, so the mechanical stop proceeds on its own terms.
-    if unclassified and breaker.breaker != "round-cap":
-        status.state = TaskState.ADDRESSING
-        status.next_action = classify_action(
-            ctx.number, len(unclassified), open_threads
-        )
-        return status
-
     # 1. Required reviewers must all be SETTLED (ADR-0006): a recorded terminal
     #    funnel outcome, NOT only a posted review. A reviewer HOLDS the PR only
     #    while never-requested or in-flight (within window — WS03 ages in-flight
@@ -543,15 +517,14 @@ def _evaluate(
     #    NOT appear here — one broken reviewer never parks the PR. Best-effort
     #    reviewers (outside `required`) never hold.
     holding = [r for r in required if funnel_states[r.name] in _HOLDS]
-    # No-re-request on an all-nitpick round (#423): when the latest round's
-    # recorded verdicts are ALL nitpick, the nit-fix push must not re-open the
-    # loop — a reviewer holding only because that push staled its earlier
-    # review (the rerun=True stale-after-push case) is dropped from the holding
-    # set entirely, so no RE-REQUEST is advised or performed and an
-    # otherwise-ready PR falls through to READY with the breaker recorded. A
+    # No-re-request after a fired breaker (ADR-0044): the loop is stopped, so
+    # the fix push must not re-open it — a reviewer holding only because that
+    # push staled its earlier review (the rerun=True stale-after-push case) is
+    # dropped from the holding set entirely, so no RE-REQUEST is advised or
+    # performed and the round's leftover threads are the only remaining work. A
     # genuinely never-requested reviewer still holds (the breaker cannot waive
     # a review that never happened), and an already in-flight one is awaited.
-    if breaker_stops and breaker.breaker == "all-nitpick":
+    if breaker_stops:
         holding = [r for r in holding if not _has_stale_review(ctx, r)]
     if holding:
         # Split the holding reviewers into the act each one's funnel state dictates
@@ -606,20 +579,31 @@ def _evaluate(
         return status
 
     # 2. Required reviews in; any open thread (from any reviewer) must be
-    #    addressed — UNLESS the stopping rule has fired (6 rounds, or the latest
-    #    round is all nitpicks): then do NOT open another round. The leftover
-    #    threads no longer hold, so fall through to the readiness checks below —
-    #    an otherwise-ready PR flips to READY (it records the breaker name so the
-    #    stop is visible), and a real CI/merge problem still blocks it on its own
-    #    terms. Record the breaker either way.
+    #    addressed BEFORE Ready — breaker or no breaker (ADR-0044: minor/nit
+    #    findings still require thread resolution; they just never mint another
+    #    round). When the stopping rule has fired the prose says so: the
+    #    remaining work is resolving the leftover threads, and the fix push
+    #    re-opens nothing (the re-request suppression above). Once every thread
+    #    is resolved, an otherwise-ready PR falls through to READY with the
+    #    breaker name recorded, and a real CI/merge problem still blocks it on
+    #    its own terms.
     if breaker_stops:
         status.breaker = breaker.breaker
-    if open_threads and not breaker_stops:
+    if open_threads:
         status.state = TaskState.ADDRESSING
-        status.next_action = (
-            f"triage {open_threads} open thread(s): read them with "
-            "`gh pr view --comments`, then fix-or-reply + resolve each"
-        )
+        if breaker_stops:
+            status.next_action = (
+                f"review loop stopped ({breaker.breaker}) — resolve the "
+                f"{open_threads} remaining open thread(s) in severity order "
+                "(fix-or-reply + resolve each); minor/nit findings never mint "
+                "another round, and no re-review will be requested"
+            )
+        else:
+            status.next_action = (
+                f"triage {open_threads} open thread(s) in severity order "
+                "(critical → nit): read them with `gh pr view --comments`, "
+                "then fix-or-reply + resolve each"
+            )
         return status
 
     # 3. Reviewed. Now evaluate mergeability + CI.
@@ -695,9 +679,8 @@ def _evaluate(
         status.next_action = "reviews done; CI check(s) running — wait for checks"
         return status
 
-    # The PR is now otherwise-ready: required reviews in, no conflict, not
-    # behind, CI not failing/pending, and either no open threads or only leftover
-    # ones the stopping rule chose not to open another round for. The ONLY merge
+    # The PR is now otherwise-ready: required reviews in, every thread
+    # resolved, no conflict, not behind, CI not failing/pending. The ONLY merge
     # states left lead to READY (UNSTABLE-green / CLEAN). If the stopping rule
     # fired, `status.breaker` already carries its name (set above) so the stop
     # stays visible on the READY status — the flip itself proceeds normally; the
@@ -784,9 +767,9 @@ def reviews_in(status: TaskStatus, required_names: Sequence[str]) -> bool:
     outcome — posted OR degraded (failed / empty / timed-out) — settles it.
 
     Deliberately NOT a `TaskState` check: a red-checks PR with its reviews
-    landed ranks BLOCKED (#352), and a landed round with unclassified findings
-    ranks ADDRESSING behind the CLASSIFY gate (#423) — both are reviews-in.
-    Conversely BLOCKED-on-CI with review requests deferred is NOT. Only the
+    landed ranks BLOCKED (#352), and a landed round with open threads ranks
+    ADDRESSING — both are reviews-in. Conversely BLOCKED-on-CI with review
+    requests deferred is NOT. Only the
     per-reviewer funnel answers this. A required name MISSING from
     `reviewer_funnel` (a snapshot that never evaluated it) counts as holding —
     absence of evidence is not a landed review.
@@ -796,32 +779,6 @@ def reviews_in(status: TaskStatus, required_names: Sequence[str]) -> bool:
         and status.reviewer_funnel[name].state not in _HOLDS
         for name in required_names
     )
-
-
-def classify_action(pr: int | None, unclassified: int, open_threads: int) -> str:
-    """Render the CLASSIFY next-action (#423) — the one instruction the gate
-    reports while the latest round has unclassified findings.
-
-    PURE human-facing prose, but deliberately carrying the LITERAL commands to
-    run (list + record) so the agent reading it never has to reconstruct the
-    verb. Shared with the pre-push tripwire (`shipit pr push-gate`), which
-    blocks a push with this same message — one wording, two seams. When open
-    threads remain, the triage half of the round's work is appended so the
-    gate never hides it.
-    """
-    target = f" {pr}" if pr is not None else ""
-    action = (
-        f"{unclassified} unclassified finding(s) in the latest review round — "
-        f"record the verdict you formed while addressing each: "
-        f"`shipit pr classify{target} --comment <id> nitpick|substantive "
-        f'[--reason "…"]` (list them: `shipit pr classify{target}`)'
-    )
-    if open_threads:
-        action += (
-            f"; {open_threads} open thread(s) also still need triage "
-            "(fix-or-reply + resolve)"
-        )
-    return action
 
 
 def _classify_pending(

@@ -27,7 +27,10 @@ from .variant import role_of_meta, role_of_name
 #: v3 (COR01-WS02) adds ``eval.invocation`` — the observed + intended
 #: Backend × Model × ReasoningLevel launch config (ADR-0025), a group-by dimension
 #: for ``shipit eval report``.
-SCHEMA_VERSION = 3
+#: v4 (RVW02-WS03) adds ``eval.run_id`` — the run's transcript-stem identity, the
+#: join key that lets a **review-round record**'s contributing runs resolve to
+#: their eval records in ``shipit eval report``'s review axis.
+SCHEMA_VERSION = 4
 
 #: The role recorded for a SUBAGENT run whose meta is absent/unreadable. The locator
 #: still classifies it as a subagent (off the transcript filename), but with no
@@ -46,6 +49,7 @@ def build(
     timestamp: str,
     is_coordinator: bool,
     spawned_role: str | None = None,
+    run_id: str | None = None,
 ) -> dict[str, Any]:
     """Assemble the eval record for one run.
 
@@ -59,6 +63,12 @@ def build(
     ``coordinator`` label (see :func:`_role_name`). ``variant`` is stamped verbatim
     (WS01 passes ``None``; WS03 fills it). ``commit`` is the stamping `git.commit`
     (``None`` when it could not be resolved — the record is still valid).
+    ``run_id`` is the run's on-disk identity — the transcript filename's stem
+    (``agent-<id>`` for a subagent, the session id for the coordinator), read at
+    the hook boundary from the SAME file the locator resolved — stamped as
+    ``eval.run_id`` so a **review-round record**'s contributing-run ids join this
+    record in ``shipit eval report``'s review axis (RVW02-WS03). ``None`` (an
+    unlocatable identity) still yields a valid record; it just cannot be joined.
 
     The objective metrics fold in from :func:`shipit.harness.eval.extractors.extract`
     under stable OTel ``gen_ai.usage.*`` names for the standard token fields and
@@ -73,6 +83,7 @@ def build(
     return {
         "eval.schema_version": SCHEMA_VERSION,
         "eval.timestamp": timestamp,
+        "eval.run_id": run_id,
         "gen_ai.agent.name": _role_name(meta, is_coordinator, spawned_role),
         "gen_ai.request.model": meta.get("model"),
         "eval.permission_mode": meta.get("spawnMode"),

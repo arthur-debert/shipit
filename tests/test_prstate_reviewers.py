@@ -49,8 +49,17 @@ AGY = AgyAdapter()
 
 
 def _rerun_roster(name: str) -> Roster:
-    """A Roster flipping `name` to rerun=True — the head-strict opt-in as a value."""
+    """A Roster flipping `name` to rerun=True — the head-strict opt-in as a value.
+
+    Since ADR-0043 / RVW02-WS06 this is also the CODE default, so it doubles as
+    "the shipped default policy expressed explicitly"."""
     return Roster((RosterEntry(name=name, required=True, rerun=True),))
+
+
+def _review_once_roster(name: str) -> Roster:
+    """A Roster opting `name` OUT to rerun=False — review-once, now the explicit
+    opt-out (ADR-0043 flipped the code default to head-strict)."""
+    return Roster((RosterEntry(name=name, required=True, rerun=False),))
 
 
 def test_registry_catalogs_all_adapters():
@@ -135,7 +144,8 @@ def test_gemini_review_on_earlier_head_still_counts_as_done():
 
 
 def test_copilot_review_on_earlier_head_counts_done_review_once():
-    # DEFAULT (review-once): an earlier-head Copilot review still counts as done.
+    # Review-once (the explicit opt-out, ADR-0043): an earlier-head Copilot review
+    # still counts as done — the reviewer won't be asked to look again.
     from shipit.prstate.model import Review, readiness_view
 
     ctx = readiness_view(
@@ -144,6 +154,7 @@ def test_copilot_review_on_earlier_head_counts_done_review_once():
         is_draft=True,
         reviews=[Review(1, "Copilot", "COMMENTED", OLD, "")],
         requested_logins=["Copilot"],
+        roster=_review_once_roster("copilot"),
     )
     assert COPILOT.detect(ctx) in (
         ReviewLifecycle.DONE_CLEAN,
@@ -310,8 +321,9 @@ def test_coderabbit_done_on_head_with_open_comment():
     assert len(CODERABBIT.open_threads(ctx)) == 1
 
 
-def test_coderabbit_review_once_by_default_counts_earlier_head():
-    # DEFAULT review-once: an earlier-head CodeRabbit review counts as done.
+def test_coderabbit_review_once_opt_out_counts_earlier_head():
+    # Review-once as the explicit opt-out (ADR-0043): an earlier-head CodeRabbit
+    # review counts as done.
     from shipit.prstate.model import Review, readiness_view
 
     ctx = readiness_view(
@@ -320,6 +332,7 @@ def test_coderabbit_review_once_by_default_counts_earlier_head():
         is_draft=True,
         reviews=[Review(1, "coderabbitai[bot]", "COMMENTED", OLD, "")],
         requested_logins=["coderabbitai[bot]"],
+        roster=_review_once_roster("coderabbit"),
     )
     assert CODERABBIT.detect(ctx) in (
         ReviewLifecycle.DONE_CLEAN,
@@ -443,7 +456,8 @@ def test_codex_detect_not_requested_when_empty():
 
 
 def test_codex_detect_stale_review_counts_done_review_once():
-    # DEFAULT review-once: an earlier-head local review still counts as done.
+    # Review-once as the explicit opt-out (ADR-0043): an earlier-head local review
+    # still counts as done.
     from shipit.prstate.model import Review, readiness_view
 
     ctx = readiness_view(
@@ -451,6 +465,7 @@ def test_codex_detect_stale_review_counts_done_review_once():
         head_sha=NEW,
         is_draft=True,
         reviews=[Review(1, "adr-codex-review[bot]", "COMMENTED", OLD, "")],
+        roster=_review_once_roster("codex"),
     )
     assert CODEX.detect(ctx) in (
         ReviewLifecycle.DONE_CLEAN,
@@ -614,3 +629,55 @@ def test_local_cancel_is_a_noop():
     # no-mechanism backend.
     assert CODEX.cancel(_target(7)) is False
     assert AGY.cancel(_target(9)) is False
+
+
+def test_local_request_threads_dimensions_and_table_policy(monkeypatch, tmp_path):
+    # RVW02-WS04: the per-reviewer `dimensions` ride the entry (same seam as
+    # model/instructions); the table-level calibrator + nit cap ride the
+    # ReviewPolicy — all threaded to the detached child as VALUES, never a
+    # config re-read inside the run path.
+    from shipit.prstate.reviewers_config import load_roster
+    from shipit.review import service
+
+    (tmp_path / ".shipit.toml").write_text(
+        "[reviewers]\n"
+        "nit_cap = 2\n"
+        'calibrator = { backend = "claude", reasoning = "medium" }\n'
+        "copilot = {}\n"
+        'codex = { dimensions = ["correctness", "security-robustness"] }\n',
+        encoding="utf-8",
+    )
+
+    captured: dict = {}
+
+    def fake_start_detached(agent, pr, **kwargs):
+        captured.update(kwargs)
+        return True
+
+    monkeypatch.setattr(service, "start_detached_review", fake_start_detached)
+    roster = load_roster(str(tmp_path))
+    assert CODEX.request(_target(3), roster.entry("codex"), policy=roster.policy)
+    assert captured["dimensions"] == ("correctness", "security-robustness")
+    assert captured["nit_cap"] == 2
+    assert captured["calibrator"].backend == "claude"
+    assert captured["calibrator"].reasoning == "medium"
+
+
+def test_local_request_omits_unset_fanout_config(monkeypatch, tmp_path):
+    # Unset values stay OMITTED so the run path's shipped defaults remain the
+    # single source of the default (no None-vs-default ambiguity in kwargs).
+    from shipit.prstate.roster import ReviewPolicy
+    from shipit.review import service
+
+    captured: dict = {}
+
+    def fake_start_detached(agent, pr, **kwargs):
+        captured.update(kwargs)
+        return True
+
+    monkeypatch.setattr(service, "start_detached_review", fake_start_detached)
+    monkeypatch.chdir(tmp_path)
+    assert CODEX.request(_target(3), policy=ReviewPolicy()) is True
+    assert "dimensions" not in captured
+    assert "calibrator" not in captured
+    assert "nit_cap" not in captured

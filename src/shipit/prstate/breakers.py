@@ -8,20 +8,17 @@ repeat-finding / divergent-counting machinery any more):
       • the round cap has been reached (default 6 — there is no 7th round;
         repo policy can override it via `round_cap` in the `[reviewers]` table
         of `.shipit.toml`, carried on `Roster.round_cap`), or
-      • the current round's RECORDED verdicts are all nitpick (#423): the agent
-        that addressed the round classified every finding, and every verdict is
-        `nitpick` (docstring/wording fixes, cosmetic style already settled —
-        nothing that changes correctness or behaviour).
+      • the current round has findings but NONE major-or-worse (ADR-0044 /
+        RVW02): every finding's resolved Severity fails the merge-block test —
+        minor/nit only, nothing a competent reviewer would hold the merge for.
 
-There is NO auto-classification of any kind — no marker list, no body regex,
-no model call (the old ``_NITPICK_MARKERS`` machinery is DELETED, #423): any
-auto-classifier just chases reviewer phrasing forever. The agent addressing
-the round has already judged each finding's weight by deciding fix-vs-reply;
-`shipit pr classify` records that judgment into the dev-cycle event log
-(write-once, keyed by finding comment id — :mod:`.verdicts`), the snapshot
-carries it (``ReadinessView.verdicts``), and this rule CONSUMES it. A round
-with any unclassified finding is not all-nitpick — and the state machine's
-CLASSIFY gate refuses to advance past an unclassified round anyway.
+There is NO classification step anywhere: findings arrive PRE-classified on
+the 4-tier Severity ladder, and this rule reads each finding's severity
+through the precedence chain (:mod:`.severity` — machine marker →
+reviewer-adapter mapping → ``major`` fail-safe, beaten only by a write-once
+Severity override off the snapshot's ``ReadinessView.overrides``). The
+``major`` default is what makes the rule fail-safe: an unparseable finding
+forces another round rather than slipping the Breaker.
 
 A *round* is one ITERATION — one head SHA that got re-reviewed — NOT one review
 object. That distinction is load-bearing once there are several required
@@ -31,13 +28,14 @@ findings on the same head fold into ONE round. Its findings are the review-threa
 comments attached to those reviews (GraphQL `reviewThreads`, the single source
 of truth for inline comments; release#515).
 
-When the rule fires on an otherwise-ready PR (CI green, merge state CLEAN), the
-state machine routes to READY and hands it to the human — it does NOT open
-another round. An all-nitpick stop additionally suppresses every RE-REQUEST:
-the nit-fix push stales no one back into the loop (not even a `rerun: true`
-reviewer) — the loop terminates by simply not asking again. When the PR is not
-otherwise ready (failing CI, conflict), the real reason BLOCKS it; the stopping
-rule never invents a block of its own.
+When the rule fires, the loop is over but the round's leftover minor/nit
+threads still require RESOLUTION before Ready (fix-or-reply + resolve — the
+state machine holds ADDRESSING while any thread is open); they just never mint
+another round: a fired breaker suppresses every RE-REQUEST, so the fix push
+stales no one back into the loop (not even a `rerun: true` reviewer) — the
+loop terminates by simply not asking again. When the PR is not otherwise ready
+(failing CI, conflict), the real reason BLOCKS it; the stopping rule never
+invents a block of its own.
 """
 
 from __future__ import annotations
@@ -45,16 +43,21 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from ..finding import Severity
 from ..identity import Sha
 from .model import ReadinessView, ReviewComment
 from .reviewers import ReviewerAdapter, required_adapters
-from .verdicts import NITPICK
+from .severity import finding_severity
 
 # The SHIPPED default round cap: the 6th round is the last; there is no 7th.
 # Only the default — repo policy overrides it via `Roster.round_cap` (the
 # `round_cap` key in `.shipit.toml` `[reviewers]`), threaded onto the
 # `ReadinessView` at the verb boundary; no config is read in this module.
 ROUND_CAP = 6
+
+#: The no-major+ stop's breaker name (ADR-0044): the latest round's findings
+#: are all minor/nit — nothing passes the merge-block test — so no further round.
+NO_MAJOR_FINDING = "no-major-finding"
 
 
 @dataclass(frozen=True)
@@ -84,11 +87,12 @@ def build_rounds(
     those reviews' thread comments (resolved or not — a resolved finding was
     still a finding of that round), keyed by the review each comment was
     submitted with (`ReviewComment.review_id`). The comments ride WHOLE (id +
-    body + location): the comment id is the verdict key (#423) and the body the
-    human-facing excerpt, so every consumer — the breaker, the classify verb,
-    the gate — reads the same finding identity. Login matching is the adapter's
-    job — never re-roll an author filter here (a reviewer's review login and
-    comment author can render differently; release#455).
+    body + location): the body carries the machine marker / native severity
+    format the precedence chain reads, and the comment id is the
+    Severity-override key — so every consumer (the breaker, the classify verb)
+    reads the same finding identity. Login matching is the adapter's job —
+    never re-roll an author filter here (a reviewer's review login and comment
+    author can render differently; release#455).
 
     `required` is the blocking set; defaults to the snapshot Roster's required
     adapters (`ctx.roster`, CLI01-WS04) but the engine threads its own set in so
@@ -117,35 +121,17 @@ def build_rounds(
     return rounds
 
 
-def unclassified_findings(
-    rnd: Round, verdicts: Mapping[int, str]
-) -> tuple[ReviewComment, ...]:
-    """The round's findings with NO recorded verdict, in round order.
+def has_blocking_finding(rnd: Round, overrides: Mapping[int, Severity]) -> bool:
+    """True iff any of the round's findings resolves major-or-worse (ADR-0044).
 
-    The CLASSIFY gate's structured input (#423): while this is non-empty for
-    the LATEST round, the state machine reports CLASSIFY and refuses to
-    advance (no RE-REQUEST, no READY) — and the pre-push tripwire blocks the
-    push with the same message. An id is unclassified iff absent from
-    ``verdicts``; nothing here inspects a body.
+    Each finding's Severity comes from the precedence chain
+    (:func:`~shipit.prstate.severity.finding_severity`): its machine marker,
+    else its author's adapter mapping, else the ``major`` fail-safe — beaten
+    only by a write-once override in ``overrides``. ``blocks_merge`` is the
+    merge-block test: major-or-worse means a competent reviewer would hold the
+    merge, and only such a finding keeps the review loop minting rounds.
     """
-    return tuple(f for f in rnd.findings if f.comment_id not in verdicts)
-
-
-def is_all_nitpick_round(rnd: Round, verdicts: Mapping[int, str]) -> bool:
-    """True iff the round has findings and EVERY finding's RECORDED verdict is
-    ``nitpick`` (#423).
-
-    Consumes verdicts only — the agent's recorded fix-vs-reply judgment, keyed
-    by finding comment id — never the comment body: there is no marker list and
-    no fallback. A finding with no verdict is NOT a nitpick (the round is
-    simply not all-nitpick yet; the CLASSIFY gate keeps the loop from advancing
-    past it). An empty round (a clean/approving pass, no findings) is not "all
-    nitpicks" — there is nothing to address, so the normal readiness checks
-    handle it.
-    """
-    return bool(rnd.findings) and all(
-        verdicts.get(f.comment_id) == NITPICK for f in rnd.findings
-    )
+    return any(finding_severity(f, overrides).blocks_merge for f in rnd.findings)
 
 
 def evaluate_breakers(
@@ -157,15 +143,18 @@ def evaluate_breakers(
     `required` is threaded through to `build_rounds` so round counting uses the
     SAME required set the engine evaluates (release#622).
 
-    Stop when the round cap has been reached, or when the latest round's
-    recorded verdicts (``ctx.verdicts``, the dev-cycle log read folded onto the
-    snapshot at the gather seam) are all nitpick. The cap is the snapshot
-    Roster's `round_cap` (`ctx.roster`, the ONE boundary-loaded config value —
-    the same value `build_rounds` defaults its required set from), falling back
-    to the shipped :data:`ROUND_CAP` when unset. Either way the reported
-    `cycles` is the raw round count (what the human sees). The state machine
-    decides what a stop means for routing (READY when otherwise ready, else the
-    real blocker — and for all-nitpick, no re-request at all).
+    Stop when the round cap has been reached, or when the latest round has
+    findings but none major-or-worse (each finding's severity resolved through
+    the precedence chain against the snapshot's ``ctx.overrides`` — the
+    dev-cycle log read folded on at the gather seam). An EMPTY latest round (a
+    clean/approving pass, no findings) does not fire the no-major+ stop: there
+    is nothing to address, so the normal readiness checks handle it. The cap is
+    the snapshot Roster's `round_cap` (`ctx.roster`, the ONE boundary-loaded
+    config value — the same value `build_rounds` defaults its required set
+    from), falling back to the shipped :data:`ROUND_CAP` when unset. Either way
+    the reported `cycles` is the raw round count (what the human sees). The
+    state machine decides what a stop means for routing (leftover threads still
+    resolve before READY, and a fired breaker suppresses every re-request).
     """
     rounds = build_rounds(ctx, required=required)
     n = len(rounds)
@@ -179,12 +168,16 @@ def evaluate_breakers(
             n,
         )
 
-    if rounds and is_all_nitpick_round(rounds[-1], ctx.verdicts):
+    if (
+        rounds
+        and rounds[-1].findings
+        and not has_blocking_finding(rounds[-1], ctx.overrides)
+    ):
         return BreakerVerdict(
             True,
-            "all-nitpick",
-            "every finding of the latest review round is classified nitpick "
-            "(nothing that changes correctness or behaviour) — stop rather "
+            NO_MAJOR_FINDING,
+            "no finding of the latest review round is major-or-worse (nothing "
+            "a competent reviewer would hold the merge for) — stop rather "
             "than open another round",
             n,
         )

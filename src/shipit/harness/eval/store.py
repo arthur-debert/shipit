@@ -1,23 +1,29 @@
-"""Local eval store — append eval records to a harness-owned, never-committed file.
+"""Local record store family — append harness records to harness-owned, never-committed files.
 
-The store is JSONL, append-only, **keyed by `Repo` identity**, and lives OUTSIDE
-every repo working tree: under platformdirs' user *state* dir (`~/Library/Application
-Support/shipit/eval` on macOS, `~/.local/state/shipit/eval` on Linux), the same
-`platformdirs`-rooted convention `logsetup` uses. So process telemetry never
-dirties product history — a written record can never show up as a repo change
-(docs/prd/har02-run-eval.md, ADR-0013: "local, never committed").
+ONE store family, two record kinds (RVW02-WS03 generalized the eval-only helpers
+rather than duplicating them): the **eval record** kind (:data:`EVAL_KIND`, how a
+run *behaved*) and the **review-round record** kind (:data:`REVIEW_ROUNDS_KIND`,
+what a review *concluded*). Every kind shares the same convention: JSONL,
+append-only, **keyed by `Repo` identity**, living OUTSIDE every repo working tree
+under platformdirs' user *state* dir (``~/Library/Application Support/shipit`` on
+macOS, ``~/.local/state/shipit`` on Linux — the same `platformdirs`-rooted
+convention `logsetup` uses), one subdirectory per kind (``…/shipit/eval``,
+``…/shipit/review-rounds``). So process telemetry never dirties product history —
+a written record can never show up as a repo change (docs/prd/har02-run-eval.md,
+ADR-0013: "local, never committed").
 
 The key is the repo's **origin `owner/name` identity** (:class:`shipit.identity.Repo`),
 NOT the resolved filesystem path (ADR-0024): every Tree/clone of one repo pools into
-ONE store file, so `shipit eval report` joins a repo's runs across every checkout
-instead of scattering one store per clone path. **No compat**: pre-existing
-path-keyed stores simply orphan (local, uncommitted, regenerable data).
+ONE store file per kind, so `shipit eval report` joins a repo's runs (and its review
+rounds) across every checkout instead of scattering one store per clone path.
+**No compat**: pre-existing path-keyed stores simply orphan (local, uncommitted,
+regenerable data).
 
-``base_dir`` is the eval-store root itself, injected by tests (mirroring
-:mod:`shipit.logsetup`, whose ``resolve_log_dir`` returns an injected ``base_dir``
-verbatim) so they write to a tmp path. It is returned as-is — the ``eval``
-suffix is appended only when computing the *default* root from platformdirs, so
-an injected ``base_dir`` is already the leaf the store writes under.
+``base_dir`` is the FAMILY root (the dir the per-kind subdirs live under), injected
+by tests (mirroring :mod:`shipit.logsetup`, whose ``resolve_log_dir`` returns an
+injected ``base_dir`` verbatim) so they write to a tmp path — ONE injected root
+covers every kind, which is what lets a reader (the eval report's review-axis
+join) resolve both stores from a single override.
 """
 
 from __future__ import annotations
@@ -32,17 +38,27 @@ import platformdirs
 if TYPE_CHECKING:
     from ...identity import Repo
 
+#: The eval-record kind: one JSONL line per run, saying how the run *behaved*
+#: (tool calls, tokens, stuck-loops — :mod:`shipit.harness.eval.record`).
+EVAL_KIND = "eval"
 
-def store_dir(base_dir: Path | None = None) -> Path:
-    """The eval store's root directory (outside any repo tree).
+#: The review-round-record kind: one JSONL line per review round, saying what the
+#: review *concluded* (findings with severities and dispositions, coverage, the
+#: range reviewed — :mod:`shipit.review.roundrecord`).
+REVIEW_ROUNDS_KIND = "review-rounds"
 
-    ``base_dir`` IS that root when given (returned verbatim, for tests); otherwise
-    the root is ``platformdirs.user_state_dir("shipit")/eval``. The ``eval`` suffix
-    belongs to the platformdirs default only — an injected ``base_dir`` is the leaf.
+
+def store_dir(base_dir: Path | None = None, *, kind: str = EVAL_KIND) -> Path:
+    """The store root for one record ``kind`` (outside any repo tree).
+
+    The family root is ``base_dir`` when given (verbatim, for tests) else
+    ``platformdirs.user_state_dir("shipit")``; the kind's store root is the
+    ``kind`` subdirectory under it — so the eval store's default root is
+    unchanged (``…/shipit/eval``) and every other kind sits beside it.
     """
     if base_dir is not None:
-        return Path(base_dir)
-    return Path(platformdirs.user_state_dir("shipit")) / "eval"
+        return Path(base_dir) / kind
+    return Path(platformdirs.user_state_dir("shipit")) / kind
 
 
 def repo_key(repo: Repo) -> str:
@@ -84,27 +100,71 @@ def _slug(text: str) -> str:
     return text.strip("-") or "_"
 
 
-def store_path(repo: Repo, base_dir: Path | None = None) -> Path:
-    """The JSONL store file for ``repo``'s identity: ``<root>/<owner>/<name>.jsonl``.
+def store_path(
+    repo: Repo, base_dir: Path | None = None, *, kind: str = EVAL_KIND
+) -> Path:
+    """The JSONL store file for ``repo``'s identity under one record ``kind``:
+    ``<root>/<kind>/<owner>/<name>.jsonl``.
 
     The nested ``<owner>/<name>`` key (:func:`repo_key`) becomes a nested store
-    file, so distinct repos never share a path (see the collision note there).
+    file, so distinct repos never share a path (see the collision note there),
+    and distinct kinds never share a file (the kind is a directory level, so an
+    eval record can never land in a review-rounds store).
     """
-    return store_dir(base_dir) / f"{repo_key(repo)}.jsonl"
+    return store_dir(base_dir, kind=kind) / f"{repo_key(repo)}.jsonl"
 
 
 def append_record(
-    record: dict[str, Any], repo: Repo, base_dir: Path | None = None
+    record: dict[str, Any],
+    repo: Repo,
+    base_dir: Path | None = None,
+    *,
+    kind: str = EVAL_KIND,
 ) -> Path:
-    """Append one eval record as a JSONL line to the repo's store; return its path.
+    """Append one record as a JSONL line to the repo's ``kind`` store; return its path.
 
     Keyed by ``repo``'s origin identity (:func:`repo_key`), so a run's record lands
     under one stable per-repo file regardless of which clone it ran in. Creates the
     store directory on first write. Returns the path so the caller (and tests) can
     assert where the record landed.
     """
-    path = store_path(repo, base_dir)
+    path = store_path(repo, base_dir, kind=kind)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(record) + "\n")
     return path
+
+
+def read_records(
+    repo: Repo, base_dir: Path | None = None, *, kind: str = EVAL_KIND
+) -> list[dict[str, Any]]:
+    """Read every record of one ``kind`` for ``repo``, oldest-appended first.
+
+    The read sibling of :func:`append_record`: resolves the SAME origin-keyed
+    store path (:func:`store_path`) and parses the JSONL back into dicts, in
+    append order (the file is append-only, so line order is chronological). A
+    MISSING store (nothing ever appended) is an empty list, never an error —
+    a reader that has no history simply sees none (the incremental-round query
+    that has no prior review-round record for a PR then treats the round as a
+    full round, RVW02-WS06). A malformed line is SKIPPED rather than fatal: the
+    store is local, uncommitted telemetry, and one corrupt line must not blind a
+    reader to every intact record around it.
+
+    ``base_dir`` overrides the family root (tests), exactly as on the writers.
+    """
+    path = store_path(repo, base_dir, kind=kind)
+    if not path.exists():
+        return []
+    records: list[dict[str, Any]] = []
+    with path.open(encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                parsed = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict):
+                records.append(parsed)
+    return records

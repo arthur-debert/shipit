@@ -21,9 +21,12 @@ Pure core / thin boundary (the eval-wire shape):
     worker (``implementer``). :func:`role_of_meta` delegates to it (a meta's
     ``agentType`` is just one such name) so every seam that resolves a role name —
     the record's meta path and its launch-context override — shares ONE rule set.
-  - :func:`role_prompt_text` / :func:`resolve_variant` are the BOUNDARY — read the
-    bundled role-prompt fragments (:mod:`shipit.harness.prompts`) and the
-    environment, then call the pure core.
+  - :func:`role_prompt_text` / :func:`resolve_variant` / :func:`label_from_env`
+    are the BOUNDARY — read the bundled role-prompt fragments
+    (:mod:`shipit.harness.prompts`) and the environment, then call the pure core.
+    The label read is shared with the review-round record's variant
+    (:mod:`shipit.review.roundrecord`), so eval records and round records name
+    the same A/B arm the same way.
 """
 
 from __future__ import annotations
@@ -73,6 +76,23 @@ def variant_of(prompt_text: str, *, label: str | None = None) -> Variant:
         content_hash=config.content_hash(prompt_text.encode("utf-8")),
         label=label,
     )
+
+
+def label_from_env(env: Mapping[str, str] | None = None) -> str | None:
+    """The explicit A/B label of the running variant, or ``None``. BOUNDARY.
+
+    Reads :data:`VARIANT_LABEL_ENV`, normalized like the other hook-boundary env
+    reads (e.g. :func:`shipit.verbs.hook.pretooluse._break_glass_armed`):
+    surrounding whitespace is stripped and an empty string is ``None``, so a
+    label accidentally padded by shell quoting or CI templating does not split
+    an experiment arm from itself. Shared by :func:`resolve_variant` (the eval
+    record's role-prompt variant) and the review-round record's
+    review-instructions variant (:mod:`shipit.review.roundrecord`), so both
+    stores read the SAME arm handle. ``env`` is injectable for tests (defaults
+    to ``os.environ``).
+    """
+    environ = os.environ if env is None else env
+    return (environ.get(VARIANT_LABEL_ENV) or "").strip() or None
 
 
 def role_of_name(name: str | None) -> Role:
@@ -129,14 +149,9 @@ def resolve_variant(
     """Resolve a run's variant from its meta + the environment. BOUNDARY.
 
     Maps the meta to its role, reads that role's generated prompt, and content-
-    hashes it, carrying any :data:`VARIANT_LABEL_ENV` A/B label. The label is
-    normalized like the other hook-boundary env reads (e.g.
-    :func:`shipit.verbs.hook.pretooluse._break_glass_armed`): surrounding
-    whitespace is stripped and an empty string is treated as ``None``, so a label
-    accidentally padded by shell quoting or CI templating does not split an arm
-    from itself. ``env`` is injectable for tests (defaults to ``os.environ``).
+    hashes it, carrying any :data:`VARIANT_LABEL_ENV` A/B label
+    (:func:`label_from_env` — the shared, normalized read). ``env`` is
+    injectable for tests (defaults to ``os.environ``).
     """
-    environ = os.environ if env is None else env
-    label = (environ.get(VARIANT_LABEL_ENV) or "").strip() or None
     prompt = role_prompt_text(role_of_meta(meta))
-    return variant_of(prompt, label=label)
+    return variant_of(prompt, label=label_from_env(env))

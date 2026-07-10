@@ -50,6 +50,18 @@ class RunFiles:
     meta: Path | None
 
     @property
+    def run_id(self) -> str:
+        """The run's stable on-disk identity — the transcript filename's stem
+        (``agent-<id>`` for a subagent, the session id for the coordinator).
+
+        This is the ``eval.run_id`` the record stamps (RVW02-WS03), and so the
+        join key a **review-round record**'s contributing runs carry: both sides
+        name the run by the one identity the harness already assigns it — its
+        transcript file — so no second id scheme is minted.
+        """
+        return self.transcript.stem
+
+    @property
     def is_coordinator(self) -> bool:
         """True for the coordinator run (the session transcript, no `agent-` prefix).
 

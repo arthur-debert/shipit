@@ -80,15 +80,16 @@ def test_scaffold_body_renders_from_the_default_map_and_round_trips(tmp_path):
 
 
 def test_scaffold_body_renders_each_reviewers_rerun_flag(tmp_path, monkeypatch):
-    # The renderer must honour the map VALUES, not just its keys: a reviewer with
-    # rerun=True renders `{ rerun = true }`, one with rerun=False the empty `{}`.
-    # (Guards against the renderer silently dropping a future rerun default.)
+    # The renderer must honour the map VALUES, not just its keys, and (ADR-0043 /
+    # RVW02-WS06) render the rerun flag EXPLICITLY for BOTH values — an omitted
+    # rerun now parses as head-strict True, so a review-once default must be
+    # written `{ rerun = false }`, never left to a `{}` that would flip it.
     monkeypatch.setattr(
         reviewers_config, "DEFAULT_REVIEWERS", {"copilot": True, "codex": False}
     )
     body = reviewers_config.default_reviewers_scaffold_body()
     assert "copilot = { rerun = true }" in body
-    assert "codex = {}" in body
+    assert "codex = { rerun = false }" in body
     # And it round-trips: loading the rendered body yields the (patched) flags.
     assert tomllib.loads(body)  # syntactically valid TOML
     roster = load_roster(_write(tmp_path, body))
@@ -122,11 +123,19 @@ def test_rerun_flags_are_per_reviewer(tmp_path):
     assert roster.entry("codex").rerun is False
 
 
-def test_rerun_defaults_false_when_options_absent(tmp_path):
-    # `copilot = {}` with an empty options table means defaults — rerun=False.
+def test_rerun_defaults_true_when_options_absent(tmp_path):
+    # `copilot = {}` with an empty options table means defaults — and ADR-0043 /
+    # RVW02-WS06 flipped the code default to head-strict rerun=True.
     roster = load_roster(_write(tmp_path, "[reviewers]\ncopilot = {}\ncodex = {}\n"))
+    assert roster.entry("copilot").rerun is True
+    assert roster.entry("codex").rerun is True
+
+
+def test_rerun_false_is_an_explicit_opt_out(tmp_path):
+    # Review-once survives as an explicit per-reviewer opt-out (the metered
+    # full-diff app-reviewer case, ADR-0043).
+    roster = load_roster(_write(tmp_path, "[reviewers]\ncopilot = { rerun = false }\n"))
     assert roster.entry("copilot").rerun is False
-    assert roster.entry("codex").rerun is False
 
 
 # --- the reserved table-level `round_cap` policy key -------------------------
@@ -296,11 +305,11 @@ def test_absolute_instructions_kept(tmp_path):
 def test_unconfigured_reviewer_reads_all_defaults(tmp_path):
     # Roster.entry is TOTAL: a reviewer outside the table (e.g. a forced
     # `--reviewer codex-local` run) reads the all-defaults entry — not required,
-    # review-once, no run options.
+    # head-strict rerun (ADR-0043), no run options.
     roster = load_roster(_write(tmp_path, "[reviewers]\ncopilot = {}\n"))
     entry = roster.entry("codex")
     assert entry.required is False
-    assert entry.rerun is False
+    assert entry.rerun is True
     assert (entry.model, entry.instructions, entry.timeout) == (None, None, None)
 
 
@@ -477,3 +486,120 @@ def test_required_adapters_maps_the_roster_in_config_order(tmp_path):
     root = _write(tmp_path, "[reviewers]\ncoderabbit = {}\ncopilot = {}\n")
     adapters = required_adapters(load_roster(root))
     assert [a.name for a in adapters] == ["coderabbit", "copilot"]
+
+
+# --- RVW02-WS04: per-reviewer `dimensions`, table-level `nit_cap`/`calibrator` --
+
+
+def test_dimensions_option_lands_on_the_entry(tmp_path):
+    root = _write(
+        tmp_path,
+        '[reviewers]\ncodex = { dimensions = ["correctness", "test-quality"] }\n',
+    )
+    entry = load_roster(root).entry("codex")
+    assert entry.dimensions == ("correctness", "test-quality")
+
+
+def test_dimensions_default_is_unset(tmp_path):
+    root = _write(tmp_path, "[reviewers]\ncodex = {}\n")
+    assert load_roster(root).entry("codex").dimensions is None
+
+
+def test_unknown_dimension_fails_loud_with_the_known_set(tmp_path):
+    root = _write(tmp_path, '[reviewers]\ncodex = { dimensions = ["highs-only"] }\n')
+    with pytest.raises(RequiredReviewersConfigError, match="known dimensions"):
+        load_roster(root)
+
+
+def test_dimensions_wrong_shape_and_duplicates_fail_loud(tmp_path):
+    for bad in (
+        'codex = { dimensions = "correctness" }\n',
+        "codex = { dimensions = [] }\n",
+        "codex = { dimensions = [1] }\n",
+        'codex = { dimensions = ["correctness", "correctness"] }\n',
+    ):
+        root = _write(tmp_path, f"[reviewers]\n{bad}")
+        with pytest.raises(RequiredReviewersConfigError, match="dimensions"):
+            load_roster(root)
+
+
+def test_nit_cap_lands_on_the_roster_and_zero_is_legal(tmp_path):
+    root = _write(tmp_path, "[reviewers]\nnit_cap = 0\ncodex = {}\n")
+    assert load_roster(root).nit_cap == 0
+    root = _write(tmp_path, "[reviewers]\nnit_cap = 3\ncodex = {}\n")
+    assert load_roster(root).nit_cap == 3
+
+
+def test_nit_cap_default_is_uncapped(tmp_path):
+    root = _write(tmp_path, "[reviewers]\ncodex = {}\n")
+    assert load_roster(root).nit_cap is None
+
+
+def test_nit_cap_rejects_negative_bool_and_non_int(tmp_path):
+    for bad in ("nit_cap = -1", "nit_cap = true", 'nit_cap = "3"'):
+        root = _write(tmp_path, f"[reviewers]\n{bad}\ncodex = {{}}\n")
+        with pytest.raises(RequiredReviewersConfigError, match="nit_cap"):
+            load_roster(root)
+
+
+def test_calibrator_table_builds_a_validated_config(tmp_path):
+    root = _write(
+        tmp_path,
+        "[reviewers]\n"
+        'calibrator = { backend = "codex", model = "gpt-5.5", '
+        'reasoning = "medium", timeout = 300 }\n'
+        "codex = {}\n",
+    )
+    calibrator = load_roster(root).calibrator
+    assert calibrator.backend == "codex"
+    assert calibrator.model == "gpt-5.5"
+    assert calibrator.reasoning == "medium"
+    assert calibrator.timeout == "300s"  # normalized to the canonical shape
+
+
+def test_calibrator_default_is_unset_meaning_shipped_default(tmp_path):
+    root = _write(tmp_path, "[reviewers]\ncodex = {}\n")
+    assert load_roster(root).calibrator is None
+
+
+def test_calibrator_unknown_key_fails_loud(tmp_path):
+    root = _write(
+        tmp_path, '[reviewers]\ncalibrator = { agent = "claude" }\ncodex = {}\n'
+    )
+    with pytest.raises(RequiredReviewersConfigError, match="unknown option"):
+        load_roster(root)
+
+
+def test_calibrator_invalid_values_fail_loud_at_load(tmp_path):
+    # Membership/validity is CalibratorConfig's construction-is-validation,
+    # surfaced as a config error naming the file — never a raw ValueError.
+    for bad in (
+        'calibrator = { backend = "gpt-cli" }',
+        'calibrator = { reasoning = "ultra" }',
+        "calibrator = { timeout = -5 }",
+        "calibrator = [1]",
+    ):
+        root = _write(tmp_path, f"[reviewers]\n{bad}\ncodex = {{}}\n")
+        with pytest.raises(RequiredReviewersConfigError, match="calibrator"):
+            load_roster(root)
+
+
+def test_table_level_policy_applies_with_default_reviewer_entries(tmp_path):
+    # nit_cap/calibrator ride the table even when no reviewer entry is set —
+    # policy without opting out of the default required set.
+    root = _write(
+        tmp_path, '[reviewers]\nnit_cap = 2\ncalibrator = { backend = "claude" }\n'
+    )
+    roster = load_roster(root)
+    assert roster.required_names == tuple(reviewers_config.DEFAULT_REVIEWERS)
+    assert roster.nit_cap == 2
+    assert roster.calibrator.backend == "claude"
+
+
+def test_roster_policy_bundles_the_table_level_values(tmp_path):
+    root = _write(
+        tmp_path, '[reviewers]\nnit_cap = 1\ncalibrator = { backend = "claude" }\n'
+    )
+    policy = load_roster(root).policy
+    assert policy.nit_cap == 1
+    assert policy.calibrator.backend == "claude"

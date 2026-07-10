@@ -35,6 +35,7 @@ from ..provision.lexd import ProvisionError
 from ..prstate.errors import PrStateError
 from ..prstate.flip import NotReady
 from ..prstate.reviewers_config import RequiredReviewersConfigError
+from ..review.diff import ReviewError
 from ..spawn.subagent import SpawnError
 from ..tree.layout import LayoutError
 from ..tree.removal import RemovalError
@@ -53,7 +54,9 @@ from ._context import NoAmbientRepoError
 #: changelog refusals (empty release, invalid version, unsyncable tree —
 #: TOL01-WS06), and the fleet sweep's refusals (a missing source checkout, an
 #: unresolvable candidate build, a selector outside the declared portfolio —
-#: TOL01-WS07). Extended
+#: TOL01-WS07), and the review path's precondition refusals (a bad commit
+#: range / unknown revision / repo-less checkout in `pr review replay` —
+#: RVW02-WS03). Extended
 #: deliberately, one entry per new domain refusal, as verbs adopt the shell.
 KNOWN_ERRORS: tuple[type[Exception], ...] = (
     execrun.ExecError,
@@ -71,6 +74,7 @@ KNOWN_ERRORS: tuple[type[Exception], ...] = (
     EventNotRecordedError,
     ProvisionError,
     SweepError,
+    ReviewError,
 )
 
 

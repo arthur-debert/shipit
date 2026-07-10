@@ -24,6 +24,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from ..review.calibrator import CalibratorConfig
+
 #: The canonical duration shape a per-reviewer ``timeout`` carries: whole seconds
 #: with the ``s`` suffix (e.g. ``600s``) — exactly what the local-agent run path
 #: passes to the agent CLI. The loader normalizes config input to this; a value
@@ -37,21 +39,30 @@ class RosterEntry:
 
     ``name`` is the canonical lowercase adapter name (the wire string the
     engine's context maps are keyed by). ``required`` is whether this reviewer
-    holds Ready; ``rerun`` whether it re-reviews every push (default OFF —
-    review-once); ``window_seconds`` the per-reviewer readiness wait window
+    holds Ready; ``rerun`` whether it re-reviews every push (default ON —
+    head-strict; ADR-0043 flipped the code default now that a round after the
+    first reviews only the cheap fix range, so fix commits are actually reviewed;
+    review-once is an explicit per-reviewer opt-out for reviewers whose re-runs
+    stay expensive, e.g. full-diff app reviewers on metered plans);
+    ``window_seconds`` the per-reviewer readiness wait window
     (``None`` → the engine's shipped default); ``model`` / ``instructions`` /
     ``timeout`` the local-agent RUN options (``None`` → the run path's own
-    defaults). An UNCONFIGURED reviewer is exactly the field defaults with its
-    name — which is why :meth:`Roster.entry` can be total.
+    defaults); ``dimensions`` the local-agent reviewer's **Dimension pass** set
+    (RVW02-WS04 — the per-reviewer fan-out option riding the same seam as
+    ``model``/``instructions``; ``None`` → the shipped default set, membership
+    validated by the loader against the closed dimension registry). An
+    UNCONFIGURED reviewer is exactly the field defaults with its name — which
+    is why :meth:`Roster.entry` can be total.
     """
 
     name: str
     required: bool = False
-    rerun: bool = False
+    rerun: bool = True
     window_seconds: int | None = None
     model: str | None = None
     instructions: str | None = None
     timeout: str | None = None
+    dimensions: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
         if not self.name or not isinstance(self.name, str):
@@ -84,6 +95,32 @@ class RosterEntry:
                 f"RosterEntry.timeout must be a canonical `<N>s` duration "
                 f"(e.g. '600s'), got {self.timeout!r}"
             )
+        if self.dimensions is not None and (
+            not isinstance(self.dimensions, tuple)
+            or not self.dimensions
+            or any(not isinstance(d, str) or not d for d in self.dimensions)
+        ):
+            # Shape only — MEMBERSHIP in the closed dimension registry is the
+            # loader's job (it fails loud with the known set); this value only
+            # defends its own invariant (a non-empty tuple of non-empty names).
+            raise ValueError(
+                f"RosterEntry.dimensions must be a non-empty tuple of dimension "
+                f"names, got {self.dimensions!r}"
+            )
+
+
+@dataclass(frozen=True)
+class ReviewPolicy:
+    """The TABLE-LEVEL review-run policy (RVW02-WS04), bundled for the request
+    path: the ONE calibrator config every reviewer's fan-out shares and the
+    round-1 nit cap. ``nit_cap=None`` means uncapped (the shipped default);
+    ``calibrator=None`` means the judge is OFF — the round-1 default of the
+    mechanically-deduped union (RVW02-WS08), NOT a default-on judge. Read only by
+    the local-agent reviewer adapters; App reviewers place a plain request edge
+    and never see it."""
+
+    calibrator: CalibratorConfig | None = None
+    nit_cap: int | None = None
 
 
 @dataclass(frozen=True)
@@ -110,11 +147,23 @@ class Roster:
     (the default) means the shipped default (``wait.POLL_INTERVAL_SECONDS``,
     60s) — the waiter keeps owning its own constant, same convention as
     ``round_cap``.
+
+    Two more table-level values are the RVW02-WS04 review-run policy
+    (:attr:`policy` bundles them for the request path): ``nit_cap`` — the
+    round-1 nit budget the fan-out routing enforces (``None`` → uncapped, the
+    shipped default; ``0`` → floor at minor) — and ``calibrator`` — the ONE
+    fixed judge config shared by every reviewer, a DORMANT stage OFF by default
+    (:class:`~shipit.review.calibrator.CalibratorConfig`; ``None`` → judge off,
+    the deduped-union round-1 default of RVW02-WS08; set it to opt the judge back
+    on). Table-level ON PURPOSE (ADR-0045): a per-reviewer calibrator would fork
+    the common severity ruler.
     """
 
     entries: tuple[RosterEntry, ...] = ()
     round_cap: int | None = None
     poll_interval: int | None = None
+    nit_cap: int | None = None
+    calibrator: CalibratorConfig | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.entries, tuple) or any(
@@ -139,6 +188,22 @@ class Roster:
                 f"Roster.poll_interval must be a positive int of seconds, "
                 f"got {self.poll_interval!r}"
             )
+        if self.nit_cap is not None and (
+            isinstance(self.nit_cap, bool)
+            or not isinstance(self.nit_cap, int)
+            or self.nit_cap < 0
+        ):
+            # 0 is legal (floor at minor) — the cap is a budget, not a count.
+            raise ValueError(
+                f"Roster.nit_cap must be a non-negative int of round-1 nits, "
+                f"got {self.nit_cap!r}"
+            )
+        if self.calibrator is not None and not isinstance(
+            self.calibrator, CalibratorConfig
+        ):
+            raise ValueError(
+                f"Roster.calibrator must be a CalibratorConfig, got {self.calibrator!r}"
+            )
         names = [e.name for e in self.entries]
         duplicates = sorted({n for n in names if names.count(n) > 1})
         if duplicates:
@@ -151,8 +216,8 @@ class Roster:
         """The settings for reviewer `name` — TOTAL, never None.
 
         A configured reviewer returns its entry; an unconfigured one returns the
-        all-defaults entry (not required, review-once, shipped window, no run
-        options), so every consumer reads settings the same way instead of
+        all-defaults entry (not required, head-strict rerun, shipped window, no
+        run options), so every consumer reads settings the same way instead of
         re-rolling a `.get(name, default)` per setting. Matching is by canonical
         lowercase name, the same normalization the loader applies to keys.
         """
@@ -161,6 +226,15 @@ class Roster:
             if e.name == key:
                 return e
         return RosterEntry(name=key)
+
+    @property
+    def policy(self) -> ReviewPolicy:
+        """The table-level review-RUN policy as one value (RVW02-WS04) — what
+        the request path threads to a local reviewer's detached run alongside
+        its per-reviewer entry, so the calibrator + nit cap arrive as values
+        exactly like ``model``/``instructions`` do (never re-resolved from
+        config inside the run path)."""
+        return ReviewPolicy(calibrator=self.calibrator, nit_cap=self.nit_cap)
 
     @property
     def required(self) -> tuple[RosterEntry, ...]:

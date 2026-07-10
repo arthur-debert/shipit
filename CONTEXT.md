@@ -182,10 +182,9 @@ reviewer**.
 A per-reviewer policy flag. `rerun=true` (head-strict) — the review must be on
 the current head, so a push re-stales it and the reviewer is re-requested (on
 the fix range only, after round 1). `rerun=false` (review-once) — a review on
-any commit counts as done and is never stale after a push. Head-strict becomes
-the default for everyone when the RVW02 incremental-round work lands
-(ADR-0043); the shipped default stays review-once until that flip, and
-review-once then survives only as an explicit per-reviewer cost opt-out.
+any commit counts as done and is never stale after a push. Head-strict IS the
+default for everyone (ADR-0043, flipped by the RVW02 incremental-round work in
+WS06); review-once survives only as an explicit per-reviewer cost opt-out.
 *Avoid*: review-once as the philosophy (it was a workaround for uncoordinated
 review floods, retired with ADR-0031's sole-requester rule).
 
@@ -290,10 +289,16 @@ scope the *search*); "sub-reviewer" (a pass has no identity, funnel, or posted
 review — the reviewer does).
 
 **Calibrator**:
-The one fixed judge between dimension passes and the posted review: dedups the
+An OPTIONAL, DORMANT judge — OFF by default since the WS08 decouple (#669). By
+default round-1 posts the **mechanically-deduped union** of the dimension passes
+(each pass's own severity; a deterministic `(file, line, claim)` merge, no LLM
+judge). Opted back on via the table-level `[reviewers].calibrator` key, it sits
+between dimension passes and the posted review: dedups the
 union, adversarially verifies each **Finding** with tier-appropriate evidence
 (quoted evidence always; a concrete failure scenario for major-or-worse, a
-clear rationale for minor/nit — or the finding is dropped), normalizes
+clear rationale for minor/nit — dropping a finding only when adversarial
+verification actively refutes it, never on mere uncertainty, and never
+downgrading one that reproduces; RVW02-WS08/F2 #665), normalizes
 **Severity** onto the shared ladder, and emits the final severity-ordered
 result. The same
 agent/model for every reviewer — a table-level setting, like `round_cap` — so

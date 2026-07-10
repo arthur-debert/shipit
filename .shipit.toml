@@ -42,17 +42,53 @@ AGY_REVIEW_APP_ID            = { doppler = "AGY_REVIEW_APP_ID" }
 # shipped Copilot-only default; see src/shipit/prstate/reviewers_config.py). The
 # map KEYS are the required reviewers — all must be DONE to flip Ready. shipit
 # dogfoods its own local-review backends: `codex` and `agy` post as their App
-# bots and block the flip-to-Ready alongside Copilot. Review-once (rerun defaults
-# OFF): a token-billed local agent re-runs only on explicit opt-in, never per push.
-# Copilot opts IN to rerun (head-strict) HERE — every push re-stales its review,
-# generating per-push review rounds that exercise the round counter and the
-# all-nitpick breaker (RVW01-WS01). The SHIPPED default stays rerun = false.
+# bots and block the flip-to-Ready alongside Copilot. Head-strict rerun is now the
+# CODE default (ADR-0043 / RVW02-WS06): a round after the first reviews only the
+# cheap fix range, so re-reviewing every push is affordable and the commits that
+# address a review are themselves reviewed. `codex`/`agy` therefore OMIT `rerun`
+# and rely on that default (rerun = true). Copilot states `rerun = true` explicitly
+# — it opts IN despite being a full-diff app reviewer, to keep exercising the round
+# counter and the no-major+ breaker (RVW01-WS01). The SHIPPED default reviewer
+# (Copilot in DEFAULT_REVIEWERS) stays EXPLICIT review-once for a bare consumer —
+# the ADR-0043 metered-app opt-out — but this dogfood repo chooses head-strict.
 # The table-level key `round_cap` is RESERVED (not a reviewer): it sets the
 # review-round cap the engine's stopping breaker uses (default 6 when unset).
 [reviewers]
 copilot = { rerun = true }
-codex = {}
-agy = {}
+# The local reviewers' readiness wait window is BUMPED over the shipped 20m
+# default (RVW02-WS04): a round-1 review now fans out into parallel dimension
+# passes (and, when the calibrator is opted on, a calibration run), so a large
+# PR's review legitimately takes longer to ARRIVE — 45 minutes covers the
+# fan-out without letting a vanished
+# run park the PR forever (the window is the arrival deadline, not the per-run
+# agent timeout).
+#
+# `dimensions` — the RVW02-WS05 baseline-study shipped default set, codified
+# from the data (report on #638). Across all three baseline PRs every one of the
+# four dimensions produced at least one posted, calibrated finding
+# (security-robustness surfaced the sole new production major; correctness,
+# cross-file-invariants and test-quality all posted too), so none is a removal
+# candidate — the ADR-0045 default of all four stands, made explicit here on the
+# dogfood reviewers.
+codex = { window = 2700, dimensions = ["correctness", "cross-file-invariants", "security-robustness", "test-quality"] }
+agy = { window = 2700, dimensions = ["correctness", "cross-file-invariants", "security-robustness", "test-quality"] }
+
+# Table-level review-run policy, set FROM the WS05 baseline study (#638):
+#
+#   nit_cap = 3 — post-calibration nit volume was ZERO across all three baseline
+#   PRs (the single nit candidate was dropped as unverified by the calibrator),
+#   so the feared nit flood never materialised. A small positive cap is flood
+#   insurance that essentially never binds on a healthy PR (US-18: keep low-end
+#   optionality without flooding); it is deliberately NOT tuned against real nit
+#   volume, because the sample produced none.
+#
+#   calibrator — left at the shipped default: OFF (dormant). WS08 (#669)
+#   decoupled the calibrator and made the mechanically-deduped union the round-1
+#   default, after the WS05 A/B measured the LLM calibrator NET-NEGATIVE on major
+#   recall (ADR-0045 as amended). shipit dogfoods that shipped default and does
+#   NOT opt back in; the concept/config/hooks stay wired but dormant. To turn it
+#   on, add a table-level `calibrator = { backend = "claude", reasoning = "high" }`.
+nit_cap = 3
 
 # [toolchains] — the path→toolchain map (ADR-0007/0039): each build-bearing path
 # declares its toolchain, and the tree-input Tool verbs (`shipit test`,
