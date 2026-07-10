@@ -49,8 +49,17 @@ AGY = AgyAdapter()
 
 
 def _rerun_roster(name: str) -> Roster:
-    """A Roster flipping `name` to rerun=True — the head-strict opt-in as a value."""
+    """A Roster flipping `name` to rerun=True — the head-strict opt-in as a value.
+
+    Since ADR-0043 / RVW02-WS06 this is also the CODE default, so it doubles as
+    "the shipped default policy expressed explicitly"."""
     return Roster((RosterEntry(name=name, required=True, rerun=True),))
+
+
+def _review_once_roster(name: str) -> Roster:
+    """A Roster opting `name` OUT to rerun=False — review-once, now the explicit
+    opt-out (ADR-0043 flipped the code default to head-strict)."""
+    return Roster((RosterEntry(name=name, required=True, rerun=False),))
 
 
 def test_registry_catalogs_all_adapters():
@@ -135,7 +144,8 @@ def test_gemini_review_on_earlier_head_still_counts_as_done():
 
 
 def test_copilot_review_on_earlier_head_counts_done_review_once():
-    # DEFAULT (review-once): an earlier-head Copilot review still counts as done.
+    # Review-once (the explicit opt-out, ADR-0043): an earlier-head Copilot review
+    # still counts as done — the reviewer won't be asked to look again.
     from shipit.prstate.model import Review, readiness_view
 
     ctx = readiness_view(
@@ -144,6 +154,7 @@ def test_copilot_review_on_earlier_head_counts_done_review_once():
         is_draft=True,
         reviews=[Review(1, "Copilot", "COMMENTED", OLD, "")],
         requested_logins=["Copilot"],
+        roster=_review_once_roster("copilot"),
     )
     assert COPILOT.detect(ctx) in (
         ReviewLifecycle.DONE_CLEAN,
@@ -310,8 +321,9 @@ def test_coderabbit_done_on_head_with_open_comment():
     assert len(CODERABBIT.open_threads(ctx)) == 1
 
 
-def test_coderabbit_review_once_by_default_counts_earlier_head():
-    # DEFAULT review-once: an earlier-head CodeRabbit review counts as done.
+def test_coderabbit_review_once_opt_out_counts_earlier_head():
+    # Review-once as the explicit opt-out (ADR-0043): an earlier-head CodeRabbit
+    # review counts as done.
     from shipit.prstate.model import Review, readiness_view
 
     ctx = readiness_view(
@@ -320,6 +332,7 @@ def test_coderabbit_review_once_by_default_counts_earlier_head():
         is_draft=True,
         reviews=[Review(1, "coderabbitai[bot]", "COMMENTED", OLD, "")],
         requested_logins=["coderabbitai[bot]"],
+        roster=_review_once_roster("coderabbit"),
     )
     assert CODERABBIT.detect(ctx) in (
         ReviewLifecycle.DONE_CLEAN,
@@ -443,7 +456,8 @@ def test_codex_detect_not_requested_when_empty():
 
 
 def test_codex_detect_stale_review_counts_done_review_once():
-    # DEFAULT review-once: an earlier-head local review still counts as done.
+    # Review-once as the explicit opt-out (ADR-0043): an earlier-head local review
+    # still counts as done.
     from shipit.prstate.model import Review, readiness_view
 
     ctx = readiness_view(
@@ -451,6 +465,7 @@ def test_codex_detect_stale_review_counts_done_review_once():
         head_sha=NEW,
         is_draft=True,
         reviews=[Review(1, "adr-codex-review[bot]", "COMMENTED", OLD, "")],
+        roster=_review_once_roster("codex"),
     )
     assert CODEX.detect(ctx) in (
         ReviewLifecycle.DONE_CLEAN,

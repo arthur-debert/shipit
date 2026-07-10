@@ -25,7 +25,9 @@ from shipit.prstate.roster import Roster, RosterEntry
 def test_entry_defaults_are_the_shipped_defaults():
     entry = RosterEntry(name="copilot")
     assert entry.required is False
-    assert entry.rerun is False
+    # ADR-0043 / RVW02-WS06: the code default is head-strict rerun; review-once
+    # is an explicit per-reviewer opt-out.
+    assert entry.rerun is True
     assert entry.window_seconds is None
     assert (entry.model, entry.instructions, entry.timeout) == (None, None, None)
 

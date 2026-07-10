@@ -39,8 +39,12 @@ class RosterEntry:
 
     ``name`` is the canonical lowercase adapter name (the wire string the
     engine's context maps are keyed by). ``required`` is whether this reviewer
-    holds Ready; ``rerun`` whether it re-reviews every push (default OFF —
-    review-once); ``window_seconds`` the per-reviewer readiness wait window
+    holds Ready; ``rerun`` whether it re-reviews every push (default ON —
+    head-strict; ADR-0043 flipped the code default now that a round after the
+    first reviews only the cheap fix range, so fix commits are actually reviewed;
+    review-once is an explicit per-reviewer opt-out for reviewers whose re-runs
+    stay expensive, e.g. full-diff app reviewers on metered plans);
+    ``window_seconds`` the per-reviewer readiness wait window
     (``None`` → the engine's shipped default); ``model`` / ``instructions`` /
     ``timeout`` the local-agent RUN options (``None`` → the run path's own
     defaults); ``dimensions`` the local-agent reviewer's **Dimension pass** set
@@ -53,7 +57,7 @@ class RosterEntry:
 
     name: str
     required: bool = False
-    rerun: bool = False
+    rerun: bool = True
     window_seconds: int | None = None
     model: str | None = None
     instructions: str | None = None
@@ -212,8 +216,8 @@ class Roster:
         """The settings for reviewer `name` — TOTAL, never None.
 
         A configured reviewer returns its entry; an unconfigured one returns the
-        all-defaults entry (not required, review-once, shipped window, no run
-        options), so every consumer reads settings the same way instead of
+        all-defaults entry (not required, head-strict rerun, shipped window, no
+        run options), so every consumer reads settings the same way instead of
         re-rolling a `.get(name, default)` per setting. Matching is by canonical
         lowercase name, the same normalization the loader applies to keys.
         """

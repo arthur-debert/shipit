@@ -72,7 +72,11 @@ from .backends import BackendError, BackendUnavailable, parse_review_output
 from .backends.base import _TIMEOUT_MARKER
 from .dimensions import Dimension
 from .instructions import load_instructions
-from .prompt import build_range_reviewer_task, build_reviewer_task
+from .prompt import (
+    build_incremental_reviewer_task,
+    build_range_reviewer_task,
+    build_reviewer_task,
+)
 from .schema import REVIEW_SCHEMA
 
 logger = logging.getLogger("shipit.review")
@@ -184,6 +188,7 @@ def pass_task_text(
     *,
     instructions_path: str | None = None,
     dimension: Dimension | None = None,
+    incremental_range: tuple[str, str] | None = None,
 ) -> str:
     """The EXACT reviewer task text a :func:`run_tree_review` launch composes —
     the fan-out's **Variant** source (RVW02-WS04).
@@ -195,12 +200,36 @@ def pass_task_text(
     backend's schema presentation + the optional dimension slice) without
     launching anything. Raises ``ValueError`` for a non-funnel backend, exactly
     like the launch path.
+
+    ``incremental_range`` (RVW02-WS06) selects the INCREMENTAL fix-range task
+    (:func:`~shipit.review.prompt.build_incremental_reviewer_task`) over
+    ``(base_sha, head_sha)`` instead of the full-PR task — so the incremental
+    round's single pass hashes the same bytes it launches with. ``incremental_range``
+    is mutually exclusive with ``dimension`` (round ≥ 2 is ONE full-scope pass, not
+    a dimension fan-out); passing both is a caller error this helper rejects with
+    ``ValueError`` — exactly like the launch path — so misuse fails loudly instead
+    of silently hashing the wrong task shape.
     """
     spec = _SPECS.get(backend)
     if spec is None:
         raise ValueError(
             f"unknown funnel review backend {backend.name!r} "
             f"(known: {', '.join(b.name for b in _SPECS)})"
+        )
+    if incremental_range is not None and dimension is not None:
+        raise ValueError(
+            "pass_task_text: incremental_range and dimension are mutually "
+            "exclusive — an incremental round is ONE full-scope fix-range pass, "
+            "not a dimension pass"
+        )
+    if incremental_range is not None:
+        base_sha, head_sha = incremental_range
+        return build_incremental_reviewer_task(
+            load_instructions(instructions_path),
+            pr_number,
+            base_sha,
+            head_sha,
+            schema_inline=spec.schema_inline,
         )
     return build_reviewer_task(
         load_instructions(instructions_path),
@@ -249,6 +278,7 @@ def run_tree_review(
     launcher: launch.Runner | None = None,
     dimension: Dimension | None = None,
     tree_path: str | None = None,
+    incremental_range: tuple[str, str] | None = None,
 ) -> dict:
     """Launch ``backend`` as a reviewer in a read-only Tree and CAPTURE its review
     dict.
@@ -268,6 +298,15 @@ def run_tree_review(
     fan-out provisions once via :func:`provision_review_tree` and shares it
     across its parallel passes); ``None`` provisions here, exactly as before.
 
+    ``incremental_range`` (RVW02-WS06) selects the INCREMENTAL fix-range task
+    (:func:`~shipit.review.prompt.build_incremental_reviewer_task`) over
+    ``(base_sha, head_sha)`` — the reviewer reads only ``git diff base..head``
+    plus the dependency neighborhood, not the full ``gh pr diff``. It is
+    mutually exclusive with ``dimension`` (round ≥ 2 is ONE full-scope pass, not
+    a fan-out) — passing both raises ``ValueError`` so a misrouted call fails
+    loudly rather than silently running the wrong task shape; the fan-out never
+    combines them. ``None`` keeps the full-PR task, exactly as before.
+
     With ``dry_run=True``: resolves the Tree COORDINATES (no clone, no model bill),
     prints the would-run Tree-launch argv, and returns an empty review — so a dry-run is
     honest (it shows exactly what would run and bills nothing).
@@ -279,15 +318,31 @@ def run_tree_review(
             f"unknown funnel review backend {backend.name!r} "
             f"(known: {', '.join(b.name for b in _SPECS)})"
         )
+    if incremental_range is not None and dimension is not None:
+        raise ValueError(
+            "run_tree_review: incremental_range and dimension are mutually "
+            "exclusive — an incremental round is ONE full-scope fix-range pass, "
+            "not a dimension pass"
+        )
     _preflight(backend, dry_run=dry_run)
 
     instructions = load_instructions(instructions_path)
-    task = build_reviewer_task(
-        instructions,
-        ctx.number,
-        schema_inline=spec.schema_inline,
-        dimension=dimension,
-    )
+    if incremental_range is not None:
+        base_sha, head_sha = incremental_range
+        task = build_incremental_reviewer_task(
+            instructions,
+            ctx.number,
+            base_sha,
+            head_sha,
+            schema_inline=spec.schema_inline,
+        )
+    else:
+        task = build_reviewer_task(
+            instructions,
+            ctx.number,
+            schema_inline=spec.schema_inline,
+            dimension=dimension,
+        )
     adapter = spec.adapter_factory(model, timeout)  # type: ignore[operator]
 
     schema_path: str | None = None

@@ -6,7 +6,10 @@ availability, so it must be a one-line config edit with no code change
 (release#622). This module is the single place that resolves that config:
 
   * `DEFAULT_REVIEWERS` — the declarative default shipped for every consumer:
-    Copilot only, review-once (rerun=False). CodeRabbit is a registered,
+    Copilot only, and EXPLICITLY review-once (rerun=False) — Copilot is a
+    full-diff app reviewer on a metered plan, exactly the ADR-0043 opt-out case,
+    so it keeps review-once even though the CODE default flipped to head-strict.
+    CodeRabbit is a registered,
     requestable adapter being PILOTED on the phos-org repos (where the GitHub
     App is installed) — a pilot repo opts in via the override below; requiring
     it by default would block every other repo on an app that is not installed
@@ -29,10 +32,15 @@ The `[reviewers]` value is a MAP from reviewer name to an options inline-table;
 the map KEYS are the required reviewers (all must be DONE to flip Ready). The
 options:
 
-  * `rerun` (bool, default **False**) — whether the reviewer re-reviews every
-    new head (consumed by the engine). All reviewers are token-billed (and
-    local agents cost a real model run each time), so re-reviewing each push is
-    explicit opt-in, not the default.
+  * `rerun` (bool, default **True** — head-strict) — whether the reviewer
+    re-reviews every new head (consumed by the engine). ADR-0043 flipped the
+    code default to head-strict now that a round after the first reviews only
+    the cheap fix range (RVW02-WS06): every push re-stales the reviewer and the
+    engine re-requests it, so the commits addressing a review are themselves
+    reviewed. Review-once (`rerun = false`) is an explicit per-reviewer opt-out
+    for reviewers whose re-runs stay expensive — full-diff app reviewers on
+    metered plans (Copilot is exactly this, and the shipped default set keeps it
+    review-once via `DEFAULT_REVIEWERS`).
   * `window` (duration, default **20m**) — the per-reviewer readiness wait
     window (OBS04-WS03): how long the engine waits for an in-flight review to
     ARRIVE before ageing it to *timed-out* → settled.
@@ -117,17 +125,17 @@ DEFAULT_REVIEWERS: dict[str, bool] = {"copilot": False}
 def default_reviewers_scaffold_body() -> str:
     """The `[reviewers]` TOML table body the install scaffold seeds when a consumer
     has none — rendered FAITHFULLY from :data:`DEFAULT_REVIEWERS`, the SINGLE source of
-    the required-reviewer default (ADR-0025). Each default reviewer becomes a
-    `name = { rerun = <bool> }` entry when it sets rerun, else the empty-options
-    `name = {}` (rerun defaults off). Rendering the map VALUES (not just its keys) keeps
-    the scaffold truly single-sourced: if a future default flips a reviewer to
-    `rerun = true`, the seeded `.shipit.toml` tracks it instead of silently diverging
-    from the engine default (which reads the same map). Because both the engine default
-    and the seeded config come from this one map, a freshly-installed repo requires
-    exactly what a repo with no config does — the code-default vs install-scaffold
-    disagreement is gone."""
+    the required-reviewer default (ADR-0025). Each default reviewer becomes an EXPLICIT
+    `name = { rerun = <true|false> }` entry — the rerun flag is ALWAYS written, never
+    left to an empty `name = {}`. This matters since ADR-0043 flipped the code default
+    to head-strict (RVW02-WS06): an omitted rerun now parses as `true`, so a `{}` entry
+    could no longer faithfully carry a review-once default (Copilot's) — the seeded
+    config would silently diverge from `DEFAULT_REVIEWERS`. Writing the flag verbatim
+    keeps the scaffold single-sourced against the map VALUES regardless of what the code
+    default is, so a freshly-installed repo requires exactly what a repo with no config
+    does — the code-default vs install-scaffold disagreement stays gone."""
     lines = [
-        f"{name} = {{ rerun = true }}" if rerun else f"{name} = {{}}"
+        f"{name} = {{ rerun = {'true' if rerun else 'false'} }}"
         for name, rerun in DEFAULT_REVIEWERS.items()
     ]
     return "[reviewers]\n" + "\n".join(lines) + "\n"
@@ -461,7 +469,7 @@ def _parse_entry(name: str, key: str, opts: object, *, config_dir: Path) -> Rost
                 f"{OVERRIDE_FILE} `{OVERRIDE_KEY}.{name}.{field}` must be a "
                 "non-empty string"
             )
-    rerun = opts.get("rerun", False)
+    rerun = opts.get("rerun", True)
     if not isinstance(rerun, bool):
         raise RequiredReviewersConfigError(
             f"{OVERRIDE_FILE} `{OVERRIDE_KEY}.{name}.rerun` must be a boolean"

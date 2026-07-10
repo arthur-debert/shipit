@@ -43,7 +43,7 @@ from pathlib import Path
 from typing import Any
 
 from ..finding import Disposition, JudgedFinding
-from ..harness.eval.store import REVIEW_ROUNDS_KIND, append_record
+from ..harness.eval.store import REVIEW_ROUNDS_KIND, append_record, read_records
 from ..harness.eval.variant import label_from_env, variant_of
 from ..identity import repo_from_slug
 from .instructions import load_instructions
@@ -222,6 +222,53 @@ def record_round(
         timestamp=_now_iso(),
     )
     return append_record(record, repo, base_dir, kind=REVIEW_ROUNDS_KIND)
+
+
+def last_reviewed_head(
+    *,
+    repo_slug: str,
+    pr: int,
+    reviewer: str,
+    new_head: str,
+    base_dir: Path | None = None,
+) -> str | None:
+    """The head SHA ``reviewer`` most recently reviewed on PR ``pr`` — the
+    incremental round's fix-range BASE (RVW02-WS06, ADR-0045), or ``None``.
+
+    Reads the repo's review-round store (:func:`~shipit.harness.eval.store.read_records`,
+    the SAME origin-keyed store the tee writes to at generate time) and returns
+    the ``round.range.head`` of the most-recent record that:
+
+      * belongs to THIS PR (``round.pr == pr``) and THIS reviewer
+        (``round.reviewer == reviewer``) — one reviewer's own review history, so
+        a co-reviewer's rounds never mis-scope this one's fix range; and
+      * reviewed a DIFFERENT head than the one now being reviewed
+        (``head != new_head``) — a re-review of the SAME head (an idempotent
+        re-request) is not a prior round to diff against.
+
+    Records are append-ordered chronological, so the LAST matching record is the
+    most recent; its head is the last commit this reviewer saw. ``None`` when the
+    reviewer has no prior differing-head record for this PR — a first round, or a
+    round whose predecessor's record write failed (the tee is fail-open): both
+    correctly fall through to a full round (fail toward over-reviewing). The
+    replay path's records (``round.pr is None``) never match a real PR number, so
+    an offline replay can never be mistaken for a prior PR round.
+
+    ``base_dir`` overrides the store family root (tests), as on the writers.
+    """
+    repo = repo_from_slug(repo_slug)
+    found: str | None = None
+    for record in read_records(repo, base_dir, kind=REVIEW_ROUNDS_KIND):
+        if record.get("round.pr") != pr:
+            continue
+        if record.get("round.reviewer") != reviewer:
+            continue
+        rng = record.get("round.range")
+        head = rng.get("head") if isinstance(rng, Mapping) else None
+        if not head or head == new_head:
+            continue
+        found = head
+    return found
 
 
 def _now_iso() -> str:

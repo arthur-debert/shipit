@@ -323,6 +323,30 @@ def test_diff_range_takes_sha_endpoints(monkeypatch):
     assert seen["args"] == ["diff", f"{'a' * 40}..{'b' * 40}"]
 
 
+def test_is_ancestor_true_on_exit_zero(monkeypatch):
+    # `git merge-base --is-ancestor A B` exits 0 when A is an ancestor of B — the
+    # incremental-round convergence gate (RVW02-WS06).
+    seen = {}
+
+    def fake(args, *, cwd):
+        seen["args"] = args
+        return _ok()
+
+    monkeypatch.setattr(git, "_probe", fake)
+    assert git.is_ancestor(Sha("a" * 40), Sha("b" * 40), cwd="/x") is True
+    assert seen["args"] == ["merge-base", "--is-ancestor", "a" * 40, "b" * 40]
+
+
+def test_is_ancestor_false_on_nonancestor_and_on_error(monkeypatch):
+    # Exit 1 = a genuine non-ancestor (rebase/force-push); any other nonzero =
+    # error (a commit not present). BOTH return False so the caller falls back to
+    # a full round — fail toward over-reviewing, never a wrongly-narrowed one.
+    monkeypatch.setattr(git, "_probe", lambda args, *, cwd: _fail(rc=1))
+    assert git.is_ancestor(Sha("a" * 40), Sha("b" * 40), cwd="/x") is False
+    monkeypatch.setattr(git, "_probe", lambda args, *, cwd: _fail("bad object", rc=128))
+    assert git.is_ancestor(Sha("a" * 40), Sha("b" * 40), cwd="/x") is False
+
+
 def test_diff_name_only_takes_sha_endpoints_and_parses_lines(monkeypatch):
     seen = {}
 

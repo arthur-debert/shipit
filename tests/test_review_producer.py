@@ -394,6 +394,53 @@ def test_pass_task_text_matches_the_launched_prompt(_faked):
     assert task in _faked["cmd"][-1]
 
 
+def test_incremental_range_launches_the_fix_range_task(_faked):
+    # RVW02-WS06: an incremental round launches the fix-range task (git diff
+    # base..head, NOT `gh pr diff`) with mandated neighborhood context, and
+    # `pass_task_text` re-derives the SAME prompt for the round-record variant.
+    review = producer.run_tree_review(
+        agent_backend.CODEX,
+        _ctx(),
+        launcher=_faked["launcher"],
+        incremental_range=("b" * 40, "c" * 40),
+        tree_path="/trees/shared/leaf",
+    )
+    assert review["summary"]["status"] == "COMMENT"
+    prompt = _faked["cmd"][-1]
+    assert f"git diff {'b' * 40}..{'c' * 40}" in prompt
+    assert "MANDATORY CONTEXT EXPANSION" in prompt
+    task = producer.pass_task_text(
+        agent_backend.CODEX, 42, incremental_range=("b" * 40, "c" * 40)
+    )
+    assert task in prompt
+
+
+def test_incremental_range_and_dimension_are_mutually_exclusive(_faked):
+    # RVW02-WS06: an incremental round is ONE full-scope fix-range pass, not a
+    # dimension pass — supplying both is a caller programming error that BOTH the
+    # variant-source helper and the launch path reject with ValueError, rather
+    # than silently letting incremental_range win and hashing/launching a task
+    # shape the caller did not mean.
+    from shipit.review.dimensions import by_name
+
+    dim = by_name("correctness")
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        producer.pass_task_text(
+            agent_backend.CODEX,
+            42,
+            dimension=dim,
+            incremental_range=("b" * 40, "c" * 40),
+        )
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        producer.run_tree_review(
+            agent_backend.CODEX,
+            _ctx(),
+            launcher=_faked["launcher"],
+            dimension=dim,
+            incremental_range=("b" * 40, "c" * 40),
+        )
+
+
 def test_provision_review_tree_requires_a_head_branch(monkeypatch):
     import pytest as _pytest
 

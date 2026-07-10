@@ -179,6 +179,69 @@ def test_record_round_appends_to_the_review_rounds_store(tmp_path, monkeypatch):
     assert record["round.timestamp"]  # stamped at the boundary
 
 
+def _write_round(tmp_path, *, pr, reviewer, head, base="0" * 40):
+    return roundrecord.record_round(
+        _REVIEW,
+        repo_slug="acme/widget",
+        pr=pr,
+        base_sha=base,
+        head_sha=head,
+        reviewer=reviewer,
+        model="pro",
+        timeout="600s",
+        instructions_path=None,
+        base_dir=tmp_path / "state",
+    )
+
+
+def test_last_reviewed_head_returns_the_most_recent_differing_head(tmp_path):
+    # The incremental round's fix-range BASE (RVW02-WS06): the head this reviewer
+    # most recently reviewed on this PR, other than the head now being reviewed.
+    _write_round(tmp_path, pr=7, reviewer="codex", head="a" * 40)
+    _write_round(tmp_path, pr=7, reviewer="codex", head="b" * 40)
+    got = roundrecord.last_reviewed_head(
+        repo_slug="acme/widget",
+        pr=7,
+        reviewer="codex",
+        new_head="c" * 40,
+        base_dir=tmp_path / "state",
+    )
+    assert got == "b" * 40  # the most recent, append order = chronological
+
+
+def test_last_reviewed_head_scopes_to_pr_and_reviewer_and_excludes_the_new_head(
+    tmp_path,
+):
+    _write_round(tmp_path, pr=7, reviewer="codex", head="a" * 40)
+    _write_round(tmp_path, pr=7, reviewer="agy", head="d" * 40)  # other reviewer
+    _write_round(tmp_path, pr=9, reviewer="codex", head="e" * 40)  # other PR
+    _write_round(tmp_path, pr=7, reviewer="codex", head="c" * 40)  # == new_head
+    got = roundrecord.last_reviewed_head(
+        repo_slug="acme/widget",
+        pr=7,
+        reviewer="codex",
+        new_head="c" * 40,
+        base_dir=tmp_path / "state",
+    )
+    # Only codex@pr7 with head != new_head qualifies → the "a" round.
+    assert got == "a" * 40
+
+
+def test_last_reviewed_head_none_when_no_prior_round(tmp_path):
+    # No prior differing-head record → None → the caller plans a full round 1
+    # (fail toward over-reviewing). An offline replay (round.pr is None) never
+    # matches a real PR number, so it can't be mistaken for a prior round.
+    _write_round(tmp_path, pr=None, reviewer="codex", head="a" * 40)
+    got = roundrecord.last_reviewed_head(
+        repo_slug="acme/widget",
+        pr=7,
+        reviewer="codex",
+        new_head="c" * 40,
+        base_dir=tmp_path / "state",
+    )
+    assert got is None
+
+
 def test_same_instructions_pool_and_edited_instructions_separate(tmp_path):
     a = tmp_path / "a.txt"
     b = tmp_path / "b.txt"
@@ -250,6 +313,118 @@ def test_generate_review_tees_a_round_record(monkeypatch, tmp_path):
     assert kwargs["head_sha"] == "b" * 40
     assert kwargs["reviewer"] == "codex"
     assert kwargs["duration_ms"] >= 0
+
+
+def test_generate_review_incremental_rescopes_and_records_the_fix_range(
+    monkeypatch, tmp_path
+):
+    # RVW02-WS06 wiring: given an incremental plan, generate_review re-diffs ctx
+    # to the fix range, runs the fan-out in incremental mode, and the tee records
+    # the fix range (base = last-reviewed head, head = new head) like round 1.
+    from shipit.agent import backend as agent_backend
+    from shipit.identity import Sha
+    from shipit.review import service
+    from shipit.review.rounds import RoundPlan
+
+    monkeypatch.setattr(
+        service.rounds,
+        "plan_for_view",
+        lambda c, reviewer, **kw: RoundPlan(
+            incremental=True, base=Sha("d" * 40), head=Sha("b" * 40)
+        ),
+    )
+    monkeypatch.setattr(
+        service.diff,
+        "rescoped_view",
+        lambda view, base: SimpleNamespace(
+            repo="acme/widget",
+            number=5,
+            base_sha=str(base),
+            head_sha="b" * 40,
+            diff="fix range",
+            workdir="/tmp/wd",
+            head_ref="branch",
+        ),
+    )
+    captured: dict = {}
+    monkeypatch.setattr(
+        service.fanout,
+        "run_fanout_review",
+        lambda backend, c, **kw: (
+            captured.update(incremental=kw.get("incremental"), base=c.base_sha)
+            or service.fanout.FanoutOutcome(
+                review={"summary": {"status": "COMMENT"}, "comments": []},
+                findings=(),
+                runs=(),
+            )
+        ),
+    )
+    written = []
+    monkeypatch.setattr(
+        service.roundrecord,
+        "record_round",
+        lambda r, **kw: written.append(kw) or tmp_path / "s",
+    )
+    service.generate_review(agent_backend.CODEX, _tee_ctx())
+    assert captured["incremental"] is True
+    assert captured["base"] == "d" * 40  # the fan-out saw the fix-range base
+    [kw] = written
+    assert kw["base_sha"] == "d" * 40 and kw["head_sha"] == "b" * 40
+
+
+def test_generate_review_force_push_fallback_keeps_full_range(monkeypatch, tmp_path):
+    # RVW02-WS06 wiring: a rebase/force-push plan (incremental=False with a
+    # fallback_reason) must NOT rescope — generate_review runs the fan-out in FULL
+    # mode over the resolved view and the tee records the full base..head range,
+    # exactly like round 1. The incremental test above only covers the incremental
+    # plan at this seam; this pins the fallback branch here too, so a regression
+    # that rescoped or narrowed a fallback round would fail.
+    from shipit.agent import backend as agent_backend
+    from shipit.identity import Sha
+    from shipit.review import service
+    from shipit.review.rounds import RoundPlan
+
+    monkeypatch.setattr(
+        service.rounds,
+        "plan_for_view",
+        lambda c, reviewer, **kw: RoundPlan(
+            incremental=False,
+            base=Sha("a" * 40),
+            head=Sha("b" * 40),
+            fallback_reason="last-reviewed head is not an ancestor (force-push)",
+        ),
+    )
+    rescoped: list = []
+    monkeypatch.setattr(
+        service.diff,
+        "rescoped_view",
+        lambda view, base: rescoped.append(base) or view,
+    )
+    captured: dict = {}
+    monkeypatch.setattr(
+        service.fanout,
+        "run_fanout_review",
+        lambda backend, c, **kw: (
+            captured.update(incremental=kw.get("incremental"), base=c.base_sha)
+            or service.fanout.FanoutOutcome(
+                review={"summary": {"status": "COMMENT"}, "comments": []},
+                findings=(),
+                runs=(),
+            )
+        ),
+    )
+    written = []
+    monkeypatch.setattr(
+        service.roundrecord,
+        "record_round",
+        lambda r, **kw: written.append(kw) or tmp_path / "s",
+    )
+    service.generate_review(agent_backend.CODEX, _tee_ctx())
+    assert rescoped == []  # a full/fallback round never rescopes the view
+    assert captured["incremental"] is False  # the fan-out runs the FULL round
+    assert captured["base"] == "a" * 40  # over the resolved view's full range
+    [kw] = written
+    assert kw["base_sha"] == "a" * 40 and kw["head_sha"] == "b" * 40
 
 
 def test_tee_failure_is_fail_open_and_never_degrades_the_review(monkeypatch, caplog):

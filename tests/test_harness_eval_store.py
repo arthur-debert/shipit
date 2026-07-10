@@ -29,6 +29,31 @@ def test_append_writes_jsonl_lines_keyed_by_repo(tmp_path):
     assert [json.loads(line) for line in lines] == [{"a": 1}, {"a": 2}]
 
 
+def test_read_records_round_trips_append_order(tmp_path):
+    base = tmp_path / "state"
+    repo = _repo()
+    store.append_record({"a": 1}, repo, base_dir=base)
+    store.append_record({"a": 2}, repo, base_dir=base)
+    assert store.read_records(repo, base_dir=base) == [{"a": 1}, {"a": 2}]
+
+
+def test_read_records_missing_store_is_empty(tmp_path):
+    # A reader with no history sees none — never an error (the incremental-round
+    # query that has no prior record then plans a full round).
+    assert store.read_records(_repo(), base_dir=tmp_path / "state") == []
+
+
+def test_read_records_skips_a_corrupt_line(tmp_path):
+    base = tmp_path / "state"
+    repo = _repo()
+    path = store.append_record({"a": 1}, repo, base_dir=base)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write("{not json\n")
+    store.append_record({"a": 2}, repo, base_dir=base)
+    # One corrupt line must not blind the reader to the intact records around it.
+    assert store.read_records(repo, base_dir=base) == [{"a": 1}, {"a": 2}]
+
+
 def test_store_path_is_outside_the_repo_tree(tmp_path):
     base = tmp_path / "state"
     path = store.append_record({"x": 1}, _repo(), base_dir=base)
