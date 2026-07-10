@@ -66,6 +66,7 @@ How to Measure
     introduced or exposed — a purely pre-existing issue the diff does not touch is
     out of scope and must not be posted. Read beyond the diff freely: the callers,
     definitions, usages, and neighboring code of what changed are the context a
-    finding needs. But do NOT execute build, test, or shell commands and do NOT
-    start background tasks — this is a read-only review, not an agentic session.
-    Respond with ONLY the requested JSON and nothing else.
+    finding needs. But beyond fetching the diff as instructed and reading files,
+    do NOT execute build, test, or shell commands and do NOT start background
+    tasks — this is a read-only review, not an agentic session. Respond with ONLY
+    the requested JSON and nothing else.

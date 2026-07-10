@@ -26,20 +26,25 @@ from shipit.review.schema import REVIEW_SCHEMA
 _INSTRUCTIONS = "Be thorough."
 
 
-def _every_arm_task():
-    """One task per reviewer arm: full, dimension pass, incremental, range."""
+def _every_arm_task(instructions=_INSTRUCTIONS):
+    """One task per reviewer arm: full, dimension pass, incremental, range.
+
+    ``instructions`` is threaded through every arm so a test can compose the
+    REAL bundled default (not just the dummy) into all four tasks and assert on
+    the resulting body — otherwise a check against instruction-derived text is a
+    tautology (the dummy trivially lacks it)."""
     from shipit.review.dimensions import by_name
 
     return {
-        "full": build_reviewer_task(_INSTRUCTIONS, 42, schema_inline=False),
+        "full": build_reviewer_task(instructions, 42, schema_inline=False),
         "dimension": build_reviewer_task(
-            _INSTRUCTIONS, 42, schema_inline=False, dimension=by_name("correctness")
+            instructions, 42, schema_inline=False, dimension=by_name("correctness")
         ),
         "incremental": build_incremental_reviewer_task(
-            _INSTRUCTIONS, 42, "b" * 40, "c" * 40, schema_inline=False
+            instructions, 42, "b" * 40, "c" * 40, schema_inline=False
         ),
         "range": build_range_reviewer_task(
-            _INSTRUCTIONS, "b" * 40, "c" * 40, schema_inline=False
+            instructions, "b" * 40, "c" * 40, schema_inline=False
         ),
     }
 
@@ -122,7 +127,9 @@ def test_dimension_scoped_task_carries_the_focus_section():
     )
     assert "DIMENSION FOCUS — Correctness" in task
     assert "logic errors" in task
-    assert "pre-existing" in task
+    # (The diff-introduced-or-exposed scope rule is NOT asserted here: it rides
+    # the shared baseline, not this focus section — that separation is pinned by
+    # test_dimension_section_carries_no_private_scope_rule.)
     # The base contract is untouched: fetch the diff, emit JSON, never post.
     assert "gh pr diff 7" in task
     assert "Do NOT post the review yourself" in task
@@ -173,13 +180,13 @@ def test_the_diff_only_vs_walk_checkout_contradiction_is_gone():
     assert "one-shot review" not in bundled
     assert "Scope is the diff; context is the checkout" in bundled
     assert "introduced or exposed" in bundled
-    for arm, task in _every_arm_task().items():
+    # The bundled default composes cleanly with EVERY arm and stays
+    # contradiction-free end to end: compose the real bundled instructions (not
+    # the dummy) into all four arms and assert the retired text is gone from
+    # each while the shared baseline is present.
+    for arm, task in _every_arm_task(bundled).items():
         assert "solely on the provided diff" not in task, arm
-    # The bundled default composes cleanly with every arm and stays
-    # contradiction-free end to end.
-    composed = build_reviewer_task(bundled, 42, schema_inline=False)
-    assert "solely on the provided diff" not in composed
-    assert "SCOPE AND CONTEXT" in composed
+        assert "SCOPE AND CONTEXT" in task, arm
 
 
 def test_dimension_section_precedes_the_inline_schema_for_agy():
