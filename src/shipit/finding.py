@@ -136,11 +136,18 @@ class JudgedFinding:
     is canonical: a merged-away duplicate carries its twin's disposition (its
     substance posts through the twin) but is itself never a second posted comment,
     so it must never count as posted in the record's posted-vs-dropped split.
+
+    ``run_id`` (RVW03-WS02) is the id of the pass that ORIGINATED the finding —
+    the ``round.runs`` entry (and per-run artifact bundle) it traces back to, so
+    a posted finding leads to the pass → prompt → raw output that emitted it.
+    ``None`` when the producing pipeline predates the correlation (old records)
+    or genuinely has no per-pass identity.
     """
 
     finding: Finding
     disposition: Disposition
     duplicate_of: int | None = None
+    run_id: str | None = None
 
     @property
     def posted(self) -> bool:

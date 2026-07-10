@@ -1,0 +1,635 @@
+# Ground-truth fixture — versioned corpus for the deterministic review
+# scorer (ADR-0048). Format + banking flow: lab/README.md.
+# GENERATED-CANONICAL: edit via `shipit eval bank` (or edit + re-save);
+# hand comments do not survive a save.
+
+schema = 1
+version = 1
+
+[[prs]]
+id = "core-440"
+repo = "phos-editor/core"
+pr = 440
+base_sha = "b5c33ce8ba14fe77fa27c7cd2bcfa4c086226722"
+head_sha = "bf1d1c584f472e6628f464dd9b173ab6965457f2"
+title = "GPU activation + measure-first gate"
+language = "rust"
+notes = "RVW02 WS05 baseline; 14f +583/-5; round-1 range"
+
+[[prs]]
+id = "app-391"
+repo = "phos-editor/app"
+pr = 391
+base_sha = "4704fdd2e9d1ac133b9e65943a82ba07a233a559"
+head_sha = "9108f85305673bae3699193dfb8c97f94ec69c02"
+title = "viewport tile-cache coarse levels + off-screen short-circuit"
+language = "svelte-ts"
+notes = "RVW02 WS05 baseline; 10f +504/-27; round-1 range"
+
+[[prs]]
+id = "lex-820"
+repo = "lex-fmt/lex"
+pr = 820
+base_sha = "6861f7cd76daf90d67d19b66e8a4cec0bf3df5bd"
+head_sha = "3d5aa8d58ec3439ad60c16a587fc3370a29dec1c"
+title = "formatter-faithfulness epic umbrella"
+language = "rust"
+notes = "RVW02 WS05 baseline; 11f +496/-131; round-1 range"
+
+[[prs]]
+id = "app-351"
+repo = "phos-editor/app"
+pr = 351
+base_sha = "91f5b95e92f79d4c294a4a3887617682ad6c9139"
+head_sha = "1540afcbb76d53e51a92557e5636fc5376129ce8"
+title = "APP-GPW01-WS02: GpuDisplay state-machine redesign"
+language = "svelte-ts"
+
+[[prs]]
+id = "app-376"
+repo = "phos-editor/app"
+pr = 376
+base_sha = "4a8ea7795200be818cbe0e87fb2c4f80200a0fd9"
+head_sha = "671e58db30df65ebe5b4307a71bcfcb20ca35bca"
+title = "APP-GLA01-WS04: cache reuse across viewport moves"
+language = "svelte-ts"
+
+[[prs]]
+id = "core-403"
+repo = "phos-editor/core"
+pr = 403
+base_sha = "8980e8246782af6bf242665c09cdb73a213962d5"
+head_sha = "e01bf42885afd7aef465398a9b9034104b88c9e5"
+title = "COR-RND03-WS06: colour lowering + Display-on-GPU"
+language = "rust"
+
+[[prs]]
+id = "core-427"
+repo = "phos-editor/core"
+pr = 427
+base_sha = "92e3b18fc40ebd9863ad653372060f73355c2ba5"
+head_sha = "2d4a909f36f9095ebd86f36d770df5a219470021"
+title = "COR-RND04-WS03: level selection + cross-level tolerance"
+language = "rust"
+
+[[prs]]
+id = "core-407"
+repo = "phos-editor/core"
+pr = 407
+base_sha = "166a54546439a5ab803c7db6c8f547876058a380"
+head_sha = "62693b6bcde69e13ead0ff86768d8daeca5c7ecc"
+title = "COR-RND03-WS08 - Web GPU transport bridge (expose colour lowering to wasm)"
+language = "rust"
+
+[[prs]]
+id = "lex-787"
+repo = "lex-fmt/lex"
+pr = 787
+base_sha = "94375509e55131e78785ff4495557f27bb4ba7a4"
+head_sha = "dcef09fe986a65e35bb6fe5d89eaa48267e671dd"
+title = "feat(babel): faithfulness harness + structural paragraph separation (#781)"
+language = "rust"
+
+[[prs]]
+id = "shipit-651"
+repo = "arthur-debert/shipit"
+pr = 651
+base_sha = "c855f7c9b7861c05248be377e9f8c088a3eb1ace"
+head_sha = "aae207d03b002039686971aab8eceabf27d0cae4"
+title = "RVW02-WS01: Finding domain & wire format"
+language = "python"
+
+[[prs]]
+id = "shipit-662"
+repo = "arthur-debert/shipit"
+pr = 662
+base_sha = "b34cb8c95121853a4a2e222b4f99532f5967930c"
+head_sha = "eb14fdcc241db877c5ce739f0666b92d70a0f73b"
+title = "RVW02-WS04: Round-1 dimension fan-out + calibrator"
+language = "python"
+
+[[prs]]
+id = "dodot-224"
+repo = "arthur-debert/dodot"
+pr = 224
+base_sha = "a50e5e740796e0fa9fbf033ad396b511cb968b39"
+head_sha = "8fa038ea4da7f13206922201a94532756f1553b8"
+title = "fix: ignored packs — up/down match status output, sweep stale state (#222)"
+language = "rust"
+
+[[labels]]
+id = "core-G1"
+pr = "core-440"
+file = "phos-bench/src/bin/gpu_compare.rs"
+severity = "major"
+verdict = "real"
+confirmed = true
+claim = "gpu_fallback_reason estimates readback staging cost as w*h*16, ignoring the 256-byte row padding read_texture allocates, so widths needing padding are mis-reported GPU-OK and then panic at readback"
+[labels.provenance]
+kind = "fix-commit"
+ref = "f211ab3"
+
+[[labels]]
+id = "core-G2"
+pr = "core-440"
+file = "phos-editor/src/graph_session.rs"
+severity = "minor"
+verdict = "real"
+confirmed = true
+claim = "the gpu: None docstring claims the field is None only on headless builds, but software adapters make it Some on headless too"
+[labels.provenance]
+kind = "fix-commit"
+ref = "f211ab3"
+
+[[labels]]
+id = "core-G3"
+pr = "core-440"
+file = "phos-bench/src/bin/gpu_compare.rs"
+severity = "major"
+verdict = "real"
+confirmed = true
+claim = "the GPU compute (est) figure subtracts a non-comparable round-trip measurement, producing a misleading go/no-go number"
+[labels.provenance]
+kind = "fix-commit"
+ref = "c449b8c"
+
+[[labels]]
+id = "app-G1"
+pr = "app-391"
+file = "src/lib/editor/Editor.svelte"
+lines = [2360, 2385]
+severity = "major"
+verdict = "real"
+confirmed = true
+claim = "the 0x0-frame short-circuit skips applyLayout, so a fully-offscreen pan leaves stale pixels on screen"
+aliases = ["empty-frame short-circuit skips applyLayout; an offscreen pan leaves a stale texture on the canvas"]
+[labels.provenance]
+kind = "fix-commit"
+ref = "b5b88aef"
+
+[[labels]]
+id = "lex-G1"
+pr = "lex-820"
+file = "crates/lex-babel/src/formats/lex/separation.rs"
+lines = [40, 80]
+severity = "minor"
+verdict = "real"
+confirmed = true
+claim = "the separation.rs module docs claim all Definition merges are intended, contradicting lex#819"
+[labels.provenance]
+kind = "fix-commit"
+ref = "ca022ae2"
+
+[[labels]]
+id = "lex-G2"
+pr = "lex-820"
+file = "crates/lex-babel/src/formats/lex/separation.rs"
+severity = "nit"
+verdict = "real"
+confirmed = true
+claim = "redundant block scope around the colon-subject guard"
+[labels.provenance]
+kind = "fix-commit"
+ref = "ca022ae2"
+
+[[labels]]
+id = "app-351-L1"
+pr = "app-351"
+file = "src/lib/editor/pipeline-worker.ts"
+lines = [130, 140]
+severity = "major"
+verdict = "real"
+confirmed = false
+claim = "maybePresentGpu() returns true immediately after display.present() even when GpuDisplay is Acquiring or the present internally no-ops/fails, so the worker reports presented:true and the host skips the rgba8 fallback, leaving the canvas blank."
+[labels.provenance]
+kind = "fix-commit"
+ref = "8a6683aa0441e1f909e37a2f34d820e4847e3b08"
+
+[[labels]]
+id = "app-351-L2"
+pr = "app-351"
+file = "src/lib/editor/Editor.svelte"
+lines = [1497, 1508]
+severity = "major"
+verdict = "real"
+confirmed = false
+claim = "displayReady()'s result is ignored, so a ready:false (GPU acquisition failure after the irreversible OffscreenCanvas transfer) leaves the editor with no presenter and no recovery path."
+[labels.provenance]
+kind = "fix-commit"
+ref = "8a6683aa0441e1f909e37a2f34d820e4847e3b08"
+
+[[labels]]
+id = "app-351-L3"
+pr = "app-351"
+file = "src/lib/editor/gpu-display.ts"
+lines = [310, 321]
+severity = "major"
+verdict = "real"
+confirmed = false
+claim = "A synchronous throw in enterReady() (shader/pipeline/buffer creation) rejects ready and clears display but never destroys the acquired GPUDevice, leaking a live device."
+[labels.provenance]
+kind = "fix-commit"
+ref = "8a6683aa0441e1f909e37a2f34d820e4847e3b08"
+
+[[labels]]
+id = "app-351-L4"
+pr = "app-351"
+file = "src/lib/editor/gpu-display.ts"
+lines = [678, 693]
+severity = "minor"
+verdict = "real"
+confirmed = false
+claim = "On a program-present failure outputTex is created but not tracked or destroyed in the catch block, so a later throw in the try block leaks the GPU texture."
+[labels.provenance]
+kind = "fix-commit"
+ref = "8a6683aa0441e1f909e37a2f34d820e4847e3b08"
+
+[[labels]]
+id = "app-376-L1"
+pr = "app-376"
+file = "src/lib/editor/pipeline-scheduler.ts"
+lines = [578, 590]
+severity = "major"
+verdict = "real"
+confirmed = false
+claim = "Streamed tiles from in-flight region requests are written back into ViewportTileCache unconditionally, so tiles from a stream started before invalidate() repopulate the invalidated cache and later renders reuse stale content."
+[labels.provenance]
+kind = "fix-commit"
+ref = "17f134fd08f75b1ddc8a8089f43ee3b3db9c916a"
+
+[[labels]]
+id = "app-376-L2"
+pr = "app-376"
+file = "src/lib/editor/pipeline-driver-tauri.ts"
+lines = [982, 1000]
+severity = "major"
+verdict = "real"
+confirmed = false
+claim = "The native Tauri driver writes every blitted tile back to cacheCtx.store even if invalidate() ran mid-stream, letting stale tiles survive a content invalidation in the cache."
+[labels.provenance]
+kind = "fix-commit"
+ref = "17f134fd08f75b1ddc8a8089f43ee3b3db9c916a"
+
+[[labels]]
+id = "app-376-L3"
+pr = "app-376"
+file = "src/lib/editor/Editor.svelte"
+lines = [1913, 1967]
+severity = "major"
+verdict = "real"
+confirmed = false
+claim = "The cache-reuse E2E probes derive firstFetched/secondFetched/aFetched/panFetched from a planRegion() recompute inside the probe rather than tiles the transport actually streamed, so the reuse gate can pass even if the transport stops consulting the cache entirely."
+[labels.provenance]
+kind = "fix-commit"
+ref = "17f134fd08f75b1ddc8a8089f43ee3b3db9c916a"
+
+[[labels]]
+id = "core-403-L1"
+pr = "core-403"
+file = "phos-editor/src/dag/colour_lowering.rs"
+lines = [150, 190]
+severity = "major"
+verdict = "real"
+confirmed = false
+claim = "Generated WGSL names LUT textures by original op index (lut3d_{i}) while the bind group layout packs entries densely by LUT count, so any chain whose LUT is not at op index 0/1 (or mixed Lut3D+Lut1D chains) references a nonexistent binding and fails shader/bind validation."
+[labels.provenance]
+kind = "confirmed-thread"
+ref = "https://github.com/phos-editor/core/pull/403#discussion_r3455356569"
+
+[[labels]]
+id = "core-403-L2"
+pr = "core-403"
+file = "phos-editor/src/dag/colour_lowering.rs"
+lines = [300, 340]
+severity = "major"
+verdict = "real"
+confirmed = false
+claim = "Lut1D lowering declares texture_1d<f32> with TextureDimension::D1 uploads, which wgpu/WGSL does not support as declared, so any Camera LUT containing a 1D LUT fails shader validation or binding creation instead of running on GPU."
+[labels.provenance]
+kind = "confirmed-thread"
+ref = "https://github.com/phos-editor/core/pull/403#discussion_r3455356576"
+
+[[labels]]
+id = "core-403-L3"
+pr = "core-403"
+file = "phos-editor/src/dag/colour_lowering.rs"
+lines = [585, 600]
+severity = "major"
+verdict = "real"
+confirmed = false
+claim = "run_colour_gpu_fill unconditionally calls bake_formation_tail even for Camera LUT processors, replacing the actual CLF Matrix/Range/Exponent/Log/CDL/Lut chain with a sampled log/Lut3D approximation, producing colours that diverge from the CPU path."
+[labels.provenance]
+kind = "confirmed-thread"
+ref = "https://github.com/phos-editor/core/pull/403#discussion_r3455356580"
+
+[[labels]]
+id = "core-403-L4"
+pr = "core-403"
+file = "phos-editor/src/dag/nodes/camera_lut.rs"
+lines = [110, 146]
+severity = "major"
+verdict = "real"
+confirmed = false
+claim = "The GPU path (including the cpu_fallback Ok result) assigns full input-sized buffers directly to output.color.backing, bypassing write_region and ignoring roi, so partial-tile fills write wrong output and corrupt cached pixels outside the ROI."
+[labels.provenance]
+kind = "confirmed-thread"
+ref = "https://github.com/phos-editor/core/pull/403#discussion_r3455356586"
+
+[[labels]]
+id = "core-403-L5"
+pr = "core-403"
+file = "phos-editor/src/dag/nodes/view_transform.rs"
+lines = [120, 150]
+severity = "major"
+verdict = "real"
+confirmed = false
+claim = "ViewTransform's GPU path has the same ROI contract violation: it replaces the whole output backing instead of write_region, so partial-region evaluation overwrites pixels outside the requested ROI."
+[labels.provenance]
+kind = "confirmed-thread"
+ref = "https://github.com/phos-editor/core/pull/403#discussion_r3455356590"
+
+[[labels]]
+id = "core-403-L6"
+pr = "core-403"
+file = "phos-editor/src/dag/colour_lowering.rs"
+lines = [790, 830]
+severity = "major"
+verdict = "real"
+confirmed = false
+claim = "Lut1D and Lut3D WGSL sampling passes raw [0,1] coordinates without the half-texel scale/offset (coord*(n-1)/n + 0.5/n), producing a half-texel shift versus the CPU tetrahedral interpolation across the whole image."
+[labels.provenance]
+kind = "confirmed-thread"
+ref = "https://github.com/phos-editor/core/pull/403#discussion_r3455370858"
+
+[[labels]]
+id = "core-403-L7"
+pr = "core-403"
+file = "phos-editor/src/dag/colour_lowering.rs"
+lines = [648, 700]
+severity = "major"
+verdict = "real"
+confirmed = false
+claim = "build_colour_pipeline hardcodes filterable:true / SamplerBindingType::Filtering for float32 LUT textures regardless of whether FLOAT32_FILTERABLE was enabled at device creation, causing a wgpu bind-group validation panic on adapters lacking the feature."
+[labels.provenance]
+kind = "fix-commit"
+ref = "9a2557edd7ba74f1977570cc52e0fff328c6c53b"
+
+[[labels]]
+id = "core-427-L1"
+pr = "core-427"
+file = "phos-editor/src/dag/mip.rs"
+lines = [95, 110]
+severity = "major"
+verdict = "real"
+confirmed = false
+claim = "max_useful_level only treats an extent as empty when both axes are degenerate, so a 0x100 or 100x0 extent returns MipLevel(7) instead of 0, letting select_level name a coarse level for an empty target in violation of the empty-extent contract."
+[labels.provenance]
+kind = "confirmed-thread"
+ref = "https://github.com/phos-editor/core/pull/427#discussion_r3471103478"
+
+[[labels]]
+id = "core-427-L2"
+pr = "core-427"
+file = "phos-editor/src/graph_session.rs"
+lines = [2160, 2200]
+severity = "major"
+verdict = "real"
+confirmed = false
+claim = "render_region_for_scale requires the caller to pass region in the dynamically selected mip level's coordinates, but the max_useful_level cap makes that level unpredictable to callers, so a caller predicting level 3 when the backend caps at 2 gets its coordinates misinterpreted and renders the wrong tiles."
+[labels.provenance]
+kind = "confirmed-thread"
+ref = "https://github.com/phos-editor/core/pull/427#discussion_r3471120908"
+
+[[labels]]
+id = "core-407-L1"
+pr = "core-407"
+file = "phos-editor/src/graph_session.rs"
+lines = [2025, 2045]
+severity = "major"
+verdict = "real"
+confirmed = false
+claim = "display_input_source selects the first edge whose to_node is the Display sink while ignoring the destination port, so upstream resolution is edge-iteration-order-sensitive and a metadata/control edge inserted before the image edge resolves the wrong parent node for the GPU bridge."
+[labels.provenance]
+kind = "confirmed-thread"
+ref = "https://github.com/phos-editor/core/pull/407#discussion_r3456203899"
+
+[[labels]]
+id = "core-407-L2"
+pr = "core-407"
+file = "phos-editor/src/dag/colour_lowering.rs"
+lines = [280, 330]
+severity = "minor"
+verdict = "real"
+confirmed = false
+claim = "lut_payloads never validates table lengths: the 3D path silently drops a trailing partial chunk while still reporting the original grid_size (JS uploads a wrong-shaped texture), and the 1D path indexes table[0] (panics on an empty channel array) and zip-truncates unequal channel lengths."
+[labels.provenance]
+kind = "confirmed-thread"
+ref = "https://github.com/phos-editor/core/pull/407#discussion_r3456203902"
+
+[[labels]]
+id = "core-407-L3"
+pr = "core-407"
+file = "phos-editor/src/graph_session.rs"
+lines = [2010, 2022]
+severity = "minor"
+verdict = "real"
+confirmed = false
+claim = "display_gpu_program returns Ok(None) when the Display sink's image input is unwired, masking a broken/disconnected graph as the normal GPU-ineligible CPU-fallback signal instead of surfacing EvalError::MissingInput like the CPU render path."
+[labels.provenance]
+kind = "fix-commit"
+ref = "03a489cc8e65b1dc962cc09ebe9e7a83be52b17b"
+
+[[labels]]
+id = "lex-787-L1"
+pr = "lex-787"
+file = "crates/lex-babel/src/formats/lex/serializer.rs"
+lines = [460, 490]
+severity = "major"
+verdict = "real"
+confirmed = false
+claim = "visit_table does not open an interior sibling scope, so the footnote-list/cell/closer walks driven by Table::accept run in the outer scope and overwrite the recorded Table kind (e.g. with List), corrupting blank-line separation decisions for the table's next sibling."
+[labels.provenance]
+kind = "fix-commit"
+ref = "4e47021828c0ced56b061843edf23b1671e5536e"
+
+[[labels]]
+id = "lex-787-L2"
+pr = "lex-787"
+file = "crates/lex-babel/src/formats/lex/serializer.rs"
+lines = [256, 280]
+severity = "major"
+verdict = "real"
+confirmed = false
+claim = "visit_list calls separate_before(BlockKind::List) before entering suppress_output for a table's already-emitted footnote list, so the muted second walk still mutates sibling_levels and can emit stray structural blank lines."
+[labels.provenance]
+kind = "fix-commit"
+ref = "4e47021828c0ced56b061843edf23b1671e5536e"
+
+[[labels]]
+id = "lex-787-L3"
+pr = "lex-787"
+file = "crates/lex-babel/src/formats/lex/serializer.rs"
+lines = [175, 178]
+severity = "minor"
+verdict = "real"
+confirmed = false
+claim = "leave_sibling_scope silently ignores a pop on an empty sibling_levels stack, hiding mismatched enter/leave scope bugs that would skew later separation state."
+[labels.provenance]
+kind = "fix-commit"
+ref = "852b0fff8d618e420a66ae623afd39c221c5cf1d"
+
+[[labels]]
+id = "lex-787-L4"
+pr = "lex-787"
+file = "crates/lex-babel/tests/markdown/export.rs"
+lines = [780, 787]
+severity = "minor"
+verdict = "real"
+confirmed = false
+claim = "The doc.untitled regression test asserts only result.is_err(), so it keeps passing if the fixture fails for an unrelated reason instead of the reserved doc.* prefix rejection it is meant to guard."
+[labels.provenance]
+kind = "fix-commit"
+ref = "852b0fff8d618e420a66ae623afd39c221c5cf1d"
+
+[[labels]]
+id = "shipit-651-L1"
+pr = "shipit-651"
+file = "src/shipit/review/post.py"
+lines = [224, 229]
+severity = "major"
+verdict = "real"
+confirmed = false
+claim = "The unanchored-finding fold in build_review_payload omits finding.fix, so an off-diff finding's suggested remedy is silently dropped from the posted review body."
+[labels.provenance]
+kind = "confirmed-thread"
+ref = "https://github.com/arthur-debert/shipit/pull/651#discussion_r3553945023"
+
+[[labels]]
+id = "shipit-651-L2"
+pr = "shipit-651"
+file = "src/shipit/review/post.py"
+lines = [150, 167]
+severity = "major"
+verdict = "real"
+confirmed = false
+claim = "_coverage_section assumes coverage is a dict of dicts, so malformed schema-unenforced (agy) output like skipped:[\"foo\"] raises AttributeError and aborts posting the entire review."
+[labels.provenance]
+kind = "fix-commit"
+ref = "55747739aee074affe135206c0fee57754d6d077"
+
+[[labels]]
+id = "shipit-651-L3"
+pr = "shipit-651"
+file = "src/shipit/review/post.py"
+lines = [129, 147]
+severity = "major"
+verdict = "real"
+confirmed = false
+claim = "_finding_from_dict passes non-string category/file/text values from unvalidated agent JSON straight into Finding, so a non-empty dict category crashes render_marker._escape (.replace on dict) and aborts the post."
+[labels.provenance]
+kind = "fix-commit"
+ref = "4f0f06f1b141d378c4b5efee4d92738b2c85dd1e"
+
+[[labels]]
+id = "shipit-651-L4"
+pr = "shipit-651"
+file = "src/shipit/finding.py"
+lines = [294, 335]
+severity = "major"
+verdict = "real"
+confirmed = false
+claim = "parse_comment strips ALL shipit:finding markers and splits evidence/fix on the first fenced block or 'Suggested fix:' label anywhere in the text, so a claim containing those delimiters is mis-parsed and the render/parse round trip is lossy."
+[labels.provenance]
+kind = "fix-commit"
+ref = "1559d837ee0bed2973ae558a91e485c64117d5fe"
+
+[[labels]]
+id = "shipit-651-L5"
+pr = "shipit-651"
+file = "src/shipit/review/schema.py"
+lines = [70, 87]
+severity = "major"
+verdict = "real"
+confirmed = false
+claim = "REVIEW_SCHEMA declares line as a required non-nullable integer while the prompt and posting path treat it as optional, so a schema-enforced backend cannot emit a file-level finding without inventing a bogus line number."
+[labels.provenance]
+kind = "fix-commit"
+ref = "1559d837ee0bed2973ae558a91e485c64117d5fe"
+
+[[labels]]
+id = "shipit-662-L1"
+pr = "shipit-662"
+file = "src/shipit/review/fanout.py"
+lines = [270, 276]
+severity = "major"
+verdict = "real"
+confirmed = false
+claim = "run_fanout_review flattens routed entries to (Finding, Disposition) tuples before record_round, discarding duplicate_of, so merged-away duplicates are persisted and reported as posted findings that never actually posted."
+[labels.provenance]
+kind = "confirmed-thread"
+ref = "https://github.com/arthur-debert/shipit/pull/662#discussion_r3554833822"
+
+[[labels]]
+id = "shipit-662-L2"
+pr = "shipit-662"
+file = "src/shipit/review/fanout.py"
+lines = [362, 370]
+severity = "major"
+verdict = "real"
+confirmed = false
+claim = "route_calibrated's nit-cap guard requires duplicate_of is None, so when a POST-judged nit canonical flips to NIT_SUPPRESSED its merged-away duplicates keep the stale POST disposition and the record/attestation disagree."
+[labels.provenance]
+kind = "confirmed-thread"
+ref = "https://github.com/arthur-debert/shipit/pull/662#discussion_r3554844161"
+
+[[labels]]
+id = "shipit-662-L3"
+pr = "shipit-662"
+file = "src/shipit/verbs/pr/review.py"
+lines = [221, 236]
+severity = "minor"
+verdict = "real"
+confirmed = false
+claim = "The child _run entrypoint accepts a negative --nit-cap via the CLI and forwards it into the run path instead of failing cleanly at the process boundary like the --calibrator-* guards, breaking parity with config validation."
+[labels.provenance]
+kind = "fix-commit"
+ref = "0ffe9098a1530c0d194b4b8ccbda62875b510827"
+
+[[labels]]
+id = "dodot-224-L1"
+pr = "dodot-224"
+file = "crates/dodot-lib/src/commands/up.rs"
+lines = [204, 207]
+severity = "major"
+verdict = "real"
+confirmed = false
+claim = "The stale-state sweep runs over the pack_filter-narrowed ignored set (ignored.dir_names) while the init script is regenerated from the whole datastore, so a filtered `dodot up <other-pack>` leaves a now-ignored pack's state in place and the regenerated init script keeps sourcing it."
+[labels.provenance]
+kind = "confirmed-thread"
+ref = "291210986c84fd9789bcdf3d50e770207983ea73"
+
+[[labels]]
+id = "dodot-224-L2"
+pr = "dodot-224"
+file = "crates/dodot-lib/src/commands/down.rs"
+lines = [81, 88]
+severity = "major"
+verdict = "real"
+confirmed = false
+claim = "`down` sweeps only the filter-narrowed ignored set while regenerating the global init script from the full datastore, so a filtered `dodot down` leaves stale state for now-ignored packs outside the filter that the init script keeps sourcing."
+[labels.provenance]
+kind = "confirmed-thread"
+ref = "291210986c84fd9789bcdf3d50e770207983ea73"
+
+[[labels]]
+id = "dodot-224-L3"
+pr = "dodot-224"
+file = "crates/dodot-lib/src/commands/down.rs"
+lines = [81, 88]
+severity = "major"
+verdict = "real"
+confirmed = false
+claim = "The any_removed stale-state count is computed inside the `if !ctx.dry_run` block, so `down --dry-run` reports 'Nothing to deactivate.' while a real run would sweep the now-ignored pack and report 'Packs deactivated.' — dry-run and real output diverge."
+[labels.provenance]
+kind = "confirmed-thread"
+ref = "291210986c84fd9789bcdf3d50e770207983ea73"

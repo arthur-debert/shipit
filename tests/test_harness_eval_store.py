@@ -11,6 +11,9 @@ scatter-bug fix: two clones of one repo at different paths share ONE store file.
 from __future__ import annotations
 
 import json
+import logging
+import subprocess
+import sys
 
 from shipit.harness.eval import store
 from shipit.identity import Owner, OwnerKind, Repo
@@ -43,15 +46,95 @@ def test_read_records_missing_store_is_empty(tmp_path):
     assert store.read_records(_repo(), base_dir=tmp_path / "state") == []
 
 
-def test_read_records_skips_a_corrupt_line(tmp_path):
+def test_read_records_skips_a_corrupt_line_loudly(tmp_path, caplog):
     base = tmp_path / "state"
     repo = _repo()
     path = store.append_record({"a": 1}, repo, base_dir=base)
     with path.open("a", encoding="utf-8") as fh:
         fh.write("{not json\n")
     store.append_record({"a": 2}, repo, base_dir=base)
-    # One corrupt line must not blind the reader to the intact records around it.
-    assert store.read_records(repo, base_dir=base) == [{"a": 1}, {"a": 2}]
+    # One corrupt line must not blind the reader to the intact records around
+    # it — but it surfaces as a WARNING naming the file and 1-based line number
+    # (RVW03-WS03), so a corrupted round never silently reads as "nothing here".
+    with caplog.at_level(logging.WARNING, logger="shipit.harness"):
+        assert store.read_records(repo, base_dir=base) == [{"a": 1}, {"a": 2}]
+    warning = "\n".join(r.getMessage() for r in caplog.records)
+    assert str(path) in warning
+    assert "line 2" in warning
+
+
+def test_read_records_warns_on_a_non_object_line(tmp_path, caplog):
+    # A parseable-but-wrong-shape line (a bare JSON array/string) is malformed
+    # for this store too — skipped, and just as loudly as invalid JSON.
+    base = tmp_path / "state"
+    repo = _repo()
+    path = store.append_record({"a": 1}, repo, base_dir=base)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write('["not", "a", "record"]\n')
+    with caplog.at_level(logging.WARNING, logger="shipit.harness"):
+        assert store.read_records(repo, base_dir=base) == [{"a": 1}]
+    warning = "\n".join(r.getMessage() for r in caplog.records)
+    assert str(path) in warning
+    assert "line 2" in warning
+    assert "list" in warning
+
+
+def test_intact_reads_emit_no_malformed_warning(tmp_path, caplog):
+    base = tmp_path / "state"
+    repo = _repo()
+    store.append_record({"a": 1}, repo, base_dir=base)
+    with caplog.at_level(logging.WARNING, logger="shipit.harness"):
+        assert store.read_records(repo, base_dir=base) == [{"a": 1}]
+    assert not caplog.records
+
+
+#: One appender process: N appends of a record whose payload is LARGER than the
+#: default 8KiB writer buffer, so an unserialized append would flush in multiple
+#: chunks and interleave with a concurrent process's chunks. Argv:
+#: <base_dir> <who> <count>.
+_APPENDER = """
+import sys
+from pathlib import Path
+
+from shipit.harness.eval import store
+from shipit.identity import Owner, Repo
+
+base, who, count = Path(sys.argv[1]), sys.argv[2], int(sys.argv[3])
+repo = Repo(owner=Owner(login="acme"), name="widget")
+payload = who * 65536
+for i in range(count):
+    store.append_record({"who": who, "i": i, "payload": payload}, repo, base_dir=base)
+"""
+
+
+def test_concurrent_appends_from_separate_processes_do_not_corrupt(tmp_path):
+    """The RVW03-WS03 stress test: parallel settles append to ONE per-repo JSONL
+    from separate processes. Each record's payload (64KiB) exceeds the writer's
+    buffer, so without the append lock two processes' flush chunks would
+    interleave and splice records into malformed lines. Every appended record
+    must read back complete and intact."""
+    base = tmp_path / "state"
+    writers, appends_each = 4, 8
+    procs = [
+        subprocess.Popen(
+            [sys.executable, "-c", _APPENDER, str(base), who, str(appends_each)],
+        )
+        for who in ("a", "b", "c", "d")
+    ]
+    for proc in procs:
+        assert proc.wait(timeout=120) == 0
+
+    records = store.read_records(_repo(), base_dir=base)
+    # Nothing corrupt: every append reads back (a malformed line would have been
+    # skipped by the loud reader and break the count), each one intact.
+    assert len(records) == writers * appends_each
+    seen = set()
+    for record in records:
+        assert record["payload"] == record["who"] * 65536
+        seen.add((record["who"], record["i"]))
+    assert seen == {
+        (who, i) for who in ("a", "b", "c", "d") for i in range(appends_each)
+    }
 
 
 def test_store_path_is_outside_the_repo_tree(tmp_path):

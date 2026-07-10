@@ -34,7 +34,10 @@ selects on the record's flat fields — ``--pr <n>``, ``--session
 <id|current>`` (``current`` resolved via :mod:`shipit.session.current`: the
 session environment first, the ephemeral Tree leaf second, ADR-0027),
 ``--epic <code>``, ``--ws <n>`` (accepting ``1``, ``01``, or ``WS01``), and
-``--agent <id>`` / ``--role <name>``. All AND-composed, applied client-side
+``--agent <id>`` / ``--role <name>`` — plus the review-observability trio
+(RVW03-WS02) selecting on the review sub-agents' correlation extras:
+``--reviewer <name>``, ``--run <id>`` (one pass/calibrator run), and
+``--round <id>`` (one fan-out round). All AND-composed, applied client-side
 before the tail count, uniform across the static, ``--raw``, and
 ``--follow`` views (:class:`shipit.logread.Filter` is the one predicate).
 
@@ -172,6 +175,9 @@ def build_query(
     ws: int | str | None = None,
     agent: str | None = None,
     role: str | None = None,
+    reviewer: str | None = None,
+    run_id: str | None = None,
+    round_id: str | None = None,
     tail: int = DEFAULT_TAIL,
     follow: bool = False,
     raw: bool = False,
@@ -209,6 +215,9 @@ def build_query(
             ws=ws,
             agent=agent,
             role=role,
+            reviewer=reviewer,
+            run_id=run_id,
+            round_id=round_id,
             tail=tail,
             follow=follow,
             raw=raw,
@@ -404,6 +413,29 @@ def run(
     help="Only records whose bound `role` domain key equals this Role name.",
 )
 @click.option(
+    "--reviewer",
+    "reviewer",
+    default=None,
+    metavar="NAME",
+    help="Only records whose `reviewer` field equals this reviewing agent.",
+)
+@click.option(
+    "--run",
+    "run_id",
+    default=None,
+    metavar="ID",
+    help="Only records whose `run_id` field equals this review sub-agent run "
+    "(one dimension/incremental pass or calibrator run).",
+)
+@click.option(
+    "--round",
+    "round_id",
+    default=None,
+    metavar="ID",
+    help="Only records whose `round_id` field equals this review round "
+    "(one fan-out round's passes group under one id).",
+)
+@click.option(
     "--flow",
     is_flag=True,
     help="Render the filtered records as the session story (implies --events).",
@@ -427,6 +459,9 @@ def logs_cmd(
     ws: str | None,
     agent: str | None,
     role: str | None,
+    reviewer: str | None,
+    run_id: str | None,
+    round_id: str | None,
     flow: bool,
     show_agents: bool,
 ) -> None:
@@ -439,8 +474,10 @@ def logs_cmd(
     prints the path plus the last N records, rendered legibly (ts LEVEL logger:
     msg, domain keys trailing); a malformed line is skipped with a stderr note.
     --raw passes the stored lines through unmodified for jq — no parsing, no
-    skipping, malformed lines included — UNLESS a filter is active. --events and
-    the domain-key filters (--pr/--session/--epic/--ws/--agent/--role) compose
+    skipping, malformed lines included — UNLESS a filter is active. --events,
+    the domain-key filters (--pr/--session/--epic/--ws/--agent/--role), and the
+    review filters (--reviewer/--run/--round, on the review sub-agents'
+    correlation extras) compose
     as AND, apply before the tail count, and work with every view; selecting on
     a field requires parsing, so under an active filter even --raw parses and
     drops a malformed line rather than passing it through. --flow renders the
@@ -458,6 +495,9 @@ def logs_cmd(
         ws=ws,
         agent=agent,
         role=role,
+        reviewer=reviewer,
+        run_id=run_id,
+        round_id=round_id,
         tail=lines,
         follow=follow,
         raw=raw,

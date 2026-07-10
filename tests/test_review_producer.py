@@ -69,10 +69,11 @@ def _faked(monkeypatch):
 
 
 def test_codex_launches_in_the_tree_and_captures_the_review(_faked):
-    review = producer.run_tree_review(
+    captured = producer.run_tree_review(
         agent_backend.CODEX, _ctx(), launcher=_faked["launcher"]
     )
 
+    review = captured.review
     assert review["summary"]["status"] == "COMMENT"  # captured + parsed from stdout
     cmd = _faked["cmd"]
     # Launched as a codex reviewer (read-only posture), rooted in the read-only Tree.
@@ -93,7 +94,7 @@ def test_codex_launches_in_the_tree_and_captures_the_review(_faked):
 
 
 def test_agy_maps_to_the_antigravity_adapter_with_prose_schema(_faked):
-    review = producer.run_tree_review(
+    captured = producer.run_tree_review(
         agent_backend.ANTIGRAVITY,
         _ctx(),
         model="pro",
@@ -101,7 +102,7 @@ def test_agy_maps_to_the_antigravity_adapter_with_prose_schema(_faked):
         launcher=_faked["launcher"],
     )
 
-    assert review["summary"]["status"] == "COMMENT"
+    assert captured.review["summary"]["status"] == "COMMENT"
     cmd = _faked["cmd"]
     assert cmd[0] == "agy"
     # agy is rooted via --add-dir <Tree> (it ignores process cwd) and carries the timeout.
@@ -259,16 +260,26 @@ def test_dry_run_prints_argv_and_never_launches_or_clones(monkeypatch, capsys):
         launched.append(1)
         return LaunchResult(returncode=0, stdout=_VALID, stderr="")
 
-    review = producer.run_tree_review(
-        agent_backend.CODEX, _ctx(), dry_run=True, launcher=launcher
+    # Request a reasoning level: codex DOES carry a knob, so the adapter would
+    # apply it to a REAL launch — but a dry run launches nothing, so the captured
+    # result must still report reasoning unset (not the requested "low").
+    captured = producer.run_tree_review(
+        agent_backend.CODEX, _ctx(), dry_run=True, launcher=launcher, reasoning="low"
     )
 
-    assert review["summary"]["overall_feedback"] == "(dry-run)"
+    assert captured.review["summary"]["overall_feedback"] == "(dry-run)"
+    # A dry run bills no model, so it MEASURES no usage and applies no reasoning:
+    # both are the explicit-unknown/unset state, never a fabricated/echoed value.
+    assert captured.usage.total_tokens is None
+    assert captured.reasoning is None
     assert not cloned  # no Tree cloned
     assert not launched  # no model billed
     out = capsys.readouterr().out
     assert "dry-run" in out
     assert "codex" in out and "exec" in out  # the would-run argv is shown
+    # the requested level is not LOST — it rides the printed would-run argv,
+    # which is why the captured (unlaunched) result need not echo it.
+    assert "model_reasoning_effort=low" in out
 
 
 def test_missing_cli_fails_loud(monkeypatch):
@@ -277,6 +288,48 @@ def test_missing_cli_fails_loud(monkeypatch):
         producer.run_tree_review(
             agent_backend.CODEX, _ctx(), launcher=lambda *a, **k: None
         )
+
+
+def test_preflight_round_passes_when_every_binary_is_on_path(monkeypatch):
+    monkeypatch.setattr(producer.shutil, "which", lambda binary: f"/usr/bin/{binary}")
+    producer.preflight_round([agent_backend.CODEX, agent_backend.CLAUDE])  # no raise
+
+
+def test_preflight_round_names_each_missing_binary_in_one_error(monkeypatch):
+    """RVW03-WS03: the round-level preflight raises ONE actionable
+    BackendUnavailable naming every missing binary — the 'binary X not found —
+    install/configure it' shape — instead of letting each pass discover the
+    miss and report 'all N dimension passes failed'."""
+    monkeypatch.setattr(
+        producer.shutil,
+        "which",
+        lambda binary: None if binary in ("codex", "claude") else f"/usr/bin/{binary}",
+    )
+    with pytest.raises(BackendUnavailable) as exc:
+        producer.preflight_round(
+            [agent_backend.CODEX, agent_backend.CLAUDE, agent_backend.ANTIGRAVITY]
+        )
+    message = str(exc.value)
+    assert "binary 'codex' not found — install/configure it" in message
+    assert "binary 'claude' not found — install/configure it" in message
+    assert "no passes were launched" in message
+    assert "agy" not in message  # the present binary is not blamed
+
+
+def test_preflight_round_checks_a_duplicate_binary_once(monkeypatch):
+    """Two round entries sharing one binary (reviewer + calibrator on the same
+    backend) are one check and, when missing, one blame line."""
+    checked: list[str] = []
+
+    def which(binary):
+        checked.append(binary)
+        return None
+
+    monkeypatch.setattr(producer.shutil, "which", which)
+    with pytest.raises(BackendUnavailable) as exc:
+        producer.preflight_round([agent_backend.CODEX, agent_backend.CODEX])
+    assert checked == ["codex"]
+    assert str(exc.value).count("codex") == 2  # the binary + the backend name
 
 
 def test_missing_head_branch_is_a_clean_failure(_faked):
@@ -367,14 +420,14 @@ def test_dimension_pass_reuses_the_handed_in_tree_and_scopes_the_prompt(
         raise AssertionError("tree_path was handed in; no re-provisioning")
 
     monkeypatch.setattr(producer, "create_readonly", boom)
-    review = producer.run_tree_review(
+    captured = producer.run_tree_review(
         agent_backend.CODEX,
         _ctx(),
         launcher=_faked["launcher"],
         dimension=by_name("security-robustness"),
         tree_path="/trees/shared/leaf",
     )
-    assert review["summary"]["status"] == "COMMENT"
+    assert captured.review["summary"]["status"] == "COMMENT"
     assert _faked["cwd"] == "/trees/shared/leaf"
     prompt = _faked["cmd"][-1]
     assert "DIMENSION FOCUS — Security / robustness" in prompt
@@ -394,18 +447,78 @@ def test_pass_task_text_matches_the_launched_prompt(_faked):
     assert task in _faked["cmd"][-1]
 
 
+def _range_view():
+    from shipit.identity import Sha
+    from shipit.review.diff import RangeView
+
+    return RangeView(
+        repo=repo_from_slug("acme/widget"),
+        base_sha=Sha("a" * 40),
+        head_sha=Sha("b" * 40),
+        diff="diff --git a/x b/x\n",
+        changed_files=["x"],
+        workdir="/checkout",
+    )
+
+
+def test_range_dimension_pass_runs_offline_with_the_range_scoped_focus(_faked):
+    # RVW03-WS01: the offline fan-out replay narrows the RANGE task to one
+    # dimension exactly like the PR task — same focus slice — launched in the
+    # replay checkout with NO Tree and NO gh. Scope rides the shared
+    # `_scope_and_context` baseline over the range's own `git diff` fetch
+    # (ADR-0050), carrying the RANGE diff noun, never a `gh pr diff`.
+    from shipit.review.dimensions import by_name
+
+    view = _range_view()
+    captured = producer.run_range_review(
+        agent_backend.CODEX,
+        view,
+        launcher=_faked["launcher"],
+        dimension=by_name("correctness"),
+    )
+    assert captured.review["summary"]["status"] == "COMMENT"
+    assert _faked["cwd"] == "/checkout"
+    prompt = _faked["cmd"][-1]
+    assert f"git diff {'a' * 40}..{'b' * 40}" in prompt
+    assert "DIMENSION FOCUS — Correctness" in prompt
+    # The shared scope baseline reaches the range pass and names the range's diff.
+    assert "report ONLY findings this range's diff INTRODUCED or EXPOSED" in prompt
+    assert "this PR's diff" not in prompt
+    assert "gh pr diff" not in prompt
+
+
+def test_range_pass_task_text_matches_the_launched_prompt(_faked):
+    # The offline fan-out's variant source: `range_pass_task_text` re-derives
+    # the exact task `run_range_review` composes, so a replayed pass's
+    # `round.runs` variant hashes the prompt content that actually ran.
+    from shipit.review.dimensions import by_name
+
+    dim = by_name("test-quality")
+    view = _range_view()
+    producer.run_range_review(
+        agent_backend.CODEX, view, launcher=_faked["launcher"], dimension=dim
+    )
+    task = producer.range_pass_task_text(agent_backend.CODEX, view, dimension=dim)
+    assert task in _faked["cmd"][-1]
+
+
+def test_range_pass_task_text_rejects_a_non_funnel_backend():
+    with pytest.raises(ValueError, match="unknown funnel review backend"):
+        producer.range_pass_task_text(agent_backend.CLAUDE, _range_view())
+
+
 def test_incremental_range_launches_the_fix_range_task(_faked):
     # RVW02-WS06: an incremental round launches the fix-range task (git diff
     # base..head, NOT `gh pr diff`) with mandated neighborhood context, and
     # `pass_task_text` re-derives the SAME prompt for the round-record variant.
-    review = producer.run_tree_review(
+    captured = producer.run_tree_review(
         agent_backend.CODEX,
         _ctx(),
         launcher=_faked["launcher"],
         incremental_range=("b" * 40, "c" * 40),
         tree_path="/trees/shared/leaf",
     )
-    assert review["summary"]["status"] == "COMMENT"
+    assert captured.review["summary"]["status"] == "COMMENT"
     prompt = _faked["cmd"][-1]
     assert f"git diff {'b' * 40}..{'c' * 40}" in prompt
     assert "MANDATORY CONTEXT EXPANSION" in prompt
@@ -458,3 +571,214 @@ def test_provision_review_tree_requires_a_head_branch(monkeypatch):
     )
     with _pytest.raises(RuntimeError, match="head branch"):
         producer.provision_review_tree(ctx)
+
+
+def test_codex_usage_is_captured_from_the_stderr_tokens_line(_faked):
+    # RVW03-WS04 (#667): codex 0.139 reports its token total on STDERR as a
+    # human log line ("tokens used" + a comma-grouped figure, probed). The
+    # capture must read it at launch-result level — no transcript join.
+    def launcher(cmd, *, cwd, env, timeout=None):
+        return LaunchResult(
+            returncode=0,
+            stdout=_VALID,
+            stderr="OpenAI Codex v0.139.0\ncodex\nOK\ntokens used\n11,943\n",
+        )
+
+    captured = producer.run_tree_review(agent_backend.CODEX, _ctx(), launcher=launcher)
+    assert captured.usage.total_tokens == 11943
+    assert captured.usage.reported is True
+
+
+def test_codex_usage_without_the_tokens_line_reads_unreported_not_zero(_faked):
+    # A CLI formatting drift must degrade to the HONEST unknown, never a zero.
+    captured = producer.run_tree_review(
+        agent_backend.CODEX, _ctx(), launcher=_faked["launcher"]
+    )
+    assert captured.usage.total_tokens is None
+    assert captured.usage.reported is False
+
+
+def test_agy_usage_is_explicitly_unreported(_faked):
+    # agy 1.1.1 reports NO usage anywhere (probed) — the record must say so
+    # explicitly (total None) rather than fabricating a number.
+    captured = producer.run_tree_review(
+        agent_backend.ANTIGRAVITY, _ctx(), launcher=_faked["launcher"]
+    )
+    assert captured.usage.total_tokens is None
+    assert captured.usage.as_record()["source"] == "unreported"
+
+
+def test_reasoning_reaches_codex_argv_and_the_capture_reports_it(_faked):
+    # RVW03-WS04 (#685): a requested ReasoningLevel must land in REAL argv where
+    # the CLI has a knob — codex's `-c model_reasoning_effort=<level>` — and the
+    # capture reports the level actually applied (what records stamp).
+    captured = producer.run_tree_review(
+        agent_backend.CODEX, _ctx(), launcher=_faked["launcher"], reasoning="low"
+    )
+    cmd = _faked["cmd"]
+    assert "model_reasoning_effort=low" in cmd
+    assert cmd[cmd.index("model_reasoning_effort=low") - 1] == "-c"
+    assert captured.reasoning == "low"
+
+
+def test_reasoning_unset_leaves_codex_argv_bare_and_reports_none(_faked):
+    captured = producer.run_tree_review(
+        agent_backend.CODEX, _ctx(), launcher=_faked["launcher"]
+    )
+    assert not any("model_reasoning_effort" in arg for arg in _faked["cmd"])
+    assert captured.reasoning is None
+
+
+def test_reasoning_is_dropped_for_agy_and_never_echoed(_faked):
+    # agy has NO reasoning knob (probed 1.1.1): the requested level must NOT
+    # ride its argv, and the capture must report None — the record then reads
+    # "unset" instead of echoing a config value that never ran (#685).
+    captured = producer.run_tree_review(
+        agent_backend.ANTIGRAVITY, _ctx(), launcher=_faked["launcher"], reasoning="low"
+    )
+    assert not any("reasoning" in arg or "effort" in arg for arg in _faked["cmd"])
+    assert captured.reasoning is None
+
+
+# ---------------------------------------------------------------------------
+# RVW03-WS02 — the launch seam fills the per-run artifact bundle, every path
+# ---------------------------------------------------------------------------
+
+
+def _bundle(tmp_path):
+    from shipit.review.artifacts import RunArtifacts
+
+    return RunArtifacts(tmp_path / "bundle")
+
+
+def test_success_launch_fills_the_bundle(_faked, tmp_path):
+    import json
+
+    bundle = _bundle(tmp_path)
+    producer.run_tree_review(
+        agent_backend.CODEX,
+        _ctx(),
+        launcher=_faked["launcher"],
+        run_id="run-1",
+        artifacts=bundle,
+    )
+    # The EXACT prompt the launch composed — the same bytes pass_task_text derives.
+    expected_task = producer.pass_task_text(agent_backend.CODEX, _ctx().number)
+    assert (bundle.dir / "prompt.txt").read_text() == expected_task
+    assert (bundle.dir / "stdout.raw").read_text() == _VALID
+    assert (bundle.dir / "stderr.raw").read_text() == ""
+    meta = json.loads((bundle.dir / "meta.json").read_text())
+    assert meta["exit_code"] == 0
+    assert meta["timed_out"] is False
+    assert meta["argv"] == _faked["cmd"]
+    assert "duration_ms" in meta
+
+
+def test_nonzero_exit_bundle_keeps_full_raw_and_logs_point_at_it(
+    _faked, tmp_path, caplog
+):
+    import json
+    import logging
+
+    long_err = "x" * 2000  # far past the 500-char message truncation
+
+    def launcher(cmd, *, cwd, env, timeout=None):
+        return LaunchResult(returncode=1, stdout="partial out", stderr=long_err)
+
+    bundle = _bundle(tmp_path)
+    caplog.set_level(logging.WARNING, logger="shipit.review")
+    with pytest.raises(RuntimeError) as exc:
+        producer.run_tree_review(
+            agent_backend.CODEX,
+            _ctx(),
+            launcher=launcher,
+            artifacts=bundle,
+            run_id="run-x",
+        )
+    # The absolute bundle path is kept OUT of the raised message — that message
+    # crosses into the GitHub-facing funnel check summary and must not leak a
+    # user-home / state path. The LOCAL log points a developer at the full raw.
+    assert str(bundle.dir) not in str(exc.value)
+    assert str(bundle.dir) in caplog.text
+    # The breadcrumb carries correlation extras so `shipit logs --run/--reviewer`
+    # selects the very line that says where the raw output lives.
+    [breadcrumb] = [r for r in caplog.records if "full raw output at" in r.getMessage()]
+    assert breadcrumb.run_id == "run-x"
+    assert breadcrumb.reviewer == "codex"
+    # The bundle carries the UNtruncated streams + the exit meta.
+    assert (bundle.dir / "stderr.raw").read_text() == long_err
+    assert (bundle.dir / "stdout.raw").read_text() == "partial out"
+    meta = json.loads((bundle.dir / "meta.json").read_text())
+    assert meta["exit_code"] == 1
+
+
+def test_seam_timeout_bundle_keeps_partial_streams_and_timed_out_meta(_faked, tmp_path):
+    import json
+
+    def launcher(cmd, *, cwd, env, timeout=None):
+        raise execrun.ExecError(
+            cmd,
+            rc=None,
+            stdout="partial body",
+            stderr="killed at deadline",
+            cause=execrun.CAUSE_TIMEOUT,
+        )
+
+    bundle = _bundle(tmp_path)
+    with pytest.raises(BackendError):
+        producer.run_tree_review(
+            agent_backend.CODEX, _ctx(), launcher=launcher, artifacts=bundle
+        )
+    assert (bundle.dir / "stdout.raw").read_text() == "partial body"
+    assert (bundle.dir / "stderr.raw").read_text() == "killed at deadline"
+    meta = json.loads((bundle.dir / "meta.json").read_text())
+    assert meta["timed_out"] is True
+    assert meta["exit_code"] is None
+    # The prompt was written BEFORE the launch, so a killed child leaves it.
+    assert (bundle.dir / "prompt.txt").exists()
+
+
+def test_exit_zero_timeout_marker_corrects_the_bundle_timed_out_meta(_faked, tmp_path):
+    import json
+
+    from shipit.review.backends.base import _TIMEOUT_MARKER
+
+    # Exit 0, but the stdout is unparseable AND carries the timeout marker:
+    # parse_review_output raises BackendError(timed_out=True). The launch seam
+    # optimistically recorded timed_out=False before the parse — the meta must be
+    # CORRECTED to True so the bundle never claims a real timeout was a clean run.
+    def launcher(cmd, *, cwd, env, timeout=None):
+        return LaunchResult(returncode=0, stdout=f"...{_TIMEOUT_MARKER}...", stderr="")
+
+    bundle = _bundle(tmp_path)
+    with pytest.raises(BackendError) as exc:
+        producer.run_tree_review(
+            agent_backend.CODEX, _ctx(), launcher=launcher, artifacts=bundle
+        )
+    assert exc.value.timed_out is True
+    meta = json.loads((bundle.dir / "meta.json").read_text())
+    assert meta["exit_code"] == 0
+    assert meta["timed_out"] is True
+
+
+def test_range_review_fills_the_bundle_too(monkeypatch, tmp_path):
+    import json
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(producer.shutil, "which", lambda binary: f"/usr/bin/{binary}")
+
+    def launcher(cmd, *, cwd, env, timeout=None):
+        return LaunchResult(returncode=0, stdout=_VALID, stderr="")
+
+    view = SimpleNamespace(workdir=str(tmp_path), base_sha="a" * 40, head_sha="b" * 40)
+    bundle = _bundle(tmp_path)
+    producer.run_range_review(
+        agent_backend.CODEX, view, launcher=launcher, run_id="r", artifacts=bundle
+    )
+    assert (bundle.dir / "prompt.txt").read_text()
+    assert (bundle.dir / "stdout.raw").read_text() == _VALID
+    # Range and Tree passes share `_launch_and_capture`, so the correlation meta
+    # must land on this path too — exit code and the caller's run id serialized.
+    meta = json.loads((bundle.dir / "meta.json").read_text())
+    assert meta["exit_code"] == 0
+    assert meta["timed_out"] is False

@@ -35,7 +35,9 @@ from ..provision.lexd import ProvisionError
 from ..prstate.errors import PrStateError
 from ..prstate.flip import NotReady
 from ..prstate.reviewers_config import RequiredReviewersConfigError
+from ..review.cell import CellError
 from ..review.diff import ReviewError
+from ..review.groundtruth import FixtureError
 from ..spawn.subagent import SpawnError
 from ..tree.layout import LayoutError
 from ..tree.removal import RemovalError
@@ -56,7 +58,9 @@ from ._context import NoAmbientRepoError
 #: unresolvable candidate build, a selector outside the declared portfolio —
 #: TOL01-WS07), and the review path's precondition refusals (a bad commit
 #: range / unknown revision / repo-less checkout in `pr review replay` —
-#: RVW02-WS03). Extended
+#: RVW02-WS03), and the Review Lab's refusals (an untrustworthy cell file /
+#: unfair pair / missing checkout in `lab run`/`lab report`, and an
+#: untrustworthy ground-truth fixture — RVW03-WS07). Extended
 #: deliberately, one entry per new domain refusal, as verbs adopt the shell.
 KNOWN_ERRORS: tuple[type[Exception], ...] = (
     execrun.ExecError,
@@ -75,6 +79,8 @@ KNOWN_ERRORS: tuple[type[Exception], ...] = (
     ProvisionError,
     SweepError,
     ReviewError,
+    CellError,
+    FixtureError,
 )
 
 

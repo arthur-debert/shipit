@@ -190,3 +190,19 @@ def test_output_schema_path_is_accepted_and_ignored():
     )
     assert "--output-schema" not in cmd
     assert "/tmp/s.json" not in cmd
+
+
+def test_agy_has_no_reasoning_knob_and_reports_none():
+    # RVW03-WS04 (#685): agy carries NO reasoning/effort flag (probed 1.1.1), so
+    # by design the adapter takes no `reasoning` parameter and inherits the base
+    # `reasoning = None` (see AntigravityAdapter's docstring). This pins the
+    # OBSERVABLE contract — `reasoning is None` and no effort/reasoning knob in
+    # argv, the record stamp for "unset", never an echoed config value the CLI
+    # ignored — rather than the constructor signature, so it stays the arbiter
+    # of what agy actually runs however the adapter is later refactored.
+    from shipit.spawn.backends import antigravity as agy_backend
+
+    adapter = agy_backend.AntigravityAdapter()
+    assert adapter.reasoning is None
+    cmd = adapter.build_command("task", "reviewer", read_only=True, cwd="/tree")
+    assert not any("effort" in arg or "reasoning" in arg for arg in cmd)

@@ -38,18 +38,24 @@ past the Breaker.
 
 Launching (:func:`run_calibrator`) rides the SAME spawn seam as every other
 agent launch (:mod:`shipit.spawn.backends` adapter + :func:`shipit.spawn.launch.launch`),
-read-only in the shared Tree so the judge can verify evidence against the real
-checkout. The ``claude`` result envelope (``--output-format json``) is
-unwrapped here, and its ``session_id`` becomes the calibrator's run id — the
-handle the round record's ``round.runs`` joins to eval records; a backend with
-no envelope gets a minted id.
+read-only in the shared Tree (live path) or the replay checkout (offline
+fan-out replay, RVW03-WS01 — where the judge's ground truth is the range's
+``git diff``, matching the passes' own diff source) so the judge can verify
+evidence against the real checkout. The ``claude`` result envelope
+(``--output-format json``) is unwrapped here: its ``session_id`` becomes the
+calibrator's run id (a backend with no envelope gets a minted id) and its
+``usage`` block becomes the run's measured token cost (RVW03-WS04 — captured at
+launch-result level; the round record's ``round.runs`` entry carries it, no
+transcript join involved).
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import re
 import shutil
+import time
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -69,8 +75,12 @@ from ..spawn.backends.antigravity import AntigravityAdapter
 from ..spawn.backends.claude import ClaudeAdapter
 from ..spawn.backends.codex import CodexAdapter
 from ..tree.cleanup import parse_duration
+from .artifacts import RunArtifacts
 from .backends import BackendError, BackendUnavailable
 from .schema import extract_json
+from .usage import UNREPORTED, TokenUsage, from_claude_envelope, from_codex_stderr
+
+logger = logging.getLogger("shipit.review")
 
 #: The role the calibrator launches under — the read-only reviewer posture
 #: (mirrors :data:`shipit.review.producer._REVIEWER_ROLE`): the judge reads the
@@ -90,10 +100,12 @@ class CalibratorConfig:
     ``backend`` is a spawn-adapter token (``claude`` / ``codex`` /
     ``antigravity``); ``model`` an optional verbatim/alias model id (``None`` →
     the backend's own default); ``reasoning`` the chosen
-    :class:`~shipit.agent.invocation.ReasoningLevel` token (recorded on the
-    round record's calibrator run and threaded to backends that carry a knob
-    for it — none of today's CLIs do, so today it is config + record, not an
-    argv flag); ``timeout`` the launch-seam process deadline (canonical
+    :class:`~shipit.agent.invocation.ReasoningLevel` token, threaded to REAL
+    argv where the backend carries a knob (RVW03-WS04, #685: ``claude
+    --effort``; codex ``-c model_reasoning_effort``; agy has none) — the round
+    record's calibrator run stamps the level the adapter ACTUALLY applied, so
+    a knob-less backend records unset rather than echoing this config value;
+    ``timeout`` the launch-seam process deadline (canonical
     ``<N>s``). The shipped default is the ADR-0045 decision: ``claude`` at
     ``high`` reasoning.
 
@@ -201,8 +213,13 @@ shape — no prose, no markdown fences, nothing before or after it):
 }"""
 
 
-def build_calibrator_task(candidates_json: str, pr_number: int) -> str:
-    """Compose the calibrator task: judge ``candidates_json`` for PR ``pr_number``.
+def build_calibrator_task(
+    candidates_json: str,
+    *,
+    pr_number: int | None = None,
+    commit_range: tuple[str, str] | None = None,
+) -> str:
+    """Compose the calibrator task: judge ``candidates_json`` against its diff.
 
     The judge contract (ADR-0045, its verification floor amended by
     RVW02-WS08/F2 #665): never originate; dedup by
@@ -218,20 +235,66 @@ def build_calibrator_task(candidates_json: str, pr_number: int) -> str:
     cover EVERY candidate id exactly once (own ``id`` or another entry's
     ``merged``). ``candidates_json`` is the union as a JSON array of
     ``{id, dimension, file, line, severity, category, confidence, text,
-    evidence, fix}`` objects; the task embeds it whole — the judge reads the
-    checkout + ``gh pr diff`` for the ground truth it verifies against.
+    evidence, fix}`` objects; the task embeds it whole.
+
+    The GROUND-TRUTH source is the one target-conditional part (RVW03-WS01):
+    exactly one of ``pr_number`` (the live path — the judge reads
+    ``gh pr diff``) or ``commit_range`` (the offline fan-out replay — the judge
+    reads ``git diff <base>..<head>`` and is told it is offline, matching the
+    passes' own diff source) must be given; anything else is a caller error
+    raised loud as ``ValueError``.
     """
+    if (pr_number is None) == (commit_range is None):
+        raise ValueError(
+            "build_calibrator_task: exactly one of pr_number (live PR) and "
+            "commit_range (offline replay) must be given — the judge needs ONE "
+            "ground-truth diff source"
+        )
+    if commit_range is not None:
+        base_sha, head_sha = commit_range
+        situation = (
+            "You are running in a READ-ONLY checkout of a repository; the review "
+            "is an OFFLINE replay of one commit range — there is NO pull request "
+            "involved."
+        )
+        ground_truth = (
+            f"FIRST, get the ground truth: run `git diff {base_sha}..{head_sha}` "
+            "to read the range's unified diff. Do NOT call `gh` — this review is "
+            "offline and touches nothing on GitHub. Read the surrounding code in "
+            "this checkout wherever you need context to judge a candidate."
+        )
+        # The result sink and diff-scope nouns follow the offline framing too, so
+        # the body never contradicts `situation`/`ground_truth` by naming a PR or
+        # a GitHub post (RVW03-WS01). The passes reach the same offline scoping
+        # through the shared `_scope_and_context` baseline (carrying the range
+        # diff noun) plus their range diff fetch (ADR-0050); the calibrator
+        # states it inline because its prompt does not carry that baseline.
+        result_fate = "recorded in the local replay record"
+        diff_noun = "this range's diff"
+        summary_owner = "the review's"
+        settle = "records it locally"
+    else:
+        situation = (
+            "You are running in a shared, READ-ONLY checkout of pull request "
+            f"#{pr_number}'s head commit."
+        )
+        ground_truth = (
+            f"FIRST, get the ground truth: run `gh pr diff {pr_number}` to read "
+            "the pull request's unified diff (it uses the PR's ACTUAL base and "
+            "head — do NOT assume the base is `main`). Read the surrounding code "
+            "in this checkout wherever you need context to judge a candidate."
+        )
+        result_fate = "posted"
+        diff_noun = "this PR's diff"
+        summary_owner = "the posted review's"
+        settle = "posts it"
     return f"""\
 You are the review CALIBRATOR: the single judge of candidate code-review \
-findings. You are running in a shared, READ-ONLY checkout of pull request \
-#{pr_number}'s head commit. Parallel dimension-scoped review passes produced \
+findings. {situation} Parallel dimension-scoped review passes produced \
 the candidate findings below; your job is to turn that raw union into the one \
-calibrated result that gets posted.
+calibrated result that gets {result_fate}.
 
-FIRST, get the ground truth: run `gh pr diff {pr_number}` to read the pull \
-request's unified diff (it uses the PR's ACTUAL base and head — do NOT assume \
-the base is `main`). Read the surrounding code in this checkout wherever you \
-need context to judge a candidate.
+{ground_truth}
 
 THE CANDIDATE FINDINGS (a JSON array; each candidate has a stable "id"):
 {candidates_json}
@@ -260,10 +323,10 @@ major or critical must state a CONCRETE FAILURE SCENARIO in its "text" (what \
 inputs/state make it go wrong, and what happens); a minor or nit needs a clear \
 rationale. NEVER downgrade a finding's severity to keep it: verify it at the \
 severity it deserves, or — only when you have actually refuted it — drop it.
-4. Route scope: a verified finding that is beyond this PR's diff — a \
-pre-existing issue the passes were allowed to report — gets disposition \
-"out-of-scope" (it is persisted, not posted). Everything verified and \
-in-scope gets "post".
+4. Route scope: a verified finding that is beyond {diff_noun} — a \
+pre-existing issue a pass reported despite its diff-only scope — gets \
+disposition "out-of-scope" (it is persisted, not posted). Everything verified \
+and in-scope gets "post".
 5. NORMALIZE severity on the one ladder, ignoring the candidates' own \
 severity claims where wrong. The major/minor boundary is the MERGE-BLOCK \
 TEST: would a competent reviewer hold the merge for this? critical = merging \
@@ -276,14 +339,14 @@ exactly one entry's "merged" array. An id you drop silently, judge twice, or \
 invent is a contract violation and the whole calibration is rejected.
 
 Order the findings array highest severity first (critical, major, minor, \
-nit). In "summary.overall_feedback", give the posted review's summary \
+nit). In "summary.overall_feedback", give {summary_owner} summary \
 paragraph.
 
 {_CALIBRATION_SCHEMA_PROSE}
 
-Do NOT post anything — do not run `gh pr review` or comment on the PR; emit \
-the JSON object on stdout and stop. shipit validates and posts the calibrated \
-result."""
+Do NOT post anything — do not run `gh pr review` or comment anywhere; emit \
+the JSON object on stdout and stop. shipit validates the calibrated result \
+and {settle}."""
 
 
 def parse_calibration(
@@ -465,32 +528,75 @@ def _text_or(value: object, fallback: object) -> str:
     return fallback if isinstance(fallback, str) else ""
 
 
+@dataclass(frozen=True)
+class CalibratorRun:
+    """One calibrator launch's full capture (RVW03-WS04): the validated
+    calibration plus the launch's measurements.
+
+    ``run_id`` is the claude envelope's ``session_id`` when the backend yields
+    one, else a minted uuid hex; ``task`` the exact prompt that ran (the caller
+    variant-hashes it for the round record); ``usage`` the launch's token cost
+    as the CLI reported it (claude: the envelope's ``usage`` block; codex: the
+    stderr figure; agy: explicitly unreported); ``reasoning`` the ReasoningLevel
+    the adapter ACTUALLY wired into argv (``None`` = no knob applied — the
+    record stamps this, never ``config.reasoning``).
+    """
+
+    result: CalibrationResult
+    run_id: str
+    task: str
+    usage: TokenUsage
+    reasoning: str | None
+
+
 def run_calibrator(
     config: CalibratorConfig,
     union: Sequence[Mapping[str, object]],
     *,
-    pr_number: int,
     cwd: str,
+    pr_number: int | None = None,
+    commit_range: tuple[str, str] | None = None,
     launcher: launch.Runner | None = None,
-) -> tuple[CalibrationResult, str, str]:
-    """Launch the calibrator over ``union`` in the shared Tree at ``cwd`` and
-    return ``(result, run_id, task_text)``.
+    artifacts: RunArtifacts | None = None,
+    correlation: Mapping[str, object] | None = None,
+) -> CalibratorRun:
+    """Launch the calibrator over ``union`` in the checkout at ``cwd`` and
+    return its :class:`CalibratorRun`.
 
     The launch rides the shared spawn seam (adapter argv + auth-env scrub +
     :func:`shipit.spawn.launch.launch` under the ``config.timeout`` process
     deadline) with the read-only reviewer posture — the judge verifies evidence
-    against the real checkout but can neither edit nor post. ``run_id`` is the
-    claude envelope's ``session_id`` when the backend yields one (the honest
-    join key to eval records), else a minted uuid hex; ``task_text`` is the
-    exact prompt that ran (the caller variant-hashes it for the round record).
+    against the real checkout but can neither edit nor post. ``cwd`` is the
+    shared read-only Tree on the live path, the replay checkout on the offline
+    one; exactly one of ``pr_number`` / ``commit_range`` selects the judge's
+    ground-truth diff source (:func:`build_calibrator_task`, RVW03-WS01 — the
+    range form matches the passes' own ``git diff`` so an offline replay's judge
+    sees the same diff they did). ``config.reasoning`` reaches real argv where
+    the backend has a knob (:func:`_adapter_for`), and the returned ``reasoning``
+    is what was actually applied (RVW03-WS04).
+
+    ``artifacts`` (RVW03-WS02) is the judge run's fail-open bundle: the exact
+    task text is written before the launch, the RAW stdout/stderr + launch meta
+    (exit code, duration, timed-out flag, and — once unwrapped — the true run
+    id) after, on every path — so a calibrator failure (previously only
+    ``str(exc)``) leaves its full raw output inspectable on disk.
+
+    ``correlation`` (RVW03-WS02) is the fan-out's per-pass log-correlation extras
+    (``reviewer``/``round_id``/the stable surrogate ``run_id`` = ``calibrator``);
+    the raw-output DEBUG record carries them so ``shipit logs --run calibrator``
+    can slice the judge's trail alongside the round's progress events.
 
     Raises :class:`~shipit.review.backends.BackendUnavailable` (CLI missing),
     :class:`~shipit.review.backends.BackendError` (a launch-seam timeout / a
     nonzero child / unparseable output — carrying the raw for the salvage
     conventions), or :class:`CalibrationContractError` (parseable output that
     violates the judge contract) — the fan-out maps each to a degraded,
-    non-blocking round (ADR-0006).
+    non-blocking round (ADR-0006). Passing neither or both of ``pr_number`` /
+    ``commit_range`` is a CALLER contract violation and raises
+    :class:`ValueError` from :func:`build_calibrator_task` before any launch — a
+    programming bug at the call site, not a degraded round.
     """
+    sink = artifacts if artifacts is not None else RunArtifacts.disabled()
     identity = agent_backend.by_name(config.backend)
     if shutil.which(identity.binary) is None:
         raise BackendUnavailable(
@@ -498,10 +604,23 @@ def run_calibrator(
             f"{identity.binary!r} CLI on your PATH, but it was not found. "
             "Install it (and log it in), then re-run."
         )
-    task = build_calibrator_task(json.dumps(list(union), indent=2), pr_number=pr_number)
+    # The union candidates carry pass-plumbing the judge must not see (the
+    # RVW03-WS02 ``run_id`` correlation is the record's business, not part of
+    # the judged content — and prompt bytes are variant-hashed, so plumbing in
+    # the task would split experiment arms on non-content):
+    # serialize exactly the documented candidate shape.
+    candidates = [{k: v for k, v in c.items() if k != "run_id"} for c in union]
+    task = build_calibrator_task(
+        json.dumps(candidates, indent=2),
+        pr_number=pr_number,
+        commit_range=commit_range,
+    )
     adapter = _adapter_for(config)
     cmd = adapter.build_command(task, _CALIBRATOR_ROLE, read_only=True, cwd=cwd)
     deadline = float(parse_duration(config.timeout))
+    sink.write_prompt(task)
+    sink.record(argv=list(cmd), cwd=cwd, seam_deadline_s=deadline)
+    start = time.monotonic()
     try:
         result = launch.launch(
             cmd,
@@ -511,7 +630,15 @@ def run_calibrator(
             runner=launcher,
         )
     except execrun.ExecError as exc:
-        if exc.cause != execrun.CAUSE_TIMEOUT:
+        timed_out = exc.cause == execrun.CAUSE_TIMEOUT
+        sink.write_streams(exc.stdout, exc.stderr)
+        sink.record(
+            duration_ms=int((time.monotonic() - start) * 1000),
+            exit_code=None,
+            timed_out=timed_out,
+            error=str(exc),
+        )
+        if not timed_out:
             raise
         raise BackendError(
             f"the calibrator ({config.backend}) timed out — the launch seam "
@@ -520,47 +647,98 @@ def run_calibrator(
             raw=f"{exc.stdout}\n{exc.stderr}".strip(),
             timed_out=True,
         ) from exc
+    sink.write_streams(result.stdout, result.stderr)
+    sink.record(
+        duration_ms=int((time.monotonic() - start) * 1000),
+        exit_code=result.returncode,
+        timed_out=False,
+    )
+    # The judge's raw output at DEBUG (issue #681 item 2) — the passes get this
+    # via parse_review_output; the calibrator's parse (`_unwrap_output`) now has
+    # the same durable raw trail in the log sink, on top of the bundle on disk.
+    logger.debug(
+        "calibrator (%s) raw output for pr#%s (%d chars):\n%s",
+        config.backend,
+        pr_number,
+        len(result.stdout or ""),
+        result.stdout or "",
+        extra={**dict(correlation or {}), "pr": pr_number},
+    )
     if result.returncode != 0:
         detail = (result.stderr or "").strip() or (result.stdout or "").strip()
+        if sink.dir is not None:
+            # LOCAL breadcrumb to the full raw on disk; the absolute path stays
+            # OUT of the BackendError message, which the service surfaces in the
+            # GitHub-facing funnel check summary (no user-home / state leak).
+            logger.warning(
+                "the calibrator (%s) exited %d — full raw output at %s",
+                config.backend,
+                result.returncode,
+                sink.dir,
+                extra={**dict(correlation or {}), "pr": pr_number},
+            )
         raise BackendError(
             f"the calibrator ({config.backend}) exited {result.returncode}: "
             f"{detail[:500]}",
             raw=f"{result.stdout}\n{result.stderr}".strip(),
         )
-    payload, run_id = _unwrap_output(result.stdout or "", backend=config.backend)
-    return parse_calibration(payload, union), run_id, task
+    payload, run_id, envelope_usage = _unwrap_output(
+        result.stdout or "", backend=config.backend
+    )
+    sink.record(run_id=run_id)  # RVW03-WS02: the true run id into the bundle meta
+    if envelope_usage.reported:
+        usage = envelope_usage  # the claude envelope's own usage block
+    elif config.backend == "codex":
+        usage = from_codex_stderr(result.stderr or "")
+    else:
+        usage = UNREPORTED
+    return CalibratorRun(
+        result=parse_calibration(payload, union),
+        run_id=run_id,
+        task=task,
+        usage=usage,
+        reasoning=adapter.reasoning,
+    )
 
 
 def _adapter_for(config: CalibratorConfig):
     """The spawn :class:`~shipit.spawn.backends.base.BackendAdapter` instance
-    carrying ``config``'s model (and, for agy, its timeout) — a fresh per-run
-    adapter exactly like the producer builds per reviewer; the registry default
-    is used only when the config pins nothing beyond the backend."""
+    carrying ``config``'s model, its reasoning level where the backend has a
+    knob (RVW03-WS04), and, for agy, its timeout — a fresh per-run adapter
+    exactly like the producer builds per reviewer; the registry default is used
+    only for an unlisted-but-registered backend (whose knobs we don't know)."""
     if config.backend == "claude":
-        return ClaudeAdapter(model=config.model)
+        return ClaudeAdapter(model=config.model, reasoning=config.reasoning)
     if config.backend == "codex":
-        return (
-            CodexAdapter(model=config.model)
-            if config.model is not None
-            else resolve_adapter("codex")
-        )
+        # config.model None → the adapter's own backend-defined default, never a
+        # duplicated model literal here that could drift from the backend identity.
+        if config.model is None:
+            return CodexAdapter(reasoning=config.reasoning)
+        return CodexAdapter(model=config.model, reasoning=config.reasoning)
     if config.backend == "antigravity":
-        model = config.model if config.model is not None else "pro"
-        return AntigravityAdapter(model=model, timeout=config.timeout)
+        # agy has NO reasoning knob (probed 1.1.1): the config level is dropped
+        # here so the record stamps unset, never an echoed unapplied value.
+        # A None model defers to the adapter's own default (same non-duplication).
+        if config.model is None:
+            return AntigravityAdapter(timeout=config.timeout)
+        return AntigravityAdapter(model=config.model, timeout=config.timeout)
     # CalibratorConfig construction already validated backend membership; an
     # unlisted-but-registered backend falls back to its registry default.
     return resolve_adapter(config.backend)
 
 
-def _unwrap_output(stdout: str, *, backend: str) -> tuple[dict, str]:
-    """Parse a calibrator's stdout into ``(payload, run_id)``.
+def _unwrap_output(stdout: str, *, backend: str) -> tuple[dict, str, TokenUsage]:
+    """Parse a calibrator's stdout into ``(payload, run_id, usage)``.
 
     ``claude -p --output-format json`` wraps its answer in a result envelope
-    (``{"result": "<text>", "session_id": …}``); the payload is extracted from
-    the envelope's ``result`` text and the ``session_id`` becomes the run id —
-    the transcript-stem identity eval records join on. Any other shape (codex /
-    agy, or a claude run that emitted the object bare) parses directly and
-    mints a uuid run id. Unparseable output raises
+    (``{"result": "<text>", "session_id": …, "usage": …}``); the payload is
+    extracted from the envelope's ``result`` text, the ``session_id`` becomes
+    the run id, and the envelope's ``usage`` block becomes the launch's
+    measured token usage (RVW03-WS04 — captured at launch-result level, no
+    transcript join). Any other shape (codex / agy, or a claude run that
+    emitted the object bare) parses directly, mints a uuid run id, and reports
+    usage :data:`~shipit.review.usage.UNREPORTED` (the caller may still read a
+    non-envelope source, e.g. codex's stderr figure). Unparseable output raises
     :class:`~shipit.review.backends.BackendError` with the raw attached.
     """
     try:
@@ -571,9 +749,11 @@ def _unwrap_output(stdout: str, *, backend: str) -> tuple[dict, str]:
             raw=stdout,
         ) from exc
     run_id = ""
+    usage = UNREPORTED
     if "findings" not in parsed and isinstance(parsed.get("result"), str):
         session = parsed.get("session_id")
         run_id = str(session) if session else ""
+        usage = from_claude_envelope(parsed)
         try:
             parsed = extract_json(parsed["result"])
         except ValueError as exc:
@@ -582,4 +762,4 @@ def _unwrap_output(stdout: str, *, backend: str) -> tuple[dict, str]:
                 "parseable JSON payload",
                 raw=stdout,
             ) from exc
-    return parsed, run_id or uuid.uuid4().hex
+    return parsed, run_id or uuid.uuid4().hex, usage

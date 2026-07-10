@@ -229,6 +229,44 @@ def test_calibrator_task_drops_only_on_refutation_not_uncertainty():
     assert "never downgrade" in lowered
 
 
+def test_calibrator_task_pr_ground_truth_is_the_pr_diff():
+    task = build_calibrator_task("[]", pr_number=42)
+    assert "gh pr diff 42" in task
+    assert "pull request #42" in task
+    assert "posts it" in task
+
+
+def test_calibrator_task_range_ground_truth_is_the_offline_git_diff():
+    # RVW03-WS01: an offline fan-out replay's judge reads the SAME range diff
+    # the passes did (`git diff <base>..<head>`) — never `gh` — and is told the
+    # result is recorded locally, not posted.
+    task = build_calibrator_task("[]", commit_range=("a" * 40, "b" * 40))
+    assert f"git diff {'a' * 40}..{'b' * 40}" in task
+    assert "gh pr diff" not in task
+    assert "Do NOT call `gh`" in task
+    assert "NO pull request" in task
+    assert "records it locally" in task
+    # The rest of the body follows the offline framing too — the scope and
+    # result-sink nouns never contradict it by naming a PR or a GitHub post.
+    assert "this PR's diff" not in task
+    assert "this range's diff" in task
+    assert "the posted review's summary" not in task
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {},
+        {"pr_number": 42, "commit_range": ("a" * 40, "b" * 40)},
+    ],
+)
+def test_calibrator_task_requires_exactly_one_ground_truth_source(kwargs):
+    # The judge needs ONE diff to verify against: neither source and both
+    # sources are caller errors, refused loud before any prompt is composed.
+    with pytest.raises(ValueError, match="exactly one"):
+        build_calibrator_task("[]", **kwargs)
+
+
 # --- run_calibrator: the launch seam -------------------------------------------
 
 
@@ -249,32 +287,88 @@ def test_run_calibrator_launches_claude_read_only_and_unwraps_the_envelope(
     monkeypatch,
 ):
     """The claude path: the argv is the read-only reviewer posture carrying the
-    config's model; the result envelope is unwrapped and its session_id becomes
-    the run id (the eval-record join key)."""
+    config's model AND its reasoning as the real `--effort` knob (RVW03-WS04);
+    the result envelope is unwrapped — session_id becomes the run id, and the
+    envelope's usage block becomes the run's measured token cost."""
     monkeypatch.setattr(calibrator.shutil, "which", lambda binary: "/usr/bin/claude")
     seen: dict = {}
 
     def fake_runner(cmd, *, cwd, env, timeout=None):
         seen.update({"cmd": cmd, "cwd": cwd, "timeout": timeout})
-        envelope = json.dumps({"result": _calibration_json(), "session_id": "sess-42"})
+        envelope = json.dumps(
+            {
+                "result": _calibration_json(),
+                "session_id": "sess-42",
+                "usage": {
+                    "input_tokens": 10,
+                    "output_tokens": 40,
+                    "cache_read_input_tokens": 1000,
+                    "cache_creation_input_tokens": 200,
+                },
+            }
+        )
         return LaunchResult(returncode=0, stdout=envelope, stderr="")
 
     config = CalibratorConfig(model="opus-x", timeout="30s")
-    result, run_id, task = run_calibrator(
+    judged = run_calibrator(
         config, _union(), pr_number=9, cwd="/tree", launcher=fake_runner
     )
-    assert run_id == "sess-42"
-    assert result.overall_feedback == "verdict"
-    assert result.entries[0].disposition is Disposition.POST
+    assert judged.run_id == "sess-42"
+    assert judged.result.overall_feedback == "verdict"
+    assert judged.result.entries[0].disposition is Disposition.POST
     cmd = seen["cmd"]
     assert cmd[0] == "claude"
     assert cmd[cmd.index("--model") + 1] == "opus-x"
+    # The config's reasoning reaches REAL argv (claude --effort, RVW03-WS04)
+    # and the capture reports the applied level — what the record stamps.
+    assert cmd[cmd.index("--effort") + 1] == "high"
+    assert judged.reasoning == "high"
     assert "--tools" in cmd  # the read-only reviewer posture
     assert seen["cwd"] == "/tree"
     assert seen["timeout"] == 30.0
+    # The envelope's usage block is the launch-result-level measurement (#667).
+    assert judged.usage.total_tokens == 10 + 40 + 1000 + 200
+    assert judged.usage.input_tokens == 10
+    assert judged.usage.output_tokens == 40
     # The task embeds the candidates and the judge contract.
-    assert "NEVER originate" in task
-    assert '"id": 0' in task
+    assert "NEVER originate" in judged.task
+    assert '"id": 0' in judged.task
+
+
+def test_run_calibrator_raw_output_log_carries_the_correlation_extras(
+    monkeypatch, caplog
+):
+    """The judge's raw-output DEBUG record (issue #681 item 2) carries the
+    fan-out's correlation extras, so `shipit logs --run calibrator --round <id>`
+    slices it alongside the round's progress events rather than leaving it
+    filterable only by `pr`."""
+    import logging
+
+    monkeypatch.setattr(calibrator.shutil, "which", lambda binary: "/usr/bin/claude")
+
+    def fake_runner(cmd, *, cwd, env, timeout=None):
+        return LaunchResult(returncode=0, stdout=_calibration_json(), stderr="")
+
+    correlation = {
+        "pr": 9,
+        "reviewer": "codex",
+        "run_id": "calibrator",
+        "round_id": "round-abc",
+        "dimension": "calibrator",
+    }
+    caplog.set_level(logging.DEBUG, logger="shipit.review")
+    run_calibrator(
+        CalibratorConfig(),
+        _union(),
+        pr_number=9,
+        cwd="/tree",
+        launcher=fake_runner,
+        correlation=correlation,
+    )
+    raw = [r for r in caplog.records if "raw output for pr#9" in r.getMessage()]
+    assert len(raw) == 1
+    assert raw[0].run_id == "calibrator"
+    assert raw[0].round_id == "round-abc"
 
 
 def test_run_calibrator_bare_json_mints_a_run_id(monkeypatch):
@@ -283,10 +377,62 @@ def test_run_calibrator_bare_json_mints_a_run_id(monkeypatch):
     def fake_runner(cmd, *, cwd, env, timeout=None):
         return LaunchResult(returncode=0, stdout=_calibration_json(), stderr="")
 
-    _, run_id, _ = run_calibrator(
+    judged = run_calibrator(
         CalibratorConfig(), _union(), pr_number=9, cwd="/tree", launcher=fake_runner
     )
-    assert run_id  # minted — never an empty join key
+    assert judged.run_id  # minted — never an empty run identity
+    # A bare (non-envelope) answer carries no usage: explicitly unknown.
+    assert judged.usage.total_tokens is None
+
+
+def test_run_calibrator_codex_backend_reads_usage_from_stderr(monkeypatch):
+    # RVW03-WS04: a codex calibrator's usage rides its stderr "tokens used"
+    # figure (probed 0.139) — captured at launch-result level like the passes'.
+    monkeypatch.setattr(calibrator.shutil, "which", lambda binary: "/usr/bin/codex")
+    seen: dict = {}
+
+    def fake_runner(cmd, *, cwd, env, timeout=None):
+        seen["cmd"] = cmd
+        return LaunchResult(
+            returncode=0,
+            stdout=_calibration_json(),
+            stderr="codex\nverdict\ntokens used\n2,500\n",
+        )
+
+    judged = run_calibrator(
+        CalibratorConfig(backend="codex", reasoning="medium"),
+        _union(),
+        pr_number=9,
+        cwd="/tree",
+        launcher=fake_runner,
+    )
+    assert judged.usage.total_tokens == 2500
+    # The reasoning knob reaches codex argv and is reported as applied.
+    assert "model_reasoning_effort=medium" in seen["cmd"]
+    assert judged.reasoning == "medium"
+
+
+def test_run_calibrator_agy_backend_records_reasoning_unset(monkeypatch):
+    # agy has NO reasoning knob (probed 1.1.1): the config level must NOT be
+    # echoed — the capture reports None (→ the record reads unset, #685) and
+    # usage is explicitly unknown (agy reports none).
+    monkeypatch.setattr(calibrator.shutil, "which", lambda binary: "/usr/bin/agy")
+    seen: dict = {}
+
+    def fake_runner(cmd, *, cwd, env, timeout=None):
+        seen["cmd"] = cmd
+        return LaunchResult(returncode=0, stdout=_calibration_json(), stderr="")
+
+    judged = run_calibrator(
+        CalibratorConfig(backend="antigravity", reasoning="high"),
+        _union(),
+        pr_number=9,
+        cwd="/tree",
+        launcher=fake_runner,
+    )
+    assert judged.reasoning is None
+    assert not any("effort" in arg or "reasoning" in arg for arg in seen["cmd"])
+    assert judged.usage.total_tokens is None
 
 
 def test_run_calibrator_missing_cli_is_backend_unavailable(monkeypatch):
@@ -348,3 +494,97 @@ def test_run_calibrator_contract_violation_propagates(monkeypatch):
         run_calibrator(
             CalibratorConfig(), _union(), pr_number=9, cwd="/tree", launcher=fake_runner
         )
+
+
+# ---------------------------------------------------------------------------
+# RVW03-WS02 — the calibrator run fills its artifact bundle, every path
+# ---------------------------------------------------------------------------
+
+
+def test_run_calibrator_fills_the_bundle_and_records_the_true_run_id(
+    monkeypatch, tmp_path
+):
+    from shipit.review.artifacts import RunArtifacts
+
+    monkeypatch.setattr(calibrator.shutil, "which", lambda binary: "/usr/bin/claude")
+
+    def fake_runner(cmd, *, cwd, env, timeout=None):
+        envelope = json.dumps({"result": _calibration_json(), "session_id": "sess-7"})
+        return LaunchResult(returncode=0, stdout=envelope, stderr="warn line")
+
+    bundle = RunArtifacts(tmp_path / "calibrator")
+    judged = run_calibrator(
+        CalibratorConfig(),
+        _union(),
+        pr_number=9,
+        cwd="/tree",
+        launcher=fake_runner,
+        artifacts=bundle,
+    )
+    assert judged.run_id == "sess-7"
+    # The exact prompt + raw streams landed, and the meta carries the TRUE
+    # (post-unwrap) run id — the bundle's dir name is fixed, the id is data.
+    assert (bundle.dir / "prompt.txt").read_text() == judged.task
+    assert "sess-7" in (bundle.dir / "stdout.raw").read_text()
+    assert (bundle.dir / "stderr.raw").read_text() == "warn line"
+    meta = json.loads((bundle.dir / "meta.json").read_text())
+    assert meta["run_id"] == "sess-7"
+    assert meta["exit_code"] == 0
+    assert meta["timed_out"] is False
+
+
+def test_run_calibrator_failure_bundle_keeps_full_raw(monkeypatch, tmp_path, caplog):
+    """A nonzero judge (previously surviving only as detail[:500]) leaves its
+    FULL raw output in the bundle; a LOCAL log points at it, while the raised
+    message keeps the absolute path OUT (it reaches the GitHub check summary)."""
+    import logging
+
+    from shipit.review.artifacts import RunArtifacts
+
+    monkeypatch.setattr(calibrator.shutil, "which", lambda binary: "/usr/bin/claude")
+    long_err = "y" * 2000
+
+    def exit_one(cmd, *, cwd, env, timeout=None):
+        return LaunchResult(returncode=1, stdout="half an answer", stderr=long_err)
+
+    bundle = RunArtifacts(tmp_path / "calibrator")
+    caplog.set_level(logging.WARNING, logger="shipit.review")
+    correlation = {"reviewer": "codex", "run_id": "calibrator", "round_id": "round-abc"}
+    with pytest.raises(BackendError) as exc:
+        run_calibrator(
+            CalibratorConfig(),
+            _union(),
+            pr_number=9,
+            cwd="/tree",
+            launcher=exit_one,
+            artifacts=bundle,
+            correlation=correlation,
+        )
+    assert str(bundle.dir) not in str(exc.value)
+    assert str(bundle.dir) in caplog.text
+    # The breadcrumb WARNING carries the same correlation extras as the DEBUG
+    # raw-output record, so `shipit logs --run calibrator --round …` selects it.
+    [breadcrumb] = [r for r in caplog.records if "full raw output at" in r.getMessage()]
+    assert breadcrumb.run_id == "calibrator"
+    assert breadcrumb.round_id == "round-abc"
+    assert (bundle.dir / "stderr.raw").read_text() == long_err
+    assert (bundle.dir / "stdout.raw").read_text() == "half an answer"
+    meta = json.loads((bundle.dir / "meta.json").read_text())
+    assert meta["exit_code"] == 1
+
+
+def test_calibrator_task_never_carries_the_run_id_plumbing(monkeypatch):
+    """The union candidates carry the RVW03-WS02 `run_id` correlation; the
+    judge's serialized candidates must NOT (plumbing is the record's business,
+    and prompt bytes are variant-hashed)."""
+    monkeypatch.setattr(calibrator.shutil, "which", lambda binary: "/usr/bin/claude")
+
+    def fake_runner(cmd, *, cwd, env, timeout=None):
+        return LaunchResult(returncode=0, stdout=_calibration_json(), stderr="")
+
+    union = [dict(_candidate(0), run_id="pass-run-id-hex")]
+    task = run_calibrator(
+        CalibratorConfig(), union, pr_number=9, cwd="/tree", launcher=fake_runner
+    ).task
+    assert "pass-run-id-hex" not in task
+    assert "run_id" not in task

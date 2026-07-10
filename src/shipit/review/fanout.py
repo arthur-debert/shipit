@@ -22,13 +22,25 @@ every judged finding a **Disposition**.
 
 What this module owns:
 
-  * the pass fan-out (provision the Tree once, launch the configured
-    dimension set in parallel through :func:`shipit.review.producer.run_tree_review`,
-    tolerate per-pass failures — a pass failure degrades coverage, it never
-    kills the round unless EVERY pass failed);
+  * the pass fan-out (preflight every configured backend binary ONCE before
+    anything launches — :func:`shipit.review.producer.preflight_round`, so a
+    missing binary is one actionable error and zero passes start; provision the
+    Tree once; launch the configured dimension set in parallel through
+    :func:`shipit.review.producer.run_tree_review`; tolerate per-pass failures
+    — a pass failure degrades coverage, it never kills the round unless EVERY
+    pass failed);
   * the union (each successful pass's comments, coerced through the ONE trust
     boundary :func:`shipit.review.schema.finding_from_dict`, tagged with the
-    dimension that found them) and the merged coverage attestation;
+    dimension that found them AND the ``run_id`` of the pass that emitted them
+    — the RVW03-WS02 finding↔pass correlation) and the merged coverage
+    attestation;
+  * the round's OBSERVABILITY trail (RVW03-WS02): one **round id** per fan-out,
+    a per-run artifact bundle (:mod:`shipit.review.artifacts` — exact prompt,
+    raw streams, machine-readable meta, written unconditionally and fail-open)
+    for every pass and the calibrator, ``review.pass.launched`` /
+    ``review.pass.settled`` progress events with ``run_id`` / ``dimension`` /
+    ``round_id`` extras so parallel passes are separable in the log sink and a
+    coordinating agent can watch a multi-minute round live;
   * the default MECHANICAL dedup (:func:`dedup_union`) that merges same-location
     same-claim candidates into one canonical carrying its pass severity — the
     off-path replacement for the LLM judge;
@@ -38,15 +50,29 @@ What this module owns:
     posted review at minor), the posted status derives from what posts
     (major-or-worse → ``REQUEST_CHANGES``); and
   * the round's contributing-run trail: one entry per pass (and, when the
-    calibrator is on, one for it), each with a run id and the **Variant** hash
-    of the exact prompt that ran — what the review-round record's ``round.runs``
-    carries and ``shipit eval report`` joins on (WS03).
+    calibrator is on, one for it), each with a run id, the **Variant** hash
+    of the exact prompt that ran, the run's measured token ``usage`` as its
+    CLI reported it (explicitly-unknown otherwise, RVW03-WS04), and — where a
+    ReasoningLevel actually reached argv — the applied ``reasoning`` — what
+    the review-round record's ``round.runs`` carries and ``shipit eval
+    report`` reads its cost axis from (WS03/RVW03-WS04).
 
 The fan-out is INVISIBLE below the reviewer boundary (ADR-0045): the service
 posts ONE review through the reviewer's own bot exactly as before; the funnel,
 reconcile, and prstate machinery are untouched. An EMPTY union has nothing to
 post — it skips both the dedup and the (dormant) calibrator and posts the
 attested clean review.
+
+The offline fan-out replay (RVW03-WS01) drives this SAME orchestration: the
+sanctioned experiment driver (:func:`shipit.review.replay.run_fanout_replay`)
+hands :func:`run_fanout_review` a range-scoped
+:class:`~shipit.review.diff.RangeView` instead of a PR ctx, and the three
+PR-coupled seams dispatch on it — no Tree (the passes run in the replay
+checkout), range tasks reading ``git diff <base>..<head>``
+(:func:`shipit.review.producer.run_range_review` /
+:func:`~shipit.review.producer.range_pass_task_text`), and the calibrator's
+ground truth the same range diff. Everything else — union, dedup/calibration,
+routing, run trail — is one code path for both arms.
 """
 
 from __future__ import annotations
@@ -57,9 +83,11 @@ import uuid
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from .. import events
+from ..agent import backend as agent_backend
 from ..agent.backend import Backend
 from ..finding import (
     DEFAULT_SEVERITY,
@@ -71,14 +99,17 @@ from ..finding import (
 )
 from ..harness.eval.variant import label_from_env, variant_of
 from ..spawn import launch
+from . import artifacts as artifacts_mod
 from . import producer
 from .calibrator import (
     CalibratedFinding,
     CalibratorConfig,
     run_calibrator,
 )
+from .diff import RangeView
 from .dimensions import Dimension, known_dimension_names, resolve_dimensions
 from .schema import finding_from_dict
+from .usage import UNREPORTED
 
 logger = logging.getLogger("shipit.review")
 
@@ -93,14 +124,27 @@ class FanoutOutcome:
     dormant judge is on; ``findings`` is the FULL judged set as
     :class:`JudgedFinding`\\ s
     — routed-out findings AND merged-away duplicates included, never erased (the
-    round record's Opportunity-harvest seam); ``runs`` the contributing-run
-    entries (every pass + the calibrator, run ids + variant hashes) for
-    ``round.runs``.
+    round record's Opportunity-harvest seam), each carrying the ``run_id`` of
+    the pass that originated it (RVW03-WS02); ``runs`` the contributing-run
+    entries (every pass + the calibrator: run ids, variant hashes, artifact
+    bundle paths, per-run ``usage`` as the CLI reported it, and ``reasoning``
+    where a level actually reached argv — RVW03-WS04) for ``round.runs``;
+    ``total_tokens`` the round's measured token cost — the sum of the runs'
+    REPORTED usage, ``None`` when no contributing run reported any (an explicitly
+    latency-only round, never a fabricated zero); ``round_id`` the
+    fan-out-minted round identity and ``artifacts_dir`` the directory this
+    round's per-run bundles live under (``None`` when no bundle could be keyed —
+    a hand-built ctx with no repo identity, or a dry run) — what the round record
+    persists as ``round.id`` / ``round.artifacts`` so the bundles are
+    discoverable from the record.
     """
 
     review: dict
     findings: tuple[JudgedFinding, ...]
     runs: tuple[dict[str, Any], ...]
+    total_tokens: int | None = None
+    round_id: str = ""
+    artifacts_dir: str | None = None
 
 
 @dataclass(frozen=True)
@@ -115,12 +159,15 @@ class _PassResult:
 
 #: The shipped cheaper **ReasoningLevel** an INCREMENTAL round's single pass runs
 #: at (RVW02-WS06, ADR-0045). Round 1 is exhaustive; rounds after it review only
-#: the fix range, so they run cheaper. This is a RECORD-only constant, not an argv
-#: flag (no CLI carries a reasoning knob) — it is stamped on the incremental pass's
-#: run entry so the review-round record shows the round ran at the cheaper level.
-#: :func:`run_fanout_review` takes it as an argument (defaulting here), but no
-#: ``[reviewers]`` config key wires it and the service never overrides the default;
-#: moving it today means changing this constant.
+#: the fix range, so they run cheaper. Since RVW03-WS04 (#685) this is a REAL argv
+#: request, no longer a record-only stamp: it is threaded through
+#: :func:`~shipit.review.producer.run_tree_review` to the backend adapter, which
+#: applies it where the CLI has a knob (codex ``-c model_reasoning_effort``) and
+#: drops it where it has none (agy). The run entry's ``reasoning`` is stamped from
+#: what the adapter ACTUALLY applied — a knob-less backend records unset, never
+#: this config value. :func:`run_fanout_review` takes it as an argument
+#: (defaulting here), but no ``[reviewers]`` config key wires it and the service
+#: never overrides the default; moving it today means changing this constant.
 DEFAULT_INCREMENTAL_REASONING = "low"
 
 #: The synthetic **Dimension** an INCREMENTAL round's single pass carries so it
@@ -138,7 +185,7 @@ _INCREMENTAL_DIMENSION = Dimension(
 
 def run_fanout_review(
     backend: Backend,
-    ctx,
+    target,
     *,
     model: str = "pro",
     timeout: str = "600s",
@@ -146,14 +193,28 @@ def run_fanout_review(
     dimensions: Sequence[str] | None = None,
     calibrator: CalibratorConfig | None = None,
     nit_cap: int | None = None,
+    invocation_overrides: Mapping[str, Mapping[str, str]] | None = None,
     incremental: bool = False,
     incremental_reasoning: str = DEFAULT_INCREMENTAL_REASONING,
     dry_run: bool = False,
     launcher: launch.Runner | None = None,
+    artifacts_base_dir: Path | None = None,
 ) -> FanoutOutcome:
-    """Fan ``backend``'s review of ``ctx`` out into dimension passes (round 1), or
-    run ONE incremental fix-range pass (round ≥ 2), and return the routed
-    :class:`FanoutOutcome`.
+    """Fan ``backend``'s review of ``target`` out into dimension passes (round
+    1), or run ONE incremental fix-range pass (round ≥ 2), and return the
+    routed :class:`FanoutOutcome`.
+
+    ``target`` is EITHER a PR review view (the live path — provisions the
+    shared read-only Tree; a round-1 pass fetches ``gh pr diff``, a round-≥2
+    ``incremental`` pass the fix-range ``git diff <base>..<head>`` instead — see
+    ``incremental`` below) or a range-scoped
+    :class:`~shipit.review.diff.RangeView` (the offline fan-out replay,
+    RVW03-WS01 — the passes run in the replay checkout over
+    ``git diff <base>..<head>``, and the calibrator's ground truth is that same
+    range diff). The dispatch happens at the three PR-coupled seams only;
+    union, dedup/calibration, routing, and the run trail are ONE code path for
+    both arms — the sanctioned replacement for the retired transient
+    monkey-patch driver (#680).
 
     By DEFAULT (``calibrator=None``, RVW02-WS08) the union is posted through the
     MECHANICAL dedup (:func:`dedup_union`) using each pass's OWN severity — no
@@ -162,8 +223,8 @@ def run_fanout_review(
     #638/#665), routing the union through :func:`run_calibrator` instead.
 
     ``incremental`` (RVW02-WS06, ADR-0045) selects the round-≥2 shape: ONE
-    full-scope pass over the FIX RANGE — ``ctx.base_sha..ctx.head_sha``, where
-    ``ctx`` is the caller's fix-range-rescoped view
+    full-scope pass over the FIX RANGE — ``target.base_sha..target.head_sha``,
+    where ``target`` is the caller's fix-range-rescoped view
     (:func:`shipit.review.diff.rescoped_view`) — with mandatory
     dependency-neighborhood context, INSTEAD of the parallel dimension fan-out.
     The pass runs at ``incremental_reasoning`` (the cheaper level, stamped on its
@@ -172,7 +233,11 @@ def run_fanout_review(
     not posted) — a late round can't be recolonized by style churn. The
     calibrator, if configured, still runs (single-pass + calibrator). Round 1
     (``incremental=False``) is unchanged: the ``dimensions`` fan-out with the
-    table-level ``nit_cap``.
+    table-level ``nit_cap``. ``incremental`` is a LIVE-PR shape only: rounds are
+    keyed to a live PR head, so an incremental :class:`RangeView` call is a
+    caller error (``ValueError`` — multi-round fix-range replay is explicitly
+    out of the Review Lab's scope), as is a :class:`RangeView` ``dry_run`` (the
+    dry-run contract prints a would-run TREE launch; replay has none).
 
     ``dimensions`` names the reviewer's configured pass set (the per-reviewer
     Roster option; ``None``/empty → the shipped default set), used only in round
@@ -181,17 +246,45 @@ def run_fanout_review(
     ``0`` → floor at minor; IGNORED in an incremental round, which forces ``0``).
     ``model`` / ``timeout`` / ``instructions_path`` are the reviewer's own run
     options and apply to every pass, exactly as they applied to the monolithic
-    run.
+    run — except where ``invocation_overrides`` (RVW03-WS07) narrows one pass:
+    a ``{dimension name: {"model"/"timeout": …}}`` mapping, the Review Lab's
+    experiment-only per-dimension Invocation capability (ADR-0049 — it lives
+    in the lab runner's cells, deliberately NOT in Roster configuration; the
+    live service never passes it). Each overridden pass launches AND records
+    with its own model/timeout (the run entry and bundle meta stamp the actual
+    values, so the arm is never mislabeled). An override naming a dimension
+    outside this round's pass set — or any override in an ``incremental``
+    round, which has no dimension passes — is a loud ``ValueError``: a
+    silently-ignored override would run a different experiment than the
+    reviewed cell file declares.
 
-    Failure posture: a SINGLE pass failure is tolerated — its run entry records
-    the outcome, the posted summary attests the degraded coverage; ALL passes
-    failing raises ``RuntimeError`` (the service maps it to the ``failed``
-    funnel outcome; in an incremental round the sole pass failing IS all passes
-    failing). When the judge is ON, a calibrator failure (unavailable /
+    Failure posture: every configured backend binary (the reviewer's own plus,
+    when the judge is on, the calibrator's) is preflighted ONCE before the Tree
+    is provisioned or any pass launches
+    (:func:`shipit.review.producer.preflight_round`, RVW03-WS03) — a missing
+    binary raises ONE actionable
+    :class:`~shipit.review.backends.base.BackendUnavailable` naming it, and no
+    pass processes start. Past preflight, a SINGLE pass failure is tolerated —
+    its run entry records the outcome, the posted summary attests the degraded
+    coverage; ALL passes failing raises ``RuntimeError`` (the service maps it
+    to the ``failed`` funnel outcome; in an incremental round the sole pass
+    failing IS all passes failing). When the judge is ON, a calibrator failure (unavailable /
     timed out / unparseable / contract-violating output) PROPAGATES — an
     uncalibrated union is never posted under the judge's ruler; the round
     degrades non-blocking exactly like a failed monolithic review (ADR-0006).
     The default dedup path is pure and cannot fail this way.
+
+    OBSERVABILITY (RVW03-WS02): the fan-out mints ONE round id per invocation
+    and, for EVERY launched run (each pass and the calibrator, success and
+    failure alike), persists a per-run artifact bundle
+    (:mod:`shipit.review.artifacts` — exact prompt, raw streams, meta) under
+    ``<state-root>/review-artifacts/<owner>/<name>/<round_id>/``, fail-open;
+    each run entry carries its bundle path as ``artifacts``, each finding the
+    ``run_id`` of the pass that emitted it, and every pass emits
+    ``review.pass.launched`` / ``review.pass.settled`` progress events with
+    ``run_id``/``dimension``/``round_id`` extras. ``artifacts_base_dir``
+    overrides the bundle family root (tests), mirroring the store's
+    ``base_dir``.
 
     With ``dry_run=True``: prints each pass's would-run argv (one per
     dimension, or the single incremental pass, no clone, no model bill) plus a
@@ -199,9 +292,28 @@ def run_fanout_review(
     calibrator), and returns an empty outcome — the same honest dry-run contract
     as the producer's.
     """
+    range_view = target if isinstance(target, RangeView) else None
+    if range_view is not None and incremental:
+        raise ValueError(
+            "run_fanout_review: incremental and a RangeView target are mutually "
+            "exclusive — rounds are keyed to a live PR head, and multi-round "
+            "fix-range replay is out of the Review Lab's scope"
+        )
+    if range_view is not None and dry_run:
+        raise ValueError(
+            "run_fanout_review: dry_run is not supported for a RangeView target "
+            "— the dry-run contract prints a would-run Tree launch, and an "
+            "offline replay has no Tree"
+        )
+    if invocation_overrides and incremental:
+        raise ValueError(
+            "run_fanout_review: invocation_overrides and incremental are "
+            "mutually exclusive — an incremental round runs one fix-range "
+            "pass, not dimension passes"
+        )
     incremental_range: tuple[str, str] | None = None
     if incremental:
-        incremental_range = (str(ctx.base_sha), str(ctx.head_sha))
+        incremental_range = (str(target.base_sha), str(target.head_sha))
         dims = (_INCREMENTAL_DIMENSION,)
         effective_nit_cap = 0
     else:
@@ -213,13 +325,33 @@ def run_fanout_review(
                 f"{', '.join(known_dimension_names())}"
             ) from None
         effective_nit_cap = nit_cap
+    if invocation_overrides:
+        unknown = sorted(set(invocation_overrides) - {d.name for d in dims})
+        if unknown:
+            raise ValueError(
+                f"invocation_overrides name dimension(s) outside this round's "
+                f"pass set: {', '.join(unknown)} (passes: "
+                f"{', '.join(d.name for d in dims)})"
+            )
     agent = backend.funnel_agent or backend.name
+    # The one display/telemetry split between the arms: a PR target logs and
+    # emits as `pr#<n>`; a range target has no PR — its label is the range and
+    # its `pr` extra is OMITTED (the domain-key contract is absent-not-null, so a
+    # range record carries no `pr` key rather than `pr: null` — logcontext drops
+    # None from bound keys, but a per-call `extra` does not, so drop it here).
+    pr_number = None if range_view is not None else target.number
+    pr_extra = {"pr": pr_number} if pr_number is not None else {}
+    where = (
+        f"range {range_view.base_sha}..{range_view.head_sha}"
+        if range_view is not None
+        else f"pr#{target.number}"
+    )
 
     if dry_run:
         for dim in dims:
             producer.run_tree_review(
                 backend,
-                ctx,
+                target,
                 model=model,
                 timeout=timeout,
                 instructions_path=instructions_path,
@@ -247,63 +379,222 @@ def run_fanout_review(
             runs=(),
         )
 
-    tree_path = producer.provision_review_tree(ctx)
+    # Round-level preflight (RVW03-WS03): every configured backend binary is
+    # checked ONCE, before the Tree is provisioned or any pass launches — a
+    # missing binary is ONE actionable BackendUnavailable naming the binary,
+    # never "all N dimension passes failed" with N truncated per-pass details.
+    # Both arms need it: the range replay launches the same backends, it just
+    # skips the Tree below.
+    round_backends = [backend]
+    if calibrator is not None:
+        round_backends.append(agent_backend.by_name(calibrator.backend))
+    producer.preflight_round(round_backends)
+
+    # The Tree seam: the live path provisions ONE shared read-only Tree on the
+    # PR head; the offline replay reviews the checkout whose range was resolved
+    # — no Tree, no gh (the replay boundary already validated the endpoints).
+    workdir = (
+        range_view.workdir
+        if range_view is not None
+        else producer.provision_review_tree(target)
+    )
     label = label_from_env()
+    # The round's observability identity (RVW03-WS02): ONE round id per fan-out
+    # invocation, keying the per-run artifact bundles beside the round store. A
+    # target (PR view or RangeView) with no usable repo identity disables the
+    # bundles (fail-open) — the round still runs, its record just carries no
+    # artifacts location.
+    round_id = uuid.uuid4().hex
+    # `round_root` keys on the owner/name SLUG: a PR view's `.repo` already IS
+    # that slug (str), a RangeView's `.repo` is a `Repo` whose `.slug` is it.
+    repo_slug = (
+        range_view.repo.slug
+        if range_view is not None
+        else getattr(target, "repo", None)
+    )
+    round_dir = artifacts_mod.round_root(
+        repo_slug, round_id, base_dir=artifacts_base_dir
+    )
 
     def _one_pass(dim: Dimension) -> _PassResult:
-        task = producer.pass_task_text(
-            backend,
-            ctx.number,
-            instructions_path=instructions_path,
-            dimension=None if incremental else dim,
-            incremental_range=incremental_range,
-        )
-        run: dict[str, Any] = {
-            "run_id": uuid.uuid4().hex,
-            "kind": "incremental-pass" if incremental else "dimension-pass",
-            "dimension": dim.name,
-            "backend": agent,
-            "model": model,
-            "variant": variant_of(task, label=label).as_record(),
-        }
-        if incremental:
-            # The cheaper reasoning is config + RECORD only (no CLI knob) — stamp
-            # it on the run entry so the round record shows the level it ran at.
-            run["reasoning"] = incremental_reasoning
-            run["range"] = {"base": incremental_range[0], "head": incremental_range[1]}
-        start = time.monotonic()
-        try:
-            review = producer.run_tree_review(
+        # The per-dimension Invocation override seam (RVW03-WS07): the lab's
+        # experiment-only capability — this pass's model/timeout, everything
+        # below stamps the ACTUAL values so the arm is never mislabeled.
+        override = (invocation_overrides or {}).get(dim.name, {})
+        pass_model = override.get("model", model)
+        pass_timeout = override.get("timeout", timeout)
+        if range_view is not None:
+            task = producer.range_pass_task_text(
                 backend,
-                ctx,
-                model=model,
-                timeout=timeout,
+                range_view,
                 instructions_path=instructions_path,
-                launcher=launcher,
+                dimension=dim,
+            )
+        else:
+            task = producer.pass_task_text(
+                backend,
+                target.number,
+                instructions_path=instructions_path,
                 dimension=None if incremental else dim,
-                tree_path=tree_path,
                 incremental_range=incremental_range,
             )
+        run_id = uuid.uuid4().hex
+        kind = "incremental-pass" if incremental else "dimension-pass"
+        bundle = artifacts_mod.RunArtifacts.under(round_dir, run_id)
+        run: dict[str, Any] = {
+            "run_id": run_id,
+            "kind": kind,
+            "dimension": dim.name,
+            "backend": agent,
+            "model": pass_model,
+            "variant": variant_of(task, label=label).as_record(),
+            "artifacts": str(bundle.dir) if bundle.dir is not None else None,
+            # Explicitly-unknown until the launch reports back (RVW03-WS04): a
+            # failed pass keeps this honest "we do not know", never a zero.
+            "usage": UNREPORTED.as_record(),
+        }
+        if incremental:
+            run["range"] = {"base": incremental_range[0], "head": incremental_range[1]}
+        # The run's identity facts land in the bundle meta up front, so even a
+        # pass that dies mid-launch leaves a self-describing bundle.
+        bundle.record(
+            run_id=run_id,
+            round_id=round_id,
+            kind=kind,
+            dimension=dim.name,
+            backend=agent,
+            model=pass_model,
+            variant=run["variant"],
+            pr=pr_number,
+        )
+        # The per-pass correlation extras (RVW03-WS02): every log record and
+        # event this pass emits carries them, so the 4 parallel passes'
+        # interleaved lines group post-mortem — and `shipit logs --run/--round`
+        # can slice to one pass or one round. `pr` is omitted for a range replay
+        # (absent-not-null), so a range record's events carry no `pr` key.
+        correlation = {
+            **pr_extra,
+            "reviewer": agent,
+            "run_id": run_id,
+            "round_id": round_id,
+            "dimension": dim.name,
+        }
+        events.emit(
+            logger,
+            "review.pass.launched",
+            "%s pass %s launched for %s (agent=%s)",
+            "incremental" if incremental else "dimension",
+            dim.name,
+            where,
+            agent,
+            extra=correlation,
+        )
+        start = time.monotonic()
+        try:
+            if range_view is not None:
+                # Offline fan-out replay (RVW03-WS01): the pass reviews the
+                # range in the replay checkout. Round-1 shape, so no incremental
+                # ReasoningLevel request — usage/reasoning still ride the capture.
+                captured = producer.run_range_review(
+                    backend,
+                    range_view,
+                    model=pass_model,
+                    timeout=pass_timeout,
+                    instructions_path=instructions_path,
+                    launcher=launcher,
+                    dimension=dim,
+                    run_id=run_id,
+                    artifacts=bundle,
+                )
+            else:
+                captured = producer.run_tree_review(
+                    backend,
+                    target,
+                    model=pass_model,
+                    timeout=pass_timeout,
+                    instructions_path=instructions_path,
+                    launcher=launcher,
+                    dimension=None if incremental else dim,
+                    tree_path=workdir,
+                    incremental_range=incremental_range,
+                    # The cheaper incremental ReasoningLevel is a real argv
+                    # REQUEST (RVW03-WS04): the adapter applies it where the
+                    # CLI has a knob.
+                    reasoning=incremental_reasoning if incremental else None,
+                    run_id=run_id,
+                    artifacts=bundle,
+                )
         except Exception as exc:  # noqa: BLE001 - a pass failure degrades, never kills
             run["duration_ms"] = int((time.monotonic() - start) * 1000)
             run["outcome"] = (
                 "timed_out" if getattr(exc, "timed_out", False) else "failed"
             )
+            # The detail string stays a truncated SUMMARY; the FULL raw output
+            # lives in the bundle the run entry's `artifacts` points at
+            # (written at the launch seam, success and failure alike).
             run["detail"] = str(exc)[:500]
+            bundle.record(
+                outcome=run["outcome"],
+                duration_ms=run["duration_ms"],
+                error=str(exc),
+            )
             logger.warning(
-                "%s pass %s failed for pr#%s (agent=%s) — coverage degrades, "
+                "%s pass %s failed for %s (agent=%s) — coverage degrades, "
                 "the round continues",
                 "incremental" if incremental else "dimension",
                 dim.name,
-                ctx.number,
+                where,
                 agent,
                 exc_info=True,
-                extra={"pr": ctx.number, "reviewer": agent},
+                extra=correlation,
+            )
+            events.emit(
+                logger,
+                "review.pass.settled",
+                "%s pass %s settled %s for %s in %dms",
+                "incremental" if incremental else "dimension",
+                dim.name,
+                run["outcome"],
+                where,
+                run["duration_ms"],
+                extra={
+                    **correlation,
+                    "outcome": run["outcome"],
+                    "duration_ms": run["duration_ms"],
+                },
             )
             return _PassResult(dimension=dim, run=run, review=None)
+        review = captured.review
         run["duration_ms"] = int((time.monotonic() - start) * 1000)
         run["outcome"] = "success"
         run["findings"] = len(review.get("comments") or [])
+        run["usage"] = captured.usage.as_record()
+        if captured.reasoning is not None:
+            # Stamped from the argv ACTUALLY used (RVW03-WS04) — absent when no
+            # level was applied (unset, or the backend has no knob), so the
+            # record never echoes a config value that did not run.
+            run["reasoning"] = captured.reasoning
+        bundle.record(
+            outcome="success",
+            duration_ms=run["duration_ms"],
+            findings=run["findings"],
+        )
+        events.emit(
+            logger,
+            "review.pass.settled",
+            "%s pass %s settled success for %s in %dms (%d finding(s))",
+            "incremental" if incremental else "dimension",
+            dim.name,
+            where,
+            run["duration_ms"],
+            run["findings"],
+            extra={
+                **correlation,
+                "outcome": "success",
+                "duration_ms": run["duration_ms"],
+                "findings": run["findings"],
+            },
+        )
         return _PassResult(dimension=dim, run=run, review=review)
 
     with ThreadPoolExecutor(max_workers=len(dims)) as pool:
@@ -321,10 +612,11 @@ def run_fanout_review(
             if incremental
             else f"all {len(dims)} dimension passes failed"
         )
-        raise RuntimeError(f"{kind} for pr#{ctx.number} (agent={agent}) — {details}")
+        raise RuntimeError(f"{kind} for {where} (agent={agent}) — {details}")
 
     union = _build_union(succeeded)
     coverage = _merge_coverage(succeeded)
+    artifacts_dir = str(round_dir) if round_dir is not None else None
 
     calibrated = calibrator is not None
     if not union:
@@ -346,7 +638,14 @@ def run_fanout_review(
             },
             "comments": [],
         }
-        return FanoutOutcome(review=review, findings=(), runs=tuple(runs))
+        return FanoutOutcome(
+            review=review,
+            findings=(),
+            runs=tuple(runs),
+            total_tokens=_round_total(runs),
+            round_id=round_id,
+            artifacts_dir=artifacts_dir,
+        )
 
     if calibrator is None:
         # DEFAULT (RVW02-WS08): post the MECHANICALLY-deduped union using each
@@ -355,28 +654,133 @@ def run_fanout_review(
         feedback = ""
     else:
         # Dormant judge opted back on: route the union through the calibrator.
+        # Its bundle directory is the fixed `calibrator` name (one judge per
+        # round; its TRUE run id — the claude session id — is known only after
+        # the launch and lands in the bundle meta + the run entry below).
+        calibrator_bundle = artifacts_mod.RunArtifacts.under(round_dir, "calibrator")
+        calibrator_bundle.record(
+            round_id=round_id,
+            kind="calibrator",
+            backend=calibrator.backend,
+            model=calibrator.model,
+            reasoning=calibrator.reasoning,
+            pr=pr_number,
+        )
         calibrator_run: dict[str, Any] = {
             "kind": "calibrator",
             "backend": calibrator.backend,
             "model": calibrator.model,
-            "reasoning": calibrator.reasoning,
+            # NB (RVW03-WS04): the APPLIED reasoning is stamped below from the
+            # judge run, never `calibrator.reasoning` here — a knob-less backend
+            # (agy) must record unset, not the echoed config value.
+            "artifacts": (
+                str(calibrator_bundle.dir)
+                if calibrator_bundle.dir is not None
+                else None
+            ),
         }
-        start = time.monotonic()
-        result, run_id, task = run_calibrator(
-            calibrator,
-            union,
-            pr_number=ctx.number,
-            cwd=tree_path,
-            launcher=launcher,
+        # RVW03-WS02 correlation: the calibrator's STABLE surrogate run id is the
+        # fixed `calibrator` bundle name — its true backend session id is known
+        # only post-launch (it lands in the run entry + bundle meta below). The
+        # passes correlate by their real run ids; the one judge per round
+        # correlates by this fixed name, so `shipit logs --run calibrator` slices
+        # its whole trail — launch, settle (success OR failure), and the raw-
+        # output DEBUG record inside `run_calibrator` — even when a pre-id failure
+        # means no true run id ever exists. `pr` is omitted for a range replay
+        # (absent-not-null), matching the passes' correlation.
+        calibrator_correlation = {
+            **pr_extra,
+            "reviewer": agent,
+            "run_id": "calibrator",
+            "round_id": round_id,
+            "dimension": "calibrator",
+        }
+        events.emit(
+            logger,
+            "review.pass.launched",
+            "calibrator (%s) launched over %d candidate(s) for %s",
+            calibrator.backend,
+            len(union),
+            where,
+            extra=calibrator_correlation,
         )
+        start = time.monotonic()
+        try:
+            judged_run = run_calibrator(
+                calibrator,
+                union,
+                pr_number=pr_number,
+                commit_range=(
+                    (str(range_view.base_sha), str(range_view.head_sha))
+                    if range_view is not None
+                    else None
+                ),
+                cwd=workdir,
+                launcher=launcher,
+                artifacts=calibrator_bundle,
+                correlation=calibrator_correlation,
+            )
+        except Exception as exc:
+            # The failure PROPAGATES (an uncalibrated union never posts under
+            # the judge's ruler) — but it settles observably first: the bundle
+            # carries the outcome (the launch seam already wrote the raw
+            # streams) and the settled event closes the progress trail.
+            duration_ms = int((time.monotonic() - start) * 1000)
+            calibrator_bundle.record(
+                outcome=("timed_out" if getattr(exc, "timed_out", False) else "failed"),
+                duration_ms=duration_ms,
+                error=str(exc),
+            )
+            events.emit(
+                logger,
+                "review.pass.settled",
+                "calibrator (%s) settled failed for %s in %dms",
+                calibrator.backend,
+                where,
+                duration_ms,
+                extra={
+                    **calibrator_correlation,
+                    "outcome": "failed",
+                    "duration_ms": duration_ms,
+                },
+            )
+            raise
+        result = judged_run.result
+        duration_ms = int((time.monotonic() - start) * 1000)
         calibrator_run.update(
             {
-                "run_id": run_id,
-                "duration_ms": int((time.monotonic() - start) * 1000),
+                "run_id": judged_run.run_id,
+                "duration_ms": duration_ms,
                 "outcome": "success",
                 "judged": len(result.entries),
-                "variant": variant_of(task, label=label).as_record(),
+                "variant": variant_of(judged_run.task, label=label).as_record(),
+                "usage": judged_run.usage.as_record(),
             }
+        )
+        if judged_run.reasoning is not None:
+            # Stamped from the argv actually used (RVW03-WS04), never from
+            # `calibrator.reasoning` config — a knob-less backend records unset.
+            calibrator_run["reasoning"] = judged_run.reasoning
+        calibrator_bundle.record(
+            run_id=judged_run.run_id,
+            outcome="success",
+            duration_ms=duration_ms,
+            judged=len(result.entries),
+            variant=calibrator_run["variant"],
+        )
+        events.emit(
+            logger,
+            "review.pass.settled",
+            "calibrator (%s) settled success for %s in %dms (%d judged)",
+            calibrator.backend,
+            where,
+            duration_ms,
+            len(result.entries),
+            extra={
+                **calibrator_correlation,
+                "outcome": "success",
+                "duration_ms": duration_ms,
+            },
         )
         runs.append(calibrator_run)
         entries = result.entries
@@ -384,7 +788,10 @@ def run_fanout_review(
 
     routed = route_calibrated(entries, nit_cap=effective_nit_cap)
     findings = tuple(
-        JudgedFinding(entry.finding, d, entry.duplicate_of) for entry, d in routed
+        JudgedFinding(
+            entry.finding, d, entry.duplicate_of, run_id=_pass_run_id(union, entry.id)
+        )
+        for entry, d in routed
     )
     posted_entries = [judged for judged in findings if judged.posted]
     comments = [_comment_dict(judged.finding) for judged in posted_entries]
@@ -414,15 +821,16 @@ def run_fanout_review(
     events.emit(
         logger,
         "review.calibrated" if calibrated else "review.deduped",
-        "%s completed for pr#%s (agent=%s): %d candidate(s) -> %d posted",
+        "%s completed for %s (agent=%s): %d candidate(s) -> %d posted",
         "calibration" if calibrated else "mechanical dedup",
-        ctx.number,
+        where,
         agent,
         len(union),
         posted,
         extra={
-            "pr": ctx.number,
+            **pr_extra,
             "reviewer": agent,
+            "round_id": round_id,
             "candidates": len(union),
             "posted": posted,
         },
@@ -431,23 +839,76 @@ def run_fanout_review(
         if judged.posted:
             continue
         finding = judged.finding
+        # `round_id` groups this round's disposition trail; `run_id` (when the
+        # finding carries its originating pass's) traces a routed-out finding
+        # back to the pass that raised it — the same `--run`/`--round` slices the
+        # progress events answer to.
+        disposition_extra = {
+            **pr_extra,
+            "reviewer": agent,
+            "round_id": round_id,
+            "severity": finding.severity.value,
+            "disposition": judged.disposition.value,
+        }
+        if judged.run_id is not None:
+            disposition_extra["run_id"] = judged.run_id
         events.emit(
             logger,
             "finding.dispositioned",
-            "finding routed out on pr#%s: %s (%s) -> %s",
-            ctx.number,
+            "finding routed out on %s: %s (%s) -> %s",
+            where,
             finding.file or "(no file)",
             finding.severity.value,
             judged.disposition.value,
-            extra={
-                "pr": ctx.number,
-                "reviewer": agent,
-                "severity": finding.severity.value,
-                "disposition": judged.disposition.value,
-            },
+            extra=disposition_extra,
         )
 
-    return FanoutOutcome(review=review, findings=findings, runs=tuple(runs))
+    return FanoutOutcome(
+        review=review,
+        findings=findings,
+        runs=tuple(runs),
+        total_tokens=_round_total(runs),
+        round_id=round_id,
+        artifacts_dir=artifacts_dir,
+    )
+
+
+def _round_total(runs: Sequence[Mapping[str, Any]]) -> int | None:
+    """The round's measured token total: the sum of the contributing runs'
+    REPORTED usage (RVW03-WS04). PURE.
+
+    A run whose CLI reported no usage contributes nothing (its record says
+    ``unreported`` explicitly); a round where NO run reported returns ``None``
+    — the honest latency-only marker the eval report distinguishes — never a
+    fabricated ``0``. A partially-reported round sums what was measured (a
+    lower bound; each run's own record shows which contributed).
+    """
+    totals = []
+    for run in runs:
+        usage = run.get("usage")
+        if not isinstance(usage, Mapping):
+            continue
+        total = usage.get("total_tokens")
+        if isinstance(total, int) and not isinstance(total, bool):
+            totals.append(total)
+    return sum(totals) if totals else None
+
+
+def _pass_run_id(union: Sequence[Mapping[str, Any]], entry_id: int) -> str | None:
+    """The originating pass's run id for one judged entry — the RVW03-WS02
+    finding↔pass correlation.
+
+    ``entry_id`` is the entry's union index (the contract's join key; the
+    calibrator boundary already rejected out-of-range ids, and the mechanical
+    dedup only ever uses real indices); the union candidate carries the
+    ``run_id`` :func:`_build_union` stamped from the pass that emitted it.
+    Defensive ``None`` for an out-of-range id rather than a crash — the
+    correlation is telemetry, never worth failing a round over.
+    """
+    if 0 <= entry_id < len(union):
+        raw = union[entry_id].get("run_id")
+        return str(raw) if raw else None
+    return None
 
 
 def route_calibrated(
@@ -638,7 +1099,9 @@ def _build_union(succeeded: Sequence[_PassResult]) -> list[dict[str, Any]]:
     """The calibrator's candidate list: every successful pass's comments,
     coerced through the ONE trust boundary (:func:`finding_from_dict` — the
     same coercion the posting path applies) and tagged with the dimension that
-    found them. Candidate ``id`` == list index (the contract's join key)."""
+    found them AND the ``run_id`` of the pass that emitted them (RVW03-WS02 —
+    what :func:`_pass_run_id` reads back onto the judged findings). Candidate
+    ``id`` == list index (the contract's join key)."""
     union: list[dict[str, Any]] = []
     for result in succeeded:
         for raw in result.review.get("comments") or []:
@@ -649,6 +1112,7 @@ def _build_union(succeeded: Sequence[_PassResult]) -> list[dict[str, Any]]:
                 {
                     "id": len(union),
                     "dimension": result.dimension.name,
+                    "run_id": result.run.get("run_id"),
                     "file": finding.file,
                     "line": finding.line,
                     "severity": finding.severity.value,

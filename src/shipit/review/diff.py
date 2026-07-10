@@ -150,6 +150,28 @@ def review_view(
     )
 
 
+@dataclass(frozen=True)
+class RangeView:
+    """A resolved commit range of one checkout: the replay path's review target.
+
+    The offline sibling of :class:`ReviewView` — same diff/changed-files/workdir
+    surface the producer needs, but there is no PR core at all (no number, no
+    draft state): the target IS the range. ``repo`` is the checkout's origin
+    identity — the round record's store key (ADR-0024), resolved offline. It
+    lives HERE (with its PR sibling) rather than in :mod:`shipit.review.replay`
+    so the fan-out orchestrator (:mod:`shipit.review.fanout`) can dispatch on it
+    without importing the replay boundary (RVW03-WS01); the replay module builds
+    it (:func:`shipit.review.replay.resolve_range`) and both arms consume it.
+    """
+
+    repo: Repo
+    base_sha: Sha
+    head_sha: Sha
+    diff: str
+    changed_files: list[str]
+    workdir: str
+
+
 def rescoped_view(view: ReviewView, base_sha: str | Sha) -> ReviewView:
     """A copy of ``view`` re-diffed over the FIX RANGE ``base_sha..head`` — the
     incremental round's narrowed target (RVW02-WS06, ADR-0045).

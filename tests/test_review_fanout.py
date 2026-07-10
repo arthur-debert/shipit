@@ -28,8 +28,11 @@ from shipit.review.calibrator import (
     CalibrationContractError,
     CalibrationResult,
     CalibratorConfig,
+    CalibratorRun,
 )
 from shipit.review.dimensions import by_name
+from shipit.review.producer import CapturedReview
+from shipit.review.usage import UNREPORTED, TokenUsage
 
 #: Opt the dormant LLM calibrator back ON. The default (``calibrator=None``,
 #: RVW02-WS08) is OFF — the mechanically-deduped union — so every test that
@@ -93,12 +96,40 @@ def _calibrated(i, finding, disposition=Disposition.POST, **kw):
     return CalibratedFinding(id=i, finding=finding, disposition=disposition, **kw)
 
 
+@pytest.fixture(autouse=True)
+def _tmp_state_root(monkeypatch, tmp_path):
+    """Keep the RVW03-WS02 artifact bundles out of the real user state dir.
+
+    `run_fanout_review` writes per-run bundles under the store family root by
+    default; redirecting `platformdirs.user_state_dir` pins every un-injected
+    write to this test's tmp dir, so the suite never touches a real `$HOME`."""
+    from shipit.harness.eval import store
+
+    monkeypatch.setattr(
+        store.platformdirs, "user_state_dir", lambda name: str(tmp_path / "state")
+    )
+    return tmp_path / "state"
+
+
 @pytest.fixture
 def _seams(monkeypatch):
     """Fake the producer + calibrator seams; returns the capture dict tests
     read (per-dimension reviews or exceptions in `reviews`, the union handed
-    to the calibrator in `union`, the calibration result in `result`)."""
-    capture: dict = {"reviews": {}, "union": None, "result": None, "trees": []}
+    to the calibrator in `union`, the calibration result in `result`, the
+    round preflight's backend sets in `preflights`)."""
+    capture: dict = {
+        "reviews": {},
+        "union": None,
+        "result": None,
+        "trees": [],
+        "preflights": [],
+    }
+
+    monkeypatch.setattr(
+        fanout.producer,
+        "preflight_round",
+        lambda backends: capture["preflights"].append(list(backends)),
+    )
 
     monkeypatch.setattr(
         fanout.producer,
@@ -130,14 +161,46 @@ def _seams(monkeypatch):
         assert kw["tree_path"] == "/tree"  # every pass shares the ONE Tree
         if isinstance(outcome, Exception):
             raise outcome
-        return outcome
+        # Mirror the real producer's capture (RVW03-WS04): per-launch usage
+        # (per-key override via capture["usage"], else explicitly unreported)
+        # and the APPLIED reasoning — the fake plays a knob-carrying backend
+        # (codex), so the requested level is what lands in argv.
+        return CapturedReview(
+            review=outcome,
+            usage=capture.get("usage", {}).get(key, UNREPORTED),
+            reasoning=kw.get("reasoning"),
+        )
 
     monkeypatch.setattr(fanout.producer, "run_tree_review", fake_run_tree_review)
 
-    def fake_run_calibrator(config, union, *, pr_number, cwd, launcher=None):
+    def fake_run_calibrator(
+        config,
+        union,
+        *,
+        cwd,
+        pr_number=None,
+        commit_range=None,
+        launcher=None,
+        artifacts=None,
+        correlation=None,
+    ):
         capture["union"] = union
+        capture["calibrator_target"] = {
+            "pr_number": pr_number,
+            "commit_range": commit_range,
+        }
+        capture["calibrator_artifacts"] = artifacts
+        capture["calibrator_correlation"] = correlation
         assert cwd == "/tree"
-        return capture["result"], "cal-run-id", "calibrator task"
+        return CalibratorRun(
+            result=capture["result"],
+            run_id="cal-run-id",
+            task="calibrator task",
+            usage=capture.get("usage", {}).get("calibrator", UNREPORTED),
+            # The fake plays the default claude judge, whose `--effort` knob is
+            # real (RVW03-WS04) — the config level IS the applied level here.
+            reasoning=config.reasoning,
+        )
 
     monkeypatch.setattr(fanout, "run_calibrator", fake_run_calibrator)
     return capture
@@ -280,19 +343,104 @@ def test_single_pass_failure_degrades_but_the_round_continues(_seams):
     assert "codex exited 1" in failed["detail"]
 
 
-def test_all_passes_failing_fails_the_round(_seams):
+def test_all_passes_failing_fails_the_round(_seams, _tmp_state_root, caplog):
+    import json as _json
+    import logging as _logging
+
     from shipit.agent import backend as agent_backend
 
     _seams["reviews"] = {
         "correctness": RuntimeError("boom a"),
         "test-quality": RuntimeError("boom b"),
     }
+    caplog.set_level(_logging.INFO, logger="shipit.review")
     with pytest.raises(RuntimeError, match="all 2 dimension passes failed"):
         fanout.run_fanout_review(
             agent_backend.CODEX,
             _ctx(),
             dimensions=["correctness", "test-quality"],
         )
+    # The fatal path returns no FanoutOutcome, so the ONLY witness of the failed
+    # passes is the state-root + log side effects — assert they survive the
+    # raise: each failed pass wrote a bundle (meta carrying its failed outcome +
+    # full error) and emitted its launched + settled events.
+    repo_root = _tmp_state_root / "review-artifacts" / "owner" / "repo"
+    metas = [_json.loads(p.read_text()) for p in repo_root.glob("*/*/meta.json")]
+    assert len(metas) == 2
+    assert {m["outcome"] for m in metas} == {"failed"}
+    assert {m["error"] for m in metas} == {"boom a", "boom b"}
+    names = _event_names(caplog)
+    assert names.count("review.pass.launched") == 2
+    assert names.count("review.pass.settled") == 2
+
+
+def test_round_preflights_the_reviewer_backend_once_before_the_fanout(
+    monkeypatch, _seams
+):
+    """RVW03-WS03: the round's configured backend set is preflighted ONCE, and
+    it happens BEFORE the Tree provisions — so a missing binary can never cost
+    a Tree clone or a pass launch."""
+    from shipit.agent import backend as agent_backend
+
+    order: list[str] = []
+    _seams["reviews"] = {"correctness": _pass_review([])}
+    real_preflight = fanout.producer.preflight_round
+    real_provision = fanout.producer.provision_review_tree
+    monkeypatch.setattr(
+        fanout.producer,
+        "preflight_round",
+        lambda backends: order.append("preflight") or real_preflight(backends),
+    )
+    monkeypatch.setattr(
+        fanout.producer,
+        "provision_review_tree",
+        lambda ctx: order.append("provision") or real_provision(ctx),
+    )
+    fanout.run_fanout_review(agent_backend.CODEX, _ctx(), dimensions=["correctness"])
+    assert order == ["preflight", "provision"]
+    assert _seams["preflights"] == [[agent_backend.CODEX]]
+
+
+def test_round_preflight_includes_the_calibrators_backend_when_the_judge_is_on(
+    _seams,
+):
+    """With the dormant judge opted on, its backend is part of the round's
+    configured set — its binary missing must surface at preflight, not after
+    every pass already ran (the round's most expensive possible failure)."""
+    from shipit.agent import backend as agent_backend
+
+    _seams["reviews"] = {"correctness": _pass_review([])}
+    fanout.run_fanout_review(
+        agent_backend.CODEX, _ctx(), dimensions=["correctness"], calibrator=_CAL
+    )
+    assert _seams["preflights"] == [
+        [agent_backend.CODEX, agent_backend.by_name(_CAL.backend)]
+    ]
+
+
+def test_missing_binary_fails_the_round_before_any_pass_launches(monkeypatch, _seams):
+    """RVW03-WS03 regression: a missing backend binary is ONE actionable
+    BackendUnavailable from the round preflight — never 'all N dimension passes
+    failed' with N truncated per-pass details — and NO pass launches, NO Tree
+    provisions."""
+    from shipit.agent import backend as agent_backend
+    from shipit.review.backends import BackendUnavailable
+
+    launched: list = []
+    monkeypatch.setattr(
+        fanout.producer,
+        "run_tree_review",
+        lambda *a, **k: launched.append(a) or _pass_review([]),
+    )
+
+    def missing(backends):
+        raise BackendUnavailable("binary 'codex' not found — install/configure it")
+
+    monkeypatch.setattr(fanout.producer, "preflight_round", missing)
+    with pytest.raises(BackendUnavailable, match="install/configure"):
+        fanout.run_fanout_review(agent_backend.CODEX, _ctx())
+    assert launched == []
+    assert _seams["trees"] == []
 
 
 def test_calibrator_failure_propagates_and_no_union_is_posted(monkeypatch, _seams):
@@ -308,7 +456,17 @@ def test_calibrator_failure_propagates_and_no_union_is_posted(monkeypatch, _seam
         "test-quality": _pass_review([]),
     }
 
-    def boom(config, union, *, pr_number, cwd, launcher=None):
+    def boom(
+        config,
+        union,
+        *,
+        cwd,
+        pr_number=None,
+        commit_range=None,
+        launcher=None,
+        artifacts=None,
+        correlation=None,
+    ):
         raise CalibrationContractError("calibrator output missing candidate id 0")
 
     monkeypatch.setattr(fanout, "run_calibrator", boom)
@@ -748,7 +906,9 @@ def test_incremental_round_runs_one_pass_suppresses_nits_records_range(_seams):
     # Exactly ONE pass ran — not the dimension fan-out.
     assert [run["kind"] for run in outcome.runs] == ["incremental-pass"]
     run = outcome.runs[0]
-    # The cheaper reasoning level is stamped on the run (config + record).
+    # The cheaper reasoning level is stamped from the argv ACTUALLY applied
+    # (RVW03-WS04: the fake plays a knob-carrying backend, so the requested
+    # level ran) — no longer a record-only echo of config.
     assert run["reasoning"] == fanout.DEFAULT_INCREMENTAL_REASONING
     # The fix range is recorded on the run entry.
     assert run["range"] == {"base": "b" * 40, "head": "c" * 40}
@@ -794,3 +954,590 @@ def test_incremental_pass_failure_fails_the_round(_seams):
         fanout.run_fanout_review(
             agent_backend.CODEX, _incremental_ctx(), incremental=True
         )
+
+
+# --- measured token usage (RVW03-WS04) ---------------------------------------
+
+
+def test_per_run_usage_is_stamped_and_the_round_total_sums_reported_runs(_seams):
+    """Each run entry carries the usage its CLI reported (RVW03-WS04, #667) and
+    the round total sums exactly the REPORTED runs — a partially-reported round
+    is a lower bound, never padded with fabricated zeros."""
+    from shipit.agent import backend as agent_backend
+
+    _seams["reviews"] = {
+        "correctness": _pass_review([_comment("bug", severity="major")]),
+        "test-quality": _pass_review([]),
+    }
+    _seams["usage"] = {
+        "correctness": TokenUsage(total_tokens=11943, source="codex-stderr"),
+        "test-quality": TokenUsage(total_tokens=57, source="codex-stderr"),
+    }
+    outcome = fanout.run_fanout_review(
+        agent_backend.CODEX, _ctx(), dimensions=["correctness", "test-quality"]
+    )
+    by_dim = {run["dimension"]: run for run in outcome.runs}
+    assert by_dim["correctness"]["usage"] == {
+        "total_tokens": 11943,
+        "input_tokens": None,
+        "output_tokens": None,
+        "source": "codex-stderr",
+    }
+    assert outcome.total_tokens == 11943 + 57
+
+
+def test_unreported_usage_round_totals_none_not_zero(_seams):
+    """A round where NO run reported usage totals None — the explicit
+    latency-only marker the eval report distinguishes — never a fake 0."""
+    from shipit.agent import backend as agent_backend
+
+    _seams["reviews"] = {
+        "correctness": _pass_review([]),
+        "test-quality": _pass_review([]),
+    }
+    outcome = fanout.run_fanout_review(
+        agent_backend.CODEX, _ctx(), dimensions=["correctness", "test-quality"]
+    )
+    assert all(
+        run["usage"]
+        == {
+            "total_tokens": None,
+            "input_tokens": None,
+            "output_tokens": None,
+            "source": "unreported",
+        }
+        for run in outcome.runs
+    )
+    assert outcome.total_tokens is None
+
+
+def test_failed_pass_keeps_the_explicitly_unknown_usage(_seams):
+    """A failed pass's run entry keeps usage explicitly-unknown (its launch may
+    have billed tokens nobody reported) while the surviving pass's measurement
+    still reaches the round total."""
+    from shipit.agent import backend as agent_backend
+
+    _seams["reviews"] = {
+        "correctness": _pass_review([_comment("bug", severity="major")]),
+        "test-quality": RuntimeError("backend blew up"),
+    }
+    _seams["usage"] = {
+        "correctness": TokenUsage(total_tokens=500, source="codex-stderr"),
+    }
+    outcome = fanout.run_fanout_review(
+        agent_backend.CODEX, _ctx(), dimensions=["correctness", "test-quality"]
+    )
+    by_dim = {run["dimension"]: run for run in outcome.runs}
+    assert by_dim["test-quality"]["usage"]["total_tokens"] is None
+    assert by_dim["test-quality"]["usage"]["source"] == "unreported"
+    assert outcome.total_tokens == 500
+
+
+def test_calibrator_usage_and_applied_reasoning_ride_its_run_entry(_seams):
+    """The calibrator's run entry carries its measured usage and the reasoning
+    level the adapter ACTUALLY applied (RVW03-WS04) — and its usage joins the
+    round total alongside the passes'."""
+    from shipit.agent import backend as agent_backend
+
+    _seams["reviews"] = {
+        "correctness": _pass_review([_comment("bug", severity="major")]),
+    }
+    _seams["usage"] = {
+        "correctness": TokenUsage(total_tokens=100, source="codex-stderr"),
+        "calibrator": TokenUsage(
+            total_tokens=2000,
+            source="claude-envelope",
+            input_tokens=1900,
+            output_tokens=100,
+        ),
+    }
+    _seams["result"] = CalibrationResult(
+        overall_feedback="v",
+        entries=(_calibrated(0, _finding(Severity.MAJOR, "bug")),),
+    )
+    outcome = fanout.run_fanout_review(
+        agent_backend.CODEX, _ctx(), dimensions=["correctness"], calibrator=_CAL
+    )
+    cal = outcome.runs[-1]
+    assert cal["kind"] == "calibrator"
+    assert cal["usage"]["total_tokens"] == 2000
+    assert cal["usage"]["source"] == "claude-envelope"
+    assert cal["reasoning"] == "high"  # applied by the claude --effort knob
+    assert outcome.total_tokens == 2100
+
+
+def test_round1_passes_record_no_reasoning_when_none_was_applied(_seams):
+    """Round-1 passes request no ReasoningLevel, so no run entry carries one —
+    the record never invents a level that was not in argv (#685)."""
+    from shipit.agent import backend as agent_backend
+
+    _seams["reviews"] = {"correctness": _pass_review([])}
+    outcome = fanout.run_fanout_review(
+        agent_backend.CODEX, _ctx(), dimensions=["correctness"]
+    )
+    assert "reasoning" not in outcome.runs[0]
+
+
+# --- the offline range target (RVW03-WS01) -----------------------------------
+
+
+def _range_view(workdir="/replay-checkout"):
+    from shipit.identity import repo_from_slug
+    from shipit.review.diff import RangeView
+
+    return RangeView(
+        repo=repo_from_slug("acme/widget"),
+        base_sha=Sha("d" * 40),
+        head_sha=Sha("e" * 40),
+        diff="diff --git a/x b/x\n",
+        changed_files=["x"],
+        workdir=workdir,
+    )
+
+
+@pytest.fixture
+def _range_seams(monkeypatch):
+    """Fake the RANGE producer seams (the offline arm's dispatch targets) and
+    BOOBY-TRAP the PR-coupled ones — a RangeView target must never provision a
+    Tree or compose a `gh pr diff` task."""
+    capture: dict = {
+        "reviews": {},
+        "union": None,
+        "result": None,
+        "calls": [],
+        "preflights": [],
+    }
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("a RangeView target must never touch a PR seam")
+
+    # The range arm still preflights its backend binaries (RVW03-WS03 preflight,
+    # shared with the PR arm) — stub it so the offline tests don't require the
+    # real `codex`/`claude` binaries on PATH, capturing the round's backend set.
+    monkeypatch.setattr(
+        fanout.producer,
+        "preflight_round",
+        lambda backends: capture["preflights"].append(list(backends)),
+    )
+
+    monkeypatch.setattr(fanout.producer, "provision_review_tree", _boom)
+    monkeypatch.setattr(fanout.producer, "run_tree_review", _boom)
+    monkeypatch.setattr(fanout.producer, "pass_task_text", _boom)
+
+    def fake_range_pass_task_text(
+        backend, view, *, instructions_path=None, dimension=None
+    ):
+        return f"range task for {dimension.name}"
+
+    monkeypatch.setattr(
+        fanout.producer, "range_pass_task_text", fake_range_pass_task_text
+    )
+
+    def fake_run_range_review(backend, view, **kw):
+        capture["calls"].append({"view": view, "dimension": kw.get("dimension")})
+        dim = kw["dimension"]
+        outcome = capture["reviews"][dim.name]
+        if isinstance(outcome, Exception):
+            raise outcome
+        # Mirror the live arm (RVW03-WS04): the range pass's capture carries its
+        # measured usage (per-dimension override via capture["usage"]) so range
+        # run entries carry usage exactly like live entries, plus applied reasoning.
+        return CapturedReview(
+            review=outcome,
+            usage=capture.get("usage", {}).get(dim.name, UNREPORTED),
+            reasoning=kw.get("reasoning"),
+        )
+
+    monkeypatch.setattr(fanout.producer, "run_range_review", fake_run_range_review)
+
+    def fake_run_calibrator(
+        config,
+        union,
+        *,
+        cwd,
+        pr_number=None,
+        commit_range=None,
+        launcher=None,
+        artifacts=None,
+        correlation=None,
+    ):
+        capture["union"] = union
+        capture["calibrator_target"] = {
+            "cwd": cwd,
+            "pr_number": pr_number,
+            "commit_range": commit_range,
+        }
+        return CalibratorRun(
+            result=capture["result"],
+            run_id="cal-run-id",
+            task="calibrator task",
+            usage=capture.get("usage", {}).get("calibrator", UNREPORTED),
+            reasoning=config.reasoning,
+        )
+
+    monkeypatch.setattr(fanout, "run_calibrator", fake_run_calibrator)
+    return capture
+
+
+def test_range_target_fans_out_through_the_range_producer(_range_seams):
+    """One code path (RVW03-WS01): a RangeView target runs the SAME fan-out —
+    union, dedup, routing, run trail — with the passes dispatched to the range
+    producer (no Tree, no gh) in the replay checkout."""
+    from shipit.agent import backend as agent_backend
+
+    _range_seams["reviews"] = {
+        "correctness": _pass_review([_comment("bug", severity="major")]),
+        "test-quality": _pass_review([]),
+    }
+    outcome = fanout.run_fanout_review(
+        agent_backend.CODEX,
+        _range_view(),
+        dimensions=["correctness", "test-quality"],
+    )
+    # Every pass launched through run_range_review with its dimension slice
+    # (the passes run in parallel, so compare order-insensitively).
+    assert sorted(c["dimension"].name for c in _range_seams["calls"]) == [
+        "correctness",
+        "test-quality",
+    ]
+    assert all(c["view"].workdir == "/replay-checkout" for c in _range_seams["calls"])
+    # The range round preflights its backend binaries too (RVW03-WS03, shared
+    # with the PR arm) — once, over the reviewer's configured backend.
+    assert _range_seams["preflights"] == [[agent_backend.CODEX]]
+    # The routed outcome is the fan-out's usual product: runs per pass, the
+    # deduped union posted with pass severities.
+    assert [run["kind"] for run in outcome.runs] == ["dimension-pass"] * 2
+    assert [c["text"] for c in outcome.review["comments"]] == ["bug"]
+    assert outcome.review["summary"]["status"] == "REQUEST_CHANGES"
+
+
+def test_range_target_calibrator_gets_the_range_ground_truth(_range_seams):
+    # The third PR-coupled seam: with the judge on, an offline round hands the
+    # calibrator the RANGE (its `git diff` ground truth) and the replay
+    # checkout as cwd — never a PR number, never a Tree.
+    from shipit.agent import backend as agent_backend
+
+    _range_seams["reviews"] = {
+        "correctness": _pass_review([_comment("bug", severity="major")]),
+    }
+    _range_seams["result"] = CalibrationResult(
+        overall_feedback="v", entries=(_calibrated(0, _finding(Severity.MAJOR, "bug")),)
+    )
+    outcome = fanout.run_fanout_review(
+        agent_backend.CODEX,
+        _range_view(),
+        dimensions=["correctness"],
+        calibrator=_CAL,
+    )
+    assert _range_seams["calibrator_target"] == {
+        "cwd": "/replay-checkout",
+        "pr_number": None,
+        "commit_range": ("d" * 40, "e" * 40),
+    }
+    assert [run["kind"] for run in outcome.runs] == ["dimension-pass", "calibrator"]
+
+
+def test_range_target_all_passes_failing_fails_the_round_with_the_range_label(
+    _range_seams,
+):
+    from shipit.agent import backend as agent_backend
+
+    _range_seams["reviews"] = {
+        "correctness": RuntimeError("backend blew up"),
+    }
+    with pytest.raises(RuntimeError, match=f"range {'d' * 40}..{'e' * 40}"):
+        fanout.run_fanout_review(
+            agent_backend.CODEX, _range_view(), dimensions=["correctness"]
+        )
+
+
+def test_range_target_rejects_incremental_and_dry_run():
+    # Rounds are keyed to a live PR head (multi-round fix-range replay is out
+    # of the Review Lab's scope) and the dry-run contract prints a would-run
+    # TREE launch — both are caller errors on a RangeView, refused loud.
+    from shipit.agent import backend as agent_backend
+
+    with pytest.raises(ValueError, match="incremental"):
+        fanout.run_fanout_review(agent_backend.CODEX, _range_view(), incremental=True)
+    with pytest.raises(ValueError, match="dry_run"):
+        fanout.run_fanout_review(agent_backend.CODEX, _range_view(), dry_run=True)
+
+
+# ---------------------------------------------------------------------------
+# RVW03-WS02 — per-run artifact bundles + finding↔pass correlation + progress
+# ---------------------------------------------------------------------------
+
+
+def _event_names(caplog):
+    from shipit import events
+
+    return [
+        name
+        for r in caplog.records
+        if (name := getattr(r, events.EXTRA_KEY, None)) is not None
+    ]
+
+
+def test_fanout_persists_bundles_and_correlates_findings_to_passes(
+    _seams, _tmp_state_root, caplog
+):
+    """Every pass — success AND failure — gets an artifact bundle keyed by its
+    run id under the round's directory; the round id/artifacts location ride
+    the outcome; every finding carries its originating pass's run id."""
+    import json as _json
+    import logging as _logging
+    from pathlib import Path as _Path
+
+    from shipit.agent import backend as agent_backend
+
+    _seams["reviews"] = {
+        "correctness": _pass_review([_comment("bug", severity="major")]),
+        "test-quality": RuntimeError("child exploded"),
+    }
+    caplog.set_level(_logging.INFO, logger="shipit.review")
+    outcome = fanout.run_fanout_review(
+        agent_backend.CODEX,
+        _ctx(),
+        dimensions=["correctness", "test-quality"],
+    )
+
+    # The round's observability identity, discoverable from the outcome (and
+    # thence the round record): bundles live under the shared state root.
+    assert outcome.round_id
+    assert outcome.artifacts_dir == str(
+        _tmp_state_root / "review-artifacts" / "owner" / "repo" / outcome.round_id
+    )
+
+    runs = {run["dimension"]: run for run in outcome.runs}
+    ok, bad = runs["correctness"], runs["test-quality"]
+    # Each run entry points at its own bundle dir (named by its run id).
+    assert ok["artifacts"] == str(_Path(outcome.artifacts_dir) / ok["run_id"])
+    assert bad["artifacts"] == str(_Path(outcome.artifacts_dir) / bad["run_id"])
+    # UNCONDITIONAL: the FAILED pass's bundle exists too, meta carrying the
+    # run identity + settled outcome + the untruncated error.
+    bad_meta = _json.loads((_Path(bad["artifacts"]) / "meta.json").read_text())
+    assert bad_meta["run_id"] == bad["run_id"]
+    assert bad_meta["round_id"] == outcome.round_id
+    assert bad_meta["outcome"] == "failed"
+    assert bad_meta["error"] == "child exploded"
+    ok_meta = _json.loads((_Path(ok["artifacts"]) / "meta.json").read_text())
+    assert ok_meta["outcome"] == "success" and ok_meta["findings"] == 1
+
+    # Finding↔pass correlation: the posted finding traces to the pass that
+    # emitted it.
+    assert [j.run_id for j in outcome.findings] == [ok["run_id"]]
+
+    # The coarse progress trail: one launched + one settled event per pass,
+    # each carrying the correlation extras.
+    names = _event_names(caplog)
+    assert names.count("review.pass.launched") == 2
+    assert names.count("review.pass.settled") == 2
+    settled = [
+        r for r in caplog.records if getattr(r, "_event", None) == "review.pass.settled"
+    ]
+    by_dim = {r.dimension: r for r in settled}
+    assert by_dim["correctness"].outcome == "success"
+    assert by_dim["test-quality"].outcome == "failed"
+    assert by_dim["correctness"].run_id == ok["run_id"]
+    assert by_dim["correctness"].round_id == outcome.round_id
+
+
+def test_calibrator_gets_its_own_bundle_and_run_entry_artifacts(
+    _seams, _tmp_state_root
+):
+    """The judge's bundle lives at the fixed `calibrator` name under the round
+    dir (one judge per round; its true run id is post-hoc) and its run entry
+    points there."""
+    from pathlib import Path as _Path
+
+    from shipit.agent import backend as agent_backend
+
+    _seams["reviews"] = {
+        "correctness": _pass_review([_comment("bug", severity="major")])
+    }
+    _seams["result"] = CalibrationResult(
+        overall_feedback="v",
+        entries=(_calibrated(0, _finding(Severity.MAJOR, "bug")),),
+    )
+    outcome = fanout.run_fanout_review(
+        agent_backend.CODEX, _ctx(), dimensions=["correctness"], calibrator=_CAL
+    )
+    cal = next(run for run in outcome.runs if run["kind"] == "calibrator")
+    assert cal["artifacts"] == str(_Path(outcome.artifacts_dir) / "calibrator")
+    # The bundle handle was threaded into run_calibrator (which writes the
+    # prompt/streams at the launch seam).
+    assert _seams["calibrator_artifacts"] is not None
+    assert str(_seams["calibrator_artifacts"].dir) == cal["artifacts"]
+
+
+def test_calibrator_progress_events_carry_the_stable_surrogate_run_id(
+    _seams, _tmp_state_root, caplog
+):
+    """The one judge per round has no true run id until AFTER it launches (and
+    none at all on a pre-id failure), so its launch + settle events and its
+    raw-output log correlate by the STABLE surrogate `run_id=calibrator` (the
+    fixed bundle name) — `shipit logs --run calibrator` slices its whole trail.
+    The round-level completion + disposition events carry `round_id`/`run_id`
+    too, so no round-level record falls outside the `--round`/`--run` filters."""
+    import logging as _logging
+
+    from shipit.agent import backend as agent_backend
+
+    _seams["reviews"] = {
+        "correctness": _pass_review(
+            [
+                _comment("real bug", severity="major"),
+                _comment("out of scope", severity="minor", line=9),
+            ]
+        )
+    }
+    _seams["result"] = CalibrationResult(
+        overall_feedback="v",
+        entries=(
+            _calibrated(0, _finding(Severity.MAJOR, "real bug")),
+            _calibrated(
+                1,
+                _finding(Severity.MINOR, "out of scope", file="a.py"),
+                Disposition.OUT_OF_SCOPE,
+            ),
+        ),
+    )
+    caplog.set_level(_logging.INFO, logger="shipit.review")
+    outcome = fanout.run_fanout_review(
+        agent_backend.CODEX, _ctx(), dimensions=["correctness"], calibrator=_CAL
+    )
+
+    # The correlation extras threaded into run_calibrator (for its DEBUG raw log).
+    corr = _seams["calibrator_correlation"]
+    assert corr["run_id"] == "calibrator"
+    assert corr["round_id"] == outcome.round_id
+    assert corr["dimension"] == "calibrator"
+
+    by_event: dict[str, list] = {}
+    for r in caplog.records:
+        name = getattr(r, "_event", None)
+        if name is not None:
+            by_event.setdefault(name, []).append(r)
+
+    # Both calibrator progress events correlate by the surrogate run id.
+    cal_launched = [
+        r for r in by_event["review.pass.launched"] if r.dimension == "calibrator"
+    ]
+    cal_settled = [
+        r for r in by_event["review.pass.settled"] if r.dimension == "calibrator"
+    ]
+    assert len(cal_launched) == 1 and len(cal_settled) == 1
+    assert cal_launched[0].run_id == "calibrator"
+    assert cal_settled[0].run_id == "calibrator"
+    assert cal_settled[0].round_id == outcome.round_id
+
+    # The round completion event is round-correlated.
+    [completed] = by_event["review.calibrated"]
+    assert completed.round_id == outcome.round_id
+
+    # The routed-out finding's disposition event traces to its round AND its
+    # originating pass run.
+    pass_run_id = next(
+        run["run_id"] for run in outcome.runs if run["kind"] == "dimension-pass"
+    )
+    [disp] = by_event["finding.dispositioned"]
+    assert disp.round_id == outcome.round_id
+    assert disp.run_id == pass_run_id
+
+
+def test_calibrator_failure_settled_event_carries_the_surrogate_run_id(
+    monkeypatch, _seams, _tmp_state_root, caplog
+):
+    """Even a calibrator that fails BEFORE yielding a session id settles a
+    `review.pass.settled` failure event that `--run calibrator` can select."""
+    import logging as _logging
+
+    from shipit.agent import backend as agent_backend
+
+    _seams["reviews"] = {
+        "correctness": _pass_review([_comment("bug", severity="major")])
+    }
+
+    def boom(
+        config,
+        union,
+        *,
+        cwd,
+        pr_number=None,
+        commit_range=None,
+        launcher=None,
+        artifacts=None,
+        correlation=None,
+    ):
+        raise CalibrationContractError("calibrator output missing candidate id 0")
+
+    monkeypatch.setattr(fanout, "run_calibrator", boom)
+    caplog.set_level(_logging.INFO, logger="shipit.review")
+    with pytest.raises(CalibrationContractError):
+        fanout.run_fanout_review(
+            agent_backend.CODEX, _ctx(), dimensions=["correctness"], calibrator=_CAL
+        )
+    settled = [
+        r
+        for r in caplog.records
+        if getattr(r, "_event", None) == "review.pass.settled"
+        and getattr(r, "dimension", None) == "calibrator"
+    ]
+    assert len(settled) == 1
+    assert settled[0].run_id == "calibrator"
+    assert settled[0].outcome == "failed"
+
+
+def test_union_candidates_carry_the_pass_run_id(_seams):
+    """The union tags every candidate with the run id of the pass that emitted
+    it — the join `_pass_run_id` reads back onto the judged findings."""
+    from shipit.agent import backend as agent_backend
+
+    _seams["reviews"] = {
+        "correctness": _pass_review([_comment("bug", severity="major")]),
+        "test-quality": _pass_review(
+            [_comment("gap", severity="minor", file="t.py")], reviewed=("t.py",)
+        ),
+    }
+    _seams["result"] = CalibrationResult(
+        overall_feedback="v",
+        entries=(
+            _calibrated(0, _finding(Severity.MAJOR, "bug")),
+            _calibrated(1, _finding(Severity.MINOR, "gap", file="t.py")),
+        ),
+    )
+    outcome = fanout.run_fanout_review(
+        agent_backend.CODEX,
+        _ctx(),
+        dimensions=["correctness", "test-quality"],
+        calibrator=_CAL,
+    )
+    union = _seams["union"]
+    runs = {run["dimension"]: run for run in outcome.runs if "dimension" in run}
+    assert union[0]["run_id"] == runs["correctness"]["run_id"]
+    assert union[1]["run_id"] == runs["test-quality"]["run_id"]
+    by_text = {j.finding.text: j for j in outcome.findings}
+    assert by_text["bug"].run_id == runs["correctness"]["run_id"]
+    assert by_text["gap"].run_id == runs["test-quality"]["run_id"]
+
+
+def test_bundles_fail_open_when_ctx_has_no_repo_identity(_seams, _tmp_state_root):
+    """A hand-built ctx with no repo slug disables the bundles — the round
+    still runs, runs carry `artifacts: None`, the outcome carries no
+    artifacts dir, and nothing is written."""
+    from types import SimpleNamespace as _NS
+
+    from shipit.agent import backend as agent_backend
+
+    ctx = _NS(number=5, repo=None, head_ref="feature/x", workdir="/checkout", diff="")
+    _seams["reviews"] = {
+        "correctness": _pass_review([_comment("bug", severity="major")])
+    }
+    outcome = fanout.run_fanout_review(
+        agent_backend.CODEX, ctx, dimensions=["correctness"]
+    )
+    assert outcome.artifacts_dir is None
+    assert outcome.round_id  # the round is still identified
+    assert all(run["artifacts"] is None for run in outcome.runs)
+    assert [j.run_id for j in outcome.findings] == [outcome.runs[0]["run_id"]]
+    assert not (_tmp_state_root / "review-artifacts").exists()

@@ -111,9 +111,10 @@ def test_routed_out_findings_are_recorded_with_their_disposition():
 
 
 def test_contributing_runs_ride_verbatim_as_the_ws04_seam():
-    # `round.runs` carries the run ids + variant hashes of every contributing
-    # run — the join key `shipit eval report` resolves eval records by. Today's
-    # single-pass producer contributes none; the shape is the WS04 seam.
+    # `round.runs` carries every contributing run's entry (run ids + variant
+    # hashes + per-run usage, RVW03-WS04) verbatim — the eval report's review
+    # axis reads cost straight off the record. The single-pass replay
+    # contributes none; the shape is the fan-out's seam.
     runs = [{"run_id": "agent-a7c77e10", "variant": {"content_hash": "sha256:x"}}]
     assert _build(runs=runs)["round.runs"] == runs
     assert _build()["round.runs"] == []
@@ -475,7 +476,7 @@ def test_record_round_persists_calibrator_findings_and_runs(tmp_path):
     # RVW02-WS04: the PR path passes the Calibrator's REAL routing plus the
     # contributing runs (every dimension pass + the calibrator, run ids +
     # variant hashes) — the record retains routed-out findings, never just the
-    # posted subset, and `round.runs` is the eval-report join surface.
+    # posted subset, and `round.runs` is the eval report's per-run surface.
     findings = [
         JudgedFinding(
             Finding(severity=Severity.MAJOR, text="bug", file="a.py"), Disposition.POST
@@ -568,3 +569,163 @@ def test_tee_forwards_the_fanout_findings_and_runs(monkeypatch, tmp_path):
     service.generate_review(agent_backend.CODEX, _tee_ctx())
     assert captured["findings"] == findings
     assert captured["runs"] == runs
+
+
+def test_record_round_threads_the_measured_round_token_total(tmp_path):
+    # RVW03-WS04 (#667): `total_tokens` — the sum of the runs' CLI-reported
+    # usage — reaches `round.usage.total_tokens`, and each run's own `usage`
+    # block rides `round.runs` verbatim. No transcript/run_id join involved.
+    runs = [
+        {
+            "run_id": "pass-1",
+            "kind": "dimension-pass",
+            "variant": {"content_hash": "sha256:p1", "label": None},
+            "usage": {
+                "total_tokens": 11943,
+                "input_tokens": None,
+                "output_tokens": None,
+                "source": "codex-stderr",
+            },
+        },
+    ]
+    path = roundrecord.record_round(
+        _REVIEW,
+        repo_slug="acme/widget",
+        pr=7,
+        base_sha="a" * 40,
+        head_sha="b" * 40,
+        reviewer="codex",
+        model="pro",
+        timeout="600s",
+        instructions_path=None,
+        runs=runs,
+        duration_ms=2000,
+        total_tokens=11943,
+        base_dir=tmp_path / "state",
+    )
+    [line] = path.read_text(encoding="utf-8").splitlines()
+    record = json.loads(line)
+    assert record["round.usage"] == {"duration_ms": 2000, "total_tokens": 11943}
+    assert record["round.runs"][0]["usage"]["total_tokens"] == 11943
+    assert record["round.runs"][0]["usage"]["source"] == "codex-stderr"
+
+
+def test_tee_threads_the_fanout_round_token_total(monkeypatch, tmp_path):
+    # The generate-time tee forwards the fan-out's measured round total into
+    # the record (RVW03-WS04) — the seam that used to silently drop it (#667).
+    from shipit.agent import backend as agent_backend
+    from shipit.review import service
+
+    review = {"summary": {"status": "COMMENT", "overall_feedback": ""}, "comments": []}
+    monkeypatch.setattr(
+        service.fanout,
+        "run_fanout_review",
+        lambda backend, ctx, **kw: service.fanout.FanoutOutcome(
+            review=dict(review), findings=(), runs=(), total_tokens=12000
+        ),
+    )
+    written = []
+    monkeypatch.setattr(
+        service.roundrecord,
+        "record_round",
+        lambda r, **kw: written.append(kw) or tmp_path / "s",
+    )
+    service.generate_review(agent_backend.CODEX, _tee_ctx())
+    [kw] = written
+    assert kw["total_tokens"] == 12000
+
+
+# ---------------------------------------------------------------------------
+# RVW03-WS02 — round.id / round.artifacts + finding↔pass run_id correlation
+# ---------------------------------------------------------------------------
+
+
+def test_build_carries_round_identity_artifacts_and_finding_run_ids():
+    judged = [
+        JudgedFinding(
+            Finding(severity=Severity.MAJOR, text="bug", file="a.py"),
+            Disposition.POST,
+            run_id="pass-1",
+        ),
+        JudgedFinding(
+            Finding(severity=Severity.NIT, text="style", file="b.py"),
+            Disposition.NIT_SUPPRESSED,
+        ),
+    ]
+    record = roundrecord.build(
+        review=_REVIEW,
+        findings=judged,
+        repo="owner/repo",
+        pr=7,
+        base_sha="b" * 40,
+        head_sha="h" * 40,
+        reviewer="codex",
+        model="pro",
+        timeout="600s",
+        instructions_path=None,
+        variant=None,
+        round_id="round-hex",
+        artifacts_dir="/state/review-artifacts/owner/repo/round-hex",
+        timestamp="2026-01-01T00:00:00+00:00",
+    )
+    # Bumped to 4 when RVW03-WS07 added `round.cell` (the field-set convention:
+    # any aggregator reading mixed stores keys off this).
+    assert record["round.schema_version"] == 4
+    assert record["round.id"] == "round-hex"
+    assert record["round.artifacts"] == "/state/review-artifacts/owner/repo/round-hex"
+    # Each persisted finding carries its originating pass's run id (None when
+    # the producing pipeline had no per-pass identity — never erased, never
+    # invented).
+    assert [f["run_id"] for f in record["round.findings"]] == ["pass-1", None]
+
+
+def test_build_defaults_round_identity_to_none():
+    record = roundrecord.build(
+        review=_REVIEW,
+        findings=[],
+        repo="owner/repo",
+        pr=None,
+        base_sha="b" * 40,
+        head_sha="h" * 40,
+        reviewer="codex",
+        model="pro",
+        timeout="600s",
+        instructions_path=None,
+        variant=None,
+        timestamp="2026-01-01T00:00:00+00:00",
+    )
+    assert record["round.id"] is None
+    assert record["round.artifacts"] is None
+
+
+def test_dispositioned_stamps_the_single_pass_run_id():
+    review = {
+        "summary": {"status": "COMMENT"},
+        "comments": [{"file": "a.py", "line": 1, "text": "bug", "severity": "major"}],
+    }
+    judged = roundrecord.dispositioned(review, run_id="range-run")
+    assert [j.run_id for j in judged] == ["range-run"]
+    # And the default stays correlation-free, exactly as before.
+    assert [j.run_id for j in roundrecord.dispositioned(review)] == [None]
+
+
+def test_record_round_threads_round_identity_to_the_store(tmp_path):
+    instructions = tmp_path / "instructions.txt"
+    instructions.write_text("review carefully", encoding="utf-8")
+    path = roundrecord.record_round(
+        _REVIEW,
+        repo_slug="owner/repo",
+        pr=3,
+        base_sha="b" * 40,
+        head_sha="h" * 40,
+        reviewer="codex",
+        model="pro",
+        timeout="600s",
+        instructions_path=str(instructions),
+        round_id="rid-1",
+        artifacts_dir="/somewhere/rid-1",
+        base_dir=tmp_path / "state",
+    )
+    record = json.loads(path.read_text().splitlines()[-1])
+    assert record["round.id"] == "rid-1"
+    assert record["round.artifacts"] == "/somewhere/rid-1"
