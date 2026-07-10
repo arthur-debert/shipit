@@ -49,6 +49,7 @@ from ..harness.eval.variant import variant_of
 from ..identity import repo_from_slug
 from . import replay as replay_mod
 from .cell import (
+    MAX_PLANNED_POINTS,
     Cell,
     CellError,
     compose_informed_instructions,
@@ -174,7 +175,23 @@ def plan_points(
     Pins in declared order; per pin, replicates 1..R; per replicate, sweeps
     1..K — sweeps INNERMOST so an informed sweep's priors (same pin, same
     replicate, lower sweep) are always banked before it runs.
+
+    Refuses a plan whose total ``pins × replicates × sweeps`` exceeds
+    :data:`~shipit.review.cell.MAX_PLANNED_POINTS` BEFORE building the tuple:
+    the per-axis :data:`~shipit.review.cell.MAX_SWEEP_COUNT` still lets the
+    product reach a million points, and one point is one model launch, so a
+    runaway plan must die loudly here rather than exhaust memory or bill a
+    million runs. Both the runner and the report route through this guard.
     """
+    total = len(pins) * cell.replicates * cell.sweeps
+    if total > MAX_PLANNED_POINTS:
+        raise CellError(
+            f"cell {cell.id!r}: {len(pins)} pin(s) × {cell.replicates} "
+            f"replicate(s) × {cell.sweeps} sweep(s) = {total} points exceeds "
+            f"the max {MAX_PLANNED_POINTS} — one point is one model launch, so "
+            "a plan this large is a mistake, not an experiment (narrow the "
+            "pins, replicates, or sweeps)"
+        )
     return tuple(
         PlannedPoint(
             pin=pin,
@@ -446,27 +463,26 @@ def _run_point(
 ) -> dict:
     """One point through the unchanged replay driver. BOUNDARY.
 
-    Informed sweeps ≥ 2 compose the prior sweeps' posted findings into a TEMP
-    instructions file here — the runner layer (ADR-0049), so the driver call
-    below is byte-identical between blind and informed arms except for the
-    instructions path it is handed. The temp file is removed after the run
-    (the per-run artifact bundle already banked the exact prompt).
+    EVERY point launches from a TEMP instructions file written here from the
+    up-front-read ``base_text`` — the exact bytes hashed into the point's
+    ``variant_hash`` (see :func:`run_cell`). The replay driver re-reads its
+    instructions path at launch, so handing it the original
+    ``cell.instructions_path`` would let an edit or symlink swap between the
+    up-front read and this launch run DIFFERENT bytes than the record is banked
+    under — a corrupt point mislabeled under a hash it never ran. Materializing
+    the immutable bytes closes that window for both arms, and the driver call is
+    byte-identical between them except for the instructions path it is handed:
 
-    The blind / sweep-1 path re-runs the symlink guard here and hands the driver
-    the RESOLVED real path, not ``cell.instructions_path`` — the driver reads the
-    file again at launch, so re-checking right before that read closes the TOCTOU
-    window a swapped symlink could open between the up-front preflight and here.
+    - informed sweeps ≥ 2 launch ``base_text`` composed with the prior sweeps'
+      posted findings (the runner layer, ADR-0049);
+    - blind / sweep-1 launch ``base_text`` verbatim.
+
+    The temp file is removed after the run (the per-run artifact bundle already
+    banked the exact prompt).
     """
-    composed_path: str | None = None
     if cell.sweep_mode == "informed" and point.sweep > 1:
         priors = _prior_findings(records, point)
-        composed = compose_informed_instructions(base_text, priors)
-        fd, composed_path = tempfile.mkstemp(
-            prefix=f"lab-{cell.id}-", suffix=".txt", text=True
-        )
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(composed)
-        instructions_path = composed_path
+        launch_text = compose_informed_instructions(base_text, priors)
         logger.info(
             "lab: informed sweep %d of %s primed with %d prior finding(s)",
             point.sweep,
@@ -475,11 +491,12 @@ def _run_point(
             extra={"cell": cell.id, "sweep": point.sweep},
         )
     else:
-        # Only the blind / sweep-1 path passes the cell's OWN instructions file
-        # to the driver, so the symlink re-check belongs here — an informed
-        # sweep ≥2 launches the composed temp above and must not fail because
-        # the (unused) original path moved between sweeps.
-        instructions_path = safe_instructions_path(cell.instructions_path)
+        launch_text = base_text
+    fd, instructions_path = tempfile.mkstemp(
+        prefix=f"lab-{cell.id}-", suffix=".txt", text=True
+    )
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(launch_text)
     try:
         if cell.shape == "fanout":
             return replay_mod.run_fanout_replay(
@@ -506,8 +523,7 @@ def _run_point(
             base_dir=base_dir,
         )
     finally:
-        if composed_path is not None:
-            try:
-                os.unlink(composed_path)
-            except OSError:  # pragma: no cover - best-effort cleanup
-                pass
+        try:
+            os.unlink(instructions_path)
+        except OSError:  # pragma: no cover - best-effort cleanup
+            pass

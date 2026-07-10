@@ -11,8 +11,6 @@ number and never a zero.
 
 from __future__ import annotations
 
-import sys
-
 import pytest
 
 from shipit.review import usage
@@ -46,6 +44,17 @@ def test_claude_envelope_without_cache_counters_still_totals():
         {"usage": {"input_tokens": 5, "output_tokens": 7}}
     )
     assert parsed.total_tokens == 12
+
+
+def test_claude_envelope_zero_tokens_is_a_real_measurement_not_degraded():
+    # 0 is falsy, so a valid all-zero run must parse as a measured total of 0
+    # (`reported`), never fall through to UNREPORTED (`total_tokens is None`).
+    parsed = usage.from_claude_envelope(
+        {"usage": {"input_tokens": 0, "output_tokens": 0}}
+    )
+    assert parsed.total_tokens == 0
+    assert parsed.reported is True
+    assert parsed is not usage.UNREPORTED
 
 
 def test_claude_envelope_missing_or_malformed_usage_is_unreported():
@@ -118,27 +127,19 @@ def test_codex_stderr_tolerates_a_same_line_colon_rendering():
 def test_codex_stderr_without_the_line_is_unreported_never_zero():
     assert usage.from_codex_stderr("codex: some log noise") is usage.UNREPORTED
     assert usage.from_codex_stderr("") is usage.UNREPORTED
+    # The explicit `stderr or ""` guard: a None stderr degrades, never raises.
+    assert usage.from_codex_stderr(None) is usage.UNREPORTED
 
 
 def test_codex_stderr_commas_only_figure_degrades_never_crashes():
     # The `tokens used` line matched but the capture is commas-only: it strips
     # to "" and int("") raises ValueError. This untrusted-stderr parse must
     # degrade to UNREPORTED, never let that propagate out and crash
-    # run_calibrator/run_replay. (Limit-independent — always raises.)
+    # run_calibrator/run_replay. Covers the ValueError branch generally — an
+    # oversized figure past CPython's int-string limit raises the SAME
+    # ValueError and degrades identically (no dedicated test: that trigger is a
+    # tunable VM internal, not this parser's own domain behavior).
     assert usage.from_codex_stderr("tokens used\n,,,\n") is usage.UNREPORTED
-
-
-def test_codex_stderr_oversized_figure_degrades_when_int_limit_enabled():
-    # A figure past CPython's integer-string-conversion limit also raises
-    # ValueError in int() and must degrade the same way. That limit is only
-    # active when set (>0), so size the digit string just past whatever limit
-    # is in effect, and skip when the limit is disabled (== 0) — there is then
-    # no ValueError to trigger and the test would otherwise be runtime-dependent.
-    limit = sys.get_int_max_str_digits()
-    if limit == 0:
-        pytest.skip("int-string-conversion limit disabled; int() would not raise")
-    oversized = "9" * (limit + 1)
-    assert usage.from_codex_stderr(f"tokens used: {oversized}\n") is usage.UNREPORTED
 
 
 # --- the record shape -------------------------------------------------------------

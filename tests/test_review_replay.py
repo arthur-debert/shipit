@@ -382,6 +382,34 @@ def test_run_fanout_replay_runs_every_pass_offline_and_writes_the_record(
     assert "review-rounds" in str(result["record_path"])
 
 
+def test_run_fanout_replay_sums_cli_reported_usage_onto_the_round(
+    checkout, monkeypatch, tmp_path
+):
+    """Every fan-out pass that reports a CLI "tokens used" figure contributes to
+    a NON-NULL round.usage.total_tokens — the summed measured cost lab curves
+    read (`round.usage.total_tokens`), matching the single-pass replay path and
+    the live service tee. Without this the fan-out cells render latency-only."""
+    monkeypatch.setattr(producer.shutil, "which", lambda binary: f"/usr/bin/{binary}")
+
+    def _launch(cmd, *, cwd, env, timeout=None):
+        return LaunchResult(
+            returncode=0, stdout=_VALID, stderr="codex\ntokens used\n1,234\n"
+        )
+
+    view = replay.resolve_range("HEAD~1..HEAD", workdir=str(checkout))
+    result = replay.run_fanout_replay(
+        agent_backend.CODEX,
+        view,
+        launcher=_launch,
+        base_dir=tmp_path / "state",
+    )
+
+    [line] = result["record_path"].read_text(encoding="utf-8").splitlines()
+    record = json.loads(line)
+    # 4 default dimension passes, each reporting 1,234 tokens → summed round cost.
+    assert record["round.usage"]["total_tokens"] == 4 * 1234
+
+
 def test_run_fanout_replay_single_pass_flags_apply_unchanged(
     checkout, fanout_launcher, tmp_path, monkeypatch
 ):

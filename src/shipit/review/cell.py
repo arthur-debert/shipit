@@ -189,6 +189,15 @@ def _optional_str(raw: Mapping[str, Any], key: str, where: str) -> str | None:
 #: a plan this large is a mistake, never a real experiment.
 MAX_SWEEP_COUNT = 1000
 
+#: The ceiling on a cell's TOTAL planned points (``pins × replicates ×
+#: sweeps``). :data:`MAX_SWEEP_COUNT` bounds each axis alone, but their product
+#: still reaches a million points per pin (``1000 × 1000``) — enough to exhaust
+#: memory building the plan tuple and to bill a million model runs from one
+#: reviewed cell. :func:`shipit.review.labrun.plan_points` enforces this total
+#: so both the runner and the report refuse a runaway plan before it allocates.
+#: One point is one model launch; a cell asking for more is a config error.
+MAX_PLANNED_POINTS = 10_000
+
 
 def _positive_int(raw: Mapping[str, Any], key: str, where: str, default: int) -> int:
     value = raw.get(key, default)

@@ -257,6 +257,44 @@ def test_blind_sweeps_never_compose_priors(checkout, launcher, tmp_path):
         assert "already banked by prior sweeps" not in launch["cmd"][-1]
 
 
+def test_every_point_launches_the_up_front_bytes_not_a_re_read_of_the_original(
+    checkout, tmp_path, monkeypatch
+):
+    """The idempotency key hashes the instructions read ONCE up front, so every
+    point must launch those exact bytes. The replay driver re-reads its
+    instructions path at launch; handing it the original file would let an edit
+    landing mid-run bill the model bytes the record is not keyed under. run_cell
+    materializes the hashed bytes per point, so a rewrite of the original never
+    reaches a launch — even a later blind sweep."""
+    view = replay.resolve_range("HEAD~1..HEAD", workdir=str(checkout))
+    monkeypatch.chdir(checkout)
+    instr = checkout / "lab" / "instructions"
+    instr.mkdir(parents=True)
+    (instr / "base.txt").write_text("ORIGINAL-BYTES-MARKER\n", encoding="utf-8")
+
+    # A launcher that rewrites the original instructions file on its first call —
+    # an edit/swap landing mid-run between the up-front read and a later launch.
+    launches: list = []
+
+    def _mutating_launch(cmd, *, cwd, env, timeout=None):
+        launches.append({"cmd": cmd})
+        (instr / "base.txt").write_text("MUTATED-BYTES-MARKER\n", encoding="utf-8")
+        return LaunchResult(returncode=0, stdout=_REVIEW, stderr="")
+
+    run_cell(
+        _control_cell(instructions={"path": "lab/instructions/base.txt"}),  # blind K=2
+        _fixture_for(view),
+        checkouts=[str(checkout)],
+        base_dir=tmp_path / "state",
+        launcher=_mutating_launch,
+    )
+    assert len(launches) == 2  # both points ran
+    for launch in launches:
+        prompt = launch["cmd"][-1]
+        assert "ORIGINAL-BYTES-MARKER" in prompt
+        assert "MUTATED-BYTES-MARKER" not in prompt
+
+
 def test_missing_checkout_is_a_loud_preflight_refusal(
     checkout, launcher, tmp_path, monkeypatch
 ):
@@ -363,6 +401,31 @@ def test_plan_points_orders_sweeps_innermost():
         (2, 1),
         (2, 2),
     ]
+
+
+def test_plan_points_refuses_a_runaway_total_before_building_the_tuple():
+    """The per-axis cap still lets the product blow up (1000 × 1000 per pin);
+    a total past MAX_PLANNED_POINTS is a config typo, not an experiment, and
+    must refuse loudly before enumerating a million points or billing them."""
+    # Each axis is individually valid (≤ MAX_SWEEP_COUNT), but 1000 × 100 = 100k
+    # points is a runaway total for one pin.
+    cell = _control_cell(sweeps={"count": 100, "replicates": 1000})
+    fixture = parse_fixture(
+        {
+            "version": 1,
+            "prs": [
+                {
+                    "id": "widget-1",
+                    "repo": "acme/widget",
+                    "pr": 7,
+                    "base_sha": "a" * 40,
+                    "head_sha": "b" * 40,
+                }
+            ],
+        }
+    )
+    with pytest.raises(CellError, match="exceeds the max"):
+        plan_points(cell, resolve_pins(cell, fixture), variant_hash="sha256:x")
 
 
 def test_safe_instructions_path_refuses_a_symlink_escaping_the_repo(

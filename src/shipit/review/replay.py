@@ -377,6 +377,7 @@ def run_fanout_replay(
         instructions_path=instructions_path,
         findings=outcome.findings,
         runs=outcome.runs,
+        total_tokens=outcome.total_tokens,
         duration_ms=duration_ms,
         round_id=outcome.round_id,
         artifacts_dir=outcome.artifacts_dir,
