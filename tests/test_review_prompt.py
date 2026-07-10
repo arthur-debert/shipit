@@ -154,6 +154,39 @@ def test_every_arm_carries_the_one_shared_scope_and_context_baseline():
         assert "do NOT execute build, test, or shell commands" in task, arm
 
 
+def test_shared_scope_baseline_names_the_arm_appropriate_diff_noun():
+    """RVW03-WS01 re-homed onto ADR-0050: the ONE shared scope statement names
+    the arm's own diff, so the live-PR arms scope to "this PR's diff" and the
+    offline replay scopes to "this range's diff" — the range noun flows through
+    the shared surface EVERY arm carries (including the dimension pass), not a
+    private per-pass sentence. Same statement, arm-appropriate noun."""
+    tasks = _every_arm_task()
+    # The live-PR arms (full, dimension pass, incremental) name the PR's diff.
+    for arm in ("full", "dimension", "incremental"):
+        task = tasks[arm]
+        assert "report ONLY findings this PR's diff INTRODUCED or EXPOSED" in task, arm
+        assert "this range's diff" not in task, arm
+    # The offline replay arm names the range's diff, never a PR.
+    range_task = tasks["range"]
+    assert "report ONLY findings this range's diff INTRODUCED or EXPOSED" in range_task
+    assert "this PR's diff" not in range_task
+
+    # The range DIMENSION pass carries the range noun too (a full range task plus
+    # the focus section) — the re-homing reaches the fan-out passes, not just the
+    # monolithic arm.
+    from shipit.review.dimensions import by_name
+
+    range_pass = build_range_reviewer_task(
+        _INSTRUCTIONS,
+        "b" * 40,
+        "c" * 40,
+        schema_inline=False,
+        dimension=by_name("correctness"),
+    )
+    assert "report ONLY findings this range's diff INTRODUCED or EXPOSED" in range_pass
+    assert "this PR's diff" not in range_pass
+
+
 def test_dimension_section_carries_no_private_scope_rule():
     """The scope rule reaches a dimension pass through the shared baseline
     ONCE — the focus section no longer restates it as a private rule (the old

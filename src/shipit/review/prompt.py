@@ -19,12 +19,15 @@ retired front-loaded backends: the agent walks the whole codebase lazily instead
 of reviewing a context-free pasted diff.
 
 Every task body embeds the ONE canonical scope/context baseline of ADR-0050
-(``_SCOPE_AND_CONTEXT``): report only on the diff (findings the diff introduced
+(``_scope_and_context``): report only on the diff (findings the diff introduced
 or exposed; purely pre-existing issues are out of scope and not posted); read
 anything (the checkout is context — callers, definitions, neighbors); run
 nothing (no build/test/shell execution). Full, incremental, range, and
 dimension passes all carry it, so every reviewer arm answers the same question
-— the Review Lab parity baseline (RVW03-WS05, docs/spec/review-lab.md).
+— the Review Lab parity baseline (RVW03-WS05, docs/spec/review-lab.md). Its one
+argument is the arm-appropriate diff noun (``"this PR's diff"`` live, ``"this
+range's diff"`` on the offline replay), so the scope statement is identical
+across arms while still naming each arm's target.
 
 The agent is told to emit its review as a single JSON object on stdout and to
 **NOT** post it — shipit captures that stdout and posts it via the existing
@@ -42,20 +45,32 @@ from __future__ import annotations
 
 from .dimensions import Dimension
 
-# The ONE canonical scope/context baseline every reviewer arm and pass carries
-# (ADR-0050, RVW03-WS05): report only on the diff; read anything; run nothing.
-# Embedded verbatim in the full, incremental, and range tasks (and therefore in
-# every dimension pass, which is a full task plus a focus section) so every arm
-# answers the same question and their recall denominators compare — the Review
-# Lab parity baseline (docs/spec/review-lab.md). The scope rule used to live
-# only in the dimension section; the context rule used to be contradicted by
-# the bundled instructions' "solely on the provided diff". Both now live here,
-# once.
-_SCOPE_AND_CONTEXT = """\
+
+def _scope_and_context(diff_noun: str = "this PR's diff") -> str:
+    """The ONE canonical scope/context baseline every reviewer arm and pass
+    carries (ADR-0050, RVW03-WS05): report only on the diff; read anything; run
+    nothing. Embedded in the full, incremental, and range tasks (and therefore
+    in every dimension pass, which is a full task plus a focus section) so every
+    arm answers the same question and their recall denominators compare — the
+    Review Lab parity baseline (docs/spec/review-lab.md). The scope rule used to
+    live only in the dimension section; the context rule used to be contradicted
+    by the bundled instructions' "solely on the provided diff". Both now live
+    here, once.
+
+    ``diff_noun`` names the diff under review, so the ONE scope statement stays
+    identical across arms while naming the arm-appropriate target — ``"this PR's
+    diff"`` on the live path, ``"this range's diff"`` on the offline replay
+    (RVW03-WS01, where there is no PR). This is where WS01's range-scoping is
+    homed: the range noun rides the SHARED surface every arm carries (full,
+    incremental, range, and every dimension pass), not a private per-pass
+    sentence — so parity holds (same scope statement) without erasing the
+    target distinction.
+    """
+    return f"""\
 SCOPE AND CONTEXT — report only on the diff; read anything; run nothing:
-* SCOPE is the diff: report ONLY findings the diff you were told to fetch \
-above INTRODUCED or EXPOSED. A purely pre-existing issue the diff does not \
-touch is OUT OF SCOPE and must NOT be posted as a finding.
+* SCOPE is the diff: report ONLY findings {diff_noun} INTRODUCED or EXPOSED. \
+A purely pre-existing issue the diff does not touch is OUT OF SCOPE and must \
+NOT be posted as a finding.
 * CONTEXT is the checkout: reading BEYOND the diff is encouraged. Open the \
 callers, definitions, usages, and neighboring code of what changed whenever \
 that context sharpens or refutes a finding — a raw-hunk-only review is how \
@@ -63,6 +78,7 @@ cross-file regressions get missed.
 * RUN NOTHING: beyond fetching the diff as instructed above and reading \
 files, do NOT execute build, test, or shell commands and do NOT start \
 background tasks — this is a read-only review, not an agentic session."""
+
 
 # Human-readable description of the expected JSON, embedded for backends without
 # native schema enforcement (agy). Kept in sync with schema.REVIEW_SCHEMA.
@@ -130,7 +146,7 @@ def build_reviewer_task(
        captures stdout and posts it as the bot through the funnel's check-run gate.
 
     Every arm carries the shared ADR-0050 scope/context baseline
-    (``_SCOPE_AND_CONTEXT``): report only findings the diff INTRODUCED or
+    (``_scope_and_context``): report only findings the diff INTRODUCED or
     EXPOSED (pre-existing issues are out of scope), read the checkout freely
     for context, execute nothing.
 
@@ -156,7 +172,7 @@ unified diff. It uses the PR's ACTUAL base and head — do NOT assume the base i
 `main` (a work-stream or epic PR targets its umbrella branch). Read the surrounding \
 code in this checkout for any context you need.
 
-{_SCOPE_AND_CONTEXT}
+{_scope_and_context("this PR's diff")}
 
 Here are the custom review instructions you must follow:
 {instructions}
@@ -209,9 +225,10 @@ def _dimension_section(dimension: Dimension) -> str:
     Calibrator (ADR-0045) still dedups/verifies/renormalizes what the passes
     report. The section carries ONLY dimension-specific narrowing (category
     ownership); the diff-introduced-or-exposed scope rule is the shared
-    ``_SCOPE_AND_CONTEXT`` baseline every arm carries (ADR-0050), not a private
-    rule of this pass — so the live and range arms' pass prompts are
-    byte-identical here, differing only in how each fetches its diff.
+    ``_scope_and_context`` baseline every arm carries (ADR-0050), not a private
+    rule of this pass — so this focus section is byte-identical across arms. The
+    live and range passes differ only in how each fetches its diff and in the
+    shared baseline's arm-appropriate diff noun.
     """
     return f"""\
 DIMENSION FOCUS — {dimension.title}: this review is ONE scoped pass of a \
@@ -266,7 +283,7 @@ distant invariant is exactly what an incremental review must still catch; a \
 raw-hunk-only pass would miss it. Open the surrounding and cross-file source \
 freely.
 
-{_SCOPE_AND_CONTEXT}
+{_scope_and_context("this PR's diff")}
 
 Here are the custom review instructions you must follow:
 {instructions}
@@ -343,7 +360,7 @@ FIRST, get the changes: run `git diff {base_sha}..{head_sha}` to read the range'
 unified diff. Read the surrounding code in this checkout for any context you need. \
 Do NOT call `gh` — this review is offline and touches nothing on GitHub.
 
-{_SCOPE_AND_CONTEXT}
+{_scope_and_context("this range's diff")}
 
 Here are the custom review instructions you must follow:
 {instructions}

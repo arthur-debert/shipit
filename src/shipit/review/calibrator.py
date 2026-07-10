@@ -257,9 +257,9 @@ def build_calibrator_task(
         # The result sink and diff-scope nouns follow the offline framing too, so
         # the body never contradicts `situation`/`ground_truth` by naming a PR or
         # a GitHub post (RVW03-WS01). The passes reach the same offline scoping
-        # through the shared `_SCOPE_AND_CONTEXT` baseline plus their range diff
-        # fetch (ADR-0050); the calibrator states it inline because its prompt
-        # does not carry that baseline.
+        # through the shared `_scope_and_context` baseline (carrying the range
+        # diff noun) plus their range diff fetch (ADR-0050); the calibrator
+        # states it inline because its prompt does not carry that baseline.
         result_fate = "recorded in the local replay record"
         diff_noun = "this range's diff"
         summary_owner = "the review's"
