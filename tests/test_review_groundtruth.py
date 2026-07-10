@@ -265,11 +265,16 @@ def shipped():
     return load_fixture(Path(__file__).resolve().parents[1] / "lab" / "fixture.toml")
 
 
-class TestShippedFixtureV1:
-    """The committed lab/fixture.toml IS product data — pin its acceptance bars."""
+class TestShippedFixture:
+    """The committed lab/fixture.toml IS product data — pin its acceptance bars.
 
-    def test_loads_and_names_version_1(self, shipped):
-        assert shipped.version == 1
+    The version pin tracks the fixture's current banked version: every
+    adjudication session bumps it (v1 → v35 at the first cells banking), and
+    this test is updated in the same diff as the deliberate bump.
+    """
+
+    def test_loads_and_pins_current_version(self, shipped):
+        assert shipped.version == 35
 
     def test_8_to_12_pinned_ranges(self, shipped):
         assert 8 <= len(shipped.prs) <= 12
