@@ -117,7 +117,8 @@ the verbs they already must run.
   `pr.unready` (the guarded flip's undo — a human pushing the PR back into
   the agent's court), and the
   planning family `planning.grill.started`, `planning.adr.written`,
-  `planning.prd.written`, `planning.epic.minted`, `planning.ws.minted`.
+  `planning.spec.written`, legacy `planning.prd.written`,
+  `planning.epic.minted`, `planning.ws.minted`.
 - **Three witness tiers, strongest preferred** (ADR-0032): verb-witnessed
   (the verb performing the milestone emits — the dev cycle's tier),
   hook-witnessed (the managed post-commit hook emits `commit.created`),
@@ -200,8 +201,8 @@ the verbs they already must run.
 - The design's one prompt-side ask is verb adoption itself, and that pressure
   already exists; every event this epic adds is a side effect of a command
   the flow already requires. Planning-tier events are best-effort by design:
-  a missing `planning.prd.written` means a skipped skill step, not a broken
-  invariant.
+  a missing `planning.spec.written` means a skipped skill step, not a broken
+  invariant. `planning.prd.written` remains accepted for legacy records/scripts.
 - The emit verb doubles as a free adoption signal: `session.intent` records
   incidentally show which sessions used the planning skills.
 - The flow view is the intended data source for the future epic-status sweep

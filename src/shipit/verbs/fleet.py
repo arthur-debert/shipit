@@ -1,7 +1,7 @@
 """``shipit fleet`` — fleet-wide verification over the declared portfolio.
 
 A NESTED click group (the ``tree``/``changelog`` shape): ``sweep`` is its one
-verb today — the TOL01 exit gate (docs/prd/tol01-ci-tools.md, stories 47/49).
+verb today — the TOL01 exit gate (docs/legacy-prd/tol01-ci-tools.md, stories 47/49).
 The verb is thin (ADR-0030): read the portfolio off the CURRENT checkout's
 ``.shipit.toml`` (the sweep runs from the shipit repo — the portfolio's home),
 resolve the candidate build, hand typed entries to the domain orchestrator

@@ -156,8 +156,8 @@ def test_load_units_includes_lefthook_and_pixi_task_block():
     assert pixi.anchor == "[tasks]"
     # The managed pixi TASKS block stays the thin task lines ONLY; the linter
     # deps ride in their own sibling `[feature.lint.dependencies]` block (ADP00,
-    # docs/prd/adoption.md — amending the lint PRD's task-line-only decision),
-    # tested below. `provision-lexd` invokes the binary's provision subcommand
+    # docs/legacy-prd/adoption.md — amending the lint PRD's task-line-only
+    # decision), tested below. `provision-lexd` invokes the binary's provision subcommand
     # (ADP00-WS03), so no provisioning script is ever distributed. `changelog`
     # is the release-notes tool's thin caller (TOL01-WS06, ADR-0039: pixi tasks
     # are one-line callers of the verb). Each task
@@ -239,7 +239,7 @@ def test_pixi_block_reinstall_replaces_in_place():
 
 
 # --------------------------------------------------------------------------
-# The ADP00 managed consumer environment (docs/prd/adoption.md) — the lint
+# The ADP00 managed consumer environment (docs/legacy-prd/adoption.md) — the lint
 # feature/dependency block + the lint environment definition, siblings of the
 # tasks block in the consumer's pixi.toml.
 # --------------------------------------------------------------------------
@@ -288,7 +288,7 @@ def test_load_units_includes_the_lint_env_blocks():
 
 
 def test_packaged_lint_env_agrees_with_shipits_own_manifest():
-    """The dogfood drift check (docs/prd/adoption.md): shipit's own manifest and
+    """The dogfood drift check (docs/legacy-prd/adoption.md): shipit's own manifest and
     the packaged consumer block pin IDENTICAL versions, so shipit dogfoods
     exactly what the fleet receives and a version bump is one data-block edit
     (mirrored into shipit's own hand-written toolchain, or this test fails)."""
@@ -325,7 +325,7 @@ def test_shipits_own_pixi_manifest_reconciles_to_noop():
 
 
 # --------------------------------------------------------------------------
-# The ADP00 consumer-generic lefthook caller (docs/prd/adoption.md, #419) —
+# The ADP00 consumer-generic lefthook caller (docs/legacy-prd/adoption.md, #419) —
 # the managed variant works on a stock consumer right after install; shipit's
 # own repo-local legs live in a committed lefthook-local.yml (lefthook's
 # native config layering), never in the managed file.
@@ -1051,7 +1051,7 @@ def test_a_code_only_shipit_change_rolls_the_pin_forward(tmp_path, monkeypatch):
 
 # --------------------------------------------------------------------------
 # The HAR01 harness units — generated agent-defs + the settings.json hook line
-# (docs/prd/har01-coordinator-guard-and-role-prompts.md, user stories 17 & 21)
+# (docs/legacy-prd/har01-coordinator-guard-and-role-prompts.md, user stories 17 & 21)
 # --------------------------------------------------------------------------
 
 
@@ -1148,7 +1148,7 @@ def test_hook_units_coexist_on_one_settings_file():
 # --------------------------------------------------------------------------
 # The session-bootstrap launcher units — the generic ./agent-start launcher
 # (CDX01 #627), its ./claude-start / ./codex-start compatibility shims, and
-# the SessionStart activation hook (docs/prd/session-bootstrap.md Layers A &
+# the SessionStart activation hook (docs/legacy-prd/session-bootstrap.md Layers A &
 # D, issue #218)
 # --------------------------------------------------------------------------
 
@@ -2627,7 +2627,7 @@ def test_fresh_install_writes_set_and_opens_draft_pr(tmp_path, rec):
     assert result.pr_updated is False
 
     # Managed files landed.
-    assert (tmp_path / "skills" / "to-prd" / "SKILL.md").is_file()
+    assert (tmp_path / "skills" / "to-spec" / "SKILL.md").is_file()
     assert (tmp_path / "bin" / "shipit").is_file()
     # The AGENTS block was spliced in without losing the consumer's text.
     agents = (tmp_path / "AGENTS.md").read_text()
@@ -2773,13 +2773,13 @@ def test_consumer_edit_surfaces_as_override(tmp_path, rec):
     rec.calls.clear()
 
     # The consumer edits a managed skill file.
-    skill = tmp_path / "skills" / "to-prd" / "SKILL.md"
+    skill = tmp_path / "skills" / "to-spec" / "SKILL.md"
     skill.write_text("CONSUMER EDIT\n")
 
     _apply(tmp_path, iapply.MODE_PR)
     assert ("pr_create", True) in rec.calls
     assert "### Overrides" in rec.pr_body
-    assert "skills/to-prd/SKILL.md" in rec.pr_body
+    assert "skills/to-spec/SKILL.md" in rec.pr_body
     # The diff is captured BEFORE the overwrite, so it shows the consumer's edit
     # (a non-empty diff), not an empty diff against what shipit just wrote.
     assert "CONSUMER EDIT" in rec.pr_body
@@ -2829,7 +2829,7 @@ def test_declined_unit_is_never_written_and_drops_from_the_manifest(tmp_path, re
     (tmp_path / "bin" / "shipit").write_text("#!/bin/sh\n# MY OWN LAUNCHER\n")
     _decline(tmp_path, "bin/shipit")
     # Another unit changes, so the plan still has work — an applying install runs.
-    (tmp_path / "skills" / "to-prd" / "SKILL.md").unlink()
+    (tmp_path / "skills" / "to-spec" / "SKILL.md").unlink()
 
     result = _apply(tmp_path, iapply.MODE_PR)
     assert result.pr_url is not None
@@ -2840,7 +2840,7 @@ def test_declined_unit_is_never_written_and_drops_from_the_manifest(tmp_path, re
     cfg = config.load(cfg_path)
     managed = config.load_managed(cfg)
     assert iunits.SHIPIT_LAUNCHER_FILE not in managed
-    assert "skills/to-prd/SKILL.md" in managed
+    assert "skills/to-spec/SKILL.md" in managed
     # The decline itself survives the manifest re-stamp (the durable half)...
     assert config.load_declines(cfg, cfg_path.read_text()) == (
         iunits.SHIPIT_LAUNCHER_FILE,
@@ -2919,7 +2919,7 @@ def test_shipits_own_manifest_declines_the_launcher():
 
 
 def test_fresh_install_delivers_the_lint_environment(tmp_path, rec):
-    # ADP00 (docs/prd/adoption.md): a fresh install ADDs the lint env blocks —
+    # ADP00 (docs/legacy-prd/adoption.md): a fresh install ADDs the lint env blocks —
     # the consumer's pixi.toml ends up a complete, valid manifest whose lint
     # environment carries the fleet-pinned toolchain, alongside the consumer's
     # own untouched content.
@@ -3134,7 +3134,7 @@ def test_default_install_mid_drift_never_branches_or_opens_pr(tmp_path, rec):
     _apply(tmp_path)
     rec.calls.clear()
 
-    skill = tmp_path / "skills" / "to-prd" / "SKILL.md"
+    skill = tmp_path / "skills" / "to-spec" / "SKILL.md"
     skill.write_text("CONSUMER EDIT\n")
     result = _apply(tmp_path)
     # The drifted unit was refreshed to shipit's content, in the working tree.
@@ -3145,7 +3145,7 @@ def test_default_install_mid_drift_never_branches_or_opens_pr(tmp_path, rec):
     # the renderer's stderr warning derives from the typed result.
     warning = verb.format_result_warnings(result)
     assert "consumer-edited" in warning
-    assert "skills/to-prd/SKILL.md" in warning
+    assert "skills/to-spec/SKILL.md" in warning
 
 
 def test_push_flag_pushes_to_branch_without_pr(tmp_path, rec):
@@ -3596,7 +3596,7 @@ def test_activation_output_joins_streams_with_newline(tmp_path):
 
 
 # --------------------------------------------------------------------------
-# Retired files (docs/prd/rvw01-sole-requester.md, ADR-0031)
+# Retired files (docs/legacy-prd/rvw01-sole-requester.md, ADR-0031)
 # --------------------------------------------------------------------------
 
 # A pristine copy of the retired Copilot caller workflow, snapshotted before
@@ -3604,6 +3604,94 @@ def test_activation_output_joins_streams_with_newline(tmp_path):
 # consumer, and its hash pins the packaged manifest to real historical content.
 PRISTINE_WORKFLOW = Path(__file__).parent / "data" / "copilot-review-pristine.yml"
 RETIRED_WORKFLOW_PATH = ".github/workflows/copilot-review.yml"
+PRISTINE_TO_PRD_SKILL = """---
+name: to-prd
+description: Turn the current conversation context into a PRD — the authoritative feature spec — and write it to docs/prd/. Use when user wants to create a PRD from the current context.
+metadata:
+    forked-from: https://github.com/mattpocock/skills (skills/engineering/to-prd)
+---
+This skill takes the current conversation context and codebase understanding and produces a PRD. Do NOT re-run the requirements interview — that happened earlier, in `/grill-me-with-docs`; synthesize the PRD from what you already know. This is not a fully AFK skill, though: step 2 still expects a short confirmation of the module boundaries and test scope with the user. That scoped confirmation is not a requirements interview.
+
+The issue tracker and triage label vocabulary should have been provided to you — run `/setup-matt-pocock-skills` if not.
+
+## Process
+
+1. Explore the repo to understand the current state of the codebase, if you haven't already. Use the project's domain glossary vocabulary (`CONTEXT.md`) throughout the PRD, and respect any ADRs in the area you're touching.
+
+2. Sketch out the major modules you will need to build or modify to complete the implementation. Actively look for opportunities to extract deep modules that can be tested in isolation.
+
+A deep module (as opposed to a shallow module) is one which encapsulates a lot of functionality in a simple, testable interface which rarely changes.
+
+Check with the user that these modules match their expectations. Check with the user which modules they want tests written for.
+
+3. Write the PRD using the template below. **The PRD is the authoritative feature definition / spec** — the *what & why*. It is a file, not an issue body:
+
+   - Write it to `docs/prd/<slug>.md`. This file is the single source of truth for the spec.
+   - That is the whole output of this skill. Do NOT open an epic tracker issue here. The **epic GitHub issue is an execution tracker** — it summarizes the PRD and points to it plus the relevant ADRs — and it is created later, in `/to-tickets` (the issue-planning leg), not by this skill.
+   - The epic code (`THEME+NN`, e.g. `GPU02`) is assigned by the human, but it is used later in `/to-tickets` when the epic issue is minted — not here.
+
+4. Once the PRD file is written, record the milestone in the dev-cycle log (best-effort — ADR-0032; if the command errors, continue — a skipped emission is a missing event, never a broken step):
+
+   ```sh
+   shipit log event planning.prd.written --about "PRD: docs/prd/<slug>.md"
+   ```
+
+<prd-template>
+
+## Problem Statement
+
+The problem that the user is facing, from the user's perspective.
+
+## Solution
+
+The solution to the problem, from the user's perspective.
+
+## User Stories
+
+A LONG, numbered list of user stories. Each user story should be in the format of:
+
+1. As an <actor>, I want a <feature>, so that <benefit>
+
+<user-story-example>
+1. As a mobile bank customer, I want to see balance on my accounts, so that I can make better informed decisions about my spending
+</user-story-example>
+
+This list of user stories should be extremely extensive and cover all aspects of the feature.
+
+## Implementation Decisions
+
+A list of implementation decisions that were made. This can include:
+
+- The modules that will be built/modified
+- The interfaces of those modules that will be modified
+- Technical clarifications from the developer
+- Architectural decisions
+- Schema changes
+- API contracts
+- Specific interactions
+
+Do NOT include specific file paths or code snippets. They may end up being outdated very quickly.
+
+Exception: if a prototype produced a snippet that encodes a decision more precisely than prose can (state machine, reducer, schema, type shape), inline it within the relevant decision and note briefly that it came from a prototype. Trim to the decision-rich parts — not a working demo, just the important bits.
+
+## Testing Decisions
+
+A list of testing decisions that were made. Include:
+
+- A description of what makes a good test (only test external behavior, not implementation details)
+- Which modules will be tested
+- Prior art for the tests (i.e. similar types of tests in the codebase)
+
+## Out of Scope
+
+A description of the things that are out of scope for this PRD.
+
+## Further Notes
+
+Any further notes about the feature.
+
+</prd-template>
+"""
 RETIRED_SKILL_HASHES = {
     "skills/shipit-planning/SKILL.md": (
         "sha256:a16ac4744238b3a5b59da8a887bb6268742fd01a8a285797e0198aba49e44336",
@@ -3620,6 +3708,9 @@ RETIRED_SKILL_HASHES = {
     "skills/shipit-to-prd/SKILL.md": (
         "sha256:0f13f20cad06161baff87628ea6b1cf5bac0cc7919beb6176535f9cdf9ae42d8",
         "sha256:4bdf82e153221545c8340744a5def096316c0cf88f0db9548a373bce6f91d0c1",
+    ),
+    "skills/to-prd/SKILL.md": (
+        "sha256:3b1fc2aa002d78a63f9bd858144be177a1b2f69a2ca97e2ca165bc86f6ca5a2e",
     ),
     "skills/shipit-to-issues/SKILL.md": (
         "sha256:4df3706b12c89fb7d844521800addea1c9ab9f448cd7f926b993a5d92f46869b",
@@ -3735,6 +3826,26 @@ def test_install_deletes_a_pristine_retired_skill_file(tmp_path, rec):
     _apply(tmp_path)
     assert not victim.exists()
     assert (tmp_path / "skills/grill-me-with-docs/ADR-FORMAT.md").is_file()
+
+
+def test_install_deletes_a_pristine_retired_to_prd_skill_and_installs_to_spec(
+    tmp_path, rec
+):
+    # The managed `/to-prd` path was renamed to `/to-spec`; an upgraded
+    # consumer with a pristine retired copy must not keep both runnable skills
+    # after install.
+    retired_path = "skills/to-prd/SKILL.md"
+    old_bytes = PRISTINE_TO_PRD_SKILL.encode()
+    assert config.content_hash(old_bytes) in RETIRED_SKILL_HASHES[retired_path]
+    victim = tmp_path / retired_path
+    victim.parent.mkdir(parents=True)
+    victim.write_bytes(old_bytes)
+
+    plan = _plan(tmp_path)
+    assert retired_path in [d.retired.path for d in plan.retire_deletes]
+    _apply(tmp_path)
+    assert not victim.exists()
+    assert (tmp_path / "skills/to-spec/SKILL.md").is_file()
 
 
 def test_install_keeps_a_modified_retired_file_with_warning(tmp_path, rec):

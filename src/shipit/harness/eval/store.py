@@ -9,7 +9,7 @@ under platformdirs' user *state* dir (``~/Library/Application Support/shipit`` o
 macOS, ``~/.local/state/shipit`` on Linux — the same `platformdirs`-rooted
 convention `logsetup` uses), one subdirectory per kind (``…/shipit/eval``,
 ``…/shipit/review-rounds``). So process telemetry never dirties product history —
-a written record can never show up as a repo change (docs/prd/har02-run-eval.md,
+a written record can never show up as a repo change (docs/legacy-prd/har02-run-eval.md,
 ADR-0013: "local, never committed").
 
 The key is the repo's **origin `owner/name` identity** (:class:`shipit.identity.Repo`),

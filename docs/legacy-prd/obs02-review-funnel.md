@@ -1,6 +1,6 @@
 # OBS02 — Review funnel
 
-> Epic: **OBS02** · Status: planned · Plan: `docs/prd/FUTURE_WORK.md`
+> Epic: **OBS02** · Status: planned · Plan: `docs/legacy-prd/FUTURE_WORK.md`
 > ADR: `docs/adr/0005-local-review-funnel-via-check-runs.md`
 > Glossary: `CONTEXT.md` (Review funnel, Holds / Settled, Local-agent reviewer)
 

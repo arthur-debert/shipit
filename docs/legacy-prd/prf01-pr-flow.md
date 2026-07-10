@@ -1,6 +1,6 @@
 # PRF01 — PR flow
 
-> Epic: **PRF01** · Status: ready-for-agent · Plan: `docs/prd/FUTURE_WORK.md`
+> Epic: **PRF01** · Status: ready-for-agent · Plan: `docs/legacy-prd/FUTURE_WORK.md`
 > ADRs: `docs/adr/0001-reuse-release-core-by-copy.md`, `docs/adr/0002-adapt-release-primitives-two-cli-conventions.md`
 > Glossary: `CONTEXT.md` (PR-flow terms)
 >

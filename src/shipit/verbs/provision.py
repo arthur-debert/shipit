@@ -8,7 +8,7 @@ failures — a refused platform, a checksum mismatch, a failed fetch Exec —
 mapped by the one :func:`~._errors.cli_errors` shell (``error: …`` + exit 1).
 
 `provision lexd` is the consumer delivery path for the lex Lang's gate tool
-(docs/prd/adoption.md): the managed ``provision-lexd`` pixi task invokes it,
+(docs/legacy-prd/adoption.md): the managed ``provision-lexd`` pixi task invokes it,
 so a consumer repo carries no provisioning script. Idempotent — re-running at
 the same pin is a no-op.
 """

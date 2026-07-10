@@ -3,7 +3,7 @@
 > Epic: **WF02** (theme WF — Workflows). Status: **planned**. Blocked by **WF01**.
 > Spec source of truth. Glossary: `CONTEXT.md` (build/release). Decisions:
 > `docs/adr/0008-content-addressed-artifact-identity.md`; rationale
-> `docs/dev/{architecture,workflows}.lex`. Map: `docs/prd/FUTURE_WORK.md`.
+> `docs/dev/{architecture,workflows}.lex`. Map: `docs/legacy-prd/FUTURE_WORK.md`.
 
 ## Problem Statement
 

@@ -1,13 +1,13 @@
 # OBS01 — Logging foundation
 
-> Epic: **OBS01** · Status: planned · Plan: `docs/prd/FUTURE_WORK.md`
+> Epic: **OBS01** · Status: planned · Plan: `docs/legacy-prd/FUTURE_WORK.md`
 > Glossary: `CONTEXT.md`
 >
 > **Since superseded in part (LOG01, 2026-07):** the file sink's record format is now
 > **JSONL** (flat `ts`/`level`/`logger`/`msg` + domain keys) with central redaction and
-> a `shipit logs` reader — see `docs/prd/glassbox.md` and ADR-0029. Further extended
+> a `shipit logs` reader — see `docs/legacy-prd/glassbox.md` and ADR-0029. Further extended
 > (LOG04, 2026-07): domain keys grew to nine and the reader gained domain-key filters
-> plus a `--flow` dev-cycle view — see `docs/prd/log04-dev-cycle-event-log.md` and
+> plus a `--flow` dev-cycle view — see `docs/legacy-prd/log04-dev-cycle-event-log.md` and
 > ADR-0032. The sink/path/level
 > decisions below still hold; this PRD is the historical record of the foundation.
 
@@ -23,7 +23,7 @@ scrolled past in a terminal that is now gone.
 
 This is tolerable only because today's PR-review path is synchronous and blocking — a
 human is watching the one command run. The rest of the observability spine
-(`docs/prd/FUTURE_WORK.md`) removes exactly that property: OBS03 makes local reviews
+(`docs/legacy-prd/FUTURE_WORK.md`) removes exactly that property: OBS03 makes local reviews
 **async, fire-and-forget, detached** runs driven by subagents — work that happens
 out of our control with no human watching. Shipping that on top of a package that keeps
 no record is, in the maintainer's words, **"a death sentence."** A durable log is the
@@ -144,6 +144,6 @@ delivered here:
 - **OBS03** — async, detached local review execution that posts back to the PR.
 - **OBS04** — the state machine consuming breadcrumbs + timestamps with a wait window.
 
-OBS01 depends on nothing and unblocks OBS02 → OBS03 → OBS04 (see `docs/prd/FUTURE_WORK.md`
+OBS01 depends on nothing and unblocks OBS02 → OBS03 → OBS04 (see `docs/legacy-prd/FUTURE_WORK.md`
 for the spine). Funnel semantics, async execution, and engine changes are all theirs, not
 this epic's.

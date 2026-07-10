@@ -181,7 +181,7 @@ hook contract; denial uses only the stable PreToolUse surface shipit already own
 > importantly the enforcement story moved on: this deny-only stance is now paired with a
 > **positive** path — the coordinator provisions and launches every Run through
 > `shipit spawn subagent`, which mints the Tree and roots the child agent in it (the native
-> worktree path stays denied). The full successor PRD comes later via `/to-prd`; see
+> worktree path stays denied). The full successor Spec comes later via `/to-spec`; see
 > ADR-0017 (spawning), ADR-0018 (write vs read-only Trees), and ADR-0019 (the
 > headless-`claude` launch contract that settles the launch mechanism ADR-0017 left open).
 

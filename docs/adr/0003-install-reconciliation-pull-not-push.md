@@ -24,7 +24,7 @@ push-versus-pull and why the drift engine is the anti-goal — lives in
 `docs/dev/architecture.lex §2` and `docs/dev/lessons-learned.lex §4`; it is not duplicated
 here.
 
-## Resolved details (carried from docs/prd/install-reconciliation.md)
+## Resolved details (carried from docs/legacy-prd/install-reconciliation.md)
 
 - **The bootstrap is `bin/shipit`** — a minimal launcher managed as a whole-file
   unit (`src/shipit/verbs/install.py:171-178`; content at

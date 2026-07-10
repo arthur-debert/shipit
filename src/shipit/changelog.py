@@ -1,6 +1,6 @@
 """changelog — the pure core of the language-agnostic release-notes Tool.
 
-The changelog model (docs/dev/workflows.lex §4, PRD docs/prd/tol01-ci-tools.md
+The changelog model (docs/dev/workflows.lex §4, PRD docs/legacy-prd/tol01-ci-tools.md
 stories 18/26, TOL01-WS06 #554): release notes accumulate as FRAGMENTS under
 ``CHANGELOG/unreleased-*.md``, one per feature/fix PR — plain markdown
 regardless of Toolchain, so nothing here carries per-language logic. The

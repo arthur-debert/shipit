@@ -2,7 +2,7 @@
 
 # Adoption runbook — running shipit in a repo + the coordinator survival prompts
 
-The written discipline both coordinator layers run on during fleet adoption (ADP00 WS06, revised in WS14/WS15 onto ADR-0033; [spec:](../prd/adoption.md)). Three artifacts: how a repo runs its pinned shipit (the managed `bin/shipit` launcher), the survival prompt for the root coordinator driving adoption from shipit's side, and the survival prompt for the coordinator inside the consumer repo being adopted. The two prompts are verbatim blocks: the ADP01 flow embeds or links them into each spawned coordinator's brief — paste them as-is, never paraphrase.
+The written discipline both coordinator layers run on during fleet adoption (ADP00 WS06, revised in WS14/WS15 onto ADR-0033; [spec:](../legacy-prd/adoption.md)). Three artifacts: how a repo runs its pinned shipit (the managed `bin/shipit` launcher), the survival prompt for the root coordinator driving adoption from shipit's side, and the survival prompt for the coordinator inside the consumer repo being adopted. The two prompts are verbatim blocks: the ADP01 flow embeds or links them into each spawned coordinator's brief — paste them as-is, never paraphrase.
 
 ## 1. Running shipit in a repo — the pinned launcher
 

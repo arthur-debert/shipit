@@ -3,7 +3,7 @@
 > **Status: Accepted.** Epic ADP00; decided in the WS08 regroup after the canary
 > dry-run surfaced the tool/managed-set lag window (#420, rounds 5–6). Reverses
 > the TRE03-era provisioning reconcile-commit; supersedes the "Step 5"
-> pixi-dependency plan noted in ADR-0003 and `docs/prd/install-reconciliation.md`;
+> pixi-dependency plan noted in ADR-0003 and `docs/legacy-prd/install-reconciliation.md`;
 > reaffirms ADR-0003's pull-not-push.
 
 A consumer repo pins the exact shipit it runs: `.shipit.toml`'s

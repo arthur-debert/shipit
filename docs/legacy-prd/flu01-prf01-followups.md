@@ -1,6 +1,6 @@
 # FLU01 — PRF01 review follow-ups
 
-> Epic: **FLU01** · Status: planned · Plan: `docs/prd/FUTURE_WORK.md`
+> Epic: **FLU01** · Status: planned · Plan: `docs/legacy-prd/FUTURE_WORK.md`
 > Glossary: `CONTEXT.md` (PR-flow terms)
 >
 > **Since superseded in part (PROC02, 2026-07):** `src/shipit/prstate/ghapi.py`

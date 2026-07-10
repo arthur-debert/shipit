@@ -1,4 +1,4 @@
-"""lint — the standardized multi-language checks (docs/prd/lint-checks.md).
+"""lint — the standardized multi-language checks (docs/legacy-prd/lint-checks.md).
 
 shipit INVERTS release's lefthook-as-orchestrator model. Because pixi has no
 cross-manifest task inheritance (architecture.lex §5), the per-language
@@ -364,7 +364,7 @@ RUST = Lang(
     # nested crate that ISN'T a workspace member is never silently skipped).
     # clippy and fmt both carry --all so a workspace root covers its declared
     # members even when only the root manifest is tracked (release-core's
-    # battle-tested forms, docs/prd/lint-checks.md). clippy findings are hard
+    # battle-tested forms, docs/legacy-prd/lint-checks.md). clippy findings are hard
     # errors (-D warnings) and clippy has no safe in-place fix here, so under
     # --fix it still runs its check form; `cargo fmt --all` is the one rust
     # --fix leg. A repo with .rs files but no tracked Cargo.toml runs at the
@@ -877,7 +877,7 @@ def drop_ignored(paths: list[str], patterns: list[str]) -> list[str]:
 #: ONE exception is markdown, spared in check mode too — but by a SEPARATE
 #: mechanism, not this guard: the managed ``.markdownlintignore`` lists these
 #: same dirs so ``markdownlint`` skips them regardless of argv (malformed
-#: markdown is a common fixture genre; see docs/prd/lint-checks.md).
+#: markdown is a common fixture genre; see docs/legacy-prd/lint-checks.md).
 PROTECTED_TESTDATA_GLOBS: tuple[str, ...] = (
     "fixtures/",
     "__fixtures__/",

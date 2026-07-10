@@ -18,7 +18,7 @@ def test_content_hash_is_sha256_prefixed():
 def test_write_manifest_fresh_file_roundtrips(tmp_path):
     p = tmp_path / ".shipit.toml"
     managed = {
-        "skills/to-prd/SKILL.md": "sha256:aaa",
+        "skills/to-spec/SKILL.md": "sha256:aaa",
         "AGENTS.md#shipit-block": "sha256:bbb",
         "bin/shipit": "sha256:ccc",
     }

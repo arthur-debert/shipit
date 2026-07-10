@@ -2,7 +2,7 @@
 
 At a **run**'s terminal lifecycle hook, deterministically read the on-disk
 transcript + `.meta.json` and write one **eval record** per run to a
-harness-owned local store (docs/prd/har02-run-eval.md, ADR-0013). Every field is
+harness-owned local store (docs/legacy-prd/har02-run-eval.md, ADR-0013). Every field is
 extracted *by code* — no model call, no judge (the subjective agent-as-judge is
 HAR04).
 

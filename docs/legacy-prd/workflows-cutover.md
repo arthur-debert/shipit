@@ -1,6 +1,6 @@
 # workflows + cutover
 
-> Status: **superseded in part by `docs/prd/tol01-ci-tools.md`** (TOL01,
+> Status: **superseded in part by `docs/legacy-prd/tol01-ci-tools.md`** (TOL01,
 > 2026-07): the workflow building blocks — stage reusable workflows + one
 > composed chain, scar invariants inside the blocks (ADR-0040) — are TOL01
 > scope. The *cutover* half (re-pointing consumers, the real-release gate on

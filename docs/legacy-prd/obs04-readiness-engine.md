@@ -1,6 +1,6 @@
 # OBS04 — Readiness engine consumes the funnel
 
-> Epic: **OBS04** · Status: planned · Plan: `docs/prd/FUTURE_WORK.md`
+> Epic: **OBS04** · Status: planned · Plan: `docs/legacy-prd/FUTURE_WORK.md`
 > ADR: `docs/adr/0006-readiness-with-degraded-reviewers.md`
 > Glossary: `CONTEXT.md`
 

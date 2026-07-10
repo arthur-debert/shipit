@@ -5,7 +5,7 @@ configures the package logger ``logging.getLogger("shipit")`` and attaches the
 sinks shipit logs through. Each sink lives in its own builder so the wiring in
 :func:`configure_logging` is a simple, additive union.
 
-Three sinks, chosen for where shipit runs (PRD ``docs/prd/obs01-logging.md``):
+Three sinks, chosen for where shipit runs (PRD ``docs/legacy-prd/obs01-logging.md``):
 
 - **Console** — quiet by default (WARNING+ to stderr), so the user-facing surface
   is unchanged in spirit from today. ``-v/--verbose`` raises it to DEBUG so an
