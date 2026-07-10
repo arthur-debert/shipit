@@ -192,7 +192,9 @@ def run_fanout_review(
     routed :class:`FanoutOutcome`.
 
     ``target`` is EITHER a PR review view (the live path — provisions the
-    shared read-only Tree, tasks fetch ``gh pr diff``) or a range-scoped
+    shared read-only Tree; a round-1 pass fetches ``gh pr diff``, a round-≥2
+    ``incremental`` pass the fix-range ``git diff <base>..<head>`` instead — see
+    ``incremental`` below) or a range-scoped
     :class:`~shipit.review.diff.RangeView` (the offline fan-out replay,
     RVW03-WS01 — the passes run in the replay checkout over
     ``git diff <base>..<head>``, and the calibrator's ground truth is that same
