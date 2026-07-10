@@ -4,7 +4,7 @@
 # hand comments do not survive a save.
 
 schema = 1
-version = 1
+version = 35
 
 [[prs]]
 id = "core-440"
@@ -633,3 +633,270 @@ claim = "The any_removed stale-state count is computed inside the `if !ctx.dry_r
 [labels.provenance]
 kind = "confirmed-thread"
 ref = "291210986c84fd9789bcdf3d50e770207983ea73"
+
+[[labels]]
+id = "core-G7"
+pr = "core-440"
+file = "phos-editor/src/graph_session.rs"
+severity = "major"
+verdict = "real"
+confirmed = true
+claim = "the GPU activation test asserts only frame-vs-CPU-twin closeness and gpu.is_none(), so a silent CPU fallback in eval still passes — live GPU execution is unguarded"
+aliases = ["the test is named as the session GPU activation gate but its assertions would still pass if the evaluator stopped passing env gpu and the whole render silently used the CPU path, since CPU fallback produces the same dimensions, close pixels, and a non-uniform frame"]
+[labels.provenance]
+kind = "adjudication"
+ref = "rvw03-first-cells-2026-07-10"
+
+[[labels]]
+id = "core-G8"
+pr = "core-440"
+file = "phos-editor/src/dag/eval.rs"
+lines = [1280, 1310]
+severity = "major"
+verdict = "real"
+confirmed = true
+claim = "GpuContext::readback maps device-loss/map failure to a zero-filled buffer that transfer/eval then cache as a successful render, so a device loss yields a silently memoized black frame"
+[labels.provenance]
+kind = "adjudication"
+ref = "rvw03-first-cells-2026-07-10"
+
+[[labels]]
+id = "core-G9"
+pr = "core-440"
+file = "phos-editor/src/dag/eval.rs"
+lines = [1280, 1300]
+severity = "major"
+verdict = "real"
+confirmed = true
+claim = "the sigmoid ODT GPU path bakes only the OCIO display transform and never applies compress_sigmoid tone-compression params, so GPU renders of phos.odt.sigmoid are untone-mapped"
+[labels.provenance]
+kind = "adjudication"
+ref = "rvw03-first-cells-2026-07-10"
+
+[[labels]]
+id = "core-G10"
+pr = "core-440"
+file = "phos-editor/src/graph_session.rs"
+lines = [2900, 2960]
+severity = "major"
+verdict = "real"
+confirmed = true
+claim = "ColourGpuCache lut_textures/pipelines are unbudgeted HashMaps outside the 512MiB texture pool and user CLF LUTs now reach them via the live session, so VRAM grows without bound or eviction"
+aliases = ["the camera-LUT GPU path is reachable for user-supplied CLF assets but LUT textures are cached permanently in GpuContext colour_cache outside the texture-pool budget, each distinct content hash inserting a new texture with no eviction or accounting, growing VRAM for the session lifetime"]
+[labels.provenance]
+kind = "adjudication"
+ref = "rvw03-first-cells-2026-07-10"
+
+[[labels]]
+id = "core-G11"
+pr = "core-440"
+file = "phos-editor/src/dag/eval.rs"
+lines = [2094, 2110]
+severity = "minor"
+verdict = "real"
+confirmed = true
+claim = "the region/viewport streaming path now receives env.gpu and reads back per fill but no test exercises it with a live device, leaving the region GPU path uncovered"
+[labels.provenance]
+kind = "adjudication"
+ref = "rvw03-first-cells-2026-07-10"
+
+[[labels]]
+id = "core-G12"
+pr = "core-440"
+file = "phos-bench/src/bin/gpu_compare.rs"
+lines = [234, 238]
+severity = "nit"
+verdict = "real"
+confirmed = true
+claim = "gpu_compare duplicates the private SESSION_VRAM_BUDGET_BYTES as a local constant instead of sharing it, so the bench silently diverges if the session budget changes"
+[labels.provenance]
+kind = "adjudication"
+ref = "rvw03-first-cells-2026-07-10"
+
+[[labels]]
+id = "core-G13"
+pr = "core-440"
+file = "phos-editor/src/dag/node.rs"
+lines = [151, 158]
+severity = "nit"
+verdict = "real"
+confirmed = true
+claim = "EvalContext::gpu and OracleCtx::gpu docs still say the field is None everywhere and no device exists, but the session now builds a live device and nodes have GPU fills"
+[labels.provenance]
+kind = "adjudication"
+ref = "rvw03-first-cells-2026-07-10"
+
+[[labels]]
+id = "core-G14"
+pr = "core-440"
+file = "phos-editor/src/dag/nodes/view_transform.rs"
+lines = [16, 25]
+severity = "nit"
+verdict = "real"
+confirmed = true
+claim = "the view-transform module doc still advertises a zero-readback Display win while the evaluator now forces an unconditional GPU-to-CPU readback after every fill"
+[labels.provenance]
+kind = "adjudication"
+ref = "rvw03-first-cells-2026-07-10"
+
+[[labels]]
+id = "core-X1"
+pr = "core-440"
+file = "phos-editor/src/dag/eval.rs"
+lines = [1286, 1300]
+severity = "major"
+verdict = "not-real"
+confirmed = true
+claim = "cache keys omitting GPU mode cannot return wrong pixels because every fill is read back to CPU before caching, so cached output is mode-independent"
+aliases = ["node output depends on EvalEnv gpu but neither the working memo nor the content cache keys include execution mode; reusing one Evaluator across CPU and GPU environments can return a memoized CPU render for a GPU request since hash_node salts params but not backend", "node output depends on EvalEnv gpu but the working memo and content cache keys omit execution mode and hash_node salts params, color authority, sources, and class maps but not backend, so ΔE-bounded GPU output and bit-exact CPU output can alias in caches"]
+[labels.provenance]
+kind = "adjudication"
+ref = "rvw03-first-cells-2026-07-10"
+
+[[labels]]
+id = "core-X2"
+pr = "core-440"
+file = "phos-editor/src/dag/eval.rs"
+lines = [1299, 1300]
+severity = "major"
+verdict = "not-real"
+confirmed = true
+claim = "the unconditional post-fill readback is a documented WS01a interim (ADR 0005, pipelining deferred) and breaks no residency test, not a contract violation"
+aliases = ["unconditional readback after every GPU-capable fill forces GPU to CPU after the LUT and CPU to GPU again for the ODT even though both nodes have GPU fills, invalidating the residency invariant and making the benchmark measure redundant per-node transfer", "unconditional post-fill CPU readback breaks the cross-file GPU residency contract documented and proven by dag transfer and gpu_mixed_graph tests where consecutive GPU nodes stay resident and only transfer at genuine backend flips"]
+[labels.provenance]
+kind = "adjudication"
+ref = "rvw03-first-cells-2026-07-10"
+
+[[labels]]
+id = "app-G4"
+pr = "app-391"
+file = "src/lib/editor/Editor.svelte"
+lines = [2308, 2376]
+severity = "major"
+verdict = "real"
+confirmed = true
+claim = "coarse-level bounded frames carry nonzero originX/originY that the present path never consumes before reapplying the full-image layout, so a panned level>0 viewport renders misplaced/stretched"
+[labels.provenance]
+kind = "adjudication"
+ref = "rvw03-first-cells-2026-07-10"
+
+[[labels]]
+id = "app-G5"
+pr = "app-391"
+file = "tests/e2e/viewer-pan-cache.spec.ts"
+lines = [85, 101]
+severity = "minor"
+verdict = "real"
+confirmed = true
+claim = "the 64x64 coarse fixture yields a single level-1 cell so level0Region delta mapping is never exercised and tests assert only streamed counts, letting an unmapped fetch regress green"
+aliases = ["the wasm coarse-level coverage only repeats a whole-source render until every cell is resident so the pure-cache-hit early return never exercises the partial-delta path where seed.plan.fetch is mapped back through level0Region", "the new wasm coverage still uses the 64x64 fixture so the coarse-level case is a single-cell whole-region repeat and the scheduler level-0 to level-space delta mapping for a pan with newly exposed cells is never exercised"]
+[labels.provenance]
+kind = "adjudication"
+ref = "rvw03-first-cells-2026-07-10"
+
+[[labels]]
+id = "app-G6"
+pr = "app-391"
+file = "tests/e2e/viewer-pan-cache.spec.ts"
+lines = [105, 110]
+severity = "minor"
+verdict = "real"
+confirmed = true
+claim = "the off-screen test drives a hand-built 0x0 region through the low-level probe, bypassing the changed visibleRegion and present-skip branches, so neither diff-changed path is under test"
+aliases = ["the off-screen E2E assertion is backed by a synthetic probe calling store.renderRegion with an explicit zero region, proving only the transport short-circuit and not the changed visibleRegion and requestViewportRender empty-frame wiring during an actual pan"]
+[labels.provenance]
+kind = "adjudication"
+ref = "rvw03-first-cells-2026-07-10"
+
+[[labels]]
+id = "app-G7"
+pr = "app-391"
+file = "src/lib/editor/tile-compositor.ts"
+lines = [42, 102]
+severity = "nit"
+verdict = "real"
+confirmed = true
+claim = "tile/extent/AssembledFrame docs still say level-0 coordinates while the coarse path now runs grid and assembler in selected-level space"
+[labels.provenance]
+kind = "adjudication"
+ref = "rvw03-first-cells-2026-07-10"
+
+[[labels]]
+id = "lex-G3"
+pr = "lex-820"
+file = "crates/lex-core/src/lex/parsing/parser.rs"
+lines = [505, 527]
+severity = "major"
+verdict = "real"
+confirmed = true
+claim = "the new first-line-SubjectLine guard checks no indentation and any colon-terminated line classifies as SubjectLine, so fullwidth verbatim whose first body line ends in a colon mis-parses as paragraphs"
+aliases = ["The new guard rejects every verbatim/table candidate whose next nonblank token is another subject line without checking indentation; a valid first content line at the fullwidth column can itself end in a colon and be classified as SubjectLine so valid verbatim blocks fall back to paragraph parsing", "fullwidth verbatim content is intentionally arbitrary flat lines that can themselves end in a colon; match_verbatim_block returns None at the first subject so the parser treats the subject as a paragraph and re-anchors an empty verbatim, changing document shape and content ownership", "the early-return treats any subject-shaped line after the verbatim subject as proof the first line was a colon-terminated paragraph, breaking the builder contract of collecting arbitrary flat content lines until the closing marker"]
+[labels.provenance]
+kind = "adjudication"
+ref = "rvw03-first-cells-2026-07-10"
+
+[[labels]]
+id = "lex-G4"
+pr = "lex-820"
+file = "crates/lex-core/src/lex/parsing/parser.rs"
+lines = [500, 530]
+severity = "major"
+verdict = "real"
+confirmed = true
+claim = "verbatim_protected_lines claims to mirror match_verbatim_block but lacks the new first-line guard, so anchoring protects spans the parser no longer treats as verbatim"
+[labels.provenance]
+kind = "adjudication"
+ref = "rvw03-first-cells-2026-07-10"
+
+[[labels]]
+id = "lex-G5"
+pr = "lex-820"
+file = "crates/lex-core/src/lex/assembling/stages/attach_annotations.rs"
+lines = [174, 179]
+severity = "minor"
+verdict = "real"
+confirmed = true
+claim = "title promotion runs before annotation attachment so a below-title annotation also satisfies previous.is_none plus next_is_session and is routed to document root, indistinguishable from top-of-doc metadata"
+[labels.provenance]
+kind = "adjudication"
+ref = "rvw03-first-cells-2026-07-10"
+
+[[labels]]
+id = "lex-G6"
+pr = "lex-820"
+file = "crates/lex-core/src/lex/parsing/parser.rs"
+lines = [936, 1050]
+severity = "minor"
+verdict = "real"
+confirmed = true
+claim = "the lex#814 regressions drive only the private matcher with synthetic tokens and no end-to-end test asserts a colon-terminated paragraph survives lex-parse-format"
+aliases = ["the regression for lex#814 is only exercised by calling the private matcher with hand-built LineType tokens, proving one synthetic shape returns None but not protecting the user-visible parser and formatter scenario of a colon-terminated paragraph before a verbatim or table block"]
+[labels.provenance]
+kind = "adjudication"
+ref = "rvw03-first-cells-2026-07-10"
+
+[[labels]]
+id = "lex-G7"
+pr = "lex-820"
+file = "crates/lex-babel/tests/lex_separation/matrix.rs"
+lines = [330, 365]
+severity = "minor"
+verdict = "real"
+confirmed = true
+claim = "the Definition-to-Annotation shape assertion checks only that a trailing Paragraph exists and never its text, so a dropped annotation body still passes despite the nothing-is-lost comment"
+[labels.provenance]
+kind = "adjudication"
+ref = "rvw03-first-cells-2026-07-10"
+
+[[labels]]
+id = "app-G8"
+pr = "app-391"
+file = "tests/e2e-native/specs/viewer-pan-cache.spec.ts"
+lines = [115, 150]
+severity = "minor"
+verdict = "real"
+confirmed = true
+claim = "the native coarse pan assertions count streamed tiles only and never check which cell the streamed tile landed in, so an unmapped level-space fetch region can repaint the wrong coarse cell and still pass"
+[labels.provenance]
+kind = "adjudication"
+ref = "rvw03-first-cells-2026-07-10"
