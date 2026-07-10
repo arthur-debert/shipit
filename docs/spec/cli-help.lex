@@ -292,8 +292,8 @@ Shipit CLI Human Help Draft
 
             The lab answers questions such as "does this review configuration
             find more real issues at the same budget?" A declarative cell
-            defines one experimental axis and its baseline. Runs replay pinned
-            PR ranges offline, bank review-round records, and report
+            defines one experimental axis and its baseline. The lab replays
+            pinned PR ranges offline, banks review-round records, and reports
             convergence curves for recall, precision, token cost, and latency.
 
             The product surface remains `shipit pr review`; the lab is how
