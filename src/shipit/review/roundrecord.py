@@ -13,13 +13,14 @@ The boundary, stated once: an **eval record** says how a run *behaved*; a
 review-round record says what the review *concluded* — and, since RVW03-WS04,
 what it COST. Each contributing run's entry (``round.runs``: the dimension
 fan-out fills it with one entry per **Dimension pass** plus the **Calibrator**
-run; the single-pass offline replay contributes its one range pass) carries its
-run id, **Variant** hash, per-run token ``usage`` measured from the CLI's own
-output at launch-result level (explicitly-unknown for a CLI that reports none —
-NEVER via the broken transcript/run_id join), and the ReasoningLevel actually
-applied to argv. ``round.usage.total_tokens`` sums the reported per-run usage;
-``shipit eval report``'s review axis reads that token cost straight from the
-record. The record also carries its own review-instructions **Variant**
+run — offline exactly as live, RVW03-WS01; the single-pass offline replay
+contributes its one range pass, RVW03-WS02) carries its run id, **Variant**
+hash, per-run token ``usage`` measured from the CLI's own output at launch-result
+level (explicitly-unknown for a CLI that reports none — NEVER via the broken
+transcript/run_id join), and the ReasoningLevel actually applied to argv.
+``round.usage.total_tokens`` sums the reported per-run usage; ``shipit eval
+report``'s review axis reads that token cost straight from the record. The
+record also carries its own review-instructions **Variant**
 (``round.variant``), the experiment-arm handle a review-prompt A/B groups by.
 Since RVW03-WS02 it further carries ``round.id`` / ``round.artifacts`` (the
 round's per-run artifact-bundle location, :mod:`shipit.review.artifacts`) and

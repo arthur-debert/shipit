@@ -447,6 +447,66 @@ def test_pass_task_text_matches_the_launched_prompt(_faked):
     assert task in _faked["cmd"][-1]
 
 
+def _range_view():
+    from shipit.identity import Sha
+    from shipit.review.diff import RangeView
+
+    return RangeView(
+        repo=repo_from_slug("acme/widget"),
+        base_sha=Sha("a" * 40),
+        head_sha=Sha("b" * 40),
+        diff="diff --git a/x b/x\n",
+        changed_files=["x"],
+        workdir="/checkout",
+    )
+
+
+def test_range_dimension_pass_runs_offline_with_the_range_scoped_focus(_faked):
+    # RVW03-WS01: the offline fan-out replay narrows the RANGE task to one
+    # dimension exactly like the PR task — same focus slice — launched in the
+    # replay checkout with NO Tree and NO gh. Scope rides the shared
+    # `_scope_and_context` baseline over the range's own `git diff` fetch
+    # (ADR-0050), carrying the RANGE diff noun, never a `gh pr diff`.
+    from shipit.review.dimensions import by_name
+
+    view = _range_view()
+    captured = producer.run_range_review(
+        agent_backend.CODEX,
+        view,
+        launcher=_faked["launcher"],
+        dimension=by_name("correctness"),
+    )
+    assert captured.review["summary"]["status"] == "COMMENT"
+    assert _faked["cwd"] == "/checkout"
+    prompt = _faked["cmd"][-1]
+    assert f"git diff {'a' * 40}..{'b' * 40}" in prompt
+    assert "DIMENSION FOCUS — Correctness" in prompt
+    # The shared scope baseline reaches the range pass and names the range's diff.
+    assert "report ONLY findings this range's diff INTRODUCED or EXPOSED" in prompt
+    assert "this PR's diff" not in prompt
+    assert "gh pr diff" not in prompt
+
+
+def test_range_pass_task_text_matches_the_launched_prompt(_faked):
+    # The offline fan-out's variant source: `range_pass_task_text` re-derives
+    # the exact task `run_range_review` composes, so a replayed pass's
+    # `round.runs` variant hashes the prompt content that actually ran.
+    from shipit.review.dimensions import by_name
+
+    dim = by_name("test-quality")
+    view = _range_view()
+    producer.run_range_review(
+        agent_backend.CODEX, view, launcher=_faked["launcher"], dimension=dim
+    )
+    task = producer.range_pass_task_text(agent_backend.CODEX, view, dimension=dim)
+    assert task in _faked["cmd"][-1]
+
+
+def test_range_pass_task_text_rejects_a_non_funnel_backend():
+    with pytest.raises(ValueError, match="unknown funnel review backend"):
+        producer.range_pass_task_text(agent_backend.CLAUDE, _range_view())
+
+
 def test_incremental_range_launches_the_fix_range_task(_faked):
     # RVW02-WS06: an incremental round launches the fix-range task (git diff
     # base..head, NOT `gh pr diff`) with mandated neighborhood context, and

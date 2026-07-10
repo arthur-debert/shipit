@@ -1,14 +1,22 @@
 """replay — review an arbitrary commit range offline: record written, no PR touched.
 
-The RVW02-WS03 offline A/B harness: ``shipit pr review replay <base>..<head>``
-resolves a commit RANGE of the current checkout (never a PR), runs a local review
-backend over it through the shared range producer
-(:func:`shipit.review.producer.run_range_review`), and writes the resulting
-**Review-round record** (:mod:`shipit.review.roundrecord`, ``round.pr = None``)
-to the local store — the review path's NO-POST mode. Nothing on GitHub is read
-or written: no post, no check run, no review request. A historical PR's round 1
-replays as ``merge-base..first-round-head`` — which is exactly what the
-three-dot spelling ``base...head`` resolves (the merge base is computed here).
+The sanctioned offline experiment driver (RVW02-WS03 single pass; RVW03-WS01
+fan-out): ``shipit pr review replay <base>..<head>`` resolves a commit RANGE of
+the current checkout (never a PR) and runs a local review backend over it —
+either as ONE monolithic pass through the shared range producer
+(:func:`run_replay` → :func:`shipit.review.producer.run_range_review`) or, with
+``--fanout``, as the full dimension fan-out through the ONE fan-out
+orchestrator (:func:`run_fanout_replay` →
+:func:`shipit.review.fanout.run_fanout_review`, the SAME code path the live-PR
+service drives) — and writes the resulting **Review-round record**
+(:mod:`shipit.review.roundrecord`, ``round.pr = None``) to the local store —
+the review path's NO-POST mode. Both arms read the diff the same way
+(``git diff <base>..<head>`` in the checkout), so replays of the two arms over
+the same range are comparable (no ``git diff`` vs ``gh pr diff`` skew). Nothing
+on GitHub is read or written: no post, no check run, no review request. A
+historical PR's round 1 replays as ``merge-base..first-round-head`` — which is
+exactly what the three-dot spelling ``base...head`` resolves (the merge base is
+computed here).
 
 Range grammar (:func:`parse_range`): ``A..B`` reviews exactly the diff from
 commit ``A`` to commit ``B``; ``A...B`` reviews from ``merge-base(A, B)`` to
@@ -27,36 +35,19 @@ from __future__ import annotations
 import logging
 import time
 import uuid
-from dataclasses import dataclass
+from collections.abc import Sequence
 from pathlib import Path
 
 from .. import execrun, git, identity
 from ..agent.backend import Backend
-from ..identity import Repo, Sha
+from ..identity import Sha
+from ..spawn import launch
 from . import artifacts as artifacts_mod
-from . import producer, roundrecord
-from .diff import ReviewError
+from . import fanout, producer, roundrecord
+from .calibrator import CalibratorConfig
+from .diff import RangeView, ReviewError
 
 logger = logging.getLogger("shipit.review")
-
-
-@dataclass(frozen=True)
-class RangeView:
-    """A resolved commit range of one checkout: the replay path's review target.
-
-    The offline sibling of the PR path's :class:`~shipit.review.diff.ReviewView`
-    — same diff/changed-files/workdir surface the producer needs, but there is
-    no PR core at all (no number, no draft state): the target IS the range.
-    ``repo`` is the checkout's origin identity — the round record's store key
-    (ADR-0024), resolved offline.
-    """
-
-    repo: Repo
-    base_sha: Sha
-    head_sha: Sha
-    diff: str
-    changed_files: list[str]
-    workdir: str
 
 
 def parse_range(spec: str) -> tuple[str, str, bool]:
@@ -291,3 +282,158 @@ def run_replay(
         extra={"reviewer": agent, "duration_ms": duration_ms},
     )
     return {"review": review, "record_path": record_path}
+
+
+def run_fanout_replay(
+    backend: Backend,
+    view: RangeView,
+    *,
+    model: str = "pro",
+    timeout: str = "600s",
+    instructions_path: str | None = None,
+    dimensions: Sequence[str] | None = None,
+    calibrator: CalibratorConfig | None = None,
+    nit_cap: int | None = None,
+    launcher: launch.Runner | None = None,
+    base_dir: Path | None = None,
+) -> dict:
+    """Fan-out-review ``view``'s range with ``backend`` and WRITE the round record.
+
+    The FAN-OUT arm of the no-post pipeline (RVW03-WS01) — the sanctioned way to
+    run a fan-out experiment cell: the configured **Dimension passes** run
+    offline over the range through the ONE fan-out orchestrator
+    (:func:`shipit.review.fanout.run_fanout_review`, the same code path the
+    live-PR service drives, handed the range-scoped ``view`` instead of a PR
+    ctx), then the **Review-round record** is written with ``round.pr = None``
+    exactly like the single-pass :func:`run_replay` — ``round.runs`` populated
+    per pass (plus the calibrator's run when ``calibrator`` opts the dormant
+    judge on), ``round.findings`` carrying the routing's real dispositions.
+    ``nit_cap`` defaults to ``None`` (uncapped): an offline experiment records
+    everything; there is no PR to protect from nit churn. When ``calibrator``
+    is set, the role agent-defs are provisioned into the replay checkout first
+    (:func:`provision_agent_defs`) so the judge's ``claude --agent reviewer``
+    launch works in a clone that never committed them; a filesystem failure
+    provisioning them is re-raised as a :class:`~shipit.review.diff.ReviewError`
+    (the replay path's clean one-line refusal) rather than a raw ``OSError``.
+
+    Returns ``{"review": …, "record_path": …}`` and PROPAGATES a record-write
+    failure, both exactly as the single-pass arm does (the record is the
+    product). ``base_dir`` overrides the store family root (tests); ``launcher``
+    injects the launch seam (tests).
+    """
+    if calibrator is not None:
+        # A filesystem failure here (read-only checkout, permissions, a
+        # non-directory `.claude`/`agents` component) must die as the replay
+        # path's ONE clean domain refusal, not a raw OSError traceback — the
+        # provisioning runs before any model bills.
+        try:
+            provision_agent_defs(view.workdir)
+        except OSError as exc:
+            raise ReviewError(
+                f"cannot provision the calibrator's role agent-defs into "
+                f"{view.workdir!r} ({exc}) — the fan-out replay's judge reads "
+                "them from the checkout. Fix the checkout's writability, or drop "
+                "the `--calibrator-*` options to run the fan-out without the "
+                "judge, then re-run."
+            ) from exc
+    agent = backend.funnel_agent or backend.name
+    start = time.monotonic()
+    outcome = fanout.run_fanout_review(
+        backend,
+        view,
+        model=model,
+        timeout=timeout,
+        instructions_path=instructions_path,
+        dimensions=dimensions,
+        calibrator=calibrator,
+        nit_cap=nit_cap,
+        launcher=launcher,
+        artifacts_base_dir=base_dir,
+    )
+    duration_ms = int((time.monotonic() - start) * 1000)
+    record_path = roundrecord.record_round(
+        outcome.review,
+        repo_slug=view.repo.slug,
+        pr=None,
+        base_sha=str(view.base_sha),
+        head_sha=str(view.head_sha),
+        reviewer=agent,
+        model=model,
+        timeout=timeout,
+        instructions_path=instructions_path,
+        findings=outcome.findings,
+        runs=outcome.runs,
+        duration_ms=duration_ms,
+        round_id=outcome.round_id,
+        artifacts_dir=outcome.artifacts_dir,
+        base_dir=base_dir,
+    )
+    logger.info(
+        "fan-out replay complete (agent=%s) over %s..%s in %dms — record at %s",
+        agent,
+        view.base_sha,
+        view.head_sha,
+        duration_ms,
+        record_path,
+        extra={"reviewer": agent, "duration_ms": duration_ms},
+    )
+    return {"review": outcome.review, "record_path": record_path}
+
+
+def provision_agent_defs(workdir: str) -> list[Path]:
+    """Provision the bundled role agent-defs into ``workdir``'s ``.claude/agents``.
+
+    The RVW02-WS08 op gap (#680): the Calibrator's default backend launches
+    ``claude --agent reviewer``, which reads ``.claude/agents/reviewer.md`` from
+    the checkout it runs in — present in shipit-self and installed consumers,
+    ABSENT in a bare experiment clone, where the launch fails. So a fan-out
+    replay with the judge on writes the bundled agent-defs
+    (:func:`shipit.install.units.agents_root` — the same source ``shipit
+    install`` vendors) into the replay checkout first. Only MISSING files are
+    written: an existing def (committed, installed, or deliberately edited as an
+    experiment arm) is the checkout's own and is never clobbered. Returns the
+    paths written (empty when everything was already present).
+
+    Untrusted-checkout guard (RVW03-WS01): replay runs over a checkout the
+    operator may not control, so the writes stay strictly inside the checkout.
+    A ``.claude``/``agents`` path component that is a SYMLINK (git carries
+    symlinks) could redirect the bundled defs outside the checkout, so a
+    symlinked component aborts provisioning with nothing written. Each file is
+    created with exclusive ``open(..., "xb")``, so an existing name (a regular
+    file OR a pre-planted symlink) is left untouched — never followed or
+    truncated — which also makes concurrent replays on one checkout race-safe.
+    """
+    from ..install.units import AGENTS_DEF_DIR, agents_root
+
+    root = Path(workdir).resolve()
+    probe = root
+    for part in Path(AGENTS_DEF_DIR).parts:
+        probe = probe / part
+        if probe.is_symlink():
+            logger.warning(
+                "replay: refusing to provision agent-defs — %s is a symlink; "
+                "leaving the untrusted checkout untouched",
+                probe,
+            )
+            return []
+    dest_dir = root / AGENTS_DEF_DIR
+    written: list[Path] = []
+    for entry in agents_root().iterdir():
+        if not entry.is_file():
+            continue
+        dest = dest_dir / entry.name
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            with open(dest, "xb") as fh:
+                fh.write(entry.read_bytes())
+        except FileExistsError:
+            continue
+        written.append(dest)
+    if written:
+        logger.info(
+            "replay: provisioned %d role agent-def(s) into %s",
+            len(written),
+            dest_dir,
+            extra={"files": len(written)},
+        )
+    return written
