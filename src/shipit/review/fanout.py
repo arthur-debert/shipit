@@ -47,6 +47,17 @@ posts ONE review through the reviewer's own bot exactly as before; the funnel,
 reconcile, and prstate machinery are untouched. An EMPTY union has nothing to
 post — it skips both the dedup and the (dormant) calibrator and posts the
 attested clean review.
+
+The offline fan-out replay (RVW03-WS01) drives this SAME orchestration: the
+sanctioned experiment driver (:func:`shipit.review.replay.run_fanout_replay`)
+hands :func:`run_fanout_review` a range-scoped
+:class:`~shipit.review.diff.RangeView` instead of a PR ctx, and the three
+PR-coupled seams dispatch on it — no Tree (the passes run in the replay
+checkout), range tasks reading ``git diff <base>..<head>``
+(:func:`shipit.review.producer.run_range_review` /
+:func:`~shipit.review.producer.range_pass_task_text`), and the calibrator's
+ground truth the same range diff. Everything else — union, dedup/calibration,
+routing, run trail — is one code path for both arms.
 """
 
 from __future__ import annotations
@@ -77,6 +88,7 @@ from .calibrator import (
     CalibratorConfig,
     run_calibrator,
 )
+from .diff import RangeView
 from .dimensions import Dimension, known_dimension_names, resolve_dimensions
 from .schema import finding_from_dict
 
@@ -138,7 +150,7 @@ _INCREMENTAL_DIMENSION = Dimension(
 
 def run_fanout_review(
     backend: Backend,
-    ctx,
+    target,
     *,
     model: str = "pro",
     timeout: str = "600s",
@@ -151,9 +163,19 @@ def run_fanout_review(
     dry_run: bool = False,
     launcher: launch.Runner | None = None,
 ) -> FanoutOutcome:
-    """Fan ``backend``'s review of ``ctx`` out into dimension passes (round 1), or
-    run ONE incremental fix-range pass (round ≥ 2), and return the routed
-    :class:`FanoutOutcome`.
+    """Fan ``backend``'s review of ``target`` out into dimension passes (round
+    1), or run ONE incremental fix-range pass (round ≥ 2), and return the
+    routed :class:`FanoutOutcome`.
+
+    ``target`` is EITHER a PR review view (the live path — provisions the
+    shared read-only Tree, tasks fetch ``gh pr diff``) or a range-scoped
+    :class:`~shipit.review.diff.RangeView` (the offline fan-out replay,
+    RVW03-WS01 — the passes run in the replay checkout over
+    ``git diff <base>..<head>``, and the calibrator's ground truth is that same
+    range diff). The dispatch happens at the three PR-coupled seams only;
+    union, dedup/calibration, routing, and the run trail are ONE code path for
+    both arms — the sanctioned replacement for the retired transient
+    monkey-patch driver (#680).
 
     By DEFAULT (``calibrator=None``, RVW02-WS08) the union is posted through the
     MECHANICAL dedup (:func:`dedup_union`) using each pass's OWN severity — no
@@ -162,8 +184,8 @@ def run_fanout_review(
     #638/#665), routing the union through :func:`run_calibrator` instead.
 
     ``incremental`` (RVW02-WS06, ADR-0045) selects the round-≥2 shape: ONE
-    full-scope pass over the FIX RANGE — ``ctx.base_sha..ctx.head_sha``, where
-    ``ctx`` is the caller's fix-range-rescoped view
+    full-scope pass over the FIX RANGE — ``target.base_sha..target.head_sha``,
+    where ``target`` is the caller's fix-range-rescoped view
     (:func:`shipit.review.diff.rescoped_view`) — with mandatory
     dependency-neighborhood context, INSTEAD of the parallel dimension fan-out.
     The pass runs at ``incremental_reasoning`` (the cheaper level, stamped on its
@@ -172,7 +194,11 @@ def run_fanout_review(
     not posted) — a late round can't be recolonized by style churn. The
     calibrator, if configured, still runs (single-pass + calibrator). Round 1
     (``incremental=False``) is unchanged: the ``dimensions`` fan-out with the
-    table-level ``nit_cap``.
+    table-level ``nit_cap``. ``incremental`` is a LIVE-PR shape only: rounds are
+    keyed to a live PR head, so an incremental :class:`RangeView` call is a
+    caller error (``ValueError`` — multi-round fix-range replay is explicitly
+    out of the Review Lab's scope), as is a :class:`RangeView` ``dry_run`` (the
+    dry-run contract prints a would-run TREE launch; replay has none).
 
     ``dimensions`` names the reviewer's configured pass set (the per-reviewer
     Roster option; ``None``/empty → the shipped default set), used only in round
@@ -199,9 +225,22 @@ def run_fanout_review(
     calibrator), and returns an empty outcome — the same honest dry-run contract
     as the producer's.
     """
+    range_view = target if isinstance(target, RangeView) else None
+    if range_view is not None and incremental:
+        raise ValueError(
+            "run_fanout_review: incremental and a RangeView target are mutually "
+            "exclusive — rounds are keyed to a live PR head, and multi-round "
+            "fix-range replay is out of the Review Lab's scope"
+        )
+    if range_view is not None and dry_run:
+        raise ValueError(
+            "run_fanout_review: dry_run is not supported for a RangeView target "
+            "— the dry-run contract prints a would-run Tree launch, and an "
+            "offline replay has no Tree"
+        )
     incremental_range: tuple[str, str] | None = None
     if incremental:
-        incremental_range = (str(ctx.base_sha), str(ctx.head_sha))
+        incremental_range = (str(target.base_sha), str(target.head_sha))
         dims = (_INCREMENTAL_DIMENSION,)
         effective_nit_cap = 0
     else:
@@ -214,12 +253,21 @@ def run_fanout_review(
             ) from None
         effective_nit_cap = nit_cap
     agent = backend.funnel_agent or backend.name
+    # The one display/telemetry split between the arms: a PR target logs and
+    # emits as `pr#<n>`; a range target has no PR — its label is the range and
+    # its `pr` extra is honest-None (matching the record's `round.pr`).
+    pr_number = None if range_view is not None else target.number
+    where = (
+        f"range {range_view.base_sha}..{range_view.head_sha}"
+        if range_view is not None
+        else f"pr#{target.number}"
+    )
 
     if dry_run:
         for dim in dims:
             producer.run_tree_review(
                 backend,
-                ctx,
+                target,
                 model=model,
                 timeout=timeout,
                 instructions_path=instructions_path,
@@ -247,17 +295,32 @@ def run_fanout_review(
             runs=(),
         )
 
-    tree_path = producer.provision_review_tree(ctx)
+    # The Tree seam: the live path provisions ONE shared read-only Tree on the
+    # PR head; the offline replay reviews the checkout whose range was resolved
+    # — no Tree, no gh (the replay boundary already validated the endpoints).
+    workdir = (
+        range_view.workdir
+        if range_view is not None
+        else producer.provision_review_tree(target)
+    )
     label = label_from_env()
 
     def _one_pass(dim: Dimension) -> _PassResult:
-        task = producer.pass_task_text(
-            backend,
-            ctx.number,
-            instructions_path=instructions_path,
-            dimension=None if incremental else dim,
-            incremental_range=incremental_range,
-        )
+        if range_view is not None:
+            task = producer.range_pass_task_text(
+                backend,
+                range_view,
+                instructions_path=instructions_path,
+                dimension=dim,
+            )
+        else:
+            task = producer.pass_task_text(
+                backend,
+                target.number,
+                instructions_path=instructions_path,
+                dimension=None if incremental else dim,
+                incremental_range=incremental_range,
+            )
         run: dict[str, Any] = {
             "run_id": uuid.uuid4().hex,
             "kind": "incremental-pass" if incremental else "dimension-pass",
@@ -273,17 +336,28 @@ def run_fanout_review(
             run["range"] = {"base": incremental_range[0], "head": incremental_range[1]}
         start = time.monotonic()
         try:
-            review = producer.run_tree_review(
-                backend,
-                ctx,
-                model=model,
-                timeout=timeout,
-                instructions_path=instructions_path,
-                launcher=launcher,
-                dimension=None if incremental else dim,
-                tree_path=tree_path,
-                incremental_range=incremental_range,
-            )
+            if range_view is not None:
+                review = producer.run_range_review(
+                    backend,
+                    range_view,
+                    model=model,
+                    timeout=timeout,
+                    instructions_path=instructions_path,
+                    launcher=launcher,
+                    dimension=dim,
+                )
+            else:
+                review = producer.run_tree_review(
+                    backend,
+                    target,
+                    model=model,
+                    timeout=timeout,
+                    instructions_path=instructions_path,
+                    launcher=launcher,
+                    dimension=None if incremental else dim,
+                    tree_path=workdir,
+                    incremental_range=incremental_range,
+                )
         except Exception as exc:  # noqa: BLE001 - a pass failure degrades, never kills
             run["duration_ms"] = int((time.monotonic() - start) * 1000)
             run["outcome"] = (
@@ -291,14 +365,14 @@ def run_fanout_review(
             )
             run["detail"] = str(exc)[:500]
             logger.warning(
-                "%s pass %s failed for pr#%s (agent=%s) — coverage degrades, "
+                "%s pass %s failed for %s (agent=%s) — coverage degrades, "
                 "the round continues",
                 "incremental" if incremental else "dimension",
                 dim.name,
-                ctx.number,
+                where,
                 agent,
                 exc_info=True,
-                extra={"pr": ctx.number, "reviewer": agent},
+                extra={"pr": pr_number, "reviewer": agent},
             )
             return _PassResult(dimension=dim, run=run, review=None)
         run["duration_ms"] = int((time.monotonic() - start) * 1000)
@@ -321,7 +395,7 @@ def run_fanout_review(
             if incremental
             else f"all {len(dims)} dimension passes failed"
         )
-        raise RuntimeError(f"{kind} for pr#{ctx.number} (agent={agent}) — {details}")
+        raise RuntimeError(f"{kind} for {where} (agent={agent}) — {details}")
 
     union = _build_union(succeeded)
     coverage = _merge_coverage(succeeded)
@@ -365,8 +439,13 @@ def run_fanout_review(
         result, run_id, task = run_calibrator(
             calibrator,
             union,
-            pr_number=ctx.number,
-            cwd=tree_path,
+            cwd=workdir,
+            pr_number=pr_number,
+            commit_range=(
+                (str(range_view.base_sha), str(range_view.head_sha))
+                if range_view is not None
+                else None
+            ),
             launcher=launcher,
         )
         calibrator_run.update(
@@ -414,14 +493,14 @@ def run_fanout_review(
     events.emit(
         logger,
         "review.calibrated" if calibrated else "review.deduped",
-        "%s completed for pr#%s (agent=%s): %d candidate(s) -> %d posted",
+        "%s completed for %s (agent=%s): %d candidate(s) -> %d posted",
         "calibration" if calibrated else "mechanical dedup",
-        ctx.number,
+        where,
         agent,
         len(union),
         posted,
         extra={
-            "pr": ctx.number,
+            "pr": pr_number,
             "reviewer": agent,
             "candidates": len(union),
             "posted": posted,
@@ -434,13 +513,13 @@ def run_fanout_review(
         events.emit(
             logger,
             "finding.dispositioned",
-            "finding routed out on pr#%s: %s (%s) -> %s",
-            ctx.number,
+            "finding routed out on %s: %s (%s) -> %s",
+            where,
             finding.file or "(no file)",
             finding.severity.value,
             judged.disposition.value,
             extra={
-                "pr": ctx.number,
+                "pr": pr_number,
                 "reviewer": agent,
                 "severity": finding.severity.value,
                 "disposition": judged.disposition.value,

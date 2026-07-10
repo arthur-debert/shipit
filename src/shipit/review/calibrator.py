@@ -38,8 +38,11 @@ past the Breaker.
 
 Launching (:func:`run_calibrator`) rides the SAME spawn seam as every other
 agent launch (:mod:`shipit.spawn.backends` adapter + :func:`shipit.spawn.launch.launch`),
-read-only in the shared Tree so the judge can verify evidence against the real
-checkout. The ``claude`` result envelope (``--output-format json``) is
+read-only in the shared Tree (live path) or the replay checkout (offline
+fan-out replay, RVW03-WS01 — where the judge's ground truth is the range's
+``git diff``, matching the passes' own diff source) so the judge can verify
+evidence against the real checkout. The ``claude`` result envelope
+(``--output-format json``) is
 unwrapped here, and its ``session_id`` becomes the calibrator's run id — the
 handle the round record's ``round.runs`` joins to eval records; a backend with
 no envelope gets a minted id.
@@ -201,8 +204,13 @@ shape — no prose, no markdown fences, nothing before or after it):
 }"""
 
 
-def build_calibrator_task(candidates_json: str, pr_number: int) -> str:
-    """Compose the calibrator task: judge ``candidates_json`` for PR ``pr_number``.
+def build_calibrator_task(
+    candidates_json: str,
+    *,
+    pr_number: int | None = None,
+    commit_range: tuple[str, str] | None = None,
+) -> str:
+    """Compose the calibrator task: judge ``candidates_json`` against its diff.
 
     The judge contract (ADR-0045, its verification floor amended by
     RVW02-WS08/F2 #665): never originate; dedup by
@@ -218,20 +226,54 @@ def build_calibrator_task(candidates_json: str, pr_number: int) -> str:
     cover EVERY candidate id exactly once (own ``id`` or another entry's
     ``merged``). ``candidates_json`` is the union as a JSON array of
     ``{id, dimension, file, line, severity, category, confidence, text,
-    evidence, fix}`` objects; the task embeds it whole — the judge reads the
-    checkout + ``gh pr diff`` for the ground truth it verifies against.
+    evidence, fix}`` objects; the task embeds it whole.
+
+    The GROUND-TRUTH source is the one target-conditional part (RVW03-WS01):
+    exactly one of ``pr_number`` (the live path — the judge reads
+    ``gh pr diff``) or ``commit_range`` (the offline fan-out replay — the judge
+    reads ``git diff <base>..<head>`` and is told it is offline, matching the
+    passes' own diff source) must be given; anything else is a caller error
+    raised loud as ``ValueError``.
     """
+    if (pr_number is None) == (commit_range is None):
+        raise ValueError(
+            "build_calibrator_task: exactly one of pr_number (live PR) and "
+            "commit_range (offline replay) must be given — the judge needs ONE "
+            "ground-truth diff source"
+        )
+    if commit_range is not None:
+        base_sha, head_sha = commit_range
+        situation = (
+            "You are running in a READ-ONLY checkout of a repository; the review "
+            "is an OFFLINE replay of one commit range — there is NO pull request "
+            "involved."
+        )
+        ground_truth = (
+            f"FIRST, get the ground truth: run `git diff {base_sha}..{head_sha}` "
+            "to read the range's unified diff. Do NOT call `gh` — this review is "
+            "offline and touches nothing on GitHub. Read the surrounding code in "
+            "this checkout wherever you need context to judge a candidate."
+        )
+        settle = "records it locally"
+    else:
+        situation = (
+            "You are running in a shared, READ-ONLY checkout of pull request "
+            f"#{pr_number}'s head commit."
+        )
+        ground_truth = (
+            f"FIRST, get the ground truth: run `gh pr diff {pr_number}` to read "
+            "the pull request's unified diff (it uses the PR's ACTUAL base and "
+            "head — do NOT assume the base is `main`). Read the surrounding code "
+            "in this checkout wherever you need context to judge a candidate."
+        )
+        settle = "posts it"
     return f"""\
 You are the review CALIBRATOR: the single judge of candidate code-review \
-findings. You are running in a shared, READ-ONLY checkout of pull request \
-#{pr_number}'s head commit. Parallel dimension-scoped review passes produced \
+findings. {situation} Parallel dimension-scoped review passes produced \
 the candidate findings below; your job is to turn that raw union into the one \
 calibrated result that gets posted.
 
-FIRST, get the ground truth: run `gh pr diff {pr_number}` to read the pull \
-request's unified diff (it uses the PR's ACTUAL base and head — do NOT assume \
-the base is `main`). Read the surrounding code in this checkout wherever you \
-need context to judge a candidate.
+{ground_truth}
 
 THE CANDIDATE FINDINGS (a JSON array; each candidate has a stable "id"):
 {candidates_json}
@@ -281,9 +323,9 @@ paragraph.
 
 {_CALIBRATION_SCHEMA_PROSE}
 
-Do NOT post anything — do not run `gh pr review` or comment on the PR; emit \
-the JSON object on stdout and stop. shipit validates and posts the calibrated \
-result."""
+Do NOT post anything — do not run `gh pr review` or comment anywhere; emit \
+the JSON object on stdout and stop. shipit validates the calibrated result \
+and {settle}."""
 
 
 def parse_calibration(
@@ -469,17 +511,23 @@ def run_calibrator(
     config: CalibratorConfig,
     union: Sequence[Mapping[str, object]],
     *,
-    pr_number: int,
     cwd: str,
+    pr_number: int | None = None,
+    commit_range: tuple[str, str] | None = None,
     launcher: launch.Runner | None = None,
 ) -> tuple[CalibrationResult, str, str]:
-    """Launch the calibrator over ``union`` in the shared Tree at ``cwd`` and
+    """Launch the calibrator over ``union`` in the checkout at ``cwd`` and
     return ``(result, run_id, task_text)``.
 
     The launch rides the shared spawn seam (adapter argv + auth-env scrub +
     :func:`shipit.spawn.launch.launch` under the ``config.timeout`` process
     deadline) with the read-only reviewer posture — the judge verifies evidence
-    against the real checkout but can neither edit nor post. ``run_id`` is the
+    against the real checkout but can neither edit nor post. ``cwd`` is the
+    shared read-only Tree on the live path, the replay checkout on the offline
+    one; exactly one of ``pr_number`` / ``commit_range`` selects the judge's
+    ground-truth diff source (:func:`build_calibrator_task`, RVW03-WS01 — the
+    range form matches the passes' own ``git diff`` so an offline replay's
+    judge sees the same diff they did). ``run_id`` is the
     claude envelope's ``session_id`` when the backend yields one (the honest
     join key to eval records), else a minted uuid hex; ``task_text`` is the
     exact prompt that ran (the caller variant-hashes it for the round record).
@@ -498,7 +546,11 @@ def run_calibrator(
             f"{identity.binary!r} CLI on your PATH, but it was not found. "
             "Install it (and log it in), then re-run."
         )
-    task = build_calibrator_task(json.dumps(list(union), indent=2), pr_number=pr_number)
+    task = build_calibrator_task(
+        json.dumps(list(union), indent=2),
+        pr_number=pr_number,
+        commit_range=commit_range,
+    )
     adapter = _adapter_for(config)
     cmd = adapter.build_command(task, _CALIBRATOR_ROLE, read_only=True, cwd=cwd)
     deadline = float(parse_duration(config.timeout))

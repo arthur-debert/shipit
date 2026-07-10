@@ -2,9 +2,11 @@
 
 `pr review` is a SUBGROUP under `pr` (so the invocation is
 `shipit pr review request [PR] [--reviewer NAME]`), leaving room for sibling
-review verbs without crowding the top-level `pr` group — `replay` (RVW02-WS03)
-is one: an OFFLINE review of an arbitrary commit range that writes the local
-review-round record and touches no PR. This module owns
+review verbs without crowding the top-level `pr` group — `replay` (RVW02-WS03;
+fan-out arm RVW03-WS01) is one: an OFFLINE review of an arbitrary commit range
+— one monolithic pass, or with `--fanout` the full dimension fan-out (the
+sanctioned experiment driver) — that writes the local review-round record and
+touches no PR. This module owns
 only the thin CLI: parse args -> resolve the typed PR target -> pick the
 adapter scope -> call the engine's reviewer-request service
 (:func:`shipit.prstate.request.request_reviewers` — CLI01-WS03 promoted it out
@@ -100,12 +102,45 @@ def request_cmd(pr: int | None, reviewer: str | None) -> None:
     default=None,
     help="Path to review instructions (default: the bundled instructions).",
 )
+@click.option(
+    "--fanout",
+    "fanout",
+    is_flag=True,
+    default=False,
+    help=(
+        "Run the full dimension fan-out over the range (the sanctioned offline "
+        "experiment driver, RVW03-WS01) instead of one monolithic pass."
+    ),
+)
+@click.option(
+    "--dimensions",
+    "dimensions",
+    default=None,
+    help=(
+        "Comma-separated dimension pass set for --fanout (default: the shipped set)."
+    ),
+)
+@click.option(
+    "--calibrator-backend",
+    "calibrator_backend",
+    default=None,
+    help="Opt the dormant calibrator ON for --fanout (a spawn backend token).",
+)
+@click.option("--calibrator-model", "calibrator_model", default=None)
+@click.option("--calibrator-reasoning", "calibrator_reasoning", default=None)
+@click.option("--calibrator-timeout", "calibrator_timeout", default=None)
 def replay_cmd(
     range_spec: str,
     agent: str,
     model: str,
     timeout: str,
     instructions: str | None,
+    fanout: bool,
+    dimensions: str | None,
+    calibrator_backend: str | None,
+    calibrator_model: str | None,
+    calibrator_reasoning: str | None,
+    calibrator_timeout: str | None,
 ) -> None:
     """Review commit RANGE offline and write the review-round record — no PR touched.
 
@@ -116,6 +151,14 @@ def replay_cmd(
     local agent in THIS checkout, nothing is posted anywhere, and the round
     record (findings with dispositions, coverage, range, variant) lands in the
     harness-owned local store `shipit eval report` reads.
+
+    `--fanout` runs the configured dimension passes in parallel over the range
+    — the SAME fan-out the live PR path runs, reading the range's `git diff`
+    instead of `gh pr diff` — and records one round with `round.runs` populated
+    per pass: the sanctioned way to run a fan-out experiment cell. Any
+    `--calibrator-*` flag opts the dormant judge on for the run (absent fields
+    keep the shipped defaults; the role agent-defs it needs are provisioned
+    into this checkout). All other flags apply to either arm unchanged.
     """
     raise SystemExit(
         run_replay(
@@ -124,6 +167,12 @@ def replay_cmd(
             model=model,
             timeout=timeout,
             instructions=instructions,
+            fanout=fanout,
+            dimensions=dimensions,
+            calibrator_backend=calibrator_backend,
+            calibrator_model=calibrator_model,
+            calibrator_reasoning=calibrator_reasoning,
+            calibrator_timeout=calibrator_timeout,
         )
     )
 
@@ -136,21 +185,39 @@ def run_replay(
     model: str,
     timeout: str,
     instructions: str | None,
+    fanout: bool = False,
+    dimensions: str | None = None,
+    calibrator_backend: str | None = None,
+    calibrator_model: str | None = None,
+    calibrator_reasoning: str | None = None,
+    calibrator_timeout: str | None = None,
 ) -> int:
     """Resolve the range -> run the offline review -> write the record. Exit code.
+
+    ``fanout`` selects the dimension fan-out arm (RVW03-WS01) over the
+    monolithic single pass; ``dimensions`` (comma-joined names) and the four
+    ``calibrator_*`` fields are its config surface, mirroring the detached
+    child's — any calibrator field present mints the table-level
+    :class:`~shipit.review.calibrator.CalibratorConfig` (absent fields keep the
+    shipped defaults), all absent keeps the judge OFF (the deduped union).
 
     User-facing failures are DOMAIN refusals through the one
     :func:`~.._errors.cli_errors` shell (exit 1, one ``error: …`` line): a bad
     range spec / unknown revision / repo-less checkout
     (:class:`~shipit.review.diff.ReviewError` out of the replay resolver), an
-    unknown ``--agent`` (normalized here), a malformed ``--timeout`` and an
-    unreadable ``--instructions`` file (both preflighted here, before any model
-    run bills), and a backend that is missing/failed/timed out (normalized here
-    from the producer's error set).
+    unknown ``--agent`` (normalized here), a malformed ``--timeout``, an
+    unreadable ``--instructions`` file, a fan-out flag without ``--fanout``, an
+    unknown ``--dimensions`` name and a malformed ``--calibrator-*`` field (all
+    preflighted here, before any model run bills), and a backend that is
+    missing/failed/timed out — including a fan-out whose every pass failed and
+    a calibrator contract violation — normalized here from the producer's and
+    fan-out's error set.
     """
     from ...review import replay as replay_mod
     from ...review.backends import BackendError, BackendUnavailable
+    from ...review.calibrator import CalibratorConfig
     from ...review.diff import ReviewError
+    from ...review.dimensions import known_dimension_names, resolve_dimensions
     from ...review.instructions import load_instructions
     from ...tree.cleanup import parse_duration
 
@@ -183,25 +250,76 @@ def run_replay(
                 f"cannot read review instructions {instructions!r}: {exc}"
             ) from exc
 
+    # The fan-out config surface (RVW03-WS01), preflighted the same way: the
+    # fan-out-only flags refuse without --fanout (a silently-ignored flag would
+    # mislabel the experiment arm), an unknown dimension name and a malformed
+    # calibrator field die here as one clean line — before any model run bills.
+    calibrator_fields = {
+        "backend": calibrator_backend,
+        "model": calibrator_model,
+        "reasoning": calibrator_reasoning,
+        "timeout": calibrator_timeout,
+    }
+    calibrator_given = any(value is not None for value in calibrator_fields.values())
+    if not fanout and (dimensions is not None or calibrator_given):
+        raise ReviewError(
+            "--dimensions and --calibrator-* apply only to the fan-out arm — "
+            "pass --fanout to run the dimension fan-out over the range"
+        )
+    dimension_names = (
+        tuple(name.strip() for name in dimensions.split(",") if name.strip())
+        if dimensions
+        else None
+    )
+    if dimension_names:
+        try:
+            resolve_dimensions(dimension_names)
+        except KeyError as exc:
+            raise ReviewError(
+                f"unknown review dimension {exc.args[0]!r} — known dimensions: "
+                f"{', '.join(known_dimension_names())}"
+            ) from None
+    calibrator = None
+    if calibrator_given:
+        try:
+            calibrator = CalibratorConfig(
+                **{k: v for k, v in calibrator_fields.items() if v is not None}
+            )
+        except ValueError as exc:
+            raise ReviewError(f"invalid --calibrator-* options: {exc}") from exc
+
     view = replay_mod.resolve_range(range_spec)
     try:
-        result = replay_mod.run_replay(
-            backend,
-            view,
-            model=model,
-            timeout=timeout,
-            instructions_path=instructions,
-        )
+        if fanout:
+            result = replay_mod.run_fanout_replay(
+                backend,
+                view,
+                model=model,
+                timeout=timeout,
+                instructions_path=instructions,
+                dimensions=dimension_names,
+                calibrator=calibrator,
+            )
+        else:
+            result = replay_mod.run_replay(
+                backend,
+                view,
+                model=model,
+                timeout=timeout,
+                instructions_path=instructions,
+            )
     except (BackendUnavailable, BackendError, RuntimeError) as exc:
-        # The producer's error set (missing CLI / unparseable / timed out /
-        # nonzero child) — normalized to the review path's domain refusal so
+        # The producer's + fan-out's error set (missing CLI / unparseable /
+        # timed out / nonzero child / every pass failed / a calibrator contract
+        # violation) — normalized to the review path's domain refusal so
         # the shell renders one clean line; there is no funnel breadcrumb to
         # settle here (replay has no check run).
         raise ReviewError(str(exc)) from exc
     review = result["review"]
     comments = review.get("comments") or []
+    arm = "fan-out" if fanout else "single pass"
     print(
-        f"replayed {view.base_sha}..{view.head_sha} with {agent}: "
+        f"replayed {view.base_sha}..{view.head_sha} with {agent} ({arm}): "
         f"{len(comments)} finding(s), status "
         f"{(review.get('summary') or {}).get('status')}"
     )

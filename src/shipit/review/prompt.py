@@ -5,7 +5,9 @@ to ONE **Dimension pass** via ``dimension=`` (RVW02-WS04: the fan-out launches i
 once per configured dimension; the focus section scopes the SEARCH, never the
 severity ladder); `build_range_reviewer_task`
 composes its offline commit-range sibling (RVW02-WS03 replay: the diff comes from
-`git diff <base>..<head>`, no PR, nothing posted). This module is the ONE place a
+`git diff <base>..<head>`, no PR, nothing posted), which takes the SAME
+``dimension=`` narrowing (RVW03-WS01: the offline fan-out replay launches it once
+per configured dimension). This module is the ONE place a
 review (finder) task is composed — the Calibrator's JUDGE task is a different
 contract and lives with its boundary (:mod:`shipit.review.calibrator`). Since
 TRE05-WS04b the producer no longer **front-loads** the diff into the prompt
@@ -159,7 +161,9 @@ captures your output and posts the review."""
     return body
 
 
-def _dimension_section(dimension: Dimension) -> str:
+def _dimension_section(
+    dimension: Dimension, *, diff_noun: str = "this PR's diff"
+) -> str:
     """The focus section that narrows a reviewer task to ONE dimension pass.
 
     Scopes the SEARCH: the pass is released from budgeting across other concerns
@@ -170,13 +174,18 @@ def _dimension_section(dimension: Dimension) -> str:
     EXPOSED (a purely pre-existing issue would otherwise post as blocking) and
     its stated severity is the posted one. An opted-in Calibrator (ADR-0045)
     still dedups/verifies/renormalizes what the passes report.
+
+    ``diff_noun`` names the diff being reviewed — ``"this PR's diff"`` on the
+    live path, ``"this range's diff"`` on the offline replay (RVW03-WS01, where
+    there is no PR) — so the two arms' pass prompts are byte-identical except
+    where the target genuinely differs.
     """
     return f"""\
 DIMENSION FOCUS — {dimension.title}: this review is ONE scoped pass of a \
 parallel fan-out; other passes cover the other dimensions, and their union is \
 mechanically deduped and posted with each pass's own severity. \
 Hunt EXHAUSTIVELY and ONLY for: {dimension.focus}
-Report ONLY findings this PR's diff INTRODUCED or EXPOSED — a purely \
+Report ONLY findings {diff_noun} INTRODUCED or EXPOSED — a purely \
 pre-existing issue outside the diff is out of scope here and must not be \
 posted. Your stated severity is the posted severity. Do not pad with findings \
 outside this dimension's focus."""
@@ -266,7 +275,12 @@ captures your output and posts the review."""
 
 
 def build_range_reviewer_task(
-    instructions: str, base_sha: str, head_sha: str, *, schema_inline: bool
+    instructions: str,
+    base_sha: str,
+    head_sha: str,
+    *,
+    schema_inline: bool,
+    dimension: Dimension | None = None,
 ) -> str:
     """Compose the COMMIT-RANGE reviewer task — the offline-replay sibling of
     :func:`build_reviewer_task` (RVW02-WS03).
@@ -277,7 +291,14 @@ def build_range_reviewer_task(
     the task never carries a user-typed rev that could miss) — and is told it is
     OFFLINE: no ``gh`` calls, nothing posted, output captured from stdout exactly
     like the PR path. The checkout it runs in provides the surrounding-code
-    context. ``schema_inline`` follows the same backend split as the PR task.
+    context.
+
+    ``dimension`` narrows the task to ONE **Dimension pass** exactly as on the
+    PR task (RVW03-WS01: the offline fan-out replay launches this once per
+    configured dimension) — the SAME focus section, its diff noun the range's —
+    so a replayed pass prompt differs from the live one only in how the diff is
+    fetched. ``None`` keeps the monolithic full-scope task.
+    ``schema_inline`` follows the same backend split as the PR task.
     """
     body = f"""\
 You are an expert AI code reviewer. You are running in a checkout of a repository. \
@@ -320,6 +341,9 @@ text before or after the JSON. Do NOT post the review anywhere — do not run `g
 otherwise publish it; just emit the JSON and stop. shipit captures your output and \
 records it locally."""
 
+    if dimension is not None:
+        section = _dimension_section(dimension, diff_noun="this range's diff")
+        body = f"{body}\n\n{section}"
     if schema_inline:
         body = f"{body}\n\n{_SCHEMA_PROSE}\n\n{_JSON_VALIDITY_INSTRUCTION}"
 

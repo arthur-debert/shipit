@@ -229,6 +229,39 @@ def test_calibrator_task_drops_only_on_refutation_not_uncertainty():
     assert "never downgrade" in lowered
 
 
+def test_calibrator_task_pr_ground_truth_is_the_pr_diff():
+    task = build_calibrator_task("[]", pr_number=42)
+    assert "gh pr diff 42" in task
+    assert "pull request #42" in task
+    assert "posts it" in task
+
+
+def test_calibrator_task_range_ground_truth_is_the_offline_git_diff():
+    # RVW03-WS01: an offline fan-out replay's judge reads the SAME range diff
+    # the passes did (`git diff <base>..<head>`) — never `gh` — and is told the
+    # result is recorded locally, not posted.
+    task = build_calibrator_task("[]", commit_range=("a" * 40, "b" * 40))
+    assert f"git diff {'a' * 40}..{'b' * 40}" in task
+    assert "gh pr diff" not in task
+    assert "Do NOT call `gh`" in task
+    assert "NO pull request" in task
+    assert "records it locally" in task
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {},
+        {"pr_number": 42, "commit_range": ("a" * 40, "b" * 40)},
+    ],
+)
+def test_calibrator_task_requires_exactly_one_ground_truth_source(kwargs):
+    # The judge needs ONE diff to verify against: neither source and both
+    # sources are caller errors, refused loud before any prompt is composed.
+    with pytest.raises(ValueError, match="exactly one"):
+        build_calibrator_task("[]", **kwargs)
+
+
 # --- run_calibrator: the launch seam -------------------------------------------
 
 
