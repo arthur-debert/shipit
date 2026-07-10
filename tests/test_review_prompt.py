@@ -180,6 +180,9 @@ def test_the_diff_only_vs_walk_checkout_contradiction_is_gone():
     assert "one-shot review" not in bundled
     assert "Scope is the diff; context is the checkout" in bundled
     assert "introduced or exposed" in bundled
+    # The run-nothing rule keeps the fetch/read carve-out, so the bundled text
+    # does not contradict the task's own `gh pr diff` fetch when composed.
+    assert "beyond fetching the diff as instructed and reading files" in bundled
     # The bundled default composes cleanly with EVERY arm and stays
     # contradiction-free end to end: compose the real bundled instructions (not
     # the dummy) into all four arms and assert the retired text is gone from
