@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -262,3 +263,46 @@ def test_replay_verb_bad_timeout_is_one_clean_error_line_before_any_run(capsys):
     )
     assert rc == 1
     assert "error: invalid --timeout 'bad'" in capsys.readouterr().err
+
+
+def test_run_replay_persists_the_range_pass_bundle_and_correlation(
+    checkout, launcher, tmp_path
+):
+    """RVW03-WS02: the replay's single range pass is a review sub-agent run —
+    it gets a bundle under the SAME injected family root as the record store,
+    and the record carries round.id / round.artifacts / one runs entry / the
+    run id on every finding."""
+    view = replay.resolve_range("HEAD~1..HEAD", workdir=str(checkout))
+    result = replay.run_replay(
+        agent_backend.CODEX,
+        view,
+        launcher=launcher["launch"],
+        base_dir=tmp_path / "state",
+    )
+    [line] = result["record_path"].read_text(encoding="utf-8").splitlines()
+    record = json.loads(line)
+    assert record["round.id"]
+    artifacts_dir = Path(record["round.artifacts"])
+    assert artifacts_dir == (
+        tmp_path / "state" / "review-artifacts" / "acme" / "widget" / record["round.id"]
+    )
+    [run] = record["round.runs"]
+    assert run["kind"] == "range-pass"
+    assert run["outcome"] == "success"
+    assert run["artifacts"] == str(artifacts_dir / run["run_id"])
+    # The bundle exists with the EXACT prompt + raw streams + meta — content,
+    # not mere truthiness, so a regression that writes the wrong stream (an
+    # error string, an empty body) can't pass.
+    bundle = artifacts_dir / run["run_id"]
+    assert (
+        f"git diff {view.base_sha}..{view.head_sha}"
+        in (bundle / "prompt.txt").read_text()
+    )
+    assert (bundle / "stdout.raw").read_text() == _VALID
+    meta = json.loads((bundle / "meta.json").read_text())
+    assert meta["outcome"] == "success"
+    assert meta["run_id"] == run["run_id"]
+    assert meta["exit_code"] == 0
+    # Finding↔pass correlation, single-pass flavour.
+    [finding] = record["round.findings"]
+    assert finding["run_id"] == run["run_id"]

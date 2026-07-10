@@ -48,8 +48,10 @@ no envelope gets a minted id.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import shutil
+import time
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -69,8 +71,11 @@ from ..spawn.backends.antigravity import AntigravityAdapter
 from ..spawn.backends.claude import ClaudeAdapter
 from ..spawn.backends.codex import CodexAdapter
 from ..tree.cleanup import parse_duration
+from .artifacts import RunArtifacts
 from .backends import BackendError, BackendUnavailable
 from .schema import extract_json
+
+logger = logging.getLogger("shipit.review")
 
 #: The role the calibrator launches under — the read-only reviewer posture
 #: (mirrors :data:`shipit.review.producer._REVIEWER_ROLE`): the judge reads the
@@ -472,6 +477,8 @@ def run_calibrator(
     pr_number: int,
     cwd: str,
     launcher: launch.Runner | None = None,
+    artifacts: RunArtifacts | None = None,
+    correlation: Mapping[str, object] | None = None,
 ) -> tuple[CalibrationResult, str, str]:
     """Launch the calibrator over ``union`` in the shared Tree at ``cwd`` and
     return ``(result, run_id, task_text)``.
@@ -484,6 +491,17 @@ def run_calibrator(
     join key to eval records), else a minted uuid hex; ``task_text`` is the
     exact prompt that ran (the caller variant-hashes it for the round record).
 
+    ``artifacts`` (RVW03-WS02) is the judge run's fail-open bundle: the exact
+    task text is written before the launch, the RAW stdout/stderr + launch meta
+    (exit code, duration, timed-out flag, and — once unwrapped — the true run
+    id) after, on every path — so a calibrator failure (previously only
+    ``str(exc)``) leaves its full raw output inspectable on disk.
+
+    ``correlation`` (RVW03-WS02) is the fan-out's per-pass log-correlation extras
+    (``reviewer``/``round_id``/the stable surrogate ``run_id`` = ``calibrator``);
+    the raw-output DEBUG record carries them so ``shipit logs --run calibrator``
+    can slice the judge's trail alongside the round's progress events.
+
     Raises :class:`~shipit.review.backends.BackendUnavailable` (CLI missing),
     :class:`~shipit.review.backends.BackendError` (a launch-seam timeout / a
     nonzero child / unparseable output — carrying the raw for the salvage
@@ -491,6 +509,7 @@ def run_calibrator(
     violates the judge contract) — the fan-out maps each to a degraded,
     non-blocking round (ADR-0006).
     """
+    sink = artifacts if artifacts is not None else RunArtifacts.disabled()
     identity = agent_backend.by_name(config.backend)
     if shutil.which(identity.binary) is None:
         raise BackendUnavailable(
@@ -498,10 +517,19 @@ def run_calibrator(
             f"{identity.binary!r} CLI on your PATH, but it was not found. "
             "Install it (and log it in), then re-run."
         )
-    task = build_calibrator_task(json.dumps(list(union), indent=2), pr_number=pr_number)
+    # The union candidates carry pass-plumbing the judge must not see (the
+    # RVW03-WS02 ``run_id`` correlation is the record's business, not part of
+    # the judged content — and prompt bytes are variant-hashed, so plumbing in
+    # the task would split experiment arms on non-content):
+    # serialize exactly the documented candidate shape.
+    candidates = [{k: v for k, v in c.items() if k != "run_id"} for c in union]
+    task = build_calibrator_task(json.dumps(candidates, indent=2), pr_number=pr_number)
     adapter = _adapter_for(config)
     cmd = adapter.build_command(task, _CALIBRATOR_ROLE, read_only=True, cwd=cwd)
     deadline = float(parse_duration(config.timeout))
+    sink.write_prompt(task)
+    sink.record(argv=list(cmd), cwd=cwd, seam_deadline_s=deadline)
+    start = time.monotonic()
     try:
         result = launch.launch(
             cmd,
@@ -511,7 +539,15 @@ def run_calibrator(
             runner=launcher,
         )
     except execrun.ExecError as exc:
-        if exc.cause != execrun.CAUSE_TIMEOUT:
+        timed_out = exc.cause == execrun.CAUSE_TIMEOUT
+        sink.write_streams(exc.stdout, exc.stderr)
+        sink.record(
+            duration_ms=int((time.monotonic() - start) * 1000),
+            exit_code=None,
+            timed_out=timed_out,
+            error=str(exc),
+        )
+        if not timed_out:
             raise
         raise BackendError(
             f"the calibrator ({config.backend}) timed out — the launch seam "
@@ -520,14 +556,43 @@ def run_calibrator(
             raw=f"{exc.stdout}\n{exc.stderr}".strip(),
             timed_out=True,
         ) from exc
+    sink.write_streams(result.stdout, result.stderr)
+    sink.record(
+        duration_ms=int((time.monotonic() - start) * 1000),
+        exit_code=result.returncode,
+        timed_out=False,
+    )
+    # The judge's raw output at DEBUG (issue #681 item 2) — the passes get this
+    # via parse_review_output; the calibrator's parse (`_unwrap_output`) now has
+    # the same durable raw trail in the log sink, on top of the bundle on disk.
+    logger.debug(
+        "calibrator (%s) raw output for pr#%s (%d chars):\n%s",
+        config.backend,
+        pr_number,
+        len(result.stdout or ""),
+        result.stdout or "",
+        extra={**dict(correlation or {}), "pr": pr_number},
+    )
     if result.returncode != 0:
         detail = (result.stderr or "").strip() or (result.stdout or "").strip()
+        if sink.dir is not None:
+            # LOCAL breadcrumb to the full raw on disk; the absolute path stays
+            # OUT of the BackendError message, which the service surfaces in the
+            # GitHub-facing funnel check summary (no user-home / state leak).
+            logger.warning(
+                "the calibrator (%s) exited %d — full raw output at %s",
+                config.backend,
+                result.returncode,
+                sink.dir,
+                extra={**dict(correlation or {}), "pr": pr_number},
+            )
         raise BackendError(
             f"the calibrator ({config.backend}) exited {result.returncode}: "
             f"{detail[:500]}",
             raw=f"{result.stdout}\n{result.stderr}".strip(),
         )
     payload, run_id = _unwrap_output(result.stdout or "", backend=config.backend)
+    sink.record(run_id=run_id)
     return parse_calibration(payload, union), run_id, task
 
 

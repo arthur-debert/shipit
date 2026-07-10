@@ -500,3 +500,147 @@ def test_provision_review_tree_requires_a_head_branch(monkeypatch):
     )
     with _pytest.raises(RuntimeError, match="head branch"):
         producer.provision_review_tree(ctx)
+
+
+# ---------------------------------------------------------------------------
+# RVW03-WS02 — the launch seam fills the per-run artifact bundle, every path
+# ---------------------------------------------------------------------------
+
+
+def _bundle(tmp_path):
+    from shipit.review.artifacts import RunArtifacts
+
+    return RunArtifacts(tmp_path / "bundle")
+
+
+def test_success_launch_fills_the_bundle(_faked, tmp_path):
+    import json
+
+    bundle = _bundle(tmp_path)
+    producer.run_tree_review(
+        agent_backend.CODEX,
+        _ctx(),
+        launcher=_faked["launcher"],
+        run_id="run-1",
+        artifacts=bundle,
+    )
+    # The EXACT prompt the launch composed — the same bytes pass_task_text derives.
+    expected_task = producer.pass_task_text(agent_backend.CODEX, _ctx().number)
+    assert (bundle.dir / "prompt.txt").read_text() == expected_task
+    assert (bundle.dir / "stdout.raw").read_text() == _VALID
+    assert (bundle.dir / "stderr.raw").read_text() == ""
+    meta = json.loads((bundle.dir / "meta.json").read_text())
+    assert meta["exit_code"] == 0
+    assert meta["timed_out"] is False
+    assert meta["argv"] == _faked["cmd"]
+    assert "duration_ms" in meta
+
+
+def test_nonzero_exit_bundle_keeps_full_raw_and_logs_point_at_it(
+    _faked, tmp_path, caplog
+):
+    import json
+    import logging
+
+    long_err = "x" * 2000  # far past the 500-char message truncation
+
+    def launcher(cmd, *, cwd, env, timeout=None):
+        return LaunchResult(returncode=1, stdout="partial out", stderr=long_err)
+
+    bundle = _bundle(tmp_path)
+    caplog.set_level(logging.WARNING, logger="shipit.review")
+    with pytest.raises(RuntimeError) as exc:
+        producer.run_tree_review(
+            agent_backend.CODEX,
+            _ctx(),
+            launcher=launcher,
+            artifacts=bundle,
+            run_id="run-x",
+        )
+    # The absolute bundle path is kept OUT of the raised message — that message
+    # crosses into the GitHub-facing funnel check summary and must not leak a
+    # user-home / state path. The LOCAL log points a developer at the full raw.
+    assert str(bundle.dir) not in str(exc.value)
+    assert str(bundle.dir) in caplog.text
+    # The breadcrumb carries correlation extras so `shipit logs --run/--reviewer`
+    # selects the very line that says where the raw output lives.
+    [breadcrumb] = [r for r in caplog.records if "full raw output at" in r.getMessage()]
+    assert breadcrumb.run_id == "run-x"
+    assert breadcrumb.reviewer == "codex"
+    # The bundle carries the UNtruncated streams + the exit meta.
+    assert (bundle.dir / "stderr.raw").read_text() == long_err
+    assert (bundle.dir / "stdout.raw").read_text() == "partial out"
+    meta = json.loads((bundle.dir / "meta.json").read_text())
+    assert meta["exit_code"] == 1
+
+
+def test_seam_timeout_bundle_keeps_partial_streams_and_timed_out_meta(_faked, tmp_path):
+    import json
+
+    def launcher(cmd, *, cwd, env, timeout=None):
+        raise execrun.ExecError(
+            cmd,
+            rc=None,
+            stdout="partial body",
+            stderr="killed at deadline",
+            cause=execrun.CAUSE_TIMEOUT,
+        )
+
+    bundle = _bundle(tmp_path)
+    with pytest.raises(BackendError):
+        producer.run_tree_review(
+            agent_backend.CODEX, _ctx(), launcher=launcher, artifacts=bundle
+        )
+    assert (bundle.dir / "stdout.raw").read_text() == "partial body"
+    assert (bundle.dir / "stderr.raw").read_text() == "killed at deadline"
+    meta = json.loads((bundle.dir / "meta.json").read_text())
+    assert meta["timed_out"] is True
+    assert meta["exit_code"] is None
+    # The prompt was written BEFORE the launch, so a killed child leaves it.
+    assert (bundle.dir / "prompt.txt").exists()
+
+
+def test_exit_zero_timeout_marker_corrects_the_bundle_timed_out_meta(_faked, tmp_path):
+    import json
+
+    from shipit.review.backends.base import _TIMEOUT_MARKER
+
+    # Exit 0, but the stdout is unparseable AND carries the timeout marker:
+    # parse_review_output raises BackendError(timed_out=True). The launch seam
+    # optimistically recorded timed_out=False before the parse — the meta must be
+    # CORRECTED to True so the bundle never claims a real timeout was a clean run.
+    def launcher(cmd, *, cwd, env, timeout=None):
+        return LaunchResult(returncode=0, stdout=f"...{_TIMEOUT_MARKER}...", stderr="")
+
+    bundle = _bundle(tmp_path)
+    with pytest.raises(BackendError) as exc:
+        producer.run_tree_review(
+            agent_backend.CODEX, _ctx(), launcher=launcher, artifacts=bundle
+        )
+    assert exc.value.timed_out is True
+    meta = json.loads((bundle.dir / "meta.json").read_text())
+    assert meta["exit_code"] == 0
+    assert meta["timed_out"] is True
+
+
+def test_range_review_fills_the_bundle_too(monkeypatch, tmp_path):
+    import json
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(producer.shutil, "which", lambda binary: f"/usr/bin/{binary}")
+
+    def launcher(cmd, *, cwd, env, timeout=None):
+        return LaunchResult(returncode=0, stdout=_VALID, stderr="")
+
+    view = SimpleNamespace(workdir=str(tmp_path), base_sha="a" * 40, head_sha="b" * 40)
+    bundle = _bundle(tmp_path)
+    producer.run_range_review(
+        agent_backend.CODEX, view, launcher=launcher, run_id="r", artifacts=bundle
+    )
+    assert (bundle.dir / "prompt.txt").read_text()
+    assert (bundle.dir / "stdout.raw").read_text() == _VALID
+    # Range and Tree passes share `_launch_and_capture`, so the correlation meta
+    # must land on this path too — exit code and the caller's run id serialized.
+    meta = json.loads((bundle.dir / "meta.json").read_text())
+    assert meta["exit_code"] == 0
+    assert meta["timed_out"] is False

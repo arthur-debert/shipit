@@ -66,6 +66,9 @@ def build_query(
     ws: int | str | None = None,
     agent: str | None = None,
     role: str | None = None,
+    reviewer: str | None = None,
+    run_id: str | None = None,
+    round_id: str | None = None,
     tail: int = DEFAULT_TAIL,
     follow: bool = False,
     raw: bool = False,
@@ -82,6 +85,9 @@ def build_query(
     ``raw``/``follow`` contradiction — for the CLI boundary to map to a usage
     error; ``session`` arrives already resolved (the ``current`` sentinel is
     the boundary's job, since resolving it reads the process environment).
+    ``reviewer`` / ``run_id`` / ``round_id`` select on the review sub-agent
+    correlation extras (RVW03-WS02) — one reviewing agent, one pass run, one
+    fan-out round — composing AND with the rest like every other filter.
     """
     normalized_ws = normalize_ws(ws) if ws is not None else None
     record_filter = Filter(
@@ -92,6 +98,9 @@ def build_query(
         ws=normalized_ws,
         agent=agent,
         role=role,
+        reviewer=reviewer,
+        run_id=run_id,
+        round_id=round_id,
     )
     return LogQuery(
         record_filter=record_filter,
