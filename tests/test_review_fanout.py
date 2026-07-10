@@ -906,10 +906,25 @@ def _range_seams(monkeypatch):
     """Fake the RANGE producer seams (the offline arm's dispatch targets) and
     BOOBY-TRAP the PR-coupled ones — a RangeView target must never provision a
     Tree or compose a `gh pr diff` task."""
-    capture: dict = {"reviews": {}, "union": None, "result": None, "calls": []}
+    capture: dict = {
+        "reviews": {},
+        "union": None,
+        "result": None,
+        "calls": [],
+        "preflights": [],
+    }
 
     def _boom(*args, **kwargs):
         raise AssertionError("a RangeView target must never touch a PR seam")
+
+    # The range arm still preflights its backend binaries (RVW03-WS03 preflight,
+    # shared with the PR arm) — stub it so the offline tests don't require the
+    # real `codex`/`claude` binaries on PATH, capturing the round's backend set.
+    monkeypatch.setattr(
+        fanout.producer,
+        "preflight_round",
+        lambda backends: capture["preflights"].append(list(backends)),
+    )
 
     monkeypatch.setattr(fanout.producer, "provision_review_tree", _boom)
     monkeypatch.setattr(fanout.producer, "run_tree_review", _boom)
@@ -970,6 +985,9 @@ def test_range_target_fans_out_through_the_range_producer(_range_seams):
         "test-quality",
     ]
     assert all(c["view"].workdir == "/replay-checkout" for c in _range_seams["calls"])
+    # The range round preflights its backend binaries too (RVW03-WS03, shared
+    # with the PR arm) — once, over the reviewer's configured backend.
+    assert _range_seams["preflights"] == [[agent_backend.CODEX]]
     # The routed outcome is the fan-out's usual product: runs per pass, the
     # deduped union posted with pass severities.
     assert [run["kind"] for run in outcome.runs] == ["dimension-pass"] * 2
