@@ -24,6 +24,10 @@ _Avoid_: boolean `is_org` language.
 An existing on-disk checkout of a Repo at a branch and commit. A Tree has a WorkingDir, but a human or CI checkout can also be a WorkingDir without being a Tree.
 _Avoid_: using WorkingDir as the repo identity.
 
+**Main checkout**:
+A WorkingDir that is not a Tree: the ordinary human or CI checkout of a Repo. It can be read by ambient investigation, but agent Runs should use Trees for isolated work.
+_Avoid_: treating the main checkout as a Tree or as a safe shared write workspace.
+
 **Sha**:
 A full git commit object id used when shipit needs commit identity, review staleness, or Tree provenance. Prefix matching is an explicit question, not normal equality.
 _Avoid_: "commit" when the value only names the commit.
@@ -136,12 +140,12 @@ A reviewer or readiness pillar holds a PR when it prevents Ready; it is settled 
 
 ### Planning
 
-**Spec**:
-The authoritative feature definition in `docs/spec/`: what is being built and why. A merged docs PR locks it before execution work is decomposed.
-_Avoid_: treating an epic issue as the spec.
+**PRD**:
+The authoritative feature definition in `docs/prd/`: what is being built and why. A merged docs PR locks it before execution work is decomposed.
+_Avoid_: treating an epic issue as the PRD.
 
 **Epic issue**:
-A GitHub tracker for how a Spec lands: work streams, progress, and links to the Spec and ADRs. It tracks execution, not the full feature definition.
+A GitHub tracker for how a PRD lands: work streams, progress, and links to the PRD and ADRs. It tracks execution, not the full feature definition.
 
 **Work Stream**:
 An independently grabbable slice of an epic that ships through the normal draft PR lifecycle. Work streams target the epic branch, not `main`.
