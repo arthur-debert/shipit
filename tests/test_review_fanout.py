@@ -97,8 +97,21 @@ def _calibrated(i, finding, disposition=Disposition.POST, **kw):
 def _seams(monkeypatch):
     """Fake the producer + calibrator seams; returns the capture dict tests
     read (per-dimension reviews or exceptions in `reviews`, the union handed
-    to the calibrator in `union`, the calibration result in `result`)."""
-    capture: dict = {"reviews": {}, "union": None, "result": None, "trees": []}
+    to the calibrator in `union`, the calibration result in `result`, the
+    round preflight's backend sets in `preflights`)."""
+    capture: dict = {
+        "reviews": {},
+        "union": None,
+        "result": None,
+        "trees": [],
+        "preflights": [],
+    }
+
+    monkeypatch.setattr(
+        fanout.producer,
+        "preflight_round",
+        lambda backends: capture["preflights"].append(list(backends)),
+    )
 
     monkeypatch.setattr(
         fanout.producer,
@@ -293,6 +306,75 @@ def test_all_passes_failing_fails_the_round(_seams):
             _ctx(),
             dimensions=["correctness", "test-quality"],
         )
+
+
+def test_round_preflights_the_reviewer_backend_once_before_the_fanout(
+    monkeypatch, _seams
+):
+    """RVW03-WS03: the round's configured backend set is preflighted ONCE, and
+    it happens BEFORE the Tree provisions — so a missing binary can never cost
+    a Tree clone or a pass launch."""
+    from shipit.agent import backend as agent_backend
+
+    order: list[str] = []
+    _seams["reviews"] = {"correctness": _pass_review([])}
+    real_preflight = fanout.producer.preflight_round
+    real_provision = fanout.producer.provision_review_tree
+    monkeypatch.setattr(
+        fanout.producer,
+        "preflight_round",
+        lambda backends: order.append("preflight") or real_preflight(backends),
+    )
+    monkeypatch.setattr(
+        fanout.producer,
+        "provision_review_tree",
+        lambda ctx: order.append("provision") or real_provision(ctx),
+    )
+    fanout.run_fanout_review(agent_backend.CODEX, _ctx(), dimensions=["correctness"])
+    assert order == ["preflight", "provision"]
+    assert _seams["preflights"] == [[agent_backend.CODEX]]
+
+
+def test_round_preflight_includes_the_calibrators_backend_when_the_judge_is_on(
+    _seams,
+):
+    """With the dormant judge opted on, its backend is part of the round's
+    configured set — its binary missing must surface at preflight, not after
+    every pass already ran (the round's most expensive possible failure)."""
+    from shipit.agent import backend as agent_backend
+
+    _seams["reviews"] = {"correctness": _pass_review([])}
+    fanout.run_fanout_review(
+        agent_backend.CODEX, _ctx(), dimensions=["correctness"], calibrator=_CAL
+    )
+    assert _seams["preflights"] == [
+        [agent_backend.CODEX, agent_backend.by_name(_CAL.backend)]
+    ]
+
+
+def test_missing_binary_fails_the_round_before_any_pass_launches(monkeypatch, _seams):
+    """RVW03-WS03 regression: a missing backend binary is ONE actionable
+    BackendUnavailable from the round preflight — never 'all N dimension passes
+    failed' with N truncated per-pass details — and NO pass launches, NO Tree
+    provisions."""
+    from shipit.agent import backend as agent_backend
+    from shipit.review.backends import BackendUnavailable
+
+    launched: list = []
+    monkeypatch.setattr(
+        fanout.producer,
+        "run_tree_review",
+        lambda *a, **k: launched.append(a) or _pass_review([]),
+    )
+
+    def missing(backends):
+        raise BackendUnavailable("binary 'codex' not found — install/configure it")
+
+    monkeypatch.setattr(fanout.producer, "preflight_round", missing)
+    with pytest.raises(BackendUnavailable, match="install/configure"):
+        fanout.run_fanout_review(agent_backend.CODEX, _ctx())
+    assert launched == []
+    assert _seams["trees"] == []
 
 
 def test_calibrator_failure_propagates_and_no_union_is_posted(monkeypatch, _seams):

@@ -19,6 +19,11 @@ rounds) across every checkout instead of scattering one store per clone path.
 **No compat**: pre-existing path-keyed stores simply orphan (local, uncommitted,
 regenerable data).
 
+Integrity (RVW03-WS03): appends are serialized under an exclusive ``flock`` so
+parallel settles from separate processes can never interleave two records into
+one malformed line; readers skip a malformed line LOUDLY (a warning naming the
+file + 1-based line number), never silently.
+
 ``base_dir`` is the FAMILY root (the dir the per-kind subdirs live under), injected
 by tests (mirroring :mod:`shipit.logsetup`, whose ``resolve_log_dir`` returns an
 injected ``base_dir`` verbatim) so they write to a tmp path — ONE injected root
@@ -28,7 +33,9 @@ join) resolve both stores from a single override.
 
 from __future__ import annotations
 
+import fcntl
 import json
+import logging
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -37,6 +44,8 @@ import platformdirs
 
 if TYPE_CHECKING:
     from ...identity import Repo
+
+logger = logging.getLogger("shipit.harness")
 
 #: The eval-record kind: one JSONL line per run, saying how the run *behaved*
 #: (tool calls, tokens, stuck-loops — :mod:`shipit.harness.eval.record`).
@@ -127,11 +136,23 @@ def append_record(
     under one stable per-repo file regardless of which clone it ran in. Creates the
     store directory on first write. Returns the path so the caller (and tests) can
     assert where the record landed.
+
+    Appends are SERIALIZED under an exclusive file lock (``flock``, RVW03-WS03):
+    parallel settles append to the same per-repo file from separate processes, and
+    a record larger than the writer's buffer would otherwise flush interleaved
+    with a concurrent append's chunks — splicing two records into one malformed
+    line. The lock is held only for the single line's write + flush, and releases
+    with the file handle even on error.
     """
     path = store_path(repo, base_dir, kind=kind)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(record) + "\n")
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            fh.write(json.dumps(record) + "\n")
+            fh.flush()
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
     return path
 
 
@@ -146,9 +167,11 @@ def read_records(
     MISSING store (nothing ever appended) is an empty list, never an error —
     a reader that has no history simply sees none (the incremental-round query
     that has no prior review-round record for a PR then treats the round as a
-    full round, RVW02-WS06). A malformed line is SKIPPED rather than fatal: the
+    full round, RVW02-WS06). A malformed line is skipped rather than fatal — the
     store is local, uncommitted telemetry, and one corrupt line must not blind a
-    reader to every intact record around it.
+    reader to every intact record around it — but it is skipped LOUDLY
+    (RVW03-WS03): a warning names the file and the 1-based line number, so a
+    corrupted round can never silently read as "this arm found nothing".
 
     ``base_dir`` overrides the family root (tests), exactly as on the writers.
     """
@@ -157,14 +180,28 @@ def read_records(
         return []
     records: list[dict[str, Any]] = []
     with path.open(encoding="utf-8") as fh:
-        for line in fh:
+        for lineno, line in enumerate(fh, start=1):
             line = line.strip()
             if not line:
                 continue
             try:
                 parsed = json.loads(line)
             except json.JSONDecodeError:
+                logger.warning(
+                    "malformed record skipped in %s, line %d: not valid JSON",
+                    path,
+                    lineno,
+                    exc_info=True,
+                )
                 continue
-            if isinstance(parsed, dict):
-                records.append(parsed)
+            if not isinstance(parsed, dict):
+                logger.warning(
+                    "malformed record skipped in %s, line %d: expected a JSON "
+                    "object, got %s",
+                    path,
+                    lineno,
+                    type(parsed).__name__,
+                )
+                continue
+            records.append(parsed)
     return records

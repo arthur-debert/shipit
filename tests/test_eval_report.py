@@ -526,6 +526,30 @@ def test_aggregate_without_rounds_path_has_an_empty_review_axis(tmp_path):
     assert report.aggregate(eval_path).review == []
 
 
+def test_read_jsonl_skips_a_malformed_line_loudly(tmp_path, caplog):
+    # RVW03-WS03: the report's reader mirrors the store's — a malformed line is
+    # skipped (one bad write never takes the report down) but WARNS with the
+    # file + 1-based line number, so a corrupted round can never silently read
+    # as "this arm found nothing".
+    import logging
+
+    base = tmp_path / "state"
+    path = store.append_record(
+        _round(variant=_variant(_V1)),
+        _REPO,
+        base_dir=base,
+        kind=store.REVIEW_ROUNDS_KIND,
+    )
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write("{spliced garbage\n")
+    with caplog.at_level(logging.WARNING, logger="shipit.harness"):
+        records = report._read_jsonl(path)
+    assert len(records) == 1
+    warning = "\n".join(r.getMessage() for r in caplog.records)
+    assert str(path) in warning
+    assert "line 2" in warning
+
+
 def test_run_renders_the_review_axis_from_the_same_family_root(tmp_path, monkeypatch):
     base, _, _ = _seed_rounds(tmp_path)
     monkeypatch.setattr(report, "_resolve_repo", lambda start: _REPO)

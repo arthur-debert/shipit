@@ -34,6 +34,7 @@ substrate stays a local file (ADR-0013).
 from __future__ import annotations
 
 import json
+import logging
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -44,6 +45,8 @@ import click
 
 from ... import execrun, identity
 from ...harness.eval import store
+
+logger = logging.getLogger("shipit.harness")
 
 #: The eval-record fields the aggregator groups and measures over (the WS01 record
 #: shape). Quoted in SQL because the JSON keys carry dots (OTel ``gen_ai.*`` /
@@ -367,9 +370,12 @@ def _read_jsonl(path: str | Path | None) -> list[dict]:
 
     Tolerant by design (the stores are local, append-only telemetry): a
     malformed or non-object line is skipped, never an error, so one bad write
-    cannot take the whole report down. The file is STREAMED line-by-line (not
-    ``read_text().splitlines()``) so an unbounded append-only store does not
-    allocate the whole file plus a split-line list at once.
+    cannot take the whole report down — but it is skipped LOUDLY (RVW03-WS03),
+    a warning naming the file and 1-based line number, mirroring
+    :func:`shipit.harness.eval.store.read_records`: a corrupted round must
+    never silently read as "this arm found nothing". The file is STREAMED
+    line-by-line (not ``read_text().splitlines()``) so an unbounded append-only
+    store does not allocate the whole file plus a split-line list at once.
     """
     if path is None:
         return []
@@ -378,15 +384,29 @@ def _read_jsonl(path: str | Path | None) -> list[dict]:
         return []
     records: list[dict] = []
     with target.open(encoding="utf-8") as fh:
-        for line in fh:
+        for lineno, line in enumerate(fh, start=1):
             if not line.strip():
                 continue
             try:
                 parsed = json.loads(line)
             except json.JSONDecodeError:
+                logger.warning(
+                    "malformed record skipped in %s, line %d: not valid JSON",
+                    target,
+                    lineno,
+                    exc_info=True,
+                )
                 continue
-            if isinstance(parsed, dict):
-                records.append(parsed)
+            if not isinstance(parsed, dict):
+                logger.warning(
+                    "malformed record skipped in %s, line %d: expected a JSON "
+                    "object, got %s",
+                    target,
+                    lineno,
+                    type(parsed).__name__,
+                )
+                continue
+            records.append(parsed)
     return records
 
 

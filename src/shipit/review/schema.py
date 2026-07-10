@@ -12,8 +12,11 @@ skipped with reasons — so silence means "clean," not "skipped." The attestatio
 is human-facing, not engine data.
 
 `extract_json` is the three-fallback parse: direct, fenced (```json …```), then a
-greedy `{...}` regex — agents wrap their JSON output inconsistently, so the parser
-is deliberately forgiving.
+BALANCED SCAN over every embedded ``{…}`` object (RVW03-WS03) — agents wrap their
+JSON output inconsistently, so the parser is deliberately forgiving. The scan
+replaced a greedy ``{.*}`` regex whose first-brace-to-last-brace capture broke on
+brace-bearing wrapper prose (a stray braced log line silently cost the round a
+whole dimension pass) and could splice a WRONG object out of two adjacent ones.
 
 `finding_from_dict` is the ONE trust boundary from an unvalidated
 ``REVIEW_SCHEMA`` comment dict to a typed :class:`~shipit.finding.Finding` —
@@ -170,8 +173,10 @@ def extract_json(text: str) -> dict:
     """Parse a JSON object out of an agent's stdout, tolerating wrapping.
 
     Tries, in order: a direct parse of the stripped text; stripping ```json …```
-    code fences; a greedy ``{.*}`` regex. Raises :class:`ValueError` if none
-    yield valid JSON.
+    code fences; a BALANCED SCAN over every embedded object
+    (:func:`_scan_embedded_objects`) that returns the largest one — never the
+    greedy first-brace-to-last-brace splice (RVW03-WS03). Raises
+    :class:`ValueError` if none yield valid JSON.
     """
     text_clean = text.strip()
     try:
@@ -185,11 +190,54 @@ def extract_json(text: str) -> dict:
     except json.JSONDecodeError:
         pass
 
-    match = re.search(r"(\{.*\})", text_clean, re.DOTALL)
-    if match:
-        try:
-            return json.loads(match.group(1))
-        except json.JSONDecodeError:
-            pass
+    best = None
+    for candidate, span in _scan_embedded_objects(text_clean):
+        if best is None or span > best[1]:
+            best = (candidate, span)
+    if best is not None:
+        return best[0]
 
     raise ValueError(f"Could not parse valid JSON from output:\n{text}")
+
+
+def _scan_embedded_objects(text: str) -> list[tuple[dict, int]]:
+    """Every complete JSON OBJECT embedded in ``text``, as ``(object, source
+    length)`` pairs — the balanced-scan fallback behind :func:`extract_json`.
+
+    At each ``{`` the real JSON decoder (:meth:`json.JSONDecoder.raw_decode`)
+    tries to parse ONE complete value starting there — so brace balance,
+    strings, and escapes follow the actual JSON grammar (a ``}`` inside a
+    string literal never closes an object) and a returned candidate is a
+    complete, well-formed object by construction: a mis-spliced object (half of
+    one candidate glued to half of another, the greedy-regex failure mode) is
+    impossible. A ``{`` that starts no valid JSON (brace-bearing prose, an
+    unquoted-key log line, a truncated object) is stepped past — the scan
+    resumes at the first ``{`` AFTER the decode-failure position, because
+    everything up to it was consumed as the valid prefix of the BROKEN object:
+    an interior object of a truncated review must never surface as a standalone
+    candidate (a timed-out review whose complete inner ``summary`` parsed would
+    silently read as a clean, comment-less round — exactly what the upstream
+    timeout-salvage path exists to catch, so truncated-only output still raises
+    there). A ``{`` that DOES parse is consumed whole, so an object's own
+    nested braces are never re-scanned as candidates.
+
+    The caller picks the LARGEST candidate: wrapper prose around a review
+    commonly carries small braced fragments (log lines, inline examples), and
+    the findings object dwarfs them — while first-match would hand back
+    whichever fragment happened to come first.
+    """
+    decoder = json.JSONDecoder()
+    found: list[tuple[dict, int]] = []
+    index = text.find("{")
+    while index != -1:
+        try:
+            candidate, end = decoder.raw_decode(text, index)
+        except json.JSONDecodeError as exc:
+            # Skip the broken object's consumed prefix, not just one brace:
+            # its interior objects are fragments of IT, never candidates.
+            index = text.find("{", max(exc.pos, index + 1))
+            continue
+        if isinstance(candidate, dict):
+            found.append((candidate, end - index))
+        index = text.find("{", end)
+    return found
