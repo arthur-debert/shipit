@@ -17,7 +17,8 @@ The objective is a **convergence curve, not a round-1 score**: cells may run K
 full **Sweeps** over the same range (blind, or informed by prior sweeps'
 findings — an explicit declared mode), and the scorer reports cumulative
 recall, cumulative false positives/precision, token cost, and latency at each
-sweep point. Designs are compared **at equal budget** (recall per token/minute),
+sweep point. Designs are compared **at equal budget** (recall per token and
+recall per minute — two separate normalization views),
 so a configuration that converges by sweep 2 at half the cost shows up as the
 win it is instead of being penalized for surfacing findings "late". Round-1
 exhaustiveness remains the product north star (the incremental-round

@@ -216,7 +216,7 @@ The versioned, in-repo corpus of pinned historical PR ranges and their Ground-tr
 _Avoid_: "test set", "benchmark" as the noun.
 
 **Ground-truth label**:
-One evidenced verdict in the Ground-truth fixture: a finding location, claim, and severity that is real or not-real, carrying provenance — a fix commit, a confirmed thread, or a banked Adjudication.
+One evidenced verdict in the Ground-truth fixture: a finding (its location, claim, and severity) judged real or not-real, carrying provenance — a fix commit, a confirmed thread, or a banked Adjudication.
 _Avoid_: labels admitted on opinion without provenance.
 
 **Adjudication**:
