@@ -178,8 +178,8 @@ predictable cost:
   adversarially verifies with tier-appropriate evidence (quoted evidence
   always; a concrete failure scenario for major-or-worse, a clear rationale
   for minor/nit; a finding is dropped only when adversarial verification
-  actively refutes it — never on mere uncertainty — and never downgraded, F2
-  #665), normalizes severity, orders the result, assigns dispositions.
+  actively refutes it — never on mere uncertainty — and never downgraded;
+  F2 #665), normalizes severity, orders the result, assigns dispositions.
   It never originates findings. The reviewer's own bot posts the calibrated
   result; funnel/reconcile semantics are unchanged.
 - **Incremental rounds** (ADR-0045): rounds after the first review
