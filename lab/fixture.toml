@@ -4,7 +4,7 @@
 # hand comments do not survive a save.
 
 schema = 1
-version = 36
+version = 37
 
 [[prs]]
 id = "core-440"
@@ -137,6 +137,7 @@ severity = "minor"
 verdict = "real"
 confirmed = true
 claim = "the gpu: None docstring claims the field is None only on headless builds, but software adapters make it Some on headless too"
+aliases = ["With the hardware-require flag unset, software adapters on headless CI still yield a live session GPU, contradicting the field documentation that None means no GPU available on headless runners."]
 [labels.provenance]
 kind = "fix-commit"
 ref = "f211ab3"
@@ -643,7 +644,7 @@ severity = "major"
 verdict = "real"
 confirmed = true
 claim = "the GPU activation test asserts only frame-vs-CPU-twin closeness and gpu.is_none(), so a silent CPU fallback in eval still passes — live GPU execution is unguarded"
-aliases = ["the test is named as the session GPU activation gate but its assertions would still pass if the evaluator stopped passing env gpu and the whole render silently used the CPU path, since CPU fallback produces the same dimensions, close pixels, and a non-uniform frame"]
+aliases = ["the test is named as the session GPU activation gate but its assertions would still pass if the evaluator stopped passing env gpu and the whole render silently used the CPU path, since CPU fallback produces the same dimensions, close pixels, and a non-uniform frame", "The live-GPU session test only checks a skip when gpu is None, a bounded GPU-vs-CPU-twin difference, and non-uniform output, so a silent CPU fallback yields a diff of zero and still passes — the activation test cannot distinguish live GPU from CPU fallback."]
 [labels.provenance]
 kind = "adjudication"
 ref = "rvw03-first-cells-2026-07-10"
@@ -657,7 +658,7 @@ severity = "major"
 verdict = "real"
 confirmed = true
 claim = "GpuContext::readback maps device-loss/map failure to a zero-filled buffer that transfer/eval then cache as a successful render, so a device loss yields a silently memoized black frame"
-aliases = ["GpuContext::readback can still fail after a successful GPU fill — the padded staging buffer can exceed max_buffer_size making create_buffer a wgpu validation failure, and map failures become an all-zero CPU buffer that is then cached and presented."]
+aliases = ["GpuContext::readback can still fail after a successful GPU fill — the padded staging buffer can exceed max_buffer_size making create_buffer a wgpu validation failure, and map failures become an all-zero CPU buffer that is then cached and presented.", "The post-fill readback is not preflighted against max_buffer_size: a shape that fits the texture-pair budget can exceed the padded staging-buffer limit, turning a successful GPU fill into a wgpu validation panic instead of the CPU fallback, on both the whole-frame and region sites."]
 [labels.provenance]
 kind = "adjudication"
 ref = "rvw03-first-cells-2026-07-10"
@@ -698,7 +699,7 @@ severity = "minor"
 verdict = "real"
 confirmed = true
 claim = "the region/viewport streaming path now receives env.gpu and reads back per fill but no test exercises it with a live device, leaving the region GPU path uncovered"
-aliases = ["The tiled/region evaluator passes the live GPU context and immediately reads back GPU-resident region outputs, but added coverage only goes through render_display/whole-frame eval_target — no GPU-eligible node is exercised via render_region, next_tile, or banded export."]
+aliases = ["The tiled/region evaluator passes the live GPU context and immediately reads back GPU-resident region outputs, but added coverage only goes through render_display/whole-frame eval_target — no GPU-eligible node is exercised via render_region, next_tile, or banded export.", "The region evaluator threads env.gpu and reads back per fill, but only whole-frame render_display has a live-device test — no GPU-eligible node ever executes via render_region, next_tile, or banded export."]
 [labels.provenance]
 kind = "adjudication"
 ref = "rvw03-first-cells-2026-07-10"
@@ -712,7 +713,7 @@ severity = "nit"
 verdict = "real"
 confirmed = true
 claim = "gpu_compare duplicates the private SESSION_VRAM_BUDGET_BYTES as a local constant instead of sharing it, so the bench silently diverges if the session budget changes"
-aliases = ["The benchmark hard-codes the session VRAM budget while claiming it matches graph_session::SESSION_VRAM_BUDGET_BYTES, a private constant hard-coded separately, so tuning the live session budget silently makes the go/no-go benchmark measure a different fallback envelope than production."]
+aliases = ["The benchmark hard-codes the session VRAM budget while claiming it matches graph_session::SESSION_VRAM_BUDGET_BYTES, a private constant hard-coded separately, so tuning the live session budget silently makes the go/no-go benchmark measure a different fallback envelope than production.", "BUDGET_BYTES re-declares the private session VRAM budget constant with no compiler-enforced link to graph_session, so tuning the live budget silently diverges the benchmark."]
 [labels.provenance]
 kind = "adjudication"
 ref = "rvw03-first-cells-2026-07-10"
@@ -748,12 +749,12 @@ ref = "rvw03-first-cells-2026-07-10"
 id = "core-X1"
 pr = "core-440"
 file = "phos-editor/src/dag/eval.rs"
-lines = [1286, 1300]
+lines = [1285, 1300]
 severity = "major"
 verdict = "not-real"
 confirmed = true
 claim = "cache keys omitting GPU mode cannot return wrong pixels because every fill is read back to CPU before caching, so cached output is mode-independent"
-aliases = ["node output depends on EvalEnv gpu but neither the working memo nor the content cache keys include execution mode; reusing one Evaluator across CPU and GPU environments can return a memoized CPU render for a GPU request since hash_node salts params but not backend", "node output depends on EvalEnv gpu but the working memo and content cache keys omit execution mode and hash_node salts params, color authority, sources, and class maps but not backend, so ΔE-bounded GPU output and bit-exact CPU output can alias in caches"]
+aliases = ["node output depends on EvalEnv gpu but neither the working memo nor the content cache keys include execution mode; reusing one Evaluator across CPU and GPU environments can return a memoized CPU render for a GPU request since hash_node salts params but not backend", "node output depends on EvalEnv gpu but the working memo and content cache keys omit execution mode and hash_node salts params, color authority, sources, and class maps but not backend, so ΔE-bounded GPU output and bit-exact CPU output can alias in caches", "Forwarding env.gpu makes node output depend on the backend while the working memo and content cache are keyed by graph content only, so a reused Evaluator can serve GPU-approximated pixels for a CPU request or vice versa."]
 [labels.provenance]
 kind = "adjudication"
 ref = "rvw03-first-cells-2026-07-10"
@@ -794,7 +795,7 @@ severity = "minor"
 verdict = "real"
 confirmed = true
 claim = "the 64x64 coarse fixture yields a single level-1 cell so level0Region delta mapping is never exercised and tests assert only streamed counts, letting an unmapped fetch regress green"
-aliases = ["the wasm coarse-level coverage only repeats a whole-source render until every cell is resident so the pure-cache-hit early return never exercises the partial-delta path where seed.plan.fetch is mapped back through level0Region", "the new wasm coverage still uses the 64x64 fixture so the coarse-level case is a single-cell whole-region repeat and the scheduler level-0 to level-space delta mapping for a pan with newly exposed cells is never exercised", "The wasm coarse-level test repeats the exact same region so the second render is an all-resident hit and the scheduler path that maps a non-resident delta back to level 0 never runs.", "The wasm e2e exercises the coarse level only through the all-resident repeat path driving seed.plan.fetch === null, while the narrowed-delta coarse pan via level0Region is covered only on the native lane.", "The wasm coarse test uses the 64x64 fixture and repeats the whole-source region, which at scale 0.5 is a single level-1 cell, so the changed PipelineScheduler partial coarse-delta request mapping is never exercised."]
+aliases = ["the wasm coarse-level coverage only repeats a whole-source render until every cell is resident so the pure-cache-hit early return never exercises the partial-delta path where seed.plan.fetch is mapped back through level0Region", "the new wasm coverage still uses the 64x64 fixture so the coarse-level case is a single-cell whole-region repeat and the scheduler level-0 to level-space delta mapping for a pan with newly exposed cells is never exercised", "The wasm coarse-level test repeats the exact same region so the second render is an all-resident hit and the scheduler path that maps a non-resident delta back to level 0 never runs.", "The wasm e2e exercises the coarse level only through the all-resident repeat path driving seed.plan.fetch === null, while the narrowed-delta coarse pan via level0Region is covered only on the native lane.", "The wasm coarse test uses the 64x64 fixture and repeats the whole-source region, which at scale 0.5 is a single level-1 cell, so the changed PipelineScheduler partial coarse-delta request mapping is never exercised.", "The coarse cache-hit coverage discards the rendered frames and asserts only reused, fetched, and streamed counters — never digest or dimension equality against the cold coarse render — so wrong-pixel level-space seeding still passes."]
 [labels.provenance]
 kind = "adjudication"
 ref = "rvw03-first-cells-2026-07-10"
@@ -808,7 +809,7 @@ severity = "minor"
 verdict = "real"
 confirmed = true
 claim = "the off-screen test drives a hand-built 0x0 region through the low-level probe, bypassing the changed visibleRegion and present-skip branches, so neither diff-changed path is under test"
-aliases = ["the off-screen E2E assertion is backed by a synthetic probe calling store.renderRegion with an explicit zero region, proving only the transport short-circuit and not the changed visibleRegion and requestViewportRender empty-frame wiring during an actual pan"]
+aliases = ["the off-screen E2E assertion is backed by a synthetic probe calling store.renderRegion with an explicit zero region, proving only the transport short-circuit and not the changed visibleRegion and requestViewportRender empty-frame wiring during an actual pan", "The off-screen check drives a hand-built zero-area region straight through store.renderRegion, so the real visibleRegion to requestViewportRender to present-skip wiring is never exercised by an actual pan."]
 [labels.provenance]
 kind = "adjudication"
 ref = "rvw03-first-cells-2026-07-10"
@@ -875,7 +876,7 @@ severity = "minor"
 verdict = "real"
 confirmed = true
 claim = "the lex#814 regressions drive only the private matcher with synthetic tokens and no end-to-end test asserts a colon-terminated paragraph survives lex-parse-format"
-aliases = ["the regression for lex#814 is only exercised by calling the private matcher with hand-built LineType tokens, proving one synthetic shape returns None but not protecting the user-visible parser and formatter scenario of a colon-terminated paragraph before a verbatim or table block", "The new verbatim_anchor_tests exercise only GrammarMatcher::match_verbatim_block on hand-built LineContainers, do not prove the full parser materializes the first subject as a paragraph preserving its text, and omit the table half of the lex#814 fix."]
+aliases = ["the regression for lex#814 is only exercised by calling the private matcher with hand-built LineType tokens, proving one synthetic shape returns None but not protecting the user-visible parser and formatter scenario of a colon-terminated paragraph before a verbatim or table block", "The new verbatim_anchor_tests exercise only GrammarMatcher::match_verbatim_block on hand-built LineContainers, do not prove the full parser materializes the first subject as a paragraph preserving its text, and omit the table half of the lex#814 fix.", "The focused verbatim-anchor regression proves only the verbatim shape on synthetic tokens; the table half of the lex#814 fix has no regression and could re-absorb without failing."]
 [labels.provenance]
 kind = "adjudication"
 ref = "rvw03-first-cells-2026-07-10"
@@ -884,11 +885,12 @@ ref = "rvw03-first-cells-2026-07-10"
 id = "lex-G7"
 pr = "lex-820"
 file = "crates/lex-babel/tests/lex_separation/matrix.rs"
-lines = [330, 365]
+lines = [327, 365]
 severity = "minor"
 verdict = "real"
 confirmed = true
 claim = "the Definition-to-Annotation shape assertion checks only that a trailing Paragraph exists and never its text, so a dropped annotation body still passes despite the nothing-is-lost comment"
+aliases = ["The Definition-to-Annotation arm asserts body_kinds and validates the verbatim but never inspects the trailing paragraph carrying the annotation body, so dropped or changed annotation text still passes."]
 [labels.provenance]
 kind = "adjudication"
 ref = "rvw03-first-cells-2026-07-10"
@@ -969,6 +971,7 @@ severity = "nit"
 verdict = "real"
 confirmed = true
 claim = "The transfer module doc still promises GPU-to-GPU edges keep tiles resident with no readback, but the WS01a evaluator reads back to CPU after every fill, so the doc lacks the serial-readback interim note and misleads readers about the live contract."
+aliases = ["The transfer module still documents that consecutive same-backend nodes keep tiles resident and a GPU-to-GPU edge does no readback, though the evaluator now forces a CPU readback after every fill."]
 [labels.provenance]
 kind = "adjudication"
 ref = "v35-run triage 2026-07-10 (VERDICT-SHEET-review-lab)"
@@ -990,12 +993,12 @@ ref = "v35-run triage 2026-07-10 (VERDICT-SHEET-review-lab)"
 id = "core-X3"
 pr = "core-440"
 file = "phos-editor/src/dag/eval.rs"
-lines = [725, 819]
+lines = [725, 970]
 severity = "minor"
 verdict = "not-real"
 confirmed = true
 claim = "Claim that the working memo and content-cache keys must include the GPU/CPU execution mode: debunked — every GPU fill is read back to CPU before caching and no caller mixes backends across one evaluator's caches (GraphSession fixes gpu at construction; the bench uses a fresh Evaluator per sample)."
-aliases = ["A reused Evaluator can render a GPU-eligible node with gpu Some, store the read-back result under the normal content key, and a later CPU-only EvalEnv hits the same memo or content entry and returns the GPU approximation instead of running the CPU path."]
+aliases = ["A reused Evaluator can render a GPU-eligible node with gpu Some, store the read-back result under the normal content key, and a later CPU-only EvalEnv hits the same memo or content entry and returns the GPU approximation instead of running the CPU path.", "The content hash folds node type, params, colour authority and inputs but not the execution backend, so a memo or content hit can serve pixels computed under a different env.gpu than the current call supplies."]
 [labels.provenance]
 kind = "adjudication"
 ref = "v35-run triage 2026-07-10 (VERDICT-SHEET-review-lab)"
@@ -1030,11 +1033,12 @@ ref = "v35-run triage 2026-07-10 (VERDICT-SHEET-review-lab)"
 id = "app-G11"
 pr = "app-391"
 file = "src/lib/editor/pipeline-driver-tauri.ts"
-lines = [940, 946]
+lines = [940, 975]
 severity = "minor"
 verdict = "real"
 confirmed = true
 claim = "The all-resident/empty seed short-circuit returns assembler.frame() without re-running the stale-session guard after the awaited dynamic Tauri import, so a session replacement during the import lets a warm render settle against the replaced session — the normal path checks after await done."
+aliases = ["The empty and all-resident seed short-circuits return assembler.frame() without re-running the stale-session initId guard after the awaited dynamic import, unlike the normal path which re-checks after await done."]
 [labels.provenance]
 kind = "adjudication"
 ref = "v35-run triage 2026-07-10 (VERDICT-SHEET-review-lab)"
@@ -1075,7 +1079,7 @@ severity = "minor"
 verdict = "real"
 confirmed = true
 claim = "test_leading_annotation_above_session_attaches_to_root asserts only annotation counts and an empty session, never the authored labels, values, or order, so a regression that duplicates, drops, or strips annotation content still passes."
-aliases = ["The leading-annotation test validates the new next_is_session branch only at the attachment stage, asserting count and empty session, without checking the exact labels and inline values survive or that format-then-reparse converges."]
+aliases = ["The leading-annotation test validates the new next_is_session branch only at the attachment stage, asserting count and empty session, without checking the exact labels and inline values survive or that format-then-reparse converges.", "The leading-annotation regression covers the attachment stage in isolation and asserts counts only, so a serialization that reparses the annotations back onto the session or changes their content while preserving the count still passes."]
 [labels.provenance]
 kind = "adjudication"
 ref = "v35-run triage 2026-07-10 (VERDICT-SHEET-review-lab)"
@@ -1141,6 +1145,290 @@ severity = "major"
 verdict = "not-real"
 confirmed = true
 claim = "Claim that the Definition-to-Table matrix assertion checks only body_kinds and not the table rows or definition body: debunked — assert_definition_hijack_shape's Table arm asserts body_kinds, table.subject, and empty header/body rows, pinning exactly the lex#819 loss shape."
+aliases = ["Claim that the broad Definition-to-Table matrix assertion checks only body_kinds and not the definition body or table rows — the Table arm asserts body_kinds, the subject, and empty header and body rows."]
 [labels.provenance]
 kind = "adjudication"
 ref = "v35-run triage 2026-07-10 (VERDICT-SHEET-review-lab)"
+
+[[labels]]
+id = "core-G21"
+pr = "core-440"
+file = "phos-editor/src/graph_session.rs"
+lines = [860, 950]
+severity = "minor"
+verdict = "real"
+confirmed = true
+claim = "Every session constructor (new, with_actor, load, from_store) eagerly runs init_session_gpu — a synchronous adapter request and device creation — even for metadata-only sessions and tests that never render; the single-device-per-session invariant does not require eager construction."
+[labels.provenance]
+kind = "adjudication"
+ref = "sevtiers-run triage 2026-07-11 (VERDICT-SHEET-2)"
+
+[[labels]]
+id = "core-G22"
+pr = "core-440"
+file = "phos-bench/src/bin/gpu_compare.rs"
+lines = [20, 30]
+severity = "nit"
+verdict = "real"
+confirmed = true
+claim = "The benchmark's headline doc bullet says the ODT fill is isolated with a warm memo and targeted invalidation, while its own Cache-free isolation section says cold-frame differencing with a fresh Evaluator per sample — the file contradicts itself about its measurement method."
+[labels.provenance]
+kind = "adjudication"
+ref = "sevtiers-run triage 2026-07-11 (VERDICT-SHEET-2)"
+
+[[labels]]
+id = "core-G23"
+pr = "core-440"
+file = "phos-bench/src/bin/gpu_compare.rs"
+severity = "nit"
+verdict = "real"
+confirmed = true
+claim = "The file mixes the hyphenated spelling fall-back with the code spelling fallback and CPU-fallback used elsewhere in the same file."
+[labels.provenance]
+kind = "adjudication"
+ref = "sevtiers-run triage 2026-07-11 (VERDICT-SHEET-2)"
+
+[[labels]]
+id = "core-G24"
+pr = "core-440"
+file = "phos-bench/src/scenarios.rs"
+lines = [158, 166]
+severity = "nit"
+verdict = "real"
+confirmed = true
+claim = "A comment claims the GPU-vs-CPU comparison supplies a live context through this Engine's gpu field, but gpu_compare defines its own private Engine and this one is only ever built with gpu None — the described wiring does not exist."
+[labels.provenance]
+kind = "adjudication"
+ref = "sevtiers-run triage 2026-07-11 (VERDICT-SHEET-2)"
+
+[[labels]]
+id = "core-G25"
+pr = "core-440"
+file = "phos-editor/src/gpu.rs"
+lines = [15, 25]
+severity = "nit"
+verdict = "real"
+confirmed = true
+claim = "The gpu module doc still promises transfers happen only at a genuine backend flip with no readback between two GPU nodes, stale for the same WS01a serial-readback reason as the transfer and view_transform docs."
+[labels.provenance]
+kind = "adjudication"
+ref = "sevtiers-run triage 2026-07-11 (VERDICT-SHEET-2)"
+
+[[labels]]
+id = "core-G26"
+pr = "core-440"
+file = "phos-editor/src/graph_session.rs"
+lines = [2940, 2960]
+severity = "minor"
+verdict = "real"
+confirmed = true
+claim = "The session region entry points thread the live GPU into eval_region with readback before caching and tiling, but no session-level test drives render_region, next_tile, or banded export through a GPU-eligible node — only whole-frame render_display is covered."
+[labels.provenance]
+kind = "adjudication"
+ref = "sevtiers-run triage 2026-07-11 (VERDICT-SHEET-2)"
+
+[[labels]]
+id = "app-G13"
+pr = "app-391"
+file = "src/lib/editor/Editor.svelte"
+lines = [2060, 2072]
+severity = "nit"
+verdict = "real"
+confirmed = true
+claim = "Probe locals coarseA_l0 and coarseB_l0 use a snake_case _l0 suffix amid otherwise camelCase TypeScript locals; they are not wire-format fields."
+[labels.provenance]
+kind = "adjudication"
+ref = "sevtiers-run triage 2026-07-11 (VERDICT-SHEET-2)"
+
+[[labels]]
+id = "app-G14"
+pr = "app-391"
+file = "tests/e2e-native/specs/viewer-pan-cache.spec.ts"
+lines = [40, 145]
+severity = "minor"
+verdict = "real"
+confirmed = true
+claim = "The native coarse coverage drives the synthetic renderRegionPanProbe through store.renderRegion from the test bridge, so the live requestViewportRender branch — the removed level-0 gate and the level>0 cache attach — is never exercised by a real viewport pan."
+[labels.provenance]
+kind = "adjudication"
+ref = "sevtiers-run triage 2026-07-11 (VERDICT-SHEET-2)"
+
+[[labels]]
+id = "app-G15"
+pr = "app-391"
+file = "src/lib/editor/tile-cache.ts"
+severity = "nit"
+verdict = "real"
+confirmed = true
+claim = "The module contract and helper docs still describe the tile grid, TILE_SIZE, and seeding in level-0 image coordinates and call level 0 the only bounded-region case, stale now that the coarse extension keys and narrows in the selected level's space."
+[labels.provenance]
+kind = "adjudication"
+ref = "sevtiers-run triage 2026-07-11 (VERDICT-SHEET-2)"
+
+[[labels]]
+id = "lex-G14"
+pr = "lex-820"
+file = "crates/lex-core/src/lex/anchoring/lines.rs"
+lines = [95, 110]
+severity = "major"
+verdict = "real"
+confirmed = true
+claim = "The head-line pre-pass strips a trailing colon and records a Subject anchor for any non-list-item colon-ended line, without mirroring the lex#814 parser disambiguation that keeps a colon paragraph before a verbatim or table as a Paragraph — anchoring records a Subject where the AST produces a Paragraph, so references and parser shape diverge."
+[labels.provenance]
+kind = "adjudication"
+ref = "sevtiers-run triage 2026-07-11 (VERDICT-SHEET-2)"
+
+[[labels]]
+id = "lex-G15"
+pr = "lex-820"
+file = "crates/lex-babel/tests/lex_separation/matrix.rs"
+lines = [359, 402]
+severity = "major"
+verdict = "real"
+confirmed = true
+claim = "Definition immediately before a Table merges into a degenerate table that drops both the definition body and every table row — real content loss the matrix arm itself pins by asserting the subject plus empty header and body rows (the lex#819 defect, characterized but unfixed)."
+[labels.provenance]
+kind = "adjudication"
+ref = "sevtiers-run triage 2026-07-11 (VERDICT-SHEET-2)"
+
+[[labels]]
+id = "lex-G16"
+pr = "lex-820"
+file = "crates/lex-babel/tests/markdown/faithfulness_fixtures.rs"
+lines = [24, 35]
+severity = "minor"
+verdict = "real"
+confirmed = true
+claim = "The module-doc bullet says the lex#790 colon-paragraph absorption still blocks the CommonMark, comrak, and kitchensink fixtures, while the known-failure block in the same file says that absorption is fixed by lex#814 and retags those fixtures to other residuals — the file tells two contradictory stories."
+[labels.provenance]
+kind = "adjudication"
+ref = "sevtiers-run triage 2026-07-11 (VERDICT-SHEET-2)"
+
+[[labels]]
+id = "lex-G17"
+pr = "lex-820"
+file = "crates/lex-babel/tests/lex_separation/matrix.rs"
+lines = [263, 315]
+severity = "major"
+verdict = "real"
+confirmed = true
+claim = "verbatim_group_text keeps only VerbatimLine children via filter_map, so the Definition-to-Verbatim positive-shape assertion still passes if a regression injects extra non-verbatim children into the group — the guard cannot see them."
+[labels.provenance]
+kind = "adjudication"
+ref = "sevtiers-run triage 2026-07-11 (VERDICT-SHEET-2)"
+
+[[labels]]
+id = "lex-G18"
+pr = "lex-820"
+file = "crates/lex-core/src/lex/assembling/stages/attach_annotations.rs"
+lines = [170, 176]
+severity = "nit"
+verdict = "real"
+confirmed = true
+claim = "A production comment bakes review-tool attribution (\"gemini, #816\") into the source; repo convention keeps the invariant and drops the process name."
+[labels.provenance]
+kind = "adjudication"
+ref = "sevtiers-run triage 2026-07-11 (VERDICT-SHEET-2)"
+
+[[labels]]
+id = "lex-G19"
+pr = "lex-820"
+file = "crates/lex-babel/tests/lex_separation/matrix.rs"
+severity = "nit"
+verdict = "real"
+confirmed = true
+claim = "Test docs bake review-tool attribution (\"the weakness codex flagged\") into assert_definition_hijack_shape's comments instead of stating the invariant."
+[labels.provenance]
+kind = "adjudication"
+ref = "sevtiers-run triage 2026-07-11 (VERDICT-SHEET-2)"
+
+[[labels]]
+id = "lex-G20"
+pr = "lex-820"
+file = "crates/lex-babel/tests/lex_separation/matrix.rs"
+lines = [250, 262]
+severity = "nit"
+verdict = "real"
+confirmed = true
+claim = "is_known_hijack's name has drifted: Definition-to-Verbatim and Annotation merges are now documented as working as designed, leaving only Table a real hijack."
+[labels.provenance]
+kind = "adjudication"
+ref = "sevtiers-run triage 2026-07-11 (VERDICT-SHEET-2)"
+
+[[labels]]
+id = "lex-G21"
+pr = "lex-820"
+file = "crates/lex-babel/tests/lex_separation/matrix.rs"
+lines = [745, 755]
+severity = "nit"
+verdict = "real"
+confirmed = true
+claim = "The proptest comment lists the skipped hijack adjacencies as Definition-to-Verbatim and Table, omitting Definition-to-Annotation which is_known_hijack also includes."
+[labels.provenance]
+kind = "adjudication"
+ref = "sevtiers-run triage 2026-07-11 (VERDICT-SHEET-2)"
+
+[[labels]]
+id = "lex-G22"
+pr = "lex-820"
+file = "crates/lex-babel/tests/lex_separation/matrix.rs"
+lines = [630, 640]
+severity = "nit"
+verdict = "real"
+confirmed = true
+claim = "The faithful-blocks loop comment says every block type except Verbatim and Table, but the loop also excludes Annotation — the comment omits one exclusion."
+[labels.provenance]
+kind = "adjudication"
+ref = "sevtiers-run triage 2026-07-11 (VERDICT-SHEET-2)"
+
+[[labels]]
+id = "lex-G23"
+pr = "lex-820"
+file = "crates/lex-core/src/lex/assembling/stages/attach_annotations/distance.rs"
+lines = [140, 155]
+severity = "minor"
+verdict = "real"
+confirmed = true
+claim = "The document-root Rule-1 shortcut (previous is none plus blank-after or next-is-session) also captures annotations authored below a document title and directly above the first session, forcing them onto the document root — the lex-G5 defect at its decide_attachment site."
+[labels.provenance]
+kind = "adjudication"
+ref = "sevtiers-run triage 2026-07-11 (VERDICT-SHEET-2)"
+
+[[labels]]
+id = "core-X4"
+pr = "core-440"
+file = "phos-editor/src/graph_session.rs"
+lines = [2030, 2160]
+severity = "major"
+verdict = "not-real"
+confirmed = true
+claim = "Claim that display_gpu_program breaks the web/native parity contract because eval_target now threads the session GPU into the upstream chain: debunked — its only production caller is the wasm path where the session GPU is always None, and the native callers are bridge tests whose graphs have no GPU-eligible upstream, so the promised CPU materialization is never violated by a real caller."
+[labels.provenance]
+kind = "adjudication"
+ref = "sevtiers-run triage 2026-07-11 (VERDICT-SHEET-2)"
+
+[[labels]]
+id = "core-X5"
+pr = "core-440"
+file = "phos-editor/src/graph_session.rs"
+lines = [778, 800]
+severity = "nit"
+verdict = "not-real"
+confirmed = true
+claim = "Claims that the session-GPU field documentation has formatting defects — a hard wrap splitting words or over-aggressive emphasis: the text is single-line and the capitalized emphasis is the intentional single-device invariant."
+[labels.provenance]
+kind = "adjudication"
+ref = "sevtiers-run triage 2026-07-11 (VERDICT-SHEET-2)"
+
+[[labels]]
+id = "app-X1"
+pr = "app-391"
+file = "src/lib/editor/Editor.svelte"
+lines = [1955, 1970]
+severity = "nit"
+verdict = "not-real"
+confirmed = true
+claim = "Claim that the off-screen renderRegion call's single-line layout is inconsistent with the wrapped coarse calls: the layout is Prettier-canonical width-driven wrapping enforced by the same hooks CI runs; a manual re-wrap would be reverted."
+[labels.provenance]
+kind = "adjudication"
+ref = "sevtiers-run triage 2026-07-11 (VERDICT-SHEET-2)"
