@@ -478,6 +478,7 @@ def run_calibrator(
     cwd: str,
     launcher: launch.Runner | None = None,
     artifacts: RunArtifacts | None = None,
+    correlation: Mapping[str, object] | None = None,
 ) -> tuple[CalibrationResult, str, str]:
     """Launch the calibrator over ``union`` in the shared Tree at ``cwd`` and
     return ``(result, run_id, task_text)``.
@@ -495,6 +496,11 @@ def run_calibrator(
     (exit code, duration, timed-out flag, and — once unwrapped — the true run
     id) after, on every path — so a calibrator failure (previously only
     ``str(exc)``) leaves its full raw output inspectable on disk.
+
+    ``correlation`` (RVW03-WS02) is the fan-out's per-pass log-correlation extras
+    (``reviewer``/``round_id``/the stable surrogate ``run_id`` = ``calibrator``);
+    the raw-output DEBUG record carries them so ``shipit logs --run calibrator``
+    can slice the judge's trail alongside the round's progress events.
 
     Raises :class:`~shipit.review.backends.BackendUnavailable` (CLI missing),
     :class:`~shipit.review.backends.BackendError` (a launch-seam timeout / a
@@ -565,14 +571,23 @@ def run_calibrator(
         pr_number,
         len(result.stdout or ""),
         result.stdout or "",
-        extra={"pr": pr_number},
+        extra={**dict(correlation or {}), "pr": pr_number},
     )
     if result.returncode != 0:
         detail = (result.stderr or "").strip() or (result.stdout or "").strip()
-        where = f" (full raw output at {sink.dir})" if sink.dir is not None else ""
+        if sink.dir is not None:
+            # LOCAL breadcrumb to the full raw on disk; the absolute path stays
+            # OUT of the BackendError message, which the service surfaces in the
+            # GitHub-facing funnel check summary (no user-home / state leak).
+            logger.warning(
+                "the calibrator (%s) exited %d — full raw output at %s",
+                config.backend,
+                result.returncode,
+                sink.dir,
+            )
         raise BackendError(
             f"the calibrator ({config.backend}) exited {result.returncode}: "
-            f"{detail[:500]}{where}",
+            f"{detail[:500]}",
             raw=f"{result.stdout}\n{result.stderr}".strip(),
         )
     payload, run_id = _unwrap_output(result.stdout or "", backend=config.backend)

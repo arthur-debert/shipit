@@ -150,10 +150,18 @@ def _seams(monkeypatch):
     monkeypatch.setattr(fanout.producer, "run_tree_review", fake_run_tree_review)
 
     def fake_run_calibrator(
-        config, union, *, pr_number, cwd, launcher=None, artifacts=None
+        config,
+        union,
+        *,
+        pr_number,
+        cwd,
+        launcher=None,
+        artifacts=None,
+        correlation=None,
     ):
         capture["union"] = union
         capture["calibrator_artifacts"] = artifacts
+        capture["calibrator_correlation"] = correlation
         assert cwd == "/tree"
         return capture["result"], "cal-run-id", "calibrator task"
 
@@ -298,19 +306,35 @@ def test_single_pass_failure_degrades_but_the_round_continues(_seams):
     assert "codex exited 1" in failed["detail"]
 
 
-def test_all_passes_failing_fails_the_round(_seams):
+def test_all_passes_failing_fails_the_round(_seams, _tmp_state_root, caplog):
+    import json as _json
+    import logging as _logging
+
     from shipit.agent import backend as agent_backend
 
     _seams["reviews"] = {
         "correctness": RuntimeError("boom a"),
         "test-quality": RuntimeError("boom b"),
     }
+    caplog.set_level(_logging.INFO, logger="shipit.review")
     with pytest.raises(RuntimeError, match="all 2 dimension passes failed"):
         fanout.run_fanout_review(
             agent_backend.CODEX,
             _ctx(),
             dimensions=["correctness", "test-quality"],
         )
+    # The fatal path returns no FanoutOutcome, so the ONLY witness of the failed
+    # passes is the state-root + log side effects — assert they survive the
+    # raise: each failed pass wrote a bundle (meta carrying its failed outcome +
+    # full error) and emitted its launched + settled events.
+    repo_root = _tmp_state_root / "review-artifacts" / "owner" / "repo"
+    metas = [_json.loads(p.read_text()) for p in repo_root.glob("*/*/meta.json")]
+    assert len(metas) == 2
+    assert {m["outcome"] for m in metas} == {"failed"}
+    assert {m["error"] for m in metas} == {"boom a", "boom b"}
+    names = _event_names(caplog)
+    assert names.count("review.pass.launched") == 2
+    assert names.count("review.pass.settled") == 2
 
 
 def test_calibrator_failure_propagates_and_no_union_is_posted(monkeypatch, _seams):
@@ -326,7 +350,16 @@ def test_calibrator_failure_propagates_and_no_union_is_posted(monkeypatch, _seam
         "test-quality": _pass_review([]),
     }
 
-    def boom(config, union, *, pr_number, cwd, launcher=None, artifacts=None):
+    def boom(
+        config,
+        union,
+        *,
+        pr_number,
+        cwd,
+        launcher=None,
+        artifacts=None,
+        correlation=None,
+    ):
         raise CalibrationContractError("calibrator output missing candidate id 0")
 
     monkeypatch.setattr(fanout, "run_calibrator", boom)
@@ -919,6 +952,123 @@ def test_calibrator_gets_its_own_bundle_and_run_entry_artifacts(
     # prompt/streams at the launch seam).
     assert _seams["calibrator_artifacts"] is not None
     assert str(_seams["calibrator_artifacts"].dir) == cal["artifacts"]
+
+
+def test_calibrator_progress_events_carry_the_stable_surrogate_run_id(
+    _seams, _tmp_state_root, caplog
+):
+    """The one judge per round has no true run id until AFTER it launches (and
+    none at all on a pre-id failure), so its launch + settle events and its
+    raw-output log correlate by the STABLE surrogate `run_id=calibrator` (the
+    fixed bundle name) — `shipit logs --run calibrator` slices its whole trail.
+    The round-level completion + disposition events carry `round_id`/`run_id`
+    too, so no round-level record falls outside the `--round`/`--run` filters."""
+    import logging as _logging
+
+    from shipit.agent import backend as agent_backend
+
+    _seams["reviews"] = {
+        "correctness": _pass_review(
+            [
+                _comment("real bug", severity="major"),
+                _comment("out of scope", severity="minor", line=9),
+            ]
+        )
+    }
+    _seams["result"] = CalibrationResult(
+        overall_feedback="v",
+        entries=(
+            _calibrated(0, _finding(Severity.MAJOR, "real bug")),
+            _calibrated(
+                1,
+                _finding(Severity.MINOR, "out of scope", file="a.py"),
+                Disposition.OUT_OF_SCOPE,
+            ),
+        ),
+    )
+    caplog.set_level(_logging.INFO, logger="shipit.review")
+    outcome = fanout.run_fanout_review(
+        agent_backend.CODEX, _ctx(), dimensions=["correctness"], calibrator=_CAL
+    )
+
+    # The correlation extras threaded into run_calibrator (for its DEBUG raw log).
+    corr = _seams["calibrator_correlation"]
+    assert corr["run_id"] == "calibrator"
+    assert corr["round_id"] == outcome.round_id
+    assert corr["dimension"] == "calibrator"
+
+    by_event: dict[str, list] = {}
+    for r in caplog.records:
+        name = getattr(r, "_event", None)
+        if name is not None:
+            by_event.setdefault(name, []).append(r)
+
+    # Both calibrator progress events correlate by the surrogate run id.
+    cal_launched = [
+        r for r in by_event["review.pass.launched"] if r.dimension == "calibrator"
+    ]
+    cal_settled = [
+        r for r in by_event["review.pass.settled"] if r.dimension == "calibrator"
+    ]
+    assert len(cal_launched) == 1 and len(cal_settled) == 1
+    assert cal_launched[0].run_id == "calibrator"
+    assert cal_settled[0].run_id == "calibrator"
+    assert cal_settled[0].round_id == outcome.round_id
+
+    # The round completion event is round-correlated.
+    [completed] = by_event["review.calibrated"]
+    assert completed.round_id == outcome.round_id
+
+    # The routed-out finding's disposition event traces to its round AND its
+    # originating pass run.
+    pass_run_id = next(
+        run["run_id"] for run in outcome.runs if run["kind"] == "dimension-pass"
+    )
+    [disp] = by_event["finding.dispositioned"]
+    assert disp.round_id == outcome.round_id
+    assert disp.run_id == pass_run_id
+
+
+def test_calibrator_failure_settled_event_carries_the_surrogate_run_id(
+    monkeypatch, _seams, _tmp_state_root, caplog
+):
+    """Even a calibrator that fails BEFORE yielding a session id settles a
+    `review.pass.settled` failure event that `--run calibrator` can select."""
+    import logging as _logging
+
+    from shipit.agent import backend as agent_backend
+
+    _seams["reviews"] = {
+        "correctness": _pass_review([_comment("bug", severity="major")])
+    }
+
+    def boom(
+        config,
+        union,
+        *,
+        pr_number,
+        cwd,
+        launcher=None,
+        artifacts=None,
+        correlation=None,
+    ):
+        raise CalibrationContractError("calibrator output missing candidate id 0")
+
+    monkeypatch.setattr(fanout, "run_calibrator", boom)
+    caplog.set_level(_logging.INFO, logger="shipit.review")
+    with pytest.raises(CalibrationContractError):
+        fanout.run_fanout_review(
+            agent_backend.CODEX, _ctx(), dimensions=["correctness"], calibrator=_CAL
+        )
+    settled = [
+        r
+        for r in caplog.records
+        if getattr(r, "_event", None) == "review.pass.settled"
+        and getattr(r, "dimension", None) == "calibrator"
+    ]
+    assert len(settled) == 1
+    assert settled[0].run_id == "calibrator"
+    assert settled[0].outcome == "failed"
 
 
 def test_union_candidates_carry_the_pass_run_id(_seams):

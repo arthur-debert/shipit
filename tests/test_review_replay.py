@@ -290,13 +290,19 @@ def test_run_replay_persists_the_range_pass_bundle_and_correlation(
     assert run["kind"] == "range-pass"
     assert run["outcome"] == "success"
     assert run["artifacts"] == str(artifacts_dir / run["run_id"])
-    # The bundle exists with prompt + raw streams + meta.
+    # The bundle exists with the EXACT prompt + raw streams + meta — content,
+    # not mere truthiness, so a regression that writes the wrong stream (an
+    # error string, an empty body) can't pass.
     bundle = artifacts_dir / run["run_id"]
-    assert (bundle / "prompt.txt").read_text()
-    assert (bundle / "stdout.raw").read_text()
+    assert (
+        f"git diff {view.base_sha}..{view.head_sha}"
+        in (bundle / "prompt.txt").read_text()
+    )
+    assert (bundle / "stdout.raw").read_text() == _VALID
     meta = json.loads((bundle / "meta.json").read_text())
     assert meta["outcome"] == "success"
     assert meta["run_id"] == run["run_id"]
+    assert meta["exit_code"] == 0
     # Finding↔pass correlation, single-pass flavour.
     [finding] = record["round.findings"]
     assert finding["run_id"] == run["run_id"]

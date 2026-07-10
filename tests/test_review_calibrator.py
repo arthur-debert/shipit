@@ -277,6 +277,42 @@ def test_run_calibrator_launches_claude_read_only_and_unwraps_the_envelope(
     assert '"id": 0' in task
 
 
+def test_run_calibrator_raw_output_log_carries_the_correlation_extras(
+    monkeypatch, caplog
+):
+    """The judge's raw-output DEBUG record (issue #681 item 2) carries the
+    fan-out's correlation extras, so `shipit logs --run calibrator --round <id>`
+    slices it alongside the round's progress events rather than leaving it
+    filterable only by `pr`."""
+    import logging
+
+    monkeypatch.setattr(calibrator.shutil, "which", lambda binary: "/usr/bin/claude")
+
+    def fake_runner(cmd, *, cwd, env, timeout=None):
+        return LaunchResult(returncode=0, stdout=_calibration_json(), stderr="")
+
+    correlation = {
+        "pr": 9,
+        "reviewer": "codex",
+        "run_id": "calibrator",
+        "round_id": "round-abc",
+        "dimension": "calibrator",
+    }
+    caplog.set_level(logging.DEBUG, logger="shipit.review")
+    run_calibrator(
+        CalibratorConfig(),
+        _union(),
+        pr_number=9,
+        cwd="/tree",
+        launcher=fake_runner,
+        correlation=correlation,
+    )
+    raw = [r for r in caplog.records if "raw output for pr#9" in r.getMessage()]
+    assert len(raw) == 1
+    assert raw[0].run_id == "calibrator"
+    assert raw[0].round_id == "round-abc"
+
+
 def test_run_calibrator_bare_json_mints_a_run_id(monkeypatch):
     monkeypatch.setattr(calibrator.shutil, "which", lambda binary: "/usr/bin/claude")
 
@@ -387,9 +423,12 @@ def test_run_calibrator_fills_the_bundle_and_records_the_true_run_id(
     assert meta["timed_out"] is False
 
 
-def test_run_calibrator_failure_bundle_keeps_full_raw(monkeypatch, tmp_path):
+def test_run_calibrator_failure_bundle_keeps_full_raw(monkeypatch, tmp_path, caplog):
     """A nonzero judge (previously surviving only as detail[:500]) leaves its
-    FULL raw output in the bundle, and the error points at it."""
+    FULL raw output in the bundle; a LOCAL log points at it, while the raised
+    message keeps the absolute path OUT (it reaches the GitHub check summary)."""
+    import logging
+
     from shipit.review.artifacts import RunArtifacts
 
     monkeypatch.setattr(calibrator.shutil, "which", lambda binary: "/usr/bin/claude")
@@ -399,6 +438,7 @@ def test_run_calibrator_failure_bundle_keeps_full_raw(monkeypatch, tmp_path):
         return LaunchResult(returncode=1, stdout="half an answer", stderr=long_err)
 
     bundle = RunArtifacts(tmp_path / "calibrator")
+    caplog.set_level(logging.WARNING, logger="shipit.review")
     with pytest.raises(BackendError) as exc:
         run_calibrator(
             CalibratorConfig(),
@@ -408,7 +448,8 @@ def test_run_calibrator_failure_bundle_keeps_full_raw(monkeypatch, tmp_path):
             launcher=exit_one,
             artifacts=bundle,
         )
-    assert str(bundle.dir) in str(exc.value)
+    assert str(bundle.dir) not in str(exc.value)
+    assert str(bundle.dir) in caplog.text
     assert (bundle.dir / "stderr.raw").read_text() == long_err
     assert (bundle.dir / "stdout.raw").read_text() == "half an answer"
     meta = json.loads((bundle.dir / "meta.json").read_text())

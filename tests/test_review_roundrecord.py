@@ -583,7 +583,7 @@ def test_build_carries_round_identity_artifacts_and_finding_run_ids():
             run_id="pass-1",
         ),
         JudgedFinding(
-            Finding(severity=Severity.MINOR, text="style", file="b.py"),
+            Finding(severity=Severity.NIT, text="style", file="b.py"),
             Disposition.NIT_SUPPRESSED,
         ),
     ]

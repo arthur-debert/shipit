@@ -59,6 +59,16 @@ STDOUT_FILENAME = "stdout.raw"
 STDERR_FILENAME = "stderr.raw"
 META_FILENAME = "meta.json"
 
+#: Per-stream character cap for a persisted raw stream. A real reviewer emits a
+#: JSON review (KB to low single-digit MB); this generous bound exists ONLY so a
+#: pathological or prompt-injected reviewer that spews a runaway stream cannot
+#: grow the never-committed state root without limit. A capped stream keeps its
+#: HEAD (where the parse error / timeout marker lives) and ends with
+#: :data:`_TRUNCATION_MARKER`; ``meta.json`` records the truncation, so a
+#: post-mortem is never misled into thinking it has the full output.
+MAX_STREAM_CHARS = 5 * 1024 * 1024
+_TRUNCATION_MARKER = "\n…[shipit: stream truncated at {cap} chars]…\n"
+
 
 def round_root(
     repo_slug: str | None, round_id: str, *, base_dir: Path | None = None
@@ -138,9 +148,18 @@ class RunArtifacts:
     def write_streams(self, stdout: str | None, stderr: str | None) -> None:
         """Persist the raw captured streams — success, nonzero exit, and the
         timeout's partial output alike (the full raw a truncated ``detail``
-        string can never carry)."""
-        self._write(STDOUT_FILENAME, stdout or "")
-        self._write(STDERR_FILENAME, stderr or "")
+        string can never carry).
+
+        Each stream is bounded to :data:`MAX_STREAM_CHARS` (a runaway/prompt-
+        injected reviewer must not fill the state root); a truncation is recorded
+        in ``meta.json`` so the bundle never silently claims the full output.
+        """
+        out, out_truncated = _bounded(stdout or "")
+        err, err_truncated = _bounded(stderr or "")
+        self._write(STDOUT_FILENAME, out)
+        self._write(STDERR_FILENAME, err)
+        if out_truncated or err_truncated:
+            self.record(stdout_truncated=out_truncated, stderr_truncated=err_truncated)
 
     def record(self, **fields: Any) -> None:
         """Merge ``fields`` into the bundle's ``meta.json`` and rewrite it.
@@ -157,15 +176,38 @@ class RunArtifacts:
         )
 
     def _write(self, filename: str, content: str) -> None:
-        """One member-file write — directory on demand, FAIL-OPEN."""
+        """One member-file write — directory on demand, ATOMIC, FAIL-OPEN.
+
+        Writes to a sibling ``.tmp`` then :meth:`Path.replace` (an atomic
+        rename on the same filesystem): the accretive ``meta.json`` is rewritten
+        whole on every :meth:`record`, so a crash MID-write must not truncate the
+        live file and lose the telemetry recorded so far — the half-written
+        temp is the only casualty, and the previous file stays intact.
+        """
         if self.dir is None:
             return
         try:
             self.dir.mkdir(parents=True, exist_ok=True)
-            (self.dir / filename).write_text(content, encoding="utf-8")
+            dest = self.dir / filename
+            tmp = dest.with_name(f"{filename}.tmp")
+            tmp.write_text(content, encoding="utf-8")
+            tmp.replace(dest)
         except OSError:
             logger.warning(
                 "review artifact write failed for %s (the run is unaffected)",
                 self.dir / filename,
                 exc_info=True,
             )
+
+
+def _bounded(text: str) -> tuple[str, bool]:
+    """``text`` capped to :data:`MAX_STREAM_CHARS`, and whether it was capped.
+
+    A capped stream keeps its head (the parse error / timeout marker lives
+    there) and ends with :data:`_TRUNCATION_MARKER` so the file itself declares
+    the cut.
+    """
+    if len(text) <= MAX_STREAM_CHARS:
+        return text, False
+    marker = _TRUNCATION_MARKER.format(cap=MAX_STREAM_CHARS)
+    return text[:MAX_STREAM_CHARS] + marker, True

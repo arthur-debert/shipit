@@ -76,6 +76,41 @@ def test_meta_degrades_unserializable_values_to_repr(tmp_path):
     assert "boom" in meta["error"]
 
 
+def test_streams_over_the_cap_are_truncated_with_a_marker_and_flagged_in_meta(tmp_path):
+    """A runaway / prompt-injected reviewer must not fill the state root: an
+    oversized stream is capped (head kept, so the parse-error/timeout marker at
+    the top survives), a truncation marker ends the file, and meta records it —
+    a post-mortem is never misled into thinking it has the full output."""
+    bundle = artifacts.RunArtifacts(tmp_path / "run")
+    huge = "z" * (artifacts.MAX_STREAM_CHARS + 100)
+    bundle.write_streams(huge, "short err")
+
+    out = (tmp_path / "run" / artifacts.STDOUT_FILENAME).read_text()
+    assert len(out) < len(huge)
+    assert out.startswith("z" * 1000)  # the head is kept
+    assert "truncated" in out
+    # A within-cap stream is untouched.
+    assert (tmp_path / "run" / artifacts.STDERR_FILENAME).read_text() == "short err"
+    meta = json.loads((tmp_path / "run" / artifacts.META_FILENAME).read_text())
+    assert meta["stdout_truncated"] is True
+    assert meta["stderr_truncated"] is False
+
+
+def test_meta_rewrite_is_atomic_and_leaves_no_temp_file(tmp_path):
+    """Meta ACCRETES via repeated whole-file rewrites; each goes through a temp +
+    atomic replace, so a crash mid-write can't truncate the live file. After a
+    normal run the bundle holds only its member files — no stray `.tmp`."""
+    run_dir = tmp_path / "run"
+    bundle = artifacts.RunArtifacts(run_dir)
+    bundle.record(a=1)
+    bundle.record(b=2)  # a second whole-file rewrite
+    assert json.loads((run_dir / artifacts.META_FILENAME).read_text()) == {
+        "a": 1,
+        "b": 2,
+    }
+    assert not list(run_dir.glob("*.tmp"))
+
+
 def test_disabled_sink_noops_every_write(tmp_path):
     bundle = artifacts.RunArtifacts.disabled()
     bundle.write_prompt("p")

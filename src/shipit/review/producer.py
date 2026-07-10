@@ -561,7 +561,18 @@ def _launch_and_capture(
         exit_code=result.returncode,
         timed_out=False,
     )
-    return _capture(agent, result, artifacts=sink)
+    try:
+        return _capture(agent, result, artifacts=sink)
+    except BackendError as exc:
+        # An exit-0 launch can STILL be a timeout: `_capture` re-parses the
+        # stdout and `parse_review_output` raises `BackendError(timed_out=True)`
+        # when otherwise-unparseable output carries the marker. Correct the
+        # optimistic `timed_out=False` just recorded so `meta.json` agrees with
+        # the `timed_out` outcome the fanout/service will settle, before the
+        # failure propagates — the bundle must never claim a timeout was a clean
+        # exit.
+        sink.record(timed_out=exc.timed_out)
+        raise
 
 
 def _capture(
@@ -575,10 +586,12 @@ def _capture(
     stdout is parsed; an unparseable / marker-bearing parse raises :class:`BackendError`
     (carrying the raw for the #76 salvage), exactly as before.
 
-    The nonzero-exit ``RuntimeError`` still truncates its human-facing detail,
-    but with an ``artifacts`` bundle enabled it now POINTS at the bundle
-    directory, where the caller already persisted the FULL raw streams
-    (RVW03-WS02) — the truncated string is a summary, no longer the only record.
+    The nonzero-exit ``RuntimeError`` still truncates its human-facing detail;
+    the FULL raw streams live in the ``artifacts`` bundle (RVW03-WS02). The
+    bundle's absolute path is logged LOCALLY (a developer running the review sees
+    it), but is kept OUT of the raised message — that message crosses into the
+    GitHub-facing funnel breadcrumb (:func:`shipit.review.service._close_funnel_breadcrumb`),
+    where a user-home / state-root path must not leak into the PR check summary.
     """
     stdout = result.stdout or ""
     stderr = result.stderr or ""
@@ -590,9 +603,8 @@ def _capture(
             # NOT echo it — we set the STRUCTURED ``timed_out`` flag explicitly so
             # the service settles ``timed_out`` (not ``empty``) regardless. ``raw``
             # carries combined stdout+stderr so the #76 salvage still has the marker
-            # context to surface.
-            if artifacts is not None:
-                artifacts.record(timed_out=True)
+            # context to surface. The caller (`_launch_and_capture`) records the
+            # timeout into the bundle meta from this exception's ``timed_out``.
             raise BackendError(
                 f"{agent} timed out before returning a complete review "
                 "(try a faster model or a smaller diff)",
@@ -600,13 +612,15 @@ def _capture(
                 timed_out=True,
             )
         detail = stderr.strip() or stdout.strip()
-        where = (
-            f" (full raw output at {artifacts.dir})"
-            if artifacts is not None and artifacts.dir is not None
-            else ""
-        )
+        if artifacts is not None and artifacts.dir is not None:
+            logger.warning(
+                "%s reviewer exited %d — full raw output at %s",
+                agent,
+                result.returncode,
+                artifacts.dir,
+            )
         raise RuntimeError(
-            f"{agent} reviewer exited {result.returncode}: {detail[:500]}{where}"
+            f"{agent} reviewer exited {result.returncode}: {detail[:500]}"
         )
     return parse_review_output(stdout, backend_name=agent)
 

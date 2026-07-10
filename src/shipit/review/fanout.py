@@ -508,6 +508,21 @@ def run_fanout_review(
                 else None
             ),
         }
+        # RVW03-WS02 correlation: the calibrator's STABLE surrogate run id is the
+        # fixed `calibrator` bundle name — its true backend session id is known
+        # only post-launch (it lands in the run entry + bundle meta below). The
+        # passes correlate by their real run ids; the one judge per round
+        # correlates by this fixed name, so `shipit logs --run calibrator` slices
+        # its whole trail — launch, settle (success OR failure), and the raw-
+        # output DEBUG record inside `run_calibrator` — even when a pre-id failure
+        # means no true run id ever exists.
+        calibrator_correlation = {
+            "pr": ctx.number,
+            "reviewer": agent,
+            "run_id": "calibrator",
+            "round_id": round_id,
+            "dimension": "calibrator",
+        }
         events.emit(
             logger,
             "review.pass.launched",
@@ -515,12 +530,7 @@ def run_fanout_review(
             calibrator.backend,
             len(union),
             ctx.number,
-            extra={
-                "pr": ctx.number,
-                "reviewer": agent,
-                "round_id": round_id,
-                "dimension": "calibrator",
-            },
+            extra=calibrator_correlation,
         )
         start = time.monotonic()
         try:
@@ -531,6 +541,7 @@ def run_fanout_review(
                 cwd=tree_path,
                 launcher=launcher,
                 artifacts=calibrator_bundle,
+                correlation=calibrator_correlation,
             )
         except Exception as exc:
             # The failure PROPAGATES (an uncalibrated union never posts under
@@ -551,10 +562,7 @@ def run_fanout_review(
                 ctx.number,
                 duration_ms,
                 extra={
-                    "pr": ctx.number,
-                    "reviewer": agent,
-                    "round_id": round_id,
-                    "dimension": "calibrator",
+                    **calibrator_correlation,
                     "outcome": "failed",
                     "duration_ms": duration_ms,
                 },
@@ -586,11 +594,7 @@ def run_fanout_review(
             duration_ms,
             len(result.entries),
             extra={
-                "pr": ctx.number,
-                "reviewer": agent,
-                "run_id": run_id,
-                "round_id": round_id,
-                "dimension": "calibrator",
+                **calibrator_correlation,
                 "outcome": "success",
                 "duration_ms": duration_ms,
             },
@@ -643,6 +647,7 @@ def run_fanout_review(
         extra={
             "pr": ctx.number,
             "reviewer": agent,
+            "round_id": round_id,
             "candidates": len(union),
             "posted": posted,
         },
@@ -651,6 +656,19 @@ def run_fanout_review(
         if judged.posted:
             continue
         finding = judged.finding
+        # `round_id` groups this round's disposition trail; `run_id` (when the
+        # finding carries its originating pass's) traces a routed-out finding
+        # back to the pass that raised it — the same `--run`/`--round` slices the
+        # progress events answer to.
+        disposition_extra = {
+            "pr": ctx.number,
+            "reviewer": agent,
+            "round_id": round_id,
+            "severity": finding.severity.value,
+            "disposition": judged.disposition.value,
+        }
+        if judged.run_id is not None:
+            disposition_extra["run_id"] = judged.run_id
         events.emit(
             logger,
             "finding.dispositioned",
@@ -659,12 +677,7 @@ def run_fanout_review(
             finding.file or "(no file)",
             finding.severity.value,
             judged.disposition.value,
-            extra={
-                "pr": ctx.number,
-                "reviewer": agent,
-                "severity": finding.severity.value,
-                "disposition": judged.disposition.value,
-            },
+            extra=disposition_extra,
         )
 
     return FanoutOutcome(
