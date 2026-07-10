@@ -279,6 +279,48 @@ def test_missing_cli_fails_loud(monkeypatch):
         )
 
 
+def test_preflight_round_passes_when_every_binary_is_on_path(monkeypatch):
+    monkeypatch.setattr(producer.shutil, "which", lambda binary: f"/usr/bin/{binary}")
+    producer.preflight_round([agent_backend.CODEX, agent_backend.CLAUDE])  # no raise
+
+
+def test_preflight_round_names_each_missing_binary_in_one_error(monkeypatch):
+    """RVW03-WS03: the round-level preflight raises ONE actionable
+    BackendUnavailable naming every missing binary — the 'binary X not found —
+    install/configure it' shape — instead of letting each pass discover the
+    miss and report 'all N dimension passes failed'."""
+    monkeypatch.setattr(
+        producer.shutil,
+        "which",
+        lambda binary: None if binary in ("codex", "claude") else f"/usr/bin/{binary}",
+    )
+    with pytest.raises(BackendUnavailable) as exc:
+        producer.preflight_round(
+            [agent_backend.CODEX, agent_backend.CLAUDE, agent_backend.ANTIGRAVITY]
+        )
+    message = str(exc.value)
+    assert "binary 'codex' not found — install/configure it" in message
+    assert "binary 'claude' not found — install/configure it" in message
+    assert "no passes were launched" in message
+    assert "agy" not in message  # the present binary is not blamed
+
+
+def test_preflight_round_checks_a_duplicate_binary_once(monkeypatch):
+    """Two round entries sharing one binary (reviewer + calibrator on the same
+    backend) are one check and, when missing, one blame line."""
+    checked: list[str] = []
+
+    def which(binary):
+        checked.append(binary)
+        return None
+
+    monkeypatch.setattr(producer.shutil, "which", which)
+    with pytest.raises(BackendUnavailable) as exc:
+        producer.preflight_round([agent_backend.CODEX, agent_backend.CODEX])
+    assert checked == ["codex"]
+    assert str(exc.value).count("codex") == 2  # the binary + the backend name
+
+
 def test_missing_head_branch_is_a_clean_failure(_faked):
     ctx = _ctx()
     ctx.head_ref = ""

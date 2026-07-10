@@ -22,10 +22,13 @@ every judged finding a **Disposition**.
 
 What this module owns:
 
-  * the pass fan-out (provision the Tree once, launch the configured
-    dimension set in parallel through :func:`shipit.review.producer.run_tree_review`,
-    tolerate per-pass failures — a pass failure degrades coverage, it never
-    kills the round unless EVERY pass failed);
+  * the pass fan-out (preflight every configured backend binary ONCE before
+    anything launches — :func:`shipit.review.producer.preflight_round`, so a
+    missing binary is one actionable error and zero passes start; provision the
+    Tree once; launch the configured dimension set in parallel through
+    :func:`shipit.review.producer.run_tree_review`; tolerate per-pass failures
+    — a pass failure degrades coverage, it never kills the round unless EVERY
+    pass failed);
   * the union (each successful pass's comments, coerced through the ONE trust
     boundary :func:`shipit.review.schema.finding_from_dict`, tagged with the
     dimension that found them) and the merged coverage attestation;
@@ -71,6 +74,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .. import events
+from ..agent import backend as agent_backend
 from ..agent.backend import Backend
 from ..finding import (
     DEFAULT_SEVERITY,
@@ -209,11 +213,17 @@ def run_fanout_review(
     options and apply to every pass, exactly as they applied to the monolithic
     run.
 
-    Failure posture: a SINGLE pass failure is tolerated — its run entry records
-    the outcome, the posted summary attests the degraded coverage; ALL passes
-    failing raises ``RuntimeError`` (the service maps it to the ``failed``
-    funnel outcome; in an incremental round the sole pass failing IS all passes
-    failing). When the judge is ON, a calibrator failure (unavailable /
+    Failure posture: every configured backend binary (the reviewer's own plus,
+    when the judge is on, the calibrator's) is preflighted ONCE before the Tree
+    is provisioned or any pass launches
+    (:func:`shipit.review.producer.preflight_round`, RVW03-WS03) — a missing
+    binary raises ONE actionable
+    :class:`~shipit.review.backends.base.BackendUnavailable` naming it, and no
+    pass processes start. Past preflight, a SINGLE pass failure is tolerated —
+    its run entry records the outcome, the posted summary attests the degraded
+    coverage; ALL passes failing raises ``RuntimeError`` (the service maps it
+    to the ``failed`` funnel outcome; in an incremental round the sole pass
+    failing IS all passes failing). When the judge is ON, a calibrator failure (unavailable /
     timed out / unparseable / contract-violating output) PROPAGATES — an
     uncalibrated union is never posted under the judge's ruler; the round
     degrades non-blocking exactly like a failed monolithic review (ADR-0006).
@@ -297,6 +307,17 @@ def run_fanout_review(
             findings=(),
             runs=(),
         )
+
+    # Round-level preflight (RVW03-WS03): every configured backend binary is
+    # checked ONCE, before the Tree is provisioned or any pass launches — a
+    # missing binary is ONE actionable BackendUnavailable naming the binary,
+    # never "all N dimension passes failed" with N truncated per-pass details.
+    # Both arms need it: the range replay launches the same backends, it just
+    # skips the Tree below.
+    round_backends = [backend]
+    if calibrator is not None:
+        round_backends.append(agent_backend.by_name(calibrator.backend))
+    producer.preflight_round(round_backends)
 
     # The Tree seam: the live path provisions ONE shared read-only Tree on the
     # PR head; the offline replay reviews the checkout whose range was resolved

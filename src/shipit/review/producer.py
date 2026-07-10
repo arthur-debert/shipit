@@ -60,6 +60,7 @@ import logging
 import os
 import shutil
 import tempfile
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from .. import execrun, gh, git
@@ -636,6 +637,39 @@ def _preflight(backend: Backend, *, dry_run: bool) -> None:
             f"The '{backend.funnel_agent or backend.name}' review backend requires "
             f"the '{backend.binary}' CLI on your PATH, but it was not found. "
             f"Install it (and log it in), then re-run."
+        )
+
+
+def preflight_round(backends: Sequence[Backend]) -> None:
+    """Verify EVERY backend a round is configured to launch, ONCE, before any
+    pass starts; raise ONE :class:`BackendUnavailable` naming each missing binary.
+
+    The round-level preflight (RVW03-WS03): the fan-out calls this before
+    provisioning the Tree or launching a single pass, so a missing binary
+    surfaces as one actionable "binary X not found — install/configure it"
+    error and NO pass processes launch — never as "all N dimension passes
+    failed" with N truncated per-pass details. ``backends`` is the round's
+    configured set (the reviewer's own backend plus, when the dormant judge is
+    on, the calibrator's); duplicate binaries are checked once. The per-launch
+    checks (:func:`_preflight`, the calibrator's own) stay as backstops for
+    callers outside a fan-out round.
+    """
+    missing: list[Backend] = []
+    seen: set[str] = set()
+    for backend in backends:
+        if backend.binary in seen:
+            continue
+        seen.add(backend.binary)
+        if shutil.which(backend.binary) is None:
+            missing.append(backend)
+    if missing:
+        details = "; ".join(
+            f"binary {b.binary!r} not found — install/configure it "
+            f"(the {(b.funnel_agent or b.name)!r} backend requires it on PATH)"
+            for b in missing
+        )
+        raise BackendUnavailable(
+            f"review preflight failed, no passes were launched: {details}"
         )
 
 

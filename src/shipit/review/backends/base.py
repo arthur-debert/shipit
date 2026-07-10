@@ -93,11 +93,14 @@ def parse_review_output(stdout: str, *, backend_name: str = "the agent") -> dict
     """
     # Local import: schema is a sibling, but keeping it here avoids any chance
     # of an import-order issue and matches the lazy style used elsewhere.
-    from ..schema import extract_json
+    from ..schema import extract_json, is_review_shaped
 
     raw = stdout or ""
     try:
-        review = extract_json(stdout)
+        # `want=is_review_shaped`: among the objects in a noisy stdout, select the
+        # real `{summary, comments}` review — never a larger unrelated JSON blob,
+        # which (no `comments`) would settle downstream as a silent clean pass.
+        review = extract_json(stdout, want=is_review_shaped)
     except ValueError as exc:
         snippet = (
             f"{raw[:_SNIPPET]} … {raw[-_SNIPPET:]}" if len(raw) > 2 * _SNIPPET else raw
