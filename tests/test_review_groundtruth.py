@@ -274,7 +274,7 @@ class TestShippedFixture:
     """
 
     def test_loads_and_pins_current_version(self, shipped):
-        assert shipped.version == 36
+        assert shipped.version == 37
 
     def test_8_to_12_pinned_ranges(self, shipped):
         assert 8 <= len(shipped.prs) <= 12
