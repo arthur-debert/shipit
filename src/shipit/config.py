@@ -963,8 +963,9 @@ _REVIEWERS_SCAFFOLD_HEADER = """\
 # `prstate.reviewers_config.DEFAULT_REVIEWERS`. codex/agy are NOT seeded by default —
 # their review GitHub Apps are not installed on an arbitrary repo, so requiring them
 # would park PRs at REVIEWS_PENDING; a repo that HAS the Apps opts them in here (e.g.
-# `codex = {}`). Review-once: `rerun` defaults OFF (token-billed; opt in per reviewer
-# with e.g. `copilot = { rerun = true }`)."""
+# `codex = {}`). `rerun` defaults ON (head-strict — re-review every push, ADR-0043);
+# a metered reviewer opts OUT to review-once with e.g. `copilot = { rerun = false }`
+# (which is exactly why the shipped Copilot default is review-once)."""
 
 
 def reviewers_scaffold() -> str:

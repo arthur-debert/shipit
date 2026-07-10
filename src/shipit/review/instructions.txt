@@ -56,9 +56,11 @@ How to Measure
 
     Take note of the issues that do not match such a world class implementation, and
     then, after your initial high-level assessment on the axis above, list the issues,
-    by highest to lowest priority. For each, include a brief but clear description of
-    where and what the issue is about, and the correct way to address it as a
-    suggestion. Output a ranked list of findings, ordered highest to lowest priority.
+    ordered by severity, highest first (critical, then major, then minor, then nit —
+    the major/minor boundary is the merge-block test: would a competent reviewer hold
+    the merge for this?). For each, include a brief but clear description of where and
+    what the issue is about, and the correct way to address it as a suggestion. Output
+    a ranked list of findings, ordered highest severity first.
 
     Base your review solely on the provided diff and on reading the changed files.
     Do NOT run build, test, or shell commands, and do NOT start background tasks —

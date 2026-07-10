@@ -173,13 +173,18 @@ predictable cost:
   the same seam as `model`/`instructions`), unions the results, and hands
   them to the **Calibrator**. Passes may report pre-existing issues; routing
   them out is the calibrator's job, not prompt-mandated silence.
-- **Calibrator** (ADR-0045): one fixed table-level agent/model (default:
-  claude backend at high ReasoningLevel) shared by all reviewers — dedups,
-  adversarially verifies with tier-appropriate evidence (quoted evidence
-  always; a concrete failure scenario for major-or-worse, a clear rationale
-  for minor/nit; any finding that fails verification is dropped, never
-  downgraded), normalizes severity, orders the result, assigns dispositions.
-  It never originates findings. The reviewer's own bot posts the calibrated
+- **Calibrator** (ADR-0045, decoupled in WS08 #669): an OPTIONAL, DORMANT
+  stage — OFF by default. The default round-1 posts the **mechanically-deduped
+  union** of the dimension passes (each pass's own severity; `(file, line,
+  claim)` collisions merge into the most-severe member — a deterministic dedup,
+  no LLM judge). Opted back on via the table-level `[reviewers].calibrator` key,
+  it is one fixed agent/model (default: claude backend at high ReasoningLevel)
+  shared by all reviewers — dedups, adversarially verifies with tier-appropriate
+  evidence (quoted evidence always; a concrete failure scenario for
+  major-or-worse, a clear rationale for minor/nit; a finding is dropped only when
+  adversarial verification actively refutes it — never on mere uncertainty — and
+  never downgraded; F2 #665), normalizes severity, orders the result, assigns
+  dispositions. It never originates findings. The reviewer's own bot posts the
   result; funnel/reconcile semantics are unchanged.
 - **Incremental rounds** (ADR-0045): rounds after the first review
   `last-reviewed-head..new-head` (both SHAs already known to the engine —

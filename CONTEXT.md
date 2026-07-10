@@ -16,6 +16,10 @@ _Avoid_: "org/repo" when the owner might be a user; using checkout paths as repo
 The GitHub account that owns a Repo. Its login identifies the owner; whether it is a user or organization is enrichment, not part of Repo identity.
 _Avoid_: "org" as the general noun.
 
+**OwnerKind**:
+The closed set for whether an Owner is a user or organization. It is enrichment for owner-specific capabilities, not part of Repo identity.
+_Avoid_: boolean `is_org` language.
+
 **WorkingDir**:
 An existing on-disk checkout of a Repo at a branch and commit. A Tree has a WorkingDir, but a human or CI checkout can also be a WorkingDir without being a Tree.
 _Avoid_: using WorkingDir as the repo identity.
@@ -132,12 +136,12 @@ A reviewer or readiness pillar holds a PR when it prevents Ready; it is settled 
 
 ### Planning
 
-**PRD**:
-The authoritative feature definition in `docs/prd/`: what is being built and why. A merged docs PR locks it before execution work is decomposed.
+**Spec**:
+The authoritative feature definition in `docs/spec/`: what is being built and why. A merged docs PR locks it before execution work is decomposed.
 _Avoid_: treating an epic issue as the spec.
 
 **Epic issue**:
-A GitHub tracker for how a PRD lands: work streams, progress, and links to the PRD and ADRs. It tracks execution, not the full feature definition.
+A GitHub tracker for how a Spec lands: work streams, progress, and links to the Spec and ADRs. It tracks execution, not the full feature definition.
 
 **Work Stream**:
 An independently grabbable slice of an epic that ships through the normal draft PR lifecycle. Work streams target the epic branch, not `main`.

@@ -239,3 +239,117 @@ def test_pr_review_run_invokes_detached_child(monkeypatch):
     assert "repo" not in captured  # the repo rides ON the target now
     assert captured["run_id"] == 555
     assert captured["as_app"] is True
+
+
+def test_pr_review_run_reconstructs_the_fanout_config(monkeypatch):
+    """RVW02-WS04: the child entry parses `--dimensions` (comma-joined), the
+    `--nit-cap`, and the four `--calibrator-*` fields into the typed values the
+    service consumes — a config re-read never happens in the child."""
+    from shipit.review import service
+
+    captured: dict = {}
+
+    def fake_child(backend, pr, **kw):
+        captured.update(kw)
+        return {}
+
+    monkeypatch.setattr(service, "run_detached_review", fake_child)
+    rc = cli.main(
+        [
+            "pr",
+            "review",
+            "_run",
+            "--agent",
+            "codex",
+            "--pr",
+            "5",
+            "--repo",
+            "owner/repo",
+            "--dimensions",
+            "correctness,test-quality",
+            "--nit-cap",
+            "0",
+            "--calibrator-backend",
+            "claude",
+            "--calibrator-reasoning",
+            "medium",
+        ]
+    )
+    assert rc == 0
+    assert captured["dimensions"] == ("correctness", "test-quality")
+    assert captured["nit_cap"] == 0
+    calibrator = captured["calibrator"]
+    assert calibrator.backend == "claude"
+    assert calibrator.reasoning == "medium"
+    assert calibrator.timeout == "600s"  # unset fields keep the shipped defaults
+
+
+def test_pr_review_run_defaults_leave_the_fanout_config_unset(monkeypatch):
+    from shipit.review import service
+
+    captured: dict = {}
+    monkeypatch.setattr(
+        service, "run_detached_review", lambda backend, pr, **kw: captured.update(kw)
+    )
+    rc = cli.main(
+        ["pr", "review", "_run", "--agent", "codex", "--pr", "5", "--repo", "o/r"]
+    )
+    assert rc == 0
+    assert captured["dimensions"] is None
+    assert captured["calibrator"] is None
+    assert captured["nit_cap"] is None
+
+
+def test_pr_review_run_rejects_a_bad_calibrator_cleanly(monkeypatch, capsys):
+    """A malformed --calibrator-* field dies at the process boundary as one
+    clean line — before any model run bills."""
+    from shipit.review import service
+
+    ran: list = []
+    monkeypatch.setattr(service, "run_detached_review", lambda *a, **k: ran.append(1))
+    rc = cli.main(
+        [
+            "pr",
+            "review",
+            "_run",
+            "--agent",
+            "codex",
+            "--pr",
+            "5",
+            "--repo",
+            "o/r",
+            "--calibrator-backend",
+            "gpt-cli",
+        ]
+    )
+    assert rc == 1
+    assert "calibrator" in capsys.readouterr().err
+    assert ran == []
+
+
+def test_pr_review_run_rejects_a_negative_nit_cap_cleanly(monkeypatch, capsys):
+    """`--nit-cap` is a non-negative budget (0 = floor at minor), validated at the
+    config boundary; the child entry enforces the same floor so a negative value
+    dies here as one clean line — CLI parity — before any model run bills."""
+    from shipit.review import service
+
+    ran: list = []
+    monkeypatch.setattr(service, "run_detached_review", lambda *a, **k: ran.append(1))
+    rc = cli.main(
+        [
+            "pr",
+            "review",
+            "_run",
+            "--agent",
+            "codex",
+            "--pr",
+            "5",
+            "--repo",
+            "o/r",
+            "--nit-cap",
+            "-1",
+        ]
+    )
+    assert rc == 1
+    assert "nit-cap" in capsys.readouterr().err
+    assert ran == []
