@@ -15,7 +15,7 @@ The verb NEVER recomputes the log's location — it consumes
 ``LOG_FILENAME``), the single source of truth, so reader and writer can never
 disagree about where the log lives. No platform ``if`` branch, no bespoke
 log-dir env var (the path library owns the location, per the glassbox PRD
-``docs/prd/glassbox.md``).
+``docs/legacy-prd/glassbox.md``).
 
 The verb reads JSONL ONLY — a hard cutover, no dual-format sniffing
 (ADR-0029; pre-cutover freeform files age out via rotation). Two output

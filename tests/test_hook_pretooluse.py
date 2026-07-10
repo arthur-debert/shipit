@@ -284,7 +284,7 @@ def test_subagent_code_edit_is_allowed_silently():
 
 def test_coordinator_doc_edit_is_allowed_silently():
     payload = json.dumps(
-        {"tool_name": "Write", "tool_input": {"file_path": "docs/prd/har01.md"}}
+        {"tool_name": "Write", "tool_input": {"file_path": "docs/legacy-prd/har01.md"}}
     )
     code, out = _run(payload)
     assert code == 0

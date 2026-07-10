@@ -4,7 +4,7 @@
 coordinator), the **variant** attribution, the `git.commit`, and a timestamp, and
 returns the dict written as one JSONL line. Field names follow OpenTelemetry
 `gen_ai.*` for the standard agent fields and `eval.*` for the harness-local ones
-(docs/prd/har02-run-eval.md, module #3); `git.commit` correlates the record to
+(docs/legacy-prd/har02-run-eval.md, module #3); `git.commit` correlates the record to
 repo state without the record ever entering the tree.
 
 Pure: a function of its arguments only (the timestamp and commit are passed in by

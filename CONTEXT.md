@@ -140,12 +140,12 @@ A reviewer or readiness pillar holds a PR when it prevents Ready; it is settled 
 
 ### Planning
 
-**PRD**:
-The authoritative feature definition in `docs/prd/`: what is being built and why. A merged docs PR locks it before execution work is decomposed.
-_Avoid_: treating an epic issue as the PRD.
+**Spec**:
+The authoritative feature definition in `docs/spec/`: what is being built and why. A merged docs PR locks it before execution work is decomposed. Legacy PRDs live in `docs/legacy-prd/`.
+_Avoid_: treating an epic issue as the spec.
 
 **Epic issue**:
-A GitHub tracker for how a PRD lands: work streams, progress, and links to the PRD and ADRs. It tracks execution, not the full feature definition.
+A GitHub tracker for how a Spec lands: work streams, progress, and links to the Spec and ADRs. It tracks execution, not the full feature definition.
 
 **Work Stream**:
 An independently grabbable slice of an epic that ships through the normal draft PR lifecycle. Work streams target the epic branch, not `main`.

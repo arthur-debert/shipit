@@ -52,7 +52,7 @@ Each managed unit is either a WHOLE FILE or a marker-delimited BLOCK in a
 consumer-owned file. The architecture's slow set is "the bootstrap, the lefthook
 caller, the skills, the AGENTS.md block" — but stage it to what exists now:
 
-- `skills/` — whole files (the skills already in this repo: planning, to-prd,
+- `skills/` — whole files (the skills already in this repo: planning, to-spec,
   to-tickets, grill-me-with-docs, coordinating, implementing, shepherding-prs,
   lex-primer — confirm the exact managed subset when defining the set). They must
   be bundled as PACKAGE DATA so the pip-installed `shipit` can vendor them — the
@@ -75,7 +75,7 @@ Step 1 defined `[secrets]`. Step 2 adds two tables:
 version = "<shipit commit hash that last wrote the set>"
 
 [managed]
-"skills/to-prd/SKILL.md" = "sha256:..."
+"skills/to-spec/SKILL.md" = "sha256:..."
 "AGENTS.md#shipit-block"       = "sha256:..."   # block, not whole file
 ```
 

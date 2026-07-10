@@ -1,6 +1,6 @@
 # Retired files — paths shipit used to distribute (or release-sync-era debris)
 # that must no longer exist in a consumer. `shipit install` runs a retired-files
-# pass over these entries (docs/prd/rvw01-sole-requester.md, ADR-0031): a file
+# pass over these entries (docs/legacy-prd/rvw01-sole-requester.md, ADR-0031): a file
 # whose content matches one of the known pristine hashes is deleted; a file whose
 # content differs from EVERY known version is kept with a warning (never destroy
 # local edits — the same safety philosophy as the [managed] pristine-hash
@@ -54,7 +54,7 @@ pristine = [
 ]
 
 [[retired]]
-# Renamed to `skills/to-prd/SKILL.md`.
+# Superseded by `skills/to-spec/SKILL.md`.
 path = "skills/shipit-to-prd/SKILL.md"
 pristine = [
   "sha256:0f13f20cad06161baff87628ea6b1cf5bac0cc7919beb6176535f9cdf9ae42d8",

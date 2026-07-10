@@ -1,4 +1,4 @@
-"""provision — pinned external tools delivered by the binary (docs/prd/adoption.md).
+"""provision — pinned external tools delivered by the binary (docs/legacy-prd/adoption.md).
 
 The domain home for "put a pinned prebuilt tool into the active pixi env":
 tools that gate the required-check path but are not on conda-forge, so they

@@ -40,7 +40,7 @@ from shipit.harness.codepath import is_code_path
         ("vec.h", True),
         ("parser.c", True),
         # --- NON-CODE (allowed) -----------------------------------------------
-        ("docs/prd/har01.md", False),
+        ("docs/legacy-prd/har01.md", False),
         ("docs/adr/0012-enforcement.lex", False),
         ("AGENTS.lex", False),
         ("README.md", False),

@@ -54,8 +54,8 @@ RECORD_KEY = "event"
 #: :data:`RECORD_KEY` — structlog's own ``EventRenamer(replace_by=…)`` pattern.
 EXTRA_KEY = "_event"
 
-#: The closed dev-cycle event vocabulary (ADR-0032; PRD
-#: ``docs/prd/log04-dev-cycle-event-log.md``). Dot-namespaced
+#: The closed dev-cycle event vocabulary (ADR-0032; legacy PRD
+#: ``docs/legacy-prd/log04-dev-cycle-event-log.md``). Dot-namespaced
 #: ``<noun>.<milestone>`` names, all live: the shipit verbs emit the
 #: verb-witnessed names, the managed post-commit hook emits ``commit.created``,
 #: and the planning skills script ``session.intent`` + the ``planning.*``
@@ -140,13 +140,16 @@ EVENT_NAMES = frozenset(
         # the planning cycle (skill-scripted tier)
         "planning.grill.started",
         "planning.adr.written",
+        "planning.spec.written",
+        # Legacy event name retained so old planning records and older
+        # installed skills remain readable/accepted.
         "planning.prd.written",
         "planning.epic.minted",
         "planning.ws.minted",
     }
 )
 
-#: The skill-scripted tier's names (ADR-0032; PRD §Implementation Decisions) —
+#: The skill-scripted tier's names (ADR-0032; legacy PRD §Implementation Decisions) —
 #: the only events whose human ``msg`` may come from the caller (the emit
 #: verb's ``--about``), because a skill checkpoint is the one witness that
 #: knows the crystallized intent ("planning session: reviewer symmetry").
@@ -160,6 +163,8 @@ SKILL_SCRIPTED_NAMES = frozenset(
         "session.intent",
         "planning.grill.started",
         "planning.adr.written",
+        "planning.spec.written",
+        # Legacy event name retained for backward compatibility.
         "planning.prd.written",
         "planning.epic.minted",
         "planning.ws.minted",

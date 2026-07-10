@@ -10,7 +10,7 @@ coordinate.
 Your round-1 brief follows the shepherd BRIEF TEMPLATE
 (`shipit spawn brief shepherd`): it must name the PR (with its Context note),
 its issue ref, the exact verify commands for each round's fixes (test suite,
-lint gate, role-relevant gotchas), the epic's governing docs (ADR/PRD list) to
+lint gate, role-relevant gotchas), the epic's governing docs (ADR/Spec list) to
 self-check each round's diff against BEFORE pushing, and the decision
 boundaries a review thread cannot re-open (those findings get a rationale
 reply, not a fix). If a mandatory slot is missing from your cold brief, FLAG

@@ -156,7 +156,7 @@ def test_load_units_includes_lefthook_and_pixi_task_block():
     assert pixi.anchor == "[tasks]"
     # The managed pixi TASKS block stays the thin task lines ONLY; the linter
     # deps ride in their own sibling `[feature.lint.dependencies]` block (ADP00,
-    # docs/prd/adoption.md — amending the lint PRD's task-line-only decision),
+    # docs/legacy-prd/adoption.md — amending the lint PRD's task-line-only decision),
     # tested below. `provision-lexd` invokes the binary's provision subcommand
     # (ADP00-WS03), so no provisioning script is ever distributed. `changelog`
     # is the release-notes tool's thin caller (TOL01-WS06, ADR-0039: pixi tasks
@@ -239,7 +239,7 @@ def test_pixi_block_reinstall_replaces_in_place():
 
 
 # --------------------------------------------------------------------------
-# The ADP00 managed consumer environment (docs/prd/adoption.md) — the lint
+# The ADP00 managed consumer environment (docs/legacy-prd/adoption.md) — the lint
 # feature/dependency block + the lint environment definition, siblings of the
 # tasks block in the consumer's pixi.toml.
 # --------------------------------------------------------------------------
@@ -288,7 +288,7 @@ def test_load_units_includes_the_lint_env_blocks():
 
 
 def test_packaged_lint_env_agrees_with_shipits_own_manifest():
-    """The dogfood drift check (docs/prd/adoption.md): shipit's own manifest and
+    """The dogfood drift check (docs/legacy-prd/adoption.md): shipit's own manifest and
     the packaged consumer block pin IDENTICAL versions, so shipit dogfoods
     exactly what the fleet receives and a version bump is one data-block edit
     (mirrored into shipit's own hand-written toolchain, or this test fails)."""
@@ -325,7 +325,7 @@ def test_shipits_own_pixi_manifest_reconciles_to_noop():
 
 
 # --------------------------------------------------------------------------
-# The ADP00 consumer-generic lefthook caller (docs/prd/adoption.md, #419) —
+# The ADP00 consumer-generic lefthook caller (docs/legacy-prd/adoption.md, #419) —
 # the managed variant works on a stock consumer right after install; shipit's
 # own repo-local legs live in a committed lefthook-local.yml (lefthook's
 # native config layering), never in the managed file.
@@ -1051,7 +1051,7 @@ def test_a_code_only_shipit_change_rolls_the_pin_forward(tmp_path, monkeypatch):
 
 # --------------------------------------------------------------------------
 # The HAR01 harness units — generated agent-defs + the settings.json hook line
-# (docs/prd/har01-coordinator-guard-and-role-prompts.md, user stories 17 & 21)
+# (docs/legacy-prd/har01-coordinator-guard-and-role-prompts.md, user stories 17 & 21)
 # --------------------------------------------------------------------------
 
 
@@ -1148,7 +1148,7 @@ def test_hook_units_coexist_on_one_settings_file():
 # --------------------------------------------------------------------------
 # The session-bootstrap launcher units — the generic ./agent-start launcher
 # (CDX01 #627), its ./claude-start / ./codex-start compatibility shims, and
-# the SessionStart activation hook (docs/prd/session-bootstrap.md Layers A &
+# the SessionStart activation hook (docs/legacy-prd/session-bootstrap.md Layers A &
 # D, issue #218)
 # --------------------------------------------------------------------------
 
@@ -2627,7 +2627,7 @@ def test_fresh_install_writes_set_and_opens_draft_pr(tmp_path, rec):
     assert result.pr_updated is False
 
     # Managed files landed.
-    assert (tmp_path / "skills" / "to-prd" / "SKILL.md").is_file()
+    assert (tmp_path / "skills" / "to-spec" / "SKILL.md").is_file()
     assert (tmp_path / "bin" / "shipit").is_file()
     # The AGENTS block was spliced in without losing the consumer's text.
     agents = (tmp_path / "AGENTS.md").read_text()
@@ -2773,13 +2773,13 @@ def test_consumer_edit_surfaces_as_override(tmp_path, rec):
     rec.calls.clear()
 
     # The consumer edits a managed skill file.
-    skill = tmp_path / "skills" / "to-prd" / "SKILL.md"
+    skill = tmp_path / "skills" / "to-spec" / "SKILL.md"
     skill.write_text("CONSUMER EDIT\n")
 
     _apply(tmp_path, iapply.MODE_PR)
     assert ("pr_create", True) in rec.calls
     assert "### Overrides" in rec.pr_body
-    assert "skills/to-prd/SKILL.md" in rec.pr_body
+    assert "skills/to-spec/SKILL.md" in rec.pr_body
     # The diff is captured BEFORE the overwrite, so it shows the consumer's edit
     # (a non-empty diff), not an empty diff against what shipit just wrote.
     assert "CONSUMER EDIT" in rec.pr_body
@@ -2829,7 +2829,7 @@ def test_declined_unit_is_never_written_and_drops_from_the_manifest(tmp_path, re
     (tmp_path / "bin" / "shipit").write_text("#!/bin/sh\n# MY OWN LAUNCHER\n")
     _decline(tmp_path, "bin/shipit")
     # Another unit changes, so the plan still has work — an applying install runs.
-    (tmp_path / "skills" / "to-prd" / "SKILL.md").unlink()
+    (tmp_path / "skills" / "to-spec" / "SKILL.md").unlink()
 
     result = _apply(tmp_path, iapply.MODE_PR)
     assert result.pr_url is not None
@@ -2840,7 +2840,7 @@ def test_declined_unit_is_never_written_and_drops_from_the_manifest(tmp_path, re
     cfg = config.load(cfg_path)
     managed = config.load_managed(cfg)
     assert iunits.SHIPIT_LAUNCHER_FILE not in managed
-    assert "skills/to-prd/SKILL.md" in managed
+    assert "skills/to-spec/SKILL.md" in managed
     # The decline itself survives the manifest re-stamp (the durable half)...
     assert config.load_declines(cfg, cfg_path.read_text()) == (
         iunits.SHIPIT_LAUNCHER_FILE,
@@ -2919,7 +2919,7 @@ def test_shipits_own_manifest_declines_the_launcher():
 
 
 def test_fresh_install_delivers_the_lint_environment(tmp_path, rec):
-    # ADP00 (docs/prd/adoption.md): a fresh install ADDs the lint env blocks —
+    # ADP00 (docs/legacy-prd/adoption.md): a fresh install ADDs the lint env blocks —
     # the consumer's pixi.toml ends up a complete, valid manifest whose lint
     # environment carries the fleet-pinned toolchain, alongside the consumer's
     # own untouched content.
@@ -3134,7 +3134,7 @@ def test_default_install_mid_drift_never_branches_or_opens_pr(tmp_path, rec):
     _apply(tmp_path)
     rec.calls.clear()
 
-    skill = tmp_path / "skills" / "to-prd" / "SKILL.md"
+    skill = tmp_path / "skills" / "to-spec" / "SKILL.md"
     skill.write_text("CONSUMER EDIT\n")
     result = _apply(tmp_path)
     # The drifted unit was refreshed to shipit's content, in the working tree.
@@ -3145,7 +3145,7 @@ def test_default_install_mid_drift_never_branches_or_opens_pr(tmp_path, rec):
     # the renderer's stderr warning derives from the typed result.
     warning = verb.format_result_warnings(result)
     assert "consumer-edited" in warning
-    assert "skills/to-prd/SKILL.md" in warning
+    assert "skills/to-spec/SKILL.md" in warning
 
 
 def test_push_flag_pushes_to_branch_without_pr(tmp_path, rec):
@@ -3596,7 +3596,7 @@ def test_activation_output_joins_streams_with_newline(tmp_path):
 
 
 # --------------------------------------------------------------------------
-# Retired files (docs/prd/rvw01-sole-requester.md, ADR-0031)
+# Retired files (docs/legacy-prd/rvw01-sole-requester.md, ADR-0031)
 # --------------------------------------------------------------------------
 
 # A pristine copy of the retired Copilot caller workflow, snapshotted before

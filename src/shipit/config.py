@@ -147,7 +147,7 @@ def load(path: str | Path) -> dict:
 #
 # ``[shipit].version`` pins the shipit commit that last wrote the managed set;
 # ``[managed]`` is the per-unit pristine-hash map the next re-install compares
-# against (docs/dev/architecture.lex §6, docs/prd/install-reconciliation.md). tomllib is read-only,
+# against (docs/dev/architecture.lex §6, docs/legacy-prd/install-reconciliation.md). tomllib is read-only,
 # so the writer below hand-serializes these two flat string tables and splices
 # them into an existing file, leaving any ``[secrets]`` (and anything else the
 # consumer owns) textually untouched.
@@ -292,7 +292,7 @@ class ToolchainEntry:
     registry, :mod:`shipit.tools.registry`), and the per-path producing-command
     ``commands`` overrides — tool slot → argv — with which a nonstandard repo
     opts one leg out of a registry default without forking the tool
-    (docs/prd/tol01-ci-tools.md story 4). Empty ``commands`` means every tool
+    (docs/legacy-prd/tol01-ci-tools.md story 4). Empty ``commands`` means every tool
     runs its registry default on this leg.
     """
 

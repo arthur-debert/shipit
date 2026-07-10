@@ -51,7 +51,7 @@ The coordinator reads/researches to brief the work, then delegates. It does not 
 
 ### 1.2. Implementation (the implementer subagent)
 
-The coordinator SPAWNS an IMPLEMENTER to do the task + tests — shipit OWNS spawning (ADR-0017 / ADR-0019), so the **Tree** is always minted FOR the Run, never provisioned by hand. Two launch paths, both routing the Run into an isolated Tree: the `shipit spawn subagent --repo R --epic E --ws N --issue I --role implementer` verb (it resolves the base and creates the Tree, then roots a headless agent in it — for a work stream (`--epic E --ws N`) the verb cuts the WS Tree off the epic-grouped base `origin/E/umbrella` and its draft PR targets the epic branch `E/umbrella`, matching the coordinator-driven epic topology; it fail-closes loudly if `origin/E/umbrella` is absent on the remote — never a silent fallback to `origin/main` (\#176, closed). For a standalone issue (`--issue N` with NO `--epic`/`--ws`) the same verb cuts `issues/<id>/<session>` (session default `work`) off `origin/main`, its draft PR targeting `main` — the single-issue analog of the work-stream path (ADR-0026)), or the in-CC `Agent(isolation:"worktree")` tool, whose spawn the `WorktreeCreate` hook auto-routes into a Tree. The coordinator never runs `shipit tree create` by hand to provision a Run and never points an Agent tool at an external checkout. A Tree is a dissociated clone rooted as the Run's cwd (no bash-cwd footgun), NOT a native `git worktree` — that path is denied (ADR-0014) — so concurrent agents never collide on one checkout; [see](./docs/prd/where-to-do-work.md). The implementer runs the checks (`shipit lint`) and tests (`pixi run test`) green BEFORE opening the PR — CI runs the same as required checks, so local green is necessary for CI green.
+The coordinator SPAWNS an IMPLEMENTER to do the task + tests — shipit OWNS spawning (ADR-0017 / ADR-0019), so the **Tree** is always minted FOR the Run, never provisioned by hand. Two launch paths, both routing the Run into an isolated Tree: the `shipit spawn subagent --repo R --epic E --ws N --issue I --role implementer` verb (it resolves the base and creates the Tree, then roots a headless agent in it — for a work stream (`--epic E --ws N`) the verb cuts the WS Tree off the epic-grouped base `origin/E/umbrella` and its draft PR targets the epic branch `E/umbrella`, matching the coordinator-driven epic topology; it fail-closes loudly if `origin/E/umbrella` is absent on the remote — never a silent fallback to `origin/main` (\#176, closed). For a standalone issue (`--issue N` with NO `--epic`/`--ws`) the same verb cuts `issues/<id>/<session>` (session default `work`) off `origin/main`, its draft PR targeting `main` — the single-issue analog of the work-stream path (ADR-0026)), or the in-CC `Agent(isolation:"worktree")` tool, whose spawn the `WorktreeCreate` hook auto-routes into a Tree. The coordinator never runs `shipit tree create` by hand to provision a Run and never points an Agent tool at an external checkout. A Tree is a dissociated clone rooted as the Run's cwd (no bash-cwd footgun), NOT a native `git worktree` — that path is denied (ADR-0014) — so concurrent agents never collide on one checkout; [see](./docs/legacy-prd/where-to-do-work.md). The implementer runs the checks (`shipit lint`) and tests (`pixi run test`) green BEFORE opening the PR — CI runs the same as required checks, so local green is necessary for CI green.
 
 Check fidelity: a check that reads ambient local state (a sibling checkout, a machine-only tool, an env var CI lacks) passes locally and lies about CI. If a check needs something, make CI provide it.
 
@@ -82,7 +82,7 @@ An epic — a feature of multiple PRs — is the SAME coordinator + role-split m
 
 This topology is FIXED policy, not a choice: the coordinator does NOT ask the human to pick a PR strategy (one big PR, one PR per workstream to `main`, an epic branch) — a multi-PR feature runs on the epic branch, full stop.
 
-A feature is planned before execution via `/planning` (ideation -\> ADRs -\> PRD -\> docs PR, then epic/WS decomposition -\> issues).
+A feature is planned before execution via `/planning` (ideation -\> ADRs -\> Spec -\> docs PR, then epic/WS decomposition -\> issues).
 
 Full topology — per-workstream delegation, integration ordering, convergence, the docs pass, the umbrella, changelog/release status. [See](./docs/dev/epics.lex) before running an epic.
 
@@ -122,7 +122,7 @@ Every change ships as an agent-driven PR. The shipit **PR engine is authoritativ
 it reads where a PR stands and emits the **single next action**. Don't carry the policy
 (reviewers, waits, breakers) in your head — run the tool and do what it returns.
 
-**Planning a new feature/epic?** Run `/planning` first — it walks overview → ADRs → PRD → issues, checking in with you at the overview and the docs PR.
+**Planning a new feature/epic?** Run `/planning` first — it walks overview → ADRs → Spec → issues, checking in with you at the overview and the docs PR.
 
 ### Commands
 

@@ -16,7 +16,7 @@ in [../../AGENTS.lex], applied here per workstream.
 
 Before execution, a new feature is planned via `/planning` — the
 orchestrator that drives ideation, the overview gate, the ADRs
-(`/grill-me-with-docs`), the PRD under `docs/prd/` (`/to-prd`), the
+(`/grill-me-with-docs`), the Spec under `docs/spec/` (`/to-spec`), the
 docs PR, then epic/WS decomposition into issues (`/to-tickets`). Each Work
 Stream is a vertical slice — a sub-issue of the epic, with blocked-by
 dependencies.
@@ -24,7 +24,7 @@ dependencies.
 1. Information gathering
 
     The coordinator is briefed as in the single-task cycle's information-gathering
-    step in [../../AGENTS.lex] — via the epic tracker issue, the PRD, or a chat
+    step in [../../AGENTS.lex] — via the epic tracker issue, the Spec, or a chat
     with the maintainer. It does the general reading/research and CREATES the epic
     branch (`EPIC/umbrella` — see [./naming.lex]). Its workspace needs no manual
     step: a coordinator session already runs inside its own ephemeral
@@ -36,7 +36,7 @@ dependencies.
     how Runs get their Tree minted FOR them (covered under Delegation per
     workstream — by `shipit spawn subagent` or the `WorktreeCreate` hook, never
     hand-created). The Tree is a dissociated clone, never a native `git worktree`
-    (ADR-0014 / see [../prd/where-to-do-work.md]). It asks the maintainer for
+    (ADR-0014 / see [../legacy-prd/where-to-do-work.md]). It asks the maintainer for
     decisions/clarifications as needed.
 
 2. Delegation per workstream

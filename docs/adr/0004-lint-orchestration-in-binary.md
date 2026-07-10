@@ -20,7 +20,7 @@ binary with the identical config — "both agree" because there is one transcrip
 rules, not two. Full rationale is in `docs/dev/architecture.lex §5` (why a binary, not
 templated tasks) and `§7` (lint checks: one definition, hard).
 
-## Resolved details (carried from docs/prd/lint-checks.md)
+## Resolved details (carried from docs/legacy-prd/lint-checks.md)
 
 - **Provisioning / the conda-forge gap.** prettier and markdownlint-cli ARE on
   conda-forge, so the anticipated npm path is unnecessary — every linter is a

@@ -1,7 +1,7 @@
 """`shipit ci` — the PR-time routing surface the ``wf-checks`` block calls.
 
 ``shipit ci plan`` is the ONE planner invocation behind the block's job matrix
-(docs/prd/tol01-ci-tools.md story 15; ADR-0040: every decision the matrix
+(docs/legacy-prd/tol01-ci-tools.md story 15; ADR-0040: every decision the matrix
 encodes comes out of the fixture-tested planner, the block routes and nothing
 else). The pure planning — trigger ladder, thin/full scope, runner defaults,
 setup-pixi env-set identity, cache descriptors — lives in
@@ -53,7 +53,7 @@ def missing_lanes_message() -> str:
     is a copy-paste away (the ordinary required+local checks)."""
     return (
         f"no [lanes] declared in {config.CONFIG_NAME} — `shipit ci plan` routes "
-        "CI from that declaration (docs/prd/tol01-ci-tools.md story 14). "
+        "CI from that declaration (docs/legacy-prd/tol01-ci-tools.md story 14). "
         "Declare e.g.:\n"
         '  [lanes.lint]\n  run = "lint"\n  required = true\n  local = true\n'
         '  [lanes.test]\n  run = "test"\n  required = true\n  local = true'
