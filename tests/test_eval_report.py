@@ -578,6 +578,52 @@ def test_read_jsonl_warns_on_a_non_object_line(tmp_path, caplog):
     assert "list" in warning
 
 
+def test_aggregate_waits_out_an_in_flight_exclusive_append(tmp_path):
+    # RVW03-WS03: DuckDB's `read_json_auto` reads the store directly, bypassing the
+    # per-open lock the Python readers take. `aggregate` guards its DuckDB reads
+    # with a shared `flock`, so a concurrent appender's exclusive lock blocks the
+    # report until that append's flush completes — no half-flushed line reaches
+    # DuckDB, no crashed query. Proven by holding LOCK_EX from another thread:
+    # aggregate must NOT finish while the lock is held, then completes correctly
+    # once it releases (the shared/exclusive locks contend because flock keys on
+    # the open file description, so two separate opens contend even in-process).
+    import fcntl
+    import threading
+
+    _, _, path = _seed(tmp_path)
+    holding = threading.Event()
+    release = threading.Event()
+
+    def hold_exclusive():
+        with path.open("a", encoding="utf-8") as fh:
+            fcntl.flock(fh, fcntl.LOCK_EX)
+            holding.set()
+            release.wait(timeout=10)
+        # LOCK_EX released when the handle closes here.
+
+    holder = threading.Thread(target=hold_exclusive, daemon=True)
+    holder.start()
+    try:
+        assert holding.wait(timeout=10)
+        done = threading.Event()
+        result: dict = {}
+
+        def run_aggregate():
+            result["report"] = report.aggregate(path)
+            done.set()
+
+        reader = threading.Thread(target=run_aggregate, daemon=True)
+        reader.start()
+        # Blocked on the shared lock while the exclusive lock is held.
+        assert not done.wait(timeout=0.5)
+        release.set()
+        assert done.wait(timeout=10)
+        assert result["report"].total_runs == 3
+    finally:
+        release.set()
+        holder.join(timeout=10)
+
+
 def test_run_renders_the_review_axis_from_the_same_family_root(tmp_path, monkeypatch):
     base, _, _ = _seed_rounds(tmp_path)
     monkeypatch.setattr(report, "_resolve_repo", lambda start: _REPO)

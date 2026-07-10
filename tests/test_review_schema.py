@@ -155,14 +155,38 @@ def test_is_review_shaped_predicate():
     assert not is_review_shaped({"summary": {}, "comments": {}})
 
 
+#: A COMPLETE (balanced) JSON object nested far past the decoder's recursion
+#: limit — the pathological blob a broken/hostile agent can emit.
+_DEEP_OBJECT = '{"a":' * 60000 + "1" + "}" * 60000
+
+
 def test_deeply_nested_object_blob_raises_value_error_not_recursion_error():
     """Deeply nested untrusted output would exhaust the JSON decoder's recursion
     limit; the parser must degrade to a plain ``ValueError`` (→ BackendError),
     never a ``RecursionError`` crash — and must do so FAST, without re-decoding
     the blob from each of its interior braces."""
-    blob = '{"a":' * 60000 + "1" + "}" * 60000
     with pytest.raises(ValueError, match="Could not parse valid JSON"):
-        extract_json(blob)
+        extract_json(_DEEP_OBJECT)
+
+
+def test_a_deeply_nested_object_blob_does_not_hide_a_following_review():
+    """The RecursionError branch must STEP PAST a complete over-deep OBJECT (not
+    just a brace-free array) and recover a review printed after it — the array
+    variant below is trivially stepped over by ``text.find("{")`` and so does not
+    exercise this path. Checked with and without the review-shape predicate."""
+    text = f"{_DEEP_OBJECT}\n{_REVIEW_JSON}"
+    assert extract_json(text) == _REVIEW
+    assert extract_json(text, want=is_review_shaped) == _REVIEW
+
+
+def test_a_truncated_deeply_nested_object_blob_stops_the_scan():
+    """An UNTERMINATED over-deep object has no findable end, so the scan stops
+    rather than guess where it closes — a following object is deliberately not
+    recovered (the stream is already broken). It must still fail as a plain
+    ``ValueError``, never a ``RecursionError``."""
+    truncated = '{"a":' * 60000  # no closing braces
+    with pytest.raises(ValueError, match="Could not parse valid JSON"):
+        extract_json(f"{truncated}\n{_REVIEW_JSON}")
 
 
 def test_a_deeply_nested_array_blob_does_not_hide_a_following_review():
@@ -171,3 +195,14 @@ def test_a_deeply_nested_array_blob_does_not_hide_a_following_review():
     and recovers the review after it."""
     blob = "[" * 5000 + "]" * 5000
     assert extract_json(f"{blob}\n{_REVIEW_JSON}") == _REVIEW
+
+
+def test_a_bare_non_object_json_value_is_not_accepted():
+    """`extract_json` is typed and documented to yield a JSON OBJECT: a fast path
+    that parses to a bare array / string / number must fall through and, with
+    nothing else to find, raise ``ValueError`` — never hand a non-mapping to a
+    caller (e.g. the calibrator's `_unwrap_output`) that would then crash on
+    ``.get``. Holds for the generic (`want=None`) call, not only the review path."""
+    for bare in ("[1, 2, 3]", '"just a string"', "42"):
+        with pytest.raises(ValueError, match="Could not parse valid JSON"):
+            extract_json(bare)

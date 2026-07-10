@@ -37,7 +37,8 @@ import fcntl
 import json
 import logging
 import sys
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TextIO
@@ -193,6 +194,23 @@ def _group_query(key_expr: str, order_by: str) -> str:
     """
 
 
+@contextmanager
+def _shared_lock(path: Path) -> Iterator[None]:
+    """Hold a shared ``flock`` (``LOCK_SH``) on ``path`` for the wrapped block.
+
+    For a reader whose actual file I/O is NOT its own locked handle — DuckDB's
+    ``read_json_auto`` opens the store itself (:func:`aggregate`) — so the lock
+    rides a separate fd held open around the read. Advisory locking is
+    cooperative: while this shared lock is held, a concurrent appender's
+    :func:`~shipit.harness.eval.store.append_record` cannot take its exclusive
+    lock, so no half-flushed line is visible to the read (RVW03-WS03). Released
+    when the fd closes at block exit. ``path`` must exist (the caller checks).
+    """
+    with path.open(encoding="utf-8") as fh:
+        fcntl.flock(fh, fcntl.LOCK_SH)
+        yield
+
+
 def aggregate(
     store_path: str | Path, rounds_path: str | Path | None = None
 ) -> EvalReport:
@@ -224,29 +242,38 @@ def aggregate(
 
     con = duckdb.connect(":memory:")
     try:
-        # A store whose rows predate a field's introduction has NO such column at
-        # all, so a query referencing it would fail to bind. Consult the inferred
-        # schema and fall back to the constant bucket for an absent group column, so
-        # the report is tolerant of a mixed-schema store (e.g. pre-v3 records with no
-        # `eval.invocation`) instead of raising.
-        present = _present_columns(con, str(path))
-        role_key = f"COALESCE(CAST({_ROLE_FIELD} AS VARCHAR), '{_UNKNOWN_ROLE}')"
-        variant_key = _VARIANT_KEY
-        invocation_key = (
-            _INVOCATION_KEY
-            if _column(_INVOCATION_FIELD) in present
-            else f"'{_NO_INVOCATION}'"
-        )
-        # The day bucket is the ISO timestamp's date prefix — taken as the leading
-        # 10 chars so it never depends on DuckDB parsing the timezone offset.
-        day_key = f"SUBSTR(CAST({_TIMESTAMP_FIELD} AS VARCHAR), 1, 10)"
+        # DuckDB's `read_json_auto` reads the store at the OS level, BYPASSING the
+        # per-open lock `_read_jsonl` / `store.read_records` take — so hold a shared
+        # lock across EVERY DuckDB read of the file (RVW03-WS03): it blocks a
+        # concurrent appender's exclusive lock for the span, so DuckDB can never
+        # read a half-flushed final line and crash the whole query with a JSON parse
+        # error. (The `total`/`EvalReport` build below touches no file, so it needs
+        # no lock.)
+        with _shared_lock(path):
+            # A store whose rows predate a field's introduction has NO such column
+            # at all, so a query referencing it would fail to bind. Consult the
+            # inferred schema and fall back to the constant bucket for an absent
+            # group column, so the report is tolerant of a mixed-schema store (e.g.
+            # pre-v3 records with no `eval.invocation`) instead of raising.
+            present = _present_columns(con, str(path))
+            role_key = f"COALESCE(CAST({_ROLE_FIELD} AS VARCHAR), '{_UNKNOWN_ROLE}')"
+            variant_key = _VARIANT_KEY
+            invocation_key = (
+                _INVOCATION_KEY
+                if _column(_INVOCATION_FIELD) in present
+                else f"'{_NO_INVOCATION}'"
+            )
+            # The day bucket is the ISO timestamp's date prefix — taken as the
+            # leading 10 chars so it never depends on DuckDB parsing the timezone
+            # offset.
+            day_key = f"SUBSTR(CAST({_TIMESTAMP_FIELD} AS VARCHAR), 1, 10)"
 
-        by_role = _run_group(con, role_key, str(path), _ORDER_BY_RUNS)
-        by_variant = _run_group(con, variant_key, str(path), _ORDER_BY_RUNS)
-        by_invocation = _run_group(con, invocation_key, str(path), _ORDER_BY_RUNS)
-        # The day trend orders chronologically by the date key, not by run count,
-        # so a busy older day cannot jump ahead of a quieter newer one.
-        by_day = _run_group(con, day_key, str(path), _ORDER_BY_KEY)
+            by_role = _run_group(con, role_key, str(path), _ORDER_BY_RUNS)
+            by_variant = _run_group(con, variant_key, str(path), _ORDER_BY_RUNS)
+            by_invocation = _run_group(con, invocation_key, str(path), _ORDER_BY_RUNS)
+            # The day trend orders chronologically by the date key, not by run
+            # count, so a busy older day cannot jump ahead of a quieter newer one.
+            by_day = _run_group(con, day_key, str(path), _ORDER_BY_KEY)
         total = sum(row.runs for row in by_role)
         return EvalReport(
             total_runs=total,
