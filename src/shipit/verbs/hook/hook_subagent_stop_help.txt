@@ -1,0 +1,4 @@
+`shipit hook subagent-stop` evaluates a subagent run at terminal SubagentStop.
+
+It is the subagent counterpart to `stop`, used for role-run accounting and
+harness checks.

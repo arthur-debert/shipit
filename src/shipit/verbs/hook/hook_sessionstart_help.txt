@@ -1,0 +1,6 @@
+`shipit hook sessionstart` activates repository tooling and records coordinator
+liveness.
+
+It writes activation into `CLAUDE_ENV_FILE`, exports log context, writes the
+session pidfile, emits a session event, and warns when the session appears to be
+running in a source clone instead of an isolated Tree.

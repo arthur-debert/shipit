@@ -1,0 +1,10 @@
+`shipit` is the portfolio standardization tool.
+
+It provisions repository conventions, runs the standardized lint, test, build,
+and e2e surfaces, manages isolated Trees for agent work, drives draft PRs
+through the review loop, records the dev-cycle log, and supports measured
+review experiments.
+
+Use `shipit --help` for the terse command map and `shipit <command> help` for a
+long-form guide when a command provides one. Use `shipit --version` to identify
+the exact running build.

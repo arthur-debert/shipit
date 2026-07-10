@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from importlib import resources
 
 import click
 import pytest
@@ -30,6 +31,9 @@ from shipit.review.curve import convergence_curve, render_curve_report
 from shipit.review.groundtruth import parse_fixture
 from shipit.review.labrun import plan_points, resolve_pins, run_cell
 from shipit.spawn.launch import LaunchResult
+from shipit.verbs.lab import lab_group
+from shipit.verbs.lab import report as report_verb
+from shipit.verbs.lab import run as run_verb
 
 # A single-pass review whose finding lexically matches the fixture label below
 # (same file, line in range, claim-token overlap above the threshold).
@@ -161,6 +165,19 @@ def test_lab_long_form_help_command(capsys):
     out = capsys.readouterr().out
     assert "`shipit lab` runs measured experiments" in out
     assert "shipit lab run CELL" in out
+
+
+def test_lab_long_form_help_uses_command_named_resources():
+    files = resources.files("shipit.verbs.lab")
+    assert files.joinpath("lab_help.txt").is_file()
+    assert files.joinpath("lab_run_help.txt").is_file()
+    assert files.joinpath("lab_report_help.txt").is_file()
+    assert not files.joinpath("help.txt").is_file()
+    assert not files.joinpath("run_help.txt").is_file()
+    assert not files.joinpath("report_help.txt").is_file()
+    assert "help" in lab_group.commands
+    assert run_verb.cmd.help_resource == "lab_run_help.txt"
+    assert report_verb.cmd.help_resource == "lab_report_help.txt"
 
 
 def test_lab_run_long_form_help_leaf(capsys):

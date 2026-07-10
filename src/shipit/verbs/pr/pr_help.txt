@@ -1,0 +1,7 @@
+`shipit pr` drives a draft PR through review, checks, mergeability, and the
+ready flip.
+
+Use `shipit pr status` for a read-only snapshot, `shipit pr next` to perform the
+single engine-reported next action, `shipit pr wait` when the engine needs time,
+and `shipit pr ready` only when the guarded state says the PR is ready. Humans
+merge after the ready flip.

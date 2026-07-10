@@ -1,0 +1,6 @@
+`shipit changelog coalesce VERSION` cuts release notes for a supplied version.
+
+A prerelease version prints or writes the coalesced notes without consuming the
+fragments. A final version moves the fragments into `CHANGELOG/VERSION.md` and
+re-renders `CHANGELOG.md`. The version is supplied by the caller; this command
+does not infer bumps.

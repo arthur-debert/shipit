@@ -1,0 +1,6 @@
+`shipit eval score` scores banked review-round records against the in-repo
+ground-truth fixture.
+
+It reports recall, false positives, unadjudicated emissions, and near-misses per
+variant. Scoring is deterministic and token-free, so it is safe to rerun while
+developing review strategy.

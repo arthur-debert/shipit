@@ -1,0 +1,5 @@
+`shipit install` writes shipit's repository integration files.
+
+It lays down or updates managed launchers, hooks, agent definitions, workflow
+blocks, and local configuration according to the requested mode. Use dry-run or
+PR modes when reviewing broad repository standardization changes.

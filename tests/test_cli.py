@@ -3,6 +3,60 @@
 from shipit import cli
 
 
+def _public_command_paths(command, path=()):
+    if not hasattr(command, "commands"):
+        return
+    for name, child in command.commands.items():
+        if name == "help" or getattr(child, "hidden", False):
+            continue
+        child_path = (*path, name)
+        yield child_path
+        yield from _public_command_paths(child, child_path)
+
+
+def test_root_long_form_help(capsys):
+    rc = cli.main(["help"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "`shipit` is the portfolio standardization tool." in out
+    assert "shipit <command> help" in out
+
+
+def test_group_long_form_help(capsys):
+    rc = cli.main(["pr", "review", "help"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "`shipit pr review` contains reviewer-facing actions." in out
+    assert "_run" not in out
+
+
+def test_leaf_long_form_help_preserves_click_help(capsys):
+    rc = cli.main(["build", "help"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "`shipit build` runs the repository's declared build legs." in out
+    assert "Usage:" not in out
+
+    rc = cli.main(["build", "--help"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Usage:" in out
+    assert "declared build legs" not in out
+
+
+def test_long_form_help_resources_cover_public_commands():
+    expected = {(), *_public_command_paths(cli.root)}
+    assert set(cli._HELP_RESOURCES) == expected
+    assert ("pr", "review", "_run") not in cli._HELP_RESOURCES
+
+
+def test_long_form_help_resource_filename_convention():
+    for path, (_, resource) in cli._HELP_RESOURCES.items():
+        assert resource.endswith("_help.txt")
+        command_name = "shipit" if not path else path[-1].replace("-", "_")
+        assert command_name in resource.removesuffix("_help.txt")
+
+
 def test_help_lists_gh_setup(capsys):
     rc = cli.main(["--help"])
     assert rc == 0

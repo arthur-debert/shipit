@@ -1,0 +1,5 @@
+`shipit spawn brief ROLE` prints a role's task brief template.
+
+The template is the task-specific half of a spawned agent prompt. Fill every
+slot before spawning so the implementer or shepherd has the issue, checks,
+governing docs, and boundaries.

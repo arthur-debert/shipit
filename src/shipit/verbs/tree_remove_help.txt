@@ -1,0 +1,4 @@
+`shipit tree remove TARGET` deletes one Tree by path or directory name.
+
+Removal refuses ambiguous targets and protects work that exists only in that
+Tree. Use `--yes` only when you deliberately want to skip the confirmation gate.

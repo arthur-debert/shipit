@@ -1,0 +1,5 @@
+`shipit tree create` provisions an isolated Tree and prints its READY summary.
+
+It accepts exactly one shape: `--issue N`, `--epic E --ws N`, or `--branch NAME`.
+The planner resolves the branch, base, and directory, then creates a
+fully-independent clone under the central root.

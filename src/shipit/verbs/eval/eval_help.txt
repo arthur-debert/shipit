@@ -1,0 +1,6 @@
+`shipit eval` reads local objective-evaluation data.
+
+It is the reporting and adjudication side of the agent harness. Terminal hooks
+write never-committed JSONL stores; eval commands aggregate those stores, score
+review-round records against the ground-truth fixture, and bank human
+adjudication back into that fixture.

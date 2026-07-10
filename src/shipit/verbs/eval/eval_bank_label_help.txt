@@ -1,0 +1,5 @@
+`shipit eval bank label` adds a new adjudicated label to the fixture.
+
+A label names the pinned PR range, file and optional line range, severity,
+verdict, claim, and provenance. This grows the benchmark when a reviewed
+emission identifies a real issue not already represented.

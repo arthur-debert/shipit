@@ -21,6 +21,7 @@ from .verbs import e2e as e2e_verb
 from .verbs import gh_setup, install, lint, logs, verify_apps
 from .verbs import test as test_verb
 from .verbs._context import resolve_root_context
+from .verbs._help import register_long_help
 from .verbs.changelog import changelog as changelog_group
 from .verbs.ci import ci as ci_group
 from .verbs.eval import eval_group
@@ -337,6 +338,70 @@ root.add_command(fleet_group)
 # one workflow/job under act in a container against a crafted event, so a
 # workflow edit is validated locally before any push (PRD stories 40/41).
 root.add_command(wf_group)
+
+
+_HELP_RESOURCES = {
+    (): ("shipit", "shipit_help.txt"),
+    ("gh-setup",): ("shipit.verbs", "gh_setup_help.txt"),
+    ("verify-apps",): ("shipit.verbs", "verify_apps_help.txt"),
+    ("install",): ("shipit.verbs", "install_help.txt"),
+    ("lint",): ("shipit.verbs", "lint_help.txt"),
+    ("test",): ("shipit.verbs", "test_help.txt"),
+    ("build",): ("shipit.verbs", "build_help.txt"),
+    ("e2e",): ("shipit.verbs", "e2e_help.txt"),
+    ("changelog",): ("shipit.verbs", "changelog_help.txt"),
+    ("changelog", "check"): ("shipit.verbs", "changelog_check_help.txt"),
+    ("changelog", "render"): ("shipit.verbs", "changelog_render_help.txt"),
+    ("changelog", "coalesce"): ("shipit.verbs", "changelog_coalesce_help.txt"),
+    ("ci",): ("shipit.verbs", "ci_help.txt"),
+    ("ci", "plan"): ("shipit.verbs", "ci_plan_help.txt"),
+    ("logs",): ("shipit.verbs", "logs_help.txt"),
+    ("provision",): ("shipit.verbs", "provision_help.txt"),
+    ("provision", "lexd"): ("shipit.verbs", "provision_lexd_help.txt"),
+    ("pr",): ("shipit.verbs.pr", "pr_help.txt"),
+    ("pr", "status"): ("shipit.verbs.pr", "pr_status_help.txt"),
+    ("pr", "review"): ("shipit.verbs.pr", "pr_review_help.txt"),
+    ("pr", "review", "request"): ("shipit.verbs.pr", "pr_review_request_help.txt"),
+    ("pr", "review", "replay"): ("shipit.verbs.pr", "pr_review_replay_help.txt"),
+    ("pr", "next"): ("shipit.verbs.pr", "pr_next_help.txt"),
+    ("pr", "ready"): ("shipit.verbs.pr", "pr_ready_help.txt"),
+    ("pr", "classify"): ("shipit.verbs.pr", "pr_classify_help.txt"),
+    ("pr", "wait"): ("shipit.verbs.pr", "pr_wait_help.txt"),
+    ("hook",): ("shipit.verbs.hook", "hook_help.txt"),
+    ("hook", "pretooluse"): ("shipit.verbs.hook", "hook_pretooluse_help.txt"),
+    ("hook", "stop"): ("shipit.verbs.hook", "hook_stop_help.txt"),
+    ("hook", "subagent-stop"): ("shipit.verbs.hook", "hook_subagent_stop_help.txt"),
+    ("hook", "sessionstart"): ("shipit.verbs.hook", "hook_sessionstart_help.txt"),
+    ("hook", "worktreecreate"): ("shipit.verbs.hook", "hook_worktreecreate_help.txt"),
+    ("hook", "worktreeremove"): ("shipit.verbs.hook", "hook_worktreeremove_help.txt"),
+    ("eval",): ("shipit.verbs.eval", "eval_help.txt"),
+    ("eval", "report"): ("shipit.verbs.eval", "eval_report_help.txt"),
+    ("eval", "score"): ("shipit.verbs.eval", "eval_score_help.txt"),
+    ("eval", "bank"): ("shipit.verbs.eval", "eval_bank_help.txt"),
+    ("eval", "bank", "label"): ("shipit.verbs.eval", "eval_bank_label_help.txt"),
+    ("eval", "bank", "alias"): ("shipit.verbs.eval", "eval_bank_alias_help.txt"),
+    ("lab",): ("shipit.verbs.lab", "lab_help.txt"),
+    ("lab", "run"): ("shipit.verbs.lab", "lab_run_help.txt"),
+    ("lab", "report"): ("shipit.verbs.lab", "lab_report_help.txt"),
+    ("log",): ("shipit.verbs", "log_help.txt"),
+    ("log", "event"): ("shipit.verbs", "log_event_help.txt"),
+    ("tree",): ("shipit.verbs", "tree_help.txt"),
+    ("tree", "create"): ("shipit.verbs", "tree_create_help.txt"),
+    ("tree", "list"): ("shipit.verbs", "tree_list_help.txt"),
+    ("tree", "remove"): ("shipit.verbs", "tree_remove_help.txt"),
+    ("tree", "gc"): ("shipit.verbs", "tree_gc_help.txt"),
+    ("spawn",): ("shipit.verbs", "spawn_help.txt"),
+    ("spawn", "subagent"): ("shipit.verbs", "spawn_subagent_help.txt"),
+    ("spawn", "brief"): ("shipit.verbs", "spawn_brief_help.txt"),
+    ("session",): ("shipit.verbs", "session_help.txt"),
+    ("session", "codex"): ("shipit.verbs", "session_codex_help.txt"),
+    ("fleet",): ("shipit.verbs", "fleet_help.txt"),
+    ("fleet", "sweep"): ("shipit.verbs", "fleet_sweep_help.txt"),
+    ("wf",): ("shipit.verbs", "wf_help.txt"),
+    ("wf", "test"): ("shipit.verbs", "wf_test_help.txt"),
+}
+
+register_long_help(root, _HELP_RESOURCES)
 
 
 def main(argv: list[str] | None = None) -> int:

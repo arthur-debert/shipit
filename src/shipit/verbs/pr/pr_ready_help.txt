@@ -1,0 +1,5 @@
+`shipit pr ready` flips a draft PR to ready for human validation and merge.
+
+The guard refuses early. Use it only after reviews are addressed, checks are
+green, and the PR is mergeable. `--undo` returns a ready PR to draft when a human
+requests more changes.

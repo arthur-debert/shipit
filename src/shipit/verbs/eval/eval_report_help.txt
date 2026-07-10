@@ -1,0 +1,5 @@
+`shipit eval report` summarizes the local objective-eval store by role, variant,
+and time.
+
+Use it to inspect what agent runs produced locally. It is a read-only
+aggregation over the harness JSONL store.

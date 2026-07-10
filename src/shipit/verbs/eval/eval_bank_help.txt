@@ -1,0 +1,4 @@
+`shipit eval bank` records a human adjudication into the ground-truth fixture.
+
+This is the write side of review evaluation. Use it only after deciding whether
+a finding is a real label or a recognized alias for an existing label.

@@ -1,0 +1,4 @@
+`shipit hook stop` evaluates a coordinator run at terminal Stop.
+
+It records and checks end-of-run harness expectations without blocking the host;
+failures are fail-open.

@@ -1,0 +1,4 @@
+`shipit pr review replay RANGE` reviews a local commit range offline.
+
+It can run one monolithic pass or a fan-out pass set, then writes the local
+review-round record. It does not post to GitHub and does not mutate a PR.

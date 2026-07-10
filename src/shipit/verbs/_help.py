@@ -2,8 +2,7 @@
 
 Click's ``--help`` remains the terse syntax/options map. This module serves
 standalone UTF-8 text bundled beside command modules for the longer,
-task-oriented help pages exposed as git-style ``help`` subcommands. The first
-implemented slice is ``shipit lab help`` plus the lab leaf commands.
+task-oriented help pages exposed as git-style ``help`` subcommands.
 """
 
 from __future__ import annotations
@@ -40,6 +39,54 @@ def register_help_command(group: click.Group, *, package: str, resource: str) ->
     group.add_command(help_command(package=package, resource=resource))
 
 
+def enable_leaf_help(
+    command: click.Command, *, package: str, resource: str
+) -> click.Command:
+    """Teach one leaf command to reserve leading ``help`` for long-form help."""
+    if isinstance(command, click.Group):
+        raise TypeError("enable_leaf_help only accepts leaf commands")
+    if not isinstance(command, HelpableCommand):
+        command.__class__ = HelpableCommand
+    command.help_package = package  # type: ignore[attr-defined]
+    command.help_resource = resource  # type: ignore[attr-defined]
+    return command
+
+
+def register_long_help(
+    root: click.Group, specs: dict[tuple[str, ...], tuple[str, str]]
+) -> None:
+    """Wire long-form help resources onto public commands named by path.
+
+    ``()`` names the root group. Hidden commands are intentionally refused so
+    internal entrypoints cannot accidentally join the human help surface.
+    """
+    for path, (package, resource) in specs.items():
+        command = _resolve_command(root, path)
+        if getattr(command, "hidden", False):
+            dotted = " ".join(path) or root.name or "root"
+            raise RuntimeError(
+                f"cannot register human help for hidden command {dotted}"
+            )
+        if isinstance(command, click.Group):
+            register_help_command(command, package=package, resource=resource)
+        else:
+            enable_leaf_help(command, package=package, resource=resource)
+
+
+def _resolve_command(root: click.Group, path: tuple[str, ...]) -> click.Command:
+    command: click.Command = root
+    for part in path:
+        if not isinstance(command, click.Group):
+            joined = " ".join(path)
+            raise RuntimeError(f"long help path crosses leaf command: {joined}")
+        try:
+            command = command.commands[part]
+        except KeyError as exc:
+            joined = " ".join(path)
+            raise RuntimeError(f"long help path does not exist: {joined}") from exc
+    return command
+
+
 class HelpableCommand(click.Command):
     """A leaf command that reserves leading ``help`` for long-form help.
 
@@ -65,7 +112,7 @@ class HelpableCommand(click.Command):
     def _first_positional_arg(self, ctx: click.Context, args: list[str]) -> str | None:
         parser = self.make_parser(ctx)
         try:
-            opts, _, _ = parser.parse_args(args=list(args))
+            opts, leftover, _ = parser.parse_args(args=list(args))
         except click.ClickException:
             return None
         for param in self.get_params(ctx):
@@ -75,4 +122,6 @@ class HelpableCommand(click.Command):
                     first = value[0] if value else None
                     return first if isinstance(first, str) else None
                 return value if isinstance(value, str) else None
+        if leftover and leftover[0] == "help":
+            return "help"
         return None

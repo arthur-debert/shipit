@@ -85,7 +85,7 @@ def run(
     name="run",
     cls=HelpableCommand,
     help_package=__package__,
-    help_resource="run_help.txt",
+    help_resource="lab_run_help.txt",
 )
 @click.argument("cell_ref", metavar="CELL")
 @click.option(

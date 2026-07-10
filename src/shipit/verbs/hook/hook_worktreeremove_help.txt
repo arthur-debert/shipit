@@ -1,0 +1,5 @@
+`shipit hook worktreeremove` observes host worktree removal.
+
+It is the cleanup companion to Tree provisioning: it receives host lifecycle
+payloads and lets shipit update its local records without turning cleanup into a
+manual user workflow.

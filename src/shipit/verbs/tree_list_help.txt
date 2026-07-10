@@ -1,0 +1,4 @@
+`shipit tree list` prints the known Tree fleet.
+
+Use it to find Tree paths, branches, and ages before removing or debugging a
+Run. JSON output is available for scripts that need the same registry view.

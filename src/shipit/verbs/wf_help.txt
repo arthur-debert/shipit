@@ -1,0 +1,4 @@
+`shipit wf` contains workflow-development tools.
+
+Use it to validate GitHub Actions workflow edits locally before a push. The
+current public verb is `shipit wf test`.

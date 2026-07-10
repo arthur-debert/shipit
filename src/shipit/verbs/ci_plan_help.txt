@@ -1,0 +1,6 @@
+`shipit ci plan` emits the GitHub Actions job matrix for the repository's
+declared `[lanes]`.
+
+A workflow plan job captures the JSON and fans out into `pixi run <run>` jobs.
+Pull-request events can narrow work by base-branch diff; non-PR events force
+full scope.

@@ -1,0 +1,5 @@
+`shipit hook pretooluse` evaluates a tool call before it runs.
+
+Its main human meaning is the coordinator guard: coordinator sessions are denied
+direct code edits, while role-scoped subagents may edit according to their role.
+Malformed input fails open so a broken hook does not strand the user.

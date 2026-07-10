@@ -1,0 +1,5 @@
+`shipit pr next` performs the PR engine's single next action.
+
+The engine owns the policy for reviewer requests, waits, breakers, and ready
+state. Run this command, inspect what it did, and loop only when the engine says
+there is another action.

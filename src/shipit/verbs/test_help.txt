@@ -1,0 +1,5 @@
+`shipit test` runs the repository's declared test legs.
+
+It reads `.shipit.toml [toolchains]` and dispatches each selected leg to the
+toolchain's test command. Bare `shipit test` runs every leg. Pass one leg to
+narrow, and use arguments after `--` only when exactly one leg is selected.

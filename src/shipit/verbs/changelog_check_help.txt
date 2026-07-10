@@ -1,0 +1,5 @@
+`shipit changelog check` verifies that `CHANGELOG.md` matches a fresh render of
+the release-note fragments.
+
+Use it in PR checks and locally before pushing. It catches missing renders after
+adding a fragment and hand-edits to `CHANGELOG.md` that do not have a fragment.

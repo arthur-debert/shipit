@@ -1,0 +1,5 @@
+`shipit tree` manages isolated Trees.
+
+Trees are independent clones used by agent work so concurrent runs do not
+collide in one checkout. Use `create` to provision one, `list` to inspect the
+fleet, `remove` to delete one Tree, and `gc` to reclaim provably safe old Trees.

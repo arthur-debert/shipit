@@ -1,0 +1,5 @@
+`shipit pr review` contains reviewer-facing actions.
+
+Use `shipit pr review request` to request or re-request the configured reviewer
+set on a PR. Use `shipit pr review replay` to run an offline review over a local
+commit range and write a review-round record without touching a PR.

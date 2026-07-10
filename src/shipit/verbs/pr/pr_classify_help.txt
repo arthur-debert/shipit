@@ -1,0 +1,5 @@
+`shipit pr classify` records a correction for a review finding's severity.
+
+Use it when a reviewer-emitted severity needs an explicit local override. The
+correction is keyed by the finding comment and feeds the PR engine's later
+decisions.

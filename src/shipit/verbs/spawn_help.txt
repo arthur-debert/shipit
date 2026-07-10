@@ -1,0 +1,5 @@
+`shipit spawn` launches backend-agent Runs that shipit owns end to end.
+
+`shipit spawn subagent` creates the Run's Tree and starts the backend agent
+rooted there. `shipit spawn brief` prints the role-specific task brief template
+the coordinator fills before spawning.

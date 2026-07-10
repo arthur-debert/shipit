@@ -1,0 +1,5 @@
+`shipit logs` locates and reads shipit's durable per-repo JSONL log.
+
+Use it to inspect operational records, dev-cycle events, PR review state, and
+session flow. Filters such as `--flow`, `--session current`, `--epic`, `--ws`,
+`--pr`, and `--agent` narrow the story without editing the underlying log.
