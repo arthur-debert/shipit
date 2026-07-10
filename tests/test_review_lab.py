@@ -267,6 +267,7 @@ def test_every_point_launches_the_up_front_bytes_not_a_re_read_of_the_original(
     materializes the hashed bytes per point, so a rewrite of the original never
     reaches a launch — even a later blind sweep."""
     view = replay.resolve_range("HEAD~1..HEAD", workdir=str(checkout))
+    monkeypatch.setattr(producer.shutil, "which", lambda binary: f"/usr/bin/{binary}")
     monkeypatch.chdir(checkout)
     instr = checkout / "lab" / "instructions"
     instr.mkdir(parents=True)
