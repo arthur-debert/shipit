@@ -549,7 +549,10 @@ def run_calibrator(
     nonzero child / unparseable output — carrying the raw for the salvage
     conventions), or :class:`CalibrationContractError` (parseable output that
     violates the judge contract) — the fan-out maps each to a degraded,
-    non-blocking round (ADR-0006).
+    non-blocking round (ADR-0006). Passing neither or both of ``pr_number`` /
+    ``commit_range`` is a CALLER contract violation and raises
+    :class:`ValueError` from :func:`build_calibrator_task` before any launch — a
+    programming bug at the call site, not a degraded round.
     """
     identity = agent_backend.by_name(config.backend)
     if shutil.which(identity.binary) is None:
