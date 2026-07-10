@@ -14,8 +14,9 @@ in the default path. The WS05/F2 baseline (#638, #665) showed the LLM
 recall (it refuted a true major the passes found, dragging recall below the
 single-pass baseline), so it is OPTIONAL and OFF by default. It is kept warm —
 concept, config, hooks, and the F2 reproduction-based floor all wired but
-dormant (the ADR-0044 ``classify`` pattern) — and a reviewer opts it back on by
-configuring a ``calibrator`` in its Roster entry; when on it dedups,
+dormant (the ADR-0044 ``classify`` pattern) — and it is opted back on by setting
+the table-level ``[reviewers].calibrator`` key (one shared judge, not a
+per-reviewer entry); when on it dedups,
 adversarially verifies, normalizes severity onto the one ruler, and assigns
 every judged finding a **Disposition**.
 

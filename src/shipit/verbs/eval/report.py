@@ -367,7 +367,9 @@ def _read_jsonl(path: str | Path | None) -> list[dict]:
 
     Tolerant by design (the stores are local, append-only telemetry): a
     malformed or non-object line is skipped, never an error, so one bad write
-    cannot take the whole report down.
+    cannot take the whole report down. The file is STREAMED line-by-line (not
+    ``read_text().splitlines()``) so an unbounded append-only store does not
+    allocate the whole file plus a split-line list at once.
     """
     if path is None:
         return []
@@ -375,15 +377,16 @@ def _read_jsonl(path: str | Path | None) -> list[dict]:
     if not target.exists():
         return []
     records: list[dict] = []
-    for line in target.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        try:
-            parsed = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(parsed, dict):
-            records.append(parsed)
+    with target.open(encoding="utf-8") as fh:
+        for line in fh:
+            if not line.strip():
+                continue
+            try:
+                parsed = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict):
+                records.append(parsed)
     return records
 
 

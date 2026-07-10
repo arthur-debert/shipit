@@ -358,3 +358,32 @@ def test_rescoped_view_rediffs_over_the_fix_range(monkeypatch):
     assert rescoped.number == 5
     assert rescoped.repo == "owner/repo"
     assert rescoped.head_ref == "feature/x"
+
+
+def test_rescoped_view_wraps_a_git_failure_in_review_error(monkeypatch):
+    # The incremental re-diff fails LOUD (ReviewError carrying the PR + range),
+    # never a raw git error or a silently empty review — by round >= 2 both
+    # endpoints are proven present, so a diff failure is exceptional.
+    view = diff.review_view(
+        number=5,
+        repo="owner/repo",
+        head_sha="c" * 40,
+        base_ref="main",
+        base_sha="a" * 40,
+        diff="full pr diff",
+        is_draft=False,
+        changed_files=["a.py"],
+        workdir="/wd",
+        head_ref="feature/x",
+    )
+
+    def boom(base, head, *, cwd):
+        raise diff.execrun.ExecError(["git", "diff"], rc=1, stderr="fatal: bad object")
+
+    monkeypatch.setattr(diff.git, "diff_range", boom)
+    with pytest.raises(diff.ReviewError) as excinfo:
+        diff.rescoped_view(view, "b" * 40)
+    message = str(excinfo.value)
+    assert "failed to compute the incremental fix-range diff" in message
+    assert "#5" in message
+    assert f"{'b' * 40}..{'c' * 40}" in message

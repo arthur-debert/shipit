@@ -136,7 +136,8 @@ def finding_from_dict(raw: dict) -> Finding:
     (:func:`shipit.finding.resolve_severity`): an absent or unparseable severity
     lands on ``major`` — it forces a round rather than slipping past the Breaker.
     String fields fall back to ``""``, a non-int ``line`` to ``None``, a
-    non-number ``confidence`` to ``None``.
+    non-number ``confidence`` to ``None`` — and a ``bool`` (an ``int`` subclass)
+    is rejected as neither, so ``line: true`` never becomes line 1.
     """
     line = raw.get("line")
     confidence = raw.get("confidence")
@@ -148,11 +149,18 @@ def finding_from_dict(raw: dict) -> Finding:
         severity=resolve_severity(adapter=parse_severity(raw.get("severity"))),
         text=_str_field(raw.get("text")),
         file=_str_field(raw.get("file")),
-        line=line if isinstance(line, int) else None,
+        # `bool` is a subclass of `int`, so exclude it explicitly — `line: true`
+        # must NOT coerce to line 1 and anchor a comment to the wrong location.
+        line=line if isinstance(line, int) and not isinstance(line, bool) else None,
         category=_str_field(raw.get("category")),
         # JSON Schema `type: number` admits an int (`1`); coerce so a Finding's
-        # confidence is honestly a float and never a bare int downstream.
-        confidence=float(confidence) if isinstance(confidence, (int, float)) else None,
+        # confidence is honestly a float and never a bare int downstream. Exclude
+        # `bool` (an int subclass) so `confidence: true` is rejected, not 1.0.
+        confidence=(
+            float(confidence)
+            if isinstance(confidence, (int, float)) and not isinstance(confidence, bool)
+            else None
+        ),
         evidence=_str_field(raw.get("evidence")),
         fix=_str_field(raw.get("fix")),
     )

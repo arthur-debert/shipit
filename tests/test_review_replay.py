@@ -192,6 +192,26 @@ def test_run_replay_writes_the_round_record_and_touches_no_pr(
     assert "acme" in str(record_path) and "widget" in str(record_path)
 
 
+def test_run_replay_propagates_a_record_write_failure(
+    checkout, launcher, tmp_path, monkeypatch
+):
+    # The replay record is the PRODUCT, not fail-open telemetry (unlike the
+    # review-path tee): a write failure PROPAGATES rather than being swallowed.
+    view = replay.resolve_range("HEAD~1..HEAD", workdir=str(checkout))
+
+    def boom(*args, **kwargs):
+        raise OSError("store unwritable")
+
+    monkeypatch.setattr(replay.roundrecord, "record_round", boom)
+    with pytest.raises(OSError, match="store unwritable"):
+        replay.run_replay(
+            agent_backend.CODEX,
+            view,
+            launcher=launcher["launch"],
+            base_dir=tmp_path / "state",
+        )
+
+
 # --- the CLI verb's user-facing errors ------------------------------------------
 
 

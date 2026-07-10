@@ -46,7 +46,7 @@ The PR state engine drives the loop and is the SOLE requester of required review
 - `shipit pr wait` — the ONE blocking verb (ADR-0034): the
   coordinator parks behind `--until reviews-in|ready` instead of polling.
 
-Reviewers ride adapters: app reviewers (Copilot) through native review-request edges, local-agent reviewers (agy-local, codex-local) through detached runs whose funnel is a check run on the PR (ADR-0005) — the PR itself is the whole store. Re-review is per-reviewer policy, default review-once; a round cap / no-major-finding breaker ends the loop rather than iterating forever. PR-flow vocabulary: `CONTEXT.md`.
+Reviewers ride adapters: app reviewers (Copilot) through native review-request edges, local-agent reviewers (agy-local, codex-local) through detached runs whose funnel is a check run on the PR (ADR-0005) — the PR itself is the whole store. Re-review is per-reviewer policy — the code default is head-strict (re-review every push, ADR-0043), and the shipped Copilot default is an explicit review-once opt-out; a round cap / no-major-finding breaker ends the loop rather than iterating forever. PR-flow vocabulary: `CONTEXT.md`.
 
 Addressing is its own role: ONE SHEPHERD per PR (ADR-0035), briefed cold on round 1, parked between rounds, resumed per round. Each round it triages the open threads — fix, or reply with a rationale — resolves every thread, pushes the round's commits at once, and parks again.
 

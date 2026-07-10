@@ -98,12 +98,12 @@ def build_reviewer_task(
        captures stdout and posts it as the bot through the funnel's check-run gate.
 
     ``dimension`` narrows the task to ONE **Dimension pass** (RVW02-WS04,
-    ADR-0045): a focus section scopes the SEARCH to that dimension — severity is
-    still stated per the shared ladder, but final severity is assigned at
-    calibration, and the pass is told overlap/pre-existing findings are fine
-    (the Calibrator dedups and routes; prompt-mandated silence would hide the
-    routing decision from the record). ``None`` keeps the monolithic full-scope
-    task.
+    ADR-0045): a focus section scopes the SEARCH to that dimension. By the
+    shipped default (calibrator OFF, RVW02-WS08) the passes' union is
+    MECHANICALLY deduped and posted with each pass's own severity — there is no
+    routing stage to drop out-of-scope findings, so the pass is told to report
+    only findings the PR diff INTRODUCED or EXPOSED and its stated severity is
+    the posted one. ``None`` keeps the monolithic full-scope task.
 
     When ``schema_inline`` is True the expected JSON shape is appended in prose (for
     a backend without native schema enforcement — agy); otherwise it is omitted (codex
@@ -162,22 +162,24 @@ captures your output and posts the review."""
 def _dimension_section(dimension: Dimension) -> str:
     """The focus section that narrows a reviewer task to ONE dimension pass.
 
-    Scopes the SEARCH, not the severity: the pass still states severity on the
-    shared ladder (a useful prior), but the Calibrator assigns the final one
-    (ADR-0045 — dimensions scope the search; severity is assigned at
-    calibration). The pass is explicitly released from budgeting across other
-    concerns (that anchoring is what the fan-out removes) and from suppressing
-    pre-existing issues (routing them out is the Calibrator's job, recorded —
-    not prompt-mandated silence).
+    Scopes the SEARCH: the pass is released from budgeting across other concerns
+    (that anchoring is what the fan-out removes) so it hunts ONE dimension
+    exhaustively. By the shipped default (calibrator OFF, RVW02-WS08) the union
+    is mechanically deduped and posted with each pass's OWN severity — there is
+    no routing stage, so the pass reports only findings the diff INTRODUCED or
+    EXPOSED (a purely pre-existing issue would otherwise post as blocking) and
+    its stated severity is the posted one. An opted-in Calibrator (ADR-0045)
+    still dedups/verifies/renormalizes what the passes report.
     """
     return f"""\
 DIMENSION FOCUS — {dimension.title}: this review is ONE scoped pass of a \
-parallel fan-out; other passes cover the other dimensions, and a calibration \
-stage dedups the union, verifies each finding, and assigns final severity. \
+parallel fan-out; other passes cover the other dimensions, and their union is \
+mechanically deduped and posted with each pass's own severity. \
 Hunt EXHAUSTIVELY and ONLY for: {dimension.focus}
-Report a finding even if it looks pre-existing (it may predate this PR) — a \
-later stage routes out-of-scope findings explicitly; do not silently drop \
-them. Do not pad with findings outside this dimension's focus."""
+Report ONLY findings this PR's diff INTRODUCED or EXPOSED — a purely \
+pre-existing issue outside the diff is out of scope here and must not be \
+posted. Your stated severity is the posted severity. Do not pad with findings \
+outside this dimension's focus."""
 
 
 def build_incremental_reviewer_task(

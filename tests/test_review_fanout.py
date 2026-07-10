@@ -719,7 +719,10 @@ def test_by_name_is_the_prompt_slice_the_passes_launch_with():
     )
     assert "DIMENSION FOCUS — Cross-file invariants" in task
     assert "READ BEYOND THE DIFF" in task
-    assert "do not silently drop" in task
+    # Default path (calibrator OFF, WS08): the pass self-scopes to the diff —
+    # there is no routing stage to drop a purely pre-existing finding.
+    assert "INTRODUCED or EXPOSED" in task
+    assert "Your stated severity is the posted severity" in task
 
 
 # --- incremental rounds (RVW02-WS06, ADR-0045) ------------------------------
