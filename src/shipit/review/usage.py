@@ -93,18 +93,33 @@ def from_claude_envelope(envelope: Mapping[str, Any]) -> TokenUsage:
     ``input + output + cache_read + cache_creation`` — every token the run
     consumed, the same fold the transcript extractor's convention uses for the
     prompt side. A malformed/absent block degrades to :data:`UNREPORTED`
-    (never a guessed number).
+    (never a guessed number). A counter that is PRESENT but corrupt (a bool, a
+    negative, a non-int) is a shape-drift signal for the whole block, not an
+    absent field: it poisons the measurement to :data:`UNREPORTED` rather than
+    folding in as a partial (undercounted) total — an absent counter is simply
+    left out of the sum.
     """
     usage = envelope.get("usage")
     if not isinstance(usage, Mapping):
         return UNREPORTED
-    input_tokens = _int_or_none(usage.get("input_tokens"))
-    output_tokens = _int_or_none(usage.get("output_tokens"))
-    cache_read = _int_or_none(usage.get("cache_read_input_tokens")) or 0
-    cache_creation = _int_or_none(usage.get("cache_creation_input_tokens")) or 0
+    counts: dict[str, int] = {}
+    for key in (
+        "input_tokens",
+        "output_tokens",
+        "cache_read_input_tokens",
+        "cache_creation_input_tokens",
+    ):
+        if key not in usage:
+            continue  # absent → not summed (legitimately omitted, e.g. no cache)
+        value = _int_or_none(usage[key])
+        if value is None:
+            return UNREPORTED  # present but corrupt — the block is untrustworthy
+        counts[key] = value
+    input_tokens = counts.get("input_tokens")
+    output_tokens = counts.get("output_tokens")
     if input_tokens is None and output_tokens is None:
         return UNREPORTED
-    total = (input_tokens or 0) + (output_tokens or 0) + cache_read + cache_creation
+    total = sum(counts.values())
     return TokenUsage(
         total_tokens=total,
         source=SOURCE_CLAUDE_ENVELOPE,

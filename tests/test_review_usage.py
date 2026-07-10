@@ -11,6 +11,8 @@ number and never a zero.
 
 from __future__ import annotations
 
+import pytest
+
 from shipit.review import usage
 
 # --- the claude envelope (probed 2.1.206) ---------------------------------------
@@ -53,13 +55,26 @@ def test_claude_envelope_missing_or_malformed_usage_is_unreported():
     )
 
 
-def test_claude_envelope_rejects_bools_and_negatives_as_counts():
-    # JSON `true` is a Python bool (an int subclass) and a negative count is
-    # nonsense — neither may masquerade as a measurement.
-    parsed = usage.from_claude_envelope(
-        {"usage": {"input_tokens": True, "output_tokens": -3}}
-    )
-    assert parsed is usage.UNREPORTED
+@pytest.mark.parametrize(
+    "block",
+    [
+        # both counts corrupt — JSON `true` is a Python bool (an int subclass)
+        # and a negative count is nonsense; neither may masquerade as a count.
+        {"input_tokens": True, "output_tokens": -3},
+        # ONE valid count next to a corrupt one: the corrupt field must not be
+        # treated as absent (which would report a partial, undercounted total).
+        {"input_tokens": 10, "output_tokens": -3},
+        {"input_tokens": True, "output_tokens": 7},
+        # a corrupt cache counter poisons the block the same way, even though
+        # input/output themselves are valid — the block has drifted.
+        {"input_tokens": 5, "output_tokens": 7, "cache_read_input_tokens": -1},
+    ],
+)
+def test_claude_envelope_corrupt_count_poisons_whole_block(block):
+    # A present-but-corrupt counter is a shape-drift signal for the whole block,
+    # so the parser degrades to the explicit unknown rather than reporting a
+    # partial total that silently drops the bad field.
+    assert usage.from_claude_envelope({"usage": block}) is usage.UNREPORTED
 
 
 # --- the codex stderr figure (probed 0.139.0) ------------------------------------

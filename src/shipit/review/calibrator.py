@@ -578,13 +578,18 @@ def _adapter_for(config: CalibratorConfig):
     if config.backend == "claude":
         return ClaudeAdapter(model=config.model, reasoning=config.reasoning)
     if config.backend == "codex":
-        model = config.model if config.model is not None else "pro"
-        return CodexAdapter(model=model, reasoning=config.reasoning)
+        # config.model None → the adapter's own backend-defined default, never a
+        # duplicated model literal here that could drift from the backend identity.
+        if config.model is None:
+            return CodexAdapter(reasoning=config.reasoning)
+        return CodexAdapter(model=config.model, reasoning=config.reasoning)
     if config.backend == "antigravity":
         # agy has NO reasoning knob (probed 1.1.1): the config level is dropped
         # here so the record stamps unset, never an echoed unapplied value.
-        model = config.model if config.model is not None else "pro"
-        return AntigravityAdapter(model=model, timeout=config.timeout)
+        # A None model defers to the adapter's own default (same non-duplication).
+        if config.model is None:
+            return AntigravityAdapter(timeout=config.timeout)
+        return AntigravityAdapter(model=config.model, timeout=config.timeout)
     # CalibratorConfig construction already validated backend membership; an
     # unlisted-but-registered backend falls back to its registry default.
     return resolve_adapter(config.backend)
