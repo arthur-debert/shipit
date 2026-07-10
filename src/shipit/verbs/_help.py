@@ -15,7 +15,13 @@ import click
 
 def load_help_text(package: str, resource: str) -> str:
     """Return one package-relative help text file as UTF-8 text."""
-    return resources.files(package).joinpath(resource).read_text(encoding="utf-8")
+    try:
+        return resources.files(package).joinpath(resource).read_text(encoding="utf-8")
+    except FileNotFoundError as exc:
+        raise click.ClickException(
+            f"bundled help resource {package}:{resource} is missing; "
+            "reinstall shipit or file a bug"
+        ) from exc
 
 
 def help_command(name: str = "help", *, package: str, resource: str) -> click.Command:
@@ -66,6 +72,7 @@ class HelpableCommand(click.Command):
             if isinstance(param, click.Argument):
                 value = opts.get(param.name)
                 if isinstance(value, (tuple, list)):
-                    return value[0] if value else None
-                return value
+                    first = value[0] if value else None
+                    return first if isinstance(first, str) else None
+                return value if isinstance(value, str) else None
         return None

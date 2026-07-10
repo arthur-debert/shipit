@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import subprocess
 
+import click
 import pytest
 from click.testing import CliRunner
 
@@ -228,6 +229,24 @@ def test_lab_report_click_help_stays_terse():
     assert "Usage:" in result.output
     assert "--fixture" in result.output
     assert "`shipit lab report CELL` renders" not in result.output
+
+
+def test_long_form_help_missing_resource_is_a_click_error():
+    from shipit.verbs import _help
+
+    with pytest.raises(click.ClickException) as excinfo:
+        _help.load_help_text("shipit.verbs.lab", "missing_help.txt")
+
+    assert "bundled help resource shipit.verbs.lab:missing_help.txt is missing" in str(
+        excinfo.value
+    )
+
+
+def test_helpable_command_missing_positional_returns_none():
+    from shipit.verbs.lab import run as run_verb
+
+    ctx = click.Context(run_verb.cmd)
+    assert run_verb.cmd._first_positional_arg(ctx, []) is None
 
 
 def test_lab_run_cell_still_reaches_the_run_callback(monkeypatch):
