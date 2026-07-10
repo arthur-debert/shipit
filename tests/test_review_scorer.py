@@ -331,3 +331,45 @@ class TestReportSanitization:
         )
         text = render_report(score_records(fx, [record([near])]))
         assert "\x1b" not in text
+
+    def test_option_like_label_id_stays_a_positional_argument(self):
+        # A fixture label id can be any non-empty string, including one shaped
+        # like a flag. The near-miss command must place it after a `--` so a
+        # copy-paste can't bind it to `bank alias`'s `--fixture` option.
+        hostile_id = "--fixture=/tmp/other.toml"
+        fx = parse_fixture(
+            {
+                "schema": 1,
+                "version": 3,
+                "prs": [
+                    {
+                        "id": "core-440",
+                        "repo": "phos-editor/core",
+                        "pr": 440,
+                        "base_sha": BASE,
+                        "head_sha": HEAD,
+                    }
+                ],
+                "labels": [
+                    {
+                        "id": hostile_id,
+                        "pr": "core-440",
+                        "file": "phos-bench/src/bin/gpu_compare.rs",
+                        "lines": [100, 160],
+                        "severity": "major",
+                        "verdict": "real",
+                        "confirmed": True,
+                        "claim": GT_CLAIM,
+                        "provenance": {"kind": "fix-commit", "ref": "f211ab3"},
+                    }
+                ],
+            }
+        )
+        near = finding(
+            "phos-bench/src/bin/gpu_compare.rs",
+            120,
+            "the fallback decision sizes its staging buffer allocation incorrectly",
+        )
+        text = render_report(score_records(fx, [record([near])]))
+        assert f"bank alias --text <phrasing> -- {hostile_id}" in text
+        assert f"bank alias {hostile_id}" not in text

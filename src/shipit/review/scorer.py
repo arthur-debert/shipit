@@ -363,11 +363,13 @@ def _adjudication_lines(items: Sequence[Adjudication]) -> list[str]:
         head = f"    [{pr_id}] {loc} ({severity}) — {_sanitize(item.text)}"
         out.append(head)
         if item.kind == "near-miss":
-            # shlex.quote so the copy-paste command stays one safe argument even
-            # if the (already control-char-stripped) id carries whitespace.
+            # The id is fixture-supplied, so the copy-paste command guards it on
+            # two layers: shlex.quote keeps it one shell token (whitespace), and
+            # the `--` terminator keeps Click from parsing an option-looking id
+            # (e.g. `--fixture=…`) as an option instead of the LABEL_ID argument.
             out.append(
                 f"      ↳ near-missed label {label_id!r} — if same defect:"
-                f" shipit eval bank alias {shlex.quote(label_id)} --text <phrasing>"
+                f" shipit eval bank alias --text <phrasing> -- {shlex.quote(label_id)}"
             )
         elif item.kind == "unmatched":
             out.append(
