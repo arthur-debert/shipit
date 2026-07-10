@@ -1,11 +1,11 @@
-# Ground-truth fixture with banked adjudication; the scorer is deterministic
+# Ground-truth fixture with banked Adjudication; the scorer is deterministic
 
 Review quality was measured by humans reading eval reports against three
 historically-known majors — small enough that one finding swung recall by 33
 points (RVW02 WS05/#638, #665), and no false-positive rate existed at all. We
 decided review measurement runs against a **versioned, in-repo ground-truth
 fixture**: a corpus of pinned historical PR ranges whose labels carry provenance
-(a fix commit, a maintainer-confirmed thread, or a banked adjudication), scored
+(a fix commit, a maintainer-confirmed thread, or a banked Adjudication), scored
 by a **fully deterministic scorer** — same file, line within the label's range,
 normalized claim-token overlap. No LLM is ever part of the measuring
 instrument: a misjudging semantic matcher is the RVW02 calibrator failure

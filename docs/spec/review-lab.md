@@ -31,7 +31,8 @@ babysitting big runs is itself a failure mode.
 
 ## Solution
 
-The Review Lab stands on the Phase-1 harness (sanctioned `replay --fanout`,
+The Review Lab stands on the Phase-1 harness (sanctioned
+`shipit pr review replay --fanout`,
 per-run artifact bundles, robustness fixes, real token/reasoning measurement
 — #688–#691) and adds four pieces:
 
