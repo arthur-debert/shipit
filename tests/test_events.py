@@ -120,6 +120,8 @@ def test_the_starting_vocabulary_is_registered():
         "review.deduped",
         "review.calibrated",
         "finding.dispositioned",
+        "review.pass.launched",
+        "review.pass.settled",
         "round.detected",
         "breaker.fired",
         "wait.started",

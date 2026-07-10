@@ -72,6 +72,13 @@ class Filter:
     record without the key cannot match it: absent means unbound, not
     wildcard.
 
+    The review-observability trio (RVW03-WS02) selects the same way on the
+    review sub-agent EXTRAS the fan-out stamps per record — not domain keys,
+    but flat fields all the same: ``reviewer`` (the reviewing agent),
+    ``run_id`` (one pass/calibrator run), ``round_id`` (one fan-out round) —
+    so ``shipit logs --run <id>`` isolates one pass's interleaved lines and
+    ``--round <id>`` groups a whole round's.
+
     Filtering requires parsing, so with any filter ACTIVE a non-record line
     (blank padding, a torn write) simply cannot match and is dropped silently —
     in both modes: a malformed line's fields are unknowable, and surfacing it
@@ -90,6 +97,9 @@ class Filter:
         ws: int | None = None,
         agent: str | None = None,
         role: str | None = None,
+        reviewer: str | None = None,
+        run_id: str | None = None,
+        round_id: str | None = None,
     ) -> None:
         self.events_only = events_only
         self.fields = {
@@ -101,6 +111,9 @@ class Filter:
                 "ws": ws,
                 "agent": agent,
                 "role": role,
+                "reviewer": reviewer,
+                "run_id": run_id,
+                "round_id": round_id,
             }.items()
             if value is not None
         }

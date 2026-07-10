@@ -107,6 +107,14 @@ EVENT_NAMES = frozenset(
         "review.deduped",
         "review.calibrated",
         "finding.dispositioned",
+        # per-pass progress inside a fan-out round (RVW03-WS02): a multi-minute
+        # round is opaque between launch and union without these — one
+        # `launched` per pass/calibrator as it starts and one `settled` as it
+        # returns (outcome + duration + run_id/dimension riding the record), so
+        # a coordinating agent tailing `shipit logs -f --events` sees which
+        # passes are running/settled without waiting for the round to end.
+        "review.pass.launched",
+        "review.pass.settled",
         # the blocking waiter (`shipit pr wait`, ADR-0034): the wait's own
         # lifecycle — started at entry, one state_changed per poll tick where
         # the observed state moved (the tail-able progress trail), and exactly

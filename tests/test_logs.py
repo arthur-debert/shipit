@@ -400,6 +400,52 @@ def test_domain_filters_behave_identically_under_raw(tmp_path, capsys):
     assert [json.loads(line)["msg"] for line in out] == ["implementer spawned"]
 
 
+def test_review_correlation_filters_compose_as_and_through_the_verb(tmp_path, capsys):
+    # --reviewer/--run/--round thread through the VERB's build_query onto the
+    # record filter and AND-compose: only the calibrator run of round r-1 under
+    # reviewer codex survives, proving the option→query→filter wiring end to end
+    # (a wrong dest name would drop the field and over-match).
+    _write_log(
+        tmp_path,
+        "\n".join(
+            [
+                _record(
+                    "calibrator launched",
+                    event="review.pass.launched",
+                    reviewer="codex",
+                    run_id="calibrator",
+                    round_id="r-1",
+                ),
+                _record(
+                    "other round's calibrator",
+                    event="review.pass.launched",
+                    reviewer="codex",
+                    run_id="calibrator",
+                    round_id="r-2",
+                ),
+                _record(
+                    "a dimension pass, same round",
+                    event="review.pass.launched",
+                    reviewer="codex",
+                    run_id="run-9",
+                    round_id="r-1",
+                ),
+            ]
+        )
+        + "\n",
+    )
+    rc = logs.run(
+        REPO,
+        query=logs.build_query(
+            reviewer="codex", run_id="calibrator", round_id="r-1", raw=True
+        ),
+        base_dir=tmp_path,
+    )
+    assert rc == 0
+    out = capsys.readouterr().out.splitlines()
+    assert [json.loads(line)["msg"] for line in out] == ["calibrator launched"]
+
+
 def test_cli_logs_help_shows_filter_flags(capsys):
     rc = cli.main(["logs", "--help"])
     assert rc == 0
@@ -588,7 +634,17 @@ def test_cli_logs_help_shows_domain_key_and_flow_flags(capsys):
     rc = cli.main(["logs", "--help"])
     assert rc == 0
     out = capsys.readouterr().out
-    for flag in ("--session", "--epic", "--ws", "--agent", "--role", "--flow"):
+    for flag in (
+        "--session",
+        "--epic",
+        "--ws",
+        "--agent",
+        "--role",
+        "--reviewer",
+        "--run",
+        "--round",
+        "--flow",
+    ):
         assert flag in out
     assert "--agent-ids" in out
 

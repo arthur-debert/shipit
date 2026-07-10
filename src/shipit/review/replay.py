@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import logging
 import time
+import uuid
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -41,6 +42,7 @@ from .. import execrun, git, identity
 from ..agent.backend import Backend
 from ..identity import Sha
 from ..spawn import launch
+from . import artifacts as artifacts_mod
 from . import fanout, producer, roundrecord
 from .calibrator import CalibratorConfig
 from .diff import RangeView, ReviewError
@@ -185,19 +187,64 @@ def run_replay(
     verb can render what was found and where the record landed. The record
     write PROPAGATES on failure — it is the product here, not telemetry (the
     review-path tee is the fail-open twin). ``base_dir`` overrides the store
-    family root (tests); ``launcher`` injects the launch seam (tests).
+    family root (tests) — the per-run artifact bundle (below) roots under the
+    SAME injected family root; ``launcher`` injects the launch seam (tests).
+
+    OBSERVABILITY (RVW03-WS02): the replay's single range pass is a review
+    sub-agent run like any other, so it too persists a per-run artifact bundle
+    (exact prompt, raw streams, meta — unconditional, fail-open) under a minted
+    round id, and its record carries ``round.id`` / ``round.artifacts``, one
+    ``round.runs`` entry, and the run's id on every finding — the same
+    finding↔pass trail as the fan-out's, so replay evidence is as inspectable
+    as a live round's.
     """
     agent = backend.funnel_agent or backend.name
-    start = time.monotonic()
-    review = producer.run_range_review(
-        backend,
-        view,
+    round_id = uuid.uuid4().hex
+    run_id = uuid.uuid4().hex
+    round_dir = artifacts_mod.round_root(view.repo.slug, round_id, base_dir=base_dir)
+    bundle = artifacts_mod.RunArtifacts.under(round_dir, run_id)
+    bundle.record(
+        run_id=run_id,
+        round_id=round_id,
+        kind="range-pass",
+        backend=agent,
         model=model,
-        timeout=timeout,
-        instructions_path=instructions_path,
-        launcher=launcher,
+        range={"base": str(view.base_sha), "head": str(view.head_sha)},
     )
+    run: dict = {
+        "run_id": run_id,
+        "kind": "range-pass",
+        "backend": agent,
+        "model": model,
+        "artifacts": str(bundle.dir) if bundle.dir is not None else None,
+    }
+    start = time.monotonic()
+    try:
+        review = producer.run_range_review(
+            backend,
+            view,
+            model=model,
+            timeout=timeout,
+            instructions_path=instructions_path,
+            launcher=launcher,
+            run_id=run_id,
+            artifacts=bundle,
+        )
+    except Exception as exc:
+        # The failure propagates (replay's record is its product) — but the
+        # bundle settles first, so the prompt + raw streams the launch seam
+        # already wrote are joined by the outcome on disk.
+        bundle.record(
+            outcome="timed_out" if getattr(exc, "timed_out", False) else "failed",
+            duration_ms=int((time.monotonic() - start) * 1000),
+            error=str(exc),
+        )
+        raise
     duration_ms = int((time.monotonic() - start) * 1000)
+    run["duration_ms"] = duration_ms
+    run["outcome"] = "success"
+    run["findings"] = len(review.get("comments") or [])
+    bundle.record(outcome="success", duration_ms=duration_ms, findings=run["findings"])
     record_path = roundrecord.record_round(
         review,
         repo_slug=view.repo.slug,
@@ -208,7 +255,11 @@ def run_replay(
         model=model,
         timeout=timeout,
         instructions_path=instructions_path,
+        findings=roundrecord.dispositioned(review, run_id=run_id),
+        runs=(run,),
         duration_ms=duration_ms,
+        round_id=round_id,
+        artifacts_dir=str(round_dir) if round_dir is not None else None,
         base_dir=base_dir,
     )
     logger.info(
@@ -272,6 +323,7 @@ def run_fanout_replay(
         calibrator=calibrator,
         nit_cap=nit_cap,
         launcher=launcher,
+        artifacts_base_dir=base_dir,
     )
     duration_ms = int((time.monotonic() - start) * 1000)
     record_path = roundrecord.record_round(
@@ -287,6 +339,8 @@ def run_fanout_replay(
         findings=outcome.findings,
         runs=outcome.runs,
         duration_ms=duration_ms,
+        round_id=outcome.round_id,
+        artifacts_dir=outcome.artifacts_dir,
         base_dir=base_dir,
     )
     logger.info(
