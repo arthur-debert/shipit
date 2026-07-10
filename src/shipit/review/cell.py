@@ -25,9 +25,11 @@ Validation posture: LOUD on any defect, including UNKNOWN keys — a misspelled
 knob silently ignored would run a different experiment than the reviewed file
 declares, which is exactly the mislabeled-arm failure the lab exists to kill.
 For the same reason an ``[invocation]`` ``reasoning`` key is REJECTED with its
-own message: no offline replay backend carries a reasoning knob yet
-(post-#685/#691), and accepting the field would stamp arms with a level that
-never reached a backend — the RVW02 failure reproduced in config.
+own message: the codex/claude backends DO carry a reasoning knob now
+(#685/#691), but the lab runner does not yet thread a level from the Cell
+through the replay driver into the backend, so accepting the field would stamp
+arms with a level that never reached a run — the RVW02 failure reproduced in
+config.
 """
 
 from __future__ import annotations
@@ -104,8 +106,9 @@ class CellInvocation:
     :func:`shipit.agent.backend.by_funnel_agent` at run time); ``model`` and
     ``timeout`` apply to every pass unless a per-dimension override
     (:attr:`Cell.dimension_invocations`) narrows one pass. There is
-    deliberately NO ``reasoning`` field: no replay backend carries the knob yet,
-    and a recorded-but-unwired level would mislabel the arm (see module doc).
+    deliberately NO ``reasoning`` field: the backends carry the knob (#685/#691)
+    but the lab runner does not thread a level into the replay driver yet, so a
+    recorded-but-unwired level would mislabel the arm (see module doc).
     """
 
     backend: str = "codex"
@@ -255,10 +258,11 @@ def _parse_invocation(raw: Any, where: str) -> CellInvocation:
         raise CellError(f"{where}: [invocation] must be a table")
     if "reasoning" in raw:
         raise CellError(
-            f"{where}: [invocation] 'reasoning' is not wireable — no offline "
-            "replay backend carries a reasoning knob yet (post-#685/#691), and "
-            "a recorded-but-unapplied level would mislabel the experiment arm. "
-            "Drop the key."
+            f"{where}: [invocation] 'reasoning' is not wireable — the "
+            "codex/claude backends carry a reasoning knob (#685/#691), but the "
+            "lab runner does not thread a level from the Cell into the replay "
+            "driver yet, so a recorded-but-unapplied level would mislabel the "
+            "experiment arm. Drop the key."
         )
     _reject_unknown_keys(raw, ["backend", "model", "timeout", "dimensions"], where)
     defaults = CellInvocation()

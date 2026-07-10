@@ -138,8 +138,9 @@ dedup = "mechanical"        # "mechanical" | "calibrated"
 backend = "codex"           # funnel agent: codex | agy
 model = "pro"
 timeout = "600s"
-# NO `reasoning` key: no replay backend carries the knob yet (post-#685/#691);
-# a recorded-but-unapplied level would mislabel the arm, so it is rejected.
+# NO `reasoning` key: the codex/claude backends carry the knob (#685/#691), but
+# the lab runner does not thread a level into the replay driver yet, so a
+# recorded-but-unapplied level would mislabel the arm — the key is rejected.
 
 # [invocation.dimensions.security-robustness]  # experiment-only per-dimension
 # model = "opus"                               # Invocation overrides (never Roster)

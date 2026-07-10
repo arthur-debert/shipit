@@ -128,17 +128,19 @@ def from_claude_envelope(envelope: Mapping[str, Any]) -> TokenUsage:
     )
 
 
-def from_codex_stderr(stderr: str) -> TokenUsage:
+def from_codex_stderr(stderr: str | None) -> TokenUsage:
     """Usage from ``codex exec``'s stderr log (probed on codex 0.139.0).
 
     codex prints the run's total as a human log line on STDERR — ``tokens
     used`` then a comma-grouped figure (see :data:`_CODEX_TOKENS_LINE`);
     stdout carries only the final message, so this is the ONE stream the
-    figure lives in. No match degrades to :data:`UNREPORTED` — a CLI
-    formatting drift reads as "unknown", never as zero. A match whose digits
-    do not form a valid int (a commas-only capture like ``,,,`` that strips to
-    empty, or a figure past CPython's integer-string-conversion limit) degrades
-    the same way rather than raising out of this untrusted-stderr parse.
+    figure lives in. A ``None`` stderr (a launch result that captured none) is
+    tolerated as absent and degrades like an empty string. No match degrades to
+    :data:`UNREPORTED` — a CLI formatting drift reads as "unknown", never as
+    zero. A match whose digits do not form a valid int (a commas-only capture
+    like ``,,,`` that strips to empty, or a figure past CPython's
+    integer-string-conversion limit) degrades the same way rather than raising
+    out of this untrusted-stderr parse.
     """
     match = _CODEX_TOKENS_LINE.search(stderr or "")
     if match is None:

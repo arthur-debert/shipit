@@ -142,8 +142,9 @@ def test_unknown_pipeline_key_is_loud():
 
 
 def test_invocation_reasoning_is_rejected_as_not_wireable():
-    # No replay backend carries a reasoning knob yet: accepting the field would
-    # stamp arms with a level that never reached a backend — the RVW02 failure.
+    # The backends carry a reasoning knob (#685/#691), but the lab runner does
+    # not thread a level into the replay driver yet: accepting the field would
+    # stamp arms with a level that never reached a run — the RVW02 failure.
     data = _cell_data()
     data["invocation"]["reasoning"] = "high"
     with pytest.raises(CellError, match="reasoning.*not wireable"):

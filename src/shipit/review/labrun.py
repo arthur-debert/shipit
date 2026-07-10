@@ -495,9 +495,12 @@ def _run_point(
     fd, instructions_path = tempfile.mkstemp(
         prefix=f"lab-{cell.id}-", suffix=".txt", text=True
     )
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        fh.write(launch_text)
+    # The `try` opens BEFORE the write: mkstemp already created the file on
+    # disk, so a failing `os.fdopen`/`fh.write` (encoding error, full disk) must
+    # still hit the `finally` that unlinks it — otherwise the temp leaks.
     try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(launch_text)
         if cell.shape == "fanout":
             return replay_mod.run_fanout_replay(
                 backend,
