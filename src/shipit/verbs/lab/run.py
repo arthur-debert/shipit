@@ -131,15 +131,7 @@ def cmd(
     fixture_path: str | None,
     cells_dir: str | None,
 ) -> None:
-    """Run experiment cell CELL over the offline replay driver, foreground.
-
-    CELL is a cell id under lab/cells/ or a path to a cell file. Every
-    (fixture PR × replicate × sweep) point runs through the sanctioned replay
-    driver and lands as a review-round record tagged with the cell's full
-    idempotency key; banked points are REUSED, never re-run (ADR-0049 — extend
-    a curve and pay only for the new points). Informed sweeps compose the
-    prior sweeps' posted findings into the instructions at the runner layer.
-    """
+    """Run experiment cell CELL over the offline replay driver."""
     raise SystemExit(
         run(
             cell_ref,

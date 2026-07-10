@@ -140,12 +140,5 @@ def run(
     help="Cells directory for id references and baselines (default: lab/cells).",
 )
 def cmd(cell_ref: str, fixture_path: str | None, cells_dir: str | None) -> None:
-    """Render CELL's convergence curve from banked review-round records.
-
-    CELL is a cell id under lab/cells/ or a path to a cell file. Prints
-    cumulative major-or-worse recall, false positives / precision, token cost,
-    and latency per sweep point — with the baseline cell's curve beside it for
-    the equal-budget comparison. Deterministic and token-free: scoring banked
-    records is free to re-run forever (ADR-0048/0049).
-    """
+    """Render CELL's convergence curve from banked review-round records."""
     raise SystemExit(run(cell_ref, fixture_path=fixture_path, cells_dir=cells_dir))

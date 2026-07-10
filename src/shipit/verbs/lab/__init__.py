@@ -26,12 +26,8 @@ from .._help import register_help_command
     help=(
         "Review Lab — run and report declarative review experiments "
         "(ADR-0049).\n\n"
-        "`run` executes one committed cell file over the offline replay "
-        "driver, idempotently by key (banked sweep points are reused, never "
-        "re-paid; --force re-runs). `report` renders the cell's convergence "
-        "curve — cumulative recall, precision, token cost, and latency per "
-        "sweep point, compared against its baseline cell at equal budget — "
-        "from the banked records, token-free. `--help` is the map."
+        "Use `run` to execute a cell and `report` to render its banked "
+        "convergence curve. `shipit lab help` is the long-form map."
     ),
 )
 def lab_group() -> None:

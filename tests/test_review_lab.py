@@ -170,12 +170,48 @@ def test_lab_run_long_form_help_leaf(capsys):
     assert "--checkout" in out
 
 
+def test_lab_run_long_form_help_leaf_allows_trailing_options(capsys):
+    rc = cli.main(["lab", "run", "help", "--force"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "`shipit lab run CELL` executes" in out
+    assert "2 executed, 0 reused" not in out
+
+
+def test_lab_run_click_help_stays_terse():
+    from shipit.verbs.lab import run as run_verb
+
+    result = CliRunner().invoke(run_verb.cmd, ["--help"])
+    assert result.exit_code == 0
+    assert "Usage:" in result.output
+    assert "--checkout" in result.output
+    assert "`shipit lab run CELL` executes" not in result.output
+
+
 def test_lab_report_long_form_help_leaf(capsys):
     rc = cli.main(["lab", "report", "help"])
     assert rc == 0
     out = capsys.readouterr().out
     assert "`shipit lab report CELL` renders" in out
     assert "deterministic and token-free" in out
+
+
+def test_lab_report_long_form_help_leaf_allows_trailing_options(capsys):
+    rc = cli.main(["lab", "report", "help", "--fixture", "fixture.toml"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "`shipit lab report CELL` renders" in out
+    assert "deterministic and token-free" in out
+
+
+def test_lab_report_click_help_stays_terse():
+    from shipit.verbs.lab import report as report_verb
+
+    result = CliRunner().invoke(report_verb.cmd, ["--help"])
+    assert result.exit_code == 0
+    assert "Usage:" in result.output
+    assert "--fixture" in result.output
+    assert "`shipit lab report CELL` renders" not in result.output
 
 
 def test_lab_run_cell_still_reaches_the_run_callback(monkeypatch):

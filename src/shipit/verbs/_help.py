@@ -1,9 +1,9 @@
-"""Long-form human help for ``shipit <command> help`` surfaces.
+"""Helpers for long-form human help surfaces.
 
 Click's ``--help`` remains the terse syntax/options map. This module serves
 standalone UTF-8 text bundled beside command modules for the longer,
-task-oriented help pages that should be available as git-style ``help``
-subcommands.
+task-oriented help pages exposed as git-style ``help`` subcommands. The first
+implemented slice is ``shipit lab help`` plus the lab leaf commands.
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ def help_command(name: str = "help", *, package: str, resource: str) -> click.Co
 
     @click.command(name=name)
     def cmd() -> None:
+        """Print the long-form help guide."""
         click.echo(load_help_text(package, resource), nl=False)
 
     return cmd
@@ -37,8 +38,8 @@ class HelpableCommand(click.Command):
     """A leaf command that reserves leading ``help`` for long-form help.
 
     ``shipit lab run CELL`` is intentionally still a leaf command, not a group.
-    This shim intercepts the exact ``shipit lab run help`` shape before Click
-    treats ``help`` as CELL, while leaving every other CELL value untouched.
+    This shim intercepts leading ``help`` before Click treats it as CELL, while
+    leaving every other CELL value untouched.
     """
 
     def __init__(self, *args, help_package: str, help_resource: str, **kwargs) -> None:
@@ -47,7 +48,7 @@ class HelpableCommand(click.Command):
         self.help_resource = help_resource
 
     def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
-        if args == ["help"]:
+        if not ctx.resilient_parsing and args and args[0] == "help":
             click.echo(load_help_text(self.help_package, self.help_resource), nl=False)
             ctx.exit()
         return super().parse_args(ctx, args)

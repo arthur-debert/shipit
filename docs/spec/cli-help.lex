@@ -1,9 +1,12 @@
 Shipit CLI Human Help Draft
 
     This is a proposed long-form help map for `shipit <command> help`.
-    It is intentionally human-oriented: each entry starts with what the
-    command is for, then names the important behavior and boundaries. The
-    terse `--help` surface can stay focused on syntax and options.
+    The implemented slice in the current PR is `shipit lab help`,
+    `shipit lab run help`, and `shipit lab report help`; the remaining
+    command entries below are a draft map for future expansion. The help text
+    is intentionally human-oriented: each entry starts with what the command is
+    for, then names the important behavior and boundaries. The terse `--help`
+    surface can stay focused on syntax and options.
 
     Source notes:
         The tree was derived from the Click command graph rooted at
