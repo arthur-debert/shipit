@@ -154,6 +154,7 @@ def resolve_pins(
             f"{', '.join(map(repr, unknown))}"
         )
     if subset:
+        subset_ids = set(subset)
         outside = [pin_id for pin_id in subset if pin_id not in declared]
         if outside:
             raise CellError(
@@ -161,7 +162,7 @@ def resolve_pins(
                 f"{', '.join(map(repr, outside))} "
                 f"(declared: {', '.join(map(repr, declared))})"
             )
-        declared = tuple(pin_id for pin_id in declared if pin_id in set(subset))
+        declared = tuple(pin_id for pin_id in declared if pin_id in subset_ids)
     return tuple(by_id[pin_id] for pin_id in declared)
 
 
