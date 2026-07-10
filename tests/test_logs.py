@@ -588,7 +588,17 @@ def test_cli_logs_help_shows_domain_key_and_flow_flags(capsys):
     rc = cli.main(["logs", "--help"])
     assert rc == 0
     out = capsys.readouterr().out
-    for flag in ("--session", "--epic", "--ws", "--agent", "--role", "--flow"):
+    for flag in (
+        "--session",
+        "--epic",
+        "--ws",
+        "--agent",
+        "--role",
+        "--reviewer",
+        "--run",
+        "--round",
+        "--flow",
+    ):
         assert flag in out
     assert "--agent-ids" in out
 

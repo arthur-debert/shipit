@@ -93,6 +93,21 @@ def _calibrated(i, finding, disposition=Disposition.POST, **kw):
     return CalibratedFinding(id=i, finding=finding, disposition=disposition, **kw)
 
 
+@pytest.fixture(autouse=True)
+def _tmp_state_root(monkeypatch, tmp_path):
+    """Keep the RVW03-WS02 artifact bundles out of the real user state dir.
+
+    `run_fanout_review` writes per-run bundles under the store family root by
+    default; redirecting `platformdirs.user_state_dir` pins every un-injected
+    write to this test's tmp dir, so the suite never touches a real `$HOME`."""
+    from shipit.harness.eval import store
+
+    monkeypatch.setattr(
+        store.platformdirs, "user_state_dir", lambda name: str(tmp_path / "state")
+    )
+    return tmp_path / "state"
+
+
 @pytest.fixture
 def _seams(monkeypatch):
     """Fake the producer + calibrator seams; returns the capture dict tests
@@ -134,8 +149,11 @@ def _seams(monkeypatch):
 
     monkeypatch.setattr(fanout.producer, "run_tree_review", fake_run_tree_review)
 
-    def fake_run_calibrator(config, union, *, pr_number, cwd, launcher=None):
+    def fake_run_calibrator(
+        config, union, *, pr_number, cwd, launcher=None, artifacts=None
+    ):
         capture["union"] = union
+        capture["calibrator_artifacts"] = artifacts
         assert cwd == "/tree"
         return capture["result"], "cal-run-id", "calibrator task"
 
@@ -308,7 +326,7 @@ def test_calibrator_failure_propagates_and_no_union_is_posted(monkeypatch, _seam
         "test-quality": _pass_review([]),
     }
 
-    def boom(config, union, *, pr_number, cwd, launcher=None):
+    def boom(config, union, *, pr_number, cwd, launcher=None, artifacts=None):
         raise CalibrationContractError("calibrator output missing candidate id 0")
 
     monkeypatch.setattr(fanout, "run_calibrator", boom)
@@ -794,3 +812,165 @@ def test_incremental_pass_failure_fails_the_round(_seams):
         fanout.run_fanout_review(
             agent_backend.CODEX, _incremental_ctx(), incremental=True
         )
+
+
+# ---------------------------------------------------------------------------
+# RVW03-WS02 — per-run artifact bundles + finding↔pass correlation + progress
+# ---------------------------------------------------------------------------
+
+
+def _event_names(caplog):
+    from shipit import events
+
+    return [
+        name
+        for r in caplog.records
+        if (name := getattr(r, events.EXTRA_KEY, None)) is not None
+    ]
+
+
+def test_fanout_persists_bundles_and_correlates_findings_to_passes(
+    _seams, _tmp_state_root, caplog
+):
+    """Every pass — success AND failure — gets an artifact bundle keyed by its
+    run id under the round's directory; the round id/artifacts location ride
+    the outcome; every finding carries its originating pass's run id."""
+    import json as _json
+    import logging as _logging
+    from pathlib import Path as _Path
+
+    from shipit.agent import backend as agent_backend
+
+    _seams["reviews"] = {
+        "correctness": _pass_review([_comment("bug", severity="major")]),
+        "test-quality": RuntimeError("child exploded"),
+    }
+    caplog.set_level(_logging.INFO, logger="shipit.review")
+    outcome = fanout.run_fanout_review(
+        agent_backend.CODEX,
+        _ctx(),
+        dimensions=["correctness", "test-quality"],
+    )
+
+    # The round's observability identity, discoverable from the outcome (and
+    # thence the round record): bundles live under the shared state root.
+    assert outcome.round_id
+    assert outcome.artifacts_dir == str(
+        _tmp_state_root / "review-artifacts" / "owner" / "repo" / outcome.round_id
+    )
+
+    runs = {run["dimension"]: run for run in outcome.runs}
+    ok, bad = runs["correctness"], runs["test-quality"]
+    # Each run entry points at its own bundle dir (named by its run id).
+    assert ok["artifacts"] == str(_Path(outcome.artifacts_dir) / ok["run_id"])
+    assert bad["artifacts"] == str(_Path(outcome.artifacts_dir) / bad["run_id"])
+    # UNCONDITIONAL: the FAILED pass's bundle exists too, meta carrying the
+    # run identity + settled outcome + the untruncated error.
+    bad_meta = _json.loads((_Path(bad["artifacts"]) / "meta.json").read_text())
+    assert bad_meta["run_id"] == bad["run_id"]
+    assert bad_meta["round_id"] == outcome.round_id
+    assert bad_meta["outcome"] == "failed"
+    assert bad_meta["error"] == "child exploded"
+    ok_meta = _json.loads((_Path(ok["artifacts"]) / "meta.json").read_text())
+    assert ok_meta["outcome"] == "success" and ok_meta["findings"] == 1
+
+    # Finding↔pass correlation: the posted finding traces to the pass that
+    # emitted it.
+    assert [j.run_id for j in outcome.findings] == [ok["run_id"]]
+
+    # The coarse progress trail: one launched + one settled event per pass,
+    # each carrying the correlation extras.
+    names = _event_names(caplog)
+    assert names.count("review.pass.launched") == 2
+    assert names.count("review.pass.settled") == 2
+    settled = [
+        r for r in caplog.records if getattr(r, "_event", None) == "review.pass.settled"
+    ]
+    by_dim = {r.dimension: r for r in settled}
+    assert by_dim["correctness"].outcome == "success"
+    assert by_dim["test-quality"].outcome == "failed"
+    assert by_dim["correctness"].run_id == ok["run_id"]
+    assert by_dim["correctness"].round_id == outcome.round_id
+
+
+def test_calibrator_gets_its_own_bundle_and_run_entry_artifacts(
+    _seams, _tmp_state_root
+):
+    """The judge's bundle lives at the fixed `calibrator` name under the round
+    dir (one judge per round; its true run id is post-hoc) and its run entry
+    points there."""
+    from pathlib import Path as _Path
+
+    from shipit.agent import backend as agent_backend
+
+    _seams["reviews"] = {
+        "correctness": _pass_review([_comment("bug", severity="major")])
+    }
+    _seams["result"] = CalibrationResult(
+        overall_feedback="v",
+        entries=(_calibrated(0, _finding(Severity.MAJOR, "bug")),),
+    )
+    outcome = fanout.run_fanout_review(
+        agent_backend.CODEX, _ctx(), dimensions=["correctness"], calibrator=_CAL
+    )
+    cal = next(run for run in outcome.runs if run["kind"] == "calibrator")
+    assert cal["artifacts"] == str(_Path(outcome.artifacts_dir) / "calibrator")
+    # The bundle handle was threaded into run_calibrator (which writes the
+    # prompt/streams at the launch seam).
+    assert _seams["calibrator_artifacts"] is not None
+    assert str(_seams["calibrator_artifacts"].dir) == cal["artifacts"]
+
+
+def test_union_candidates_carry_the_pass_run_id(_seams):
+    """The union tags every candidate with the run id of the pass that emitted
+    it — the join `_pass_run_id` reads back onto the judged findings."""
+    from shipit.agent import backend as agent_backend
+
+    _seams["reviews"] = {
+        "correctness": _pass_review([_comment("bug", severity="major")]),
+        "test-quality": _pass_review(
+            [_comment("gap", severity="minor", file="t.py")], reviewed=("t.py",)
+        ),
+    }
+    _seams["result"] = CalibrationResult(
+        overall_feedback="v",
+        entries=(
+            _calibrated(0, _finding(Severity.MAJOR, "bug")),
+            _calibrated(1, _finding(Severity.MINOR, "gap", file="t.py")),
+        ),
+    )
+    outcome = fanout.run_fanout_review(
+        agent_backend.CODEX,
+        _ctx(),
+        dimensions=["correctness", "test-quality"],
+        calibrator=_CAL,
+    )
+    union = _seams["union"]
+    runs = {run["dimension"]: run for run in outcome.runs if "dimension" in run}
+    assert union[0]["run_id"] == runs["correctness"]["run_id"]
+    assert union[1]["run_id"] == runs["test-quality"]["run_id"]
+    by_text = {j.finding.text: j for j in outcome.findings}
+    assert by_text["bug"].run_id == runs["correctness"]["run_id"]
+    assert by_text["gap"].run_id == runs["test-quality"]["run_id"]
+
+
+def test_bundles_fail_open_when_ctx_has_no_repo_identity(_seams, _tmp_state_root):
+    """A hand-built ctx with no repo slug disables the bundles — the round
+    still runs, runs carry `artifacts: None`, the outcome carries no
+    artifacts dir, and nothing is written."""
+    from types import SimpleNamespace as _NS
+
+    from shipit.agent import backend as agent_backend
+
+    ctx = _NS(number=5, repo=None, head_ref="feature/x", workdir="/checkout", diff="")
+    _seams["reviews"] = {
+        "correctness": _pass_review([_comment("bug", severity="major")])
+    }
+    outcome = fanout.run_fanout_review(
+        agent_backend.CODEX, ctx, dimensions=["correctness"]
+    )
+    assert outcome.artifacts_dir is None
+    assert outcome.round_id  # the round is still identified
+    assert all(run["artifacts"] is None for run in outcome.runs)
+    assert [j.run_id for j in outcome.findings] == [outcome.runs[0]["run_id"]]
+    assert not (_tmp_state_root / "review-artifacts").exists()

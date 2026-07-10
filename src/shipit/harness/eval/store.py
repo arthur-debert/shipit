@@ -24,6 +24,12 @@ by tests (mirroring :mod:`shipit.logsetup`, whose ``resolve_log_dir`` returns an
 injected ``base_dir`` verbatim) so they write to a tmp path — ONE injected root
 covers every kind, which is what lets a reader (the eval report's review-axis
 join) resolve both stores from a single override.
+
+One non-JSONL sibling shares the family root through :func:`store_dir`: the
+review path's per-run artifact bundle TREE (:mod:`shipit.review.artifacts`,
+kind ``review-artifacts`` — per-run directories, not a record file), so
+bundles inherit the never-committed / repo-keyed / test-injectable properties
+stated here without a second state root.
 """
 
 from __future__ import annotations

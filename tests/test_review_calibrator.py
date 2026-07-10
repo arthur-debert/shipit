@@ -348,3 +348,85 @@ def test_run_calibrator_contract_violation_propagates(monkeypatch):
         run_calibrator(
             CalibratorConfig(), _union(), pr_number=9, cwd="/tree", launcher=fake_runner
         )
+
+
+# ---------------------------------------------------------------------------
+# RVW03-WS02 — the calibrator run fills its artifact bundle, every path
+# ---------------------------------------------------------------------------
+
+
+def test_run_calibrator_fills_the_bundle_and_records_the_true_run_id(
+    monkeypatch, tmp_path
+):
+    from shipit.review.artifacts import RunArtifacts
+
+    monkeypatch.setattr(calibrator.shutil, "which", lambda binary: "/usr/bin/claude")
+
+    def fake_runner(cmd, *, cwd, env, timeout=None):
+        envelope = json.dumps({"result": _calibration_json(), "session_id": "sess-7"})
+        return LaunchResult(returncode=0, stdout=envelope, stderr="warn line")
+
+    bundle = RunArtifacts(tmp_path / "calibrator")
+    _, run_id, task = run_calibrator(
+        CalibratorConfig(),
+        _union(),
+        pr_number=9,
+        cwd="/tree",
+        launcher=fake_runner,
+        artifacts=bundle,
+    )
+    assert run_id == "sess-7"
+    # The exact prompt + raw streams landed, and the meta carries the TRUE
+    # (post-unwrap) run id — the bundle's dir name is fixed, the id is data.
+    assert (bundle.dir / "prompt.txt").read_text() == task
+    assert "sess-7" in (bundle.dir / "stdout.raw").read_text()
+    assert (bundle.dir / "stderr.raw").read_text() == "warn line"
+    meta = json.loads((bundle.dir / "meta.json").read_text())
+    assert meta["run_id"] == "sess-7"
+    assert meta["exit_code"] == 0
+    assert meta["timed_out"] is False
+
+
+def test_run_calibrator_failure_bundle_keeps_full_raw(monkeypatch, tmp_path):
+    """A nonzero judge (previously surviving only as detail[:500]) leaves its
+    FULL raw output in the bundle, and the error points at it."""
+    from shipit.review.artifacts import RunArtifacts
+
+    monkeypatch.setattr(calibrator.shutil, "which", lambda binary: "/usr/bin/claude")
+    long_err = "y" * 2000
+
+    def exit_one(cmd, *, cwd, env, timeout=None):
+        return LaunchResult(returncode=1, stdout="half an answer", stderr=long_err)
+
+    bundle = RunArtifacts(tmp_path / "calibrator")
+    with pytest.raises(BackendError) as exc:
+        run_calibrator(
+            CalibratorConfig(),
+            _union(),
+            pr_number=9,
+            cwd="/tree",
+            launcher=exit_one,
+            artifacts=bundle,
+        )
+    assert str(bundle.dir) in str(exc.value)
+    assert (bundle.dir / "stderr.raw").read_text() == long_err
+    assert (bundle.dir / "stdout.raw").read_text() == "half an answer"
+    meta = json.loads((bundle.dir / "meta.json").read_text())
+    assert meta["exit_code"] == 1
+
+
+def test_calibrator_task_never_carries_the_run_id_plumbing(monkeypatch):
+    """The union candidates carry the RVW03-WS02 `run_id` correlation; the
+    judge's serialized candidates must NOT (plumbing is the record's business,
+    and prompt bytes are variant-hashed)."""
+    monkeypatch.setattr(calibrator.shutil, "which", lambda binary: "/usr/bin/claude")
+
+    def fake_runner(cmd, *, cwd, env, timeout=None):
+        return LaunchResult(returncode=0, stdout=_calibration_json(), stderr="")
+
+    union = [dict(_candidate(0), run_id="pass-run-id-hex")]
+    _, _, task = run_calibrator(
+        CalibratorConfig(), union, pr_number=9, cwd="/tree", launcher=fake_runner
+    )
+    assert "pass-run-id-hex" not in task
+    assert "run_id" not in task
