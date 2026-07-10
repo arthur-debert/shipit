@@ -148,7 +148,7 @@ timeout = "600s"
 [sweeps]
 count = 2                   # K full sweeps over the same ranges
 mode = "blind"              # "blind" | "informed" (sweep k primed with <k's findings)
-replicates = 1              # repeat runs per (pin, sweep) for variance
+replicates = 2              # repeat runs per (pin, sweep) for variance
 ```
 
 ### Running and idempotency

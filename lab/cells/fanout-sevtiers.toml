@@ -1,0 +1,31 @@
+# TREATMENT cell (ADR-0051; format: lab/README.md "Cells").
+# One axis vs fanout-baseline: passes scoped by severity tier (the ADR-0051
+# experiment-only set) instead of concern dimension — the literature's
+# strongest configuration, measured against the shipped fan-out. Everything
+# else is byte-identical to the control; PR review of this pair checks
+# exactly that.
+
+schema = 1
+id = "fanout-sevtiers"
+baseline = "fanout-baseline"
+axis = "pass scoping: severity tiers vs concern dimensions"
+description = "Literature-config treatment of fanout-baseline: identical fan-out pipeline, passes scoped by severity tier (critical/high, medium, low) instead of concern dimension."
+
+[fixture]
+version = 36
+prs = ["core-440", "app-391", "lex-820"]
+
+[pipeline]
+shape = "fanout"
+dimensions = ["sev-critical-high", "sev-medium", "sev-low"]
+dedup = "mechanical"
+
+[invocation]
+backend = "codex"
+model = "pro"
+timeout = "600s"
+
+[sweeps]
+count = 2
+mode = "blind"
+replicates = 2

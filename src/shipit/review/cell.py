@@ -42,7 +42,11 @@ from pathlib import Path
 from typing import Any
 
 from .calibrator import CalibratorConfig
-from .dimensions import known_dimension_names, resolve_dimensions
+from .dimensions import (
+    DEFAULT_DIMENSION_NAMES,
+    known_dimension_names,
+    resolve_dimensions,
+)
 from .groundtruth import Fixture
 
 __all__ = [
@@ -482,7 +486,10 @@ def parse_cell(data: Mapping[str, Any], *, where: str = "cell") -> Cell:
 
     invocation_raw = data.get("invocation")
     invocation = _parse_invocation(invocation_raw, where)
-    effective_dimensions = dimensions if dimensions else tuple(known_dimension_names())
+    # Omitted `dimensions` means the SHIPPED default set, not everything the
+    # registry knows — the experiment-only severity tiers (ADR-0051) run only
+    # when a cell lists them explicitly.
+    effective_dimensions = dimensions if dimensions else DEFAULT_DIMENSION_NAMES
     dimension_invocations = _parse_dimension_invocations(
         invocation_raw.get("dimensions")
         if isinstance(invocation_raw, Mapping)
