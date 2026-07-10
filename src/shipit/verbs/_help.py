@@ -17,9 +17,9 @@ def load_help_text(package: str, resource: str) -> str:
     """Return one package-relative help text file as UTF-8 text."""
     try:
         return resources.files(package).joinpath(resource).read_text(encoding="utf-8")
-    except FileNotFoundError as exc:
+    except (FileNotFoundError, IsADirectoryError, ModuleNotFoundError) as exc:
         raise click.ClickException(
-            f"bundled help resource {package}:{resource} is missing; "
+            f"bundled help resource {package}:{resource} is unavailable; "
             "reinstall shipit or file a bug"
         ) from exc
 

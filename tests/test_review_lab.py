@@ -237,7 +237,30 @@ def test_long_form_help_missing_resource_is_a_click_error():
     with pytest.raises(click.ClickException) as excinfo:
         _help.load_help_text("shipit.verbs.lab", "missing_help.txt")
 
-    assert "bundled help resource shipit.verbs.lab:missing_help.txt is missing" in str(
+    assert (
+        "bundled help resource shipit.verbs.lab:missing_help.txt is unavailable"
+        in str(excinfo.value)
+    )
+
+
+def test_long_form_help_missing_package_is_a_click_error():
+    from shipit.verbs import _help
+
+    with pytest.raises(click.ClickException) as excinfo:
+        _help.load_help_text("shipit.verbs.missing", "help.txt")
+
+    assert "bundled help resource shipit.verbs.missing:help.txt is unavailable" in str(
+        excinfo.value
+    )
+
+
+def test_long_form_help_directory_resource_is_a_click_error():
+    from shipit.verbs import _help
+
+    with pytest.raises(click.ClickException) as excinfo:
+        _help.load_help_text("shipit.verbs.lab", ".")
+
+    assert "bundled help resource shipit.verbs.lab:. is unavailable" in str(
         excinfo.value
     )
 
