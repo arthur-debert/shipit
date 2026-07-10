@@ -33,6 +33,13 @@
 > those and reproduces is not dropped for want of a perfect justification. The
 > A/B evidence (WS05, #638) found the pre-amendment floor over-pruned
 > reproducible true positives.
+>
+> **Amended by ADR-0051.** The "do not add a severity-scoped pass" rejection
+> is narrowed to the SHIPPED DEFAULT: an experiment-only severity-tier
+> dimension set (`sev-critical-high` / `sev-medium` / `sev-low`) now exists in
+> the closed registry for Review-Lab measurement, selectable only by explicit
+> `dimensions` config. The default decomposition and calibration-time severity
+> assignment are unchanged pending Lab evidence.
 
 A local-agent reviewer's first review of a PR is no longer one monolithic
 "find everything" pass: the detached review run fans out into parallel

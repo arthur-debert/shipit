@@ -9,9 +9,13 @@ the closed registry of known dimensions, the shipped default set, and the ONE
 resolver config names route through — so the Roster loader and the fan-out
 orchestrator agree on exactly which dimensions exist.
 
-Dimensions scope the SEARCH; severity is assigned at calibration (ADR-0045).
-A severity-scoped finder (a "highs-only pass") is explicitly rejected by the
-decision record — do not add one here. The registry is a closed tuple
+Dimensions scope the SEARCH; on the shipped default path severity is assigned
+at calibration (ADR-0045). ADR-0051 narrows ADR-0045's severity-scoped-finder
+rejection to that shipped default: the registry also carries an
+EXPERIMENT-ONLY severity-tier set (``sev-critical-high`` / ``sev-medium`` /
+``sev-low``) for Review-Lab measurement, selectable solely via an explicit
+``dimensions`` list (a Lab cell or a Roster override) and never part of the
+shipped default. The registry is a closed tuple
 (ADR-0021 closed-registry-over-hierarchy): adding a dimension is one entry,
 referenced everywhere else (the Roster `dimensions` option validates against
 :func:`known_dimension_names`; the pass prompt reads :attr:`Dimension.focus`).
@@ -39,12 +43,12 @@ class Dimension:
     focus: str
 
 
-#: The closed dimension registry — the ADR-0045 default decomposition. Each
+#: The ADR-0045 concern-scoped decomposition — the SHIPPED DEFAULT set. Each
 #: ``focus`` deliberately tells the pass to IGNORE everything outside its
 #: dimension: narrowed attention is the recall mechanism (single-pass recall
 #: <50% at every tier — the evidence behind the fan-out), and overlap between
 #: passes is fine (the Calibrator dedups), so a pass never self-budgets.
-DIMENSIONS: tuple[Dimension, ...] = (
+_CONCERN_DIMENSIONS: tuple[Dimension, ...] = (
     Dimension(
         name="correctness",
         title="Correctness",
@@ -97,18 +101,76 @@ DIMENSIONS: tuple[Dimension, ...] = (
     ),
 )
 
-#: The shipped default dimension set — every registered dimension, registry
-#: order. A per-reviewer Roster ``dimensions`` option narrows or reorders it.
-DEFAULT_DIMENSION_NAMES: tuple[str, ...] = tuple(d.name for d in DIMENSIONS)
+#: The EXPERIMENT-ONLY severity-tier set (ADR-0051, amending ADR-0045). Passes
+#: scoped by severity tier instead of concern — the literature's strongest
+#: configuration — so the Review Lab's `fanout-sevtiers` cell can measure the
+#: tier fan-out against the shipped concern-scoped one. NEVER part of the
+#: shipped default: only an explicit ``dimensions`` list (a Lab cell or a
+#: Roster override) selects these. The focus texts are experiment material —
+#: editing them changes the recorded instructions-variant hash and orphans
+#: banked lab points, so a wording change means a deliberate re-run.
+_SEVERITY_TIER_DIMENSIONS: tuple[Dimension, ...] = (
+    Dimension(
+        name="sev-critical-high",
+        title="Severity: critical/high",
+        focus=(
+            "merge-blocking defects ONLY: wrong results or outputs, data loss "
+            "or corruption, destructive or irreversible side effects (deleting "
+            "or overwriting files, dropping records), crashes and panics on "
+            "reachable paths, security holes, and silent failure modes that "
+            "ship bad state. Trace the concrete inputs/state that reach the "
+            "failure. Ignore design taste, missing tests, style, naming, and "
+            "docs: other passes own those. Emit only findings you would block "
+            "a merge over."
+        ),
+    ),
+    Dimension(
+        name="sev-medium",
+        title="Severity: medium",
+        focus=(
+            "worth-fixing-but-not-blocking defects: design flaws and wrong "
+            "abstractions, missing robustness (unvalidated input, unbounded "
+            "growth, resource leaks, race conditions with limited blast "
+            "radius), error handling that degrades quietly rather than failing "
+            "loud, and weak or missing tests for the changed behavior. Ignore "
+            "merge-blocking corruption/data-loss defects and pure style/docs "
+            "polish: other passes own those."
+        ),
+    ),
+    Dimension(
+        name="sev-low",
+        title="Severity: low",
+        focus=(
+            "polish: style and naming, formatting, comment and docstring "
+            "drift, dead cross-references, typos, and documentation gaps with "
+            "no behavioral impact. Ignore anything with correctness, "
+            "robustness, security, or test implications: other passes own "
+            "those."
+        ),
+    ),
+)
+
+#: The closed dimension registry — everything a ``dimensions`` config list may
+#: name: the ADR-0045 concern-scoped four plus the ADR-0051 experiment-only
+#: severity-tier three.
+DIMENSIONS: tuple[Dimension, ...] = _CONCERN_DIMENSIONS + _SEVERITY_TIER_DIMENSIONS
+
+#: The shipped default dimension set — exactly the ADR-0045 concern-scoped
+#: decomposition, registry order; the severity-tier entries are experiment-only
+#: and excluded (ADR-0051). A per-reviewer Roster ``dimensions`` option
+#: narrows, reorders, or (explicitly) swaps it.
+DEFAULT_DIMENSION_NAMES: tuple[str, ...] = tuple(d.name for d in _CONCERN_DIMENSIONS)
 
 _BY_NAME: dict[str, Dimension] = {d.name: d for d in DIMENSIONS}
 
 
 def known_dimension_names() -> tuple[str, ...]:
-    """Every registered dimension's config token, registry order — what the
-    Roster loader validates a ``dimensions`` option against (unknown names fail
-    loud there, roster prior art)."""
-    return DEFAULT_DIMENSION_NAMES
+    """Every registered dimension's config token, registry order (default set
+    first, then the experiment-only tiers) — what the Roster loader validates a
+    ``dimensions`` option against (unknown names fail loud there, roster prior
+    art). A superset of :data:`DEFAULT_DIMENSION_NAMES`: the severity-tier
+    tokens validate but never run unless explicitly listed (ADR-0051)."""
+    return tuple(d.name for d in DIMENSIONS)
 
 
 def by_name(name: str) -> Dimension:
@@ -124,9 +186,10 @@ def by_name(name: str) -> Dimension:
 
 def resolve_dimensions(names: Sequence[str] | None) -> tuple[Dimension, ...]:
     """The :class:`Dimension` set for ``names`` — ``None``/empty means the
-    shipped default set (every registered dimension), else the named subset in
-    the given order. Raises ``KeyError`` on an unknown name (the config
-    boundary validates first; see :func:`by_name`)."""
+    SHIPPED DEFAULT set (the concern-scoped four, never the experiment-only
+    tiers; ADR-0051), else the named subset in the given order. Raises
+    ``KeyError`` on an unknown name (the config boundary validates first; see
+    :func:`by_name`)."""
     if not names:
-        return DIMENSIONS
+        return _CONCERN_DIMENSIONS
     return tuple(by_name(name) for name in names)

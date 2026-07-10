@@ -988,31 +988,52 @@ def test_lab_report_unknown_cell_is_one_clean_error_line(tmp_path, capsys):
     assert capsys.readouterr().err.startswith("error: no cell file")
 
 
-# --- the committed demo pair ----------------------------------------------------------
+# --- the committed cells ---------------------------------------------------------------
 
 
-def test_the_committed_demo_cell_pair_loads_and_is_fair():
-    """The in-repo example pair (lab/cells/) must load, pass the fair-pair
-    check, and resolve every pin against the committed fixture v1."""
+def test_the_committed_cells_load_and_pair_fairly():
+    """Every in-repo treatment cell (lab/cells/) must load, pass the fair-pair
+    check against the committed control, and resolve every pin against the
+    committed fixture."""
     from pathlib import Path
 
     from shipit.review.cell import check_fair_pair, load_cell
     from shipit.review.groundtruth import load_fixture
 
     control = load_cell(Path("lab/cells/fanout-baseline.toml"))
-    treatment = load_cell(Path("lab/cells/fanout-informed.toml"))
+    treatments = [
+        load_cell(Path(f"lab/cells/{stem}.toml"))
+        for stem in ("fanout-informed", "fanout-sevtiers")
+    ]
     fixture = load_fixture(Path("lab/fixture.toml"))
-    check_fair_pair(treatment, control, fixture)
     assert fixture.version == control.fixture_version
+    assert control.is_control
+    for treatment in treatments:
+        check_fair_pair(treatment, control, fixture)
+        assert treatment.axis != "control"
     # Pin the committed run shape so a cost-visible drift (e.g. an accidental
     # revert to replicates = 1) fails here rather than silently shrinking the
-    # demo run: check_fair_pair only equates the pair, it does not fix the count.
-    for cell in (control, treatment):
+    # runs: check_fair_pair only equates the pair, it does not fix the count.
+    for cell in (control, *treatments):
         assert cell.sweeps == 2
         assert cell.replicates == 2
-    assert [p.id for p in resolve_pins(treatment, fixture)] == [
-        "core-440",
-        "app-391",
-        "lex-820",
-    ]
-    assert treatment.axis != "control" and control.is_control
+        assert [p.id for p in resolve_pins(cell, fixture)] == [
+            "core-440",
+            "app-391",
+            "lex-820",
+        ]
+    # The ADR-0051 cell's one axis: the experiment-only severity-tier pass set
+    # (every other cell's omitted `dimensions` means the shipped concern-scoped
+    # set). Select by id, not list position — brittle if a cell is added or the
+    # order changes — and pin EVERY cell's `dimensions`: check_fair_pair leaves
+    # "only one axis changed" to human review, so a stray `dimensions` block on
+    # the control or the other treatment would confound the experiment while
+    # this test stayed green. Pinning all three fails here instead.
+    by_id = {cell.id: cell for cell in (control, *treatments)}
+    assert by_id["fanout-sevtiers"].dimensions == (
+        "sev-critical-high",
+        "sev-medium",
+        "sev-low",
+    )
+    assert by_id["fanout-baseline"].dimensions == ()
+    assert by_id["fanout-informed"].dimensions == ()
