@@ -121,6 +121,30 @@ def test_active_filter_drops_malformed_lines():
     assert not flt.matches('"a bare string"')
 
 
+def test_review_correlation_filters_select_on_the_pass_extras():
+    """RVW03-WS02: `--reviewer` / `--run` / `--round` select on the flat
+    `reviewer` / `run_id` / `round_id` fields the fan-out stamps per record,
+    AND-composing like every other filter — so one pass's interleaved lines
+    (or one round's) isolate post-mortem."""
+    flt = Filter(run_id="abc123")
+    assert flt.matches(_record("pass line", run_id="abc123", dimension="bugs"))
+    assert not flt.matches(_record("other pass", run_id="def456"))
+    assert not flt.matches(_record("uncorrelated line"))
+
+    both = Filter(reviewer="codex", round_id="r-1")
+    assert both.matches(_record("in", reviewer="codex", round_id="r-1"))
+    assert not both.matches(_record("other round", reviewer="codex", round_id="r-2"))
+    assert not both.matches(_record("other reviewer", reviewer="agy", round_id="r-1"))
+
+
+def test_build_query_threads_the_review_correlation_filters():
+    query = build_query(reviewer="codex", run_id="run-1", round_id="round-1")
+    assert query.record_filter.fields["reviewer"] == "codex"
+    assert query.record_filter.fields["run_id"] == "run-1"
+    assert query.record_filter.fields["round_id"] == "round-1"
+    assert query.record_filter.active
+
+
 # --------------------------------------------------------------------------
 # last_n — the one tail helper
 # --------------------------------------------------------------------------

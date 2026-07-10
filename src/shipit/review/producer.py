@@ -62,6 +62,8 @@ import logging
 import os
 import shutil
 import tempfile
+import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from .. import execrun, gh, git
@@ -73,6 +75,7 @@ from ..spawn.backends.base import BackendAdapter
 from ..spawn.backends.codex import CodexAdapter
 from ..tree.cleanup import parse_duration
 from ..tree.readonly import create_readonly, readonly_plan
+from .artifacts import RunArtifacts
 from .backends import BackendError, BackendUnavailable, parse_review_output
 from .backends.base import _TIMEOUT_MARKER
 from .dimensions import Dimension
@@ -332,6 +335,8 @@ def run_tree_review(
     tree_path: str | None = None,
     incremental_range: tuple[str, str] | None = None,
     reasoning: str | None = None,
+    run_id: str | None = None,
+    artifacts: RunArtifacts | None = None,
 ) -> CapturedReview:
     """Launch ``backend`` as a reviewer in a read-only Tree and CAPTURE its review.
 
@@ -366,6 +371,14 @@ def run_tree_review(
     a fan-out) — passing both raises ``ValueError`` so a misrouted call fails
     loudly rather than silently running the wrong task shape; the fan-out never
     combines them. ``None`` keeps the full-PR task, exactly as before.
+
+    ``run_id`` / ``artifacts`` are the RVW03-WS02 observability seam: ``run_id``
+    is the fan-out-minted pass id, stamped (with the dimension) onto this
+    launch's log records so parallel passes are separable in the log sink;
+    ``artifacts`` is the pass's :class:`~shipit.review.artifacts.RunArtifacts`
+    bundle, which the launch core fills with the exact prompt, the raw streams,
+    and the launch meta — success and failure alike, fail-open. ``None`` for
+    either keeps the pre-WS02 behaviour (no correlation extras, no bundle).
 
     With ``dry_run=True``: resolves the Tree COORDINATES (no clone, no model bill),
     prints the would-run Tree-launch argv, and returns an empty capture — so a dry-run
@@ -422,13 +435,16 @@ def run_tree_review(
             schema_path = _write_schema_tempfile()
 
         cwd = tree_path if tree_path is not None else provision_review_tree(ctx)
+        correlation = {} if run_id is None else {"run_id": run_id}
+        if dimension is not None:
+            correlation["dimension"] = dimension.name
         logger.info(
             "review launching for pr#%s (agent=%s%s) in read-only Tree %s",
             ctx.number,
             agent,
             f", dimension={dimension.name}" if dimension is not None else "",
             cwd,
-            extra={"pr": ctx.number, "tree": cwd, "reviewer": agent},
+            extra={"pr": ctx.number, "tree": cwd, "reviewer": agent, **correlation},
         )
         return _launch_and_capture(
             agent,
@@ -439,6 +455,8 @@ def run_tree_review(
             timeout=timeout,
             schema_path=schema_path,
             launcher=launcher,
+            artifacts=artifacts,
+            run_id=run_id,
         )
     finally:
         if schema_path and os.path.exists(schema_path):
@@ -454,6 +472,8 @@ def run_range_review(
     instructions_path: str | None = None,
     launcher: launch.Runner | None = None,
     reasoning: str | None = None,
+    run_id: str | None = None,
+    artifacts: RunArtifacts | None = None,
 ) -> CapturedReview:
     """Launch ``backend`` as an OFFLINE commit-range reviewer and CAPTURE its
     review (RVW02-WS03 replay) — a :class:`CapturedReview`, exactly like
@@ -469,6 +489,11 @@ def run_range_review(
         — the replay boundary already resolved + validated both endpoints;
       * nothing downstream posts: the caller (:mod:`shipit.review.replay`) writes
         the review-round record and stops — no PR is touched.
+
+    ``run_id`` / ``artifacts`` are the same RVW03-WS02 observability seam as on
+    :func:`run_tree_review`: the caller-minted run id lands on this launch's
+    log records, and the :class:`~shipit.review.artifacts.RunArtifacts` bundle
+    captures the exact prompt + raw streams + launch meta, fail-open.
 
     Raises exactly the :func:`run_tree_review` error set (missing CLI →
     :class:`BackendUnavailable`; unparseable / timed-out output →
@@ -502,7 +527,10 @@ def run_range_review(
             view.workdir,
             view.base_sha,
             view.head_sha,
-            extra={"reviewer": agent},
+            extra={
+                "reviewer": agent,
+                **({} if run_id is None else {"run_id": run_id}),
+            },
         )
         return _launch_and_capture(
             agent,
@@ -513,6 +541,8 @@ def run_range_review(
             timeout=timeout,
             schema_path=schema_path,
             launcher=launcher,
+            artifacts=artifacts,
+            run_id=run_id,
         )
     finally:
         if schema_path and os.path.exists(schema_path):
@@ -529,6 +559,8 @@ def _launch_and_capture(
     timeout: str,
     schema_path: str | None,
     launcher: launch.Runner | None,
+    artifacts: RunArtifacts | None = None,
+    run_id: str | None = None,
 ) -> CapturedReview:
     """Launch one reviewer child in ``cwd`` under the seam deadline and parse its
     stdout — the launch core :func:`run_tree_review` (PR/Tree) and
@@ -537,7 +569,19 @@ def _launch_and_capture(
     :class:`CapturedReview` carries the launch's measured usage
     (``spec.usage_parser`` over the raw :class:`~shipit.spawn.launch.LaunchResult`)
     and the adapter's APPLIED reasoning level (RVW03-WS04).
+
+    ``run_id`` is the pass's correlation id — threaded onto the local breadcrumb
+    WARNING (the line pointing at the bundle path) so ``shipit logs --run`` /
+    ``--reviewer`` can select the very record that says where the raw output lives.
+
+    ``artifacts`` (RVW03-WS02) is the run's fail-open bundle: the EXACT prompt
+    is written BEFORE the launch (a hung/killed child still leaves it
+    inspectable), the raw streams + launch meta (argv, exit code, duration,
+    timed-out flag) after — on the success, timeout, and nonzero-exit paths
+    alike, so the full raw output is always on disk even where the raised
+    error's message truncates. ``None`` disables the bundle (pre-WS02 callers).
     """
+    sink = artifacts if artifacts is not None else RunArtifacts.disabled()
     cmd = adapter.build_command(
         task,
         _REVIEWER_ROLE,
@@ -545,6 +589,9 @@ def _launch_and_capture(
         cwd=cwd,
         output_schema_path=schema_path,
     )
+    sink.write_prompt(task)
+    sink.record(argv=list(cmd), cwd=cwd, seam_deadline_s=_seam_deadline(timeout, spec))
+    start = time.monotonic()
     try:
         result = launch.launch(
             cmd,
@@ -554,7 +601,15 @@ def _launch_and_capture(
             runner=launcher,
         )
     except execrun.ExecError as exc:
-        if exc.cause != execrun.CAUSE_TIMEOUT:
+        timed_out = exc.cause == execrun.CAUSE_TIMEOUT
+        sink.write_streams(exc.stdout, exc.stderr)
+        sink.record(
+            duration_ms=int((time.monotonic() - start) * 1000),
+            exit_code=None,
+            timed_out=timed_out,
+            error=str(exc),
+        )
+        if not timed_out:
             # A non-timeout transport failure (missing binary, bad cwd): leave it
             # for the service's generic mapping to `failed` (ADR-0028 normalizes
             # every OS-level launch error into ExecError; a nonzero CHILD is a
@@ -573,14 +628,40 @@ def _launch_and_capture(
             raw=f"{exc.stdout}\n{exc.stderr}".strip(),
             timed_out=True,
         ) from exc
+    sink.write_streams(result.stdout, result.stderr)
+    sink.record(
+        duration_ms=int((time.monotonic() - start) * 1000),
+        exit_code=result.returncode,
+        timed_out=False,
+    )
+    try:
+        review = _capture(agent, result, artifacts=sink, run_id=run_id)
+    except BackendError as exc:
+        # An exit-0 launch can STILL be a timeout: `_capture` re-parses the
+        # stdout and `parse_review_output` raises `BackendError(timed_out=True)`
+        # when otherwise-unparseable output carries the marker. Correct the
+        # optimistic `timed_out=False` just recorded so `meta.json` agrees with
+        # the `timed_out` outcome the fanout/service will settle, before the
+        # failure propagates — the bundle must never claim a timeout was a clean
+        # exit.
+        sink.record(timed_out=exc.timed_out)
+        raise
+    # RVW03-WS04: wrap the captured review with the launch's measured token usage
+    # and the reasoning level the adapter actually applied to argv.
     return CapturedReview(
-        review=_capture(agent, result),
+        review=review,
         usage=spec.usage_parser(result),  # type: ignore[operator]
         reasoning=adapter.reasoning,
     )
 
 
-def _capture(agent: str, result: launch.LaunchResult) -> dict:
+def _capture(
+    agent: str,
+    result: launch.LaunchResult,
+    *,
+    artifacts: RunArtifacts | None = None,
+    run_id: str | None = None,
+) -> dict:
     """Turn the launched reviewer's result into a review dict, or raise.
 
     A nonzero exit is a hard failure (mirroring the retired ``proc.run(check=True)``
@@ -588,6 +669,13 @@ def _capture(agent: str, result: launch.LaunchResult) -> dict:
     a generic failure (so it settles ``timed_out``, not ``failed``). On exit 0 the raw
     stdout is parsed; an unparseable / marker-bearing parse raises :class:`BackendError`
     (carrying the raw for the #76 salvage), exactly as before.
+
+    The nonzero-exit ``RuntimeError`` still truncates its human-facing detail;
+    the FULL raw streams live in the ``artifacts`` bundle (RVW03-WS02). The
+    bundle's absolute path is logged LOCALLY (a developer running the review sees
+    it), but is kept OUT of the raised message — that message crosses into the
+    GitHub-facing funnel breadcrumb (:func:`shipit.review.service._close_funnel_breadcrumb`),
+    where a user-home / state-root path must not leak into the PR check summary.
     """
     stdout = result.stdout or ""
     stderr = result.stderr or ""
@@ -599,7 +687,8 @@ def _capture(agent: str, result: launch.LaunchResult) -> dict:
             # NOT echo it — we set the STRUCTURED ``timed_out`` flag explicitly so
             # the service settles ``timed_out`` (not ``empty``) regardless. ``raw``
             # carries combined stdout+stderr so the #76 salvage still has the marker
-            # context to surface.
+            # context to surface. The caller (`_launch_and_capture`) records the
+            # timeout into the bundle meta from this exception's ``timed_out``.
             raise BackendError(
                 f"{agent} timed out before returning a complete review "
                 "(try a faster model or a smaller diff)",
@@ -607,6 +696,17 @@ def _capture(agent: str, result: launch.LaunchResult) -> dict:
                 timed_out=True,
             )
         detail = stderr.strip() or stdout.strip()
+        if artifacts is not None and artifacts.dir is not None:
+            logger.warning(
+                "%s reviewer exited %d — full raw output at %s",
+                agent,
+                result.returncode,
+                artifacts.dir,
+                extra={
+                    "reviewer": agent,
+                    **({} if run_id is None else {"run_id": run_id}),
+                },
+            )
         raise RuntimeError(
             f"{agent} reviewer exited {result.returncode}: {detail[:500]}"
         )
@@ -671,6 +771,39 @@ def _preflight(backend: Backend, *, dry_run: bool) -> None:
             f"The '{backend.funnel_agent or backend.name}' review backend requires "
             f"the '{backend.binary}' CLI on your PATH, but it was not found. "
             f"Install it (and log it in), then re-run."
+        )
+
+
+def preflight_round(backends: Sequence[Backend]) -> None:
+    """Verify EVERY backend a round is configured to launch, ONCE, before any
+    pass starts; raise ONE :class:`BackendUnavailable` naming each missing binary.
+
+    The round-level preflight (RVW03-WS03): the fan-out calls this before
+    provisioning the Tree or launching a single pass, so a missing binary
+    surfaces as one actionable "binary X not found — install/configure it"
+    error and NO pass processes launch — never as "all N dimension passes
+    failed" with N truncated per-pass details. ``backends`` is the round's
+    configured set (the reviewer's own backend plus, when the dormant judge is
+    on, the calibrator's); duplicate binaries are checked once. The per-launch
+    checks (:func:`_preflight`, the calibrator's own) stay as backstops for
+    callers outside a fan-out round.
+    """
+    missing: list[Backend] = []
+    seen: set[str] = set()
+    for backend in backends:
+        if backend.binary in seen:
+            continue
+        seen.add(backend.binary)
+        if shutil.which(backend.binary) is None:
+            missing.append(backend)
+    if missing:
+        details = "; ".join(
+            f"binary {b.binary!r} not found — install/configure it "
+            f"(the {(b.funnel_agent or b.name)!r} backend requires it on PATH)"
+            for b in missing
+        )
+        raise BackendUnavailable(
+            f"review preflight failed, no passes were launched: {details}"
         )
 
 

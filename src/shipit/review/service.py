@@ -195,6 +195,8 @@ def generate_review(
             runs=outcome.runs,
             duration_ms=duration_ms,
             total_tokens=outcome.total_tokens,
+            round_id=outcome.round_id or None,
+            artifacts_dir=outcome.artifacts_dir,
         )
     return review
 
@@ -211,16 +213,20 @@ def _tee_round_record(
     runs=(),
     duration_ms: int | None,
     total_tokens: int | None = None,
+    round_id: str | None = None,
+    artifacts_dir: str | None = None,
 ) -> None:
     """Tee the generated review into the local review-round record store — FAIL-OPEN.
 
     Verb-witnessed at generate time (RVW02-WS03): the review's product (all
     findings with the Calibrator's dispositions — ``findings``, routed-out
-    entries retained — plus every contributing run's id + variant hash +
-    measured token usage — ``runs`` / ``total_tokens`` (RVW03-WS04) — the
-    coverage attestation, and the range reviewed) lands in the
-    harness-owned store the moment it exists, independent of the posting path —
-    a tee, not a pipeline change. Any failure (a hand-built ctx with no repo,
+    entries retained, each carrying its originating pass's ``run_id`` — plus
+    every contributing run's id + variant hash + artifact bundle path + measured
+    token usage — ``runs`` / ``total_tokens`` (RVW03-WS04) — the round's
+    ``round_id`` / ``artifacts_dir`` bundle location (RVW03-WS02), the coverage
+    attestation, and the range reviewed) lands in the harness-owned store the
+    moment it exists, independent of the posting path — a tee, not a pipeline
+    change. Any failure (a hand-built ctx with no repo,
     an unwritable store, an unreadable instructions file) is logged at WARNING
     and swallowed: process telemetry must never degrade the review it observes
     (the same posture as the eval hook's fail-open contract).
@@ -250,6 +256,8 @@ def _tee_round_record(
             runs=runs,
             duration_ms=duration_ms,
             total_tokens=total_tokens,
+            round_id=round_id,
+            artifacts_dir=artifacts_dir,
         )
     except Exception:  # noqa: BLE001 - the tee is telemetry; never degrade the review
         logger.warning(

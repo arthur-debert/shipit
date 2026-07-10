@@ -38,9 +38,12 @@ substrate stays a local file (ADR-0013).
 
 from __future__ import annotations
 
+import fcntl
 import json
+import logging
 import sys
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TextIO
@@ -49,6 +52,8 @@ import click
 
 from ... import execrun, identity
 from ...harness.eval import store
+
+logger = logging.getLogger("shipit.harness")
 
 #: The eval-record fields the aggregator groups and measures over (the WS01 record
 #: shape). Quoted in SQL because the JSON keys carry dots (OTel ``gen_ai.*`` /
@@ -197,6 +202,23 @@ def _group_query(key_expr: str, order_by: str) -> str:
     """
 
 
+@contextmanager
+def _shared_lock(path: Path) -> Iterator[None]:
+    """Hold a shared ``flock`` (``LOCK_SH``) on ``path`` for the wrapped block.
+
+    For a reader whose actual file I/O is NOT its own locked handle — DuckDB's
+    ``read_json_auto`` opens the store itself (:func:`aggregate`) — so the lock
+    rides a separate fd held open around the read. Advisory locking is
+    cooperative: while this shared lock is held, a concurrent appender's
+    :func:`~shipit.harness.eval.store.append_record` cannot take its exclusive
+    lock, so no half-flushed line is visible to the read (RVW03-WS03). Released
+    when the fd closes at block exit. ``path`` must exist (the caller checks).
+    """
+    with path.open(encoding="utf-8") as fh:
+        fcntl.flock(fh, fcntl.LOCK_SH)
+        yield
+
+
 def aggregate(
     store_path: str | Path, rounds_path: str | Path | None = None
 ) -> EvalReport:
@@ -230,29 +252,38 @@ def aggregate(
 
     con = duckdb.connect(":memory:")
     try:
-        # A store whose rows predate a field's introduction has NO such column at
-        # all, so a query referencing it would fail to bind. Consult the inferred
-        # schema and fall back to the constant bucket for an absent group column, so
-        # the report is tolerant of a mixed-schema store (e.g. pre-v3 records with no
-        # `eval.invocation`) instead of raising.
-        present = _present_columns(con, str(path))
-        role_key = f"COALESCE(CAST({_ROLE_FIELD} AS VARCHAR), '{_UNKNOWN_ROLE}')"
-        variant_key = _VARIANT_KEY
-        invocation_key = (
-            _INVOCATION_KEY
-            if _column(_INVOCATION_FIELD) in present
-            else f"'{_NO_INVOCATION}'"
-        )
-        # The day bucket is the ISO timestamp's date prefix — taken as the leading
-        # 10 chars so it never depends on DuckDB parsing the timezone offset.
-        day_key = f"SUBSTR(CAST({_TIMESTAMP_FIELD} AS VARCHAR), 1, 10)"
+        # DuckDB's `read_json_auto` reads the store at the OS level, BYPASSING the
+        # per-open lock `_read_jsonl` / `store.read_records` take — so hold a shared
+        # lock across EVERY DuckDB read of the file (RVW03-WS03): it blocks a
+        # concurrent appender's exclusive lock for the span, so DuckDB can never
+        # read a half-flushed final line and crash the whole query with a JSON parse
+        # error. (The `total`/`EvalReport` build below touches no file, so it needs
+        # no lock.)
+        with _shared_lock(path):
+            # A store whose rows predate a field's introduction has NO such column
+            # at all, so a query referencing it would fail to bind. Consult the
+            # inferred schema and fall back to the constant bucket for an absent
+            # group column, so the report is tolerant of a mixed-schema store (e.g.
+            # pre-v3 records with no `eval.invocation`) instead of raising.
+            present = _present_columns(con, str(path))
+            role_key = f"COALESCE(CAST({_ROLE_FIELD} AS VARCHAR), '{_UNKNOWN_ROLE}')"
+            variant_key = _VARIANT_KEY
+            invocation_key = (
+                _INVOCATION_KEY
+                if _column(_INVOCATION_FIELD) in present
+                else f"'{_NO_INVOCATION}'"
+            )
+            # The day bucket is the ISO timestamp's date prefix — taken as the
+            # leading 10 chars so it never depends on DuckDB parsing the timezone
+            # offset.
+            day_key = f"SUBSTR(CAST({_TIMESTAMP_FIELD} AS VARCHAR), 1, 10)"
 
-        by_role = _run_group(con, role_key, str(path), _ORDER_BY_RUNS)
-        by_variant = _run_group(con, variant_key, str(path), _ORDER_BY_RUNS)
-        by_invocation = _run_group(con, invocation_key, str(path), _ORDER_BY_RUNS)
-        # The day trend orders chronologically by the date key, not by run count,
-        # so a busy older day cannot jump ahead of a quieter newer one.
-        by_day = _run_group(con, day_key, str(path), _ORDER_BY_KEY)
+            by_role = _run_group(con, role_key, str(path), _ORDER_BY_RUNS)
+            by_variant = _run_group(con, variant_key, str(path), _ORDER_BY_RUNS)
+            by_invocation = _run_group(con, invocation_key, str(path), _ORDER_BY_RUNS)
+            # The day trend orders chronologically by the date key, not by run
+            # count, so a busy older day cannot jump ahead of a quieter newer one.
+            by_day = _run_group(con, day_key, str(path), _ORDER_BY_KEY)
         total = sum(row.runs for row in by_role)
         return EvalReport(
             total_runs=total,
@@ -365,9 +396,17 @@ def _read_jsonl(path: str | Path | None) -> list[dict]:
 
     Tolerant by design (the stores are local, append-only telemetry): a
     malformed or non-object line is skipped, never an error, so one bad write
-    cannot take the whole report down. The file is STREAMED line-by-line (not
-    ``read_text().splitlines()``) so an unbounded append-only store does not
-    allocate the whole file plus a split-line list at once.
+    cannot take the whole report down — but it is skipped LOUDLY (RVW03-WS03),
+    a warning naming the file and 1-based line number, mirroring
+    :func:`shipit.harness.eval.store.read_records`: a corrupted round must
+    never silently read as "this arm found nothing". The file is STREAMED
+    line-by-line (not ``read_text().splitlines()``) so an unbounded append-only
+    store does not allocate the whole file plus a split-line list at once.
+
+    Takes a SHARED ``flock`` (``LOCK_SH``) before iterating, mirroring
+    :func:`shipit.harness.eval.store.read_records` (RVW03-WS03): it waits out an
+    in-flight exclusive append rather than streaming a half-flushed final line —
+    which would otherwise LOUDLY warn and drop a valid record mid-append.
     """
     if path is None:
         return []
@@ -376,15 +415,30 @@ def _read_jsonl(path: str | Path | None) -> list[dict]:
         return []
     records: list[dict] = []
     with target.open(encoding="utf-8") as fh:
-        for line in fh:
+        fcntl.flock(fh, fcntl.LOCK_SH)
+        for lineno, line in enumerate(fh, start=1):
             if not line.strip():
                 continue
             try:
                 parsed = json.loads(line)
             except json.JSONDecodeError:
+                logger.warning(
+                    "malformed record skipped in %s, line %d: not valid JSON",
+                    target,
+                    lineno,
+                    exc_info=True,
+                )
                 continue
-            if isinstance(parsed, dict):
-                records.append(parsed)
+            if not isinstance(parsed, dict):
+                logger.warning(
+                    "malformed record skipped in %s, line %d: expected a JSON "
+                    "object, got %s",
+                    target,
+                    lineno,
+                    type(parsed).__name__,
+                )
+                continue
+            records.append(parsed)
     return records
 
 

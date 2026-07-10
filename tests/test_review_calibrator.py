@@ -297,6 +297,42 @@ def test_run_calibrator_launches_claude_read_only_and_unwraps_the_envelope(
     assert '"id": 0' in judged.task
 
 
+def test_run_calibrator_raw_output_log_carries_the_correlation_extras(
+    monkeypatch, caplog
+):
+    """The judge's raw-output DEBUG record (issue #681 item 2) carries the
+    fan-out's correlation extras, so `shipit logs --run calibrator --round <id>`
+    slices it alongside the round's progress events rather than leaving it
+    filterable only by `pr`."""
+    import logging
+
+    monkeypatch.setattr(calibrator.shutil, "which", lambda binary: "/usr/bin/claude")
+
+    def fake_runner(cmd, *, cwd, env, timeout=None):
+        return LaunchResult(returncode=0, stdout=_calibration_json(), stderr="")
+
+    correlation = {
+        "pr": 9,
+        "reviewer": "codex",
+        "run_id": "calibrator",
+        "round_id": "round-abc",
+        "dimension": "calibrator",
+    }
+    caplog.set_level(logging.DEBUG, logger="shipit.review")
+    run_calibrator(
+        CalibratorConfig(),
+        _union(),
+        pr_number=9,
+        cwd="/tree",
+        launcher=fake_runner,
+        correlation=correlation,
+    )
+    raw = [r for r in caplog.records if "raw output for pr#9" in r.getMessage()]
+    assert len(raw) == 1
+    assert raw[0].run_id == "calibrator"
+    assert raw[0].round_id == "round-abc"
+
+
 def test_run_calibrator_bare_json_mints_a_run_id(monkeypatch):
     monkeypatch.setattr(calibrator.shutil, "which", lambda binary: "/usr/bin/claude")
 
@@ -420,3 +456,97 @@ def test_run_calibrator_contract_violation_propagates(monkeypatch):
         run_calibrator(
             CalibratorConfig(), _union(), pr_number=9, cwd="/tree", launcher=fake_runner
         )
+
+
+# ---------------------------------------------------------------------------
+# RVW03-WS02 — the calibrator run fills its artifact bundle, every path
+# ---------------------------------------------------------------------------
+
+
+def test_run_calibrator_fills_the_bundle_and_records_the_true_run_id(
+    monkeypatch, tmp_path
+):
+    from shipit.review.artifacts import RunArtifacts
+
+    monkeypatch.setattr(calibrator.shutil, "which", lambda binary: "/usr/bin/claude")
+
+    def fake_runner(cmd, *, cwd, env, timeout=None):
+        envelope = json.dumps({"result": _calibration_json(), "session_id": "sess-7"})
+        return LaunchResult(returncode=0, stdout=envelope, stderr="warn line")
+
+    bundle = RunArtifacts(tmp_path / "calibrator")
+    judged = run_calibrator(
+        CalibratorConfig(),
+        _union(),
+        pr_number=9,
+        cwd="/tree",
+        launcher=fake_runner,
+        artifacts=bundle,
+    )
+    assert judged.run_id == "sess-7"
+    # The exact prompt + raw streams landed, and the meta carries the TRUE
+    # (post-unwrap) run id — the bundle's dir name is fixed, the id is data.
+    assert (bundle.dir / "prompt.txt").read_text() == judged.task
+    assert "sess-7" in (bundle.dir / "stdout.raw").read_text()
+    assert (bundle.dir / "stderr.raw").read_text() == "warn line"
+    meta = json.loads((bundle.dir / "meta.json").read_text())
+    assert meta["run_id"] == "sess-7"
+    assert meta["exit_code"] == 0
+    assert meta["timed_out"] is False
+
+
+def test_run_calibrator_failure_bundle_keeps_full_raw(monkeypatch, tmp_path, caplog):
+    """A nonzero judge (previously surviving only as detail[:500]) leaves its
+    FULL raw output in the bundle; a LOCAL log points at it, while the raised
+    message keeps the absolute path OUT (it reaches the GitHub check summary)."""
+    import logging
+
+    from shipit.review.artifacts import RunArtifacts
+
+    monkeypatch.setattr(calibrator.shutil, "which", lambda binary: "/usr/bin/claude")
+    long_err = "y" * 2000
+
+    def exit_one(cmd, *, cwd, env, timeout=None):
+        return LaunchResult(returncode=1, stdout="half an answer", stderr=long_err)
+
+    bundle = RunArtifacts(tmp_path / "calibrator")
+    caplog.set_level(logging.WARNING, logger="shipit.review")
+    correlation = {"reviewer": "codex", "run_id": "calibrator", "round_id": "round-abc"}
+    with pytest.raises(BackendError) as exc:
+        run_calibrator(
+            CalibratorConfig(),
+            _union(),
+            pr_number=9,
+            cwd="/tree",
+            launcher=exit_one,
+            artifacts=bundle,
+            correlation=correlation,
+        )
+    assert str(bundle.dir) not in str(exc.value)
+    assert str(bundle.dir) in caplog.text
+    # The breadcrumb WARNING carries the same correlation extras as the DEBUG
+    # raw-output record, so `shipit logs --run calibrator --round …` selects it.
+    [breadcrumb] = [r for r in caplog.records if "full raw output at" in r.getMessage()]
+    assert breadcrumb.run_id == "calibrator"
+    assert breadcrumb.round_id == "round-abc"
+    assert (bundle.dir / "stderr.raw").read_text() == long_err
+    assert (bundle.dir / "stdout.raw").read_text() == "half an answer"
+    meta = json.loads((bundle.dir / "meta.json").read_text())
+    assert meta["exit_code"] == 1
+
+
+def test_calibrator_task_never_carries_the_run_id_plumbing(monkeypatch):
+    """The union candidates carry the RVW03-WS02 `run_id` correlation; the
+    judge's serialized candidates must NOT (plumbing is the record's business,
+    and prompt bytes are variant-hashed)."""
+    monkeypatch.setattr(calibrator.shutil, "which", lambda binary: "/usr/bin/claude")
+
+    def fake_runner(cmd, *, cwd, env, timeout=None):
+        return LaunchResult(returncode=0, stdout=_calibration_json(), stderr="")
+
+    union = [dict(_candidate(0), run_id="pass-run-id-hex")]
+    task = run_calibrator(
+        CalibratorConfig(), union, pr_number=9, cwd="/tree", launcher=fake_runner
+    ).task
+    assert "pass-run-id-hex" not in task
+    assert "run_id" not in task

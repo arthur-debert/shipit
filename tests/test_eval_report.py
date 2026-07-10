@@ -555,6 +555,104 @@ def test_aggregate_without_rounds_path_has_an_empty_review_axis(tmp_path):
     assert report.aggregate(eval_path).review == []
 
 
+def test_read_jsonl_skips_a_malformed_line_loudly(tmp_path, caplog):
+    # RVW03-WS03: the report's reader mirrors the store's — a malformed line is
+    # skipped (one bad write never takes the report down) but WARNS with the
+    # file + 1-based line number, so a corrupted round can never silently read
+    # as "this arm found nothing".
+    import logging
+
+    base = tmp_path / "state"
+    path = store.append_record(
+        _round(variant=_variant(_V1)),
+        _REPO,
+        base_dir=base,
+        kind=store.REVIEW_ROUNDS_KIND,
+    )
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write("{spliced garbage\n")
+    with caplog.at_level(logging.WARNING, logger="shipit.harness"):
+        records = report._read_jsonl(path)
+    assert len(records) == 1
+    warning = "\n".join(r.getMessage() for r in caplog.records)
+    assert str(path) in warning
+    assert "line 2" in warning
+
+
+def test_read_jsonl_warns_on_a_non_object_line(tmp_path, caplog):
+    # RVW03-WS03: a line that is VALID JSON but not an object (a bare array /
+    # string) is a distinct malformed case from unparseable text. The report's
+    # reader skips it but WARNS naming the file, the 1-based line number, and the
+    # got-type — mirroring `store.read_records` (whose sibling case is covered by
+    # `test_read_records_warns_on_a_non_object_line`) so neither reader can ever
+    # silently read a corrupted round as "this arm found nothing".
+    import logging
+
+    base = tmp_path / "state"
+    path = store.append_record(
+        _round(variant=_variant(_V1)),
+        _REPO,
+        base_dir=base,
+        kind=store.REVIEW_ROUNDS_KIND,
+    )
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write('["not", "a", "record"]\n')
+    with caplog.at_level(logging.WARNING, logger="shipit.harness"):
+        records = report._read_jsonl(path)
+    assert len(records) == 1
+    warning = "\n".join(r.getMessage() for r in caplog.records)
+    assert str(path) in warning
+    assert "line 2" in warning
+    assert "expected a JSON object" in warning
+    assert "list" in warning
+
+
+def test_aggregate_waits_out_an_in_flight_exclusive_append(tmp_path):
+    # RVW03-WS03: DuckDB's `read_json_auto` reads the store directly, bypassing the
+    # per-open lock the Python readers take. `aggregate` guards its DuckDB reads
+    # with a shared `flock`, so a concurrent appender's exclusive lock blocks the
+    # report until that append's flush completes — no half-flushed line reaches
+    # DuckDB, no crashed query. Proven by holding LOCK_EX from another thread:
+    # aggregate must NOT finish while the lock is held, then completes correctly
+    # once it releases (the shared/exclusive locks contend because flock keys on
+    # the open file description, so two separate opens contend even in-process).
+    import fcntl
+    import threading
+
+    _, _, path = _seed(tmp_path)
+    holding = threading.Event()
+    release = threading.Event()
+
+    def hold_exclusive():
+        with path.open("a", encoding="utf-8") as fh:
+            fcntl.flock(fh, fcntl.LOCK_EX)
+            holding.set()
+            release.wait(timeout=10)
+        # LOCK_EX released when the handle closes here.
+
+    holder = threading.Thread(target=hold_exclusive, daemon=True)
+    holder.start()
+    try:
+        assert holding.wait(timeout=10)
+        done = threading.Event()
+        result: dict = {}
+
+        def run_aggregate():
+            result["report"] = report.aggregate(path)
+            done.set()
+
+        reader = threading.Thread(target=run_aggregate, daemon=True)
+        reader.start()
+        # Blocked on the shared lock while the exclusive lock is held.
+        assert not done.wait(timeout=0.5)
+        release.set()
+        assert done.wait(timeout=10)
+        assert result["report"].total_runs == 3
+    finally:
+        release.set()
+        holder.join(timeout=10)
+
+
 def test_run_renders_the_review_axis_from_the_same_family_root(tmp_path, monkeypatch):
     base, _, _ = _seed_rounds(tmp_path)
     monkeypatch.setattr(report, "_resolve_repo", lambda start: _REPO)
