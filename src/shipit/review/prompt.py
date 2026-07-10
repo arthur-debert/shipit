@@ -25,9 +25,10 @@ anything (the checkout is context — callers, definitions, neighbors); run
 nothing (no build/test/shell execution). Full, incremental, range, and
 dimension passes all carry it, so every reviewer arm answers the same question
 — the Review Lab parity baseline (RVW03-WS05, docs/spec/review-lab.md). Its one
-argument is the arm-appropriate diff noun (``"this PR's diff"`` live, ``"this
-range's diff"`` on the offline replay), so the scope statement is identical
-across arms while still naming each arm's target.
+argument is the arm-appropriate diff noun (``"this PR's diff"`` full-live,
+``"the fix range's diff"`` incremental, ``"this range's diff"`` on the offline
+replay), matching what each arm told the agent to fetch, so the scope statement
+is identical across arms while still naming each arm's target.
 
 The agent is told to emit its review as a single JSON object on stdout and to
 **NOT** post it — shipit captures that stdout and posts it via the existing
@@ -59,12 +60,16 @@ def _scope_and_context(diff_noun: str = "this PR's diff") -> str:
 
     ``diff_noun`` names the diff under review, so the ONE scope statement stays
     identical across arms while naming the arm-appropriate target — ``"this PR's
-    diff"`` on the live path, ``"this range's diff"`` on the offline replay
-    (RVW03-WS01, where there is no PR). This is where WS01's range-scoping is
-    homed: the range noun rides the SHARED surface every arm carries (full,
-    incremental, range, and every dimension pass), not a private per-pass
-    sentence — so parity holds (same scope statement) without erasing the
-    target distinction.
+    diff"`` on the full live path, ``"the fix range's diff"`` on the incremental
+    (round >= 2) path which reviews ONLY the commits since the last review, and
+    ``"this range's diff"`` on the offline replay (RVW03-WS01, where there is no
+    PR). The noun MUST match what the arm told the agent to fetch just above: an
+    incremental arm that fetched ``git diff <base>..<head>`` but then scoped to
+    "this PR's diff" would invite the round >= 2 reviewer to re-report the whole
+    PR. This is where WS01's range-scoping is homed: the range noun rides the
+    SHARED surface every arm carries (full, incremental, range, and every
+    dimension pass), not a private per-pass sentence — so parity holds (same
+    scope statement) without erasing the target distinction.
     """
     return f"""\
 SCOPE AND CONTEXT — report only on the diff; read anything; run nothing:
@@ -283,7 +288,7 @@ distant invariant is exactly what an incremental review must still catch; a \
 raw-hunk-only pass would miss it. Open the surrounding and cross-file source \
 freely.
 
-{_scope_and_context("this PR's diff")}
+{_scope_and_context("the fix range's diff")}
 
 Here are the custom review instructions you must follow:
 {instructions}

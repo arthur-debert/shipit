@@ -156,16 +156,27 @@ def test_every_arm_carries_the_one_shared_scope_and_context_baseline():
 
 def test_shared_scope_baseline_names_the_arm_appropriate_diff_noun():
     """RVW03-WS01 re-homed onto ADR-0050: the ONE shared scope statement names
-    the arm's own diff, so the live-PR arms scope to "this PR's diff" and the
-    offline replay scopes to "this range's diff" — the range noun flows through
-    the shared surface EVERY arm carries (including the dimension pass), not a
-    private per-pass sentence. Same statement, arm-appropriate noun."""
+    the arm's own diff — the noun MUST match what that arm told the agent to
+    fetch. The full live arm scopes to "this PR's diff", the incremental
+    (round >= 2) arm to "the fix range's diff" (it fetched only the fix range,
+    NOT the whole PR — a "this PR's diff" noun there would re-scope the reviewer
+    to the entire PR), and the offline replay to "this range's diff". Same
+    statement, arm-appropriate noun, flowing through the shared surface every
+    arm carries (including the dimension pass), not a private per-pass sentence."""
     tasks = _every_arm_task()
-    # The live-PR arms (full, dimension pass, incremental) name the PR's diff.
-    for arm in ("full", "dimension", "incremental"):
+    # The full-scope live-PR arms (full, dimension pass) name the whole PR's diff.
+    for arm in ("full", "dimension"):
         task = tasks[arm]
         assert "report ONLY findings this PR's diff INTRODUCED or EXPOSED" in task, arm
         assert "this range's diff" not in task, arm
+        assert "the fix range's diff" not in task, arm
+    # The incremental arm reviews ONLY the fix range, so its scope noun matches:
+    # the fix range's diff, never the whole PR's.
+    incremental = tasks["incremental"]
+    assert (
+        "report ONLY findings the fix range's diff INTRODUCED or EXPOSED" in incremental
+    )
+    assert "this PR's diff" not in incremental
     # The offline replay arm names the range's diff, never a PR.
     range_task = tasks["range"]
     assert "report ONLY findings this range's diff INTRODUCED or EXPOSED" in range_task
