@@ -211,6 +211,24 @@ _Avoid_: conflating this with a test variant.
 **Review-round record**:
 The harness record of what one reviewer concluded for one Review round. Eval records describe run behavior; review-round records describe review output.
 
+**Ground-truth fixture**:
+The versioned, in-repo corpus of pinned historical PR ranges and their Ground-truth labels that review experiments are scored against. Scored results name the fixture version; numbers from different versions are not comparable.
+_Avoid_: "test set", "benchmark" as the noun.
+
+**Ground-truth label**:
+One evidenced verdict in the Ground-truth fixture: a finding location, claim, and severity that is real or not-real, carrying provenance — a fix commit, a confirmed thread, or a banked Adjudication.
+_Avoid_: labels admitted on opinion without provenance.
+
+**Adjudication**:
+The one-time human-confirmed verdict on an emitted finding the fixture does not know, banked into the Ground-truth fixture as a new label or a phrasing alias. It grows the fixture as a side effect of running Cells.
+
+**Cell**:
+One declared review experiment: a versioned in-repo file naming its baseline cell and the single axis it changes, plus fixture subset, pipeline shape, Invocation, replicates, and Sweeps. Banked cell results are reused, never re-run.
+_Avoid_: "experiment run" for the declaration.
+
+**Sweep**:
+One full review pass over a range inside a Cell. Multiple sweeps measure convergence over the same range; a Sweep is not a Review round, which is keyed to a live PR head and fix pushes.
+
 **Break-glass**:
 A visible, logged exception that allows an operation that policy would otherwise block. Its use is meant to be rare and measurable.
 _Avoid_: silent overrides.
