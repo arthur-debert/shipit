@@ -166,13 +166,18 @@ def _seams(monkeypatch):
         config,
         union,
         *,
-        pr_number,
         cwd,
+        pr_number=None,
+        commit_range=None,
         launcher=None,
         artifacts=None,
         correlation=None,
     ):
         capture["union"] = union
+        capture["calibrator_target"] = {
+            "pr_number": pr_number,
+            "commit_range": commit_range,
+        }
         capture["calibrator_artifacts"] = artifacts
         capture["calibrator_correlation"] = correlation
         assert cwd == "/tree"
@@ -436,8 +441,9 @@ def test_calibrator_failure_propagates_and_no_union_is_posted(monkeypatch, _seam
         config,
         union,
         *,
-        pr_number,
         cwd,
+        pr_number=None,
+        commit_range=None,
         launcher=None,
         artifacts=None,
         correlation=None,
@@ -929,6 +935,177 @@ def test_incremental_pass_failure_fails_the_round(_seams):
         )
 
 
+# --- the offline range target (RVW03-WS01) -----------------------------------
+
+
+def _range_view(workdir="/replay-checkout"):
+    from shipit.identity import repo_from_slug
+    from shipit.review.diff import RangeView
+
+    return RangeView(
+        repo=repo_from_slug("acme/widget"),
+        base_sha=Sha("d" * 40),
+        head_sha=Sha("e" * 40),
+        diff="diff --git a/x b/x\n",
+        changed_files=["x"],
+        workdir=workdir,
+    )
+
+
+@pytest.fixture
+def _range_seams(monkeypatch):
+    """Fake the RANGE producer seams (the offline arm's dispatch targets) and
+    BOOBY-TRAP the PR-coupled ones — a RangeView target must never provision a
+    Tree or compose a `gh pr diff` task."""
+    capture: dict = {
+        "reviews": {},
+        "union": None,
+        "result": None,
+        "calls": [],
+        "preflights": [],
+    }
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("a RangeView target must never touch a PR seam")
+
+    # The range arm still preflights its backend binaries (RVW03-WS03 preflight,
+    # shared with the PR arm) — stub it so the offline tests don't require the
+    # real `codex`/`claude` binaries on PATH, capturing the round's backend set.
+    monkeypatch.setattr(
+        fanout.producer,
+        "preflight_round",
+        lambda backends: capture["preflights"].append(list(backends)),
+    )
+
+    monkeypatch.setattr(fanout.producer, "provision_review_tree", _boom)
+    monkeypatch.setattr(fanout.producer, "run_tree_review", _boom)
+    monkeypatch.setattr(fanout.producer, "pass_task_text", _boom)
+
+    def fake_range_pass_task_text(
+        backend, view, *, instructions_path=None, dimension=None
+    ):
+        return f"range task for {dimension.name}"
+
+    monkeypatch.setattr(
+        fanout.producer, "range_pass_task_text", fake_range_pass_task_text
+    )
+
+    def fake_run_range_review(backend, view, **kw):
+        capture["calls"].append({"view": view, "dimension": kw.get("dimension")})
+        outcome = capture["reviews"][kw["dimension"].name]
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(fanout.producer, "run_range_review", fake_run_range_review)
+
+    def fake_run_calibrator(
+        config,
+        union,
+        *,
+        cwd,
+        pr_number=None,
+        commit_range=None,
+        launcher=None,
+        artifacts=None,
+        correlation=None,
+    ):
+        capture["union"] = union
+        capture["calibrator_target"] = {
+            "cwd": cwd,
+            "pr_number": pr_number,
+            "commit_range": commit_range,
+        }
+        return capture["result"], "cal-run-id", "calibrator task"
+
+    monkeypatch.setattr(fanout, "run_calibrator", fake_run_calibrator)
+    return capture
+
+
+def test_range_target_fans_out_through_the_range_producer(_range_seams):
+    """One code path (RVW03-WS01): a RangeView target runs the SAME fan-out —
+    union, dedup, routing, run trail — with the passes dispatched to the range
+    producer (no Tree, no gh) in the replay checkout."""
+    from shipit.agent import backend as agent_backend
+
+    _range_seams["reviews"] = {
+        "correctness": _pass_review([_comment("bug", severity="major")]),
+        "test-quality": _pass_review([]),
+    }
+    outcome = fanout.run_fanout_review(
+        agent_backend.CODEX,
+        _range_view(),
+        dimensions=["correctness", "test-quality"],
+    )
+    # Every pass launched through run_range_review with its dimension slice
+    # (the passes run in parallel, so compare order-insensitively).
+    assert sorted(c["dimension"].name for c in _range_seams["calls"]) == [
+        "correctness",
+        "test-quality",
+    ]
+    assert all(c["view"].workdir == "/replay-checkout" for c in _range_seams["calls"])
+    # The range round preflights its backend binaries too (RVW03-WS03, shared
+    # with the PR arm) — once, over the reviewer's configured backend.
+    assert _range_seams["preflights"] == [[agent_backend.CODEX]]
+    # The routed outcome is the fan-out's usual product: runs per pass, the
+    # deduped union posted with pass severities.
+    assert [run["kind"] for run in outcome.runs] == ["dimension-pass"] * 2
+    assert [c["text"] for c in outcome.review["comments"]] == ["bug"]
+    assert outcome.review["summary"]["status"] == "REQUEST_CHANGES"
+
+
+def test_range_target_calibrator_gets_the_range_ground_truth(_range_seams):
+    # The third PR-coupled seam: with the judge on, an offline round hands the
+    # calibrator the RANGE (its `git diff` ground truth) and the replay
+    # checkout as cwd — never a PR number, never a Tree.
+    from shipit.agent import backend as agent_backend
+
+    _range_seams["reviews"] = {
+        "correctness": _pass_review([_comment("bug", severity="major")]),
+    }
+    _range_seams["result"] = CalibrationResult(
+        overall_feedback="v", entries=(_calibrated(0, _finding(Severity.MAJOR, "bug")),)
+    )
+    outcome = fanout.run_fanout_review(
+        agent_backend.CODEX,
+        _range_view(),
+        dimensions=["correctness"],
+        calibrator=_CAL,
+    )
+    assert _range_seams["calibrator_target"] == {
+        "cwd": "/replay-checkout",
+        "pr_number": None,
+        "commit_range": ("d" * 40, "e" * 40),
+    }
+    assert [run["kind"] for run in outcome.runs] == ["dimension-pass", "calibrator"]
+
+
+def test_range_target_all_passes_failing_fails_the_round_with_the_range_label(
+    _range_seams,
+):
+    from shipit.agent import backend as agent_backend
+
+    _range_seams["reviews"] = {
+        "correctness": RuntimeError("backend blew up"),
+    }
+    with pytest.raises(RuntimeError, match=f"range {'d' * 40}..{'e' * 40}"):
+        fanout.run_fanout_review(
+            agent_backend.CODEX, _range_view(), dimensions=["correctness"]
+        )
+
+
+def test_range_target_rejects_incremental_and_dry_run():
+    # Rounds are keyed to a live PR head (multi-round fix-range replay is out
+    # of the Review Lab's scope) and the dry-run contract prints a would-run
+    # TREE launch — both are caller errors on a RangeView, refused loud.
+    from shipit.agent import backend as agent_backend
+
+    with pytest.raises(ValueError, match="incremental"):
+        fanout.run_fanout_review(agent_backend.CODEX, _range_view(), incremental=True)
+    with pytest.raises(ValueError, match="dry_run"):
+        fanout.run_fanout_review(agent_backend.CODEX, _range_view(), dry_run=True)
+
+
 # ---------------------------------------------------------------------------
 # RVW03-WS02 — per-run artifact bundles + finding↔pass correlation + progress
 # ---------------------------------------------------------------------------
@@ -1128,8 +1305,9 @@ def test_calibrator_failure_settled_event_carries_the_surrogate_run_id(
         config,
         union,
         *,
-        pr_number,
         cwd,
+        pr_number=None,
+        commit_range=None,
         launcher=None,
         artifacts=None,
         correlation=None,

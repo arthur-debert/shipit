@@ -40,7 +40,10 @@ The RVW02-WS04 dimension fan-out (:mod:`shipit.review.fanout`) drives
 (``dimension=…``) against ONE shared Tree it provisions up front
 (:func:`provision_review_tree`, so N parallel passes never race N refreshes) —
 and hashes each pass's exact prompt via :func:`pass_task_text` for the
-review-round record's per-run **Variant**.
+review-round record's per-run **Variant**. The offline fan-out replay
+(RVW03-WS01) drives :func:`run_range_review` the same way — once per pass with
+the same ``dimension=`` narrowing, :func:`range_pass_task_text` as its variant
+source — so the live and replay arms differ only in how the diff is fetched.
 
 It does NOT post, does NOT touch the check-run, and does NOT decide outcomes — the
 service layer (:mod:`shipit.review.service`) owns posting + the funnel breadcrumb,
@@ -242,6 +245,39 @@ def pass_task_text(
     )
 
 
+def range_pass_task_text(
+    backend: Backend,
+    view,
+    *,
+    instructions_path: str | None = None,
+    dimension: Dimension | None = None,
+) -> str:
+    """The EXACT reviewer task text a :func:`run_range_review` launch composes —
+    the offline fan-out replay's **Variant** source (RVW03-WS01).
+
+    The range sibling of :func:`pass_task_text`: re-derives the same bytes
+    :func:`run_range_review` will launch with (instructions + the resolved
+    range + the backend's schema presentation + the optional dimension slice)
+    without launching anything, so a replayed pass's ``round.runs`` variant
+    hash is honest exactly like a live pass's. ``view`` is the resolved
+    :class:`~shipit.review.diff.RangeView`. Raises ``ValueError`` for a
+    non-funnel backend, exactly like the launch path.
+    """
+    spec = _SPECS.get(backend)
+    if spec is None:
+        raise ValueError(
+            f"unknown funnel review backend {backend.name!r} "
+            f"(known: {', '.join(b.name for b in _SPECS)})"
+        )
+    return build_range_reviewer_task(
+        load_instructions(instructions_path),
+        str(view.base_sha),
+        str(view.head_sha),
+        schema_inline=spec.schema_inline,
+        dimension=dimension,
+    )
+
+
 def provision_review_tree(ctx) -> str:
     """Provision (or reuse) the shared read-only Tree on ``ctx``'s PR head and
     return its path.
@@ -411,6 +447,7 @@ def run_range_review(
     timeout: str = "600s",
     instructions_path: str | None = None,
     launcher: launch.Runner | None = None,
+    dimension: Dimension | None = None,
     run_id: str | None = None,
     artifacts: RunArtifacts | None = None,
 ) -> dict:
@@ -428,6 +465,9 @@ def run_range_review(
       * nothing downstream posts: the caller (:mod:`shipit.review.replay`) writes
         the review-round record and stops — no PR is touched.
 
+    ``dimension`` narrows the task to ONE **Dimension pass** exactly as on
+    :func:`run_tree_review` (RVW03-WS01: the offline fan-out replay launches
+    this once per configured dimension); ``None`` keeps the full-scope task.
     ``run_id`` / ``artifacts`` are the same RVW03-WS02 observability seam as on
     :func:`run_tree_review`: the caller-minted run id lands on this launch's
     log records, and the :class:`~shipit.review.artifacts.RunArtifacts` bundle
@@ -452,6 +492,7 @@ def run_range_review(
         str(view.base_sha),
         str(view.head_sha),
         schema_inline=spec.schema_inline,
+        dimension=dimension,
     )
     adapter = spec.adapter_factory(model, timeout)  # type: ignore[operator]
 

@@ -14,8 +14,9 @@ review-round record says what the review *concluded*. They meet in
 ``shipit eval report``, which joins round records to eval records by run id —
 each record carries the run ids + **Variant** hashes of its contributing runs
 (``round.runs``: the WS04 dimension fan-out fills it with one entry per
-**Dimension pass** plus the **Calibrator** run; the single-pass offline replay
-contributes its one range pass) and its own review-instructions **Variant**
+**Dimension pass** plus the **Calibrator** run — offline exactly as live,
+RVW03-WS01; the single-pass offline replay contributes its one range pass,
+RVW03-WS02) and its own review-instructions **Variant**
 (``round.variant``), the experiment-arm handle a review-prompt A/B groups by.
 Since RVW03-WS02 the record also carries ``round.id`` / ``round.artifacts``
 (the round's per-run artifact-bundle location,
