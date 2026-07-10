@@ -425,6 +425,28 @@ def test_run_fanout_replay_calibrator_runs_offline_with_provisioned_agent_defs(
     assert kinds == ["dimension-pass", "calibrator"]
 
 
+def test_run_fanout_replay_provisioning_failure_is_a_clean_review_error(
+    checkout, fanout_launcher, tmp_path, monkeypatch
+):
+    # A filesystem failure while provisioning the calibrator's agent-defs must
+    # surface as the replay path's ONE clean ReviewError (rendered as a single
+    # `error:` line by the verb), never a raw OSError traceback.
+    def boom(workdir):
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(replay, "provision_agent_defs", boom)
+    view = replay.resolve_range("HEAD~1..HEAD", workdir=str(checkout))
+    with pytest.raises(ReviewError, match="agent-defs"):
+        replay.run_fanout_replay(
+            agent_backend.CODEX,
+            view,
+            dimensions=("correctness",),
+            calibrator=CalibratorConfig(),
+            launcher=fanout_launcher["launch"],
+            base_dir=tmp_path / "state",
+        )
+
+
 def test_provision_agent_defs_writes_missing_and_never_clobbers(checkout):
     agents_dir = checkout / ".claude" / "agents"
     agents_dir.mkdir(parents=True)

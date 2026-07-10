@@ -302,7 +302,9 @@ def run_fanout_replay(
     everything; there is no PR to protect from nit churn. When ``calibrator``
     is set, the role agent-defs are provisioned into the replay checkout first
     (:func:`provision_agent_defs`) so the judge's ``claude --agent reviewer``
-    launch works in a clone that never committed them.
+    launch works in a clone that never committed them; a filesystem failure
+    provisioning them is re-raised as a :class:`~shipit.review.diff.ReviewError`
+    (the replay path's clean one-line refusal) rather than a raw ``OSError``.
 
     Returns ``{"review": …, "record_path": …}`` and PROPAGATES a record-write
     failure, both exactly as the single-pass arm does (the record is the
@@ -310,7 +312,20 @@ def run_fanout_replay(
     injects the launch seam (tests).
     """
     if calibrator is not None:
-        provision_agent_defs(view.workdir)
+        # A filesystem failure here (read-only checkout, permissions, a
+        # non-directory `.claude`/`agents` component) must die as the replay
+        # path's ONE clean domain refusal, not a raw OSError traceback — the
+        # provisioning runs before any model bills.
+        try:
+            provision_agent_defs(view.workdir)
+        except OSError as exc:
+            raise ReviewError(
+                f"cannot provision the calibrator's role agent-defs into "
+                f"{view.workdir!r} ({exc}) — the fan-out replay's judge reads "
+                "them from the checkout. Fix the checkout's writability, or drop "
+                "the `--calibrator-*` options to run the fan-out without the "
+                "judge, then re-run."
+            ) from exc
     agent = backend.funnel_agent or backend.name
     start = time.monotonic()
     outcome = fanout.run_fanout_review(
