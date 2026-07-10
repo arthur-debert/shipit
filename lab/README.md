@@ -95,3 +95,70 @@ human-vetted labels (issue #638, confirmed); the remaining ranges and labels
 were mined by parallel scout agents from fix-commit archaeology across the
 portfolio and normalized by an economical-model agent, and land as
 **unconfirmed candidates** pending maintainer confirmation.
+
+## Cells (`lab/cells/`)
+
+A **Cell** (ADR-0049; `docs/spec/review-lab.md`) is one declarative review
+experiment: a small committed TOML file under `lab/cells/` that
+`shipit lab run <id>` resolves onto the sanctioned offline replay driver
+(`shipit pr review replay [--fanout]`), foreground, on subscription-billed
+CLI backends. `shipit lab report <id>` then renders its **convergence
+curve** from the banked records — cumulative major-or-worse recall, false
+positives / adjudicated precision, token cost, and latency per sweep point,
+compared against the baseline cell **at equal budget** (recall per Mtok and
+per minute). Both verbs are validated loudly at load: unknown keys, a missing
+`baseline`/`axis` declaration, or an unfair pair (different fixture version
+or PR subset than the baseline) refuse before any token burns.
+
+### Format (schema 1)
+
+Parsed and validated by `shipit.review.cell`; the demo pair below is
+`fanout-baseline.toml` (control) + `fanout-informed.toml` (treatment).
+
+```toml
+schema = 1
+id = "fanout-informed"      # must equal the filename stem
+baseline = "fanout-baseline"  # MANDATORY: the control cell (a control names itself)
+axis = "sweep mode: informed vs blind"  # MANDATORY: the ONE thing changed
+                                        # (a control declares axis = "control")
+description = "…"
+
+[fixture]
+version = 1                 # the label-set version scores cite (validated at run)
+prs = ["core-440", …]       # fixture pin subset (omit = every pin)
+
+[pipeline]
+shape = "fanout"            # "single" | "fanout"
+dimensions = ["correctness", …]   # fan-out pass set (omit = shipped set)
+dedup = "mechanical"        # "mechanical" | "calibrated"
+# [pipeline.calibrator]     # required iff dedup = "calibrated"
+# backend = "claude"
+
+[invocation]
+backend = "codex"           # funnel agent: codex | agy
+model = "pro"
+timeout = "600s"
+# NO `reasoning` key: no replay backend carries the knob yet (post-#685/#691);
+# a recorded-but-unapplied level would mislabel the arm, so it is rejected.
+
+# [invocation.dimensions.security-robustness]  # experiment-only per-dimension
+# model = "opus"                               # Invocation overrides (never Roster)
+
+[sweeps]
+count = 2                   # K full sweeps over the same ranges
+mode = "blind"              # "blind" | "informed" (sweep k primed with <k's findings)
+replicates = 1              # repeat runs per (pin, sweep) for variance
+```
+
+### Running and idempotency
+
+`shipit lab run fanout-informed --checkout ~/src/core --checkout ~/src/app …`
+executes every (pin × replicate × sweep) point. Replay is offline: each pinned
+repo needs a local clone with the pinned commits fetched, and a pin with no
+matching checkout refuses loudly before anything runs. Runs are **idempotent
+by key** — (cell, fixture PR, fixture version, instructions variant,
+replicate, sweep), stamped on each record as `round.cell` — so banked points
+are reused, never re-paid: extending a K=1 curve to K=2 pays only for sweep 2.
+`--force` is the one explicit re-run path (the newest record per key wins in
+the report). Editing the instructions file changes the variant hash, so stale
+banked records are never silently reused for a new prompt.

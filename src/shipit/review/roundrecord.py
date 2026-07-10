@@ -22,6 +22,10 @@ Since RVW03-WS02 the record also carries ``round.id`` / ``round.artifacts``
 (the round's per-run artifact-bundle location,
 :mod:`shipit.review.artifacts`) and each finding's originating ``run_id``, so
 a posted finding traces back to the pass → prompt → raw output that emitted it.
+Since RVW03-WS07 a ``lab run`` round additionally carries ``round.cell`` — the
+experiment **Cell** tag (cell id + the full idempotency key,
+:func:`shipit.review.cell.run_key`) that makes banked cell results
+reusable-by-key and curve-reportable (``None`` on every non-cell round).
 
 Dispositions are the Opportunity-harvest seam: the record ALWAYS carries every
 judged finding WITH its disposition — routed-out (dropped) findings included,
@@ -60,7 +64,10 @@ from .schema import finding_from_dict
 #: 3 added ``round.id`` / ``round.artifacts`` (the per-round artifact-bundle
 #: location) and ``round.findings[].run_id`` (the finding↔pass correlation),
 #: RVW03-WS02.
-SCHEMA_VERSION = 3
+#: 4 added ``round.cell`` — the experiment Cell tag a ``lab run`` stamps
+#: (cell id + full idempotency key, :func:`shipit.review.cell.run_key`;
+#: ``None`` for every non-cell round), RVW03-WS07.
+SCHEMA_VERSION = 4
 
 
 def dispositioned(
@@ -109,6 +116,7 @@ def build(
     total_tokens: int | None = None,
     round_id: str | None = None,
     artifacts_dir: str | None = None,
+    cell: Mapping[str, Any] | None = None,
     timestamp: str,
 ) -> dict[str, Any]:
     """Assemble the review-round record — one JSONL line per review round. PURE.
@@ -129,7 +137,11 @@ def build(
     ``round_id`` / ``artifacts_dir`` (RVW03-WS02) are the round's identity and
     the directory its per-run artifact bundles live under — ``round.id`` /
     ``round.artifacts``, what makes a round's bundles discoverable from its
-    record (``None`` for a pipeline with no bundles).
+    record (``None`` for a pipeline with no bundles). ``cell`` (RVW03-WS07) is
+    the experiment Cell tag a ``lab run`` stamps — the cell id + the full
+    idempotency key (:func:`shipit.review.cell.run_key`), what makes a banked
+    record reusable-by-key and curve-reportable; ``None`` (every non-cell
+    round) leaves ``round.cell`` null.
     """
     summary = review.get("summary") or {}
     if not isinstance(summary, Mapping):
@@ -153,6 +165,7 @@ def build(
             "instructions_path": instructions_path,
         },
         "round.variant": dict(variant) if variant is not None else None,
+        "round.cell": dict(cell) if cell is not None else None,
         "round.runs": [dict(run) for run in runs],
         "round.usage": {"duration_ms": duration_ms, "total_tokens": total_tokens},
     }
@@ -202,6 +215,7 @@ def record_round(
     duration_ms: int | None = None,
     round_id: str | None = None,
     artifacts_dir: str | None = None,
+    cell: Mapping[str, Any] | None = None,
     base_dir: Path | None = None,
     env: Mapping[str, str] | None = None,
 ) -> Path:
@@ -225,7 +239,9 @@ def record_round(
     bundle paths: every dimension pass + the calibrator) onto ``round.runs``.
     ``round_id`` / ``artifacts_dir`` (RVW03-WS02) land as ``round.id`` /
     ``round.artifacts`` — the round's identity and its bundles' location, so
-    the artifact trail is discoverable from the record.
+    the artifact trail is discoverable from the record. ``cell`` (RVW03-WS07)
+    lands as ``round.cell`` — the ``lab run`` experiment tag (cell id + the
+    full idempotency key); ``None`` for every non-cell round.
 
     RAISES on failure (a malformed slug, an unreadable instructions file, an
     unwritable store): the caller owns the failure posture — the review-path tee
@@ -253,6 +269,7 @@ def record_round(
         duration_ms=duration_ms,
         round_id=round_id,
         artifacts_dir=artifacts_dir,
+        cell=cell,
         timestamp=_now_iso(),
     )
     return append_record(record, repo, base_dir, kind=REVIEW_ROUNDS_KIND)

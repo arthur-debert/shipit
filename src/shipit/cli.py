@@ -26,6 +26,7 @@ from .verbs.ci import ci as ci_group
 from .verbs.eval import eval_group
 from .verbs.fleet import fleet as fleet_group
 from .verbs.hook import hook as hook_group
+from .verbs.lab import lab_group
 from .verbs.logevent import log as log_group
 from .verbs.pr import pr as pr_group
 from .verbs.provision import provision as provision_group
@@ -301,6 +302,11 @@ root.add_command(hook_group)
 # The nested `eval` group (HAR02) — the READER side of the harness eval store the
 # `hook` events write; `shipit eval report` aggregates it. Attached like `pr`.
 root.add_command(eval_group)
+
+# The nested `lab` group (RVW03, ADR-0049) — the Review Lab's experiment
+# surface: `lab run` executes a declarative cell over the offline replay
+# driver, `lab report` renders its convergence curve. Attached like `eval`.
+root.add_command(lab_group)
 
 # The nested `log` group (LOG04) — the constrained dev-cycle WRITE path:
 # `shipit log event <name>` records a registered milestone (ADR-0032). The

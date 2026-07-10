@@ -181,6 +181,7 @@ def run_fanout_review(
     dimensions: Sequence[str] | None = None,
     calibrator: CalibratorConfig | None = None,
     nit_cap: int | None = None,
+    invocation_overrides: Mapping[str, Mapping[str, str]] | None = None,
     incremental: bool = False,
     incremental_reasoning: str = DEFAULT_INCREMENTAL_REASONING,
     dry_run: bool = False,
@@ -233,7 +234,17 @@ def run_fanout_review(
     ``0`` → floor at minor; IGNORED in an incremental round, which forces ``0``).
     ``model`` / ``timeout`` / ``instructions_path`` are the reviewer's own run
     options and apply to every pass, exactly as they applied to the monolithic
-    run.
+    run — except where ``invocation_overrides`` (RVW03-WS07) narrows one pass:
+    a ``{dimension name: {"model"/"timeout": …}}`` mapping, the Review Lab's
+    experiment-only per-dimension Invocation capability (ADR-0049 — it lives
+    in the lab runner's cells, deliberately NOT in Roster configuration; the
+    live service never passes it). Each overridden pass launches AND records
+    with its own model/timeout (the run entry and bundle meta stamp the actual
+    values, so the arm is never mislabeled). An override naming a dimension
+    outside this round's pass set — or any override in an ``incremental``
+    round, which has no dimension passes — is a loud ``ValueError``: a
+    silently-ignored override would run a different experiment than the
+    reviewed cell file declares.
 
     Failure posture: every configured backend binary (the reviewer's own plus,
     when the judge is on, the calibrator's) is preflighted ONCE before the Tree
@@ -282,6 +293,12 @@ def run_fanout_review(
             "— the dry-run contract prints a would-run Tree launch, and an "
             "offline replay has no Tree"
         )
+    if invocation_overrides and incremental:
+        raise ValueError(
+            "run_fanout_review: invocation_overrides and incremental are "
+            "mutually exclusive — an incremental round runs one fix-range "
+            "pass, not dimension passes"
+        )
     incremental_range: tuple[str, str] | None = None
     if incremental:
         incremental_range = (str(target.base_sha), str(target.head_sha))
@@ -296,6 +313,14 @@ def run_fanout_review(
                 f"{', '.join(known_dimension_names())}"
             ) from None
         effective_nit_cap = nit_cap
+    if invocation_overrides:
+        unknown = sorted(set(invocation_overrides) - {d.name for d in dims})
+        if unknown:
+            raise ValueError(
+                f"invocation_overrides name dimension(s) outside this round's "
+                f"pass set: {', '.join(unknown)} (passes: "
+                f"{', '.join(d.name for d in dims)})"
+            )
     agent = backend.funnel_agent or backend.name
     # The one display/telemetry split between the arms: a PR target logs and
     # emits as `pr#<n>`; a range target has no PR — its label is the range and
@@ -380,6 +405,12 @@ def run_fanout_review(
     )
 
     def _one_pass(dim: Dimension) -> _PassResult:
+        # The per-dimension Invocation override seam (RVW03-WS07): the lab's
+        # experiment-only capability — this pass's model/timeout, everything
+        # below stamps the ACTUAL values so the arm is never mislabeled.
+        override = (invocation_overrides or {}).get(dim.name, {})
+        pass_model = override.get("model", model)
+        pass_timeout = override.get("timeout", timeout)
         if range_view is not None:
             task = producer.range_pass_task_text(
                 backend,
@@ -403,7 +434,7 @@ def run_fanout_review(
             "kind": kind,
             "dimension": dim.name,
             "backend": agent,
-            "model": model,
+            "model": pass_model,
             "variant": variant_of(task, label=label).as_record(),
             "artifacts": str(bundle.dir) if bundle.dir is not None else None,
         }
@@ -420,7 +451,7 @@ def run_fanout_review(
             kind=kind,
             dimension=dim.name,
             backend=agent,
-            model=model,
+            model=pass_model,
             variant=run["variant"],
             pr=pr_number,
         )
@@ -452,8 +483,8 @@ def run_fanout_review(
                 review = producer.run_range_review(
                     backend,
                     range_view,
-                    model=model,
-                    timeout=timeout,
+                    model=pass_model,
+                    timeout=pass_timeout,
                     instructions_path=instructions_path,
                     launcher=launcher,
                     dimension=dim,
@@ -464,8 +495,8 @@ def run_fanout_review(
                 review = producer.run_tree_review(
                     backend,
                     target,
-                    model=model,
-                    timeout=timeout,
+                    model=pass_model,
+                    timeout=pass_timeout,
                     instructions_path=instructions_path,
                     launcher=launcher,
                     dimension=None if incremental else dim,

@@ -603,7 +603,9 @@ def test_build_carries_round_identity_artifacts_and_finding_run_ids():
         artifacts_dir="/state/review-artifacts/owner/repo/round-hex",
         timestamp="2026-01-01T00:00:00+00:00",
     )
-    assert record["round.schema_version"] == 3
+    # Bumped to 4 when RVW03-WS07 added `round.cell` (the field-set convention:
+    # any aggregator reading mixed stores keys off this).
+    assert record["round.schema_version"] == 4
     assert record["round.id"] == "round-hex"
     assert record["round.artifacts"] == "/state/review-artifacts/owner/repo/round-hex"
     # Each persisted finding carries its originating pass's run id (None when

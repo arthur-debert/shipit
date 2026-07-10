@@ -1,0 +1,29 @@
+# Demo TREATMENT cell (ADR-0049; format: lab/README.md "Cells").
+# One axis vs fanout-baseline: sweep mode informed instead of blind — sweep 2
+# is primed with sweep 1's posted findings (composed into the instructions at
+# the runner layer) and told to hunt for what they missed. Everything else is
+# byte-identical to the control; PR review of this pair checks exactly that.
+
+schema = 1
+id = "fanout-informed"
+baseline = "fanout-baseline"
+axis = "sweep mode: informed vs blind"
+description = "Informed-sweep treatment of fanout-baseline: identical pipeline, sweep 2 primed with sweep 1's posted findings."
+
+[fixture]
+version = 1
+prs = ["core-440", "app-391", "lex-820"]
+
+[pipeline]
+shape = "fanout"
+dedup = "mechanical"
+
+[invocation]
+backend = "codex"
+model = "pro"
+timeout = "600s"
+
+[sweeps]
+count = 2
+mode = "informed"
+replicates = 1
