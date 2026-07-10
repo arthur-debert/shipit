@@ -35,7 +35,10 @@ def eval_group() -> None:
     """Root of the ``eval`` subcommand group; verbs are attached below."""
 
 
-# --- verb registration (append-only; one import + one add_command per verb) ---
+# --- verb registration ---------------------------------------------------------
+# Verbs import in one ruff-sorted block (I001 canonically merges same-package
+# imports, so a literal one-line-per-verb block is not stable); each new verb
+# still appends exactly one `add_command` line below — that list is append-only.
 from . import bank, report, score  # noqa: E402  (HAR02-WS04; RVW03-WS06)
 
 eval_group.add_command(report.cmd)

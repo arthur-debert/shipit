@@ -56,10 +56,10 @@ def run(
     root = base_dir if base_dir is None else Path(base_dir)
     records: list[dict[str, Any]] = []
     for slug in sorted({pin.repo for pin in fixture.prs}):
-        try:
-            repo = repo_from_slug(slug)
-        except ValueError:
-            continue  # parse_fixture guarantees owner/name shape; belt-and-suspenders
+        # `load_fixture` already validated every pin.repo as an owner/name slug
+        # (a malformed one is a loud FixtureError there, never a silent skip
+        # here that would shrink the scorer's denominator).
+        repo = repo_from_slug(slug)
         records.extend(store.read_records(repo, root, kind=store.REVIEW_ROUNDS_KIND))
     print(render_report(score_records(fixture, records)), file=out, end="")
     return 0

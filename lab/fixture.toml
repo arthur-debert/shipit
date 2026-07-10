@@ -114,7 +114,7 @@ repo = "arthur-debert/dodot"
 pr = 224
 base_sha = "a50e5e740796e0fa9fbf033ad396b511cb968b39"
 head_sha = "8fa038ea4da7f13206922201a94532756f1553b8"
-title = "fix: ignored packs \u2014 up/down match status output, sweep stale state (#222)"
+title = "fix: ignored packs — up/down match status output, sweep stale state (#222)"
 language = "rust"
 
 [[labels]]
@@ -629,7 +629,7 @@ lines = [81, 88]
 severity = "major"
 verdict = "real"
 confirmed = false
-claim = "The any_removed stale-state count is computed inside the `if !ctx.dry_run` block, so `down --dry-run` reports 'Nothing to deactivate.' while a real run would sweep the now-ignored pack and report 'Packs deactivated.' \u2014 dry-run and real output diverge."
+claim = "The any_removed stale-state count is computed inside the `if !ctx.dry_run` block, so `down --dry-run` reports 'Nothing to deactivate.' while a real run would sweep the now-ignored pack and report 'Packs deactivated.' — dry-run and real output diverge."
 [labels.provenance]
 kind = "confirmed-thread"
 ref = "291210986c84fd9789bcdf3d50e770207983ea73"

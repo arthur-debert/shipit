@@ -25,8 +25,9 @@ record dicts; the CLI boundary lives in :mod:`shipit.verbs.eval.score`):
    line within the label's range, claim-token overlap with aliases honored).
    Candidate (unconfirmed) labels never enter a metric — opinion must not sit
    in a denominator.
-4. Per Variant (``round.variant`` label else content-hash — the same key the
-   eval report groups by): a ``real`` label is RECALLED when any posted
+4. Per Variant (``round.variant`` content-hash, decorated with the optional
+   A/B label — the same key the eval report groups by, so an arm reads alike
+   on both surfaces): a ``real`` label is RECALLED when any posted
    finding of that variant matches it; a finding matching a ``not-real`` label
    is a measured FALSE POSITIVE (the banked refutation paying rent); a finding
    matching nothing is UNADJUDICATED — not wrong, *unknown to the corpus* —
@@ -44,6 +45,7 @@ numbers from different versions are never comparable.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -160,8 +162,12 @@ def _pin_for(fixture: Fixture, record: Mapping[str, Any]) -> PinnedRange | None:
 
 
 def _variant_key(record: Mapping[str, Any]) -> str:
-    """The record's experiment-arm key: label else content-hash else ``(none)``
-    (the eval report's grouping rule, restated for plain dicts)."""
+    """The record's experiment-arm key — the SAME rendering the eval report's
+    variant axis produces (:func:`shipit.verbs.eval.report._variant_bucket`):
+    ``content_hash``, or ``content_hash [label]`` when an A/B label is present,
+    else ``(none)``. Keyed on the content-hash IDENTITY (label only decorates)
+    so two arms of the same prompt sharing one label never collapse into a
+    single bucket — which would mix their denominators and recalled sets."""
     variant = record.get("round.variant")
     if not isinstance(variant, Mapping):
         return _NO_VARIANT
@@ -169,9 +175,7 @@ def _variant_key(record: Mapping[str, Any]) -> str:
     if not isinstance(content_hash, str) or not content_hash:
         return _NO_VARIANT
     label = variant.get("label")
-    if isinstance(label, str) and label:
-        return label
-    return content_hash
+    return f"{content_hash} [{label}]" if label is not None else content_hash
 
 
 def _posted_findings(record: Mapping[str, Any]) -> list[Mapping[str, Any]]:
@@ -325,6 +329,19 @@ def score_records(
 # --- rendering (text; the CLI's output layer) ---------------------------------
 
 
+#: Control characters (C0/C1 + DEL) that must never reach the terminal verbatim:
+#: adjudication text is model-generated round-record data, so an embedded ANSI
+#: escape or bare newline could forge report structure or spoof output (CWE-150).
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+
+def _sanitize(text: str) -> str:
+    """One line of untrusted record text, safe to interpolate into the report:
+    control characters (ESC, CR/LF, the rest of C0/C1 + DEL) become a visible
+    ``·`` so external text can neither move the cursor nor break the layout."""
+    return _CONTROL_CHARS.sub("·", text)
+
+
 def _tier_line(tier: TierScore) -> str:
     marker = "  [UNDERPOWERED]" if tier.underpowered else ""
     pct = f" ({tier.recalled / tier.positives:.0%})" if tier.positives else ""
@@ -334,8 +351,10 @@ def _tier_line(tier: TierScore) -> str:
 def _adjudication_lines(items: Sequence[Adjudication]) -> list[str]:
     out = []
     for item in items:
-        loc = f"{item.file}:{item.line}" if item.line is not None else item.file
-        head = f"    [{item.pr_id}] {loc} ({item.severity or '?'}) — {item.text}"
+        file = _sanitize(item.file)
+        loc = f"{file}:{item.line}" if item.line is not None else file
+        severity = _sanitize(item.severity) or "?"
+        head = f"    [{item.pr_id}] {loc} ({severity}) — {_sanitize(item.text)}"
         out.append(head)
         if item.kind == "near-miss":
             out.append(
@@ -371,7 +390,8 @@ def render_report(report: ScoreReport) -> str:
     for vs in report.variants:
         lines += [
             "",
-            f"variant {vs.variant}  ({vs.rounds} round(s) over {', '.join(vs.pr_ids)})",
+            f"variant {_sanitize(vs.variant)}  "
+            f"({vs.rounds} round(s) over {', '.join(vs.pr_ids)})",
         ]
         lines += [_tier_line(tier) for tier in vs.tiers]
         lines.append(

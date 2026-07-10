@@ -83,6 +83,8 @@ class TestParseFixture:
             {"schema": FIXTURE_SCHEMA_VERSION + 1},
             {"prs": [dict(PR, base_sha="not-a-sha")]},
             {"prs": [dict(PR, head_sha="abc")]},  # too short
+            {"prs": [dict(PR, repo="not-a-slug")]},  # not owner/name
+            {"prs": [dict(PR, repo="owner/name/extra")]},  # too many segments
             {"prs": [dict(PR), dict(PR)]},  # duplicate pr id
             {"labels": [label_data(pr="unknown-pr")]},
             {"labels": [label_data(severity="blocker")]},  # retired ladder
@@ -190,6 +192,26 @@ class TestSerialization:
         assert (
             load_fixture(path).labels[0].claim == 'claim with "quotes" and back\\slash'
         )
+
+    def test_non_bmp_claim_round_trips(self, tmp_path):
+        # An emoji (or any non-BMP char) in a claim must serialize as literal
+        # UTF-8, not a `🚀` surrogate pair — TOML forbids surrogate
+        # escapes, so the pair would make save's own round-trip parse reject it.
+        fixture = parse_fixture(
+            data(labels=[label_data(claim="rocket 🚀 in the readback path")])
+        )
+        path = tmp_path / "fixture.toml"
+        save_fixture(fixture, path)
+        assert load_fixture(path).labels[0].claim == "rocket 🚀 in the readback path"
+
+    def test_save_is_atomic_and_leaves_no_temp(self, tmp_path):
+        # Overwrite an existing file, then assert only the target remains (the
+        # same-directory temp is always cleaned up — no `.tmp-<pid>` litter).
+        path = tmp_path / "fixture.toml"
+        save_fixture(parse_fixture(data()), path)
+        save_fixture(parse_fixture(data(version=2)), path)
+        assert load_fixture(path).version == 2
+        assert [p.name for p in tmp_path.iterdir()] == ["fixture.toml"]
 
     def test_save_validates_a_programmatic_fixture(self, tmp_path):
         # One rule set: a Label assembled in code (bad verdict) must fail the

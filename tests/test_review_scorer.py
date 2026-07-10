@@ -174,8 +174,29 @@ class TestRecall:
             fixture(), [record([hit()], variant="arm-a"), record([], variant="arm-b")]
         )
         by_name = {vs.variant: vs for vs in report.variants}
-        assert by_name["arm-a"].recalled_label_ids == ("core-G1",)
-        assert by_name["arm-b"].recalled_label_ids == ()
+        # the arm key mirrors the eval report: `content_hash [label]`.
+        assert by_name["sha256:aaa [arm-a]"].recalled_label_ids == ("core-G1",)
+        assert by_name["sha256:aaa [arm-b]"].recalled_label_ids == ()
+
+    def test_same_label_different_hash_do_not_collapse(self):
+        # Two prompt versions carrying the SAME A/B label are DISTINCT arms —
+        # keying on the label alone would merge their denominators and recalls.
+        def rec(content_hash, findings):
+            return {
+                "round.schema_version": 2,
+                "round.repo": "phos-editor/core",
+                "round.pr": None,
+                "round.range": {"base": BASE, "head": HEAD},
+                "round.variant": {"content_hash": content_hash, "label": "arm-a"},
+                "round.findings": findings,
+            }
+
+        report = score_records(
+            fixture(), [rec("sha256:aaa", [hit()]), rec("sha256:bbb", [])]
+        )
+        by_name = {vs.variant: vs for vs in report.variants}
+        assert by_name["sha256:aaa [arm-a]"].recalled_label_ids == ("core-G1",)
+        assert by_name["sha256:bbb [arm-a]"].recalled_label_ids == ()
 
 
 class TestFalsePositivesAndAdjudication:
@@ -254,3 +275,19 @@ class TestUnderpowered:
     def test_empty_store_renders_the_empty_report(self):
         text = render_report(score_records(fixture(), []))
         assert "nothing to score" in text
+
+
+class TestReportSanitization:
+    def test_control_chars_in_emission_text_cannot_forge_output(self):
+        # Adjudication text is model-generated round-record data: an ANSI escape
+        # or bare newline must not reach the terminal and forge report structure.
+        hostile = finding(
+            "phos-editor/src/other.rs",
+            10,
+            "\x1b[2Kspoofed\nHEADER: fake recall 99/99",
+        )
+        text = render_report(score_records(fixture(), [record([hostile])]))
+        assert "\x1b" not in text
+        # the embedded newline is neutralized: the whole emission stays one line.
+        emission = next(ln for ln in text.splitlines() if "spoofed" in ln)
+        assert "fake recall 99/99" in emission

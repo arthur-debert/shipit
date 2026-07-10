@@ -36,12 +36,14 @@ so the scorer (:mod:`shipit.review.scorer`) can stay deterministic forever.
 from __future__ import annotations
 
 import json
+import os
 import tomllib
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 from ..finding import Severity, parse_severity
+from ..identity import repo_from_slug
 
 __all__ = [
     "DEFAULT_FIXTURE_PATH",
@@ -197,9 +199,18 @@ def _parse_pr(raw: Any, index: int) -> PinnedRange:
     for name, sha in (("base_sha", base), ("head_sha", head)):
         if len(sha) < 7 or any(c not in "0123456789abcdef" for c in sha.lower()):
             raise FixtureError(f"{where}: {name!r} must be a hex SHA (≥7 chars)")
+    repo = _require_str(raw, "repo", where)
+    try:
+        # The fixture is the scorer's denominator, so its repo must be a real
+        # ``owner/name`` slug HERE (the one contract boundary) — a bad slug that
+        # loaded silently would make `shipit eval score` skip that pin's store
+        # and report a quietly-shrunk recall instead of failing loud (ADR-0048).
+        repo_from_slug(repo)
+    except ValueError as exc:
+        raise FixtureError(f"{where}: {exc}") from exc
     return PinnedRange(
         id=_require_str(raw, "id", where),
-        repo=_require_str(raw, "repo", where),
+        repo=repo,
         pr=pr,
         base_sha=base.lower(),
         head_sha=head.lower(),
@@ -354,8 +365,11 @@ def bank_alias(fixture: Fixture, label_id: str, alias: str) -> Fixture:
 
 def _toml_str(value: str) -> str:
     """One TOML basic string. ``json.dumps`` escaping is valid TOML basic-string
-    escaping (same ``\\"``/``\\\\``/control-char rules), so reuse it."""
-    return json.dumps(value)
+    escaping (same ``\\"``/``\\\\``/control-char rules), so reuse it —
+    ``ensure_ascii=False`` so a non-BMP char (an emoji in a claim) serializes as
+    literal UTF-8, not the ``\\uD83D\\uDE80`` surrogate pair TOML forbids (which
+    would make the save's round-trip parse reject the file it just wrote)."""
+    return json.dumps(value, ensure_ascii=False)
 
 
 def dump_fixture(fixture: Fixture) -> str:
@@ -427,4 +441,16 @@ def save_fixture(fixture: Fixture, path: Path) -> None:
     text = dump_fixture(fixture)
     parse_fixture(tomllib.loads(text))
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
+    # Atomic replace: the fixture is the committed ground-truth corpus and this
+    # is its only write path, so a crash / disk-full mid-write must never leave
+    # it truncated. Write a same-directory temp file, fsync, then os.replace()
+    # (atomic on the same filesystem) — the target is always a whole old-or-new.
+    tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    try:
+        with tmp.open("w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
