@@ -757,8 +757,8 @@ a branch-pinned reviewer gets this one (ADR-0018).
 
 **Reviewer Run** (a kind of **Run**):
 A branch-pinned, **read-only** Run — a PR reviewer (claude / codex / antigravity) that reads
-the diff and code and **posts a review**, without mutating the reviewed checkout or
-landing changes itself. Spawned like any Run
+the diff and code, then **posts a review** without mutating the reviewed checkout or
+landing changes autonomously. Spawned like any Run
 via `shipit spawn subagent --role reviewer`, it gets a shared **Read-only Tree** and reports
 back through the PR (a posted review). Contrast the **implementer** / **shepherd** write-Runs
 (write Tree, report via a draft PR) and the **explorer** (ambient, no Tree).

@@ -10,7 +10,7 @@ The immediate problem is that Shipit needs a stable foundation for its broader r
 
 Introduce **Role Profile**, **Tree Profile**, and **Work Env** as the foundation vocabulary and implementation shape.
 
-A **Role Profile** is the fixed Shipit-owned registry describing the structural shape of each Role: Tree Profile, mutation rights, brief surface, generated prompt surface, and harness enforcement. It is authoritative: spawn, prompt generation, and enforcement read it rather than re-stating role shape locally.
+The **Role Profile** registry is the fixed Shipit-owned registry describing the structural shape of each Role: Tree Profile, mutation rights, brief surface, generated prompt surface, and harness enforcement. It is authoritative: spawn, prompt generation, and enforcement read it rather than re-stating role shape locally.
 
 A **Tree Profile** describes the execution shape a Role receives: `session`, `write`, `read-only`, or `ambient`. A Role Profile selects a Tree Profile, and the Tree Profile determines the shape of the Work Env.
 
@@ -21,7 +21,7 @@ A **Work Env** is the execution context Shipit uses to do work: a checkout plus 
 1. As a maintainer, I want each Role’s structural shape declared once, so that prompt generation, spawn, and enforcement cannot drift.
 2. As a maintainer, I want Role Profiles to be fixed by Shipit, so that consumer repos cannot weaken core execution guarantees before the model is battle-hardened.
 3. As a coordinator, I want implementers and shepherds to consistently receive write Tree-backed Work Envs, so that they can build, test, commit, and open PRs without touching another checkout.
-4. As a coordinator, I want reviewers to consistently receive read-only Tree-backed Work Envs, so that review happens against the correct branch without mutating the reviewed source.
+4. As a coordinator, I want reviewers to consistently receive Read-only Tree-backed Work Envs, so that review happens against the correct branch without mutating the reviewed source.
 5. As a coordinator, I want explorers to remain ambient, so that read-only investigation does not provision unnecessary Trees.
 6. As a reviewer, I want my reviewed source of truth to remain a Read-only Tree, so that review output cannot accidentally mutate the PR under review.
 7. As a future reviewer workflow, I want room for Review proposals, so that reviewers may eventually produce candidate diffs or stacked PRs without becoming implementers.
@@ -42,7 +42,7 @@ A **Work Env** is the execution context Shipit uses to do work: a checkout plus 
 
 ## Implementation Decisions
 
-- **Role Profile is a fixed Shipit-owned registry.** It is not consumer configuration. The registry describes each known Role’s Tree Profile, mutation rights, brief surface, generated prompt surface, and harness enforcement.
+- **The Role Profile registry is fixed and Shipit-owned.** It is not consumer configuration. The registry describes each known Role’s Tree Profile, mutation rights, brief surface, generated prompt surface, and harness enforcement.
 
 - **Role Profile sits above Role definition.** Role Profile owns structural shape and references behavioral text sources. Role definitions remain the source of prompt prose.
 
@@ -50,7 +50,7 @@ A **Work Env** is the execution context Shipit uses to do work: a checkout plus 
 
 - **Work Env is inferred, not configured.** Role Profiles, Trees, Direct checkouts, CI, and fleet runners determine Work Env. `.shipit.toml` continues to describe project shape and policy, not execution-model overrides.
 
-- **Work Env has two checkout relationships.** A Tree-backed Work Env uses a Shipit-provisioned Tree. A Direct-checkout Work Env uses an existing WorkingDir that Shipit did not provision as a Tree, such as a human local checkout or CI checkout.
+- **Work Env has two checkout relationships.** A Tree-backed Work Env uses a Shipit-provisioned Tree. A Direct-checkout Work Env uses an existing `WorkingDir` that Shipit did not provision as a Tree, such as a human local checkout or CI checkout.
 
 - **Spawn consumes Role Profile.** `spawn subagent` should derive write versus read-only versus ambient behavior from Role Profile rather than checking literal role names in multiple places.
 
