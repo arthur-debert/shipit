@@ -382,6 +382,32 @@ def test_run_fanout_replay_runs_every_pass_offline_and_writes_the_record(
     assert "review-rounds" in str(result["record_path"])
 
 
+def test_run_fanout_replay_round_variant_folds_the_dimension_set(
+    checkout, fanout_launcher, tmp_path
+):
+    """#713: the fan-out replay's round.variant covers the RESOLVED pass set
+    (names + focus texts), not just the shared instructions file — two arms
+    differing only by `dimensions` must never stamp one variant."""
+    from shipit.harness.eval.variant import variant_of
+    from shipit.review.dimensions import fanout_variant_text
+    from shipit.review.instructions import load_instructions
+
+    view = replay.resolve_range("HEAD~1..HEAD", workdir=str(checkout))
+    result = replay.run_fanout_replay(
+        agent_backend.CODEX,
+        view,
+        dimensions=["correctness"],
+        launcher=fanout_launcher["launch"],
+        base_dir=tmp_path / "state",
+    )
+    [line] = result["record_path"].read_text(encoding="utf-8").splitlines()
+    record = json.loads(line)
+    instructions = load_instructions(None)
+    expected = variant_of(fanout_variant_text(instructions, ["correctness"]))
+    assert record["round.variant"]["content_hash"] == expected.content_hash
+    assert expected.content_hash != variant_of(instructions).content_hash
+
+
 def test_run_fanout_replay_sums_cli_reported_usage_onto_the_round(
     checkout, monkeypatch, tmp_path
 ):

@@ -83,3 +83,57 @@ def test_resolve_unknown_name_raises():
     known set; a raw KeyError here is a programming error, loud by design)."""
     with pytest.raises(KeyError):
         dimensions.resolve_dimensions(["correctness", "highs-only"])
+
+
+def test_fanout_variant_text_folds_names_titles_and_focus_texts():
+    """#713: a fan-out round's variant material is the instructions PLUS the
+    resolved dimension set — each dimension's config token, title, and focus
+    slice (all prompt material the pass task embeds) — so two arms that differ
+    only by dimension set can never hash to one variant."""
+    base = "review instructions"
+    concern = dimensions.fanout_variant_text(base, None)
+    tiers = dimensions.fanout_variant_text(
+        base, ["sev-critical-high", "sev-medium", "sev-low"]
+    )
+    assert concern != tiers
+    assert concern.startswith(base) and tiers.startswith(base)
+    for dim in dimensions.resolve_dimensions(None):
+        assert dim.name in concern
+        assert dim.title in concern
+        assert dim.focus in concern
+
+
+def test_fanout_variant_text_default_and_reordered_sets_pool():
+    """Canonicalization: None/empty means the shipped default (pools with the
+    explicit spelling of it), and passes run in parallel, so a REORDERED
+    dimensions list is the same experiment — same text, same hash."""
+    base = "x"
+    explicit = dimensions.fanout_variant_text(
+        base, list(dimensions.DEFAULT_DIMENSION_NAMES)
+    )
+    assert dimensions.fanout_variant_text(base, None) == explicit
+    assert dimensions.fanout_variant_text(base, ()) == explicit
+    reordered = dimensions.fanout_variant_text(
+        base, list(reversed(dimensions.DEFAULT_DIMENSION_NAMES))
+    )
+    assert reordered == explicit
+
+
+def test_fanout_variant_text_folds_per_dimension_overrides():
+    """A per-dimension Invocation override is experiment material too (#713):
+    it changes the text; override FIELD order is canonicalized; an override
+    naming a dimension outside the set never reaches the material (the config
+    boundaries reject it loudly — here it must simply not corrupt the hash)."""
+    base = "x"
+    plain = dimensions.fanout_variant_text(base, ["correctness"])
+    overridden = dimensions.fanout_variant_text(
+        base, ["correctness"], {"correctness": {"model": "o3", "timeout": "120s"}}
+    )
+    assert overridden != plain
+    assert overridden == dimensions.fanout_variant_text(
+        base, ["correctness"], {"correctness": {"timeout": "120s", "model": "o3"}}
+    )
+    stray = dimensions.fanout_variant_text(
+        base, ["correctness"], {"test-quality": {"model": "o3"}}
+    )
+    assert stray == plain

@@ -171,9 +171,12 @@ def convergence_curve(
     Filters to the records matching THIS run's full expected key set — the
     ADR-0049 idempotency keys (cell, fixture version, pin, variant, replicate,
     sweep) of ``cell``'s own plan at ``variant_hash`` (the content hash of the
-    cell's BASE instructions, computed by the boundary that reads them). Nothing
-    else pools in: a record from a DIFFERENT instructions variant of the same
-    cell (edit the prompt, the hash changes), a pin outside the cell's declared
+    cell's variant text — the BASE instructions folded with a fan-out cell's
+    dimension set, :func:`shipit.review.cell.instructions_variant_text` —
+    computed by the boundary that reads them). Nothing else pools in: a record
+    from a DIFFERENT instructions variant of the same cell (edit the prompt —
+    the file or a dimension focus text — and the hash changes), a pin outside
+    the cell's declared
     subset, or a foreign cell id / fixture version is excluded, so the curve
     scores only the current arm and never overstates recall/FP/cost by mixing
     superseded prompts or stray pins. ``--force`` re-runs are then superseded by

@@ -18,6 +18,7 @@ from shipit.review.cell import (
     CellError,
     check_fair_pair,
     compose_informed_instructions,
+    instructions_variant_text,
     key_tuple,
     load_cell,
     parse_cell,
@@ -418,6 +419,55 @@ def test_key_tuple_returns_none_for_a_corrupt_non_scalar_key_field():
     assert isinstance(key_tuple(key), tuple)
     assert key_tuple({**key, "id": []}) is None
     assert key_tuple({**key, "pr": {"nested": 1}}) is None
+
+
+def test_instructions_variant_text_single_shape_is_the_base_text_verbatim():
+    """A single-pass cell's variant text IS its instructions — no dimension
+    passes run, and the unchanged bytes keep existing banked single-pass
+    points on their recorded keys (#713's fold re-keys FAN-OUT cells only)."""
+    cell = parse_cell(_cell_data(pipeline={"shape": "single"}))
+    assert instructions_variant_text(cell, "base text") == "base text"
+
+
+def test_instructions_variant_text_fanout_folds_the_dimension_set():
+    """#713 regression: two fan-out cells identical but for the `dimensions`
+    list must produce DIFFERENT variant texts (the focus texts live in code
+    and the list selects them), and the default set folds too — a fan-out
+    cell's text is never the bare instructions."""
+    base = "base text"
+    default = parse_cell(_cell_data())
+    tiers = parse_cell(
+        _cell_data(
+            pipeline={
+                "shape": "fanout",
+                "dimensions": ["sev-critical-high", "sev-medium", "sev-low"],
+            }
+        )
+    )
+    assert instructions_variant_text(default, base) != base
+    assert instructions_variant_text(tiers, base) != instructions_variant_text(
+        default, base
+    )
+
+
+def test_instructions_variant_text_fanout_folds_dimension_overrides():
+    """A per-dimension Invocation override changes what the passes run, so it
+    changes the fan-out cell's variant text (#713)."""
+    plain = parse_cell(
+        _cell_data(pipeline={"shape": "fanout", "dimensions": ["correctness"]})
+    )
+    overridden = parse_cell(
+        _cell_data(
+            pipeline={"shape": "fanout", "dimensions": ["correctness"]},
+            invocation={
+                "backend": "codex",
+                "dimensions": {"correctness": {"model": "o3"}},
+            },
+        )
+    )
+    assert instructions_variant_text(plain, "x") != instructions_variant_text(
+        overridden, "x"
+    )
 
 
 # --- informed-sweep composition --------------------------------------------------------

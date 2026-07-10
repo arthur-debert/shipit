@@ -54,6 +54,7 @@ from . import checkrun, diff, fanout, ghauth, post, roundrecord, rounds
 from .backends.base import BackendError
 from .calibrator import CalibratorConfig
 from .diff import ReviewError, resolve_pr
+from .dimensions import resolve_dimensions
 
 #: The review path's logger — a child of the package ``shipit`` logger. A local
 #: review run (start, the backend/agent invoked, and the outcome) is recorded
@@ -197,6 +198,18 @@ def generate_review(
             total_tokens=outcome.total_tokens,
             round_id=outcome.round_id or None,
             artifacts_dir=outcome.artifacts_dir,
+            # A round-1 dimension fan-out folds its RESOLVED pass set into
+            # round.variant (#713: focus texts are prompt material the
+            # instructions file does not cover — arms differing only by
+            # dimension set must stamp different variants). An incremental
+            # round ran ONE fix-range pass, not the dimension set — nothing to
+            # fold. Resolution cannot fail here: run_fanout_review above
+            # already resolved the same names.
+            dimension_names=(
+                None
+                if plan.incremental
+                else tuple(d.name for d in resolve_dimensions(dimensions))
+            ),
         )
     return review
 
@@ -215,6 +228,7 @@ def _tee_round_record(
     total_tokens: int | None = None,
     round_id: str | None = None,
     artifacts_dir: str | None = None,
+    dimension_names: Sequence[str] | None = None,
 ) -> None:
     """Tee the generated review into the local review-round record store — FAIL-OPEN.
 
@@ -226,7 +240,10 @@ def _tee_round_record(
     ``round_id`` / ``artifacts_dir`` bundle location (RVW03-WS02), the coverage
     attestation, and the range reviewed) lands in the harness-owned store the
     moment it exists, independent of the posting path — a tee, not a pipeline
-    change. Any failure (a hand-built ctx with no repo,
+    change. ``dimension_names`` is a round-1 fan-out's RESOLVED pass set —
+    folded into the record's ``round.variant`` hash alongside the instructions
+    (#713); ``None`` (an incremental round) hashes the instructions alone.
+    Any failure (a hand-built ctx with no repo,
     an unwritable store, an unreadable instructions file) is logged at WARNING
     and swallowed: process telemetry must never degrade the review it observes
     (the same posture as the eval hook's fail-open contract).
@@ -258,6 +275,7 @@ def _tee_round_record(
             total_tokens=total_tokens,
             round_id=round_id,
             artifacts_dir=artifacts_dir,
+            dimension_names=dimension_names,
         )
     except Exception:  # noqa: BLE001 - the tee is telemetry; never degrade the review
         logger.warning(

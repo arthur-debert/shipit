@@ -161,5 +161,9 @@ by key** — (cell, fixture PR, fixture version, instructions variant,
 replicate, sweep), stamped on each record as `round.cell` — so banked points
 are reused, never re-paid: extending a K=1 curve to K=2 pays only for sweep 2.
 `--force` is the one explicit re-run path (the newest record per key wins in
-the report). Editing the instructions file changes the variant hash, so stale
-banked records are never silently reused for a new prompt.
+the report). The variant hash covers the WHOLE prompt material: the
+instructions file, and — for a `fanout` cell — the resolved dimension set
+(names, titles, focus texts, per-dimension invocation overrides), which lives
+in code (`src/shipit/review/dimensions.py`) and is selected by the cell's
+`dimensions` list (#713). Editing any of it changes the variant hash, so
+stale banked records are never silently reused for a new prompt.

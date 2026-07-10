@@ -23,7 +23,7 @@ referenced everywhere else (the Roster `dimensions` option validates against
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 
@@ -193,3 +193,43 @@ def resolve_dimensions(names: Sequence[str] | None) -> tuple[Dimension, ...]:
     if not names:
         return _CONCERN_DIMENSIONS
     return tuple(by_name(name) for name in names)
+
+
+def fanout_variant_text(
+    instructions_text: str,
+    names: Sequence[str] | None,
+    overrides: Mapping[str, Mapping[str, str]] | None = None,
+) -> str:
+    """The text a fan-out round's instructions-variant hash covers. PURE.
+
+    The shared instructions file is only PART of a fan-out round's prompt
+    material: each pass embeds its dimension's title/focus slice
+    (:func:`shipit.review.prompt.build_reviewer_task`), a ``dimensions`` list
+    selects the set, and a lab cell may override a pass's Invocation. None of
+    that lives in the instructions file, so hashing the file alone lets a
+    focus-text edit — exactly the experiment material ADR-0051 froze — reuse
+    results recorded under the old prompt (#713). This helper folds the
+    RESOLVED dimension set (name, title, focus, and any per-dimension
+    invocation overrides) into the hashed text, canonically: dimensions sorted
+    by name (passes run in parallel, so a reordered config list is the same
+    experiment and pools with itself) and override fields sorted within each
+    block. Every consumer of the fan-out instructions-variant hash — the lab
+    run key (:func:`shipit.review.cell.instructions_variant_text`) and the
+    round record's ``round.variant``
+    (:func:`shipit.review.roundrecord.record_round`) — derives it from THIS
+    text, so they can never disagree.
+
+    ``names`` follows :func:`resolve_dimensions` (``None``/empty = the shipped
+    default set; unknown names raise ``KeyError`` there). ``overrides`` is the
+    per-dimension Invocation table (``{dimension name: {"model"/"timeout":
+    …}}``); an entry naming a dimension outside the set is ignored here — the
+    config boundaries already reject it loudly (cell parse, fan-out preflight).
+    """
+    lines = [instructions_text, "", "--- dimension set (variant material) ---"]
+    for dim in sorted(resolve_dimensions(names), key=lambda d: d.name):
+        lines.append(f"[dimension: {dim.name}]")
+        lines.append(f"title: {dim.title}")
+        lines.append(f"focus: {dim.focus}")
+        override = (overrides or {}).get(dim.name) or {}
+        lines.extend(f"override.{key}: {override[key]}" for key in sorted(override))
+    return "\n".join(lines)
