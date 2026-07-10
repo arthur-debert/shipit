@@ -265,6 +265,10 @@ def test_dry_run_prints_argv_and_never_launches_or_clones(monkeypatch, capsys):
     )
 
     assert captured.review["summary"]["overall_feedback"] == "(dry-run)"
+    # A dry run bills no model, so it MEASURES no usage and applies no reasoning:
+    # both are the explicit-unknown/unset state, never a fabricated figure.
+    assert captured.usage.total_tokens is None
+    assert captured.reasoning is None
     assert not cloned  # no Tree cloned
     assert not launched  # no model billed
     out = capsys.readouterr().out
