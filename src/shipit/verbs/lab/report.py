@@ -98,7 +98,7 @@ def run(
         if not baseline_path.is_file():
             raise CellError(
                 f"cell {cell.id!r} names baseline {cell.baseline!r} but "
-                f"{baseline_path} does not exist — commit the control cell of "
+                f"{baseline_path} does not exist — commit the baseline cell of "
                 "the pair first"
             )
         baseline = load_cell(baseline_path)

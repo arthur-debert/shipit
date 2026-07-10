@@ -64,7 +64,7 @@ def run(
         if not baseline_path.is_file():
             raise CellError(
                 f"cell {cell.id!r} names baseline {cell.baseline!r} but "
-                f"{baseline_path} does not exist — the control cell is part of "
+                f"{baseline_path} does not exist — the baseline cell is part of "
                 "the reviewed pair; commit it first"
             )
         check_fair_pair(cell, load_cell(baseline_path), fixture)

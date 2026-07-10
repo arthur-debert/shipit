@@ -1,0 +1,31 @@
+# COMPOSITION cell (ADR-0049/ADR-0051; format: lab/README.md "Cells").
+# One axis vs fanout-sevtiers: sweep mode informed instead of blind — the
+# composition of the two treatments that each showed an equal-budget edge
+# (informed sweeps: v35+v36 evidence; severity-tier scoping: the v36 sevtiers
+# run). Everything else is byte-identical to the fanout-sevtiers baseline;
+# PR review of this pair checks exactly that.
+
+schema = 1
+id = "sevtiers-informed"
+baseline = "fanout-sevtiers"
+axis = "sweep mode: informed vs blind"
+description = "Informed-sweep treatment of fanout-sevtiers: identical severity-tier fan-out, sweep 2 primed with sweep 1's posted findings."
+
+[fixture]
+version = 37
+prs = ["core-440", "app-391", "lex-820"]
+
+[pipeline]
+shape = "fanout"
+dimensions = ["sev-critical-high", "sev-medium", "sev-low"]
+dedup = "mechanical"
+
+[invocation]
+backend = "codex"
+model = "pro"
+timeout = "600s"
+
+[sweeps]
+count = 2
+mode = "informed"
+replicates = 2

@@ -7,9 +7,10 @@ dimension fan-out, dedup mode, calibrator on/off), the **Invocation**
 (backend/model/timeout, with experiment-only per-dimension overrides), the
 instructions **Variant**, and the sweep plan (``count`` × ``replicates``,
 blind or informed). Two fields are MANDATORY and validated at load —
-``baseline`` (the control cell this one is compared against) and ``axis``
-(the ONE thing changed vs that baseline) — so an unfair comparison fails at
-PR review of the cell file, before any token burns.
+``baseline`` (the cell this one is compared against — usually the control; a
+composition cell may name a treatment, see :func:`check_fair_pair`) and
+``axis`` (the ONE thing changed vs that baseline) — so an unfair comparison
+fails at PR review of the cell file, before any token burns.
 
 This module is the PURE domain layer: parse + validate
 (:func:`parse_cell` / :func:`load_cell`), the idempotency key
@@ -609,22 +610,23 @@ def check_fair_pair(cell: Cell, baseline: Cell, fixture: Fixture) -> None:
     score against the SAME fixture version and the SAME PR subset (differing
     denominators answer different questions — comparing them is the RVW02
     incomparable-arms failure), and ``cell.baseline`` must actually name
-    ``baseline``, which must be a control. The PR subset compares EFFECTIVE pin
-    sets against ``fixture`` — ``prs = []`` means "every fixture pin", so a
-    control that omits ``prs`` and a treatment that lists all of them
-    explicitly are the SAME denominator, not an unfair pair. The remaining half
-    — that the axis named really is the ONLY difference — is what PR review of
-    the cell pair checks, which the mandatory declarations make reviewable.
+    ``baseline``. The baseline is USUALLY the control, but need not be: a
+    COMPOSITION cell layers one new axis onto a treatment that already earned
+    its edge (e.g. ``sevtiers-informed`` vs ``fanout-sevtiers``, #717). The
+    chain does not hide axes because every committed cell is itself
+    fair-pair-checked against ITS declared baseline (in the committed-cells
+    test and at ``lab run``/``report`` time), so each link is declared and
+    reviewed — the one-axis discipline holds per pair, all the way down to the
+    control. The PR subset compares EFFECTIVE pin sets against ``fixture`` —
+    ``prs = []`` means "every fixture pin", so a control that omits ``prs``
+    and a treatment that lists all of them explicitly are the SAME
+    denominator, not an unfair pair. The remaining half — that the axis named
+    really is the ONLY difference — is what PR review of the cell pair checks,
+    which the mandatory declarations make reviewable.
     """
     if cell.baseline != baseline.id:
         raise CellError(
             f"cell {cell.id!r} declares baseline {cell.baseline!r}, not {baseline.id!r}"
-        )
-    if not baseline.is_control:
-        raise CellError(
-            f"baseline cell {baseline.id!r} is not a control (its own baseline "
-            f"is {baseline.baseline!r}) — chained treatments hide axes; compare "
-            "against the control directly"
         )
     if cell.fixture_version != baseline.fixture_version:
         raise CellError(

@@ -488,18 +488,24 @@ def test_check_fair_pair_treats_empty_prs_as_every_fixture_pin():
     check_fair_pair(treatment, control, _fair_fixture())  # no raise
 
 
-def test_check_fair_pair_rejects_wrong_baseline_and_non_control():
+def test_check_fair_pair_rejects_wrong_baseline():
     other = parse_cell(_cell_data(id="other-control", baseline="other-control"))
     with pytest.raises(CellError, match="declares baseline"):
         check_fair_pair(parse_cell(_treatment_data()), other, _fair_fixture())
-    # Chained treatments hide axes: the named baseline must itself be a control.
+
+
+def test_check_fair_pair_accepts_a_treatment_baseline():
+    """A COMPOSITION cell names a treatment as its baseline (one new axis
+    layered onto a treatment that earned its edge — #717's sevtiers-informed
+    vs fanout-sevtiers). The chain hides nothing: each committed link is
+    itself fair-pair-checked against ITS baseline, so the pair is fair as long
+    as the denominators match."""
     chained = parse_cell(_treatment_data())
-    with pytest.raises(CellError, match="not a control"):
-        check_fair_pair(
-            parse_cell(_treatment_data(id="deeper", baseline="treatment")),
-            chained,
-            _fair_fixture(),
-        )
+    check_fair_pair(
+        parse_cell(_treatment_data(id="deeper", baseline="treatment")),
+        chained,
+        _fair_fixture(),
+    )  # no raise
 
 
 def test_check_fair_pair_rejects_differing_denominators():

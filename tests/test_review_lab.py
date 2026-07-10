@@ -1003,13 +1003,18 @@ def test_the_committed_cells_load_and_pair_fairly():
     control = load_cell(Path("lab/cells/fanout-baseline.toml"))
     treatments = [
         load_cell(Path(f"lab/cells/{stem}.toml"))
-        for stem in ("fanout-informed", "fanout-sevtiers")
+        for stem in ("fanout-informed", "fanout-sevtiers", "sevtiers-informed")
     ]
     fixture = load_fixture(Path("lab/fixture.toml"))
     assert fixture.version == control.fixture_version
     assert control.is_control
+    by_id = {cell.id: cell for cell in (control, *treatments)}
     for treatment in treatments:
-        check_fair_pair(treatment, control, fixture)
+        # Each treatment pairs against its DECLARED baseline — the control for
+        # the first-generation cells; the fanout-sevtiers treatment for the
+        # composition cell sevtiers-informed (#717). A KeyError here means a
+        # cell names a baseline that is not committed — fail loudly.
+        check_fair_pair(treatment, by_id[treatment.baseline], fixture)
         assert treatment.axis != "control"
     # Pin the committed run shape so a cost-visible drift (e.g. an accidental
     # revert to replicates = 1) fails here rather than silently shrinking the
@@ -1022,18 +1027,21 @@ def test_the_committed_cells_load_and_pair_fairly():
             "app-391",
             "lex-820",
         ]
-    # The ADR-0051 cell's one axis: the experiment-only severity-tier pass set
-    # (every other cell's omitted `dimensions` means the shipped concern-scoped
-    # set). Select by id, not list position — brittle if a cell is added or the
-    # order changes — and pin EVERY cell's `dimensions`: check_fair_pair leaves
-    # "only one axis changed" to human review, so a stray `dimensions` block on
-    # the control or the other treatment would confound the experiment while
-    # this test stayed green. Pinning all three fails here instead.
-    by_id = {cell.id: cell for cell in (control, *treatments)}
-    assert by_id["fanout-sevtiers"].dimensions == (
-        "sev-critical-high",
-        "sev-medium",
-        "sev-low",
-    )
+    # The severity-tier cells' pass set (ADR-0051; every other cell's omitted
+    # `dimensions` means the shipped concern-scoped set) and every cell's sweep
+    # mode. Select by id, not list position — brittle if a cell is added or the
+    # order changes — and pin EVERY cell's `dimensions` and `sweep_mode`:
+    # check_fair_pair leaves "only one axis changed" to human review, so a
+    # stray `dimensions` block or mode flip on a control or the wrong treatment
+    # would confound an experiment while this test stayed green. The
+    # composition cell sevtiers-informed (#717) must match its fanout-sevtiers
+    # baseline on dimensions exactly and differ ONLY on mode.
+    sev_tiers = ("sev-critical-high", "sev-medium", "sev-low")
+    assert by_id["fanout-sevtiers"].dimensions == sev_tiers
+    assert by_id["sevtiers-informed"].dimensions == sev_tiers
     assert by_id["fanout-baseline"].dimensions == ()
     assert by_id["fanout-informed"].dimensions == ()
+    assert by_id["fanout-baseline"].sweep_mode == "blind"
+    assert by_id["fanout-sevtiers"].sweep_mode == "blind"
+    assert by_id["fanout-informed"].sweep_mode == "informed"
+    assert by_id["sevtiers-informed"].sweep_mode == "informed"
