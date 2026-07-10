@@ -254,6 +254,12 @@ def build_calibrator_task(
             "offline and touches nothing on GitHub. Read the surrounding code in "
             "this checkout wherever you need context to judge a candidate."
         )
+        # The result sink and diff-scope nouns follow the offline framing too, so
+        # the body never contradicts `situation`/`ground_truth` by naming a PR or
+        # a GitHub post (mirrors the passes' own `diff_noun`, RVW03-WS01).
+        result_fate = "recorded in the local replay record"
+        diff_noun = "this range's diff"
+        summary_owner = "the review's"
         settle = "records it locally"
     else:
         situation = (
@@ -266,12 +272,15 @@ def build_calibrator_task(
             "head — do NOT assume the base is `main`). Read the surrounding code "
             "in this checkout wherever you need context to judge a candidate."
         )
+        result_fate = "posted"
+        diff_noun = "this PR's diff"
+        summary_owner = "the posted review's"
         settle = "posts it"
     return f"""\
 You are the review CALIBRATOR: the single judge of candidate code-review \
 findings. {situation} Parallel dimension-scoped review passes produced \
 the candidate findings below; your job is to turn that raw union into the one \
-calibrated result that gets posted.
+calibrated result that gets {result_fate}.
 
 {ground_truth}
 
@@ -302,7 +311,7 @@ major or critical must state a CONCRETE FAILURE SCENARIO in its "text" (what \
 inputs/state make it go wrong, and what happens); a minor or nit needs a clear \
 rationale. NEVER downgrade a finding's severity to keep it: verify it at the \
 severity it deserves, or — only when you have actually refuted it — drop it.
-4. Route scope: a verified finding that is beyond this PR's diff — a \
+4. Route scope: a verified finding that is beyond {diff_noun} — a \
 pre-existing issue the passes were allowed to report — gets disposition \
 "out-of-scope" (it is persisted, not posted). Everything verified and \
 in-scope gets "post".
@@ -318,7 +327,7 @@ exactly one entry's "merged" array. An id you drop silently, judge twice, or \
 invent is a contract violation and the whole calibration is rejected.
 
 Order the findings array highest severity first (critical, major, minor, \
-nit). In "summary.overall_feedback", give the posted review's summary \
+nit). In "summary.overall_feedback", give {summary_owner} summary \
 paragraph.
 
 {_CALIBRATION_SCHEMA_PROSE}

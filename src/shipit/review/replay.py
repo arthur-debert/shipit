@@ -314,19 +314,41 @@ def provision_agent_defs(workdir: str) -> list[Path]:
     written: an existing def (committed, installed, or deliberately edited as an
     experiment arm) is the checkout's own and is never clobbered. Returns the
     paths written (empty when everything was already present).
+
+    Untrusted-checkout guard (RVW03-WS01): replay runs over a checkout the
+    operator may not control, so the writes stay strictly inside the checkout.
+    A ``.claude``/``agents`` path component that is a SYMLINK (git carries
+    symlinks) could redirect the bundled defs outside the checkout, so a
+    symlinked component aborts provisioning with nothing written. Each file is
+    created with exclusive ``open(..., "xb")``, so an existing name (a regular
+    file OR a pre-planted symlink) is left untouched — never followed or
+    truncated — which also makes concurrent replays on one checkout race-safe.
     """
     from ..install.units import AGENTS_DEF_DIR, agents_root
 
-    dest_dir = Path(workdir) / AGENTS_DEF_DIR
+    root = Path(workdir).resolve()
+    probe = root
+    for part in Path(AGENTS_DEF_DIR).parts:
+        probe = probe / part
+        if probe.is_symlink():
+            logger.warning(
+                "replay: refusing to provision agent-defs — %s is a symlink; "
+                "leaving the untrusted checkout untouched",
+                probe,
+            )
+            return []
+    dest_dir = root / AGENTS_DEF_DIR
     written: list[Path] = []
     for entry in agents_root().iterdir():
         if not entry.is_file():
             continue
         dest = dest_dir / entry.name
-        if dest.exists():
-            continue
         dest_dir.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(entry.read_bytes())
+        try:
+            with open(dest, "xb") as fh:
+                fh.write(entry.read_bytes())
+        except FileExistsError:
+            continue
         written.append(dest)
     if written:
         logger.info(

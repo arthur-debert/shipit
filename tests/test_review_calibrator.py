@@ -246,6 +246,11 @@ def test_calibrator_task_range_ground_truth_is_the_offline_git_diff():
     assert "Do NOT call `gh`" in task
     assert "NO pull request" in task
     assert "records it locally" in task
+    # The rest of the body follows the offline framing too — the scope and
+    # result-sink nouns never contradict it by naming a PR or a GitHub post.
+    assert "this PR's diff" not in task
+    assert "this range's diff" in task
+    assert "the posted review's summary" not in task
 
 
 @pytest.mark.parametrize(

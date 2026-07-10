@@ -442,6 +442,21 @@ def test_provision_agent_defs_writes_missing_and_never_clobbers(checkout):
     assert replay.provision_agent_defs(str(checkout)) == []
 
 
+def test_provision_agent_defs_refuses_symlinked_component(checkout, tmp_path):
+    # Untrusted-checkout guard: a crafted checkout can make `.claude` (or
+    # `.claude/agents`) a symlink out of the tree; provisioning must refuse
+    # rather than follow it and write bundled defs outside the checkout.
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (checkout / ".claude").symlink_to(outside, target_is_directory=True)
+
+    written = replay.provision_agent_defs(str(checkout))
+
+    assert written == []
+    # Nothing leaked through the symlink to the external directory.
+    assert list(outside.iterdir()) == []
+
+
 # --- the fan-out CLI surface ------------------------------------------------------
 
 
@@ -455,6 +470,24 @@ def test_replay_verb_fanout_flags_require_fanout(capsys):
         timeout="600s",
         instructions=None,
         dimensions="correctness",
+    )
+    assert rc == 1
+    assert "error: --dimensions and --calibrator-*" in capsys.readouterr().err
+
+
+def test_replay_verb_calibrator_flag_requires_fanout(capsys):
+    # The `calibrator_given` half of the same preflight: a `--calibrator-*`
+    # field without `--fanout` refuses too (a silently-ignored judge flag would
+    # mislabel the experiment arm), before any range resolve or model run.
+    from shipit.verbs.pr import review as review_verb
+
+    rc = review_verb.run_replay(
+        "a..b",
+        agent="codex",
+        model="pro",
+        timeout="600s",
+        instructions=None,
+        calibrator_backend="claude",
     )
     assert rc == 1
     assert "error: --dimensions and --calibrator-*" in capsys.readouterr().err

@@ -255,8 +255,11 @@ def run_fanout_review(
     agent = backend.funnel_agent or backend.name
     # The one display/telemetry split between the arms: a PR target logs and
     # emits as `pr#<n>`; a range target has no PR — its label is the range and
-    # its `pr` extra is honest-None (matching the record's `round.pr`).
+    # its `pr` extra is OMITTED (the domain-key contract is absent-not-null, so a
+    # range record carries no `pr` key rather than `pr: null` — logcontext drops
+    # None from bound keys, but a per-call `extra` does not, so drop it here).
     pr_number = None if range_view is not None else target.number
+    pr_extra = {"pr": pr_number} if pr_number is not None else {}
     where = (
         f"range {range_view.base_sha}..{range_view.head_sha}"
         if range_view is not None
@@ -372,7 +375,7 @@ def run_fanout_review(
                 where,
                 agent,
                 exc_info=True,
-                extra={"pr": pr_number, "reviewer": agent},
+                extra={**pr_extra, "reviewer": agent},
             )
             return _PassResult(dimension=dim, run=run, review=None)
         run["duration_ms"] = int((time.monotonic() - start) * 1000)
@@ -500,7 +503,7 @@ def run_fanout_review(
         len(union),
         posted,
         extra={
-            "pr": pr_number,
+            **pr_extra,
             "reviewer": agent,
             "candidates": len(union),
             "posted": posted,
@@ -519,7 +522,7 @@ def run_fanout_review(
             finding.severity.value,
             judged.disposition.value,
             extra={
-                "pr": pr_number,
+                **pr_extra,
                 "reviewer": agent,
                 "severity": finding.severity.value,
                 "disposition": judged.disposition.value,
