@@ -389,7 +389,8 @@ def test_run_on_a_non_checkout_reports_no_records(tmp_path, monkeypatch):
     assert "empty" in buf.getvalue().lower()
 
 
-# --- the review axis (RVW02-WS03): round records joined to eval records ---------
+# --- the review axis (RVW02-WS03 / RVW03-WS04): round records, cost from the
+# --- rounds themselves -----------------------------------------------------------
 
 
 def _round(
@@ -398,6 +399,7 @@ def _round(
     findings=(),
     runs=(),
     duration_ms=1000,
+    total_tokens=None,
 ):
     """One review-round record in the REAL persisted shape (roundrecord.build)."""
     from shipit.finding import Disposition, Finding, JudgedFinding, Severity
@@ -426,14 +428,17 @@ def _round(
         variant=variant,
         runs=list(runs),
         duration_ms=duration_ms,
+        total_tokens=total_tokens,
         timestamp="2026-07-09T00:00:00+00:00",
     )
 
 
 def _seed_rounds(tmp_path):
-    """Two rounds of variant V1 (one with a joinable run), one of V2."""
+    """Two rounds of variant V1 (one with measured token usage), one of V2
+    (latency-only — its backend's CLI reported no usage)."""
     base = tmp_path / "state"
-    # An eval record whose run id one V1 round's contributing run carries.
+    # An unrelated eval record: the review axis reads its cost off the ROUND
+    # records themselves (RVW03-WS04) — eval records coexist but are not joined.
     record = build(
         metrics={"tool_call_count": 3, "token_usage": {"total_tokens": 500}},
         meta={"agentType": "reviewer"},
@@ -441,7 +446,7 @@ def _seed_rounds(tmp_path):
         commit="abc123",
         timestamp="2026-07-09T00:00:00+00:00",
         is_coordinator=False,
-        run_id="agent-joinme",
+        run_id="agent-unjoined",
     )
     store.append_record(record, _REPO, base_dir=base)
     for round_record in (
@@ -455,8 +460,15 @@ def _seed_rounds(tmp_path):
                 ("stale", "minor", "out-of-scope"),
                 ("dup", "major", "post", 0),
             ],
-            runs=[{"run_id": "agent-joinme", "variant": _variant(_V1)}],
+            runs=[
+                {
+                    "run_id": "pass-1",
+                    "variant": _variant(_V1),
+                    "usage": {"total_tokens": 2500, "source": "codex-stderr"},
+                }
+            ],
             duration_ms=2000,
+            total_tokens=2500,
         ),
         _round(
             variant=_variant(_V1),
@@ -476,8 +488,8 @@ def _seed_rounds(tmp_path):
 
 
 def test_review_axis_groups_rounds_by_variant_and_splits_dispositions(tmp_path):
-    _, eval_path, rounds_path = _seed_rounds(tmp_path)
-    rows = report.review_axis(rounds_path, eval_path)
+    _, _, rounds_path = _seed_rounds(tmp_path)
+    rows = report.review_axis(rounds_path)
     assert [(r.key, r.rounds) for r in rows] == [
         (_V1, 2),
         (f"{_V2} [arm-b]", 1),
@@ -490,15 +502,32 @@ def test_review_axis_groups_rounds_by_variant_and_splits_dispositions(tmp_path):
     assert v1.avg_duration_ms == 1500.0
 
 
-def test_review_axis_joins_eval_records_by_run_id(tmp_path):
+def test_review_axis_reads_token_cost_off_the_round_records(tmp_path):
+    # RVW03-WS04 (#667): the cost column comes from each round's OWN
+    # `round.usage.total_tokens` — measured at launch-result level — with the
+    # broken eval-record run-id join retired. The average is over exactly the
+    # rounds that REPORTED (one of V1's two); a variant with no reporting round
+    # is a latency-only cell (None), never zero.
+    _, _, rounds_path = _seed_rounds(tmp_path)
+    v1, v2 = report.review_axis(rounds_path)
+    assert v1.token_rounds == 1
+    assert v1.avg_round_tokens == 2500.0
+    assert v2.token_rounds == 0
+    assert v2.avg_round_tokens is None
+
+
+def test_review_render_marks_latency_only_cells_as_such(tmp_path):
+    # A variant NONE of whose rounds reported usage must render an explicit
+    # `latency-only` marker in the tokens column — unmeasured reads as
+    # unmeasured, never as a numeric cost.
     _, eval_path, rounds_path = _seed_rounds(tmp_path)
-    v1, v2 = report.review_axis(rounds_path, eval_path)
-    # The V1 round's contributing run resolved to its eval record → its cost
-    # (total tokens) rides the review axis; V2 contributed no joinable run.
-    assert v1.joined_runs == 1
-    assert v1.avg_run_tokens == 500.0
-    assert v2.joined_runs == 0
-    assert v2.avg_run_tokens is None
+    text = report.format_report(report.aggregate(eval_path, rounds_path))
+    review_lines = text[text.index("Review rounds (by variant):") :].splitlines()
+    v1_line = next(line for line in review_lines if line.strip().startswith(_V1))
+    v2_line = next(line for line in review_lines if f"{_V2} [arm-b]" in line)
+    assert "2500" in v1_line
+    assert "latency-only" in v2_line
+    assert "latency-only" not in v1_line
 
 
 def test_review_axis_reports_rounds_even_with_no_eval_store(tmp_path):

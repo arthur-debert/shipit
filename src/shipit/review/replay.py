@@ -183,7 +183,10 @@ def run_replay(
 
     The no-post pipeline: generate via the shared range producer, then write the
     **Review-round record** with ``round.pr = None`` (no PR was touched — the
-    honest replay marker). Returns ``{"review": …, "record_path": …}`` so the
+    honest replay marker). The record's ``round.usage.total_tokens`` carries the
+    launch's CLI-measured usage (RVW03-WS04; ``None`` when the backend's CLI
+    reports none — the explicit latency-only marker). Returns ``{"review": …,
+    "record_path": …}`` so the
     verb can render what was found and where the record landed. The record
     write PROPAGATES on failure — it is the product here, not telemetry (the
     review-path tee is the fail-open twin). ``base_dir`` overrides the store
@@ -220,7 +223,7 @@ def run_replay(
     }
     start = time.monotonic()
     try:
-        review = producer.run_range_review(
+        captured = producer.run_range_review(
             backend,
             view,
             model=model,
@@ -240,6 +243,12 @@ def run_replay(
             error=str(exc),
         )
         raise
+    review = captured.review
+    # RVW03-WS04: the single range pass carries its CLI-measured usage and the
+    # applied reasoning on its round.runs entry, exactly like a fan-out pass.
+    run["usage"] = captured.usage.as_record()
+    if captured.reasoning is not None:
+        run["reasoning"] = captured.reasoning
     duration_ms = int((time.monotonic() - start) * 1000)
     run["duration_ms"] = duration_ms
     run["outcome"] = "success"
@@ -258,6 +267,7 @@ def run_replay(
         findings=roundrecord.dispositioned(review, run_id=run_id),
         runs=(run,),
         duration_ms=duration_ms,
+        total_tokens=captured.usage.total_tokens,
         round_id=round_id,
         artifacts_dir=str(round_dir) if round_dir is not None else None,
         base_dir=base_dir,

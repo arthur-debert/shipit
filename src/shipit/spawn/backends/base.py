@@ -66,6 +66,17 @@ class BackendAdapter(ABC):
     #: value echoed in the SPAWNED summary; concrete adapters set it as a class attr.
     name: str
 
+    #: The **ReasoningLevel actually wired into this adapter's argv** (RVW03-WS04,
+    #: #685) — ``None`` when no level is applied, either because the caller set none
+    #: or because the backend's CLI has NO reasoning knob (``agy``). Records are
+    #: stamped from THIS attribute, never from config: a configured level a backend
+    #: could not apply must read as unset/unknown, not echo the config (the RVW02
+    #: "reasoning=high" claims described config, not what ran). An adapter with a
+    #: real knob (``claude --effort``; codex ``-c model_reasoning_effort``) sets it
+    #: at construction from the level it will emit; :class:`AntigravityAdapter`
+    #: takes no such parameter and leaves this class default.
+    reasoning: str | None = None
+
     @abstractmethod
     def build_command(
         self,

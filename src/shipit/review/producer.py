@@ -28,7 +28,12 @@ What this module owns (and ONLY this):
     real process DEADLINE (#404) — a review is a bounded, non-blocking degrade
     (ADR-0006), so a stalled backend is KILLED at the seam and settled ``timed_out``,
     never waited on forever — then CAPTURE its stdout and parse it into a review dict
-    (:func:`shipit.review.backends.parse_review_output`).
+    (:func:`shipit.review.backends.parse_review_output`), wrapped in a
+    :class:`CapturedReview` that also carries the launch's MEASURED token usage
+    (:mod:`shipit.review.usage` — parsed per-backend from the CLI's own output,
+    RVW03-WS04) and the ReasoningLevel the adapter ACTUALLY wired into argv
+    (``None`` when the backend has no knob — records stamp from this, never from
+    config).
 
 A second producer shares the same launch core (RVW02-WS03):
 :func:`run_range_review`, the OFFLINE commit-range sibling — no Tree, no ``gh``,
@@ -84,6 +89,7 @@ from .prompt import (
     build_reviewer_task,
 )
 from .schema import REVIEW_SCHEMA
+from .usage import UNREPORTED, TokenUsage, from_codex_stderr
 
 logger = logging.getLogger("shipit.review")
 
@@ -95,11 +101,32 @@ _REVIEWER_ROLE = "reviewer"
 
 
 @dataclass(frozen=True)
+class CapturedReview:
+    """One reviewer launch's full capture (RVW03-WS04): the parsed review PLUS
+    the launch's measurements.
+
+    ``review`` is the REVIEW_SCHEMA-shaped dict downstream consumes exactly as
+    before. ``usage`` is the launch's token cost as the backend's CLI actually
+    reported it (:mod:`shipit.review.usage`; explicitly :data:`~shipit.review.usage.UNREPORTED`
+    for a CLI that reports none — never a fabricated number). ``reasoning`` is
+    the ReasoningLevel the adapter ACTUALLY wired into the launched argv
+    (``adapter.reasoning``): ``None`` means no knob was applied — either unset,
+    or the backend has none — so a record stamped from it never echoes a config
+    value that did not run (#685).
+    """
+
+    review: dict
+    usage: TokenUsage
+    reasoning: str | None
+
+
+@dataclass(frozen=True)
 class _BackendSpec:
     """How one funnel backend maps onto the shared spawn launch seam.
 
     ``adapter_factory`` builds the spawn ``BackendAdapter`` carrying the model (and,
-    for agy, the timeout) — the SAME adapter the spawn surface launches a reviewer
+    for agy, the timeout; and, where the CLI has a knob, the reasoning level —
+    RVW03-WS04) — the SAME adapter the spawn surface launches a reviewer
     through, so there is one definition of the launch. The CLI binary that must be
     on PATH (preflight) is NOT here — it is the :class:`Backend` identity's
     ``binary`` alias (ADR-0025), read off the registry entry. ``schema_inline``
@@ -114,26 +141,49 @@ class _BackendSpec:
     (salvageable-output) path wins the race and the seam is a pure backstop; a
     backend without one is killed by the seam at exactly the configured deadline
     (#404).
+
+    ``usage_parser`` extracts the launch's token usage from the finished
+    :class:`~shipit.spawn.launch.LaunchResult` — per-backend, because WHERE a CLI
+    reports usage is backend-private (codex: a stderr log line; agy: nowhere —
+    explicitly :data:`~shipit.review.usage.UNREPORTED`). Probed facts, documented
+    in :mod:`shipit.review.usage`.
     """
 
     schema_inline: bool
     native_schema: bool
     native_timeout: bool
-    adapter_factory: object  # Callable[[str, str], BackendAdapter]
+    adapter_factory: object  # Callable[[str, str, str | None], BackendAdapter]
+    usage_parser: object  # Callable[[launch.LaunchResult], TokenUsage]
 
 
-def _codex_adapter(model: str, timeout: str) -> BackendAdapter:
+def _codex_adapter(model: str, timeout: str, reasoning: str | None) -> BackendAdapter:
     # codex has no per-run timeout flag, so the deadline is NOT threaded into the
     # adapter (only the model is) — it is enforced at the launch SEAM instead, where
     # `run_tree_review` passes it to `launch.launch(timeout=...)` as a hard process
     # deadline (#404). `native_timeout=False` in the spec records that the seam is
-    # codex's SOLE timeout enforcement.
+    # codex's SOLE timeout enforcement. `reasoning` IS threaded (RVW03-WS04): codex
+    # carries the one probed reasoning knob (`-c model_reasoning_effort=<level>`).
     del timeout
-    return CodexAdapter(model=model)
+    return CodexAdapter(model=model, reasoning=reasoning)
 
 
-def _agy_adapter(model: str, timeout: str) -> BackendAdapter:
+def _agy_adapter(model: str, timeout: str, reasoning: str | None) -> BackendAdapter:
+    # agy has NO reasoning knob (probed 1.1.1) — the requested level is DROPPED
+    # here, deliberately: the adapter's `reasoning` stays None, so the run record
+    # stamps "unset" instead of echoing a config value that never reached the CLI.
+    del reasoning
     return AntigravityAdapter(model=model, timeout=timeout)
+
+
+def _codex_usage(result: launch.LaunchResult) -> TokenUsage:
+    """codex reports its token total on STDERR (probed 0.139.0, RVW03-WS04)."""
+    return from_codex_stderr(result.stderr or "")
+
+
+def _agy_usage(result: launch.LaunchResult) -> TokenUsage:
+    """agy reports NO usage anywhere (probed 1.1.1) — explicitly unknown."""
+    del result
+    return UNREPORTED
 
 
 #: :class:`Backend` identity → how it launches as a reviewer. ``CODEX`` ≡ the ``codex``
@@ -150,12 +200,14 @@ _SPECS: dict[Backend, _BackendSpec] = {
         native_schema=True,
         native_timeout=False,
         adapter_factory=_codex_adapter,
+        usage_parser=_codex_usage,
     ),
     ANTIGRAVITY: _BackendSpec(
         schema_inline=True,
         native_schema=False,
         native_timeout=True,
         adapter_factory=_agy_adapter,
+        usage_parser=_agy_usage,
     ),
 }
 
@@ -318,20 +370,28 @@ def run_tree_review(
     dimension: Dimension | None = None,
     tree_path: str | None = None,
     incremental_range: tuple[str, str] | None = None,
+    reasoning: str | None = None,
     run_id: str | None = None,
     artifacts: RunArtifacts | None = None,
-) -> dict:
-    """Launch ``backend`` as a reviewer in a read-only Tree and CAPTURE its review
-    dict.
+) -> CapturedReview:
+    """Launch ``backend`` as a reviewer in a read-only Tree and CAPTURE its review.
 
     Provisions the shared read-only Tree on ``ctx``'s PR head, launches the backend
     through its spawn read-only posture with a task that fetches the diff via
     ``gh pr diff`` and emits structured JSON, captures stdout, and parses it. Returns
-    the review dict; it does NOT post and does NOT touch the check-run (the service
+    a :class:`CapturedReview` — the review dict plus the launch's measured token
+    usage and the reasoning level ACTUALLY applied to argv (RVW03-WS04); it does NOT
+    post and does NOT touch the check-run (the service
     owns those). Raises :class:`BackendUnavailable` (missing CLI), :class:`BackendError`
     (unparseable / timed-out output, carrying the raw for salvage), or a plain
     ``RuntimeError`` (a nonzero child / a missing PR head branch) → the service maps it
     to ``failed``.
+
+    ``reasoning`` requests a ReasoningLevel for the launch (RVW03-WS04, #685). It
+    reaches real argv ONLY where the backend's CLI has a knob (codex
+    ``-c model_reasoning_effort=<level>``); a backend without one (agy) drops it,
+    and the returned ``CapturedReview.reasoning`` reports what was actually
+    applied — the value records must stamp, never the request.
 
     ``dimension`` narrows the task to ONE **Dimension pass** (RVW02-WS04 — the
     fan-out launches this once per configured dimension); ``None`` keeps the
@@ -357,8 +417,8 @@ def run_tree_review(
     either keeps the pre-WS02 behaviour (no correlation extras, no bundle).
 
     With ``dry_run=True``: resolves the Tree COORDINATES (no clone, no model bill),
-    prints the would-run Tree-launch argv, and returns an empty review — so a dry-run is
-    honest (it shows exactly what would run and bills nothing).
+    prints the would-run Tree-launch argv, and returns an empty capture — so a dry-run
+    is honest (it shows exactly what would run and bills nothing).
     """
     agent = backend.funnel_agent or backend.name
     spec = _SPECS.get(backend)
@@ -392,7 +452,7 @@ def run_tree_review(
             schema_inline=spec.schema_inline,
             dimension=dimension,
         )
-    adapter = spec.adapter_factory(model, timeout)  # type: ignore[operator]
+    adapter = spec.adapter_factory(model, timeout, reasoning)  # type: ignore[operator]
 
     schema_path: str | None = None
     try:
@@ -447,12 +507,14 @@ def run_range_review(
     timeout: str = "600s",
     instructions_path: str | None = None,
     launcher: launch.Runner | None = None,
+    reasoning: str | None = None,
     dimension: Dimension | None = None,
     run_id: str | None = None,
     artifacts: RunArtifacts | None = None,
-) -> dict:
+) -> CapturedReview:
     """Launch ``backend`` as an OFFLINE commit-range reviewer and CAPTURE its
-    review dict (RVW02-WS03 replay).
+    review (RVW02-WS03 replay) — a :class:`CapturedReview`, exactly like
+    :func:`run_tree_review` (usage + applied reasoning ride along, RVW03-WS04).
 
     The range sibling of :func:`run_tree_review` — the SAME backend specs,
     preflight, adapters, schema handling, launch seam, deadline mapping, and
@@ -494,7 +556,7 @@ def run_range_review(
         schema_inline=spec.schema_inline,
         dimension=dimension,
     )
-    adapter = spec.adapter_factory(model, timeout)  # type: ignore[operator]
+    adapter = spec.adapter_factory(model, timeout, reasoning)  # type: ignore[operator]
 
     schema_path: str | None = None
     try:
@@ -540,11 +602,14 @@ def _launch_and_capture(
     launcher: launch.Runner | None,
     artifacts: RunArtifacts | None = None,
     run_id: str | None = None,
-) -> dict:
+) -> CapturedReview:
     """Launch one reviewer child in ``cwd`` under the seam deadline and parse its
     stdout — the launch core :func:`run_tree_review` (PR/Tree) and
     :func:`run_range_review` (offline range) share, so the deadline mapping and
-    the timeout→``BackendError`` normalization exist exactly once.
+    the timeout→``BackendError`` normalization exist exactly once. The returned
+    :class:`CapturedReview` carries the launch's measured usage
+    (``spec.usage_parser`` over the raw :class:`~shipit.spawn.launch.LaunchResult`)
+    and the adapter's APPLIED reasoning level (RVW03-WS04).
 
     ``run_id`` is the pass's correlation id — threaded onto the local breadcrumb
     WARNING (the line pointing at the bundle path) so ``shipit logs --run`` /
@@ -611,7 +676,7 @@ def _launch_and_capture(
         timed_out=False,
     )
     try:
-        return _capture(agent, result, artifacts=sink, run_id=run_id)
+        review = _capture(agent, result, artifacts=sink, run_id=run_id)
     except BackendError as exc:
         # An exit-0 launch can STILL be a timeout: `_capture` re-parses the
         # stdout and `parse_review_output` raises `BackendError(timed_out=True)`
@@ -622,6 +687,13 @@ def _launch_and_capture(
         # exit.
         sink.record(timed_out=exc.timed_out)
         raise
+    # RVW03-WS04: wrap the captured review with the launch's measured token usage
+    # and the reasoning level the adapter actually applied to argv.
+    return CapturedReview(
+        review=review,
+        usage=spec.usage_parser(result),  # type: ignore[operator]
+        reasoning=adapter.reasoning,
+    )
 
 
 def _capture(
@@ -690,7 +762,7 @@ def _dry_run(
     task: str,
     repo: Repo,
     branch: str,
-) -> dict:
+) -> CapturedReview:
     """Print the would-run Tree-launch argv WITHOUT cloning or billing; return empty.
 
     Resolves the Tree's COORDINATES (the leaf dir the read-only Tree WOULD occupy) so
@@ -710,10 +782,18 @@ def _dry_run(
     )
     print(f"(dry-run: would launch {agent} reviewer in read-only Tree {plan.dir})")
     print(json.dumps({"cwd": str(plan.dir), "argv": cmd}, indent=2))
-    return {
-        "summary": {"status": "COMMENT", "overall_feedback": "(dry-run)"},
-        "comments": [],
-    }
+    return CapturedReview(
+        review={
+            "summary": {"status": "COMMENT", "overall_feedback": "(dry-run)"},
+            "comments": [],
+        },
+        # A dry run launches nothing, so — like usage — no reasoning was actually
+        # applied to a real launch: report the unset state, never adapter.reasoning
+        # (which would echo a requested level as "applied" and mis-stamp telemetry).
+        # The would-run level is already visible in the printed argv above.
+        usage=UNREPORTED,
+        reasoning=None,
+    )
 
 
 def _preflight(backend: Backend, *, dry_run: bool) -> None:

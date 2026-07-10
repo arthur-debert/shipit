@@ -258,3 +258,28 @@ def test_launch_roots_codex_in_the_tree_with_scrubbed_env():
     # The bypass-posture write argv reached the runner intact.
     assert captured["cmd"][:2] == ["codex", "exec"]
     assert "--dangerously-bypass-approvals-and-sandbox" in captured["cmd"]
+
+
+def test_reasoning_level_rides_the_model_reasoning_effort_override():
+    # RVW03-WS04 (#685): a pinned ReasoningLevel reaches REAL argv via codex's
+    # `-c model_reasoning_effort=<level>` config override (probed on 0.139.0:
+    # the run header echoes `reasoning effort: <level>`), and the adapter
+    # reports the applied level for the record stamp.
+    from shipit.spawn.backends import codex as codex_backend
+
+    adapter = codex_backend.CodexAdapter(reasoning="low")
+    cmd = adapter.build_command("task", "reviewer", read_only=True)
+    assert "model_reasoning_effort=low" in cmd
+    assert cmd[cmd.index("model_reasoning_effort=low") - 1] == "-c"
+    assert adapter.reasoning == "low"
+    # The override precedes the prompt (the last positional arg), like every flag.
+    assert cmd[-1].endswith("task")
+
+
+def test_no_reasoning_level_means_no_effort_override():
+    from shipit.spawn.backends import codex as codex_backend
+
+    adapter = codex_backend.CodexAdapter()
+    cmd = adapter.build_command("task", "implementer")
+    assert not any("model_reasoning_effort" in arg for arg in cmd)
+    assert adapter.reasoning is None
