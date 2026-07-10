@@ -3828,9 +3828,12 @@ def test_install_deletes_a_pristine_retired_skill_file(tmp_path, rec):
     assert (tmp_path / "skills/grill-me-with-docs/ADR-FORMAT.md").is_file()
 
 
-def test_install_deletes_the_retired_to_prd_skill_and_installs_to_spec(tmp_path, rec):
+def test_install_deletes_a_pristine_retired_to_prd_skill_and_installs_to_spec(
+    tmp_path, rec
+):
     # The managed `/to-prd` path was renamed to `/to-spec`; an upgraded
-    # consumer must not keep both runnable skills after install.
+    # consumer with a pristine retired copy must not keep both runnable skills
+    # after install.
     retired_path = "skills/to-prd/SKILL.md"
     old_bytes = PRISTINE_TO_PRD_SKILL.encode()
     assert config.content_hash(old_bytes) in RETIRED_SKILL_HASHES[retired_path]
