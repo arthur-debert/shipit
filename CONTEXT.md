@@ -293,7 +293,9 @@ review — the reviewer does).
 The one fixed judge between dimension passes and the posted review: dedups the
 union, adversarially verifies each **Finding** with tier-appropriate evidence
 (quoted evidence always; a concrete failure scenario for major-or-worse, a
-clear rationale for minor/nit — or the finding is dropped), normalizes
+clear rationale for minor/nit — dropping a finding only when adversarial
+verification actively refutes it, never on mere uncertainty, and never
+downgrading one that reproduces; RVW02-WS08/F2 #665), normalizes
 **Severity** onto the shared ladder, and emits the final severity-ordered
 result. The same
 agent/model for every reviewer — a table-level setting, like `round_cap` — so

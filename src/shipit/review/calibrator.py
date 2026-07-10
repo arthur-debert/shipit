@@ -204,7 +204,8 @@ shape — no prose, no markdown fences, nothing before or after it):
 def build_calibrator_task(candidates_json: str, pr_number: int) -> str:
     """Compose the calibrator task: judge ``candidates_json`` for PR ``pr_number``.
 
-    The judge contract, verbatim from ADR-0045: never originate; dedup by
+    The judge contract (ADR-0045, its verification floor amended by
+    RVW02-WS08/F2 #665): never originate; dedup by
     merging (``merged`` ids); adversarially verify with tier-appropriate
     evidence (quoted evidence always; a concrete failure scenario for
     major-or-worse, a clear rationale for minor/nit). The verification floor is
