@@ -439,16 +439,28 @@ policy marks those two checks blocking — not that they are gates.)
 The function an acting agent plays in the dev cycle — and the **context predicate**
 the agent harness keys enforcement on. A **closed registry** (mirrors **Toolchain** /
 **Reviewer adapter**: adding one is an entry, nothing downstream changes):
-`coordinator`, `implementer`, `shepherd`, `explorer`. Read from the acting session's
+`coordinator`, `implementer`, `shepherd`, `explorer`, `reviewer`. Read from the acting session's
 agent identity — *empty ⇒ `coordinator`* (the top-level, human-facing session), a
 named subagent ⇒ that role. Two realizations of the same concept: the **coordinator**
 is a *session-role* (the top-level session; it has no agent-def file — its prompt
 arrives as injected context plus the enforcement **deny** reason), while
-`implementer` / `shepherd` / `explorer` are *agent-def roles* (each a generated
+`implementer` / `shepherd` / `explorer` / `reviewer` are *agent-def roles* (each a generated
 prompt file whose body is that role's system prompt). The **policy** reads `role`
 uniformly across both.
 *Avoid*: "agent type" as the domain noun (that's the raw signal under the term);
 "guard" (enforcement is a **policy**, not a thing with inherent power).
+
+**Role Profile**:
+The declared structural shape of a **Role** — its **Tree Profile**, mutation rights,
+brief surface, generated prompt surface, and harness enforcement. A Role Profile is
+authoritative: spawn, prompt generation, and enforcement read it rather than
+re-stating role shape locally. Role Profiles are a Shipit-owned fixed registry for
+now, not repo configuration; weakening or adding one is a product change, not a
+consumer override. It sits above the **Role definition**: the profile points at the
+behavioral text sources and brief surfaces, while the role definition remains the
+source of role prose. A **Role prompt** is the text that tells the agent how to behave.
+*Avoid*: "Role Policy" (policy is the operation-specific blocking/advisory rule);
+"capabilities" (too broad unless naming a specific permission).
 
 **Role definition**:
 The single source of a **role**'s behavior — focused **lex** fragments (a shared
@@ -515,7 +527,7 @@ separable by data rather than intuition. *Avoid*: conflating it with a `test` **
 **Review-round record**:
 The persisted product of one reviewer's review of one **Review round** — the
 judged **Findings** with their severities and dispositions, the coverage
-attestation, and the range reviewed — written verb-witnessed at generate time
+attestation, optional **Review proposals**, and the range reviewed — written verb-witnessed at generate time
 to the same harness-owned, repo-keyed, never-committed JSONL convention as the
 **eval record**, carrying the run ids and **Variant** hashes of every
 contributing **Dimension pass** and the **Calibrator**. The boundary, stated
@@ -747,10 +759,22 @@ a branch-pinned reviewer gets this one (ADR-0018).
 
 **Reviewer Run** (a kind of **Run**):
 A branch-pinned, **read-only** Run — a PR reviewer (claude / codex / antigravity) that reads
-the diff and code and **posts a review**, never executing or mutating. Spawned like any Run
+the diff and code, then **posts a review** without mutating the reviewed checkout or
+landing changes autonomously. Spawned like any Run
 via `shipit spawn subagent --role reviewer`, it gets a shared **Read-only Tree** and reports
 back through the PR (a posted review). Contrast the **implementer** / **shepherd** write-Runs
 (write Tree, report via a draft PR) and the **explorer** (ambient, no Tree).
+
+**Review proposal**:
+A future-optional candidate code change produced by a **Reviewer Run** as supporting
+review output — a diff, patch, branch, or stacked PR. A Review proposal is never
+applied by the Reviewer Run; the **Shepherd** decides whether and how to incorporate it.
+
+**Proposal Work Env**:
+A future-optional auxiliary **Work Env** a **Reviewer Run** may use to prepare or
+validate a **Review proposal**. It does not replace the reviewer’s **Read-only Tree**
+as the reviewed source of truth, and it does not give the reviewer authority to land
+changes.
 
 **shipit-owned spawning**:
 The model (ADR-0017) where the **coordinator** launches every real **Run** through a CLI —
@@ -790,6 +814,33 @@ branch-pinned, so it *does* get a Tree). Enforcement is the flip side — the na
 pointing at the shipit-owned spawn path, so no role can drift back to the old
 shared-worktree mess.
 
+**Tree Profile**:
+The declared execution shape for where a **Role** runs: `session`, `write`,
+`read-only`, or `ambient`. A Tree Profile determines whether Shipit provisions a
+**Session Tree**, **write Tree**, **Read-only Tree**, or no Tree at all; `ambient`
+means the Role runs in the existing context without a Shipit-provisioned Tree.
+A **Role Profile** selects a Tree Profile; the Tree Profile determines the shape of
+the **Work Env** the role receives.
+*Avoid*: "Tree posture" (use Profile consistently); treating `ambient` as a kind
+of Tree.
+
+**Work Env**:
+The execution context Shipit uses to do work: a checkout plus the activated tools
+and paths for that checkout. A **Run** receives a Work Env; a **Lane** or fleet
+verification cell also executes in one. A Work Env gives file isolation and tool
+resolution when backed by a **Tree**, but is not a security sandbox; a Tree is the
+isolated checkout primitive inside a Tree-backed Work Env.
+Two variants name the checkout relationship: a **Tree-backed Work Env** uses a
+Shipit-provisioned **Tree**; a **Direct-checkout Work Env** uses an existing
+**WorkingDir** that Shipit did not provision as a Tree, such as a human local
+checkout or CI checkout.
+Work Env is inferred from execution context, not consumer-configured: Role Profiles,
+Trees, direct checkouts, and CI/fleet runners determine it. Per-consumer tuning is
+deferred until the base model is battle-hardened and real variation appears.
+*Avoid*: "workspace" (collides with Cargo/pixi/editor workspaces), "working tree"
+(collides with Git worktree language), "sandbox" (overclaims containment), "root"
+(overloaded with user/filesystem/repo root meanings).
+
 ### Build & release
 
 **Toolchain**:
@@ -808,8 +859,8 @@ several (a Tauri app = a rust path + an npm path + maybe an mkdocs path).
 **Tool**:
 A uniform shipit verb — `shipit lint`, `shipit test`, `shipit build`, … — that
 walks the **path→toolchain map** and dispatches each entry to its producing
-command. The verb is the single implementation everywhere: laptop, hook, and CI
-all invoke it, the same way `shipit lint` already works (ADR-0004 generalized).
+command in a **Work Env**. The verb is the single implementation everywhere:
+laptop, hook, and CI all invoke it, the same way `shipit lint` already works (ADR-0004 generalized).
 The pixi task of the same name is a thin one-line caller
 (`test = "./bin/shipit test"` — the ADR-0033 pinned launcher),
 never the home of logic; underlying-command flags stay reachable via passthrough
@@ -875,7 +926,8 @@ content-key is the artifact's identity, not merely a cache bucket.
 **Lane**:
 A declared CI test unit — `{ name, consumes an artifact, run = a **tool** or
 **leg**, required, local, trigger (pr / push / nightly / dispatch), runner,
-scope }` (the pixi task is only the thin caller of that tool). The
+scope }` (the pixi task is only the thin caller of that tool). A Lane runs in a
+**Work Env**; the Lane names what runs, while the Work Env names where it runs. The
 generic CI workflow fans the lanes into jobs; each resolves-or-builds its
 **artifact** by **content-key** (WF02 — until then, the artifact seam's
 local-build / CI-artifact sources), runs its harness, and posts results. The
