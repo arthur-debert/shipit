@@ -91,6 +91,7 @@ class TestParseFixture:
             {"prs": [dict(PR, head_sha="abc")]},  # too short
             {"prs": [dict(PR, repo="not-a-slug")]},  # not owner/name
             {"prs": [dict(PR, repo="owner/name/extra")]},  # too many segments
+            {"prs": [dict(PR, title=123)]},  # soft field, wrong type (no coercion)
             {"prs": [dict(PR), dict(PR)]},  # duplicate pr id
             {"labels": [label_data(pr="unknown-pr")]},
             {"labels": [label_data(severity="blocker")]},  # retired ladder

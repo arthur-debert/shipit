@@ -187,6 +187,19 @@ def _require_str(raw: dict[str, Any], key: str, where: str) -> str:
     return value.strip()
 
 
+def _optional_str(raw: dict[str, Any], key: str, where: str) -> str:
+    """An optional informational field: absent/``null`` is ``""``, a string is
+    kept, anything else is a loud defect. No silent ``str()`` coercion — the
+    module's "loud on any defect" contract holds for the soft fields too, so a
+    ``title = 123`` mistake surfaces instead of becoming the string ``"123"``."""
+    value = raw.get(key)
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise FixtureError(f"{where}: {key!r} must be a string")
+    return value
+
+
 def _parse_pr(raw: Any, index: int) -> PinnedRange:
     where = f"prs[{index}]"
     if not isinstance(raw, dict):
@@ -217,9 +230,9 @@ def _parse_pr(raw: Any, index: int) -> PinnedRange:
         pr=pr,
         base_sha=base.lower(),
         head_sha=head.lower(),
-        title=str(raw.get("title", "")),
-        language=str(raw.get("language", "")),
-        notes=str(raw.get("notes", "")),
+        title=_optional_str(raw, "title", where),
+        language=_optional_str(raw, "language", where),
+        notes=_optional_str(raw, "notes", where),
     )
 
 
