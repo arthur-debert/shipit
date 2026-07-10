@@ -353,3 +353,108 @@ def test_launch_specs_are_keyed_by_the_backend_value_not_a_retyped_name():
     failing at run time with `unknown funnel review backend`."""
     assert all(isinstance(k, agent_backend.Backend) for k in producer._SPECS)
     assert set(producer._SPECS) == set(agent_backend.funnel_backends())
+
+
+def test_dimension_pass_reuses_the_handed_in_tree_and_scopes_the_prompt(
+    _faked, monkeypatch
+):
+    # RVW02-WS04: a Dimension pass hands in the ALREADY-provisioned Tree (the
+    # fan-out provisions once for all parallel passes) — the producer must NOT
+    # re-provision — and the launched task carries the dimension focus slice.
+    from shipit.review.dimensions import by_name
+
+    def boom(plan, *, source_repo, github_url):
+        raise AssertionError("tree_path was handed in; no re-provisioning")
+
+    monkeypatch.setattr(producer, "create_readonly", boom)
+    review = producer.run_tree_review(
+        agent_backend.CODEX,
+        _ctx(),
+        launcher=_faked["launcher"],
+        dimension=by_name("security-robustness"),
+        tree_path="/trees/shared/leaf",
+    )
+    assert review["summary"]["status"] == "COMMENT"
+    assert _faked["cwd"] == "/trees/shared/leaf"
+    prompt = _faked["cmd"][-1]
+    assert "DIMENSION FOCUS — Security / robustness" in prompt
+
+
+def test_pass_task_text_matches_the_launched_prompt(_faked):
+    # The variant source: `pass_task_text` re-derives the exact task the
+    # launch composes (the adapter may prepend its role preamble around it),
+    # so the round record's per-run variant hashes the prompt content that ran.
+    from shipit.review.dimensions import by_name
+
+    dim = by_name("correctness")
+    producer.run_tree_review(
+        agent_backend.CODEX, _ctx(), launcher=_faked["launcher"], dimension=dim
+    )
+    task = producer.pass_task_text(agent_backend.CODEX, 42, dimension=dim)
+    assert task in _faked["cmd"][-1]
+
+
+def test_incremental_range_launches_the_fix_range_task(_faked):
+    # RVW02-WS06: an incremental round launches the fix-range task (git diff
+    # base..head, NOT `gh pr diff`) with mandated neighborhood context, and
+    # `pass_task_text` re-derives the SAME prompt for the round-record variant.
+    review = producer.run_tree_review(
+        agent_backend.CODEX,
+        _ctx(),
+        launcher=_faked["launcher"],
+        incremental_range=("b" * 40, "c" * 40),
+        tree_path="/trees/shared/leaf",
+    )
+    assert review["summary"]["status"] == "COMMENT"
+    prompt = _faked["cmd"][-1]
+    assert f"git diff {'b' * 40}..{'c' * 40}" in prompt
+    assert "MANDATORY CONTEXT EXPANSION" in prompt
+    task = producer.pass_task_text(
+        agent_backend.CODEX, 42, incremental_range=("b" * 40, "c" * 40)
+    )
+    assert task in prompt
+
+
+def test_incremental_range_and_dimension_are_mutually_exclusive(_faked):
+    # RVW02-WS06: an incremental round is ONE full-scope fix-range pass, not a
+    # dimension pass — supplying both is a caller programming error that BOTH the
+    # variant-source helper and the launch path reject with ValueError, rather
+    # than silently letting incremental_range win and hashing/launching a task
+    # shape the caller did not mean.
+    from shipit.review.dimensions import by_name
+
+    dim = by_name("correctness")
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        producer.pass_task_text(
+            agent_backend.CODEX,
+            42,
+            dimension=dim,
+            incremental_range=("b" * 40, "c" * 40),
+        )
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        producer.run_tree_review(
+            agent_backend.CODEX,
+            _ctx(),
+            launcher=_faked["launcher"],
+            dimension=dim,
+            incremental_range=("b" * 40, "c" * 40),
+        )
+
+
+def test_provision_review_tree_requires_a_head_branch(monkeypatch):
+    import pytest as _pytest
+
+    ctx = review_view(
+        number=42,
+        repo="arthur-debert/shipit",
+        head_sha="deadbeef" * 5,
+        base_ref="TRE05/umbrella",
+        base_sha="cafe" * 10,
+        diff="diff --git a/x b/x\n",
+        is_draft=False,
+        changed_files=["x"],
+        workdir="/checkout",
+        head_ref="",
+    )
+    with _pytest.raises(RuntimeError, match="head branch"):
+        producer.provision_review_tree(ctx)

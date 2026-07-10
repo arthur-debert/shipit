@@ -11,7 +11,10 @@ The split mirrors ADR-0012's pure-core / thin-boundary shape:
   - :mod:`locate`     — resolve the just-closed run's transcript + meta (boundary).
   - :mod:`extractors` — objective metrics from the transcript (pure core).
   - :mod:`record`     — assemble the JSONL eval record (pure).
-  - :mod:`store`      — append a record to the local, never-committed store (boundary).
+  - :mod:`store`      — the local, never-committed store FAMILY (boundary):
+    the eval-record kind, plus the review-round record kind the review path
+    writes (:mod:`shipit.review.roundrecord`, RVW02-WS03) — one convention,
+    two record kinds.
 
 The `shipit hook stop` / `shipit hook subagent-stop` boundary
 (:mod:`shipit.verbs.hook.eval`) wires them together, synchronously and fail-open.

@@ -1,10 +1,13 @@
-"""The `shipit pr classify` CLI surface (#423) — through the ADR-0030 seam.
+"""The `shipit pr classify` CLI surface (ADR-0044) — through the ADR-0030 seam.
 
-These prove the WIRING and the verb's own rules (list vs record mode, the
-latest-round membership check, the no-PR refusal, the exit contract) — the
-verdict STORE is unit-tested in test_prstate_verdicts.py and the engine's gate
-in test_prstate_breakers.py. The boundary (`resolve_pr` / `gather` /
-`load_roster` / `record_verdict`) is monkeypatched so there is no network and
+The verb is the write-once Severity-OVERRIDE writer (the chain's dormant
+correction path), plus a list mode showing the latest round's chain-resolved
+severities. These prove the WIRING and the verb's own rules (list vs record
+mode, the latest-round membership check, the no-PR refusal, the exit
+contract) — the override STORE is unit-tested in test_prstate_overrides.py,
+the precedence chain in test_prstate_severity.py, and the engine's breaker in
+test_prstate_breakers.py. The boundary (`resolve_pr` / `gather` /
+`load_roster` / `record_override`) is monkeypatched so there is no network and
 no real log file.
 """
 
@@ -16,6 +19,7 @@ import json
 import pytest
 
 from shipit import cli
+from shipit.finding import Severity
 from shipit.identity import Sha, repo_from_slug
 from shipit.pr import PrId
 from shipit.prstate.model import Review, ReviewComment, Thread, readiness_view
@@ -25,8 +29,10 @@ from shipit.verbs.pr import classify as classify_verb
 REPO = repo_from_slug("owner/repo")
 HEAD = Sha(hashlib.sha1(b"head").hexdigest())
 
-# Real #412 finding bodies — untagged Copilot cosmetics.
-BODY_1 = "capitalize the first word of the sentence for correct English grammar"
+# One marker-carrying finding (resolves `nit` off the marker) and one unmarked
+# Copilot finding (resolves `major` off the fail-safe) — the list view must
+# show both severities and their source rungs.
+BODY_1 = "<!-- shipit:finding severity=nit -->\nnitpick: capitalize the sentence"
 BODY_2 = "consider referencing the CLI02 PRD inline"
 
 
@@ -42,7 +48,7 @@ def _thread(cid: int, body: str, review_id: int = 900) -> Thread:
     return Thread(thread_id=f"PRT_{cid}", is_resolved=True, comments=(comment,))
 
 
-def _ctx(verdicts=None, threads=None):
+def _ctx(overrides=None, threads=None):
     return readiness_view(
         number=42,
         head_sha=HEAD,
@@ -60,7 +66,7 @@ def _ctx(verdicts=None, threads=None):
         threads=threads
         if threads is not None
         else [_thread(101, BODY_1), _thread(202, BODY_2)],
-        verdicts=verdicts or {},
+        overrides=overrides or {},
         # The SHIPPED default roster (copilot-only) as a value: `build_rounds`
         # derives its required set from `ctx.roster`, and the empty Roster
         # requires no one — no reviews would fold into rounds.
@@ -70,7 +76,7 @@ def _ctx(verdicts=None, threads=None):
 
 @pytest.fixture
 def recorded():
-    """The record_verdict spy's call log."""
+    """The record_override spy's call log."""
     return []
 
 
@@ -87,9 +93,9 @@ def patched(monkeypatch, recorded):
     monkeypatch.setattr(classify_verb, "gather", lambda target, roster: _ctx())
     monkeypatch.setattr(
         classify_verb,
-        "record_verdict",
-        lambda repo, pr, cid, verdict, reason=None: recorded.append(
-            (repo, pr, cid, verdict, reason)
+        "record_override",
+        lambda repo, pr, cid, severity, reason=None: recorded.append(
+            (repo, pr, cid, severity, reason)
         ),
     )
 
@@ -100,38 +106,47 @@ def test_pr_help_lists_classify(capsys):
     assert "classify" in capsys.readouterr().out
 
 
-def test_list_mode_prints_unclassified_findings_with_the_record_command(
+def test_list_mode_prints_resolved_severities_with_the_override_command(
     patched, capsys
 ):
     rc = cli.main(["pr", "classify"])
     assert rc == 0
     out = capsys.readouterr().out
-    assert "2 unclassified finding(s) of 2" in out
+    assert "2 finding(s), severity-resolved" in out
     assert "101" in out and "202" in out
+    # each finding shows its chain-resolved severity + the deciding rung
+    assert "nit (marker)" in out
+    assert "major (default)" in out
     assert BODY_2 in out
-    assert "shipit pr classify 42 --comment <id> nitpick|substantive" in out
+    assert "shipit pr classify 42 --comment <id> {critical|major|minor|nit}" in out
 
 
-def test_list_mode_json_carries_ids_and_excerpts(patched, capsys):
+def test_list_mode_json_carries_ids_severities_and_sources(patched, capsys):
     rc = cli.main(["pr", "classify", "--json"])
     assert rc == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["pr"] == 42
     assert payload["round"] == 1
-    assert payload["total"] == 2
-    assert [f["comment_id"] for f in payload["unclassified"]] == [101, 202]
-    assert payload["unclassified"][0]["excerpt"] == BODY_1
+    assert [f["comment_id"] for f in payload["findings"]] == [101, 202]
+    assert payload["findings"][0]["severity"] == "nit"
+    assert payload["findings"][0]["source"] == "marker"
+    assert payload["findings"][1]["severity"] == "major"
+    assert payload["findings"][1]["source"] == "default"
 
 
-def test_list_mode_reports_fully_classified(patched, monkeypatch, capsys):
+def test_list_mode_shows_a_recorded_override_as_the_source(
+    patched, monkeypatch, capsys
+):
     monkeypatch.setattr(
         classify_verb,
         "gather",
-        lambda target, roster: _ctx(verdicts={101: "nitpick", 202: "nitpick"}),
+        lambda target, roster: _ctx(overrides={202: Severity.MINOR}),
     )
-    rc = cli.main(["pr", "classify"])
+    rc = cli.main(["pr", "classify", "--json"])
     assert rc == 0
-    assert "all 2 finding(s) of round 1 are classified" in capsys.readouterr().out
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["findings"][1]["severity"] == "minor"
+    assert payload["findings"][1]["source"] == "override"
 
 
 def test_list_mode_reports_no_round(patched, monkeypatch, capsys):
@@ -147,32 +162,19 @@ def test_list_mode_reports_no_round(patched, monkeypatch, capsys):
     assert "no review round yet" in capsys.readouterr().out
 
 
-def test_record_mode_writes_the_verdict_once(patched, recorded, capsys):
+def test_record_mode_writes_the_override_once(patched, recorded, capsys):
     rc = cli.main(
-        ["pr", "classify", "--comment", "101", "nitpick", "--reason", "grammar only"]
+        ["pr", "classify", "--comment", "202", "nit", "--reason", "grammar only"]
     )
     assert rc == 0
-    assert recorded == [(REPO, 42, 101, "nitpick", "grammar only")]
+    assert recorded == [(REPO, 42, 202, Severity.NIT, "grammar only")]
     out = capsys.readouterr().out
-    assert "classified finding 101 as nitpick" in out
-    assert "1 unclassified finding(s) remaining" in out
-
-
-def test_record_mode_reports_the_fully_classified_round(
-    patched, monkeypatch, recorded, capsys
-):
-    monkeypatch.setattr(
-        classify_verb,
-        "gather",
-        lambda target, roster: _ctx(verdicts={202: "nitpick"}),
-    )
-    rc = cli.main(["pr", "classify", "--comment", "101", "substantive"])
-    assert rc == 0
-    assert "the latest round is fully classified" in capsys.readouterr().out
+    assert "severity of finding 202" in out
+    assert "overridden to nit" in out
 
 
 def test_record_refuses_a_comment_outside_the_latest_round(patched, recorded, capsys):
-    rc = cli.main(["pr", "classify", "--comment", "999", "nitpick"])
+    rc = cli.main(["pr", "classify", "--comment", "999", "nit"])
     assert rc == 1
     assert recorded == []
     err = capsys.readouterr().err
@@ -180,10 +182,13 @@ def test_record_refuses_a_comment_outside_the_latest_round(patched, recorded, ca
     assert "not a finding of the latest review round" in err
 
 
-def test_record_verdict_is_a_usage_validated_choice(patched, capsys):
-    # The verdict half of --comment validates at argv parse: exit 2, never verb code.
-    rc = cli.main(["pr", "classify", "--comment", "101", "cosmetic"])
-    assert rc == 2
+def test_record_severity_is_a_usage_validated_choice(patched, capsys):
+    # The severity half of --comment validates at argv parse — the ladder is
+    # the ONLY vocabulary (the retired nitpick|substantive pair included):
+    # exit 2, never verb code.
+    assert cli.main(["pr", "classify", "--comment", "101", "cosmetic"]) == 2
+    assert cli.main(["pr", "classify", "--comment", "101", "nitpick"]) == 2
+    assert cli.main(["pr", "classify", "--comment", "101", "substantive"]) == 2
 
 
 def test_reason_without_comment_is_refused(patched, capsys):

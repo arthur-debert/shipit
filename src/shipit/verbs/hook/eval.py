@@ -90,6 +90,9 @@ def run(stdin: TextIO | None = None) -> int:
             # and pass it IN so the pure builder can override the would-be
             # `coordinator` label (the genuine interactive coordinator carries none).
             spawned_role=logcontext.role_from_env(),
+            # The run's transcript-stem identity — the `eval.run_id` a
+            # review-round record's contributing runs join on (RVW02-WS03).
+            run_id=run_files.run_id,
         )
         append_record(record, wd.repo)
     except Exception:  # noqa: BLE001 — fail-open is the whole point.

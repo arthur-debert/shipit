@@ -393,7 +393,7 @@ def test_engine_rerequests_stale_head_copilot_under_rerun(context):
     # Copilot's earlier-head review, so the engine must both ADVISE the
     # re-request in the prose and ROUTE to it via `to_request` — this is what
     # generates the per-push review rounds the round counter and the
-    # all-nitpick breaker are exercised by.
+    # no-major+ breaker are exercised by.
     ctx = context("copilot_stale_needs_rerequest")
     ctx.roster = Roster((RosterEntry(name="copilot", required=True, rerun=True),))
     status = evaluate(ctx)
@@ -662,9 +662,11 @@ def test_a_push_re_stales_both_required_reviewers_when_rerun():
 
 
 def test_review_once_both_earlier_head_reaches_ready():
-    # The DEFAULT (review-once): the SAME both-reviewed-an-earlier-head context,
-    # with no rerun opt-in, reaches READY — neither earlier-head review is stale,
-    # so a push does NOT re-open the review holds (the whole point of the policy).
+    # Review-once as the EXPLICIT per-reviewer opt-out (ADR-0043 flipped the code
+    # default to head-strict): the SAME both-reviewed-an-earlier-head context,
+    # with BOTH reviewers opted out to review-once, reaches READY — neither
+    # earlier-head review is stale, so a push does NOT re-open the review holds
+    # (the whole point of the opt-out).
     ctx = readiness_view(
         number=1,
         head_sha=NEW,
@@ -676,8 +678,14 @@ def test_review_once_both_earlier_head_reaches_ready():
             Review(2, "coderabbitai[bot]", "APPROVED", OLD, ""),
         ],
         checks=_green_checks(),
+        roster=Roster(
+            (
+                RosterEntry(name="copilot", required=True, rerun=False),
+                RosterEntry(name="coderabbit", required=True, rerun=False),
+            )
+        ),
     )
-    status = evaluate(ctx, required=_both_required())
+    status = evaluate(ctx)
     assert status.state is TaskState.READY
 
 

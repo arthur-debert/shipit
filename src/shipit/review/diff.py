@@ -150,6 +150,44 @@ def review_view(
     )
 
 
+def rescoped_view(view: ReviewView, base_sha: str | Sha) -> ReviewView:
+    """A copy of ``view`` re-diffed over the FIX RANGE ``base_sha..head`` — the
+    incremental round's narrowed target (RVW02-WS06, ADR-0045).
+
+    An incremental round (round ≥ 2) reviews only ``last-reviewed-head..new-head``,
+    not the whole PR. This recomputes the two-dot diff + changed-file list from
+    ``base_sha`` (the reviewer's last-reviewed head — a proven ancestor of the
+    head, so present in ``view.workdir`` after :func:`resolve_pr`'s fetches) to
+    ``view.head_sha``, and returns a NEW view carrying that narrower diff with the
+    SAME PR identity, head, workdir, and head branch — only ``base_sha`` /
+    ``diff`` / ``changed_files`` change. The composed ``PR`` core is shared
+    unchanged: the head, draft state, and merge state are the PR's, not the
+    range's.
+
+    Endpoints are :class:`~shipit.identity.Sha` (a raw string is minted here,
+    PROC03). Raises :class:`ReviewError` if the diff cannot be computed — by the
+    time an incremental round is planned both endpoints are proven present, so a
+    failure is exceptional and fails loud rather than silently reviewing nothing.
+    """
+    base = base_sha if isinstance(base_sha, Sha) else Sha(str(base_sha))
+    try:
+        diff = git.diff_range(base, view.head_sha, cwd=view.workdir)
+        changed_files = git.diff_name_only(base, view.head_sha, cwd=view.workdir)
+    except execrun.ExecError as exc:
+        raise ReviewError(
+            f"failed to compute the incremental fix-range diff for PR "
+            f"#{view.number} ({base}..{view.head_sha}): {exc}"
+        ) from exc
+    return ReviewView(
+        pr=view.pr,
+        base_sha=base,
+        diff=diff,
+        changed_files=changed_files,
+        workdir=view.workdir,
+        head_ref=view.head_ref,
+    )
+
+
 #: Placeholder repo identity for a hand-built :class:`ReviewView` with no slug —
 #: a resolved PR always carries its real, canonical repo (see :func:`resolve_pr`).
 _HANDBUILT_REPO = repo_from_slug("local/local")

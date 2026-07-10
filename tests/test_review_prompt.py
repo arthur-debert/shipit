@@ -10,9 +10,26 @@ JSON-validity instruction.
 
 from __future__ import annotations
 
-from shipit.review.prompt import build_reviewer_task
+from shipit.review.prompt import build_incremental_reviewer_task, build_reviewer_task
+from shipit.review.schema import REVIEW_SCHEMA
 
 _INSTRUCTIONS = "Be thorough."
+
+
+def test_schema_line_is_nullable_but_stays_required():
+    """A file-level finding has no line, so `line` accepts null — but it STAYS in
+    `required` because codex's strict `--output-schema` needs every property
+    required (optionality rides the null type, not omission)."""
+    item = REVIEW_SCHEMA["properties"]["comments"]["items"]
+    assert item["properties"]["line"]["type"] == ["integer", "null"]
+    assert "line" in item["required"]
+
+
+def test_agy_prose_notes_line_may_be_null():
+    """The in-prose schema (agy's only guide) tells the agent a file-level finding
+    uses null rather than a fabricated line number."""
+    task = build_reviewer_task(_INSTRUCTIONS, 7, schema_inline=True)
+    assert "null for a file-level finding" in task
 
 
 def test_task_tells_agent_to_fetch_the_diff_itself_and_not_post():
@@ -26,6 +43,22 @@ def test_task_tells_agent_to_fetch_the_diff_itself_and_not_post():
     assert _INSTRUCTIONS in task
 
 
+def test_task_instructs_the_severity_ladder_and_merge_block_boundary():
+    """Every reviewer task (both backends) carries the 4-tier ladder, the
+    merge-block test as the major/minor boundary, severity-first ordering, the
+    informational-only status of category/confidence, and the coverage
+    attestation. The retired ERROR/WARNING/INFO triple is gone."""
+    for schema_inline in (False, True):
+        task = build_reviewer_task(_INSTRUCTIONS, 42, schema_inline=schema_inline)
+        assert "critical, major, minor, or nit" in task
+        assert "MERGE-BLOCK TEST" in task
+        assert "would a competent reviewer hold the merge" in task
+        assert "highest severity first" in task
+        assert "informational only" in task
+        assert "attest your coverage" in task
+        assert "ERROR" not in task and "WARNING" not in task
+
+
 def test_agy_task_includes_schema_and_json_validity_instruction():
     """The agy path (`schema_inline=True`) embeds the in-prose schema AND the #76
     JSON-validity hardening telling the agent its ENTIRE response must be valid JSON."""
@@ -33,6 +66,12 @@ def test_agy_task_includes_schema_and_json_validity_instruction():
     assert "JSON Schema:" in task  # the in-prose schema
     assert "ENTIRE response must be a single, complete, valid JSON object" in task
     assert "valid JSON that a strict parser accepts on the first try" in task
+    # The prose schema mirrors REVIEW_SCHEMA's new shape: the 4-tier severity
+    # enum, informational category/confidence, evidence/fix, coverage attestation.
+    assert '"critical" | "major" | "minor" | "nit"' in task
+    assert '"category"' in task and '"confidence"' in task
+    assert '"evidence"' in task and '"fix"' in task
+    assert '"coverage"' in task
 
 
 def test_codex_task_omits_schema_and_validity_instruction():
@@ -41,3 +80,61 @@ def test_codex_task_omits_schema_and_validity_instruction():
     task = build_reviewer_task(_INSTRUCTIONS, 7, schema_inline=False)
     assert "JSON Schema:" not in task
     assert "ENTIRE response must be a single, complete, valid JSON object" not in task
+
+
+def test_dimension_scoped_task_carries_the_focus_section():
+    # RVW02-WS04: a Dimension pass's task is the SAME reviewer contract plus a
+    # focus section that scopes the SEARCH — severity stays on the shared
+    # ladder (final severity is the Calibrator's), pre-existing findings are
+    # explicitly allowed (routing them out is the calibrator's job).
+    from shipit.review.dimensions import by_name
+
+    task = build_reviewer_task(
+        "INSTR", 7, schema_inline=False, dimension=by_name("correctness")
+    )
+    assert "DIMENSION FOCUS — Correctness" in task
+    assert "logic errors" in task
+    assert "pre-existing" in task
+    # The base contract is untouched: fetch the diff, emit JSON, never post.
+    assert "gh pr diff 7" in task
+    assert "Do NOT post the review yourself" in task
+
+
+def test_dimension_section_precedes_the_inline_schema_for_agy():
+    from shipit.review.dimensions import by_name
+
+    task = build_reviewer_task(
+        "INSTR", 7, schema_inline=True, dimension=by_name("test-quality")
+    )
+    assert task.index("DIMENSION FOCUS") < task.index("JSON Schema:")
+
+
+def test_monolithic_task_carries_no_dimension_section():
+    task = build_reviewer_task("INSTR", 7, schema_inline=False)
+    assert "DIMENSION FOCUS" not in task
+
+
+# --- incremental (round >= 2) reviewer task (RVW02-WS06, ADR-0045) ----------
+
+
+def test_incremental_task_diffs_the_fix_range_not_the_full_pr():
+    task = build_incremental_reviewer_task(
+        _INSTRUCTIONS, 42, "b" * 40, "c" * 40, schema_inline=False
+    )
+    # It diffs the FIX RANGE via git, and explicitly forbids the full `gh pr diff`.
+    assert f"git diff {'b' * 40}..{'c' * 40}" in task
+    assert "Do NOT" in task and "gh pr diff" in task
+    assert _INSTRUCTIONS in task
+
+
+def test_incremental_task_mandates_dependency_neighborhood_context():
+    # The load-bearing anti-regression rule: read callers/definitions/usages
+    # beyond the diff, so a local fix breaking a distant invariant is still caught.
+    task = build_incremental_reviewer_task(
+        _INSTRUCTIONS, 42, "b" * 40, "c" * 40, schema_inline=True
+    )
+    assert "MANDATORY CONTEXT EXPANSION" in task
+    assert "DEPENDENCY NEIGHBORHOOD" in task
+    # It keeps the same ladder + JSON contract as the full task, and the agy prose.
+    assert "critical, major, minor, or nit" in task
+    assert "null for a file-level finding" in task

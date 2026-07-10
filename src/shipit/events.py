@@ -95,6 +95,18 @@ EVENT_NAMES = frozenset(
         "review.degraded",
         "round.detected",
         "breaker.fired",
+        # the round-1 dimension fan-out (RVW02-WS04 / ADR-0045), emitted
+        # verb-witnessed by the detached review child: the union reached the
+        # posted review either through the default MECHANICAL dedup
+        # (``review.deduped``, RVW02-WS08 — calibrator off, pass severities
+        # kept) or, when a reviewer opts the dormant calibrator back on, the LLM
+        # judge (``review.calibrated`` — the union judged onto the one severity
+        # ruler); and each judged finding routed OUT of the posted review (its
+        # disposition rides the record — the Opportunity-harvest seam's
+        # flow-log twin).
+        "review.deduped",
+        "review.calibrated",
+        "finding.dispositioned",
         # the blocking waiter (`shipit pr wait`, ADR-0034): the wait's own
         # lifecycle — started at entry, one state_changed per poll tick where
         # the observed state moved (the tail-able progress trail), and exactly
@@ -108,11 +120,12 @@ EVENT_NAMES = frozenset(
         "wait.fired",
         "wait.actionable",
         "wait.timed_out",
-        # a review finding's recorded verdict (#423): the agent addressing the
-        # round classifies each finding (nitpick | substantive) as a byproduct
-        # of triaging its thread; the record — keyed by the finding comment's
-        # id, written once — is what the all-nitpick breaker consumes.
-        "finding.classified",
+        # a finding's write-once Severity override (RVW02 / ADR-0044): the
+        # dormant correction path for a wrong reviewer-emitted severity —
+        # keyed by the finding comment's id, written once via `shipit pr
+        # classify`; it beats every other rung of the severity precedence
+        # chain the engine resolves findings through.
+        "finding.severity_overridden",
         # the ready flip and its undo
         "pr.ready",
         "pr.unready",

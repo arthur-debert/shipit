@@ -47,6 +47,16 @@ def test_subagent_without_meta_sidecar_degrades_to_no_meta(tmp_path):
     assert run.is_coordinator is False
 
 
+def test_run_id_is_the_transcript_stem_for_both_run_kinds(tmp_path):
+    # The run id is the transcript filename's stem — the ONE identity the harness
+    # already assigns a run, and the `eval.run_id` join key a review-round
+    # record's contributing runs carry (RVW02-WS03).
+    session = _write(tmp_path / "57d92339-f3c3-45e8.jsonl")
+    agent = _write(tmp_path / "subagents" / "agent-a7c77e10.jsonl")
+    assert locate_run({"transcript_path": str(session)}).run_id == "57d92339-f3c3-45e8"
+    assert locate_run({"transcript_path": str(agent)}).run_id == "agent-a7c77e10"
+
+
 def test_missing_transcript_path_returns_none():
     # No transcript named → nothing to evaluate; the boundary fails open on None.
     assert locate_run({}) is None

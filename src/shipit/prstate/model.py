@@ -20,6 +20,7 @@ from datetime import datetime
 from enum import StrEnum
 
 from .. import events
+from ..finding import Severity
 from ..identity import Repo, Sha, repo_from_slug
 from ..pr import PR, PrId
 from .roster import Roster
@@ -223,8 +224,8 @@ class ReadinessView:
     # here at the build site — so the engine/adapters read every per-reviewer
     # setting (required, rerun, wait window, run options) off the snapshot,
     # never the filesystem, and the settings can never disagree with each other.
-    # rerun=True means head-strict (re-review every push); rerun=False (the
-    # DEFAULT for any reviewer absent from the roster) means review-once: a
+    # rerun=True (the DEFAULT, including for any reviewer absent from the roster)
+    # means head-strict (re-review every push); rerun=False means review-once: a
     # review on ANY commit of the PR counts as done and is never
     # stale-after-push. A reviewer without a `window_seconds` uses the shipped
     # 20m default (`reviewers.DEFAULT_WAIT_WINDOW`, applied by the adapter);
@@ -240,15 +241,16 @@ class ReadinessView:
     # LOCAL reviewer has no requested edge (it ages its check run's `started_at`
     # instead) and so never appears here. Empty in a light/skip context.
     requested_at: dict[str, str] = field(default_factory=dict)
-    # The recorded finding verdicts for this PR (#423): finding comment id ->
-    # "nitpick" | "substantive", loaded ONCE from the dev-cycle event log at the
-    # gather seam (`prstate.verdicts.load_verdicts`) and threaded on here — the
-    # roster precedent — so the breaker and the classify gate read recorded
-    # judgments off the snapshot, never the filesystem. There is NO
-    # auto-classification: an id absent here is an UNCLASSIFIED finding, which
-    # gates the loop (`pr next`/`pr status` report CLASSIFY) rather than
-    # defaulting to either verdict. Empty is the honest fixture default.
-    verdicts: dict[int, str] = field(default_factory=dict)
+    # The write-once Severity overrides for this PR (ADR-0044): finding comment
+    # id -> Severity, loaded ONCE from the dev-cycle event log at the gather
+    # seam (`prstate.overrides.load_overrides`) and threaded on here — the
+    # roster precedent — so the breaker and the classify verb read recorded
+    # overrides off the snapshot, never the filesystem. An override is the TOP
+    # rung of the severity precedence chain (it beats the machine marker, the
+    # adapter mapping, and the `major` fail-safe); an id absent here simply
+    # resolves through the rest of the chain — findings arrive pre-classified,
+    # so nothing gates on this store. Empty is the honest fixture default.
+    overrides: dict[int, Severity] = field(default_factory=dict)
     # The first-sight registry for the OBSERVATIONAL dev-cycle events this
     # snapshot's evaluations witness (`round.detected`, `breaker.fired`,
     # `review.degraded` — ADR-0032). A passed value, never a module global
@@ -338,7 +340,7 @@ def readiness_view(
     now: datetime | None = None,
     roster: Roster | None = None,
     requested_at: dict[str, str] | None = None,
-    verdicts: dict[int, str] | None = None,
+    overrides: dict[int, Severity] | None = None,
     sightings: events.Sightings | None = None,
 ) -> ReadinessView:
     """Compose a :class:`ReadinessView` from flattened core values — the ergonomic
@@ -376,6 +378,6 @@ def readiness_view(
         now=now,
         roster=roster if roster is not None else Roster(),
         requested_at=requested_at if requested_at is not None else {},
-        verdicts=verdicts if verdicts is not None else {},
+        overrides=overrides if overrides is not None else {},
         sightings=sightings if sightings is not None else events.Sightings(),
     )

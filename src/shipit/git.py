@@ -408,6 +408,34 @@ def _validated_shas(out: str) -> list[Sha] | None:
 # --------------------------------------------------------------------------
 
 
+def resolve_commit(rev: str, *, cwd: str) -> Sha | None:
+    """Resolve a revision NAME (branch, tag, sha prefix, ``HEAD~2``, …) to the
+    commit :class:`~shipit.identity.Sha` it names in ``cwd``, or ``None``.
+
+    ``git rev-parse --verify --quiet <rev>^{commit}`` as a probe: the
+    commit-range review path (RVW02-WS03 replay) takes ARBITRARY user-supplied
+    endpoints, so — unlike the PR path, whose endpoints arrive as validated
+    ``gh``-supplied oids — the raw name is resolved to a typed commit identity
+    HERE, at the one git boundary. ``None`` means "not a commit in this
+    checkout" (unknown ref, ambiguous name, a non-commit object) so the caller
+    can fail loud with its own actionable message; a launch-level failure
+    (missing git, timeout) raises :class:`ExecError` rather than collapsing
+    into that same ``None``. Output that does not validate as a full sha
+    returns ``None`` too — the adapter's conservative parse contract: nothing
+    rather than something wrong.
+    """
+    from .identity import Sha  # lazy: see module-top TYPE_CHECKING note.
+
+    result = _probe(["rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}"], cwd=cwd)
+    if not result.ok:
+        return None
+    raw = result.stdout.strip()
+    try:
+        return Sha(raw)
+    except ValueError:
+        return None
+
+
 def commit_present(sha: Sha, *, cwd: str) -> bool:
     """True if ``sha`` is a commit object reachable in ``cwd`` (no fetch).
 
@@ -475,6 +503,31 @@ def merge_base(a: Sha, b: Sha, *, cwd: str) -> Sha | None:
         return Sha(raw)
     except ValueError:
         return None
+
+
+def is_ancestor(ancestor: Sha, descendant: Sha, *, cwd: str) -> bool:
+    """True iff ``ancestor`` is a first-parent-or-any ancestor of ``descendant``
+    (``git merge-base --is-ancestor``).
+
+    The convergence gate for incremental review rounds (RVW02-WS06, ADR-0045):
+    a round after the first reviews only ``last-reviewed-head..new-head``, which
+    is a meaningful *fix range* ONLY when the last-reviewed head is still in the
+    new head's history. A rebase or force-push rewrites that history, so the old
+    head is no longer an ancestor — the incremental premise is void and the
+    caller must fall back to a full-PR round (fail toward over-reviewing).
+
+    A PROBE, not a hard command: ``git merge-base --is-ancestor`` exits 0 when
+    the ancestry holds, 1 when it does not, and something else on error (a
+    commit not present in this checkout, a broken repo). Only exit 0 returns
+    ``True``; EVERY other outcome — a genuine non-ancestor AND any error —
+    returns ``False``, so an unresolvable ancestry check degrades to the SAFE
+    side (a full round), never a wrongly-narrowed incremental one. A
+    launch-level failure (missing binary) still raises :class:`ExecError`
+    through :func:`_probe`'s runner, exactly like the other probes.
+    """
+    return _probe(
+        ["merge-base", "--is-ancestor", str(ancestor), str(descendant)], cwd=cwd
+    ).ok
 
 
 def diff_range(base: Sha, head: Sha, *, cwd: str) -> str:

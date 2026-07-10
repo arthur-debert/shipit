@@ -27,6 +27,7 @@ from __future__ import annotations
 import pytest
 from conftest import load_context
 
+from shipit.identity import Sha
 from shipit.prstate.model import FunnelState, Review, ReviewFunnelCheck
 from shipit.prstate.reviewers import by_name
 from shipit.prstate.state import TaskState, evaluate
@@ -42,13 +43,20 @@ _REQUIRED = [by_name("copilot"), by_name("codex")]
 _CODEX_BOT = "adr-codex-review[bot]"
 
 
-def _ctx(funnel=None, codex_review=False, head="beef03"):
+# The base fixture's head sha (``headRefOid``). A codex review is injected ON this
+# head so it counts under the head-strict rerun default (ADR-0043 / RVW02-WS06):
+# an abbreviated or earlier-head commit_id would no longer settle a head-strict
+# reviewer (and a raw-string commit_id refuses to compare against the Sha head).
+_FIXTURE_HEAD = Sha("beef030000000000000000000000000000000000")
+
+
+def _ctx(funnel=None, codex_review=False, head=_FIXTURE_HEAD):
     """Load the otherwise-ready base snapshot and inject a codex funnel signal.
 
     `funnel` is the codex-local breadcrumb (a `ReviewFunnelCheck` or None);
-    `codex_review` adds a POSTED review by the codex bot on the head. The base has
-    copilot already posted + CI green + a CLEAN merge, so the codex signal alone
-    decides holds vs settled vs degraded.
+    `codex_review` adds a POSTED review by the codex bot ON the fixture head (so it
+    counts under head-strict rerun). The base has copilot already posted + CI green
+    + a CLEAN merge, so the codex signal alone decides holds vs settled vs degraded.
     """
     ctx = load_context("local_reviewer_otherwise_ready")
     ctx.review_funnel = [funnel] if funnel is not None else []
@@ -58,7 +66,7 @@ def _ctx(funnel=None, codex_review=False, head="beef03"):
                 review_id=9102,
                 author=_CODEX_BOT,
                 state="COMMENTED",
-                commit_id=head,
+                commit_id=head if isinstance(head, Sha) else Sha(head),
                 body="",
             )
         )
