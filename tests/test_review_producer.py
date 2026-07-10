@@ -410,8 +410,10 @@ def _range_view():
 
 def test_range_dimension_pass_runs_offline_with_the_range_scoped_focus(_faked):
     # RVW03-WS01: the offline fan-out replay narrows the RANGE task to one
-    # dimension exactly like the PR task — same focus slice, the range's diff
-    # noun — launched in the replay checkout with NO Tree and NO gh.
+    # dimension exactly like the PR task — same focus slice — launched in the
+    # replay checkout with NO Tree and NO gh. Scope rides the shared
+    # `_SCOPE_AND_CONTEXT` baseline over the range's own `git diff` fetch
+    # (ADR-0050), never a `gh pr diff`.
     from shipit.review.dimensions import by_name
 
     view = _range_view()
@@ -426,8 +428,7 @@ def test_range_dimension_pass_runs_offline_with_the_range_scoped_focus(_faked):
     prompt = _faked["cmd"][-1]
     assert f"git diff {'a' * 40}..{'b' * 40}" in prompt
     assert "DIMENSION FOCUS — Correctness" in prompt
-    assert "this range's diff" in prompt
-    assert "this PR's diff" not in prompt
+    assert "INTRODUCED or EXPOSED" in prompt  # the shared scope baseline reaches it
     assert "gh pr diff" not in prompt
 
 

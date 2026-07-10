@@ -62,7 +62,11 @@ How to Measure
     what the issue is about, and the correct way to address it as a suggestion. Output
     a ranked list of findings, ordered highest severity first.
 
-    Base your review solely on the provided diff and on reading the changed files.
-    Do NOT run build, test, or shell commands, and do NOT start background tasks —
-    this is a one-shot review, not an agentic session. Respond with ONLY the
-    requested JSON and nothing else.
+    Scope is the diff; context is the checkout. Report only findings the diff
+    introduced or exposed — a purely pre-existing issue the diff does not touch is
+    out of scope and must not be posted. Read beyond the diff freely: the callers,
+    definitions, usages, and neighboring code of what changed are the context a
+    finding needs. But beyond fetching the diff as instructed and reading files,
+    do NOT execute build, test, or shell commands and do NOT start background
+    tasks — this is a read-only review, not an agentic session. Respond with ONLY
+    the requested JSON and nothing else.

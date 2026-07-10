@@ -256,7 +256,10 @@ def build_calibrator_task(
         )
         # The result sink and diff-scope nouns follow the offline framing too, so
         # the body never contradicts `situation`/`ground_truth` by naming a PR or
-        # a GitHub post (mirrors the passes' own `diff_noun`, RVW03-WS01).
+        # a GitHub post (RVW03-WS01). The passes reach the same offline scoping
+        # through the shared `_SCOPE_AND_CONTEXT` baseline plus their range diff
+        # fetch (ADR-0050); the calibrator states it inline because its prompt
+        # does not carry that baseline.
         result_fate = "recorded in the local replay record"
         diff_noun = "this range's diff"
         summary_owner = "the review's"
@@ -312,9 +315,9 @@ inputs/state make it go wrong, and what happens); a minor or nit needs a clear \
 rationale. NEVER downgrade a finding's severity to keep it: verify it at the \
 severity it deserves, or — only when you have actually refuted it — drop it.
 4. Route scope: a verified finding that is beyond {diff_noun} — a \
-pre-existing issue the passes were allowed to report — gets disposition \
-"out-of-scope" (it is persisted, not posted). Everything verified and \
-in-scope gets "post".
+pre-existing issue a pass reported despite its diff-only scope — gets \
+disposition "out-of-scope" (it is persisted, not posted). Everything verified \
+and in-scope gets "post".
 5. NORMALIZE severity on the one ladder, ignoring the candidates' own \
 severity claims where wrong. The major/minor boundary is the MERGE-BLOCK \
 TEST: would a competent reviewer hold the merge for this? critical = merging \

@@ -18,6 +18,14 @@ itself** with ``gh pr diff <n>``, so the body tells it *how to get the diff* and
 retired front-loaded backends: the agent walks the whole codebase lazily instead
 of reviewing a context-free pasted diff.
 
+Every task body embeds the ONE canonical scope/context baseline of ADR-0050
+(``_SCOPE_AND_CONTEXT``): report only on the diff (findings the diff introduced
+or exposed; purely pre-existing issues are out of scope and not posted); read
+anything (the checkout is context — callers, definitions, neighbors); run
+nothing (no build/test/shell execution). Full, incremental, range, and
+dimension passes all carry it, so every reviewer arm answers the same question
+— the Review Lab parity baseline (RVW03-WS05, docs/spec/review-lab.md).
+
 The agent is told to emit its review as a single JSON object on stdout and to
 **NOT** post it — shipit captures that stdout and posts it via the existing
 App-identity ``post`` path onto the existing ``review: <agent>-local`` check-run
@@ -33,6 +41,28 @@ The only backend-conditional part is the schema presentation:
 from __future__ import annotations
 
 from .dimensions import Dimension
+
+# The ONE canonical scope/context baseline every reviewer arm and pass carries
+# (ADR-0050, RVW03-WS05): report only on the diff; read anything; run nothing.
+# Embedded verbatim in the full, incremental, and range tasks (and therefore in
+# every dimension pass, which is a full task plus a focus section) so every arm
+# answers the same question and their recall denominators compare — the Review
+# Lab parity baseline (docs/spec/review-lab.md). The scope rule used to live
+# only in the dimension section; the context rule used to be contradicted by
+# the bundled instructions' "solely on the provided diff". Both now live here,
+# once.
+_SCOPE_AND_CONTEXT = """\
+SCOPE AND CONTEXT — report only on the diff; read anything; run nothing:
+* SCOPE is the diff: report ONLY findings the diff you were told to fetch \
+above INTRODUCED or EXPOSED. A purely pre-existing issue the diff does not \
+touch is OUT OF SCOPE and must NOT be posted as a finding.
+* CONTEXT is the checkout: reading BEYOND the diff is encouraged. Open the \
+callers, definitions, usages, and neighboring code of what changed whenever \
+that context sharpens or refutes a finding — a raw-hunk-only review is how \
+cross-file regressions get missed.
+* RUN NOTHING: beyond fetching the diff as instructed above and reading \
+files, do NOT execute build, test, or shell commands and do NOT start \
+background tasks — this is a read-only review, not an agentic session."""
 
 # Human-readable description of the expected JSON, embedded for backends without
 # native schema enforcement (agy). Kept in sync with schema.REVIEW_SCHEMA.
@@ -99,13 +129,18 @@ def build_reviewer_task(
     3. emit the review as a SINGLE JSON object on stdout and **NOT** post it — shipit
        captures stdout and posts it as the bot through the funnel's check-run gate.
 
+    Every arm carries the shared ADR-0050 scope/context baseline
+    (``_SCOPE_AND_CONTEXT``): report only findings the diff INTRODUCED or
+    EXPOSED (pre-existing issues are out of scope), read the checkout freely
+    for context, execute nothing.
+
     ``dimension`` narrows the task to ONE **Dimension pass** (RVW02-WS04,
     ADR-0045): a focus section scopes the SEARCH to that dimension. By the
     shipped default (calibrator OFF, RVW02-WS08) the passes' union is
     MECHANICALLY deduped and posted with each pass's own severity — there is no
-    routing stage to drop out-of-scope findings, so the pass is told to report
-    only findings the PR diff INTRODUCED or EXPOSED and its stated severity is
-    the posted one. ``None`` keeps the monolithic full-scope task.
+    routing stage, so its stated severity is the posted one. The focus section
+    carries only dimension-specific narrowing; the scope rule is the shared
+    baseline above. ``None`` keeps the monolithic full-scope task.
 
     When ``schema_inline`` is True the expected JSON shape is appended in prose (for
     a backend without native schema enforcement — agy); otherwise it is omitted (codex
@@ -120,6 +155,8 @@ FIRST, get the changes: run `gh pr diff {pr_number}` to read the pull request's 
 unified diff. It uses the PR's ACTUAL base and head — do NOT assume the base is \
 `main` (a work-stream or epic PR targets its umbrella branch). Read the surrounding \
 code in this checkout for any context you need.
+
+{_SCOPE_AND_CONTEXT}
 
 Here are the custom review instructions you must follow:
 {instructions}
@@ -161,33 +198,27 @@ captures your output and posts the review."""
     return body
 
 
-def _dimension_section(
-    dimension: Dimension, *, diff_noun: str = "this PR's diff"
-) -> str:
+def _dimension_section(dimension: Dimension) -> str:
     """The focus section that narrows a reviewer task to ONE dimension pass.
 
     Scopes the SEARCH: the pass is released from budgeting across other concerns
     (that anchoring is what the fan-out removes) so it hunts ONE dimension
     exhaustively. By the shipped default (calibrator OFF, RVW02-WS08) the union
     is mechanically deduped and posted with each pass's OWN severity — there is
-    no routing stage, so the pass reports only findings the diff INTRODUCED or
-    EXPOSED (a purely pre-existing issue would otherwise post as blocking) and
-    its stated severity is the posted one. An opted-in Calibrator (ADR-0045)
-    still dedups/verifies/renormalizes what the passes report.
-
-    ``diff_noun`` names the diff being reviewed — ``"this PR's diff"`` on the
-    live path, ``"this range's diff"`` on the offline replay (RVW03-WS01, where
-    there is no PR) — so the two arms' pass prompts are byte-identical except
-    where the target genuinely differs.
+    no routing stage, so its stated severity is the posted one. An opted-in
+    Calibrator (ADR-0045) still dedups/verifies/renormalizes what the passes
+    report. The section carries ONLY dimension-specific narrowing (category
+    ownership); the diff-introduced-or-exposed scope rule is the shared
+    ``_SCOPE_AND_CONTEXT`` baseline every arm carries (ADR-0050), not a private
+    rule of this pass — so the live and range arms' pass prompts are
+    byte-identical here, differing only in how each fetches its diff.
     """
     return f"""\
 DIMENSION FOCUS — {dimension.title}: this review is ONE scoped pass of a \
 parallel fan-out; other passes cover the other dimensions, and their union is \
 mechanically deduped and posted with each pass's own severity. \
 Hunt EXHAUSTIVELY and ONLY for: {dimension.focus}
-Report ONLY findings {diff_noun} INTRODUCED or EXPOSED — a purely \
-pre-existing issue outside the diff is out of scope here and must not be \
-posted. Your stated severity is the posted severity. Do not pad with findings \
+Your stated severity is the posted severity. Do not pad with findings \
 outside this dimension's focus."""
 
 
@@ -234,6 +265,8 @@ participates in — even when they lie OUTSIDE the diff. A local fix that breaks
 distant invariant is exactly what an incremental review must still catch; a \
 raw-hunk-only pass would miss it. Open the surrounding and cross-file source \
 freely.
+
+{_SCOPE_AND_CONTEXT}
 
 Here are the custom review instructions you must follow:
 {instructions}
@@ -295,9 +328,10 @@ def build_range_reviewer_task(
 
     ``dimension`` narrows the task to ONE **Dimension pass** exactly as on the
     PR task (RVW03-WS01: the offline fan-out replay launches this once per
-    configured dimension) — the SAME focus section, its diff noun the range's —
-    so a replayed pass prompt differs from the live one only in how the diff is
-    fetched. ``None`` keeps the monolithic full-scope task.
+    configured dimension) — the SAME focus section, and the SAME shared scope
+    baseline (ADR-0050) — so a replayed pass prompt differs from the live one
+    only in how the diff is fetched. ``None`` keeps the monolithic full-scope
+    task.
     ``schema_inline`` follows the same backend split as the PR task.
     """
     body = f"""\
@@ -308,6 +342,8 @@ range of this repository — there is NO pull request involved.
 FIRST, get the changes: run `git diff {base_sha}..{head_sha}` to read the range's \
 unified diff. Read the surrounding code in this checkout for any context you need. \
 Do NOT call `gh` — this review is offline and touches nothing on GitHub.
+
+{_SCOPE_AND_CONTEXT}
 
 Here are the custom review instructions you must follow:
 {instructions}
@@ -342,7 +378,7 @@ otherwise publish it; just emit the JSON and stop. shipit captures your output a
 records it locally."""
 
     if dimension is not None:
-        section = _dimension_section(dimension, diff_noun="this range's diff")
+        section = _dimension_section(dimension)
         body = f"{body}\n\n{section}"
     if schema_inline:
         body = f"{body}\n\n{_SCHEMA_PROSE}\n\n{_JSON_VALIDITY_INSTRUCTION}"
