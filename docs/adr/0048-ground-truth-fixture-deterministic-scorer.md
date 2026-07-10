@@ -8,7 +8,7 @@ fixture**: a corpus of pinned historical PR ranges whose labels carry provenance
 (a fix commit, a maintainer-confirmed thread, or a banked adjudication), scored
 by a **fully deterministic scorer** — same file, line within the label's range,
 normalized claim-token overlap. No LLM is ever part of the measuring
-instrument: a mis-judging semantic matcher is the RVW02 calibrator failure
+instrument: a misjudging semantic matcher is the RVW02 calibrator failure
 reproduced one level up, in the ruler itself. An LLM matcher may be a *cell
 under test*, never the scorer.
 

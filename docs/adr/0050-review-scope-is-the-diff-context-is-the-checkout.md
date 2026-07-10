@@ -11,7 +11,7 @@ anything; run nothing.**
 
 Scope: only findings the PR's diff introduced or exposed may be posted; purely
 pre-existing issues route out-of-scope (the archetypal disposition of
-ADR-0045) toward the Opportunity seam, for single-pass exactly as for
+ADR-0045) toward the Opportunity store, for single-pass exactly as for
 dimension passes. Context: reading callers, definitions, and neighboring code
 in the checkout is encouraged — ADR-0045 already mandates
 dependency-neighborhood reading because raw-hunk review is the documented
