@@ -178,6 +178,14 @@ def test_lab_run_long_form_help_leaf_allows_trailing_options(capsys):
     assert "2 executed, 0 reused" not in out
 
 
+def test_lab_run_long_form_help_leaf_allows_leading_options(capsys):
+    rc = cli.main(["lab", "run", "--force", "help"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "`shipit lab run CELL` executes" in out
+    assert "2 executed, 0 reused" not in out
+
+
 def test_lab_run_click_help_stays_terse():
     from shipit.verbs.lab import run as run_verb
 
@@ -198,6 +206,14 @@ def test_lab_report_long_form_help_leaf(capsys):
 
 def test_lab_report_long_form_help_leaf_allows_trailing_options(capsys):
     rc = cli.main(["lab", "report", "help", "--fixture", "fixture.toml"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "`shipit lab report CELL` renders" in out
+    assert "deterministic and token-free" in out
+
+
+def test_lab_report_long_form_help_leaf_allows_leading_options(capsys):
+    rc = cli.main(["lab", "report", "--fixture", "fixture.toml", "help"])
     assert rc == 0
     out = capsys.readouterr().out
     assert "`shipit lab report CELL` renders" in out

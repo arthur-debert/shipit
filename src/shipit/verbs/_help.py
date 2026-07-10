@@ -38,8 +38,8 @@ class HelpableCommand(click.Command):
     """A leaf command that reserves leading ``help`` for long-form help.
 
     ``shipit lab run CELL`` is intentionally still a leaf command, not a group.
-    This shim intercepts leading ``help`` before Click treats it as CELL, while
-    leaving every other CELL value untouched.
+    This shim intercepts a first positional ``help`` before Click treats it as
+    CELL, while leaving every other CELL value untouched.
     """
 
     def __init__(self, *args, help_package: str, help_resource: str, **kwargs) -> None:
@@ -48,7 +48,24 @@ class HelpableCommand(click.Command):
         self.help_resource = help_resource
 
     def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
-        if not ctx.resilient_parsing and args and args[0] == "help":
+        if (
+            not ctx.resilient_parsing
+            and self._first_positional_arg(ctx, args) == "help"
+        ):
             click.echo(load_help_text(self.help_package, self.help_resource), nl=False)
             ctx.exit()
         return super().parse_args(ctx, args)
+
+    def _first_positional_arg(self, ctx: click.Context, args: list[str]) -> str | None:
+        parser = self.make_parser(ctx)
+        try:
+            opts, _, _ = parser.parse_args(args=list(args))
+        except click.ClickException:
+            return None
+        for param in self.get_params(ctx):
+            if isinstance(param, click.Argument):
+                value = opts.get(param.name)
+                if isinstance(value, (tuple, list)):
+                    return value[0] if value else None
+                return value
+        return None
