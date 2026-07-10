@@ -93,35 +93,35 @@ def from_claude_envelope(envelope: Mapping[str, Any]) -> TokenUsage:
     ``input + output + cache_read + cache_creation`` — every token the run
     consumed, the same fold the transcript extractor's convention uses for the
     prompt side. A malformed/absent block degrades to :data:`UNREPORTED`
-    (never a guessed number). A counter that is PRESENT but corrupt (a bool, a
-    negative, a non-int) is a shape-drift signal for the whole block, not an
-    absent field: it poisons the measurement to :data:`UNREPORTED` rather than
-    folding in as a partial (undercounted) total — an absent counter is simply
-    left out of the sum.
+    (never a guessed number). The drift rule, so a partial never masquerades as
+    a real measurement:
+
+    - ``input_tokens`` and ``output_tokens`` are BOTH REQUIRED — the probed
+      envelope always carries both, so either one absent (or present-but-corrupt:
+      a bool, a negative, a non-int) is shape drift → :data:`UNREPORTED`, never a
+      one-sided partial total.
+    - the cache counters are OPTIONAL (legitimately omitted when nothing was
+      cached): absent → left out of the sum; present-but-corrupt → drift →
+      :data:`UNREPORTED`.
     """
     usage = envelope.get("usage")
     if not isinstance(usage, Mapping):
         return UNREPORTED
-    counts: dict[str, int] = {}
-    for key in (
-        "input_tokens",
-        "output_tokens",
-        "cache_read_input_tokens",
-        "cache_creation_input_tokens",
-    ):
+    input_tokens = _int_or_none(usage.get("input_tokens"))
+    output_tokens = _int_or_none(usage.get("output_tokens"))
+    # a missing/corrupt REQUIRED counter is drift — degrade, never undercount
+    if input_tokens is None or output_tokens is None:
+        return UNREPORTED
+    cache_total = 0
+    for key in ("cache_read_input_tokens", "cache_creation_input_tokens"):
         if key not in usage:
             continue  # absent → not summed (legitimately omitted, e.g. no cache)
         value = _int_or_none(usage[key])
         if value is None:
             return UNREPORTED  # present but corrupt — the block is untrustworthy
-        counts[key] = value
-    input_tokens = counts.get("input_tokens")
-    output_tokens = counts.get("output_tokens")
-    if input_tokens is None and output_tokens is None:
-        return UNREPORTED
-    total = sum(counts.values())
+        cache_total += value
     return TokenUsage(
-        total_tokens=total,
+        total_tokens=input_tokens + output_tokens + cache_total,
         source=SOURCE_CLAUDE_ENVELOPE,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
