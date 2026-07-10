@@ -1,5 +1,18 @@
 # Dimension-scoped fan-out with a single calibrator; severity-scoped finders rejected
 
+> **Amended by RVW02-WS08 (F2, #665).** The verification floor is
+> REPRODUCTION-based: the calibrator drops a finding ONLY when adversarial
+> verification actively REFUTES it (misquoted or fabricated evidence, code that
+> does not behave as the finding claims, a failure that cannot occur) — never on
+> mere uncertainty or imperfect phrasing — and a finding that reproduces is
+> kept, never downgraded. The "or the finding is dropped" wording in the
+> original decision below predates this and is superseded: quoted evidence and
+> the tier-appropriate rationale (concrete failure scenario for major-or-worse,
+> a rationale for minor/nit) are still required, but a candidate that clears
+> those and reproduces is not dropped for want of a perfect justification. The
+> A/B evidence (WS05, #638) found the pre-amendment floor over-pruned
+> reproducible true positives.
+
 A local-agent reviewer's first review of a PR is no longer one monolithic
 "find everything" pass: the detached review run fans out into parallel
 **dimension passes** (correctness, cross-file invariants, security/robustness,

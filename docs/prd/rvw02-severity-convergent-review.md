@@ -177,8 +177,9 @@ predictable cost:
   claude backend at high ReasoningLevel) shared by all reviewers — dedups,
   adversarially verifies with tier-appropriate evidence (quoted evidence
   always; a concrete failure scenario for major-or-worse, a clear rationale
-  for minor/nit; any finding that fails verification is dropped, never
-  downgraded), normalizes severity, orders the result, assigns dispositions.
+  for minor/nit; a finding is dropped only when adversarial verification
+  actively refutes it — never on mere uncertainty — and never downgraded;
+  F2 #665), normalizes severity, orders the result, assigns dispositions.
   It never originates findings. The reviewer's own bot posts the calibrated
   result; funnel/reconcile semantics are unchanged.
 - **Incremental rounds** (ADR-0045): rounds after the first review

@@ -29,6 +29,7 @@ from shipit.review.backends import BackendError, BackendUnavailable
 from shipit.review.calibrator import (
     CalibrationContractError,
     CalibratorConfig,
+    build_calibrator_task,
     parse_calibration,
     run_calibrator,
 )
@@ -201,6 +202,31 @@ def test_post_without_evidence_flips_to_drop_unverified():
     assert result.entries[0].disposition is Disposition.DROP_UNVERIFIED
     # Severity untouched: dropped, never downgraded.
     assert result.entries[0].finding.severity is Severity.MINOR
+
+
+# --- build_calibrator_task: the F2 reproduction-based verification floor -------
+#
+# The calibrator's WISDOM is not unit-tested (the A/B harness measures that),
+# but the PROMPT's verification-floor framing is a contract the F2 fix
+# (RVW02-WS08, #665) turns on: drop only on active REFUTATION, never on mere
+# uncertainty. A regression that reverts the prompt to "prove-it-or-drop" would
+# silently reintroduce the true-positive over-pruning, so pin the framing.
+
+
+def test_calibrator_task_drops_only_on_refutation_not_uncertainty():
+    task = build_calibrator_task("[]", pr_number=42)
+    lowered = task.lower()
+    # The drop test is reproduction/refutation, not failure-to-justify.
+    assert "refute" in lowered
+    assert "reproduces" in lowered
+    assert 'drop-unverified" only when you can actively refute' in lowered
+    # Uncertainty is explicitly NOT grounds to drop a reproducing finding.
+    assert "not grounds to drop" in lowered
+    # The preserved-discipline invariants stay: evidence always, concrete
+    # failure scenario for major+, never downgrade.
+    assert "evidence" in lowered
+    assert "concrete failure scenario" in lowered
+    assert "never downgrade" in lowered
 
 
 # --- run_calibrator: the launch seam -------------------------------------------

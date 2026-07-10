@@ -5,8 +5,11 @@ The **Calibrator** takes the UNION of a reviewer's parallel **Dimension pass**
 findings and: dedups (merging duplicates into one canonical finding),
 adversarially verifies each finding with tier-appropriate evidence (quoted
 evidence always; a concrete failure scenario for major-or-worse, a clear
-rationale for minor/nit — a finding that fails verification is DROPPED, never
-downgraded), normalizes **Severity** onto the shared ladder, and assigns every
+rationale for minor/nit). Its verification floor is REPRODUCTION-based
+(RVW02-WS08, F2 #665): a finding is DROPPED only when adversarial verification
+actively REFUTES it — never merely because the judge is unsure — and a
+reproducing finding is kept, never downgraded. It then normalizes **Severity**
+onto the shared ladder, and assigns every
 judged finding a **Disposition**. It NEVER originates findings — a judge that
 also finds is a monolithic reviewer again, with the anchoring bias the fan-out
 exists to remove.
@@ -201,11 +204,16 @@ shape — no prose, no markdown fences, nothing before or after it):
 def build_calibrator_task(candidates_json: str, pr_number: int) -> str:
     """Compose the calibrator task: judge ``candidates_json`` for PR ``pr_number``.
 
-    The judge contract, verbatim from ADR-0045: never originate; dedup by
+    The judge contract (ADR-0045, its verification floor amended by
+    RVW02-WS08/F2 #665): never originate; dedup by
     merging (``merged`` ids); adversarially verify with tier-appropriate
     evidence (quoted evidence always; a concrete failure scenario for
-    major-or-worse, a clear rationale for minor/nit; failed verification →
-    ``drop-unverified``, never a downgrade); route pre-existing / beyond-diff
+    major-or-worse, a clear rationale for minor/nit). The verification floor is
+    REPRODUCTION-based (RVW02-WS08, F2 #665): a finding is dropped
+    ``drop-unverified`` only when it is actively REFUTED (misquoted evidence,
+    code that does not behave as claimed, a failure that cannot occur), never
+    merely because the judge is unsure or cannot phrase a perfect rationale — a
+    finding that reproduces is kept, never downgraded. Route pre-existing / beyond-diff
     findings ``out-of-scope``; normalize severity on the merge-block ruler;
     cover EVERY candidate id exactly once (own ``id`` or another entry's
     ``merged``). ``candidates_json`` is the union as a JSON array of
@@ -237,15 +245,21 @@ must be a candidate id, and any new issue you spot is out of your mandate.
 issue, keep the best-located, best-argued one and list the others' ids in its \
 "merged" array. A merged id must not appear as its own entry.
 3. ADVERSARIALLY VERIFY each kept candidate against the actual code: try to \
-refute it. Every verified finding needs the quoted code it rests on in \
-"evidence" (quote it from this checkout — verify the pass quoted it \
-faithfully). A finding you judge major or critical must state a CONCRETE \
-FAILURE SCENARIO in its "text" (what inputs/state make it go wrong, and what \
-happens); a minor or nit needs a clear rationale. A candidate that fails \
-verification — you cannot back it with quoted evidence and a tier-appropriate \
-justification — gets disposition "drop-unverified". NEVER downgrade a \
-finding's severity to keep it: verify it at the severity it deserves or drop \
-it.
+REFUTE it — trace the code and try to construct the failure it claims. The \
+drop test is REPRODUCTION, not eloquence: a candidate gets disposition \
+"drop-unverified" ONLY when you can actively refute it — its quoted evidence \
+is misquoted or fabricated, the code does not behave as the finding claims, or \
+the failure it describes cannot occur (it is guarded, unreachable, or \
+contradicted by the surrounding code). A candidate whose failure REPRODUCES \
+against the real code is verified and KEPT — keep it even if you would have \
+worded or argued it differently; being unsure, or being unable to phrase a \
+perfect rationale, is NOT grounds to drop a finding that reproduces. Every \
+kept finding needs the quoted code it rests on in "evidence" (quote it from \
+this checkout — verify the pass quoted it faithfully). A finding you judge \
+major or critical must state a CONCRETE FAILURE SCENARIO in its "text" (what \
+inputs/state make it go wrong, and what happens); a minor or nit needs a clear \
+rationale. NEVER downgrade a finding's severity to keep it: verify it at the \
+severity it deserves, or — only when you have actually refuted it — drop it.
 4. Route scope: a verified finding that is beyond this PR's diff — a \
 pre-existing issue the passes were allowed to report — gets disposition \
 "out-of-scope" (it is persisted, not posted). Everything verified and \
