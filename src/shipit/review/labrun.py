@@ -492,15 +492,14 @@ def _run_point(
         )
     else:
         launch_text = base_text
-    fd, instructions_path = tempfile.mkstemp(
-        prefix=f"lab-{cell.id}-", suffix=".txt", text=True
-    )
-    # The `try` opens BEFORE the write: mkstemp already created the file on
-    # disk, so a failing `os.fdopen`/`fh.write` (encoding error, full disk) must
-    # still hit the `finally` that unlinks it — otherwise the temp leaks.
+    fd, instructions_path = tempfile.mkstemp(prefix=f"lab-{cell.id}-", suffix=".txt")
+    # Close the raw fd at once and write by path: os.fdopen takes ownership of
+    # the fd only on success, so writing through it would leak the fd if fdopen
+    # itself raised. mkstemp already created the file (0600, ours), so the
+    # `finally` unlinks it whether the write or the run fails — no temp leaks.
+    os.close(fd)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(launch_text)
+        Path(instructions_path).write_text(launch_text, encoding="utf-8")
         if cell.shape == "fanout":
             return replay_mod.run_fanout_replay(
                 backend,
