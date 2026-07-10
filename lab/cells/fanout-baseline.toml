@@ -1,0 +1,29 @@
+# Demo CONTROL cell (ADR-0049; format: lab/README.md "Cells").
+# The union baseline: the shipped dimension fan-out, mechanical dedup, blind
+# sweeps — the arm every treatment cell names as `baseline` and differs from
+# on exactly one declared axis. A control is its own baseline and declares
+# axis = "control".
+
+schema = 1
+id = "fanout-baseline"
+baseline = "fanout-baseline"
+axis = "control"
+description = "Union baseline: shipped fan-out, mechanical dedup, blind K=2 sweeps over the three human-confirmed RVW02 pins."
+
+[fixture]
+version = 1
+prs = ["core-440", "app-391", "lex-820"]
+
+[pipeline]
+shape = "fanout"
+dedup = "mechanical"
+
+[invocation]
+backend = "codex"
+model = "pro"
+timeout = "600s"
+
+[sweeps]
+count = 2
+mode = "blind"
+replicates = 1

@@ -22,10 +22,14 @@ transcript/run_id join), and the ReasoningLevel actually applied to argv.
 report``'s review axis reads that token cost straight from the record. The
 record also carries its own review-instructions **Variant**
 (``round.variant``), the experiment-arm handle a review-prompt A/B groups by.
-Since RVW03-WS02 it further carries ``round.id`` / ``round.artifacts`` (the
-round's per-run artifact-bundle location, :mod:`shipit.review.artifacts`) and
-each finding's originating ``run_id``, so a posted finding traces back to the
-pass → prompt → raw output that emitted it.
+Since RVW03-WS02 the record also carries ``round.id`` / ``round.artifacts``
+(the round's per-run artifact-bundle location,
+:mod:`shipit.review.artifacts`) and each finding's originating ``run_id``, so
+a posted finding traces back to the pass → prompt → raw output that emitted it.
+Since RVW03-WS07 a ``lab run`` round additionally carries ``round.cell`` — the
+experiment **Cell** tag (cell id + the full idempotency key,
+:func:`shipit.review.cell.run_key`) that makes banked cell results
+reusable-by-key and curve-reportable (``None`` on every non-cell round).
 
 Dispositions are the Opportunity-harvest seam: the record ALWAYS carries every
 judged finding WITH its disposition — routed-out (dropped) findings included,
@@ -68,7 +72,10 @@ from .schema import finding_from_dict
 #: join) with a real ``round.usage.total_tokens`` summed from it, plus
 #: ``round.runs[].reasoning`` as a stamp of the argv ACTUALLY used (absent = no
 #: level applied), never an echoed config value.
-SCHEMA_VERSION = 3
+#: 4 added ``round.cell`` — the experiment Cell tag a ``lab run`` stamps
+#: (cell id + full idempotency key, :func:`shipit.review.cell.run_key`;
+#: ``None`` for every non-cell round), RVW03-WS07.
+SCHEMA_VERSION = 4
 
 
 def dispositioned(
@@ -117,6 +124,7 @@ def build(
     total_tokens: int | None = None,
     round_id: str | None = None,
     artifacts_dir: str | None = None,
+    cell: Mapping[str, Any] | None = None,
     timestamp: str,
 ) -> dict[str, Any]:
     """Assemble the review-round record — one JSONL line per review round. PURE.
@@ -140,6 +148,10 @@ def build(
     (RVW03-WS02) are the round's identity and the directory its per-run artifact
     bundles live under — ``round.id`` / ``round.artifacts``, what makes a round's
     bundles discoverable from its record (``None`` for a pipeline with no bundles).
+    ``cell`` (RVW03-WS07) is the experiment Cell tag a ``lab run`` stamps — the
+    cell id + the full idempotency key (:func:`shipit.review.cell.run_key`), what
+    makes a banked record reusable-by-key and curve-reportable; ``None`` (every
+    non-cell round) leaves ``round.cell`` null.
     """
     summary = review.get("summary") or {}
     if not isinstance(summary, Mapping):
@@ -163,6 +175,7 @@ def build(
             "instructions_path": instructions_path,
         },
         "round.variant": dict(variant) if variant is not None else None,
+        "round.cell": dict(cell) if cell is not None else None,
         "round.runs": [dict(run) for run in runs],
         "round.usage": {"duration_ms": duration_ms, "total_tokens": total_tokens},
     }
@@ -213,6 +226,7 @@ def record_round(
     total_tokens: int | None = None,
     round_id: str | None = None,
     artifacts_dir: str | None = None,
+    cell: Mapping[str, Any] | None = None,
     base_dir: Path | None = None,
     env: Mapping[str, str] | None = None,
 ) -> Path:
@@ -238,7 +252,9 @@ def record_round(
     token total (RVW03-WS04 — ``None`` = no run reported usage, the latency-only
     marker). ``round_id`` / ``artifacts_dir`` (RVW03-WS02) land as ``round.id`` /
     ``round.artifacts`` — the round's identity and its bundles' location, so the
-    artifact trail is discoverable from the record.
+    artifact trail is discoverable from the record. ``cell`` (RVW03-WS07) lands
+    as ``round.cell`` — the ``lab run`` experiment tag (cell id + the full
+    idempotency key); ``None`` for every non-cell round.
 
     RAISES on failure (a malformed slug, an unreadable instructions file, an
     unwritable store): the caller owns the failure posture — the review-path tee
@@ -267,6 +283,7 @@ def record_round(
         total_tokens=total_tokens,
         round_id=round_id,
         artifacts_dir=artifacts_dir,
+        cell=cell,
         timestamp=_now_iso(),
     )
     return append_record(record, repo, base_dir, kind=REVIEW_ROUNDS_KIND)

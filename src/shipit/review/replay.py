@@ -35,8 +35,9 @@ from __future__ import annotations
 import logging
 import time
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import Any
 
 from .. import execrun, git, identity
 from ..agent.backend import Backend
@@ -176,6 +177,7 @@ def run_replay(
     model: str = "pro",
     timeout: str = "600s",
     instructions_path: str | None = None,
+    cell: Mapping[str, Any] | None = None,
     launcher=None,
     base_dir: Path | None = None,
 ) -> dict:
@@ -189,9 +191,12 @@ def run_replay(
     "record_path": …}`` so the
     verb can render what was found and where the record landed. The record
     write PROPAGATES on failure — it is the product here, not telemetry (the
-    review-path tee is the fail-open twin). ``base_dir`` overrides the store
-    family root (tests) — the per-run artifact bundle (below) roots under the
-    SAME injected family root; ``launcher`` injects the launch seam (tests).
+    review-path tee is the fail-open twin). ``cell`` (RVW03-WS07) is the
+    experiment Cell tag the lab runner stamps onto the record's ``round.cell``
+    (cell id + idempotency key; ``None`` for a plain replay). ``base_dir``
+    overrides the store family root (tests) — the per-run artifact bundle
+    (below) roots under the SAME injected family root; ``launcher`` injects
+    the launch seam (tests).
 
     OBSERVABILITY (RVW03-WS02): the replay's single range pass is a review
     sub-agent run like any other, so it too persists a per-run artifact bundle
@@ -270,6 +275,7 @@ def run_replay(
         total_tokens=captured.usage.total_tokens,
         round_id=round_id,
         artifacts_dir=str(round_dir) if round_dir is not None else None,
+        cell=cell,
         base_dir=base_dir,
     )
     logger.info(
@@ -294,6 +300,8 @@ def run_fanout_replay(
     dimensions: Sequence[str] | None = None,
     calibrator: CalibratorConfig | None = None,
     nit_cap: int | None = None,
+    invocation_overrides: Mapping[str, Mapping[str, str]] | None = None,
+    cell: Mapping[str, Any] | None = None,
     launcher: launch.Runner | None = None,
     base_dir: Path | None = None,
 ) -> dict:
@@ -318,7 +326,12 @@ def run_fanout_replay(
 
     Returns ``{"review": …, "record_path": …}`` and PROPAGATES a record-write
     failure, both exactly as the single-pass arm does (the record is the
-    product). ``base_dir`` overrides the store family root (tests); ``launcher``
+    product). ``invocation_overrides`` (RVW03-WS07) are the experiment-only
+    per-dimension Invocation overrides (``{dimension name: {"model"/"timeout":
+    …}}``) threaded to the orchestrator — a lab-cell capability, never Roster
+    configuration (ADR-0049); ``cell`` is the Cell tag stamped onto the
+    record's ``round.cell`` (cell id + idempotency key; ``None`` for a plain
+    replay). ``base_dir`` overrides the store family root (tests); ``launcher``
     injects the launch seam (tests).
     """
     if calibrator is not None:
@@ -347,6 +360,7 @@ def run_fanout_replay(
         dimensions=dimensions,
         calibrator=calibrator,
         nit_cap=nit_cap,
+        invocation_overrides=invocation_overrides,
         launcher=launcher,
         artifacts_base_dir=base_dir,
     )
@@ -366,6 +380,7 @@ def run_fanout_replay(
         duration_ms=duration_ms,
         round_id=outcome.round_id,
         artifacts_dir=outcome.artifacts_dir,
+        cell=cell,
         base_dir=base_dir,
     )
     logger.info(
