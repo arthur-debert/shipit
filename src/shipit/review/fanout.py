@@ -114,11 +114,12 @@ class _PassResult:
 
 #: The shipped cheaper **ReasoningLevel** an INCREMENTAL round's single pass runs
 #: at (RVW02-WS06, ADR-0045). Round 1 is exhaustive; rounds after it review only
-#: the fix range, so they run cheaper. Like the calibrator's reasoning, this is
-#: config + RECORD today, not an argv flag (no CLI carries a reasoning knob) — it
-#: is stamped on the incremental pass's run entry so the review-round record shows
-#: the round ran at the cheaper level. A repo overrides it via the
-#: ``incremental_reasoning`` key in its ``[reviewers]`` table.
+#: the fix range, so they run cheaper. This is a RECORD-only constant, not an argv
+#: flag (no CLI carries a reasoning knob) — it is stamped on the incremental pass's
+#: run entry so the review-round record shows the round ran at the cheaper level.
+#: :func:`run_fanout_review` takes it as an argument (defaulting here), but no
+#: ``[reviewers]`` config key wires it and the service never overrides the default;
+#: moving it today means changing this constant.
 DEFAULT_INCREMENTAL_REASONING = "low"
 
 #: The synthetic **Dimension** an INCREMENTAL round's single pass carries so it

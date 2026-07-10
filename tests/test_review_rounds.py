@@ -15,7 +15,7 @@ from types import SimpleNamespace
 from shipit.identity import Sha
 from shipit.review import roundrecord, rounds
 
-MB = Sha("a" * 40)  # merge base
+BASE = Sha("a" * 40)  # the PR base ref tip (baseRefOid), not the merge base
 OLD = Sha("b" * 40)  # an earlier reviewed head
 NEW = Sha("c" * 40)  # the head now under review
 
@@ -25,16 +25,16 @@ NEW = Sha("c" * 40)  # the head now under review
 
 def test_first_round_has_no_prior_head_and_is_full():
     plan = rounds.decide_round(
-        merge_base=MB, new_head=NEW, last_reviewed_head=None, last_is_ancestor=False
+        base_ref=BASE, new_head=NEW, last_reviewed_head=None, last_is_ancestor=False
     )
     assert plan.incremental is False
-    assert plan.base == MB and plan.head == NEW
+    assert plan.base == BASE and plan.head == NEW
     assert plan.fallback_reason is None  # a first round is not a fallback
 
 
 def test_ancestor_prior_head_is_an_incremental_fix_range():
     plan = rounds.decide_round(
-        merge_base=MB, new_head=NEW, last_reviewed_head=OLD, last_is_ancestor=True
+        base_ref=BASE, new_head=NEW, last_reviewed_head=OLD, last_is_ancestor=True
     )
     assert plan.incremental is True
     assert plan.base == OLD and plan.head == NEW  # the fix range
@@ -43,23 +43,24 @@ def test_ancestor_prior_head_is_an_incremental_fix_range():
 
 def test_force_push_non_ancestor_falls_back_to_a_full_round():
     # A rebase/force-push rewrote history: the old head is no longer an ancestor,
-    # so the incremental premise is void → a full round over the merge base, with
-    # the reason recorded so the over-review is explained.
+    # so the incremental premise is void → a full round (base carries the base ref
+    # tip, stamped not re-diffed), with the reason recorded so the over-review is
+    # explained.
     plan = rounds.decide_round(
-        merge_base=MB, new_head=NEW, last_reviewed_head=OLD, last_is_ancestor=False
+        base_ref=BASE, new_head=NEW, last_reviewed_head=OLD, last_is_ancestor=False
     )
     assert plan.incremental is False
-    assert plan.base == MB and plan.head == NEW
+    assert plan.base == BASE and plan.head == NEW
     assert plan.fallback_reason and "not an ancestor" in plan.fallback_reason
 
 
 def test_prior_head_equal_to_new_head_is_a_full_round():
     # A re-review of the exact same head has no fix range → full round (defensive).
     plan = rounds.decide_round(
-        merge_base=MB, new_head=NEW, last_reviewed_head=NEW, last_is_ancestor=True
+        base_ref=BASE, new_head=NEW, last_reviewed_head=NEW, last_is_ancestor=True
     )
     assert plan.incremental is False
-    assert plan.base == MB
+    assert plan.base == BASE
 
 
 # --- planable gate ----------------------------------------------------------
@@ -67,12 +68,12 @@ def test_prior_head_equal_to_new_head_is_a_full_round():
 
 def test_planable_true_only_with_all_fields():
     full = SimpleNamespace(
-        base_sha=MB, head_sha=NEW, repo="acme/widget", workdir="/wd", number=1
+        base_sha=BASE, head_sha=NEW, repo="acme/widget", workdir="/wd", number=1
     )
     assert rounds.planable(full) is True
     bare = SimpleNamespace(diff="d", workdir="/wd", number=1, head_ref="b")
     assert rounds.planable(bare) is False
-    no_repo = SimpleNamespace(base_sha=MB, head_sha=NEW, repo=None, workdir="/wd")
+    no_repo = SimpleNamespace(base_sha=BASE, head_sha=NEW, repo=None, workdir="/wd")
     assert rounds.planable(no_repo) is False
 
 
@@ -80,7 +81,9 @@ def test_planable_true_only_with_all_fields():
 
 
 def _view(**kw):
-    base = dict(base_sha=MB, head_sha=NEW, repo="acme/widget", workdir="/wd", number=7)
+    base = dict(
+        base_sha=BASE, head_sha=NEW, repo="acme/widget", workdir="/wd", number=7
+    )
     base.update(kw)
     return SimpleNamespace(**base)
 
@@ -90,7 +93,7 @@ def _record_prior_head(tmp_path, *, pr=7, reviewer="codex", head=str(OLD)):
         {"summary": {"status": "COMMENT"}, "comments": []},
         repo_slug="acme/widget",
         pr=pr,
-        base_sha=str(MB),
+        base_sha=str(BASE),
         head_sha=head,
         reviewer=reviewer,
         model="pro",

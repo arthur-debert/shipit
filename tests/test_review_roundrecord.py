@@ -372,6 +372,61 @@ def test_generate_review_incremental_rescopes_and_records_the_fix_range(
     assert kw["base_sha"] == "d" * 40 and kw["head_sha"] == "b" * 40
 
 
+def test_generate_review_force_push_fallback_keeps_full_range(monkeypatch, tmp_path):
+    # RVW02-WS06 wiring: a rebase/force-push plan (incremental=False with a
+    # fallback_reason) must NOT rescope — generate_review runs the fan-out in FULL
+    # mode over the resolved view and the tee records the full base..head range,
+    # exactly like round 1. The incremental test above only covers the incremental
+    # plan at this seam; this pins the fallback branch here too, so a regression
+    # that rescoped or narrowed a fallback round would fail.
+    from shipit.agent import backend as agent_backend
+    from shipit.identity import Sha
+    from shipit.review import service
+    from shipit.review.rounds import RoundPlan
+
+    monkeypatch.setattr(
+        service.rounds,
+        "plan_for_view",
+        lambda c, reviewer, **kw: RoundPlan(
+            incremental=False,
+            base=Sha("a" * 40),
+            head=Sha("b" * 40),
+            fallback_reason="last-reviewed head is not an ancestor (force-push)",
+        ),
+    )
+    rescoped: list = []
+    monkeypatch.setattr(
+        service.diff,
+        "rescoped_view",
+        lambda view, base: rescoped.append(base) or view,
+    )
+    captured: dict = {}
+    monkeypatch.setattr(
+        service.fanout,
+        "run_fanout_review",
+        lambda backend, c, **kw: (
+            captured.update(incremental=kw.get("incremental"), base=c.base_sha)
+            or service.fanout.FanoutOutcome(
+                review={"summary": {"status": "COMMENT"}, "comments": []},
+                findings=(),
+                runs=(),
+            )
+        ),
+    )
+    written = []
+    monkeypatch.setattr(
+        service.roundrecord,
+        "record_round",
+        lambda r, **kw: written.append(kw) or tmp_path / "s",
+    )
+    service.generate_review(agent_backend.CODEX, _tee_ctx())
+    assert rescoped == []  # a full/fallback round never rescopes the view
+    assert captured["incremental"] is False  # the fan-out runs the FULL round
+    assert captured["base"] == "a" * 40  # over the resolved view's full range
+    [kw] = written
+    assert kw["base_sha"] == "a" * 40 and kw["head_sha"] == "b" * 40
+
+
 def test_tee_failure_is_fail_open_and_never_degrades_the_review(monkeypatch, caplog):
     from shipit.agent import backend as agent_backend
     from shipit.review import service

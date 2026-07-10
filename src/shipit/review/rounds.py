@@ -11,8 +11,8 @@ The decision splits into a PURE core and a thin I/O orchestration, the
 value-objects-functional-core split (ADR-0021):
 
   * :func:`decide_round` is PURE — a :class:`RoundPlan` is a function of
-    (merge base, new head, the last head this reviewer reviewed, whether that
-    last head is still an ancestor of the new head). Unit-testable from four
+    (the PR base ref tip, new head, the last head this reviewer reviewed, whether
+    that last head is still an ancestor of the new head). Unit-testable from four
     shas and a bool; it encodes the whole policy, including the rebase/force-push
     fallback (a non-ancestor last head voids the incremental premise → a full
     round; fail toward over-reviewing).
@@ -22,14 +22,17 @@ value-objects-functional-core split (ADR-0021):
     against the checkout (:func:`shipit.git.is_ancestor`), then delegates the
     verdict to :func:`decide_round`.
 
-Both SHAs a plan needs are already known without asking GitHub: the merge base
-and new head come off the resolved :class:`~shipit.review.diff.ReviewView`, and
-the last-reviewed head is the head of this reviewer's most recent round record
-(rounds are keyed by head SHA — PRD). The plan's ``base`` is exactly the diff
-base the review runs over — the merge base for a full round (GitHub's three-dot
-"Files changed" scope), the last-reviewed head for an incremental one — so the
-round record's recorded range is correct for both shapes (WS06 acceptance: an
-incremental round records ``last-reviewed-head..new-head``).
+Both SHAs a plan needs are already known without asking GitHub: the PR's base ref
+tip (``baseRefOid``) and new head come off the resolved
+:class:`~shipit.review.diff.ReviewView` (``base_sha`` / ``head_sha``), and the
+last-reviewed head is the head of this reviewer's most recent round record (rounds
+are keyed by head SHA — PRD). ``plan.base`` is the diff base a caller re-diffs over
+ONLY for an incremental round — the last-reviewed head — so its recorded range is
+``last-reviewed-head..new-head`` (WS06 acceptance). A full round stamps the base ref
+tip on ``plan.base`` for the record but the caller never re-diffs over it: the
+resolved view already carries the full-PR diff (its own merge-base..head, computed
+in :func:`~shipit.review.diff.resolve_pr`), so ``ctx.base_sha`` here is ``baseRefOid``,
+NOT that merge base.
 """
 
 from __future__ import annotations
@@ -50,12 +53,13 @@ class RoundPlan:
     fix range.
 
     ``incremental`` is the shape: ``False`` is a full round (round 1, or a
-    fallback), reviewed as the dimension fan-out over ``base..head`` where
-    ``base`` is the PR's merge base; ``True`` is an incremental round, reviewed
-    as ONE pass over the fix range ``base..head`` where ``base`` is the
-    reviewer's last-reviewed head. ``base`` / ``head`` are therefore the exact
-    diff endpoints the round runs over in BOTH shapes — the caller re-diffs the
-    :class:`~shipit.review.diff.ReviewView` over them and records the range as-is.
+    fallback), reviewed as the dimension fan-out over the resolved view's OWN
+    full-PR diff; its ``base`` carries the PR base ref tip (``baseRefOid``) for the
+    record, but the caller does NOT re-diff over it. ``True`` is an incremental
+    round, reviewed as ONE pass over the fix range ``base..head`` where ``base`` is
+    the reviewer's last-reviewed head — here ``base`` / ``head`` ARE the diff
+    endpoints the caller re-diffs the :class:`~shipit.review.diff.ReviewView` over,
+    and the record keys the range as-is.
 
     ``fallback_reason`` is set ONLY when a round that COULD have been incremental
     (the reviewer has a prior head) was forced to a full round instead — today
@@ -73,40 +77,41 @@ class RoundPlan:
 
 def decide_round(
     *,
-    merge_base: Sha,
+    base_ref: Sha,
     new_head: Sha,
     last_reviewed_head: Sha | None,
     last_is_ancestor: bool,
 ) -> RoundPlan:
     """Decide one round's scope from its shas + the ancestry fact. PURE.
 
-    The policy, in order:
+    ``base_ref`` is the PR's base ref tip (``baseRefOid``); it is stamped on a full
+    round's ``plan.base`` for the record but is NOT used as a diff endpoint (the
+    resolved view already carries the full-PR diff). The policy, in order:
 
       * NO prior head (``last_reviewed_head is None``) — this reviewer has never
-        reviewed this PR: a full round 1 over the merge base. ``fallback_reason``
-        stays ``None`` (a first round is not a fallback).
+        reviewed this PR: a full round 1. ``fallback_reason`` stays ``None`` (a
+        first round is not a fallback).
       * The prior head EQUALS the new head — a re-review of the exact same head
         (an idempotent re-request, or a store quirk): there is no fix range to
-        review, so a full round over the merge base. (The store reader already
-        filters this out, so it is a defensive belt.)
+        review, so a full round. (The store reader already filters this out, so
+        it is a defensive belt.)
       * The prior head is NOT an ancestor of the new head
         (``not last_is_ancestor``) — a rebase or force-push rewrote history and
-        voided the incremental premise: a full round over the merge base, with
-        ``fallback_reason`` set so the over-review is explained. Fail toward
-        over-reviewing (ADR-0045).
+        voided the incremental premise: a full round, with ``fallback_reason``
+        set so the over-review is explained. Fail toward over-reviewing (ADR-0045).
       * Otherwise — the prior head is a real ancestor: an INCREMENTAL round over
-        the fix range ``last_reviewed_head..new_head``.
+        the fix range ``last_reviewed_head..new_head`` (``base`` is that prior head).
 
     ``last_is_ancestor`` is meaningful only when ``last_reviewed_head`` is set;
     the caller passes ``False`` (or anything) when it is ``None`` and the first
     branch wins first.
     """
     if last_reviewed_head is None or last_reviewed_head == new_head:
-        return RoundPlan(incremental=False, base=merge_base, head=new_head)
+        return RoundPlan(incremental=False, base=base_ref, head=new_head)
     if not last_is_ancestor:
         return RoundPlan(
             incremental=False,
-            base=merge_base,
+            base=base_ref,
             head=new_head,
             fallback_reason=(
                 f"last-reviewed head {last_reviewed_head} is not an ancestor of "
@@ -130,18 +135,20 @@ def plan_for_view(
     ``ctx``'s head in ``ctx.workdir`` (the checkout that resolved the PR, where
     both commits are present after :func:`~shipit.review.diff.resolve_pr`'s
     fetches). ``ctx`` is a resolved :class:`~shipit.review.diff.ReviewView`:
-    ``ctx.base_sha`` is the PR merge base (the full-round diff base),
-    ``ctx.head_sha`` the new head, ``ctx.repo`` the store key, ``ctx.number`` the
-    PR. Callers gate on :func:`planable` first, so ``ctx`` here always carries a
+    ``ctx.base_sha`` is the PR base ref tip (``baseRefOid``, NOT the merge base —
+    the view's own full-PR diff is computed over a separate merge base in
+    :func:`~shipit.review.diff.resolve_pr`), ``ctx.head_sha`` the new head,
+    ``ctx.repo`` the store key, ``ctx.number`` the PR. Callers gate on
+    :func:`planable` first, so ``ctx`` here always carries a
     base sha, head sha, repo, and workdir; a resolved PR with no repo history
     (``ctx.repo`` None on a hand-built view) still plans a full round — the honest
     default. ``base_dir`` overrides the store root (tests).
     """
     new_head = _as_sha(ctx.head_sha)
-    merge_base = _as_sha(ctx.base_sha)
+    base_ref = _as_sha(ctx.base_sha)
     repo_slug = ctx.repo
     if not repo_slug:
-        return RoundPlan(incremental=False, base=merge_base, head=new_head)
+        return RoundPlan(incremental=False, base=base_ref, head=new_head)
 
     raw_last = roundrecord.last_reviewed_head(
         repo_slug=repo_slug,
@@ -151,7 +158,7 @@ def plan_for_view(
         base_dir=base_dir,
     )
     if raw_last is None:
-        return RoundPlan(incremental=False, base=merge_base, head=new_head)
+        return RoundPlan(incremental=False, base=base_ref, head=new_head)
     try:
         last_head = Sha(raw_last)
     except ValueError:
@@ -164,11 +171,11 @@ def plan_for_view(
             ctx.number,
             reviewer,
         )
-        return RoundPlan(incremental=False, base=merge_base, head=new_head)
+        return RoundPlan(incremental=False, base=base_ref, head=new_head)
 
     last_is_ancestor = git.is_ancestor(last_head, new_head, cwd=ctx.workdir)
     plan = decide_round(
-        merge_base=merge_base,
+        base_ref=base_ref,
         new_head=new_head,
         last_reviewed_head=last_head,
         last_is_ancestor=last_is_ancestor,

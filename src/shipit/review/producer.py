@@ -204,15 +204,23 @@ def pass_task_text(
     ``incremental_range`` (RVW02-WS06) selects the INCREMENTAL fix-range task
     (:func:`~shipit.review.prompt.build_incremental_reviewer_task`) over
     ``(base_sha, head_sha)`` instead of the full-PR task — so the incremental
-    round's single pass hashes the same bytes it launches with. ``dimension`` is
-    ignored in the incremental path (round ≥ 2 is ONE full-scope pass, not a
-    dimension fan-out); passing both is a caller error the launch path guards.
+    round's single pass hashes the same bytes it launches with. ``incremental_range``
+    is mutually exclusive with ``dimension`` (round ≥ 2 is ONE full-scope pass, not
+    a dimension fan-out); passing both is a caller error this helper rejects with
+    ``ValueError`` — exactly like the launch path — so misuse fails loudly instead
+    of silently hashing the wrong task shape.
     """
     spec = _SPECS.get(backend)
     if spec is None:
         raise ValueError(
             f"unknown funnel review backend {backend.name!r} "
             f"(known: {', '.join(b.name for b in _SPECS)})"
+        )
+    if incremental_range is not None and dimension is not None:
+        raise ValueError(
+            "pass_task_text: incremental_range and dimension are mutually "
+            "exclusive — an incremental round is ONE full-scope fix-range pass, "
+            "not a dimension pass"
         )
     if incremental_range is not None:
         base_sha, head_sha = incremental_range
@@ -295,8 +303,9 @@ def run_tree_review(
     ``(base_sha, head_sha)`` — the reviewer reads only ``git diff base..head``
     plus the dependency neighborhood, not the full ``gh pr diff``. It is
     mutually exclusive with ``dimension`` (round ≥ 2 is ONE full-scope pass, not
-    a fan-out), which the fan-out never combines; ``None`` keeps the full-PR
-    task, exactly as before.
+    a fan-out) — passing both raises ``ValueError`` so a misrouted call fails
+    loudly rather than silently running the wrong task shape; the fan-out never
+    combines them. ``None`` keeps the full-PR task, exactly as before.
 
     With ``dry_run=True``: resolves the Tree COORDINATES (no clone, no model bill),
     prints the would-run Tree-launch argv, and returns an empty review — so a dry-run is
@@ -308,6 +317,12 @@ def run_tree_review(
         raise ValueError(
             f"unknown funnel review backend {backend.name!r} "
             f"(known: {', '.join(b.name for b in _SPECS)})"
+        )
+    if incremental_range is not None and dimension is not None:
+        raise ValueError(
+            "run_tree_review: incremental_range and dimension are mutually "
+            "exclusive — an incremental round is ONE full-scope fix-range pass, "
+            "not a dimension pass"
         )
     _preflight(backend, dry_run=dry_run)
 
