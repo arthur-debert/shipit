@@ -57,8 +57,36 @@ copilot = { rerun = true }
 # longer to ARRIVE — 45 minutes covers the fan-out without letting a vanished
 # run park the PR forever (the window is the arrival deadline, not the per-run
 # agent timeout).
-codex = { window = 2700 }
-agy = { window = 2700 }
+#
+# `dimensions` — the RVW02-WS05 baseline-study shipped default set, codified
+# from the data (report on #638). Across all three baseline PRs every one of the
+# four dimensions produced at least one posted, calibrated finding
+# (security-robustness surfaced the sole new production major; correctness,
+# cross-file-invariants and test-quality all posted too), so none is a removal
+# candidate — the ADR-0045 default of all four stands, made explicit here on the
+# dogfood reviewers.
+codex = { window = 2700, dimensions = ["correctness", "cross-file-invariants", "security-robustness", "test-quality"] }
+agy = { window = 2700, dimensions = ["correctness", "cross-file-invariants", "security-robustness", "test-quality"] }
+
+# Table-level review-run policy, set FROM the WS05 baseline study (#638):
+#
+#   nit_cap = 3 — post-calibration nit volume was ZERO across all three baseline
+#   PRs (the single nit candidate was dropped as unverified by the calibrator),
+#   so the feared nit flood never materialised. A small positive cap is flood
+#   insurance that essentially never binds on a healthy PR (US-18: keep low-end
+#   optionality without flooding); it is deliberately NOT tuned against real nit
+#   volume, because the sample produced none.
+#
+#   calibrator reasoning = high — the study confirms the ADR-0045 default. At
+#   `high` the calibrator held its I/O contract and correctly refuted every
+#   candidate false positive (0/4 of core#440's historical-FP family reproduced;
+#   it actively refuted a stale-`EvalEnv` nit and two unverifiable major
+#   claims). Its remaining defect is the OPPOSITE — over-pruning one true major
+#   (app#391's off-screen-pan finding) — which lowering the reasoning level
+#   would worsen, not fix; that is a calibrator-prompt issue reported in the
+#   ticket, out of this WS's scope.
+nit_cap = 3
+calibrator = { backend = "claude", reasoning = "high" }
 
 # [toolchains] — the path→toolchain map (ADR-0007/0039): each build-bearing path
 # declares its toolchain, and the tree-input Tool verbs (`shipit test`,
