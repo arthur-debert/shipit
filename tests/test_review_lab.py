@@ -261,6 +261,38 @@ def test_changing_the_dimension_set_re_keys_banked_fanout_points(
     assert len(variants) == 2  # one instructions file, two arms, two keys
 
 
+def test_per_dimension_invocation_overrides_re_key_banked_fanout_points(
+    checkout, launcher, tmp_path
+):
+    """#713 regression at the RUNNER boundary: the run key folds per-dimension
+    Invocation overrides too, not just the dimension NAMES — two fan-out cells
+    with the SAME `dimensions` list but different `[invocation.dimensions]`
+    blocks run different prompt material (a pass under a different model), so
+    the second RE-EXECUTES and never reuses the first's banked point. Guards the
+    'keyed on cell.dimensions but dropped cell.dimension_invocations' regression
+    the names-only test cannot see. The same overrides still bank and reuse."""
+    view = replay.resolve_range("HEAD~1..HEAD", workdir=str(checkout))
+    fixture = _fixture_for(view)
+    state = tmp_path / "state"
+    kwargs = dict(
+        checkouts=[str(checkout)], base_dir=state, launcher=launcher["launch"]
+    )
+    inv = {"backend": "codex", "model": "pro", "timeout": "600s"}
+    plain = _fanout_cell(["correctness"], invocation=inv)
+    overridden = _fanout_cell(
+        ["correctness"],
+        invocation={**inv, "dimensions": {"correctness": {"model": "o3"}}},
+    )
+    first = run_cell(plain, fixture, **kwargs)
+    assert len(first.executed) == 1
+    swapped = run_cell(overridden, fixture, **kwargs)
+    assert len(swapped.executed) == 1 and not swapped.reused  # re-paid, not reused
+    again = run_cell(overridden, fixture, **kwargs)
+    assert not again.executed and len(again.reused) == 1  # same override still banks
+    variants = {record["round.cell"]["variant"] for record in _store_records(state)}
+    assert len(variants) == 2  # same dimension list, two override blocks, two keys
+
+
 def test_informed_sweeps_compose_prior_findings_at_the_runner_layer(
     checkout, launcher, tmp_path
 ):

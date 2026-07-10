@@ -408,6 +408,38 @@ def test_run_fanout_replay_round_variant_folds_the_dimension_set(
     assert expected.content_hash != variant_of(instructions).content_hash
 
 
+def test_run_fanout_replay_round_variant_folds_invocation_overrides(
+    checkout, fanout_launcher, tmp_path
+):
+    """#713 at the replay boundary: round.variant folds the per-dimension
+    Invocation overrides threaded to the orchestrator, not just the dimension
+    names — an override reaching `record_round` lands in the recorded variant,
+    so a run under a different per-pass model is never replayed onto the plain
+    arm's banked variant. Guards `invocation_overrides` being dropped between
+    `run_fanout_replay` and `record_round`."""
+    from shipit.harness.eval.variant import variant_of
+    from shipit.review.dimensions import fanout_variant_text
+    from shipit.review.instructions import load_instructions
+
+    view = replay.resolve_range("HEAD~1..HEAD", workdir=str(checkout))
+    overrides = {"correctness": {"model": "o3"}}
+    result = replay.run_fanout_replay(
+        agent_backend.CODEX,
+        view,
+        dimensions=["correctness"],
+        invocation_overrides=overrides,
+        launcher=fanout_launcher["launch"],
+        base_dir=tmp_path / "state",
+    )
+    [line] = result["record_path"].read_text(encoding="utf-8").splitlines()
+    record = json.loads(line)
+    instructions = load_instructions(None)
+    expected = variant_of(fanout_variant_text(instructions, ["correctness"], overrides))
+    assert record["round.variant"]["content_hash"] == expected.content_hash
+    plain = variant_of(fanout_variant_text(instructions, ["correctness"]))
+    assert expected.content_hash != plain.content_hash
+
+
 def test_run_fanout_replay_sums_cli_reported_usage_onto_the_round(
     checkout, monkeypatch, tmp_path
 ):

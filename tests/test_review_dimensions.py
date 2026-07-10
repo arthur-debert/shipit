@@ -137,3 +137,19 @@ def test_fanout_variant_text_folds_per_dimension_overrides():
         base, ["correctness"], {"test-quality": {"model": "o3"}}
     )
     assert stray == plain
+
+
+def test_fanout_variant_text_canonicalization_is_injective_no_line_injection():
+    """#713 hash integrity: the canonicalization is INJECTIVE — an override
+    value carrying its own block's line framing (a newline plus a forged
+    `override.` line) must NOT canonicalize identically to a genuinely
+    different override set. Values are JSON-encoded, so no value can forge a
+    line boundary and pool two distinct dimension sets under one variant."""
+    base = "x"
+    injected = dimensions.fanout_variant_text(
+        base, ["correctness"], {"correctness": {"model": "b\noverride.timeout: d"}}
+    )
+    genuine = dimensions.fanout_variant_text(
+        base, ["correctness"], {"correctness": {"model": "b", "timeout": "d"}}
+    )
+    assert injected != genuine

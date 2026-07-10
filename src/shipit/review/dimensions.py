@@ -23,6 +23,7 @@ referenced everywhere else (the Roster `dimensions` option validates against
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
@@ -224,12 +225,24 @@ def fanout_variant_text(
     per-dimension Invocation table (``{dimension name: {"model"/"timeout":
     …}}``); an entry naming a dimension outside the set is ignored here — the
     config boundaries already reject it loudly (cell parse, fan-out preflight).
+
+    Every folded field (name, title, focus, and each override key/value) is
+    JSON-encoded before it lands on its line, so the canonicalization is
+    INJECTIVE: a JSON string literal never contains a bare newline, so no field
+    value can forge a line boundary and collide two distinct dimension sets into
+    one hash (#713 — a focus text is editable prose and an override value is
+    caller-supplied; a raw join would let ``{"model": "x\\noverride.timeout: y"}``
+    canonicalize identically to ``{"model": "x", "timeout": "y"}``).
     """
     lines = [instructions_text, "", "--- dimension set (variant material) ---"]
     for dim in sorted(resolve_dimensions(names), key=lambda d: d.name):
-        lines.append(f"[dimension: {dim.name}]")
-        lines.append(f"title: {dim.title}")
-        lines.append(f"focus: {dim.focus}")
+        lines.append(f"[dimension: {json.dumps(dim.name, ensure_ascii=False)}]")
+        lines.append(f"title: {json.dumps(dim.title, ensure_ascii=False)}")
+        lines.append(f"focus: {json.dumps(dim.focus, ensure_ascii=False)}")
         override = (overrides or {}).get(dim.name) or {}
-        lines.extend(f"override.{key}: {override[key]}" for key in sorted(override))
+        lines.extend(
+            f"override.{json.dumps(key, ensure_ascii=False)}: "
+            f"{json.dumps(override[key], ensure_ascii=False)}"
+            for key in sorted(override)
+        )
     return "\n".join(lines)
