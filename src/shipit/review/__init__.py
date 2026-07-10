@@ -14,6 +14,13 @@ release's ``~/.config/release-review/apps/*.pem`` disk lookups.
 **One-way edge:** ``prstate.reviewers`` lazy-imports this package; this package
 NEVER imports ``prstate``. The reviewer adapters call into
 :mod:`shipit.review.service` to run + post a local review synchronously.
+
+The Review Lab's measuring side lives here too (RVW03-WS06, ADR-0048):
+:mod:`shipit.review.match` (the one deterministic same-claim primitive, shared
+with same-round dedup), :mod:`shipit.review.groundtruth` (the versioned
+in-repo Ground-truth fixture + Adjudication banking), and
+:mod:`shipit.review.scorer` (recall/FP/unadjudicated per Variant over banked
+round records) — all pure, token-free, and LLM-free by design.
 """
 
 from __future__ import annotations
