@@ -52,6 +52,7 @@ from .cell import (
     Cell,
     CellError,
     compose_informed_instructions,
+    key_tuple,
     record_matches_key,
     run_key,
 )
@@ -60,7 +61,40 @@ from .instructions import load_instructions
 
 logger = logging.getLogger("shipit.review")
 
-__all__ = ["PlannedPoint", "RunSummary", "plan_points", "resolve_pins", "run_cell"]
+__all__ = [
+    "PlannedPoint",
+    "RunSummary",
+    "plan_points",
+    "resolve_pins",
+    "run_cell",
+    "safe_instructions_path",
+]
+
+
+def safe_instructions_path(path: str | None) -> str | None:
+    """Resolve a cell's repo-relative instructions ``path`` and refuse one that
+    escapes the working-directory root via symlink. BOUNDARY (touches the fs).
+
+    :func:`shipit.review.cell._validate_instructions_path` rejects absolute /
+    ``~`` / ``..`` at parse, but an IN-repo symlink (``lab/instructions/x.txt``
+    → ``/etc/passwd``) still resolves outside the tree, and
+    :func:`shipit.review.instructions.load_instructions` ends in a plain
+    ``open`` — so the read is re-checked HERE against the RESOLVED real path: it
+    must stay within ``cwd`` (symlinks followed), or the cell read is a loud
+    refusal, keeping the in-repo-files-only promise intact for symlinks too.
+    ``None`` (the bundled default) passes straight through.
+    """
+    if path is None:
+        return None
+    root = Path.cwd().resolve()
+    resolved = (root / path).resolve()
+    if resolved != root and root not in resolved.parents:
+        raise CellError(
+            f"cell instructions {path!r} resolve to {resolved} — outside the "
+            "repo root; a symlink escaping the repo is refused (cells read "
+            "in-repo files only)"
+        )
+    return str(resolved)
 
 
 @dataclass(frozen=True)
@@ -260,7 +294,7 @@ def run_cell(
     # the idempotency key hashes this text, and an unreadable file must die
     # before any model run bills.
     try:
-        base_text = load_instructions(cell.instructions_path)
+        base_text = load_instructions(safe_instructions_path(cell.instructions_path))
     except OSError as exc:
         raise CellError(
             f"cell {cell.id!r}: cannot read instructions "
@@ -334,12 +368,27 @@ def run_cell(
             )
         return records_by_slug[slug]
 
+    # The banked idempotency keys of a slug's store as a SET, so the per-point
+    # reuse check is O(1) — the store holds every review round of the repo, so
+    # a per-point `any(record_matches_key ...)` scan would be O(points ×
+    # records). Cached alongside `records_by_slug` and dropped with it on write.
+    banked_keys_by_slug: dict[str, set[tuple]] = {}
+
+    def _banked_keys(slug: str) -> set[tuple]:
+        if slug not in banked_keys_by_slug:
+            banked_keys_by_slug[slug] = {
+                key_tuple(tag)
+                for record in _records(slug)
+                if isinstance(tag := record.get("round.cell"), Mapping)
+            }
+        return banked_keys_by_slug[slug]
+
     executed: list[Mapping[str, Any]] = []
     reused: list[Mapping[str, Any]] = []
     for point in points:
         slug = point.pin.repo.lower()
         where = f"{point.pin.id!r} replicate {point.replicate} sweep {point.sweep}"
-        banked = any(record_matches_key(record, point.key) for record in _records(slug))
+        banked = key_tuple(point.key) in _banked_keys(slug)
         if banked and not force:
             say(f"  {where}: banked — reused (pass --force to re-run)")
             reused.append(point.key)
@@ -359,6 +408,7 @@ def run_cell(
         say(f"  {where}: record at {result['record_path']}")
         executed.append(point.key)
         records_by_slug.pop(slug, None)  # refresh: the store grew
+        banked_keys_by_slug.pop(slug, None)  # and its derived key set
     say(
         f"cell {cell.id!r}: {len(executed)} executed, {len(reused)} reused "
         f"(idempotent by key)"

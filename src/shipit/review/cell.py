@@ -51,6 +51,7 @@ __all__ = [
     "CellInvocation",
     "check_fair_pair",
     "compose_informed_instructions",
+    "key_tuple",
     "load_cell",
     "parse_cell",
     "record_matches_key",
@@ -466,15 +467,14 @@ def parse_cell(data: Mapping[str, Any], *, where: str = "cell") -> Cell:
     instructions_path: str | None = None
     label: str | None = None
     if instructions_raw is not None:
+        instr_where = f"{where}: [instructions]"
         if not isinstance(instructions_raw, Mapping):
-            raise CellError(f"{where}: [instructions] must be a table")
-        _reject_unknown_keys(
-            instructions_raw, ["path", "label"], f"{where}: [instructions]"
-        )
-        instructions_path = _optional_str(instructions_raw, "path", where)
+            raise CellError(f"{instr_where} must be a table")
+        _reject_unknown_keys(instructions_raw, ["path", "label"], instr_where)
+        instructions_path = _optional_str(instructions_raw, "path", instr_where)
         if instructions_path is not None:
-            _validate_instructions_path(instructions_path, where)
-        label = _optional_str(instructions_raw, "label", where)
+            _validate_instructions_path(instructions_path, instr_where)
+        label = _optional_str(instructions_raw, "label", instr_where)
 
     sweeps_raw = data.get("sweeps")
     sweeps, sweep_mode, replicates = 1, "blind", 1
@@ -636,6 +636,15 @@ def run_key(
 #: The fields of :func:`run_key` that ARE the idempotency key — the ADR-0049
 #: six-tuple. The rest of the ``round.cell`` tag is report decoration.
 KEY_FIELDS = ("id", "fixture_version", "pr", "variant", "replicate", "sweep")
+
+
+def key_tuple(tag: Mapping[str, Any]) -> tuple:
+    """The ADR-0049 idempotency key as a HASHABLE tuple in ``KEY_FIELDS`` order
+    — the same fields :func:`record_matches_key` compares one at a time, packed
+    for O(1) set membership when many records are matched against many keys.
+    PURE. ``tag`` is a ``round.cell`` tag or a :func:`run_key` dict; a missing
+    field reads as ``None`` (which never equals a real run's key field)."""
+    return tuple(tag.get(field) for field in KEY_FIELDS)
 
 
 def record_matches_key(record: Mapping[str, Any], key: Mapping[str, Any]) -> bool:

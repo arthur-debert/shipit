@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..finding import Severity
-from .cell import KEY_FIELDS, Cell, record_matches_key
+from .cell import Cell, key_tuple
 from .groundtruth import Fixture
 from .labrun import plan_points, resolve_pins
 from .scorer import UNDERPOWERED_FLOOR, VariantScore, score_records
@@ -127,7 +127,7 @@ def _dedupe_by_key(
     for record in records:
         tag = _cell_tag(record)
         assert tag is not None  # filtered by the caller
-        by_key[tuple(tag.get(field) for field in KEY_FIELDS)] = record
+        by_key[key_tuple(tag)] = record
     return list(by_key.values())
 
 
@@ -187,18 +187,22 @@ def convergence_curve(
             cell, resolve_pins(cell, fixture), variant_hash=variant_hash
         )
     ]
+    # Index the expected keys once and match records by O(1) tuple membership —
+    # `lab report` loads EVERY banked record of each pinned repo, so an
+    # any(record_matches_key ...) scan per record would be O(records × keys).
+    expected_tuples = {key_tuple(key) for key in expected_keys}
     tagged = [
         record
         for record in records
-        if any(record_matches_key(record, key) for key in expected_keys)
+        if (tag := _cell_tag(record)) is not None and key_tuple(tag) in expected_tuples
     ]
     deduped = _dedupe_by_key(tagged)
+    banked_tuples = {key_tuple(_cell_tag(record)) for record in deduped}
     points = []
     for sweep in range(1, cell.sweeps + 1):
         keys_this_sweep = [key for key in expected_keys if key["sweep"] == sweep]
         banked_this_sweep = sum(
-            any(record_matches_key(record, key) for record in deduped)
-            for key in keys_this_sweep
+            key_tuple(key) in banked_tuples for key in keys_this_sweep
         )
         subset = [
             record

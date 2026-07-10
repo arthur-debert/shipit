@@ -364,6 +364,28 @@ def test_plan_points_orders_sweeps_innermost():
     ]
 
 
+def test_safe_instructions_path_refuses_a_symlink_escaping_the_repo(
+    tmp_path, monkeypatch
+):
+    """The parse guard blocks absolute / `~` / `..`, but an IN-repo symlink
+    pointing out still resolves to a secret; the read boundary re-checks that the
+    resolved real path stays within the repo root, so a symlink escape is a loud
+    refusal (the in-repo-files-only promise holds for symlinks too)."""
+    from shipit.review.labrun import safe_instructions_path
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "lab" / "instructions").mkdir(parents=True)
+    secret = tmp_path.parent / "escaped-secret.txt"
+    secret.write_text("s3cret", encoding="utf-8")
+    (tmp_path / "lab" / "instructions" / "evil.txt").symlink_to(secret)
+    with pytest.raises(CellError, match="outside the repo root"):
+        safe_instructions_path("lab/instructions/evil.txt")
+    # An in-repo real file resolves fine; the bundled default (None) passes through.
+    (tmp_path / "lab" / "instructions" / "ok.txt").write_text("hi", encoding="utf-8")
+    assert safe_instructions_path("lab/instructions/ok.txt").endswith("ok.txt")
+    assert safe_instructions_path(None) is None
+
+
 # --- per-dimension Invocation overrides through the driver --------------------------
 
 

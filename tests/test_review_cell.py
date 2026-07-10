@@ -287,6 +287,13 @@ def test_instructions_path_accepts_a_repo_relative_file():
     assert cell.instructions_path == "lab/instructions/strict.txt"
 
 
+def test_instructions_field_errors_point_at_the_instructions_table():
+    """A present-but-empty path/label error names `[instructions]`, not the whole
+    cell, so the TOML is quick to fix."""
+    with pytest.raises(CellError, match=r"\[instructions\]"):
+        parse_cell(_cell_data(instructions={"path": "  "}))
+
+
 # --- the file boundary ---------------------------------------------------------------
 
 

@@ -33,18 +33,19 @@ from ...review.cell import (
 from ...review.curve import convergence_curve, render_curve_report
 from ...review.groundtruth import DEFAULT_FIXTURE_PATH, load_fixture
 from ...review.instructions import load_instructions
-from ...review.labrun import resolve_pins
+from ...review.labrun import resolve_pins, safe_instructions_path
 from .._errors import cli_errors
 
 
 def _variant_hash(cell: Cell) -> str:
     """The content hash of ``cell``'s BASE instructions — the variant half of
     the run key, computed EXACTLY as the runner does (:mod:`shipit.review.labrun`)
-    so the report selects the same records the runs banked. A missing/unreadable
+    so the report selects the same records the runs banked. The path is
+    symlink-checked identically to the runner, and a missing/unreadable
     instructions file is a loud :class:`CellError`, never a silently-empty curve.
     """
     try:
-        base_text = load_instructions(cell.instructions_path)
+        base_text = load_instructions(safe_instructions_path(cell.instructions_path))
     except OSError as exc:
         raise CellError(
             f"cell {cell.id!r}: cannot read instructions "
