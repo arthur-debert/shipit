@@ -6,7 +6,7 @@ shipit standardizes agent-driven development across a personal portfolio of repo
 
 ## Language
 
-### Core identities
+### Core Identities
 
 **Repo**:
 A GitHub repository in canonical `owner/name` form. The repo, not a local path, is the stable identity used for Tree locations, logs, eval records, and portfolio operations.
