@@ -96,11 +96,15 @@ EVENT_NAMES = frozenset(
         "round.detected",
         "breaker.fired",
         # the round-1 dimension fan-out (RVW02-WS04 / ADR-0045), emitted
-        # verb-witnessed by the detached review child: calibration completed
-        # (the union was judged onto the one severity ruler) and each judged
-        # finding the calibrator routed OUT of the posted review (its
+        # verb-witnessed by the detached review child: the union reached the
+        # posted review either through the default MECHANICAL dedup
+        # (``review.deduped``, RVW02-WS08 — calibrator off, pass severities
+        # kept) or, when a reviewer opts the dormant calibrator back on, the LLM
+        # judge (``review.calibrated`` — the union judged onto the one severity
+        # ruler); and each judged finding routed OUT of the posted review (its
         # disposition rides the record — the Opportunity-harvest seam's
         # flow-log twin).
+        "review.deduped",
         "review.calibrated",
         "finding.dispositioned",
         # the blocking waiter (`shipit pr wait`, ADR-0034): the wait's own

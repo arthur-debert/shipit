@@ -1,12 +1,22 @@
-"""fanout — round-1 dimension fan-out + calibration (RVW02-WS04, ADR-0045).
+"""fanout — round-1 dimension fan-out + union post (RVW02-WS04/WS08, ADR-0045).
 
 The orchestration between the review producer and the posting service: a
 local-agent reviewer's detached review run no longer makes one monolithic
 "find everything" pass — it fans out into parallel **Dimension passes**
 (:mod:`shipit.review.dimensions`) on the reviewer's own backend against ONE
-shared read-only Tree, unions the results, and hands the union to the
-**Calibrator** (:mod:`shipit.review.calibrator`) — the single fixed table-level
-judge that dedups, adversarially verifies, normalizes severity, and assigns
+shared read-only Tree, unions the results, and posts them.
+
+By DEFAULT (RVW02-WS08) the union is posted through a MECHANICAL, deterministic
+dedup (:func:`dedup_union`): findings sharing a ``(file, line, claim)`` merge
+into one canonical that posts with its OWN pass-assigned severity — no LLM judge
+in the default path. The WS05/F2 baseline (#638, #665) showed the LLM
+**Calibrator** (:mod:`shipit.review.calibrator`) net-negative on round-1 major
+recall (it refuted a true major the passes found, dragging recall below the
+single-pass baseline), so it is OPTIONAL and OFF by default. It is kept warm —
+concept, config, hooks, and the F2 reproduction-based floor all wired but
+dormant (the ADR-0044 ``classify`` pattern) — and a reviewer opts it back on by
+configuring a ``calibrator`` in its Roster entry; when on it dedups,
+adversarially verifies, normalizes severity onto the one ruler, and assigns
 every judged finding a **Disposition**.
 
 What this module owns:
@@ -18,21 +28,24 @@ What this module owns:
   * the union (each successful pass's comments, coerced through the ONE trust
     boundary :func:`shipit.review.schema.finding_from_dict`, tagged with the
     dimension that found them) and the merged coverage attestation;
-  * the deterministic post-calibration routing (:func:`route_calibrated`):
-    duplicates never post, round-1 nits post under the TABLE-LEVEL nit cap
-    (over-cap nits flip to ``nit-suppressed``, recorded; ``0`` floors the
+  * the default MECHANICAL dedup (:func:`dedup_union`) that merges same-location
+    same-claim candidates into one canonical carrying its pass severity — the
+    off-path replacement for the LLM judge;
+  * the deterministic post routing (:func:`route_calibrated`), shared by both
+    paths: duplicates never post, round-1 nits post under the TABLE-LEVEL nit
+    cap (over-cap nits flip to ``nit-suppressed``, recorded; ``0`` floors the
     posted review at minor), the posted status derives from what posts
     (major-or-worse → ``REQUEST_CHANGES``); and
-  * the round's contributing-run trail: one entry per pass + one for the
-    calibrator, each with a run id and the **Variant** hash of the exact
-    prompt that ran — what the review-round record's ``round.runs`` carries
-    and ``shipit eval report`` joins on (WS03).
+  * the round's contributing-run trail: one entry per pass (and, when the
+    calibrator is on, one for it), each with a run id and the **Variant** hash
+    of the exact prompt that ran — what the review-round record's ``round.runs``
+    carries and ``shipit eval report`` joins on (WS03).
 
 The fan-out is INVISIBLE below the reviewer boundary (ADR-0045): the service
 posts ONE review through the reviewer's own bot exactly as before; the funnel,
-reconcile, and prstate machinery are untouched. An EMPTY union skips the
-calibrator entirely (a judge that never originates has nothing to do with
-nothing) and posts the attested clean review.
+reconcile, and prstate machinery are untouched. An EMPTY union has nothing to
+post — it skips both the dedup and the (dormant) calibrator and posts the
+attested clean review.
 """
 
 from __future__ import annotations
@@ -47,12 +60,18 @@ from typing import Any
 
 from .. import events
 from ..agent.backend import Backend
-from ..finding import Disposition, Finding, JudgedFinding, Severity
+from ..finding import (
+    DEFAULT_SEVERITY,
+    Disposition,
+    Finding,
+    JudgedFinding,
+    Severity,
+    parse_severity,
+)
 from ..harness.eval.variant import label_from_env, variant_of
 from ..spawn import launch
 from . import producer
 from .calibrator import (
-    DEFAULT_CALIBRATOR,
     CalibratedFinding,
     CalibratorConfig,
     run_calibrator,
@@ -67,9 +86,11 @@ logger = logging.getLogger("shipit.review")
 class FanoutOutcome:
     """One fan-out round's product, ready for the service seam.
 
-    ``review`` is the calibrated REVIEW_SCHEMA-shaped dict the posting path
+    ``review`` is the routed REVIEW_SCHEMA-shaped dict the posting path
     consumes unchanged (the fan-out's invisibility below the reviewer
-    boundary); ``findings`` is the FULL judged set as :class:`JudgedFinding`\\ s
+    boundary) — the deduped union by default, or the calibrated result when the
+    dormant judge is on; ``findings`` is the FULL judged set as
+    :class:`JudgedFinding`\\ s
     — routed-out findings AND merged-away duplicates included, never erased (the
     round record's Opportunity-harvest seam); ``runs`` the contributing-run
     entries (every pass + the calibrator, run ids + variant hashes) for
@@ -104,12 +125,18 @@ def run_fanout_review(
     dry_run: bool = False,
     launcher: launch.Runner | None = None,
 ) -> FanoutOutcome:
-    """Fan ``backend``'s review of ``ctx`` out into dimension passes, calibrate
-    the union, and return the calibrated :class:`FanoutOutcome`.
+    """Fan ``backend``'s review of ``ctx`` out into dimension passes, post the
+    union, and return the routed :class:`FanoutOutcome`.
+
+    By DEFAULT (``calibrator=None``, RVW02-WS08) the union is posted through the
+    MECHANICAL dedup (:func:`dedup_union`) using each pass's OWN severity — no
+    model run. A ``calibrator`` :class:`CalibratorConfig` opts the dormant LLM
+    judge back on (the WS05/F2 baseline found it net-negative on major recall,
+    #638/#665), routing the union through :func:`run_calibrator` instead.
 
     ``dimensions`` names the reviewer's configured pass set (the per-reviewer
     Roster option; ``None``/empty → the shipped default set); ``calibrator``
-    the table-level judge config (``None`` → :data:`~shipit.review.calibrator.DEFAULT_CALIBRATOR`);
+    the table-level judge config (``None`` → judge OFF, deduped union);
     ``nit_cap`` the table-level round-1 nit budget (``None`` → uncapped, ``0``
     → floor at minor). ``model`` / ``timeout`` / ``instructions_path`` are the
     reviewer's own run options and apply to every pass, exactly as they applied
@@ -118,14 +145,15 @@ def run_fanout_review(
     Failure posture: a SINGLE pass failure is tolerated — its run entry records
     the outcome, the posted summary attests the degraded coverage; ALL passes
     failing raises ``RuntimeError`` (the service maps it to the ``failed``
-    funnel outcome). A calibrator failure (unavailable / timed out /
-    unparseable / contract-violating output) PROPAGATES — an uncalibrated
-    union is never posted (severities off the common ruler would be posted
-    unverified); the round degrades non-blocking exactly like a failed
-    monolithic review (ADR-0006).
+    funnel outcome). When the judge is ON, a calibrator failure (unavailable /
+    timed out / unparseable / contract-violating output) PROPAGATES — an
+    uncalibrated union is never posted under the judge's ruler; the round
+    degrades non-blocking exactly like a failed monolithic review (ADR-0006).
+    The default dedup path is pure and cannot fail this way.
 
     With ``dry_run=True``: prints each pass's would-run argv (one per
-    dimension, no clone, no model bill) plus a calibrator note, and returns an
+    dimension, no clone, no model bill) plus a note on how the union would be
+    posted (mechanical dedup, or the configured calibrator), and returns an
     empty outcome — the same honest dry-run contract as the producer's.
     """
     try:
@@ -135,7 +163,6 @@ def run_fanout_review(
             f"unknown review dimension {exc.args[0]!r} — known dimensions: "
             f"{', '.join(known_dimension_names())}"
         ) from None
-    config = calibrator if calibrator is not None else DEFAULT_CALIBRATOR
     agent = backend.funnel_agent or backend.name
 
     if dry_run:
@@ -149,10 +176,17 @@ def run_fanout_review(
                 dry_run=True,
                 dimension=dim,
             )
-        print(
-            f"(dry-run: would calibrate the union with {config.backend} "
-            f"[model={config.model or 'default'}, reasoning={config.reasoning}])"
-        )
+        if calibrator is None:
+            print(
+                "(dry-run: calibrator OFF — would post the mechanically-deduped "
+                "union using each pass's own severity)"
+            )
+        else:
+            print(
+                f"(dry-run: would calibrate the union with {calibrator.backend} "
+                f"[model={calibrator.model or 'default'}, "
+                f"reasoning={calibrator.reasoning}])"
+            )
         return FanoutOutcome(
             review={
                 "summary": {"status": "COMMENT", "overall_feedback": "(dry-run)"},
@@ -228,14 +262,21 @@ def run_fanout_review(
     union = _build_union(succeeded)
     coverage = _merge_coverage(succeeded)
 
+    calibrated = calibrator is not None
     if not union:
-        # Nothing to judge: the calibrator NEVER originates, so launching it
-        # over an empty union buys nothing. Post the attested clean review.
+        # Nothing to post: neither the mechanical dedup nor the (dormant, never
+        # originating) calibrator has anything to do with an empty union. Post
+        # the attested clean review.
         review = {
             "summary": {
                 "status": "COMMENT" if failed else "APPROVED",
                 "overall_feedback": _attestation(
-                    dims, failed, union_size=0, entries=(), posted=0
+                    dims,
+                    failed,
+                    union_size=0,
+                    entries=(),
+                    posted=0,
+                    calibrated=calibrated,
                 ),
                 "coverage": coverage,
             },
@@ -243,32 +284,41 @@ def run_fanout_review(
         }
         return FanoutOutcome(review=review, findings=(), runs=tuple(runs))
 
-    calibrator_run: dict[str, Any] = {
-        "kind": "calibrator",
-        "backend": config.backend,
-        "model": config.model,
-        "reasoning": config.reasoning,
-    }
-    start = time.monotonic()
-    result, run_id, task = run_calibrator(
-        config,
-        union,
-        pr_number=ctx.number,
-        cwd=tree_path,
-        launcher=launcher,
-    )
-    calibrator_run.update(
-        {
-            "run_id": run_id,
-            "duration_ms": int((time.monotonic() - start) * 1000),
-            "outcome": "success",
-            "judged": len(result.entries),
-            "variant": variant_of(task, label=label).as_record(),
+    if calibrator is None:
+        # DEFAULT (RVW02-WS08): post the MECHANICALLY-deduped union using each
+        # pass's own severity — no model run, no LLM judge.
+        entries = dedup_union(union)
+        feedback = ""
+    else:
+        # Dormant judge opted back on: route the union through the calibrator.
+        calibrator_run: dict[str, Any] = {
+            "kind": "calibrator",
+            "backend": calibrator.backend,
+            "model": calibrator.model,
+            "reasoning": calibrator.reasoning,
         }
-    )
-    runs.append(calibrator_run)
+        start = time.monotonic()
+        result, run_id, task = run_calibrator(
+            calibrator,
+            union,
+            pr_number=ctx.number,
+            cwd=tree_path,
+            launcher=launcher,
+        )
+        calibrator_run.update(
+            {
+                "run_id": run_id,
+                "duration_ms": int((time.monotonic() - start) * 1000),
+                "outcome": "success",
+                "judged": len(result.entries),
+                "variant": variant_of(task, label=label).as_record(),
+            }
+        )
+        runs.append(calibrator_run)
+        entries = result.entries
+        feedback = result.overall_feedback.strip()
 
-    routed = route_calibrated(result.entries, nit_cap=nit_cap)
+    routed = route_calibrated(entries, nit_cap=nit_cap)
     findings = tuple(
         JudgedFinding(entry.finding, d, entry.duplicate_of) for entry, d in routed
     )
@@ -278,9 +328,13 @@ def run_fanout_review(
     status = _derive_status(
         (judged.finding for judged in posted_entries), degraded=bool(failed)
     )
-    feedback = result.overall_feedback.strip()
     attestation = _attestation(
-        dims, failed, union_size=len(union), entries=findings, posted=posted
+        dims,
+        failed,
+        union_size=len(union),
+        entries=findings,
+        posted=posted,
+        calibrated=calibrated,
     )
     review = {
         "summary": {
@@ -295,8 +349,9 @@ def run_fanout_review(
 
     events.emit(
         logger,
-        "review.calibrated",
-        "calibration completed for pr#%s (agent=%s): %d candidate(s) -> %d posted",
+        "review.calibrated" if calibrated else "review.deduped",
+        "%s completed for pr#%s (agent=%s): %d candidate(s) -> %d posted",
+        "calibration" if calibrated else "mechanical dedup",
         ctx.number,
         agent,
         len(union),
@@ -334,7 +389,8 @@ def run_fanout_review(
 def route_calibrated(
     entries: Sequence[CalibratedFinding], *, nit_cap: int | None
 ) -> tuple[tuple[CalibratedFinding, Disposition], ...]:
-    """The deterministic post-calibration routing. PURE.
+    """The deterministic post routing, shared by both paths (the calibrator's
+    judged entries and the mechanical :func:`dedup_union`). PURE.
 
     Two policies the CODE enforces rather than the judge (deterministic, so
     they are testable and prompt-drift-proof):
@@ -381,6 +437,137 @@ def route_calibrated(
             final_disposition_for[entry.id] = disposition
         routed.append((entry, disposition))
     return tuple(routed)
+
+
+def dedup_union(
+    union: Sequence[Mapping[str, Any]],
+) -> tuple[CalibratedFinding, ...]:
+    """Mechanically dedup the pass ``union`` into judged entries — the DEFAULT
+    round-1 path (RVW02-WS08, calibrator off). PURE, no model.
+
+    Candidates sharing a ``(file, line, claim)`` key — where ``claim`` is the
+    finding text whitespace-collapsed and case-folded — are ONE underlying
+    finding: the group's most-severe member (ties → lowest union id) becomes the
+    canonical (disposition ``post``, its group-mates listed in ``merged``); each
+    other member becomes a merged-away duplicate (``duplicate_of`` the canonical,
+    carrying the canonical's severity like :func:`~shipit.review.calibrator.parse_calibration`
+    materializes its inverse edge) so the round record retains every union
+    finding. The canonical keeps its OWN pass-assigned severity — there is no
+    judge to renormalize onto a common ruler, and the whole point of the off
+    path is to trust the passes' severities. Nothing is ever DROPPED here:
+    mechanical dedup only merges duplicates; a candidate's substance always
+    reaches the record (and, unless a nit-cap flip in :func:`route_calibrated`
+    suppresses it, the PR).
+
+    Every entry is disposition ``post`` — the nit cap and the duplicates-never-
+    post rule are applied downstream by :func:`route_calibrated`, exactly as for
+    the calibrator's entries. Canonicals are emitted first (in first-seen group
+    order), then their duplicates, so the stable severity sort in
+    :func:`route_calibrated` always sees a canonical before its duplicate.
+    """
+    groups: dict[tuple[str, int | None, str], list[Mapping[str, Any]]] = {}
+    order: list[tuple[str, int | None, str]] = []
+    for candidate in union:
+        key = _dedup_key(candidate)
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(candidate)
+
+    entries: list[CalibratedFinding] = []
+    for key in order:
+        members = groups[key]
+        canonical = min(
+            members,
+            key=lambda c: (
+                (parse_severity(c.get("severity")) or DEFAULT_SEVERITY).rank,
+                _candidate_id(c),
+            ),
+        )
+        canonical_finding = _finding_from_candidate(canonical)
+        merged = tuple(_candidate_id(c) for c in members if c is not canonical)
+        entries.append(
+            CalibratedFinding(
+                id=_candidate_id(canonical),
+                finding=canonical_finding,
+                disposition=Disposition.POST,
+                merged=merged,
+            )
+        )
+        for member in members:
+            if member is canonical:
+                continue
+            entries.append(
+                CalibratedFinding(
+                    id=_candidate_id(member),
+                    finding=_finding_from_candidate(
+                        member, severity=canonical_finding.severity
+                    ),
+                    disposition=Disposition.POST,
+                    duplicate_of=_candidate_id(canonical),
+                )
+            )
+    return tuple(entries)
+
+
+def _dedup_key(candidate: Mapping[str, Any]) -> tuple[str, int | None, str]:
+    """The mechanical dedup identity: file + line + normalized claim.
+
+    The claim is the finding text with runs of whitespace collapsed and
+    case-folded, so trivially-reworded-but-identical restatements of the same
+    claim at the same location still merge; anything more (semantic overlap of
+    differently-worded findings) is the LLM judge's job, deliberately NOT
+    attempted here — a mechanical merge stays conservative so it never fuses two
+    genuinely distinct findings.
+    """
+    line = candidate.get("line")
+    claim = " ".join(str(candidate.get("text") or "").split()).casefold()
+    return (
+        str(candidate.get("file") or ""),
+        line if isinstance(line, int) and not isinstance(line, bool) else None,
+        claim,
+    )
+
+
+def _candidate_id(candidate: Mapping[str, Any]) -> int:
+    """A union candidate's stable id (its index in the union — the join key
+    :func:`_build_union` stamps)."""
+    raw = candidate.get("id")
+    return raw if isinstance(raw, int) and not isinstance(raw, bool) else -1
+
+
+def _finding_from_candidate(
+    candidate: Mapping[str, Any], *, severity: Severity | None = None
+) -> Finding:
+    """Coerce one union candidate dict back into a domain :class:`Finding`.
+
+    ``severity`` overrides the candidate's own (a merged-away duplicate carries
+    its canonical twin's severity); ``None`` keeps the candidate's pass-assigned
+    severity through the domain fail-safe (:func:`~shipit.finding.parse_severity`
+    else ``major``). The candidate already passed the ONE trust boundary in
+    :func:`_build_union`, so the fields are just re-typed here.
+    """
+    resolved = (
+        severity
+        if severity is not None
+        else (parse_severity(candidate.get("severity")) or DEFAULT_SEVERITY)
+    )
+    line = candidate.get("line")
+    confidence = candidate.get("confidence")
+    return Finding(
+        severity=resolved,
+        text=str(candidate.get("text") or ""),
+        file=str(candidate.get("file") or ""),
+        line=line if isinstance(line, int) and not isinstance(line, bool) else None,
+        category=str(candidate.get("category") or ""),
+        confidence=(
+            float(confidence)
+            if isinstance(confidence, (int, float)) and not isinstance(confidence, bool)
+            else None
+        ),
+        evidence=str(candidate.get("evidence") or ""),
+        fix=str(candidate.get("fix") or ""),
+    )
 
 
 def _build_union(succeeded: Sequence[_PassResult]) -> list[dict[str, Any]]:
@@ -453,43 +640,59 @@ def _attestation(
     union_size: int,
     entries: Sequence[JudgedFinding],
     posted: int,
+    calibrated: bool,
 ) -> str:
     """The fan-out attestation paragraph for the posted summary: what ran, what
-    it found, and how calibration routed it — so a human reading the PR sees
-    the coverage claim (and any degradation) without opening the record.
+    it found, and how the union routed to the posted set — so a human reading
+    the PR sees the coverage claim (and any degradation) without opening the
+    record.
 
-    The routed-out counts plus ``posted`` plus the merged-away ``duplicate``
-    count sum to ``union_size``: every candidate is accounted for, so the
-    arithmetic a human checks always balances (deduped candidates included). An
-    EMPTY union skipped the calibrator (:func:`run_fanout_review`), so its line
-    never claims a calibration that never ran.
+    ``calibrated`` selects the routing phrasing: the DEFAULT off path posts the
+    mechanically-deduped union (only nit-suppressed and duplicate route out — no
+    drop/out-of-scope, which only the LLM judge produces); the on path posts
+    "after calibration" with the full routed-out breakdown. Either way the
+    routed-out counts plus ``posted`` plus the merged-away ``duplicate`` count
+    sum to ``union_size``: every candidate is accounted for, so the arithmetic a
+    human checks always balances. An EMPTY union had nothing to route (both the
+    dedup and the dormant calibrator were skipped), so its line never claims a
+    routing that never ran.
     """
     names = ", ".join(d.name for d in dims)
     prelude = f"Review fan-out: {len(dims)} dimension pass(es) ({names}) -> "
+    duplicates = sum(1 for judged in entries if judged.duplicate_of is not None)
+    nit_suppressed = sum(
+        1
+        for judged in entries
+        if judged.disposition is Disposition.NIT_SUPPRESSED
+        and judged.duplicate_of is None
+    )
     if union_size == 0:
-        # The calibrator was skipped — a judge over nothing does nothing — so
-        # attest the clean pass without a misleading "after calibration" routing.
-        lines = [f"{prelude}no candidate findings (calibration skipped)."]
+        # Nothing was routed — a dedup/judge over nothing does nothing — so
+        # attest the clean pass without a misleading routing that never ran.
+        lines = [f"{prelude}no candidate findings."]
+    elif not calibrated:
+        lines = [
+            f"{prelude}{union_size} candidate finding(s) -> {posted} posted as the "
+            f"deduped union ({nit_suppressed} nit-suppressed, {duplicates} "
+            f"duplicate); calibrator off."
+        ]
     else:
-        routed_out = {
-            disposition: sum(
-                1
-                for judged in entries
-                if judged.disposition is disposition and judged.duplicate_of is None
-            )
-            for disposition in (
-                Disposition.DROP_UNVERIFIED,
-                Disposition.NIT_SUPPRESSED,
-                Disposition.OUT_OF_SCOPE,
-            )
-        }
-        duplicates = sum(1 for judged in entries if judged.duplicate_of is not None)
+        dropped = sum(
+            1
+            for judged in entries
+            if judged.disposition is Disposition.DROP_UNVERIFIED
+            and judged.duplicate_of is None
+        )
+        out_of_scope = sum(
+            1
+            for judged in entries
+            if judged.disposition is Disposition.OUT_OF_SCOPE
+            and judged.duplicate_of is None
+        )
         lines = [
             f"{prelude}{union_size} candidate finding(s) -> {posted} posted after "
-            f"calibration ({routed_out[Disposition.DROP_UNVERIFIED]} "
-            f"dropped-unverified, {routed_out[Disposition.OUT_OF_SCOPE]} "
-            f"out-of-scope, {routed_out[Disposition.NIT_SUPPRESSED]} "
-            f"nit-suppressed, {duplicates} duplicate)."
+            f"calibration ({dropped} dropped-unverified, {out_of_scope} "
+            f"out-of-scope, {nit_suppressed} nit-suppressed, {duplicates} duplicate)."
         ]
     if failed:
         failures = ", ".join(
@@ -504,7 +707,7 @@ def _attestation(
 def _comment_dict(finding: Finding) -> dict[str, Any]:
     """One posted finding back in REVIEW_SCHEMA comment shape — what the
     posting path and the round record both re-coerce through
-    :func:`finding_from_dict`, so the calibrated result rides the EXISTING
+    :func:`finding_from_dict`, so the routed result rides the EXISTING
     pipeline unchanged (the invisibility constraint)."""
     return {
         "file": finding.file,

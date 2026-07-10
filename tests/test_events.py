@@ -117,6 +117,7 @@ def test_the_starting_vocabulary_is_registered():
         "review.requested",
         "review.received",
         "review.degraded",
+        "review.deduped",
         "review.calibrated",
         "finding.dispositioned",
         "round.detected",

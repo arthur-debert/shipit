@@ -109,10 +109,11 @@ class RosterEntry:
 class ReviewPolicy:
     """The TABLE-LEVEL review-run policy (RVW02-WS04), bundled for the request
     path: the ONE calibrator config every reviewer's fan-out shares and the
-    round-1 nit cap. ``None`` fields mean the run path's shipped defaults —
-    the same None-means-shipped-default convention as every other roster
-    value. Read only by the local-agent reviewer adapters; App reviewers place
-    a plain request edge and never see it."""
+    round-1 nit cap. ``nit_cap=None`` means uncapped (the shipped default);
+    ``calibrator=None`` means the judge is OFF — the round-1 default of the
+    mechanically-deduped union (RVW02-WS08), NOT a default-on judge. Read only by
+    the local-agent reviewer adapters; App reviewers place a plain request edge
+    and never see it."""
 
     calibrator: CalibratorConfig | None = None
     nit_cap: int | None = None
@@ -147,10 +148,11 @@ class Roster:
     (:attr:`policy` bundles them for the request path): ``nit_cap`` — the
     round-1 nit budget the fan-out routing enforces (``None`` → uncapped, the
     shipped default; ``0`` → floor at minor) — and ``calibrator`` — the ONE
-    fixed judge config shared by every reviewer
-    (:class:`~shipit.review.calibrator.CalibratorConfig`; ``None`` → the
-    shipped ``claude``-at-high default). Table-level ON PURPOSE (ADR-0045): a
-    per-reviewer calibrator would fork the common severity ruler.
+    fixed judge config shared by every reviewer, a DORMANT stage OFF by default
+    (:class:`~shipit.review.calibrator.CalibratorConfig`; ``None`` → judge off,
+    the deduped-union round-1 default of RVW02-WS08; set it to opt the judge back
+    on). Table-level ON PURPOSE (ADR-0045): a per-reviewer calibrator would fork
+    the common severity ruler.
     """
 
     entries: tuple[RosterEntry, ...] = ()

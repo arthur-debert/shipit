@@ -69,30 +69,34 @@ def generate_review(
     nit_cap: int | None = None,
     dry_run: bool = False,
 ) -> dict:
-    """Run ``backend``'s dimension fan-out over ``ctx`` and return the calibrated
+    """Run ``backend``'s dimension fan-out over ``ctx`` and return the routed
     review.
 
-    The RVW02-WS04 round-1 pipeline (ADR-0045): one shared read-only Tree
+    The RVW02-WS04/WS08 round-1 pipeline (ADR-0045): one shared read-only Tree
     (ADR-0018) on the PR head, the reviewer's configured **Dimension passes**
     in parallel through its spawn read-only posture (each fetching the scoped
-    diff itself via ``gh pr diff`` — never assuming the base is ``main``), the
-    union judged by the table-level **Calibrator**, and the routed result
-    returned as the same REVIEW_SCHEMA-shaped dict the monolithic producer
-    yielded — posting + the funnel check-run are the caller's job, unchanged;
-    below this seam the fan-out is invisible.
+    diff itself via ``gh pr diff`` — never assuming the base is ``main``), and
+    the union posted — by DEFAULT through the mechanical dedup (calibrator off,
+    RVW02-WS08), or through the dormant table-level **Calibrator** when a
+    reviewer opts it on. The routed result is returned as the same
+    REVIEW_SCHEMA-shaped dict the monolithic producer yielded — posting + the
+    funnel check-run are the caller's job, unchanged; below this seam the
+    fan-out is invisible.
 
     Delegates to :func:`shipit.review.fanout.run_fanout_review`, which owns the
-    Tree, the pass fan-out, the calibration, and the routing. A missing CLI
-    raises :class:`~shipit.review.backends.base.BackendUnavailable`; a review
-    that produced nothing usable (every pass failed, a calibrator
-    timeout/unparseable output/contract violation) raises
+    Tree, the pass fan-out, the dedup/calibration, and the routing. A missing
+    CLI raises :class:`~shipit.review.backends.base.BackendUnavailable`; a review
+    that produced nothing usable (every pass failed, or — with the calibrator on
+    — a calibrator timeout/unparseable output/contract violation) raises
     :class:`~shipit.review.backends.base.BackendError` /
     ``RuntimeError`` — the same error set as before, so the service's outcome
     mapping is unchanged.
 
     ``dimensions`` / ``calibrator`` / ``nit_cap`` are the RVW02 config surface
-    (per-reviewer Roster option; table-level judge + nit budget) — ``None``
-    means the shipped defaults. ``timeout`` is the PER-PASS agent timeout (a
+    (per-reviewer Roster option; table-level judge + nit budget) — ``calibrator``
+    ``None`` means the judge is OFF (the deduped union); ``dimensions`` /
+    ``nit_cap`` ``None`` mean the shipped defaults. ``timeout`` is the PER-PASS
+    agent timeout (a
     ``<N>s`` duration string), enforced at the launch seam as a process
     deadline for every backend (#404). ``dry_run`` prints each pass's would-run
     Tree-launch argv and bills nothing.
@@ -100,9 +104,10 @@ def generate_review(
     Every successfully generated review is ALSO teed to the local
     **review-round record** store at this seam (RVW02-WS03) — verb-witnessed at
     generate time, BEFORE any posting, so the record exists whether or not the
-    post succeeds and the posting path is untouched. The tee carries the
-    calibrator's REAL dispositions (routed-out findings retained) and every
-    contributing run's id + variant hash. It is fail-open
+    post succeeds and the posting path is untouched. The tee carries the REAL
+    dispositions the routing assigned (from the dedup or the calibrator —
+    routed-out findings retained) and every contributing run's id + variant
+    hash. It is fail-open
     (:func:`_tee_round_record`): a record miss is logged and swallowed, never a
     degraded review.
     """

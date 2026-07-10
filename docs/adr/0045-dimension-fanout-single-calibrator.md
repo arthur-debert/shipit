@@ -1,7 +1,26 @@
 # Dimension-scoped fan-out with a single calibrator; severity-scoped finders rejected
 
-> **Amended by RVW02-WS08 (F2, #665).** The verification floor is
-> REPRODUCTION-based: the calibrator drops a finding ONLY when adversarial
+> **Amended by RVW02-WS08 (decouple, #669).** The calibrator is now an
+> OPTIONAL, DORMANT stage — OFF by default. The default round-1 posts the
+> **mechanically-deduped union** of the dimension passes, using each pass's own
+> severity: findings sharing a `(file, line, claim)` merge into one canonical
+> (the most-severe member) that posts, duplicates ride the record — a
+> deterministic dedup, no LLM judge. Rationale: the WS05/F2 A/B baseline (#638,
+> #665) measured the LLM calibrator NET-NEGATIVE on round-1 major recall — it
+> refuted a true major the passes had found, dragging fan-out recall (0/3)
+> *below* the single-pass baseline (1/3). The fan-out is the bet with outside
+> evidence; the calibrator was an unproven precision layer bolted on, and on the
+> baseline it destroyed signal. So it is KEPT — concept, config, hooks, and the
+> F2 reproduction-based floor all wired but dormant (the ADR-0044 `classify`
+> pattern: kept warm, not run) — and a reviewer opts it back on by configuring a
+> `calibrator` in its Roster entry. Tuning/re-verifying it (the app-G1
+> wrong-refutation, #665) is a later, independent effort, NOT a blocker for
+> shipping the fan-out gain. The rest of this ADR (the fan-out, the passes, the
+> single-ruler and never-originates constraints) stands; wherever it says the
+> union "feeds"/"is judged by" the calibrator, read that as the on path.
+>
+> **Amended by RVW02-WS08 (F2, #665).** The calibrator's verification floor
+> (when it IS on) is REPRODUCTION-based: it drops a finding ONLY when adversarial
 > verification actively REFUTES it (misquoted or fabricated evidence, code that
 > does not behave as the finding claims, a failure that cannot occur) — never on
 > mere uncertainty or imperfect phrasing — and a finding that reproduces is
