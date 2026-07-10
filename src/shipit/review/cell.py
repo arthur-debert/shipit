@@ -638,13 +638,29 @@ def run_key(
 KEY_FIELDS = ("id", "fixture_version", "pr", "variant", "replicate", "sweep")
 
 
-def key_tuple(tag: Mapping[str, Any]) -> tuple:
+#: The value types a KEY_FIELD may legitimately hold — the shapes
+#: :func:`run_key` produces (ids/variant strings, versions/replicate/sweep
+#: ints). Anything else in a stored ``round.cell`` tag is a corrupt or
+#: hand-edited record: it is never a real run's key, and it must not crash the
+#: reader (a ``list``/``dict`` there would be an unhashable set element).
+_KEY_SCALAR_TYPES = (str, int, type(None))
+
+
+def key_tuple(tag: Mapping[str, Any]) -> tuple | None:
     """The ADR-0049 idempotency key as a HASHABLE tuple in ``KEY_FIELDS`` order
     — the same fields :func:`record_matches_key` compares one at a time, packed
     for O(1) set membership when many records are matched against many keys.
     PURE. ``tag`` is a ``round.cell`` tag or a :func:`run_key` dict; a missing
-    field reads as ``None`` (which never equals a real run's key field)."""
-    return tuple(tag.get(field) for field in KEY_FIELDS)
+    field reads as ``None`` (which never equals a real run's key field).
+
+    Returns ``None`` when any key field holds a non-scalar (a corrupt stored
+    record — e.g. ``{"id": []}``), so a malformed banked line is skipped, never
+    fed as an unhashable element into a caller's set (the robustness the older
+    value-by-value :func:`record_matches_key` comparison had by construction)."""
+    values = tuple(tag.get(field) for field in KEY_FIELDS)
+    if any(not isinstance(value, _KEY_SCALAR_TYPES) for value in values):
+        return None
+    return values
 
 
 def record_matches_key(record: Mapping[str, Any], key: Mapping[str, Any]) -> bool:

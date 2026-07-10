@@ -378,7 +378,7 @@ def test_safe_instructions_path_refuses_a_symlink_escaping_the_repo(
     secret = tmp_path.parent / "escaped-secret.txt"
     secret.write_text("s3cret", encoding="utf-8")
     (tmp_path / "lab" / "instructions" / "evil.txt").symlink_to(secret)
-    with pytest.raises(CellError, match="outside the repo root"):
+    with pytest.raises(CellError, match="outside the working directory"):
         safe_instructions_path("lab/instructions/evil.txt")
     # An in-repo real file resolves fine; the bundled default (None) passes through.
     (tmp_path / "lab" / "instructions" / "ok.txt").write_text("hi", encoding="utf-8")
@@ -696,6 +696,31 @@ def test_convergence_curve_ignores_a_pin_outside_the_cells_subset():
     )
     [point] = curve.points
     assert point.records == 0 and point.missing  # the stray pin never pooled
+
+
+def test_convergence_curve_survives_a_corrupt_banked_record():
+    """A malformed stored record whose `round.cell` key holds a non-scalar (a
+    hand-edited or corrupt store line) is SKIPPED, not fed as an unhashable
+    element into the O(1) key-tuple set — no `TypeError: unhashable type`."""
+    fixture = _curve_fixture()
+    good = _tagged_record(
+        sweep=1,
+        findings=[("f.txt", 2, "the staging buffer misses row padding here")],
+        base="a" * 40,
+        head="b" * 40,
+    )
+    corrupt = _tagged_record(
+        sweep=1, findings=[("x.txt", 1, "noise")], base="a" * 40, head="b" * 40
+    )
+    corrupt["round.cell"]["id"] = []  # unhashable — a corrupt key field
+    curve = convergence_curve(
+        _treatment_cell(sweeps=1),
+        fixture,
+        [corrupt, good],
+        variant_hash="sha256:base",
+    )
+    [point] = curve.points
+    assert point.records == 1 and point.recalled == 1  # only the good record pooled
 
 
 def test_render_curve_report_carries_the_honesty_markers():

@@ -72,7 +72,7 @@ __all__ = [
 
 
 def safe_instructions_path(path: str | None) -> str | None:
-    """Resolve a cell's repo-relative instructions ``path`` and refuse one that
+    """Resolve a cell's relative instructions ``path`` and refuse one that
     escapes the working-directory root via symlink. BOUNDARY (touches the fs).
 
     :func:`shipit.review.cell._validate_instructions_path` rejects absolute /
@@ -80,19 +80,29 @@ def safe_instructions_path(path: str | None) -> str | None:
     → ``/etc/passwd``) still resolves outside the tree, and
     :func:`shipit.review.instructions.load_instructions` ends in a plain
     ``open`` — so the read is re-checked HERE against the RESOLVED real path: it
-    must stay within ``cwd`` (symlinks followed), or the cell read is a loud
-    refusal, keeping the in-repo-files-only promise intact for symlinks too.
-    ``None`` (the bundled default) passes straight through.
+    must stay within the working directory (``cwd`` — where the relative path is
+    read from; ``lab run`` runs from the repo root), symlinks followed, or the
+    cell read is a loud refusal, keeping the in-repo-files-only promise intact
+    for symlinks too. Returns the resolved absolute path so the caller reads the
+    real target directly. ``None`` (the bundled default) passes straight through.
+    A broken or LOOPING symlink (``resolve`` raises ``OSError`` / ``RuntimeError``)
+    is also a loud :class:`CellError`, never a raw traceback.
     """
     if path is None:
         return None
     root = Path.cwd().resolve()
-    resolved = (root / path).resolve()
+    try:
+        resolved = (root / path).resolve()
+    except (OSError, RuntimeError) as exc:  # broken / looping symlink
+        raise CellError(
+            f"cell instructions {path!r} cannot be resolved ({exc}) — check for "
+            "a broken or looping symlink"
+        ) from exc
     if resolved != root and root not in resolved.parents:
         raise CellError(
             f"cell instructions {path!r} resolve to {resolved} — outside the "
-            "repo root; a symlink escaping the repo is refused (cells read "
-            "in-repo files only)"
+            "working directory; a symlink escaping the tree is refused (cells "
+            "read in-repo files only)"
         )
     return str(resolved)
 
@@ -184,7 +194,8 @@ def plan_points(
 
 
 def _checkout_map(checkouts: Sequence[str]) -> dict[str, str]:
-    """Each supplied checkout path → its origin ``owner/name`` slug. BOUNDARY.
+    """Origin ``owner/name`` slug → its supplied checkout path, for every
+    supplied checkout. BOUNDARY.
 
     A path that is not a clone with a resolvable origin identity is a loud
     :class:`CellError` naming it — a mis-supplied checkout must never silently
@@ -377,9 +388,10 @@ def run_cell(
     def _banked_keys(slug: str) -> set[tuple]:
         if slug not in banked_keys_by_slug:
             banked_keys_by_slug[slug] = {
-                key_tuple(tag)
+                kt
                 for record in _records(slug)
                 if isinstance(tag := record.get("round.cell"), Mapping)
+                and (kt := key_tuple(tag)) is not None  # skip a corrupt key
             }
         return banked_keys_by_slug[slug]
 
@@ -434,9 +446,14 @@ def _run_point(
     below is byte-identical between blind and informed arms except for the
     instructions path it is handed. The temp file is removed after the run
     (the per-run artifact bundle already banked the exact prompt).
+
+    The blind / sweep-1 path re-runs the symlink guard here and hands the driver
+    the RESOLVED real path, not ``cell.instructions_path`` — the driver reads the
+    file again at launch, so re-checking right before that read closes the TOCTOU
+    window a swapped symlink could open between the up-front preflight and here.
     """
-    instructions_path = cell.instructions_path
     composed_path: str | None = None
+    instructions_path = safe_instructions_path(cell.instructions_path)
     if cell.sweep_mode == "informed" and point.sweep > 1:
         priors = _prior_findings(records, point)
         composed = compose_informed_instructions(base_text, priors)

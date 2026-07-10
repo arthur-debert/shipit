@@ -127,7 +127,8 @@ def _dedupe_by_key(
     for record in records:
         tag = _cell_tag(record)
         assert tag is not None  # filtered by the caller
-        by_key[key_tuple(tag)] = record
+        if (kt := key_tuple(tag)) is not None:  # skip a corrupt (unhashable) key
+            by_key[kt] = record
     return list(by_key.values())
 
 
@@ -197,7 +198,9 @@ def convergence_curve(
         if (tag := _cell_tag(record)) is not None and key_tuple(tag) in expected_tuples
     ]
     deduped = _dedupe_by_key(tagged)
-    banked_tuples = {key_tuple(_cell_tag(record)) for record in deduped}
+    banked_tuples = {
+        kt for record in deduped if (kt := key_tuple(_cell_tag(record))) is not None
+    }
     points = []
     for sweep in range(1, cell.sweeps + 1):
         keys_this_sweep = [key for key in expected_keys if key["sweep"] == sweep]

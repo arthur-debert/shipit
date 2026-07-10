@@ -18,6 +18,7 @@ from shipit.review.cell import (
     CellError,
     check_fair_pair,
     compose_informed_instructions,
+    key_tuple,
     load_cell,
     parse_cell,
     record_matches_key,
@@ -367,6 +368,19 @@ def test_run_key_and_record_matching_use_the_full_key():
         assert not record_matches_key({"round.cell": {**key, field: other}}, key)
     assert not record_matches_key({"round.cell": None}, key)
     assert not record_matches_key({}, key)
+
+
+def test_key_tuple_returns_none_for_a_corrupt_non_scalar_key_field():
+    """A well-formed key packs to a hashable tuple; a corrupt tag with a
+    non-scalar key field returns None, so a reader skips it instead of feeding
+    an unhashable value into a set."""
+    cell = parse_cell(_cell_data())
+    key = run_key(
+        cell, pr_id="core-440", variant_hash="sha256:aa", replicate=1, sweep=1
+    )
+    assert isinstance(key_tuple(key), tuple)
+    assert key_tuple({**key, "id": []}) is None
+    assert key_tuple({**key, "pr": {"nested": 1}}) is None
 
 
 # --- informed-sweep composition --------------------------------------------------------
