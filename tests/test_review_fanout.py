@@ -28,8 +28,11 @@ from shipit.review.calibrator import (
     CalibrationContractError,
     CalibrationResult,
     CalibratorConfig,
+    CalibratorRun,
 )
 from shipit.review.dimensions import by_name
+from shipit.review.producer import CapturedReview
+from shipit.review.usage import UNREPORTED, TokenUsage
 
 #: Opt the dormant LLM calibrator back ON. The default (``calibrator=None``,
 #: RVW02-WS08) is OFF — the mechanically-deduped union — so every test that
@@ -158,7 +161,15 @@ def _seams(monkeypatch):
         assert kw["tree_path"] == "/tree"  # every pass shares the ONE Tree
         if isinstance(outcome, Exception):
             raise outcome
-        return outcome
+        # Mirror the real producer's capture (RVW03-WS04): per-launch usage
+        # (per-key override via capture["usage"], else explicitly unreported)
+        # and the APPLIED reasoning — the fake plays a knob-carrying backend
+        # (codex), so the requested level is what lands in argv.
+        return CapturedReview(
+            review=outcome,
+            usage=capture.get("usage", {}).get(key, UNREPORTED),
+            reasoning=kw.get("reasoning"),
+        )
 
     monkeypatch.setattr(fanout.producer, "run_tree_review", fake_run_tree_review)
 
@@ -181,7 +192,15 @@ def _seams(monkeypatch):
         capture["calibrator_artifacts"] = artifacts
         capture["calibrator_correlation"] = correlation
         assert cwd == "/tree"
-        return capture["result"], "cal-run-id", "calibrator task"
+        return CalibratorRun(
+            result=capture["result"],
+            run_id="cal-run-id",
+            task="calibrator task",
+            usage=capture.get("usage", {}).get("calibrator", UNREPORTED),
+            # The fake plays the default claude judge, whose `--effort` knob is
+            # real (RVW03-WS04) — the config level IS the applied level here.
+            reasoning=config.reasoning,
+        )
 
     monkeypatch.setattr(fanout, "run_calibrator", fake_run_calibrator)
     return capture
@@ -887,7 +906,9 @@ def test_incremental_round_runs_one_pass_suppresses_nits_records_range(_seams):
     # Exactly ONE pass ran — not the dimension fan-out.
     assert [run["kind"] for run in outcome.runs] == ["incremental-pass"]
     run = outcome.runs[0]
-    # The cheaper reasoning level is stamped on the run (config + record).
+    # The cheaper reasoning level is stamped from the argv ACTUALLY applied
+    # (RVW03-WS04: the fake plays a knob-carrying backend, so the requested
+    # level ran) — no longer a record-only echo of config.
     assert run["reasoning"] == fanout.DEFAULT_INCREMENTAL_REASONING
     # The fix range is recorded on the run entry.
     assert run["range"] == {"base": "b" * 40, "head": "c" * 40}
@@ -933,6 +954,128 @@ def test_incremental_pass_failure_fails_the_round(_seams):
         fanout.run_fanout_review(
             agent_backend.CODEX, _incremental_ctx(), incremental=True
         )
+
+
+# --- measured token usage (RVW03-WS04) ---------------------------------------
+
+
+def test_per_run_usage_is_stamped_and_the_round_total_sums_reported_runs(_seams):
+    """Each run entry carries the usage its CLI reported (RVW03-WS04, #667) and
+    the round total sums exactly the REPORTED runs — a partially-reported round
+    is a lower bound, never padded with fabricated zeros."""
+    from shipit.agent import backend as agent_backend
+
+    _seams["reviews"] = {
+        "correctness": _pass_review([_comment("bug", severity="major")]),
+        "test-quality": _pass_review([]),
+    }
+    _seams["usage"] = {
+        "correctness": TokenUsage(total_tokens=11943, source="codex-stderr"),
+        "test-quality": TokenUsage(total_tokens=57, source="codex-stderr"),
+    }
+    outcome = fanout.run_fanout_review(
+        agent_backend.CODEX, _ctx(), dimensions=["correctness", "test-quality"]
+    )
+    by_dim = {run["dimension"]: run for run in outcome.runs}
+    assert by_dim["correctness"]["usage"] == {
+        "total_tokens": 11943,
+        "input_tokens": None,
+        "output_tokens": None,
+        "source": "codex-stderr",
+    }
+    assert outcome.total_tokens == 11943 + 57
+
+
+def test_unreported_usage_round_totals_none_not_zero(_seams):
+    """A round where NO run reported usage totals None — the explicit
+    latency-only marker the eval report distinguishes — never a fake 0."""
+    from shipit.agent import backend as agent_backend
+
+    _seams["reviews"] = {
+        "correctness": _pass_review([]),
+        "test-quality": _pass_review([]),
+    }
+    outcome = fanout.run_fanout_review(
+        agent_backend.CODEX, _ctx(), dimensions=["correctness", "test-quality"]
+    )
+    assert all(
+        run["usage"]
+        == {
+            "total_tokens": None,
+            "input_tokens": None,
+            "output_tokens": None,
+            "source": "unreported",
+        }
+        for run in outcome.runs
+    )
+    assert outcome.total_tokens is None
+
+
+def test_failed_pass_keeps_the_explicitly_unknown_usage(_seams):
+    """A failed pass's run entry keeps usage explicitly-unknown (its launch may
+    have billed tokens nobody reported) while the surviving pass's measurement
+    still reaches the round total."""
+    from shipit.agent import backend as agent_backend
+
+    _seams["reviews"] = {
+        "correctness": _pass_review([_comment("bug", severity="major")]),
+        "test-quality": RuntimeError("backend blew up"),
+    }
+    _seams["usage"] = {
+        "correctness": TokenUsage(total_tokens=500, source="codex-stderr"),
+    }
+    outcome = fanout.run_fanout_review(
+        agent_backend.CODEX, _ctx(), dimensions=["correctness", "test-quality"]
+    )
+    by_dim = {run["dimension"]: run for run in outcome.runs}
+    assert by_dim["test-quality"]["usage"]["total_tokens"] is None
+    assert by_dim["test-quality"]["usage"]["source"] == "unreported"
+    assert outcome.total_tokens == 500
+
+
+def test_calibrator_usage_and_applied_reasoning_ride_its_run_entry(_seams):
+    """The calibrator's run entry carries its measured usage and the reasoning
+    level the adapter ACTUALLY applied (RVW03-WS04) — and its usage joins the
+    round total alongside the passes'."""
+    from shipit.agent import backend as agent_backend
+
+    _seams["reviews"] = {
+        "correctness": _pass_review([_comment("bug", severity="major")]),
+    }
+    _seams["usage"] = {
+        "correctness": TokenUsage(total_tokens=100, source="codex-stderr"),
+        "calibrator": TokenUsage(
+            total_tokens=2000,
+            source="claude-envelope",
+            input_tokens=1900,
+            output_tokens=100,
+        ),
+    }
+    _seams["result"] = CalibrationResult(
+        overall_feedback="v",
+        entries=(_calibrated(0, _finding(Severity.MAJOR, "bug")),),
+    )
+    outcome = fanout.run_fanout_review(
+        agent_backend.CODEX, _ctx(), dimensions=["correctness"], calibrator=_CAL
+    )
+    cal = outcome.runs[-1]
+    assert cal["kind"] == "calibrator"
+    assert cal["usage"]["total_tokens"] == 2000
+    assert cal["usage"]["source"] == "claude-envelope"
+    assert cal["reasoning"] == "high"  # applied by the claude --effort knob
+    assert outcome.total_tokens == 2100
+
+
+def test_round1_passes_record_no_reasoning_when_none_was_applied(_seams):
+    """Round-1 passes request no ReasoningLevel, so no run entry carries one —
+    the record never invents a level that was not in argv (#685)."""
+    from shipit.agent import backend as agent_backend
+
+    _seams["reviews"] = {"correctness": _pass_review([])}
+    outcome = fanout.run_fanout_review(
+        agent_backend.CODEX, _ctx(), dimensions=["correctness"]
+    )
+    assert "reasoning" not in outcome.runs[0]
 
 
 # --- the offline range target (RVW03-WS01) -----------------------------------
@@ -992,10 +1135,18 @@ def _range_seams(monkeypatch):
 
     def fake_run_range_review(backend, view, **kw):
         capture["calls"].append({"view": view, "dimension": kw.get("dimension")})
-        outcome = capture["reviews"][kw["dimension"].name]
+        dim = kw["dimension"]
+        outcome = capture["reviews"][dim.name]
         if isinstance(outcome, Exception):
             raise outcome
-        return outcome
+        # Mirror the live arm (RVW03-WS04): the range pass's capture carries its
+        # measured usage (per-dimension override via capture["usage"]) so range
+        # run entries carry usage exactly like live entries, plus applied reasoning.
+        return CapturedReview(
+            review=outcome,
+            usage=capture.get("usage", {}).get(dim.name, UNREPORTED),
+            reasoning=kw.get("reasoning"),
+        )
 
     monkeypatch.setattr(fanout.producer, "run_range_review", fake_run_range_review)
 
@@ -1016,7 +1167,13 @@ def _range_seams(monkeypatch):
             "pr_number": pr_number,
             "commit_range": commit_range,
         }
-        return capture["result"], "cal-run-id", "calibrator task"
+        return CalibratorRun(
+            result=capture["result"],
+            run_id="cal-run-id",
+            task="calibrator task",
+            usage=capture.get("usage", {}).get("calibrator", UNREPORTED),
+            reasoning=config.reasoning,
+        )
 
     monkeypatch.setattr(fanout, "run_calibrator", fake_run_calibrator)
     return capture

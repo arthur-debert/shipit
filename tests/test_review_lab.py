@@ -273,6 +273,46 @@ def test_missing_checkout_is_a_loud_preflight_refusal(
     assert not launcher["launches"]
 
 
+def test_unfetched_pin_sha_refuses_before_any_launch(checkout, launcher, tmp_path):
+    """The all-or-nothing preflight resolves EVERY pin's range up front: a
+    second pin naming an unfetched SHA refuses before the FIRST pin's point ever
+    launches — locking the documented contract that a multi-pin run never bills
+    pin 1 and then dies on pin 2's missing commit, leaving a half-run curve."""
+    view = replay.resolve_range("HEAD~1..HEAD", workdir=str(checkout))
+    fixture = parse_fixture(
+        {
+            "schema": 1,
+            "version": 1,
+            "prs": [
+                {
+                    "id": "widget-1",
+                    "repo": "acme/widget",
+                    "pr": 7,
+                    "base_sha": str(view.base_sha),
+                    "head_sha": str(view.head_sha),
+                },
+                {
+                    "id": "widget-2",  # same repo/checkout, but SHAs never fetched
+                    "repo": "acme/widget",
+                    "pr": 8,
+                    "base_sha": "0" * 40,
+                    "head_sha": "1" * 40,
+                },
+            ],
+        }
+    )
+    cell = _control_cell(fixture={"version": 1, "prs": ["widget-1", "widget-2"]})
+    with pytest.raises(CellError, match="does not resolve"):
+        run_cell(
+            cell,
+            fixture,
+            checkouts=[str(checkout)],
+            base_dir=tmp_path / "state",
+            launcher=launcher["launch"],
+        )
+    assert not launcher["launches"]  # all-or-nothing: nothing billed
+
+
 def test_fixture_version_drift_refuses_to_run(checkout, launcher, tmp_path):
     view = replay.resolve_range("HEAD~1..HEAD", workdir=str(checkout))
     cell = _control_cell(fixture={"version": 2, "prs": ["widget-1"]})
@@ -365,6 +405,12 @@ def test_fanout_cell_applies_per_dimension_invocation_overrides(
     models = {run["dimension"]: run["model"] for run in record["round.runs"]}
     assert models == {"correctness": "pro", "test-quality": "o3"}
     assert record["round.cell"]["id"] == "ctl"
+    # The override must reach the DRIVER, not merely the record: the two passes
+    # launch with DISTINCT process deadlines (correctness's 600s vs the
+    # overridden test-quality's 120s), so the timeout override — which round.runs
+    # does NOT stamp — is verified end-to-end at the launch seam, not assumed.
+    launch_timeouts = {launch["timeout"] for launch in launcher["launches"]}
+    assert None not in launch_timeouts and len(launch_timeouts) == 2
 
 
 def test_fanout_rejects_overrides_outside_the_pass_set(checkout):
@@ -507,7 +553,9 @@ def test_convergence_curve_reports_cumulative_points_and_missing_sweeps():
             head="b" * 40,
         ),
     ]
-    curve = convergence_curve(_treatment_cell(), fixture, records)
+    curve = convergence_curve(
+        _treatment_cell(), fixture, records, variant_hash="sha256:base"
+    )
     assert [p.sweep for p in curve.points] == [1, 2, 3]
     p1, p2, p3 = curve.points
     assert (p1.recalled, p1.positives) == (0, 1)
@@ -538,7 +586,9 @@ def test_convergence_curve_latency_only_and_last_record_wins():
         base="a" * 40,
         head="b" * 40,
     )
-    curve = convergence_curve(_treatment_cell(sweeps=1), fixture, [stale, rerun])
+    curve = convergence_curve(
+        _treatment_cell(sweeps=1), fixture, [stale, rerun], variant_hash="sha256:base"
+    )
     [point] = curve.points
     # A --force re-run supersedes its predecessor: both never score together.
     assert point.records == 1 and point.recalled == 1
@@ -562,9 +612,68 @@ def test_convergence_curve_ignores_other_cells_and_other_fixture_versions():
         head="b" * 40,
     )
     drifted["round.cell"]["fixture_version"] = 9
-    curve = convergence_curve(_treatment_cell(sweeps=1), fixture, [foreign, drifted])
+    curve = convergence_curve(
+        _treatment_cell(sweeps=1),
+        fixture,
+        [foreign, drifted],
+        variant_hash="sha256:base",
+    )
     [point] = curve.points
     assert point.records == 0 and point.missing
+
+
+def test_convergence_curve_ignores_a_pin_outside_the_cells_subset():
+    """A record whose cell id + fixture version match but whose PR is a
+    DIFFERENT fixture pin (one the cell does not declare, sharing the same repo
+    store) must NOT pool into the curve. The report filters by the FULL expected
+    key — pin included — so a stray pin never inflates recall or the denominator."""
+    fixture = parse_fixture(
+        {
+            "version": 1,
+            "prs": [
+                {
+                    "id": "widget-1",
+                    "repo": "acme/widget",
+                    "pr": 7,
+                    "base_sha": "a" * 40,
+                    "head_sha": "b" * 40,
+                },
+                {
+                    "id": "widget-2",  # same repo, NOT in the cell's declared subset
+                    "repo": "acme/widget",
+                    "pr": 8,
+                    "base_sha": "c" * 40,
+                    "head_sha": "d" * 40,
+                },
+            ],
+            "labels": [
+                {
+                    "id": "widget-G1",
+                    "pr": "widget-1",
+                    "file": "f.txt",
+                    "lines": [1, 3],
+                    "severity": "major",
+                    "verdict": "real",
+                    "confirmed": True,
+                    "claim": "staging buffer row padding missed",
+                    "provenance": {"kind": "fix-commit", "ref": "abc1234"},
+                }
+            ],
+        }
+    )
+    # A well-scoring record, but tagged for widget-2 — the cell declares widget-1.
+    stray = _tagged_record(
+        sweep=1,
+        findings=[("f.txt", 2, "the staging buffer misses row padding here")],
+        base="a" * 40,
+        head="b" * 40,
+    )
+    stray["round.cell"]["pr"] = "widget-2"
+    curve = convergence_curve(
+        _treatment_cell(sweeps=1), fixture, [stray], variant_hash="sha256:base"
+    )
+    [point] = curve.points
+    assert point.records == 0 and point.missing  # the stray pin never pooled
 
 
 def test_render_curve_report_carries_the_honesty_markers():
@@ -578,7 +687,7 @@ def test_render_curve_report_carries_the_honesty_markers():
         ),
     ]
     cell = _treatment_cell(sweeps=2)
-    curve = convergence_curve(cell, fixture, records)
+    curve = convergence_curve(cell, fixture, records, variant_hash="sha256:base")
     baseline_cell = parse_cell(
         {
             "schema": 1,
@@ -590,7 +699,9 @@ def test_render_curve_report_carries_the_honesty_markers():
             "sweeps": {"count": 2},
         }
     )
-    baseline_curve = convergence_curve(baseline_cell, fixture, [])
+    baseline_curve = convergence_curve(
+        baseline_cell, fixture, [], variant_hash="sha256:base"
+    )
     text = render_curve_report(curve, baseline_curve)
     assert "convergence curve — cell treat" in text
     assert "EQUAL BUDGET" in text
@@ -716,9 +827,12 @@ def test_lab_run_refuses_an_unfair_pair_as_one_clean_error_line(
         cells / "ctl.toml",
         _cell_toml("ctl", baseline="ctl", axis="control", mode="blind"),
     )
+    # A genuinely-unfair pair: the treatment scores a DIFFERENT pin subset than
+    # the control (not just a different spelling of the same one — an empty
+    # `prs` would resolve to the same single fixture pin and be fair).
     unfair = _cell_toml(
         "treat", baseline="ctl", axis="pr subset", mode="blind"
-    ).replace('prs = ["widget-1"]', "prs = []")
+    ).replace('prs = ["widget-1"]', 'prs = ["widget-2"]')
     _write(cells / "treat.toml", unfair)
     fixture_path = tmp_path / "fixture.toml"
     _write(fixture_path, _fixture_toml(view))
@@ -775,8 +889,8 @@ def test_the_committed_demo_cell_pair_loads_and_is_fair():
 
     control = load_cell(Path("lab/cells/fanout-baseline.toml"))
     treatment = load_cell(Path("lab/cells/fanout-informed.toml"))
-    check_fair_pair(treatment, control)
     fixture = load_fixture(Path("lab/fixture.toml"))
+    check_fair_pair(treatment, control, fixture)
     assert fixture.version == control.fixture_version
     assert [p.id for p in resolve_pins(treatment, fixture)] == [
         "core-440",

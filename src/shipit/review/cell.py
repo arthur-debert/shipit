@@ -32,6 +32,7 @@ never reached a backend — the RVW02 failure reproduced in config.
 
 from __future__ import annotations
 
+import re
 import tomllib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -40,6 +41,7 @@ from typing import Any
 
 from .calibrator import CalibratorConfig
 from .dimensions import known_dimension_names, resolve_dimensions
+from .groundtruth import Fixture
 
 __all__ = [
     "CELL_SCHEMA_VERSION",
@@ -164,12 +166,46 @@ def _optional_str(raw: Mapping[str, Any], key: str, where: str) -> str | None:
     return value.strip()
 
 
+#: The ceiling on a sweep/replicate count. The runner allocates one point per
+#: (pin × replicate × sweep), so an unbounded count is an OOM vector (a typo'd
+#: ``count = 1000000000`` would build a billion-tuple before anything runs) —
+#: a plan this large is a mistake, never a real experiment.
+MAX_SWEEP_COUNT = 1000
+
+
 def _positive_int(raw: Mapping[str, Any], key: str, where: str, default: int) -> int:
     value = raw.get(key, default)
     # bool is an int subclass; `count = true` must not parse as 1.
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise CellError(f"{where}: {key!r} must be a positive integer")
+    if value > MAX_SWEEP_COUNT:
+        raise CellError(
+            f"{where}: {key!r} = {value} exceeds the max {MAX_SWEEP_COUNT} — "
+            "the runner allocates one point per pin × replicate × sweep, so a "
+            "plan this large is a mistake, not an experiment"
+        )
     return value
+
+
+def _validate_instructions_path(path: str, where: str) -> None:
+    """Constrain a cell's ``[instructions].path`` to an in-repo relative file.
+
+    A cell TOML is committed and reviewed, but its ``path`` is still untrusted
+    input: an absolute path (``/etc/passwd``), a home-expansion (``~/.ssh/…``),
+    or a ``..`` traversal would let a cell read a LOCAL SECRET off the
+    maintainer's disk and hand its contents to the model as prompt text when
+    ``lab run`` executes — arbitrary-file-read → exfiltration. Cells read
+    instructions from in-repo files ONLY, so anything but a repo-relative path
+    with no parent-directory hops is a loud refusal here, before any run.
+    """
+    candidate = Path(path)
+    if candidate.is_absolute() or path.startswith("~") or ".." in candidate.parts:
+        raise CellError(
+            f"{where}: [instructions] 'path' must be a repo-relative path with "
+            f"no '..' segments (got {path!r}) — a cell reads its instructions "
+            "from in-repo files only; an absolute, '~', or traversal path could "
+            "exfiltrate a local secret into the prompt"
+        )
 
 
 def _reject_unknown_keys(
@@ -436,6 +472,8 @@ def parse_cell(data: Mapping[str, Any], *, where: str = "cell") -> Cell:
             instructions_raw, ["path", "label"], f"{where}: [instructions]"
         )
         instructions_path = _optional_str(instructions_raw, "path", where)
+        if instructions_path is not None:
+            _validate_instructions_path(instructions_path, where)
         label = _optional_str(instructions_raw, "label", where)
 
     sweeps_raw = data.get("sweeps")
@@ -509,7 +547,16 @@ def resolve_cell_path(ref: str, cells_dir: Path = DEFAULT_CELLS_DIR) -> Path:
     return cells_dir / f"{ref}.toml"
 
 
-def check_fair_pair(cell: Cell, baseline: Cell) -> None:
+def _effective_pins(cell: Cell, fixture: Fixture) -> frozenset[str]:
+    """The pin id set a cell actually replays: its declared ``prs``, or — the
+    ``prs = []`` "every fixture pin" convention (:func:`resolve_pins` expands
+    it) — the fixture's full pin set. The denominator a fair-pair compares."""
+    if cell.prs:
+        return frozenset(cell.prs)
+    return frozenset(pin.id for pin in fixture.prs)
+
+
+def check_fair_pair(cell: Cell, baseline: Cell, fixture: Fixture) -> None:
     """Loud :class:`CellError` when ``cell`` and its ``baseline`` cannot be
     fairly compared. PURE.
 
@@ -517,9 +564,12 @@ def check_fair_pair(cell: Cell, baseline: Cell) -> None:
     score against the SAME fixture version and the SAME PR subset (differing
     denominators answer different questions — comparing them is the RVW02
     incomparable-arms failure), and ``cell.baseline`` must actually name
-    ``baseline``, which must be a control. The remaining half — that the axis
-    named really is the ONLY difference — is what PR review of the cell pair
-    checks, which the mandatory declarations make reviewable.
+    ``baseline``, which must be a control. The PR subset compares EFFECTIVE pin
+    sets against ``fixture`` — ``prs = []`` means "every fixture pin", so a
+    control that omits ``prs`` and a treatment that lists all of them
+    explicitly are the SAME denominator, not an unfair pair. The remaining half
+    — that the axis named really is the ONLY difference — is what PR review of
+    the cell pair checks, which the mandatory declarations make reviewable.
     """
     if cell.baseline != baseline.id:
         raise CellError(
@@ -537,7 +587,7 @@ def check_fair_pair(cell: Cell, baseline: Cell) -> None:
             f"{baseline.id!r} (fixture v{baseline.fixture_version}) pin "
             "different fixture versions — their numbers never compare"
         )
-    if set(cell.prs) != set(baseline.prs):
+    if _effective_pins(cell, fixture) != _effective_pins(baseline, fixture):
         raise CellError(
             f"cells {cell.id!r} and {baseline.id!r} replay different PR subsets "
             "— their recall denominators differ, so the comparison is unfair"
@@ -599,6 +649,26 @@ def record_matches_key(record: Mapping[str, Any], key: Mapping[str, Any]) -> boo
 
 # --- informed-sweep composition (runner-layer, never a replay-driver change) ---
 
+#: Control characters stripped from a prior finding before it enters the next
+#: sweep's prompt — a banked finding's fields ultimately derive from untrusted
+#: diffs, so a terminal-escape or NUL byte must never ride through the store
+#: into the composed instructions (the same CWE-150 guard the curve render uses).
+_PRIOR_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+
+#: The most prior findings a composed prompt embeds, and the per-field char cap:
+#: a prior finding's text is untrusted and unbounded, so a poisoned or huge
+#: banked record can neither bloat the prompt without limit nor smuggle an
+#: arbitrarily long field into it. Excess is truncated, not silently dropped.
+MAX_PRIOR_FINDINGS = 200
+_MAX_PRIOR_FIELD_LEN = 500
+
+
+def _clean_prior_field(value: Any, *, limit: int = _MAX_PRIOR_FIELD_LEN) -> str:
+    """One prior-finding field as inert, bounded prompt data: control chars
+    neutralized, whitespace flattened to one line, length capped."""
+    flattened = " ".join(_PRIOR_CONTROL_CHARS.sub("·", str(value)).split())
+    return flattened[:limit]
+
 
 def compose_informed_instructions(
     base_text: str, prior_findings: Sequence[Mapping[str, Any]]
@@ -613,17 +683,27 @@ def compose_informed_instructions(
     ALREADY BANKED: its job is what they missed, so repeats are wasted tokens.
     An empty ``prior_findings`` returns the base text unchanged (sweep 1 of an
     informed cell is blind by construction).
+
+    Prior findings are UNTRUSTED data (their fields trace back to diffs), so
+    they enter as inert, bounded text — control characters neutralized, each
+    field length-capped, and the list truncated at :data:`MAX_PRIOR_FINDINGS` —
+    never as free prose a poisoned record could bloat or use to steer the run.
     """
     if not prior_findings:
         return base_text
     lines = []
-    for finding in prior_findings:
-        file = str(finding.get("file") or "?")
+    for finding in prior_findings[:MAX_PRIOR_FINDINGS]:
+        file = _clean_prior_field(finding.get("file") or "?")
         line = finding.get("line")
         loc = f"{file}:{line}" if isinstance(line, int) else file
-        severity = str(finding.get("severity") or "?")
-        text = " ".join(str(finding.get("text") or "").split())
+        severity = _clean_prior_field(finding.get("severity") or "?", limit=32)
+        text = _clean_prior_field(finding.get("text") or "")
         lines.append(f"- {loc} ({severity}): {text}")
+    if len(prior_findings) > MAX_PRIOR_FINDINGS:
+        lines.append(
+            f"- (+{len(prior_findings) - MAX_PRIOR_FINDINGS} more banked "
+            "finding(s) omitted from this prompt)"
+        )
     return (
         f"{base_text.rstrip()}\n\n"
         "## Findings already banked by prior sweeps\n\n"

@@ -60,7 +60,7 @@ from .instructions import load_instructions
 
 logger = logging.getLogger("shipit.review")
 
-__all__ = ["PlannedPoint", "RunSummary", "plan_points", "run_cell"]
+__all__ = ["PlannedPoint", "RunSummary", "plan_points", "resolve_pins", "run_cell"]
 
 
 @dataclass(frozen=True)
@@ -107,14 +107,15 @@ def resolve_pins(
     if unknown:
         raise CellError(
             f"cell {cell.id!r} names fixture pin(s) the fixture does not have: "
-            f"{', '.join(unknown)}"
+            f"{', '.join(map(repr, unknown))}"
         )
     if subset:
         outside = [pin_id for pin_id in subset if pin_id not in declared]
         if outside:
             raise CellError(
                 f"--pr pin(s) outside cell {cell.id!r}'s declared subset: "
-                f"{', '.join(outside)} (declared: {', '.join(declared)})"
+                f"{', '.join(map(repr, outside))} "
+                f"(declared: {', '.join(map(repr, declared))})"
             )
         declared = tuple(pin_id for pin_id in declared if pin_id in set(subset))
     return tuple(by_id[pin_id] for pin_id in declared)
@@ -189,14 +190,20 @@ def _prior_findings(
     records: Sequence[Mapping[str, Any]], point: PlannedPoint
 ) -> list[Mapping[str, Any]]:
     """Every posted finding banked by this point's PRIOR sweeps (same cell /
-    fixture version / pin / variant / replicate, sweep < this one), in store
-    order. PURE — the informed sweep's composition input."""
+    fixture version / pin / variant / replicate, sweep < this one). PURE — the
+    informed sweep's composition input.
+
+    LAST-RECORD-WINS per prior sweep key, the SAME rule the curve scorer applies
+    (:func:`shipit.review.curve._dedupe_by_key`): the store is append-only and
+    ``--force`` re-runs append a NEW record under the same key, so only the
+    newest record for each prior sweep contributes — a superseded run's findings
+    never leak (or double) into the next sweep's prompt."""
     priors: list[Mapping[str, Any]] = []
     for sweep in range(1, point.sweep):
         prior_key = {**point.key, "sweep": sweep}
-        for record in records:
-            if record_matches_key(record, prior_key):
-                priors.extend(_posted_findings(record))
+        matching = [r for r in records if record_matches_key(r, prior_key)]
+        if matching:
+            priors.extend(_posted_findings(matching[-1]))
     return priors
 
 
@@ -218,9 +225,10 @@ def run_cell(
     not across rounds). Each point is idempotent by its FULL key: a banked
     record is reused (printed as such), never re-run, unless ``force``.
     Preflight is all-or-nothing BEFORE any model run bills: the fixture
-    version, pin set, backend token, instructions file, and every needed
-    checkout are validated first — a missing clone is a loud refusal naming
-    what to clone, never a silent skip.
+    version, pin set, backend token, instructions file, every needed checkout,
+    AND every pinned commit range are resolved first — a missing clone or an
+    unfetched pinned SHA is a loud refusal naming what to fix, never a silent
+    skip and never a half-run curve (pin 1 launched, pin 2 dead on its SHA).
 
     ``checkouts`` are local clone paths (the current directory is always a
     candidate); ``pr_subset`` narrows the session to named pins; ``base_dir``
@@ -275,14 +283,40 @@ def run_cell(
     missing = sorted({pin.repo.lower() for pin in pins} - set(slug_to_checkout))
     if missing:
         raise CellError(
-            f"no checkout supplied for fixture repo(s): {', '.join(missing)} — "
-            "clone them locally (with the pinned commits fetched) and pass "
-            "each clone via --checkout"
+            f"no checkout supplied for fixture repo(s): "
+            f"{', '.join(map(repr, missing))} — clone them locally (with the "
+            "pinned commits fetched) and pass each clone via --checkout"
         )
+
+    # Range preflight: resolve EVERY pin's commit range up front, so an
+    # unfetched or unknown pinned SHA refuses BEFORE any point launches —
+    # all-or-nothing (never launch pin 1's point, then die on pin 2's missing
+    # SHA and leave a half-run curve banked). Slugs stay lowercased (Repo
+    # identity is canonical-lowercase; fixture pins may vary in case).
+    views_by_pin: dict[str, Any] = {}
+    for pin in pins:
+        workdir = slug_to_checkout[pin.repo.lower()]
+        try:
+            view = replay_mod.resolve_range(
+                f"{pin.base_sha}..{pin.head_sha}", workdir=workdir
+            )
+        except Exception as exc:  # git resolution failure — one loud refusal
+            raise CellError(
+                f"cell {cell.id!r}: pin {pin.id!r} range "
+                f"{pin.base_sha[:12]}..{pin.head_sha[:12]} does not resolve in "
+                f"checkout {workdir!r} ({exc}) — fetch the pinned commits "
+                "before running (offline replay never fetches)"
+            ) from exc
+        if view.repo.slug != pin.repo.lower():
+            raise CellError(
+                f"checkout {workdir!r} resolves to {view.repo.slug!r}, not the "
+                f"pin's repo {pin.repo!r} (pin {pin.id!r})"
+            )
+        views_by_pin[pin.id] = view
 
     points = plan_points(cell, pins, variant_hash=variant_hash)
     say(
-        f"cell {cell.id} (axis: {cell.axis}; baseline: {cell.baseline}) — "
+        f"cell {cell.id!r} (axis: {cell.axis!r}; baseline: {cell.baseline!r}) — "
         f"{len(points)} point(s): {len(pins)} pin(s) × "
         f"{cell.replicates} replicate(s) × {cell.sweeps} sweep(s), "
         f"{cell.sweep_mode} sweeps"
@@ -304,22 +338,14 @@ def run_cell(
     reused: list[Mapping[str, Any]] = []
     for point in points:
         slug = point.pin.repo.lower()
-        where = f"{point.pin.id} replicate {point.replicate} sweep {point.sweep}"
+        where = f"{point.pin.id!r} replicate {point.replicate} sweep {point.sweep}"
         banked = any(record_matches_key(record, point.key) for record in _records(slug))
         if banked and not force:
             say(f"  {where}: banked — reused (pass --force to re-run)")
             reused.append(point.key)
             continue
-        workdir = slug_to_checkout[slug]
-        view = replay_mod.resolve_range(
-            f"{point.pin.base_sha}..{point.pin.head_sha}", workdir=workdir
-        )
-        if view.repo.slug != slug:
-            raise CellError(
-                f"checkout {workdir!r} resolves to {view.repo.slug!r}, not the "
-                f"pin's repo {point.pin.repo!r}"
-            )
-        say(f"  {where}: running ({cell.shape}, {cell.invocation.backend})…")
+        view = views_by_pin[point.pin.id]  # resolved in the range preflight above
+        say(f"  {where}: running ({cell.shape}, {cell.invocation.backend!r})…")
         result = _run_point(
             cell,
             backend,
@@ -334,7 +360,7 @@ def run_cell(
         executed.append(point.key)
         records_by_slug.pop(slug, None)  # refresh: the store grew
     say(
-        f"cell {cell.id}: {len(executed)} executed, {len(reused)} reused "
+        f"cell {cell.id!r}: {len(executed)} executed, {len(reused)} reused "
         f"(idempotent by key)"
     )
     return RunSummary(cell_id=cell.id, executed=tuple(executed), reused=tuple(reused))

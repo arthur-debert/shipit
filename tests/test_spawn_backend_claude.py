@@ -139,3 +139,20 @@ def test_build_command_pins_a_model_when_the_instance_carries_one():
     assert "--model" not in claude_backend.ClaudeAdapter().build_command(
         "task", "reviewer"
     )
+
+
+def test_reasoning_level_rides_the_native_effort_flag():
+    # RVW03-WS04 (#685): a pinned ReasoningLevel reaches REAL argv via claude's
+    # native `--effort <level>` (probed on 2.1.206: accepts low/medium/high/
+    # xhigh/max, a superset of the domain tokens), and the adapter reports the
+    # applied level for the record stamp.
+    adapter = claude_backend.ClaudeAdapter(reasoning="high")
+    cmd = adapter.build_command("task", "reviewer", read_only=True)
+    assert cmd[cmd.index("--effort") + 1] == "high"
+    assert adapter.reasoning == "high"
+
+
+def test_no_reasoning_level_means_no_effort_flag():
+    cmd = CLAUDE.build_command("task", "implementer")
+    assert "--effort" not in cmd
+    assert CLAUDE.reasoning is None

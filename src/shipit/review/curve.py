@@ -33,8 +33,9 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..finding import Severity
-from .cell import KEY_FIELDS, Cell
+from .cell import KEY_FIELDS, Cell, record_matches_key
 from .groundtruth import Fixture
+from .labrun import plan_points, resolve_pins
 from .scorer import UNDERPOWERED_FLOOR, VariantScore, score_records
 
 __all__ = ["CellCurve", "CurvePoint", "convergence_curve", "render_curve_report"]
@@ -49,18 +50,21 @@ _HEADLINE_TIERS = (Severity.CRITICAL, Severity.MAJOR)
 class CurvePoint:
     """One cumulative sweep point: what sweeps ``1..sweep`` achieved together.
 
-    ``records`` counts the banked rounds pooled into this point; ``missing``
-    marks a DECLARED sweep with no banked record yet (the curve renders the
-    gap and says how to fill it, never silently truncates). ``tokens`` is the
-    cumulative ``round.usage.total_tokens`` sum over records that carry one
-    (``None`` when none do — the latency-only case); ``tokens_complete`` says
-    whether EVERY pooled record carried a count, so a partial sum renders as
-    the floor it is (``≥``), never as the truth.
+    ``records`` counts the banked rounds pooled into this point. ``expected``
+    is how many DECLARED points this sweep has (pins × replicates) and
+    ``banked`` how many of them have a record — a sweep is :pyattr:`missing`
+    whenever ``banked < expected``, so an interrupted multi-pin run renders the
+    gap (and how many points are short) instead of a falsely-complete curve.
+    ``tokens`` is the cumulative ``round.usage.total_tokens`` sum over records
+    that carry one (``None`` when none do — the latency-only case);
+    ``tokens_complete`` says whether EVERY pooled record carried a count, so a
+    partial sum renders as the floor it is (``≥``), never as the truth.
     """
 
     sweep: int
     records: int
-    missing: bool
+    expected: int
+    banked: int
     positives: int
     recalled: int
     false_positives: int
@@ -68,6 +72,12 @@ class CurvePoint:
     tokens: int | None
     tokens_complete: bool
     duration_ms: int
+
+    @property
+    def missing(self) -> bool:
+        """True when a declared point of this sweep has no banked record yet —
+        the curve renders the gap and how to fill it, never silently truncates."""
+        return self.banked < self.expected
 
     @property
     def recall(self) -> float | None:
@@ -149,36 +159,53 @@ def _usage_int(record: Mapping[str, Any], key: str) -> int | None:
 
 
 def convergence_curve(
-    cell: Cell, fixture: Fixture, records: Sequence[Mapping[str, Any]]
+    cell: Cell,
+    fixture: Fixture,
+    records: Sequence[Mapping[str, Any]],
+    *,
+    variant_hash: str,
 ) -> CellCurve:
     """``cell``'s convergence curve from the banked records. PURE, deterministic.
 
-    Filters to the records the cell's runs tagged (``round.cell.id`` +
-    fixture version), supersedes ``--force`` re-runs by key (last wins), and
-    scores each cumulative prefix ``sweeps 1..k`` for ``k = 1..cell.sweeps``
-    as one pooled arm. A declared sweep with no banked record yields a
+    Filters to the records matching THIS run's full expected key set — the
+    ADR-0049 idempotency keys (cell, fixture version, pin, variant, replicate,
+    sweep) of ``cell``'s own plan at ``variant_hash`` (the content hash of the
+    cell's BASE instructions, computed by the boundary that reads them). Nothing
+    else pools in: a record from a DIFFERENT instructions variant of the same
+    cell (edit the prompt, the hash changes), a pin outside the cell's declared
+    subset, or a foreign cell id / fixture version is excluded, so the curve
+    scores only the current arm and never overstates recall/FP/cost by mixing
+    superseded prompts or stray pins. ``--force`` re-runs are then superseded by
+    key (last wins), and each cumulative prefix ``sweeps 1..k`` scores as one
+    pooled arm. A sweep whose declared points are not all banked yields a
     ``missing`` point carrying the prior sweeps' cumulative numbers — the gap
-    renders, the curve never silently shortens.
+    (and how many points are short) renders, the curve never silently shortens.
     """
+    expected_keys = [
+        point.key
+        for point in plan_points(
+            cell, resolve_pins(cell, fixture), variant_hash=variant_hash
+        )
+    ]
     tagged = [
         record
         for record in records
-        if (tag := _cell_tag(record)) is not None
-        and tag.get("id") == cell.id
-        and tag.get("fixture_version") == cell.fixture_version
+        if any(record_matches_key(record, key) for key in expected_keys)
     ]
     deduped = _dedupe_by_key(tagged)
     points = []
     for sweep in range(1, cell.sweeps + 1):
+        keys_this_sweep = [key for key in expected_keys if key["sweep"] == sweep]
+        banked_this_sweep = sum(
+            any(record_matches_key(record, key) for record in deduped)
+            for key in keys_this_sweep
+        )
         subset = [
             record
             for record in deduped
             if isinstance(sweep_of := _cell_tag(record).get("sweep"), int)
             and sweep_of <= sweep
         ]
-        has_this_sweep = any(
-            _cell_tag(record).get("sweep") == sweep for record in subset
-        )
         score = _pooled_score(fixture, subset)
         if score is None:
             positives = recalled = fps = unadj = 0
@@ -197,7 +224,8 @@ def convergence_curve(
             CurvePoint(
                 sweep=sweep,
                 records=len(subset),
-                missing=not has_this_sweep,
+                expected=len(keys_this_sweep),
+                banked=banked_this_sweep,
                 positives=positives,
                 recalled=recalled,
                 false_positives=fps,
@@ -257,10 +285,10 @@ def _per_budget(point: CurvePoint) -> tuple[str, str]:
     tokens and recall per minute — ``n/a`` whenever either side is missing."""
     recall = point.recall
     per_mtok = "n/a"
-    if recall is not None and point.tokens:
+    if recall is not None and point.tokens is not None and point.tokens > 0:
         per_mtok = f"{recall / (point.tokens / 1_000_000):.1%}/Mtok"
     per_minute = "n/a"
-    if recall is not None and point.duration_ms:
+    if recall is not None and point.duration_ms > 0:
         per_minute = f"{recall / point.minutes:.1%}/min"
     return per_mtok, per_minute
 
@@ -283,9 +311,10 @@ def _curve_lines(curve: CellCurve, *, title: str) -> list[str]:
         lines.append(cost)
         if point.missing:
             lines.append(
-                f"    [missing] sweep {point.sweep} has no banked record — "
-                "cumulative numbers above carry the prior sweeps; "
-                "`shipit lab run` fills the point"
+                f"    [missing] sweep {point.sweep}: "
+                f"{point.expected - point.banked} of {point.expected} declared "
+                "point(s) unbanked — cumulative numbers above carry the prior "
+                "sweeps; `shipit lab run` fills the point"
             )
     if not curve.points:
         lines.append("  (cell declares zero sweeps — nothing to render)")

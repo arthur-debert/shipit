@@ -24,6 +24,34 @@ from shipit.review.cell import (
     resolve_cell_path,
     run_key,
 )
+from shipit.review.groundtruth import parse_fixture
+
+
+def _fair_fixture():
+    """A fixture pinning the pins the fair-pair tests name (`core-440`,
+    `app-391`) — `check_fair_pair` compares EFFECTIVE pin sets against it, so
+    `prs = []` (every pin) and an explicit full list read as one denominator."""
+    return parse_fixture(
+        {
+            "version": 1,
+            "prs": [
+                {
+                    "id": "core-440",
+                    "repo": "acme/core",
+                    "pr": 1,
+                    "base_sha": "a" * 40,
+                    "head_sha": "b" * 40,
+                },
+                {
+                    "id": "app-391",
+                    "repo": "acme/app",
+                    "pr": 2,
+                    "base_sha": "c" * 40,
+                    "head_sha": "d" * 40,
+                },
+            ],
+        }
+    )
 
 
 def _cell_data(**overrides):
@@ -229,6 +257,36 @@ def test_sweep_mode_vocabulary_is_closed():
         parse_cell(_cell_data(sweeps={"count": 1, "mode": "psychic"}))
 
 
+def test_sweep_count_and_replicates_reject_absurd_values():
+    """An unbounded count is an OOM vector — the runner allocates one point per
+    pin × replicate × sweep, so a plan above the ceiling is a mistake, refused
+    at parse before it can build a billion-tuple."""
+    with pytest.raises(CellError, match="exceeds the max"):
+        parse_cell(_cell_data(sweeps={"count": 1_000_000_000}))
+    with pytest.raises(CellError, match="exceeds the max"):
+        parse_cell(_cell_data(sweeps={"count": 1, "replicates": 2000}))
+
+
+# --- instructions path safety (arbitrary-file-read guard) --------------------------
+
+
+@pytest.mark.parametrize(
+    "bad_path",
+    ["/etc/passwd", "~/.ssh/id_rsa", "../../.aws/credentials", "sub/../../x"],
+)
+def test_instructions_path_rejects_absolute_home_and_traversal(bad_path):
+    """A cell reads instructions from in-repo files ONLY: an absolute, '~', or
+    '..' path is a loud refusal at parse — it could otherwise read a local
+    secret off disk and hand its contents to the model as prompt text."""
+    with pytest.raises(CellError, match="repo-relative"):
+        parse_cell(_cell_data(instructions={"path": bad_path}))
+
+
+def test_instructions_path_accepts_a_repo_relative_file():
+    cell = parse_cell(_cell_data(instructions={"path": "lab/instructions/strict.txt"}))
+    assert cell.instructions_path == "lab/instructions/strict.txt"
+
+
 # --- the file boundary ---------------------------------------------------------------
 
 
@@ -332,22 +390,57 @@ def test_compose_informed_instructions_embeds_prior_findings():
     assert "what they MISSED" in composed
 
 
+def test_compose_informed_instructions_neutralizes_control_chars_and_caps():
+    """Prior findings are untrusted (their fields trace back to diffs): a
+    terminal-escape byte is neutralized before it reaches the prompt, and a
+    flood of priors is capped with an explicit note — a poisoned or huge banked
+    record can neither steer nor bloat the next sweep's instructions."""
+    from shipit.review.cell import MAX_PRIOR_FINDINGS
+
+    composed = compose_informed_instructions(
+        "base",
+        [{"file": "a.py", "line": 1, "severity": "major", "text": "x\x1b[31mred"}],
+    )
+    assert "\x1b" not in composed and "x·[31mred" in composed
+    many = [
+        {"file": f"f{i}.py", "line": i, "severity": "minor", "text": "t"}
+        for i in range(MAX_PRIOR_FINDINGS + 5)
+    ]
+    capped = compose_informed_instructions("base", many)
+    assert "5 more banked finding(s) omitted" in capped
+
+
 # --- the fair-pair rule -----------------------------------------------------------------
 
 
 def test_check_fair_pair_passes_a_fair_pair():
-    check_fair_pair(parse_cell(_treatment_data()), parse_cell(_cell_data()))
+    check_fair_pair(
+        parse_cell(_treatment_data()), parse_cell(_cell_data()), _fair_fixture()
+    )
+
+
+def test_check_fair_pair_treats_empty_prs_as_every_fixture_pin():
+    """`prs = []` means "every fixture pin", so a control that omits `prs` and a
+    treatment that lists all pins explicitly are ONE denominator — a fair pair,
+    not a spurious mismatch. The check compares effective sets, not raw `prs`."""
+    control = parse_cell(_cell_data(fixture={"version": 1}))  # prs omitted = all
+    treatment = parse_cell(
+        _treatment_data(fixture={"version": 1, "prs": ["core-440", "app-391"]})
+    )
+    check_fair_pair(treatment, control, _fair_fixture())  # no raise
 
 
 def test_check_fair_pair_rejects_wrong_baseline_and_non_control():
     other = parse_cell(_cell_data(id="other-control", baseline="other-control"))
     with pytest.raises(CellError, match="declares baseline"):
-        check_fair_pair(parse_cell(_treatment_data()), other)
+        check_fair_pair(parse_cell(_treatment_data()), other, _fair_fixture())
     # Chained treatments hide axes: the named baseline must itself be a control.
     chained = parse_cell(_treatment_data())
     with pytest.raises(CellError, match="not a control"):
         check_fair_pair(
-            parse_cell(_treatment_data(id="deeper", baseline="treatment")), chained
+            parse_cell(_treatment_data(id="deeper", baseline="treatment")),
+            chained,
+            _fair_fixture(),
         )
 
 
@@ -357,9 +450,11 @@ def test_check_fair_pair_rejects_differing_denominators():
         check_fair_pair(
             parse_cell(_treatment_data(fixture={"version": 2, "prs": ["core-440"]})),
             control,
+            _fair_fixture(),
         )
     with pytest.raises(CellError, match="different PR subsets"):
         check_fair_pair(
             parse_cell(_treatment_data(fixture={"version": 1, "prs": ["app-391"]})),
             control,
+            _fair_fixture(),
         )

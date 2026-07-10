@@ -67,7 +67,7 @@ def run(
                 f"{baseline_path} does not exist — the control cell is part of "
                 "the reviewed pair; commit it first"
             )
-        check_fair_pair(cell, load_cell(baseline_path))
+        check_fair_pair(cell, load_cell(baseline_path), fixture)
     run_cell(
         cell,
         fixture,

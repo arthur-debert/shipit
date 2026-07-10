@@ -20,6 +20,7 @@ from typing import Any, TextIO
 import click
 
 from ...harness.eval import store
+from ...harness.eval.variant import variant_of
 from ...identity import repo_from_slug
 from ...review.cell import (
     DEFAULT_CELLS_DIR,
@@ -31,8 +32,25 @@ from ...review.cell import (
 )
 from ...review.curve import convergence_curve, render_curve_report
 from ...review.groundtruth import DEFAULT_FIXTURE_PATH, load_fixture
+from ...review.instructions import load_instructions
 from ...review.labrun import resolve_pins
 from .._errors import cli_errors
+
+
+def _variant_hash(cell: Cell) -> str:
+    """The content hash of ``cell``'s BASE instructions — the variant half of
+    the run key, computed EXACTLY as the runner does (:mod:`shipit.review.labrun`)
+    so the report selects the same records the runs banked. A missing/unreadable
+    instructions file is a loud :class:`CellError`, never a silently-empty curve.
+    """
+    try:
+        base_text = load_instructions(cell.instructions_path)
+    except OSError as exc:
+        raise CellError(
+            f"cell {cell.id!r}: cannot read instructions "
+            f"{cell.instructions_path!r}: {exc}"
+        ) from exc
+    return variant_of(base_text).content_hash
 
 
 def _pin_records(cell: Cell, fixture, base_dir: Path | None) -> list[dict[str, Any]]:
@@ -83,11 +101,19 @@ def run(
                 "the pair first"
             )
         baseline = load_cell(baseline_path)
-        check_fair_pair(cell, baseline)
+        check_fair_pair(cell, baseline, fixture)
         baseline_curve = convergence_curve(
-            baseline, fixture, _pin_records(baseline, fixture, base_dir)
+            baseline,
+            fixture,
+            _pin_records(baseline, fixture, base_dir),
+            variant_hash=_variant_hash(baseline),
         )
-    curve = convergence_curve(cell, fixture, _pin_records(cell, fixture, base_dir))
+    curve = convergence_curve(
+        cell,
+        fixture,
+        _pin_records(cell, fixture, base_dir),
+        variant_hash=_variant_hash(cell),
+    )
     print(render_curve_report(curve, baseline_curve), file=out, end="")
     return 0
 

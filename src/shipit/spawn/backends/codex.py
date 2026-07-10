@@ -112,6 +112,15 @@ def resolve_model(model: str) -> str:
 #: parses (``foo.bar=true``).
 NETWORK_ACCESS_OVERRIDE = "sandbox_workspace_write.network_access=true"
 
+#: The codex ``-c`` config key that pins the model's reasoning effort (RVW03-WS04,
+#: #685) — codex's native ReasoningLevel knob, applied as ``-c
+#: model_reasoning_effort=<level>``. Probed on codex 0.139.0 (2026-07-10): the
+#: override is accepted and the run header echoes ``reasoning effort: <level>``,
+#: so the flag demonstrably reaches the model config (it is not a silent no-op).
+#: The :class:`~shipit.agent.invocation.ReasoningLevel` tokens (``low`` /
+#: ``medium`` / ``high``) are valid values verbatim.
+REASONING_EFFORT_KEY = "model_reasoning_effort"
+
 
 def _role_preamble(role: str) -> str:
     """The role line prepended to a codex prompt (the no-``--agent`` conveyance).
@@ -131,11 +140,17 @@ class CodexAdapter(BackendAdapter):
 
     name = _IDENTITY.name
 
-    def __init__(self, model: str = DEFAULT_MODEL) -> None:
+    def __init__(
+        self, model: str = DEFAULT_MODEL, reasoning: str | None = None
+    ) -> None:
         #: The Codex model id (alias resolved once at construction). The registry's
         #: shared instance uses :data:`DEFAULT_MODEL`; the funnel constructs an instance
         #: with its per-reviewer ``model`` so the capture reviewer honours the config.
         self.model = resolve_model(model)
+        #: The reasoning level actually emitted as ``-c model_reasoning_effort=…``
+        #: (RVW03-WS04) — ``None`` omits the override (codex's own config default)
+        #: and is what records stamped from this attribute then honestly report.
+        self.reasoning = reasoning
 
     def build_command(
         self,
@@ -148,9 +163,13 @@ class CodexAdapter(BackendAdapter):
     ) -> list[str]:
         """The exact ``codex exec`` argv ADR-0020 §codex specifies, per posture.
 
-        Common shell: ``codex exec --skip-git-repo-check <posture flags> --model <id>
-        "<role-preamble + task>"``. The task prompt is the first positional arg, with the
-        role prepended (:func:`_role_preamble`) because codex has no ``--agent`` flag.
+        Common shell: ``codex exec --skip-git-repo-check <posture flags>
+        [-c model_reasoning_effort=<level>] --model <id> "<role-preamble + task>"``.
+        The task prompt is the first positional arg, with the role prepended
+        (:func:`_role_preamble`) because codex has no ``--agent`` flag. The
+        reasoning override (:data:`REASONING_EFFORT_KEY`, RVW03-WS04) appears only
+        when this instance pins a level — codex's native ReasoningLevel knob,
+        common to both postures.
 
         ``read_only`` selects the posture flags:
 
@@ -196,11 +215,17 @@ class CodexAdapter(BackendAdapter):
         )
         if read_only and output_schema_path is not None:
             posture += ["--output-schema", output_schema_path]
+        reasoning = (
+            ["-c", f"{REASONING_EFFORT_KEY}={self.reasoning}"]
+            if self.reasoning is not None
+            else []
+        )
         return [
             "codex",
             "exec",
             "--skip-git-repo-check",
             *posture,
+            *reasoning,
             "--model",
             self.model,
             prompt,
