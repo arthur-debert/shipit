@@ -291,3 +291,43 @@ class TestReportSanitization:
         # the embedded newline is neutralized: the whole emission stays one line.
         emission = next(ln for ln in text.splitlines() if "spoofed" in ln)
         assert "fake recall 99/99" in emission
+
+    def test_fixture_derived_ids_cannot_forge_output(self):
+        # pin ids and label ids come from the fixture file (user-provided) — a
+        # control char in one must not survive into the report head, the variant
+        # header, or the near-miss banking command's copy-paste argument.
+        fx = parse_fixture(
+            {
+                "schema": 1,
+                "version": 3,
+                "prs": [
+                    {
+                        "id": "core\x1b440",
+                        "repo": "phos-editor/core",
+                        "pr": 440,
+                        "base_sha": BASE,
+                        "head_sha": HEAD,
+                    }
+                ],
+                "labels": [
+                    {
+                        "id": "core\x1bG1",
+                        "pr": "core\x1b440",
+                        "file": "phos-bench/src/bin/gpu_compare.rs",
+                        "lines": [100, 160],
+                        "severity": "major",
+                        "verdict": "real",
+                        "confirmed": True,
+                        "claim": GT_CLAIM,
+                        "provenance": {"kind": "fix-commit", "ref": "f211ab3"},
+                    }
+                ],
+            }
+        )
+        near = finding(
+            "phos-bench/src/bin/gpu_compare.rs",
+            120,
+            "the fallback decision sizes its staging buffer allocation incorrectly",
+        )
+        text = render_report(score_records(fx, [record([near])]))
+        assert "\x1b" not in text

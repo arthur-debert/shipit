@@ -46,6 +46,7 @@ numbers from different versions are never comparable.
 from __future__ import annotations
 
 import re
+import shlex
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -351,15 +352,22 @@ def _tier_line(tier: TierScore) -> str:
 def _adjudication_lines(items: Sequence[Adjudication]) -> list[str]:
     out = []
     for item in items:
+        # Every interpolated field is external (finding text from the round
+        # records, ids/paths from the fixture file) — all sanitized so neither
+        # source can forge terminal output (CWE-150).
+        pr_id = _sanitize(item.pr_id)
         file = _sanitize(item.file)
         loc = f"{file}:{item.line}" if item.line is not None else file
         severity = _sanitize(item.severity) or "?"
-        head = f"    [{item.pr_id}] {loc} ({severity}) — {_sanitize(item.text)}"
+        label_id = _sanitize(item.label_id or "")
+        head = f"    [{pr_id}] {loc} ({severity}) — {_sanitize(item.text)}"
         out.append(head)
         if item.kind == "near-miss":
+            # shlex.quote so the copy-paste command stays one safe argument even
+            # if the (already control-char-stripped) id carries whitespace.
             out.append(
-                f"      ↳ near-missed label {item.label_id!r} — if same defect:"
-                f" shipit eval bank alias {item.label_id} --text <phrasing>"
+                f"      ↳ near-missed label {label_id!r} — if same defect:"
+                f" shipit eval bank alias {shlex.quote(label_id)} --text <phrasing>"
             )
         elif item.kind == "unmatched":
             out.append(
@@ -367,7 +375,7 @@ def _adjudication_lines(items: Sequence[Adjudication]) -> list[str]:
                 " shipit eval bank label … --verdict real|not-real"
             )
         elif item.kind == "false-positive":
-            out.append(f"      ↳ matched banked not-real label {item.label_id!r}")
+            out.append(f"      ↳ matched banked not-real label {label_id!r}")
     return out
 
 
@@ -391,7 +399,8 @@ def render_report(report: ScoreReport) -> str:
         lines += [
             "",
             f"variant {_sanitize(vs.variant)}  "
-            f"({vs.rounds} round(s) over {', '.join(vs.pr_ids)})",
+            f"({vs.rounds} round(s) over "
+            f"{', '.join(_sanitize(p) for p in vs.pr_ids)})",
         ]
         lines += [_tier_line(tier) for tier in vs.tiers]
         lines.append(
