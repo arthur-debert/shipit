@@ -84,7 +84,7 @@ When the user states how something works, check whether the code agrees. If you 
 
 When a high-value domain term is resolved and it belongs in the shared glossary, update `CONTEXT.md` right there. Don't batch up qualifying glossary updates — capture them while the distinction is fresh. Use the format in [CONTEXT-FORMAT.md](./CONTEXT-FORMAT.md).
 
-Updating `CONTEXT.md` is not the goal of the grill. The goal is sharper shared language and better decisions. Most resolved details should stay in the conversation, code, ADRs, PRDs, or focused docs; only terms that are project-specific, repeatedly useful, and likely to be misunderstood without a glossary entry belong in `CONTEXT.md`.
+Updating `CONTEXT.md` is not the goal of the grill. The goal is sharper shared language and better decisions. Most resolved details should stay in the conversation, code, ADRs, Specs, or focused docs; only terms that are project-specific, repeatedly useful, and likely to be misunderstood without a glossary entry belong in `CONTEXT.md`.
 
 `CONTEXT.md` should be totally devoid of implementation details. Do not treat `CONTEXT.md` as a spec, a scratch pad, a transcript, or a repository for implementation decisions. It is a curated glossary and nothing else. Do not add general computing terms, one-off labels, workflow status words, or every term mentioned during the grill.
 
