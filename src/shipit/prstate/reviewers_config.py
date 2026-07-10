@@ -69,10 +69,14 @@ entries):
     reviewer's fan-out shares (ADR-0045: table-level on purpose — a
     per-reviewer calibrator would fork the common severity ruler): an
     inline-table of `backend` / `model` / `reasoning` / `timeout`, e.g.
-    `calibrator = { backend = "claude", reasoning = "high" }`. Unset means the
-    shipped default (`claude` at high ReasoningLevel). Unknown keys and
-    invalid values fail LOUD. Lands on `Roster.calibrator` as a validated
-    :class:`~shipit.review.calibrator.CalibratorConfig`.
+    `calibrator = { backend = "claude", reasoning = "high" }`. The calibrator
+    is a DORMANT stage, OFF by default (RVW02-WS08, #669: the WS05/F2 baseline
+    found the LLM judge net-negative on round-1 major recall) — UNSET means the
+    round-1 default of the mechanically-deduped union; SETTING this inline-table
+    opts the judge back on (its own default is `claude` at high ReasoningLevel).
+    Unknown keys and invalid values fail LOUD. Lands on `Roster.calibrator` as a
+    validated :class:`~shipit.review.calibrator.CalibratorConfig` (or `None` when
+    unset).
 
 The `[reviewers]` value is TABLE-ONLY: a list/array form (`reviewers =
 ["copilot", "codex"]`) is REJECTED loud, not silently accepted. The required

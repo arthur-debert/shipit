@@ -1,13 +1,17 @@
-"""Unit tests for `shipit.review.fanout` — round-1 dimension fan-out +
-calibration (RVW02-WS04, ADR-0045).
+"""Unit tests for `shipit.review.fanout` — round-1 dimension fan-out + union
+post (RVW02-WS04/WS08, ADR-0045).
 
 The orchestration is pinned with the producer + calibrator seams FAKED (no
 Tree, no model run, no gh): pass fan-out over one shared Tree, the union's
 shape and trust-boundary coercion, pass-failure tolerance vs all-failed, the
-empty-union short-circuit (no calibrator run), the deterministic routing
-(duplicates never post, the nit cap, the derived status), the merged coverage
-attestation, and the contributing-run trail (run ids + variant hashes) the
-round record persists.
+empty-union short-circuit, the deterministic routing (duplicates never post,
+the nit cap, the derived status), the merged coverage attestation, and the
+contributing-run trail (run ids + variant hashes) the round record persists.
+
+Both round-1 paths are covered: the DEFAULT mechanically-deduped union
+(RVW02-WS08, calibrator off — no model run, pass severities kept, same-location
+same-claim merged) and the DORMANT LLM calibrator when a reviewer opts it back
+on (`calibrator=_CAL`).
 """
 
 from __future__ import annotations
@@ -22,8 +26,14 @@ from shipit.review.calibrator import (
     CalibratedFinding,
     CalibrationContractError,
     CalibrationResult,
+    CalibratorConfig,
 )
 from shipit.review.dimensions import by_name
+
+#: Opt the dormant LLM calibrator back ON. The default (``calibrator=None``,
+#: RVW02-WS08) is OFF — the mechanically-deduped union — so every test that
+#: exercises the judge path passes this explicitly.
+_CAL = CalibratorConfig()
 
 
 def _ctx():
@@ -131,6 +141,7 @@ def test_fanout_unions_passes_calibrates_and_posts(monkeypatch, _seams):
         agent_backend.CODEX,
         _ctx(),
         dimensions=["correctness", "test-quality"],
+        calibrator=_CAL,
     )
 
     # The union handed to the calibrator: ids == index, dimension-tagged, the
@@ -200,6 +211,7 @@ def test_merged_away_duplicate_rides_the_record_without_double_posting(_seams):
         agent_backend.CODEX,
         _ctx(),
         dimensions=["correctness", "test-quality"],
+        calibrator=_CAL,
     )
     review = outcome.review
     # ONE posted comment though the union carried two candidates.
@@ -229,6 +241,7 @@ def test_single_pass_failure_degrades_but_the_round_continues(_seams):
         agent_backend.CODEX,
         _ctx(),
         dimensions=["correctness", "security-robustness"],
+        calibrator=_CAL,
     )
     # The surviving pass's finding still made it through calibration.
     assert [c["text"] for c in outcome.review["comments"]] == ["bug"]
@@ -277,6 +290,7 @@ def test_calibrator_failure_propagates_and_no_union_is_posted(monkeypatch, _seam
             agent_backend.CODEX,
             _ctx(),
             dimensions=["correctness", "test-quality"],
+            calibrator=_CAL,
         )
 
 
@@ -293,17 +307,16 @@ def test_empty_union_skips_the_calibrator_and_posts_the_attested_clean_review(
         agent_backend.CODEX,
         _ctx(),
         dimensions=["correctness", "test-quality"],
+        calibrator=_CAL,
     )
     assert _seams["union"] is None  # the calibrator never ran
     review = outcome.review
     assert review["comments"] == []
     assert review["summary"]["status"] == "APPROVED"
-    # The empty union skipped the calibrator, so the attestation says so instead
+    # The empty union had nothing to route, so the attestation says so instead
     # of claiming a routing "after calibration" that never ran.
-    assert (
-        "no candidate findings (calibration skipped)"
-        in review["summary"]["overall_feedback"]
-    )
+    assert "no candidate findings" in review["summary"]["overall_feedback"]
+    assert "after calibration" not in review["summary"]["overall_feedback"]
     assert review["summary"]["coverage"]["reviewed"] == ["a.py", "t.py"]
     assert outcome.findings == ()
     assert [r["kind"] for r in outcome.runs] == ["dimension-pass", "dimension-pass"]
@@ -332,6 +345,212 @@ def test_unknown_dimension_fails_loud():
 
     with pytest.raises(ValueError, match="unknown review dimension 'highs-only'"):
         fanout.run_fanout_review(agent_backend.CODEX, _ctx(), dimensions=["highs-only"])
+
+
+# --- the DEFAULT off path: deduped union, no calibrator (RVW02-WS08) -----------
+
+
+def test_default_posts_deduped_union_with_pass_severities_no_calibrator(_seams):
+    """The DEFAULT round-1 (calibrator=None): the union posts through the
+    MECHANICAL dedup using each pass's OWN severity — the LLM judge never runs,
+    the run trail carries no calibrator entry, and the attestation says so."""
+    from shipit.agent import backend as agent_backend
+
+    _seams["reviews"] = {
+        "correctness": _pass_review([_comment("real bug", severity="major")]),
+        "test-quality": _pass_review(
+            [_comment("weak test", severity="nit", file="t.py")],
+            reviewed=("t.py",),
+        ),
+    }
+    outcome = fanout.run_fanout_review(
+        agent_backend.CODEX,
+        _ctx(),
+        dimensions=["correctness", "test-quality"],
+    )
+    assert _seams["union"] is None  # the calibrator never ran
+
+    review = outcome.review
+    # Both distinct findings post, each with its own pass-assigned severity.
+    assert {c["text"]: c["severity"] for c in review["comments"]} == {
+        "real bug": "major",
+        "weak test": "nit",
+    }
+    # A major posted -> the round blocks; the summary attests the off path.
+    assert review["summary"]["status"] == "REQUEST_CHANGES"
+    assert "posted as the deduped union" in review["summary"]["overall_feedback"]
+    assert "calibrator off" in review["summary"]["overall_feedback"]
+    assert "after calibration" not in review["summary"]["overall_feedback"]
+
+    # The run trail is passes ONLY — no calibrator run.
+    assert [r["kind"] for r in outcome.runs] == ["dimension-pass", "dimension-pass"]
+    # The full judged set persists, both canonical and posted.
+    assert all(j.posted and j.duplicate_of is None for j in outcome.findings)
+
+
+def test_default_union_merges_same_location_same_claim_into_one_canonical(_seams):
+    """Two passes flagging the same claim at the same file:line are ONE finding:
+    mechanically deduped to one canonical (the most-severe member) that posts
+    once, the duplicate riding the record with its `duplicate_of` edge."""
+    from shipit.agent import backend as agent_backend
+
+    _seams["reviews"] = {
+        "correctness": _pass_review(
+            [_comment("off-by-one here", severity="minor", file="a.py", line=42)]
+        ),
+        "security-robustness": _pass_review(
+            [_comment("off-by-one here", severity="major", file="a.py", line=42)]
+        ),
+    }
+    outcome = fanout.run_fanout_review(
+        agent_backend.CODEX,
+        _ctx(),
+        dimensions=["correctness", "security-robustness"],
+    )
+    review = outcome.review
+    # ONE posted comment though two passes flagged it — at the MOST-severe
+    # member's severity (major beats minor); duplicates never double-post.
+    assert [(c["text"], c["severity"]) for c in review["comments"]] == [
+        ("off-by-one here", "major")
+    ]
+    assert review["summary"]["status"] == "REQUEST_CHANGES"
+    assert "1 duplicate)" in review["summary"]["overall_feedback"]
+    # Both union entries persist: canonical (posts) + merged-away duplicate.
+    dispositions = sorted((j.duplicate_of is None, j.posted) for j in outcome.findings)
+    assert dispositions == [(False, False), (True, True)]
+
+
+def test_default_union_keeps_distinct_claims_at_the_same_line(_seams):
+    """Same file:line but DIFFERENT claims are distinct findings — the
+    conservative mechanical key never fuses them."""
+    from shipit.agent import backend as agent_backend
+
+    _seams["reviews"] = {
+        "correctness": _pass_review(
+            [_comment("null deref", severity="major", file="a.py", line=7)]
+        ),
+        "test-quality": _pass_review(
+            [_comment("unclear name", severity="nit", file="a.py", line=7)]
+        ),
+    }
+    outcome = fanout.run_fanout_review(
+        agent_backend.CODEX,
+        _ctx(),
+        dimensions=["correctness", "test-quality"],
+    )
+    assert {c["text"] for c in outcome.review["comments"]} == {
+        "null deref",
+        "unclear name",
+    }
+
+
+def test_default_union_applies_the_nit_cap(_seams):
+    """The nit cap is CODE-enforced downstream (route_calibrated), so it rides
+    the off path exactly as it rides the calibrated one."""
+    from shipit.agent import backend as agent_backend
+
+    _seams["reviews"] = {
+        "correctness": _pass_review(
+            [
+                _comment("nit one", severity="nit", file="a.py", line=1),
+                _comment("nit two", severity="nit", file="a.py", line=2),
+            ]
+        ),
+        "test-quality": _pass_review([]),
+    }
+    outcome = fanout.run_fanout_review(
+        agent_backend.CODEX,
+        _ctx(),
+        dimensions=["correctness", "test-quality"],
+        nit_cap=1,
+    )
+    # Only the first nit posts; the second flips to nit-suppressed (retained).
+    assert [c["text"] for c in outcome.review["comments"]] == ["nit one"]
+    suppressed = [
+        j for j in outcome.findings if j.disposition is Disposition.NIT_SUPPRESSED
+    ]
+    assert [j.finding.text for j in suppressed] == ["nit two"]
+    assert "1 nit-suppressed" in outcome.review["summary"]["overall_feedback"]
+
+
+# --- dedup_union: the mechanical dedup (pure) ---------------------------------
+
+
+def _cand(i, text, severity="minor", file="a.py", line=3):
+    return {
+        "id": i,
+        "dimension": "correctness",
+        "file": file,
+        "line": line,
+        "severity": severity,
+        "category": "correctness",
+        "confidence": 0.9,
+        "text": text,
+        "evidence": f"evidence {i}",
+        "fix": "",
+    }
+
+
+def test_dedup_union_merges_by_file_line_claim():
+    union = [
+        _cand(0, "same claim", severity="minor"),
+        _cand(1, "same claim", severity="major"),
+        _cand(2, "other claim", severity="nit"),
+    ]
+    entries = fanout.dedup_union(union)
+    canonicals = [e for e in entries if e.duplicate_of is None]
+    duplicates = [e for e in entries if e.duplicate_of is not None]
+    # Two groups -> two canonicals; the same-claim group merges 0+1.
+    assert {e.finding.text for e in canonicals} == {"same claim", "other claim"}
+    # The canonical for the merged group is the MOST severe member (major).
+    merged_canonical = next(e for e in canonicals if e.finding.text == "same claim")
+    assert merged_canonical.finding.severity is Severity.MAJOR
+    assert merged_canonical.id == 1  # the major-severity member
+    assert set(merged_canonical.merged) == {0}
+    # The duplicate carries the canonical's severity and points back to it.
+    assert len(duplicates) == 1
+    assert duplicates[0].id == 0
+    assert duplicates[0].duplicate_of == 1
+    assert duplicates[0].finding.severity is Severity.MAJOR
+    assert duplicates[0].finding.text == "same claim"
+    # Every entry is `post`; routing (dedup/cap) is route_calibrated's job.
+    assert all(e.disposition is Disposition.POST for e in entries)
+
+
+def test_dedup_union_ties_break_on_lowest_id():
+    union = [
+        _cand(0, "tie", severity="major"),
+        _cand(1, "tie", severity="major"),
+    ]
+    entries = fanout.dedup_union(union)
+    canonical = next(e for e in entries if e.duplicate_of is None)
+    assert canonical.id == 0  # equal severity -> lowest union id wins
+
+
+def test_dedup_union_normalizes_claim_whitespace_and_case():
+    union = [
+        _cand(0, "Same  Claim\nhere"),
+        _cand(1, "same claim here"),
+    ]
+    entries = fanout.dedup_union(union)
+    assert sum(1 for e in entries if e.duplicate_of is None) == 1
+
+
+def test_dedup_union_distinct_lines_are_distinct():
+    union = [_cand(0, "claim", line=1), _cand(1, "claim", line=2)]
+    entries = fanout.dedup_union(union)
+    assert sum(1 for e in entries if e.duplicate_of is None) == 2
+
+
+def test_dedup_union_canonical_precedes_its_duplicate_for_stable_routing():
+    """route_calibrated relies on canonicals appearing before their duplicates
+    (its stable severity sort must see the twin first) — dedup_union must emit
+    them in that order so the off path routes correctly."""
+    union = [_cand(0, "dup", severity="minor"), _cand(1, "dup", severity="minor")]
+    entries = fanout.dedup_union(union)
+    routed = fanout.route_calibrated(entries, nit_cap=None)
+    posts = [e for e, d in routed if d is Disposition.POST and e.duplicate_of is None]
+    assert len(posts) == 1  # exactly one posts; the duplicate does not blow up
 
 
 # --- route_calibrated: the deterministic routing (pure) ------------------------
@@ -408,7 +627,7 @@ def test_nit_cap_suppression_propagates_to_merged_away_duplicates():
     assert by_text["nit-dup"] is Disposition.NIT_SUPPRESSED
 
 
-def test_dry_run_prints_per_pass_argv_and_bills_nothing(monkeypatch, capsys):
+def test_dry_run_default_notes_the_deduped_union_and_bills_nothing(monkeypatch, capsys):
     from shipit.agent import backend as agent_backend
 
     printed: list = []
@@ -424,9 +643,33 @@ def test_dry_run_prints_per_pass_argv_and_bills_nothing(monkeypatch, capsys):
         dry_run=True,
     )
     assert printed == ["correctness", "test-quality"]
-    assert "would calibrate the union" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    # Default: calibrator OFF — the note is about the mechanical union, not a judge.
+    assert "calibrator OFF" in out
+    assert "mechanically-deduped union" in out
+    assert "would calibrate" not in out
     assert outcome.review["comments"] == []
     assert outcome.runs == ()
+
+
+def test_dry_run_with_calibrator_on_notes_the_judge_and_bills_nothing(
+    monkeypatch, capsys
+):
+    from shipit.agent import backend as agent_backend
+
+    monkeypatch.setattr(
+        fanout.producer,
+        "run_tree_review",
+        lambda backend, ctx, **kw: {},
+    )
+    fanout.run_fanout_review(
+        agent_backend.CODEX,
+        _ctx(),
+        dimensions=["correctness", "test-quality"],
+        calibrator=_CAL,
+        dry_run=True,
+    )
+    assert "would calibrate the union" in capsys.readouterr().out
 
 
 def test_default_dimension_set_is_used_when_none_configured(_seams):
