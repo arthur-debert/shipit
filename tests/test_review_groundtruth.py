@@ -69,6 +69,12 @@ class TestParseFixture:
         assert label.texts == (label.claim, *label.aliases)
         assert label.provenance == Provenance("fix-commit", "f211ab3")
 
+    def test_repo_slug_is_canonicalized_to_lowercase(self):
+        # A mixed-case slug validates but is stored canonical, so two pins that
+        # differ only by case share one identity (no double-read in eval score).
+        fixture = parse_fixture(data(prs=[dict(PR, repo="Phos-Editor/Core")]))
+        assert fixture.prs[0].repo == "phos-editor/core"
+
     def test_lines_are_optional_file_scoped(self):
         raw = label_data()
         del raw["lines"]
@@ -203,6 +209,14 @@ class TestSerialization:
         path = tmp_path / "fixture.toml"
         save_fixture(fixture, path)
         assert load_fixture(path).labels[0].claim == "rocket 🚀 in the readback path"
+
+    def test_del_control_char_in_claim_round_trips(self, tmp_path):
+        # DEL (U+007F) is the one char json.dumps leaves literal but TOML forbids
+        # in a basic string — it must be escaped or the save round-trip crashes.
+        fixture = parse_fixture(data(labels=[label_data(claim="before\x7fafter")]))
+        path = tmp_path / "fixture.toml"
+        save_fixture(fixture, path)
+        assert load_fixture(path).labels[0].claim == "before\x7fafter"
 
     def test_save_is_atomic_and_leaves_no_temp(self, tmp_path):
         # Overwrite an existing file, then assert only the target remains (the

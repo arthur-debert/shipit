@@ -199,18 +199,21 @@ def _parse_pr(raw: Any, index: int) -> PinnedRange:
     for name, sha in (("base_sha", base), ("head_sha", head)):
         if len(sha) < 7 or any(c not in "0123456789abcdef" for c in sha.lower()):
             raise FixtureError(f"{where}: {name!r} must be a hex SHA (≥7 chars)")
-    repo = _require_str(raw, "repo", where)
+    raw_repo = _require_str(raw, "repo", where)
     try:
         # The fixture is the scorer's denominator, so its repo must be a real
         # ``owner/name`` slug HERE (the one contract boundary) — a bad slug that
         # loaded silently would make `shipit eval score` skip that pin's store
         # and report a quietly-shrunk recall instead of failing loud (ADR-0048).
-        repo_from_slug(repo)
+        # Store the CANONICAL (lowercased) slug so two pins differing only in
+        # case share one identity — otherwise `eval score` reads their common
+        # store twice and double-counts its records.
+        parsed = repo_from_slug(raw_repo)
     except ValueError as exc:
         raise FixtureError(f"{where}: {exc}") from exc
     return PinnedRange(
         id=_require_str(raw, "id", where),
-        repo=repo,
+        repo=f"{parsed.owner.login}/{parsed.name}",
         pr=pr,
         base_sha=base.lower(),
         head_sha=head.lower(),
@@ -368,8 +371,13 @@ def _toml_str(value: str) -> str:
     escaping (same ``\\"``/``\\\\``/control-char rules), so reuse it —
     ``ensure_ascii=False`` so a non-BMP char (an emoji in a claim) serializes as
     literal UTF-8, not the ``\\uD83D\\uDE80`` surrogate pair TOML forbids (which
-    would make the save's round-trip parse reject the file it just wrote)."""
-    return json.dumps(value, ensure_ascii=False)
+    would make the save's round-trip parse reject the file it just wrote).
+
+    One char slips past ``json.dumps``: DEL (U+007F). JSON only requires escaping
+    U+0000–U+001F, but TOML forbids a literal DEL in a basic string too, so it
+    must be escaped by hand — otherwise a claim containing one crashes the save's
+    round-trip parse. (JSON already escapes every OTHER char TOML forbids.)"""
+    return json.dumps(value, ensure_ascii=False).replace("\x7f", "\\u007f")
 
 
 def dump_fixture(fixture: Fixture) -> str:
