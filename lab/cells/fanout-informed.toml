@@ -26,4 +26,4 @@ timeout = "600s"
 [sweeps]
 count = 2
 mode = "informed"
-replicates = 1
+replicates = 2

@@ -1004,6 +1004,12 @@ def test_the_committed_demo_cell_pair_loads_and_is_fair():
     fixture = load_fixture(Path("lab/fixture.toml"))
     check_fair_pair(treatment, control, fixture)
     assert fixture.version == control.fixture_version
+    # Pin the committed run shape so a cost-visible drift (e.g. an accidental
+    # revert to replicates = 1) fails here rather than silently shrinking the
+    # demo run: check_fair_pair only equates the pair, it does not fix the count.
+    for cell in (control, treatment):
+        assert cell.sweeps == 2
+        assert cell.replicates == 2
     assert [p.id for p in resolve_pins(treatment, fixture)] == [
         "core-440",
         "app-391",
