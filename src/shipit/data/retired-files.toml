@@ -62,6 +62,13 @@ pristine = [
 ]
 
 [[retired]]
+# Superseded by `skills/to-spec/SKILL.md`.
+path = "skills/to-prd/SKILL.md"
+pristine = [
+  "sha256:3b1fc2aa002d78a63f9bd858144be177a1b2f69a2ca97e2ca165bc86f6ca5a2e",
+]
+
+[[retired]]
 # Renamed to `skills/to-tickets/SKILL.md`.
 path = "skills/shipit-to-issues/SKILL.md"
 pristine = [

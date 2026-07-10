@@ -156,8 +156,8 @@ def test_load_units_includes_lefthook_and_pixi_task_block():
     assert pixi.anchor == "[tasks]"
     # The managed pixi TASKS block stays the thin task lines ONLY; the linter
     # deps ride in their own sibling `[feature.lint.dependencies]` block (ADP00,
-    # docs/legacy-prd/adoption.md — amending the lint PRD's task-line-only decision),
-    # tested below. `provision-lexd` invokes the binary's provision subcommand
+    # docs/legacy-prd/adoption.md — amending the lint PRD's task-line-only
+    # decision), tested below. `provision-lexd` invokes the binary's provision subcommand
     # (ADP00-WS03), so no provisioning script is ever distributed. `changelog`
     # is the release-notes tool's thin caller (TOL01-WS06, ADR-0039: pixi tasks
     # are one-line callers of the verb). Each task
@@ -3604,6 +3604,94 @@ def test_activation_output_joins_streams_with_newline(tmp_path):
 # consumer, and its hash pins the packaged manifest to real historical content.
 PRISTINE_WORKFLOW = Path(__file__).parent / "data" / "copilot-review-pristine.yml"
 RETIRED_WORKFLOW_PATH = ".github/workflows/copilot-review.yml"
+PRISTINE_TO_PRD_SKILL = """---
+name: to-prd
+description: Turn the current conversation context into a PRD — the authoritative feature spec — and write it to docs/prd/. Use when user wants to create a PRD from the current context.
+metadata:
+    forked-from: https://github.com/mattpocock/skills (skills/engineering/to-prd)
+---
+This skill takes the current conversation context and codebase understanding and produces a PRD. Do NOT re-run the requirements interview — that happened earlier, in `/grill-me-with-docs`; synthesize the PRD from what you already know. This is not a fully AFK skill, though: step 2 still expects a short confirmation of the module boundaries and test scope with the user. That scoped confirmation is not a requirements interview.
+
+The issue tracker and triage label vocabulary should have been provided to you — run `/setup-matt-pocock-skills` if not.
+
+## Process
+
+1. Explore the repo to understand the current state of the codebase, if you haven't already. Use the project's domain glossary vocabulary (`CONTEXT.md`) throughout the PRD, and respect any ADRs in the area you're touching.
+
+2. Sketch out the major modules you will need to build or modify to complete the implementation. Actively look for opportunities to extract deep modules that can be tested in isolation.
+
+A deep module (as opposed to a shallow module) is one which encapsulates a lot of functionality in a simple, testable interface which rarely changes.
+
+Check with the user that these modules match their expectations. Check with the user which modules they want tests written for.
+
+3. Write the PRD using the template below. **The PRD is the authoritative feature definition / spec** — the *what & why*. It is a file, not an issue body:
+
+   - Write it to `docs/prd/<slug>.md`. This file is the single source of truth for the spec.
+   - That is the whole output of this skill. Do NOT open an epic tracker issue here. The **epic GitHub issue is an execution tracker** — it summarizes the PRD and points to it plus the relevant ADRs — and it is created later, in `/to-tickets` (the issue-planning leg), not by this skill.
+   - The epic code (`THEME+NN`, e.g. `GPU02`) is assigned by the human, but it is used later in `/to-tickets` when the epic issue is minted — not here.
+
+4. Once the PRD file is written, record the milestone in the dev-cycle log (best-effort — ADR-0032; if the command errors, continue — a skipped emission is a missing event, never a broken step):
+
+   ```sh
+   shipit log event planning.prd.written --about "PRD: docs/prd/<slug>.md"
+   ```
+
+<prd-template>
+
+## Problem Statement
+
+The problem that the user is facing, from the user's perspective.
+
+## Solution
+
+The solution to the problem, from the user's perspective.
+
+## User Stories
+
+A LONG, numbered list of user stories. Each user story should be in the format of:
+
+1. As an <actor>, I want a <feature>, so that <benefit>
+
+<user-story-example>
+1. As a mobile bank customer, I want to see balance on my accounts, so that I can make better informed decisions about my spending
+</user-story-example>
+
+This list of user stories should be extremely extensive and cover all aspects of the feature.
+
+## Implementation Decisions
+
+A list of implementation decisions that were made. This can include:
+
+- The modules that will be built/modified
+- The interfaces of those modules that will be modified
+- Technical clarifications from the developer
+- Architectural decisions
+- Schema changes
+- API contracts
+- Specific interactions
+
+Do NOT include specific file paths or code snippets. They may end up being outdated very quickly.
+
+Exception: if a prototype produced a snippet that encodes a decision more precisely than prose can (state machine, reducer, schema, type shape), inline it within the relevant decision and note briefly that it came from a prototype. Trim to the decision-rich parts — not a working demo, just the important bits.
+
+## Testing Decisions
+
+A list of testing decisions that were made. Include:
+
+- A description of what makes a good test (only test external behavior, not implementation details)
+- Which modules will be tested
+- Prior art for the tests (i.e. similar types of tests in the codebase)
+
+## Out of Scope
+
+A description of the things that are out of scope for this PRD.
+
+## Further Notes
+
+Any further notes about the feature.
+
+</prd-template>
+"""
 RETIRED_SKILL_HASHES = {
     "skills/shipit-planning/SKILL.md": (
         "sha256:a16ac4744238b3a5b59da8a887bb6268742fd01a8a285797e0198aba49e44336",
@@ -3620,6 +3708,9 @@ RETIRED_SKILL_HASHES = {
     "skills/shipit-to-prd/SKILL.md": (
         "sha256:0f13f20cad06161baff87628ea6b1cf5bac0cc7919beb6176535f9cdf9ae42d8",
         "sha256:4bdf82e153221545c8340744a5def096316c0cf88f0db9548a373bce6f91d0c1",
+    ),
+    "skills/to-prd/SKILL.md": (
+        "sha256:3b1fc2aa002d78a63f9bd858144be177a1b2f69a2ca97e2ca165bc86f6ca5a2e",
     ),
     "skills/shipit-to-issues/SKILL.md": (
         "sha256:4df3706b12c89fb7d844521800addea1c9ab9f448cd7f926b993a5d92f46869b",
@@ -3735,6 +3826,23 @@ def test_install_deletes_a_pristine_retired_skill_file(tmp_path, rec):
     _apply(tmp_path)
     assert not victim.exists()
     assert (tmp_path / "skills/grill-me-with-docs/ADR-FORMAT.md").is_file()
+
+
+def test_install_deletes_the_retired_to_prd_skill_and_installs_to_spec(tmp_path, rec):
+    # The managed `/to-prd` path was renamed to `/to-spec`; an upgraded
+    # consumer must not keep both runnable skills after install.
+    retired_path = "skills/to-prd/SKILL.md"
+    old_bytes = PRISTINE_TO_PRD_SKILL.encode()
+    assert config.content_hash(old_bytes) in RETIRED_SKILL_HASHES[retired_path]
+    victim = tmp_path / retired_path
+    victim.parent.mkdir(parents=True)
+    victim.write_bytes(old_bytes)
+
+    plan = _plan(tmp_path)
+    assert retired_path in [d.retired.path for d in plan.retire_deletes]
+    _apply(tmp_path)
+    assert not victim.exists()
+    assert (tmp_path / "skills/to-spec/SKILL.md").is_file()
 
 
 def test_install_keeps_a_modified_retired_file_with_warning(tmp_path, rec):
