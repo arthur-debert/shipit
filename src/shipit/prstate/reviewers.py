@@ -205,13 +205,14 @@ class ReviewerAdapter:
         return None
 
     def _rerun(self, ctx: ReadinessView) -> bool:
-        """This reviewer's rerun policy for `ctx` (default False = review-once).
+        """This reviewer's rerun policy for `ctx` (default True = head-strict).
 
         rerun is read off this reviewer's Roster ENTRY (`ctx.roster`, loaded
         once at the verb boundary and threaded onto the context at the build
-        site). False is the shipped default for EVERY reviewer (all reviewers
-        are token-billed / cost a model run, so re-reviewing each push is
-        explicit opt-in)."""
+        site). True is the shipped default for EVERY reviewer (head-strict:
+        a review counts only on the current head, so any push re-requests it —
+        convergent review re-reads each new head, ADR-0043); a reviewer opts
+        OUT to review-once with rerun=False."""
         return ctx.roster.entry(self.name).rerun
 
     def _window(self, ctx: ReadinessView) -> timedelta:
@@ -239,11 +240,11 @@ class ReviewerAdapter:
 
         The lifecycle depends on the reviewer's rerun flag:
 
-          * rerun=False (default, review-once): a non-DISMISSED review by this
+          * rerun=False (opt-out, review-once): a non-DISMISSED review by this
             reviewer on ANY commit of the PR reads DONE — it is NEVER stale
             after a push. The reviewer won't be asked to look again, so an
             earlier-head review still satisfies the requirement.
-          * rerun=True (opt-in, head-strict): the review must be on the CURRENT
+          * rerun=True (default, head-strict): the review must be on the CURRENT
             head to count DONE; a review only on an older head is stale and the
             reviewer reads back as REQUESTED (needs re-request for the new head).
 
@@ -375,8 +376,9 @@ class CopilotAdapter(ReviewerAdapter):
     Copilot has a real `review_requested` edge and no observable mid-review
     signal, so it goes REQUESTED -> DONE. Whether an earlier-head review counts
     as done is the per-reviewer rerun policy (see base `detect`): review-once
-    (default) counts any-head; rerun=True is head-strict (an earlier-head review
-    is stale and the reviewer reads back REQUESTED for the new head).
+    (rerun=False) counts any-head; head-strict (rerun=True, the default) requires
+    the current head (an earlier-head review is stale and the reviewer reads back
+    REQUESTED for the new head).
 
     Copilot emits NO native severity vocabulary, so `native_severity` stays the
     base None (deliberate, ADR-0044): its findings resolve through the chain's
@@ -610,9 +612,10 @@ class _LocalReviewAdapter(ReviewerAdapter):
     actually requested. The DETECTION path is fully intact — `detect` reads an
     existing local-agent review exactly as in release.
 
-    Detection is the shared rerun-aware base `detect`: review-once (default)
-    counts a non-DISMISSED review by `matches` on any head as done; rerun=True
-    is head-strict. There is no requested edge for a local reviewer
+    Detection is the shared rerun-aware base `detect`: review-once (rerun=False)
+    counts a non-DISMISSED review by `matches` on any head as done; head-strict
+    (rerun=True, the default) requires the current head. There is no requested
+    edge for a local reviewer
     (`has_requested_edge = False`), so `requested_logins` is never consulted —
     either a counting review exists (done) or the reviewer hasn't run
     (NOT_REQUESTED). The bot login is matched on BOTH the GitHub App `[bot]` suffix

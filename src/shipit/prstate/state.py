@@ -51,10 +51,10 @@ decision is the polling caller's, not the snapshot's — the snapshot is
 stateless and has no clock.
 
 Review rounds repeat until done, governed by the per-reviewer rerun policy: for a
-rerun=True (head-strict) reviewer a review counts only against the current head,
-so any push stales the prior review and the snapshot advises RE-REQUEST; for a
-rerun=False reviewer (review-once — the DEFAULT for everyone) a review on ANY
-head still counts as done and a push never re-stales it. Either way the engine
+rerun=True (head-strict — the DEFAULT for everyone) reviewer a review counts only
+against the current head, so any push stales the prior review and the snapshot
+advises RE-REQUEST; for a rerun=False reviewer (review-once — the opt-out) a
+review on ANY head still counts as done and a push never re-stales it. Either way the engine
 is the arbiter — no minor-round exception, #565.
 
 The stopping rule (breakers.py) caps that repetition: address every comment

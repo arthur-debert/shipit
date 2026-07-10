@@ -57,8 +57,9 @@ AGY_REVIEW_APP_ID            = { doppler = "AGY_REVIEW_APP_ID" }
 copilot = { rerun = true }
 # The local reviewers' readiness wait window is BUMPED over the shipped 20m
 # default (RVW02-WS04): a round-1 review now fans out into parallel dimension
-# passes plus a calibration run, so a large PR's review legitimately takes
-# longer to ARRIVE — 45 minutes covers the fan-out without letting a vanished
+# passes (and, when the calibrator is opted on, a calibration run), so a large
+# PR's review legitimately takes longer to ARRIVE — 45 minutes covers the
+# fan-out without letting a vanished
 # run park the PR forever (the window is the arrival deadline, not the per-run
 # agent timeout).
 #
@@ -81,16 +82,13 @@ agy = { window = 2700, dimensions = ["correctness", "cross-file-invariants", "se
 #   optionality without flooding); it is deliberately NOT tuned against real nit
 #   volume, because the sample produced none.
 #
-#   calibrator reasoning = high — the study confirms the ADR-0045 default. At
-#   `high` the calibrator held its I/O contract and correctly refuted every
-#   candidate false positive (0/4 of core#440's historical-FP family reproduced;
-#   it actively refuted a stale-`EvalEnv` nit and two unverifiable major
-#   claims). Its remaining defect is the OPPOSITE — over-pruning one true major
-#   (app#391's off-screen-pan finding) — which lowering the reasoning level
-#   would worsen, not fix; that is a calibrator-prompt issue reported in the
-#   ticket, out of this WS's scope.
+#   calibrator — left at the shipped default: OFF (dormant). WS08 (#669)
+#   decoupled the calibrator and made the mechanically-deduped union the round-1
+#   default, after the WS05 A/B measured the LLM calibrator NET-NEGATIVE on major
+#   recall (ADR-0045 as amended). shipit dogfoods that shipped default and does
+#   NOT opt back in; the concept/config/hooks stay wired but dormant. To turn it
+#   on, add a table-level `calibrator = { backend = "claude", reasoning = "high" }`.
 nit_cap = 3
-calibrator = { backend = "claude", reasoning = "high" }
 
 # [toolchains] — the path→toolchain map (ADR-0007/0039): each build-bearing path
 # declares its toolchain, and the tree-input Tool verbs (`shipit test`,

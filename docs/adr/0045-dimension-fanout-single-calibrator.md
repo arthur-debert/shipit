@@ -12,8 +12,10 @@
 > evidence; the calibrator was an unproven precision layer bolted on, and on the
 > baseline it destroyed signal. So it is KEPT — concept, config, hooks, and the
 > F2 reproduction-based floor all wired but dormant (the ADR-0044 `classify`
-> pattern: kept warm, not run) — and a reviewer opts it back on by configuring a
-> `calibrator` in its Roster entry. Tuning/re-verifying it (the app-G1
+> pattern: kept warm, not run) — and it is opted back on by setting the
+> table-level `[reviewers].calibrator` key (one shared judge for every reviewer,
+> never a per-reviewer entry — the single-ruler constraint below).
+> Tuning/re-verifying it (the app-G1
 > wrong-refutation, #665) is a later, independent effort, NOT a blocker for
 > shipping the fan-out gain. The rest of this ADR (the fan-out, the passes, the
 > single-ruler and never-originates constraints) stands; wherever it says the

@@ -558,8 +558,8 @@ def context_from_raw(
 
     `roster` is the reviewer configuration as ONE value (CLI01-WS04), loaded at
     the verb boundary and threaded onto the view; it defaults to the EMPTY
-    Roster (every reviewer at its shipped defaults: review-once, 20m window) so
-    a test/fixture context that omits it gets the default behaviour.
+    Roster (every reviewer at its shipped defaults: head-strict rerun, 20m
+    window) so a test/fixture context that omits it gets the default behaviour.
 
     `requested_at` is the App `review_requested` edge times (login -> ISO-8601);
     it defaults to empty so a fixture that omits it gets no App-side ageing (a

@@ -224,8 +224,8 @@ class ReadinessView:
     # here at the build site — so the engine/adapters read every per-reviewer
     # setting (required, rerun, wait window, run options) off the snapshot,
     # never the filesystem, and the settings can never disagree with each other.
-    # rerun=True means head-strict (re-review every push); rerun=False (the
-    # DEFAULT for any reviewer absent from the roster) means review-once: a
+    # rerun=True (the DEFAULT, including for any reviewer absent from the roster)
+    # means head-strict (re-review every push); rerun=False means review-once: a
     # review on ANY commit of the PR counts as done and is never
     # stale-after-push. A reviewer without a `window_seconds` uses the shipped
     # 20m default (`reviewers.DEFAULT_WAIT_WINDOW`, applied by the adapter);
