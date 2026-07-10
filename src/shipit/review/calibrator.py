@@ -266,9 +266,9 @@ inputs/state make it go wrong, and what happens); a minor or nit needs a clear \
 rationale. NEVER downgrade a finding's severity to keep it: verify it at the \
 severity it deserves, or — only when you have actually refuted it — drop it.
 4. Route scope: a verified finding that is beyond this PR's diff — a \
-pre-existing issue the passes were allowed to report — gets disposition \
-"out-of-scope" (it is persisted, not posted). Everything verified and \
-in-scope gets "post".
+pre-existing issue a pass reported despite its diff-only scope — gets \
+disposition "out-of-scope" (it is persisted, not posted). Everything verified \
+and in-scope gets "post".
 5. NORMALIZE severity on the one ladder, ignoring the candidates' own \
 severity claims where wrong. The major/minor boundary is the MERGE-BLOCK \
 TEST: would a competent reviewer hold the merge for this? critical = merging \
