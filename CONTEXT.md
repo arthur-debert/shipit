@@ -1,3 +1,5 @@
+<!-- markdownlint-disable MD013 -->
+
 # shipit
 
 shipit standardizes work across a personal portfolio of repos: provisioning,
