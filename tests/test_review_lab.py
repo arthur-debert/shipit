@@ -1023,7 +1023,17 @@ def test_the_committed_cells_load_and_pair_fairly():
             "lex-820",
         ]
     # The ADR-0051 cell's one axis: the experiment-only severity-tier pass set
-    # (the control's omitted `dimensions` means the shipped concern-scoped set).
-    sevtiers = treatments[1]
-    assert sevtiers.dimensions == ("sev-critical-high", "sev-medium", "sev-low")
-    assert control.dimensions == ()
+    # (every other cell's omitted `dimensions` means the shipped concern-scoped
+    # set). Select by id, not list position — brittle if a cell is added or the
+    # order changes — and pin EVERY cell's `dimensions`: check_fair_pair leaves
+    # "only one axis changed" to human review, so a stray `dimensions` block on
+    # the control or the other treatment would confound the experiment while
+    # this test stayed green. Pinning all three fails here instead.
+    by_id = {cell.id: cell for cell in (control, *treatments)}
+    assert by_id["fanout-sevtiers"].dimensions == (
+        "sev-critical-high",
+        "sev-medium",
+        "sev-low",
+    )
+    assert by_id["fanout-baseline"].dimensions == ()
+    assert by_id["fanout-informed"].dimensions == ()

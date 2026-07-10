@@ -431,6 +431,13 @@ def parse_cell(data: Mapping[str, Any], *, where: str = "cell") -> Cell:
             raise CellError(
                 f"{where}: [pipeline] 'dimensions' must be an array of dimension names"
             )
+        if not dimensions_raw:
+            raise CellError(
+                f"{where}: [pipeline] 'dimensions' is an empty list — omit the key "
+                "for the shipped default set, or list at least one dimension (an "
+                "explicit empty list is a config mistake, not the default; the "
+                "Roster `dimensions` option rejects it the same way)"
+            )
         names = []
         for i, name in enumerate(dimensions_raw):
             if not isinstance(name, str) or not name.strip():
@@ -488,7 +495,9 @@ def parse_cell(data: Mapping[str, Any], *, where: str = "cell") -> Cell:
     invocation = _parse_invocation(invocation_raw, where)
     # Omitted `dimensions` means the SHIPPED default set, not everything the
     # registry knows — the experiment-only severity tiers (ADR-0051) run only
-    # when a cell lists them explicitly.
+    # when a cell lists them explicitly. `dimensions` is empty here ONLY when
+    # the key was omitted (an explicit empty list was rejected loud above), so
+    # the fallback never masks a config mistake.
     effective_dimensions = dimensions if dimensions else DEFAULT_DIMENSION_NAMES
     dimension_invocations = _parse_dimension_invocations(
         invocation_raw.get("dimensions")

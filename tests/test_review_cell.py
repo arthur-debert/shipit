@@ -179,6 +179,31 @@ def test_per_dimension_override_parses_and_validates_membership():
         parse_cell(data)
 
 
+def test_omitted_dimensions_pass_set_is_the_shipped_default_not_the_registry():
+    # ADR-0051: an omitted `pipeline.dimensions` runs ONLY the shipped default
+    # four, never the experiment-only severity tiers. A per-dimension override
+    # naming a tier is therefore outside this cell's pass set — this pins the
+    # default-vs-registry distinction at the parse boundary, which would regress
+    # silently if `effective_dimensions` fell back to the whole registry.
+    data = _cell_data()  # pipeline.dimensions omitted -> shipped default four
+    data["invocation"]["dimensions"] = {"sev-low": {"model": "o3"}}
+    with pytest.raises(CellError, match="outside this cell's pass set"):
+        parse_cell(data)
+    # The same override is accepted once the cell lists the tier explicitly.
+    data = _cell_data(pipeline={"shape": "fanout", "dimensions": ["sev-low"]})
+    data["invocation"]["dimensions"] = {"sev-low": {"model": "o3"}}
+    cell = parse_cell(data)
+    assert cell.dimension_invocations == {"sev-low": {"model": "o3"}}
+
+
+def test_explicit_empty_dimensions_list_is_rejected_loud():
+    # An explicit `dimensions = []` is a config mistake, not a synonym for the
+    # default set — reject it loud rather than silently running the shipped
+    # default (the Roster `dimensions` option has the same non-empty posture).
+    with pytest.raises(CellError, match="empty list"):
+        parse_cell(_cell_data(pipeline={"shape": "fanout", "dimensions": []}))
+
+
 def test_per_dimension_override_rejects_backend_and_unknown_fields():
     data = _cell_data()
     data["invocation"]["dimensions"] = {"correctness": {"backend": "agy"}}

@@ -34,8 +34,14 @@ def test_severity_tier_set_is_registered_but_experiment_only():
     in the known set the config boundary validates against — but NEVER in the
     shipped default."""
     tiers = ("sev-critical-high", "sev-medium", "sev-low")
+    # Registration means resolvable to a REAL registry entry, not a name
+    # round-trip: by_name maps token -> that entry, so `d.name == token` is
+    # structural, and order is already covered by
+    # test_resolve_subset_preserves_the_given_order. The content check is that
+    # each tier resolves (no KeyError; see test_resolve_unknown_name_raises) to a
+    # registry Dimension carrying a focus slice.
     resolved = dimensions.resolve_dimensions(tiers)
-    assert tuple(d.name for d in resolved) == tiers
+    assert all(d in dimensions.DIMENSIONS and d.focus.strip() for d in resolved)
     known = dimensions.known_dimension_names()
     for name in tiers:
         assert name in known
@@ -58,7 +64,13 @@ def test_resolve_none_or_empty_is_the_shipped_default_set():
     default = dimensions.resolve_dimensions(dimensions.DEFAULT_DIMENSION_NAMES)
     assert dimensions.resolve_dimensions(None) == default
     assert dimensions.resolve_dimensions(()) == default
-    assert tuple(d.name for d in default) == dimensions.DEFAULT_DIMENSION_NAMES
+    # Assert on the None path itself, not on `default` (which was built FROM
+    # DEFAULT_DIMENSION_NAMES and so can never disagree): this pins that the
+    # None/empty branch returns exactly the shipped-default names, in order.
+    assert (
+        tuple(d.name for d in dimensions.resolve_dimensions(None))
+        == dimensions.DEFAULT_DIMENSION_NAMES
+    )
 
 
 def test_resolve_subset_preserves_the_given_order():
