@@ -1,0 +1,13 @@
+shipit lab report
+
+`shipit lab report CELL` renders a cell's convergence curve from banked
+review-round records.
+
+CELL is either an id under `lab/cells/` or a path to a cell file. Reporting
+loads the cell, its baseline cell when applicable, the ground-truth fixture,
+and the local review-round record stores for each pinned repository.
+
+It compares the cell against its baseline at equal budget and reports
+cumulative major-or-worse recall, false positives or precision, token cost, and
+latency per sweep point. Reporting is deterministic and token-free, so it is
+safe to rerun while developing review strategy.

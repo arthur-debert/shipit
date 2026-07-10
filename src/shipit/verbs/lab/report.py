@@ -35,6 +35,7 @@ from ...review.groundtruth import DEFAULT_FIXTURE_PATH, load_fixture
 from ...review.instructions import load_instructions
 from ...review.labrun import resolve_pins, safe_instructions_path
 from .._errors import cli_errors
+from .._help import HelpableCommand
 
 
 def _variant_hash(cell: Cell) -> str:
@@ -119,7 +120,12 @@ def run(
     return 0
 
 
-@click.command(name="report")
+@click.command(
+    name="report",
+    cls=HelpableCommand,
+    help_package=__package__,
+    help_resource="report_help.txt",
+)
 @click.argument("cell_ref", metavar="CELL")
 @click.option(
     "--fixture",

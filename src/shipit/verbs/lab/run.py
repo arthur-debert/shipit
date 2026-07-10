@@ -31,6 +31,7 @@ from ...review.cell import (
 from ...review.groundtruth import DEFAULT_FIXTURE_PATH, load_fixture
 from ...review.labrun import run_cell
 from .._errors import cli_errors
+from .._help import HelpableCommand
 
 
 @cli_errors
@@ -80,7 +81,12 @@ def run(
     return 0
 
 
-@click.command(name="run")
+@click.command(
+    name="run",
+    cls=HelpableCommand,
+    help_package=__package__,
+    help_resource="run_help.txt",
+)
 @click.argument("cell_ref", metavar="CELL")
 @click.option(
     "--checkout",

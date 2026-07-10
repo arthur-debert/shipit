@@ -20,7 +20,9 @@ import json
 import subprocess
 
 import pytest
+from click.testing import CliRunner
 
+from shipit import cli
 from shipit.review import fanout, producer, replay
 from shipit.review.cell import CellError, parse_cell
 from shipit.review.curve import convergence_curve, render_curve_report
@@ -147,6 +149,102 @@ def _read_records(paths):
 
 def _store_records(base_dir):
     return _read_records(sorted(base_dir.rglob("*.jsonl")))
+
+
+# --- long-form CLI help ---------------------------------------------------------
+
+
+def test_lab_long_form_help_command(capsys):
+    rc = cli.main(["lab", "help"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "`shipit lab` runs measured experiments" in out
+    assert "shipit lab run CELL" in out
+
+
+def test_lab_run_long_form_help_leaf(capsys):
+    rc = cli.main(["lab", "run", "help"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "`shipit lab run CELL` executes" in out
+    assert "--checkout" in out
+
+
+def test_lab_report_long_form_help_leaf(capsys):
+    rc = cli.main(["lab", "report", "help"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "`shipit lab report CELL` renders" in out
+    assert "deterministic and token-free" in out
+
+
+def test_lab_run_cell_still_reaches_the_run_callback(monkeypatch):
+    from shipit.verbs.lab import run as run_verb
+
+    seen = {}
+
+    def fake_run(cell_ref, *, checkouts, prs, force, fixture_path, cells_dir):
+        seen.update(
+            cell_ref=cell_ref,
+            checkouts=checkouts,
+            prs=prs,
+            force=force,
+            fixture_path=fixture_path,
+            cells_dir=cells_dir,
+        )
+        return 0
+
+    monkeypatch.setattr(run_verb, "run", fake_run)
+    result = CliRunner().invoke(
+        run_verb.cmd,
+        [
+            "ctl",
+            "--checkout",
+            "/repo",
+            "--pr",
+            "widget-1",
+            "--force",
+            "--fixture",
+            "fixture.toml",
+            "--cells-dir",
+            "cells",
+        ],
+    )
+    assert result.exit_code == 0
+    assert seen == {
+        "cell_ref": "ctl",
+        "checkouts": ("/repo",),
+        "prs": ("widget-1",),
+        "force": True,
+        "fixture_path": "fixture.toml",
+        "cells_dir": "cells",
+    }
+
+
+def test_lab_report_cell_still_reaches_the_report_callback(monkeypatch):
+    from shipit.verbs.lab import report as report_verb
+
+    seen = {}
+
+    def fake_run(cell_ref, *, fixture_path, cells_dir):
+        seen.update(
+            cell_ref=cell_ref,
+            fixture_path=fixture_path,
+            cells_dir=cells_dir,
+        )
+        return 0
+
+    monkeypatch.setattr(report_verb, "run", fake_run)
+    result = CliRunner().invoke(
+        report_verb.cmd,
+        ["treat", "--fixture", "fixture.toml", "--cells-dir", "cells"],
+    )
+    assert result.exit_code == 0
+    assert seen == {
+        "cell_ref": "treat",
+        "fixture_path": "fixture.toml",
+        "cells_dir": "cells",
+    }
 
 
 # --- the runner: execution, tagging, idempotency ----------------------------------

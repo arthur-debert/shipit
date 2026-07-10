@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import click
 
+from .._help import register_help_command
+
 
 @click.group(
     name="lab",
@@ -41,5 +43,6 @@ def lab_group() -> None:
 # verb appends exactly one `add_command` line below — that list is append-only.
 from . import report, run  # noqa: E402  (RVW03-WS07)
 
+register_help_command(lab_group, package=__package__, resource="help.txt")
 lab_group.add_command(run.cmd)
 lab_group.add_command(report.cmd)

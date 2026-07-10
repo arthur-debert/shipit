@@ -1,0 +1,20 @@
+shipit lab
+
+`shipit lab` runs measured experiments on code-review strategies.
+
+The lab answers questions such as "does this review configuration find more
+real issues at the same budget?" A declarative cell defines one experimental
+axis and its baseline. Runs replay pinned PR ranges offline, bank review-round
+records, and report convergence curves for recall, precision, token cost, and
+latency.
+
+The product surface remains `shipit pr review`; the lab is how changes to that
+review strategy earn promotion.
+
+Commands:
+
+  shipit lab run CELL
+      Execute one experiment cell over the offline replay driver.
+
+  shipit lab report CELL
+      Render a cell's convergence curve from banked review-round records.

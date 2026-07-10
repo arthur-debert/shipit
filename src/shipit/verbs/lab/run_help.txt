@@ -1,0 +1,12 @@
+shipit lab run
+
+`shipit lab run CELL` executes one experiment cell over the offline replay
+driver.
+
+CELL is either an id under `lab/cells/` or a path to a cell file. Each fixture
+PR, replicate, and sweep point is keyed idempotently. Existing banked points
+are reused, not re-paid; `--force` is the explicit rerun path.
+
+Use `--checkout` to supply local clones that already contain the fixture-pinned
+commits. Replay is offline: a missing checkout or unfetched pinned commit is a
+runtime refusal, not an implicit network fetch.
