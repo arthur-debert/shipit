@@ -112,6 +112,28 @@ class _PassResult:
     review: dict | None
 
 
+#: The shipped cheaper **ReasoningLevel** an INCREMENTAL round's single pass runs
+#: at (RVW02-WS06, ADR-0045). Round 1 is exhaustive; rounds after it review only
+#: the fix range, so they run cheaper. Like the calibrator's reasoning, this is
+#: config + RECORD today, not an argv flag (no CLI carries a reasoning knob) — it
+#: is stamped on the incremental pass's run entry so the review-round record shows
+#: the round ran at the cheaper level. A repo overrides it via the
+#: ``incremental_reasoning`` key in its ``[reviewers]`` table.
+DEFAULT_INCREMENTAL_REASONING = "low"
+
+#: The synthetic **Dimension** an INCREMENTAL round's single pass carries so it
+#: flows through the SAME union / coverage / attestation machinery as a round-1
+#: dimension pass (RVW02-WS06). A round after the first is ONE full-scope pass over
+#: the fix range, NOT a dimension fan-out — so this is not a member of the closed
+#: :data:`shipit.review.dimensions.DIMENSIONS` registry; it exists only to label the
+#: incremental pass in the record and attestation.
+_INCREMENTAL_DIMENSION = Dimension(
+    name="incremental",
+    title="Incremental fix-range",
+    focus="the fix range only, with mandatory dependency-neighborhood context",
+)
+
+
 def run_fanout_review(
     backend: Backend,
     ctx,
@@ -122,11 +144,14 @@ def run_fanout_review(
     dimensions: Sequence[str] | None = None,
     calibrator: CalibratorConfig | None = None,
     nit_cap: int | None = None,
+    incremental: bool = False,
+    incremental_reasoning: str = DEFAULT_INCREMENTAL_REASONING,
     dry_run: bool = False,
     launcher: launch.Runner | None = None,
 ) -> FanoutOutcome:
-    """Fan ``backend``'s review of ``ctx`` out into dimension passes, post the
-    union, and return the routed :class:`FanoutOutcome`.
+    """Fan ``backend``'s review of ``ctx`` out into dimension passes (round 1), or
+    run ONE incremental fix-range pass (round ≥ 2), and return the routed
+    :class:`FanoutOutcome`.
 
     By DEFAULT (``calibrator=None``, RVW02-WS08) the union is posted through the
     MECHANICAL dedup (:func:`dedup_union`) using each pass's OWN severity — no
@@ -134,35 +159,58 @@ def run_fanout_review(
     judge back on (the WS05/F2 baseline found it net-negative on major recall,
     #638/#665), routing the union through :func:`run_calibrator` instead.
 
+    ``incremental`` (RVW02-WS06, ADR-0045) selects the round-≥2 shape: ONE
+    full-scope pass over the FIX RANGE — ``ctx.base_sha..ctx.head_sha``, where
+    ``ctx`` is the caller's fix-range-rescoped view
+    (:func:`shipit.review.diff.rescoped_view`) — with mandatory
+    dependency-neighborhood context, INSTEAD of the parallel dimension fan-out.
+    The pass runs at ``incremental_reasoning`` (the cheaper level, stamped on its
+    run entry) and NEW NITS ARE SUPPRESSED: the routing runs with an effective
+    ``nit_cap`` of ``0``, so every fresh nit routes ``nit-suppressed`` (recorded,
+    not posted) — a late round can't be recolonized by style churn. The
+    calibrator, if configured, still runs (single-pass + calibrator). Round 1
+    (``incremental=False``) is unchanged: the ``dimensions`` fan-out with the
+    table-level ``nit_cap``.
+
     ``dimensions`` names the reviewer's configured pass set (the per-reviewer
-    Roster option; ``None``/empty → the shipped default set); ``calibrator``
-    the table-level judge config (``None`` → judge OFF, deduped union);
-    ``nit_cap`` the table-level round-1 nit budget (``None`` → uncapped, ``0``
-    → floor at minor). ``model`` / ``timeout`` / ``instructions_path`` are the
-    reviewer's own run options and apply to every pass, exactly as they applied
-    to the monolithic run.
+    Roster option; ``None``/empty → the shipped default set), used only in round
+    1; ``calibrator`` the table-level judge config (``None`` → judge OFF, deduped
+    union); ``nit_cap`` the table-level round-1 nit budget (``None`` → uncapped,
+    ``0`` → floor at minor; IGNORED in an incremental round, which forces ``0``).
+    ``model`` / ``timeout`` / ``instructions_path`` are the reviewer's own run
+    options and apply to every pass, exactly as they applied to the monolithic
+    run.
 
     Failure posture: a SINGLE pass failure is tolerated — its run entry records
     the outcome, the posted summary attests the degraded coverage; ALL passes
     failing raises ``RuntimeError`` (the service maps it to the ``failed``
-    funnel outcome). When the judge is ON, a calibrator failure (unavailable /
+    funnel outcome; in an incremental round the sole pass failing IS all passes
+    failing). When the judge is ON, a calibrator failure (unavailable /
     timed out / unparseable / contract-violating output) PROPAGATES — an
     uncalibrated union is never posted under the judge's ruler; the round
     degrades non-blocking exactly like a failed monolithic review (ADR-0006).
     The default dedup path is pure and cannot fail this way.
 
     With ``dry_run=True``: prints each pass's would-run argv (one per
-    dimension, no clone, no model bill) plus a note on how the union would be
-    posted (mechanical dedup, or the configured calibrator), and returns an
-    empty outcome — the same honest dry-run contract as the producer's.
+    dimension, or the single incremental pass, no clone, no model bill) plus a
+    note on how the union would be posted (mechanical dedup, or the configured
+    calibrator), and returns an empty outcome — the same honest dry-run contract
+    as the producer's.
     """
-    try:
-        dims = resolve_dimensions(dimensions)
-    except KeyError as exc:
-        raise ValueError(
-            f"unknown review dimension {exc.args[0]!r} — known dimensions: "
-            f"{', '.join(known_dimension_names())}"
-        ) from None
+    incremental_range: tuple[str, str] | None = None
+    if incremental:
+        incremental_range = (str(ctx.base_sha), str(ctx.head_sha))
+        dims = (_INCREMENTAL_DIMENSION,)
+        effective_nit_cap = 0
+    else:
+        try:
+            dims = resolve_dimensions(dimensions)
+        except KeyError as exc:
+            raise ValueError(
+                f"unknown review dimension {exc.args[0]!r} — known dimensions: "
+                f"{', '.join(known_dimension_names())}"
+            ) from None
+        effective_nit_cap = nit_cap
     agent = backend.funnel_agent or backend.name
 
     if dry_run:
@@ -174,7 +222,8 @@ def run_fanout_review(
                 timeout=timeout,
                 instructions_path=instructions_path,
                 dry_run=True,
-                dimension=dim,
+                dimension=None if incremental else dim,
+                incremental_range=incremental_range,
             )
         if calibrator is None:
             print(
@@ -201,16 +250,25 @@ def run_fanout_review(
 
     def _one_pass(dim: Dimension) -> _PassResult:
         task = producer.pass_task_text(
-            backend, ctx.number, instructions_path=instructions_path, dimension=dim
+            backend,
+            ctx.number,
+            instructions_path=instructions_path,
+            dimension=None if incremental else dim,
+            incremental_range=incremental_range,
         )
         run: dict[str, Any] = {
             "run_id": uuid.uuid4().hex,
-            "kind": "dimension-pass",
+            "kind": "incremental-pass" if incremental else "dimension-pass",
             "dimension": dim.name,
             "backend": agent,
             "model": model,
             "variant": variant_of(task, label=label).as_record(),
         }
+        if incremental:
+            # The cheaper reasoning is config + RECORD only (no CLI knob) — stamp
+            # it on the run entry so the round record shows the level it ran at.
+            run["reasoning"] = incremental_reasoning
+            run["range"] = {"base": incremental_range[0], "head": incremental_range[1]}
         start = time.monotonic()
         try:
             review = producer.run_tree_review(
@@ -220,8 +278,9 @@ def run_fanout_review(
                 timeout=timeout,
                 instructions_path=instructions_path,
                 launcher=launcher,
-                dimension=dim,
+                dimension=None if incremental else dim,
                 tree_path=tree_path,
+                incremental_range=incremental_range,
             )
         except Exception as exc:  # noqa: BLE001 - a pass failure degrades, never kills
             run["duration_ms"] = int((time.monotonic() - start) * 1000)
@@ -230,8 +289,9 @@ def run_fanout_review(
             )
             run["detail"] = str(exc)[:500]
             logger.warning(
-                "dimension pass %s failed for pr#%s (agent=%s) — coverage degrades, "
+                "%s pass %s failed for pr#%s (agent=%s) — coverage degrades, "
                 "the round continues",
+                "incremental" if incremental else "dimension",
                 dim.name,
                 ctx.number,
                 agent,
@@ -254,10 +314,12 @@ def run_fanout_review(
         details = "; ".join(
             f"{r.dimension.name}: {r.run.get('detail', 'failed')}" for r in failed
         )
-        raise RuntimeError(
-            f"all {len(dims)} dimension passes failed for pr#{ctx.number} "
-            f"(agent={agent}) — {details}"
+        kind = (
+            "the incremental pass failed"
+            if incremental
+            else f"all {len(dims)} dimension passes failed"
         )
+        raise RuntimeError(f"{kind} for pr#{ctx.number} (agent={agent}) — {details}")
 
     union = _build_union(succeeded)
     coverage = _merge_coverage(succeeded)
@@ -318,7 +380,7 @@ def run_fanout_review(
         entries = result.entries
         feedback = result.overall_feedback.strip()
 
-    routed = route_calibrated(entries, nit_cap=nit_cap)
+    routed = route_calibrated(entries, nit_cap=effective_nit_cap)
     findings = tuple(
         JudgedFinding(entry.finding, d, entry.duplicate_of) for entry, d in routed
     )

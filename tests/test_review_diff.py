@@ -319,3 +319,42 @@ def test_review_view_repo_is_none_for_handbuilt_context():
         is_draft=False,
     )
     assert ctx.repo is None
+
+
+# --- rescoped_view: the incremental fix-range re-diff (RVW02-WS06) -----------
+
+
+def test_rescoped_view_rediffs_over_the_fix_range(monkeypatch):
+    view = diff.review_view(
+        number=5,
+        repo="owner/repo",
+        head_sha="c" * 40,
+        base_ref="main",
+        base_sha="a" * 40,  # the PR merge base (full-round base)
+        diff="full pr diff",
+        is_draft=False,
+        changed_files=["a.py", "b.py"],
+        workdir="/wd",
+        head_ref="feature/x",
+    )
+    seen = {}
+
+    def fake_diff_range(base, head, *, cwd):
+        seen["range"] = (str(base), str(head), cwd)
+        return "fix range diff"
+
+    monkeypatch.setattr(diff.git, "diff_range", fake_diff_range)
+    monkeypatch.setattr(diff.git, "diff_name_only", lambda base, head, *, cwd: ["b.py"])
+
+    rescoped = diff.rescoped_view(view, "b" * 40)
+    # The new base is the last-reviewed head; the diff/changed-files are re-scoped.
+    assert rescoped.base_sha == Sha("b" * 40)
+    assert rescoped.diff == "fix range diff"
+    assert rescoped.changed_files == ["b.py"]
+    # Diffed base..head in the view's workdir.
+    assert seen["range"] == ("b" * 40, "c" * 40, "/wd")
+    # The PR identity, head, workdir, and head branch are unchanged.
+    assert rescoped.head_sha == Sha("c" * 40)
+    assert rescoped.number == 5
+    assert rescoped.repo == "owner/repo"
+    assert rescoped.head_ref == "feature/x"

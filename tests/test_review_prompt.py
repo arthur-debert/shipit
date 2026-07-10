@@ -10,7 +10,7 @@ JSON-validity instruction.
 
 from __future__ import annotations
 
-from shipit.review.prompt import build_reviewer_task
+from shipit.review.prompt import build_incremental_reviewer_task, build_reviewer_task
 from shipit.review.schema import REVIEW_SCHEMA
 
 _INSTRUCTIONS = "Be thorough."
@@ -112,3 +112,29 @@ def test_dimension_section_precedes_the_inline_schema_for_agy():
 def test_monolithic_task_carries_no_dimension_section():
     task = build_reviewer_task("INSTR", 7, schema_inline=False)
     assert "DIMENSION FOCUS" not in task
+
+
+# --- incremental (round >= 2) reviewer task (RVW02-WS06, ADR-0045) ----------
+
+
+def test_incremental_task_diffs_the_fix_range_not_the_full_pr():
+    task = build_incremental_reviewer_task(
+        _INSTRUCTIONS, 42, "b" * 40, "c" * 40, schema_inline=False
+    )
+    # It diffs the FIX RANGE via git, and explicitly forbids the full `gh pr diff`.
+    assert f"git diff {'b' * 40}..{'c' * 40}" in task
+    assert "Do NOT" in task and "gh pr diff" in task
+    assert _INSTRUCTIONS in task
+
+
+def test_incremental_task_mandates_dependency_neighborhood_context():
+    # The load-bearing anti-regression rule: read callers/definitions/usages
+    # beyond the diff, so a local fix breaking a distant invariant is still caught.
+    task = build_incremental_reviewer_task(
+        _INSTRUCTIONS, 42, "b" * 40, "c" * 40, schema_inline=True
+    )
+    assert "MANDATORY CONTEXT EXPANSION" in task
+    assert "DEPENDENCY NEIGHBORHOOD" in task
+    # It keeps the same ladder + JSON contract as the full task, and the agy prose.
+    assert "critical, major, minor, or nit" in task
+    assert "null for a file-level finding" in task

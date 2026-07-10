@@ -180,6 +180,89 @@ later stage routes out-of-scope findings explicitly; do not silently drop \
 them. Do not pad with findings outside this dimension's focus."""
 
 
+def build_incremental_reviewer_task(
+    instructions: str,
+    pr_number: int,
+    base_sha: str,
+    head_sha: str,
+    *,
+    schema_inline: bool,
+) -> str:
+    """Compose the INCREMENTAL (round ≥ 2) reviewer task — the fix-range sibling
+    of :func:`build_reviewer_task` (RVW02-WS06, ADR-0045).
+
+    A round after the first reviews ONLY the fix range — the commits added since
+    this reviewer last reviewed the PR — not the whole PR again. So the diff
+    source is ``git diff <base_sha>..<head_sha>`` over the two pre-resolved shas
+    (the last-reviewed head → the new head, both present in this Tree), NOT the
+    full ``gh pr diff``. Same review contract and JSON output as the full task.
+
+    The load-bearing difference from a naive raw-hunk incremental review is the
+    MANDATORY dependency-neighborhood context (PRD US-13; ADR-0045): a local fix
+    can break a distant invariant, so the task REQUIRES the agent — for every
+    changed hunk — to read the callers, definitions, and usages of what changed
+    beyond the diff itself, using its full read-only checkout. Raw-hunk review is
+    the documented cross-file-regression failure mode; this prompt exists to
+    prevent it. ``schema_inline`` follows the same backend split as the full task.
+    """
+    body = f"""\
+You are an expert AI code reviewer. You are running in a shared, READ-ONLY checkout \
+of pull request #{pr_number} at its head commit. This is an INCREMENTAL review: the \
+PR was already reviewed at an earlier commit, and your job is to review ONLY the \
+changes made since — the fix range — not the whole PR again.
+
+FIRST, get the changes: run `git diff {base_sha}..{head_sha}` to read the fix \
+range's unified diff. Those are the commits added since the last review. Do NOT \
+run `gh pr diff` — that would re-review the entire PR; review only this range.
+
+MANDATORY CONTEXT EXPANSION: for EVERY changed hunk, do not review it in \
+isolation. Using this full read-only checkout, read the DEPENDENCY NEIGHBORHOOD of \
+what changed — the callers of a changed function, the definition of a changed \
+call, the other usages of a changed symbol, the invariants the changed code \
+participates in — even when they lie OUTSIDE the diff. A local fix that breaks a \
+distant invariant is exactly what an incremental review must still catch; a \
+raw-hunk-only pass would miss it. Open the surrounding and cross-file source \
+freely.
+
+Here are the custom review instructions you must follow:
+{instructions}
+
+Identify bugs, code quality issues, style violations, potential crashes, logic \
+errors, or missing tests introduced or exposed by the fix range. For each finding, \
+determine:
+1. The file path (relative to the repository root)
+2. The specific line number (if applicable)
+3. The severity, on the 4-tier ladder: critical, major, minor, or nit. The \
+major/minor boundary is the MERGE-BLOCK TEST: would a competent reviewer hold the \
+merge for this? critical = merging would be actively harmful (security hole, data \
+loss, crash, broken build); major = a concrete correctness or behavioral defect \
+worth blocking the merge on; minor = worth doing, not worth holding the merge; \
+nit = wording, naming, or style with no correctness, behavioral, or security impact.
+4. The category that best describes it (e.g. correctness, cross-file invariants, \
+security, tests) and your confidence in the finding from 0.0 to 1.0 — both are \
+informational only; nothing routes on them.
+5. A descriptive comment explaining the issue and recommending a fix
+6. The quoted code the finding rests on (evidence), and the suggested fix
+
+Order the comments array highest severity first: every critical, then every major, \
+then minor, then nit.
+
+In the summary, attest your coverage: list what you actually reviewed (files, or \
+file:hunk ranges) and anything you skipped with the reason — so silence means \
+"clean", not "skipped".
+
+You must output your complete review strictly as a single JSON object on stdout. Do \
+NOT wrap the JSON in markdown blocks (e.g. do not use ```json) and do NOT write any \
+text before or after the JSON. Do NOT post the review yourself — do not run \
+`gh pr review` or otherwise comment on the PR; just emit the JSON and stop. shipit \
+captures your output and posts the review."""
+
+    if schema_inline:
+        body = f"{body}\n\n{_SCHEMA_PROSE}\n\n{_JSON_VALIDITY_INSTRUCTION}"
+
+    return body
+
+
 def build_range_reviewer_task(
     instructions: str, base_sha: str, head_sha: str, *, schema_inline: bool
 ) -> str:

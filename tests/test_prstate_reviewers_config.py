@@ -80,15 +80,16 @@ def test_scaffold_body_renders_from_the_default_map_and_round_trips(tmp_path):
 
 
 def test_scaffold_body_renders_each_reviewers_rerun_flag(tmp_path, monkeypatch):
-    # The renderer must honour the map VALUES, not just its keys: a reviewer with
-    # rerun=True renders `{ rerun = true }`, one with rerun=False the empty `{}`.
-    # (Guards against the renderer silently dropping a future rerun default.)
+    # The renderer must honour the map VALUES, not just its keys, and (ADR-0043 /
+    # RVW02-WS06) render the rerun flag EXPLICITLY for BOTH values — an omitted
+    # rerun now parses as head-strict True, so a review-once default must be
+    # written `{ rerun = false }`, never left to a `{}` that would flip it.
     monkeypatch.setattr(
         reviewers_config, "DEFAULT_REVIEWERS", {"copilot": True, "codex": False}
     )
     body = reviewers_config.default_reviewers_scaffold_body()
     assert "copilot = { rerun = true }" in body
-    assert "codex = {}" in body
+    assert "codex = { rerun = false }" in body
     # And it round-trips: loading the rendered body yields the (patched) flags.
     assert tomllib.loads(body)  # syntactically valid TOML
     roster = load_roster(_write(tmp_path, body))
@@ -122,11 +123,19 @@ def test_rerun_flags_are_per_reviewer(tmp_path):
     assert roster.entry("codex").rerun is False
 
 
-def test_rerun_defaults_false_when_options_absent(tmp_path):
-    # `copilot = {}` with an empty options table means defaults — rerun=False.
+def test_rerun_defaults_true_when_options_absent(tmp_path):
+    # `copilot = {}` with an empty options table means defaults — and ADR-0043 /
+    # RVW02-WS06 flipped the code default to head-strict rerun=True.
     roster = load_roster(_write(tmp_path, "[reviewers]\ncopilot = {}\ncodex = {}\n"))
+    assert roster.entry("copilot").rerun is True
+    assert roster.entry("codex").rerun is True
+
+
+def test_rerun_false_is_an_explicit_opt_out(tmp_path):
+    # Review-once survives as an explicit per-reviewer opt-out (the metered
+    # full-diff app-reviewer case, ADR-0043).
+    roster = load_roster(_write(tmp_path, "[reviewers]\ncopilot = { rerun = false }\n"))
     assert roster.entry("copilot").rerun is False
-    assert roster.entry("codex").rerun is False
 
 
 # --- the reserved table-level `round_cap` policy key -------------------------
@@ -296,11 +305,11 @@ def test_absolute_instructions_kept(tmp_path):
 def test_unconfigured_reviewer_reads_all_defaults(tmp_path):
     # Roster.entry is TOTAL: a reviewer outside the table (e.g. a forced
     # `--reviewer codex-local` run) reads the all-defaults entry — not required,
-    # review-once, no run options.
+    # head-strict rerun (ADR-0043), no run options.
     roster = load_roster(_write(tmp_path, "[reviewers]\ncopilot = {}\n"))
     entry = roster.entry("codex")
     assert entry.required is False
-    assert entry.rerun is False
+    assert entry.rerun is True
     assert (entry.model, entry.instructions, entry.timeout) == (None, None, None)
 
 

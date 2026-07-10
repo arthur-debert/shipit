@@ -7,18 +7,23 @@ returns in-flight.
 
 Layered functions:
 
-  * :func:`generate_review` — delegate to the dimension FAN-OUT
-    (:func:`shipit.review.fanout.run_fanout_review`, RVW02-WS04 / ADR-0045):
-    provision ONE shared read-only Tree (ADR-0018) on the PR head, launch the
-    reviewer's configured **Dimension passes** in parallel through its spawn
-    read-only posture (each fetching the diff itself via ``gh pr diff``), union
-    the results, and hand them to the table-level **Calibrator**, whose
-    validated, routed output is the review dict. No GitHub posting — the
-    fan-out is invisible below this seam (one review per reviewer per head,
-    exactly as before). The generated review is TEED to the local review-round
-    record store here (RVW02-WS03, fail-open) — verb-witnessed at generate
-    time, before any post, now carrying the calibrator's REAL dispositions and
-    every contributing run (passes + calibrator) with run ids + variant hashes.
+  * :func:`generate_review` — decide the round SCOPE (RVW02-WS06:
+    :func:`shipit.review.rounds.plan_for_view`) then delegate to the FAN-OUT
+    (:func:`shipit.review.fanout.run_fanout_review`, RVW02-WS04 / ADR-0045).
+    ROUND 1 provisions ONE shared read-only Tree (ADR-0018) on the PR head,
+    launches the reviewer's configured **Dimension passes** in parallel (each
+    fetching the diff itself via ``gh pr diff``), and unions the results. A
+    round AFTER the first — this reviewer already reviewed an earlier head still
+    an ancestor of the new head — re-diffs to the FIX RANGE and runs ONE
+    incremental pass with new nits suppressed instead (a rebase/force-push falls
+    back to a full round). Either way the union is routed (mechanical dedup by
+    default, the dormant **Calibrator** when opted on) to the review dict. No
+    GitHub posting — the fan-out is invisible below this seam (one review per
+    reviewer per head, exactly as before). The generated review is TEED to the
+    local review-round record store here (RVW02-WS03, fail-open) — verb-witnessed
+    at generate time, before any post, carrying the REAL dispositions, the range
+    reviewed, and every contributing run (passes + calibrator) with run ids +
+    variant hashes.
   * :func:`start_detached_review` — the OBS03 PARENT entry the reviewer adapter
     calls: do the cheap synchronous work (resolve ``(repo, head_sha)``, reconcile
     against any in-flight run, open the ``in_progress`` breadcrumb), spawn a
@@ -45,7 +50,7 @@ from collections.abc import Callable, Mapping, Sequence
 from .. import execrun, gh, logcontext
 from ..agent.backend import Backend
 from ..pr import PrId
-from . import checkrun, fanout, ghauth, post, roundrecord
+from . import checkrun, diff, fanout, ghauth, post, roundrecord, rounds
 from .backends.base import BackendError
 from .calibrator import CalibratorConfig
 from .diff import ReviewError, resolve_pr
@@ -69,8 +74,18 @@ def generate_review(
     nit_cap: int | None = None,
     dry_run: bool = False,
 ) -> dict:
-    """Run ``backend``'s dimension fan-out over ``ctx`` and return the routed
-    review.
+    """Run ``backend``'s review over ``ctx`` (full round 1, or an incremental
+    fix-range round ≥ 2) and return the routed review.
+
+    Round SCOPE is decided here (RVW02-WS06, ADR-0045) via
+    :func:`shipit.review.rounds.plan_for_view`: when this reviewer already
+    reviewed an earlier head of this PR that is still an ancestor of the new
+    head, ``ctx`` is re-diffed to the FIX RANGE
+    (:func:`shipit.review.diff.rescoped_view`) and the fan-out runs ONE
+    incremental pass with new nits suppressed, instead of the full dimension
+    fan-out; a rebase/force-push (the old head is no longer an ancestor) or a
+    first round runs the full pipeline. A ``dry_run`` always takes the full
+    round-1 path (it touches neither the round store nor git).
 
     The RVW02-WS04/WS08 round-1 pipeline (ADR-0045): one shared read-only Tree
     (ADR-0018) on the PR head, the reviewer's configured **Dimension passes**
@@ -112,11 +127,36 @@ def generate_review(
     degraded review.
     """
     agent = backend.funnel_agent
+    # Decide the round SCOPE (RVW02-WS06, ADR-0045): round 1 is the full-PR
+    # dimension fan-out; a round after the first — this reviewer already reviewed
+    # an earlier head of this PR, still an ancestor of the new head — is ONE
+    # incremental pass over the fix range. A rebase/force-push (the old head is no
+    # longer an ancestor) falls back to a full round. A dry run never touches the
+    # store or git for a plan — it just exercises the round-1 dry-run path.
+    reviewer = agent or backend.name
+    plan = (
+        rounds.plan_for_view(ctx, reviewer)
+        if not dry_run and rounds.planable(ctx)
+        else rounds.RoundPlan(
+            incremental=False,
+            base=getattr(ctx, "base_sha", None),
+            head=getattr(ctx, "head_sha", None),
+        )
+    )
+    if plan.incremental:
+        # Re-diff over the fix range so the fan-out reviews (and the round record
+        # records) exactly ``last-reviewed-head..new-head``.
+        ctx = diff.rescoped_view(ctx, plan.base)
     logger.info(
-        "review run: agent=%s model=%s timeout=%s starting (dimension fan-out)",
+        "review run: agent=%s model=%s timeout=%s starting (%s)",
         agent,
         model,
         timeout,
+        (
+            f"incremental fix-range {ctx.base_sha}..{ctx.head_sha}"
+            if plan.incremental
+            else "dimension fan-out"
+        ),
         extra={"reviewer": agent, "pr": ctx.number},
     )
     start = time.monotonic()
@@ -129,6 +169,7 @@ def generate_review(
         dimensions=dimensions,
         calibrator=calibrator,
         nit_cap=nit_cap,
+        incremental=plan.incremental,
         dry_run=dry_run,
     )
     review = outcome.review

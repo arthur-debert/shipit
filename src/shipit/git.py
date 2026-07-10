@@ -505,6 +505,31 @@ def merge_base(a: Sha, b: Sha, *, cwd: str) -> Sha | None:
         return None
 
 
+def is_ancestor(ancestor: Sha, descendant: Sha, *, cwd: str) -> bool:
+    """True iff ``ancestor`` is a first-parent-or-any ancestor of ``descendant``
+    (``git merge-base --is-ancestor``).
+
+    The convergence gate for incremental review rounds (RVW02-WS06, ADR-0045):
+    a round after the first reviews only ``last-reviewed-head..new-head``, which
+    is a meaningful *fix range* ONLY when the last-reviewed head is still in the
+    new head's history. A rebase or force-push rewrites that history, so the old
+    head is no longer an ancestor — the incremental premise is void and the
+    caller must fall back to a full-PR round (fail toward over-reviewing).
+
+    A PROBE, not a hard command: ``git merge-base --is-ancestor`` exits 0 when
+    the ancestry holds, 1 when it does not, and something else on error (a
+    commit not present in this checkout, a broken repo). Only exit 0 returns
+    ``True``; EVERY other outcome — a genuine non-ancestor AND any error —
+    returns ``False``, so an unresolvable ancestry check degrades to the SAFE
+    side (a full round), never a wrongly-narrowed incremental one. A
+    launch-level failure (missing binary) still raises :class:`ExecError`
+    through :func:`_probe`'s runner, exactly like the other probes.
+    """
+    return _probe(
+        ["merge-base", "--is-ancestor", str(ancestor), str(descendant)], cwd=cwd
+    ).ok
+
+
 def diff_range(base: Sha, head: Sha, *, cwd: str) -> str:
     """The two-dot diff ``git diff <base>..<head>`` — the patch text between two commits.
 

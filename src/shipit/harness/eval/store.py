@@ -133,3 +133,38 @@ def append_record(
     with path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(record) + "\n")
     return path
+
+
+def read_records(
+    repo: Repo, base_dir: Path | None = None, *, kind: str = EVAL_KIND
+) -> list[dict[str, Any]]:
+    """Read every record of one ``kind`` for ``repo``, oldest-appended first.
+
+    The read sibling of :func:`append_record`: resolves the SAME origin-keyed
+    store path (:func:`store_path`) and parses the JSONL back into dicts, in
+    append order (the file is append-only, so line order is chronological). A
+    MISSING store (nothing ever appended) is an empty list, never an error —
+    a reader that has no history simply sees none (the incremental-round query
+    that has no prior review-round record for a PR then treats the round as a
+    full round, RVW02-WS06). A malformed line is SKIPPED rather than fatal: the
+    store is local, uncommitted telemetry, and one corrupt line must not blind a
+    reader to every intact record around it.
+
+    ``base_dir`` overrides the family root (tests), exactly as on the writers.
+    """
+    path = store_path(repo, base_dir, kind=kind)
+    if not path.exists():
+        return []
+    records: list[dict[str, Any]] = []
+    with path.open(encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                parsed = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict):
+                records.append(parsed)
+    return records

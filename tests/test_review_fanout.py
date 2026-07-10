@@ -21,6 +21,7 @@ from types import SimpleNamespace
 import pytest
 
 from shipit.finding import Disposition, Finding, Severity
+from shipit.identity import Sha
 from shipit.review import fanout
 from shipit.review.calibrator import (
     CalibratedFinding,
@@ -43,6 +44,20 @@ def _ctx():
         head_ref="feature/x",
         workdir="/checkout",
         diff="",
+    )
+
+
+def _incremental_ctx():
+    # A fix-range-rescoped view: base_sha is the last-reviewed head, head_sha the
+    # new head (RVW02-WS06). The fan-out derives the incremental range from these.
+    return SimpleNamespace(
+        number=5,
+        repo="owner/repo",
+        head_ref="feature/x",
+        workdir="/checkout",
+        diff="",
+        base_sha=Sha("b" * 40),
+        head_sha=Sha("c" * 40),
     )
 
 
@@ -90,16 +105,28 @@ def _seams(monkeypatch):
         "provision_review_tree",
         lambda ctx: capture["trees"].append("/tree") or "/tree",
     )
-    monkeypatch.setattr(
-        fanout.producer,
-        "pass_task_text",
-        lambda backend, number, *, instructions_path=None, dimension=None: (
-            f"task for {dimension.name}"
-        ),
-    )
+
+    def fake_pass_task_text(
+        backend,
+        number,
+        *,
+        instructions_path=None,
+        dimension=None,
+        incremental_range=None,
+    ):
+        if incremental_range is not None:
+            return (
+                f"incremental task for {incremental_range[0]}..{incremental_range[1]}"
+            )
+        return f"task for {dimension.name}"
+
+    monkeypatch.setattr(fanout.producer, "pass_task_text", fake_pass_task_text)
 
     def fake_run_tree_review(backend, ctx, **kw):
-        outcome = capture["reviews"][kw["dimension"].name]
+        # An incremental round runs ONE pass (dimension=None, incremental_range
+        # set) keyed as "incremental"; a round-1 pass is keyed by dimension name.
+        key = kw["dimension"].name if kw.get("dimension") is not None else "incremental"
+        outcome = capture["reviews"][key]
         assert kw["tree_path"] == "/tree"  # every pass shares the ONE Tree
         if isinstance(outcome, Exception):
             raise outcome
@@ -693,3 +720,74 @@ def test_by_name_is_the_prompt_slice_the_passes_launch_with():
     assert "DIMENSION FOCUS — Cross-file invariants" in task
     assert "READ BEYOND THE DIFF" in task
     assert "do not silently drop" in task
+
+
+# --- incremental rounds (RVW02-WS06, ADR-0045) ------------------------------
+
+
+def test_incremental_round_runs_one_pass_suppresses_nits_records_range(_seams):
+    """A round after the first is ONE incremental pass over the fix range, at the
+    cheaper reasoning, with new nits suppressed (default dedup path)."""
+    from shipit.agent import backend as agent_backend
+
+    _seams["reviews"] = {
+        "incremental": _pass_review(
+            [
+                _comment("real bug", severity="major"),
+                _comment("style", severity="nit", file="a.py", line=9),
+            ]
+        )
+    }
+    outcome = fanout.run_fanout_review(
+        agent_backend.CODEX, _incremental_ctx(), incremental=True
+    )
+
+    # Exactly ONE pass ran — not the dimension fan-out.
+    assert [run["kind"] for run in outcome.runs] == ["incremental-pass"]
+    run = outcome.runs[0]
+    # The cheaper reasoning level is stamped on the run (config + record).
+    assert run["reasoning"] == fanout.DEFAULT_INCREMENTAL_REASONING
+    # The fix range is recorded on the run entry.
+    assert run["range"] == {"base": "b" * 40, "head": "c" * 40}
+    assert run["dimension"] == "incremental"
+
+    review = outcome.review
+    # The major posts; the new nit is SUPPRESSED (not posted) — a late round
+    # can't be recolonized by style churn.
+    assert [c["text"] for c in review["comments"]] == ["real bug"]
+    suppressed = {
+        j.finding.text: j.disposition for j in outcome.findings if not j.posted
+    }
+    assert suppressed == {"style": Disposition.NIT_SUPPRESSED}
+
+
+def test_incremental_round_still_runs_the_calibrator_when_configured(_seams):
+    # single-pass + calibrator (ADR-0045): opting the judge on still routes the
+    # single incremental pass's union through it.
+    from shipit.agent import backend as agent_backend
+
+    _seams["reviews"] = {
+        "incremental": _pass_review([_comment("bug", severity="major")])
+    }
+    _seams["result"] = CalibrationResult(
+        overall_feedback="v", entries=(_calibrated(0, _finding(Severity.MAJOR, "bug")),)
+    )
+    outcome = fanout.run_fanout_review(
+        agent_backend.CODEX, _incremental_ctx(), incremental=True, calibrator=_CAL
+    )
+    assert _seams["union"] is not None  # the calibrator ran over the single pass
+    kinds = [run["kind"] for run in outcome.runs]
+    assert kinds == ["incremental-pass", "calibrator"]
+    assert [c["text"] for c in outcome.review["comments"]] == ["bug"]
+
+
+def test_incremental_pass_failure_fails_the_round(_seams):
+    # The sole pass failing IS all passes failing → RuntimeError (service maps it
+    # to the `failed` funnel outcome).
+    from shipit.agent import backend as agent_backend
+
+    _seams["reviews"] = {"incremental": RuntimeError("backend blew up")}
+    with pytest.raises(RuntimeError, match="the incremental pass failed"):
+        fanout.run_fanout_review(
+            agent_backend.CODEX, _incremental_ctx(), incremental=True
+        )
