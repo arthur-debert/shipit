@@ -1,5 +1,5 @@
 # shipit's own pixi workspace — Step 3 lands shipit's first pixi integration
-# (docs/prd/lint-checks.md). The substrate proven in Spike 0 stops being a spike here and
+# (docs/legacy-prd/lint-checks.md). The substrate proven in Spike 0 stops being a spike here and
 # becomes a real dependency of shipit's own repo: the lint checks are dogfooded on shipit
 # from this step forward.
 #
@@ -7,7 +7,7 @@
 # PINNED in pixi.lock and CI runs `--locked` (architecture.lex §2) — version
 # bumps arrive as auto-PRs, never silently. The lone exception is `lexd` (not on
 # conda-forge), fetched at a pin by `shipit provision lexd` (the binary owns the
-# pin — docs/prd/adoption.md).
+# pin — docs/legacy-prd/adoption.md).
 
 [workspace]
 name = "shipit"
@@ -145,7 +145,7 @@ test = { cmd = "./bin/shipit provision lexd && ./bin/shipit test" }
 
 # The `lint` FEATURE carries the MANAGED fleet-pinned dependency block below —
 # the exact block `shipit install` delivers to every consumer (ADP00,
-# docs/prd/adoption.md: the managed set owns the consumer environment). shipit
+# docs/legacy-prd/adoption.md: the managed set owns the consumer environment). shipit
 # self-installs at Tree provisioning, so its own manifest must carry the block
 # verbatim for the reconcile to stay a NOOP; a drift test
 # (tests/test_install.py) asserts these pins agree with the hand-written
@@ -175,7 +175,7 @@ test = { cmd = "./bin/shipit provision lexd && ./bin/shipit test" }
 # provisioning script anymore.
 [feature.lint.dependencies]
 # >>> shipit-managed lint deps (do not edit; regenerate via `shipit install`) >>>
-# The fleet-pinned lint toolchain (docs/prd/adoption.md: the managed set owns
+# The fleet-pinned lint toolchain (docs/legacy-prd/adoption.md: the managed set owns
 # the consumer environment). Canonical versions live HERE — a bump is one data
 # edit, rolled fleet-wide on each consumer's next `shipit install` reconcile.
 ruff = "0.15.*"

@@ -9,7 +9,7 @@ the single implementation everywhere (laptop, lefthook hook, CI job); the
 pixi task of the same name is a thin one-line caller.
 
 The pure, fixture-testable cores live here (the PRD's pure-cores/effectful-
-shells decision, docs/prd/tol01-ci-tools.md):
+shells decision, docs/legacy-prd/tol01-ci-tools.md):
 
 - :mod:`shipit.tools.registry` — the CLOSED toolchain registry (rust / go /
   python / npm), each entry carrying its default producing command per tool

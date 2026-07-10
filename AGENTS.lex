@@ -92,7 +92,7 @@ The PR lifecycle (draft -> ready -> stop):
         an external checkout. A Tree is a dissociated clone rooted as the Run's cwd (no
         bash-cwd footgun), NOT a native `git worktree` — that path is denied (ADR-0014) —
         so concurrent agents never collide on one checkout;
-        see [./docs/prd/where-to-do-work.md]. The implementer runs the checks (`shipit lint`)
+        see [./docs/legacy-prd/where-to-do-work.md]. The implementer runs the checks (`shipit lint`)
         and tests (`pixi run test`) green BEFORE opening the PR — CI runs the same as
         required checks, so local green is necessary for CI green.
 
@@ -173,7 +173,7 @@ The PR lifecycle (draft -> ready -> stop):
     epic branch) — a multi-PR feature runs on the epic branch, full stop.
 
     A feature is planned before execution via `/planning` (ideation -> ADRs
-    -> PRD -> docs PR, then epic/WS decomposition -> issues).
+    -> Spec -> docs PR, then epic/WS decomposition -> issues).
 
     Full topology — per-workstream delegation, integration ordering, convergence,
     the docs pass, the umbrella, changelog/release status. See [./docs/dev/epics.lex]

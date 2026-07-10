@@ -7,7 +7,7 @@ CONTEXT.md (**Exec**, **Tool adapter**, **Sha**).
 > **Since extended (LOG04, 2026-07):** the domain-key vocabulary grew from the
 > five listed here to nine (`epic`, `ws`, `agent`, `role`), and the `logs`
 > reader gained domain-key filters, `--events`, and a `--flow` dev-cycle view —
-> see `docs/prd/log04-dev-cycle-event-log.md` and ADR-0032. This spec's
+> see `docs/legacy-prd/log04-dev-cycle-event-log.md` and ADR-0032. This spec's
 > five-key and reader passages are the historical baseline.
 
 ## Problem Statement

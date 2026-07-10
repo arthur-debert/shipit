@@ -2,7 +2,7 @@
 
 ## Problem Statement
 
-Trees (`docs/prd/where-to-do-work.md`, ADR-0014) gave every *spawned* Run an isolated,
+Trees (`docs/legacy-prd/where-to-do-work.md`, ADR-0014) gave every *spawned* Run an isolated,
 provisioned checkout. But the one session that starts it all — the **coordinator**, the
 top-level, human-facing Claude Code session — was left behind. It still runs in the plain
 repo checkout it was launched from, un-isolated and un-activated. Two faces of one gap:

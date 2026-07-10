@@ -27,7 +27,7 @@ cycle's tier. *Hook-witnessed*: a shipit-managed git hook emits (post-commit
 → `commit.created`) — automatic, skippable only by a hook bypass, which the
 eval store already counts. *Skill-scripted*: a skill's instructions include the
 emission step — best-effort, and accepted as such; this is how the planning
-cycle (grill, ADR/PRD written, epic/WS minted) enters the record at all,
+cycle (grill, ADR/Spec written, epic/WS minted) enters the record at all,
 since its milestones pass through skills and `gh`, not shipit verbs. The
 write path for the last two tiers is one constrained verb (`shipit log
 event`) that accepts ONLY registered event names — freeform narration stays
@@ -63,7 +63,8 @@ types get debated.
   must run emit the trail as a side effect. Adoption of the *verbs* is the
   only prompt-side ask, and that pressure already exists.
 - Planning-tier events are best-effort by design; a missing
-  `planning.prd.written` means a skipped skill step, not a broken invariant.
+  `planning.spec.written` means a skipped skill step, not a broken invariant.
+  `planning.prd.written` remains a legacy accepted name for old records/scripts.
 - Skill/command adoption metrics stay OUT: they are per-run behavioral
   telemetry and belong to the eval store's transcript extractors (ADR-0013),
   not the milestone vocabulary.

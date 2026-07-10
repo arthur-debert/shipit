@@ -32,7 +32,7 @@ REPO = repo_from_slug("acme/widget")
 #: Each planning skill and the registered event names its emission steps call
 #: (the issue's checkpoint map): the orchestrator states the session's purpose
 #: when the overview is blessed; the grill restates it at start (a later
-#: intent supersedes at read time) and records grill start + each ADR; the PRD
+#: intent supersedes at read time) and records grill start + each ADR; the Spec
 #: and issue skills record their own artifacts.
 PLANNING_EMISSIONS = {
     "planning": {"session.intent"},
@@ -41,7 +41,7 @@ PLANNING_EMISSIONS = {
         "planning.grill.started",
         "planning.adr.written",
     },
-    "to-prd": {"planning.prd.written"},
+    "to-spec": {"planning.spec.written"},
     "to-tickets": {"planning.epic.minted", "planning.ws.minted"},
 }
 
@@ -83,7 +83,7 @@ def test_every_skill_emit_call_names_a_registered_skill_scripted_event():
         if skill_dir.is_dir() and doc.is_file():
             called.update(_EMIT_CALL.findall(doc.read_text(encoding="utf-8")))
     # The tier exists at all — the planning family is actually scripted.
-    assert called >= {"session.intent", "planning.prd.written"}
+    assert called >= {"session.intent", "planning.spec.written"}
     unregistered = called - events.EVENT_NAMES
     assert not unregistered, f"skills emit unregistered events: {sorted(unregistered)}"
     wrong_tier = called - events.SKILL_SCRIPTED_NAMES
@@ -114,7 +114,7 @@ def test_session_status_skill_is_in_the_managed_set():
 
 def test_planning_leg_dry_run_renders_in_the_flow_view(tmp_path, capsys):
     """The whole tier, externally: the emission sequence a planning leg's
-    skills script (grill -> ADR -> PRD -> epic/WS minting) through the real
+    skills script (grill -> ADR -> Spec -> epic/WS minting) through the real
     emit verb + logging pipeline, read back with the reader the session-status
     skill wraps — the intent opens the story, every milestone renders."""
     logsetup.configure_logging(
@@ -124,7 +124,7 @@ def test_planning_leg_dry_run_renders_in_the_flow_view(tmp_path, capsys):
         ("session.intent", "planning session: reviewer symmetry"),
         ("planning.grill.started", None),
         ("planning.adr.written", "ADR-0031: engine as sole requester"),
-        ("planning.prd.written", "PRD: docs/prd/reviewer-symmetry.md"),
+        ("planning.spec.written", "Spec: docs/spec/reviewer-symmetry.md"),
         ("planning.epic.minted", "RVW01: Reviewer symmetry (#387)"),
         ("planning.ws.minted", "RVW01-WS01: walking skeleton (#388)"),
     ]
@@ -147,6 +147,6 @@ def test_planning_leg_dry_run_renders_in_the_flow_view(tmp_path, capsys):
     # did not.
     assert "planning grill started" in body
     assert "ADR-0031: engine as sole requester" in body
-    assert "PRD: docs/prd/reviewer-symmetry.md" in body
+    assert "Spec: docs/spec/reviewer-symmetry.md" in body
     assert "RVW01: Reviewer symmetry (#387)" in body
     assert "RVW01-WS01: walking skeleton (#388)" in body

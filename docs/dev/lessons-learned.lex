@@ -3,7 +3,7 @@ shipit Lessons Learned
 This document preserves the reasoning chain and history behind shipit's design
 — the "why behind the why". The other dev docs describe the final state and the
 path to it: [./architecture.lex] holds the decisions, [./workflows.lex] the CI
-pipeline, [../prd/FUTURE_WORK.md] the high-level map. This one is the exception:
+pipeline, [../legacy-prd/FUTURE_WORK.md] the high-level map. This one is the exception:
 it is allowed to discuss rejected alternatives, raw research findings, and
 unsolved problems, so that a future session starting with a fresh context can
 recover not just WHAT was decided but WHY, and what was consciously left open.
@@ -276,7 +276,7 @@ current truth.
         between minors and whose rust/tauri toolchain story is unproven for this
         stack. This is the right trade, but it is not free — Spike 0 is the
         load-bearing test of the whole premise, which is why it blocks everything
-        in [../prd/FUTURE_WORK.md].
+        in [../legacy-prd/FUTURE_WORK.md].
 
     Step 6 is the danger zone:
 
@@ -301,7 +301,7 @@ current truth.
 
 8. Spike 0 outcome — pixi DOES run the rust + tauri toolchain (verified 2026-06-25)
 
-    The premise question from [../prd/FUTURE_WORK.md] is answered yes: pixi-provisioned
+    The premise question from [../legacy-prd/FUTURE_WORK.md] is answered yes: pixi-provisioned
     native deps built a real tauri bundle with the correct main binary on BOTH
     macos-latest and ubuntu-latest. Done on a throwaway phos-editor/app branch
     (spike/pixi-tauri), since torn down — phos main untouched. The foundational
@@ -351,7 +351,7 @@ current truth.
           consumer's native-dep source) must NOT live there — default it in a
           script and let CI export the real path, or CI cannot redirect it.
         - setup-pixi was NOT blocked by the phos-editor org Actions policy (the
-          worry flagged in [../prd/FUTURE_WORK.md] did not bite this time). RELEASE_TOKEN
+          worry flagged in [../legacy-prd/FUTURE_WORK.md] did not bite this time). RELEASE_TOKEN
           cloned the private phos-core at its pinned tag, serving BOTH the native
           git-dep patch and the from-source wasm build from one clone.
         - The producing-logic-runs-in-local-Docker property ([./architecture.lex] §3)

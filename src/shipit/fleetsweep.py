@@ -3,7 +3,7 @@
 ``shipit fleet sweep`` runs every shipped tool verb locally against every
 ``[project.portfolio]`` repo it applies to and assembles ONE per-tool ×
 per-repo matrix report — the evidence artifact the workstream is verified by
-(PRD docs/prd/tol01-ci-tools.md, stories 47/49; evidence over unit tests) and
+(PRD docs/legacy-prd/tol01-ci-tools.md, stories 47/49; evidence over unit tests) and
 ADP02's adoption-readiness seed (a repo whose row is all green is
 adoption-ready).
 

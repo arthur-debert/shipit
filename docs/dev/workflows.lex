@@ -8,7 +8,7 @@ is locally runnable — a shipit verb behind a thin pixi task caller; routing
 logic is thin YAML) is stated in [./architecture.lex#3].
 
 :: note ::
-    Reconciliation (TOL01, 2026-07). The PRD `docs/prd/tol01-ci-tools.md` and
+    Reconciliation (TOL01, 2026-07). The PRD `docs/legacy-prd/tol01-ci-tools.md` and
     ADR-0039/0040/0041 supersede parts of this doc's vocabulary: producing
     steps are shipit verbs now (pixi tasks are thin callers); the "package"
     stage is renamed `bundle` and the terminal stage `publish` ("release"

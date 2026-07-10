@@ -1,6 +1,6 @@
 # OBS03 — Async local-review execution
 
-> Epic: **OBS03** · Status: planned · Plan: `docs/prd/FUTURE_WORK.md`
+> Epic: **OBS03** · Status: planned · Plan: `docs/legacy-prd/FUTURE_WORK.md`
 > ADR: `docs/adr/0005-local-review-funnel-via-check-runs.md`
 > Glossary: `CONTEXT.md` (PR-flow terms)
 

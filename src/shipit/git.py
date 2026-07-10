@@ -182,7 +182,7 @@ def ls_files(*, cwd: str) -> list[str]:
     """Tracked files (``git ls-files``), repo-root-relative, in git's order.
 
     Tracked-only is deliberate: it keeps generated/ignored paths out of the lint
-    scope without an exclude list (docs/prd/lint-checks.md — "whole tree via git ls-files").
+    scope without an exclude list (docs/legacy-prd/lint-checks.md — "whole tree via git ls-files").
     """
     out = _git(["ls-files"], cwd=cwd)
     return [line for line in out.splitlines() if line.strip()]

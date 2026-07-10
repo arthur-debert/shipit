@@ -20,7 +20,7 @@ Your round-1 brief should name:
 - the PR and its `## Context` note;
 - the issue the PR implements;
 - exact verify commands for review fixes;
-- governing PRD, ADR, or docs;
+- governing Spec, ADR, or docs;
 - decision boundaries that review comments cannot re-open.
 
 If a mandatory slot is missing, flag it to the coordinator instead of guessing.

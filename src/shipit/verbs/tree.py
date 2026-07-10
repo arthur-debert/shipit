@@ -1,4 +1,4 @@
-"""``shipit tree`` — the Tree command group (PRD docs/prd/where-to-do-work.md).
+"""``shipit tree`` — the Tree command group (PRD docs/legacy-prd/where-to-do-work.md).
 
 A NESTED click group: ``shipit tree <verb>`` is the surface for isolated Trees.
 ``create`` exposes the full spec grammar (naming.lex §3) — the ``--issue N``,

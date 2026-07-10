@@ -24,7 +24,7 @@ the decision visible. A declined key naming NO unit in this catalog rides
 :attr:`Plan.decline_unmatched` and warns (a typo must not silently decline
 nothing).
 
-Install also decides a RETIRED-FILES pass (docs/prd/rvw01-sole-requester.md,
+Install also decides a RETIRED-FILES pass (docs/legacy-prd/rvw01-sole-requester.md,
 ADR-0031): a packaged manifest (``retired-files.toml``) lists paths shipit used
 to distribute that must no longer exist, each with every known pristine
 content hash. Three outcomes, same safety philosophy — never destroy a local
@@ -124,7 +124,7 @@ NOOP = "noop"
 UPDATE = "update"
 OVERRIDE = "override"
 
-# Retired-files outcomes (docs/prd/rvw01-sole-requester.md). NOOP is shared:
+# Retired-files outcomes (docs/legacy-prd/rvw01-sole-requester.md). NOOP is shared:
 # an absent retired file is the same nothing-to-do as a current managed unit.
 DELETE = "delete"
 KEEP = "keep"
@@ -203,7 +203,7 @@ def activates_hooks(decisions: Sequence[Decision]) -> bool:
 
 
 # --------------------------------------------------------------------------
-# Retired files (docs/prd/rvw01-sole-requester.md, ADR-0031)
+# Retired files (docs/legacy-prd/rvw01-sole-requester.md, ADR-0031)
 # --------------------------------------------------------------------------
 #
 # Files shipit used to distribute (or release-sync-era debris) are removed

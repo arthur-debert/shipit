@@ -4,7 +4,7 @@ CDX01 makes Codex a first-class **coordinator** surface: `shipit session codex`
 (usually via the managed `./agent-start codex`) launches an interactive Codex session
 in its own ephemeral session Tree, the exact isolated shape `./agent-start claude`
 gets from the `--worktree` hook seam ([ADR-0027](../adr/0027-coordinator-session-tree-ephemeral.md),
-[docs/prd/session-bootstrap.md](../prd/session-bootstrap.md)). Codex has no pre-launch hook seam, so the
+[docs/legacy-prd/session-bootstrap.md](../legacy-prd/session-bootstrap.md)). Codex has no pre-launch hook seam, so the
 launcher inverts the order: mint a `codex-<utc>-<pid>` session id, provision the
 central-root ephemeral Tree for it (branch `ephemeral/<id>`, base
 `origin/main` — the same Tree machinery every shape uses), then exec

@@ -1,7 +1,7 @@
 """Variant resolver — content-hash the role prompt that produced a run (module #4).
 
 Every **eval record** is stamped with a **variant** so results attribute to the
-exact harness version that ran (docs/prd/har02-run-eval.md, module #4; CONTEXT.md
+exact harness version that ran (docs/legacy-prd/har02-run-eval.md, module #4; CONTEXT.md
 "variant"): a *derived content-hash* of the generated **role prompt** that drove
 the run — the **content-key** / pristine-hash idea applied to prompts — plus an
 optional explicit A/B **label** for deliberate experiments. Identical prompts hash

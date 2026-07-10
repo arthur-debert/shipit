@@ -18,7 +18,7 @@ The coordinator's role is fixed by policy, not convention: it orchestrates and d
 
 ### 1.2. Plan the work
 
-A task arrives as a GitHub issue, a maintainer message, or a feature idea. A single fix needs no ceremony — brief an implementer and go. A feature runs through `/planning` first: ideation, ADRs (`docs/adr/`), a PRD (`docs/prd/`), a docs PR, then decomposition into an epic tracker issue with workstream sub-issues. The PRD is the spec; the epic issue tracks how the work lands.
+A task arrives as a GitHub issue, a maintainer message, or a feature idea. A single fix needs no ceremony — brief an implementer and go. A feature runs through `/planning` first: ideation, ADRs (`docs/adr/`), a Spec (`docs/spec/`), a docs PR, then decomposition into an epic tracker issue with workstream sub-issues. The Spec is the source of truth; the epic issue tracks how the work lands.
 
 ### 1.3. Delegate
 
@@ -68,11 +68,11 @@ Each surface below is a summary; the pointer is the real document.
 
 Tool verbs
 
-: `shipit lint` is the shipped example of the pattern: one binary-owned checkset, called by a thin pixi task, lefthook, and CI (ADR-0004). TOL01 extends the same tools-as-verbs model (ADR-0039) to `shipit test`, `shipit build`, `shipit e2e`, and `shipit ci`: uniform verbs that walk the repo's path→toolchain map ([./.shipit.toml](./.shipit.toml)) and dispatch each entry to its producing command, with underlying-tool flags still reachable via passthrough (`shipit test rust -- <args>`). See `docs/prd/tol01-ci-tools.md` and `docs/dev/architecture.lex` §7.
+: `shipit lint` is the shipped example of the pattern: one binary-owned checkset, called by a thin pixi task, lefthook, and CI (ADR-0004). TOL01 extends the same tools-as-verbs model (ADR-0039) to `shipit test`, `shipit build`, `shipit e2e`, and `shipit ci`: uniform verbs that walk the repo's path→toolchain map ([./.shipit.toml](./.shipit.toml)) and dispatch each entry to its producing command, with underlying-tool flags still reachable via passthrough (`shipit test rust -- <args>`). See `docs/legacy-prd/tol01-ci-tools.md` and `docs/dev/architecture.lex` §7.
 
 Trees
 
-: Isolated, fully-independent clones under a central root (`~/workspace/trees/<org>/<repo>/…`) — one write Tree per Run, shared read-only Trees for reviewers, an ephemeral session Tree for the coordinator. Real clones, deliberately NOT `git worktree` (that path is denied — ADR-0014), so concurrent agents never collide. Managed by `shipit tree create | list | remove | gc`. See `docs/prd/where-to-do-work.md`, ADR-0018 and ADR-0027.
+: Isolated, fully-independent clones under a central root (`~/workspace/trees/<org>/<repo>/…`) — one write Tree per Run, shared read-only Trees for reviewers, an ephemeral session Tree for the coordinator. Real clones, deliberately NOT `git worktree` (that path is denied — ADR-0014), so concurrent agents never collide. Managed by `shipit tree create | list | remove | gc`. See `docs/legacy-prd/where-to-do-work.md`, ADR-0018 and ADR-0027.
 
 Spawning
 
@@ -80,11 +80,11 @@ Spawning
 
 The PR engine
 
-: A pure function from a PR snapshot to the single next action, at `src/shipit/prstate/`. Readiness is three pillars — reviewed, CI green, mergeable — and reviewer mechanics live in per-reviewer adapters, so adding a reviewer is adding a registry entry. Vocabulary: `CONTEXT.md`. Flow design: `docs/prd/prf01-pr-flow.md`; readiness design: `docs/prd/obs04-readiness-engine.md`. The rules are ADR-0006 / ADR-0031 / ADR-0034 / ADR-0035.
+: A pure function from a PR snapshot to the single next action, at `src/shipit/prstate/`. Readiness is three pillars — reviewed, CI green, mergeable — and reviewer mechanics live in per-reviewer adapters, so adding a reviewer is adding a registry entry. Vocabulary: `CONTEXT.md`. Flow design: `docs/legacy-prd/prf01-pr-flow.md`; readiness design: `docs/legacy-prd/obs04-readiness-engine.md`. The rules are ADR-0006 / ADR-0031 / ADR-0034 / ADR-0035.
 
 The log
 
-: Every shipit process writes a durable per-repo JSONL record — flat objects, closed domain-key vocabulary (`session`, `epic`, `ws`, `pr`, `agent`, `role`, …), dev-cycle events as tagged records (ADR-0029 / ADR-0032). `shipit logs` is the reader; `--flow` renders the filtered events as a story. `shipit eval` aggregates per-Run objective records from the same substrate. See `docs/prd/obs01-logging.md` and `docs/prd/log04-dev-cycle-event-log.md`.
+: Every shipit process writes a durable per-repo JSONL record — flat objects, closed domain-key vocabulary (`session`, `epic`, `ws`, `pr`, `agent`, `role`, …), dev-cycle events as tagged records (ADR-0029 / ADR-0032). `shipit logs` is the reader; `--flow` renders the filtered events as a story. `shipit eval` aggregates per-Run objective records from the same substrate. See `docs/legacy-prd/obs01-logging.md` and `docs/legacy-prd/log04-dev-cycle-event-log.md`.
 
 pixi, the substrate
 
@@ -115,5 +115,6 @@ Install does NOT touch the consumer's main branch: it stages the changes on a br
 - [./docs/dev/workflows.lex](./docs/dev/workflows.lex) — the composable CI design (build → bundle →
   sign → release) and its invariants.
 - [./docs/adr](./docs/adr) — the ADR log of individual design decisions.
-- [./docs/prd](./docs/prd) — the feature specs.
-- [./docs/prd/FUTURE_WORK.md](./docs/prd/FUTURE_WORK.md) — the map of shipped + planned work.
+- [./docs/spec](./docs/spec) — new authoritative feature specs.
+- [./docs/legacy-prd](./docs/legacy-prd) — historical feature specs written under the old PRD name.
+- [./docs/legacy-prd/FUTURE_WORK.md](./docs/legacy-prd/FUTURE_WORK.md) — the map of shipped + planned work.

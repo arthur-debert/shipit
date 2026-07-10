@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shipit bootstrap launcher — installed and managed by `shipit install`.
 #
-# This is the MINIMAL bootstrap (docs/prd/install-reconciliation.md): it makes the
+# This is the MINIMAL bootstrap (docs/legacy-prd/install-reconciliation.md): it makes the
 # `shipit` CLI reachable from a stable in-repo path and execs it. The pinned-version
 # auto-provision (a pixi dependency on the shipit package at the commit recorded in
 # .shipit.toml's [shipit].version) lands with the pixi integration in Step 5; until

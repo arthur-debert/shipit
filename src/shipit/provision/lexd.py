@@ -7,7 +7,7 @@ from its GitHub release, the same "download a pinned prebuilt binary" pattern
 Spike 0 used for wasm-bindgen. This module replaces the repo-local
 ``tools/provision-lexd.sh``: a consumer's managed ``provision-lexd`` task
 invokes ``shipit provision lexd`` and there is no script to reconcile
-(docs/prd/adoption.md).
+(docs/legacy-prd/adoption.md).
 
 Idempotent: a no-op when the pinned lexd is already installed in the env — the
 already-installed probe runs BEFORE platform resolution, so a platform with no

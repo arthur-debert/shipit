@@ -3,7 +3,7 @@
 A **Lane** is the declaration of one CI test unit (CONTEXT.md Build & release;
 ``.shipit.toml [lanes]``, parsed to :class:`shipit.config.Lane` at the boundary
 per ADR-0030). :func:`plan` is where the enforcement vocabulary becomes
-executable (docs/prd/tol01-ci-tools.md stories 13–16): it maps the typed
+executable (docs/legacy-prd/tol01-ci-tools.md stories 13–16): it maps the typed
 declarations, the CI event, and a path-diff to the ORDERED job matrix the
 ``wf-checks`` workflow block fans into jobs — the lane-side twin of the release
 planner (preflight), same pure-core shape, PR-time axis. Every decision the

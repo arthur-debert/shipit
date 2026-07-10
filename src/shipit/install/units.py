@@ -23,7 +23,7 @@ AGENTS_KEY = "AGENTS.md#shipit-block"
 BLOCK_OPEN = "<!-- Managed by shipit; do not edit. Regenerate via shipit install. -->"
 BLOCK_CLOSE = "<!-- End shipit-managed block. -->"
 
-# The lint-check units Step 2 deferred to Step 3 (docs/prd/lint-checks.md). The consumer gets
+# The lint-check units Step 2 deferred to Step 3 (docs/legacy-prd/lint-checks.md). The consumer gets
 # the thin lefthook caller (whole file) and a `lint = "shipit lint"` task BLOCK
 # in its own pixi.toml. The pixi blocks use TOML-comment markers (HTML comments
 # are invalid TOML) and anchor under a table header so the managed keys land in
@@ -85,7 +85,7 @@ PIXI_TEST_TASK_OPEN = (
 )
 PIXI_TEST_TASK_CLOSE = "# <<< shipit-managed test task <<<"
 
-# The ADP00 managed consumer environment (docs/prd/adoption.md: THE MANAGED SET
+# The ADP00 managed consumer environment (docs/legacy-prd/adoption.md: THE MANAGED SET
 # OWNS THE CONSUMER ENVIRONMENT). Two sibling marker blocks join the tasks block
 # in the consumer's pixi.toml: the lint feature/dependency block carrying the
 # fleet-pinned toolchain, and the lint environment definition — so the managed
@@ -236,7 +236,7 @@ def pixi_manifest_seed(name: str) -> str:
     )
 
 
-# The HAR01 agent harness (docs/prd/har01-coordinator-guard-and-role-prompts.md):
+# The HAR01 agent harness (docs/legacy-prd/har01-coordinator-guard-and-role-prompts.md):
 # the three GENERATED subagent agent-defs and the committed `PreToolUse` hook line
 # join the managed set so a consumer's agents follow the same dev cycle + guard.
 #
@@ -279,7 +279,7 @@ SETTINGS_HOOK_MARKER = "shipit hook pretooluse"
 #: marker would otherwise match (see :func:`shipit.install.splice.is_retired_hook`).
 MANAGED_HOOK_COMMAND_MARKER = "shipit hook"
 
-# The HAR02 eval wire (docs/prd/har02-run-eval.md) adds two more committed
+# The HAR02 eval wire (docs/legacy-prd/har02-run-eval.md) adds two more committed
 # settings.json hook lines — the terminal-hook eval boundary — each its own
 # event array + command marker, reconciled by the SAME event-keyed JSON-hook
 # splice as PreToolUse. Stop/SubagentStop entries carry no `matcher` (they bind
@@ -315,7 +315,7 @@ SETUP_DEV_ENV_FILE = "bin/setup-dev-env.sh"
 # `bin/shipit` (an executable whole-file bootstrap unit at the repo root).
 AGENT_LAUNCHER_FILE = "agent-start"
 
-# The SES01 session-bootstrap set (docs/prd/session-bootstrap.md, ADR-0027): the
+# The SES01 session-bootstrap set (docs/legacy-prd/session-bootstrap.md, ADR-0027): the
 # `./claude-start` launcher (Layer D; since #627 a compatibility shim that
 # delegates to `./agent-start claude` — convenience only, `claude -w <name>`
 # works without it) and the SessionStart activation hook line (Layer A —
@@ -575,7 +575,7 @@ def load_units(*, toolchains: frozenset[str] = frozenset()) -> list[Unit]:
         )
     )
 
-    # The lint-check units (docs/prd/lint-checks.md): the thin lefthook caller and the
+    # The lint-check units (docs/legacy-prd/lint-checks.md): the thin lefthook caller and the
     # `lint = "shipit lint"` task block in the consumer's pixi.toml.
     units.append(
         Unit(
@@ -619,7 +619,7 @@ def load_units(*, toolchains: frozenset[str] = frozenset()) -> list[Unit]:
         )
     )
 
-    # The ADP00 managed consumer environment (docs/prd/adoption.md): the lint
+    # The ADP00 managed consumer environment (docs/legacy-prd/adoption.md): the lint
     # feature/dependency block (fleet-pinned toolchain) and the lint environment
     # definition, siblings of the tasks block in the same consumer pixi.toml.
     units.append(
@@ -665,7 +665,7 @@ def load_units(*, toolchains: frozenset[str] = frozenset()) -> list[Unit]:
                 )
             )
 
-    # The HAR01 harness (docs/prd/har01-coordinator-guard-and-role-prompts.md): the
+    # The HAR01 harness (docs/legacy-prd/har01-coordinator-guard-and-role-prompts.md): the
     # generated subagent agent-defs (whole files) and the committed PreToolUse hook
     # line (a JSON splice into the consumer's settings.json).
     for rel, content in walk_files(agents_root()):

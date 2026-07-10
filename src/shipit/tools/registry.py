@@ -8,7 +8,7 @@ nothing downstream changes — and a toolchain is never a project-Kind switch
 ("a tauri Kind" is a composition of map entries, not a dispatch label).
 
 The default test commands are release-core's battle-tested runners
-(docs/prd/tol01-ci-tools.md, story 3): rust → cargo-nextest ("the standard
+(docs/legacy-prd/tol01-ci-tools.md, story 3): rust → cargo-nextest ("the standard
 test runner used by bin/check-tests across the fleet"), go → ``go test
 ./...``, python → pytest. The npm default is NOT pinned by the PRD (story 3
 lists only rust/go/python); ADR-0039's registry sketch names ``npm test``

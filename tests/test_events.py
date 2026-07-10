@@ -97,7 +97,7 @@ def test_unknown_name_raises_and_logs_nothing(tmp_path):
 
 
 def test_the_starting_vocabulary_is_registered():
-    """The full PRD starting set is registered up front (LOG04-WS01 registers
+    """The full legacy PRD starting set plus current Spec milestone are registered up front (LOG04-WS01 registers
     the vocabulary even though only review.requested is emitted) — one additive
     registry, so a later Work Stream adds an emission, not a name debate."""
     assert events.EVENT_NAMES == {
@@ -135,6 +135,8 @@ def test_the_starting_vocabulary_is_registered():
         "sweep.completed",
         "planning.grill.started",
         "planning.adr.written",
+        "planning.spec.written",
+        # Legacy compatibility for old planning logs/scripts.
         "planning.prd.written",
         "planning.epic.minted",
         "planning.ws.minted",
