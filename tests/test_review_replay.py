@@ -149,10 +149,10 @@ def test_range_producer_launches_in_the_checkout_with_the_git_diff_task(
     checkout, launcher
 ):
     view = replay.resolve_range("HEAD~1..HEAD", workdir=str(checkout))
-    review = producer.run_range_review(
+    captured = producer.run_range_review(
         agent_backend.CODEX, view, launcher=launcher["launch"]
     )
-    assert review["summary"]["status"] == "COMMENT"
+    assert captured.review["summary"]["status"] == "COMMENT"
     # Launched in the CHECKOUT (no Tree), with the offline range task: the agent
     # reads the diff via git over the RESOLVED shas and is told there is no PR.
     assert launcher["cwd"] == str(checkout)
@@ -187,9 +187,35 @@ def test_run_replay_writes_the_round_record_and_touches_no_pr(
     assert finding["disposition"] == "post"
     assert record["round.variant"]["content_hash"].startswith("sha256:")
     assert record["round.usage"]["duration_ms"] >= 0
+    # The fake launcher's stdout carries no codex tokens line, so the round's
+    # token cost is EXPLICITLY unknown (latency-only) — never a fabricated 0.
+    assert record["round.usage"]["total_tokens"] is None
     # Repo-keyed under the review-rounds kind, outside the checkout.
     assert "review-rounds" in str(record_path)
     assert "acme" in str(record_path) and "widget" in str(record_path)
+
+
+def test_run_replay_records_cli_reported_usage_on_the_round(
+    checkout, launcher, tmp_path
+):
+    # RVW03-WS04 (#667): a backend whose CLI reports usage (codex's stderr
+    # "tokens used" figure) lands a NON-NULL round.usage.total_tokens — measured
+    # at launch-result level, no transcript/run_id join involved.
+    def _launch(cmd, *, cwd, env, timeout=None):
+        return LaunchResult(
+            returncode=0, stdout=_VALID, stderr="codex\ntokens used\n1,234\n"
+        )
+
+    view = replay.resolve_range("HEAD~1..HEAD", workdir=str(checkout))
+    result = replay.run_replay(
+        agent_backend.CODEX,
+        view,
+        launcher=_launch,
+        base_dir=tmp_path / "state",
+    )
+    [line] = result["record_path"].read_text(encoding="utf-8").splitlines()
+    record = json.loads(line)
+    assert record["round.usage"]["total_tokens"] == 1234
 
 
 def test_run_replay_propagates_a_record_write_failure(

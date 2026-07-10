@@ -38,9 +38,12 @@ What this module owns:
     posted review at minor), the posted status derives from what posts
     (major-or-worse → ``REQUEST_CHANGES``); and
   * the round's contributing-run trail: one entry per pass (and, when the
-    calibrator is on, one for it), each with a run id and the **Variant** hash
-    of the exact prompt that ran — what the review-round record's ``round.runs``
-    carries and ``shipit eval report`` joins on (WS03).
+    calibrator is on, one for it), each with a run id, the **Variant** hash
+    of the exact prompt that ran, the run's measured token ``usage`` as its
+    CLI reported it (explicitly-unknown otherwise, RVW03-WS04), and — where a
+    ReasoningLevel actually reached argv — the applied ``reasoning`` — what
+    the review-round record's ``round.runs`` carries and ``shipit eval
+    report`` reads its cost axis from (WS03/RVW03-WS04).
 
 The fan-out is INVISIBLE below the reviewer boundary (ADR-0045): the service
 posts ONE review through the reviewer's own bot exactly as before; the funnel,
@@ -79,6 +82,7 @@ from .calibrator import (
 )
 from .dimensions import Dimension, known_dimension_names, resolve_dimensions
 from .schema import finding_from_dict
+from .usage import UNREPORTED
 
 logger = logging.getLogger("shipit.review")
 
@@ -94,13 +98,18 @@ class FanoutOutcome:
     :class:`JudgedFinding`\\ s
     — routed-out findings AND merged-away duplicates included, never erased (the
     round record's Opportunity-harvest seam); ``runs`` the contributing-run
-    entries (every pass + the calibrator, run ids + variant hashes) for
-    ``round.runs``.
+    entries (every pass + the calibrator: run ids, variant hashes, per-run
+    ``usage`` as the CLI reported it, and ``reasoning`` where a level actually
+    reached argv — RVW03-WS04) for ``round.runs``; ``total_tokens`` the round's
+    measured token cost — the sum of the runs' REPORTED usage, ``None`` when no
+    contributing run reported any (an explicitly latency-only round, never a
+    fabricated zero).
     """
 
     review: dict
     findings: tuple[JudgedFinding, ...]
     runs: tuple[dict[str, Any], ...]
+    total_tokens: int | None = None
 
 
 @dataclass(frozen=True)
@@ -115,12 +124,15 @@ class _PassResult:
 
 #: The shipped cheaper **ReasoningLevel** an INCREMENTAL round's single pass runs
 #: at (RVW02-WS06, ADR-0045). Round 1 is exhaustive; rounds after it review only
-#: the fix range, so they run cheaper. This is a RECORD-only constant, not an argv
-#: flag (no CLI carries a reasoning knob) — it is stamped on the incremental pass's
-#: run entry so the review-round record shows the round ran at the cheaper level.
-#: :func:`run_fanout_review` takes it as an argument (defaulting here), but no
-#: ``[reviewers]`` config key wires it and the service never overrides the default;
-#: moving it today means changing this constant.
+#: the fix range, so they run cheaper. Since RVW03-WS04 (#685) this is a REAL argv
+#: request, no longer a record-only stamp: it is threaded through
+#: :func:`~shipit.review.producer.run_tree_review` to the backend adapter, which
+#: applies it where the CLI has a knob (codex ``-c model_reasoning_effort``) and
+#: drops it where it has none (agy). The run entry's ``reasoning`` is stamped from
+#: what the adapter ACTUALLY applied — a knob-less backend records unset, never
+#: this config value. :func:`run_fanout_review` takes it as an argument
+#: (defaulting here), but no ``[reviewers]`` config key wires it and the service
+#: never overrides the default; moving it today means changing this constant.
 DEFAULT_INCREMENTAL_REASONING = "low"
 
 #: The synthetic **Dimension** an INCREMENTAL round's single pass carries so it
@@ -265,15 +277,15 @@ def run_fanout_review(
             "backend": agent,
             "model": model,
             "variant": variant_of(task, label=label).as_record(),
+            # Explicitly-unknown until the launch reports back (RVW03-WS04): a
+            # failed pass keeps this honest "we do not know", never a zero.
+            "usage": UNREPORTED.as_record(),
         }
         if incremental:
-            # The cheaper reasoning is config + RECORD only (no CLI knob) — stamp
-            # it on the run entry so the round record shows the level it ran at.
-            run["reasoning"] = incremental_reasoning
             run["range"] = {"base": incremental_range[0], "head": incremental_range[1]}
         start = time.monotonic()
         try:
-            review = producer.run_tree_review(
+            captured = producer.run_tree_review(
                 backend,
                 ctx,
                 model=model,
@@ -283,6 +295,9 @@ def run_fanout_review(
                 dimension=None if incremental else dim,
                 tree_path=tree_path,
                 incremental_range=incremental_range,
+                # The cheaper incremental ReasoningLevel is a real argv REQUEST
+                # (RVW03-WS04): the adapter applies it where the CLI has a knob.
+                reasoning=incremental_reasoning if incremental else None,
             )
         except Exception as exc:  # noqa: BLE001 - a pass failure degrades, never kills
             run["duration_ms"] = int((time.monotonic() - start) * 1000)
@@ -301,9 +316,16 @@ def run_fanout_review(
                 extra={"pr": ctx.number, "reviewer": agent},
             )
             return _PassResult(dimension=dim, run=run, review=None)
+        review = captured.review
         run["duration_ms"] = int((time.monotonic() - start) * 1000)
         run["outcome"] = "success"
         run["findings"] = len(review.get("comments") or [])
+        run["usage"] = captured.usage.as_record()
+        if captured.reasoning is not None:
+            # Stamped from the argv ACTUALLY used (RVW03-WS04) — absent when no
+            # level was applied (unset, or the backend has no knob), so the
+            # record never echoes a config value that did not run.
+            run["reasoning"] = captured.reasoning
         return _PassResult(dimension=dim, run=run, review=review)
 
     with ThreadPoolExecutor(max_workers=len(dims)) as pool:
@@ -346,7 +368,12 @@ def run_fanout_review(
             },
             "comments": [],
         }
-        return FanoutOutcome(review=review, findings=(), runs=tuple(runs))
+        return FanoutOutcome(
+            review=review,
+            findings=(),
+            runs=tuple(runs),
+            total_tokens=_round_total(runs),
+        )
 
     if calibrator is None:
         # DEFAULT (RVW02-WS08): post the MECHANICALLY-deduped union using each
@@ -359,25 +386,30 @@ def run_fanout_review(
             "kind": "calibrator",
             "backend": calibrator.backend,
             "model": calibrator.model,
-            "reasoning": calibrator.reasoning,
         }
         start = time.monotonic()
-        result, run_id, task = run_calibrator(
+        judged_run = run_calibrator(
             calibrator,
             union,
             pr_number=ctx.number,
             cwd=tree_path,
             launcher=launcher,
         )
+        result = judged_run.result
         calibrator_run.update(
             {
-                "run_id": run_id,
+                "run_id": judged_run.run_id,
                 "duration_ms": int((time.monotonic() - start) * 1000),
                 "outcome": "success",
                 "judged": len(result.entries),
-                "variant": variant_of(task, label=label).as_record(),
+                "variant": variant_of(judged_run.task, label=label).as_record(),
+                "usage": judged_run.usage.as_record(),
             }
         )
+        if judged_run.reasoning is not None:
+            # Stamped from the argv actually used (RVW03-WS04), never from
+            # `calibrator.reasoning` config — a knob-less backend records unset.
+            calibrator_run["reasoning"] = judged_run.reasoning
         runs.append(calibrator_run)
         entries = result.entries
         feedback = result.overall_feedback.strip()
@@ -447,7 +479,33 @@ def run_fanout_review(
             },
         )
 
-    return FanoutOutcome(review=review, findings=findings, runs=tuple(runs))
+    return FanoutOutcome(
+        review=review,
+        findings=findings,
+        runs=tuple(runs),
+        total_tokens=_round_total(runs),
+    )
+
+
+def _round_total(runs: Sequence[Mapping[str, Any]]) -> int | None:
+    """The round's measured token total: the sum of the contributing runs'
+    REPORTED usage (RVW03-WS04). PURE.
+
+    A run whose CLI reported no usage contributes nothing (its record says
+    ``unreported`` explicitly); a round where NO run reported returns ``None``
+    — the honest latency-only marker the eval report distinguishes — never a
+    fabricated ``0``. A partially-reported round sums what was measured (a
+    lower bound; each run's own record shows which contributed).
+    """
+    totals = []
+    for run in runs:
+        usage = run.get("usage")
+        if not isinstance(usage, Mapping):
+            continue
+        total = usage.get("total_tokens")
+        if isinstance(total, int) and not isinstance(total, bool):
+            totals.append(total)
+    return sum(totals) if totals else None
 
 
 def route_calibrated(

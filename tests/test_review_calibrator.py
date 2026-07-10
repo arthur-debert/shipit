@@ -249,32 +249,52 @@ def test_run_calibrator_launches_claude_read_only_and_unwraps_the_envelope(
     monkeypatch,
 ):
     """The claude path: the argv is the read-only reviewer posture carrying the
-    config's model; the result envelope is unwrapped and its session_id becomes
-    the run id (the eval-record join key)."""
+    config's model AND its reasoning as the real `--effort` knob (RVW03-WS04);
+    the result envelope is unwrapped — session_id becomes the run id, and the
+    envelope's usage block becomes the run's measured token cost."""
     monkeypatch.setattr(calibrator.shutil, "which", lambda binary: "/usr/bin/claude")
     seen: dict = {}
 
     def fake_runner(cmd, *, cwd, env, timeout=None):
         seen.update({"cmd": cmd, "cwd": cwd, "timeout": timeout})
-        envelope = json.dumps({"result": _calibration_json(), "session_id": "sess-42"})
+        envelope = json.dumps(
+            {
+                "result": _calibration_json(),
+                "session_id": "sess-42",
+                "usage": {
+                    "input_tokens": 10,
+                    "output_tokens": 40,
+                    "cache_read_input_tokens": 1000,
+                    "cache_creation_input_tokens": 200,
+                },
+            }
+        )
         return LaunchResult(returncode=0, stdout=envelope, stderr="")
 
     config = CalibratorConfig(model="opus-x", timeout="30s")
-    result, run_id, task = run_calibrator(
+    judged = run_calibrator(
         config, _union(), pr_number=9, cwd="/tree", launcher=fake_runner
     )
-    assert run_id == "sess-42"
-    assert result.overall_feedback == "verdict"
-    assert result.entries[0].disposition is Disposition.POST
+    assert judged.run_id == "sess-42"
+    assert judged.result.overall_feedback == "verdict"
+    assert judged.result.entries[0].disposition is Disposition.POST
     cmd = seen["cmd"]
     assert cmd[0] == "claude"
     assert cmd[cmd.index("--model") + 1] == "opus-x"
+    # The config's reasoning reaches REAL argv (claude --effort, RVW03-WS04)
+    # and the capture reports the applied level — what the record stamps.
+    assert cmd[cmd.index("--effort") + 1] == "high"
+    assert judged.reasoning == "high"
     assert "--tools" in cmd  # the read-only reviewer posture
     assert seen["cwd"] == "/tree"
     assert seen["timeout"] == 30.0
+    # The envelope's usage block is the launch-result-level measurement (#667).
+    assert judged.usage.total_tokens == 10 + 40 + 1000 + 200
+    assert judged.usage.input_tokens == 10
+    assert judged.usage.output_tokens == 40
     # The task embeds the candidates and the judge contract.
-    assert "NEVER originate" in task
-    assert '"id": 0' in task
+    assert "NEVER originate" in judged.task
+    assert '"id": 0' in judged.task
 
 
 def test_run_calibrator_bare_json_mints_a_run_id(monkeypatch):
@@ -283,10 +303,62 @@ def test_run_calibrator_bare_json_mints_a_run_id(monkeypatch):
     def fake_runner(cmd, *, cwd, env, timeout=None):
         return LaunchResult(returncode=0, stdout=_calibration_json(), stderr="")
 
-    _, run_id, _ = run_calibrator(
+    judged = run_calibrator(
         CalibratorConfig(), _union(), pr_number=9, cwd="/tree", launcher=fake_runner
     )
-    assert run_id  # minted — never an empty join key
+    assert judged.run_id  # minted — never an empty run identity
+    # A bare (non-envelope) answer carries no usage: explicitly unknown.
+    assert judged.usage.total_tokens is None
+
+
+def test_run_calibrator_codex_backend_reads_usage_from_stderr(monkeypatch):
+    # RVW03-WS04: a codex calibrator's usage rides its stderr "tokens used"
+    # figure (probed 0.139) — captured at launch-result level like the passes'.
+    monkeypatch.setattr(calibrator.shutil, "which", lambda binary: "/usr/bin/codex")
+    seen: dict = {}
+
+    def fake_runner(cmd, *, cwd, env, timeout=None):
+        seen["cmd"] = cmd
+        return LaunchResult(
+            returncode=0,
+            stdout=_calibration_json(),
+            stderr="codex\nverdict\ntokens used\n2,500\n",
+        )
+
+    judged = run_calibrator(
+        CalibratorConfig(backend="codex", reasoning="medium"),
+        _union(),
+        pr_number=9,
+        cwd="/tree",
+        launcher=fake_runner,
+    )
+    assert judged.usage.total_tokens == 2500
+    # The reasoning knob reaches codex argv and is reported as applied.
+    assert "model_reasoning_effort=medium" in seen["cmd"]
+    assert judged.reasoning == "medium"
+
+
+def test_run_calibrator_agy_backend_records_reasoning_unset(monkeypatch):
+    # agy has NO reasoning knob (probed 1.1.1): the config level must NOT be
+    # echoed — the capture reports None (→ the record reads unset, #685) and
+    # usage is explicitly unknown (agy reports none).
+    monkeypatch.setattr(calibrator.shutil, "which", lambda binary: "/usr/bin/agy")
+    seen: dict = {}
+
+    def fake_runner(cmd, *, cwd, env, timeout=None):
+        seen["cmd"] = cmd
+        return LaunchResult(returncode=0, stdout=_calibration_json(), stderr="")
+
+    judged = run_calibrator(
+        CalibratorConfig(backend="antigravity", reasoning="high"),
+        _union(),
+        pr_number=9,
+        cwd="/tree",
+        launcher=fake_runner,
+    )
+    assert judged.reasoning is None
+    assert not any("effort" in arg or "reasoning" in arg for arg in seen["cmd"])
+    assert judged.usage.total_tokens is None
 
 
 def test_run_calibrator_missing_cli_is_backend_unavailable(monkeypatch):

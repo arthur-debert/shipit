@@ -13,11 +13,16 @@ DuckDB's ``read_json_auto`` and rolls it up five ways —
   launch config produced which results, so configurations are comparable (ADR-0025);
 - **trend over time** (the ``eval.timestamp`` day): metrics run-over-run, so the
   harness's improvement (or regression) is a query, not a guess (user story 11);
-- **the review axis** (RVW02-WS03): **review-round records** grouped by their
-  review-instructions **Variant** — rounds / findings / posted vs routed-out
-  dispositions / cost — JOINED to eval records by run id (``round.runs[].run_id``
-  ↔ ``eval.run_id``), so "which prompt variant produced what recall at what
-  cost" is one report, not intuition (PRD rvw02, user story 24).
+- **the review axis** (RVW02-WS03 / RVW03-WS04): **review-round records** grouped
+  by their review-instructions **Variant** — rounds / findings / posted vs
+  routed-out dispositions / cost — with token cost read DIRECTLY off each
+  round's own ``round.usage.total_tokens`` (measured from the CLI's output at
+  launch-result level). The old eval-record run-id join is retired: the funnel's
+  run ids are minted uuids that never match a transcript stem, so that join was
+  broken by construction (#667). A Variant none of whose rounds reported usage
+  renders as an explicit **latency-only** cell, never a fake zero — so "which
+  prompt variant produced what recall at what cost" is one report, not
+  intuition (PRD rvw02, user story 24).
 
 The aggregation is a pure function of the store *paths* (:func:`aggregate`), with
 the click command (:func:`cmd`) / :func:`run` as the thin boundary that resolves
@@ -120,16 +125,19 @@ class GroupRow:
 @dataclass(frozen=True)
 class ReviewRoundRow:
     """One review-axis bucket: a round-record **Variant** (the experiment-arm
-    handle), its round/finding volumes split by disposition, its own recorded
-    cost, and the run-id-joined eval-record cost of its contributing runs.
+    handle), its round/finding volumes split by disposition, and its own
+    recorded cost — latency always, tokens where measured.
 
     ``posted`` vs ``dropped`` is the disposition split (``post`` AND canonical
     — a merged-away duplicate shares its twin's ``post`` but never reached the
     PR — vs every routed-out finding + duplicate) — the recall/FP raw material.
-    ``joined_runs`` /
-    ``avg_run_tokens`` come from the eval store via the ``round.runs[].run_id``
-    ↔ ``eval.run_id`` join (zero/None when no contributing run has an eval
-    record — today's CLI backends contribute none; WS04's fan-out will).
+    ``token_rounds`` / ``avg_round_tokens`` come from each round's OWN
+    ``round.usage.total_tokens`` (RVW03-WS04: usage measured from the CLI's
+    output at launch-result level — the broken eval-record run-id join is
+    retired): ``token_rounds`` counts the rounds that reported a total, and the
+    average is over exactly those. ``avg_round_tokens is None`` (no round
+    reported) is the LATENCY-ONLY marker the renderer surfaces explicitly —
+    "unmeasured", never zero.
     """
 
     key: str
@@ -138,8 +146,8 @@ class ReviewRoundRow:
     posted: int
     dropped: int
     avg_duration_ms: float
-    joined_runs: int
-    avg_run_tokens: float | None
+    token_rounds: int
+    avg_round_tokens: float | None
 
 
 @dataclass(frozen=True)
@@ -194,17 +202,19 @@ def aggregate(
 ) -> EvalReport:
     """Roll the JSONL eval store at ``store_path`` up by role, variant, and day —
     plus, when ``rounds_path`` names the repo's review-rounds store, the review
-    axis (:func:`review_axis`: round records by variant, run-id-joined to the
-    eval records).
+    axis (:func:`review_axis`: round records by variant, cost read off the
+    rounds themselves).
 
     Pure of any global state: it opens an in-memory DuckDB, reads the files, and
     returns the structured result. A store that does not exist yet (or is empty)
     yields an empty roll-up rather than an error — "no runs recorded" is a valid,
     common state, not a failure — and the two stores are independent: review
     rounds report even when no eval record exists yet (replay against CLI
-    backends writes rounds but no eval records).
+    backends writes rounds but no eval records), and the review axis reads its
+    cost off the round records themselves (RVW03-WS04), so it never needs the
+    eval store at all.
     """
-    review = review_axis(rounds_path, store_path) if rounds_path is not None else []
+    review = review_axis(rounds_path) if rounds_path is not None else []
     path = Path(store_path)
     if not path.exists() or path.stat().st_size == 0:
         return EvalReport(
@@ -256,33 +266,29 @@ def aggregate(
         con.close()
 
 
-def review_axis(
-    rounds_path: str | Path | None, eval_path: str | Path
-) -> list[ReviewRoundRow]:
-    """The review axis: round records grouped by **Variant**, run-id-joined to
-    eval records (RVW02-WS03; PRD rvw02 user story 24).
+def review_axis(rounds_path: str | Path | None) -> list[ReviewRoundRow]:
+    """The review axis: round records grouped by **Variant** (RVW02-WS03 /
+    RVW03-WS04; PRD rvw02 user story 24).
 
-    Plain Python over the two JSONL stores — the rounds store is one line per
-    review round (small by construction), and the nested findings/dispositions
-    lists stay out of DuckDB's struct inference. Per variant bucket: rounds,
-    findings split ``posted`` (disposition ``post`` AND canonical — a merged-away
-    duplicate shares its twin's ``post`` but never reached the PR) vs ``dropped``
-    (every routed-out finding + duplicate — the recall/FP raw material), the round's own mean
-    duration, and the joined eval-record cost — each ``round.runs[].run_id``
-    resolved against ``eval.run_id``, averaging the joined runs' total tokens.
-    A missing store, a malformed line, or a round with no joinable run degrades
+    Plain Python over the rounds JSONL store — one line per review round (small
+    by construction), and the nested findings/dispositions lists stay out of
+    DuckDB's struct inference. Per variant bucket: rounds, findings split
+    ``posted`` (disposition ``post`` AND canonical — a merged-away duplicate
+    shares its twin's ``post`` but never reached the PR) vs ``dropped`` (every
+    routed-out finding + duplicate — the recall/FP raw material), the round's
+    own mean duration, and the round's own MEASURED token cost — read directly
+    off ``round.usage.total_tokens`` (RVW03-WS04: usage captured from the CLI's
+    output at launch-result level; the eval-record run-id join is retired as
+    broken by construction, #667). A round whose backend reported no usage
+    contributes latency only; a bucket where NO round reported renders as an
+    explicit latency-only cell. A missing store or a malformed line degrades
     per-item (skip / None), never errors: the report reads whatever history the
-    stores hold. Buckets order most-rounds first, then key — the same "top
+    store holds. Buckets order most-rounds first, then key — the same "top
     buckets" ordering as the DuckDB roll-ups.
     """
     rounds = _read_jsonl(rounds_path)
     if not rounds:
         return []
-    tokens_by_run: dict[str, object] = {}
-    for record in _read_jsonl(eval_path):
-        run_id = record.get("eval.run_id")
-        if run_id:
-            tokens_by_run[str(run_id)] = record.get("eval.usage.total_tokens")
 
     buckets: dict[str, dict] = {}
     for round_record in rounds:
@@ -294,7 +300,6 @@ def review_axis(
                 "findings": 0,
                 "posted": 0,
                 "durations": [],
-                "joined": 0,
                 "tokens": [],
             },
         )
@@ -318,16 +323,9 @@ def review_axis(
         duration = usage.get("duration_ms") if isinstance(usage, Mapping) else None
         if isinstance(duration, (int, float)):
             bucket["durations"].append(float(duration))
-        runs = round_record.get("round.runs")
-        for run in runs if isinstance(runs, list) else []:
-            if not isinstance(run, Mapping):
-                continue
-            run_id = str(run.get("run_id") or "")
-            if run_id and run_id in tokens_by_run:
-                bucket["joined"] += 1
-                tokens = tokens_by_run[run_id]
-                if isinstance(tokens, (int, float)):
-                    bucket["tokens"].append(float(tokens))
+        tokens = usage.get("total_tokens") if isinstance(usage, Mapping) else None
+        if isinstance(tokens, (int, float)) and not isinstance(tokens, bool):
+            bucket["tokens"].append(float(tokens))
 
     rows = [
         ReviewRoundRow(
@@ -337,8 +335,8 @@ def review_axis(
             posted=bucket["posted"],
             dropped=bucket["findings"] - bucket["posted"],
             avg_duration_ms=_mean(bucket["durations"]) or 0.0,
-            joined_runs=bucket["joined"],
-            avg_run_tokens=_mean(bucket["tokens"]),
+            token_rounds=len(bucket["tokens"]),
+            avg_round_tokens=_mean(bucket["tokens"]),
         )
         for key, bucket in buckets.items()
     ]
@@ -436,9 +434,12 @@ def _render_section(title: str, key_header: str, rows: list[GroupRow]) -> list[s
 def _render_review_section(rows: list[ReviewRoundRow]) -> list[str]:
     """Render the review axis as an aligned text table (a list of lines).
 
-    The disposition split (posted vs dropped) and the joined eval-run cost are
-    the load-bearing columns — what a review-prompt A/B actually compares. A
-    variant with no joinable runs prints ``-`` for tokens rather than a fake 0.
+    The disposition split (posted vs dropped) and the measured token cost are
+    the load-bearing columns — what a review-prompt A/B actually compares. The
+    tokens column shows the mean per-round total where rounds reported usage
+    (RVW03-WS04); a variant NONE of whose rounds reported prints an explicit
+    ``latency-only`` marker — an unmeasured cell must read as unmeasured, never
+    as zero cost.
     """
     lines = ["Review rounds (by variant):"]
     if not rows:
@@ -447,14 +448,18 @@ def _render_review_section(rows: list[ReviewRoundRow]) -> list[str]:
     key_width = max(len("variant"), *(len(r.key) for r in rows))
     lines.append(
         f"  {'variant':<{key_width}}  {'rounds':>6}  {'findings':>8}  "
-        f"{'posted':>6}  {'dropped':>7}  {'avg ms':>8}  {'runs':>4}  {'tokens':>8}"
+        f"{'posted':>6}  {'dropped':>7}  {'avg ms':>8}  {'avg tokens':>12}"
     )
     for r in rows:
-        tokens = f"{r.avg_run_tokens:.0f}" if r.avg_run_tokens is not None else "-"
+        tokens = (
+            f"{r.avg_round_tokens:.0f}"
+            if r.avg_round_tokens is not None
+            else "latency-only"
+        )
         lines.append(
             f"  {r.key:<{key_width}}  {r.rounds:>6}  {r.findings:>8}  "
             f"{r.posted:>6}  {r.dropped:>7}  {r.avg_duration_ms:>8.0f}  "
-            f"{r.joined_runs:>4}  {tokens:>8}"
+            f"{tokens:>12}"
         )
     return lines
 
@@ -515,8 +520,7 @@ def run(
     the current checkout, resolved to its origin ``owner/name`` identity (the
     store key, ADR-0024). ``base_dir`` overrides the store FAMILY root (injected
     by tests, mirroring :func:`shipit.harness.eval.store.store_path`) — one root
-    resolves BOTH kind stores (eval + review-rounds), which is what makes the
-    review-axis join a same-override read. The store paths are computed by the
+    resolves BOTH kind stores (eval + review-rounds). The store paths are computed by the
     store module — the single source of truth — so reader and writer can never
     disagree about where records live. A path that is not a checkout (or has no
     origin) has no per-repo store, so it prints the empty report rather than

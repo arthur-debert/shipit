@@ -53,12 +53,23 @@ class ClaudeAdapter(BackendAdapter):
     caller that must vary it (the review Calibrator's table-level config,
     RVW02-WS04) constructs a per-run instance, the same convention as the
     per-run ``codex`` / ``agy`` adapters.
+
+    ``reasoning`` optionally pins the child's effort level via claude's native
+    ``--effort <level>`` flag (RVW03-WS04, #685 — probed on 2.1.206: it accepts
+    ``low``/``medium``/``high``/``xhigh``/``max``, a superset of the
+    :class:`~shipit.agent.invocation.ReasoningLevel` tokens, so the domain
+    levels pass through verbatim). ``None`` omits the flag — claude's own
+    default effort — and is what the :attr:`reasoning` attribute then reports,
+    so a record stamped from it honestly reads "unset".
     """
 
     name = _IDENTITY.name
 
-    def __init__(self, model: str | None = None) -> None:
+    def __init__(self, model: str | None = None, reasoning: str | None = None) -> None:
         self.model = model
+        #: The level actually emitted as ``--effort`` (records stamp from this;
+        #: the base-class contract, RVW03-WS04).
+        self.reasoning = reasoning
 
     def build_command(
         self,
@@ -72,9 +83,10 @@ class ClaudeAdapter(BackendAdapter):
         """The exact ``claude`` print-mode argv ADR-0019 §1 specifies.
 
         ``claude -p "<task>" --agent <role> --permission-mode bypassPermissions
-        [--model <id>] [--tools "<allowlist>"] --output-format json`` (the
-        ``--model`` flag appears only when this instance pins one). Two args are
-        load-bearing:
+        [--model <id>] [--effort <level>] [--tools "<allowlist>"] --output-format
+        json`` (the ``--model`` / ``--effort`` flags appear only when this
+        instance pins them — ``--effort`` is the native ReasoningLevel knob,
+        RVW03-WS04). Two args are load-bearing:
         ``--agent <role>`` populates the hook payload's ``agent_type`` so the
         coordinator-guard allows the Run's own edits (§2), and ``--permission-mode
         bypassPermissions`` is the write-Run mode (§4) — still bounded by the guard,
@@ -113,6 +125,8 @@ class ClaudeAdapter(BackendAdapter):
         ]
         if self.model is not None:
             cmd += ["--model", self.model]
+        if self.reasoning is not None:
+            cmd += ["--effort", self.reasoning]
         if read_only:
             cmd += ["--tools", ",".join(REVIEWER_TOOLS)]
         cmd += ["--output-format", "json"]

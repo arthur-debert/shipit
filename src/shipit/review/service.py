@@ -194,6 +194,7 @@ def generate_review(
             findings=outcome.findings,
             runs=outcome.runs,
             duration_ms=duration_ms,
+            total_tokens=outcome.total_tokens,
         )
     return review
 
@@ -209,13 +210,15 @@ def _tee_round_record(
     findings=None,
     runs=(),
     duration_ms: int | None,
+    total_tokens: int | None = None,
 ) -> None:
     """Tee the generated review into the local review-round record store — FAIL-OPEN.
 
     Verb-witnessed at generate time (RVW02-WS03): the review's product (all
     findings with the Calibrator's dispositions — ``findings``, routed-out
-    entries retained — plus every contributing run's id + variant hash —
-    ``runs`` — the coverage attestation, and the range reviewed) lands in the
+    entries retained — plus every contributing run's id + variant hash +
+    measured token usage — ``runs`` / ``total_tokens`` (RVW03-WS04) — the
+    coverage attestation, and the range reviewed) lands in the
     harness-owned store the moment it exists, independent of the posting path —
     a tee, not a pipeline change. Any failure (a hand-built ctx with no repo,
     an unwritable store, an unreadable instructions file) is logged at WARNING
@@ -246,6 +249,7 @@ def _tee_round_record(
             findings=findings,
             runs=runs,
             duration_ms=duration_ms,
+            total_tokens=total_tokens,
         )
     except Exception:  # noqa: BLE001 - the tee is telemetry; never degrade the review
         logger.warning(

@@ -10,13 +10,17 @@ JSONL store family as the eval record
 (:mod:`shipit.harness.eval.store`, :data:`~shipit.harness.eval.store.REVIEW_ROUNDS_KIND`).
 
 The boundary, stated once: an **eval record** says how a run *behaved*; a
-review-round record says what the review *concluded*. They meet in
-``shipit eval report``, which joins round records to eval records by run id —
-each record carries the run ids + **Variant** hashes of its contributing runs
-(``round.runs``: the WS04 dimension fan-out fills it with one entry per
-**Dimension pass** plus the **Calibrator** run; the single-pass offline replay
-contributes none) and its own review-instructions **Variant**
-(``round.variant``), the experiment-arm handle a review-prompt A/B groups by.
+review-round record says what the review *concluded* — and, since RVW03-WS04,
+what it COST: each contributing run's entry (``round.runs``: the dimension
+fan-out fills it with one entry per **Dimension pass** plus the **Calibrator**
+run; the single-pass offline replay contributes none) carries its run id,
+**Variant** hash, per-run token ``usage`` measured from the CLI's own output at
+launch-result level (explicitly-unknown for a CLI that reports none — NEVER via
+the broken transcript/run_id join), and the ReasoningLevel actually applied to
+argv. ``round.usage.total_tokens`` sums the reported per-run usage; the record
+also carries its own review-instructions **Variant** (``round.variant``), the
+experiment-arm handle a review-prompt A/B groups by, which ``shipit eval
+report``'s review axis buckets on.
 
 Dispositions are the Opportunity-harvest seam: the record ALWAYS carries every
 judged finding WITH its disposition — routed-out (dropped) findings included,
@@ -52,7 +56,12 @@ from .schema import finding_from_dict
 #: Bump when the record's field set changes, so an aggregator can read mixed stores
 #: (the same convention as :data:`shipit.harness.eval.record.SCHEMA_VERSION`).
 #: 2 added ``round.findings[].duplicate_of`` (the fan-out dedup edge, RVW02-WS04).
-SCHEMA_VERSION = 2
+#: 3 (RVW03-WS04) added per-run ``round.runs[].usage`` (token usage measured from
+#: the CLI's own output at launch-result level — no transcript join) with a real
+#: ``round.usage.total_tokens`` summed from it, and made ``round.runs[].reasoning``
+#: a stamp of the argv ACTUALLY used (absent = no level applied), never an echoed
+#: config value.
+SCHEMA_VERSION = 3
 
 
 def dispositioned(review: Mapping[str, Any]) -> list[JudgedFinding]:
@@ -104,10 +113,13 @@ def build(
     ``None`` for an offline range replay (no PR was touched); ``base_sha`` /
     ``head_sha`` are the range reviewed. ``variant`` is the review-instructions
     content-hash (+ optional A/B label) — the experiment-arm handle; ``runs``
-    carries the run ids + variant hashes of every contributing run (empty for
-    today's single-pass producer; WS04's dimension passes + Calibrator fill it).
-    ``duration_ms`` / ``total_tokens`` are the round's cost (``None`` when the
-    backend reports none — the CLI backends report no token totals).
+    carries every contributing run's entry (run id, variant hash, per-run
+    ``usage``, applied ``reasoning`` — the dimension passes + Calibrator fill
+    it; the single-pass replay contributes none). ``duration_ms`` /
+    ``total_tokens`` are the round's cost: ``total_tokens`` is the sum of the
+    runs' CLI-REPORTED usage (RVW03-WS04, measured at launch-result level) and
+    ``None`` only when no contributing run reported any — the explicit
+    latency-only marker, never a fabricated zero.
     """
     summary = review.get("summary") or {}
     if not isinstance(summary, Mapping):
@@ -173,6 +185,7 @@ def record_round(
     findings: Sequence[JudgedFinding] | None = None,
     runs: Sequence[Mapping[str, Any]] = (),
     duration_ms: int | None = None,
+    total_tokens: int | None = None,
     base_dir: Path | None = None,
     env: Mapping[str, str] | None = None,
 ) -> Path:
@@ -192,8 +205,10 @@ def record_round(
     (the RVW02-WS04 fan-out passes it; routed-out findings included, never
     erased); ``None`` — the single-pass replay — falls back to
     :func:`dispositioned` (everything ``post``). ``runs`` carries the
-    contributing runs' entries (run ids + per-run variant hashes: every
-    dimension pass + the calibrator) onto ``round.runs``.
+    contributing runs' entries (run ids, per-run variant hashes, per-run
+    ``usage``, applied ``reasoning``: every dimension pass + the calibrator)
+    onto ``round.runs``; ``total_tokens`` the round's CLI-measured token total
+    (RVW03-WS04 — ``None`` = no run reported usage, the latency-only marker).
 
     RAISES on failure (a malformed slug, an unreadable instructions file, an
     unwritable store): the caller owns the failure posture — the review-path tee
@@ -219,6 +234,7 @@ def record_round(
         variant=variant.as_record(),
         runs=runs,
         duration_ms=duration_ms,
+        total_tokens=total_tokens,
         timestamp=_now_iso(),
     )
     return append_record(record, repo, base_dir, kind=REVIEW_ROUNDS_KIND)

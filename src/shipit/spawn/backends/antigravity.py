@@ -109,6 +109,11 @@ class AntigravityAdapter(BackendAdapter):
     builds one per reviewer carrying that reviewer's model/timeout
     (:mod:`shipit.review.producer`). The ``--backend`` token is ``antigravity``
     (user-facing); the binary is ``agy``.
+
+    agy has NO reasoning/effort knob (probed 1.1.1, RVW03-WS04 — nothing in its
+    help surface), so this adapter takes no ``reasoning`` parameter and inherits
+    the base class's ``reasoning = None``: a record stamped from the applied
+    argv honestly reads "unset", never an echoed config value the CLI ignored.
     """
 
     name = _IDENTITY.name

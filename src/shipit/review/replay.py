@@ -190,7 +190,10 @@ def run_replay(
 
     The no-post pipeline: generate via the shared range producer, then write the
     **Review-round record** with ``round.pr = None`` (no PR was touched — the
-    honest replay marker). Returns ``{"review": …, "record_path": …}`` so the
+    honest replay marker). The record's ``round.usage.total_tokens`` carries the
+    launch's CLI-measured usage (RVW03-WS04; ``None`` when the backend's CLI
+    reports none — the explicit latency-only marker). Returns ``{"review": …,
+    "record_path": …}`` so the
     verb can render what was found and where the record landed. The record
     write PROPAGATES on failure — it is the product here, not telemetry (the
     review-path tee is the fail-open twin). ``base_dir`` overrides the store
@@ -198,7 +201,7 @@ def run_replay(
     """
     agent = backend.funnel_agent or backend.name
     start = time.monotonic()
-    review = producer.run_range_review(
+    captured = producer.run_range_review(
         backend,
         view,
         model=model,
@@ -206,6 +209,7 @@ def run_replay(
         instructions_path=instructions_path,
         launcher=launcher,
     )
+    review = captured.review
     duration_ms = int((time.monotonic() - start) * 1000)
     record_path = roundrecord.record_round(
         review,
@@ -218,6 +222,7 @@ def run_replay(
         timeout=timeout,
         instructions_path=instructions_path,
         duration_ms=duration_ms,
+        total_tokens=captured.usage.total_tokens,
         base_dir=base_dir,
     )
     logger.info(

@@ -69,10 +69,11 @@ def _faked(monkeypatch):
 
 
 def test_codex_launches_in_the_tree_and_captures_the_review(_faked):
-    review = producer.run_tree_review(
+    captured = producer.run_tree_review(
         agent_backend.CODEX, _ctx(), launcher=_faked["launcher"]
     )
 
+    review = captured.review
     assert review["summary"]["status"] == "COMMENT"  # captured + parsed from stdout
     cmd = _faked["cmd"]
     # Launched as a codex reviewer (read-only posture), rooted in the read-only Tree.
@@ -93,7 +94,7 @@ def test_codex_launches_in_the_tree_and_captures_the_review(_faked):
 
 
 def test_agy_maps_to_the_antigravity_adapter_with_prose_schema(_faked):
-    review = producer.run_tree_review(
+    captured = producer.run_tree_review(
         agent_backend.ANTIGRAVITY,
         _ctx(),
         model="pro",
@@ -101,7 +102,7 @@ def test_agy_maps_to_the_antigravity_adapter_with_prose_schema(_faked):
         launcher=_faked["launcher"],
     )
 
-    assert review["summary"]["status"] == "COMMENT"
+    assert captured.review["summary"]["status"] == "COMMENT"
     cmd = _faked["cmd"]
     assert cmd[0] == "agy"
     # agy is rooted via --add-dir <Tree> (it ignores process cwd) and carries the timeout.
@@ -259,11 +260,11 @@ def test_dry_run_prints_argv_and_never_launches_or_clones(monkeypatch, capsys):
         launched.append(1)
         return LaunchResult(returncode=0, stdout=_VALID, stderr="")
 
-    review = producer.run_tree_review(
+    captured = producer.run_tree_review(
         agent_backend.CODEX, _ctx(), dry_run=True, launcher=launcher
     )
 
-    assert review["summary"]["overall_feedback"] == "(dry-run)"
+    assert captured.review["summary"]["overall_feedback"] == "(dry-run)"
     assert not cloned  # no Tree cloned
     assert not launched  # no model billed
     out = capsys.readouterr().out
@@ -367,14 +368,14 @@ def test_dimension_pass_reuses_the_handed_in_tree_and_scopes_the_prompt(
         raise AssertionError("tree_path was handed in; no re-provisioning")
 
     monkeypatch.setattr(producer, "create_readonly", boom)
-    review = producer.run_tree_review(
+    captured = producer.run_tree_review(
         agent_backend.CODEX,
         _ctx(),
         launcher=_faked["launcher"],
         dimension=by_name("security-robustness"),
         tree_path="/trees/shared/leaf",
     )
-    assert review["summary"]["status"] == "COMMENT"
+    assert captured.review["summary"]["status"] == "COMMENT"
     assert _faked["cwd"] == "/trees/shared/leaf"
     prompt = _faked["cmd"][-1]
     assert "DIMENSION FOCUS — Security / robustness" in prompt
@@ -398,14 +399,14 @@ def test_incremental_range_launches_the_fix_range_task(_faked):
     # RVW02-WS06: an incremental round launches the fix-range task (git diff
     # base..head, NOT `gh pr diff`) with mandated neighborhood context, and
     # `pass_task_text` re-derives the SAME prompt for the round-record variant.
-    review = producer.run_tree_review(
+    captured = producer.run_tree_review(
         agent_backend.CODEX,
         _ctx(),
         launcher=_faked["launcher"],
         incremental_range=("b" * 40, "c" * 40),
         tree_path="/trees/shared/leaf",
     )
-    assert review["summary"]["status"] == "COMMENT"
+    assert captured.review["summary"]["status"] == "COMMENT"
     prompt = _faked["cmd"][-1]
     assert f"git diff {'b' * 40}..{'c' * 40}" in prompt
     assert "MANDATORY CONTEXT EXPANSION" in prompt
@@ -458,3 +459,70 @@ def test_provision_review_tree_requires_a_head_branch(monkeypatch):
     )
     with _pytest.raises(RuntimeError, match="head branch"):
         producer.provision_review_tree(ctx)
+
+
+def test_codex_usage_is_captured_from_the_stderr_tokens_line(_faked):
+    # RVW03-WS04 (#667): codex 0.139 reports its token total on STDERR as a
+    # human log line ("tokens used" + a comma-grouped figure, probed). The
+    # capture must read it at launch-result level — no transcript join.
+    def launcher(cmd, *, cwd, env, timeout=None):
+        return LaunchResult(
+            returncode=0,
+            stdout=_VALID,
+            stderr="OpenAI Codex v0.139.0\ncodex\nOK\ntokens used\n11,943\n",
+        )
+
+    captured = producer.run_tree_review(agent_backend.CODEX, _ctx(), launcher=launcher)
+    assert captured.usage.total_tokens == 11943
+    assert captured.usage.reported is True
+
+
+def test_codex_usage_without_the_tokens_line_reads_unreported_not_zero(_faked):
+    # A CLI formatting drift must degrade to the HONEST unknown, never a zero.
+    captured = producer.run_tree_review(
+        agent_backend.CODEX, _ctx(), launcher=_faked["launcher"]
+    )
+    assert captured.usage.total_tokens is None
+    assert captured.usage.reported is False
+
+
+def test_agy_usage_is_explicitly_unreported(_faked):
+    # agy 1.1.1 reports NO usage anywhere (probed) — the record must say so
+    # explicitly (total None) rather than fabricating a number.
+    captured = producer.run_tree_review(
+        agent_backend.ANTIGRAVITY, _ctx(), launcher=_faked["launcher"]
+    )
+    assert captured.usage.total_tokens is None
+    assert captured.usage.as_record()["source"] == "unreported"
+
+
+def test_reasoning_reaches_codex_argv_and_the_capture_reports_it(_faked):
+    # RVW03-WS04 (#685): a requested ReasoningLevel must land in REAL argv where
+    # the CLI has a knob — codex's `-c model_reasoning_effort=<level>` — and the
+    # capture reports the level actually applied (what records stamp).
+    captured = producer.run_tree_review(
+        agent_backend.CODEX, _ctx(), launcher=_faked["launcher"], reasoning="low"
+    )
+    cmd = _faked["cmd"]
+    assert "model_reasoning_effort=low" in cmd
+    assert cmd[cmd.index("model_reasoning_effort=low") - 1] == "-c"
+    assert captured.reasoning == "low"
+
+
+def test_reasoning_unset_leaves_codex_argv_bare_and_reports_none(_faked):
+    captured = producer.run_tree_review(
+        agent_backend.CODEX, _ctx(), launcher=_faked["launcher"]
+    )
+    assert not any("model_reasoning_effort" in arg for arg in _faked["cmd"])
+    assert captured.reasoning is None
+
+
+def test_reasoning_is_dropped_for_agy_and_never_echoed(_faked):
+    # agy has NO reasoning knob (probed 1.1.1): the requested level must NOT
+    # ride its argv, and the capture must report None — the record then reads
+    # "unset" instead of echoing a config value that never ran (#685).
+    captured = producer.run_tree_review(
+        agent_backend.ANTIGRAVITY, _ctx(), launcher=_faked["launcher"], reasoning="low"
+    )
+    assert not any("reasoning" in arg or "effort" in arg for arg in _faked["cmd"])
+    assert captured.reasoning is None
