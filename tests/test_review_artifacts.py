@@ -86,9 +86,11 @@ def test_streams_over_the_cap_are_truncated_with_a_marker_and_flagged_in_meta(tm
     bundle.write_streams(huge, "short err")
 
     out = (tmp_path / "run" / artifacts.STDOUT_FILENAME).read_text()
-    assert len(out) < len(huge)
+    # The cap bounds on-disk growth INCLUDING the marker: the persisted file is
+    # never longer than MAX_STREAM_CHARS (the marker eats into the head budget).
+    assert len(out) <= artifacts.MAX_STREAM_CHARS
     assert out.startswith("z" * 1000)  # the head is kept
-    assert "truncated" in out
+    assert out.endswith("…\n") and "truncated" in out
     # A within-cap stream is untouched.
     assert (tmp_path / "run" / artifacts.STDERR_FILENAME).read_text() == "short err"
     meta = json.loads((tmp_path / "run" / artifacts.META_FILENAME).read_text())

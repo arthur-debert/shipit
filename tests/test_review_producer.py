@@ -509,13 +509,22 @@ def test_nonzero_exit_bundle_keeps_full_raw_and_logs_point_at_it(
     caplog.set_level(logging.WARNING, logger="shipit.review")
     with pytest.raises(RuntimeError) as exc:
         producer.run_tree_review(
-            agent_backend.CODEX, _ctx(), launcher=launcher, artifacts=bundle
+            agent_backend.CODEX,
+            _ctx(),
+            launcher=launcher,
+            artifacts=bundle,
+            run_id="run-x",
         )
     # The absolute bundle path is kept OUT of the raised message — that message
     # crosses into the GitHub-facing funnel check summary and must not leak a
     # user-home / state path. The LOCAL log points a developer at the full raw.
     assert str(bundle.dir) not in str(exc.value)
     assert str(bundle.dir) in caplog.text
+    # The breadcrumb carries correlation extras so `shipit logs --run/--reviewer`
+    # selects the very line that says where the raw output lives.
+    [breadcrumb] = [r for r in caplog.records if "full raw output at" in r.getMessage()]
+    assert breadcrumb.run_id == "run-x"
+    assert breadcrumb.reviewer == "codex"
     # The bundle carries the UNtruncated streams + the exit meta.
     assert (bundle.dir / "stderr.raw").read_text() == long_err
     assert (bundle.dir / "stdout.raw").read_text() == "partial out"

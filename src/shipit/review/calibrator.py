@@ -584,6 +584,7 @@ def run_calibrator(
                 config.backend,
                 result.returncode,
                 sink.dir,
+                extra={**dict(correlation or {}), "pr": pr_number},
             )
         raise BackendError(
             f"the calibrator ({config.backend}) exited {result.returncode}: "

@@ -395,6 +395,7 @@ def run_tree_review(
             schema_path=schema_path,
             launcher=launcher,
             artifacts=artifacts,
+            run_id=run_id,
         )
     finally:
         if schema_path and os.path.exists(schema_path):
@@ -478,6 +479,7 @@ def run_range_review(
             schema_path=schema_path,
             launcher=launcher,
             artifacts=artifacts,
+            run_id=run_id,
         )
     finally:
         if schema_path and os.path.exists(schema_path):
@@ -495,11 +497,16 @@ def _launch_and_capture(
     schema_path: str | None,
     launcher: launch.Runner | None,
     artifacts: RunArtifacts | None = None,
+    run_id: str | None = None,
 ) -> dict:
     """Launch one reviewer child in ``cwd`` under the seam deadline and parse its
     stdout — the launch core :func:`run_tree_review` (PR/Tree) and
     :func:`run_range_review` (offline range) share, so the deadline mapping and
     the timeout→``BackendError`` normalization exist exactly once.
+
+    ``run_id`` is the pass's correlation id — threaded onto the local breadcrumb
+    WARNING (the line pointing at the bundle path) so ``shipit logs --run`` /
+    ``--reviewer`` can select the very record that says where the raw output lives.
 
     ``artifacts`` (RVW03-WS02) is the run's fail-open bundle: the EXACT prompt
     is written BEFORE the launch (a hung/killed child still leaves it
@@ -562,7 +569,7 @@ def _launch_and_capture(
         timed_out=False,
     )
     try:
-        return _capture(agent, result, artifacts=sink)
+        return _capture(agent, result, artifacts=sink, run_id=run_id)
     except BackendError as exc:
         # An exit-0 launch can STILL be a timeout: `_capture` re-parses the
         # stdout and `parse_review_output` raises `BackendError(timed_out=True)`
@@ -576,7 +583,11 @@ def _launch_and_capture(
 
 
 def _capture(
-    agent: str, result: launch.LaunchResult, *, artifacts: RunArtifacts | None = None
+    agent: str,
+    result: launch.LaunchResult,
+    *,
+    artifacts: RunArtifacts | None = None,
+    run_id: str | None = None,
 ) -> dict:
     """Turn the launched reviewer's result into a review dict, or raise.
 
@@ -618,6 +629,10 @@ def _capture(
                 agent,
                 result.returncode,
                 artifacts.dir,
+                extra={
+                    "reviewer": agent,
+                    **({} if run_id is None else {"run_id": run_id}),
+                },
             )
         raise RuntimeError(
             f"{agent} reviewer exited {result.returncode}: {detail[:500]}"

@@ -439,6 +439,7 @@ def test_run_calibrator_failure_bundle_keeps_full_raw(monkeypatch, tmp_path, cap
 
     bundle = RunArtifacts(tmp_path / "calibrator")
     caplog.set_level(logging.WARNING, logger="shipit.review")
+    correlation = {"reviewer": "codex", "run_id": "calibrator", "round_id": "round-abc"}
     with pytest.raises(BackendError) as exc:
         run_calibrator(
             CalibratorConfig(),
@@ -447,9 +448,15 @@ def test_run_calibrator_failure_bundle_keeps_full_raw(monkeypatch, tmp_path, cap
             cwd="/tree",
             launcher=exit_one,
             artifacts=bundle,
+            correlation=correlation,
         )
     assert str(bundle.dir) not in str(exc.value)
     assert str(bundle.dir) in caplog.text
+    # The breadcrumb WARNING carries the same correlation extras as the DEBUG
+    # raw-output record, so `shipit logs --run calibrator --round …` selects it.
+    [breadcrumb] = [r for r in caplog.records if "full raw output at" in r.getMessage()]
+    assert breadcrumb.run_id == "calibrator"
+    assert breadcrumb.round_id == "round-abc"
     assert (bundle.dir / "stderr.raw").read_text() == long_err
     assert (bundle.dir / "stdout.raw").read_text() == "half an answer"
     meta = json.loads((bundle.dir / "meta.json").read_text())

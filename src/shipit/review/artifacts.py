@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -178,18 +179,21 @@ class RunArtifacts:
     def _write(self, filename: str, content: str) -> None:
         """One member-file write — directory on demand, ATOMIC, FAIL-OPEN.
 
-        Writes to a sibling ``.tmp`` then :meth:`Path.replace` (an atomic
-        rename on the same filesystem): the accretive ``meta.json`` is rewritten
-        whole on every :meth:`record`, so a crash MID-write must not truncate the
-        live file and lose the telemetry recorded so far — the half-written
-        temp is the only casualty, and the previous file stays intact.
+        Writes to a UNIQUELY-named sibling ``.tmp`` then :meth:`Path.replace`
+        (an atomic rename on the same filesystem): the accretive ``meta.json``
+        is rewritten whole on every :meth:`record`, so a crash MID-write must not
+        truncate the live file and lose the telemetry recorded so far — the
+        half-written temp is the only casualty, and the previous file stays
+        intact. The per-write random suffix means two writers that ever share a
+        bundle dir (they don't today — every run's dir is keyed by a unique run
+        id under a unique round id) can't collide on the temp and lose a payload.
         """
         if self.dir is None:
             return
         try:
             self.dir.mkdir(parents=True, exist_ok=True)
             dest = self.dir / filename
-            tmp = dest.with_name(f"{filename}.tmp")
+            tmp = dest.with_name(f"{filename}.{uuid.uuid4().hex[:8]}.tmp")
             tmp.write_text(content, encoding="utf-8")
             tmp.replace(dest)
         except OSError:
@@ -205,9 +209,12 @@ def _bounded(text: str) -> tuple[str, bool]:
 
     A capped stream keeps its head (the parse error / timeout marker lives
     there) and ends with :data:`_TRUNCATION_MARKER` so the file itself declares
-    the cut.
+    the cut. The marker eats into the head budget, so the persisted file is
+    exactly :data:`MAX_STREAM_CHARS` — the cap bounds on-disk growth INCLUDING
+    the marker, never head + marker over the cap.
     """
     if len(text) <= MAX_STREAM_CHARS:
         return text, False
     marker = _TRUNCATION_MARKER.format(cap=MAX_STREAM_CHARS)
-    return text[:MAX_STREAM_CHARS] + marker, True
+    head = text[: MAX_STREAM_CHARS - len(marker)]
+    return head + marker, True
