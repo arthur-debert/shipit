@@ -646,8 +646,12 @@ def _dry_run(
             "summary": {"status": "COMMENT", "overall_feedback": "(dry-run)"},
             "comments": [],
         },
+        # A dry run launches nothing, so — like usage — no reasoning was actually
+        # applied to a real launch: report the unset state, never adapter.reasoning
+        # (which would echo a requested level as "applied" and mis-stamp telemetry).
+        # The would-run level is already visible in the printed argv above.
         usage=UNREPORTED,
-        reasoning=adapter.reasoning,
+        reasoning=None,
     )
 
 

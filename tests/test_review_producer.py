@@ -260,13 +260,16 @@ def test_dry_run_prints_argv_and_never_launches_or_clones(monkeypatch, capsys):
         launched.append(1)
         return LaunchResult(returncode=0, stdout=_VALID, stderr="")
 
+    # Request a reasoning level: codex DOES carry a knob, so the adapter would
+    # apply it to a REAL launch — but a dry run launches nothing, so the captured
+    # result must still report reasoning unset (not the requested "low").
     captured = producer.run_tree_review(
-        agent_backend.CODEX, _ctx(), dry_run=True, launcher=launcher
+        agent_backend.CODEX, _ctx(), dry_run=True, launcher=launcher, reasoning="low"
     )
 
     assert captured.review["summary"]["overall_feedback"] == "(dry-run)"
     # A dry run bills no model, so it MEASURES no usage and applies no reasoning:
-    # both are the explicit-unknown/unset state, never a fabricated figure.
+    # both are the explicit-unknown/unset state, never a fabricated/echoed value.
     assert captured.usage.total_tokens is None
     assert captured.reasoning is None
     assert not cloned  # no Tree cloned
@@ -274,6 +277,9 @@ def test_dry_run_prints_argv_and_never_launches_or_clones(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "dry-run" in out
     assert "codex" in out and "exec" in out  # the would-run argv is shown
+    # the requested level is not LOST — it rides the printed would-run argv,
+    # which is why the captured (unlaunched) result need not echo it.
+    assert "model_reasoning_effort=low" in out
 
 
 def test_missing_cli_fails_loud(monkeypatch):
