@@ -550,6 +550,34 @@ def test_read_jsonl_skips_a_malformed_line_loudly(tmp_path, caplog):
     assert "line 2" in warning
 
 
+def test_read_jsonl_warns_on_a_non_object_line(tmp_path, caplog):
+    # RVW03-WS03: a line that is VALID JSON but not an object (a bare array /
+    # string) is a distinct malformed case from unparseable text. The report's
+    # reader skips it but WARNS naming the file, the 1-based line number, and the
+    # got-type — mirroring `store.read_records` (whose sibling case is covered by
+    # `test_read_records_warns_on_a_non_object_line`) so neither reader can ever
+    # silently read a corrupted round as "this arm found nothing".
+    import logging
+
+    base = tmp_path / "state"
+    path = store.append_record(
+        _round(variant=_variant(_V1)),
+        _REPO,
+        base_dir=base,
+        kind=store.REVIEW_ROUNDS_KIND,
+    )
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write('["not", "a", "record"]\n')
+    with caplog.at_level(logging.WARNING, logger="shipit.harness"):
+        records = report._read_jsonl(path)
+    assert len(records) == 1
+    warning = "\n".join(r.getMessage() for r in caplog.records)
+    assert str(path) in warning
+    assert "line 2" in warning
+    assert "expected a JSON object" in warning
+    assert "list" in warning
+
+
 def test_run_renders_the_review_axis_from_the_same_family_root(tmp_path, monkeypatch):
     base, _, _ = _seed_rounds(tmp_path)
     monkeypatch.setattr(report, "_resolve_repo", lambda start: _REPO)

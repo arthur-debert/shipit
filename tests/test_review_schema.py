@@ -16,7 +16,7 @@ import json
 
 import pytest
 
-from shipit.review.schema import extract_json
+from shipit.review.schema import extract_json, is_review_shaped
 
 #: A review-shaped object big enough to dwarf any wrapper fragment (the scan
 #: returns the LARGEST embedded object).
@@ -111,3 +111,63 @@ def test_no_json_at_all_raises_value_error():
 def test_only_a_truncated_object_raises_value_error():
     with pytest.raises(ValueError, match="Could not parse valid JSON"):
         extract_json(_REVIEW_JSON[: len(_REVIEW_JSON) // 2])
+
+
+#: A valid JSON object LARGER than the review but NOT review-shaped (no
+#: ``summary`` object, no ``comments`` list) — a stray log/tool dump in noisy
+#: reviewer stdout. Larger than ``_REVIEW_JSON`` so plain largest-wins would
+#: select it.
+_BIG_NON_REVIEW_JSON = json.dumps({"log": ["x" * 40] * 40})
+
+
+def test_the_non_review_blob_is_larger_than_the_review():
+    # Guards the premise of the `want`-selection tests below: without the shape
+    # predicate, largest-wins WOULD pick this blob over the review.
+    assert len(_BIG_NON_REVIEW_JSON) > len(_REVIEW_JSON)
+
+
+def test_want_selects_the_review_over_a_larger_unrelated_blob():
+    """Noisy stdout can carry a large unrelated JSON object (a log/tool dump)
+    bigger than the review. Largest-wins alone returns it, and a dict with no
+    ``comments`` reads downstream as a CLEAN, finding-less pass. ``want``
+    (:func:`is_review_shaped`) selects the review-shaped candidate instead — the
+    generic call still returns the larger blob, proving the predicate is what
+    changes the selection (the calibrator's generic contract is untouched)."""
+    text = f"{_BIG_NON_REVIEW_JSON}\n{_REVIEW_JSON}\ntrailing prose"
+    assert extract_json(text, want=is_review_shaped) == _REVIEW
+    assert extract_json(text) != _REVIEW
+
+
+def test_want_raises_loudly_when_no_review_shaped_object_is_present():
+    """A pass whose ONLY object is off-shape must fail LOUD (→ BackendError →
+    the #76 salvage), never return the blob as a silent clean pass. This also
+    exercises the fast-path gate: the blob parses directly, but ``want`` rejects
+    it so the parse falls through to the scan, which finds nothing wanted."""
+    with pytest.raises(ValueError, match="Could not parse valid JSON"):
+        extract_json(_BIG_NON_REVIEW_JSON, want=is_review_shaped)
+
+
+def test_is_review_shaped_predicate():
+    assert is_review_shaped(_REVIEW)
+    assert not is_review_shaped({"log": []})
+    # `summary` present but not an object, or `comments` not a list → off-shape.
+    assert not is_review_shaped({"summary": "ok", "comments": []})
+    assert not is_review_shaped({"summary": {}, "comments": {}})
+
+
+def test_deeply_nested_object_blob_raises_value_error_not_recursion_error():
+    """Deeply nested untrusted output would exhaust the JSON decoder's recursion
+    limit; the parser must degrade to a plain ``ValueError`` (→ BackendError),
+    never a ``RecursionError`` crash — and must do so FAST, without re-decoding
+    the blob from each of its interior braces."""
+    blob = '{"a":' * 60000 + "1" + "}" * 60000
+    with pytest.raises(ValueError, match="Could not parse valid JSON"):
+        extract_json(blob)
+
+
+def test_a_deeply_nested_array_blob_does_not_hide_a_following_review():
+    """A pathological nested-array blob before the review must not crash the parse
+    or shadow the real object — the scan steps over the brace-free array region
+    and recovers the review after it."""
+    blob = "[" * 5000 + "]" * 5000
+    assert extract_json(f"{blob}\n{_REVIEW_JSON}") == _REVIEW

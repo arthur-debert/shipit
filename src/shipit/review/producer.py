@@ -623,7 +623,7 @@ def preflight_round(backends: Sequence[Backend]) -> None:
     if missing:
         details = "; ".join(
             f"binary {b.binary!r} not found — install/configure it "
-            f"(the {b.funnel_agent or b.name!r} backend requires it on PATH)"
+            f"(the {(b.funnel_agent or b.name)!r} backend requires it on PATH)"
             for b in missing
         )
         raise BackendUnavailable(

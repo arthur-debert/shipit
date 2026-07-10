@@ -33,6 +33,7 @@ substrate stays a local file (ADR-0013).
 
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
 import sys
@@ -376,6 +377,11 @@ def _read_jsonl(path: str | Path | None) -> list[dict]:
     never silently read as "this arm found nothing". The file is STREAMED
     line-by-line (not ``read_text().splitlines()``) so an unbounded append-only
     store does not allocate the whole file plus a split-line list at once.
+
+    Takes a SHARED ``flock`` (``LOCK_SH``) before iterating, mirroring
+    :func:`shipit.harness.eval.store.read_records` (RVW03-WS03): it waits out an
+    in-flight exclusive append rather than streaming a half-flushed final line —
+    which would otherwise LOUDLY warn and drop a valid record mid-append.
     """
     if path is None:
         return []
@@ -384,6 +390,7 @@ def _read_jsonl(path: str | Path | None) -> list[dict]:
         return []
     records: list[dict] = []
     with target.open(encoding="utf-8") as fh:
+        fcntl.flock(fh, fcntl.LOCK_SH)
         for lineno, line in enumerate(fh, start=1):
             if not line.strip():
                 continue

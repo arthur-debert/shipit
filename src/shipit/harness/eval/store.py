@@ -141,18 +141,19 @@ def append_record(
     parallel settles append to the same per-repo file from separate processes, and
     a record larger than the writer's buffer would otherwise flush interleaved
     with a concurrent append's chunks — splicing two records into one malformed
-    line. The lock is held only for the single line's write + flush, and releases
-    with the file handle even on error.
+    line. The lock is NOT released explicitly: it is dropped by the kernel when the
+    file handle closes at the end of the ``with`` block, so ``close()``'s own final
+    flush still lands UNDER the lock — an explicit ``LOCK_UN`` before the ``with``
+    exits would release it before that flush, reopening the interleave it exists to
+    prevent (e.g. if a ``KeyboardInterrupt`` hits between the two). Close releases
+    the lock on error too, so no ``finally`` is needed.
     """
     path = store_path(repo, base_dir, kind=kind)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as fh:
         fcntl.flock(fh, fcntl.LOCK_EX)
-        try:
-            fh.write(json.dumps(record) + "\n")
-            fh.flush()
-        finally:
-            fcntl.flock(fh, fcntl.LOCK_UN)
+        fh.write(json.dumps(record) + "\n")
+        fh.flush()
     return path
 
 
@@ -173,6 +174,13 @@ def read_records(
     (RVW03-WS03): a warning names the file and the 1-based line number, so a
     corrupted round can never silently read as "this arm found nothing".
 
+    The read takes a SHARED ``flock`` (``LOCK_SH``) before iterating, so it waits
+    out any in-flight exclusive append instead of streaming a half-flushed final
+    line — a torn read would otherwise LOUDLY warn and drop a perfectly valid
+    record mid-append (RVW03-WS03). The shared lock lets concurrent readers
+    proceed together while still excluding a writer's ``LOCK_EX``; the kernel drops
+    it when the handle closes at the end of the ``with``.
+
     ``base_dir`` overrides the family root (tests), exactly as on the writers.
     """
     path = store_path(repo, base_dir, kind=kind)
@@ -180,6 +188,7 @@ def read_records(
         return []
     records: list[dict[str, Any]] = []
     with path.open(encoding="utf-8") as fh:
+        fcntl.flock(fh, fcntl.LOCK_SH)
         for lineno, line in enumerate(fh, start=1):
             line = line.strip()
             if not line:

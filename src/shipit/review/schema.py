@@ -17,6 +17,12 @@ JSON output inconsistently, so the parser is deliberately forgiving. The scan
 replaced a greedy ``{.*}`` regex whose first-brace-to-last-brace capture broke on
 brace-bearing wrapper prose (a stray braced log line silently cost the round a
 whole dimension pass) and could splice a WRONG object out of two adjacent ones.
+The review caller passes the `is_review_shaped` `want` predicate so a large
+UNRELATED JSON blob in noisy stdout is never selected over the real
+``{summary, comments}`` review (which would read downstream as a clean,
+finding-less pass); a `RecursionError` from deeply nested untrusted output is
+caught at every parse attempt, so a pathological blob degrades to "no parseable
+object" instead of crashing the round.
 
 `finding_from_dict` is the ONE trust boundary from an unvalidated
 ``REVIEW_SCHEMA`` comment dict to a typed :class:`~shipit.finding.Finding` —
@@ -29,6 +35,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 
 from ..finding import Finding, Severity, parse_severity, resolve_severity
 
@@ -169,29 +176,87 @@ def finding_from_dict(raw: dict) -> Finding:
     )
 
 
-def extract_json(text: str) -> dict:
+def is_review_shaped(payload: dict) -> bool:
+    """Whether ``payload`` has the review ENVELOPE shape — a ``summary`` object and
+    a ``comments`` list (:data:`REVIEW_SCHEMA`'s two required top-level keys).
+
+    The shape predicate the review parse path hands :func:`extract_json` as
+    ``want`` so an UNRELATED JSON object in noisy stdout is never selected as the
+    review. It is deliberately shallow: it gates SELECTION among embedded
+    candidates, not full schema validation (:func:`finding_from_dict` is the
+    per-finding trust boundary), so it only has to tell the real
+    ``{summary, comments}`` envelope apart from a stray log/tool blob.
+    """
+    return isinstance(payload.get("summary"), dict) and isinstance(
+        payload.get("comments"), list
+    )
+
+
+def _accepted(value: object, want: Callable[[dict], bool] | None) -> bool:
+    """Whether ``value`` is an acceptable :func:`extract_json` result.
+
+    A GENERIC caller (``want`` is ``None`` — the calibrator envelope, which is not
+    review-shaped) accepts any parsed value from the fast paths and any dict from
+    the scan, the historical behavior. A caller that passes a shape predicate
+    accepts ONLY a ``dict`` the predicate approves, so an off-shape object can
+    never be selected.
+    """
+    if want is None:
+        return True
+    return isinstance(value, dict) and want(value)
+
+
+def extract_json(text: str, *, want: Callable[[dict], bool] | None = None) -> dict:
     """Parse a JSON object out of an agent's stdout, tolerating wrapping.
 
     Tries, in order: a direct parse of the stripped text; stripping ```json …```
     code fences; a BALANCED SCAN over every embedded object
-    (:func:`_scan_embedded_objects`) that returns the largest one — never the
-    greedy first-brace-to-last-brace splice (RVW03-WS03). Raises
-    :class:`ValueError` if none yield valid JSON.
+    (:func:`_scan_embedded_objects`) — never the greedy first-brace-to-last-brace
+    splice (RVW03-WS03). Raises :class:`ValueError` if none yield an accepted
+    object.
+
+    ``want`` is an optional SHAPE predicate. Without it (the generic caller — the
+    calibrator envelope, which is NOT review-shaped) the fast paths return any
+    valid JSON value and the scan returns the LARGEST embedded object, unchanged.
+    WITH it (the review caller passes :func:`is_review_shaped`) only a ``dict``
+    the predicate approves is accepted: the fast paths fall through when their
+    parse is not a wanted dict, and the scan selects the largest *wanted*
+    candidate rather than merely the largest. This closes a silent-clean-pass
+    hole — noisy stdout can carry a large unrelated JSON blob (a log/tool object)
+    around the real ``{summary, comments}`` review, and returning that blob (a
+    dict with no ``comments``) would read downstream as a finding-less, i.e.
+    CLEAN, pass. When no wanted candidate exists the parse fails LOUDLY
+    (``ValueError`` → :class:`~shipit.review.backends.BackendError` → the #76
+    salvage), never a silent clean.
+
+    Deeply nested untrusted output can exhaust the recursion limit INSIDE the JSON
+    decoder; ``RecursionError`` is caught alongside ``json.JSONDecodeError`` on the
+    fast-path parses, and :func:`_scan_embedded_objects` STOPS the scan on an
+    over-deep object (never retrying its interior braces), so a pathological blob
+    degrades to "no parseable object" — fast, and without crashing the round.
     """
     text_clean = text.strip()
     try:
-        return json.loads(text_clean)
-    except json.JSONDecodeError:
+        parsed = json.loads(text_clean)
+    except (json.JSONDecodeError, RecursionError):
         pass
+    else:
+        if _accepted(parsed, want):
+            return parsed
 
     cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", text_clean, flags=re.MULTILINE)
     try:
-        return json.loads(cleaned)
-    except json.JSONDecodeError:
+        parsed = json.loads(cleaned)
+    except (json.JSONDecodeError, RecursionError):
         pass
+    else:
+        if _accepted(parsed, want):
+            return parsed
 
-    best = None
+    best: tuple[dict, int] | None = None
     for candidate, span in _scan_embedded_objects(text_clean):
+        if not _accepted(candidate, want):
+            continue
         if best is None or span > best[1]:
             best = (candidate, span)
     if best is not None:
@@ -237,6 +302,18 @@ def _scan_embedded_objects(text: str) -> list[tuple[dict, int]]:
             # its interior objects are fragments of IT, never candidates.
             index = text.find("{", max(exc.pos, index + 1))
             continue
+        except RecursionError:
+            # Deeply nested untrusted output exhausts the decoder's recursion
+            # limit at this `{`. STOP the scan and return what came before it,
+            # rather than crash the round (uncaught) — and, crucially, rather than
+            # resume at the next interior brace: `RecursionError` carries no
+            # `.pos`, so a per-brace retry would re-decode the same over-deep
+            # structure from each of its N interior braces (O(N^2) — a hang on the
+            # very pathological input this guards). Interior objects of an
+            # over-deep blob are fragments of IT, never independent candidates
+            # (the same reason the decode-failure branch skips a broken object's
+            # whole prefix), so nothing recoverable is abandoned.
+            break
         if isinstance(candidate, dict):
             found.append((candidate, end - index))
         index = text.find("{", end)
