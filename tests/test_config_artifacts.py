@@ -303,6 +303,34 @@ def test_sign_must_be_a_boolean():
         _load('[artifacts.x]\nsign = "yes"\n')
 
 
+def test_sign_with_a_darwin_platform_parses():
+    # `sign = true` is coherent as soon as one darwin lane exists (signing runs
+    # on macOS): the linux entry rides along un-signed, the darwin one signs.
+    (artifact,) = _load(
+        '[artifacts.x]\nplatforms = ["darwin-arm64", "linux-x86_64"]\nsign = true\n'
+    )
+    assert artifact.sign is True
+
+
+def test_sign_without_a_darwin_platform_is_refused():
+    # A linux-only signing declaration would silently ship UNSIGNED (no darwin
+    # lane → no sign stage) while gh-setup still demands the Apple secrets — the
+    # two consumers disagreeing. Refused at parse (story 28).
+    with pytest.raises(
+        config.ConfigError, match=r"sign = true requires at least one darwin platform"
+    ):
+        _load('[artifacts.x]\nplatforms = ["linux-x86_64"]\nsign = true\n')
+
+
+def test_sign_with_default_platforms_is_refused():
+    # An undeclared `platforms` defaults to the linux lane — non-darwin — so a
+    # bare `sign = true` is refused the same way a linux-only one is.
+    with pytest.raises(
+        config.ConfigError, match=r"sign = true requires at least one darwin platform"
+    ):
+        _load("[artifacts.x]\nsign = true\n")
+
+
 def test_bundle_config_parses_to_a_path():
     # The artifact-declared bundle-config hook (TOL02-WS01, PRD story 25):
     # the repo-relative version file release prepare bumps in lockstep.

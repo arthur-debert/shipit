@@ -188,3 +188,11 @@ def test_secrets_block_maps_each_name_to_its_own_secret_ref():
         "  RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}\n"
         "  PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}"
     )
+
+
+def test_secrets_block_is_empty_when_nothing_is_required():
+    # A not-yet-release-capable map (no endpoints) derives no requirement, so
+    # the block is omitted entirely — a bare `secrets:` key would be a mapping
+    # with no entries, invalid YAML.
+    arts = _artifacts('[artifacts.lib]\nbuild = ["python"]\n')
+    assert secretreq.secrets_block(arts) == ""

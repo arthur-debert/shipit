@@ -225,21 +225,11 @@ def test_unsigned_flips_the_plan_to_the_unsigned_path():
 
 
 def test_unsigned_is_refused_when_nothing_would_sign():
-    # No declared signing → nothing to break-glass.
+    # No declared signing → nothing to break-glass. (A `sign = true` map that
+    # never meets darwin cannot even be constructed — config refuses it at
+    # parse; see test_config_artifacts.py.)
     with pytest.raises(ReleaseError, match="no sign stage to skip"):
         preflight.plan(PYTHON_PKG, _resolved("0.3.1"), unsigned=True)
-
-
-def test_unsigned_is_refused_when_signing_never_meets_darwin():
-    arts = _artifacts(
-        "[artifacts.cli]\n"
-        'build = ["rust"]\n'
-        'platforms = ["linux-x86_64"]\n'
-        'endpoints = ["gh-release"]\n'
-        "sign = true\n"
-    )
-    with pytest.raises(ReleaseError, match="no sign stage to skip"):
-        preflight.plan(arts, _resolved("1.0.0"), unsigned=True)
 
 
 # --------------------------------------------------------------------------

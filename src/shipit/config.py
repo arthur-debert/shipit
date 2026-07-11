@@ -574,6 +574,10 @@ class Artifact:
     fallback chain (workflows.lex §3.2: mainBinaryName → productName →
     package name — the scar-#2 integrity guard's inputs); and ``sign`` also
     by the sign stage — that later.
+
+    ``sign = true`` requires at least one darwin platform (signing runs on
+    macOS only) — refused at parse otherwise, so signing can never silently
+    degrade to an unsigned plan and preflight/gh-setup cannot disagree over it.
     """
 
     name: str
@@ -808,10 +812,24 @@ def _parse_artifact(name: str, spec: object) -> Artifact:
         if value is not None and (not isinstance(value, str) or not value):
             raise ConfigError(f"{where}.{key}: must be a non-empty name; got {value!r}")
         names[key] = value
+    platforms = _parse_platforms(f"{where}.platforms", spec.get("platforms", []))
+    if sign and not any(platform.startswith("darwin") for platform in platforms):
+        # Signing runs on macOS only, so `sign = true` without a darwin lane is
+        # an incoherent declaration: it would otherwise silently ship UNSIGNED
+        # (the plan's sign stage never materializes) while gh-setup still demands
+        # the Apple secrets — the two consumers disagreeing. Refuse it here, at
+        # the one boundary both consumers cross, so `sign = true` always implies
+        # a darwin signing lane (an undeclared `platforms` defaults to the linux
+        # lane — non-darwin — so it is refused too).
+        raise ConfigError(
+            f"{where}: sign = true requires at least one darwin platform "
+            f"(signing runs on macOS only); declare a darwin lane in "
+            f"`platforms` or drop `sign`"
+        )
     return Artifact(
         name=name,
         build=build,
-        platforms=_parse_platforms(f"{where}.platforms", spec.get("platforms", [])),
+        platforms=platforms,
         bundle=_parse_bundle(where, spec["bundle"]) if "bundle" in spec else None,
         bundle_config=bundle_config,
         main_binary=names["main-binary"],

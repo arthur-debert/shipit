@@ -124,6 +124,9 @@ def requirements(artifacts: Sequence[Artifact]) -> tuple[Requirement, ...]:
                         required_by=f"endpoint {endpoint} (artifact {artifact.name})",
                     )
                 )
+        # `sign = true` always meets a darwin lane (config refuses it otherwise,
+        # :class:`shipit.config.Artifact`), so the sign-mac names are genuinely
+        # required — this cannot demand Apple secrets a plan would then skip.
         if artifact.sign:
             reqs.extend(
                 Requirement(
@@ -139,7 +142,7 @@ def required_names(artifacts: Sequence[Artifact]) -> tuple[str, ...]:
     """The derived requirement NAMES, deduplicated, first-seen order."""
     seen: dict[str, None] = {}
     for req in requirements(artifacts):
-        seen.setdefault(req.name)
+        seen[req.name] = None
     return tuple(seen)
 
 
@@ -181,9 +184,15 @@ def secrets_block(artifacts: Sequence[Artifact]) -> str:
     consumer's caller workflow lists every derived name explicitly with the
     mapped (GitHub) name. The WS06 caller generation embeds this text
     verbatim; no trailing newline (the embedder owns layout).
+
+    A repo that derives no requirement (a not-yet-release-capable map with no
+    endpoints) yields the empty string — the block is omitted entirely rather
+    than emitted as a bare ``secrets:`` key, which would be a mapping with no
+    entries: invalid YAML.
     """
+    names = required_names(artifacts)
+    if not names:
+        return ""
     lines = ["secrets:"]
-    lines.extend(
-        f"  {name}: ${{{{ secrets.{name} }}}}" for name in required_names(artifacts)
-    )
+    lines.extend(f"  {name}: ${{{{ secrets.{name} }}}}" for name in names)
     return "\n".join(lines)

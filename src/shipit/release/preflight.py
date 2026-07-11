@@ -145,8 +145,14 @@ PLATFORM_MATRIX: dict[str, PlatformSpec] = {
 }
 
 # The declaration vocabulary (config) and the attribute table (here) are two
-# halves of one registry — import dies loudly if they ever drift.
-assert tuple(PLATFORM_MATRIX) == PLATFORMS
+# halves of one registry — import dies loudly if they ever drift. An explicit
+# raise, not `assert`: the guard must survive `python -O` (which strips asserts).
+if tuple(PLATFORM_MATRIX) != PLATFORMS:
+    raise RuntimeError(
+        f"PLATFORM_MATRIX keys {tuple(PLATFORM_MATRIX)} drifted from the closed "
+        f"PLATFORMS registry {PLATFORMS} — the two halves of the platform "
+        f"registry must stay in lockstep"
+    )
 
 
 @dataclass(frozen=True)
@@ -335,11 +341,11 @@ def _plan_secrets(endpoints: Sequence[str], *, sign: bool) -> tuple[str, ...]:
     names only when the sign stage is live."""
     seen: dict[str, None] = {}
     for name in secretreq.PREPARE_SECRETS:
-        seen.setdefault(name)
+        seen[name] = None
     for endpoint in endpoints:
         for name in secretreq.ENDPOINT_SECRETS[endpoint]:
-            seen.setdefault(name)
+            seen[name] = None
     if sign:
         for name in secretreq.SIGN_MAC_SECRETS:
-            seen.setdefault(name)
+            seen[name] = None
     return tuple(seen)
