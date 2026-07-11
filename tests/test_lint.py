@@ -32,11 +32,11 @@ from shipit.verbs import lint as lint_verb
 # so argv assertions can name what `_canonical_config` resolves without hardcoding
 # a machine-specific path. A tool with no shipped file-config (shellcheck, shfmt,
 # cargo, lexd) injects nothing.
-_RUFF_CFG = lint._data_path("ruff.toml")
-_PRETTIER_CFG = lint._data_path("prettierrc.yaml")
-_MD_CFG = lint._data_path("markdownlint.yaml")
-_YAML_CFG = lint._data_path("yamllint.yaml")
-_ACTIONLINT_CFG = lint._data_path("actionlint.yaml")
+_RUFF_CFG = lint.data_path("ruff.toml")
+_PRETTIER_CFG = lint.data_path("prettierrc.yaml")
+_MD_CFG = lint.data_path("markdownlint.yaml")
+_YAML_CFG = lint.data_path("yamllint.yaml")
+_ACTIONLINT_CFG = lint.data_path("actionlint.yaml")
 
 # --------------------------------------------------------------------------
 # Pure routing
@@ -1987,7 +1987,7 @@ def test_shipped_actionlint_config_declares_the_org_runner_labels():
     # Parse the config and assert gpu_t4 under self-hosted-runner.labels
     # specifically — a raw substring match would also see the explanatory
     # comment above the mapping, staying green if the real label were deleted.
-    body = Path(lint._data_path("actionlint.yaml")).read_text(encoding="utf-8")
+    body = Path(lint.data_path("actionlint.yaml")).read_text(encoding="utf-8")
     config = yaml.safe_load(body)
     assert "gpu_t4" in config["self-hosted-runner"]["labels"]
 
@@ -2022,7 +2022,7 @@ def test_shipped_ruff_toml_matches_the_repo_root_carve_out():
     # (what the gate injects fleet-wide). A drift between them would make the gate and
     # a bare `ruff` disagree, so pin them equal. `pyproject.toml` must carry NO ruff
     # config anymore.
-    data = Path(lint._data_path("ruff.toml")).read_bytes()
+    data = Path(lint.data_path("ruff.toml")).read_bytes()
     repo_root = Path(__file__).resolve().parent.parent
     assert (repo_root / "ruff.toml").read_bytes() == data
     # No `[tool.ruff…]` TABLE header survives in pyproject (a prose mention in a

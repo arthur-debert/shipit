@@ -1477,10 +1477,11 @@ def run(
     :func:`detect_rust_skew` and the module docstring).
 
     A malformed ``.shipit.toml`` read for the ``[lint].ignore`` seam raises
-    :class:`~shipit.config.ConfigError`, which the shared
-    :func:`~shipit.verbs._errors.cli_errors` shell maps to one ``error: …`` line +
-    exit 1 — the same clean, legible failure every config-reading verb gives,
-    never a raw traceback mid-gate.
+    :class:`~shipit.config.ConfigError` to direct service callers. The
+    :func:`shipit.verbs.lint.run` CLI wrapper applies
+    :func:`~shipit.verbs._errors.cli_errors`, mapping it to one ``error: …`` line
+    and exit 1 — the same clean, legible failure every config-reading verb gives,
+    never a raw traceback at the CLI boundary.
     """
     started = time.monotonic()
     root = Path(path or ".").resolve()
