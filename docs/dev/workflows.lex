@@ -113,13 +113,23 @@ logic is thin YAML) is stated in [./architecture.lex#3].
 
     3.3. Partial-release prevention
 
-        The release job publishes ONLY when build and package succeeded and
-        sign either succeeded (signed path) or was skipped (unsigned path). A
-        FAILED sign or package blocks the release. This block cannot be a plain
-        dependency — the default "a skipped dependency skips the dependent"
-        would wrongly skip release on the unsigned path — so it is an explicit
-        result check that accepts skipped-or-success for sign while still
-        blocking on failure. Never ship a half-built set.
+        The release job publishes ONLY when every LIVE upstream stage
+        succeeded and sign either succeeded (signed path) or was skipped
+        (unsigned path). A FAILED (or cancelled) stage blocks the release,
+        always. This block cannot be a plain dependency — the default "a
+        skipped dependency skips the dependent" would wrongly skip release on
+        the unsigned path — so it is an explicit result check in the publish
+        verb, fed the stage results verbatim. Never ship a half-built set.
+
+        Liveness is a PLAN fact, never read off the result strings (issue
+        #745): a no-build plan (empty matrix — "the tag is the release") skips
+        the build job, and a reusable-workflow caller whose only inner job was
+        if-skipped concludes SKIPPED (canary-confirmed), so the gate accepts
+        skipped for build/bundle exactly when the plan proves the stage
+        non-live (empty matrix for build, no bundle stage in stages for
+        bundle). A LIVE build/bundle still requires success, and the chain
+        still carries zero logic: the plan's matrix and stages ride to the
+        verb verbatim, and the verb derives the verdict.
 
 4. The changelog model (generalizable, language-agnostic)
 

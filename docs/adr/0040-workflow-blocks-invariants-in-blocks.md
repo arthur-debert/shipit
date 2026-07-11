@@ -8,8 +8,11 @@ plus one composed `wf-release.yml` that chains them via nested `workflow_call`,
 so a standard consumer's caller is a single `uses:` line while odd repos compose
 stages directly, sanctioned. The decisive rule: the scar invariants live inside
 the blocks they protect, never in the chain. `wf-publish` takes upstream stage
-results as explicit inputs and enforces partial-release prevention (ADR-0009:
-publish only if build+bundle succeeded and sign succeeded-or-was-skipped);
+results — plus the plan's stage-liveness facts (`matrix`, `stages`), verbatim —
+as explicit inputs and enforces partial-release prevention (ADR-0009 /
+workflows.lex §3.3: publish only if every live stage succeeded — a plan-proven
+non-live build/bundle may be skipped, the empty-matrix "tag is the release"
+shape — and sign succeeded-or-was-skipped);
 `assert-bundle` (the right-binary integrity guard) runs at `wf-sign-mac`'s entry
 and on `wf-publish`'s unsigned path. We rejected leaving the `needs:` wiring to
 consumers — that puts copy-pasted, drift-prone logic in 19 repos, the exact thing

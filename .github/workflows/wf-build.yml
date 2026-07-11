@@ -49,8 +49,11 @@ permissions:
 jobs:
   build:
     # An empty matrix is a legitimate plan (no build-bearing artifact —
-    # "the tag is the release"): the job skips and the block concludes
-    # green, mirroring wf-checks.yml's empty-plan rule.
+    # "the tag is the release"): the job skips, and a reusable-workflow
+    # caller whose only inner job was if-skipped concludes SKIPPED, not
+    # success (canary-confirmed, issue #745). The composed chain passes that
+    # result verbatim beside the plan's matrix, and the publish verb's gate
+    # accepts the skip because the PLAN proves the stage non-live.
     if: inputs.matrix != '[]'
     strategy:
       # Every leg reports (the barrier verdict is wf-publish's verb, which

@@ -1125,6 +1125,8 @@ def run_publish(
     build_result: str,
     bundle_result: str,
     sign_result: str,
+    matrix: str | None = None,
+    stages: str | None = None,
     assets: str | None = None,
     notes: str | None = None,
     testpypi: bool = False,
@@ -1141,7 +1143,13 @@ def run_publish(
 
     1. The scar-#3 refusal gate first (:func:`shipit.release.publish.check_gate`,
        PRD story 32) — pure, before any I/O, so a blocked publish touches
-       nothing.
+       nothing. ``matrix``/``stages`` are the preflight plan's fields
+       VERBATIM — the stage-liveness facts (issue #745): an empty matrix
+       proves build non-live, while a stages list without ``bundle`` proves
+       bundle non-live; the gate then accepts ``skipped`` for exactly those
+       stages. Omitted facts default to LIVE — the strict
+       contract (a caller that states no plan never weakens the gate);
+       liveness is never inferred from the result strings.
     2. The plan (:func:`shipit.release.publish.plan`): the RC guard and
        brew's stable-only rule decided centrally, ``release`` endpoints
        ordered before ``derived`` ones (stories 33/35). WS02's preflight
@@ -1166,8 +1174,18 @@ def run_publish(
     dir without walking parents.
     """
     # The refusal gate runs FIRST — pure, before any filesystem or git read
-    # (ADR-0040: the block passes results in, the VERB enforces).
-    publish_mod.check_gate(build_result, bundle_result, sign_result)
+    # (ADR-0040: the block passes results AND plan facts in, the VERB
+    # enforces). Liveness derives from the plan verbatim; an omitted fact
+    # stays live/strict.
+    build_live = True if matrix is None else publish_mod.build_is_live(matrix)
+    bundle_live = True if stages is None else publish_mod.bundle_is_live(stages)
+    publish_mod.check_gate(
+        build_result,
+        bundle_result,
+        sign_result,
+        build_live=build_live,
+        bundle_live=bundle_live,
+    )
 
     run_cmd = run_cmd or _run_publish_cmd
     probe = probe or _probe_publish_cmd
@@ -1510,13 +1528,19 @@ _RESULT_CHOICE = click.Choice(publish_mod.STAGE_RESULTS)
     "--build-result",
     type=_RESULT_CHOICE,
     required=True,
-    help="The build stage's result — must be `success` (scar #3).",
+    help=(
+        "The build stage's result — `success` when the stage is live; "
+        "`skipped` also passes when --matrix proves it non-live (scar #3)."
+    ),
 )
 @click.option(
     "--bundle-result",
     type=_RESULT_CHOICE,
     required=True,
-    help="The bundle stage's result — must be `success` (scar #3).",
+    help=(
+        "The bundle stage's result — `success` when the stage is live; "
+        "`skipped` also passes when --stages proves it non-live (scar #3)."
+    ),
 )
 @click.option(
     "--sign-result",
@@ -1525,6 +1549,24 @@ _RESULT_CHOICE = click.Choice(publish_mod.STAGE_RESULTS)
     help=(
         "The sign stage's result — `success` (signed path) or `skipped` "
         "(unsigned path); a FAILED sign blocks everything (scar #3)."
+    ),
+)
+@click.option(
+    "--matrix",
+    help=(
+        "The preflight plan's `matrix` JSON, verbatim — the build stage's "
+        "liveness fact: an empty matrix (the tag-is-the-release shape) "
+        "proves build non-live, so `skipped` passes the gate. Omitted: "
+        "build is treated as live (`success` required)."
+    ),
+)
+@click.option(
+    "--stages",
+    help=(
+        "The preflight plan's `stages` JSON, verbatim — the bundle stage's "
+        "liveness fact: a list without `bundle` proves bundle non-live, so "
+        "`skipped` passes the gate. Omitted: bundle is treated as live "
+        "(`success` required)."
     ),
 )
 @click.option(
@@ -1558,6 +1600,8 @@ def publish_cmd(
     build_result: str,
     bundle_result: str,
     sign_result: str,
+    matrix: str | None,
+    stages: str | None,
     assets: str | None,
     notes: str | None,
     testpypi: bool,
@@ -1565,9 +1609,13 @@ def publish_cmd(
 ) -> None:
     """Publish the staged Artifacts to their declared Distribution endpoints.
 
-    The terminal release stage: refuses unless build+bundle succeeded and
-    sign succeeded-or-was-skipped (the explicit result inputs — a partial
-    release is structurally impossible), then walks the [artifacts] map and
+    The terminal release stage: refuses unless every LIVE upstream stage
+    succeeded and sign succeeded-or-was-skipped (the explicit result inputs —
+    a partial release is structurally impossible). --matrix/--stages carry
+    the preflight plan's liveness facts verbatim: a plan-proven non-live
+    build/bundle (empty matrix / no bundle stage — "the tag is the release")
+    may be `skipped`; omitted facts keep the strict success-only contract,
+    and `failure`/`cancelled` always block. It then walks the [artifacts] map and
     dispatches each declared endpoint through the closed adapter registry
     (gh-release, crates, pypi, npm, brew). A -release-rc VERSION publishes
     ONLY to the GH release (as prerelease) — every external endpoint is
@@ -1589,6 +1637,8 @@ def publish_cmd(
             build_result=build_result,
             bundle_result=bundle_result,
             sign_result=sign_result,
+            matrix=matrix,
+            stages=stages,
             assets=assets,
             notes=notes,
             testpypi=testpypi,

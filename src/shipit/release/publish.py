@@ -35,7 +35,14 @@ for the WS06 ``wf-publish`` block and a laptop invocation (ADR-0040):
 
 - :func:`check_gate` — the scar-#3 refusal (workflows.lex §3.3, PRD story
   32): publish takes the upstream stage results as EXPLICIT INPUTS and
-  refuses unless build+bundle succeeded and sign succeeded-or-was-skipped.
+  refuses unless every LIVE stage succeeded. Liveness is a plan fact, never
+  read off the result strings (issue #745): a live build/bundle must be
+  ``success``; a proven non-live one (empty matrix — "the tag is the
+  release" — or no bundle stage in the plan) may be ``success`` or
+  ``skipped``; ``failure``/``cancelled`` always refuse. Sign keeps its own
+  rule: success-or-skipped (the skip IS the sanctioned unsigned path). The
+  liveness facts derive from the plan verbatim
+  (:func:`build_is_live` / :func:`bundle_is_live`).
 - :func:`is_live_fire` — the central RC guard (PRD story 33): a
   ``-release-rc`` version publishes ONLY to the GH release (as prerelease);
   every external endpoint is skipped — one implementation, never one
@@ -213,29 +220,104 @@ class Published:
 # --------------------------------------------------------------------------
 
 
-def check_gate(build: str, bundle: str, sign: str) -> None:
+def build_is_live(matrix: str) -> bool:
+    """Whether the plan's build stage is live — the matrix carries at least
+    one leg. Pure over the preflight plan's ``matrix`` JSON, verbatim.
+
+    An empty matrix is the legitimate no-build shape ("the tag is the
+    release", wf-build.yml): its build job is ``if``-skipped and the caller
+    job concludes ``skipped`` (canary-confirmed, issue #745), which the gate
+    must accept — but only against THIS plan fact, never inferred from the
+    result string. Malformed JSON is a loud :class:`ReleaseError`.
+    """
+    try:
+        entries = json.loads(matrix)
+    except json.JSONDecodeError as exc:
+        raise ReleaseError(
+            f"--matrix is not valid JSON ({exc}) — pass the preflight plan's "
+            f"`matrix` field verbatim (wf-prepare's output)"
+        ) from exc
+    if not isinstance(entries, list):
+        raise ReleaseError(
+            "--matrix must be the preflight plan's `matrix` JSON array, "
+            f"got {type(entries).__name__}"
+        )
+    return bool(entries)
+
+
+def bundle_is_live(stages: str) -> bool:
+    """Whether the plan's bundle stage is live — ``"bundle"`` appears in the
+    plan's live-stage list. Pure over the preflight plan's ``stages`` JSON,
+    verbatim.
+
+    The plan names ``bundle`` iff some matrix entry actually bundles
+    (:func:`shipit.release.preflight.plan`), so a build-only plan (or an
+    empty matrix) proves the bundle stage non-live. Malformed JSON is a loud
+    :class:`ReleaseError`.
+    """
+    try:
+        names_ = json.loads(stages)
+    except json.JSONDecodeError as exc:
+        raise ReleaseError(
+            f"--stages is not valid JSON ({exc}) — pass the preflight plan's "
+            f"`stages` field verbatim (wf-prepare's output)"
+        ) from exc
+    if not isinstance(names_, list):
+        raise ReleaseError(
+            "--stages must be the preflight plan's `stages` JSON array, "
+            f"got {type(names_).__name__}"
+        )
+    return "bundle" in names_
+
+
+def check_gate(
+    build: str,
+    bundle: str,
+    sign: str,
+    *,
+    build_live: bool = True,
+    bundle_live: bool = True,
+) -> None:
     """The scar-#3 refusal gate (workflows.lex §3.3, PRD story 32). Pure.
 
-    Publish proceeds ONLY when build and bundle succeeded and sign either
-    succeeded (signed path) or was skipped (unsigned path) — an explicit
+    Publish proceeds ONLY when every LIVE stage succeeded — an explicit
     result check, never a plain dependency (a skipped sign must pass, a
-    FAILED sign or bundle must block). Anything else raises
+    FAILED sign or bundle must block). Per stage:
+
+    - a LIVE build/bundle must be ``success``;
+    - a NON-live build/bundle (``build_live``/``bundle_live`` False — the
+      plan proved the stage had nothing to run: empty matrix / no bundle
+      stage, issue #745) may be ``success`` or ``skipped``;
+    - ``failure``/``cancelled`` always refuse, live or not;
+    - sign keeps its own rule regardless of liveness: success (signed path)
+      or skipped (unsigned path).
+
+    Liveness defaults to True — the strict contract — so a caller that
+    states no plan fact never weakens the gate. Anything blocked raises
     :class:`ReleaseError` naming every blocking input, so the refusal is
     diagnosable in one read.
     """
     blockers = []
-    if build != RESULT_SUCCESS:
-        blockers.append(f"build={build}")
-    if bundle != RESULT_SUCCESS:
-        blockers.append(f"bundle={bundle}")
+    for stage, result, live in (
+        ("build", build, build_live),
+        ("bundle", bundle, bundle_live),
+    ):
+        if live:
+            if result != RESULT_SUCCESS:
+                blockers.append(f"{stage}={result} (live {stage} requires success)")
+        elif result not in (RESULT_SUCCESS, RESULT_SKIPPED):
+            blockers.append(
+                f"{stage}={result} (success-or-skipped required for a non-live {stage})"
+            )
     if sign not in (RESULT_SUCCESS, RESULT_SKIPPED):
-        blockers.append(f"sign={sign} (skipped-or-success required)")
+        blockers.append(f"sign={sign} (success-or-skipped required)")
     if blockers:
         raise ReleaseError(
             "publish refused — upstream stage results block the release: "
             + ", ".join(blockers)
-            + " (build+bundle must be success, sign success-or-skipped; "
-            "never ship a half-built set — workflows.lex §3.3)"
+            + " (a live build/bundle must be success, a plan-proven non-live "
+            "one success-or-skipped, sign success-or-skipped; never ship a "
+            "half-built set — workflows.lex §3.3)"
         )
 
 

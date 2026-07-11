@@ -155,10 +155,16 @@ jobs:
       tag: ${{ needs.prepare.outputs.tag }}
       # wf-build runs build+bundle as one job, so both results are its one
       # verdict — passed twice because the verb's contract names the two
-      # stages separately (direct composition may split them).
+      # stages separately (direct composition may split them). On an empty
+      # matrix that verdict is `skipped` (the wf-build job is if-skipped and
+      # the caller job concludes skipped — canary-confirmed, issue #745):
+      # still passed VERBATIM, beside the plan facts (`matrix`, `stages`)
+      # from which the VERB proves the skip legitimate (ADR-0040 — no
+      # translation here).
       build-result: ${{ needs.build.result }}
       bundle-result: ${{ needs.build.result }}
       sign-result: ${{ needs.sign.result }}
+      matrix: ${{ needs.prepare.outputs.matrix }}
       unsigned-matrix: ${{ needs.prepare.outputs.unsigned-matrix }}
       stages: ${{ needs.prepare.outputs.stages }}
     secrets:
