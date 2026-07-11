@@ -251,6 +251,7 @@ def test_mac_app_requires_the_source_dir():
 def test_mac_app_parses_command_and_source():
     (artifact,) = _load(
         "[artifacts.app]\n"
+        'build = ["rust"]\n'
         'bundle = { composition = "mac-app", command = ["npm", "run", "bundle"],'
         ' source = "./src-tauri/target/release/bundle" }\n'
     )
@@ -314,6 +315,23 @@ def test_sign_with_a_build_and_darwin_platform_parses():
         "sign = true\n"
     )
     assert artifact.sign is True
+
+
+def test_bundle_without_a_build_target_is_refused():
+    # The bundle twin of the sign rule: a bundle composes build outputs, so on a
+    # no-build artifact the stage never materializes yet the declaration reads
+    # as intent. Refused at parse rather than silently dropped.
+    with pytest.raises(
+        config.ConfigError, match=r"bundle requires at least one build target"
+    ):
+        _load('[artifacts.x]\nbundle = { composition = "archive" }\n')
+
+
+def test_bundle_shape_error_precedes_the_build_requirement():
+    # A malformed bundle still gets its specific composition-shape error first —
+    # the build-requirement check is ordered after the composition parse.
+    with pytest.raises(config.ConfigError, match="bundle must name its composition"):
+        _load("[artifacts.x]\nbundle = {}\n")
 
 
 def test_sign_without_a_build_target_is_refused():

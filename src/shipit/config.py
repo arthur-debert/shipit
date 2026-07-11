@@ -582,7 +582,9 @@ class Artifact:
     ``sign = true`` requires at least one build target AND at least one darwin
     platform (signing signs a build output, and runs on macOS only) — refused
     at parse otherwise, so signing can never silently degrade to an unsigned
-    plan and preflight/gh-setup cannot disagree over it.
+    plan and preflight/gh-setup cannot disagree over it. ``bundle`` follows the
+    same rule for the same reason: it composes build outputs, so a bundle on a
+    no-build artifact is refused at parse rather than silently dropped.
     """
 
     name: str
@@ -841,11 +843,25 @@ def _parse_artifact(name: str, spec: object) -> Artifact:
                 f"(signing runs on macOS only); declare a darwin lane in "
                 f"`platforms` or drop `sign`"
             )
+    bundle = _parse_bundle(where, spec["bundle"]) if "bundle" in spec else None
+    if bundle is not None and not build:
+        # The bundle twin of the sign rule: a bundle composes BUILD OUTPUTS
+        # (:mod:`shipit.release.bundle`), so preflight materializes the bundle
+        # stage only from a build-bearing artifact. Declared on a no-build
+        # artifact the stage never materializes yet the declaration reads as
+        # intent — refuse it here rather than silently dropping the bundle.
+        # Ordered AFTER the composition-shape parse so a malformed bundle still
+        # gets its specific error first.
+        raise ConfigError(
+            f"{where}: bundle requires at least one build target "
+            f"(a bundle composes build outputs; an artifact with no build "
+            f"produces nothing to bundle)"
+        )
     return Artifact(
         name=name,
         build=build,
         platforms=platforms,
-        bundle=_parse_bundle(where, spec["bundle"]) if "bundle" in spec else None,
+        bundle=bundle,
         bundle_config=bundle_config,
         main_binary=names["main-binary"],
         product_name=names["product-name"],

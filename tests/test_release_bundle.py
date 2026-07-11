@@ -379,11 +379,12 @@ def test_wheel_rerun_overwrites_existing_same_named_outputs(tmp_path):
 
 MAC_APP_SPEC = {
     "app": {
+        "build": ["rust"],
         "bundle": {
             "composition": "mac-app",
             "command": ["npm", "run", "bundle"],
             "source": "src-tauri/target/release/bundle",
-        }
+        },
     }
 }
 

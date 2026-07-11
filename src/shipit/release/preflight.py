@@ -288,13 +288,11 @@ def plan(
     # A declared composition matching NONE of its artifact's build platforms
     # produces no bundle anywhere — a config mistake (deb on a darwin-only
     # artifact) refused loudly here, the way `sign = true` demands a darwin
-    # lane, rather than silently dropping the stage.
+    # lane, rather than silently dropping the stage. (A bundle with no build at
+    # all is refused earlier, at config parse — shipit.config._parse_artifact —
+    # so every artifact reaching here has build targets.)
     for artifact in artifacts:
-        if (
-            artifact.bundle is not None
-            and artifact.build
-            and artifact.name not in bundling
-        ):
+        if artifact.bundle is not None and artifact.name not in bundling:
             platforms = ", ".join(artifact.platforms) or DEFAULT_PLATFORM
             raise ReleaseError(
                 f"[artifacts.{artifact.name}] declares bundle composition "
