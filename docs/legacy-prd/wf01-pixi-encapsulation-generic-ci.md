@@ -110,7 +110,7 @@ to a thin caller of `arthur-debert/shipit@vN`, upgraded by bumping one version.
   Mirrors the existing `config.py` / `prstate/reviewers_config.py` split.
 - **toolchain registry.** A closed registry of toolchains (rust, npm, mkdocs, go,
   wasm, …), each carrying its provisioning expectation and the uniform task names it
-  expects (`build`/`test`/`lint`). Same shape as `verbs/lint.py`'s `LANGS` and
+  expects (`build`/`test`/`lint`). Same shape as `shipit/lint.py`'s `LANGS` and
   `prstate/reviewers.py`'s adapter registry — adding one is adding an entry
   (ADR-0007).
 - **lane planner (deep module).** Pure function `(declared lanes + event +
@@ -127,7 +127,7 @@ to a thin caller of `arthur-debert/shipit@vN`, upgraded by bumping one version.
   `pixi run <lane task>` per job + collect/post. Routing only — matrix, artifact
   up/download stubs, secret injection. No shell logic in YAML.
 - **actionlint into the lint check.** Add a workflow/actionlint **Lang** to
-  `verbs/lint.py`'s registry so `shipit lint` (hence pre-commit and CI) lints
+  `shipit/lint.py`'s registry so `shipit lint` (hence pre-commit and CI) lints
   workflow YAML. Hard-fail check: missing `actionlint` exits non-zero (architecture.lex §7).
 - **act harness (`shipit wf test` / a pixi task).** A wrapper that runs one
   workflow/job under `act` in catthehacker containers with an input-file and crafted

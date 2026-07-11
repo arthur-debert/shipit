@@ -29,7 +29,7 @@ The pure cores — event-payload crafting (:func:`craft_event` /
 :func:`parse_inputs`), job selection (:func:`workflow_jobs`), and the act argv
 encoding (:func:`act_argv`) — are kept out of the Exec boundary so they are
 fixture-testable with no docker anywhere near the tests, the same split the
-lint verb uses. Every act/docker invocation goes through the one Exec runner
+lint service uses. Every act/docker invocation goes through the one Exec runner
 (:mod:`shipit.execrun`, ADR-0028) via the injectable ``run_cmd`` seam; verb
 tests assert the RECORDED argv.
 
@@ -55,8 +55,8 @@ import click
 import yaml
 
 from .. import execrun
+from ..lint import data_path
 from ._errors import cli_errors
-from .lint import _data_path
 
 logger = logging.getLogger("shipit.wf")
 
@@ -328,7 +328,7 @@ def ensure_image(run_cmd: RunCmd) -> bool:
     )
     if probe.rc == 0:
         return False
-    dockerfile = _data_path(WF_DOCKERFILE)
+    dockerfile = data_path(WF_DOCKERFILE)
     run_cmd(
         [
             "docker",

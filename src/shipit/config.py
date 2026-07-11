@@ -266,7 +266,7 @@ def load_lint_ignore(cfg: dict) -> list[str]:
     routing, so one ``ignore`` entry drops a path from every leg (markdownlint,
     shfmt, ruff, …). Patterns are gitignore-style — the SAME syntax as the
     ``.markdownlintignore`` this seam replaces, matched by shipit's own
-    ``.treeinclude`` engine (:func:`shipit.verbs.lint.path_ignored`): ``*`` does
+    ``.treeinclude`` engine (:func:`shipit.lint.path_ignored`): ``*`` does
     not cross ``/``, ``**`` matches any run of segments, a trailing-slash pattern
     matches a directory's whole subtree (``CHANGELOG/`` → every built
     ``CHANGELOG/*.md``), an unanchored name floats to any depth (``CHANGELOG.md``

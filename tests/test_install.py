@@ -711,7 +711,7 @@ def test_managed_markdownlintignore_covers_managed_paths_and_testdata():
     with no ignore entry — tested in test_lint.py). The test-data globs match
     lint.PROTECTED_TESTDATA_GLOBS: the fixer refuses to auto-rewrite them AND
     check mode skips these deliberately-malformed fixtures too."""
-    from shipit.verbs import lint
+    from shipit import lint
 
     entries = [
         line

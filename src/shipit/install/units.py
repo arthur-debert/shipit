@@ -113,7 +113,7 @@ PIXI_ENVS_ANCHOR = "[environments]"
 # The CONDITIONAL per-toolchain dep blocks (#547 Layer 1): a consumer whose
 # tracked manifests signal a toolchain (a `Cargo.toml` anywhere → rust, `go.mod`
 # → go, `package.json` → node — the same per-manifest discovery that makes the
-# corresponding `shipit lint` leg run, see verbs/lint.py) gets that toolchain
+# corresponding `shipit lint` leg run, see shipit/lint.py) gets that toolchain
 # pinned through pixi/conda-forge, so the lint legs stop hard-failing (127)
 # wherever the host happens to lack cargo/go/node — the #526 "clippy is
 # local-only" CI gap. rust and go anchor under the lint feature (they provision

@@ -78,7 +78,7 @@ Two phases, mirrored in the work streams:
 ### The gate injects config (mechanism 1)
 
 Generalize the `editorconfig_pin` field on the `Tool` dataclass
-(`src/shipit/verbs/lint.py`) into an always-applied config-injection: each tool
+(`src/shipit/lint.py`) into an always-applied config-injection: each tool
 carries the flag(s) that pin it to shipit's canonical config (`--config <path>`
 for ruff/prettier/markdownlint/yamllint; explicit flags for shellcheck/shfmt;
 `--config-path` for rustfmt; clippy lints on the command line). Unlike

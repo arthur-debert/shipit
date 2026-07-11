@@ -34,7 +34,7 @@ templated tasks) and `§7` (lint checks: one definition, hard).
   formatter under `--all-files` silently rewrites untouched files). `--fix` is the
   opt-in formatter pass, exposed as `pixi run fmt`; only tools with a safe
   in-place fix participate, the rest still run as checks
-  (`src/shipit/verbs/lint.py:14-19`, `Tool.fix`, `pixi.toml` `fmt` task).
+  (`src/shipit/lint.py`, `Tool.fix`, `pixi.toml` `fmt` task).
 - **Whole-tree, NOT staged-only.** Staged-only was deliberately NOT implemented.
   Both the pre-commit and pre-push hooks call `pixi run lint`, which lints the
   whole tracked tree via `git ls-files` (`lefthook.yml` and
