@@ -34,14 +34,20 @@ def test_live_addressing_real_payload(context):
     }
     assert status.open_threads == 2
     assert status.cycles == 1
-    assert status.breaker is None
+    # The REAL Copilot findings carry no severity anywhere, so they resolve
+    # through Copilot's `minor` unclassified policy (#743): a Copilot-only
+    # unclassified round fires the no-major+ stop — both threads still resolve
+    # before Ready (state stays ADDRESSING above), but no further round is
+    # minted. Pre-#743 these findings rode the `major` fail-safe, this breaker
+    # could never fire on a Copilot-commenting PR, and loops rode to the cap.
+    assert status.breaker == "no-major-finding"
 
 
 def test_live_ready_real_payload(context):
     # Same PR after replying + resolving both threads — drives straight to
-    # READY: findings arrive pre-classified (ADR-0044), so resolved threads +
-    # green checks + a clean merge state ARE the done-signal; no recorded
-    # verdict exists or is needed.
+    # READY: every finding's severity resolves off the chain (ADR-0044), so
+    # resolved threads + green checks + a clean merge state ARE the
+    # done-signal; no recorded verdict exists or is needed.
     ctx = context("live_ready_pr342")
     status = evaluate(ctx, required=_COPILOT_ONLY)
     assert status.state is TaskState.READY

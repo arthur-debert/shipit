@@ -1,9 +1,9 @@
 """Severity overrides — the write-once correction store for finding severities.
 
-Findings arrive PRE-classified (ADR-0044): every reviewer's findings carry a
-4-tier :class:`~shipit.finding.Severity` the engine resolves through the
-precedence chain (machine marker → reviewer-adapter mapping → ``major``
-fail-safe — :mod:`shipit.prstate.severity`). This module is the chain's TOP
+Every finding resolves to a 4-tier :class:`~shipit.finding.Severity` through
+the precedence chain (machine marker → reviewer-adapter mapping → the
+adapter's unclassified-severity policy → ``major`` fail-safe —
+:mod:`shipit.prstate.severity`; ADR-0044). This module is the chain's TOP
 rung: a write-once **Severity override**, recorded when a reviewer-emitted
 severity is judged wrong, beating every other source. It is a DORMANT
 correction path — `shipit pr classify` is the only writer, and it is

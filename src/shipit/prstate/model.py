@@ -247,9 +247,10 @@ class ReadinessView:
     # roster precedent — so the breaker and the classify verb read recorded
     # overrides off the snapshot, never the filesystem. An override is the TOP
     # rung of the severity precedence chain (it beats the machine marker, the
-    # adapter mapping, and the `major` fail-safe); an id absent here simply
-    # resolves through the rest of the chain — findings arrive pre-classified,
-    # so nothing gates on this store. Empty is the honest fixture default.
+    # adapter mapping, the adapter's unclassified-severity policy, and the
+    # `major` fail-safe); an id absent here simply resolves through the rest
+    # of the chain, so nothing gates on this store. Empty is the honest
+    # fixture default.
     overrides: dict[int, Severity] = field(default_factory=dict)
     # The first-sight registry for the OBSERVATIONAL dev-cycle events this
     # snapshot's evaluations witness (`round.detected`, `breaker.fired`,

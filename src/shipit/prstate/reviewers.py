@@ -184,6 +184,16 @@ class ReviewerAdapter:
     # Structure only: the adapter declares the location; whether content ships
     # there is a per-reviewer onboarding decision.
     instruction_files: tuple[str, ...] = ()
+    # This reviewer's severity POLICY for an UNCLASSIFIED finding (#743): the
+    # rung of the precedence chain between the adapter's native mapping and the
+    # global ``major`` fail-safe — what a finding resolves to when NEITHER the
+    # machine marker NOR `native_severity` classifies it. None (the base
+    # default) means no explicit policy: such a finding rides the fail-safe,
+    # forcing a round rather than slipping the Breaker. An adapter declares a
+    # policy ONLY when its reviewer emits no severity vocabulary at all AND its
+    # unclassified findings have a known typical weight (Copilot → ``minor``);
+    # the write-once Severity override still corrects any individual finding.
+    unclassified_severity: Severity | None = None
 
     def matches(self, login: str) -> bool:
         raise NotImplementedError
@@ -199,8 +209,10 @@ class ReviewerAdapter:
         branching on a name. Base: None — a reviewer with no native severity
         vocabulary (Copilot) contributes nothing here, and a LOCAL-agent
         reviewer's findings carry the machine marker (the chain's stronger
-        rung) instead. None falls through to the chain's ``major`` fail-safe:
-        an unmappable finding forces a round rather than slipping the Breaker.
+        rung) instead. None falls through to this adapter's
+        `unclassified_severity` policy when one is declared (#743), else to
+        the chain's ``major`` fail-safe: an unmappable finding by a
+        no-policy reviewer forces a round rather than slipping the Breaker.
         """
         return None
 
@@ -380,15 +392,27 @@ class CopilotAdapter(ReviewerAdapter):
     the current head (an earlier-head review is stale and the reviewer reads back
     REQUESTED for the new head).
 
-    Copilot emits NO native severity vocabulary, so `native_severity` stays the
-    base None (deliberate, ADR-0044): its findings resolve through the chain's
-    ``major`` fail-safe — forcing a round rather than slipping the Breaker —
-    correctable per finding via the write-once Severity override.
+    Copilot emits NO severity vocabulary anywhere — not in comment bodies, not
+    in review/review-comment API metadata (verified against captured REST and
+    GraphQL payloads, #743) — so `native_severity` stays the base None: there
+    is nothing to map. Its findings resolve through the explicit
+    `unclassified_severity` POLICY instead: ``minor``. Riding the chain's
+    ``major`` fail-safe here defeated the no-major-finding Breaker — every
+    unclassified Copilot nit read major-or-worse, so any round with one
+    re-minted a round and every Copilot-commenting PR rode to the round cap
+    (#743) — while Copilot's unclassified findings are in practice minor/nit
+    wording items. ``minor`` still requires each thread RESOLVED before Ready;
+    it just never mints another round. A genuinely blocking Copilot finding is
+    upgraded per finding via the write-once Severity override, which beats the
+    policy (and an explicit machine marker still would too).
     """
 
     name = "copilot"
     requestable = True
     instruction_files = (".github/copilot-instructions.md",)
+    # Copilot's unclassified findings resolve MINOR (#743): addressed and
+    # resolved like any finding, but never minting another review round.
+    unclassified_severity = Severity.MINOR
 
     def matches(self, login: str) -> bool:
         return "copilot" in login.lower()

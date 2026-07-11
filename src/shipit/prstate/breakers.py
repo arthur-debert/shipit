@@ -12,13 +12,17 @@ repeat-finding / divergent-counting machinery any more):
         RVW02): every finding's resolved Severity fails the merge-block test —
         minor/nit only, nothing a competent reviewer would hold the merge for.
 
-There is NO classification step anywhere: findings arrive PRE-classified on
-the 4-tier Severity ladder, and this rule reads each finding's severity
-through the precedence chain (:mod:`.severity` — machine marker →
-reviewer-adapter mapping → ``major`` fail-safe, beaten only by a write-once
-Severity override off the snapshot's ``ReadinessView.overrides``). The
-``major`` default is what makes the rule fail-safe: an unparseable finding
-forces another round rather than slipping the Breaker.
+There is NO classification step anywhere: this rule reads each finding's
+severity through the precedence chain (:mod:`.severity` — machine marker →
+reviewer-adapter mapping → the adapter's unclassified-severity policy →
+``major`` fail-safe, beaten only by a write-once Severity override off the
+snapshot's ``ReadinessView.overrides``). The ``major`` default keeps the rule
+fail-safe for a reviewer WITHOUT an explicit policy: its unparseable finding
+forces another round rather than slipping the Breaker. A reviewer that emits
+no severity vocabulary at all instead declares a policy on its adapter
+(#743: Copilot's unclassified findings resolve ``minor``) — otherwise its
+every nit read major-or-worse, the no-major+ stop could never fire on a
+round containing one, and such loops always rode to the round cap.
 
 A *round* is one ITERATION — one head SHA that got re-reviewed — NOT one review
 object. That distinction is load-bearing once there are several required
@@ -126,7 +130,8 @@ def has_blocking_finding(rnd: Round, overrides: Mapping[int, Severity]) -> bool:
 
     Each finding's Severity comes from the precedence chain
     (:func:`~shipit.prstate.severity.finding_severity`): its machine marker,
-    else its author's adapter mapping, else the ``major`` fail-safe — beaten
+    else its author's adapter mapping, else that adapter's
+    unclassified-severity policy, else the ``major`` fail-safe — beaten
     only by a write-once override in ``overrides``. ``blocks_merge`` is the
     merge-block test: major-or-worse means a competent reviewer would hold the
     merge, and only such a finding keeps the review loop minting rounds.
