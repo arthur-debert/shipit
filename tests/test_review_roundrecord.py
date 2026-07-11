@@ -372,11 +372,20 @@ def test_generate_review_explicit_dimensions_fold_into_the_record(
     from shipit.review import service
 
     review = {"summary": {"status": "COMMENT", "overall_feedback": ""}, "comments": []}
+    # ADR-0052 makes `dimensions` the SHAPE SWITCH: forwarding it selects the
+    # fan-out, omitting it runs the default single pass. The record's
+    # `dimension_names` is derived from generate_review's OWN argument, so it
+    # would still fold correctly even if the arg stopped reaching
+    # run_fanout_review (the real review would then run the mislabeled single
+    # pass). Capture the fan-out kwargs and assert the tuple was forwarded, so
+    # this test pins the forwarding, not just the record derivation.
+    forwarded: dict = {}
     monkeypatch.setattr(
         service.fanout,
         "run_fanout_review",
-        lambda backend, ctx, **kw: service.fanout.FanoutOutcome(
-            review=dict(review), findings=(), runs=()
+        lambda backend, ctx, **kw: (
+            forwarded.update(kw)
+            or service.fanout.FanoutOutcome(review=dict(review), findings=(), runs=())
         ),
     )
     written = []
@@ -390,6 +399,7 @@ def test_generate_review_explicit_dimensions_fold_into_the_record(
         _tee_ctx(),
         dimensions=("test-quality", "correctness"),
     )
+    assert forwarded["dimensions"] == ("test-quality", "correctness")
     [(_, kwargs)] = written
     assert kwargs["dimension_names"] == ("test-quality", "correctness")
 

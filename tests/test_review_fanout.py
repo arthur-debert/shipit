@@ -1022,6 +1022,18 @@ def test_incremental_pass_failure_fails_the_round(_seams):
         )
 
 
+def test_single_pass_failure_fails_the_round(_seams):
+    # ADR-0052: the round-1 DEFAULT is one monolithic pass. Its sole pass failing
+    # IS all passes failing → RuntimeError with the single-pass phrasing (service
+    # maps it to the `failed` funnel outcome), the failure posture of the new
+    # default path.
+    from shipit.agent import backend as agent_backend
+
+    _seams["reviews"] = {"single": RuntimeError("backend blew up")}
+    with pytest.raises(RuntimeError, match="the single review pass failed"):
+        fanout.run_fanout_review(agent_backend.CODEX, _ctx())
+
+
 # --- measured token usage (RVW03-WS04) ---------------------------------------
 
 

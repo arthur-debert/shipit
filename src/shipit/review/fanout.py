@@ -1238,9 +1238,12 @@ def _attestation(
     dedup and the dormant calibrator were skipped), so its line never claims a
     routing that never ran.
     """
-    if len(dims) == 1 and dims[0].name == _SINGLE_PASS_DIMENSION.name:
+    if len(dims) == 1 and dims[0] is _SINGLE_PASS_DIMENSION:
         # The round-1 DEFAULT (ADR-0052) ran one monolithic pass — attest it
-        # honestly instead of claiming a fan-out of one.
+        # honestly instead of claiming a fan-out of one. Keyed off the synthetic
+        # dimension's OBJECT IDENTITY, not its name: the label rides through as
+        # this module singleton, so a future registry dimension that happened to
+        # be named "single" can never trigger the single-pass wording.
         prelude = "Review: one full-scope pass -> "
     else:
         names = ", ".join(d.name for d in dims)
