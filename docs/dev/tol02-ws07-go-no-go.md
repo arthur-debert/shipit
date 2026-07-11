@@ -8,8 +8,10 @@ URLs, inspection output) is attached to #565 as comments; this note records
 what was exercised, what was found, and what remains remote-unverified.
 
 STATUS: FINAL — the composed pipeline ran green end-to-end on the hardest
-rust consumer; verdict GO for the TOL02 pipeline leg, with a named
-remote-unverified remainder owned by other epics (below).
+rust consumer, AND green again through the real remote-`@v1` refs after the
+owner made shipit public; verdict GO for the TOL02 pipeline leg. The
+remaining unverified items (mac `.app`/`.dmg` sign, cross-target + wasm/npm
+coverage) are owned by other epics (below).
 
 ## The cut
 
@@ -22,13 +24,16 @@ remote-unverified remainder owned by other epics (below).
   gh-release) — archive bundles, platforms darwin-arm64 / linux-x86_64 /
   linux-arm64 (native-runner lanes only, see gaps).
 - Driven through the composed `wf-release.yml` graph (nested stage blocks,
-  ADR-0040) — not a hand-assembled stage sequence. See finding 4 for where
-  the block definitions resolved from.
-- The two acceptance runs:
-  - Green traversal:
+  ADR-0040) — not a hand-assembled stage sequence. Exercised BOTH ways: first
+  through blocks VENDORED verbatim on the campaign branch, then — after
+  shipit was made public — through the REAL remote `@v1` refs (finding 4).
+- The acceptance runs:
+  - Vendored-blocks green traversal (stage verbs + composed wiring):
     <https://github.com/lex-fmt/lex/actions/runs/29161944608>
   - Resumability re-dispatch:
     <https://github.com/lex-fmt/lex/actions/runs/29162247720>
+  - Remote-`@v1` green traversal (the @vN distribution leg):
+    <https://github.com/lex-fmt/lex/actions/runs/29162869655>
 
 ## Stages exercised
 
@@ -110,25 +115,34 @@ the branch ref never advanced.
    advance-major takes over from the first real release. Owner: the first
    real shipit release (ADP02's standing gate).
 
-- **Finding 4 — private shipit cannot be `uses:`-called from org-owned
-  consumers, BLOCKING for the @vN distribution model** (owner decision, deliberately
-   not settled here): lex lives under the `lex-fmt` org while shipit is
-   private under the `arthur-debert` user. GitHub shares a private repo's
-   reusable workflows within the owner namespace only (`access_level: user`
-   reaches user-owned repos; there is NO credential mechanism for
-   cross-owner `uses:`), and the pixi/uv git-dependency pin hits the same
-   wall on org runners. ADR-0010's consumer model ("consumers pin
-   `arthur-debert/shipit/...@v1`") and ADR-0033's private-with-credentials
-   stance contradict each other for every non-user-owned consumer; legacy
-   `arthur-debert/release` is public for exactly this reason. Decision
-   needed: make shipit public, or scope @vN distribution to user-owned
-   repos. Campaign consequence: the five wf-* blocks were VENDORED verbatim
-   onto the lex campaign branch (nested `uses:` rewritten to `./` local
-   paths — with the blocks in-repo, local refs resolve by construction) and
-   the pinned shipit build rode a committed wheel; the composed graph, stage
-   wiring, matrix fan, and every release verb ran unmodified, but the
-   REMOTE-@v1-REF RESOLUTION LEG IS REMOTE-UNVERIFIED. Owner: repo owner +
-   ADP02.
+- **Finding 4 — private shipit could not be `uses:`-called from org-owned
+  consumers; RESOLVED by making shipit public, and the @vN leg is now
+  VERIFIED**: lex lives under the `lex-fmt` org while shipit was private
+  under the `arthur-debert` user. GitHub shares a private repo's reusable
+  workflows within the owner namespace only (`access_level: user` reaches
+  user-owned repos; there is NO credential mechanism for cross-owner
+  `uses:`), and the pixi/uv git-dependency pin hit the same wall on org
+  runners. ADR-0010's consumer model ("consumers pin
+  `arthur-debert/shipit/...@v1`") and ADR-0033's private-with-credentials
+  stance contradicted each other for every non-user-owned consumer; legacy
+  `arthur-debert/release` is public for exactly this reason. **Owner
+  decision (2026-07-11): shipit was made PUBLIC, mirroring legacy
+  `arthur-debert/release`; the user-owned-only scoping alternative was
+  rejected — the full @vN distribution model holds for all consumers,
+  org-owned included.** The campaign then ran a SECOND traversal through the
+  REAL remote refs (run `29162869655`): lex's caller switched to
+  `uses: arthur-debert/shipit/.github/workflows/wf-release.yml@v1`, and the
+  logs confirm cross-owner resolution — `Uses: arthur-debert/shipit/.github/
+  workflows/wf-{prepare,build,publish}.yml@refs/heads/v1 (d958bc2)` — with
+  every nested `@v1` ref resolving. The launcher execed the pin through uv
+  against the now-public repo (`Building shipit @ git+https://github.com/
+  arthur-debert/shipit@d958bc2`), so the vendored blocks, the `SHIPIT_EXEC`
+  bridge, and the committed wheel were all removed (lex's pixi env carries
+  `uv` instead). The earlier vendored run (finding 4's prior workaround)
+  stays valid stage evidence for the verbs + composed wiring; this run
+  proves the remote-@v1 DISTRIBUTION leg. The floating-major automation
+  (`advance-major.yml`) takes over `v1` from the first real release; the
+  manual `v1` bootstrap (finding 3) remains a campaign device until then.
 
 - **Finding 5 — shipit's Actions access level was `none`** — even same-owner
   repos could not call its reusable workflows. Set to `user` via the API. This
@@ -136,15 +150,19 @@ the branch ref never advanced.
    install/gh-setup surface. Owner: follow-up issue.
 
 - **Finding 6 — the wf-* blocks' `pixi run --locked ./bin/shipit` contract
-  meets the ADR-0033 uv launcher unprovisioned on runners**: the launcher never
-  consults PATH and uv-provisions the pin, but the runner leg (uv install plus
-  a credential for the private clone) is explicitly deferred to ADP02
-   (ADR-0033 consequences). The rc run failed exactly there (`shipit: uv is
-   not on PATH`, exit 127). Campaign bridge: the launcher's sanctioned,
-   announced `SHIPIT_EXEC` override pointing at the pixi-provisioned pinned
-   build (vendored wheel, installed as a `[pypi-dependencies]` path dep).
-   Owner: ADP02's runner leg — the blocks and the launcher need one
-   provisioning contract on runners.
+  meets the ADR-0033 uv launcher unprovisioned on runners**: the launcher
+  never consults PATH and uv-provisions the pin, but the runner leg needs
+  two things — uv on PATH, and (while shipit was private) a credential for
+  the clone. The first vendored run failed exactly there (`shipit: uv is not
+  on PATH`, exit 127), bridged by the launcher's sanctioned, announced
+  `SHIPIT_EXEC` override pointing at the pixi-provisioned wheel. Once shipit
+  went public (finding 4), the credential half vanished and the remote run
+  dropped the bridge entirely: lex's pixi env carries `uv`, and the launcher
+  execed the pin via `uv tool run --from git+…/shipit@<sha>` cloning the
+  public repo — the genuine ADR-0033 path, no `SHIPIT_EXEC` in the run.
+  Residual for adoption: uv must be provisioned on the runner (here via the
+  consumer's pixi env); ADP02 owns making that a standard part of the runner
+  leg rather than a per-consumer `[dependencies]` entry.
 
 - **Finding 7 — a stale `dist/` was committed on the campaign branch**
   (campaign hygiene): a prior LOCAL macOS `shipit release bundle` left darwin
@@ -183,12 +201,17 @@ placement). Two reasons, both recorded rather than silently elided:
   signer's REMOTE verification lands with phos-app in ADP02, where that
   shape actually exists.
 
+## Now verified (was remote-unverified)
+
+- Remote `@v1` cross-repo ref resolution (finding 4) — VERIFIED by run
+  `29162869655` after shipit was made public: lex-fmt/lex (org-owned)
+  resolved arthur-debert/shipit's (user-owned) `wf-release.yml@v1` and every
+  nested `@v1` block cross-owner, and the launcher resolved the pin via uv
+  against the public repo. The full @vN distribution model is proven, not
+  just the stage verbs.
+
 ## Not exercised / remote-unverified remainder
 
-- Remote `@v1` cross-repo ref resolution (finding 4) — owner decision +
-  ADP02. The composed graph, stage wiring, matrix fan, RC guard, and every
-  release verb ran unmodified via the vendored-verbatim blocks; only the
-  cross-owner remote-ref RESOLUTION is unproven.
 - wf-sign-mac (no sign declaration on lex; the `.app`/`.dmg` signer's remote
   proof is owned by phos-app / ADP02).
 - Cross-compiled lanes: darwin-x86_64, linux-musl, windows — `shipit build`
@@ -224,14 +247,17 @@ version fanning into a multi-artifact, multi-platform Release) — through
 preflight → prepare → build → bundle → assert-bundle → publish, green, with
 artifact inspection confirming the right binary per target, the RC guard
 verified live against the registries, and resumability converging on
-re-dispatch. Two failures the rc surfaced were fixed in shipit
-(findings 1–2, zero lex-side patches); the rest are named campaign-branch or
-operational items with owners.
+re-dispatch. After the owner made shipit public, the SAME pipeline ran green
+a second time through the REAL remote `@v1` refs, proving the cross-owner
+@vN distribution leg end-to-end — not just the stage verbs but the actual
+consumer wiring a real adopter uses. Two failures the rc surfaced were fixed
+in shipit (findings 1–2, zero lex-side patches); the rest are named
+campaign-branch or operational items with owners.
 
-The remote-unverified remainder is real and NAMED, owned outside this WS:
-the cross-owner remote-`@v1` distribution leg (finding 4 — a visibility
-decision + ADP02), the `.app`/`.dmg` mac-sign leg (phos-app / ADP02), and
-cross-target + wasm/npm build coverage (future stage WSs). None of these is
-a defect in the pipeline this WS proved; each is a distribution/coverage
-frontier owned by its epic. TOL02's pipeline is proven end-to-end on a real
-multi-artifact consumer — the bar PRD story 48 set for closing the epic.
+The remaining unverified remainder is real and NAMED, owned outside this WS:
+the `.app`/`.dmg` mac-sign leg (phos-app / ADP02) and cross-target + wasm/npm
+build coverage (future stage WSs). Neither is a defect in the pipeline this
+WS proved; each is a distribution/coverage frontier owned by its epic.
+TOL02's pipeline is proven end-to-end on a real multi-artifact consumer,
+through both vendored and real remote-`@v1` refs — clearing, and exceeding,
+the bar PRD story 48 set for closing the epic.
