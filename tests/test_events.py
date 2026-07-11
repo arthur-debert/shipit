@@ -131,6 +131,8 @@ def test_the_starting_vocabulary_is_registered():
         "wait.actionable",
         "wait.timed_out",
         "finding.severity_overridden",
+        # The release pipeline's recorded break-glass (TOL02-WS02, story 29).
+        "release.unsigned",
         "pr.ready",
         "pr.unready",
         "sweep.started",

@@ -1,0 +1,54 @@
+name: advance-major
+
+# The @vN propagation path for shipit's published workflow blocks (TOL02-WS06,
+# ADR-0010; the legacy gh-action.yml `advance-major` semantics): on each
+# NON-PRERELEASE release tag, force-move the floating v<MAJOR> BRANCH to the
+# new tag. Consumers pin `arthur-debert/shipit/.github/workflows/<wf>.yml@v1`;
+# without this advance, `@vN` publishing has no propagation path.
+#
+# Decision recorded (issue #564 AC): the floating ref is a BRANCH, not a
+# moving tag — matching the issue's distribution model and the proven legacy
+# mechanism (`git branch -f` + `--force-with-lease`); wf-checks.yml's header
+# is updated in step. Prereleases NEVER advance it (an rc must not yank vN
+# forward), and this workflow is shipit-repo-local plumbing, not a published
+# wf-* block.
+#
+# Trigger note: the release tag is pushed by `shipit release prepare` under
+# the RELEASE_TOKEN PAT (wf-prepare's checkout token), so this push event
+# fires; a GITHUB_TOKEN-pushed tag would not.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  advance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full fetch so origin/v<MAJOR> is known locally and
+          # --force-with-lease has a lease to check.
+          fetch-depth: 0
+      - name: Force-move the v<MAJOR> branch (stable releases only)
+        env:
+          REF: ${{ github.ref }}
+        # v1.2.3 -> v1. A prerelease part (any `-`) skips: an rc never
+        # advances the floating branch (legacy gh-action.yml rule).
+        run: |
+          TAG="${REF#refs/tags/}"
+          case "$TAG" in
+            *-*)
+              echo "prerelease tag $TAG: not advancing the major branch"
+              exit 0
+              ;;
+          esac
+          BRANCH="${TAG%%.*}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git branch -f "$BRANCH" "$TAG"
+          git push origin "$BRANCH" --force-with-lease

@@ -56,6 +56,22 @@ def _parsed(path: pathlib.Path) -> ast.Module:
 #:   point. ``npm`` has a second sanctioned home: the Tree provisioner's
 #:   frozen node install (``npm ci``, :mod:`shipit.tree.create` #543) —
 #:   provisioning-side, a different concern from the producing dispatch.
+#:   ``cargo`` and ``npm`` gain a third: the closed bump-adapter registry
+#:   (:mod:`shipit.release.bump`, TOL02-WS01) — the release-side projection
+#:   commands (``cargo set-version``/``cargo update``, ``npm version``),
+#:   ADR-0041's one assembly point for the manifest bumps. ``cargo`` and
+#:   ``uv`` gain the bundle-composition registry
+#:   (:mod:`shipit.release.bundle`, TOL02-WS03) — the bundle-side composition
+#:   commands (``cargo deb``, ``uv build --out-dir``).
+#: - ``tar`` / ``zip`` — the archiver invocations of the bundle compositions
+#:   (TOL02-WS03): assembled ONLY in the composition registry
+#:   (:mod:`shipit.release.bundle`) — the tarball/zip contract and the mac
+#:   reseal payload. ``tar`` gains the signer unit
+#:   (:mod:`shipit.release.sign`, TOL02-WS04): the reseal payload's unpack.
+#: - ``codesign`` / ``security`` / ``xcrun`` / ``hdiutil`` — the mac signer
+#:   unit's tools (TOL02-WS04): assembled ONLY in
+#:   :mod:`shipit.release.sign` — keychain lifecycle, inner-first codesign,
+#:   hdiutil reseal, notarytool submit/poll/staple.
 #: - ``bin/check-e2e`` — the e2e harness registry's bats default
 #:   (TOL01-WS03): the script head is assembled ONLY in the closed harness
 #:   registry (:mod:`shipit.tools.e2e`); a declared ``e2e.harness`` argv is
@@ -66,11 +82,33 @@ _ADAPTER_HOMES: dict[str, tuple[str, ...]] = {
     "pixi": ("pixienv/read.py", "pixienv/run.py"),
     "ps": ("session/liveness.py",),
     "curl": ("provision/lexd.py",),
-    "cargo": ("tools/registry.py",),
+    "cargo": (
+        "tools/registry.py",
+        "release/bump.py",
+        "release/bundle.py",
+        "release/publish.py",
+    ),
     "go": ("tools/registry.py",),
     "pytest": ("tools/registry.py",),
-    "npm": ("tools/registry.py", "tree/create.py"),
-    "uv": ("tools/registry.py",),
+    "npm": (
+        "tools/registry.py",
+        "tree/create.py",
+        "release/bump.py",
+        "release/publish.py",
+    ),
+    "uv": ("tools/registry.py", "release/bundle.py"),
+    "tar": ("release/bundle.py", "release/sign.py"),
+    "zip": ("release/bundle.py",),
+    "codesign": ("release/sign.py",),
+    "security": ("release/sign.py",),
+    "xcrun": ("release/sign.py",),
+    "hdiutil": ("release/sign.py",),
+    # The publish-side endpoint adapters (TOL02-WS05): twine (pypi upload)
+    # and ruby (the brew formula's `ruby -c` syntax check) are assembled
+    # ONLY in the closed endpoint-adapter registry. `cargo publish` /
+    # `npm publish` extend those tools' home lists above.
+    "twine": ("release/publish.py",),
+    "ruby": ("release/publish.py",),
     "bin/check-e2e": ("tools/e2e.py",),
     # The act harness (TOL01-WS04): `shipit wf test` is the one place that
     # drives act, and its docker probes/builds live beside it.

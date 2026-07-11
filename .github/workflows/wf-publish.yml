@@ -1,0 +1,203 @@
+name: wf-publish
+
+# The release PUBLISH stage block (ADR-0010/0040, TOL02-WS06). Routing ONLY:
+# it stages the artifacts back into one tree and hands the upstream stage
+# RESULTS — explicit workflow inputs, the GitHub job-result vocabulary
+# verbatim — to `shipit release publish`, whose gate IS scar #3
+# (workflows.lex §3.3 / ADR-0009: publish only when build and bundle
+# succeeded and sign succeeded-or-was-skipped; anything else is one loud
+# refusal naming every blocker). The check lives in the VERB, inside this
+# block — no consumer `needs:` wiring (or miswiring) can produce a publish
+# after a failed stage, and this YAML never duplicates the expression
+# (ADR-0040 rejected consumer-owned wiring; the legacy tauri-app release
+# `if:` moved here as inputs).
+#
+# Scar #2's second placement (ADR-0040, workflows.lex §3.2) also lives
+# here: the `assert` job runs `shipit release assert-bundle` over every
+# `unsigned-matrix` entry — the trees whose plan sign flag is FALSE AND that
+# carry a bundle (wf-prepare narrows the projection), exactly the bundle
+# trees that never traversed wf-sign-mac's entry guard (on a signed plan the
+# non-darwin bundling legs; on an --unsigned plan every bundling leg). A
+# build-only artifact has no bundle-* artifact to download and is excluded
+# upstream, so this job never fans over a tree it cannot assert. The publish
+# job is ordered after
+# it and blocks on its failure.
+#
+# The RC guard is NOT here (PRD story 33 / ADR-0040): a -release-rc version
+# reaches the verb, which collapses dispatch to the GH release only — the
+# plan's endpoint set is already post-guard, and this block re-derives
+# neither.
+#
+# Publishing (ADR-0010): consumers call this block as
+#   uses: arthur-debert/shipit/.github/workflows/wf-publish.yml@v1
+# — through the composed wf-release.yml or directly (PRD story 38).
+#
+# Check-name contract (PRD story 42, consumed by ADP02): this block's jobs
+# are `assert` (per unsigned leg: `assert (<artifact>, <platform>)`) and
+# `publish`. Never renamed casually.
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: The concrete semver prepare cut.
+        type: string
+        required: true
+      tag:
+        description: The release tag (the checkout ref).
+        type: string
+        required: true
+      build-result:
+        description: >-
+          The build stage's result (success|failure|cancelled|skipped) —
+          `needs.<build>.result` verbatim. The verb enforces scar #3.
+        type: string
+        required: true
+      bundle-result:
+        description: >-
+          The bundle stage's result. wf-build runs build+bundle as one job,
+          so a composed caller passes the same result for both; direct
+          composition with split jobs passes each its own.
+        type: string
+        required: true
+      sign-result:
+        description: >-
+          The sign stage's result: success (signed path) or skipped
+          (unsigned path) publishes; failure or cancelled blocks everything.
+        type: string
+        required: true
+      unsigned-matrix:
+        description: >-
+          The preflight plan's unsigned bundle-bearing projection
+          (wf-prepare's `unsigned-matrix` output, verbatim): the unsigned
+          entries that carry a bundle tree — exactly the trees this block's
+          assert job re-guards. Build-only artifacts are excluded upstream.
+        type: string
+        required: true
+      stages:
+        description: The preflight plan's `stages` field (JSON, verbatim).
+        type: string
+        required: true
+    secrets:
+      # The endpoint token set (shipit.release.secretreq ENDPOINT_SECRETS,
+      # PRD story 46), declared optional: the verb validates every
+      # non-skipped endpoint's token before the first dispatch and refuses
+      # loudly — the block never re-checks. gh-release rides the workflow's
+      # own GITHUB_TOKEN (no entry in the registry).
+      CARGO_REGISTRY_TOKEN:
+        required: false
+      PYPI_TOKEN:
+        required: false
+      NPM_TOKEN:
+        required: false
+      HOMEBREW_TAP_TOKEN:
+        required: false
+
+permissions:
+  # gh-release creates the release and uploads assets on this repo.
+  contents: write
+
+jobs:
+  assert:
+    # Plan-gated: only when the plan carries an assert-bundle stage and at
+    # least one entry never traverses wf-sign-mac (ADR-0040's unsigned-path
+    # placement). Pure file inspection — one ubuntu runner per leg
+    # regardless of the entry's build platform.
+    if: >-
+      contains(fromJson(inputs.stages), 'assert-bundle')
+      && inputs.unsigned-matrix != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(inputs.unsigned-matrix) }}
+    name: assert (${{ matrix.artifact }}, ${{ matrix.platform }})
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: prefix-dev/setup-pixi@v0.9.6
+        with:
+          # Lockstep with the Layer 0 bootstrap's PIXI_PIN — see
+          # wf-checks.yml.
+          pixi-version: v0.71.0
+          locked: true
+      - name: Download the bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: bundle-${{ matrix.artifact }}-${{ matrix.platform }}
+          path: bundle
+      - name: "Assert bundle main binary (scar #2, unsigned path)"
+        env:
+          ARTIFACT: ${{ matrix.artifact }}
+        run: pixi run --locked ./bin/shipit release assert-bundle bundle "$ARTIFACT"
+
+  publish:
+    needs: [assert]
+    # Runs when assert succeeded OR legitimately skipped (all-signed plan,
+    # no bundle stage) — never after an assert failure, and never on a
+    # cancelled run. This is the block's INTERNAL ordering of its two
+    # invariants, not scar #3: the stage-result gate stays in the verb.
+    if: ${{ !cancelled() && needs.assert.result != 'failure' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: prefix-dev/setup-pixi@v0.9.6
+        with:
+          # Lockstep with the Layer 0 bootstrap's PIXI_PIN — see
+          # wf-checks.yml.
+          pixi-version: v0.71.0
+          locked: true
+      - name: Download the release notes
+        uses: actions/download-artifact@v4
+        with:
+          name: release-notes
+          # prepare wrote RELEASE_NOTES.md at the repo root; the verb reads
+          # it there by default.
+          path: .
+      - name: Stage the bundle trees
+        uses: actions/download-artifact@v4
+        with:
+          pattern: bundle-*
+          path: dist
+          # One flat tree: asset filenames are target-qualified, so legs
+          # never collide (the dmg exception is handled by the signed
+          # overlay below).
+          merge-multiple: true
+      - name: Overlay the signed artifacts
+        # Plan path, not a re-check: on the signed path the signed .dmg —
+        # staged under the ORIGINAL dmg filename — replaces the unsigned
+        # one; cp -f makes the overwrite explicit instead of trusting
+        # download-order semantics.
+        if: inputs.sign-result == 'success'
+        uses: actions/download-artifact@v4
+        with:
+          pattern: signed-*
+          path: dist-signed
+          merge-multiple: true
+      - name: Apply the signed overlay
+        if: inputs.sign-result == 'success'
+        run: cp -f dist-signed/* dist/
+      - name: Publish
+        env:
+          VERSION: ${{ inputs.version }}
+          BUILD_RESULT: ${{ inputs.build-result }}
+          BUNDLE_RESULT: ${{ inputs.bundle-result }}
+          SIGN_RESULT: ${{ inputs.sign-result }}
+          # gh-release rides the Actions token; endpoint tokens are
+          # validated by the verb before the first dispatch.
+          GH_TOKEN: ${{ github.token }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        # Scar #3 is the verb's first act (pure gate before any I/O), fed
+        # the stage results verbatim; endpoints walk release-before-derived
+        # and every dispatch is idempotent-resumable (ADR-0009).
+        run: |
+          pixi run --locked ./bin/shipit release publish "$VERSION" \
+            --build-result "$BUILD_RESULT" \
+            --bundle-result "$BUNDLE_RESULT" \
+            --sign-result "$SIGN_RESULT"

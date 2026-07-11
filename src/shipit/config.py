@@ -24,7 +24,7 @@ import re
 import tomllib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 
 from .identity import Sha
@@ -328,15 +328,33 @@ def _parse_argv(where: str, value: object) -> tuple[str, ...]:
     return tuple(value)
 
 
+def _reject_path_escape(where: str, value: str) -> None:
+    """Refuse a config path that leaves the checkout — absolute, or carrying a
+    ``..`` segment. Pure.
+
+    Such a path is later joined to the repo root and READ or REWRITTEN (an
+    adapter's leg cwd, a bundle-config bump); an absolute path discards the root
+    and ``..`` climbs above it, so a repo's own ``.shipit.toml`` could steer a
+    release rewrite at a file outside the tree. Rejected at the parse boundary,
+    the one place every value flows through.
+    """
+    pure = PurePosixPath(value)
+    if pure.is_absolute() or ".." in pure.parts:
+        raise ConfigError(
+            f"{where}: must be a repo-relative path inside the checkout — no "
+            f"leading '/', no '..' segment; got {value!r}"
+        )
+
+
 def _parse_toolchain_entry(path: str, spec: object) -> ToolchainEntry:
     """One ``[toolchains]`` entry: a bare toolchain-name string, or a table
     carrying ``toolchain`` plus per-tool argv overrides (see the loader)."""
     from .tools import registry  # lazy — config stays import-light at module load
 
-    if not path or path.startswith("/"):
+    if not path or path.startswith("/") or ".." in PurePosixPath(path).parts:
         raise ConfigError(
-            f"[toolchains] paths are repo-relative ({'empty' if not path else path!r}"
-            f" is not); use '.' for the repo root"
+            f"[toolchains] paths are repo-relative and inside the checkout "
+            f"({'empty' if not path else path!r} is not); use '.' for the repo root"
         )
     if isinstance(spec, str):
         name, overrides = spec, {}
@@ -370,7 +388,13 @@ def _parse_toolchain_entry(path: str, spec: object) -> ToolchainEntry:
             f"[toolchains].{path}: unknown toolchain `{name}`; "
             f"known toolchains: {known}"
         )
-    return ToolchainEntry(path=path, toolchain=name, commands=overrides)
+    # Store the CANONICAL repo-relative form (`./web` -> `web`, `web/` -> `web`):
+    # the leg's pathspecs are matched against `git status --porcelain` output,
+    # which is already canonical, so a non-normalized entry would miss its own
+    # changed files and trip a false `no-op bump` refusal in `release prepare`.
+    return ToolchainEntry(
+        path=str(PurePosixPath(path)), toolchain=name, commands=overrides
+    )
 
 
 def load_toolchains(cfg: dict) -> tuple[ToolchainEntry, ...]:
@@ -415,11 +439,15 @@ def load_toolchains(cfg: dict) -> tuple[ToolchainEntry, ...]:
 # loud errors naming the offending key.
 #
 #     [artifacts.lex-cli]
-#     build     = [{ toolchain = "rust", package = "lex-cli" }]
-#     bundle    = { command = ["tauri", "bundle"] }          # optional
-#     endpoints = ["gh-release", "crates"]                   # closed set
-#     e2e       = { harness = ["bats", "tests/e2e.bats"] }   # optional
-#     sign      = true                                       # default false
+#     build         = [{ toolchain = "rust", package = "lex-cli" }]
+#     platforms     = ["darwin-arm64", "linux-x86_64"]            # closed set
+#     bundle        = { composition = "archive" }                # optional
+#     bundle-config = "src-tauri/tauri.conf.json"                # optional
+#     main-binary   = "lex"                                      # optional
+#     product-name  = "Lex"                                      # optional
+#     endpoints     = ["gh-release", "crates"]                   # closed set
+#     e2e           = { harness = ["bats", "tests/e2e.bats"] }   # optional
+#     sign          = true                                       # default false
 #
 # A build entry may be the bare toolchain name ("python") when the leg's
 # default build produces the artifact whole. An artifact may declare ZERO
@@ -429,9 +457,32 @@ def load_toolchains(cfg: dict) -> tuple[ToolchainEntry, ...]:
 
 #: The CLOSED distribution-endpoint registry names an ``endpoints`` list may
 #: use (PRD: one adapter per endpoint; gh-release, crates, pypi, npm, brew).
-#: Adding an endpoint is an adapter plus an entry here; consumed by the
-#: release stages later — WS02 only validates the declaration.
+#: Adding an endpoint is an adapter plus an entry here plus its
+#: secret-requirement declaration
+#: (:data:`shipit.release.secretreq.ENDPOINT_SECRETS`); consumed by the
+#: release planner (``release preflight``, WS02) and by the publish stage's
+#: adapter registry (:mod:`shipit.release.publish`, TOL02-WS05), whose entries
+#: mirror this set one-to-one (asserted in its tests, so the two can never
+#: drift).
 ENDPOINTS: tuple[str, ...] = ("gh-release", "crates", "pypi", "npm", "brew")
+
+#: The CLOSED OS×arch platform registry a ``platforms`` list may use — the
+#: release-side build/fan-out axis (TOL02-WS02, the lane planner's release
+#: twin). Each name is one ``<os>-<arch>`` release lane; the per-platform
+#: attributes (target triple, runner label, archive/binary extensions,
+#: packaging arch) live in the release planner's matrix table
+#: (:data:`shipit.release.preflight.PLATFORM_MATRIX`, keyed by exactly this
+#: set — drift-guarded by test). Declared per artifact INSTEAD of the legacy
+#: workflows' darwin/linux/musl/windows inputs; an undeclared list defaults
+#: to the ordinary linux lane at plan time.
+PLATFORMS: tuple[str, ...] = (
+    "darwin-arm64",
+    "darwin-x86_64",
+    "linux-x86_64",
+    "linux-x86_64-musl",
+    "linux-arm64",
+    "windows-x86_64",
+)
 
 
 @dataclass(frozen=True)
@@ -452,17 +503,45 @@ class BuildTarget:
     package: str | None = None
     version_var: str | None = None
 
+    @property
+    def package_basename(self) -> str | None:
+        """The binary name this target's ``package`` yields — its path basename
+        — or ``None`` when it names none: no ``package``, an empty basename, or
+        a bare path-navigation token (``./cmd/padz`` → ``padz``;
+        ``.``/``./``/``..``/``/`` → ``None``). The single source of truth for
+        "does this package name a binary?", shared by the binary-location
+        derivation (:func:`shipit.tools.e2e.binary_location`) and the
+        assert-bundle expected-name chain
+        (:func:`shipit.release.integrity.expected_main_binary`)."""
+        if self.package is None:
+            return None
+        name = PurePosixPath(self.package).name
+        return name if name and name not in (".", "..") else None
+
 
 @dataclass(frozen=True)
 class BundleSpec:
     """An artifact's declared bundle step — the optional composition that
-    combines toolchain outputs into the artifact (``tauri bundle``,
-    ``electron-builder``). ``command`` is the argv, through the one exec seam
-    like every producing command (ADR-0028). Parsed now; RUN by the release
-    ``bundle`` stage later ("package" is retired — the stage word is bundle).
+    combines toolchain outputs into the unsigned distributable, run by
+    ``shipit release bundle`` (TOL02-WS03; "package" is retired — the stage
+    word is bundle).
+
+    ``composition`` names an entry of the CLOSED composition registry
+    (:mod:`shipit.release.bundle` — archive, deb, wheel, mac-app), the
+    ADR-0007 shape: the bundle step is declared per artifact, keyed off the
+    map, never a project-Kind switch. ``command`` is the declared bundler
+    argv the ``mac-app`` composition runs (``tauri build``,
+    ``electron-builder`` — the only consumer-specific part of the mac path,
+    workflows.lex §3.1), through the one exec seam like every producing
+    command (ADR-0028); ``source`` is the repo-relative directory that
+    bundler leaves the coupled ``.app``/``.dmg`` pair under. Both are
+    REQUIRED by ``mac-app`` and rejected for every other composition (their
+    commands are registry-assembled, never declared).
     """
 
-    command: tuple[str, ...]
+    composition: str
+    command: tuple[str, ...] | None = None
+    source: str | None = None
 
 
 @dataclass(frozen=True)
@@ -482,14 +561,39 @@ class Artifact:
 
     ``build`` targets are consumed by ``shipit build`` and ``e2e`` by
     ``shipit e2e`` (the harness declaration plus the ``<NAME>_BIN``
-    injection) now; ``bundle`` by the bundle stage, ``endpoints`` by the
-    release stages, and ``sign`` by the sign stage / preflight secrets
-    validation — those later.
+    injection); ``platforms`` (the closed :data:`PLATFORMS` OS×arch set,
+    ``()`` = the default linux lane), ``endpoints``, and ``sign`` by the
+    release planner (``release preflight``, WS02: the OS×arch matrix, the
+    endpoint set, and the derived secret requirements —
+    :mod:`shipit.release.preflight` / :mod:`shipit.release.secretreq`);
+    ``endpoints`` also by ``shipit release publish`` (TOL02-WS05: each name
+    dispatches to its endpoint adapter, release-stage endpoints before derived
+    ones); ``bundle_config`` by ``shipit release prepare`` (the
+    artifact-declared bundle-config hook, ADR-0041/PRD story 25: the
+    repo-root-relative JSON file — ``tauri.conf.json`` — whose top-level
+    ``version`` is bumped in lockstep with the leg adapters, keeping "tauri"
+    out of the bump dispatch registry); ``bundle`` by ``shipit release bundle``
+    (TOL02-WS03: the declared composition into the unsigned distributable);
+    ``main_binary`` / ``product_name`` by ``shipit release assert-bundle``'s
+    expected-name fallback chain (workflows.lex §3.2: mainBinaryName →
+    productName → package name — the scar-#2 integrity guard's inputs); and
+    ``sign`` also by the sign stage — that later.
+
+    ``sign = true`` requires at least one build target AND at least one darwin
+    platform (signing signs a build output, and runs on macOS only) — refused
+    at parse otherwise, so signing can never silently degrade to an unsigned
+    plan and preflight/gh-setup cannot disagree over it. ``bundle`` follows the
+    same rule for the same reason: it composes build outputs, so a bundle on a
+    no-build artifact is refused at parse rather than silently dropped.
     """
 
     name: str
     build: tuple[BuildTarget, ...] = ()
+    platforms: tuple[str, ...] = ()
     bundle: BundleSpec | None = None
+    bundle_config: str | None = None
+    main_binary: str | None = None
+    product_name: str | None = None
     endpoints: tuple[str, ...] = ()
     e2e: E2eSpec | None = None
     sign: bool = False
@@ -564,7 +668,7 @@ def _parse_build_target(where: str, spec: object) -> BuildTarget:
 
 def _parse_endpoints(where: str, value: object) -> tuple[str, ...]:
     """The ``endpoints`` list, validated against the closed :data:`ENDPOINTS`
-    registry — a declaration the release stages consume later."""
+    registry — the declaration ``shipit release publish`` dispatches."""
     if not isinstance(value, list) or not all(isinstance(e, str) for e in value):
         raise ConfigError(f"{where}: must be a list of endpoint names")
     for endpoint in value:
@@ -576,16 +680,83 @@ def _parse_endpoints(where: str, value: object) -> tuple[str, ...]:
     return tuple(value)
 
 
+def _parse_platforms(where: str, value: object) -> tuple[str, ...]:
+    """The ``platforms`` list, validated against the closed :data:`PLATFORMS`
+    registry — the release planner's OS×arch fan-out axis (WS02). Duplicates
+    are refused loudly: a repeated platform would mean a repeated matrix
+    entry, never an intent."""
+    if not isinstance(value, list) or not all(isinstance(p, str) for p in value):
+        raise ConfigError(f"{where}: must be a list of platform names")
+    seen: set[str] = set()
+    for platform in value:
+        if platform not in PLATFORMS:
+            known = ", ".join(PLATFORMS)
+            raise ConfigError(
+                f"{where}: unknown platform `{platform}`; known platforms: {known}"
+            )
+        if platform in seen:
+            raise ConfigError(f"{where}: duplicate platform `{platform}`")
+        seen.add(platform)
+    return tuple(value)
+
+
 def _parse_bundle(where: str, spec: object) -> BundleSpec:
+    from .release import bundle as bundle_registry  # lazy — config stays import-light
+
     if not isinstance(spec, dict):
         raise ConfigError(
             f"{where}.bundle: must be a table, e.g. "
-            f'{{ command = ["tauri", "bundle"] }}; got {spec!r}'
+            f'{{ composition = "archive" }}; got {spec!r}'
         )
-    _reject_unknown_keys(f"{where}.bundle", spec, ("command",))
-    if "command" not in spec:
-        raise ConfigError(f"{where}.bundle must declare its command argv")
-    return BundleSpec(command=_parse_argv(f"{where}.bundle.command", spec["command"]))
+    _reject_unknown_keys(f"{where}.bundle", spec, ("composition", "command", "source"))
+    composition = spec.get("composition")
+    if not isinstance(composition, str) or not composition:
+        raise ConfigError(
+            f"{where}.bundle must name its composition, e.g. "
+            f'{{ composition = "archive" }}'
+        )
+    entry = bundle_registry.composition(composition)
+    if entry is None:
+        known = ", ".join(bundle_registry.names())
+        raise ConfigError(
+            f"{where}.bundle: unknown composition `{composition}`; "
+            f"known compositions: {known}"
+        )
+    command = spec.get("command")
+    source = spec.get("source")
+    if entry.declared_command:
+        # mac-app: the bundler that produces the coupled .app/.dmg pair is the
+        # one consumer-specific part of the mac path (workflows.lex §3.1), so
+        # the declaration must carry it — and say where the pair lands.
+        if command is None:
+            raise ConfigError(
+                f"{where}.bundle: composition `{composition}` runs the "
+                f"artifact's own bundler — declare its argv, e.g. "
+                f'command = ["npm", "run", "tauri", "build"]'
+            )
+        if not isinstance(source, str) or not source:
+            raise ConfigError(
+                f"{where}.bundle: composition `{composition}` needs `source` — "
+                f"the repo-relative directory the bundler leaves the "
+                f'.app/.dmg pair under, e.g. "src-tauri/target/release/bundle"'
+            )
+        _reject_path_escape(f"{where}.bundle.source", source)
+        return BundleSpec(
+            composition=composition,
+            command=_parse_argv(f"{where}.bundle.command", command),
+            source=str(PurePosixPath(source)),
+        )
+    # Registry-assembled compositions (archive, deb, wheel): their commands
+    # are the registry's one assembly point (ADR-0028) — a declared argv or
+    # source dir would be a second one, refused loudly.
+    for key in ("command", "source"):
+        if key in spec:
+            raise ConfigError(
+                f"{where}.bundle: `{key}` applies only to compositions that "
+                f"run a declared bundler (mac-app); composition "
+                f"`{composition}` assembles its own commands"
+            )
+    return BundleSpec(composition=composition)
 
 
 def _parse_e2e(where: str, spec: object) -> E2eSpec:
@@ -605,7 +776,33 @@ def _parse_artifact(name: str, spec: object) -> Artifact:
     where = f"[artifacts].{name}"
     if not isinstance(spec, dict):
         raise ConfigError(f"{where} must be a table; got {spec!r}")
-    _reject_unknown_keys(where, spec, ("build", "bundle", "endpoints", "e2e", "sign"))
+    _reject_unknown_keys(
+        where,
+        spec,
+        (
+            "build",
+            "platforms",
+            "bundle",
+            "bundle-config",
+            "endpoints",
+            "e2e",
+            "main-binary",
+            "product-name",
+            "sign",
+        ),
+    )
+    bundle_config = spec.get("bundle-config")
+    if bundle_config is not None:
+        if not isinstance(bundle_config, str) or not bundle_config:
+            raise ConfigError(
+                f"{where}.bundle-config: must be a non-empty repo-relative path, "
+                f'e.g. "src-tauri/tauri.conf.json"; got {bundle_config!r}'
+            )
+        _reject_path_escape(f"{where}.bundle-config", bundle_config)
+        # Canonical form (`./x` -> `x`): the release stage stages this path and
+        # matches it against `git status`, so a non-normalized value would read
+        # as a different, unchanged file and trip a false no-op / missing-file.
+        bundle_config = str(PurePosixPath(bundle_config))
     build_spec = spec.get("build", [])
     if not isinstance(build_spec, list):
         raise ConfigError(f"{where}.build: must be a list of build targets")
@@ -616,10 +813,58 @@ def _parse_artifact(name: str, spec: object) -> Artifact:
     sign = spec.get("sign", False)
     if not isinstance(sign, bool):
         raise ConfigError(f"{where}.sign: must be a boolean; got {sign!r}")
+    names = {}
+    for key in ("main-binary", "product-name"):
+        value = spec.get(key)
+        if value is not None and (not isinstance(value, str) or not value):
+            raise ConfigError(f"{where}.{key}: must be a non-empty name; got {value!r}")
+        names[key] = value
+    platforms = _parse_platforms(f"{where}.platforms", spec.get("platforms", []))
+    if sign:
+        # `sign = true` must be a declaration both consumers read the same way:
+        # preflight materializes a sign stage ONLY from a BUILD-BEARING artifact
+        # on a DARWIN lane (:func:`shipit.release.preflight._matrix` skips an
+        # artifact with no build, and signing runs on macOS), while secretreq
+        # demands the Apple secrets from the bare `sign` flag. Missing either the
+        # build target or the darwin lane, the sign stage never materializes yet
+        # gh-setup still demands the Apple secrets — the two disagreeing, silently
+        # shipping UNSIGNED. Refuse both gaps here, at the one boundary both
+        # consumers cross, so `sign = true` always implies a signable darwin build
+        # (an undeclared `platforms` defaults to the linux lane — non-darwin — so
+        # it is refused too).
+        if not build:
+            raise ConfigError(
+                f"{where}: sign = true requires at least one build target "
+                f"(an artifact with no build produces nothing to sign)"
+            )
+        if not any(platform.startswith("darwin") for platform in platforms):
+            raise ConfigError(
+                f"{where}: sign = true requires at least one darwin platform "
+                f"(signing runs on macOS only); declare a darwin lane in "
+                f"`platforms` or drop `sign`"
+            )
+    bundle = _parse_bundle(where, spec["bundle"]) if "bundle" in spec else None
+    if bundle is not None and not build:
+        # The bundle twin of the sign rule: a bundle composes BUILD OUTPUTS
+        # (:mod:`shipit.release.bundle`), so preflight materializes the bundle
+        # stage only from a build-bearing artifact. Declared on a no-build
+        # artifact the stage never materializes yet the declaration reads as
+        # intent — refuse it here rather than silently dropping the bundle.
+        # Ordered AFTER the composition-shape parse so a malformed bundle still
+        # gets its specific error first.
+        raise ConfigError(
+            f"{where}: bundle requires at least one build target "
+            f"(a bundle composes build outputs; an artifact with no build "
+            f"produces nothing to bundle)"
+        )
     return Artifact(
         name=name,
         build=build,
-        bundle=_parse_bundle(where, spec["bundle"]) if "bundle" in spec else None,
+        platforms=platforms,
+        bundle=bundle,
+        bundle_config=bundle_config,
+        main_binary=names["main-binary"],
+        product_name=names["product-name"],
         endpoints=_parse_endpoints(f"{where}.endpoints", spec.get("endpoints", [])),
         e2e=_parse_e2e(where, spec["e2e"]) if "e2e" in spec else None,
         sign=sign,

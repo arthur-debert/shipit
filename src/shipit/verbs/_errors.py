@@ -35,6 +35,7 @@ from ..provision.lexd import ProvisionError
 from ..prstate.errors import PrStateError
 from ..prstate.flip import NotReady
 from ..prstate.reviewers_config import RequiredReviewersConfigError
+from ..release import ReleaseError
 from ..review.cell import CellError
 from ..review.diff import ReviewError
 from ..review.groundtruth import FixtureError
@@ -61,8 +62,12 @@ from ._context import NoAmbientRepoError
 #: range / unknown revision / repo-less checkout in `pr review replay` —
 #: RVW02-WS03), and the Review Lab's refusals (an untrustworthy cell file /
 #: unfair pair / missing checkout in `lab run`/`lab report`, and an
-#: untrustworthy ground-truth fixture — RVW03-WS07). Extended
-#: deliberately, one entry per new domain refusal, as verbs adopt the shell.
+#: untrustworthy ground-truth fixture — RVW03-WS07), and the release
+#: stages' refusals (a no-op bump, a manifest a projection cannot rewrite,
+#: a prepare outside a checkout / on a detached HEAD — TOL02-WS01; a bundle
+#: composition over missing build outputs, an unresolvable assert-bundle
+#: expected name — TOL02-WS03). Extended deliberately, one entry per new
+#: domain refusal, as verbs adopt the shell.
 KNOWN_ERRORS: tuple[type[Exception], ...] = (
     execrun.ExecError,
     PrStateError,
@@ -79,6 +84,7 @@ KNOWN_ERRORS: tuple[type[Exception], ...] = (
     EventNotRecordedError,
     ProvisionError,
     SweepError,
+    ReleaseError,
     ReviewError,
     CellError,
     FixtureError,

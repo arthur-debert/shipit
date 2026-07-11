@@ -33,7 +33,10 @@ def test_full_artifact_parses_to_typed_frozen_values():
     (artifact,) = _load(
         "[artifacts.lex-cli]\n"
         'build = [{ toolchain = "rust", package = "lex-cli" }]\n'
-        'bundle = { command = ["tauri", "bundle"] }\n'
+        'platforms = ["darwin-arm64", "linux-x86_64"]\n'
+        'bundle = { composition = "archive" }\n'
+        'main-binary = "lex"\n'
+        'product-name = "Lex"\n'
         'endpoints = ["gh-release", "crates"]\n'
         'e2e = { harness = ["bats", "tests/e2e.bats"] }\n'
         "sign = true\n"
@@ -41,7 +44,10 @@ def test_full_artifact_parses_to_typed_frozen_values():
     assert artifact == config.Artifact(
         name="lex-cli",
         build=(config.BuildTarget(toolchain="rust", package="lex-cli"),),
-        bundle=config.BundleSpec(command=("tauri", "bundle")),
+        platforms=("darwin-arm64", "linux-x86_64"),
+        bundle=config.BundleSpec(composition="archive"),
+        main_binary="lex",
+        product_name="Lex",
         endpoints=("gh-release", "crates"),
         e2e=config.E2eSpec(harness=("bats", "tests/e2e.bats")),
         sign=True,
@@ -62,6 +68,26 @@ def test_optional_fields_default_to_absent_not_null():
     assert artifact.bundle is None
     assert artifact.e2e is None
     assert artifact.sign is False
+
+
+@pytest.mark.parametrize(
+    "package,expected",
+    [
+        (None, None),
+        ("lex-cli", "lex-cli"),
+        ("./cmd/padz", "padz"),
+        (".", None),
+        ("./", None),
+        ("..", None),
+        ("/", None),
+    ],
+)
+def test_build_target_package_basename(package, expected):
+    # The single source of truth for "does this package name a binary?" — the
+    # basename, or None for no package / a bare path-navigation token. Shared by
+    # binary_location and the assert-bundle expected-name chain.
+    target = config.BuildTarget(toolchain="go", package=package)
+    assert target.package_basename == expected
 
 
 def test_go_target_carries_the_version_var():
@@ -111,13 +137,35 @@ def test_non_table_artifact_is_refused():
 def test_unknown_artifact_key_names_itself_and_the_known_set():
     with pytest.raises(config.ConfigError, match="unknown key `endpoint`") as exc:
         _load('[artifacts.x]\nendpoint = ["gh-release"]\n')
-    assert "build, bundle, endpoints, e2e, sign" in str(exc.value)
+    assert (
+        "build, platforms, bundle, bundle-config, endpoints, e2e, "
+        "main-binary, product-name, sign" in str(exc.value)
+    )
 
 
 def test_unknown_endpoint_names_the_closed_registry():
     with pytest.raises(config.ConfigError, match="unknown endpoint `homebrew`") as exc:
         _load('[artifacts.x]\nendpoints = ["homebrew"]\n')
     assert "gh-release, crates, pypi, npm, brew" in str(exc.value)
+
+
+def test_unknown_platform_names_the_closed_registry():
+    with pytest.raises(config.ConfigError, match="unknown platform `darwin`") as exc:
+        _load('[artifacts.x]\nplatforms = ["darwin"]\n')
+    assert ", ".join(config.PLATFORMS) in str(exc.value)
+
+
+def test_duplicate_platform_is_refused():
+    # A repeated platform would mean a repeated matrix entry, never an intent.
+    with pytest.raises(config.ConfigError, match="duplicate platform `linux-x86_64`"):
+        _load('[artifacts.x]\nplatforms = ["linux-x86_64", "linux-x86_64"]\n')
+
+
+def test_non_list_platforms_is_refused():
+    with pytest.raises(
+        config.ConfigError, match=r"platforms: must be a list of platform names"
+    ):
+        _load('[artifacts.x]\nplatforms = "linux-x86_64"\n')
 
 
 def test_unknown_build_toolchain_names_the_registry():
@@ -172,9 +220,47 @@ def test_version_var_is_go_only():
         )
 
 
-def test_bundle_requires_its_command_argv():
-    with pytest.raises(config.ConfigError, match="bundle must declare its command"):
+def test_bundle_requires_its_composition():
+    with pytest.raises(config.ConfigError, match="bundle must name its composition"):
         _load("[artifacts.x]\nbundle = {}\n")
+
+
+def test_bundle_composition_names_the_closed_registry():
+    # The composition registry is closed (ADR-0007's shape): the message
+    # names the known set, mirroring endpoints/toolchains.
+    with pytest.raises(config.ConfigError, match="unknown composition `rpm`") as exc:
+        _load('[artifacts.x]\nbundle = { composition = "rpm" }\n')
+    assert "archive, deb, wheel, mac-app" in str(exc.value)
+
+
+def test_mac_app_requires_the_declared_bundler_command():
+    # mac-app runs the artifact's OWN bundler (the one consumer-specific part
+    # of the mac path, workflows.lex §3.1) — the declaration must carry it.
+    with pytest.raises(config.ConfigError, match="declare its argv"):
+        _load('[artifacts.x]\nbundle = { composition = "mac-app" }\n')
+
+
+def test_mac_app_requires_the_source_dir():
+    with pytest.raises(config.ConfigError, match="needs `source`"):
+        _load(
+            "[artifacts.x]\n"
+            'bundle = { composition = "mac-app", command = ["tauri", "build"] }\n'
+        )
+
+
+def test_mac_app_parses_command_and_source():
+    (artifact,) = _load(
+        "[artifacts.app]\n"
+        'build = ["rust"]\n'
+        'bundle = { composition = "mac-app", command = ["npm", "run", "bundle"],'
+        ' source = "./src-tauri/target/release/bundle" }\n'
+    )
+    assert artifact.bundle == config.BundleSpec(
+        composition="mac-app",
+        command=("npm", "run", "bundle"),
+        # Normalized to canonical form, like bundle-config.
+        source="src-tauri/target/release/bundle",
+    )
 
 
 def test_bundle_command_must_be_an_argv_list():
@@ -182,7 +268,28 @@ def test_bundle_command_must_be_an_argv_list():
     with pytest.raises(
         config.ConfigError, match=r"bundle.command must be a non-empty argv"
     ):
-        _load('[artifacts.x]\nbundle = { command = "tauri bundle" }\n')
+        _load(
+            "[artifacts.x]\n"
+            'bundle = { composition = "mac-app", command = "tauri bundle",'
+            ' source = "out" }\n'
+        )
+
+
+@pytest.mark.parametrize("key,value", [("command", '["tar"]'), ("source", '"out"')])
+def test_registry_assembled_compositions_reject_declared_command(key, value):
+    # archive/deb/wheel assemble their own commands (ADR-0028's one assembly
+    # point) — a declared argv or source dir would be a second one.
+    with pytest.raises(config.ConfigError, match=f"`{key}` applies only to"):
+        _load(
+            f'[artifacts.x]\nbundle = {{ composition = "archive", {key} = {value} }}\n'
+        )
+
+
+@pytest.mark.parametrize("key", ["main-binary", "product-name"])
+@pytest.mark.parametrize("value", ['""', "true", "[1]"])
+def test_main_binary_names_must_be_non_empty_strings(key, value):
+    with pytest.raises(config.ConfigError, match=f"{key}: must be a non-empty name"):
+        _load(f"[artifacts.x]\n{key} = {value}\n")
 
 
 def test_e2e_harness_must_be_an_argv_list():
@@ -195,6 +302,108 @@ def test_e2e_harness_must_be_an_argv_list():
 def test_sign_must_be_a_boolean():
     with pytest.raises(config.ConfigError, match=r"\.sign: must be a boolean"):
         _load('[artifacts.x]\nsign = "yes"\n')
+
+
+def test_sign_with_a_build_and_darwin_platform_parses():
+    # `sign = true` is coherent once a build-bearing artifact has a darwin lane
+    # (signing signs a build output, on macOS): the linux entry rides along
+    # un-signed, the darwin one signs.
+    (artifact,) = _load(
+        "[artifacts.x]\n"
+        'build = ["rust"]\n'
+        'platforms = ["darwin-arm64", "linux-x86_64"]\n'
+        "sign = true\n"
+    )
+    assert artifact.sign is True
+
+
+def test_bundle_without_a_build_target_is_refused():
+    # The bundle twin of the sign rule: a bundle composes build outputs, so on a
+    # no-build artifact the stage never materializes yet the declaration reads
+    # as intent. Refused at parse rather than silently dropped.
+    with pytest.raises(
+        config.ConfigError, match=r"bundle requires at least one build target"
+    ):
+        _load('[artifacts.x]\nbundle = { composition = "archive" }\n')
+
+
+def test_bundle_shape_error_precedes_the_build_requirement():
+    # A malformed bundle still gets its specific composition-shape error first —
+    # the build-requirement check is ordered after the composition parse.
+    with pytest.raises(config.ConfigError, match="bundle must name its composition"):
+        _load("[artifacts.x]\nbundle = {}\n")
+
+
+def test_sign_without_a_build_target_is_refused():
+    # An artifact with no build produces nothing to sign, so preflight emits no
+    # matrix entry (and no sign stage) for it while gh-setup would still demand
+    # the Apple secrets — the two consumers disagreeing. Refused at parse.
+    with pytest.raises(
+        config.ConfigError, match=r"sign = true requires at least one build target"
+    ):
+        _load('[artifacts.x]\nplatforms = ["darwin-arm64"]\nsign = true\n')
+
+
+def test_sign_without_a_darwin_platform_is_refused():
+    # A linux-only signing declaration would silently ship UNSIGNED (no darwin
+    # lane → no sign stage) while gh-setup still demands the Apple secrets — the
+    # two consumers disagreeing. Refused at parse (story 28).
+    with pytest.raises(
+        config.ConfigError, match=r"sign = true requires at least one darwin platform"
+    ):
+        _load(
+            '[artifacts.x]\nbuild = ["rust"]\nplatforms = ["linux-x86_64"]\nsign = true\n'
+        )
+
+
+def test_sign_with_default_platforms_is_refused():
+    # An undeclared `platforms` defaults to the linux lane — non-darwin — so a
+    # build-bearing `sign = true` is refused the same way a linux-only one is.
+    with pytest.raises(
+        config.ConfigError, match=r"sign = true requires at least one darwin platform"
+    ):
+        _load('[artifacts.x]\nbuild = ["rust"]\nsign = true\n')
+
+
+def test_bundle_config_parses_to_a_path():
+    # The artifact-declared bundle-config hook (TOL02-WS01, PRD story 25):
+    # the repo-relative version file release prepare bumps in lockstep.
+    (artifact,) = _load(
+        '[artifacts.app]\nbundle-config = "src-tauri/tauri.conf.json"\n'
+    )
+    assert artifact.bundle_config == "src-tauri/tauri.conf.json"
+
+
+def test_bundle_config_defaults_to_absent():
+    (artifact,) = _load('[artifacts.app]\nendpoints = ["gh-release"]\n')
+    assert artifact.bundle_config is None
+
+
+@pytest.mark.parametrize("value", ['""', "true", "[1]"])
+def test_bundle_config_must_be_a_non_empty_path(value):
+    with pytest.raises(config.ConfigError, match=r"bundle-config: must be a non-empty"):
+        _load(f"[artifacts.app]\nbundle-config = {value}\n")
+
+
+def test_bundle_config_is_normalized_to_canonical_form():
+    # `./src-tauri/...` must be stored as `src-tauri/...` so the release stage
+    # stages and matches the same path `git status` reports (no false no-op).
+    (artifact,) = _load(
+        '[artifacts.app]\nbundle-config = "./src-tauri/tauri.conf.json"\n'
+    )
+    assert artifact.bundle_config == "src-tauri/tauri.conf.json"
+
+
+@pytest.mark.parametrize(
+    "value",
+    ['"/etc/passwd"', '"../outside/tauri.conf.json"', '"a/../../b.json"'],
+)
+def test_bundle_config_rejects_paths_escaping_the_checkout(value):
+    # A repo config is joined to the checkout root and REWRITTEN by release
+    # prepare; an absolute or `..` path would steer that write outside the tree,
+    # so it is refused at the parse boundary (the one place values flow through).
+    with pytest.raises(config.ConfigError, match=r"inside the checkout"):
+        _load(f"[artifacts.app]\nbundle-config = {value}\n")
 
 
 def test_artifacts_is_a_known_top_level_table(tmp_path):

@@ -22,10 +22,11 @@ rendered projection / cut section / notes file. Three subcommands, one model
   notes text for both the tag annotation and the GitHub release. The version
   is a supplied bare semver (ADR-0041) — bump words resolve in TOL02's version
   resolver, never here. A prerelease version EXTRACTS the notes without
-  consuming the fragments; a final version rolls them. TOL02's prepare stage
-  consumes the same behavior through the core API
-  (:func:`shipit.changelog.plan_coalesce`), so the release plumbing (bump, tag,
-  publish) stays out of this verb.
+  consuming the fragments; a final version rolls them. The release pipeline's
+  prepare stage (:mod:`shipit.verbs.release`) consumes the same behavior
+  through this module's :func:`plan_cut` / :func:`apply_cut` pair over the
+  core API (:func:`shipit.changelog.plan_coalesce`), so the release plumbing
+  (bump, tag, publish) stays out of this verb.
 
 Exit contract (story 8, ADR-0030): 0 success/synced, 1 runtime refusal or a
 failing check (one ``error: …`` line via the shared :func:`~._errors.cli_errors`
@@ -201,6 +202,75 @@ def _today() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%d")
 
 
+def plan_cut(
+    root: Path,
+    version: str,
+    *,
+    read_tree: Callable[[Path], ChangelogTree] | None = None,
+    today: Callable[[], str] | None = None,
+) -> tuple[ChangelogTree, core.CoalescePlan]:
+    """Read and validate the ``CHANGELOG/`` tree under ``root`` and plan the
+    cut for ``version`` — the coalesce API's READ side (story 26), shared by
+    ``shipit changelog coalesce`` (:func:`run_coalesce`) and the release
+    pipeline's prepare stage (:mod:`shipit.verbs.release`).
+
+    ``version`` is a supplied bare semver (ADR-0041). Raises
+    :class:`ChangelogError` for a tree the model cannot answer for and for
+    every :func:`shipit.changelog.plan_coalesce` refusal — notably the
+    EMPTY-RELEASE refusal, which is why prepare plans the cut BEFORE touching
+    any manifest: a release with no notes dies with nothing mutated.
+    """
+    read_tree = read_tree or _read_tree
+    tree = read_tree(root)
+    _require_model(tree)
+    plan = core.plan_coalesce(
+        version,
+        tree.fragments,
+        date=(today or _today)(),
+        existing_section=tree.sections.get(version),
+    )
+    return tree, plan
+
+
+def apply_cut(
+    root: Path,
+    plan: core.CoalescePlan,
+    *,
+    read_tree: Callable[[Path], ChangelogTree] | None = None,
+) -> None:
+    """Execute a MUTATING :class:`~shipit.changelog.CoalescePlan` against the
+    tree under ``root``: write the version section, consume the fragments, and
+    re-render ``CHANGELOG.md`` from the post-cut tree (so the fragment-sync
+    check stays green on the cut commit). A no-op for a plan that does not
+    mutate (a prerelease extract, a resume).
+
+    The ONE cut executor, shared by ``shipit changelog coalesce``
+    (:func:`run_coalesce`) and the release pipeline's prepare stage
+    (:mod:`shipit.verbs.release`), which consumes the coalesce API rather than
+    re-implementing the roll (PRD story 26). Filesystem failures surface as
+    :class:`ChangelogError` (ADR-0030), never a raw ``OSError``.
+    """
+    if plan.section is None:
+        return
+    read_tree = read_tree or _read_tree
+    changelog_dir = root / core.CHANGELOG_DIR
+    # Wrap the cut's filesystem mutations so an OSError (read-only checkout,
+    # transient IO) exits 1 with an ``error: …`` line instead of a traceback
+    # (ADR-0030). _require_model raises ChangelogError, which passes through.
+    with _fs_mutation(f"cannot cut {plan.version}"):
+        section_path = changelog_dir / f"{plan.version}{core.FRAGMENT_SUFFIX}"
+        section_path.write_text(plan.section, encoding="utf-8")
+        for name in plan.consumed:
+            (changelog_dir / name).unlink()
+        # Re-render the projection from the POST-cut tree so the committed
+        # CHANGELOG.md and the fragment dir move in one step (the sync check
+        # stays green on the cut commit).
+        after = read_tree(root)
+        _require_model(after)
+        rendered = core.render(after.fragments, after.sections, legacy=after.legacy)
+        (root / core.CHANGELOG_FILE).write_text(rendered, encoding="utf-8")
+
+
 # --------------------------------------------------------------------------
 # The verb runners (click-free, seams injectable — the testable surface)
 # --------------------------------------------------------------------------
@@ -320,17 +390,9 @@ def run_coalesce(
     root = _resolve_root(
         Path(path or ".").resolve(), repo_root=repo_root or git.repo_root
     )
-    tree = read_tree(root)
-    _require_model(tree)
-    plan = core.plan_coalesce(
-        version,
-        tree.fragments,
-        date=(today or _today)(),
-        existing_section=tree.sections.get(version),
-    )
+    tree, plan = plan_cut(root, version, read_tree=read_tree, today=today)
 
     report = sys.stdout if notes_out else sys.stderr
-    changelog_dir = root / core.CHANGELOG_DIR
 
     # Fail BEFORE mutating the tree when the notes destination is unusable:
     # coalesce's contract is that the cut and its one notes artifact land
@@ -359,21 +421,7 @@ def run_coalesce(
             raise ChangelogError(f"cannot write notes to {notes_out}: {exc}") from exc
 
     if plan.section is not None:
-        # Wrap the cut's filesystem mutations so an OSError (read-only checkout,
-        # transient IO) exits 1 with an ``error: …`` line instead of a traceback
-        # (ADR-0030). _require_model raises ChangelogError, which passes through.
-        with _fs_mutation(f"cannot cut {plan.version}"):
-            section_path = changelog_dir / f"{plan.version}{core.FRAGMENT_SUFFIX}"
-            section_path.write_text(plan.section, encoding="utf-8")
-            for name in plan.consumed:
-                (changelog_dir / name).unlink()
-            # Re-render the projection from the POST-cut tree so the committed
-            # CHANGELOG.md and the fragment dir move in one step (the sync check
-            # stays green on the cut commit).
-            after = read_tree(root)
-            _require_model(after)
-            rendered = core.render(after.fragments, after.sections, legacy=after.legacy)
-            (root / core.CHANGELOG_FILE).write_text(rendered, encoding="utf-8")
+        apply_cut(root, plan, read_tree=read_tree)
         print(
             f"changelog: coalesced {len(plan.consumed)} fragment"
             f"{'s' if len(plan.consumed) != 1 else ''} into "

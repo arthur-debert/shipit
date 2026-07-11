@@ -172,14 +172,24 @@ def test_go_binary_without_a_package_is_named_by_the_artifact():
     assert e2e_mod.binary_location(artifact, (_entry(".", "go"),)).relpath == "dodot"
 
 
-@pytest.mark.parametrize("package", [".", "./", "/"])
+@pytest.mark.parametrize("package", [".", "./", "..", "../", "/"])
 def test_ambiguous_go_package_is_refused_with_a_real_diagnosis(package):
-    # `.` / `./` / `/` have no basename to name the binary: fail fast with a
-    # clear ConfigError, never a downstream "built green but no binary at
+    # `.` / `./` / `..` / `/` have no basename to name the binary: fail fast
+    # with a clear ConfigError, never a downstream "built green but no binary at
     # <dir>" (drop `package` to build the module root as the artifact name).
     artifact = _artifact("padz", build=(config.BuildTarget("go", package=package),))
     with pytest.raises(config.ConfigError, match=r"has no binary name.*\./cmd/padz"):
         e2e_mod.binary_location(artifact, (_entry(".", "go"),))
+
+
+@pytest.mark.parametrize("package", [".", "./", "..", "/"])
+def test_ambiguous_rust_package_is_refused_before_a_nonsense_binary_path(package):
+    # A rust `package = "."` would otherwise yield `target/release/.` and a
+    # misleading "no built binary" — refuse it up front with the crate hint,
+    # the same guard go gets (the archive composition consumes this location).
+    artifact = _artifact("app", build=(config.BuildTarget("rust", package=package),))
+    with pytest.raises(config.ConfigError, match=r"has no binary name.*crate name"):
+        e2e_mod.binary_location(artifact, (_entry(".", "rust"),))
 
 
 def test_the_first_binary_producing_target_wins_over_non_binary_ones():

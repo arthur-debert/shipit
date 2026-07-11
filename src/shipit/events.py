@@ -136,6 +136,11 @@ EVENT_NAMES = frozenset(
         # classify`; it beats every other rung of the severity precedence
         # chain the engine resolves findings through.
         "finding.severity_overridden",
+        # the release pipeline's break-glass (TOL02-WS02, PRD story 29 /
+        # CONTEXT.md Break-glass: visible, recorded, never ambient): every
+        # `release preflight --unsigned` use lands one durable record — the
+        # unsigned plan is a logged exception, never a silent override.
+        "release.unsigned",
         # the ready flip and its undo
         "pr.ready",
         "pr.unready",

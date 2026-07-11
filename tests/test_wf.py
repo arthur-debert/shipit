@@ -61,6 +61,19 @@ def test_craft_dispatch_event_defaults_to_no_inputs():
     assert wf.craft_event(wf.EVENT_WORKFLOW_DISPATCH)["inputs"] == {}
 
 
+def test_craft_workflow_call_event_carries_inputs():
+    """workflow_call is a first-class crafted kind (TOL02-WS06): the wf-*
+    blocks are call-only, so smoking them needs a call payload — same minimal
+    ref+inputs shape as a dispatch."""
+    payload = wf.craft_event(
+        wf.EVENT_WORKFLOW_CALL, branch="main", inputs={"version": "1.2.3"}
+    )
+    assert payload["ref"] == "refs/heads/main"
+    assert payload["inputs"] == {"version": "1.2.3"}
+    assert wf.EVENT_WORKFLOW_CALL in wf.EVENT_KINDS
+    assert wf.EVENT_WORKFLOW_CALL in wf.INPUT_EVENT_KINDS
+
+
 def test_craft_event_unknown_kind_is_a_value_error():
     with pytest.raises(ValueError, match="unknown event kind"):
         wf.craft_event("issues")
@@ -286,12 +299,46 @@ def test_missing_workflow_file_refuses(tmp_path, capsys):
     assert rec.calls == []
 
 
-def test_inputs_refused_outside_workflow_dispatch(workflow_file, capsys):
+def test_inputs_refused_outside_input_bearing_events(workflow_file, capsys):
     rec = _Recorder()
     rc = wf.run(str(workflow_file), inputs=("version=1",), run_cmd=rec)
     assert rc == 1
     assert "--input only applies" in capsys.readouterr().err
     assert rec.calls == []
+
+
+def test_dry_run_and_local_repositories_ride_the_act_argv():
+    """The block-smoke encodings (TOL02-WS06): --dry-run is act's -n (the
+    side-effectful wf-* blocks' smoke mode) and each --local-repository
+    mapping rides verbatim (the composed chain's offline @vN resolution)."""
+    argv = wf.act_argv(
+        event=wf.EVENT_WORKFLOW_CALL,
+        workflow="wf.yml",
+        event_path="e.json",
+        dry_run=True,
+        local_repositories=("arthur-debert/shipit@v1=/tree",),
+    )
+    assert "--dryrun" in argv
+    assert argv[argv.index("--local-repository") + 1] == "arthur-debert/shipit@v1=/tree"
+    plain = wf.act_argv(event=wf.EVENT_PUSH, workflow="wf.yml", event_path="e.json")
+    assert "--dryrun" not in plain
+    assert "--local-repository" not in plain
+
+
+def test_workflow_call_inputs_reach_the_payload(workflow_file):
+    rec = _Recorder()
+    rc = wf.run(
+        str(workflow_file),
+        event=wf.EVENT_WORKFLOW_CALL,
+        inputs=("version=1.2.3",),
+        run_cmd=rec,
+    )
+    assert rc == 0
+    assert rec.payloads == [
+        wf.craft_event(wf.EVENT_WORKFLOW_CALL, inputs={"version": "1.2.3"})
+    ]
+    act = next(c for c in rec.calls if c[0] == "act")
+    assert act[1] == "workflow_call"
 
 
 def test_malformed_input_refuses(workflow_file, capsys):

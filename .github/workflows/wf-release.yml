@@ -1,0 +1,154 @@
+name: wf-release
+
+# The COMPOSED release chain (ADR-0040, TOL02-WS06): wf-prepare → wf-build →
+# wf-sign-mac → wf-publish via nested workflow_call, two levels. A standard
+# consumer's release caller is ONE `uses:` line against this workflow (PRD
+# story 38); an odd-shaped repo composes the stage blocks directly — both
+# sanctioned, composition is a spectrum, not a fork.
+#
+# This chain carries ZERO logic (ADR-0040's consequence — which is what
+# makes it act-testable apart from the documented mac holes): every `if:`
+# below READS a plan output or passes a stage result through verbatim; the
+# scar invariants live inside the blocks (assert-bundle at wf-sign-mac's
+# entry and on wf-publish's unsigned path; the scar-#3 stage-result gate in
+# the publish verb). Nothing here re-derives a matrix, endpoint, sign, or
+# RC decision.
+#
+# THE REMOTE-REF SCAR (legacy sign-notarize-mac.yml, release RC #823): every
+# nested reusable-workflow ref below is a FULL `arthur-debert/shipit/...@v1`
+# ref, NEVER a `./` local path. A `./` workflow ref resolves against the
+# TOP-LEVEL caller's repo — the CONSUMER — so the whole graph fails to
+# compile there (startup_failure, 0 jobs). actionlint passes the broken
+# form; only a live cross-repo dispatch surfaces it. The refs are correct by
+# construction, and a drift test pins them (tests/test_release_blocks.py).
+#
+# Distribution (ADR-0010): `v1` is the floating v<MAJOR> BRANCH
+# advance-major.yml force-moves on each non-prerelease shipit release —
+# consumers pin `@v1` and upgrade by riding it (or pin a tag to freeze).
+#
+# Check-name contract (PRD story 42, consumed by ADP02): a consumer calling
+# this workflow from caller job `release` sees checks
+#   release / prepare / prepare
+#   release / build / build (<artifact>, <platform>)
+#   release / sign / sign (<artifact>, <platform>)
+#   release / publish / assert (<artifact>, <platform>)
+#   release / publish / publish
+# The job ids below (`prepare`, `build`, `sign`, `publish`) are that
+# surface's middle segment. Never renamed casually.
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: >-
+          The release version: a bare semver (1.2.3, 1.2.3-rc.1) or a bump
+          word (major|minor|patch).
+        type: string
+        required: true
+      unsigned:
+        description: >-
+          Break-glass: flip a signing plan to the unsigned path (recorded;
+          refused when the plan has no sign stage to skip).
+        type: boolean
+        required: false
+        default: false
+    secrets:
+      # The full closed registry (shipit.release.secretreq, PRD story 46),
+      # forwarded explicitly to the stage that consumes each — the
+      # generated consumer caller passes exactly the plan-required subset.
+      RELEASE_TOKEN:
+        required: false
+      CARGO_REGISTRY_TOKEN:
+        required: false
+      PYPI_TOKEN:
+        required: false
+      NPM_TOKEN:
+        required: false
+      HOMEBREW_TAP_TOKEN:
+        required: false
+      APPLE_CERTIFICATE:
+        required: false
+      APPLE_CERTIFICATE_PASSWORD:
+        required: false
+      ASC_API_KEY_BASE64:
+        required: false
+      ASC_API_KEY_ID:
+        required: false
+      ASC_API_ISSUER_ID:
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    uses: arthur-debert/shipit/.github/workflows/wf-prepare.yml@v1
+    with:
+      version: ${{ inputs.version }}
+      unsigned: ${{ inputs.unsigned }}
+    secrets:
+      RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      ASC_API_KEY_BASE64: ${{ secrets.ASC_API_KEY_BASE64 }}
+      ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+      ASC_API_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
+
+  build:
+    needs: prepare
+    uses: arthur-debert/shipit/.github/workflows/wf-build.yml@v1
+    with:
+      version: ${{ needs.prepare.outputs.version }}
+      tag: ${{ needs.prepare.outputs.tag }}
+      matrix: ${{ needs.prepare.outputs.matrix }}
+      stages: ${{ needs.prepare.outputs.stages }}
+
+  sign:
+    needs: [prepare, build]
+    # Reads the plan's sign projection (resolved ONCE by preflight — the
+    # legacy should-sign lesson): an empty projection skips the stage, and
+    # the skip reaches the publish verb as sign-result=skipped, the
+    # sanctioned unsigned path. Default needs-semantics on build: a failed
+    # build skips sign, and the verb blocks on build-result=failure.
+    if: needs.prepare.outputs.sign-matrix != '[]'
+    uses: arthur-debert/shipit/.github/workflows/wf-sign-mac.yml@v1
+    with:
+      tag: ${{ needs.prepare.outputs.tag }}
+      sign-matrix: ${{ needs.prepare.outputs.sign-matrix }}
+    secrets:
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      ASC_API_KEY_BASE64: ${{ secrets.ASC_API_KEY_BASE64 }}
+      ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+      ASC_API_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
+
+  publish:
+    needs: [prepare, build, sign]
+    # `!cancelled()` + prepare-success ONLY (legacy tauri-app's gate minus
+    # its result expression): publish must RUN even when sign was skipped
+    # or a stage failed — the stage results ride as explicit inputs and the
+    # VERB decides (scar #3, inside wf-publish). A plain `needs:` would
+    # wrongly skip the unsigned path; a YAML result check here would
+    # duplicate the verb's gate (ADR-0040 rejected both).
+    if: ${{ !cancelled() && needs.prepare.result == 'success' }}
+    uses: arthur-debert/shipit/.github/workflows/wf-publish.yml@v1
+    with:
+      version: ${{ needs.prepare.outputs.version }}
+      tag: ${{ needs.prepare.outputs.tag }}
+      # wf-build runs build+bundle as one job, so both results are its one
+      # verdict — passed twice because the verb's contract names the two
+      # stages separately (direct composition may split them).
+      build-result: ${{ needs.build.result }}
+      bundle-result: ${{ needs.build.result }}
+      sign-result: ${{ needs.sign.result }}
+      unsigned-matrix: ${{ needs.prepare.outputs.unsigned-matrix }}
+      stages: ${{ needs.prepare.outputs.stages }}
+    secrets:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}

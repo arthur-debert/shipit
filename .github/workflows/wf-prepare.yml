@@ -1,0 +1,223 @@
+name: wf-prepare
+
+# The release PREPARE stage block (ADR-0010/0040, TOL02-WS06). Routing ONLY,
+# zero logic: ONE `shipit release preflight --json` invocation emits the
+# machine-readable release plan (PRD story 27 — per-OS matrix, live stages,
+# post-RC-guard endpoints, required secrets), and this block's outputs are
+# that plan's fields verbatim. No downstream block re-derives a decision:
+# wf-build's matrix, wf-sign-mac's fan, wf-publish's unsigned-path assert all
+# consume THESE outputs (the legacy tauri-app `should-sign` lesson: one
+# definition, no disagreeing checks). `shipit release prepare` then writes
+# the release history (manifest bumps, changelog roll, release commit,
+# annotated tag, atomic push) and this block ships the coalesced notes to
+# wf-publish as the `release-notes` artifact — prepare writes them transient,
+# never committed.
+#
+# Publishing (the @vN convention, ADR-0010): consumers call this block by
+# floating major ref —
+#   uses: arthur-debert/shipit/.github/workflows/wf-prepare.yml@v1
+# where `v1` is the v<MAJOR> BRANCH advance-major.yml force-moves on each
+# non-prerelease shipit release. Standard consumers reach it through the
+# composed wf-release.yml; direct composition is equally sanctioned (PRD
+# story 38).
+#
+# Check-name contract (PRD story 42, consumed by ADP02): this block's one
+# job is `prepare`; a caller's check surface is `<caller-job> / prepare`.
+# Renaming it breaks consumer branch protection — never casual.
+#
+# Secrets (PRD story 46): the names below are the closed requirement
+# registry (shipit.release.secretreq) — the same derivation gh-setup syncs
+# and the generated caller `secrets:` block embeds. All are declared
+# optional YAML-side because WHICH are required is the plan's decision:
+# preflight validates presence (same-named env vars) against the plan's
+# live stages/endpoints and hard-fails naming every missing one.
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: >-
+          The release version: a bare semver (1.2.3, 1.2.3-rc.1) or a bump
+          word (major|minor|patch).
+        type: string
+        required: true
+      unsigned:
+        description: >-
+          Break-glass: flip a signing plan to the unsigned path (recorded;
+          refused when the plan has no sign stage to skip).
+        type: boolean
+        required: false
+        default: false
+    outputs:
+      version:
+        description: The resolved concrete semver.
+        value: ${{ jobs.prepare.outputs.version }}
+      tag:
+        description: The release tag (v<version>) prepare pushed.
+        value: ${{ jobs.prepare.outputs.tag }}
+      release-sha:
+        description: The commit the tag points at.
+        value: ${{ jobs.prepare.outputs.release-sha }}
+      prerelease:
+        description: "'true' when the version carries a prerelease part."
+        value: ${{ jobs.prepare.outputs.prerelease }}
+      matrix:
+        description: The plan's OS×arch matrix (GitHub matrix.include shape).
+        value: ${{ jobs.prepare.outputs.matrix }}
+      sign-matrix:
+        description: >-
+          The matrix entries whose plan sign flag is true — the wf-sign-mac
+          fan. A projection of the plan's per-entry decision, never a
+          re-derivation.
+        value: ${{ jobs.prepare.outputs.sign-matrix }}
+      unsigned-matrix:
+        description: >-
+          The matrix entries whose plan sign flag is false AND whose artifact
+          declares a bundle — the trees that never traverse wf-sign-mac yet
+          carry a bundle for wf-publish to assert (ADR-0040). A build-only
+          artifact (no composition) has no tree to guard, so it is excluded:
+          the assert job must not fan over an entry with no `bundle-*`
+          artifact to download.
+        value: ${{ jobs.prepare.outputs.unsigned-matrix }}
+      stages:
+        description: The plan's live stage subset, pipeline order.
+        value: ${{ jobs.prepare.outputs.stages }}
+      endpoints:
+        description: The plan's post-RC-guard endpoint set.
+        value: ${{ jobs.prepare.outputs.endpoints }}
+      secrets:
+        description: The plan-scoped required GitHub secret names.
+        value: ${{ jobs.prepare.outputs.secrets }}
+
+    secrets:
+      RELEASE_TOKEN:
+        description: >-
+          PAT for prepare's branch+tag push through the ruleset (and so the
+          pushed tag still triggers workflows — a GITHUB_TOKEN push would
+          not).
+        required: false
+      CARGO_REGISTRY_TOKEN:
+        required: false
+      PYPI_TOKEN:
+        required: false
+      NPM_TOKEN:
+        required: false
+      HOMEBREW_TAP_TOKEN:
+        required: false
+      APPLE_CERTIFICATE:
+        required: false
+      APPLE_CERTIFICATE_PASSWORD:
+        required: false
+      ASC_API_KEY_BASE64:
+        required: false
+      ASC_API_KEY_ID:
+        required: false
+      ASC_API_ISSUER_ID:
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.prepare.outputs.version }}
+      tag: ${{ steps.prepare.outputs.tag }}
+      release-sha: ${{ steps.prepare.outputs.release-sha }}
+      prerelease: ${{ steps.prepare.outputs.prerelease }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+      sign-matrix: ${{ steps.plan.outputs.sign-matrix }}
+      unsigned-matrix: ${{ steps.plan.outputs.unsigned-matrix }}
+      stages: ${{ steps.plan.outputs.stages }}
+      endpoints: ${{ steps.plan.outputs.endpoints }}
+      secrets: ${{ steps.plan.outputs.secrets }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history: prepare resolves bump words from tags and rolls
+          # the changelog; a shallow clone would leave both unanswerable.
+          fetch-depth: 0
+          # Prefer the PAT: prepare pushes the release commit and tag through
+          # the ruleset, and a PAT-pushed tag still fires the tag-triggered
+          # workflows (advance-major.yml). Fall back to github.token when no
+          # PAT is supplied (a plan with no protected-tag ruleset) — an empty
+          # RELEASE_TOKEN would otherwise override checkout's default token
+          # with "" and force an unauthenticated clone that cannot push. When
+          # the plan DOES require the PAT, preflight hard-fails naming it.
+          token: ${{ secrets.RELEASE_TOKEN || github.token }}
+      - uses: prefix-dev/setup-pixi@v0.9.6
+        with:
+          # Keep in lockstep with PIXI_PIN in the managed Layer 0 bootstrap
+          # (src/shipit/data/bootstrap/setup-dev-env.sh) — same rule as
+          # wf-checks.yml.
+          pixi-version: v0.71.0
+          locked: true
+      - name: Preflight — emit the release plan
+        id: plan
+        env:
+          VERSION: ${{ inputs.version }}
+          UNSIGNED: ${{ inputs.unsigned }}
+          # Presence plumbing (PRD stories 28/46): preflight validates the
+          # plan's required secrets as same-named env vars — every registry
+          # name is mapped; the PLAN decides which must be non-empty.
+          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          ASC_API_KEY_BASE64: ${{ secrets.ASC_API_KEY_BASE64 }}
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_API_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
+        # ONE planner invocation (the pinned launcher, ADR-0033); its JSON
+        # becomes this block's outputs. The jq lines are transport (compact
+        # the indented JSON, split out fields) and projection of the plan's
+        # per-entry decisions (select reads the decisions, never remakes
+        # them): sign-matrix is the sign flag; unsigned-matrix is unsigned
+        # AND bundle-bearing — the trees wf-publish's assert job re-guards.
+        run: |
+          # pipefail: the default step shell is `bash -e` WITHOUT pipefail, so
+          # a failed producer in `preflight | jq` would be masked by jq's 0 on
+          # empty input — the step would write blank outputs and let `prepare`
+          # push a release the plan never sanctioned. The barrier depends on
+          # the whole pipeline failing.
+          set -euo pipefail
+          flags=()
+          if [ "$UNSIGNED" = "true" ]; then flags+=(--unsigned); fi
+          plan="$(pixi run --locked ./bin/shipit release preflight "$VERSION" --json "${flags[@]}" | jq -c .)"
+          {
+            printf 'matrix=%s\n' "$(jq -c '.matrix' <<<"$plan")"
+            printf 'sign-matrix=%s\n' "$(jq -c '[.matrix[] | select(.sign)]' <<<"$plan")"
+            printf 'unsigned-matrix=%s\n' "$(jq -c '[.matrix[] | select((.sign | not) and .bundle)]' <<<"$plan")"
+            printf 'stages=%s\n' "$(jq -c '.stages' <<<"$plan")"
+            printf 'endpoints=%s\n' "$(jq -c '.endpoints' <<<"$plan")"
+            printf 'secrets=%s\n' "$(jq -c '.secrets' <<<"$plan")"
+          } >> "$GITHUB_OUTPUT"
+      - name: Prepare — write the release history
+        id: prepare
+        env:
+          VERSION: ${{ inputs.version }}
+        # Committer identity for the release commit; the push rides the
+        # checkout's persisted PAT. Prepare is resume-safe: an existing tag
+        # is a no-op success, so a re-run never double-bumps.
+        run: |
+          # pipefail (same reason as the plan step): a failed `prepare` must
+          # not be masked by jq's 0 on empty input.
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          prepared="$(pixi run --locked ./bin/shipit release prepare "$VERSION" --json | jq -c .)"
+          {
+            printf 'version=%s\n' "$(jq -r '.version' <<<"$prepared")"
+            printf 'tag=%s\n' "$(jq -r '.tag' <<<"$prepared")"
+            printf 'release-sha=%s\n' "$(jq -r '.release_sha' <<<"$prepared")"
+            printf 'prerelease=%s\n' "$(jq -r '.prerelease' <<<"$prepared")"
+          } >> "$GITHUB_OUTPUT"
+      - name: Ship the release notes to wf-publish
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-notes
+          path: RELEASE_NOTES.md
+          if-no-files-found: error
