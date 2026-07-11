@@ -20,6 +20,12 @@ the workflow here; the filter stays because portfolio repos still carry the
 file until their own cutover). The bare
 caller-job name of a reusable call is never a reported context and would deadlock
 every PR — release#602.
+
+This module also owns the workflow-file parsing seam gh-setup's Actions
+access-level verify pass (#739) uses: :func:`is_reusable_workflow` /
+:func:`publishes_reusable_workflows` detect ``workflow_call`` publishers, from
+the local checkout or via the contents API — same loader, same YAML-1.1
+``on:`` gotcha handling.
 """
 
 from __future__ import annotations
@@ -94,6 +100,12 @@ def workflow_triggers(workflow: object) -> list[str]:
 def is_pr_workflow(workflow: object) -> bool:
     """True if the workflow triggers on ``pull_request``."""
     return "pull_request" in workflow_triggers(workflow)
+
+
+def is_reusable_workflow(workflow: object) -> bool:
+    """True if the workflow triggers on ``workflow_call`` (a reusable-workflow
+    publisher — the callable side of ADR-0010's distribution model)."""
+    return "workflow_call" in workflow_triggers(workflow)
 
 
 def pr_trigger_is_path_filtered(workflow: object) -> bool:
@@ -277,6 +289,56 @@ def pr_workflow_paths(workflows_dir: str) -> list[str]:
         if is_pr_workflow(doc) and not pr_trigger_is_path_filtered(doc):
             paths.append(f".github/workflows/{base}")
     return paths
+
+
+def publishes_reusable_workflows(repo: str, *, toplevel: str | None) -> bool:
+    """Whether ``repo`` publishes any reusable (``workflow_call``) workflow.
+
+    The publisher detection of gh-setup's access-level verify pass (#739).
+    With ``toplevel`` (the ambient-checkout case) the LOCAL
+    ``.github/workflows/`` files are scanned — the same source ruleset
+    discovery reads; a file that won't parse is skipped (it publishes
+    nothing). Without it (an explicitly named remote repo) the contents API
+    serves the listing and each file body; a missing workflows directory
+    (HTTP 404) means "not a publisher".
+
+    Raises :class:`~shipit.execrun.ExecError` on any OTHER remote read
+    failure (auth, transport): the caller must report "could not inspect",
+    never mistake an unreadable repo for a verified non-publisher.
+    """
+    if toplevel is not None:
+        workflows_dir = os.path.join(toplevel, ".github", "workflows")
+        paths: list[str] = []
+        for ext in ("*.yml", "*.yaml"):
+            paths.extend(sorted(glob.glob(os.path.join(workflows_dir, ext))))
+        for path in paths:
+            try:
+                doc = _load_yaml_file(path)
+            except (OSError, yaml.YAMLError):
+                continue
+            if is_reusable_workflow(doc):
+                return True
+        return False
+    try:
+        listing = gh.rest(f"repos/{repo}/contents/.github/workflows")
+    except execrun.ExecError as exc:
+        if "HTTP 404" in exc.stderr:
+            return False  # no workflows directory at all — not a publisher
+        raise
+    for entry in listing if isinstance(listing, list) else []:
+        name = entry.get("name") if isinstance(entry, dict) else None
+        if not isinstance(name, str) or not name.endswith((".yml", ".yaml")):
+            continue
+        obj = gh.rest(f"repos/{repo}/contents/.github/workflows/{name}")
+        if not isinstance(obj, dict) or "content" not in obj:
+            continue
+        try:
+            doc = _load_yaml_text(base64.b64decode(obj["content"]).decode("utf-8"))
+        except (ValueError, yaml.YAMLError):
+            continue
+        if is_reusable_workflow(doc):
+            return True
+    return False
 
 
 def checks_from_runs(repo: str, default_branch: str, paths: list[str]) -> list[str]:

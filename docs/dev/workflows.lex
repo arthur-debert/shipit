@@ -156,3 +156,17 @@ logic is thin YAML) is stated in [./architecture.lex#3].
     release), each consuming the previous stage's artifacts. A consumer that
     needs signing wires in the sign job; one that does not, omits it and ships
     the unsigned bundles end-to-end with zero signing secrets.
+
+7. Publishing reusable workflows — the publisher-side access surface
+
+    Publishing reusable workflow blocks portfolio-wide (cross-owner `uses:`
+    refs) requires a PUBLIC publisher repo — a private repo's workflows are
+    shareable within its owner namespace ONLY, at any access level; the
+    decision and its evidence live in ADR-0053
+    [../adr/0053-shipit-is-public-vn-distribution-needs-a-public-publisher.md].
+    Same-owner-only publishing from a private repo additionally needs the
+    repo's Actions access level (`repos/{owner}/{repo}/actions/permissions/
+    access`) at `user` (user-owned) or `organization` (org-owned) — it ships
+    as `none`, which blocks even same-owner callers (TOL02-WS07 finding 5).
+    gh-setup VERIFIES this and warns when a private `workflow_call` publisher
+    sits at `none`, naming the fix; it never sets the level (#739).
