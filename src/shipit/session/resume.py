@@ -9,7 +9,7 @@ it turns records into a typed target; backend-specific launch mechanics stay in
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -147,9 +147,18 @@ def _records_for_repos(
     found: list[ResumeTarget] = []
     for repo in repos:
         path = logsetup.log_file_path(repo, base_dir=base_dir)
-        if not path.exists():
-            continue
-        found.extend(_sessions(_read_jsonl(path), repo=repo))
+        paths = [
+            path.with_name(f"{path.name}.{index}")
+            for index in range(logsetup.BACKUP_COUNT, 0, -1)
+        ]
+        paths.append(path)
+        records = (
+            record
+            for candidate in paths
+            if candidate.exists()
+            for record in _read_jsonl(candidate)
+        )
+        found.extend(_sessions(records, repo=repo))
     return found
 
 
@@ -169,13 +178,12 @@ def _discover_repos(*, base_dir: str | Path | None) -> list[Repo]:
     return repos
 
 
-def _read_jsonl(path: Path) -> list[dict[str, Any]]:
-    records: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        record = parse_record(line)
-        if record is not None:
-            records.append(record)
-    return records
+def _read_jsonl(path: Path) -> Iterator[dict[str, Any]]:
+    with path.open(encoding="utf-8") as handle:
+        for line in handle:
+            record = parse_record(line)
+            if record is not None:
+                yield record
 
 
 def _sessions(

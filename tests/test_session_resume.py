@@ -10,8 +10,8 @@ REPO = repo_from_slug("arthur-debert/shipit")
 
 
 def _log(base: Path, slug: str, *records: dict) -> None:
-    owner, name = slug.split("/")
-    path = base / owner / name / "shipit.log"
+    repo = repo_from_slug(slug)
+    path = base / repo.owner.login / repo.name / "shipit.log"
     path.parent.mkdir(parents=True)
     path.write_text("\n".join(json.dumps(record) for record in records) + "\n")
 
@@ -22,6 +22,13 @@ def test_resolve_shipit_codex_session_to_native_thread(tmp_path: Path):
         "arthur-debert/shipit",
         {
             "repo": "arthur-debert/shipit",
+            "session": "codex-20260711-121015-73781",
+            "tree": "/trees/shipit/ephemeral/codex-20260711-121015-73781",
+            "backend": "codex",
+        },
+        {
+            "repo": "arthur-debert/shipit",
+            "event": "session.started",
             "session": "codex-20260711-121015-73781",
             "tree": "/trees/shipit/ephemeral/codex-20260711-121015-73781",
             "codex_thread": "019f-thread",
@@ -37,6 +44,25 @@ def test_resolve_shipit_codex_session_to_native_thread(tmp_path: Path):
         native_session_id="019f-thread",
         tree="/trees/shipit/ephemeral/codex-20260711-121015-73781",
     )
+
+
+def test_resolve_fresh_codex_session_from_sessionstart_record(tmp_path: Path):
+    _log(
+        tmp_path,
+        "arthur-debert/shipit",
+        {
+            "repo": "arthur-debert/shipit",
+            "event": "session.started",
+            "session": "codex-20260711-121015-73781",
+            "tree": "/trees/shipit/ephemeral/codex-20260711-121015-73781",
+            "codex_thread": "019f-fresh-thread",
+        },
+    )
+
+    target = resume.resolve("codex-20260711-121015-73781", base_dir=tmp_path)
+
+    assert target.backend == "codex"
+    assert target.native_session_id == "019f-fresh-thread"
 
 
 def test_resolve_shipit_claude_session_from_sessionstart_record(tmp_path: Path):
@@ -113,6 +139,36 @@ def test_resolve_native_id_can_be_scoped_by_repo(tmp_path: Path):
 
     assert target.repo == REPO
     assert target.shipit_session_id == "sess-1"
+
+
+def test_resolve_merges_session_across_rotated_log_boundary(tmp_path: Path):
+    active = tmp_path / REPO.owner.login / REPO.name / resume.logsetup.LOG_FILENAME
+    active.parent.mkdir(parents=True)
+    active.with_name(f"{active.name}.1").write_text(
+        json.dumps(
+            {
+                "repo": REPO.slug,
+                "session": "codex-rotated",
+                "codex_thread": "019f-rotated",
+            }
+        )
+        + "\n"
+    )
+    active.write_text(
+        json.dumps(
+            {
+                "repo": REPO.slug,
+                "session": "codex-rotated",
+                "tree": "/fresh/tree",
+            }
+        )
+        + "\n"
+    )
+
+    target = resume.resolve("codex-rotated", repo=REPO, base_dir=tmp_path)
+
+    assert target.native_session_id == "019f-rotated"
+    assert target.tree == "/fresh/tree"
 
 
 def test_source_checkout_prefers_matching_ambient_checkout(monkeypatch, tmp_path: Path):

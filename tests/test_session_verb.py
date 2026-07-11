@@ -2,6 +2,8 @@ import io
 import json
 from dataclasses import dataclass, replace
 
+from click.testing import CliRunner
+
 from shipit.identity import Repo, repo_from_slug
 from shipit.tree.create import Tree
 from shipit.verbs import session
@@ -301,6 +303,28 @@ def test_run_resume_delegates_claude_target_to_claude_runner(tmp_path):
     assert native_id == "claude-native"
     assert args == ["--model", "opus"]
     assert kwargs["resumed_session_id"] == "sess-1"
+
+
+def test_resume_cli_last_preserves_backend_flags(monkeypatch):
+    captured = {}
+
+    def fake_run_resume(target, **kwargs):
+        captured["target"] = target
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(session, "run_resume", fake_run_resume)
+
+    result = CliRunner().invoke(
+        session.resume_cmd,
+        ["--last", "--repo", "arthur-debert/shipit", "--model", "opus"],
+    )
+
+    assert result.exit_code == 0
+    assert captured["target"] is None
+    assert captured["last"] is True
+    assert captured["repo_identity"] == repo_from_slug("arthur-debert/shipit")
+    assert captured["backend_args"] == ["--model", "opus"]
 
 
 def test_run_codex_spec_matches_the_coordinator_worktreecreate_spec(

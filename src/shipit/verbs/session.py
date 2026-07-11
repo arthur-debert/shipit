@@ -114,10 +114,9 @@ def codex_cmd(codex_args: tuple[str, ...]) -> None:
     default=None,
     help="Target repository as owner/name; required for --last and no-cwd use.",
 )
-@click.argument("target", required=False)
-@click.argument("backend_args", nargs=-1, type=click.UNPROCESSED)
+@click.argument("args", nargs=-1, type=click.UNPROCESSED)
 def resume_cmd(
-    last: bool, repo_identity: identity.Repo | None, target: str | None, backend_args
+    last: bool, repo_identity: identity.Repo | None, args: tuple[str, ...]
 ) -> None:
     """Resume a coordinator session by shipit session id or backend-native id.
 
@@ -129,6 +128,11 @@ def resume_cmd(
     WorktreeCreate hook still provisions the Tree.
     """
 
+    # One variadic argument avoids Click assigning the first unknown backend
+    # flag to an optional ``target`` positional. Under ``--last`` every token
+    # is backend argv; otherwise the first token is the requested identity.
+    target = None if last or not args else args[0]
+    backend_args = args if last else args[1:]
     raise SystemExit(
         run_resume(
             target,
@@ -273,7 +277,7 @@ def run_codex(
             session_id,
             tree.path,
             extra={
-                "argv": argv,
+                "argv": shlex.join(argv),
                 "backend": resume.CODEX_BACKEND,
                 "resumed_session": resumed_session_id,
                 **({"codex_thread": resume_thread_id} if resume_thread_id else {}),
@@ -350,7 +354,7 @@ def run_claude_resume(
             session_id,
             expected_tree,
             extra={
-                "argv": argv,
+                "argv": shlex.join(argv),
                 "backend": resume.CLAUDE_BACKEND,
                 "session_id": native_session_id,
                 "resumed_session": resumed_session_id,
