@@ -43,7 +43,7 @@ MAC_APP = _artifacts(
 [artifacts.app]
 build = ["npm", { toolchain = "rust" }]
 platforms = ["darwin-arm64"]
-bundle = { command = ["tauri", "bundle"] }
+bundle = { composition = "mac-app", command = ["tauri", "build"], source = "src-tauri/target/release/bundle" }
 endpoints = ["gh-release"]
 sign = true
 """

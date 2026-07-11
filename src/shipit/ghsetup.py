@@ -333,9 +333,11 @@ def sync_secrets(
     sources (TOL02-WS02, PRD stories 44/45).
 
     The required names are the registry declarations traversed from the
-    artifact map (:mod:`shipit.release.secretreq`) plus the seeded App-secret
-    names (:func:`shipit.config.seeded_app_secrets` — the review funnel's
-    registry-derived requirement). Three outcome groups, in order:
+    artifact map (:mod:`shipit.release.secretreq`). The seeded App-secret names
+    (:func:`shipit.config.seeded_app_secrets`) are install's concern — seeded
+    into ``[secrets]`` declared and non-optional by ``shipit install`` — so the
+    sync only keeps a DECLARED one off the orphan list (via ``extra_required``),
+    never forcing or demanding them. Three outcome groups, in order:
 
     - the non-orphan declared sources, resolved and pushed by
       :func:`push_secrets` (dry-run resolves nothing); a source whose name is in
@@ -351,12 +353,15 @@ def sync_secrets(
     orphan_names = set(
         secretreq.orphans(artifacts, sources, extra_required=app_secrets)
     )
-    required_names = set(secretreq.required_names(artifacts)) | set(app_secrets)
+    required_names = set(secretreq.required_names(artifacts))
     # A derived-REQUIRED secret is required by definition: its `optional` flag
     # cannot make an absent value a silent skip, or the sync would succeed while
     # under-provisioning (story 44). The derivation wins over the flag — force
     # required sources non-optional so a missing value resolves to `failed`, not
-    # `skipped`. A genuinely optional source (nothing requires it) keeps its flag.
+    # `skipped`. A genuinely optional source (nothing requires it) keeps its
+    # flag. Scoped to the artifact-map derivation: the seeded App secrets are
+    # install's concern (seeded declared + non-optional), so the sync neither
+    # forces nor demands them — it only keeps a declared one off the orphan list.
     to_push = [
         replace(source, optional=False)
         if source.optional and source.name in required_names

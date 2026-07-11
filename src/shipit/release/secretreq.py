@@ -152,7 +152,14 @@ def missing_sources(
     """The requirements no ``[secrets]`` entry sources — story 45's sync-time
     error set, each naming its requiring entry. One entry per (name,
     requiring entry) pair, so the report shows every declaration that goes
-    unserved."""
+    unserved.
+
+    Scoped to the artifact-map DERIVATION (this module's registries). The
+    seeded App secrets are a separate concern: ``shipit install`` seeds their
+    ``[secrets]`` mappings (declared and non-optional,
+    :func:`shipit.config.plan_policy_seed`), so their DECLARATION is install's
+    job, not the sync's — gh-setup only keeps a declared one from being flagged
+    an orphan (:func:`orphans`)."""
     declared = {source.name for source in sources}
     return tuple(req for req in requirements(artifacts) if req.name not in declared)
 
@@ -187,8 +194,8 @@ def secrets_block(artifacts: Sequence[Artifact]) -> str:
 
     A repo that derives no requirement (a not-yet-release-capable map with no
     endpoints) yields the empty string — the block is omitted entirely rather
-    than emitted as a bare ``secrets:`` key, which would be a mapping with no
-    entries: invalid YAML.
+    than emitted as a bare ``secrets:`` key, which parses as ``secrets: null``
+    and GitHub Actions rejects (it expects ``secrets`` to be a mapping).
     """
     names = required_names(artifacts)
     if not names:

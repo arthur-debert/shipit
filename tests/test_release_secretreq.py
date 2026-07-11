@@ -192,7 +192,7 @@ def test_secrets_block_maps_each_name_to_its_own_secret_ref():
 
 def test_secrets_block_is_empty_when_nothing_is_required():
     # A not-yet-release-capable map (no endpoints) derives no requirement, so
-    # the block is omitted entirely — a bare `secrets:` key would be a mapping
-    # with no entries, invalid YAML.
+    # the block is omitted entirely — a bare `secrets:` key parses as
+    # `secrets: null`, which GitHub Actions rejects (it wants a mapping).
     arts = _artifacts('[artifacts.lib]\nbuild = ["python"]\n')
     assert secretreq.secrets_block(arts) == ""
