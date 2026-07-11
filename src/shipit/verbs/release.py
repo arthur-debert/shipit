@@ -24,10 +24,13 @@ writer of repo history. The effectful shell over three pure cores:
 
 The shell's own rules:
 
-- a CLEAN working tree is a precondition: prepare refuses before any mutation
-  if ``git status`` is non-empty, so no pre-existing edit rides the release
-  commit or masks a no-op bump, and a ``-release-rc`` cut's ``reset_hard``
-  never destroys uncommitted work.
+- a CLEAN working tree is a precondition of a history-writing cut: prepare
+  refuses before any mutation if a TRACKED file is modified, so no pre-existing
+  edit rides the release commit or masks a no-op bump, and a ``-release-rc``
+  cut's ``reset_hard`` never destroys uncommitted work. Untracked files are
+  exempt (never staged, and ``reset_hard`` leaves them), and a RESUME skips the
+  gate entirely (it writes no history) — a leftover notes artifact from a prior
+  run never blocks it.
 - every external command runs through the one Exec seam (ADR-0028): adapter
   commands via :func:`shipit.execrun.run`, git via the :mod:`shipit.git`
   adapter.
@@ -57,6 +60,7 @@ malformed version argument, rejected at parse by
 
 from __future__ import annotations
 
+import contextlib
 import fnmatch
 import logging
 from collections.abc import Callable, Sequence
@@ -270,18 +274,6 @@ def run_prepare(
     root = Path(root_s)
     cwd = str(root)
 
-    # A history-writing command runs on a CLEAN tree only — refused BEFORE any
-    # mutation. Otherwise an unrelated pre-existing edit (a dirty pyproject.toml,
-    # Cargo.lock, CHANGELOG.md) rides the release commit or masks a no-op bump,
-    # and a -release-rc cut's `reset_hard` would destroy that uncommitted work.
-    dirty = gitio.status_porcelain(cwd=cwd)
-    if dirty:
-        raise ReleaseError(
-            "working tree has uncommitted changes — `release prepare` writes "
-            "repo history and must run on a clean tree; commit or stash them "
-            "first:\n" + "\n".join(dirty)
-        )
-
     cfg = load_config(root)
     entries = config.load_toolchains(cfg)
     artifacts = config.load_artifacts(cfg)
@@ -327,6 +319,24 @@ def run_prepare(
             extra={"version": version, "tag": resolved.tag, "sha": str(sha)},
         )
         return 0
+
+    # A history-writing cut runs on a CLEAN tree only — refused BEFORE any
+    # mutation, so an unrelated pre-existing edit (a dirty pyproject.toml,
+    # Cargo.lock, CHANGELOG.md) can neither ride the release commit nor mask a
+    # no-op bump, and a -release-rc `reset_hard` can never destroy uncommitted
+    # work. Only TRACKED changes count: an untracked file (a build artifact, a
+    # prior run's RELEASE_NOTES.md) is never staged by the explicit-pathspec
+    # commit and survives `reset_hard`, so it must not block a release — and the
+    # gate is skipped entirely on a resume (above), which writes no history.
+    dirty = [
+        line for line in gitio.status_porcelain(cwd=cwd) if not line.startswith("??")
+    ]
+    if dirty:
+        raise ReleaseError(
+            "working tree has uncommitted changes to tracked files — "
+            "`release prepare` writes repo history and must run on a clean "
+            "tree; commit or stash them first:\n" + "\n".join(dirty)
+        )
 
     branch = gitio.current_branch(cwd=cwd)
     if branch is None:
@@ -430,12 +440,19 @@ def run_prepare(
                 gitio.reset_hard(str(base_sha), cwd=cwd)
             gitio.push_tag(resolved.tag, cwd=cwd)
         else:
-            # The branch push runs the repo's pre-push checks (story 24), and
-            # the tag follows only after the branch lands.
-            gitio.push(branch, cwd=cwd)
-            gitio.push_tag(resolved.tag, cwd=cwd)
+            # Branch and tag publish ATOMICALLY (both refs or neither) through
+            # the repo's pre-push checks (story 24): a tag-ref rejection can
+            # never leave the remote branch-advanced-but-tagless — a partial
+            # state the next run could neither resume (no remote tag) nor
+            # cleanly redo (the tree already carries the version).
+            gitio.push_atomic(branch, resolved.tag, cwd=cwd)
     except Exception:
-        gitio.delete_tag(resolved.tag, cwd=cwd)
+        # Best-effort rollback: drop the LOCAL tag so the next run does not
+        # falsely RESUME (ADR-0009 keys resume off tag existence) on an
+        # unpublished cut — but never let a cleanup failure mask the push error
+        # that actually aborted the release.
+        with contextlib.suppress(Exception):
+            gitio.delete_tag(resolved.tag, cwd=cwd)
         raise
 
     result = PrepareResult(

@@ -100,6 +100,10 @@ class FakeGit:
         self.calls.append(("push_tag", name))
         self._maybe_fail("push_tag")
 
+    def push_atomic(self, branch, tag, *, cwd):
+        self.calls.append(("push_atomic", branch, tag))
+        self._maybe_fail("push_atomic")
+
     def delete_tag(self, name, *, cwd):
         self.calls.append(("delete_tag", name))
         if name in self.tags:
@@ -182,8 +186,8 @@ def test_final_cut_end_to_end(python_repo, capsys):
     assert (python_repo / "CHANGELOG" / "0.2.0.md").is_file()
     assert not (python_repo / "CHANGELOG" / "unreleased-x.md").exists()
 
-    # Stage-only-intended-files, then commit → tag → push branch → push tag.
-    assert fake.mutated() == ["add", "commit", "tag", "push", "push_tag"]
+    # Stage-only-intended-files, then commit → tag → atomic branch+tag push.
+    assert fake.mutated() == ["add", "commit", "tag", "push_atomic"]
     add = next(c for c in fake.calls if c[0] == "add")
     assert set(add[1]) == {
         "pyproject.toml",
@@ -196,8 +200,7 @@ def test_final_cut_end_to_end(python_repo, capsys):
     tag = next(c for c in fake.calls if c[0] == "tag")
     assert tag[1] == "v0.2.0"
     assert "- a fix" in tag[2]  # the annotation carries THE notes text
-    assert ("push", "main") in fake.calls
-    assert ("push_tag", "v0.2.0") in fake.calls
+    assert ("push_atomic", "main", "v0.2.0") in fake.calls  # both refs together
 
     # Uniform typed outputs (--json), consumed without re-parsing.
     out = json.loads(capsys.readouterr().out)
@@ -242,7 +245,7 @@ def test_recorded_adapter_command_lines_per_leg(tmp_path, monkeypatch):
     # -rc.N: notes extracted, fragments KEPT for the final, branch still pushed.
     assert (root / "CHANGELOG" / "unreleased-x.md").is_file()
     assert not (root / "CHANGELOG" / "1.0.0-rc.1.md").exists()
-    assert fake.mutated() == ["add", "commit", "tag", "push", "push_tag"]
+    assert fake.mutated() == ["add", "commit", "tag", "push_atomic"]
     add = next(c for c in fake.calls if c[0] == "add")
     assert "CHANGELOG.md" not in add[1]  # nothing rolled on a prerelease
 
@@ -380,9 +383,9 @@ def test_outside_a_checkout_is_refused(tmp_path, monkeypatch, capsys):
 
 
 def test_dirty_tree_is_refused_before_any_mutation(python_repo, capsys):
-    """A history-writing command runs on a clean tree only: an uncommitted edit
-    at the start aborts before any bump — so nothing rides the release commit
-    and a -release-rc `reset_hard` can never destroy the user's work."""
+    """A history-writing cut runs on a clean tree only: an uncommitted edit to a
+    TRACKED file at the start aborts before any bump — so nothing rides the
+    release commit and a -release-rc `reset_hard` can never destroy the work."""
     fake = gitio_for(python_repo, pre_status=[" M pyproject.toml"])
     recorder = CmdRecorder()
     rc = release_verb.run_prepare(spec("0.2.0"), gitio=fake, run_cmd=recorder)
@@ -393,20 +396,75 @@ def test_dirty_tree_is_refused_before_any_mutation(python_repo, capsys):
     assert fake.mutated() == []  # nothing staged, committed, tagged, or pushed
 
 
-def test_push_failure_deletes_the_local_tag(python_repo, capsys):
-    """A failed publish must not leave a local tag behind: it would make the
-    next run falsely RESUME (ADR-0009) and report success on an unpushed cut.
-    The tag is deleted, so a rerun re-attempts instead of resuming."""
-    # A prerelease cut (no changelog roll): the branch push lands, the tag push
-    # then fails — the interesting partial-publish the rollback must clean up.
+def test_untracked_files_do_not_block_a_fresh_cut(python_repo):
+    """Untracked files never ride the explicit-pathspec commit and survive
+    `reset_hard`, so they must not gate a release (a build artifact, a prior
+    run's RELEASE_NOTES.md). A tracked bump still proceeds past them."""
     fake = gitio_for(
-        python_repo, status_lines=[" M pyproject.toml"], fail_on="push_tag"
+        python_repo,
+        pre_status=["?? scratch.log", "?? RELEASE_NOTES.md"],
+        status_lines=[" M pyproject.toml"],
+    )
+    rc = release_verb.run_prepare(spec("0.2.0-rc.1"), gitio=fake, run_cmd=CmdRecorder())
+    assert rc == 0
+    assert fake.mutated() == ["add", "commit", "tag", "push_atomic"]
+
+
+def test_resume_is_not_blocked_by_a_dirty_tree(tmp_path, monkeypatch, capsys):
+    """A RESUME writes no history (no commit, reset, or push), so the clean-tree
+    gate does not apply — including a leftover RELEASE_NOTES.md from the prior
+    run that produced this tag (the ADR-0009 resumability codex flagged)."""
+    root = make_repo(
+        tmp_path,
+        monkeypatch,
+        toml=_PY_TOML,
+        fragments=(),
+        files=[
+            ("pyproject.toml", _PYPROJECT),
+            ("CHANGELOG/1.2.3.md", "## 1.2.3 - 2026-07-01\n\n### Fixed\n\n- a fix\n"),
+        ],
+    )
+    fake = gitio_for(
+        root,
+        tags=["v1.2.3"],
+        pre_status=[" M pyproject.toml", "?? RELEASE_NOTES.md"],
+    )
+    rc = release_verb.run_prepare(
+        spec("1.2.3"), as_json=True, gitio=fake, run_cmd=CmdRecorder()
+    )
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out)["resume"] is True
+    assert fake.mutated() == []  # resume touches no history despite the dirty tree
+
+
+def test_push_failure_deletes_the_local_tag(python_repo, capsys):
+    """A failed atomic publish must not leave a local tag behind: it would make
+    the next run falsely RESUME (ADR-0009) and report success on an unpushed
+    cut. The tag is deleted, so a rerun re-attempts instead of resuming."""
+    fake = gitio_for(
+        python_repo, status_lines=[" M pyproject.toml"], fail_on="push_atomic"
     )
     rc = release_verb.run_prepare(spec("0.2.0-rc.1"), gitio=fake, run_cmd=CmdRecorder())
     assert rc == 1
-    assert ("push", "main") in fake.calls  # branch landed first
+    assert ("push_atomic", "main", "v0.2.0-rc.1") in fake.calls
     assert ("delete_tag", "v0.2.0-rc.1") in fake.calls
     assert "v0.2.0-rc.1" not in fake.tags  # not left behind to fake a resume
+
+
+def test_push_failure_rollback_is_best_effort(python_repo, capsys):
+    """A failing cleanup must never mask the original push error: `delete_tag`
+    raising in the rollback still lets the push ExecError surface as exit 1."""
+
+    class DeleteRaises(FakeGit):
+        def delete_tag(self, name, *, cwd):
+            self.calls.append(("delete_tag", name))
+            raise execrun.ExecError(["git", "tag", "-d"], rc=1, stderr="nope")
+
+    fake = DeleteRaises(status_lines=[" M pyproject.toml"], fail_on="push_atomic")
+    fake.root = str(python_repo)
+    rc = release_verb.run_prepare(spec("0.2.0-rc.1"), gitio=fake, run_cmd=CmdRecorder())
+    assert rc == 1  # the push failure, not the cleanup failure, is the outcome
+    assert ("delete_tag", "v0.2.0-rc.1") in fake.calls
 
 
 # --------------------------------------------------------------------------
@@ -471,7 +529,7 @@ def test_go_prerelease_tags_head_without_a_commit(tmp_path, monkeypatch, capsys)
         spec("1.0.0-rc.1"), as_json=True, gitio=fake, run_cmd=CmdRecorder()
     )
     assert rc == 0
-    assert fake.mutated() == ["tag", "push", "push_tag"]
+    assert fake.mutated() == ["tag", "push_atomic"]
     out = json.loads(capsys.readouterr().out)
     assert out["release_sha"] == str(BASE_SHA)
     assert out["prerelease"] is True

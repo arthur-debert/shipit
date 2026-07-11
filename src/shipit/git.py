@@ -609,6 +609,25 @@ def push_tag(name: str, *, cwd: str, remote: str = "origin") -> None:
     _git(["push", remote, f"refs/tags/{name}"], cwd=cwd, timeout=_NETWORK_TIMEOUT)
 
 
+def push_atomic(branch: str, tag: str, *, cwd: str, remote: str = "origin") -> None:
+    """``git push --atomic <remote> <branch> refs/tags/<tag>`` — publish a
+    branch and a tag as ONE server-side transaction.
+
+    The release prepare stage's final (non-tag-only) publish: ``--atomic`` means
+    the remote updates both refs or neither, so a tag-ref rejection can never
+    leave the branch advanced while the tag is missing — a partial-published
+    state the next run could neither resume (no remote tag) nor cleanly redo
+    (the tree already carries the version). Like :func:`push_tag`, the tag rides
+    its full ``refs/tags/`` ref so a same-named branch is never pushed by
+    mistake; the push runs the repo's pre-push checks (story 24: no bypass).
+    """
+    _git(
+        ["push", "--atomic", remote, branch, f"refs/tags/{tag}"],
+        cwd=cwd,
+        timeout=_NETWORK_TIMEOUT,
+    )
+
+
 def delete_tag(name: str, *, cwd: str) -> None:
     """``git tag -d <name>`` — remove a LOCAL tag.
 
