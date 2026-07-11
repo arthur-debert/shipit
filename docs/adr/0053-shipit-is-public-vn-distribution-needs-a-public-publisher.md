@@ -27,10 +27,10 @@ resolution.
 Evidence — the decision was verified live in the same campaign, not just
 reasoned (campaign comments on #565; findings recorded in
 `docs/dev/tol02-ws07-go-no-go.md`): after the flip, lex's caller switched to
-the real remote refs (`uses:
-arthur-debert/shipit/.github/workflows/wf-release.yml@v1`) and the traversal
-ran green end-to-end (lex-fmt/lex Actions run `29162869655`), with every
-nested `@v1` block resolving cross-owner and the ADR-0033 launcher
+the real remote refs
+(`uses: arthur-debert/shipit/.github/workflows/wf-release.yml@v1`) and the
+traversal ran green end-to-end (lex-fmt/lex Actions run `29162869655`), with
+every nested `@v1` block resolving cross-owner and the ADR-0033 launcher
 uv-resolving the pin against the now-public repo — the vendored blocks, the
 `SHIPIT_EXEC` bridge, and the committed wheel all removed from the consumer.
 
