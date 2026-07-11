@@ -300,6 +300,18 @@ def write_task(
     spelled ``git push -u origin {branch}`` because at bank time the branch is
     fresh (no draft PR yet ⇒ no upstream set), so a bare ``git push`` would reject
     the WIP commit and lose exactly the work the protocol exists to salvage.
+
+    The task also carries the **headless foreground rule** (#663): a spawned Run
+    is a headless child, so ending its turn exits the process — and any
+    background tasks still running are killed with it. The affordance that is
+    safe in an interactive session (launch background work, end the turn, get
+    re-invoked on completion) is a silent kill in a headless Run: nothing ever
+    re-invokes it. The rule is backend-neutral (it is about the Run's process
+    lifecycle, not any CLI's flags) and rides EVERY spawned write Run's task:
+    long work runs in the foreground (blocking) or is synchronously awaited, and
+    the turn never ends while background work is in flight. Observed on
+    RVW02-WS05, whose first Run backgrounded its replay pipelines, ended its
+    turn to "wait for completion notifications", and lost them all at exit.
     """
     link = f"closes #{issue}" if closes else f"for #{issue}"
     return (
@@ -319,7 +331,14 @@ def write_task(
         f"what is done and what remains, and push the branch with "
         f"`git push -u origin {branch}` (a fresh branch has no upstream yet, so a bare "
         f"`git push` would reject the commit and lose it) — a pushed WIP commit "
-        f"turns the failed spawn into a resumable handoff instead of a silent loss."
+        f"turns the failed spawn into a resumable handoff instead of a silent loss. "
+        f"You are a HEADLESS Run: ending your turn exits your process, and any "
+        f"background tasks still running are killed with it — nothing re-invokes a "
+        f"headless Run when background work completes (only interactive sessions "
+        f"get that). Run long work (tests, builds, long scripts) in the foreground, "
+        f"blocking, or await it synchronously before continuing; never end your "
+        f"turn — even to 'wait for completion notifications' — while background "
+        f"work is in flight."
     )
 
 
