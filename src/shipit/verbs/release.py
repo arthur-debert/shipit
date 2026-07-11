@@ -591,6 +591,7 @@ def run_bundle(
     out: str | None = None,
     as_json: bool = False,
     run_cmd: bundle_mod.RunCmd | None = None,
+    gitio: Any = git,
 ) -> int:
     """Run the bundle stage from the current directory. Returns 0/1.
 
@@ -600,10 +601,21 @@ def run_bundle(
     FIRST failing composition aborts the stage non-zero — nothing is written
     outside the bundle output tree, preserving ADR-0009's all-or-nothing
     barrier for chained stages. ``run_cmd`` injects the Exec boundary — the
-    recorded-invocation surface the tests drive.
+    recorded-invocation surface the tests drive; ``gitio`` the git adapter.
+
+    Config and the output tree anchor to the CHECKOUT ROOT (``gitio.repo_root``,
+    like ``prepare``), not the process cwd: ``load_config`` reads ``.shipit.toml``
+    from that exact dir without walking parents, so rooting at cwd would make a
+    run from a subdirectory silently see zero artifacts and mis-anchor ``--out``.
     """
     run_cmd = run_cmd or _run_compose
-    root = Path(".").resolve()
+    root_s = gitio.repo_root(cwd=".")
+    if root_s is None:
+        raise ReleaseError(
+            "not inside a git checkout — `release bundle` composes a checkout's "
+            "build outputs"
+        )
+    root = Path(root_s)
     cfg = load_config(root)
     entries = config.load_toolchains(cfg)
     artifacts = config.load_artifacts(cfg)
@@ -700,6 +712,7 @@ def run_assert_bundle(
     artifact: str | None = None,
     expected: str | None = None,
     as_json: bool = False,
+    gitio: Any = git,
 ) -> int:
     """Run the integrity guard over the bundle tree at ``tree``. Returns 0/1.
 
@@ -712,10 +725,20 @@ def run_assert_bundle(
     actual names lands on stderr (exit 1), so the WS06 blocks — the signer's
     entry and the unsigned publish path — call this with no extra plumbing;
     ``--json`` renders the same typed verdict on stdout either way.
+
+    The artifact-map branch anchors config to the CHECKOUT ROOT
+    (``gitio.repo_root``), not the process cwd: ``load_config`` does not walk
+    up to ``.shipit.toml``, so a run from a subdirectory would otherwise misread
+    the repo as declaring zero artifacts. ``--expected`` needs no checkout.
     """
     if expected is None:
-        root = Path(".").resolve()
-        artifacts = config.load_artifacts(load_config(root))
+        root_s = gitio.repo_root(cwd=".")
+        if root_s is None:
+            raise ReleaseError(
+                "not inside a git checkout — resolve the expected name from the "
+                "artifact map, or pass --expected NAME"
+            )
+        artifacts = config.load_artifacts(load_config(Path(root_s)))
         if artifact is not None:
             match = next((a for a in artifacts if a.name == artifact), None)
             if match is None:

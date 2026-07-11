@@ -148,19 +148,64 @@ def _compose_archive(req: ComposeRequest) -> Composed:
         )
     stem = f"{req.artifact.name}-{req.target}"
     stage = req.out_dir / stem
-    stage.mkdir(parents=True, exist_ok=True)
+    if stage.exists():
+        # A rerun rebuilds the staging subdir from scratch: reusing it
+        # (exist_ok=True) would leave files a PRIOR build shipped but the
+        # current one no longer has, and the archiver would re-pack them —
+        # `zip -r` UPDATES an existing archive in place rather than replacing
+        # it, so stale payload would survive into the artifact (mac-app
+        # already replaces its staged tree for the same reason).
+        shutil.rmtree(stage)
+    stage.mkdir(parents=True)
     shutil.copy2(binary, stage / binary.name)
     for doc in DOC_FILES:
         doc_path = req.root / doc
         if doc_path.is_file():
             shutil.copy2(doc_path, stage / doc)
+    archive = f"{stem}.zip" if windows else f"{stem}.tar.gz"
+    archive_path = req.out_dir / archive
+    if archive_path.exists():
+        # `zip -r` merges into an existing archive; even for tar we recreate
+        # from a clean slate so a rerun's artifact is exactly the fresh tree.
+        archive_path.unlink()
     if windows:
-        archive = f"{stem}.zip"
         req.run_cmd(["zip", "-r", archive, stem], req.out_dir)
     else:
-        archive = f"{stem}.tar.gz"
         req.run_cmd(["tar", "-czf", archive, stem], req.out_dir)
     return Composed(req.artifact.name, "archive", (archive, f"{stem}/"))
+
+
+def _emit_into_out(
+    req: ComposeRequest, argv: Sequence[str], out_flag: str, cwd: Path
+) -> list[str]:
+    """Run ``argv`` with ``out_flag`` pointing at a FRESH scratch dir under
+    the output tree, then move whatever it wrote into ``out_dir`` (overwriting
+    stale same-named files) and return the produced names, sorted.
+
+    Isolating the tool's writes in a per-artifact scratch dir makes the
+    produced set exactly what THIS run emitted: the old before/after
+    subtraction over the shared ``out_dir`` misread a rerun that OVERWROTE an
+    identically-named artifact (the common case — same version, same target)
+    as "produced nothing" and hard-failed. The scratch dir is always removed,
+    including on a composition-command failure.
+    """
+    req.out_dir.mkdir(parents=True, exist_ok=True)
+    scratch = req.out_dir / f".tmp-{req.artifact.name}"
+    if scratch.exists():
+        shutil.rmtree(scratch)
+    scratch.mkdir(parents=True)
+    try:
+        req.run_cmd([*argv, out_flag, str(scratch)], cwd)
+        produced = sorted(p.name for p in scratch.iterdir())
+        for name in produced:
+            dest = req.out_dir / name
+            if dest.exists():
+                dest.unlink()
+            shutil.move(str(scratch / name), str(dest))
+    finally:
+        if scratch.exists():
+            shutil.rmtree(scratch)
+    return produced
 
 
 def _compose_deb(req: ComposeRequest) -> Composed:
@@ -171,8 +216,6 @@ def _compose_deb(req: ComposeRequest) -> Composed:
         (t.package for t in req.artifact.build if t.toolchain == "rust" and t.package),
         None,
     )
-    req.out_dir.mkdir(parents=True, exist_ok=True)
-    before = {p.name for p in req.out_dir.glob("*.deb")}
     argv = ["cargo", "deb", "--no-build", "--no-strip"]
     if package is not None:
         argv += ["-p", package]
@@ -181,9 +224,8 @@ def _compose_deb(req: ComposeRequest) -> Composed:
         # build-deb contract) — passed through only when the caller declared
         # one, because it also redirects which target/ dir cargo-deb reads.
         argv += ["--target", req.target]
-    argv += ["--output", str(req.out_dir)]
-    req.run_cmd(argv, req.root / leg.path)
-    produced = sorted({p.name for p in req.out_dir.glob("*.deb")} - before)
+    emitted = _emit_into_out(req, argv, "--output", req.root / leg.path)
+    produced = [name for name in emitted if name.endswith(".deb")]
     if not produced:
         raise ReleaseError(
             f"[artifacts.{req.artifact.name}] deb composition: cargo deb "
@@ -197,10 +239,7 @@ def _compose_wheel(req: ComposeRequest) -> Composed:
     """``uv build`` into the bundle output tree; BOTH the wheel and the sdist
     must appear — one build, consumed by multiple publish targets."""
     leg = _leg_for(req.artifact, req.entries, "python", "wheel")
-    req.out_dir.mkdir(parents=True, exist_ok=True)
-    before = {p.name for p in req.out_dir.iterdir()}
-    req.run_cmd(["uv", "build", "--out-dir", str(req.out_dir)], req.root / leg.path)
-    produced = {p.name for p in req.out_dir.iterdir()} - before
+    produced = _emit_into_out(req, ["uv", "build"], "--out-dir", req.root / leg.path)
     wheels = sorted(name for name in produced if name.endswith(".whl"))
     sdists = sorted(name for name in produced if name.endswith(".tar.gz"))
     if not wheels or not sdists:

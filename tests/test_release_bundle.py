@@ -148,6 +148,35 @@ def test_archive_without_a_built_binary_refuses(tmp_path):
     assert recorder.calls == []  # nothing ran, nothing written
 
 
+def _tar_writes(argv, cwd):
+    # tar/zip: write the named archive so the rerun path (unlink + recreate) is
+    # exercised for real.
+    (cwd / argv[2]).write_bytes(b"archive")
+
+
+def test_archive_rerun_rebuilds_the_stage_and_replaces_the_archive(tmp_path):
+    # A rerun must reflect the CURRENT build outputs: a doc a prior run shipped
+    # but that is now gone must not survive in the staging dir (zip -r would
+    # otherwise re-pack it), and the stale archive is replaced, not merged.
+    (artifact,) = _artifacts(
+        {"lex": {"build": ["rust"], "bundle": {"composition": "archive"}}}
+    )
+    entries = _entries({".": "rust"})
+    _executable(tmp_path / "target/release/lex")
+    stem = f"lex-{LINUX}"
+    stage = tmp_path / "dist" / stem
+    stage.mkdir(parents=True)
+    (stage / "STALE.md").write_text("a doc a prior run shipped")
+    (tmp_path / "dist" / f"{stem}.tar.gz").write_bytes(b"old")
+    recorder = RunRecorder({"tar": _tar_writes})
+
+    bundle_mod.ARCHIVE.compose(_request(tmp_path, artifact, entries, run_cmd=recorder))
+
+    assert not (stage / "STALE.md").exists()  # staging dir rebuilt from scratch
+    assert (stage / "lex").is_file()
+    assert (tmp_path / "dist" / f"{stem}.tar.gz").read_bytes() == b"archive"
+
+
 # --------------------------------------------------------------------------
 # deb — cargo-deb over the pre-built binary
 # --------------------------------------------------------------------------
@@ -177,6 +206,9 @@ def test_deb_invokes_cargo_deb_no_rebuild_no_strip(tmp_path):
         _request(tmp_path, artifact, _entries({".": "rust"}), run_cmd=recorder)
     )
 
+    # cargo-deb writes into a per-artifact scratch dir under the output tree;
+    # bundle then moves the .deb into `dist/` (rerun-safe: an overwrite of the
+    # same name is no longer misread as "produced nothing").
     assert recorder.calls == [
         (
             (
@@ -187,7 +219,7 @@ def test_deb_invokes_cargo_deb_no_rebuild_no_strip(tmp_path):
                 "-p",
                 "lex-cli",
                 "--output",
-                str(tmp_path / "dist"),
+                str(tmp_path / "dist" / ".tmp-lex-cli"),
             ),
             tmp_path,  # cwd at the rust leg's map path
         )
@@ -195,6 +227,8 @@ def test_deb_invokes_cargo_deb_no_rebuild_no_strip(tmp_path):
     assert composed == bundle_mod.Composed(
         "lex-cli", "deb", ("lex-cli_1.0.0-1_amd64.deb",)
     )
+    assert (tmp_path / "dist" / "lex-cli_1.0.0-1_amd64.deb").is_file()
+    assert not (tmp_path / "dist" / ".tmp-lex-cli").exists()
 
 
 def test_deb_rides_an_explicitly_declared_target(tmp_path):
@@ -226,6 +260,32 @@ def test_deb_hard_fails_when_no_deb_appears(tmp_path):
         bundle_mod.DEB.compose(
             _request(tmp_path, artifact, _entries({".": "rust"}), run_cmd=recorder)
         )
+
+
+def test_deb_rerun_overwrites_an_existing_same_named_deb(tmp_path):
+    # The common rerun case (same version, same target): an identically-named
+    # .deb already sits in the output tree. The old before/after subtraction
+    # misread the overwrite as "produced no .deb"; the scratch-dir emit sees it.
+    (artifact,) = _artifacts(
+        {
+            "lex-cli": {
+                "build": [{"toolchain": "rust", "package": "lex-cli"}],
+                "bundle": {"composition": "deb"},
+            }
+        }
+    )
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / "lex-cli_1.0.0-1_amd64.deb").write_bytes(b"stale")
+    recorder = RunRecorder({"cargo": _deb_effect()})
+
+    composed = bundle_mod.DEB.compose(
+        _request(tmp_path, artifact, _entries({".": "rust"}), run_cmd=recorder)
+    )
+
+    assert composed.outputs == ("lex-cli_1.0.0-1_amd64.deb",)
+    assert (dist / "lex-cli_1.0.0-1_amd64.deb").read_bytes() == b"deb"  # fresh
+    assert not (dist / ".tmp-lex-cli").exists()
 
 
 def test_deb_without_a_rust_leg_refuses(tmp_path):
@@ -265,12 +325,17 @@ def test_wheel_builds_both_wheel_and_sdist_into_the_out_tree(tmp_path):
         _request(tmp_path, artifact, _entries({".": "python"}), run_cmd=recorder)
     )
 
+    # uv builds into a per-artifact scratch dir under the output tree; bundle
+    # then moves the wheel + sdist into `dist/` (rerun-safe overwrite).
     assert recorder.calls == [
-        (("uv", "build", "--out-dir", str(tmp_path / "dist")), tmp_path)
+        (("uv", "build", "--out-dir", str(tmp_path / "dist" / ".tmp-pkg")), tmp_path)
     ]
     assert composed == bundle_mod.Composed(
         "pkg", "wheel", ("pkg-1.0.0-py3-none-any.whl", "pkg-1.0.0.tar.gz")
     )
+    assert (tmp_path / "dist" / "pkg-1.0.0-py3-none-any.whl").is_file()
+    assert (tmp_path / "dist" / "pkg-1.0.0.tar.gz").is_file()
+    assert not (tmp_path / "dist" / ".tmp-pkg").exists()
 
 
 @pytest.mark.parametrize(
@@ -286,6 +351,26 @@ def test_wheel_requires_both_halves(tmp_path, produced, missing):
         bundle_mod.WHEEL.compose(
             _request(tmp_path, artifact, _entries({".": "python"}), run_cmd=recorder)
         )
+
+
+def test_wheel_rerun_overwrites_existing_same_named_outputs(tmp_path):
+    # Same rerun hazard as deb: identically-named wheel + sdist already present.
+    (artifact,) = _artifacts(
+        {"pkg": {"build": ["python"], "bundle": {"composition": "wheel"}}}
+    )
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / "pkg-1.0.0-py3-none-any.whl").write_bytes(b"stale")
+    (dist / "pkg-1.0.0.tar.gz").write_bytes(b"stale")
+    recorder = RunRecorder({"uv": _uv_effect()})
+
+    composed = bundle_mod.WHEEL.compose(
+        _request(tmp_path, artifact, _entries({".": "python"}), run_cmd=recorder)
+    )
+
+    assert composed.outputs == ("pkg-1.0.0-py3-none-any.whl", "pkg-1.0.0.tar.gz")
+    assert (dist / "pkg-1.0.0-py3-none-any.whl").read_bytes() == b"pkg"  # fresh
+    assert not (dist / ".tmp-pkg").exists()
 
 
 # --------------------------------------------------------------------------
@@ -436,6 +521,10 @@ endpoints = ["gh-release"]
 def _repo(tmp_path, monkeypatch, toml=REPO_TOML):
     (tmp_path / ".shipit.toml").write_text(toml, encoding="utf-8")
     monkeypatch.chdir(tmp_path)
+    # bundle anchors config and the output tree to the checkout root (not cwd),
+    # so a run from a subdirectory sees the same map; the tmp repo is not a git
+    # checkout, so stub the adapter to report its root.
+    monkeypatch.setattr(release_verb.git, "repo_root", lambda *, cwd: str(tmp_path))
     return tmp_path
 
 
@@ -520,3 +609,13 @@ def test_bundle_refuses_an_underivable_host_target(tmp_path, monkeypatch, capsys
     rc = release_verb.run_bundle(run_cmd=RunRecorder())
     assert rc == 1
     assert "pass --target" in capsys.readouterr().err
+
+
+def test_bundle_refuses_outside_a_git_checkout(tmp_path, monkeypatch, capsys):
+    # Config and the output tree anchor to the checkout root; without one the
+    # stage refuses loudly instead of silently reading zero artifacts from cwd.
+    _repo(tmp_path, monkeypatch)
+    monkeypatch.setattr(release_verb.git, "repo_root", lambda *, cwd: None)
+    rc = release_verb.run_bundle(target=LINUX, run_cmd=RunRecorder())
+    assert rc == 1
+    assert "not inside a git checkout" in capsys.readouterr().err

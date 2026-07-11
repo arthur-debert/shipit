@@ -211,6 +211,10 @@ main-binary = "phos"
 def _repo(tmp_path, monkeypatch, toml=REPO_TOML):
     (tmp_path / ".shipit.toml").write_text(toml, encoding="utf-8")
     monkeypatch.chdir(tmp_path)
+    # assert-bundle anchors config to the checkout root (not cwd), so the map
+    # branch resolves the same from any subdirectory; the tmp repo is not a git
+    # checkout, so stub the adapter to report its root.
+    monkeypatch.setattr(release_verb.git, "repo_root", lambda *, cwd: str(tmp_path))
     return tmp_path
 
 
@@ -254,11 +258,24 @@ def test_verb_json_renders_the_typed_verdict_even_on_failure(
 
 def test_verb_expected_flag_bypasses_the_artifact_map(tmp_path, monkeypatch, capsys):
     # No .shipit.toml at all: --expected needs no config (the WS06 blocks'
-    # no-extra-plumbing path).
+    # no-extra-plumbing path) — and no checkout either.
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(release_verb.git, "repo_root", lambda *, cwd: None)
     _make_app(tmp_path / "dist")
     rc = release_verb.run_assert_bundle(str(tmp_path / "dist"), expected="phos")
     assert rc == 0
+
+
+def test_verb_map_branch_refuses_outside_a_git_checkout(tmp_path, monkeypatch, capsys):
+    # Without --expected the expected name resolves from the artifact map, which
+    # is anchored to the checkout root; no checkout is a loud refusal, not a
+    # misread of cwd as declaring zero artifacts.
+    root = _repo(tmp_path, monkeypatch)
+    (root / "dist").mkdir()
+    monkeypatch.setattr(release_verb.git, "repo_root", lambda *, cwd: None)
+    rc = release_verb.run_assert_bundle(str(root / "dist"))
+    assert rc == 1
+    assert "not inside a git checkout" in capsys.readouterr().err
 
 
 def test_verb_refuses_an_unknown_artifact(tmp_path, monkeypatch, capsys):
