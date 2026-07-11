@@ -895,6 +895,34 @@ def test_render_curve_report_carries_the_honesty_markers():
     assert "baseline ctl (control):" in text
 
 
+def test_render_curve_report_labels_a_treatment_baseline_by_its_axis():
+    """A composition cell's IMMEDIATE baseline is an intermediate treatment,
+    not the control (sevtiers-informed baselines fanout-sevtiers, #719). The
+    baseline heading must cite that baseline's own axis, never mislabel it
+    `(control)` — only the self-baselined control arm reads `(control)`."""
+    fixture = _curve_fixture()
+    curve = convergence_curve(
+        _treatment_cell(sweeps=2), fixture, [], variant_hash="sha256:base"
+    )
+    treatment_baseline = parse_cell(
+        {
+            "schema": 1,
+            "id": "mid",
+            "baseline": "ctl",
+            "axis": "dimensions",
+            "fixture": {"version": 1, "prs": ["widget-1"]},
+            "pipeline": {"shape": "single"},
+            "sweeps": {"count": 2},
+        }
+    )
+    baseline_curve = convergence_curve(
+        treatment_baseline, fixture, [], variant_hash="sha256:base"
+    )
+    text = render_curve_report(curve, baseline_curve)
+    assert "baseline mid (axis: dimensions):" in text
+    assert "(control)" not in text
+
+
 # --- the CLI verbs (thin boundary + acceptance end-to-end) ---------------------------
 
 
@@ -1074,7 +1102,7 @@ def test_lab_run_refuses_a_cyclic_baseline_chain(tmp_path, capsys):
     assert rc == 1
     err = capsys.readouterr().err
     assert err.startswith("error:") and "cyclic baseline chain" in err
-    assert "a -> b -> a" in err
+    assert "'a' -> 'b' -> 'a'" in err  # ids quoted (repr) so control chars can't leak
 
 
 def test_lab_report_missing_baseline_file_is_one_clean_error_line(tmp_path, capsys):
@@ -1180,11 +1208,16 @@ def test_the_committed_cells_load_and_pair_fairly():
     from shipit.review.groundtruth import load_fixture
 
     cells_dir = Path("lab/cells")
-    control = load_cell(cells_dir / "fanout-baseline.toml")
-    treatments = [
-        load_cell(cells_dir / f"{stem}.toml")
-        for stem in ("fanout-informed", "fanout-sevtiers", "sevtiers-informed")
-    ]
+    # Discover EVERY committed cell so a newly added one is covered without
+    # editing this test: partition by is_control (exactly one control), and an
+    # unauthorized new cell trips the allowed_deltas KeyError below (agy
+    # review). A hardcoded stem list would silently skip a new cell's
+    # lineage/fairness checks and let the docstring's "Every" claim lapse.
+    cells = [load_cell(path) for path in sorted(cells_dir.glob("*.toml"))]
+    controls = [c for c in cells if c.is_control]
+    treatments = [c for c in cells if not c.is_control]
+    assert len(controls) == 1, "exactly one committed control cell expected"
+    control = controls[0]
     fixture = load_fixture(Path("lab/fixture.toml"))
     assert fixture.version == control.fixture_version
     assert control.is_control

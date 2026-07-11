@@ -674,9 +674,12 @@ def check_baseline_lineage(
     while not current.is_control:
         parent = resolve_baseline(current)
         if parent.id in visited:
+            trail = " -> ".join(
+                repr(cid) for cid in (*(c.id for c in chain), parent.id)
+            )
             raise CellError(
                 f"cell {cell.id!r} has a cyclic baseline chain "
-                f"({' -> '.join([*(c.id for c in chain), parent.id])}) — a "
+                f"({trail}) — a "
                 "baseline chain must terminate at a control cell "
                 "(baseline == id), so a cell can never be its own ancestor"
             )
@@ -703,7 +706,7 @@ def load_baseline_lineage(
             raise CellError(
                 f"cell {current.id!r} names baseline {current.baseline!r}, "
                 f"but {current.baseline!r} has no cell file in cells dir "
-                f"{cells_dir} ({path} does not exist) — every link of the "
+                f"{cells_dir} ({str(path)!r} does not exist) — every link of the "
                 "baseline chain is part of the reviewed lineage; commit the "
                 "missing cell first"
             )

@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..finding import Severity
-from .cell import Cell, key_tuple
+from .cell import CONTROL_AXIS, Cell, key_tuple
 from .groundtruth import Fixture
 from .labrun import plan_points, resolve_pins
 from .scorer import UNDERPOWERED_FLOOR, VariantScore, score_records
@@ -338,7 +338,10 @@ def render_curve_report(curve: CellCurve, baseline: CellCurve | None = None) -> 
     cell's curve rendered with the SAME machinery, so the equal-budget
     comparison — recall per Mtok and per minute at every cumulative sweep
     point — reads off two adjacent lines instead of being computed in the
-    reader's head.
+    reader's head. The baseline heading marks what that curve IS: ``(control)``
+    only when the baseline is the control arm, else its own ``(axis: …)`` — a
+    composition cell's immediate baseline is an intermediate treatment (#719),
+    never the control, so labelling it ``(control)`` would misread the lineage.
     """
     lines = [
         f"convergence curve — cell {_sanitize(curve.cell_id)} "
@@ -351,8 +354,13 @@ def render_curve_report(curve: CellCurve, baseline: CellCurve | None = None) -> 
     lines += _curve_lines(curve, title=f"cell {_sanitize(curve.cell_id)}:")
     if baseline is not None:
         lines.append("")
+        kind = (
+            "control"
+            if baseline.axis == CONTROL_AXIS
+            else f"axis: {_sanitize(baseline.axis)}"
+        )
         lines += _curve_lines(
             baseline,
-            title=f"baseline {_sanitize(baseline.cell_id)} (control):",
+            title=f"baseline {_sanitize(baseline.cell_id)} ({kind}):",
         )
     return "\n".join(lines) + "\n"

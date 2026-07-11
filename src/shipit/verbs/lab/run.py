@@ -45,7 +45,7 @@ def run(
     base_dir: Path | None = None,
     launcher=None,
 ) -> int:
-    """Load + validate → fair-pair check → execute the sweep plan. Exit code.
+    """Load + lineage check → execute the sweep plan. Exit code.
 
     ``cell_ref`` is a path to a cell file, or a cell id under ``cells_dir``
     (default ``lab/cells/``). A treatment cell's WHOLE baseline chain must
