@@ -3,9 +3,12 @@
 Fixture-driven over the PRD Testing Decisions' named cases: the SYNC set
 (what gh-setup provisions), the VALIDATION set (what preflight checks — see
 ``test_release_preflight.py`` for the plan-scoped side), ORPHANS, and
-MISSING-SOURCE errors. Plus the two cannot-drift guards: the endpoint
+MISSING-SOURCE errors. Plus the reviewer credential derivation (#740, option
+C): declared funnel reviewers contribute their App credential pair to the
+PROVISIONING projection only. And the two cannot-drift guards: the endpoint
 registry keys mirror the closed config set, and the cross-org caller's
-``secrets:`` block lists exactly the gh-setup sync set (story 46).
+``secrets:`` block lists exactly the RELEASE-side sync set (story 46) — never
+a reviewer credential (ADR-0040 boundary).
 """
 
 import tomllib
@@ -147,11 +150,19 @@ def test_declared_source_nothing_requires_is_an_orphan():
     assert secretreq.orphans(_artifacts(PYTHON_PKG), sources) == ("NPM_TOKEN",)
 
 
-def test_extra_required_names_are_not_orphans():
-    # gh-setup's non-release requirements (the seeded App secrets) ride in.
-    sources = _sources('[secrets]\nFUNNEL_PEM = { doppler = "FUNNEL_PEM" }\n')
-    assert secretreq.orphans((), sources) == ("FUNNEL_PEM",)
-    assert secretreq.orphans((), sources, extra_required=("FUNNEL_PEM",)) == ()
+def test_reviewer_declared_app_secrets_are_not_orphans():
+    # #740: an App credential rides the derived set like every other name —
+    # declared reviewer → required (never orphan); undeclared → normal orphan.
+    sources = _sources(
+        "[secrets]\n"
+        'CODEX_REVIEW_APP_PRIVATE_KEY = { doppler = "CODEX_REVIEW_APP_PRIVATE_KEY" }\n'
+        'CODEX_REVIEW_APP_ID = { doppler = "CODEX_REVIEW_APP_ID" }\n'
+    )
+    assert secretreq.orphans((), sources) == (
+        "CODEX_REVIEW_APP_PRIVATE_KEY",
+        "CODEX_REVIEW_APP_ID",
+    )
+    assert secretreq.orphans((), sources, reviewers=("codex",)) == ()
 
 
 def test_tolerated_names_are_never_orphans():
@@ -163,6 +174,72 @@ def test_tolerated_names_are_never_orphans():
         'RELEASE_TOKEN = { env = "GH_TOKEN", optional = true }\n'
     )
     assert secretreq.orphans((), sources) == ()
+
+
+# --------------------------------------------------------------------------
+# Reviewer credential derivation (#740, option C — the third input)
+# --------------------------------------------------------------------------
+
+
+def test_declared_funnel_reviewers_contribute_their_credential_pairs():
+    # One (PEM, App-id) pair per declared funnel reviewer, Backend-registry
+    # names, declaration order — exactly how endpoints contribute theirs.
+    names = secretreq.required_names((), reviewers=("codex", "agy"))
+    assert names == (
+        "CODEX_REVIEW_APP_PRIVATE_KEY",
+        "CODEX_REVIEW_APP_ID",
+        "AGY_REVIEW_APP_PRIVATE_KEY",
+        "AGY_REVIEW_APP_ID",
+    )
+
+
+def test_hosted_reviewers_contribute_no_credentials():
+    # Copilot/CodeRabbit/Gemini are the platform's identities, not ours to
+    # provision — the shipped default roster (copilot) derives nothing, so a
+    # reviewers-less/default repo is exactly as demanding as before.
+    assert secretreq.required_names((), reviewers=("copilot",)) == ()
+    assert secretreq.requirements((), reviewers=("coderabbit", "gemini")) == ()
+
+
+def test_reviewer_requirements_name_their_declaring_reviewer():
+    # Story 45's error anchor: the failure names the [reviewers] declaration.
+    reqs = secretreq.requirements((), reviewers=("codex",))
+    assert [(r.name, r.required_by) for r in reqs] == [
+        ("CODEX_REVIEW_APP_PRIVATE_KEY", "reviewer codex ([reviewers] declaration)"),
+        ("CODEX_REVIEW_APP_ID", "reviewer codex ([reviewers] declaration)"),
+    ]
+
+
+def test_reviewer_requirements_ride_after_the_artifact_traversal():
+    names = secretreq.required_names(_artifacts(PYTHON_PKG), reviewers=("agy",))
+    assert names == (
+        "RELEASE_TOKEN",
+        "PYPI_TOKEN",
+        "AGY_REVIEW_APP_PRIVATE_KEY",
+        "AGY_REVIEW_APP_ID",
+    )
+
+
+def test_declared_reviewer_with_unsourced_credentials_is_missing():
+    # The #740 behavior change: a repo with a reviewer declared and a pruned
+    # [secrets] source FAILS the sync — loud at gh-setup, not at review-post.
+    sources = _sources(
+        "[secrets]\n"
+        'CODEX_REVIEW_APP_PRIVATE_KEY = { doppler = "CODEX_REVIEW_APP_PRIVATE_KEY" }\n'
+    )
+    missing = secretreq.missing_sources((), sources, reviewers=("codex",))
+    assert [(m.name, m.required_by) for m in missing] == [
+        ("CODEX_REVIEW_APP_ID", "reviewer codex ([reviewers] declaration)")
+    ]
+
+
+def test_secrets_block_never_carries_reviewer_credentials():
+    # The ADR-0040 boundary: reviewer App credentials are repository
+    # provisioning (gh-setup), never part of the reusable release workflow's
+    # forwarded secrets — secrets_block has no reviewers input at all.
+    block = secretreq.secrets_block(_artifacts(RUST_CLI))
+    for backend_name in secretreq.reviewer_requirements(("codex", "agy")):
+        assert backend_name.name not in block
 
 
 # --------------------------------------------------------------------------

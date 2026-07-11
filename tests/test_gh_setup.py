@@ -12,13 +12,27 @@ from typing import Any
 
 import pytest
 
-from shipit import config, execrun, ghsetup
+from shipit import config, execrun, ghsetup, redact
 from shipit.config import SecretSource
 from shipit.identity import Revision, WorkingDir, repo_from_slug
 from shipit.verbs import gh_setup as gh_setup_verb
 from shipit.verbs._context import RootContext
 
 REPO = repo_from_slug("o/r")
+
+
+@pytest.fixture(autouse=True)
+def _clean_redactor_registry():
+    """Secret resolution must not leak process-lifetime redactor state.
+
+    Production deliberately retains every fetched value for the process lifetime,
+    but this module resolves many synthetic values across otherwise independent
+    tests.  Clear the test seam around each case so short fixtures such as an App
+    id cannot redact unrelated later records (for example, timestamp digits).
+    """
+    redact.clear_registered_secrets()
+    yield
+    redact.clear_registered_secrets()
 
 
 def get_rule(ruleset: dict[str, Any], rule_type: str) -> dict[str, Any]:
@@ -404,6 +418,77 @@ def test_setup_missing_source_fails_naming_the_requiring_entry(
     assert report.secrets_failed == 1  # → the verb's rc 1
 
 
+def test_setup_reads_reviewers_and_provisions_their_credentials(
+    fake_gh, monkeypatch, tmp_path
+):
+    """#740 end-to-end: the [reviewers] table is the third derivation input —
+    a declared funnel reviewer's sourced credential pair is pushed."""
+    monkeypatch.setattr(ghsetup.gh, "default_branch", lambda repo: "main")
+    monkeypatch.setattr(ghsetup.checks_mod, "discover", lambda *a, **k: ["c / check"])
+    monkeypatch.setenv("VAR_PEM", "pem")
+    monkeypatch.setenv("VAR_ID", "42")
+    # A direct caller may supply any filename; all policy tables must come from
+    # that exact file rather than re-discovering a sibling `.shipit.toml`.
+    cfg = tmp_path / "custom-policy.toml"
+    cfg.write_text(
+        "[reviewers]\ncodex = {}\n"
+        "[secrets]\n"
+        'CODEX_REVIEW_APP_PRIVATE_KEY = { env = "VAR_PEM" }\n'
+        'CODEX_REVIEW_APP_ID = { env = "VAR_ID" }\n',
+        encoding="utf-8",
+    )
+
+    report = ghsetup.setup(REPO, config_path=str(cfg), dry_run=False)
+    assert report.secrets_error is None
+    assert [(s.name, s.action) for s in report.secrets] == [
+        ("CODEX_REVIEW_APP_PRIVATE_KEY", "set"),
+        ("CODEX_REVIEW_APP_ID", "set"),
+    ]
+    assert fake_gh.secrets == {
+        "CODEX_REVIEW_APP_PRIVATE_KEY": "pem",
+        "CODEX_REVIEW_APP_ID": "42",
+    }
+
+
+def test_setup_declared_reviewer_with_pruned_secrets_fails_the_sync(
+    fake_gh, monkeypatch, tmp_path
+):
+    """#740's deliberate behavior change, end-to-end: reviewers declared +
+    broken/pruned [secrets] → failed outcomes → rc 1, loud at sync time."""
+    monkeypatch.setattr(ghsetup.gh, "default_branch", lambda repo: "main")
+    monkeypatch.setattr(ghsetup.checks_mod, "discover", lambda *a, **k: ["c / check"])
+    cfg = tmp_path / ".shipit.toml"
+    cfg.write_text("[reviewers]\ncodex = {}\n[secrets]\n", encoding="utf-8")
+
+    report = ghsetup.setup(REPO, config_path=str(cfg), dry_run=False)
+    failed = [s for s in report.secrets if s.action == "failed"]
+    assert [s.name for s in failed] == [
+        "CODEX_REVIEW_APP_PRIVATE_KEY",
+        "CODEX_REVIEW_APP_ID",
+    ]
+    assert "reviewer codex ([reviewers] declaration)" in failed[0].reason
+    assert report.secrets_failed == 2  # → the verb's rc 1
+
+
+def test_setup_malformed_reviewers_degrades_like_a_config_error(
+    fake_gh, monkeypatch, tmp_path
+):
+    """A bad [reviewers] table is the same degraded-but-continuing posture as a
+    malformed [secrets]: ruleset/labels applied, the failure a report fact."""
+    monkeypatch.setattr(ghsetup.gh, "default_branch", lambda repo: "main")
+    monkeypatch.setattr(ghsetup.checks_mod, "discover", lambda *a, **k: ["c / check"])
+    cfg = tmp_path / "custom-policy.toml"
+    cfg.write_text("[reviewers]\nnotareviewer = {}\n", encoding="utf-8")
+
+    report = ghsetup.setup(REPO, config_path=str(cfg), dry_run=False)
+    assert report.secrets == ()
+    assert report.secrets_error is not None
+    assert "notareviewer" in report.secrets_error
+    assert str(cfg) in report.secrets_error
+    assert ".shipit.toml" not in report.secrets_error
+    assert report.ruleset.action == "created"  # the earlier passes still ran
+
+
 def test_sync_secrets_dry_run_reports_the_same_derivation(fake_gh, monkeypatch):
     """Dry-run previews the derived sync — would-push, missing, orphan — with
     zero resolution side effects (no doppler, no prompt, no env read)."""
@@ -415,7 +500,7 @@ def test_sync_secrets_dry_run_reports_the_same_derivation(fake_gh, monkeypatch):
         SecretSource("NPM_TOKEN", "env", "VAR_B", False),  # orphan
     ]
     outcomes = ghsetup.sync_secrets(
-        "o/r", artifacts, sources, dry_run=True, prompt=None
+        "o/r", artifacts, sources, reviewers=(), dry_run=True, prompt=None
     )
     assert [(o.name, o.action) for o in outcomes] == [
         ("RELEASE_TOKEN", "dry-run"),
@@ -425,17 +510,80 @@ def test_sync_secrets_dry_run_reports_the_same_derivation(fake_gh, monkeypatch):
     assert fake_gh.secrets == {}
 
 
-def test_sync_secrets_seeded_app_secrets_are_required_not_orphaned(
+def test_sync_secrets_declared_reviewer_app_secrets_are_required_and_pushed(
     fake_gh, monkeypatch
 ):
-    """The review funnel's registry-derived names ride the required set —
-    the seeded [secrets] scaffold never reads as drift."""
+    """#740 (option C): a declared funnel reviewer's credential pair rides the
+    derived required set — sourced → pushed, exactly like an endpoint token."""
+    monkeypatch.setenv("VAR_PEM", "pem")
+    monkeypatch.setenv("VAR_ID", "42")
+    sources = [
+        SecretSource("CODEX_REVIEW_APP_PRIVATE_KEY", "env", "VAR_PEM", False),
+        SecretSource("CODEX_REVIEW_APP_ID", "env", "VAR_ID", False),
+    ]
+    outcomes = ghsetup.sync_secrets(
+        "o/r", (), sources, reviewers=("codex",), dry_run=False, prompt=None
+    )
+    assert [(o.name, o.action) for o in outcomes] == [
+        ("CODEX_REVIEW_APP_PRIVATE_KEY", "set"),
+        ("CODEX_REVIEW_APP_ID", "set"),
+    ]
+    assert fake_gh.secrets == {
+        "CODEX_REVIEW_APP_PRIVATE_KEY": "pem",
+        "CODEX_REVIEW_APP_ID": "42",
+    }
+
+
+def test_sync_secrets_undeclared_seeded_app_secrets_are_orphans(fake_gh, monkeypatch):
+    """#740: the extra_required orphan exemption is gone — a seeded App pair
+    whose reviewer is NOT in [reviewers] is a normal orphan: flagged, never
+    resolved, never pushed."""
     monkeypatch.setenv("VAR_APP", "pem")
     (app_name, *_rest) = config.seeded_app_secrets()
     sources = [SecretSource(app_name, "env", "VAR_APP", False)]
-    outcomes = ghsetup.sync_secrets("o/r", (), sources, dry_run=False, prompt=None)
-    assert [(o.name, o.action) for o in outcomes] == [(app_name, "set")]
-    assert fake_gh.secrets == {app_name: "pem"}
+    outcomes = ghsetup.sync_secrets(
+        "o/r", (), sources, reviewers=(), dry_run=False, prompt=None
+    )
+    assert [(o.name, o.action) for o in outcomes] == [(app_name, "orphan")]
+    assert fake_gh.secrets == {}
+
+
+def test_sync_secrets_declared_reviewer_without_sources_fails_loud(fake_gh):
+    """#740's deliberate behavior change: reviewers declared + pruned [secrets]
+    source → the sync FAILS naming the declaring reviewer (rc 1 at gh-setup,
+    not a delayed break at review-posting time)."""
+    outcomes = ghsetup.sync_secrets(
+        "o/r", (), [], reviewers=("agy",), dry_run=False, prompt=None
+    )
+    assert [(o.name, o.action) for o in outcomes] == [
+        ("AGY_REVIEW_APP_PRIVATE_KEY", "failed"),
+        ("AGY_REVIEW_APP_ID", "failed"),
+    ]
+    assert all(
+        "reviewer agy ([reviewers] declaration)" in (o.reason or "") for o in outcomes
+    )
+    assert fake_gh.secrets == {}
+
+
+def test_sync_secrets_reviewer_credential_cannot_be_optional_skipped(
+    fake_gh, monkeypatch
+):
+    """A hand-edited `optional = true` on a declared reviewer's credential can
+    no longer sync "clean" while the value is absent (#740's failure mode):
+    the derivation wins over the flag — failed, not skipped."""
+    monkeypatch.delenv("VAR_MISSING", raising=False)
+    sources = [
+        SecretSource("CODEX_REVIEW_APP_PRIVATE_KEY", "env", "VAR_MISSING", True),
+        SecretSource("CODEX_REVIEW_APP_ID", "env", "VAR_MISSING", True),
+    ]
+    outcomes = ghsetup.sync_secrets(
+        "o/r", (), sources, reviewers=("codex",), dry_run=False, prompt=None
+    )
+    assert [(o.name, o.action) for o in outcomes] == [
+        ("CODEX_REVIEW_APP_PRIVATE_KEY", "failed"),
+        ("CODEX_REVIEW_APP_ID", "failed"),
+    ]
+    assert fake_gh.secrets == {}
 
 
 def test_sync_secrets_required_source_cannot_be_optional_skipped(fake_gh, monkeypatch):
@@ -449,7 +597,7 @@ def test_sync_secrets_required_source_cannot_be_optional_skipped(fake_gh, monkey
     )
     sources = [SecretSource("RELEASE_TOKEN", "env", "VAR_MISSING", True)]  # optional
     outcomes = ghsetup.sync_secrets(
-        "o/r", artifacts, sources, dry_run=False, prompt=None
+        "o/r", artifacts, sources, reviewers=(), dry_run=False, prompt=None
     )
     assert [(o.name, o.action) for o in outcomes] == [("RELEASE_TOKEN", "failed")]
     assert fake_gh.secrets == {}  # not skipped, not pushed — the sync fails loud

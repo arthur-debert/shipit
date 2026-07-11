@@ -7,14 +7,19 @@ they require (this module's closed tables); the repo's ``.shipit.toml
 secret name mapped to one doppler/env/prompt source — architecture.lex §6, the
 resolution pipeline in :mod:`shipit.secretsrc` unchanged). Deriving the
 required set is a pure traversal of the repo's declarations — the artifact
-map's endpoints, its ``sign`` declarations, and the prepare stage's push —
-consumed identically by:
+map's endpoints, its ``sign`` declarations, the prepare stage's push, and (a
+third derivation input, #740) the ``[reviewers]`` declarations, whose funnel
+backends contribute their GitHub-App credential pair off the Backend registry
+— consumed identically by:
 
 1. ``gh-setup``'s secrets sync (:mod:`shipit.ghsetup`): a required name with
    no declared source is a SYNC-TIME error naming the requiring entry (story
    45), and a declared/pushed secret nothing requires is flagged as an orphan
    — the derived set replaces push-everything-in-``[secrets]``, so a repo can
-   never under- or over-provision (story 44).
+   never under- or over-provision (story 44). gh-setup is the PROVISIONING
+   consumer: it is the one caller that passes ``reviewers`` (the validated
+   roster's required names), so reviewer App credentials are demanded exactly
+   where the repo runs App reviewers and orphan-flagged where it doesn't.
 2. preflight presence validation (:mod:`shipit.release.preflight`): the plan's
    ``secrets`` field is built from these same tables, scoped to the plan's
    live endpoints and stages (story 28's hard fail consumes it).
@@ -23,20 +28,31 @@ consumed identically by:
    cross-org consumers list every derived name explicitly (story 46); the
    WS06 caller generation renders this function's output.
 
+Consumers 2 and 3 are the RELEASE-ONLY projection: they never see the
+reviewer contribution (they take no ``reviewers``), because forwarding the
+review funnel's App credentials into the reusable release workflow contract
+would leak repository-provisioning concerns across the workflow-chain
+boundary (ADR-0040) — the release chain has no use for a review bot's PEM.
+
 Adding an endpoint adapter later is its :data:`ENDPOINT_SECRETS` entry (plus
 the adapter itself, WS05) — the derivation functions never change (story 43).
+Adding a funnel backend likewise is its Backend-registry entry alone: the
+reviewer traversal reads the registry's Doppler-key aliases, never a copy.
 
 Pure module: no I/O, no config parsing (it consumes the typed
 :class:`~shipit.config.Artifact` / :class:`~shipit.config.SecretSource`
-values), fixture-tested over the PRD Testing Decisions' named cases — sync
-set, validation set, orphans, missing-source errors.
+values and plain reviewer NAMES off an already-validated
+:class:`~shipit.prstate.roster.Roster`), fixture-tested over the PRD Testing
+Decisions' named cases — sync set, validation set, orphans, missing-source
+errors, reviewer credential pairs.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 
+from ..agent import backend as _backend
 from ..config import Artifact, SecretSource
 
 #: The prepare stage's requirement: its bump commit + tag push must pass the
@@ -103,16 +119,54 @@ class Requirement:
     required_by: str
 
 
-def requirements(artifacts: Sequence[Artifact]) -> tuple[Requirement, ...]:
+def reviewer_requirements(reviewers: Sequence[str]) -> tuple[Requirement, ...]:
+    """The credential requirements the ``[reviewers]`` declarations contribute
+    (#740, option C) — one (PEM, App-id) pair per declared FUNNEL reviewer.
+
+    ``reviewers`` are required-reviewer NAMES off the validated roster
+    (:attr:`shipit.prstate.roster.Roster.required_names` — canonical lowercase
+    adapter names). A local-agent reviewer's name IS its backend's funnel-agent
+    alias (``codex`` / ``agy``), so the pair derives from the Backend registry
+    (:pyattr:`~shipit.agent.backend.Backend.doppler_pem_key` /
+    :pyattr:`~shipit.agent.backend.Backend.doppler_app_id_key`) — the GitHub
+    secret NAME equals the Doppler key by seeding convention
+    (:func:`shipit.config.secrets_scaffold`). A hosted reviewer (copilot,
+    coderabbit, gemini) matches no funnel backend and contributes nothing —
+    its credentials are the platform's, not ours to provision.
+    """
+    reqs: list[Requirement] = []
+    for reviewer in reviewers:
+        try:
+            b = _backend.by_funnel_agent(reviewer)
+        except KeyError:
+            continue  # hosted reviewer — no App credential pair to provision
+        reqs.extend(
+            Requirement(
+                name=name, required_by=f"reviewer {reviewer} ([reviewers] declaration)"
+            )
+            for name in (b.doppler_pem_key, b.doppler_app_id_key)
+        )
+    return tuple(reqs)
+
+
+def requirements(
+    artifacts: Sequence[Artifact], *, reviewers: Sequence[str] = ()
+) -> tuple[Requirement, ...]:
     """The full derived requirement set — the repo's declarations traversed.
 
     Order is deterministic: prepare's push first (required as soon as any
     artifact declares an endpoint — the repo is release-capable), then per
     artifact in declaration order its endpoints (each via
     :data:`ENDPOINT_SECRETS`) and its ``sign`` declaration
-    (:data:`SIGN_MAC_SECRETS`). A name required by several entries appears
-    once per requiring entry — collapse with :func:`required_names` when
-    only the name set matters.
+    (:data:`SIGN_MAC_SECRETS`), then per declared reviewer its credential
+    pair (:func:`reviewer_requirements`). A name required by several entries
+    appears once per requiring entry — collapse with :func:`required_names`
+    when only the name set matters.
+
+    ``reviewers`` is the PROVISIONING-scope input (#740): gh-setup passes the
+    roster's required names; the release-only consumers (preflight, the
+    caller's :func:`secrets_block`) leave it empty on purpose — see the module
+    docstring's ADR-0040 boundary.
     """
     release_capable = any(artifact.endpoints for artifact in artifacts)
     reqs: list[Requirement] = [
@@ -139,51 +193,59 @@ def requirements(artifacts: Sequence[Artifact]) -> tuple[Requirement, ...]:
                 )
                 for name in SIGN_MAC_SECRETS
             )
+    reqs.extend(reviewer_requirements(reviewers))
     return tuple(reqs)
 
 
-def required_names(artifacts: Sequence[Artifact]) -> tuple[str, ...]:
+def required_names(
+    artifacts: Sequence[Artifact], *, reviewers: Sequence[str] = ()
+) -> tuple[str, ...]:
     """The derived requirement NAMES, deduplicated, first-seen order."""
     seen: dict[str, None] = {}
-    for req in requirements(artifacts):
+    for req in requirements(artifacts, reviewers=reviewers):
         seen[req.name] = None
     return tuple(seen)
 
 
 def missing_sources(
-    artifacts: Sequence[Artifact], sources: Sequence[SecretSource]
+    artifacts: Sequence[Artifact],
+    sources: Sequence[SecretSource],
+    *,
+    reviewers: Sequence[str] = (),
 ) -> tuple[Requirement, ...]:
     """The requirements no ``[secrets]`` entry sources — story 45's sync-time
     error set, each naming its requiring entry. One entry per (name,
     requiring entry) pair, so the report shows every declaration that goes
     unserved.
 
-    Scoped to the artifact-map DERIVATION (this module's registries). The
-    seeded App secrets are a separate concern: ``shipit install`` seeds their
-    ``[secrets]`` mappings (declared and non-optional,
-    :func:`shipit.config.plan_policy_seed`), so their DECLARATION is install's
-    job, not the sync's — gh-setup only keeps a declared one from being flagged
-    an orphan (:func:`orphans`)."""
+    With ``reviewers`` passed (gh-setup's provisioning scope, #740), a
+    declared funnel reviewer whose credential pair has no ``[secrets]`` source
+    is an error HERE — the sync fails loud where the repo opts the reviewer
+    in, instead of the App breaking later at review-posting time."""
     declared = {source.name for source in sources}
-    return tuple(req for req in requirements(artifacts) if req.name not in declared)
+    return tuple(
+        req
+        for req in requirements(artifacts, reviewers=reviewers)
+        if req.name not in declared
+    )
 
 
 def orphans(
     artifacts: Sequence[Artifact],
     sources: Sequence[SecretSource],
     *,
-    extra_required: Iterable[str] = (),
+    reviewers: Sequence[str] = (),
 ) -> tuple[str, ...]:
     """The declared ``[secrets]`` names NOTHING requires (story 45's orphan
     flag), in declaration order.
 
-    ``extra_required`` is the caller's non-release requirement set — gh-setup
-    passes the seeded App-secret names
-    (:func:`shipit.config.seeded_app_secrets`), which the review funnel
-    requires outside this module's registries. :data:`TOLERATED` names are
-    exempt by definition.
+    An App credential rides the derived set like every other requirement
+    (#740): declared reviewer → required, never an orphan; seeded-but-
+    undeclared (e.g. the install scaffold's codex/agy pairs on a repo whose
+    ``[reviewers]`` never opts them in) → a NORMAL orphan, flagged and not
+    pushed. :data:`TOLERATED` names are exempt by definition.
     """
-    keep = set(required_names(artifacts)) | set(extra_required) | set(TOLERATED)
+    keep = set(required_names(artifacts, reviewers=reviewers)) | set(TOLERATED)
     return tuple(source.name for source in sources if source.name not in keep)
 
 
@@ -200,6 +262,12 @@ def secrets_block(artifacts: Sequence[Artifact]) -> str:
     endpoints) yields the empty string — the block is omitted entirely rather
     than emitted as a bare ``secrets:`` key, which parses as ``secrets: null``
     and GitHub Actions rejects (it expects ``secrets`` to be a mapping).
+
+    Deliberately takes NO ``reviewers``: this is the RELEASE-ONLY projection
+    (#740 / ADR-0040 boundary). Reviewer App credentials are repository
+    provisioning (gh-setup's scope) — forwarding them here would leak the
+    review funnel's PEM/App-id into the reusable release workflow contract of
+    every cross-org consumer.
     """
     names = required_names(artifacts)
     if not names:

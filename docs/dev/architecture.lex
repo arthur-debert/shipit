@@ -191,6 +191,17 @@ the durable code is one slim versioned package; and configuration is explicit.
         secret explicitly with the mapped name. gh-setup pushes the secrets and
         the workflow caller reads the same map — they cannot diverge.
 
+        WHICH names must exist is never the table's call: gh-setup derives the
+        required set from the repo's declarations — the artifact map's
+        endpoints/sign/prepare traversal plus the `[reviewers]` table, where a
+        declared funnel reviewer (codex/agy) requires its GitHub App credential
+        pair off the Backend registry (#740). A required name with no source
+        fails the sync loud; a declared name nothing requires is an orphan,
+        flagged and not pushed. The reviewer contribution is provisioning-only:
+        the release-side projections (preflight's plan secrets, the caller's
+        `secrets:` block) never carry App credentials across the workflow-chain
+        boundary.
+
 7. The commit/push checks: one definition
 
     There is exactly one definition of these checks, invoked everywhere. lefthook is thin:

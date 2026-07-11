@@ -1146,9 +1146,13 @@ def write_manifest(path: str | Path, *, version: str, managed: dict[str, str]) -
 # The local-reviewer GitHub App credential mappings install seeds into a
 # consumer's ``[secrets]``. Each GitHub secret NAME is sourced from the Doppler
 # github/prd key of the SAME name; the credentials let a CI-side review post as the
-# App bot with the same key the local path sources directly (CI parity). The
-# generic gh-setup push only provisions a secret when its source RESOLVES, so
-# seeding the mapping is safe even before a consumer's GitHub App is installed.
+# App bot with the same key the local path sources directly (CI parity). Seeding
+# the mapping is safe even before a consumer's GitHub App is installed: gh-setup's
+# sync derives an App pair's REQUIREMENT from the consumer's ``[reviewers]``
+# declarations (#740, :func:`shipit.release.secretreq.reviewer_requirements`), so
+# a seeded pair whose reviewer is never opted in is flagged as an orphan (not
+# pushed, not demanded), and one whose reviewer IS declared must resolve or the
+# sync fails loud.
 #
 # The key NAMES are never spelled here: they DERIVE from the Backend registry
 # (:func:`shipit.agent.backend.funnel_backends` → ``doppler_pem_key`` /
@@ -1177,8 +1181,9 @@ _SECRETS_SCAFFOLD_HEADER = """\
 # [secrets] — repo Actions secrets. Each table key is the GitHub secret NAME; the
 # value names exactly one source ({ doppler = "KEY" } / { env = "VAR" } /
 # { prompt = true }). Seeded with shipit's local-reviewer (codex/agy) GitHub App
-# credentials, each sourced from Doppler github/prd. `shipit gh-setup` only pushes
-# a secret when its source resolves, so these are safe before the App is installed.
+# credentials, each sourced from Doppler github/prd. `shipit gh-setup` pushes an
+# App credential only when its reviewer is declared in [reviewers]; an undeclared
+# pair is flagged as an orphan (not pushed), so seeding is safe before opt-in.
 [secrets]"""
 
 
