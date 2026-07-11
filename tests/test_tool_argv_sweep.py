@@ -66,7 +66,12 @@ def _parsed(path: pathlib.Path) -> ast.Module:
 #: - ``tar`` / ``zip`` — the archiver invocations of the bundle compositions
 #:   (TOL02-WS03): assembled ONLY in the composition registry
 #:   (:mod:`shipit.release.bundle`) — the tarball/zip contract and the mac
-#:   reseal payload.
+#:   reseal payload. ``tar`` gains the signer unit
+#:   (:mod:`shipit.release.sign`, TOL02-WS04): the reseal payload's unpack.
+#: - ``codesign`` / ``security`` / ``xcrun`` / ``hdiutil`` — the mac signer
+#:   unit's tools (TOL02-WS04): assembled ONLY in
+#:   :mod:`shipit.release.sign` — keychain lifecycle, inner-first codesign,
+#:   hdiutil reseal, notarytool submit/poll/staple.
 #: - ``bin/check-e2e`` — the e2e harness registry's bats default
 #:   (TOL01-WS03): the script head is assembled ONLY in the closed harness
 #:   registry (:mod:`shipit.tools.e2e`); a declared ``e2e.harness`` argv is
@@ -92,8 +97,12 @@ _ADAPTER_HOMES: dict[str, tuple[str, ...]] = {
         "release/publish.py",
     ),
     "uv": ("tools/registry.py", "release/bundle.py"),
-    "tar": ("release/bundle.py",),
+    "tar": ("release/bundle.py", "release/sign.py"),
     "zip": ("release/bundle.py",),
+    "codesign": ("release/sign.py",),
+    "security": ("release/sign.py",),
+    "xcrun": ("release/sign.py",),
+    "hdiutil": ("release/sign.py",),
     # The publish-side endpoint adapters (TOL02-WS05): twine (pypi upload)
     # and ruby (the brew formula's `ruby -c` syntax check) are assembled
     # ONLY in the closed endpoint-adapter registry. `cargo publish` /

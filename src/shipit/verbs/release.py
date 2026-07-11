@@ -14,6 +14,11 @@ pipeline's planner and its effectful stages:
 - ``shipit release assert-bundle`` (TOL02-WS03 #561) — the scar-#2
   integrity guard (workflows.lex §3.2), the thin shell over the pure core
   (:mod:`shipit.release.integrity`);
+- ``shipit release sign`` (TOL02-WS04 #562) — the consumer-agnostic mac
+  signer unit (workflows.lex §3.1: reopen → resign inner-first → reseal →
+  notarize → staple), the thin shell over :mod:`shipit.release.sign` that
+  owns the scratch-dir lifecycle. Act-untestable (real macOS + real Apple
+  credentials); remote verification is the TOL02-WS07 lex rc.
 - ``shipit release publish`` (TOL02-WS05 #563) — the TERMINAL stage: the
   effectful walk over the closed endpoint-adapter registry
   (:mod:`shipit.release.publish`), dispatching each artifact's declared
@@ -84,7 +89,9 @@ import json
 import logging
 import os
 import platform
+import shutil
 import sys
+import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -100,6 +107,7 @@ from ..release import bundle as bundle_mod
 from ..release import integrity as integrity_mod
 from ..release import preflight as preflight_mod
 from ..release import publish as publish_mod
+from ..release import sign as sign_mod
 from ..release import version as version_mod
 from . import changelog as changelog_verb
 from ._errors import cli_errors
@@ -898,6 +906,101 @@ def run_assert_bundle(
 
 
 # --------------------------------------------------------------------------
+# The sign stage (TOL02-WS04): the consumer-agnostic mac signer unit
+# --------------------------------------------------------------------------
+
+
+def format_sign(result: sign_mod.SignResult) -> str:
+    """The text rendering of a :class:`~shipit.release.sign.SignResult`. Pure."""
+    staple = "stapled" if result.stapled else "staple failed (non-fatal)"
+    return "\n".join(
+        (
+            f"release: signed + notarized {result.app} -> {result.dmg}",
+            f"  identity  {result.identity}",
+            f"  nested    {result.nested_signed} nested signable(s) signed before the .app",
+            f"  notary    {result.submission_id} ({staple})",
+        )
+    )
+
+
+def _run_sign_cmd(argv: Sequence[str], timeout: float) -> execrun.ExecResult:
+    """Run one signer command through the one Exec runner (ADR-0028).
+
+    ``check=True``: a failing tool (a codesign refusal, a keychain collision,
+    an hdiutil error) raises :class:`~shipit.execrun.ExecError`, which the
+    shared error shell renders — the sign stage aborts non-zero with the
+    temporary keychain torn down and decoded credentials wiped by the core's
+    ``finally`` blocks. Each command's timeout is STATED by the core
+    (:mod:`shipit.release.sign`'s per-stage constants), never the runner's
+    implicit default.
+    """
+    return execrun.run(list(argv), timeout=timeout)
+
+
+@cli_errors
+def run_sign(
+    tree: str,
+    *,
+    out: str | None = None,
+    entitlements: str | None = None,
+    notary_timeout: int = sign_mod.DEFAULT_NOTARY_TIMEOUT_MIN,
+    as_json: bool = False,
+    run_cmd: sign_mod.RunCmd | None = None,
+    env: Mapping[str, str] | None = None,
+    uniq: Callable[[], str] | None = None,
+    mint_pass: Callable[[], str] | None = None,
+    sleep: Callable[[float], None] | None = None,
+) -> int:
+    """Run the sign stage over the bundle tree at ``tree``. Returns 0/1.
+
+    The consumer-agnostic transformer needs no git checkout and no
+    ``.shipit.toml``: its inputs are the tree (carrying the reseal payload +
+    at most one ``.dmg``) and the credential env vars, hard-failing with the
+    missing names when they are absent (:mod:`shipit.release.sign`). This
+    shell owns the scratch dir every intermediate lives under — removed whole
+    on any exit, so no decoded credential material and no half-signed
+    intermediate survives the run. ``run_cmd`` injects the Exec boundary (the
+    recorded-invocation surface the tests drive); ``env``/``uniq``/
+    ``mint_pass``/``sleep`` the credential source and nondeterminism seams.
+    """
+    run_cmd = run_cmd or _run_sign_cmd
+    tree_path = Path(tree)
+    out_arg = Path(out) if out else tree_path
+    seams: dict[str, Any] = {}
+    for name, value in (("uniq", uniq), ("mint_pass", mint_pass), ("sleep", sleep)):
+        if value is not None:
+            seams[name] = value
+    scratch = Path(tempfile.mkdtemp(prefix="shipit-sign-"))
+    try:
+        result = sign_mod.sign_bundle(
+            sign_mod.SignRequest(
+                tree=tree_path,
+                out_dir=out_arg,
+                scratch=scratch,
+                run_cmd=run_cmd,
+                env=os.environ if env is None else env,
+                entitlements=Path(entitlements) if entitlements else None,
+                timeout_minutes=notary_timeout,
+                **seams,
+            )
+        )
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+    emit(result, format_sign, as_json=as_json)
+    logger.info(
+        "release sign complete",
+        extra={
+            "app": result.app,
+            "dmg": result.dmg,
+            "submission_id": result.submission_id,
+            "stapled": result.stapled,
+            "nested_signed": result.nested_signed,
+        },
+    )
+    return 0
+
+
+# --------------------------------------------------------------------------
 # The publish stage (TOL02-WS05): staged Artifacts → Distribution endpoints
 # --------------------------------------------------------------------------
 
@@ -1160,10 +1263,12 @@ def release() -> None:
     validates it before anything is written; `prepare` resolves the supplied
     version, projects it into the manifests, and writes commit + annotated
     tag; `bundle` composes build outputs into the unsigned Artifacts and
-    `assert-bundle` guards their integrity (workflows.lex §3.2); `publish` —
-    the terminal stage — dispatches the staged Artifacts to their declared
+    `assert-bundle` guards their integrity (workflows.lex §3.2); `sign` is the
+    mac signer unit — it reopens an unsigned .app/.dmg bundle and reseals it
+    signed, notarized, and stapled (workflows.lex §3.1); `publish` — the
+    terminal stage — dispatches the staged Artifacts to their declared
     Distribution endpoints, gated by the scar-#3 refusal and the central RC
-    guard. The remaining stage (sign) lands as its work stream does.
+    guard.
     """
 
 
@@ -1291,6 +1396,68 @@ def assert_bundle_cmd(
     """
     raise SystemExit(
         run_assert_bundle(tree, artifact=artifact, expected=expected, as_json=as_json)
+    )
+
+
+@release.command(name="sign")
+@click.argument("tree", type=click.Path(exists=True, file_okay=False))
+@click.option(
+    "--out",
+    type=click.Path(file_okay=False),
+    help=(
+        "Stage the signed .dmg here (default: TREE itself, replacing the "
+        "unsigned .dmg under its original filename)."
+    ),
+)
+@click.option(
+    "--entitlements",
+    type=click.Path(exists=True, dir_okay=False),
+    help=(
+        "Entitlements plist applied when codesigning the top-level .app ONLY "
+        "(never its nested frameworks/helpers — that mis-application is what "
+        "the notary rejects; mac apps with QL/Spotlight extensions usually "
+        "need one)."
+    ),
+)
+@click.option(
+    "--notary-timeout",
+    type=click.IntRange(min=1),
+    default=sign_mod.DEFAULT_NOTARY_TIMEOUT_MIN,
+    show_default=True,
+    metavar="MIN",
+    help="Max minutes to wait for Apple's notary verdict before hard-failing.",
+)
+@json_option
+def sign_cmd(
+    tree: str,
+    out: str | None,
+    entitlements: str | None,
+    notary_timeout: int,
+    as_json: bool,
+) -> None:
+    """Sign, notarize, and staple an unsigned mac bundle tree.
+
+    The consumer-agnostic mac signer unit (workflows.lex 3.1): TREE carries
+    the unsigned .app reseal payload (<name>.unsigned-app.tar.gz) and at
+    most one .dmg. The unit unpacks the .app, codesigns every nested signable
+    (Mach-O files and nested bundle roots) inner-first and the .app LAST
+    (hardened runtime + timestamp), reseals
+    the .dmg from the SIGNED .app via hdiutil, codesigns it, notarizes +
+    staples, and stages the signed .dmg under the original dmg filename.
+    Runs on a mac laptop outside CI given the credential env vars; missing
+    signing or notary secrets is a hard fail naming the missing names —
+    there is no warn-and-skip (the unsigned path is upstream --unsigned
+    break-glass, never a skip in here). Act-untestable: remote verification
+    is the TOL02-WS07 lex rc.
+    """
+    raise SystemExit(
+        run_sign(
+            tree,
+            out=out,
+            entitlements=entitlements,
+            notary_timeout=notary_timeout,
+            as_json=as_json,
+        )
     )
 
 
