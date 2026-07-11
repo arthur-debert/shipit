@@ -273,8 +273,8 @@ def run_preflight(
     if missing:
         raise ReleaseError(
             f"missing required secrets: {', '.join(missing)} — the plan "
-            "cannot run to publish (story 28: fail here, before prepare "
-            "writes history)"
+            "cannot run to publish; failing now, before prepare writes any "
+            "history"
         )
     emit(release_plan, format_preflight, as_json=as_json)
     logger.info(
