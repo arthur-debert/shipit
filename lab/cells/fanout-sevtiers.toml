@@ -12,7 +12,7 @@ axis = "pass scoping: severity tiers vs concern dimensions"
 description = "Literature-config treatment of fanout-baseline: identical fan-out pipeline, passes scoped by severity tier (critical/high, medium, low) instead of concern dimension."
 
 [fixture]
-version = 38
+version = 39
 prs = ["core-440", "app-391", "lex-820"]
 
 [pipeline]

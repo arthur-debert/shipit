@@ -16,7 +16,7 @@ axis = "union dedup: semantic near-duplicate collapse vs exact-claim mechanical"
 description = "Semantic-dedup treatment of fanout-baseline: identical fan-out pipeline, same-round near-duplicates (same non-empty file and concrete line, or both file-scoped; wording differs) collapse through the deterministic #673 same-claim seam before posting."
 
 [fixture]
-version = 38
+version = 39
 prs = ["core-440", "app-391", "lex-820"]
 
 [pipeline]

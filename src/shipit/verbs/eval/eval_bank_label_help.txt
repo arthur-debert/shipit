@@ -3,3 +3,7 @@
 A label names the pinned PR range, file and optional line range, severity,
 verdict, claim, and provenance. This grows the benchmark when a reviewed
 emission identifies a real issue not already represented.
+
+Pass --defect FAMILY when the label is another valid anchor of an
+already-banked defect (for example the same defect emitted in a different
+file). Labels sharing a defect family count once for recall.

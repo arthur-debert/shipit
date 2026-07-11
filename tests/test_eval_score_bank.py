@@ -146,6 +146,42 @@ class TestBank:
         assert label.confirmed and label.verdict == "not-real"
         assert label.lines == (50, 60)
 
+    def test_bank_label_with_defect_joins_the_family(self, fixture_path):
+        # The second-anchor flow (#751): a cross-file emission of a banked
+        # defect banks as a new label sharing the family, coherent or loud.
+        argv = [
+            "label",
+            "--fixture",
+            str(fixture_path),
+            "--id",
+            "core-G2",
+            "--pr",
+            "core-440",
+            "--file",
+            "phos-editor/src/graph_session.rs",
+            "--severity",
+            "major",
+            "--verdict",
+            "real",
+            "--claim",
+            "the same staging estimate defect at its session anchor",
+            "--provenance",
+            "adjudication:sheet-3",
+            "--defect",
+            "core-staging-estimate",
+        ]
+        result = CliRunner().invoke(bank_verb.group, argv)
+        assert result.exit_code == 0, result.output
+        fixture = load_fixture(fixture_path)
+        assert fixture.label_by_id("core-G2").defect == "core-staging-estimate"
+        # incoherent family member (verdict flips) refuses and leaves v2 alone.
+        wrong = [a for a in argv]
+        wrong[wrong.index("core-G2")] = "core-G3"
+        wrong[wrong.index("real")] = "not-real"
+        result = CliRunner().invoke(bank_verb.group, wrong)
+        assert result.exit_code == 1
+        assert load_fixture(fixture_path).version == 2
+
     def test_bank_alias_bumps_version(self, fixture_path):
         result = CliRunner().invoke(
             bank_verb.group,

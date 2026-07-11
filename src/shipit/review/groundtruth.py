@@ -19,11 +19,25 @@ agents mine fix-commit archaeology, a normalizer compresses, the human
 confirms — the coordinator never ingests the raw bulk); this module only
 defines what a label IS and how one banks.
 
+One defect is not always one label: a defect can legitimately surface at
+SEVERAL file/site anchors (a cross-file contract lie, a coverage gap emitted at
+either end of the plumbing — the #673 v35–v37 residuals). Aliases cannot bridge
+files (file identity is the matcher's one non-negotiable coordinate), so such a
+defect is modeled as several labels — one per valid anchor, each with its own
+line range and lexicon — sharing an explicit ``defect`` **equivalence-family
+id**. Identity is DECLARED fixture data, never inferred from cross-file
+similarity; :attr:`Label.defect_key` is what recall counts, so a family scores
+once no matter how many of its anchors a review hits, while labels without a
+family (distinct defects, or repeated instances each independently fixable)
+keep counting separately. A family is validated coherent at parse: one pinned
+range, one verdict, one severity.
+
 **Banking** (:func:`bank_label` / :func:`bank_alias`) is the Adjudication
 write-path: a confirmed verdict on an unmatched emission becomes a new label
 (real or not-real — a banked not-real label is what makes false positives
-measurable), a confirmed near-miss becomes a phrasing alias on its label; both
-BUMP the version. Banking is pure (fixture in → fixture out);
+measurable; ``--defect`` joins it to an existing family when it re-anchors a
+banked defect), a confirmed near-miss becomes a phrasing alias on its label;
+both BUMP the version. Banking is pure (fixture in → fixture out);
 :func:`save_fixture` serializes deterministically (:func:`dump_fixture`) so a
 bank is a reviewable one-hunk diff. The file is regenerated on every save —
 hand comments do not survive, by design: the fixture is data, its docs live in
@@ -131,7 +145,10 @@ class Label:
     that lies throughout); ``aliases`` are banked alternate phrasings
     (Adjudication grows them); ``confirmed`` gates scoring — only a
     human-confirmed label enters any metric. ``severity`` uses the one 4-tier
-    ladder (:class:`shipit.finding.Severity`).
+    ladder (:class:`shipit.finding.Severity`). ``defect`` is the optional
+    equivalence-family id: labels sharing it are anchors/phrasings of ONE
+    defect and count once (:attr:`defect_key`); ``None`` means this label IS
+    its own defect.
     """
 
     id: str
@@ -144,12 +161,21 @@ class Label:
     lines: tuple[int, int] | None = None
     aliases: tuple[str, ...] = ()
     confirmed: bool = False
+    defect: str | None = None
 
     @property
     def texts(self) -> tuple[str, ...]:
         """Every admissible phrasing of this defect: the claim + its aliases —
         the ``texts`` the matching primitive takes (:func:`shipit.review.match.match_claim`)."""
         return (self.claim, *self.aliases)
+
+    @property
+    def defect_key(self) -> str:
+        """The identity recall counts under: the declared equivalence-family id
+        when the label has one, else the label's own id. One defect with many
+        anchor labels yields one key; two labels without a family yield two —
+        distinct defects and repeated instances stay distinguishable."""
+        return self.defect or self.id
 
 
 @dataclass(frozen=True)
@@ -278,6 +304,12 @@ def _parse_label(raw: Any, index: int, pr_ids: set[str]) -> Label:
     confirmed = raw.get("confirmed", False)
     if not isinstance(confirmed, bool):
         raise FixtureError(f"{where}: 'confirmed' must be a bool")
+    defect_raw = raw.get("defect")
+    defect: str | None = None
+    if defect_raw is not None:
+        if not isinstance(defect_raw, str) or not defect_raw.strip():
+            raise FixtureError(f"{where}: 'defect' must be a non-empty string")
+        defect = defect_raw.strip()
     return Label(
         id=_require_str(raw, "id", where),
         pr_id=pr_id,
@@ -291,7 +323,35 @@ def _parse_label(raw: Any, index: int, pr_ids: set[str]) -> Label:
         lines=lines,
         aliases=tuple(aliases_raw),
         confirmed=confirmed,
+        defect=defect,
     )
+
+
+def _validate_defect_families(labels: tuple[Label, ...]) -> None:
+    """Every declared ``defect`` family must be coherent, loudly.
+
+    One defect lives in one pinned range, is real or not-real (never both),
+    and sits on one severity tier — otherwise the scorer's once-per-family
+    counting would be ambiguous (which pin's denominator? which tier?). A
+    single-member family is legal: it declares identity ahead of the next
+    anchor's banking.
+    """
+    first_of: dict[str, Label] = {}
+    for label in labels:
+        if label.defect is None:
+            continue
+        first = first_of.setdefault(label.defect, label)
+        for field, mismatched in (
+            ("pr", label.pr_id != first.pr_id),
+            ("verdict", label.verdict != first.verdict),
+            ("severity", label.severity is not first.severity),
+        ):
+            if mismatched:
+                raise FixtureError(
+                    f"defect family {label.defect!r}: labels {first.id!r} and "
+                    f"{label.id!r} disagree on {field} — one defect is one "
+                    "pinned range, one verdict, one severity tier"
+                )
 
 
 def parse_fixture(data: dict[str, Any]) -> Fixture:
@@ -299,8 +359,8 @@ def parse_fixture(data: dict[str, Any]) -> Fixture:
 
     Validates the full contract here — unique ids, labels referencing pinned
     ranges, the severity ladder, verdict + provenance vocabularies, sane line
-    ranges — so every consumer downstream (scorer, banking, tests) can trust a
-    :class:`Fixture` unconditionally.
+    ranges, coherent defect families — so every consumer downstream (scorer,
+    banking, tests) can trust a :class:`Fixture` unconditionally.
     """
     version = data.get("version")
     if not isinstance(version, int) or version < 1:
@@ -321,6 +381,7 @@ def parse_fixture(data: dict[str, Any]) -> Fixture:
     label_ids = [label.id for label in labels]
     if len(set(label_ids)) != len(label_ids):
         raise FixtureError("duplicate label ids in fixture")
+    _validate_defect_families(labels)
     return Fixture(version=version, prs=prs, labels=labels, schema=schema)
 
 
@@ -345,14 +406,18 @@ def bank_label(fixture: Fixture, label: Label) -> Fixture:
     The unmatched-emission flow (ADR-0048): the human confirmed the emission is
     ``real`` (a defect the corpus did not know) or ``not-real`` (a banked
     refutation that makes the same false positive measurable forever after).
-    A banked label arrives ``confirmed=True`` by definition — Adjudication IS
-    the confirmation. Duplicate ids and unknown pr ids are loud.
+    A label carrying a ``defect`` family id joins that equivalence family —
+    the second-anchor flow for a cross-file emission of a banked defect — and
+    must be coherent with it (same pr, verdict, severity), loudly. A banked
+    label arrives ``confirmed=True`` by definition — Adjudication IS the
+    confirmation. Duplicate ids and unknown pr ids are loud.
     """
     if any(existing.id == label.id for existing in fixture.labels):
         raise FixtureError(f"label id {label.id!r} already banked")
     if label.pr_id not in {p.id for p in fixture.prs}:
         raise FixtureError(f"label {label.id!r} names unknown pr {label.pr_id!r}")
     banked = replace(label, confirmed=True)
+    _validate_defect_families((*fixture.labels, banked))
     return replace(
         fixture, version=fixture.version + 1, labels=(*fixture.labels, banked)
     )
@@ -431,6 +496,8 @@ def dump_fixture(fixture: Fixture) -> str:
             f"pr = {_toml_str(label.pr_id)}",
             f"file = {_toml_str(label.file)}",
         ]
+        if label.defect is not None:
+            out.append(f"defect = {_toml_str(label.defect)}")
         if label.lines is not None:
             out.append(f"lines = [{label.lines[0]}, {label.lines[1]}]")
         out += [

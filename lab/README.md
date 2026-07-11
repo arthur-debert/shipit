@@ -31,6 +31,10 @@ notes = "…"
 id = "core-G1"
 pr = "core-440"
 file = "phos-bench/src/bin/gpu_compare.rs"
+defect = "core-gpu-region-coverage"  # OPTIONAL equivalence-family id: labels
+                                     # sharing it are anchors of ONE defect and
+                                     # count once for recall; omit = the label
+                                     # is its own defect
 lines = [100, 160]              # inclusive, at the PINNED head; omit = file-scoped
 severity = "major"              # the one 4-tier ladder (critical|major|minor|nit)
 verdict = "real"                # or "not-real" — a banked refutation (measurable FP)
@@ -43,7 +47,9 @@ ref = "f211ab3"                 # sha / thread URL / adjudication pointer
 ```
 
 Rules the parser enforces: every label references a pinned `pr`; ids are
-unique; SHAs are hex (≥7 chars); `lines` is `[start, end]` with `start ≤ end`.
+unique; SHAs are hex (≥7 chars); `lines` is `[start, end]` with `start ≤ end`;
+a `defect` family is coherent (all members share `pr`, `verdict`, and
+`severity`).
 
 ## Versioning
 
@@ -87,6 +93,31 @@ and banked, and the fixture absorbs the semantics over time:
 
 Both rewrite `lab/fixture.toml` canonically and bump `version`; commit the
 diff through the normal PR flow (the fixture is reviewed like code).
+
+### Equivalence families (`defect`)
+
+One defect can legitimately surface at SEVERAL anchors — a cross-file contract
+lie, a coverage gap emitted at either end of the plumbing (the #673 v35–v37
+residuals). Aliases cannot bridge files (file identity is the matcher's one
+non-negotiable coordinate), so an unmatched emission that re-anchors an
+already-banked defect is banked as a **new label in the same `defect` family**:
+
+```sh
+shipit eval bank label --id core-G26 --pr core-440 \
+    --file phos-editor/src/graph_session.rs --lines 2940:3570 \
+    --severity minor --verdict real --defect core-gpu-region-coverage \
+    --claim "…the same coverage gap, stated at the session entry points…" \
+    --provenance "adjudication:…"
+```
+
+Each anchor keeps its own line range and lexicon (aliases still bank per
+label); the scorer counts the family ONCE — in the recall denominator and in
+the recall — no matter how many anchors a review hits. Identity is declared
+fixture data, never inferred cross-file similarity: labels WITHOUT a shared
+family stay separate defects, so distinct defects and repeated instances (the
+same kind of bug in several places, each independently fixable) remain
+distinguishable. Use a family only when fixing the defect once would retire
+every member.
 
 ## Fixture v1 provenance
 
