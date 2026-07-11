@@ -15,6 +15,7 @@ import json
 import plistlib
 import shutil
 import tarfile
+import zipfile
 
 import pytest
 
@@ -195,6 +196,93 @@ def test_an_empty_tree_has_nothing_to_assert_and_fails(tmp_path):
     verdict = integrity.check_tree(tmp_path, "lex")
     assert not verdict.ok
     assert "no main binary found" in verdict.problem
+
+
+# --------------------------------------------------------------------------
+# check_tree — plain archives, read in place (GH artifact strips exec bits)
+# --------------------------------------------------------------------------
+
+
+def _make_archive(
+    tmp_path, binary="lex", docs=True, extra=(), name=None, mode=0o755, strip_loose=True
+):
+    """A real ``<stem>.tar.gz`` (the archive composition's output): a
+    ``<stem>/`` tree with the binary (exec bit `mode`) + docs, tarred with
+    the mode PRESERVED in the header. `strip_loose` removes the staging tree
+    after tarring so the archive is the only main-binary bearer, and — when
+    kept — re-writes the loose binary at 0o644 to model GH artifact transport
+    dropping the exec bit off the downloaded staging file."""
+    stem = f"{binary}-x86_64-unknown-linux-gnu" if name is None else name
+    stage = tmp_path / stem
+    stage.mkdir(parents=True)
+    for exe in (binary, *extra):
+        (stage / exe).write_bytes(b"\x7fELF")
+        (stage / exe).chmod(mode)
+    if docs:
+        (stage / "README.md").write_text("readme")
+    archive = tmp_path / f"{stem}.tar.gz"
+    with tarfile.open(archive, "w:gz") as tar:
+        tar.add(stage, arcname=stem)
+    if strip_loose:
+        shutil.rmtree(stage)
+    else:
+        # GH artifact download hands the loose binary back non-executable.
+        for exe in (binary, *extra):
+            (stage / exe).chmod(0o644)
+    return archive
+
+
+def test_archive_main_binary_passes_from_the_internal_exec_bit(tmp_path):
+    _make_archive(tmp_path)
+    verdict = integrity.check_tree(tmp_path, "lex")
+    assert verdict.ok
+    assert verdict.actual == ("lex",)
+
+
+def test_archive_with_the_wrong_binary_fails(tmp_path):
+    _make_archive(tmp_path, binary="gen_fixtures")
+    verdict = integrity.check_tree(tmp_path, "lex")
+    assert not verdict.ok
+    assert verdict.actual == ("gen_fixtures",)
+
+
+def test_archive_is_asserted_when_the_loose_staging_binary_lost_its_exec_bit(tmp_path):
+    # THE finding: wf-publish downloads a cross-job artifact, GH strips the
+    # staging binary's exec bit, and the loose scan goes blind — but the
+    # archive beside it preserves the exec bit in its header and still asserts.
+    _make_archive(tmp_path, strip_loose=False)
+    verdict = integrity.check_tree(tmp_path, "lex")
+    assert verdict.ok
+    assert verdict.actual == ("lex",)
+
+
+def test_archive_with_several_exec_members_is_undeterminable(tmp_path):
+    _make_archive(tmp_path, extra=("gen_fixtures",))
+    verdict = integrity.check_tree(tmp_path, "lex")
+    assert not verdict.ok
+    assert "no determinable main binary" in verdict.problem
+
+
+def test_reseal_payload_is_not_treated_as_a_plain_archive(tmp_path):
+    # The reseal payload is a `.tar.gz` too; it stays on the payload path
+    # (inner .app), never double-counted as a plain archive.
+    _make_payload(tmp_path)
+    verdict = integrity.check_tree(tmp_path, "phos")
+    assert verdict.ok
+    assert verdict.actual == ("phos",)
+
+
+def test_windows_zip_matches_the_exe_stem(tmp_path):
+    stem = "lex-x86_64-pc-windows-msvc"
+    stage = tmp_path / stem
+    stage.mkdir(parents=True)
+    (stage / "lex.exe").write_bytes(b"MZ")
+    (stage / "README.md").write_text("readme")
+    with zipfile.ZipFile(tmp_path / f"{stem}.zip", "w") as zf:
+        for f in sorted(stage.iterdir()):
+            zf.write(f, arcname=f"{stem}/{f.name}")
+    shutil.rmtree(stage)
+    assert integrity.check_tree(tmp_path, "lex").ok
 
 
 def test_an_app_takes_precedence_over_loose_executables(tmp_path):
