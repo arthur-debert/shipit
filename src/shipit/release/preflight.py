@@ -54,7 +54,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 
 from ..config import ENDPOINTS, PLATFORMS, Artifact
-from . import ReleaseError, secretreq
+from . import ReleaseError, bundle, secretreq
 from .version import ResolvedVersion
 
 #: The release pipeline's stage vocabulary, pipeline order (PRD story 19).
@@ -163,13 +163,17 @@ class MatrixEntry:
     everywhere downstream): the artifact declares signing, the platform is
     darwin, and no ``--unsigned`` break-glass flipped the plan. ``bundle`` is
     the parallel per-entry bundle decision — whether THIS entry's artifact
-    declares a composition. The ``bundle`` stage is a plan-wide flag (live
-    when ANY artifact bundles), but the fan includes every build-bearing
-    artifact whether or not it bundles, so the per-entry flag is what gates
-    the block work: wf-build bundles/uploads only ``bundle`` entries, and the
-    unsigned assert projection (:func:`plan`'s consumers) narrows to them —
-    a build-only artifact beside a bundled one would otherwise stage nothing
-    yet trip ``if-no-files-found: error`` and a phantom assert download."""
+    declares a composition THAT APPLIES TO THIS PLATFORM
+    (:meth:`shipit.release.bundle.Composition.applies`, the same predicate the
+    bundle verb skips on: a platform-specific composition — deb on linux,
+    mac-app on darwin — bundles only its matching legs). The ``bundle`` stage
+    is a plan-wide flag (live when ANY artifact bundles), but the fan includes
+    every build-bearing artifact whether or not it bundles, so the per-entry
+    flag is what gates the block work: wf-build bundles/uploads only ``bundle``
+    entries, and the unsigned assert projection (:func:`plan`'s consumers)
+    narrows to them — a build-only artifact (or a leg the composition does not
+    apply to) beside a bundled one would otherwise stage nothing yet trip
+    ``if-no-files-found: error`` and a phantom assert download."""
 
     artifact: str
     platform: str
@@ -329,6 +333,16 @@ def _matrix(artifacts: Sequence[Artifact]) -> tuple[MatrixEntry, ...]:
             continue
         for platform in artifact.platforms or (DEFAULT_PLATFORM,):
             spec = PLATFORM_MATRIX[platform]
+            # Per-entry bundle decision, in lockstep with the bundle verb's own
+            # skip (shipit.verbs.release: `comp.applies(target)`): a
+            # platform-specific composition (deb on linux, mac-app on darwin)
+            # bundles only its matching legs. A whole-artifact flag would mark
+            # every leg of a multi-platform artifact bundle-bearing, then the
+            # non-applicable legs run `release bundle`, compose NOTHING (the
+            # verb skips), and trip the upload's `if-no-files-found: error`.
+            bundle_here = artifact.bundle is not None and bundle.composition(
+                artifact.bundle.composition
+            ).applies(spec.target)
             entries.append(
                 MatrixEntry(
                     artifact=artifact.name,
@@ -336,7 +350,7 @@ def _matrix(artifacts: Sequence[Artifact]) -> tuple[MatrixEntry, ...]:
                     target=spec.target,
                     runner=spec.runner,
                     sign=artifact.sign and platform.startswith("darwin"),
-                    bundle=artifact.bundle is not None,
+                    bundle=bundle_here,
                     ext_archive=spec.ext_archive,
                     ext_bin=spec.ext_bin,
                     package_arch=spec.package_arch,

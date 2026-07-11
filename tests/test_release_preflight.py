@@ -173,6 +173,34 @@ endpoints = ["gh-release"]
     assert [e.artifact for e in unsigned_assert] == ["tool"]
 
 
+def test_bundle_flag_is_platform_aware_for_a_platform_specific_composition():
+    # Umbrella second-look (codex): ONE artifact whose composition is
+    # platform-specific (deb → linux only) but which spans several platforms.
+    # A whole-artifact `bundle is not None` flag would mark the darwin leg
+    # bundle-bearing too; wf-build would then run `release bundle` there, the
+    # verb would skip deb (composition does not apply to the target — same
+    # `Composition.applies` predicate), stage nothing, and the upload would
+    # trip `if-no-files-found: error`. The per-entry flag must mirror the
+    # verb's skip: bundle only the leg the composition applies to.
+    arts = _artifacts(
+        """
+[artifacts.tool]
+build = [{ toolchain = "rust", package = "tool-cli" }]
+platforms = ["darwin-arm64", "linux-x86_64"]
+bundle = { composition = "deb" }
+endpoints = ["gh-release"]
+"""
+    )
+    plan = preflight.plan(arts, _resolved("1.0.0"))
+    assert [(e.platform, e.bundle) for e in plan.matrix] == [
+        ("darwin-arm64", False),  # deb does not apply to aarch64-apple-darwin
+        ("linux-x86_64", True),  # deb applies to x86_64-unknown-linux-gnu
+    ]
+    # The bundle stage stays live (the artifact DOES bundle, on its linux leg).
+    assert "bundle" in plan.stages
+    assert "assert-bundle" in plan.stages
+
+
 def test_python_pkg_shape_defaults_to_the_linux_lane_and_skips_apple_names():
     plan = preflight.plan(PYTHON_PKG, _resolved("0.3.1"))
     assert [(e.platform, e.runner, e.sign) for e in plan.matrix] == [
