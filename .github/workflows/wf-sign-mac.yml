@@ -1,0 +1,113 @@
+name: wf-sign-mac
+
+# The release SIGN stage block (ADR-0010/0040, TOL02-WS06). Routing ONLY
+# around ONE producing verb: `shipit release sign` does the whole reopen →
+# codesign (nested inner-first, .app last) → hdiutil reseal → notarize →
+# staple pass, including the temporary-keychain import (workflows.lex §3.1
+# — package(unsigned) -> sign-reopens-and-reseals, never sign -> package).
+# The fan is the plan's sign projection (`sign-matrix` — the entries whose
+# preflight sign flag is true), so this block signs exactly what the plan
+# decided, nothing re-derived.
+#
+# Scar #2 lives HERE, inside the block (ADR-0040, workflows.lex §3.2):
+# `shipit release assert-bundle` runs AT ENTRY — before any secret is
+# touched — so a wrong main binary (the gen_fixtures scar: signed and
+# notarized cleanly) can never reach the signer. No consumer wiring can
+# bypass it.
+#
+# Publishing (ADR-0010): consumers call this block as
+#   uses: arthur-debert/shipit/.github/workflows/wf-sign-mac.yml@v1
+# — through the composed wf-release.yml or directly (PRD story 38).
+#
+# Check-name contract (PRD story 42, consumed by ADP02): this block's one
+# job is `sign`, surfacing per leg as
+# `<caller-job> / sign (<artifact>, <platform>)`. Never renamed casually.
+#
+# act hole (PRD story 41): this block's signer leg is on the printed
+# untestable surface — macOS runner, keychain, codesign/notarytool have no
+# linux analogue; its smoke dry-runs the routing only.
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: The release tag (the checkout ref for config resolution).
+        type: string
+        required: true
+      sign-matrix:
+        description: >-
+          The preflight plan's sign projection: the matrix entries whose
+          sign flag is true (wf-prepare's `sign-matrix` output, verbatim).
+        type: string
+        required: true
+    secrets:
+      # The mac signing set (shipit.release.secretreq SIGN_MAC_SECRETS, PRD
+      # story 46). Declared optional YAML-side: preflight already proved
+      # presence at plan time, and the verb hard-fails naming any missing
+      # name — the block never re-checks.
+      APPLE_CERTIFICATE:
+        required: false
+      APPLE_CERTIFICATE_PASSWORD:
+        required: false
+      ASC_API_KEY_BASE64:
+        required: false
+      ASC_API_KEY_ID:
+        required: false
+      ASC_API_ISSUER_ID:
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  sign:
+    # An empty sign projection means the plan has no sign stage: skip green.
+    if: inputs.sign-matrix != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(inputs.sign-matrix) }}
+    name: sign (${{ matrix.artifact }}, ${{ matrix.platform }})
+    # The plan names the runner (darwin entries plan mac labels) — the block
+    # never hardcodes one.
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: prefix-dev/setup-pixi@v0.9.6
+        with:
+          # Lockstep with the Layer 0 bootstrap's PIXI_PIN — see
+          # wf-checks.yml.
+          pixi-version: v0.71.0
+          locked: true
+      - name: Download the unsigned bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: bundle-${{ matrix.artifact }}-${{ matrix.platform }}
+          path: dist
+      - name: "Assert bundle main binary (scar #2, AT ENTRY)"
+        env:
+          ARTIFACT: ${{ matrix.artifact }}
+        # Before any secret is imported: the right-binary guard. The verb
+        # reads the reseal payload in place and hard-fails on a mismatch.
+        run: pixi run --locked ./bin/shipit release assert-bundle dist "$ARTIFACT"
+      - name: Sign, reseal, notarize, staple
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          ASC_API_KEY_BASE64: ${{ secrets.ASC_API_KEY_BASE64 }}
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_API_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
+        # One verb invocation: temporary keychain, reopen the payload, sign
+        # nested-inner-first/.app-last, reseal the dmg, notarize + staple;
+        # the signed .dmg is staged in place under the original filename.
+        run: pixi run --locked ./bin/shipit release sign dist
+      - name: Upload the signed artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: signed-${{ matrix.artifact }}-${{ matrix.platform }}
+          # Only the signed .dmg: wf-publish overlays it onto the unsigned
+          # tree (same filename — the signed dmg replaces the unsigned one).
+          path: dist/*.dmg
+          if-no-files-found: error

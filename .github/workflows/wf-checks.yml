@@ -12,10 +12,11 @@ name: wf-checks
 # implementation.
 #
 # Publishing (the @vN convention ADR-0010 promises): consumers call this block
-# by tag —
+# by floating major ref —
 #   uses: arthur-debert/shipit/.github/workflows/wf-checks.yml@v1
-# where `v1` is a MOVING MAJOR TAG (the actions convention) shipit advances on
-# each compatible release; upgrading consumer CI is bumping that one version.
+# where `v1` is the FLOATING v<MAJOR> BRANCH advance-major.yml force-moves on
+# each non-prerelease shipit release (TOL02-WS06 recorded the branch-not-tag
+# decision); upgrading consumer CI is bumping that one version.
 # shipit's own caller (.github/workflows/ci.yml) uses the LOCAL PATH instead,
 # so a PR that edits this block is checked by the edited block itself.
 #
