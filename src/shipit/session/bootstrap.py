@@ -156,16 +156,11 @@ def codex_env(
        (:func:`shipit.spawn.launch.scrub_tree_env` — leaked ``PIXI_*``/Conda
        activation vars out, so the session's own ``pixi``/``shipit`` calls resolve
        the Tree, not the parent checkout);
-    3. the launch-seam agent-identity scrub: the inherited agent-identity keys
-       ``SHIPIT_LOG_CTX_ROLE``/``_AGENT``/``_RUN`` (a coordinator started from
-       inside a spawned worker Run's shell) are dropped — the session being
-       launched IS a coordinator, a fresh agent. The pretooluse edit guard's
-       ROLE fallback would otherwise silently resolve it to the worker's role
-       and disarm; the worker's AGENT/RUN spawn ids would mis-tag the new
-       coordinator's own log records with the worker's identity. Task-correlation
-       keys (``PR``/``EPIC``/…) may still inherit — they describe the work, not
-       who is doing it. The managed ``agent-start`` launcher scrubs the same
-       keys; this covers a direct ``shipit session codex``;
+    3. the launch-seam log-context scrub: every inherited
+       ``SHIPIT_LOG_CTX_*`` domain key is dropped. A global resume may target a
+       different repository/task from the shell that invoked it; the fresh
+       session must establish its own correlation rather than inherit stale
+       PR/epic/role identity;
     4. the ``SHIPIT_LOG_CTX_SESSION``/``_TREE`` exports (names from
        :data:`shipit.logcontext.ENV_PREFIX`, values matching what the SessionStart
        hook would export for this Tree — the leaf IS the session id, ADR-0027),
@@ -177,8 +172,7 @@ def codex_env(
     env = scrub_tree_env(CodexAdapter().child_env(parent_env))
     if activation is not None:
         env = pixienv.activated_env(env, activation)
-    for key in ("ROLE", "AGENT", "RUN"):
-        env.pop(logcontext.ENV_PREFIX + key, None)
+    env = logcontext.scrub_env(env)
     env[logcontext.ENV_PREFIX + "SESSION"] = session_id
     env[logcontext.ENV_PREFIX + "TREE"] = str(tree)
     return env

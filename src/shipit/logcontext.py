@@ -188,13 +188,20 @@ def env_export(env: Mapping[str, str] | None = None, **extra: Any) -> dict[str, 
     The child rebinds via :func:`bind_from_env` at its logging setup.
     """
     _check_names(extra)
-    merged = dict(os.environ if env is None else env)
-    for name in DOMAIN_KEYS:
-        merged.pop(ENV_PREFIX + name.upper(), None)
+    merged = scrub_env(os.environ if env is None else env)
     for name, value in {**bound(), **extra}.items():
         if value is not None:
             merged[ENV_PREFIX + name.upper()] = str(value)
     return merged
+
+
+def scrub_env(env: Mapping[str, str]) -> dict[str, str]:
+    """Copy ``env`` without any inherited shipit correlation exports."""
+
+    scrubbed = dict(env)
+    for name in DOMAIN_KEYS:
+        scrubbed.pop(ENV_PREFIX + name.upper(), None)
+    return scrubbed
 
 
 def role_from_env(env: Mapping[str, str] | None = None) -> str | None:

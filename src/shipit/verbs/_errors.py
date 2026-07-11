@@ -38,6 +38,7 @@ from ..prstate.reviewers_config import RequiredReviewersConfigError
 from ..review.cell import CellError
 from ..review.diff import ReviewError
 from ..review.groundtruth import FixtureError
+from ..session.resume import ResumeError
 from ..spawn.subagent import SpawnError
 from ..tree.layout import LayoutError
 from ..tree.removal import RemovalError
@@ -81,6 +82,7 @@ KNOWN_ERRORS: tuple[type[Exception], ...] = (
     ReviewError,
     CellError,
     FixtureError,
+    ResumeError,
 )
 
 

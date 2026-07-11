@@ -88,29 +88,24 @@ def test_codex_env_applies_pixi_activation_after_scrubbing():
     assert "PIXI_PROJECT_ROOT" not in env
 
 
-def test_codex_env_drops_the_inherited_worker_agent_identity_exports():
-    # The launch-seam agent-identity scrub (#631): a coordinator launched from
-    # inside a spawned worker Run's shell inherits the worker's agent-identity
-    # log-context exports — ROLE (riding in it would make the pretooluse edit
-    # guard's fallback resolve the coordinator to the worker's role and silently
-    # disarm) plus the paired AGENT/RUN spawn ids (which would mis-tag the new
-    # coordinator's own log records with the worker's identity). The env builder
-    # drops all three actively; a task-correlation key like PR still rides.
+def test_codex_env_drops_all_inherited_log_context_exports():
+    # A resumed coordinator may target a different repo/task than its invoking
+    # shell, so no inherited correlation field may survive into the fresh Tree.
     parent = {
         "PATH": "/bin",
-        logcontext.ENV_PREFIX + "ROLE": "implementer",
-        logcontext.ENV_PREFIX + "AGENT": "deadbeef",
-        logcontext.ENV_PREFIX + "RUN": "77",
-        logcontext.ENV_PREFIX + "PR": "632",
+        **{
+            logcontext.ENV_PREFIX + key.upper(): "stale"
+            for key in logcontext.DOMAIN_KEYS
+        },
     }
 
     env = bootstrap.codex_env(parent, session_id="codex-1", tree="/trees/codex-1")
 
-    assert logcontext.ENV_PREFIX + "ROLE" not in env
-    assert logcontext.ENV_PREFIX + "AGENT" not in env
-    assert logcontext.ENV_PREFIX + "RUN" not in env
-    # Task-correlation keys describe the work, not who does it — they inherit.
-    assert env[logcontext.ENV_PREFIX + "PR"] == "632"
+    for key in logcontext.DOMAIN_KEYS:
+        if key not in {"session", "tree"}:
+            assert logcontext.ENV_PREFIX + key.upper() not in env
+    assert env[logcontext.ENV_PREFIX + "SESSION"] == "codex-1"
+    assert env[logcontext.ENV_PREFIX + "TREE"] == "/trees/codex-1"
 
 
 def test_format_launch_names_session_tree_and_exact_argv():

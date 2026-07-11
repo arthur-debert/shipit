@@ -827,6 +827,21 @@ def test_every_session_start_emits_session_started(tmp_path, monkeypatch, caplog
     assert not hasattr(started, "session_id")
 
 
+def test_codex_session_start_persists_native_thread_id(tmp_path, monkeypatch, caplog):
+    root = tmp_path / "trees"
+    tree = _ephemeral_tree(root, leaf="codex-20260711-121015-73781")
+    monkeypatch.setenv(layout.CENTRAL_ROOT_ENV, str(root))
+    monkeypatch.setenv("CODEX_THREAD_ID", "019f-fresh-thread")
+
+    with caplog.at_level(logging.INFO, logger="shipit.hook"):
+        code = _run_log_context(tree, tmp_path / "codex-env")
+
+    assert code == 0
+    (started,) = _session_started_records(caplog)
+    assert started.codex_thread == "019f-fresh-thread"
+    assert not hasattr(started, "session_id")
+
+
 def test_session_started_binds_the_ephemeral_session_scoped(tmp_path, monkeypatch):
     # In an ephemeral session Tree the event carries the per-launch session id
     # (the dir leaf, ADR-0027) — bound SCOPED, so it lands on this record via
