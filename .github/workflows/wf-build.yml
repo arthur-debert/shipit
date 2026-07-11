@@ -84,20 +84,25 @@ jobs:
         # rides to the toolchains that stamp it.
         run: pixi run --locked ./bin/shipit build --version "$VERSION"
       - name: Bundle
-        # Plan-gated (never re-derived): the bundle stage is live only when
-        # an artifact declares a composition. Narrowed to THIS entry's
-        # artifact (the matrix is one artifact × platform per entry): the
-        # cross-job bundle artifact must carry exactly this artifact's
+        # Plan-gated PER ENTRY (never re-derived): the bundle stage is a
+        # plan-wide flag, but the fan includes every build-bearing artifact
+        # whether or not it bundles, so this entry runs bundle only when ITS
+        # artifact declares a composition (`matrix.bundle`). Narrowed to THIS
+        # entry's artifact (the matrix is one artifact × platform per entry):
+        # the cross-job bundle artifact must carry exactly this artifact's
         # outputs — a whole-map bundle would put every artifact's binary in
-        # every entry's tree and fail wf-publish's per-artifact
-        # assert-bundle on any multi-artifact repo.
-        if: contains(fromJson(inputs.stages), 'bundle')
+        # every entry's tree and fail wf-publish's per-artifact assert-bundle
+        # on any multi-artifact repo. Gating on `matrix.bundle` (not the
+        # plan-wide stage) is what spares a build-only artifact beside a
+        # bundled one from a passthrough that stages nothing yet trips the
+        # upload's `if-no-files-found: error`.
+        if: matrix.bundle
         env:
           TARGET: ${{ matrix.target }}
           ARTIFACT: ${{ matrix.artifact }}
         run: pixi run --locked ./bin/shipit release bundle --target "$TARGET" --artifact "$ARTIFACT"
       - name: Upload the staged bundle tree
-        if: contains(fromJson(inputs.stages), 'bundle')
+        if: matrix.bundle
         uses: actions/upload-artifact@v4
         with:
           name: bundle-${{ matrix.artifact }}-${{ matrix.platform }}

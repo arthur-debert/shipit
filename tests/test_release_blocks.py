@@ -53,7 +53,8 @@ STABLE_JOBS = {
 _ENTRY = (
     '[{"artifact":"demo","platform":"linux-x86_64",'
     '"target":"x86_64-unknown-linux-gnu","runner":"ubuntu-latest",'
-    '"sign":false,"ext_archive":".tar.gz","ext_bin":"","package_arch":"amd64"}]'
+    '"sign":false,"bundle":true,'
+    '"ext_archive":".tar.gz","ext_bin":"","package_arch":"amd64"}]'
 )
 _STAGES = '["preflight","prepare","bundle","assert-bundle","publish"]'
 
@@ -191,7 +192,7 @@ def test_build_block_never_ships_the_target_tree():
     assert "!dist/**/*.app/**" in path
 
 
-def test_build_block_bundles_only_its_matrix_entrys_artifact():
+def test_build_block_bundles_only_its_matrix_entry_artifact():
     # The per-entry narrowing contract (TOL02-WS07's lex rc finding): the
     # matrix is one artifact × platform per entry, and wf-publish's assert
     # job inspects `bundle-<artifact>-<platform>` PER ARTIFACT — a
@@ -202,6 +203,20 @@ def test_build_block_bundles_only_its_matrix_entrys_artifact():
     bundle = next(s for s in steps if "release bundle" in s.get("run", ""))
     assert '--artifact "$ARTIFACT"' in bundle["run"]
     assert bundle["env"]["ARTIFACT"] == "${{ matrix.artifact }}"
+
+
+def test_build_block_gates_bundle_on_the_per_entry_flag_not_the_stage():
+    # The mixed-map fix (codex, round 1): the bundle stage is a plan-WIDE
+    # flag, but the fan includes every build-bearing artifact whether or not
+    # it bundles. Gating bundle/upload on the plan-wide stage would send a
+    # build-only artifact's leg through a passthrough that stages nothing,
+    # then trip the upload's `if-no-files-found: error`. Both steps gate on
+    # the per-entry `matrix.bundle` decision instead.
+    steps = _steps("wf-build.yml", "build")
+    bundle = next(s for s in steps if "release bundle" in s.get("run", ""))
+    upload = next(s for s in steps if "upload-artifact" in s.get("uses", ""))
+    assert bundle["if"] == "matrix.bundle"
+    assert upload["if"] == "matrix.bundle"
 
 
 def test_pixi_pin_is_lockstep_across_all_blocks():

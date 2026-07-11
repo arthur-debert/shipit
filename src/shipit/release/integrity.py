@@ -167,12 +167,16 @@ def _is_plain_archive(path: Path) -> bool:
 
 def _archive_main_binary(archive: Path) -> str | None:
     """The main-binary name of a plain archive (``.tar.gz``/``.zip``), read
-    WITHOUT extraction: the SOLE executable regular-file member (the exec bit
-    stored in the archive header survives artifact transport, unlike the loose
-    file's), or — for a windows ``.zip`` carrying no unix mode — the sole
-    ``.exe`` member (its stem). ``None`` when undeterminable (zero or several
-    candidates); the docs the archive ships beside the binary carry no exec
-    bit and are never candidates."""
+    WITHOUT extraction: the SOLE executable member (the exec bit stored in the
+    archive header survives artifact transport, unlike the loose file's; a
+    windows ``.zip`` carries no unix mode, so a ``.exe`` member counts by its
+    suffix, its stem). ``None`` when undeterminable — zero candidates, or
+    SEVERAL by ANY measure: the exec-bit and ``.exe`` tallies are counted
+    TOGETHER, so an archive mixing a unix executable and a ``.exe`` is
+    ambiguous and fails loudly rather than silently picking one. Only regular
+    files are considered (a symlink with the exec bit is never a candidate,
+    zip and tar alike); the docs the archive ships beside the binary carry no
+    exec bit and are never candidates."""
     exec_members: list[str] = []
     exe_members: list[str] = []
     try:
@@ -181,10 +185,18 @@ def _archive_main_binary(archive: Path) -> str | None:
                 for info in zf.infolist():
                     if info.is_dir():
                         continue
+                    # Match tar's isfile() filter: a Unix-created entry that
+                    # is not a regular file (symlink, device) is not a binary
+                    # candidate even with the exec bit set. Windows-created
+                    # entries carry no unix mode (mode == 0) and fall through
+                    # to the .exe suffix check below.
+                    mode = info.external_attr >> 16
+                    if mode and (mode & 0o170000) != 0o100000:
+                        continue
                     base = PurePosixPath(info.filename).name
                     if base.endswith(".exe"):
                         exe_members.append(base[: -len(".exe")])
-                    elif (info.external_attr >> 16) & 0o111:
+                    elif mode & 0o111:
                         exec_members.append(base)
         else:
             with tarfile.open(archive, mode="r:gz") as tar:
@@ -198,7 +210,7 @@ def _archive_main_binary(archive: Path) -> str | None:
                         exec_members.append(base)
     except (tarfile.TarError, zipfile.BadZipFile, OSError):
         return None
-    candidates = exec_members or exe_members
+    candidates = exec_members + exe_members
     if len(candidates) == 1:
         return candidates[0]
     return None
@@ -242,7 +254,10 @@ def check_tree(tree: Path, expected: str) -> BundleVerdict:
     apps = sorted(p for p in tree.rglob("*.app") if p.is_dir())
     payloads = sorted(p for p in tree.rglob(f"*{RESEAL_SUFFIX}") if p.is_file())
     archives = sorted(
-        p for p in tree.rglob("*") if p.is_file() and _is_plain_archive(p)
+        p
+        for suffix in PLAIN_ARCHIVE_SUFFIXES
+        for p in tree.rglob(f"*{suffix}")
+        if p.is_file() and _is_plain_archive(p)
     )
     for app in apps:
         name = _app_main_binary(app)

@@ -161,13 +161,22 @@ class MatrixEntry:
 
     ``sign`` is THE per-entry signing decision (resolved once, referenced
     everywhere downstream): the artifact declares signing, the platform is
-    darwin, and no ``--unsigned`` break-glass flipped the plan."""
+    darwin, and no ``--unsigned`` break-glass flipped the plan. ``bundle`` is
+    the parallel per-entry bundle decision — whether THIS entry's artifact
+    declares a composition. The ``bundle`` stage is a plan-wide flag (live
+    when ANY artifact bundles), but the fan includes every build-bearing
+    artifact whether or not it bundles, so the per-entry flag is what gates
+    the block work: wf-build bundles/uploads only ``bundle`` entries, and the
+    unsigned assert projection (:func:`plan`'s consumers) narrows to them —
+    a build-only artifact beside a bundled one would otherwise stage nothing
+    yet trip ``if-no-files-found: error`` and a phantom assert download."""
 
     artifact: str
     platform: str
     target: str
     runner: str
     sign: bool
+    bundle: bool
     ext_archive: str
     ext_bin: str
     package_arch: str
@@ -180,6 +189,7 @@ class MatrixEntry:
             "target": self.target,
             "runner": self.runner,
             "sign": self.sign,
+            "bundle": self.bundle,
             "ext_archive": self.ext_archive,
             "ext_bin": self.ext_bin,
             "package_arch": self.package_arch,
@@ -326,6 +336,7 @@ def _matrix(artifacts: Sequence[Artifact]) -> tuple[MatrixEntry, ...]:
                     target=spec.target,
                     runner=spec.runner,
                     sign=artifact.sign and platform.startswith("darwin"),
+                    bundle=artifact.bundle is not None,
                     ext_archive=spec.ext_archive,
                     ext_bin=spec.ext_bin,
                     package_arch=spec.package_arch,

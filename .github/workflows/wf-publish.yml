@@ -14,9 +14,13 @@ name: wf-publish
 #
 # Scar #2's second placement (ADR-0040, workflows.lex §3.2) also lives
 # here: the `assert` job runs `shipit release assert-bundle` over every
-# matrix entry whose plan sign flag is FALSE — exactly the trees that never
-# traversed wf-sign-mac's entry guard (on a signed plan the non-darwin
-# legs; on an --unsigned plan everything). The publish job is ordered after
+# `unsigned-matrix` entry — the trees whose plan sign flag is FALSE AND that
+# carry a bundle (wf-prepare narrows the projection), exactly the bundle
+# trees that never traversed wf-sign-mac's entry guard (on a signed plan the
+# non-darwin bundling legs; on an --unsigned plan every bundling leg). A
+# build-only artifact has no bundle-* artifact to download and is excluded
+# upstream, so this job never fans over a tree it cannot assert. The publish
+# job is ordered after
 # it and blocks on its failure.
 #
 # The RC guard is NOT here (PRD story 33 / ADR-0040): a -release-rc version
@@ -64,9 +68,10 @@ on:
         required: true
       unsigned-matrix:
         description: >-
-          The preflight plan's unsigned projection (wf-prepare's
-          `unsigned-matrix` output, verbatim): the entries whose trees this
-          block's assert job re-guards.
+          The preflight plan's unsigned bundle-bearing projection
+          (wf-prepare's `unsigned-matrix` output, verbatim): the unsigned
+          entries that carry a bundle tree — exactly the trees this block's
+          assert job re-guards. Build-only artifacts are excluded upstream.
         type: string
         required: true
       stages:

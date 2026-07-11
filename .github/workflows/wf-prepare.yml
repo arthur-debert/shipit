@@ -72,8 +72,12 @@ on:
         value: ${{ jobs.prepare.outputs.sign-matrix }}
       unsigned-matrix:
         description: >-
-          The matrix entries whose plan sign flag is false — the path that
-          never traverses wf-sign-mac, asserted by wf-publish (ADR-0040).
+          The matrix entries whose plan sign flag is false AND whose artifact
+          declares a bundle — the trees that never traverse wf-sign-mac yet
+          carry a bundle for wf-publish to assert (ADR-0040). A build-only
+          artifact (no composition) has no tree to guard, so it is excluded:
+          the assert job must not fan over an entry with no `bundle-*`
+          artifact to download.
         value: ${{ jobs.prepare.outputs.unsigned-matrix }}
       stages:
         description: The plan's live stage subset, pipeline order.
@@ -170,7 +174,9 @@ jobs:
         # ONE planner invocation (the pinned launcher, ADR-0033); its JSON
         # becomes this block's outputs. The jq lines are transport (compact
         # the indented JSON, split out fields) and projection of the plan's
-        # per-entry sign flag (select reads the decision, never remakes it).
+        # per-entry decisions (select reads the decisions, never remakes
+        # them): sign-matrix is the sign flag; unsigned-matrix is unsigned
+        # AND bundle-bearing — the trees wf-publish's assert job re-guards.
         run: |
           # pipefail: the default step shell is `bash -e` WITHOUT pipefail, so
           # a failed producer in `preflight | jq` would be masked by jq's 0 on
@@ -184,7 +190,7 @@ jobs:
           {
             printf 'matrix=%s\n' "$(jq -c '.matrix' <<<"$plan")"
             printf 'sign-matrix=%s\n' "$(jq -c '[.matrix[] | select(.sign)]' <<<"$plan")"
-            printf 'unsigned-matrix=%s\n' "$(jq -c '[.matrix[] | select(.sign | not)]' <<<"$plan")"
+            printf 'unsigned-matrix=%s\n' "$(jq -c '[.matrix[] | select((.sign | not) and .bundle)]' <<<"$plan")"
             printf 'stages=%s\n' "$(jq -c '.stages' <<<"$plan")"
             printf 'endpoints=%s\n' "$(jq -c '.endpoints' <<<"$plan")"
             printf 'secrets=%s\n' "$(jq -c '.secrets' <<<"$plan")"

@@ -84,6 +84,7 @@ def test_rust_cli_shape_plans_matrix_stages_endpoints_secrets():
         "target": "aarch64-apple-darwin",
         "runner": "macos-latest",
         "sign": True,  # declared signing meets a darwin platform
+        "bundle": False,  # RUST_CLI declares no composition
         "ext_archive": ".tar.gz",
         "ext_bin": "",
         "package_arch": "arm64",
@@ -94,6 +95,7 @@ def test_rust_cli_shape_plans_matrix_stages_endpoints_secrets():
         "target": "x86_64-pc-windows-msvc",
         "runner": "windows-latest",
         "sign": False,  # sign is darwin-only, resolved once per entry
+        "bundle": False,  # RUST_CLI declares no composition
         "ext_archive": ".zip",
         "ext_bin": ".exe",
         "package_arch": "amd64",
@@ -131,6 +133,44 @@ def test_mac_app_shape_plans_bundle_and_sign():
     )
     assert plan.endpoints == ("gh-release",)
     assert plan.secrets == ("RELEASE_TOKEN", *secretreq.SIGN_MAC_SECRETS)
+
+
+def test_mixed_map_flags_bundle_per_entry_so_build_only_legs_skip_bundling():
+    # codex, round 1: a bundled artifact beside a build-only one. `bundle`
+    # is a plan-WIDE stage flag (live because SOME artifact bundles), but the
+    # fan includes BOTH build-bearing artifacts. Each entry carries its own
+    # `bundle` decision so wf-build bundles/uploads only the bundled leg —
+    # the build-only leg would otherwise passthrough (stage nothing) and trip
+    # the upload's `if-no-files-found: error`, and wf-publish's assert would
+    # then fan over a `bundle-helper-*` artifact that was never uploaded.
+    arts = _artifacts(
+        """
+[artifacts.tool]
+build = [{ toolchain = "rust", package = "tool-cli" }]
+platforms = ["linux-x86_64"]
+bundle = { composition = "archive" }
+endpoints = ["gh-release"]
+
+[artifacts.helper]
+build = [{ toolchain = "rust", package = "helper-cli" }]
+platforms = ["linux-x86_64"]
+endpoints = ["gh-release"]
+"""
+    )
+    plan = preflight.plan(arts, _resolved("1.0.0"))
+    # The plan-wide stage is live (some artifact bundles)...
+    assert "bundle" in plan.stages
+    assert "assert-bundle" in plan.stages
+    # ...but the per-entry flag distinguishes the two legs.
+    assert [(e.artifact, e.bundle) for e in plan.matrix] == [
+        ("tool", True),
+        ("helper", False),
+    ]
+    # The unsigned-matrix projection wf-prepare emits — `select((.sign | not)
+    # and .bundle)` — carries ONLY the bundled leg, so the assert job never
+    # tries to download a bundle the build-only leg never produced.
+    unsigned_assert = [e for e in plan.matrix if not e.sign and e.bundle]
+    assert [e.artifact for e in unsigned_assert] == ["tool"]
 
 
 def test_python_pkg_shape_defaults_to_the_linux_lane_and_skips_apple_names():

@@ -14,6 +14,7 @@ with the verdict + expected/actual names on stderr, ``--json`` available.
 import json
 import plistlib
 import shutil
+import stat
 import tarfile
 import zipfile
 
@@ -261,6 +262,45 @@ def test_archive_with_several_exec_members_is_undeterminable(tmp_path):
     verdict = integrity.check_tree(tmp_path, "lex")
     assert not verdict.ok
     assert "no determinable main binary" in verdict.problem
+
+
+def test_archive_mixing_a_unix_exec_and_an_exe_is_undeterminable(tmp_path):
+    # agy, round 1: the exec-bit tally and the `.exe` tally are counted
+    # TOGETHER. An archive carrying both a unix executable and a `.exe` is
+    # ambiguous — two candidates by different measures — and must fail loudly,
+    # never silently return the unix one and drop the `.exe`.
+    stem = "lex-x86_64-unknown-linux-gnu"
+    stage = tmp_path / stem
+    stage.mkdir(parents=True)
+    (stage / "helper").write_bytes(b"\x7fELF")
+    (stage / "helper").chmod(0o755)
+    (stage / "main.exe").write_bytes(b"MZ")
+    archive = tmp_path / f"{stem}.tar.gz"
+    with tarfile.open(archive, "w:gz") as tar:
+        tar.add(stage, arcname=stem)
+    shutil.rmtree(stage)
+    verdict = integrity.check_tree(tmp_path, "lex")
+    assert not verdict.ok
+    assert "no determinable main binary" in verdict.problem
+
+
+def test_zip_exec_bit_symlink_is_not_a_binary_candidate(tmp_path):
+    # agy, round 1: a Unix-created ZIP can carry a symlink WITH the exec bit
+    # set. It is not a regular file and must be ignored (matching tar's
+    # isfile() filter), so it never inflates the candidate count nor
+    # masquerades as the main binary. The real binary beside it still asserts.
+    stem = "lex-x86_64-unknown-linux-gnu"
+    archive = tmp_path / f"{stem}.zip"
+    real = zipfile.ZipInfo(f"{stem}/lex")
+    real.external_attr = (stat.S_IFREG | 0o755) << 16
+    link = zipfile.ZipInfo(f"{stem}/latest")
+    link.external_attr = (stat.S_IFLNK | 0o777) << 16
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr(real, b"\x7fELF")
+        zf.writestr(link, "lex")  # symlink target as content
+    verdict = integrity.check_tree(tmp_path, "lex")
+    assert verdict.ok
+    assert verdict.actual == ("lex",)
 
 
 def test_reseal_payload_is_not_treated_as_a_plain_archive(tmp_path):
