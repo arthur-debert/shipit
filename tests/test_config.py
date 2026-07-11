@@ -427,6 +427,15 @@ def test_load_toolchains_rejects_paths_escaping_the_checkout():
         _toolchains('[toolchains]\n"../evil" = "rust"\n')
 
 
+def test_load_toolchains_normalizes_paths_to_canonical_form():
+    # `./web` and `web/` must be stored as `web` so the leg's pathspecs match
+    # `git status --porcelain` output and never trip a false no-op bump.
+    (entry,) = _toolchains('[toolchains]\n"./web" = "npm"\n')
+    assert entry.path == "web"
+    (root_entry,) = _toolchains('[toolchains]\n"." = "python"\n')
+    assert root_entry.path == "."
+
+
 def test_load_toolchains_non_table_section_rejected():
     with pytest.raises(config.ConfigError, match=r"\[toolchains\] must be a table"):
         config.load_toolchains({"toolchains": "rust"})

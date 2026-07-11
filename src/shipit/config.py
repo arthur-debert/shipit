@@ -388,7 +388,13 @@ def _parse_toolchain_entry(path: str, spec: object) -> ToolchainEntry:
             f"[toolchains].{path}: unknown toolchain `{name}`; "
             f"known toolchains: {known}"
         )
-    return ToolchainEntry(path=path, toolchain=name, commands=overrides)
+    # Store the CANONICAL repo-relative form (`./web` -> `web`, `web/` -> `web`):
+    # the leg's pathspecs are matched against `git status --porcelain` output,
+    # which is already canonical, so a non-normalized entry would miss its own
+    # changed files and trip a false `no-op bump` refusal in `release prepare`.
+    return ToolchainEntry(
+        path=str(PurePosixPath(path)), toolchain=name, commands=overrides
+    )
 
 
 def load_toolchains(cfg: dict) -> tuple[ToolchainEntry, ...]:
@@ -640,6 +646,10 @@ def _parse_artifact(name: str, spec: object) -> Artifact:
                 f'e.g. "src-tauri/tauri.conf.json"; got {bundle_config!r}'
             )
         _reject_path_escape(f"{where}.bundle-config", bundle_config)
+        # Canonical form (`./x` -> `x`): the release stage stages this path and
+        # matches it against `git status`, so a non-normalized value would read
+        # as a different, unchanged file and trip a false no-op / missing-file.
+        bundle_config = str(PurePosixPath(bundle_config))
     build_spec = spec.get("build", [])
     if not isinstance(build_spec, list):
         raise ConfigError(f"{where}.build: must be a list of build targets")

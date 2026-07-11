@@ -58,6 +58,13 @@ def test_version_tags_release_ranks_above_its_prereleases():
     assert v.version_tags(["v1.2.3-rc.2", "v1.2.3"]) == ["1.2.3", "1.2.3-rc.2"]
 
 
+def test_version_tags_ignores_build_metadata_tags():
+    """A `v<semver>+build` tag is not a shape the caller can ever supply
+    (`parse_spec` rejects `+`) and build metadata is ignored for precedence, so
+    it must not participate in resolution or resume detection."""
+    assert v.version_tags(["v1.2.3+build.7", "v1.2.2"]) == ["1.2.2"]
+
+
 # --------------------------------------------------------------------------
 # resolve — bump words, prerelease flags, resume detection
 # --------------------------------------------------------------------------

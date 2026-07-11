@@ -448,12 +448,16 @@ def test_push_failure_deletes_the_local_tag(python_repo, capsys):
     assert rc == 1
     assert ("push_atomic", "main", "v0.2.0-rc.1") in fake.calls
     assert ("delete_tag", "v0.2.0-rc.1") in fake.calls
+    # The local branch is also reset off the bump commit, so a redo reproduces
+    # the bump cleanly instead of dead-ending on a no-op-bump refusal.
+    assert ("reset_hard", str(BASE_SHA)) in fake.calls
     assert "v0.2.0-rc.1" not in fake.tags  # not left behind to fake a resume
 
 
 def test_push_failure_rollback_is_best_effort(python_repo, capsys):
-    """A failing cleanup must never mask the original push error: `delete_tag`
-    raising in the rollback still lets the push ExecError surface as exit 1."""
+    """A failing cleanup must never mask the original push error, and each
+    rollback step is independently suppressed: `delete_tag` raising still lets
+    the branch reset run and the push ExecError surface as exit 1."""
 
     class DeleteRaises(FakeGit):
         def delete_tag(self, name, *, cwd):
@@ -465,6 +469,7 @@ def test_push_failure_rollback_is_best_effort(python_repo, capsys):
     rc = release_verb.run_prepare(spec("0.2.0-rc.1"), gitio=fake, run_cmd=CmdRecorder())
     assert rc == 1  # the push failure, not the cleanup failure, is the outcome
     assert ("delete_tag", "v0.2.0-rc.1") in fake.calls
+    assert ("reset_hard", str(BASE_SHA)) in fake.calls  # ran despite delete raising
 
 
 # --------------------------------------------------------------------------

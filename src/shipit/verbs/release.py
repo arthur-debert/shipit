@@ -447,12 +447,21 @@ def run_prepare(
             # cleanly redo (the tree already carries the version).
             gitio.push_atomic(branch, resolved.tag, cwd=cwd)
     except Exception:
-        # Best-effort rollback: drop the LOCAL tag so the next run does not
-        # falsely RESUME (ADR-0009 keys resume off tag existence) on an
-        # unpublished cut — but never let a cleanup failure mask the push error
-        # that actually aborted the release.
+        # Best-effort rollback of the local state a failed publish leaves behind,
+        # so the next run can cleanly REDO rather than falsely resume or dead-end
+        # on a no-op bump — each step independently suppressed so one cleanup
+        # failure neither blocks the others nor masks the push error that aborted
+        # the release (the bare `raise` re-raises that original exception):
+        #   - drop the local tag (ADR-0009 keys resume off tag existence, so a
+        #     leftover tag would fake a resume on an unpublished cut);
+        #   - for a non-tag-only cut, move the branch ref back off the bump
+        #     commit (the tag-only path already reset it inside the try) — else
+        #     the tree still carries the version and the redo hits `no-op bump`.
         with contextlib.suppress(Exception):
             gitio.delete_tag(resolved.tag, cwd=cwd)
+        if not resolved.tag_only and to_commit:
+            with contextlib.suppress(Exception):
+                gitio.reset_hard(str(base_sha), cwd=cwd)
         raise
 
     result = PrepareResult(

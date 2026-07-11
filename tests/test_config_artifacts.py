@@ -217,6 +217,15 @@ def test_bundle_config_must_be_a_non_empty_path(value):
         _load(f"[artifacts.app]\nbundle-config = {value}\n")
 
 
+def test_bundle_config_is_normalized_to_canonical_form():
+    # `./src-tauri/...` must be stored as `src-tauri/...` so the release stage
+    # stages and matches the same path `git status` reports (no false no-op).
+    (artifact,) = _load(
+        '[artifacts.app]\nbundle-config = "./src-tauri/tauri.conf.json"\n'
+    )
+    assert artifact.bundle_config == "src-tauri/tauri.conf.json"
+
+
 @pytest.mark.parametrize(
     "value",
     ['"/etc/passwd"', '"../outside/tauri.conf.json"', '"a/../../b.json"'],

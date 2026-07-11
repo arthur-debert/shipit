@@ -116,12 +116,18 @@ def version_tags(tags: list[str] | tuple[str, ...]) -> list[str]:
 
     Non-version tags (no ``v`` prefix, or an invalid semver after it) are
     ignored — a repo's odd tags (``deploy-2024``, ``tip``) never poison the
-    latest-tag resolution.
+    latest-tag resolution. Build metadata (``+…``) also disqualifies a tag: a
+    release version is exactly what the tag names (:func:`parse_spec` rejects
+    ``+`` in the supplied version), and build metadata is ignored for semver
+    precedence, so admitting such a tag would make ordering and resume
+    detection inconsistent with the versions the caller can ever supply.
     """
     versions = [
-        tag[len(TAG_PREFIX) :]
+        tail
         for tag in tags
-        if tag.startswith(TAG_PREFIX) and SEMVER_RE.match(tag[len(TAG_PREFIX) :])
+        if tag.startswith(TAG_PREFIX)
+        and "+" not in (tail := tag[len(TAG_PREFIX) :])
+        and SEMVER_RE.match(tail)
     ]
     return sort_versions_desc(versions)
 
