@@ -17,6 +17,41 @@ from shipit import execrun
 from shipit.spawn import launch
 
 
+def test_write_task_forbids_ending_the_turn_with_background_work_in_flight():
+    # #663: a headless Run that ends its turn EXITS — its background children die
+    # with it (interactive sessions get re-invoked when harness-tracked background
+    # work completes; a headless Run does not). RVW02-WS05's first Run launched
+    # its long pipelines as background tasks, ended its turn to "wait", and the
+    # exit silently killed 21 minutes of billed work. The task prompt must carry
+    # the backend-neutral rule for EVERY spawned write Run: long work runs in the
+    # foreground (or is synchronously awaited), and the turn never ends while
+    # background work is in flight. All the halves are load-bearing: the headless
+    # framing, the turn-end-is-exit equivalence, the kill consequence, and the
+    # foreground mandate.
+    task = launch.write_task(
+        "implementer",
+        issue=663,
+        branch="issues/663/work",
+        base_branch="main",
+        closes=True,
+    )
+    assert "headless" in task.lower()
+    assert "ending your turn exits" in task.lower()
+    assert "background" in task.lower()
+    assert "killed" in task.lower()
+    assert "foreground" in task.lower()
+
+
+def test_write_task_background_rule_is_shape_independent():
+    # The #663 rule guards the RUN's lifecycle, not the write shape — the epic
+    # work-stream shape must carry it identically to the standalone-issue shape.
+    task = launch.write_task(
+        "implementer", issue=42, branch="X/WS01", base_branch="main", closes=False
+    )
+    assert "ending your turn exits" in task.lower()
+    assert "foreground" in task.lower()
+
+
 def test_reviewer_task_names_the_branch_and_posts_a_review():
     task = launch.reviewer_task("TRE03/WS03")
     assert "TRE03/WS03" in task
