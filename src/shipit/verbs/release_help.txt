@@ -15,5 +15,8 @@ a bundle's integrity (its main binary must be the expected app) before it is
 signed or published. `sign` is the consumer-agnostic mac signer unit: it
 reopens an unsigned .app/.dmg bundle tree, codesigns inner-first with the
 .app last, reseals the .dmg from the signed .app via hdiutil, and notarizes
-+ staples — hard-failing on missing secrets, never skipping. Later stages
-(publish) land as their work streams do.
++ staples — hard-failing on missing secrets, never skipping. `publish` — the
+terminal stage — dispatches the staged Artifacts to their declared
+Distribution endpoints (gh-release, crates, pypi, npm, brew), refusing unless
+build+bundle succeeded and sign succeeded-or-was-skipped, with the -release-rc
+guard central in the verb.

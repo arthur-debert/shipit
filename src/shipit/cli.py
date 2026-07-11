@@ -277,9 +277,9 @@ root.add_command(changelog_group)
 # invocable stages (PRD story 19): `preflight` (WS02: the planner + secrets
 # derivation), `prepare` (WS01: version resolve, bump projection, changelog
 # roll, commit + annotated tag + push, ADR-0041), `bundle` + `assert-bundle`
-# (WS03: unsigned Artifact composition and the scar-#2 integrity guard), and
-# `sign` (WS04: the consumer-agnostic mac signer unit, workflows.lex §3.1);
-# `publish` (WS05) lands with its work stream.
+# (WS03: unsigned Artifact composition and the scar-#2 integrity guard),
+# `sign` (WS04: the consumer-agnostic mac signer unit, workflows.lex §3.1),
+# and `publish` (WS05: the terminal endpoint-adapter dispatch, scar-#3 gate).
 root.add_command(release_group)
 
 
@@ -369,6 +369,7 @@ _HELP_RESOURCES = {
     ("release", "bundle"): ("shipit.verbs", "release_bundle_help.txt"),
     ("release", "assert-bundle"): ("shipit.verbs", "release_assert_bundle_help.txt"),
     ("release", "sign"): ("shipit.verbs", "release_sign_help.txt"),
+    ("release", "publish"): ("shipit.verbs", "release_publish_help.txt"),
     ("ci",): ("shipit.verbs", "ci_help.txt"),
     ("ci", "plan"): ("shipit.verbs", "ci_plan_help.txt"),
     ("logs",): ("shipit.verbs", "logs_help.txt"),

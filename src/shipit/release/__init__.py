@@ -32,11 +32,19 @@ work streams land:
   exec seam AND caller-scoped filesystem I/O under the scratch dir (decoding
   credential material, staging the ``.dmg``); hard-fails on missing secrets
   (no warn-and-skip).
+- :mod:`.publish` — the closed endpoint-adapter registry (WS05): how a
+  declared Distribution endpoint (gh-release, crates, pypi, npm, brew)
+  ships the staged Artifacts — plus the stage's pure cores: the scar-#3
+  refusal gate, the central ``-release-rc`` guard, and the
+  release-before-derived ordering plan.
+- :mod:`.brew` — the brew formula render core (WS05): the shared formula
+  template, the PascalCase class derivation, and the crate-metadata pull.
+  Pure text; the effectful tap push is the brew adapter in :mod:`.publish`.
 
 The effectful shells live in :mod:`shipit.verbs` (``shipit release prepare`` /
-``preflight`` / ``bundle`` / ``assert-bundle`` / ``sign`` are
+``preflight`` / ``bundle`` / ``assert-bundle`` / ``sign`` / ``publish`` are
 :mod:`shipit.verbs.release`), executing through the one Exec seam (ADR-0028)
-and the git adapter.
+and the git/gh adapters.
 """
 
 from __future__ import annotations
@@ -53,10 +61,13 @@ class ReleaseError(RuntimeError):
     a bundle composition over missing build outputs (no built binary, no
     ``.deb``/wheel/sdist produced, no coupled ``.app``/``.dmg`` pair or
     reseal payload), an assert-bundle whose expected name cannot be
-    resolved (an unknown or unnamed artifact), and the signer's refusals
+    resolved (an unknown or unnamed artifact), the signer's refusals
     (missing signing/notary secrets — named, never skipped —, a tree with
     zero or multiple ``.app``/``.dmg``, no codesigning identity in the
-    imported cert, a rejected or unconfirmed notarization). USAGE errors
-    (a malformed version argument) are NOT this class — they die at the
-    click boundary as exit 2 (ADR-0030).
+    imported cert, a rejected or unconfirmed notarization), and the publish
+    stage's refusals (the scar-#3 gate over the upstream stage results, a
+    missing endpoint token, a failed external publish that is not the
+    already-published resume case, a formula without its crate metadata).
+    USAGE errors (a malformed version argument) are NOT this class — they
+    die at the click boundary as exit 2 (ADR-0030).
     """

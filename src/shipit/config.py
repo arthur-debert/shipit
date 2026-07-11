@@ -460,8 +460,10 @@ def load_toolchains(cfg: dict) -> tuple[ToolchainEntry, ...]:
 #: Adding an endpoint is an adapter plus an entry here plus its
 #: secret-requirement declaration
 #: (:data:`shipit.release.secretreq.ENDPOINT_SECRETS`); consumed by the
-#: release planner (``release preflight``, WS02) and the endpoint adapters
-#: (WS05).
+#: release planner (``release preflight``, WS02) and by the publish stage's
+#: adapter registry (:mod:`shipit.release.publish`, TOL02-WS05), whose entries
+#: mirror this set one-to-one (asserted in its tests, so the two can never
+#: drift).
 ENDPOINTS: tuple[str, ...] = ("gh-release", "crates", "pypi", "npm", "brew")
 
 #: The CLOSED OS×arch platform registry a ``platforms`` list may use — the
@@ -564,16 +566,18 @@ class Artifact:
     release planner (``release preflight``, WS02: the OS×arch matrix, the
     endpoint set, and the derived secret requirements —
     :mod:`shipit.release.preflight` / :mod:`shipit.release.secretreq`);
-    ``bundle_config`` by ``shipit release prepare`` (the artifact-declared
-    bundle-config hook, ADR-0041/PRD story 25: the repo-root-relative JSON
-    file — ``tauri.conf.json`` — whose top-level ``version`` is bumped in
-    lockstep with the leg adapters, keeping "tauri" out of the bump dispatch
-    registry); ``bundle`` by ``shipit release bundle`` (TOL02-WS03: the
-    declared composition into the unsigned distributable); ``main_binary`` /
-    ``product_name`` by ``shipit release assert-bundle``'s expected-name
-    fallback chain (workflows.lex §3.2: mainBinaryName → productName →
-    package name — the scar-#2 integrity guard's inputs); and ``sign`` also
-    by the sign stage — that later.
+    ``endpoints`` also by ``shipit release publish`` (TOL02-WS05: each name
+    dispatches to its endpoint adapter, release-stage endpoints before derived
+    ones); ``bundle_config`` by ``shipit release prepare`` (the
+    artifact-declared bundle-config hook, ADR-0041/PRD story 25: the
+    repo-root-relative JSON file — ``tauri.conf.json`` — whose top-level
+    ``version`` is bumped in lockstep with the leg adapters, keeping "tauri"
+    out of the bump dispatch registry); ``bundle`` by ``shipit release bundle``
+    (TOL02-WS03: the declared composition into the unsigned distributable);
+    ``main_binary`` / ``product_name`` by ``shipit release assert-bundle``'s
+    expected-name fallback chain (workflows.lex §3.2: mainBinaryName →
+    productName → package name — the scar-#2 integrity guard's inputs); and
+    ``sign`` also by the sign stage — that later.
 
     ``sign = true`` requires at least one build target AND at least one darwin
     platform (signing signs a build output, and runs on macOS only) — refused
@@ -662,7 +666,7 @@ def _parse_build_target(where: str, spec: object) -> BuildTarget:
 
 def _parse_endpoints(where: str, value: object) -> tuple[str, ...]:
     """The ``endpoints`` list, validated against the closed :data:`ENDPOINTS`
-    registry — a declaration the release stages consume later."""
+    registry — the declaration ``shipit release publish`` dispatches."""
     if not isinstance(value, list) or not all(isinstance(e, str) for e in value):
         raise ConfigError(f"{where}: must be a list of endpoint names")
     for endpoint in value:
