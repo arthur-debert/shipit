@@ -219,6 +219,21 @@ def load_roster(root: str | None = None) -> Roster:
             cfg = tomllib.load(fh)
     except tomllib.TOMLDecodeError as exc:
         raise RequiredReviewersConfigError(f"malformed {config}: {exc}") from None
+    return parse_roster(cfg, config_path=config)
+
+
+def parse_roster(
+    cfg: dict[str, object], *, config_path: str | Path = OVERRIDE_FILE
+) -> Roster:
+    """Validate one already-loaded config dictionary into a :class:`Roster`.
+
+    This is the parser half of :func:`load_roster`, for boundaries that already
+    loaded an explicit config path alongside other policy tables.  Keeping the
+    parser here preserves the ONE reviewer-config authority while ensuring every
+    table comes from the same file. ``config_path`` anchors relative reviewer
+    instruction paths and identifies validation errors.
+    """
+    config = Path(config_path)
     value = cfg.get(OVERRIDE_KEY)
     if value is None:
         return default_roster()

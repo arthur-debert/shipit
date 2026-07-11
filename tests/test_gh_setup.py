@@ -427,7 +427,9 @@ def test_setup_reads_reviewers_and_provisions_their_credentials(
     monkeypatch.setattr(ghsetup.checks_mod, "discover", lambda *a, **k: ["c / check"])
     monkeypatch.setenv("VAR_PEM", "pem")
     monkeypatch.setenv("VAR_ID", "42")
-    cfg = tmp_path / ".shipit.toml"
+    # A direct caller may supply any filename; all policy tables must come from
+    # that exact file rather than re-discovering a sibling `.shipit.toml`.
+    cfg = tmp_path / "custom-policy.toml"
     cfg.write_text(
         "[reviewers]\ncodex = {}\n"
         "[secrets]\n"

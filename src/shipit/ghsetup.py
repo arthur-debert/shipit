@@ -518,12 +518,12 @@ def setup(
         cfg = config.load(cfg_path)
         sources = config.load_secrets(cfg)
         artifacts = config.load_artifacts(cfg)
-        # The reviewers derivation input (#740): the validated roster's required
-        # names, read through the ONE boundary loader (never a second parser).
-        # It searches up from the config's own directory, so it reads the same
-        # `.shipit.toml` the [secrets]/[artifacts] declarations came from.
-        reviewers = reviewers_config.load_roster(
-            str(Path(cfg_path).parent)
+        # The reviewers derivation input (#740): parse the already-loaded config
+        # through the ONE canonical reviewer parser.  Passing both the dictionary
+        # and its exact path keeps [reviewers], [secrets], and [artifacts] on one
+        # file even when a direct caller uses a nonstandard config filename.
+        reviewers = reviewers_config.parse_roster(
+            cfg, config_path=cfg_path
         ).required_names
     except (
         config.ConfigError,
