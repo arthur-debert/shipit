@@ -1,0 +1,5 @@
+`shipit provision lexd` installs the pinned `lexd` binary into the active pixi
+environment.
+
+Consumer repos call this through the managed pixi task, so they do not carry a
+copy of the provisioning script. Re-running at the same pin is a no-op.

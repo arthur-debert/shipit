@@ -1,0 +1,9 @@
+`shipit e2e` runs declared end-to-end harnesses for built artifacts.
+
+It reads `[artifacts.<name>.e2e]`, builds or resolves the artifact binary,
+injects its absolute path into the harness as `<NAME>_BIN`, and runs the harness
+from the repo root. A repo with no e2e declarations has no e2e lane and exits
+cleanly.
+
+Run bare `shipit e2e` for every declared harness. Pass an artifact name to run
+one. Arguments after `--` are forwarded to that one harness.

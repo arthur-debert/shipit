@@ -1,0 +1,4 @@
+`shipit pr wait` blocks until the PR reaches the requested engine milestone.
+
+Use it for coordinator-owned waits such as reviews arriving or the PR becoming
+ready. It emits progress through the dev-cycle log while waiting.

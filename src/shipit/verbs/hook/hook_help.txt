@@ -1,0 +1,5 @@
+`shipit hook` is the agent harness entrypoint called by lifecycle hooks.
+
+Humans usually do not run these commands directly. They are the binary side of
+the host settings, translating hook payloads into allow/deny decisions,
+activation, Tree provisioning, liveness records, and cleanup.

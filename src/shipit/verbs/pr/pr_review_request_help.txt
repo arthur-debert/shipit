@@ -1,0 +1,6 @@
+`shipit pr review request` requests reviews on a PR and verifies that the
+requests attached.
+
+With no reviewer flag it asks for the required reviewers that still need to
+review the current head. With `--reviewer NAME` it forces one reviewer by adapter
+registry name.

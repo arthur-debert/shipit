@@ -18,15 +18,22 @@ from __future__ import annotations
 
 import json
 import subprocess
+from importlib import resources
 
+import click
 import pytest
+from click.testing import CliRunner
 
+from shipit import cli
 from shipit.review import fanout, producer, replay
 from shipit.review.cell import CellError, parse_cell
 from shipit.review.curve import convergence_curve, render_curve_report
 from shipit.review.groundtruth import parse_fixture
 from shipit.review.labrun import plan_points, resolve_pins, run_cell
 from shipit.spawn.launch import LaunchResult
+from shipit.verbs.lab import lab_group
+from shipit.verbs.lab import report as report_verb
+from shipit.verbs.lab import run as run_verb
 
 # A single-pass review whose finding lexically matches the fixture label below
 # (same file, line in range, claim-token overlap above the threshold).
@@ -147,6 +154,208 @@ def _read_records(paths):
 
 def _store_records(base_dir):
     return _read_records(sorted(base_dir.rglob("*.jsonl")))
+
+
+# --- long-form CLI help ---------------------------------------------------------
+
+
+def test_lab_long_form_help_command(capsys):
+    rc = cli.main(["lab", "help"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "`shipit lab` runs measured experiments" in out
+    assert "shipit lab run CELL" in out
+
+
+def test_lab_long_form_help_uses_command_named_resources():
+    files = resources.files("shipit.verbs.lab")
+    assert files.joinpath("lab_help.txt").is_file()
+    assert files.joinpath("lab_run_help.txt").is_file()
+    assert files.joinpath("lab_report_help.txt").is_file()
+    assert not files.joinpath("help.txt").is_file()
+    assert not files.joinpath("run_help.txt").is_file()
+    assert not files.joinpath("report_help.txt").is_file()
+    assert "help" in lab_group.commands
+    assert run_verb.cmd.help_resource == "lab_run_help.txt"
+    assert report_verb.cmd.help_resource == "lab_report_help.txt"
+
+
+def test_lab_run_long_form_help_leaf(capsys):
+    rc = cli.main(["lab", "run", "help"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "`shipit lab run CELL` executes" in out
+    assert "--checkout" in out
+
+
+def test_lab_run_long_form_help_leaf_allows_trailing_options(capsys):
+    rc = cli.main(["lab", "run", "help", "--force"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "`shipit lab run CELL` executes" in out
+    assert "2 executed, 0 reused" not in out
+
+
+def test_lab_run_long_form_help_leaf_allows_leading_options(capsys):
+    rc = cli.main(["lab", "run", "--force", "help"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "`shipit lab run CELL` executes" in out
+    assert "2 executed, 0 reused" not in out
+
+
+def test_lab_run_click_help_stays_terse():
+    from shipit.verbs.lab import run as run_verb
+
+    result = CliRunner().invoke(run_verb.cmd, ["--help"])
+    assert result.exit_code == 0
+    assert "Usage:" in result.output
+    assert "--checkout" in result.output
+    assert "`shipit lab run CELL` executes" not in result.output
+
+
+def test_lab_report_long_form_help_leaf(capsys):
+    rc = cli.main(["lab", "report", "help"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "`shipit lab report CELL` renders" in out
+    assert "deterministic and token-free" in out
+
+
+def test_lab_report_long_form_help_leaf_allows_trailing_options(capsys):
+    rc = cli.main(["lab", "report", "help", "--fixture", "fixture.toml"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "`shipit lab report CELL` renders" in out
+    assert "deterministic and token-free" in out
+
+
+def test_lab_report_long_form_help_leaf_allows_leading_options(capsys):
+    rc = cli.main(["lab", "report", "--fixture", "fixture.toml", "help"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "`shipit lab report CELL` renders" in out
+    assert "deterministic and token-free" in out
+
+
+def test_lab_report_click_help_stays_terse():
+    from shipit.verbs.lab import report as report_verb
+
+    result = CliRunner().invoke(report_verb.cmd, ["--help"])
+    assert result.exit_code == 0
+    assert "Usage:" in result.output
+    assert "--fixture" in result.output
+    assert "`shipit lab report CELL` renders" not in result.output
+
+
+def test_long_form_help_missing_resource_is_a_click_error():
+    from shipit.verbs import _help
+
+    with pytest.raises(click.ClickException) as excinfo:
+        _help.load_help_text("shipit.verbs.lab", "missing_help.txt")
+
+    assert (
+        "bundled help resource shipit.verbs.lab:missing_help.txt is unavailable"
+        in str(excinfo.value)
+    )
+
+
+def test_long_form_help_missing_package_is_a_click_error():
+    from shipit.verbs import _help
+
+    with pytest.raises(click.ClickException) as excinfo:
+        _help.load_help_text("shipit.verbs.missing", "help.txt")
+
+    assert "bundled help resource shipit.verbs.missing:help.txt is unavailable" in str(
+        excinfo.value
+    )
+
+
+def test_long_form_help_directory_resource_is_a_click_error():
+    from shipit.verbs import _help
+
+    with pytest.raises(click.ClickException) as excinfo:
+        _help.load_help_text("shipit.verbs.lab", ".")
+
+    assert "bundled help resource shipit.verbs.lab:. is unavailable" in str(
+        excinfo.value
+    )
+
+
+def test_helpable_command_missing_positional_returns_none():
+    from shipit.verbs.lab import run as run_verb
+
+    ctx = click.Context(run_verb.cmd)
+    assert run_verb.cmd._first_positional_arg(ctx, []) is None
+
+
+def test_lab_run_cell_still_reaches_the_run_callback(monkeypatch):
+    from shipit.verbs.lab import run as run_verb
+
+    seen = {}
+
+    def fake_run(cell_ref, *, checkouts, prs, force, fixture_path, cells_dir):
+        seen.update(
+            cell_ref=cell_ref,
+            checkouts=checkouts,
+            prs=prs,
+            force=force,
+            fixture_path=fixture_path,
+            cells_dir=cells_dir,
+        )
+        return 0
+
+    monkeypatch.setattr(run_verb, "run", fake_run)
+    result = CliRunner().invoke(
+        run_verb.cmd,
+        [
+            "ctl",
+            "--checkout",
+            "/repo",
+            "--pr",
+            "widget-1",
+            "--force",
+            "--fixture",
+            "fixture.toml",
+            "--cells-dir",
+            "cells",
+        ],
+    )
+    assert result.exit_code == 0
+    assert seen == {
+        "cell_ref": "ctl",
+        "checkouts": ("/repo",),
+        "prs": ("widget-1",),
+        "force": True,
+        "fixture_path": "fixture.toml",
+        "cells_dir": "cells",
+    }
+
+
+def test_lab_report_cell_still_reaches_the_report_callback(monkeypatch):
+    from shipit.verbs.lab import report as report_verb
+
+    seen = {}
+
+    def fake_run(cell_ref, *, fixture_path, cells_dir):
+        seen.update(
+            cell_ref=cell_ref,
+            fixture_path=fixture_path,
+            cells_dir=cells_dir,
+        )
+        return 0
+
+    monkeypatch.setattr(report_verb, "run", fake_run)
+    result = CliRunner().invoke(
+        report_verb.cmd,
+        ["treat", "--fixture", "fixture.toml", "--cells-dir", "cells"],
+    )
+    assert result.exit_code == 0
+    assert seen == {
+        "cell_ref": "treat",
+        "fixture_path": "fixture.toml",
+        "cells_dir": "cells",
+    }
 
 
 # --- the runner: execution, tagging, idempotency ----------------------------------

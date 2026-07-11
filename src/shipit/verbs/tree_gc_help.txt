@@ -1,0 +1,5 @@
+`shipit tree gc` sweeps the central root for reclaimable Trees.
+
+Only provably safe Trees are removed: merged PR, clean worktree, nothing
+unpushed, and old enough for the threshold. `--dry-run` prints the same decision
+without deleting anything.

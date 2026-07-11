@@ -1,0 +1,5 @@
+`shipit log event NAME` records a dev-cycle event.
+
+NAME must be registered in shipit's closed event vocabulary. Domain keys come
+from the environment and current checkout rather than flags, so records remain
+consistent across hooks, spawned agents, and direct invocations.

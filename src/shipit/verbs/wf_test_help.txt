@@ -1,0 +1,5 @@
+`shipit wf test` runs a workflow under `act` in a container against a crafted
+event.
+
+Use it to validate a workflow or one job locally. The command also prints the
+surface that `act` cannot verify, so the remaining push-only risk stays visible.

@@ -1,0 +1,6 @@
+`shipit session codex` launches an interactive Codex coordinator session in a
+fresh session Tree.
+
+It mints a session id, provisions an ephemeral Tree from `origin/main`, changes
+into that Tree, and replaces the process with `codex --cd <tree>`. Extra
+arguments are forwarded to Codex.

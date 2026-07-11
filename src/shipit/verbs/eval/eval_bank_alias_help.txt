@@ -1,0 +1,6 @@
+`shipit eval bank alias` adds an accepted near-miss phrasing to an existing
+label.
+
+Use it when an emitted finding is semantically the same issue as a fixture label
+but uses different wording. Future scoring can then recognize that phrasing
+without another human decision.

@@ -1,0 +1,6 @@
+`shipit hook worktreecreate` provisions an isolated Tree for a host
+WorktreeCreate request.
+
+It serves top-level coordinator launches and in-host subagent launches. On
+success it prints the Tree path for the host to adopt as cwd. It fails closed so
+a provisioning failure never leaves the host in an unsafe checkout.

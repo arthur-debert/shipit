@@ -36,6 +36,7 @@ from ...review.groundtruth import DEFAULT_FIXTURE_PATH, load_fixture
 from ...review.instructions import load_instructions
 from ...review.labrun import resolve_pins, safe_instructions_path
 from .._errors import cli_errors
+from .._help import HelpableCommand
 
 
 def _variant_hash(cell: Cell) -> str:
@@ -123,7 +124,12 @@ def run(
     return 0
 
 
-@click.command(name="report")
+@click.command(
+    name="report",
+    cls=HelpableCommand,
+    help_package=__package__,
+    help_resource="lab_report_help.txt",
+)
 @click.argument("cell_ref", metavar="CELL")
 @click.option(
     "--fixture",
@@ -138,12 +144,5 @@ def run(
     help="Cells directory for id references and baselines (default: lab/cells).",
 )
 def cmd(cell_ref: str, fixture_path: str | None, cells_dir: str | None) -> None:
-    """Render CELL's convergence curve from banked review-round records.
-
-    CELL is a cell id under lab/cells/ or a path to a cell file. Prints
-    cumulative major-or-worse recall, false positives / precision, token cost,
-    and latency per sweep point — with the baseline cell's curve beside it for
-    the equal-budget comparison. Deterministic and token-free: scoring banked
-    records is free to re-run forever (ADR-0048/0049).
-    """
+    """Render CELL's convergence curve from banked review-round records."""
     raise SystemExit(run(cell_ref, fixture_path=fixture_path, cells_dir=cells_dir))

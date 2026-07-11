@@ -1,0 +1,5 @@
+`shipit pr status` reports where a PR stands in the draft-to-ready loop.
+
+It resolves the target PR, gathers the current review/check/mergeability state,
+and prints the next action without changing anything. Use it when orienting
+before acting.

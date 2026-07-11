@@ -1,0 +1,5 @@
+`shipit verify-apps` verifies that local-agent reviewer GitHub Apps are live.
+
+For each reviewer App it mints an installation token and checks the permissions
+needed to post review checks. It only verifies; installation and consent happen
+outside this command.

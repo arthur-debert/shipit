@@ -31,6 +31,7 @@ from ...review.cell import (
 from ...review.groundtruth import DEFAULT_FIXTURE_PATH, load_fixture
 from ...review.labrun import run_cell
 from .._errors import cli_errors
+from .._help import HelpableCommand
 
 
 @cli_errors
@@ -80,7 +81,12 @@ def run(
     return 0
 
 
-@click.command(name="run")
+@click.command(
+    name="run",
+    cls=HelpableCommand,
+    help_package=__package__,
+    help_resource="lab_run_help.txt",
+)
 @click.argument("cell_ref", metavar="CELL")
 @click.option(
     "--checkout",
@@ -125,15 +131,7 @@ def cmd(
     fixture_path: str | None,
     cells_dir: str | None,
 ) -> None:
-    """Run experiment cell CELL over the offline replay driver, foreground.
-
-    CELL is a cell id under lab/cells/ or a path to a cell file. Every
-    (fixture PR × replicate × sweep) point runs through the sanctioned replay
-    driver and lands as a review-round record tagged with the cell's full
-    idempotency key; banked points are REUSED, never re-run (ADR-0049 — extend
-    a curve and pay only for the new points). Informed sweeps compose the
-    prior sweeps' posted findings into the instructions at the runner layer.
-    """
+    """Run experiment cell CELL over the offline replay driver."""
     raise SystemExit(
         run(
             cell_ref,

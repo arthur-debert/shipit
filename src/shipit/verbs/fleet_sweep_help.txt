@@ -1,0 +1,7 @@
+`shipit fleet sweep` runs applicable tool verbs against each portfolio repo in
+fresh Trees.
+
+Applicability comes from each target repo's own declarations: lint always
+applies, test and build apply where toolchains declare legs, e2e applies where
+artifacts declare harnesses, and changelog check applies where changelog
+fragments exist. The output is an evidence matrix with raw output for red cells.

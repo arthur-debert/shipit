@@ -1,0 +1,10 @@
+`shipit build` runs the repository's declared build legs.
+
+It reads `.shipit.toml [toolchains]` and dispatches each selected leg to the real
+builder for that toolchain, such as cargo, go build, uv build, or an npm build
+script. Pixi provisions the environment; it is not treated as the builder.
+
+Run bare `shipit build` for every build leg. Pass a leg name or path to build
+one leg. Arguments after `--` are forwarded to the selected builder and require
+exactly one selected leg. `--version VERSION` supplies release-version injection
+only for build targets that declare it.

@@ -1,0 +1,5 @@
+`shipit fleet` verifies a candidate shipit build across the declared portfolio.
+
+It is for adoption and release confidence: instead of proving a change only in
+the shipit repo, it runs shipped tool verbs across the configured portfolio and
+reports the per-repo, per-tool matrix.

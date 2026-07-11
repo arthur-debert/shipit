@@ -1,0 +1,7 @@
+`shipit ci` is the CI routing surface for repository lanes.
+
+It exists so GitHub Actions can ask shipit which standardized checks should run
+for the current event, instead of each workflow reimplementing path and lane
+policy.
+
+Use `shipit ci plan` from workflow planning jobs to emit the job matrix.

@@ -1,0 +1,8 @@
+`shipit changelog` owns release-note fragments and the rendered `CHANGELOG.md`.
+
+Feature and fix PRs add `CHANGELOG/unreleased-*.md` fragments. `CHANGELOG.md` is
+generated from those fragments and should not be hand-edited as the source of
+truth.
+
+Use `shipit changelog check` in checks, `shipit changelog render` to refresh the
+projection, and `shipit changelog coalesce VERSION` at release time.

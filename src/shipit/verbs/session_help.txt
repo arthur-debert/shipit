@@ -1,0 +1,5 @@
+`shipit session` launches isolated top-level coordinator sessions.
+
+Claude sessions ride the host worktree hook seam. `shipit session codex` is the
+Codex counterpart: it provisions the ephemeral session Tree explicitly, then
+execs codex rooted in that Tree.

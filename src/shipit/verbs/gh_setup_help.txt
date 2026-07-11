@@ -1,0 +1,5 @@
+`shipit gh-setup` makes a GitHub repository conform to portfolio standards.
+
+It applies and verifies repository rulesets, labels, secrets, and required
+checks from `.shipit.toml` or explicit options. The command is idempotent, so it
+is suitable for first setup and later drift repair.

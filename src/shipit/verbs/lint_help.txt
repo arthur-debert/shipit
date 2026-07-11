@@ -1,0 +1,5 @@
+`shipit lint` runs the standardized multi-language checks over a repository.
+
+It is the same hard-fail surface used by hooks and CI. A missing required tool is
+a failure, not a skip. Use `--fix` only when you want formatters to edit files in
+place.

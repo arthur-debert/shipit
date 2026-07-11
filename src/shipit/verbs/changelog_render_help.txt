@@ -1,0 +1,5 @@
+`shipit changelog render` regenerates `CHANGELOG.md` from `CHANGELOG/`
+fragments.
+
+This is the normal fix after `changelog check` reports that the committed
+changelog projection is stale.

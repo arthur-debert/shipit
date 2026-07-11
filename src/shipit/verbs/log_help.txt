@@ -1,0 +1,5 @@
+`shipit log` is the constrained dev-cycle write path.
+
+Use `shipit log event <name>` to record a registered milestone into the durable
+per-repo JSONL log. Registered names only: this surface is a lifecycle trail, not
+a freeform diary.
