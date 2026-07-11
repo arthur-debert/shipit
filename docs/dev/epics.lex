@@ -60,9 +60,10 @@ dependencies.
     Parallel implementation, serialized integration. Subagents implement
     eligible workstreams concurrently per the dependency graph, but the
     coordinator merges into the epic branch one at a time. After each merge,
-    in-flight WS branches pull the new epic head and re-green before their own PR
-    flips READY. Workstreams may overlap files; contention is resolved at merge
-    time, never by pre-partitioning.
+    in-flight WS branches MERGE the new epic head in (never rebase — see the
+    currency rule in §3) and re-green before their own PR flips READY.
+    Workstreams may overlap files; contention is resolved at merge time, never
+    by pre-partitioning.
 
 3. Integration
 
@@ -81,6 +82,18 @@ dependencies.
     rather than waiting to be woken; reviewer waits are never left unwatched —
     `shipit pr wait` (ADR-0034) is the blocking watch (CLI02 retro: an 8-minute
     dead gap between a merge and the resulting conflict being handled).
+
+    Epic-branch currency is MERGE-only: a WS branch takes the new epic head by
+    merging `EPIC/umbrella` in, NEVER by rebasing onto it. Re-review rounds
+    are head-strict incremental — each round reviews only
+    `last-reviewed-head..new-head` (ADR-0043) — and a rebase rewrites the WS
+    branch's history so the last-reviewed head is no longer an ancestor of the
+    new one: the next round's range degenerates to the whole umbrella delta,
+    and reviewers re-flag sibling workstreams' already-landed code as if it
+    were this PR's (observed live on \#732; confirmed by the maintainer
+    mid-epic). Merging keeps the range to the merge commit plus the genuine
+    fixes, and the squash-merge at integration erases the merge commits
+    anyway — the merge-commit noise never outlives the WS PR.
 
 4. Convergence — clearing the fallouts
 
