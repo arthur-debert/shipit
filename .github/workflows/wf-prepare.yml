@@ -134,10 +134,14 @@ jobs:
           # Full history: prepare resolves bump words from tags and rolls
           # the changelog; a shallow clone would leave both unanswerable.
           fetch-depth: 0
-          # The PAT (not github.token): prepare pushes the release commit
-          # and tag through the ruleset, and a PAT-pushed tag still fires
-          # the tag-triggered workflows (advance-major.yml).
-          token: ${{ secrets.RELEASE_TOKEN }}
+          # Prefer the PAT: prepare pushes the release commit and tag through
+          # the ruleset, and a PAT-pushed tag still fires the tag-triggered
+          # workflows (advance-major.yml). Fall back to github.token when no
+          # PAT is supplied (a plan with no protected-tag ruleset) — an empty
+          # RELEASE_TOKEN would otherwise override checkout's default token
+          # with "" and force an unauthenticated clone that cannot push. When
+          # the plan DOES require the PAT, preflight hard-fails naming it.
+          token: ${{ secrets.RELEASE_TOKEN || github.token }}
       - uses: prefix-dev/setup-pixi@v0.9.6
         with:
           # Keep in lockstep with PIXI_PIN in the managed Layer 0 bootstrap
@@ -168,6 +172,12 @@ jobs:
         # the indented JSON, split out fields) and projection of the plan's
         # per-entry sign flag (select reads the decision, never remakes it).
         run: |
+          # pipefail: the default step shell is `bash -e` WITHOUT pipefail, so
+          # a failed producer in `preflight | jq` would be masked by jq's 0 on
+          # empty input — the step would write blank outputs and let `prepare`
+          # push a release the plan never sanctioned. The barrier depends on
+          # the whole pipeline failing.
+          set -euo pipefail
           flags=()
           if [ "$UNSIGNED" = "true" ]; then flags+=(--unsigned); fi
           plan="$(pixi run --locked ./bin/shipit release preflight "$VERSION" --json "${flags[@]}" | jq -c .)"
@@ -187,6 +197,9 @@ jobs:
         # checkout's persisted PAT. Prepare is resume-safe: an existing tag
         # is a no-op success, so a re-run never double-bumps.
         run: |
+          # pipefail (same reason as the plan step): a failed `prepare` must
+          # not be masked by jq's 0 on empty input.
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           prepared="$(pixi run --locked ./bin/shipit release prepare "$VERSION" --json | jq -c .)"

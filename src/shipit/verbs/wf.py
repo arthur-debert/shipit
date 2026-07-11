@@ -384,7 +384,9 @@ def run(
     ``dry_run`` runs act in plan/dry-run mode (``-n``): the workflow is
     parsed, the trigger matched, expressions and the job graph evaluated, but
     no step executes — the smoke mode for side-effectful workflows (the wf-*
-    release blocks). ``local_repositories`` maps remote ``owner/repo@ref``
+    release blocks). Because a dry run never instantiates the runner image,
+    :func:`ensure_image` is skipped for it (act still needs a reachable
+    daemon). ``local_repositories`` maps remote ``owner/repo@ref``
     workflow/action refs to local paths (see :func:`act_argv`).
 
     The act-untestable surface (:func:`untestable_notice`) is printed on EVERY
@@ -413,7 +415,11 @@ def run(
     payload = craft_event(event, branch=branch, inputs=dispatch_inputs)
 
     print(f"wf test: {workflow} (event {event}" + (f", job {job})" if job else ")"))
-    if ensure_image(run_cmd):
+    # A dry run evaluates the graph without instantiating containers, so the
+    # runner image is never used — building it first is wasted work. (act's
+    # dry run still needs a REACHABLE daemon, so the smoke tests keep their
+    # docker-daemon skip; they just no longer need the image built.)
+    if not dry_run and ensure_image(run_cmd):
         print(f"  built {WF_IMAGE} (stock-Ubuntu act runner image)")
 
     # The payload lives in a temp file only as long as act needs to read it.

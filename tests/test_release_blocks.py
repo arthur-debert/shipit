@@ -110,7 +110,13 @@ def test_composed_chain_carries_zero_logic():
     publish = jobs["publish"]
     assert "needs.build.result ==" not in publish.get("if", "")
     assert "needs.sign.result ==" not in publish.get("if", "")
+    # `!cancelled()` is a status function: it overrides the default
+    # skip-when-a-need-failed/was-skipped, so publish still RUNS to reach the
+    # unsigned path or the verb's scar-#3 refusal (a plain `needs:` would
+    # wrongly skip it). Prepare-success is the only gate. `always()` would be
+    # wrong here — it runs even on cancellation.
     assert "!cancelled()" in publish["if"]
+    assert "needs.prepare.result == 'success'" in publish["if"]
     assert publish["with"]["build-result"] == "${{ needs.build.result }}"
     assert publish["with"]["bundle-result"] == "${{ needs.build.result }}"
     assert publish["with"]["sign-result"] == "${{ needs.sign.result }}"
@@ -128,7 +134,7 @@ def test_assert_bundle_runs_at_sign_entry_before_any_secret():
     assert order and sign and order[0] < sign[0]
 
 
-def test_assert_bundle_guards_publishs_unsigned_path():
+def test_assert_bundle_guards_publishes_unsigned_path():
     # Scar #2, second placement (ADR-0040): wf-publish's assert job fans
     # over the plan's UNSIGNED projection — the trees that never traversed
     # wf-sign-mac — and the publish job is ordered after it.
@@ -138,6 +144,10 @@ def test_assert_bundle_guards_publishs_unsigned_path():
     assert "assert-bundle" in _runs(assert_job["steps"])
     publish = doc["jobs"]["publish"]
     assert publish["needs"] == ["assert"]
+    # `!cancelled()` overrides the default skip so publish still RUNS when the
+    # assert job legitimately skips (all-signed plan / no bundle stage); the
+    # result gate below then admits skipped-or-success and blocks failure.
+    assert "!cancelled()" in publish["if"]
     assert "needs.assert.result != 'failure'" in publish["if"]
 
 
@@ -152,6 +162,19 @@ def test_publish_block_feeds_results_to_the_verb_not_yaml():
         assert flag in script
     assert "inputs.build-result" not in publish["if"]
     assert "inputs.sign-result" not in publish["if"]
+
+
+def test_prepare_pipeline_steps_set_pipefail():
+    # The plan and prepare steps pipe a shipit invocation into jq. The default
+    # step shell is `bash -e` WITHOUT pipefail, so a failed producer would be
+    # masked by jq's 0 on empty input — the step would emit blank outputs and
+    # let a release the plan never sanctioned proceed. Every run step that
+    # pipes into jq must set pipefail so the whole pipeline fails.
+    steps = _steps("wf-prepare.yml", "prepare")
+    piped = [s for s in steps if "| jq -c" in s.get("run", "")]
+    assert piped, "expected the plan/prepare steps to pipe into jq"
+    for step in piped:
+        assert "set -euo pipefail" in step["run"], step.get("name")
 
 
 def test_build_block_never_ships_the_target_tree():
