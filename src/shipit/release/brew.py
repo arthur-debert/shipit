@@ -144,6 +144,17 @@ def metadata_for(metadata: dict, artifact: config.Artifact) -> tuple[str, str, s
     return str(desc), str(homepage), str(license_)
 
 
+def _ruby_str(value: str) -> str:
+    """``value`` escaped for a Ruby DOUBLE-QUOTED string literal. Pure.
+
+    Escapes the backslash, the double quote, and ``#`` (defusing ``#{…}``
+    interpolation) so a crate description/homepage/license/binary carrying any
+    of them still renders a formula that ``ruby -c`` accepts — never a syntax
+    error or an interpolation that reads a Ruby variable at install time.
+    """
+    return value.replace("\\", "\\\\").replace('"', '\\"').replace("#", "\\#")
+
+
 def _is_arm(triple: str) -> bool:
     """Whether ``triple`` is an arm target (``on_arm`` branch). Pure."""
     return triple.startswith(("aarch64", "arm"))
@@ -207,10 +218,10 @@ def render(
         lines.append(PRIVATE_STRATEGY_PREAMBLE.rstrip("\n"))
         lines.append("")
     lines.append(f"class {formula_class(binary)} < Formula")
-    lines.append(f'  desc "{desc}"')
-    lines.append(f'  homepage "{homepage}"')
-    lines.append(f'  version "{version}"')
-    lines.append(f'  license "{license_}"')
+    lines.append(f'  desc "{_ruby_str(desc)}"')
+    lines.append(f'  homepage "{_ruby_str(homepage)}"')
+    lines.append(f'  version "{_ruby_str(version)}"')
+    lines.append(f'  license "{_ruby_str(license_)}"')
     for os_word, pairs in (("on_macos", mac), ("on_linux", linux)):
         if pairs:
             lines.append("")
@@ -218,7 +229,7 @@ def render(
     lines += [
         "",
         "  def install",
-        f'    bin.install "{binary}"',
+        f'    bin.install "{_ruby_str(binary)}"',
         "  end",
         "end",
         "",

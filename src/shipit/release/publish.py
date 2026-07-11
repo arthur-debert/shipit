@@ -16,7 +16,9 @@ switch), one adapter per name of :data:`shipit.config.ENDPOINTS`:
   SUCCESS, so a re-run after a mid-workspace failure resumes (PRD story 36).
 - **pypi** — twine-style upload of the staged wheel+sdist with
   ``--skip-existing`` (idempotent), plus the ``--testpypi`` staging flag;
-  token presence is validated before any upload.
+  token presence is validated before any upload. The upload is SCOPED to the
+  artifact's own distribution (its ``pyproject`` ``[project].name``), so a
+  multi-artifact bundle tree never leaks a sibling's wheel to the index.
 - **npm** — publishes the prebuilt package tree (wasm-pack output style)
   without rebuilding (``--ignore-scripts``); publish-over-existing is
   SUCCESS.
@@ -68,7 +70,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import tempfile
+import tomllib
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -269,6 +273,13 @@ def plan(
     33 — every external endpoint skipped); any prerelease skips brew (the
     tap is the stable channel). An endpoint name outside the closed registry
     is a hard :class:`ReleaseError` naming the known set.
+
+    Cross-endpoint invariant: an unskipped brew dispatch REQUIRES an unskipped
+    gh-release in the same plan — the formula points at
+    ``releases/download/<tag>/…`` assets that only gh-release creates and
+    uploads, so brew alone would push a tap formula referencing a release this
+    run never produced. gh-release is itself idempotent-resumable, so a
+    tap-repair run simply lists both.
     """
     dispatches: list[Dispatch] = []
     for stage in ("release", "derived"):
@@ -289,6 +300,15 @@ def plan(
                 elif prerelease and adapter.name == "brew":
                     skip = SKIP_STABLE_ONLY
                 dispatches.append(Dispatch(artifact, adapter, skip))
+    live = [d.adapter.name for d in dispatches if d.skip is None]
+    if "brew" in live and "gh-release" not in live:
+        raise ReleaseError(
+            "publish plan invalid — a brew endpoint renders a formula pointing "
+            "at gh-release assets (`releases/download/<tag>/…`), but no unskipped "
+            "gh-release endpoint is planned: declare `gh-release` so the release "
+            "the formula targets is created and its assets uploaded (both "
+            "endpoints are idempotent — a resume converges, nothing is duplicated)"
+        )
     return tuple(dispatches)
 
 
@@ -518,10 +538,16 @@ def _publish_crates(req: PublishRequest) -> Published:
     anything else aborts with the stderr tail. cargo 1.66+ waits for the
     sparse index between dependent publishes natively, so there is no
     inter-publish sleep (the legacy composite's wait defaulted to 0).
+
+    The registry token rides the ``cargo publish`` child env
+    (:data:`CRATES_TOKEN_ENV`), never argv and never the ambient process
+    environment — consistent with the pypi/npm adapters, so an injected
+    ``env`` (recorded tests, workflow composition) authenticates the publish.
+    ``cargo metadata`` needs no token.
     """
     leg = _leg_for(req.artifact, req.entries, "rust", "crates")
     leg_dir = _leg_dir(req.root, leg)
-    _require_token(req, "crates", CRATES_TOKEN_ENV)
+    token = _require_token(req, "crates", CRATES_TOKEN_ENV)
     metadata = req.run_cmd(
         ["cargo", "metadata", "--format-version", "1", "--no-deps"], leg_dir, None
     )
@@ -533,7 +559,9 @@ def _publish_crates(req: PublishRequest) -> Published:
         )
     actions = []
     for crate in order:
-        result = req.probe(["cargo", "publish", "-p", crate], leg_dir, None)
+        result = req.probe(
+            ["cargo", "publish", "-p", crate], leg_dir, {CRATES_TOKEN_ENV: token}
+        )
         if result.rc == 0:
             actions.append(f"{crate} {req.version} published")
         elif crate_already_published(result.stderr):
@@ -551,42 +579,101 @@ def _publish_crates(req: PublishRequest) -> Published:
 # --------------------------------------------------------------------------
 
 
-def pypi_uploads(names: Sequence[str]) -> tuple[str, ...]:
-    """The staged wheel(s) plus each wheel's MATCHING sdist, from the asset
-    names. Pure.
+def _canonical_dist(name: str) -> str:
+    """The PEP 503/427 canonical distribution key of a filename component:
+    runs of ``-``/``_``/``.`` collapse to a single ``_`` and case folds. Pure.
 
-    A wheel is ``<dist>-<version>-…"``.whl``; its sdist is
-    ``<dist>-<version>.tar.gz`` — matching by that prefix keeps the archive
-    composition's ``<name>-<target>.tar.gz`` tarballs (which are NOT python
-    distributions) out of the upload set.
+    So one distribution's wheel form (PEP 427 escapes every run to ``_``) and
+    its sdist form (PEP 625 does the same; a legacy sdist keeps the original
+    hyphens/dots) compare EQUAL — ``my-awesome-pkg`` / ``my_awesome_pkg`` /
+    ``My.Awesome.Pkg`` are one key.
     """
-    available = set(names)
+    return re.sub(r"[-_.]+", "_", name).lower()
+
+
+def pypi_uploads(names: Sequence[str], dist: str) -> tuple[str, ...]:
+    """The staged wheel(s) of distribution ``dist`` plus each wheel's MATCHING
+    sdist, from the asset names. Pure.
+
+    ``dist`` is the artifact's Python distribution name; the upload is scoped
+    to THIS artifact's outputs, so a multi-artifact run never ships another
+    artifact's wheel to PyPI under this artifact's token (registry publishes
+    are irreversible). A wheel is ``<dist>-<version>-…\\ .whl`` and its sdist
+    ``<dist>-<version>.tar.gz``; the dist part is matched CANONICALLY
+    (:func:`_canonical_dist`), so the wheel's underscore form and a legacy
+    hyphenated sdist both match, while the archive composition's
+    ``<name>-<target>.tar.gz`` tarballs (NOT python distributions) stay out.
+    """
+    want = _canonical_dist(dist)
+    sdists = sorted(n for n in names if n.endswith(".tar.gz"))
     files: list[str] = []
     for wheel in sorted(n for n in names if n.endswith(".whl")):
+        parts = wheel.split("-")
+        if len(parts) < 2 or _canonical_dist(parts[0]) != want:
+            continue
         files.append(wheel)
-        sdist = "-".join(wheel.split("-")[:2]) + ".tar.gz"
-        if sdist in available and sdist not in files:
-            files.append(sdist)
+        version = parts[1]
+        for sdist in sdists:
+            cand_dist, _sep, cand_version = sdist[: -len(".tar.gz")].rpartition("-")
+            if (
+                cand_version == version
+                and _canonical_dist(cand_dist) == want
+                and sdist not in files
+            ):
+                files.append(sdist)
+                break
     return tuple(files)
 
 
+def _pypi_dist_name(req: PublishRequest) -> str:
+    """The artifact's Python distribution name — ``[project].name`` of the
+    python leg's ``pyproject.toml`` — the key publish scopes the upload to.
+
+    Resolved like every other adapter's leg (:func:`_leg_for`); a missing
+    leg, unreadable ``pyproject``, or a ``pyproject`` with no
+    ``[project].name`` is a LOUD :class:`ReleaseError` — publish never falls
+    back to scanning the whole bundle tree.
+    """
+    leg = _leg_for(req.artifact, req.entries, "python", "pypi")
+    pyproject = _leg_dir(req.root, leg) / "pyproject.toml"
+    try:
+        data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise ReleaseError(
+            f"[artifacts.{req.artifact.name}] pypi: cannot read {pyproject} "
+            f"to scope the upload to this artifact's distribution: {exc}"
+        ) from exc
+    project = data.get("project") if isinstance(data, dict) else None
+    name = project.get("name") if isinstance(project, dict) else None
+    if not name:
+        raise ReleaseError(
+            f"[artifacts.{req.artifact.name}] pypi: {pyproject} has no "
+            f"[project].name — publish scopes the upload by distribution name, "
+            f"never ships the whole bundle tree to the index"
+        )
+    return str(name)
+
+
 def _publish_pypi(req: PublishRequest) -> Published:
-    """Twine-style upload of the staged wheel+sdist. See the module
+    """Twine-style upload of the artifact's staged wheel+sdist. See the module
     docstring's pypi entry.
 
-    ``--skip-existing`` is the idempotence contract (a re-run over
-    already-uploaded files converges); ``--testpypi`` reroutes to
-    :data:`TESTPYPI_URL` with the staging token. The token rides the child
-    env (``TWINE_USERNAME``/``TWINE_PASSWORD``), never argv.
+    The upload is SCOPED to the artifact's distribution (:func:`_pypi_dist_name`
+    over the python leg's ``pyproject``), so a multi-artifact bundle tree never
+    leaks another artifact's wheel to the index. ``--skip-existing`` is the
+    idempotence contract (a re-run over already-uploaded files converges);
+    ``--testpypi`` reroutes to :data:`TESTPYPI_URL` with the staging token. The
+    token rides the child env (``TWINE_USERNAME``/``TWINE_PASSWORD``), never argv.
     """
     key = TESTPYPI_TOKEN_ENV if req.testpypi else PYPI_TOKEN_ENV
     token = _require_token(req, "pypi", key)
-    files = pypi_uploads(_asset_names(req.assets_dir))
+    dist = _pypi_dist_name(req)
+    files = pypi_uploads(_asset_names(req.assets_dir), dist)
     if not files:
         raise ReleaseError(
-            f"[artifacts.{req.artifact.name}] pypi: no wheel under "
-            f"{req.assets_dir} — the bundle stage's wheel composition "
-            f"produces it; run `shipit release bundle` first"
+            f"[artifacts.{req.artifact.name}] pypi: no wheel for distribution "
+            f"`{dist}` under {req.assets_dir} — the bundle stage's wheel "
+            f"composition produces it; run `shipit release bundle` first"
         )
     argv = ["twine", "upload", "--non-interactive", "--skip-existing"]
     if req.testpypi:
@@ -732,7 +819,7 @@ def _publish_brew(req: PublishRequest) -> Published:
     scratch = req.assets_dir / "brew"
     scratch.mkdir(parents=True, exist_ok=True)
     rendered = scratch / f"{binary}.rb"
-    rendered.write_text(text, encoding="utf-8")
+    rendered.write_text(text, encoding="utf-8", newline="\n")
     req.run_cmd(["ruby", "-c", str(rendered)], req.root, None)
     actions = [f"rendered {formula_rel} ({', '.join(sorted(targets))})"]
     with tempfile.TemporaryDirectory(prefix="shipit-brew-tap-") as tmp:
@@ -746,7 +833,7 @@ def _publish_brew(req: PublishRequest) -> Published:
         )
         dest = tap_dir / formula_rel
         dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text(text, encoding="utf-8")
+        dest.write_text(text, encoding="utf-8", newline="\n")
         tap_cwd = str(tap_dir)
         if not req.gitio.status_porcelain(cwd=tap_cwd):
             # Idempotence prior art (legacy push-brew-tap): the formula the

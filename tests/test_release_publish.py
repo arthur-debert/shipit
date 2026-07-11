@@ -322,6 +322,38 @@ def test_plan_unknown_endpoint_is_a_hard_error_naming_the_known_set():
     assert "gh-release, crates, pypi, npm, brew" in str(err.value)
 
 
+def test_plan_brew_alone_refuses_without_an_unskipped_gh_release():
+    """The brew formula points at gh-release assets; a brew endpoint with no
+    unskipped gh-release in the plan would push a formula referencing a release
+    this run never created — a hard plan refusal, not a broken tap."""
+    artifacts = _artifacts({"lex": {"endpoints": ["brew"]}})
+    with pytest.raises(ReleaseError, match="brew endpoint renders a formula"):
+        publish_mod.plan(artifacts, prerelease=False, live_fire=False)
+
+
+def test_plan_brew_with_gh_release_on_any_artifact_is_valid():
+    """One unskipped gh-release (any artifact) uploads the whole asset tree, so
+    it satisfies every brew formula's asset URLs — the invariant is plan-wide."""
+    artifacts = _artifacts(
+        {"lex": {"endpoints": ["brew"]}, "core": {"endpoints": ["gh-release"]}}
+    )
+    dispatched = publish_mod.plan(artifacts, prerelease=False, live_fire=False)
+    assert {(d.artifact.name, d.adapter.name) for d in dispatched} == {
+        ("core", "gh-release"),
+        ("lex", "brew"),
+    }
+
+
+def test_plan_brew_needs_gh_release_unskipped_not_merely_present(tmp_path):
+    """A prerelease that skips brew never trips the invariant; but a stable cut
+    whose only gh-release was RC-skipped would — the check reads the UNSKIPPED
+    set. Here brew is skipped by the prerelease rule, so the plan is valid even
+    without gh-release."""
+    artifacts = _artifacts({"lex": {"endpoints": ["brew"]}})
+    dispatched = publish_mod.plan(artifacts, prerelease=True, live_fire=False)
+    assert dispatched[0].skip == publish_mod.SKIP_STABLE_ONLY
+
+
 def test_missing_secrets_reports_planned_unskipped_dispatches_only():
     artifacts = _artifacts(
         {"lex": {"endpoints": ["gh-release", "crates", "npm", "brew"]}}
@@ -358,6 +390,15 @@ def _staged_assets(tmp_path, names):
     for name in names:
         (dist / name).write_bytes(b"bytes-of-" + name.encode())
     return dist
+
+
+def _pyproject(dir_path, name):
+    """A minimal ``pyproject.toml`` naming the distribution — what the pypi
+    adapter reads to scope its upload to this artifact."""
+    dir_path.mkdir(parents=True, exist_ok=True)
+    (dir_path / "pyproject.toml").write_text(
+        f'[project]\nname = "{name}"\nversion = "0"\n', encoding="utf-8"
+    )
 
 
 def test_gh_release_creates_with_prerelease_from_the_suffix_and_uploads(tmp_path):
@@ -492,6 +533,13 @@ def test_crates_publishes_in_order_and_resumes_past_already_published(tmp_path):
         ("cargo", "publish", "-p", "core"),
         ("cargo", "publish", "-p", "app"),
     ]
+    # The registry token rides the child env (never argv, never the ambient
+    # process env) — so an injected `env` authenticates the publish, exactly
+    # like the pypi/npm adapters.
+    assert [env for _, _, env in probe.calls] == [
+        {"CARGO_REGISTRY_TOKEN": "tok"},
+        {"CARGO_REGISTRY_TOKEN": "tok"},
+    ]
     assert published.actions == (
         "core 1.2.3 already published — resumed",
         "app 1.2.3 published",
@@ -529,25 +577,57 @@ def test_crates_without_a_rust_leg_refuses(tmp_path):
 # --------------------------------------------------------------------------
 
 
-def test_pypi_uploads_selects_wheels_plus_matching_sdists_only():
+def test_pypi_uploads_selects_the_named_distribution_wheel_and_sdist_only():
     names = [
         "pkg-1.0.0-py3-none-any.whl",
         "pkg-1.0.0.tar.gz",
+        "other_pkg-2.0.0-py3-none-any.whl",  # another artifact's wheel
+        "other_pkg-2.0.0.tar.gz",  # ...and its sdist: both out of scope
         f"lex-{LINUX}.tar.gz",  # an archive-composition tarball: NOT python
-        "other-2.0.0.tar.gz",  # an sdist with no wheel: not selected
+        "pkg-9.9.9.tar.gz",  # an sdist with no matching wheel: not selected
     ]
-    assert publish_mod.pypi_uploads(names) == (
+    assert publish_mod.pypi_uploads(names, "pkg") == (
         "pkg-1.0.0-py3-none-any.whl",
         "pkg-1.0.0.tar.gz",
     )
 
 
-def test_pypi_uploads_with_skip_existing_and_the_token_in_env_not_argv(tmp_path):
-    dist = _staged_assets(tmp_path, ["pkg-1.0.0-py3-none-any.whl", "pkg-1.0.0.tar.gz"])
+def test_pypi_uploads_matches_a_legacy_hyphenated_sdist_canonically():
+    """A wheel PEP 427-escapes the dist name to underscores, but a legacy
+    sdist may keep the original hyphens/dots — the match is canonical, so the
+    sdist is still selected (never silently skipped)."""
+    names = [
+        "my_awesome_pkg-1.0.0-py3-none-any.whl",
+        "my-awesome-pkg-1.0.0.tar.gz",
+    ]
+    assert publish_mod.pypi_uploads(names, "my-awesome-pkg") == (
+        "my_awesome_pkg-1.0.0-py3-none-any.whl",
+        "my-awesome-pkg-1.0.0.tar.gz",
+    )
+
+
+def test_pypi_scopes_the_upload_to_the_artifact_distribution(tmp_path):
+    """A multi-artifact bundle tree carries another artifact's wheel; publish
+    uploads ONLY this artifact's distribution — never leaks a foreign wheel to
+    the index under this token (registry publishes are irreversible)."""
+    dist = _staged_assets(
+        tmp_path,
+        [
+            "pkg-1.0.0-py3-none-any.whl",
+            "pkg-1.0.0.tar.gz",
+            "other_pkg-2.0.0-py3-none-any.whl",
+            "other_pkg-2.0.0.tar.gz",
+        ],
+    )
+    _pyproject(tmp_path, "pkg")
     artifact = _artifacts({"pkg": {"endpoints": ["pypi"]}})[0]
     run_cmd = SeamRecorder()
     req = _request(
-        tmp_path, artifact, env={"PYPI_API_TOKEN": "pypi-tok"}, run_cmd=run_cmd
+        tmp_path,
+        artifact,
+        entries=_entries({".": "python"}),
+        env={"PYPI_API_TOKEN": "pypi-tok"},
+        run_cmd=run_cmd,
     )
 
     publish_mod._publish_pypi(req)
@@ -563,15 +643,18 @@ def test_pypi_uploads_with_skip_existing_and_the_token_in_env_not_argv(tmp_path)
     )
     assert env == {"TWINE_USERNAME": "__token__", "TWINE_PASSWORD": "pypi-tok"}
     assert "pypi-tok" not in " ".join(argv)
+    assert "other_pkg" not in " ".join(argv)
 
 
 def test_pypi_testpypi_flag_reroutes_and_uses_the_staging_token(tmp_path):
     _staged_assets(tmp_path, ["pkg-1.0.0-py3-none-any.whl"])
+    _pyproject(tmp_path, "pkg")
     artifact = _artifacts({"pkg": {"endpoints": ["pypi"]}})[0]
     run_cmd = SeamRecorder()
     req = _request(
         tmp_path,
         artifact,
+        entries=_entries({".": "python"}),
         env={"TESTPYPI_API_TOKEN": "staging-tok"},
         run_cmd=run_cmd,
         testpypi=True,
@@ -586,9 +669,39 @@ def test_pypi_testpypi_flag_reroutes_and_uses_the_staging_token(tmp_path):
 
 def test_pypi_without_a_wheel_refuses(tmp_path):
     _staged_assets(tmp_path, [f"lex-{LINUX}.tar.gz"])
+    _pyproject(tmp_path, "pkg")
+    artifact = _artifacts({"pkg": {"endpoints": ["pypi"]}})[0]
+    req = _request(
+        tmp_path,
+        artifact,
+        entries=_entries({".": "python"}),
+        env={"PYPI_API_TOKEN": "tok"},
+    )
+    with pytest.raises(ReleaseError, match="no wheel"):
+        publish_mod._publish_pypi(req)
+
+
+def test_pypi_without_a_python_leg_refuses(tmp_path):
+    _staged_assets(tmp_path, ["pkg-1.0.0-py3-none-any.whl"])
     artifact = _artifacts({"pkg": {"endpoints": ["pypi"]}})[0]
     req = _request(tmp_path, artifact, env={"PYPI_API_TOKEN": "tok"})
-    with pytest.raises(ReleaseError, match="no wheel"):
+    with pytest.raises(ReleaseError, match="needs a \\[toolchains\\] python leg"):
+        publish_mod._publish_pypi(req)
+
+
+def test_pypi_pyproject_without_a_name_refuses(tmp_path):
+    _staged_assets(tmp_path, ["pkg-1.0.0-py3-none-any.whl"])
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nversion = '0'\n", encoding="utf-8"
+    )
+    artifact = _artifacts({"pkg": {"endpoints": ["pypi"]}})[0]
+    req = _request(
+        tmp_path,
+        artifact,
+        entries=_entries({".": "python"}),
+        env={"PYPI_API_TOKEN": "tok"},
+    )
+    with pytest.raises(ReleaseError, match="no \\[project\\].name"):
         publish_mod._publish_pypi(req)
 
 
@@ -760,6 +873,28 @@ def test_brew_render_core():
     assert "on_arm do" in text and "on_intel do" in text
     assert "on_linux" not in text  # no linux target: no empty block
     assert 'bin.install "lex-cli"' in text
+
+
+def test_brew_render_escapes_ruby_string_metadata():
+    """Metadata carrying a double quote, a backslash, or a ``#{`` interpolation
+    still renders a formula ``ruby -c`` accepts — the literals are escaped, so
+    a valid crate description never breaks the tap publish."""
+    text = brew_mod.render(
+        binary="lex-cli",
+        version="1.2.3",
+        desc='He said "hi" \\ and used #{ENV}',
+        homepage="https://x",
+        license_="MIT",
+        targets={MAC_ARM: ("https://u/arm", "aa")},
+        private=False,
+    )
+    assert r'desc "He said \"hi\" \\ and used \#{ENV}"' in text
+    # Every inner double quote is backslash-escaped (no bare `"` closes the
+    # literal early) and the interpolation is defused.
+    desc_line = next(
+        line for line in text.splitlines() if line.strip().startswith("desc ")
+    )
+    assert '"hi"' not in desc_line and r"\#{ENV}" in desc_line
 
 
 def test_brew_metadata_for_hard_errors_on_missing_fields():
