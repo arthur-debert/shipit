@@ -85,6 +85,7 @@ import binascii
 import contextlib
 import json
 import logging
+import math
 import os
 import re
 import secrets as pysecrets
@@ -725,9 +726,12 @@ def _notarize(
 ) -> tuple[str, bool]:
     """``notarytool`` submit → poll → staple against ``dmg``.
 
-    Returns ``(submission_id, stapled)``. Submit is ``--no-wait`` + a 30s
-    poll loop (the legacy cadence); a transient ``info`` failure counts as
-    one ``Unknown`` poll, never an abort. ``Invalid``/``Rejected`` fetches
+    Returns ``(submission_id, stapled)``. Submit is ``--no-wait`` + a poll
+    loop cadenced at :data:`POLL_INTERVAL` (the poll count derives from it,
+    never a hard-coded factor); ``req.timeout_minutes`` is >= 1 by the time
+    this runs (:func:`sign_bundle` refuses a non-positive window up front, so
+    the loop always polls at least once). A transient ``info`` failure counts
+    as one ``Unknown`` poll, never an abort. ``Invalid``/``Rejected`` fetches
     the notary log and hard-fails; so does poll exhaustion (the legacy
     timed-out soft-pass is gone — an unconfirmed notarization is a failure,
     resumable by re-running the stage). A staple failure is NON-fatal:
@@ -764,7 +768,9 @@ def _notarize(
             extra={"submission_id": submission_id, "dmg": str(dmg)},
         )
 
-        max_polls = req.timeout_minutes * 2  # one poll per POLL_INTERVAL
+        # Poll count derives from POLL_INTERVAL (never a hard-coded factor):
+        # one poll per interval across the whole timeout window, rounded up.
+        max_polls = math.ceil(req.timeout_minutes * 60 / POLL_INTERVAL)
         status = "Unknown"
         for poll in range(max_polls):
             try:
@@ -833,10 +839,19 @@ def sign_bundle(req: SignRequest) -> SignResult:
     ``req.out_dir`` under the original dmg filename.
 
     Credentials resolve FIRST — a missing secret hard-fails before any work,
-    with zero commands run (the recorded-invocation tests pin exactly that).
+    with zero commands run (the recorded-invocation tests pin exactly that);
+    a non-positive ``timeout_minutes`` is refused in the same up-front pass,
+    before any signing, so a misconfigured window never wastes the sign +
+    reseal only to fail at the notary poll.
     """
     signing = resolve_signing(req.env)
     notary = resolve_notary(req.env)
+    if req.timeout_minutes < 1:
+        raise ReleaseError(
+            f"notary timeout must be at least 1 minute, got "
+            f"{req.timeout_minutes} — a non-positive window would sign and "
+            "submit, then never poll for the verdict"
+        )
 
     payload = _find_payload(req.tree)
     original_dmg = _find_dmg(req.tree)

@@ -667,6 +667,17 @@ def test_sign_bundle_unconfirmed_notarization_is_a_hard_fail(tmp_path):
     assert not recorder.heads("xcrun", "stapler")
 
 
+def test_sign_bundle_non_positive_notary_timeout_hard_fails_before_any_work(tmp_path):
+    # A non-positive timeout would sign, submit, then never poll — refused up
+    # front alongside the credential checks, before any command runs.
+    _fixture_tree(tmp_path)
+    recorder = SignRecorder(tmp_path)
+    request = _request(tmp_path, recorder, timeout_minutes=0)
+    with pytest.raises(ReleaseError, match="notary timeout must be at least 1 minute"):
+        sign_mod.sign_bundle(request)
+    assert recorder.calls == []  # zero commands run
+
+
 def test_sign_bundle_flaky_poll_counts_as_unknown_and_polling_continues(tmp_path):
     _fixture_tree(tmp_path)
     polls = iter(("boom", "Accepted"))
