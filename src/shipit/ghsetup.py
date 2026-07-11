@@ -351,6 +351,11 @@ def sync_secrets(
       the sync never under-provisions);
     - one ``failed`` outcome per derived requirement with NO declared source,
       naming the requiring entry (the sync-time error of story 45);
+    - one ``failed`` outcome per ALTERNATIVE-SET requirement (#746 — the
+      notary trios) with no complete alternative sourced: ONE diagnostic
+      naming what is missing from every alternative. A repo sources either
+      trio (or both); whichever it declares is pushed, and the unused trio is
+      neither demanded nor orphaned;
     - one ``orphan`` outcome per declared source nothing requires — flagged
       and NOT pushed (never over-provisions, story 44).
     """
@@ -382,6 +387,29 @@ def sync_secrets(
         )
         for req in secretreq.missing_sources(artifacts, sources, reviewers=reviewers)
     )
+    # The either-satisfies requirements (#746): any complete provisioned
+    # alternative satisfies one; none complete is ONE failed outcome whose
+    # reason names what is missing from every alternative. A declaration is
+    # not enough here: an optional source may resolve absent and be skipped,
+    # so only successfully set names can satisfy a live sync. Dry-run cannot
+    # resolve sources without side effects, so its prospective report uses
+    # the declared set just as the plain-name dry-run does.
+    present = (
+        {source.name for source in sources}
+        if dry_run
+        else {outcome.name for outcome in outcomes if outcome.action == "set"}
+    )
+    unsatisfied = tuple(
+        SecretOutcome(
+            name=alt_req.sets.label,
+            source="none",
+            action="failed",
+            reason=f"required by {alt_req.required_by}; "
+            f"{alt_req.sets.describe_gap(present)}",
+        )
+        for alt_req in secretreq.alternative_requirements(artifacts)
+        if not alt_req.sets.satisfied(present)
+    )
     orphans = tuple(
         SecretOutcome(
             name=source.name,
@@ -392,7 +420,7 @@ def sync_secrets(
         for source in sources
         if source.name in orphan_names
     )
-    return outcomes + missing + orphans
+    return outcomes + missing + unsatisfied + orphans
 
 
 def push_secrets(

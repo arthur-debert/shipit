@@ -603,6 +603,153 @@ def test_sync_secrets_required_source_cannot_be_optional_skipped(fake_gh, monkey
     assert fake_gh.secrets == {}  # not skipped, not pushed — the sync fails loud
 
 
+def _signing_artifacts():
+    """A minimal signing artifact map (sign = true on a darwin lane)."""
+    return config.load_artifacts(
+        {
+            "artifacts": {
+                "app": {
+                    "build": [{"toolchain": "rust", "package": "app-cli"}],
+                    "platforms": ["darwin-arm64"],
+                    "endpoints": ["gh-release"],
+                    "sign": True,
+                }
+            }
+        }
+    )
+
+
+def _env_source(name):
+    return SecretSource(name, "env", f"VAR_{name}", False)
+
+
+#: The names a signing repo must source besides a notary trio.
+_SIGN_BASE_NAMES = ("RELEASE_TOKEN", "APPLE_CERTIFICATE", "APPLE_CERTIFICATE_PASSWORD")
+
+_APPLE_ID_TRIO = ("APPLE_ID", "APPLE_PASSWORD", "APPLE_TEAM_ID")
+_ASC_TRIO = ("ASC_API_KEY_BASE64", "ASC_API_KEY_ID", "ASC_API_ISSUER_ID")
+
+
+def test_sync_secrets_apple_id_only_trio_is_pushed_without_demanding_asc(
+    fake_gh, monkeypatch
+):
+    """#746: the Apple-ID trio is a first-class provisioning path — a repo
+    sourcing it (and no ASC key) syncs clean: pushed, the ASC trio neither
+    demanded name-by-name nor flagged."""
+    names = (*_SIGN_BASE_NAMES, *_APPLE_ID_TRIO)
+    for name in names:
+        monkeypatch.setenv(f"VAR_{name}", f"value-{name}")
+    outcomes = ghsetup.sync_secrets(
+        "o/r",
+        _signing_artifacts(),
+        [_env_source(n) for n in names],
+        reviewers=(),
+        dry_run=False,
+        prompt=None,
+    )
+    assert [(o.name, o.action) for o in outcomes] == [(n, "set") for n in names]
+    assert set(fake_gh.secrets) == set(names)
+
+
+def test_sync_secrets_partial_asc_beside_complete_apple_id_is_accepted(
+    fake_gh, monkeypatch
+):
+    """#746: a partial ASC trio never poisons a complete Apple-ID trio — the
+    declared partial names are still accepted (pushed), not orphaned, and no
+    diagnostic fires."""
+    names = (*_SIGN_BASE_NAMES, "ASC_API_KEY_ID", *_APPLE_ID_TRIO)
+    for name in names:
+        monkeypatch.setenv(f"VAR_{name}", f"value-{name}")
+    outcomes = ghsetup.sync_secrets(
+        "o/r",
+        _signing_artifacts(),
+        [_env_source(n) for n in names],
+        reviewers=(),
+        dry_run=False,
+        prompt=None,
+    )
+    assert [(o.name, o.action) for o in outcomes] == [(n, "set") for n in names]
+
+
+def test_sync_secrets_optional_absent_trio_does_not_satisfy_notary_requirement(
+    fake_gh, monkeypatch
+):
+    """#746: merely declaring a complete trio cannot make sync clean when
+    every optional source resolves absent — satisfaction follows effective
+    provisioning, not config keys."""
+    for name in _SIGN_BASE_NAMES:
+        monkeypatch.setenv(f"VAR_{name}", f"value-{name}")
+    for name in _APPLE_ID_TRIO:
+        monkeypatch.delenv(f"VAR_{name}", raising=False)
+    sources = [
+        *[_env_source(name) for name in _SIGN_BASE_NAMES],
+        *[SecretSource(name, "env", f"VAR_{name}", True) for name in _APPLE_ID_TRIO],
+    ]
+
+    outcomes = ghsetup.sync_secrets(
+        "o/r",
+        _signing_artifacts(),
+        sources,
+        reviewers=(),
+        dry_run=False,
+        prompt=None,
+    )
+
+    assert [(o.name, o.action) for o in outcomes] == [
+        *((name, "set") for name in _SIGN_BASE_NAMES),
+        *((name, "skipped") for name in _APPLE_ID_TRIO),
+        ("notary credentials", "failed"),
+    ]
+    assert "Apple-ID trio (missing: APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID)" in (
+        outcomes[-1].reason or ""
+    )
+    assert set(fake_gh.secrets) == set(_SIGN_BASE_NAMES)
+
+
+def test_sync_secrets_no_complete_notary_trio_fails_with_one_diagnostic(
+    fake_gh, monkeypatch
+):
+    """#746: neither trio complete → ONE failed outcome for the requirement,
+    its reason naming what is missing from EVERY alternative — never six
+    name-by-name failures."""
+    names = (*_SIGN_BASE_NAMES, "ASC_API_KEY_ID")  # one ASC name, no Apple-ID
+    for name in names:
+        monkeypatch.setenv(f"VAR_{name}", f"value-{name}")
+    outcomes = ghsetup.sync_secrets(
+        "o/r",
+        _signing_artifacts(),
+        [_env_source(n) for n in names],
+        reviewers=(),
+        dry_run=False,
+        prompt=None,
+    )
+    failed = [o for o in outcomes if o.action == "failed"]
+    assert [o.name for o in failed] == ["notary credentials"]
+    reason = failed[0].reason or ""
+    assert "required by sign-mac stage (artifact app)" in reason
+    assert "ASC API-key trio (missing: " in reason
+    assert "Apple-ID trio (missing: " in reason
+    # The sourced names still pushed — one gap never strands the others.
+    assert set(fake_gh.secrets) == set(names)
+
+
+def test_sync_secrets_both_trios_sourced_orphans_neither(fake_gh, monkeypatch):
+    """#746: declaring both trios is legal — both pushed, no orphan flag."""
+    names = (*_SIGN_BASE_NAMES, *_ASC_TRIO, *_APPLE_ID_TRIO)
+    for name in names:
+        monkeypatch.setenv(f"VAR_{name}", f"value-{name}")
+    outcomes = ghsetup.sync_secrets(
+        "o/r",
+        _signing_artifacts(),
+        [_env_source(n) for n in names],
+        reviewers=(),
+        dry_run=False,
+        prompt=None,
+    )
+    assert all(o.action == "set" for o in outcomes)
+    assert set(fake_gh.secrets) == set(names)
+
+
 def test_setup_discovery_respects_local_checkout(fake_gh, monkeypatch):
     """``local_checkout`` flows straight through to checks discovery — ``None``
     (a remote target) disables reading local workflow files."""

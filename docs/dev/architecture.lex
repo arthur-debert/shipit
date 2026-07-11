@@ -197,7 +197,13 @@ the durable code is one slim versioned package; and configuration is explicit.
         declared funnel reviewer (codex/agy) requires its GitHub App credential
         pair off the Backend registry (#740). A required name with no source
         fails the sync loud; a declared name nothing requires is an orphan,
-        flagged and not pushed. The reviewer contribution is provisioning-only:
+        flagged and not pushed. One requirement is an either-set, not a name
+        conjunction: a signing repo's notary credentials are satisfied by ANY
+        complete alternative trio — the ASC API-key trio or the Apple-ID trio,
+        both first-class CI paths (#746) — so gh-setup pushes whichever the
+        repo sources without demanding or orphaning the unused one, and no
+        complete trio fails as one diagnostic naming what each alternative is
+        missing. The reviewer contribution is provisioning-only:
         the release-side projections (preflight's plan secrets, the caller's
         `secrets:` block) never carry App credentials across the workflow-chain
         boundary.

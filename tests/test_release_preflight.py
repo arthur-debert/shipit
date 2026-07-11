@@ -103,16 +103,16 @@ def test_rust_cli_shape_plans_matrix_stages_endpoints_secrets():
     # No bundle step declared → the bundle stages are absent, not skipped.
     assert plan.stages == ("preflight", "prepare", "sign", "publish")
     assert plan.endpoints == ("gh-release", "crates", "brew")
+    # The demanded conjunction carries the cert pair only; the notary trios
+    # ride the plan's either-satisfies requirement (#746).
     assert plan.secrets == (
         "RELEASE_TOKEN",
         "CARGO_REGISTRY_TOKEN",
         "HOMEBREW_TAP_TOKEN",
         "APPLE_CERTIFICATE",
         "APPLE_CERTIFICATE_PASSWORD",
-        "ASC_API_KEY_BASE64",
-        "ASC_API_KEY_ID",
-        "ASC_API_ISSUER_ID",
     )
+    assert plan.secret_alternatives == (secretreq.NOTARY_SECRETS,)
     assert (plan.prerelease, plan.tag_only, plan.unsigned) == (False, False, False)
 
 
@@ -132,7 +132,8 @@ def test_mac_app_shape_plans_bundle_and_sign():
         "publish",
     )
     assert plan.endpoints == ("gh-release",)
-    assert plan.secrets == ("RELEASE_TOKEN", *secretreq.SIGN_MAC_SECRETS)
+    assert plan.secrets == ("RELEASE_TOKEN", *secretreq.SIGN_MAC_CERT_SECRETS)
+    assert plan.secret_alternatives == (secretreq.NOTARY_SECRETS,)
 
 
 def test_mixed_map_flags_bundle_per_entry_so_build_only_legs_skip_bundling():
@@ -268,9 +269,35 @@ def test_to_dict_is_the_declared_json_surface():
         "stages",
         "endpoints",
         "secrets",
+        "secret_alternatives",
     }
     assert payload["event"] == "local"
     assert payload["matrix"][0]["target"] == "x86_64-unknown-linux-gnu"
+    # A non-signing plan carries no either-satisfies requirement.
+    assert payload["secret_alternatives"] == []
+
+
+def test_to_dict_projects_the_notary_alternatives_for_a_signing_plan():
+    payload = preflight.plan(RUST_CLI, _resolved("1.2.3")).to_dict()
+    assert payload["secret_alternatives"] == [
+        {
+            "label": "notary credentials",
+            "alternatives": [
+                {
+                    "label": "ASC API-key trio",
+                    "names": [
+                        "ASC_API_KEY_BASE64",
+                        "ASC_API_KEY_ID",
+                        "ASC_API_ISSUER_ID",
+                    ],
+                },
+                {
+                    "label": "Apple-ID trio",
+                    "names": ["APPLE_ID", "APPLE_PASSWORD", "APPLE_TEAM_ID"],
+                },
+            ],
+        }
+    ]
 
 
 # --------------------------------------------------------------------------
@@ -287,7 +314,8 @@ def test_release_rc_plans_gh_release_only_with_prerelease_marked():
     assert plan.tag_only is True
     # The endpoint secrets follow the collapsed set; sign still runs (a
     # live-fire rc exercises the whole pipeline).
-    assert plan.secrets == ("RELEASE_TOKEN", *secretreq.SIGN_MAC_SECRETS)
+    assert plan.secrets == ("RELEASE_TOKEN", *secretreq.SIGN_MAC_CERT_SECRETS)
+    assert plan.secret_alternatives == (secretreq.NOTARY_SECRETS,)
     assert "sign" in plan.stages
 
 
@@ -308,12 +336,14 @@ def test_unsigned_flips_the_plan_to_the_unsigned_path():
     assert plan.unsigned is True
     assert "sign" not in plan.stages
     assert all(e.sign is False for e in plan.matrix)
-    # The Apple names drop out of the required set with the stage.
+    # The Apple names drop out of the required set with the stage — and so
+    # does the notary either-set requirement.
     assert plan.secrets == (
         "RELEASE_TOKEN",
         "CARGO_REGISTRY_TOKEN",
         "HOMEBREW_TAP_TOKEN",
     )
+    assert plan.secret_alternatives == ()
 
 
 def test_unsigned_is_refused_when_nothing_would_sign():
@@ -342,20 +372,31 @@ def test_unknown_event_is_a_caller_bug():
         preflight.plan(PYTHON_PKG, _resolved("1.0.0"), event="push")
 
 
+#: Base env satisfying RUST_CLI's plan conjunction (everything but notary).
+_SIGNING_BASE_ENV = {
+    "RELEASE_TOKEN": "t",
+    "CARGO_REGISTRY_TOKEN": "c",
+    "HOMEBREW_TAP_TOKEN": "h",
+    "APPLE_CERTIFICATE": "cert",
+    "APPLE_CERTIFICATE_PASSWORD": "pw",
+}
+
+_ASC_ENV = {"ASC_API_KEY_BASE64": "k", "ASC_API_KEY_ID": "i", "ASC_API_ISSUER_ID": "u"}
+_APPLE_ID_ENV = {"APPLE_ID": "a", "APPLE_PASSWORD": "p", "APPLE_TEAM_ID": "t"}
+
+
 def test_missing_secrets_reports_absent_and_empty_names_in_plan_order():
     plan = preflight.plan(RUST_CLI, _resolved("1.2.3"))
     env = {
         "RELEASE_TOKEN": "t",
         "CARGO_REGISTRY_TOKEN": "",  # empty is absent — an empty token cannot publish
         "APPLE_CERTIFICATE": "c",
+        **_ASC_ENV,
     }
     assert preflight.missing_secrets(plan, env) == (
         "CARGO_REGISTRY_TOKEN",
         "HOMEBREW_TAP_TOKEN",
         "APPLE_CERTIFICATE_PASSWORD",
-        "ASC_API_KEY_BASE64",
-        "ASC_API_KEY_ID",
-        "ASC_API_ISSUER_ID",
     )
 
 
@@ -363,6 +404,43 @@ def test_missing_secrets_is_empty_when_the_plan_is_fully_provisioned():
     plan = preflight.plan(PYTHON_PKG, _resolved("0.3.1"))
     env = {"RELEASE_TOKEN": "t", "PYPI_TOKEN": "p"}
     assert preflight.missing_secrets(plan, env) == ()
+
+
+@pytest.mark.parametrize(
+    "notary_env",
+    [
+        _ASC_ENV,  # ASC-only
+        _APPLE_ID_ENV,  # Apple-ID-only: the first-class CI alternative (#746)
+        {**_ASC_ENV, **_APPLE_ID_ENV},  # both (the signer prefers ASC)
+        # Partial ASC beside a COMPLETE Apple-ID trio: satisfied.
+        {"ASC_API_KEY_ID": "i", **_APPLE_ID_ENV},
+    ],
+)
+def test_missing_secrets_accepts_either_complete_notary_trio(notary_env):
+    plan = preflight.plan(RUST_CLI, _resolved("1.2.3"))
+    assert preflight.missing_secrets(plan, {**_SIGNING_BASE_ENV, **notary_env}) == ()
+
+
+@pytest.mark.parametrize(
+    "notary_env",
+    [
+        {},  # neither trio at all
+        # Both trios incomplete (an empty value counts as absent).
+        {"ASC_API_KEY_ID": "i", "APPLE_ID": "a", "APPLE_PASSWORD": ""},
+    ],
+)
+def test_missing_secrets_reports_one_notary_gap_naming_both_trios(notary_env):
+    # No complete trio → ONE diagnostic entry naming what is missing from
+    # EVERY alternative — never the six names demanded one by one.
+    plan = preflight.plan(RUST_CLI, _resolved("1.2.3"))
+    missing = preflight.missing_secrets(plan, {**_SIGNING_BASE_ENV, **notary_env})
+    assert len(missing) == 1
+    (gap,) = missing
+    assert gap.startswith("notary credentials: one complete set needed — ")
+    assert "ASC API-key trio (missing: " in gap
+    assert "Apple-ID trio (missing: " in gap
+    assert "ASC_API_KEY_BASE64" in gap
+    assert "APPLE_TEAM_ID" in gap
 
 
 # --------------------------------------------------------------------------

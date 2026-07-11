@@ -32,7 +32,10 @@ The plan's five fields (story 27):
 - ``secrets`` — the required secret names for THIS plan, from the same
   requirement registries gh-setup syncs (:mod:`shipit.release.secretreq`),
   scoped to the plan's live endpoints and stages: no sign stage, no Apple
-  names (so an unsigned or non-darwin run checks only what it uses).
+  names (so an unsigned or non-darwin run checks only what it uses). Plus
+  ``secret_alternatives`` (#746): the plan's either-satisfies requirements —
+  with a live sign stage, the notary credentials (ASC API-key trio OR
+  Apple-ID trio; either complete env trio passes presence validation).
 
 ``unsigned=True`` is the explicit break-glass (story 29, CONTEXT.md:
 visible, recorded, never ambient): it flips the plan to the unsigned path
@@ -224,6 +227,7 @@ class ReleasePlan:
     stages: tuple[str, ...]
     endpoints: tuple[str, ...]
     secrets: tuple[str, ...]
+    secret_alternatives: tuple[secretreq.AlternativeSet, ...]
 
     def to_dict(self) -> dict:
         """The ``--json`` projection — exactly the plan's declared fields."""
@@ -239,6 +243,7 @@ class ReleasePlan:
             "stages": list(self.stages),
             "endpoints": list(self.endpoints),
             "secrets": list(self.secrets),
+            "secret_alternatives": [alt.to_dict() for alt in self.secret_alternatives],
         }
 
 
@@ -321,7 +326,12 @@ def plan(
         else tuple(e for e in ENDPOINTS if e in declared)
     )
 
-    secrets = _plan_secrets(endpoints, sign="sign" in stages)
+    sign_stage = "sign" in stages
+    secrets = _plan_secrets(endpoints, sign=sign_stage)
+    # The plan's either-satisfies requirements (#746): with a live sign
+    # stage, the notary credentials — either complete trio passes presence
+    # validation; an unsigned or non-darwin plan carries none.
+    secret_alternatives = (secretreq.NOTARY_SECRETS,) if sign_stage else ()
     return ReleasePlan(
         version=resolved.version,
         tag=resolved.tag,
@@ -334,6 +344,7 @@ def plan(
         stages=stages,
         endpoints=endpoints,
         secrets=secrets,
+        secret_alternatives=secret_alternatives,
     )
 
 
@@ -342,9 +353,19 @@ def missing_secrets(
 ) -> tuple[str, ...]:
     """The plan's required secret names absent (or empty) in ``env`` — story
     28's hard-fail set, checked over exactly what the plan uses (a
-    non-signing plan never checks the Apple names). Pure; the shell injects
-    the real environment."""
-    return tuple(name for name in release_plan.secrets if not env.get(name))
+    non-signing plan never checks the Apple names). An alternative-set
+    requirement (#746) is satisfied by ANY complete alternative present in
+    ``env``; when none is, the set contributes ONE rendered diagnostic
+    naming what is missing from every alternative (never its names one by
+    one). Pure; the shell injects the real environment."""
+    missing = [name for name in release_plan.secrets if not env.get(name)]
+    present = {name for name, value in env.items() if value}
+    missing.extend(
+        alt.describe_gap(present)
+        for alt in release_plan.secret_alternatives
+        if not alt.satisfied(present)
+    )
+    return tuple(missing)
 
 
 def _matrix(artifacts: Sequence[Artifact]) -> tuple[MatrixEntry, ...]:
@@ -388,7 +409,8 @@ def _plan_secrets(endpoints: Sequence[str], *, sign: bool) -> tuple[str, ...]:
     """The plan-scoped required names, from the SAME requirement registries
     gh-setup syncs (:mod:`shipit.release.secretreq` — one definition of every
     name): prepare's push, each live endpoint's declaration, and the sign-mac
-    names only when the sign stage is live."""
+    CERT PAIR only when the sign stage is live — the notary credentials are
+    not names here but the plan's alternative-set requirement (#746)."""
     seen: dict[str, None] = {}
     for name in secretreq.PREPARE_SECRETS:
         seen[name] = None
@@ -396,6 +418,6 @@ def _plan_secrets(endpoints: Sequence[str], *, sign: bool) -> tuple[str, ...]:
         for name in secretreq.ENDPOINT_SECRETS[endpoint]:
             seen[name] = None
     if sign:
-        for name in secretreq.SIGN_MAC_SECRETS:
+        for name in secretreq.SIGN_MAC_CERT_SECRETS:
             seen[name] = None
     return tuple(seen)

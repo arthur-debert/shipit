@@ -86,7 +86,10 @@ on:
         description: The plan's post-RC-guard endpoint set.
         value: ${{ jobs.prepare.outputs.endpoints }}
       secrets:
-        description: The plan-scoped required GitHub secret names.
+        description: >-
+          The plan-scoped required GitHub secret names (the conjunction
+          only; the plan's either-satisfies notary requirement rides the
+          plan JSON's `secret_alternatives`, #746).
         value: ${{ jobs.prepare.outputs.secrets }}
 
     secrets:
@@ -113,6 +116,14 @@ on:
       ASC_API_KEY_ID:
         required: false
       ASC_API_ISSUER_ID:
+        required: false
+      # The Apple-ID notary trio — the ASC trio's first-class alternative
+      # (#746): preflight passes when EITHER trio is complete.
+      APPLE_ID:
+        required: false
+      APPLE_PASSWORD:
+        required: false
+      APPLE_TEAM_ID:
         required: false
 
 permissions:
@@ -171,6 +182,9 @@ jobs:
           ASC_API_KEY_BASE64: ${{ secrets.ASC_API_KEY_BASE64 }}
           ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
           ASC_API_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         # ONE planner invocation (the pinned launcher, ADR-0033); its JSON
         # becomes this block's outputs. The jq lines are transport (compact
         # the indented JSON, split out fields) and projection of the plan's
