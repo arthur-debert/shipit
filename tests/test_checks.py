@@ -1,5 +1,7 @@
 """Unit tests for required-check discovery — the pure helpers and nesting logic."""
 
+import pytest
+
 from shipit import checks
 
 
@@ -84,6 +86,142 @@ def test_job_contexts_plain_job():
     assert checks._job_contexts(
         "build", {"name": "Build"}, toplevel=None, cache={}
     ) == ["Build"]
+
+
+def test_is_reusable_workflow():
+    assert checks.is_reusable_workflow({"on": "workflow_call"})
+    assert checks.is_reusable_workflow({"on": {"workflow_call": {"inputs": {}}}})
+    assert checks.is_reusable_workflow({"on": ["push", "workflow_call"]})
+    assert not checks.is_reusable_workflow({"on": "pull_request"})
+    assert not checks.is_reusable_workflow("nonsense")
+
+
+def _write_workflow(tmp_path, name, text):
+    wfdir = tmp_path / ".github" / "workflows"
+    wfdir.mkdir(parents=True, exist_ok=True)
+    (wfdir / name).write_text(text, encoding="utf-8")
+
+
+def test_publishes_reusable_workflows_local_scan(tmp_path):
+    _write_workflow(tmp_path, "ci.yml", "on:\n  pull_request:\njobs:\n  ci: {}\n")
+    assert not checks.publishes_reusable_workflows("o/r", toplevel=str(tmp_path))
+    _write_workflow(
+        tmp_path, "wf-build.yaml", "on:\n  workflow_call:\njobs:\n  b: {}\n"
+    )
+    assert checks.publishes_reusable_workflows("o/r", toplevel=str(tmp_path))
+
+
+def test_publishes_reusable_workflows_local_skips_unparseable(tmp_path):
+    _write_workflow(tmp_path, "broken.yml", "on: [unclosed\n")
+    assert not checks.publishes_reusable_workflows("o/r", toplevel=str(tmp_path))
+
+
+def test_publishes_reusable_workflows_local_skips_non_utf8(tmp_path):
+    _write_workflow(tmp_path, "broken.yml", "placeholder")
+    (tmp_path / ".github" / "workflows" / "broken.yml").write_bytes(b"\xff\xfe")
+    assert not checks.publishes_reusable_workflows("o/r", toplevel=str(tmp_path))
+
+
+def test_publishes_reusable_workflows_local_no_workflows_dir(tmp_path):
+    assert not checks.publishes_reusable_workflows("o/r", toplevel=str(tmp_path))
+
+
+def test_check_discovery_skips_non_utf8_workflows(tmp_path):
+    wfdir = tmp_path / ".github" / "workflows"
+    wfdir.mkdir(parents=True)
+    path = wfdir / "broken.yml"
+    path.write_bytes(b"\xff\xfe")
+
+    assert checks.pr_workflow_paths(str(wfdir)) == []
+    assert (
+        checks.checks_from_workflows(str(tmp_path), [".github/workflows/broken.yml"])
+        == []
+    )
+
+
+def test_publishes_reusable_workflows_remote_contents_api(monkeypatch):
+    import base64
+
+    body = base64.b64encode(b"on:\n  workflow_call:\njobs:\n  b: {}\n").decode()
+    responses = {
+        "repos/o/r/contents/.github/workflows": [
+            {"name": "notes.md"},
+            {"name": "wf-build.yml"},
+        ],
+        "repos/o/r/contents/.github/workflows/wf-build.yml": {"content": body},
+    }
+    calls = []
+
+    def rest(path, *, method=None, body=None, paginate=False):
+        calls.append(path)
+        return responses[path]
+
+    monkeypatch.setattr(checks.gh, "rest", rest)
+    assert checks.publishes_reusable_workflows("o/r", toplevel=None)
+    assert "repos/o/r/contents/.github/workflows/notes.md" not in calls
+
+
+def test_publishes_reusable_workflows_remote_404_means_no_publisher(monkeypatch):
+    from shipit.execrun import ExecError
+
+    def rest(path, *, method=None, body=None, paginate=False):
+        raise ExecError(["gh", "api"], rc=1, stderr="gh: Not Found (HTTP 404)")
+
+    monkeypatch.setattr(checks.gh, "rest", rest)
+    assert not checks.publishes_reusable_workflows("o/r", toplevel=None)
+
+
+@pytest.mark.parametrize("listing", [None, {"name": "wf-build.yml"}])
+def test_publishes_reusable_workflows_remote_malformed_listing_raises(
+    monkeypatch, listing
+):
+    monkeypatch.setattr(checks.gh, "rest", lambda *args, **kwargs: listing)
+    with pytest.raises(ValueError, match="expected a list"):
+        checks.publishes_reusable_workflows("o/r", toplevel=None)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        None,
+        {},
+        {"content": None},
+        {"content": "//4="},
+    ],
+)
+def test_publishes_reusable_workflows_remote_skips_unparseable_file(
+    monkeypatch, payload
+):
+    responses = {
+        "repos/o/r/contents/.github/workflows": [{"name": "broken.yml"}],
+        "repos/o/r/contents/.github/workflows/broken.yml": payload,
+    }
+    monkeypatch.setattr(checks.gh, "rest", lambda path, **kwargs: responses[path])
+    assert not checks.publishes_reusable_workflows("o/r", toplevel=None)
+
+
+def test_publishes_reusable_workflows_remote_other_failure_raises(monkeypatch):
+    """A non-404 remote failure must RAISE — the caller reports "could not
+    inspect", never a verified non-publisher."""
+    import pytest
+
+    from shipit.execrun import ExecError
+
+    def rest(path, *, method=None, body=None, paginate=False):
+        raise ExecError(["gh", "api"], rc=1, stderr="HTTP 403")
+
+    monkeypatch.setattr(checks.gh, "rest", rest)
+    with pytest.raises(ExecError):
+        checks.publishes_reusable_workflows("o/r", toplevel=None)
+
+
+@pytest.mark.parametrize("payload", [None, {}, {"content": None}])
+def test_fetch_called_workflow_rejects_non_string_content(monkeypatch, payload):
+    monkeypatch.setattr(checks.gh, "rest", lambda *args, **kwargs: payload)
+    with pytest.raises(ValueError, match="no content for reusable workflow"):
+        checks._fetch_called_workflow(
+            "owner/repo/.github/workflows/ci.yml@v1", toplevel=None
+        )
 
 
 def test_job_contexts_reusable_nesting_and_conditions():

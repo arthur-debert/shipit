@@ -1,6 +1,6 @@
 """The gh-setup domain — make a GitHub repo conform to the portfolio standard.
 
-Three idempotent passes (install AND update share this surface):
+Four idempotent passes (install AND update share this surface):
 
   a. ruleset — apply the standard main-branch-protection ruleset, requiring the
      TARGET repo's own checks (auto-discovered, never phos's captured set).
@@ -14,6 +14,17 @@ Three idempotent passes (install AND update share this surface):
      fails the sync naming the requiring entry; a declared entry nothing
      requires is flagged as an orphan and NOT pushed (never under- or
      over-provisions); the doppler/env/prompt resolution path is unchanged.
+  d. workflow access — VERIFY-AND-WARN ONLY (#739, decided scope): a PRIVATE
+     repo that publishes reusable (``workflow_call``) workflows with the
+     Actions access level at ``none`` is uncallable by every other repo
+     (TOL02-WS07 finding 5), so the pass reads
+     ``repos/{owner}/{repo}/actions/permissions/access`` and warns, naming
+     the fix per owner kind (``user`` / ``organization``). It NEVER sets the
+     level — cross-owner publishing needs a public repo at any setting
+     (ADR-0053), so full management is structurally pointless here. A public
+     repo is typed not-applicable WITHOUT touching the access endpoint (it
+     422s there); an inspection failure is reported as ``unknown``, distinct
+     from a verified ``none``.
 
 Re-running is a clean no-op: the ruleset is PUT in place when it already exists,
 labels are ``--force`` upserts, and a changed secret is re-set to its new value.
@@ -196,6 +207,41 @@ class SecretOutcome:
 
 
 @dataclass(frozen=True)
+class WorkflowAccessOutcome:
+    """Pass (d)'s outcome — the verify-and-warn read, never a mutation (#739).
+
+    ``status`` is one of:
+
+    - ``"not-applicable"`` — the repo is public (any repo can call its
+      reusable workflows, ADR-0053) or it publishes no ``workflow_call``
+      workflow; ``reason`` says which. The access endpoint was NOT called.
+    - ``"acceptable"`` — a private publisher whose ``access_level`` is not
+      ``none`` (``user``/``organization``/``enterprise``).
+    - ``"warn"`` — a private publisher VERIFIED at ``access_level: none``:
+      no other repo can call its reusable workflows (TOL02-WS07 finding 5).
+      ``recommended_level`` names the fix for the owner kind and ``reason``
+      carries the exact command; gh-setup never runs it.
+    - ``"unknown"`` — the inspection itself failed (auth/transport/malformed
+      payload); ``reason`` carries the error. Distinct from a verified
+      ``none`` on purpose: "could not look" must never read as "looked and
+      it's broken" (or vice versa).
+    """
+
+    status: str
+    reason: str
+    access_level: str | None = None
+    recommended_level: str | None = None
+
+    def to_dict(self) -> dict:
+        return {
+            "status": self.status,
+            "reason": self.reason,
+            "access_level": self.access_level,
+            "recommended_level": self.recommended_level,
+        }
+
+
+@dataclass(frozen=True)
 class SetupReport:
     """The one frozen result of a gh-setup run — per-pass outcomes, no prints.
 
@@ -209,6 +255,7 @@ class SetupReport:
     dry_run: bool
     ruleset: RulesetOutcome
     labels: tuple[LabelOutcome, ...]
+    workflow_access: WorkflowAccessOutcome
     secrets: tuple[SecretOutcome, ...]
     secrets_error: str | None = None
 
@@ -237,6 +284,7 @@ class SetupReport:
             "dry_run": self.dry_run,
             "ruleset": self.ruleset.to_dict(),
             "labels": [{"name": lb.name, "action": lb.action} for lb in self.labels],
+            "workflow_access": self.workflow_access.to_dict(),
             "secrets": [
                 {
                     "name": s.name,
@@ -321,6 +369,95 @@ def ensure_labels(
     if not dry_run:
         logger.info("labels ensured", extra={"repo": repo, "labels": len(labels)})
     return tuple(outcomes)
+
+
+def verify_workflow_access(
+    repo: str, *, local_checkout: str | None
+) -> WorkflowAccessOutcome:
+    """Pass (d). Verify (never set) the Actions access level of a private
+    reusable-workflow publisher (#739).
+
+    Reads only, so a dry run and a real run are the SAME pass. The gates in
+    order — each skipping the rest:
+
+    1. A public repo is not-applicable WITHOUT calling the access endpoint
+       (it returns 422 for public repos), per ADR-0053: public reusable
+       workflows are callable by any repo at any setting.
+    2. A private repo publishing no ``workflow_call`` workflow under
+       ``.github/workflows/`` is not-applicable — nothing to call. Detection
+       reads the local checkout when ``local_checkout`` is given (the ambient
+       case), the contents API otherwise (an explicitly named remote repo).
+    3. ``GET repos/{repo}/actions/permissions/access`` — ``none`` warns,
+       naming ``access_level=user`` or ``organization`` from the owner kind
+       (the repos payload's ``owner.type``); anything else is acceptable.
+
+    Every inspection failure (transport, auth, malformed payload) degrades to
+    the ``unknown`` outcome — a report fact, never a raise: gh-setup's other
+    passes must not be stranded by an advisory read.
+    """
+    try:
+        info = gh.rest(f"repos/{repo}")
+        if not isinstance(info, dict) or not isinstance(info.get("private"), bool):
+            raise ValueError(f"malformed repos/{repo} payload: no boolean `private`")
+        if not info["private"]:
+            return WorkflowAccessOutcome(
+                status="not-applicable",
+                reason="repository is public — its reusable workflows are "
+                "callable by any repo (ADR-0053)",
+            )
+        if not checks_mod.publishes_reusable_workflows(repo, toplevel=local_checkout):
+            return WorkflowAccessOutcome(
+                status="not-applicable",
+                reason="no workflow_call workflows under .github/workflows — "
+                "not a reusable-workflow publisher",
+            )
+        access = gh.rest(f"repos/{repo}/actions/permissions/access")
+        if not isinstance(access, dict) or not isinstance(
+            access.get("access_level"), str
+        ):
+            raise ValueError(
+                f"malformed repos/{repo}/actions/permissions/access payload: "
+                "no `access_level`"
+            )
+        level = access["access_level"]
+        if level != "none":
+            return WorkflowAccessOutcome(
+                status="acceptable",
+                reason=f"Actions access level is {level!r}",
+                access_level=level,
+            )
+        owner = info.get("owner")
+        owner_type = owner.get("type") if isinstance(owner, dict) else None
+        recommended = "organization" if owner_type == "Organization" else "user"
+        reason = (
+            "private reusable-workflow publisher with Actions access level "
+            "'none' — no other repo can call its workflows (TOL02-WS07 "
+            f"finding 5); fix: gh api -X PUT repos/{repo}/actions/permissions/"
+            f"access -f access_level={recommended} (gh-setup verifies only, "
+            "never sets it)"
+        )
+        logger.warning(
+            "actions access level is none on a private workflow publisher",
+            extra={"repo": repo, "recommended_level": recommended},
+        )
+        return WorkflowAccessOutcome(
+            status="warn",
+            reason=reason,
+            access_level="none",
+            recommended_level=recommended,
+        )
+    except (execrun.ExecError, ValueError) as exc:
+        # Degraded-but-continuing, and DISTINCT from a verified `none`:
+        # "could not look" must never render as a warn (or as acceptable).
+        logger.warning(
+            "could not verify actions access level",
+            exc_info=True,
+            extra={"repo": repo},
+        )
+        return WorkflowAccessOutcome(
+            status="unknown",
+            reason=f"could not verify Actions access: {exc}",
+        )
 
 
 def sync_secrets(
@@ -506,12 +643,14 @@ def setup(
     dry_run: bool = False,
     prompt: Callable[[str], str] | None = None,
 ) -> SetupReport:
-    """Drive the three passes against ``repo``; returns the one frozen report.
+    """Drive the four passes against ``repo``; returns the one frozen report.
 
     ``local_checkout`` is the target's local checkout root when shipit runs
     inside the target repo — it enables workflow auto-discovery (a remote-only
     target passes ``None`` and relies on ``checks_override`` or runs-based
-    discovery). ``config_path`` is the resolved ``.shipit.toml`` location; the
+    discovery) and feeds pass (d)'s local ``workflow_call`` publisher
+    detection (a remote target is inspected via the contents API instead).
+    ``config_path`` is the resolved ``.shipit.toml`` location; the
     CLI threads the ambient checkout's, a direct caller may omit it to read
     ``local_checkout``'s (falling back to the current directory).
 
@@ -536,6 +675,9 @@ def setup(
 
     ruleset = apply_ruleset(slug, checks, dry_run=dry_run)
     labels = ensure_labels(slug, load_labels(), dry_run=dry_run)
+    # Pass (d) reads only, so dry-run runs it identically — the report is the
+    # same either way, and a dry run still surfaces the access warning.
+    workflow_access = verify_workflow_access(slug, local_checkout=local_checkout)
 
     cfg_path = config_path or str(Path(local_checkout or ".") / config.CONFIG_NAME)
     secrets_error: str | None = None
@@ -580,6 +722,7 @@ def setup(
         dry_run=dry_run,
         ruleset=ruleset,
         labels=labels,
+        workflow_access=workflow_access,
         secrets=secrets,
         secrets_error=secrets_error,
     )

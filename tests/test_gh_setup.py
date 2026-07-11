@@ -8,6 +8,7 @@ values → domain → render) plus pure-renderer assertions that freeze the text
 surface.
 """
 
+import re
 from typing import Any
 
 import pytest
@@ -210,18 +211,26 @@ def test_existing_ruleset_id():
 
 
 class FakeGh:
-    """Records calls and serves canned ruleset-list responses."""
+    """Records calls and serves canned ruleset-list / repo-info responses."""
 
     def __init__(self, existing_rulesets=None):
         self.calls = []
         self._rulesets = existing_rulesets or []
         self.secrets = {}
         self.labels = []
+        # Pass (d) inputs: a public user-owned repo by default, so the access
+        # verify is typed not-applicable and never reaches the access endpoint.
+        self.repo_info = {"private": False, "owner": {"type": "User"}}
+        self.access_level = "none"
 
     def rest(self, path, *, method=None, body=None, paginate=False):
         self.calls.append(("rest", path, method))
         if path.endswith("/rulesets") and method is None:
             return self._rulesets
+        if path.endswith("/actions/permissions/access"):
+            return {"access_level": self.access_level}
+        if re.fullmatch(r"repos/[^/]+/[^/]+", path):
+            return self.repo_info
         return None
 
     def label_create(self, repo, name, *, description, color):
@@ -777,6 +786,233 @@ def test_setup_checks_override_skips_discovery(fake_gh, monkeypatch):
     assert report.ruleset.checks == ("a", "b")
 
 
+# --------------------------------------------------------------------------
+# Pass (d) — the Actions access verify-and-warn (#739). Reads only, no PUT.
+# --------------------------------------------------------------------------
+
+_PUBLISHER_YAML = "on:\n  workflow_call:\n    inputs: {}\njobs:\n  build: {}\n"
+_PR_ONLY_YAML = "on:\n  pull_request:\njobs:\n  ci: {}\n"
+
+
+def _checkout(tmp_path, *files):
+    """A fake local checkout carrying the given (name, text) workflow files."""
+    wfdir = tmp_path / ".github" / "workflows"
+    wfdir.mkdir(parents=True, exist_ok=True)
+    for name, text in files:
+        (wfdir / name).write_text(text, encoding="utf-8")
+    return str(tmp_path)
+
+
+def _rest_fake(monkeypatch, responses):
+    """Patch gh.rest with a canned path→response map; returns the call log.
+
+    A response that is an Exception is raised; an unexpected path fails the
+    test (KeyError) — the seam asserts WHICH endpoints the pass touches.
+    """
+    calls = []
+
+    def rest(path, *, method=None, body=None, paginate=False):
+        assert method is None, "the verify pass must never mutate"
+        calls.append(path)
+        result = responses[path]
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    monkeypatch.setattr(ghsetup.gh, "rest", rest)
+    return calls
+
+
+def test_workflow_access_public_is_not_applicable_without_access_call(monkeypatch):
+    """Public repo → typed not-applicable, and the access endpoint (which 422s
+    on public repos) is NEVER called — nor is any workflow inspected."""
+    calls = _rest_fake(
+        monkeypatch, {"repos/o/r": {"private": False, "owner": {"type": "User"}}}
+    )
+    outcome = ghsetup.verify_workflow_access("o/r", local_checkout=None)
+    assert outcome.status == "not-applicable"
+    assert "public" in outcome.reason
+    assert calls == ["repos/o/r"]
+
+
+def test_workflow_access_private_non_publisher_is_not_applicable(monkeypatch, tmp_path):
+    """A private repo with no workflow_call workflow has nothing callable —
+    not-applicable, access endpoint untouched."""
+    calls = _rest_fake(
+        monkeypatch, {"repos/o/r": {"private": True, "owner": {"type": "User"}}}
+    )
+    checkout = _checkout(tmp_path, ("ci.yml", _PR_ONLY_YAML))
+    outcome = ghsetup.verify_workflow_access("o/r", local_checkout=checkout)
+    assert outcome.status == "not-applicable"
+    assert "not a reusable-workflow publisher" in outcome.reason
+    assert calls == ["repos/o/r"]
+
+
+def test_workflow_access_private_publisher_none_warns_naming_user_fix(
+    monkeypatch, tmp_path
+):
+    _rest_fake(
+        monkeypatch,
+        {
+            "repos/o/r": {"private": True, "owner": {"type": "User"}},
+            "repos/o/r/actions/permissions/access": {"access_level": "none"},
+        },
+    )
+    checkout = _checkout(tmp_path, ("wf-build.yml", _PUBLISHER_YAML))
+    outcome = ghsetup.verify_workflow_access("o/r", local_checkout=checkout)
+    assert outcome.status == "warn"
+    assert outcome.access_level == "none"
+    assert outcome.recommended_level == "user"
+    assert "access_level=user" in outcome.reason
+    assert "never sets" in outcome.reason
+
+
+def test_workflow_access_org_owner_names_organization(monkeypatch, tmp_path):
+    _rest_fake(
+        monkeypatch,
+        {
+            "repos/o/r": {"private": True, "owner": {"type": "Organization"}},
+            "repos/o/r/actions/permissions/access": {"access_level": "none"},
+        },
+    )
+    checkout = _checkout(tmp_path, ("wf-build.yml", _PUBLISHER_YAML))
+    outcome = ghsetup.verify_workflow_access("o/r", local_checkout=checkout)
+    assert outcome.status == "warn"
+    assert outcome.recommended_level == "organization"
+    assert "access_level=organization" in outcome.reason
+
+
+def test_workflow_access_acceptable_level_is_no_warn(monkeypatch, tmp_path):
+    _rest_fake(
+        monkeypatch,
+        {
+            "repos/o/r": {"private": True, "owner": {"type": "User"}},
+            "repos/o/r/actions/permissions/access": {"access_level": "user"},
+        },
+    )
+    checkout = _checkout(tmp_path, ("wf-build.yml", _PUBLISHER_YAML))
+    outcome = ghsetup.verify_workflow_access("o/r", local_checkout=checkout)
+    assert outcome.status == "acceptable"
+    assert outcome.access_level == "user"
+    assert outcome.recommended_level is None
+
+
+def test_workflow_access_repo_read_failure_is_unknown_not_warn(monkeypatch):
+    """An unreadable repo is `unknown` — never a verified `none` (or a clean
+    not-applicable)."""
+    _rest_fake(
+        monkeypatch,
+        {
+            "repos/o/r": execrun.ExecError(
+                ["gh", "api"], rc=1, stderr="HTTP 403 forbidden"
+            )
+        },
+    )
+    outcome = ghsetup.verify_workflow_access("o/r", local_checkout=None)
+    assert outcome.status == "unknown"
+    assert outcome.status != "warn"
+    assert "could not verify Actions access" in outcome.reason
+    assert "403" in outcome.reason
+
+
+def test_workflow_access_access_read_failure_is_unknown(monkeypatch, tmp_path):
+    _rest_fake(
+        monkeypatch,
+        {
+            "repos/o/r": {"private": True, "owner": {"type": "User"}},
+            "repos/o/r/actions/permissions/access": execrun.ExecError(
+                ["gh", "api"], rc=1, stderr="HTTP 401"
+            ),
+        },
+    )
+    checkout = _checkout(tmp_path, ("wf-build.yml", _PUBLISHER_YAML))
+    outcome = ghsetup.verify_workflow_access("o/r", local_checkout=checkout)
+    assert outcome.status == "unknown"
+    assert outcome.access_level is None
+
+
+def test_workflow_access_malformed_access_payload_is_unknown(monkeypatch, tmp_path):
+    _rest_fake(
+        monkeypatch,
+        {
+            "repos/o/r": {"private": True, "owner": {"type": "User"}},
+            "repos/o/r/actions/permissions/access": {"nope": True},
+        },
+    )
+    checkout = _checkout(tmp_path, ("wf-build.yml", _PUBLISHER_YAML))
+    outcome = ghsetup.verify_workflow_access("o/r", local_checkout=checkout)
+    assert outcome.status == "unknown"
+    assert "access_level" in outcome.reason
+
+
+def test_workflow_access_remote_repo_inspects_via_contents_api(monkeypatch):
+    """An explicitly named remote target (no local checkout) detects the
+    publisher through the contents API and still warns on `none`."""
+    import base64
+
+    encoded = base64.b64encode(_PUBLISHER_YAML.encode()).decode()
+    calls = _rest_fake(
+        monkeypatch,
+        {
+            "repos/o/r": {"private": True, "owner": {"type": "User"}},
+            "repos/o/r/contents/.github/workflows": [
+                {"name": "wf-build.yml"},
+                {"name": "README.md"},
+            ],
+            "repos/o/r/contents/.github/workflows/wf-build.yml": {"content": encoded},
+            "repos/o/r/actions/permissions/access": {"access_level": "none"},
+        },
+    )
+    outcome = ghsetup.verify_workflow_access("o/r", local_checkout=None)
+    assert outcome.status == "warn"
+    assert outcome.recommended_level == "user"
+    # The non-workflow file is never fetched.
+    assert "repos/o/r/contents/.github/workflows/README.md" not in calls
+
+
+def test_workflow_access_remote_missing_workflows_dir_is_not_applicable(monkeypatch):
+    """HTTP 404 on the contents listing means no workflows directory — a
+    verified non-publisher, not an inspection failure."""
+    _rest_fake(
+        monkeypatch,
+        {
+            "repos/o/r": {"private": True, "owner": {"type": "User"}},
+            "repos/o/r/contents/.github/workflows": execrun.ExecError(
+                ["gh", "api"], rc=1, stderr="gh: Not Found (HTTP 404)"
+            ),
+        },
+    )
+    outcome = ghsetup.verify_workflow_access("o/r", local_checkout=None)
+    assert outcome.status == "not-applicable"
+    assert "not a reusable-workflow publisher" in outcome.reason
+
+
+@pytest.mark.parametrize("listing", [None, {"name": "wf-build.yml"}])
+def test_workflow_access_remote_malformed_listing_is_unknown(monkeypatch, listing):
+    """A malformed contents response is an inspection failure, never proof
+    that the target has no reusable workflows."""
+    _rest_fake(
+        monkeypatch,
+        {
+            "repos/o/r": {"private": True, "owner": {"type": "User"}},
+            "repos/o/r/contents/.github/workflows": listing,
+        },
+    )
+    outcome = ghsetup.verify_workflow_access("o/r", local_checkout=None)
+    assert outcome.status == "unknown"
+    assert "expected a list" in outcome.reason
+
+
+def test_setup_report_carries_the_workflow_access_outcome(fake_gh, monkeypatch):
+    """setup() threads pass (d) into the report; the fake's default public
+    repo is typed not-applicable — on the dry run too (the pass reads only)."""
+    monkeypatch.setattr(ghsetup.gh, "default_branch", lambda repo: "main")
+    monkeypatch.setattr(ghsetup.checks_mod, "discover", lambda *a, **k: ["c / check"])
+    report = ghsetup.setup(REPO, config_path="/dev/null", dry_run=True)
+    assert report.workflow_access.status == "not-applicable"
+    assert "public" in report.workflow_access.reason
+
+
 def test_report_json_field_set():
     """The exact --json surface: SetupReport.to_dict()'s declared field set."""
     report = ghsetup.SetupReport(
@@ -790,6 +1026,12 @@ def test_report_json_field_set():
             payload={"name": ghsetup.RULESET_NAME},
         ),
         labels=(ghsetup.LabelOutcome(name="bug", action="upserted"),),
+        workflow_access=ghsetup.WorkflowAccessOutcome(
+            status="warn",
+            reason="access level none",
+            access_level="none",
+            recommended_level="user",
+        ),
         secrets=(
             ghsetup.SecretOutcome(name="A", source="env", action="set"),
             ghsetup.SecretOutcome(
@@ -803,8 +1045,15 @@ def test_report_json_field_set():
         "dry_run",
         "ruleset",
         "labels",
+        "workflow_access",
         "secrets",
         "secrets_error",
+    }
+    assert payload["workflow_access"] == {
+        "status": "warn",
+        "reason": "access level none",
+        "access_level": "none",
+        "recommended_level": "user",
     }
     assert set(payload["ruleset"]) == {
         "name",
@@ -844,6 +1093,11 @@ def _report(**overrides) -> ghsetup.SetupReport:
             payload={"name": ghsetup.RULESET_NAME},
         ),
         labels=(ghsetup.LabelOutcome(name="bug", action="upserted"),),
+        workflow_access=ghsetup.WorkflowAccessOutcome(
+            status="not-applicable",
+            reason="repository is public — its reusable workflows are "
+            "callable by any repo (ADR-0053)",
+        ),
         secrets=(),
         secrets_error=None,
     )
@@ -874,6 +1128,9 @@ def test_format_setup_real_run():
         "  ruleset created\n"
         "labels:\n"
         "  label bug\n"
+        "workflow access:\n"
+        "  not applicable: repository is public — its reusable workflows are "
+        "callable by any repo (ADR-0053)\n"
         "secrets:\n"
         "  secret A\n"
         "  skip B (optional source absent)\n"
@@ -905,6 +1162,9 @@ def test_format_setup_dry_run_renders_off_the_same_shape():
         '{\n  "name": "main-branch-protection"\n}\n'
         "labels:\n"
         "  [dry] label bug\n"
+        "workflow access:\n"
+        "  not applicable: repository is public — its reusable workflows are "
+        "callable by any repo (ADR-0053)\n"
         "secrets:\n"
         "  [dry] secret A (from env)\n"
         "  1 secret(s) set, 0 skipped, 0 failed\n"
@@ -938,6 +1198,63 @@ def test_format_setup_config_error_line():
     report = _report(secrets_error="no .shipit.toml at /x")
     out = gh_setup_verb.format_setup(report)
     assert "secrets:\n  no secrets applied: no .shipit.toml at /x\ndone." in out
+
+
+def test_format_setup_workflow_access_warn_line():
+    report = _report(
+        workflow_access=ghsetup.WorkflowAccessOutcome(
+            status="warn",
+            reason="private reusable-workflow publisher with Actions access "
+            "level 'none' — fix: gh api …",
+            access_level="none",
+            recommended_level="user",
+        ),
+    )
+    out = gh_setup_verb.format_setup(report)
+    assert (
+        "workflow access:\n"
+        "  WARN private reusable-workflow publisher with Actions access "
+        "level 'none' — fix: gh api …\n"
+    ) in out
+
+
+def test_format_setup_workflow_access_acceptable_line():
+    report = _report(
+        workflow_access=ghsetup.WorkflowAccessOutcome(
+            status="acceptable",
+            reason="Actions access level is 'user'",
+            access_level="user",
+        ),
+    )
+    out = gh_setup_verb.format_setup(report)
+    assert "workflow access:\n  access level: user (acceptable)\n" in out
+
+
+def test_format_setup_workflow_access_unknown_line():
+    """The inspection failure renders as a warning, NOT as the WARN verdict —
+    "could not look" stays distinct from "looked and it's none"."""
+    report = _report(
+        workflow_access=ghsetup.WorkflowAccessOutcome(
+            status="unknown",
+            reason="could not verify Actions access: HTTP 403",
+        ),
+    )
+    out = gh_setup_verb.format_setup(report)
+    assert (
+        "workflow access:\n  warning: could not verify Actions access: HTTP 403\n"
+    ) in out
+    assert "WARN " not in out
+
+
+def test_format_setup_rejects_unknown_workflow_access_status():
+    report = _report(
+        workflow_access=ghsetup.WorkflowAccessOutcome(
+            status="typo",
+            reason="must not be rendered as not applicable",
+        ),
+    )
+    with pytest.raises(ValueError, match="unknown workflow access status: 'typo'"):
+        gh_setup_verb.format_setup(report)
 
 
 # --------------------------------------------------------------------------
@@ -1059,6 +1376,7 @@ def test_cli_json_emits_the_report_dict(stub_setup, monkeypatch, capsys):
         "dry_run",
         "ruleset",
         "labels",
+        "workflow_access",
         "secrets",
         "secrets_error",
     }
@@ -1130,7 +1448,7 @@ def test_failed_run_emits_the_failed_event(monkeypatch, capsys, caplog):
         r for r in caplog.records if getattr(r, ev.EXTRA_KEY, None) == "ghsetup.failed"
     ]
     assert len(failed) == 1
-    assert failed[0].step == "setup (ruleset/labels/secrets)"
+    assert failed[0].step == "setup (ruleset/labels/access/secrets)"
     names = _event_names(caplog)
     assert "ghsetup.completed" not in names
 
