@@ -648,6 +648,16 @@ def push(
     _git(args, cwd=cwd, timeout=_NETWORK_TIMEOUT)
 
 
+def clone(url: str, dest: str) -> None:
+    """``git clone <url> <dest>`` for data-store checkouts."""
+    _git(["clone", url, dest], timeout=_CLONE_TIMEOUT)
+
+
+def pull_rebase(*, cwd: str, remote: str = "origin") -> None:
+    """``git pull --rebase <remote>`` inside a mutable data-store checkout."""
+    _git(["pull", "--rebase", remote], cwd=cwd, timeout=_NETWORK_TIMEOUT)
+
+
 #: The stderr signatures of a REFERENCE-POISONED clone (#353, diagnosis
 #: narrowed in #372). On git 2.54 a reference repo carrying ANY commit-graph —
 #: a plain ``objects/info/commit-graph`` file or a split chain under
