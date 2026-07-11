@@ -1,0 +1,12 @@
+`shipit session resume` resumes a coordinator conversation in a fresh session Tree.
+
+Targets may be a human-facing shipit session id (`codex-...` / `sess-...`) or a
+backend-native id recorded in durable shipit logs. Use `--last --repo owner/name`
+to resume the newest known session for a repository without running from a
+checkout.
+
+The command resolves repository, backend, native id, and source checkout from
+shipit-owned records, then dispatches to the backend's native resume contract:
+Codex is re-rooted with `codex resume --cd <fresh-tree> ...`; Claude uses
+`claude --worktree <fresh-session> --resume ...` so the WorktreeCreate hook
+provisions the fresh Tree.

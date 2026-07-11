@@ -395,6 +395,7 @@ _HELP_RESOURCES = {
     ("spawn", "brief"): ("shipit.verbs", "spawn_brief_help.txt"),
     ("session",): ("shipit.verbs", "session_help.txt"),
     ("session", "codex"): ("shipit.verbs", "session_codex_help.txt"),
+    ("session", "resume"): ("shipit.verbs", "session_resume_help.txt"),
     ("fleet",): ("shipit.verbs", "fleet_help.txt"),
     ("fleet", "sweep"): ("shipit.verbs", "fleet_sweep_help.txt"),
     ("wf",): ("shipit.verbs", "wf_help.txt"),

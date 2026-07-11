@@ -2,7 +2,7 @@ import io
 import json
 from dataclasses import dataclass, replace
 
-from shipit.identity import Repo
+from shipit.identity import Repo, repo_from_slug
 from shipit.tree.create import Tree
 from shipit.verbs import session
 from shipit.verbs.hook import worktreecreate
@@ -196,6 +196,113 @@ def test_run_codex_resume_uses_first_class_resume_argv(monkeypatch, tmp_path):
     ]
 
 
+def test_run_codex_resume_can_launch_from_explicit_source_repo(monkeypatch, tmp_path):
+    capture = LaunchCapture()
+    source = tmp_path / "source"
+    tree_path = tmp_path / "tree"
+
+    monkeypatch.setattr(session.git, "repo_root", lambda: None)
+    monkeypatch.setattr(session, "new_agent_hash", lambda: "deadbeef")
+    monkeypatch.setattr(session.time, "time", lambda: 1783585261)
+    monkeypatch.setattr(session.os, "getpid", lambda: 4242)
+
+    def fake_creator(spec, *, source_repo):
+        capture.spec = spec
+        capture.source_repo = source_repo
+        return Tree(path=str(tree_path), branch="ephemeral/codex-1", base="origin/main")
+
+    rc = session.run_codex(
+        [],
+        resume_thread_id="019f-thread",
+        repo_identity=Repo("arthur-debert", "shipit"),
+        source_repo=str(source),
+        creator=fake_creator,
+        chdir=lambda path: None,
+        execute=lambda file, argv, env: setattr(capture, "argv", argv),
+        which=lambda binary: "/usr/local/bin/codex",
+        environ={"PATH": "/bin"},
+    )
+
+    assert rc == 0
+    assert capture.source_repo == str(source)
+    assert capture.spec.repo == Repo("arthur-debert", "shipit")
+    assert capture.argv[:5] == [
+        "codex",
+        "resume",
+        "--cd",
+        str(tree_path),
+        session.bootstrap.BYPASS_FLAG,
+    ]
+
+
+def test_run_resume_delegates_codex_target_to_codex_runner(tmp_path):
+    captured = {}
+    repo = repo_from_slug("arthur-debert/shipit")
+    target = session.resume.ResumeTarget(
+        repo=repo,
+        backend="codex",
+        shipit_session_id="codex-1",
+        native_session_id="019f-thread",
+    )
+
+    def resolver(raw, **kwargs):
+        captured["resolver"] = (raw, kwargs)
+        return target
+
+    def source_locator(repo):
+        captured["source_repo"] = repo
+        return str(tmp_path / "source")
+
+    def codex_runner(args, **kwargs):
+        captured["codex"] = (list(args), kwargs)
+        return 0
+
+    rc = session.run_resume(
+        "codex-1",
+        backend_args=["--model", "gpt-5"],
+        resolver=resolver,
+        source_locator=source_locator,
+        codex_runner=codex_runner,
+    )
+
+    assert rc == 0
+    assert captured["resolver"][0] == "codex-1"
+    assert captured["source_repo"] == repo
+    args, kwargs = captured["codex"]
+    assert args == ["--model", "gpt-5"]
+    assert kwargs["resume_thread_id"] == "019f-thread"
+    assert kwargs["resumed_session_id"] == "codex-1"
+    assert kwargs["repo_identity"] == repo
+
+
+def test_run_resume_delegates_claude_target_to_claude_runner(tmp_path):
+    captured = {}
+    target = session.resume.ResumeTarget(
+        repo=repo_from_slug("arthur-debert/shipit"),
+        backend="claude",
+        shipit_session_id="sess-1",
+        native_session_id="claude-native",
+    )
+
+    def claude_runner(native_id, args, **kwargs):
+        captured["claude"] = (native_id, list(args), kwargs)
+        return 0
+
+    rc = session.run_resume(
+        "sess-1",
+        backend_args=["--model", "opus"],
+        resolver=lambda raw, **kwargs: target,
+        source_locator=lambda repo: str(tmp_path / "source"),
+        claude_runner=claude_runner,
+    )
+
+    assert rc == 0
+    native_id, args, kwargs = captured["claude"]
+    assert native_id == "claude-native"
+    assert args == ["--model", "opus"]
+    assert kwargs["resumed_session_id"] == "sess-1"
+
+
 def test_run_codex_spec_matches_the_coordinator_worktreecreate_spec(
     monkeypatch, tmp_path
 ):
@@ -209,7 +316,7 @@ def test_run_codex_spec_matches_the_coordinator_worktreecreate_spec(
     # forking the session-Tree shape per host.
     specs: dict[str, object] = {}
     source = tmp_path / "source"
-    repo = Repo("arthur-debert", "shipit")
+    repo = repo_from_slug("arthur-debert/shipit")
 
     def creator(key):
         def create(spec, *, source_repo):
@@ -255,6 +362,61 @@ def test_run_codex_spec_matches_the_coordinator_worktreecreate_spec(
     assert claude_spec.ephemeral == "sess-20260709-082101-4242"
     # ...and EVERY other field is identical across the two hosts' paths.
     assert replace(codex_spec, ephemeral=claude_spec.ephemeral) == claude_spec
+
+
+def test_run_claude_resume_execs_native_resume_through_worktree(
+    monkeypatch, tmp_path, capsys
+):
+    capture = LaunchCapture()
+    source = tmp_path / "source"
+    repo = repo_from_slug("arthur-debert/shipit")
+
+    monkeypatch.setattr(session, "new_agent_hash", lambda: "deadbeef")
+    monkeypatch.setattr(session.time, "time", lambda: 1783585261)
+    monkeypatch.setattr(session.os, "getpid", lambda: 4242)
+
+    def fake_chdir(path: str) -> None:
+        capture.chdir = path
+
+    def fake_execute(file: str, argv: list[str], env: dict[str, str]) -> None:
+        capture.exec_file = file
+        capture.argv = argv
+        capture.env = env
+
+    rc = session.run_claude_resume(
+        "claude-native",
+        ["--model", "opus"],
+        repo_identity=repo,
+        source_repo=str(source),
+        chdir=fake_chdir,
+        execute=fake_execute,
+        which=lambda binary: "/usr/local/bin/claude",
+        environ={
+            "PATH": "/bin",
+            "PIXI_PROJECT_ROOT": "/stale/source",
+            "SHIPIT_LOG_CTX_SESSION": "old",
+            "SHIPIT_LOG_CTX_TREE": "/old/tree",
+        },
+    )
+
+    assert rc == 0
+    assert capture.chdir == str(source)
+    assert capture.exec_file == "claude"
+    assert capture.argv == [
+        "claude",
+        "--worktree",
+        "sess-20260709-082101-4242",
+        "--resume",
+        "claude-native",
+        "--model",
+        "opus",
+    ]
+    assert capture.env is not None
+    assert capture.env["PATH"] == "/bin"
+    assert "PIXI_PROJECT_ROOT" not in capture.env
+    assert "SHIPIT_LOG_CTX_SESSION" not in capture.env
+    assert "SHIPIT_LOG_CTX_TREE" not in capture.env
+    assert "claude session sess-20260709-082101-4242" in capsys.readouterr().out
 
 
 def test_run_codex_refuses_outside_git_checkout(monkeypatch, capsys):
