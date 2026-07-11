@@ -168,7 +168,7 @@ class TestBank:
             "--provenance",
             "adjudication:sheet-3",
             "--defect",
-            "core-staging-estimate",
+            "  core-staging-estimate  ",
         ]
         result = CliRunner().invoke(bank_verb.group, argv)
         assert result.exit_code == 0, result.output

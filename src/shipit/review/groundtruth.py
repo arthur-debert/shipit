@@ -334,12 +334,22 @@ def _validate_defect_families(labels: tuple[Label, ...]) -> None:
     and sits on one severity tier — otherwise the scorer's once-per-family
     counting would be ambiguous (which pin's denominator? which tier?). A
     single-member family is legal: it declares identity ahead of the next
-    anchor's banking.
+    anchor's banking. Family ids share the scorer's key space with label ids,
+    so a family id may equal a label id only when that label explicitly joins
+    the family — otherwise two distinct defects would merge by accident.
     """
+    by_id = {label.id: label for label in labels}
     first_of: dict[str, Label] = {}
     for label in labels:
         if label.defect is None:
             continue
+        colliding = by_id.get(label.defect)
+        if colliding is not None and colliding.defect != label.defect:
+            raise FixtureError(
+                f"defect family {label.defect!r} collides with label id "
+                f"{colliding.id!r}, but that label does not explicitly join "
+                "the family"
+            )
         first = first_of.setdefault(label.defect, label)
         for field, mismatched in (
             ("pr", label.pr_id != first.pr_id),
@@ -416,7 +426,12 @@ def bank_label(fixture: Fixture, label: Label) -> Fixture:
         raise FixtureError(f"label id {label.id!r} already banked")
     if label.pr_id not in {p.id for p in fixture.prs}:
         raise FixtureError(f"label {label.id!r} names unknown pr {label.pr_id!r}")
-    banked = replace(label, confirmed=True)
+    defect = label.defect
+    if defect is not None:
+        if not isinstance(defect, str) or not defect.strip():
+            raise FixtureError("defect must be a non-empty string")
+        defect = defect.strip()
+    banked = replace(label, confirmed=True, defect=defect)
     _validate_defect_families((*fixture.labels, banked))
     return replace(
         fixture, version=fixture.version + 1, labels=(*fixture.labels, banked)

@@ -166,6 +166,17 @@ class TestDefectFamilies:
         with pytest.raises(FixtureError):
             parse_fixture(data(labels=[label_data(defect="  ")]))
 
+    def test_family_id_cannot_silently_capture_an_unfamilied_label(self):
+        with pytest.raises(FixtureError, match="collides with label id"):
+            parse_fixture(
+                data(
+                    labels=[
+                        label_data(),
+                        label_data(id="core-G2", defect="core-G1"),
+                    ]
+                )
+            )
+
     def test_defect_round_trips_through_dump(self, tmp_path):
         fixture = parse_fixture(data(labels=[label_data(defect="core-fam")]))
         path = tmp_path / "fixture.toml"
@@ -182,10 +193,40 @@ class TestDefectFamilies:
             verdict="real",
             claim="the same defect stated at its other anchor site",
             provenance=Provenance("adjudication", "sheet-3"),
-            defect="core-fam",
+            defect="  core-fam  ",
         )
         banked = bank_label(fixture, anchor)
-        assert banked.label_by_id("core-G2").defect_key == "core-fam"
+        assert banked.label_by_id("core-G2").defect == "core-fam"
+
+    def test_bank_label_rejects_a_blank_defect(self):
+        fixture = parse_fixture(data())
+        blank = Label(
+            id="core-G2",
+            pr_id="core-440",
+            file="phos-editor/src/graph_session.rs",
+            severity=Severity.MAJOR,
+            verdict="real",
+            claim="c",
+            provenance=Provenance("adjudication", "r"),
+            defect="  ",
+        )
+        with pytest.raises(FixtureError, match="defect must be a non-empty string"):
+            bank_label(fixture, blank)
+
+    def test_bank_label_rejects_a_family_id_collision(self):
+        fixture = parse_fixture(data())
+        colliding = Label(
+            id="core-G2",
+            pr_id="core-440",
+            file="phos-editor/src/graph_session.rs",
+            severity=Severity.MAJOR,
+            verdict="real",
+            claim="c",
+            provenance=Provenance("adjudication", "r"),
+            defect="core-G1",
+        )
+        with pytest.raises(FixtureError, match="collides with label id"):
+            bank_label(fixture, colliding)
 
     def test_bank_label_rejects_an_incoherent_family_member(self):
         fixture = parse_fixture(data(labels=[label_data(defect="core-fam")]))
