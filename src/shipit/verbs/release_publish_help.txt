@@ -12,7 +12,7 @@ registry:
               a mid-workspace failure resumes.
 - pypi        twine-style upload of the staged wheel+sdist with
               --skip-existing; `--testpypi` reroutes to test.pypi.org
-              (staging lane, TESTPYPI_API_TOKEN).
+              (staging lane, TESTPYPI_TOKEN).
 - npm         publishes the prebuilt package tree without rebuilding
               (--ignore-scripts); publish-over-existing is success.
 - brew        DERIVED endpoint: renders the shared formula template against
@@ -39,10 +39,11 @@ the wf-publish workflow block and a laptop invocation:
   converges on re-run instead of erroring — already-published is success,
   create becomes edit, an unchanged formula pushes nothing.
 
-Each adapter declares the secret names it requires (CARGO_REGISTRY_TOKEN,
-PYPI_API_TOKEN, NODE_AUTH_TOKEN, HOMEBREW_TAP_TOKEN); a missing token for a
-planned endpoint fails loudly BEFORE the first dispatch, never as a silent
-adapter skip. gh-release rides gh's ambient auth.
+Each adapter's required secret name comes from the one derivation authority
+(CARGO_REGISTRY_TOKEN, PYPI_TOKEN, NPM_TOKEN, HOMEBREW_TAP_TOKEN — the same
+map gh-setup syncs and preflight validates); a missing token for a planned
+endpoint fails loudly BEFORE the first dispatch, never as a silent adapter
+skip. gh-release rides gh's ambient auth.
 
 VERSION is the concrete semver `release prepare` cut — never a bump word
 (publish must not re-resolve the version). An endpoint name outside the

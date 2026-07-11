@@ -1,7 +1,11 @@
 """`shipit release` — the Release pipeline's stage verbs (TOL02, PRD story 19).
 
-Each release stage is independently invocable; this module carries four:
+Each release stage is independently invocable; this module carries the
+pipeline's planner and its effectful stages:
 
+- ``shipit release preflight`` (TOL02-WS02 #560) — the planner (see
+  :func:`run_preflight`): (artifact map, resolved version, event) → the
+  machine-readable plan, hard-failing on missing secrets before any write;
 - ``shipit release prepare`` (TOL02-WS01 #559) — the pipeline's only writer
   of repo history;
 - ``shipit release bundle`` (TOL02-WS03 #561) — the composition of build
@@ -81,19 +85,20 @@ import logging
 import os
 import platform
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import click
 
-from .. import config, execrun, gh, git, redact
+from .. import config, events, execrun, gh, git, redact
 from ..changelog import is_prerelease
 from ..release import ReleaseError
 from ..release import bump as bump_mod
 from ..release import bundle as bundle_mod
 from ..release import integrity as integrity_mod
+from ..release import preflight as preflight_mod
 from ..release import publish as publish_mod
 from ..release import version as version_mod
 from . import changelog as changelog_verb
@@ -190,6 +195,108 @@ def format_prepare(result: PrepareResult) -> str:
             f"  notes    {result.notes_path}",
         )
     )
+
+
+def format_preflight(release_plan: preflight_mod.ReleasePlan) -> str:
+    """The text rendering of a :class:`~shipit.release.preflight.ReleasePlan`.
+    Pure. The workflow consumes ``--json``; this is the operator's summary."""
+    kind = "prerelease" if release_plan.prerelease else "final"
+    lines = [
+        f"release preflight: {release_plan.version} ({kind}, "
+        f"event {release_plan.event})",
+        f"  artifacts  {', '.join(release_plan.artifacts) or 'none'}",
+        f"  matrix     {len(release_plan.matrix)} "
+        f"entr{'y' if len(release_plan.matrix) == 1 else 'ies'}"
+        + (
+            f" ({', '.join(e.platform for e in release_plan.matrix)})"
+            if release_plan.matrix
+            else ""
+        ),
+        f"  stages     {', '.join(release_plan.stages)}",
+        f"  endpoints  {', '.join(release_plan.endpoints)}",
+        f"  secrets    {', '.join(release_plan.secrets)}",
+    ]
+    if release_plan.tag_only:
+        lines.append(
+            "  rc guard   -release-rc: GH release only, external endpoints dropped"
+        )
+    if release_plan.unsigned:
+        lines.append("  UNSIGNED   break-glass: sign stage skipped (recorded)")
+    return "\n".join(lines)
+
+
+@cli_errors
+def run_preflight(
+    spec: version_mod.VersionSpec,
+    *,
+    event: str = "dispatch",
+    unsigned: bool = False,
+    as_json: bool = False,
+    gitio: Any = git,
+    env: Mapping[str, str] | None = None,
+) -> int:
+    """Run the preflight planner from the current directory. Returns 0/1.
+
+    The thin shell over the pure core (ADR-0030): load the artifact map,
+    resolve the supplied version against the repo's tags (ADR-0041 — the
+    same resolution prepare will make), plan
+    (:func:`shipit.release.preflight.plan`), record the ``--unsigned``
+    break-glass (story 29: every use is a durable ``release.unsigned``
+    event), hard-fail on missing required secrets (story 28 — checked
+    against the injected ``env``; the workflow's caller injects each GitHub
+    secret as a same-named env var), and render text or ``--json``. The plan
+    refusals (phantom release, nothing-to-break-glass) and the presence
+    failure are :class:`~shipit.release.ReleaseError` → exit 1.
+    """
+    root_s = gitio.repo_root(cwd=".")
+    if root_s is None:
+        raise ReleaseError(
+            "not inside a git checkout — `release preflight` reads the "
+            "repo's declarations"
+        )
+    root = Path(root_s)
+    cfg = load_config(root)
+    artifacts = config.load_artifacts(cfg)
+    resolved = version_mod.resolve(spec, gitio.list_tags(cwd=str(root)))
+
+    release_plan = preflight_mod.plan(
+        artifacts, resolved, event=event, unsigned=unsigned
+    )
+    if unsigned:
+        # The break-glass record (story 29): emitted AFTER the plan accepted
+        # the flip (a refused --unsigned never counts as a use), before any
+        # output consumes the unsigned plan.
+        events.emit(
+            logger,
+            "release.unsigned",
+            "release preflight --unsigned: sign stage skipped for %s (%s)",
+            release_plan.version,
+            release_plan.tag,
+            extra={"version": release_plan.version, "tag": release_plan.tag},
+        )
+    missing = preflight_mod.missing_secrets(
+        release_plan, os.environ if env is None else env
+    )
+    if missing:
+        raise ReleaseError(
+            f"missing required secrets: {', '.join(missing)} — the plan "
+            "cannot run to publish; failing now, before prepare writes any "
+            "history"
+        )
+    emit(release_plan, format_preflight, as_json=as_json)
+    logger.info(
+        "release preflight planned",
+        extra={
+            "version": release_plan.version,
+            "tag": release_plan.tag,
+            "event": release_plan.event,
+            "unsigned": release_plan.unsigned,
+            "matrix": len(release_plan.matrix),
+            "stages": ",".join(release_plan.stages),
+            "endpoints": ",".join(release_plan.endpoints),
+        },
+    )
+    return 0
 
 
 # --------------------------------------------------------------------------
@@ -1048,15 +1155,57 @@ def run_publish(
 def release() -> None:
     """The release pipeline, one independently invocable stage per subcommand.
 
-    The tag is the version authority (ADR-0041): `prepare` resolves the
-    supplied version, projects it into the manifests, and writes commit +
-    annotated tag. `bundle` composes build outputs into the unsigned
-    Artifacts and `assert-bundle` guards their integrity (workflows.lex
-    §3.2). `publish` — the terminal stage — dispatches the staged Artifacts
-    to their declared Distribution endpoints, gated by the scar-#3 refusal
-    and the central RC guard. The remaining stages (preflight, sign) land
-    as their work streams do.
+    The tag is the version authority (ADR-0041): `preflight` plans the run
+    (matrix, live stages, post-RC-guard endpoints, required secrets) and
+    validates it before anything is written; `prepare` resolves the supplied
+    version, projects it into the manifests, and writes commit + annotated
+    tag; `bundle` composes build outputs into the unsigned Artifacts and
+    `assert-bundle` guards their integrity (workflows.lex §3.2); `publish` —
+    the terminal stage — dispatches the staged Artifacts to their declared
+    Distribution endpoints, gated by the scar-#3 refusal and the central RC
+    guard. The remaining stage (sign) lands as its work stream does.
     """
+
+
+@release.command(name="preflight")
+@click.argument("version", type=VERSION_SPEC)
+@click.option(
+    "--event",
+    type=click.Choice(preflight_mod.EVENTS),
+    default="dispatch",
+    show_default=True,
+    help=(
+        "The triggering release event the plan records — the composed "
+        "workflow's dispatch run or a laptop cut."
+    ),
+)
+@click.option(
+    "--unsigned",
+    is_flag=True,
+    help=(
+        "Break-glass: plan the unsigned path (sign stage skipped, Apple "
+        "secrets unchecked). Explicit and recorded — every use lands a "
+        "release.unsigned event; refused when the repo declares no signing."
+    ),
+)
+@json_option
+def preflight_cmd(
+    version: version_mod.VersionSpec, event: str, unsigned: bool, as_json: bool
+) -> None:
+    """Plan the release: matrix, live stages, endpoints, required secrets.
+
+    VERSION is a bare semver (1.2.3, 1.2.3-rc.1) or a bump word
+    (major | minor | patch) resolved against the latest tag, exactly as
+    `prepare` will resolve it. Emits the machine-readable plan the composed
+    workflow consumes as job outputs (--json) — decisions are made HERE,
+    never re-derived in YAML — and hard-fails while it is still cheap:
+    before any toolchain exists and before prepare writes history. A
+    -release-rc version plans GH-release-only (external endpoints dropped
+    from the plan); missing required secrets are a hard failure.
+    """
+    raise SystemExit(
+        run_preflight(version, event=event, unsigned=unsigned, as_json=as_json)
+    )
 
 
 @release.command(name="prepare")
@@ -1193,7 +1342,7 @@ _RESULT_CHOICE = click.Choice(publish_mod.STAGE_RESULTS)
     is_flag=True,
     help=(
         "Reroute the pypi endpoint to test.pypi.org (staging lane; needs "
-        "TESTPYPI_API_TOKEN instead of PYPI_API_TOKEN)."
+        "TESTPYPI_TOKEN instead of PYPI_TOKEN)."
     ),
 )
 @json_option

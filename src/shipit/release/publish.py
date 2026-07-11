@@ -56,11 +56,15 @@ the one Exec runner (ADR-0028 — the ``cargo publish`` / ``twine`` /
 ``npm publish`` / ``ruby -c`` argv literals below are those tools' one
 publish-side assembly point, whitelisted in ``tests/test_tool_argv_sweep.py``),
 ``ghio`` the gh Tool adapter (:mod:`shipit.gh` — the gh-release REST/CLI
-calls), ``gitio`` the git adapter (the tap clone/commit/push). Each adapter
-declares its required secret names (``secrets`` — PRD story 43, the secrets
-derivation registry's input); the verb validates presence of every planned
-endpoint's tokens BEFORE the first dispatch, so a missing token fails loudly
-at validation, never as a silent adapter skip.
+calls), ``gitio`` the git adapter (the tap clone/commit/push). Each adapter's
+required secret NAME comes from the one derivation authority
+(:data:`shipit.release.secretreq.ENDPOINT_SECRETS`, WS02 — gh-setup syncs and
+preflight validates the same map, so the fleet never names a secret two ways);
+the verb validates presence of every planned endpoint's tokens BEFORE the
+first dispatch, so a missing token fails loudly at validation, never as a
+silent adapter skip. An adapter looks its token up under that secret name and
+feeds it to the tool under the var the TOOL reads (``NODE_AUTH_TOKEN`` for npm,
+``TWINE_PASSWORD`` for twine — :data:`NPM_AUTH_ENV` / :data:`CARGO_TOKEN_ENV`).
 
 The effectful shell is ``shipit release publish``
 (:mod:`shipit.verbs.release`).
@@ -80,7 +84,7 @@ from typing import Any
 
 from .. import config, execrun
 from ..changelog import SEMVER_RE
-from . import ReleaseError
+from . import ReleaseError, secretreq
 from . import brew as brew_mod
 from . import integrity as integrity_mod
 from .version import RELEASE_RC_PRE
@@ -103,19 +107,29 @@ TAP_COMMITTER = ("shipit release", "shipit-release@users.noreply.github.com")
 #: ``--repository-url`` (the production default needs no URL).
 TESTPYPI_URL = "https://test.pypi.org/legacy/"
 
-#: Per-adapter token env keys. These are the names each adapter DECLARES to
-#: the secrets derivation registry (PRD stories 43–45: gh-setup derives the
-#: repo's needed secret set from what it actually ships) and validates at
-#: publish time. gh-release declares NONE: ``gh`` rides its ambient auth
-#: (Actions' ``GITHUB_TOKEN`` / a laptop's ``gh auth``), which is never a
-#: synced secret. ``TESTPYPI_API_TOKEN`` is the ``--testpypi`` staging
-#: lane's RUNTIME requirement, deliberately outside the static declaration —
-#: staging is opt-in per run, not a provisioned endpoint of the repo.
-CRATES_TOKEN_ENV = "CARGO_REGISTRY_TOKEN"
-PYPI_TOKEN_ENV = "PYPI_API_TOKEN"
-TESTPYPI_TOKEN_ENV = "TESTPYPI_API_TOKEN"
-NPM_TOKEN_ENV = "NODE_AUTH_TOKEN"
-TAP_TOKEN_ENV = "HOMEBREW_TAP_TOKEN"
+#: The GitHub SECRET NAME each adapter looks its token up under, at publish
+#: time and in :func:`required_env_keys` — sourced from the ONE derivation
+#: authority (:data:`shipit.release.secretreq.ENDPOINT_SECRETS` /
+#: :data:`~shipit.release.secretreq.TESTPYPI_SECRET`, WS02), so publish,
+#: gh-setup's sync, and preflight's validation can never name a secret
+#: differently (the "one secret map, three consumers that cannot drift"
+#: invariant — architecture.lex §6, PRD stories 43–46). gh-release declares
+#: NONE: ``gh`` rides its ambient auth (Actions' ``GITHUB_TOKEN`` / a laptop's
+#: ``gh auth``), never a synced secret. ``TESTPYPI_SECRET`` is the
+#: ``--testpypi`` staging lane's RUNTIME requirement, opt-in per run.
+CRATES_SECRET = secretreq.ENDPOINT_SECRETS["crates"][0]
+PYPI_SECRET = secretreq.ENDPOINT_SECRETS["pypi"][0]
+TESTPYPI_SECRET = secretreq.TESTPYPI_SECRET
+NPM_SECRET = secretreq.ENDPOINT_SECRETS["npm"][0]
+TAP_SECRET = secretreq.ENDPOINT_SECRETS["brew"][0]
+
+#: The child-process env var each tool READS the token under — the runtime
+#: feed, tool-specific and distinct from the secret NAME the token is
+#: provisioned/looked-up under above. cargo reads ``CARGO_REGISTRY_TOKEN``
+#: (which also happens to be its secret name); npm reads ``NODE_AUTH_TOKEN``;
+#: twine reads ``TWINE_USERNAME``/``TWINE_PASSWORD`` (inline in the adapter).
+CARGO_TOKEN_ENV = "CARGO_REGISTRY_TOKEN"
+NPM_AUTH_ENV = "NODE_AUTH_TOKEN"
 
 #: cargo's already-published stderr signatures (lowercased match): the
 #: idempotent-resume contract — an already-uploaded crate version is SUCCESS
@@ -315,12 +329,13 @@ def plan(
 def required_env_keys(adapter: EndpointAdapter, *, testpypi: bool) -> tuple[str, ...]:
     """The token env keys THIS run of ``adapter`` needs. Pure.
 
-    The static ``secrets`` declaration feeds the derivation registry (story
-    43); the runtime set differs only for pypi's opt-in staging lane, which
-    swaps the production token for :data:`TESTPYPI_TOKEN_ENV`.
+    Each adapter's ``secrets`` mirrors :data:`secretreq.ENDPOINT_SECRETS`
+    (the one derivation authority, WS02); the runtime set differs only for
+    pypi's opt-in staging lane, which swaps the production token for
+    :data:`TESTPYPI_SECRET`.
     """
     if adapter.name == "pypi" and testpypi:
-        return (TESTPYPI_TOKEN_ENV,)
+        return (TESTPYPI_SECRET,)
     return adapter.secrets
 
 
@@ -539,15 +554,16 @@ def _publish_crates(req: PublishRequest) -> Published:
     sparse index between dependent publishes natively, so there is no
     inter-publish sleep (the legacy composite's wait defaulted to 0).
 
-    The registry token rides the ``cargo publish`` child env
-    (:data:`CRATES_TOKEN_ENV`), never argv and never the ambient process
-    environment — consistent with the pypi/npm adapters, so an injected
-    ``env`` (recorded tests, workflow composition) authenticates the publish.
-    ``cargo metadata`` needs no token.
+    The registry token is looked up under its secret name
+    (:data:`CRATES_SECRET`) and rides the ``cargo publish`` child env
+    (:data:`CARGO_TOKEN_ENV`, the var cargo reads — here the same string),
+    never argv and never the ambient process environment — consistent with the
+    pypi/npm adapters, so an injected ``env`` (recorded tests, workflow
+    composition) authenticates the publish. ``cargo metadata`` needs no token.
     """
     leg = _leg_for(req.artifact, req.entries, "rust", "crates")
     leg_dir = _leg_dir(req.root, leg)
-    token = _require_token(req, "crates", CRATES_TOKEN_ENV)
+    token = _require_token(req, "crates", CRATES_SECRET)
     metadata = req.run_cmd(
         ["cargo", "metadata", "--format-version", "1", "--no-deps"], leg_dir, None
     )
@@ -560,7 +576,7 @@ def _publish_crates(req: PublishRequest) -> Published:
     actions = []
     for crate in order:
         result = req.probe(
-            ["cargo", "publish", "-p", crate], leg_dir, {CRATES_TOKEN_ENV: token}
+            ["cargo", "publish", "-p", crate], leg_dir, {CARGO_TOKEN_ENV: token}
         )
         if result.rc == 0:
             actions.append(f"{crate} {req.version} published")
@@ -665,7 +681,7 @@ def _publish_pypi(req: PublishRequest) -> Published:
     ``--testpypi`` reroutes to :data:`TESTPYPI_URL` with the staging token. The
     token rides the child env (``TWINE_USERNAME``/``TWINE_PASSWORD``), never argv.
     """
-    key = TESTPYPI_TOKEN_ENV if req.testpypi else PYPI_TOKEN_ENV
+    key = TESTPYPI_SECRET if req.testpypi else PYPI_SECRET
     token = _require_token(req, "pypi", key)
     dist = _pypi_dist_name(req)
     files = pypi_uploads(_asset_names(req.assets_dir), dist)
@@ -709,16 +725,17 @@ def _publish_npm(req: PublishRequest) -> Published:
     ``--ignore-scripts`` is the no-rebuild contract: the tree (a wasm-pack
     ``pkg/``, a prepared package dir) was produced by the build/bundle
     stages, and a lifecycle script re-running a build here would be a second
-    build path. The token rides the child env (the setup-node
-    ``NODE_AUTH_TOKEN`` convention), never argv.
+    build path. The token is looked up under its secret name
+    (:data:`NPM_SECRET`) and rides the child env under the var npm reads (the
+    setup-node ``NODE_AUTH_TOKEN`` convention, :data:`NPM_AUTH_ENV`), never argv.
     """
     leg = _leg_for(req.artifact, req.entries, "npm", "npm")
-    token = _require_token(req, "npm", NPM_TOKEN_ENV)
+    token = _require_token(req, "npm", NPM_SECRET)
     pkg_dir = _leg_dir(req.root, leg)
     result = req.probe(
         ["npm", "publish", "--ignore-scripts"],
         pkg_dir,
-        {NPM_TOKEN_ENV: token},
+        {NPM_AUTH_ENV: token},
     )
     if result.rc == 0:
         action = f"published {req.version} from {leg.path or '.'}"
@@ -777,7 +794,7 @@ def _publish_brew(req: PublishRequest) -> Published:
     in the tap clone is a no-op (nothing committed, nothing pushed).
     """
     assert req.repo is not None  # the verb resolves the slug for a planned brew
-    token = _require_token(req, "brew", TAP_TOKEN_ENV)
+    token = _require_token(req, "brew", TAP_SECRET)
     archives = brew_archives(req.artifact.name, _asset_names(req.assets_dir))
     if not archives:
         raise ReleaseError(
@@ -864,9 +881,10 @@ class EndpointAdapter:
 
     ``stage`` is ``"release"`` or ``"derived"`` (PRD story 35 ordering);
     ``external`` marks the endpoints the RC guard skips on a live-fire cut
-    (everything but gh-release — story 33). ``secrets`` is the STATIC
-    declaration gh-setup's derivation traverses (stories 43–45); the runtime
-    validation set is :func:`required_env_keys`.
+    (everything but gh-release — story 33). ``secrets`` MIRRORS the endpoint's
+    :data:`secretreq.ENDPOINT_SECRETS` entry (the one derivation authority
+    gh-setup/preflight traverse, WS02, stories 43–45) rather than re-declaring
+    the names; the runtime validation set is :func:`required_env_keys`.
     """
 
     name: str
@@ -880,11 +898,17 @@ GH_RELEASE = EndpointAdapter(
     "gh-release", "release", _publish_gh_release, external=False
 )
 CRATES = EndpointAdapter(
-    "crates", "release", _publish_crates, secrets=(CRATES_TOKEN_ENV,)
+    "crates", "release", _publish_crates, secrets=secretreq.ENDPOINT_SECRETS["crates"]
 )
-PYPI = EndpointAdapter("pypi", "release", _publish_pypi, secrets=(PYPI_TOKEN_ENV,))
-NPM = EndpointAdapter("npm", "release", _publish_npm, secrets=(NPM_TOKEN_ENV,))
-BREW = EndpointAdapter("brew", "derived", _publish_brew, secrets=(TAP_TOKEN_ENV,))
+PYPI = EndpointAdapter(
+    "pypi", "release", _publish_pypi, secrets=secretreq.ENDPOINT_SECRETS["pypi"]
+)
+NPM = EndpointAdapter(
+    "npm", "release", _publish_npm, secrets=secretreq.ENDPOINT_SECRETS["npm"]
+)
+BREW = EndpointAdapter(
+    "brew", "derived", _publish_brew, secrets=secretreq.ENDPOINT_SECRETS["brew"]
+)
 
 #: The CLOSED registry, in a stable order (the config boundary's
 #: :data:`shipit.config.ENDPOINTS` names exactly this set — asserted in the

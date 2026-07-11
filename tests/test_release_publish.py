@@ -23,6 +23,7 @@ from shipit import config, execrun
 from shipit.release import ReleaseError
 from shipit.release import brew as brew_mod
 from shipit.release import publish as publish_mod
+from shipit.release import secretreq as secretreq_mod
 from shipit.verbs import release as release_verb
 
 MAC_ARM = "aarch64-apple-darwin"
@@ -256,17 +257,14 @@ def test_registry_mirrors_the_config_endpoint_set_and_stages():
     assert [a.name for a in publish_mod.ADAPTERS if not a.external] == ["gh-release"]
 
 
-def test_registry_declares_the_secret_names():
-    """Story 43: each adapter declares its required secret names — the
-    derivation registry's input. gh-release declares none (ambient gh auth)."""
+def test_registry_secret_names_mirror_the_derivation_authority():
+    """Story 43: each adapter's declared secret names ARE
+    `secretreq.ENDPOINT_SECRETS` (the one derivation authority, WS02) — publish
+    consumes that map rather than re-declaring names that could drift from what
+    gh-setup syncs and preflight validates. gh-release declares none (ambient
+    gh auth)."""
     declared = {a.name: a.secrets for a in publish_mod.ADAPTERS}
-    assert declared == {
-        "gh-release": (),
-        "crates": ("CARGO_REGISTRY_TOKEN",),
-        "pypi": ("PYPI_API_TOKEN",),
-        "npm": ("NODE_AUTH_TOKEN",),
-        "brew": ("HOMEBREW_TAP_TOKEN",),
-    }
+    assert declared == dict(secretreq_mod.ENDPOINT_SECRETS)
 
 
 def test_plan_orders_release_endpoints_before_derived():
@@ -365,17 +363,18 @@ def test_missing_secrets_reports_planned_unskipped_dispatches_only():
     missing = publish_mod.missing_secrets(final, {}, testpypi=False)
     assert missing == (
         ("crates", "CARGO_REGISTRY_TOKEN"),
-        ("npm", "NODE_AUTH_TOKEN"),
+        ("npm", "NPM_TOKEN"),
         ("brew", "HOMEBREW_TAP_TOKEN"),
     )
 
 
 def test_required_env_keys_testpypi_swaps_the_pypi_token():
-    assert publish_mod.required_env_keys(publish_mod.PYPI, testpypi=False) == (
-        "PYPI_API_TOKEN",
+    assert (
+        publish_mod.required_env_keys(publish_mod.PYPI, testpypi=False)
+        == (secretreq_mod.ENDPOINT_SECRETS["pypi"])
     )
     assert publish_mod.required_env_keys(publish_mod.PYPI, testpypi=True) == (
-        "TESTPYPI_API_TOKEN",
+        secretreq_mod.TESTPYPI_SECRET,
     )
 
 
@@ -626,7 +625,7 @@ def test_pypi_scopes_the_upload_to_the_artifact_distribution(tmp_path):
         tmp_path,
         artifact,
         entries=_entries({".": "python"}),
-        env={"PYPI_API_TOKEN": "pypi-tok"},
+        env={"PYPI_TOKEN": "pypi-tok"},
         run_cmd=run_cmd,
     )
 
@@ -655,7 +654,7 @@ def test_pypi_testpypi_flag_reroutes_and_uses_the_staging_token(tmp_path):
         tmp_path,
         artifact,
         entries=_entries({".": "python"}),
-        env={"TESTPYPI_API_TOKEN": "staging-tok"},
+        env={"TESTPYPI_TOKEN": "staging-tok"},
         run_cmd=run_cmd,
         testpypi=True,
     )
@@ -675,7 +674,7 @@ def test_pypi_without_a_wheel_refuses(tmp_path):
         tmp_path,
         artifact,
         entries=_entries({".": "python"}),
-        env={"PYPI_API_TOKEN": "tok"},
+        env={"PYPI_TOKEN": "tok"},
     )
     with pytest.raises(ReleaseError, match="no wheel"):
         publish_mod._publish_pypi(req)
@@ -684,7 +683,7 @@ def test_pypi_without_a_wheel_refuses(tmp_path):
 def test_pypi_without_a_python_leg_refuses(tmp_path):
     _staged_assets(tmp_path, ["pkg-1.0.0-py3-none-any.whl"])
     artifact = _artifacts({"pkg": {"endpoints": ["pypi"]}})[0]
-    req = _request(tmp_path, artifact, env={"PYPI_API_TOKEN": "tok"})
+    req = _request(tmp_path, artifact, env={"PYPI_TOKEN": "tok"})
     with pytest.raises(ReleaseError, match="needs a \\[toolchains\\] python leg"):
         publish_mod._publish_pypi(req)
 
@@ -699,7 +698,7 @@ def test_pypi_pyproject_without_a_name_refuses(tmp_path):
         tmp_path,
         artifact,
         entries=_entries({".": "python"}),
-        env={"PYPI_API_TOKEN": "tok"},
+        env={"PYPI_TOKEN": "tok"},
     )
     with pytest.raises(ReleaseError, match="no \\[project\\].name"):
         publish_mod._publish_pypi(req)
@@ -718,7 +717,7 @@ def test_npm_publishes_the_prebuilt_tree_without_rebuilding(tmp_path):
         tmp_path,
         artifact,
         entries=entries,
-        env={"NODE_AUTH_TOKEN": "npm-tok"},
+        env={"NPM_TOKEN": "npm-tok"},  # looked up under the secret name
         probe=probe,
     )
 
@@ -727,6 +726,8 @@ def test_npm_publishes_the_prebuilt_tree_without_rebuilding(tmp_path):
     argv, cwd, env = probe.calls[0]
     assert argv == ("npm", "publish", "--ignore-scripts")
     assert cwd == tmp_path / "pkg"  # the prebuilt tree, not a rebuild
+    # ...and fed to npm under the var npm reads (NODE_AUTH_TOKEN), not the
+    # secret name — the two-vocabulary indirection secretreq owns.
     assert env == {"NODE_AUTH_TOKEN": "npm-tok"}
     assert published.actions == ("published 1.2.3 from pkg",)
 
@@ -747,7 +748,7 @@ def test_npm_publish_over_existing_is_success(tmp_path):
         tmp_path,
         artifact,
         entries=entries,
-        env={"NODE_AUTH_TOKEN": "tok"},
+        env={"NPM_TOKEN": "tok"},
         probe=probe,
     )
     published = publish_mod._publish_npm(req)

@@ -6,11 +6,14 @@ decision, bumped by per-toolchain adapters. The version is always supplied by
 the caller (a bare semver or a bump word), never inferred from fragments or
 commit messages.
 
-`prepare` is the pipeline's only writer of repo history. `bundle` composes
-the built outputs into unsigned Artifacts, and `assert-bundle` guards a
-bundle's integrity (its main binary must be the expected app) before it is
+`preflight` plans the run — the OS×arch matrix, live stages, post-RC-guard
+endpoints, and required secrets, emitted as the machine-readable plan the
+composed workflow consumes — and hard-fails on missing secrets before anything
+is written. `prepare` is the pipeline's only writer of repo history. `bundle`
+composes the built outputs into unsigned Artifacts, and `assert-bundle` guards
+a bundle's integrity (its main binary must be the expected app) before it is
 signed or published. `publish` — the terminal stage — dispatches the staged
-Artifacts to their declared Distribution endpoints (gh-release, crates,
-pypi, npm, brew), refusing unless build+bundle succeeded and sign
-succeeded-or-was-skipped, with the -release-rc guard central in the verb.
-The remaining stages (preflight, sign) land as their work streams do.
+Artifacts to their declared Distribution endpoints (gh-release, crates, pypi,
+npm, brew), refusing unless build+bundle succeeded and sign
+succeeded-or-was-skipped, with the -release-rc guard central in the verb. The
+remaining stage (sign) lands as its work stream does.
