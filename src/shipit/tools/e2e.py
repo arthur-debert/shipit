@@ -220,7 +220,10 @@ class BinaryLocation:
 
 
 def binary_location(
-    artifact: config.Artifact, entries: Sequence[config.ToolchainEntry]
+    artifact: config.Artifact,
+    entries: Sequence[config.ToolchainEntry],
+    *,
+    consumer: str = "e2e",
 ) -> BinaryLocation:
     """The expected location of ``artifact``'s built binary — pure, derived
     from the declaration alone (the local-build source verifies the file
@@ -231,19 +234,23 @@ def binary_location(
     toolchain: rust → ``target/release/<package or artifact name>`` (cargo's
     release profile output under the leg's workspace), go →
     ``<basename(package)>`` (``go build ./cmd/padz`` writes ``padz`` in its
-    cwd), or the artifact name when the target declares no package. Raises
-    :class:`~shipit.config.ConfigError` when the artifact declares e2e but
-    no binary-producing target, when the target's toolchain has no map leg
-    to build on, or when a go target's package is ambiguous (``.``, ``/`` —
-    no basename to name the binary) — config inconsistencies, refused loudly.
+    cwd), or the artifact name when the target declares no package.
+    ``consumer`` names the binary-consuming stage in the refusal messages —
+    ``"e2e"`` (this module's tool) or ``"bundle"`` (the release stage's
+    archive composition, TOL02-WS03), which share exactly this derivation.
+    Raises :class:`~shipit.config.ConfigError` when the artifact needs a
+    binary but declares no binary-producing target, when the target's
+    toolchain has no map leg to build on, or when a go target's package is
+    ambiguous (``.``, ``/`` — no basename to name the binary) — config
+    inconsistencies, refused loudly.
     """
     target = next((t for t in artifact.build if t.toolchain in BINARY_TOOLCHAINS), None)
     if target is None:
         raise config.ConfigError(
-            f"[artifacts].{artifact.name} declares e2e but no binary-producing "
-            f"build target ({' / '.join(BINARY_TOOLCHAINS)}) — e2e injects a "
-            f"built binary as <NAME>_BIN, so the artifact must declare where "
-            f"one comes from"
+            f"[artifacts].{artifact.name} declares {consumer} but no "
+            f"binary-producing build target ({' / '.join(BINARY_TOOLCHAINS)}) "
+            f"— {consumer} consumes a built binary, so the artifact must "
+            f"declare where one comes from"
         )
     leg_path = next(
         (entry.path for entry in entries if entry.toolchain == target.toolchain),
@@ -251,7 +258,7 @@ def binary_location(
     )
     if leg_path is None:
         raise config.ConfigError(
-            f"[artifacts].{artifact.name} e2e needs a [toolchains] "
+            f"[artifacts].{artifact.name} {consumer} needs a [toolchains] "
             f"{target.toolchain} leg to build its binary, and none is mapped"
         )
     if target.toolchain == "rust":

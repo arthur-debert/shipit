@@ -440,8 +440,10 @@ def load_toolchains(cfg: dict) -> tuple[ToolchainEntry, ...]:
 #
 #     [artifacts.lex-cli]
 #     build         = [{ toolchain = "rust", package = "lex-cli" }]
-#     bundle        = { command = ["tauri", "bundle"] }          # optional
+#     bundle        = { composition = "archive" }                # optional
 #     bundle-config = "src-tauri/tauri.conf.json"                # optional
+#     main-binary   = "lex"                                      # optional
+#     product-name  = "Lex"                                      # optional
 #     endpoints     = ["gh-release", "crates"]                   # closed set
 #     e2e           = { harness = ["bats", "tests/e2e.bats"] }   # optional
 #     sign          = true                                       # default false
@@ -481,13 +483,26 @@ class BuildTarget:
 @dataclass(frozen=True)
 class BundleSpec:
     """An artifact's declared bundle step — the optional composition that
-    combines toolchain outputs into the artifact (``tauri bundle``,
-    ``electron-builder``). ``command`` is the argv, through the one exec seam
-    like every producing command (ADR-0028). Parsed now; RUN by the release
-    ``bundle`` stage later ("package" is retired — the stage word is bundle).
+    combines toolchain outputs into the unsigned distributable, run by
+    ``shipit release bundle`` (TOL02-WS03; "package" is retired — the stage
+    word is bundle).
+
+    ``composition`` names an entry of the CLOSED composition registry
+    (:mod:`shipit.release.bundle` — archive, deb, wheel, mac-app), the
+    ADR-0007 shape: the bundle step is declared per artifact, keyed off the
+    map, never a project-Kind switch. ``command`` is the declared bundler
+    argv the ``mac-app`` composition runs (``tauri build``,
+    ``electron-builder`` — the only consumer-specific part of the mac path,
+    workflows.lex §3.1), through the one exec seam like every producing
+    command (ADR-0028); ``source`` is the repo-relative directory that
+    bundler leaves the coupled ``.app``/``.dmg`` pair under. Both are
+    REQUIRED by ``mac-app`` and rejected for every other composition (their
+    commands are registry-assembled, never declared).
     """
 
-    command: tuple[str, ...]
+    composition: str
+    command: tuple[str, ...] | None = None
+    source: str | None = None
 
 
 @dataclass(frozen=True)
@@ -507,19 +522,25 @@ class Artifact:
 
     ``build`` targets are consumed by ``shipit build`` and ``e2e`` by
     ``shipit e2e`` (the harness declaration plus the ``<NAME>_BIN``
-    injection) now; ``bundle_config`` by ``shipit release prepare`` (the
+    injection); ``bundle_config`` by ``shipit release prepare`` (the
     artifact-declared bundle-config hook, ADR-0041/PRD story 25: the
     repo-root-relative JSON file — ``tauri.conf.json`` — whose top-level
     ``version`` is bumped in lockstep with the leg adapters, keeping "tauri"
-    out of the bump dispatch registry); ``bundle`` by the bundle stage,
-    ``endpoints`` by the release stages, and ``sign`` by the sign stage /
-    preflight secrets validation — those later.
+    out of the bump dispatch registry); ``bundle`` by ``shipit release
+    bundle`` (TOL02-WS03: the declared composition into the unsigned
+    distributable); ``main_binary`` / ``product_name`` by ``shipit release
+    assert-bundle``'s expected-name fallback chain (workflows.lex §3.2:
+    mainBinaryName → productName → package name — the scar-#2 integrity
+    guard's inputs); ``endpoints`` by the release stages, and ``sign`` by
+    the sign stage / preflight secrets validation — those later.
     """
 
     name: str
     build: tuple[BuildTarget, ...] = ()
     bundle: BundleSpec | None = None
     bundle_config: str | None = None
+    main_binary: str | None = None
+    product_name: str | None = None
     endpoints: tuple[str, ...] = ()
     e2e: E2eSpec | None = None
     sign: bool = False
@@ -607,15 +628,62 @@ def _parse_endpoints(where: str, value: object) -> tuple[str, ...]:
 
 
 def _parse_bundle(where: str, spec: object) -> BundleSpec:
+    from .release import bundle as bundle_registry  # lazy — config stays import-light
+
     if not isinstance(spec, dict):
         raise ConfigError(
             f"{where}.bundle: must be a table, e.g. "
-            f'{{ command = ["tauri", "bundle"] }}; got {spec!r}'
+            f'{{ composition = "archive" }}; got {spec!r}'
         )
-    _reject_unknown_keys(f"{where}.bundle", spec, ("command",))
-    if "command" not in spec:
-        raise ConfigError(f"{where}.bundle must declare its command argv")
-    return BundleSpec(command=_parse_argv(f"{where}.bundle.command", spec["command"]))
+    _reject_unknown_keys(f"{where}.bundle", spec, ("composition", "command", "source"))
+    composition = spec.get("composition")
+    if not isinstance(composition, str) or not composition:
+        raise ConfigError(
+            f"{where}.bundle must name its composition, e.g. "
+            f'{{ composition = "archive" }}'
+        )
+    entry = bundle_registry.composition(composition)
+    if entry is None:
+        known = ", ".join(bundle_registry.names())
+        raise ConfigError(
+            f"{where}.bundle: unknown composition `{composition}`; "
+            f"known compositions: {known}"
+        )
+    command = spec.get("command")
+    source = spec.get("source")
+    if entry.declared_command:
+        # mac-app: the bundler that produces the coupled .app/.dmg pair is the
+        # one consumer-specific part of the mac path (workflows.lex §3.1), so
+        # the declaration must carry it — and say where the pair lands.
+        if command is None:
+            raise ConfigError(
+                f"{where}.bundle: composition `{composition}` runs the "
+                f"artifact's own bundler — declare its argv, e.g. "
+                f'command = ["npm", "run", "tauri", "build"]'
+            )
+        if not isinstance(source, str) or not source:
+            raise ConfigError(
+                f"{where}.bundle: composition `{composition}` needs `source` — "
+                f"the repo-relative directory the bundler leaves the "
+                f'.app/.dmg pair under, e.g. "src-tauri/target/release/bundle"'
+            )
+        _reject_path_escape(f"{where}.bundle.source", source)
+        return BundleSpec(
+            composition=composition,
+            command=_parse_argv(f"{where}.bundle.command", command),
+            source=str(PurePosixPath(source)),
+        )
+    # Registry-assembled compositions (archive, deb, wheel): their commands
+    # are the registry's one assembly point (ADR-0028) — a declared argv or
+    # source dir would be a second one, refused loudly.
+    for key in ("command", "source"):
+        if key in spec:
+            raise ConfigError(
+                f"{where}.bundle: `{key}` applies only to compositions that "
+                f"run a declared bundler (mac-app); composition "
+                f"`{composition}` assembles its own commands"
+            )
+    return BundleSpec(composition=composition)
 
 
 def _parse_e2e(where: str, spec: object) -> E2eSpec:
@@ -636,7 +704,18 @@ def _parse_artifact(name: str, spec: object) -> Artifact:
     if not isinstance(spec, dict):
         raise ConfigError(f"{where} must be a table; got {spec!r}")
     _reject_unknown_keys(
-        where, spec, ("build", "bundle", "bundle-config", "endpoints", "e2e", "sign")
+        where,
+        spec,
+        (
+            "build",
+            "bundle",
+            "bundle-config",
+            "endpoints",
+            "e2e",
+            "main-binary",
+            "product-name",
+            "sign",
+        ),
     )
     bundle_config = spec.get("bundle-config")
     if bundle_config is not None:
@@ -660,11 +739,19 @@ def _parse_artifact(name: str, spec: object) -> Artifact:
     sign = spec.get("sign", False)
     if not isinstance(sign, bool):
         raise ConfigError(f"{where}.sign: must be a boolean; got {sign!r}")
+    names = {}
+    for key in ("main-binary", "product-name"):
+        value = spec.get(key)
+        if value is not None and (not isinstance(value, str) or not value):
+            raise ConfigError(f"{where}.{key}: must be a non-empty name; got {value!r}")
+        names[key] = value
     return Artifact(
         name=name,
         build=build,
         bundle=_parse_bundle(where, spec["bundle"]) if "bundle" in spec else None,
         bundle_config=bundle_config,
+        main_binary=names["main-binary"],
+        product_name=names["product-name"],
         endpoints=_parse_endpoints(f"{where}.endpoints", spec.get("endpoints", [])),
         e2e=_parse_e2e(where, spec["e2e"]) if "e2e" in spec else None,
         sign=sign,

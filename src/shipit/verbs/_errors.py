@@ -63,8 +63,10 @@ from ._context import NoAmbientRepoError
 #: unfair pair / missing checkout in `lab run`/`lab report`, and an
 #: untrustworthy ground-truth fixture — RVW03-WS07), and the release
 #: stages' refusals (a no-op bump, a manifest a projection cannot rewrite,
-#: a prepare outside a checkout / on a detached HEAD — TOL02-WS01). Extended
-#: deliberately, one entry per new domain refusal, as verbs adopt the shell.
+#: a prepare outside a checkout / on a detached HEAD — TOL02-WS01; a bundle
+#: composition over missing build outputs, an unresolvable assert-bundle
+#: expected name — TOL02-WS03). Extended deliberately, one entry per new
+#: domain refusal, as verbs adopt the shell.
 KNOWN_ERRORS: tuple[type[Exception], ...] = (
     execrun.ExecError,
     PrStateError,

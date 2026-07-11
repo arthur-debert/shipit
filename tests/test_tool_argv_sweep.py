@@ -59,7 +59,14 @@ def _parsed(path: pathlib.Path) -> ast.Module:
 #:   ``cargo`` and ``npm`` gain a third: the closed bump-adapter registry
 #:   (:mod:`shipit.release.bump`, TOL02-WS01) — the release-side projection
 #:   commands (``cargo set-version``/``cargo update``, ``npm version``),
-#:   ADR-0041's one assembly point for the manifest bumps.
+#:   ADR-0041's one assembly point for the manifest bumps. ``cargo`` and
+#:   ``uv`` gain the bundle-composition registry
+#:   (:mod:`shipit.release.bundle`, TOL02-WS03) — the bundle-side composition
+#:   commands (``cargo deb``, ``uv build --out-dir``).
+#: - ``tar`` / ``zip`` — the archiver invocations of the bundle compositions
+#:   (TOL02-WS03): assembled ONLY in the composition registry
+#:   (:mod:`shipit.release.bundle`) — the tarball/zip contract and the mac
+#:   reseal payload.
 #: - ``bin/check-e2e`` — the e2e harness registry's bats default
 #:   (TOL01-WS03): the script head is assembled ONLY in the closed harness
 #:   registry (:mod:`shipit.tools.e2e`); a declared ``e2e.harness`` argv is
@@ -70,11 +77,13 @@ _ADAPTER_HOMES: dict[str, tuple[str, ...]] = {
     "pixi": ("pixienv/read.py", "pixienv/run.py"),
     "ps": ("session/liveness.py",),
     "curl": ("provision/lexd.py",),
-    "cargo": ("tools/registry.py", "release/bump.py"),
+    "cargo": ("tools/registry.py", "release/bump.py", "release/bundle.py"),
     "go": ("tools/registry.py",),
     "pytest": ("tools/registry.py",),
     "npm": ("tools/registry.py", "tree/create.py", "release/bump.py"),
-    "uv": ("tools/registry.py",),
+    "uv": ("tools/registry.py", "release/bundle.py"),
+    "tar": ("release/bundle.py",),
+    "zip": ("release/bundle.py",),
     "bin/check-e2e": ("tools/e2e.py",),
     # The act harness (TOL01-WS04): `shipit wf test` is the one place that
     # drives act, and its docker probes/builds live beside it.

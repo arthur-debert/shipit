@@ -10,10 +10,17 @@ work streams land:
 - :mod:`.bump` — the per-toolchain bump-adapter registry and the
   artifact-declared bundle-config hook (WS01): how the tag decision projects
   into manifests. Command literals + pure text rewrites; no I/O.
+- :mod:`.bundle` — the closed bundle-composition registry (WS03): how a
+  declared artifact composes build outputs into its unsigned distributable
+  (archive, deb, wheel, mac-app). Command literals + compose functions,
+  effectful only through the injected exec seam.
+- :mod:`.integrity` — the assert-bundle pure core (WS03, workflows.lex
+  §3.2): the expected-main-binary fallback chain and the bundle-tree check
+  behind ``shipit release assert-bundle``.
 
 The effectful shells live in :mod:`shipit.verbs` (``shipit release prepare``
-is :mod:`shipit.verbs.release`), executing through the one Exec seam
-(ADR-0028) and the git adapter.
+/ ``bundle`` / ``assert-bundle`` are :mod:`shipit.verbs.release`), executing
+through the one Exec seam (ADR-0028) and the git adapter.
 """
 
 from __future__ import annotations
@@ -26,7 +33,11 @@ class ReleaseError(RuntimeError):
     Raised for runtime refusals of the release stages: a no-op bump (the
     manifests already carry the target version but its tag does not exist —
     re-running against a different release), a manifest a bump adapter cannot
-    rewrite, a prepare invoked outside a git checkout or on a detached HEAD.
-    USAGE errors (a malformed version argument) are NOT this class — they die
-    at the click boundary as exit 2 (ADR-0030).
+    rewrite, a prepare invoked outside a git checkout or on a detached HEAD,
+    a bundle composition over missing build outputs (no built binary, no
+    ``.deb``/wheel/sdist produced, no coupled ``.app``/``.dmg`` pair or
+    reseal payload), and an assert-bundle whose expected name cannot be
+    resolved (an unknown or unnamed artifact). USAGE errors (a malformed
+    version argument) are NOT this class — they die at the click boundary as
+    exit 2 (ADR-0030).
     """

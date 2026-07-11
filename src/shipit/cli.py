@@ -362,6 +362,8 @@ _HELP_RESOURCES = {
     ("changelog", "coalesce"): ("shipit.verbs", "changelog_coalesce_help.txt"),
     ("release",): ("shipit.verbs", "release_help.txt"),
     ("release", "prepare"): ("shipit.verbs", "release_prepare_help.txt"),
+    ("release", "bundle"): ("shipit.verbs", "release_bundle_help.txt"),
+    ("release", "assert-bundle"): ("shipit.verbs", "release_assert_bundle_help.txt"),
     ("ci",): ("shipit.verbs", "ci_help.txt"),
     ("ci", "plan"): ("shipit.verbs", "ci_plan_help.txt"),
     ("logs",): ("shipit.verbs", "logs_help.txt"),
