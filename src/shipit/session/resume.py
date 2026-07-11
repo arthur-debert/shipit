@@ -15,9 +15,9 @@ from pathlib import Path
 from typing import Any
 
 from .. import git, identity, logsetup
+from ..fleetsweep import DEFAULT_SOURCE_ROOT
 from ..identity import Repo
 from ..logread.records import parse_record
-from ..tree import layout
 
 CODEX_BACKEND = "codex"
 CLAUDE_BACKEND = "claude"
@@ -102,9 +102,11 @@ def source_checkout_for_repo(repo: Repo, *, cwd: str | None = None) -> str:
     """Return a deterministic local checkout that can seed a fresh Tree for ``repo``.
 
     The ambient checkout wins only when its origin resolves to ``repo``. Otherwise
-    the central Tree root is scanned for existing clones of the same repo and the
-    lexicographically first path is used as a reference donor. If none exists,
-    fail with an actionable error instead of falling back to an arbitrary cwd.
+    shipit's established local source root (``~/h``, shared with fleet sweep) is
+    searched to a bounded depth for a matching canonical checkout. Trees are not
+    source checkouts: choosing one makes resume depend on disposable agent/review
+    state, and recursively walking a busy Tree root is unbounded. If no stable
+    source exists, fail actionably instead of falling back to an arbitrary Tree.
     """
 
     ambient = git.repo_root(cwd=cwd)
@@ -115,22 +117,46 @@ def source_checkout_for_repo(repo: Repo, *, cwd: str | None = None) -> str:
         except Exception:  # noqa: BLE001 - a bad ambient checkout is not a match.
             pass
 
-    repo_root = layout.central_root() / repo.owner.login / repo.name
-    matches: list[str] = []
-    if repo_root.is_dir():
-        for path in sorted(repo_root.rglob(".git")):
-            checkout = str(path.parent)
-            try:
-                if identity.resolve_repo(checkout) == repo:
-                    matches.append(checkout)
-            except Exception:  # noqa: BLE001 - ignore non-checkout/odd dirs.
-                continue
+    matches = _matching_source_checkouts(repo, DEFAULT_SOURCE_ROOT.expanduser())
     if matches:
         return matches[0]
     raise ResumeError(
-        f"no local checkout found for {repo.slug}; run from that repo's checkout "
-        "or create one Tree/source clone before resuming"
+        f"no stable source checkout found for {repo.slug}; run from that repo's "
+        f"checkout or clone it under {DEFAULT_SOURCE_ROOT.expanduser()} before resuming"
     )
+
+
+def _matching_source_checkouts(repo: Repo, source_root: Path) -> list[str]:
+    """Matching clones at the canonical root, one or two path segments deep."""
+
+    preferred = (
+        source_root / repo.name,
+        source_root / repo.owner.login / repo.name,
+        source_root,
+    )
+    for checkout in preferred:
+        if _checkout_matches(checkout, repo):
+            return [str(checkout)]
+
+    git_dirs: list[Path] = []
+    if source_root.is_dir():
+        git_dirs.extend(source_root.glob("*/.git"))
+        git_dirs.extend(source_root.glob("*/*/.git"))
+    matches: list[str] = []
+    for path in sorted(git_dirs):
+        checkout = path.parent
+        if checkout not in preferred and _checkout_matches(checkout, repo):
+            matches.append(str(checkout))
+    return matches
+
+
+def _checkout_matches(checkout: Path, repo: Repo) -> bool:
+    if not (checkout / ".git").is_dir():
+        return False
+    try:
+        return identity.resolve_repo(str(checkout)) == repo
+    except Exception:  # noqa: BLE001 - ignore non-checkout/odd dirs.
+        return False
 
 
 def _matches(records: list[ResumeTarget], target: str) -> list[ResumeTarget]:
@@ -224,6 +250,12 @@ def _backend_for_session(session_id: str) -> str | None:
         if session_id.startswith(prefix):
             return backend
     return None
+
+
+def is_shipit_session_id(value: str) -> bool:
+    """Whether ``value`` uses a recognizable shipit coordinator-session prefix."""
+
+    return _backend_for_session(value) is not None
 
 
 def _native_id(record: dict[str, Any], backend: str) -> str | None:

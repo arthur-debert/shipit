@@ -204,13 +204,37 @@ def test_source_checkout_prefers_matching_ambient_checkout(monkeypatch, tmp_path
     assert resume.source_checkout_for_repo(REPO) == str(source)
 
 
-def test_source_checkout_scans_central_tree_root_when_outside_checkout(
+def test_source_checkout_uses_stable_source_root_when_outside_checkout(
     monkeypatch, tmp_path: Path
 ):
-    tree = tmp_path / "trees" / "arthur-debert" / "shipit" / "ephemeral" / "sess-1"
+    source_root = tmp_path / "sources"
+    source = source_root / "shipit"
+    (source / ".git").mkdir(parents=True)
+    (source_root / "archive" / "noisy" / ".git").mkdir(parents=True)
+    inspected = []
+
+    def resolve_repo(path):
+        inspected.append(path)
+        assert path == str(source)
+        return REPO
+
+    monkeypatch.setattr(resume.git, "repo_root", lambda cwd=None: None)
+    monkeypatch.setattr(resume, "DEFAULT_SOURCE_ROOT", source_root)
+    monkeypatch.setattr(resume.identity, "resolve_repo", resolve_repo)
+
+    assert resume.source_checkout_for_repo(REPO) == str(source)
+    assert inspected == [str(source)]
+
+
+def test_source_checkout_ignores_transient_trees_and_fails_fast(
+    monkeypatch, tmp_path: Path
+):
+    source_root = tmp_path / "sources"
+    source_root.mkdir()
+    tree = tmp_path / "trees" / "arthur-debert" / "shipit" / "branches" / "agent-a"
     (tree / ".git").mkdir(parents=True)
     monkeypatch.setattr(resume.git, "repo_root", lambda cwd=None: None)
-    monkeypatch.setattr(resume.layout, "central_root", lambda: tmp_path / "trees")
-    monkeypatch.setattr(resume.identity, "resolve_repo", lambda path: REPO)
+    monkeypatch.setattr(resume, "DEFAULT_SOURCE_ROOT", source_root)
 
-    assert resume.source_checkout_for_repo(REPO) == str(tree)
+    with pytest.raises(resume.ResumeError, match="no stable source checkout"):
+        resume.source_checkout_for_repo(REPO)

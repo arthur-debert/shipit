@@ -337,6 +337,26 @@ def test_resume_cli_last_rejects_an_explicit_target():
     assert "pass either a target or --last, not both" in result.output
 
 
+def test_resume_cli_last_preserves_an_initial_backend_prompt(monkeypatch):
+    captured = {}
+
+    def fake_run_resume(target, **kwargs):
+        captured["target"] = target
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(session, "run_resume", fake_run_resume)
+
+    result = CliRunner().invoke(
+        session.resume_cmd,
+        ["--last", "--repo", "arthur-debert/shipit", "fix the bug"],
+    )
+
+    assert result.exit_code == 0
+    assert captured["target"] is None
+    assert captured["backend_args"] == ["fix the bug"]
+
+
 def test_run_codex_spec_matches_the_coordinator_worktreecreate_spec(
     monkeypatch, tmp_path
 ):

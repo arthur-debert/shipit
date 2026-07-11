@@ -128,10 +128,11 @@ def resume_cmd(
     WorktreeCreate hook still provisions the Tree.
     """
 
-    # One variadic argument avoids Click assigning the first unknown backend
-    # flag to an optional ``target`` positional. Under ``--last`` every token
-    # is backend argv; otherwise the first token is the requested identity.
-    last_with_target = last and bool(args) and not args[0].startswith("-")
+    # One variadic argument avoids Click assigning an unknown backend flag to an
+    # optional ``target`` positional. Under ``--last`` a recognizable shipit id
+    # is retained as a target so mutual exclusivity fails closed; other tokens,
+    # including a backend's initial prompt, remain backend argv.
+    last_with_target = last and bool(args) and resume.is_shipit_session_id(args[0])
     target = args[0] if last_with_target or (not last and args) else None
     backend_args = args[1:] if target is not None else args
     raise SystemExit(
@@ -280,7 +281,11 @@ def run_codex(
             extra={
                 "argv": shlex.join(argv),
                 "backend": resume.CODEX_BACKEND,
-                "resumed_session": resumed_session_id,
+                **(
+                    {"resumed_session": resumed_session_id}
+                    if resumed_session_id
+                    else {}
+                ),
                 **({"codex_thread": resume_thread_id} if resume_thread_id else {}),
             },
         )
@@ -358,7 +363,11 @@ def run_claude_resume(
                 "argv": shlex.join(argv),
                 "backend": resume.CLAUDE_BACKEND,
                 "session_id": native_session_id,
-                "resumed_session": resumed_session_id,
+                **(
+                    {"resumed_session": resumed_session_id}
+                    if resumed_session_id
+                    else {}
+                ),
                 "repo": repo_identity.slug,
             },
         )
