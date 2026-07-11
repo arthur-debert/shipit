@@ -104,6 +104,12 @@ TAIL_CHARS = 2000
 #: place of stdout instead — the failure is still surfaced, the secret never is.
 SECRET_STDOUT_PLACEHOLDER = "<redacted: secret-bearing stdout>"
 
+# Prompt fragments this short are unsafe to replace globally in a diagnostic
+# stream: a task such as ``t`` would rewrite every matching letter in ordinary
+# stderr. If one appears, suppress the ambiguous stream instead.
+SHORT_PROMPT_MAX_CHARS = 8
+PROMPT_STREAM_PLACEHOLDER = "<redacted: prompt-bearing stream>"
+
 #: :attr:`ExecError.cause` tags — the one axis callers may branch on.
 CAUSE_EXIT = "exit"  # the child completed with a nonzero rc (check=True)
 CAUSE_TIMEOUT = "timeout"  # the timeout expired; the child was killed
@@ -251,11 +257,21 @@ def _display_argv(argv: list[str] | tuple[str, ...]) -> list[str]:
             "--profile",
             "--sandbox",
         }
+        boolean_flags = {
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--ephemeral",
+            "--json",
+            "--oss",
+            "--skip-git-repo-check",
+        }
+        has_developer_instructions = any(
+            arg.startswith("developer_instructions=") for arg in display
+        )
         if (
             len(display) > 2
             and display[-1] != "exec"
-            and not display[-1].startswith("-")
             and display[-2] not in value_flags
+            and (has_developer_instructions or display[-1] not in boolean_flags)
         ):
             display[-1] = _prompt_summary(display[-1])
     elif binary in {"agy", "antigravity"}:
@@ -281,6 +297,11 @@ def _summarize_prompt_text(
                 replacements.append(
                     (raw.removeprefix(prefix), display.removeprefix(prefix))
                 )
+    if any(
+        raw and len(raw) <= SHORT_PROMPT_MAX_CHARS and raw in text
+        for raw, _display in replacements
+    ):
+        return PROMPT_STREAM_PLACEHOLDER
     for raw, display in sorted(
         replacements, key=lambda pair: len(pair[0]), reverse=True
     ):

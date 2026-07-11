@@ -139,6 +139,20 @@ def test_codex_flag_only_argv_keeps_diagnostic_shape(argv):
     assert execrun._display_argv(argv) == argv
 
 
+def test_codex_prompt_starting_with_hyphen_is_summarized():
+    argv = [
+        "codex",
+        "exec",
+        "-c",
+        "developer_instructions=ROLE SLICE",
+        "- Please fix the session setup",
+    ]
+    joined = " ".join(execrun._display_argv(argv))
+    assert "ROLE SLICE" not in joined
+    assert "Please fix" not in joined
+    assert joined.count("<redacted: prompt sha256=") == 2
+
+
 def test_codex_failure_never_exposes_prompt_payloads(monkeypatch, caplog):
     role = "SECRET ROLE SLICE"
     task = "SECRET TASK PROMPT"
@@ -166,6 +180,28 @@ def test_codex_failure_never_exposes_prompt_payloads(monkeypatch, caplog):
         assert leak not in surfaced
         assert leak not in rendered
     assert surfaced.count("<redacted: prompt sha256=") >= 2
+
+
+def test_short_prompt_echo_suppresses_ambiguous_failure_stream(monkeypatch):
+    task = "fix"
+    argv = [
+        "codex",
+        "exec",
+        "-c",
+        "developer_instructions=ROLE SLICE",
+        task,
+    ]
+    diagnostic = "prefix: failed to fix process configuration"
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        _fake_completed(rc=1, stderr=diagnostic),
+    )
+    with pytest.raises(execrun.ExecError) as excinfo:
+        execrun.run(argv)
+    err = excinfo.value
+    assert err.stderr == execrun.PROMPT_STREAM_PLACEHOLDER
+    assert diagnostic not in str(err)
 
 
 # ---------------------------------------------------------------------------
