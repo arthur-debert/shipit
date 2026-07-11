@@ -9,5 +9,8 @@ commit messages.
 `prepare` is the pipeline's only writer of repo history. `bundle` composes
 the built outputs into unsigned Artifacts, and `assert-bundle` guards a
 bundle's integrity (its main binary must be the expected app) before it is
-signed or published. Later stages (preflight, sign, publish) land as their
-work streams do.
+signed or published. `publish` — the terminal stage — dispatches the staged
+Artifacts to their declared Distribution endpoints (gh-release, crates,
+pypi, npm, brew), refusing unless build+bundle succeeded and sign
+succeeded-or-was-skipped, with the -release-rc guard central in the verb.
+The remaining stages (preflight, sign) land as their work streams do.

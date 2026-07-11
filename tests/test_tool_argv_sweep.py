@@ -77,13 +77,29 @@ _ADAPTER_HOMES: dict[str, tuple[str, ...]] = {
     "pixi": ("pixienv/read.py", "pixienv/run.py"),
     "ps": ("session/liveness.py",),
     "curl": ("provision/lexd.py",),
-    "cargo": ("tools/registry.py", "release/bump.py", "release/bundle.py"),
+    "cargo": (
+        "tools/registry.py",
+        "release/bump.py",
+        "release/bundle.py",
+        "release/publish.py",
+    ),
     "go": ("tools/registry.py",),
     "pytest": ("tools/registry.py",),
-    "npm": ("tools/registry.py", "tree/create.py", "release/bump.py"),
+    "npm": (
+        "tools/registry.py",
+        "tree/create.py",
+        "release/bump.py",
+        "release/publish.py",
+    ),
     "uv": ("tools/registry.py", "release/bundle.py"),
     "tar": ("release/bundle.py",),
     "zip": ("release/bundle.py",),
+    # The publish-side endpoint adapters (TOL02-WS05): twine (pypi upload)
+    # and ruby (the brew formula's `ruby -c` syntax check) are assembled
+    # ONLY in the closed endpoint-adapter registry. `cargo publish` /
+    # `npm publish` extend those tools' home lists above.
+    "twine": ("release/publish.py",),
+    "ruby": ("release/publish.py",),
     "bin/check-e2e": ("tools/e2e.py",),
     # The act harness (TOL01-WS04): `shipit wf test` is the one place that
     # drives act, and its docker probes/builds live beside it.

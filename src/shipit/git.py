@@ -910,6 +910,34 @@ def fetch(*, cwd: str, remote: str = "origin") -> None:
     _git(["fetch", remote], cwd=cwd, timeout=_NETWORK_TIMEOUT)
 
 
+def clone(url: str, dest: str, *, depth: int | None = 1) -> None:
+    """``git clone [--depth N] <url> <dest>`` — a plain (non-dissociated) clone.
+
+    The publish stage's tap-push clone (TOL02-WS05): a small side repo cloned
+    fresh, mutated, pushed, and discarded — none of the reference-donor
+    machinery of :func:`clone_dissociated` applies. ``depth=1`` by default
+    (the clone exists to carry one commit forward); pass ``None`` for full
+    history. ``url`` may carry a token userinfo — the caller registers that
+    token with the central redactor first, so the recorded argv is masked.
+    """
+    args = ["clone"]
+    if depth is not None:
+        args += ["--depth", str(depth)]
+    _git([*args, url, dest], timeout=_CLONE_TIMEOUT)
+
+
+def configure_identity(name: str, email: str, *, cwd: str) -> None:
+    """Set ``user.name``/``user.email`` in ``cwd``'s LOCAL git config.
+
+    A fresh throwaway clone (the publish stage's tap push) commits on a
+    runner that may carry no global identity; stating one locally keeps the
+    commit from dying on ``Author identity unknown`` without touching any
+    global state.
+    """
+    _git(["config", "--local", "user.name", name], cwd=cwd)
+    _git(["config", "--local", "user.email", email], cwd=cwd)
+
+
 def checkout_new_branch(branch: str, base: str, *, cwd: str) -> None:
     """``git checkout -b <branch> <base>`` — cut ``branch`` from ``base`` and switch."""
     _git(["checkout", "-b", branch, base], cwd=cwd)
