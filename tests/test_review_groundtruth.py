@@ -114,6 +114,136 @@ class TestParseFixture:
         assert len(fixture.labels_for("core-440", confirmed_only=False)) == 2
 
 
+class TestDefectFamilies:
+    """The explicit equivalence-family identity (#751): one defect, several
+    valid anchors, declared in fixture data — never inferred similarity."""
+
+    def test_defect_family_parses_and_keys(self):
+        fixture = parse_fixture(
+            data(
+                labels=[
+                    label_data(defect="core-fam"),
+                    label_data(
+                        id="core-G2",
+                        file="phos-editor/src/graph_session.rs",
+                        defect="core-fam",
+                    ),
+                ]
+            )
+        )
+        assert [lb.defect_key for lb in fixture.labels] == ["core-fam", "core-fam"]
+
+    def test_label_without_defect_is_its_own_key(self):
+        label = parse_fixture(data()).labels[0]
+        assert label.defect is None and label.defect_key == "core-G1"
+
+    @pytest.mark.parametrize(
+        "second",
+        [
+            # a family may not straddle verdicts, severities, or pinned ranges.
+            label_data(id="core-G2", defect="fam", verdict="not-real"),
+            label_data(id="core-G2", defect="fam", severity="nit"),
+        ],
+    )
+    def test_incoherent_family_is_loud(self, second):
+        with pytest.raises(FixtureError, match="defect family"):
+            parse_fixture(data(labels=[label_data(defect="fam"), second]))
+
+    def test_family_across_pinned_ranges_is_loud(self):
+        pr2 = dict(PR, id="core-441", pr=441)
+        with pytest.raises(FixtureError, match="defect family"):
+            parse_fixture(
+                data(
+                    prs=[dict(PR), pr2],
+                    labels=[
+                        label_data(defect="fam"),
+                        label_data(id="core-G2", pr="core-441", defect="fam"),
+                    ],
+                )
+            )
+
+    def test_blank_defect_is_loud(self):
+        with pytest.raises(FixtureError):
+            parse_fixture(data(labels=[label_data(defect="  ")]))
+
+    def test_family_id_cannot_silently_capture_an_unfamilied_label(self):
+        with pytest.raises(FixtureError, match="collides with label id"):
+            parse_fixture(
+                data(
+                    labels=[
+                        label_data(),
+                        label_data(id="core-G2", defect="core-G1"),
+                    ]
+                )
+            )
+
+    def test_defect_round_trips_through_dump(self, tmp_path):
+        fixture = parse_fixture(data(labels=[label_data(defect="core-fam")]))
+        path = tmp_path / "fixture.toml"
+        save_fixture(fixture, path)
+        assert load_fixture(path).labels[0].defect == "core-fam"
+
+    def test_bank_label_joins_a_family(self):
+        fixture = parse_fixture(data(labels=[label_data(defect="core-fam")]))
+        anchor = Label(
+            id="core-G2",
+            pr_id="core-440",
+            file="phos-editor/src/graph_session.rs",
+            severity=Severity.MAJOR,
+            verdict="real",
+            claim="the same defect stated at its other anchor site",
+            provenance=Provenance("adjudication", "sheet-3"),
+            defect="  core-fam  ",
+        )
+        banked = bank_label(fixture, anchor)
+        assert banked.label_by_id("core-G2").defect == "core-fam"
+
+    def test_bank_label_rejects_a_blank_defect(self):
+        fixture = parse_fixture(data())
+        blank = Label(
+            id="core-G2",
+            pr_id="core-440",
+            file="phos-editor/src/graph_session.rs",
+            severity=Severity.MAJOR,
+            verdict="real",
+            claim="c",
+            provenance=Provenance("adjudication", "r"),
+            defect="  ",
+        )
+        with pytest.raises(FixtureError, match="defect must be a non-empty string"):
+            bank_label(fixture, blank)
+
+    def test_bank_label_rejects_a_family_id_collision(self):
+        fixture = parse_fixture(data())
+        colliding = Label(
+            id="core-G2",
+            pr_id="core-440",
+            file="phos-editor/src/graph_session.rs",
+            severity=Severity.MAJOR,
+            verdict="real",
+            claim="c",
+            provenance=Provenance("adjudication", "r"),
+            defect="core-G1",
+        )
+        with pytest.raises(FixtureError, match="collides with label id"):
+            bank_label(fixture, colliding)
+
+    def test_bank_label_rejects_an_incoherent_family_member(self):
+        fixture = parse_fixture(data(labels=[label_data(defect="core-fam")]))
+        wrong_tier = Label(
+            id="core-G2",
+            pr_id="core-440",
+            file="phos-editor/src/graph_session.rs",
+            severity=Severity.NIT,  # the family is major
+            verdict="real",
+            claim="c",
+            provenance=Provenance("adjudication", "r"),
+            defect="core-fam",
+        )
+        with pytest.raises(FixtureError, match="defect family"):
+            bank_label(fixture, wrong_tier)
+
+
 class TestBanking:
     def test_bank_label_appends_confirmed_and_bumps_version(self):
         fixture = parse_fixture(data())
@@ -274,7 +404,7 @@ class TestShippedFixture:
     """
 
     def test_loads_and_pins_current_version(self, shipped):
-        assert shipped.version == 38
+        assert shipped.version == 39
 
     def test_8_to_12_pinned_ranges(self, shipped):
         assert 8 <= len(shipped.prs) <= 12
@@ -293,6 +423,21 @@ class TestShippedFixture:
     def test_spans_language_and_repo(self, shipped):
         assert len({p.repo for p in shipped.prs}) >= 4
         assert len({p.language for p in shipped.prs if p.language}) >= 3
+
+    def test_673_residual_families_are_declared(self, shipped):
+        # The v35–v37 adjudication evidence on #673: each documented cross-file
+        # residual's promoted labels share one explicit defect family (#751) —
+        # graph-session, distance, native-spec, and GPU-residency.
+        families = {}
+        for label in shipped.labels:
+            if label.defect is not None:
+                families.setdefault(label.defect, set()).add(label.id)
+        assert families == {
+            "core-gpu-region-coverage": {"core-G11", "core-G26"},
+            "lex-below-title-annotation": {"lex-G5", "lex-G23"},
+            "app-probe-bypasses-viewport-render": {"app-G6", "app-G14"},
+            "core-stale-residency-doc": {"core-G14", "core-G19", "core-G25"},
+        }
 
     def test_is_in_canonical_form(self, shipped):
         path = Path(__file__).resolve().parents[1] / "lab" / "fixture.toml"

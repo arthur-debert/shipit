@@ -12,7 +12,7 @@ axis = "sweep mode: informed vs blind"
 description = "Informed-sweep treatment of fanout-sevtiers: identical severity-tier fan-out, sweep 2 primed with sweep 1's posted findings."
 
 [fixture]
-version = 38
+version = 39
 prs = ["core-440", "app-391", "lex-820"]
 
 [pipeline]

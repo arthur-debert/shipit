@@ -199,6 +199,210 @@ class TestRecall:
         assert by_name["sha256:bbb [arm-a]"].recalled_label_ids == ()
 
 
+def label(
+    id, file, claim, *, lines=(1, 50), severity="major", verdict="real", defect=None
+):
+    raw = {
+        "id": id,
+        "pr": "core-440",
+        "file": file,
+        "lines": list(lines),
+        "severity": severity,
+        "verdict": verdict,
+        "confirmed": True,
+        "claim": claim,
+        "provenance": {"kind": "adjudication", "ref": "sheet-3"},
+    }
+    if defect is not None:
+        raw["defect"] = defect
+    return raw
+
+
+class TestDefectFamilies:
+    """One defect, several valid anchors (#751): labels sharing an explicit
+    ``defect`` family count once for recall — modeled on the #673 v35–v37
+    residuals (graph-session, distance, native-spec, GPU-residency, same-file
+    matcher misses)."""
+
+    # The graph-session/distance/native-spec shape: one defect anchored in one
+    # file, legitimately emitted at a second file's site — aliases cannot
+    # bridge files, the family can.
+    CROSS_FILE = [
+        label(
+            "core-G11",
+            "phos-editor/src/dag/eval.rs",
+            "the region streaming path receives env.gpu but no test exercises "
+            "it with a live device leaving the region GPU path uncovered",
+            defect="core-gpu-region-coverage",
+        ),
+        label(
+            "core-G26",
+            "phos-editor/src/graph_session.rs",
+            "session region entry points thread the live GPU into eval_region "
+            "but no session-level test drives render_region through a "
+            "GPU-eligible node",
+            defect="core-gpu-region-coverage",
+        ),
+    ]
+
+    def test_second_anchor_emission_recalls_the_family(self):
+        emitted = finding(
+            "phos-editor/src/graph_session.rs",
+            10,
+            "no session-level test drives render_region through a GPU-eligible "
+            "node although entry points thread the live GPU into eval_region",
+        )
+        report = score_records(fixture(labels=self.CROSS_FILE), [record([emitted])])
+        major = tier(report, 0, Severity.MAJOR)
+        assert (major.recalled, major.positives) == (1, 1)
+
+    def test_hitting_both_anchors_still_counts_one_defect(self):
+        both = [
+            finding("phos-editor/src/dag/eval.rs", 10, self.CROSS_FILE[0]["claim"]),
+            finding(
+                "phos-editor/src/graph_session.rs", 10, self.CROSS_FILE[1]["claim"]
+            ),
+        ]
+        report = score_records(fixture(labels=self.CROSS_FILE), [record(both)])
+        major = tier(report, 0, Severity.MAJOR)
+        # equivalent labels AND equivalent emissions count once...
+        assert (major.recalled, major.positives) == (1, 1)
+        # ...while the anchor-level view still shows which sites matched.
+        assert report.variants[0].recalled_label_ids == ("core-G11", "core-G26")
+
+    def test_missing_the_whole_family_counts_one_miss(self):
+        report = score_records(fixture(labels=self.CROSS_FILE), [record([])])
+        major = tier(report, 0, Severity.MAJOR)
+        assert (major.recalled, major.positives) == (0, 1)
+
+    def test_three_anchor_family_counts_once(self):
+        # The GPU-residency shape: one stale-contract defect surfacing in the
+        # transfer, view-transform, and gpu module docs at once.
+        residency = [
+            label(
+                f"core-R{i}",
+                file,
+                f"the {name} module doc still promises GPU residency with no "
+                "readback but the evaluator reads back after every fill",
+                severity="nit",
+                defect="core-stale-residency-doc",
+            )
+            for i, (file, name) in enumerate(
+                [
+                    ("phos-editor/src/dag/transfer.rs", "transfer"),
+                    ("phos-editor/src/dag/nodes/view_transform.rs", "view transform"),
+                    ("phos-editor/src/gpu.rs", "gpu"),
+                ]
+            )
+        ]
+        hits = [
+            finding(
+                "phos-editor/src/gpu.rs", 20, residency[2]["claim"], severity="nit"
+            ),
+            finding(
+                "phos-editor/src/dag/transfer.rs",
+                6,
+                residency[0]["claim"],
+                severity="nit",
+            ),
+        ]
+        report = score_records(fixture(labels=residency), [record(hits)])
+        nit = tier(report, 0, Severity.NIT)
+        assert (nit.recalled, nit.positives) == (1, 1)
+
+    def test_same_file_sibling_covers_a_matcher_miss(self):
+        # The core-G24 shape: an emission in the RIGHT file that keeps failing
+        # the banked label's lexicon is banked as a same-file sibling in the
+        # family — recalled once, never double-counted.
+        siblings = [
+            label(
+                "core-G24",
+                "phos-bench/src/scenarios.rs",
+                "a comment claims the GPU-vs-CPU comparison supplies a live "
+                "context through this Engine gpu field",
+                defect="core-engine-comment-lie",
+            ),
+            label(
+                "core-G24b",
+                "phos-bench/src/scenarios.rs",
+                "gpu_compare defines its own private Engine so the described "
+                "wiring does not exist and this one is only built with gpu None",
+                defect="core-engine-comment-lie",
+            ),
+        ]
+        emitted = finding(
+            "phos-bench/src/scenarios.rs",
+            10,
+            "gpu_compare uses its own private Engine, the described wiring "
+            "does not exist — this Engine is only ever built with gpu None",
+        )
+        report = score_records(fixture(labels=siblings), [record([emitted])])
+        major = tier(report, 0, Severity.MAJOR)
+        assert (major.recalled, major.positives) == (1, 1)
+
+    def test_not_real_family_measures_the_false_positive(self):
+        # The core-X1 shape: a banked refutation whose phrasings keep missing
+        # the lexicon gains a sibling; matching EITHER is a measured FP and the
+        # family never enters the recall denominator.
+        refuted = [
+            label(
+                "core-X1",
+                "phos-editor/src/dag/eval.rs",
+                "cache keys omitting GPU mode cannot return wrong pixels "
+                "because every fill is read back to CPU before caching",
+                verdict="not-real",
+                defect="core-cache-mode-refuted",
+            ),
+            label(
+                "core-X1b",
+                "phos-editor/src/dag/eval.rs",
+                "memoized CPU render returned for a GPU request since "
+                "hash_node salts params but not backend",
+                verdict="not-real",
+                defect="core-cache-mode-refuted",
+            ),
+        ]
+        emitted = finding(
+            "phos-editor/src/dag/eval.rs",
+            10,
+            "hash_node salts params but not backend so a memoized CPU render "
+            "can be returned for a GPU request",
+        )
+        report = score_records(fixture(labels=refuted), [record([emitted])])
+        vs = report.variants[0]
+        assert [fp.label_id for fp in vs.false_positives] == ["core-X1b"]
+        assert tier(report, 0, Severity.MAJOR).positives == 0
+
+    def test_unfamilied_labels_stay_distinct_defects(self):
+        # Identity is DECLARED, never inferred: without a shared defect id,
+        # cross-file labels — even similarly worded repeated instances, each
+        # independently fixable — keep their own denominator slots.
+        instances = [
+            label(
+                "core-D1",
+                "phos-editor/src/dag/transfer.rs",
+                "module doc promises zero-readback GPU residency, stale after "
+                "the serial-readback interim",
+            ),
+            label(
+                "core-D2",
+                "phos-editor/src/gpu.rs",
+                "module doc promises zero-readback GPU residency, stale after "
+                "the serial-readback interim",
+            ),
+        ]
+        emitted = finding(
+            "phos-editor/src/gpu.rs",
+            10,
+            "module doc promises zero-readback GPU residency, stale after the "
+            "serial-readback interim",
+        )
+        report = score_records(fixture(labels=instances), [record([emitted])])
+        major = tier(report, 0, Severity.MAJOR)
+        assert (major.recalled, major.positives) == (1, 2)
+        assert report.variants[0].recalled_label_ids == ("core-D2",)
+
+
 class TestFalsePositivesAndAdjudication:
     def test_matching_a_not_real_label_is_a_measured_false_positive(self):
         fp = finding(

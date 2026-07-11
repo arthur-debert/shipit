@@ -9,7 +9,7 @@ axis = "pipeline shape: single-pass vs fanout"
 description = "Single-pass treatment of fanout-baseline: identical invocation and sweeps, one monolithic review pass instead of the concern-scoped fan-out."
 
 [fixture]
-version = 38
+version = 39
 prs = ["core-440", "app-391", "lex-820"]
 
 [pipeline]
