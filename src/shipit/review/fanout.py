@@ -901,11 +901,18 @@ def run_fanout_review(
         "comments": comments,
     }
 
+    operation = (
+        "calibration"
+        if calibrated
+        else "semantic near-duplicate dedup"
+        if semantic_dedup
+        else "mechanical dedup"
+    )
     events.emit(
         logger,
         "review.calibrated" if calibrated else "review.deduped",
         "%s completed for %s (agent=%s): %d candidate(s) -> %d posted",
-        "calibration" if calibrated else "mechanical dedup",
+        operation,
         where,
         agent,
         len(union),

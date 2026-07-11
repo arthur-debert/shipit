@@ -899,14 +899,17 @@ def test_semantic_dedup_exact_restatement_follows_its_twin_into_the_group():
     assert set(canonical.merged) == {1, 2}
 
 
-def test_semantic_dedup_rides_the_off_path_and_attests_itself(_seams):
+def test_semantic_dedup_rides_the_off_path_and_attests_itself(_seams, caplog):
     """The opt-in treatment end-to-end through the orchestrator: two passes'
     reworded same-location findings post ONCE, the attestation names the
     semantic union (a treated round never reads as the stock mechanical arm),
     and the merged-away duplicate rides the round record with its
     `duplicate_of` provenance edge."""
+    import logging
+
     from shipit.agent import backend as agent_backend
 
+    caplog.set_level(logging.INFO, logger="shipit.review")
     _seams["reviews"] = {
         "correctness": _pass_review(
             [_comment(_ZERO_FILL_A, severity="major", file="e.rs", line=1299)]
@@ -933,6 +936,13 @@ def test_semantic_dedup_rides_the_off_path_and_attests_itself(_seams):
     duplicate = next(j for j in outcome.findings if j.duplicate_of is not None)
     assert canonical.posted and not duplicate.posted
     assert duplicate.duplicate_of == 0  # lowest-union-id canonical of the pair
+    [completed] = [
+        record
+        for record in caplog.records
+        if getattr(record, "_event", None) == "review.deduped"
+    ]
+    assert "semantic near-duplicate dedup completed" in completed.getMessage()
+    assert "mechanical dedup" not in completed.getMessage()
 
 
 def test_semantic_dedup_with_a_calibrator_is_a_loud_caller_error():
