@@ -265,7 +265,14 @@ def notary_args(creds: NotaryCredentials, key_path: Path | None) -> list[str]:
     every submit/info/log call. ``key_path`` is where the decoded ``.p8``
     lives for the ASC style (unused for Apple-ID). Pure."""
     if creds.style == "asc":
-        assert key_path is not None
+        if key_path is None:
+            # An internal invariant (_notarize always decodes the .p8 first),
+            # enforced explicitly rather than via `assert` — which `python -O`
+            # strips, letting a None flow into a confusing notarytool call.
+            raise ReleaseError(
+                "ASC notarization requires the decoded .p8 key path but none "
+                "was provided (internal error)"
+            )
         return [
             "--key",
             str(key_path),
@@ -556,11 +563,13 @@ def _unsafe_tar_member(listing: str) -> str | None:
     the extraction dir — an ABSOLUTE path or one with a ``..`` segment (classic
     tar path traversal) — or ``None`` when every member is confined. Pure."""
     for raw in listing.splitlines():
-        member = raw.strip()
-        if not member:
+        # Validate the EXACT member `tar` would extract — no `.strip()`, which
+        # would rewrite a legitimately-named `..<space>` dir to `..` and block
+        # it. ``splitlines`` already drops the line endings.
+        if not raw:
             continue
-        if member.startswith("/") or ".." in member.split("/"):
-            return member
+        if raw.startswith("/") or ".." in raw.split("/"):
+            return raw
     return None
 
 

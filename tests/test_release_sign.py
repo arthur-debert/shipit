@@ -173,6 +173,15 @@ def test_notary_args_apple_id_trio():
     ]
 
 
+def test_notary_args_asc_without_key_path_is_a_domain_refusal():
+    # The ASC-style invariant is enforced explicitly (not via `assert`, which
+    # `python -O` strips): a missing key path is a ReleaseError, not a None
+    # flowing into the notarytool argv.
+    creds = sign_mod.resolve_notary(FULL_ENV)
+    with pytest.raises(ReleaseError, match="requires the decoded .p8 key path"):
+        sign_mod.notary_args(creds, None)
+
+
 def test_codesign_argv_hardened_runtime_timestamp_and_entitlements():
     plain = sign_mod.codesign_argv(IDENTITY, Path("/x/App.app"))
     assert plain == [
@@ -635,6 +644,9 @@ def test_sign_bundle_refuses_a_payload_with_two_apps(tmp_path):
         ("App.app/\n../../evil\n", "../../evil"),
         ("App.app/../escape\n", "App.app/../escape"),
         ("\n\n", None),  # blank lines are ignored
+        # `.. ` (dot-dot-space) is a legitimate literal name that does NOT
+        # traverse — the exact member is validated, never a `.strip()`ed copy.
+        (".. \nApp.app/a.. b\n", None),
     ],
 )
 def test_unsafe_tar_member_flags_absolute_and_dotdot(listing, unsafe):
