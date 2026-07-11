@@ -17,9 +17,10 @@ dedup (:func:`dedup_union`): findings sharing a ``(file, line, claim)`` merge
 into one canonical that posts with its OWN pass-assigned severity — no LLM judge
 in the default path. An OPT-IN treatment (#750, ``semantic_dedup`` — a Review
 Lab cell's ``dedup = "semantic"``, never the product default until a cell earns
-it) additionally collapses same-round NEAR-duplicates: same file, same line,
-claim-token overlap at the #673 seam's threshold (:func:`~shipit.review.match.same_claim`
-— still deterministic and LLM-free, ADR-0048). The WS05/F2 baseline (#638, #665) showed the LLM
+it) additionally collapses same-round NEAR-duplicates: same non-empty file and
+same concrete line (or both file-scoped), claim-token overlap at the #673
+seam's threshold (:func:`~shipit.review.match.same_claim` — still deterministic
+and LLM-free, ADR-0048). The WS05/F2 baseline (#638, #665) showed the LLM
 **Calibrator** (:mod:`shipit.review.calibrator`) net-negative on round-1 major
 recall (it refuted a true major the passes found, dragging recall below the
 single-pass baseline), so it is OPTIONAL and OFF by default. It is kept warm —
@@ -252,9 +253,10 @@ def run_fanout_review(
     judge back on (the WS05/F2 baseline found it net-negative on major recall,
     #638/#665), routing the union through :func:`run_calibrator` instead.
     ``semantic_dedup`` (#750) opts the mechanical dedup into the additional
-    NEAR-duplicate collapse (same file, same line, differently-worded same
-    claim — :func:`dedup_union` with ``semantic=True``; still deterministic and
-    LLM-free): a Review Lab treatment (a cell's ``dedup = "semantic"``), never
+    NEAR-duplicate collapse (same non-empty file and same concrete line, or
+    both file-scoped; differently-worded same claim — :func:`dedup_union` with
+    ``semantic=True``; still deterministic and LLM-free): a Review Lab
+    treatment (a cell's ``dedup = "semantic"``), never
     the product default until a cell earns it. It is the OFF path's knob, so
     combining it with a ``calibrator`` is a caller error (``ValueError``) — the
     judge does its own semantic dedup, and running both would post an arm no
@@ -1165,7 +1167,8 @@ def _near_duplicate(a: Mapping[str, Any], b: Mapping[str, Any]) -> bool:
 
     The #673 same-claim seam (:func:`~shipit.review.match.same_claim`: same
     file, lines within slack, claim-token overlap ≥ the ADR-0048 threshold)
-    applied at its most conservative: zero line slack
+    applied at its most conservative: the normalized lines must be equal
+    (same concrete line, or both file-scoped), zero line slack
     (:data:`SEMANTIC_DEDUP_LINE_SLACK`), and a candidate with NO file never
     matches — the seam would compare two file-less claims on text alone, and a
     location-free merge has no "same location" to be conservative about.
@@ -1175,11 +1178,15 @@ def _near_duplicate(a: Mapping[str, Any], b: Mapping[str, Any]) -> bool:
     file = str(a.get("file") or "")
     if not file:
         return False
+    a_line = _candidate_line(a)
+    b_line = _candidate_line(b)
+    if a_line != b_line:
+        return False
     return same_claim(
-        Claim(file=file, line=_candidate_line(a), text=str(a.get("text") or "")),
+        Claim(file=file, line=a_line, text=str(a.get("text") or "")),
         Claim(
             file=str(b.get("file") or ""),
-            line=_candidate_line(b),
+            line=b_line,
             text=str(b.get("text") or ""),
         ),
         line_slack=SEMANTIC_DEDUP_LINE_SLACK,

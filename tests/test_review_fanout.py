@@ -820,6 +820,18 @@ def test_semantic_dedup_never_merges_file_less_candidates():
     assert sum(1 for e in entries if e.duplicate_of is None) == 2
 
 
+def test_semantic_dedup_never_merges_file_scoped_with_line_scoped():
+    """The shared same-claim seam treats a missing line on either side as
+    file-scoped, but this same-round treatment is stricter: mixed scopes are
+    distinct locations even when their claim text overlaps."""
+    union = [
+        _cand(0, _ZERO_FILL_A, file="src/bin/eval.rs", line=None),
+        _cand(1, _ZERO_FILL_B, file="src/bin/eval.rs", line=1299),
+    ]
+    entries = fanout.dedup_union(union, semantic=True)
+    assert sum(1 for e in entries if e.duplicate_of is None) == 2
+
+
 def test_semantic_dedup_zero_line_slack_keeps_adjacent_lines_separate():
     """SEMANTIC_DEDUP_LINE_SLACK is ZERO: every pass reviewed the same head,
     so there is no drift to absorb — findings one line apart never collapse."""
