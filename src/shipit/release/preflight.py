@@ -20,9 +20,11 @@ The plan's five fields (story 27):
   vocabulary, driven by declarations instead of workflow inputs. Opting out
   of a platform drops its entry, never leaves a dead job.
 - ``stages`` — the live stage subset of ``preflight → prepare → bundle →
-  assert-bundle → sign → publish``: bundle (and its assert) only where a
-  bundle step exists, sign only when declared signing meets a darwin entry
-  (and ``--unsigned`` did not flip it).
+  assert-bundle → sign → publish``: bundle (and its assert) only when some
+  matrix entry actually bundles — a composition that APPLIES to a built
+  platform (a composition matching none of its artifact's platforms is a loud
+  refusal, not a silently dropped stage); sign only when declared signing
+  meets a darwin entry (and ``--unsigned`` did not flip it).
 - ``endpoints`` — the post-RC-guard endpoint set: a ``-release-rc`` version
   plans GH-release-only with every external endpoint dropped from the plan,
   not filtered later in YAML (story 33's guard consumed as plan shape;
@@ -277,7 +279,32 @@ def plan(
         )
     matrix = tuple(replace(e, sign=False) for e in signed) if unsigned else signed
 
-    bundle_live = any(artifact.bundle is not None for artifact in artifacts)
+    # The bundle stage is live iff some MATRIX ENTRY actually bundles — the
+    # same platform-aware per-entry flag the fan gates on, never the
+    # artifact-level declaration: a platform-specific composition that matches
+    # only some legs still bundles, but the stage and the matrix must agree on
+    # WHICH, or the plan advertises a stage no entry produces.
+    bundling = {entry.artifact for entry in matrix if entry.bundle}
+    # A declared composition matching NONE of its artifact's build platforms
+    # produces no bundle anywhere — a config mistake (deb on a darwin-only
+    # artifact) refused loudly here, the way `sign = true` demands a darwin
+    # lane, rather than silently dropping the stage.
+    for artifact in artifacts:
+        if (
+            artifact.bundle is not None
+            and artifact.build
+            and artifact.name not in bundling
+        ):
+            platforms = ", ".join(artifact.platforms) or DEFAULT_PLATFORM
+            raise ReleaseError(
+                f"[artifacts.{artifact.name}] declares bundle composition "
+                f"`{artifact.bundle.composition}`, but it applies to none of "
+                f"the artifact's platforms ({platforms}) — a platform-specific "
+                f"composition (deb → linux, mac-app → darwin) needs a matching "
+                f"platform, or the bundle is never produced"
+            )
+
+    bundle_live = bool(bundling)
     live = {"preflight", "prepare", "publish"}
     if bundle_live:
         live |= {"bundle", "assert-bundle"}

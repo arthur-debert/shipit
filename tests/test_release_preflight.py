@@ -201,6 +201,26 @@ endpoints = ["gh-release"]
     assert "assert-bundle" in plan.stages
 
 
+def test_composition_matching_no_declared_platform_is_a_loud_refusal():
+    # The other half of the platform-aware flag: a composition (deb → linux)
+    # declared on an artifact whose ONLY platform it cannot bundle (darwin)
+    # produces no bundle on any leg. Rather than silently drop the stage (or,
+    # pre-fix, trip the CI upload's `if-no-files-found: error`), preflight
+    # refuses loudly — the same contract as `sign = true` demanding a darwin
+    # lane. Keeps `bundle_live` and the matrix from ever disagreeing.
+    arts = _artifacts(
+        """
+[artifacts.tool]
+build = [{ toolchain = "rust", package = "tool-cli" }]
+platforms = ["darwin-arm64"]
+bundle = { composition = "deb" }
+endpoints = ["gh-release"]
+"""
+    )
+    with pytest.raises(ReleaseError, match="applies to none"):
+        preflight.plan(arts, _resolved("1.0.0"))
+
+
 def test_python_pkg_shape_defaults_to_the_linux_lane_and_skips_apple_names():
     plan = preflight.plan(PYTHON_PKG, _resolved("0.3.1"))
     assert [(e.platform, e.runner, e.sign) for e in plan.matrix] == [
