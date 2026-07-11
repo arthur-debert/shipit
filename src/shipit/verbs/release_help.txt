@@ -6,8 +6,11 @@ decision, bumped by per-toolchain adapters. The version is always supplied by
 the caller (a bare semver or a bump word), never inferred from fragments or
 commit messages.
 
-`prepare` is the pipeline's only writer of repo history. `bundle` composes
-the built outputs into unsigned Artifacts, and `assert-bundle` guards a
-bundle's integrity (its main binary must be the expected app) before it is
-signed or published. Later stages (preflight, sign, publish) land as their
-work streams do.
+`preflight` plans the run — the OS×arch matrix, live stages, post-RC-guard
+endpoints, and required secrets, emitted as the machine-readable plan the
+composed workflow consumes — and hard-fails on missing secrets before anything
+is written. `prepare` is the pipeline's only writer of repo history. `bundle`
+composes the built outputs into unsigned Artifacts, and `assert-bundle` guards
+a bundle's integrity (its main binary must be the expected app) before it is
+signed or published. Later stages (sign, publish) land as their work streams
+do.
