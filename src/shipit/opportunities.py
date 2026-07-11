@@ -104,6 +104,10 @@ def load_store_config(cfg: dict) -> OpportunityStoreConfig:
         raise config.ConfigError(
             f'[project.opportunities].repo must look like "owner/name"; got {repo!r}'
         ) from exc
+    if not re.fullmatch(r"[a-z0-9_.-]+/[a-z0-9_.-]+", parsed_repo.slug):
+        raise config.ConfigError(
+            f'[project.opportunities].repo must look like "owner/name"; got {repo!r}'
+        )
     return OpportunityStoreConfig(repo=parsed_repo.slug)
 
 

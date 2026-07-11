@@ -91,6 +91,18 @@ def test_load_store_config_reads_project_opportunities_repo():
             {"project": {"opportunities": {"repo": "not-a-slug"}}},
             r'must look like "owner/name"',
         ),
+        (
+            {"project": {"opportunities": {"repo": "bad owner/repo"}}},
+            r'must look like "owner/name"',
+        ),
+        (
+            {"project": {"opportunities": {"repo": "owner/re po"}}},
+            r'must look like "owner/name"',
+        ),
+        (
+            {"project": {"opportunities": {"repo": "owner/name?x"}}},
+            r'must look like "owner/name"',
+        ),
     ],
 )
 def test_load_store_config_reports_missing_or_malformed_config(cfg, message):
