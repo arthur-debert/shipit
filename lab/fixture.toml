@@ -4,7 +4,7 @@
 # hand comments do not survive a save.
 
 schema = 1
-version = 37
+version = 38
 
 [[prs]]
 id = "core-440"
@@ -125,6 +125,7 @@ severity = "major"
 verdict = "real"
 confirmed = true
 claim = "gpu_fallback_reason estimates readback staging cost as w*h*16, ignoring the 256-byte row padding read_texture allocates, so widths needing padding are mis-reported GPU-OK and then panic at readback"
+aliases = ["`gpu_fallback_reason` compares `max_buffer_size` against the unpadded RGBA byte count, but `GpuContext::read_texture` allocates a row-padded readback buffer using `COPY_BYTES_PER_ROW_ALIGNMENT`. For widths that are not already aligned, this can report a size as GPU-capable even though the actual readback buffer exceeds the device limit; the benchmark would then drive the path it meant to classify as fallback."]
 [labels.provenance]
 kind = "fix-commit"
 ref = "f211ab3"
@@ -137,7 +138,7 @@ severity = "minor"
 verdict = "real"
 confirmed = true
 claim = "the gpu: None docstring claims the field is None only on headless builds, but software adapters make it Some on headless too"
-aliases = ["With the hardware-require flag unset, software adapters on headless CI still yield a live session GPU, contradicting the field documentation that None means no GPU available on headless runners."]
+aliases = ["With the hardware-require flag unset, software adapters on headless CI still yield a live session GPU, contradicting the field documentation that None means no GPU available on headless runners.", "`GraphSession` now initializes a GPU for every native session, but it passes `require_hw = false` in normal runs, and `GpuContext::new` only rejects `DeviceType::Cpu` software adapters when `require_hw` is true. On headless Linux setups with llvmpipe/lavapipe, this can silently engage the GPU path through a CPU rasterizer for ordinary sessions and tests, making display/color nodes slower and no longer byte-identical to the CPU/wasm path."]
 [labels.provenance]
 kind = "fix-commit"
 ref = "f211ab3"
@@ -163,7 +164,7 @@ severity = "major"
 verdict = "real"
 confirmed = true
 claim = "the 0x0-frame short-circuit skips applyLayout, so a fully-offscreen pan leaves stale pixels on screen"
-aliases = ["empty-frame short-circuit skips applyLayout; an offscreen pan leaves a stale texture on the canvas"]
+aliases = ["empty-frame short-circuit skips applyLayout; an offscreen pan leaves a stale texture on the canvas", "The new off-screen path intentionally returns a 0x0 frame from the transports, but this presentation code now also skips applyLayout for that frame because the layout update is inside the positive-size guard."]
 [labels.provenance]
 kind = "fix-commit"
 ref = "b5b88aef"
@@ -177,7 +178,7 @@ severity = "minor"
 verdict = "real"
 confirmed = true
 claim = "the separation.rs module docs claim all Definition merges are intended, contradicting lex#819"
-aliases = ["This separation comment says Definition-to-Table merges are intended group semantics while the matrix test in the same range documents Definition-to-Table as the known lex#819 content-loss bug — cross-file drift in the separation table's source explanation."]
+aliases = ["This separation comment says Definition-to-Table merges are intended group semantics while the matrix test in the same range documents Definition-to-Table as the known lex#819 content-loss bug — cross-file drift in the separation table's source explanation.", "The inline row comment repeats the same drift by saying Definition→Table merges by design. Elsewhere in this diff, Table is documented as the one non-intended content-loss bug, so this row-level note should not group Table with the intended Verbatim/Annotation cases."]
 [labels.provenance]
 kind = "fix-commit"
 ref = "ca022ae2"
@@ -644,7 +645,7 @@ severity = "major"
 verdict = "real"
 confirmed = true
 claim = "the GPU activation test asserts only frame-vs-CPU-twin closeness and gpu.is_none(), so a silent CPU fallback in eval still passes — live GPU execution is unguarded"
-aliases = ["the test is named as the session GPU activation gate but its assertions would still pass if the evaluator stopped passing env gpu and the whole render silently used the CPU path, since CPU fallback produces the same dimensions, close pixels, and a non-uniform frame", "The live-GPU session test only checks a skip when gpu is None, a bounded GPU-vs-CPU-twin difference, and non-uniform output, so a silent CPU fallback yields a diff of zero and still passes — the activation test cannot distinguish live GPU from CPU fallback."]
+aliases = ["the test is named as the session GPU activation gate but its assertions would still pass if the evaluator stopped passing env gpu and the whole render silently used the CPU path, since CPU fallback produces the same dimensions, close pixels, and a non-uniform frame", "The live-GPU session test only checks a skip when gpu is None, a bounded GPU-vs-CPU-twin difference, and non-uniform output, so a silent CPU fallback yields a diff of zero and still passes — the activation test cannot distinguish live GPU from CPU fallback.", "This activation test can still pass if the production evaluator never forwards the session GPU into node evaluation. With `gpu: env.gpu` removed or accidentally changed back to `None`, `render_display()` would take the CPU path, produce the same dimensions and near-identical pixels as the CPU twin, and satisfy every assertion here.", "This activation gate does not prove that the AgX ODT GPU `fill` actually ran. If `run_colour_gpu_fill` fails and `ViewTransformNode::fill` falls back to CPU, `render_display()` still succeeds, `max_diff` becomes 0, and the non-uniform-frame assertion still passes."]
 [labels.provenance]
 kind = "adjudication"
 ref = "rvw03-first-cells-2026-07-10"
@@ -658,7 +659,7 @@ severity = "major"
 verdict = "real"
 confirmed = true
 claim = "GpuContext::readback maps device-loss/map failure to a zero-filled buffer that transfer/eval then cache as a successful render, so a device loss yields a silently memoized black frame"
-aliases = ["GpuContext::readback can still fail after a successful GPU fill — the padded staging buffer can exceed max_buffer_size making create_buffer a wgpu validation failure, and map failures become an all-zero CPU buffer that is then cached and presented.", "The post-fill readback is not preflighted against max_buffer_size: a shape that fits the texture-pair budget can exceed the padded staging-buffer limit, turning a successful GPU fill into a wgpu validation panic instead of the CPU fallback, on both the whole-frame and region sites."]
+aliases = ["GpuContext::readback can still fail after a successful GPU fill — the padded staging buffer can exceed max_buffer_size making create_buffer a wgpu validation failure, and map failures become an all-zero CPU buffer that is then cached and presented.", "The post-fill readback is not preflighted against max_buffer_size: a shape that fits the texture-pair budget can exceed the padded staging-buffer limit, turning a successful GPU fill into a wgpu validation panic instead of the CPU fallback, on both the whole-frame and region sites.", "This new production readback path is infallible, but the underlying GPU readback currently turns a map/device failure into an all-zero CPU buffer. Once `GraphSession` threads a live `GpuContext` into evaluation, a transient readback failure can therefore be cached and handed to display/export as a valid black tile instead of surfacing an eval error or recomputing the node on CPU."]
 [labels.provenance]
 kind = "adjudication"
 ref = "rvw03-first-cells-2026-07-10"
@@ -699,7 +700,7 @@ severity = "minor"
 verdict = "real"
 confirmed = true
 claim = "the region/viewport streaming path now receives env.gpu and reads back per fill but no test exercises it with a live device, leaving the region GPU path uncovered"
-aliases = ["The tiled/region evaluator passes the live GPU context and immediately reads back GPU-resident region outputs, but added coverage only goes through render_display/whole-frame eval_target — no GPU-eligible node is exercised via render_region, next_tile, or banded export.", "The region evaluator threads env.gpu and reads back per fill, but only whole-frame render_display has a live-device test — no GPU-eligible node ever executes via render_region, next_tile, or banded export."]
+aliases = ["The tiled/region evaluator passes the live GPU context and immediately reads back GPU-resident region outputs, but added coverage only goes through render_display/whole-frame eval_target — no GPU-eligible node is exercised via render_region, next_tile, or banded export.", "The region evaluator threads env.gpu and reads back per fill, but only whole-frame render_display has a live-device test — no GPU-eligible node ever executes via render_region, next_tile, or banded export.", "The diff adds a separate GPU plumbing/readback path for `evaluate_region_at`, but the added coverage only renders a whole frame through `render_display`. Whole-frame `evaluate` and region/tile `evaluate_region_at` build different `EvalContext`s and call `ensure_backend` at different sites, so a regression in the warm-loop/tile path could ship unnoticed."]
 [labels.provenance]
 kind = "adjudication"
 ref = "rvw03-first-cells-2026-07-10"
@@ -713,7 +714,7 @@ severity = "nit"
 verdict = "real"
 confirmed = true
 claim = "gpu_compare duplicates the private SESSION_VRAM_BUDGET_BYTES as a local constant instead of sharing it, so the bench silently diverges if the session budget changes"
-aliases = ["The benchmark hard-codes the session VRAM budget while claiming it matches graph_session::SESSION_VRAM_BUDGET_BYTES, a private constant hard-coded separately, so tuning the live session budget silently makes the go/no-go benchmark measure a different fallback envelope than production.", "BUDGET_BYTES re-declares the private session VRAM budget constant with no compiler-enforced link to graph_session, so tuning the live budget silently diverges the benchmark."]
+aliases = ["The benchmark hard-codes the session VRAM budget while claiming it matches graph_session::SESSION_VRAM_BUDGET_BYTES, a private constant hard-coded separately, so tuning the live session budget silently makes the go/no-go benchmark measure a different fallback envelope than production.", "BUDGET_BYTES re-declares the private session VRAM budget constant with no compiler-enforced link to graph_session, so tuning the live budget silently diverges the benchmark.", "This comment says the copied benchmark budget “matches `graph_session::SESSION_VRAM_BUDGET_BYTES`”, but the referenced constant is private to `phos-editor/src/graph_session.rs`, so readers cannot navigate to or reuse that source of truth from this binary. Since this benchmark is intentionally documentation-heavy, phrase this as an explicit keep-in-sync note with the full source location, or expose/share the constant if the cross-reference is meant to be authoritative."]
 [labels.provenance]
 kind = "adjudication"
 ref = "rvw03-first-cells-2026-07-10"
@@ -727,7 +728,7 @@ severity = "nit"
 verdict = "real"
 confirmed = true
 claim = "EvalContext::gpu and OracleCtx::gpu docs still say the field is None everywhere and no device exists, but the session now builds a live device and nodes have GPU fills"
-aliases = ["The public EvalContext::gpu documentation still says None is used everywhere and that no node has a GPU fill, misleading future node implementations about when GPU execution is live.", "Cross-module contract docs describe the pre-activation world: EvalContext::gpu and OracleCtx::gpu say no device is created yet, even though GraphSession constructs a live device and camera_lut plus the ODT have live GPU fills."]
+aliases = ["The public EvalContext::gpu documentation still says None is used everywhere and that no node has a GPU fill, misleading future node implementations about when GPU execution is live.", "Cross-module contract docs describe the pre-activation world: EvalContext::gpu and OracleCtx::gpu say no device is created yet, even though GraphSession constructs a live device and camera_lut plus the ODT have live GPU fills.", "`EvalContext::gpu` is now live through `GraphSession` and `EvalEnv`, but the central node API documentation still says no device exists and no node has a GPU fill."]
 [labels.provenance]
 kind = "adjudication"
 ref = "rvw03-first-cells-2026-07-10"
@@ -782,6 +783,7 @@ severity = "major"
 verdict = "real"
 confirmed = true
 claim = "coarse-level bounded frames carry nonzero originX/originY that the present path never consumes before reapplying the full-image layout, so a panned level>0 viewport renders misplaced/stretched"
+aliases = ["Enabling bounded visible-region requests at coarse levels makes the presented texture a cropped level-space frame, but the display shader still samples it with full-image UVs and no origin adjustment. For example, at level 1 with a level-0 visible window starting at x=1024, the transport returns a frame whose origin is x=512 and whose width is only the visible window; `renderer.loadPixels`/`presentRgba8` uploads just that crop, then `applyLayout(viewerState.layout())` keeps using full-image `uv_offset`/`uv_scale`."]
 [labels.provenance]
 kind = "adjudication"
 ref = "rvw03-first-cells-2026-07-10"
@@ -795,7 +797,7 @@ severity = "minor"
 verdict = "real"
 confirmed = true
 claim = "the 64x64 coarse fixture yields a single level-1 cell so level0Region delta mapping is never exercised and tests assert only streamed counts, letting an unmapped fetch regress green"
-aliases = ["the wasm coarse-level coverage only repeats a whole-source render until every cell is resident so the pure-cache-hit early return never exercises the partial-delta path where seed.plan.fetch is mapped back through level0Region", "the new wasm coverage still uses the 64x64 fixture so the coarse-level case is a single-cell whole-region repeat and the scheduler level-0 to level-space delta mapping for a pan with newly exposed cells is never exercised", "The wasm coarse-level test repeats the exact same region so the second render is an all-resident hit and the scheduler path that maps a non-resident delta back to level 0 never runs.", "The wasm e2e exercises the coarse level only through the all-resident repeat path driving seed.plan.fetch === null, while the narrowed-delta coarse pan via level0Region is covered only on the native lane.", "The wasm coarse test uses the 64x64 fixture and repeats the whole-source region, which at scale 0.5 is a single level-1 cell, so the changed PipelineScheduler partial coarse-delta request mapping is never exercised.", "The coarse cache-hit coverage discards the rendered frames and asserts only reused, fetched, and streamed counters — never digest or dimension equality against the cold coarse render — so wrong-pixel level-space seeding still passes."]
+aliases = ["the wasm coarse-level coverage only repeats a whole-source render until every cell is resident so the pure-cache-hit early return never exercises the partial-delta path where seed.plan.fetch is mapped back through level0Region", "the new wasm coverage still uses the 64x64 fixture so the coarse-level case is a single-cell whole-region repeat and the scheduler level-0 to level-space delta mapping for a pan with newly exposed cells is never exercised", "The wasm coarse-level test repeats the exact same region so the second render is an all-resident hit and the scheduler path that maps a non-resident delta back to level 0 never runs.", "The wasm e2e exercises the coarse level only through the all-resident repeat path driving seed.plan.fetch === null, while the narrowed-delta coarse pan via level0Region is covered only on the native lane.", "The wasm coarse test uses the 64x64 fixture and repeats the whole-source region, which at scale 0.5 is a single level-1 cell, so the changed PipelineScheduler partial coarse-delta request mapping is never exercised.", "The coarse cache-hit coverage discards the rendered frames and asserts only reused, fetched, and streamed counters — never digest or dimension equality against the cold coarse render — so wrong-pixel level-space seeding still passes.", "The new coarse-level worker coverage proves the second render made no core round-trip, but it never verifies that the all-from-cache coarse frame is actually the same pixels/dimensions as the cold coarse frame. The level-0 path already guards this with `firstDigest`/`secondDigest`; without the same assertion here, a regression in level-space seeding/composition could return a wrong coarse cached frame while still streaming zero tiles."]
 [labels.provenance]
 kind = "adjudication"
 ref = "rvw03-first-cells-2026-07-10"
@@ -809,7 +811,7 @@ severity = "minor"
 verdict = "real"
 confirmed = true
 claim = "the off-screen test drives a hand-built 0x0 region through the low-level probe, bypassing the changed visibleRegion and present-skip branches, so neither diff-changed path is under test"
-aliases = ["the off-screen E2E assertion is backed by a synthetic probe calling store.renderRegion with an explicit zero region, proving only the transport short-circuit and not the changed visibleRegion and requestViewportRender empty-frame wiring during an actual pan", "The off-screen check drives a hand-built zero-area region straight through store.renderRegion, so the real visibleRegion to requestViewportRender to present-skip wiring is never exercised by an actual pan."]
+aliases = ["the off-screen E2E assertion is backed by a synthetic probe calling store.renderRegion with an explicit zero region, proving only the transport short-circuit and not the changed visibleRegion and requestViewportRender empty-frame wiring during an actual pan", "The off-screen check drives a hand-built zero-area region straight through store.renderRegion, so the real visibleRegion to requestViewportRender to present-skip wiring is never exercised by an actual pan.", "The off-screen assertions only prove that a manually constructed zero-sized renderRegion probe fetches/streams no tiles. They do not cover the user-visible path changed in Editor.svelte: visibleRegion must produce the degenerate rect, requestViewportRender must skip the 0-dimension upload, and the layout must still move the existing texture off-screen rather than leaving a stale frame visible."]
 [labels.provenance]
 kind = "adjudication"
 ref = "rvw03-first-cells-2026-07-10"
@@ -836,7 +838,7 @@ severity = "major"
 verdict = "real"
 confirmed = true
 claim = "the new first-line-SubjectLine guard checks no indentation and any colon-terminated line classifies as SubjectLine, so fullwidth verbatim whose first body line ends in a colon mis-parses as paragraphs"
-aliases = ["The new guard rejects every verbatim/table candidate whose next nonblank token is another subject line without checking indentation; a valid first content line at the fullwidth column can itself end in a colon and be classified as SubjectLine so valid verbatim blocks fall back to paragraph parsing", "fullwidth verbatim content is intentionally arbitrary flat lines that can themselves end in a colon; match_verbatim_block returns None at the first subject so the parser treats the subject as a paragraph and re-anchors an empty verbatim, changing document shape and content ownership", "the early-return treats any subject-shaped line after the verbatim subject as proof the first line was a colon-terminated paragraph, breaking the builder contract of collecting arbitrary flat content lines until the closing marker", "A valid grouped verbatim whose first group is empty (subject line followed by another subject line before the shared closer) no longer matches as one verbatim block because the guard treats the next subject line after the first subject as proof of a colon-terminated paragraph."]
+aliases = ["The new guard rejects every verbatim/table candidate whose next nonblank token is another subject line without checking indentation; a valid first content line at the fullwidth column can itself end in a colon and be classified as SubjectLine so valid verbatim blocks fall back to paragraph parsing", "fullwidth verbatim content is intentionally arbitrary flat lines that can themselves end in a colon; match_verbatim_block returns None at the first subject so the parser treats the subject as a paragraph and re-anchors an empty verbatim, changing document shape and content ownership", "the early-return treats any subject-shaped line after the verbatim subject as proof the first line was a colon-terminated paragraph, breaking the builder contract of collecting arbitrary flat content lines until the closing marker", "A valid grouped verbatim whose first group is empty (subject line followed by another subject line before the shared closer) no longer matches as one verbatim block because the guard treats the next subject line after the first subject as proof of a colon-terminated paragraph.", "This guard rejects any verbatim candidate whose first nonblank content token is subject-shaped, but fullwidth verbatim content is intentionally collected as raw line tokens and can begin with a colon-terminated line. For input shaped like `Code:\\nA label-like content line:\\nplain text\\n:: verbatim ::`, the old matcher would build one VerbatimBlock with the colon line in `content_lines`; this now returns `None`, so the same bytes are parsed as ordinary Lex blocks/annotations instead of verbatim content."]
 [labels.provenance]
 kind = "adjudication"
 ref = "rvw03-first-cells-2026-07-10"
@@ -876,7 +878,7 @@ severity = "minor"
 verdict = "real"
 confirmed = true
 claim = "the lex#814 regressions drive only the private matcher with synthetic tokens and no end-to-end test asserts a colon-terminated paragraph survives lex-parse-format"
-aliases = ["the regression for lex#814 is only exercised by calling the private matcher with hand-built LineType tokens, proving one synthetic shape returns None but not protecting the user-visible parser and formatter scenario of a colon-terminated paragraph before a verbatim or table block", "The new verbatim_anchor_tests exercise only GrammarMatcher::match_verbatim_block on hand-built LineContainers, do not prove the full parser materializes the first subject as a paragraph preserving its text, and omit the table half of the lex#814 fix.", "The focused verbatim-anchor regression proves only the verbatim shape on synthetic tokens; the table half of the lex#814 fix has no regression and could re-absorb without failing."]
+aliases = ["the regression for lex#814 is only exercised by calling the private matcher with hand-built LineType tokens, proving one synthetic shape returns None but not protecting the user-visible parser and formatter scenario of a colon-terminated paragraph before a verbatim or table block", "The new verbatim_anchor_tests exercise only GrammarMatcher::match_verbatim_block on hand-built LineContainers, do not prove the full parser materializes the first subject as a paragraph preserving its text, and omit the table half of the lex#814 fix.", "The focused verbatim-anchor regression proves only the verbatim shape on synthetic tokens; the table half of the lex#814 fix has no regression and could re-absorb without failing.", "The new parser behavior is documented as protecting colon-terminated paragraphs before both verbatim and table subjects, and the implementation adds a table-specific `:: table ::` branch via `line_is_table_marker`/`table_span_has_single_pipe_group`. The added focused test only covers the verbatim path with synthetic `LineToken`s whose `source_tokens` are empty, so it cannot exercise the table-marker branch at all."]
 [labels.provenance]
 kind = "adjudication"
 ref = "rvw03-first-cells-2026-07-10"
@@ -993,12 +995,12 @@ ref = "v35-run triage 2026-07-10 (VERDICT-SHEET-review-lab)"
 id = "core-X3"
 pr = "core-440"
 file = "phos-editor/src/dag/eval.rs"
-lines = [725, 970]
+lines = [510, 970]
 severity = "minor"
 verdict = "not-real"
 confirmed = true
 claim = "Claim that the working memo and content-cache keys must include the GPU/CPU execution mode: debunked — every GPU fill is read back to CPU before caching and no caller mixes backends across one evaluator's caches (GraphSession fixes gpu at construction; the bench uses a fresh Evaluator per sample)."
-aliases = ["A reused Evaluator can render a GPU-eligible node with gpu Some, store the read-back result under the normal content key, and a later CPU-only EvalEnv hits the same memo or content entry and returns the GPU approximation instead of running the CPU path.", "The content hash folds node type, params, colour authority and inputs but not the execution backend, so a memo or content hit can serve pixels computed under a different env.gpu than the current call supplies."]
+aliases = ["A reused Evaluator can render a GPU-eligible node with gpu Some, store the read-back result under the normal content key, and a later CPU-only EvalEnv hits the same memo or content entry and returns the GPU approximation instead of running the CPU path.", "The content hash folds node type, params, colour authority and inputs but not the execution backend, so a memo or content hit can serve pixels computed under a different env.gpu than the current call supplies.", "Adding `EvalEnv::gpu` makes evaluation output depend on an environment field that is not part of the content hash. `hash_node` still folds only node type, params, color authority, source/class-map identities, and input hashes, while the new fill path forwards `env.gpu` to nodes whose GPU implementations are documented as ΔE-bounded rather than bit-exact."]
 [labels.provenance]
 kind = "adjudication"
 ref = "v35-run triage 2026-07-10 (VERDICT-SHEET-review-lab)"
@@ -1012,6 +1014,7 @@ severity = "major"
 verdict = "real"
 confirmed = true
 claim = "Cache residency is keyed only by level/col/row while streamed tiles are clipped to the requested region, so reusing a resident edge cell under a shifted non-cell-aligned viewport pushes a stale-rect tile — TileAssembler.push throws escapes-the-frame-box or newly visible pixels stay unfilled."
+aliases = ["This now attaches the resident-tile cache at coarse levels, but the cache still treats a cell key as fully resident even when the cached tile was clamped to a previous partial visible region. At level > 0, two panned visible regions can map into the same coarse grid cell with different level-space origins; `planRegion` will report a pure cache hit, `seedAssemblerFromCache` will begin the new smaller/shifted frame, then push the old partial tile whose `x/y` can be outside that frame, causing `TileAssembler.push` to throw and the viewport render to be dropped."]
 [labels.provenance]
 kind = "adjudication"
 ref = "v35-run triage 2026-07-10 (VERDICT-SHEET-review-lab)"
@@ -1079,7 +1082,7 @@ severity = "minor"
 verdict = "real"
 confirmed = true
 claim = "test_leading_annotation_above_session_attaches_to_root asserts only annotation counts and an empty session, never the authored labels, values, or order, so a regression that duplicates, drops, or strips annotation content still passes."
-aliases = ["The leading-annotation test validates the new next_is_session branch only at the attachment stage, asserting count and empty session, without checking the exact labels and inline values survive or that format-then-reparse converges.", "The leading-annotation regression covers the attachment stage in isolation and asserts counts only, so a serialization that reparses the annotations back onto the session or changes their content while preserving the count still passes."]
+aliases = ["The leading-annotation test validates the new next_is_session branch only at the attachment stage, asserting count and empty session, without checking the exact labels and inline values survive or that format-then-reparse converges.", "The leading-annotation regression covers the attachment stage in isolation and asserts counts only, so a serialization that reparses the annotations back onto the session or changes their content while preserving the count still passes.", "This regression test only counts that two annotations reached the root; it does not assert that the specific labels and values from the input survived the move. Since this change is about document metadata attachment and nearby known failures involve annotation content changing across round trips, the test should pin the externally visible metadata, not just the attachment count.", "This test checks the first attachment pass, but the bug being fixed is parse/format/reparse convergence: single-line annotations above the first session used to attach to the session, while the serialized block form reattached to the root. Without a minimal round-trip assertion, a future serializer or parser change could reintroduce the mismatch while this stage-only test still passes."]
 [labels.provenance]
 kind = "adjudication"
 ref = "v35-run triage 2026-07-10 (VERDICT-SHEET-review-lab)"
@@ -1106,6 +1109,7 @@ severity = "nit"
 verdict = "real"
 confirmed = true
 claim = "The known-failure comment cross-references the separation.rs Closer re-anchoring section, which this range renamed to multi-group verbatim absorption, so the pointer is dead and keeps the old hijack terminology alive in the failure ledger."
+aliases = ["This cross-reference no longer matches the renamed section in `separation.rs`; the diff replaced the old closer-reanchoring language with `Multi-group verbatim absorption`."]
 [labels.provenance]
 kind = "adjudication"
 ref = "v35-run triage 2026-07-10 (VERDICT-SHEET-review-lab)"
@@ -1159,6 +1163,7 @@ severity = "minor"
 verdict = "real"
 confirmed = true
 claim = "Every session constructor (new, with_actor, load, from_store) eagerly runs init_session_gpu — a synchronous adapter request and device creation — even for metadata-only sessions and tests that never render; the single-device-per-session invariant does not require eager construction."
+aliases = ["`GraphSession::new()` and `GraphSession::load()` now synchronously request a wgpu adapter/device for every session, even for CPU-only graphs and tests that immediately clear `session.gpu = None`.", "The diff makes every public `GraphSession::new`/`load` engage a GPU automatically, but the only CPU-only escape hatch shown here is mutating the private `gpu` field from same-module unit tests. The new tests acknowledge GPU and CPU colour paths are not bit-exact, yet integration tests and downstream callers have no explicit way to request deterministic CPU evaluation or to work around a bad driver while still constructing a normal session."]
 [labels.provenance]
 kind = "adjudication"
 ref = "sevtiers-run triage 2026-07-11 (VERDICT-SHEET-2)"
@@ -1172,6 +1177,7 @@ severity = "nit"
 verdict = "real"
 confirmed = true
 claim = "The benchmark's headline doc bullet says the ODT fill is isolated with a warm memo and targeted invalidation, while its own Cache-free isolation section says cold-frame differencing with a fresh Evaluator per sample — the file contradicts itself about its measurement method."
+aliases = ["The benchmark's overview says the ODT-fill metric is measured by a warm memo with only the ODT invalidated, but the same module and implementation now isolate it via cold-frame differencing (`cold(source → odt) - cold(source)`)."]
 [labels.provenance]
 kind = "adjudication"
 ref = "sevtiers-run triage 2026-07-11 (VERDICT-SHEET-2)"
@@ -1184,6 +1190,7 @@ severity = "nit"
 verdict = "real"
 confirmed = true
 claim = "The file mixes the hyphenated spelling fall-back with the code spelling fallback and CPU-fallback used elsewhere in the same file."
+aliases = ["The new docs use “fall-back” as a noun/adjective in a couple of places, while the surrounding code and output use “fallback” / “falls back.” This is just polish, but standardizing it avoids distracting terminology drift in the benchmark docs."]
 [labels.provenance]
 kind = "adjudication"
 ref = "sevtiers-run triage 2026-07-11 (VERDICT-SHEET-2)"
@@ -1192,11 +1199,12 @@ ref = "sevtiers-run triage 2026-07-11 (VERDICT-SHEET-2)"
 id = "core-G24"
 pr = "core-440"
 file = "phos-bench/src/scenarios.rs"
-lines = [158, 166]
+lines = [158, 170]
 severity = "nit"
 verdict = "real"
 confirmed = true
 claim = "A comment claims the GPU-vs-CPU comparison supplies a live context through this Engine's gpu field, but gpu_compare defines its own private Engine and this one is only ever built with gpu None — the described wiring does not exist."
+aliases = ["This new field comment says `gpu_compare` supplies a live context to this `Engine`, but `gpu_compare.rs` defines and uses its own `Engine` instead."]
 [labels.provenance]
 kind = "adjudication"
 ref = "sevtiers-run triage 2026-07-11 (VERDICT-SHEET-2)"
@@ -1218,11 +1226,12 @@ ref = "sevtiers-run triage 2026-07-11 (VERDICT-SHEET-2)"
 id = "core-G26"
 pr = "core-440"
 file = "phos-editor/src/graph_session.rs"
-lines = [2940, 2960]
+lines = [2940, 3570]
 severity = "minor"
 verdict = "real"
 confirmed = true
 claim = "The session region entry points thread the live GPU into eval_region with readback before caching and tiling, but no session-level test drives render_region, next_tile, or banded export through a GPU-eligible node — only whole-frame render_display is covered."
+aliases = ["The new activation test only exercises the whole-frame display path, but this change also threads `self.gpu.as_ref()` into `render_region`, `render_region_at`, and the banded export path, and `region_fill_node` now has its own GPU readback before tile caching/cropping. A regression in the tiled path would not be caught by `render_display()`."]
 [labels.provenance]
 kind = "adjudication"
 ref = "sevtiers-run triage 2026-07-11 (VERDICT-SHEET-2)"
@@ -1236,6 +1245,7 @@ severity = "nit"
 verdict = "real"
 confirmed = true
 claim = "Probe locals coarseA_l0 and coarseB_l0 use a snake_case _l0 suffix amid otherwise camelCase TypeScript locals; they are not wire-format fields."
+aliases = ["The newly added `coarseA_l0` / `coarseB_l0` identifiers mix snake-style suffixes into a file and surrounding block that otherwise use camelCase (`regionA`, `coarseLevelW`, `coarsePlanA`)."]
 [labels.provenance]
 kind = "adjudication"
 ref = "sevtiers-run triage 2026-07-11 (VERDICT-SHEET-2)"
@@ -1261,6 +1271,7 @@ severity = "nit"
 verdict = "real"
 confirmed = true
 claim = "The module contract and helper docs still describe the tile grid, TILE_SIZE, and seeding in level-0 image coordinates and call level 0 the only bounded-region case, stale now that the coarse extension keys and narrows in the selected level's space."
+aliases = ["The coarse-level cache change now documents and uses the grid in the selected level's coordinate space, but this existing exported constant comment still says the 256-cell size is in `level-0 px`."]
 [labels.provenance]
 kind = "adjudication"
 ref = "sevtiers-run triage 2026-07-11 (VERDICT-SHEET-2)"
@@ -1287,6 +1298,7 @@ severity = "major"
 verdict = "real"
 confirmed = true
 claim = "Definition immediately before a Table merges into a degenerate table that drops both the definition body and every table row — real content loss the matrix arm itself pins by asserting the subject plus empty header and body rows (the lex#819 defect, characterized but unfixed)."
+aliases = ["The range explicitly exposes that `Definition -> Table` still round-trips through a degenerate table that drops both the definition body and all table rows."]
 [labels.provenance]
 kind = "adjudication"
 ref = "sevtiers-run triage 2026-07-11 (VERDICT-SHEET-2)"
@@ -1295,11 +1307,12 @@ ref = "sevtiers-run triage 2026-07-11 (VERDICT-SHEET-2)"
 id = "lex-G16"
 pr = "lex-820"
 file = "crates/lex-babel/tests/markdown/faithfulness_fixtures.rs"
-lines = [24, 35]
+lines = [24, 65]
 severity = "minor"
 verdict = "real"
 confirmed = true
 claim = "The module-doc bullet says the lex#790 colon-paragraph absorption still blocks the CommonMark, comrak, and kitchensink fixtures, while the known-failure block in the same file says that absorption is fixed by lex#814 and retags those fixtures to other residuals — the file tells two contradictory stories."
+aliases = ["The anti-rot comment still names the old known-failure issue set even though this diff retags the active fixture list to lex#814 and lex#817."]
 [labels.provenance]
 kind = "adjudication"
 ref = "sevtiers-run triage 2026-07-11 (VERDICT-SHEET-2)"
@@ -1326,6 +1339,7 @@ severity = "nit"
 verdict = "real"
 confirmed = true
 claim = "A production comment bakes review-tool attribution (\"gemini, #816\") into the source; repo convention keeps the invariant and drops the process name."
+aliases = ["The parenthetical `gemini, #816` reads like an internal review note rather than durable source documentation. The rest of the comment already explains the reason for the gate, so this cross-reference adds noise and will age poorly."]
 [labels.provenance]
 kind = "adjudication"
 ref = "sevtiers-run triage 2026-07-11 (VERDICT-SHEET-2)"
@@ -1338,6 +1352,7 @@ severity = "nit"
 verdict = "real"
 confirmed = true
 claim = "Test docs bake review-tool attribution (\"the weakness codex flagged\") into assert_definition_hijack_shape's comments instead of stating the invariant."
+aliases = ["This doc comment bakes a review-tool attribution (`codex flagged`) into the test helper documentation. The helper's purpose is clear without naming the reviewer, and keeping the comment about the technical weakness makes it more maintainable."]
 [labels.provenance]
 kind = "adjudication"
 ref = "sevtiers-run triage 2026-07-11 (VERDICT-SHEET-2)"
@@ -1346,11 +1361,12 @@ ref = "sevtiers-run triage 2026-07-11 (VERDICT-SHEET-2)"
 id = "lex-G20"
 pr = "lex-820"
 file = "crates/lex-babel/tests/lex_separation/matrix.rs"
-lines = [250, 262]
+lines = [16, 282]
 severity = "nit"
 verdict = "real"
 confirmed = true
 claim = "is_known_hijack's name has drifted: Definition-to-Verbatim and Annotation merges are now documented as working as designed, leaving only Table a real hijack."
+aliases = ["The implementation now documents two of these cases as intended multi-group verbatim semantics and one as a known content-loss bug, so the `hijack` name has drifted from the concept it represents.", "The helper docstring says it asserts the exact intended merged shape for any `Definition -> next` hijack, but the Table arm immediately below is explicitly a known content-loss bug and not intended."]
 [labels.provenance]
 kind = "adjudication"
 ref = "sevtiers-run triage 2026-07-11 (VERDICT-SHEET-2)"
@@ -1359,11 +1375,12 @@ ref = "sevtiers-run triage 2026-07-11 (VERDICT-SHEET-2)"
 id = "lex-G21"
 pr = "lex-820"
 file = "crates/lex-babel/tests/lex_separation/matrix.rs"
-lines = [745, 755]
+lines = [745, 771]
 severity = "nit"
 verdict = "real"
 confirmed = true
 claim = "The proptest comment lists the skipped hijack adjacencies as Definition-to-Verbatim and Table, omitting Definition-to-Annotation which is_known_hijack also includes."
+aliases = ["This comment says all skipped adjacencies are intended multi-group merges, but `is_known_hijack` also includes `Definition -> Table`, which the surrounding docs call a known content-loss bug. The docstring above is precise; this inline comment should use the same neutral wording."]
 [labels.provenance]
 kind = "adjudication"
 ref = "sevtiers-run triage 2026-07-11 (VERDICT-SHEET-2)"
@@ -1372,11 +1389,12 @@ ref = "sevtiers-run triage 2026-07-11 (VERDICT-SHEET-2)"
 id = "lex-G22"
 pr = "lex-820"
 file = "crates/lex-babel/tests/lex_separation/matrix.rs"
-lines = [630, 640]
+lines = [590, 645]
 severity = "nit"
 verdict = "real"
 confirmed = true
 claim = "The faithful-blocks loop comment says every block type except Verbatim and Table, but the loop also excludes Annotation — the comment omits one exclusion."
+aliases = ["This comment drifted after the range changed the known hijack set: it still says `Verbatim/Table` are the excluded documented hijacks, but the helper now treats `Definition -> Table` as separated and `Definition -> Annotation` as the second known merge. The loop also omits `Annotation`, so the prose now misdescribes both the exclusion and the current grammar note."]
 [labels.provenance]
 kind = "adjudication"
 ref = "sevtiers-run triage 2026-07-11 (VERDICT-SHEET-2)"
@@ -1390,6 +1408,7 @@ severity = "minor"
 verdict = "real"
 confirmed = true
 claim = "The document-root Rule-1 shortcut (previous is none plus blank-after or next-is-session) also captures annotations authored below a document title and directly above the first session, forcing them onto the document root — the lex-G5 defect at its decide_attachment site."
+aliases = ["The new `next_is_session` route also fires for annotations authored after a promoted document title, because title extraction removes the title from `root.children`, leaving `previous.is_none()` and the first session as `next`. For example `Title\\n\\n:: note :: x\\nFirst Session\\n\\n    Body` used to follow the normal proximity rule and attach `note` to the session; with this change it becomes document metadata."]
 [labels.provenance]
 kind = "adjudication"
 ref = "sevtiers-run triage 2026-07-11 (VERDICT-SHEET-2)"
@@ -1398,11 +1417,12 @@ ref = "sevtiers-run triage 2026-07-11 (VERDICT-SHEET-2)"
 id = "core-X4"
 pr = "core-440"
 file = "phos-editor/src/graph_session.rs"
-lines = [2030, 2160]
+lines = [2030, 2925]
 severity = "major"
 verdict = "not-real"
 confirmed = true
 claim = "Claim that display_gpu_program breaks the web/native parity contract because eval_target now threads the session GPU into the upstream chain: debunked — its only production caller is the wasm path where the session GPU is always None, and the native callers are bridge tests whose graphs have no GPU-eligible upstream, so the promised CPU materialization is never violated by a real caller."
+aliases = ["`display_gpu_program` still promises that the pre-Display input pixels are produced by a CPU upstream chain for the web GPU handoff, but this call now routes through `eval_target`, whose env passes `self.gpu.as_ref()` into every eligible upstream node. A graph like `source -> camera.lut -> odt` can therefore bake the camera LUT with the native GPU path before handing pixels to the browser Display shader, contrary to the method's CPU-upstream contract.", "`display_gpu_program()` still documents and builds the browser handoff as Display-only GPU: it materializes the pre-Display input pixels on the CPU, then gives those pixels plus the Display WGSL/LUTs to the JS worker. This diff changes the shared `eval_target()` helper to always thread `self.gpu.as_ref()`, and `display_gpu_program()` calls that helper for `input_source`."]
 [labels.provenance]
 kind = "adjudication"
 ref = "sevtiers-run triage 2026-07-11 (VERDICT-SHEET-2)"
@@ -1411,11 +1431,12 @@ ref = "sevtiers-run triage 2026-07-11 (VERDICT-SHEET-2)"
 id = "core-X5"
 pr = "core-440"
 file = "phos-editor/src/graph_session.rs"
-lines = [778, 800]
+lines = [778, 840]
 severity = "nit"
 verdict = "not-real"
 confirmed = true
 claim = "Claims that the session-GPU field documentation has formatting defects — a hard wrap splitting words or over-aggressive emphasis: the text is single-line and the capitalized emphasis is the intentional single-device invariant."
+aliases = ["The newly added GPU field doc has an accidental hard wrap that leaves `Core` and `has` split across separate short lines. It reads like an editing artifact in generated rustdoc."]
 [labels.provenance]
 kind = "adjudication"
 ref = "sevtiers-run triage 2026-07-11 (VERDICT-SHEET-2)"
@@ -1432,3 +1453,133 @@ claim = "Claim that the off-screen renderRegion call's single-line layout is inc
 [labels.provenance]
 kind = "adjudication"
 ref = "sevtiers-run triage 2026-07-11 (VERDICT-SHEET-2)"
+
+[[labels]]
+id = "core-G27"
+pr = "core-440"
+file = "phos-editor/src/graph_session.rs"
+lines = [800, 812]
+severity = "major"
+verdict = "real"
+confirmed = true
+claim = "SESSION_VRAM_BUDGET_BYTES is declared unconditionally but its only use is inside the cfg(not(wasm32)) init_session_gpu, so the const is dead code on wasm32 and breaks the wasm clippy -D warnings CI lane for the dependent wasm crate."
+[labels.provenance]
+kind = "adjudication"
+ref = "666-run triage 2026-07-11 (VERDICT-SHEET-3)"
+
+[[labels]]
+id = "core-G28"
+pr = "core-440"
+file = "phos-bench/src/bin/gpu_compare.rs"
+lines = [4, 10]
+severity = "nit"
+verdict = "real"
+confirmed = true
+claim = "The module-doc headline phrase \"the number the human go/no-go on the pipelining stack reads\" is ungrammatical rustdoc that obscures what the benchmark reports."
+[labels.provenance]
+kind = "adjudication"
+ref = "666-run triage 2026-07-11 (VERDICT-SHEET-3)"
+
+[[labels]]
+id = "core-G29"
+pr = "core-440"
+file = "phos-bench/src/bin/gpu_compare.rs"
+lines = [285, 292]
+severity = "nit"
+verdict = "real"
+confirmed = true
+claim = "The local binding gpu_e is cryptic beside its sibling cpu; naming the engine gpu_engine (or gpu) would match the file's own conventions."
+[labels.provenance]
+kind = "adjudication"
+ref = "666-run triage 2026-07-11 (VERDICT-SHEET-3)"
+
+[[labels]]
+id = "app-G16"
+pr = "app-391"
+file = "tests/e2e/viewer-pan-cache.spec.ts"
+lines = [25, 35]
+severity = "minor"
+verdict = "real"
+confirmed = true
+claim = "The wasm coarse test passes cache and level directly into store.renderRegion, bypassing the live requestViewportRender gate — the removed level-0 guard and the level>0 cache attach are never exercised by the wasm lane (the wasm sibling of the native-spec gap)."
+[labels.provenance]
+kind = "adjudication"
+ref = "666-run triage 2026-07-11 (VERDICT-SHEET-3)"
+
+[[labels]]
+id = "app-G17"
+pr = "app-391"
+file = "src/lib/editor/Editor.svelte"
+lines = [2165, 2176]
+severity = "nit"
+verdict = "real"
+confirmed = true
+claim = "The lastCacheStats test-bridge doc still says cache-aware rendering is the zoomed-in first-render case, stale now that the PR attaches the cache at coarse zoomed-out levels too."
+[labels.provenance]
+kind = "adjudication"
+ref = "666-run triage 2026-07-11 (VERDICT-SHEET-3)"
+
+[[labels]]
+id = "app-G18"
+pr = "app-391"
+file = "src/lib/editor/pipeline-driver-tauri.ts"
+lines = [925, 932]
+severity = "nit"
+verdict = "real"
+confirmed = true
+claim = "The local lvlRegion abbreviates the imported levelRegion helper's name inconsistently with the level0Region/levelRegion naming used around it."
+[labels.provenance]
+kind = "adjudication"
+ref = "666-run triage 2026-07-11 (VERDICT-SHEET-3)"
+
+[[labels]]
+id = "app-G19"
+pr = "app-391"
+file = "src/lib/editor/tile-cache.ts"
+lines = [118, 132]
+severity = "nit"
+verdict = "real"
+confirmed = true
+claim = "The level0Region JSDoc reads \"scale a level-`level` rect\", embedding the literal parameter name in a hyphenated term where sibling docs say level-space."
+[labels.provenance]
+kind = "adjudication"
+ref = "666-run triage 2026-07-11 (VERDICT-SHEET-3)"
+
+[[labels]]
+id = "app-G20"
+pr = "app-391"
+file = "src/lib/editor/pipeline-driver-tauri.ts"
+lines = [924, 930]
+severity = "nit"
+verdict = "real"
+confirmed = true
+claim = "The comment \"back to level-0 for the request core re-maps through level_region\" parses as if \"request core\" were a noun phrase; the same wording is duplicated in the scheduler."
+[labels.provenance]
+kind = "adjudication"
+ref = "666-run triage 2026-07-11 (VERDICT-SHEET-3)"
+
+[[labels]]
+id = "core-X6"
+pr = "core-440"
+file = "phos-editor/src/dag/eval.rs"
+lines = [508, 522]
+severity = "nit"
+verdict = "not-real"
+confirmed = true
+claim = "Claim that the EvalEnv gpu documentation should state software rasterizers are refused: false premise — with the hardware-require flag unset the default deliberately accepts software adapters, and the docstring says so."
+[labels.provenance]
+kind = "adjudication"
+ref = "666-run triage 2026-07-11 (VERDICT-SHEET-3)"
+
+[[labels]]
+id = "core-X7"
+pr = "core-440"
+file = "phos-bench/src/bin/gpu_compare.rs"
+lines = [255, 266]
+severity = "minor"
+verdict = "not-real"
+confirmed = true
+claim = "Claim that exiting 0 on a no-GPU host makes the benchmark a misleading green gate: intended behavior — the run prints its skip loudly and PHOS_GPU_REQUIRE_HW is the strict opt-in for hardware-mandatory lanes."
+[labels.provenance]
+kind = "adjudication"
+ref = "666-run triage 2026-07-11 (VERDICT-SHEET-3)"
