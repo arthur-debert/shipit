@@ -264,14 +264,12 @@ def _display_argv(argv: list[str] | tuple[str, ...]) -> list[str]:
             "--oss",
             "--skip-git-repo-check",
         }
-        has_developer_instructions = any(
-            arg.startswith("developer_instructions=") for arg in display
-        )
         if (
             len(display) > 2
             and display[-1] != "exec"
             and display[-2] not in value_flags
-            and (has_developer_instructions or display[-1] not in boolean_flags)
+            and display[-1] not in boolean_flags
+            and not display[-1].startswith("developer_instructions=")
         ):
             display[-1] = _prompt_summary(display[-1])
     elif binary in {"agy", "antigravity"}:
@@ -292,11 +290,11 @@ def _summarize_prompt_text(
     for raw, display in zip(raw_argv, display_argv, strict=True):
         if raw != display:
             replacements.append((raw, display))
-        for prefix in ("developer_instructions=", "--print="):
-            if raw.startswith(prefix) and display.startswith(prefix):
-                replacements.append(
-                    (raw.removeprefix(prefix), display.removeprefix(prefix))
-                )
+            for prefix in ("developer_instructions=", "--print="):
+                if raw.startswith(prefix) and display.startswith(prefix):
+                    replacements.append(
+                        (raw.removeprefix(prefix), display.removeprefix(prefix))
+                    )
     if any(
         raw and len(raw) <= SHORT_PROMPT_MAX_CHARS and raw in text
         for raw, _display in replacements

@@ -208,6 +208,11 @@ class NextActs:
         """
         by_name = {r.name: r for r in required_adapters(self._roster)}
         selected = [by_name[name] for name in status.to_request if name in by_name]
+        # A local reviewer can fail synchronously before detach (most notably
+        # when the default pixi env lacks review auth). Try every no-edge local
+        # first so rerouting through the review env cannot happen after a remote
+        # GitHub request edge was already placed.
+        selected.sort(key=lambda adapter: adapter.has_requested_edge)
         if not selected:
             return f"no requestable reviewer to (re-)request — {status.next_action}"
         # force=True: selection is done above, so the service requests exactly

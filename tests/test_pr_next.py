@@ -171,6 +171,7 @@ def test_next_request_act_renders_and_dropped_edge_is_error(
     class FakeAdapter:
         def __init__(self, name):
             self.name = name
+            self.has_requested_edge = True
 
     monkeypatch.setattr(
         dispatch_mod, "required_adapters", lambda roster: [FakeAdapter("copilot")]

@@ -283,8 +283,9 @@ TARGET = PrId(repo=REPO, number=42)
 
 
 class FakeAdapter:
-    def __init__(self, name):
+    def __init__(self, name, *, has_requested_edge=True):
         self.name = name
+        self.has_requested_edge = has_requested_edge
 
     def matches(self, login):
         return self.name in login.lower()
@@ -406,6 +407,31 @@ def test_request_act_selects_never_requested_and_stale(monkeypatch):
     line = NextActs(TARGET).request_review(_pending(["copilot", "coderabbit"]))
     assert selected["names"] == ["copilot", "coderabbit"]
     assert line == "requested review(s): copilot, coderabbit"
+
+
+def test_request_act_tries_local_before_remote_to_make_reroute_atomic(monkeypatch):
+    adapters = [
+        FakeAdapter("copilot"),
+        FakeAdapter("codex", has_requested_edge=False),
+    ]
+    monkeypatch.setattr(dispatch_mod, "required_adapters", lambda roster: adapters)
+    seen = {}
+
+    def fail_local_auth(pr, selected, roster, *, force):
+        seen["order"] = [adapter.name for adapter in selected]
+        raise PrStateError("Posting a review as a GitHub App needs PyJWT")
+
+    monkeypatch.setattr(dispatch_mod, "request_reviewers", fail_local_auth)
+    monkeypatch.setattr(
+        dispatch_mod,
+        "rerun_pr_next_in_review_env",
+        lambda pr: "requested review(s) via review env",
+    )
+
+    line = NextActs(TARGET).request_review(_pending(["copilot", "codex"]))
+
+    assert seen["order"] == ["codex", "copilot"]
+    assert line == "requested review(s) via review env"
 
 
 def test_request_act_dropped_edge_raises_prstate_error(monkeypatch):

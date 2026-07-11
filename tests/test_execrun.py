@@ -139,6 +139,13 @@ def test_codex_flag_only_argv_keeps_diagnostic_shape(argv):
     assert execrun._display_argv(argv) == argv
 
 
+def test_codex_boolean_flag_after_developer_instructions_is_not_a_prompt():
+    argv = ["codex", "exec", "-c", "developer_instructions=ROLE", "--json"]
+    display = execrun._display_argv(argv)
+    assert display[-1] == "--json"
+    assert "ROLE" not in " ".join(display)
+
+
 def test_codex_prompt_starting_with_hyphen_is_summarized():
     argv = [
         "codex",
@@ -202,6 +209,18 @@ def test_short_prompt_echo_suppresses_ambiguous_failure_stream(monkeypatch):
     err = excinfo.value
     assert err.stderr == execrun.PROMPT_STREAM_PLACEHOLDER
     assert diagnostic not in str(err)
+
+
+def test_unrelated_print_equals_argument_does_not_suppress_failure_stream(monkeypatch):
+    diagnostic = "script failed on line 1"
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        _fake_completed(rc=1, stderr=diagnostic),
+    )
+    with pytest.raises(execrun.ExecError) as excinfo:
+        execrun.run(["python", "script.py", "--print=1"])
+    assert excinfo.value.stderr == diagnostic
 
 
 # ---------------------------------------------------------------------------
