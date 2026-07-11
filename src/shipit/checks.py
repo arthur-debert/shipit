@@ -303,8 +303,9 @@ def publishes_reusable_workflows(repo: str, *, toplevel: str | None) -> bool:
     (HTTP 404) means "not a publisher".
 
     Raises :class:`~shipit.execrun.ExecError` on any OTHER remote read
-    failure (auth, transport): the caller must report "could not inspect",
-    never mistake an unreadable repo for a verified non-publisher.
+    failure (auth, transport), and :class:`ValueError` on a malformed remote
+    directory payload: the caller must report "could not inspect", never
+    mistake an unreadable repo for a verified non-publisher.
     """
     if toplevel is not None:
         workflows_dir = os.path.join(toplevel, ".github", "workflows")
@@ -314,7 +315,7 @@ def publishes_reusable_workflows(repo: str, *, toplevel: str | None) -> bool:
         for path in paths:
             try:
                 doc = _load_yaml_file(path)
-            except (OSError, yaml.YAMLError):
+            except (OSError, UnicodeDecodeError, yaml.YAMLError):
                 continue
             if is_reusable_workflow(doc):
                 return True
@@ -325,12 +326,17 @@ def publishes_reusable_workflows(repo: str, *, toplevel: str | None) -> bool:
         if "HTTP 404" in exc.stderr:
             return False  # no workflows directory at all — not a publisher
         raise
-    for entry in listing if isinstance(listing, list) else []:
+    if not isinstance(listing, list):
+        raise ValueError(
+            f"malformed repos/{repo}/contents/.github/workflows payload: "
+            "expected a list"
+        )
+    for entry in listing:
         name = entry.get("name") if isinstance(entry, dict) else None
         if not isinstance(name, str) or not name.endswith((".yml", ".yaml")):
             continue
         obj = gh.rest(f"repos/{repo}/contents/.github/workflows/{name}")
-        if not isinstance(obj, dict) or "content" not in obj:
+        if not isinstance(obj, dict) or not isinstance(obj.get("content"), str):
             continue
         try:
             doc = _load_yaml_text(base64.b64decode(obj["content"]).decode("utf-8"))

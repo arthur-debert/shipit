@@ -165,8 +165,9 @@ logic is thin YAML) is stated in [./architecture.lex#3].
     decision and its evidence live in ADR-0053
     [../adr/0053-shipit-is-public-vn-distribution-needs-a-public-publisher.md].
     Same-owner-only publishing from a private repo additionally needs the
-    repo's Actions access level (`repos/{owner}/{repo}/actions/permissions/
-    access`) at `user` (user-owned) or `organization` (org-owned) — it ships
+    repo's Actions access level
+    (`repos/{owner}/{repo}/actions/permissions/access`) at `user` (user-owned)
+    or `organization` (org-owned) — it ships
     as `none`, which blocks even same-owner callers (TOL02-WS07 finding 5).
     gh-setup VERIFIES this and warns when a private `workflow_call` publisher
     sits at `none`, naming the fix; it never sets the level (#739).

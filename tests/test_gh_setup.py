@@ -987,6 +987,22 @@ def test_workflow_access_remote_missing_workflows_dir_is_not_applicable(monkeypa
     assert "not a reusable-workflow publisher" in outcome.reason
 
 
+@pytest.mark.parametrize("listing", [None, {"name": "wf-build.yml"}])
+def test_workflow_access_remote_malformed_listing_is_unknown(monkeypatch, listing):
+    """A malformed contents response is an inspection failure, never proof
+    that the target has no reusable workflows."""
+    _rest_fake(
+        monkeypatch,
+        {
+            "repos/o/r": {"private": True, "owner": {"type": "User"}},
+            "repos/o/r/contents/.github/workflows": listing,
+        },
+    )
+    outcome = ghsetup.verify_workflow_access("o/r", local_checkout=None)
+    assert outcome.status == "unknown"
+    assert "expected a list" in outcome.reason
+
+
 def test_setup_report_carries_the_workflow_access_outcome(fake_gh, monkeypatch):
     """setup() threads pass (d) into the report; the fake's default public
     repo is typed not-applicable — on the dry run too (the pass reads only)."""

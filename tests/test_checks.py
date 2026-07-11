@@ -1,5 +1,7 @@
 """Unit tests for required-check discovery — the pure helpers and nesting logic."""
 
+import pytest
+
 from shipit import checks
 
 
@@ -114,6 +116,12 @@ def test_publishes_reusable_workflows_local_skips_unparseable(tmp_path):
     assert not checks.publishes_reusable_workflows("o/r", toplevel=str(tmp_path))
 
 
+def test_publishes_reusable_workflows_local_skips_non_utf8(tmp_path):
+    _write_workflow(tmp_path, "broken.yml", "placeholder")
+    (tmp_path / ".github" / "workflows" / "broken.yml").write_bytes(b"\xff\xfe")
+    assert not checks.publishes_reusable_workflows("o/r", toplevel=str(tmp_path))
+
+
 def test_publishes_reusable_workflows_local_no_workflows_dir(tmp_path):
     assert not checks.publishes_reusable_workflows("o/r", toplevel=str(tmp_path))
 
@@ -147,6 +155,35 @@ def test_publishes_reusable_workflows_remote_404_means_no_publisher(monkeypatch)
         raise ExecError(["gh", "api"], rc=1, stderr="gh: Not Found (HTTP 404)")
 
     monkeypatch.setattr(checks.gh, "rest", rest)
+    assert not checks.publishes_reusable_workflows("o/r", toplevel=None)
+
+
+@pytest.mark.parametrize("listing", [None, {"name": "wf-build.yml"}])
+def test_publishes_reusable_workflows_remote_malformed_listing_raises(
+    monkeypatch, listing
+):
+    monkeypatch.setattr(checks.gh, "rest", lambda *args, **kwargs: listing)
+    with pytest.raises(ValueError, match="expected a list"):
+        checks.publishes_reusable_workflows("o/r", toplevel=None)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        None,
+        {},
+        {"content": None},
+        {"content": "//4="},
+    ],
+)
+def test_publishes_reusable_workflows_remote_skips_unparseable_file(
+    monkeypatch, payload
+):
+    responses = {
+        "repos/o/r/contents/.github/workflows": [{"name": "broken.yml"}],
+        "repos/o/r/contents/.github/workflows/broken.yml": payload,
+    }
+    monkeypatch.setattr(checks.gh, "rest", lambda path, **kwargs: responses[path])
     assert not checks.publishes_reusable_workflows("o/r", toplevel=None)
 
 
