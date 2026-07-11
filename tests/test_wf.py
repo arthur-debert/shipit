@@ -28,8 +28,8 @@ from pathlib import Path
 
 import pytest
 
-from shipit import execrun
-from shipit.verbs import lint, wf
+from shipit import execrun, lint
+from shipit.verbs import wf
 
 # --------------------------------------------------------------------------
 # Pure cores — event crafting

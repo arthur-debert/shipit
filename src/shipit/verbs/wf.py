@@ -55,8 +55,8 @@ import click
 import yaml
 
 from .. import execrun
+from ..lint import _data_path
 from ._errors import cli_errors
-from .lint import _data_path
 
 logger = logging.getLogger("shipit.wf")
 

@@ -54,7 +54,7 @@ def test_sprayed_modules_have_a_shipit_logger():
         # CLI02-WS04 promoted the gh-setup passes into their domain module;
         # the sprayed records moved with them (the verb is print-free glue).
         ("shipit.ghsetup", "shipit.ghsetup"),
-        ("shipit.verbs.lint", "shipit.lint"),
+        ("shipit.lint", "shipit.lint"),
         ("shipit.session.liveness", "shipit.session"),
         # LOG02-WS01..WS03: the tree / spawn / review+prstate sprays.
         ("shipit.tree.create", "shipit.tree"),
@@ -92,8 +92,10 @@ def test_verbs_keep_print_for_user_facing_output():
     output still writes with ``print()`` — logging never replaced stdout. The
     pr family is exempt since CLI01-WS03, install since CLI02-WS01, and
     gh-setup since CLI02-WS04: those verbs render through the shared ADR-0030
-    emit seam (:mod:`shipit.verbs._render`), which owns the print."""
-    from shipit.verbs import _render, lint
+    emit seam (:mod:`shipit.verbs._render`), which owns the print. Lint now
+    renders from its service module while the verb is only the CLI shell."""
+    from shipit import lint
+    from shipit.verbs import _render
 
     for mod in (lint, _render):
         src = inspect.getsource(mod)

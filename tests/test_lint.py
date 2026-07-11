@@ -25,8 +25,8 @@ from pathlib import Path
 import pytest
 import yaml
 
-from shipit import execrun
-from shipit.verbs import lint
+from shipit import execrun, lint
+from shipit.verbs import lint as lint_verb
 
 # The packaged canonical-config paths the gate injects by DEFAULT (WS03 #516),
 # so argv assertions can name what `_canonical_config` resolves without hardcoding
@@ -1584,7 +1584,7 @@ def test_malformed_shipit_toml_fails_clean_not_traceback(tmp_path, capsys):
     # exit 1 (the cli_errors shell, ADR-0030), NOT a raw ConfigError traceback
     # escaping mid-gate — the same clean failure every config-reading verb gives.
     (tmp_path / ".shipit.toml").write_text("[lint]\nignore = 42\n")
-    rc = lint.run(
+    rc = lint_verb.run(
         str(tmp_path),
         discover=_fake_discover(["README.md"]),
         run_tool=_Recorder(),
@@ -2230,7 +2230,7 @@ class _ToolSpec:
     rust (``cargo fmt`` behind clippy) and python (``ruff format`` behind
     ``ruff check``). So each tool gets its OWN fixture + hostile targeting THAT
     tool's ambient config source, and the assertion reads the tool's own
-    :class:`~shipit.verbs.lint.ToolRun` out of ``runs_out`` (:func:`_target_run`),
+    :class:`~shipit.lint.ToolRun` out of ``runs_out`` (:func:`_target_run`),
     so one tool's baseline can never mask another tool's leak.
 
     ``target_check`` is the tool's :attr:`Tool.check` tuple — the identity that
