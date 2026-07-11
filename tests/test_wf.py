@@ -254,7 +254,7 @@ def test_image_is_built_from_the_packaged_dockerfile_on_miss(workflow_file):
     build = next(c for c in rec.calls if c[:2] == ["docker", "build"])
     assert build[build.index("--tag") + 1] == wf.WF_IMAGE
     dockerfile = build[build.index("--file") + 1]
-    assert dockerfile == lint._data_path(wf.WF_DOCKERFILE)
+    assert dockerfile == lint.data_path(wf.WF_DOCKERFILE)
     # build happens BEFORE act.
     heads = [c[0] for c in rec.calls]
     assert heads.index("docker") < heads.index("act")
@@ -387,7 +387,7 @@ def test_packaged_dockerfile_matches_the_containers_doc_image():
     wheel install builds from) must stay byte-identical — the dogfood drift
     pattern (one body, two readers, a test pinning the pair)."""
     repo_copy = Path(__file__).resolve().parents[1] / "docker" / "ubuntu.Dockerfile"
-    packaged = Path(lint._data_path(wf.WF_DOCKERFILE))
+    packaged = Path(lint.data_path(wf.WF_DOCKERFILE))
     assert packaged.read_bytes() == repo_copy.read_bytes()
 
 

@@ -179,6 +179,15 @@ def _data_path(name: str) -> str:
     return path
 
 
+def data_path(name: str) -> str:
+    """Return the filesystem path to a packaged ``shipit.data`` file.
+
+    This is the public service boundary for callers outside this module;
+    :func:`_data_path` retains the internal resolution and validation logic.
+    """
+    return _data_path(name)
+
+
 #: The packaged canonical ``rustfmt.toml`` path, resolved once at import so the
 #: :data:`RUST` ``cargo fmt`` tuples can carry it inline (WS03 #516). rustfmt takes
 #: its config as a file the gate passes AFTER cargo's ``--`` separator

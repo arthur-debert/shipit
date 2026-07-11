@@ -56,7 +56,8 @@ pixi integration below. Skip every release-specific lefthook command
 
 ### The shipit lint verb (the orchestrator)
 
-A NEW verb `src/shipit/verbs/lint.py`, attached in `cli.py` exactly like
+A NEW lint service `src/shipit/lint.py`, exposed through the thin
+`src/shipit/verbs/lint.py` CLI wrapper and attached in `cli.py` exactly like
 `gh-setup` (a thin click command forwarding to a `run(...) -> int`). The
 per-language orchestration is pure logic — keep it OUT of the subprocess boundary
 so it is unit-testable, the same split `checks.py` uses against its gh calls. The

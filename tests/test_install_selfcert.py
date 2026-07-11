@@ -453,6 +453,27 @@ def test_certify_collects_every_miss_never_fail_fast(staged):
     assert selfcert.CHECK_HOOKS in names
 
 
+def test_certify_reports_malformed_config_across_postconditions(staged):
+    # Moving lint behind its service boundary must not let ConfigError escape
+    # self-certification: every postcondition still reports its own failure.
+    (staged / config.CONFIG_NAME).write_text("not = valid = toml\n")
+    _live_hooks(staged)
+
+    report = selfcert.certify(
+        _plan_with_writes(staged),
+        staged,
+        hooks_activated=True,
+        stamped_pin=GOOD_SHA,
+        runner=_dispatching_runner(GOOD_SHA),
+    )
+
+    assert not report.ok
+    failures = {check.name: check.detail for check in report.failures}
+    assert selfcert.CHECK_MANIFEST in failures
+    assert selfcert.CHECK_DELIVERED_LINT in failures
+    assert "scoped lint could not run" in failures[selfcert.CHECK_DELIVERED_LINT]
+
+
 def test_format_failure_names_every_missed_postcondition():
     report = selfcert.CertReport(
         checks=(

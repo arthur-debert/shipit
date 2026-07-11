@@ -210,7 +210,7 @@ def _check_delivered_lint(root: Path, plan: Plan, runner) -> CertCheck:
         return CertCheck(CHECK_DELIVERED_LINT, True)
     try:
         rc, report = _scoped_lint(root, paths, runner)
-    except execrun.ExecError as exc:
+    except (config.ConfigError, execrun.ExecError) as exc:
         return CertCheck(
             CHECK_DELIVERED_LINT, False, f"scoped lint could not run: {exc}"
         )

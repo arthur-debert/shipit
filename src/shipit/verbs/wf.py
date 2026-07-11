@@ -55,7 +55,7 @@ import click
 import yaml
 
 from .. import execrun
-from ..lint import _data_path
+from ..lint import data_path
 from ._errors import cli_errors
 
 logger = logging.getLogger("shipit.wf")
@@ -328,7 +328,7 @@ def ensure_image(run_cmd: RunCmd) -> bool:
     )
     if probe.rc == 0:
         return False
-    dockerfile = _data_path(WF_DOCKERFILE)
+    dockerfile = data_path(WF_DOCKERFILE)
     run_cmd(
         [
             "docker",

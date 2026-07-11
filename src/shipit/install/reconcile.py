@@ -576,7 +576,7 @@ def _plan_lefthook_conflicts(
 # --------------------------------------------------------------------------
 
 #: manifest basename -> toolchain signal (#547 Layer 1). A tracked manifest
-#: ANYWHERE in the tree is the signal, matching `verbs/lint.py`'s per-manifest
+#: ANYWHERE in the tree is the signal, matching `shipit/lint.py`'s per-manifest
 #: leg discovery: a tracked ``Cargo.toml`` is exactly what makes the rust lint
 #: leg run (which hard-fails 127 without cargo — the gap the rust dep block
 #: closes, #526); ``go.mod`` and ``package.json`` are the go/node analogues.
