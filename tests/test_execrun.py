@@ -129,6 +129,33 @@ def test_every_repeated_prompt_flag_is_summarized():
 
 
 @pytest.mark.parametrize(
+    "child,payloads",
+    [
+        (["claude", "-p", "CLAUDE TASK"], ["CLAUDE TASK"]),
+        (
+            [
+                "codex",
+                "exec",
+                "-c",
+                "developer_instructions=CODEX ROLE",
+                "CODEX TASK",
+            ],
+            ["CODEX ROLE", "CODEX TASK"],
+        ),
+        (["agy", "--print", "AGY TASK"], ["AGY TASK"]),
+    ],
+)
+def test_pixi_run_wrapper_summarizes_nested_backend_prompts(child, payloads):
+    argv = ["pixi", "run", "--manifest-path", "/tree/pixi.toml", "--", *child]
+    display = execrun._display_argv(argv)
+    joined = " ".join(display)
+    assert display[:5] == argv[:5]
+    for payload in payloads:
+        assert payload not in joined
+    assert joined.count("<redacted: prompt sha256=") == len(payloads)
+
+
+@pytest.mark.parametrize(
     "argv",
     [
         ["codex", "exec"],
@@ -187,6 +214,39 @@ def test_codex_failure_never_exposes_prompt_payloads(monkeypatch, caplog):
         assert leak not in surfaced
         assert leak not in rendered
     assert surfaced.count("<redacted: prompt sha256=") >= 2
+
+
+def test_pixi_wrapped_codex_failure_never_exposes_prompt_payloads(monkeypatch, caplog):
+    role = "WRAPPED SECRET ROLE"
+    task = "WRAPPED SECRET TASK"
+    argv = [
+        "pixi",
+        "run",
+        "--manifest-path",
+        "/tree/pixi.toml",
+        "--",
+        "codex",
+        "exec",
+        "-c",
+        f"developer_instructions={role}",
+        task,
+    ]
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        _fake_completed(rc=1, stderr=f"launch failed: {role}; task: {task}"),
+    )
+    with caplog.at_level(logging.ERROR, logger="shipit.exec"):
+        with pytest.raises(execrun.ExecError) as excinfo:
+            execrun.run(argv)
+    surfaced = (
+        " ".join(excinfo.value.argv)
+        + excinfo.value.stderr
+        + str(excinfo.value)
+        + "\n".join(record.getMessage() for record in caplog.records)
+    )
+    assert role not in surfaced
+    assert task not in surfaced
 
 
 def test_short_prompt_echo_suppresses_ambiguous_failure_stream(monkeypatch):

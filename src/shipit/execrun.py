@@ -234,6 +234,12 @@ def _display_argv(argv: list[str] | tuple[str, ...]) -> list[str]:
                 display[index + 1] = _prompt_summary(display[index + 1])
 
     binary = os.path.basename(display[0])
+    if binary == "pixi" and "run" in display[1:] and "--" in display:
+        separator = display.index("--")
+        child_argv = display[separator + 1 :]
+        if child_argv:
+            display[separator + 1 :] = _display_argv(child_argv)
+        return display
     if binary == "claude":
         redact_after("-p")
     elif binary == "codex" and "exec" in display:
