@@ -54,14 +54,14 @@ pixi integration below. Skip every release-specific lefthook command
 (`workflow-action-major`, `consumer-contract-*`, `captured-fixtures-lint`,
 `lint-skills`): those encode release's sync model, the thing shipit deleted.
 
-### The shipit lint verb (the orchestrator)
+### The shipit lint service (the orchestrator)
 
 A NEW lint service `src/shipit/lint.py`, exposed through the thin
 `src/shipit/verbs/lint.py` CLI wrapper and attached in `cli.py` exactly like
 `gh-setup` (a thin click command forwarding to a `run(...) -> int`). The
 per-language orchestration is pure logic — keep it OUT of the subprocess boundary
 so it is unit-testable, the same split `checks.py` uses against its gh calls. The
-verb:
+service:
 
 - DISCOVERS files (whole tree via `git ls-files` — tracked files only, which keeps
   generated and ignored paths out of scope) and ROUTES each to a toolchain by
@@ -70,7 +70,7 @@ verb:
 - RUNS each language's tool(s), aggregates the results, and emits one verdict. It
   is a HARD-fail check (`architecture.lex §7`): a missing tool exits non-zero, never
   skips. A clean run is `0`; any failure is `1`.
-- is the SAME definition everywhere. CI runs `pixi run lint` (= this verb) and the
+- is the SAME definition everywhere. CI runs `pixi run lint` (= this service) and the
   lefthook pre-commit hook runs `pixi run lint`; "both agree" because it is ONE
   binary with ONE config, not two transcriptions of the rules drifting apart.
 
@@ -221,7 +221,7 @@ It is enforced two ways, because the fixers come in two shapes:
 - The **per-manifest Rust formatter** (`cargo fmt`) takes NO file list: it
   rewrites a whole crate, reaching a protected `.rs` via a `mod` decl (or a
   fixture that is itself a crate), and `rustfmt`'s own `ignore` config is
-  nightly-only (#502). So the verb snapshots the protected `.rs` bytes before
+  nightly-only (#502). So the service snapshots the protected `.rs` bytes before
   the fix-form run and restores any the formatter rewrote (`protected_testdata`
   + `_snapshot`/`_restore`) — the net effect is the same: the fixture is
   byte-identical after `--fix`, while real crate files stay formatted.
@@ -233,7 +233,7 @@ Two deliberate scoping choices:
   still reported; only the destructive auto-rewrite is refused. A tool with no
   fixer (shellcheck, yamllint, lexd, `cargo clippy`) still covers a fixture even
   during a `--fix` run.
-- **Verb-level, tool-agnostic.** The guard lives in the verb, not per-linter, so
+- **Service-level, tool-agnostic.** The guard lives in the service, not per-linter, so
   it holds for the fixers that have NO ignore-file of their own (shfmt, ruff,
   cargo fmt) as well as the ones that do — a per-tool ignore would be a partial
   guarantee.

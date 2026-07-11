@@ -543,7 +543,7 @@ def test_non_editorconfig_tool_ignores_the_pin():
 
 
 # --------------------------------------------------------------------------
-# The verb — boundary injected
+# The service — boundary injected
 # --------------------------------------------------------------------------
 
 
@@ -753,11 +753,11 @@ def test_fix_mode_reports_the_post_drop_count_in_note_and_log(tmp_path, capsys, 
 
 
 def test_check_mode_still_passes_protected_fixtures_to_the_checkers(tmp_path, capsys):
-    # The guard is MUTATION-only: in check mode the verb still hands the fixture
+    # The guard is MUTATION-only: in check mode the service still hands the fixture
     # to the tool's argv, so the CI gate reports a genuinely-broken fixture.
     # (For MARKDOWN specifically, markdownlint then skips it via the managed
     # `.markdownlintignore` — a separate mechanism in the consumer's tree that
-    # this verb does not model; here we assert only the verb-level behavior:
+    # this service does not model; here we assert only the service-level behavior:
     # check mode does not drop the path.)
     rec = _Recorder()
     rc = lint.run(
@@ -1231,7 +1231,7 @@ class _FakeCargoFmt:
 def test_fix_mode_restores_a_mod_included_rust_fixture_cargo_fmt_rewrote(tmp_path):
     # #502: `cargo fmt --all` takes no file batch and formats a whole crate, so a
     # protected `.rs` reachable via a `mod` decl CANNOT be kept off its argv (and
-    # rustfmt's own `ignore` is nightly-only). The verb snapshots protected `.rs`
+    # rustfmt's own `ignore` is nightly-only). The service snapshots protected `.rs`
     # and restores any the formatter rewrote: the fixture is byte-identical after
     # --fix, while real crate source stays reformatted.
     (tmp_path / "src").mkdir()

@@ -9,7 +9,7 @@ cross-manifest task inheritance (architecture.lex §5), the per-language
 discovery, routing and aggregation cannot live in a pixi task templated into
 each consumer — that is drift on pixi.toml. So it lives HERE, in the binary:
 lefthook is thin (it calls ``pixi run lint``), pixi is thin (it runs
-``shipit lint``), and this verb does the real work. CI and the pre-commit hook
+``shipit lint``), and this service does the real work. CI and the pre-commit hook
 run the IDENTICAL checks because it is ONE binary with ONE config — "both agree"
 is structural, not two transcriptions of the rules drifting apart.
 
@@ -1233,7 +1233,7 @@ def _snapshot(root: Path, rel_paths: list[str]) -> dict[str, bytes]:
     The per-manifest fix guard's pre-image (#500/#502): ``cargo fmt`` rewrites a
     whole crate and takes no file batch, so a protected ``.rs`` reachable via a
     ``mod`` decl can't be kept off its argv the way a batch fixer's is. Instead
-    the verb snapshots the protected files, lets the fixer run, then restores any
+    the service snapshots the protected files, lets the fixer run, then restores any
     it rewrote (see :func:`_restore`). A missing/unreadable path is simply not
     snapshotted — there is then nothing to restore.
     """

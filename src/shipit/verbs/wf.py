@@ -29,7 +29,7 @@ The pure cores — event-payload crafting (:func:`craft_event` /
 :func:`parse_inputs`), job selection (:func:`workflow_jobs`), and the act argv
 encoding (:func:`act_argv`) — are kept out of the Exec boundary so they are
 fixture-testable with no docker anywhere near the tests, the same split the
-lint verb uses. Every act/docker invocation goes through the one Exec runner
+lint service uses. Every act/docker invocation goes through the one Exec runner
 (:mod:`shipit.execrun`, ADR-0028) via the injectable ``run_cmd`` seam; verb
 tests assert the RECORDED argv.
 
