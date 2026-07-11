@@ -602,6 +602,94 @@ def secret_list(repo: str) -> list[str]:
 
 
 # --------------------------------------------------------------------------
+# releases (the publish stage's gh-release endpoint, TOL02-WS05)
+# --------------------------------------------------------------------------
+
+#: Release-asset uploads move real artifact bytes (a .dmg easily runs to
+#: hundreds of MB), so the upload alone gets a larger stated bound than the
+#: adapter's network default (ADR-0028: every Exec states its timeout).
+_UPLOAD_TIMEOUT: float = 1800.0
+
+
+def release_exists(tag: str, *, cwd: str | None = None) -> bool:
+    """Whether the repo already has a GH Release for ``tag`` (probe: a
+    missing release is a NORMAL answer — the publish stage's create-vs-edit
+    branch, its idempotent-resume seam)."""
+    return _run_probe(["gh", "release", "view", tag, "--json", "name"], cwd=cwd).rc == 0
+
+
+def release_create(
+    tag: str, *, notes_file: str, prerelease: bool, cwd: str | None = None
+) -> None:
+    """``gh release create <tag>`` from the coalesced notes file.
+
+    ``--verify-tag`` refuses to mint the tag itself: the tag is the version
+    authority, written and pushed by `release prepare` (ADR-0041) — a publish
+    against an unpushed tag must fail loudly, never invent one.
+    """
+    args = [
+        "gh",
+        "release",
+        "create",
+        tag,
+        "--verify-tag",
+        "--title",
+        tag,
+        "--notes-file",
+        notes_file,
+    ]
+    if prerelease:
+        args.append("--prerelease")
+    _run(args, cwd=cwd)
+
+
+def release_edit(
+    tag: str, *, notes_file: str, prerelease: bool, cwd: str | None = None
+) -> None:
+    """``gh release edit <tag>`` — the resume path of an existing release.
+
+    The prerelease flag is passed EXPLICITLY in both directions
+    (``--prerelease=true|false``): ``gh release edit`` leaves it unchanged
+    unless stated (the legacy release#726 scar), so a resume must re-assert
+    it rather than trust what the first pass set.
+    """
+    _run(
+        [
+            "gh",
+            "release",
+            "edit",
+            tag,
+            "--notes-file",
+            notes_file,
+            f"--prerelease={'true' if prerelease else 'false'}",
+        ],
+        cwd=cwd,
+    )
+
+
+def release_upload(tag: str, files: list[str], *, cwd: str | None = None) -> None:
+    """``gh release upload <tag> <files…> --clobber`` — idempotent asset
+    upload (a re-run replaces same-named assets instead of erroring)."""
+    if not files:
+        return
+    _run(
+        ["gh", "release", "upload", tag, *files, "--clobber"],
+        cwd=cwd,
+        timeout=_UPLOAD_TIMEOUT,
+    )
+
+
+def repo_is_private(slug: str) -> bool:
+    """Whether the ``owner/name`` repo is private (the brew adapter's
+    download-strategy switch: a private repo's release assets need the
+    token-authenticated strategy inlined into the formula)."""
+    data = rest(f"repos/{slug}")
+    if not isinstance(data, dict) or not isinstance(data.get("private"), bool):
+        raise ValueError(f"malformed repos/{slug} payload: no boolean `private`")
+    return data["private"]
+
+
+# --------------------------------------------------------------------------
 # PR reads/writes (the git side of a head lives in :mod:`shipit.git`)
 # --------------------------------------------------------------------------
 

@@ -25,10 +25,19 @@ work streams land:
 - :mod:`.integrity` — the assert-bundle pure core (WS03, workflows.lex
   §3.2): the expected-main-binary fallback chain and the bundle-tree check
   behind ``shipit release assert-bundle``.
+- :mod:`.publish` — the closed endpoint-adapter registry (WS05): how a
+  declared Distribution endpoint (gh-release, crates, pypi, npm, brew)
+  ships the staged Artifacts — plus the stage's pure cores: the scar-#3
+  refusal gate, the central ``-release-rc`` guard, and the
+  release-before-derived ordering plan.
+- :mod:`.brew` — the brew formula render core (WS05): the shared formula
+  template, the PascalCase class derivation, and the crate-metadata pull.
+  Pure text; the effectful tap push is the brew adapter in :mod:`.publish`.
 
 The effectful shells live in :mod:`shipit.verbs` (``shipit release prepare`` /
-``preflight`` / ``bundle`` / ``assert-bundle`` are :mod:`shipit.verbs.release`),
-executing through the one Exec seam (ADR-0028) and the git adapter.
+``preflight`` / ``bundle`` / ``assert-bundle`` / ``publish`` are
+:mod:`shipit.verbs.release`), executing through the one Exec seam (ADR-0028)
+and the git/gh adapters.
 """
 
 from __future__ import annotations
@@ -44,8 +53,11 @@ class ReleaseError(RuntimeError):
     rewrite, a prepare invoked outside a git checkout or on a detached HEAD,
     a bundle composition over missing build outputs (no built binary, no
     ``.deb``/wheel/sdist produced, no coupled ``.app``/``.dmg`` pair or
-    reseal payload), and an assert-bundle whose expected name cannot be
-    resolved (an unknown or unnamed artifact). USAGE errors (a malformed
-    version argument) are NOT this class — they die at the click boundary as
-    exit 2 (ADR-0030).
+    reseal payload), an assert-bundle whose expected name cannot be
+    resolved (an unknown or unnamed artifact), and the publish stage's
+    refusals (the scar-#3 gate over the upstream stage results, a missing
+    endpoint token, a failed external publish that is not the
+    already-published resume case, a formula without its crate metadata).
+    USAGE errors (a malformed version argument) are NOT this class — they
+    die at the click boundary as exit 2 (ADR-0030).
     """

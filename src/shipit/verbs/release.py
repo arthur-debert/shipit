@@ -1,7 +1,7 @@
 """`shipit release` — the Release pipeline's stage verbs (TOL02, PRD story 19).
 
 Each release stage is independently invocable; this module carries the
-pipeline's planner and its first effectful stages:
+pipeline's planner and its effectful stages:
 
 - ``shipit release preflight`` (TOL02-WS02 #560) — the planner (see
   :func:`run_preflight`): (artifact map, resolved version, event) → the
@@ -13,7 +13,12 @@ pipeline's planner and its first effectful stages:
   composition registry (:mod:`shipit.release.bundle`);
 - ``shipit release assert-bundle`` (TOL02-WS03 #561) — the scar-#2
   integrity guard (workflows.lex §3.2), the thin shell over the pure core
-  (:mod:`shipit.release.integrity`).
+  (:mod:`shipit.release.integrity`);
+- ``shipit release publish`` (TOL02-WS05 #563) — the TERMINAL stage: the
+  effectful walk over the closed endpoint-adapter registry
+  (:mod:`shipit.release.publish`), dispatching each artifact's declared
+  Distribution endpoints, gated by the scar-#3 refusal and the central RC
+  guard (both pure cores there).
 
 ``prepare`` is the effectful shell over three pure cores:
 
@@ -87,12 +92,14 @@ from typing import Any
 
 import click
 
-from .. import config, events, execrun, git
+from .. import config, events, execrun, gh, git, redact
+from ..changelog import is_prerelease
 from ..release import ReleaseError
 from ..release import bump as bump_mod
 from ..release import bundle as bundle_mod
 from ..release import integrity as integrity_mod
 from ..release import preflight as preflight_mod
+from ..release import publish as publish_mod
 from ..release import version as version_mod
 from . import changelog as changelog_verb
 from ._errors import cli_errors
@@ -891,6 +898,255 @@ def run_assert_bundle(
 
 
 # --------------------------------------------------------------------------
+# The publish stage (TOL02-WS05): staged Artifacts → Distribution endpoints
+# --------------------------------------------------------------------------
+
+#: Each publish command Exec's stated timeout (ADR-0028): ``cargo publish``
+#: verify-builds the crate before uploading, so the bound matches the build
+#: verbs' hour rather than a network call's minutes.
+PUBLISH_TIMEOUT: float = 3600.0
+
+
+@dataclass(frozen=True)
+class PublishResult:
+    """The publish stage's uniform, typed output (ADR-0030).
+
+    ``published`` carries each completed endpoint dispatch's actions;
+    ``skipped`` the dispatches the PLAN skipped, with the stated reason (the
+    RC guard, brew's stable-only rule) — skips are verdicts, never silence.
+    """
+
+    version: str
+    tag: str
+    prerelease: bool
+    live_fire: bool
+    published: tuple[publish_mod.Published, ...]
+    skipped: tuple[tuple[str, str, str], ...]
+
+    def to_dict(self) -> dict:
+        """The ``--json`` field set — exactly the declared outputs."""
+        return {
+            "version": self.version,
+            "tag": self.tag,
+            "prerelease": self.prerelease,
+            "live_fire": self.live_fire,
+            "published": [p.to_dict() for p in self.published],
+            "skipped": [
+                {"artifact": artifact, "endpoint": endpoint, "reason": reason}
+                for artifact, endpoint, reason in self.skipped
+            ],
+        }
+
+
+def format_publish(result: PublishResult) -> str:
+    """The text rendering of a :class:`PublishResult`. Pure."""
+    if not result.published and not result.skipped:
+        return "release: no endpoints declared — nothing to publish"
+    count = len(result.published)
+    headline = (
+        f"release: published {result.version} to {count} "
+        f"endpoint{'s' if count != 1 else ''}"
+    )
+    if result.live_fire:
+        headline += " (live-fire -release-rc: GH release only)"
+    lines = [headline]
+    for published in result.published:
+        lines.append(
+            f"  {published.artifact}  [{published.endpoint}]  "
+            f"{'; '.join(published.actions)}"
+        )
+    for artifact, endpoint, reason in result.skipped:
+        lines.append(f"  {artifact}  [{endpoint}]  skipped: {reason}")
+    return "\n".join(lines)
+
+
+def _run_publish_cmd(
+    argv: Sequence[str], cwd: Path, env: Any = None
+) -> execrun.ExecResult:
+    """Run one adapter command through the one Exec runner (ADR-0028),
+    check=True: a failing command raises :class:`~shipit.execrun.ExecError`,
+    rendered by the shared error shell — publish aborts fail-fast, and a
+    re-run resumes (ADR-0009 phase 2)."""
+    return execrun.run(
+        list(argv),
+        cwd=str(cwd),
+        env=dict(env) if env else None,
+        timeout=PUBLISH_TIMEOUT,
+    )
+
+
+def _probe_publish_cmd(
+    argv: Sequence[str], cwd: Path, env: Any = None
+) -> execrun.ExecResult:
+    """Run one adapter command as a probe (check=False): a nonzero rc is a
+    NORMAL answer the adapter classifies — the already-published resume path
+    of ``cargo publish`` / ``npm publish``."""
+    return execrun.run(
+        list(argv),
+        cwd=str(cwd),
+        env=dict(env) if env else None,
+        check=False,
+        timeout=PUBLISH_TIMEOUT,
+    )
+
+
+@cli_errors
+def run_publish(
+    spec: version_mod.VersionSpec,
+    *,
+    build_result: str,
+    bundle_result: str,
+    sign_result: str,
+    assets: str | None = None,
+    notes: str | None = None,
+    testpypi: bool = False,
+    as_json: bool = False,
+    gitio: Any = git,
+    ghio: Any = gh,
+    run_cmd: publish_mod.RunCmd | None = None,
+    probe: publish_mod.Probe | None = None,
+    env: Any = None,
+) -> int:
+    """Run the publish stage from the current directory. Returns 0/1.
+
+    The order of operations IS the invariant set:
+
+    1. The scar-#3 refusal gate first (:func:`shipit.release.publish.check_gate`,
+       PRD story 32) — pure, before any I/O, so a blocked publish touches
+       nothing.
+    2. The plan (:func:`shipit.release.publish.plan`): the RC guard and
+       brew's stable-only rule decided centrally, ``release`` endpoints
+       ordered before ``derived`` ones (stories 33/35). WS02's preflight
+       will emit this same plan; until then publish derives it from the map.
+    3. Token validation for every NON-SKIPPED dispatch — a missing token is
+       one loud refusal BEFORE the first dispatch, never a silent adapter
+       skip (stories 43–45); present tokens are registered with the central
+       redactor so no Exec record can leak them.
+    4. The dispatches, in plan order, fail-fast: external endpoints cannot
+       roll back, so a mid-run failure aborts and the RE-RUN converges
+       (ADR-0009 phase 2 — every adapter treats already-published as
+       success).
+
+    ``spec`` must carry a concrete semver (the click boundary rejects bump
+    words — publish ships the version prepare cut, it never re-resolves).
+    ``run_cmd``/``probe`` inject the Exec boundary, ``gitio``/``ghio`` the
+    git/gh adapters, ``env`` the token lookup surface — the recorded-fixture
+    surface the tests drive (PRD Testing Decisions).
+
+    Config and the asset tree anchor to the CHECKOUT ROOT (``gitio.repo_root``,
+    like ``bundle``): ``load_config`` reads ``.shipit.toml`` from that exact
+    dir without walking parents.
+    """
+    # The refusal gate runs FIRST — pure, before any filesystem or git read
+    # (ADR-0040: the block passes results in, the VERB enforces).
+    publish_mod.check_gate(build_result, bundle_result, sign_result)
+
+    run_cmd = run_cmd or _run_publish_cmd
+    probe = probe or _probe_publish_cmd
+    env_map = os.environ if env is None else env
+
+    root_s = gitio.repo_root(cwd=".")
+    if root_s is None:
+        raise ReleaseError(
+            "not inside a git checkout — `release publish` walks a checkout's "
+            "artifact map"
+        )
+    root = Path(root_s)
+    cfg = load_config(root)
+    entries = config.load_toolchains(cfg)
+    artifacts = config.load_artifacts(cfg)
+
+    assert spec.semver is not None  # the click boundary rejects bump words
+    version = spec.semver
+    tag = f"{version_mod.TAG_PREFIX}{version}"
+    prerelease = is_prerelease(version)
+    live_fire = publish_mod.is_live_fire(version)
+
+    assets_arg = Path(assets) if assets else Path(DEFAULT_BUNDLE_DIR)
+    assets_dir = assets_arg if assets_arg.is_absolute() else root / assets_arg
+    notes_arg = Path(notes) if notes else Path(DEFAULT_NOTES_FILE)
+    notes_path = notes_arg if notes_arg.is_absolute() else root / notes_arg
+
+    dispatches = publish_mod.plan(artifacts, prerelease=prerelease, live_fire=live_fire)
+
+    # Token validation BEFORE the first dispatch (stories 43-45): one loud
+    # refusal naming every missing token, never a silent adapter skip. The
+    # tokens that ARE present get registered with the central redactor at
+    # the one moment the verb provably reads them.
+    missing = publish_mod.missing_secrets(dispatches, env_map, testpypi=testpypi)
+    if missing:
+        raise ReleaseError(
+            "publish refused — required tokens are not set: "
+            + ", ".join(f"{key} ({endpoint})" for endpoint, key in missing)
+            + " — gh-setup derives and syncs the needed set from the "
+            "declared endpoints"
+        )
+    for dispatch in dispatches:
+        if dispatch.skip is not None:
+            continue
+        for key in publish_mod.required_env_keys(dispatch.adapter, testpypi=testpypi):
+            redact.register_secret(env_map[key])
+
+    # The repo slug is resolved only when a planned dispatch needs it (brew's
+    # asset URLs) — a laptop RC cut must not require a gh round-trip.
+    repo: str | None = None
+    if any(d.skip is None and d.adapter.name == "brew" for d in dispatches):
+        repo = ghio.current_repo(cwd=str(root)).slug
+
+    published: list[publish_mod.Published] = []
+    skipped: list[tuple[str, str, str]] = []
+    for dispatch in dispatches:
+        if dispatch.skip is not None:
+            skipped.append(
+                (dispatch.artifact.name, dispatch.adapter.name, dispatch.skip)
+            )
+            continue
+        published.append(
+            dispatch.adapter.publish(
+                publish_mod.PublishRequest(
+                    artifact=dispatch.artifact,
+                    entries=entries,
+                    root=root,
+                    assets_dir=assets_dir,
+                    version=version,
+                    tag=tag,
+                    prerelease=prerelease,
+                    notes_path=notes_path,
+                    env=env_map,
+                    run_cmd=run_cmd,
+                    probe=probe,
+                    ghio=ghio,
+                    gitio=gitio,
+                    repo=repo,
+                    testpypi=testpypi,
+                )
+            )
+        )
+
+    result = PublishResult(
+        version=version,
+        tag=tag,
+        prerelease=prerelease,
+        live_fire=live_fire,
+        published=tuple(published),
+        skipped=tuple(skipped),
+    )
+    emit(result, format_publish, as_json=as_json)
+    logger.info(
+        "release publish complete",
+        extra={
+            "version": version,
+            "tag": tag,
+            "prerelease": prerelease,
+            "live_fire": live_fire,
+            "published": len(published),
+            "skipped": len(skipped),
+        },
+    )
+    return 0
+
+
+# --------------------------------------------------------------------------
 # Click glue
 # --------------------------------------------------------------------------
 
@@ -904,8 +1160,10 @@ def release() -> None:
     validates it before anything is written; `prepare` resolves the supplied
     version, projects it into the manifests, and writes commit + annotated
     tag; `bundle` composes build outputs into the unsigned Artifacts and
-    `assert-bundle` guards their integrity (workflows.lex §3.2). Later stages
-    (sign, publish) land as their work streams do.
+    `assert-bundle` guards their integrity (workflows.lex §3.2); `publish` —
+    the terminal stage — dispatches the staged Artifacts to their declared
+    Distribution endpoints, gated by the scar-#3 refusal and the central RC
+    guard. The remaining stage (sign) lands as its work stream does.
     """
 
 
@@ -1033,4 +1291,100 @@ def assert_bundle_cmd(
     """
     raise SystemExit(
         run_assert_bundle(tree, artifact=artifact, expected=expected, as_json=as_json)
+    )
+
+
+_RESULT_CHOICE = click.Choice(publish_mod.STAGE_RESULTS)
+
+
+@release.command(name="publish")
+@click.argument("version", type=VERSION_SPEC)
+@click.option(
+    "--build-result",
+    type=_RESULT_CHOICE,
+    required=True,
+    help="The build stage's result — must be `success` (scar #3).",
+)
+@click.option(
+    "--bundle-result",
+    type=_RESULT_CHOICE,
+    required=True,
+    help="The bundle stage's result — must be `success` (scar #3).",
+)
+@click.option(
+    "--sign-result",
+    type=_RESULT_CHOICE,
+    required=True,
+    help=(
+        "The sign stage's result — `success` (signed path) or `skipped` "
+        "(unsigned path); a FAILED sign blocks everything (scar #3)."
+    ),
+)
+@click.option(
+    "--assets",
+    type=click.Path(file_okay=False),
+    help=(
+        f"The staged bundle tree the endpoints ship (default: "
+        f"{DEFAULT_BUNDLE_DIR} at the repo root)."
+    ),
+)
+@click.option(
+    "--notes",
+    type=click.Path(dir_okay=False),
+    help=(
+        f"The coalesced release-notes file for the GH release (default: "
+        f"{DEFAULT_NOTES_FILE} at the repo root — where `release prepare` "
+        f"writes it)."
+    ),
+)
+@click.option(
+    "--testpypi",
+    is_flag=True,
+    help=(
+        "Reroute the pypi endpoint to test.pypi.org (staging lane; needs "
+        "TESTPYPI_TOKEN instead of PYPI_TOKEN)."
+    ),
+)
+@json_option
+def publish_cmd(
+    version: version_mod.VersionSpec,
+    build_result: str,
+    bundle_result: str,
+    sign_result: str,
+    assets: str | None,
+    notes: str | None,
+    testpypi: bool,
+    as_json: bool,
+) -> None:
+    """Publish the staged Artifacts to their declared Distribution endpoints.
+
+    The terminal release stage: refuses unless build+bundle succeeded and
+    sign succeeded-or-was-skipped (the explicit result inputs — a partial
+    release is structurally impossible), then walks the [artifacts] map and
+    dispatches each declared endpoint through the closed adapter registry
+    (gh-release, crates, pypi, npm, brew). A -release-rc VERSION publishes
+    ONLY to the GH release (as prerelease) — every external endpoint is
+    skipped. `release` endpoints run before `derived` ones (brew renders
+    against the final asset URLs/SHAs). Every adapter treats
+    already-published as success, so a re-run after a partial publish
+    converges. VERSION is the concrete semver prepare cut — never a bump
+    word (publish must not re-resolve the version).
+    """
+    if version.semver is None:
+        raise click.UsageError(
+            "publish takes the concrete version `release prepare` cut "
+            "(e.g. 1.2.3) — a bump word would re-resolve against the tags "
+            "and could disagree with what was prepared"
+        )
+    raise SystemExit(
+        run_publish(
+            version,
+            build_result=build_result,
+            bundle_result=bundle_result,
+            sign_result=sign_result,
+            assets=assets,
+            notes=notes,
+            testpypi=testpypi,
+            as_json=as_json,
+        )
     )
