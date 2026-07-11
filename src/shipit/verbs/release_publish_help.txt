@@ -27,8 +27,12 @@ the wf-publish workflow block and a laptop invocation:
 
 - Refusal first (scar #3): publish takes the upstream stage results as
   explicit inputs (--build-result/--bundle-result/--sign-result) and
-  refuses unless build+bundle succeeded and sign succeeded-or-was-skipped.
-  A failed sign or bundle blocks everything.
+  refuses unless every LIVE stage succeeded and sign
+  succeeded-or-was-skipped. Liveness is a plan fact, passed verbatim
+  (--matrix/--stages): a plan-proven non-live build/bundle (empty matrix /
+  no bundle stage — "the tag is the release") may be skipped; omitted
+  facts keep the strict success-only contract. A failed (or cancelled)
+  stage blocks everything, live or not.
 - RC guard, central: a `-release-rc` VERSION publishes ONLY to the GH
   release (as prerelease); every external endpoint — crates, pypi, npm,
   brew — is skipped, making live-fire pipeline verification safe from a

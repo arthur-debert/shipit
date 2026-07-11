@@ -1,7 +1,8 @@
 """`shipit release publish` — the terminal stage's cores and adapters.
 
 The pure cores (:mod:`shipit.release.publish`) are fixture-tested straight:
-the scar-#3 refusal gate over EVERY upstream-result combination, the central
+the scar-#3 refusal gate over EVERY upstream-result × stage-liveness
+combination (plus the plan-fact liveness derivations, issue #745), the central
 ``-release-rc`` guard, the release-before-derived ordering plan, the crates
 topological order, and the brew render core (:mod:`shipit.release.brew`).
 The adapters are driven with the ONE effectful boundary recorded (PRD
@@ -189,30 +190,66 @@ def _request(
 # --------------------------------------------------------------------------
 
 
+def _stage_admits(result: str, live: bool) -> bool:
+    """The gate's per-stage contract (issue #745): a LIVE build/bundle must
+    be success; a plan-proven non-live one may be success or skipped;
+    failure/cancelled always block."""
+    return result == "success" if live else result in ("success", "skipped")
+
+
 @pytest.mark.parametrize(
-    ("build", "bundle", "sign"),
-    list(itertools.product(publish_mod.STAGE_RESULTS, repeat=3)),
-)
-def test_gate_admits_exactly_success_success_and_sign_skipped_or_success(
-    build, bundle, sign
-):
-    """Publish proceeds ONLY on build=bundle=success with sign
-    success-or-skipped: a failed sign blocks, a skipped sign passes, a
-    failed (or skipped, or cancelled) bundle blocks — all 64 combinations."""
-    allowed = (
-        build == "success"
-        and bundle == "success"
-        and sign
-        in (
-            "success",
-            "skipped",
+    ("build", "bundle", "sign", "build_live", "bundle_live"),
+    list(
+        itertools.product(
+            publish_mod.STAGE_RESULTS,
+            publish_mod.STAGE_RESULTS,
+            publish_mod.STAGE_RESULTS,
+            (True, False),
+            (True, False),
         )
+    ),
+)
+def test_gate_admits_exactly_per_stage_liveness_contract(
+    build, bundle, sign, build_live, bundle_live
+):
+    """The full result × liveness matrix (all 256 combinations): publish
+    proceeds ONLY when build and bundle each satisfy their liveness contract
+    (live → success; non-live → success-or-skipped; failure/cancelled always
+    block) and sign is success-or-skipped regardless of liveness."""
+    allowed = (
+        _stage_admits(build, build_live)
+        and _stage_admits(bundle, bundle_live)
+        and sign in ("success", "skipped")
     )
     if allowed:
-        publish_mod.check_gate(build, bundle, sign)
+        publish_mod.check_gate(
+            build, bundle, sign, build_live=build_live, bundle_live=bundle_live
+        )
     else:
         with pytest.raises(ReleaseError, match="publish refused"):
-            publish_mod.check_gate(build, bundle, sign)
+            publish_mod.check_gate(
+                build, bundle, sign, build_live=build_live, bundle_live=bundle_live
+            )
+
+
+def test_gate_defaults_to_live_strict():
+    """Omitted liveness facts keep the strict contract: a skipped
+    build/bundle blocks unless the plan PROVED the stage non-live — the
+    laptop/direct-caller default never weakens the gate."""
+    with pytest.raises(ReleaseError, match="live build requires success"):
+        publish_mod.check_gate("skipped", "success", "skipped")
+    with pytest.raises(ReleaseError, match="live bundle requires success"):
+        publish_mod.check_gate("success", "skipped", "skipped")
+
+
+def test_gate_empty_matrix_shape_publishes():
+    """The confirmed #745 shape: an empty-matrix plan drives the composed
+    chain to build=bundle=skipped (the caller job of an if-skipped inner job
+    concludes skipped — canary-confirmed), and the gate accepts it because
+    the plan proves both stages non-live."""
+    publish_mod.check_gate(
+        "skipped", "skipped", "skipped", build_live=False, bundle_live=False
+    )
 
 
 def test_gate_refusal_names_every_blocking_input():
@@ -222,6 +259,35 @@ def test_gate_refusal_names_every_blocking_input():
     assert "build=failure" in message
     assert "bundle=cancelled" in message
     assert "sign=failure" in message
+
+
+# --------------------------------------------------------------------------
+# The liveness facts (issue #745) — plan JSON verbatim, never result strings
+# --------------------------------------------------------------------------
+
+
+def test_build_is_live_iff_the_plan_matrix_is_non_empty():
+    assert publish_mod.build_is_live("[]") is False
+    assert publish_mod.build_is_live(json.dumps([{"artifact": "lex"}])) is True
+
+
+def test_bundle_is_live_iff_the_plan_stages_name_bundle():
+    assert publish_mod.bundle_is_live('["preflight","prepare","publish"]') is False
+    assert (
+        publish_mod.bundle_is_live(
+            '["preflight","prepare","bundle","assert-bundle","publish"]'
+        )
+        is True
+    )
+
+
+@pytest.mark.parametrize("raw", ["", "not json", '{"a":1}'])
+def test_liveness_facts_refuse_malformed_plan_json_loudly(raw):
+    # A garbled fact must never silently read as live OR non-live.
+    with pytest.raises(ReleaseError, match="--matrix"):
+        publish_mod.build_is_live(raw)
+    with pytest.raises(ReleaseError, match="--stages"):
+        publish_mod.bundle_is_live(raw)
 
 
 # --------------------------------------------------------------------------
@@ -969,6 +1035,147 @@ def test_publish_failed_sign_blocks_and_skipped_sign_passes_the_gate():
     publish_mod.check_gate("success", "success", "skipped")
     with pytest.raises(ReleaseError):
         publish_mod.check_gate("success", "success", "failure")
+
+
+#: The no-build "tag is the release" map (issue #745): endpoints only —
+#: preflight plans an empty matrix and no bundle stage for it.
+TAG_ONLY_TOML = """
+[artifacts.lex]
+endpoints = ["gh-release"]
+"""
+
+
+def test_publish_verb_accepts_the_empty_matrix_skipped_results(
+    tmp_path, monkeypatch, capsys
+):
+    """The confirmed #745 chain shape end-to-end at the verb: the composed
+    caller passes build=bundle=skipped (the if-skipped wf-build caller job's
+    result, canary-confirmed) plus the plan facts verbatim — an empty matrix
+    and a bundle-less stages list — and publish proceeds to gh-release."""
+    _publish_repo(tmp_path, monkeypatch, toml=TAG_ONLY_TOML)
+    recorder = SeamRecorder()
+    ghio = FakeGh(exists=False)
+    gitio = FakeGit(root=tmp_path)
+
+    rc = release_verb.run_publish(
+        _spec("1.2.3"),
+        build_result="skipped",
+        bundle_result="skipped",
+        sign_result="skipped",
+        matrix="[]",
+        stages='["preflight", "prepare", "publish"]',
+        run_cmd=recorder,
+        probe=recorder,
+        ghio=ghio,
+        gitio=gitio,
+        env={},
+    )
+
+    assert rc == 0
+    # The tag IS the release: a notes-only GH release, no staged assets, no
+    # external endpoint touched.
+    assert ("create", "v1.2.3", str(tmp_path / "RELEASE_NOTES.md"), False) in (
+        ghio.calls
+    )
+    assert not any(call[0] == "upload" for call in ghio.calls)
+    assert recorder.calls == []
+    assert "published 1.2.3" in capsys.readouterr().out
+
+
+def test_publish_verb_still_refuses_a_live_skipped_build(tmp_path, monkeypatch, capsys):
+    """A NON-empty matrix (live build) with a skipped result stays blocked —
+    liveness comes from the plan fact, never from the result string."""
+    _publish_repo(tmp_path, monkeypatch)
+    recorder = SeamRecorder()
+    ghio = FakeGh()
+    gitio = FakeGit(root=tmp_path)
+
+    rc = release_verb.run_publish(
+        _spec("1.2.3"),
+        build_result="skipped",
+        bundle_result="skipped",
+        sign_result="skipped",
+        matrix=json.dumps([{"artifact": "lex", "platform": "linux-x86_64"}]),
+        stages='["preflight", "prepare", "bundle", "assert-bundle", "publish"]',
+        run_cmd=recorder,
+        probe=recorder,
+        ghio=ghio,
+        gitio=gitio,
+        env={},
+    )
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "publish refused" in err
+    assert "live build requires success" in err
+    assert recorder.calls == []
+    assert ghio.calls == []
+
+
+def test_publish_verb_refuses_failure_and_cancelled_even_when_non_live(
+    tmp_path, monkeypatch, capsys
+):
+    """failure/cancelled always block, live or not: a non-live stage's
+    tolerance covers exactly the legitimate skip, never a broken run."""
+    _publish_repo(tmp_path, monkeypatch, toml=TAG_ONLY_TOML)
+    for result in ("failure", "cancelled"):
+        rc = release_verb.run_publish(
+            _spec("1.2.3"),
+            build_result=result,
+            bundle_result="skipped",
+            sign_result="skipped",
+            matrix="[]",
+            stages='["preflight", "prepare", "publish"]',
+            run_cmd=SeamRecorder(),
+            probe=SeamRecorder(),
+            ghio=FakeGh(),
+            gitio=FakeGit(root=tmp_path),
+            env={},
+        )
+        assert rc == 1
+        assert "publish refused" in capsys.readouterr().err
+
+
+def test_publish_verb_omitted_facts_keep_the_strict_gate(tmp_path, monkeypatch, capsys):
+    """The pre-#745 invocation (no --matrix/--stages) is the strict
+    contract: skipped build/bundle refuse — a caller that states no plan
+    never weakens the gate."""
+    _publish_repo(tmp_path, monkeypatch, toml=TAG_ONLY_TOML)
+    rc = release_verb.run_publish(
+        _spec("1.2.3"),
+        build_result="skipped",
+        bundle_result="skipped",
+        sign_result="skipped",
+        run_cmd=SeamRecorder(),
+        probe=SeamRecorder(),
+        ghio=FakeGh(),
+        gitio=FakeGit(root=tmp_path),
+        env={},
+    )
+    assert rc == 1
+    assert "publish refused" in capsys.readouterr().err
+
+
+def test_publish_verb_malformed_fact_is_a_loud_refusal(tmp_path, monkeypatch, capsys):
+    """A garbled plan fact dies at the gate, before any read or dispatch."""
+    _publish_repo(tmp_path, monkeypatch, toml=TAG_ONLY_TOML)
+    ghio = FakeGh()
+    rc = release_verb.run_publish(
+        _spec("1.2.3"),
+        build_result="skipped",
+        bundle_result="skipped",
+        sign_result="skipped",
+        matrix="not json",
+        stages='["publish"]',
+        run_cmd=SeamRecorder(),
+        probe=SeamRecorder(),
+        ghio=ghio,
+        gitio=FakeGit(root=tmp_path),
+        env={},
+    )
+    assert rc == 1
+    assert "--matrix is not valid JSON" in capsys.readouterr().err
+    assert ghio.calls == []
 
 
 def test_publish_rc_guard_records_no_external_invocation(tmp_path, monkeypatch, capsys):

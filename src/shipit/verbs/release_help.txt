@@ -18,5 +18,6 @@ reopens an unsigned .app/.dmg bundle tree, codesigns inner-first with the
 + staples — hard-failing on missing secrets, never skipping. `publish` — the
 terminal stage — dispatches the staged Artifacts to their declared
 Distribution endpoints (gh-release, crates, pypi, npm, brew), refusing unless
-build+bundle succeeded and sign succeeded-or-was-skipped, with the -release-rc
-guard central in the verb.
+every live stage succeeded (a plan-proven non-live build/bundle may be
+skipped — the empty-matrix "tag is the release" shape) and sign
+succeeded-or-was-skipped, with the -release-rc guard central in the verb.

@@ -121,6 +121,11 @@ def test_composed_chain_carries_zero_logic():
     assert publish["with"]["build-result"] == "${{ needs.build.result }}"
     assert publish["with"]["bundle-result"] == "${{ needs.build.result }}"
     assert publish["with"]["sign-result"] == "${{ needs.sign.result }}"
+    # The liveness facts ride VERBATIM (issue #745): the chain never
+    # translates a skipped result nor computes `matrix != '[]'` itself —
+    # the verb derives the empty-matrix verdict from the plan facts.
+    assert publish["with"]["matrix"] == "${{ needs.prepare.outputs.matrix }}"
+    assert publish["with"]["stages"] == "${{ needs.prepare.outputs.stages }}"
     # The one sign decision is the plan's projection, read, never remade.
     assert jobs["sign"]["if"] == "needs.prepare.outputs.sign-matrix != '[]'"
 
@@ -154,15 +159,27 @@ def test_assert_bundle_guards_publishes_unsigned_path():
 
 def test_publish_block_feeds_results_to_the_verb_not_yaml():
     # Scar #3 lives in the verb (ADR-0009/0040): the block hands the three
-    # stage results to `shipit release publish` verbatim and its own `if:`
-    # never re-derives the gate from them.
+    # stage results AND the plan's liveness facts (issue #745 — matrix and
+    # stages, verbatim) to `shipit release publish`, and its own `if:` never
+    # re-derives the gate from them.
     doc = _load("wf-publish.yml")
     publish = doc["jobs"]["publish"]
     script = _runs(publish["steps"])
-    for flag in ("--build-result", "--bundle-result", "--sign-result"):
+    for flag in (
+        "--build-result",
+        "--bundle-result",
+        "--sign-result",
+        "--matrix",
+        "--stages",
+    ):
         assert flag in script
     assert "inputs.build-result" not in publish["if"]
     assert "inputs.sign-result" not in publish["if"]
+    assert "inputs.matrix" not in publish["if"]
+    # The facts reach the verb untranslated: env passthrough only.
+    step = next(s for s in publish["steps"] if "release publish" in s.get("run", ""))
+    assert step["env"]["MATRIX"] == "${{ inputs.matrix }}"
+    assert step["env"]["STAGES"] == "${{ inputs.stages }}"
 
 
 def test_prepare_pipeline_steps_set_pipefail():
@@ -335,6 +352,7 @@ _SMOKES: dict[str, dict] = {
             "build-result=success",
             "bundle-result=success",
             "sign-result=skipped",
+            f"matrix={_ENTRY}",
             f"unsigned-matrix={_ENTRY}",
             f"stages={_STAGES}",
         ),

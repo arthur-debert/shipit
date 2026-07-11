@@ -3,14 +3,17 @@ name: wf-publish
 # The release PUBLISH stage block (ADR-0010/0040, TOL02-WS06). Routing ONLY:
 # it stages the artifacts back into one tree and hands the upstream stage
 # RESULTS — explicit workflow inputs, the GitHub job-result vocabulary
-# verbatim — to `shipit release publish`, whose gate IS scar #3
-# (workflows.lex §3.3 / ADR-0009: publish only when build and bundle
-# succeeded and sign succeeded-or-was-skipped; anything else is one loud
-# refusal naming every blocker). The check lives in the VERB, inside this
-# block — no consumer `needs:` wiring (or miswiring) can produce a publish
-# after a failed stage, and this YAML never duplicates the expression
-# (ADR-0040 rejected consumer-owned wiring; the legacy tauri-app release
-# `if:` moved here as inputs).
+# verbatim — plus the plan's LIVENESS FACTS (`matrix`, `stages`, verbatim —
+# issue #745) to `shipit release publish`, whose gate IS scar #3
+# (workflows.lex §3.3 / ADR-0009: publish only when every live stage
+# succeeded — a plan-proven non-live build/bundle may be skipped (the
+# empty-matrix "tag is the release" shape), sign succeeded-or-was-skipped;
+# anything else is one loud refusal naming every blocker). The check lives
+# in the VERB, inside this block — no consumer `needs:` wiring (or
+# miswiring) can produce a publish after a failed stage, and this YAML
+# never duplicates the expression or translates a result (ADR-0040 rejected
+# consumer-owned wiring; the legacy tauri-app release `if:` moved here as
+# inputs).
 #
 # Scar #2's second placement (ADR-0040, workflows.lex §3.2) also lives
 # here: the `assert` job runs `shipit release assert-bundle` over every
@@ -50,7 +53,8 @@ on:
       build-result:
         description: >-
           The build stage's result (success|failure|cancelled|skipped) —
-          `needs.<build>.result` verbatim. The verb enforces scar #3.
+          `needs.<build>.result` verbatim. The verb enforces scar #3 against
+          the plan's liveness facts (`matrix`/`stages`).
         type: string
         required: true
       bundle-result:
@@ -58,6 +62,14 @@ on:
           The bundle stage's result. wf-build runs build+bundle as one job,
           so a composed caller passes the same result for both; direct
           composition with split jobs passes each its own.
+        type: string
+        required: true
+      matrix:
+        description: >-
+          The preflight plan's `matrix` field (JSON, verbatim) — the build
+          stage's liveness fact (issue #745): an empty matrix proves the
+          skipped build legitimate ("the tag is the release"), and the VERB
+          derives that verdict — this block never translates a result.
         type: string
         required: true
       sign-result:
@@ -75,7 +87,11 @@ on:
         type: string
         required: true
       stages:
-        description: The preflight plan's `stages` field (JSON, verbatim).
+        description: >-
+          The preflight plan's `stages` field (JSON, verbatim) — gates the
+          assert job AND carries the bundle stage's liveness fact to the
+          publish verb (no `bundle` entry proves a skipped bundle
+          legitimate, issue #745).
         type: string
         required: true
     secrets:
@@ -186,6 +202,8 @@ jobs:
           BUILD_RESULT: ${{ inputs.build-result }}
           BUNDLE_RESULT: ${{ inputs.bundle-result }}
           SIGN_RESULT: ${{ inputs.sign-result }}
+          MATRIX: ${{ inputs.matrix }}
+          STAGES: ${{ inputs.stages }}
           # gh-release rides the Actions token; endpoint tokens are
           # validated by the verb before the first dispatch.
           GH_TOKEN: ${{ github.token }}
@@ -194,10 +212,15 @@ jobs:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         # Scar #3 is the verb's first act (pure gate before any I/O), fed
-        # the stage results verbatim; endpoints walk release-before-derived
-        # and every dispatch is idempotent-resumable (ADR-0009).
+        # the stage results AND the plan's liveness facts verbatim (issue
+        # #745 — the verb, never this YAML, decides that an empty-matrix
+        # skipped build/bundle is legitimate); endpoints walk
+        # release-before-derived and every dispatch is idempotent-resumable
+        # (ADR-0009).
         run: |
           pixi run --locked ./bin/shipit release publish "$VERSION" \
             --build-result "$BUILD_RESULT" \
             --bundle-result "$BUNDLE_RESULT" \
-            --sign-result "$SIGN_RESULT"
+            --sign-result "$SIGN_RESULT" \
+            --matrix "$MATRIX" \
+            --stages "$STAGES"
