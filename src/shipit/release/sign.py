@@ -113,7 +113,11 @@ CERT_PASSWORD_SECRET = "APPLE_CERTIFICATE_PASSWORD"
 
 #: Notary credential style 1 — the App Store Connect API key trio (base64
 #: ``.p8`` + key id + issuer UUID). WINS when both styles are present.
-ASC_SECRETS: tuple[str, ...] = ("ASC_KEY_BASE64", "ASC_KEY_ID", "ASC_ISSUER_ID")
+ASC_SECRETS: tuple[str, ...] = (
+    "ASC_API_KEY_BASE64",
+    "ASC_API_KEY_ID",
+    "ASC_API_ISSUER_ID",
+)
 
 #: Notary credential style 2 — Apple-ID email + app-specific password + team
 #: id. Used only when the ASC trio is incomplete.
@@ -232,9 +236,9 @@ def resolve_notary(env: Mapping[str, str]) -> NotaryCredentials:
             redact.register_secret(value)
         return NotaryCredentials(
             style="asc",
-            key_b64=asc["ASC_KEY_BASE64"],
-            key_id=asc["ASC_KEY_ID"],
-            issuer_id=asc["ASC_ISSUER_ID"],
+            key_b64=asc["ASC_API_KEY_BASE64"],
+            key_id=asc["ASC_API_KEY_ID"],
+            issuer_id=asc["ASC_API_ISSUER_ID"],
         )
     if all(apple.values()):
         for value in apple.values():
@@ -734,7 +738,7 @@ def _notarize(
     try:
         if creds.style == "asc":
             key_path = req.scratch / "AuthKey.p8"
-            key_path.write_bytes(_decode_b64(creds.key_b64, "ASC_KEY_BASE64"))
+            key_path.write_bytes(_decode_b64(creds.key_b64, "ASC_API_KEY_BASE64"))
         auth = notary_args(creds, key_path)
         submitted = req.run_cmd(
             [

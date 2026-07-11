@@ -36,9 +36,9 @@ MACHO_64 = b"\xcf\xfa\xed\xfe" + b"\x00" * 12  # thin arm64/x86_64 on-disk magic
 FULL_ENV = {
     "APPLE_CERTIFICATE": "Y2VydC1wMTI=",  # base64("cert-p12")
     "APPLE_CERTIFICATE_PASSWORD": "p12pass",
-    "ASC_KEY_BASE64": "cDgta2V5",  # base64("p8-key")
-    "ASC_KEY_ID": "KEYID123",
-    "ASC_ISSUER_ID": "issuer-uuid",
+    "ASC_API_KEY_BASE64": "cDgta2V5",  # base64("p8-key")
+    "ASC_API_KEY_ID": "KEYID123",
+    "ASC_API_ISSUER_ID": "issuer-uuid",
     "APPLE_ID": "dev@example.com",
     "APPLE_PASSWORD": "app-specific",
     "APPLE_TEAM_ID": "TEAM123",
@@ -70,7 +70,7 @@ def test_required_secret_names_declare_cert_pair_and_both_notary_trios():
         "APPLE_CERTIFICATE_PASSWORD",
     )
     assert sign_mod.NOTARY_SECRET_SETS == (
-        ("ASC_KEY_BASE64", "ASC_KEY_ID", "ASC_ISSUER_ID"),
+        ("ASC_API_KEY_BASE64", "ASC_API_KEY_ID", "ASC_API_ISSUER_ID"),
         ("APPLE_ID", "APPLE_PASSWORD", "APPLE_TEAM_ID"),
     )
     assert sign_mod.required_secret_names() == (
@@ -78,6 +78,21 @@ def test_required_secret_names_declare_cert_pair_and_both_notary_trios():
         *sign_mod.ASC_SECRETS,
         *sign_mod.APPLE_ID_SECRETS,
     )
+
+
+def test_sign_secret_names_match_the_ws02_requirements_registry():
+    # The signer READS exactly the GitHub secret names the WS02 secrets-
+    # requirements derivation DECLARES for the sign-mac stage
+    # (secretreq.SIGN_MAC_SECRETS: the cert pair + the ASC notary trio). If
+    # these drift, gh-setup provisions one spelling while the signer reads
+    # another and ASC notarization silently fails to resolve. The Apple-ID
+    # trio is the signer's runtime fallback, not a declared requirement.
+    from shipit.release import secretreq
+
+    assert (
+        *sign_mod.SIGNING_SECRETS,
+        *sign_mod.ASC_SECRETS,
+    ) == secretreq.SIGN_MAC_SECRETS
 
 
 def test_resolve_signing_missing_cert_hard_fails_naming_it():
@@ -103,7 +118,7 @@ def test_resolve_notary_asc_wins_when_both_styles_present():
 
 
 def test_resolve_notary_falls_back_to_apple_id_on_partial_asc():
-    env = dict(APPLE_ID_ENV, ASC_KEY_BASE64="cDgta2V5")  # incomplete ASC trio
+    env = dict(APPLE_ID_ENV, ASC_API_KEY_BASE64="cDgta2V5")  # incomplete ASC trio
     creds = sign_mod.resolve_notary(env)
     assert creds.style == "apple-id"
     assert (creds.apple_id, creds.password, creds.team_id) == (
@@ -114,15 +129,20 @@ def test_resolve_notary_falls_back_to_apple_id_on_partial_asc():
 
 
 def test_resolve_notary_neither_complete_names_the_missing_of_both_sets():
-    env = {"ASC_KEY_ID": "KEYID123", "APPLE_ID": "dev@example.com"}
+    env = {"ASC_API_KEY_ID": "KEYID123", "APPLE_ID": "dev@example.com"}
     with pytest.raises(ReleaseError) as excinfo:
         sign_mod.resolve_notary(env)
     message = str(excinfo.value)
     # Every UNSET name of both alternatives is spelled out; the set names
     # already supplied are not reported missing.
-    for name in ("ASC_KEY_BASE64", "ASC_ISSUER_ID", "APPLE_PASSWORD", "APPLE_TEAM_ID"):
+    for name in (
+        "ASC_API_KEY_BASE64",
+        "ASC_API_ISSUER_ID",
+        "APPLE_PASSWORD",
+        "APPLE_TEAM_ID",
+    ):
         assert name in message
-    assert "ASC_KEY_ID," not in message and "missing: APPLE_ID" not in message
+    assert "ASC_API_KEY_ID," not in message and "missing: APPLE_ID" not in message
 
 
 def test_notary_args_asc_trio_with_key_path():

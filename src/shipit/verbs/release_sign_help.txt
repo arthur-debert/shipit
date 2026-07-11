@@ -33,9 +33,10 @@ Credentials, from the environment:
   signing         APPLE_CERTIFICATE (base64 Developer ID .p12) +
                   APPLE_CERTIFICATE_PASSWORD (an EMPTY password is valid —
                   passwordless .p12 is legal PKCS#12)
-  notarization    either the ASC API key trio (ASC_KEY_BASE64 / ASC_KEY_ID /
-                  ASC_ISSUER_ID — wins when both styles are present) or the
-                  Apple-ID trio (APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID)
+  notarization    either the ASC API key trio (ASC_API_KEY_BASE64 /
+                  ASC_API_KEY_ID / ASC_API_ISSUER_ID — wins when both styles
+                  are present) or the Apple-ID trio (APPLE_ID /
+                  APPLE_PASSWORD / APPLE_TEAM_ID)
 
 Missing signing or notary secrets is a HARD FAIL naming the missing names —
 the legacy warn-and-skip is gone. Missing-secrets detection belongs to
