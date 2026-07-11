@@ -117,7 +117,8 @@ def request_cmd(pr: int | None, reviewer: str | None) -> None:
     "dimensions",
     default=None,
     help=(
-        "Comma-separated dimension pass set for --fanout (default: the shipped set)."
+        "Comma-separated dimension pass set for --fanout (default: the concern "
+        "fan-out set, ADR-0045)."
     ),
 )
 @click.option(

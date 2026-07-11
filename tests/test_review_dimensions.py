@@ -1,11 +1,13 @@
 """Unit tests for `shipit.review.dimensions` — the closed Dimension registry
 (RVW02-WS04, ADR-0045).
 
-The registry is the single source of the dimension vocabulary: the shipped
-default set is exactly the ADR-0045 decomposition, the ADR-0051 severity-tier
-set is registered but EXPERIMENT-ONLY (explicit selection, never default),
-config tokens resolve through ONE lookup, and an unknown token is a loud
-failure (the config boundary's job to translate — never a silent skip).
+The registry is the single source of the dimension vocabulary: the fan-out's
+default set is exactly the ADR-0045 decomposition (the SET a fan-out runs when
+its explicit opt-in names no list — the fan-out itself stopped being the
+round-1 default in ADR-0052), the ADR-0051 severity-tier set is registered but
+EXPERIMENT-ONLY (explicit selection, never default), config tokens resolve
+through ONE lookup, and an unknown token is a loud failure (the config
+boundary's job to translate — never a silent skip).
 """
 
 from __future__ import annotations
@@ -16,7 +18,7 @@ from shipit.review import dimensions
 
 
 def test_default_set_is_the_adr_0045_decomposition():
-    """The ADR-0051 guardrail: the SHIPPED DEFAULT set stays exactly the
+    """The ADR-0051 guardrail: the fan-out's DEFAULT SET stays exactly the
     ADR-0045 four — correctness, cross-file invariants, security/robustness,
     test quality, registry order — no matter what experiment-only entries the
     registry gains."""
@@ -58,9 +60,12 @@ def test_every_dimension_carries_a_focus_slice():
         assert dim.focus.strip()
 
 
-def test_resolve_none_or_empty_is_the_shipped_default_set():
-    """None/empty resolves to the shipped default four — NOT the whole
-    registry, which also carries the experiment-only tiers (ADR-0051)."""
+def test_resolve_none_or_empty_is_the_fanout_default_set():
+    """None/empty resolves to the fan-out's default four — NOT the whole
+    registry, which also carries the experiment-only tiers (ADR-0051). NB
+    (ADR-0052): the resolver keeps this arm for variant-hash stability and the
+    explicit fan-out drivers; the round-1 SHAPE switch happens before it, in
+    `run_fanout_review`."""
     default = dimensions.resolve_dimensions(dimensions.DEFAULT_DIMENSION_NAMES)
     assert dimensions.resolve_dimensions(None) == default
     assert dimensions.resolve_dimensions(()) == default
@@ -104,9 +109,9 @@ def test_fanout_variant_text_folds_names_titles_and_focus_texts():
 
 
 def test_fanout_variant_text_default_and_reordered_sets_pool():
-    """Canonicalization: None/empty means the shipped default (pools with the
-    explicit spelling of it), and passes run in parallel, so a REORDERED
-    dimensions list is the same experiment — same text, same hash."""
+    """Canonicalization: None/empty means the fan-out's default set (pools
+    with the explicit spelling of it), and passes run in parallel, so a
+    REORDERED dimensions list is the same experiment — same text, same hash."""
     base = "x"
     explicit = dimensions.fanout_variant_text(
         base, list(dimensions.DEFAULT_DIMENSION_NAMES)

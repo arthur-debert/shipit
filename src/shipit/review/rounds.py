@@ -1,8 +1,10 @@
 """rounds — decide a review round's SCOPE: full round 1, or an incremental fix range.
 
 The convergence half of the RVW02 review redesign (ADR-0045; PRD "Incremental
-rounds"). Round 1 is exhaustive and expensive by design (the dimension fan-out
-over the whole PR diff). Every round AFTER the first is cheap and narrow: it
+rounds"). Round 1 is exhaustive by design: the whole PR diff, reviewed as one
+monolithic full-scope pass by default, or as the dimension fan-out when a
+reviewer's ``dimensions`` config opts in (ADR-0052). Every round AFTER the
+first is cheap and narrow: it
 reviews only the *fix range* — ``last-reviewed-head..new-head`` — as ONE
 incremental pass with dependency-neighborhood context, new nits suppressed. This
 module owns the ONE decision between those two shapes and nothing else.
@@ -53,8 +55,8 @@ class RoundPlan:
     fix range.
 
     ``incremental`` is the shape: ``False`` is a full round (round 1, or a
-    fallback), reviewed as the dimension fan-out over the resolved view's OWN
-    full-PR diff; its ``base`` carries the PR base ref tip (``baseRefOid``) for the
+    fallback), reviewed over the resolved view's OWN full-PR diff (the default
+    single pass, or the opted-in dimension fan-out — ADR-0052); its ``base`` carries the PR base ref tip (``baseRefOid``) for the
     record, but the caller does NOT re-diff over it. ``True`` is an incremental
     round, reviewed as ONE pass over the fix range ``base..head`` where ``base`` is
     the reviewer's last-reviewed head — here ``base`` / ``head`` ARE the diff

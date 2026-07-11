@@ -47,7 +47,7 @@ from . import artifacts as artifacts_mod
 from . import fanout, producer, roundrecord
 from .calibrator import CalibratorConfig
 from .diff import RangeView, ReviewError
-from .dimensions import resolve_dimensions
+from .dimensions import DEFAULT_DIMENSION_NAMES, resolve_dimensions
 
 logger = logging.getLogger("shipit.review")
 
@@ -317,8 +317,13 @@ def run_fanout_replay(
     exactly like the single-pass :func:`run_replay` — ``round.runs`` populated
     per pass (plus the calibrator's run when ``calibrator`` opts the dormant
     judge on), ``round.findings`` carrying the routing's real dispositions.
-    ``nit_cap`` defaults to ``None`` (uncapped): an offline experiment records
-    everything; there is no PR to protect from nit churn. When ``calibrator``
+    ``dimensions`` defaults to the fan-out's default SET — the ADR-0045
+    concern four (:data:`shipit.review.dimensions.DEFAULT_DIMENSION_NAMES`):
+    calling this driver at all is the explicit fan-out opt-in (ADR-0052), so
+    an unnamed set means "the fan-out, stock decomposition", never the
+    orchestrator's single-pass default. ``nit_cap`` defaults to ``None``
+    (uncapped): an offline experiment records everything; there is no PR to
+    protect from nit churn. When ``calibrator``
     is set, the role agent-defs are provisioned into the replay checkout first
     (:func:`provision_agent_defs`) so the judge's ``claude --agent reviewer``
     launch works in a clone that never committed them; a filesystem failure
@@ -335,6 +340,13 @@ def run_fanout_replay(
     replay). ``base_dir`` overrides the store family root (tests); ``launcher``
     injects the launch seam (tests).
     """
+    # This driver IS the explicit fan-out opt-in (a `shape = "fanout"` Lab
+    # cell, or `shipit pr review replay --fanout`), so a call without a named
+    # `dimensions` list means the fan-out's DEFAULT SET — the ADR-0045 concern
+    # four — not the orchestrator's no-dimensions default, which is now the
+    # single monolithic pass (ADR-0052). Resolve it here so the orchestrator
+    # below runs the fan-out and the record folds the real pass set.
+    dimensions = tuple(dimensions) if dimensions else DEFAULT_DIMENSION_NAMES
     if calibrator is not None:
         # A filesystem failure here (read-only checkout, permissions, a
         # non-directory `.claude`/`agents` component) must die as the replay

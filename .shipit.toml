@@ -56,22 +56,19 @@ AGY_REVIEW_APP_ID            = { doppler = "AGY_REVIEW_APP_ID" }
 [reviewers]
 copilot = { rerun = true }
 # The local reviewers' readiness wait window is BUMPED over the shipped 20m
-# default (RVW02-WS04): a round-1 review now fans out into parallel dimension
-# passes (and, when the calibrator is opted on, a calibration run), so a large
-# PR's review legitimately takes longer to ARRIVE — 45 minutes covers the
-# fan-out without letting a vanished
-# run park the PR forever (the window is the arrival deadline, not the per-run
-# agent timeout).
+# default (RVW02-WS04): a large PR's round-1 review (the single full-scope pass
+# and, when the calibrator is opted on, a calibration run) legitimately takes
+# longer to ARRIVE — 45 minutes covers it without letting a vanished run park
+# the PR forever (the window is the arrival deadline, not the per-run agent
+# timeout).
 #
-# `dimensions` — the RVW02-WS05 baseline-study shipped default set, codified
-# from the data (report on #638). Across all three baseline PRs every one of the
-# four dimensions produced at least one posted, calibrated finding
-# (security-robustness surfaced the sole new production major; correctness,
-# cross-file-invariants and test-quality all posted too), so none is a removal
-# candidate — the ADR-0045 default of all four stands, made explicit here on the
-# dogfood reviewers.
-codex = { window = 2700, dimensions = ["correctness", "cross-file-invariants", "security-robustness", "test-quality"] }
-agy = { window = 2700, dimensions = ["correctness", "cross-file-invariants", "security-robustness", "test-quality"] }
+# No `dimensions` key: these dogfood reviewers ride the ADR-0052 round-1 DEFAULT
+# — ONE unscoped full-scope pass, not the four-pass fan-out. The fan-out stays
+# fully wired and selectable — re-add `dimensions = [...]` on a reviewer to opt
+# it back in (the RVW02-WS05 baseline-study set was correctness,
+# cross-file-invariants, security-robustness, test-quality; report on #638).
+codex = { window = 2700 }
+agy = { window = 2700 }
 
 # Table-level review-run policy, set FROM the WS05 baseline study (#638):
 #

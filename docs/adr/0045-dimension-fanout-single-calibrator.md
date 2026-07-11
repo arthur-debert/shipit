@@ -40,6 +40,13 @@
 > the closed registry for Review-Lab measurement, selectable only by explicit
 > `dimensions` config. The default decomposition and calibration-time severity
 > assignment are unchanged pending Lab evidence.
+>
+> **Amended by ADR-0052.** The concern fan-out is no longer the round-1
+> DEFAULT: Lab measurement (v37 fixture) found a single monolithic pass
+> matches its confirmed-major recall at ~1/4 the cost, and the fan-out
+> missed a between-buckets CI major both unblinkered configs caught. The
+> fan-out remains fully wired and selectable per reviewer; dimensions,
+> mechanical dedup, and the dormant calibrator are unchanged.
 
 A local-agent reviewer's first review of a PR is no longer one monolithic
 "find everything" pass: the detached review run fans out into parallel

@@ -1,12 +1,14 @@
-"""Unit tests for `shipit.review.fanout` — round-1 dimension fan-out + union
-post (RVW02-WS04/WS08, ADR-0045).
+"""Unit tests for `shipit.review.fanout` — round-1 review orchestration +
+union post (RVW02-WS04/WS08, ADR-0045, ADR-0052).
 
 The orchestration is pinned with the producer + calibrator seams FAKED (no
-Tree, no model run, no gh): pass fan-out over one shared Tree, the union's
-shape and trust-boundary coercion, pass-failure tolerance vs all-failed, the
-empty-union short-circuit, the deterministic routing (duplicates never post,
-the nit cap, the derived status), the merged coverage attestation, and the
-contributing-run trail (run ids + variant hashes) the round record persists.
+Tree, no model run, no gh): the round-1 shape switch (default single
+monolithic pass, ADR-0052; explicit `dimensions` → the fan-out), the pass
+fan-out over one shared Tree, the union's shape and trust-boundary coercion,
+pass-failure tolerance vs all-failed, the empty-union short-circuit, the
+deterministic routing (duplicates never post, the nit cap, the derived
+status), the merged coverage attestation, and the contributing-run trail
+(run ids + variant hashes) the round record persists.
 
 Both round-1 paths are covered: the DEFAULT mechanically-deduped union
 (RVW02-WS08, calibrator off — no model run, pass severities kept, same-location
@@ -149,14 +151,24 @@ def _seams(monkeypatch):
             return (
                 f"incremental task for {incremental_range[0]}..{incremental_range[1]}"
             )
+        if dimension is None:
+            # The round-1 DEFAULT single pass (ADR-0052) launches unscoped.
+            return "single full-scope task"
         return f"task for {dimension.name}"
 
     monkeypatch.setattr(fanout.producer, "pass_task_text", fake_pass_task_text)
 
     def fake_run_tree_review(backend, ctx, **kw):
         # An incremental round runs ONE pass (dimension=None, incremental_range
-        # set) keyed as "incremental"; a round-1 pass is keyed by dimension name.
-        key = kw["dimension"].name if kw.get("dimension") is not None else "incremental"
+        # set) keyed as "incremental"; the round-1 DEFAULT single pass
+        # (ADR-0052) is also unscoped (dimension=None, no range) and keys as
+        # "single"; a fan-out pass is keyed by dimension name.
+        if kw.get("dimension") is not None:
+            key = kw["dimension"].name
+        elif kw.get("incremental_range") is not None:
+            key = "incremental"
+        else:
+            key = "single"
         outcome = capture["reviews"][key]
         assert kw["tree_path"] == "/tree"  # every pass shares the ONE Tree
         if isinstance(outcome, Exception):
@@ -857,13 +869,67 @@ def test_dry_run_with_calibrator_on_notes_the_judge_and_bills_nothing(
     assert "would calibrate the union" in capsys.readouterr().out
 
 
-def test_default_dimension_set_is_used_when_none_configured(_seams):
+def test_default_round1_shape_is_one_monolithic_single_pass(_seams, monkeypatch):
+    """ADR-0052: no configured `dimensions` → ONE unscoped full-scope pass,
+    never the dimension fan-out. The pass launches with dimension=None (the
+    monolithic task) and its run entry carries the `single` label."""
     from shipit.agent import backend as agent_backend
-    from shipit.review.dimensions import DEFAULT_DIMENSION_NAMES
 
-    _seams["reviews"] = {name: _pass_review([]) for name in DEFAULT_DIMENSION_NAMES}
+    seen_dimensions = []
+    real_task_text = fanout.producer.pass_task_text
+
+    def spying_task_text(backend, number, **kw):
+        seen_dimensions.append(kw.get("dimension"))
+        return real_task_text(backend, number, **kw)
+
+    monkeypatch.setattr(fanout.producer, "pass_task_text", spying_task_text)
+    _seams["reviews"] = {"single": _pass_review([_comment("bug", severity="major")])}
     outcome = fanout.run_fanout_review(agent_backend.CODEX, _ctx())
-    assert [r["dimension"] for r in outcome.runs] == list(DEFAULT_DIMENSION_NAMES)
+    assert [r["dimension"] for r in outcome.runs] == ["single"]
+    assert [r["kind"] for r in outcome.runs] == ["single-pass"]
+    assert seen_dimensions == [None]  # unscoped: the monolithic full-scope task
+    assert (
+        "Review: one full-scope pass" in (outcome.review["summary"]["overall_feedback"])
+    )
+    assert [c["text"] for c in outcome.review["comments"]] == ["bug"]
+
+
+def test_explicit_dimensions_config_still_routes_to_the_fanout(_seams):
+    """The fan-out stays fully wired behind the explicit opt-in (ADR-0052):
+    a named `dimensions` list runs exactly those scoped passes in parallel
+    and posts their union, exactly as under ADR-0045."""
+    from shipit.agent import backend as agent_backend
+
+    _seams["reviews"] = {
+        "correctness": _pass_review([_comment("logic bug", severity="major")]),
+        "test-quality": _pass_review([_comment("missing test", severity="minor")]),
+    }
+    outcome = fanout.run_fanout_review(
+        agent_backend.CODEX, _ctx(), dimensions=["correctness", "test-quality"]
+    )
+    assert [r["dimension"] for r in outcome.runs] == ["correctness", "test-quality"]
+    assert all(r["kind"] == "dimension-pass" for r in outcome.runs)
+    assert (
+        "Review fan-out: 2 dimension pass(es)"
+        in (outcome.review["summary"]["overall_feedback"])
+    )
+    assert [c["text"] for c in outcome.review["comments"]] == [
+        "logic bug",
+        "missing test",
+    ]
+
+
+def test_invocation_overrides_without_explicit_dimensions_fail_loud(_seams):
+    """An override targets a dimension pass; the default single-pass round has
+    none (ADR-0052) — silently ignoring it would run a mislabeled arm."""
+    from shipit.agent import backend as agent_backend
+
+    with pytest.raises(ValueError, match="explicit `dimensions` fan-out"):
+        fanout.run_fanout_review(
+            agent_backend.CODEX,
+            _ctx(),
+            invocation_overrides={"correctness": {"model": "flash"}},
+        )
 
 
 def test_by_name_is_the_prompt_slice_the_passes_launch_with():
@@ -954,6 +1020,18 @@ def test_incremental_pass_failure_fails_the_round(_seams):
         fanout.run_fanout_review(
             agent_backend.CODEX, _incremental_ctx(), incremental=True
         )
+
+
+def test_single_pass_failure_fails_the_round(_seams):
+    # ADR-0052: the round-1 DEFAULT is one monolithic pass. Its sole pass failing
+    # IS all passes failing → RuntimeError with the single-pass phrasing (service
+    # maps it to the `failed` funnel outcome), the failure posture of the new
+    # default path.
+    from shipit.agent import backend as agent_backend
+
+    _seams["reviews"] = {"single": RuntimeError("backend blew up")}
+    with pytest.raises(RuntimeError, match="the single review pass failed"):
+        fanout.run_fanout_review(agent_backend.CODEX, _ctx())
 
 
 # --- measured token usage (RVW03-WS04) ---------------------------------------
