@@ -54,10 +54,9 @@ def expected_main_binary(artifact: config.Artifact) -> str:
     if artifact.product_name is not None:
         return artifact.product_name
     for target in artifact.build:
-        if target.package is not None:
-            name = PurePosixPath(target.package).name
-            if name and name not in (".", ".."):
-                return name
+        basename = target.package_basename
+        if basename is not None:
+            return basename
     return artifact.name
 
 

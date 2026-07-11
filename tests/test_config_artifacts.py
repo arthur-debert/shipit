@@ -68,6 +68,26 @@ def test_optional_fields_default_to_absent_not_null():
     assert artifact.sign is False
 
 
+@pytest.mark.parametrize(
+    "package,expected",
+    [
+        (None, None),
+        ("lex-cli", "lex-cli"),
+        ("./cmd/padz", "padz"),
+        (".", None),
+        ("./", None),
+        ("..", None),
+        ("/", None),
+    ],
+)
+def test_build_target_package_basename(package, expected):
+    # The single source of truth for "does this package name a binary?" — the
+    # basename, or None for no package / a bare path-navigation token. Shared by
+    # binary_location and the assert-bundle expected-name chain.
+    target = config.BuildTarget(toolchain="go", package=package)
+    assert target.package_basename == expected
+
+
 def test_go_target_carries_the_version_var():
     (artifact,) = _load(
         "[artifacts.mycli]\n"

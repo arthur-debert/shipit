@@ -479,6 +479,21 @@ class BuildTarget:
     package: str | None = None
     version_var: str | None = None
 
+    @property
+    def package_basename(self) -> str | None:
+        """The binary name this target's ``package`` yields — its path basename
+        — or ``None`` when it names none: no ``package``, an empty basename, or
+        a bare path-navigation token (``./cmd/padz`` → ``padz``;
+        ``.``/``./``/``..``/``/`` → ``None``). The single source of truth for
+        "does this package name a binary?", shared by the binary-location
+        derivation (:func:`shipit.tools.e2e.binary_location`) and the
+        assert-bundle expected-name chain
+        (:func:`shipit.release.integrity.expected_main_binary`)."""
+        if self.package is None:
+            return None
+        name = PurePosixPath(self.package).name
+        return name if name and name not in (".", "..") else None
+
 
 @dataclass(frozen=True)
 class BundleSpec:

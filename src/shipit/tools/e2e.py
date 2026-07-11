@@ -45,7 +45,6 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
-from pathlib import PurePosixPath
 
 from .. import config
 
@@ -61,15 +60,6 @@ BINARY_TOOLCHAINS: tuple[str, ...] = ("rust", "go")
 #: consumer suites — padz's ``PADZ_BIN``, dodot's ``DODOT_BIN`` — predate
 #: shipit and must keep working unchanged).
 _LEGACY_TR = str.maketrans("abcdefghijklmnopqrstuvwxyz-", "ABCDEFGHIJKLMNOPQRSTUVWXYZ_")
-
-
-def _package_basename(package: str) -> str | None:
-    """The binary name a build target's ``package`` yields — its path basename
-    — or ``None`` when it names no binary: an empty basename or a bare
-    path-navigation token (``./cmd/padz`` → ``padz``; ``.``/``./``/``..``/``/``
-    → ``None``). Pure."""
-    name = PurePosixPath(package).name
-    return name if name and name not in (".", "..") else None
 
 
 def bin_env_var(name: str) -> str:
@@ -270,7 +260,7 @@ def binary_location(
             f"[artifacts].{artifact.name} {consumer} needs a [toolchains] "
             f"{target.toolchain} leg to build its binary, and none is mapped"
         )
-    if target.package is not None and _package_basename(target.package) is None:
+    if target.package is not None and target.package_basename is None:
         # A path-navigation package (`.`, `./`, `..`, `/`) names no binary —
         # refuse it here with the real diagnosis (shared by rust and go), never
         # let it degrade downstream into a nonsense binary path (rust's
@@ -292,5 +282,5 @@ def binary_location(
     elif target.package is None:  # go, module root -> named by the artifact
         relpath = artifact.name
     else:  # go, an explicit package: the built binary is its basename
-        relpath = PurePosixPath(target.package).name
+        relpath = target.package_basename
     return BinaryLocation(leg_path=leg_path, relpath=relpath)
