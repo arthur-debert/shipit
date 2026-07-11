@@ -20,8 +20,10 @@ work streams land:
 - :mod:`.sign` — the consumer-agnostic mac signer unit (WS04, workflows.lex
   §3.1): reopen the unsigned ``.app``/``.dmg`` bundle, codesign inner-first
   with the ``.app`` last, reseal via ``hdiutil``, notarize + staple. Pure
-  argument assembly + credential resolution, effectful only through the
-  injected exec seam; hard-fails on missing secrets (no warn-and-skip).
+  argument assembly + credential resolution; effectful through the injected
+  exec seam AND caller-scoped filesystem I/O under the scratch dir (decoding
+  credential material, staging the ``.dmg``); hard-fails on missing secrets
+  (no warn-and-skip).
 
 The effectful shells live in :mod:`shipit.verbs` (``shipit release prepare``
 / ``bundle`` / ``assert-bundle`` / ``sign`` are :mod:`shipit.verbs.release`),

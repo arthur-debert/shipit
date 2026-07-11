@@ -55,8 +55,6 @@ IDENTITY = "Developer ID Application: Phos (TEAM123)"
 
 FIND_IDENTITY_OUT = f'  1) ABCDEF0123 "{IDENTITY}"\n     1 valid identities found\n'
 
-LIST_KEYCHAINS_OUT = '    "/Users/u/Library/Keychains/login.keychain-db"\n'
-
 
 # --------------------------------------------------------------------------
 # Pure assembly: secret names, credential resolution, flag construction
@@ -167,6 +165,11 @@ def test_codesign_argv_hardened_runtime_timestamp_and_entitlements():
         IDENTITY, Path("/x/App.app"), Path("/x/ent.plist")
     )
     assert with_ent[-3:] == ["--entitlements", "/x/ent.plist", "/x/App.app"]
+    # The signing keychain is pinned explicitly (no global search-list mutation).
+    with_kc = sign_mod.codesign_argv(
+        IDENTITY, Path("/x/App.app"), keychain=Path("/tmp/sign.keychain-db")
+    )
+    assert with_kc[with_kc.index("--keychain") + 1] == "/tmp/sign.keychain-db"
 
 
 def test_sign_order_puts_nested_first_and_the_app_last():
@@ -235,6 +238,29 @@ def test_nested_signable_inner_first_frameworks_opaque_symlinks_skipped(tmp_path
     assert app not in paths
 
 
+def test_nested_signable_lists_plugin_and_bundle_roots(tmp_path):
+    """Loadable ``.plugin`` / ``.bundle`` roots are signed as a unit: signing
+    only their inner Mach-O leaves the bundle root unsigned, which the notary /
+    Gatekeeper rejects. Their roots must appear in the enumeration."""
+    app = tmp_path / "App.app"
+    (app / "Contents" / "MacOS").mkdir(parents=True)
+    (app / "Contents" / "MacOS" / "app").write_bytes(MACHO_64)
+    plugin = app / "Contents" / "PlugIns" / "Widget.plugin" / "Contents" / "MacOS"
+    plugin.mkdir(parents=True)
+    (plugin / "Widget").write_bytes(MACHO_64)
+    bundle = app / "Contents" / "Resources" / "Res.bundle" / "Contents" / "MacOS"
+    bundle.mkdir(parents=True)
+    (bundle / "Res").write_bytes(MACHO_64)
+
+    rel = [str(p.relative_to(app)) for p in sign_mod.nested_signable(app)]
+    assert "Contents/PlugIns/Widget.plugin" in rel
+    assert "Contents/Resources/Res.bundle" in rel
+    # A bundle root lands AFTER its own inner Mach-O (inner-first order).
+    assert rel.index("Contents/PlugIns/Widget.plugin") > rel.index(
+        "Contents/PlugIns/Widget.plugin/Contents/MacOS/Widget"
+    )
+
+
 # --------------------------------------------------------------------------
 # The recorded exec seam
 # --------------------------------------------------------------------------
@@ -243,8 +269,8 @@ def test_nested_signable_inner_first_frameworks_opaque_symlinks_skipped(tmp_path
 class SignRecorder:
     """The recorded signer seam: exact argv + stated timeout per Exec, with
     canned stdouts / simulated writes for the commands whose OUTPUT the unit
-    consumes (list-keychains, find-identity, notarytool JSON, tar extraction,
-    hdiutil's dmg)."""
+    consumes (find-identity, notarytool JSON, tar extraction, hdiutil's
+    dmg)."""
 
     def __init__(self, tmp_path: Path, *, statuses=("Accepted",), effects=None):
         self.calls: list[tuple[tuple[str, ...], float]] = []
@@ -269,8 +295,6 @@ class SignRecorder:
             shutil.copytree(
                 self.tmp_path / "src" / "Phos.app", work / "Phos.app", symlinks=True
             )
-        elif argv[0] == "security" and argv[1] == "list-keychains" and "-s" not in argv:
-            stdout = LIST_KEYCHAINS_OUT
         elif argv[0] == "security" and argv[1] == "find-identity":
             stdout = FIND_IDENTITY_OUT
         elif argv[0] == "hdiutil":
@@ -362,20 +386,10 @@ def test_sign_bundle_full_recorded_sequence(tmp_path):
                 "kc-pass",
                 kc,
             ),
-            ("security", "list-keychains", "-d", "user"),
-            (
-                "security",
-                "list-keychains",
-                "-d",
-                "user",
-                "-s",
-                kc,
-                "/Users/u/Library/Keychains/login.keychain-db",
-            ),
             ("security", "find-identity", "-v", "-p", "codesigning", kc),
         ]
 
-    def signs(path):
+    def signs(path, kc):
         return [
             (
                 "codesign",
@@ -385,6 +399,8 @@ def test_sign_bundle_full_recorded_sequence(tmp_path):
                 "--options",
                 "runtime",
                 "--timestamp",
+                "--keychain",
+                kc,
                 str(path),
             ),
             ("codesign", "--verify", "--strict", str(path)),
@@ -407,7 +423,7 @@ def test_sign_bundle_full_recorded_sequence(tmp_path):
             str(scratch / "unpacked"),
         ),
         *keychain_setup(kc1, cert1),
-        *[argv for path in inner_first for argv in signs(path)],
+        *[argv for path in inner_first for argv in signs(path, kc1)],
         ("security", "delete-keychain", kc1),
         (
             "hdiutil",
@@ -422,7 +438,7 @@ def test_sign_bundle_full_recorded_sequence(tmp_path):
             signed_dmg,
         ),
         *keychain_setup(kc2, cert2),  # the dmg pass: its OWN unique keychain
-        *signs(signed_dmg),
+        *signs(signed_dmg, kc2),
         ("security", "delete-keychain", kc2),
         (
             "xcrun",
@@ -651,7 +667,7 @@ def test_sign_bundle_staple_failure_is_non_fatal(tmp_path):
     assert (tmp_path / "dist" / "Phos_1.0.0_aarch64.dmg").read_bytes() == b"signed-dmg"
 
 
-def test_sign_bundle_entitlements_apply_to_the_app_pass_only(tmp_path):
+def test_sign_bundle_entitlements_apply_to_the_app_root_only(tmp_path):
     _fixture_tree(tmp_path)
     ent = tmp_path / "ent.plist"
     ent.write_text("<plist/>")
@@ -660,9 +676,16 @@ def test_sign_bundle_entitlements_apply_to_the_app_pass_only(tmp_path):
     sign_mod.sign_bundle(_request(tmp_path, recorder, entitlements=ent))
 
     signs = recorder.heads("codesign", "--force")
-    app_pass, dmg_pass = signs[:-1], signs[-1]
-    assert all("--entitlements" in argv for argv in app_pass)
-    assert "--entitlements" not in dmg_pass  # meaningless on a disk image
+    # sign_order signs the nested paths first, the .app root last, then the dmg
+    # pass runs last of all: entitlements ride ONLY the .app root — a nested
+    # framework/helper carrying the app's entitlements is what the notary
+    # rejects, and they are meaningless on the disk image.
+    app_root_pass = signs[-2]
+    nested_passes = signs[:-2]
+    dmg_pass = signs[-1]
+    assert "--entitlements" in app_root_pass
+    assert all("--entitlements" not in argv for argv in nested_passes)
+    assert "--entitlements" not in dmg_pass
 
 
 def test_sign_bundle_without_an_incoming_dmg_stages_under_the_app_name(tmp_path):

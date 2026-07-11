@@ -285,12 +285,19 @@ def notary_args(creds: NotaryCredentials, key_path: Path | None) -> list[str]:
 
 
 def codesign_argv(
-    identity: str, path: Path, entitlements: Path | None = None
+    identity: str,
+    path: Path,
+    entitlements: Path | None = None,
+    keychain: Path | None = None,
 ) -> list[str]:
     """One codesign invocation: hardened runtime + secure timestamp, forced
-    re-sign (the bundler may have ad-hoc-signed), optional entitlements. Pure."""
+    re-sign (the bundler may have ad-hoc-signed), the signing identity pinned
+    to ``keychain`` via ``--keychain`` (found there without touching the user's
+    global keychain search list), optional entitlements. Pure."""
     argv = ["codesign", "--force", "--sign", identity, "--options", "runtime"]
     argv.append("--timestamp")
+    if keychain is not None:
+        argv += ["--keychain", str(keychain)]
     if entitlements is not None:
         argv += ["--entitlements", str(entitlements)]
     argv.append(str(path))
@@ -305,10 +312,20 @@ def sign_order(nested: Sequence[Path], app: Path) -> list[Path]:
 
 #: The nested code-bundle roots the enumeration recognises. ``.framework`` is
 #: OPAQUE (the root is the signing unit; its internals are never signed
-#: individually); ``.app`` / ``.appex`` / ``.xpc`` are RECURSED into — their
-#: root sign covers only their main executable, so their inner extra Mach-O
-#: is enumerated too.
-BUNDLE_SUFFIXES: tuple[str, ...] = (".framework", ".app", ".appex", ".xpc")
+#: individually); ``.app`` / ``.appex`` / ``.xpc`` / ``.plugin`` / ``.bundle``
+#: are RECURSED into — their root sign covers only their main executable, so
+#: their inner extra Mach-O is enumerated too. The loadable ``.plugin`` /
+#: ``.bundle`` roots MUST be listed: signing only their inner Mach-O and never
+#: the bundle root leaves the root unsigned, which the notary/Gatekeeper
+#: rejects (the signature must land on the bundle root).
+BUNDLE_SUFFIXES: tuple[str, ...] = (
+    ".framework",
+    ".app",
+    ".appex",
+    ".xpc",
+    ".plugin",
+    ".bundle",
+)
 
 #: Mach-O magic numbers, as the first four ON-DISK bytes — thin 32/64-bit in
 #: both byte orders, plus the fat/universal header (always big-endian on
@@ -440,8 +457,9 @@ class SignResult:
 
     ``dmg`` is the ABSOLUTE staged path of the signed, notarized ``.dmg``
     (under the original dmg filename); ``nested_signed`` how many nested
-    Mach-O preceded the ``.app``; ``stapled`` whether the ticket was stapled
-    (a staple failure is non-fatal — online Gatekeeper still verifies).
+    signable paths (Mach-O files AND nested bundle roots) preceded the
+    ``.app``; ``stapled`` whether the ticket was stapled (a staple failure is
+    non-fatal — online Gatekeeper still verifies).
     """
 
     app: str
@@ -515,14 +533,6 @@ def _unpack(payload: Path, work: Path, run_cmd: RunCmd) -> Path:
     return apps[0]
 
 
-def _parse_keychain_list(stdout: str) -> list[str]:
-    """The keychain paths out of ``security list-keychains`` output (one
-    quoted, indented path per line). Pure."""
-    return [
-        line.strip().strip('"') for line in stdout.splitlines() if line.strip('" \t')
-    ]
-
-
 def _parse_identity(stdout: str) -> str | None:
     """The first codesigning identity name out of ``security find-identity -v``
     output (``  1) <hash> "<name>"``), or ``None`` when the keychain holds
@@ -533,9 +543,15 @@ def _parse_identity(stdout: str) -> str | None:
 
 def _decode_b64(value: str, what: str) -> bytes:
     """Decode base64 secret material, re-shaping a garbage value as the
-    domain refusal (never a raw ``binascii.Error`` traceback)."""
+    domain refusal (never a raw ``binascii.Error`` traceback).
+
+    Whitespace is stripped before decoding: secrets injected through the
+    environment routinely carry a trailing newline (or wrapped lines), and
+    ``validate=True`` — which rejects any non-alphabet byte — would fail those
+    otherwise-valid base64 payloads. Stripping first keeps the strict check on
+    genuinely corrupt input while tolerating the newline."""
     try:
-        return base64.b64decode(value, validate=True)
+        return base64.b64decode(re.sub(r"\s+", "", value), validate=True)
     except (binascii.Error, ValueError) as exc:
         raise ReleaseError(f"{what} is not valid base64: {exc}") from exc
 
@@ -551,11 +567,18 @@ def _sign_paths(
 
     The full legacy ``sign-mac`` lifecycle: unique keychain + cert paths per
     call (the ``.app`` and ``.dmg`` passes in one run must not collide),
-    create/unlock/import/partition-list, search-list PREPEND (keeping the
-    existing user keychains), identity discovery, then per path a forced
-    hardened-runtime + timestamp sign followed by ``codesign --verify
-    --strict``. The ``finally`` tears the keychain down and unlinks the
-    decoded ``.p12`` on every exit path — success or failure.
+    create/unlock/import/partition-list, identity discovery IN that keychain,
+    then per path a forced hardened-runtime + timestamp sign followed by
+    ``codesign --verify --strict``. The signing keychain is pinned on every
+    ``codesign`` via ``--keychain`` rather than prepended to the user's global
+    keychain search list: a search-list mutation outlives a ``SIGKILL`` (or a
+    power loss) that skips the ``finally`` teardown and would then permanently
+    pollute a release engineer's laptop. Entitlements ride ONLY the final path
+    (the top-level ``.app``); a nested framework or helper must never carry the
+    app's entitlements — that mis-application is exactly what the notary
+    rejects (and why ``codesign --deep`` is shunned). The ``finally`` tears the
+    keychain down and unlinks the decoded ``.p12`` on every exit path — success
+    or failure.
     """
     uniq = req.uniq()
     keychain = req.scratch / f"signing-{uniq}.keychain-db"
@@ -607,21 +630,6 @@ def _sign_paths(
             ],
             SIGN_CMD_TIMEOUT,
         )
-        existing = _parse_keychain_list(
-            run(["security", "list-keychains", "-d", "user"], SIGN_CMD_TIMEOUT).stdout
-        )
-        run(
-            [
-                "security",
-                "list-keychains",
-                "-d",
-                "user",
-                "-s",
-                str(keychain),
-                *existing,
-            ],
-            SIGN_CMD_TIMEOUT,
-        )
         found = run(
             ["security", "find-identity", "-v", "-p", "codesigning", str(keychain)],
             SIGN_CMD_TIMEOUT,
@@ -632,10 +640,14 @@ def _sign_paths(
                 f"no codesigning identity found in the keychain imported from "
                 f"{CERT_SECRET} — is the .p12 a Developer ID Application cert?"
             )
-        for path in paths:
+        for index, path in enumerate(paths):
             if not path.exists():
                 raise ReleaseError(f"path to sign not found: {path}")
-            run(codesign_argv(identity, path, entitlements), SIGN_CMD_TIMEOUT)
+            # Entitlements belong ONLY on the top-level .app — the LAST path
+            # (sign_order appends it). Applying them to nested frameworks and
+            # helper Mach-O is the mis-application the notary rejects.
+            path_ent = entitlements if index == len(paths) - 1 else None
+            run(codesign_argv(identity, path, path_ent, keychain), SIGN_CMD_TIMEOUT)
             run(["codesign", "--verify", "--strict", str(path)], SIGN_CMD_TIMEOUT)
         return identity
     finally:
@@ -822,7 +834,7 @@ def sign_bundle(req: SignRequest) -> SignResult:
 
     return SignResult(
         app=app.name,
-        dmg=str(dest),
+        dmg=str(dest.absolute()),
         identity=identity,
         submission_id=submission_id,
         stapled=stapled,

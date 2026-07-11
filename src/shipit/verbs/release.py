@@ -803,7 +803,7 @@ def format_sign(result: sign_mod.SignResult) -> str:
         (
             f"release: signed + notarized {result.app} -> {result.dmg}",
             f"  identity  {result.identity}",
-            f"  nested    {result.nested_signed} nested Mach-O signed before the .app",
+            f"  nested    {result.nested_signed} nested signable(s) signed before the .app",
             f"  notary    {result.submission_id} ({staple})",
         )
     )
@@ -1029,8 +1029,9 @@ def sign_cmd(
 
     The consumer-agnostic mac signer unit (workflows.lex 3.1): TREE carries
     the unsigned .app reseal payload (<name>.unsigned-app.tar.gz) and at
-    most one .dmg. The unit unpacks the .app, codesigns every nested Mach-O
-    inner-first and the .app LAST (hardened runtime + timestamp), reseals
+    most one .dmg. The unit unpacks the .app, codesigns every nested signable
+    (Mach-O files and nested bundle roots) inner-first and the .app LAST
+    (hardened runtime + timestamp), reseals
     the .dmg from the SIGNED .app via hdiutil, codesigns it, notarizes +
     staples, and stages the signed .dmg under the original dmg filename.
     Runs on a mac laptop outside CI given the credential env vars; missing
