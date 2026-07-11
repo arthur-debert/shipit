@@ -111,7 +111,7 @@ def test_non_table_artifact_is_refused():
 def test_unknown_artifact_key_names_itself_and_the_known_set():
     with pytest.raises(config.ConfigError, match="unknown key `endpoint`") as exc:
         _load('[artifacts.x]\nendpoint = ["gh-release"]\n')
-    assert "build, bundle, endpoints, e2e, sign" in str(exc.value)
+    assert "build, bundle, bundle-config, endpoints, e2e, sign" in str(exc.value)
 
 
 def test_unknown_endpoint_names_the_closed_registry():
@@ -195,6 +195,26 @@ def test_e2e_harness_must_be_an_argv_list():
 def test_sign_must_be_a_boolean():
     with pytest.raises(config.ConfigError, match=r"\.sign: must be a boolean"):
         _load('[artifacts.x]\nsign = "yes"\n')
+
+
+def test_bundle_config_parses_to_a_path():
+    # The artifact-declared bundle-config hook (TOL02-WS01, PRD story 25):
+    # the repo-relative version file release prepare bumps in lockstep.
+    (artifact,) = _load(
+        '[artifacts.app]\nbundle-config = "src-tauri/tauri.conf.json"\n'
+    )
+    assert artifact.bundle_config == "src-tauri/tauri.conf.json"
+
+
+def test_bundle_config_defaults_to_absent():
+    (artifact,) = _load('[artifacts.app]\nendpoints = ["gh-release"]\n')
+    assert artifact.bundle_config is None
+
+
+@pytest.mark.parametrize("value", ['""', "true", "[1]"])
+def test_bundle_config_must_be_a_non_empty_path(value):
+    with pytest.raises(config.ConfigError, match=r"bundle-config: must be a non-empty"):
+        _load(f"[artifacts.app]\nbundle-config = {value}\n")
 
 
 def test_artifacts_is_a_known_top_level_table(tmp_path):

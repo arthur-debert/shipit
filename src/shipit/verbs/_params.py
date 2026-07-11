@@ -18,6 +18,9 @@ The repeated CLI concepts are defined ONCE here:
   Tree-taking verb; which shape a combination selects stays a domain decision.
 - :data:`json_option` / :data:`dry_run_option` — the shared flags, one
   spelling, one help string.
+- :data:`VERSION_SPEC` — a release version argument (``<semver>`` or a bump
+  word) through the canonical parser
+  (:func:`shipit.release.version.parse_spec`, ADR-0041).
 
 The PR target is the deliberate exception (ADR-0030): click validates only
 the explicit ``int``; resolving "which PR" (explicit number vs the current
@@ -84,6 +87,34 @@ class DurationParam(click.ParamType):
 
 #: The shared instance verbs reference (a ParamType is stateless).
 DURATION = DurationParam()
+
+
+class VersionSpecParam(click.ParamType):
+    """Mints a :class:`~shipit.release.version.VersionSpec` from a version
+    argument (``<semver>`` or ``major``/``minor``/``patch``) at parse.
+
+    The canonical parser (:func:`shipit.release.version.parse_spec`) is the
+    ONE place a version argument becomes a spec (ADR-0041/0030): a leading
+    ``v``, build metadata, or a string that is neither semver nor a bump word
+    fails as a click usage error — exit 2, never verb-body code. Shared by
+    every release-stage verb that takes a version.
+    """
+
+    name = "version"
+
+    def convert(self, value: object, param, ctx):
+        from ..release.version import VersionSpec, parse_spec  # lazy: verb-only
+
+        if isinstance(value, VersionSpec):
+            return value
+        try:
+            return parse_spec(str(value))
+        except ValueError as exc:
+            self.fail(str(exc), param, ctx)
+
+
+#: The shared instance verbs reference (a ParamType is stateless).
+VERSION_SPEC = VersionSpecParam()
 
 
 def _ambient_repo() -> Repo | None:

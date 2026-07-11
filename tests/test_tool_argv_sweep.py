@@ -56,6 +56,10 @@ def _parsed(path: pathlib.Path) -> ast.Module:
 #:   point. ``npm`` has a second sanctioned home: the Tree provisioner's
 #:   frozen node install (``npm ci``, :mod:`shipit.tree.create` #543) —
 #:   provisioning-side, a different concern from the producing dispatch.
+#:   ``cargo`` and ``npm`` gain a third: the closed bump-adapter registry
+#:   (:mod:`shipit.release.bump`, TOL02-WS01) — the release-side projection
+#:   commands (``cargo set-version``/``cargo update``, ``npm version``),
+#:   ADR-0041's one assembly point for the manifest bumps.
 #: - ``bin/check-e2e`` — the e2e harness registry's bats default
 #:   (TOL01-WS03): the script head is assembled ONLY in the closed harness
 #:   registry (:mod:`shipit.tools.e2e`); a declared ``e2e.harness`` argv is
@@ -66,10 +70,10 @@ _ADAPTER_HOMES: dict[str, tuple[str, ...]] = {
     "pixi": ("pixienv/read.py", "pixienv/run.py"),
     "ps": ("session/liveness.py",),
     "curl": ("provision/lexd.py",),
-    "cargo": ("tools/registry.py",),
+    "cargo": ("tools/registry.py", "release/bump.py"),
     "go": ("tools/registry.py",),
     "pytest": ("tools/registry.py",),
-    "npm": ("tools/registry.py", "tree/create.py"),
+    "npm": ("tools/registry.py", "tree/create.py", "release/bump.py"),
     "uv": ("tools/registry.py",),
     "bin/check-e2e": ("tools/e2e.py",),
     # The act harness (TOL01-WS04): `shipit wf test` is the one place that

@@ -415,11 +415,12 @@ def load_toolchains(cfg: dict) -> tuple[ToolchainEntry, ...]:
 # loud errors naming the offending key.
 #
 #     [artifacts.lex-cli]
-#     build     = [{ toolchain = "rust", package = "lex-cli" }]
-#     bundle    = { command = ["tauri", "bundle"] }          # optional
-#     endpoints = ["gh-release", "crates"]                   # closed set
-#     e2e       = { harness = ["bats", "tests/e2e.bats"] }   # optional
-#     sign      = true                                       # default false
+#     build         = [{ toolchain = "rust", package = "lex-cli" }]
+#     bundle        = { command = ["tauri", "bundle"] }          # optional
+#     bundle-config = "src-tauri/tauri.conf.json"                # optional
+#     endpoints     = ["gh-release", "crates"]                   # closed set
+#     e2e           = { harness = ["bats", "tests/e2e.bats"] }   # optional
+#     sign          = true                                       # default false
 #
 # A build entry may be the bare toolchain name ("python") when the leg's
 # default build produces the artifact whole. An artifact may declare ZERO
@@ -482,14 +483,19 @@ class Artifact:
 
     ``build`` targets are consumed by ``shipit build`` and ``e2e`` by
     ``shipit e2e`` (the harness declaration plus the ``<NAME>_BIN``
-    injection) now; ``bundle`` by the bundle stage, ``endpoints`` by the
-    release stages, and ``sign`` by the sign stage / preflight secrets
-    validation — those later.
+    injection) now; ``bundle_config`` by ``shipit release prepare`` (the
+    artifact-declared bundle-config hook, ADR-0041/PRD story 25: the
+    repo-root-relative JSON file — ``tauri.conf.json`` — whose top-level
+    ``version`` is bumped in lockstep with the leg adapters, keeping "tauri"
+    out of the bump dispatch registry); ``bundle`` by the bundle stage,
+    ``endpoints`` by the release stages, and ``sign`` by the sign stage /
+    preflight secrets validation — those later.
     """
 
     name: str
     build: tuple[BuildTarget, ...] = ()
     bundle: BundleSpec | None = None
+    bundle_config: str | None = None
     endpoints: tuple[str, ...] = ()
     e2e: E2eSpec | None = None
     sign: bool = False
@@ -605,7 +611,17 @@ def _parse_artifact(name: str, spec: object) -> Artifact:
     where = f"[artifacts].{name}"
     if not isinstance(spec, dict):
         raise ConfigError(f"{where} must be a table; got {spec!r}")
-    _reject_unknown_keys(where, spec, ("build", "bundle", "endpoints", "e2e", "sign"))
+    _reject_unknown_keys(
+        where, spec, ("build", "bundle", "bundle-config", "endpoints", "e2e", "sign")
+    )
+    bundle_config = spec.get("bundle-config")
+    if bundle_config is not None and (
+        not isinstance(bundle_config, str) or not bundle_config
+    ):
+        raise ConfigError(
+            f"{where}.bundle-config: must be a non-empty repo-relative path, "
+            f'e.g. "src-tauri/tauri.conf.json"; got {bundle_config!r}'
+        )
     build_spec = spec.get("build", [])
     if not isinstance(build_spec, list):
         raise ConfigError(f"{where}.build: must be a list of build targets")
@@ -620,6 +636,7 @@ def _parse_artifact(name: str, spec: object) -> Artifact:
         name=name,
         build=build,
         bundle=_parse_bundle(where, spec["bundle"]) if "bundle" in spec else None,
+        bundle_config=bundle_config,
         endpoints=_parse_endpoints(f"{where}.endpoints", spec.get("endpoints", [])),
         e2e=_parse_e2e(where, spec["e2e"]) if "e2e" in spec else None,
         sign=sign,

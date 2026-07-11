@@ -31,6 +31,7 @@ from .verbs.lab import lab_group
 from .verbs.logevent import log as log_group
 from .verbs.pr import pr as pr_group
 from .verbs.provision import provision as provision_group
+from .verbs.release import release as release_group
 from .verbs.session import session as session_group
 from .verbs.spawn import spawn as spawn_group
 from .verbs.tree import tree as tree_group
@@ -272,6 +273,12 @@ def e2e_cmd(args: tuple[str, ...]) -> None:
 # `check` (the changelog-sync lane's run) and the cut-time `coalesce`.
 root.add_command(changelog_group)
 
+# The nested `release` group (TOL02) — the release pipeline's independently
+# invocable stages (PRD story 19). WS01 lands `prepare` (version resolve, bump
+# projection, changelog roll, commit + annotated tag + push, ADR-0041); later
+# stages (preflight, bundle, sign, publish) land with their work streams.
+root.add_command(release_group)
+
 
 # The nested `ci` group (TOL01-WS05) — the PR-time routing surface: `ci plan`
 # is the one lane-planner invocation whose JSON matrix the wf-checks workflow
@@ -353,6 +360,8 @@ _HELP_RESOURCES = {
     ("changelog", "check"): ("shipit.verbs", "changelog_check_help.txt"),
     ("changelog", "render"): ("shipit.verbs", "changelog_render_help.txt"),
     ("changelog", "coalesce"): ("shipit.verbs", "changelog_coalesce_help.txt"),
+    ("release",): ("shipit.verbs", "release_help.txt"),
+    ("release", "prepare"): ("shipit.verbs", "release_prepare_help.txt"),
     ("ci",): ("shipit.verbs", "ci_help.txt"),
     ("ci", "plan"): ("shipit.verbs", "ci_plan_help.txt"),
     ("logs",): ("shipit.verbs", "logs_help.txt"),

@@ -577,6 +577,38 @@ def changed_paths_since(base_ref: str, *, cwd: str) -> list[str] | None:
 # --------------------------------------------------------------------------
 
 
+def list_tags(*, cwd: str) -> list[str]:
+    """Every tag name in ``cwd``'s checkout (``git tag --list``), unordered.
+
+    The release version resolver's input (ADR-0041): it filters and orders
+    the ``v<semver>`` tags itself (:func:`shipit.release.version.version_tags`)
+    — the adapter hands over the raw name list and imposes no policy.
+    """
+    out = _git(["tag", "--list"], cwd=cwd)
+    return [line.strip() for line in out.splitlines() if line.strip()]
+
+
+def tag_annotated(name: str, message: str, *, cwd: str) -> None:
+    """Create annotated tag ``name`` at ``HEAD`` with ``message`` as the
+    annotation (``git tag -a -m``).
+
+    The release prepare stage's tag write (ADR-0041: the tag is the version
+    authority; its annotation carries THE one release-notes text, story 26).
+    ``message`` rides argv — never a shell string — so arbitrary notes text is
+    safe by construction (ADR-0028).
+    """
+    _git(["tag", "-a", name, "-m", message], cwd=cwd)
+
+
+def push_tag(name: str, *, cwd: str, remote: str = "origin") -> None:
+    """``git push <remote> refs/tags/<name>`` — publish one tag.
+
+    Spelled with the full ref so a same-named branch can never be pushed by
+    mistake (the release tag push must move exactly one ref).
+    """
+    _git(["push", remote, f"refs/tags/{name}"], cwd=cwd, timeout=_NETWORK_TIMEOUT)
+
+
 def switch_create(branch: str, *, cwd: str) -> None:
     """Create-or-reset ``branch`` from the current HEAD and switch to it.
 
@@ -871,6 +903,12 @@ def reset_hard(ref: str, *, cwd: str) -> None:
     clone is reused after the PR head advanced, a ``git fetch`` followed by a hard reset
     to ``origin/<branch>`` re-pins the working tree to the CURRENT head, so a second
     reviewer never reads the stale commit the first clone happened to land on.
+
+    Also the ``-release-rc`` live-fire cut's branch restore (legacy release#663
+    contract, :mod:`shipit.verbs.release`): the bump commit travels on the TAG
+    ONLY, so after tagging, prepare resets the branch back to the pre-bump
+    commit — the commit stays reachable from the tag, the branch's version
+    line stays clean.
     """
     _git(["reset", "--hard", ref], cwd=cwd)
 
