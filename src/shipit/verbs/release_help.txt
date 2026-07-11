@@ -1,0 +1,10 @@
+`shipit release` runs the release pipeline, one independently invocable stage
+per subcommand.
+
+The git tag is the version authority: manifests are projections of the tag
+decision, bumped by per-toolchain adapters. The version is always supplied by
+the caller (a bare semver or a bump word), never inferred from fragments or
+commit messages.
+
+`prepare` is the pipeline's only writer of repo history. Later stages
+(preflight, bundle, sign, publish) land as their work streams do.

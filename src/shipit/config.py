@@ -24,7 +24,7 @@ import re
 import tomllib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 
 from .identity import Sha
@@ -328,15 +328,33 @@ def _parse_argv(where: str, value: object) -> tuple[str, ...]:
     return tuple(value)
 
 
+def _reject_path_escape(where: str, value: str) -> None:
+    """Refuse a config path that leaves the checkout — absolute, or carrying a
+    ``..`` segment. Pure.
+
+    Such a path is later joined to the repo root and READ or REWRITTEN (an
+    adapter's leg cwd, a bundle-config bump); an absolute path discards the root
+    and ``..`` climbs above it, so a repo's own ``.shipit.toml`` could steer a
+    release rewrite at a file outside the tree. Rejected at the parse boundary,
+    the one place every value flows through.
+    """
+    pure = PurePosixPath(value)
+    if pure.is_absolute() or ".." in pure.parts:
+        raise ConfigError(
+            f"{where}: must be a repo-relative path inside the checkout — no "
+            f"leading '/', no '..' segment; got {value!r}"
+        )
+
+
 def _parse_toolchain_entry(path: str, spec: object) -> ToolchainEntry:
     """One ``[toolchains]`` entry: a bare toolchain-name string, or a table
     carrying ``toolchain`` plus per-tool argv overrides (see the loader)."""
     from .tools import registry  # lazy — config stays import-light at module load
 
-    if not path or path.startswith("/"):
+    if not path or path.startswith("/") or ".." in PurePosixPath(path).parts:
         raise ConfigError(
-            f"[toolchains] paths are repo-relative ({'empty' if not path else path!r}"
-            f" is not); use '.' for the repo root"
+            f"[toolchains] paths are repo-relative and inside the checkout "
+            f"({'empty' if not path else path!r} is not); use '.' for the repo root"
         )
     if isinstance(spec, str):
         name, overrides = spec, {}
@@ -370,7 +388,13 @@ def _parse_toolchain_entry(path: str, spec: object) -> ToolchainEntry:
             f"[toolchains].{path}: unknown toolchain `{name}`; "
             f"known toolchains: {known}"
         )
-    return ToolchainEntry(path=path, toolchain=name, commands=overrides)
+    # Store the CANONICAL repo-relative form (`./web` -> `web`, `web/` -> `web`):
+    # the leg's pathspecs are matched against `git status --porcelain` output,
+    # which is already canonical, so a non-normalized entry would miss its own
+    # changed files and trip a false `no-op bump` refusal in `release prepare`.
+    return ToolchainEntry(
+        path=str(PurePosixPath(path)), toolchain=name, commands=overrides
+    )
 
 
 def load_toolchains(cfg: dict) -> tuple[ToolchainEntry, ...]:
@@ -415,11 +439,12 @@ def load_toolchains(cfg: dict) -> tuple[ToolchainEntry, ...]:
 # loud errors naming the offending key.
 #
 #     [artifacts.lex-cli]
-#     build     = [{ toolchain = "rust", package = "lex-cli" }]
-#     bundle    = { command = ["tauri", "bundle"] }          # optional
-#     endpoints = ["gh-release", "crates"]                   # closed set
-#     e2e       = { harness = ["bats", "tests/e2e.bats"] }   # optional
-#     sign      = true                                       # default false
+#     build         = [{ toolchain = "rust", package = "lex-cli" }]
+#     bundle        = { command = ["tauri", "bundle"] }          # optional
+#     bundle-config = "src-tauri/tauri.conf.json"                # optional
+#     endpoints     = ["gh-release", "crates"]                   # closed set
+#     e2e           = { harness = ["bats", "tests/e2e.bats"] }   # optional
+#     sign          = true                                       # default false
 #
 # A build entry may be the bare toolchain name ("python") when the leg's
 # default build produces the artifact whole. An artifact may declare ZERO
@@ -482,14 +507,19 @@ class Artifact:
 
     ``build`` targets are consumed by ``shipit build`` and ``e2e`` by
     ``shipit e2e`` (the harness declaration plus the ``<NAME>_BIN``
-    injection) now; ``bundle`` by the bundle stage, ``endpoints`` by the
-    release stages, and ``sign`` by the sign stage / preflight secrets
-    validation — those later.
+    injection) now; ``bundle_config`` by ``shipit release prepare`` (the
+    artifact-declared bundle-config hook, ADR-0041/PRD story 25: the
+    repo-root-relative JSON file — ``tauri.conf.json`` — whose top-level
+    ``version`` is bumped in lockstep with the leg adapters, keeping "tauri"
+    out of the bump dispatch registry); ``bundle`` by the bundle stage,
+    ``endpoints`` by the release stages, and ``sign`` by the sign stage /
+    preflight secrets validation — those later.
     """
 
     name: str
     build: tuple[BuildTarget, ...] = ()
     bundle: BundleSpec | None = None
+    bundle_config: str | None = None
     endpoints: tuple[str, ...] = ()
     e2e: E2eSpec | None = None
     sign: bool = False
@@ -605,7 +635,21 @@ def _parse_artifact(name: str, spec: object) -> Artifact:
     where = f"[artifacts].{name}"
     if not isinstance(spec, dict):
         raise ConfigError(f"{where} must be a table; got {spec!r}")
-    _reject_unknown_keys(where, spec, ("build", "bundle", "endpoints", "e2e", "sign"))
+    _reject_unknown_keys(
+        where, spec, ("build", "bundle", "bundle-config", "endpoints", "e2e", "sign")
+    )
+    bundle_config = spec.get("bundle-config")
+    if bundle_config is not None:
+        if not isinstance(bundle_config, str) or not bundle_config:
+            raise ConfigError(
+                f"{where}.bundle-config: must be a non-empty repo-relative path, "
+                f'e.g. "src-tauri/tauri.conf.json"; got {bundle_config!r}'
+            )
+        _reject_path_escape(f"{where}.bundle-config", bundle_config)
+        # Canonical form (`./x` -> `x`): the release stage stages this path and
+        # matches it against `git status`, so a non-normalized value would read
+        # as a different, unchanged file and trip a false no-op / missing-file.
+        bundle_config = str(PurePosixPath(bundle_config))
     build_spec = spec.get("build", [])
     if not isinstance(build_spec, list):
         raise ConfigError(f"{where}.build: must be a list of build targets")
@@ -620,6 +664,7 @@ def _parse_artifact(name: str, spec: object) -> Artifact:
         name=name,
         build=build,
         bundle=_parse_bundle(where, spec["bundle"]) if "bundle" in spec else None,
+        bundle_config=bundle_config,
         endpoints=_parse_endpoints(f"{where}.endpoints", spec.get("endpoints", [])),
         e2e=_parse_e2e(where, spec["e2e"]) if "e2e" in spec else None,
         sign=sign,

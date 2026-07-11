@@ -85,12 +85,15 @@ class ChangelogError(RuntimeError):
 # Forked by copy from release-core's semver-tool-parity regex (ADR-0001): NAT
 # identifiers admit no leading zeros; prerelease identifiers are NAT or
 # ALPHANUM. Validation is strict and bare — a leading `v` does NOT validate
-# (the tag decorates, the version string does not; ADR-0041).
+# (the tag decorates, the version string does not; ADR-0041). PUBLIC: the ONE
+# semver grammar in shipit — the release version resolver
+# (shipit.release.version) parses and orders against this same regex, so the
+# changelog and the release pipeline can never disagree on what a version is.
 
 _NAT = r"(?:0|[1-9][0-9]*)"
 _ALPHANUM = r"(?:[0-9]*[A-Za-z-][0-9A-Za-z-]*)"
 _IDENT = rf"(?:{_NAT}|{_ALPHANUM})"
-_SEMVER_RE = re.compile(
+SEMVER_RE = re.compile(
     rf"^(?P<major>{_NAT})\.(?P<minor>{_NAT})\.(?P<patch>{_NAT})"
     rf"(?:-(?P<pre>{_IDENT}(?:\.{_IDENT})*))?"
     rf"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
@@ -99,14 +102,14 @@ _SEMVER_RE = re.compile(
 
 def is_semver(version: str) -> bool:
     """Whether ``version`` is a valid BARE semver (no ``v`` prefix). Pure."""
-    return bool(_SEMVER_RE.match(version))
+    return bool(SEMVER_RE.match(version))
 
 
 def is_prerelease(version: str) -> bool:
     """Whether ``version`` carries a prerelease suffix (``-rc.1``,
     ``-release-rc``, …) — the semver-suffix detection ADR-0041 fixes. Pure.
     A non-semver string is not a prerelease (callers validate first)."""
-    match = _SEMVER_RE.match(version)
+    match = SEMVER_RE.match(version)
     return bool(match and match.group("pre"))
 
 
@@ -123,7 +126,7 @@ def _version_key(version: str) -> tuple:
     """The full §11 ordering key. A bare release ranks ABOVE its prereleases;
     build metadata is ignored for precedence. Callers validate first — an
     invalid version raises :class:`ChangelogError` (never a silent mis-sort)."""
-    match = _SEMVER_RE.match(version)
+    match = SEMVER_RE.match(version)
     if match is None:
         raise ChangelogError(f"not a valid semver version: {version!r}")
     pre = match.group("pre")
