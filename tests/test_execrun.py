@@ -160,6 +160,30 @@ def test_pixi_run_wrapper_summarizes_nested_backend_prompts(child, payloads, sep
 
 
 @pytest.mark.parametrize(
+    "pixi_options",
+    [
+        ["-e", "codex"],
+        ["--environment", "agy"],
+        ["--manifest-path=claude"],
+    ],
+)
+def test_pixi_option_value_named_like_backend_is_not_the_child(pixi_options):
+    prompt = "REAL CLAUDE PROMPT"
+    argv = ["pixi", "run", *pixi_options, "claude", "-p", prompt]
+    display = execrun._display_argv(argv)
+    assert display[: 2 + len(pixi_options)] == argv[: 2 + len(pixi_options)]
+    assert prompt not in " ".join(display)
+
+
+def test_pixi_downstream_separator_does_not_hide_earlier_backend_prompt():
+    prompt = "AGY PROMPT BEFORE DOWNSTREAM SEPARATOR"
+    argv = ["pixi", "run", "agy", "--print", prompt, "--", "--extra"]
+    display = execrun._display_argv(argv)
+    assert prompt not in " ".join(display)
+    assert display[-2:] == ["--", "--extra"]
+
+
+@pytest.mark.parametrize(
     "argv",
     [
         ["codex", "exec"],

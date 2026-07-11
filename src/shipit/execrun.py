@@ -110,6 +110,53 @@ SECRET_STDOUT_PLACEHOLDER = "<redacted: secret-bearing stdout>"
 SHORT_PROMPT_MAX_CHARS = 8
 PROMPT_STREAM_PLACEHOLDER = "<redacted: prompt-bearing stream>"
 
+AGENT_BINARIES = {"agy", "antigravity", "claude", "codex"}
+PIXI_RUN_VALUE_FLAGS = {
+    "-e",
+    "--environment",
+    "-p",
+    "--platform",
+    "--config-file",
+    "--auth-file",
+    "--concurrent-downloads",
+    "--concurrent-solves",
+    "--pinning-strategy",
+    "--pypi-keyring-provider",
+    "--tls-root-certs",
+    "-m",
+    "--manifest-path",
+    "-w",
+    "--workspace",
+    "--color",
+}
+PIXI_RUN_BOOLEAN_FLAGS = {
+    "-x",
+    "--executable",
+    "--clean-env",
+    "--skip-deps",
+    "--templated",
+    "-n",
+    "--dry-run",
+    "--help",
+    "-h",
+    "--no-config",
+    "--run-post-link-scripts",
+    "--no-symbolic-links",
+    "--no-hard-links",
+    "--no-ref-links",
+    "--tls-no-verify",
+    "--use-environment-activation-cache",
+    "--force-activate",
+    "--no-completions",
+    "--verbose",
+    "--quiet",
+    "--no-progress",
+    "--no-install",
+    "--frozen",
+    "--locked",
+    "--as-is",
+}
+
 #: :attr:`ExecError.cause` tags — the one axis callers may branch on.
 CAUSE_EXIT = "exit"  # the child completed with a nonzero rc (check=True)
 CAUSE_TIMEOUT = "timeout"  # the timeout expired; the child was killed
@@ -235,22 +282,18 @@ def _display_argv(argv: list[str] | tuple[str, ...]) -> list[str]:
 
     binary = os.path.basename(display[0])
     if binary == "pixi" and "run" in display[1:]:
-        child_start: int | None = None
-        if "--" in display:
-            child_start = display.index("--") + 1
-        else:
-            run_index = display.index("run")
-            known_backends = {"agy", "antigravity", "claude", "codex"}
-            child_start = next(
-                (
-                    index
-                    for index in range(run_index + 1, len(display))
-                    if os.path.basename(display[index]) in known_backends
-                ),
-                None,
-            )
+        run_index = display.index("run")
+        child_start = _pixi_run_child_start(display, run_index)
         if child_start is not None and child_start < len(display):
             display[child_start:] = _display_argv(display[child_start:])
+        elif any(
+            os.path.basename(arg) in AGENT_BINARIES for arg in display[run_index + 1 :]
+        ):
+            # An unknown/future pixi option made the prefix ambiguous while an
+            # agent binary is present. Fail closed without changing argv length
+            # (ExecError stream sanitization zips raw/display positionally).
+            for index in range(run_index + 1, len(display)):
+                display[index] = _prompt_summary(display[index])
         return display
     if binary == "claude":
         redact_after("-p")
@@ -296,6 +339,28 @@ def _display_argv(argv: list[str] | tuple[str, ...]) -> list[str]:
             if arg.startswith("--print="):
                 display[index] = "--print=" + _prompt_summary(arg.split("=", 1)[1])
     return display
+
+
+def _pixi_run_child_start(display: list[str], run_index: int) -> int | None:
+    """Locate pixi run's first positional command while skipping its options."""
+    index = run_index + 1
+    while index < len(display):
+        arg = display[index]
+        if arg == "--":
+            return index + 1
+        if arg in PIXI_RUN_VALUE_FLAGS:
+            index += 2
+            continue
+        if any(arg.startswith(f"{flag}=") for flag in PIXI_RUN_VALUE_FLAGS):
+            index += 1
+            continue
+        if arg in PIXI_RUN_BOOLEAN_FLAGS or (
+            arg.startswith("-") and set(arg[1:]) <= {"q", "v"}
+        ):
+            index += 1
+            continue
+        return index if os.path.basename(arg) in AGENT_BINARIES else None
+    return None
 
 
 def _summarize_prompt_text(
