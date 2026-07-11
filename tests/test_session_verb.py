@@ -1,5 +1,6 @@
 import io
 import json
+import logging
 from dataclasses import dataclass, replace
 
 from click.testing import CliRunner
@@ -151,7 +152,9 @@ def test_run_codex_activates_the_tree_pixi_env(monkeypatch, tmp_path):
     assert capture.env["CONDA_PREFIX"] == f"{tree_path}/.pixi/envs/default"
 
 
-def test_run_codex_resume_uses_first_class_resume_argv(monkeypatch, tmp_path):
+def test_run_codex_resume_redacts_prompt_from_surfaces(
+    monkeypatch, tmp_path, capsys, caplog
+):
     capture = LaunchCapture()
     source = tmp_path / "source"
     tree_path = tmp_path / "tree"
@@ -174,15 +177,18 @@ def test_run_codex_resume_uses_first_class_resume_argv(monkeypatch, tmp_path):
         capture.exec_file = file
         capture.argv = argv
 
-    rc = session.run_codex(
-        ["--model", "gpt-5"],
-        resume_thread_id="019f-thread",
-        creator=fake_creator,
-        chdir=lambda path: None,
-        execute=fake_execute,
-        which=lambda binary: "/usr/local/bin/codex",
-        environ={"PATH": "/bin"},
-    )
+    secret_prompt = "fix customer alpha's private bug"
+    with caplog.at_level(logging.INFO, logger="shipit.session"):
+        rc = session.run_codex(
+            ["--model", "gpt-5"],
+            resume_thread_id="019f-thread",
+            prompt=secret_prompt,
+            creator=fake_creator,
+            chdir=lambda path: None,
+            execute=fake_execute,
+            which=lambda binary: "/usr/local/bin/codex",
+            environ={"PATH": "/bin"},
+        )
 
     assert rc == 0
     assert capture.exec_file == "codex"
@@ -195,7 +201,15 @@ def test_run_codex_resume_uses_first_class_resume_argv(monkeypatch, tmp_path):
         "019f-thread",
         "--model",
         "gpt-5",
+        secret_prompt,
     ]
+    launch = next(r for r in caplog.records if r.msg.startswith("launching codex"))
+    assert secret_prompt not in launch.argv
+    assert "<prompt:redacted>" in launch.argv
+    assert launch.prompt_chars == len(secret_prompt)
+    output = capsys.readouterr().out
+    assert secret_prompt not in output
+    assert "<prompt:redacted>" in output
 
 
 def test_run_codex_resume_can_launch_from_explicit_source_repo(monkeypatch, tmp_path):
@@ -257,8 +271,10 @@ def test_run_resume_delegates_codex_target_to_codex_runner(tmp_path):
 
     def codex_runner(args, **kwargs):
         captured["codex"] = (list(args), kwargs)
+        captured["context"] = session.logcontext.bound()
         return 0
 
+    session.logcontext.bind(pr=999, epic="STALE01")
     rc = session.run_resume(
         "codex-1",
         backend_args=["--model", "gpt-5"],
@@ -275,6 +291,7 @@ def test_run_resume_delegates_codex_target_to_codex_runner(tmp_path):
     assert kwargs["resume_thread_id"] == "019f-thread"
     assert kwargs["resumed_session_id"] == "codex-1"
     assert kwargs["repo_identity"] == repo
+    assert captured["context"] == {"repo": "arthur-debert/shipit"}
 
 
 def test_run_resume_delegates_claude_target_to_claude_runner(tmp_path):
@@ -360,7 +377,8 @@ def test_resume_cli_last_forwards_an_explicit_initial_backend_prompt(monkeypatch
 
     assert result.exit_code == 0
     assert captured["target"] is None
-    assert captured["backend_args"] == ["fix the bug"]
+    assert captured["backend_args"] == []
+    assert captured["prompt"] == "fix the bug"
 
 
 def test_resume_cli_last_rejects_a_native_id_as_an_explicit_target():
@@ -440,7 +458,7 @@ def test_run_codex_spec_matches_the_coordinator_worktreecreate_spec(
 
 
 def test_run_claude_resume_execs_native_resume_through_worktree(
-    monkeypatch, tmp_path, capsys
+    monkeypatch, tmp_path, capsys, caplog
 ):
     capture = LaunchCapture()
     source = tmp_path / "source"
@@ -458,21 +476,27 @@ def test_run_claude_resume_execs_native_resume_through_worktree(
         capture.argv = argv
         capture.env = env
 
-    rc = session.run_claude_resume(
-        "claude-native",
-        ["--model", "opus"],
-        repo_identity=repo,
-        source_repo=str(source),
-        chdir=fake_chdir,
-        execute=fake_execute,
-        which=lambda binary: "/usr/local/bin/claude",
-        environ={
-            "PATH": "/bin",
-            "PIXI_PROJECT_ROOT": "/stale/source",
-            "SHIPIT_LOG_CTX_SESSION": "old",
-            "SHIPIT_LOG_CTX_TREE": "/old/tree",
-        },
-    )
+    secret_prompt = "summarize private customer alpha"
+    stale_context = {
+        session.logcontext.ENV_PREFIX + key.upper(): "stale"
+        for key in session.logcontext.DOMAIN_KEYS
+    }
+    with caplog.at_level(logging.INFO, logger="shipit.session"):
+        rc = session.run_claude_resume(
+            "claude-native",
+            ["--model", "opus"],
+            repo_identity=repo,
+            source_repo=str(source),
+            prompt=secret_prompt,
+            chdir=fake_chdir,
+            execute=fake_execute,
+            which=lambda binary: "/usr/local/bin/claude",
+            environ={
+                "PATH": "/bin",
+                "PIXI_PROJECT_ROOT": "/stale/source",
+                **stale_context,
+            },
+        )
 
     assert rc == 0
     assert capture.chdir == str(source)
@@ -485,13 +509,21 @@ def test_run_claude_resume_execs_native_resume_through_worktree(
         "claude-native",
         "--model",
         "opus",
+        secret_prompt,
     ]
     assert capture.env is not None
     assert capture.env["PATH"] == "/bin"
     assert "PIXI_PROJECT_ROOT" not in capture.env
-    assert "SHIPIT_LOG_CTX_SESSION" not in capture.env
-    assert "SHIPIT_LOG_CTX_TREE" not in capture.env
-    assert "claude session sess-20260709-082101-4242" in capsys.readouterr().out
+    for key in session.logcontext.DOMAIN_KEYS:
+        assert session.logcontext.ENV_PREFIX + key.upper() not in capture.env
+    launch = next(r for r in caplog.records if r.msg.startswith("launching claude"))
+    assert secret_prompt not in launch.argv
+    assert "<prompt:redacted>" in launch.argv
+    assert launch.prompt_chars == len(secret_prompt)
+    output = capsys.readouterr().out
+    assert "claude session sess-20260709-082101-4242" in output
+    assert secret_prompt not in output
+    assert "<prompt:redacted>" in output
 
 
 def test_run_codex_refuses_outside_git_checkout(monkeypatch, capsys):

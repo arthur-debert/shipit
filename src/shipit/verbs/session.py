@@ -144,14 +144,13 @@ def resume_cmd(
     last_with_target = last and bool(args) and not args[0].startswith("-")
     target = args[0] if last_with_target or (not last and args) else None
     backend_args = args[1:] if target is not None else args
-    if prompt is not None:
-        backend_args = (*backend_args, prompt)
     raise SystemExit(
         run_resume(
             target,
             last=last,
             repo_identity=repo_identity,
             backend_args=list(backend_args),
+            prompt=prompt,
         )
     )
 
@@ -163,6 +162,7 @@ def run_resume(
     last: bool = False,
     repo_identity: identity.Repo | None = None,
     backend_args: Sequence[str] = (),
+    prompt: str | None = None,
     resolver: Callable[..., resume.ResumeTarget] = resume.resolve,
     source_locator: Callable[..., str] = resume.source_checkout_for_repo,
     codex_runner: Callable[..., int] | None = None,
@@ -176,6 +176,10 @@ def run_resume(
     """
 
     resolved = resolver(target, repo=repo_identity, last=last)
+    # This process may itself have been invoked from another live coordinator.
+    # The resume target starts a distinct session and may name a different repo,
+    # so clear every inherited in-process correlation before binding its truth.
+    logcontext.unbind(*logcontext.DOMAIN_KEYS)
     logcontext.bind(repo=resolved.repo.slug)
     logsetup.configure_logging(repo=resolved.repo)
     source_repo = source_locator(resolved.repo)
@@ -188,6 +192,7 @@ def run_resume(
             resumed_session_id=resolved.shipit_session_id,
             repo_identity=resolved.repo,
             source_repo=source_repo,
+            prompt=prompt,
         )
     if resolved.backend == resume.CLAUDE_BACKEND:
         runner = claude_runner or run_claude_resume
@@ -197,6 +202,7 @@ def run_resume(
             repo_identity=resolved.repo,
             source_repo=source_repo,
             resumed_session_id=resolved.shipit_session_id,
+            prompt=prompt,
         )
     raise resume.ResumeError(f"unsupported backend {resolved.backend!r}")
 
@@ -206,6 +212,7 @@ def run_codex(
     *,
     resume_thread_id: str | None = None,
     resumed_session_id: str | None = None,
+    prompt: str | None = None,
     repo_identity: identity.Repo | None = None,
     source_repo: str | None = None,
     creator: Callable[..., Tree] = create_from_source,
@@ -261,6 +268,9 @@ def run_codex(
         if resume_thread_id is not None
         else bootstrap.codex_argv(tree.path, codex_args)
     )
+    if prompt is not None:
+        argv = [*argv, prompt]
+    display_argv = _display_argv(argv, prompt=prompt)
     try:
         activation = bootstrap.activation_for_tree(
             tree.path,
@@ -279,7 +289,7 @@ def run_codex(
         tree=tree.path,
         activation=activation,
     )
-    print(bootstrap.format_launch(session_id, tree.path, argv), flush=True)
+    print(bootstrap.format_launch(session_id, tree.path, display_argv), flush=True)
     # The launch milestone, written BEFORE the exec replaces this process: the
     # last record this pid can leave, and the one that joins the session id/Tree
     # pair to the codex launch in the flow log. (The Tree's own birth already
@@ -290,7 +300,8 @@ def run_codex(
             session_id,
             tree.path,
             extra={
-                "argv": shlex.join(argv),
+                "argv": shlex.join(display_argv),
+                **({"prompt_chars": len(prompt)} if prompt is not None else {}),
                 "backend": resume.CODEX_BACKEND,
                 **(
                     {"resumed_session": resumed_session_id}
@@ -327,6 +338,7 @@ def run_claude_resume(
     repo_identity: identity.Repo,
     source_repo: str,
     resumed_session_id: str | None = None,
+    prompt: str | None = None,
     chdir: Callable[[str], None] = os.chdir,
     execute: Callable[[str, list[str], dict[str, str]], None] = os.execvpe,
     which: Callable[[str], str | None] = shutil.which,
@@ -363,15 +375,22 @@ def run_claude_resume(
         native_session_id,
         *claude_args,
     ]
+    if prompt is not None:
+        argv.append(prompt)
+    display_argv = _display_argv(argv, prompt=prompt)
     env = _claude_resume_env(os.environ if environ is None else environ)
-    print(_format_claude_resume_launch(session_id, expected_tree, argv), flush=True)
+    print(
+        _format_claude_resume_launch(session_id, expected_tree, display_argv),
+        flush=True,
+    )
     with logcontext.scoped(session=session_id, tree=str(expected_tree)):
         logger.info(
             "launching claude coordinator session %s for resume in %s",
             session_id,
             expected_tree,
             extra={
-                "argv": shlex.join(argv),
+                "argv": shlex.join(display_argv),
+                **({"prompt_chars": len(prompt)} if prompt is not None else {}),
                 "backend": resume.CLAUDE_BACKEND,
                 "session_id": native_session_id,
                 **(
@@ -404,9 +423,13 @@ def _claude_resume_env(parent_env: Mapping[str, str]) -> dict[str, str]:
     """Claude resume env: preserve Claude's session seams, scrub stale Tree identity."""
 
     env = scrub_tree_env(dict(parent_env))
-    for key in ("ROLE", "AGENT", "RUN", "SESSION", "TREE"):
-        env.pop(logcontext.ENV_PREFIX + key, None)
-    return env
+    return logcontext.scrub_env(env)
+
+
+def _display_argv(argv: Sequence[str], *, prompt: str | None) -> list[str]:
+    """Argv safe for scrollback/logging while execution keeps the real prompt."""
+
+    return [*argv[:-1], "<prompt:redacted>"] if prompt is not None else list(argv)
 
 
 def _format_claude_resume_launch(
