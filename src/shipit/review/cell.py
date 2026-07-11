@@ -18,7 +18,9 @@ This module is the PURE domain layer: parse + validate
 version, variant, replicate, sweep, the ADR-0049 banked-reuse key), the
 informed-sweep instruction composition (:func:`compose_informed_instructions`
 — prior findings enter at the RUNNER layer, never as a replay-driver change),
-and the fair-pair check (:func:`check_fair_pair`). The I/O runner lives in
+and the fairness checks — per-edge (:func:`check_fair_pair`) and the
+baseline-chain walk to the control (:func:`check_baseline_lineage` /
+:func:`load_baseline_lineage`). The I/O runner lives in
 :mod:`shipit.review.labrun`; the convergence-curve report in
 :mod:`shipit.review.curve`; the thin CLI in :mod:`shipit.verbs.lab`.
 
@@ -37,7 +39,7 @@ from __future__ import annotations
 
 import re
 import tomllib
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -57,10 +59,12 @@ __all__ = [
     "Cell",
     "CellError",
     "CellInvocation",
+    "check_baseline_lineage",
     "check_fair_pair",
     "compose_informed_instructions",
     "instructions_variant_text",
     "key_tuple",
+    "load_baseline_lineage",
     "load_cell",
     "parse_cell",
     "record_matches_key",
@@ -615,11 +619,12 @@ def check_fair_pair(cell: Cell, baseline: Cell, fixture: Fixture) -> None:
     ``baseline``. The baseline is USUALLY the control, but need not be: a
     COMPOSITION cell layers one new axis onto a treatment that already earned
     its edge (e.g. ``sevtiers-informed`` vs ``fanout-sevtiers``, #717). The
-    chain does not hide axes because every committed cell is itself
-    fair-pair-checked against ITS declared baseline (in the committed-cells
-    test and at ``lab run``/``report`` time), so each link is declared and
-    reviewed — the one-axis discipline holds per pair, all the way down to the
-    control. The PR subset compares EFFECTIVE pin sets against ``fixture`` —
+    chain does not hide axes because the WHOLE chain is walked
+    (:func:`check_baseline_lineage` — at ``lab run``/``report`` time and in
+    the committed-cells test), fair-pair-checking every hop and requiring
+    termination at a control, so each link is declared and reviewed — the
+    one-axis discipline holds per pair, all the way down to the control.
+    The PR subset compares EFFECTIVE pin sets against ``fixture`` —
     ``prs = []`` means "every fixture pin", so a control that omits ``prs``
     and a treatment that lists all of them explicitly are the SAME
     denominator, not an unfair pair. The remaining half — that the axis named
@@ -641,6 +646,70 @@ def check_fair_pair(cell: Cell, baseline: Cell, fixture: Fixture) -> None:
             f"cells {cell.id!r} and {baseline.id!r} replay different PR subsets "
             "— their recall denominators differ, so the comparison is unfair"
         )
+
+
+def check_baseline_lineage(
+    cell: Cell,
+    fixture: Fixture,
+    resolve_baseline: Callable[[Cell], Cell],
+) -> tuple[Cell, ...]:
+    """Walk ``cell``'s declared baseline chain to its control, fair-pair
+    checking every hop. Returns the chain ``(cell, …, control)``. PURE.
+
+    :func:`check_fair_pair` proves one EDGE; this proves the LINEAGE (#719):
+    starting from ``cell``, repeatedly resolve ``current.baseline`` via
+    ``resolve_baseline`` — which is given the referencing cell and must return
+    its loaded baseline or raise a :class:`CellError` naming the missing
+    ancestor (and where it searched, see :func:`load_baseline_lineage`) — and
+    require the walk to terminate at a control (``baseline == id``). A
+    repeated id is a loud cycle error: without this walk two treatments could
+    name each other, share fixture/pins, pass every per-edge check, and a
+    control-less or cyclic lineage would silently read as a fair experiment.
+    A control cell is its own one-cell chain (``resolve_baseline`` is never
+    called).
+    """
+    chain = [cell]
+    visited = {cell.id}
+    current = cell
+    while not current.is_control:
+        parent = resolve_baseline(current)
+        if parent.id in visited:
+            raise CellError(
+                f"cell {cell.id!r} has a cyclic baseline chain "
+                f"({' -> '.join([*(c.id for c in chain), parent.id])}) — a "
+                "baseline chain must terminate at a control cell "
+                "(baseline == id), so a cell can never be its own ancestor"
+            )
+        check_fair_pair(current, parent, fixture)
+        visited.add(parent.id)
+        chain.append(parent)
+        current = parent
+    return tuple(chain)
+
+
+def load_baseline_lineage(
+    cell: Cell, fixture: Fixture, cells_dir: Path = DEFAULT_CELLS_DIR
+) -> tuple[Cell, ...]:
+    """:func:`check_baseline_lineage` over the cells DIRECTORY — each ancestor
+    loads from ``<cells_dir>/<baseline>.toml`` (the same lookup ``lab run`` /
+    ``lab report`` use). Returns the chain ``(cell, …, control)``; a missing
+    ancestor is a loud :class:`CellError` naming the missing cell id and the
+    cells dir searched, a cycle or an unfair hop the walker's own error.
+    """
+
+    def resolve(current: Cell) -> Cell:
+        path = cells_dir / f"{current.baseline}.toml"
+        if not path.is_file():
+            raise CellError(
+                f"cell {current.id!r} names baseline {current.baseline!r}, "
+                f"but {current.baseline!r} has no cell file in cells dir "
+                f"{cells_dir} ({path} does not exist) — every link of the "
+                "baseline chain is part of the reviewed lineage; commit the "
+                "missing cell first"
+            )
+        return load_cell(path)
+
+    return check_baseline_lineage(cell, fixture, resolve)
 
 
 # --- the idempotency key (ADR-0049: banked results are never paid for twice) ---

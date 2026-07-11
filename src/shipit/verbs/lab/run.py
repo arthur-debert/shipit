@@ -4,15 +4,16 @@ The thin CLI around :func:`shipit.review.labrun.run_cell` (ADR-0049,
 RVW03-WS07): resolve the cell reference to its committed file, load + validate
 it (:mod:`shipit.review.cell` — the mandatory baseline/axis fairness
 declaration fails HERE, before any token burns), load the Ground-truth
-fixture, enforce the fair-pair check against the named baseline cell, and run
-every (pin × replicate × sweep) point foreground on the subscription-billed
-CLI backends. Idempotent by the full key: banked points are reused, never
-re-paid — ``--force`` is the one explicit re-execute path.
+fixture, walk the declared baseline chain to its control (per-hop fair-pair;
+a missing ancestor, a cycle, or a control-less lineage refuses loud, #719),
+and run every (pin × replicate × sweep) point foreground on the
+subscription-billed CLI backends. Idempotent by the full key: banked points
+are reused, never re-paid — ``--force`` is the one explicit re-execute path.
 
 Errors route through the one :func:`~.._errors.cli_errors` shell: an
-untrustworthy cell or fixture file, an unfair pair, a missing checkout or
-un-fetched pinned commit, and a backend failure all surface as one uniform
-``error: …`` stderr line + exit 1.
+untrustworthy cell or fixture file, an unfair or broken lineage, a missing
+checkout or un-fetched pinned commit, and a backend failure all surface as
+one uniform ``error: …`` stderr line + exit 1.
 """
 
 from __future__ import annotations
@@ -23,8 +24,7 @@ import click
 
 from ...review.cell import (
     DEFAULT_CELLS_DIR,
-    CellError,
-    check_fair_pair,
+    load_baseline_lineage,
     load_cell,
     resolve_cell_path,
 )
@@ -48,26 +48,20 @@ def run(
     """Load + validate → fair-pair check → execute the sweep plan. Exit code.
 
     ``cell_ref`` is a path to a cell file, or a cell id under ``cells_dir``
-    (default ``lab/cells/``). A treatment cell's BASELINE file must load from
-    the same cells directory and pass :func:`check_fair_pair` — an unfair
-    comparison refuses to run, exactly as it should fail at PR review of the
-    cell file. ``base_dir``/``launcher`` are the store/launch injection seams
-    (tests), as on the replay driver.
+    (default ``lab/cells/``). A treatment cell's WHOLE baseline chain must
+    load from the same cells directory and pass
+    :func:`~shipit.review.cell.load_baseline_lineage` — per-hop fair-pair,
+    terminating at a control; a missing ancestor, a cycle, or an unfair pair
+    refuses to run, exactly as it should fail at PR review of the cell file.
+    ``base_dir``/``launcher`` are the store/launch injection seams (tests),
+    as on the replay driver.
     """
     cells_root = Path(cells_dir) if cells_dir is not None else DEFAULT_CELLS_DIR
     cell = load_cell(resolve_cell_path(cell_ref, cells_root))
     fixture = load_fixture(
         Path(fixture_path) if fixture_path is not None else DEFAULT_FIXTURE_PATH
     )
-    if not cell.is_control:
-        baseline_path = cells_root / f"{cell.baseline}.toml"
-        if not baseline_path.is_file():
-            raise CellError(
-                f"cell {cell.id!r} names baseline {cell.baseline!r} but "
-                f"{baseline_path} does not exist — the baseline cell is part of "
-                "the reviewed pair; commit it first"
-            )
-        check_fair_pair(cell, load_cell(baseline_path), fixture)
+    load_baseline_lineage(cell, fixture, cells_root)
     run_cell(
         cell,
         fixture,

@@ -107,8 +107,11 @@ curve** from the banked records — cumulative major-or-worse recall, false
 positives / adjudicated precision, token cost, and latency per sweep point,
 compared against the baseline cell **at equal budget** (recall per Mtok and
 per minute). Both verbs are validated loudly at load: unknown keys, a missing
-`baseline`/`axis` declaration, or an unfair pair (different fixture version
-or PR subset than the baseline) refuse before any token burns.
+`baseline`/`axis` declaration, an unfair pair (different fixture version
+or PR subset than the baseline), or a broken baseline lineage — the whole
+declared chain is walked hop by hop and must terminate at a committed
+control, so a missing ancestor or a cycle refuses too — all before any
+token burns.
 
 ### Format (schema 1)
 

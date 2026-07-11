@@ -1050,6 +1050,56 @@ def test_lab_run_missing_baseline_file_is_one_clean_error_line(tmp_path, capsys)
     assert rc == 1
     err = capsys.readouterr().err
     assert err.startswith("error:") and "does not exist" in err
+    # The lineage error names the missing cell id and the cells dir searched.
+    assert "'ctl'" in err and str(cells) in err
+
+
+def test_lab_run_refuses_a_cyclic_baseline_chain(tmp_path, capsys):
+    """Two treatments naming each other share fixture/pins, so every EDGE is
+    fair — only the lineage walk (#719) sees the chain never reaches a
+    control. `lab run` must refuse loud before any token burns."""
+    from shipit.verbs.lab import run as run_verb
+
+    cells = tmp_path / "cells"
+    _write(cells / "a.toml", _cell_toml("a", baseline="b", axis="x", mode="blind"))
+    _write(cells / "b.toml", _cell_toml("b", baseline="a", axis="y", mode="blind"))
+    fixture_path = tmp_path / "fixture.toml"
+    _write(fixture_path, "schema = 1\nversion = 1\n")
+    rc = run_verb.run(
+        "a",
+        fixture_path=str(fixture_path),
+        cells_dir=str(cells),
+        base_dir=tmp_path / "state",
+    )
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert err.startswith("error:") and "cyclic baseline chain" in err
+    assert "a -> b -> a" in err
+
+
+def test_lab_report_missing_baseline_file_is_one_clean_error_line(tmp_path, capsys):
+    """`lab report` walks the same lineage as `lab run` (#718's agy thread:
+    this path had no coverage) — and its missing-ancestor error names the
+    missing cell id and the cells dir it searched."""
+    from shipit.verbs.lab import report as report_verb
+
+    cells = tmp_path / "cells"
+    _write(
+        cells / "treat.toml",
+        _cell_toml("treat", baseline="ghost", axis="x", mode="blind"),
+    )
+    fixture_path = tmp_path / "fixture.toml"
+    _write(fixture_path, "schema = 1\nversion = 1\n")
+    rc = report_verb.run(
+        "treat",
+        fixture_path=str(fixture_path),
+        cells_dir=str(cells),
+        base_dir=tmp_path / "state",
+    )
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert err.startswith("error:") and "does not exist" in err
+    assert "'ghost'" in err and str(cells) in err
 
 
 def test_lab_report_unknown_cell_is_one_clean_error_line(tmp_path, capsys):
@@ -1119,17 +1169,20 @@ count = 1
 
 
 def test_the_committed_cells_load_and_pair_fairly():
-    """Every in-repo treatment cell (lab/cells/) must load, pass the fair-pair
-    check against the committed control, and resolve every pin against the
-    committed fixture."""
+    """Every in-repo treatment cell (lab/cells/) must load, walk its WHOLE
+    baseline lineage to the committed control (per-hop fair-pair, no missing
+    ancestor, no cycle — #719), and resolve every pin against the committed
+    fixture."""
+    import dataclasses
     from pathlib import Path
 
-    from shipit.review.cell import check_fair_pair, load_cell
+    from shipit.review.cell import load_baseline_lineage, load_cell
     from shipit.review.groundtruth import load_fixture
 
-    control = load_cell(Path("lab/cells/fanout-baseline.toml"))
+    cells_dir = Path("lab/cells")
+    control = load_cell(cells_dir / "fanout-baseline.toml")
     treatments = [
-        load_cell(Path(f"lab/cells/{stem}.toml"))
+        load_cell(cells_dir / f"{stem}.toml")
         for stem in ("fanout-informed", "fanout-sevtiers", "sevtiers-informed")
     ]
     fixture = load_fixture(Path("lab/fixture.toml"))
@@ -1137,12 +1190,46 @@ def test_the_committed_cells_load_and_pair_fairly():
     assert control.is_control
     by_id = {cell.id: cell for cell in (control, *treatments)}
     for treatment in treatments:
-        # Each treatment pairs against its DECLARED baseline — the control for
-        # the first-generation cells; the fanout-sevtiers treatment for the
-        # composition cell sevtiers-informed (#717). A KeyError here means a
-        # cell names a baseline that is not committed — fail loudly.
-        check_fair_pair(treatment, by_id[treatment.baseline], fixture)
+        # Each treatment's FULL baseline chain — the control one hop away for
+        # the first-generation cells; two hops for the composition cell
+        # sevtiers-informed (#717) — must load from lab/cells/, fair-pair per
+        # hop, and terminate at the committed control. A cell naming an
+        # uncommitted baseline (or a cyclic/control-less lineage) is the
+        # validator's loud CellError naming the offender, not a raw KeyError.
+        chain = load_baseline_lineage(treatment, fixture, cells_dir)
+        assert chain[-1].id == control.id and chain[-1].is_control
         assert treatment.axis != "control"
+    # Pin the committed lineage SHAPE: who each treatment measures against.
+    assert by_id["fanout-informed"].baseline == "fanout-baseline"
+    assert by_id["fanout-sevtiers"].baseline == "fanout-baseline"
+    assert by_id["sevtiers-informed"].baseline == "fanout-sevtiers"
+    assert [
+        c.id
+        for c in load_baseline_lineage(by_id["sevtiers-informed"], fixture, cells_dir)
+    ] == ["sevtiers-informed", "fanout-sevtiers", "fanout-baseline"]
+    # Each treatment must be byte-identical to its declared baseline in EVERY
+    # experiment-defining field except its declared axis's own knob — pin the
+    # full delta set, not just the fields the axis names, so a stray edit to
+    # e.g. `model`, `timeout`, or `dedup` on one cell of a pair fails here
+    # instead of silently confounding the one-axis comparison (#718 review).
+    identity_fields = {"id", "baseline", "axis", "description"}
+    allowed_deltas = {
+        "fanout-informed": {"sweep_mode"},
+        "fanout-sevtiers": {"dimensions"},
+        "sevtiers-informed": {"sweep_mode"},
+    }
+    for treatment in treatments:
+        base = by_id[treatment.baseline]
+        deltas = {
+            f.name
+            for f in dataclasses.fields(treatment)
+            if getattr(treatment, f.name) != getattr(base, f.name)
+        } - identity_fields
+        assert deltas == allowed_deltas[treatment.id], (
+            f"cell {treatment.id!r} differs from baseline {base.id!r} in "
+            f"{sorted(deltas)}; only {sorted(allowed_deltas[treatment.id])} "
+            "may differ (the declared axis)"
+        )
     # Pin the committed run shape so a cost-visible drift (e.g. an accidental
     # revert to replicates = 1) fails here rather than silently shrinking the
     # runs: check_fair_pair only equates the pair, it does not fix the count.
