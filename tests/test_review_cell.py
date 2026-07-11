@@ -16,10 +16,12 @@ import pytest
 
 from shipit.review.cell import (
     CellError,
+    check_baseline_lineage,
     check_fair_pair,
     compose_informed_instructions,
     instructions_variant_text,
     key_tuple,
+    load_baseline_lineage,
     load_cell,
     parse_cell,
     record_matches_key,
@@ -547,12 +549,20 @@ def test_check_fair_pair_rejects_wrong_baseline():
 def test_check_fair_pair_accepts_a_treatment_baseline():
     """A COMPOSITION cell names a treatment as its baseline (one new axis
     layered onto a treatment that earned its edge — #717's sevtiers-informed
-    vs fanout-sevtiers). The chain hides nothing: each committed link is
-    itself fair-pair-checked against ITS baseline, so the pair is fair as long
-    as the denominators match."""
+    vs fanout-sevtiers) and declares its own NEW axis, distinct from its
+    baseline's. The chain hides nothing: each committed link is itself
+    fair-pair-checked against ITS baseline (and the whole lineage is walked
+    to the control, see the baseline-lineage tests), so the pair is fair as
+    long as the denominators match."""
     chained = parse_cell(_treatment_data())
     check_fair_pair(
-        parse_cell(_treatment_data(id="deeper", baseline="treatment")),
+        parse_cell(
+            _treatment_data(
+                id="deeper",
+                baseline="treatment",
+                axis="pass scoping: severity tiers vs concern dimensions",
+            )
+        ),
         chained,
         _fair_fixture(),
     )  # no raise
@@ -572,3 +582,147 @@ def test_check_fair_pair_rejects_differing_denominators():
             control,
             _fair_fixture(),
         )
+
+
+# --- the baseline-lineage walk ----------------------------------------------------------
+# check_fair_pair proves one EDGE; the walk proves the whole chain terminates
+# at a control, with no missing ancestor and no cycle (#719 — the gap #718's
+# composition cell opened when it dropped the baseline-is-control guard).
+
+
+def _lineage_resolver(cells):
+    """A mapping-backed resolver for the pure walker: parent by declared
+    baseline id, a loud CellError when the ancestor is not in the map (the
+    contract `load_baseline_lineage`'s file-backed resolver fulfils on disk)."""
+
+    def resolve(current):
+        parent = cells.get(current.baseline)
+        if parent is None:
+            raise CellError(
+                f"cell {current.id!r} names baseline {current.baseline!r} "
+                "which does not exist"
+            )
+        return parent
+
+    return resolve
+
+
+def test_check_baseline_lineage_walks_a_chain_to_the_control():
+    control = parse_cell(_cell_data())
+    mid = parse_cell(_treatment_data())
+    deep = parse_cell(
+        _treatment_data(
+            id="deeper",
+            baseline="treatment",
+            axis="pass scoping: severity tiers vs concern dimensions",
+        )
+    )
+    cells = {c.id: c for c in (control, mid, deep)}
+    chain = check_baseline_lineage(deep, _fair_fixture(), _lineage_resolver(cells))
+    assert [c.id for c in chain] == ["deeper", "treatment", "control"]
+    assert chain[-1].is_control
+
+
+def test_check_baseline_lineage_control_is_its_own_one_cell_chain():
+    control = parse_cell(_cell_data())
+
+    def never(_current):  # pragma: no cover - the walker must not call it
+        raise AssertionError("a control has no baseline hop to resolve")
+
+    assert check_baseline_lineage(control, _fair_fixture(), never) == (control,)
+
+
+def test_check_baseline_lineage_rejects_a_cycle():
+    # Two treatments naming each other: identical fixture/pins, so every EDGE
+    # passes check_fair_pair — only the walk sees no control terminates it.
+    a = parse_cell(_treatment_data(id="a", baseline="b", axis="x"))
+    b = parse_cell(_treatment_data(id="b", baseline="a", axis="y"))
+    with pytest.raises(CellError, match="cyclic baseline chain"):
+        check_baseline_lineage(a, _fair_fixture(), _lineage_resolver({"a": a, "b": b}))
+
+
+def test_check_baseline_lineage_rejects_a_missing_ancestor():
+    # The hole is one hop DEEP (the cell's own baseline exists; ITS baseline
+    # does not) — an immediate-edge check would miss it.
+    mid = parse_cell(_treatment_data(id="mid", baseline="ghost", axis="x"))
+    deep = parse_cell(_treatment_data(id="deep", baseline="mid", axis="y"))
+    with pytest.raises(CellError, match="'ghost'"):
+        check_baseline_lineage(
+            deep, _fair_fixture(), _lineage_resolver({"mid": mid, "deep": deep})
+        )
+
+
+def test_check_baseline_lineage_fair_pair_checks_every_hop():
+    # The unfairness is one hop DEEP: deep↔mid agree on fixture v2, but mid
+    # pins a different version than its control — the walk fails the hop.
+    control = parse_cell(_cell_data())
+    mid = parse_cell(
+        _treatment_data(id="mid", fixture={"version": 2, "prs": ["core-440"]})
+    )
+    deep = parse_cell(
+        _treatment_data(
+            id="deep",
+            baseline="mid",
+            axis="y",
+            fixture={"version": 2, "prs": ["core-440"]},
+        )
+    )
+    cells = {c.id: c for c in (control, mid, deep)}
+    with pytest.raises(CellError, match="different fixture versions"):
+        check_baseline_lineage(deep, _fair_fixture(), _lineage_resolver(cells))
+
+
+def test_load_baseline_lineage_names_the_missing_cell_and_the_dir(tmp_path):
+    """The file-backed walk's missing-ancestor error must name the missing
+    cell id AND the cells dir it searched (#718's agy thread on report.py)."""
+    path = tmp_path / "treat.toml"
+    path.write_text(
+        """
+schema = 1
+id = "treat"
+baseline = "ghost"
+axis = "x"
+[fixture]
+version = 1
+prs = ["core-440"]
+[pipeline]
+shape = "single"
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(CellError) as exc:
+        load_baseline_lineage(load_cell(path), _fair_fixture(), tmp_path)
+    message = str(exc.value)
+    assert "'ghost'" in message and str(tmp_path) in message
+    assert "does not exist" in message
+
+
+def test_load_baseline_lineage_loads_a_committed_chain(tmp_path):
+    """A three-link chain on disk (composition → treatment → control) loads,
+    fair-pairs per hop, and returns the whole lineage in order."""
+
+    def cell_toml(cell_id, baseline, axis):
+        return f"""
+schema = 1
+id = "{cell_id}"
+baseline = "{baseline}"
+axis = "{axis}"
+[fixture]
+version = 1
+prs = ["core-440"]
+[pipeline]
+shape = "single"
+"""
+
+    for cell_id, baseline, axis in (
+        ("ctl", "ctl", "control"),
+        ("treat", "ctl", "x"),
+        ("compose", "treat", "y"),
+    ):
+        (tmp_path / f"{cell_id}.toml").write_text(
+            cell_toml(cell_id, baseline, axis), encoding="utf-8"
+        )
+    chain = load_baseline_lineage(
+        load_cell(tmp_path / "compose.toml"), _fair_fixture(), tmp_path
+    )
+    assert [c.id for c in chain] == ["compose", "treat", "ctl"]

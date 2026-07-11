@@ -1,7 +1,8 @@
 """``shipit lab report`` — render one Cell's convergence curve from banked records.
 
 The Review Lab's cell read-side (ADR-0049, RVW03-WS07): loads the cell + its
-baseline cell (fair-pair enforced, same as ``lab run``), the Ground-truth
+whole baseline lineage (per-hop fair-pair, chain walked to the control, same
+as ``lab run`` — #719), the Ground-truth
 fixture, and the local review-round record stores of every repo the cell pins,
 then prints the deterministic convergence-curve report
 (:mod:`shipit.review.curve`): cumulative major-or-worse recall, false
@@ -26,8 +27,8 @@ from ...review.cell import (
     DEFAULT_CELLS_DIR,
     Cell,
     CellError,
-    check_fair_pair,
     instructions_variant_text,
+    load_baseline_lineage,
     load_cell,
     resolve_cell_path,
 )
@@ -83,10 +84,13 @@ def run(
     base_dir: Path | None = None,
     out: TextIO | None = None,
 ) -> int:
-    """Load + fair-pair check → pool banked records → print the curve. Exit code.
+    """Load + lineage check → pool banked records → print the curve. Exit code.
 
-    The baseline cell loads from the same cells directory and renders beside
-    the treatment (a control cell renders alone — it IS the baseline);
+    The whole baseline chain loads from the same cells directory and is
+    walked to its control (:func:`~shipit.review.cell.load_baseline_lineage`
+    — per-hop fair-pair; a missing ancestor, cycle, or unfair pair refuses,
+    #719); the IMMEDIATE baseline's curve renders beside the treatment (a
+    control cell renders alone — it IS the baseline).
     :func:`resolve_pins` re-validates the fixture version pin, so a report
     against a drifted fixture refuses instead of printing incomparable
     numbers. ``base_dir`` overrides the store family root (tests).
@@ -97,17 +101,10 @@ def run(
     fixture = load_fixture(
         Path(fixture_path) if fixture_path is not None else DEFAULT_FIXTURE_PATH
     )
+    lineage = load_baseline_lineage(cell, fixture, cells_root)
     baseline_curve = None
     if not cell.is_control:
-        baseline_path = cells_root / f"{cell.baseline}.toml"
-        if not baseline_path.is_file():
-            raise CellError(
-                f"cell {cell.id!r} names baseline {cell.baseline!r} but "
-                f"{baseline_path} does not exist — commit the baseline cell of "
-                "the pair first"
-            )
-        baseline = load_cell(baseline_path)
-        check_fair_pair(cell, baseline, fixture)
+        baseline = lineage[1]
         baseline_curve = convergence_curve(
             baseline,
             fixture,
