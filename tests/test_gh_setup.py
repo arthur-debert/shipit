@@ -477,13 +477,15 @@ def test_setup_malformed_reviewers_degrades_like_a_config_error(
     malformed [secrets]: ruleset/labels applied, the failure a report fact."""
     monkeypatch.setattr(ghsetup.gh, "default_branch", lambda repo: "main")
     monkeypatch.setattr(ghsetup.checks_mod, "discover", lambda *a, **k: ["c / check"])
-    cfg = tmp_path / ".shipit.toml"
+    cfg = tmp_path / "custom-policy.toml"
     cfg.write_text("[reviewers]\nnotareviewer = {}\n", encoding="utf-8")
 
     report = ghsetup.setup(REPO, config_path=str(cfg), dry_run=False)
     assert report.secrets == ()
     assert report.secrets_error is not None
     assert "notareviewer" in report.secrets_error
+    assert str(cfg) in report.secrets_error
+    assert ".shipit.toml" not in report.secrets_error
     assert report.ruleset.action == "created"  # the earlier passes still ran
 
 

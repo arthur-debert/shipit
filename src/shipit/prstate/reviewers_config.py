@@ -233,17 +233,28 @@ def parse_roster(
     table comes from the same file. ``config_path`` anchors relative reviewer
     instruction paths and identifies validation errors.
     """
-    config = Path(config_path)
-    value = cfg.get(OVERRIDE_KEY)
-    if value is None:
-        return default_roster()
-    entries = _parse_table(value, config_dir=config.parent)
-    # `_parse_table` has already established `value` is a table; the reserved
-    # table-level policy keys ride that same table (they are NOT reviewer entries).
-    round_cap = _parse_round_cap(value)
-    poll_interval = _parse_poll_interval(value)
-    nit_cap = _parse_nit_cap(value)
-    calibrator = _parse_calibrator(value)
+    config = Path(config_path).resolve()
+    try:
+        value = cfg.get(OVERRIDE_KEY)
+        if value is None:
+            return default_roster()
+        entries = _parse_table(value, config_dir=config.parent)
+        # `_parse_table` has already established `value` is a table; the reserved
+        # table-level policy keys ride that same table (they are NOT reviewer entries).
+        round_cap = _parse_round_cap(value)
+        poll_interval = _parse_poll_interval(value)
+        nit_cap = _parse_nit_cap(value)
+        calibrator = _parse_calibrator(value)
+        _validate(tuple(e.name for e in entries))
+    except RequiredReviewersConfigError as exc:
+        # The mature validators name the conventional file.  An explicit custom
+        # path must not misattribute their errors; keep conventional diagnostics
+        # stable while rebasing every nested validator for the custom-path seam.
+        if config.name == OVERRIDE_FILE:
+            raise
+        raise RequiredReviewersConfigError(
+            str(exc).replace(OVERRIDE_FILE, str(config))
+        ) from exc
     if not entries:
         # No reviewer entries → the shipped default required set. The table-level
         # policy keys still apply: policy can be set without opting out of the
@@ -255,7 +266,6 @@ def parse_roster(
             nit_cap=nit_cap,
             calibrator=calibrator,
         )
-    _validate(tuple(e.name for e in entries))
     try:
         return Roster(
             tuple(entries),
