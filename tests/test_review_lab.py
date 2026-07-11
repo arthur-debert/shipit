@@ -221,6 +221,78 @@ def test_extending_the_sweep_count_pays_only_for_the_new_points(
     assert [k["sweep"] for k in summary.executed] == [2]
 
 
+def _fanout_cell(dims, cell_id="ctl", **overrides):
+    """A fanout-shaped control cell over the test pin, dimensions explicit."""
+    data = {
+        "schema": 1,
+        "id": cell_id,
+        "baseline": cell_id,
+        "axis": "control",
+        "fixture": {"version": 1, "prs": ["widget-1"]},
+        "pipeline": {"shape": "fanout", "dimensions": list(dims)},
+        "invocation": {"backend": "codex", "model": "pro", "timeout": "600s"},
+        "sweeps": {"count": 1, "mode": "blind", "replicates": 1},
+    }
+    data.update(overrides)
+    return parse_cell(data)
+
+
+def test_changing_the_dimension_set_re_keys_banked_fanout_points(
+    checkout, launcher, tmp_path
+):
+    """#713 regression: the run key's variant folds the RESOLVED dimension set
+    (names + focus texts), so a fan-out cell re-run under a different
+    `dimensions` list RE-EXECUTES — it must never reuse points banked under
+    the other prompt (the idempotency hole: focus texts are prompt material
+    that never reached the hash). The same set still banks and reuses."""
+    view = replay.resolve_range("HEAD~1..HEAD", workdir=str(checkout))
+    fixture = _fixture_for(view)
+    state = tmp_path / "state"
+    kwargs = dict(
+        checkouts=[str(checkout)], base_dir=state, launcher=launcher["launch"]
+    )
+    first = run_cell(_fanout_cell(["correctness"]), fixture, **kwargs)
+    assert len(first.executed) == 1
+    swapped = run_cell(_fanout_cell(["sev-critical-high"]), fixture, **kwargs)
+    assert len(swapped.executed) == 1 and not swapped.reused  # re-paid, not reused
+    again = run_cell(_fanout_cell(["sev-critical-high"]), fixture, **kwargs)
+    assert not again.executed and len(again.reused) == 1  # same set still banks
+    variants = {record["round.cell"]["variant"] for record in _store_records(state)}
+    assert len(variants) == 2  # one instructions file, two arms, two keys
+
+
+def test_per_dimension_invocation_overrides_re_key_banked_fanout_points(
+    checkout, launcher, tmp_path
+):
+    """#713 regression at the RUNNER boundary: the run key folds per-dimension
+    Invocation overrides too, not just the dimension NAMES — two fan-out cells
+    with the SAME `dimensions` list but different `[invocation.dimensions]`
+    blocks run different prompt material (a pass under a different model), so
+    the second RE-EXECUTES and never reuses the first's banked point. Guards the
+    'keyed on cell.dimensions but dropped cell.dimension_invocations' regression
+    the names-only test cannot see. The same overrides still bank and reuse."""
+    view = replay.resolve_range("HEAD~1..HEAD", workdir=str(checkout))
+    fixture = _fixture_for(view)
+    state = tmp_path / "state"
+    kwargs = dict(
+        checkouts=[str(checkout)], base_dir=state, launcher=launcher["launch"]
+    )
+    inv = {"backend": "codex", "model": "pro", "timeout": "600s"}
+    plain = _fanout_cell(["correctness"], invocation=inv)
+    overridden = _fanout_cell(
+        ["correctness"],
+        invocation={**inv, "dimensions": {"correctness": {"model": "o3"}}},
+    )
+    first = run_cell(plain, fixture, **kwargs)
+    assert len(first.executed) == 1
+    swapped = run_cell(overridden, fixture, **kwargs)
+    assert len(swapped.executed) == 1 and not swapped.reused  # re-paid, not reused
+    again = run_cell(overridden, fixture, **kwargs)
+    assert not again.executed and len(again.reused) == 1  # same override still banks
+    variants = {record["round.cell"]["variant"] for record in _store_records(state)}
+    assert len(variants) == 2  # same dimension list, two override blocks, two keys
+
+
 def test_informed_sweeps_compose_prior_findings_at_the_runner_layer(
     checkout, launcher, tmp_path
 ):
@@ -986,6 +1058,61 @@ def test_lab_report_unknown_cell_is_one_clean_error_line(tmp_path, capsys):
     rc = report_verb.run("ghost", cells_dir=str(tmp_path / "cells"))
     assert rc == 1
     assert capsys.readouterr().err.startswith("error: no cell file")
+
+
+def test_lab_report_selects_fanout_records_by_the_folded_key(
+    checkout, launcher, tmp_path, capsys
+):
+    """#713: `lab report`'s variant hash must fold the dimension set EXACTLY
+    as the runner does — a fan-out cell's banked points render as a scored
+    curve, never as missing points under a mismatched key."""
+    from shipit.verbs.lab import report as report_verb
+    from shipit.verbs.lab import run as run_verb
+
+    view = replay.resolve_range("HEAD~1..HEAD", workdir=str(checkout))
+    cells = tmp_path / "cells"
+    _write(
+        cells / "ctl.toml",
+        """
+schema = 1
+id = "ctl"
+baseline = "ctl"
+axis = "control"
+[fixture]
+version = 1
+prs = ["widget-1"]
+[pipeline]
+shape = "fanout"
+dimensions = ["correctness"]
+[invocation]
+backend = "codex"
+[sweeps]
+count = 1
+""",
+    )
+    fixture_path = tmp_path / "fixture.toml"
+    _write(fixture_path, _fixture_toml(view))
+    state = tmp_path / "state"
+    rc = run_verb.run(
+        "ctl",
+        checkouts=(str(checkout),),
+        fixture_path=str(fixture_path),
+        cells_dir=str(cells),
+        base_dir=state,
+        launcher=launcher["launch"],
+    )
+    assert rc == 0
+    capsys.readouterr()
+    rc = report_verb.run(
+        "ctl",
+        fixture_path=str(fixture_path),
+        cells_dir=str(cells),
+        base_dir=state,
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "sweep 1: recall 1/1 (100%)" in out
+    assert "missing" not in out
 
 
 # --- the committed cells ---------------------------------------------------------------

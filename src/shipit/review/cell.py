@@ -44,6 +44,7 @@ from typing import Any
 from .calibrator import CalibratorConfig
 from .dimensions import (
     DEFAULT_DIMENSION_NAMES,
+    fanout_variant_text,
     known_dimension_names,
     resolve_dimensions,
 )
@@ -57,6 +58,7 @@ __all__ = [
     "CellInvocation",
     "check_fair_pair",
     "compose_informed_instructions",
+    "instructions_variant_text",
     "key_tuple",
     "load_cell",
     "parse_cell",
@@ -642,6 +644,28 @@ def check_fair_pair(cell: Cell, baseline: Cell, fixture: Fixture) -> None:
 # --- the idempotency key (ADR-0049: banked results are never paid for twice) ---
 
 
+def instructions_variant_text(cell: Cell, base_text: str) -> str:
+    """The text ``cell``'s instructions-variant hash covers. PURE.
+
+    ``base_text`` is the cell's BASE instructions (read once by the runner /
+    report). A ``single``-shape cell hashes it verbatim — its one pass embeds
+    nothing beyond the instructions, and the unchanged text keeps existing
+    banked single-pass points on their recorded keys. A ``fanout`` cell folds
+    its resolved dimension set — names, titles, focus texts — and its
+    per-dimension Invocation overrides into the hashed text
+    (:func:`~shipit.review.dimensions.fanout_variant_text`, #713): the focus
+    texts live in code and the cell's ``dimensions`` list selects them, so the
+    file alone under-keys the experiment — a focus-text edit (ADR-0051's
+    experiment material) must change the variant and re-key, never silently
+    reuse points banked under the old prompt. Both run-key derivations
+    (:mod:`shipit.review.labrun` and ``lab report``) hash THIS text, so the
+    report always selects exactly the records the runs banked.
+    """
+    if cell.shape != "fanout":
+        return base_text
+    return fanout_variant_text(base_text, cell.dimensions, cell.dimension_invocations)
+
+
 def run_key(
     cell: Cell,
     *,
@@ -654,13 +678,16 @@ def run_key(
     tag. PURE.
 
     The ADR-0049 key: (cell, fixture PR, fixture version, variant, replicate,
-    sweep). ``variant_hash`` is the content hash of the cell's BASE
-    instructions (the ``sha256:`` scheme of
-    :func:`shipit.harness.eval.variant.variant_of`) — editing the prompt
-    changes the key, so banked records of the old prompt are never silently
-    reused for the new one. An informed sweep's COMPOSED instructions hash
-    differently per sweep (they embed prior findings), so the record's own
-    ``round.variant`` cannot key reuse — the base hash here can, and does.
+    sweep). ``variant_hash`` is the content hash of the cell's variant text —
+    the BASE instructions, folded with a fan-out cell's resolved dimension set
+    and per-dimension overrides (:func:`instructions_variant_text`, #713) —
+    in the ``sha256:`` scheme of
+    :func:`shipit.harness.eval.variant.variant_of`. Editing the prompt — the
+    instructions file OR a dimension focus text — changes the key, so banked
+    records of the old prompt are never silently reused for the new one. An
+    informed sweep's COMPOSED instructions hash differently per sweep (they
+    embed prior findings), so the record's own ``round.variant`` cannot key
+    reuse — the base hash here can, and does.
     The non-key fields (axis/baseline/sweep_mode/label) ride along for the
     report's benefit; :func:`record_matches_key` compares KEY fields only.
     """

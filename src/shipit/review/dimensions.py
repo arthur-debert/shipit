@@ -23,7 +23,8 @@ referenced everywhere else (the Roster `dimensions` option validates against
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import json
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 
@@ -193,3 +194,55 @@ def resolve_dimensions(names: Sequence[str] | None) -> tuple[Dimension, ...]:
     if not names:
         return _CONCERN_DIMENSIONS
     return tuple(by_name(name) for name in names)
+
+
+def fanout_variant_text(
+    instructions_text: str,
+    names: Sequence[str] | None,
+    overrides: Mapping[str, Mapping[str, str]] | None = None,
+) -> str:
+    """The text a fan-out round's instructions-variant hash covers. PURE.
+
+    The shared instructions file is only PART of a fan-out round's prompt
+    material: each pass embeds its dimension's title/focus slice
+    (:func:`shipit.review.prompt.build_reviewer_task`), a ``dimensions`` list
+    selects the set, and a lab cell may override a pass's Invocation. None of
+    that lives in the instructions file, so hashing the file alone lets a
+    focus-text edit — exactly the experiment material ADR-0051 froze — reuse
+    results recorded under the old prompt (#713). This helper folds the
+    RESOLVED dimension set (name, title, focus, and any per-dimension
+    invocation overrides) into the hashed text, canonically: dimensions sorted
+    by name (passes run in parallel, so a reordered config list is the same
+    experiment and pools with itself) and override fields sorted within each
+    block. Every consumer of the fan-out instructions-variant hash — the lab
+    run key (:func:`shipit.review.cell.instructions_variant_text`) and the
+    round record's ``round.variant``
+    (:func:`shipit.review.roundrecord.record_round`) — derives it from THIS
+    text, so they can never disagree.
+
+    ``names`` follows :func:`resolve_dimensions` (``None``/empty = the shipped
+    default set; unknown names raise ``KeyError`` there). ``overrides`` is the
+    per-dimension Invocation table (``{dimension name: {"model"/"timeout":
+    …}}``); an entry naming a dimension outside the set is ignored here — the
+    config boundaries already reject it loudly (cell parse, fan-out preflight).
+
+    Every folded field (name, title, focus, and each override key/value) is
+    JSON-encoded before it lands on its line, so the canonicalization is
+    INJECTIVE: a JSON string literal never contains a bare newline, so no field
+    value can forge a line boundary and collide two distinct dimension sets into
+    one hash (#713 — a focus text is editable prose and an override value is
+    caller-supplied; a raw join would let ``{"model": "x\\noverride.timeout: y"}``
+    canonicalize identically to ``{"model": "x", "timeout": "y"}``).
+    """
+    lines = [instructions_text, "", "--- dimension set (variant material) ---"]
+    for dim in sorted(resolve_dimensions(names), key=lambda d: d.name):
+        lines.append(f"[dimension: {json.dumps(dim.name, ensure_ascii=False)}]")
+        lines.append(f"title: {json.dumps(dim.title, ensure_ascii=False)}")
+        lines.append(f"focus: {json.dumps(dim.focus, ensure_ascii=False)}")
+        override = (overrides or {}).get(dim.name) or {}
+        lines.extend(
+            f"override.{json.dumps(key, ensure_ascii=False)}: "
+            f"{json.dumps(override[key], ensure_ascii=False)}"
+            for key in sorted(override)
+        )
+    return "\n".join(lines)

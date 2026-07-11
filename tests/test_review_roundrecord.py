@@ -271,6 +271,47 @@ def test_same_instructions_pool_and_edited_instructions_separate(tmp_path):
     assert _variant(a) != _variant(edited)
 
 
+def test_fanout_round_variant_folds_the_dimension_set(tmp_path):
+    """#713: rounds sharing ONE instructions file but running different
+    dimension sets stamp DIFFERENT round.variant hashes (`eval score` can
+    separate the arms); a non-fan-out round (dimension_names None) hashes the
+    instructions alone, exactly as before, so single-pass variants pool with
+    their own history."""
+    from shipit.harness.eval.variant import variant_of
+    from shipit.review.dimensions import DEFAULT_DIMENSION_NAMES
+
+    instructions = tmp_path / "i.txt"
+    instructions.write_text("same instructions", encoding="utf-8")
+
+    def _variant(**kw):
+        record_path = roundrecord.record_round(
+            {"summary": {"status": "COMMENT"}, "comments": []},
+            repo_slug="acme/widget",
+            pr=1,
+            base_sha="a" * 40,
+            head_sha="b" * 40,
+            reviewer="codex",
+            model="pro",
+            timeout="600s",
+            instructions_path=str(instructions),
+            base_dir=tmp_path / "state",
+            env={},
+            **kw,
+        )
+        line = record_path.read_text().splitlines()[-1]
+        return json.loads(line)["round.variant"]["content_hash"]
+
+    plain = _variant()
+    concern = _variant(dimension_names=DEFAULT_DIMENSION_NAMES)
+    tiers = _variant(dimension_names=("sev-critical-high", "sev-medium", "sev-low"))
+    overridden = _variant(
+        dimension_names=DEFAULT_DIMENSION_NAMES,
+        dimension_overrides={"correctness": {"model": "o3"}},
+    )
+    assert plain == variant_of("same instructions").content_hash  # unchanged path
+    assert len({plain, concern, tiers, overridden}) == 4  # every arm separates
+
+
 # --- the service tee (generate time, fail-open, posting path untouched) --------
 
 
@@ -314,6 +355,11 @@ def test_generate_review_tees_a_round_record(monkeypatch, tmp_path):
     assert kwargs["head_sha"] == "b" * 40
     assert kwargs["reviewer"] == "codex"
     assert kwargs["duration_ms"] >= 0
+    # #713: a round-1 fan-out forwards its RESOLVED pass set so the record's
+    # round.variant folds the dimension prompt material.
+    from shipit.review.dimensions import DEFAULT_DIMENSION_NAMES
+
+    assert kwargs["dimension_names"] == DEFAULT_DIMENSION_NAMES
 
 
 def test_generate_review_incremental_rescopes_and_records_the_fix_range(
@@ -371,6 +417,9 @@ def test_generate_review_incremental_rescopes_and_records_the_fix_range(
     assert captured["base"] == "d" * 40  # the fan-out saw the fix-range base
     [kw] = written
     assert kw["base_sha"] == "d" * 40 and kw["head_sha"] == "b" * 40
+    # #713: an incremental round ran ONE fix-range pass, not the dimension
+    # set — nothing folds into its round.variant.
+    assert kw["dimension_names"] is None
 
 
 def test_generate_review_force_push_fallback_keeps_full_range(monkeypatch, tmp_path):

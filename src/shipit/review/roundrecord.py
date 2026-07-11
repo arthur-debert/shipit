@@ -21,7 +21,11 @@ transcript/run_id join), and the ReasoningLevel actually applied to argv.
 ``round.usage.total_tokens`` sums the reported per-run usage; ``shipit eval
 report``'s review axis reads that token cost straight from the record. The
 record also carries its own review-instructions **Variant**
-(``round.variant``), the experiment-arm handle a review-prompt A/B groups by.
+(``round.variant``), the experiment-arm handle a review-prompt A/B groups by —
+for a dimension fan-out round the hash folds the resolved dimension set's
+prompt material (names, titles, focus texts, per-dimension overrides) in with
+the instructions (#713), so arms differing only by dimension set stamp
+different variants.
 Since RVW03-WS02 the record also carries ``round.id`` / ``round.artifacts``
 (the round's per-run artifact-bundle location,
 :mod:`shipit.review.artifacts`) and each finding's originating ``run_id``, so
@@ -59,6 +63,7 @@ from ..finding import Disposition, JudgedFinding
 from ..harness.eval.store import REVIEW_ROUNDS_KIND, append_record, read_records
 from ..harness.eval.variant import label_from_env, variant_of
 from ..identity import repo_from_slug
+from .dimensions import fanout_variant_text
 from .instructions import load_instructions
 from .schema import finding_from_dict
 
@@ -227,6 +232,8 @@ def record_round(
     round_id: str | None = None,
     artifacts_dir: str | None = None,
     cell: Mapping[str, Any] | None = None,
+    dimension_names: Sequence[str] | None = None,
+    dimension_overrides: Mapping[str, Mapping[str, str]] | None = None,
     base_dir: Path | None = None,
     env: Mapping[str, str] | None = None,
 ) -> Path:
@@ -240,7 +247,15 @@ def record_round(
     scheme as the role-prompt variant; the instructions are the prompt a
     review A/B edits, so identical instructions pool across PRs and an edited
     prompt separates arms) with any :data:`~shipit.harness.eval.variant.VARIANT_LABEL_ENV`
-    label. Returns the store path the record landed in.
+    label. For a dimension fan-out round, ``dimension_names`` — the RESOLVED
+    pass set the round actually ran (never ``None``-means-default: the caller
+    resolves; ``None`` here means "not a dimension fan-out", the single-pass
+    and incremental rounds) — folds the dimensions' prompt material (names,
+    titles, focus texts, plus any per-dimension ``dimension_overrides``) into
+    the hashed text (:func:`~shipit.review.dimensions.fanout_variant_text`,
+    #713): the focus texts live in code, not the instructions file, so two
+    arms differing only by dimension set would otherwise stamp one variant and
+    pool in ``eval score``. Returns the store path the record landed in.
 
     ``findings`` is the FULL judged set with the Calibrator's real dispositions
     (the RVW02-WS04 fan-out passes it; routed-out findings included, never
@@ -263,9 +278,12 @@ def record_round(
     injects the label read.
     """
     repo = repo_from_slug(repo_slug)
-    variant = variant_of(
-        load_instructions(instructions_path), label=label_from_env(env)
-    )
+    variant_text = load_instructions(instructions_path)
+    if dimension_names is not None:
+        variant_text = fanout_variant_text(
+            variant_text, dimension_names, dimension_overrides
+        )
+    variant = variant_of(variant_text, label=label_from_env(env))
     record = build(
         review=review,
         findings=findings if findings is not None else dispositioned(review),

@@ -53,6 +53,7 @@ from .cell import (
     Cell,
     CellError,
     compose_informed_instructions,
+    instructions_variant_text,
     key_tuple,
     record_matches_key,
     run_key,
@@ -324,7 +325,9 @@ def run_cell(
         ) from None
 
     # The cell's BASE instructions: read once, up front — the variant half of
-    # the idempotency key hashes this text, and an unreadable file must die
+    # the idempotency key hashes this text (folded, for a fan-out cell, with
+    # the resolved dimension set + per-dimension overrides — dimension focus
+    # texts are prompt material too, #713), and an unreadable file must die
     # before any model run bills.
     try:
         base_text = load_instructions(safe_instructions_path(cell.instructions_path))
@@ -333,7 +336,7 @@ def run_cell(
             f"cell {cell.id!r}: cannot read instructions "
             f"{cell.instructions_path!r}: {exc}"
         ) from exc
-    variant_hash = variant_of(base_text).content_hash
+    variant_hash = variant_of(instructions_variant_text(cell, base_text)).content_hash
 
     # Checkout preflight: every pin must resolve to a supplied clone (cwd is
     # a best-effort candidate too) BEFORE anything runs — all-or-nothing,

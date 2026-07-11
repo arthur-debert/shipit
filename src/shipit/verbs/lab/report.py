@@ -27,6 +27,7 @@ from ...review.cell import (
     Cell,
     CellError,
     check_fair_pair,
+    instructions_variant_text,
     load_cell,
     resolve_cell_path,
 )
@@ -38,11 +39,14 @@ from .._errors import cli_errors
 
 
 def _variant_hash(cell: Cell) -> str:
-    """The content hash of ``cell``'s BASE instructions — the variant half of
-    the run key, computed EXACTLY as the runner does (:mod:`shipit.review.labrun`)
-    so the report selects the same records the runs banked. The path is
-    symlink-checked identically to the runner, and a missing/unreadable
-    instructions file is a loud :class:`CellError`, never a silently-empty curve.
+    """The content hash of ``cell``'s variant text — the BASE instructions,
+    folded with a fan-out cell's resolved dimension set + per-dimension
+    overrides (:func:`~shipit.review.cell.instructions_variant_text`, #713) —
+    the variant half of the run key, computed EXACTLY as the runner does
+    (:mod:`shipit.review.labrun`) so the report selects the same records the
+    runs banked. The path is symlink-checked identically to the runner, and a
+    missing/unreadable instructions file is a loud :class:`CellError`, never a
+    silently-empty curve.
     """
     try:
         base_text = load_instructions(safe_instructions_path(cell.instructions_path))
@@ -51,7 +55,7 @@ def _variant_hash(cell: Cell) -> str:
             f"cell {cell.id!r}: cannot read instructions "
             f"{cell.instructions_path!r}: {exc}"
         ) from exc
-    return variant_of(base_text).content_hash
+    return variant_of(instructions_variant_text(cell, base_text)).content_hash
 
 
 def _pin_records(cell: Cell, fixture, base_dir: Path | None) -> list[dict[str, Any]]:

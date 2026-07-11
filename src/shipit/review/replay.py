@@ -47,6 +47,7 @@ from . import artifacts as artifacts_mod
 from . import fanout, producer, roundrecord
 from .calibrator import CalibratorConfig
 from .diff import RangeView, ReviewError
+from .dimensions import resolve_dimensions
 
 logger = logging.getLogger("shipit.review")
 
@@ -382,6 +383,12 @@ def run_fanout_replay(
         round_id=outcome.round_id,
         artifacts_dir=outcome.artifacts_dir,
         cell=cell,
+        # The round's RESOLVED pass set + overrides fold into round.variant
+        # (#713): dimension focus texts are prompt material the instructions
+        # file does not cover. Resolution cannot fail here — the orchestrator
+        # above already ran the same names through resolve_dimensions.
+        dimension_names=tuple(d.name for d in resolve_dimensions(dimensions)),
+        dimension_overrides=invocation_overrides,
         base_dir=base_dir,
     )
     logger.info(
