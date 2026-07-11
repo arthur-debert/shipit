@@ -238,27 +238,45 @@ def test_nested_signable_inner_first_frameworks_opaque_symlinks_skipped(tmp_path
     assert app not in paths
 
 
-def test_nested_signable_lists_plugin_and_bundle_roots(tmp_path):
-    """Loadable ``.plugin`` / ``.bundle`` roots are signed as a unit: signing
-    only their inner Mach-O leaves the bundle root unsigned, which the notary /
-    Gatekeeper rejects. Their roots must appear in the enumeration."""
+def test_nested_signable_lists_code_plugin_and_bundle_roots(tmp_path):
+    """A CODE-bearing loadable ``.plugin`` / ``.bundle`` root is signed as a
+    unit: signing only its inner Mach-O leaves the bundle root unsigned, which
+    the notary / Gatekeeper rejects. Its root must appear in the enumeration."""
     app = tmp_path / "App.app"
     (app / "Contents" / "MacOS").mkdir(parents=True)
     (app / "Contents" / "MacOS" / "app").write_bytes(MACHO_64)
     plugin = app / "Contents" / "PlugIns" / "Widget.plugin" / "Contents" / "MacOS"
     plugin.mkdir(parents=True)
     (plugin / "Widget").write_bytes(MACHO_64)
-    bundle = app / "Contents" / "Resources" / "Res.bundle" / "Contents" / "MacOS"
+    bundle = app / "Contents" / "Resources" / "Code.bundle" / "Contents" / "MacOS"
     bundle.mkdir(parents=True)
-    (bundle / "Res").write_bytes(MACHO_64)
+    (bundle / "Code").write_bytes(MACHO_64)
 
     rel = [str(p.relative_to(app)) for p in sign_mod.nested_signable(app)]
     assert "Contents/PlugIns/Widget.plugin" in rel
-    assert "Contents/Resources/Res.bundle" in rel
+    assert "Contents/Resources/Code.bundle" in rel
     # A bundle root lands AFTER its own inner Mach-O (inner-first order).
     assert rel.index("Contents/PlugIns/Widget.plugin") > rel.index(
         "Contents/PlugIns/Widget.plugin/Contents/MacOS/Widget"
     )
+
+
+def test_nested_signable_skips_data_only_resource_bundle(tmp_path):
+    """A data-only ``.bundle`` (icons, plists — no Mach-O anywhere) is NOT a
+    signing unit: handing its root to ``codesign`` can fail the pass, and the
+    content-based enumeration deliberately never signed non-code. Its root and
+    its resources are both absent from the enumeration."""
+    app = tmp_path / "App.app"
+    (app / "Contents" / "MacOS").mkdir(parents=True)
+    (app / "Contents" / "MacOS" / "app").write_bytes(MACHO_64)
+    res = app / "Contents" / "Resources" / "Assets.bundle" / "Contents" / "Resources"
+    res.mkdir(parents=True)
+    (res / "icon.png").write_bytes(b"\x89PNG....")
+    (res.parent / "Info.plist").write_text("<plist/>")
+
+    rel = [str(p.relative_to(app)) for p in sign_mod.nested_signable(app)]
+    assert not any("Assets.bundle" in r for r in rel)
+    assert rel == ["Contents/MacOS/app"]
 
 
 # --------------------------------------------------------------------------

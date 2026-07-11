@@ -327,6 +327,26 @@ BUNDLE_SUFFIXES: tuple[str, ...] = (
     ".bundle",
 )
 
+#: The bundle suffixes emitted ONLY when the directory actually carries code.
+#: ``.app`` / ``.appex`` / ``.xpc`` / ``.framework`` are code bundles by
+#: definition, but ``.plugin`` / ``.bundle`` are also the shape of data-only
+#: RESOURCE bundles (icons, nibs, plists — no Mach-O anywhere). Those must not
+#: be handed to ``codesign``: a data-only bundle root is not a signing unit
+#: and signing it can fail the pass. So a ``.plugin`` / ``.bundle`` root is
+#: emitted only when it contains a Mach-O (:func:`_contains_macho`).
+_CODE_GATED_SUFFIXES: frozenset[str] = frozenset({".plugin", ".bundle"})
+
+
+def _contains_macho(root: Path, detect: Callable[[Path], bool]) -> bool:
+    """Whether ``root`` carries any Mach-O file — the code-bundle test for the
+    loadable ``.plugin`` / ``.bundle`` roots. Detected by CONTENT (``detect``),
+    never by name; a data-only resource bundle has none and is NOT a signing
+    unit."""
+    return any(
+        p.is_file() and not p.is_symlink() and detect(p) for p in root.rglob("*")
+    )
+
+
 #: Mach-O magic numbers, as the first four ON-DISK bytes — thin 32/64-bit in
 #: both byte orders, plus the fat/universal header (always big-endian on
 #: disk: ``ca fe ba be`` / ``ca fe ba bf``).
@@ -371,7 +391,10 @@ def nested_signable(
 
     - nested code-bundle roots (:data:`BUNDLE_SUFFIXES`) are emitted once at
       their root; being shallower than their own contents, each root lands
-      AFTER them — the correct inner-out order, main-executable re-sign last;
+      AFTER them — the correct inner-out order, main-executable re-sign last.
+      A loadable ``.plugin`` / ``.bundle`` root is emitted only when it
+      carries code (:data:`_CODE_GATED_SUFFIXES`): a data-only resource
+      ``.bundle`` is not a signing unit and must never reach ``codesign``;
     - Mach-O FILES are detected by content (``detect``), excluding anything
       inside a ``.framework`` (opaque — its root is the signing unit) but
       INCLUDING files inside helper ``.app``/``.appex``/``.xpc`` bundles
@@ -390,6 +413,10 @@ def nested_signable(
         depth = len(rel.parts) - 1
         if path.is_dir():
             if path.suffix in BUNDLE_SUFFIXES:
+                if path.suffix in _CODE_GATED_SUFFIXES and not _contains_macho(
+                    path, detect
+                ):
+                    continue  # a data-only resource bundle — not a signing unit
                 entries.append((depth, path))
         elif path.is_file():
             if any(part.endswith(".framework") for part in rel.parts[:-1]):

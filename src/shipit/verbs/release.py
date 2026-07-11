@@ -1155,8 +1155,10 @@ def assert_bundle_cmd(
     "--entitlements",
     type=click.Path(exists=True, dir_okay=False),
     help=(
-        "Entitlements plist applied when codesigning the .app and its nested "
-        "Mach-O (mac apps with QL/Spotlight extensions usually need one)."
+        "Entitlements plist applied when codesigning the top-level .app ONLY "
+        "(never its nested frameworks/helpers — that mis-application is what "
+        "the notary rejects; mac apps with QL/Spotlight extensions usually "
+        "need one)."
     ),
 )
 @click.option(
