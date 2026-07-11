@@ -129,8 +129,10 @@ the branch ref never advanced.
   decision (2026-07-11): shipit was made PUBLIC, mirroring legacy
   `arthur-debert/release`; the user-owned-only scoping alternative was
   rejected — the full @vN distribution model holds for all consumers,
-  org-owned included.** The campaign then ran a SECOND traversal through the
-  REAL remote refs (run `29162869655`): lex's caller switched to
+  org-owned included.** The decision, its evidence, and the rejected
+  alternative are recorded as ADR-0053. The campaign then ran a SECOND
+  traversal through the REAL remote refs (run `29162869655`): lex's caller
+  switched to
   `uses: arthur-debert/shipit/.github/workflows/wf-release.yml@v1`, and the
   logs confirm cross-owner resolution — `Uses: arthur-debert/shipit/.github/
   workflows/wf-{prepare,build,publish}.yml@refs/heads/v1 (d958bc2)` — with
@@ -203,7 +205,8 @@ placement). Two reasons, both recorded rather than silently elided:
 
 ## Now verified (was remote-unverified)
 
-- Remote `@v1` cross-repo ref resolution (finding 4) — VERIFIED by run
+- Remote `@v1` cross-repo ref resolution (finding 4; decision recorded as
+  ADR-0053) — VERIFIED by run
   `29162869655` after shipit was made public: lex-fmt/lex (org-owned)
   resolved arthur-debert/shipit's (user-owned) `wf-release.yml@v1` and every
   nested `@v1` block cross-owner, and the launcher resolved the pin via uv
