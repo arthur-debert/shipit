@@ -12,13 +12,27 @@ from typing import Any
 
 import pytest
 
-from shipit import config, execrun, ghsetup
+from shipit import config, execrun, ghsetup, redact
 from shipit.config import SecretSource
 from shipit.identity import Revision, WorkingDir, repo_from_slug
 from shipit.verbs import gh_setup as gh_setup_verb
 from shipit.verbs._context import RootContext
 
 REPO = repo_from_slug("o/r")
+
+
+@pytest.fixture(autouse=True)
+def _clean_redactor_registry():
+    """Secret resolution must not leak process-lifetime redactor state.
+
+    Production deliberately retains every fetched value for the process lifetime,
+    but this module resolves many synthetic values across otherwise independent
+    tests.  Clear the test seam around each case so short fixtures such as an App
+    id cannot redact unrelated later records (for example, timestamp digits).
+    """
+    redact.clear_registered_secrets()
+    yield
+    redact.clear_registered_secrets()
 
 
 def get_rule(ruleset: dict[str, Any], rule_type: str) -> dict[str, Any]:
