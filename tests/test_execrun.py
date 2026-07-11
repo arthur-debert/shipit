@@ -145,11 +145,15 @@ def test_every_repeated_prompt_flag_is_summarized():
         (["agy", "--print", "AGY TASK"], ["AGY TASK"]),
     ],
 )
-def test_pixi_run_wrapper_summarizes_nested_backend_prompts(child, payloads):
-    argv = ["pixi", "run", "--manifest-path", "/tree/pixi.toml", "--", *child]
+@pytest.mark.parametrize("separator", [True, False])
+def test_pixi_run_wrapper_summarizes_nested_backend_prompts(child, payloads, separator):
+    argv = ["pixi", "run", "--manifest-path", "/tree/pixi.toml"]
+    if separator:
+        argv.append("--")
+    argv.extend(child)
     display = execrun._display_argv(argv)
     joined = " ".join(display)
-    assert display[:5] == argv[:5]
+    assert display[:4] == argv[:4]
     for payload in payloads:
         assert payload not in joined
     assert joined.count("<redacted: prompt sha256=") == len(payloads)

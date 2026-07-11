@@ -234,11 +234,23 @@ def _display_argv(argv: list[str] | tuple[str, ...]) -> list[str]:
                 display[index + 1] = _prompt_summary(display[index + 1])
 
     binary = os.path.basename(display[0])
-    if binary == "pixi" and "run" in display[1:] and "--" in display:
-        separator = display.index("--")
-        child_argv = display[separator + 1 :]
-        if child_argv:
-            display[separator + 1 :] = _display_argv(child_argv)
+    if binary == "pixi" and "run" in display[1:]:
+        child_start: int | None = None
+        if "--" in display:
+            child_start = display.index("--") + 1
+        else:
+            run_index = display.index("run")
+            known_backends = {"agy", "antigravity", "claude", "codex"}
+            child_start = next(
+                (
+                    index
+                    for index in range(run_index + 1, len(display))
+                    if os.path.basename(display[index]) in known_backends
+                ),
+                None,
+            )
+        if child_start is not None and child_start < len(display):
+            display[child_start:] = _display_argv(display[child_start:])
         return display
     if binary == "claude":
         redact_after("-p")
