@@ -15,7 +15,7 @@ import yaml
 
 from . import config, git
 from .execrun import ExecError
-from .identity import Repo
+from .identity import Repo, repo_from_slug
 
 SCHEMA_VERSION = 1
 LIFECYCLE_INBOX = "inbox"
@@ -63,7 +63,7 @@ class StoreGitBoundary(Protocol):
 
     def commit(self, message: str, paths: list[str], *, cwd: str) -> None: ...
 
-    def pull_rebase(self, *, cwd: str, remote: str = "origin") -> None: ...
+    def pull_rebase(self, branch: str, *, cwd: str, remote: str = "origin") -> None: ...
 
     def push(self, branch: str, *, cwd: str, remote: str = "origin") -> None: ...
 
@@ -98,12 +98,13 @@ def load_store_config(cfg: dict) -> OpportunityStoreConfig:
         raise config.ConfigError(
             '[project.opportunities].repo must be a non-empty "owner/name" string'
         )
-    repo = repo.strip()
-    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
+    try:
+        parsed_repo = repo_from_slug(repo)
+    except ValueError as exc:
         raise config.ConfigError(
             f'[project.opportunities].repo must look like "owner/name"; got {repo!r}'
-        )
-    return OpportunityStoreConfig(repo=repo.lower())
+        ) from exc
+    return OpportunityStoreConfig(repo=parsed_repo.slug)
 
 
 def validate_capture(capture: OpportunityCapture) -> None:
@@ -234,17 +235,31 @@ def _push_with_rebase_retry(
 ) -> None:
     attempts = max(1, attempts)
     last: ExecError | None = None
+    attempts_performed = 0
     for attempt in range(1, attempts + 1):
+        attempts_performed = attempt
         try:
             boundary.push(branch, cwd=cwd)
             return
         except ExecError as exc:
             last = exc
-            if attempt == attempts:
+            if attempt == attempts or not _is_non_fast_forward_push(exc):
                 break
-            boundary.pull_rebase(cwd=cwd)
+            boundary.pull_rebase(branch, cwd=cwd)
     raise OpportunityError(
-        f"failed to push Opportunity store update after {attempts} push attempt(s): {last}"
+        "failed to push Opportunity store update after "
+        f"{attempts_performed} push attempt(s): {last}"
+    )
+
+
+def _is_non_fast_forward_push(exc: ExecError) -> bool:
+    """Whether a failed push is the concurrent-writer race we can rebase."""
+
+    if exc.cause != "exit":
+        return False
+    output = f"{exc.stdout}\n{exc.stderr}".lower()
+    return "non-fast-forward" in output or (
+        "[rejected]" in output and "(fetch first)" in output
     )
 
 

@@ -113,9 +113,15 @@ def test_allocate_inbox_path_skips_existing_collision(tmp_path):
 
 
 class _FakeStoreGit:
-    def __init__(self, *, push_failures: int = 0) -> None:
+    def __init__(
+        self,
+        *,
+        push_failures: int = 0,
+        push_failure_stderr: str = "non-fast-forward",
+    ) -> None:
         self.calls: list[tuple] = []
         self.push_failures = push_failures
+        self.push_failure_stderr = push_failure_stderr
         self.captured_text = ""
 
     def clone(self, url: str, dest: str) -> None:
@@ -129,8 +135,8 @@ class _FakeStoreGit:
     def commit(self, message: str, paths: list[str], *, cwd: str) -> None:
         self.calls.append(("commit", message, tuple(paths)))
 
-    def pull_rebase(self, *, cwd: str, remote: str = "origin") -> None:
-        self.calls.append(("pull_rebase", remote))
+    def pull_rebase(self, branch: str, *, cwd: str, remote: str = "origin") -> None:
+        self.calls.append(("pull_rebase", branch, remote))
 
     def push(self, branch: str, *, cwd: str, remote: str = "origin") -> None:
         self.calls.append(("push", branch, remote))
@@ -139,7 +145,7 @@ class _FakeStoreGit:
             raise execrun.ExecError(
                 ["git", "push"],
                 rc=1,
-                stderr="non-fast-forward",
+                stderr=self.push_failure_stderr,
                 duration_ms=1,
             )
 
@@ -179,14 +185,28 @@ def test_write_to_store_rebases_and_retries_failed_push():
         token_factory=lambda: "abc123abc123",
     )
     assert [call[0] for call in fake.calls].count("push") == 2
-    assert ("pull_rebase", "origin") in fake.calls
+    assert ("pull_rebase", "main", "origin") in fake.calls
+
+
+def test_write_to_store_does_not_retry_non_race_push_failure():
+    fake = _FakeStoreGit(
+        push_failures=1, push_failure_stderr="fatal: Authentication failed"
+    )
+    with pytest.raises(OpportunityError, match=r"after 1 push attempt\(s\)"):
+        write_to_store(
+            OpportunityStoreConfig("acme/opportunity-store"),
+            _capture(),
+            boundary=fake,
+            token_factory=lambda: "abc123abc123",
+        )
+
+    assert [call[0] for call in fake.calls].count("push") == 1
+    assert not any(call[0] == "pull_rebase" for call in fake.calls)
 
 
 def test_write_to_store_reports_store_write_failure():
     fake = _FakeStoreGit(push_failures=2)
-    with pytest.raises(
-        OpportunityError, match="failed to push Opportunity store update"
-    ):
+    with pytest.raises(OpportunityError, match=r"after 2 push attempt\(s\)"):
         write_to_store(
             OpportunityStoreConfig("acme/opportunity-store"),
             _capture(),

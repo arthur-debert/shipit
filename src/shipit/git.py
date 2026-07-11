@@ -653,9 +653,9 @@ def clone(url: str, dest: str) -> None:
     _git(["clone", url, dest], timeout=_CLONE_TIMEOUT)
 
 
-def pull_rebase(*, cwd: str, remote: str = "origin") -> None:
-    """``git pull --rebase <remote>`` inside a mutable data-store checkout."""
-    _git(["pull", "--rebase", remote], cwd=cwd, timeout=_NETWORK_TIMEOUT)
+def pull_rebase(branch: str, *, cwd: str, remote: str = "origin") -> None:
+    """``git pull --rebase <remote> <branch>`` in a data-store checkout."""
+    _git(["pull", "--rebase", remote, branch], cwd=cwd, timeout=_NETWORK_TIMEOUT)
 
 
 #: The stderr signatures of a REFERENCE-POISONED clone (#353, diagnosis
