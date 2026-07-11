@@ -1163,7 +1163,7 @@ def assert_bundle_cmd(
 )
 @click.option(
     "--notary-timeout",
-    type=int,
+    type=click.IntRange(min=1),
     default=sign_mod.DEFAULT_NOTARY_TIMEOUT_MIN,
     show_default=True,
     metavar="MIN",

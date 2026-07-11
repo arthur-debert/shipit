@@ -55,6 +55,10 @@ IDENTITY = "Developer ID Application: Phos (TEAM123)"
 
 FIND_IDENTITY_OUT = f'  1) ABCDEF0123 "{IDENTITY}"\n     1 valid identities found\n'
 
+#: A safe `tar -tzf` member listing for the fixture payload (all members
+#: confined under the .app — no absolute or `..` paths).
+TAR_LISTING = "Phos.app/\nPhos.app/Contents/\nPhos.app/Contents/MacOS/phos\n"
+
 
 # --------------------------------------------------------------------------
 # Pure assembly: secret names, credential resolution, flag construction
@@ -328,7 +332,9 @@ class SignRecorder:
 
     def _respond(self, argv):
         stdout = ""
-        if argv[0] == "tar" and argv[1] == "-xzf":
+        if argv[0] == "tar" and argv[1] == "-tzf":
+            stdout = TAR_LISTING
+        elif argv[0] == "tar" and argv[1] == "-xzf":
             work = Path(argv[argv.index("-C") + 1])
             shutil.copytree(
                 self.tmp_path / "src" / "Phos.app", work / "Phos.app", symlinks=True
@@ -453,6 +459,7 @@ def test_sign_bundle_full_recorded_sequence(tmp_path):
         app,  # the .app signs LAST
     ]
     expected = [
+        ("tar", "-tzf", str(tmp_path / "dist" / "app.unsigned-app.tar.gz")),
         (
             "tar",
             "-xzf",
@@ -618,6 +625,42 @@ def test_sign_bundle_refuses_a_payload_with_two_apps(tmp_path):
     recorder = SignRecorder(tmp_path, effects={"tar": two_apps})
     with pytest.raises(ReleaseError, match=r"exactly one \.app .* found 2"):
         sign_mod.sign_bundle(_request(tmp_path, recorder))
+
+
+@pytest.mark.parametrize(
+    "listing,unsafe",
+    [
+        ("App.app/\nApp.app/Contents/MacOS/app\n", None),
+        ("App.app/\n/etc/passwd\n", "/etc/passwd"),
+        ("App.app/\n../../evil\n", "../../evil"),
+        ("App.app/../escape\n", "App.app/../escape"),
+        ("\n\n", None),  # blank lines are ignored
+    ],
+)
+def test_unsafe_tar_member_flags_absolute_and_dotdot(listing, unsafe):
+    assert sign_mod._unsafe_tar_member(listing) == unsafe
+
+
+def test_sign_bundle_rejects_a_payload_with_a_traversal_member(tmp_path):
+    # A tampered/garbled payload whose members escape the extraction dir is
+    # refused after listing (tar -tzf) and BEFORE extraction — nothing unpacked.
+    _fixture_tree(tmp_path)
+
+    def evil_listing(argv):
+        if argv[:2] == ("tar", "-tzf"):
+            return execrun.ExecResult(
+                argv=argv,
+                rc=0,
+                stdout="Phos.app/\n../../etc/evil\n",
+                stderr="",
+                duration_ms=1,
+            )
+        return None
+
+    recorder = SignRecorder(tmp_path, effects={"tar": evil_listing})
+    with pytest.raises(ReleaseError, match="unsafe path in reseal payload"):
+        sign_mod.sign_bundle(_request(tmp_path, recorder))
+    assert not recorder.heads("tar", "-xzf")  # extraction never ran
 
 
 def test_sign_bundle_no_identity_still_tears_the_keychain_down(tmp_path):

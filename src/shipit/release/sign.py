@@ -551,10 +551,35 @@ def _find_dmg(tree: Path) -> Path | None:
     return dmgs[0] if dmgs else None
 
 
+def _unsafe_tar_member(listing: str) -> str | None:
+    """The first archive member (from ``tar -tzf`` output) that would escape
+    the extraction dir — an ABSOLUTE path or one with a ``..`` segment (classic
+    tar path traversal) — or ``None`` when every member is confined. Pure."""
+    for raw in listing.splitlines():
+        member = raw.strip()
+        if not member:
+            continue
+        if member.startswith("/") or ".." in member.split("/"):
+            return member
+    return None
+
+
 def _unpack(payload: Path, work: Path, run_cmd: RunCmd) -> Path:
     """Untar the reseal payload into ``work`` and return the ONE extracted
-    ``.app``; zero or multiple is a hard error."""
+    ``.app``; zero or multiple is a hard error.
+
+    The archive is LISTED and validated before extraction: a member with an
+    absolute path or a ``..`` segment would let a tampered or garbled payload
+    write OUTSIDE ``work`` (tar path traversal), so any such member is a hard
+    refusal with nothing extracted."""
     work.mkdir(parents=True, exist_ok=True)
+    listing = run_cmd(["tar", "-tzf", str(payload)], SIGN_CMD_TIMEOUT).stdout
+    unsafe = _unsafe_tar_member(listing)
+    if unsafe is not None:
+        raise ReleaseError(
+            f"unsafe path in reseal payload {payload.name}: {unsafe!r} escapes "
+            "the extraction dir (absolute or .. path) — refusing to extract"
+        )
     run_cmd(["tar", "-xzf", str(payload), "-C", str(work)], SIGN_CMD_TIMEOUT)
     apps = sorted(p for p in work.iterdir() if p.is_dir() and p.suffix == ".app")
     if len(apps) != 1:
