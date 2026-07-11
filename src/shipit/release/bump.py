@@ -126,10 +126,12 @@ def adapter_for(toolchain: str) -> BumpAdapter:
 #: ``[project]`` table's ``version = "…"`` line in a ``pyproject.toml``: the
 #: match is anchored to the table header and may cross only NON-header lines
 #: (arrays, strings) on the way to the ``version`` line, so a ``version`` key
-#: of some OTHER table (``[tool.something] version``) is never rewritten.
+#: of some OTHER table (``[tool.something] version``) is never rewritten. The
+#: quote character is captured (``q``) and back-referenced for the close, so a
+#: TOML literal string (``version = '1.0.0'``) bumps and keeps its own style.
 _PYPROJECT_VERSION_RE = re.compile(
-    r"(?P<head>^\[project\][ \t]*\n(?:(?!^\[).*\n)*?^version[ \t]*=[ \t]*\")"
-    r"(?P<value>[^\"]*)(?P<tail>\")",
+    r"(?P<head>^\[project\][ \t]*\n(?:(?!^\[).*\n)*?^version[ \t]*=[ \t]*(?P<q>[\"']))"
+    r"(?P<value>[^\"']*)(?P<tail>(?P=q))",
     re.MULTILINE,
 )
 

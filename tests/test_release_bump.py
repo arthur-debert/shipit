@@ -102,6 +102,16 @@ def test_bump_pyproject_crosses_arrays_but_not_tables():
     assert 'version = "2.0.0"' in bump.bump_pyproject(text, "2.0.0")
 
 
+def test_bump_pyproject_preserves_single_quote_style():
+    """A TOML literal string (single-quoted) is a valid version line; the bump
+    keeps the consumer's quote style."""
+    text = "[project]\nname = 'x'\nversion = '1.0.0'\n"
+    assert (
+        bump.bump_pyproject(text, "2.0.0")
+        == "[project]\nname = 'x'\nversion = '2.0.0'\n"
+    )
+
+
 def test_bump_pyproject_without_project_version_is_loud():
     with pytest.raises(ReleaseError, match="no \\[project\\] version"):
         bump.bump_pyproject('[project]\nname = "x"\ndynamic = ["version"]\n', "1.0.0")

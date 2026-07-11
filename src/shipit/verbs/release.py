@@ -24,6 +24,10 @@ writer of repo history. The effectful shell over three pure cores:
 
 The shell's own rules:
 
+- a CLEAN working tree is a precondition: prepare refuses before any mutation
+  if ``git status`` is non-empty, so no pre-existing edit rides the release
+  commit or masks a no-op bump, and a ``-release-rc`` cut's ``reset_hard``
+  never destroys uncommitted work.
 - every external command runs through the one Exec seam (ADR-0028): adapter
   commands via :func:`shipit.execrun.run`, git via the :mod:`shipit.git`
   adapter.
@@ -180,18 +184,35 @@ def _write_notes(notes_path: Path, text: str) -> None:
         raise ReleaseError(f"cannot write notes to {notes_path}: {exc}") from exc
 
 
+def _unquote_status_path(field: str) -> str:
+    """Decode one ``git status --porcelain`` path field. Pure.
+
+    Git C-quotes (wraps in double quotes, backslash-escapes) any path with
+    special characters — a quote, a backslash, a control char, or (with the
+    default ``core.quotepath``) a non-ASCII byte, emitted as an octal ``\\NNN``
+    of its UTF-8 bytes. An unquoted field is returned verbatim; a quoted one is
+    decoded back to the real path so the glob match sees the true name.
+    """
+    if not field.startswith('"'):
+        return field
+    inner = field[1:-1]
+    raw = inner.encode("latin-1", "backslashreplace").decode("unicode_escape")
+    return raw.encode("latin-1", "backslashreplace").decode("utf-8", "replace")
+
+
 def _changed_paths(status_lines: list[str]) -> list[str]:
     """The repo-relative paths of ``git status --porcelain`` lines. Pure.
 
     A rename line (``R  old -> new``) contributes its NEW path — the side a
-    stage/commit addresses.
+    stage/commit addresses. A path with special characters arrives C-quoted
+    (:func:`_unquote_status_path`) and is decoded back to its real name.
     """
     paths = []
     for line in status_lines:
         path = line[3:]
         if " -> " in path:
             path = path.split(" -> ", 1)[1]
-        paths.append(path)
+        paths.append(_unquote_status_path(path))
     return paths
 
 
@@ -249,13 +270,32 @@ def run_prepare(
     root = Path(root_s)
     cwd = str(root)
 
+    # A history-writing command runs on a CLEAN tree only — refused BEFORE any
+    # mutation. Otherwise an unrelated pre-existing edit (a dirty pyproject.toml,
+    # Cargo.lock, CHANGELOG.md) rides the release commit or masks a no-op bump,
+    # and a -release-rc cut's `reset_hard` would destroy that uncommitted work.
+    dirty = gitio.status_porcelain(cwd=cwd)
+    if dirty:
+        raise ReleaseError(
+            "working tree has uncommitted changes — `release prepare` writes "
+            "repo history and must run on a clean tree; commit or stash them "
+            "first:\n" + "\n".join(dirty)
+        )
+
     cfg = load_config(root)
     entries = config.load_toolchains(cfg)
     artifacts = config.load_artifacts(cfg)
 
     resolved = version_mod.resolve(spec, gitio.list_tags(cwd=cwd))
     version = resolved.version
-    notes_path = Path(notes_out) if notes_out else root / DEFAULT_NOTES_FILE
+    # A relative --notes-out anchors to the repo root, exactly like the default,
+    # so the destination never depends on which subdirectory prepare is run from
+    # (an absolute path is honoured as given).
+    if notes_out:
+        notes_arg = Path(notes_out)
+        notes_path = notes_arg if notes_arg.is_absolute() else root / notes_arg
+    else:
+        notes_path = root / DEFAULT_NOTES_FILE
 
     # The coalesce plan comes FIRST (story 26): the empty-release refusal and
     # every changelog-model refusal fire here, before any manifest is touched
@@ -376,20 +416,27 @@ def run_prepare(
 
     # The tag is the version authority (ADR-0041); its annotation carries THE
     # one coalesced notes text (story 26) — the same text the GH release gets.
+    # It is written locally BEFORE the push, so any push failure must delete it
+    # again: a leftover local tag would make the next run falsely RESUME
+    # (ADR-0009 keys resume off tag existence) and report success on a cut that
+    # never reached the remote.
     gitio.tag_annotated(resolved.tag, plan.notes, cwd=cwd)
-
-    if resolved.tag_only:
-        # Live-fire contract (-release-rc): the bump commit travels on the TAG
-        # ONLY. Move the branch ref back (the commit stays reachable from the
-        # tag), then push nothing but the tag.
-        if to_commit:
-            gitio.reset_hard(str(base_sha), cwd=cwd)
-        gitio.push_tag(resolved.tag, cwd=cwd)
-    else:
-        # The branch push runs the repo's pre-push checks (story 24), and the
-        # tag follows only after the branch lands.
-        gitio.push(branch, cwd=cwd)
-        gitio.push_tag(resolved.tag, cwd=cwd)
+    try:
+        if resolved.tag_only:
+            # Live-fire contract (-release-rc): the bump commit travels on the
+            # TAG ONLY. Move the branch ref back (the commit stays reachable
+            # from the tag), then push nothing but the tag.
+            if to_commit:
+                gitio.reset_hard(str(base_sha), cwd=cwd)
+            gitio.push_tag(resolved.tag, cwd=cwd)
+        else:
+            # The branch push runs the repo's pre-push checks (story 24), and
+            # the tag follows only after the branch lands.
+            gitio.push(branch, cwd=cwd)
+            gitio.push_tag(resolved.tag, cwd=cwd)
+    except Exception:
+        gitio.delete_tag(resolved.tag, cwd=cwd)
+        raise
 
     result = PrepareResult(
         version=version,

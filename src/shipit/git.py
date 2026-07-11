@@ -609,6 +609,18 @@ def push_tag(name: str, *, cwd: str, remote: str = "origin") -> None:
     _git(["push", remote, f"refs/tags/{name}"], cwd=cwd, timeout=_NETWORK_TIMEOUT)
 
 
+def delete_tag(name: str, *, cwd: str) -> None:
+    """``git tag -d <name>`` — remove a LOCAL tag.
+
+    The release prepare stage's rollback for a failed publish: an annotated tag
+    is written locally before the push, so a push failure must delete it again —
+    otherwise the leftover local tag makes the next run falsely RESUME
+    (ADR-0009 keys resume off tag existence) and report success on a cut that
+    never reached the remote.
+    """
+    _git(["tag", "-d", name], cwd=cwd)
+
+
 def switch_create(branch: str, *, cwd: str) -> None:
     """Create-or-reset ``branch`` from the current HEAD and switch to it.
 

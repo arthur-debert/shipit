@@ -420,6 +420,13 @@ def test_load_toolchains_rejects_absolute_paths():
         _toolchains('[toolchains]\n"/abs" = "rust"\n')
 
 
+def test_load_toolchains_rejects_paths_escaping_the_checkout():
+    # A leg path is an adapter's cwd; a `..` segment would run the bump outside
+    # the tree, so it is refused alongside absolute paths.
+    with pytest.raises(config.ConfigError, match="repo-relative"):
+        _toolchains('[toolchains]\n"../evil" = "rust"\n')
+
+
 def test_load_toolchains_non_table_section_rejected():
     with pytest.raises(config.ConfigError, match=r"\[toolchains\] must be a table"):
         config.load_toolchains({"toolchains": "rust"})

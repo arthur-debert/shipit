@@ -95,6 +95,22 @@ def test_resolve_minor_from_a_prerelease_latest():
     assert v.resolve(v.VersionSpec(bump="minor"), ["v1.2.3-rc.1"]).version == "1.3.0"
 
 
+@pytest.mark.parametrize(
+    ("word", "latest", "expected"),
+    [
+        # A bump word on a prerelease of its exact target triple FINALIZES it
+        # (npm semver.inc semantics) instead of climbing past a whole release.
+        ("major", "2.0.0-rc.1", "2.0.0"),
+        ("minor", "1.3.0-rc.1", "1.3.0"),
+        # But a prerelease that is NOT the word's target triple still climbs.
+        ("major", "2.1.0-rc.1", "3.0.0"),
+        ("minor", "1.3.1-rc.1", "1.4.0"),
+    ],
+)
+def test_resolve_bump_word_finalizes_matching_prerelease(word, latest, expected):
+    assert v.resolve(v.VersionSpec(bump=word), [f"v{latest}"]).version == expected
+
+
 def test_resolve_explicit_semver_passes_through():
     resolved = v.resolve(v.VersionSpec(semver="3.0.2"), _TAGS)
     assert resolved.version == "3.0.2"

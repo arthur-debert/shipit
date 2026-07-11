@@ -24,7 +24,7 @@ import re
 import tomllib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 
 from .identity import Sha
@@ -328,15 +328,33 @@ def _parse_argv(where: str, value: object) -> tuple[str, ...]:
     return tuple(value)
 
 
+def _reject_path_escape(where: str, value: str) -> None:
+    """Refuse a config path that leaves the checkout — absolute, or carrying a
+    ``..`` segment. Pure.
+
+    Such a path is later joined to the repo root and READ or REWRITTEN (an
+    adapter's leg cwd, a bundle-config bump); an absolute path discards the root
+    and ``..`` climbs above it, so a repo's own ``.shipit.toml`` could steer a
+    release rewrite at a file outside the tree. Rejected at the parse boundary,
+    the one place every value flows through.
+    """
+    pure = PurePosixPath(value)
+    if pure.is_absolute() or ".." in pure.parts:
+        raise ConfigError(
+            f"{where}: must be a repo-relative path inside the checkout — no "
+            f"leading '/', no '..' segment; got {value!r}"
+        )
+
+
 def _parse_toolchain_entry(path: str, spec: object) -> ToolchainEntry:
     """One ``[toolchains]`` entry: a bare toolchain-name string, or a table
     carrying ``toolchain`` plus per-tool argv overrides (see the loader)."""
     from .tools import registry  # lazy — config stays import-light at module load
 
-    if not path or path.startswith("/"):
+    if not path or path.startswith("/") or ".." in PurePosixPath(path).parts:
         raise ConfigError(
-            f"[toolchains] paths are repo-relative ({'empty' if not path else path!r}"
-            f" is not); use '.' for the repo root"
+            f"[toolchains] paths are repo-relative and inside the checkout "
+            f"({'empty' if not path else path!r} is not); use '.' for the repo root"
         )
     if isinstance(spec, str):
         name, overrides = spec, {}
@@ -615,13 +633,13 @@ def _parse_artifact(name: str, spec: object) -> Artifact:
         where, spec, ("build", "bundle", "bundle-config", "endpoints", "e2e", "sign")
     )
     bundle_config = spec.get("bundle-config")
-    if bundle_config is not None and (
-        not isinstance(bundle_config, str) or not bundle_config
-    ):
-        raise ConfigError(
-            f"{where}.bundle-config: must be a non-empty repo-relative path, "
-            f'e.g. "src-tauri/tauri.conf.json"; got {bundle_config!r}'
-        )
+    if bundle_config is not None:
+        if not isinstance(bundle_config, str) or not bundle_config:
+            raise ConfigError(
+                f"{where}.bundle-config: must be a non-empty repo-relative path, "
+                f'e.g. "src-tauri/tauri.conf.json"; got {bundle_config!r}'
+            )
+        _reject_path_escape(f"{where}.bundle-config", bundle_config)
     build_spec = spec.get("build", [])
     if not isinstance(build_spec, list):
         raise ConfigError(f"{where}.build: must be a list of build targets")

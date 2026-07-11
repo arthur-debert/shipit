@@ -139,10 +139,16 @@ def _triple(version: str) -> tuple[int, int, int]:
 def _bump(word: str, latest: str | None) -> str:
     """Apply ``word`` to the latest version (``None`` → :data:`_ZERO`). Pure.
 
-    Standard semver increment semantics (the semver crate's): ``major`` →
-    ``X+1.0.0``, ``minor`` → ``X.Y+1.0`` — and ``patch`` on a PRERELEASE
-    closes it to its own triple (``1.2.3-rc.1`` → ``1.2.3``, the final the rc
-    led to), else ``Z+1``.
+    Standard semver increment semantics (npm ``semver.inc``'s): a bump word on
+    a PRERELEASE of the exact target triple FINALIZES it rather than climbing
+    past it — the rc led to that release, so the word that names it closes it:
+
+    - ``major`` → ``X+1.0.0``, but ``X.0.0-rc.1`` → ``X.0.0`` (finalize).
+    - ``minor`` → ``X.Y+1.0``, but ``X.Y.0-rc.1`` → ``X.Y.0`` (finalize).
+    - ``patch`` → ``X.Y.Z+1``, but any ``X.Y.Z-rc.1`` → ``X.Y.Z`` (finalize).
+
+    Without this, a prerelease could only be finalized via ``patch`` and every
+    ``major``/``minor`` on an rc would skip a whole release.
     """
     if latest is None:
         major, minor, patch = _ZERO
@@ -151,8 +157,12 @@ def _bump(word: str, latest: str | None) -> str:
         major, minor, patch = _triple(latest)
         pre = is_prerelease(latest)
     if word == "major":
+        if pre and minor == 0 and patch == 0:
+            return f"{major}.0.0"
         return f"{major + 1}.0.0"
     if word == "minor":
+        if pre and patch == 0:
+            return f"{major}.{minor}.0"
         return f"{major}.{minor + 1}.0"
     if pre:
         return f"{major}.{minor}.{patch}"

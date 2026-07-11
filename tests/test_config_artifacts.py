@@ -217,6 +217,18 @@ def test_bundle_config_must_be_a_non_empty_path(value):
         _load(f"[artifacts.app]\nbundle-config = {value}\n")
 
 
+@pytest.mark.parametrize(
+    "value",
+    ['"/etc/passwd"', '"../outside/tauri.conf.json"', '"a/../../b.json"'],
+)
+def test_bundle_config_rejects_paths_escaping_the_checkout(value):
+    # A repo config is joined to the checkout root and REWRITTEN by release
+    # prepare; an absolute or `..` path would steer that write outside the tree,
+    # so it is refused at the parse boundary (the one place values flow through).
+    with pytest.raises(config.ConfigError, match=r"inside the checkout"):
+        _load(f"[artifacts.app]\nbundle-config = {value}\n")
+
+
 def test_artifacts_is_a_known_top_level_table(tmp_path):
     # The closed known-tables registry accepts [artifacts]; the boundary load
     # would otherwise reject the whole file before the loader ever ran.

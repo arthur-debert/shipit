@@ -13,6 +13,7 @@ import json
 
 import pytest
 
+from shipit import execrun
 from shipit.identity import Sha
 from shipit.release import version as version_mod
 from shipit.verbs import release as release_verb
@@ -29,21 +30,34 @@ def spec(raw):
 class FakeGit:
     """A recorded git fixture: reads are scripted, mutations are captured.
 
-    ``status_lines`` scripts the post-bump ``git status --porcelain`` answer
-    (the recorded shape of what the bump commands changed); ``commit()``
-    advances ``head`` to :data:`BUMP_SHA` exactly like the real adapter's
-    commit would. Every mutating call lands in ``calls`` for exact-order
-    assertions. ``commit``'s signature deliberately has NO ``no_verify``
-    parameter: a bypass attempt (story 24's forbidden path) would fail the
-    test as a ``TypeError``, structurally.
+    ``pre_status`` scripts the CLEAN-tree gate's answer (the first
+    ``status_porcelain`` call, before any mutation — empty by default);
+    ``status_lines`` scripts the post-bump answer (every later call — the
+    recorded shape of what the bump commands changed). ``commit()`` advances
+    ``head`` to :data:`BUMP_SHA` exactly like the real adapter's commit would.
+    Every mutating call lands in ``calls`` for exact-order assertions.
+    ``commit``'s signature deliberately has NO ``no_verify`` parameter: a
+    bypass attempt (story 24's forbidden path) would fail the test as a
+    ``TypeError``, structurally. ``fail_on`` names a mutating verb whose call
+    raises an :class:`~shipit.execrun.ExecError`, recording the push-failure
+    rollback path.
     """
 
-    def __init__(self, *, tags=(), status_lines=(), branch="main"):
+    def __init__(
+        self, *, tags=(), status_lines=(), branch="main", pre_status=(), fail_on=None
+    ):
         self.tags = list(tags)
         self.status_lines = list(status_lines)
         self.branch = branch
+        self.pre_status = list(pre_status)
+        self.fail_on = fail_on
         self.head = BASE_SHA
         self.calls = []
+        self._status_calls = 0
+
+    def _maybe_fail(self, verb):
+        if verb == self.fail_on:
+            raise execrun.ExecError(["git", verb], rc=1, stderr="boom")
 
     def repo_root(self, *, cwd):
         return self.root
@@ -62,7 +76,10 @@ class FakeGit:
         return self.head
 
     def status_porcelain(self, *, cwd):
-        return list(self.status_lines)
+        # The first call is the clean-tree gate (pre-bump); later calls report
+        # what the bump changed — the real adapter's answer at each point.
+        self._status_calls += 1
+        return list(self.pre_status if self._status_calls == 1 else self.status_lines)
 
     def add(self, paths, *, cwd):
         self.calls.append(("add", tuple(paths)))
@@ -73,12 +90,20 @@ class FakeGit:
 
     def tag_annotated(self, name, message, *, cwd):
         self.calls.append(("tag", name, message))
+        self.tags.append(name)
 
     def push(self, branch, *, cwd):
         self.calls.append(("push", branch))
+        self._maybe_fail("push")
 
     def push_tag(self, name, *, cwd):
         self.calls.append(("push_tag", name))
+        self._maybe_fail("push_tag")
+
+    def delete_tag(self, name, *, cwd):
+        self.calls.append(("delete_tag", name))
+        if name in self.tags:
+            self.tags.remove(name)
 
     def reset_hard(self, rev, *, cwd):
         self.calls.append(("reset_hard", rev))
@@ -352,6 +377,36 @@ def test_outside_a_checkout_is_refused(tmp_path, monkeypatch, capsys):
     rc = release_verb.run_prepare(spec("0.2.0"), gitio=NoRepo(), run_cmd=CmdRecorder())
     assert rc == 1
     assert "not inside a git checkout" in capsys.readouterr().err
+
+
+def test_dirty_tree_is_refused_before_any_mutation(python_repo, capsys):
+    """A history-writing command runs on a clean tree only: an uncommitted edit
+    at the start aborts before any bump — so nothing rides the release commit
+    and a -release-rc `reset_hard` can never destroy the user's work."""
+    fake = gitio_for(python_repo, pre_status=[" M pyproject.toml"])
+    recorder = CmdRecorder()
+    rc = release_verb.run_prepare(spec("0.2.0"), gitio=fake, run_cmd=recorder)
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "uncommitted changes" in err
+    assert recorder.calls == []  # not a single bump command ran
+    assert fake.mutated() == []  # nothing staged, committed, tagged, or pushed
+
+
+def test_push_failure_deletes_the_local_tag(python_repo, capsys):
+    """A failed publish must not leave a local tag behind: it would make the
+    next run falsely RESUME (ADR-0009) and report success on an unpushed cut.
+    The tag is deleted, so a rerun re-attempts instead of resuming."""
+    # A prerelease cut (no changelog roll): the branch push lands, the tag push
+    # then fails — the interesting partial-publish the rollback must clean up.
+    fake = gitio_for(
+        python_repo, status_lines=[" M pyproject.toml"], fail_on="push_tag"
+    )
+    rc = release_verb.run_prepare(spec("0.2.0-rc.1"), gitio=fake, run_cmd=CmdRecorder())
+    assert rc == 1
+    assert ("push", "main") in fake.calls  # branch landed first
+    assert ("delete_tag", "v0.2.0-rc.1") in fake.calls
+    assert "v0.2.0-rc.1" not in fake.tags  # not left behind to fake a resume
 
 
 # --------------------------------------------------------------------------
