@@ -283,8 +283,9 @@ TARGET = PrId(repo=REPO, number=42)
 
 
 class FakeAdapter:
-    def __init__(self, name):
+    def __init__(self, name, *, has_requested_edge=True):
         self.name = name
+        self.has_requested_edge = has_requested_edge
 
     def matches(self, login):
         return self.name in login.lower()
@@ -408,6 +409,31 @@ def test_request_act_selects_never_requested_and_stale(monkeypatch):
     assert line == "requested review(s): copilot, coderabbit"
 
 
+def test_request_act_tries_local_before_remote_to_make_reroute_atomic(monkeypatch):
+    adapters = [
+        FakeAdapter("copilot"),
+        FakeAdapter("codex", has_requested_edge=False),
+    ]
+    monkeypatch.setattr(dispatch_mod, "required_adapters", lambda roster: adapters)
+    seen = {}
+
+    def fail_local_auth(pr, selected, roster, *, force):
+        seen["order"] = [adapter.name for adapter in selected]
+        raise PrStateError("Posting a review as a GitHub App needs PyJWT")
+
+    monkeypatch.setattr(dispatch_mod, "request_reviewers", fail_local_auth)
+    monkeypatch.setattr(
+        dispatch_mod,
+        "rerun_pr_next_in_review_env",
+        lambda pr: "requested review(s) via review env",
+    )
+
+    line = NextActs(TARGET).request_review(_pending(["copilot", "codex"]))
+
+    assert seen["order"] == ["codex", "copilot"]
+    assert line == "requested review(s) via review env"
+
+
 def test_request_act_dropped_edge_raises_prstate_error(monkeypatch):
     """A silently-dropped request edge (#614) → the domain refusal, naming the
     reviewer — the caller's error shell renders it as stderr + non-zero."""
@@ -439,6 +465,23 @@ def test_request_act_without_a_requestable_adapter_reports(monkeypatch):
     assert line.startswith("no requestable reviewer")
 
 
+def test_review_env_rerun_maps_nonzero_to_domain_error(monkeypatch):
+    from shipit.execrun import ExecResult
+
+    monkeypatch.setattr(dispatch_mod.git, "repo_root", lambda: "/repo")
+    seen = {}
+
+    def fake_run(argv, root, **kwargs):
+        seen.update(argv=argv, root=root, kwargs=kwargs)
+        return ExecResult(tuple(argv), 1, "", "auth still unavailable", 12)
+
+    monkeypatch.setattr(dispatch_mod.pixienv, "run_in_env", fake_run)
+    with pytest.raises(PrStateError, match="review-env rerun failed") as exc:
+        dispatch_mod.rerun_pr_next_in_review_env(TARGET)
+    assert "auth still unavailable" in str(exc.value)
+    assert seen["kwargs"] == {"environment": "review", "check": False}
+
+
 def test_flip_act_goes_through_the_shared_guard(monkeypatch):
     """The ready act flips through the SAME guarded re-check `pr ready` uses —
     the typed target travels into the guard."""
@@ -451,7 +494,7 @@ def test_flip_act_goes_through_the_shared_guard(monkeypatch):
     monkeypatch.setattr(dispatch_mod, "guarded_flip", fake_guard)
     line = NextActs(TARGET).flip_ready(_status(TaskState.READY))
     assert flipped == [TARGET]
-    assert line == "flipped draft→ready — human validates + merges"
+    assert line == "flipped draft→ready — ready for human validation"
 
 
 def test_report_act_surfaces_the_engines_next_action():

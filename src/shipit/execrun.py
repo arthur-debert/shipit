@@ -69,6 +69,7 @@ parameter defaulting to :func:`run`, and the runner's own suite fakes
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import shlex
@@ -102,6 +103,59 @@ TAIL_CHARS = 2000
 #: caller marks the Exec ``secret_stdout``, the error carries this placeholder in
 #: place of stdout instead — the failure is still surfaced, the secret never is.
 SECRET_STDOUT_PLACEHOLDER = "<redacted: secret-bearing stdout>"
+
+# Prompt fragments this short are unsafe to replace globally in a diagnostic
+# stream: a task such as ``t`` would rewrite every matching letter in ordinary
+# stderr. If one appears, suppress the ambiguous stream instead.
+SHORT_PROMPT_MAX_CHARS = 8
+PROMPT_STREAM_PLACEHOLDER = "<redacted: prompt-bearing stream>"
+
+AGENT_BINARIES = {"agy", "antigravity", "claude", "codex"}
+PIXI_RUN_VALUE_FLAGS = {
+    "-e",
+    "--environment",
+    "-p",
+    "--platform",
+    "--config-file",
+    "--auth-file",
+    "--concurrent-downloads",
+    "--concurrent-solves",
+    "--pinning-strategy",
+    "--pypi-keyring-provider",
+    "--tls-root-certs",
+    "-m",
+    "--manifest-path",
+    "-w",
+    "--workspace",
+    "--color",
+}
+PIXI_RUN_BOOLEAN_FLAGS = {
+    "-x",
+    "--executable",
+    "--clean-env",
+    "--skip-deps",
+    "--templated",
+    "-n",
+    "--dry-run",
+    "--help",
+    "-h",
+    "--no-config",
+    "--run-post-link-scripts",
+    "--no-symbolic-links",
+    "--no-hard-links",
+    "--no-ref-links",
+    "--tls-no-verify",
+    "--use-environment-activation-cache",
+    "--force-activate",
+    "--no-completions",
+    "--verbose",
+    "--quiet",
+    "--no-progress",
+    "--no-install",
+    "--frozen",
+    "--locked",
+    "--as-is",
+}
 
 #: :attr:`ExecError.cause` tags — the one axis callers may branch on.
 CAUSE_EXIT = "exit"  # the child completed with a nonzero rc (check=True)
@@ -148,10 +202,20 @@ class ExecError(RuntimeError):
         duration_ms: int = 0,
         cause: str = CAUSE_EXIT,
     ) -> None:
-        self.argv = tuple(redact.redact_text(arg) for arg in argv)
+        raw_argv = [str(arg) for arg in argv]
+        # Prompt payloads are sensitive even when they contain no registered
+        # secret. Keep the error-facing argv on the same bounded display
+        # contract as durable Exec records; the raw argv belongs only to the
+        # child process / successful ExecResult.
+        display_argv = _display_argv(raw_argv)
+        self.argv = tuple(redact.redact_text(arg) for arg in display_argv)
         self.rc = rc
-        self.stdout = redact.redact_text(stdout)
-        self.stderr = redact.redact_text(stderr)
+        self.stdout = redact.redact_text(
+            _summarize_prompt_text(stdout, raw_argv, display_argv)
+        )
+        self.stderr = redact.redact_text(
+            _summarize_prompt_text(stderr, raw_argv, display_argv)
+        )
         self.duration_ms = duration_ms
         self.cause = cause
         detail = _tail(self.stderr) or _tail(self.stdout)
@@ -179,13 +243,152 @@ def _record_fields(
     masks every field, on every sink, at format time.
     """
     fields: dict[str, int | str] = {
-        "argv": shlex.join(argv),
+        "argv": shlex.join(_display_argv(argv)),
         "cwd": str(cwd or "."),
     }
     for key, value in outcome.items():
         if value is not None:
             fields[key] = value
     return fields
+
+
+def _prompt_summary(text: str) -> str:
+    """Stable bounded stand-in for agent prompt/developer-instruction payloads."""
+    # Failure records receive ExecError.argv, which is already display-safe.
+    # Keep the transform idempotent rather than hashing the summary again.
+    if text.startswith("<redacted: prompt sha256="):
+        return text
+    digest = hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()[:12]
+    return f"<redacted: prompt sha256={digest} chars={len(text)}>"
+
+
+def _display_argv(argv: list[str] | tuple[str, ...]) -> list[str]:
+    """Return an argv safe for durable logs, preserving shape but not prompts.
+
+    Agent CLIs carry large/sensitive prompt material as argv (`claude -p`,
+    `codex exec`, `agy --print`) and Codex additionally accepts a
+    `developer_instructions=...` config override. The child still receives the
+    original argv; only the structured Exec record and its human message use
+    this summarized view.
+    """
+    display = [str(arg) for arg in argv]
+    if not display:
+        return display
+
+    def redact_after(flag: str) -> None:
+        for index, arg in enumerate(display):
+            if arg == flag and index + 1 < len(display):
+                display[index + 1] = _prompt_summary(display[index + 1])
+
+    binary = os.path.basename(display[0])
+    if binary == "pixi" and "run" in display[1:]:
+        run_index = display.index("run")
+        child_start = _pixi_run_child_start(display, run_index)
+        if child_start is not None and child_start < len(display):
+            display[child_start:] = _display_argv(display[child_start:])
+        elif any(
+            os.path.basename(arg) in AGENT_BINARIES for arg in display[run_index + 1 :]
+        ):
+            # An unknown/future pixi option made the prefix ambiguous while an
+            # agent binary is present. Fail closed without changing argv length
+            # (ExecError stream sanitization zips raw/display positionally).
+            for index in range(run_index + 1, len(display)):
+                display[index] = _prompt_summary(display[index])
+        return display
+    if binary == "claude":
+        redact_after("-p")
+    elif binary == "codex" and "exec" in display:
+        for index, arg in enumerate(display):
+            if arg.startswith("developer_instructions="):
+                display[index] = "developer_instructions=" + _prompt_summary(
+                    arg.split("=", 1)[1]
+                )
+        # The prompt is the final positional argument in shipit's codex adapter.
+        # Do not destroy malformed/flag-only command diagnostics (for example,
+        # `codex exec --model gpt-5` has no prompt at all).
+        value_flags = {
+            "-c",
+            "-C",
+            "-m",
+            "-s",
+            "--cd",
+            "--color",
+            "--model",
+            "--output-schema",
+            "--profile",
+            "--sandbox",
+        }
+        boolean_flags = {
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--ephemeral",
+            "--json",
+            "--oss",
+            "--skip-git-repo-check",
+        }
+        if (
+            len(display) > 2
+            and display[-1] != "exec"
+            and display[-2] not in value_flags
+            and display[-1] not in boolean_flags
+            and not display[-1].startswith("developer_instructions=")
+        ):
+            display[-1] = _prompt_summary(display[-1])
+    elif binary in {"agy", "antigravity"}:
+        redact_after("--print")
+        for index, arg in enumerate(display):
+            if arg.startswith("--print="):
+                display[index] = "--print=" + _prompt_summary(arg.split("=", 1)[1])
+    return display
+
+
+def _pixi_run_child_start(display: list[str], run_index: int) -> int | None:
+    """Locate pixi run's first positional command while skipping its options."""
+    index = run_index + 1
+    while index < len(display):
+        arg = display[index]
+        if arg == "--":
+            return index + 1
+        if arg in PIXI_RUN_VALUE_FLAGS:
+            index += 2
+            continue
+        if any(arg.startswith(f"{flag}=") for flag in PIXI_RUN_VALUE_FLAGS):
+            index += 1
+            continue
+        if arg in PIXI_RUN_BOOLEAN_FLAGS or (
+            arg.startswith("-") and set(arg[1:]) <= {"q", "v"}
+        ):
+            index += 1
+            continue
+        return index if os.path.basename(arg) in AGENT_BINARIES else None
+    return None
+
+
+def _summarize_prompt_text(
+    text: str,
+    raw_argv: list[str],
+    display_argv: list[str],
+) -> str:
+    """Replace argv-carried prompt payloads echoed into a failure stream."""
+    replacements: list[tuple[str, str]] = []
+    for raw, display in zip(raw_argv, display_argv, strict=True):
+        if raw != display:
+            replacements.append((raw, display))
+            for prefix in ("developer_instructions=", "--print="):
+                if raw.startswith(prefix) and display.startswith(prefix):
+                    replacements.append(
+                        (raw.removeprefix(prefix), display.removeprefix(prefix))
+                    )
+    if any(
+        raw and len(raw) <= SHORT_PROMPT_MAX_CHARS and raw in text
+        for raw, _display in replacements
+    ):
+        return PROMPT_STREAM_PLACEHOLDER
+    for raw, display in sorted(
+        replacements, key=lambda pair: len(pair[0]), reverse=True
+    ):
+        if raw:
+            text = text.replace(raw, display)
+    return text
 
 
 def run(
@@ -462,7 +665,10 @@ def _sanitize_cause(exc: BaseException) -> BaseException:
         exc.cmd = (
             redact.redact_text(exc.cmd)
             if isinstance(exc.cmd, str)
-            else [redact.redact_text(str(arg)) for arg in exc.cmd]
+            else [
+                redact.redact_text(arg)
+                for arg in _display_argv([str(arg) for arg in exc.cmd])
+            ]
         )
         exc.args = (exc.cmd, exc.timeout, None, None)[: len(exc.args)]
     return exc

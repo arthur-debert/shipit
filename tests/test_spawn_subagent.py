@@ -13,12 +13,13 @@ the error shell, the byte-stable SPAWNED render) is the thin smoke layer in
 
 from __future__ import annotations
 
+import logging
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from shipit import execrun, gh, logcontext
+from shipit import events, execrun, gh, logcontext
 from shipit.execrun import ExecError
 from shipit.identity import repo_from_slug
 from shipit.spawn import launch
@@ -165,6 +166,20 @@ def test_write_spawn_returns_the_typed_result(tmp_path, monkeypatch):
         "pr_state": "OPEN",
         "pr_is_draft": True,
     }
+
+
+def test_write_spawn_emits_bounded_phase_events(tmp_path, caplog):
+    b, _calls = bounds(tmp_path)
+
+    with caplog.at_level(logging.INFO, logger="shipit.spawn"):
+        spawn_subagent(spec(), b)
+
+    phases = [
+        rec.phase
+        for rec in caplog.records
+        if getattr(rec, events.EXTRA_KEY, None) == "agent.phase"
+    ]
+    assert phases == ["tree_provisioning", "agent_running", "pr_audit"]
 
 
 def test_write_spawn_links_pr_from_the_tree_branch(tmp_path):

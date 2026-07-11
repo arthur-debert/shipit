@@ -79,17 +79,22 @@ def codex_cmd(codex_args: tuple[str, ...]) -> None:
     message) when run outside a git checkout, when Tree creation fails, or when
     the codex binary cannot be exec'd.
     """
-    raise SystemExit(run_codex(list(codex_args)))
+    args = list(codex_args)
+    if len(args) >= 2 and args[0] == "resume":
+        raise SystemExit(run_codex(args[2:], resume_thread_id=args[1]))
+    raise SystemExit(run_codex(args))
 
 
 def run_codex(
     codex_args: Sequence[str],
     *,
+    resume_thread_id: str | None = None,
     creator: Callable[..., Tree] = create_from_source,
     chdir: Callable[[str], None] = os.chdir,
     execute: Callable[[str, list[str], dict[str, str]], None] = os.execvpe,
     which: Callable[[str], str | None] = shutil.which,
     environ: Mapping[str, str] | None = None,
+    activation_runner: Callable[..., execrun.ExecResult] = execrun.run,
 ) -> int:
     """Mint id → create the ephemeral Tree → chdir → exec codex. Returns only on failure.
 
@@ -132,11 +137,28 @@ def run_codex(
         print(f"session codex: {exc}", file=sys.stderr)
         return 1
 
-    argv = bootstrap.codex_argv(tree.path, codex_args)
+    argv = (
+        bootstrap.codex_resume_argv(tree.path, resume_thread_id, codex_args)
+        if resume_thread_id is not None
+        else bootstrap.codex_argv(tree.path, codex_args)
+    )
+    try:
+        activation = bootstrap.activation_for_tree(
+            tree.path,
+            runner=activation_runner,
+        )
+    except (execrun.ExecError, ValueError, OSError) as exc:
+        logger.warning(
+            "session codex: pixi activation failed open; launching unactivated",
+            exc_info=True,
+        )
+        print(f"session codex: activation skipped: {exc}", file=sys.stderr)
+        activation = None
     env = bootstrap.codex_env(
         os.environ if environ is None else environ,
         session_id=session_id,
         tree=tree.path,
+        activation=activation,
     )
     print(bootstrap.format_launch(session_id, tree.path, argv), flush=True)
     # The launch milestone, written BEFORE the exec replaces this process: the
@@ -148,7 +170,10 @@ def run_codex(
             "launching codex coordinator session %s in %s",
             session_id,
             tree.path,
-            extra={"argv": argv},
+            extra={
+                "argv": argv,
+                **({"codex_thread": resume_thread_id} if resume_thread_id else {}),
+            },
         )
     # chdir FIRST: codex hook commands and child shells inherit the process cwd,
     # so it must agree with --cd's agent root — both point at the Tree.

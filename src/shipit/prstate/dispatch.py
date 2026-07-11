@@ -42,9 +42,10 @@ real `Acts` for a fake is the whole test seam.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Protocol
 
-from .. import events
+from .. import events, git, pixienv
 from ..pr import PrId
 from .errors import PrStateError
 from .flip import guarded_flip
@@ -57,6 +58,8 @@ from .state import TaskState, TaskStatus
 #: action a `pr next` invocation takes is a lifecycle milestone (LOG02 spray,
 #: ADR-0029) — the durable twin of the verb's "action:" render.
 logger = logging.getLogger("shipit.prstate")
+
+REVIEW_ENV_NAME = "review"
 
 
 class Acts(Protocol):
@@ -205,12 +208,22 @@ class NextActs:
         """
         by_name = {r.name: r for r in required_adapters(self._roster)}
         selected = [by_name[name] for name in status.to_request if name in by_name]
+        # A local reviewer can fail synchronously before detach (most notably
+        # when the default pixi env lacks review auth). Try every no-edge local
+        # first so rerouting through the review env cannot happen after a remote
+        # GitHub request edge was already placed.
+        selected.sort(key=lambda adapter: adapter.has_requested_edge)
         if not selected:
             return f"no requestable reviewer to (re-)request — {status.next_action}"
         # force=True: selection is done above, so the service requests exactly
         # these and attach-verifies each remote edge. ExecError/PrStateError (e.g. a
         # deferred local-agent reviewer, or a gh failure) propagates to the caller.
-        result = request_reviewers(self._pr, selected, self._roster, force=True)
+        try:
+            result = request_reviewers(self._pr, selected, self._roster, force=True)
+        except PrStateError as exc:
+            if _should_rerun_in_review_env(exc):
+                return rerun_pr_next_in_review_env(self._pr)
+            raise
         if not result.ok:
             # A remote request edge was silently dropped (#614) — fail loud rather
             # than park the PR invisibly at reviews-pending.
@@ -230,5 +243,41 @@ class NextActs:
         # re-evaluates live and raises NotReady if it is no longer READY.
         # The verb's already-loaded Roster rides into the flip's re-check, so the
         # READY path never resolves reviewer settings twice (CLI01-WS04).
-        flipped = guarded_flip(self._pr, self._roster, sightings=self._sightings)
-        return f"flipped draft→ready — {flipped.next_action}"
+        guarded_flip(self._pr, self._roster, sightings=self._sightings)
+        return "flipped draft→ready — ready for human validation"
+
+
+def _should_rerun_in_review_env(exc: PrStateError) -> bool:
+    """Whether a local-review auth failure is the known missing review extra."""
+    if os.environ.get("PIXI_ENVIRONMENT_NAME") == REVIEW_ENV_NAME:
+        return False
+    text = str(exc)
+    return "PyJWT" in text or "pixi run -e review" in text
+
+
+def rerun_pr_next_in_review_env(pr: PrId) -> str:
+    """Rerun the documented `pr next` action inside pixi's review env.
+
+    The default env intentionally keeps the review extra out of the normal
+    required-check surface, but local reviewers need PyJWT to mint App auth.
+    This preserves the user-facing command (`shipit pr next`) by internally
+    routing the same single action into the review env when the default env is
+    missing that optional dependency.
+    """
+    root = git.repo_root()
+    if not root:
+        raise PrStateError("cannot route local review through pixi: not inside a repo")
+    result = pixienv.run_in_env(
+        ["shipit", "pr", "next", str(pr.number)],
+        root,
+        environment=REVIEW_ENV_NAME,
+        check=False,
+    )
+    if not result.ok:
+        detail = result.stderr.strip() or result.stdout.strip()
+        suffix = f": {detail}" if detail else ""
+        raise PrStateError(f"review-env rerun failed (rc={result.rc}){suffix}")
+    for line in result.stdout.splitlines():
+        if line.startswith("action: "):
+            return line.removeprefix("action: ").strip()
+    return "requested review(s) via review env"

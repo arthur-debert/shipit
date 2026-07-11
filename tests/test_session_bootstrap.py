@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from shipit import logcontext
+from shipit.pixienv import Activation
 from shipit.session import bootstrap
 
 
@@ -20,6 +21,23 @@ def test_codex_argv_roots_interactive_codex_in_tree_and_forwards_extra_args():
         "--cd",
         str(tree),
         bootstrap.BYPASS_FLAG,
+        "--model",
+        "gpt-5",
+    ]
+
+
+def test_codex_resume_argv_re_roots_the_thread_in_the_tree():
+    tree = Path("/trees/arthur-debert/shipit/ephemeral/codex-1")
+
+    argv = bootstrap.codex_resume_argv(tree, "019f-thread", ["--model", "gpt-5"])
+
+    assert argv == [
+        "codex",
+        "resume",
+        "--cd",
+        str(tree),
+        bootstrap.BYPASS_FLAG,
+        "019f-thread",
         "--model",
         "gpt-5",
     ]
@@ -47,6 +65,27 @@ def test_codex_env_scrubs_billing_and_project_pointers_keeps_access_token():
     assert "CONDA_PREFIX" not in env
     assert env[logcontext.ENV_PREFIX + "SESSION"] == "codex-1"
     assert env[logcontext.ENV_PREFIX + "TREE"] == tree
+
+
+def test_codex_env_applies_pixi_activation_after_scrubbing():
+    tree = "/trees/shipit/ephemeral/codex-1"
+    parent = {
+        "PATH": "/source/.pixi/envs/default/bin:/bin",
+        "PIXI_PROJECT_ROOT": "/source/checkout",
+    }
+    act = Activation(
+        environment_variables={
+            "PATH": f"{tree}/.pixi/envs/default/bin:/bin",
+            "CONDA_PREFIX": f"{tree}/.pixi/envs/default",
+        },
+        activation_scripts=(),
+    )
+
+    env = bootstrap.codex_env(parent, session_id="codex-1", tree=tree, activation=act)
+
+    assert env["PATH"] == f"{tree}/.pixi/envs/default/bin:/bin"
+    assert env["CONDA_PREFIX"] == f"{tree}/.pixi/envs/default"
+    assert "PIXI_PROJECT_ROOT" not in env
 
 
 def test_codex_env_drops_the_inherited_worker_agent_identity_exports():

@@ -122,6 +122,6 @@ def test_run_outside_a_checkout_is_the_uniform_refusal(capsys):
 def test_format_flipped_and_undone_are_pure_renderers():
     """The verb's renderers are plain string functions (the render seam)."""
     assert ready_verb.format_flipped(_status(TaskState.READY)) == (
-        "PR #42: flipped draft→ready — …"
+        "PR #42: flipped draft→ready — ready for human validation"
     )
     assert ready_verb.format_undone(TARGET) == "PR #42: reverted ready→draft"

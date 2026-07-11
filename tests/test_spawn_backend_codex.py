@@ -1,8 +1,8 @@
 """Unit tests for the ``codex`` backend adapter and its registry entry (ADR-0020 §codex).
 
 The per-backend WRITE launch contract probed by the WS00 spike — the exact ``codex exec
---dangerously-bypass-approvals-and-sandbox`` argv, the role-prepend conveyance (codex has
-no ``--agent``), the ``OPENAI_API_KEY`` / ``CODEX_API_KEY`` API-billing scrub with the
+--dangerously-bypass-approvals-and-sandbox`` argv, generated role instructions via
+``developer_instructions`` (codex has no ``--agent``), the ``OPENAI_API_KEY`` / ``CODEX_API_KEY`` API-billing scrub with the
 ``CODEX_ACCESS_TOKEN`` automation passthrough (CDX01-WS03), and the reviewer
 posture — asserted exhaustively at the seam inputs (ADR-0020 §De-risking (a):
 ``build_command`` + ``child_env`` are the cheap, high-value things to pin). No real codex
@@ -24,17 +24,18 @@ def test_build_command_is_the_adr_write_contract():
     # The literal ADR-0020 §codex WRITE invocation, in order. The bypass flag is
     # load-bearing: the default workspace-write sandbox blocks .git writes + network,
     # so a Run that commits + opens a PR needs the unsandboxed posture.
-    assert cmd[:5] == [
+    assert cmd[:4] == [
         "codex",
         "exec",
         "--skip-git-repo-check",
         "--dangerously-bypass-approvals-and-sandbox",
-        "--model",
     ]
-    assert cmd[5] == codex_backend.DEFAULT_MODEL
+    assert cmd[cmd.index("--model") + 1] == codex_backend.DEFAULT_MODEL
+    assert cmd[cmd.index("-c") + 1].startswith(
+        f"{codex_backend.DEVELOPER_INSTRUCTIONS_KEY}="
+    )
     # The prompt is the single trailing positional arg.
-    assert cmd[6] == cmd[-1]
-    assert len(cmd) == 7
+    assert cmd[-1] == "do the thing"
 
 
 def test_build_command_has_no_sandbox_for_a_write_run():
@@ -47,20 +48,30 @@ def test_build_command_has_no_sandbox_for_a_write_run():
     assert "workspace-write" not in cmd
 
 
-def test_build_command_prepends_the_role_to_the_prompt():
-    # codex has NO --agent flag (ADR-0020 §codex): the role is conveyed by prepending
-    # it to the task prompt, the only native mechanism the spike validated.
+def test_build_command_carries_generated_role_in_developer_instructions():
+    # codex has NO --agent flag: the generated role slice rides Codex's
+    # developer-instruction override, and the filled task brief stays the
+    # separate positional prompt.
     cmd = CODEX.build_command("implement issue #42", "implementer")
-    prompt = cmd[-1]
-    assert "implementer" in prompt
-    assert prompt.endswith("implement issue #42")
-    # The role rides as a flag value nowhere — it lives in the prompt text only.
+    instructions = next(
+        arg
+        for arg in cmd
+        if arg.startswith(f"{codex_backend.DEVELOPER_INSTRUCTIONS_KEY}=")
+    )
+    assert "## Your role" in instructions
+    assert "implementer" in instructions
+    assert cmd[-1] == "implement issue #42"
     assert "--agent" not in cmd
 
 
 def test_build_command_carries_the_role_verbatim():
     cmd = CODEX.build_command("t", "shepherd")
-    assert "shepherd" in cmd[-1]
+    instructions = next(
+        arg
+        for arg in cmd
+        if arg.startswith(f"{codex_backend.DEVELOPER_INSTRUCTIONS_KEY}=")
+    )
+    assert "shepherd" in instructions
 
 
 def test_build_command_has_no_tools_flag_either_posture():
@@ -86,7 +97,7 @@ def test_reviewer_build_command_is_network_capable_non_bypass_sandbox():
     assert "read-only" not in cmd  # the ADR's first guess — falsified by the probe
     # The model + prompt still trail in order; prompt is the single positional.
     assert cmd[cmd.index("--model") + 1] == codex_backend.DEFAULT_MODEL
-    assert cmd[-1] == f"{codex_backend._role_preamble('reviewer')}\n\nreview it"
+    assert cmd[-1] == "review it"
 
 
 def test_write_and_reviewer_argv_differ_in_posture():

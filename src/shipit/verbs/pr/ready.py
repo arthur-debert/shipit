@@ -86,7 +86,7 @@ def run(pr: int | None = None, *, undo: bool = False, repo: Repo | None = None) 
 
 def format_flipped(status: TaskStatus) -> str:
     """The pure text renderer for a performed flip (the render seam owns stdout)."""
-    return f"PR #{status.pr}: flipped draft→ready — {status.next_action}"
+    return f"PR #{status.pr}: flipped draft→ready — ready for human validation"
 
 
 def format_undone(target: PrId) -> str:

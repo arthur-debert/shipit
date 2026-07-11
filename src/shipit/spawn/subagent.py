@@ -606,6 +606,13 @@ def _run_child(
         role,
         extra={"backend": adapter.name, "role": role, "cwd": tree.path},
     )
+    events.emit(
+        logger,
+        "agent.phase",
+        "spawn subagent: phase agent_running for %s run",
+        role,
+        extra={"phase": "agent_running", "backend": adapter.name, "role": role},
+    )
     launch_start = time.monotonic()
     try:
         result = launch.launch(
@@ -674,6 +681,13 @@ def _launch_write(
     exists).
     """
     create_start = time.monotonic()
+    events.emit(
+        logger,
+        "agent.phase",
+        "spawn subagent: phase tree_provisioning for %s run",
+        role,
+        extra={"phase": "tree_provisioning", "role": role, "backend": backend},
+    )
     try:
         tree = bounds.create_tree(spec, source_repo=source_repo, github_url=github_url)
     except (ValueError, execrun.ExecError, OSError) as exc:
@@ -735,6 +749,13 @@ def _launch_write(
     try:
         _run_child(cmd, tree=tree, adapter=adapter, bounds=bounds, role=role)
 
+        events.emit(
+            logger,
+            "agent.phase",
+            "spawn subagent: phase pr_audit for %s run",
+            role,
+            extra={"phase": "pr_audit", "role": role, "backend": backend},
+        )
         # The Run reports back through the PR (ADR-0019 §6): resolve the PR it opened
         # on the Tree's branch through the SAME gh boundary the fleet scan uses — no
         # side database, the PR on the branch IS the Run↔PR link — then audit it.
@@ -799,6 +820,16 @@ def _launch_reviewer(
     """
     plan = readonly_plan(repo=repo, branch=branch)
     create_start = time.monotonic()
+    events.emit(
+        logger,
+        "agent.phase",
+        "spawn subagent: phase read_only_tree for reviewer run",
+        extra={
+            "phase": "read_only_tree",
+            "role": REVIEWER_ROLE,
+            "backend": adapter.name,
+        },
+    )
     try:
         tree = bounds.create_readonly_tree(
             plan, source_repo=source_repo, github_url=github_url
