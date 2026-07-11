@@ -266,7 +266,12 @@ def rerun_pr_next_in_review_env(pr: PrId) -> str:
         ["shipit", "pr", "next", str(pr.number)],
         root,
         environment=REVIEW_ENV_NAME,
+        check=False,
     )
+    if not result.ok:
+        detail = result.stderr.strip() or result.stdout.strip()
+        suffix = f": {detail}" if detail else ""
+        raise PrStateError(f"review-env rerun failed (rc={result.rc}){suffix}")
     for line in result.stdout.splitlines():
         if line.startswith("action: "):
             return line.removeprefix("action: ").strip()

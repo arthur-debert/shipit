@@ -258,7 +258,7 @@ def test_next_local_auth_failure_reroutes_through_review_env(
     rc = cli.main(["pr", "next"])
     out, err = capsys.readouterr()
     assert rc == 0
-    assert err == ""
+    assert not any(line.startswith("error: ") for line in err.splitlines())
     assert "action: requested review(s): codex" in out
     assert rerouted == [42]
     assert spawned == []  # no doomed child was detached

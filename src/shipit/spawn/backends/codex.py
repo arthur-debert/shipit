@@ -13,12 +13,12 @@ NOT from guessed flags. Three facts are load-bearing and non-obvious:
   Tree (ADR-0018) **is**. With the flag the spike landed a real commit; without it the
   Run cannot produce its result. ``--skip-git-repo-check`` lets codex run in the Tree
   without re-litigating that it is a git checkout.
-- **There is NO native ``--agent`` / ``--system-prompt``.** codex cannot be handed a
-  role identity by flag (the way ``claude --agent <role>`` is), and it does **not** run
-  under the shipit harness or its ``PreToolUse`` guard at all — it is a foreign runtime.
-  So the role is conveyed the only native way the spike validated: **prepended to the
-  task prompt** (:func:`_role_preamble`). Writing the role into an ``AGENTS.md`` /
-  ``experimental_instructions_file`` in the Tree was rejected — it would pollute the PR.
+- **There is NO native ``--agent`` flag.** codex does **not** run under the shipit
+  harness or its ``PreToolUse`` guard — it is a foreign runtime. The generated role
+  slice is therefore passed through Codex's native ``developer_instructions`` config
+  override, while the positional prompt contains only the task brief. Writing the role
+  into an ``AGENTS.md`` / ``experimental_instructions_file`` in the Tree remains
+  rejected because it would pollute the PR.
 - **codex auth is ChatGPT OAuth** (tokens in ``~/.codex/auth.json`` / ``$CODEX_HOME``),
   inherited by the child. The spike found a bogus ``OPENAI_API_KEY`` did *not* break
   codex 0.139 on the probe box (it preferred the stored tokens), but the safe
@@ -130,14 +130,11 @@ DEVELOPER_INSTRUCTIONS_KEY = "developer_instructions"
 
 
 def _role_preamble(role: str) -> str:
-    """The role line prepended to a codex prompt (the no-``--agent`` conveyance).
+    """The fallback developer instruction for an unknown/custom role.
 
-    codex has no native agent/system-prompt flag and does not run under the shipit
-    harness, so the role is folded into the task prompt itself (ADR-0020 §codex
-    Role/instruction conveyance — prompt-prepend is the recorded mechanism). The PR
-    contract / draft-and-stop discipline already rides the task text from
-    :func:`shipit.spawn.launch.write_task`; this preamble names the role the child is
-    acting as so its judgement is anchored to it.
+    Known shipit roles use their generated role-scoped prompt. A custom role has
+    no generated slice, so this minimal identity travels through the same Codex
+    ``developer_instructions`` override; it is never prepended to the task prompt.
     """
     return f"You are acting as the '{role}' role for this Run."
 
@@ -185,9 +182,9 @@ class CodexAdapter(BackendAdapter):
         """The exact ``codex exec`` argv ADR-0020 §codex specifies, per posture.
 
         Common shell: ``codex exec --skip-git-repo-check <posture flags>
-        [-c model_reasoning_effort=<level>] --model <id> "<role-preamble + task>"``.
-        The task prompt is the first positional arg, with the role prepended
-        (:func:`_role_preamble`) because codex has no ``--agent`` flag. The
+        [-c model_reasoning_effort=<level>] -c developer_instructions=<role>
+        --model <id> "<task>"``. The generated role slice travels through Codex's
+        developer-instruction channel; the positional prompt is the task only. The
         reasoning override (:data:`REASONING_EFFORT_KEY`, RVW03-WS04) appears only
         when this instance pins a level — codex's native ReasoningLevel knob,
         common to both postures.

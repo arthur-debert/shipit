@@ -439,6 +439,23 @@ def test_request_act_without_a_requestable_adapter_reports(monkeypatch):
     assert line.startswith("no requestable reviewer")
 
 
+def test_review_env_rerun_maps_nonzero_to_domain_error(monkeypatch):
+    from shipit.execrun import ExecResult
+
+    monkeypatch.setattr(dispatch_mod.git, "repo_root", lambda: "/repo")
+    seen = {}
+
+    def fake_run(argv, root, **kwargs):
+        seen.update(argv=argv, root=root, kwargs=kwargs)
+        return ExecResult(tuple(argv), 1, "", "auth still unavailable", 12)
+
+    monkeypatch.setattr(dispatch_mod.pixienv, "run_in_env", fake_run)
+    with pytest.raises(PrStateError, match="review-env rerun failed") as exc:
+        dispatch_mod.rerun_pr_next_in_review_env(TARGET)
+    assert "auth still unavailable" in str(exc.value)
+    assert seen["kwargs"] == {"environment": "review", "check": False}
+
+
 def test_flip_act_goes_through_the_shared_guard(monkeypatch):
     """The ready act flips through the SAME guarded re-check `pr ready` uses —
     the typed target travels into the guard."""

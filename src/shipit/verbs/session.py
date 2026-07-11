@@ -94,7 +94,7 @@ def run_codex(
     execute: Callable[[str, list[str], dict[str, str]], None] = os.execvpe,
     which: Callable[[str], str | None] = shutil.which,
     environ: Mapping[str, str] | None = None,
-    activation_runner=execrun.run,
+    activation_runner: Callable[..., execrun.ExecResult] = execrun.run,
 ) -> int:
     """Mint id → create the ephemeral Tree → chdir → exec codex. Returns only on failure.
 

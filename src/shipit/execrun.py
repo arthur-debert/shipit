@@ -149,10 +149,20 @@ class ExecError(RuntimeError):
         duration_ms: int = 0,
         cause: str = CAUSE_EXIT,
     ) -> None:
-        self.argv = tuple(redact.redact_text(arg) for arg in argv)
+        raw_argv = [str(arg) for arg in argv]
+        # Prompt payloads are sensitive even when they contain no registered
+        # secret. Keep the error-facing argv on the same bounded display
+        # contract as durable Exec records; the raw argv belongs only to the
+        # child process / successful ExecResult.
+        display_argv = _display_argv(raw_argv)
+        self.argv = tuple(redact.redact_text(arg) for arg in display_argv)
         self.rc = rc
-        self.stdout = redact.redact_text(stdout)
-        self.stderr = redact.redact_text(stderr)
+        self.stdout = redact.redact_text(
+            _summarize_prompt_text(stdout, raw_argv, display_argv)
+        )
+        self.stderr = redact.redact_text(
+            _summarize_prompt_text(stderr, raw_argv, display_argv)
+        )
         self.duration_ms = duration_ms
         self.cause = cause
         detail = _tail(self.stderr) or _tail(self.stdout)
@@ -191,6 +201,10 @@ def _record_fields(
 
 def _prompt_summary(text: str) -> str:
     """Stable bounded stand-in for agent prompt/developer-instruction payloads."""
+    # Failure records receive ExecError.argv, which is already display-safe.
+    # Keep the transform idempotent rather than hashing the summary again.
+    if text.startswith("<redacted: prompt sha256="):
+        return text
     digest = hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()[:12]
     return f"<redacted: prompt sha256={digest} chars={len(text)}>"
 
@@ -209,10 +223,9 @@ def _display_argv(argv: list[str] | tuple[str, ...]) -> list[str]:
         return display
 
     def redact_after(flag: str) -> None:
-        if flag in display:
-            index = display.index(flag) + 1
-            if index < len(display):
-                display[index] = _prompt_summary(display[index])
+        for index, arg in enumerate(display):
+            if arg == flag and index + 1 < len(display):
+                display[index + 1] = _prompt_summary(display[index + 1])
 
     binary = os.path.basename(display[0])
     if binary == "claude":
@@ -224,7 +237,26 @@ def _display_argv(argv: list[str] | tuple[str, ...]) -> list[str]:
                     arg.split("=", 1)[1]
                 )
         # The prompt is the final positional argument in shipit's codex adapter.
-        if display:
+        # Do not destroy malformed/flag-only command diagnostics (for example,
+        # `codex exec --model gpt-5` has no prompt at all).
+        value_flags = {
+            "-c",
+            "-C",
+            "-m",
+            "-s",
+            "--cd",
+            "--color",
+            "--model",
+            "--output-schema",
+            "--profile",
+            "--sandbox",
+        }
+        if (
+            len(display) > 2
+            and display[-1] != "exec"
+            and not display[-1].startswith("-")
+            and display[-2] not in value_flags
+        ):
             display[-1] = _prompt_summary(display[-1])
     elif binary in {"agy", "antigravity"}:
         redact_after("--print")
@@ -232,6 +264,29 @@ def _display_argv(argv: list[str] | tuple[str, ...]) -> list[str]:
             if arg.startswith("--print="):
                 display[index] = "--print=" + _prompt_summary(arg.split("=", 1)[1])
     return display
+
+
+def _summarize_prompt_text(
+    text: str,
+    raw_argv: list[str],
+    display_argv: list[str],
+) -> str:
+    """Replace argv-carried prompt payloads echoed into a failure stream."""
+    replacements: list[tuple[str, str]] = []
+    for raw, display in zip(raw_argv, display_argv, strict=True):
+        if raw != display:
+            replacements.append((raw, display))
+        for prefix in ("developer_instructions=", "--print="):
+            if raw.startswith(prefix) and display.startswith(prefix):
+                replacements.append(
+                    (raw.removeprefix(prefix), display.removeprefix(prefix))
+                )
+    for raw, display in sorted(
+        replacements, key=lambda pair: len(pair[0]), reverse=True
+    ):
+        if raw:
+            text = text.replace(raw, display)
+    return text
 
 
 def run(
@@ -508,7 +563,10 @@ def _sanitize_cause(exc: BaseException) -> BaseException:
         exc.cmd = (
             redact.redact_text(exc.cmd)
             if isinstance(exc.cmd, str)
-            else [redact.redact_text(str(arg)) for arg in exc.cmd]
+            else [
+                redact.redact_text(arg)
+                for arg in _display_argv([str(arg) for arg in exc.cmd])
+            ]
         )
         exc.args = (exc.cmd, exc.timeout, None, None)[: len(exc.args)]
     return exc

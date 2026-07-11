@@ -118,6 +118,56 @@ def test_prompt_bearing_argv_is_summarized_for_exec_records():
     assert joined.count("<redacted: prompt sha256=") == 2
 
 
+def test_every_repeated_prompt_flag_is_summarized():
+    display = execrun._display_argv(
+        ["agy", "--print", "FIRST PROMPT", "--print", "SECOND PROMPT"]
+    )
+    joined = " ".join(display)
+    assert "FIRST PROMPT" not in joined
+    assert "SECOND PROMPT" not in joined
+    assert joined.count("<redacted: prompt sha256=") == 2
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["codex", "exec"],
+        ["codex", "exec", "--model", "gpt-5"],
+    ],
+)
+def test_codex_flag_only_argv_keeps_diagnostic_shape(argv):
+    assert execrun._display_argv(argv) == argv
+
+
+def test_codex_failure_never_exposes_prompt_payloads(monkeypatch, caplog):
+    role = "SECRET ROLE SLICE"
+    task = "SECRET TASK PROMPT"
+    argv = [
+        "codex",
+        "exec",
+        "-c",
+        f"developer_instructions={role}",
+        "--model",
+        "gpt-5.5",
+        task,
+    ]
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        _fake_completed(rc=1, stderr=f"launch failed: {role}; task: {task}"),
+    )
+    with caplog.at_level(logging.ERROR, logger="shipit.exec"):
+        with pytest.raises(execrun.ExecError) as excinfo:
+            execrun.run(argv)
+    err = excinfo.value
+    surfaced = " ".join(err.argv) + err.stderr + str(err)
+    rendered = "\n".join(record.getMessage() for record in caplog.records)
+    for leak in (role, task):
+        assert leak not in surfaced
+        assert leak not in rendered
+    assert surfaced.count("<redacted: prompt sha256=") >= 2
+
+
 # ---------------------------------------------------------------------------
 # Missing binary / OS normalization
 # ---------------------------------------------------------------------------
@@ -314,6 +364,30 @@ def test_timeout_cause_cmd_is_redacted(monkeypatch, _clean_registry):
     cause = excinfo.value.__cause__
     assert "s3cret-value" not in " ".join(cause.cmd)
     assert "s3cret-value" not in str(cause)
+
+
+def test_timeout_cause_cmd_summarizes_codex_prompts(monkeypatch):
+    role = "SECRET ROLE SLICE"
+    task = "SECRET TASK PROMPT"
+    argv = [
+        "codex",
+        "exec",
+        "-c",
+        f"developer_instructions={role}",
+        task,
+    ]
+
+    def fake_run(child_argv, **kwargs):
+        raise subprocess.TimeoutExpired(child_argv, 0.1)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(execrun.ExecError) as excinfo:
+        execrun.run(argv, timeout=0.1)
+    cause = excinfo.value.__cause__
+    surfaced = " ".join(cause.cmd) + str(cause) + repr(cause)
+    assert role not in surfaced
+    assert task not in surfaced
+    assert surfaced.count("<redacted: prompt sha256=") >= 2
 
 
 def test_timeout_cause_args_tuple_is_sanitized(monkeypatch, _clean_registry):
