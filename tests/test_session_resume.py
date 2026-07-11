@@ -141,6 +141,21 @@ def test_resolve_native_id_can_be_scoped_by_repo(tmp_path: Path):
     assert target.shipit_session_id == "sess-1"
 
 
+def test_discover_repos_uses_the_platform_log_base(monkeypatch, tmp_path: Path):
+    _log(
+        tmp_path,
+        "arthur-debert/shipit",
+        {"repo": REPO.slug, "session": "sess-1", "session_id": "native"},
+    )
+    monkeypatch.setattr(
+        resume.logsetup,
+        "resolve_log_dir",
+        lambda repo: tmp_path / repo.owner.login / repo.name,
+    )
+
+    assert resume._discover_repos(base_dir=None) == [REPO]
+
+
 def test_resolve_merges_session_across_rotated_log_boundary(tmp_path: Path):
     active = tmp_path / REPO.owner.login / REPO.name / resume.logsetup.LOG_FILENAME
     active.parent.mkdir(parents=True)

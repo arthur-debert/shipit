@@ -192,7 +192,9 @@ def _discover_repos(*, base_dir: str | Path | None) -> list[Repo]:
     base = (
         Path(base_dir)
         if base_dir is not None
-        else logsetup.resolve_log_dir(identity.repo_from_slug("x/y")).parents[1]
+        # resolve_log_dir is <base>/<owner>/<repo>; climb those two identity
+        # segments to the root whose immediate children are owners.
+        else logsetup.resolve_log_dir(identity.repo_from_slug("x/y")).parent.parent
     )
     if not base.is_dir():
         return []

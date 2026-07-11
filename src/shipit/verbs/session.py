@@ -181,7 +181,10 @@ def run_resume(
     # so clear every inherited in-process correlation before binding its truth.
     logcontext.unbind(*logcontext.DOMAIN_KEYS)
     logcontext.bind(repo=resolved.repo.slug)
-    logsetup.configure_logging(repo=resolved.repo)
+    logsetup.configure_logging(
+        repo=resolved.repo,
+        env=logcontext.scrub_env(os.environ),
+    )
     source_repo = source_locator(resolved.repo)
 
     if resolved.backend == resume.CODEX_BACKEND:

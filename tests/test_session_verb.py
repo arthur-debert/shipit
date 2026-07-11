@@ -251,7 +251,7 @@ def test_run_codex_resume_can_launch_from_explicit_source_repo(monkeypatch, tmp_
     ]
 
 
-def test_run_resume_delegates_codex_target_to_codex_runner(tmp_path):
+def test_run_resume_delegates_codex_target_to_codex_runner(tmp_path, monkeypatch):
     captured = {}
     repo = repo_from_slug("arthur-debert/shipit")
     target = session.resume.ResumeTarget(
@@ -274,6 +274,13 @@ def test_run_resume_delegates_codex_target_to_codex_runner(tmp_path):
         captured["context"] = session.logcontext.bound()
         return 0
 
+    monkeypatch.setenv("SHIPIT_LOG_CTX_PR", "999")
+    monkeypatch.setenv("SHIPIT_LOG_CTX_EPIC", "STALE01")
+
+    def configure_logging(**kwargs):
+        captured["logging_env"] = kwargs["env"]
+
+    monkeypatch.setattr(session.logsetup, "configure_logging", configure_logging)
     session.logcontext.bind(pr=999, epic="STALE01")
     rc = session.run_resume(
         "codex-1",
@@ -292,6 +299,8 @@ def test_run_resume_delegates_codex_target_to_codex_runner(tmp_path):
     assert kwargs["resumed_session_id"] == "codex-1"
     assert kwargs["repo_identity"] == repo
     assert captured["context"] == {"repo": "arthur-debert/shipit"}
+    assert "SHIPIT_LOG_CTX_PR" not in captured["logging_env"]
+    assert "SHIPIT_LOG_CTX_EPIC" not in captured["logging_env"]
 
 
 def test_run_resume_delegates_claude_target_to_claude_runner(tmp_path):
