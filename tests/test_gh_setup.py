@@ -671,6 +671,41 @@ def test_sync_secrets_partial_asc_beside_complete_apple_id_is_accepted(
     assert [(o.name, o.action) for o in outcomes] == [(n, "set") for n in names]
 
 
+def test_sync_secrets_optional_absent_trio_does_not_satisfy_notary_requirement(
+    fake_gh, monkeypatch
+):
+    """#746: merely declaring a complete trio cannot make sync clean when
+    every optional source resolves absent — satisfaction follows effective
+    provisioning, not config keys."""
+    for name in _SIGN_BASE_NAMES:
+        monkeypatch.setenv(f"VAR_{name}", f"value-{name}")
+    for name in _APPLE_ID_TRIO:
+        monkeypatch.delenv(f"VAR_{name}", raising=False)
+    sources = [
+        *[_env_source(name) for name in _SIGN_BASE_NAMES],
+        *[SecretSource(name, "env", f"VAR_{name}", True) for name in _APPLE_ID_TRIO],
+    ]
+
+    outcomes = ghsetup.sync_secrets(
+        "o/r",
+        _signing_artifacts(),
+        sources,
+        reviewers=(),
+        dry_run=False,
+        prompt=None,
+    )
+
+    assert [(o.name, o.action) for o in outcomes] == [
+        *((name, "set") for name in _SIGN_BASE_NAMES),
+        *((name, "skipped") for name in _APPLE_ID_TRIO),
+        ("notary credentials", "failed"),
+    ]
+    assert "Apple-ID trio (missing: APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID)" in (
+        outcomes[-1].reason or ""
+    )
+    assert set(fake_gh.secrets) == set(_SIGN_BASE_NAMES)
+
+
 def test_sync_secrets_no_complete_notary_trio_fails_with_one_diagnostic(
     fake_gh, monkeypatch
 ):

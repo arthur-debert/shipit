@@ -387,19 +387,28 @@ def sync_secrets(
         )
         for req in secretreq.missing_sources(artifacts, sources, reviewers=reviewers)
     )
-    # The either-satisfies requirements (#746): any complete sourced
+    # The either-satisfies requirements (#746): any complete provisioned
     # alternative satisfies one; none complete is ONE failed outcome whose
-    # reason names what is missing from every alternative.
-    declared = {source.name for source in sources}
+    # reason names what is missing from every alternative. A declaration is
+    # not enough here: an optional source may resolve absent and be skipped,
+    # so only successfully set names can satisfy a live sync. Dry-run cannot
+    # resolve sources without side effects, so its prospective report uses
+    # the declared set just as the plain-name dry-run does.
+    present = (
+        {source.name for source in sources}
+        if dry_run
+        else {outcome.name for outcome in outcomes if outcome.action == "set"}
+    )
     unsatisfied = tuple(
         SecretOutcome(
             name=alt_req.sets.label,
             source="none",
             action="failed",
             reason=f"required by {alt_req.required_by}; "
-            f"{alt_req.sets.describe_gap(declared)}",
+            f"{alt_req.sets.describe_gap(present)}",
         )
-        for alt_req in secretreq.unsatisfied_alternatives(artifacts, sources)
+        for alt_req in secretreq.alternative_requirements(artifacts)
+        if not alt_req.sets.satisfied(present)
     )
     orphans = tuple(
         SecretOutcome(
