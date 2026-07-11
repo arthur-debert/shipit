@@ -1,0 +1,321 @@
+"""`shipit release assert-bundle` — fixture tests over the pure core.
+
+The integrity guard (workflows.lex §3.2) is pure over a bundle tree, so the
+tests build real tmp-path fixtures: ``.app`` bundles (Info.plist +
+Contents/MacOS), reseal payloads (real tars, read in place), and loose-binary
+dist trees. Coverage pins each level of the expected-name fallback chain
+(mainBinaryName → productName → package name → artifact name) and reproduces
+the scar itself: the gen_fixtures incident — a dev tool shipped as the app's
+main executable, signing and notarizing cleanly — as the wrong-binary
+fixture. The verb tests pin the uniform exit contract: 0 match, 1 mismatch
+with the verdict + expected/actual names on stderr, ``--json`` available.
+"""
+
+import json
+import plistlib
+import shutil
+import tarfile
+
+import pytest
+
+from shipit import config
+from shipit.release import integrity
+from shipit.verbs import release as release_verb
+
+
+def _artifact(spec: dict, name: str = "phos") -> config.Artifact:
+    (artifact,) = config.load_artifacts({"artifacts": {name: spec}})
+    return artifact
+
+
+# --------------------------------------------------------------------------
+# The expected-name fallback chain — one test per level
+# --------------------------------------------------------------------------
+
+
+def test_expected_name_prefers_declared_main_binary():
+    artifact = _artifact(
+        {
+            "main-binary": "phos-bin",
+            "product-name": "Phos",
+            "build": [{"toolchain": "rust", "package": "phos-app"}],
+        }
+    )
+    assert integrity.expected_main_binary(artifact) == "phos-bin"
+
+
+def test_expected_name_falls_back_to_product_name():
+    artifact = _artifact(
+        {
+            "product-name": "Phos",
+            "build": [{"toolchain": "rust", "package": "phos-app"}],
+        }
+    )
+    assert integrity.expected_main_binary(artifact) == "Phos"
+
+
+def test_expected_name_falls_back_to_the_package_name():
+    artifact = _artifact({"build": [{"toolchain": "rust", "package": "phos-app"}]})
+    assert integrity.expected_main_binary(artifact) == "phos-app"
+
+
+def test_expected_name_takes_a_go_package_basename():
+    artifact = _artifact({"build": [{"toolchain": "go", "package": "./cmd/padz"}]})
+    assert integrity.expected_main_binary(artifact) == "padz"
+
+
+def test_expected_name_bottoms_out_at_the_artifact_name():
+    artifact = _artifact({"build": ["rust"]})
+    assert integrity.expected_main_binary(artifact) == "phos"
+
+
+@pytest.mark.parametrize("package", [".", "./", "..", "/"])
+def test_expected_name_skips_a_package_with_no_usable_basename(package):
+    # A path-navigation package (`.`/`./`/`..`/`/`) names no binary — the chain
+    # skips it and bottoms out at the artifact name, never asserting `.`/`..`.
+    artifact = _artifact({"build": [{"toolchain": "go", "package": package}]})
+    assert integrity.expected_main_binary(artifact) == "phos"
+
+
+# --------------------------------------------------------------------------
+# check_tree — .app fixtures
+# --------------------------------------------------------------------------
+
+
+def _make_app(root, app="Phos.app", executable="phos", plist=True, extra=()):
+    macos = root / app / "Contents" / "MacOS"
+    macos.mkdir(parents=True)
+    for name in (executable, *extra):
+        (macos / name).write_bytes(b"\xcf\xfa\xed\xfe")
+        (macos / name).chmod(0o755)
+    if plist:
+        (root / app / "Contents" / "Info.plist").write_bytes(
+            plistlib.dumps({"CFBundleExecutable": executable})
+        )
+    return root / app
+
+
+def test_app_with_the_expected_main_binary_passes(tmp_path):
+    _make_app(tmp_path)
+    verdict = integrity.check_tree(tmp_path, "phos")
+    assert verdict.ok
+    assert verdict.actual == ("phos",)
+
+
+def test_the_gen_fixtures_regression_fails_loudly(tmp_path):
+    # THE scar (workflows.lex §3.2): a src-tauri crate with multiple binaries
+    # and no declared main let the bundler pick the alphabetically-first one —
+    # gen_fixtures shipped as the app's main executable and SIGNED CLEANLY.
+    # The bundler's pick rides Info.plist; the real app sits beside it, inert.
+    _make_app(tmp_path, executable="gen_fixtures", extra=("phos",))
+    verdict = integrity.check_tree(tmp_path, "phos")
+    assert not verdict.ok
+    assert verdict.actual == ("gen_fixtures",)
+    assert verdict.expected == "phos"
+
+
+def test_app_without_plist_uses_the_sole_macos_binary(tmp_path):
+    _make_app(tmp_path, plist=False)
+    assert integrity.check_tree(tmp_path, "phos").ok
+
+
+def test_app_without_plist_and_several_binaries_is_undeterminable(tmp_path):
+    _make_app(tmp_path, plist=False, extra=("gen_fixtures",))
+    verdict = integrity.check_tree(tmp_path, "phos")
+    assert not verdict.ok
+    assert "no determinable main binary" in verdict.problem
+
+
+# --------------------------------------------------------------------------
+# check_tree — reseal payloads, read in place
+# --------------------------------------------------------------------------
+
+
+def _make_payload(tree, executable="phos", name="phos.unsigned-app.tar.gz"):
+    app = _make_app(tree / "staging", executable=executable)
+    tree.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(tree / name, "w:gz") as tar:
+        tar.add(app, arcname=app.name)
+    # The staging .app must not shadow the payload under test.
+    shutil.rmtree(tree / "staging")
+    return tree / name
+
+
+def test_reseal_payload_is_inspected_without_extraction(tmp_path):
+    _make_payload(tmp_path)
+    verdict = integrity.check_tree(tmp_path, "phos")
+    assert verdict.ok
+    assert verdict.actual == ("phos",)
+
+
+def test_reseal_payload_with_the_wrong_binary_fails(tmp_path):
+    _make_payload(tmp_path, executable="gen_fixtures")
+    verdict = integrity.check_tree(tmp_path, "phos")
+    assert not verdict.ok
+    assert verdict.actual == ("gen_fixtures",)
+
+
+# --------------------------------------------------------------------------
+# check_tree — loose-binary trees (the archive layout) and empties
+# --------------------------------------------------------------------------
+
+
+def _make_dist(tmp_path, binary="lex", docs=True):
+    stage = tmp_path / f"{binary}-x86_64-unknown-linux-gnu"
+    stage.mkdir(parents=True)
+    (stage / binary).write_bytes(b"\x7fELF")
+    (stage / binary).chmod(0o755)
+    if docs:
+        (stage / "README.md").write_text("readme")  # not executable, not counted
+    return stage
+
+
+def test_loose_executable_matching_the_expected_name_passes(tmp_path):
+    _make_dist(tmp_path)
+    verdict = integrity.check_tree(tmp_path, "lex")
+    assert verdict.ok
+    assert verdict.actual == ("lex",)
+
+
+def test_loose_executable_with_the_wrong_name_fails(tmp_path):
+    _make_dist(tmp_path, binary="gen_fixtures")
+    verdict = integrity.check_tree(tmp_path, "lex")
+    assert not verdict.ok
+    assert verdict.actual == ("gen_fixtures",)
+
+
+def test_windows_exe_matches_by_stem(tmp_path):
+    stage = tmp_path / "lex-x86_64-pc-windows-msvc"
+    stage.mkdir(parents=True)
+    (stage / "lex.exe").write_bytes(b"MZ")  # no exec bit on windows payloads
+    assert integrity.check_tree(tmp_path, "lex").ok
+
+
+def test_an_empty_tree_has_nothing_to_assert_and_fails(tmp_path):
+    verdict = integrity.check_tree(tmp_path, "lex")
+    assert not verdict.ok
+    assert "no main binary found" in verdict.problem
+
+
+def test_an_app_takes_precedence_over_loose_executables(tmp_path):
+    # When the tree bundles an app, the app IS the main binary — a correct
+    # loose helper binary beside a wrong .app must not mask the scar.
+    _make_app(tmp_path, executable="gen_fixtures")
+    _make_dist(tmp_path, binary="phos")
+    verdict = integrity.check_tree(tmp_path, "phos")
+    assert not verdict.ok
+    assert verdict.actual == ("gen_fixtures",)
+
+
+# --------------------------------------------------------------------------
+# The verb: exit contract, stderr diagnosis, --json, artifact resolution
+# --------------------------------------------------------------------------
+
+REPO_TOML = """\
+[artifacts.phos]
+build = [{ toolchain = "rust", package = "phos-app" }]
+main-binary = "phos"
+"""
+
+
+def _repo(tmp_path, monkeypatch, toml=REPO_TOML):
+    (tmp_path / ".shipit.toml").write_text(toml, encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    # assert-bundle anchors config to the checkout root (not cwd), so the map
+    # branch resolves the same from any subdirectory; the tmp repo is not a git
+    # checkout, so stub the adapter to report its root.
+    monkeypatch.setattr(release_verb.git, "repo_root", lambda *, cwd: str(tmp_path))
+    return tmp_path
+
+
+def test_verb_passes_on_a_matching_tree(tmp_path, monkeypatch, capsys):
+    root = _repo(tmp_path, monkeypatch)
+    _make_app(root / "dist")
+    rc = release_verb.run_assert_bundle(str(root / "dist"))
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "assert-bundle: ok" in captured.out
+    assert captured.err == ""
+
+
+def test_verb_fails_with_the_verdict_on_stderr(tmp_path, monkeypatch, capsys):
+    root = _repo(tmp_path, monkeypatch)
+    _make_app(root / "dist", executable="gen_fixtures")
+    rc = release_verb.run_assert_bundle(str(root / "dist"))
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "expected main binary 'phos'" in err
+    assert "gen_fixtures" in err
+
+
+def test_verb_json_renders_the_typed_verdict_even_on_failure(
+    tmp_path, monkeypatch, capsys
+):
+    root = _repo(tmp_path, monkeypatch)
+    _make_app(root / "dist", executable="gen_fixtures")
+    rc = release_verb.run_assert_bundle(str(root / "dist"), as_json=True)
+    assert rc == 1
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload == {
+        "tree": str(root / "dist"),
+        "expected": "phos",
+        "actual": ["gen_fixtures"],
+        "ok": False,
+    }
+    assert "expected main binary" in captured.err
+
+
+def test_verb_expected_flag_bypasses_the_artifact_map(tmp_path, monkeypatch, capsys):
+    # No .shipit.toml at all: --expected needs no config (the WS06 blocks'
+    # no-extra-plumbing path) — and no checkout either.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(release_verb.git, "repo_root", lambda *, cwd: None)
+    _make_app(tmp_path / "dist")
+    rc = release_verb.run_assert_bundle(str(tmp_path / "dist"), expected="phos")
+    assert rc == 0
+
+
+def test_verb_map_branch_refuses_outside_a_git_checkout(tmp_path, monkeypatch, capsys):
+    # Without --expected the expected name resolves from the artifact map, which
+    # is anchored to the checkout root; no checkout is a loud refusal, not a
+    # misread of cwd as declaring zero artifacts.
+    root = _repo(tmp_path, monkeypatch)
+    (root / "dist").mkdir()
+    monkeypatch.setattr(release_verb.git, "repo_root", lambda *, cwd: None)
+    rc = release_verb.run_assert_bundle(str(root / "dist"))
+    assert rc == 1
+    assert "not inside a git checkout" in capsys.readouterr().err
+
+
+def test_verb_refuses_an_unknown_artifact(tmp_path, monkeypatch, capsys):
+    root = _repo(tmp_path, monkeypatch)
+    (root / "dist").mkdir()
+    rc = release_verb.run_assert_bundle(str(root / "dist"), artifact="nope")
+    assert rc == 1
+    assert "unknown artifact 'nope'" in capsys.readouterr().err
+
+
+def test_verb_requires_naming_one_of_several_artifacts(tmp_path, monkeypatch, capsys):
+    root = _repo(
+        tmp_path,
+        monkeypatch,
+        "[artifacts.a]\nendpoints = []\n[artifacts.b]\nendpoints = []\n",
+    )
+    (root / "dist").mkdir()
+    rc = release_verb.run_assert_bundle(str(root / "dist"))
+    assert rc == 1
+    assert "name one" in capsys.readouterr().err
+
+
+def test_verb_resolves_the_named_artifact_through_the_chain(
+    tmp_path, monkeypatch, capsys
+):
+    root = _repo(
+        tmp_path,
+        monkeypatch,
+        '[artifacts.other]\nendpoints = []\n[artifacts.app]\nproduct-name = "Phos"\n',
+    )
+    _make_app(root / "dist", executable="Phos")
+    rc = release_verb.run_assert_bundle(str(root / "dist"), artifact="app")
+    assert rc == 0

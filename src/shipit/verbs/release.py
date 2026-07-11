@@ -1,8 +1,17 @@
 """`shipit release` — the Release pipeline's stage verbs (TOL02, PRD story 19).
 
-Each release stage is independently invocable; this module carries the FIRST
-stage, ``shipit release prepare`` (TOL02-WS01 #559) — the pipeline's only
-writer of repo history. The effectful shell over three pure cores:
+Each release stage is independently invocable; this module carries three:
+
+- ``shipit release prepare`` (TOL02-WS01 #559) — the pipeline's only writer
+  of repo history;
+- ``shipit release bundle`` (TOL02-WS03 #561) — the composition of build
+  outputs into unsigned Artifacts, the effectful walk over the closed
+  composition registry (:mod:`shipit.release.bundle`);
+- ``shipit release assert-bundle`` (TOL02-WS03 #561) — the scar-#2
+  integrity guard (workflows.lex §3.2), the thin shell over the pure core
+  (:mod:`shipit.release.integrity`).
+
+``prepare`` is the effectful shell over three pure cores:
 
 - the **version resolver** (:mod:`shipit.release.version`, ADR-0041): the
   caller supplies ``<semver>`` or a bump word, parsed to a
@@ -62,7 +71,10 @@ from __future__ import annotations
 
 import contextlib
 import fnmatch
+import json
 import logging
+import platform
+import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -73,6 +85,8 @@ import click
 from .. import config, execrun, git
 from ..release import ReleaseError
 from ..release import bump as bump_mod
+from ..release import bundle as bundle_mod
+from ..release import integrity as integrity_mod
 from ..release import version as version_mod
 from . import changelog as changelog_verb
 from ._errors import cli_errors
@@ -96,6 +110,16 @@ DEFAULT_NOTES_FILE = "RELEASE_NOTES.md"
 #: (a final release): the re-rendered projection, the new version section,
 #: and the consumed fragment deletions.
 _CHANGELOG_STAGE: tuple[str, ...] = ("CHANGELOG.md", "CHANGELOG/*")
+
+#: Each composition command Exec's stated timeout (ADR-0028): a declared mac
+#: bundler (``tauri build``) legitimately compiles cold, so the bound matches
+#: the build verbs' hour rather than the bump commands' minutes.
+BUNDLE_TIMEOUT: float = 3600.0
+
+#: The bundle output tree when ``--out`` is omitted: repo-root-relative — the
+#: legacy packaging steps' ``dist/`` home. The ONLY place compositions write
+#: (ADR-0009's barrier); uploads are publish's job, signing the signer's.
+DEFAULT_BUNDLE_DIR = "dist"
 
 
 @dataclass(frozen=True)
@@ -493,6 +517,272 @@ def run_prepare(
 
 
 # --------------------------------------------------------------------------
+# The bundle stage (TOL02-WS03): build outputs → unsigned Artifacts
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class BundleResult:
+    """The bundle stage's uniform, typed output (ADR-0030).
+
+    ``composed`` carries what each declared composition produced (out-tree-
+    relative paths); ``skipped`` the declared compositions that do not apply
+    to this target (a deb on a mac run — the per-OS matrix runs them on
+    theirs); ``passthrough`` the artifacts with NO bundle declaration
+    (zero-bundle artifacts like a tag-only release stay legal and untouched).
+    """
+
+    target: str
+    out: str
+    composed: tuple[bundle_mod.Composed, ...]
+    skipped: tuple[tuple[str, str], ...]
+    passthrough: tuple[str, ...]
+
+    def to_dict(self) -> dict:
+        """The ``--json`` field set — exactly the declared outputs."""
+        return {
+            "target": self.target,
+            "out": self.out,
+            "composed": [c.to_dict() for c in self.composed],
+            "skipped": [
+                {"artifact": name, "composition": comp} for name, comp in self.skipped
+            ],
+            "passthrough": list(self.passthrough),
+        }
+
+
+def format_bundle(result: BundleResult) -> str:
+    """The text rendering of a :class:`BundleResult`. Pure."""
+    if not result.composed and not result.skipped:
+        return "release: no bundle declared — nothing to compose"
+    count = len(result.composed)
+    lines = [
+        f"release: bundled {count} artifact{'s' if count != 1 else ''} "
+        f"for {result.target} -> {result.out}"
+    ]
+    for composed in result.composed:
+        lines.append(
+            f"  {composed.artifact}  [{composed.composition}]  "
+            f"{', '.join(composed.outputs)}"
+        )
+    for name, comp in result.skipped:
+        lines.append(f"  {name}  [{comp}]  skipped: not for this target")
+    for name in result.passthrough:
+        lines.append(f"  {name}  passthrough: no bundle declared")
+    return "\n".join(lines)
+
+
+def _run_compose(argv: Sequence[str], cwd: Path) -> execrun.ExecResult:
+    """Run one composition command through the one Exec runner (ADR-0028).
+
+    ``check=True``: a failing composition command (a bundler refusal, a
+    missing cargo-deb) raises :class:`~shipit.execrun.ExecError`, which the
+    shared error shell renders — the bundle stage aborts non-zero with later
+    artifacts untouched (ADR-0009's barrier for the callers that chain
+    stages).
+    """
+    return execrun.run(list(argv), cwd=str(cwd), timeout=BUNDLE_TIMEOUT)
+
+
+@cli_errors
+def run_bundle(
+    *,
+    target: str | None = None,
+    out: str | None = None,
+    as_json: bool = False,
+    run_cmd: bundle_mod.RunCmd | None = None,
+    gitio: Any = git,
+) -> int:
+    """Run the bundle stage from the current directory. Returns 0/1.
+
+    Walks the ``[artifacts]`` map in declaration order and runs each declared
+    composition that applies to the target (:mod:`shipit.release.bundle`);
+    an artifact with no bundle declaration passes through untouched. The
+    FIRST failing composition aborts the stage non-zero — nothing is written
+    outside the bundle output tree, preserving ADR-0009's all-or-nothing
+    barrier for chained stages. ``run_cmd`` injects the Exec boundary — the
+    recorded-invocation surface the tests drive; ``gitio`` the git adapter.
+
+    Config and the output tree anchor to the CHECKOUT ROOT (``gitio.repo_root``,
+    like ``prepare``), not the process cwd: ``load_config`` reads ``.shipit.toml``
+    from that exact dir without walking parents, so rooting at cwd would make a
+    run from a subdirectory silently see zero artifacts and mis-anchor ``--out``.
+    """
+    run_cmd = run_cmd or _run_compose
+    root_s = gitio.repo_root(cwd=".")
+    if root_s is None:
+        raise ReleaseError(
+            "not inside a git checkout — `release bundle` composes a checkout's "
+            "build outputs"
+        )
+    root = Path(root_s)
+    cfg = load_config(root)
+    entries = config.load_toolchains(cfg)
+    artifacts = config.load_artifacts(cfg)
+
+    resolved = target or bundle_mod.host_target(platform.system(), platform.machine())
+    if resolved is None:
+        raise ReleaseError(
+            f"cannot derive a target triple for this host "
+            f"({platform.system()}/{platform.machine()}) — pass --target"
+        )
+    out_arg = Path(out) if out else Path(DEFAULT_BUNDLE_DIR)
+    # A relative --out anchors to the repo root, exactly like the default, so
+    # the output tree never depends on which subdirectory bundle is run from.
+    out_dir = out_arg if out_arg.is_absolute() else root / out_arg
+
+    composed: list[bundle_mod.Composed] = []
+    skipped: list[tuple[str, str]] = []
+    passthrough: list[str] = []
+    for artifact in artifacts:
+        if artifact.bundle is None:
+            passthrough.append(artifact.name)
+            continue
+        comp = bundle_mod.composition(artifact.bundle.composition)
+        if comp is None:  # pragma: no cover — the parse boundary validated it
+            raise ReleaseError(
+                f"[artifacts.{artifact.name}] names unknown composition "
+                f"{artifact.bundle.composition!r}"
+            )
+        if not comp.applies(resolved):
+            skipped.append((artifact.name, comp.name))
+            continue
+        composed.append(
+            comp.compose(
+                bundle_mod.ComposeRequest(
+                    artifact=artifact,
+                    entries=entries,
+                    root=root,
+                    out_dir=out_dir,
+                    target=resolved,
+                    run_cmd=run_cmd,
+                    target_declared=target is not None,
+                )
+            )
+        )
+
+    result = BundleResult(
+        target=resolved,
+        out=str(out_dir),
+        composed=tuple(composed),
+        skipped=tuple(skipped),
+        passthrough=tuple(passthrough),
+    )
+    emit(result, format_bundle, as_json=as_json)
+    logger.info(
+        "release bundle complete",
+        extra={
+            "target": resolved,
+            "out": str(out_dir),
+            "composed": len(composed),
+            "skipped": len(skipped),
+            "passthrough": len(passthrough),
+        },
+    )
+    return 0
+
+
+# --------------------------------------------------------------------------
+# assert-bundle (TOL02-WS03): the scar-#2 integrity guard, workflows.lex §3.2
+# --------------------------------------------------------------------------
+
+
+def format_assert_bundle(verdict: integrity_mod.BundleVerdict) -> str:
+    """The text rendering of a :class:`~shipit.release.integrity.BundleVerdict`
+    — verdict plus expected/actual names, the §3.2 diagnosis. Pure."""
+    if verdict.ok:
+        return (
+            f"assert-bundle: ok — main binary {verdict.expected!r} "
+            f"(tree {verdict.tree})"
+        )
+    found = ", ".join(verdict.actual) if verdict.actual else "none"
+    line = (
+        f"assert-bundle: FAIL — expected main binary {verdict.expected!r}, "
+        f"found: {found}"
+    )
+    if verdict.problem is not None:
+        line += f" ({verdict.problem})"
+    return f"{line} (tree {verdict.tree})"
+
+
+@cli_errors
+def run_assert_bundle(
+    tree: str,
+    *,
+    artifact: str | None = None,
+    expected: str | None = None,
+    as_json: bool = False,
+    gitio: Any = git,
+) -> int:
+    """Run the integrity guard over the bundle tree at ``tree``. Returns 0/1.
+
+    ``expected`` short-circuits the artifact map entirely (the name to assert,
+    supplied directly); otherwise the expected name resolves from the named
+    ``artifact``'s declaration — or the repo's ONE artifact when unnamed —
+    through the fallback chain (mainBinaryName → productName → package name,
+    :func:`shipit.release.integrity.expected_main_binary`). Pure over the
+    tree: no network, no toolchain. On failure the verdict with expected and
+    actual names lands on stderr (exit 1), so the WS06 blocks — the signer's
+    entry and the unsigned publish path — call this with no extra plumbing;
+    ``--json`` renders the same typed verdict on stdout either way.
+
+    The artifact-map branch anchors config to the CHECKOUT ROOT
+    (``gitio.repo_root``), not the process cwd: ``load_config`` does not walk
+    up to ``.shipit.toml``, so a run from a subdirectory would otherwise misread
+    the repo as declaring zero artifacts. ``--expected`` needs no checkout.
+    """
+    if expected is None:
+        root_s = gitio.repo_root(cwd=".")
+        if root_s is None:
+            raise ReleaseError(
+                "not inside a git checkout — resolve the expected name from the "
+                "artifact map, or pass --expected NAME"
+            )
+        artifacts = config.load_artifacts(load_config(Path(root_s)))
+        if artifact is not None:
+            match = next((a for a in artifacts if a.name == artifact), None)
+            if match is None:
+                known = ", ".join(a.name for a in artifacts) or "none declared"
+                raise ReleaseError(
+                    f"unknown artifact {artifact!r} — declared artifacts: {known}"
+                )
+        elif len(artifacts) == 1:
+            match = artifacts[0]
+        else:
+            raise ReleaseError(
+                f"this repo declares {len(artifacts)} artifacts — name one "
+                f"(`shipit release assert-bundle TREE ARTIFACT`) or pass "
+                f"--expected"
+            )
+        expected = integrity_mod.expected_main_binary(match)
+
+    verdict = integrity_mod.check_tree(Path(tree), expected)
+    if as_json:
+        print(json.dumps(verdict.to_dict(), indent=2))
+    if verdict.ok:
+        if not as_json:
+            print(format_assert_bundle(verdict))
+        logger.info(
+            "assert-bundle passed",
+            extra={"tree": verdict.tree, "expected": verdict.expected},
+        )
+        return 0
+    # The failure diagnosis goes to STDERR (the acceptance contract: verdict +
+    # expected/actual names on stderr) — even under --json, whose typed verdict
+    # rides stdout without colliding.
+    print(format_assert_bundle(verdict), file=sys.stderr)
+    logger.error(
+        "assert-bundle failed",
+        extra={
+            "tree": verdict.tree,
+            "expected": verdict.expected,
+            "actual": ", ".join(verdict.actual),
+        },
+    )
+    return 1
+
+
+# --------------------------------------------------------------------------
 # Click glue
 # --------------------------------------------------------------------------
 
@@ -503,8 +793,10 @@ def release() -> None:
 
     The tag is the version authority (ADR-0041): `prepare` resolves the
     supplied version, projects it into the manifests, and writes commit +
-    annotated tag. Later stages (preflight, bundle, sign, publish) land as
-    their work streams do.
+    annotated tag. `bundle` composes build outputs into the unsigned
+    Artifacts and `assert-bundle` guards their integrity (workflows.lex
+    §3.2). Later stages (preflight, sign, publish) land as their work
+    streams do.
     """
 
 
@@ -533,3 +825,62 @@ def prepare_cmd(
     branch ref is never advanced.
     """
     raise SystemExit(run_prepare(version, notes_out=notes_out, as_json=as_json))
+
+
+@release.command(name="bundle")
+@click.option(
+    "--target",
+    metavar="TRIPLE",
+    help=(
+        "The target triple the bundles are named for (<name>-<target>); "
+        "default: derived from this host. An explicit triple also rides "
+        "cargo-deb's --target."
+    ),
+)
+@click.option(
+    "--out",
+    type=click.Path(file_okay=False),
+    help=f"The bundle output tree (default: {DEFAULT_BUNDLE_DIR} at the repo root).",
+)
+@json_option
+def bundle_cmd(target: str | None, out: str | None, as_json: bool) -> None:
+    """Compose build outputs into the unsigned Artifacts.
+
+    Walks the [artifacts] map and runs each artifact's declared bundle
+    composition (archive, deb, wheel, mac-app) for the current target;
+    artifacts with no bundle declaration pass through untouched, and
+    compositions for other platforms are skipped (the per-OS matrix runs
+    them on theirs). Writes only under the bundle output tree — no uploads,
+    no signing. Any failing composition exits non-zero with later artifacts
+    untouched.
+    """
+    raise SystemExit(run_bundle(target=target, out=out, as_json=as_json))
+
+
+@release.command(name="assert-bundle")
+@click.argument("tree", type=click.Path(exists=True, file_okay=False))
+@click.argument("artifact", required=False)
+@click.option(
+    "--expected",
+    metavar="NAME",
+    help=(
+        "Assert this main-binary name directly, bypassing the artifact map's "
+        "fallback chain."
+    ),
+)
+@json_option
+def assert_bundle_cmd(
+    tree: str, artifact: str | None, expected: str | None, as_json: bool
+) -> None:
+    """Assert the bundle tree's main binary is the expected app.
+
+    The integrity guard (workflows.lex 3.2): signing is not integrity, so
+    before a bundle is signed or published, its MAIN binary must be the
+    declared app — the expected name resolves via main-binary -> product-name
+    -> package name from ARTIFACT's declaration (or the repo's one artifact
+    when omitted). Exit 0 when it matches; exit 1 with the verdict and the
+    expected/actual names on stderr when it does not.
+    """
+    raise SystemExit(
+        run_assert_bundle(tree, artifact=artifact, expected=expected, as_json=as_json)
+    )
