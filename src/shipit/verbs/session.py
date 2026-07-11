@@ -114,9 +114,17 @@ def codex_cmd(codex_args: tuple[str, ...]) -> None:
     default=None,
     help="Target repository as owner/name; required for --last and no-cwd use.",
 )
+@click.option(
+    "--prompt",
+    default=None,
+    help="Intentional initial backend prompt; avoids ambiguity with a resume target.",
+)
 @click.argument("args", nargs=-1, type=click.UNPROCESSED)
 def resume_cmd(
-    last: bool, repo_identity: identity.Repo | None, args: tuple[str, ...]
+    last: bool,
+    repo_identity: identity.Repo | None,
+    prompt: str | None,
+    args: tuple[str, ...],
 ) -> None:
     """Resume a coordinator session by shipit session id or backend-native id.
 
@@ -129,12 +137,15 @@ def resume_cmd(
     """
 
     # One variadic argument avoids Click assigning an unknown backend flag to an
-    # optional ``target`` positional. Under ``--last`` a recognizable shipit id
-    # is retained as a target so mutual exclusivity fails closed; other tokens,
-    # including a backend's initial prompt, remain backend argv.
-    last_with_target = last and bool(args) and resume.is_shipit_session_id(args[0])
+    # optional ``target`` positional. Under ``--last`` every leading bare token
+    # is retained as a target so mutual exclusivity fails closed (a native UUID
+    # and a prompt are otherwise indistinguishable). Intentional prompts use the
+    # explicit --prompt surface; leading backend options remain pass-through.
+    last_with_target = last and bool(args) and not args[0].startswith("-")
     target = args[0] if last_with_target or (not last and args) else None
     backend_args = args[1:] if target is not None else args
+    if prompt is not None:
+        backend_args = (*backend_args, prompt)
     raise SystemExit(
         run_resume(
             target,

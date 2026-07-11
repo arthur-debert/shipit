@@ -252,12 +252,6 @@ def _backend_for_session(session_id: str) -> str | None:
     return None
 
 
-def is_shipit_session_id(value: str) -> bool:
-    """Whether ``value`` uses a recognizable shipit coordinator-session prefix."""
-
-    return _backend_for_session(value) is not None
-
-
 def _native_id(record: dict[str, Any], backend: str) -> str | None:
     if backend == CODEX_BACKEND:
         return _str_field(record, "codex_thread") or _str_field(record, "session_id")

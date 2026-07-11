@@ -5,6 +5,10 @@ backend-native id recorded in durable shipit logs. Use `--last --repo owner/name
 to resume the newest known session for a repository without running from a
 checkout.
 
+`--last` is mutually exclusive with every explicit target, including a native
+backend id. To intentionally send an initial prompt while using `--last`, pass
+`--prompt "..."`; backend options such as `--model opus` continue to pass through.
+
 The command resolves repository, backend, native id, and source checkout from
 shipit-owned records, then dispatches to the backend's native resume contract:
 Codex is re-rooted with `codex resume --cd <fresh-tree> ...`; Claude uses

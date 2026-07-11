@@ -337,7 +337,7 @@ def test_resume_cli_last_rejects_an_explicit_target():
     assert "pass either a target or --last, not both" in result.output
 
 
-def test_resume_cli_last_preserves_an_initial_backend_prompt(monkeypatch):
+def test_resume_cli_last_forwards_an_explicit_initial_backend_prompt(monkeypatch):
     captured = {}
 
     def fake_run_resume(target, **kwargs):
@@ -349,12 +349,33 @@ def test_resume_cli_last_preserves_an_initial_backend_prompt(monkeypatch):
 
     result = CliRunner().invoke(
         session.resume_cmd,
-        ["--last", "--repo", "arthur-debert/shipit", "fix the bug"],
+        [
+            "--last",
+            "--repo",
+            "arthur-debert/shipit",
+            "--prompt",
+            "fix the bug",
+        ],
     )
 
     assert result.exit_code == 0
     assert captured["target"] is None
     assert captured["backend_args"] == ["fix the bug"]
+
+
+def test_resume_cli_last_rejects_a_native_id_as_an_explicit_target():
+    result = CliRunner().invoke(
+        session.resume_cmd,
+        [
+            "--last",
+            "--repo",
+            "arthur-debert/shipit",
+            "019f5115-fb40-7db2-a82f-d2fc02a1da22",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "pass either a target or --last, not both" in result.output
 
 
 def test_run_codex_spec_matches_the_coordinator_worktreecreate_spec(
