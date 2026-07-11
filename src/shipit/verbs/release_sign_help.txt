@@ -1,0 +1,52 @@
+`shipit release sign` is the consumer-agnostic macOS signer unit: given a
+bundle tree carrying an UNSIGNED .app/.dmg pair, it reopens the bundle and
+produces a signed, notarized, stapled .dmg. The model is bundle(unsigned) →
+sign-reopens-and-reseals, never sign → bundle (workflows.lex §3.1).
+
+One invocation, end to end:
+
+1. unpack the unsigned .app from its reseal payload
+   (<name>.unsigned-app.tar.gz — a tarball because artifact upload destroys
+   a .app's symlinks and exec bits). Exactly one .app and at most one .dmg;
+   zero or multiple is a hard error, never a nondeterministic pick;
+2. enumerate the nested signable Mach-O inside the .app (extra executables,
+   loose dylibs, helper bundles — recursively; frameworks are opaque and
+   signed at their root);
+3. codesign inner-first with the .app LAST — hardened runtime + secure
+   timestamp on every Mach-O (a flat sign leaves nested code unhardened and
+   the notary rejects it). The Developer ID .p12 is imported into a
+   per-invocation temporary keychain torn down on every exit, with unique
+   keychain/cert paths per pass so the .app and .dmg passes cannot collide;
+4. reseal the .dmg FROM the signed .app via hdiutil (re-bundling would strip
+   the signature), then codesign the resealed .dmg;
+5. notarytool submit / poll / staple against the signed .dmg, then stage it
+   under the original dmg filename (--out, default: TREE itself).
+
+The unit makes zero tauri or electron assumptions: whatever bundler produced
+the unsigned input is the caller's business. It needs no git checkout and no
+.shipit.toml — it runs anywhere a mac, the tree, and the credentials are,
+laptop or CI. The assert-bundle integrity guard at the signer's entry is the
+wf-sign-mac workflow block's job, not this unit's.
+
+Credentials, from the environment:
+
+  signing         APPLE_CERTIFICATE (base64 Developer ID .p12) +
+                  APPLE_CERTIFICATE_PASSWORD (an EMPTY password is valid —
+                  passwordless .p12 is legal PKCS#12)
+  notarization    either the ASC API key trio (ASC_KEY_BASE64 / ASC_KEY_ID /
+                  ASC_ISSUER_ID — wins when both styles are present) or the
+                  Apple-ID trio (APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID)
+
+Missing signing or notary secrets is a HARD FAIL naming the missing names —
+the legacy warn-and-skip is gone. Missing-secrets detection belongs to
+preflight; the only unsigned path is the explicit --unsigned break-glass
+decided upstream, never an ambient skip inside the signer. Decoded credential
+material (.p12/.p8) is wiped on any exit, success or failure.
+
+This unit is act-untestable — codesign/notarytool need a real macOS runner
+and real Apple credentials — so its verification is remote-only: the
+TOL02-WS07 lex rc cut, and the full .app/.dmg leg with phos-app in ADP02.
+
+Exit codes: 0 signed + notarized (staple failure alone is non-fatal), 1
+runtime failure (missing secrets, bad tree, rejected or unconfirmed
+notarization), 2 usage.

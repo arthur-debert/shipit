@@ -274,9 +274,12 @@ def e2e_cmd(args: tuple[str, ...]) -> None:
 root.add_command(changelog_group)
 
 # The nested `release` group (TOL02) — the release pipeline's independently
-# invocable stages (PRD story 19). WS01 lands `prepare` (version resolve, bump
-# projection, changelog roll, commit + annotated tag + push, ADR-0041); later
-# stages (preflight, bundle, sign, publish) land with their work streams.
+# invocable stages (PRD story 19): `prepare` (WS01: version resolve, bump
+# projection, changelog roll, commit + annotated tag + push, ADR-0041),
+# `bundle` + `assert-bundle` (WS03: unsigned Artifact composition and the
+# scar-#2 integrity guard), and `sign` (WS04: the consumer-agnostic mac
+# signer unit, workflows.lex §3.1); later stages (preflight, publish) land
+# with their work streams.
 root.add_command(release_group)
 
 
@@ -364,6 +367,7 @@ _HELP_RESOURCES = {
     ("release", "prepare"): ("shipit.verbs", "release_prepare_help.txt"),
     ("release", "bundle"): ("shipit.verbs", "release_bundle_help.txt"),
     ("release", "assert-bundle"): ("shipit.verbs", "release_assert_bundle_help.txt"),
+    ("release", "sign"): ("shipit.verbs", "release_sign_help.txt"),
     ("ci",): ("shipit.verbs", "ci_help.txt"),
     ("ci", "plan"): ("shipit.verbs", "ci_plan_help.txt"),
     ("logs",): ("shipit.verbs", "logs_help.txt"),

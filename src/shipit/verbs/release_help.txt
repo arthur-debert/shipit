@@ -9,5 +9,8 @@ commit messages.
 `prepare` is the pipeline's only writer of repo history. `bundle` composes
 the built outputs into unsigned Artifacts, and `assert-bundle` guards a
 bundle's integrity (its main binary must be the expected app) before it is
-signed or published. Later stages (preflight, sign, publish) land as their
-work streams do.
+signed or published. `sign` is the consumer-agnostic mac signer unit: it
+reopens an unsigned .app/.dmg bundle tree, codesigns inner-first with the
+.app last, reseals the .dmg from the signed .app via hdiutil, and notarizes
++ staples — hard-failing on missing secrets, never skipping. Later stages
+(preflight, publish) land as their work streams do.

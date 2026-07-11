@@ -17,10 +17,15 @@ work streams land:
 - :mod:`.integrity` — the assert-bundle pure core (WS03, workflows.lex
   §3.2): the expected-main-binary fallback chain and the bundle-tree check
   behind ``shipit release assert-bundle``.
+- :mod:`.sign` — the consumer-agnostic mac signer unit (WS04, workflows.lex
+  §3.1): reopen the unsigned ``.app``/``.dmg`` bundle, codesign inner-first
+  with the ``.app`` last, reseal via ``hdiutil``, notarize + staple. Pure
+  argument assembly + credential resolution, effectful only through the
+  injected exec seam; hard-fails on missing secrets (no warn-and-skip).
 
 The effectful shells live in :mod:`shipit.verbs` (``shipit release prepare``
-/ ``bundle`` / ``assert-bundle`` are :mod:`shipit.verbs.release`), executing
-through the one Exec seam (ADR-0028) and the git adapter.
+/ ``bundle`` / ``assert-bundle`` / ``sign`` are :mod:`shipit.verbs.release`),
+executing through the one Exec seam (ADR-0028) and the git adapter.
 """
 
 from __future__ import annotations
@@ -36,8 +41,11 @@ class ReleaseError(RuntimeError):
     rewrite, a prepare invoked outside a git checkout or on a detached HEAD,
     a bundle composition over missing build outputs (no built binary, no
     ``.deb``/wheel/sdist produced, no coupled ``.app``/``.dmg`` pair or
-    reseal payload), and an assert-bundle whose expected name cannot be
-    resolved (an unknown or unnamed artifact). USAGE errors (a malformed
-    version argument) are NOT this class — they die at the click boundary as
-    exit 2 (ADR-0030).
+    reseal payload), an assert-bundle whose expected name cannot be
+    resolved (an unknown or unnamed artifact), and the signer's refusals
+    (missing signing/notary secrets — named, never skipped —, a tree with
+    zero or multiple ``.app``/``.dmg``, no codesigning identity in the
+    imported cert, a rejected or unconfirmed notarization). USAGE errors
+    (a malformed version argument) are NOT this class — they die at the
+    click boundary as exit 2 (ADR-0030).
     """
