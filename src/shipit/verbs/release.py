@@ -224,6 +224,14 @@ def format_preflight(release_plan: preflight_mod.ReleasePlan) -> str:
         f"  endpoints  {', '.join(release_plan.endpoints)}",
         f"  secrets    {', '.join(release_plan.secrets)}",
     ]
+    # The plan's either-satisfies requirements (#746): one line per set, so
+    # the operator sees that ANY listed trio satisfies it — these names are
+    # deliberately not mixed into the `secrets` conjunction line above.
+    lines.extend(
+        f"  either     {alt.label}: "
+        + " or ".join(f"{a.label} ({', '.join(a.names)})" for a in alt.alternatives)
+        for alt in release_plan.secret_alternatives
+    )
     if release_plan.tag_only:
         lines.append(
             "  rc guard   -release-rc: GH release only, external endpoints dropped"

@@ -86,17 +86,22 @@ def test_required_secret_names_declare_cert_pair_and_both_notary_trios():
 
 def test_sign_secret_names_match_the_ws02_requirements_registry():
     # The signer READS exactly the GitHub secret names the WS02 secrets-
-    # requirements derivation DECLARES for the sign-mac stage
-    # (secretreq.SIGN_MAC_SECRETS: the cert pair + the ASC notary trio). If
-    # these drift, gh-setup provisions one spelling while the signer reads
-    # another and ASC notarization silently fails to resolve. The Apple-ID
-    # trio is the signer's runtime fallback, not a declared requirement.
+    # requirements derivation DECLARES for the sign-mac stage: the cert pair
+    # (unconditional) plus BOTH notary trios as one either-satisfies
+    # requirement (#746 — the Apple-ID trio is a first-class CI alternative,
+    # no longer a runtime-only fallback). If these drift, gh-setup provisions
+    # one spelling while the signer reads another and notarization silently
+    # fails to resolve.
     from shipit.release import secretreq
 
-    assert (
-        *sign_mod.SIGNING_SECRETS,
-        *sign_mod.ASC_SECRETS,
-    ) == secretreq.SIGN_MAC_SECRETS
+    assert sign_mod.SIGNING_SECRETS == secretreq.SIGN_MAC_CERT_SECRETS
+    assert sign_mod.ASC_SECRETS == secretreq.ASC_NOTARY_SECRETS
+    assert sign_mod.APPLE_ID_SECRETS == secretreq.APPLE_ID_NOTARY_SECRETS
+    # Same alternatives, same precedence (ASC first — the signer's
+    # resolution order when both trios are complete).
+    assert sign_mod.NOTARY_SECRET_SETS == tuple(
+        alt.names for alt in secretreq.NOTARY_SECRETS.alternatives
+    )
 
 
 def test_resolve_signing_missing_cert_hard_fails_naming_it():

@@ -219,6 +219,51 @@ def test_build_block_gates_bundle_on_the_per_entry_flag_not_the_stage():
     assert upload["if"] == "matrix.bundle"
 
 
+def test_sign_chain_declares_and_forwards_both_notary_trios():
+    # #746: the Apple-ID trio is a first-class CI notary path beside the ASC
+    # trio. Every hop of the chain must ACCEPT either path — wf-sign-mac
+    # (the consumer) and wf-prepare (preflight's presence env) declare the
+    # full mac signing surface as optional secrets, and wf-release forwards
+    # it verbatim to both. All optional: WHICH trio must be complete is the
+    # plan's/verb's decision, never YAML's (ADR-0040).
+    from shipit.release import secretreq
+
+    mac_names = {
+        *secretreq.SIGN_MAC_CERT_SECRETS,
+        *secretreq.NOTARY_SECRETS.names(),
+    }
+
+    for block in ("wf-sign-mac.yml", "wf-prepare.yml", "wf-release.yml"):
+        declared = _load(block)["on"]["workflow_call"]["secrets"]
+        assert mac_names <= set(declared), block
+        assert all(
+            not spec.get("required", False)
+            for name, spec in declared.items()
+            if name in mac_names
+        ), block
+
+    # wf-sign-mac's sign step reads every name as a same-named env var …
+    sign_step = next(
+        s
+        for s in _steps("wf-sign-mac.yml", "sign")
+        if "release sign" in s.get("run", "")
+    )
+    for name in sorted(mac_names):
+        assert sign_step["env"][name] == f"${{{{ secrets.{name} }}}}"
+    # … wf-prepare injects them for preflight's presence validation …
+    plan_step = next(
+        s for s in _steps("wf-prepare.yml", "prepare") if s.get("id") == "plan"
+    )
+    for name in sorted(mac_names):
+        assert plan_step["env"][name] == f"${{{{ secrets.{name} }}}}"
+    # … and the composed chain forwards them to prepare and sign.
+    jobs = _load(COMPOSED)["jobs"]
+    for job_id in ("prepare", "sign"):
+        forwarded = jobs[job_id]["secrets"]
+        for name in sorted(mac_names):
+            assert forwarded[name] == f"${{{{ secrets.{name} }}}}", job_id
+
+
 def test_pixi_pin_is_lockstep_across_all_blocks():
     # The wf-checks.yml pin is the one test_install.py locks to the Layer 0
     # bootstrap; every release block must ride the SAME pin so a bump is

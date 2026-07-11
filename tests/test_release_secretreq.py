@@ -5,13 +5,18 @@ Fixture-driven over the PRD Testing Decisions' named cases: the SYNC set
 ``test_release_preflight.py`` for the plan-scoped side), ORPHANS, and
 MISSING-SOURCE errors. Plus the reviewer credential derivation (#740, option
 C): declared funnel reviewers contribute their App credential pair to the
-PROVISIONING projection only. And the two cannot-drift guards: the endpoint
+PROVISIONING projection only. Plus the notary alternative set (#746): either
+complete trio — ASC API-key or Apple-ID — satisfies the sign-mac notary
+requirement, whichever is sourced is accepted, and no complete trio is ONE
+diagnostic naming both gaps. And the two cannot-drift guards: the endpoint
 registry keys mirror the closed config set, and the cross-org caller's
-``secrets:`` block lists exactly the RELEASE-side sync set (story 46) — never
-a reviewer credential (ADR-0040 boundary).
+``secrets:`` block lists exactly the RELEASE-side accepted set (story 46) —
+never a reviewer credential (ADR-0040 boundary).
 """
 
 import tomllib
+
+import pytest
 
 from shipit import config
 from shipit.release import secretreq
@@ -51,6 +56,9 @@ def test_registry_keys_mirror_the_closed_endpoint_set():
 
 
 def test_rust_cli_shape_derives_the_sync_set_in_traversal_order():
+    # The DEMANDED conjunction: the notary trios are deliberately absent —
+    # they are the either-satisfies requirement (#746), never names demanded
+    # one by one.
     names = secretreq.required_names(_artifacts(RUST_CLI))
     assert names == (
         "RELEASE_TOKEN",  # prepare push — the repo declares endpoints
@@ -58,10 +66,29 @@ def test_rust_cli_shape_derives_the_sync_set_in_traversal_order():
         "HOMEBREW_TAP_TOKEN",  # endpoint brew
         "APPLE_CERTIFICATE",  # sign-mac: the ONE unified cert spelling
         "APPLE_CERTIFICATE_PASSWORD",
+    )
+
+
+def test_accepted_names_append_both_notary_trios_for_a_signing_map():
+    # The provision/forward surface (#746): required names plus EVERY
+    # alternative's names, ASC (precedence) before Apple-ID.
+    names = secretreq.accepted_names(_artifacts(RUST_CLI))
+    assert names == (
+        "RELEASE_TOKEN",
+        "CARGO_REGISTRY_TOKEN",
+        "HOMEBREW_TAP_TOKEN",
+        "APPLE_CERTIFICATE",
+        "APPLE_CERTIFICATE_PASSWORD",
         "ASC_API_KEY_BASE64",
         "ASC_API_KEY_ID",
         "ASC_API_ISSUER_ID",
+        "APPLE_ID",
+        "APPLE_PASSWORD",
+        "APPLE_TEAM_ID",
     )
+    # A non-signing map accepts exactly what it requires.
+    arts = _artifacts(PYTHON_PKG)
+    assert secretreq.accepted_names(arts) == secretreq.required_names(arts)
 
 
 def test_python_pkg_shape_derives_tokens_without_apple_names():
@@ -177,6 +204,109 @@ def test_tolerated_names_are_never_orphans():
 
 
 # --------------------------------------------------------------------------
+# The notary alternative set (#746 — either trio satisfies)
+# --------------------------------------------------------------------------
+
+ASC_SOURCES = (
+    'ASC_API_KEY_BASE64 = { doppler = "ASC_API_KEY_BASE64" }\n'
+    'ASC_API_KEY_ID = { doppler = "ASC_API_KEY_ID" }\n'
+    'ASC_API_ISSUER_ID = { doppler = "ASC_API_ISSUER_ID" }\n'
+)
+
+APPLE_ID_SOURCES = (
+    'APPLE_ID = { doppler = "APPLE_ID" }\n'
+    'APPLE_PASSWORD = { doppler = "APPLE_PASSWORD" }\n'
+    'APPLE_TEAM_ID = { doppler = "APPLE_TEAM_ID" }\n'
+)
+
+
+def test_signing_artifacts_contribute_one_notary_alternative_requirement():
+    reqs = secretreq.alternative_requirements(_artifacts(RUST_CLI))
+    assert [(r.sets.label, r.required_by) for r in reqs] == [
+        ("notary credentials", "sign-mac stage (artifact lex)")
+    ]
+    # A non-signing map contributes none.
+    assert secretreq.alternative_requirements(_artifacts(PYTHON_PKG)) == ()
+
+
+@pytest.mark.parametrize(
+    "sources_toml",
+    [
+        ASC_SOURCES,  # ASC-only
+        APPLE_ID_SOURCES,  # Apple-ID-only
+        ASC_SOURCES + APPLE_ID_SOURCES,  # both
+        # Partial ASC beside a COMPLETE Apple-ID trio: satisfied — a partial
+        # alternative never poisons a complete one.
+        'ASC_API_KEY_ID = { doppler = "ASC_API_KEY_ID" }\n' + APPLE_ID_SOURCES,
+    ],
+)
+def test_either_complete_sourced_trio_satisfies_the_notary_requirement(sources_toml):
+    sources = _sources("[secrets]\n" + sources_toml)
+    assert secretreq.unsatisfied_alternatives(_artifacts(RUST_CLI), sources) == ()
+
+
+@pytest.mark.parametrize(
+    "sources_toml",
+    [
+        "",  # neither trio sourced at all
+        # Both trios incomplete — one name of each.
+        'ASC_API_KEY_ID = { doppler = "ASC_API_KEY_ID" }\n'
+        'APPLE_ID = { doppler = "APPLE_ID" }\n',
+    ],
+)
+def test_no_complete_trio_is_one_gap_naming_both_alternatives(sources_toml):
+    sources = _sources("[secrets]\n" + sources_toml)
+    gaps = secretreq.unsatisfied_alternatives(_artifacts(RUST_CLI), sources)
+    assert [g.required_by for g in gaps] == ["sign-mac stage (artifact lex)"]
+    detail = gaps[0].sets.describe_gap({s.name for s in sources})
+    # ONE diagnostic naming what is missing from EVERY alternative.
+    assert detail.startswith("notary credentials: one complete set needed — ")
+    assert "ASC API-key trio (missing: " in detail
+    assert "Apple-ID trio (missing: " in detail
+    for name in ("ASC_API_KEY_BASE64", "APPLE_PASSWORD", "APPLE_TEAM_ID"):
+        assert name in detail
+
+
+def test_notary_trio_sources_are_never_orphans_on_a_signing_map():
+    # Whichever trio the repo declares is ACCEPTED (pushed, not flagged) —
+    # and declaring both orphans neither (#746).
+    sources = _sources("[secrets]\n" + ASC_SOURCES + APPLE_ID_SOURCES)
+    assert secretreq.orphans(_artifacts(RUST_CLI), sources) == ()
+
+
+def test_notary_trio_sources_are_normal_orphans_without_a_sign_declaration():
+    # No sign declaration → the alternative set is not live; its names get
+    # no special treatment.
+    sources = _sources("[secrets]\n" + APPLE_ID_SOURCES)
+    assert secretreq.orphans(_artifacts(PYTHON_PKG), sources) == (
+        "APPLE_ID",
+        "APPLE_PASSWORD",
+        "APPLE_TEAM_ID",
+    )
+
+
+def test_partial_trio_sources_are_accepted_not_orphaned_on_a_signing_map():
+    # The declared HALF of an unused trio still belongs to the live
+    # alternative set — accepted, never flagged (the other, complete trio
+    # satisfies the requirement).
+    sources = _sources(
+        "[secrets]\n"
+        + APPLE_ID_SOURCES
+        + 'ASC_API_KEY_ID = { doppler = "ASC_API_KEY_ID" }\n'
+    )
+    assert secretreq.orphans(_artifacts(RUST_CLI), sources) == ()
+    assert secretreq.unsatisfied_alternatives(_artifacts(RUST_CLI), sources) == ()
+
+
+def test_notary_names_are_never_individually_missing():
+    # The either-set names must not ride missing_sources (that would demand
+    # BOTH trios name-by-name — exactly the conjunction #746 rejects).
+    missing = secretreq.missing_sources(_artifacts(RUST_CLI), [])
+    notary = set(secretreq.NOTARY_SECRETS.names())
+    assert notary.isdisjoint({m.name for m in missing})
+
+
+# --------------------------------------------------------------------------
 # Reviewer credential derivation (#740, option C — the third input)
 # --------------------------------------------------------------------------
 
@@ -247,15 +377,19 @@ def test_secrets_block_never_carries_reviewer_credentials():
 # --------------------------------------------------------------------------
 
 
-def test_secrets_block_lists_exactly_the_sync_set():
+def test_secrets_block_lists_exactly_the_accepted_set():
     # The one derivation feeds gh-setup's sync AND the caller block: asserted
-    # equal, so the three consumers of the secret map cannot drift.
+    # equal, so the three consumers of the secret map cannot drift. The
+    # ACCEPTED set (#746): both notary trios forwarded — an unprovisioned
+    # name passes empty, so listing both never forces both.
     arts = _artifacts(RUST_CLI)
     block = secretreq.secrets_block(arts)
     lines = block.splitlines()
     assert lines[0] == "secrets:"
     listed = tuple(line.split(":")[0].strip() for line in lines[1:])
-    assert listed == secretreq.required_names(arts)
+    assert listed == secretreq.accepted_names(arts)
+    for name in (*secretreq.ASC_NOTARY_SECRETS, *secretreq.APPLE_ID_NOTARY_SECRETS):
+        assert name in listed
 
 
 def test_secrets_block_maps_each_name_to_its_own_secret_ref():

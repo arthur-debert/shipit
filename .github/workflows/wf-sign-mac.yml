@@ -41,10 +41,13 @@ on:
         type: string
         required: true
     secrets:
-      # The mac signing set (shipit.release.secretreq SIGN_MAC_SECRETS, PRD
-      # story 46). Declared optional YAML-side: preflight already proved
-      # presence at plan time, and the verb hard-fails naming any missing
-      # name — the block never re-checks.
+      # The mac signing set (shipit.release.secretreq: the cert pair plus
+      # BOTH notary alternatives — the ASC API-key trio OR the Apple-ID trio
+      # satisfies notarization, #746; the signer prefers ASC when both are
+      # complete). Declared optional YAML-side: preflight already proved
+      # presence at plan time (either complete trio), and the verb hard-fails
+      # naming any missing name — the block never re-checks, and forwarding
+      # an unprovisioned trio passes empty, never forcing both.
       APPLE_CERTIFICATE:
         required: false
       APPLE_CERTIFICATE_PASSWORD:
@@ -54,6 +57,12 @@ on:
       ASC_API_KEY_ID:
         required: false
       ASC_API_ISSUER_ID:
+        required: false
+      APPLE_ID:
+        required: false
+      APPLE_PASSWORD:
+        required: false
+      APPLE_TEAM_ID:
         required: false
 
 permissions:
@@ -99,6 +108,9 @@ jobs:
           ASC_API_KEY_BASE64: ${{ secrets.ASC_API_KEY_BASE64 }}
           ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
           ASC_API_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         # One verb invocation: temporary keychain, reopen the payload, sign
         # nested-inner-first/.app-last, reseal the dmg, notarize + staple;
         # the signed .dmg is staged in place under the original filename.

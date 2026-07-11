@@ -351,6 +351,11 @@ def sync_secrets(
       the sync never under-provisions);
     - one ``failed`` outcome per derived requirement with NO declared source,
       naming the requiring entry (the sync-time error of story 45);
+    - one ``failed`` outcome per ALTERNATIVE-SET requirement (#746 — the
+      notary trios) with no complete alternative sourced: ONE diagnostic
+      naming what is missing from every alternative. A repo sources either
+      trio (or both); whichever it declares is pushed, and the unused trio is
+      neither demanded nor orphaned;
     - one ``orphan`` outcome per declared source nothing requires — flagged
       and NOT pushed (never over-provisions, story 44).
     """
@@ -382,6 +387,20 @@ def sync_secrets(
         )
         for req in secretreq.missing_sources(artifacts, sources, reviewers=reviewers)
     )
+    # The either-satisfies requirements (#746): any complete sourced
+    # alternative satisfies one; none complete is ONE failed outcome whose
+    # reason names what is missing from every alternative.
+    declared = {source.name for source in sources}
+    unsatisfied = tuple(
+        SecretOutcome(
+            name=alt_req.sets.label,
+            source="none",
+            action="failed",
+            reason=f"required by {alt_req.required_by}; "
+            f"{alt_req.sets.describe_gap(declared)}",
+        )
+        for alt_req in secretreq.unsatisfied_alternatives(artifacts, sources)
+    )
     orphans = tuple(
         SecretOutcome(
             name=source.name,
@@ -392,7 +411,7 @@ def sync_secrets(
         for source in sources
         if source.name in orphan_names
     )
-    return outcomes + missing + orphans
+    return outcomes + missing + unsatisfied + orphans
 
 
 def push_secrets(
