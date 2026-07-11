@@ -34,7 +34,7 @@ every nested `@v1` block resolving cross-owner and the ADR-0033 launcher
 uv-resolving the pin against the now-public repo — the vendored blocks, the
 `SHIPIT_EXEC` bridge, and the committed wheel all removed from the consumer.
 
-### Alternative rejected
+### Alternatives rejected
 
 **Scope the consumer set to user-owned repos only** (keep shipit private;
 declare cross-owner consumers out of scope). Rejected: org-owned consumers

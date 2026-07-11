@@ -93,7 +93,7 @@ dependencies.
     `last-reviewed-head..new-head` — ADR-0043): after a rebase the
     last-reviewed head is no longer an ancestor of the new one, so the engine
     drops off the incremental path onto a full-PR re-review — a
-    `merge_base(EPIC/umbrella, WS)..WS` diff that EXCLUDES already-landed
+    `merge-base(EPIC/umbrella, WS)..WS` diff that EXCLUDES already-landed
     sibling code, but re-reviews the whole WS change from scratch — whereas
     after a merge the last-reviewed head stays an ancestor and the round stays
     incremental. Merging is not free: that incremental round is a two-dot
