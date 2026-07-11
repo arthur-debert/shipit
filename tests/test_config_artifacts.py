@@ -33,6 +33,7 @@ def test_full_artifact_parses_to_typed_frozen_values():
     (artifact,) = _load(
         "[artifacts.lex-cli]\n"
         'build = [{ toolchain = "rust", package = "lex-cli" }]\n'
+        'platforms = ["darwin-arm64", "linux-x86_64"]\n'
         'bundle = { composition = "archive" }\n'
         'main-binary = "lex"\n'
         'product-name = "Lex"\n'
@@ -43,6 +44,7 @@ def test_full_artifact_parses_to_typed_frozen_values():
     assert artifact == config.Artifact(
         name="lex-cli",
         build=(config.BuildTarget(toolchain="rust", package="lex-cli"),),
+        platforms=("darwin-arm64", "linux-x86_64"),
         bundle=config.BundleSpec(composition="archive"),
         main_binary="lex",
         product_name="Lex",
@@ -136,8 +138,8 @@ def test_unknown_artifact_key_names_itself_and_the_known_set():
     with pytest.raises(config.ConfigError, match="unknown key `endpoint`") as exc:
         _load('[artifacts.x]\nendpoint = ["gh-release"]\n')
     assert (
-        "build, bundle, bundle-config, endpoints, e2e, main-binary, "
-        "product-name, sign" in str(exc.value)
+        "build, platforms, bundle, bundle-config, endpoints, e2e, "
+        "main-binary, product-name, sign" in str(exc.value)
     )
 
 
@@ -145,6 +147,25 @@ def test_unknown_endpoint_names_the_closed_registry():
     with pytest.raises(config.ConfigError, match="unknown endpoint `homebrew`") as exc:
         _load('[artifacts.x]\nendpoints = ["homebrew"]\n')
     assert "gh-release, crates, pypi, npm, brew" in str(exc.value)
+
+
+def test_unknown_platform_names_the_closed_registry():
+    with pytest.raises(config.ConfigError, match="unknown platform `darwin`") as exc:
+        _load('[artifacts.x]\nplatforms = ["darwin"]\n')
+    assert ", ".join(config.PLATFORMS) in str(exc.value)
+
+
+def test_duplicate_platform_is_refused():
+    # A repeated platform would mean a repeated matrix entry, never an intent.
+    with pytest.raises(config.ConfigError, match="duplicate platform `linux-x86_64`"):
+        _load('[artifacts.x]\nplatforms = ["linux-x86_64", "linux-x86_64"]\n')
+
+
+def test_non_list_platforms_is_refused():
+    with pytest.raises(
+        config.ConfigError, match=r"platforms: must be a list of platform names"
+    ):
+        _load('[artifacts.x]\nplatforms = "linux-x86_64"\n')
 
 
 def test_unknown_build_toolchain_names_the_registry():

@@ -10,6 +10,14 @@ work streams land:
 - :mod:`.bump` — the per-toolchain bump-adapter registry and the
   artifact-declared bundle-config hook (WS01): how the tag decision projects
   into manifests. Command literals + pure text rewrites; no I/O.
+- :mod:`.preflight` — the release-side planner (WS02): (artifact map,
+  resolved version, event) → the machine-readable plan (OS×arch matrix, live
+  stages, post-RC-guard endpoints, required secrets) the composed workflow
+  consumes as job outputs. Pure.
+- :mod:`.secretreq` — secrets derivation (WS02): registry entries declare
+  the secret NAMES they require; traversing the repo's declarations yields
+  the one required set gh-setup syncs, preflight validates, and the
+  cross-org caller's ``secrets:`` block lists. Pure.
 - :mod:`.bundle` — the closed bundle-composition registry (WS03): how a
   declared artifact composes build outputs into its unsigned distributable
   (archive, deb, wheel, mac-app). Command literals + compose functions,
@@ -18,9 +26,9 @@ work streams land:
   §3.2): the expected-main-binary fallback chain and the bundle-tree check
   behind ``shipit release assert-bundle``.
 
-The effectful shells live in :mod:`shipit.verbs` (``shipit release prepare``
-/ ``bundle`` / ``assert-bundle`` are :mod:`shipit.verbs.release`), executing
-through the one Exec seam (ADR-0028) and the git adapter.
+The effectful shells live in :mod:`shipit.verbs` (``shipit release prepare`` /
+``preflight`` / ``bundle`` / ``assert-bundle`` are :mod:`shipit.verbs.release`),
+executing through the one Exec seam (ADR-0028) and the git adapter.
 """
 
 from __future__ import annotations

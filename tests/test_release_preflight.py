@@ -1,0 +1,406 @@
+"""The release preflight planner (TOL02-WS02) — pure core + thin verb shell.
+
+Fixture-driven pure-core coverage (PRD Testing Decisions, the lane planner's
+release twin): the three declared shapes (rust-CLI, mac-app, python-pkg) →
+full plan assertions; the RC guard consumed as plan shape (story 33); the
+``--unsigned`` break-glass flip and refusal (story 29); presence validation
+(story 28); the phantom-release refusal (the legacy python-pkg preflight
+lesson). The verb tests drive :func:`shipit.verbs.release.run_preflight`
+with injected git/env seams — no network, no real checkout state.
+"""
+
+import json
+import tomllib
+
+import pytest
+
+from shipit import config
+from shipit.release import ReleaseError, preflight, secretreq
+from shipit.release.version import parse_spec, resolve
+from shipit.verbs import release as release_verb
+
+
+def _artifacts(text: str) -> tuple[config.Artifact, ...]:
+    return config.load_artifacts(tomllib.loads(text))
+
+
+def _resolved(raw: str) -> object:
+    return resolve(parse_spec(raw), [])
+
+
+RUST_CLI = _artifacts(
+    """
+[artifacts.lex]
+build = [{ toolchain = "rust", package = "lex-cli" }]
+platforms = ["darwin-arm64", "linux-x86_64", "linux-x86_64-musl", "windows-x86_64"]
+endpoints = ["gh-release", "crates", "brew"]
+sign = true
+"""
+)
+
+MAC_APP = _artifacts(
+    """
+[artifacts.app]
+build = ["npm", { toolchain = "rust" }]
+platforms = ["darwin-arm64"]
+bundle = { command = ["tauri", "bundle"] }
+endpoints = ["gh-release"]
+sign = true
+"""
+)
+
+PYTHON_PKG = _artifacts(
+    """
+[artifacts.dist]
+build = ["python"]
+endpoints = ["gh-release", "pypi"]
+"""
+)
+
+
+# --------------------------------------------------------------------------
+# The three shapes — plan content (story 27)
+# --------------------------------------------------------------------------
+
+
+def test_platform_table_mirrors_the_closed_config_set():
+    assert tuple(preflight.PLATFORM_MATRIX) == config.PLATFORMS
+
+
+def test_rust_cli_shape_plans_matrix_stages_endpoints_secrets():
+    plan = preflight.plan(RUST_CLI, _resolved("1.2.3"))
+    assert plan.artifacts == ("lex",)
+    assert [e.platform for e in plan.matrix] == [
+        "darwin-arm64",
+        "linux-x86_64",
+        "linux-x86_64-musl",
+        "windows-x86_64",
+    ]
+    # The full per-entry vocabulary — the legacy setup-matrix fields, from
+    # declarations instead of workflow inputs.
+    assert plan.matrix[0].as_matrix_entry() == {
+        "artifact": "lex",
+        "platform": "darwin-arm64",
+        "target": "aarch64-apple-darwin",
+        "runner": "macos-latest",
+        "sign": True,  # declared signing meets a darwin platform
+        "ext_archive": ".tar.gz",
+        "ext_bin": "",
+        "package_arch": "arm64",
+    }
+    assert plan.matrix[3].as_matrix_entry() == {
+        "artifact": "lex",
+        "platform": "windows-x86_64",
+        "target": "x86_64-pc-windows-msvc",
+        "runner": "windows-latest",
+        "sign": False,  # sign is darwin-only, resolved once per entry
+        "ext_archive": ".zip",
+        "ext_bin": ".exe",
+        "package_arch": "amd64",
+    }
+    # No bundle step declared → the bundle stages are absent, not skipped.
+    assert plan.stages == ("preflight", "prepare", "sign", "publish")
+    assert plan.endpoints == ("gh-release", "crates", "brew")
+    assert plan.secrets == (
+        "RELEASE_TOKEN",
+        "CRATES_IO_KEY",
+        "HOMEBREW_TAP_TOKEN",
+        "APPLE_CERTIFICATE",
+        "APPLE_CERTIFICATE_PASSWORD",
+        "ASC_API_KEY_BASE64",
+        "ASC_API_KEY_ID",
+        "ASC_API_ISSUER_ID",
+    )
+    assert (plan.prerelease, plan.tag_only, plan.unsigned) == (False, False, False)
+
+
+def test_mac_app_shape_plans_bundle_and_sign():
+    plan = preflight.plan(MAC_APP, _resolved("2.0.0"))
+    # One artifact, one darwin platform — two build targets still mean ONE
+    # matrix entry per platform (the artifact is the unit, not the leg).
+    assert [(e.artifact, e.platform, e.sign) for e in plan.matrix] == [
+        ("app", "darwin-arm64", True)
+    ]
+    assert plan.stages == (
+        "preflight",
+        "prepare",
+        "bundle",
+        "assert-bundle",
+        "sign",
+        "publish",
+    )
+    assert plan.endpoints == ("gh-release",)
+    assert plan.secrets == ("RELEASE_TOKEN", *secretreq.SIGN_MAC_SECRETS)
+
+
+def test_python_pkg_shape_defaults_to_the_linux_lane_and_skips_apple_names():
+    plan = preflight.plan(PYTHON_PKG, _resolved("0.3.1"))
+    assert [(e.platform, e.runner, e.sign) for e in plan.matrix] == [
+        ("linux-x86_64", "ubuntu-latest", False)
+    ]
+    assert plan.stages == ("preflight", "prepare", "publish")
+    assert plan.endpoints == ("gh-release", "pypi")
+    # Signing not declared → only signing-relevant names are NOT checked
+    # (story 28's flip side: one definition, no disagreeing checks).
+    assert plan.secrets == ("RELEASE_TOKEN", "PYPI_TOKEN")
+
+
+def test_endpointless_build_artifact_emits_matrix_but_no_endpoints():
+    # A helper artifact rides the matrix; the endpoint set comes from the
+    # artifacts that declare distribution.
+    arts = PYTHON_PKG + _artifacts('[artifacts.docs]\nbuild = ["python"]\n')
+    plan = preflight.plan(arts, _resolved("0.3.1"))
+    assert plan.artifacts == ("dist", "docs")
+    assert [e.artifact for e in plan.matrix] == ["dist", "docs"]
+    assert plan.endpoints == ("gh-release", "pypi")
+
+
+def test_declaration_order_rides_the_matrix_and_registry_order_the_endpoints():
+    arts = _artifacts(
+        '[artifacts.b]\nbuild = ["python"]\nendpoints = ["brew", "gh-release"]\n'
+    )
+    plan = preflight.plan(arts, _resolved("1.0.0"))
+    # Endpoints normalize to the closed registry's canonical order
+    # (gh-release first, brew — the derived endpoint — last).
+    assert plan.endpoints == ("gh-release", "brew")
+
+
+def test_to_dict_is_the_declared_json_surface():
+    plan = preflight.plan(PYTHON_PKG, _resolved("0.3.1"), event="local")
+    payload = plan.to_dict()
+    assert set(payload) == {
+        "version",
+        "tag",
+        "prerelease",
+        "tag_only",
+        "event",
+        "unsigned",
+        "artifacts",
+        "matrix",
+        "stages",
+        "endpoints",
+        "secrets",
+    }
+    assert payload["event"] == "local"
+    assert payload["matrix"][0]["target"] == "x86_64-unknown-linux-gnu"
+
+
+# --------------------------------------------------------------------------
+# The RC guard as plan shape (story 33)
+# --------------------------------------------------------------------------
+
+
+def test_release_rc_plans_gh_release_only_with_prerelease_marked():
+    plan = preflight.plan(RUST_CLI, _resolved("1.2.3-release-rc"))
+    # External endpoints are ABSENT from the plan, not filtered later in
+    # YAML; the guard's enforcement stays central in the publish verb (WS05).
+    assert plan.endpoints == ("gh-release",)
+    assert plan.prerelease is True
+    assert plan.tag_only is True
+    # The endpoint secrets follow the collapsed set; sign still runs (a
+    # live-fire rc exercises the whole pipeline).
+    assert plan.secrets == ("RELEASE_TOKEN", *secretreq.SIGN_MAC_SECRETS)
+    assert "sign" in plan.stages
+
+
+def test_plain_rc_prerelease_keeps_the_declared_endpoints():
+    plan = preflight.plan(RUST_CLI, _resolved("1.2.3-rc.1"))
+    assert plan.prerelease is True
+    assert plan.tag_only is False
+    assert plan.endpoints == ("gh-release", "crates", "brew")
+
+
+# --------------------------------------------------------------------------
+# --unsigned break-glass (story 29)
+# --------------------------------------------------------------------------
+
+
+def test_unsigned_flips_the_plan_to_the_unsigned_path():
+    plan = preflight.plan(RUST_CLI, _resolved("1.2.3"), unsigned=True)
+    assert plan.unsigned is True
+    assert "sign" not in plan.stages
+    assert all(e.sign is False for e in plan.matrix)
+    # The Apple names drop out of the required set with the stage.
+    assert plan.secrets == ("RELEASE_TOKEN", "CRATES_IO_KEY", "HOMEBREW_TAP_TOKEN")
+
+
+def test_unsigned_is_refused_when_nothing_would_sign():
+    # No declared signing → nothing to break-glass.
+    with pytest.raises(ReleaseError, match="no sign stage to skip"):
+        preflight.plan(PYTHON_PKG, _resolved("0.3.1"), unsigned=True)
+
+
+def test_unsigned_is_refused_when_signing_never_meets_darwin():
+    arts = _artifacts(
+        "[artifacts.cli]\n"
+        'build = ["rust"]\n'
+        'platforms = ["linux-x86_64"]\n'
+        'endpoints = ["gh-release"]\n'
+        "sign = true\n"
+    )
+    with pytest.raises(ReleaseError, match="no sign stage to skip"):
+        preflight.plan(arts, _resolved("1.0.0"), unsigned=True)
+
+
+# --------------------------------------------------------------------------
+# Refusals and presence validation (stories 27/28)
+# --------------------------------------------------------------------------
+
+
+def test_zero_endpoint_map_is_a_phantom_release_refusal():
+    arts = _artifacts('[artifacts.lib]\nbuild = ["python"]\n')
+    with pytest.raises(ReleaseError, match="phantom release"):
+        preflight.plan(arts, _resolved("1.0.0"))
+    with pytest.raises(ReleaseError, match="phantom release"):
+        preflight.plan((), _resolved("1.0.0"))
+
+
+def test_unknown_event_is_a_caller_bug():
+    with pytest.raises(ValueError, match="unknown release event"):
+        preflight.plan(PYTHON_PKG, _resolved("1.0.0"), event="push")
+
+
+def test_missing_secrets_reports_absent_and_empty_names_in_plan_order():
+    plan = preflight.plan(RUST_CLI, _resolved("1.2.3"))
+    env = {
+        "RELEASE_TOKEN": "t",
+        "CRATES_IO_KEY": "",  # empty is absent — an empty token cannot publish
+        "APPLE_CERTIFICATE": "c",
+    }
+    assert preflight.missing_secrets(plan, env) == (
+        "CRATES_IO_KEY",
+        "HOMEBREW_TAP_TOKEN",
+        "APPLE_CERTIFICATE_PASSWORD",
+        "ASC_API_KEY_BASE64",
+        "ASC_API_KEY_ID",
+        "ASC_API_ISSUER_ID",
+    )
+
+
+def test_missing_secrets_is_empty_when_the_plan_is_fully_provisioned():
+    plan = preflight.plan(PYTHON_PKG, _resolved("0.3.1"))
+    env = {"RELEASE_TOKEN": "t", "PYPI_TOKEN": "p"}
+    assert preflight.missing_secrets(plan, env) == ()
+
+
+# --------------------------------------------------------------------------
+# The verb shell — injected seams, ADR-0030 rendering
+# --------------------------------------------------------------------------
+
+
+class FakeGit:
+    """The two reads preflight makes: repo root and existing tags."""
+
+    def __init__(self, root, tags=()):
+        self._root = root
+        self._tags = list(tags)
+
+    def repo_root(self, *, cwd):
+        return self._root
+
+    def list_tags(self, *, cwd):
+        return list(self._tags)
+
+
+@pytest.fixture
+def repo(tmp_path, monkeypatch):
+    (tmp_path / ".shipit.toml").write_text(
+        '[artifacts.dist]\nbuild = ["python"]\nendpoints = ["gh-release", "pypi"]\n',
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    return tmp_path
+
+
+def test_run_preflight_emits_the_json_plan(repo, capsys):
+    rc = release_verb.run_preflight(
+        parse_spec("1.0.0"),
+        as_json=True,
+        gitio=FakeGit(str(repo)),
+        env={"RELEASE_TOKEN": "t", "PYPI_TOKEN": "p"},
+    )
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["version"] == "1.0.0"
+    assert payload["endpoints"] == ["gh-release", "pypi"]
+    assert payload["secrets"] == ["RELEASE_TOKEN", "PYPI_TOKEN"]
+
+
+def test_run_preflight_resolves_bump_words_like_prepare_will(repo, capsys):
+    rc = release_verb.run_preflight(
+        parse_spec("minor"),
+        as_json=True,
+        gitio=FakeGit(str(repo), tags=["v1.2.3"]),
+        env={"RELEASE_TOKEN": "t", "PYPI_TOKEN": "p"},
+    )
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out)["version"] == "1.3.0"
+
+
+def test_run_preflight_hard_fails_on_missing_secrets(repo, capsys):
+    rc = release_verb.run_preflight(
+        parse_spec("1.0.0"),
+        gitio=FakeGit(str(repo)),
+        env={"RELEASE_TOKEN": "t"},  # PYPI_TOKEN absent
+    )
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "error:" in err and "PYPI_TOKEN" in err
+
+
+def test_run_preflight_text_rendering_carries_the_plan_summary(repo, capsys):
+    rc = release_verb.run_preflight(
+        parse_spec("1.0.0-release-rc"),
+        gitio=FakeGit(str(repo)),
+        env={"RELEASE_TOKEN": "t", "PYPI_TOKEN": "p"},
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "release preflight: 1.0.0-release-rc (prerelease" in out
+    assert "endpoints  gh-release" in out
+    assert "rc guard" in out
+
+
+def test_run_preflight_unsigned_records_the_break_glass_event(repo, capsys, caplog):
+    (repo / ".shipit.toml").write_text(
+        "[artifacts.app]\n"
+        'build = ["rust"]\n'
+        'platforms = ["darwin-arm64"]\n'
+        'endpoints = ["gh-release"]\n'
+        "sign = true\n",
+        encoding="utf-8",
+    )
+    with caplog.at_level("INFO", logger="shipit.release"):
+        rc = release_verb.run_preflight(
+            parse_spec("1.0.0"),
+            unsigned=True,
+            gitio=FakeGit(str(repo)),
+            env={"RELEASE_TOKEN": "t"},
+        )
+    assert rc == 0
+    events = [
+        r for r in caplog.records if getattr(r, "_event", None) == "release.unsigned"
+    ]
+    assert len(events) == 1  # every use is recorded, exactly once
+    out = capsys.readouterr().out
+    assert "UNSIGNED" in out
+
+
+def test_run_preflight_refused_unsigned_records_no_event(repo, capsys, caplog):
+    with caplog.at_level("INFO", logger="shipit.release"):
+        rc = release_verb.run_preflight(
+            parse_spec("1.0.0"),
+            unsigned=True,
+            gitio=FakeGit(str(repo)),
+            env={"RELEASE_TOKEN": "t", "PYPI_TOKEN": "p"},
+        )
+    assert rc == 1  # nothing to break-glass — refused before any record
+    assert not [
+        r for r in caplog.records if getattr(r, "_event", None) == "release.unsigned"
+    ]
+
+
+def test_run_preflight_outside_a_checkout_is_a_domain_refusal(repo, capsys):
+    rc = release_verb.run_preflight(parse_spec("1.0.0"), gitio=FakeGit(None), env={})
+    assert rc == 1
+    assert "not inside a git checkout" in capsys.readouterr().err

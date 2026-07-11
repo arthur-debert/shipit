@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from shipit import execrun, ghsetup
+from shipit import config, execrun, ghsetup
 from shipit.config import SecretSource
 from shipit.identity import Revision, WorkingDir, repo_from_slug
 from shipit.verbs import gh_setup as gh_setup_verb
@@ -346,24 +346,96 @@ def test_setup_dry_run_reports_and_mutates_nothing(fake_gh, monkeypatch):
     assert not any(m in ("POST", "PUT") for (_, _, m) in fake_gh.calls)
 
 
-def test_setup_pushes_configured_secrets(fake_gh, monkeypatch, tmp_path):
+def test_setup_pushes_the_derived_requirement_set(fake_gh, monkeypatch, tmp_path):
+    """The sync consumes the derivation (TOL02-WS02, story 44): required and
+    sourced → pushed; declared-but-unrequired → orphan, NOT pushed."""
+    monkeypatch.setattr(ghsetup.gh, "default_branch", lambda repo: "main")
+    monkeypatch.setattr(ghsetup.checks_mod, "discover", lambda *a, **k: ["c / check"])
+    monkeypatch.setenv("VAR_A", "secret-a")
+    monkeypatch.setenv("VAR_B", "secret-b")
+    cfg = tmp_path / ".shipit.toml"
+    cfg.write_text(
+        '[artifacts.dist]\nbuild = ["python"]\nendpoints = ["gh-release", "pypi"]\n'
+        "[secrets]\n"
+        'RELEASE_TOKEN = { env = "VAR_A" }\n'
+        'PYPI_TOKEN = { env = "VAR_B" }\n'
+        'NPM_TOKEN = { env = "VAR_B" }\n',  # no npm endpoint → orphan
+        encoding="utf-8",
+    )
+
+    report = ghsetup.setup(REPO, config_path=str(cfg), dry_run=False)
+    assert report.secrets_error is None
+    assert [(s.name, s.action) for s in report.secrets] == [
+        ("RELEASE_TOKEN", "set"),
+        ("PYPI_TOKEN", "set"),
+        ("NPM_TOKEN", "orphan"),
+    ]
+    assert (report.secrets_set, report.secrets_failed, report.secrets_orphaned) == (
+        2,
+        0,
+        1,
+    )
+    # Never over-provisions: the orphan is flagged, not pushed.
+    assert fake_gh.secrets == {"RELEASE_TOKEN": "secret-a", "PYPI_TOKEN": "secret-b"}
+    assert report.ruleset.action == "created"
+    assert ("rest", "repos/o/r/rulesets", "POST") in fake_gh.calls
+
+
+def test_setup_missing_source_fails_naming_the_requiring_entry(
+    fake_gh, monkeypatch, tmp_path
+):
+    """Story 45: a derived requirement with no [secrets] source is a
+    SYNC-TIME error naming the requiring registry entry — drift is caught at
+    gh-setup, not at release."""
     monkeypatch.setattr(ghsetup.gh, "default_branch", lambda repo: "main")
     monkeypatch.setattr(ghsetup.checks_mod, "discover", lambda *a, **k: ["c / check"])
     monkeypatch.setenv("VAR_A", "secret-a")
     cfg = tmp_path / ".shipit.toml"
-    cfg.write_text('[secrets]\nA = { env = "VAR_A" }\n', encoding="utf-8")
+    cfg.write_text(
+        '[artifacts.dist]\nbuild = ["python"]\nendpoints = ["gh-release", "pypi"]\n'
+        '[secrets]\nRELEASE_TOKEN = { env = "VAR_A" }\n',
+        encoding="utf-8",
+    )
 
     report = ghsetup.setup(REPO, config_path=str(cfg), dry_run=False)
-    assert report.secrets_error is None
-    assert [(s.name, s.action) for s in report.secrets] == [("A", "set")]
-    assert (report.secrets_set, report.secrets_skipped, report.secrets_failed) == (
-        1,
-        0,
-        0,
+    failed = [s for s in report.secrets if s.action == "failed"]
+    assert [(s.name, s.source) for s in failed] == [("PYPI_TOKEN", "none")]
+    assert "required by endpoint pypi (artifact dist)" in failed[0].reason
+    assert report.secrets_failed == 1  # → the verb's rc 1
+
+
+def test_sync_secrets_dry_run_reports_the_same_derivation(fake_gh, monkeypatch):
+    """Dry-run previews the derived sync — would-push, missing, orphan — with
+    zero resolution side effects (no doppler, no prompt, no env read)."""
+    artifacts = config.load_artifacts(
+        {"artifacts": {"dist": {"build": ["python"], "endpoints": ["pypi"]}}}
     )
-    assert fake_gh.secrets == {"A": "secret-a"}
-    assert report.ruleset.action == "created"
-    assert ("rest", "repos/o/r/rulesets", "POST") in fake_gh.calls
+    sources = [
+        SecretSource("RELEASE_TOKEN", "env", "VAR_A", False),
+        SecretSource("NPM_TOKEN", "env", "VAR_B", False),  # orphan
+    ]
+    outcomes = ghsetup.sync_secrets(
+        "o/r", artifacts, sources, dry_run=True, prompt=None
+    )
+    assert [(o.name, o.action) for o in outcomes] == [
+        ("RELEASE_TOKEN", "dry-run"),
+        ("PYPI_TOKEN", "failed"),  # missing source is a fact, dry or real
+        ("NPM_TOKEN", "orphan"),
+    ]
+    assert fake_gh.secrets == {}
+
+
+def test_sync_secrets_seeded_app_secrets_are_required_not_orphaned(
+    fake_gh, monkeypatch
+):
+    """The review funnel's registry-derived names ride the required set —
+    the seeded [secrets] scaffold never reads as drift."""
+    monkeypatch.setenv("VAR_APP", "pem")
+    (app_name, *_rest) = config.seeded_app_secrets()
+    sources = [SecretSource(app_name, "env", "VAR_APP", False)]
+    outcomes = ghsetup.sync_secrets("o/r", (), sources, dry_run=False, prompt=None)
+    assert [(o.name, o.action) for o in outcomes] == [(app_name, "set")]
+    assert fake_gh.secrets == {app_name: "pem"}
 
 
 def test_setup_discovery_respects_local_checkout(fake_gh, monkeypatch):

@@ -440,6 +440,7 @@ def load_toolchains(cfg: dict) -> tuple[ToolchainEntry, ...]:
 #
 #     [artifacts.lex-cli]
 #     build         = [{ toolchain = "rust", package = "lex-cli" }]
+#     platforms     = ["darwin-arm64", "linux-x86_64"]            # closed set
 #     bundle        = { composition = "archive" }                # optional
 #     bundle-config = "src-tauri/tauri.conf.json"                # optional
 #     main-binary   = "lex"                                      # optional
@@ -456,9 +457,30 @@ def load_toolchains(cfg: dict) -> tuple[ToolchainEntry, ...]:
 
 #: The CLOSED distribution-endpoint registry names an ``endpoints`` list may
 #: use (PRD: one adapter per endpoint; gh-release, crates, pypi, npm, brew).
-#: Adding an endpoint is an adapter plus an entry here; consumed by the
-#: release stages later — WS02 only validates the declaration.
+#: Adding an endpoint is an adapter plus an entry here plus its
+#: secret-requirement declaration
+#: (:data:`shipit.release.secretreq.ENDPOINT_SECRETS`); consumed by the
+#: release planner (``release preflight``, WS02) and the endpoint adapters
+#: (WS05).
 ENDPOINTS: tuple[str, ...] = ("gh-release", "crates", "pypi", "npm", "brew")
+
+#: The CLOSED OS×arch platform registry a ``platforms`` list may use — the
+#: release-side build/fan-out axis (TOL02-WS02, the lane planner's release
+#: twin). Each name is one ``<os>-<arch>`` release lane; the per-platform
+#: attributes (target triple, runner label, archive/binary extensions,
+#: packaging arch) live in the release planner's matrix table
+#: (:data:`shipit.release.preflight.PLATFORM_MATRIX`, keyed by exactly this
+#: set — drift-guarded by test). Declared per artifact INSTEAD of the legacy
+#: workflows' darwin/linux/musl/windows inputs; an undeclared list defaults
+#: to the ordinary linux lane at plan time.
+PLATFORMS: tuple[str, ...] = (
+    "darwin-arm64",
+    "darwin-x86_64",
+    "linux-x86_64",
+    "linux-x86_64-musl",
+    "linux-arm64",
+    "windows-x86_64",
+)
 
 
 @dataclass(frozen=True)
@@ -537,21 +559,26 @@ class Artifact:
 
     ``build`` targets are consumed by ``shipit build`` and ``e2e`` by
     ``shipit e2e`` (the harness declaration plus the ``<NAME>_BIN``
-    injection); ``bundle_config`` by ``shipit release prepare`` (the
-    artifact-declared bundle-config hook, ADR-0041/PRD story 25: the
-    repo-root-relative JSON file — ``tauri.conf.json`` — whose top-level
-    ``version`` is bumped in lockstep with the leg adapters, keeping "tauri"
-    out of the bump dispatch registry); ``bundle`` by ``shipit release
-    bundle`` (TOL02-WS03: the declared composition into the unsigned
-    distributable); ``main_binary`` / ``product_name`` by ``shipit release
-    assert-bundle``'s expected-name fallback chain (workflows.lex §3.2:
-    mainBinaryName → productName → package name — the scar-#2 integrity
-    guard's inputs); ``endpoints`` by the release stages, and ``sign`` by
-    the sign stage / preflight secrets validation — those later.
+    injection); ``platforms`` (the closed :data:`PLATFORMS` OS×arch set,
+    ``()`` = the default linux lane), ``endpoints``, and ``sign`` by the
+    release planner (``release preflight``, WS02: the OS×arch matrix, the
+    endpoint set, and the derived secret requirements —
+    :mod:`shipit.release.preflight` / :mod:`shipit.release.secretreq`);
+    ``bundle_config`` by ``shipit release prepare`` (the artifact-declared
+    bundle-config hook, ADR-0041/PRD story 25: the repo-root-relative JSON
+    file — ``tauri.conf.json`` — whose top-level ``version`` is bumped in
+    lockstep with the leg adapters, keeping "tauri" out of the bump dispatch
+    registry); ``bundle`` by ``shipit release bundle`` (TOL02-WS03: the
+    declared composition into the unsigned distributable); ``main_binary`` /
+    ``product_name`` by ``shipit release assert-bundle``'s expected-name
+    fallback chain (workflows.lex §3.2: mainBinaryName → productName →
+    package name — the scar-#2 integrity guard's inputs); and ``sign`` also
+    by the sign stage — that later.
     """
 
     name: str
     build: tuple[BuildTarget, ...] = ()
+    platforms: tuple[str, ...] = ()
     bundle: BundleSpec | None = None
     bundle_config: str | None = None
     main_binary: str | None = None
@@ -642,6 +669,26 @@ def _parse_endpoints(where: str, value: object) -> tuple[str, ...]:
     return tuple(value)
 
 
+def _parse_platforms(where: str, value: object) -> tuple[str, ...]:
+    """The ``platforms`` list, validated against the closed :data:`PLATFORMS`
+    registry — the release planner's OS×arch fan-out axis (WS02). Duplicates
+    are refused loudly: a repeated platform would mean a repeated matrix
+    entry, never an intent."""
+    if not isinstance(value, list) or not all(isinstance(p, str) for p in value):
+        raise ConfigError(f"{where}: must be a list of platform names")
+    seen: set[str] = set()
+    for platform in value:
+        if platform not in PLATFORMS:
+            known = ", ".join(PLATFORMS)
+            raise ConfigError(
+                f"{where}: unknown platform `{platform}`; known platforms: {known}"
+            )
+        if platform in seen:
+            raise ConfigError(f"{where}: duplicate platform `{platform}`")
+        seen.add(platform)
+    return tuple(value)
+
+
 def _parse_bundle(where: str, spec: object) -> BundleSpec:
     from .release import bundle as bundle_registry  # lazy — config stays import-light
 
@@ -723,6 +770,7 @@ def _parse_artifact(name: str, spec: object) -> Artifact:
         spec,
         (
             "build",
+            "platforms",
             "bundle",
             "bundle-config",
             "endpoints",
@@ -763,6 +811,7 @@ def _parse_artifact(name: str, spec: object) -> Artifact:
     return Artifact(
         name=name,
         build=build,
+        platforms=_parse_platforms(f"{where}.platforms", spec.get("platforms", [])),
         bundle=_parse_bundle(where, spec["bundle"]) if "bundle" in spec else None,
         bundle_config=bundle_config,
         main_binary=names["main-binary"],

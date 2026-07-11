@@ -5,7 +5,14 @@ Three idempotent passes (install AND update share this surface):
   a. ruleset — apply the standard main-branch-protection ruleset, requiring the
      TARGET repo's own checks (auto-discovered, never phos's captured set).
   b. labels  — ensure the standard label set exists (create-or-update).
-  c. secrets — resolve each ``[secrets]`` entry from .shipit.toml and push it.
+  c. secrets — sync the DERIVED requirement set (TOL02-WS02, PRD stories
+     44/45): the registry declarations traversed from the artifact map
+     (:mod:`shipit.release.secretreq`) decide WHICH names must exist; the
+     ``.shipit.toml [secrets]`` table only says where each comes from. A
+     required name with no declared source fails the sync naming the
+     requiring entry; a declared entry nothing requires is flagged as an
+     orphan and NOT pushed (never under- or over-provisions); the
+     doppler/env/prompt resolution path is unchanged.
 
 Re-running is a clean no-op: the ruleset is PUT in place when it already exists,
 labels are ``--force`` upserts, and a changed secret is re-set to its new value.
@@ -35,6 +42,7 @@ from typing import Any
 from . import checks as checks_mod
 from . import config, execrun, gh, secretsrc
 from .identity import Repo
+from .release import secretreq
 
 logger = logging.getLogger("shipit.ghsetup")
 
@@ -170,9 +178,13 @@ class SecretOutcome:
     """One secret of pass (c).
 
     ``action`` is ``"set"`` / ``"skipped"`` (optional source absent) /
-    ``"failed"`` (required source unresolvable) / ``"dry-run"`` (not resolved —
-    a dry run must not hit doppler or prompt). ``reason`` says why for the
-    skipped/failed outcomes; the secret VALUE never appears anywhere.
+    ``"failed"`` (required source unresolvable, or — story 45 — a derived
+    requirement with no ``[secrets]`` source at all, ``source`` then
+    ``"none"`` and ``reason`` naming the requiring entry) / ``"orphan"``
+    (declared but nothing requires it — flagged, not pushed) / ``"dry-run"``
+    (not resolved — a dry run must not hit doppler or prompt). ``reason``
+    says why for the skipped/failed/orphan outcomes; the secret VALUE never
+    appears anywhere.
     """
 
     name: str
@@ -210,6 +222,12 @@ class SetupReport:
     @property
     def secrets_failed(self) -> int:
         return sum(1 for s in self.secrets if s.action == "failed")
+
+    @property
+    def secrets_orphaned(self) -> int:
+        """Declared ``[secrets]`` entries nothing requires (flagged, never
+        pushed, never rc-relevant — the drift signal of story 45)."""
+        return sum(1 for s in self.secrets if s.action == "orphan")
 
     def to_dict(self) -> dict:
         return {
@@ -303,6 +321,57 @@ def ensure_labels(
     return tuple(outcomes)
 
 
+def sync_secrets(
+    repo: str,
+    artifacts: tuple[config.Artifact, ...],
+    sources: list[config.SecretSource],
+    *,
+    dry_run: bool,
+    prompt=None,
+) -> tuple[SecretOutcome, ...]:
+    """Pass (c). Sync the derived requirement set against the ``[secrets]``
+    sources (TOL02-WS02, PRD stories 44/45).
+
+    The required names are the registry declarations traversed from the
+    artifact map (:mod:`shipit.release.secretreq`) plus the seeded App-secret
+    names (:func:`shipit.config.seeded_app_secrets` — the review funnel's
+    registry-derived requirement). Three outcome groups, in order:
+
+    - the non-orphan declared sources, resolved and pushed by
+      :func:`push_secrets` exactly as before (dry-run resolves nothing);
+    - one ``failed`` outcome per derived requirement with NO declared source,
+      naming the requiring entry (the sync-time error of story 45);
+    - one ``orphan`` outcome per declared source nothing requires — flagged
+      and NOT pushed (never over-provisions, story 44).
+    """
+    app_secrets = config.seeded_app_secrets()
+    orphan_names = set(
+        secretreq.orphans(artifacts, sources, extra_required=app_secrets)
+    )
+    to_push = [source for source in sources if source.name not in orphan_names]
+    outcomes = push_secrets(repo, to_push, dry_run=dry_run, prompt=prompt)
+    missing = tuple(
+        SecretOutcome(
+            name=req.name,
+            source="none",
+            action="failed",
+            reason=f"required by {req.required_by}; no [secrets] source declares it",
+        )
+        for req in secretreq.missing_sources(artifacts, sources)
+    )
+    orphans = tuple(
+        SecretOutcome(
+            name=source.name,
+            source=source.kind,
+            action="orphan",
+            reason="declared in [secrets] but nothing requires it — not pushed",
+        )
+        for source in sources
+        if source.name in orphan_names
+    )
+    return outcomes + missing + orphans
+
+
 def push_secrets(
     repo: str,
     sources: list[config.SecretSource],
@@ -310,10 +379,12 @@ def push_secrets(
     dry_run: bool,
     prompt=None,
 ) -> tuple[SecretOutcome, ...]:
-    """Pass (c). Resolve and push each secret; returns one outcome per source.
+    """Resolve and push each given secret; returns one outcome per source.
 
-    A required source that can't be resolved is recorded as failed — it does
-    NOT abort the pass, so one bad secret never strands the others (or crashes
+    The WHICH decision happened upstream (:func:`sync_secrets` — the derived
+    requirement set); this loop owns only resolution and push. A required
+    source that can't be resolved is recorded as failed — it does NOT abort
+    the pass, so one bad secret never strands the others (or crashes
     gh-setup after the ruleset/labels already applied).
     """
     outcomes: list[SecretOutcome] = []
@@ -418,14 +489,22 @@ def setup(
     cfg_path = config_path or str(Path(local_checkout or ".") / config.CONFIG_NAME)
     secrets_error: str | None = None
     sources: list[config.SecretSource] = []
+    artifacts: tuple[config.Artifact, ...] = ()
     try:
         cfg = config.load(cfg_path)
         sources = config.load_secrets(cfg)
+        artifacts = config.load_artifacts(cfg)
     except config.ConfigError as exc:
         # Degraded-but-continuing: the ruleset/labels passes already applied.
         secrets_error = str(exc)
         logger.warning("no secrets applied", exc_info=True, extra={"repo": slug})
-    secrets = push_secrets(slug, sources, dry_run=dry_run, prompt=prompt)
+    if secrets_error is None:
+        secrets = sync_secrets(slug, artifacts, sources, dry_run=dry_run, prompt=prompt)
+    else:
+        # No parsed declarations to derive from — the config failure is the
+        # report fact; deriving against an empty map would mint phantom
+        # missing-source failures on top of it.
+        secrets = ()
 
     report = SetupReport(
         repo=slug,
