@@ -575,9 +575,10 @@ class Artifact:
     package name — the scar-#2 integrity guard's inputs); and ``sign`` also
     by the sign stage — that later.
 
-    ``sign = true`` requires at least one darwin platform (signing runs on
-    macOS only) — refused at parse otherwise, so signing can never silently
-    degrade to an unsigned plan and preflight/gh-setup cannot disagree over it.
+    ``sign = true`` requires at least one build target AND at least one darwin
+    platform (signing signs a build output, and runs on macOS only) — refused
+    at parse otherwise, so signing can never silently degrade to an unsigned
+    plan and preflight/gh-setup cannot disagree over it.
     """
 
     name: str
@@ -813,19 +814,29 @@ def _parse_artifact(name: str, spec: object) -> Artifact:
             raise ConfigError(f"{where}.{key}: must be a non-empty name; got {value!r}")
         names[key] = value
     platforms = _parse_platforms(f"{where}.platforms", spec.get("platforms", []))
-    if sign and not any(platform.startswith("darwin") for platform in platforms):
-        # Signing runs on macOS only, so `sign = true` without a darwin lane is
-        # an incoherent declaration: it would otherwise silently ship UNSIGNED
-        # (the plan's sign stage never materializes) while gh-setup still demands
-        # the Apple secrets — the two consumers disagreeing. Refuse it here, at
-        # the one boundary both consumers cross, so `sign = true` always implies
-        # a darwin signing lane (an undeclared `platforms` defaults to the linux
-        # lane — non-darwin — so it is refused too).
-        raise ConfigError(
-            f"{where}: sign = true requires at least one darwin platform "
-            f"(signing runs on macOS only); declare a darwin lane in "
-            f"`platforms` or drop `sign`"
-        )
+    if sign:
+        # `sign = true` must be a declaration both consumers read the same way:
+        # preflight materializes a sign stage ONLY from a BUILD-BEARING artifact
+        # on a DARWIN lane (:func:`shipit.release.preflight._matrix` skips an
+        # artifact with no build, and signing runs on macOS), while secretreq
+        # demands the Apple secrets from the bare `sign` flag. Missing either the
+        # build target or the darwin lane, the sign stage never materializes yet
+        # gh-setup still demands the Apple secrets — the two disagreeing, silently
+        # shipping UNSIGNED. Refuse both gaps here, at the one boundary both
+        # consumers cross, so `sign = true` always implies a signable darwin build
+        # (an undeclared `platforms` defaults to the linux lane — non-darwin — so
+        # it is refused too).
+        if not build:
+            raise ConfigError(
+                f"{where}: sign = true requires at least one build target "
+                f"(an artifact with no build produces nothing to sign)"
+            )
+        if not any(platform.startswith("darwin") for platform in platforms):
+            raise ConfigError(
+                f"{where}: sign = true requires at least one darwin platform "
+                f"(signing runs on macOS only); declare a darwin lane in "
+                f"`platforms` or drop `sign`"
+            )
     return Artifact(
         name=name,
         build=build,

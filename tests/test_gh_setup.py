@@ -438,6 +438,23 @@ def test_sync_secrets_seeded_app_secrets_are_required_not_orphaned(
     assert fake_gh.secrets == {app_name: "pem"}
 
 
+def test_sync_secrets_required_source_cannot_be_optional_skipped(fake_gh, monkeypatch):
+    """A derived-REQUIRED secret marked `optional = true` cannot silently skip
+    when absent (story 44 — the sync never under-provisions): the derivation
+    wins over the flag, so a missing value is `failed`, not `skipped`."""
+    monkeypatch.delenv("VAR_MISSING", raising=False)
+    # A gh-release endpoint makes RELEASE_TOKEN required (prepare's push).
+    artifacts = config.load_artifacts(
+        {"artifacts": {"dist": {"build": ["python"], "endpoints": ["gh-release"]}}}
+    )
+    sources = [SecretSource("RELEASE_TOKEN", "env", "VAR_MISSING", True)]  # optional
+    outcomes = ghsetup.sync_secrets(
+        "o/r", artifacts, sources, dry_run=False, prompt=None
+    )
+    assert [(o.name, o.action) for o in outcomes] == [("RELEASE_TOKEN", "failed")]
+    assert fake_gh.secrets == {}  # not skipped, not pushed — the sync fails loud
+
+
 def test_setup_discovery_respects_local_checkout(fake_gh, monkeypatch):
     """``local_checkout`` flows straight through to checks discovery — ``None``
     (a remote target) disables reading local workflow files."""

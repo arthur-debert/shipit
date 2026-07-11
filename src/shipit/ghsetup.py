@@ -34,7 +34,7 @@ import logging
 import time
 import tomllib
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from importlib import resources
 from pathlib import Path
 from typing import Any
@@ -338,7 +338,10 @@ def sync_secrets(
     registry-derived requirement). Three outcome groups, in order:
 
     - the non-orphan declared sources, resolved and pushed by
-      :func:`push_secrets` exactly as before (dry-run resolves nothing);
+      :func:`push_secrets` (dry-run resolves nothing); a source whose name is in
+      the derived required set is forced non-optional first, so its `optional`
+      flag can never turn a missing REQUIRED value into a silent skip (story 44 —
+      the sync never under-provisions);
     - one ``failed`` outcome per derived requirement with NO declared source,
       naming the requiring entry (the sync-time error of story 45);
     - one ``orphan`` outcome per declared source nothing requires — flagged
@@ -348,7 +351,19 @@ def sync_secrets(
     orphan_names = set(
         secretreq.orphans(artifacts, sources, extra_required=app_secrets)
     )
-    to_push = [source for source in sources if source.name not in orphan_names]
+    required_names = set(secretreq.required_names(artifacts)) | set(app_secrets)
+    # A derived-REQUIRED secret is required by definition: its `optional` flag
+    # cannot make an absent value a silent skip, or the sync would succeed while
+    # under-provisioning (story 44). The derivation wins over the flag — force
+    # required sources non-optional so a missing value resolves to `failed`, not
+    # `skipped`. A genuinely optional source (nothing requires it) keeps its flag.
+    to_push = [
+        replace(source, optional=False)
+        if source.optional and source.name in required_names
+        else source
+        for source in sources
+        if source.name not in orphan_names
+    ]
     outcomes = push_secrets(repo, to_push, dry_run=dry_run, prompt=prompt)
     missing = tuple(
         SecretOutcome(

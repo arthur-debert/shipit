@@ -303,13 +303,27 @@ def test_sign_must_be_a_boolean():
         _load('[artifacts.x]\nsign = "yes"\n')
 
 
-def test_sign_with_a_darwin_platform_parses():
-    # `sign = true` is coherent as soon as one darwin lane exists (signing runs
-    # on macOS): the linux entry rides along un-signed, the darwin one signs.
+def test_sign_with_a_build_and_darwin_platform_parses():
+    # `sign = true` is coherent once a build-bearing artifact has a darwin lane
+    # (signing signs a build output, on macOS): the linux entry rides along
+    # un-signed, the darwin one signs.
     (artifact,) = _load(
-        '[artifacts.x]\nplatforms = ["darwin-arm64", "linux-x86_64"]\nsign = true\n'
+        "[artifacts.x]\n"
+        'build = ["rust"]\n'
+        'platforms = ["darwin-arm64", "linux-x86_64"]\n'
+        "sign = true\n"
     )
     assert artifact.sign is True
+
+
+def test_sign_without_a_build_target_is_refused():
+    # An artifact with no build produces nothing to sign, so preflight emits no
+    # matrix entry (and no sign stage) for it while gh-setup would still demand
+    # the Apple secrets — the two consumers disagreeing. Refused at parse.
+    with pytest.raises(
+        config.ConfigError, match=r"sign = true requires at least one build target"
+    ):
+        _load('[artifacts.x]\nplatforms = ["darwin-arm64"]\nsign = true\n')
 
 
 def test_sign_without_a_darwin_platform_is_refused():
@@ -319,16 +333,18 @@ def test_sign_without_a_darwin_platform_is_refused():
     with pytest.raises(
         config.ConfigError, match=r"sign = true requires at least one darwin platform"
     ):
-        _load('[artifacts.x]\nplatforms = ["linux-x86_64"]\nsign = true\n')
+        _load(
+            '[artifacts.x]\nbuild = ["rust"]\nplatforms = ["linux-x86_64"]\nsign = true\n'
+        )
 
 
 def test_sign_with_default_platforms_is_refused():
     # An undeclared `platforms` defaults to the linux lane — non-darwin — so a
-    # bare `sign = true` is refused the same way a linux-only one is.
+    # build-bearing `sign = true` is refused the same way a linux-only one is.
     with pytest.raises(
         config.ConfigError, match=r"sign = true requires at least one darwin platform"
     ):
-        _load("[artifacts.x]\nsign = true\n")
+        _load('[artifacts.x]\nbuild = ["rust"]\nsign = true\n')
 
 
 def test_bundle_config_parses_to_a_path():
