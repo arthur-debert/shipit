@@ -213,8 +213,10 @@ def format_setup(report: SetupReport) -> str:
         lines.append(f"  warning: {wa.reason}")
     elif wa.status == "acceptable":
         lines.append(f"  access level: {wa.access_level} (acceptable)")
-    else:
+    elif wa.status == "not-applicable":
         lines.append(f"  not applicable: {wa.reason}")
+    else:
+        raise ValueError(f"unknown workflow access status: {wa.status!r}")
 
     lines.append("secrets:")
     if report.secrets_error is not None:

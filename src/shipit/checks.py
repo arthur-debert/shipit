@@ -201,7 +201,7 @@ def _fetch_called_workflow(uses: str, toplevel: str | None) -> object:
     obj = gh.rest(
         "repos/{owner}/{repo}/contents/{path}?ref={ref}".format(**match.groupdict())
     )
-    if not isinstance(obj, dict) or "content" not in obj:
+    if not isinstance(obj, dict) or not isinstance(obj.get("content"), str):
         raise ValueError(f"no content for reusable workflow: {uses!r}")
     text = base64.b64decode(obj["content"]).decode("utf-8")
     return _load_yaml_text(text)
@@ -284,7 +284,7 @@ def pr_workflow_paths(workflows_dir: str) -> list[str]:
             continue
         try:
             doc = _load_yaml_file(path)
-        except (OSError, yaml.YAMLError):
+        except (OSError, UnicodeDecodeError, yaml.YAMLError):
             continue
         if is_pr_workflow(doc) and not pr_trigger_is_path_filtered(doc):
             paths.append(f".github/workflows/{base}")
@@ -395,7 +395,7 @@ def checks_from_workflows(toplevel: str, paths: list[str]) -> list[str]:
     for path in paths:
         try:
             doc = _load_yaml_file(os.path.join(toplevel, path))
-        except (OSError, yaml.YAMLError):
+        except (OSError, UnicodeDecodeError, yaml.YAMLError):
             continue
         if not isinstance(doc, dict) or not isinstance(doc.get("jobs"), dict):
             continue

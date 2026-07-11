@@ -1246,6 +1246,17 @@ def test_format_setup_workflow_access_unknown_line():
     assert "WARN " not in out
 
 
+def test_format_setup_rejects_unknown_workflow_access_status():
+    report = _report(
+        workflow_access=ghsetup.WorkflowAccessOutcome(
+            status="typo",
+            reason="must not be rendered as not applicable",
+        ),
+    )
+    with pytest.raises(ValueError, match="unknown workflow access status: 'typo'"):
+        gh_setup_verb.format_setup(report)
+
+
 # --------------------------------------------------------------------------
 # Verb wiring smoke layer — glue only; the domain is stubbed
 # --------------------------------------------------------------------------

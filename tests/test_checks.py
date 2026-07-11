@@ -126,6 +126,19 @@ def test_publishes_reusable_workflows_local_no_workflows_dir(tmp_path):
     assert not checks.publishes_reusable_workflows("o/r", toplevel=str(tmp_path))
 
 
+def test_check_discovery_skips_non_utf8_workflows(tmp_path):
+    wfdir = tmp_path / ".github" / "workflows"
+    wfdir.mkdir(parents=True)
+    path = wfdir / "broken.yml"
+    path.write_bytes(b"\xff\xfe")
+
+    assert checks.pr_workflow_paths(str(wfdir)) == []
+    assert (
+        checks.checks_from_workflows(str(tmp_path), [".github/workflows/broken.yml"])
+        == []
+    )
+
+
 def test_publishes_reusable_workflows_remote_contents_api(monkeypatch):
     import base64
 
@@ -200,6 +213,15 @@ def test_publishes_reusable_workflows_remote_other_failure_raises(monkeypatch):
     monkeypatch.setattr(checks.gh, "rest", rest)
     with pytest.raises(ExecError):
         checks.publishes_reusable_workflows("o/r", toplevel=None)
+
+
+@pytest.mark.parametrize("payload", [None, {}, {"content": None}])
+def test_fetch_called_workflow_rejects_non_string_content(monkeypatch, payload):
+    monkeypatch.setattr(checks.gh, "rest", lambda *args, **kwargs: payload)
+    with pytest.raises(ValueError, match="no content for reusable workflow"):
+        checks._fetch_called_workflow(
+            "owner/repo/.github/workflows/ci.yml@v1", toplevel=None
+        )
 
 
 def test_job_contexts_reusable_nesting_and_conditions():
