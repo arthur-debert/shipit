@@ -134,7 +134,9 @@ prs = ["core-440", …]       # fixture pin subset (omit = every pin)
 
 [pipeline]
 shape = "fanout"            # "single" | "fanout"
-dimensions = ["correctness", …]   # fan-out pass set (omit = shipped set)
+dimensions = ["correctness", …]   # fan-out pass set (omit = the concern set,
+                                  # ADR-0045; the fan-out itself is opt-in
+                                  # portfolio-wide since ADR-0052)
 dedup = "mechanical"        # "mechanical" | "calibrated"
 # [pipeline.calibrator]     # required iff dedup = "calibrated"
 # backend = "claude"

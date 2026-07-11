@@ -8,18 +8,21 @@ returns in-flight.
 Layered functions:
 
   * :func:`generate_review` — decide the round SCOPE (RVW02-WS06:
-    :func:`shipit.review.rounds.plan_for_view`) then delegate to the FAN-OUT
-    (:func:`shipit.review.fanout.run_fanout_review`, RVW02-WS04 / ADR-0045).
-    ROUND 1 provisions ONE shared read-only Tree (ADR-0018) on the PR head,
-    launches the reviewer's configured **Dimension passes** in parallel (each
-    fetching the diff itself via ``gh pr diff``), and unions the results. A
-    round AFTER the first — this reviewer already reviewed an earlier head still
-    an ancestor of the new head — re-diffs to the FIX RANGE and runs ONE
-    incremental pass with new nits suppressed instead (a rebase/force-push falls
-    back to a full round). Either way the union is routed (mechanical dedup by
-    default, the dormant **Calibrator** when opted on) to the review dict. No
-    GitHub posting — the fan-out is invisible below this seam (one review per
-    reviewer per head, exactly as before). The generated review is TEED to the
+    :func:`shipit.review.rounds.plan_for_view`) then delegate to the round
+    orchestrator (:func:`shipit.review.fanout.run_fanout_review`, RVW02-WS04 /
+    ADR-0045 / ADR-0052). ROUND 1 provisions ONE shared read-only Tree
+    (ADR-0018) on the PR head and runs the reviewer's configured shape: by
+    DEFAULT one monolithic full-scope pass (ADR-0052); with an explicit
+    per-reviewer ``dimensions`` config, the ADR-0045 **Dimension passes** in
+    parallel (each fetching the diff itself via ``gh pr diff``), results
+    unioned. A round AFTER the first — this reviewer already reviewed an
+    earlier head still an ancestor of the new head — re-diffs to the FIX RANGE
+    and runs ONE incremental pass with new nits suppressed instead (a
+    rebase/force-push falls back to a full round). Either way the result is
+    routed (mechanical dedup by default, the dormant **Calibrator** when opted
+    on) to the review dict. No GitHub posting — the pipeline shape is
+    invisible below this seam (one review per reviewer per head, exactly as
+    before). The generated review is TEED to the
     local review-round record store here (RVW02-WS03, fail-open) — verb-witnessed
     at generate time, before any post, carrying the REAL dispositions, the range
     reviewed, and every contributing run (passes + calibrator) with run ids +
@@ -82,22 +85,24 @@ def generate_review(
     :func:`shipit.review.rounds.plan_for_view`: when this reviewer already
     reviewed an earlier head of this PR that is still an ancestor of the new
     head, ``ctx`` is re-diffed to the FIX RANGE
-    (:func:`shipit.review.diff.rescoped_view`) and the fan-out runs ONE
-    incremental pass with new nits suppressed, instead of the full dimension
-    fan-out; a rebase/force-push (the old head is no longer an ancestor) or a
+    (:func:`shipit.review.diff.rescoped_view`) and the orchestrator runs ONE
+    incremental pass with new nits suppressed, instead of the full round-1
+    pipeline; a rebase/force-push (the old head is no longer an ancestor) or a
     first round runs the full pipeline. A ``dry_run`` always takes the full
     round-1 path (it touches neither the round store nor git).
 
-    The RVW02-WS04/WS08 round-1 pipeline (ADR-0045): one shared read-only Tree
-    (ADR-0018) on the PR head, the reviewer's configured **Dimension passes**
-    in parallel through its spawn read-only posture (each fetching the scoped
-    diff itself via ``gh pr diff`` — never assuming the base is ``main``), and
-    the union posted — by DEFAULT through the mechanical dedup (calibrator off,
-    RVW02-WS08), or through the dormant table-level **Calibrator** when a
+    The round-1 pipeline (RVW02-WS04/WS08, ADR-0045 / ADR-0052): one shared
+    read-only Tree (ADR-0018) on the PR head and the reviewer's configured
+    shape through its spawn read-only posture — by DEFAULT one monolithic
+    full-scope pass (ADR-0052); with an explicit per-reviewer ``dimensions``
+    config, the ADR-0045 **Dimension passes** in parallel (each fetching the
+    scoped diff itself via ``gh pr diff`` — never assuming the base is
+    ``main``) — and the result posted through the mechanical dedup (calibrator
+    off, RVW02-WS08), or through the dormant table-level **Calibrator** when a
     reviewer opts it on. The routed result is returned as the same
     REVIEW_SCHEMA-shaped dict the monolithic producer yielded — posting + the
     funnel check-run are the caller's job, unchanged; below this seam the
-    fan-out is invisible.
+    pipeline shape is invisible.
 
     Delegates to :func:`shipit.review.fanout.run_fanout_review`, which owns the
     Tree, the pass fan-out, the dedup/calibration, and the routing. A missing
@@ -110,8 +115,10 @@ def generate_review(
 
     ``dimensions`` / ``calibrator`` / ``nit_cap`` are the RVW02 config surface
     (per-reviewer Roster option; table-level judge + nit budget) — ``calibrator``
-    ``None`` means the judge is OFF (the deduped union); ``dimensions`` /
-    ``nit_cap`` ``None`` mean the shipped defaults. ``timeout`` is the PER-PASS
+    ``None`` means the judge is OFF (the deduped union); ``dimensions`` ``None``
+    means the shipped default shape, the single monolithic round-1 pass
+    (ADR-0052 — a non-empty list is the explicit fan-out opt-in); ``nit_cap``
+    ``None`` means the shipped default (uncapped). ``timeout`` is the PER-PASS
     agent timeout (a
     ``<N>s`` duration string), enforced at the launch seam as a process
     deadline for every backend (#404). ``dry_run`` prints each pass's would-run
@@ -129,7 +136,8 @@ def generate_review(
     """
     agent = backend.funnel_agent
     # Decide the round SCOPE (RVW02-WS06, ADR-0045): round 1 is the full-PR
-    # dimension fan-out; a round after the first — this reviewer already reviewed
+    # review (the default single pass, or the opted-in dimension fan-out —
+    # ADR-0052); a round after the first — this reviewer already reviewed
     # an earlier head of this PR, still an ancestor of the new head — is ONE
     # incremental pass over the fix range. A rebase/force-push (the old head is no
     # longer an ancestor) falls back to a full round. A dry run never touches the
@@ -156,7 +164,7 @@ def generate_review(
         (
             f"incremental fix-range {ctx.base_sha}..{ctx.head_sha}"
             if plan.incremental
-            else "dimension fan-out"
+            else ("dimension fan-out" if dimensions else "single full-scope pass")
         ),
         extra={"reviewer": agent, "pr": ctx.number},
     )
@@ -202,12 +210,15 @@ def generate_review(
             # round.variant (#713: focus texts are prompt material the
             # instructions file does not cover — arms differing only by
             # dimension set must stamp different variants). An incremental
-            # round ran ONE fix-range pass, not the dimension set — nothing to
-            # fold. Resolution cannot fail here: run_fanout_review above
-            # already resolved the same names.
+            # round ran ONE fix-range pass, and the round-1 DEFAULT (ADR-0052)
+            # ran ONE unscoped monolithic pass — neither embeds a dimension
+            # slice, so neither folds a set (the instructions file alone is
+            # the prompt material, matching the Lab's `single` shape hashing).
+            # Resolution cannot fail here: run_fanout_review above already
+            # resolved the same names.
             dimension_names=(
                 None
-                if plan.incremental
+                if plan.incremental or not dimensions
                 else tuple(d.name for d in resolve_dimensions(dimensions))
             ),
         )

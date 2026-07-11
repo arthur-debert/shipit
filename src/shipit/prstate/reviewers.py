@@ -710,10 +710,12 @@ class _LocalReviewAdapter(ReviewerAdapter):
             run_kwargs["instructions_path"] = entry.instructions
         if entry.timeout is not None:
             run_kwargs["timeout"] = entry.timeout
-        # The RVW02-WS04 fan-out config: the per-reviewer dimension set rides
-        # the entry (same seam as model/instructions); the shared calibrator +
-        # nit cap ride the table-level policy. Unset values are omitted so the
-        # run path's shipped defaults stay the single source of the default.
+        # The RVW02-WS04 fan-out config: the per-reviewer dimension set — the
+        # explicit fan-out opt-in (ADR-0052) — rides the entry (same seam as
+        # model/instructions); the shared calibrator + nit cap ride the
+        # table-level policy. Unset values are omitted so the run path's
+        # shipped defaults (round-1 single pass) stay the single source of the
+        # default.
         if entry.dimensions is not None:
             run_kwargs["dimensions"] = entry.dimensions
         if policy is not None:

@@ -1,21 +1,24 @@
 """dimensions — the closed **Dimension pass** registry (RVW02-WS04, ADR-0045).
 
 A **Dimension pass** is one scoped finder inside a local-agent reviewer's
-round-1 review run: a single pass whose prompt is narrowed to one dimension,
-run on that reviewer's Backend against the shared read-only Tree (CONTEXT.md
-"Dimension pass"). Passes run in parallel; their union feeds the **Calibrator**
-(:mod:`shipit.review.calibrator`). This module owns the dimension vocabulary —
-the closed registry of known dimensions, the shipped default set, and the ONE
+round-1 fan-out review run: a single pass whose prompt is narrowed to one
+dimension, run on that reviewer's Backend against the shared read-only Tree
+(CONTEXT.md "Dimension pass"). Passes run in parallel; their union feeds the
+**Calibrator** (:mod:`shipit.review.calibrator`). Since ADR-0052 the fan-out
+itself is OPT-IN — the round-1 default is one monolithic full-scope pass, and
+an explicit ``dimensions`` config (a Roster entry or a Lab ``shape = "fanout"``
+cell) selects the fan-out. This module owns the dimension vocabulary — the
+closed registry of known dimensions, the fan-out's default set, and the ONE
 resolver config names route through — so the Roster loader and the fan-out
 orchestrator agree on exactly which dimensions exist.
 
-Dimensions scope the SEARCH; on the shipped default path severity is assigned
+Dimensions scope the SEARCH; on the stock fan-out path severity is assigned
 at calibration (ADR-0045). ADR-0051 narrows ADR-0045's severity-scoped-finder
-rejection to that shipped default: the registry also carries an
+rejection to that stock decomposition: the registry also carries an
 EXPERIMENT-ONLY severity-tier set (``sev-critical-high`` / ``sev-medium`` /
 ``sev-low``) for Review-Lab measurement, selectable solely via an explicit
 ``dimensions`` list (a Lab cell or a Roster override) and never part of the
-shipped default. The registry is a closed tuple
+fan-out's default set. The registry is a closed tuple
 (ADR-0021 closed-registry-over-hierarchy): adding a dimension is one entry,
 referenced everywhere else (the Roster `dimensions` option validates against
 :func:`known_dimension_names`; the pass prompt reads :attr:`Dimension.focus`).
@@ -44,11 +47,15 @@ class Dimension:
     focus: str
 
 
-#: The ADR-0045 concern-scoped decomposition — the SHIPPED DEFAULT set. Each
+#: The ADR-0045 concern-scoped decomposition — the fan-out's DEFAULT SET (the
+#: stock set a fan-out runs when its explicit opt-in names no list; since
+#: ADR-0052 the fan-out itself is no longer the round-1 default). Each
 #: ``focus`` deliberately tells the pass to IGNORE everything outside its
-#: dimension: narrowed attention is the recall mechanism (single-pass recall
-#: <50% at every tier — the evidence behind the fan-out), and overlap between
-#: passes is fine (the Calibrator dedups), so a pass never self-budgets.
+#: dimension: narrowed attention was the fan-out's recall bet, and overlap
+#: between passes is fine (the Calibrator dedups), so a pass never
+#: self-budgets. Lab measurement (v37, ADR-0052) found the per-bucket
+#: disclaimers carry a blind-spot cost: defects belonging to no bucket
+#: (build/CI-class) can fall between the passes.
 _CONCERN_DIMENSIONS: tuple[Dimension, ...] = (
     Dimension(
         name="correctness",
@@ -156,10 +163,14 @@ _SEVERITY_TIER_DIMENSIONS: tuple[Dimension, ...] = (
 #: severity-tier three.
 DIMENSIONS: tuple[Dimension, ...] = _CONCERN_DIMENSIONS + _SEVERITY_TIER_DIMENSIONS
 
-#: The shipped default dimension set — exactly the ADR-0045 concern-scoped
+#: The fan-out's default dimension set — exactly the ADR-0045 concern-scoped
 #: decomposition, registry order; the severity-tier entries are experiment-only
-#: and excluded (ADR-0051). A per-reviewer Roster ``dimensions`` option
-#: narrows, reorders, or (explicitly) swaps it.
+#: and excluded (ADR-0051). This is the SET an explicitly-selected fan-out
+#: runs when no list is named (the ``--fanout`` replay arm; a ``shape =
+#: "fanout"`` Lab cell without ``dimensions``) — NOT the round-1 default
+#: shape, which is the single monolithic pass (ADR-0052). A per-reviewer
+#: Roster ``dimensions`` option (itself the live fan-out opt-in) names,
+#: narrows, reorders, or swaps it explicitly.
 DEFAULT_DIMENSION_NAMES: tuple[str, ...] = tuple(d.name for d in _CONCERN_DIMENSIONS)
 
 _BY_NAME: dict[str, Dimension] = {d.name: d for d in DIMENSIONS}
@@ -187,10 +198,14 @@ def by_name(name: str) -> Dimension:
 
 def resolve_dimensions(names: Sequence[str] | None) -> tuple[Dimension, ...]:
     """The :class:`Dimension` set for ``names`` — ``None``/empty means the
-    SHIPPED DEFAULT set (the concern-scoped four, never the experiment-only
-    tiers; ADR-0051), else the named subset in the given order. Raises
-    ``KeyError`` on an unknown name (the config boundary validates first; see
-    :func:`by_name`)."""
+    fan-out's DEFAULT SET (the concern-scoped four, never the experiment-only
+    tiers; ADR-0051), else the named subset in the given order. NB (ADR-0052):
+    this resolves a SET for a fan-out that is already selected — it is not the
+    round-1 shape switch (``run_fanout_review`` treats an empty ``dimensions``
+    as the single-pass default BEFORE resolving); the ``None`` arm keeps the
+    variant-hash canonicalization (:func:`fanout_variant_text`) and banked Lab
+    points stable. Raises ``KeyError`` on an unknown name (the config boundary
+    validates first; see :func:`by_name`)."""
     if not names:
         return _CONCERN_DIMENSIONS
     return tuple(by_name(name) for name in names)

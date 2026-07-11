@@ -348,7 +348,9 @@ def test_run_fanout_replay_runs_every_pass_offline_and_writes_the_record(
     )
 
     launches = fanout_launcher["launches"]
-    assert len(launches) == 4  # the shipped default dimension set
+    # The fan-out driver IS the explicit opt-in (ADR-0052): no named set still
+    # runs the fan-out's default four, never the orchestrator's single pass.
+    assert len(launches) == 4
     for launch in launches:
         assert launch["cwd"] == str(checkout)  # the checkout, never a Tree
         prompt = launch["cmd"][-1]

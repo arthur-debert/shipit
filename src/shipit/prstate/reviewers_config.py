@@ -50,8 +50,10 @@ options:
   * `model` / `instructions` — free-form strings consumed by the local-agent
     review RUN path; they do not affect the engine verdict.
   * `dimensions` (array of dimension names, RVW02-WS04) — the local-agent
-    reviewer's **Dimension pass** set, riding the same seam as
-    `model`/`instructions`. Unset means the shipped default set; names
+    reviewer's fan-out OPT-IN and **Dimension pass** set, riding the same seam
+    as `model`/`instructions`. Unset means the round-1 default shape: one
+    monolithic full-scope pass (ADR-0052). Setting a non-empty list selects
+    the ADR-0045 dimension fan-out with exactly the named passes; names
     validate against the closed registry
     (:func:`shipit.review.dimensions.known_dimension_names`) — an unknown
     dimension fails LOUD with the known set, roster prior art.
@@ -506,7 +508,8 @@ def _parse_entry(name: str, key: str, opts: object, *, config_dir: Path) -> Rost
 
 def _parse_dimensions(name: str, value: object) -> tuple[str, ...] | None:
     """Validate one reviewer's `dimensions` option (RVW02-WS04) → the canonical
-    tuple, or ``None`` when unset (the shipped default set).
+    tuple, or ``None`` when unset (the round-1 single-pass default, ADR-0052 —
+    a returned tuple is the reviewer's explicit fan-out opt-in).
 
     An array of dimension names from the CLOSED registry
     (:func:`shipit.review.dimensions.known_dimension_names`); an unknown name,

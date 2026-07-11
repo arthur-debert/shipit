@@ -95,7 +95,8 @@ EVENT_NAMES = frozenset(
         "review.degraded",
         "round.detected",
         "breaker.fired",
-        # the round-1 dimension fan-out (RVW02-WS04 / ADR-0045), emitted
+        # the round-1 review pipeline (RVW02-WS04 / ADR-0045 / ADR-0052 — the
+        # default single pass or the opted-in dimension fan-out), emitted
         # verb-witnessed by the detached review child: the union reached the
         # posted review either through the default MECHANICAL dedup
         # (``review.deduped``, RVW02-WS08 — calibrator off, pass severities
@@ -107,7 +108,7 @@ EVENT_NAMES = frozenset(
         "review.deduped",
         "review.calibrated",
         "finding.dispositioned",
-        # per-pass progress inside a fan-out round (RVW03-WS02): a multi-minute
+        # per-pass progress inside a review round (RVW03-WS02): a multi-minute
         # round is opaque between launch and union without these — one
         # `launched` per pass/calibrator as it starts and one `settled` as it
         # returns (outcome + duration + run_id/dimension riding the record), so

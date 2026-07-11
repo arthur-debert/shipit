@@ -441,9 +441,10 @@ def parse_cell(data: Mapping[str, Any], *, where: str = "cell") -> Cell:
         if not dimensions_raw:
             raise CellError(
                 f"{where}: [pipeline] 'dimensions' is an empty list — omit the key "
-                "for the shipped default set, or list at least one dimension (an "
-                "explicit empty list is a config mistake, not the default; the "
-                "Roster `dimensions` option rejects it the same way)"
+                "for the fan-out's default set (the ADR-0045 concern four), or "
+                "list at least one dimension (an explicit empty list is a config "
+                "mistake, not the default; the Roster `dimensions` option rejects "
+                "it the same way)"
             )
         names = []
         for i, name in enumerate(dimensions_raw):

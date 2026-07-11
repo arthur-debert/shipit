@@ -1,10 +1,16 @@
-"""fanout — round-1 dimension fan-out + union post (RVW02-WS04/WS08, ADR-0045).
+"""fanout — round-1 review orchestration + union post (RVW02-WS04/WS08,
+ADR-0045, ADR-0052).
 
-The orchestration between the review producer and the posting service: a
-local-agent reviewer's detached review run no longer makes one monolithic
-"find everything" pass — it fans out into parallel **Dimension passes**
+The orchestration between the review producer and the posting service. By
+DEFAULT (ADR-0052) a local-agent reviewer's round-1 detached review run is ONE
+monolithic full-scope pass — Lab measurement (v37 fixture) found the
+concern-scoped fan-out matched its confirmed-major recall at ~4x the token
+cost, with a between-buckets blind spot the unscoped pass caught. An explicit
+per-reviewer ``dimensions`` config (or a Lab ``shape = "fanout"`` cell) opts
+back into the ADR-0045 fan-out: parallel **Dimension passes**
 (:mod:`shipit.review.dimensions`) on the reviewer's own backend against ONE
-shared read-only Tree, unions the results, and posts them.
+shared read-only Tree, results unioned. Either shape flows through the same
+union/dedup/routing machinery below.
 
 By DEFAULT (RVW02-WS08) the union is posted through a MECHANICAL, deterministic
 dedup (:func:`dedup_union`): findings sharing a ``(file, line, claim)`` merge
@@ -182,6 +188,23 @@ _INCREMENTAL_DIMENSION = Dimension(
     focus="the fix range only, with mandatory dependency-neighborhood context",
 )
 
+#: The synthetic **Dimension** the round-1 DEFAULT single pass carries
+#: (ADR-0052). The default round-1 shape is ONE monolithic full-scope pass —
+#: the pass launches with ``dimension=None`` (the unscoped task), and this
+#: label exists only so the pass rides the SAME union / coverage / attestation
+#: / record machinery as a fan-out pass, exactly like the incremental round's
+#: synthetic dimension above. The name matches the Review Lab's ``single``
+#: shape token (:data:`shipit.review.cell.SHAPES`) so records read as one
+#: vocabulary. Not a member of the closed
+#: :data:`shipit.review.dimensions.DIMENSIONS` registry: a config
+#: ``dimensions`` list cannot name it — listing dimensions IS the fan-out
+#: opt-in.
+_SINGLE_PASS_DIMENSION = Dimension(
+    name="single",
+    title="Single full-scope pass",
+    focus="the full diff, unscoped — one monolithic full-scope pass",
+)
+
 
 def run_fanout_review(
     backend: Backend,
@@ -200,9 +223,10 @@ def run_fanout_review(
     launcher: launch.Runner | None = None,
     artifacts_base_dir: Path | None = None,
 ) -> FanoutOutcome:
-    """Fan ``backend``'s review of ``target`` out into dimension passes (round
-    1), or run ONE incremental fix-range pass (round ≥ 2), and return the
-    routed :class:`FanoutOutcome`.
+    """Run ``backend``'s round-1 review of ``target`` — ONE monolithic
+    full-scope pass by default (ADR-0052), or the dimension fan-out when
+    ``dimensions`` explicitly opts in — or ONE incremental fix-range pass
+    (round ≥ 2), and return the routed :class:`FanoutOutcome`.
 
     ``target`` is EITHER a PR review view (the live path — provisions the
     shared read-only Tree; a round-1 pass fetches ``gh pr diff``, a round-≥2
@@ -232,16 +256,22 @@ def run_fanout_review(
     ``nit_cap`` of ``0``, so every fresh nit routes ``nit-suppressed`` (recorded,
     not posted) — a late round can't be recolonized by style churn. The
     calibrator, if configured, still runs (single-pass + calibrator). Round 1
-    (``incremental=False``) is unchanged: the ``dimensions`` fan-out with the
-    table-level ``nit_cap``. ``incremental`` is a LIVE-PR shape only: rounds are
+    (``incremental=False``) runs the ``dimensions`` shape (default single pass,
+    explicit list → fan-out — see below) with the table-level ``nit_cap``.
+    ``incremental`` is a LIVE-PR shape only: rounds are
     keyed to a live PR head, so an incremental :class:`RangeView` call is a
     caller error (``ValueError`` — multi-round fix-range replay is explicitly
     out of the Review Lab's scope), as is a :class:`RangeView` ``dry_run`` (the
     dry-run contract prints a would-run TREE launch; replay has none).
 
-    ``dimensions`` names the reviewer's configured pass set (the per-reviewer
-    Roster option; ``None``/empty → the shipped default set), used only in round
-    1; ``calibrator`` the table-level judge config (``None`` → judge OFF, deduped
+    ``dimensions`` is BOTH the round-1 shape switch and the pass set
+    (ADR-0052): ``None``/empty — the shipped default — runs ONE monolithic
+    full-scope pass (no dimension scoping; the pass carries the synthetic
+    ``single`` label through the union/record machinery), while an explicit
+    non-empty list (the per-reviewer Roster option, or the fan-out replay
+    arm's resolved set) opts into the ADR-0045 dimension fan-out with exactly
+    the named passes. Used only in round 1. ``calibrator`` is
+    the table-level judge config (``None`` → judge OFF, deduped
     union); ``nit_cap`` the table-level round-1 nit budget (``None`` → uncapped,
     ``0`` → floor at minor; IGNORED in an incremental round, which forces ``0``).
     ``model`` / ``timeout`` / ``instructions_path`` are the reviewer's own run
@@ -253,10 +283,10 @@ def run_fanout_review(
     live service never passes it). Each overridden pass launches AND records
     with its own model/timeout (the run entry and bundle meta stamp the actual
     values, so the arm is never mislabeled). An override naming a dimension
-    outside this round's pass set — or any override in an ``incremental``
-    round, which has no dimension passes — is a loud ``ValueError``: a
-    silently-ignored override would run a different experiment than the
-    reviewed cell file declares.
+    outside this round's pass set — or any override in an ``incremental`` or
+    default single-pass round, neither of which has dimension passes — is a
+    loud ``ValueError``: a silently-ignored override would run a different
+    experiment than the reviewed cell file declares.
 
     Failure posture: every configured backend binary (the reviewer's own plus,
     when the judge is on, the calibrator's) is preflighted ONCE before the Tree
@@ -267,8 +297,8 @@ def run_fanout_review(
     pass processes start. Past preflight, a SINGLE pass failure is tolerated —
     its run entry records the outcome, the posted summary attests the degraded
     coverage; ALL passes failing raises ``RuntimeError`` (the service maps it
-    to the ``failed`` funnel outcome; in an incremental round the sole pass
-    failing IS all passes failing). When the judge is ON, a calibrator failure (unavailable /
+    to the ``failed`` funnel outcome; in an incremental or default single-pass
+    round the sole pass failing IS all passes failing). When the judge is ON, a calibrator failure (unavailable /
     timed out / unparseable / contract-violating output) PROPAGATES — an
     uncalibrated union is never posted under the judge's ruler; the round
     degrades non-blocking exactly like a failed monolithic review (ADR-0006).
@@ -287,7 +317,8 @@ def run_fanout_review(
     ``base_dir``.
 
     With ``dry_run=True``: prints each pass's would-run argv (one per
-    dimension, or the single incremental pass, no clone, no model bill) plus a
+    dimension, or the one monolithic/incremental pass, no clone, no model
+    bill) plus a
     note on how the union would be posted (mechanical dedup, or the configured
     calibrator), and returns an empty outcome — the same honest dry-run contract
     as the producer's.
@@ -311,11 +342,25 @@ def run_fanout_review(
             "mutually exclusive — an incremental round runs one fix-range "
             "pass, not dimension passes"
         )
+    if invocation_overrides and not dimensions:
+        raise ValueError(
+            "run_fanout_review: invocation_overrides require an explicit "
+            "`dimensions` fan-out — the round-1 default is one monolithic "
+            "pass (ADR-0052), which has no dimension passes to override"
+        )
     incremental_range: tuple[str, str] | None = None
+    single = False
     if incremental:
         incremental_range = (str(target.base_sha), str(target.head_sha))
         dims = (_INCREMENTAL_DIMENSION,)
         effective_nit_cap = 0
+    elif not dimensions:
+        # The round-1 DEFAULT shape (ADR-0052): ONE monolithic full-scope pass.
+        # The synthetic label rides the union/record machinery; the pass itself
+        # launches unscoped (dimension=None → the full-scope task).
+        single = True
+        dims = (_SINGLE_PASS_DIMENSION,)
+        effective_nit_cap = nit_cap
     else:
         try:
             dims = resolve_dimensions(dimensions)
@@ -334,6 +379,12 @@ def run_fanout_review(
                 f"{', '.join(d.name for d in dims)})"
             )
     agent = backend.funnel_agent or backend.name
+    # The round's ONE shape vocabulary: `scoped` gates the per-pass dimension
+    # slice (only fan-out passes are narrowed; the monolithic and incremental
+    # passes launch with dimension=None → the full-scope task), `pass_word`
+    # labels the run entries, events, and log lines consistently.
+    scoped = not incremental and not single
+    pass_word = "incremental" if incremental else ("single" if single else "dimension")
     # The one display/telemetry split between the arms: a PR target logs and
     # emits as `pr#<n>`; a range target has no PR — its label is the range and
     # its `pr` extra is OMITTED (the domain-key contract is absent-not-null, so a
@@ -356,7 +407,7 @@ def run_fanout_review(
                 timeout=timeout,
                 instructions_path=instructions_path,
                 dry_run=True,
-                dimension=None if incremental else dim,
+                dimension=dim if scoped else None,
                 incremental_range=incremental_range,
             )
         if calibrator is None:
@@ -428,18 +479,18 @@ def run_fanout_review(
                 backend,
                 range_view,
                 instructions_path=instructions_path,
-                dimension=dim,
+                dimension=dim if scoped else None,
             )
         else:
             task = producer.pass_task_text(
                 backend,
                 target.number,
                 instructions_path=instructions_path,
-                dimension=None if incremental else dim,
+                dimension=dim if scoped else None,
                 incremental_range=incremental_range,
             )
         run_id = uuid.uuid4().hex
-        kind = "incremental-pass" if incremental else "dimension-pass"
+        kind = f"{pass_word}-pass"
         bundle = artifacts_mod.RunArtifacts.under(round_dir, run_id)
         run: dict[str, Any] = {
             "run_id": run_id,
@@ -483,7 +534,7 @@ def run_fanout_review(
             logger,
             "review.pass.launched",
             "%s pass %s launched for %s (agent=%s)",
-            "incremental" if incremental else "dimension",
+            pass_word,
             dim.name,
             where,
             agent,
@@ -502,7 +553,7 @@ def run_fanout_review(
                     timeout=pass_timeout,
                     instructions_path=instructions_path,
                     launcher=launcher,
-                    dimension=dim,
+                    dimension=dim if scoped else None,
                     run_id=run_id,
                     artifacts=bundle,
                 )
@@ -514,7 +565,7 @@ def run_fanout_review(
                     timeout=pass_timeout,
                     instructions_path=instructions_path,
                     launcher=launcher,
-                    dimension=None if incremental else dim,
+                    dimension=dim if scoped else None,
                     tree_path=workdir,
                     incremental_range=incremental_range,
                     # The cheaper incremental ReasoningLevel is a real argv
@@ -541,7 +592,7 @@ def run_fanout_review(
             logger.warning(
                 "%s pass %s failed for %s (agent=%s) — coverage degrades, "
                 "the round continues",
-                "incremental" if incremental else "dimension",
+                pass_word,
                 dim.name,
                 where,
                 agent,
@@ -552,7 +603,7 @@ def run_fanout_review(
                 logger,
                 "review.pass.settled",
                 "%s pass %s settled %s for %s in %dms",
-                "incremental" if incremental else "dimension",
+                pass_word,
                 dim.name,
                 run["outcome"],
                 where,
@@ -583,7 +634,7 @@ def run_fanout_review(
             logger,
             "review.pass.settled",
             "%s pass %s settled success for %s in %dms (%d finding(s))",
-            "incremental" if incremental else "dimension",
+            pass_word,
             dim.name,
             where,
             run["duration_ms"],
@@ -607,11 +658,12 @@ def run_fanout_review(
         details = "; ".join(
             f"{r.dimension.name}: {r.run.get('detail', 'failed')}" for r in failed
         )
-        kind = (
-            "the incremental pass failed"
-            if incremental
-            else f"all {len(dims)} dimension passes failed"
-        )
+        if incremental:
+            kind = "the incremental pass failed"
+        elif single:
+            kind = "the single review pass failed"
+        else:
+            kind = f"all {len(dims)} dimension passes failed"
         raise RuntimeError(f"{kind} for {where} (agent={agent}) — {details}")
 
     union = _build_union(succeeded)
@@ -1170,10 +1222,11 @@ def _attestation(
     posted: int,
     calibrated: bool,
 ) -> str:
-    """The fan-out attestation paragraph for the posted summary: what ran, what
-    it found, and how the union routed to the posted set — so a human reading
-    the PR sees the coverage claim (and any degradation) without opening the
-    record.
+    """The round's attestation paragraph for the posted summary: what ran
+    (the default single full-scope pass, ADR-0052, or the opted-in dimension
+    fan-out), what it found, and how the union routed to the posted set — so a
+    human reading the PR sees the coverage claim (and any degradation) without
+    opening the record.
 
     ``calibrated`` selects the routing phrasing: the DEFAULT off path posts the
     mechanically-deduped union (only nit-suppressed and duplicate route out — no
@@ -1185,8 +1238,13 @@ def _attestation(
     dedup and the dormant calibrator were skipped), so its line never claims a
     routing that never ran.
     """
-    names = ", ".join(d.name for d in dims)
-    prelude = f"Review fan-out: {len(dims)} dimension pass(es) ({names}) -> "
+    if len(dims) == 1 and dims[0].name == _SINGLE_PASS_DIMENSION.name:
+        # The round-1 DEFAULT (ADR-0052) ran one monolithic pass — attest it
+        # honestly instead of claiming a fan-out of one.
+        prelude = "Review: one full-scope pass -> "
+    else:
+        names = ", ".join(d.name for d in dims)
+        prelude = f"Review fan-out: {len(dims)} dimension pass(es) ({names}) -> "
     duplicates = sum(1 for judged in entries if judged.duplicate_of is not None)
     nit_suppressed = sum(
         1

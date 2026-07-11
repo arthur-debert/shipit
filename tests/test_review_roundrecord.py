@@ -355,11 +355,43 @@ def test_generate_review_tees_a_round_record(monkeypatch, tmp_path):
     assert kwargs["head_sha"] == "b" * 40
     assert kwargs["reviewer"] == "codex"
     assert kwargs["duration_ms"] >= 0
-    # #713: a round-1 fan-out forwards its RESOLVED pass set so the record's
-    # round.variant folds the dimension prompt material.
-    from shipit.review.dimensions import DEFAULT_DIMENSION_NAMES
+    # ADR-0052: the default round-1 shape is ONE unscoped monolithic pass — no
+    # dimension slice in the prompt, so no set folds into round.variant (the
+    # instructions file alone is the prompt material, matching the Lab's
+    # `single` shape hashing).
+    assert kwargs["dimension_names"] is None
 
-    assert kwargs["dimension_names"] == DEFAULT_DIMENSION_NAMES
+
+def test_generate_review_explicit_dimensions_fold_into_the_record(
+    monkeypatch, tmp_path
+):
+    """#713 still holds behind the opt-in (ADR-0052): a round-1 fan-out
+    forwards its RESOLVED pass set so the record's round.variant folds the
+    dimension prompt material."""
+    from shipit.agent import backend as agent_backend
+    from shipit.review import service
+
+    review = {"summary": {"status": "COMMENT", "overall_feedback": ""}, "comments": []}
+    monkeypatch.setattr(
+        service.fanout,
+        "run_fanout_review",
+        lambda backend, ctx, **kw: service.fanout.FanoutOutcome(
+            review=dict(review), findings=(), runs=()
+        ),
+    )
+    written = []
+    monkeypatch.setattr(
+        service.roundrecord,
+        "record_round",
+        lambda r, **kw: written.append((r, kw)) or tmp_path / "store.jsonl",
+    )
+    service.generate_review(
+        agent_backend.CODEX,
+        _tee_ctx(),
+        dimensions=("test-quality", "correctness"),
+    )
+    [(_, kwargs)] = written
+    assert kwargs["dimension_names"] == ("test-quality", "correctness")
 
 
 def test_generate_review_incremental_rescopes_and_records_the_fix_range(

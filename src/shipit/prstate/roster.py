@@ -48,9 +48,11 @@ class RosterEntry:
     (``None`` → the engine's shipped default); ``model`` / ``instructions`` /
     ``timeout`` the local-agent RUN options (``None`` → the run path's own
     defaults); ``dimensions`` the local-agent reviewer's **Dimension pass** set
-    (RVW02-WS04 — the per-reviewer fan-out option riding the same seam as
-    ``model``/``instructions``; ``None`` → the shipped default set, membership
-    validated by the loader against the closed dimension registry). An
+    (RVW02-WS04 — the per-reviewer fan-out OPT-IN riding the same seam as
+    ``model``/``instructions``; ``None`` → the round-1 default of one
+    monolithic full-scope pass (ADR-0052), a non-empty tuple → the ADR-0045
+    dimension fan-out with exactly the named passes, membership validated by
+    the loader against the closed dimension registry). An
     UNCONFIGURED reviewer is exactly the field defaults with its name — which
     is why :meth:`Roster.entry` can be total.
     """
