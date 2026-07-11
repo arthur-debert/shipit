@@ -1,9 +1,9 @@
 """`shipit pr classify` — the write-once Severity-override verb (ADR-0044).
 
-The DORMANT correction path of the severity precedence chain. Findings arrive
-PRE-classified: the engine resolves each finding's Severity via machine marker
-→ reviewer-adapter mapping → ``major`` fail-safe, and there is no
-classification stage anywhere. This verb exists for the one case that chain
+The DORMANT correction path of the severity precedence chain. The engine
+resolves each finding's Severity via machine marker → reviewer-adapter mapping
+→ the adapter's unclassified-severity policy → ``major`` fail-safe, and there
+is no classification stage anywhere. This verb exists for the one case that chain
 gets wrong — a reviewer-emitted severity judged incorrect — recording a
 write-once **Severity override** (:mod:`shipit.prstate.overrides`, the
 dev-cycle event log as the durable record) that beats every other rung. It is
@@ -15,8 +15,8 @@ Two modes, ADR-0030 glue + renderers around the engine's round vocabulary:
 
 - **list** (no ``--comment``): the LATEST round's findings with each one's
   RESOLVED severity and the chain rung that decided it
-  (``override | marker | adapter | default``) — the read that makes a wrong
-  severity visible before anyone overrides it.
+  (``override | marker | adapter | policy | default``) — the read that makes
+  a wrong severity visible before anyone overrides it.
 - **record** (``--comment <id> {critical|major|minor|nit} [--reason "…"]``):
   validate the id IS a finding of the latest round, then write the override
   (write-once — re-overriding errors).
@@ -61,7 +61,7 @@ class FindingLine:
 
     comment_id: int
     severity: str  # the chain-resolved severity value
-    source: str  # which rung decided: override | marker | adapter | default
+    source: str  # which rung decided: override | marker | adapter | policy | default
     path: str
     line: int | None
     author: str

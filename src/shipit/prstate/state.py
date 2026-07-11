@@ -59,10 +59,11 @@ is the arbiter — no minor-round exception, #565.
 
 The stopping rule (breakers.py) caps that repetition: address every comment
 each round EXCEPT stop when the round cap is reached, or when the latest round
-has findings but NONE major-or-worse (ADR-0044 — findings arrive PRE-classified
-on the 4-tier Severity ladder; the engine resolves each finding's severity
-through the precedence chain: machine marker → reviewer-adapter mapping →
-`major` fail-safe, beaten only by a write-once Severity override). A fired
+has findings but NONE major-or-worse (ADR-0044 — the engine resolves each
+finding's severity on the 4-tier Severity ladder through the precedence
+chain: machine marker → reviewer-adapter mapping → the adapter's
+unclassified-severity policy (#743: Copilot's is `minor`) → `major`
+fail-safe, beaten only by a write-once Severity override). A fired
 breaker means no further round is minted: it suppresses every RE-REQUEST, so
 the fix push cannot re-open the loop (not even for a rerun=True reviewer whose
 review the push staled). The round's leftover minor/nit threads still require

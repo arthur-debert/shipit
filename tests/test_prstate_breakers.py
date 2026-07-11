@@ -41,9 +41,10 @@ def marked(severity: str, text: str = "the claim") -> str:
     return f"<!-- shipit:finding severity={severity} -->\nnitpick: {text}"
 
 
-# An UNMARKED Copilot body — the unmappable shape (#412's cosmetic nits carried
-# no format at all): no marker, no Copilot native vocabulary → the chain lands
-# on the `major` fail-safe, which is exactly what keeps it minting rounds.
+# An UNMARKED Copilot body — the unclassified shape (#412's cosmetic nits
+# carried no format at all): no marker, no Copilot native vocabulary → the
+# chain lands on Copilot's unclassified-severity policy, `minor` (#743) — so
+# a round of these can fire the no-major+ stop instead of riding to the cap.
 UNMARKED = "capitalize the first word of the sentence for correct English grammar"
 
 
@@ -62,7 +63,9 @@ def review(rid: int, head: str, author: str = "Copilot") -> Review:
 _FID = count(9000)  # unique comment/thread ids for synthetic findings
 
 
-def finding(rid: int, path: str, line: int, body: str = UNMARKED) -> Thread:
+def finding(
+    rid: int, path: str, line: int, body: str = UNMARKED, author: str = "Copilot"
+) -> Thread:
     """A review thread holding one finding submitted with review `rid`.
 
     Resolved on purpose: a resolved finding was still a finding of that round,
@@ -71,7 +74,7 @@ def finding(rid: int, path: str, line: int, body: str = UNMARKED) -> Thread:
     """
     cid = next(_FID)
     comment = ReviewComment(
-        comment_id=cid, path=path, line=line, body=body, author="Copilot", review_id=rid
+        comment_id=cid, path=path, line=line, body=body, author=author, review_id=rid
     )
     return Thread(thread_id=f"PRT_f{cid}", is_resolved=True, comments=(comment,))
 
@@ -177,8 +180,8 @@ def test_two_required_reviewers_across_two_heads_is_two_rounds_not_four():
     # The release#622 double-count shape: with TWO required reviewers, two
     # iteration rounds (heads h1, h2) get four review objects (each reviewer
     # reviews each head). Rounds are iterations, not reviews — so this is 2
-    # rounds, well under the cap of 6, and nothing stops (the findings are
-    # unmarked → `major` fail-safe, so the no-major+ stop stays quiet too).
+    # rounds, well under the cap of 6, and nothing stops (the rounds carry no
+    # findings at all, so the no-major+ stop stays quiet too).
     reviews = [
         review(1, "h1", author="Copilot"),
         review(2, "h1", author="coderabbitai[bot]"),
@@ -219,8 +222,9 @@ def test_shipped_default_cap_is_six():
 
 
 def test_five_rounds_under_cap_no_stop():
+    # marked major so the no-major+ stop stays quiet — this pins the CAP alone.
     reviews = [review(i, f"c{i}") for i in range(1, 6)]
-    findings = [finding(i, f"f{i}.py", i) for i in range(1, 6)]
+    findings = [finding(i, f"f{i}.py", i, marked("major")) for i in range(1, 6)]
     v = evaluate_breakers(ctx(reviews, findings=findings))
     assert not v.stop
     assert v.cycles == 5
@@ -259,9 +263,10 @@ def test_configured_cap_of_two_fires_on_round_two():
 def test_configured_cap_looser_than_default_defers_the_stop():
     # A cap ABOVE the shipped default also holds: 6 rounds under a cap of 8
     # do not stop — the roster value replaces the constant in both directions.
+    # (Marked major so the no-major+ stop cannot fire in the cap's stead.)
     capped = replace(default_roster(), round_cap=8)
     reviews = [review(i, f"c{i}") for i in range(1, 7)]
-    findings = [finding(i, f"f{i}.py", i) for i in range(1, 7)]
+    findings = [finding(i, f"f{i}.py", i, marked("major")) for i in range(1, 7)]
     v = evaluate_breakers(ctx(reviews, findings=findings, roster=capped))
     assert not v.stop
     assert v.cycles == 6
@@ -296,15 +301,44 @@ def test_any_major_or_worse_finding_keeps_the_loop_running():
         assert not evaluate_breakers(c).stop
 
 
-def test_unmarked_finding_resolves_major_and_keeps_the_loop_running():
-    # The fail-safe: an unparseable finding (no marker, and Copilot has no
-    # native severity vocabulary) resolves `major` — it forces another round
-    # rather than slipping the Breaker.
+def test_unmarked_copilot_round_fires_the_no_major_stop():
+    # The #743 fix: an unclassified Copilot finding resolves through the
+    # adapter's `minor` policy, not the `major` fail-safe — so a Copilot-only
+    # round of unmarked nits fires the no-major+ stop instead of re-minting
+    # rounds until the cap (the TOL02 pattern: #732/#735/#742 all rode to 6).
     findings = [
         finding(1, "a.py", 1, marked("nit")),
         finding(1, "b.py", 2, UNMARKED),
     ]
     c = ctx([review(1, "c1")], findings=findings)
+    assert not has_blocking_finding(build_rounds(c)[0], {})
+    v = evaluate_breakers(c)
+    assert v.stop and v.breaker == NO_MAJOR_FINDING
+
+
+def test_unclassified_finding_without_an_adapter_policy_keeps_the_loop_running():
+    # The fail-safe survives #743: an unparseable finding whose author has no
+    # adapter (so no unclassified policy either) still resolves `major` — it
+    # forces another round rather than slipping the Breaker.
+    findings = [
+        finding(1, "a.py", 1, marked("nit")),
+        finding(1, "b.py", 2, UNMARKED, author="mystery-reviewer"),
+    ]
+    c = ctx([review(1, "c1")], findings=findings)
+    assert has_blocking_finding(build_rounds(c)[0], {})
+    assert not evaluate_breakers(c).stop
+
+
+def test_an_override_still_upgrades_an_unclassified_copilot_finding():
+    # The policy is per FINDING-SOURCE, not a waiver: a genuinely blocking
+    # Copilot finding is upgraded via the write-once override, which beats the
+    # policy rung — and keeps the loop running.
+    f = finding(1, "a.py", 1, UNMARKED)
+    c = ctx(
+        [review(1, "c1")],
+        findings=[f],
+        overrides={fid(f): Severity.MAJOR},
+    )
     assert not evaluate_breakers(c).stop
 
 
@@ -383,8 +417,12 @@ _GREEN = [{"status": "COMPLETED", "conclusion": "SUCCESS"}]
 
 
 def test_open_thread_under_cap_routes_to_addressing():
+    # marked major: the round must still be LIVE (no breaker) for this shape.
     reviews = [review(i, f"c{i}") for i in range(1, 3)]
-    findings = [finding(1, "a.py", 1), finding(2, "b.py", 2)]
+    findings = [
+        finding(1, "a.py", 1, marked("major")),
+        finding(2, "b.py", 2, marked("major")),
+    ]
     c = ctx(
         reviews,
         findings=findings,
@@ -457,6 +495,23 @@ def test_no_major_stop_with_open_threads_addresses_without_minting_a_round():
     assert status.breaker == NO_MAJOR_FINDING
     assert status.to_request == []
     assert "review loop stopped" in status.next_action
+
+
+def test_unmarked_copilot_round_converges_to_ready_when_threads_resolve():
+    # The #743 end-to-end shape (#742's late rounds): a Copilot-only round of
+    # UNMARKED nits, every thread resolved, CI green — the engine records the
+    # no-major+ stop and routes READY instead of re-requesting toward the cap.
+    reviews = [review(1, "c1")]
+    findings = [finding(1, "a.py", 1, UNMARKED)]
+    c = ctx(
+        reviews,
+        findings=findings,
+        head="c1",
+        checks=_GREEN,
+    )
+    status = evaluate(c, required=_COPILOT_ONLY)
+    assert status.state is TaskState.READY
+    assert status.breaker == NO_MAJOR_FINDING
 
 
 def test_stop_does_not_override_a_real_ci_failure():

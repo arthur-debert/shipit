@@ -5,22 +5,28 @@ round — a :class:`~shipit.prstate.model.ReviewComment` off a GitHub review
 thread — resolves to one 4-tier :class:`~shipit.finding.Severity` through the
 precedence chain, and findings from EVERY reviewer kind obey the one ladder:
 
-  machine marker → **Reviewer adapter** native-format mapping → ``major``
-  fail-safe — beaten only by a write-once **Severity override**.
+  machine marker → **Reviewer adapter** native-format mapping → the adapter's
+  **unclassified-severity policy** → ``major`` fail-safe — beaten only by a
+  write-once **Severity override**.
 
 The chain's ORDER lives in the pure domain (:func:`shipit.finding.
 resolve_severity`); this module is the engine-side glue that feeds it from a
 posted comment: the marker parsed off the body, the adapter looked up by the
 comment's author (each app reviewer's adapter owns mapping its native severity
-format — :meth:`~shipit.prstate.reviewers.ReviewerAdapter.native_severity`),
-and the override read off the snapshot (``ReadinessView.overrides``, the
+format — :meth:`~shipit.prstate.reviewers.ReviewerAdapter.native_severity` —
+and, for a reviewer with no severity vocabulary at all, its explicit
+unclassified policy — :attr:`~shipit.prstate.reviewers.ReviewerAdapter.
+unclassified_severity`, #743: Copilot's is ``minor``), and the override read
+off the snapshot (``ReadinessView.overrides``, the
 :mod:`shipit.prstate.overrides` store folded on at the gather seam). The
-``major`` default is the fail-safe: an unparseable finding forces a review
-round rather than slipping past the Breaker.
+``major`` default is the fail-safe for a reviewer WITHOUT an explicit policy:
+its unparseable finding forces a review round rather than slipping past the
+Breaker.
 
 :func:`resolve_finding_severity` additionally reports WHICH rung decided
-(``override | marker | adapter | default``) so the classify verb's list view
-can show a human where each severity came from without re-deriving the chain.
+(``override | marker | adapter | policy | default``) so the classify verb's
+list view can show a human where each severity came from without re-deriving
+the chain.
 """
 
 from __future__ import annotations
@@ -36,6 +42,7 @@ from .reviewers import REGISTRY, ReviewerAdapter
 OVERRIDE = "override"
 MARKER = "marker"
 ADAPTER = "adapter"
+POLICY = "policy"
 DEFAULT = "default"
 
 
@@ -44,7 +51,7 @@ class SeverityResolution:
     """One finding's resolved Severity + the chain rung that decided it."""
 
     severity: Severity
-    source: str  # override | marker | adapter | default
+    source: str  # override | marker | adapter | policy | default
 
 
 def resolve_finding_severity(
@@ -59,8 +66,8 @@ def resolve_finding_severity(
     (``ReadinessView.overrides``). ``adapters`` is the reviewer catalog the
     author is matched against — defaulted to the full :data:`~shipit.prstate.
     reviewers.REGISTRY` so ANY known reviewer's native mapping applies; a test
-    passes its own list. An author no adapter matches simply has no adapter
-    rung (its findings resolve marker-else-``major``).
+    passes its own list. An author no adapter matches simply has no adapter or
+    policy rung (its findings resolve marker-else-``major``).
 
     The precedence ORDER is delegated to the domain's
     :func:`~shipit.finding.resolve_severity` — one chain, defined once — and
@@ -73,8 +80,12 @@ def resolve_finding_severity(
     marker_severity = marker.severity if marker else None
     adapter = next((a for a in adapters if a.matches(comment.author)), None)
     adapter_severity = adapter.native_severity(comment.body) if adapter else None
+    policy_severity = adapter.unclassified_severity if adapter else None
     severity = resolve_severity(
-        marker=marker_severity, adapter=adapter_severity, override=override
+        marker=marker_severity,
+        adapter=adapter_severity,
+        override=override,
+        policy=policy_severity,
     )
     if override is not None:
         source = OVERRIDE
@@ -82,6 +93,8 @@ def resolve_finding_severity(
         source = MARKER
     elif adapter_severity is not None:
         source = ADAPTER
+    elif policy_severity is not None:
+        source = POLICY
     else:
         source = DEFAULT
     return SeverityResolution(severity=severity, source=source)
