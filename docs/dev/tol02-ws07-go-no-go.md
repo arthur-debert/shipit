@@ -130,8 +130,9 @@ the branch ref never advanced.
   `arthur-debert/release`; the user-owned-only scoping alternative was
   rejected — the full @vN distribution model holds for all consumers,
   org-owned included.** The decision, its evidence, and the rejected
-  alternative are recorded as ADR-0053. The campaign then ran a SECOND traversal through the
-  REAL remote refs (run `29162869655`): lex's caller switched to
+  alternative are recorded as ADR-0053. The campaign then ran a SECOND
+  traversal through the REAL remote refs (run `29162869655`): lex's caller
+  switched to
   `uses: arthur-debert/shipit/.github/workflows/wf-release.yml@v1`, and the
   logs confirm cross-owner resolution — `Uses: arthur-debert/shipit/.github/
   workflows/wf-{prepare,build,publish}.yml@refs/heads/v1 (d958bc2)` — with

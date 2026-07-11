@@ -86,14 +86,20 @@ dependencies.
     Epic-branch currency is MERGE-only: a WS branch takes the new epic head by
     merging `EPIC/umbrella` in, NEVER by rebasing onto it. Re-review rounds
     are head-strict incremental — each round reviews only
-    `last-reviewed-head..new-head` (ADR-0043) — and a rebase rewrites the WS
-    branch's history so the last-reviewed head is no longer an ancestor of the
-    new one: the next round's range degenerates to the whole umbrella delta,
-    and reviewers re-flag sibling workstreams' already-landed code as if it
-    were this PR's (observed live on \#732; confirmed by the maintainer
-    mid-epic). Merging keeps the range to the merge commit plus the genuine
-    fixes, and the squash-merge at integration erases the merge commits
-    anyway — the merge-commit noise never outlives the WS PR.
+    `last-reviewed-head..new-head` (ADR-0043). A rebase rewrites the WS
+    branch's already-reviewed history, so the last-reviewed head is no longer
+    an ancestor of the new one: the ancestry gate voids the incremental
+    premise and the engine falls back to re-reviewing the WHOLE PR, and every
+    existing review-thread anchor on the rewritten commits is orphaned. On
+    \#732 that surfaced as reviewers re-flagging sibling workstreams'
+    already-landed code as if it were this PR's (observed live; confirmed by
+    the maintainer mid-epic). Merging preserves that ancestry — the
+    last-reviewed head stays an ancestor of the merge commit — so the round
+    stays incremental and the existing anchors survive. The incremental range
+    is a two-dot `last-reviewed-head..merge` diff, so the umbrella changes the
+    merge brings in DO appear in that one round (merging narrows the history,
+    not the diff); the squash-merge at integration then erases the merge
+    commits, so that noise never outlives the WS PR.
 
 4. Convergence — clearing the fallouts
 
