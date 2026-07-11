@@ -118,7 +118,9 @@ Parsed and validated by `shipit.review.cell`; the demo pair below is
 ```toml
 schema = 1
 id = "fanout-informed"      # must equal the filename stem
-baseline = "fanout-baseline"  # MANDATORY: the control cell (a control names itself)
+baseline = "fanout-baseline"  # MANDATORY: the cell compared against (usually the
+                              # control; a composition cell names a treatment;
+                              # a control names itself)
 axis = "sweep mode: informed vs blind"  # MANDATORY: the ONE thing changed
                                         # (a control declares axis = "control")
 description = "…"
