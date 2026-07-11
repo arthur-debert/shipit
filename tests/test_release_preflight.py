@@ -103,7 +103,7 @@ def test_rust_cli_shape_plans_matrix_stages_endpoints_secrets():
     assert plan.endpoints == ("gh-release", "crates", "brew")
     assert plan.secrets == (
         "RELEASE_TOKEN",
-        "CRATES_IO_KEY",
+        "CARGO_REGISTRY_TOKEN",
         "HOMEBREW_TAP_TOKEN",
         "APPLE_CERTIFICATE",
         "APPLE_CERTIFICATE_PASSWORD",
@@ -221,7 +221,11 @@ def test_unsigned_flips_the_plan_to_the_unsigned_path():
     assert "sign" not in plan.stages
     assert all(e.sign is False for e in plan.matrix)
     # The Apple names drop out of the required set with the stage.
-    assert plan.secrets == ("RELEASE_TOKEN", "CRATES_IO_KEY", "HOMEBREW_TAP_TOKEN")
+    assert plan.secrets == (
+        "RELEASE_TOKEN",
+        "CARGO_REGISTRY_TOKEN",
+        "HOMEBREW_TAP_TOKEN",
+    )
 
 
 def test_unsigned_is_refused_when_nothing_would_sign():
@@ -254,11 +258,11 @@ def test_missing_secrets_reports_absent_and_empty_names_in_plan_order():
     plan = preflight.plan(RUST_CLI, _resolved("1.2.3"))
     env = {
         "RELEASE_TOKEN": "t",
-        "CRATES_IO_KEY": "",  # empty is absent — an empty token cannot publish
+        "CARGO_REGISTRY_TOKEN": "",  # empty is absent — an empty token cannot publish
         "APPLE_CERTIFICATE": "c",
     }
     assert preflight.missing_secrets(plan, env) == (
-        "CRATES_IO_KEY",
+        "CARGO_REGISTRY_TOKEN",
         "HOMEBREW_TAP_TOKEN",
         "APPLE_CERTIFICATE_PASSWORD",
         "ASC_API_KEY_BASE64",

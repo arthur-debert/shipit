@@ -61,12 +61,16 @@ SIGN_MAC_SECRETS: tuple[str, ...] = (
 )
 
 #: Per-endpoint requirement declarations (story 43), keyed by exactly the
-#: closed :data:`shipit.config.ENDPOINTS` set (drift-guarded by test).
-#: ``gh-release`` requires nothing extra: the workflow's ambient
-#: ``GITHUB_TOKEN`` publishes the GitHub release.
+#: closed :data:`shipit.config.ENDPOINTS` set (drift-guarded by test). These
+#: are GITHUB SECRET NAMES (the ``[secrets]`` table key, architecture.lex §6),
+#: which may differ from the source key: crates.io's token is sourced under
+#: ``CRATES_IO_KEY`` but Cargo reads it as ``CARGO_REGISTRY_TOKEN`` (§6's
+#: exemplar — ``CARGO_REGISTRY_TOKEN = { doppler = "CRATES_IO_KEY" }``), so the
+#: REQUIRED name is the gh-secret one. ``gh-release`` requires nothing extra:
+#: the workflow's ambient ``GITHUB_TOKEN`` publishes the GitHub release.
 ENDPOINT_SECRETS: dict[str, tuple[str, ...]] = {
     "gh-release": (),
-    "crates": ("CRATES_IO_KEY",),
+    "crates": ("CARGO_REGISTRY_TOKEN",),
     "pypi": ("PYPI_TOKEN",),
     "npm": ("NPM_TOKEN",),
     "brew": ("HOMEBREW_TAP_TOKEN",),

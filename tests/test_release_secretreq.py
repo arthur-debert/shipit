@@ -51,7 +51,7 @@ def test_rust_cli_shape_derives_the_sync_set_in_traversal_order():
     names = secretreq.required_names(_artifacts(RUST_CLI))
     assert names == (
         "RELEASE_TOKEN",  # prepare push — the repo declares endpoints
-        "CRATES_IO_KEY",  # endpoint crates
+        "CARGO_REGISTRY_TOKEN",  # endpoint crates (gh-secret name; source CRATES_IO_KEY)
         "HOMEBREW_TAP_TOKEN",  # endpoint brew
         "APPLE_CERTIFICATE",  # sign-mac: the ONE unified cert spelling
         "APPLE_CERTIFICATE_PASSWORD",
@@ -84,7 +84,7 @@ def test_requirements_name_their_requiring_entry():
     reqs = secretreq.requirements(_artifacts(RUST_CLI))
     by_name = {req.name: req.required_by for req in reqs}
     assert by_name["RELEASE_TOKEN"] == "prepare push"
-    assert by_name["CRATES_IO_KEY"] == "endpoint crates (artifact lex)"
+    assert by_name["CARGO_REGISTRY_TOKEN"] == "endpoint crates (artifact lex)"
     assert by_name["APPLE_CERTIFICATE"] == "sign-mac stage (artifact lex)"
 
 

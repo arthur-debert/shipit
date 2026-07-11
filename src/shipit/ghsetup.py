@@ -327,7 +327,7 @@ def sync_secrets(
     sources: list[config.SecretSource],
     *,
     dry_run: bool,
-    prompt=None,
+    prompt: Callable[[str], str] | None = None,
 ) -> tuple[SecretOutcome, ...]:
     """Pass (c). Sync the derived requirement set against the ``[secrets]``
     sources (TOL02-WS02, PRD stories 44/45).
@@ -397,7 +397,7 @@ def push_secrets(
     sources: list[config.SecretSource],
     *,
     dry_run: bool,
-    prompt=None,
+    prompt: Callable[[str], str] | None = None,
 ) -> tuple[SecretOutcome, ...]:
     """Resolve and push each given secret; returns one outcome per source.
 
