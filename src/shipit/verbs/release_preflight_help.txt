@@ -1,0 +1,29 @@
+`shipit release preflight VERSION` plans the release run and validates it
+while failure is still cheap: before any toolchain is installed and before
+`prepare` writes history, so a missing token can never strand a half-released
+tag.
+
+VERSION is a bare semver (`1.2.3`, `1.2.3-rc.1`) or a bump word
+(`major | minor | patch`) resolved against the latest tag — the same
+resolution `prepare` will make. The plan is a pure function of the artifact
+map, the resolved version, and the event; the composed workflow consumes it
+as job outputs and never re-derives a decision in YAML.
+
+The plan carries: the artifact set; the OS×arch matrix (one entry per
+build-bearing artifact and declared platform — target triple, runner, sign
+flag, archive/binary extensions, packaging arch); the live stage set (bundle
+only where a bundle step exists, sign only when declared signing meets a
+darwin platform); the post-RC-guard endpoint set (a `-release-rc` version
+plans GH-release-only — every external endpoint is dropped from the plan);
+and the required secret names, derived from the same requirement registry
+`gh-setup` syncs.
+
+Every required secret must be present (non-empty) in the environment — the
+caller workflow injects each GitHub secret under its own name — or preflight
+hard-fails. `--unsigned` is the explicit break-glass for a signing repo
+without certs at hand: it flips the plan to the unsigned path, is refused
+when there is no sign stage to skip, and every use is recorded as a
+`release.unsigned` event.
+
+Outputs (text or `--json`): version, tag, prerelease and rc flags, event,
+artifacts, matrix entries, stages, endpoints, and required secrets.

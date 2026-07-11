@@ -211,16 +211,21 @@ def format_setup(report: SetupReport) -> str:
             lines.append(f"  FAIL {secret.name}: {secret.reason}")
         elif secret.action == "skipped":
             lines.append(f"  skip {secret.name} ({secret.reason})")
+        elif secret.action == "orphan":
+            lines.append(f"  ORPHAN {secret.name}: {secret.reason}")
         else:
             lines.append(f"  secret {secret.name}")
     if report.secrets:
         # The historical summary counts a dry secret as "set" — it is the
         # number of secrets the run WOULD push.
         would_set = sum(1 for s in report.secrets if s.action in ("set", "dry-run"))
-        lines.append(
+        summary = (
             f"  {would_set} secret(s) set, "
             f"{report.secrets_skipped} skipped, {report.secrets_failed} failed"
         )
+        if report.secrets_orphaned:
+            summary += f", {report.secrets_orphaned} orphaned"
+        lines.append(summary)
 
     lines.append("done.")
     return "\n".join(lines)
