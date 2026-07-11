@@ -619,3 +619,38 @@ def test_bundle_refuses_outside_a_git_checkout(tmp_path, monkeypatch, capsys):
     rc = release_verb.run_bundle(target=LINUX, run_cmd=RunRecorder())
     assert rc == 1
     assert "not inside a git checkout" in capsys.readouterr().err
+
+
+def test_bundle_artifact_narrows_the_walk_to_one_artifact(
+    tmp_path, monkeypatch, capsys
+):
+    # The per-matrix-entry contract (wf-build passes its entry's artifact):
+    # the narrowed walk composes exactly that artifact, so the cross-job
+    # bundle tree never carries a sibling artifact's binary (which would
+    # fail wf-publish's per-artifact assert-bundle on a multi-artifact map).
+    root = _repo(tmp_path, monkeypatch)
+    _executable(root / "target/release/lex")
+    recorder = RunRecorder({"cargo": _deb_effect()})
+
+    rc = release_verb.run_bundle(target=LINUX, artifact="lex", run_cmd=recorder)
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "bundled 1 artifact" in out
+    # lex-deb applies on LINUX but is outside the narrowed walk: its
+    # composition never runs — only lex's archive tar.
+    assert recorder.heads == ["tar"]
+    assert "lex-deb" not in out
+
+
+def test_bundle_artifact_unknown_name_is_a_loud_refusal(tmp_path, monkeypatch, capsys):
+    _repo(tmp_path, monkeypatch)
+    recorder = RunRecorder()
+
+    rc = release_verb.run_bundle(target=LINUX, artifact="nope", run_cmd=recorder)
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "--artifact nope" in err
+    assert "lex, lex-deb, plugin" in err  # names the declared set
+    assert recorder.calls == []  # refused before any composition ran

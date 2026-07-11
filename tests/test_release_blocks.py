@@ -191,6 +191,19 @@ def test_build_block_never_ships_the_target_tree():
     assert "!dist/**/*.app/**" in path
 
 
+def test_build_block_bundles_only_its_matrix_entrys_artifact():
+    # The per-entry narrowing contract (TOL02-WS07's lex rc finding): the
+    # matrix is one artifact × platform per entry, and wf-publish's assert
+    # job inspects `bundle-<artifact>-<platform>` PER ARTIFACT — a
+    # whole-map `release bundle` would put every artifact's binary in every
+    # entry's tree and fail assert-bundle on any multi-artifact repo. The
+    # bundle step must pass its entry's artifact through to the verb.
+    steps = _steps("wf-build.yml", "build")
+    bundle = next(s for s in steps if "release bundle" in s.get("run", ""))
+    assert '--artifact "$ARTIFACT"' in bundle["run"]
+    assert bundle["env"]["ARTIFACT"] == "${{ matrix.artifact }}"
+
+
 def test_pixi_pin_is_lockstep_across_all_blocks():
     # The wf-checks.yml pin is the one test_install.py locks to the Layer 0
     # bootstrap; every release block must ride the SAME pin so a bump is

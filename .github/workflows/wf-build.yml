@@ -85,11 +85,17 @@ jobs:
         run: pixi run --locked ./bin/shipit build --version "$VERSION"
       - name: Bundle
         # Plan-gated (never re-derived): the bundle stage is live only when
-        # an artifact declares a composition.
+        # an artifact declares a composition. Narrowed to THIS entry's
+        # artifact (the matrix is one artifact × platform per entry): the
+        # cross-job bundle artifact must carry exactly this artifact's
+        # outputs — a whole-map bundle would put every artifact's binary in
+        # every entry's tree and fail wf-publish's per-artifact
+        # assert-bundle on any multi-artifact repo.
         if: contains(fromJson(inputs.stages), 'bundle')
         env:
           TARGET: ${{ matrix.target }}
-        run: pixi run --locked ./bin/shipit release bundle --target "$TARGET"
+          ARTIFACT: ${{ matrix.artifact }}
+        run: pixi run --locked ./bin/shipit release bundle --target "$TARGET" --artifact "$ARTIFACT"
       - name: Upload the staged bundle tree
         if: contains(fromJson(inputs.stages), 'bundle')
         uses: actions/upload-artifact@v4
