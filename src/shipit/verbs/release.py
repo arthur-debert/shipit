@@ -712,6 +712,7 @@ def run_bundle(
     *,
     target: str | None = None,
     out: str | None = None,
+    artifact: str | None = None,
     as_json: bool = False,
     run_cmd: bundle_mod.RunCmd | None = None,
     gitio: Any = git,
@@ -723,8 +724,15 @@ def run_bundle(
     an artifact with no bundle declaration passes through untouched. The
     FIRST failing composition aborts the stage non-zero — nothing is written
     outside the bundle output tree, preserving ADR-0009's all-or-nothing
-    barrier for chained stages. ``run_cmd`` injects the Exec boundary — the
-    recorded-invocation surface the tests drive; ``gitio`` the git adapter.
+    barrier for chained stages. ``artifact`` narrows the walk to ONE declared
+    artifact — the per-matrix-entry contract wf-build rides (each entry is
+    one artifact × platform, and its cross-job bundle artifact must carry
+    exactly that artifact's outputs: a whole-map tree would put every
+    artifact's binary in every entry's tree and fail wf-publish's
+    per-artifact assert-bundle on any multi-artifact repo); an unknown name
+    is a loud refusal naming the declared set. ``run_cmd`` injects the Exec
+    boundary — the recorded-invocation surface the tests drive; ``gitio``
+    the git adapter.
 
     Config and the output tree anchor to the CHECKOUT ROOT (``gitio.repo_root``,
     like ``prepare``), not the process cwd: ``load_config`` reads ``.shipit.toml``
@@ -742,6 +750,15 @@ def run_bundle(
     cfg = load_config(root)
     entries = config.load_toolchains(cfg)
     artifacts = config.load_artifacts(cfg)
+    if artifact is not None:
+        selected = tuple(a for a in artifacts if a.name == artifact)
+        if not selected:
+            declared = ", ".join(a.name for a in artifacts) or "none declared"
+            raise ReleaseError(
+                f"--artifact {artifact}: no such artifact in the [artifacts] "
+                f"map (declared: {declared})"
+            )
+        artifacts = selected
 
     resolved = target or bundle_mod.host_target(platform.system(), platform.machine())
     if resolved is None:
@@ -1355,19 +1372,34 @@ def prepare_cmd(
     type=click.Path(file_okay=False),
     help=f"The bundle output tree (default: {DEFAULT_BUNDLE_DIR} at the repo root).",
 )
+@click.option(
+    "--artifact",
+    metavar="NAME",
+    help=(
+        "Narrow the walk to this one declared artifact (the per-matrix-entry "
+        "contract: wf-build passes its entry's artifact so each cross-job "
+        "bundle tree carries exactly that artifact's outputs). Unknown names "
+        "are refused loudly."
+    ),
+)
 @json_option
-def bundle_cmd(target: str | None, out: str | None, as_json: bool) -> None:
+def bundle_cmd(
+    target: str | None, out: str | None, artifact: str | None, as_json: bool
+) -> None:
     """Compose build outputs into the unsigned Artifacts.
 
     Walks the [artifacts] map and runs each artifact's declared bundle
     composition (archive, deb, wheel, mac-app) for the current target;
     artifacts with no bundle declaration pass through untouched, and
     compositions for other platforms are skipped (the per-OS matrix runs
-    them on theirs). Writes only under the bundle output tree — no uploads,
-    no signing. Any failing composition exits non-zero with later artifacts
-    untouched.
+    them on theirs). --artifact narrows the walk to one declared artifact
+    (each matrix entry bundles its own artifact only). Writes only under
+    the bundle output tree — no uploads, no signing. Any failing
+    composition exits non-zero with later artifacts untouched.
     """
-    raise SystemExit(run_bundle(target=target, out=out, as_json=as_json))
+    raise SystemExit(
+        run_bundle(target=target, out=out, artifact=artifact, as_json=as_json)
+    )
 
 
 @release.command(name="assert-bundle")

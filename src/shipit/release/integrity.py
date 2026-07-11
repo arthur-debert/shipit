@@ -18,10 +18,20 @@ Two halves:
   (productName) → the first build target's package name → the artifact name.
 - :func:`check_tree` — the check itself, over a bundle tree: every main
   binary the tree carries (a ``.app``'s ``CFBundleExecutable``, a reseal
-  payload's inner ``.app``, or — when the tree bundles no app — its loose
+  payload's inner ``.app``, a plain ``.tar.gz``/``.zip`` archive's inner
+  executable, or — when the tree bundles none of those — its loose
   executables) must be named exactly the expected name. A tree with NO
   discoverable main binary fails loudly: "nothing to assert" is a wrong
   bundle, never a pass.
+
+The archive tier exists because GitHub Actions artifact upload/download
+STRIPS Unix exec bits: wf-publish's unsigned-path assert (ADR-0040) runs
+over a bundle tree that crossed a cross-job artifact, so the loose staging
+binary the archive composition emits arrives non-executable and the exec-bit
+loose scan cannot see it. The ``.tar.gz`` beside it is the real distributable
+and preserves the exec bit INSIDE its own header (tar stores mode), so the
+archive is read in place — the same transport-proof, no-extraction shape as
+the reseal payload — and its inner executable is the assertable main binary.
 
 Pure over the filesystem (reads only); rendered by the verb with uniform
 exit codes (0 pass, 1 fail — verdict + expected/actual on stderr, ``--json``
@@ -32,6 +42,7 @@ from __future__ import annotations
 
 import plistlib
 import tarfile
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -40,6 +51,12 @@ from .. import config
 #: The reseal-payload suffix the mac-app composition emits
 #: (:mod:`shipit.release.bundle`) — inspected here without extraction.
 RESEAL_SUFFIX = ".unsigned-app.tar.gz"
+
+#: The plain-archive suffixes the archive composition emits (tarball on unix,
+#: zip on windows) — read in place for the exec-bit-preserving main-binary
+#: check. The reseal payload is also a ``.tar.gz`` but is handled separately
+#: (:func:`_payload_main_binary`), so it is excluded by :func:`_is_plain_archive`.
+PLAIN_ARCHIVE_SUFFIXES = (".tar.gz", ".zip")
 
 
 def expected_main_binary(artifact: config.Artifact) -> str:
@@ -139,6 +156,66 @@ def _payload_main_binary(payload: Path) -> str | None:
     return None
 
 
+def _is_plain_archive(path: Path) -> bool:
+    """Whether ``path`` is a plain archive-composition output (a ``.tar.gz``
+    or ``.zip``) — NOT the reseal payload (also a ``.tar.gz``, handled by
+    :func:`_payload_main_binary`). Pure."""
+    if path.name.endswith(RESEAL_SUFFIX):
+        return False
+    return path.name.endswith(PLAIN_ARCHIVE_SUFFIXES)
+
+
+def _archive_main_binary(archive: Path) -> str | None:
+    """The main-binary name of a plain archive (``.tar.gz``/``.zip``), read
+    WITHOUT extraction: the SOLE executable member (the exec bit stored in the
+    archive header survives artifact transport, unlike the loose file's; a
+    windows ``.zip`` carries no unix mode, so a ``.exe`` member counts by its
+    suffix, its stem). ``None`` when undeterminable — zero candidates, or
+    SEVERAL by ANY measure: the exec-bit and ``.exe`` tallies are counted
+    TOGETHER, so an archive mixing a unix executable and a ``.exe`` is
+    ambiguous and fails loudly rather than silently picking one. Only regular
+    files are considered (a symlink with the exec bit is never a candidate,
+    zip and tar alike); the docs the archive ships beside the binary carry no
+    exec bit and are never candidates."""
+    exec_members: list[str] = []
+    exe_members: list[str] = []
+    try:
+        if archive.name.endswith(".zip"):
+            with zipfile.ZipFile(archive) as zf:
+                for info in zf.infolist():
+                    if info.is_dir():
+                        continue
+                    # Match tar's isfile() filter: a Unix-created entry that
+                    # is not a regular file (symlink, device) is not a binary
+                    # candidate even with the exec bit set. Windows-created
+                    # entries carry no unix mode (mode == 0) and fall through
+                    # to the .exe suffix check below.
+                    mode = info.external_attr >> 16
+                    if mode and (mode & 0o170000) != 0o100000:
+                        continue
+                    base = PurePosixPath(info.filename).name
+                    if base.endswith(".exe"):
+                        exe_members.append(base[: -len(".exe")])
+                    elif mode & 0o111:
+                        exec_members.append(base)
+        else:
+            with tarfile.open(archive, mode="r:gz") as tar:
+                for member in tar:
+                    if not member.isfile():
+                        continue
+                    base = PurePosixPath(member.name).name
+                    if base.endswith(".exe"):
+                        exe_members.append(base[: -len(".exe")])
+                    elif member.mode & 0o111:
+                        exec_members.append(base)
+    except (tarfile.TarError, zipfile.BadZipFile, OSError):
+        return None
+    candidates = exec_members + exe_members
+    if len(candidates) == 1:
+        return candidates[0]
+    return None
+
+
 def _is_executable(path: Path) -> bool:
     """Whether ``path`` is a loose main-binary candidate: an executable
     regular file (or a ``.exe`` — windows carries no exec bit through)."""
@@ -161,17 +238,27 @@ def check_tree(tree: Path, expected: str) -> BundleVerdict:
 
     1. every ``*.app`` directory under ``tree`` (:func:`_app_main_binary`);
     2. every reseal payload (``*.unsigned-app.tar.gz``), read in place;
-    3. only when the tree carries neither: every loose executable file
-       (``.exe`` counted by suffix, its stem compared).
+    3. every plain archive (``*.tar.gz``/``*.zip``), read in place
+       (:func:`_archive_main_binary`) — the exec bit inside the archive
+       survives artifact transport where the loose file's does not;
+    4. only when the tree carries none of the above: every loose executable
+       file (``.exe`` counted by suffix, its stem compared).
 
     The verdict is ``ok`` exactly when at least one main binary was found
-    and EVERY one is named ``expected``. An undeterminable app/payload, or
-    a tree with nothing to assert, fails with the diagnosis in ``problem``.
+    and EVERY one is named ``expected``. An undeterminable app/payload/
+    archive, or a tree with nothing to assert, fails with the diagnosis in
+    ``problem``.
     """
     actual: list[str] = []
     problems: list[str] = []
     apps = sorted(p for p in tree.rglob("*.app") if p.is_dir())
     payloads = sorted(p for p in tree.rglob(f"*{RESEAL_SUFFIX}") if p.is_file())
+    archives = sorted(
+        p
+        for suffix in PLAIN_ARCHIVE_SUFFIXES
+        for p in tree.rglob(f"*{suffix}")
+        if p.is_file() and _is_plain_archive(p)
+    )
     for app in apps:
         name = _app_main_binary(app)
         if name is None:
@@ -184,7 +271,13 @@ def check_tree(tree: Path, expected: str) -> BundleVerdict:
             problems.append(f"{payload.relative_to(tree)}: no determinable main binary")
         else:
             actual.append(name)
-    if not apps and not payloads:
+    for archive in archives:
+        name = _archive_main_binary(archive)
+        if name is None:
+            problems.append(f"{archive.relative_to(tree)}: no determinable main binary")
+        else:
+            actual.append(name)
+    if not apps and not payloads and not archives:
         for path in sorted(tree.rglob("*")):
             if _is_executable(path):
                 actual.append(path.stem if path.suffix == ".exe" else path.name)
